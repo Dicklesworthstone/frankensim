@@ -45,6 +45,11 @@ pub mod plates;
 #[path = "plate_impact/network.rs"]
 pub mod network;
 
+/// Reciprocal contact with original rotating rod attachments and full inertia.
+#[cfg(feature = "rod-dynamics")]
+#[path = "plate_impact/rods.rs"]
+pub mod rods;
+
 /// Physical and numerical allowances. Background momentum never enlarges an
 /// impulse allowance. All supports are stationary in the original plate frame.
 #[derive(Clone, Copy, Debug, PartialEq)]

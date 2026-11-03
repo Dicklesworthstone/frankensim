@@ -12,12 +12,12 @@ use self::network::{
     RodRigidNetworkTransfer, apply_rigid_normal_contact_network, validate_network_budget,
 };
 use super::super::impulse::{RodImpulseReport, RodPointImpulse};
-use super::super::{RodMotion, RodMotionInertia, add, checkpoint, sub};
+use super::super::{RodMotion, RodMotionInertia, checkpoint};
 use super::multiple::RodRigidMultiImpactError;
 use super::{
-    RigidMomentumTransfer, RodMomentumTransfer, RodRigidImpactControls, RodRigidImpactError,
-    RodRigidImpulseBalance, RodRigidSystemAudit, components, cross, cross_dd, dd, dot, finite,
-    norm, project_velocity, rotate, validate_controls, vector,
+    ContactDirectionResponse, RigidMomentumTransfer, RodMomentumTransfer, RodRigidImpactControls,
+    RodRigidImpactError, RodRigidImpulseBalance, RodRigidSystemAudit, components, cross, cross_dd,
+    dd, dot, dot_dd, finite, norm, project_velocity, validate_controls, vector,
 };
 use fs_contact::multicontact::{MultiImpactConfig, MultiImpactResult};
 use fs_exec::CancelGate;
@@ -126,16 +126,14 @@ struct PreparedEndpoint {
     original: RodRigidNetworkEndpoint,
     owner: Participant,
     central_arm_body_m: [f64; 3],
-    point_world_m: [f64; 3],
+    point_world_dd_m: [Dd; 3],
     translation_m_s: [Dd; 3],
     rotation_m_s: [f64; 3],
 }
 
 struct DirectionResponse {
     owner: Participant,
-    direction_world: [f64; 3],
-    torque_body: [f64; 3],
-    rotation_body: [f64; 3],
+    native: ContactDirectionResponse,
 }
 
 /// The same endpoint, mobility and publication owner serves one or many rods.
@@ -251,7 +249,9 @@ impl<I: RodMotionInertia> ContactNetwork<'_, I> {
                 ));
             }
             let normal = unit_direction(witness.normal_world)?;
-            let separation = sub(positive.point_world_m, negative.point_world_m);
+            let separation = std::array::from_fn(|c| {
+                (positive.point_world_dd_m[c] - negative.point_world_dd_m[c]).to_f64()
+            });
             finite(&separation)?;
             let gap = dot(normal, separation);
             finite(&[gap])?;
@@ -307,27 +307,20 @@ impl<I: RodMotionInertia> ContactNetwork<'_, I> {
                         if a.owner != b.owner {
                             continue;
                         }
-                        // Both actions use the same original symmetric tensor.
-                        // Symmetric bilinear evaluation avoids contact-order
-                        // dependence from the two finite inverse actions.
-                        value = value
-                            + dd(0.5)
-                                * (dot_dd(a.torque_body, b.rotation_body)
-                                    + dot_dd(b.torque_body, a.rotation_body));
                         match a.owner {
                             Participant::Rod { rod, node } => {
-                                let rod = &self.rods[rod];
-                                for c in 0..3 {
-                                    if !rod.model.fixed_positions()[node][c] {
-                                        value = value
-                                            + dd(a.direction_world[c]) * dd(b.direction_world[c])
-                                                / dd(rod.kinetics[node].mass);
-                                    }
-                                }
+                                value = value
+                                    + self.rods[rod]
+                                        .contact_cross_mobility(node, a.native, b.native)?;
                             }
                             Participant::Rigid(body) => {
+                                // Symmetric bilinear evaluation of the original
+                                // full tensor preserves contact-order invariance.
                                 value = value
-                                    + dot_dd(a.direction_world, b.direction_world)
+                                    + dd(0.5)
+                                        * (dot_dd(a.native.torque_body, b.native.rotation_body)
+                                            + dot_dd(b.native.torque_body, a.native.rotation_body))
+                                    + dot_dd(a.native.direction_world, b.native.direction_world)
                                         / dd(bodies[body].inertia.mass());
                             }
                         }
@@ -572,32 +565,24 @@ impl<I: RodMotionInertia> ContactNetwork<'_, I> {
         bodies: &[RodRigidParticipant],
         original: RodRigidNetworkEndpoint,
     ) -> Result<PreparedEndpoint, RodRigidImpactError> {
-        let (owner, arm, point, translation, rotation) = match original {
+        let (owner, arm, point, point_dd, translation, rotation) = match original {
             RodRigidNetworkEndpoint::Rod {
                 rod,
                 node,
                 point_body_m,
             } => {
-                finite(&point_body_m)?;
                 let motion = self
                     .rods
                     .get(rod)
                     .ok_or_else(|| invalid("absent graph rod"))?;
-                let k = *motion
-                    .kinetics
-                    .get(node)
-                    .ok_or_else(|| invalid("absent graph rod node"))?;
-                let frame = motion.pose.frames[node];
-                let arm = sub(point_body_m, k.center);
-                let point = add(motion.pose.positions_m[node], rotate(frame, point_body_m)?);
-                let rotation = rotate(frame, cross(k.omega(motion.spin[node])?, arm))?;
-                let translation = motion.linear[node].map(|p| dd(p) / dd(k.mass));
+                let point = motion.contact_point_kinematics(node, point_body_m)?;
                 (
                     Participant::Rod { rod, node },
-                    arm,
-                    point,
-                    translation,
-                    rotation,
+                    point.central_arm_body_m,
+                    point.point_world_m,
+                    point.point_world_dd_m,
+                    point.translation_m_s,
+                    point.rotation_m_s,
                 )
             }
             RodRigidNetworkEndpoint::Rigid { body, arm_body_m } => {
@@ -614,10 +599,20 @@ impl<I: RodMotionInertia> ContactNetwork<'_, I> {
                     components(body_value.state.pose().orientation().rotate_body_to_world(
                         kinematics.angular_velocity_body.cross(vector(arm_body_m)),
                     ));
+                let origin = components(body_value.state.pose().position_world());
+                let offset = components(
+                    body_value
+                        .state
+                        .pose()
+                        .orientation()
+                        .rotate_body_to_world(vector(arm_body_m)),
+                );
+                let point_dd = std::array::from_fn(|c| dd(origin[c]) + dd(offset[c]));
                 (
                     Participant::Rigid(body),
                     arm_body_m,
                     components(kinematics.point_world),
+                    point_dd,
                     translation,
                     rotation,
                 )
@@ -631,7 +626,7 @@ impl<I: RodMotionInertia> ContactNetwork<'_, I> {
             original,
             owner,
             central_arm_body_m: arm,
-            point_world_m: point,
+            point_world_dd_m: point_dd,
             translation_m_s: translation,
             rotation_m_s: rotation,
         })
@@ -643,19 +638,12 @@ impl<I: RodMotionInertia> ContactNetwork<'_, I> {
         endpoint: PreparedEndpoint,
         direction: [f64; 3],
     ) -> Result<DirectionResponse, RodRigidImpactError> {
-        let (torque, rotation) = match endpoint.owner {
-            Participant::Rod { rod, node } => {
-                let rod = &self.rods[rod];
-                let local = rotate(rod.pose.frames[node].inverse(), direction)?;
-                let torque = cross(endpoint.central_arm_body_m, local);
-                finite(&torque)?;
-                let rotation = if rod.model.fixed_frames()[node] {
-                    [0.0; 3]
-                } else {
-                    rod.kinetics[node].omega(torque)?
-                };
-                (torque, rotation)
-            }
+        let native = match endpoint.owner {
+            Participant::Rod { rod, node } => self.rods[rod].contact_direction_response(
+                node,
+                endpoint.central_arm_body_m,
+                direction,
+            )?,
             Participant::Rigid(body) => {
                 let body = bodies[body];
                 let local = components(
@@ -667,16 +655,18 @@ impl<I: RodMotionInertia> ContactNetwork<'_, I> {
                 let torque = cross(endpoint.central_arm_body_m, local);
                 let rotation =
                     components(body.inertia.angular_velocity_body_checked(vector(torque))?);
-                (torque, rotation)
+                ContactDirectionResponse {
+                    direction_world: direction,
+                    torque_body: torque,
+                    rotation_body: rotation,
+                }
             }
         };
-        finite(&torque)?;
-        finite(&rotation)?;
+        finite(&native.torque_body)?;
+        finite(&native.rotation_body)?;
         Ok(DirectionResponse {
             owner: endpoint.owner,
-            direction_world: direction,
-            torque_body: torque,
-            rotation_body: rotation,
+            native,
         })
     }
 }
@@ -706,10 +696,6 @@ fn relative_velocity(
     });
     finite(&value.map(Dd::to_f64))?;
     Ok(value)
-}
-
-fn dot_dd(a: [f64; 3], b: [f64; 3]) -> Dd {
-    dd(a[0]) * dd(b[0]) + dd(a[1]) * dd(b[1]) + dd(a[2]) * dd(b[2])
 }
 
 fn unit_direction(direction: [f64; 3]) -> Result<[f64; 3], RodRigidImpactError> {

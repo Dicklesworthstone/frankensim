@@ -775,6 +775,67 @@ fn graph_limits_geometry_noops_and_per_body_resolution_refuse_atomically() {
         )
         .is_err()
     );
+    // G0/G3: subtract common origins before rounding attachment coordinates.
+    // At 2^53 both offsets 1.5 and 1.75 round to the same world coordinate,
+    // but their actual signed gap is -0.25 m. A zero-velocity event must still
+    // reject penetration, for both rod/rigid and rigid/rigid graph endpoints.
+    let common = 9_007_199_254_740_992.0;
+    assert_eq!(common + 1.5, common + 1.75);
+    let translated_model = Arc::new(rod.model().clone());
+    let mut translated_pose = translated_model.initial_pose();
+    for position in &mut translated_pose.positions_m {
+        position[2] = common;
+    }
+    let translated = RodMotion::new(
+        translated_model,
+        translated_pose,
+        &[[0.0; 3]; 2],
+        &[[0.0; 3]; 2],
+        rod.time_s(),
+        &gate,
+    )
+    .unwrap();
+    let translated_bodies = [
+        participant(2.3, [0.8, 0.0, common], [0.0; 3]),
+        participant(1.7, [0.8, 0.0, common], [0.0; 3]),
+    ];
+    for rigid_only in [false, true] {
+        let positive = |offset| {
+            if rigid_only {
+                rigid_point(0, [0.0, 0.0, offset])
+            } else {
+                rod_point(1, [0.0, 0.0, offset])
+            }
+        };
+        let negative = |offset| rigid_point(usize::from(rigid_only), [0.0, 0.0, offset]);
+        assert!(matches!(
+            translated.apply_rigid_normal_contact_graph(
+                &translated_bodies,
+                &[edge(positive(1.5), negative(1.75), [0.0, 0.0, 1.0], 0.0)],
+                impact_controls(),
+                graph_config(),
+                RodRigidGraphBudget::default(),
+                &gate,
+            ),
+            Err(RodRigidMultiImpactError::Contact(
+                fs_contact::multicontact::MultiImpactError::InvalidContact { index: 0, .. }
+            ))
+        ));
+        let separated = translated
+            .apply_rigid_normal_contact_graph(
+                &translated_bodies,
+                &[edge(positive(1.75), negative(1.5), [0.0, 0.0, 1.0], 0.0)],
+                impact_controls(),
+                graph_config(),
+                RodRigidGraphBudget::default(),
+                &gate,
+            )
+            .unwrap();
+        assert_eq!(separated.2.gaps_m, [0.25]);
+        assert!(separated.2.transfer.balance.is_none());
+        assert_eq!(separated.0.pose(), translated.pose());
+        assert_eq!(separated.1, translated_bodies.map(|b| b.state));
+    }
     let mut broad = impact_controls();
     broad.geometry_tolerance_m = 1e-3;
     let crooked = [participant(2.3, [0.8, 1e-4, 0.0], [1.0, 0.0, 0.0])];

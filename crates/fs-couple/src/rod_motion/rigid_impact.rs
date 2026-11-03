@@ -135,6 +135,34 @@ pub(super) struct RodMomentumTransfer<'a, I: RodMotionInertia> {
     pub(super) receipt: Option<&'a RodImpulseReport>,
 }
 
+/// Original attachment kinematics, with translation kept unrounded so common
+/// motion can cancel before the smaller rotational response is added.
+pub(crate) struct RodContactPoint {
+    pub(crate) central_arm_body_m: [f64; 3],
+    pub(crate) point_world_m: [f64; 3],
+    pub(crate) point_world_dd_m: [Dd; 3],
+    pub(crate) translation_m_s: [Dd; 3],
+    pub(crate) rotation_m_s: [f64; 3],
+}
+
+/// One direction acted on by the original supported central inertia tensor.
+#[derive(Clone, Copy)]
+pub(crate) struct ContactDirectionResponse {
+    pub(crate) direction_world: [f64; 3],
+    pub(crate) torque_body: [f64; 3],
+    pub(crate) rotation_body: [f64; 3],
+}
+
+/// Raw native changes and support actions for one combined mechanical account.
+/// A coupling owner rounds only after adding all participating original bodies.
+pub(crate) struct RodTransferAudit {
+    pub(crate) linear: [Dd; 3],
+    pub(crate) angular: [Dd; 3],
+    pub(crate) support_linear: [Dd; 3],
+    pub(crate) support_angular: [Dd; 3],
+    pub(crate) kinetic_energy: Dd,
+}
+
 /// Work belongs to the complete simultaneous event, while stored momentum
 /// resolution must be checked independently for every original participant.
 pub(super) struct RodRigidSystemAudit<'a> {
@@ -182,6 +210,163 @@ impl core::fmt::Display for RodRigidImpactError {
 impl std::error::Error for RodRigidImpactError {}
 
 impl<I: RodMotionInertia> RodMotion<I> {
+    pub(crate) fn contact_point_kinematics(
+        &self,
+        node: usize,
+        point_body_m: [f64; 3],
+    ) -> Result<RodContactPoint, RodRigidImpactError> {
+        finite(&point_body_m)?;
+        let k = *self
+            .kinetics
+            .get(node)
+            .ok_or(RodRigidImpactError::Invalid("absent contact rod node"))?;
+        let frame = self.pose.frames[node];
+        let central_arm_body_m = sub(point_body_m, k.center);
+        let offset_world = rotate(frame, point_body_m)?;
+        let point_world_m = add(self.pose.positions_m[node], offset_world);
+        // Retain the rotating material offset until the other participant's
+        // origin is subtracted. Rounding either absolute point first can hide
+        // real penetration in a large translated coordinate frame.
+        let point_world_dd_m =
+            std::array::from_fn(|c| dd(self.pose.positions_m[node][c]) + dd(offset_world[c]));
+        let rotation_m_s = rotate(frame, cross(k.omega(self.spin[node])?, central_arm_body_m))?;
+        let translation_m_s = self.linear[node].map(|p| dd(p) / dd(k.mass));
+        finite(&central_arm_body_m)?;
+        finite(&point_world_m)?;
+        finite(&rotation_m_s)?;
+        finite(&translation_m_s.map(Dd::to_f64))?;
+        Ok(RodContactPoint {
+            central_arm_body_m,
+            point_world_m,
+            point_world_dd_m,
+            translation_m_s,
+            rotation_m_s,
+        })
+    }
+
+    pub(crate) fn contact_direction_response(
+        &self,
+        node: usize,
+        central_arm_body_m: [f64; 3],
+        direction_world: [f64; 3],
+    ) -> Result<ContactDirectionResponse, RodRigidImpactError> {
+        finite(&central_arm_body_m)?;
+        finite(&direction_world)?;
+        let k = *self
+            .kinetics
+            .get(node)
+            .ok_or(RodRigidImpactError::Invalid("absent contact rod node"))?;
+        let local = rotate(self.pose.frames[node].inverse(), direction_world)?;
+        let torque_body = cross(central_arm_body_m, local);
+        finite(&torque_body)?;
+        let rotation_body = if self.model.fixed_frames()[node] {
+            [0.0; 3]
+        } else {
+            k.omega(torque_body)?
+        };
+        finite(&rotation_body)?;
+        Ok(ContactDirectionResponse {
+            direction_world,
+            torque_body,
+            rotation_body,
+        })
+    }
+
+    pub(crate) fn contact_cross_mobility(
+        &self,
+        node: usize,
+        a: ContactDirectionResponse,
+        b: ContactDirectionResponse,
+    ) -> Result<Dd, RodRigidImpactError> {
+        let k = self
+            .kinetics
+            .get(node)
+            .ok_or(RodRigidImpactError::Invalid("absent contact rod node"))?;
+        // Symmetric bilinear evaluation removes contact-order dependence from
+        // the two finite inverse actions without changing the original tensor.
+        let mut value = dd(0.5)
+            * (dot_dd(a.torque_body, b.rotation_body) + dot_dd(b.torque_body, a.rotation_body));
+        for c in 0..3 {
+            if !self.model.fixed_positions()[node][c] {
+                value = value + dd(a.direction_world[c]) * dd(b.direction_world[c]) / dd(k.mass);
+            }
+        }
+        finite(&[value.to_f64()])?;
+        Ok(value)
+    }
+
+    pub(crate) fn account_contact_transfer(
+        &self,
+        next: &Self,
+        receipt: Option<&RodImpulseReport>,
+        origin: [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<RodTransferAudit, RodRigidImpactError> {
+        checkpoint(gate)?;
+        finite(&origin)?;
+        let mut audit = RodTransferAudit {
+            linear: [Dd::ZERO; 3],
+            angular: [Dd::ZERO; 3],
+            support_linear: [Dd::ZERO; 3],
+            support_angular: [Dd::ZERO; 3],
+            kinetic_energy: Dd::ZERO,
+        };
+        let Some(receipt) = receipt else {
+            if self.linear != next.linear || self.spin != next.spin {
+                return Err(RodRigidImpactError::Invalid(
+                    "changed rod momentum requires its native impulse receipt",
+                ));
+            }
+            return Ok(audit);
+        };
+        if receipt.support_impulses.len() != self.linear.len()
+            || next.linear.len() != self.linear.len()
+            || next.spin.len() != self.spin.len()
+        {
+            return Err(RodRigidImpactError::Invalid(
+                "incomplete rod support receipt",
+            ));
+        }
+        for node in 0..self.linear.len() {
+            checkpoint(gate)?;
+            let support = &receipt.support_impulses[node];
+            if self.linear[node] == next.linear[node]
+                && self.spin[node] == next.spin[node]
+                && support.linear_n_s == [0.0; 3]
+                && support.angular_nm_s == [0.0; 3]
+            {
+                continue;
+            }
+            let k = self.kinetics[node];
+            let frame = self.pose.frames[node];
+            let dp = difference(next.linear[node], self.linear[node]);
+            let ds = difference(next.spin[node], self.spin[node]);
+            let old_omega = k.omega(self.spin[node])?;
+            let next_omega = k.omega(next.spin[node])?;
+            for c in 0..3 {
+                audit.kinetic_energy = audit.kinetic_energy
+                    + dp[c]
+                        * (dd(self.linear[node][c]) * dd(0.5) + dd(next.linear[node][c]) * dd(0.5))
+                        / dd(k.mass)
+                    + ds[c] * (dd(old_omega[c]) * dd(0.5) + dd(next_omega[c]) * dd(0.5));
+                audit.linear[c] = audit.linear[c] + dp[c];
+                audit.support_linear[c] = audit.support_linear[c] + dd(support.linear_n_s[c]);
+            }
+            let node_arm = sub(self.pose.positions_m[node], origin);
+            let centroid_arm = add(node_arm, rotate(frame, k.center)?);
+            let orbital = cross_dd(centroid_arm, dp);
+            let spin_world = rotate(frame, ds.map(Dd::to_f64))?;
+            let support_orbital = cross_dd(node_arm, support.linear_n_s.map(dd));
+            for c in 0..3 {
+                audit.angular[c] = audit.angular[c] + orbital[c] + dd(spin_world[c]);
+                audit.support_angular[c] =
+                    audit.support_angular[c] + support_orbital[c] + dd(support.angular_nm_s[c]);
+            }
+        }
+        checkpoint(gate)?;
+        Ok(audit)
+    }
+
     /// Resolve one frictionless impact and return BOTH continuing native states.
     ///
     /// The rod's actual nodal centroid, full central inertia and existing fixed
@@ -440,60 +625,16 @@ impl<I: RodMotionInertia> RodMotion<I> {
         let mut angular = [dd(0.0); 3];
         let origin = controls.impulse.balance_origin_m;
         for transfer in rods {
-            checkpoint(gate)?;
-            let rod = transfer.before;
-            let next_rod = transfer.after;
-            let Some(rod_report) = transfer.receipt else {
-                if rod.linear != next_rod.linear || rod.spin != next_rod.spin {
-                    return Err(RodRigidImpactError::Invalid(
-                        "changed rod momentum requires its native impulse receipt",
-                    ));
-                }
-                continue;
-            };
-            if rod_report.support_impulses.len() != rod.linear.len()
-                || next_rod.linear.len() != rod.linear.len()
-                || next_rod.spin.len() != rod.spin.len()
-            {
-                return Err(RodRigidImpactError::Invalid(
-                    "incomplete rod support receipt",
-                ));
-            }
-            for node in 0..rod.linear.len() {
-                checkpoint(gate)?;
-                let support = &rod_report.support_impulses[node];
-                if rod.linear[node] == next_rod.linear[node]
-                    && rod.spin[node] == next_rod.spin[node]
-                    && support.linear_n_s == [0.0; 3]
-                    && support.angular_nm_s == [0.0; 3]
-                {
-                    continue;
-                }
-                let k = rod.kinetics[node];
-                let frame = rod.pose.frames[node];
-                let dp = difference(next_rod.linear[node], rod.linear[node]);
-                let ds = difference(next_rod.spin[node], rod.spin[node]);
-                let old_omega = k.omega(rod.spin[node])?;
-                let next_omega = k.omega(next_rod.spin[node])?;
-                for c in 0..3 {
-                    kinetic = kinetic
-                        + dp[c]
-                            * (dd(rod.linear[node][c]) * dd(0.5)
-                                + dd(next_rod.linear[node][c]) * dd(0.5))
-                            / dd(k.mass)
-                        + ds[c] * (dd(old_omega[c]) * dd(0.5) + dd(next_omega[c]) * dd(0.5));
-                    linear[c] = linear[c] + dp[c] - dd(support.linear_n_s[c]);
-                }
-                let node_arm = sub(rod.pose.positions_m[node], origin);
-                let centroid_arm = add(node_arm, rotate(frame, k.center)?);
-                let orbital = cross_dd(centroid_arm, dp);
-                let spin_world = rotate(frame, ds.map(Dd::to_f64))?;
-                let support_orbital = cross_dd(node_arm, support.linear_n_s.map(dd));
-                for c in 0..3 {
-                    angular[c] = angular[c] + orbital[c] + dd(spin_world[c])
-                        - support_orbital[c]
-                        - dd(support.angular_nm_s[c]);
-                }
+            let native = transfer.before.account_contact_transfer(
+                transfer.after,
+                transfer.receipt,
+                origin,
+                gate,
+            )?;
+            kinetic = kinetic + native.kinetic_energy;
+            for c in 0..3 {
+                linear[c] = linear[c] + native.linear[c] - native.support_linear[c];
+                angular[c] = angular[c] + native.angular[c] - native.support_angular[c];
             }
         }
         let mut body_linear_defect: f64 = 0.0;
@@ -659,7 +800,10 @@ fn cross_dd(a: [f64; 3], b: [Dd; 3]) -> [Dd; 3] {
     ]
 }
 fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-    (dd(a[0]) * dd(b[0]) + dd(a[1]) * dd(b[1]) + dd(a[2]) * dd(b[2])).to_f64()
+    dot_dd(a, b).to_f64()
+}
+pub(super) fn dot_dd(a: [f64; 3], b: [f64; 3]) -> Dd {
+    dd(a[0]) * dd(b[0]) + dd(a[1]) * dd(b[1]) + dd(a[2]) * dd(b[2])
 }
 fn norm(a: [f64; 3]) -> f64 {
     fs_math::det::hypot(fs_math::det::hypot(a[0], a[1]), a[2])

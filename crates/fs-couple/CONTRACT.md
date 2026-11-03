@@ -22932,6 +22932,78 @@ thermal loss destinations, experimental validation and measured performance
 are not established by this extension. A unique velocity witness does not
 establish unique local pressure, support load shares or heat partition.
 
+## Native rod-to-spatial-plate simultaneous normal impacts
+
+With `rod-dynamics`, `plate_impact::rods::RodPlateImpact` exchanges momentum
+between one continuing original `RodMotion<I>` and one original spatial
+`PlateDynamics<L>` trajectory. Each `RodPlatePoint` names an existing material
+node and its rotating material offset; the matching prepared plate site uses
+the original interpolation and its transpose. Mesh x/y are world coordinates,
+the plate normal is world +z, and an explicit reference face height is added to
+the original transverse displacement. Both native clocks must agree. The rod
+receives +z impulse and the plate its reciprocal -z action.
+Original world positions and rotated material offsets remain compensated
+through alignment and gap evaluation, so large common origins cannot round
+small penetration into an inactive separating witness.
+The same native point-kinematics and directional-mobility helpers serve the
+existing rod/rigid contact graphs. Their original endpoint identities remain
+intact while origin subtraction and material offsets precede final rounding;
+both signed normal gaps and tangential misalignment use that shared geometry.
+
+The original cached plate block `B M^-1 B^T` is augmented at each event by the
+actual rod's supported cross mobility. Centered and eccentric rods share their
+native mass, full central tensor, centroid offsets and stationary support
+policy. Shared-node rotational/translation cross terms are retained, while
+distinct rod nodes still interact through the original consistent plate mass.
+One global `fs-contact` normal law resolves all active rows together, including
+initially separating rows. Its nonpenetration, work admission and
+unique-impulse/unique-velocity distinction remain authoritative. Redundant
+impulses do not establish unique local pressure or a heat partition.
+
+One original rod point-impulse batch and one original plate structural impulse
+plus acceleration restart produce private candidates. Actual original point
+speeds, each native stored momentum transfer, both support resultants and the
+complete event's momentum/work must pass before either participant changes.
+Original rod sources, pose, elastic response, translation remainder, clocks and
+step counts remain with the trajectory. The plate retains its displacement,
+clock, accepted steps and telemetry. Background damping acts through its
+original acceleration restart and subsequent native integration; the impact
+does not turn damping into an additional impulse or force divided by a timestep.
+
+Compensated native momentum and kinetic increments are combined before final
+rounding, retaining small collision work beneath large common translation.
+Rod support force/couple reactions and plate constrained-row cross inertia are
+included about world zero. All represented linear and angular increments must
+close: the transverse plate contributes Pz and bending Lx/Ly, while the rod
+retains its full spatial accounting. Failure, cancellation, mismatched clocks,
+misaligned points or unresolved stored transfers publish neither candidate;
+an all-zero event invokes no native update.
+
+Preparation and event storage have explicit contact, plate mass-product,
+original rod-node and combined workspace bounds. The normal law admits at most
+64 sites. Preparation reuses the original consistent-mass solve per site;
+events add O(k²) rod cross responses, O(k n_plate) interpolation/transpose work,
+one O(n_rod + k) native rod batch and one native plate mass solve/restart.
+There is no per-contact trajectory clone, surrogate rigid plate, invented
+inertia, contact-time search, moving-normal law, persistent-contact stepper,
+tangential friction, shell in-plane dynamics or mechanical-loss thermal route.
+
+Five focused physical groups in `tests/plate_impact/rods.rs` compare a full
+six-by-six rod spatial-mass inverse and dense original plate mass against
+three-site simultaneous impacts; check permitted frame/translation and contact
+permutation invariance, restitution endpoints and continuation through both
+native integrators; reconstruct stationary rod/plate support reactions; compare
+distinct-node and redundant contact motion; preserve small loss beneath common
+translation energy; and exercise late native-load/cancellation refusal,
+geometry, clocks, budgets, exact rollback, retry and zero-event identity.
+The geometry refusal includes a -0.25 m gap under a 2^53 m common origin that
+would otherwise round to a false +0.25 m gap before contact admission.
+The shared rod/rigid graph regressions retain positive separating gaps and
+reject negative penetrating gaps under large translated origins. The combined
+original-source native build passes all 104 tests: 32 plate/contact tests,
+including all five rod/plate groups, and 72 original rod tests. This selected
+native closure is not a full workspace Cargo or DSR verification claim.
+
 ## Simultaneous normal contact graphs on native rods and finite bodies
 
 `rod_motion::RodMotion::apply_rigid_normal_contact_graph` resolves authored
