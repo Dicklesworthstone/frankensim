@@ -3,8 +3,11 @@
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_math::c64::C64;
-use fs_modal::harmonic::{HarmonicResponseControls, HarmonicResponseError};
-use fs_solid::frame2d::{FrameMassFormulation, harmonic::FrameHarmonicError};
+use fs_modal::harmonic::{HarmonicPortControls, HarmonicResponseControls, HarmonicResponseError};
+use fs_solid::frame2d::{
+    FrameMassFormulation,
+    harmonic::{FrameHarmonicError, FrameHarmonicPortLoad},
+};
 use fs_solid::{Frame2d, Geometry, Rayleigh, SectionModel};
 
 fn with_cx<R>(gate: &CancelGate, f: impl FnOnce(&Cx<'_>) -> R) -> R {
@@ -29,6 +32,14 @@ fn controls() -> HarmonicResponseControls {
         maximum_coordinates: 12,
         maximum_payload_bytes: 1 << 20,
         maximum_relative_residual: 1e-12,
+    }
+}
+
+fn port_controls() -> HarmonicPortControls {
+    HarmonicPortControls {
+        maximum_ports: 4,
+        maximum_projection_terms: 4096,
+        maximum_payload_bytes: 1 << 16,
     }
 }
 
@@ -217,5 +228,204 @@ fn g0_refusals_preserve_original_state_and_do_not_invent_mass_or_loss() {
                 HarmonicResponseError::Cancelled
             ))
         ));
+    });
+}
+
+#[test]
+fn g1_attached_inertance_moves_resonance_and_regularizes_the_bare_pole() {
+    with_cx(&CancelGate::new(), |cx| {
+        let frame = frame(1.0, 0.0, true, FrameMassFormulation::ConsistentReference);
+        let accepted = frame.displacements().to_vec();
+        let force_map = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+        let rayleigh = Rayleigh { a0: 0.0, a1: 0.0 };
+        // Native m=2,k=8. Physical attached mass 6 shifts resonance from 2
+        // to 1 rad/s. Its resistance is 0.5; no structural loss is invented.
+        for omega in [0.5, 1.0, 2.0, 4.0] {
+            let impedance = [C64::new(0.5, -6.0 * omega)];
+            let prepared = frame
+                .prepare_harmonic_response_with_port_impedance(
+                    omega,
+                    rayleigh,
+                    FrameHarmonicPortLoad {
+                        force_map: &force_map,
+                        ports: 1,
+                        impedance: &impedance,
+                        controls: port_controls(),
+                    },
+                    controls(),
+                    cx,
+                )
+                .unwrap();
+            assert_eq!(prepared.free_dofs(), &[3]);
+            for force in [C64::ONE, C64::new(-0.3, 0.7)] {
+                let response = prepared.solve(&[force], cx).unwrap();
+                let q = force / C64::new(8.0 - 8.0 * omega * omega, -0.5 * omega);
+                let v = C64::new(q.im, -q.re).scale(omega);
+                close(response.displacement[0], q, 5e-13);
+                let port = response.port_load.as_ref().unwrap();
+                close(port.flow[0], v, 5e-13);
+                close(port.effort[0], impedance[0] * v, 5e-13);
+                let absorbed = 0.25 * v.norm_sq();
+                assert!((port.average_absorbed_power_w - absorbed).abs() < 2e-12 * absorbed);
+                assert_eq!(response.average_viscous_power_w, 0.0);
+                assert!(response.power_balance_residual_w.abs() < 2e-12 * absorbed);
+                if omega == 1.0 {
+                    close(response.velocity[0], force.scale(2.0), 5e-13);
+                }
+            }
+        }
+        assert_eq!(frame.displacements(), accepted);
+    });
+}
+
+#[test]
+fn g1_mutual_boundary_load_retains_lever_arms_and_bending_coupling() {
+    with_cx(&CancelGate::new(), |cx| {
+        let mut frame = frame(1.0, 0.0, false, FrameMassFormulation::ConsistentReference);
+        frame.fix(1, [true, false, false]);
+        let rayleigh = Rayleigh { a0: 0.1, a1: 0.02 };
+        // Port 0: transverse force with a 0.25 m moment arm.
+        // Port 1: pure moment. The same map must be used for conjugate flow.
+        let mut force_map = [0.0; 12];
+        force_map[8] = 1.0;
+        force_map[10] = 0.25;
+        force_map[11] = 1.0;
+        for omega in [0.5, 2.0, 6.0] {
+            let z00 = C64::new(0.7, -0.4 * omega);
+            let z01 = C64::new(0.2, -0.1 * omega);
+            let z11 = C64::new(0.5, -0.2 * omega);
+            let impedance = [z00, z01, z01, z11];
+            let prepared = frame
+                .prepare_harmonic_response_with_port_impedance(
+                    omega,
+                    rayleigh,
+                    FrameHarmonicPortLoad {
+                        force_map: &force_map,
+                        ports: 2,
+                        impedance: &impedance,
+                        controls: port_controls(),
+                    },
+                    controls(),
+                    cx,
+                )
+                .unwrap();
+            assert_eq!(prepared.free_dofs(), &[4, 5]);
+            let force = [C64::new(1.0, -0.3), C64::new(-0.2, 0.4)];
+            let response = prepared.solve(&force, cx).unwrap();
+            // Independent two-coordinate inverse using exact Hermite integrals.
+            let entry = |k: f64, m: f64, z: C64| {
+                C64::new(
+                    k - omega * omega * m,
+                    -omega * (rayleigh.a0 * m + rayleigh.a1 * k),
+                ) + C64::new(z.im, -z.re).scale(omega)
+            };
+            let a = entry(24.0, 78.0 / 35.0, z00);
+            let b = entry(-12.0, -11.0 / 35.0, z00.scale(0.25) + z01);
+            let d = entry(8.0, 2.0 / 35.0, z00.scale(0.0625) + z01.scale(0.5) + z11);
+            let determinant = a * d - b * b;
+            close(
+                response.displacement[0],
+                (d * force[0] - b * force[1]) / determinant,
+                4e-12,
+            );
+            close(
+                response.displacement[1],
+                (a * force[1] - b * force[0]) / determinant,
+                4e-12,
+            );
+            let flow = [
+                response.velocity[0] + response.velocity[1].scale(0.25),
+                response.velocity[1],
+            ];
+            let port = response.port_load.as_ref().unwrap();
+            for (actual, expected) in port.flow.iter().zip(flow) {
+                close(*actual, expected, 5e-13);
+            }
+            close(port.effort[0], z00 * flow[0] + z01 * flow[1], 5e-13);
+            close(port.effort[1], z01 * flow[0] + z11 * flow[1], 5e-13);
+            let cross = flow[0].re * flow[1].re + flow[0].im * flow[1].im;
+            let power = 0.5 * (0.7 * flow[0].norm_sq() + 0.4 * cross + 0.5 * flow[1].norm_sq());
+            assert!((port.average_absorbed_power_w - power).abs() < 2e-12 * power);
+            assert!(
+                response.power_balance_residual_w.abs() < 4e-12 * response.average_input_power_w
+            );
+        }
+    });
+}
+
+#[test]
+fn g0_supported_ports_are_motionless_and_load_refusals_preserve_the_frame() {
+    with_cx(&CancelGate::new(), |cx| {
+        let frame = frame(1.0, 0.0, true, FrameMassFormulation::ConsistentReference);
+        let accepted = frame.displacements().to_vec();
+        let mut map = [0.0; 12];
+        map[6] = 1.0; // Moving axial tip, port 0.
+        map[1] = 1.0; // Supported axial root, port 1.
+        let impedance = [C64::ONE, C64::new(0.25, 0.0), C64::new(0.25, 0.0), C64::ONE];
+        let load = FrameHarmonicPortLoad {
+            force_map: &map,
+            ports: 2,
+            impedance: &impedance,
+            controls: port_controls(),
+        };
+        let rayleigh = Rayleigh { a0: 0.0, a1: 0.0 };
+        let prepared = frame
+            .prepare_harmonic_response_with_port_impedance(2.0, rayleigh, load, controls(), cx)
+            .unwrap();
+        let result = prepared.solve(&[C64::ONE], cx).unwrap();
+        let port = result.port_load.unwrap();
+        close(port.flow[0], C64::ONE, 5e-13);
+        assert_eq!(port.flow[1], C64::ZERO);
+        close(port.effort[1], C64::new(0.25, 0.0), 5e-13);
+        assert!((port.average_absorbed_power_w - 0.5).abs() < 1e-13);
+        for bad in [
+            FrameHarmonicPortLoad {
+                force_map: &map[..10],
+                ..load
+            },
+            FrameHarmonicPortLoad { ports: 0, ..load },
+            FrameHarmonicPortLoad {
+                controls: HarmonicPortControls {
+                    maximum_payload_bytes: 1,
+                    ..port_controls()
+                },
+                ..load
+            },
+            FrameHarmonicPortLoad {
+                controls: HarmonicPortControls {
+                    maximum_projection_terms: 0,
+                    ..port_controls()
+                },
+                ..load
+            },
+        ] {
+            assert!(
+                frame
+                    .prepare_harmonic_response_with_port_impedance(
+                        2.0,
+                        rayleigh,
+                        bad,
+                        controls(),
+                        cx,
+                    )
+                    .is_err()
+            );
+        }
+        let active = [C64::new(-1.0, 0.0), C64::ZERO, C64::ZERO, C64::ONE];
+        assert!(
+            frame
+                .prepare_harmonic_response_with_port_impedance(
+                    2.0,
+                    rayleigh,
+                    FrameHarmonicPortLoad {
+                        impedance: &active,
+                        ..load
+                    },
+                    controls(),
+                    cx,
+                )
+                .is_err()
+        );
+        assert_eq!(frame.displacements(), accepted);
     });
 }

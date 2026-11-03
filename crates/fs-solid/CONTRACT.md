@@ -3530,6 +3530,31 @@ resonance, full consistent bending inertia, heterogeneous nonproportional loss,
 rotational covariance, reciprocity, source-band boundaries, physical power,
 singular limits, budgets, cancellation and unchanged accepted state.
 
+### Physical boundary loads on the native frame
+
+`Frame2d::prepare_harmonic_response_with_port_impedance` takes the full
+native node-major force map, including supported rows, and the original
+frequency-dependent complex load impedance. The same map and its transpose
+pair nodal force/moment with physical port flow. Reduction retains every free
+coordinate and every supplied port; no modal basis or bare-frame inverse is
+introduced. The complete pencil is
+`K - omega^2 M - i omega C - i omega B Z B^T`, so attached inertia,
+compliance and mutual losses can shift and damp the actual coupled resonance.
+A physical load may resolve an otherwise singular bare-frame pole.
+
+The shared harmonic owner admits the load's pointwise Hermitian part and
+returns original port flows, opposing efforts and net absorbed boundary work.
+That work remains separate from structural viscous power. The load owner
+supplies frequency-band validity, physical units, causality and source accuracy;
+pointwise admission is not a broadband certificate. Finite impedance at DC
+does not encode a spring's `1/omega` pole. Supported ports have zero flow,
+but mutual loading may give them nonzero effort; full support reactions are
+outside this response. Separate load payload limits reserve the native-map
+reduction before delegating the remaining budget to the shared owner.
+The same original section-band, geometry, inertia and cancellation conditions
+apply. Added `frame2d_harmonic` cases specify analytic attached-mass resonance,
+lever-arm/mutual bending loads, physical work, supported ports and refusals.
+
 ## Original material strain domains on frozen modal solid trajectories
 
 `ViscoElements::validate_displacement` evaluates the existing element Mandel
