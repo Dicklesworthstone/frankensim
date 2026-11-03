@@ -2283,8 +2283,29 @@ closure and world angular-momentum accounting. Cancellation publishes nothing.
 specified child masses, COMs and full parallel-axis inertia against the parent,
 applies equal-and-opposite internal recoil, and reports actual mass, linear
 momentum, orbital-plus-spin angular momentum and separation-work residuals.
-Children use the declared shared principal-axis convention; incompatible
-geometry or nonrepresentable bookkeeping is refused.
+Children retain the declared common material body axes; their principal axes
+may differ when using the full-tensor model. Incompatible geometry or
+nonrepresentable bookkeeping is refused.
+
+### Full-tensor rocket stage separation
+
+The existing `RocketStage<I>` and `StageSeparation<I>` now retain the same
+sealed `RocketInertiaModel` as their parent. The diagonal model remains the
+default; `TensorRocketInertia` stages preserve independently oriented dry and
+propellant tensors without projecting them onto common principal axes.
+Admission compares every entry of the complete parallel-axis tensor, as well
+as separate dry/propellant inventories and the common COM. Both returned
+children keep their original inertia laws and continue through the native
+full-tensor depletion and flight owner.
+
+The original assembly release still owns the inherited rigid velocity field,
+common-point equal/opposite recoil, spin plus orbital momentum, and separation
+work. The adapter remains allocation-free for two stages. Three focused
+G1/G3/G4 regression groups cover independent tensor/impulse/work calculations,
+no-recoil release followed by powered flight of both descendants, an admissible
+off-diagonal-only inertia mismatch, and late cancellation with deterministic
+retry. These are numerical fixtures, not calibration or a resolved explosive
+separation model; geometry/contact admission remains the caller's operation.
 
 These operations do not infer internal relative-flow momentum/Coriolis
 transport, slosh, shifting COM/principal axes or arbitrary outlet inertia

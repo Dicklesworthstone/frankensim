@@ -1,14 +1,16 @@
 //! Instantaneous separation of two native rocket bodies.
 //!
-//! Both pieces share the parent principal axes at separation. Their supplied
+//! Both pieces retain the parent material body axes at separation. Their supplied
 //! masses, centres and full parallel-axis assembly must reproduce the parent.
+//! Principal axes may differ between the dry, propellant and child distributions;
+//! the same adapter admits both native diagonal and full-tensor inertia models.
 //! Equal and opposite impulses act at one common physical point. Each piece
 //! inherits v_com + omega cross r before recoil; neither spin, orbital angular
 //! momentum nor a discarded stage disappears from the returned result.
 //! This event models a prescribed separation impulse, not pyrotechnic pressure,
 //! contact/reimpact, fracture or plume interaction.
 
-use super::{RigidRocketError, RigidRocketInertia, RigidRocketState, poll};
+use super::{RigidRocketError, RigidRocketInertia, RigidRocketState, RocketInertiaModel, poll};
 use crate::assembly::{
     AssemblyError, AssemblyPart, ImpulseTotals, SeparationImpulse, release_accounting,
     release_components_into,
@@ -17,7 +19,7 @@ use crate::{MassProperties, Pose, UnitQuaternion, Vec3, rocket::RocketState};
 
 /// One piece, with axes aligned to the parent body and its own COM origin.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct RocketStage {
+pub struct RocketStage<I = RigidRocketInertia> {
     /// Dry mass of this piece [kg].
     pub dry_mass_kg: f64,
     /// Remaining propellant retained by this piece [kg].
@@ -25,16 +27,16 @@ pub struct RocketStage {
     /// Piece COM relative to the parent COM, in common body axes [m].
     pub center_of_mass_body_m: Vec3,
     /// Its own COM-referenced dry and propellant inertia law.
-    pub inertia: RigidRocketInertia,
+    pub inertia: I,
 }
 
 /// Both surviving owners and actual event accounting.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct StageSeparation {
+pub struct StageSeparation<I = RigidRocketInertia> {
     /// Continuing vehicle after recoil and transfer to its new COM.
-    pub retained: RigidRocketState,
+    pub retained: RigidRocketState<I>,
     /// Released vehicle after the opposite recoil; it can continue independently.
-    pub released: RigidRocketState,
+    pub released: RigidRocketState<I>,
     /// Actual piece mass sum minus parent mass [kg].
     pub mass_residual_kg: f64,
     /// Actual sum of world linear momenta minus the parent [kg m/s].
@@ -48,7 +50,7 @@ pub struct StageSeparation {
     pub energy_balance_residual_j: f64,
 }
 
-impl RocketStage {
+impl<I: RocketInertiaModel> RocketStage<I> {
     fn properties(self) -> Result<MassProperties, RigidRocketError> {
         let translation = RocketState {
             position_m: Vec3::ZERO,
@@ -67,7 +69,7 @@ fn magnitude(vector: Vec3) -> f64 {
     vector.x.abs().max(vector.y.abs()).max(vector.z.abs())
 }
 
-impl RigidRocketState {
+impl<I: RocketInertiaModel> RigidRocketState<I> {
     /// Separate two supplied mass distributions at a shared impulse point.
     ///
     /// impulse_on_retained_body_n_s is applied to the retained piece and its
@@ -75,17 +77,21 @@ impl RigidRocketState {
     /// from the original parent COM. These are body-frame input coordinates.
     /// Checks dry/propellant mass sums, COM and all six entries of the
     /// parallel-axis inertia assembly before publishing either piece.
+    /// Each child's inertia is expressed in the parent's material body axes;
+    /// its principal axes need not match the parent's or the other child's.
+    /// The original full-inertia release owner supplies spin, orbital motion
+    /// and recoil. No diagonal projection or new separation dynamics is used.
     /// relative_assembly_tolerance must be positive and at most 1e-6; accepted
     /// discrepancies are reported, never repaired by changing a supplied mass.
     pub fn separate(
         &self,
-        retained: RocketStage,
-        released: RocketStage,
+        retained: RocketStage<I>,
+        released: RocketStage<I>,
         impulse_on_retained_body_n_s: Vec3,
         application_point_body_m: Vec3,
         relative_assembly_tolerance: f64,
         mut cancelled: impl FnMut() -> bool,
-    ) -> Result<StageSeparation, RigidRocketError> {
+    ) -> Result<StageSeparation<I>, RigidRocketError> {
         poll(&mut cancelled)?;
         let tolerance = relative_assembly_tolerance;
         if !tolerance.is_finite()
@@ -129,28 +135,27 @@ impl RigidRocketState {
         let mut assembled = [[0.0; 3]; 3];
         for (piece, part) in pieces.iter().zip(parts) {
             let r = piece.center_of_mass_body_m;
-            let d = part.principal_inertia_body();
+            let inertia = part.inertia_tensor_body();
             let m = part.mass();
             let values = [r.x, r.y, r.z];
-            let diagonal = [d.x, d.y, d.z];
             for row in 0..3 {
                 for col in 0..3 {
-                    assembled[row][col] += if row == col {
+                    let shift = if row == col {
                         let a = values[(row + 1) % 3];
                         let b = values[(row + 2) % 3];
-                        diagonal[row] + m * (a * a + b * b)
+                        m * (a * a + b * b)
                     } else {
                         -m * values[row] * values[col]
                     };
+                    assembled[row][col] += inertia.m[3 * row + col] + shift;
                 }
             }
         }
-        let parent_inertia = properties.principal_inertia_body();
-        let diagonal = [parent_inertia.x, parent_inertia.y, parent_inertia.z];
-        let scale = magnitude(parent_inertia);
+        let parent_inertia = properties.inertia_tensor_body();
+        let scale = parent_inertia.m.iter().fold(0.0_f64, |a, b| a.max(b.abs()));
         for row in 0..3 {
             for col in 0..3 {
-                let expected = if row == col { diagonal[row] } else { 0.0 };
+                let expected = parent_inertia.m[3 * row + col];
                 if !assembled[row][col].is_finite()
                     || (assembled[row][col] - expected).abs() > tolerance * scale
                 {
