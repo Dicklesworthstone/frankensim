@@ -24156,3 +24156,13 @@ bitwise clock/history independence; the existing runtime adapter; factor reuse;
 and source-band, resource and cancellation refusals. This evidence does not
 qualify nonlinear flow, evolving gas, continuum BEM accuracy, arbitrary fit
 passivity between samples, or the full repository build.
+
+### Forced response of complete causal shell and dynamic-load resonance images
+
+`PreparedShellResonance::harmonic_factor` evaluates the same complete selected shell/substrate/coating/load state image as its existing pole APIs. `ShellForcedFactor::response` accepts peak complex forces at the original force ports, followed by signed exterior and cavity pressures, using `exp(-i omega t)`. Internal attachment ports remain internally connected. One shared physical LU serves all external drive vectors at each admitted positive angular frequency; the common authored shell/load frequency band is enforced before factorization. Bare component resonances need no separate impedance inverse.
+
+`ShellForcedResponse` retains the complete joint harmonic state, original port outputs and per-port supplied work, plus physical modal and force-port displacement, velocity and signed volume flow. It independently accounts for cycle-mean mechanical storage, background/interface heat, every actual selected substrate/coating memory branch, and original load storage and resistance heat. Mutual load-port work remains signed per port. Shell and load balances, original forced mechanical/kinematic/material/load equations, and full-owner energy/heat are cross-checked. These forced cycle means are distinct from the existing free-pole complex-envelope quantities.
+
+`ShellForcedBudget` admits the additional observation payload and work before the solve. Each branch/interface projection is reused across original mechanical equation checks. Cancellation, malformed input, insufficient resources or failed original physical accounting returns no partial response and preserves the factor/source. The fixed source basis and already selected causal material approximation remain the source model's limits. This is a linear image response; finite-amplitude coating strain admission remains the source image's separate geometric strain check.
+
+`coating_dynamic_response` checks independently solved causal body/load amplitudes, actual source memory and load heat, a finite joint response at an exactly singular standalone attachment resonance, two-coordinate cross-memory and dynamic-load coupling, mutual signed port work, both oriented pressure drives, shared-factor reuse, and source-band/resource/cancellation admission. Existing shell pole and free-mode semantics remain unchanged.

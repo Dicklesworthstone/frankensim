@@ -29,6 +29,9 @@ use fs_phs::{PhsError, PortHamiltonian, QuadraticStorage, RelaxationBranch};
 pub use super::harmonic::loaded::ShellHarmonicPort;
 pub use fs_phs::harmonic::{BeynOptions, PoleOptions, ResonanceRegion};
 
+/// Full-state forced response of the same causal shell and independent loads.
+pub mod response;
+
 /// An original causal impedance owner, connected through physical shell flows.
 /// The load receives the selected velocity/volume flow and returns its opposing
 /// force/pressure. Its storage must be declared exactly quadratic; all of its
