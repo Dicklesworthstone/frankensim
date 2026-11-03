@@ -19,6 +19,7 @@
 
 pub use fs_evidence::Color;
 
+mod angular_momentum;
 pub mod conjugate;
 pub mod core2;
 pub mod d3q19;

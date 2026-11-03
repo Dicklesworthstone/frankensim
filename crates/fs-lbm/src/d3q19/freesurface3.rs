@@ -91,6 +91,19 @@ pub enum ConversionRedistribution3 {
     /// Reproduce version-1 global pooling, including its nonlocal mass and heat
     /// mixing between disconnected drops. Intended only for historical replay.
     LegacyGlobal,
+    /// Preserve mass and both momenta separately on each actual connected
+    /// conversion route set. A least-change rotation corrects cell relocation;
+    /// unresolved spin, Mach excess or population readback errors refuse.
+    /// Numerical kinetic change is reported, never converted to physical heat.
+    /// The remap changes mass first moments: this is not a Galilean-invariant
+    /// geometric projection or a claim about the complete VOF timestep.
+    ConservativeLocalAngular,
+}
+
+impl ConversionRedistribution3 {
+    fn preserves_momentum(self) -> bool {
+        matches!(self, Self::ConservativeLocal | Self::ConservativeLocalAngular)
+    }
 }
 
 /// D3Q19 lattice speed of sound squared.
@@ -740,6 +753,8 @@ impl FreeSurface3 {
     /// ConservativeLocal additionally transports physical conversion momentum,
     /// bounds actual receiving inventories, and refuses unlocated carry. Its
     /// numerical kinetic change is available through conversion_momentum_report.
+    /// ConservativeLocalAngular also closes cell-centre angular momentum on
+    /// each actual connected route set, refusing unresolved rotational motion.
     #[must_use]
     pub fn with_conversion_redistribution(mut self, model: ConversionRedistribution3) -> Self {
         self.redistribution = model;
@@ -1128,10 +1143,11 @@ impl FreeSurface3 {
     /// publication. Cancellation preserves populations, tracked mass and all
     /// conversion counters. Once publication begins its conversion cascade
     /// finishes; a later cancellation request is observed by the next step.
-    /// ConservativeLocal evaluates the entire step on a private candidate;
-    /// conversion/cancellation refusal also preserves its populations and receipt.
+    /// Both conservative momentum modes evaluate the entire step on a private
+    /// candidate; conversion/cancellation refusal also preserves populations
+    /// and the accepted receipt.
     pub fn step_with_gate(&mut self, gate: &CancelGate) -> Result<(), FreeSurfaceError3> {
-        if self.redistribution == ConversionRedistribution3::ConservativeLocal {
+        if self.redistribution.preserves_momentum() {
             check_cancel(gate)?;
             let mut candidate = self.clone();
             candidate.step_inner(gate, None, None, None)?;
@@ -1416,7 +1432,7 @@ impl FreeSurface3 {
         mut transport: Option<&mut MassTransport3>,
         tolerance: f64,
     ) -> Result<(), FreeSurfaceError3> {
-        let mut momentum = if self.redistribution == ConversionRedistribution3::ConservativeLocal {
+        let mut momentum = if self.redistribution.preserves_momentum() {
             Some(conversion_momentum::ConversionMomentum3::new(self)?)
         } else { None };
         // Capacity routing needs physical recipient inventories. The opt-in

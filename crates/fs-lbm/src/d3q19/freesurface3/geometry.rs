@@ -39,7 +39,7 @@ impl FreeSurface3 {
     /// threshold; subsequent local transfers finish its residuals. Every mass
     /// movement uses the existing companion-field route budget, and each
     /// unfinished round must consume a route. Unlocated carry refuses.
-    /// ConservativeLocal reuses its momentum-carrying native conversion and
+    /// Both conservative momentum modes reuse their native conversion and
     /// exact routes. An already bounded endpoint keeps its accepted conversion
     /// receipt and populations, rather than running a second mass-only remap.
     ///
@@ -54,9 +54,13 @@ impl FreeSurface3 {
         gate: &CancelGate,
     ) -> Result<(), FreeSurfaceError3> {
         check_cancel(gate)?;
-        if !matches!(self.redistribution,
-            ConversionRedistribution3::Local | ConversionRedistribution3::ConservativeLocal)
-            || self.carry != 0.0 {
+        if !matches!(
+            self.redistribution,
+            ConversionRedistribution3::Local
+                | ConversionRedistribution3::ConservativeLocal
+                | ConversionRedistribution3::ConservativeLocalAngular
+        ) || self.carry != 0.0
+        {
             return Err(FreeSurfaceError3::Transport(
                 "resolved interface geometry requires local routes and no unlocated carry",
             ));
@@ -79,7 +83,7 @@ impl FreeSurface3 {
                 trace.after = self.mass_snapshot();
                 return Ok(());
             }
-            if self.redistribution == ConversionRedistribution3::ConservativeLocal {
+            if self.redistribution.preserves_momentum() {
                 // This same owner closes both momentum and signed inventory.
                 // Recheck its actual density/fill bounds on the next pass;
                 // leave trace.before and any earlier native routes intact.

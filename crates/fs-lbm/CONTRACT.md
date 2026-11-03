@@ -6910,6 +6910,38 @@ forces, advancing/receding and disconnected fronts, actual before/routes/after
 mass continuity, a real collision/stream/conversion step, zero-pressure replay,
 co-moving identity and late public-step rollback.
 
+`ConversionRedistribution3::ConservativeLocalAngular` extends that native
+conversion with angular closure. It preserves signed tracked mass, Guo physical
+linear momentum and cell-centre angular momentum separately for each component
+of actual adjacent conversion routes. Original source inventories are captured
+before class changes, including negative mass debt and retained source fluid
+that later receives a transfer. Detached fronts cannot exchange corrective
+impulse or torque through a global pool.
+
+The final positive masses define a component centroid and inertia. A
+mass-weighted least-change translation and rotation close the two momenta;
+the same scaled SVD owner already used for tetrahedral liquid ingress admits
+only represented inertia directions. The actual native population readback
+must then satisfy the existing local roundoff policy. Unresolved spin,
+inadmissible Mach, nonpositive populations or failed closure refuse before a
+public normal/pressure step publishes its candidate. Original transport and
+readback defects remain accounted for alongside final component defects.
+
+The conversion receipt supplies `absolute_angular_momentum_defect = Some(...)`
+only for this mode, about fixed local component origins; other modes return
+`None`. Signed numerical kinetic change includes the corrective motion and
+never becomes physical heat. The remap is in the declared wall-bounded lattice
+frame: relocating cell mass changes its first moment, so a uniform velocity
+boost can require a different angular correction. This is neither a geometric
+projection that preserves mass centroids nor a claim of whole-timestep angular
+or energy conservation. Existing modes retain their arithmetic.
+
+Focused regression sources independently check asymmetric forced fronts,
+detached components, a retained source paying signed debt, unrepresentable spin
+with one surviving cell, density preservation, numerical kinetic change and
+public normal/pressure rollback. Their presence is not native execution or
+experimental validation evidence.
+
 ### Conservative conversion on the resolved thermocapillary thermal trajectory
 
 `MaterialFreeSurfaceEnthalpy3::with_conversion_redistribution` selects the native

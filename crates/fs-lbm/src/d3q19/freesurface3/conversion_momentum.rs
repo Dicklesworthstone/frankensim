@@ -2,16 +2,24 @@
 
 use super::*;
 
+mod angular;
+
 /// Balance of the most recent explicitly conservative conversion, in lattice
 /// units. Collision, streaming, pressure traction and wall work are excluded.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ConversionMomentumReport3 {
     /// Sum of absolute actual mass transfers on adjacent interface routes.
     pub redistributed_mass: f64,
-    /// Sum of absolute source/recipient mass-representation defects.
+    /// Sum of absolute local transport mass defects, plus complete component
+    /// closure defects after angular correction when that mode is selected.
     pub absolute_mass_defect: f64,
-    /// Sum of absolute local defects in each physical momentum component.
+    /// Sum of absolute local transport/readback defects in each physical
+    /// momentum component, plus component closure defects in angular mode.
     pub absolute_momentum_defect: [f64; 3],
+    /// Actual sum of absolute angular defects over route-connected components,
+    /// about each component's first Morton-ordered cell centre. Only the
+    /// angular-preserving mode supplies this; other modes return `None`.
+    pub absolute_angular_momentum_defect: Option<[f64; 3]>,
     /// Signed resolved kinetic change caused by numerical conversion alone.
     /// This is remap error, NEVER an authored physical heat source.
     pub kinetic_energy_change: f64,
@@ -36,6 +44,7 @@ pub(super) struct ConversionMomentum3 {
     sources: BTreeMap<(u64, usize), Source3>,
     recipients: BTreeMap<(u64, usize), Recipient3>,
     report: ConversionMomentumReport3,
+    angular: Option<angular::AngularConversion3>,
 }
 
 fn refused(reason: &'static str) -> FreeSurfaceError3 {
@@ -81,6 +90,9 @@ impl ConversionMomentum3 {
             sources: BTreeMap::new(),
             recipients: BTreeMap::new(),
             report: ConversionMomentumReport3::default(),
+            angular: (surface.redistribution
+                == ConversionRedistribution3::ConservativeLocalAngular)
+                .then(angular::AngularConversion3::default),
         })
     }
 
@@ -97,6 +109,9 @@ impl ConversionMomentum3 {
         let (density, velocity) = state(surface, key, lane)?;
         if !amount.is_finite() {
             return Err(refused("nonfinite conservative conversion mass"));
+        }
+        if let Some(angular) = &mut self.angular {
+            angular.capture((key, lane), surface.tiles[&key].mass[lane], velocity);
         }
         self.sources
             .insert((key, lane), Source3 { velocity, density });
@@ -216,6 +231,15 @@ impl ConversionMomentum3 {
                         actual,
                     )?;
                 }
+                if let Some(angular) = &mut self.angular {
+                    angular.link(
+                        (key, lane),
+                        (nb_key, nb_lane),
+                        recipient.mass,
+                        recipient.velocity,
+                        actual,
+                    );
+                }
                 for d in 0..3 {
                     recipient.relative_momentum[d] +=
                         actual * (velocity[d] - recipient.velocity[d]);
@@ -292,6 +316,9 @@ impl ConversionMomentum3 {
                             .map(|d| (recipient.velocity[d] + 0.5 * du[d]) * du[d])
                             .sum::<f64>();
         }
+        if let Some(angular) = self.angular {
+            angular.finish(surface, &mut self.report)?;
+        }
         if [
             self.report.redistributed_mass,
             self.report.absolute_mass_defect,
@@ -299,6 +326,12 @@ impl ConversionMomentum3 {
         ]
         .iter()
         .chain(&self.report.absolute_momentum_defect)
+        .chain(
+            self.report
+                .absolute_angular_momentum_defect
+                .iter()
+                .flatten(),
+        )
         .any(|v| !v.is_finite())
         {
             return Err(refused("conservative conversion balance overflowed"));
@@ -408,6 +441,37 @@ mod tests {
             }
         }
         values
+    }
+
+    // Independent signed-mass angular inventory from public physical samples.
+    fn angular_inventory(
+        surface: &FreeSurface3,
+        origin: [f64; 3],
+        region: impl Fn(i64) -> bool,
+    ) -> [f64; 3] {
+        let mut angular = [0.0; 3];
+        for (&key, tile) in &surface.tiles {
+            for lane in 0..TILE_CELLS {
+                let (x, y, z) = FreeSurface3::global_of(key, lane);
+                if tile.cells[lane] == Cell3::Gas || !region(x) {
+                    continue;
+                }
+                let sample = surface
+                    .sample_at(x as usize, y as usize, z as usize)
+                    .unwrap();
+                let mass = if tile.cells[lane] == Cell3::Fluid {
+                    sample.density
+                } else {
+                    tile.mass[lane]
+                };
+                let p = sample.velocity.map(|u| mass * u);
+                let r: [f64; 3] = core::array::from_fn(|d| [x, y, z][d] as f64 + 0.5 - origin[d]);
+                angular[0] += r[1] * p[2] - r[2] * p[1];
+                angular[1] += r[2] * p[0] - r[0] * p[2];
+                angular[2] += r[0] * p[1] - r[1] * p[0];
+            }
+        }
+        angular
     }
 
     fn check_balance(surface: &FreeSurface3, before: (f64, [f64; 3], f64)) {
@@ -700,7 +764,169 @@ mod tests {
     }
 
     #[test]
+    fn g1_angular_conversion_preserves_an_asymmetric_front_and_reports_actual_numerical_work() {
+        let mut surface = surface(
+            &[
+                cell([3, 3, 3], 0.8, [0.06, 0.01, -0.02]),
+                cell([4, 3, 3], 1.4, [-0.025, 0.03, 0.015]),
+                cell([3, 4, 3], 0.9, [0.01, -0.02, 0.03]),
+            ],
+            [0.0002, -0.0001, 0.00005],
+        )
+        .with_conversion_redistribution(ConversionRedistribution3::ConservativeLocalAngular);
+        let rho = surface.sample_at(3, 3, 3).unwrap().density;
+        set_mass(&mut surface, [3, 3, 3], 1.2 * rho);
+        let before = inventory(&surface, |_| true);
+        let origin = [3.5; 3];
+        let angular = angular_inventory(&surface, origin, |_| true);
+        let densities = density_bits(&surface);
+        let mut linear = surface
+            .clone()
+            .with_conversion_redistribution(ConversionRedistribution3::ConservativeLocal);
+        linear.apply_conversions(None).unwrap();
+        let linear_angular = angular_inventory(&linear, origin, |_| true);
+        assert!((0..3).any(|d| (linear_angular[d] - angular[d]).abs() > 1e-6));
+        assert_eq!(
+            linear
+                .conversion_momentum_report()
+                .unwrap()
+                .absolute_angular_momentum_defect,
+            None
+        );
+
+        let mut trace = MassTransport3::new(surface.mass_snapshot(), 1024);
+        surface
+            .resolve_interface_fills(&mut trace, &CancelGate::new_clock_free())
+            .unwrap();
+        check_routes(&trace, &surface);
+        check_balance(&surface, before);
+        let actual = angular_inventory(&surface, origin, |_| true);
+        for d in 0..3 {
+            assert!((actual[d] - angular[d]).abs() < 5e-13);
+        }
+        let report = surface.conversion_momentum_report().unwrap();
+        assert!(
+            report
+                .absolute_angular_momentum_defect
+                .unwrap()
+                .iter()
+                .all(|l| *l < 5e-13)
+        );
+        for (cell, bits) in densities {
+            assert_eq!(density_bits(&surface)[&cell], bits);
+        }
+    }
+
+    #[test]
+    fn g1_angular_conversion_cannot_exchange_spin_between_disconnected_fronts() {
+        let mut surface = surface(
+            &[
+                cell([3, 3, 3], 0.8, [0.05, -0.01, 0.02]),
+                cell([4, 3, 3], 1.2, [-0.02, 0.03, 0.01]),
+                cell([11, 3, 3], 0.6, [0.01, 0.0, -0.03]),
+                cell([12, 3, 3], 1.1, [0.0, 0.02, 0.04]),
+            ],
+            [0.0001, -0.0001, 0.00005],
+        )
+        .with_conversion_redistribution(ConversionRedistribution3::ConservativeLocalAngular);
+        for (position, amount) in [([3, 3, 3], 0.12), ([11, 3, 3], 0.1)] {
+            let rho = surface
+                .sample_at(position[0], position[1], position[2])
+                .unwrap()
+                .density;
+            set_mass(&mut surface, position, rho + amount);
+        }
+        let before = inventory(&surface, |_| true);
+        let local = [
+            inventory(&surface, |x| x < 8),
+            inventory(&surface, |x| x >= 8),
+        ];
+        let angular = [
+            angular_inventory(&surface, [3.5; 3], |x| x < 8),
+            angular_inventory(&surface, [11.5, 3.5, 3.5], |x| x >= 8),
+        ];
+        surface.apply_conversions(None).unwrap();
+        check_balance(&surface, before);
+        for part in 0..2 {
+            let origin = [3.5 + 8.0 * part as f64, 3.5, 3.5];
+            let actual = inventory(&surface, |x| (x >= 8) == (part == 1));
+            let spin = angular_inventory(&surface, origin, |x| (x >= 8) == (part == 1));
+            assert!((actual.0 - local[part].0).abs() < 5e-13);
+            for d in 0..3 {
+                assert!((actual.1[d] - local[part].1[d]).abs() < 5e-13);
+                assert!((spin[d] - angular[part][d]).abs() < 5e-13);
+            }
+        }
+    }
+
+    #[test]
+    fn g1_angular_conversion_keeps_a_sources_original_signed_inventory_when_it_receives_debt() {
+        let mut surface = surface(
+            &[
+                cell([3, 3, 3], 0.8, [0.04, 0.02, -0.01]),
+                cell([4, 3, 3], 1.2, [-0.03, 0.01, 0.02]),
+                cell([4, 4, 3], 0.9, [0.01, -0.02, 0.0]),
+            ],
+            [0.0002, -0.0001, 0.00005],
+        )
+        .with_conversion_redistribution(ConversionRedistribution3::ConservativeLocalAngular);
+        let rho = surface.sample_at(3, 3, 3).unwrap().density;
+        set_mass(&mut surface, [3, 3, 3], rho + 0.16);
+        set_mass(&mut surface, [4, 3, 3], -0.02);
+        let before = inventory(&surface, |_| true);
+        let angular = angular_inventory(&surface, [3.5; 3], |_| true);
+        let mut trace = MassTransport3::new(surface.mass_snapshot(), 1024);
+        surface.apply_conversions(Some(&mut trace)).unwrap();
+        trace.after = surface.mass_snapshot();
+        check_routes(&trace, &surface);
+        check_balance(&surface, before);
+        assert_eq!(surface.sample_at(3, 3, 3).unwrap().cell, Cell3::Interface);
+        assert!(trace.routes.iter().any(|route| {
+            FreeSurface3::transport_coordinates(route.from) == Some([3, 3, 3])
+                && FreeSurface3::transport_coordinates(route.to) == Some([4, 3, 3])
+        }));
+        let actual = angular_inventory(&surface, [3.5; 3], |_| true);
+        for d in 0..3 {
+            assert!((actual[d] - angular[d]).abs() < 5e-13);
+        }
+    }
+
+    #[test]
+    fn g4_angular_conversion_refuses_signed_debt_whose_single_survivor_cannot_carry_spin() {
+        let mut surface = surface(
+            &[
+                cell([3, 3, 3], 0.8, [-0.06, 0.02, 0.0]),
+                cell([4, 3, 3], 1.7, [0.02, -0.01, 0.03]),
+            ],
+            [0.0; 3],
+        );
+        set_mass(&mut surface, [3, 3, 3], -0.02);
+        let angular = angular_inventory(&surface, [3.5; 3], |_| true);
+        let mut linear = surface.clone();
+        linear.apply_conversions(None).unwrap();
+        let actual = angular_inventory(&linear, [3.5; 3], |_| true);
+        assert!((actual[2] - angular[2] + 0.0004).abs() < 1e-14);
+        surface = surface
+            .with_conversion_redistribution(ConversionRedistribution3::ConservativeLocalAngular);
+        assert!(matches!(
+            surface.apply_conversions(None),
+            Err(FreeSurfaceError3::Transport(
+                "converted cells cannot resolve angular momentum; refine"
+            ))
+        ));
+    }
+
+    #[test]
     fn g4_public_normal_and_pressure_steps_rollback_late_conversion_and_cancellation() {
+        for mode in [
+            ConversionRedistribution3::ConservativeLocal,
+            ConversionRedistribution3::ConservativeLocalAngular,
+        ] {
+            public_conversion_refusal(mode);
+        }
+    }
+
+    fn public_conversion_refusal(mode: ConversionRedistribution3) {
         let mut cells = Vec::new();
         for z in 0..8 {
             for y in 0..8 {
@@ -711,7 +937,7 @@ mod tests {
                 }
             }
         }
-        let mut surface = surface(&cells, [0.0; 3]);
+        let mut surface = surface(&cells, [0.0; 3]).with_conversion_redistribution(mode);
         // This post-stream overshoot is surrounded entirely by full cells.
         // It needs a wider remap; borrowing from the distant free face is not
         // an adjacent-interface conversion. The error occurs after streaming.
