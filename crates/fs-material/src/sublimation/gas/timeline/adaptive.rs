@@ -18,7 +18,8 @@
 
 use super::{
     GasCellAudit, GasTimelineAudit, GasTimelineCandidate, GasTimelineError,
-    GasTimelineSurface, HeatTotals, Sum, ThermalWork, advance_deposition, finite,
+    GasTimelineEquilibriumSurface, GasTimelineSurface, TimelineSurface,
+    HeatTotals, Sum, ThermalWork, advance_deposition, finite, normalize_surfaces, partition_reports,
 };
 use crate::sublimation::gas::{
     GasSurfaceError, accommodation::ThermalAccommodation, chamber::GasChamberSolve,
@@ -244,7 +245,7 @@ impl History {
         self,
         original: &DepositionSimulation<'_>,
         original_gas: &ClosedGasParcel,
-        surfaces: &[GasTimelineSurface<'_>],
+        surfaces: &[TimelineSurface<'_>],
         endpoint: &mut GasTimelineCandidate<'_, '_>,
         thermal_config: StepConfig,
         phase_config: GasChamberSolve,
@@ -304,8 +305,10 @@ impl History {
         }
         let mut cells = BTreeMap::new();
         for (id, total) in self.cells { checkpoint()?; cells.insert(id, total.report()?); }
+        let condensed_phases = partition_reports(original, endpoint.thermal(), surfaces,
+            &cells, mass_tolerance, checkpoint)?;
         endpoint.audit = GasTimelineAudit {
-            thermal: heat, cells, outgoing_mass_kg: self.outgoing.value()?,
+            thermal: heat, cells, condensed_phases, outgoing_mass_kg: self.outgoing.value()?,
             incoming_mass_kg: self.incoming.value()?, transferred_mass_kg: self.transferred.value()?,
             energy_into_gas_j: stream_energy, reflected_heat_into_gas_j: self.reflected.value()?,
             solid_energy_change_j: self.solid_energy.value()?,
@@ -340,9 +343,10 @@ pub fn advance_deposition_adaptive<'thermal, 'catalog>(
     thermal_config: StepConfig,
     phase_config: GasChamberSolve,
     controls: GasTimelineAdaptiveSolve,
-    checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
 ) -> Result<GasTimelineAdaptiveCandidate<'thermal, 'catalog>, GasTimelineAdaptiveError> {
-    advance(thermal, surfaces, None, gas, catalog, target_s, thermal_config, phase_config, controls, checkpoint)
+    let surfaces = normalize_surfaces(thermal, surfaces, phase_config, &mut checkpoint)?;
+    advance(thermal, &surfaces, None, gas, catalog, target_s, thermal_config, phase_config, controls, checkpoint)
 }
 
 /// The same coupled controller with explicit reflected heat on every selected
@@ -359,15 +363,40 @@ pub fn advance_deposition_adaptive_with_accommodation<'thermal, 'catalog>(
     thermal_config: StepConfig,
     phase_config: GasChamberSolve,
     controls: GasTimelineAdaptiveSolve,
-    checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
 ) -> Result<GasTimelineAdaptiveCandidate<'thermal, 'catalog>, GasTimelineAdaptiveError> {
-    advance(thermal, surfaces, Some(accommodation), gas, catalog, target_s, thermal_config, phase_config, controls, checkpoint)
+    let surfaces = normalize_surfaces(thermal, surfaces, phase_config, &mut checkpoint)?;
+    advance(thermal, &surfaces, Some(accommodation), gas, catalog, target_s, thermal_config, phase_config, controls, checkpoint)
+}
+
+/// Adapt conduction/deposition across the original sharp freezing/melting chart.
+///
+/// Uses the same complete split-error estimate, including bulk enthalpy error
+/// on latent plateaus, and the same single thermal work ceiling. All selected
+/// cells must retain their explicitly exposed solid seed after every heat and
+/// phase substep. Unsupported phase/source states refuse rather than becoming
+/// time-error retries. The returned phase inventory covers the whole window.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_deposition_adaptive_with_equilibrium<'thermal, 'catalog>(
+    thermal: &DepositionSimulation<'thermal>,
+    surfaces: &[GasTimelineEquilibriumSurface<'_>],
+    accommodation: Option<&BTreeMap<CellId, ThermalAccommodation>>,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    target_s: f64,
+    thermal_config: StepConfig,
+    phase_config: GasChamberSolve,
+    controls: GasTimelineAdaptiveSolve,
+    mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+) -> Result<GasTimelineAdaptiveCandidate<'thermal, 'catalog>, GasTimelineAdaptiveError> {
+    let surfaces = normalize_surfaces(thermal, surfaces, phase_config, &mut checkpoint)?;
+    advance(thermal, &surfaces, accommodation, gas, catalog, target_s, thermal_config, phase_config, controls, checkpoint)
 }
 
 #[allow(clippy::too_many_arguments)]
 fn advance<'thermal, 'catalog>(
     thermal: &DepositionSimulation<'thermal>,
-    surfaces: &[GasTimelineSurface<'_>],
+    surfaces: &[TimelineSurface<'_>],
     accommodation: Option<&BTreeMap<CellId, ThermalAccommodation>>,
     gas: &ClosedGasParcel,
     catalog: &'catalog ThermochemicalGasModel,

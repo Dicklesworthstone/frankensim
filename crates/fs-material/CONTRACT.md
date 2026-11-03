@@ -5981,6 +5981,78 @@ actual-source native integration tests passed for physical heat/gas feedback,
 order, births/datum shifts, exposure events, work limits, solid-branch refusal,
 conservation and rollback.
 
+### Deposition through sharp freezing and melting on the heat timeline
+
+`sublimation::gas::timeline::advance_deposition_with_equilibrium` and its
+complete-split adaptive counterpart admit explicitly selected
+`GasTimelineEquilibriumSurface` bindings. Each retains the original
+`SharpMeltingCaloric`; its identity, including latent energy and datum, must
+match the registered thermal law. Temperature-only agreement on an isothermal
+plateau cannot substitute for that identity. The original heat observer checks
+the chart and a positive solid inventory after every thermal substep and birth.
+
+The existing partitioned chamber supplies all molecular exchange, shared old-gas
+withdrawal limits, optional reflected heat and original gas reconstruction.
+Thermal conduction and authored sources can cross the sharp fusion plateau;
+deposited vapor may melt some of the solid or concurrent heat extraction may
+freeze liquid. Bulk enthalpy owns fusion energy exactly once. Whole-window
+`condensed_phases` reports compare original or incoming-birth inventories with
+the accepted final inventories, including conversions during heat substeps.
+They are not the sum of molecular-only phase reports.
+
+The thermal boundary commits a source-identity-bound `CondensedCellExchange`
+through the same stale-cell, positive-mass, enthalpy-domain, reference-area,
+work and atomic-cancellation checks as pure-solid exchange. Existing pure-solid
+entry points retain their branch restrictions. The adaptive owner controls
+complete heat/molecular splitting, including bulk enthalpy error at constant
+temperature, and retains one work ceiling and whole-window conservation budget.
+
+Every exposed face is explicitly admitted SOLID area; bulk phase fraction does
+not determine coverage. Complete melting at any intermediate heat or molecular
+endpoint refuses the entire requested advance. Nucleation on an all-liquid or
+bare surface, alloy mushy ranges, changing geometry, vapor pressure work and
+experimental phase-diagram validation remain outside this reduction. Focused
+regressions cover analytic deposition/cooling/fusion balance, source-datum
+invariance, heat-contact freezing, fusion-onset crossing, source mismatch,
+complete melting, births, late cancellation and adaptive temporal refinement.
+
+### State-dependent heat transport during deposition
+
+`sublimation::gas::timeline::observed` supplies pure-solid and sharp-equilibrium
+entry points accepting an original `DepositionObserver`. The same thermal
+kernel owns conduction, radiation, interval sources, endpoint sources,
+conductance overrides and timestep limits. Observer transitions also clip the
+outer molecular interval. The observer begins once per requested advance;
+internal heat/phase intervals continue its accepted history without resetting
+source-energy accumulators. The returned observer, thermal state and finite gas
+are one transactional candidate, including on late source failure.
+
+External bath and source heat enters the combined balance exactly once through
+the native thermal audit. Molecular and reflected gas heat remain internal
+transfers. Heat callbacks see each thermal endpoint before molecular exchange;
+the next interval sees accepted deposited or sublimated mass. The existing
+`ConductionObserver::with_planar_phase_layers` can therefore update normal
+thermal resistance from mass at a declared constant density and fixed
+footprint. That geometry must be physically admissible for the selected phase
+regime; mixed solid/liquid admission does not infer constant density.
+
+All selected exposed areas are evaluated in one original canonical coverage
+sweep per molecular interval, preserving subtraction order while avoiding a
+full contact scan for every surface. This observed path is a fixed-step,
+first-order heat/phase composition and requires temporal refinement; it does
+not provide an adaptive observer error estimate. Focused regressions cover
+unchanged no-op trajectories, deposition/resistance feedback, source transition
+clipping and accumulated heat, conservation and transactional source refusal.
+
+`cargo run -p fs-material --example nonisothermal_ice_cold_trap --
+--conducting-layers` runs a finite-vapor, two-temperature ice-layer scenario
+using the original IAPWS ice and NASA gas owners, with mass-dependent conduction
+to prescribed baths. It prints layer growth/retreat, temperature, gas pressure,
+mass/energy closure and three temporal resolutions. Its specified dense-layer
+density and conductivity are scenario inputs; it does not infer porous frost,
+spatial gas transport, bare-surface nucleation or an experimentally calibrated
+cold trap.
+
 ## Sourced sharp solid/liquid melting
 
 `phase::melting::ResolvedMeltingCurve` joins two continuously supported source

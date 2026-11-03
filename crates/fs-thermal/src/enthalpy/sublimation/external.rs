@@ -1,10 +1,12 @@
 //! Thermal-owner admission for externally solved solid/gas exchange.
 //!
-//! The external owner supplies a pure-solid enthalpy interval and the complete
+//! The external owner supplies an admitted enthalpy interval and the complete
 //! expected cell. This owner retains identities, caloric laws, reference
 //! geometry, contacts, clock and schedule; only accepted mass and h can change.
 //! Phase identity is caller-admitted: a temperature or an interval alone cannot
-//! prove that an arbitrary material chart describes a pure solid.
+//! prove that an arbitrary material chart describes a pure solid. Mixed-phase
+//! exchange additionally binds the original caloric identity; its physical
+//! owner must admit the constituent inventories before submitting an endpoint.
 
 use std::collections::BTreeSet;
 
@@ -27,6 +29,31 @@ pub struct SolidCellExchange {
     pub replacement: SolidSurfaceState,
     /// Inclusive caller-admitted pure-solid branch, in the ORIGINAL h datum.
     pub pure_solid_enthalpy_range_j_kg: [f64; 2],
+}
+
+/// A phase-partitioned endpoint on an explicitly identified original caloric law.
+///
+/// The external phase owner admits constituent masses, latent storage and exposed
+/// solid area. This boundary only commits its complete bulk mass/enthalpy update;
+/// it does not infer a phase fraction from temperature or add latent heat.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CondensedCellExchange {
+    pub expected: DepositedCell,
+    pub interval_exposed_area_m2: f64,
+    pub replacement: SolidSurfaceState,
+    /// Inclusive original-source bulk enthalpy interval [J/kg].
+    pub enthalpy_range_j_kg: [f64; 2],
+    /// Exact identity of the original registered thermal law, including datum.
+    pub caloric_identity: [u8; 32],
+}
+
+#[derive(Clone, Copy)]
+struct Exchange<'a> {
+    expected: &'a DepositedCell,
+    area: f64,
+    replacement: SolidSurfaceState,
+    range: [f64; 2],
+    caloric_identity: Option<[u8; 32]>,
 }
 
 impl DepositionSimulation<'_> {
@@ -78,6 +105,46 @@ impl DepositionSimulation<'_> {
     pub fn apply_solid_exchanges(
         &mut self,
         exchanges: &[SolidCellExchange],
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), DepositionError> {
+        self.apply_phase_exchanges(
+            exchanges.iter().map(|exchange| Exchange {
+                expected: &exchange.expected,
+                area: exchange.interval_exposed_area_m2,
+                replacement: exchange.replacement,
+                range: exchange.pure_solid_enthalpy_range_j_kg,
+                caloric_identity: None,
+            }),
+            checkpoint,
+        )
+    }
+
+    /// Atomically accept an original-source mixed-phase bulk endpoint.
+    ///
+    /// Shares the pure-solid path's stale-cell, storage, geometry, budget and
+    /// cancellation checks. The caller must first resolve and admit every
+    /// constituent on the SAME caloric identity. No melting/nucleation model
+    /// or new caloric interpretation is introduced by this boundary.
+    pub fn apply_condensed_exchanges(
+        &mut self,
+        exchanges: &[CondensedCellExchange],
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), DepositionError> {
+        self.apply_phase_exchanges(
+            exchanges.iter().map(|exchange| Exchange {
+                expected: &exchange.expected,
+                area: exchange.interval_exposed_area_m2,
+                replacement: exchange.replacement,
+                range: exchange.enthalpy_range_j_kg,
+                caloric_identity: Some(exchange.caloric_identity),
+            }),
+            checkpoint,
+        )
+    }
+
+    fn apply_phase_exchanges<'a>(
+        &mut self,
+        exchanges: impl ExactSizeIterator<Item = Exchange<'a>> + Clone,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), DepositionError> {
         checkpoint()?;
@@ -85,7 +152,7 @@ impl DepositionSimulation<'_> {
             return Err(DepositionError::Budget("external solid exchange cells"));
         }
         let mut ids = BTreeSet::new();
-        for (index, exchange) in exchanges.iter().enumerate() {
+        for (index, exchange) in exchanges.clone().enumerate() {
             if index % 256 == 0 {
                 checkpoint()?;
             }
@@ -93,7 +160,7 @@ impl DepositionSimulation<'_> {
             let cell = self.cells.get(&id).ok_or(DepositionError::InvalidInput(
                 "external solid exchange requires an active cell",
             ))?;
-            if !ids.insert(id) || cell != &exchange.expected {
+            if !ids.insert(id) || cell != exchange.expected {
                 return Err(DepositionError::InvalidInput(
                     "duplicate or stale external solid exchange",
                 ));
@@ -103,8 +170,15 @@ impl DepositionSimulation<'_> {
                     "external solid exchange requires enthalpy storage and an explicit open-mass model",
                 ));
             }
-            let [lo, hi] = exchange.pure_solid_enthalpy_range_j_kg;
-            let area = exchange.interval_exposed_area_m2;
+            if let Some(identity) = exchange.caloric_identity {
+                if self.material_caloric_identity(cell.material_id)? != Some(identity) {
+                    return Err(DepositionError::InvalidInput(
+                        "external condensed exchange caloric identity mismatch",
+                    ));
+                }
+            }
+            let [lo, hi] = exchange.range;
+            let area = exchange.area;
             let next = exchange.replacement;
             if !lo.is_finite()
                 || !hi.is_finite()
@@ -146,6 +220,9 @@ mod tests {
 
     struct Caloric;
     impl ThermalLaw for Caloric {
+        fn caloric_identity(&self) -> Option<[u8; 32]> {
+            Some([17; 32])
+        }
         fn temperature_k(&self, h: f64) -> Result<f64, DepositionError> {
             let t = 250.0 + h / 2000.0;
             if (200.0..=300.0).contains(&t) {
@@ -230,6 +307,52 @@ mod tests {
         assert_eq!(state.cells()[&CellId(1)], expected);
         assert_eq!(state.temperature_k(CellId(1)), Ok(249.5));
         assert_eq!(state.time_s(), 0.0);
+    }
+
+    #[test]
+    fn condensed_batch_requires_original_source_identity_and_commits_atomically() {
+        let mut state = state();
+        let before = state.cells().clone();
+        let update = |id| {
+            let row = exchange(&state, id);
+            CondensedCellExchange {
+                expected: row.expected,
+                interval_exposed_area_m2: row.interval_exposed_area_m2,
+                replacement: row.replacement,
+                enthalpy_range_j_kg: [-50_000.0, 30_000.0],
+                caloric_identity: [17; 32],
+            }
+        };
+        let mut rows = [update(1), update(2)];
+        rows[1].caloric_identity = [18; 32];
+        assert_eq!(
+            state.apply_condensed_exchanges(&rows, || Ok(())),
+            Err(DepositionError::InvalidInput(
+                "external condensed exchange caloric identity mismatch"
+            ))
+        );
+        assert_eq!(state.cells(), &before);
+        rows[1].caloric_identity = [17; 32];
+        let mut calls = 0;
+        assert_eq!(
+            state.apply_condensed_exchanges(&rows, || {
+                calls += 1;
+                if calls == 3 {
+                    Err(DepositionError::Cancelled)
+                } else {
+                    Ok(())
+                }
+            }),
+            Err(DepositionError::Cancelled)
+        );
+        assert_eq!(state.cells(), &before);
+        state.apply_condensed_exchanges(&rows, || Ok(())).unwrap();
+        for row in rows {
+            let cell = &state.cells()[&row.expected.id];
+            assert_eq!(cell.mass_kg, row.replacement.mass_kg);
+            assert_eq!(cell.specific_h_j_kg, row.replacement.specific_enthalpy_j_kg);
+            assert_eq!(cell.geometry, row.expected.geometry);
+        }
     }
 
     #[test]

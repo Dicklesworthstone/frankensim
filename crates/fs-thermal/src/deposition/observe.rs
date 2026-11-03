@@ -393,6 +393,31 @@ impl<'a> DepositionSimulation<'a> {
     /// refusal occurs BEFORE the next thermal evaluation.
     pub fn advance_observed_limited<O: DepositionObserver>(
         &self, observer: &O, target_s: f64, config: StepConfig, max_substeps: usize,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(Self, O, EnergyAudit), O::Error> {
+        self.advance_observed_interval(observer, target_s, config, max_substeps, true, checkpoint)
+    }
+
+    /// Continue an already-begun observer within one enclosing physical advance.
+    ///
+    /// Coupled owners first call `advance_observed_limited` (including any
+    /// same-time births), then pass its ACCEPTED observer here for later splits.
+    /// This retains per-window source energy and physical history: `begin` is
+    /// not called again. All other hooks, deep cloning, original thermal laws,
+    /// event ordering, conservation gates and cancellation are unchanged.
+    /// Pass the enclosing advance's remaining work allowance; this method does
+    /// not manage that shared budget or authorize mutations of a source owner.
+    pub fn advance_observed_continuing_limited<O: DepositionObserver>(
+        &self, observer: &O, target_s: f64, config: StepConfig, max_substeps: usize,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(Self, O, EnergyAudit), O::Error> {
+        self.advance_observed_interval(observer, target_s, config, max_substeps, false, checkpoint)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_observed_interval<O: DepositionObserver>(
+        &self, observer: &O, target_s: f64, config: StepConfig, max_substeps: usize,
+        begin_observer: bool,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<(Self, O, EnergyAudit), O::Error> {
         checkpoint()?;
@@ -403,7 +428,7 @@ impl<'a> DepositionSimulation<'a> {
         finite(self.energy_j())?;
         let mut next = self.clone();
         let mut observer = observer.clone();
-        observer.begin()?;
+        if begin_observer { observer.begin()?; }
         let mut unrepresented_heat_j = 0.0;
         let mut audit = EnergyAudit { incoming_mass_kg: 0.0, incoming_energy_j: 0.0,
             external_heat_j: 0.0, stored_energy_change_j: 0.0, residual_j: 0.0,

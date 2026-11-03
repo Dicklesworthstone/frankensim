@@ -59,6 +59,14 @@ specific enthalpy. Every material chart in one balance uses a compatible energy
 datum. The shared timeline is re-exported by fs-conduction; consumers must not
 implement independent copies of its storage update.
 
+`advance_observed_continuing_limited` continues the accepted observer from an
+earlier `advance_observed_limited` interval within one enclosing physical
+advance. It uses the same thermal kernel and all original observer hooks,
+without calling `begin` again. Coupling owners can split heat and mass exchange
+without resetting a source's per-window energy or physical history. The caller
+must supply the remaining shared substep allowance and retain the original
+deep-clone/rollback contract; continuation does not renew that work budget.
+
 `DepositionSimulation::apply_heat_j` adds signed endpoint heat to those same
 cells without advancing time or re-integrating sources and contacts. The
 original material law resolves `h_new = h_old + Q/m`, including latent storage.

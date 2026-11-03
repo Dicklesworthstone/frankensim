@@ -1,8 +1,10 @@
 //! Original thermal transport and a jointly evolving gas on one timeline.
 //!
-//! Every selected cell is a caller-admitted pure solid, on its original caloric
-//! chart and a declared enthalpy interval. The existing heat observer checks that
-//! branch after each accepted thermal substep and birth. One joint molecular
+//! Selected cells retain their original caloric charts. The default lane admits
+//! pure solids; the opt-in equilibrium lane retains a solid/liquid partition on
+//! one sharp fusion chart, with an explicitly exposed SOLID surface. The existing
+//! heat observer checks the branch after each accepted thermal substep and birth.
+//! One joint molecular
 //! step follows heat over each event-clipped interval; refine max_dt_s for this
 //! first-order splitting and the explicit molecular rates. Gross-inventory
 //! refusals require a shorter physical step, never independently clipped streams.
@@ -22,6 +24,10 @@
 #[path = "timeline/adaptive.rs"]
 pub mod adaptive;
 
+/// Original source/conduction observers sharing this same heat and phase clock.
+#[path = "timeline/observed.rs"]
+pub mod observed;
+
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -29,14 +35,17 @@ use super::accommodation::ThermalAccommodation;
 use super::chamber::{
     GasChamberSolve, GasChamberStep, GasChamberSurface, advance_chamber_with_accommodation,
     advance_chamber_with_gas,
+    mixed::{CondensedInventory, CondensedPhaseStep, SharpMeltingCaloric, advance_partitioned_chamber},
 };
 use super::{GasSurfaceBinding, GasSurfaceError};
 use crate::thermochemical_gas::{ThermochemicalGasModel, energy::parcel::ClosedGasParcel};
 use fs_thermal::enthalpy::{
     CellId, DepositedCell, DepositionError, DepositionObserver, DepositionSimulation, EnergyAudit,
-    Event, StepConfig, sublimation::external::SolidCellExchange,
+    Event, StepConfig, sublimation::external::{CondensedCellExchange, SolidCellExchange},
 };
 use fs_thermal::sublimation::{SolidSurfaceState, SublimationError, SublimationLaw};
+use fs_thermal::observers::CoupledObservers;
+use observed::GasTimelineObservedError;
 
 /// Original cell identity and explicitly admitted pure-solid phase binding.
 #[derive(Clone, Copy)]
@@ -46,6 +55,68 @@ pub struct GasTimelineSurface<'a> {
     pub binding: &'a GasSurfaceBinding,
     /// Inclusive pure-solid branch in the ORIGINAL thermal law's h datum.
     pub pure_solid_enthalpy_range_j_kg: [f64; 2],
+}
+
+/// Original thermal cell with an explicitly exposed solid part and sharp fusion.
+///
+/// The timeline must register this exact caloric identity, including its datum.
+/// Every exposed geometric face is caller-admitted SOLID area even when the
+/// bulk contains liquid; coverage is never inferred from bulk mass fraction.
+/// Complete melting refuses at any heat substep or molecular endpoint. Liquid
+/// evaporation, nucleation and a changing interface topology need other owners.
+#[derive(Clone, Copy)]
+pub struct GasTimelineEquilibriumSurface<'a> {
+    pub cell_id: CellId,
+    pub law: &'a dyn SublimationLaw,
+    pub binding: &'a GasSurfaceBinding,
+    pub caloric: SharpMeltingCaloric<'a>,
+}
+
+// Normalize each public binding once; all physical stepping, event handling and
+// accounting below remain shared. Borrow original phase sources, never copy knots.
+#[derive(Clone, Copy)]
+struct TimelineSurface<'a> {
+    cell_id: CellId,
+    law: &'a dyn SublimationLaw,
+    binding: &'a GasSurfaceBinding,
+    enthalpy_range_j_kg: [f64; 2],
+    caloric: Option<SharpMeltingCaloric<'a>>,
+}
+impl<'a> From<GasTimelineSurface<'a>> for TimelineSurface<'a> {
+    fn from(surface: GasTimelineSurface<'a>) -> Self {
+        Self { cell_id: surface.cell_id, law: surface.law, binding: surface.binding,
+            enthalpy_range_j_kg: surface.pure_solid_enthalpy_range_j_kg, caloric: None }
+    }
+}
+impl<'a> From<GasTimelineEquilibriumSurface<'a>> for TimelineSurface<'a> {
+    fn from(surface: GasTimelineEquilibriumSurface<'a>) -> Self {
+        let knots = surface.caloric.curve().knots();
+        // SharpMeltingCaloric already admitted exactly one complete plateau.
+        let end = knots.iter().find(|knot| knot.liquid_mass_fraction == 1.0)
+            .expect("admitted sharp fusion endpoint");
+        Self { cell_id: surface.cell_id, law: surface.law, binding: surface.binding,
+            enthalpy_range_j_kg: [knots[0].specific_enthalpy_j_kg, end.specific_enthalpy_j_kg],
+            caloric: Some(surface.caloric) }
+    }
+}
+
+fn normalize_surfaces<'a, S: Copy + Into<TimelineSurface<'a>>>(
+    thermal: &DepositionSimulation<'_>,
+    surfaces: &[S],
+    phase_config: GasChamberSolve,
+    checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
+) -> Result<Vec<TimelineSurface<'a>>, DepositionError> {
+    checkpoint()?;
+    if surfaces.len() > thermal.work_budget().max_cells
+        || surfaces.len() > phase_config.maximum_surfaces {
+        return Err(DepositionError::Budget("evolving-gas surface selection"));
+    }
+    let mut normalized = Vec::with_capacity(surfaces.len());
+    for (index, surface) in surfaces.iter().enumerate() {
+        if index % 256 == 0 { checkpoint()?; }
+        normalized.push((*surface).into());
+    }
+    Ok(normalized)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -89,6 +160,12 @@ pub struct GasCellAudit {
 pub struct GasTimelineAudit {
     pub thermal: EnergyAudit,
     pub cells: BTreeMap<CellId, GasCellAudit>,
+    /// Original/birth-to-final solid/liquid inventory for the equilibrium lane.
+    /// Includes conversion during thermal AND molecular substeps; positive
+    /// melted_mass_kg is melting and negative is freezing. Fusion energy is
+    /// already in original bulk h and must never be supplied again as heat.
+    /// Unborn cells and the pure-solid lane have no entry.
+    pub condensed_phases: BTreeMap<CellId, CondensedPhaseStep>,
     pub outgoing_mass_kg: f64,
     pub incoming_mass_kg: f64,
     pub transferred_mass_kg: f64,
@@ -188,6 +265,50 @@ impl Sum {
         finite(self.sum + self.correction)
     }
 }
+
+// Reconstruct whole-window phase changes from original/birth and final bulk
+// inventories. Summing molecular-only phase reports would miss heat-driven
+// freezing and melting between phase intervals.
+fn partition_reports(
+    original: &DepositionSimulation<'_>,
+    endpoint: &DepositionSimulation<'_>,
+    surfaces: &[TimelineSurface<'_>],
+    accounts: &BTreeMap<CellId, GasCellAudit>,
+    mass_tolerance: f64,
+    checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
+) -> Result<BTreeMap<CellId, CondensedPhaseStep>, GasTimelineError> {
+    let mut reports = BTreeMap::new();
+    if surfaces.iter().all(|surface| surface.caloric.is_none()) { return Ok(reports); }
+    let mut births = BTreeMap::new();
+    for event in original.pending_events() {
+        checkpoint()?;
+        if event.time_s > endpoint.time_s() { break; }
+        if let Event::Birth(cell) = &event.event { births.entry(cell.id).or_insert(cell); }
+    }
+    for surface in surfaces {
+        checkpoint()?;
+        let Some(source) = surface.caloric else { continue };
+        let Some(final_cell) = endpoint.cells().get(&surface.cell_id) else { continue };
+        let initial_cell = original.cells().get(&surface.cell_id)
+            .or_else(|| births.get(&surface.cell_id).copied())
+            .ok_or(DepositionError::InvalidInput("partitioned endpoint has no original cell or birth"))?;
+        let inventory = |cell: &DepositedCell| CondensedInventory::new(source, SolidSurfaceState {
+            mass_kg: cell.mass_kg, specific_enthalpy_j_kg: cell.specific_h_j_kg, area_m2: 0.0,
+        });
+        let initial = inventory(initial_cell)?;
+        let final_inventory = inventory(final_cell)?;
+        let melted_mass_kg = final_inventory.liquid_mass_kg - initial.liquid_mass_kg;
+        let residual = (final_inventory.solid_mass_kg - initial.solid_mass_kg)
+            + accounts[&surface.cell_id].transferred_mass_kg + melted_mass_kg;
+        if !residual.is_finite() || residual.abs() > mass_tolerance {
+            return Err(GasTimelineError::MassBalance { residual_kg: residual, tolerance_kg: mass_tolerance });
+        }
+        reports.insert(surface.cell_id, CondensedPhaseStep {
+            initial, final_inventory, melted_mass_kg, solid_mass_residual_kg: residual,
+        });
+    }
+    Ok(reports)
+}
 #[derive(Default)]
 struct HeatTotals {
     mass: Sum,
@@ -251,12 +372,26 @@ impl ThermalWork {
 #[derive(Clone)]
 struct SolidBranchGuard<'a> {
     ranges: BTreeMap<CellId, [f64; 2]>,
+    calorics: BTreeMap<CellId, SharpMeltingCaloric<'a>>,
     work: Option<&'a ThermalWork>,
 }
 impl SolidBranchGuard<'_> {
-    fn check(&self, cell: &DepositedCell) -> Result<(), DepositionError> {
+    fn check(&self, cell: &DepositedCell, thermal: &DepositionSimulation<'_>) -> Result<(), DepositionError> {
         if let Some(&[lo, hi]) = self.ranges.get(&cell.id) {
             if !(lo..=hi).contains(&cell.specific_h_j_kg) {
+                return Err(DepositionError::MaterialDomain);
+            }
+        }
+        if let Some(source) = self.calorics.get(&cell.id) {
+            if thermal.material_caloric_identity(cell.material_id)? != Some(*source.curve().identity().as_bytes()) {
+                return Err(DepositionError::InvalidInput("partitioned timeline caloric identity mismatch"));
+            }
+            let inventory = CondensedInventory::new(*source, SolidSurfaceState {
+                mass_kg: cell.mass_kg, specific_enthalpy_j_kg: cell.specific_h_j_kg, area_m2: 0.0,
+            }).map_err(|_| DepositionError::MaterialDomain)?;
+            if inventory.solid_mass_kg <= 0.0
+                || thermal.temperature_at_specific_enthalpy_k(cell.id, cell.specific_h_j_kg)?
+                    != inventory.caloric.temperature_k() {
                 return Err(DepositionError::MaterialDomain);
             }
         }
@@ -272,7 +407,7 @@ impl SolidBranchGuard<'_> {
                 checkpoint()?;
             }
             if let Some(cell) = thermal.cells().get(id) {
-                self.check(cell)?;
+                self.check(cell, thermal)?;
             }
         }
         Ok(())
@@ -280,9 +415,9 @@ impl SolidBranchGuard<'_> {
 }
 impl DepositionObserver for SolidBranchGuard<'_> {
     type Error = DepositionError;
-    fn event(&mut self, event: &Event, _: &DepositionSimulation<'_>) -> Result<(), Self::Error> {
+    fn event(&mut self, event: &Event, thermal: &DepositionSimulation<'_>) -> Result<(), Self::Error> {
         if let Event::Birth(cell) = event {
-            self.check(cell)?;
+            self.check(cell, thermal)?;
         }
         Ok(())
     }
@@ -320,9 +455,10 @@ pub fn advance_deposition_with_gas<'thermal, 'catalog>(
     target_s: f64,
     thermal_config: StepConfig,
     phase_config: GasChamberSolve,
-    checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
 ) -> Result<GasTimelineCandidate<'thermal, 'catalog>, GasTimelineError> {
-    advance_deposition(thermal, surfaces, None, gas, catalog, target_s,
+    let surfaces = normalize_surfaces(thermal, surfaces, phase_config, &mut checkpoint)?;
+    advance_deposition(thermal, &surfaces, None, gas, catalog, target_s,
         thermal_config, phase_config, None, checkpoint)
 }
 
@@ -353,16 +489,46 @@ pub fn advance_deposition_with_accommodation<'thermal, 'catalog>(
     target_s: f64,
     thermal_config: StepConfig,
     phase_config: GasChamberSolve,
-    checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
 ) -> Result<GasTimelineCandidate<'thermal, 'catalog>, GasTimelineError> {
-    advance_deposition(thermal, surfaces, Some(accommodation), gas, catalog, target_s,
+    let surfaces = normalize_surfaces(thermal, surfaces, phase_config, &mut checkpoint)?;
+    advance_deposition(thermal, &surfaces, Some(accommodation), gas, catalog, target_s,
+        thermal_config, phase_config, None, checkpoint)
+}
+
+/// Original heat timeline with deposition and solid/liquid latent storage.
+///
+/// The same sharp caloric source owns conduction temperature, constituent mass
+/// and fusion energy. Incoming vapor may melt some solid; heat extraction may
+/// freeze liquid or leave the plateau into the solid branch. Neither conversion
+/// supplies an additional heat source. Gross emission can spend only solid
+/// present AFTER the preceding heat step; incoming vapor cannot fund emission.
+///
+/// Every selected cell must retain a positive solid seed throughout. Original
+/// birth/contact times, start-of-interval exposure, optional reflected heat,
+/// whole-window budgets and atomic rollback match the pure-solid lane. This is
+/// first-order splitting; refine max_dt_s or use the complete adaptive variant.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_deposition_with_equilibrium<'thermal, 'catalog>(
+    thermal: &DepositionSimulation<'thermal>,
+    surfaces: &[GasTimelineEquilibriumSurface<'_>],
+    accommodation: Option<&BTreeMap<CellId, ThermalAccommodation>>,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    target_s: f64,
+    thermal_config: StepConfig,
+    phase_config: GasChamberSolve,
+    mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+) -> Result<GasTimelineCandidate<'thermal, 'catalog>, GasTimelineError> {
+    let surfaces = normalize_surfaces(thermal, surfaces, phase_config, &mut checkpoint)?;
+    advance_deposition(thermal, &surfaces, accommodation, gas, catalog, target_s,
         thermal_config, phase_config, None, checkpoint)
 }
 
 #[allow(clippy::too_many_arguments)]
 fn advance_deposition<'thermal, 'catalog>(
     thermal: &DepositionSimulation<'thermal>,
-    surfaces: &[GasTimelineSurface<'_>],
+    surfaces: &[TimelineSurface<'_>],
     accommodation: Option<&BTreeMap<CellId, ThermalAccommodation>>,
     gas: &ClosedGasParcel,
     catalog: &'catalog ThermochemicalGasModel,
@@ -370,8 +536,31 @@ fn advance_deposition<'thermal, 'catalog>(
     thermal_config: StepConfig,
     phase_config: GasChamberSolve,
     work: Option<&ThermalWork>,
-    mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    checkpoint: impl FnMut() -> Result<(), DepositionError>,
 ) -> Result<GasTimelineCandidate<'thermal, 'catalog>, GasTimelineError> {
+    advance_deposition_observed(thermal, surfaces, accommodation, &(), gas, catalog,
+        target_s, thermal_config, phase_config, work, checkpoint)
+        .map(|(candidate, ())| candidate)
+        .map_err(|error| match error {
+            GasTimelineObservedError::Timeline(error) => error,
+            GasTimelineObservedError::Observer(error) => error.into(),
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn advance_deposition_observed<'thermal, 'catalog, O: DepositionObserver>(
+    thermal: &DepositionSimulation<'thermal>,
+    surfaces: &[TimelineSurface<'_>],
+    accommodation: Option<&BTreeMap<CellId, ThermalAccommodation>>,
+    observer: &O,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    target_s: f64,
+    thermal_config: StepConfig,
+    phase_config: GasChamberSolve,
+    work: Option<&ThermalWork>,
+    mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+) -> Result<(GasTimelineCandidate<'thermal, 'catalog>, O), GasTimelineObservedError<O::Error>> {
     checkpoint()?;
     if !target_s.is_finite()
         || target_s < thermal.time_s()
@@ -412,12 +601,13 @@ fn advance_deposition<'thermal, 'catalog>(
     let mut ordered: Vec<_> = surfaces.iter().collect();
     ordered.sort_unstable_by_key(|surface| surface.cell_id);
     let mut ranges = BTreeMap::new();
+    let mut phase_sources = BTreeMap::new();
     let mut bindings = BTreeMap::new();
     for (index, surface) in ordered.iter().enumerate() {
         if index % 256 == 0 {
             checkpoint()?;
         }
-        let [lo, hi] = surface.pure_solid_enthalpy_range_j_kg;
+        let [lo, hi] = surface.enthalpy_range_j_kg;
         if !known.contains(&surface.cell_id)
             || !lo.is_finite()
             || !hi.is_finite()
@@ -431,6 +621,12 @@ fn advance_deposition<'thermal, 'catalog>(
             .into());
         }
         bindings.insert(surface.cell_id, surface.binding);
+        if let Some(source) = surface.caloric {
+            phase_sources.insert(surface.cell_id, source);
+        }
+    }
+    if !phase_sources.is_empty() && phase_sources.len() != surfaces.len() {
+        return Err(DepositionError::InvalidInput("partitioned sources must cover all selected cells").into());
     }
     if let Some(laws) = accommodation {
         if laws.len() != ordered.len() {
@@ -443,7 +639,7 @@ fn advance_deposition<'thermal, 'catalog>(
             }
         }
     }
-    let guard = SolidBranchGuard { ranges, work };
+    let guard = SolidBranchGuard { ranges, calorics: phase_sources, work };
     guard.check_all(thermal, &mut checkpoint)?;
     // Validate original gas/catalog/controls even for a zero-duration window or
     // when all selected cells are scheduled strictly after the target.
@@ -462,13 +658,14 @@ fn advance_deposition<'thermal, 'catalog>(
     }
     validation?;
 
-    let (mut next, _, initial_heat) = thermal.advance_observed_limited(
-        &guard,
+    let combined = CoupledObservers::new(guard, observer.clone());
+    let (mut next, mut observed, initial_heat) = thermal.advance_observed_limited(
+        &combined,
         thermal.time_s(),
         thermal_config,
         work.map_or(budget.max_substeps, |meter| meter.remaining().min(budget.max_substeps)),
         &mut checkpoint,
-    )?;
+    ).map_err(observed::coupled_error)?;
     let mut heat = HeatTotals::default();
     heat.add(initial_heat)?;
     let mut next_gas = gas.clone();
@@ -479,6 +676,7 @@ fn advance_deposition<'thermal, 'catalog>(
     // Cell extinction/removal is refused by the original whole-cell model.
     // Each selected cell therefore enters this map at most once per advance.
     let mut active_accommodation = BTreeMap::new();
+    let mut active_calorics = BTreeMap::new();
     let mut outgoing = Sum::default();
     let mut incoming = Sum::default();
     let mut transferred = Sum::default();
@@ -494,16 +692,27 @@ fn advance_deposition<'thermal, 'catalog>(
     while next.time_s() < target_s {
         checkpoint()?;
         let start_s = next.time_s();
+        let mut active = Vec::with_capacity(ordered.len());
+        for (index, surface) in ordered.iter().enumerate() {
+            if index % 256 == 0 { checkpoint()?; }
+            if next.cells().contains_key(&surface.cell_id) { active.push(surface.cell_id); }
+        }
+        // One canonical contact sweep preserves each scalar subtraction order
+        // without rescanning every link for every selected deposition surface.
+        let areas = next.exposed_areas_m2(&active, &mut checkpoint)?;
         let mut exposed = Vec::with_capacity(ordered.len());
         for (index, surface) in ordered.iter().enumerate() {
             if index % 256 == 0 {
                 checkpoint()?;
             }
             if next.cells().contains_key(&surface.cell_id) {
-                exposed.push((*surface, next.exposed_area_m2(surface.cell_id)?));
+                exposed.push((*surface, areas[&surface.cell_id]));
                 if let Some(laws) = accommodation {
                     active_accommodation.entry(surface.cell_id.0)
                         .or_insert_with(|| laws[&surface.cell_id].clone());
+                }
+                if let Some(source) = surface.caloric {
+                    active_calorics.entry(surface.cell_id.0).or_insert(source);
                 }
             }
         }
@@ -517,6 +726,15 @@ fn advance_deposition<'thermal, 'catalog>(
         if let Some(event) = next.pending_events().first() {
             stop_s = stop_s.min(event.time_s);
         }
+        if !next.cells().is_empty() {
+            if let Some(transition) = observed.next_transition_time_s(&next, &mut checkpoint)
+                .map_err(observed::coupled_error)? {
+                if !transition.is_finite() || transition <= start_s {
+                    return Err(DepositionError::InvalidInput("invalid deposition heat-source transition").into());
+                }
+                stop_s = stop_s.min(transition);
+            }
+        }
         if !stop_s.is_finite() || stop_s <= start_s {
             return Err(DepositionError::Arithmetic.into());
         }
@@ -525,14 +743,15 @@ fn advance_deposition<'thermal, 'catalog>(
             .checked_sub(heat.substeps)
             .ok_or(DepositionError::Budget("evolving-gas thermal substeps"))?;
         let remaining = work.map_or(remaining, |meter| meter.remaining().min(remaining));
-        let (heated, _, report) = next.advance_observed_limited(
-            &guard,
+        let (heated, accepted_observer, report) = next.advance_observed_continuing_limited(
+            &observed,
             stop_s,
             thermal_config,
             remaining,
             &mut checkpoint,
-        )?;
+        ).map_err(observed::coupled_error)?;
         next = heated;
+        observed = accepted_observer;
         heat.add(report)?;
         if exposed.is_empty() {
             continue;
@@ -545,7 +764,7 @@ fn advance_deposition<'thermal, 'catalog>(
                 let state = &next;
                 let errors = &chart_error;
                 let id = surface.cell_id;
-                let [lo, hi] = surface.pure_solid_enthalpy_range_j_kg;
+                let [lo, hi] = surface.enthalpy_range_j_kg;
                 move |h| {
                     let result = if (lo..=hi).contains(&h) {
                         state.temperature_at_specific_enthalpy_k(id, h)
@@ -588,7 +807,15 @@ fn advance_deposition<'thermal, 'catalog>(
                     true
                 }
             };
-            if accommodation.is_some() {
+            if !active_calorics.is_empty() {
+                advance_partitioned_chamber(&inputs, &active_calorics,
+                    accommodation.map(|_| &active_accommodation), &next_gas, catalog,
+                    stop_s - start_s, phase_config, &mut cancelled)
+                    .map(|candidate| {
+                        let (exchange, _, reflection) = candidate.into_parts();
+                        (exchange, reflection)
+                    })
+            } else if accommodation.is_some() {
                 advance_chamber_with_accommodation(&inputs, &active_accommodation,
                     &next_gas, catalog, stop_s - start_s, phase_config, &mut cancelled)
             } else {
@@ -615,6 +842,7 @@ fn advance_deposition<'thermal, 'catalog>(
             return Err(DepositionError::InvalidInput("joint phase endpoint count changed").into());
         }
         let mut updates = Vec::with_capacity(exposed.len());
+        let mut condensed_updates = Vec::new();
         for (index, ((surface, area), endpoint)) in
             exposed.iter().zip(candidate.surfaces()).enumerate()
         {
@@ -626,15 +854,32 @@ fn advance_deposition<'thermal, 'catalog>(
                     DepositionError::InvalidInput("joint phase endpoint identity changed").into(),
                 );
             }
-            updates.push(SolidCellExchange {
-                expected: next.cells()[&surface.cell_id].clone(),
-                interval_exposed_area_m2: *area,
-                replacement: endpoint.solid,
-                pure_solid_enthalpy_range_j_kg: surface.pure_solid_enthalpy_range_j_kg,
-            });
+            if let Some(source) = surface.caloric {
+                let inventory = CondensedInventory::new(source, endpoint.solid)?;
+                if inventory.solid_mass_kg <= 0.0 {
+                    return Err(DepositionError::MaterialDomain.into());
+                }
+                condensed_updates.push(CondensedCellExchange {
+                    expected: next.cells()[&surface.cell_id].clone(),
+                    interval_exposed_area_m2: *area, replacement: endpoint.solid,
+                    enthalpy_range_j_kg: surface.enthalpy_range_j_kg,
+                    caloric_identity: *source.curve().identity().as_bytes(),
+                });
+            } else {
+                updates.push(SolidCellExchange {
+                    expected: next.cells()[&surface.cell_id].clone(),
+                    interval_exposed_area_m2: *area,
+                    replacement: endpoint.solid,
+                    pure_solid_enthalpy_range_j_kg: surface.enthalpy_range_j_kg,
+                });
+            }
         }
         let iterations = candidate.gas_exchange().step().iterations;
-        next.apply_solid_exchanges(&updates, &mut checkpoint)?;
+        if condensed_updates.is_empty() {
+            next.apply_solid_exchanges(&updates, &mut checkpoint)?;
+        } else {
+            next.apply_condensed_exchanges(&condensed_updates, &mut checkpoint)?;
+        }
         gas_stream_residual.add(candidate.gas_exchange().step().energy_residual_j)?;
         let (endpoints, accepted_gas, _, report) = candidate.into_parts();
         next_gas = accepted_gas;
@@ -718,7 +963,7 @@ fn advance_deposition<'thermal, 'catalog>(
         return Err(GasTimelineError::MassBalance {
             residual_kg: largest_mass_residual,
             tolerance_kg: mass_tolerance,
-        });
+        }.into());
     }
     // Heat reports already subtract actual births and external heat. Molecular
     // reports already cancel each transferred species datum. Their accepted
@@ -744,9 +989,11 @@ fn advance_deposition<'thermal, 'catalog>(
     solid_energy.add(thermal_audit.stored_energy_change_j)?;
     solid_energy.add(phase_solid_energy.value()?)?;
     solid_energy.add(birth_offsets.value()?)?;
+    let condensed_phases = partition_reports(thermal, &next, surfaces, &accounts, mass_tolerance, &mut checkpoint)?;
     let audit = GasTimelineAudit {
         thermal: thermal_audit,
         cells: accounts,
+        condensed_phases,
         outgoing_mass_kg: outgoing.value()?,
         incoming_mass_kg: incoming.value()?,
         transferred_mass_kg: transferred.value()?,
@@ -762,14 +1009,14 @@ fn advance_deposition<'thermal, 'catalog>(
         last_step,
     };
     checkpoint()?;
-    Ok(GasTimelineCandidate {
+    Ok((GasTimelineCandidate {
         thermal: next,
         gas: next_gas,
         catalog,
         audit,
         gas_stream_energy_residual_j,
         solid_stream_energy_residual_j,
-    })
+    }, observed.second))
 }
 
 #[cfg(test)]
@@ -779,3 +1026,7 @@ mod tests;
 #[cfg(test)]
 #[path = "timeline/accommodation_tests.rs"]
 mod accommodation_tests;
+
+#[cfg(test)]
+#[path = "timeline/equilibrium_tests.rs"]
+mod equilibrium_tests;

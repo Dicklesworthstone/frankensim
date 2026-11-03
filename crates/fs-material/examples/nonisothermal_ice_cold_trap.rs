@@ -2,6 +2,8 @@
 //!
 //! Run: cargo run -p fs-material --example nonisothermal_ice_cold_trap
 //! Pass 0.1 as an optional argument to tighten local time-error targets tenfold.
+//! Pass --conducting-layers [step-scale] for finite ice storage with
+//! mass-dependent layer conduction and a three-timestep refinement comparison.
 //! Adaptive step doubling accepts the conservative two-half-step history; its
 //! local estimate is not a bound on global or experimental error.
 //!
@@ -80,6 +82,9 @@ const NASA_SOURCE: &str =
     "https://ntrs.nasa.gov/api/citations/20020085330/downloads/20020085330.pdf";
 const VISCOSITY_SOURCE: &str = "https://iapws.org/technical-guidance/release/viscosity.download";
 const CONDUCTIVITY_SOURCE: &str = "https://iapws.org/technical-guidance/release/ThCond.download";
+
+#[path = "nonisothermal_ice_cold_trap/conducting_layers.rs"]
+mod conducting_layers;
 
 fn typed(kind: QuantityKind) -> QuantitySpec {
     QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static))
@@ -293,6 +298,9 @@ impl IceCaloric<'_> {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    if std::env::args().nth(1).as_deref() == Some("--conducting-layers") {
+        return conducting_layers::run();
+    }
     let tolerance_scale = std::env::args()
         .nth(1)
         .map(|value| value.parse::<f64>())
