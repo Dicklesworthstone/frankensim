@@ -1,6 +1,7 @@
 //! Source-backed access to the original conservative D2Q9 conversion owner.
 
 use super::{MaterialFreeSurface2, MaterialLbmError, finite};
+use crate::core2::Cell;
 use crate::freesurface::{ConversionMomentumReport2, FreeSurfaceMomentumError2};
 use crate::material::free_surface::wetting::FreeSurfaceWettingError;
 use fs_exec::CancelGate;
@@ -60,6 +61,37 @@ impl From<FreeSurfaceWettingError> for MaterialFreeSurfaceMomentumError2 {
 }
 
 impl MaterialFreeSurface2<'_> {
+    /// Resolved liquid linear momentum per unit out-of-plane depth [kg/s].
+    /// Uses tracked interface mass and physical Guo-corrected velocity; gas,
+    /// walls and unlocated carry have no represented liquid momentum.
+    /// External forces and wall/pressure traction can change this observation;
+    /// it is not a whole-step or angular-momentum conservation certificate.
+    pub fn resolved_linear_momentum_kg_per_s(&self) -> Result<[f64; 2], MaterialLbmError> {
+        let mut momentum = [0.0; 2];
+        for (i, &cell) in self.lattice.grid.flags.iter().enumerate() {
+            if !matches!(cell, Cell::Fluid | Cell::Interface) {
+                continue;
+            }
+            let state = self.lattice.grid.moments(i);
+            let mass = if cell == Cell::Fluid {
+                state.rho
+            } else {
+                self.lattice.mass[i]
+            };
+            for d in 0..2 {
+                momentum[d] += mass * state.u[d];
+            }
+        }
+        let velocity_unit = self.scaling.velocity_si(1.0)?;
+        let convert = |p| {
+            finite(
+                (p * self.mass_per_depth_unit_kg_m) * velocity_unit,
+                "2-D liquid momentum is unrepresentable",
+            )
+        };
+        Ok([convert(momentum[0])?, convert(momentum[1])?])
+    }
+
     /// Advance the same material-bound fluid with local momentum-conserving
     /// conversion. The original density, viscosity, tension, force and wetting
     /// bindings are retained. Unsupported capacity or signed debt refuses;

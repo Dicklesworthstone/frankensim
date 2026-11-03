@@ -294,3 +294,89 @@ fn g0_newly_wet_cells_require_valid_material_state_before_publication() {
     }
     assert!(admit_initialized_cell(&[f64::INFINITY; Q], [0.0; 2]).is_err());
 }
+
+#[test]
+fn g3_material_capillary_wall_trajectories_admit_conservative_steps() {
+    let gate = CancelGate::new_clock_free();
+    for wall in [
+        PlanarWall2::XMin,
+        PlanarWall2::XMax,
+        PlanarWall2::YMin,
+        PlanarWall2::YMax,
+    ] {
+        for angle in [
+            core::f64::consts::PI / 3.0,
+            core::f64::consts::FRAC_PI_2,
+            2.0 * core::f64::consts::PI / 3.0,
+        ] {
+            // Same rho=1000 kg/m³, mu=0.1 Pa s, dx=1 mm, dt=0.2 ms
+            // and sigma=0.05 N/m as the sourced material wetting battery.
+            let mut grid = Grid::uniform(20, 20, 0.56);
+            grid.periodic_x = false;
+            grid.periodic_y = false;
+            for y in 0..20 {
+                for x in 0..20 {
+                    let (normal, tangent) = match wall {
+                        PlanarWall2::XMin => (x, y),
+                        PlanarWall2::XMax => (19 - x, y),
+                        PlanarWall2::YMin => (y, x),
+                        PlanarWall2::YMax => (19 - y, x),
+                    };
+                    let i = grid.idx(x, y);
+                    grid.flags[i] = if x == 0 || y == 0 || x == 19 || y == 19 {
+                        Cell::Wall
+                    } else if (normal * normal) as f64 + (tangent as f64 - 10.0).powi(2) < 36.0 {
+                        Cell::Fluid
+                    } else {
+                        Cell::Gas
+                    };
+                }
+            }
+            let mut sim = FreeSurface::new(grid, 0.002, ContactModel::Neutral);
+            sim.set_planar_contact_angle(wall, angle).unwrap();
+            let initial_mass = sim.ledger_mass();
+            for _ in 0..12 {
+                sim.step_with_momentum(&gate).unwrap();
+            }
+            assert!((sim.ledger_mass() - initial_mass).abs() < 1e-10 * initial_mass);
+            assert_eq!(sim.carry, 0.0);
+        }
+    }
+}
+
+#[test]
+fn g3_material_gravity_advects_a_drop_through_bounded_momentum_conversions() {
+    // Exact physical scaling of the material dispatch regression: nu=1e-4
+    // m²/s, dx=1 mm, dt=0.4 ms and acceleration -9.81 m/s².
+    let mut grid = Grid::uniform(20, 20, 0.62);
+    grid.periodic_x = false;
+    grid.periodic_y = false;
+    for y in 0..20 {
+        for x in 0..20 {
+            let i = grid.idx(x, y);
+            grid.flags[i] = if x == 0 || y == 0 || x == 19 || y == 19 {
+                Cell::Wall
+            } else if (x as f64 - 10.0).powi(2) + (y as f64 - 12.0).powi(2) < 16.0 {
+                Cell::Fluid
+            } else {
+                Cell::Gas
+            };
+        }
+    }
+    grid.rebind_gravity([0.0, -9.81 * 0.0004_f64.powi(2) / 0.001], &mut Vec::new())
+        .unwrap();
+    let mut sim = FreeSurface::new(grid, 0.0, ContactModel::Neutral);
+    let mass = sim.ledger_mass();
+    assert!(inventory(&sim, |_| true).1[1].abs() < 2e-14);
+    let mut routes = 0;
+    for _ in 0..41 {
+        routes += sim
+            .step_with_momentum(&CancelGate::new_clock_free())
+            .unwrap()
+            .routes;
+    }
+    assert!(routes > 0);
+    assert!(inventory(&sim, |_| true).1[1] < 0.0);
+    assert!((sim.ledger_mass() - mass).abs() < 1e-11 * mass);
+    assert_eq!(sim.carry, 0.0);
+}

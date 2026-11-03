@@ -8,6 +8,7 @@ use super::{
     FreeSurface, MaterialFreeSurface2, MaterialFreeSurfaceMomentumError2,
     MaterialFreeSurfaceMomentumReport2, PlanarWall2,
 };
+use crate::freesurface::FreeSurfaceMomentumError2;
 use crate::freesurface::wetting::WallFill2;
 use fs_exec::CancelGate;
 use fs_matdb::InterfaceSystemCard;
@@ -125,15 +126,23 @@ impl MaterialFreeSurfaceWetting2<'_, '_> {
     /// Transactional native momentum/mass step and contact-history refresh.
     /// Material-domain, degenerate-geometry, Cox-limit or cancellation refusals
     /// preserve all accepted populations, mass/carry, conversions and receipts.
-    /// Cancellation is checked around the dense clone/native sweep and at every
-    /// wall query; the existing dense kernel is not internally interruptible.
-    /// Its original numerical panic semantics are retained on the private copy.
+    /// Uses the same conservative conversion and SI admission as
+    /// [`Self::step_with_momentum`], retaining this entry's error type.
+    /// Cancellation is checked during native streaming and at every wall query;
+    /// the dense collision sweep itself remains noninterruptible.
     pub fn step_with_gate(&mut self, gate: &CancelGate) -> Result<(), Error> {
-        checkpoint(gate)?;
-        let mut lattice = self.flow.lattice.clone();
-        checkpoint(gate)?;
-        lattice.step();
-        self.finish_step(lattice, gate)
+        self.step_with_momentum(gate)
+            .map(|_| ())
+            .map_err(|error| match error {
+                MaterialFreeSurfaceMomentumError2::Native(FreeSurfaceMomentumError2::Cancelled) => {
+                    crate::d3q19::freesurface3::FreeSurfaceError3::Cancelled.into()
+                }
+                MaterialFreeSurfaceMomentumError2::Native(FreeSurfaceMomentumError2::Invalid(
+                    reason,
+                )) => Error::Invalid(reason),
+                MaterialFreeSurfaceMomentumError2::Units(error) => Error::Flow(error),
+                MaterialFreeSurfaceMomentumError2::Wetting(error) => error,
+            })
     }
 
     /// Advance the original dense solver with signed, capacity-bounded local

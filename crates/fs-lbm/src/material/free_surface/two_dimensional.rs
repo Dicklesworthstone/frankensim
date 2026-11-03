@@ -234,11 +234,16 @@ impl<'a> MaterialFreeSurface2<'a> {
         Ok(gravity)
     }
 
-    /// One native dense step at the admitted physical timestep. Preserves the
-    /// dense solver's original panic and mass-conversion semantics; unlike the
-    /// sparse owner this entry does not add cancellation or rollback support.
+    /// One native dense step with bounded local conversion of liquid momentum.
+    /// A complete native proposal and its SI conversion account are admitted
+    /// before publication; no unlocated carry supplies missing local capacity.
+    ///
+    /// # Panics
+    /// If the conservative proposal refuses, with the accepted flow unchanged.
+    /// Use [`Self::step_with_momentum`] for fallible stepping and cancellation.
     pub fn step(&mut self) {
-        self.lattice.step();
+        self.step_with_momentum(&CancelGate::new_clock_free())
+            .expect("material D2Q9 momentum step refused");
     }
 
     /// Advance the original dense owner under absolute external pressure [Pa]

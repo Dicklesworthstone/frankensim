@@ -7062,6 +7062,35 @@ fronts, signed debt, physical boosts and forcing, independent droplets, periodic
 capacity aliases, retained physical stress, native zero-conversion replay,
 cancellation and newly wet-cell refusal.
 
+### Material D2Q9 defaults carry conversion momentum
+
+`MaterialFreeSurface2::step` and `MaterialFreeSurfaceWetting2::step_with_gate`
+delegate to their existing `step_with_momentum` owners. Ordinary material
+stepping therefore carries signed donor momentum through actual adjacent
+conversion capacity, admits the existing SI conversion account, and publishes
+one complete candidate. Dynamic wetting publishes the same candidate together
+with its accepted source queries, contact geometry and angle history.
+
+The native `FreeSurface::step` remains the historical replay entry. Material
+`step` preserves its convenience signature and panics on a conservative refusal
+without publishing the proposal; the existing explicit momentum entry provides
+typed cancellation and refinement refusals. The wetting convenience entry
+retains its original error type and canonical cancellation classification.
+No additional lattice clone or duplicate conversion-report owner is introduced.
+
+`resolved_linear_momentum_kg_per_s` sums actual liquid mass times Guo-corrected
+velocity and converts to SI momentum per unit out-of-plane depth (kg/s). Gas,
+walls and unlocated carry have no represented liquid momentum. External forces
+and wall/pressure traction can change the observation; it does not certify
+whole-step or angular-momentum conservation.
+
+The material regressions compare default and explicit conservative evolution
+through actual nonzero conversion routes, check SI momentum against physical
+cell observations, and preserve wetting-source refusal and cancellation
+atomicity. Native capillary fixtures cover all four wall orientations and the
+existing material parameters; the gravity fixture starts at physical rest in
+the held-force frame before evolving real drop conversions.
+
 ### Density-consistent physical state at free-surface ingress and conversion
 
 Newly wet D2Q9 cells and default D3Q19 cells average their neighbors' physical

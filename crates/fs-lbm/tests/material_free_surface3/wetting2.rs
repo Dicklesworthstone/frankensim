@@ -318,6 +318,9 @@ fn g4_dense_momentum_wetting_keeps_source_refusal_and_retry_atomic() {
     ));
     same_state(refused.flow().lattice(), &before);
     assert_eq!(refused.samples(), &samples);
+    assert!(refused.step_with_gate(&gate).is_err());
+    same_state(refused.flow().lattice(), &before);
+    assert_eq!(refused.samples(), &samples);
 
     let supported = dynamic_card(&bulk, [angle; 2], [angle; 2], 100.0, false);
     for wall in [
@@ -328,6 +331,7 @@ fn g4_dense_momentum_wetting_keeps_source_refusal_and_retry_atomic() {
     ] {
         let mut retry = flow2(&bulk, &supported, wall, 0.0002);
         let mut reference = flow2(&bulk, &supported, wall, 0.0002);
+        let mut ordinary = flow2(&bulk, &supported, wall, 0.0002);
         let cancelled = CancelGate::new_clock_free();
         cancelled.request();
         assert!(matches!(
@@ -338,10 +342,68 @@ fn g4_dense_momentum_wetting_keeps_source_refusal_and_retry_atomic() {
         ));
         same_state(retry.flow().lattice(), reference.flow().lattice());
         assert_eq!(retry.samples(), reference.samples());
+        assert!(matches!(
+            ordinary.step_with_gate(&cancelled),
+            Err(
+                fs_lbm::material::free_surface::wetting::FreeSurfaceWettingError::Flow(
+                    fs_lbm::material::MaterialLbmError::FreeSurface(
+                        fs_lbm::d3q19::freesurface3::FreeSurfaceError3::Cancelled
+                    )
+                )
+            )
+        ));
+        same_state(ordinary.flow().lattice(), reference.flow().lattice());
         let a = retry.step_with_momentum(&gate).unwrap();
         let b = reference.step_with_momentum(&gate).unwrap();
+        ordinary.step_with_gate(&gate).unwrap();
         assert_eq!(a, b);
         same_state(retry.flow().lattice(), reference.flow().lattice());
         assert_eq!(retry.samples(), reference.samples());
+        same_state(ordinary.flow().lattice(), reference.flow().lattice());
+        assert_eq!(ordinary.samples(), reference.samples());
+    }
+}
+
+#[test]
+fn g3_dense_default_step_carries_momentum_through_live_conversions() {
+    let bulk = liquid(0, 300.0, None);
+    let gate = CancelGate::new_clock_free();
+    let make = || {
+        let mut domain = domain2();
+        domain.gravity_m_s2 = [0.0, -9.81];
+        plan_free_surface_from_material(&bulk, 0.001, 0.0004, 0.2)
+            .unwrap()
+            .free_surface2(domain, |x, y| {
+                (x as f64 - 10.0).powi(2) + (y as f64 - 12.0).powi(2) < 16.0
+            })
+            .unwrap()
+    };
+    let mut ordinary = make();
+    let mut explicit = make();
+    let mut routes = 0;
+    for _ in 0..41 {
+        routes += explicit.step_with_momentum(&gate).unwrap().native.routes;
+        ordinary.step();
+        same_state(ordinary.lattice(), explicit.lattice());
+    }
+    assert!(
+        routes > 0,
+        "fixture must exercise actual conversion momentum"
+    );
+    let momentum = ordinary.resolved_linear_momentum_kg_per_s().unwrap();
+    let mut sampled = [0.0; 2];
+    for y in 0..20 {
+        for x in 0..20 {
+            if let Some(cell) = ordinary.sample_at_si(x, y).unwrap() {
+                let mass_per_depth = cell.density_kg_m3 * cell.fill_fraction * 0.001_f64.powi(2);
+                for d in 0..2 {
+                    sampled[d] += mass_per_depth * cell.velocity_m_s[d];
+                }
+            }
+        }
+    }
+    assert!(momentum[1] < 0.0);
+    for d in 0..2 {
+        assert!((momentum[d] - sampled[d]).abs() < 2e-14);
     }
 }
