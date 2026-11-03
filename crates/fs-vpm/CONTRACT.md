@@ -192,6 +192,60 @@ second-order three-vortex refinement (G0/G1/G3).
 `tests/conservative.rs` exercises the checked transaction, one-buffer/work
 receipts, identity/refusal cases and long-time signed-cloud impulse.
 
+### Optional fourth-order conservative time composition
+
+`conservative::simulate_with_order_cx` and
+`conservative::ambient::simulate_with_order_cx` accept
+`CompositionOrder::{Second, Fourth}`. Existing entry points retain Second,
+including their arithmetic, resource counts and checkpoint sequence. Fourth
+composes the original reversible second-order step `S` as
+`S(w1*dt) S(w0*dt) S(w1*dt)`, with `w1=1/(2-cbrt(2))` and `w0=1-2*w1`.
+The conditions `2*w1+w0=1` and `2*w1^3+w0^3=0` cancel the leading splitting
+error. The construction follows Yoshida, *Physics Letters A* 150 (1990),
+equations (4.1), (4.5)-(4.6),
+<https://doi.org/10.1016/0375-9601(90)90092-3>.
+
+All stages use the original equal-and-opposite pair flow; no state projection,
+circulation correction or division by net circulation is introduced. Thus
+linear and angular point-vortex impulse remain conserved to roundoff in the
+unforced lane, including signed zero-net clouds and passive tracers. The held
+affine lane composes the complete source/pair step at fourth order. Adjacent
+exact maps of the same source combine into four passes: outer weights
+`w1/2` and inner weights `(w1+w0)/2`. The source moment receipt includes every
+signed source update in its original double-double accumulator. A prescribed
+source can still change impulse; no body reaction or closed-system momentum
+claim is inferred from that receipt.
+
+The fixed positive and negative weights are kept separate from `dt`. Pair
+updates use the original scaled time-fraction seam with the sign in `dt`;
+affine generators apply each weight to the original double-double half-product.
+This avoids erasing resolvable motion when `dt` is subnormal but circulation or
+source velocity is large. Both distinct signed affine maps are prepared before
+evolution. Unrepresentable internal maps or updates refuse atomically, including
+a nonzero source coefficient that underflows to zero. Negative internal stages
+are admitted only by the reversible inviscid/source path. Viscous/PSE and
+scheduled remeshing APIs retain their original nonnegative-time methods; a
+fourth-order request cannot carry a diffusion law.
+
+For `N` particles and `S` nonzero-time physical steps, Fourth admits exactly
+`3*S*N*(N-1)` pair visits, plus `4*N*S` source visits when the held affine field
+is active. Input validation/copy costs `N`; physical step boundaries cost `S`.
+One original particle vector is retained, with no stage or per-step allocation.
+These are deterministic operation/payload counts, not a wall-clock speed claim.
+Zero-time, zero-step, empty-cloud and zero-source paths preserve their original
+inactive accounting. Fourth-order accuracy requires smooth finite-core or
+noncolliding evolution and a held source; it is not an adaptive error bound,
+exact many-vortex energy conservation or an order claim across changing sources,
+viscosity or remapping.
+
+`tests/conservative_order.rs` (G0/G1/G3/G4) checks independent full-ODE fourth-order
+refinement with and without a noncommuting affine field, improved trajectory
+accuracy at equal pair work, 3,000-step signed impulse balance, reversal,
+analytic first-moment evolution and source accounting, frame/unit covariance,
+subnormal-time transport, exact resource admission and cancellation inside
+signed pair and coalesced source stages. Original affine/viscous/remeshed
+regressions remain applicable to the unchanged Second path.
+
 ## Conservative 2-D viscous diffusion
 
 The diffusion-focused implementation adds `diffusion::PseDiffusion` and two

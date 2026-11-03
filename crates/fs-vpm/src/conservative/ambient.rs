@@ -3,7 +3,8 @@
 //! For `u(x) = U + A (x-o)`, `A = [[a,b],[c,-a]]`, the background map is exact
 //! up to floating-point arithmetic. Symmetric `F(dt/2) N(dt) F(dt/2)` splitting
 //! retains second-order time accuracy of the original conservative or viscous
-//! owner. This prescribed external flow can change vortex impulse; those
+//! owner; inviscid evolution also offers the fourth-order reversible composition.
+//! This prescribed external flow can change vortex impulse; those
 //! changes are measured, not projected away or called closed-system momentum.
 
 use super::*;
@@ -75,8 +76,9 @@ pub struct AmbientVpmRun {
     /// Actual source-driven increments, accumulated without subtracting large
     /// whole-cloud inventories or dividing by net circulation.
     pub ambient_moment_change: AmbientMomentChange,
-    /// Exactly two visits per particle and nonzero-time step for an active
-    /// source, included in `run.work_units` but not in pair evaluations.
+    /// Visits per particle and nonzero-time step for an active source: two at
+    /// second order, four at fourth order. Included in `run.work_units`, not
+    /// pair evaluations.
     pub source_particle_updates: u64,
 }
 
@@ -98,7 +100,57 @@ pub fn simulate_with_cx(
     flow: AffineFlow2,
     budget: VpmBudget,
 ) -> Result<AmbientVpmRun, VpmError> {
-    run(cx, particles, dt, steps, core, flow, None, budget)
+    simulate_with_order_cx(
+        cx,
+        particles,
+        dt,
+        steps,
+        core,
+        flow,
+        CompositionOrder::Second,
+        budget,
+    )
+}
+
+/// Choose second- or fourth-order inviscid evolution in one held affine field.
+///
+/// Fourth order composes three original reversible source/pair steps. Adjacent
+/// exact maps of the same held source combine, so one physical step uses three
+/// pair sweeps and four source passes. Both distinct signed source maps are
+/// prepared before evolution. The sole particle vector, original pair owner,
+/// compensated source-moment account and execution budget remain shared.
+///
+/// The negative internal interval is meaningful only for reversible inviscid
+/// motion in a held field. No viscous, remeshing, varying-source or finite-domain
+/// reaction claim follows. Source moment changes include every signed stage;
+/// fourth order does not impose inviscid impulse invariants on a forced cloud.
+///
+/// # Errors
+/// Original input/resource/numerical/cancellation refusals, including any
+/// unrepresentable internal pair update or prepared signed affine map. All
+/// failures publish no partial cloud. Empty/zero-source paths retain the chosen
+/// conservative owner's complete result and resource counts.
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_with_order_cx(
+    cx: &Cx<'_>,
+    particles: &[VortexParticle],
+    dt: f64,
+    steps: usize,
+    core: f64,
+    flow: AffineFlow2,
+    order: CompositionOrder,
+    budget: VpmBudget,
+) -> Result<AmbientVpmRun, VpmError> {
+    run(
+        cx,
+        particles,
+        dt,
+        steps,
+        core,
+        flow,
+        Evolution::Inviscid(order),
+        budget,
+    )
 }
 
 /// Compose the held source around original `D(dt/2) A(dt) D(dt/2)` evolution.
@@ -126,9 +178,17 @@ pub fn simulate_viscous_with_cx(
         steps,
         core,
         flow,
-        Some((areas_m2, law)),
+        Evolution::Viscous(areas_m2, law),
         budget,
     )
+}
+
+// A fourth-order request cannot carry a diffusion law. This is the only
+// dispatch into the signed composition; viscous callers retain the old step.
+#[derive(Clone, Copy)]
+enum Evolution<'a> {
+    Inviscid(CompositionOrder),
+    Viscous(&'a [f64], PseDiffusion),
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -139,15 +199,19 @@ fn run(
     steps: usize,
     core: f64,
     flow: AffineFlow2,
-    viscosity: Option<(&[f64], PseDiffusion)>,
+    evolution: Evolution<'_>,
     budget: VpmBudget,
 ) -> Result<AmbientVpmRun, VpmError> {
+    let (viscosity, order) = match evolution {
+        Evolution::Inviscid(order) => (None, order),
+        Evolution::Viscous(areas, law) => (Some((areas, law)), CompositionOrder::Second),
+    };
     if flow.is_zero() || dt == 0.0 || steps == 0 || particles.is_empty() {
         let run = match viscosity {
             Some((areas, law)) => super::viscous::simulate_with_cx(
                 cx, particles, areas, dt, steps, core, law, budget,
             )?,
-            None => super::simulate_with_cx(cx, particles, dt, steps, core, budget)?,
+            None => super::simulate_with_order_cx(cx, particles, dt, steps, core, order, budget)?,
         };
         return Ok(AmbientVpmRun {
             run,
@@ -168,7 +232,7 @@ fn run(
     let sweeps = if viscosity.is_some_and(|(_, law)| law.kinematic_viscosity_m2_s() > 0.0) {
         3
     } else {
-        1
+        order.sweeps() as u64
     };
     let pair_evaluations = diffusion::pair_work(particles.len(), steps, sweeps)?;
     if pair_evaluations > budget.max_pair_evaluations {
@@ -180,7 +244,7 @@ fn run(
     }
     let source_particle_updates = (particles.len() as u64)
         .checked_mul(steps as u64)
-        .and_then(|value| value.checked_mul(2))
+        .and_then(|value| value.checked_mul(order.source_passes()))
         .ok_or(VpmError::PlanOverflow {
             resource: "ambient source visits",
         })?;
@@ -200,7 +264,12 @@ fn run(
     admit_cap("logical live bytes", peak_live_bytes, budget.max_live_bytes)?;
     let mut accountant = AdmittedBudget::admit_ambient(cx, work_units)?;
     accountant.checkpoint("fs-vpm.ambient-admission", cx)?;
-    let half = HalfFlow::new(flow, dt)?;
+    let composition = Composition::new(order);
+    let half = HalfFlow::weighted(flow, dt, composition.weights()[0])?;
+    let bridge = composition
+        .bridge_weight()
+        .map(|weight| HalfFlow::weighted(flow, dt, weight))
+        .transpose()?;
     let mut state = reserved_vec("ambient-state", particles.len())?;
     let mut meter = WorkMeter::default();
     for (index, particle) in particles.iter().copied().enumerate() {
@@ -231,15 +300,30 @@ fn run(
                 cx,
             )?,
             _ => {
-                super::symmetric_sweep(
-                    &mut state,
-                    dt,
-                    core,
-                    &mut completed_pairs,
-                    &mut meter,
-                    &mut accountant,
-                    cx,
-                )?;
+                for (index, &weight) in composition.weights().iter().enumerate() {
+                    if index != 0 {
+                        // Only a three-stage inviscid composition has bridges.
+                        if let Some(bridge) = &bridge {
+                            bridge.apply(
+                                &mut state,
+                                &mut moments,
+                                &mut meter,
+                                &mut accountant,
+                                cx,
+                            )?;
+                        }
+                    }
+                    super::weighted_symmetric_sweep(
+                        &mut state,
+                        dt,
+                        core,
+                        weight,
+                        &mut completed_pairs,
+                        &mut meter,
+                        &mut accountant,
+                        cx,
+                    )?;
+                }
                 meter.unit(&mut accountant, cx, "fs-vpm.conservative-step", || Ok(()))?;
             }
         }
@@ -301,8 +385,29 @@ enum HalfMap {
 
 impl HalfFlow {
     pub(super) fn new(flow: AffineFlow2, dt: f64) -> Result<Self, VpmError> {
-        let [a, b, c] = flow.gradient.map(|value| half_product(value, dt));
-        let offset = flow.velocity.map(|value| half_product(value, dt));
+        Self::weighted(flow, dt, 1.0)
+    }
+
+    // Form the original DD half-product before applying a composition weight:
+    // rounding weight*dt first can erase resolvable subnormal-time transport.
+    // Weight one takes the original arithmetic exactly.
+    #[allow(clippy::float_cmp)]
+    fn weighted(flow: AffineFlow2, dt: f64, weight: f64) -> Result<Self, VpmError> {
+        let product = |value| {
+            let half = half_product(value, dt);
+            if weight == 1.0 {
+                half
+            } else {
+                let scaled = half * dd(weight);
+                if value != 0.0 && scaled == Dd::ZERO {
+                    dd(f64::NAN)
+                } else {
+                    scaled
+                }
+            }
+        };
+        let [a, b, c] = flow.gradient.map(product);
+        let offset = flow.velocity.map(product);
         let delta = a * a + b * c;
         let generator = [[a, b], [c, -a]];
         if ![a, b, c, offset[0], offset[1], delta]
