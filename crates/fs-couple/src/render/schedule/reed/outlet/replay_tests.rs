@@ -90,6 +90,9 @@ fn clarinet_outlet_observers_admit_no_audible_one_window_replay() {
             .enumerate()
         {
             let info = observer.info();
+            // The receiver gate admits both cards on their requested grid: no
+            // regrid, so no added latency and the same output.
+            assert_eq!(info.fft_samples, 16_384, "{label} #{index}");
             assert_eq!(info.pre_arrival_latency_samples, info.fft_samples / 4);
             assert!(
                 info.replay_gain.0 <= OUTLET_REPLAY_GAIN_BOUND,

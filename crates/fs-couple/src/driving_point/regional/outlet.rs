@@ -27,13 +27,24 @@ pub enum OutletError {
     /// Original diagnostic from the shared Rayleigh owner.
     Receiver(String),
     /// The outlet grid would replay part of the transfer one window late above
-    /// [`OUTLET_REPLAY_GAIN_BOUND`] re its direct path. The regional observers
-    /// double their grid first and refuse only past [`MAX_OUTLET_FFT_SAMPLES`].
+    /// [`OUTLET_REPLAY_GAIN_BOUND`] re the direct sound at the receiver (see
+    /// `receiver_replay`). The regional observers double their grid first and
+    /// refuse only past [`MAX_OUTLET_FFT_SAMPLES`].
     Replay {
-        /// Worst |replayed| / |direct| amplitude ratio over the gated band.
+        /// Worst |replayed| / |direct| amplitude ratio at the receiver over the
+        /// gated band.
         gain: f64,
         /// Frequency of that worst bin [Hz].
         frequency_hz: f64,
+        /// Direct sound at that bin [dB re the direct sound's band maximum].
+        direct_db: f64,
+        /// Replayed sound at that bin [dB re the same maximum].
+        late_db: f64,
+        /// Mouth with the largest replayed contribution there (0 = bell, then
+        /// the open holes in bore order; 0 for a single-mouth observer).
+        mouth: usize,
+        /// That mouth's replayed contribution [dB re the replayed total there].
+        mouth_share_db: f64,
         /// Pre-arrival latency the observer already applies [samples].
         latency_samples: usize,
         /// Outlet grid [samples]: the largest tried by a regional observer,
@@ -49,12 +60,18 @@ impl core::fmt::Display for OutletError {
             Self::Replay {
                 gain,
                 frequency_hz,
+                direct_db,
+                late_db,
+                mouth,
+                mouth_share_db,
                 latency_samples,
                 fft_samples,
             } => write!(
                 f,
-                "outlet transfer replays {:.1} dB re its direct path at {frequency_hz:.1} Hz one window late \
-                 (bound {:.0} dB, pre-arrival latency {latency_samples} samples, outlet grid \
+                "outlet transfer replays {:.1} dB re the receiver's direct sound at {frequency_hz:.1} Hz \
+                 one window late (direct {direct_db:.1} dB, replayed {late_db:.1} dB re the direct \
+                 band peak; mouth {mouth} (0 = bell) carries {mouth_share_db:.1} dB of the replayed \
+                 sum; bound {:.0} dB, pre-arrival latency {latency_samples} samples, outlet grid \
                  {fft_samples})",
                 20.0 * gain.log10(),
                 20.0 * OUTLET_REPLAY_GAIN_BOUND.log10()
@@ -82,8 +99,9 @@ pub const MAX_OUTLET_FFT_SAMPLES: usize = 65_536;
 /// Bound the explicit bulk delay plus sampled residual, before allocation.
 pub const MAX_OUTLET_TRANSFER_SAMPLES: usize = 2 * MAX_OUTLET_FFT_SAMPLES;
 
-/// Largest admitted replay: |replayed| / |direct| amplitude at every gated bin
-/// (-60 dB). A numerical tolerance set by the verifier (mail 14776), not physics.
+/// Largest admitted replay: |replayed| / |direct| amplitude of the sound at the
+/// receiver at every gated bin (-60 dB; see `receiver_replay`). A numerical
+/// tolerance set by the verifier (mail 14776), not physics.
 pub const OUTLET_REPLAY_GAIN_BOUND: f64 = 1.0e-3;
 
 /// Common observer latency on an `n`-point outlet grid: `n / 4` samples.
@@ -125,8 +143,9 @@ pub struct OutletReceiverInfo {
     /// ([`outlet_pre_arrival_latency`]); the physical arrival is emitted this
     /// many samples after `axial + exterior` and nothing precedes `axial + exterior`.
     pub pre_arrival_latency_samples: usize,
-    /// Worst |replayed| / |direct| amplitude ratio this kernel admitted, and its
-    /// frequency [Hz] (0 when no bin lies in the gated band).
+    /// Worst |replayed| / |direct| amplitude ratio admitted at the receiver, and
+    /// its frequency [Hz] (0 when no bin lies in the gated band). The mouths of
+    /// one regional bore share one value: the gate of their summed sound.
     pub replay_gain: (f64, f64),
 }
 
@@ -172,7 +191,12 @@ impl OutletPressure {
             acceleration_residual(sample_rate_hz, fft_samples, one_way_time_s, flow)?;
         let latency = outlet_pre_arrival_latency(fft_samples);
         let band = replay_band(one_way_time_s, receiver);
-        let replay_gain = admit_replay(&residual, latency, sample_rate_hz, band)?;
+        let replay_gain = admit_replay(
+            &[ReceiverMouth::alone(&residual)],
+            latency,
+            sample_rate_hz,
+            band,
+        )?;
         let kernel = realize_with_latency(axial_delay_samples, &residual, latency);
         let dt = 1.0 / f64::from(sample_rate_hz);
         let acceleration = DelayedFilter::from_impulse_response(dt, kernel)
@@ -552,6 +576,9 @@ impl RegionalDuct {
         let bell_mic = BaffledPressure::circular_outlet(radius_m, sample_rate_hz, receiver, medium)
             .map_err(OutletError::Receiver)?;
         let bell_exterior_delay = bell_mic.delay_samples;
+        // Each mouth's own Rayleigh stage, read once: the replay gate weighs the
+        // mouths at the receiver, and the observers are realized from the same taps.
+        let bell_rayleigh = rayleigh_acceleration_taps(bell_mic, sample_rate_hz)?;
         let total_length_m = self.total_axial_length_m();
         let mut hole_mics = Vec::with_capacity(sites.len());
         for site in &sites {
@@ -565,7 +592,12 @@ impl RegionalDuct {
                 medium,
             )
             .map_err(OutletError::Receiver)?;
-            hole_mics.push((mic, hole_receiver));
+            let exterior_delay_samples = mic.delay_samples;
+            hole_mics.push((
+                exterior_delay_samples,
+                rayleigh_acceleration_taps(mic, sample_rate_hz)?,
+                hole_receiver,
+            ));
         }
         let hole_times: Vec<f64> = sites.iter().map(|s| s.one_way_time_s).collect();
         let first_bore_time_s = sites[0].bore_one_way_time_s;
@@ -592,24 +624,32 @@ impl RegionalDuct {
         let ((mut bell_residual, mut bell_delay), mut hole_residuals, shunt_line) =
             kernels_on(fft_samples)?;
         // One grid, one latency and one band (the whole bore's) for every mouth,
-        // so the summed observers keep their relative timing and are gated alike.
-        // A grid that does not hold some mouth's response to the bound doubles
-        // for every mouth together (observer kernels only), as in
-        // `baffled_outlet_delayed_at`.
+        // so the summed observers keep their relative timing. The gate bounds
+        // their summed sound at the receiver (`receiver_replay`), not each mouth
+        // against its own direct path. A grid it refuses doubles for every mouth
+        // together (observer kernels only), as in `baffled_outlet_delayed_at`.
         let band = replay_band(self.one_way_time_s(), receiver);
         let mut grid = fft_samples;
-        let (bell_replay, hole_replays) = loop {
+        let replay = loop {
             let latency = outlet_pre_arrival_latency(grid);
-            let gated =
-                admit_replay(&bell_residual, latency, sample_rate_hz, band).and_then(|bell| {
-                    hole_residuals
-                        .iter()
-                        .map(|(residual, _)| admit_replay(residual, latency, sample_rate_hz, band))
-                        .collect::<Result<Vec<_>, _>>()
-                        .map(|holes| (bell, holes))
+            let gated = {
+                let mut mouths = Vec::with_capacity(1 + hole_residuals.len());
+                mouths.push(ReceiverMouth {
+                    residual: &bell_residual,
+                    axial_delay_samples: bell_delay,
+                    rayleigh: Some(bell_rayleigh.as_slice()),
                 });
+                for ((residual, delay), (_, rayleigh, _)) in hole_residuals.iter().zip(&hole_mics) {
+                    mouths.push(ReceiverMouth {
+                        residual: residual.as_slice(),
+                        axial_delay_samples: *delay,
+                        rayleigh: Some(rayleigh.as_slice()),
+                    });
+                }
+                admit_replay(&mouths, latency, sample_rate_hz, band)
+            };
             match gated {
-                Ok(replays) => break replays,
+                Ok(replay) => break replay,
                 Err(_) if grid < MAX_OUTLET_FFT_SAMPLES => {
                     grid *= 2;
                     let ((bell, delay), holes, _) = kernels_on(grid)?;
@@ -622,18 +662,14 @@ impl RegionalDuct {
         };
         let latency = outlet_pre_arrival_latency(grid);
         let mut hole_kernels = Vec::with_capacity(hole_residuals.len());
-        for ((residual, delay), replay) in hole_residuals.into_iter().zip(hole_replays) {
-            hole_kernels.push((
-                realize_with_latency(delay, &residual, latency),
-                delay,
-                replay,
-            ));
+        for (residual, delay) in hole_residuals {
+            hole_kernels.push((realize_with_latency(delay, &residual, latency), delay));
         }
         let bell_kernel = realize_with_latency(bell_delay, &bell_residual, latency);
         let dt = 1.0 / f64::from(sample_rate_hz);
         let bell_acc = DelayedFilter::from_impulse_response(dt, bell_kernel)
             .map_err(DrivingPointError::Discrete)?;
-        let bell_rad = rayleigh_acceleration_filter(bell_mic, sample_rate_hz)?;
+        let bell_rad = rayleigh_filter(bell_rayleigh, sample_rate_hz)?;
         let bell = OutletPressure {
             acceleration: bell_acc,
             radiation: bell_rad,
@@ -647,17 +683,18 @@ impl RegionalDuct {
                 axial_delay_samples: bell_delay,
                 exterior_delay_samples: bell_exterior_delay,
                 pre_arrival_latency_samples: latency,
-                replay_gain: bell_replay,
+                replay_gain: replay,
             },
         };
         let mut holes = Vec::with_capacity(sites.len());
-        for ((site, (mic, hole_receiver)), (kernel, axial_delay_samples, replay_gain)) in
-            sites.iter().zip(hole_mics).zip(hole_kernels)
+        for (
+            (site, (exterior_delay_samples, rayleigh, hole_receiver)),
+            (kernel, axial_delay_samples),
+        ) in sites.iter().zip(hole_mics).zip(hole_kernels)
         {
-            let exterior_delay_samples = mic.delay_samples;
             let acceleration = DelayedFilter::from_impulse_response(dt, kernel)
                 .map_err(DrivingPointError::Discrete)?;
-            let radiation = rayleigh_acceleration_filter(mic, sample_rate_hz)?;
+            let radiation = rayleigh_filter(rayleigh, sample_rate_hz)?;
             holes.push(OutletPressure {
                 acceleration,
                 radiation,
@@ -671,7 +708,7 @@ impl RegionalDuct {
                     axial_delay_samples,
                     exterior_delay_samples,
                     pre_arrival_latency_samples: latency,
-                    replay_gain,
+                    replay_gain: replay,
                 },
             });
         }
@@ -750,45 +787,153 @@ fn replay_band(bore_one_way_time_s: f64, receiver: CircularOutletReceiver) -> (f
     (0.25 / bore_one_way_time_s, receiver.maximum_frequency_hz)
 }
 
+/// One mouth of an outlet observer, as heard at the receiver.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ReceiverMouth<'a> {
+    /// Circular acceleration residual on the common grid: whole-sample arrival
+    /// at tap 0, its last `latency` taps emitted before that arrival.
+    pub(crate) residual: &'a [f64],
+    /// Whole samples of axial travel removed before the residual.
+    pub(crate) axial_delay_samples: usize,
+    /// The mouth's own Rayleigh stage: receiver pressure per unit volume
+    /// acceleration, exterior delay included ([`rayleigh_acceleration_taps`]).
+    /// `None` for a lone mouth, whose ratio a common path scales out exactly.
+    pub(crate) rayleigh: Option<&'a [f64]>,
+}
+
+impl<'a> ReceiverMouth<'a> {
+    /// A lone mouth: the receiver hears it alone, so its own direct path is the
+    /// receiver's direct sound.
+    pub(crate) const fn alone(residual: &'a [f64]) -> Self {
+        Self {
+            residual,
+            axial_delay_samples: 0,
+            rayleigh: None,
+        }
+    }
+}
+
+/// Worst replay at the receiver over the gated band (see [`receiver_replay`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ReceiverReplay {
+    /// |replayed| / |direct| amplitude ratio at the worst bin.
+    pub(crate) gain: f64,
+    /// Frequency of that bin [Hz] (0 when no bin lies in the band).
+    pub(crate) frequency_hz: f64,
+    /// Direct sound at that bin [dB re the direct sound's band maximum].
+    pub(crate) direct_db: f64,
+    /// Replayed sound at that bin [dB re the same maximum].
+    pub(crate) late_db: f64,
+    /// Mouth with the largest replayed contribution at that bin.
+    pub(crate) mouth: usize,
+    /// That contribution [dB re the replayed sum at that bin].
+    pub(crate) mouth_share_db: f64,
+}
+
 /// Worst |replayed| / |direct| amplitude ratio over the bins of `band_hz`, and its
-/// frequency, for a circular residual whose whole-sample arrival is tap 0 and
-/// whose last `latency` taps will be emitted before that arrival.
-///
-/// Replayed = taps `[n/2, n - latency)`: emitted at least half a window after
-/// the arrival, past the offsets this grid resolves, i.e. the one-window replay
-/// of pre-arrival spread (or an unresolved tail). Direct = every other tap.
-/// Both are exact at the grid's bins.
+/// frequency, for a lone circular residual whose whole-sample arrival is tap 0
+/// and whose last `latency` taps will be emitted before that arrival
+/// ([`receiver_replay`] of that mouth alone; NaN if it cannot be evaluated).
+/// The per-mouth reference the tests compare against.
+#[cfg(test)]
 pub(crate) fn replay_gain(
     residual: &[f64],
     latency: usize,
     sample_rate_hz: u32,
     band_hz: (f64, f64),
 ) -> (f64, f64) {
-    let n = residual.len();
+    receiver_replay(
+        &[ReceiverMouth::alone(residual)],
+        latency,
+        sample_rate_hz,
+        band_hz,
+    )
+    .map_or((f64::NAN, 0.0), |worst| (worst.gain, worst.frequency_hz))
+}
+
+/// Replay gate of the sound at the receiver, worst over the bins of `band_hz`.
+///
+/// Each mouth's residual splits into replayed taps `[n/2, n - latency)`, emitted
+/// at least half a window after the arrival, past the offsets this grid
+/// resolves (the one-window replay of pre-arrival spread, or an unresolved
+/// tail), and direct taps (every other). At every bin, every mouth's direct
+/// spectrum goes through that mouth's own axial delay and Rayleigh stage and
+/// the results are summed, complex; the replayed spectra likewise. The gate is
+/// |replayed sum| / |direct sum|: a replay is weighed against the direct sound
+/// the listener hears with it. A mouth's own direct path is the wrong reference
+/// for several mouths: a bell can lie 80-120 dB under the open tone holes near
+/// the bore's lowest tones, and two mouths' direct paths can cancel at a bin
+/// that their replays do not. The Rayleigh stages are the shared owner's own
+/// operators, so the mouths' relative levels and phases are the baffled ones:
+/// at low ka each radiates its own volume acceleration as rho Q'/(2 pi r), with
+/// its own travel delay, independent of its radius (Kinsler, Frey, Coppens and
+/// Sanders, Fundamentals of Acoustics, 4th ed., 2000, ch. 7: the baffled
+/// circular piston at ka << 1). Exact at the grid's bins: a delay or tap
+/// folded onto the grid modulo `n` keeps its exact value at every bin.
+pub(crate) fn receiver_replay(
+    mouths: &[ReceiverMouth<'_>],
+    latency: usize,
+    sample_rate_hz: u32,
+    band_hz: (f64, f64),
+) -> Result<ReceiverReplay, OutletError> {
+    let n = mouths.first().map_or(0, |mouth| mouth.residual.len());
+    if n < 2 || !n.is_power_of_two() || mouths.iter().any(|mouth| mouth.residual.len() != n) {
+        return Err(
+            invalid("outlet replay gate needs every mouth on one power-of-two grid").into(),
+        );
+    }
     let replayed = |j: usize| j >= n / 2 && j < n - latency.min(n / 2);
-    let mut direct: Vec<FftC64> = residual
-        .iter()
-        .enumerate()
-        .map(|(j, &v)| FftC64::new(if replayed(j) { 0.0 } else { v }, 0.0))
-        .collect();
-    let mut late: Vec<FftC64> = residual
-        .iter()
-        .enumerate()
-        .map(|(j, &v)| FftC64::new(if replayed(j) { v } else { 0.0 }, 0.0))
-        .collect();
     let fft = Fft::new(n);
     let mut scratch = vec![FftC64::new(0.0, 0.0); n];
-    fft.forward(&mut direct, &mut scratch);
-    fft.forward(&mut late, &mut scratch);
+    let mut spectra = Vec::with_capacity(mouths.len());
+    for mouth in mouths {
+        let mut direct: Vec<FftC64> = mouth
+            .residual
+            .iter()
+            .enumerate()
+            .map(|(j, &v)| FftC64::new(if replayed(j) { 0.0 } else { v }, 0.0))
+            .collect();
+        let mut late: Vec<FftC64> = mouth
+            .residual
+            .iter()
+            .enumerate()
+            .map(|(j, &v)| FftC64::new(if replayed(j) { v } else { 0.0 }, 0.0))
+            .collect();
+        fft.forward(&mut direct, &mut scratch);
+        fft.forward(&mut late, &mut scratch);
+        let path = mouth.rayleigh.map(|taps| {
+            let mut folded = vec![FftC64::new(0.0, 0.0); n];
+            for (j, &tap) in taps.iter().enumerate() {
+                folded[(mouth.axial_delay_samples + j) % n].re += tap;
+            }
+            fft.forward(&mut folded, &mut scratch);
+            folded
+        });
+        spectra.push((direct, late, path));
+    }
+    let totals = |k: usize| {
+        spectra.iter().fold(
+            (C64::new(0.0, 0.0), C64::new(0.0, 0.0)),
+            |(direct, late), (d, w, path)| {
+                (
+                    direct + heard_at(d, path.as_deref(), k),
+                    late + heard_at(w, path.as_deref(), k),
+                )
+            },
+        )
+    };
     let bin_hz = f64::from(sample_rate_hz) / n as f64;
-    let mut worst = (0.0, 0.0);
+    let mut worst = (0.0, 0.0, 0);
+    let mut direct_peak = 0.0_f64;
     for k in 1..=n / 2 {
         let frequency = k as f64 * bin_hz;
         if frequency < band_hz.0 || frequency > band_hz.1 {
             continue;
         }
-        let d = det::hypot(direct[k].re, direct[k].im);
-        let w = det::hypot(late[k].re, late[k].im);
+        let (direct, late) = totals(k);
+        let d = det::hypot(direct.re, direct.im);
+        let w = det::hypot(late.re, late.im);
+        direct_peak = direct_peak.max(d);
         let gain = if d > 0.0 {
             w / d
         } else if w > 0.0 {
@@ -797,28 +942,70 @@ pub(crate) fn replay_gain(
             0.0
         };
         if gain > worst.0 {
-            worst = (gain, frequency);
+            worst = (gain, frequency, k);
         }
     }
-    worst
+    let (gain, frequency_hz, k) = worst;
+    if k == 0 {
+        return Ok(ReceiverReplay {
+            gain,
+            frequency_hz,
+            direct_db: f64::NAN,
+            late_db: f64::NAN,
+            mouth: 0,
+            mouth_share_db: f64::NAN,
+        });
+    }
+    let (direct, late) = totals(k);
+    let late_abs = det::hypot(late.re, late.im);
+    let mut mouth = 0;
+    let mut loudest = f64::NEG_INFINITY;
+    for (index, (_, w, path)) in spectra.iter().enumerate() {
+        let share = heard_at(w, path.as_deref(), k);
+        let share = det::hypot(share.re, share.im);
+        if share > loudest {
+            (mouth, loudest) = (index, share);
+        }
+    }
+    let db = |ratio: f64| 20.0 * ratio.log10();
+    Ok(ReceiverReplay {
+        gain,
+        frequency_hz,
+        direct_db: db(det::hypot(direct.re, direct.im) / direct_peak),
+        late_db: db(late_abs / direct_peak),
+        mouth,
+        mouth_share_db: db(loudest / late_abs),
+    })
 }
 
+/// Bin `k` of one mouth's spectrum as heard at the receiver: through its path
+/// (axial delay and Rayleigh stage) when it has one, else as it is.
+fn heard_at(spectrum: &[FftC64], path: Option<&[FftC64]>, k: usize) -> C64 {
+    let value = C64::new(spectrum[k].re, spectrum[k].im);
+    path.map_or(value, |path| value * C64::new(path[k].re, path[k].im))
+}
+
+/// Admit `mouths` at the receiver, or refuse with [`OutletError::Replay`].
 fn admit_replay(
-    residual: &[f64],
+    mouths: &[ReceiverMouth<'_>],
     latency: usize,
     sample_rate_hz: u32,
     band_hz: (f64, f64),
 ) -> Result<(f64, f64), OutletError> {
-    let (gain, frequency_hz) = replay_gain(residual, latency, sample_rate_hz, band_hz);
-    if gain.is_nan() || gain > OUTLET_REPLAY_GAIN_BOUND {
+    let worst = receiver_replay(mouths, latency, sample_rate_hz, band_hz)?;
+    if worst.gain.is_nan() || worst.gain > OUTLET_REPLAY_GAIN_BOUND {
         return Err(OutletError::Replay {
-            gain,
-            frequency_hz,
+            gain: worst.gain,
+            frequency_hz: worst.frequency_hz,
+            direct_db: worst.direct_db,
+            late_db: worst.late_db,
+            mouth: worst.mouth,
+            mouth_share_db: worst.mouth_share_db,
             latency_samples: latency,
-            fft_samples: residual.len(),
+            fft_samples: mouths.first().map_or(0, |mouth| mouth.residual.len()),
         });
     }
-    Ok((gain, frequency_hz))
+    Ok((worst.gain, worst.frequency_hz))
 }
 
 /// `delay` exact zeros, then the window rotated so its last `latency` taps
@@ -1121,14 +1308,28 @@ fn acceleration_kernels_with_holes(
 // Its backward difference is one pulse of amplitude `rate`, so division by that
 // known excitation yields pressure per unit volume acceleration. This is a cold
 // image of the shared owner, NOT another transcription of its integral/geometry.
-fn rayleigh_acceleration_filter(mut mic: BaffledPressure, rate: u32)
-    -> Result<DelayedFilter, OutletError> {
+fn rayleigh_acceleration_filter(
+    mic: BaffledPressure,
+    rate: u32,
+) -> Result<DelayedFilter, OutletError> {
+    rayleigh_filter(rayleigh_acceleration_taps(mic, rate)?, rate)
+}
+
+// The taps of that image: receiver pressure per unit volume acceleration.
+fn rayleigh_acceleration_taps(
+    mut mic: BaffledPressure,
+    rate: u32,
+) -> Result<Vec<f64>, OutletError> {
     let n = (mic.delay_samples.1 + 1).max(4);
     let mut kernel = Vec::with_capacity(n);
     for _ in 0..n {
         kernel.push(mic.step(&[1.0]).map_err(OutletError::Receiver)?
             / f64::from(rate));
     }
+    Ok(kernel)
+}
+
+fn rayleigh_filter(kernel: Vec<f64>, rate: u32) -> Result<DelayedFilter, OutletError> {
     DelayedFilter::from_impulse_response(1.0 / f64::from(rate), kernel)
         .map_err(|error| DrivingPointError::Discrete(error).into())
 }

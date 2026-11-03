@@ -331,3 +331,177 @@ fn open_hole_shunt_line_is_port_scale_invariant_passive_at_small_amplitude_and_u
         "actual_k_ratio={actual_k_ratio}, expected_k_ratio={expected_k_ratio}"
     );
 }
+
+// Replay gate at the receiver (MB 16347): planted mouths on a 1024-point grid at
+// 48 kHz (bins of 46.875 Hz), latency 256, so the replayed taps are [512, 768).
+const GATE_N: usize = 1024;
+const GATE_RATE: u32 = 48_000;
+const GATE_BAND: (f64, f64) = (100.0, 20_000.0);
+
+/// `direct` at the arrival (tap 0) and `late` at tap 600, inside the replayed span.
+fn planted(direct: f64, late: f64) -> Vec<f64> {
+    let mut residual = vec![0.0; GATE_N];
+    residual[0] = direct;
+    residual[600] = late;
+    residual
+}
+
+fn db(ratio: f64) -> f64 {
+    20.0 * ratio.log10()
+}
+
+/// Bin `k` of one tap `value` at sample `at`, summed directly (no FFT).
+fn bin_of(value: f64, at: usize, k: usize) -> C64 {
+    let phase = -core::f64::consts::TAU * (k * at) as f64 / GATE_N as f64;
+    C64::new(value * phase.cos(), value * phase.sin())
+}
+
+#[test]
+fn receiver_gate_refuses_a_loud_mouths_replay_at_minus_50_db_re_the_summed_direct_sound() {
+    let latency = outlet_pre_arrival_latency(GATE_N);
+    assert_eq!(latency, 256);
+    let unit: &[f64] = &[1.0];
+    // Direct sound 1 + 0.01 = 1.01 at every bin; mouth 0 replays -50 dB re that.
+    let loud = planted(1.0, 1.01 * 10.0_f64.powf(-50.0 / 20.0));
+    let quiet = planted(0.01, 0.0);
+    let mouths = [
+        ReceiverMouth {
+            residual: &loud,
+            axial_delay_samples: 0,
+            rayleigh: Some(unit),
+        },
+        ReceiverMouth {
+            residual: &quiet,
+            axial_delay_samples: 0,
+            rayleigh: Some(unit),
+        },
+    ];
+    let worst = receiver_replay(&mouths, latency, GATE_RATE, GATE_BAND).unwrap();
+    assert!((db(worst.gain) + 50.0).abs() < 1e-6, "{worst:?}");
+    assert!(worst.direct_db.abs() < 1e-6, "{worst:?}");
+    assert!((worst.late_db + 50.0).abs() < 1e-6, "{worst:?}");
+    assert_eq!(worst.mouth, 0);
+    assert!(worst.mouth_share_db.abs() < 1e-6, "{worst:?}");
+    let refusal = admit_replay(&mouths, latency, GATE_RATE, GATE_BAND).unwrap_err();
+    let text = refusal.to_string();
+    assert!(
+        matches!(
+            &refusal,
+            OutletError::Replay {
+                mouth: 0,
+                fft_samples: GATE_N,
+                ..
+            }
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("-50.0 dB re the receiver's direct sound")
+            && text.contains("mouth 0 (0 = bell) carries 0.0 dB"),
+        "{text}"
+    );
+}
+
+#[test]
+fn receiver_gate_refuses_replays_small_against_each_mouth_but_not_against_their_cancelling_sum() {
+    let latency = outlet_pre_arrival_latency(GATE_N);
+    let unit: &[f64] = &[1.0];
+    // Mouth 1 arrives 4 samples later, inverted, at 0.99: the direct paths cancel
+    // to 0.01 (-40 dB re mouth 0) at bin 256 = 12 kHz, the band's only bin where
+    // 4 k is a multiple of 1024. Each replay is -80 dB re its own mouth's direct
+    // path, and the two arrive in phase there: 1.99e-4 / 0.01, -34.0 dB.
+    let a = planted(1.0, 1.0e-4);
+    let b = planted(-0.99, 0.99e-4);
+    let mouths = [
+        ReceiverMouth {
+            residual: &a,
+            axial_delay_samples: 0,
+            rayleigh: Some(unit),
+        },
+        ReceiverMouth {
+            residual: &b,
+            axial_delay_samples: 4,
+            rayleigh: Some(unit),
+        },
+    ];
+    let worst = receiver_replay(&mouths, latency, GATE_RATE, GATE_BAND).unwrap();
+    assert_eq!(worst.frequency_hz, 12_000.0, "{worst:?}");
+    assert!(
+        (db(worst.gain) - db(1.99e-4 / 0.01)).abs() < 1e-6,
+        "{worst:?}"
+    );
+    assert!(matches!(
+        admit_replay(&mouths, latency, GATE_RATE, GATE_BAND),
+        Err(OutletError::Replay { .. })
+    ));
+    // Each mouth against its own direct path passes (the previous gate) ...
+    for residual in [&a, &b] {
+        let (own, _) = replay_gain(residual, latency, GATE_RATE, GATE_BAND);
+        assert!((db(own) + 80.0).abs() < 1e-6, "{own:e}");
+    }
+    // ... and so does the loudest mouth's direct path as the reference: at that
+    // bin, summed directly (no FFT), the replayed sum is -74 dB re mouth 0's.
+    let k = 256;
+    let direct = [bin_of(1.0, 0, k), bin_of(-0.99, 4, k)];
+    let late = bin_of(1.0e-4, 600, k) + bin_of(0.99e-4, 604, k);
+    let loudest = direct.iter().map(|d| d.abs()).fold(0.0, f64::max);
+    let loudest_reference = db(late.abs() / loudest);
+    assert!(
+        (loudest_reference + 74.0).abs() < 0.1,
+        "{loudest_reference:.2} dB"
+    );
+    // The gate's FFT sum equals the direct sum at that bin.
+    let total = (direct[0] + direct[1]).abs();
+    assert!(
+        (late.abs() / total / worst.gain - 1.0).abs() < 1e-9,
+        "{worst:?}"
+    );
+    // The 4-sample offset may sit in the axial delay or in the Rayleigh taps.
+    let shifted: &[f64] = &[0.0, 0.0, 0.0, 0.0, 1.0];
+    let moved = [
+        mouths[0],
+        ReceiverMouth {
+            residual: &b,
+            axial_delay_samples: 0,
+            rayleigh: Some(shifted),
+        },
+    ];
+    assert_eq!(
+        receiver_replay(&moved, latency, GATE_RATE, GATE_BAND).unwrap(),
+        worst
+    );
+}
+
+#[test]
+fn receiver_gate_passes_a_bell_100_db_under_a_hole_with_its_own_replay_at_minus_45_db() {
+    let latency = outlet_pre_arrival_latency(GATE_N);
+    let unit: &[f64] = &[1.0];
+    let bell = planted(1.0e-5, 1.0e-5 * 10.0_f64.powf(-45.0 / 20.0));
+    let hole = planted(1.0, 0.0);
+    // Alone, the bell refuses at -45 dB re its own direct path (the previous gate) ...
+    let alone = admit_replay(
+        &[ReceiverMouth::alone(&bell)],
+        latency,
+        GATE_RATE,
+        GATE_BAND,
+    );
+    assert!(
+        matches!(&alone, Err(OutletError::Replay { gain, .. }) if (db(*gain) + 45.0).abs() < 1e-6),
+        "{alone:?}"
+    );
+    // ... while at the receiver its replay lies 145 dB under the summed direct sound.
+    let mouths = [
+        ReceiverMouth {
+            residual: &bell,
+            axial_delay_samples: 0,
+            rayleigh: Some(unit),
+        },
+        ReceiverMouth {
+            residual: &hole,
+            axial_delay_samples: 0,
+            rayleigh: Some(unit),
+        },
+    ];
+    let (gain, _) = admit_replay(&mouths, latency, GATE_RATE, GATE_BAND).unwrap();
+    assert!((db(gain) + 145.0).abs() < 1e-3, "{:.4} dB", db(gain));
+}
