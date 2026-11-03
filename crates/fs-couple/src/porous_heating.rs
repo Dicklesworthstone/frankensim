@@ -16,6 +16,9 @@
 //! the original acoustic/material owner explicitly when that approximation ends.
 //! [`feedback`] instead refreshes the original gas/porous response from accepted
 //! native cell temperatures under an explicit isobaric background.
+//! Passive backing losses leave the thermal system by default. The stack and
+//! feedback owners' `with_load_receiver` methods explicitly deposit that work
+//! into a distinct existing native cell, preserving its own storage and links.
 
 use fs_duct::DuctError;
 use fs_duct::porous::{PorousLayerDissipation, PorousLayerExcitation};
@@ -28,6 +31,8 @@ use std::collections::BTreeMap;
 
 mod stack;
 pub use stack::PorousStackHeating;
+mod load_receiver;
+use load_receiver::LoadReceiver;
 /// Accepted-state gas-temperature feedback through the original porous stack.
 pub mod feedback;
 
@@ -126,6 +131,7 @@ struct PreparedHeat {
     power_residual_w: f64,
     boundary_power_w: [f64; 2],
     load_absorbed_power_w: f64,
+    load_receiver: Option<LoadReceiver>,
 }
 
 /// Acoustic energy over the exact accepted native thermal substeps.
@@ -135,14 +141,20 @@ pub struct PorousHeatingEnergy {
     pub incident_j: f64,
     /// Integrated coherent outgoing acoustic power [J]; never deposited as heat.
     pub outgoing_j: f64,
-    /// Positive work exported into an attached passive acoustic load [J].
-    /// This is separate from the bound porous cells and is never deposited there.
+    /// Positive work absorbed by the attached passive acoustic load [J].
+    /// This is separate from porous-cell heat and equals deposited plus exported
+    /// load energy below; it must not be debited a second time.
     pub load_absorbed_j: f64,
+    /// Load work credited once to the explicitly bound native backing cell [J].
+    pub load_deposited_j: f64,
+    /// Load work leaving the thermal system because no receiver was bound [J].
+    pub load_exported_j: f64,
     /// Original pore-viscous work [J].
     pub viscous_j: f64,
     /// Original thermal-relaxation work [J].
     pub thermal_j: f64,
-    /// Positive heat delivered once to the bound cells, already in heat_report.
+    /// Pore heat delivered once to the porous cells, already in heat_report.
+    /// A bound backing's separate load_deposited_j is also in heat_report.
     pub deposited_j: f64,
     /// Incident minus outgoing minus load work minus deposited; never cell heat.
     pub residual_j: f64,
@@ -159,6 +171,9 @@ pub struct PorousHeatingStep<'t> {
     pub acoustic: PorousHeatingEnergy,
     /// Acoustic heat [J] only, in the original authored depth order.
     pub cell_energy_j: Vec<(CellId, f64)>,
+    /// Backing heat [J] at its distinct original native cell, when bound.
+    /// This diagnoses load_deposited_j; it is not another heat credit.
+    pub load_energy_j: Option<(CellId, f64)>,
 }
 
 fn finite(value: f64) -> Result<f64, PorousHeatingError> {
@@ -327,6 +342,7 @@ impl<'e, 'l, 'm> PorousHeating<'e, 'l, 'm> {
                 power_residual_w,
                 boundary_power_w: [boundary.incident_power_w, boundary.outgoing_power_w],
                 load_absorbed_power_w: 0.0,
+                load_receiver: None,
             },
         })
     }
@@ -392,6 +408,9 @@ impl PreparedHeat {
                 ));
             }
         }
+        if let Some(receiver) = &self.load_receiver {
+            receiver.validate(thermal, checkpoint)?;
+        }
         Ok(())
     }
 
@@ -429,6 +448,7 @@ struct HeatAccount {
     mechanisms: [Dd; 2],
     boundary: [Dd; 2],
     load: Dd,
+    deposited_load: Dd,
 }
 impl HeatAccount {
     fn new(cells: usize) -> Self {
@@ -437,6 +457,7 @@ impl HeatAccount {
             mechanisms: [Dd::ZERO; 2],
             boundary: [Dd::ZERO; 2],
             load: Dd::ZERO,
+            deposited_load: Dd::ZERO,
         }
     }
     fn record(
@@ -458,7 +479,11 @@ impl HeatAccount {
         for (sum, power) in self.boundary.iter_mut().zip(heat.boundary_power_w) {
             *sum = *sum + Dd::from_f64(finite(power * dt)?);
         }
-        self.load = self.load + Dd::from_f64(finite(heat.load_absorbed_power_w * dt)?);
+        let load = Dd::from_f64(finite(heat.load_absorbed_power_w * dt)?);
+        self.load = self.load + load;
+        if heat.load_receiver.is_some() {
+            self.deposited_load = self.deposited_load + load;
+        }
         Ok(())
     }
     fn acoustic_energy(&self) -> Result<PorousHeatingEnergy, PorousHeatingError> {
@@ -467,6 +492,8 @@ impl HeatAccount {
             incident_j: finite(self.boundary[0].to_f64())?,
             outgoing_j: finite(self.boundary[1].to_f64())?,
             load_absorbed_j: finite(self.load.to_f64())?,
+            load_deposited_j: finite(self.deposited_load.to_f64())?,
+            load_exported_j: finite((self.load - self.deposited_load).to_f64())?,
             viscous_j: finite(self.mechanisms[0].to_f64())?,
             thermal_j: finite(self.mechanisms[1].to_f64())?,
             deposited_j: finite(deposited.to_f64())?,
@@ -482,7 +509,14 @@ impl HeatAccount {
         heat_report: EnergyAudit,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<PorousHeatingStep<'t>, PorousHeatingError> {
+        // Events at the target time have already run. Admit the returned
+        // binding/domain even when there is no subsequent source evaluation.
+        heat.validate(&thermal, checkpoint)?;
         let acoustic = self.acoustic_energy()?;
+        let load_energy_j = heat
+            .load_receiver
+            .as_ref()
+            .map(|receiver| (receiver.cell, acoustic.load_deposited_j));
         let cell_energy_j = heat
             .cells
             .iter()
@@ -495,6 +529,7 @@ impl HeatAccount {
             heat_report,
             acoustic,
             cell_energy_j,
+            load_energy_j,
         })
     }
 }
@@ -512,7 +547,7 @@ impl DepositionObserver for HeldHeat<'_> {
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
         self.owner.validate(thermal, checkpoint)?;
-        Ok(self.owner.sources_w.clone())
+        Ok(self.owner.sources())
     }
     fn event(&mut self, _: &Event, _: &DepositionSimulation<'_>) -> Result<(), Self::Error> {
         Ok(())

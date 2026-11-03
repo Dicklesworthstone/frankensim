@@ -8,6 +8,9 @@ use fs_couple::porous_heating::feedback::{
 };
 use fs_duct::porous::{PassivePorousTermination, PressureCovariance};
 
+#[path = "termination/receiver.rs"]
+mod receiver;
+
 const LENGTHS: [f64; 2] = [0.03, 0.05];
 const INITIAL: [f64; 2] = [0.0, 8000.0];
 const AUTHORED: [f64; 2] = [0.4, -0.2];

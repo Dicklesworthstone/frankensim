@@ -132,9 +132,33 @@ impl<'e, 's, 'l, 'm> PorousStackHeating<'e, 's, 'l, 'm> {
                 power_residual_w,
                 boundary_power_w: [boundary.incident_power_w, boundary.outgoing_power_w],
                 load_absorbed_power_w: boundary.load_absorbed_power_w,
+                load_receiver: None,
             },
             layer_cells: layer_cells.into_boxed_slice(),
         })
+    }
+
+    /// Credit the excitation's passive-load work to one distinct native cell.
+    /// The caller explicitly identifies the thermally lumped backing; its mass,
+    /// caloric law, boundaries and conduction remain native. This does not add
+    /// an acoustic load or infer its temperature dependence. With no dissipative
+    /// load the receiver gets exactly zero acoustic heat. Pore heat is unchanged.
+    /// Binding declares complete thermalization in this body; an escaping
+    /// radiation load must remain exported, not credited to a local backing.
+    pub fn with_load_receiver(
+        mut self,
+        thermal: &DepositionSimulation<'_>,
+        cell: CellId,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, PorousHeatingError> {
+        self.heat
+            .bind_load_receiver(thermal, cell, &mut checkpoint)?;
+        Ok(self)
+    }
+
+    /// Explicit backing destination, separate from the porous cell partition.
+    pub fn load_receiver(&self) -> Option<CellId> {
+        self.heat.load_receiver.map(|receiver| receiver.cell)
     }
 
     /// Original prepared whole-stack field; no isolated-slab approximation.
@@ -159,7 +183,7 @@ impl<'e, 's, 'l, 'm> PorousStackHeating<'e, 's, 'l, 'm> {
         self.heat.dissipation
     }
 
-    /// External incident minus outgoing minus deposited acoustic power [W].
+    /// Incident minus outgoing minus load work minus porous heat [W].
     pub const fn power_residual_w(&self) -> f64 {
         self.heat.power_residual_w
     }

@@ -100,6 +100,8 @@ fn power(heat: &PreparedHeat) -> PorousSpectrumPower {
         incident_power_w: heat.boundary_power_w[0],
         outgoing_power_w: heat.boundary_power_w[1],
         load_absorbed_power_w: heat.load_absorbed_power_w,
+        load_deposited_power_w: heat.load_deposited_power_w(),
+        load_exported_power_w: heat.load_exported_power_w(),
         dissipation: heat.dissipation,
         residual_w: heat.power_residual_w,
     }
@@ -174,6 +176,32 @@ fn prepare_components<'s, 'l, 'm>(
 }
 
 impl<'a> PorousCrossSpectrumHeating<'a> {
+    /// Route every frequency/angular mode's positive load work into the same
+    /// explicit native backing cell. Modes still share one thermal advance;
+    /// their per-bin accounts diagnose, and never duplicate, the summed heat.
+    /// Native backing storage/conduction evolve; authored impedances stay fixed.
+    /// Binding declares full thermalization in this body. Escaping radiation
+    /// must remain exported; no heat fraction or physical destination is guessed.
+    pub fn with_load_receiver(
+        mut self,
+        thermal: &DepositionSimulation<'_>,
+        cell: CellId,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, PorousHeatingError> {
+        self.heat
+            .bind_load_receiver(thermal, cell, &mut checkpoint)?;
+        for response in &mut self.responses {
+            checkpoint()?;
+            response.heat.load_receiver = self.heat.load_receiver;
+        }
+        Ok(self)
+    }
+
+    /// Shared explicit backing destination for all spectral/angular modes.
+    pub fn load_receiver(&self) -> Option<CellId> {
+        self.heat.load_receiver.map(|receiver| receiver.cell)
+    }
+
     /// One-sided stationary normal-incidence covariance bins with passive rear
     /// loads, paired in INPUT order before canonical frequency sorting.
     pub fn try_new_terminated(
@@ -480,6 +508,7 @@ impl<'a> PorousCrossSpectrumHeating<'a> {
                     &mut checkpoint,
                 )?;
                 let mut heat = PreparedHeat {
+                    load_receiver: None,
                     cells: bound.cells().to_vec(),
                     sources_w: bound
                         .cells()
@@ -687,7 +716,7 @@ impl DepositionObserver for CrossSpectrumObserver<'_> {
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
         self.source.refresh(thermal, &mut self.work, checkpoint)?;
-        Ok(self.source.heat.sources_w.clone())
+        Ok(self.source.heat.sources())
     }
     fn event(&mut self, _: &Event, _: &DepositionSimulation<'_>) -> Result<(), Self::Error> {
         Ok(())

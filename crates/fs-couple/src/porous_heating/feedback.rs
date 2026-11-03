@@ -394,6 +394,7 @@ impl<'a> TemperaturePorousHeating<'a> {
                     power_residual_w: source.residual_w,
                     boundary_power_w: [source.incident_power_w, source.outgoing_power_w],
                     load_absorbed_power_w: source.load_absorbed_power_w,
+                    load_receiver: None,
                 },
                 boundary,
             )
@@ -415,6 +416,29 @@ impl<'a> TemperaturePorousHeating<'a> {
             heat,
             boundary,
         })
+    }
+
+    /// Deposit all reported passive-load work in one distinct native backing
+    /// cell, in the same accepted steps as pore heat. Its native conduction may
+    /// change pore temperatures and hence acoustics. Its own temperature does
+    /// not alter the authored fixed load impedance or trigger an acoustic solve.
+    /// The backing retains its original mass, caloric law, sources and events.
+    /// Bind only work that thermalizes in this body; escaping radiation stays
+    /// exported. No heat fraction or dissipation mechanism is inferred.
+    pub fn with_load_receiver(
+        mut self,
+        thermal: &DepositionSimulation<'_>,
+        cell: CellId,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, PorousHeatingError> {
+        self.heat
+            .bind_load_receiver(thermal, cell, &mut checkpoint)?;
+        Ok(self)
+    }
+
+    /// Explicit backing destination, separate from the porous cell partition.
+    pub fn load_receiver(&self) -> Option<CellId> {
+        self.heat.load_receiver.map(|receiver| receiver.cell)
     }
 
     /// Physical thermal destinations and their current analytic heat rates.
@@ -460,6 +484,8 @@ impl<'a> TemperaturePorousHeating<'a> {
             incident_power_w: self.heat.boundary_power_w[0],
             outgoing_power_w: self.heat.boundary_power_w[1],
             load_absorbed_power_w: self.heat.load_absorbed_power_w,
+            load_deposited_power_w: self.heat.load_deposited_power_w(),
+            load_exported_power_w: self.heat.load_exported_power_w(),
             dissipation: self.heat.dissipation,
             residual_w: self.heat.power_residual_w,
         }
@@ -608,7 +634,7 @@ impl DepositionObserver for FeedbackObserver<'_> {
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
         self.source.refresh(thermal, &mut self.work, checkpoint)?;
-        Ok(self.source.heat.sources_w.clone())
+        Ok(self.source.heat.sources())
     }
     fn event(&mut self, _: &Event, _: &DepositionSimulation<'_>) -> Result<(), Self::Error> {
         Ok(())

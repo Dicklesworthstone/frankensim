@@ -23319,3 +23319,46 @@ synthetic; this is complete assembly/projection/motion evidence, not experimenta
 calibration, spatial convergence or a real-time performance guarantee. Focused
 native validation passes these two tests, the six prepared-material tests and the
 example; it does not assert a full workspace Cargo, DSR or RCH result.
+
+<!-- porous-load-thermal-receiver:start -->
+### Opt-in native thermal destination for passive backing absorption
+
+`PorousStackHeating`, `TemperaturePorousHeating`, `PorousSpectrumHeating` and
+`PorousCrossSpectrumHeating` expose `with_load_receiver`. The latter includes
+independent angular and diffuse modes. An explicit existing native cell receives
+the original positive terminal work. It must be distinct from every porous
+cell, active, and retain its original identity, geometry, mass, material,
+storage basis and caloric identity. Its temperature must remain within its
+native caloric domain. Binding is rechecked during source preparation and after
+the final accepted events before publishing the returned candidate.
+
+This optional binding declares that the complete real-impedance work thermalizes
+in the identified lumped body. No material, heat fraction or destination is
+inferred. Escaping radiation remains exported unless a separate receiving
+absorber justifies that thermal destination. The receiver's native storage,
+latent heat, boundary conditions, authored sources, events and conduction links
+remain unchanged. Backing-to-pore conduction can change pore temperatures and
+the subsequent acoustic response. The backing's temperature does not change
+the prescribed impedance or independently trigger a new acoustic solve.
+
+The default remains the export-only load behavior above. `load_absorbed_j` and
+`load_absorbed_power_w` always retain the original total load work. New
+`load_deposited_j`/`load_deposited_power_w` report the work credited to a bound
+receiver; `load_exported_j`/`load_exported_power_w` report the remainder outside
+the native thermal system. Exactly one of these channels receives the load
+work. `deposited_j` and `cell_energy_j` retain their pore-only meanings.
+`load_energy_j` separately identifies the receiving cell and its credited heat.
+The native thermal audit includes pore plus bound-load heat exactly once;
+per-bin accounts are diagnostics, not additional sources. Acoustic closure
+still subtracts total load work once, regardless of the thermal destination.
+
+One shared source-map path serves all owners; independent spectral/angular
+load powers are summed before a single native advance. Accepted-start rates
+integrate over actual native step durations, including event clipping. Fixed
+or latent pore temperatures reuse their acoustic caches. Tests use an
+independent density/bulk-modulus transfer solve, volume quadrature and three
+caloric ODEs with conduction to check refinement and conservation. They also
+check frozen/harmonic/spectral/covariance/angular parity, one-bin fast paths,
+latent backing storage, continuation, export-only defaults, exact zero loss,
+distinct binding, changed mass, caloric-domain refusal and cancellation.
+<!-- porous-load-thermal-receiver:end -->

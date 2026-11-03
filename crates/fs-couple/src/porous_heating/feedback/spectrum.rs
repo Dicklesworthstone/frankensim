@@ -105,11 +105,15 @@ pub struct PorousSpectrumPower {
     pub incident_power_w: f64,
     /// Outgoing power at prescribed-source faces [W].
     pub outgoing_power_w: f64,
-    /// Positive power exported into attached passive loads, never cell heat [W].
+    /// Positive power absorbed in attached passive loads, separate from pores [W].
     pub load_absorbed_power_w: f64,
+    /// Load work credited once to the explicit native backing receiver [W].
+    pub load_deposited_power_w: f64,
+    /// Load work outside the thermal system when no receiver is bound [W].
+    pub load_exported_power_w: f64,
     /// Native positive viscous and thermal work across all original cells [W].
     pub dissipation: PorousLayerDissipation,
-    /// Incident minus outgoing minus load work minus deposited; never cell heat.
+    /// Incident minus outgoing minus load work minus porous work; never heat.
     pub residual_w: f64,
 }
 
@@ -139,6 +143,32 @@ pub struct PorousSpectrumStep<'t, 'a> {
 }
 
 impl<'a> PorousSpectrumHeating<'a> {
+    /// Route every frequency's load work to one explicit native backing cell.
+    /// Frequencies describe the same physical specimen/backing. Their load heat
+    /// is summed before the shared thermal step and counted once. The distinct
+    /// cell retains its own mass/caloric law; fixed impedances remain unchanged.
+    /// All bound load work must thermalize in this body; escaping radiation
+    /// remains exported rather than being assigned to a local backing.
+    pub fn with_load_receiver(
+        mut self,
+        thermal: &DepositionSimulation<'_>,
+        cell: CellId,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, PorousHeatingError> {
+        self.heat
+            .bind_load_receiver(thermal, cell, &mut checkpoint)?;
+        for bin in &mut self.bins {
+            checkpoint()?;
+            bin.heat.load_receiver = self.heat.load_receiver;
+        }
+        Ok(self)
+    }
+
+    /// Shared explicit backing destination for all frequencies.
+    pub fn load_receiver(&self) -> Option<CellId> {
+        self.heat.load_receiver.map(|receiver| receiver.cell)
+    }
+
     /// Admit one common physical cell partition and a nonempty set of distinct
     /// positive frequencies. Each peak-pressure drive already represents its
     /// bin's integrated power. Duplicate frequencies refuse before any acoustic
@@ -360,6 +390,8 @@ impl<'a> PorousSpectrumHeating<'a> {
             incident_power_w: self.heat.boundary_power_w[0],
             outgoing_power_w: self.heat.boundary_power_w[1],
             load_absorbed_power_w: self.heat.load_absorbed_power_w,
+            load_deposited_power_w: self.heat.load_deposited_power_w(),
+            load_exported_power_w: self.heat.load_exported_power_w(),
             dissipation: self.heat.dissipation,
             residual_w: self.heat.power_residual_w,
         }
@@ -547,7 +579,7 @@ impl DepositionObserver for SpectrumObserver<'_> {
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
         self.source.refresh(thermal, &mut self.work, checkpoint)?;
-        Ok(self.source.heat.sources_w.clone())
+        Ok(self.source.heat.sources())
     }
     fn event(&mut self, _: &Event, _: &DepositionSimulation<'_>) -> Result<(), Self::Error> {
         Ok(())
