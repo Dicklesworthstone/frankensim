@@ -3666,6 +3666,36 @@ The same original section-band, geometry, inertia and cancellation conditions
 apply. Added `frame2d_harmonic` cases specify analytic attached-mass resonance,
 lever-arm/mutual bending loads, physical work, supported ports and refusals.
 
+### Complete damped poles of the native frame
+
+`Frame2d::resonance_poles` returns all `2 * free_dofs.len()` rates of
+`(s^2 M + s C + K) q = 0` under `exp(s t)`. A shared native linear-pencil
+preparation now supplies both this query and the existing harmonic response,
+retaining consistent inertia, section spin, every material-viscosity cross
+term and the authored Rayleigh reference. No undamped modal projection or
+diagonal loss fit is introduced. The existing scaled quadratic owner supplies
+the numerical spectrum; exact diagonal pencils retain its analytic scalar
+path and slow overdamped poles.
+
+Fixed linear geometry, elastic sections, stationary supports and positive
+inertia on every free coordinate have the same admission as native harmonic
+response. All rigid and real relaxation roots remain visible. The query
+explicitly selects the original constant Kelvin-Voigt/elastic coefficients
+as a continuous law and returns the source's intersected real-frequency band.
+It does not filter roots to that band or assert experimental validity at a
+complex rate. Pure real roots are relaxation or rigid motion, not oscillatory
+resonances; numerical eigenvalues alone do not establish a forced peak,
+observability, a mode shape or a certified stability verdict.
+
+Full-coordinate and numerical-payload limits precede dense assembly. An
+explicit conservative arithmetic-work envelope and per-window QR sweep bound
+limit the full quadratic solve. Existing native assembly and eigensolver
+checkpoints propagate cancellation without publishing a partial spectrum or
+changing accepted state. `tests/frame2d_poles.rs` adds independent scalar,
+coupled-material, full-inertia, rigid-motion and refusal regressions. These
+regression definitions require native integration execution; syntax and source
+review alone do not claim that gate has passed.
+
 ## Original material strain domains on frozen modal solid trajectories
 
 `ViscoElements::validate_displacement` evaluates the existing element Mandel

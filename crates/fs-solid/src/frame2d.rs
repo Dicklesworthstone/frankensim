@@ -54,6 +54,11 @@ pub mod creep;
 /// Full forced resonance of the original elastic frame and its material losses.
 pub mod harmonic;
 
+// One original M/C/K assembly for forced and free linear resonance.
+mod linear;
+/// Complete damped native frame spectrum under exp(s t).
+pub mod poles;
+
 mod mass;
 pub use mass::FrameMassFormulation;
 mod impulse;
@@ -1763,3 +1768,4 @@ mod damping_admission_tests {
         }
     }
 }
+

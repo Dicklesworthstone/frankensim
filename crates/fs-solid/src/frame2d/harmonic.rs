@@ -6,7 +6,8 @@
 //! from a material name or substituted for the original section viscosity.
 //! Stationary supports use the frame's original free-coordinate map.
 
-use super::{Frame2d, Geometry, Rayleigh, SectionModel};
+use super::linear::{FrameLinearError, FrameLinearPencil};
+use super::{Frame2d, Rayleigh};
 use crate::SolidError;
 use fs_exec::Cx;
 use fs_math::c64::C64;
@@ -40,6 +41,27 @@ impl From<HarmonicResponseError> for FrameHarmonicError {
         Self::Harmonic(error)
     }
 }
+
+impl From<FrameLinearError> for FrameHarmonicError {
+    fn from(error: FrameLinearError) -> Self {
+        match error {
+            FrameLinearError::Frame(error) => Self::Frame(error),
+            FrameLinearError::Invalid(what) => HarmonicResponseError::Invalid(what).into(),
+            FrameLinearError::Budget {
+                quantity,
+                requested,
+                cap,
+            } => HarmonicResponseError::Budget {
+                quantity,
+                requested,
+                cap,
+            }
+            .into(),
+            FrameLinearError::Cancelled => HarmonicResponseError::Cancelled.into(),
+        }
+    }
+}
+
 fn invalid(what: &'static str) -> FrameHarmonicError {
     HarmonicResponseError::Invalid(what).into()
 }
@@ -126,33 +148,6 @@ impl FrameHarmonicPortLoad<'_> {
             ..self.controls
         })
     }
-}
-
-// Native force-based assembly evaluates the two triangles independently.
-// Admit only roundoff skew in stiffness-scaled coordinates, then use their
-// symmetric mean, as the native modal analysis does. Never drop a coupling.
-fn stiffness_entry(
-    matrix: &[f64],
-    n: usize,
-    row: usize,
-    col: usize,
-) -> Result<f64, FrameHarmonicError> {
-    let (a, b) = (matrix[row * n + col], matrix[col * n + row]);
-    if !a.is_finite() || !b.is_finite() {
-        return Err(invalid("nonfinite frame stiffness"));
-    }
-    if a == b {
-        return Ok(a);
-    }
-    let si = matrix[row * n + row].abs().sqrt();
-    let sj = matrix[col * n + col].abs().sqrt();
-    let skew = (a / si / sj - b / si / sj).abs();
-    if !skew.is_finite() || skew > 64.0 * n as f64 * f64::EPSILON {
-        return Err(invalid(
-            "frame stiffness asymmetry exceeds assembly roundoff",
-        ));
-    }
-    Ok(0.5 * a + 0.5 * b)
 }
 
 /// One immutable frequency factor, retaining the original frame and supports.
@@ -259,118 +254,40 @@ impl Frame2d {
         cx: &Cx<'_>,
     ) -> Result<FrameHarmonicOperator<'_>, FrameHarmonicError> {
         poll(cx)?;
-        let n = self.ndof();
-        if n == 0
-            || !omega_rad_s.is_finite()
+        if !omega_rad_s.is_finite()
             || omega_rad_s < 0.0
-            || ![rayleigh.a0, rayleigh.a1]
-                .into_iter()
-                .all(|x| x.is_finite() && x >= 0.0)
             || !controls.maximum_relative_residual.is_finite()
             || controls.maximum_relative_residual <= 0.0
             || controls.maximum_relative_residual >= 1.0
         {
             return Err(invalid(
-                "nonempty frame, nonnegative finite frequency/damping and residual budget in (0,1) required",
+                "finite nonnegative frequency and residual budget in (0,1) required",
             ));
         }
-        if n > controls.maximum_coordinates {
-            return Err(HarmonicResponseError::Budget {
-                quantity: "full frame coordinates",
-                requested: n,
-                cap: controls.maximum_coordinates,
-            }
-            .into());
-        }
-        // Includes the shared owner's 128*nf^2 + 128*nf envelope, the native
-        // source assembly, full M/K/C, three free matrices and bounded
-        // per-element numerical trials (at most seven section stations).
-        let bytes = n
-            .checked_mul(n)
-            .and_then(|x| x.checked_mul(512))
-            .and_then(|x| n.checked_mul(512).and_then(|y| x.checked_add(y)))
-            .and_then(|x| {
-                self.elements
-                    .len()
-                    .checked_mul(2048)
-                    .and_then(|y| x.checked_add(y))
-            })
-            .ok_or_else(|| invalid("frame harmonic numerical payload overflow"))?;
-        if bytes > controls.maximum_payload_bytes {
-            return Err(HarmonicResponseError::Budget {
-                quantity: "frame harmonic numerical payload bytes",
-                requested: bytes,
-                cap: controls.maximum_payload_bytes,
-            }
-            .into());
-        }
+        let n = self.ndof();
         let load = load
             .map(|load| load.reduced_controls(n).map(|controls| (load, controls)))
             .transpose()?;
-        self.require_untimed_materials()?;
-        if self.geometry != Geometry::Linear
-            || self.elements.iter().any(|element| {
-                element.sections.iter().any(|section| {
-                    !matches!(section, SectionModel::Elastic { ea, ei }
-                    if ea.is_finite() && *ea > 0.0 && ei.is_finite() && *ei > 0.0)
-                })
-            })
-        {
-            return Err(invalid(
-                "harmonic frame requires fixed linear geometry and elastic sections",
-            ));
-        }
-        let mass = self.reference_mass()?;
-        let (free_dofs, massless) = self.mass_partition(&mass);
-        if free_dofs.is_empty() || !massless.is_empty() {
-            return Err(invalid(
-                "harmonic frame requires positive inertia on every free coordinate; use consistent member mass",
-            ));
-        }
-        poll(cx)?;
-        let (_, stiffness, _) = self.assemble_controlled(&self.u, &mut || {
-            cx.checkpoint().map_err(|_| SolidError::Cancelled)
-        })?;
-        let material = self.assemble_material_damping()?;
-        if let Some(operator) = &material {
-            let (low, high) = operator.omega_band_rad_s();
+        let FrameLinearPencil {
+            free_dofs,
+            mass: m,
+            stiffness: k,
+            damping: c,
+            material_omega_band_rad_s,
+        } = self.prepare_linear_pencil(
+            rayleigh,
+            controls.maximum_coordinates,
+            controls.maximum_payload_bytes,
+            cx,
+        )?;
+        if let Some((low, high)) = material_omega_band_rad_s {
             if omega_rad_s < low || omega_rad_s > high {
                 return Err(invalid(
                     "harmonic frequency lies outside original frame viscosity support",
                 ));
             }
         }
-        poll(cx)?;
-        let reference = self
-            .rayleigh_reference_stiffness
-            .as_ref()
-            .unwrap_or(&stiffness);
         let nf = free_dofs.len();
-        let mut m = vec![0.0; nf * nf];
-        let mut k = vec![0.0; nf * nf];
-        let mut c = vec![0.0; nf * nf];
-        for (i, &row) in free_dofs.iter().enumerate() {
-            poll(cx)?;
-            for (j, &col) in free_dofs[..=i].iter().enumerate() {
-                let full = row * n + col;
-                let reduced = i * nf + j;
-                m[reduced] = mass.entry(row, col);
-                k[reduced] = stiffness_entry(&stiffness, n, row, col)?;
-                let reference_entry = if rayleigh.a1 == 0.0 {
-                    0.0
-                } else {
-                    stiffness_entry(reference, n, row, col)?
-                };
-                c[reduced] = rayleigh.a0 * m[reduced]
-                    + rayleigh.a1 * reference_entry
-                    + material
-                        .as_ref()
-                        .map_or(0.0, |operator| operator.entries()[full]);
-                m[j * nf + i] = m[reduced];
-                k[j * nf + i] = k[reduced];
-                c[j * nf + i] = c[reduced];
-            }
-        }
         let response = if let Some((load, port_controls)) = load {
             let mut force_map = Vec::with_capacity(nf * load.ports);
             for &row in &free_dofs {
