@@ -1,8 +1,10 @@
-//! Capacity-bounded signed mass and linear momentum on native D2Q9 conversions.
+//! Capacity-bounded signed mass and momenta on native D2Q9 conversions.
 
 use super::*;
 use fs_exec::CancelGate;
 use std::collections::BTreeMap;
+
+mod angular;
 
 /// Conversion balance in lattice units, excluding collision, streaming,
 /// pressure traction and imposed forces. These are numerical remap terms.
@@ -14,6 +16,11 @@ pub struct ConversionMomentumReport2 {
     pub absolute_mass_defect: f64,
     /// Sum of absolute local physical linear-momentum discrepancies.
     pub absolute_momentum_defect: [f64; 2],
+    /// Sum of absolute final angular defects about each actual route
+    /// component's fixed local lattice origin. Linear residuals are reported
+    /// separately; translating residuals to another origin includes their arm.
+    /// `Some` only for angular-preserving conversion; linear mode reports `None`.
+    pub absolute_angular_momentum_defect: Option<f64>,
     /// Signed resolved kinetic change during conversion, never physical heat.
     pub kinetic_energy_change: f64,
     /// Nonzero adjacent-cell transfers. Periodic aliases count only once.
@@ -101,6 +108,32 @@ impl FreeSurface {
         Ok(report)
     }
 
+    /// Advance with local signed mass, linear and cell-centre angular momentum
+    /// preserved during conversion. Only cells connected by actual mass routes
+    /// share the minimum mass-weighted velocity correction; detached fronts
+    /// cannot supply one another's corrective impulse or torque.
+    ///
+    /// The positive final masses supply the component centroid and planar
+    /// inertia. An unresolved spin, inadmissible speed or nonpositive corrected
+    /// population refuses the whole candidate. Density and physical viscous
+    /// stress use the same Guo-preserving retarget as linear conversion.
+    ///
+    /// Angular momentum belongs to the selected inertial lattice frame.
+    /// Relocated mass does not preserve its first spatial moment, so this is
+    /// not a Galilean-equivariant geometric remap. Periodic domains refuse:
+    /// angular transport across their coordinate cut needs a separate owner.
+    /// The separate prescribed gas-pressure entries retain linear conversion.
+    /// The receipt covers conversion, not full-step torque or physical heat.
+    pub fn step_with_angular_momentum(
+        &mut self,
+        gate: &CancelGate,
+    ) -> Result<ConversionMomentumReport2, FreeSurfaceMomentumError2> {
+        let (candidate, report) = self.angular_momentum_candidate(gate)?;
+        poll(gate)?;
+        *self = candidate;
+        Ok(report)
+    }
+
     // Material units and contact-line histories must admit the SAME native
     // proposal before publication. Return its one private copy rather than
     // nesting a second transactional clone in each physical adapter.
@@ -122,12 +155,41 @@ impl FreeSurface {
     where
         Error: From<FreeSurfaceMomentumError2>,
     {
+        self.momentum_candidate_inner(gate, false, stream)
+    }
+
+    pub(crate) fn angular_momentum_candidate(
+        &self,
+        gate: &CancelGate,
+    ) -> Result<(Self, ConversionMomentumReport2), FreeSurfaceMomentumError2> {
+        poll(gate)?;
+        if self.grid.periodic_x || self.grid.periodic_y {
+            return Err(invalid(
+                "angular conversion requires nonperiodic lattice coordinates",
+            ));
+        }
+        self.momentum_candidate_inner(gate, true, |candidate| candidate.stream_step(Some(gate)))
+    }
+
+    fn momentum_candidate_inner<Error>(
+        &self,
+        gate: &CancelGate,
+        preserve_angular: bool,
+        stream: impl FnOnce(&mut Self) -> Result<(), Error>,
+    ) -> Result<(Self, ConversionMomentumReport2), Error>
+    where
+        Error: From<FreeSurfaceMomentumError2>,
+    {
         self.admit_momentum_step(gate)?;
         let mut candidate = self.clone();
         poll(gate)?;
         stream(&mut candidate)?;
         candidate.admit_momentum_step(gate)?;
-        let report = candidate.convert_momentum(gate)?;
+        let report = if preserve_angular {
+            candidate.convert_angular_momentum(gate)?
+        } else {
+            candidate.convert_momentum(gate)?
+        };
         candidate.admit_momentum_step(gate)?;
         poll(gate)?;
         Ok((candidate, report))
@@ -211,6 +273,22 @@ impl FreeSurface {
     fn convert_momentum(
         &mut self,
         gate: &CancelGate,
+    ) -> Result<ConversionMomentumReport2, FreeSurfaceMomentumError2> {
+        self.convert_momentum_inner(gate, None)
+    }
+
+    fn convert_angular_momentum(
+        &mut self,
+        gate: &CancelGate,
+    ) -> Result<ConversionMomentumReport2, FreeSurfaceMomentumError2> {
+        let angular = angular::AngularConversion2::capture_sources(self, gate)?;
+        self.convert_momentum_inner(gate, Some(angular))
+    }
+
+    fn convert_momentum_inner(
+        &mut self,
+        gate: &CancelGate,
+        mut angular: Option<angular::AngularConversion2>,
     ) -> Result<ConversionMomentumReport2, FreeSurfaceMomentumError2> {
         poll(gate)?;
         let excess = self.conversion_cascade(true)?;
@@ -301,6 +379,9 @@ impl FreeSurface {
                         carried_momentum: [0.0; 2],
                         transferred_mass: 0.0,
                     });
+                    if let Some(angular) = &mut angular {
+                        angular.link(source, nb, old_mass, entry.velocity, actual);
+                    }
                     for d in 0..2 {
                         entry.relative_momentum[d] += actual * (donor.u[d] - entry.velocity[d]);
                         entry.carried_momentum[d] += actual * donor.u[d];
@@ -359,6 +440,9 @@ impl FreeSurface {
                         .map(|d| (recipient.velocity[d] + 0.5 * du[d]) * du[d])
                         .sum::<f64>();
         }
+        if let Some(angular) = angular {
+            angular.finish(self, gate, &mut report)?;
+        }
         if [
             report.redistributed_mass,
             report.absolute_mass_defect,
@@ -366,6 +450,7 @@ impl FreeSurface {
         ]
         .iter()
         .chain(&report.absolute_momentum_defect)
+        .chain(report.absolute_angular_momentum_defect.iter())
         .any(|x| !x.is_finite())
         {
             return Err(invalid("conversion balance overflowed"));

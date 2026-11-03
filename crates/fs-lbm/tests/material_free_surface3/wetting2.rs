@@ -365,6 +365,80 @@ fn g4_dense_momentum_wetting_keeps_source_refusal_and_retry_atomic() {
 }
 
 #[test]
+fn g1_dense_angular_material_replays_native_dynamics_and_units() {
+    let bulk = liquid(0, 300.0, None);
+    let gate = CancelGate::new_clock_free();
+    for (dx, dt) in [(0.001, 0.0002), (0.002, 0.0005)] {
+        let mut domain = domain2();
+        domain.gravity_m_s2 = [0.5, -1.25];
+        let mut physical = plan_free_surface_from_material(&bulk, dx, dt, 0.1)
+            .unwrap()
+            .free_surface2(domain, |x, y| shape(PlanarWall2::YMin, x, y))
+            .unwrap();
+        let mut native = physical.lattice().clone();
+        let mass_unit = bulk.density_kg_m3() * dx * dx;
+        let velocity_unit = dx / dt;
+        for _ in 0..3 {
+            let expected = native.step_with_angular_momentum(&gate).unwrap();
+            let actual = physical.step_with_angular_momentum(&gate).unwrap();
+            assert_eq!(actual.native, expected);
+            same_state(physical.lattice(), &native);
+            assert_eq!(
+                actual.absolute_angular_momentum_defect_kg_m_per_s,
+                expected.absolute_angular_momentum_defect
+                    .map(|l| ((l * mass_unit) * velocity_unit) * dx),
+            );
+            assert_eq!(physical.carry_mass_kg_per_m().unwrap(), 0.0);
+        }
+        let before = physical.lattice().clone();
+        let cancelled = CancelGate::new_clock_free();
+        cancelled.request();
+        assert!(physical.step_with_angular_momentum(&cancelled).is_err());
+        same_state(physical.lattice(), &before);
+    }
+}
+
+#[test]
+fn g4_dense_angular_wetting_keeps_source_refusal_and_retry_atomic() {
+    use fs_lbm::material::free_surface::MaterialFreeSurfaceMomentumError2;
+    let bulk = liquid(0, 300.0, Some(0.05));
+    let gate = CancelGate::new_clock_free();
+    let angle = PI / 3.0;
+    let narrow = dynamic_card(&bulk, [angle; 2], [angle; 2], 1e-12, true);
+    let mut refused = flow2(&bulk, &narrow, PlanarWall2::YMin, 0.0002);
+    let before = refused.flow().lattice().clone();
+    let samples = refused.samples().clone();
+    let mut native = before.clone();
+    native.step_with_angular_momentum(&gate).unwrap();
+    assert!(matches!(
+        refused.step_with_angular_momentum(&gate),
+        Err(MaterialFreeSurfaceMomentumError2::Wetting(_))
+    ));
+    same_state(refused.flow().lattice(), &before);
+    assert_eq!(refused.samples(), &samples);
+
+    let supported = dynamic_card(&bulk, [angle; 2], [angle; 2], 100.0, false);
+    let mut retry = flow2(&bulk, &supported, PlanarWall2::YMin, 0.0002);
+    let mut reference = flow2(&bulk, &supported, PlanarWall2::YMin, 0.0002);
+    let cancelled = CancelGate::new_clock_free();
+    cancelled.request();
+    assert!(matches!(
+        retry.step_with_angular_momentum(&cancelled),
+        Err(MaterialFreeSurfaceMomentumError2::Native(
+            fs_lbm::freesurface::FreeSurfaceMomentumError2::Cancelled
+        ))
+    ));
+    same_state(retry.flow().lattice(), reference.flow().lattice());
+    assert_eq!(retry.samples(), reference.samples());
+    assert_eq!(
+        retry.step_with_angular_momentum(&gate).unwrap(),
+        reference.step_with_angular_momentum(&gate).unwrap(),
+    );
+    same_state(retry.flow().lattice(), reference.flow().lattice());
+    assert_eq!(retry.samples(), reference.samples());
+}
+
+#[test]
 fn g3_dense_default_step_carries_momentum_through_live_conversions() {
     let bulk = liquid(0, 300.0, None);
     let gate = CancelGate::new_clock_free();

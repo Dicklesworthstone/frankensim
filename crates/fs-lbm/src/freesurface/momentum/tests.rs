@@ -380,3 +380,206 @@ fn g3_material_gravity_advects_a_drop_through_bounded_momentum_conversions() {
     assert!((sim.ledger_mass() - mass).abs() < 1e-11 * mass);
     assert_eq!(sim.carry, 0.0);
 }
+
+// Independent signed cell-centre inventory. A different measurement origin
+// must not alter closure when the linear momentum also closes.
+fn angular_inventory(sim: &FreeSurface, origin: [f64; 2], region: impl Fn(usize) -> bool) -> f64 {
+    let mut angular = 0.0;
+    for (i, flag) in sim.grid.flags.iter().enumerate() {
+        if !region(i % sim.grid.nx) || !matches!(flag, Cell::Fluid | Cell::Interface) {
+            continue;
+        }
+        let state = sim.grid.moments(i);
+        let mass = if *flag == Cell::Fluid {
+            state.rho
+        } else {
+            sim.mass[i]
+        };
+        let x = (i % sim.grid.nx) as f64 - origin[0];
+        let y = (i / sim.grid.nx) as f64 - origin[1];
+        angular += mass * (x * state.u[1] - y * state.u[0]);
+    }
+    angular
+}
+
+#[test]
+fn g1_angular_conversion_closes_off_axis_fronts_in_each_selected_frame() {
+    let gate = CancelGate::new_clock_free();
+    for density_scale in [0.4, 1.0, 2.5] {
+        // Each boost defines its own conservation target. Relocated first
+        // mass moments do not permit a general boost-equivariance claim.
+        for boost in [[0.0; 2], [0.02, -0.01]] {
+            let mut sim = surface(
+                &[
+                    (
+                        [3, 3],
+                        0.8 * density_scale,
+                        [0.06 + boost[0], 0.01 + boost[1]],
+                    ),
+                    (
+                        [4, 4],
+                        1.4 * density_scale,
+                        [-0.02 + boost[0], 0.03 + boost[1]],
+                    ),
+                ],
+                [0.0002 * density_scale, -0.0001 * density_scale],
+            );
+            let source = sim.grid.idx(3, 3);
+            sim.mass[source] = 1.2 * sim.grid.moments(source).rho;
+            let before = inventory(&sim, |_| true);
+            let origins = [[0.0, 0.0], [13.5, -7.25]];
+            let angular = origins.map(|origin| angular_inventory(&sim, origin, |_| true));
+            let mut linear = sim.clone();
+            let linear_report = linear.convert_momentum(&gate).unwrap();
+            assert_eq!(linear_report.absolute_angular_momentum_defect, None);
+            assert!(
+                (angular_inventory(&linear, origins[0], |_| true) - angular[0]).abs()
+                    > 1e-6 * density_scale
+            );
+            let report = sim.convert_angular_momentum(&gate).unwrap();
+            assert_balance(&sim, before, report);
+            for (origin, expected) in origins.into_iter().zip(angular) {
+                assert!(
+                    (angular_inventory(&sim, origin, |_| true) - expected).abs()
+                        < 5e-13 * density_scale
+                );
+            }
+            assert!(report.absolute_angular_momentum_defect.unwrap() < 5e-13 * density_scale);
+        }
+    }
+}
+
+#[test]
+fn g1_angular_conversion_keeps_disconnected_debts_and_dual_role_sources_local() {
+    let gate = CancelGate::new_clock_free();
+    let mut sim = surface(
+        &[
+            ([3, 3], 0.8, [0.05, -0.01]),
+            ([4, 3], 1.2, [-0.02, 0.03]),
+            ([4, 4], 0.7, [0.01, 0.04]),
+            ([11, 3], 0.6, [0.03, -0.04]),
+            ([12, 3], 1.1, [-0.03, 0.01]),
+            ([11, 4], 0.8, [0.01, 0.03]),
+        ],
+        [0.0001, -0.0001],
+    );
+    // The positive source becomes interface again beside the signed debt
+    // and receives a transfer. Its original overshoot must not be forgotten.
+    let positive = sim.grid.idx(4, 3);
+    sim.mass[positive] = sim.grid.moments(positive).rho + 0.12;
+    let left_debt = sim.grid.idx(3, 3);
+    let right_debt = sim.grid.idx(11, 3);
+    sim.mass[left_debt] = -0.02;
+    sim.mass[right_debt] = -0.03;
+    let before = inventory(&sim, |_| true);
+    let left = inventory(&sim, |x| x < 8);
+    let right = inventory(&sim, |x| x >= 8);
+    let angular = [
+        angular_inventory(&sim, [3.0, 3.0], |x| x < 8),
+        angular_inventory(&sim, [11.0, 3.0], |x| x >= 8),
+    ];
+    let report = sim.convert_angular_momentum(&gate).unwrap();
+    assert_balance(&sim, before, report);
+    for (actual, expected) in [
+        (inventory(&sim, |x| x < 8), left),
+        (inventory(&sim, |x| x >= 8), right),
+    ] {
+        assert!((actual.0 - expected.0).abs() < 3e-13);
+        for d in 0..2 {
+            assert!((actual.1[d] - expected.1[d]).abs() < 3e-14);
+        }
+    }
+    assert!((angular_inventory(&sim, [3.0, 3.0], |x| x < 8) - angular[0]).abs() < 3e-14);
+    assert!((angular_inventory(&sim, [11.0, 3.0], |x| x >= 8) - angular[1]).abs() < 3e-14);
+    assert_eq!(sim.grid.flags[positive], Cell::Interface);
+}
+
+#[test]
+fn g3_angular_conversion_is_coordinate_translation_invariant() {
+    let gate = CancelGate::new_clock_free();
+    let make = |offset| {
+        let mut sim = surface(
+            &[
+                ([3 + offset, 3], 0.8, [0.06, 0.01]),
+                ([4 + offset, 4], 1.4, [-0.02, 0.03]),
+            ],
+            [0.0002, -0.0001],
+        );
+        let source = sim.grid.idx(3 + offset, 3);
+        sim.mass[source] = 1.2 * sim.grid.moments(source).rho;
+        sim
+    };
+    let mut original = make(0);
+    let mut shifted = make(7);
+    let a = original.convert_angular_momentum(&gate).unwrap();
+    let b = shifted.convert_angular_momentum(&gate).unwrap();
+    assert_eq!(a, b);
+    for y in 2..=4 {
+        for x in 2..=5 {
+            let i = original.grid.idx(x, y);
+            let j = shifted.grid.idx(x + 7, y);
+            assert_eq!(original.grid.flags[i], shifted.grid.flags[j]);
+            assert_eq!(original.mass[i].to_bits(), shifted.mass[j].to_bits());
+            assert_eq!(
+                original.grid.f[i].map(f64::to_bits),
+                shifted.grid.f[j].map(f64::to_bits)
+            );
+        }
+    }
+}
+
+#[test]
+fn g4_public_angular_step_refuses_unresolved_spin_periodicity_and_cancellation_atomically() {
+    let gate = CancelGate::new_clock_free();
+    let mut grid = Grid::uniform(4, 3, 0.8);
+    grid.periodic_x = false;
+    grid.periodic_y = false;
+    grid.flags.fill(Cell::Wall);
+    let source = grid.idx(1, 1);
+    let recipient = grid.idx(2, 1);
+    grid.flags[source] = Cell::Interface;
+    grid.flags[recipient] = Cell::Interface;
+    grid.f[source] = equilibrium(1.0, 0.0, 0.04);
+    let mut sim = FreeSurface::new(grid, 0.0, ContactModel::Neutral);
+    sim.mass[source] = -0.02;
+    let before = sim.clone();
+    let mut linear = sim.clone();
+    linear.step_with_momentum(&gate).unwrap();
+    assert_eq!(
+        sim.step_with_angular_momentum(&gate),
+        Err(invalid(
+            "converted cells cannot resolve angular momentum; refine"
+        )),
+    );
+    assert_eq!(sim.grid.f, before.grid.f);
+    assert_eq!(sim.mass, before.mass);
+    assert_eq!(sim.grid.flags, before.grid.flags);
+    assert_eq!(sim.conversions.to_gas, before.conversions.to_gas);
+
+    let mut grid = Grid::uniform(8, 8, 0.8);
+    grid.periodic_x = false;
+    grid.periodic_y = false;
+    let mut no_conversion = FreeSurface::new(grid, 0.0, ContactModel::Neutral);
+    let mut legacy = no_conversion.clone();
+    legacy.step();
+    let report = no_conversion.step_with_angular_momentum(&gate).unwrap();
+    assert_eq!(report.absolute_angular_momentum_defect, Some(0.0));
+    assert_eq!(no_conversion.grid.f, legacy.grid.f);
+    assert_eq!(no_conversion.mass, legacy.mass);
+    let before = no_conversion.clone();
+    let cancelled = CancelGate::new_clock_free();
+    cancelled.request();
+    assert_eq!(
+        no_conversion.step_with_angular_momentum(&cancelled),
+        Err(FreeSurfaceMomentumError2::Cancelled)
+    );
+    assert_eq!(no_conversion.grid.f, before.grid.f);
+    assert_eq!(no_conversion.mass, before.mass);
+    no_conversion.grid.periodic_x = true;
+    assert!(matches!(
+        no_conversion.step_with_angular_momentum(&gate),
+        Err(FreeSurfaceMomentumError2::Invalid(_))
+    ));
+    assert_eq!(no_conversion.grid.f, before.grid.f);
+    assert_eq!(no_conversion.mass, before.mass);
+}

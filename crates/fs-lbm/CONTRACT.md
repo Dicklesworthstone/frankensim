@@ -39,8 +39,20 @@ and converts mass, linear momentum and signed kinetic remap change per unit
 out-of-plane depth using `rho_ref*dx^2`, `dx/dt` and their products. The units are
 kg/m, kg/s and J/m. Numerical remap energy is not deposited as physical heat.
 This receipt covers conversion only; it does not certify full-step force/traction
-balance, angular momentum or a finite-depth three-dimensional flow. The original
-native numerical-domain, capacity and physical scaling limits still apply.
+balance or a finite-depth three-dimensional flow. The linear-only entries do not
+preserve angular momentum; the opt-in angular mode below adds that conversion
+account. The original native numerical-domain, capacity and physical scaling
+limits still apply.
+
+## D2Q9 cell-centre angular conversion
+
+`FreeSurface::step_with_angular_momentum` and the source-bound `MaterialFreeSurface2` / `MaterialFreeSurfaceWetting2` methods opt into local angular closure. Original linear-only and default dispatch remain unchanged. Prescribed cell/link gas-pressure entries retain their separate linear conversion policy; they do not yet compose with this angular mode. The existing signed, capacity-bounded adjacent transport still owns mass and linear momentum. Only actual nonzero transfer links form a correction component; disconnected fronts cannot exchange corrective impulse or torque.
+
+Each component retains original signed inventories before the class cascade, including a source later reused as a recipient. Final positive masses determine a centroid and scalar planar inertia. A translation plus rotation supplies the minimum mass-weighted velocity correction for simultaneous linear/angular closure. Existing population retargeting preserves density and physical viscous stress in the held Guo force frame. Read-back inventories must close to scaled roundoff; unresolved spin, low-Mach/positive-population failure, SI overflow or cancellation refuses the complete candidate. Wetting geometry and original source receipts share that transaction.
+
+Angular momentum is conserved at cell centres in the selected inertial lattice frame. The remap does not conserve first mass moments and therefore does not promise general boost-equivariance. Periodic coordinates refuse because transport across a periodic cut has no angular owner here. The optional angular defect sums absolute residuals about each component's fixed local origin; translating their bounds also requires the separately reported linear residuals. SI angular quantities are per depth [kg m/s]. Signed numerical kinetic changes remain separate from physical heat. These are conversion accounts, not full-step force/torque certificates.
+
+Regressions cover unequal off-axis fronts under held force, a linear-only torque-producing control, separate selected frames, translated coordinates/origins, disconnected signed-debt components and dual-role sources, unresolved-spin rollback, periodic/cancel refusal, unchanged no-conversion dynamics, material/native replay and units, and dynamic-wetting source refusal/retry.
 
 ## Rigid-frame momentum forcing on the native D2Q9 core
 
@@ -7097,9 +7109,10 @@ the existing low-Mach domain.
 One staged surface makes cancellation and admission failure atomic. The returned
 `ConversionMomentumReport2` records signed conversion kinetic change and local
 mass/linear-momentum defects. Numerical conversion loss is not physical heat.
-The receipt excludes collision/streaming, pressure traction and imposed forces;
-cell-centre relocation does not preserve first mass moments or angular momentum.
-The historical `step` retains its existing conversion behavior.
+The receipt excludes collision/streaming, pressure traction and imposed forces.
+The linear-only policy does not preserve first mass moments or angular momentum;
+the opt-in angular policy adds local angular closure without preserving first
+mass moments. The historical `step` retains its existing conversion behavior.
 
 Seven focused G0/G1/G3 regressions cover unequal-density advancing and receding
 fronts, signed debt, physical boosts and forcing, independent droplets, periodic

@@ -13,7 +13,7 @@ use fs_exec::CancelGate;
 
 /// Accepted conversion account per unit out-of-plane depth. Collision,
 /// streaming, pressure traction and body-force impulse are outside this
-/// report; it is not a complete-step or angular-momentum certificate.
+/// report; it is not a complete-step torque or energy certificate.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MaterialFreeSurfaceMomentumReport2 {
     /// Unmodified account from the original native conversion owner.
@@ -24,6 +24,10 @@ pub struct MaterialFreeSurfaceMomentumReport2 {
     pub absolute_mass_defect_kg_per_m: f64,
     /// Absolute physical linear-momentum remainder per depth [kg/s].
     pub absolute_momentum_defect_kg_per_s: [f64; 2],
+    /// Absolute cell-centre angular defect per depth [kg m/s], summed about
+    /// each route component's fixed local origin. Present only in angular mode;
+    /// translating residuals also requires the separately reported linear part.
+    pub absolute_angular_momentum_defect_kg_m_per_s: Option<f64>,
     /// Signed numerical kinetic change per depth [J/m]. Mixing and signed debt
     /// can change resolved kinetic storage; this is NEVER deposited as heat.
     pub kinetic_energy_change_j_per_m: f64,
@@ -259,6 +263,25 @@ impl MaterialFreeSurface2<'_> {
         Ok((candidate, self.momentum_report_si(native)?))
     }
 
+    /// The same source-bound step with cell-centre angular conservation on
+    /// each actual conversion component. Periodic coordinates, unresolved spin
+    /// or inadmissible corrected populations refuse before flow publication.
+    /// The selected inertial-frame and first-mass-moment limitations of
+    /// `FreeSurface::step_with_angular_momentum` apply. Numerical remap energy
+    /// remains separate from physical heat and wetting dissipation.
+    pub fn step_with_angular_momentum(
+        &mut self,
+        gate: &CancelGate,
+    ) -> Result<MaterialFreeSurfaceMomentumReport2, MaterialFreeSurfaceMomentumError2> {
+        let (candidate, native) = self.lattice.angular_momentum_candidate(gate)?;
+        let report = self.momentum_report_si(native)?;
+        if gate.is_requested() {
+            return Err(FreeSurfaceMomentumError2::Cancelled.into());
+        }
+        self.lattice = candidate;
+        Ok(report)
+    }
+
     pub(super) fn momentum_report_si(
         &self,
         native: ConversionMomentumReport2,
@@ -267,6 +290,7 @@ impl MaterialFreeSurface2<'_> {
             native,
             self.mass_per_depth_unit_kg_m,
             self.scaling.velocity_si(1.0)?,
+            self.scaling.cell_size_m(),
         )
     }
 }
@@ -276,6 +300,7 @@ impl MaterialFreeSurfaceMomentumReport2 {
         native: ConversionMomentumReport2,
         mass_unit: f64,
         velocity_unit: f64,
+        length_unit: f64,
     ) -> Result<Self, MaterialLbmError> {
         // Scale the measured value first so a zero/tiny numerical defect does
         // not overflow through an unnecessary product of two large units.
@@ -287,6 +312,10 @@ impl MaterialFreeSurfaceMomentumReport2 {
                 check((native.absolute_momentum_defect[0] * mass_unit) * velocity_unit)?,
                 check((native.absolute_momentum_defect[1] * mass_unit) * velocity_unit)?,
             ],
+            absolute_angular_momentum_defect_kg_m_per_s: native
+                .absolute_angular_momentum_defect
+                .map(|value| check(((value * mass_unit) * velocity_unit) * length_unit))
+                .transpose()?,
             kinetic_energy_change_j_per_m: check(
                 ((native.kinetic_energy_change * mass_unit) * velocity_unit) * velocity_unit,
             )?,
@@ -305,25 +334,34 @@ mod tests {
             redistributed_mass: 0.5,
             absolute_mass_defect: 1e-12,
             absolute_momentum_defect: [2e-12, 3e-12],
+            absolute_angular_momentum_defect: Some(4e-12),
             kinetic_energy_change: -0.025,
             routes: 3,
         };
         // rho=800 kg/m^3, dx=.002 m, dt=.0005 s: mass/depth=.0032
         // kg/m, speed=4 m/s, momentum/depth=.0128 kg/s, energy/depth=.0512 J/m.
-        let report = MaterialFreeSurfaceMomentumReport2::from_native(native, 0.0032, 4.0).unwrap();
+        let report =
+            MaterialFreeSurfaceMomentumReport2::from_native(native, 0.0032, 4.0, 0.002).unwrap();
         assert_eq!(report.native, native);
         assert!((report.redistributed_mass_kg_per_m - 0.0016).abs() < 1e-18);
         assert!((report.absolute_mass_defect_kg_per_m - 3.2e-15).abs() < 1e-29);
         assert!((report.absolute_momentum_defect_kg_per_s[0] - 2.56e-14).abs() < 1e-28);
         assert!((report.absolute_momentum_defect_kg_per_s[1] - 3.84e-14).abs() < 1e-28);
+        assert!(
+            (report.absolute_angular_momentum_defect_kg_m_per_s.unwrap() - 1.024e-16).abs() < 1e-30
+        );
         assert!((report.kinetic_energy_change_j_per_m + 0.00128).abs() < 1e-18);
-        assert!(MaterialFreeSurfaceMomentumReport2::from_native(native, f64::MAX, 16.0).is_err());
+        assert!(
+            MaterialFreeSurfaceMomentumReport2::from_native(native, f64::MAX, 16.0, 1.0).is_err()
+        );
         let zero = MaterialFreeSurfaceMomentumReport2::from_native(
             ConversionMomentumReport2::default(),
+            f64::MAX,
             f64::MAX,
             f64::MAX,
         )
         .unwrap();
         assert_eq!(zero.kinetic_energy_change_j_per_m, 0.0);
+        assert_eq!(zero.absolute_angular_momentum_defect_kg_m_per_s, None);
     }
 }

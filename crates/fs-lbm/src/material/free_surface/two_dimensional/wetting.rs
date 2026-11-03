@@ -198,6 +198,20 @@ impl MaterialFreeSurfaceWetting2<'_, '_> {
         Ok(report)
     }
 
+    /// Preserve cell-centre angular momentum in each local conversion component
+    /// while advancing the same sourced contact-line history. The native
+    /// nonperiodic, chosen-frame and geometric-support restrictions apply.
+    /// Flow, SI account and angle history are admitted as one transaction.
+    pub fn step_with_angular_momentum(
+        &mut self,
+        gate: &CancelGate,
+    ) -> Result<MaterialFreeSurfaceMomentumReport2, MaterialFreeSurfaceMomentumError2> {
+        let (lattice, native) = self.flow.lattice.angular_momentum_candidate(gate)?;
+        let report = self.flow.momentum_report_si(native)?;
+        self.finish_step(lattice, gate)?;
+        Ok(report)
+    }
+
     fn finish_step(&mut self, mut lattice: FreeSurface, gate: &CancelGate) -> Result<(), Error> {
         checkpoint(gate)?;
         let geometry =
