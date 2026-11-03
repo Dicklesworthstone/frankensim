@@ -6,6 +6,7 @@
 //! direction. The caller supplies a body material point above the selected
 //! plate point. [`multiple`] couples sites on one body; [`bodies`] couples
 //! several finite bodies through the same original mass and momentum owners.
+//! [`plates`] exchanges normal momentum between two original spatial plates.
 //! These paths do not detect collisions, rotate the plate normal, apply
 //! friction, or deposit impact loss as heat.
 //! Momentum resultants are those represented by this transverse plate model:
@@ -36,6 +37,9 @@ pub mod multiple;
 
 #[path = "plate_impact/bodies.rs"]
 pub mod bodies;
+
+#[path = "plate_impact/plates.rs"]
+pub mod plates;
 
 /// Physical and numerical allowances. Background momentum never enlarges an
 /// impulse allowance. All supports are stationary in the original plate frame.
@@ -141,6 +145,17 @@ struct PlateBodyTransfer {
     // Retain the unrounded aggregate request through the actual-state audit.
     linear_impulse: [Dd; 3],
     angular_impulse: [Dd; 3],
+}
+
+// Keep each original plate's contribution unrounded until every participant
+// enters the common event balance, including constrained-row support inertia.
+struct PlateTransferAudit {
+    support_impulses: Vec<(usize, f64)>,
+    linear: [Dd; 3],
+    angular: [Dd; 3],
+    support_linear: [Dd; 3],
+    support_angular: [Dd; 3],
+    kinetic_energy: Dd,
 }
 
 /// Prepared point response of the same spatial trajectory. Construction solves
@@ -565,45 +580,20 @@ impl<'a, L: PlateLoad + ?Sized> PlateRigidImpact<'a, L> {
         dissipated_energy: f64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PlateImpulseBalance, PlateRigidImpactError> {
-        let n = self.unit_impulse.len();
         let rel = self.controls.impulse.relative_impulse_tolerance;
-        let map = &self.dynamics.model().dof_map;
-        let mut full_change = vec![0.0; map.len()];
-        for (i, &r) in map.iter().enumerate() {
-            if let Some(r) = r {
-                full_change[i] = plate_receipt.velocity_change[r];
-            }
-        }
-        let mut momentum = vec![0.0; map.len()];
-        self.full_mass.spmv(&full_change, &mut momentum);
-        let scale = self.dynamics.parameters().mass_scale;
-        let mut support = vec![0.0; map.len()];
-        let mut support_impulses = Vec::with_capacity(map.len() - n);
-        for (i, value) in momentum.iter_mut().enumerate() {
-            if i % 256 == 0 {
-                poll(cancelled)?;
-            }
-            *value *= scale;
-            if map[i].is_none() {
-                support[i] = *value - full_impulse(i);
-                support_impulses.push((i, support[i]));
-            }
-        }
-        let (plate_linear, plate_angular) = self.resultants(&momentum);
-        let (support_linear, support_angular) = self.resultants(&support);
-        let mut linear_residual: [Dd; 3] = std::array::from_fn(|c| {
-            dd(components(plate_linear)[c]) - dd(components(support_linear)[c])
-        });
-        let mut angular_residual: [Dd; 3] = std::array::from_fn(|c| {
-            dd(components(plate_angular)[c]) - dd(components(support_angular)[c])
-        });
+        let plate_transfer = self.account_plate_transfer(
+            plate,
+            trial,
+            plate_receipt,
+            |i| dd(full_impulse(i)),
+            cancelled,
+        )?;
+        let mut linear_residual: [Dd; 3] =
+            std::array::from_fn(|c| plate_transfer.linear[c] - plate_transfer.support_linear[c]);
+        let mut angular_residual: [Dd; 3] =
+            std::array::from_fn(|c| plate_transfer.angular[c] - plate_transfer.support_angular[c]);
         let mut linear_scale = Dd::ZERO;
-        let mut energy = Dd::ZERO;
-        for i in 0..n {
-            energy = energy
-                + (dd(0.5 * plate.v[i]) + dd(0.5 * trial.v[i]))
-                    * dd(plate_receipt.momentum_change[i]);
-        }
+        let mut energy = plate_transfer.kinetic_energy;
         for transfer in bodies {
             poll(cancelled)?;
             let PlateBodyTransfer {
@@ -692,11 +682,11 @@ impl<'a, L: PlateLoad + ?Sized> PlateRigidImpact<'a, L> {
             self.controls.energy_tolerance_j,
         )?;
         Ok(PlateImpulseBalance {
-            support_impulses,
-            plate_linear_impulse_world: plate_linear,
-            plate_angular_impulse_world: plate_angular,
-            support_linear_impulse_world: support_linear,
-            support_angular_impulse_world: support_angular,
+            support_impulses: plate_transfer.support_impulses,
+            plate_linear_impulse_world: vector(plate_transfer.linear.map(Dd::to_f64)),
+            plate_angular_impulse_world: vector(plate_transfer.angular.map(Dd::to_f64)),
+            support_linear_impulse_world: vector(plate_transfer.support_linear.map(Dd::to_f64)),
+            support_angular_impulse_world: vector(plate_transfer.support_angular.map(Dd::to_f64)),
             linear_balance_residual: linear_residual,
             angular_balance_residual: angular_residual,
             kinetic_energy_change_j: energy.to_f64(),
@@ -705,25 +695,88 @@ impl<'a, L: PlateLoad + ?Sized> PlateRigidImpact<'a, L> {
         })
     }
 
+    fn account_plate_transfer(
+        &self,
+        plate: &SecondOrderState,
+        trial: &SecondOrderState,
+        receipt: &SecondOrderImpulse,
+        full_impulse: impl Fn(usize) -> Dd,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PlateTransferAudit, PlateRigidImpactError> {
+        let n = self.unit_impulse.len();
+        let map = &self.dynamics.model().dof_map;
+        let mut full_change = vec![0.0; map.len()];
+        for (i, &r) in map.iter().enumerate() {
+            if let Some(r) = r {
+                full_change[i] = receipt.velocity_change[r];
+            }
+        }
+        let mut momentum = vec![0.0; map.len()];
+        self.full_mass.spmv(&full_change, &mut momentum);
+        let scale = self.dynamics.parameters().mass_scale;
+        let mut support_impulses = Vec::with_capacity(map.len() - n);
+        for (i, value) in momentum.iter_mut().enumerate() {
+            if i % 256 == 0 {
+                poll(cancelled)?;
+            }
+            *value *= scale;
+            let requested = full_impulse(i);
+            if map[i].is_none() {
+                support_impulses.push((i, (dd(*value) - requested).to_f64()));
+            } else {
+                // Retain the unrounded physical transpose request when an
+                // assembled contact produces several contributions to a row.
+                check(
+                    "plate generalized transfer",
+                    (dd(*value) - requested).to_f64(),
+                    self.controls.impulse.absolute_impulse_tolerance
+                        + self.controls.impulse.relative_impulse_tolerance
+                            * value.abs().max(requested.to_f64().abs()),
+                )?;
+            }
+        }
+        let (linear, angular) = self.resultants(|i| dd(momentum[i]));
+        let (support_linear, support_angular) = self.resultants(|i| {
+            if map[i].is_none() {
+                dd(momentum[i]) - full_impulse(i)
+            } else {
+                Dd::ZERO
+            }
+        });
+        let mut kinetic_energy = Dd::ZERO;
+        for i in 0..n {
+            if i % 256 == 0 {
+                poll(cancelled)?;
+            }
+            kinetic_energy = kinetic_energy
+                + (dd(0.5 * plate.v[i]) + dd(0.5 * trial.v[i])) * dd(receipt.momentum_change[i]);
+        }
+        Ok(PlateTransferAudit {
+            support_impulses,
+            linear,
+            angular,
+            support_linear,
+            support_angular,
+            kinetic_energy,
+        })
+    }
+
     fn relative_speed(&self, motion: &PointKinematics, velocity: &[f64]) -> f64 {
         relative_speed(&self.unit_impulse, motion, velocity)
     }
 
-    fn resultants(&self, impulse: &[f64]) -> (Vec3, Vec3) {
+    fn resultants(&self, impulse: impl Fn(usize) -> Dd) -> ([Dd; 3], [Dd; 3]) {
         // Rigid transverse fields are w=vz+omega_x*y-omega_y*x,
         // wx=-omega_y and wy=omega_x. Their exact transpose gives Pz,Lx,Ly.
         let mut p = Dd::ZERO;
         let mut lx = Dd::ZERO;
         let mut ly = Dd::ZERO;
         for (node, &(x, y)) in self.mesh.nodes.iter().enumerate() {
-            p = p + dd(impulse[3 * node]);
-            lx = lx + dd(y) * dd(impulse[3 * node]) + dd(impulse[3 * node + 2]);
-            ly = ly - dd(x) * dd(impulse[3 * node]) - dd(impulse[3 * node + 1]);
+            p = p + impulse(3 * node);
+            lx = lx + dd(y) * impulse(3 * node) + impulse(3 * node + 2);
+            ly = ly - dd(x) * impulse(3 * node) - impulse(3 * node + 1);
         }
-        (
-            Vec3::new(0.0, 0.0, p.to_f64()),
-            Vec3::new(lx.to_f64(), ly.to_f64(), 0.0),
-        )
+        ([Dd::ZERO, Dd::ZERO, p], [lx, ly, Dd::ZERO])
     }
 }
 

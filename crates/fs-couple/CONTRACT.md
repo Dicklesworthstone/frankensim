@@ -276,6 +276,76 @@ with its original +z normal and stationary supports. It does not perform collisi
 discovery, rigid-rigid contact, curved or finite-rotation shell kinematics,
 frictional plate contact, moving-support work, or local thermal partition.
 
+## Simultaneous normal impacts between independently meshed spatial plates
+
+`plate_impact::plates::PlatePlateImpact` exchanges reciprocal normal momentum
+between two continuing native `PlateDynamics` trajectories. The participants
+can have different meshes, consistent masses, stationary support maps, damping,
+and concrete load-owner types. `PlateImpactSurface` supplies each original
+dynamics, mesh, complete uneliminated mass, and explicit flat-face reference
+height. A common `PlateImpactSite` slice names world-x/y locations present on
+both meshes; face offsets or material thickness are never inferred.
+
+Positive contact impulse acts along world +z on the positive plate and -z on
+the negative plate. At each site the original point observations give
+`gap = height_positive + B_positive*q_positive - height_negative -
+B_negative*q_negative` and the corresponding relative normal velocity. The
+same original stencils transfer the transpose impulses. Both states must have
+the same physical time. Their displacements, clocks, step counts and original
+telemetry remain unchanged by this frozen-configuration event.
+
+Preparation reuses both original `PlateRigidImpactSet` owners, including their
+complete-mass/support admission and cached consistent-mass response solves.
+The full contact response is the sum of their original
+`B M^-1 B^T` matrices and is assembled once. No plate is lumped, rigidified,
+modally truncated, or copied into a surrogate motion owner. The original
+`fs_contact::multicontact` law resolves all rows together, including active
+initially separating rows, and retains its global work, passivity, and
+unique-impulse/unique-velocity determinations. Redundant coordinates remain
+representative loads rather than unique local pressure or heat allocations.
+
+A nonzero event accumulates opposite full nodal requests in double-double
+arithmetic, then performs one original structural impulse and native
+acceleration restart per participant. The shared plate-only audit reconstructs
+constrained-row inertia reactions from each full mass, compares actual free-row
+transfers with the unrounded requests, and retains plate/support resultants and
+polarized kinetic increments unrounded until both participants enter the event
+balance. This same extracted owner also serves the existing plate/rigid APIs.
+Measured native endpoint speeds, original contact work, support-inclusive Pz,
+Lx and Ly, total kinetic work, and the original native numerical work allowance
+must all pass. Failed numerical work is not relabeled as physical dissipation.
+
+Only a final successful cancellation poll permits publishing both velocity and
+acceleration pairs. A failed load, solve, transfer, geometry, time, work or
+balance check leaves both original states intact. All-zero contact solutions
+invoke no native impulse/restart and preserve every original state bit.
+
+`PlatePlateImpactBudget` retains both original point/mass/contact/workspace
+budgets and adds checked combined live-storage admission for the two owner
+ceilings, compensated requests and shared contact arrays. The original
+64-contact law bound remains. Cached response preparation is quadratic in
+contact count; event transpose/observation work is linear in contact count
+times the original state sizes, with one native solve/restart per plate and
+no per-contact trajectory clone. Contact observations and transpose accumulation
+poll cancellation at bounded array tiles.
+
+Six G0/G1/G3/G4 groups independently compare a coarse triangle and a four-triangle
+refinement with exact P1 area integration and dense mass inversion across
+inelastic, partially elastic and elastic laws, contact permutations and world
+translations. They continue both original damped trajectories; prove active
+separating/inactive cross response and falsify sequential pair sweeps; recover
+full fixed-slope/free-translation inertia reactions and redundant-load motion;
+retain a known tiny physical loss during large common translation where total
+energy subtraction fails; refuse unresolvable nodal momentum updates and
+unsynchronized times; and verify distinct load types, second-owner load refusal,
+native acceleration restart, budget/cancellation boundaries and atomic retry.
+
+This is a frictionless normal event for two flat plates in their shared fixed
+world frame. It does not detect collision times, certify finite-thickness
+nonintersection, rotate normals, evolve sustained or tangential contact,
+advance moving supports, integrate a network of more than two plates, or assign
+the admitted mechanical loss to heat or other material destinations.
+
 ## Simultaneous plate and finite rigid-body normal impacts
 
 `plate_impact::multiple::PlateRigidImpactSet` resolves an entire localized normal
