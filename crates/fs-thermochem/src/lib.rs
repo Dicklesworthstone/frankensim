@@ -25,6 +25,7 @@ pub mod eos;
 pub mod equilibrium;
 pub mod kinetics;
 pub mod mixture;
+pub mod solution;
 pub mod stoichiometry;
 pub mod transport;
 pub mod water;

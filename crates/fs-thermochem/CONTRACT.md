@@ -1,5 +1,40 @@
 # CONTRACT: fs-thermochem
 
+## Binary liquid miscibility and source-owned thermodynamic forces
+
+`solution::BinaryRegularSolutionV1` retains two explicit ordered species and a
+caller-declared temperature domain for `chi(T)=A+B/T`. Its single symmetric
+molar free energy supplies activity coefficients, chemical potentials relative
+to pure-liquid standards, mixing Gibbs energy/enthalpy/entropy and the
+thermodynamic factor `Gamma=1-2 chi x(1-x)`. Pure states have zero mixing energy;
+absent-species chemical potentials are `None`, while their Gibbs–Duhem-balanced
+force products use the finite one-sided limit. Trace composition keeps the
+majority species' `log(1-x)` contribution even when `1-x` rounds to one.
+
+For `chi>2`, a bounded allocation-free log-odds bisection excludes the false
+central root and resolves the common-tangent binodal, with a small-argument
+series near criticality. It distinguishes that global coexistence gap from
+the local spinodal. A finite closed inventory uses the molar lever rule and
+reports one or two phases, plus stable/binodal/metastable/spinodal/critical feed
+classification. Species mass or phase volume must use original molecular masses
+and density laws in the consumer. The final root bracket is numerical evidence,
+not a rigorous interval certificate. Unrepresentable rich/dilute coexistence
+and exhausted work budgets refuse; cancellation never publishes a partial result.
+
+`BinarySolutionStateV1::driving_forces` supplies isothermal/isobaric
+`[Gamma grad(x_A), -Gamma grad(x_A)]` to both existing Maxwell–Stefan frames.
+Negative `Gamma` identifies demixing; it is not a molecular diffusivity for a
+Fick evolution scheme. Tests verify independent energy/chemical/caloric
+derivatives, pure and trace limits, equal chemical potentials, component
+conservation, critical limits, temperature-driven mixing/demixing, species
+exchange and original Maxwell–Stefan flux/drag-entropy equations.
+
+The constitutive model does not infer empirical pair parameters, pressure
+dependence, electrolyte or unequal-size corrections, interfacial tension,
+nucleation kinetics or a spatial phase-field evolution. Its free-energy form
+is the molar equivalent of the INL MOOSE regular-solution implementation:
+<https://mooseframework.inl.gov/docs/doxygen/modules/classRegularSolutionFreeEnergy.html>.
+
 ## Finite calcium-sulfate phases and lime neutralization
 
 `MineralReaction` provides gypsum precipitation with both hydrate waters,
