@@ -1,4 +1,6 @@
 //! Two original fusion sources, separate enthalpy datums and physical contact.
+#[path = "heterogeneous/history.rs"]
+mod history;
 use super::*;
 use fs_conduction::transient::enthalpy::heterogeneous::{
     EnthalpyRadiation, HeterogeneousEnthalpyBackwardEuler as Engine, HeterogeneousEnthalpyError,

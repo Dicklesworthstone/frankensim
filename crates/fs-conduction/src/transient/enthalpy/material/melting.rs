@@ -415,7 +415,7 @@ impl MaterialMeltingTransport {
         std::ptr::eq(problem.material, &self.numerical_basis) && problem.element_materials.is_none()
     }
 
-    pub(in crate::transient::enthalpy) fn sample_for_vertex(
+    pub(crate) fn sample_for_vertex(
         &self,
         h: f64,
         vertex: usize,

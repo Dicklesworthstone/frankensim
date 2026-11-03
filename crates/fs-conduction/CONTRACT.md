@@ -3205,7 +3205,7 @@ adaptive stepping, energy gates and cancellation keep their original owners.
 Existing endpoint adjoints use the complete conductivity chain rule and refuse
 additional source k(T) corners as well as the original caloric corners.
 
-tests/material_melting.rs contains six numerical regressions: independent
+The six original regressions in tests/material_melting.rs cover independent
 mixed-phase P1 balances and Jacobian columns; history-adjoint finite
 differences; original lumped-owner uniform heating/freezing with unchanged
 reference mass; a boundary-driven computed phase contour whose independent
@@ -3214,7 +3214,7 @@ refinement; validity/budget/cancellation refusals; and a conductivity-source
 corner refusal. The contour case is a single-tetrahedron temporal check, not
 a continuum Stefan or mesh-convergence claim. The existing Stefan refinement
 suite remains the spatial-front reference. Focused actual-source native
-verification passes all nine uniform/regional material-melting cases and
+verification passes all 12 uniform/regional/scheduled material-melting cases and
 15 adjacent enthalpy-adjoint regressions. This is not a full workspace/DSR verdict.
 
 These source bindings use isotropic materials over a stationary
@@ -3259,6 +3259,39 @@ independently reconstruct conduction/contact balance, element heat flux and
 Jacobian columns, compare source-adjoint perturbations, and check both time
 integrators. Latent exchange with graded reference inventory, uniform-source
 parity and original-assignment/source-domain refusals use the same test seam.
+
+### Original melting sources on scheduled thermal histories
+
+`EnthalpyHistoryRun::from_melting_materials` and its
+`from_melting_materials_with_nodal_reference_density` variant retain the same
+original source assignment through the existing thermal timeline. They consume
+`PhaseEnthalpyHistoryProblem` boundary, contact and volumetric-source schedules;
+a one-entry material table also covers a uniform melting specimen. Initial
+enthalpy is admitted against each original caloric and conductivity law before
+the trajectory is returned. Reference inventory is prepared once and remains
+unchanged across heat pulses, cooling, phase change and continuation.
+
+The existing history problem dispatch distinguishes declared conductivity,
+prepared phase-source transport and original sharp-melting transport. Sharp
+melting keeps its P1 interpolation of nodal k(h), while prepared phase sources
+keep their integral of k(h_h); neither discretization silently substitutes for
+the other. All existing fixed/adaptive BE, SDIRK2, contact and radiation history
+wrappers use that same selected storage and physical problem.
+
+Event times, boundary/source quadrature, phase-aware time-error controls,
+accepted-prefix state, cancellation and step budgets remain with the existing
+history owners. A refused future source or cancelled advance cannot reset
+accepted enthalpy, material identity or the physical clock. This ingress adds
+no integrator, latent-energy account, phase-kinetic law or moving-domain model;
+each wrapper retains its existing supported combinations and limitations.
+
+G1 tests integrate held heating/cooling through sensible and latent states,
+independently check two-material contact balances at source events for both
+integrators, and reconstruct nodal radiative heat from the original boundary
+areas. G4 checks retain accepted enthalpy and clocks through refused future
+heating/bath values and cancellation, then compare resumed evolution with
+replay. Six existing prepared-phase history cases also pass, guarding the
+other original source family through the same dispatch.
 
 ## Interference-driven linear lumped thermal response
 

@@ -34,6 +34,7 @@ use crate::{ConductionError, ConductionProblem, ConductivityModel, ElementMateri
 use crate::material::LiquidMassFractionConductivity;
 use crate::transient::enthalpy::{EnthalpyBudget, EnthalpyError, EnthalpyStepConfig, EnthalpyStepSolution};
 use crate::transient::enthalpy::material::phase::MaterialPhaseTransport;
+use crate::transient::enthalpy::material::melting::MaterialMeltingTransport;
 use crate::transient::enthalpy::heterogeneous::{
     HeterogeneousEnthalpyBackwardEuler, HeterogeneousEnthalpyError, ReferenceEnthalpyMaterial,
 };
@@ -52,8 +53,8 @@ pub struct EnthalpyHistoryMaterials<'s, 'c> {
     pub phase_conductivity: Option<Vec<LiquidMassFractionConductivity>>,
 }
 
-/// Schedules for transport whose complete k(T,f) law belongs to the original
-/// phase materials. No unrelated conductivity tensor or second phase multiplier
+/// Schedules whose complete conductivity law belongs to original phase or
+/// sharp-melting materials. No unrelated tensor or second phase multiplier
 /// can silently scale that source. Each source supplies its own caloric chart.
 pub struct PhaseEnthalpyHistoryProblem<'h, 'm> {
     /// Original mesh, initial instant and boundary schedules.
@@ -73,6 +74,13 @@ pub struct EnthalpyHistoryBudget {
     pub max_steps: usize,
 }
 
+#[derive(Clone, Copy)]
+enum HistoryConductivity<'h> {
+    Declared(&'h ConductivityModel, Option<&'h ElementMaterials>),
+    PhaseSource,
+    MeltingSource,
+}
+
 /// Resumable scenario trajectory retaining the full caloric state of each node.
 ///
 /// Construction supports one or several materials through the same checked
@@ -82,8 +90,8 @@ pub struct EnthalpyHistoryBudget {
 /// identities, reset a liquid fraction, or omit the selected phase conductivity.
 pub struct EnthalpyHistoryRun<'h, 'm, 'c> {
     problem: PhaseEnthalpyHistoryProblem<'h, 'm>,
-    // None means that storage owns the complete original k(h_h) source.
-    conductivity: Option<(&'h ConductivityModel, Option<&'h ElementMaterials>)>,
+    // The same physical source choice survives every endpoint/stage wrapper.
+    conductivity: HistoryConductivity<'h>,
     storage: HeterogeneousEnthalpyBackwardEuler<'m, 'c>,
     specific_h: Vec<f64>,
     temperature: Vec<f64>,
@@ -130,7 +138,7 @@ impl<'h, 'm, 'c> EnthalpyHistoryRun<'h, 'm, 'c> {
         if let Some(assigned) = problem.element_materials {
             assigned.validate_for(mesh).map_err(conduction)?;
         }
-        let conductivity = Some((problem.material, problem.element_materials));
+        let conductivity = HistoryConductivity::Declared(problem.material, problem.element_materials);
         let problem = PhaseEnthalpyHistoryProblem {
             boundary: problem.boundary, interfaces: problem.interfaces, source: problem.source,
         };
@@ -162,7 +170,7 @@ impl<'h, 'm, 'c> EnthalpyHistoryRun<'h, 'm, 'c> {
         let storage = HeterogeneousEnthalpyBackwardEuler::from_phase_materials(
             cx, problem.boundary.mesh(), materials, element_material_ids, budget.spatial,
         )?;
-        Self::from_storage(cx, problem, None, storage, initial_specific_h, budget)
+        Self::from_storage(cx, problem, HistoryConductivity::PhaseSource, storage, initial_specific_h, budget)
     }
 
     /// The same source-owned trajectory with an explicitly declared initial P1
@@ -187,7 +195,55 @@ impl<'h, 'm, 'c> EnthalpyHistoryRun<'h, 'm, 'c> {
         let storage = HeterogeneousEnthalpyBackwardEuler::from_phase_materials_with_nodal_reference_density(
             cx, problem.boundary.mesh(), materials, element_material_ids, density_kg_m3, budget.spatial,
         )?;
-        Self::from_storage(cx, problem, None, storage, initial_specific_h, budget)
+        Self::from_storage(cx, problem, HistoryConductivity::PhaseSource, storage, initial_specific_h, budget)
+    }
+
+    /// Evolve original sharp-melting sources under the existing heat-source and
+    /// boundary schedules. One material table entry covers a uniform body;
+    /// multiple entries retain their own fusion temperatures, latent heats,
+    /// enthalpy datums, phase-specific conductivity and reference densities.
+    ///
+    /// The native nodal k(h) interpolation and each source's declared volume-
+    /// fraction coexistence closure remain unchanged. Existing event, adaptive,
+    /// contact, radiation and SDIRK wrappers retain this same source dispatch.
+    /// Construction resolves initial caloric state without advancing time.
+    ///
+    /// # Errors
+    /// Original material/assignment/domain and budget refusals, invalid source
+    /// schedules, ambiguous prescribed temperatures or cancellation.
+    pub fn from_melting_materials(
+        cx: &Cx<'_>, problem: PhaseEnthalpyHistoryProblem<'h, 'm>,
+        materials: &'c [MaterialMeltingTransport], element_material_ids: &[usize],
+        initial_specific_h: &[f64], budget: EnthalpyHistoryBudget,
+    ) -> Result<Self, HeterogeneousEnthalpyError> {
+        poll(cx, 0).map_err(conduction)?;
+        Self::admit_initial_shape(problem.boundary.mesh().vertex_count(), initial_specific_h, budget)?;
+        let storage = HeterogeneousEnthalpyBackwardEuler::from_melting_materials(
+            cx, problem.boundary.mesh(), materials, element_material_ids, budget.spatial,
+        )?;
+        Self::from_storage(cx, problem, HistoryConductivity::MeltingSource, storage, initial_specific_h, budget)
+    }
+
+    /// Original sharp-melting histories with an explicitly declared P1 initial
+    /// reference-density inventory. Source calorics and conductivity stay fixed;
+    /// current equilibrium density never replaces these admitted nodal masses.
+    /// The same source and inventory survive wrapping and interrupted evolution.
+    ///
+    /// # Errors
+    /// The original melting-history refusals plus invalid or unrepresentable
+    /// reference-density input. No initial enthalpy or schedule is modified.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_melting_materials_with_nodal_reference_density(
+        cx: &Cx<'_>, problem: PhaseEnthalpyHistoryProblem<'h, 'm>,
+        materials: &'c [MaterialMeltingTransport], element_material_ids: &[usize],
+        density_kg_m3: &[f64], initial_specific_h: &[f64], budget: EnthalpyHistoryBudget,
+    ) -> Result<Self, HeterogeneousEnthalpyError> {
+        poll(cx, 0).map_err(conduction)?;
+        Self::admit_initial_shape(problem.boundary.mesh().vertex_count(), initial_specific_h, budget)?;
+        let storage = HeterogeneousEnthalpyBackwardEuler::from_melting_materials_with_nodal_reference_density(
+            cx, problem.boundary.mesh(), materials, element_material_ids, density_kg_m3, budget.spatial,
+        )?;
+        Self::from_storage(cx, problem, HistoryConductivity::MeltingSource, storage, initial_specific_h, budget)
     }
 
     fn admit_initial_shape(vertices: usize, initial: &[f64], budget: EnthalpyHistoryBudget)
@@ -204,7 +260,7 @@ impl<'h, 'm, 'c> EnthalpyHistoryRun<'h, 'm, 'c> {
 
     fn from_storage(
         cx: &Cx<'_>, problem: PhaseEnthalpyHistoryProblem<'h, 'm>,
-        conductivity: Option<(&'h ConductivityModel, Option<&'h ElementMaterials>)>,
+        conductivity: HistoryConductivity<'h>,
         storage: HeterogeneousEnthalpyBackwardEuler<'m, 'c>,
         initial_specific_h: &[f64], budget: EnthalpyHistoryBudget,
     ) -> Result<Self, HeterogeneousEnthalpyError> {
@@ -228,6 +284,9 @@ impl<'h, 'm, 'c> EnthalpyHistoryRun<'h, 'm, 'c> {
                         vertex, specific_enthalpy_j_kg: h, lower_j_kg, upper_j_kg,
                     }.into());
                 }
+            }
+            if let Some(source) = storage.melting_transport_source(storage.vertex_material_ids()[vertex]) {
+                source.sample_for_vertex(h, vertex)?;
             }
             temperature.push(state.temperature_k());
             liquid_mass_fraction.push(state.liquid_mass_fraction());
@@ -330,10 +389,11 @@ impl<'h, 'm, 'c> EnthalpyHistoryRun<'h, 'm, 'c> {
         -> Result<ConductionProblem<'s>, HeterogeneousEnthalpyError>
     {
         match self.conductivity {
-            Some((material, element_materials)) => Ok(ConductionProblem {
+            HistoryConductivity::Declared(material, element_materials) => Ok(ConductionProblem {
                 mesh: self.problem.boundary.mesh(), boundary, source, material, element_materials,
             }),
-            None => Ok(self.storage.phase_transport_problem(boundary, source)?),
+            HistoryConductivity::PhaseSource => Ok(self.storage.phase_transport_problem(boundary, source)?),
+            HistoryConductivity::MeltingSource => Ok(self.storage.melting_transport_problem(boundary, source)?),
         }
     }
 
