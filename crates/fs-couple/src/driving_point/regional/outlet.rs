@@ -26,15 +26,48 @@ pub enum OutletError {
     Transfer(DrivingPointError),
     /// Original diagnostic from the shared Rayleigh owner.
     Receiver(String),
+    /// The outlet grid would replay part of the transfer one window late above
+    /// [`OUTLET_REPLAY_GAIN_BOUND`] re its direct path. The regional observers
+    /// double their grid first and refuse only past [`MAX_OUTLET_FFT_SAMPLES`].
+    Replay {
+        /// Worst |replayed| / |direct| amplitude ratio over the gated band.
+        gain: f64,
+        /// Frequency of that worst bin [Hz].
+        frequency_hz: f64,
+        /// Pre-arrival latency the observer already applies [samples].
+        latency_samples: usize,
+        /// Outlet grid [samples]: the largest tried by a regional observer,
+        /// otherwise the requested one; a longer grid separates the replay further.
+        fft_samples: usize,
+    },
 }
 impl core::fmt::Display for OutletError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self { Self::Transfer(e) => write!(f, "{e}"), Self::Receiver(e) => write!(f, "outlet receiver: {e}") }
+        match self {
+            Self::Transfer(e) => write!(f, "{e}"),
+            Self::Receiver(e) => write!(f, "outlet receiver: {e}"),
+            Self::Replay {
+                gain,
+                frequency_hz,
+                latency_samples,
+                fft_samples,
+            } => write!(
+                f,
+                "outlet transfer replays {:.1} dB re its direct path at {frequency_hz:.1} Hz one window late \
+                 (bound {:.0} dB, pre-arrival latency {latency_samples} samples, outlet grid \
+                 {fft_samples})",
+                20.0 * gain.log10(),
+                20.0 * OUTLET_REPLAY_GAIN_BOUND.log10()
+            ),
+        }
     }
 }
 impl std::error::Error for OutletError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self { Self::Transfer(e) => Some(e), Self::Receiver(_) => None }
+        match self {
+            Self::Transfer(e) => Some(e),
+            Self::Receiver(_) | Self::Replay { .. } => None,
+        }
     }
 }
 impl From<DrivingPointError> for OutletError {
@@ -49,6 +82,25 @@ pub const MAX_OUTLET_FFT_SAMPLES: usize = 65_536;
 /// Bound the explicit bulk delay plus sampled residual, before allocation.
 pub const MAX_OUTLET_TRANSFER_SAMPLES: usize = 2 * MAX_OUTLET_FFT_SAMPLES;
 
+/// Largest admitted replay: |replayed| / |direct| amplitude at every gated bin
+/// (-60 dB). A numerical tolerance set by the verifier (mail 14776), not physics.
+pub const OUTLET_REPLAY_GAIN_BOUND: f64 = 1.0e-3;
+
+/// Common observer latency on an `n`-point outlet grid: `n / 4` samples.
+///
+/// A sampled transfer spreads its arrival over taps before the whole-sample
+/// delay (fractional arrival, finite band). A raw inverse transform puts them
+/// at the END of the window, and the observer then replays the sound one
+/// window late, at the direct path's level near the fundamental (clarinet G3:
+/// +0.1 dB at 16384 taps, i.e. a 0.341 s hold after every breath-off). Keeping
+/// the last `n / 4` taps before the arrival instead delays every observer on
+/// the grid by the same amount, so bell and side openings stay aligned; it is
+/// the quarter-window bound of the shared observation admission (4cd00d850).
+#[must_use]
+pub const fn outlet_pre_arrival_latency(n: usize) -> usize {
+    n / 4
+}
+
 /// Physical binding and finite-history choices of an outlet observation.
 #[derive(Clone, Copy, Debug)]
 pub struct OutletReceiverInfo {
@@ -61,12 +113,21 @@ pub struct OutletReceiverInfo {
     pub receiver: CircularOutletReceiver,
     /// Clock of both the source wave and pressure samples [Hz].
     pub sample_rate_hz: u32,
-    /// Power-of-two TMM sampling grid; not a continuum accuracy certificate.
+    /// Power-of-two TMM sampling grid of this observer's kernel: the requested
+    /// grid or, for a regional observer, the smallest doubling of it whose
+    /// replay the gate admits. Not a continuum accuracy certificate.
     pub fft_samples: usize,
     /// Whole samples of axial travel factored out before sampling the residual.
     pub axial_delay_samples: usize,
     /// Support of the original Rayleigh quadrature's physical travel delays.
     pub exterior_delay_samples: (usize, usize),
+    /// Output latency shared by every observer on this grid
+    /// ([`outlet_pre_arrival_latency`]); the physical arrival is emitted this
+    /// many samples after `axial + exterior` and nothing precedes `axial + exterior`.
+    pub pre_arrival_latency_samples: usize,
+    /// Worst |replayed| / |direct| amplitude ratio this kernel admitted, and its
+    /// frequency [Hz] (0 when no bin lies in the gated band).
+    pub replay_gain: (f64, f64),
 }
 
 /// Baffled terminal pressure driven by inlet outgoing characteristic pressure.
@@ -107,15 +168,32 @@ impl OutletPressure {
             RayleighMedium { density: gas.density, sound_speed: delay_speed_m_s })
             .map_err(OutletError::Receiver)?;
         let exterior_delay_samples = mic.delay_samples;
-        let (kernel, axial_delay_samples) = acceleration_kernel(
-            sample_rate_hz, fft_samples, one_way_time_s, flow)?;
+        let (residual, axial_delay_samples) =
+            acceleration_residual(sample_rate_hz, fft_samples, one_way_time_s, flow)?;
+        let latency = outlet_pre_arrival_latency(fft_samples);
+        let band = replay_band(one_way_time_s, receiver);
+        let replay_gain = admit_replay(&residual, latency, sample_rate_hz, band)?;
+        let kernel = realize_with_latency(axial_delay_samples, &residual, latency);
         let dt = 1.0 / f64::from(sample_rate_hz);
         let acceleration = DelayedFilter::from_impulse_response(dt, kernel)
             .map_err(DrivingPointError::Discrete)?;
         let radiation = rayleigh_acceleration_filter(mic, sample_rate_hz)?;
-        Ok(Self { acceleration, radiation, poisoned: false,
-            info: OutletReceiverInfo { gas, radius_m, receiver, sample_rate_hz,
-                fft_samples, axial_delay_samples, exterior_delay_samples } })
+        Ok(Self {
+            acceleration,
+            radiation,
+            poisoned: false,
+            info: OutletReceiverInfo {
+                gas,
+                radius_m,
+                receiver,
+                sample_rate_hz,
+                fft_samples,
+                axial_delay_samples,
+                exterior_delay_samples,
+                pre_arrival_latency_samples: latency,
+                replay_gain,
+            },
+        })
     }
 
     /// Original media, geometry, clocks and delay support.
@@ -263,9 +341,16 @@ impl RegionalDuct {
     ///
     /// `fft_samples` must be 256..=[`MAX_OUTLET_FFT_SAMPLES`] and a power of two. The reed adapter
     /// obtains it from its already-admitted characteristic line, so feedback
-    /// and output use the same sampling grid without a second size heuristic.
+    /// and output start from the same sampling grid without a second size heuristic.
     /// Axial whole-sample delay is removed before the inverse transform and
     /// restored as exact zero taps: no circular wrap can emit before that delay.
+    /// The window's last [`outlet_pre_arrival_latency`] taps (the transfer's
+    /// pre-arrival spread) are emitted right after those zeros, so every
+    /// observer on the grid is that many samples late. A grid on which part of
+    /// the response would still replay one window late above
+    /// [`OUTLET_REPLAY_GAIN_BOUND`] doubles for the observer's kernel only (the
+    /// grid used is in [`OutletReceiverInfo::fft_samples`]); past
+    /// [`MAX_OUTLET_FFT_SAMPLES`] it refuses.
     /// The fractional remainder and late echoes retain a finite-period sampling
     /// approximation. Increase the grid for convergence; no error enclosure is
     /// implied. The derivative is the same backward difference as the receiver.
@@ -308,14 +393,43 @@ impl RegionalDuct {
         if !zc.is_finite() || zc <= 0.0 {
             return Err(invalid("outlet transfer requires finite positive inlet impedance").into());
         }
-        OutletPressure::from_flow_response(gas, radius_m, sample_rate_hz, fft_samples,
-            self.one_way_time_s(), receiver, delay_speed_m_s, |omega| {
-                let response = self.response_with_wall(
-                    omega, LossModel::Bessel, Termination::FlangedOpen, wall)?;
-                let denominator = C64::new(response.impedance.re + zc, response.impedance.im);
-                Ok(C64::new(response.u_mouth_over_u_in.re, response.u_mouth_over_u_in.im)
-                    .scale(2.0) * denominator.recip())
-            })
+        // The response does not depend on the grid (the residual's taps agree
+        // across grids); a grid shorter than it puts its later part, or its
+        // pre-arrival spread, in the replayed taps. Example: the 0.5 m, 1.5 mm
+        // cylinder-and-cone test duct gates at -44.4 / -49.5 / -72.1 dB on
+        // 256 / 512 / 1024 points with the same tap profile, so it is observed
+        // on 1024. Only the observer's kernel moves; the feedback line stays on
+        // the requested grid. Past the largest grid the refusal stands.
+        let mut grid = fft_samples;
+        loop {
+            let observed = OutletPressure::from_flow_response(
+                gas,
+                radius_m,
+                sample_rate_hz,
+                grid,
+                self.one_way_time_s(),
+                receiver,
+                delay_speed_m_s,
+                |omega| {
+                    let response = self.response_with_wall(
+                        omega,
+                        LossModel::Bessel,
+                        Termination::FlangedOpen,
+                        wall,
+                    )?;
+                    let denominator = C64::new(response.impedance.re + zc, response.impedance.im);
+                    Ok(
+                        C64::new(response.u_mouth_over_u_in.re, response.u_mouth_over_u_in.im)
+                            .scale(2.0)
+                            * denominator.recip(),
+                    )
+                },
+            );
+            match observed {
+                Err(OutletError::Replay { .. }) if grid < MAX_OUTLET_FFT_SAMPLES => grid *= 2,
+                observed => return observed,
+            }
+        }
     }
 
     /// [`Self::baffled_outlet_delayed_at`] plus one baffled circular-disk observer
@@ -455,10 +569,10 @@ impl RegionalDuct {
         }
         let hole_times: Vec<f64> = sites.iter().map(|s| s.one_way_time_s).collect();
         let first_bore_time_s = sites[0].bore_one_way_time_s;
-        let ((bell_kernel, bell_delay), hole_kernels, shunt_line) =
+        let kernels_on = |n: usize| {
             acceleration_kernels_with_holes(
                 sample_rate_hz,
-                fft_samples,
+                n,
                 self.one_way_time_s(),
                 &hole_times,
                 first_bore_time_s,
@@ -472,7 +586,50 @@ impl RegionalDuct {
                         wall,
                     )
                 },
-            )?;
+            )
+        };
+        // The shunt line is in the loop: it stays on the requested grid.
+        let ((mut bell_residual, mut bell_delay), mut hole_residuals, shunt_line) =
+            kernels_on(fft_samples)?;
+        // One grid, one latency and one band (the whole bore's) for every mouth,
+        // so the summed observers keep their relative timing and are gated alike.
+        // A grid that does not hold some mouth's response to the bound doubles
+        // for every mouth together (observer kernels only), as in
+        // `baffled_outlet_delayed_at`.
+        let band = replay_band(self.one_way_time_s(), receiver);
+        let mut grid = fft_samples;
+        let (bell_replay, hole_replays) = loop {
+            let latency = outlet_pre_arrival_latency(grid);
+            let gated =
+                admit_replay(&bell_residual, latency, sample_rate_hz, band).and_then(|bell| {
+                    hole_residuals
+                        .iter()
+                        .map(|(residual, _)| admit_replay(residual, latency, sample_rate_hz, band))
+                        .collect::<Result<Vec<_>, _>>()
+                        .map(|holes| (bell, holes))
+                });
+            match gated {
+                Ok(replays) => break replays,
+                Err(_) if grid < MAX_OUTLET_FFT_SAMPLES => {
+                    grid *= 2;
+                    let ((bell, delay), holes, _) = kernels_on(grid)?;
+                    bell_residual = bell;
+                    bell_delay = delay;
+                    hole_residuals = holes;
+                }
+                Err(refusal) => return Err(refusal),
+            }
+        };
+        let latency = outlet_pre_arrival_latency(grid);
+        let mut hole_kernels = Vec::with_capacity(hole_residuals.len());
+        for ((residual, delay), replay) in hole_residuals.into_iter().zip(hole_replays) {
+            hole_kernels.push((
+                realize_with_latency(delay, &residual, latency),
+                delay,
+                replay,
+            ));
+        }
+        let bell_kernel = realize_with_latency(bell_delay, &bell_residual, latency);
         let dt = 1.0 / f64::from(sample_rate_hz);
         let bell_acc = DelayedFilter::from_impulse_response(dt, bell_kernel)
             .map_err(DrivingPointError::Discrete)?;
@@ -486,13 +643,15 @@ impl RegionalDuct {
                 radius_m,
                 receiver,
                 sample_rate_hz,
-                fft_samples,
+                fft_samples: grid,
                 axial_delay_samples: bell_delay,
                 exterior_delay_samples: bell_exterior_delay,
+                pre_arrival_latency_samples: latency,
+                replay_gain: bell_replay,
             },
         };
         let mut holes = Vec::with_capacity(sites.len());
-        for ((site, (mic, hole_receiver)), (kernel, axial_delay_samples)) in
+        for ((site, (mic, hole_receiver)), (kernel, axial_delay_samples, replay_gain)) in
             sites.iter().zip(hole_mics).zip(hole_kernels)
         {
             let exterior_delay_samples = mic.delay_samples;
@@ -508,9 +667,11 @@ impl RegionalDuct {
                     radius_m: site.effective_radius_m,
                     receiver: hole_receiver,
                     sample_rate_hz,
-                    fft_samples,
+                    fft_samples: grid,
                     axial_delay_samples,
                     exterior_delay_samples,
+                    pre_arrival_latency_samples: latency,
+                    replay_gain,
                 },
             });
         }
@@ -581,11 +742,104 @@ struct OpenHoleSite {
 
 fn invalid(what: &'static str) -> DrivingPointError { DrivingPointError::Invalid { what } }
 
+/// Gated band [Hz]: from the quarter-wave frequency of the whole bore's
+/// one-way travel time (no tone the bore sounds lies lower; nearer DC the
+/// kernel's exact zero DC forces |replayed| = |direct|) to the receiver's
+/// declared band top.
+fn replay_band(bore_one_way_time_s: f64, receiver: CircularOutletReceiver) -> (f64, f64) {
+    (0.25 / bore_one_way_time_s, receiver.maximum_frequency_hz)
+}
+
+/// Worst |replayed| / |direct| amplitude ratio over the bins of `band_hz`, and its
+/// frequency, for a circular residual whose whole-sample arrival is tap 0 and
+/// whose last `latency` taps will be emitted before that arrival.
+///
+/// Replayed = taps `[n/2, n - latency)`: emitted at least half a window after
+/// the arrival, past the offsets this grid resolves, i.e. the one-window replay
+/// of pre-arrival spread (or an unresolved tail). Direct = every other tap.
+/// Both are exact at the grid's bins.
+pub(crate) fn replay_gain(
+    residual: &[f64],
+    latency: usize,
+    sample_rate_hz: u32,
+    band_hz: (f64, f64),
+) -> (f64, f64) {
+    let n = residual.len();
+    let replayed = |j: usize| j >= n / 2 && j < n - latency.min(n / 2);
+    let mut direct: Vec<FftC64> = residual
+        .iter()
+        .enumerate()
+        .map(|(j, &v)| FftC64::new(if replayed(j) { 0.0 } else { v }, 0.0))
+        .collect();
+    let mut late: Vec<FftC64> = residual
+        .iter()
+        .enumerate()
+        .map(|(j, &v)| FftC64::new(if replayed(j) { v } else { 0.0 }, 0.0))
+        .collect();
+    let fft = Fft::new(n);
+    let mut scratch = vec![FftC64::new(0.0, 0.0); n];
+    fft.forward(&mut direct, &mut scratch);
+    fft.forward(&mut late, &mut scratch);
+    let bin_hz = f64::from(sample_rate_hz) / n as f64;
+    let mut worst = (0.0, 0.0);
+    for k in 1..=n / 2 {
+        let frequency = k as f64 * bin_hz;
+        if frequency < band_hz.0 || frequency > band_hz.1 {
+            continue;
+        }
+        let d = det::hypot(direct[k].re, direct[k].im);
+        let w = det::hypot(late[k].re, late[k].im);
+        let gain = if d > 0.0 {
+            w / d
+        } else if w > 0.0 {
+            f64::INFINITY
+        } else {
+            0.0
+        };
+        if gain > worst.0 {
+            worst = (gain, frequency);
+        }
+    }
+    worst
+}
+
+fn admit_replay(
+    residual: &[f64],
+    latency: usize,
+    sample_rate_hz: u32,
+    band_hz: (f64, f64),
+) -> Result<(f64, f64), OutletError> {
+    let (gain, frequency_hz) = replay_gain(residual, latency, sample_rate_hz, band_hz);
+    if gain.is_nan() || gain > OUTLET_REPLAY_GAIN_BOUND {
+        return Err(OutletError::Replay {
+            gain,
+            frequency_hz,
+            latency_samples: latency,
+            fft_samples: residual.len(),
+        });
+    }
+    Ok((gain, frequency_hz))
+}
+
+/// `delay` exact zeros, then the window rotated so its last `latency` taps
+/// precede the arrival. The length stays `delay + n`.
+fn realize_with_latency(delay: usize, residual: &[f64], latency: usize) -> Vec<f64> {
+    let split = residual.len() - latency;
+    let mut kernel = vec![0.0; delay];
+    kernel.extend_from_slice(&residual[split..]);
+    kernel.extend_from_slice(&residual[..split]);
+    kernel
+}
+
 // Sample the derivative DIRECTLY. Sampling flow with an invented zero-frequency
 // value would add a spurious finite-length step/echo after differentiation.
-fn acceleration_kernel(sample_rate_hz: u32, n: usize, one_way_time_s: f64,
-    mut flow_response: impl FnMut(f64) -> Result<C64, DrivingPointError>)
-    -> Result<(Vec<f64>, usize), DrivingPointError> {
+// Returns the circular residual (arrival at tap 0) and the removed whole delay.
+fn acceleration_residual(
+    sample_rate_hz: u32,
+    n: usize,
+    one_way_time_s: f64,
+    mut flow_response: impl FnMut(f64) -> Result<C64, DrivingPointError>,
+) -> Result<(Vec<f64>, usize), DrivingPointError> {
     if sample_rate_hz == 0 || !(256..=MAX_OUTLET_FFT_SAMPLES).contains(&n) || !n.is_power_of_two()
         || !one_way_time_s.is_finite() || one_way_time_s <= 0.0 {
         return Err(invalid("outlet transfer requires physical clock, travel time and a power-of-two grid in 256..=65536"));
@@ -596,30 +850,86 @@ fn acceleration_kernel(sample_rate_hz: u32, n: usize, one_way_time_s: f64,
         return Err(invalid("axial delay and response exceed the outlet transfer history budget"));
     }
     let delay = delay as usize;
-    let fft = Fft::new(n);
-    let mut spectrum = vec![FftC64::new(0.0, 0.0); n];
+    let mut bins = Vec::with_capacity(n / 2);
     for k in 1..=n / 2 {
         let theta = core::f64::consts::TAU * k as f64 / n as f64;
         let flow = flow_response(theta * rate)?;
         // Acoustic e^{-iwt}: conjugate of the digital backward difference.
         let derivative = C64::new(rate * (1.0 - det::cos(theta)), -rate * det::sin(theta));
-        let acceleration = flow * derivative;
-        let phase = theta * delay as f64;
-        let residual = C64::new(acceleration.re, -acceleration.im)
-            * C64::new(det::cos(phase), det::sin(phase));
-        if !residual.re.is_finite() || !residual.im.is_finite() {
-            return Err(invalid("nonfinite terminal acceleration transfer"));
-        }
-        // A real sampled sequence has a real Nyquist bin. Interior frequencies
-        // retain their full complex transfer; DC stays zero by differentiation.
+        bins.push(residual_bin(theta, delay, flow * derivative)?);
+    }
+    Ok((circular_residual(n, bins), delay))
+}
+
+/// One positive-frequency bin of the circular residual: the conjugated
+/// acceleration transfer with the whole-sample `delay` removed.
+fn residual_bin(theta: f64, delay: usize, acceleration: C64) -> Result<C64, DrivingPointError> {
+    let phase = theta * delay as f64;
+    let residual =
+        C64::new(acceleration.re, -acceleration.im) * C64::new(det::cos(phase), det::sin(phase));
+    if !residual.re.is_finite() || !residual.im.is_finite() {
+        return Err(invalid("nonfinite terminal acceleration transfer"));
+    }
+    Ok(residual)
+}
+
+/// The real circular residual from its bins k = 1..=n/2. DC stays zero by
+/// differentiation; interior bins keep their full complex transfer except for
+/// the smooth Nyquist rotation of [`rotate_to_real_nyquist`].
+fn circular_residual(n: usize, mut bins: Vec<C64>) -> Vec<f64> {
+    rotate_to_real_nyquist(&mut bins);
+    let mut spectrum = vec![FftC64::new(0.0, 0.0); n];
+    for (index, residual) in bins.into_iter().enumerate() {
+        let k = index + 1;
         spectrum[k] = FftC64::new(residual.re, if k == n / 2 { 0.0 } else { residual.im });
-        if k != n / 2 { spectrum[n - k] = FftC64::new(residual.re, -residual.im); }
+        if k != n / 2 {
+            spectrum[n - k] = FftC64::new(residual.re, -residual.im);
+        }
     }
     let mut scratch = vec![FftC64::new(0.0, 0.0); n];
-    fft.inverse(&mut spectrum, &mut scratch);
-    let mut kernel = vec![0.0; delay];
-    kernel.extend(spectrum.iter().map(|value| value.re));
-    Ok((kernel, delay))
+    Fft::new(n).inverse(&mut spectrum, &mut scratch);
+    spectrum.iter().map(|value| value.re).collect()
+}
+
+/// Fraction of the Nyquist frequency where the Nyquist phase rotation starts.
+pub const OUTLET_NYQUIST_ROTATION_START: f64 = 0.8;
+
+/// A real sampled kernel needs a real Nyquist bin. Dropping the imaginary part
+/// of that one bin is a phase jump (up to pi/2) in the periodic spectrum, and
+/// the jump rings as 1/|t| on BOTH sides of the arrival. Its far pre-arrival
+/// half then wraps into the replay taps at any grid: on the G3 site card the
+/// bell replayed at -39.9 dB at L = n/4 and gained only ~6 dB per doubling of L,
+/// whatever n. This applies the same rotation (to the nearer real half-axis)
+/// smoothly over [`OUTLET_NYQUIST_ROTATION_START`] * Nyquist .. Nyquist with a
+/// raised-cosine weight. Bins below the start are untouched, |transfer| is kept
+/// at every bin, and the start is a fraction of the sample rate only, never a
+/// receiver's admission band. A real Nyquist bin (any whole-sample delay of a
+/// real transfer) is left exactly as it was.
+fn rotate_to_real_nyquist(bins: &mut [C64]) {
+    let Some(&nyquist) = bins.last() else {
+        return;
+    };
+    let phase = det::atan2(nyquist.im, nyquist.re);
+    let correction = if phase.abs() <= core::f64::consts::FRAC_PI_2 {
+        -phase
+    } else if phase > 0.0 {
+        core::f64::consts::PI - phase
+    } else {
+        -core::f64::consts::PI - phase
+    };
+    if correction == 0.0 {
+        return;
+    }
+    let half = bins.len() as f64;
+    for (index, bin) in bins.iter_mut().enumerate() {
+        let fraction = (index + 1) as f64 / half;
+        if fraction <= OUTLET_NYQUIST_ROTATION_START {
+            continue;
+        }
+        let x = (fraction - OUTLET_NYQUIST_ROTATION_START) / (1.0 - OUTLET_NYQUIST_ROTATION_START);
+        let angle = correction * (0.5 - 0.5 * det::cos(core::f64::consts::PI * x));
+        *bin = *bin * C64::new(det::cos(angle), det::sin(angle));
+    }
 }
 
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
@@ -671,23 +981,9 @@ fn acceleration_kernels_with_holes(
     for &time_s in hole_times_s {
         hole_delays.push(check_delay(time_s)?);
     }
-    let fft = Fft::new(n);
-    let mut bell_spectrum = vec![FftC64::new(0.0, 0.0); n];
-    let mut hole_spectra = vec![vec![FftC64::new(0.0, 0.0); n]; hole_times_s.len()];
+    let mut bell_bins = Vec::with_capacity(n / 2);
+    let mut hole_bins = vec![Vec::with_capacity(n / 2); hole_times_s.len()];
     let mut shunt_spec: Option<(f64, f64, Vec<C64>, Vec<C64>)> = None;
-    let store_bin = |spectrum: &mut [FftC64], k: usize, theta: f64, delay: usize, acc: C64| -> Result<(), DrivingPointError> {
-        let phase = theta * delay as f64;
-        let residual =
-            C64::new(acc.re, -acc.im) * C64::new(det::cos(phase), det::sin(phase));
-        if !residual.re.is_finite() || !residual.im.is_finite() {
-            return Err(invalid("nonfinite terminal acceleration transfer"));
-        }
-        spectrum[k] = FftC64::new(residual.re, if k == n / 2 { 0.0 } else { residual.im });
-        if k != n / 2 {
-            spectrum[n - k] = FftC64::new(residual.re, -residual.im);
-        }
-        Ok(())
-    };
     for k in 1..=n / 2 {
         let theta = core::f64::consts::TAU * k as f64 / n as f64;
         let (r, hole_flows) = response(theta * rate).map_err(DrivingPointError::Duct)?;
@@ -698,15 +994,11 @@ fn acceleration_kernels_with_holes(
         let two_over_denom = denominator.recip().scale(2.0);
         let derivative = C64::new(rate * (1.0 - det::cos(theta)), -rate * det::sin(theta));
         let bell_flow = C64::new(r.u_mouth_over_u_in.re, r.u_mouth_over_u_in.im) * two_over_denom;
-        store_bin(&mut bell_spectrum, k, theta, bell_delay, bell_flow * derivative)?;
-        for ((spectrum, &delay), hole) in hole_spectra
-            .iter_mut()
-            .zip(&hole_delays)
-            .zip(&hole_flows)
-        {
+        bell_bins.push(residual_bin(theta, bell_delay, bell_flow * derivative)?);
+        for ((bins, &delay), hole) in hole_bins.iter_mut().zip(&hole_delays).zip(&hole_flows) {
             let hole_flow =
                 C64::new(hole.u_hole_over_u_in.re, hole.u_hole_over_u_in.im) * two_over_denom;
-            store_bin(spectrum, k, theta, delay, hole_flow * derivative)?;
+            bins.push(residual_bin(theta, delay, hole_flow * derivative)?);
         }
         if let Some(hole0) = hole_flows.first()
             && hole0.shunt_port_reference_pa_s_m3 > 0.0
@@ -725,17 +1017,13 @@ fn acceleration_kernels_with_holes(
             s0_pos[k] = hole0.shunt_port_reflection;
         }
     }
-    let mut scratch = vec![FftC64::new(0.0, 0.0); n];
-    fft.inverse(&mut bell_spectrum, &mut scratch);
-    let mut bell_kernel = vec![0.0; bell_delay];
-    bell_kernel.extend(bell_spectrum.iter().map(|value| value.re));
-    let mut hole_kernels = Vec::with_capacity(hole_spectra.len());
-    for (mut spectrum, delay) in hole_spectra.into_iter().zip(hole_delays) {
-        fft.inverse(&mut spectrum, &mut scratch);
-        let mut kernel = vec![0.0; delay];
-        kernel.extend(spectrum.iter().map(|value| value.re));
-        hole_kernels.push((kernel, delay));
-    }
+    // Circular residuals (arrival at tap 0); the caller gates and realizes them.
+    let bell_kernel = circular_residual(n, bell_bins);
+    let hole_kernels: Vec<(Vec<f64>, usize)> = hole_bins
+        .into_iter()
+        .zip(hole_delays)
+        .map(|(bins, delay)| (circular_residual(n, bins), delay))
+        .collect();
     let shunt_line = if let Some((z0_port, k_quad, mut s12_pos, mut s0_pos)) = shunt_spec {
         if let Ok((r0, holes0)) = response(1.0e-3)
             && let Some(h0) = holes0.first()

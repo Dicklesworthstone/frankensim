@@ -401,6 +401,9 @@ impl ReedPerformance {
 mod tests;
 
 #[cfg(test)]
+mod replay_tests;
+
+#[cfg(test)]
 mod molecular_tests {
     use super::*;
     use fs_duct::compose::ComposeOptions;

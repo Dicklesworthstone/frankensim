@@ -28,19 +28,48 @@ fn a_matched_delay_becomes_the_exact_delayed_physical_difference_not_a_wrapped_e
     let delay = 40;
     let zc = 2.0e6;
     let time = delay as f64 / f64::from(rate);
-    let (kernel, actual_delay) = acceleration_kernel(rate, 256, time, |omega| {
+    let (residual, actual_delay) = acceleration_residual(rate, 256, time, |omega| {
         // Independent matched-line solution: Zin=Zc; Qin=p+/Zc;
         // Qout(t)=Qin(t-tau). No use of the implementation's transfer formula.
         Ok(C64::new((omega*time).cos(), (omega*time).sin()).scale(1.0 / zc))
     }).unwrap();
     assert_eq!(actual_delay, delay);
+    // A whole-sample arrival has no pre-arrival spread: nothing replays.
+    let latency = outlet_pre_arrival_latency(256);
+    let band = (100.0, 4800.0);
+    let replay = replay_gain(&residual, latency, rate, band).0;
+    let replay_without_latency = replay_gain(&residual, 0, rate, band).0;
+    // FFT roundoff only: 1e-12 sits 9 decades below the replay gate.
+    assert_eq!(latency, 64);
+    assert!(
+        replay <= 1e-12 && replay_without_latency <= 1e-12,
+        "{replay:e} {replay_without_latency:e}"
+    );
+    let kernel = realize_with_latency(delay, &residual, latency);
     assert_eq!(kernel.len(), 256 + delay);
+    // The window's last `latency` taps sit between the exact zeros and the
+    // arrival; a whole-sample arrival leaves only FFT roundoff there. Without
+    // them the kernel is the exact delayed difference, checked as before.
+    let realized = kernel;
+    assert!(
+        realized[delay..delay + latency]
+            .iter()
+            .all(|value| value.abs() < 1e-12)
+    );
+    let kernel: Vec<f64> = realized[..delay]
+        .iter()
+        .chain(&realized[delay + latency..])
+        .copied()
+        .collect();
     for (n, value) in kernel.iter().enumerate() {
         let expected = if n == delay { f64::from(rate)/zc }
             else if n == delay+1 { -f64::from(rate)/zc } else { 0.0 };
         assert!((value-expected).abs() < 1e-12, "tap {n}: {value} versus {expected}");
         if n < delay { assert_eq!(*value, 0.0); }
     }
+    // The realized kernel: the common observer latency moves the exact
+    // difference `latency` later.
+    let (kernel, delay) = (realized, delay + latency);
     let mut filter = DelayedFilter::from_impulse_response(1.0/f64::from(rate), kernel).unwrap();
     let mut values = Vec::new();
     for n in 0..700 {
