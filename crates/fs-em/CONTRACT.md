@@ -2816,10 +2816,13 @@ Both exteriors must retain the same original homogeneous lossless material,
 with its original epsilon and mu, as for the existing cycle-mean force owner.
 This electromagnetic stress excludes mechanical medium pressure,
 electrostriction and magnetostriction. Results expose local pascals, traction
-on validated unit normals, and compensated original-grid surface quadratures
-in newtons. Products can need more spatial resolution than field reconstruction;
-the original grid is not automatically oversampled, and these quadratures
-are not exact continuous-aperture integrals or convergence certificates.
+on validated unit normals, and continuous integrals over the original
+transverse periodic cell in newtons. Signed Fourier modes and exact spatial
+orthogonality integrate the represented band-limited quadratic fields before
+sampling; an unpaired negative Nyquist mode is not its own opposite.
+Integrated stress can therefore differ from summing the returned local
+samples. This does not add an isolated finite-aperture edge model or certify
+physical spatial convergence.
 
 `boundary_stress_resultant_n` evaluates both TOTAL exterior fields with
 outward normals, retaining one plane at a time. The signed resultant is not
@@ -2830,27 +2833,42 @@ For a uniform vacuum shutter, mechanical force additionally requires
 corresponding weighted momentum rate. Material-filled interiors need their
 own consistent field/material momentum law. None is inferred or set to zero.
 
-The six independent dyadic components use twelve scalar products per
-point/frequency pair and retain DD arithmetic through factor accumulation,
-trace subtraction, spatial quadrature and subtraction of boundary resultants.
-Equal-frequency grouping and six-component synthesis reuse the original
-exposure owner, with no new film solve. One bank's fields are streamed at a
-time: work remains `O(sum_r(L_r*N + F_r*N*log N + F_r²*N))` and extra
-retained output/accumulation is `O(N)`. Existing work caps remain in force;
-an additional explicit stress-workspace cap admits the complete query before
+Original exposure admission bounds N*F² frequency-pair units. Each stress
+query performs twelve local and at most twenty-four additional modal scalar
+temporal contractions per admitted unit, at most thirty-six total. DD
+arithmetic is retained through factor accumulation, continuous-cell
+integration, trace subtraction and subtraction of boundary resultants.
+Equal-frequency grouping and synthesis reuse the original exposure owner.
+One bank's modal fields are integrated and then synthesized once in place:
+no second field bank, FFT, constitutive solve or film solve is added.
+Work remains O(sum_r(L_r*N + F_r*N*log N + F_r²*N)), with O(N) additional
+output/accumulation. Original work caps remain authoritative. The explicit
+stress-workspace cap includes two spatial-quadrature work arrays and three
+six-component modal accumulators and admits the complete query before
 allocation. The two-face resultant performs two separately admitted plane
-queries and therefore uses twice the per-plane work, retaining only one plane
-at a time. A general normal contracts the original transverse-grid quadrature;
-it does not rotate or resample that plane. Cancellation publishes no partial
-field or resultant.
+queries and therefore uses twice the per-plane work, retaining only one
+plane at a time. A general normal contracts the continuous transverse-cell
+tensor; it does not rotate or resample that plane. Cancellation publishes
+no partial field or resultant.
 
-Seven authored G1/G3/G4 regressions cover full tensor real-time quadrature,
+Seven original G1/G3/G4 regressions cover full tensor real-time quadrature,
 proper ensembles, Cartesian covariance, ultrashort carrier phase, joint-face
 standing waves, source-bound shear/traction, momentum-storage distinction,
-source refusal, budgets, darkness, cancellation and replay. The exact temporal
-and stress contraction plus three test definitions passed native no-codegen
-type analysis; complete-owner Rust tests await native execution. Independent
-mathematical references do not constitute execution of the Rust owner.
+source refusal, budgets, darkness, cancellation and replay. Before the
+continuous-cell extension, the temporal/stress contraction and three test
+definitions passed native no-codegen type analysis; that earlier result
+does not establish compilation of the current extension.
+
+Three additional source-bound regressions cover x/y Nyquist alias
+counterexamples under uniform/triangular shutters, deterministic means and
+real/proper factors, true opposite-mode interference, and original
+work/workspace admission, cancellation and retry. Independent analytic and
+dense JavaScript quadrature references were evaluated. In the unit-medium
+Nyquist stress fixture, sampled quadrature overestimates the continuous
+tensor by factors 1.9352 and 1.9643 for uniform and triangular shutters.
+The added Rust code and regressions remain uncompiled and unexecuted because
+no native execution environment is available. Independent mathematical
+references do not constitute execution of the Rust owner.
 
 ### Real and nonproper spectral source fluctuations
 

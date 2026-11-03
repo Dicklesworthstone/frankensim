@@ -11,10 +11,12 @@
 
 use super::*;
 
-/// Additional admission for a stress query. Existing exposure preparation
-/// already bounds its twelve scalar products per point/frequency pair, line
-/// reconstruction and FFT work. This cap includes that original workspace,
-/// six compensated dyadic sums per point and the complete stress output.
+/// Additional admission for a stress query. Original exposure preparation
+/// bounds N*F² frequency-pair units, line reconstruction and FFT work. Stress
+/// performs twelve local and at most twenty-four modal scalar products per
+/// admitted pair unit; the modal pass adds no FFT or retained frequency plane.
+/// This cap includes the original workspace, six compensated sums per point,
+/// the complete stress output and fixed modal quadrature scratch/accumulators.
 /// Borrowed owners, earlier outputs and allocator overhead are excluded.
 #[derive(Clone, Copy, Debug)]
 pub struct AngularSpectrumExposureStressLimits {
@@ -43,10 +45,10 @@ impl AngularSpectrumExposureStressPoint {
     }
 }
 
-/// Local stress and its periodic-cell surface quadrature. Spatial products
-/// can need a finer grid than the underlying field; this reuses the original
-/// grid without oversampling. It is not a continuous aperture integral,
-/// finite-edge surface model or spatial-convergence certificate.
+/// Local stress samples and the exact continuous-periodic-cell integral of
+/// the represented band-limited fields. Modal orthogonality avoids aliasing
+/// their quadratic products on the original sampling grid. This does not
+/// resolve a finite aperture edge or certify physical spatial convergence.
 #[derive(Debug)]
 pub struct AngularSpectrumExposureStressField {
     grid: AngularSpectrumGrid,
@@ -65,12 +67,13 @@ impl AngularSpectrumExposureStressField {
         &self.points
     }
 
-    /// Original-grid quadrature of T_ij dA over the transverse periodic cell [N].
+    /// Continuous integral of T_ij dA over the transverse periodic cell [N].
+    /// This can differ from summing the returned local stress samples.
     pub fn integrated_stress_n(&self) -> [[f64; 3]; 3] {
         symmetric(self.integrated_stress.map(Dd::to_f64))
     }
 
-    /// Contract the original transverse-cell tensor quadrature with a constant
+    /// Contract the continuous transverse-cell tensor integral with a constant
     /// unit normal [N]. This does not rotate or resample the physical plane and
     /// does not automatically give a net force on a body.
     pub fn integrated_traction_n(
@@ -99,9 +102,11 @@ impl AngularSpectrumExposure<'_, '_, '_> {
     /// and standing-wave terms. The two exterior half-spaces must retain the
     /// same original lossless material, as for the cycle-mean force owner.
     ///
-    /// O(L*N + F*N*log N + F²*N), with twelve scalar temporal contractions
-    /// per point/frequency pair. Original frequency fields are reconstructed
-    /// once; no new constitutive or film solve is performed.
+    /// O(L*N + F*N*log N + F²*N). Each admitted N*F² pair unit entails
+    /// twelve local and at most twenty-four modal temporal contractions.
+    /// Continuous-cell products are integrated before one in-place synthesis
+    /// of each original frequency field; no extra FFT, constitutive or film
+    /// solve is performed.
     pub fn stress_field(
         &self,
         side: AngularSpectrumSide,
@@ -145,7 +150,7 @@ impl AngularSpectrumExposure<'_, '_, '_> {
         )
     }
 
-    /// Grid-quadrature sum of exterior stress tractions on the two periodic-cell
+    /// Continuous-cell sum of exterior stress tractions on the two periodic-cell
     /// planes [N]: Q(T_right*ez - T_left*ez). Distances are outward
     /// from the left and right faces respectively; lateral periodic faces
     /// cancel. Only one field plane is retained at a time. Each plane uses the
@@ -250,6 +255,11 @@ fn stress_workspace(points: usize, original: usize) -> Result<usize, AngularSpec
                 + core::mem::size_of::<AngularSpectrumExposureStressPoint>(),
         )
         .and_then(|v| v.checked_add(original))
+        // Two spatial-quadrature work arrays conservatively cover both
+        // retained field values and construction temporaries. Three six-term
+        // dyads cover the streamed bank, cell integral and contraction.
+        .and_then(|v| v.checked_add(2 * core::mem::size_of::<[[[Dd; 2]; 6]; 2]>()))
+        .and_then(|v| v.checked_add(3 * core::mem::size_of::<[Dd; 6]>()))
         .ok_or_else(|| bad("exposure stress workspace overflow"))
 }
 
@@ -289,6 +299,7 @@ where
         }
         sums.push([Dd::ZERO; 6]);
     }
+    let mut integrated_dyad = [Dd::ZERO; 6];
     for (bank, proper) in banks {
         poll(cancelled)?;
         if proper {
@@ -300,7 +311,9 @@ where
                 mu,
                 |a, b| window.proper_product_kernel(a, b),
                 proper_product,
+                ProperHarmonicProduct::mean_real_product_parts_dd,
                 &mut sums,
+                &mut integrated_dyad,
                 cancelled,
             )?;
         } else {
@@ -312,7 +325,9 @@ where
                 mu,
                 |a, b| window.product_kernel(a, b),
                 product,
+                HarmonicProduct::mean_real_product_parts_dd,
                 &mut sums,
+                &mut integrated_dyad,
                 cancelled,
             )?;
         }
@@ -321,7 +336,6 @@ where
     points
         .try_reserve_exact(n)
         .map_err(|_| bad("exposure stress result allocation failed"))?;
-    let mut integrated = [Dd::ZERO; 6];
     for (i, dyad) in sums.into_iter().enumerate() {
         if i % 64 == 0 {
             poll(cancelled)?;
@@ -331,16 +345,12 @@ where
         if value.iter().any(|v| !v.is_finite()) {
             return Err(bad("exposure Maxwell stress is unrepresentable"));
         }
-        for (sum, value) in integrated.iter_mut().zip(stress) {
-            *sum = *sum + value;
-        }
         points.push(AngularSpectrumExposureStressPoint {
             maxwell_stress_pa: symmetric(value),
         });
     }
     let grid = anchor.grid();
-    let area = Dd::from_f64(grid.spacing_m[0]) * Dd::from_f64(grid.spacing_m[1]);
-    let integrated_stress = integrated.map(|s| s * area);
+    let integrated_stress = stress_from_dyad(integrated_dyad);
     if integrated_stress.iter().any(|s| !s.to_f64().is_finite()) {
         return Err(bad("integrated exposure stress is unrepresentable"));
     }
@@ -360,7 +370,9 @@ fn accumulate_stress_bank<P: Copy>(
     mu: f64,
     kernel: impl Fn(f64, f64) -> Result<P, fs_fft::harmonic_window::WindowError>,
     product: impl Fn(P, C64, C64) -> Result<Dd, MomentError>,
+    product_parts: impl Fn(P, [Dd; 2], [Dd; 2]) -> Result<Dd, fs_fft::harmonic_window::WindowError>,
     sums: &mut [[Dd; 6]],
+    integrated: &mut [Dd; 6],
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), AngularSpectrumError> {
     let f = bank.frequency_count();
@@ -385,7 +397,22 @@ fn accumulate_stress_bank<P: Copy>(
         .try_reserve_exact(f)
         .map_err(|_| bad("exposure stress field allocation failed"))?;
     for group in 0..f {
-        fields.push(bank.frequency_field(group, side, distance, cancelled)?);
+        fields.push(bank.frequency_modal_field(group, side, distance, cancelled)?);
+    }
+    let cell = integrate_cell_dyad(
+        bank.anchor.grid(),
+        &fields,
+        &kernels,
+        epsilon,
+        mu,
+        product_parts,
+        cancelled,
+    )?;
+    for (sum, value) in integrated.iter_mut().zip(cell) {
+        *sum = *sum + value;
+    }
+    for (group, field) in fields.iter_mut().enumerate() {
+        bank.synthesize_frequency_field(group, field, cancelled)?;
     }
     for (point, sum) in sums.iter_mut().enumerate() {
         poll(cancelled)?;
@@ -398,11 +425,7 @@ fn accumulate_stress_bank<P: Copy>(
             &product,
             cancelled,
         )
-        .map_err(|error| match error {
-            MomentError::Cancelled => AngularSpectrumError::Cancelled,
-            MomentError::Product(_) => bad("exposure stress product is unrepresentable"),
-            MomentError::Unrepresentable => bad("exposure stress dyad is unrepresentable"),
-        })?;
+        .map_err(dyad_error)?;
         for (sum, value) in sum.iter_mut().zip(value) {
             *sum = *sum + value;
         }
@@ -410,15 +433,77 @@ fn accumulate_stress_bank<P: Copy>(
     Ok(())
 }
 
-// Six independent components; symmetry is imposed only AFTER the complete
-// ordered frequency-pair contraction, never on an individual cross term.
-fn integrate_dyad<P: Copy>(
-    frequencies: usize,
+// The source's signed Fourier bins, including an unpaired negative Nyquist
+// mode, use the SAME spatial quadratures as exact cell power. These DD parts
+// are already conjugated to the temporal kernel's negative-time convention.
+// Integrate before synthesis; no sampled quadratic or second field bank.
+fn integrate_cell_dyad<P: Copy>(
+    grid: AngularSpectrumGrid,
+    fields: &[Vec<[C64; 6]>],
     kernels: &[P],
-    field_at: impl Fn(usize) -> [C64; 6],
     epsilon: f64,
     mu: f64,
-    product: impl Fn(P, C64, C64) -> Result<Dd, MomentError>,
+    product_parts: impl Fn(P, [Dd; 2], [Dd; 2]) -> Result<Dd, fs_fft::harmonic_window::WindowError>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<[Dd; 6], AngularSpectrumError> {
+    let mut integrated = [Dd::ZERO; 6];
+    let area = Dd::from_f64(grid.width as f64 * grid.spacing_m[0])
+        * Dd::from_f64(grid.height as f64 * grid.spacing_m[1]);
+    for mode in 0..grid.width * grid.height {
+        if mode % 32 == 0 {
+            poll(cancelled)?;
+        }
+        let opposite = opposite_mode(grid, mode);
+        if opposite.is_some_and(|other| other < mode) {
+            continue;
+        }
+        let constant = opposite == Some(mode);
+        let partner = opposite.filter(|_| !constant);
+        let weight = area * Dd::from_f64(if constant { 1.0 } else { 0.5 });
+        for quadrature in 0..if constant { 1 } else { 2 } {
+            let dyad = integrate_dyad(
+                fields.len(),
+                kernels,
+                |i| {
+                    spatial_quadratures(fields[i][mode], partner.map(|other| fields[i][other]))
+                        [quadrature]
+                },
+                epsilon,
+                mu,
+                |kernel, a, b| product_parts(kernel, a, b).map_err(MomentError::Product),
+                cancelled,
+            )
+            .map_err(dyad_error)?;
+            for (sum, value) in integrated.iter_mut().zip(dyad) {
+                *sum = *sum + weight * value;
+            }
+        }
+    }
+    if integrated.iter().any(|s| !s.to_f64().is_finite()) {
+        return Err(bad("integrated exposure stress dyad is unrepresentable"));
+    }
+    poll(cancelled)?;
+    Ok(integrated)
+}
+
+fn dyad_error(error: MomentError) -> AngularSpectrumError {
+    match error {
+        MomentError::Cancelled => AngularSpectrumError::Cancelled,
+        MomentError::Product(_) => bad("exposure stress product is unrepresentable"),
+        MomentError::Unrepresentable => bad("exposure stress dyad is unrepresentable"),
+    }
+}
+
+// Six independent components; symmetry is imposed only AFTER the complete
+// ordered frequency-pair contraction, never on an individual cross term.
+// Point samples use C64; continuous spatial quadratures keep their DD parts.
+fn integrate_dyad<P: Copy, A: Copy>(
+    frequencies: usize,
+    kernels: &[P],
+    field_at: impl Fn(usize) -> [A; 6],
+    epsilon: f64,
+    mu: f64,
+    product: impl Fn(P, A, A) -> Result<Dd, MomentError>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<[Dd; 6], MomentError> {
     let epsilon = Dd::from_f64(epsilon);
@@ -682,3 +767,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod cell_quadrature;
