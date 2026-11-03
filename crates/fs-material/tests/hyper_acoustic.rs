@@ -97,6 +97,14 @@ fn g0_reference_waves_match_small_strain_longitudinal_and_shear_speeds() {
                 rho * expected,
                 2e-13,
             );
+            for (velocity, normal) in mode
+                .energy_velocity_m_s
+                .unwrap()
+                .into_iter()
+                .zip(waves.direction)
+            {
+                close(velocity, expected.sqrt() * normal, expected.sqrt(), 3e-13);
+            }
         }
         for mode in &waves.modes[..2] {
             close(
@@ -153,6 +161,18 @@ fn g0_finite_neo_hookean_tensor_matches_independent_closed_form_and_current_mass
                 2e6,
                 5e-13,
             );
+            let bn: [f64; 3] = core::array::from_fn(|i| (0..3).map(|j| f[3 * i + j] * q[j]).sum());
+            let longitudinal = (0..3)
+                .map(|i| mode.polarization[i] * n[i])
+                .sum::<f64>()
+                .abs()
+                > 0.5;
+            let speed = mode.phase_speed_m_s.unwrap();
+            for (i, velocity) in mode.energy_velocity_m_s.unwrap().into_iter().enumerate() {
+                let expected =
+                    (mu * bn[i] + if longitudinal { beta * n[i] } else { 0.0 }) / (rho0 * speed);
+                close(velocity, expected, speed, 2e-12);
+            }
         }
     }
 }
@@ -259,6 +279,15 @@ fn g3_spatial_rotation_preserves_speeds_and_rotates_the_full_anisotropic_tensor(
                 2e3,
                 2e-12,
             );
+            let expected_velocity = rotate(a.modes[i].energy_velocity_m_s.unwrap());
+            for (actual, expected) in b.modes[i]
+                .energy_velocity_m_s
+                .unwrap()
+                .into_iter()
+                .zip(expected_velocity)
+            {
+                close(actual, expected, a.modes[i].phase_speed_m_s.unwrap(), 3e-11);
+            }
             // Projected eigenvectors remain valid even when a repeated root
             // permits the shared Jacobi solver to choose a different basis.
             let p = rotate(a.modes[i].polarization);
@@ -288,6 +317,7 @@ fn g0_admitted_expansion_keeps_negative_longitudinal_squared_speed() {
         2e-13,
     );
     assert_eq!(waves.modes[0].phase_speed_m_s, None);
+    assert_eq!(waves.modes[0].energy_velocity_m_s, None);
     assert!(waves.modes[1].phase_speed_m_s.unwrap() > 0.0);
     assert!(waves.modes[2].phase_speed_m_s.unwrap() > 0.0);
     close(waves.modes[0].polarization[0].abs(), 1.0, 1.0, 1e-13);
@@ -344,6 +374,19 @@ fn g3_units_density_and_direction_scaling_preserve_physical_wave_predictions() {
                 2e6,
                 2e-12,
             );
+            for (actual, expected) in result.modes[i]
+                .energy_velocity_m_s
+                .unwrap()
+                .into_iter()
+                .zip(reference.modes[i].energy_velocity_m_s.unwrap())
+            {
+                close(
+                    actual,
+                    expected,
+                    reference.modes[i].phase_speed_m_s.unwrap(),
+                    3e-12,
+                );
+            }
         }
     }
     let doubled_density = nh(2e5, 8e5, 4.0)
@@ -358,6 +401,54 @@ fn g3_units_density_and_direction_scaling_preserve_physical_wave_predictions() {
             2e3,
             1e-13,
         );
+        for (actual, expected) in doubled_density.modes[i]
+            .energy_velocity_m_s
+            .unwrap()
+            .into_iter()
+            .zip(reference.modes[i].energy_velocity_m_s.unwrap())
+        {
+            close(
+                actual,
+                -expected / 2.0_f64.sqrt(),
+                reference.modes[i].phase_speed_m_s.unwrap(),
+                3e-12,
+            );
+        }
+    }
+}
+
+#[test]
+fn g3_deformed_energy_transport_matches_frequency_gradients_for_all_native_laws() {
+    let f = [1.2, 0.15, 0.03, -0.04, 0.93, 0.08, 0.02, -0.05, 1.08];
+    let k = [0.4, -0.3, 0.8];
+    for law in laws() {
+        let state = law.acoustic_state(&f, 1000.0).unwrap();
+        let waves = state.directional_waves(k).unwrap();
+        for mode in 0..3 {
+            let speed = waves.modes[mode].phase_speed_m_s.unwrap();
+            let velocity = waves.modes[mode].energy_velocity_m_s.unwrap();
+            close(
+                (0..3).map(|i| waves.direction[i] * velocity[i]).sum(),
+                speed,
+                speed,
+                3e-12,
+            );
+            for axis in 0..3 {
+                let h = 1e-5;
+                let mut plus = k;
+                let mut minus = k;
+                plus[axis] += h;
+                minus[axis] -= h;
+                let frequency = |k: [f64; 3]| {
+                    k.iter().map(|v| v * v).sum::<f64>().sqrt()
+                        * state.directional_waves(k).unwrap().modes[mode]
+                            .phase_speed_m_s
+                            .unwrap()
+                };
+                let derivative = (frequency(plus) - frequency(minus)) / (2.0 * h);
+                close(velocity[axis], derivative, speed, 2e-8);
+            }
+        }
     }
 }
 

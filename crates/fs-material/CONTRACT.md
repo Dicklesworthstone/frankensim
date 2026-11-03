@@ -2750,12 +2750,19 @@ homogenization, the P2 milestone.
   Jacobi eigensolver returns signed squared phase speeds and polarizations;
   negative or zero eigenvalues retain their sign and have no positive real
   phase speed. The physical tensor, current density and eigen residual remain
-  available. Stable modes in one direction do not certify global ellipticity,
-  and phase speed is not group velocity or an attenuation/dispersion model.
+  available. Positive modes also return spatial energy velocity
+  `v_r = a_i A_iJkL a_k q_L F_rJ/(rho0*c)` from that same cached Hessian,
+  with no additional AD or eigenproblems. It equals the frequency gradient on
+  a smooth separated branch; at a repeated root it retains the chosen
+  polarization's flux. Nonpositive modes have no real energy velocity.
+  Stable modes in one direction do not certify global ellipticity or an
+  attenuation/dispersion model.
   `hyper_acoustic.rs` checks independent finite-NH formulas, the small-strain
   limit, all four laws against rank-one work derivatives, anisotropic rotation,
   density/modulus scaling and an admitted expanded NH state with a negative
-  longitudinal eigenvalue. The formulation follows
+  longitudinal eigenvalue. Energy velocities are checked against independent
+  finite-NH dispersion, all four frequency gradients, current-frame rotation,
+  normal projection and density/direction scaling. The formulation follows
   [Abiza, Destrade & Ogden (2012)](https://doi.org/10.1016/j.wavemoti.2011.12.002).
   NH's former unconditional polyconvex declaration is restricted to the
   sufficient domain condition `lambda=0` or

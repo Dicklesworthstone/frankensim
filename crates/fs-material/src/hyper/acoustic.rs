@@ -12,6 +12,9 @@
 //! `fs-la` symmetric eigensolver. Signed squared speeds retain directional
 //! instability; they are never clipped or replaced by their absolute values.
 //! Positive eigenvalues in one direction do not certify global ellipticity.
+//! Positive modes also carry their spatial energy velocity, evaluated from
+//! that SAME Hessian and deformation. This is the group velocity on a smooth
+//! separated branch; a repeated root retains its chosen polarization's flux.
 //! This uses the unconstrained three-dimensional compressible law, not a
 //! plane-stress/incompressibility projection or a Maxwell algorithmic tangent.
 //! It is a frozen constitutive prediction, not attenuation,
@@ -44,6 +47,11 @@ pub struct HyperelasticWaveMode {
     pub squared_phase_speed_m2_s2: f64,
     /// Positive phase speed, in m/s, only when the squared speed is positive.
     pub phase_speed_m_s: Option<f64>,
+    /// Spatial incremental-energy flux divided by mean wave energy [m/s].
+    /// Equals `grad_k omega` for a smooth separated branch, and obeys
+    /// `n.dot(energy_velocity)=phase_speed`. At a repeated root it describes
+    /// the selected polarization. Nonpositive squared speeds return `None`.
+    pub energy_velocity_m_s: Option<[f64; 3]>,
 }
 
 /// Three modes in ascending signed squared-speed order for one direction.
@@ -172,6 +180,7 @@ impl HyperelasticAcousticState {
             directional_modulus_pa: 0.0,
             squared_phase_speed_m2_s2: 0.0,
             phase_speed_m_s: None,
+            energy_velocity_m_s: None,
         }; 3];
         let mut relative_eigen_residual = 0.0_f64;
         for mode in 0..3 {
@@ -213,11 +222,42 @@ impl HyperelasticAcousticState {
             if polarization[pivot] < 0.0 {
                 polarization = polarization.map(|v| -v);
             }
+            let energy_velocity_m_s = if let Some(speed) = phase_speed_m_s {
+                // In the fixed current frame, q=F^T n and the dispersion is
+                // rho0*omega(k)^2 = a_i A_iJmL (F^T k)_J (F^T k)_L a_m.
+                // Major symmetry of the original material Hessian gives
+                // v_r = a_i A_iJmL a_m q_L F_rJ/(rho0*c). J cancels exactly
+                // as in the squared speed; no extra prestress term belongs here.
+                let stress: [f64; 9] = core::array::from_fn(|ij| {
+                    (0..9)
+                        .map(|ml| {
+                            (self.tangent[ij][ml] / normalizer) * polarization[ml / 3] * q[ml % 3]
+                        })
+                        .sum()
+                });
+                let velocity = core::array::from_fn(|r| {
+                    let flux: f64 = (0..9)
+                        .map(|ij| {
+                            polarization[ij / 3]
+                                * stress[ij]
+                                * self.deformation_gradient[3 * r + ij % 3]
+                        })
+                        .sum();
+                    (flux / values[mode]) * speed
+                });
+                if velocity.iter().any(|v| !v.is_finite()) {
+                    return Err(state_error("wave energy velocity is unrepresentable"));
+                }
+                Some(velocity)
+            } else {
+                None
+            };
             modes[mode] = HyperelasticWaveMode {
                 polarization,
                 directional_modulus_pa,
                 squared_phase_speed_m2_s2,
                 phase_speed_m_s,
+                energy_velocity_m_s,
             };
         }
         for i in 0..3 {
