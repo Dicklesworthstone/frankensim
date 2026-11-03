@@ -34,6 +34,35 @@ pub enum ConvectionScheme {
 }
 
 impl ConvectionScheme {
+    /// Owner and neighbour coefficients for ONE outward conservative face.
+    ///
+    /// Form both nonnegative parts from the same fitted conductance. Computing
+    /// the owner as `neighbour + flux` would subtract two large nearly equal
+    /// numbers on an inflow face, destroying its diffusion and making the two
+    /// cells disagree about their shared flux. Reversing the face must swap
+    /// these coefficients exactly, including in advection-dominated flow.
+    pub(crate) fn face_coefficients(self, diffusion: f64, flux: f64) -> (f64, f64) {
+        let magnitude = flux.abs();
+        let peclet = magnitude / diffusion;
+        let fitted = if self == Self::Exponential && peclet > 0.01 {
+            // D * P/expm1(P) = |F|/expm1(P). Evaluate the DIMENSIONED
+            // coefficient before underflow: A(P) can round to zero while
+            // D*A(P) remains a perfectly representable thermal conductance.
+            if peclet == f64::INFINITY {
+                0.0
+            } else if peclet > 700.0 {
+                det::exp(det::ln(magnitude) - peclet)
+            } else if peclet > 50.0 {
+                magnitude * det::exp(-peclet)
+            } else {
+                magnitude / det::expm1(peclet)
+            }
+        } else {
+            diffusion * self.weight(peclet)
+        };
+        (fitted + flux.max(0.0), fitted + (-flux).max(0.0))
+    }
+
     pub(crate) fn weight(self, peclet: f64) -> f64 {
         match self {
             Self::Upwind | Self::EnthalpyMinmod => 1.0,
@@ -72,6 +101,61 @@ impl ConvectionScheme {
 #[cfg(test)]
 mod tests {
     use super::ConvectionScheme;
+
+    #[test]
+    fn g0_g3_face_reversal_preserves_counterflow_and_conservative_pairing() {
+        for scheme in [
+            ConvectionScheme::Upwind,
+            ConvectionScheme::PowerLaw,
+            ConvectionScheme::Exponential,
+            ConvectionScheme::EnthalpyMinmod,
+        ] {
+            for diffusion in [1e-20, 1e-10, 0.01, 1.0, 100.0] {
+                for flow in [0.0_f64, 1e-12, 1.0, 30.0, 100.0] {
+                    let (owner, neighbour) = scheme.face_coefficients(diffusion, flow);
+                    let reversed = scheme.face_coefficients(diffusion, -flow);
+                    assert_eq!(owner, reversed.1);
+                    assert_eq!(neighbour, reversed.0);
+                    assert!(owner.is_finite() && owner >= 0.0);
+                    assert!(neighbour.is_finite() && neighbour >= 0.0);
+                    // Deliberately isolate the counterflow contribution.
+                    // No subtraction of large convective fluxes may hide it.
+                    let forward_heat = owner * 0.0 - neighbour * 300.0;
+                    let backward_heat = reversed.0 * 300.0 - reversed.1 * 0.0;
+                    assert_eq!(forward_heat, -backward_heat);
+                }
+            }
+        }
+        let diffusion = 1e-20;
+        let (diagonal, _) = ConvectionScheme::Upwind.face_coefficients(diffusion, -1.0);
+        assert_eq!(diagonal, diffusion);
+        // This was the previous incoming-face assembly: diffusion vanished.
+        assert_eq!((diffusion + 1.0) - 1.0, 0.0);
+    }
+
+    #[test]
+    fn g1_exponential_counterflow_survives_large_peclet_and_dimensional_scaling() {
+        let scheme = ConvectionScheme::Exponential;
+        let (diagonal, _) = scheme.face_coefficients(1.0, -50.0);
+        let reference = 50.0 / 50.0_f64.exp_m1();
+        assert!((diagonal / reference - 1.0).abs() < 8e-15);
+        assert!(diagonal > 0.0);
+
+        // Nuances of the dimensionless weight cannot turn a representable
+        // dimensional transport coefficient into an artificial insulator.
+        let (_, coefficient) = scheme.face_coefficients(1e300, 1e303);
+        let reference = (1e303_f64.ln() - 1000.0).exp();
+        assert!(coefficient > 0.0);
+        assert!((coefficient / reference - 1.0).abs() < 2e-13);
+        for peclet in [1e-12, 0.01, 1.0, 50.0, 100.0] {
+            let base = scheme.face_coefficients(1.0, peclet);
+            for scale in [1e-200, 1e-20, 1e20, 1e200] {
+                let scaled = scheme.face_coefficients(scale, peclet * scale);
+                assert!((scaled.0 / scale / base.0 - 1.0).abs() < 3e-14);
+                assert!((scaled.1 / scale / base.1 - 1.0).abs() < 3e-14);
+            }
+        }
+    }
 
     #[test]
     fn exponential_weight_resolves_small_and_extreme_peclet_numbers() {
@@ -129,10 +213,9 @@ mod tests {
             };
             for edge in points.windows(2) {
                 let diffusion = 1.0 / (edge[1] - edge[0]);
-                let weight = ConvectionScheme::Exponential.weight(flow / diffusion);
-                let neighbour = diffusion.mul_add(weight, (-flow).max(0.0));
-                let flux =
-                    (neighbour + flow) * temperature(edge[0]) - neighbour * temperature(edge[1]);
+                let (owner, neighbour) =
+                    ConvectionScheme::Exponential.face_coefficients(diffusion, flow);
+                let flux = owner * temperature(edge[0]) - neighbour * temperature(edge[1]);
                 assert!(
                     (flux - exact_flux).abs() < 4e-13 * (1.0 + exact_flux.abs()),
                     "flow={flow}, edge={edge:?}: {flux} != {exact_flux}"

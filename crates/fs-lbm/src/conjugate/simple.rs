@@ -1650,10 +1650,6 @@ impl<'a> Solver<'a> {
                     + self.domain.width(axis, plus[axis])))
     }
 
-    fn weight(&self, peclet: f64) -> f64 {
-        self.config.scheme.weight(peclet)
-    }
-
     /// Face of component `d` on side `s` of cell `c` (`s = 1`: plus side).
     fn cell_face(&self, d: usize, c: [usize; 3], plus: bool) -> usize {
         let mut f = c;
@@ -1757,7 +1753,7 @@ impl<'a> Solver<'a> {
                         // The unchanged doubled pressure drop then prescribes
                         // normal traction -p_res*n at the actual mouth.
                         if pressure_mouth_row { diff *= 2.0; }
-                        let coef = diff.mul_add(self.weight(flux / diff), (-flux).max(0.0));
+                        let coef = self.config.scheme.face_coefficients(diff, flux).1;
                         match comp.kind[nf] {
                             Kind::Unknown(col) | Kind::Outlet(col) => {
                                 coo.push(row, col, -coef);
@@ -1838,8 +1834,7 @@ impl<'a> Solver<'a> {
                             FvBoundary::Inlet { velocity } => {
                                 let flux = s * advective_density * side_area * velocity[d];
                                 net_out += flux;
-                                let coef = (2.0 * diff)
-                                    .mul_add(self.weight(flux / (2.0 * diff)), (-flux).max(0.0));
+                                let coef = self.config.scheme.face_coefficients(2.0 * diff, flux).1;
                                 a_p += coef;
                                 rhs = coef.mul_add(velocity[a], rhs);
                             }
@@ -1871,8 +1866,7 @@ impl<'a> Solver<'a> {
                         Kind::Unknown(col) | Kind::Outlet(col) => {
                             rhs += cross_shear;
                             net_out += edge_flux;
-                            let coef =
-                                diff.mul_add(self.weight(edge_flux / diff), (-edge_flux).max(0.0));
+                            let coef = self.config.scheme.face_coefficients(diff, edge_flux).1;
                             coo.push(row, col, -coef);
                             sum_nb += coef;
                             a_p += coef;

@@ -171,9 +171,9 @@ pub use unsteady::{
 /// Semantics version of the conjugate pipeline: covers voxel indexing, face
 /// flux layout, projection, energy discretization, solver policy, and the
 /// LBM driver's steady criterion. Bump on any change that can move results.
-/// Version 3 preserves physical momentum when rebinding lattice buoyancy
-/// and projects the Guo-corrected mass flux.
-pub const CHT_SEMANTICS_VERSION: u32 = 3;
+/// Version 4 preserves paired convection coefficients under flow reversal,
+/// including weak counterflow diffusion and dimensional exponential fitting.
+pub const CHT_SEMANTICS_VERSION: u32 = 4;
 
 /// Structured refusal from any stage of the conjugate pipeline.
 #[derive(Debug, Clone, PartialEq)]

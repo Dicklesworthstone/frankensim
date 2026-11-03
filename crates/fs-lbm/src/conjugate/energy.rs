@@ -6,8 +6,10 @@
 //! Flow*, 1980, §5.2–5.4): for an interior face with outward heat-capacity
 //! flux `F = rho c_p Q` and diffusive conductance `D = A k_h / dx` (on a
 //! graded grid `dx` is the centre distance and `k_h` weights the half widths),
-//! `a = D A(|F|/D) + max(-F, 0)` and `d = a + F`; the two sides of one face
-//! therefore carry equal and opposite `J` for ANY temperatures, so the global
+//! `a = D A(|F|/D) + max(-F, 0)` and `d = D A(|F|/D) + max(F, 0)`;
+//! both coefficients share the same fitted conductance without subtractive
+//! cancellation on inflow. The two sides of one face therefore carry equal
+//! and opposite `J` for ANY temperatures, so the global
 //! energy balance telescopes exactly. `k_h = 2 k_P k_N / (k_P + k_N)` is the
 //! series (harmonic) conductance of two half cells, exact for
 //! piecewise-constant conductivity meeting at the face.
@@ -543,10 +545,6 @@ impl Context<'_> {
         if d.is_finite() && d > 0.0 { d } else { f64::NAN }
     }
 
-    fn weight(&self, peclet: f64) -> f64 {
-        self.scheme.weight(peclet)
-    }
-
     fn enthalpy_boundary(&self, c: usize, f: usize) -> FaceTerm {
         let field = self.enthalpy.expect("enthalpy path");
         let mass = self.density * self.flow.outward(self.domain, c, f);
@@ -592,9 +590,9 @@ impl Context<'_> {
                     };
                 }
             }
-            let a = d.mul_add(self.weight(flux / d), (-flux).max(0.0));
+            let (diagonal, a) = self.scheme.face_coefficients(d, flux);
             return FaceTerm {
-                diag: a + flux,
+                diag: diagonal,
                 off: Some((n, a)),
                 rhs: 0.0,
                 advective: Advective::None,
@@ -665,14 +663,14 @@ impl Context<'_> {
                     term.rhs += half * temperature;
                     return term;
                 }
-                let a = half.mul_add(self.weight(flux / half), (-flux).max(0.0));
+                let (diagonal, a) = self.scheme.face_coefficients(half, flux);
                 let advective = if flux >= 0.0 {
                     Advective::OwnCell(flux)
                 } else {
                     Advective::Fixed(flux * temperature)
                 };
                 FaceTerm {
-                    diag: a + flux,
+                    diag: diagonal,
                     off: None,
                     rhs: a * temperature,
                     advective,

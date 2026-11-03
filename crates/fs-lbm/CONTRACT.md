@@ -3212,6 +3212,13 @@ electronics cooling (the wedge's second physics after steady conduction).
   fitting makes no multidimensional higher-order or turbulence claim. The
   numerical-leaf tests check exact face fluxes and limiting coefficients;
   `exponential_convection` checks the original CHT boundary-value solve.
+  All schemes form owner and neighbour coefficients from one nonnegative
+  fitted conductance, so reversing a heat face swaps them bit-for-bit rather
+  than cancelling inflow diffusion. Exponential fitting evaluates the
+  dimensioned conductance before underflow; a vanishing dimensionless weight
+  does not erase representable physical transport. G0/G1/G3 tests cover
+  paired heat cancellation, counterflow at large Peclet number, dimensional
+  rescaling, and the existing graded analytic profile. CHT semantics is 4.
 - `EnergyBalance` is computed from boundary and fixed-cell fluxes alone:
   `source + fixed_injection - boundary_outflow` closes to roundoff because
   the face fluxes telescope; `EnergySolution` adds `bulk_temperature_x`,
