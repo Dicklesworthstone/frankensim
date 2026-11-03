@@ -5,8 +5,11 @@
 //! are inner trials, not frozen replacements for the material law. The contact
 //! set owns ALL fixed and variable interfaces; a second set is never discarded.
 
+mod enclosure;
+
 use super::{EnthalpyHistoryRun, conduction, invalid, natural_only, poll};
 use super::adaptive::{PhaseErrorTolerance, phase_error};
+use super::radiation::enclosure::MaterialEnclosureHistoryBinding;
 use super::super::{events, radiation::{RadiationRegionHistory, admit_histories, patches_before}};
 use events::adaptive::{AdaptiveHistoryConfig, AdaptiveHistoryStep, admit_proposal, select_step};
 use crate::AmbientRadiationConfig;
@@ -27,6 +30,7 @@ pub struct ContactEnthalpyHistoryRun<'h, 'm, 'c, 'i> {
     contacts: TemperatureContacts<'m, 'i>,
     coupling: ContactHistoryCoupling,
     radiation: Option<(Vec<RadiationRegionHistory>, AmbientRadiationConfig)>,
+    material_enclosure: Option<MaterialEnclosureHistoryBinding<'h, 'c>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -63,7 +67,8 @@ impl<'h, 'm, 'c, 'i> ContactEnthalpyHistoryRun<'h, 'm, 'c, 'i> {
         let boundary = run.problem.boundary.at(cx, run.time_s).map_err(conduction)?;
         contacts.evaluate(cx, &boundary, &run.temperature).map_err(conduction)?;
         poll(cx, 0).map_err(conduction)?;
-        Ok(Self { run, contacts, coupling: ContactHistoryCoupling::Legacy(coupling), radiation: None })
+        Ok(Self { run, contacts, coupling: ContactHistoryCoupling::Legacy(coupling),
+            radiation: None, material_enclosure: None })
     }
 
     /// Attach original phase-aware contacts to the existing full enthalpy Newton
@@ -99,7 +104,8 @@ impl<'h, 'm, 'c, 'i> ContactEnthalpyHistoryRun<'h, 'm, 'c, 'i> {
         let boundary = run.problem.boundary.at(cx, run.time_s).map_err(conduction)?;
         contacts.evaluate_enthalpy(cx, &boundary, &run.storage, &run.specific_h)?;
         poll(cx, 0).map_err(conduction)?;
-        Ok(Self { run, contacts, coupling: ContactHistoryCoupling::Newton(config), radiation: None })
+        Ok(Self { run, contacts, coupling: ContactHistoryCoupling::Newton(config),
+            radiation: None, material_enclosure: None })
     }
 
     /// Retain sourced radiating surfaces and independent reservoir histories.
@@ -109,7 +115,7 @@ impl<'h, 'm, 'c, 'i> ContactEnthalpyHistoryRun<'h, 'm, 'c, 'i> {
         config: AmbientRadiationConfig) -> Result<Self, HeterogeneousEnthalpyError>
     {
         poll(cx, 0).map_err(conduction)?;
-        if self.run.accepted_steps != 0 || self.radiation.is_some() {
+        if self.run.accepted_steps != 0 || self.radiation.is_some() || self.material_enclosure.is_some() {
             return Err(invalid("attach radiation once, before the first material-contact history step"));
         }
         if matches!(self.coupling, ContactHistoryCoupling::Newton(_)) {
@@ -232,7 +238,9 @@ impl<'h, 'm, 'c, 'i> ContactEnthalpyHistoryRun<'h, 'm, 'c, 'i> {
         -> Result<f64, HeterogeneousEnthalpyError>
     {
         let reservoirs = self.radiation.iter().flat_map(|(patches, _)|
-            patches.iter().map(|patch| &patch.ambient_temperature));
+            patches.iter().map(|patch| &patch.ambient_temperature))
+            .chain(self.material_enclosure.iter().filter_map(
+                MaterialEnclosureHistoryBinding::ambient_temperature));
         events::next_endpoint(cx, self.run.problem.boundary, &self.run.problem.source,
             reservoirs, self.run.time_s, target, cap).map_err(conduction)
     }
@@ -250,6 +258,9 @@ impl<'h, 'm, 'c, 'i> ContactEnthalpyHistoryRun<'h, 'm, 'c, 'i> {
         let source = if before { events::source_before(&self.run.problem.source, to, old.len()) }
             else { self.run.problem.source.at(to, old.len()) }.map_err(conduction)?;
         let problem = self.run.conduction_problem(&boundary, &source)?;
+        if let Some(radiation) = &self.material_enclosure {
+            return self.solve_material_enclosure(cx, radiation, problem, old, to - from, to, step, before);
+        }
         let coupling = match self.coupling {
             ContactHistoryCoupling::Newton(_) => return Ok(self.contacts.advance_enthalpy_newton(
                 cx, &self.run.storage, problem, old, to - from, self.newton_config_for(step)?)?),

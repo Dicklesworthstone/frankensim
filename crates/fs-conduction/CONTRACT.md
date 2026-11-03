@@ -3632,3 +3632,39 @@ constructor refuses; this is not a claim of an all-green broad target.
 DSR and required sibling checkouts were unavailable. These are focused native
 implementation checks, not measured-interface validation or a continuum
 error bound.
+
+## Phase-dependent contact with material enclosure histories
+
+`ContactEnthalpyHistoryRun::with_material_enclosure` composes the retained
+enthalpy Newton contact policy with the original closed/open pointwise material
+radiation owner. The existing coupled Newton system simultaneously resolves
+reference-mass storage, source conductivity, both bodies' contact T/f states,
+phase-dependent emissivity and gray reflection. Contact resistance and
+emissivity are reevaluated from the same candidate h field. The original
+combined endpoint audit checks the full nodal joule residual and global heat
+balance before any accepted state or clock is changed.
+
+A shared immutable enclosure binding retains the original mesh, named traces,
+view factors, source contexts, pinned emissivity claims and exact caloric
+objects. It also serves the standalone material enclosure history, preserving
+that public API. Open enclosures require one typed black-bath temperature
+history; closed enclosures have no external radiative reservoir. Its knots
+join source and boundary events, including coincident held-signal changes.
+Direct endpoints sample right limits; event-aligned and adaptive candidates
+use interval-end left limits. Rejected candidates add no heat or accepted
+steps. Adaptive phase/enthalpy control commits only the two actual half-step
+states and their original physical contact/radiation reports.
+
+Internal contact and closed reflection cancel in the global balance. Open-bath
+exchange, authored heat sources and original boundary heat retain separate,
+once-only accounts. Attachment requires the Newton policy, an unadvanced
+history and exclusive radiation ownership. Source-domain, bath, identity,
+work-budget and cancellation refusals preserve the accepted h/T/f and clock.
+
+Three new native regressions compare eight-node implicit enthalpy trajectories
+with independently solved two-body contact and gray reflection equations,
+including exact triangular emissivity moments, unequal reference densities,
+isothermal phase evolution, closed energy conservation, scheduled bath/heater
+changes, phase-only time-error rejection and continuation after a future bath
+refusal. All six phase-contact history tests and the twelve existing material
+enclosure radiation tests pass against the composed production library.

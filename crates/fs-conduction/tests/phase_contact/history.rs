@@ -1,4 +1,6 @@
 //! Real phase-dependent contact trajectories on the existing h history owner.
+#[path = "history/enclosure.rs"]
+mod enclosure;
 use super::*;
 use fs_conduction::bc::history::ThermalBoundaryHistory;
 use fs_conduction::bc::history::march::{HeatSourceHistory, ThermalHistoryProblem};

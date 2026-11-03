@@ -14,7 +14,7 @@ use super::super::super::events::{
     adaptive::{AdaptiveHistoryConfig, AdaptiveHistoryStep, admit_proposal, select_step},
 };
 use crate::{
-    ConductionError, MaterialEnclosureRadiationPatch, MaterialPointwiseEnclosureRadiation,
+    ConductionError, ConductionMesh, MaterialEnclosureRadiationPatch, MaterialPointwiseEnclosureRadiation,
     PointwiseEnclosureRadiation, SURFACE_EMISSIVITY_PROPERTY, ScalarField,
     SurfaceEmissivity, TEMPERATURE_DIMS, ThermalBoundary,
 };
@@ -29,15 +29,14 @@ use fs_scenario::signal::TimeSignal;
 /// are shared across interval candidates. Material emissivity and the reflected
 /// operator are refreshed by the original material owner at each Newton state.
 /// Pressure, surface finish and other source conditions stay explicitly fixed.
-pub struct MaterialEnclosureEnthalpyHistoryRun<'h, 'm, 'c> {
-    run: EnthalpyHistoryRun<'h, 'm, 'c>,
+pub(crate) struct MaterialEnclosureHistoryBinding<'h, 'c> {
     base: &'h PointwiseEnclosureRadiation<'h>,
     patches: Vec<MaterialEnclosureRadiationPatch<'c>>,
     reference_emissivities: Vec<SurfaceEmissivity>,
     ambient_temperature: Option<TimeSignal>,
 }
 
-impl<'h, 'm, 'c> MaterialEnclosureEnthalpyHistoryRun<'h, 'm, 'c> {
+impl<'h, 'c> MaterialEnclosureHistoryBinding<'h, 'c> {
     /// Attach a closed or open material enclosure before the first endpoint.
     ///
     /// An open owner requires exactly one absolute-temperature schedule; a
@@ -49,8 +48,8 @@ impl<'h, 'm, 'c> MaterialEnclosureEnthalpyHistoryRun<'h, 'm, 'c> {
     /// Advanced history, wrong mesh/partition/chart, invalid source or schedule,
     /// unsupported spectral data, mismatched reservoir kind or cancellation.
     /// Construction does not advance any physical state.
-    pub fn new(
-        cx: &Cx<'_>, run: EnthalpyHistoryRun<'h, 'm, 'c>,
+    pub(crate) fn new(
+        cx: &Cx<'_>, run: &EnthalpyHistoryRun<'h, '_, 'c>,
         base: &'h PointwiseEnclosureRadiation<'h>,
         mut patches: Vec<MaterialEnclosureRadiationPatch<'c>>,
         ambient_temperature: Option<TimeSignal>,
@@ -73,22 +72,77 @@ impl<'h, 'm, 'c> MaterialEnclosureEnthalpyHistoryRun<'h, 'm, 'c> {
             )]);
             reference_emissivities.push(reference);
         }
-        let prepared = Self { run, base, patches, reference_emissivities, ambient_temperature };
-        let boundary = prepared.run.problem.boundary.at(cx, prepared.run.time_s())
+        let prepared = Self { base, patches, reference_emissivities, ambient_temperature };
+        let boundary = run.problem.boundary.at(cx, run.time_s())
             .map_err(conduction)?;
-        let base = prepared.sample(cx, &boundary, prepared.run.time_s(), false)?;
+        let base = prepared.sample(cx, run.problem.boundary.mesh(), &boundary, run.time_s(), false)?;
         let radiation = MaterialPointwiseEnclosureRadiation::new(cx, &base, &prepared.patches)
             .map_err(conduction)?;
-        if !radiation.matches_curves(cx, |vertex| prepared.run.storage.phase_curve_at(vertex)
+        if !radiation.matches_curves(cx, |vertex| run.storage.phase_curve_at(vertex)
             .expect("admitted history vertex has an original caloric chart"))
             .map_err(conduction)?
         {
             return Err(invalid("material enclosure history requires the exact storage caloric objects"));
         }
-        radiation.load_and_report(cx, &prepared.run.specific_h, &prepared.run.temperature)
+        radiation.load_and_report(cx, &run.specific_h, &run.temperature)
             .map_err(conduction)?;
         poll(cx, prepared.patches.len()).map_err(conduction)?;
         Ok(prepared)
+    }
+
+    pub(crate) fn patches(&self) -> &[MaterialEnclosureRadiationPatch<'c>] { &self.patches }
+
+    pub(crate) fn reference_emissivities(&self) -> &[SurfaceEmissivity] { &self.reference_emissivities }
+
+    pub(crate) fn ambient_temperature(&self) -> Option<&TimeSignal> { self.ambient_temperature.as_ref() }
+
+    pub(crate) fn sample<'s>(&'s self, cx: &Cx<'_>, mesh: &'s ConductionMesh,
+        boundary: &'s ThermalBoundary, time_s: f64, before: bool)
+        -> Result<PointwiseEnclosureRadiation<'s>, HeterogeneousEnthalpyError>
+    {
+        let base = self.base.at_history_boundary(cx, mesh, boundary).map_err(conduction)?;
+        let Some(signal) = &self.ambient_temperature else { return Ok(base); };
+        let value = if before { events::value_before(signal, time_s).map_err(conduction)? }
+        else { signal.eval(time_s).map_err(|error| conduction(ConductionError::Radiation {
+            surface: "open-enclosure-bath".into(),
+            what: format!("radiative reservoir history: {error}"),
+            fix: "supply a valid absolute-temperature history".into(),
+        }))? };
+        if value.dims != TEMPERATURE_DIMS {
+            return Err(conduction(ConductionError::Dimensions {
+                context: "material enclosure black-reservoir history".into(),
+                expected: TEMPERATURE_DIMS.0, found: value.dims.0,
+            }));
+        }
+        base.with_ambient_temperature_k(value.value).map_err(conduction)
+    }
+}
+
+/// Persistent material h/T/f with the original closed or open gray enclosure.
+/// Geometry, source selections and the reservoir schedule remain attached to
+/// every direct, event-aligned and adaptive interval.
+pub struct MaterialEnclosureEnthalpyHistoryRun<'h, 'm, 'c> {
+    run: EnthalpyHistoryRun<'h, 'm, 'c>,
+    radiation: MaterialEnclosureHistoryBinding<'h, 'c>,
+}
+
+impl<'h, 'm, 'c> MaterialEnclosureEnthalpyHistoryRun<'h, 'm, 'c> {
+    /// Attach original material reflection before the first endpoint.
+    /// An open enclosure requires one black-bath temperature history; a closed
+    /// enclosure requires `None`. Exact storage charts and pinned source claims
+    /// are admitted at the initial state, without advancing physical time.
+    ///
+    /// # Errors
+    /// Advanced history, mesh/partition/chart mismatch, source or reservoir
+    /// refusal, unsupported spectral data, or cancellation.
+    pub fn new(
+        cx: &Cx<'_>, run: EnthalpyHistoryRun<'h, 'm, 'c>,
+        base: &'h PointwiseEnclosureRadiation<'h>,
+        patches: Vec<MaterialEnclosureRadiationPatch<'c>>,
+        ambient_temperature: Option<TimeSignal>,
+    ) -> Result<Self, HeterogeneousEnthalpyError> {
+        let radiation = MaterialEnclosureHistoryBinding::new(cx, &run, base, patches, ambient_temperature)?;
+        Ok(Self { run, radiation })
     }
 
     /// Accepted enthalpy, temperature, fractions, reference storage and clock.
@@ -97,18 +151,18 @@ impl<'h, 'm, 'c> MaterialEnclosureEnthalpyHistoryRun<'h, 'm, 'c> {
 
     /// Original material declarations with pinned source claims in surface order.
     #[must_use]
-    pub fn patches(&self) -> &[MaterialEnclosureRadiationPatch<'c>] { &self.patches }
+    pub fn patches(&self) -> &[MaterialEnclosureRadiationPatch<'c>] { self.radiation.patches() }
 
     /// Preparation snapshots only; accepted reports carry actual nodal states.
     #[must_use]
     pub fn reference_emissivities(&self) -> &[SurfaceEmissivity] {
-        &self.reference_emissivities
+        self.radiation.reference_emissivities()
     }
 
     /// The sole black-bath history, absent for a closed enclosure.
     #[must_use]
     pub fn ambient_temperature(&self) -> Option<&TimeSignal> {
-        self.ambient_temperature.as_ref()
+        self.radiation.ambient_temperature()
     }
 
     /// Resume with more accepted endpoints without replacing any physical owner.
@@ -147,7 +201,7 @@ impl<'h, 'm, 'c> MaterialEnclosureEnthalpyHistoryRun<'h, 'm, 'c> {
         }
         let start_time_s = self.run.time_s();
         let end_time_s = events::next_endpoint(cx, self.run.problem.boundary,
-            &self.run.problem.source, self.ambient_temperature.iter(),
+            &self.run.problem.source, self.radiation.ambient_temperature().into_iter(),
             start_time_s, target_s, max_step_s).map_err(conduction)?;
         let report = self.solve_before(cx, &self.run.specific_h, start_time_s, end_time_s, config)?;
         self.run.publish(cx, end_time_s, &report)?;
@@ -172,7 +226,7 @@ impl<'h, 'm, 'c> MaterialEnclosureEnthalpyHistoryRun<'h, 'm, 'c> {
         let cap = admit_proposal(cx, self.run.accepted_steps(), self.run.max_steps(),
             proposed_step_s, adaptive).map_err(conduction)?;
         let end = events::next_endpoint(cx, self.run.problem.boundary, &self.run.problem.source,
-            self.ambient_temperature.iter(), start, target_s, cap).map_err(conduction)?;
+            self.radiation.ambient_temperature().into_iter(), start, target_s, cap).map_err(conduction)?;
         let selected = select_step(cx, start, end, adaptive, conduction, |middle, end| {
             let coarse = self.solve_before(cx, &self.run.specific_h, start, end, step)?;
             let first = self.solve_before(cx, &self.run.specific_h, start, middle, step)?;
@@ -183,27 +237,6 @@ impl<'h, 'm, 'c> MaterialEnclosureEnthalpyHistoryRun<'h, 'm, 'c> {
         self.run.publish(cx, selected.end_time_s, &selected.second_half)?;
         self.run.accepted_steps += 1;
         Ok(selected)
-    }
-
-    fn sample<'s>(&'s self, cx: &Cx<'_>, boundary: &'s ThermalBoundary, time_s: f64, before: bool)
-        -> Result<PointwiseEnclosureRadiation<'s>, HeterogeneousEnthalpyError>
-    {
-        let base = self.base.at_history_boundary(cx, self.run.problem.boundary.mesh(), boundary)
-            .map_err(conduction)?;
-        let Some(signal) = &self.ambient_temperature else { return Ok(base); };
-        let value = if before { events::value_before(signal, time_s).map_err(conduction)? }
-        else { signal.eval(time_s).map_err(|error| conduction(ConductionError::Radiation {
-            surface: "open-enclosure-bath".into(),
-            what: format!("radiative reservoir history: {error}"),
-            fix: "supply a valid absolute-temperature history".into(),
-        }))? };
-        if value.dims != TEMPERATURE_DIMS {
-            return Err(conduction(ConductionError::Dimensions {
-                context: "material enclosure black-reservoir history".into(),
-                expected: TEMPERATURE_DIMS.0, found: value.dims.0,
-            }));
-        }
-        base.with_ambient_temperature_k(value.value).map_err(conduction)
     }
 
     fn solve_before(&self, cx: &Cx<'_>, old: &[f64], from: f64, to: f64,
@@ -220,8 +253,8 @@ impl<'h, 'm, 'c> MaterialEnclosureEnthalpyHistoryRun<'h, 'm, 'c> {
         source: &ScalarField, dt_s: f64, time_s: f64, before: bool, config: EnthalpyStepConfig)
         -> Result<EnthalpyStepSolution, HeterogeneousEnthalpyError>
     {
-        let base = self.sample(cx, boundary, time_s, before)?;
-        let radiation = MaterialPointwiseEnclosureRadiation::new(cx, &base, &self.patches)
+        let base = self.radiation.sample(cx, self.run.problem.boundary.mesh(), boundary, time_s, before)?;
+        let radiation = MaterialPointwiseEnclosureRadiation::new(cx, &base, self.radiation.patches())
             .map_err(conduction)?;
         Ok(self.run.storage.advance_with_material_enclosure_radiation(cx,
             self.run.conduction_problem(boundary, source)?, self.run.problem.interfaces,
