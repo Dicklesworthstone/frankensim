@@ -1,19 +1,22 @@
 # Reactive mineral thermochemistry
 
-The six solid-phase profiles below supply reference data through the existing `matdb-pack` compiler
-and catalog. They complement mineral density and hardness references with
+The solid-phase profiles below use the existing `matdb-pack` compiler and
+catalog. They complement mineral density and hardness references with
 phase-specific molar quantities needed for thermal and chemical accounting.
+Calcite also has a directly tabulated standard formation Gibbs energy for
+reaction driving-force calculations with the compatible aqueous source set.
 
-| Profile | Molar mass, kg/mol | Formation enthalpy at 298.15 K, J/mol | Standard entropy, J/(mol K) | Cp domain |
-| --- | ---: | ---: | ---: | --- |
-| `calcite-solid-usgs-b2131-thermochemistry` | 0.100087 | −1207400 | 91.71 | 298.15–500 K |
-| `dolomite-solid-usgs-b2131-thermochemistry` | 0.184401 | −2324500 | 155.2 | 298.15–500 K |
-| `pyrite-solid-janaf-thermochemistry` | 0.119967 | −171544 | 52.916 | 298.15–500 K |
-| `quartz-alpha-janaf-standard-reference` | 0.0600843 | −910857 | 41.463 | No new Cp claim |
-| `gypsum-solid-usgs-b2131-thermochemistry` | 0.172172 | −2023000 | 193.8 | Not supplied |
-| `anhydrite-solid-usgs-b2131-thermochemistry` | 0.136142 | −1434400 | 107.4 | 298.15–1000 K |
+| Profile | Molar mass, kg/mol | Formation enthalpy at 298.15 K, J/mol | Formation Gibbs energy at 298.15 K, J/mol | Standard entropy, J/(mol K) | Cp domain |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `calcite-solid-usgs-b2131-thermochemistry` | 0.100087 | −1207400 | −1128500 | 91.71 | 298.15–500 K |
+| `dolomite-solid-usgs-b2131-thermochemistry` | 0.184401 | −2324500 | Not supplied | 155.2 | 298.15–500 K |
+| `pyrite-solid-janaf-thermochemistry` | 0.119967 | −171544 | Not supplied | 52.916 | 298.15–500 K |
+| `quartz-alpha-janaf-standard-reference` | 0.0600843 | −910857 | Not supplied | 41.463 | No new Cp claim |
+| `gypsum-solid-usgs-b2131-thermochemistry` | 0.172172 | −2023000 | Not supplied | 193.8 | Not supplied |
+| `anhydrite-solid-usgs-b2131-thermochemistry` | 0.136142 | −1434400 | Not supplied | 107.4 | 298.15–1000 K |
 
-Formation enthalpy and entropy are point claims at 298.15 K and 100000 Pa.
+Formation enthalpy, formation Gibbs energy and entropy are point claims at
+298.15 K and 100000 Pa. A Cp curve does not extend their reference-state domain.
 Calcite and pyrite retain four literal molar Cp observations, converted to
 J/(kg K) with the selected source's formula weight. Their piecewise-linear
 interpolation is an authored approximation with unstated uncertainty. Quartz
@@ -30,6 +33,10 @@ Its reference convention is `source-elemental-reference-usgs-b2131=1`.
 The source specifies one bar and standard elemental states, while its elemental
 evaluations combine JANAF, CODATA and separate USGS calcium measurements.
 This profile is not relabeled as a JANAF evaluation for convenience.
+The selected page's literal formation Gibbs energy is **−1128.5 kJ/mol**;
+nearby values from other compilations are not substituted. Its
+`standard-molar-formation-gibbs-energy` claim has separate source evidence and
+retains the same calcite phase and USGS reference selectors.
 
 Gypsum (CaSO4·2H2O) and orthorhombic anhydrite (CaSO4) follow the same USGS
 reference convention. Their standard quantities come from
@@ -58,6 +65,14 @@ enthalpy and entropy, with explicitly attributed
 [WebBook molar mass](https://webbook.nist.gov/cgi/cbook.cgi?ID=C14808607&Mask=2).
 Both JANAF profiles require `source-elemental-reference-janaf=1`.
 
+The separate `pyrite-solid-usgs-b2131-thermochemistry` profile supplies a
+compatible USGS pyrite reference for aqueous redox accounting. Together with
+O2(g), H2O(l), Fe2+(aq), the new Fe3+(aq) profile, sulfate and H+, it supplies
+complete enthalpy and Gibbs sources for pyrite oxidation, ferrous oxidation
+and ferric leaching. Their primary values, reference conventions, reaction
+equations and executable activity example are in
+[Aqueous pyrite oxidation and acid-generation references](MINING_ACID_GENERATION.md).
+
 All solid-phase profiles above require typed temperature and pressure, `source-phase-solid=1`,
 `source-pure-species=1`, `source-standard-state=1`,
 `engineering-reference-model=1`, and `source-specimen-qualified=0`. The
@@ -67,7 +82,7 @@ additional phase selectors are `source-phase-calcite=1`,
 `source-phase-gypsum=1`, or `source-phase-anhydrite=1` respectively.
 Each profile's own elemental-reference selector is mandatory.
 
-These solid-phase records do not supply aqueous-ion properties, dissolution/oxidation
+The solid-phase records supply no aqueous-ion properties, dissolution/oxidation
 rates, decomposition boundaries, equilibrium conversion or plant recovery.
 Reaction heat needs a complete, compatible set of participant formation data;
 an isolated mineral enthalpy is not a heat-of-leaching prediction.
@@ -99,16 +114,16 @@ dehydration rate or a complete reaction heat without compatible participants.
 
 ## Aqueous references for calcite neutralization
 
-Three additional profiles supply aqueous data from the same USGS Bulletin 2131
-reference convention as calcite. The primary rows are on printed pages 7, 6,
+Three aqueous profiles use the same USGS Bulletin 2131 reference convention
+as calcite. Their primary rows are on printed pages 7, 6,
 and 15 of the [report](https://pubs.usgs.gov/bul/2131/report.pdf), respectively.
 All values below apply at 298.15 K and 100000 Pa.
 
-| Profile | Molar mass, kg/mol | Formation enthalpy, J/mol | Conventional ionic entropy, J/(mol K) |
-| --- | ---: | ---: | ---: |
-| `hydrogen-ion-aqueous-usgs-b2131` | 0.001008 | 0 | 0 |
-| `calcium-ion-aqueous-usgs-b2131` | 0.040078 | -543000 | -56.2 |
-| `bicarbonate-ion-aqueous-usgs-b2131` | 0.061017 | -689900 | 98.4 |
+| Profile | Molar mass, kg/mol | Formation enthalpy, J/mol | Formation Gibbs energy, J/mol | Conventional ionic entropy, J/(mol K) |
+| --- | ---: | ---: | ---: | ---: |
+| `hydrogen-ion-aqueous-usgs-b2131` | 0.001008 | 0 | 0 | 0 |
+| `calcium-ion-aqueous-usgs-b2131` | 0.040078 | -543000 | -553600 | -56.2 |
+| `bicarbonate-ion-aqueous-usgs-b2131` | 0.061017 | -689900 | -586800 | 98.4 |
 
 The source defines aqueous `m=1` as the hypothetical ideal state at unit
 activity with ions at infinite dilution. It is not a measured finite-
@@ -141,17 +156,44 @@ reacted pure calcite, this is 1000 mol extent and **-25.5 MJ**. It consumes
 1.008 kg H+ and forms 40.078 kg calcium ions and 61.017 kg bicarbonate ions.
 These are net ionic quantities, not the mass of a commercial acid solution.
 
+The independently tabulated Gibbs sources give **−11900 J/mol extent**,
+`ln K° = 4.8004059` and dimensionless `K° ≈ 121.55975` at 298.15 K.
+`ConservedReaction::standard_gibbs_change` retains each selected claim and
+receipt, including the zero-reference H+ claim. With explicitly supplied
+dimensionless activities, `StandardReactionGibbs::at_activities` uses
+
+$$
+Q = \frac{a_{\mathrm{Ca^{2+}}}a_{\mathrm{HCO_3^-}}}
+         {a_{\mathrm{CaCO_3}}a_{\mathrm{H^+}}},
+\qquad \Delta_r G = RT\ln(Q/K^\circ).
+$$
+
+This follows the IUPAC definitions of
+[activity](https://goldbook.iupac.org/terms/view/A00115) and the
+[standard equilibrium constant](https://goldbook.iupac.org/terms/view/S05915).
+If pure calcite is assigned activity one, that value is still an explicit
+input. `Q<K°` gives a forward thermodynamic driving force, and `Q>K°` a reverse
+one. The calculation evaluates the declared state; it does not select pH,
+compute solution speciation or solve for a finite equilibrium extent. Every
+active species needs a finite positive activity in the retained source
+convention. The returned `ΔrG` is a local derivative per mole of equation
+extent, so a changing-activity process requires more than multiplying it by
+reacted mass. The formation-Gibbs column remains separate from formation
+enthalpy and conventional ionic entropy; no species-level `Hf−T*S` shortcut
+or temperature extrapolation is used.
+
 Compile each profile using the existing `cargo run -p xtask -- matdb-pack
 --manifest .../manifest.tsv --out ...fsmatpk` command, then run:
 
 ```bash
 cargo run -p fs-thermochem --example mineral_processing -- \
-  --reaction calcite-bicarbonate-neutralization \
+  --reaction calcite-bicarbonate-neutralization --gibbs \
   /tmp/mining-materials/calcite-solid-usgs-b2131-thermochemistry.fsmatpk \
   /tmp/mining-materials/hydrogen-ion-aqueous-usgs-b2131.fsmatpk \
   /tmp/mining-materials/calcium-ion-aqueous-usgs-b2131.fsmatpk \
   /tmp/mining-materials/bicarbonate-ion-aqueous-usgs-b2131.fsmatpk 100.087
 cargo test -p xtask --test mining_aqueous_sources
+cargo test -p xtask --test mining_aqueous_redox_sources
 ```
 
 The integration checks compile all four actual packs, verify source receipts,
@@ -161,8 +203,14 @@ giving -153000 J at that ceiling. Overdrawn inventory refuses. This is an
 availability bound, not a predicted conversion or dissolution rate. The
 two-proton dissolved-CO2 endpoint remains a different reaction requiring its
 own complete source set; bicarbonate data are not relabeled as CO2(aq).
-Finite-concentration activities, heat of mixing, pH selection, gas transfer
-and thermal plant behavior require additional models.
+The CLI's `--gibbs` option reports the standard reaction Gibbs energy and
+equilibrium constant when every pack provides the required source claim.
+Repeated `--activity 'SPECIES=VALUE'` options before the pack list additionally
+evaluate the supplied activity state; all participants, including calcite, are
+required. A full source-pack example appears in the
+[acid-generation reference](MINING_ACID_GENERATION.md#run-the-source-backed-balance).
+Concentration-to-activity models, heat of mixing, pH selection, gas transfer
+and thermal plant behavior remain separate inputs or models.
 
 ## Dolomite gangue neutralization and heating
 

@@ -8,12 +8,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fs_matdb::{NormalizedPack, PropertyKey, QueryPoint, SelectionPolicy, UncertaintyModel};
 use fs_qty::{
-    Amount, Dims, MolarMass, QuantitySpec,
+    Amount, Dimensionless, Dims, MolarMass, QuantitySpec,
     semantic::{QuantityKind, SemanticType, ValueForm},
 };
 use fs_thermochem::{
     SpeciesId,
-    stoichiometry::{FormationEnthalpySource, minerals::MineralReaction},
+    equilibrium::EquilibriumConstantStatusV1,
+    stoichiometry::{
+        FormationEnthalpySource, minerals::MineralReaction, thermodynamics::FormationGibbsSource,
+    },
 };
 
 const REFERENCE: &str = "source-elemental-reference-usgs-b2131";
@@ -180,7 +183,6 @@ fn g0_g3_redox_profiles_preserve_printed_quantities_and_reference_states() {
     ] {
         let pack = compile(slug);
         let count = match slug {
-            FERRIC => 4,
             OXYGEN => 5,
             _ => 6,
         };
@@ -260,6 +262,37 @@ fn g1_real_sources_close_pyrite_oxidation_heat_with_limited_oxygen() {
     let heat = reaction.standard_enthalpy_change(&sources).unwrap();
     // Independently summed printed source entries, per integer equation.
     assert_eq!(heat.molar().value(), -2_904_800.0);
+    let gibbs_sources: [_; 6] = std::array::from_fn(|i| FormationGibbsSource {
+        species: &ids[i],
+        pack: &packs[i],
+        at: &points[i],
+        reference_axis: REFERENCE,
+    });
+    let gibbs = reaction.standard_gibbs_change(&gibbs_sources).unwrap();
+    assert_eq!(gibbs.molar().value(), -2_361_600.0);
+    // Independently calculated with decimal arithmetic. K exceeds f64 range,
+    // but ln(K) and the driving force remain usable without an infinite K.
+    assert!((gibbs.log_equilibrium_constant().value() - 952.6587075931639).abs() < 1e-10);
+    assert_eq!(gibbs.status(), EquilibriumConstantStatusV1::LogOnlyOverflow);
+    assert!(gibbs.equilibrium_constant().is_none());
+    let unit_activities: [_; 6] =
+        std::array::from_fn(|i| (ids[i].clone(), Dimensionless::new(1.0)));
+    assert!(
+        (gibbs.at_activities(&unit_activities).unwrap().molar.value() - gibbs.molar().value())
+            .abs()
+            < 1e-8
+    );
+    for term in gibbs.terms() {
+        let pack = packs
+            .iter()
+            .find(|pack| pack.pack_id() == term.pack_id)
+            .unwrap();
+        pack.claims().verify_receipt(&term.answer.receipt).unwrap();
+        assert_eq!(
+            term.answer.evidence.value.uncertainty,
+            UncertaintyModel::Unstated
+        );
+    }
     let initial: [_; 6] = std::array::from_fn(|i| {
         (
             ids[i].clone(),
@@ -294,4 +327,123 @@ fn g1_real_sources_close_pyrite_oxidation_heat_with_limited_oxygen() {
             .unwrap();
         pack.claims().verify_receipt(&term.answer.receipt).unwrap();
     }
+}
+
+#[test]
+fn g1_ferric_pyrite_cycle_preserves_source_backed_hess_energy() {
+    // Source numbers are independent literal B2131 rows. The ferric oxidant
+    // must regenerate through a separate oxygen- and proton-consuming step.
+    let packs = [PYRITE, OXYGEN, WATER, FERROUS, FERRIC, SULFATE, HYDROGEN].map(compile);
+    let ids = [
+        "FeS2(s)",
+        "O2(g)",
+        "H2O(l)",
+        "Fe[2+](aq)",
+        "Fe[3+](aq)",
+        "SO4[2-](aq)",
+        "H+(aq)",
+    ]
+    .map(|id| SpeciesId::new(id).unwrap());
+    let points = [
+        "pyrite", "gas", "liquid", "aqueous", "aqueous", "aqueous", "aqueous",
+    ]
+    .map(point);
+    let mut sums = Vec::new();
+    for (endpoint, expected_h, expected_g) in [
+        (
+            MineralReaction::FerricPyriteOxidation,
+            -28_600.0,
+            -547_300.0,
+        ),
+        (
+            MineralReaction::FerrousOxidationFerric,
+            -406_800.0,
+            -181_000.0,
+        ),
+        (
+            MineralReaction::PyriteOxidationFerrous,
+            -2_904_800.0,
+            -2_361_600.0,
+        ),
+    ] {
+        let reaction = endpoint.build().unwrap();
+        let active: Vec<_> = (0..ids.len())
+            .filter(|i| reaction.terms().iter().any(|term| term.species == ids[*i]))
+            .collect();
+        let enthalpy: Vec<_> = active
+            .iter()
+            .map(|&i| FormationEnthalpySource {
+                species: &ids[i],
+                pack: &packs[i],
+                at: &points[i],
+                reference_axis: REFERENCE,
+            })
+            .collect();
+        let gibbs: Vec<_> = active
+            .iter()
+            .map(|&i| FormationGibbsSource {
+                species: &ids[i],
+                pack: &packs[i],
+                at: &points[i],
+                reference_axis: REFERENCE,
+            })
+            .collect();
+        let heat = reaction.standard_enthalpy_change(&enthalpy).unwrap();
+        let driving = reaction.standard_gibbs_change(&gibbs).unwrap();
+        assert_eq!(heat.molar().value(), expected_h);
+        assert_eq!(driving.molar().value(), expected_g);
+        sums.push((heat.molar().value(), driving.molar().value()));
+    }
+    // 2 ferric attacks + 7 Fe(II) oxidations = the 2-pyrite net endpoint.
+    // This catches source-convention and integer-extent mistakes in the cycle.
+    assert_eq!(2.0 * sums[0].0 + 7.0 * sums[1].0, sums[2].0);
+    assert_eq!(2.0 * sums[0].1 + 7.0 * sums[1].1, sums[2].1);
+}
+
+#[test]
+fn g1_calcite_driving_force_uses_explicit_proton_and_product_activities() {
+    let packs = [
+        "calcite-solid-usgs-b2131-thermochemistry",
+        HYDROGEN,
+        "calcium-ion-aqueous-usgs-b2131",
+        "bicarbonate-ion-aqueous-usgs-b2131",
+    ]
+    .map(compile);
+    let ids =
+        ["CaCO3(s)", "H+(aq)", "Ca[2+](aq)", "HCO3[-](aq)"].map(|id| SpeciesId::new(id).unwrap());
+    let points = ["calcite", "aqueous", "aqueous", "aqueous"].map(point);
+    let sources: [_; 4] = std::array::from_fn(|i| FormationGibbsSource {
+        species: &ids[i],
+        pack: &packs[i],
+        at: &points[i],
+        reference_axis: REFERENCE,
+    });
+    let reaction = MineralReaction::CalciteBicarbonateNeutralization
+        .build()
+        .unwrap();
+    let standard = reaction.standard_gibbs_change(&sources).unwrap();
+    assert_eq!(standard.molar().value(), -11_900.0);
+    assert_eq!(
+        standard.status(),
+        EquilibriumConstantStatusV1::FinitePositive
+    );
+    assert!((standard.equilibrium_constant().unwrap().value() - 121.55975102333887).abs() < 1e-10);
+    let mut activities: [_; 4] = std::array::from_fn(|i| {
+        (
+            ids[i].clone(),
+            Dimensionless::new([1.0, 1e-6, 1e-3, 1e-3][i]),
+        )
+    });
+    let acidic = standard.at_activities(&activities).unwrap();
+    assert!((acidic.log_quotient.value()).abs() < 1e-12);
+    assert!((acidic.molar.value() + 11_900.0).abs() < 1e-8);
+    assert!(acidic.affinity().value() > 0.0);
+    // Hold product and solid activities fixed while lowering a(H+). This is
+    // a declared activity scenario, not an inferred concentration/speciation.
+    activities[1].1 = Dimensionless::new(1e-10);
+    let depleted = standard.at_activities(&activities).unwrap();
+    assert!((depleted.molar.value() - 10_932.038010141036).abs() < 1e-8);
+    assert!(depleted.affinity().value() < 0.0);
+    // Even the pure-solid activity must be supplied; no hidden activity=1.
+    assert!(standard.at_activities(&activities[1..]).is_err());
 }

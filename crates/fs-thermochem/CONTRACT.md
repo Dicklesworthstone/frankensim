@@ -19,17 +19,19 @@ inventory resolution refuse rather than clipping or disappearing. The exact
 certificate proves the integer equation; binary64 final amounts are separately
 evaluated, with no claim of exact numerical mass conservation.
 
-`stoichiometry::minerals::MineralReaction` provides twenty-one explicit reference
+`stoichiometry::minerals::MineralReaction` provides twenty-four explicit reference
 endpoints: lime hydration, calcite/dolomite acid neutralization to dissolved
 CO2 or retained bicarbonate, hydrated-lime neutralization, malachite acid
 leaching to dissolved copper and CO2, separate calcite/malachite pathways to
 the USGS source-defined un-ionized H2CO3(aq), the net ionic Elsner gold-cyanidation
 balance, pyrite oxidation to either ferrous ions or ideal ferric hydroxide,
+ferrous oxidation to ferric ions, ferric attack on pyrite,
 magnesite calcination to crystalline MgO and gaseous CO2, magnetite
 oxidation to hematite, cuprous-oxide oxidation, and carbon-monoxide reduction
 of either cupric or cuprous oxide to crystalline copper and gaseous CO2,
 dry pyrite roasting to hematite/SO2, SO2 oxidation to gaseous SO3, SO3 hydration
-to pure liquid H2SO4, and the net pyrite-to-hematite/pure-acid endpoint.
+to pure liquid H2SO4, the net pyrite-to-hematite/pure-acid endpoint, and copper
+electrowinning with an oxygen-evolving anode.
 The bicarbonate pathways consume half as many protons per mole of carbonate
 mineral as the CO2 pathways. The equations do not assign a universal measured
 acid consumption to an ore, nor infer gas transfer or commercial reagent purity.
@@ -43,7 +45,7 @@ oxygen demand, and metal production. Their JANAF formation sources give
 −282838 J/mol for `2 Cu2O + O2 -> 4 CuO`, −126932 J/mol for
 `CuO + CO -> Cu + CO2`, and −112288 J/mol for `Cu2O + CO -> 2 Cu + CO2`.
 These are per written equation at the admitted standard state. The runnable
-`mineral_processing` example accepts the three- or four-pack source sets,
+`mineral_processing` example accepts explicit compatible source sets,
 prints each consumed/formed mass, retains independently rounded molar masses,
 and exposes their mass-sum residual instead of adjusting a source value.
 The sulfur endpoints reuse the existing pyrite JANAF source with its explicit
@@ -107,6 +109,18 @@ Delta_r G = R T ln(Q/K°) is a local dG/dxi diagnostic; forward affinity is its
 negative. It is not a finite-extent total free-energy change, an equilibrium
 composition solve, a phase-selection certificate or a kinetic prediction.
 No concentrations, activity coefficients, pH or ideal-gas EOS are inferred.
+
+The USGS B2131 source set covers pyrite oxidation, ferrous-oxidant regeneration,
+ferric pyrite leaching and calcite bicarbonate neutralization. Two ferric-leach
+extents plus seven ferrous-oxidation extents reproduce one integer net pyrite
+oxidation equation, including cancellation of intermediate iron and acid used
+by regeneration. Exact stoichiometry and source-backed H/G Hess sums are checked
+independently. Each finite stage still needs its reactants in inventory.
+The example exposes standard diagnostics through `--gibbs` and accepts repeated
+`--activity 'SPECIES=VALUE'` inputs for a complete explicit activity state.
+Pyrite oxidation retains finite ln(K°) even though direct K° overflows; the
+calcite source regression verifies reversal of driving force on lowering proton
+activity while holding product activities fixed.
 
 G0/G3 regressions cover independent Decimal known answers, reaction reversal
 and scaling, conserved reference shifts, source/activity permutation,

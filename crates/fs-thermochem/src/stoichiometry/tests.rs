@@ -54,6 +54,8 @@ fn all_reference_reactions_conserve_and_rebuild_identically() {
         MalachiteCarbonicAcidLeach,
         GoldCyanidation,
         PyriteOxidationFerrous,
+        FerrousOxidationFerric,
+        FerricPyriteOxidation,
         PyriteOxidationFerricHydroxide,
         MagnesiteCalcination,
         MagnetiteOxidationToHematite,
@@ -64,6 +66,7 @@ fn all_reference_reactions_conserve_and_rebuild_identically() {
         SulfurDioxideOxidation,
         SulfurTrioxideHydration,
         PyriteToHematiteAndSulfuricAcid,
+        CopperElectrowinning,
     ] {
         let first = recipe.build().unwrap();
         let second = recipe.build().unwrap();
@@ -110,6 +113,59 @@ fn pyrite_endpoint_changes_oxygen_demand_and_acid_generation() {
             .unwrap()
             .value(),
         0.5,
+    );
+}
+
+#[test]
+fn ferric_pyrite_cycle_cancels_intermediate_iron_and_regeneration_acid() {
+    let attack = MineralReaction::FerricPyriteOxidation.build().unwrap();
+    let regeneration = MineralReaction::FerrousOxidationFerric.build().unwrap();
+    let net = MineralReaction::PyriteOxidationFerrous.build().unwrap();
+    // Two ferric attacks + seven integer regeneration equations equal the
+    // direct two-pyrite endpoint. Do not count 16 H+ per pyrite as net acid.
+    let mut combined = std::collections::BTreeMap::new();
+    for (reaction, multiple) in [(&attack, 2), (&regeneration, 7), (&net, -1)] {
+        for term in reaction.terms() {
+            *combined.entry(term.species.clone()).or_insert(0_i128) += multiple * term.coefficient;
+        }
+    }
+    assert!(combined.values().all(|coefficient| *coefficient == 0));
+    close(amount(&attack, 1.0, "Fe[3+](aq)"), 14.0);
+    close(amount(&attack, 1.0, "Fe[2+](aq)"), 15.0);
+    close(amount(&attack, 1.0, "H+(aq)"), 16.0);
+    close(amount(&regeneration, 3.5, "H+(aq)"), 14.0);
+    close(amount(&regeneration, 3.5, "O2(g)"), 3.5);
+}
+
+#[test]
+fn ferric_pyrite_leach_stops_at_available_oxidant() {
+    let reaction = MineralReaction::FerricPyriteOxidation.build().unwrap();
+    let initial = [
+        (id("FeS2(s)"), Amount::new(3.0)),
+        (id("Fe[3+](aq)"), Amount::new(28.0)),
+        (id("H2O(l)"), Amount::new(20.0)),
+        (id("Fe[2+](aq)"), Amount::new(0.0)),
+        (id("SO4[2-](aq)"), Amount::new(0.0)),
+        (id("H+(aq)"), Amount::new(0.0)),
+    ];
+    let extent = reaction.limiting_extent(&initial[..3]).unwrap();
+    close(extent.value(), 2.0);
+    let final_inventory = reaction.advance_inventory(&initial, extent).unwrap();
+    for ((species, _), expected) in initial.iter().zip([1.0, 0.0, 4.0, 30.0, 4.0, 32.0]) {
+        close(
+            final_inventory
+                .iter()
+                .find(|(id, _)| id == species)
+                .unwrap()
+                .1
+                .value(),
+            expected,
+        );
+    }
+    assert!(
+        reaction
+            .advance_inventory(&initial, Amount::new(2.01))
+            .is_err()
     );
 }
 

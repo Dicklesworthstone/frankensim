@@ -1,4 +1,4 @@
-//! Evaluate mineral reaction amounts and heat from actual material packs.
+//! Evaluate mineral reaction amounts, heat and Gibbs diagnostics from material packs.
 //!
 //! Usage: `cargo run -p fs-thermochem --example mineral_processing -- \
 //! cao.fsmatpk water.fsmatpk caoh2.fsmatpk 56.077`
@@ -10,14 +10,19 @@
 //! reference data, with bicarbonate retained in solution.
 //! `--help` lists every supported reaction and required pack order.
 //! Prefix a source-pack invocation with `--equilibrium` to also resolve standard
-//! entropy, Gibbs energy and log equilibrium constants at the same source state.
+//! entropy and derive Gibbs energy and log equilibrium constants from enthalpy
+//! and entropy at the same source state.
+//! `--gibbs` additionally requires a formation-Gibbs claim for every participant.
+//! Repeated `--activity 'SPECIES=VALUE'` arguments imply `--gibbs` and evaluate
+//! the local reaction Gibbs energy only when every active activity is supplied.
+//! Both routes can be requested; independently rounded source values can differ.
 //! Or explicit malachite inventory accounting, with all four inputs in moles:
 //! `cargo run -p fs-thermochem --example mineral_processing -- \
 //! --malachite-inventory 10 12 100 3`
 //!
 //! In the source-pack modes, the final argument is kilograms of the first
-//! species actually reacted. For an aqueous ion this is its chemical-equivalent
-//! mass, not solution mass or an isolated pure-ion phase. Feed composition and
+//! declared chemical species actually reacted. For aqueous ions this is ion
+//! mass, not the mass of a solution. Commercial feed purity, concentration and
 //! conversion require separate evidence.
 //! This is standard-state bookkeeping at 298.15 K and 1 bar, not a plant
 //! temperature, reaction-rate, water-dosing or recovery prediction.
@@ -26,10 +31,12 @@ use std::{error::Error, path::Path};
 
 use fs_matdb::{MatDbError, NormalizedPack, PropertyKey, QueryPoint, SelectionPolicy};
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
-use fs_qty::{Amount, Dims, Mass, MolarMass, QuantitySpec};
+use fs_qty::{Amount, Dimensionless, Dims, Mass, MolarMass, QuantitySpec};
 use fs_thermochem::{
     MassAmountBasis, SpeciesId,
-    stoichiometry::{FormationEnthalpySource, minerals::MineralReaction},
+    stoichiometry::{
+        FormationEnthalpySource, minerals::MineralReaction, thermodynamics::FormationGibbsSource,
+    },
 };
 
 const REFERENCE: &str = "source-elemental-reference-janaf";
@@ -61,7 +68,7 @@ const REACTIONS: [&str; 15] = [
     "calcite-bicarbonate-neutralization",
     "dolomite-bicarbonate-neutralization",
 ];
-const USAGE: &str = "usage: mineral_processing [--equilibrium] [--reaction NAME] PACK... REACTED_SPECIES_EQUIVALENT_KG\n       mineral_processing --malachite-inventory MALACHITE_MOL PROTON_MOL WATER_MOL EXTENT_MOL";
+const USAGE: &str = "usage: mineral_processing [--reaction NAME] [--equilibrium] [--gibbs] [--activity 'SPECIES=VALUE']... [--] PACK... REACTED_SPECIES_KG\n       mineral_processing --malachite-inventory MALACHITE_MOL PROTON_MOL WATER_MOL EXTENT_MOL";
 
 fn case(name: &str) -> Result<ReactionCase, Box<dyn Error>> {
     Ok(match name {
@@ -484,6 +491,75 @@ fn malachite_inventory(args: &[String]) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+struct SourceOptions<'a> {
+    reaction_name: &'a str,
+    arguments: &'a [String],
+    equilibrium: bool,
+    gibbs: bool,
+    activities: Vec<(SpeciesId, Dimensionless)>,
+}
+
+fn source_options(args: &[String]) -> Result<SourceOptions<'_>, Box<dyn Error>> {
+    let mut reaction_name = None;
+    let mut equilibrium = false;
+    let mut gibbs = false;
+    let mut activities = Vec::new();
+    let mut next = 0;
+    while let Some(argument) = args.get(next) {
+        match argument.as_str() {
+            "--reaction" => {
+                if reaction_name.is_some() {
+                    return Err("--reaction may be supplied only once".into());
+                }
+                reaction_name = Some(
+                    args.get(next + 1)
+                        .ok_or("--reaction requires a reaction name")?
+                        .as_str(),
+                );
+                next += 2;
+            }
+            "--equilibrium" => {
+                equilibrium = true;
+                next += 1;
+            }
+            "--gibbs" => {
+                gibbs = true;
+                next += 1;
+            }
+            "--activity" => {
+                let input = args
+                    .get(next + 1)
+                    .ok_or("--activity requires 'SPECIES=VALUE'")?;
+                let (species, value) = input
+                    .split_once('=')
+                    .ok_or("--activity requires 'SPECIES=VALUE'")?;
+                let value: f64 = value.parse()?;
+                if !value.is_finite() || value <= 0.0 {
+                    return Err("activity must be finite and strictly positive".into());
+                }
+                activities.push((SpeciesId::new(species)?, Dimensionless::new(value)));
+                gibbs = true;
+                next += 2;
+            }
+            "--" => {
+                next += 1;
+                break;
+            }
+            unknown if unknown.starts_with("--") => {
+                return Err(format!("unknown option {unknown:?}; use --help").into());
+            }
+            _ => break,
+        }
+    }
+    Ok(SourceOptions {
+        reaction_name: reaction_name.unwrap_or("lime-hydration"),
+        arguments: &args[next..],
+        equilibrium,
+        gibbs,
+        activities,
+    })
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.as_slice() == ["--help"] {
@@ -492,31 +568,38 @@ fn main() -> Result<(), Box<dyn Error>> {
         for name in REACTIONS {
             let selected = case(name)?;
             println!("{name}: {}", selected.packs.join(" "));
+            println!("  activity species: {}", selected.species.join(" "));
         }
+        println!("Options precede the pack list; --activity implies --gibbs.");
+        println!(
+            "--equilibrium derives standard Gibbs energy from source enthalpy and entropy (Delta G = Delta H - T Delta S); it requires both properties for every species."
+        );
+        println!(
+            "--gibbs requires a direct standard-molar-formation-gibbs-energy claim in every supplied pack; unsupported source sets refuse."
+        );
+        println!(
+            "The two routes are reported separately when both are requested; independently rounded source values can differ. Activities always use the direct formation-Gibbs route."
+        );
+        println!(
+            "Supply one --activity 'SPECIES=VALUE' for every active species, including solids and water. Values are dimensionless relative activities under the retained standard states, not molarity."
+        );
+        println!(
+            "The final mass is of the first declared species actually reacted; an aqueous-ion mass is not solution mass."
+        );
+        println!(
+            "Activity Gibbs energy is dG/dxi at the supplied state, not the total change for a finite reaction extent. No equilibrium composition, reaction rate or conversion is predicted."
+        );
         return Ok(());
     }
-    let show_equilibrium = args.first().is_some_and(|arg| arg == "--equilibrium");
-    let args = if show_equilibrium {
-        &args[1..]
-    } else {
-        args.as_slice()
-    };
     if args
         .first()
         .is_some_and(|arg| arg == "--malachite-inventory")
     {
-        if show_equilibrium {
-            return Err("--equilibrium requires a complete source-pack reaction mode".into());
-        }
-        return malachite_inventory(args);
+        return malachite_inventory(&args);
     }
-    let (case, args) = if args.len() >= 2 && args[0] == "--reaction" {
-        (case(&args[1])?, &args[2..])
-    } else if args.len() == 4 {
-        (case("lime-hydration")?, args)
-    } else {
-        return Err(USAGE.into());
-    };
+    let options = source_options(&args)?;
+    let case = case(options.reaction_name)?;
+    let args = options.arguments;
     if args.len() != case.packs.len() + 1 {
         return Err(format!(
             "expected {} source packs in this order, then reacted kg: {}",
@@ -551,7 +634,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         })
         .collect::<Vec<_>>();
     let reaction = case.reaction.build()?;
-    let equilibrium = if show_equilibrium {
+    let equilibrium = if options.equilibrium {
         Some(reaction.standard_equilibrium(&sources)?)
     } else {
         None
@@ -559,6 +642,29 @@ fn main() -> Result<(), Box<dyn Error>> {
     let heat = match &equilibrium {
         Some(standard) => standard.enthalpy().clone(),
         None => reaction.standard_enthalpy_change(&sources)?,
+    };
+    let gibbs = if options.gibbs {
+        let sources = (0..packs.len())
+            .map(|i| FormationGibbsSource {
+                species: &species[i],
+                pack: &packs[i],
+                at: &points[i],
+                reference_axis: case.reference,
+            })
+            .collect::<Vec<_>>();
+        Some(reaction.standard_gibbs_change(&sources)?)
+    } else {
+        None
+    };
+    let activity_evaluation = if options.activities.is_empty() {
+        None
+    } else {
+        Some(
+            gibbs
+                .as_ref()
+                .ok_or("activities require a standard Gibbs evaluation")?
+                .at_activities(&options.activities)?,
+        )
     };
     let mut molar_masses = Vec::with_capacity(packs.len());
     for (pack, point) in packs.iter().zip(&points) {
@@ -578,10 +684,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     let amounts = reaction.amounts(extent)?;
 
     println!("{}, 298.15 K, 100000 Pa", case.equation);
-    println!(
-        "reacted {} equivalent mass [kg]: {reacted_kg}",
-        case.species[0]
-    );
+    if case.phase_axes[0] == "source-phase-aqueous" {
+        println!(
+            "reacted declared {} species mass [kg]: {reacted_kg} (not solution mass)",
+            case.species[0]
+        );
+    } else {
+        println!("reacted pure {} mass [kg]: {reacted_kg}", case.species[0]);
+    }
     println!(
         "source reactant molar mass [kg/mol]: {}",
         molar_masses[0].value()
@@ -632,6 +742,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     if let Some(standard) = equilibrium {
         println!(
+            "caloric-derived standard-state route (--equilibrium): Delta G = Delta H - T Delta S"
+        );
+        println!(
             "standard reaction entropy [J/(mol extent K)]: {}",
             standard.molar_entropy().value()
         );
@@ -651,6 +764,52 @@ fn main() -> Result<(), Box<dyn Error>> {
             "These constants use the selected standard states; activities, pH and equilibrium composition require separate inputs and models."
         );
     }
+    if let Some(standard) = &gibbs {
+        println!("tabulated formation-Gibbs route (--gibbs):");
+        println!(
+            "standard reaction Gibbs energy [J/mol extent]: {}",
+            standard.molar().value()
+        );
+        println!(
+            "ln K (dimensionless thermodynamic equilibrium constant): {}",
+            standard.log_equilibrium_constant().value()
+        );
+        println!("direct K representation: {:?}", standard.status());
+        if let Some(value) = standard.equilibrium_constant() {
+            println!("K [dimensionless]: {}", value.value());
+        }
+    }
+    if options.equilibrium && options.gibbs {
+        println!(
+            "The two routes retain independently rounded source quantities; their results are reported separately."
+        );
+    }
+    if let Some(evaluation) = activity_evaluation {
+        println!("activity diagnostics from tabulated formation-Gibbs sources:");
+        for (species, activity) in &evaluation.activities {
+            println!(
+                "relative activity {} [dimensionless]: {}",
+                species.as_str(),
+                activity.value()
+            );
+        }
+        println!("ln Q [dimensionless]: {}", evaluation.log_quotient.value());
+        println!(
+            "ln(Q/K) [dimensionless]: {}",
+            evaluation.log_quotient_over_equilibrium.value()
+        );
+        println!(
+            "activity reaction Gibbs energy dG/dxi [J/mol]: {}",
+            evaluation.molar.value()
+        );
+        println!(
+            "forward affinity [J/mol]: {}",
+            evaluation.affinity().value()
+        );
+        println!(
+            "Negative dG/dxi favors the written forward direction at these activities; this is not the total Gibbs change over the finite reacted extent."
+        );
+    }
     for pack in &packs {
         println!("source pack: {} ({})", pack.pack_id(), pack.content_hash());
     }
@@ -659,7 +818,106 @@ fn main() -> Result<(), Box<dyn Error>> {
         "Reported source uncertainty magnitudes, where available, are not a propagated reaction interval."
     );
     println!(
-        "This uses actually reacted species-equivalent mass; it does not predict conversion, plant temperature, kiln fuel duty or operating reagent doses."
+        "This uses actually reacted declared chemical species; it does not predict conversion, plant temperature, kiln fuel duty or operating reagent doses."
     );
+    if options.gibbs || options.equilibrium {
+        println!(
+            "Gibbs diagnostics retain the source reference states; no solution activity model, equilibrium composition or reaction rate is inferred."
+        );
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn arguments(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn source_options_preserve_old_defaults_and_named_reactions() {
+        let args = arguments(&["cao", "water", "lime", "56.077"]);
+        let options = source_options(&args).unwrap();
+        assert_eq!(options.reaction_name, "lime-hydration");
+        assert_eq!(options.arguments, args);
+        assert!(!options.equilibrium);
+        assert!(!options.gibbs);
+        assert!(options.activities.is_empty());
+        let args = arguments(&[
+            "--reaction",
+            "pyrite-oxidation-ferrous",
+            "pyrite",
+            "119.979",
+        ]);
+        let options = source_options(&args).unwrap();
+        assert_eq!(options.reaction_name, "pyrite-oxidation-ferrous");
+        assert_eq!(options.arguments, &args[2..]);
+        assert!(!options.gibbs);
+        let args = arguments(&["--equilibrium", "cao", "water", "lime", "56.077"]);
+        let options = source_options(&args).unwrap();
+        assert_eq!(options.reaction_name, "lime-hydration");
+        assert_eq!(options.arguments, &args[1..]);
+        assert!(options.equilibrium);
+        assert!(!options.gibbs);
+        let args = arguments(&[
+            "--equilibrium",
+            "--reaction",
+            "ferrous-oxidation-ferric",
+            "--gibbs",
+            "iron",
+            "55.847",
+        ]);
+        let options = source_options(&args).unwrap();
+        assert_eq!(options.reaction_name, "ferrous-oxidation-ferric");
+        assert_eq!(options.arguments, &args[4..]);
+        assert!(options.equilibrium);
+        assert!(options.gibbs);
+    }
+
+    #[test]
+    fn explicit_activities_imply_gibbs_without_inventing_missing_values() {
+        let args = arguments(&[
+            "--activity",
+            "Fe[2+](aq)=0.01",
+            "--reaction",
+            "ferrous-oxidation-ferric",
+            "--activity",
+            "H+(aq)=1e-3",
+            "--gibbs",
+            "--",
+            "iron",
+            "55.847",
+        ]);
+        let options = source_options(&args).unwrap();
+        assert!(options.gibbs);
+        assert_eq!(options.reaction_name, "ferrous-oxidation-ferric");
+        assert_eq!(options.activities.len(), 2);
+        assert_eq!(options.activities[0].0.as_str(), "Fe[2+](aq)");
+        assert_eq!(options.activities[0].1.value(), 0.01);
+        assert_eq!(options.arguments, &args[8..]);
+    }
+
+    #[test]
+    fn malformed_options_and_invalid_activities_refuse() {
+        for args in [
+            vec!["--reaction"],
+            vec![
+                "--reaction",
+                "lime-hydration",
+                "--reaction",
+                "lime-hydration",
+            ],
+            vec!["--activity"],
+            vec!["--activity", "H+(aq)"],
+            vec!["--activity", "H+(aq)=0"],
+            vec!["--activity", "H+(aq)=-1"],
+            vec!["--activity", "H+(aq)=NaN"],
+            vec!["--activity", "H+(aq)=inf"],
+            vec!["--unknown"],
+        ] {
+            assert!(source_options(&arguments(&args)).is_err());
+        }
+    }
 }
