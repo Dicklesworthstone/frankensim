@@ -58,7 +58,7 @@ uv run --python 3.12 --with numpy python "$EXT/compare_h4.py" "$OUT" "$EXT/measu
 
 # Optional time-domain re-observation (listening pairs): FIR bake and replay; days on the dense owner today.
 if [ "${FIR:-0}" = 1 ]; then
-  BAND=(--fs 48000 --pass 10000 --stop 12000 --latency 108 --fft 256,512,1024,2048 --clearance 0.05)
+  BAND=(--fs 48000 --pass 10000 --stop 12000 --latency 129 --fft 256,512,1024,2048 --clearance 0.05)
   BAND+=(--only embouchure,foot,hole-07,hole-08,hole-09,hole-10,hole-11,hole-12,hole-13,hole-14,hole-15,hole-16)
   for rung in coarse fine; do
     [ -e "$OUT/$rung.kernels" ] || nice -n 10 "$BIN/reobserve_apertures" bake "$EXT/body-$rung.tsv" \
