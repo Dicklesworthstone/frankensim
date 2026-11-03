@@ -12,6 +12,8 @@
 //! lime neutralization use compatible USGS goethite/portlandite source phases.
 //! Gold cyanidation uses six matched historical NBS/1989-errata references,
 //! including the individual aqueous CN-, Au(CN)2- and OH- ions.
+//! Separate NBS cases resolve molecular HCN dissociation, water dissociation,
+//! and an Elsner endpoint consuming a finite dissolved-O2 inventory.
 //! `--help` lists every supported reaction and required pack order.
 //! Prefix a source-pack invocation with `--equilibrium` to also resolve standard
 //! entropy and derive Gibbs energy and log equilibrium constants from enthalpy
@@ -59,7 +61,7 @@ struct ReactionCase {
     equation: &'static str,
 }
 
-const REACTIONS: [&str; 27] = [
+const REACTIONS: [&str; 30] = [
     "lime-hydration",
     "hydrated-lime-neutralization",
     "magnesite-calcination",
@@ -70,6 +72,9 @@ const REACTIONS: [&str; 27] = [
     "cuprous-oxide-reduction",
     "copper-electrowinning",
     "gold-cyanidation",
+    "gold-cyanidation-dissolved-oxygen",
+    "hydrogen-cyanide-dissociation",
+    "water-dissociation",
     "pyrite-roasting",
     "pyrite-oxidation-ferrous",
     "ferrous-oxidation-ferric",
@@ -256,6 +261,67 @@ fn case(name: &str) -> Result<ReactionCase, Box<dyn Error>> {
                 "source-phase-aqueous",
             ],
             equation: "4 Au(s) + 8 CN[-](aq) + O2(g) + 2 H2O(l) -> 4 Au(CN)2[-](aq) + 4 OH[-](aq), historical NBS/1989-errata Elsner reference",
+        },
+        "gold-cyanidation-dissolved-oxygen" => ReactionCase {
+            reaction: MineralReaction::GoldCyanidationDissolvedOxygen,
+            reference: NBS_REFERENCE,
+            packs: &[
+                "gold-solid-nbs1989-thermochemistry",
+                "cyanide-ion-aqueous-nbs1989",
+                "oxygen-aqueous-nbs1989-thermochemistry",
+                "water-liquid-nbs1989-thermochemistry",
+                "dicyanoaurate-ion-aqueous-nbs1989",
+                "hydroxide-ion-aqueous-nbs1989",
+            ],
+            species: &[
+                "Au(s)",
+                "CN[-](aq)",
+                "O2(aq)",
+                "H2O(l)",
+                "Au(CN)2[-](aq)",
+                "OH[-](aq)",
+            ],
+            phase_axes: &[
+                "source-phase-solid",
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+                "source-phase-liquid",
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+            ],
+            equation: "4 Au(s) + 8 CN[-](aq) + O2(aq) + 2 H2O(l) -> 4 Au(CN)2[-](aq) + 4 OH[-](aq), dissolved oxygen on the NBS molal reference",
+        },
+        "hydrogen-cyanide-dissociation" => ReactionCase {
+            reaction: MineralReaction::HydrogenCyanideDissociation,
+            reference: NBS_REFERENCE,
+            packs: &[
+                "hydrogen-cyanide-aqueous-nbs1989",
+                "hydrogen-ion-aqueous-nbs1989",
+                "cyanide-ion-aqueous-nbs1989",
+            ],
+            species: &["HCN(aq)", "H+(aq)", "CN[-](aq)"],
+            phase_axes: &[
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+            ],
+            equation: "HCN(aq) -> H+(aq) + CN[-](aq), undissociated molecular HCN on the NBS molal reference",
+        },
+        "water-dissociation" => ReactionCase {
+            reaction: MineralReaction::WaterDissociation,
+            reference: NBS_REFERENCE,
+            packs: &[
+                "water-liquid-nbs1989-thermochemistry",
+                "hydrogen-ion-aqueous-nbs1989",
+                "hydroxide-ion-aqueous-nbs1989",
+            ],
+            species: &["H2O(l)", "H+(aq)", "OH[-](aq)"],
+            phase_axes: &[
+                "source-phase-liquid",
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+            ],
+            equation: "H2O(l) -> H+(aq) + OH[-](aq), pure water and NBS molal aqueous references",
         },
         "copper-electrowinning" => ReactionCase {
             reaction: MineralReaction::CopperElectrowinning,
@@ -699,6 +765,11 @@ fn reference_point(
             "source-aqueous-unit-activity-infinite-dilution",
             "source-carbonic-reference-usgs-b2131",
         ]
+    } else if matches!(
+        pack_id,
+        "hydrogen-cyanide-aqueous-nbs1989" | "oxygen-aqueous-nbs1989-thermochemistry"
+    ) {
+        &["source-aqueous-unit-activity-infinite-dilution"]
     } else if phase_axis == "source-phase-aqueous" {
         &[
             "source-individual-ion",

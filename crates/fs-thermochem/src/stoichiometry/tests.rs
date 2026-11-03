@@ -53,6 +53,9 @@ fn all_reference_reactions_conserve_and_rebuild_identically() {
         MalachiteAcidLeach,
         MalachiteCarbonicAcidLeach,
         GoldCyanidation,
+        GoldCyanidationDissolvedOxygen,
+        HydrogenCyanideDissociation,
+        WaterDissociation,
         PyriteOxidationFerrous,
         FerrousOxidationFerric,
         FerricPyriteOxidation,
@@ -121,12 +124,18 @@ fn ferric_copper_sulfides_keep_mineral_iron_and_oxidant_stocks_separate() {
         let extent = reaction.limiting_extent(&initial[..2]).unwrap();
         close(extent.value(), 2.0);
         let advanced = reaction.advance_inventory(&initial, extent).unwrap();
-        for ((species, _), expected) in initial
-            .iter()
-            .zip([1.0, 0.0, 2.0 * copper, 2.0 * ferrous, 2.0 * sulfur])
+        for ((species, _), expected) in
+            initial
+                .iter()
+                .zip([1.0, 0.0, 2.0 * copper, 2.0 * ferrous, 2.0 * sulfur])
         {
             close(
-                advanced.iter().find(|(s, _)| s == species).unwrap().1.value(),
+                advanced
+                    .iter()
+                    .find(|(s, _)| s == species)
+                    .unwrap()
+                    .1
+                    .value(),
                 expected,
             );
         }

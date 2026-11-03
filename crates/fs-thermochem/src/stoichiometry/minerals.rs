@@ -33,6 +33,14 @@
 //! Net ionic Elsner cyanidation follows
 //! <https://doi.org/10.1038/s41598-019-43383-4> and the EPA 1994 report
 //! <https://nepis.epa.gov/Exe/ZyPURL.cgi?Dockey=2000EF6J.TXT>.
+//! The dissolved-oxygen Elsner endpoint keeps O2(aq) distinct from O2(g).
+//! Aqueous HCN dissociation and water dissociation retain the molecular/ionic
+//! states in the NBS tables, printed pages 2-37, 2-38 and 2-89, and the
+//! standard-state definitions in sections 5.5-5.8:
+//! <https://srd.nist.gov/JPCRD/jpcrdS2Vol11.pdf> and the corrected NIST dataset
+//! <https://doi.org/10.18434/M32124>. Molecular HCN uses the ao row; the ai row
+//! already represents H+ and CN-. These equations can be composed, but their
+//! presence alone does not solve coupled speciation or supply gas transfer.
 //! Magnesite calcination and magnetite oxidation retain the crystalline/gas
 //! endpoints of JANAF C-079, Mg-008, C-095, Fe-032, Fe-030 and O-029:
 //! <https://janaf.nist.gov/>. Their standard reaction heats do not determine
@@ -103,6 +111,15 @@ pub enum MineralReaction {
     /// 4 Au(s) + 8 CN- + O2(g) + 2 H2O(l) -> 4 Au(CN)2- + 4 OH-.
     /// Net ionic Elsner balance; gas supply does not imply a dissolution rate.
     GoldCyanidation,
+    /// 4 Au(s) + 8 CN- + O2(aq) + 2 H2O(l) -> 4 Au(CN)2- + 4 OH-.
+    /// Dissolved oxygen is a finite aqueous stock, distinct from a gas reservoir.
+    GoldCyanidationDissolvedOxygen,
+    /// HCN(aq) -> H+(aq) + CN[-](aq).
+    /// HCN is the neutral undissociated solute, not the ionized source component.
+    HydrogenCyanideDissociation,
+    /// H2O(l) -> H+(aq) + OH[-](aq).
+    /// Standard water dissociation; activity laws and equilibrium remain explicit.
+    WaterDissociation,
     /// 2 FeS2(s) + 7 O2(g) + 2 H2O(l) -> 2 Fe2+ + 4 SO4(2-) + 4 H+.
     PyriteOxidationFerrous,
     /// 4 Fe2+(aq) + O2(g) + 4 H+(aq) -> 4 Fe3+(aq) + 2 H2O(l).
@@ -280,6 +297,36 @@ impl MineralReaction {
                     ("H2O(l)", &[0, 0, 0, 1, 2], 0, -2),
                     ("Au(CN)2[-](aq)", &[1, 2, 2, 0, 0], -1, 4),
                     ("OH[-](aq)", &[0, 0, 0, 1, 1], -1, 4),
+                ],
+            ),
+            Self::GoldCyanidationDissolvedOxygen => (
+                "gold-cyanidation-elsner-dissolved-oxygen",
+                &["Au", "C", "N", "O", "H"],
+                &[
+                    ("Au(s)", &[1, 0, 0, 0, 0], 0, -4),
+                    ("CN[-](aq)", &[0, 1, 1, 0, 0], -1, -8),
+                    ("O2(aq)", &[0, 0, 0, 2, 0], 0, -1),
+                    ("H2O(l)", &[0, 0, 0, 1, 2], 0, -2),
+                    ("Au(CN)2[-](aq)", &[1, 2, 2, 0, 0], -1, 4),
+                    ("OH[-](aq)", &[0, 0, 0, 1, 1], -1, 4),
+                ],
+            ),
+            Self::HydrogenCyanideDissociation => (
+                "hydrogen-cyanide-dissociation",
+                &["H", "C", "N"],
+                &[
+                    ("HCN(aq)", &[1, 1, 1], 0, -1),
+                    ("H+(aq)", &[1, 0, 0], 1, 1),
+                    ("CN[-](aq)", &[0, 1, 1], -1, 1),
+                ],
+            ),
+            Self::WaterDissociation => (
+                "water-dissociation",
+                &["H", "O"],
+                &[
+                    ("H2O(l)", &[2, 1], 0, -1),
+                    ("H+(aq)", &[1, 0], 1, 1),
+                    ("OH[-](aq)", &[1, 1], -1, 1),
                 ],
             ),
             Self::PyriteOxidationFerrous => (

@@ -1,5 +1,32 @@
 # CONTRACT: fs-thermochem
 
+## Source-backed aqueous cyanide, protons and dissolved oxygen
+
+Three matched NBS/1989-errata packs add twelve literal molar-mass and H/G/S
+claims for molecular HCN(aq), H+(aq) and O2(aq). Neutral HCN uses the original
+`ao` entry, not the adjacent already-ionized `ai` component. Dissolved oxygen
+retains its own nonzero formation properties and aqueous unit-activity
+reference; gas oxygen is a distinct participant. Hydrogen retains the
+individual-ion H+-zero convention. All claims remain at 298.15 K / 100000 Pa
+under `source-elemental-reference-nbs1989`.
+
+The original conserved mineral owner adds HCN dissociation, water dissociation
+and an Elsner endpoint consuming dissolved oxygen. All three are runnable in
+`mineral_processing`. The existing single-reaction ideal equilibrium owner
+can now consume the complete aqueous HCN/water source sets with an explicit
+amount at unit activity. It does not infer that amount from volume. The direct
+Gibbs data give pKa=9.232640551245206 and pKw=13.995246497841048 on their
+retained reference basis. A dissolved-O2 Elsner extent has direct
+DeltaG=-407118 J, distinct from the gas-O2 endpoint's -390718 J.
+
+Four actual-source tests compile the nine compatible packs and check all
+literal rows, source conventions, the finite HCN quadratic, water equilibrium,
+solvent-basis scaling and dissolved-oxygen limits. The three actual CLI cases
+run with both thermodynamic routes. These source additions alone do not
+provide coupled speciation, gas transfer, cyanide-complex competition or
+dissolution kinetics. Complete sources and commands are documented in
+`data/matdb/seed-v1/MINING_AQUEOUS_CYANIDE.md`.
+
 ### Source-complete gold cyanidation
 
 The existing conserved Elsner endpoint now has a complete six-pack NBS source
