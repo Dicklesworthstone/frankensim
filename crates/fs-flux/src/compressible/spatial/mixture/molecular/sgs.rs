@@ -26,8 +26,8 @@
 use super::super::sum;
 use super::*;
 pub use crate::compressible::spatial::molecular::sgs::{
-    DynamicAveraging, DynamicScalarConfig, DynamicSgsConfig, DynamicSubgridConfig,
-    DynamicThermalSubgridConfig, SgsModel, SgsUse, SubgridConfig,
+    ChannelDynamicThermalSubgridConfig, DynamicAveraging, DynamicScalarConfig, DynamicSgsConfig,
+    DynamicSubgridConfig, DynamicThermalSubgridConfig, SgsModel, SgsUse, SubgridConfig,
 };
 use fs_gas::multicomponent::dissipation::{MaxwellStefanSolveV1, TransportFaceReport};
 use fs_gas::multicomponent::{Error as FlowError, MAX_SPECIES};
@@ -37,13 +37,13 @@ use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
 
 mod dynamic;
 pub use dynamic::{
-    DynamicComponentsConfig, MixtureDynamicSpeciesSubgridConfig, MixtureDynamicSubgridConfig,
-    MixtureDynamicThermalSubgridConfig,
+    ChannelDynamicComponentsConfig, DynamicComponentsConfig,
+    MixtureChannelDynamicSpeciesSubgridConfig, MixtureDynamicSpeciesSubgridConfig,
+    MixtureDynamicSubgridConfig, MixtureDynamicThermalSubgridConfig,
 };
 mod channel;
 pub use channel::{
-    ChannelDynamicScalarConfig, ChannelDynamicSgsConfig,
-    MixtureDynamicChannelThermalSubgridConfig,
+    ChannelDynamicScalarConfig, ChannelDynamicSgsConfig, MixtureDynamicChannelThermalSubgridConfig,
 };
 
 /// Explicit stress/heat controls shared with frozen gas, plus species mixing.
@@ -115,7 +115,8 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
             ViscosityClosure::Dynamic(_)
             | ViscosityClosure::DynamicThermal(_)
             | ViscosityClosure::DynamicChannelThermal(_)
-            | ViscosityClosure::DynamicSpecies(_) => None,
+            | ViscosityClosure::DynamicSpecies(_)
+            | ViscosityClosure::ChannelDynamicSpecies(_) => None,
         }
     }
 }
@@ -130,6 +131,7 @@ enum ViscosityClosure {
     DynamicThermal(dynamic::DynamicThermalTransport),
     DynamicChannelThermal(channel::DynamicChannelThermalTransport),
     DynamicSpecies(dynamic::DynamicSpeciesTransport),
+    ChannelDynamicSpecies(dynamic::ChannelDynamicSpeciesTransport),
 }
 
 pub(super) struct SubgridTransport {
@@ -169,12 +171,20 @@ impl SubgridTransport {
                 ViscosityClosure::DynamicThermal(dynamic) => dynamic.workspace_bytes(),
                 ViscosityClosure::DynamicChannelThermal(dynamic) => dynamic.workspace_bytes(),
                 ViscosityClosure::DynamicSpecies(dynamic) => dynamic.workspace_bytes(),
+                ViscosityClosure::ChannelDynamicSpecies(dynamic) => dynamic.workspace_bytes(),
             }
     }
 
     pub(super) fn admit_wall(&self, wall: MolecularWall3d) -> Result<(), DissipationError> {
         match &self.closure {
             ViscosityClosure::DynamicChannelThermal(dynamic) => dynamic.admit_wall(wall),
+            ViscosityClosure::ChannelDynamicSpecies(_)
+                if matches!(wall, MolecularWall3d::SlipAdiabatic) =>
+            {
+                Err(DissipationError::Invalid(
+                    "channel SGS requires no-slip wall values",
+                ))
+            }
             _ => Ok(()),
         }
     }
@@ -233,6 +243,15 @@ impl SubgridTransport {
                     return Ok(());
                 }
             }
+            ViscosityClosure::ChannelDynamicSpecies(dynamic) => {
+                if !dynamic.prepare(states, primitive, walls, cancelled)? {
+                    for values in self.dynamic_viscosity.chunks_mut(64) {
+                        poll(cancelled)?;
+                        values.fill(0.0);
+                    }
+                    return Ok(());
+                }
+            }
         }
         let n = gas.species_count();
         for (i, ((p, g), state)) in primitive
@@ -267,6 +286,7 @@ impl SubgridTransport {
                 ViscosityClosure::DynamicThermal(dynamic) => dynamic.viscosities()[i],
                 ViscosityClosure::DynamicChannelThermal(dynamic) => dynamic.viscosities()[i],
                 ViscosityClosure::DynamicSpecies(dynamic) => dynamic.viscosities()[i],
+                ViscosityClosure::ChannelDynamicSpecies(dynamic) => dynamic.viscosities()[i],
             };
             let mut cv = [0.0; MAX_SPECIES];
             for (k, model) in gas.source().models().iter().enumerate() {
@@ -316,12 +336,20 @@ impl SubgridTransport {
         let mu = 0.5 * self.dynamic_viscosity[left] + 0.5 * self.dynamic_viscosity[right];
         let dynamic_heat = match &self.closure {
             ViscosityClosure::DynamicThermal(dynamic) => Some(dynamic.face_heat(left, right)),
-            ViscosityClosure::DynamicChannelThermal(dynamic) => Some(dynamic.face_heat(left, right)),
+            ViscosityClosure::DynamicChannelThermal(dynamic) => {
+                Some(dynamic.face_heat(left, right))
+            }
             ViscosityClosure::DynamicSpecies(dynamic) => Some(dynamic.face_heat(left, right)),
+            ViscosityClosure::ChannelDynamicSpecies(dynamic) => {
+                Some(dynamic.face_heat(left, right))
+            }
             _ => None,
         };
         let dynamic_species = match &self.closure {
             ViscosityClosure::DynamicSpecies(dynamic) => Some(dynamic.face_species(left, right)),
+            ViscosityClosure::ChannelDynamicSpecies(dynamic) => {
+                Some(dynamic.face_species(left, right))
+            }
             _ => None,
         };
         // An exactly disabled model makes no extra caloric calls/arithmetic.
@@ -357,6 +385,11 @@ impl SubgridTransport {
                 None,
                 Some(dynamic.config.turbulent_schmidt),
                 dynamic.config.momentum.maximum_eddy_to_molecular,
+            ),
+            ViscosityClosure::ChannelDynamicSpecies(dynamic) => (
+                None,
+                None,
+                dynamic.config.transport.momentum.maximum_eddy_to_molecular,
             ),
         };
         if mu != 0.0 {

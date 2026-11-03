@@ -143,7 +143,7 @@ impl DynamicSpeciesTransport {
         primitive: &[Primitive],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<bool, DissipationError> {
-        self.work.load(primitive, cancelled)?;
+        self.work.fields.load(primitive, cancelled)?;
         let width = self.species.component_count() + 4;
         let (momentum, heat, species) = self
             .work
@@ -152,9 +152,9 @@ impl DynamicSpeciesTransport {
                 self.config.transport.momentum,
                 self.config.transport.heat,
                 self.config.species,
-                &self.work.density,
-                &self.work.velocity,
-                &self.work.temperature,
+                &self.work.fields.density,
+                &self.work.fields.velocity,
+                &self.work.fields.temperature,
                 &mut self.work.heat,
                 |species, cell| states[cell * width + species] / primitive[cell].density,
                 &mut self.species,
@@ -166,7 +166,9 @@ impl DynamicSpeciesTransport {
                 "dynamic species diffusivity exceeds its physical admission bound",
             ));
         }
-        self.work.collect_heat(cancelled)?;
+        self.work
+            .fields
+            .collect_heat(self.work.heat.diffusivities(), cancelled)?;
         for (cell, (&diffusivity, weight)) in self
             .species
             .diffusivities()
@@ -200,7 +202,7 @@ impl DynamicSpeciesTransport {
         right: usize,
     ) -> (f64, f64) {
         (
-            self.work.face_heat(left, right),
+            self.work.fields.face_heat(left, right),
             self.config.transport.heat.maximum_diffusivity_to_molecular,
         )
     }

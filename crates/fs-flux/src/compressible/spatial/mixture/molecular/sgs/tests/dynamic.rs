@@ -1,6 +1,7 @@
 use super::*;
 use fs_lbm::sgs3::dynamic::PeriodicDynamicSgs;
 
+mod channel;
 mod species;
 mod thermal;
 

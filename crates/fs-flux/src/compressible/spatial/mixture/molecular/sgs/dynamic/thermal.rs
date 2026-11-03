@@ -110,6 +110,11 @@ pub(in crate::compressible::spatial::mixture::molecular::sgs) struct DynamicTher
 pub(super) struct ThermalWorkspace {
     pub(super) momentum: PeriodicDynamicSgs,
     pub(super) heat: PeriodicDynamicScalar,
+    pub(super) fields: ThermalFields,
+}
+
+/// Geometry-independent same-stage fields shared by periodic and channel fits.
+pub(super) struct ThermalFields {
     pub(super) density: Vec<f64>,
     pub(super) velocity: Vec<[f64; 3]>,
     pub(super) temperature: Vec<f64>,
@@ -140,21 +145,23 @@ impl DynamicThermalTransport {
         primitive: &[Primitive],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<bool, DissipationError> {
-        self.work.load(primitive, cancelled)?;
+        self.work.fields.load(primitive, cancelled)?;
         let (momentum, heat) = self
             .work
             .momentum
             .prepare_with_scalar(
                 self.config.transport.momentum,
                 self.config.transport.heat,
-                &self.work.density,
-                &self.work.velocity,
-                &self.work.temperature,
+                &self.work.fields.density,
+                &self.work.fields.velocity,
+                &self.work.fields.temperature,
                 &mut self.work.heat,
                 &mut *cancelled,
             )
             .map_err(dynamic_error)?;
-        self.work.collect_heat(cancelled)?;
+        self.work
+            .fields
+            .collect_heat(self.work.heat.diffusivities(), cancelled)?;
         Ok(momentum.maximum_eddy_viscosity != 0.0 || heat.maximum_diffusivity != 0.0)
     }
 
@@ -169,7 +176,7 @@ impl DynamicThermalTransport {
         right: usize,
     ) -> (f64, f64) {
         (
-            self.work.face_heat(left, right),
+            self.work.fields.face_heat(left, right),
             self.config.transport.heat.maximum_diffusivity_to_molecular,
         )
     }
@@ -185,20 +192,30 @@ impl ThermalWorkspace {
             momentum: PeriodicDynamicSgs::new_cartesian(grid.shape, grid.spacing, momentum_bytes)
                 .map_err(dynamic_error)?,
             heat: PeriodicDynamicScalar::new(grid.shape, heat_bytes).map_err(dynamic_error)?,
-            density: allocated(grid.len(), 0.0)?,
-            velocity: allocated(grid.len(), [0.0; 3])?,
-            temperature: allocated(grid.len(), 0.0)?,
-            rho_diffusivity: allocated(grid.len(), 0.0)?,
+            fields: ThermalFields::new(grid.len())?,
         })
     }
 
     pub(super) fn workspace_bytes(&self) -> usize {
         self.momentum.workspace_bytes()
             + self.heat.workspace_bytes()
-            + (self.density.capacity()
-                + self.temperature.capacity()
-                + self.rho_diffusivity.capacity())
-                * size_of::<f64>()
+            + self.fields.workspace_bytes()
+    }
+}
+
+impl ThermalFields {
+    pub(super) fn new(cells: usize) -> Result<Self, DissipationError> {
+        Ok(Self {
+            density: allocated(cells, 0.0)?,
+            velocity: allocated(cells, [0.0; 3])?,
+            temperature: allocated(cells, 0.0)?,
+            rho_diffusivity: allocated(cells, 0.0)?,
+        })
+    }
+
+    pub(super) fn workspace_bytes(&self) -> usize {
+        (self.density.capacity() + self.temperature.capacity() + self.rho_diffusivity.capacity())
+            * size_of::<f64>()
             + self.velocity.capacity() * size_of::<[f64; 3]>()
     }
 
@@ -220,12 +237,13 @@ impl ThermalWorkspace {
 
     pub(super) fn collect_heat(
         &mut self,
+        diffusivities: &[f64],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), DissipationError> {
         for (i, (weight, &alpha)) in self
             .rho_diffusivity
             .iter_mut()
-            .zip(self.heat.diffusivities())
+            .zip(diffusivities)
             .enumerate()
         {
             if i % 64 == 0 {

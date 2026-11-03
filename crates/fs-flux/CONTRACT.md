@@ -1828,6 +1828,52 @@ physical wall fluxes, small-Schmidt stability and refusal behavior, and actual
 reactive split-step mixing. This is an algebraic exploration model, without
 SGS kinetic energy, backscatter, pressure dilatation or shock/turbulence closure.
 
+### Independent turbulent transport in resolved mixture channels
+
+With `experimental-sgs`, the same mixture molecular owner exposes
+`with_channel_dynamic_species_sgs` and
+`MixtureChannelDynamicSpeciesSubgridConfig`. Admission requires a fixed uniform
+Cartesian grid with at least three cells per axis, two periodic directions and
+one reflecting wall pair. Rectangular cells retain their physical directional
+widths. The caller supplies two explicit no-slip walls with finite tangential
+velocities and adiabatic or source-admitted isothermal conditions. Every
+preparation reads the current wall data; rebinding a channel wall to slip
+refuses.
+
+Momentum viscosity, temperature diffusivity and one common species diffusivity
+are fitted independently from the same SSP-stage Favre fields. Only the
+homogeneous tangential plane is test-filtered. All mass fractions contribute
+their Germano contractions with one common variation scale before plane
+averaging; no marker species or turbulent Schmidt number is selected.
+Impermeability in a coupled Maxwell--Stefan/Soret law does not imply a zero
+mass-fraction gradient. Both physical and Favre-filtered species derivatives
+therefore use three interior fluid centres at each wall, without inventing a
+composition boundary condition. Actual zero species wall flux remains enforced
+by the original molecular wall owner.
+
+Interior faces retain original Maxwell--Stefan diffusion, Soret/Dufour terms,
+source calorics and molecular bulk viscosity. The modeled common species flux
+`j_i = -mean(rho*D_t)*grad(Y_i)` uses the existing present-species pivot, exactly
+absent species and matching source-referenced partial enthalpies in conservative
+total energy. Independent heat and species transport remain available when
+the momentum fit vanishes. Modeled stress, heat and species flux are zero on
+physical walls; the original half-cell stress, heat and prescribed-wall work
+remain authoritative. Every SSP stage and retry refreshes the fits and the
+combined viscous/thermal/species-enthalpy stability bound. The existing complete
+interval and reactive split owners retain accepted state, reports and boundary
+exchanges.
+
+The complete field/operator capacity budget includes 352 nominal additional
+numerical bytes/cell over molecular-only flow, independent of species count.
+All arrays are reused without per-stage allocation or a transposed species
+field. Positive coefficient, molecular stress/heat ratio and physical species
+diffusivity bounds refuse rather than clip; negative fits use zero backscatter.
+This is a low-Mach resolved-wall exploratory closure, without a coarse-grid
+wall function, curved/open geometry, catalytic or turbulent reaction-rate
+model, SGS kinetic-energy equation or shock/pressure-dilatation closure.
+Acceptance renders refuse; no turbulent DNS or arbitrary-aspect-ratio accuracy
+is established.
+
 ### Finite-rate reactions coupled to three-dimensional compressive waves
 
 `spatial::mixture::reactive::ReactingEuler3d` composes the original volumetric

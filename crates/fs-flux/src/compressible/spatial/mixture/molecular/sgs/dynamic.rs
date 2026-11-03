@@ -28,6 +28,9 @@ pub use thermal::MixtureDynamicThermalSubgridConfig;
 mod species;
 pub(super) use species::DynamicSpeciesTransport;
 pub use species::{DynamicComponentsConfig, MixtureDynamicSpeciesSubgridConfig};
+mod channel;
+pub(super) use channel::ChannelDynamicSpeciesTransport;
+pub use channel::{ChannelDynamicComponentsConfig, MixtureChannelDynamicSpeciesSubgridConfig};
 
 /// Dynamic momentum closure plus explicitly authored heat/species diffusivity.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -114,7 +117,8 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
             ViscosityClosure::Local { .. }
             | ViscosityClosure::DynamicThermal(_)
             | ViscosityClosure::DynamicChannelThermal(_)
-            | ViscosityClosure::DynamicSpecies(_) => None,
+            | ViscosityClosure::DynamicSpecies(_)
+            | ViscosityClosure::ChannelDynamicSpecies(_) => None,
         }
     }
 }
