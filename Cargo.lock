@@ -2101,6 +2101,7 @@ dependencies = [
  "fs-material",
  "fs-math",
  "fs-modal",
+ "fs-phs",
  "fs-qty",
  "fs-solver",
  "fs-time",

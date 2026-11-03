@@ -404,7 +404,7 @@ a real normal-contact solve, and early/late transactional refusal.
 ## Linear rotor-bearing operating points
 
 The public `fs_mbd::rotordynamics` module exposes the original operating-point,
-rigid-rotor and transient owners described here. Finite internal shaft actuation
+rigid-rotor, transient and periodic owners described here. Finite internal shaft actuation
 and relative rotor phase are available separately in
 `fs_time::lie::gyrostat::rotors`; that fixed-axis angular model does not change
 this bearing/bending lane's constant-speed physical assumptions.
@@ -445,6 +445,46 @@ coefficient-uncertainty enclosures. There are still no eigenvectors or persisten
 physical mode identities, and no forced-response peak, flexible-shaft continuum
 or Floquet certificate is inferred. Speed-dependent bearing coefficients require
 a newly supplied physical operating point, not just another sample speed.
+
+`rotordynamics::periodic::periodic_floquet` forms the homogeneous period map
+for 1–256 declared constant-coefficient portions of a physical cycle. Signed
+spin and original full M/G are identical across the cycle; full C/K may change,
+including anisotropic, cross-coupled and active coefficients. Coordinate order,
+units and frame remain the caller's responsibility. Displacements and velocities
+are continuous at coefficient switches. A changed stiffness may exchange energy
+with its modulator; that exchange is not silently called heat.
+
+A common invertible mass/time scaling retains all original coordinates, including
+free modes. Native scaled Cholesky solves construct
+`[0 I; -M^-1 K, -M^-1(C + Omega G)]`; independent double-double contractions of
+the original mass and separate C/G terms gate each solved column. The existing
+bounded `fs-phs` exponential advances each constant segment, and chronological
+left multiplication forms `E_last ... E_first`. Native cancellable `fs-la`
+complex QR returns all 2n multipliers. The report includes the original
+`[q, q_dot]` monodromy, multiplier spectrum, spectral radius, numerical
+`ln(radius)/period` growth rate and maximum original mass-equation residual.
+
+There is no stable/unstable Boolean or rounding deadband around unit radius.
+Any nonfinite or zero computed multiplier refuses as unrepresentable or
+numerically unresolved, including loss of a fast-decaying direction while other
+directions retain finite radius. No truncated state, artificial damping, pole
+shift, symmetric bearing replacement or eigenvalue-error certificate is inferred.
+This is the specified segmented model; using it to approximate smooth periodic
+coefficients additionally requires coefficient/time refinement. Spin acceleration,
+changing inertia, impulses at switches and nonlinear whirl are outside this API.
+
+The existing 32-coordinate ceiling remains. Explicit limits admit segment count,
+live dense bytes, whole-cycle multiply/add work and QR sweeps before dense
+allocation. Cancellation reaches assembly, original-column residuals, matrix
+products and native QR. Each shared exponential is indivisible but bounded to
+64 states, 32 Taylor products and 48 squarings, with polls before and after;
+no wall-time deadline is promised and no partial response is published.
+
+Focused regressions include a closed-form parametric instability: two individually
+conservative scalar segments with K/M of 1 and 4 and durations pi/2 and pi/4
+have the period map diag(-1/2,-2). They also cover signed gyroscopic whirl,
+full-inertia pole/exponential agreement, volume contraction, coordinate congruence,
+cycle-origin invariance, free coordinates and unrepresentable/cancelled refusal.
 
 `harmonic_response` uses `exp(+i omega t)` and native cancellable complex LU
 on `K - omega^2 M + i omega(C + Omega G)`. Row equilibration precedes the solve;

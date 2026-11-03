@@ -21,6 +21,9 @@ use fs_modal::{ModalError, quadratic_eigenvalues_with_cancel};
 /// Physical rigid-disk, bearing and imbalance assembly in original coordinates.
 pub mod rigid;
 
+/// Full period maps and numerical Floquet multipliers for periodic coefficients.
+pub mod periodic;
+
 /// Actual time-domain motion and impulse response at a fixed shaft speed.
 pub mod transient;
 
@@ -48,6 +51,12 @@ pub enum RotorError {
     Linear(LuComplexError),
     /// Original real transient factorization refused; no damping is inserted.
     TransientLinear(fs_la::factor::FactorError),
+    /// Whole-cycle payload, work, segment or QR sweep admission failed.
+    PeriodicBudget(&'static str),
+    /// Existing bounded dense exponential could not represent a segment flow.
+    PeriodicExponential(fs_phs::PhsError),
+    /// Native full period-map eigenspectrum could not be resolved.
+    PeriodicSpectrum(fs_la::eigen_complex::EigError),
     /// Original dynamic equilibrium did not meet the caller's residual limit.
     Residual {
         /// Measured scale-relative original-force residual.
