@@ -10,6 +10,8 @@
 pub mod contact_line;
 /// Original-material inertial motion and adaptive complete-interval integration.
 pub mod inertia;
+/// Coexisting binary-liquid phases with explicitly authored pair wetting.
+pub mod miscibility;
 /// Coupled filling, gas compression and heating through original material owners.
 pub mod sealed;
 
@@ -58,6 +60,8 @@ pub enum MaterialCapillaryError {
     Flow(CircularCapillaryError),
     /// A signed mass transfer cannot be represented from the accepted volume.
     NonFiniteMass,
+    /// Signed component exchange cannot be represented from the accepted volume.
+    NonFiniteComponentTransfer,
 }
 
 impl core::fmt::Display for MaterialCapillaryError {
@@ -69,6 +73,9 @@ impl core::fmt::Display for MaterialCapillaryError {
             Self::Flow(error) => write!(f, "material capillary flow: {error:?}"),
             Self::NonFiniteMass => {
                 write!(f, "material capillary mass transfer is not representable")
+            }
+            Self::NonFiniteComponentTransfer => {
+                write!(f, "material capillary component transfer is not representable")
             }
         }
     }

@@ -556,3 +556,6 @@ mod contact_line;
 
 #[path = "material_capillary/inertia.rs"]
 mod inertia;
+
+#[path = "material_capillary/miscibility.rs"]
+mod miscibility;

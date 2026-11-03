@@ -2234,6 +2234,36 @@ unevolved rheology, and finite displaced-fluid resistance with original-owner
 retention. They establish numerical/source integration, not measured wetting
 accuracy or arbitrary two-phase applicability.
 
+## Binary liquid coexistence in open capillaries
+
+`capillary::material::miscibility::step_binary_liquid_horizontal` consumes the
+two actual source-resolved phases of `ResolvedBinaryLiquidEquilibrium`. A
+homogeneous miscible result refuses a liquid-liquid meniscus before any flow
+or work evaluation. Both composition-dependent viscosities feed the existing
+exact two-fluid Washburn operator. Density and actual component concentrations
+provide signed inlet/outlet mass and species transfers, including reversal;
+their difference is the net component inventory change inside the tube.
+End events retain their actual elapsed time and exchanged volume.
+Both phases' exact density and viscosity source requirements must satisfy the
+shared static-at-fixed-external-conditions policy. Typed held temperature,
+pressure and composition remain admissible; rate/frequency/field dependence or
+applicability and ambiguous untyped external axes refuse before flow evaluation.
+A sampled coefficient alone is not a Newtonian constitutive law.
+
+Pair tension and the wall angle measured through the selected invading phase
+are explicitly authored for the actual coexisting pair/substrate. They have no
+material-source authority; no liquid/gas surface or pure-liquid wetting value
+is substituted. Zero tension explicitly neglects capillary work. Phase/source
+receipts remain on the borrowed equilibrium owner, whose finite inventory is
+never mutated: reservoirs maintain frozen compositions and pressure during
+the accepted step. Bulk coexistence is assumed unchanged by the capillary
+pressure jump. No pressure-dependent phase diagram, interfacial transfer,
+diffusion, films, nucleation, inertia or dynamic-angle law is inferred.
+The bounded scalar adapter allocates no memory. Synthetic-source tests check
+the independent integrated resistance law, work/loss balance, both invasion
+choices and flow directions, component/mass closure, end events, unchanged
+reservoir data and refusal of a meniscus for a miscible solution.
+
 ## Finite-compartment osmosis and selective membrane networks
 
 `osmosis` (the existing `continuum` feature) evolves the original
