@@ -1717,8 +1717,7 @@ and velocity violations plus final residuals. Invalid geometry, a zero normal,
 nonfinite response or exhausted nonlinear iterations refuses without publishing
 a partial candidate.
 
-This module is deliberately a reusable projection owner rather than a contact
-law or collision detector. It does not infer unilateral activation, restitution,
+This projection interface is a reusable constrained-state repair. It does not infer unilateral activation, restitution,
 friction, support work, continuous contact force, multiple simultaneous
 constraints or event timing. The caller selects when a bilateral point/plane
 constraint is physically active and composes this projection with an
@@ -1727,6 +1726,32 @@ full tensor against the independent momentum-covector condition
 `M delta = J^T lambda`, show that products of inertia create cross-axis angular
 correction, verify nonlinear gap closure and tangent closure, and cover explicit
 invalid-geometry refusal.
+
+## Constrained rigid point/plane motion
+
+`rigid_rattle::PointPlaneRattle::advance` evolves an already constrained native
+rigid state using an initial physical normal impulse, the original full-inertia
+free step, and a normal impulse at the actual endpoint material point. The
+returned pose is the free integrator's endpoint; it is never repaired. Under
+compatible external forcing, the plane's translation and rotation symmetries
+retain tangent linear momentum and plane-normal total spin-plus-orbital angular
+momentum. Both signed impulse works remain visible in the returned receipt.
+
+The scalar position solve starts from zero impulse, uses the original normal
+mobility and accepts only residual-decreasing corrections with bounded
+backtracking. Explicit impulse, angular-travel and iteration caps admit a local
+smooth branch; failure requires physical timestep refinement or revised bounds.
+Initial gap and normal speed must already meet the projector's tolerances.
+Cancellation or a numerical refusal publishes no state, and the new step
+allocates no heap storage. The original world-fixed force/body-fixed torque
+convention is retained.
+
+`tests/rigid_rattle_step.rs` checks exact COM support under gravity, full-tensor
+offset-point momentum and impulse-work balance, reversal, second-order
+refinement, rigid-frame/tangent-boost covariance and bounded refusals. This is
+a fixed-plane bilateral law, including tensile reactions. It does not claim
+exact energy conservation, symplecticity, global root uniqueness, unilateral
+contact, friction or moving supports.
 
 ## Articulated point/plane impact response
 
