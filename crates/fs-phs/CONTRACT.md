@@ -1717,3 +1717,45 @@ with and without physical damping, full mutually coupled two-body response and
 ordinary forcing against an independent 2x2 mechanical solve, unequal-reference
 reciprocity, original hereditary state/heat, constrained descriptor RLC response,
 factor reuse, resources and cancellation (G0/G1/G3/G4).
+
+## Original-state outgoing resonance and decay
+
+`harmonic::scattering::ScatteringModel::{resonance_pole,resonance_spectrum}`
+resolve finite natural modes with zero incident waves at every selected original
+power port. The closure remains `u=-y/Z`; unselected ordinary inputs are zero.
+The existing complete continuous descriptor pencil and shared fs-la Newton/Beyn
+owners retain all storage, material memory, independent load states and algebraic
+constraints. Neither the descriptor mass nor an isolated component impedance is
+inverted. Existing continuous modal-line scattering adapters return this same
+model and therefore expose these methods without a new time discretization.
+
+`ScatteringPole` reports original state, effort and port output, actual physical
+inputs, original `H=x^H Q x/2`, and independent per-boundary outgoing accounts.
+Original material resistance is unchanged. Internal loss is `Re(e^H R e)` plus
+the already declared nonlinear equilibrium resisting tangent, if present; the
+latter remains signed incremental work, not total biased-system heat. Outgoing
+power is independently `sum |y|^2/Z`. Complex-envelope decay checks are
+`2 Re(s) H + D_internal + P_out` and, separately, original physical input work.
+These free-mode quadratic accounts have no harmonic-average factor one half.
+The original unclosed physical equations are rechecked with actual inputs using
+the same observer as forced wave response. Neither unstable poles nor signed
+power defects are clipped or reclassified as material heat.
+
+Pole/spectrum resource limits include additional wave output storage and original
+row observation work before calling the numerical owner. Cancellation and any
+failed original-row observation refuse the entire query; reusable AC factors and
+accepted histories remain unchanged. Spectrum results retain the shared argument
+count, numerical rank, nested-quadrature change and contour-conditioning evidence.
+Dark internal modes remain eligible. This is numerical finite-spectrum evidence,
+not interval completeness, transfer observability, a spatial error certificate,
+or validation of a source law outside its declared range. A reference boundary
+is the authored matched termination, not a newly inferred radiation law.
+
+Five focused regressions in `tests/scattering_poles.rs` check analytic mechanical
+decay with and without internal heat, the full hereditary spectrum including its
+real relaxation mode across two contour grids, mutual boundary feedback with a
+dark mode and ordinary ports, descriptor RLC Kirchhoff reactions, and resource/
+cancellation refusal with unchanged AC replay. The full actual fs-phs library and
+these tests were compiled through the available native Rust compiler; all five
+new tests and five existing `harmonic_scattering` regressions passed. This narrow
+validation does not claim the unavailable DSR/full-workspace gate.

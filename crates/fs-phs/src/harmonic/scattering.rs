@@ -14,6 +14,9 @@ use super::{
     C64, HarmonicError, HarmonicFactor, HarmonicModel, HarmonicResponse, finite, invalid, poll,
 };
 
+mod poles;
+pub use poles::{DecayWavePort, ScatteringPole, ScatteringSpectrum};
+
 /// Additional resources for wave closure, beyond the consumed harmonic model's
 /// existing budget. Payload excludes that model, allocator overhead and RSS.
 #[derive(Clone, Copy, Debug)]
@@ -191,6 +194,62 @@ impl ScatteringModel {
             factor,
         })
     }
+
+    // Recheck the original physical equations with actual boundary inputs.
+    // Both forced response and free decay use this same independent account;
+    // the closed generator is deliberately not used to validate its own sign.
+    fn original_residual(
+        &self,
+        laplace: C64,
+        state: &[C64],
+        effort: &[C64],
+        inputs: &[C64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<f64, HarmonicError> {
+        let original = &self.closed;
+        let mut relative = 0.0_f64;
+        for i in 0..original.n {
+            poll(cancelled)?;
+            let mut residual = if i < original.n_diff {
+                laplace * state[i]
+            } else {
+                C64::ZERO
+            };
+            let mut scale = residual.abs();
+            for (j, &e) in effort.iter().enumerate() {
+                let term = e.scale(original.structure[i * original.n + j]);
+                residual = residual - term;
+                scale += term.abs();
+            }
+            if original.resisting_tangent.is_some() {
+                let term = original.nonlinear_loss_row(i, state);
+                residual = residual + term;
+                scale += term.abs();
+            }
+            for (p, u) in inputs.iter().enumerate() {
+                let term = u.scale(original.g[i * original.m + p]);
+                residual = residual - term;
+                scale += term.abs();
+            }
+            if !finite(residual) || !scale.is_finite() {
+                return Err(invalid(
+                    "original scattering equation residual is not representable",
+                ));
+            }
+            relative = relative.max(if scale == 0.0 {
+                0.0
+            } else {
+                residual.abs() / scale
+            });
+        }
+        if relative > original.budget.relative_residual_tolerance {
+            return Err(HarmonicError::Residual {
+                relative,
+                tolerance: original.budget.relative_residual_tolerance,
+            });
+        }
+        Ok(relative)
+    }
 }
 
 impl ScatteringFactor<'_> {
@@ -275,51 +334,13 @@ impl ScatteringFactor<'_> {
         {
             return Err(invalid("physical scattering balance is not representable"));
         }
-        // Independently recheck the ORIGINAL physical rows with actual u,
-        // including algebraic reactions. No closed-operator cancellation is
-        // taken as evidence that the physical boundary sign is correct.
-        let original = &self.model.closed;
-        for i in 0..original.n {
-            poll(&mut cancelled)?;
-            let mut residual = if i < original.n_diff {
-                C64::new(0.0, -physical.omega_rad_s) * physical.state[i]
-            } else {
-                C64::ZERO
-            };
-            let mut scale = residual.abs();
-            for j in 0..original.n {
-                let term = physical.effort[j].scale(original.structure[i * original.n + j]);
-                residual = residual - term;
-                scale += term.abs();
-            }
-            if original.resisting_tangent.is_some() {
-                let term = original.nonlinear_loss_row(i, &physical.state);
-                residual = residual + term;
-                scale += term.abs();
-            }
-            for (p, u) in physical_inputs.iter().enumerate() {
-                let term = u.scale(original.g[i * original.m + p]);
-                residual = residual - term;
-                scale += term.abs();
-            }
-            if !finite(residual) || !scale.is_finite() {
-                return Err(invalid(
-                    "original scattering equation residual is not representable",
-                ));
-            }
-            let relative = if scale == 0.0 {
-                0.0
-            } else {
-                residual.abs() / scale
-            };
-            physical.relative_residual = physical.relative_residual.max(relative);
-        }
-        if physical.relative_residual > original.budget.relative_residual_tolerance {
-            return Err(HarmonicError::Residual {
-                relative: physical.relative_residual,
-                tolerance: original.budget.relative_residual_tolerance,
-            });
-        }
+        physical.relative_residual = physical.relative_residual.max(self.model.original_residual(
+            C64::new(0.0, -physical.omega_rad_s),
+            &physical.state,
+            &physical.effort,
+            &physical_inputs,
+            &mut cancelled,
+        )?);
         poll(&mut cancelled)?;
         Ok(ScatteringResponse {
             physical,
