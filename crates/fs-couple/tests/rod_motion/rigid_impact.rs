@@ -9,6 +9,9 @@ mod multiple;
 #[path = "rigid_impact/friction_multiple.rs"]
 mod friction_multiple;
 
+#[path = "rigid_impact/graph.rs"]
+mod graph;
+
 use super::*;
 use fs_couple::rod_motion::SpatialRodMotion;
 use fs_couple::rod_motion::impulse::RodImpulseControls;

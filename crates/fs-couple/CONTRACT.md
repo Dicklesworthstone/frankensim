@@ -22450,6 +22450,67 @@ stationary support reactions, continuation and transactional retry. This
 remains an isolated frozen-pose event, not persistent contact, collision
 discovery or a simultaneous-contact island.
 
+## Simultaneous normal contact graphs on native rods and finite bodies
+
+`rod_motion::RodMotion::apply_rigid_normal_contact_graph` resolves authored
+contacts between one continuing rod and a bounded slice of original finite
+`fs_mbd::RigidBodyState` participants. An oriented `graph::RodRigidGraphContact`
+can join a rod material attachment to a body, two distinct bodies, or two
+distinct rod nodes. These topologies can coexist in one original
+`fs_contact::multicontact` solve. A contact cannot join two attachments belonging
+to the same rigid participant. Body indices identify the caller's original
+participant order; rod offsets are measured from the material node, and body
+arms from the original center of mass.
+
+Each signed row retains both physical endpoints. The common graph owner
+assembles the complete `J M^-1 J^T` response from original native central
+tensors, centroid offsets, attachment arms and admitted stationary supports.
+Shared participants supply cross terms with their actual endpoint signs;
+unrelated mass blocks contribute nothing. No surrogate bodies, diagonalized
+inertias or pairwise impulse sequence replace that response. Shared translation
+is subtracted in double-double arithmetic before adding point rotation. Finite
+normal directions are normalized with a scaled norm; actual witness gaps and
+tangential separation remain authoritative. Penetration is refused.
+
+The original contact owner supplies globally admissible restitution impulses,
+passivity, total mechanical loss and the unique-impulse versus unique-velocity
+classification. One original rod point-impulse batch and one original resultant
+momentum update per affected body prepare the candidates. The same represented
+world vector acts oppositely at each edge's two endpoints. Compensated force and
+couple sums retain cross-contact cancellation before native storage. Unaffected
+bodies preserve their exact native state and have no impulse receipt; a graph
+involving only finite bodies leaves the rod unchanged. An all-zero solution
+performs no native impulse event.
+
+Publication checks every actual directional endpoint velocity, the actual
+stored linear and angular transfer of each affected body, aggregate world
+momentum including original support reactions, and cancellation-stable kinetic
+work against both the contact work and its admitted loss. Opposite unresolved
+body transfers cannot cancel into an accepted global account. All participants
+return together only after those checks and a final cancellation checkpoint.
+Poses, constitutive history, clocks and integration step counts are retained;
+the returned native states continue through their original integrators. The
+existing rod support restrictions remain binding.
+
+`RodRigidGraphBudget` bounds body input/output storage before graph allocation:
+the default and hard maximum are 128 bodies, including unused participants;
+zero admits rod-only self-contact. The original normal law bounds the graph to
+64 scalar contacts. Assembly needs O(contacts squared) storage/work and
+O(contacts) native inverse-tensor actions; native staging needs
+O(rod nodes + bodies + contacts) work without per-edge trajectory clones.
+Collision discovery, event timing, persistent friction and distribution of
+mechanical loss to heat or damage remain with their existing owners.
+
+G0/G1/G3/G4 tests compare the singleton with the original isolated owner, a
+mixed four-participant chain with independent simultaneous collision equations,
+and eccentric multi-body attachments with an independent six-dimensional
+material-origin spatial-mass solve. They check full tensor response, world-frame
+and body/contact permutation covariance, native continuation, distinct-node
+self-contact, rigid-only redundant cycles, support force/couple closure,
+per-body unresolved-transfer refusal, bounded input, invalid geometry,
+cancelled/failed publication and deterministic retry. A sequential-subgroup
+falsifier establishes why the complete signed contact graph is required.
+
 ## Coulomb friction in isolated native rod/rigid impacts
 
 `rod_motion::RodMotion::apply_rigid_frictional_impact` resolves the normal and
