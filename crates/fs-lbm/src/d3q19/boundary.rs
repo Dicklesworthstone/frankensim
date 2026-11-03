@@ -260,14 +260,18 @@ impl BoundarySpec3 {
         self.faces[face.index()]
     }
 
-    fn validate(self) {
+    /// Admit the original face rules without allocating a grid or panicking.
+    /// The ordinary grid constructor uses this same admission implementation.
+    /// Pair periodic faces, keep open faces on one axis, and respect the native
+    /// finite/tangential/low-Mach velocity and positive-density requirements.
+    pub fn try_validate(self) -> Result<(), BoundaryForcingError3> {
         for min_face in [Face3::XMin, Face3::YMin, Face3::ZMin] {
             let max_face = min_face.opposite();
-            assert_eq!(
-                self.face(min_face).is_periodic(),
-                self.face(max_face).is_periodic(),
-                "periodic boundaries must be paired on the {min_face:?}/{max_face:?} axis"
-            );
+            if self.face(min_face).is_periodic() != self.face(max_face).is_periodic() {
+                return Err(BoundaryForcingError3::Invalid(
+                    "periodic boundaries must be paired on each axis",
+                ));
+            }
         }
 
         let mut open_axes = [false; 3];
@@ -275,51 +279,51 @@ impl BoundarySpec3 {
             match self.face(face) {
                 FaceBoundary3::Periodic => {}
                 FaceBoundary3::Wall { velocity } => {
-                    assert!(
-                        velocity.iter().all(|component| component.is_finite()),
-                        "wall velocity on {face:?} must be finite"
-                    );
+                    if !velocity.iter().all(|component| component.is_finite()) {
+                        return Err(BoundaryForcingError3::Invalid("wall velocity must be finite"));
+                    }
                     let normal = face.normal();
                     let normal_velocity = velocity
                         .iter()
                         .zip(normal)
                         .map(|(u, n)| *u * f64::from(n))
                         .sum::<f64>();
-                    assert!(
-                        normal_velocity.abs() <= 16.0 * f64::EPSILON,
-                        "wall velocity on {face:?} must be tangential"
-                    );
+                    if normal_velocity.abs() > 16.0 * f64::EPSILON {
+                        return Err(BoundaryForcingError3::Invalid("wall velocity must be tangential"));
+                    }
                     let speed_sq = velocity.iter().map(|u| u * u).sum::<f64>();
-                    assert!(
-                        speed_sq < 0.03,
-                        "wall velocity on {face:?} exceeds the low-Mach admission envelope"
-                    );
+                    if speed_sq >= 0.03 {
+                        return Err(BoundaryForcingError3::Invalid("wall velocity exceeds the low-Mach admission envelope"));
+                    }
                 }
                 FaceBoundary3::Velocity { velocity } => {
-                    assert!(
-                        velocity.iter().all(|component| component.is_finite()),
-                        "velocity boundary on {face:?} must be finite"
-                    );
+                    if !velocity.iter().all(|component| component.is_finite()) {
+                        return Err(BoundaryForcingError3::Invalid("velocity boundary must be finite"));
+                    }
                     let speed_sq = velocity.iter().map(|u| u * u).sum::<f64>();
-                    assert!(
-                        speed_sq < 0.03,
-                        "velocity boundary on {face:?} exceeds the low-Mach admission envelope"
-                    );
+                    if speed_sq >= 0.03 {
+                        return Err(BoundaryForcingError3::Invalid("velocity boundary exceeds the low-Mach admission envelope"));
+                    }
                     open_axes[face.axis()] = true;
                 }
                 FaceBoundary3::Pressure { density } => {
-                    assert!(
-                        density.is_finite() && density > 0.0,
-                        "pressure-boundary density on {face:?} must be positive and finite"
-                    );
+                    if !density.is_finite() || density <= 0.0 {
+                        return Err(BoundaryForcingError3::Invalid("pressure-boundary density must be positive and finite"));
+                    }
                     open_axes[face.axis()] = true;
                 }
             }
         }
-        assert!(
-            open_axes.into_iter().filter(|is_open| *is_open).count() <= 1,
-            "open velocity/pressure faces may occupy only one axis per grid"
-        );
+        if open_axes.into_iter().filter(|is_open| *is_open).count() > 1 {
+            return Err(BoundaryForcingError3::Invalid(
+                "open velocity/pressure faces may occupy only one axis per grid",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate(self) {
+        self.try_validate().expect("invalid D3Q19 boundary specification");
     }
 }
 

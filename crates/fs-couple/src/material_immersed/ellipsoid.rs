@@ -85,14 +85,14 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize> RetainedFluidEllipsoids<'a,
     /// neither a representative radius nor a diagonal-only tensor is used.
     pub fn new(
         fluid: &'a F,
-        domain: ImmersedDomain,
+        domain: impl Into<ImmersedBoundaryDomain>,
         sources: [AdditionalMaterialEllipsoid<'a>; N],
         initial: [BodyStateSi; N],
         gate: &CancelGate,
     ) -> Result<Self, Error> {
         Self::new_with_surfaces(
             fluid,
-            domain,
+            domain.into(),
             sources,
             sources.map(|s| s.material),
             initial,

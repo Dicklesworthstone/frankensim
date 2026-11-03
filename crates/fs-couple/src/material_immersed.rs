@@ -21,11 +21,13 @@ use fs_time::{So3, Vec3};
 
 /// Ordinary light, neutral or heavy solids with measured interior-fluid correction.
 pub mod dry;
+mod boundary;
 mod ellipsoid;
 mod flow;
 /// Ordinary heavy solids with source-derived displaced-fluid inertia and gravity.
 pub mod settling;
 use ellipsoid::NativeEllipsoid3;
+pub use boundary::{FaceBoundarySi, ImmersedBoundaryDomain};
 pub use ellipsoid::{AdditionalMaterialEllipsoid, RetainedFluidEllipsoids};
 
 /// Source, physical-unit, geometry or native step refusal.
@@ -41,7 +43,7 @@ pub enum MaterialImmersedError {
     Native(PartialSaturationError3),
     /// Existing collision owner refused a live viscous-relaxation update.
     Relaxation(CollisionError3),
-    /// Original physical flow preparation or conservative Guo force rebinding refused.
+    /// Original face admission, flow preparation or conservative Guo rebinding refused.
     Flow(BoundaryForcingError3),
 }
 impl core::fmt::Display for MaterialImmersedError {
@@ -67,8 +69,9 @@ impl From<PartialSaturationError3> for MaterialImmersedError {
 }
 type Error = MaterialImmersedError;
 
-/// Fixed incompressible domain and numerical resolution. Walls are stationary;
-/// paired periodic faces are selected per axis. Bodies cannot cross the halo.
+/// Fixed incompressible domain and numerical resolution. Defaults to stationary
+/// walls or paired periodic faces. `with_boundaries` selects explicit SI faces
+/// without changing existing domain literals. Bodies cannot cross the halo.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ImmersedDomain {
     /// Cells on each axis; positive multiples of the native tile size.
@@ -196,7 +199,7 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize> RetainedFluidSpheres<'a, F,
     /// variable-density FSI closure.
     pub fn new(
         fluid: &'a F,
-        domain: ImmersedDomain,
+        domain: impl Into<ImmersedBoundaryDomain>,
         sources: [AdditionalMaterialSphere<'a>; N],
         initial: [SphereStateSi; N],
         film: FilmGeometry,
@@ -204,7 +207,7 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize> RetainedFluidSpheres<'a, F,
     ) -> Result<Self, Error> {
         Self::new_with_surfaces(
             fluid,
-            domain,
+            domain.into(),
             sources,
             sources.map(|s| s.material),
             initial,
@@ -233,7 +236,7 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize> RetainedFluidSpheres<'a, F,
 impl<'a, F: FluidTransport + ?Sized, const N: usize, S> RetainedFluidBodies<'a, F, N, S> {
     fn new_with_surfaces(
         fluid: &'a F,
-        domain: ImmersedDomain,
+        domain: ImmersedBoundaryDomain,
         sources: [S; N],
         materials: [&ResolvedBody; N],
         initial: [BodyStateSi; N],
@@ -243,9 +246,9 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize, S> RetainedFluidBodies<'a, 
         poll(gate)?;
         let scaling = plan_scaling_from_material(
             fluid,
-            domain.cell_size_m,
-            domain.timestep_s,
-            domain.maximum_speed_m_s,
+            domain.domain.cell_size_m,
+            domain.domain.timestep_s,
+            domain.domain.maximum_speed_m_s,
         )?;
         Self::new_with_scaling(
             scaling,
@@ -262,7 +265,7 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize, S> RetainedFluidBodies<'a, 
     // Ordinary additional-carrier construction passes original inertia unchanged.
     fn new_with_scaling(
         scaling: MaterialScaling<'a, F>,
-        domain: ImmersedDomain,
+        setup: ImmersedBoundaryDomain,
         sources: [S; N],
         inertias: [fs_mbd::articulated::SpatialInertia; N],
         initial: [BodyStateSi; N],
@@ -270,6 +273,7 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize, S> RetainedFluidBodies<'a, 
         gate: &CancelGate,
     ) -> Result<Self, Error> {
         poll(gate)?;
+        let domain = setup.domain;
         let count = domain
             .cells
             .into_iter()
@@ -288,6 +292,7 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize, S> RetainedFluidBodies<'a, 
                 "invalid grid/body/quadrature allocation budget",
             ));
         }
+        let boundaries = setup.lattice_boundaries(&scaling)?;
         let dx = domain.cell_size_m;
         let dt = domain.timestep_s;
         let mass_unit = positive(scaling.transport().density_kg_m3() * dx * dx * dx)?;
@@ -317,13 +322,6 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize, S> RetainedFluidBodies<'a, 
                 )?),
             });
         }
-        let boundaries = BoundarySpec3::new(core::array::from_fn(|i| {
-            if domain.periodic[i / 2] {
-                FaceBoundary3::Periodic
-            } else {
-                FaceBoundary3::stationary_wall()
-            }
-        }));
         let grid = BoundaryGrid3::new(
             domain.cells[0],
             domain.cells[1],

@@ -26161,3 +26161,45 @@ refinement, accepted-only gross/net accounting, vacuum-only parity, original
 closed-mixture limits, bounded clocks/work and atomic source/cancellation
 refusals. Rustfmt parsing and source/API review are available; native compilation
 and execution remain unverified with the missing constellation dependencies.
+
+### SI reservoir boundaries on material immersed bodies
+
+`ImmersedDomain::with_boundaries` creates an explicit construction-only
+`ImmersedBoundaryDomain`. Its six `FaceBoundarySi` entries follow `Face3::ALL`
+and admit stationary walls, paired periodic faces, prescribed material-fluid
+velocity in m/s, and pressure perturbation in Pa. All eight retained-fluid,
+settling, and physical dry sphere/ellipsoid constructors accept this setup
+through their shared original construction path. Existing `ImmersedDomain`
+literals retain their periodic/stationary defaults. Resolution, allocation,
+material inertia, body geometry and time integration keep their original owners.
+
+The common converter uses the original source-owned `MaterialScaling`.
+Velocity components use `velocity_lattice`, and the complete prescribed vector
+must respect the scenario speed bound. The inverse pressure mapping reuses
+`pressure_perturbation_si` and the same reference-one density: in the original
+numerical isothermal convention,
+`rho_lu = 1 + p_prime / (CS2 * rho_reference * (dx/dt)^2)`.
+Zero gauge pressure maps exactly to density one; negative perturbations must
+retain positive density. Nonfinite values, unrepresentable scales or densities,
+and nonzero perturbations too small to change reference density refuse. This is
+not an absolute gas-pressure or physical acoustic equation of state.
+
+`BoundarySpec3::try_validate` exposes the existing native face admission as a
+fallible operation, and the original asserting constructor delegates to that
+same implementation. SI conversion and boundary admission happen before grid
+allocation. Periodic faces stay paired, open faces occupy at most one axis,
+and the native finite/tangential/low-Mach checks remain. The immersed SI surface
+does not admit prescribed moving walls. There is no live topology mutation.
+
+Accepted construction feeds the same original open-boundary immersed solver.
+Reservoir mass and momentum remain in its shared native receipt, convertible
+through the existing mass/impulse/angular-impulse methods; no duplicate body
+reaction or heat destination is introduced. Source rebinding still requires
+unchanged reference density and fixed dx/dt, preserving these unit mappings.
+The original body halo, pressure-work and thermodynamic limitations remain.
+
+The focused cases in `material_immersed/boundary/tests.rs` exercise pressure
+round trips across scales, legacy defaults, typed pressure/speed/topology
+refusal, and six actual native body/fluid steps. Independently authored native
+faces reproduce every population, body state and reservoir receipt exactly,
+and the prescribed inlet accelerates the immersed body.

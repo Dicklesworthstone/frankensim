@@ -41,7 +41,7 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize> ResolvedImmersedBodies<'a, 
     #[allow(clippy::too_many_arguments)]
     pub fn spheres(
         fluid: &'a F,
-        domain: ImmersedDomain,
+        domain: impl Into<ImmersedBoundaryDomain>,
         sources: [SubmergedSphere<'a>; N],
         initial: [BodyStateSi; N],
         gravity_m_s2: [f64; 3],
@@ -50,7 +50,7 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize> ResolvedImmersedBodies<'a, 
     ) -> Result<Self, Error> {
         Self::with_surfaces(
             fluid,
-            domain,
+            domain.into(),
             sources.map(SubmergedSphere::material),
             initial,
             gravity_m_s2,
@@ -82,7 +82,7 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize> ResolvedImmersedBodies<'a, 
     #[allow(clippy::too_many_arguments)]
     pub fn ellipsoids(
         fluid: &'a F,
-        domain: ImmersedDomain,
+        domain: impl Into<ImmersedBoundaryDomain>,
         sources: [SubmergedEllipsoid<'a>; N],
         initial: [BodyStateSi; N],
         gravity_m_s2: [f64; 3],
@@ -90,7 +90,7 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize> ResolvedImmersedBodies<'a, 
     ) -> Result<Self, Error> {
         Self::with_surfaces(
             fluid,
-            domain,
+            domain.into(),
             sources.map(SubmergedEllipsoid::material),
             initial,
             gravity_m_s2,
@@ -120,7 +120,7 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize> ResolvedImmersedBodies<'a, 
     #[allow(clippy::too_many_arguments)]
     fn with_surfaces(
         fluid: &'a F,
-        domain: ImmersedDomain,
+        domain: ImmersedBoundaryDomain,
         materials: [&'a ResolvedBody; N],
         initial: [BodyStateSi; N],
         gravity_m_s2: [f64; 3],

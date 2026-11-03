@@ -138,16 +138,17 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize> SubmergedMaterialSpheres<'a
     /// orientation are retained. Shapes, films and fluid obey native admission.
     pub fn new(
         fluid: &'a F,
-        domain: ImmersedDomain,
+        domain: impl Into<ImmersedBoundaryDomain>,
         sources: [SubmergedSphere<'a>; N],
         initial: [BodyStateSi; N],
         gravity_m_s2: [f64; 3],
         film: FilmGeometry,
         gate: &CancelGate,
     ) -> Result<Self, Error> {
+        let setup = domain.into();
         let (scaling, inertias) = prepare(
             fluid,
-            domain,
+            setup.domain,
             sources.map(SubmergedSphere::material),
             initial,
             gravity_m_s2,
@@ -155,7 +156,7 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize> SubmergedMaterialSpheres<'a
         )?;
         let native = RetainedFluidBodies::new_with_scaling(
             scaling,
-            domain,
+            setup,
             sources,
             inertias.map(|s| s.excess),
             initial,
@@ -192,15 +193,16 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize> SubmergedMaterialEllipsoids
     /// Existing enclosing-sphere clearance applies; no ellipsoid film is added.
     pub fn new(
         fluid: &'a F,
-        domain: ImmersedDomain,
+        domain: impl Into<ImmersedBoundaryDomain>,
         sources: [SubmergedEllipsoid<'a>; N],
         initial: [BodyStateSi; N],
         gravity_m_s2: [f64; 3],
         gate: &CancelGate,
     ) -> Result<Self, Error> {
+        let setup = domain.into();
         let (scaling, inertias) = prepare(
             fluid,
-            domain,
+            setup.domain,
             sources.map(SubmergedEllipsoid::material),
             initial,
             gravity_m_s2,
@@ -208,7 +210,7 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize> SubmergedMaterialEllipsoids
         )?;
         let native = RetainedFluidBodies::new_with_scaling(
             scaling,
-            domain,
+            setup,
             sources,
             inertias.map(|s| s.excess),
             initial,

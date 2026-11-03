@@ -44,7 +44,7 @@ impl<'a, F: FluidTransport + ?Sized> ResolvedImmersedBody<'a, F> {
     #[allow(clippy::too_many_arguments)]
     pub fn sphere(
         fluid: &'a F,
-        domain: ImmersedDomain,
+        domain: impl Into<ImmersedBoundaryDomain>,
         material: &'a ResolvedBody,
         radius_m: f64,
         initial: BodyStateSi,
@@ -54,7 +54,7 @@ impl<'a, F: FluidTransport + ?Sized> ResolvedImmersedBody<'a, F> {
         let source = AdditionalMaterialSphere::new(material, radius_m)?;
         Self::with_shape(
             fluid,
-            domain,
+            domain.into(),
             material,
             initial,
             gravity_m_s2,
@@ -69,7 +69,7 @@ impl<'a, F: FluidTransport + ?Sized> ResolvedImmersedBody<'a, F> {
     #[allow(clippy::too_many_arguments)]
     pub fn ellipsoid(
         fluid: &'a F,
-        domain: ImmersedDomain,
+        domain: impl Into<ImmersedBoundaryDomain>,
         material: &'a ResolvedBody,
         semiaxes_m: [f64; 3],
         body_from_shape: So3,
@@ -80,7 +80,7 @@ impl<'a, F: FluidTransport + ?Sized> ResolvedImmersedBody<'a, F> {
         let source = AdditionalMaterialEllipsoid::new(material, semiaxes_m, body_from_shape)?;
         Self::with_shape(
             fluid,
-            domain,
+            domain.into(),
             material,
             initial,
             gravity_m_s2,
@@ -93,7 +93,7 @@ impl<'a, F: FluidTransport + ?Sized> ResolvedImmersedBody<'a, F> {
     #[allow(clippy::too_many_arguments)]
     fn with_shape(
         fluid: &'a F,
-        domain: ImmersedDomain,
+        domain: ImmersedBoundaryDomain,
         material: &'a ResolvedBody,
         initial: BodyStateSi,
         gravity_m_s2: [f64; 3],

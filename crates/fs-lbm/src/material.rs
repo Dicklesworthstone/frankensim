@@ -251,6 +251,26 @@ impl<F: FluidTransport + ?Sized> MaterialScaling<'_, F> {
         finite(CS2 * (lattice_density - 1.0) * self.transport.density_kg_m3()
             * self.velocity_scale * self.velocity_scale, "physical pressure perturbation is unrepresentable")
     }
+
+    /// SI pressure perturbation [Pa] to the original reference-one density.
+    /// This inverts the numerical isothermal pressure mapping, not a physical
+    /// gas equation of state. Zero gauge pressure maps exactly to density one.
+    /// Negative perturbations are admitted only while density stays positive.
+    /// Refuses nonfinite data, unrepresentable scale/density, and a nonzero
+    /// perturbation too small to change the represented reference density.
+    pub fn density_lattice_from_pressure_perturbation(
+        &self,
+        pressure_pa: f64,
+    ) -> Result<f64, MaterialLbmError> {
+        finite(pressure_pa, "pressure perturbation must be finite")?;
+        let scale = positive(self.pressure_perturbation_si(2.0)?, "pressure scale is unrepresentable")?;
+        let density = positive(1.0 + pressure_pa / scale, "pressure-boundary density must be positive and finite")?;
+        if pressure_pa != 0.0 && density == 1.0 {
+            return Err(MaterialLbmError::Invalid("pressure perturbation cannot be represented at reference density"));
+        }
+        self.pressure_perturbation_si(density)?;
+        Ok(density)
+    }
 }
 
 /// Existing thermal solver together with its dimension-independent temperature mapping.
