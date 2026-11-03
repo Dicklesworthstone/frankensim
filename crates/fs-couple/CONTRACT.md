@@ -22850,6 +22850,88 @@ stationary support reactions, continuation and transactional retry. This
 remains an isolated frozen-pose event, not persistent contact, collision
 discovery or a simultaneous-contact island.
 
+## Simultaneous normal contact networks of original spatial plates
+
+`plate_impact::network::PlateImpactNetwork` extends the original spatial plate
+impact owners to a graph of independently meshed plates. Each
+`PlateNetworkContact` identifies two original owners and one shared world-x/y
+point, with a declared restitution coefficient and activation distance.
+`PlateImpactSurface` retains each owner's original `PlateDynamics`, complete
+consistent mass, support map and explicit reference face height. A positive
+edge impulse acts along world +z on its positive endpoint and -z on its negative
+endpoint. Mixed load implementations use `L = dyn PlateLoad`; no load, mass,
+stiffness, physical damping or trajectory owner is substituted.
+
+Preparation reuses `PlateRigidImpactSet` for each referenced owner's incident
+points. The one shared matrix is
+`W_ij = sum_p s_pi s_pj B_pi M_p^-1 B_pj^T`, where absent incidences contribute
+zero and `M_p` is that owner's original scaled reduced consistent mass. All
+cross-interface entries on the same plate remain, even when contacts lie on
+different interfaces or one edge initially separates. The cached matrix is
+assembled once with compensated accumulation. An event delegates the whole
+admissible normal law to `fs-contact::multicontact`; neither independent edge
+solves nor a sequential sweep approximates the simultaneous impact.
+
+Actual gaps combine both native interpolated displacements with the declared
+reference face separation. Every referenced owner must have a finite matching
+checkpoint at exactly the same native physical time, including owners reached
+only by inactive edges. Unreferenced states need not share that time and are
+not admitted or copied. The original contact law rejects penetration, retains
+its complementarity and determinacy results, and rejects globally active
+energy gain rather than silently reducing restitution.
+
+An accepted event accumulates each owner's signed transpose request in raw
+double-double full nodal coordinates and rounds only the reduced impulse sent
+to the original native update. At most one original structural impulse solve
+and acceleration restart runs per affected plate. The common original plate
+transfer audit reconstructs the actual full momentum change, retains
+constrained-row cross inertia, and computes each fixed-row support impulse as
+actual momentum minus the unrounded requested impulse. Every free row must
+meet its original impulse bound. A complete exactly zero nodal request does
+not restart its owner; an all-zero contact event leaves all states bitwise
+unchanged and returns no native receipts or balance record.
+
+Before publication, actual endpoint velocities must match the shared contact
+prediction, actual relative impulse work must match the original law, and all
+owners' unrounded momentum and kinetic increments enter one collective audit.
+Only represented transverse Pz and bending Lx/Ly are claimed; complete support
+reactions are external. Actual aggregate kinetic change equals contact work
+and balances the original mechanical dissipation within declared bounds.
+Per-owner reported scalars are rounded only after this common audit. Reports
+preserve original owner indexing, including absent receipts for untouched
+owners, and original edge indexing for gaps, speeds and law quantities.
+Velocity and acceleration publish only after every gate and the final
+cancellation poll; positions, clocks, accepted-step counters and native
+telemetry remain in place. Refusal, native load failure or cancellation before
+publication changes no trajectory.
+
+Admission caps the original owner count (at most 128), global contact count
+(at most 64), total full nodal dimension and combined live workspace before
+graph allocation. Each original owner retains its own point-location,
+full-mass, contact-count, cross-mobility-product and native workspace budgets.
+The combined bound includes referenced-owner workspace ceilings, graph arrays,
+compensated requests and staged receipts; borrowed model/trajectory storage and
+the contact solver's independently bounded scratch are excluded. Work uses
+bounded cancellation checkpoints. Preparation assembles signed cache entries
+in `sum_p k_p^2` work after original point-response preparation; an event
+aggregates each owner's incident requests and performs at most one native
+impulse solve for that owner. These are structural complexity statements, not
+measured throughput claims.
+
+Focused G0/G1/G3/G4 tests use an independent three-mass centroid-chain solution,
+owner and edge permutations, a sequential-sweep falsifier, continuation through
+the original damped time owners, nonmatching spatial interpolation and dense
+consistent-mass inverses, original support cross inertia, redundant contact
+determinacy, equivalence to the existing two-plate owner, coupled initially
+separating and inactive rows, global energy-gain refusal, exact no-op behavior,
+budget admission, synchronized clocks, heterogeneous load restart/failure,
+cancellation and deterministic retry. This is fixed-normal instantaneous
+contact. Collision discovery, persistent-contact stepping, rotating normals,
+in-plane/drilling momentum, tangential friction, classical impact adjoints,
+thermal loss destinations, experimental validation and measured performance
+are not established by this extension. A unique velocity witness does not
+establish unique local pressure, support load shares or heat partition.
+
 ## Simultaneous normal contact graphs on native rods and finite bodies
 
 `rod_motion::RodMotion::apply_rigid_normal_contact_graph` resolves authored

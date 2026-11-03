@@ -396,7 +396,7 @@ impl<'a, P: PlateLoad + ?Sized, N: PlateLoad + ?Sized> PlatePlateImpact<'a, P, N
     }
 }
 
-fn difference(
+pub(super) fn difference(
     positive: &[f64],
     pv: &[f64],
     negative: &[f64],
@@ -419,7 +419,7 @@ fn difference(
     Ok(value)
 }
 
-fn requests<L: PlateLoad + ?Sized>(
+pub(super) fn requests<L: PlateLoad + ?Sized>(
     prepared: &PlateRigidImpactSet<'_, L>,
     impulses: &[f64],
     sign: f64,

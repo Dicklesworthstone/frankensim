@@ -10,7 +10,7 @@ use fs_couple::plate_impact::plates::{
 };
 use fs_plate_transient::PlateLoad;
 
-fn pair_controls() -> PlateRigidImpactSetControls {
+pub(super) fn pair_controls() -> PlateRigidImpactSetControls {
     let single = controls(0.0);
     let mut contact = MultiImpactConfig::default();
     contact.solver.gradient_tolerance = 1e-12;
@@ -26,7 +26,7 @@ fn pair_controls() -> PlateRigidImpactSetControls {
         energy_tolerance_j: single.energy_tolerance_j,
     }
 }
-fn pair_budget() -> PlatePlateImpactBudget {
+pub(super) fn pair_budget() -> PlatePlateImpactBudget {
     let owner = PlateRigidImpactSetBudget {
         plate: PlateRigidImpactBudget {
             location: PlateLoadBudget {
@@ -55,7 +55,7 @@ fn sites(points: &[[f64; 2]], restitution: f64) -> Vec<PlateImpactSite> {
         })
         .collect()
 }
-fn surface<'a>(
+pub(super) fn surface<'a>(
     mesh: &'a PlateMesh,
     model: &'a PlateModel,
     mass: &'a Csr,
@@ -87,7 +87,7 @@ fn surface<'a>(
         reference_height_m: height,
     }
 }
-fn state(n: usize) -> SecondOrderState {
+pub(super) fn state(n: usize) -> SecondOrderState {
     SecondOrderState::new(0.7, &vec![0.0; n], &vec![0.0; n], &vec![0.0; n])
 }
 fn audit(report: &PlatePlateImpactReport) {
@@ -111,7 +111,7 @@ fn audit(report: &PlatePlateImpactReport) {
 
 // Independent exact P1 area integrals on a four-triangle refinement. No cached
 // production point response or structural mass solver constructs this oracle.
-fn fine_fixture(shift: [f64; 2]) -> (PlateMesh, PlateModel, Csr) {
+pub(super) fn fine_fixture(shift: [f64; 2]) -> (PlateMesh, PlateModel, Csr) {
     let mut mesh = PlateMesh {
         nodes: vec![
             (0.0, 0.0),
@@ -153,7 +153,7 @@ fn fine_fixture(shift: [f64; 2]) -> (PlateMesh, PlateModel, Csr) {
     };
     (mesh, model, full)
 }
-fn coarse_row(point: [f64; 2]) -> Vec<f64> {
+pub(super) fn coarse_row(point: [f64; 2]) -> Vec<f64> {
     vec![
         1.0 - point[0] - point[1],
         0.0,
@@ -166,7 +166,7 @@ fn coarse_row(point: [f64; 2]) -> Vec<f64> {
         0.0,
     ]
 }
-fn fine_rows() -> Vec<Vec<f64>> {
+pub(super) fn fine_rows() -> Vec<Vec<f64>> {
     [
         [(0, 0.25), (3, 0.5), (5, 0.25)],
         [(3, 0.25), (1, 0.5), (4, 0.25)],
@@ -182,7 +182,7 @@ fn fine_rows() -> Vec<Vec<f64>> {
     })
     .collect()
 }
-fn dot(a: &[f64], b: &[f64]) -> f64 {
+pub(super) fn dot(a: &[f64], b: &[f64]) -> f64 {
     a.iter().zip(b).map(|(a, b)| a * b).sum()
 }
 

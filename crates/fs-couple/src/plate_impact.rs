@@ -41,6 +41,10 @@ pub mod bodies;
 #[path = "plate_impact/plates.rs"]
 pub mod plates;
 
+/// Simultaneous normal contact across independent native plate trajectories.
+#[path = "plate_impact/network.rs"]
+pub mod network;
+
 /// Physical and numerical allowances. Background momentum never enlarges an
 /// impulse allowance. All supports are stationary in the original plate frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
