@@ -1,5 +1,46 @@
 # fs-material — CONTRACT
 
+## Competing dissolved metals during gold cyanidation
+
+`GoldCyanidationBatch::new_with_competing_metals` couples explicit dissolved
+metal association families to the existing finite leach owner. Its
+`CompetingMetals` input supplies original source-backed families, every finite
+metal total, and bounded ligand/pH solve controls. The coupled system uses the
+original HCN/CN and water owners; shared chemical definitions, Gibbs references
+and receipts must agree. Metal counterions are explicit charge inputs. Neither
+an ore copper assay nor a Cu(II) source becomes a dissolved Cu(I) inventory
+without a separately declared physical and chemical model.
+
+The supplied charge's `uncomplexed_cyanide` is HCN+CN before optional metal
+equilibration, excluding ligands in any initial gold complex. At cumulative
+gold progress `x`, the remaining available ligand total is `T0-2*x`. Every
+rate stage jointly partitions it among HCN, free CN and the declared metal
+complexes while solving electroneutrality with the current gold-complex stock.
+The actual free CN and pH enter the original source-admitted empirical rate;
+the owned uncomplexed-cyanide source coordinate is the actual HCN+CN pool.
+Metal distributions can change as gold consumes ligand. Fixed metal totals
+are conserved; binding does not destroy cyanide or supply a fitted consumption
+factor. Zero metal totals remain explicit and recover the original chemistry
+within the declared equilibrium tolerances.
+
+Each state retains the complete ligand equilibrium, its source owner, metal
+stocks, ligand counts, charge and component residuals, numerical bracket,
+and work counts alongside the original aqueous report. The
+independently recomputed cyanide account includes metal-bound ligands and
+retains the signed, tolerance-checked ligand-equilibrium residual. Subtracting
+that reported numerical residual must leave only roundoff accounting error;
+stocks are never clipped or normalized to close the account. Kinetic local
+error estimates remain separate from equilibrium/source/model uncertainty.
+
+Both the finite-headspace and prescribed-pressure oxygen adapters carry this
+same competition through attachment and continued advance. The latter's
+`from_batch` preserves an already admitted fresh bath and its metal families.
+Leach and oxygen-transfer source conditions use actual competing-solution
+coordinates. All original atomic source/work/cancellation refusals still
+apply. This coupling does not infer redox, mineral dissolution, CuCN solid
+equilibrium, irreversible cyanide oxidation, carbon uptake, nonideal activity,
+or an ore-specific kinetic calibration.
+
 ## Prescribed-pressure oxygen contact during cyanidation
 
 `cyanide_leach::aeration::AeratedGoldCyanidationBatch` couples the original
@@ -116,7 +157,8 @@ Accessible gold is a declared reactive inventory, not inferred liberation.
 Cumulative progress is mol Au dissolved. The original conserved dissolved-O2
 Elsner equation supplies consumption/formation at extent `x/4`. The original
 `IdealAcidBaseSystem` jointly solves all admitted acid families and water at
-every rate stage. The remaining HCN+CN total is `T0-2*x`; dicyanoaurate is an
+every rate stage. In the absence of optional metal competition, the remaining
+HCN+CN total is `T0-2*x`; dicyanoaurate is an
 internally updated spectator with amount `G0+x`. Thus HCN remains available
 through dissociation, and free CN is never confused with total cyanide.
 Original Gibbs-source receipts, fixed counterions and other family totals

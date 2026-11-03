@@ -8,16 +8,19 @@
 //! Accessible gold means the caller's reactive pool, not total head-grade gold.
 //!
 //! Cumulative progress x is mol Au dissolved. The original conserved equation
-//! owns consumption/formation at extent x/4. In particular uncomplexed HCN+CN
-//! availability decreases by 2x and dissolved O2 by x/4. Free CN at a rate stage
-//! comes from simultaneous acid/base speciation, never from initial free CN.
+//! owns consumption/formation at extent x/4. Cyanide available outside the gold
+//! complex decreases by 2x and dissolved O2 by x/4. Optional competing metal
+//! pools redistribute that finite cyanide between HCN, CN and metal complexes.
+//! Free CN at a rate stage comes from simultaneous equilibrium, never from
+//! initial free CN or a fixed cyanide-consumption factor.
 //! The new Au(CN)2- stock enters that charge balance as an explicit spectator.
 //! Other analytical families and declared base spectators remain present.
 //!
 //! The solvent activity basis n_ref is an independent amount, not solution
 //! volume. Solvent activity stays one. Stoichiometric OH formation is reported
-//! separately from actual equilibrium OH; no closed solvent H/O balance, gas
-//! transfer, oxygen dosing, cyanide destruction, passivation, heat feedback,
+//! separately from actual equilibrium OH. The gas-transfer adapter supplies
+//! finite oxygen exchange and dosing. No closed solvent H/O balance, cyanide
+//! destruction, metal redox/dissolution, passivation, heat feedback,
 //! concentrated-solution accuracy, or ore calibration is asserted.
 //!
 //! Bounded RK4 full/two-half trials retain the positive two-half solution.
@@ -37,13 +40,17 @@ use fs_thermochem::{
         minerals::MineralReaction,
         network::{ReactionNetwork, ReactionNetworkError},
         thermodynamics::acid_base::{
-            AcidBaseError, AcidBaseSpeciation, IdealAcidBaseSystem, SpeciationOptions, SpectatorIon,
+            AcidBaseError, AcidBaseSpeciation, IdealAcidBaseSystem, SpeciationOptions,
+            SpectatorIon,
+            complexation::{LigandSpeciation, LigandSpeciationError},
         },
         thermodynamics::gas_liquid::GasLiquidError,
     },
 };
 use std::{collections::BTreeSet, sync::Arc};
 
+/// Finite competing metal pools sharing cyanide and the original pH owner.
+pub mod competition;
 /// Finite gas/liquid oxygen exchange coupled to the original cyanidation owner.
 pub mod gas_transfer;
 
@@ -93,6 +100,8 @@ pub enum CyanidationError {
     Source(MatDbError),
     /// Original coupled acid/base solver refusal.
     Speciation(AcidBaseError),
+    /// Original finite metal/ligand/pH equilibrium refused the staged state.
+    Complexation(LigandSpeciationError),
     /// Original gas/aqueous equilibrium or source admission refused.
     GasEquilibrium(GasLiquidError),
     /// Original exact chemical equation/amount refusal.
@@ -131,6 +140,11 @@ impl From<MatDbError> for CyanidationError {
 impl From<AcidBaseError> for CyanidationError {
     fn from(e: AcidBaseError) -> Self {
         Self::Speciation(e)
+    }
+}
+impl From<LigandSpeciationError> for CyanidationError {
+    fn from(e: LigandSpeciationError) -> Self {
+        Self::Complexation(e)
     }
 }
 impl From<GasLiquidError> for CyanidationError {
@@ -304,7 +318,8 @@ impl GoldCyanidation {
 pub struct CyanidationCharge {
     /// Reactive/accessible gold pool, mol Au; permanently locked gold is excluded.
     pub accessible_gold: Amount,
-    /// Uncomplexed HCN+CN analytical total, mol; not initial free CN.
+    /// Supplied HCN+CN, mol, before optional competing-metal equilibration.
+    /// Excludes ligands in the separately supplied initial gold complex.
     pub uncomplexed_cyanide: Amount,
     /// Dissolved molecular oxygen, mol O2; no headspace or transfer is inferred.
     pub dissolved_oxygen: Amount,
@@ -316,7 +331,8 @@ pub struct CyanidationCharge {
     pub solution_volume: Volume,
     /// Must equal the retained acid/base Gibbs-source temperature.
     pub temperature: Temperature,
-    /// Explicit fixed counterions; omit the internally owned gold complex.
+    /// Explicit fixed counterions, including those accompanying added metal.
+    /// Omit the internally owned gold complex and optional competing species.
     pub spectators: Vec<SpectatorIon>,
     /// Every other original acid-family total, exactly once, including zero totals.
     pub other_families: Vec<(String, Amount)>,
@@ -341,6 +357,9 @@ pub struct CyanidationState {
     pub free_cyanide: Amount,
     /// Original coupled speciation with actual OH, pH, families and spectator stocks.
     pub speciation: AcidBaseSpeciation,
+    /// Optional simultaneous competing-metal distributions and cyanide balance.
+    /// Its aqueous report is the same complete solution as `speciation`.
+    pub competition: Option<LigandSpeciation>,
     /// Complete actual kinetic source coordinates.
     pub conditions: QueryPoint,
     /// Actual empirical mol Au/s at this state.
@@ -351,7 +370,8 @@ pub struct CyanidationState {
 pub struct CyanidationConservation {
     /// Remaining accessible Au plus complex Au minus original total Au.
     pub gold: Amount,
-    /// Uncomplexed family plus twice complex stock minus original cyanide ligands.
+    /// Uncomplexed family plus metal-bound ligands and twice gold-complex stock,
+    /// minus original cyanide. Includes the reported equilibrium solve residual.
     pub cyanide: Amount,
     /// Remaining O2 plus original-equation O2 consumption minus original DO.
     pub dissolved_oxygen: Amount,
@@ -387,6 +407,7 @@ struct Layout {
     charge: CyanidationCharge,
     conditions: QueryPoint,
     speciation: SpeciationOptions,
+    competition: Option<competition::BoundCompetition>,
     limit: f64,
 }
 /// Persistent closed-bath progress and clock; no partial trial state is public.
@@ -439,6 +460,16 @@ impl GoldCyanidationBatch {
         charge: CyanidationCharge,
         conditions: QueryPoint,
         speciation: SpeciationOptions,
+    ) -> Result<Self> {
+        Self::new_inner(model, charge, conditions, speciation, None)
+    }
+
+    fn new_inner(
+        model: GoldCyanidation,
+        charge: CyanidationCharge,
+        conditions: QueryPoint,
+        speciation: SpeciationOptions,
+        competition: Option<competition::BoundCompetition>,
     ) -> Result<Self> {
         for value in [
             charge.accessible_gold,
@@ -508,6 +539,7 @@ impl GoldCyanidationBatch {
             charge,
             conditions,
             speciation,
+            competition,
             limit,
         });
         let mut never = || false;
@@ -757,25 +789,53 @@ fn evaluate_with_oxygen(
         None => remainder(c.dissolved_oxygen.value(), amount(&amounts, OXYGEN), x)?,
     };
     let complex = sum([c.gold_complex.value(), amount(&amounts, COMPLEX)].into_iter())?;
-    let mut totals = c.other_families.clone();
-    totals.push((layout.model.cyanide_family.clone(), Amount::new(cyanide)));
     let mut spectators = c.spectators.clone();
     spectators.push(SpectatorIon {
         species: SpeciesId::new(COMPLEX).expect("fixed species identity"),
         charge: -1,
         amount: Amount::new(complex),
     });
-    let speciation = layout.model.chemistry.speciate(
-        &totals,
-        &spectators,
-        c.amount_at_unit_activity,
-        layout.speciation,
-        || work.interrupted(),
-    );
+    let equilibrium = match &layout.competition {
+        Some(metals) => metals
+            .model
+            .speciate(
+                Amount::new(cyanide),
+                &metals.totals,
+                &c.other_families,
+                &spectators,
+                c.amount_at_unit_activity,
+                metals.numerics,
+                || work.interrupted(),
+            )
+            .map(|result| {
+                (
+                    result.aqueous.clone(),
+                    result.uncomplexed_ligand.value(),
+                    Some(result),
+                )
+            })
+            .map_err(CyanidationError::from),
+        None => {
+            let mut totals = c.other_families.clone();
+            totals.push((layout.model.cyanide_family.clone(), Amount::new(cyanide)));
+            layout
+                .model
+                .chemistry
+                .speciate(
+                    &totals,
+                    &spectators,
+                    c.amount_at_unit_activity,
+                    layout.speciation,
+                    || work.interrupted(),
+                )
+                .map(|result| (result, cyanide, None))
+                .map_err(CyanidationError::from)
+        }
+    };
     if let Some(error) = work.stopped.take() {
         return Err(error);
     }
-    let speciation = speciation?;
+    let (speciation, cyanide, competition) = equilibrium?;
     let family = speciation
         .families
         .iter()
@@ -847,6 +907,7 @@ fn evaluate_with_oxygen(
         gold_complex: Amount::new(complex),
         free_cyanide,
         speciation,
+        competition,
         conditions: point,
         rate: GoldDissolutionRate::new(rate),
     })
@@ -866,6 +927,7 @@ fn conservation(
     .into_iter())?;
     let cyanide = sum([
         state.uncomplexed_cyanide.value(),
+        bound_cyanide(state),
         product(2.0, state.gold_complex.value())?,
         -c.uncomplexed_cyanide.value(),
         -product(2.0, c.gold_complex.value())?,
@@ -880,7 +942,7 @@ fn conservation(
     for (residual, scale) in [
         (gold, c.accessible_gold.value().max(c.gold_complex.value())),
         (
-            cyanide,
+            cyanide - ligand_balance_residual(state),
             c.uncomplexed_cyanide
                 .value()
                 .max(product(2.0, c.gold_complex.value())?),
@@ -898,6 +960,21 @@ fn conservation(
         cyanide: Amount::new(cyanide),
         dissolved_oxygen: Amount::new(oxygen),
     })
+}
+fn bound_cyanide(state: &CyanidationState) -> f64 {
+    state
+        .competition
+        .as_ref()
+        .map_or(0.0, |result| result.bound_ligand.value())
+}
+// The independently recomputed analytical balance includes the equilibrium
+// owner's explicitly bounded ligand residual. Verify the remaining accounting
+// at roundoff scale without erasing or normalizing the published residual.
+fn ligand_balance_residual(state: &CyanidationState) -> f64 {
+    state
+        .competition
+        .as_ref()
+        .map_or(0.0, |result| result.ligand_balance_residual.value())
 }
 fn amount(amounts: &[ReactionAmount], species: &str) -> f64 {
     amounts

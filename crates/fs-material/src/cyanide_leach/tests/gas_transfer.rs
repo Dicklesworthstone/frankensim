@@ -135,7 +135,7 @@ fn attach_henry(
         context,
     )
 }
-fn gas_volume() -> Volume {
+pub(super) fn gas_volume() -> Volume {
     // K=1 and n_ref=1 make D_equilibrium=G; this is a manufactured partition.
     Volume::new(UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * TEMPERATURE / P0)
 }
@@ -446,7 +446,7 @@ fn transfer_card(kla: f64) -> ConstitutiveModelCard {
         "authored independent liquid-film coefficient, not measured aeration data".into();
     source
 }
-fn transfer(kla: f64) -> OxygenTransfer {
+pub(super) fn transfer(kla: f64) -> OxygenTransfer {
     OxygenTransfer::from_card(partition(), transfer_card(kla)).unwrap()
 }
 fn configured(

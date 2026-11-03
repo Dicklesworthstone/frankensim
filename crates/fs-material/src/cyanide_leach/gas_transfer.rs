@@ -404,7 +404,8 @@ pub struct AeratedCyanidationState {
 pub struct AerationConservation {
     /// Remaining solid Au plus dissolved complex Au minus original total.
     pub gold: Amount,
-    /// Uncomplexed cyanide plus complex ligands minus original total.
+    /// Uncomplexed cyanide plus gold/competing-metal ligands minus original total.
+    /// Retains any reported, tolerance-checked ligand-equilibrium residual.
     pub cyanide: Amount,
     /// Liquid oxygen + reaction consumption - initial liquid oxygen - net transfer.
     pub liquid_oxygen: Amount,
@@ -777,6 +778,7 @@ impl AeratedGoldCyanidation {
         .into_iter())?;
         let cyanide = sum([
             s.uncomplexed_cyanide.value(),
+            bound_cyanide(s),
             product(2.0, s.gold_complex.value())?,
             -c.uncomplexed_cyanide.value(),
             -product(2.0, c.gold_complex.value())?,
@@ -814,7 +816,7 @@ impl AeratedGoldCyanidation {
         for (residual, scale) in [
             (gold, c.accessible_gold.value().max(c.gold_complex.value())),
             (
-                cyanide,
+                cyanide - ligand_balance_residual(s),
                 c.uncomplexed_cyanide
                     .value()
                     .max(product(2.0, c.gold_complex.value())?),

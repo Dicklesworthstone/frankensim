@@ -168,6 +168,54 @@ fn zero_initial_oxygen_starts_and_exceeds_the_old_closed_ceiling() {
 }
 
 #[test]
+fn maintained_pressure_and_finite_copper_competition_share_one_solution() {
+    use fixture::competition::{competing_batch, component_balances, copper_charge};
+
+    let mut initial = copper_charge(0.2);
+    initial.dissolved_oxygen = Amount::new(0.0);
+    let closed = competing_batch(initial.clone(), 0.2);
+    assert_eq!(closed.maximum_gold_dissolution().value(), 0.0);
+    let initial_bound = closed.state().competition.as_ref().unwrap().bound_ligand;
+    let mut card = transfer_card(0.5);
+    card.validity = card.validity.with_quantity(
+        PH_AXIS, QuantitySpec::dimensional(Dimensionless::DIMS), 6.0, 8.0,
+    );
+    let mut batch = AeratedGoldCyanidationBatch::from_batch(
+        closed, OxygenTransfer::from_card(solubility(100_000.0), card).unwrap(),
+    ).unwrap();
+    assert_eq!(batch.state().competition.as_ref().unwrap().bound_ligand, initial_bound);
+    assert_eq!(batch.maximum_gold_dissolution().value(), 1.0);
+    let numerics = AerationNumerics {
+        maximum_step: Time::new(0.125),
+        absolute_gold_error: Amount::new(1e-10),
+        absolute_oxygen_error: Amount::new(1e-10),
+        absolute_transfer_error: Amount::new(1e-10),
+        relative_error: Dimensionless::new(5e-7),
+        maximum_work: 10_000_000,
+        ..AerationNumerics::default()
+    };
+    for (duration, pressure) in [(0.5, 100_000.0), (0.25, 50_000.0)] {
+        let result = batch.advance(
+            Time::new(duration), Pressure::new(pressure), &QueryPoint::new(), numerics, || false,
+        ).unwrap();
+        let competition = result.state.competition.as_ref().unwrap();
+        assert!(result.state.gold_dissolved.value() > 0.0);
+        assert!(result.state.dissolved_oxygen.value() > 0.0);
+        assert!(competition.bound_ligand.value() > 0.0);
+        assert!(result.oxygen_in.value() > 0.0);
+        component_balances(&result.state, &initial, 0.2);
+        close(result.conservation.gold.value(), 0.0, 3e-14);
+        close(result.conservation.cyanide.value()
+            - competition.ligand_balance_residual.value(), 0.0, 1e-13);
+        assert!(result.conservation.dissolved_oxygen.value().abs()
+            <= result.oxygen_balance_allowance.value());
+        assert_eq!(result.transfer_conditions.axes()[PH_AXIS], result.state.speciation.ph.value());
+        assert_eq!(result.transfer_conditions.axes()[FREE_CYANIDE_AXIS], result.state.free_cyanide.value());
+        assert_eq!(result.transfer_conditions.axes()[OXYGEN_PARTIAL_PRESSURE_AXIS], pressure);
+    }
+}
+
+#[test]
 fn initially_balanced_transfer_and_consumption_have_known_second_derivative() {
     // At x=0, O=2/3, kLa=2, n*=1, k=4: J=2/3=r_Au/4.
     // O'(0)=0; x'(0)=8/3; O''(0)=32/9. The remaining Au/CN evolve.

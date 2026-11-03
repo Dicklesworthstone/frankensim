@@ -3,6 +3,8 @@
 
 use super::*;
 
+#[path = "tests/competition.rs"]
+pub(in crate::cyanide_leach) mod competition;
 #[path = "tests/gas_transfer.rs"]
 mod gas_transfer;
 

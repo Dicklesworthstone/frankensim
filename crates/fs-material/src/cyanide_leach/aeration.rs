@@ -4,7 +4,7 @@
 //! d(n_O2)/dt = kLa (n_sat - n_O2) - r_Au/4. The original gas-solubility owner
 //! supplies n_sat = n_ref K p_O2/p_ref from retained formation-Gibbs sources.
 //! The original cyanidation owner supplies actual speciation, r_Au and its exact
-//! chemical equation. Only gold and uncomplexed cyanide are closed finite pools;
+//! chemical equation. Gold and total cyanide ligand are closed finite pools;
 //! a maintained gas reservoir supplies or removes oxygen.
 //!
 //! Model structure: US EPA, Aeration Equipment Evaluation, EPA/600/2-88/022,
@@ -247,11 +247,30 @@ impl AeratedGoldCyanidationBatch {
         conditions: QueryPoint,
         speciation: SpeciationOptions,
     ) -> Result<Self> {
+        Self::from_batch(
+            GoldCyanidationBatch::new(model, charge, conditions, speciation)?, transfer,
+        )
+    }
+
+    /// Attach a maintained-pressure reservoir to a freshly admitted bath,
+    /// retaining any simultaneous finite metal/ligand competition. The original
+    /// charge and source owners remain unchanged; gas exchange starts at zero.
+    pub fn from_batch(closed: GoldCyanidationBatch, transfer: OxygenTransfer) -> Result<Self> {
+        require(
+            closed.elapsed().value() == 0.0 && closed.state.gold_dissolved.value() == 0.0,
+            "maintained-pressure attachment requires a freshly admitted bath",
+        )?;
+        let model = &closed.layout.model;
+        let charge = &closed.layout.charge;
+        let conditions = &closed.layout.conditions;
         let external_gas = transfer.solubility.gas();
         require(
             model.chemistry.families().iter()
                 .all(|family| family.species().iter().all(|species| species != external_gas))
-                && charge.spectators.iter().all(|ion| &ion.species != external_gas),
+                && charge.spectators.iter().all(|ion| &ion.species != external_gas)
+                && closed.layout.competition.as_ref().is_none_or(|competition|
+                    competition.model.families().iter().all(|family|
+                        family.species().iter().all(|species| species != external_gas))),
             "the prescribed external gas cannot also belong to a liquid acid family or spectator pool",
         )?;
         let gas = transfer.solubility.standard();
@@ -268,12 +287,14 @@ impl AeratedGoldCyanidationBatch {
                 && gas.reference_axis() == water.reference_axis(),
             "gas and acid/base sources need the same temperature, reference pressure and elemental convention",
         )?;
+        let aqueous_network = closed.layout.competition.as_ref().map_or(
+            model.chemistry.reaction_network(), |competition| competition.model.reaction_network(),
+        );
         ReactionNetwork::new(
-            model.chemistry.reaction_network().reactions().iter().cloned()
+            aqueous_network.reactions().iter().cloned()
                 .chain([model.reaction.clone(), transfer.solubility.reaction().clone()])
                 .collect(),
         )?;
-        let closed = GoldCyanidationBatch::new(model, charge, conditions, speciation)?;
         let mut layout = (*closed.layout).clone();
         layout.limit = layout.charge.accessible_gold.value()
             .min(product(0.5, layout.charge.uncomplexed_cyanide.value())?);
@@ -617,7 +638,8 @@ fn open_conservation(
         -c.accessible_gold.value(), -c.gold_complex.value(),
     ].into_iter())?;
     let cyanide = sum([
-        state.uncomplexed_cyanide.value(), product(2.0, state.gold_complex.value())?,
+        state.uncomplexed_cyanide.value(), bound_cyanide(state),
+        product(2.0, state.gold_complex.value())?,
         -c.uncomplexed_cyanide.value(), -product(2.0, c.gold_complex.value())?,
     ].into_iter())?;
     let oxygen = sum([
@@ -626,7 +648,8 @@ fn open_conservation(
     ].into_iter())?;
     for (residual, allowance) in [
         (gold, 128.0 * f64::EPSILON * c.accessible_gold.value().max(c.gold_complex.value())),
-        (cyanide, 128.0 * f64::EPSILON * c.uncomplexed_cyanide.value()
+        (cyanide - ligand_balance_residual(state),
+            128.0 * f64::EPSILON * c.uncomplexed_cyanide.value()
             .max(product(2.0, c.gold_complex.value())?)),
         (oxygen, oxygen_allowance),
     ] {

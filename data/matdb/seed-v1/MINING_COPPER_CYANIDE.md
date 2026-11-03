@@ -137,3 +137,54 @@ The tests exercise both cases. No solvent inventory or temperature-dependent
 equilibrium, CuCN precipitation, Cu(I)/Cu(II) redox or dissolution of an ore
 copper mineral is inferred. All supplied dissolved Cu(I) remains in the
 explicit aqueous family until a separate supported process transfers it.
+
+## Live competition during finite gold cyanidation
+
+`GoldCyanidationBatch::new_with_competing_metals` accepts source-bound
+`competition::CompetingMetals` and re-solves the coupled equilibrium at every
+kinetic stage. Its initial `CyanidationCharge::uncomplexed_cyanide` is the
+supplied ligand pool **before** copper equilibration. The resulting
+`state.uncomplexed_cyanide` is the actual HCN+CN remainder; the retained
+`state.competition` accounts separately for copper-bound ligands and every
+copper member. Two cyanide ligands transfer into each newly formed gold
+complex, while the dissolved copper total remains fixed. Copper binding is
+reversible equilibrium, so its ligand demand changes with free CN and pH.
+
+The runnable [copper competition example](../../../crates/fs-material/examples/copper_competitive_gold_leach.rs)
+loads nine actual NBS packs, prints their hashes and association constants,
+and compares zero copper with 0.002 mol dissolved Cu(I). It declares the
+same authored gold, total-ligand and dissolved-oxygen charges in both cases,
+adds explicit copper counterions, and prints initial/final free CN, pH,
+copper-bound CN, all Cu species, gold progress and independent Au/CN/Cu/O2
+and charge residuals.
+
+```bash
+copper_leach_pack_dir="$(mktemp -d)"
+for pack in hydrogen-cyanide-aqueous-nbs1989 hydrogen-ion-aqueous-nbs1989 cyanide-ion-aqueous-nbs1989 hydroxide-ion-aqueous-nbs1989 water-liquid-nbs1989-thermochemistry copper-i-ion-aqueous-nbs1989 dicyanocuprate-i-ion-aqueous-nbs1989 tricyanocuprate-i-ion-aqueous-nbs1989 tetracyanocuprate-i-ion-aqueous-nbs1989; do
+  cargo run -p xtask -- matdb-pack \
+    --manifest "data/matdb/seed-v1/$pack/manifest.tsv" \
+    --out "$copper_leach_pack_dir/$pack.fsmatpk"
+done
+cargo run -p fs-material --example copper_competitive_gold_leach -- \
+  --materials "$copper_leach_pack_dir"
+```
+
+The declared illustration uses 0.001 mol accessible Au, 0.010 mol cyanide
+ligands, 0.0005 mol dissolved O2, 0.01 m3 liquid, `n_ref=10 mol` and 298.15 K.
+The empirical coefficient is explicitly authored as
+`k=0.5 m6/(mol2 s)` in `r_Au=k*n_Au*c_free_CN*c_DO`. For 120 seconds, it gives:
+
+| Authored scenario | Fraction of accessible Au dissolved | Final free CN-, mol | Final Cu-bound CN, mol | Final pH |
+| --- | ---: | ---: | ---: | ---: |
+| No Cu | 0.820880636 | 0.00755480846426 | 0 | 10.205915823 |
+| 0.002 mol dissolved Cu(I) | 0.523341155 | 0.00263212486881 | 0.00585957544855 | 9.988664895 |
+
+These results demonstrate how resolved free-ligand competition affects an
+explicit kinetic law; they are not measured or calibrated recovery. The
+copper case retains 0.002 mol Cu throughout, and its bound cyanide decreases
+as gold binds ligands. The example uses a finite dissolved-oxygen inventory.
+The separate [oxygen-transfer adapter](MINING_OXYGEN_TRANSFER.md) can attach
+to a competing-metal batch when its additional source and inventory inputs
+are supplied. Ore copper accessibility, Cu(II) reduction, CuCN precipitation,
+cyanide destruction, nonideal activities and reaction heat remain separate
+physical capabilities requiring their own supported models.
