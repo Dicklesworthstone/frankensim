@@ -1,5 +1,9 @@
 //! Analytic graded-mass/full-inertia contact, with retained constitutive history.
 use fs_alloc::{ArenaConfig, ArenaPool};
+use fs_contact::frictional_multicontact::{
+    FrictionalContactConfig, FrictionalContactDeterminacy, NormalVelocityLaw,
+};
+use fs_couple::inelastic_impact::multiple::*;
 use fs_couple::inelastic_impact::*;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_material::hyper::{Hyperelastic, HyperelasticModel};
@@ -258,6 +262,7 @@ fn relaxed_viscoelastic_body_collides_through_full_rigid_inertia_and_moving_supp
             event.solid.reference_nodal_density_kg_m3(),
             Some(RHO.as_slice())
         );
+        check_visco_manifold(&motion, cx);
         let mut wrong_line = point;
         wrong_line[1] += 1e-5;
         assert!(matches!(
@@ -307,6 +312,19 @@ fn relaxed_viscoelastic_body_collides_through_full_rigid_inertia_and_moving_supp
         assert_eq!(motion.solid().element_states(), before);
         assert_eq!(motion.solid().displacement_m(), displacement);
         assert_eq!(motion.velocity_mps(), [[0.2, 0.0, 0.0]; 4]);
+        assert!(matches!(
+            visco_mixed_contact_candidate(
+                &motion,
+                &[],
+                &[rigid],
+                &[properties()],
+                &mixed_contacts(0.2, 0.0)[..1],
+                ORIGIN,
+                mixed_controls(),
+                cx,
+            ),
+            Err(InelasticMixedContactError::Cancelled)
+        ));
     });
 }
 
@@ -429,6 +447,7 @@ fn freely_moving_plastic_body_uses_original_graded_inverse_and_keeps_its_return_
             assert_eq!(event.rigid.pose(), rigid.pose());
         }
         let separating = rigid_at(point, 0.3);
+        check_plastic_supported_manifold(&motion, cx);
         let unchanged = plastic_rigid_impact_candidate(
             &motion,
             &[],
@@ -463,4 +482,310 @@ fn freely_moving_plastic_body_uses_original_graded_inverse_and_keeps_its_return_
         assert_eq!(motion.solid().displacement_m(), displacement);
         assert_eq!(motion.velocity_mps(), [[0.2, 0.0, 0.0]; 4]);
     });
+}
+
+fn mixed_controls() -> InelasticMixedContactControls {
+    let c = controls();
+    InelasticMixedContactControls {
+        maximum_rigid_bodies: 2,
+        geometry_tolerance_m: c.geometry_tolerance_m,
+        velocity_tolerance_m_s: 1e-9,
+        linear_tolerance_kg_m_s: c.linear_tolerance_kg_m_s,
+        angular_tolerance_kg_m2_s: c.angular_tolerance_kg_m2_s,
+        energy_tolerance_j: 1e-9,
+        solid_impulse: c.solid_impulse,
+        contact: FrictionalContactConfig {
+            maximum_contacts: 2,
+            velocity_tolerance: 1e-11,
+            impulse_tolerance: 1e-11,
+            complementarity_tolerance: 1e-11,
+            energy_tolerance: 1e-11,
+            ..Default::default()
+        },
+    }
+}
+
+fn mixed_contacts(mu: f64, restitution: f64) -> [InelasticMixedContact; 2] {
+    [0, 1].map(|body| InelasticMixedContact {
+        id: 10 + body as u64,
+        point: RigidImpactPoint {
+            body,
+            arm_body: Vec3::new(0.0, 0.0, 0.2),
+        },
+        counterpart: FiniteSolidContactCounterpart::Solid(TetImpulsePoint {
+            tetrahedron: 0,
+            weights: if body == 0 {
+                [0.0, 1.0, 0.0, 0.0]
+            } else {
+                [0.0, 0.0, 1.0, 0.0]
+            },
+        }),
+        normal_world: Vec3::new(1.0, 0.0, 0.0),
+        tangent_world: Vec3::new(0.0, 1.0, 0.0),
+        activation_tolerance_m: 0.0,
+        friction_coefficient: mu,
+        normal_law: NormalVelocityLaw::NewtonRestitution {
+            coefficient: restitution,
+        },
+    })
+}
+
+fn mixed_audit(report: &InelasticMixedContactReport) {
+    near(norm(report.linear_momentum_residual_kg_m_s), 0.0, 2e-10);
+    near(norm(report.angular_momentum_residual_kg_m2_s), 0.0, 2e-10);
+    near(report.work_energy_residual_j, 0.0, 2e-10);
+    near(report.dissipation_residual_j, 0.0, 2e-10);
+    near(report.endpoint_velocity_residual_m_s, 0.0, 2e-10);
+    near(report.absolute_work_residual_j, 0.0, 2e-10);
+}
+
+fn check_visco_manifold(motion: &FiniteViscoTetMotion<'_>, cx: &Cx<'_>) {
+    let mut bodies = Vec::new();
+    for (index, contact) in mixed_contacts(0.2, 0.0).iter().enumerate() {
+        let FiniteSolidContactCounterpart::Solid(point) = contact.counterpart else {
+            unreachable!()
+        };
+        let x = motion.point_kinematics(point, cx).unwrap().position_m;
+        let rigid = rigid_at(x, -0.8);
+        bodies.push(
+            RigidBodyState::new(
+                rigid.pose(),
+                Vec3::new(-1.6, if index == 0 { 0.2 } else { -0.4 }, 0.0),
+                Vec3::ZERO,
+            )
+            .unwrap(),
+        );
+    }
+    // Exact graded nodal inverse: high-density node 800/71, low node1376/71,
+    // mutual response -280/71. Full rigid inertia adds 7/12 on both in-plane
+    // diagonals and +1/60 cross-axis mobility. Independent pairs cannot give
+    // these two simultaneous sticking/sliding solutions.
+    let (a, b, d, c) = (
+        800.0 / 71.0 + 7.0 / 12.0,
+        -280.0 / 71.0,
+        1376.0 / 71.0 + 7.0 / 12.0,
+        1.0 / 60.0,
+    );
+    for mu in [0.2, 0.02] {
+        let contacts = mixed_contacts(mu, 0.0);
+        let event = visco_mixed_contact_candidate(
+            motion,
+            &[],
+            &bodies,
+            &[properties(); 2],
+            &contacts,
+            ORIGIN,
+            mixed_controls(),
+            cx,
+        )
+        .unwrap();
+        let expected = if mu == 0.2 {
+            // Exact rational solution of the independent four in-plane equations.
+            [
+                [
+                    799192694047.0 / 7388547779788.0,
+                    -41727475565.0 / 7388547779788.0,
+                    0.0,
+                ],
+                [
+                    18854309027.0 / 263876706421.0,
+                    2333444795.0 / 263876706421.0,
+                    0.0,
+                ],
+            ]
+        } else {
+            // Both slip: Jt0=-mu*Jn0, Jt1=+mu*Jn1, then solve the two coupled normals.
+            let determinant = (a - c * mu) * (d + c * mu) - b * b;
+            let j0 = (d + c * mu - b) / determinant;
+            let j1 = (a - c * mu - b) / determinant;
+            [[j0, -mu * j0, 0.0], [j1, mu * j1, 0.0]]
+        };
+        let report = &event.report;
+        near(report.contact_mobility_per_kg[0], a, 2e-11);
+        near(report.contact_mobility_per_kg[1], c, 2e-11);
+        near(report.contact_mobility_per_kg[3], b, 2e-11);
+        near(report.contact_mobility_per_kg[18], b, 2e-11);
+        near(report.contact_mobility_per_kg[21], d, 2e-11);
+        assert_eq!(report.solid_mass_solves.len(), 6);
+        for contact in 0..2 {
+            for axis in 0..3 {
+                near(
+                    report.contact.impulses[contact][axis],
+                    expected[contact][axis],
+                    2e-10,
+                );
+            }
+            near(
+                report.contact.relative_velocities_after[contact][0],
+                0.0,
+                2e-10,
+            );
+        }
+        if mu == 0.2 {
+            for velocity in &report.contact.relative_velocities_after {
+                near(velocity[1], 0.0, 2e-10);
+            }
+        } else {
+            assert!(report.contact.relative_velocities_after[0][1] > 0.05);
+            assert!(report.contact.relative_velocities_after[1][1] < -0.1);
+        }
+        for (node, coefficients) in [
+            [-280.0, -328.0],
+            [800.0, -280.0],
+            [-280.0, 1376.0],
+            [-280.0, -328.0],
+        ]
+        .iter()
+        .enumerate()
+        {
+            for axis in 0..3 {
+                near(
+                    event.solid.velocity_mps()[node][axis],
+                    motion.velocity_mps()[node][axis]
+                        - (coefficients[0] * expected[0][axis]
+                            + coefficients[1] * expected[1][axis])
+                            / 71.0,
+                    3e-10,
+                );
+            }
+        }
+        mixed_audit(report);
+        assert_eq!(
+            event.solid.solid().element_states(),
+            motion.solid().element_states()
+        );
+        assert_eq!(
+            event.solid.solid().displacement_m(),
+            motion.solid().displacement_m()
+        );
+        assert_eq!(
+            event.solid.solid().element_first_piola_pa(),
+            motion.solid().element_first_piola_pa()
+        );
+        assert_eq!(event.solid.solid().time_s(), 0.007);
+        assert_eq!(event.solid.reference_mass_kg(), motion.reference_mass_kg());
+        let reordered = visco_mixed_contact_candidate(
+            motion,
+            &[],
+            &bodies,
+            &[properties(); 2],
+            &[contacts[1], contacts[0]],
+            ORIGIN,
+            mixed_controls(),
+            cx,
+        )
+        .unwrap();
+        assert_eq!(event.solid.velocity_mps(), reordered.solid.velocity_mps());
+        assert_eq!(event.rigid_bodies, reordered.rigid_bodies);
+        assert_eq!(report.contact, reordered.report.contact);
+    }
+}
+
+fn check_plastic_supported_manifold(motion: &FinitePlasticTetMotion<'_>, cx: &Cx<'_>) {
+    let contacts = mixed_contacts(0.0, 0.5);
+    let bodies: Vec<_> = contacts
+        .iter()
+        .map(|contact| {
+            let FiniteSolidContactCounterpart::Solid(point) = contact.counterpart else {
+                unreachable!()
+            };
+            rigid_at(motion.point_kinematics(point, cx).unwrap().position_m, -0.8)
+        })
+        .collect();
+    let held: Vec<_> = (0..12).filter(|&dof| dof != 3 && dof != 6).collect();
+    let event = plastic_mixed_contact_candidate(
+        motion,
+        &held,
+        &bodies,
+        &[properties(); 2],
+        &contacts,
+        ORIGIN,
+        mixed_controls(),
+        cx,
+    )
+    .unwrap();
+    // Supported scalar Mff^-1=[[1200,-840],[-840,2160]]/131.
+    // Adding the full rigid response and targeting restitution .5 gives:
+    near(
+        event.report.contact.impulses[0][0],
+        664506.0 / 2362259.0,
+        2e-10,
+    );
+    near(
+        event.report.contact.impulses[1][0],
+        457146.0 / 2362259.0,
+        2e-10,
+    );
+    near(event.report.support_work_j, -641232.0 / 11811295.0, 2e-10);
+    near(
+        event.report.contact.dissipated_energy,
+        280413.0 / 2362259.0,
+        2e-10,
+    );
+    near(
+        event.report.kinetic_change_j,
+        -2043297.0 / 11811295.0,
+        2e-10,
+    );
+    mixed_audit(&event.report);
+    for &dof in &held {
+        assert_eq!(
+            event.solid.velocity_mps()[dof / 3][dof % 3],
+            motion.velocity_mps()[dof / 3][dof % 3]
+        );
+    }
+    assert_eq!(
+        event.solid.solid().element_states(),
+        motion.solid().element_states()
+    );
+    assert_eq!(
+        event.solid.solid().element_deformation(),
+        motion.solid().element_deformation()
+    );
+    assert_eq!(
+        event.solid.solid().stored_energy_j(),
+        motion.solid().stored_energy_j()
+    );
+    // Duplicate rows have determined endpoint velocities but no unique local
+    // impulse; moving-support work is deliberately not inferred from that gauge.
+    let duplicated = [
+        contacts[0],
+        InelasticMixedContact {
+            id: 99,
+            ..contacts[0]
+        },
+    ];
+    let error = plastic_mixed_contact_candidate(
+        motion,
+        &held,
+        &bodies,
+        &[properties(); 2],
+        &duplicated,
+        ORIGIN,
+        mixed_controls(),
+        cx,
+    )
+    .unwrap_err();
+    let InelasticMixedContactError::UnresolvedSupportWork(receipt) = error else {
+        panic!("moving support needs impulse determinacy, got {error:?}");
+    };
+    assert!(matches!(
+        receipt.determinacy,
+        FrictionalContactDeterminacy::UniqueVelocity(_)
+    ));
+    let mut limited = mixed_controls();
+    limited.solid_impulse.maximum_workspace_components = 0;
+    assert!(matches!(
+        plastic_mixed_contact_candidate(
+            motion,
+            &held,
+            &bodies,
+            &[properties(); 2],
+            &contacts,
+            ORIGIN,
+            limited,
+            cx
+        ),
+        Err(InelasticMixedContactError::Solid(_))
+    ));
 }

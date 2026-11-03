@@ -5,9 +5,13 @@
 //! inertia supply its effective mass. Both native states are staged before any
 //! result is returned; material deformation, memory and physical time stay fixed.
 //!
-//! This is a single-contact event, not a sequence of pairwise solves for a
-//! simultaneous manifold. Detection, event time, persistent contact, friction
-//! and heat partition remain with their owners. No penetration repair occurs.
+//! The scalar functions below resolve one frictionless contact. [`multiple`]
+//! resolves a complete simultaneous frictional manifold through the existing
+//! coupled contact owner. Detection, event time, persistent contact and heat
+//! partition remain with their owners. No penetration repair occurs.
+
+/// Coupled frictional events retaining plastic, Maxwell and thermal histories.
+pub mod multiple;
 
 use fs_contact::impact::{
     NormalImpactError, NormalImpactInput, NormalImpactResult, solve_normal_impact,

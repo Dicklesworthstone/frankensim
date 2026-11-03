@@ -33,17 +33,17 @@ pub use super::elliptic::{
 pub use fs_mbd::frictional_impact::RigidImpactPoint;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum FiniteSolidContactCounterpart {
-    Solid(FiniteSolidPoint),
+pub enum FiniteSolidContactCounterpart<P = FiniteSolidPoint> {
+    Solid(P),
     Rigid(RigidImpactPoint),
 }
 
 /// Physical paired witnesses; the first point receives +J, its counterpart -J.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct FiniteSolidMixedContact<F = f64> {
+pub struct FiniteSolidMixedContact<F = f64, P = FiniteSolidPoint> {
     pub id: u64,
     pub point: RigidImpactPoint,
-    pub counterpart: FiniteSolidContactCounterpart,
+    pub counterpart: FiniteSolidContactCounterpart<P>,
     /// Points from the counterpart toward the first point.
     pub normal_world: Vec3,
     pub tangent_world: Vec3,
@@ -51,9 +51,9 @@ pub struct FiniteSolidMixedContact<F = f64> {
     pub friction_coefficient: F,
     pub normal_law: NormalVelocityLaw,
 }
-impl<F> FiniteSolidMixedContact<F> {
+impl<F, P> FiniteSolidMixedContact<F, P> {
     #[must_use]
-    pub fn with_friction<T>(self, friction_coefficient: T) -> FiniteSolidMixedContact<T> {
+    pub fn with_friction<T>(self, friction_coefficient: T) -> FiniteSolidMixedContact<T, P> {
         FiniteSolidMixedContact {
             id: self.id,
             point: self.point,
@@ -66,8 +66,8 @@ impl<F> FiniteSolidMixedContact<F> {
         }
     }
 }
-impl<F> From<FiniteSolidRigidContact<F>> for FiniteSolidMixedContact<F> {
-    fn from(c: FiniteSolidRigidContact<F>) -> Self {
+impl<F, P> From<FiniteSolidRigidContact<F, P>> for FiniteSolidMixedContact<F, P> {
+    fn from(c: FiniteSolidRigidContact<F, P>) -> Self {
         Self {
             id: c.id,
             point: RigidImpactPoint {
