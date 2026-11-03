@@ -70,21 +70,6 @@ fn linspace(lo: f64, hi: f64, n: usize) -> Vec<f64> {
         .collect()
 }
 
-/// The D2Q9 lattice velocities, in `fs_lbm`'s canonical order (its own `E`
-/// table is `pub(crate)`, so it is mirrored here for the momentum-exchange
-/// boundary force — the value read from `Grid::moments` needs no table).
-const E9: [(i32, i32); 9] = [
-    (0, 0),
-    (1, 0),
-    (0, 1),
-    (-1, 0),
-    (0, -1),
-    (1, 1),
-    (-1, 1),
-    (-1, -1),
-    (1, -1),
-];
-
 /// Ray-casting point-in-polygon test (closed polygon `poly`).
 fn point_in_poly(poly: &[[f64; 2]], x: f64, y: f64) -> bool {
     let n = poly.len();
@@ -534,7 +519,6 @@ fn ornithoid_lbm(c: &OrnithCandidate, nx: usize, ny: usize) -> (Vec<f64>, f64, f
     let mut grid = Grid::uniform(nx, ny, tau);
     grid.periodic_x = true;
     grid.periodic_y = false;
-    grid.g = [gx, 0.0];
 
     // rasterize the airfoil as an interior obstacle (bounce-back walls).
     let foil = c.section(PANELS);
@@ -574,9 +558,22 @@ fn ornithoid_lbm(c: &OrnithCandidate, nx: usize, ny: usize) -> (Vec<f64>, f64, f
     };
 
     let mut scratch: Vec<[f64; 9]> = Vec::new();
+    grid.rebind_gravity([gx, 0.0], &mut scratch)
+        .expect("bounded browser channel has a finite physical force frame");
+    let airfoil_walls: Vec<bool> = grid.flags.iter().map(|&cell| cell == Cell::Wall).collect();
+    let mut wall_impulse = [0.0; 2];
     let mut prev = velfield(&grid);
     for s in 0..steps {
-        grid.step(&mut scratch);
+        // Read the impulse from the same post-collision populations that
+        // actually bounce back. The final stored populations have already
+        // streamed and cannot reconstruct that exchange.
+        if s + 1 == steps {
+            wall_impulse = grid
+                .step_with_wall_momentum(&mut scratch, &airfoil_walls)
+                .wall_impulse;
+        } else {
+            grid.step(&mut scratch);
+        }
         if s + 5 == steps {
             prev = velfield(&grid);
         }
@@ -595,29 +592,7 @@ fn ornithoid_lbm(c: &OrnithCandidate, nx: usize, ny: usize) -> (Vec<f64>, f64, f
         if den > 1e-30 { num / den } else { f64::NAN }
     };
 
-    // momentum-exchange body force (Ladd): sum over fluid→wall links.
-    let (mut fx, mut fy) = (0.0f64, 0.0f64);
-    for y in 0..ny {
-        for x in 0..nx {
-            let i = grid.idx(x, y);
-            if !matches!(grid.flags[i], Cell::Fluid) {
-                continue;
-            }
-            for (q, &(ex, ey)) in E9.iter().enumerate() {
-                let nxx = x as i64 + ex as i64;
-                let nyy = y as i64 + ey as i64;
-                if nxx < 0 || nyy < 0 || nxx >= nx as i64 || nyy >= ny as i64 {
-                    continue;
-                }
-                let j = grid.idx(nxx as usize, nyy as usize);
-                if matches!(grid.flags[j], Cell::Wall) {
-                    let f = 2.0 * grid.f[i][q];
-                    fx += f64::from(ex) * f;
-                    fy += f64::from(ey) * f;
-                }
-            }
-        }
-    }
+    let [fx, fy] = wall_impulse;
     let cvbox = [8.0, 8.0, 44.0, (ny - 8) as f64];
     (field, fy, fx, steadiness, cvbox)
 }
@@ -682,7 +657,7 @@ fn canonical_cvar_or_nan(losses: &[f64], beta: f64) -> f64 {
 ///   - `[13]` `poured_mass_neutral` — mass past the lip (Neutral contact)
 ///   - `[14]` `contact_poured_band` — |poured(Neutral) − poured(Wetting)|
 ///   - `[15]` `contact_dribble_band` — |dribble(Neutral) − dribble(Wetting)|
-///   - `[16]` `fragments` — Plateau–Rayleigh fragment count (Neutral)
+///   - `[16]` `fragments` — connected liquid components in this 2-D pour
 ///   - `[17]` `cvar_robust_offband` — off-band worst growth at the robust lip
 ///   - `[18]` `cvar_nominal_offband` — off-band worst growth at the nominal lip
 ///   - `[19]` reserved (0)
@@ -734,8 +709,12 @@ pub fn run_vessel(lip_x1000: u32) -> Vec<f64> {
         .fold(f64::NEG_INFINITY, f64::max);
 
     // ---- STAGE 3: free-surface pour (Neutral, capture frames) -----------
-    let neutral = pour_inline(nx, ny, frames, ContactModel::Neutral, true);
-    let wetting = pour_inline(nx, ny, 0, ContactModel::Wetting, false);
+    let Some(neutral) = pour_inline(nx, ny, frames, ContactModel::Neutral) else {
+        return Vec::new();
+    };
+    let Some(wetting) = pour_inline(nx, ny, 0, ContactModel::Wetting) else {
+        return Vec::new();
+    };
     let contact_poured_band = (neutral.poured - wetting.poured).abs();
     let contact_dribble_band = (neutral.dribble - wetting.dribble).abs();
 
@@ -845,25 +824,30 @@ struct PourOut {
     dribble: f64,
 }
 
-/// Inline free-surface pour on an `nx×ny` lattice (transcribes the setup of
-/// `fs_vessel::pour::run_pour`), capturing `capture` evenly-spaced mass frames.
-fn pour_inline(
-    nx: usize,
-    ny: usize,
-    capture: usize,
-    contact: ContactModel,
-    _keep_frames: bool,
-) -> PourOut {
+/// Reduced free-surface geometry with the native vessel's prescribed-frame
+/// forcing, capturing `capture` evenly-spaced mass frames. The browser retains
+/// its fuller initial chamber and explicitly omits capillarity here.
+fn pour_inline(nx: usize, ny: usize, capture: usize, contact: ContactModel) -> Option<PourOut> {
     let g0 = 6.0e-4;
     let tilt_final = 0.7;
     let steps = 300u32;
     let lip_x = nx * 5 / 8;
     let lip_h = (ny * 2 / 5).min(ny - 2);
+    let rig = fs_vessel::pour::PourRig {
+        nx,
+        ny,
+        lip_x,
+        lip_h,
+        g0,
+        surface_tension: 0.0,
+        tilt_final,
+        steps,
+    };
+    let pivot = [0.5 * (nx as f64 - 1.0), 0.5];
 
     let mut grid = Grid::uniform(nx, ny, 0.55);
     grid.periodic_x = false;
     grid.periodic_y = false;
-    grid.g = [0.0, -g0];
     for i in 0..nx * ny {
         grid.flags[i] = Cell::Gas;
     }
@@ -919,8 +903,7 @@ fn pour_inline(
     let mut drift = 0.0f64;
     let law = Rheology::Newtonian { nu: 0.016_667 };
     for step in 0..steps {
-        let theta = tilt_final * f64::from(step) / f64::from(steps);
-        sim.grid.g = [g0 * theta.sin(), -g0 * theta.cos()];
+        rig.prepare_step(&mut sim.grid, step, pivot).ok()?;
         let _ = update_tau(&mut sim.grid, law);
         sim.step();
         let dr = (sim.ledger_mass() - m0).abs() / m0;
@@ -948,14 +931,14 @@ fn pour_inline(
         }
     }
     let fragments = sim.fragment_count();
-    PourOut {
+    Some(PourOut {
         frames,
         mass_field,
         drift,
         fragments,
         poured,
         dribble,
-    }
+    })
 }
 
 /// Woodcock volume transmittance of a thin z-slab whose extinction field is the
@@ -1873,6 +1856,24 @@ mod tests {
         assert!(canonical_cvar_or_nan(&[], 0.8).is_nan());
         assert!(canonical_cvar_or_nan(&[1.0], f64::NAN).is_nan());
         assert!(canonical_cvar_or_nan(&[1.0, f64::INFINITY], 0.8).is_nan());
+    }
+
+    #[test]
+    fn browser_pour_frames_come_from_the_physical_native_trajectory() {
+        let (nx, ny, captures) = (32, 20, 5);
+        let recorded = pour_inline(nx, ny, captures, ContactModel::Neutral)
+            .expect("bounded physical pour must remain representable");
+        let unrecorded = pour_inline(nx, ny, 0, ContactModel::Neutral)
+            .expect("capture policy cannot change the physical trajectory");
+        assert_eq!(recorded.frames.len(), captures * nx * ny);
+        assert_eq!(
+            &recorded.frames[(captures - 1) * nx * ny..],
+            &recorded.mass_field
+        );
+        assert_eq!(recorded.mass_field, unrecorded.mass_field);
+        assert!(recorded.mass_field.iter().all(|mass| mass.is_finite()));
+        assert!(recorded.drift < 1e-10, "mass drift {}", recorded.drift);
+        assert!(recorded.poured > 0.0);
     }
 
     #[test]

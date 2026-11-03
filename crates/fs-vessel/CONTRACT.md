@@ -218,6 +218,13 @@ checked `LossSpan`. A support breach produces no race verdict.
 
 ## Rigid-frame momentum checks
 
+`PourRig::prepare_step` is the shared native/browser entry for one scheduled
+force update. It admits the zero-based step before using the same quintic
+midpoint kinematics and original D2Q9 rigid-frame owner. Preparing a step
+changes no physical momentum; the original collision supplies the held impulse.
+An empty or exhausted schedule refuses before changing the liquid. Consumers
+retain their own geometry, capture policy and subsequent native flow step.
+
 The original native flow tests retain mass, wetting/capillary response and
 Carreau sensitivity with the physical schedule. New tests verify its zero
 endpoint spin/acceleration and that moving the pivot changes the native flow

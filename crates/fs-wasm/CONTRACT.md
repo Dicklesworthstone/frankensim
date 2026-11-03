@@ -181,6 +181,21 @@ crates. Layer: **L6 HELM / interface surface**. The crate compiles as an
 
 ## Error model
 
+The reduced Ornithoid LBM driver initializes its declared physical inlet speed
+in the held-force frame. Displayed lattice lift/drag come from the original
+solver's last-step impulse on the rasterized airfoil walls, measured from the
+populations that actually bounce back; domain-wall reactions are excluded.
+This instantaneous resolved-lattice force is not a convergence or dimensional
+aerodynamic certificate.
+
+The browser vessel uses `fs-vessel::PourRig::prepare_step` for the same prescribed
+rest-to-rest rotation and centrifugal, Euler and midpoint Coriolis forces as
+the native pour. It retains its reduced geometry, initial fill and zero
+capillarity. A refused force preparation returns an empty campaign payload.
+Frames and the final render follow that same native liquid trajectory; fragment
+counts refer to connected 2-D liquid components. No 3-D breakup, finite-inertia
+vessel dynamics or browser-native parity certificate is implied.
+
 No structured error type in v0. Browser-facing functions use bounded
 fallback outputs for invalid or failed kernel calls. Native helper
 functions may still use ordinary Rust assertions from their upstream

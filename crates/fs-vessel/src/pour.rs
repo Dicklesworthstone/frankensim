@@ -9,7 +9,7 @@
 //! fs-render's Woodcock tracker to the simulation's OWN mass buffer:
 //! the marketing shot and the physics are the same bytes.
 
-use fs_lbm::core2::frame::RigidFrame2;
+use fs_lbm::core2::frame::{FrameForcingError2, RigidFrame2};
 use fs_lbm::freesurface::{ContactModel, FreeSurface};
 use fs_lbm::rheology::{Rheology, update_tau};
 use fs_lbm::{Cell, Grid};
@@ -54,6 +54,44 @@ impl Default for PourRig {
             tilt_final: 0.7,
             steps: 900,
         }
+    }
+}
+
+impl PourRig {
+    /// Prepare one physical pour step on an existing native liquid grid.
+    ///
+    /// Native and browser consumers share this rest-to-rest tilt schedule and
+    /// its midpoint gravity, centrifugal, Euler and Coriolis forcing. `step`
+    /// is zero-based and `pivot` uses native lattice cell-centre coordinates.
+    /// Preparation preserves the accepted physical momentum and stress; the
+    /// caller then advances the original flow owner exactly once.
+    ///
+    /// Refuses an exhausted/empty schedule or invalid motion/grid before any
+    /// accepted population or force changes. Motion is prescribed; this does
+    /// not evolve finite-inertia vessel/support dynamics.
+    pub fn prepare_step(
+        &self,
+        grid: &mut Grid,
+        step: u32,
+        pivot: [f64; 2],
+    ) -> Result<(), FrameForcingError2> {
+        if step >= self.steps {
+            return Err(FrameForcingError2::InvalidMotion);
+        }
+        let [theta, speed, acceleration] = tilt_kinematics(self, f64::from(step) + 0.5);
+        RigidFrame2 {
+            origin: pivot,
+            angular_velocity: -speed,
+            angular_acceleration: -acceleration,
+            origin_acceleration: [0.0; 2],
+        }
+        .prepare_step(
+            grid,
+            [
+                self.g0 * fs_math::det::sin(theta),
+                -self.g0 * fs_math::det::cos(theta),
+            ],
+        )
     }
 }
 
@@ -190,22 +228,8 @@ fn run_pour_motion(
     let mut mass_drift = 0.0f64;
     for step in 0..rig.steps {
         if let Some(origin) = pivot {
-            let [theta, speed, acceleration] = tilt_kinematics(rig, f64::from(step) + 0.5);
-            // Clockwise tilt is negative counterclockwise frame rotation.
-            RigidFrame2 {
-                origin,
-                angular_velocity: -speed,
-                angular_acceleration: -acceleration,
-                origin_acceleration: [0.0; 2],
-            }
-            .prepare_step(
-                &mut sim.grid,
-                [
-                    rig.g0 * fs_math::det::sin(theta),
-                    -rig.g0 * fs_math::det::cos(theta),
-                ],
-            )
-            .expect("pour rigid-frame forcing");
+            rig.prepare_step(&mut sim.grid, step, origin)
+                .expect("pour rigid-frame forcing");
         } else {
             // Preserve the explicit historical model's deterministic arithmetic.
             let theta = rig.tilt_final * f64::from(step) / f64::from(rig.steps);
@@ -257,6 +281,56 @@ fn run_pour_motion(
 #[cfg(test)]
 mod capillary_tests {
     use super::*;
+
+    #[test]
+    fn shared_pour_preparation_preserves_momentum_then_delivers_native_impulse() {
+        let rig = PourRig {
+            g0: 0.0,
+            steps: 300,
+            ..PourRig::default()
+        };
+        let mut grid = Grid::uniform(8, 6, 0.8);
+        grid.f.fill(fs_lbm::equilibrium(0.73, 0.01, -0.02));
+        let initial = grid.moments(0);
+        rig.prepare_step(&mut grid, 100, [0.5, 0.5]).unwrap();
+        assert!(
+            grid.fext
+                .iter()
+                .any(|force| force.iter().any(|v| v.abs() > 1e-6))
+        );
+        let mut collided = grid.clone();
+        grid.collide_into(&mut collided.f);
+        for i in 0..grid.f.len() {
+            let prepared = grid.moments(i);
+            let after = collided.moments(i);
+            for axis in 0..2 {
+                let original = initial.rho * initial.u[axis];
+                let held = prepared.rho * prepared.u[axis];
+                let delivered = after.rho * after.u[axis] - held;
+                assert!((held - original).abs() < 3e-15);
+                assert!((delivered - grid.fext[i][axis]).abs() < 3e-15);
+            }
+        }
+    }
+
+    #[test]
+    fn refused_pour_schedule_leaves_native_state_untouched() {
+        let mut rig = PourRig::default();
+        let mut grid = Grid::uniform(4, 4, 0.8);
+        let before = grid.clone();
+        assert_eq!(
+            rig.prepare_step(&mut grid, rig.steps, [0.5, 0.5]),
+            Err(FrameForcingError2::InvalidMotion)
+        );
+        rig.steps = 0;
+        assert_eq!(
+            rig.prepare_step(&mut grid, 0, [0.5, 0.5]),
+            Err(FrameForcingError2::InvalidMotion)
+        );
+        assert_eq!(grid.f, before.f);
+        assert_eq!(grid.fext, before.fext);
+        assert_eq!(grid.g, before.g);
+    }
 
     #[test]
     fn rigid_tilt_schedule_starts_and_finishes_at_rest() {
