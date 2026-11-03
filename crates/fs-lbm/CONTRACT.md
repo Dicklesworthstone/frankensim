@@ -2688,12 +2688,51 @@ onset bracket (decay at Ra = 1200, growth at Ra = 2500, Nu > 1), n ∈
 plate temperatures, linear conduction, ledger honesty, and a
 replay-stable seeded determinism CANDIDATE.
 
+### Independently fitted dynamic transport on the thermal slab
+
+`ThermalLbm3::{thermal_channel_sgs_workspace, prepare_thermal_channel_sgs,
+step_with_sources_and_channel_sgs}` explicitly attaches the shared planar
+dynamic momentum/scalar model to the original D3Q19/D3Q7 slab. Only active
+fluid cells enter the filters. Its current Guo-centered velocity, density,
+temperature, stationary halfway walls and actual fixed plate temperatures
+determine both fits. Momentum and thermal diffusion are independent, including
+planes with zero modeled viscosity and positive modeled heat diffusion.
+The original molecular rates or supplied local molecular fields remain the
+baseline; zero fitted contributions preserve each corresponding rate's bits.
+
+The original transactional source/flow/temperature owner consumes the total
+rates for one step and measures the anti-bounce-back wall heat exchange.
+`MaterialSlab<ThermalLbm3>::step_with_power_density_and_channel_sgs` uses the
+same retained material, SI power/force conversion and normalized temperature
+map, including either sign of the physical plate temperature difference.
+Source and wall heat, temperature admission and endpoint Mach checks all
+precede publication. Rejected or cancelled trials retain the accepted physical
+state, and a retry overwrites failed scratch. The original serial collision
+kernel is checked before/after, without claiming finer cancellation inside it.
+
+The reusable numerical workspace requires `240*N_fluid + 16*N_slab` nominal
+bytes, with actual-capacity admission. This includes current rho/u/T, both
+filters and full step-local rates, but excludes the existing source owner's
+complete trial snapshot. Preparation allocates no additional arrays. Explicit
+coefficient, viscosity/diffusivity-to-molecular and Mach bounds are refusals.
+Shear dissipation diagnostics reuse the original thermal velocity stencil and
+do not add mechanical dissipation to the sensible-temperature equation.
+
+The original wall discretization applies adjacent-fluid transport through
+halfway bounce-back/anti-bounce-back; it is not a new molecular-only wall
+resistance or wall function. The six focused native channel tests cover
+independent heat, original source/wall transport, force-centering, zero-fit
+equivalence, budgets, cancellation/retry, endpoint refusal and both SI thermal
+orientations. This remains exploratory, resolved-wall Boussinesq transport;
+it supplies no total-energy or developed turbulent-channel/DNS qualification.
+
 ### No-claim boundaries (3-D coupled ports)
 
 - Single-threaded correctness-first reference rung: no SIMD/tile/parallel
   claim, no performance claim against the tiled fast path.
-- No turbulence model and no claim beyond the fixture-scale onset band
-  and profile bars actually gated in the battery.
+- The baseline battery establishes the fixture-scale onset band and profile
+  bars it actually gates; the explicit SGS paths require their separate
+  exploratory controls and do not qualify developed turbulence.
 - The seeded determinism hash is a replay-checked CANDIDATE, not a frozen
   golden: freezing awaits the GOLDEN_POLICY four-quadrant ceremony
   (committed tree, M4 + x86, debug + release), per the 40p2 precedent.

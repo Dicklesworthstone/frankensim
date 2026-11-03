@@ -17,6 +17,9 @@ use super::{
 use crate::sgs3::{SgsConfig, SgsError, SgsReport, eddy_viscosity};
 use fs_exec::CancelGate;
 
+/// Plane-averaged dynamic momentum and heat on the original halfway slab.
+pub mod channel;
+
 /// Explicit exploration controls; no turbulent Prandtl number is defaulted.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ThermalSgsConfig {
@@ -88,6 +91,12 @@ pub enum ThermalSgsError {
     Invalid(&'static str),
     Allocation,
     Closure(SgsError),
+    Dynamic(crate::sgs3::dynamic::DynamicSgsError),
+    DiffusivityRatio {
+        cell: usize,
+        ratio: f64,
+        maximum: f64,
+    },
     Source(ThermalSourceError),
     Mach {
         cell: usize,
@@ -232,7 +241,7 @@ impl ThermalLbm3 {
             }
             let nu = (workspace.momentum[cell] - 0.5) / 3.0;
             let alpha = (workspace.thermal[cell] - 0.5) / 4.0;
-            let gradient = self.thermal_sgs_gradient(cell, &workspace.velocity);
+            let gradient = self.thermal_sgs_gradient(cell, |i| workspace.velocity[i]);
             let eddy = eddy_viscosity(
                 config.closure.model,
                 config.closure.filter_width_lu,
@@ -290,7 +299,11 @@ impl ThermalLbm3 {
         Ok(report)
     }
 
-    fn thermal_sgs_gradient(&self, cell: usize, velocity: &[[f64; 3]]) -> [[f64; 3]; 3] {
+    fn thermal_sgs_gradient(
+        &self,
+        cell: usize,
+        velocity: impl Fn(usize) -> [f64; 3],
+    ) -> [[f64; 3]; 3] {
         let g = &self.grid;
         let plane = g.nx * g.ny;
         let (x, y, z) = (cell % g.nx, (cell / g.nx) % g.ny, cell / plane);
@@ -300,14 +313,14 @@ impl ThermalLbm3 {
         let yp = g.idx(x, if y + 1 == g.ny { 0 } else { y + 1 }, z);
         core::array::from_fn(|component| {
             [
-                0.5 * (velocity[xp][component] - velocity[xm][component]),
-                0.5 * (velocity[yp][component] - velocity[ym][component]),
+                0.5 * (velocity(xp)[component] - velocity(xm)[component]),
+                0.5 * (velocity(yp)[component] - velocity(ym)[component]),
                 if z == 1 {
-                    velocity[cell][component] + velocity[cell + plane][component] / 3.0
+                    velocity(cell)[component] + velocity(cell + plane)[component] / 3.0
                 } else if z + 2 == g.nz {
-                    -velocity[cell][component] - velocity[cell - plane][component] / 3.0
+                    -velocity(cell)[component] - velocity(cell - plane)[component] / 3.0
                 } else {
-                    0.5 * (velocity[cell + plane][component] - velocity[cell - plane][component])
+                    0.5 * (velocity(cell + plane)[component] - velocity(cell - plane)[component])
                 },
             ]
         })

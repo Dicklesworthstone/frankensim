@@ -6,6 +6,9 @@ use crate::thermal::sources::sgs3::{
 };
 use fs_exec::CancelGate;
 
+/// Independently fitted plane-channel momentum and sensible heat transport.
+pub mod channel;
+
 /// Accepted sensible heat in SI units and the exact applied SGS diagnostics.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MaterialThermalSgsStep {
