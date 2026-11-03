@@ -378,6 +378,11 @@ fn material_receipts_and_actual_endpoint_support_are_retained_without_freezing_a
     let right = pure(0.028, 3.5, 0.0, 0.0, 700.0, 100_000.0);
     let law =
         EffusiveInterface::try_new(left.model().clone(), vec![row], support(), regime()).unwrap();
+    law.admit_parcel(&right, || false).unwrap();
+    assert_eq!(
+        law.admit_parcel(&right, || true),
+        Err(GasEnergyError::Cancelled)
+    );
     let flux = left.effusive_flux_to(&right, &law, AREA, || false).unwrap();
     assert_eq!(
         flux.interface.transmissions()[0]
@@ -388,6 +393,7 @@ fn material_receipts_and_actual_endpoint_support_are_retained_without_freezing_a
     );
     for (t, p) in [(900.0, 100_000.0), (400.0, 300_000.0)] {
         let outside = pure(0.028, 3.5, 0.0, 0.0, t, p);
+        assert!(law.admit_parcel(&outside, || false).is_err());
         assert!(
             left.effusive_flux_to(&outside, &law, AREA, || false)
                 .is_err()
@@ -404,6 +410,7 @@ fn material_receipts_and_actual_endpoint_support_are_retained_without_freezing_a
         EffusiveInterface::try_new(left.model().clone(), vec![closed], support(), regime())
             .unwrap();
     let outside = pure(0.028, 3.5, 0.0, 0.0, 900.0, 100_000.0);
+    assert!(closed_law.admit_parcel(&outside, || false).is_err());
     assert!(
         left.effusive_flux_to(&outside, &closed_law, AREA, || false)
             .is_err()

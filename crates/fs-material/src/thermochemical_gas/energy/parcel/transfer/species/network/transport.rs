@@ -200,6 +200,8 @@ impl GasTransportStep {
     /// separate partial-pressure ordering would reject physically coupled fluxes.
     /// Effusive thermal transpiration also has no pressure-order gate. Both
     /// mechanisms instead share the inventory and total endpoint entropy gates.
+    /// Active effusive interfaces additionally retain their original gas catalog,
+    /// collisional/geometric T/p qualification and transmission source domains.
     pub fn admit_endpoint_driving_forces(
         &self,
         parcels: &BTreeMap<u64, ClosedGasParcel>,
@@ -237,6 +239,7 @@ impl GasTransportStep {
         pressure::admit_pressures(parcels, &self.nozzles, &mut cancelled)?;
         porous::admit_pressures(parcels, &self.porous, &mut cancelled)?;
         membrane::admit_partial_pressures(parcels, &self.membranes, &mut cancelled)?;
+        effusion::admit_endpoints(parcels, &self.effusion, &mut cancelled)?;
         check(&mut cancelled)
     }
 }

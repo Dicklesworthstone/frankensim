@@ -34,6 +34,7 @@ impl GasTransportRates {
         pressure::admit_pressures(parcels, &self.nozzles, &mut cancelled)?;
         porous::admit_pressures(parcels, &self.porous, &mut cancelled)?;
         membrane::admit_partial_pressures(parcels, &self.membranes, &mut cancelled)?;
+        effusion::admit_endpoints(parcels, &self.effusion, &mut cancelled)?;
         check(&mut cancelled)
     }
     pub(super) fn into_closed_step(self, exchange: SpeciesNetworkStep, entropy_change_j_k: f64) -> GasTransportStep {

@@ -425,3 +425,161 @@ fn equilibrium_closed_paths_ordering_and_late_cancellation_are_atomic() {
     );
     assert_eq!(parcels, original);
 }
+
+#[test]
+fn final_transport_endpoint_cannot_leave_the_original_effusive_support() {
+    let parcels = BTreeMap::from([(0, gas(400.0, 150.0, 0.0)), (1, gas(400.0, 100.0, 0.0))]);
+    let original = parcels.clone();
+    let broad = interface(0.0);
+    let restricted = EffusiveInterface::try_new(
+        broad.gas_catalog().clone(),
+        broad.transmissions().to_vec(),
+        EffusiveSupport {
+            temperature_k: (400.0, 400.0),
+            pressure_pa: broad.support().pressure_pa,
+        },
+        broad.regime().clone(),
+    )
+    .unwrap();
+    let endpoints = BTreeMap::from([(0, energy()), (1, energy())]);
+    let run = |surface: &EffusiveInterface| {
+        step_candidate_with_paths(
+            &parcels,
+            GasTransportPaths {
+                effusion: &[link(surface, 1e-8)],
+                ..Default::default()
+            },
+            1.0,
+            &endpoints,
+            controls(),
+            || false,
+        )
+    };
+    let allowed = run(&broad).unwrap();
+    assert!(allowed.parcels()[&0].state().state().temperature < 400.0);
+    assert!(allowed.parcels()[&1].state().state().temperature > 400.0);
+    assert!(matches!(
+        run(&restricted),
+        Err(GasTransportError::Effusion(EffusionNetworkError::Face {
+            id: 8,
+            error: GasEnergyError::Invalid(_)
+        }))
+    ));
+    assert_eq!(parcels, original);
+}
+
+#[test]
+fn enclosing_thermal_and_source_changes_requalify_the_original_interface() {
+    let parcels = BTreeMap::from([(0, gas(400.0, 100.0, 0.0)), (1, gas(400.0, 100.0, 0.0))]);
+    let surface = interface(0.0);
+    let restricted = EffusiveInterface::try_new(
+        surface.gas_catalog().clone(),
+        surface.transmissions().to_vec(),
+        EffusiveSupport {
+            temperature_k: (300.0, 500.0),
+            pressure_pa: (10.0, 200.0),
+        },
+        surface.regime().clone(),
+    )
+    .unwrap();
+    let endpoints = BTreeMap::from([(0, energy()), (1, energy())]);
+    let links = [link(&restricted, 1e-8)];
+    let paths = GasTransportPaths {
+        effusion: &links,
+        ..Default::default()
+    };
+    let accepted =
+        step_candidate_with_paths(&parcels, paths, 1.0, &endpoints, controls(), || false).unwrap();
+    let sampled =
+        super::super::sample_transfers(&parcels, paths, 1.0, &endpoints, controls(), || false)
+            .unwrap();
+    // Native caloric/transport support admits each of these states. Only the
+    // retained aperture qualification refuses the late change.
+    for changed in [
+        gas(600.0, 100.0, 0.0),
+        gas(400.0, 300.0, 0.0),
+        gas(400.0, 100.0, 1000.0),
+    ] {
+        let mut final_parcels = parcels.clone();
+        final_parcels.insert(1, changed);
+        for verdict in [
+            accepted
+                .step()
+                .admit_endpoint_driving_forces(&final_parcels, || false),
+            sampled
+                .rates
+                .admit_endpoint_driving_forces(&final_parcels, || false),
+        ] {
+            assert!(matches!(
+                verdict,
+                Err(GasTransportError::Effusion(EffusionNetworkError::Face {
+                    id: 8,
+                    ..
+                }))
+            ));
+        }
+    }
+    assert_eq!(accepted.parcels(), &parcels);
+    assert_eq!(
+        accepted
+            .step()
+            .admit_endpoint_driving_forces(&parcels, || true),
+        Err(GasTransportError::Cancelled)
+    );
+    assert_eq!(
+        sampled
+            .rates
+            .admit_endpoint_driving_forces(&parcels, || true),
+        Err(GasTransportError::Cancelled)
+    );
+}
+
+#[test]
+fn geometric_closure_skips_qualification_but_zero_transmission_does_not() {
+    let parcels = BTreeMap::from([(0, gas(400.0, 100.0, 0.0)), (1, gas(400.0, 100.0, 0.0))]);
+    let surface = interface(0.0);
+    let blocked = EffusiveInterface::try_new(
+        surface.gas_catalog().clone(),
+        vec![
+            EffusiveSpeciesTransmission::try_new(
+                SpeciesId::new("A").unwrap(),
+                0.0,
+                "synthetic closed transmission",
+            )
+            .unwrap(),
+        ],
+        EffusiveSupport {
+            temperature_k: (300.0, 500.0),
+            pressure_pa: (10.0, 200.0),
+        },
+        surface.regime().clone(),
+    )
+    .unwrap();
+    let endpoints = BTreeMap::from([(0, energy()), (1, energy())]);
+    let mut final_parcels = parcels.clone();
+    final_parcels.insert(1, gas(600.0, 300.0, 1000.0));
+    for area in [0.0, 1e-8] {
+        let links = [link(&blocked, area)];
+        let candidate = step_candidate_with_paths(
+            &parcels,
+            GasTransportPaths {
+                effusion: &links,
+                ..Default::default()
+            },
+            1.0,
+            &endpoints,
+            controls(),
+            || false,
+        )
+        .unwrap();
+        assert_eq!(candidate.parcels(), &parcels);
+        assert_eq!(
+            candidate.step().effusion[0].flux.species.is_empty(),
+            area == 0.0
+        );
+        let verdict = candidate
+            .step()
+            .admit_endpoint_driving_forces(&final_parcels, || false);
+        assert_eq!(verdict.is_ok(), area == 0.0);
+    }
+}

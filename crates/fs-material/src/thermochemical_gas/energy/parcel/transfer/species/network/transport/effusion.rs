@@ -68,6 +68,57 @@ fn face_error(id: u64, error: GasEnergyError) -> Error {
     }
 }
 
+/// Retain the original interface qualification on the final coupled states.
+/// No rate is resampled and no directional pressure ordering is imposed.
+pub(super) fn admit_endpoints(
+    parcels: &BTreeMap<u64, ClosedGasParcel>,
+    links: &[EffusionNetworkLinkStep],
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<(), Error> {
+    check(&mut cancelled)?;
+    for link in links {
+        check(&mut cancelled)?;
+        // Only zero exposed area produces no species rows. A selected zero
+        // transmission still has rows and must retain its source support.
+        if link.flux.species.is_empty() {
+            continue;
+        }
+        let pair = link.parcels.map(|id| parcels.get(&id));
+        let [Some(left), Some(right)] = pair else {
+            return Err(Error::Invalid(
+                "effusive endpoint lost an original parcel identity",
+            ));
+        };
+        let interface = &link.flux.interface;
+        for parcel in [left, right] {
+            interface
+                .admit_parcel(parcel, &mut cancelled)
+                .map_err(|error| face_error(link.id, error))?;
+        }
+        // As in the original face, a species present on either side qualifies
+        // its reciprocal transmission at BOTH states, including its empty side.
+        for transmission in interface.transmissions() {
+            check(&mut cancelled)?;
+            if [left, right].iter().any(|parcel| {
+                parcel
+                    .model()
+                    .thermodynamics()
+                    .components()
+                    .binary_search_by(|species| species.species().cmp(transmission.species()))
+                    .is_ok()
+            }) {
+                for parcel in [left, right] {
+                    let state = parcel.state().state();
+                    transmission
+                        .admit(state.temperature, state.pressure)
+                        .map_err(|error| face_error(link.id, error))?;
+                }
+            }
+        }
+    }
+    check(&mut cancelled)
+}
+
 /// Sample all independent paths without publishing gas, species or energy.
 pub(super) fn sample_transfers(
     parcels: &BTreeMap<u64, ClosedGasParcel>,

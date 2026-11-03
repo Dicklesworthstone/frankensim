@@ -268,7 +268,7 @@ impl EffusiveSpeciesTransmission {
     pub fn source_property(&self) -> Option<&str> {
         self.source_property.as_deref()
     }
-    fn admit(&self, temperature: f64, pressure: f64) -> Result<(), GasEnergyError> {
+    pub(super) fn admit(&self, temperature: f64, pressure: f64) -> Result<(), GasEnergyError> {
         for &(axis, (lo, hi)) in &self.source_bounds {
             let value = match axis {
                 SourceAxis::Temperature => temperature,
@@ -339,6 +339,40 @@ impl EffusiveInterface {
     }
     pub const fn regime(&self) -> &EffusiveRegime {
         &self.regime
+    }
+
+    /// Qualify an actual gas state without sampling another molecular beam.
+    ///
+    /// Coupled heat, reaction and other transport owners must call this before
+    /// publishing an endpoint that still exposes this interface. Its geometric
+    /// and collisional qualification covers only the original catalog and
+    /// authored T/p support. This is not a pressure-direction or equilibrium
+    /// gate: effusive thermal transpiration can move mass uphill in pressure.
+    /// A geometrically closed path should skip this otherwise active query.
+    pub fn admit_parcel(
+        &self,
+        parcel: &ClosedGasParcel,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(), GasEnergyError> {
+        poll(&mut cancelled)?;
+        let state = parcel.state().state();
+        self.support.admit(state.temperature, state.pressure)?;
+        let components = parcel.model().thermodynamics().components();
+        if components.len() > MAX_EFFUSIVE_SPECIES {
+            return Err(invalid(
+                "effusive original gas exceeds the species work bound",
+            ));
+        }
+        admit_calibration(parcel.model(), self.gas_catalog())?;
+        for component in components {
+            poll(&mut cancelled)?;
+            let index = self
+                .transmissions
+                .binary_search_by(|transmission| transmission.species.cmp(component.species()))
+                .map_err(|_| invalid("effusive qualification is missing an active gas species"))?;
+            self.transmissions[index].admit(state.temperature, state.pressure)?;
+        }
+        poll(&mut cancelled)
     }
 }
 
@@ -638,7 +672,10 @@ fn signed_product(a: f64, b: f64) -> Result<f64, GasEnergyError> {
 /// Positive product/quotient with normalized binary factors. Intermediate
 /// overflow/underflow does not close a real path; an unrepresentable final
 /// positive result refuses explicitly. At most seven factors occur per beam.
-fn positive_product_ratio(numerator: &[f64], denominator: &[f64]) -> Result<f64, GasEnergyError> {
+pub(super) fn positive_product_ratio(
+    numerator: &[f64],
+    denominator: &[f64],
+) -> Result<f64, GasEnergyError> {
     fn split(mut value: f64) -> (f64, i32) {
         let mut adjustment = 0;
         if value < f64::MIN_POSITIVE {

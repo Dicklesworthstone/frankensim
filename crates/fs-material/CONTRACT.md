@@ -6283,6 +6283,18 @@ A long accommodating pore requires its own wall-energy/transport closure.
 Zero exposed area queries no inactive sources. A selected zero transmission
 still admits its actual source domain at both reservoir states.
 
+`EffusiveInterface::admit_parcel` rechecks the original source identities and
+T/p qualification without sampling another beam. Both `GasTransportRates` and
+`GasTransportStep` apply this admission to final coupled endpoints, including
+both sides of each reciprocal transmission. An intervening heat, reaction or
+mechanical update cannot publish gas outside the aperture's original support.
+Zero exposed area stays inactive; selected zero transmission retains its source
+domain. This does not impose pressure ordering on thermal transpiration. Three
+focused network regressions and source-bound face assertions cover initial-to-
+final and later coupled-domain failures, source replacement, cancellation and
+geometric closure. Native execution remains blocked by missing constellation
+sibling checkouts in the current environment; Rustfmt parsing passed.
+
 `network::transport::GasTransportPaths::effusion` retains both directional
 species withdrawals and their molecular energy correction. The correction uses
 the actual rounded integrated beam masses and a stable temperature difference.
