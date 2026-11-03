@@ -156,17 +156,27 @@ the crash cascade with structurally exact energy accounting.
   exact-linear, non-iterative stepper for the complete retained SOS potential.
   It introduces ONE `r=sqrt(V+C0)` for the total nonlinear potential; all
   stress channels, signed couplings and physical linear coefficients remain.
-  The exact scalar `PreparedExactZoh` owner supplies held-force trajectories,
+  The existing `PreparedExactZoh` owner supplies held-force trajectories,
   same-interval mean velocities and independently integrated positive heat.
   A half-step predictor uses the current extended state, then one scalar
   Sherman-Morrison solve closes the held nonlinear force. Diagonal KC
-  channels cost O(N); dense channels retain O(N^2) multiplication. Preparation
-  and hot work grow with the retained modes without a dense 2N-state solve;
-  warm stepping allocates nothing. Damping input is `C_i` [1/s], not zeta.
-  The declared mode cap is at most 4096, and every retained omega*dt must
-  remain within a positive caller band strictly below pi. Exact nonnegative
-  displacement gains make the rank-one denominator at least one; invalid
-  data or arithmetic refuses, without dropping modes or clipping a gain.
+  channels cost O(N); dense channels retain O(N^2) multiplication. Diagonal
+  viscosity uses one scalar exact cache per mode and O(N) linear work, with
+  a declared mode cap of at most 4096. `new_with_damping_matrix` instead
+  admits the complete symmetric PSD `C` [1/s] in the original mass-normalized
+  coordinates, retaining cross-mode losses and their lossless directions.
+  Its complete linear state and independent force ports use the same exact
+  dense owner; bounded cold preparation is followed by allocation-free
+  O(N^2) linear warm work. The existing augmented-exponential cap admits
+  at most `MAX_SAV_DAMPING_MATRIX_MODES = 42` non-diagonally damped modes;
+  excess work refuses before preparation. An exactly diagonal matrix reuses
+  the scalar path bitwise and keeps its larger capacity. Both paths reuse all
+  buffers, retain one nonlinear scalar solve, and leave physical stiffness
+  unchanged. Damping input is viscosity C, not zeta. Every retained omega*dt
+  must remain within a positive caller band strictly below pi. The complete
+  held-force displacement map B enters `1 + g^T B g / 4`; passivity makes
+  this denominator at least one. Invalid data or arithmetic refuses, without
+  dropping modes, replacing C by its diagonal, or clipping a gain.
   This is a second-order exponential SAV method (Jiang/Wang/Cai, JCP 419,
   109690, doi:10.1016/j.jcp.2020.109690; scalar string formulation in
   Russo/Bilbao/Ducceschi, IFAC 2024). Its invariant is the MODIFIED energy
@@ -261,6 +271,20 @@ production clock or a wider nonlinear-band guarantee. The suite also retains
 all 128 KC modes with one rank-one solve, tests band/capacity/offset refusals,
 mid-step cancellation, unchanged rejected state, and bitwise checkpoint replay.
 
+The full-viscosity SAV regressions independently resolve a local dashpot into
+lossless common motion and damped relative motion. Closed-form forced and
+unforced trajectories cover underdamping, critical damping, and overdamping
+with damping*dt = 2600; state error stays below 5e-12 and accumulated physical
+heat agrees within 2e-11 J. The lossless common motion generates less than
+1e-23 J of numerical heat. With signed nonlinear stress channels and
+noncommuting stiffness/viscosity, state, independently integrated heat and
+auxiliary defect converge at second order to continuous RK4; finest weighted
+state error is below 5e-6, heat error below 6e-6 J, and maximum auxiliary
+defect below 2e-5 J. Modified energy/work/heat closes within 2e-11 J over the
+run. Exact diagonal compatibility is bitwise; full matrix static compliance,
+complete checkpoint replay, cancellation after candidate propagation,
+nonfinite/overflowing drive and matrix/capacity refusals are also pinned.
+
 `tests/nlmodal.rs::full_viscous_operator_preserves_local_damper_nullspace_and_forced_response`
 checks an independent common/differential analytic oscillator solution,
 rank-one damping's lossless direction and physical port work to 3e-12.
@@ -317,8 +341,8 @@ modal energies, leaked fractions, tensor size); typed refusals.
   refine temporal resolution and inspect state, pitch and auxiliary-energy
   defect; nonlinear harmonics can exceed the retained linear band. Offset
   sensitivity, modal/stress truncation and physical model error remain separate
-  convergence axes. Full matrix viscosity, contact, constitutive memory and
-  reciprocal termination coupling remain with their existing pHS owners.
+  convergence axes. Contact, constitutive memory and reciprocal termination
+  coupling remain with their existing pHS owners.
 - Moderate-rotation von Karman regime only: no damage, plasticity,
   wrinkling, or full shell curvature (quadratic coupling from
   curvature is the shells follow-up).

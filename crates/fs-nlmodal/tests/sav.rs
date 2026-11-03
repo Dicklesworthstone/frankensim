@@ -1,5 +1,5 @@
 //! Physical oracles for the exact-linear, non-iterative SOS integrator.
-use fs_nlmodal::sav::{SavConfig, SavError, SavStepper};
+use fs_nlmodal::sav::{MAX_SAV_DAMPING_MATRIX_MODES, SavConfig, SavError, SavStepper};
 use fs_nlmodal::{KcStringParams, SosModalStorage, StressChannel, kirchhoff_carrier_string};
 use fs_phs::linear_exact::{LinearSplitBudget, PreparedExactZoh};
 use fs_phs::mass_spring_damper;
@@ -428,4 +428,312 @@ fn g0_invalid_bands_capacities_offsets_and_cancelled_steps_are_transactional() {
     runtime.step(&mut state, &[0.1, 0.0]).unwrap();
     runtime.step(&mut retry, &[0.1, 0.0]).unwrap();
     assert_eq!(state, retry);
+}
+
+#[test]
+fn g3_matrix_diagonal_limit_preserves_the_scalar_trajectory_bitwise() {
+    let storage = coupled_storage();
+    let mut scalar = SavStepper::new(&storage, &[0.2, 0.5], config(0.2, 2), 0.01).unwrap();
+    let mut matrix =
+        SavStepper::new_with_damping_matrix(&storage, &[0.2, 0.0, 0.0, 0.5], config(0.2, 2), 0.01)
+            .unwrap();
+    let initial = [0.13, 0.08, -0.07, -0.11];
+    let mut a = scalar.initial_state(&initial).unwrap();
+    let mut b = matrix.initial_state(&initial).unwrap();
+    for k in 0..100 {
+        let force = [0.1 * (k as f64 * 0.13).sin(), -0.03];
+        assert_eq!(
+            scalar.step(&mut a, &force).unwrap(),
+            matrix.step(&mut b, &force).unwrap()
+        );
+        assert_eq!(a, b);
+    }
+}
+
+// A pair of equal-frequency modes with C=c*[1,-1;-1,1] splits into an
+// undamped common motion and a relative motion damped at rate 2c. This oracle
+// uses their closed-form scalar ODEs, not the production matrix exponential.
+fn oscillator_exact(omega: f64, damping: f64, q: f64, p: f64, force: f64, t: f64) -> [f64; 2] {
+    let equilibrium = force / (omega * omega);
+    let shift = q - equilibrium;
+    let a = 0.5 * damping;
+    if a == omega {
+        let decay = (-a * t).exp();
+        let b = p + a * shift;
+        return [
+            equilibrium + (shift + b * t) * decay,
+            (p - a * b * t) * decay,
+        ];
+    }
+    if a > omega {
+        let root = ((a - omega) * (a + omega)).sqrt();
+        let fast = -(a + root);
+        let slow = omega * omega / fast;
+        let slow_weight = (p - fast * shift) / (slow - fast);
+        let fast_weight = (slow * shift - p) / (slow - fast);
+        return [
+            equilibrium + slow_weight * (slow * t).exp() + fast_weight * (fast * t).exp(),
+            slow * slow_weight * (slow * t).exp() + fast * fast_weight * (fast * t).exp(),
+        ];
+    }
+    let w = ((omega - a) * (omega + a)).sqrt();
+    let decay = (-a * t).exp();
+    let (sin, cos) = (w * t).sin_cos();
+    [
+        equilibrium + decay * (shift * cos + (p + a * shift) * sin / w),
+        decay * (p * cos - (omega * omega * shift + a * p) * sin / w),
+    ]
+}
+
+#[test]
+fn g1_spatial_damper_retains_its_lossless_motion_and_exact_forced_decay() {
+    let omega = 17.0;
+    let storage = SosModalStorage {
+        omegas: vec![omega; 2],
+        channels: Vec::new(),
+    };
+    let dt = 0.013;
+    // Under-, critically, and heavily over-damped relative motion share an
+    // exact undamped common direction. The last case has damping*dt = 2600.
+    for c in [6.0, omega, 100_000.0] {
+        let damping = [c, -c, -c, c];
+        for (initial, force) in [
+            ([0.08, -0.17, 0.08, -0.17], [0.4, 0.4]),
+            ([0.08, -0.17, -0.02, 0.3], [0.4, -0.6]),
+            ([0.08, -0.17, -0.02, 0.3], [0.0, 0.0]),
+        ] {
+            let mut runtime =
+                SavStepper::new_with_damping_matrix(&storage, &damping, config(0.1, 2), dt)
+                    .unwrap();
+            let mut state = runtime.initial_state(&initial).unwrap();
+            let energy = |x: &[f64]| {
+                0.5 * (omega * omega * (x[0] * x[0] + x[2] * x[2]) + x[1] * x[1] + x[3] * x[3])
+            };
+            let mut heat = 0.0;
+            for k in 1..=120 {
+                let record = runtime.step(&mut state, &force).unwrap();
+                let t = k as f64 * dt;
+                let common = oscillator_exact(
+                    omega,
+                    0.0,
+                    0.5 * (initial[0] + initial[2]),
+                    0.5 * (initial[1] + initial[3]),
+                    0.5 * (force[0] + force[1]),
+                    t,
+                );
+                let relative = oscillator_exact(
+                    omega,
+                    2.0 * c,
+                    0.5 * (initial[0] - initial[2]),
+                    0.5 * (initial[1] - initial[3]),
+                    0.5 * (force[0] - force[1]),
+                    t,
+                );
+                let expected = [
+                    common[0] + relative[0],
+                    common[1] + relative[1],
+                    common[0] - relative[0],
+                    common[1] - relative[1],
+                ];
+                for (actual, expected) in state.coordinates().iter().zip(expected) {
+                    assert!((actual - expected).abs() < 5e-12);
+                }
+                assert_eq!(record.rank_one_solves, 0);
+                assert_eq!(record.auxiliary_energy_defect_j, 0.0);
+                assert!(record.dissipated_j >= 0.0);
+                if force == [0.0, 0.0] {
+                    assert_eq!(record.port_work_j, 0.0);
+                }
+                heat += record.dissipated_j;
+                let work =
+                    force[0] * (expected[0] - initial[0]) + force[1] * (expected[2] - initial[2]);
+                let expected_heat = energy(&initial) + work - energy(&expected);
+                assert!((heat - expected_heat).abs() < 2e-11);
+            }
+            if initial[0] == initial[2] {
+                assert!(
+                    heat < 1e-23,
+                    "a relative dashpot must not damp common motion: {heat}"
+                );
+            } else {
+                assert!(heat > 0.01);
+            }
+        }
+    }
+}
+
+fn matrix_rk4(
+    storage: &SosModalStorage,
+    initial: [f64; 4],
+    damping: [f64; 4],
+    force: [f64; 2],
+    duration: f64,
+    steps: usize,
+) -> [f64; 6] {
+    let mut x = [initial[0], initial[1], initial[2], initial[3], 0.0, 0.0];
+    let h = duration / steps as f64;
+    for _ in 0..steps {
+        let f = |x: &[f64; 6]| {
+            let z = [x[0], x[1], x[2], x[3]];
+            let y = rhs(storage, &z, &[damping[0], damping[3]], &force);
+            [
+                y[0],
+                y[1] - damping[1] * x[3],
+                y[2],
+                y[3] - damping[2] * x[1],
+                damping[0] * x[1] * x[1]
+                    + (damping[1] + damping[2]) * x[1] * x[3]
+                    + damping[3] * x[3] * x[3],
+                force[0] * x[1] + force[1] * x[3],
+            ]
+        };
+        let add = |a: [f64; 6], b: [f64; 6], c: f64| std::array::from_fn(|i| a[i] + c * b[i]);
+        let k1 = f(&x);
+        let k2 = f(&add(x, k1, h * 0.5));
+        let k3 = f(&add(x, k2, h * 0.5));
+        let k4 = f(&add(x, k3, h));
+        x = std::array::from_fn(|i| x[i] + h * (k1[i] + 2.0 * k2[i] + 2.0 * k3[i] + k4[i]) / 6.0);
+    }
+    x
+}
+
+#[test]
+fn g1_full_viscosity_nonlinear_motion_and_heat_converge_to_independent_ode() {
+    let storage = coupled_storage();
+    let initial = [0.2, 0.1, -0.04, 0.05];
+    let damping = [1.5, -0.9, -0.9, 0.8];
+    let force = [0.15, -0.03];
+    let duration = 2.0;
+    let reference = matrix_rk4(&storage, initial, damping, force, duration, 65536);
+    let mut errors = Vec::new();
+    let mut heat_errors = Vec::new();
+    let mut defects = Vec::new();
+    for steps in [100, 200, 400, 800] {
+        let mut runtime = SavStepper::new_with_damping_matrix(
+            &storage,
+            &damping,
+            config(1.0, 2),
+            duration / steps as f64,
+        )
+        .unwrap();
+        let mut state = runtime.initial_state(&initial).unwrap();
+        let mut heat = 0.0;
+        let mut work = 0.0;
+        let mut max_defect: f64 = 0.0;
+        let mut first_energy = None;
+        let mut last_energy = 0.0;
+        for _ in 0..steps {
+            let record = runtime.step(&mut state, &force).unwrap();
+            assert!(record.dissipated_j >= 0.0);
+            assert_eq!(record.rank_one_solves, 1);
+            first_energy.get_or_insert(record.modified_energy_j - record.modified_energy_change_j);
+            last_energy = record.modified_energy_j;
+            max_defect = max_defect.max(record.auxiliary_energy_defect_j.abs());
+            heat += record.dissipated_j;
+            work += record.port_work_j;
+        }
+        assert!((last_energy - first_energy.unwrap() + heat - work).abs() < 2e-11);
+        let x = state.coordinates();
+        let error = ((7.0 * (x[0] - reference[0])).powi(2)
+            + (x[1] - reference[1]).powi(2)
+            + (11.0 * (x[2] - reference[2])).powi(2)
+            + (x[3] - reference[3]).powi(2))
+        .sqrt();
+        errors.push(error);
+        heat_errors.push((heat - reference[4]).abs());
+        defects.push(max_defect);
+    }
+    eprintln!(
+        "full viscosity: state={errors:?}, heat={heat_errors:?}, auxiliary defect={defects:?}"
+    );
+    for values in [&errors, &heat_errors, &defects] {
+        for pair in values.windows(2).skip(1) {
+            let order = (pair[0] / pair[1]).log2();
+            assert!(
+                (1.8..2.3).contains(&order),
+                "second-order convergence: {values:?}, p={order}"
+            );
+        }
+    }
+    assert!(errors[3] < 5e-6);
+    assert!(heat_errors[3] < 6e-6);
+    assert!(defects[3] < 2e-5);
+}
+
+#[test]
+fn g0_full_viscosity_keeps_static_compliance_and_complete_checkpoint_replay() {
+    let storage = coupled_storage();
+    let damping = [0.4, -0.3, -0.3, 0.7];
+    let equilibrium = [0.13, 0.0, -0.07, 0.0];
+    let restoring = rhs(&storage, &equilibrium, &[0.0; 2], &[0.0; 2]);
+    let force = [-restoring[1], -restoring[3]];
+    let mut runtime =
+        SavStepper::new_with_damping_matrix(&storage, &damping, config(0.2, 2), 0.025).unwrap();
+    let mut state = runtime.initial_state(&equilibrium).unwrap();
+    for _ in 0..100 {
+        assert!(runtime.step(&mut state, &force).unwrap().dissipated_j < 1e-23);
+    }
+    for (actual, expected) in state.coordinates().iter().zip(equilibrium) {
+        assert!((actual - expected).abs() < 2e-13);
+    }
+    let mut state = runtime.initial_state(&[0.13, 0.08, -0.07, -0.11]).unwrap();
+    let unchanged = state.clone();
+    let mut calls = 0;
+    assert!(matches!(
+        runtime.step_controlled(&mut state, &force, || {
+            calls += 1;
+            calls == 7
+        }),
+        Err(SavError::Cancelled)
+    ));
+    assert_eq!(state, unchanged);
+    for invalid in [[f64::NAN, 0.0], [0.0, f64::INFINITY], [f64::MAX; 2]] {
+        assert!(runtime.step(&mut state, &invalid).is_err());
+        assert_eq!(state, unchanged);
+    }
+    let mut replay = state.clone();
+    for _ in 0..30 {
+        runtime.step(&mut state, &force).unwrap();
+    }
+    for _ in 0..30 {
+        runtime.step(&mut replay, &force).unwrap();
+    }
+    assert_eq!(state, replay);
+}
+
+#[test]
+fn g0_full_viscosity_rejects_invalid_matrices_and_excess_dense_work() {
+    let storage = coupled_storage();
+    for damping in [
+        vec![0.1, 0.2, 0.3, 0.5],
+        vec![1.0, 2.0, 2.0, 1.0],
+        vec![-1.0, 0.0, 0.0, 1.0],
+        vec![f64::NAN, 0.0, 0.0, 1.0],
+        vec![1.0, f64::INFINITY, f64::INFINITY, 1.0],
+        vec![1.0, 1.0],
+    ] {
+        assert!(
+            SavStepper::new_with_damping_matrix(&storage, &damping, config(1.0, 2), 0.01,).is_err()
+        );
+    }
+    let n = MAX_SAV_DAMPING_MATRIX_MODES + 1;
+    let storage = SosModalStorage {
+        omegas: vec![10.0; n],
+        channels: Vec::new(),
+    };
+    let mut matrix = vec![0.0; n * n];
+    matrix[0] = 1.0;
+    matrix[1] = -1.0;
+    matrix[n] = -1.0;
+    matrix[n + 1] = 1.0;
+    assert!(matches!(
+        SavStepper::new_with_damping_matrix(&storage, &matrix, config(1.0, n), 0.01,),
+        Err(SavError::Parameter {
+            what: "non-diagonal viscosity within the exact dense mode capacity"
+        })
+    ));
+    // The scalar path's larger retained-mode capacity must remain available.
+    matrix[1] = 0.0;
+    matrix[n] = 0.0;
+    assert!(SavStepper::new_with_damping_matrix(&storage, &matrix, config(1.0, n), 0.01).is_ok());
 }

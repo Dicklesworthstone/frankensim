@@ -7,7 +7,7 @@
 //!
 //! Freeze g at an exact-linear half-step predictor with the initial nonlinear
 //! force held. Over the full step, hold `f-g*r_bar` and reuse fs-phs's exact
-//! scalar oscillator trajectories, mean velocities and positive viscous heat.
+//! quadratic trajectories, mean velocities and positive viscous heat.
 //! With their free displacements d and force gains B, the only solve is
 //! `r_bar = (r + g.d/4)/(1 + g.B.g/4)`. Then `delta_r = g.delta_q/2`.
 //! Consequently `delta(H_linear+r^2-C0) = f.delta_q - heat`.
@@ -15,8 +15,9 @@
 //! This is a second-order exponential SAV discretization, not exact nonlinear
 //! motion. The numerical invariant differs from the physical SOS energy;
 //! every record reports that discrepancy. Time, mode and stress-basis refinement
-//! remain necessary. No contact, full matrix viscosity, longitudinal-memory,
-//! reciprocal termination or render-path migration is implied by this API.
+//! remain necessary. Full matrix viscosity retains all cross-mode losses through
+//! the same exact quadratic owner. No contact, longitudinal memory, reciprocal
+//! termination or render-path migration is implied by this API.
 //!
 //! References: Jiang, Wang & Cai, JCP 419 (2020), 109690,
 //! doi:10.1016/j.jcp.2020.109690 (exponential SAV); Russo, Bilbao & Ducceschi,
@@ -24,13 +25,19 @@
 //! Vibration", IFAC (2024), https://mdphys.org/PDF/IFAC2024_Strings.pdf.
 //! The update and work identity above specify this held-force extension.
 
-use crate::{NlModalError, SosModalStorage};
+use crate::{NlModalError, SosModalStorage, assemble_storage_with_damping};
 use fs_math::det;
-use fs_phs::linear_exact::{LinearSplitBudget, PreparedExactZoh};
+use fs_phs::linear_exact::{LinearSplitBudget, MAX_LINEAR_EXPONENTIAL_BLOCK_DIM, PreparedExactZoh};
 use fs_phs::{PhsError, mass_spring_damper};
 
 /// Maximum retained modal coordinates. Capacity never selects or drops modes.
 pub const MAX_SAV_MODES: usize = 4096;
+
+/// Maximum modes for non-diagonal viscosity with the current exact dense owner.
+/// Its augmented exponential needs `2 * (2*N + N + 1)` coordinates: all
+/// mechanical states, one independent force per mode, and a constant. This is
+/// a work limit, never permission to discard off-diagonal damping or modes.
+pub const MAX_SAV_DAMPING_MATRIX_MODES: usize = (MAX_LINEAR_EXPONENTIAL_BLOCK_DIM / 2 - 1) / 3;
 
 /// Explicit numerical inputs; the offset is an energy, not a stiffness change.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -78,7 +85,7 @@ pub struct SavRecord {
     pub auxiliary_energy_defect_j: f64,
     /// Cancellation-stable change of the modified energy during this step [J].
     pub modified_energy_change_j: f64,
-    /// Independent integral of C_i*p_i(t)^2 on the held-force trajectories [J].
+    /// Independent integral of p(t)^T C p(t) on the held-force trajectories [J].
     pub dissipated_j: f64,
     /// Held generalized force times its same-window displacement [J].
     pub port_work_j: f64,
@@ -151,13 +158,32 @@ fn finite(values: &[f64]) -> bool {
     values.iter().all(|v| v.is_finite())
 }
 
+enum LinearFlow {
+    Diagonal {
+        modes: Vec<PreparedExactZoh<'static>>,
+        // Exact half-interval mean velocity = a*q+b*p+beta*held_force.
+        half_mean: Vec<[f64; 3]>,
+        gains: Vec<f64>,
+    },
+    Coupled(Box<CoupledLinearFlow>),
+}
+
+struct CoupledLinearFlow {
+    full: PreparedExactZoh<'static>,
+    half: PreparedExactZoh<'static>,
+    zero_state: Vec<f64>,
+    average: Vec<f64>,
+}
+
 /// Fixed-clock exact-linear SAV owner with allocation-free warm steps.
 ///
 /// Diagonal stress matrices (including Kirchhoff-Carrier) cost O(N) per channel.
-/// A dense channel retains its full O(N^2) multiplication. Each linear cache
-/// is one original scalar oscillator; nonlinear coupling is retained through
-/// the common SAV, without a dense 2N-state exponential or Newton iteration.
-/// Damping coefficients are C_i [1/s] in `p_i' = ... - C_i*p_i`, not ratios.
+/// A dense channel retains its full O(N^2) multiplication. Diagonal viscosity
+/// uses one scalar oscillator cache per mode and O(N) linear work. Non-diagonal
+/// viscosity uses the complete quadratic system and O(N^2) warm work, with a
+/// bounded dense preparation. Both retain nonlinear coupling through one
+/// common SAV and need no exponential or Newton solve during a warm step.
+/// Damping is C [1/s] in `p' = ... - C*p`, not damping ratios.
 pub struct SavStepper<'a> {
     storage: &'a SosModalStorage,
     config: SavConfig,
@@ -165,10 +191,7 @@ pub struct SavStepper<'a> {
     root_offset: f64,
     nonlinear: bool,
     diagonal: Vec<bool>,
-    linear: Vec<PreparedExactZoh<'static>>,
-    // Exact half-interval mean velocity = a*q+b*p+beta*held_force.
-    half_mean: Vec<[f64; 3]>,
-    gains: Vec<f64>,
+    linear: LinearFlow,
     candidate: Vec<f64>,
     q: Vec<f64>,
     gradient: Vec<f64>,
@@ -184,6 +207,79 @@ impl<'a> SavStepper<'a> {
         config: SavConfig,
         dt_s: f64,
     ) -> Result<Self, SavError> {
+        Self::admit(storage, config, dt_s)?;
+        let linear = Self::diagonal_flow(storage, damping_per_s, config, dt_s)?;
+        Ok(Self::with_linear(storage, config, dt_s, linear))
+    }
+
+    /// Retain the full symmetric positive-semidefinite viscosity matrix C [1/s]
+    /// in the same mass-normalized coordinates as the storage and force vector.
+    ///
+    /// A spatial dashpot or heterogeneous material can couple modal velocities;
+    /// its off-diagonal entries and lossless motions are kept, with no diagonal
+    /// approximation or added loss floor. The existing pHS owner admits C and
+    /// independently integrates `p^T C p`. An exactly diagonal matrix uses the
+    /// same scalar caches and arithmetic as [`Self::new`]. Otherwise at most
+    /// [`MAX_SAV_DAMPING_MATRIX_MODES`] modes fit the exact dense owner's budget.
+    ///
+    /// The SAV denominator is `1 + g^T B g / 4` with the COMPLETE held-force
+    /// displacement map B. Its quadratic form is nonnegative by the passive
+    /// linear system's zero-state work identity. No per-mode gain approximation
+    /// is used, even when frequencies are nearly or exactly equal.
+    pub fn new_with_damping_matrix(
+        storage: &'a SosModalStorage,
+        damping_per_s: &[f64],
+        config: SavConfig,
+        dt_s: f64,
+    ) -> Result<Self, SavError> {
+        Self::admit(storage, config, dt_s)?;
+        let n = storage.omegas.len();
+        if n.checked_mul(n) != Some(damping_per_s.len()) || !finite(damping_per_s) {
+            return Err(refuse("a complete finite row-major modal damping matrix"));
+        }
+        if (0..n).all(|i| (0..n).all(|j| i == j || damping_per_s[i * n + j] == 0.0)) {
+            let diagonal: Vec<_> = (0..n).map(|i| damping_per_s[i * n + i]).collect();
+            let linear = Self::diagonal_flow(storage, &diagonal, config, dt_s)?;
+            return Ok(Self::with_linear(storage, config, dt_s, linear));
+        }
+        if n > MAX_SAV_DAMPING_MATRIX_MODES {
+            return Err(refuse(
+                "non-diagonal viscosity within the exact dense mode capacity",
+            ));
+        }
+        let system = || {
+            let mut ports = vec![0.0; 2 * n * n];
+            for i in 0..n {
+                ports[(2 * i + 1) * n + i] = 1.0;
+            }
+            assemble_storage_with_damping(
+                n,
+                &storage.omegas,
+                damping_per_s,
+                n,
+                ports,
+                Box::new(SosModalStorage {
+                    omegas: storage.omegas.clone(),
+                    channels: Vec::new(),
+                }),
+            )
+        };
+        let budget = LinearSplitBudget {
+            max_modes: 2 * n,
+            max_omega_dt: config.max_omega_dt,
+        };
+        let full = PreparedExactZoh::new_owned(system()?, dt_s, budget)?;
+        let half = PreparedExactZoh::new_owned(system()?, 0.5 * dt_s, budget)?;
+        let linear = LinearFlow::Coupled(Box::new(CoupledLinearFlow {
+            full,
+            half,
+            zero_state: vec![0.0; 2 * n],
+            average: vec![0.0; n],
+        }));
+        Ok(Self::with_linear(storage, config, dt_s, linear))
+    }
+
+    fn admit(storage: &SosModalStorage, config: SavConfig, dt_s: f64) -> Result<(), SavError> {
         let n = storage.omegas.len();
         if config.max_modes == 0
             || config.max_modes > MAX_SAV_MODES
@@ -205,11 +301,6 @@ impl<'a> SavStepper<'a> {
             ));
         }
         storage.validate()?;
-        if damping_per_s.len() != n || damping_per_s.iter().any(|c| !c.is_finite() || *c < 0.0) {
-            return Err(refuse(
-                "one finite nonnegative viscous coefficient per mode",
-            ));
-        }
         for (mode, &omega) in storage.omegas.iter().enumerate() {
             let omega_dt = omega * dt_s;
             if !omega_dt.is_finite() || omega_dt > config.max_omega_dt {
@@ -219,6 +310,21 @@ impl<'a> SavStepper<'a> {
                     maximum: config.max_omega_dt,
                 });
             }
+        }
+        Ok(())
+    }
+
+    fn diagonal_flow(
+        storage: &SosModalStorage,
+        damping_per_s: &[f64],
+        config: SavConfig,
+        dt_s: f64,
+    ) -> Result<LinearFlow, SavError> {
+        let n = storage.omegas.len();
+        if damping_per_s.len() != n || damping_per_s.iter().any(|c| !c.is_finite() || *c < 0.0) {
+            return Err(refuse(
+                "one finite nonnegative viscous coefficient per mode",
+            ));
         }
         let mut linear = Vec::with_capacity(n);
         let mut half_mean = Vec::with_capacity(n);
@@ -251,6 +357,20 @@ impl<'a> SavStepper<'a> {
             gains.push(gain);
             linear.push(full);
         }
+        Ok(LinearFlow::Diagonal {
+            modes: linear,
+            half_mean,
+            gains,
+        })
+    }
+
+    fn with_linear(
+        storage: &'a SosModalStorage,
+        config: SavConfig,
+        dt_s: f64,
+        linear: LinearFlow,
+    ) -> Self {
+        let n = storage.omegas.len();
         let diagonal = storage
             .channels
             .iter()
@@ -262,7 +382,7 @@ impl<'a> SavStepper<'a> {
             .channels
             .iter()
             .any(|channel| channel.coefficient > 0.0 && channel.coupling.iter().any(|e| *e != 0.0));
-        Ok(Self {
+        Self {
             storage,
             config,
             dt: dt_s,
@@ -270,13 +390,11 @@ impl<'a> SavStepper<'a> {
             nonlinear,
             diagonal,
             linear,
-            half_mean,
-            gains,
             candidate: vec![0.0; 2 * n],
             q: vec![0.0; n],
             gradient: vec![0.0; n],
             product: vec![0.0; n],
-        })
+        }
     }
 
     /// Initialize the auxiliary variable from the original physical potential.
@@ -361,15 +479,35 @@ impl<'a> SavStepper<'a> {
                 return Err(refuse("finite auxiliary predictor normalization"));
             }
             // Predictor uses the current EXTENDED state r, not a reset sqrt(V+C0).
-            for i in 0..n {
-                if cancelled() {
-                    return Err(SavError::Cancelled);
+            match &self.linear {
+                LinearFlow::Diagonal { half_mean, .. } => {
+                    for i in 0..n {
+                        if cancelled() {
+                            return Err(SavError::Cancelled);
+                        }
+                        let [a, b, beta] = half_mean[i];
+                        let q = state.coordinates[2 * i];
+                        let p = state.coordinates[2 * i + 1];
+                        let force = held_force[i] - (self.gradient[i] / root) * r;
+                        self.q[i] = q + 0.5 * self.dt * (a * q + b * p + beta * force);
+                    }
                 }
-                let [a, b, beta] = self.half_mean[i];
-                let q = state.coordinates[2 * i];
-                let p = state.coordinates[2 * i + 1];
-                let force = held_force[i] - (self.gradient[i] / root) * r;
-                self.q[i] = q + 0.5 * self.dt * (a * q + b * p + beta * force);
+                LinearFlow::Coupled(linear) => {
+                    for i in 0..n {
+                        self.product[i] = held_force[i] - (self.gradient[i] / root) * r;
+                    }
+                    for i in 0..n {
+                        if cancelled() {
+                            return Err(SavError::Cancelled);
+                        }
+                        let (free, beta) =
+                            linear
+                                .half
+                                .average_relation(&state.coordinates, &self.product, i)?;
+                        self.q[i] = state.coordinates[2 * i]
+                            + 0.5 * self.dt * (free + beta * self.product[i]);
+                    }
+                }
             }
             let potential = potential_gradient(
                 self.storage,
@@ -394,12 +532,30 @@ impl<'a> SavStepper<'a> {
             if cancelled() {
                 return Err(SavError::Cancelled);
             }
-            let pair = &state.coordinates[2 * i..2 * i + 2];
-            let (free, beta) = self.linear[i].average_relation(pair, &[0.0], 0)?;
-            let displacement = self.dt * (free + beta * held_force[i]);
             let g = self.gradient[i];
+            let (displacement, response) = match &self.linear {
+                LinearFlow::Diagonal { modes, gains, .. } => {
+                    let pair = &state.coordinates[2 * i..2 * i + 2];
+                    let (free, beta) = modes[i].average_relation(pair, &[0.0], 0)?;
+                    (self.dt * (free + beta * held_force[i]), gains[i] * g)
+                }
+                LinearFlow::Coupled(linear) => {
+                    let (free, beta) =
+                        linear
+                            .full
+                            .average_relation(&state.coordinates, held_force, i)?;
+                    let (cross, _) =
+                        linear
+                            .full
+                            .average_relation(&linear.zero_state, &self.gradient, i)?;
+                    (
+                        self.dt * (free + beta * held_force[i]),
+                        self.dt * (cross + beta * g),
+                    )
+                }
+            };
             numerator += 0.25 * g * displacement;
-            denominator += 0.25 * g * (self.gains[i] * g);
+            denominator += 0.25 * g * response;
         }
         if !finite(&[numerator, denominator]) || denominator < 1.0 {
             return Err(refuse(
@@ -411,23 +567,51 @@ impl<'a> SavStepper<'a> {
         let mut linear_change = 0.0;
         let mut heat = 0.0;
         let mut work = 0.0;
-        for i in 0..n {
-            if cancelled() {
-                return Err(SavError::Cancelled);
+        match &mut self.linear {
+            LinearFlow::Diagonal { modes, .. } => {
+                for i in 0..n {
+                    if cancelled() {
+                        return Err(SavError::Cancelled);
+                    }
+                    let force = held_force[i] - self.gradient[i] * r_bar;
+                    let mut mean = [0.0];
+                    let record = modes[i].step_into(
+                        &state.coordinates[2 * i..2 * i + 2],
+                        &[force],
+                        &mut self.candidate[2 * i..2 * i + 2],
+                        &mut mean,
+                    )?;
+                    let displacement = self.dt * mean[0];
+                    auxiliary_increment += 0.5 * self.gradient[i] * displacement;
+                    linear_change += record.delta_h;
+                    heat += record.dissipated;
+                    work += held_force[i] * displacement;
+                }
             }
-            let force = held_force[i] - self.gradient[i] * r_bar;
-            let mut mean = [0.0];
-            let record = self.linear[i].step_into(
-                &state.coordinates[2 * i..2 * i + 2],
-                &[force],
-                &mut self.candidate[2 * i..2 * i + 2],
-                &mut mean,
-            )?;
-            let displacement = self.dt * mean[0];
-            auxiliary_increment += 0.5 * self.gradient[i] * displacement;
-            linear_change += record.delta_h;
-            heat += record.dissipated;
-            work += held_force[i] * displacement;
+            LinearFlow::Coupled(linear) => {
+                for i in 0..n {
+                    self.product[i] = held_force[i] - self.gradient[i] * r_bar;
+                }
+                if cancelled() {
+                    return Err(SavError::Cancelled);
+                }
+                let record = linear.full.step_into(
+                    &state.coordinates,
+                    &self.product,
+                    &mut self.candidate,
+                    &mut linear.average,
+                )?;
+                linear_change = record.delta_h;
+                heat = record.dissipated;
+                for i in 0..n {
+                    if cancelled() {
+                        return Err(SavError::Cancelled);
+                    }
+                    let displacement = self.dt * linear.average[i];
+                    auxiliary_increment += 0.5 * self.gradient[i] * displacement;
+                    work += held_force[i] * displacement;
+                }
+            }
         }
         let next_shift = state.auxiliary_shift + auxiliary_increment;
         let auxiliary_change = (next_shift - state.auxiliary_shift)
