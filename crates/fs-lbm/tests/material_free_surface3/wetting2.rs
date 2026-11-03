@@ -243,3 +243,105 @@ fn dense_source_exit_cox_limit_and_cancel_roll_back_complete_flow_and_history() 
     same_state(retry.flow().lattice(), reference.flow().lattice());
     assert_eq!(retry.samples(), reference.samples());
 }
+
+#[test]
+fn g1_dense_material_momentum_step_replays_native_dynamics_in_physical_units() {
+    let bulk = liquid(0, 300.0, None);
+    let gate = CancelGate::new_clock_free();
+    for (dx, dt) in [(0.001, 0.0002), (0.002, 0.0005)] {
+        let mut domain = domain2();
+        domain.gravity_m_s2 = [0.5, -1.25];
+        let mut physical = plan_free_surface_from_material(&bulk, dx, dt, 0.1)
+            .unwrap()
+            .free_surface2(domain, |x, y| shape(PlanarWall2::YMin, x, y))
+            .unwrap();
+        let mut native = physical.lattice().clone();
+        let mass_unit = bulk.density_kg_m3() * dx * dx;
+        let velocity_unit = dx / dt;
+        for _ in 0..3 {
+            let expected = native.step_with_momentum(&gate).unwrap();
+            let actual = physical.step_with_momentum(&gate).unwrap();
+            assert_eq!(actual.native, expected);
+            same_state(physical.lattice(), &native);
+            assert_eq!(
+                actual.redistributed_mass_kg_per_m,
+                expected.redistributed_mass * mass_unit
+            );
+            assert_eq!(
+                actual.absolute_mass_defect_kg_per_m,
+                expected.absolute_mass_defect * mass_unit
+            );
+            for d in 0..2 {
+                assert_eq!(
+                    actual.absolute_momentum_defect_kg_per_s[d],
+                    (expected.absolute_momentum_defect[d] * mass_unit) * velocity_unit
+                );
+            }
+            assert_eq!(
+                actual.kinetic_energy_change_j_per_m,
+                ((expected.kinetic_energy_change * mass_unit) * velocity_unit) * velocity_unit
+            );
+            assert_eq!(physical.carry_mass_kg_per_m().unwrap(), 0.0);
+        }
+        let before = physical.lattice().clone();
+        let cancelled = CancelGate::new_clock_free();
+        cancelled.request();
+        assert!(matches!(
+            physical.step_with_momentum(&cancelled),
+            Err(
+                fs_lbm::material::free_surface::MaterialFreeSurfaceMomentumError2::Native(
+                    fs_lbm::freesurface::FreeSurfaceMomentumError2::Cancelled
+                )
+            )
+        ));
+        same_state(physical.lattice(), &before);
+    }
+}
+
+#[test]
+fn g4_dense_momentum_wetting_keeps_source_refusal_and_retry_atomic() {
+    use fs_lbm::material::free_surface::MaterialFreeSurfaceMomentumError2;
+    let bulk = liquid(0, 300.0, Some(0.05));
+    let gate = CancelGate::new_clock_free();
+    let angle = PI / 3.0;
+    let narrow = dynamic_card(&bulk, [angle; 2], [angle; 2], 1e-12, true);
+    let mut refused = flow2(&bulk, &narrow, PlanarWall2::YMin, 0.0002);
+    let before = refused.flow().lattice().clone();
+    let samples = refused.samples().clone();
+    // The native proposal is valid; the selected material's speed domain is
+    // what refuses. No alternate source or partly advanced liquid may escape.
+    let mut native = before.clone();
+    native.step_with_momentum(&gate).unwrap();
+    assert!(matches!(
+        refused.step_with_momentum(&gate),
+        Err(MaterialFreeSurfaceMomentumError2::Wetting(_))
+    ));
+    same_state(refused.flow().lattice(), &before);
+    assert_eq!(refused.samples(), &samples);
+
+    let supported = dynamic_card(&bulk, [angle; 2], [angle; 2], 100.0, false);
+    for wall in [
+        PlanarWall2::XMin,
+        PlanarWall2::XMax,
+        PlanarWall2::YMin,
+        PlanarWall2::YMax,
+    ] {
+        let mut retry = flow2(&bulk, &supported, wall, 0.0002);
+        let mut reference = flow2(&bulk, &supported, wall, 0.0002);
+        let cancelled = CancelGate::new_clock_free();
+        cancelled.request();
+        assert!(matches!(
+            retry.step_with_momentum(&cancelled),
+            Err(MaterialFreeSurfaceMomentumError2::Native(
+                fs_lbm::freesurface::FreeSurfaceMomentumError2::Cancelled
+            ))
+        ));
+        same_state(retry.flow().lattice(), reference.flow().lattice());
+        assert_eq!(retry.samples(), reference.samples());
+        let a = retry.step_with_momentum(&gate).unwrap();
+        let b = reference.step_with_momentum(&gate).unwrap();
+        assert_eq!(a, b);
+        same_state(retry.flow().lattice(), reference.flow().lattice());
+        assert_eq!(retry.samples(), reference.samples());
+    }
+}

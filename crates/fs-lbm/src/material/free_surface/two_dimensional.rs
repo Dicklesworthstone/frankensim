@@ -10,6 +10,8 @@ use fs_exec::CancelGate;
 
 mod wetting;
 pub use wetting::MaterialFreeSurfaceWetting2;
+mod momentum;
+pub use momentum::{MaterialFreeSurfaceMomentumError2, MaterialFreeSurfaceMomentumReport2};
 
 /// Physical coordinates of one actual native D2Q9 liquid/gas link.
 /// The domain origin is zero. The midpoint is halfway between cell centres,

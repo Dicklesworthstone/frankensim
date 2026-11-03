@@ -4,7 +4,10 @@ use super::super::wetting::{
     CoxVoinovLaw, FreeSurfaceWettingControls, FreeSurfaceWettingError as Error,
     FreeSurfaceWettingSample, WettingPhysics, checkpoint, contact_speed,
 };
-use super::{FreeSurface, MaterialFreeSurface2, PlanarWall2};
+use super::{
+    FreeSurface, MaterialFreeSurface2, MaterialFreeSurfaceMomentumError2,
+    MaterialFreeSurfaceMomentumReport2, PlanarWall2,
+};
 use crate::freesurface::wetting::WallFill2;
 use fs_exec::CancelGate;
 use fs_matdb::InterfaceSystemCard;
@@ -130,6 +133,26 @@ impl MaterialFreeSurfaceWetting2<'_, '_> {
         let mut lattice = self.flow.lattice.clone();
         checkpoint(gate)?;
         lattice.step();
+        self.finish_step(lattice, gate)
+    }
+
+    /// Advance the original dense solver with signed, capacity-bounded local
+    /// momentum conversion, then refresh this same sourced wetting history.
+    /// Native conversion, SI overflow, source-domain and cancellation refusals
+    /// leave populations, mass, geometry and all angle receipts unchanged.
+    /// One native candidate is shared by both operations. The returned kinetic
+    /// change is numerical remap energy per depth, never physical wetting heat.
+    pub fn step_with_momentum(
+        &mut self,
+        gate: &CancelGate,
+    ) -> Result<MaterialFreeSurfaceMomentumReport2, MaterialFreeSurfaceMomentumError2> {
+        let (lattice, native) = self.flow.lattice.momentum_candidate(gate)?;
+        let report = self.flow.momentum_report_si(native)?;
+        self.finish_step(lattice, gate)?;
+        Ok(report)
+    }
+
+    fn finish_step(&mut self, mut lattice: FreeSurface, gate: &CancelGate) -> Result<(), Error> {
         checkpoint(gate)?;
         let geometry =
             lattice.planar_wall_fill(self.wall, self.physics.controls.maximum_wall_cells, gate)?;

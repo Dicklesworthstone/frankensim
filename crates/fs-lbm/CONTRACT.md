@@ -1,5 +1,23 @@
 # CONTRACT: fs-lbm
 
+## Source-backed conservative D2Q9 momentum conversion
+
+`MaterialFreeSurface2::step_with_momentum` and
+`MaterialFreeSurfaceWetting2::step_with_momentum` expose the original dense
+solver's signed, capacity-bounded local mass-and-momentum conversion without
+changing its material density, viscosity, surface tension or force bindings.
+A single native proposal is shared with physical-unit reporting and the sourced
+contact-line update; native, SI-range, source-domain and cancellation refusals
+publish neither flow nor wetting history.
+
+The returned `MaterialFreeSurfaceMomentumReport2` retains the native receipt
+and converts mass, linear momentum and signed kinetic remap change per unit
+out-of-plane depth using `rho_ref*dx^2`, `dx/dt` and their products. The units are
+kg/m, kg/s and J/m. Numerical remap energy is not deposited as physical heat.
+This receipt covers conversion only; it does not certify full-step force/traction
+balance, angular momentum or a finite-depth three-dimensional flow. The original
+native numerical-domain, capacity and physical scaling limits still apply.
+
 ## Rigid-frame momentum forcing on the native D2Q9 core
 
 `core2::frame::RigidFrame2::prepare_step` supplies prescribed translation,

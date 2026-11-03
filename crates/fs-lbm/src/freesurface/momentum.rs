@@ -95,6 +95,19 @@ impl FreeSurface {
         &mut self,
         gate: &CancelGate,
     ) -> Result<ConversionMomentumReport2, FreeSurfaceMomentumError2> {
+        let (candidate, report) = self.momentum_candidate(gate)?;
+        poll(gate)?;
+        *self = candidate;
+        Ok(report)
+    }
+
+    // Material units and contact-line histories must admit the SAME native
+    // proposal before publication. Return its one private copy rather than
+    // nesting a second transactional clone in each physical adapter.
+    pub(crate) fn momentum_candidate(
+        &self,
+        gate: &CancelGate,
+    ) -> Result<(Self, ConversionMomentumReport2), FreeSurfaceMomentumError2> {
         self.admit_momentum_step(gate)?;
         let mut candidate = self.clone();
         poll(gate)?;
@@ -103,8 +116,7 @@ impl FreeSurface {
         let report = candidate.convert_momentum(gate)?;
         candidate.admit_momentum_step(gate)?;
         poll(gate)?;
-        *self = candidate;
-        Ok(report)
+        Ok((candidate, report))
     }
 
     fn admit_momentum_step(&self, gate: &CancelGate) -> Result<(), FreeSurfaceMomentumError2> {

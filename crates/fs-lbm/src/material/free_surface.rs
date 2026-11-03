@@ -25,7 +25,11 @@ use crate::{CS2, ScalingPlan};
 mod initial;
 pub use initial::MaterialFreeSurfaceInitialCell3;
 mod two_dimensional;
-pub use two_dimensional::{MaterialFreeSurface2, MaterialFreeSurfaceDomain2, MaterialFreeSurfaceSample2, MaterialFreeSurfaceWetting2, MaterialGasPressureLink2};
+pub use two_dimensional::{
+    MaterialFreeSurface2, MaterialFreeSurfaceDomain2, MaterialFreeSurfaceMomentumError2,
+    MaterialFreeSurfaceMomentumReport2, MaterialFreeSurfaceSample2, MaterialFreeSurfaceWetting2,
+    MaterialGasPressureLink2,
+};
 mod pressure;
 pub use pressure::MaterialGasPressureLink3;
 mod motion;
