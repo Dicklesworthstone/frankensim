@@ -11,13 +11,18 @@
 //! rigid, flat baffle and caller-supplied area/velocity quadrature. It adds no
 //! time filter or frequency warping. Spatial quadrature must still be refined
 //! at the requested frequency and receiver clearance: no continuum error bound,
-//! finite-baffle scattering, reaction load or molecular absorption is claimed.
+//! finite-baffle scattering or reaction load is claimed. The optional molecular
+//! path uses the original gas's causal complex wavenumber on every source path,
+//! including its absorption/dispersion in the spatial gradient. This is the
+//! same effective propagation law as the causal pressure observer, not a full
+//! thermoviscous boundary-layer or microphone-body solution.
 //! The source convention is the conjugate of the Rayleigh formula in
 //! <https://euphonics.org/4-3-2-the-rayleigh-integral-and-the-baffled-piston/>.
 
 use super::{MAX_RAYLEIGH_INPUTS, RayleighMedium, SurfaceSample};
 use fs_bem::helmholtz::Medium;
 use fs_bem::near_field::FirstOrder;
+use fs_material::relaxation::RelaxationState;
 use fs_math::{c64::C64, det};
 use std::f64::consts::TAU;
 
@@ -108,6 +113,8 @@ pub struct Prepared {
     frequency_hz: f64,
     omega_rho: f64,
     medium: RayleighMedium,
+    wavenumber_per_m: C64,
+    relaxation: Option<RelaxationState>,
 }
 
 impl Prepared {
@@ -125,6 +132,72 @@ impl Prepared {
         positions_m: &[[f64; 3]],
         frequency_hz: f64,
         medium: RayleighMedium,
+        options: Options,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, String> {
+        Self::prepare(
+            surface,
+            inputs,
+            positions_m,
+            frequency_hz,
+            medium,
+            None,
+            options,
+            cancelled,
+        )
+    }
+
+    /// Observe the same signed surface basis through its source gas's molecular
+    /// relaxation and classical transport, counted once on EACH physical path.
+    /// Density and equilibrium sound speed come from this immutable material
+    /// state; a second, potentially mismatched medium is not accepted.
+    ///
+    /// `RelaxationState::causal_wavenumber` owns the absorption and dispersion.
+    /// With `exp(-i omega t)`, the outgoing kernel is `exp(i k R)/R`, and its
+    /// derivative retains BOTH complex `i k` and geometric `-1/R`. Multiplying
+    /// a lossless vector field by an absorption filter would miss that term.
+    /// The source is evaluated once per preparation, not per surface point.
+    /// Evaluation and microphone projection remain allocation-free.
+    ///
+    /// As in the existing time-domain gas observer, this is an effective
+    /// homogeneous propagation model: the Rayleigh source and momentum relation
+    /// retain the real equilibrium density. It is not a full thermoviscous
+    /// near-boundary solution or the reservoir-only molecular BEM image.
+    /// Ideal microphone velocity sensitivity retains the equilibrium `rho*c`
+    /// reference; it does not substitute a frequency-dependent wave impedance.
+    ///
+    /// # Errors
+    /// The original geometry, frequency, work and cancellation refusals, or an
+    /// unrepresentable source wavenumber/field. No partial receiver is returned.
+    pub fn new_relaxing(
+        surface: &[SurfaceSample],
+        inputs: usize,
+        positions_m: &[[f64; 3]],
+        frequency_hz: f64,
+        relaxation: &RelaxationState,
+        options: Options,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, String> {
+        Self::prepare(
+            surface,
+            inputs,
+            positions_m,
+            frequency_hz,
+            RayleighMedium::from(relaxation.gas()),
+            Some(relaxation),
+            options,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare(
+        surface: &[SurfaceSample],
+        inputs: usize,
+        positions_m: &[[f64; 3]],
+        frequency_hz: f64,
+        medium: RayleighMedium,
+        relaxation: Option<&RelaxationState>,
         options: Options,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, String> {
@@ -145,7 +218,7 @@ impl Prepared {
         }
         let omega = TAU * frequency_hz;
         let omega_rho = omega * medium.density;
-        let k = omega / medium.sound_speed;
+        let reference_k = omega / medium.sound_speed;
         if !frequency_hz.is_finite()
             || frequency_hz <= 0.0
             || !medium.density.is_finite()
@@ -154,8 +227,8 @@ impl Prepared {
             || medium.sound_speed <= 0.0
             || !omega_rho.is_finite()
             || omega_rho <= 0.0
-            || !k.is_finite()
-            || k <= 0.0
+            || !reference_k.is_finite()
+            || reference_k <= 0.0
             || !options.minimum_clearance_m.is_finite()
             || options.minimum_clearance_m <= 0.0
             || positions_m
@@ -164,6 +237,16 @@ impl Prepared {
         {
             return Err("harmonic Rayleigh needs a finite positive medium/frequency and admitted baffle clearance".into());
         }
+        let k = if let Some(source) = relaxation {
+            if cancelled() {
+                return Err("harmonic Rayleigh preparation cancelled".into());
+            }
+            source
+                .causal_wavenumber(omega)
+                .map_err(|error| format!("harmonic Rayleigh propagation gas: {error}"))?
+        } else {
+            C64::from_re(reference_k)
+        };
         for (index, sample) in surface.iter().enumerate() {
             if index % 64 == 0 && cancelled() {
                 return Err("harmonic Rayleigh preparation cancelled".into());
@@ -193,20 +276,27 @@ impl Prepared {
                 }
                 let delta: [f64; 3] = std::array::from_fn(|i| position[i] - sample.position_m[i]);
                 let radius = det::sqrt(delta.iter().map(|x| x * x).sum());
-                let phase = k * radius;
-                if !radius.is_finite() || radius < options.minimum_clearance_m || !phase.is_finite()
+                let phase = k.re * radius;
+                let optical_depth = k.im * radius;
+                if !radius.is_finite()
+                    || radius < options.minimum_clearance_m
+                    || !phase.is_finite()
+                    || !optical_depth.is_finite()
                 {
                     return Err(
-                        "harmonic Rayleigh separation or propagation phase is unrepresentable"
+                        "harmonic Rayleigh separation, phase or attenuation is unrepresentable"
                             .into(),
                     );
                 }
-                let green = C64::new(det::cos(phase), det::sin(phase))
+                let mut green = C64::new(det::cos(phase), det::sin(phase))
                     .scale(sample.area_m2 / (TAU * radius));
+                if optical_depth > 0.0 {
+                    green = green.scale(det::exp(-optical_depth));
+                }
                 let pressure = green * C64::new(0.0, -omega_rho);
                 // Evaluate u directly: division by omega would lose the regular
                 // low-frequency volume-flow limit and its 1/R² reactive term.
-                let radial_velocity = green * C64::new(1.0 / radius, -k);
+                let radial_velocity = green * C64::new(1.0 / radius + k.im, -k.re);
                 let velocity = delta.map(|x| radial_velocity.scale(x / radius));
                 for (sum, &shape) in sums.iter_mut().zip(&sample.mode_shape) {
                     sum[0].add(pressure.scale(shape));
@@ -233,6 +323,8 @@ impl Prepared {
             frequency_hz,
             omega_rho,
             medium,
+            wavenumber_per_m: k,
+            relaxation: relaxation.cloned(),
         })
     }
 
@@ -251,6 +343,15 @@ impl Prepared {
     /// Exact medium used at preparation and by directional observation.
     pub fn medium(&self) -> RayleighMedium {
         self.medium
+    }
+    /// Original continuous outgoing wavenumber, including declared propagation
+    /// loss/dispersion. Its nonnegative imaginary part is amplitude loss [Np/m].
+    pub fn wavenumber_per_m(&self) -> C64 {
+        self.wavenumber_per_m
+    }
+    /// Retained material source, or `None` for the explicit lossless image.
+    pub fn relaxation(&self) -> Option<&RelaxationState> {
+        self.relaxation.as_ref()
     }
 
     /// Field per unit input coordinate, suitable for frequency-transfer sampling.

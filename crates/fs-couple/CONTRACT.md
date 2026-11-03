@@ -21309,8 +21309,28 @@ This provides exact Green kernels at the supplied quadrature points, not an erro
 bound for the continuous surface. Structural and spatial refinement remain the
 caller's responsibility. The harmonic matrix has no sampling clock or temporal
 interpolation filter. It adds no causal vector receiver, measured capsule response,
-molecular absorption, finite-baffle/room scattering or reciprocal radiation load,
-and does not close the wider M2.6-W1 work item.
+finite-baffle/room scattering or reciprocal radiation load, and does not close
+the wider M2.6-W1 work item.
+
+`Prepared::new_relaxing` additionally binds the original evaluated
+`fs_material::relaxation::RelaxationState`, deriving density and reference sound
+speed from that same source. Its `causal_wavenumber` supplies molecular and
+classical transport loss/dispersion once per frequency, shared with the existing
+time-domain gas observer. Each original surface-to-receiver path uses its own
+`exp(i k R)/R` before coherent summation; the velocity factor is the complete
+`1/R - i k`, including absorption's spatial derivative. The immutable source and
+used complex wavenumber remain inspectable. Existing work/input/receiver limits,
+cancellation, transactional buffers and allocation-free warm evaluation apply.
+The explicit lossless constructor retains its original arithmetic.
+
+This is the original effective homogeneous gas-propagation image, with real
+equilibrium density in its Rayleigh source and momentum relation. It does not
+claim full thermoviscous boundary-layer fields, universal high-frequency
+transport validity or equivalence to `fs-bem`'s reservoir-only molecular reaction
+model. Ideal microphone velocity sensitivity retains the source's equilibrium
+`rho*c` reference. G1/G3 integration tests use an independently evaluated synthetic
+relaxation polynomial, outward intensity decay, signed unequal propagation paths,
+spatial finite differences, and the original causal material-pressure observer.
 
 ## Three-dimensional principal-axis moisture transport and swelling
 
