@@ -23866,3 +23866,40 @@ heat; bitwise harmonic-query independence from accepted history and three
 runtime clocks; and a static load's original ordinary source slots with no
 artificial memory states (G1/G3). The synthetic axial ladder is numerical
 evidence for that declared source, not measured-material validation.
+
+
+## Native rigid cohesive loss and finite-body heat
+
+`friction_heat::rigid_cohesive::apply_rigid_cohesive_heat` advances the original
+`RigidCohesiveSystem` and original finite enthalpy network through one common
+native timestep. Every original site has exactly one matching-area thermal
+route; explicit ordered body/material mappings retain A/B identity. Several
+sites may share finite receiving cells. This is a fixed material-reference
+patch/conduction model: native finite rotations keep their objective mechanical
+work, but the thermal geometry is not remapped into current world coordinates.
+Moving footprints, changing area/coverage and finite adhesive-layer thermal
+resistance/storage are outside this owner.
+
+The actual audited native per-site damaged-area friction and surviving-bond
+viscosity supply heat exactly once. Fracture remains a distinct nonthermal
+surface-creation account. The original common-temperature, massless-face network
+solves signed heat into both bodies through their own k*A/d conductances;
+ordinary hot-to-cold exchange can make one body's net heat negative. No prescribed
+partition, thermal reservoir or numerical-loss heating is added. Both ends of
+the original straight local material path must remain closed. Mechanical source
+coefficients stay frozen during this increment; source temperature continuation
+and temporal refinement remain explicit.
+
+The native stage/publish boundary admits the complete thermal candidate before
+any body, material history, observation or clock changes. A reusable frame buffer
+keeps ordinary native stepping allocation-free after construction. Source,
+nonlinear, domain, energy and cancellation refusals preserve both accepted
+owners; final accepted native and caloric publication is infallible. Independent
+whole-system accounting checks the change of kinetic/gravity/bond plus thermal
+storage, adding fracture and subtracting applied mechanical work and other heat.
+The shared finite thermal solver is also used by the deformable cohesive owner.
+
+`tests/rigid_cohesive_friction/heat.rs` exercises independent vector-friction and
+bond-viscosity work, analytic unequal finite-cell heating with signed ordinary
+conduction, continued exact native-mechanics parity, progressive fracture kept
+out of heat, and late thermal-source/cancellation rollback (G1/G3/G4).

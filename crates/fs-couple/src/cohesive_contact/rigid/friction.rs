@@ -459,7 +459,27 @@ impl<'a> Friction<'a> {
             let slip = delta[0].hypot(delta[1]);
             let pressure = trial.damaged_compression_force_n;
             let cap = finite(mu[p] * pressure)?;
-            let k = self.cone_scale[p];
+            // A fixed cohesive-stiffness scale makes k*slip vanish with dt.
+            // If that would require a residual below disk-force roundoff for
+            // already resolved motion, condition the SAME map by predicted
+            // travel. Ordinary steps retain their original conditioning.
+            // This positive numerical scale changes neither the map's zeros
+            // nor the independent original force/work audit. Static capture
+            // keeps its original scale; no physical compliance is introduced.
+            let incoming_speed = self.incoming_velocity[p][0].hypot(self.incoming_velocity[p][1]);
+            let k = if incoming_speed > self.config.velocity_absolute_tolerance_m_s && cap > 0.0 {
+                let travel = positive(system.dt_s * incoming_speed)?;
+                let scaled_travel = finite(self.cone_scale[p] * travel)?;
+                let force_resolution = law.force_tolerance(cap, cap)? * 0.0625;
+                let map_resolution = force_resolution * (scaled_travel / (cap + scaled_travel));
+                if map_resolution <= 16.0 * f64::EPSILON * cap {
+                    self.cone_scale[p].max(positive(cap / travel)?)
+                } else {
+                    self.cone_scale[p]
+                }
+            } else {
+                self.cone_scale[p]
+            };
             let q = [forces[p][0] + k * delta[0], forces[p][1] + k * delta[1]];
             let length = q[0].hypot(q[1]);
             finite(length)?;

@@ -1,4 +1,6 @@
 //! G1/G3/G4: original finite-rotation bodies with damaged-area tangent disks.
+#[path = "rigid_cohesive_friction/heat.rs"]
+mod heat;
 #[path = "rigid_cohesive_friction/temperature.rs"]
 mod temperature;
 

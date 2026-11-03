@@ -263,6 +263,120 @@ pub fn propose_deformable_cohesive_heat<'s, 'a, 't, P, E>(
             "per-patch heat does not match original mechanical loss",
         ));
     }
+    let temperature_guesses: Vec<_> = ordered.iter().map(|c| c.temperature_guess_k).collect();
+    let solved = solve_frozen_cohesive_heat(
+        thermal,
+        &step,
+        &temperature_guesses,
+        &losses,
+        controls,
+        energy_guess_j,
+        resolve,
+        gate,
+    )?;
+    let heat = &solved.heat;
+    let combined = mechanical.kinetic_after_j - mechanical.kinetic_before_j
+        + mechanical.bulk_stored_after_j
+        - mechanical.bulk_stored_before_j
+        + mechanical.cohesive_stored_after_j
+        - mechanical.cohesive_stored_before_j
+        + heat.thermal.stored_energy_change_j
+        + mechanical.cohesive_energy_j.dissipated
+        - mechanical.external_work_j
+        - mechanical.prescribed_jump_work_j
+        - heat.external_heat_j;
+    let summed = heat.total_energy_residual_j - mechanical.energy_residual_j;
+    if [combined, summed]
+        .iter()
+        .any(|v| !v.is_finite() || v.abs() > controls.combined_energy_tolerance_j)
+    {
+        return Err(CohesiveHeatError::Invalid(
+            "original cohesive mechanics and finite heat do not balance",
+        ));
+    }
+    check()?;
+    Ok(HeatedCohesiveCandidate {
+        fracture_work_j: mechanical.cohesive_energy_j.dissipated,
+        mechanical,
+        thermal: solved.thermal,
+        heat: solved.heat,
+        source: solved.source,
+        nonlinear: solved.nonlinear,
+        thermal_trials: solved.trials,
+        patch_ids: ordered.iter().map(|c| c.patch_id).collect(),
+        combined_energy_residual_j: combined,
+        summed_energy_residual_j: summed,
+    })
+}
+
+/// Shared finite-body solve for physical losses already audited by an original
+/// native cohesive owner. It never reevaluates or advances material history.
+pub(super) struct FrozenCohesiveHeat<'t, P> {
+    pub thermal: DepositionSimulation<'t>,
+    pub heat: FrictionHeatNetworkReport,
+    pub source: P,
+    pub nonlinear: NewtonReport,
+    pub trials: usize,
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(super) fn solve_frozen_cohesive_heat<'t, P, E>(
+    thermal: &DepositionSimulation<'t>,
+    step: &FrictionHeatNetworkStep<'_, 't>,
+    temperature_guesses_k: &[f64],
+    losses_j: &[f64],
+    controls: CohesiveHeatControls,
+    energy_guess_j: &[f64],
+    resolve: impl Fn(&DepositionSimulation<'t>, &[u64], &[f64]) -> Result<CohesiveHeatSource<P>, E>,
+    gate: &CancelGate,
+) -> Result<FrozenCohesiveHeat<'t, P>, CohesiveHeatError<E>> {
+    let check = || {
+        if gate.is_requested() {
+            Err(DepositionError::Cancelled)
+        } else {
+            Ok(())
+        }
+    };
+    check()?;
+    controls.newton.validate()?;
+    let cells = thermal.cells().len();
+    let count = step.link_ids().len();
+    let dimension = cells
+        .checked_add(count)
+        .ok_or(CohesiveHeatError::Invalid("thermal dimension overflow"))?;
+    if cells == 0
+        || cells > controls.maximum_cells
+        || count == 0
+        || count > controls.maximum_interfaces
+        || dimension > controls.maximum_unknowns
+        || controls.maximum_trials == 0
+        || controls.maximum_newton_iterations == 0
+        || energy_guess_j.len() != cells
+        || energy_guess_j.iter().any(|v| !v.is_finite())
+        || temperature_guesses_k.len() != count
+        || temperature_guesses_k
+            .iter()
+            .any(|v| !v.is_finite() || *v <= 0.0)
+        || losses_j.len() != count
+        || losses_j.iter().any(|v| !v.is_finite() || *v < 0.0)
+        || !controls.difference_step_j.is_finite()
+        || controls.difference_step_j <= 0.0
+        || !controls.temperature_scale_j_per_k.is_finite()
+        || controls.temperature_scale_j_per_k <= 0.0
+        || [
+            controls.heat.cell_j,
+            controls.heat.thermal_j,
+            controls.heat.interface_j,
+            controls.heat.total_j,
+            controls.combined_energy_tolerance_j,
+        ]
+        .iter()
+        .any(|v| !v.is_finite() || *v < 0.0)
+    {
+        return Err(CohesiveHeatError::Invalid(
+            "bounded complete finite thermal problem required",
+        ));
+    }
     let trials = Cell::new(0usize);
     let evaluate = |x: &[f64], entropy: bool| {
         check()?;
@@ -275,10 +389,10 @@ pub fn propose_deformable_cohesive_heat<'s, 'a, 't, P, E>(
                 "complete finite thermal iterate required",
             ));
         }
-        let temperatures: Vec<_> = ordered
+        let temperatures: Vec<_> = temperature_guesses_k
             .iter()
             .enumerate()
-            .map(|(i, c)| c.temperature_guess_k + x[cells + i] / controls.temperature_scale_j_per_k)
+            .map(|(i, t)| t + x[cells + i] / controls.temperature_scale_j_per_k)
             .collect();
         // Project only sub-ULP iterate tails. The original residual still
         // charges every source and flux, and its acceptance gates are unchanged.
@@ -303,7 +417,7 @@ pub fn propose_deformable_cohesive_heat<'s, 'a, 't, P, E>(
                 ));
             }
             let mut interfaces = Vec::with_capacity(count);
-            for (input, &loss) in source.interfaces.iter().zip(&losses) {
+            for (input, &loss) in source.interfaces.iter().zip(losses_j) {
                 check()?;
                 interfaces.push(InterfaceHeatInput {
                     dissipated_j: loss,
@@ -347,39 +461,14 @@ pub fn propose_deformable_cohesive_heat<'s, 'a, 't, P, E>(
         return Err(CohesiveHeatError::NotConverged(result.report));
     }
     let trial = evaluate(&solver.x, controls.audit_entropy)?;
-    let heat = trial.report();
-    let combined = mechanical.kinetic_after_j - mechanical.kinetic_before_j
-        + mechanical.bulk_stored_after_j
-        - mechanical.bulk_stored_before_j
-        + mechanical.cohesive_stored_after_j
-        - mechanical.cohesive_stored_before_j
-        + heat.thermal.stored_energy_change_j
-        + mechanical.cohesive_energy_j.dissipated
-        - mechanical.external_work_j
-        - mechanical.prescribed_jump_work_j
-        - heat.external_heat_j;
-    let summed = heat.total_energy_residual_j - mechanical.energy_residual_j;
-    if [combined, summed]
-        .iter()
-        .any(|v| !v.is_finite() || v.abs() > controls.combined_energy_tolerance_j)
-    {
-        return Err(CohesiveHeatError::Invalid(
-            "original cohesive mechanics and finite heat do not balance",
-        ));
-    }
     let (thermal, source, heat) = trial.accept(controls.heat, check)?;
     check()?;
-    Ok(HeatedCohesiveCandidate {
-        fracture_work_j: mechanical.cohesive_energy_j.dissipated,
-        mechanical,
+    Ok(FrozenCohesiveHeat {
         thermal,
         heat,
         source,
         nonlinear: result.report,
-        thermal_trials: trials.get(),
-        patch_ids: ordered.iter().map(|c| c.patch_id).collect(),
-        combined_energy_residual_j: combined,
-        summed_energy_residual_j: summed,
+        trials: trials.get(),
     })
 }
 

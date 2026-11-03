@@ -349,6 +349,7 @@ pub struct RigidCohesiveSystem<'a> {
     staged_temperature: Vec<Option<SourceBoundObjectiveCohesiveTemperatureStep<'a>>>,
     thermal_active: bool,
     site_frames: Vec<Option<RigidCohesiveSiteFrame>>,
+    staged_frames: Vec<Option<RigidCohesiveSiteFrame>>,
     last_wrenches: [Wrench; 2],
     last_frame: Option<RigidCohesiveFrame>,
     friction: Option<friction::Friction<'a>>,
@@ -414,6 +415,11 @@ impl<'a> RigidCohesiveSystem<'a> {
             .try_reserve_exact(sites.len())
             .map_err(|_| RigidCohesiveError::Budget("site observation allocation"))?;
         site_frames.resize(sites.len(), None);
+        let mut staged_frames = Vec::new();
+        staged_frames
+            .try_reserve_exact(sites.len())
+            .map_err(|_| RigidCohesiveError::Budget("staged observation allocation"))?;
+        staged_frames.resize(sites.len(), None);
         let system = Self {
             bodies,
             sites,
@@ -427,6 +433,7 @@ impl<'a> RigidCohesiveSystem<'a> {
             staged_temperature,
             thermal_active: false,
             site_frames,
+            staged_frames,
             last_wrenches: [Wrench::ZERO; 2],
             last_frame: None,
             friction: None,
@@ -499,6 +506,20 @@ impl<'a> RigidCohesiveSystem<'a> {
         loads: [RigidCohesiveLoad; 2],
         gate: Option<&CancelGate>,
     ) -> Result<&RigidCohesiveFrame, RigidCohesiveError> {
+        self.step_with_acceptance(loads, gate, |_, _| Ok::<(), RigidCohesiveError>(()))?;
+        Ok(self.last_frame.as_ref().expect("frame just published"))
+    }
+
+    /// The original native proposal is complete before an external physical
+    /// owner accepts it. A refusal changes scratch only, never accepted motion,
+    /// material history, observations or clock. The callback must stage its own
+    /// payload: it runs before the final cancellation check and publication.
+    pub(crate) fn step_with_acceptance<P, E: From<RigidCohesiveError>>(
+        &mut self,
+        loads: [RigidCohesiveLoad; 2],
+        gate: Option<&CancelGate>,
+        accept: impl FnOnce(&RigidCohesiveFrame, &[Option<RigidCohesiveSiteFrame>]) -> Result<P, E>,
+    ) -> Result<P, E> {
         poll(gate)?;
         for load in loads {
             finite_vector(load.force_world_n)?;
@@ -510,7 +531,7 @@ impl<'a> RigidCohesiveSystem<'a> {
             .ok_or(RigidCohesiveError::Budget("clock"))?;
         let next_time = finite(next_step as f64 * self.dt_s)?;
         if next_time <= self.time_s {
-            return Err(RigidCohesiveError::Budget("clock resolution"));
+            return Err(RigidCohesiveError::Budget("clock resolution").into());
         }
         // Scratch is temporarily moved only to allow the joint solver to use
         // the original native evaluator; restore it on every Result path.
@@ -533,14 +554,10 @@ impl<'a> RigidCohesiveSystem<'a> {
                     .as_ref()
                     .is_some_and(|friction| !friction.temperature_complete()))
         {
-            return Err(RigidCohesiveError::Invalid("incomplete staged patch"));
+            return Err(RigidCohesiveError::Invalid("incomplete staged patch").into());
         }
         poll(gate)?;
-        // All fallible native, source, geometry and work checks precede publication.
-        for body in 0..2 {
-            self.bodies[body].state = candidate.receipts[body].state_after;
-        }
-        for (index, site) in self.sites.iter_mut().enumerate() {
+        for index in 0..self.sites.len() {
             let step = self.staged_sites[index]
                 .as_ref()
                 .expect("complete staged patch checked");
@@ -557,8 +574,7 @@ impl<'a> RigidCohesiveSystem<'a> {
             } else {
                 (0.0, 0.0, 0.0)
             };
-            site.point = step.point();
-            self.site_frames[index] = Some(RigidCohesiveSiteFrame {
+            self.staged_frames[index] = Some(RigidCohesiveSiteFrame {
                 jump_m: numerical.point.material().jump_m(),
                 damage: numerical.point.material().damage(),
                 discrete_force_on_a_n: numerical.discrete_wrench.force_on_a_n,
@@ -580,6 +596,19 @@ impl<'a> RigidCohesiveSystem<'a> {
                     .map(|_| self.staged_friction[index].frame),
             });
         }
+        let payload = accept(&frame, &self.staged_frames)?;
+        poll(gate)?;
+        // Every fallible native, thermal and source check precedes publication.
+        for body in 0..2 {
+            self.bodies[body].state = candidate.receipts[body].state_after;
+        }
+        for (index, site) in self.sites.iter_mut().enumerate() {
+            site.point = self.staged_sites[index]
+                .as_ref()
+                .expect("complete staged patch checked")
+                .point();
+        }
+        core::mem::swap(&mut self.site_frames, &mut self.staged_frames);
         if let Some(friction) = &mut self.friction {
             friction.publish(self.thermal_active);
         }
@@ -587,7 +616,7 @@ impl<'a> RigidCohesiveSystem<'a> {
         self.time_s = next_time;
         self.last_wrenches = wrenches;
         self.last_frame = Some(frame);
-        Ok(self.last_frame.as_ref().expect("frame just published"))
+        Ok(payload)
     }
 }
 
