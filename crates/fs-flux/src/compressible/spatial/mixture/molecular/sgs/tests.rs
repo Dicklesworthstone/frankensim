@@ -8,6 +8,7 @@ use fs_qty::DynViscosity;
 use fs_thermochem::transport::kinetic::ThermalConductivityQuantityV1;
 
 mod dynamic;
+mod channel;
 
 const PERIODIC: Boundaries3d = Boundaries3d {
     x: AxisBoundaries::Periodic,

@@ -252,6 +252,10 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                 }
             }
         }
+        #[cfg(feature = "experimental-sgs")]
+        if let Some(sgs) = &self.sgs {
+            sgs.admit_wall(wall)?;
+        }
         self.walls[side_index(side)] = wall;
         Ok(self)
     }
@@ -591,7 +595,7 @@ fn spatial<L: TransportLaw>(
     }
     #[cfg(feature = "experimental-sgs")]
     if let Some(sgs) = sgs.as_mut() {
-        sgs.prepare(source.gas(), states, primitive, gradient, cancelled)?;
+        sgs.prepare(source.gas(), states, primitive, gradient, walls, cancelled)?;
     }
     let normal = |index: usize, axis: usize| {
         let [a, b] = tangents(axis);

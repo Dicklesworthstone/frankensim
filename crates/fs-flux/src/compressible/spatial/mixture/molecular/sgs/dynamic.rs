@@ -113,6 +113,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
             ViscosityClosure::Dynamic(dynamic) => Some(dynamic.config),
             ViscosityClosure::Local { .. }
             | ViscosityClosure::DynamicThermal(_)
+            | ViscosityClosure::DynamicChannelThermal(_)
             | ViscosityClosure::DynamicSpecies(_) => None,
         }
     }
@@ -188,7 +189,7 @@ impl DynamicTransport {
 
 // Preserve the original molecular error owner without introducing a dependency
 // from the lower gas layer back to LBM. Cancellation keeps its typed identity.
-fn dynamic_error(error: DynamicSgsError) -> DissipationError {
+pub(super) fn dynamic_error(error: DynamicSgsError) -> DissipationError {
     match error {
         DynamicSgsError::Cancelled => DissipationError::Cancelled,
         DynamicSgsError::Invalid(reason) | DynamicSgsError::Cell { reason, .. } => {

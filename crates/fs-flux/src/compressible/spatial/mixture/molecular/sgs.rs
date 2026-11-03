@@ -40,6 +40,11 @@ pub use dynamic::{
     DynamicComponentsConfig, MixtureDynamicSpeciesSubgridConfig, MixtureDynamicSubgridConfig,
     MixtureDynamicThermalSubgridConfig,
 };
+mod channel;
+pub use channel::{
+    ChannelDynamicScalarConfig, ChannelDynamicSgsConfig,
+    MixtureDynamicChannelThermalSubgridConfig,
+};
 
 /// Explicit stress/heat controls shared with frozen gas, plus species mixing.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -109,6 +114,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
             ViscosityClosure::Local { config, .. } => Some(*config),
             ViscosityClosure::Dynamic(_)
             | ViscosityClosure::DynamicThermal(_)
+            | ViscosityClosure::DynamicChannelThermal(_)
             | ViscosityClosure::DynamicSpecies(_) => None,
         }
     }
@@ -122,6 +128,7 @@ enum ViscosityClosure {
     },
     Dynamic(dynamic::DynamicTransport),
     DynamicThermal(dynamic::DynamicThermalTransport),
+    DynamicChannelThermal(channel::DynamicChannelThermalTransport),
     DynamicSpecies(dynamic::DynamicSpeciesTransport),
 }
 
@@ -160,16 +167,26 @@ impl SubgridTransport {
                 ViscosityClosure::Local { .. } => 0,
                 ViscosityClosure::Dynamic(dynamic) => dynamic.workspace_bytes(),
                 ViscosityClosure::DynamicThermal(dynamic) => dynamic.workspace_bytes(),
+                ViscosityClosure::DynamicChannelThermal(dynamic) => dynamic.workspace_bytes(),
                 ViscosityClosure::DynamicSpecies(dynamic) => dynamic.workspace_bytes(),
             }
     }
 
+    pub(super) fn admit_wall(&self, wall: MolecularWall3d) -> Result<(), DissipationError> {
+        match &self.closure {
+            ViscosityClosure::DynamicChannelThermal(dynamic) => dynamic.admit_wall(wall),
+            _ => Ok(()),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn prepare(
         &mut self,
         gas: &MixtureGas,
         states: &[f64],
         primitive: &[Primitive],
         gradient: &[[[f64; 3]; 3]],
+        walls: &[MolecularWall3d; 6],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), DissipationError> {
         match &mut self.closure {
@@ -200,6 +217,15 @@ impl SubgridTransport {
             }
             ViscosityClosure::DynamicSpecies(dynamic) => {
                 if !dynamic.prepare(states, primitive, cancelled)? {
+                    for values in self.dynamic_viscosity.chunks_mut(64) {
+                        poll(cancelled)?;
+                        values.fill(0.0);
+                    }
+                    return Ok(());
+                }
+            }
+            ViscosityClosure::DynamicChannelThermal(dynamic) => {
+                if !dynamic.prepare(primitive, walls, cancelled)? {
                     for values in self.dynamic_viscosity.chunks_mut(64) {
                         poll(cancelled)?;
                         values.fill(0.0);
@@ -239,6 +265,7 @@ impl SubgridTransport {
                 }
                 ViscosityClosure::Dynamic(dynamic) => dynamic.viscosities()[i],
                 ViscosityClosure::DynamicThermal(dynamic) => dynamic.viscosities()[i],
+                ViscosityClosure::DynamicChannelThermal(dynamic) => dynamic.viscosities()[i],
                 ViscosityClosure::DynamicSpecies(dynamic) => dynamic.viscosities()[i],
             };
             let mut cv = [0.0; MAX_SPECIES];
@@ -289,6 +316,7 @@ impl SubgridTransport {
         let mu = 0.5 * self.dynamic_viscosity[left] + 0.5 * self.dynamic_viscosity[right];
         let dynamic_heat = match &self.closure {
             ViscosityClosure::DynamicThermal(dynamic) => Some(dynamic.face_heat(left, right)),
+            ViscosityClosure::DynamicChannelThermal(dynamic) => Some(dynamic.face_heat(left, right)),
             ViscosityClosure::DynamicSpecies(dynamic) => Some(dynamic.face_heat(left, right)),
             _ => None,
         };
@@ -324,6 +352,11 @@ impl SubgridTransport {
                 None,
                 None,
                 dynamic.config.transport.momentum.maximum_eddy_to_molecular,
+            ),
+            ViscosityClosure::DynamicChannelThermal(dynamic) => (
+                None,
+                Some(dynamic.config.turbulent_schmidt),
+                dynamic.config.momentum.maximum_eddy_to_molecular,
             ),
         };
         if mu != 0.0 {

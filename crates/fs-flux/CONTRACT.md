@@ -2918,3 +2918,30 @@ nonlinear mixed-boundary affine flow; a retained advector deliberately distinct
 from the endpoint velocity; and final cancellation, continuation and motion/law
 refusal. Native execution and formatter checks were unavailable after the
 session worker failed; these are authored cases, not claimed passing results.
+
+## Dynamic channel heat transport in evolving mixtures
+
+`MolecularTransport3d::with_dynamic_channel_thermal_sgs` exposes
+`MixtureDynamicChannelThermalSubgridConfig` on the existing evolving-mixture
+finite-volume transport owner. One reflecting axis has two explicit no-slip
+walls; the two tangential axes are periodic. The shared channel core fits
+momentum and temperature independently within homogeneous wall-distance planes
+using current SSP-stage density, velocity, temperature, Cartesian spacings and
+current wall velocity/thermal data. The original mixture face retains source
+Cp, referenced partial enthalpies, Maxwell–Stefan diffusion, conservative
+stress work, molecular wall heat exchange and the combined stability estimate.
+Heat remains active when the momentum fit vanishes; species mixing retains
+an explicitly supplied common Schmidt number. All normal orientations and
+rectangular uniform cells are supported. Tangential directions require at
+least three cells; two normal cells suffice for fixed-temperature walls,
+while any adiabatic wall requires three. Complete storage adds 264 nominal
+numerical bytes per fluid cell, with reused buffers and atomic field/report
+publication. Applicability remains low-Mach, wall-resolved exploratory LES;
+no wall function, dynamic species channel fit, reaction-rate model or
+DNS-accuracy qualification is claimed.
+
+Four new native tests cover original source Cp/partial enthalpy and wall work,
+all axes and rectangular geometry, independent heat with zero momentum fit,
+formation-reference invariance, evolving walls, conservative advancement,
+capacity admission, cancellation and retry. The broader 25-test molecular/SGS
+group also passes with the actual current fs-lbm, fs-gas and fs-tribo dependencies.
