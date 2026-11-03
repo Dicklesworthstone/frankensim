@@ -1,4 +1,4 @@
-//! Ideal affine joint locks and gears during supported rigid-payload capture.
+//! Ideal affine joint locks and gears during supported rigid-payload inventory events.
 //!
 //! The loaded inertia and incoming momentum mismatch remain owned by the
 //! original capture lifecycle. Native prescribed-base inverse-mass responses
@@ -12,11 +12,23 @@
 //! The final-rate pairing remains visible in the original bounded energy
 //! defect; midpoint reaction work is reported and capped separately. Neither
 //! is subtracted from Q or assigned to heat.
+//!
+//! Driven release instead retains the actual midpoint work of the separation
+//! pair and of the ideal joint impulse independently. Its kinetic/work balance
+//! subtracts both plus support work. Passive release admits rows without
+//! projecting their finite tangent residuals or applying a reaction.
 
 use super::{
     SupportedPayloadCapture, SupportedPayloadControls, capture_evaluated,
 };
-use crate::articulated::motion::inventory::{PayloadError, PayloadState, finite, poll};
+use super::release::{
+    SupportedPayloadRelease, SupportedPayloadReleaseControls, SupportedPayloadSeparationControls,
+    release_evaluated,
+};
+use crate::articulated::motion::inventory::{
+    PayloadAttachment, PayloadError, PayloadState, finite, poll,
+};
+use crate::articulated::motion::inventory::release::SeparationImpulse;
 use crate::articulated::motion::prescribed::PrescribedBaseMotionState;
 use crate::articulated::motion::reconfigure::constraints::{
     ConstraintError, JointConstraint, PreparedJointConstraints, admit_constraints, apply_rows,
@@ -36,7 +48,7 @@ pub struct SupportedPayloadConstraintControls {
     /// [4096*EPSILON, 1]. Dependent or unresolved rows are never regularized.
     pub minimum_reciprocal_condition: f64,
     /// Nonnegative cap on absolute actual midpoint joint-reaction work, J.
-    /// This is separate from the capture projection-loss budget.
+    /// This is separate from capture projection loss or separation-source work.
     pub maximum_reaction_work_j: f64,
 }
 
@@ -48,7 +60,7 @@ pub struct SupportedPayloadConstraintReaction {
     /// Applied A^T lambda in native compact joint order, N m s or N s.
     /// Empty when there are no rows; no generalized joint impulse is applied.
     pub joint_impulse: Vec<f64>,
-    /// Actual A q - b; configuration is unchanged during capture.
+    /// Actual A q - b; configuration is unchanged during the inventory event.
     pub position_residuals: Vec<f64>,
     /// Actual A qdot in row units/second before the event.
     pub velocity_residuals_before: Vec<f64>,
@@ -58,10 +70,12 @@ pub struct SupportedPayloadConstraintReaction {
     /// Exact tangent endpoints give zero; finite admitted defects retain work.
     pub midpoint_work_j: f64,
     /// Applied joint impulse paired with the actual final joint rates, J.
-    /// This remains in capture.balance.energy_residual_j, under its tolerance;
-    /// it is not subtracted from the nonnegative capture-projection quadratic.
+    /// In capture, this remains in capture.balance.energy_residual_j under its
+    /// tolerance; it is not subtracted from the capture-projection quadratic.
+    /// Release uses the complete midpoint-work balance instead.
     pub final_rate_pairing_j: f64,
-    /// Reciprocal condition of the normalized loaded-inertia row mobility.
+    /// Reciprocal condition of the normalized actual event-inertia mobility:
+    /// loaded inertia for capture, restored retained inertia for release.
     /// Equal to one for the empty row set.
     pub reciprocal_condition: f64,
 }
@@ -130,7 +144,78 @@ pub fn capture_payload(
     )
 }
 
-pub(super) fn capture_response(
+
+/// Original accepted release and the ideal joint impulse on the retained tree.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConstrainedSupportedPayloadRelease {
+    /// Restored inventory, recoiled tree and independent outgoing payload.
+    /// Its joint residual subtracts reaction.joint_impulse, and its energy
+    /// residual subtracts support, separation and reaction midpoint work.
+    pub release: SupportedPayloadRelease,
+    /// Native ideal reaction and accepted constant-row diagnostics.
+    pub reaction: SupportedPayloadConstraintReaction,
+}
+
+/// Detach passively while admitting the retained tree's existing ideal rows.
+///
+/// Configuration and rates remain bit-identical. The restored retained inertia
+/// must still give independent, resolved row mobility, but no row correction is
+/// applied: a finite admitted tangent residual is not an activation impulse.
+/// The reaction is exactly zero and the original passive account is preserved.
+#[allow(clippy::too_many_arguments)]
+pub fn release_payload(
+    model: &ArticulatedModel,
+    state: &PrescribedBaseMotionState,
+    attachment: &PayloadAttachment,
+    rows: &[JointConstraint],
+    controls: SupportedPayloadReleaseControls<'_>,
+    constraint_controls: SupportedPayloadConstraintControls,
+    cancelled: impl FnMut() -> bool,
+) -> Result<ConstrainedSupportedPayloadRelease, PayloadError> {
+    release_evaluated(
+        model, state, attachment, None, controls, 0.0,
+        Some((rows, constraint_controls)), cancelled,
+    )
+}
+
+/// Separate a finite payload while the retained tree keeps its ideal gear/lock rows.
+///
+/// The original equal/opposite point impulse and free couple act on the retained
+/// tree and the free payload. Row mobility uses the restored retained inertia,
+/// and the native final impulse solve receives separation and A^T lambda
+/// simultaneously. Original full payload recoil and support reactions remain
+/// authoritative; only the completed physical endpoint faces speed limits.
+///
+/// Both bodies initially share one rigid velocity field, so the separation
+/// pair's initial work cancels. Its source work is half each impulse paired
+/// with its actual velocity jump. Actual kinetic change equals that work plus
+/// signed support work and ideal-reaction midpoint work, up to the original
+/// independently bounded numerical/inventory defect. All three accounts remain
+/// separate. Finite admitted row defects may produce nonzero reaction work;
+/// that does not alter the source-only separation policy: negative separation
+/// work refuses, and nonnegative supplied work must fit the source budget.
+///
+/// Zero impulse follows the exact passive branch, including retained-inertia
+/// row admission without rate projection. No new constraint activation,
+/// actuator reservoir, contact or finite-duration release model is inferred.
+#[allow(clippy::too_many_arguments)]
+pub fn release_payload_with_impulse(
+    model: &ArticulatedModel,
+    state: &PrescribedBaseMotionState,
+    attachment: &PayloadAttachment,
+    impulse: SeparationImpulse,
+    rows: &[JointConstraint],
+    controls: SupportedPayloadSeparationControls<'_>,
+    constraint_controls: SupportedPayloadConstraintControls,
+    cancelled: impl FnMut() -> bool,
+) -> Result<ConstrainedSupportedPayloadRelease, PayloadError> {
+    release_evaluated(
+        model, state, attachment, Some(impulse), controls.balance,
+        controls.maximum_separation_work_j, Some((rows, constraint_controls)), cancelled,
+    )
+}
+
+pub(super) fn impulse_response(
     model: &ArticulatedModel,
     state: &PrescribedBaseMotionState,
     zero: &[f64],
@@ -147,10 +232,7 @@ pub(super) fn capture_response(
             SupportedPayloadConstraintReaction::empty(),
         ));
     };
-    validate_condition_floor(controls.minimum_reciprocal_condition)?;
-    if !controls.maximum_reaction_work_j.is_finite() || controls.maximum_reaction_work_j < 0.0 {
-        return Err(ConstraintError::Invalid("supported capture reaction-work budget").into());
-    }
+    admit_controls(controls)?;
     let initial = admit_constraints(
         rows, &state.joint_position, &state.joint_velocity, cancelled,
     )?;
@@ -177,7 +259,7 @@ pub(super) fn capture_response(
         if index % 64 == 0 {
             poll(cancelled)?;
         }
-        candidate.push(finite(old + delta, "supported capture free joint rate")?);
+        candidate.push(finite(old + delta, "supported payload free joint rate")?);
     }
     let rhs = apply_rows(rows, &candidate, cancelled)?
         .into_iter().map(|value| -value).collect::<Vec<_>>();
@@ -207,9 +289,9 @@ pub(super) fn capture_response(
             * (Dd::from_f64(0.5 * old) + Dd::from_f64(0.5 * new));
         final_pairing = final_pairing + applied * Dd::from_f64(new);
     }
-    let midpoint_work_j = finite(midpoint.to_f64(), "supported capture reaction work")?;
+    let midpoint_work_j = finite(midpoint.to_f64(), "supported payload reaction work")?;
     let final_rate_pairing_j = finite(
-        final_pairing.to_f64(), "supported capture final reaction pairing",
+        final_pairing.to_f64(), "supported payload final reaction pairing",
     )?;
     if midpoint_work_j.abs() > controls.maximum_reaction_work_j {
         return Err(PayloadError::ConstraintWork {
@@ -228,4 +310,45 @@ pub(super) fn capture_response(
         final_rate_pairing_j,
         reciprocal_condition: prepared.reciprocal_condition,
     }))
+}
+
+fn admit_controls(controls: SupportedPayloadConstraintControls) -> Result<(), PayloadError> {
+    validate_condition_floor(controls.minimum_reciprocal_condition)?;
+    if !controls.maximum_reaction_work_j.is_finite() || controls.maximum_reaction_work_j < 0.0 {
+        return Err(ConstraintError::Invalid("supported payload reaction-work budget").into());
+    }
+    Ok(())
+}
+
+pub(super) fn passive_reaction(
+    model: &ArticulatedModel,
+    state: &PrescribedBaseMotionState,
+    constraints: Option<(&[JointConstraint], SupportedPayloadConstraintControls)>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<SupportedPayloadConstraintReaction, PayloadError> {
+    let Some((rows, controls)) = constraints else {
+        return Ok(SupportedPayloadConstraintReaction::empty());
+    };
+    admit_controls(controls)?;
+    let initial = admit_constraints(
+        rows, &state.joint_position, &state.joint_velocity, cancelled,
+    )?;
+    if rows.is_empty() {
+        return Ok(SupportedPayloadConstraintReaction::empty());
+    }
+    let prepared = PreparedJointConstraints::prescribed_trial(
+        model, &state.joint_position, rows,
+        controls.minimum_reciprocal_condition, cancelled,
+    )?;
+    poll(cancelled)?;
+    Ok(SupportedPayloadConstraintReaction {
+        multipliers: vec![0.0; rows.len()],
+        joint_impulse: vec![0.0; model.dof_count()],
+        position_residuals: initial.position,
+        velocity_residuals_after: initial.velocity.clone(),
+        velocity_residuals_before: initial.velocity,
+        midpoint_work_j: 0.0,
+        final_rate_pairing_j: 0.0,
+        reciprocal_condition: prepared.reciprocal_condition,
+    })
 }

@@ -5027,3 +5027,41 @@ The continuation case captures a payload, advances the loaded geared mechanism
 through the actual supported implicit path, and releases its exact inventory.
 This admits existing constant affine gears/locks, not constraint activation,
 backlash, varying ratios or nonlinear point loops.
+
+## Supported constrained payload release and ejection
+
+`articulated::motion::inventory::supported::constraints` now exposes passive
+`release_payload` and driven `release_payload_with_impulse` alongside capture.
+They share the original inventory identity, rigid payload state reconstruction,
+physical point/couple convention and common release lifecycle. Active release
+uses the exact restored retained inertia for the native ideal-row mobility,
+then applies the separation impulse and `A^T lambda` in one final native
+prescribed-base event. The outgoing body retains its original full tensor and
+inverse-inertia response.
+
+Actual world momentum changes are audited against the independent support
+impulse; native joint momentum changes also include the declared ideal row
+impulse. The energy identity is
+`delta_K = W_support + W_separation + W_constraint + defect`.
+The separation pair begins on one rigid velocity field, so its initial work
+cancels and its source work comes from the actual velocity jumps. Constraint
+midpoint work and signed support work remain separate. The final balance
+retains compensated reaction products before rounding public work accounts.
+Source and absolute reaction-work budgets are independently enforced; the
+existing source-only policy refuses negative separation work. No capture
+projection loss or thermal sink is introduced into release.
+
+Passive and zero-impulse release admit initial row residuals and the retained
+inertia's normalized mobility without projecting rates or applying a reaction.
+They retain exact original state and physical balance. Numerical probe rates
+do not receive physical speed limits; the completed native event does.
+
+Five further test groups extend the shared constrained inventory target to
+12 cases. Independent retained-inertia reductions check geared recoil and
+signed support work; COM/spin and a separate centroidal solve check full-tensor
+payload response and off-centre pair work. Other cases retain finite reaction
+work, source/rate/rank refusal, passive exactness, frame/boost covariance and
+cancellation. The continuation case now covers capture, actual constrained
+implicit motion, and ejection with the advanced state and original attachment.
+Existing constant affine rows are supported; nonlinear loops, changing ratios,
+contact-triggered release and finite-duration actuator models remain separate.

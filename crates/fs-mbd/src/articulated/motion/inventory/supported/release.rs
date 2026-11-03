@@ -15,10 +15,15 @@ use super::super::{
     payload_at_link, poll, replace_link_inertia, twist_in_frame,
 };
 use super::{SupportedPayloadBalance, SupportedPayloadControls, admit, audit_momentum, negate};
+use super::constraints::{
+    ConstrainedSupportedPayloadRelease, SupportedPayloadConstraintControls,
+    impulse_response, passive_reaction,
+};
 use crate::articulated::motion::prescribed::PrescribedBaseMotionState;
+use crate::articulated::motion::reconfigure::constraints::JointConstraint;
 use crate::articulated::motion::{SpatialSum, kinetic_link_increment, sum_products};
 use crate::articulated::{
-    ArticulatedModel, BaseState, apply_prescribed_base_impulses, forward_kinematics,
+    ArticulatedModel, BaseState, forward_kinematics,
     inverse_dynamics, momentum_from_kinematics, solve_floating_base_system, validate_twist,
     validate_wrench,
 };
@@ -68,7 +73,8 @@ pub struct SupportedPayloadRelease {
     /// Equal/opposite applied impulse about the target link origin in link axes.
     pub impulse_on_retained_link: Wrench,
     /// Actual complete-system momentum and common-frame work diagnostics.
-    /// Energy residual subtracts both support work and supplied_work_j.
+    /// Energy residual subtracts support work and supplied_work_j, plus any
+    /// ideal joint-reaction midpoint work from the constrained wrapper.
     pub balance: SupportedPayloadBalance,
 }
 
@@ -96,7 +102,8 @@ pub fn release_payload(
     controls: SupportedPayloadReleaseControls<'_>,
     cancelled: impl FnMut() -> bool,
 ) -> Result<SupportedPayloadRelease, PayloadError> {
-    release_evaluated(model, state, attachment, None, controls, 0.0, cancelled)
+    release_evaluated(model, state, attachment, None, controls, 0.0, None, cancelled)
+        .map(|result| result.release)
 }
 
 /// Detach and drive separation by one internal point impulse and free couple.
@@ -136,19 +143,23 @@ pub fn release_payload_with_impulse(
         Some(impulse),
         controls.balance,
         controls.maximum_separation_work_j,
+        None,
         cancelled,
     )
+    .map(|result| result.release)
 }
 
-fn release_evaluated(
+#[allow(clippy::too_many_arguments)]
+pub(super) fn release_evaluated(
     model: &ArticulatedModel,
     state: &PrescribedBaseMotionState,
     attachment: &PayloadAttachment,
     impulse: Option<SeparationImpulse>,
     controls: SupportedPayloadReleaseControls<'_>,
     maximum_work_j: f64,
+    constraints: Option<(&[JointConstraint], SupportedPayloadConstraintControls)>,
     mut cancelled: impl FnMut() -> bool,
-) -> Result<SupportedPayloadRelease, PayloadError> {
+) -> Result<ConstrainedSupportedPayloadRelease, PayloadError> {
     poll(&mut cancelled)?;
     admit_attachment(model, attachment)?;
     if !maximum_work_j.is_finite() || maximum_work_j < 0.0 {
@@ -190,19 +201,21 @@ fn release_evaluated(
     let zero = vec![0.0; model.dof_count()];
     let mut state_after = state.clone();
     let mut payload_after = payload_before;
-    let (after_owned, support_impulse_body) = if no_impulse {
+    let (after_owned, support_impulse_body, reaction) = if no_impulse {
+        // Admit retained-inertia rows without repairing their finite residuals.
         // Passive release retains the exact original state and its FK.
-        (None, Wrench::default())
+        let reaction = passive_reaction(&model_after, state, constraints, &mut cancelled)?;
+        (None, Wrench::default(), reaction)
     } else {
         let mut body_impulses = vec![Wrench::default(); model.link_count()];
         body_impulses[target] = impulse_on_retained_link;
-        let response = apply_prescribed_base_impulses(
+        let (response, reaction) = impulse_response(
             &model_after,
-            state.base,
-            &state.joint_position,
-            &state.joint_velocity,
+            state,
             &zero,
             &body_impulses,
+            constraints,
+            &mut cancelled,
         )?;
         poll(&mut cancelled)?;
         state_after.joint_velocity = response.joint_velocity_after;
@@ -226,7 +239,7 @@ fn release_evaluated(
             &state_after.joint_velocity,
         )?;
         poll(&mut cancelled)?;
-        (Some(after), response.support_impulse_body)
+        (Some(after), response.support_impulse_body, reaction)
     };
     let after = after_owned.as_ref().unwrap_or(&kin);
     let mut momentum_after = momentum_from_kinematics(&model_after, after)?;
@@ -377,7 +390,7 @@ fn release_evaluated(
     validate_wrench(local, "supported_payload_release.local_decomposition")?;
     projected[target] = negate(local);
     poll(&mut cancelled)?;
-    let joint_momentum_residual = inverse_dynamics(
+    let mut joint_momentum_residual = inverse_dynamics(
         &model_after,
         BaseState::stationary(state.base.world_from_base),
         &state.joint_position,
@@ -387,6 +400,17 @@ fn release_evaluated(
         &projected,
     )?
     .generalized_force;
+    for (index, (residual, &applied)) in joint_momentum_residual.iter_mut()
+        .zip(&reaction.joint_impulse).enumerate()
+    {
+        if index % 64 == 0 {
+            poll(&mut cancelled)?;
+        }
+        *residual = finite(
+            (Dd::from_f64(*residual) - Dd::from_f64(applied)).to_f64(),
+            "supported_payload_release.constraint_momentum_residual",
+        )?;
+    }
     poll(&mut cancelled)?;
     let mut support = SpatialSum::default();
     support.add_world_wrench(
@@ -430,8 +454,17 @@ fn release_evaluated(
         support_impulse_body.to_array(),
         twist_in_frame(state.base.twist_body, state.base.world_from_base, boost)?.to_array(),
     );
+    // Retain the native reaction pairing before rounding its public receipt.
+    // Small signed work must survive cancellation with support/source work.
+    let constraint_work = (sum_products(
+        reaction.joint_impulse.iter().copied(),
+        state.joint_velocity.iter().copied(),
+    ) + sum_products(
+        reaction.joint_impulse.iter().copied(),
+        state_after.joint_velocity.iter().copied(),
+    )) * Dd::from_f64(0.5);
     let energy_residual_j = finite(
-        (centered_change - centered_support_work - supplied_work).to_f64(),
+        (centered_change - centered_support_work - supplied_work - constraint_work).to_f64(),
         "supported_payload_release.energy_residual",
     )?;
     if energy_residual_j.abs() > controls.energy_tolerance_j {
@@ -481,7 +514,8 @@ fn release_evaluated(
         energy_residual_j,
     };
     poll(&mut cancelled)?;
-    Ok(SupportedPayloadRelease {
+    Ok(ConstrainedSupportedPayloadRelease {
+        release: SupportedPayloadRelease {
         model_after,
         state_after,
         payload_after,
@@ -490,5 +524,7 @@ fn release_evaluated(
         impulse_on_payload_body,
         impulse_on_retained_link,
         balance,
+        },
+        reaction,
     })
 }

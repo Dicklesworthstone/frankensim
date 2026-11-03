@@ -12,7 +12,7 @@
 //! the same lifecycle. Contact discovery, nonlinear loops, finite grasp duration
 //! and a thermal destination for removed mechanical energy remain separate.
 
-/// Existing affine gear and lock reactions during supported payload capture.
+/// Existing affine gear and lock reactions during supported payload inventory events.
 #[path = "supported/constraints.rs"]
 pub mod constraints;
 
@@ -35,7 +35,7 @@ use crate::articulated::{
     validate_wrench,
 };
 use self::constraints::{
-    ConstrainedSupportedPayloadCapture, SupportedPayloadConstraintControls, capture_response,
+    ConstrainedSupportedPayloadCapture, SupportedPayloadConstraintControls, impulse_response,
 };
 use crate::articulated::motion::reconfigure::constraints::JointConstraint;
 use fs_ga::{Vec3, Wrench};
@@ -79,8 +79,8 @@ pub struct SupportedPayloadBalance {
     pub angular_momentum_residual_world: Vec3,
     /// Native RNEA projection of actual body increments or release decomposition.
     /// Unconstrained capture and equal/opposite separation have no external
-    /// relative-joint impulse. Constrained capture subtracts the declared
-    /// A^T lambda retained in its surrounding constraint-reaction receipt.
+    /// relative-joint impulse. Constrained inventory events subtract the
+    /// declared A^T lambda in their surrounding constraint-reaction receipt.
     pub joint_momentum_residual: Vec<f64>,
     /// Largest absolute residual divided by its declared allowance, at most one.
     pub maximum_normalized_momentum_residual: f64,
@@ -98,7 +98,9 @@ pub struct SupportedPayloadBalance {
     pub accounting_kinetic_energy_change_j: f64,
     /// Support work paired with the base twist in that same frame, J.
     pub accounting_support_work_j: f64,
-    /// Common-frame kinetic change minus support/separation work plus capture loss, J.
+    /// Common-frame kinetic change minus support/separation and release-reaction
+    /// work, plus capture projection loss, J. Capture retains the final-rate
+    /// constraint pairing as a finite tangency defect.
     /// This finite numerical defect is never assigned to removed energy.
     pub energy_residual_j: f64,
 }
@@ -195,7 +197,7 @@ fn capture_evaluated(
     body_impulses[target_link] = mismatch;
     let zero = vec![0.0; model.dof_count()];
     poll(&mut cancelled)?;
-    let (response, reaction) = capture_response(
+    let (response, reaction) = impulse_response(
         &model_after,
         state,
         &zero,
