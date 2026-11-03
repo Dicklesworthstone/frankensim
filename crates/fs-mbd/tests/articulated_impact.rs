@@ -7,6 +7,7 @@ use fs_mbd::articulated::{
 };
 use fs_mbd::articulated_impact::{
     ArticulatedImpactError, ArticulatedPointPlaneContact, resolve_articulated_plane_impact,
+    resolve_prescribed_base_plane_impact,
 };
 
 fn close(actual: f64, expected: f64) {
@@ -85,6 +86,54 @@ fn normal_impact_retains_small_dissipation_under_a_transverse_boost() {
             assert_eq!(result.response.base_after.twist_body.linear.x, boost);
         }
     }
+}
+
+#[test]
+fn actual_restitution_refuses_partial_rounding_under_a_common_normal_boost() {
+    let free_model = single_body(inertia(1.0, Vec3::default(), [1.0; 3]));
+    let supported_model = ArticulatedModel::new(vec![Link::new(
+        "driven slider",
+        None,
+        Se3::identity(),
+        JointModel::prismatic(Vec3::new(0.0, 1.0, 0.0), None).unwrap(),
+        inertia(1.0, Vec3::default(), [1.0; 3]),
+    )])
+    .unwrap();
+    let twist = Twist::new(Vec3::default(), Vec3::new(0.0, 1e16, 0.0));
+    let free = FreeFloatingBaseState::new(Se3::identity(), twist);
+    let supported = BaseState::prescribed(Se3::identity(), twist, Twist::zero());
+    let contact = ArticulatedPointPlaneContact {
+        plane_velocity_world: Vec3::new(0.0, 1e16 + 2.0, 0.0),
+        ..plane_contact(Vec3::default(), Vec3::default(), 1.0)
+    };
+    // Relative approach is -2. An elastic jump of 4 is representable at this
+    // background; a restitution of 1/4 needs a jump of 2.5, which rounds to 2
+    // in the native link velocity and incorrectly leaves zero relative speed.
+    let free_elastic =
+        resolve_articulated_plane_impact(&free_model, free, &[], &[], contact).unwrap();
+    let supported_elastic =
+        resolve_prescribed_base_plane_impact(&supported_model, supported, &[0.0], &[0.0], contact)
+            .unwrap();
+    close(free_elastic.relative_normal_speed_after, 2.0);
+    close(supported_elastic.relative_normal_speed_after, 2.0);
+    let rounded = ArticulatedPointPlaneContact {
+        restitution: 0.25,
+        ..contact
+    };
+    assert!(matches!(
+        resolve_articulated_plane_impact(&free_model, free, &[], &[], rounded),
+        Err(ArticulatedImpactError::ContactLaw(
+            fs_contact::impact::NormalImpactError::UnresolvedVelocityResponse
+        ))
+    ));
+    assert!(matches!(
+        resolve_prescribed_base_plane_impact(&supported_model, supported, &[0.0], &[0.0], rounded),
+        Err(ArticulatedImpactError::ContactLaw(
+            fs_contact::impact::NormalImpactError::UnresolvedVelocityResponse
+        ))
+    ));
+    assert_eq!(free.twist_body, twist);
+    assert_eq!(supported.twist_body, twist);
 }
 
 /// G0/G1: a rotated body with an offset reference origin has contact response
@@ -403,4 +452,116 @@ fn inadmissible_actual_joint_speed_refuses_without_partial_state() {
     assert_eq!(base.twist_body.linear, Vec3::new(0.0, -0.6, 0.0));
     assert_eq!(q, [0.0]);
     assert_eq!(velocity, [-0.1]);
+}
+
+/// G1: an ideal supported hinge has contact mobility r²/(I_com + m*c²),
+/// not the free-body mobility. A driven base can supply positive kinetic
+/// energy while the relative impact itself remains dissipative.
+#[test]
+fn supported_hinge_impact_uses_constrained_inertia_and_signed_base_work() {
+    let model = ArticulatedModel::new(vec![Link::new(
+        "hinge",
+        None,
+        Se3::identity(),
+        JointModel::revolute(Vec3::new(0.0, 0.0, 1.0), None).unwrap(),
+        inertia(2.0, Vec3::new(1.0, 0.0, 0.0), [0.5; 3]),
+    )])
+    .unwrap();
+    let point = Vec3::new(2.0, 0.0, 0.0);
+    for base_speed in [0.0, 2.0] {
+        for plane_speed in [0.0, -0.25] {
+            for restitution in [0.0, 0.5, 1.0] {
+                let base = BaseState::prescribed(
+                    Se3::identity(),
+                    Twist::new(Vec3::default(), Vec3::new(0.0, base_speed, 0.0)),
+                    Twist::zero(),
+                );
+                let contact = ArticulatedPointPlaneContact {
+                    plane_velocity_world: Vec3::new(0.0, plane_speed, 0.0),
+                    ..plane_contact(point, point, restitution)
+                };
+                let result =
+                    resolve_prescribed_base_plane_impact(&model, base, &[0.0], &[-2.0], contact)
+                        .unwrap();
+                let initial = base_speed - 4.0 - plane_speed;
+                let impulse = -(1.0 + restitution) * initial / 1.6;
+                let rate_jump = 2.0 * impulse / 2.5;
+                let support_force = 2.0 * rate_jump - impulse;
+                let loss = 0.5 * (1.0 - restitution * restitution) * initial * initial / 1.6;
+                close(result.inverse_effective_mass, 1.6);
+                close(result.normal_law.normal_impulse, impulse);
+                close(result.relative_normal_speed_after, -restitution * initial);
+                close(result.response.joint_velocity_after[0], -2.0 + rate_jump);
+                close(result.normal_law.dissipated_energy, loss);
+                close(result.support_work, support_force * base_speed);
+                close(result.plane_work, impulse * plane_speed);
+                close(
+                    result.response.kinetic_energy_change,
+                    result.plane_work + result.support_work - loss,
+                );
+                close_vector(
+                    result.response.support_impulse_body.force,
+                    Vec3::new(0.0, support_force, 0.0),
+                );
+                close_vector(result.response.support_impulse_body.torque, Vec3::default());
+                close_vector(
+                    result.response.linear_momentum_residual_world,
+                    Vec3::default(),
+                );
+                close_vector(
+                    result.response.angular_momentum_residual_world,
+                    Vec3::default(),
+                );
+                close(result.energy_balance_residual, 0.0);
+                assert_eq!(result.response.base_after, base);
+            }
+        }
+    }
+}
+
+#[test]
+fn supported_impact_probe_ignores_fictitious_effort_and_speed_limits() {
+    let limits = JointLimits::new(-1.0, 1.0, 0.25, 1e-15).unwrap();
+    let model = ArticulatedModel::new(vec![Link::new(
+        "light hinge",
+        None,
+        Se3::identity(),
+        JointModel::revolute(Vec3::new(0.0, 0.0, 1.0), Some(limits)).unwrap(),
+        inertia(1.0, Vec3::default(), [1e-4; 3]),
+    )])
+    .unwrap();
+    let point = Vec3::new(1.0, 0.0, 0.0);
+    let result = resolve_prescribed_base_plane_impact(
+        &model,
+        BaseState::stationary(Se3::identity()),
+        &[0.0],
+        &[-1e-4],
+        plane_contact(point, point, 0.5),
+    )
+    .unwrap();
+    close(result.inverse_effective_mass, 1e4);
+    close(result.normal_law.normal_impulse, 1.5e-8);
+    close(result.response.joint_velocity_after[0], 5e-5);
+    close(result.energy_balance_residual, 0.0);
+}
+
+#[test]
+fn an_impact_locked_by_the_support_refuses_without_an_infinite_impulse() {
+    let model = single_body(inertia(1.0, Vec3::default(), [1.0; 3]));
+    let contact = ArticulatedPointPlaneContact {
+        plane_velocity_world: Vec3::new(0.0, 1.0, 0.0),
+        ..plane_contact(Vec3::default(), Vec3::default(), 0.0)
+    };
+    assert!(matches!(
+        resolve_prescribed_base_plane_impact(
+            &model,
+            BaseState::stationary(Se3::identity()),
+            &[],
+            &[],
+            contact
+        ),
+        Err(ArticulatedImpactError::ContactLaw(
+            fs_contact::impact::NormalImpactError::InvalidInverseEffectiveMass
+        ))
+    ));
 }

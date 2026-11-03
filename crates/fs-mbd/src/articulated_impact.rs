@@ -1,9 +1,11 @@
-//! One frictionless point impact between a free articulated tree and a plane.
+//! One frictionless point impact between an articulated tree and a plane.
 //!
 //! Geometry and point inertia come from the articulated owner; the scalar
 //! restitution law comes from `fs-contact`. The caller supplies the impact
 //! configuration. This module neither detects a collision time nor repairs
 //! penetration, advances positions, or resolves simultaneous contacts.
+//! Free and prescribed-base boundaries share the contact law and endpoint
+//! accounting; each uses its own native constrained inverse-mass action.
 
 use core::fmt;
 use fs_contact::impact::{
@@ -13,8 +15,9 @@ use fs_ga::{GaError, Twist, Vec3, Wrench};
 
 use crate::articulated::{
     ArticulatedError, ArticulatedModel, BaseState, FreeFloatingBaseState,
-    FreeFloatingImpulseResponse, apply_free_floating_impulses, forward_kinematics,
-    free_floating_impulse_delta,
+    FreeFloatingImpulseResponse, ImpulseVelocityChange, PrescribedBaseImpulseResponse,
+    apply_free_floating_impulses, apply_prescribed_base_impulses, forward_kinematics,
+    free_floating_impulse_delta, prescribed_base_impulse_delta,
 };
 
 /// One link-fixed point and the prescribed plane it may strike.
@@ -39,9 +42,9 @@ pub struct ArticulatedPointPlaneContact {
 
 /// Physical endpoint state and single-contact momentum/energy accounting.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ArticulatedPlaneImpactResult {
-    /// Atomic physical impulse response, including all base and joint recoil.
-    pub response: FreeFloatingImpulseResponse,
+pub struct ArticulatedPlaneImpactResult<Response = FreeFloatingImpulseResponse> {
+    /// Atomic physical response for the chosen base boundary and every joint.
+    pub response: Response,
     /// Result returned by the shared scalar normal-impact law.
     pub normal_law: NormalImpactResult,
     /// Signed initial point/plane gap, in metres; nonnegative on success.
@@ -57,7 +60,9 @@ pub struct ArticulatedPlaneImpactResult {
     /// Work supplied by the prescribed moving plane, in joules. Positive work
     /// can increase body kinetic energy even with passive restitution.
     pub plane_work: f64,
-    /// Kinetic-energy change minus plane work plus impact dissipation, in J.
+    /// Signed work from a prescribed base reaction, zero for a free base, in J.
+    pub support_work: f64,
+    /// Kinetic change minus plane and support work plus impact dissipation, J.
     pub energy_balance_residual: f64,
 }
 
@@ -128,6 +133,9 @@ impl From<NormalImpactError> for ArticulatedImpactError {
 /// articulated joint. A unit-response probe is an inverse-mass operation, not
 /// a physical event: only the final impulse is checked against endpoint speed
 /// limits. The existing impulse owner performs the atomic state update.
+/// The actual returned normal speed must satisfy restitution within roundoff
+/// scaled to the relative impact speed; a large common motion cannot hide an
+/// unrepresentable collision response.
 ///
 /// A separating point or a gap above the activation tolerance receives zero
 /// impulse. Every negative gap refuses. There is no position projection,
@@ -139,6 +147,79 @@ pub fn resolve_articulated_plane_impact(
     joint_velocity: &[f64],
     contact: ArticulatedPointPlaneContact,
 ) -> Result<ArticulatedPlaneImpactResult, ArticulatedImpactError> {
+    resolve_plane_impact(
+        model,
+        BaseState::prescribed(base.world_from_base, base.twist_body, Twist::zero()),
+        joint_position,
+        joint_velocity,
+        contact,
+        |joints, bodies| free_floating_impulse_delta(model, joint_position, joints, bodies),
+        |joints, bodies| {
+            apply_free_floating_impulses(
+                model,
+                base,
+                joint_position,
+                joint_velocity,
+                joints,
+                bodies,
+            )
+        },
+    )
+}
+
+/// Resolve one impact on a tree attached to a stationary or driven support.
+///
+/// The base pose and twist do not jump. The contact effective mass includes
+/// every available joint and its coupled link inertia; the same native ABA
+/// operator supplies the full support reaction. A prescribed moving support
+/// contributes signed work, separate from the moving plane. There is no
+/// artificially heavy floating base, clipped velocity, or inferred support
+/// compliance. Scalar root joints are admitted.
+///
+/// Only positive finite normal mobility is supported. A contact direction
+/// locked by the prescribed boundary refuses through the normal law instead
+/// of manufacturing an impulse between immovable boundaries. All other
+/// configuration, single-contact, and endpoint-limit restrictions of
+/// [`resolve_articulated_plane_impact`] apply.
+pub fn resolve_prescribed_base_plane_impact(
+    model: &ArticulatedModel,
+    base: BaseState,
+    joint_position: &[f64],
+    joint_velocity: &[f64],
+    contact: ArticulatedPointPlaneContact,
+) -> Result<ArticulatedPlaneImpactResult<PrescribedBaseImpulseResponse>, ArticulatedImpactError> {
+    resolve_plane_impact(
+        model,
+        base,
+        joint_position,
+        joint_velocity,
+        contact,
+        |joints, bodies| {
+            prescribed_base_impulse_delta(model, joint_position, joints, bodies)
+                .map(|delta| delta.velocity)
+        },
+        |joints, bodies| {
+            apply_prescribed_base_impulses(
+                model,
+                base,
+                joint_position,
+                joint_velocity,
+                joints,
+                bodies,
+            )
+        },
+    )
+}
+
+fn resolve_plane_impact<Response: PlaneImpulseResponse>(
+    model: &ArticulatedModel,
+    base: BaseState,
+    joint_position: &[f64],
+    joint_velocity: &[f64],
+    contact: ArticulatedPointPlaneContact,
+    probe: impl FnOnce(&[f64], &[Wrench]) -> Result<ImpulseVelocityChange, ArticulatedError>,
+    apply: impl FnOnce(&[f64], &[Wrench]) -> Result<Response, ArticulatedError>,
+) -> Result<ArticulatedPlaneImpactResult<Response>, ArticulatedImpactError> {
     if contact.link_index >= model.link_count() {
         return Err(ArticulatedImpactError::InvalidLinkIndex {
             link_index: contact.link_index,
@@ -164,12 +245,7 @@ pub fn resolve_articulated_plane_impact(
         contact.normal_world.z / scale,
     );
     let normal = scaled.scale(1.0 / scaled.norm());
-    let before = forward_kinematics(
-        model,
-        BaseState::prescribed(base.world_from_base, base.twist_body, Twist::zero()),
-        joint_position,
-        joint_velocity,
-    )?;
+    let before = forward_kinematics(model, base, joint_position, joint_velocity)?;
     let pose = before.world_from_link[contact.link_index];
     let contact_point_world = pose.transform_point(contact.point_body)?;
     let gap = finite(
@@ -191,8 +267,7 @@ pub fn resolve_articulated_plane_impact(
     let mut body_impulses = vec![Wrench::default(); model.link_count()];
     let direction = Wrench::new(contact.point_body.cross(normal_body), normal_body);
     body_impulses[contact.link_index] = direction;
-    let probe =
-        free_floating_impulse_delta(model, joint_position, &joint_impulses, &body_impulses)?;
+    let probe = probe(&joint_impulses, &body_impulses)?;
     let inverse_effective_mass = finite(
         normal_body.dot(point_velocity(
             probe.body[contact.link_index],
@@ -212,23 +287,12 @@ pub fn resolve_articulated_plane_impact(
         direction.torque.scale(magnitude),
         direction.force.scale(magnitude),
     );
-    let response = apply_free_floating_impulses(
-        model,
-        base,
-        joint_position,
-        joint_velocity,
-        &joint_impulses,
-        &body_impulses,
-    )?;
+    let response = apply(&joint_impulses, &body_impulses)?;
     let after = forward_kinematics(
         model,
-        BaseState::prescribed(
-            response.base_after.world_from_base,
-            response.base_after.twist_body,
-            Twist::zero(),
-        ),
+        response.base_after(),
         joint_position,
-        &response.joint_velocity_after,
+        response.joint_velocity_after(),
     )?;
     let speed_after = finite(
         normal_body.dot(point_velocity(
@@ -237,9 +301,19 @@ pub fn resolve_articulated_plane_impact(
         )) - plane_speed,
         "relative_normal_speed_after",
     )?;
+    if normal_law.impacted {
+        // The contact law checks W*J, but adding that jump to a large stored
+        // velocity can change or erase it. Audit the actual endpoint too, on
+        // the impact scale rather than the common body/plane background.
+        let restitution_defect = (speed_after - normal_law.relative_normal_speed_after).abs();
+        if restitution_defect / speed_before.abs() > 4096.0 * f64::EPSILON {
+            return Err(NormalImpactError::UnresolvedVelocityResponse.into());
+        }
+    }
     let plane_work = finite(magnitude * plane_speed, "plane_work")?;
+    let support_work = response.support_work();
     let energy_balance_residual = finite(
-        response.kinetic_energy_change - plane_work + normal_law.dissipated_energy,
+        response.kinetic_energy_change() - plane_work - support_work + normal_law.dissipated_energy,
         "energy_balance_residual",
     )?;
     Ok(ArticulatedPlaneImpactResult {
@@ -251,8 +325,50 @@ pub fn resolve_articulated_plane_impact(
         relative_normal_speed_after: speed_after,
         contact_point_world,
         plane_work,
+        support_work,
         energy_balance_residual,
     })
+}
+
+trait PlaneImpulseResponse {
+    fn base_after(&self) -> BaseState;
+    fn joint_velocity_after(&self) -> &[f64];
+    fn kinetic_energy_change(&self) -> f64;
+    fn support_work(&self) -> f64;
+}
+
+impl PlaneImpulseResponse for FreeFloatingImpulseResponse {
+    fn base_after(&self) -> BaseState {
+        BaseState::prescribed(
+            self.base_after.world_from_base,
+            self.base_after.twist_body,
+            Twist::zero(),
+        )
+    }
+    fn joint_velocity_after(&self) -> &[f64] {
+        &self.joint_velocity_after
+    }
+    fn kinetic_energy_change(&self) -> f64 {
+        self.kinetic_energy_change
+    }
+    fn support_work(&self) -> f64 {
+        0.0
+    }
+}
+
+impl PlaneImpulseResponse for PrescribedBaseImpulseResponse {
+    fn base_after(&self) -> BaseState {
+        self.base_after
+    }
+    fn joint_velocity_after(&self) -> &[f64] {
+        &self.joint_velocity_after
+    }
+    fn kinetic_energy_change(&self) -> f64 {
+        self.kinetic_energy_change
+    }
+    fn support_work(&self) -> f64 {
+        self.support_work
+    }
 }
 
 fn point_velocity(twist: Twist, point: Vec3) -> Vec3 {

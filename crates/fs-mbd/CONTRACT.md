@@ -41,6 +41,47 @@ G1/G3 tests cover an analytic rotating radial slider, independent differentiatio
 of native forward kinematics, rotated frames, common velocity boosts, gravity
 conventions and malformed/unrepresentable motion refusal.
 
+## Prescribed-base articulated impulse response
+
+`articulated::apply_prescribed_base_impulses` applies body and joint impulses
+with the original base pose and twist held fixed. The existing ABA recursion
+solves the constrained joint inverse mass in O(n) work/storage; its condensed
+six-dimensional residual supplies the support impulse on the retained tree.
+No heavy free-base approximation, timestep scaling or velocity projection is
+used. Scalar root joints and fully fixed trees are admitted. Position and actual
+endpoint speed limits apply; instantaneous impulses are never compared with
+force/torque effort limits. Smooth acceleration and gravity contribute no
+finite impulse over this zero-duration event. A nonzero solved joint jump that
+rounds away completely refuses, including a changed joint rate erased by an
+unchanged large parent twist; an ideal constrained zero jump remains valid.
+
+The receipt retains the reaction about the base origin in base coordinates and
+about the world origin in world coordinates, including off-axis couples and
+root-actuator transmission. Actual native link velocity increments independently
+give linear/angular momentum changes and polarized kinetic change. External
+body and relative joint work remain separate from signed prescribed-support
+work. A stationary support does zero work; a driven support can supply or absorb
+energy. Residuals are reported without projecting or repairing the endpoint.
+
+`articulated_impact::resolve_prescribed_base_plane_impact` uses the same scalar
+Newton law and point kinematics as free-base impact, with the supported inverse
+mass and support work. It admits one supplied contact configuration with
+positive normal mobility; locked directions refuse. Both base boundaries check
+the actual returned normal restitution on the relative impact-speed scale;
+large common motion cannot admit a collision lost in endpoint rounding.
+It does not detect impact
+time, advance pose, add compliance, solve simultaneous supported contacts or
+allocate dissipation to heat. Native G0/G1/G3 tests use full-tensor off-centre
+hinges, a coupled slider mass oracle, driven supports, scalar root actuation,
+frame changes, a fully fixed tree, impulse units and actual endpoint limits.
+
+The simultaneous free-tree normal adapter also consumes the contact owner's
+unique-velocity result for redundant rows. Its individual impulses retain only
+representative status. The contact owner's active preimpact velocity range
+admission and native mechanical Gram structure determine total support work;
+unresolved work refuses. Actual endpoint, momentum and energy audits remain
+authoritative.
+
 ## Instantaneous rigid-point motion
 
 `RigidBodyIntegrator::prepare_point_motion` captures one native smooth state,

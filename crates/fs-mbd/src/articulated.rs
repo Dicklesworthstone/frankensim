@@ -26,6 +26,11 @@ mod mass_moments;
 mod point_motion;
 pub use point_motion::{ArticulatedPointMotion, PreparedLinkPointMotion};
 
+#[path = "articulated/prescribed_impulse.rs"]
+mod prescribed_impulse;
+pub(super) use prescribed_impulse::prescribed_base_impulse_delta;
+pub use prescribed_impulse::{PrescribedBaseImpulseResponse, apply_prescribed_base_impulses};
+
 use core::fmt;
 use fs_ga::{GaError, Mat3, Mat6, Se3, Twist, Vec3, Wrench};
 use fs_math::dd::Dd;
