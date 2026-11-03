@@ -1489,6 +1489,18 @@ actual motion and reconcile occupancy with authenticated endpoint velocity.
 A moving endpoint does not regain the larger static capacity merely because
 the sample has zero net slip.
 
+`DmtCoupledLoadLine::with_temperature_refresh` admits the original normal
+owner's held-indentation successor at the exact accepted three-coordinate
+position, with the canonical successor of the original selected shear claims.
+The original full compliance, solve bounds and occupied static/kinetic branch
+survive; changed coefficients rerun source and mechanical-stability admission.
+Finite-gap attraction retains zero real shear area. Held-load equilibria,
+stale positions, foreign source/shear tokens and cancellation cannot transfer
+the state. Prescribed normal-potential parameter work remains an explicit
+external account; the fixed-position source change produces no slip loss.
+Focused temperature regressions retain contact/gap/separated states, original
+claims under competing hot data, exact no-op identity and immutable retry.
+
 This is a constant-junction-strength, straight-coordinate-path DMT model.
 Work closure is not proof of physical trajectory accuracy or event-resolved
 stopping. Mixed-mode JKR peeling, partial-slip elastic storage, evolving frames,

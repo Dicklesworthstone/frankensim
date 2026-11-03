@@ -1,6 +1,8 @@
 //! Original native motion, sourced adhesion/shear and independent work closure.
 #[path = "../../fs-contact/tests/adhesive_dmt_coupled/common.rs"]
 mod common;
+#[path = "adhesive_dmt_modal/temperature.rs"]
+mod temperature;
 
 use common::{Z, close, config, free, sources};
 use fs_contact::normal_patch::dmt::coupled::{DmtCoupledLoadLine, DmtCoupledRegime};

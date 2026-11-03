@@ -6,6 +6,7 @@ use fs_contact::interface_binding::adhesive_shear::{
 };
 use fs_contact::interface_binding::*;
 use fs_contact::normal_patch::adhesive::{JkrEnvelope, SourceJkrSphereContact};
+use fs_contact::normal_patch::dmt::{DmtEnvelope, SourceDmtSphereContact};
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
     ClaimSet, InterfaceSystemCard, InterpolationPolicy, MaterialCard, MaterialStateId,
@@ -20,22 +21,22 @@ use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{Density, Dims, Pressure, QuantitySpec, Temperature};
 use fs_tribo::InputAuthority;
 
+fn temperature_quantity() -> QuantitySpec {
+    QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::AbsoluteTemperature,
+        ValueForm::Static,
+    ))
+}
+
+fn pressure_quantity() -> QuantitySpec {
+    QuantitySpec::semantic(SemanticType::new(QuantityKind::Pressure, ValueForm::Static))
+}
+
 pub fn point() -> QueryPoint {
     QueryPoint::new()
-        .with_quantity(
-            "T",
-            QuantitySpec::semantic(SemanticType::new(
-                QuantityKind::AbsoluteTemperature,
-                ValueForm::Static,
-            )),
-            300.0,
-        )
+        .with_quantity("T", temperature_quantity(), 300.0)
         .unwrap()
-        .with_quantity(
-            "p",
-            QuantitySpec::semantic(SemanticType::new(QuantityKind::Pressure, ValueForm::Static)),
-            2e5,
-        )
+        .with_quantity("p", pressure_quantity(), 2e5)
         .unwrap()
 }
 
@@ -43,9 +44,11 @@ fn scalar(name: &str, value: f64, dims: Dims) -> PropertyClaim {
     PropertyClaim {
         key: PropertyKey::new(name, dims),
         value: PropertyValue::Scalar { value, dims },
+        // Both authored claims and their queries carry the same fixed external
+        // conditions. Untyped pressure cannot establish static-source scope.
         validity: ValidityDomain::unconstrained()
-            .with("T", 280.0, 320.0)
-            .with("p", 1e5, 3e5),
+            .with_quantity("T", temperature_quantity(), 280.0, 320.0)
+            .with_quantity("p", pressure_quantity(), 1e5, 3e5),
         uncertainty: UncertaintyModel::Unstated,
         interpolation: InterpolationPolicy::ConstantWithinValidity,
         observations: vec![],
@@ -65,14 +68,18 @@ fn curve(name: &str, dims: Dims, values: [f64; 2], maximum_t: f64) -> PropertyCl
         knots: vec![(280.0, values[0]), (320.0, values[1])],
         dims,
     };
-    claim.validity = claim.validity.with("T", 280.0, maximum_t);
+    claim.validity = claim
+        .validity
+        .with_quantity("T", temperature_quantity(), 280.0, maximum_t);
     claim.interpolation = InterpolationPolicy::LinearInside;
     claim
 }
 
 fn alternative(name: &str, dims: Dims, value: f64) -> PropertyClaim {
     let mut claim = scalar(name, value, dims);
-    claim.validity = claim.validity.with("T", 310.0, 320.0);
+    claim.validity = claim
+        .validity
+        .with_quantity("T", temperature_quantity(), 310.0, 320.0);
     claim
         .provenance
         .source
@@ -228,6 +235,28 @@ impl Fixture {
 
     pub fn jkr(&self) -> SourceJkrSphereContact {
         SourceJkrSphereContact::new(self.normal.clone(), 1.0, 1e-7, envelope()).unwrap()
+    }
+
+    pub fn dmt(&self, range_m: f64) -> SourceDmtSphereContact {
+        SourceDmtSphereContact::new(
+            self.normal.clone(),
+            1e-6,
+            range_m,
+            DmtEnvelope {
+                maximum_indentation_m: 1e-9,
+                half_space_depth_m: 1e-3,
+                layer_thickness_m: 1e-3,
+                maximum_interaction_radius_to_radius: 0.1,
+                maximum_interaction_radius_to_depth: 0.1,
+                maximum_interaction_radius_to_layer: 0.1,
+                maximum_nominal_strain: 0.1,
+                maximum_repulsive_pressure_to_yield: 0.3,
+                maximum_adhesive_stress_to_yield: 0.1,
+                maximum_interaction_range_to_radius: 0.01,
+                maximum_tabor_parameter: 0.1,
+            },
+        )
+        .unwrap()
     }
 
     pub fn cards(&self) -> [&MaterialCard; 2] {

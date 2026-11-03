@@ -1,6 +1,8 @@
 //! G1/G3/G4: original adhesion and source junction shear on complete mechanics.
 #[path = "adhesive_dmt_coupled/common.rs"]
 mod common;
+#[path = "adhesive_dmt_coupled/temperature.rs"]
+mod temperature;
 use common::*;
 use fs_contact::normal_patch::dmt::coupled::*;
 use fs_exec::CancelGate;

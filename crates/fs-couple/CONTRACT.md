@@ -17619,6 +17619,22 @@ Only after force, work, energy, material and cancellation gates pass do body,
 contact, clock and frame advance together. Source mismatch or refused trials
 leave accepted history unchanged.
 
+`AdhesiveDmtModalSystem::apply_source_refresh` continues the same native owner
+at prescribed separate bulk-contact and interface temperatures. The exact
+accepted indentation authenticates the original normal refresh; the original
+selected shear claims follow its interface temperature. All native positions,
+velocities, work columns, full cross-axis compliance, clock and last historical
+frame remain unchanged. The new normal potential changes total native energy
+by independently reported signed parameter work, with the original energy
+limit and residual gate applied before publication. The next mechanical step
+uses the new force and actual-area static/kinetic capacities. No heat is made
+by changing junction strength at fixed coordinates. This operation changes
+local contact parameters only; modal bulk stiffness, thermal transport,
+expansion and surface entropy need their own physical owners. Two focused
+native temperature groups exercise contact/gap/separated moving bodies,
+independent potential and friction work, heating/cooling continuation, pinned
+claims, source/control/cancellation refusal and exact retry.
+
 Seven focused original-source native tests cover coupled body motion, momentum,
 complete work, off-diagonal compliance, prescribed motion, gap-only attraction,
 occupied kinetic continuation, a zero-net-slip reversal, timestep refinement

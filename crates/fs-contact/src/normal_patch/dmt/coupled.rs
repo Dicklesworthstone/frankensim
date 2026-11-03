@@ -20,6 +20,7 @@
 
 use super::{DmtError, DmtResponse, SourceDmtSphereContact};
 use crate::interface_binding::adhesive_shear::{AdhesiveShearError, SourceAdhesiveShear};
+use crate::normal_patch::adhesive::temperature::{AdhesiveThermalControl, SourceDmtThermalRefresh};
 use core::f64::consts::PI;
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::CancelGate;
@@ -258,6 +259,56 @@ impl<'a> DmtCoupledLoadLine<'a> {
     pub const fn compliance_m_per_n(&self) -> [[f64; 3]; 3] {
         self.compliance
     }
+
+    /// Stage the same joint at prescribed source temperatures and FIXED actual
+    /// coordinates. The immutable normal refresh must start at this exact
+    /// accepted indentation; a held-load equilibrium cannot move native bodies.
+    /// `next_shear` must equal the original selected claims' thermal successor.
+    ///
+    /// Recheck the original mechanical stability and source envelopes with the
+    /// new coefficients, retaining every compliance entry and solve bound.
+    /// Position and static/kinetic occupancy are preserved; changing junction
+    /// strength at fixed geometry does no slip work. The refresh's signed
+    /// parameter work is an external source input, not friction heat. This
+    /// immutable proposal changes neither this owner nor its incoming state.
+    pub fn with_temperature_refresh(
+        &self,
+        previous: DmtCoupledState,
+        refreshed: &'a SourceDmtThermalRefresh,
+        next_shear: &'a SourceAdhesiveShear,
+        gate: &CancelGate,
+    ) -> Result<(Self, DmtCoupledState), DmtCoupledError> {
+        poll(gate)?;
+        if previous.identity != self.identity
+            || refreshed.original_model_identity() != self.normal.identity()
+            || refreshed.control() != AdhesiveThermalControl::HeldIndentation
+            || refreshed.mechanical_work_j() != 0.0
+            || *refreshed.before() != self.normal.evaluate(previous.position_m[0])?
+        {
+            return Err(DmtCoupledError::StateMismatch);
+        }
+        let expected_shear = self.shear.rebind_dmt_temperature(self.normal, refreshed)?;
+        if next_shear != &expected_shear {
+            return Err(DmtCoupledError::StateMismatch);
+        }
+        poll(gate)?;
+        let next = Self::new(refreshed.source(), next_shear, self.compliance, self.config)?;
+        let admitted = next.initialize(previous.position_m)?;
+        if *refreshed.response() != next.normal.evaluate(previous.position_m[0])?
+            || (admitted.regime == DmtCoupledRegime::Released)
+                != (previous.regime == DmtCoupledRegime::Released)
+        {
+            return Err(DmtCoupledError::StateMismatch);
+        }
+        let state = DmtCoupledState {
+            identity: next.identity,
+            position_m: previous.position_m,
+            regime: previous.regime,
+        };
+        poll(gate)?;
+        Ok((next, state))
+    }
+
     pub fn initialize(&self, position_m: [f64; 3]) -> Result<DmtCoupledState, DmtCoupledError> {
         if position_m.iter().any(|v| !v.is_finite())
             || position_m[0] < self.config.minimum_indentation_m

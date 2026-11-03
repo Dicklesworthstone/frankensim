@@ -11,7 +11,9 @@
 //! zero net slip; that step does not certify an event-resolved physical stop.
 //!
 //! The source-bound DMT and constant-junction model retain their scope: fixed
-//! source conditions, fixed local work columns and straight coordinate paths.
+//! source conditions held over each step, fixed local work columns and straight
+//! coordinate paths. Explicit prescribed-temperature transfer retains native
+//! history and separately charges the contact potential's parameter work.
 //! Gap attraction has no solid shear area. There is no inferred partial-slip
 //! stiffness, JKR mixed-mode law, evolving contact frame or heat destination.
 
@@ -20,6 +22,7 @@ use super::{
 };
 use crate::modal_acoustic_time::ModalAcousticTimeModel;
 use fs_contact::interface_binding::adhesive_shear::SourceAdhesiveShear;
+use fs_contact::normal_patch::adhesive::temperature::SourceDmtThermalRefresh;
 use fs_contact::normal_patch::dmt::coupled::{
     DmtAdhesivePath, DmtCoupledConfig, DmtCoupledError, DmtCoupledLoadLine, DmtCoupledRegime,
     DmtCoupledState,
@@ -100,6 +103,20 @@ pub struct AdhesiveDmtModalFrame {
     pub iterations: usize,
     /// Includes the reserved actual-motion constitutive evaluation.
     pub evaluations: usize,
+}
+
+/// Instantaneous prescribed contact-source change at unchanged native state.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AdhesiveDmtSourceRefreshReport {
+    pub sample: u64,
+    pub energy_before_j: f64,
+    pub energy_after_j: f64,
+    pub surface_energy_before_j: f64,
+    pub surface_energy_after_j: f64,
+    /// Signed external coefficient work, distinct from slip work and heat.
+    pub parameter_work_j: f64,
+    pub energy_residual_j: f64,
+    pub energy_tolerance_j: f64,
 }
 
 /// One source-pinned junction and unchanged native modal component network.
@@ -226,6 +243,78 @@ impl<'a> AdhesiveDmtModalSystem<'a> {
                     .evaluate(self.state.position_m()[0])?
                     .reversible_energy_j,
         )?)
+    }
+
+    /// Apply a prescribed temperature successor to the same actual native
+    /// contact coordinates, without advancing a sample or resetting a branch.
+    /// The original normal source owns independent bulk-contact and interface
+    /// temperatures; the original selected shear claims follow the interface.
+    ///
+    /// The complete native motions, work columns, cross-axis compliance and
+    /// last historical frame remain unchanged. This operation changes contact
+    /// material parameters only; it does not change the modal network's bulk
+    /// stiffness, supply thermal transport/expansion, or infer surface entropy.
+    /// Surface-potential change is independently charged as signed parameter
+    /// work. Changing shear strength creates no heat at fixed actual position.
+    /// Any source, stability, energy or cancellation refusal retains this owner.
+    pub fn apply_source_refresh(
+        &mut self,
+        refreshed: &'a SourceDmtThermalRefresh,
+        next_shear: &'a SourceAdhesiveShear,
+        gate: &CancelGate,
+    ) -> Result<AdhesiveDmtSourceRefreshReport, AdhesiveDmtModalError> {
+        poll(Some(gate))?;
+        let before = self.total_energy_j()?;
+        let surface_before = self
+            .normal()
+            .evaluate(self.state.position_m()[0])?
+            .reversible_energy_j;
+        let (next, state) = self
+            .load_line
+            .with_temperature_refresh(self.state, refreshed, next_shear, gate)?;
+        let surface_after = next
+            .normal()
+            .evaluate(state.position_m()[0])?
+            .reversible_energy_j;
+        let after = finite(self.network.total_energy_j()? + surface_after)?;
+        let work = finite(refreshed.parameter_work_j())?;
+        limit(
+            "native/DMT refreshed energy magnitude",
+            after.abs(),
+            self.network.config.maximum_total_energy_j,
+        )?;
+        let residual = finite(after - before - work)?;
+        let scale = before
+            .abs()
+            .max(after.abs())
+            .max(work.abs())
+            .max(surface_before.abs())
+            .max(surface_after.abs());
+        let tolerance = finite(
+            self.network.config.energy_absolute_tolerance_j
+                + self.network.config.energy_relative_tolerance * scale,
+        )?;
+        if residual.abs() > tolerance {
+            return Err(ModalCouplingError::EnergyBalance {
+                residual_j: residual,
+                tolerance_j: tolerance,
+            }
+            .into());
+        }
+        let report = AdhesiveDmtSourceRefreshReport {
+            sample: self.samples_rendered(),
+            energy_before_j: before,
+            energy_after_j: after,
+            surface_energy_before_j: surface_before,
+            surface_energy_after_j: surface_after,
+            parameter_work_j: work,
+            energy_residual_j: residual,
+            energy_tolerance_j: tolerance,
+        };
+        poll(Some(gate))?;
+        self.load_line = next;
+        self.state = state;
+        Ok(report)
     }
 
     /// Advance held modal forces and a prescribed local coordinate rate [m/s].
