@@ -72,6 +72,128 @@ fn original_network_parity_and_three_partner_simultaneous_refinement() {
     assert!(errors[0]>1.9*errors[1] && errors[1]>1.9*errors[2]);
 }
 
+#[test]
+fn material_ambient_and_reservoir_conduction_reach_the_coupled_contact_network() {
+    use fs_thermal::enthalpy::Reservoir;
+    use fs_thermal::enthalpy::conduction::{
+        ConductionObserver, ConductiveAmbient, ConductiveReservoir, ConductivityLaw,
+    };
+    struct Conductivity;
+    impl ConductivityLaw for Conductivity {
+        fn conductivity_w_m_k(&self, _: f64) -> Result<f64, DepositionError> {
+            Ok(0.2)
+        }
+    }
+    let c = curve(0.02, 1.0);
+    let gate = CancelGate::new_clock_free();
+    let ambient = Boundary {
+        ambient_k: 330.0,
+        htc_w_m2_k: 0.0,
+        reservoir: None,
+        source_w: 0.0,
+    };
+    let reservoir = Boundary {
+        ambient_k: 300.0,
+        htc_w_m2_k: 0.0,
+        source_w: 0.0,
+        reservoir: Some(Reservoir {
+            temperature_k: 310.0,
+            area_m2: 1e-4,
+            conductance_w_k: 0.0,
+        }),
+    };
+    let mut thermal = network(
+        &c,
+        vec![
+            TimedEvent {
+                time_s: 0.0,
+                event: Event::Boundary(CellId(9), ambient),
+            },
+            TimedEvent {
+                time_s: 0.0,
+                event: Event::Boundary(CellId(77), reservoir),
+            },
+        ],
+    );
+    // Both native baths are authored insulated. The existing finite half-cell
+    // material/film law alone supplies their nonzero physical conductances.
+    let mut observer = ConductionObserver::new(
+        &thermal,
+        &[(MaterialId(1), &Conductivity)],
+        &[],
+        &[ConductiveReservoir {
+            cell_id: CellId(77),
+            half_distance_m: 0.005,
+            surface_resistance_m2_k_w: 0.025,
+        }],
+        || Ok(()),
+    )
+    .unwrap()
+    .with_ambient_faces(
+        &thermal,
+        &[ConductiveAmbient {
+            cell_id: CellId(9),
+            half_distance_m: 0.005,
+            surface_resistance_m2_k_w: 0.025,
+        }],
+        || Ok(()),
+    )
+    .unwrap();
+    let mut reference = thermal.clone();
+    let mut reference_observer = observer.clone();
+    let mut system = heated(&c, None);
+    let mut supplied = 0.0;
+    let initial_energy = thermal.energy_j();
+    for sample in 1..=8 {
+        let (next, accepted, audit) = reference
+            .advance_observed(
+                &reference_observer,
+                sample as f64 * config().dt_s,
+                thermal_config(1e-6),
+                || Ok(()),
+            )
+            .unwrap();
+        reference = next;
+        reference_observer = accepted;
+        let frame = system
+            .step_with_thermal_network(
+                &mut thermal,
+                &mut observer,
+                &bindings(),
+                thermal_config(1e-6),
+                &[0.0; 2],
+                &gate,
+                unchanged,
+            )
+            .unwrap();
+        assert_eq!(thermal.cells(), reference.cells());
+        assert_eq!(frame.impact.thermal.impact.deposited_heat_j, 0.0);
+        near(frame.external_heat_j, audit.external_heat_j, 1e-18);
+        assert!(frame.external_heat_j > 0.0);
+        supplied += frame.external_heat_j;
+        near(
+            frame.impact.thermal.impact.combined_energy_residual_j,
+            0.0,
+            1e-10,
+        );
+        for binding in bindings() {
+            let stored = system
+                .reservoirs()
+                .iter()
+                .find(|r| r.key() == binding.reservoir)
+                .unwrap();
+            assert_eq!(
+                stored.state().specific_enthalpy_j_kg(),
+                thermal.cells()[&binding.cell].specific_h_j_kg
+            );
+        }
+    }
+    near(thermal.energy_j() - initial_energy, supplied, 1e-12);
+    assert!(supplied > 1e-6);
+    assert_eq!(thermal.cells()[&CellId(9)].boundary, ambient);
+    assert_eq!(thermal.cells()[&CellId(77)].boundary, reservoir);
+}
+
 #[derive(Clone,Default,Debug,PartialEq)]
 struct MaterialObserver {steps:usize,source_w:f64,fail_at:Option<usize>}
 impl DepositionObserver for MaterialObserver {
@@ -155,4 +277,3 @@ fn stale_chart_geometry_mapping_clock_pending_events_and_cancellation_do_not_pub
 
 #[path="network/contact.rs"]
 mod contact;
-

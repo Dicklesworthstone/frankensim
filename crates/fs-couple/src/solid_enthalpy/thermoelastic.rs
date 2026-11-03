@@ -405,7 +405,7 @@ impl<'s,'m,'t,O> ThermoelasticCandidate<'s,'m,'t,O> {
 struct ReversibleHeat<'a,'s,'m,'cx,O> {
     solid:&'a ThermoelasticSolid<'s,'m>,inner:O,cx:&'a Cx<'cx>,watts:BTreeMap<CellId,f64>,
 }
-impl<O:DepositionObserver> DepositionObserver for ReversibleHeat<'_,'_,'_,'_,O> {
+impl<O: DepositionObserver> DepositionObserver for ReversibleHeat<'_, '_, '_, '_, O> {
     type Error=ThermoelasticFeedbackError<O::Error>;
     fn begin(&mut self)->Result<(),Self::Error> {
         self.inner.begin().map_err(ThermoelasticFeedbackError::Observer)
@@ -432,6 +432,24 @@ impl<O:DepositionObserver> DepositionObserver for ReversibleHeat<'_,'_,'_,'_,O> 
     fn conductances(&mut self,thermal:&DepositionSimulation<'_>,
         check:&mut dyn FnMut()->Result<(),DepositionError>)->Result<BTreeMap<u64,f64>,Self::Error> {
         self.inner.conductances(thermal,check).map_err(ThermoelasticFeedbackError::Observer)
+    }
+    fn ambient_conductances(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
+        self.inner
+            .ambient_conductances(thermal, check)
+            .map_err(ThermoelasticFeedbackError::Observer)
+    }
+    fn reservoir_conductances(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
+        self.inner
+            .reservoir_conductances(thermal, check)
+            .map_err(ThermoelasticFeedbackError::Observer)
     }
     fn heat_transfers(&mut self,thermal:&DepositionSimulation<'_>,
         check:&mut dyn FnMut()->Result<(),DepositionError>)->Result<Vec<HeatTransfer>,Self::Error> {

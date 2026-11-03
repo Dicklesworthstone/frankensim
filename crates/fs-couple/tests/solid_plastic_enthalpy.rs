@@ -326,6 +326,119 @@ fn close(actual: f64, expected: f64, tolerance: f64) {
 }
 
 #[test]
+fn resolved_ambient_and_reservoir_transport_reaches_native_thermoplastic_state() {
+    use fs_thermal::enthalpy::conduction::{
+        ConductionObserver, ConductiveAmbient, ConductiveReservoir, ConductivityLaw,
+    };
+    struct Conductivity;
+    impl ConductivityLaw for Conductivity {
+        fn conductivity_w_m_k(&self, _: f64) -> Result<f64, DepositionError> {
+            Ok(100.0)
+        }
+    }
+    context(|cx| {
+        let cp = 500.0;
+        let alpha = 1e-5;
+        let fixture = Fixture::with_expansion(cp, Some(alpha));
+        let original = initial(&[&fixture], &[], &[0.0]);
+        let mut cell = original.cells()[&CellId(100)].clone();
+        cell.boundary = Boundary {
+            ambient_k: 310.0,
+            htc_w_m2_k: 0.0,
+            source_w: 0.0,
+            reservoir: Some(Reservoir {
+                area_m2: L * L,
+                conductance_w_k: 0.0,
+                temperature_k: 315.0,
+            }),
+        };
+        let thermal = DepositionSimulation::new(
+            vec![TimedEvent {
+                time_s: 0.0,
+                event: Event::Birth(cell),
+            }],
+            &[(MaterialId(0), fixture.caloric.curve() as &dyn ThermalLaw)],
+            DepositionBudget {
+                max_cells: 1,
+                max_links: 0,
+                max_events: 1,
+                max_substeps: 16,
+            },
+        )
+        .unwrap()
+        .advance_to(0.0, thermal_config(), || Ok(()))
+        .unwrap()
+        .0;
+        let observer = ConductionObserver::new(
+            &thermal,
+            &[(MaterialId(0), &Conductivity)],
+            &[],
+            &[ConductiveReservoir {
+                cell_id: CellId(100),
+                half_distance_m: L / 2.0,
+                surface_resistance_m2_k_w: 0.0,
+            }],
+            || Ok(()),
+        )
+        .unwrap()
+        .with_ambient_faces(
+            &thermal,
+            &[ConductiveAmbient {
+                cell_id: CellId(100),
+                half_distance_m: L / 2.0,
+                surface_resistance_m2_k_w: 0.0,
+            }],
+            || Ok(()),
+        )
+        .unwrap();
+        let solid = bind(&thermal, &[&fixture], &NODES, &TETS, cx);
+        let next = solid
+            .advance(
+                &thermal,
+                &observer,
+                0.001,
+                &ROLLERS,
+                &[],
+                IncrementSettings::default(),
+                thermal_config(),
+                config(),
+                cx,
+            )
+            .unwrap();
+        let mut expected = 300.0;
+        // k=100 W/(m K), d=L/2: exposed and reservoir areas give 4 and 2 W/K.
+        for _ in 0..4 {
+            expected +=
+                0.00025 / (RHO * V * cp) * (4.0 * (310.0 - expected) + 2.0 * (315.0 - expected));
+        }
+        close(
+            next.thermal().temperature_k(CellId(100)).unwrap(),
+            expected,
+            1e-8,
+        );
+        close(
+            next.report().external_heat_j,
+            RHO * V * cp * (expected - 300.0),
+            1e-9,
+        );
+        close(next.report().combined_residual_j, 0.0, 1e-8);
+        close(next.report().physical_heat_j, 0.0, 1e-9);
+        for (node, axis) in [(1, 0), (2, 1), (3, 2)] {
+            close(
+                next.solid().solution().displacement_m[node][axis],
+                L * alpha * (expected - 300.0),
+                1e-12,
+            );
+        }
+        assert_eq!(
+            next.thermal().cells()[&CellId(100)].boundary,
+            thermal.cells()[&CellId(100)].boundary
+        );
+        assert_eq!(thermal.temperature_k(CellId(100)).unwrap(), 300.0);
+    });
+}
+
+#[test]
 fn g1_material_expansion_changes_free_shape_and_constrained_heating_on_native_mesh() {
     context(|cx| {
         let cp = 500.0;

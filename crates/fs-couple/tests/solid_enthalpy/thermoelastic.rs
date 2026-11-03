@@ -231,6 +231,139 @@ fn g1_heterogeneous_temperature_loads_and_source_swaps_share_one_compatible_traj
     });
 }
 
+#[test]
+fn resolved_surface_resistance_reaches_thermal_expansion_and_energy_balance() {
+    use fs_thermal::enthalpy::conduction::{
+        ConductionObserver, ConductiveAmbient, ConductiveReservoir, ConductivityLaw,
+    };
+    struct Conductivity;
+    impl ConductivityLaw for Conductivity {
+        fn conductivity_w_m_k(&self, _: f64) -> Result<f64, DepositionError> {
+            Ok(2.0)
+        }
+    }
+    with_cx(|cx| {
+        let (card, curve) = fixture(1000.0, 0.0, 0.0003, 0.2, false);
+        let original = thermal(&[&curve], &[0.2], &[0.0], 0.0);
+        let mut cell = original.cells()[&IDS[0]].clone();
+        cell.boundary = Boundary {
+            ambient_k: 310.0,
+            htc_w_m2_k: 0.0,
+            source_w: 0.0,
+            reservoir: Some(Reservoir {
+                area_m2: 1.0,
+                conductance_w_k: 0.0,
+                temperature_k: 320.0,
+            }),
+        };
+        let thermal = DepositionSimulation::new(
+            vec![TimedEvent {
+                time_s: 0.0,
+                event: Event::Birth(cell),
+            }],
+            &[(MaterialId(0), &curve as &dyn ThermalLaw)],
+            DepositionBudget {
+                max_cells: 1,
+                max_links: 0,
+                max_events: 1,
+                max_substeps: 16,
+            },
+        )
+        .unwrap()
+        .advance_to(0.0, thermal_controls(), || Ok(()))
+        .unwrap()
+        .0;
+        // Both baths are insulated in the authored fallback. The original
+        // material owner must supply G=A/(d/k+R), here 2 and 1 W/K.
+        let observer = ConductionObserver::new(
+            &thermal,
+            &[(MaterialId(0), &Conductivity)],
+            &[],
+            &[ConductiveReservoir {
+                cell_id: IDS[0],
+                half_distance_m: 1.0,
+                surface_resistance_m2_k_w: 0.5,
+            }],
+            || Ok(()),
+        )
+        .unwrap()
+        .with_ambient_faces(
+            &thermal,
+            &[ConductiveAmbient {
+                cell_id: IDS[0],
+                half_distance_m: 1.0,
+                surface_resistance_m2_k_w: 0.5,
+            }],
+            || Ok(()),
+        )
+        .unwrap();
+        let context = context(300.0);
+        let source = SolidEnthalpy::try_new(
+            &thermal,
+            &NODES,
+            &TETS,
+            vec![source(30, &card, &curve, &context)],
+            TetAssemblyBudget::standard(),
+            0.05,
+            mechanical().mesh_frame,
+            cx,
+        )
+        .unwrap();
+        let loads = source
+            .geometry()
+            .assemble(&[], VolumeLoad3::None, &[], cx)
+            .unwrap();
+        let body = ThermoelasticSolid::try_new(
+            &source,
+            &thermal,
+            &loads,
+            &FREE,
+            &[[280.0, 360.0]],
+            mechanical(),
+            solve(),
+            cx,
+        )
+        .unwrap();
+        let next = body
+            .advance(
+                &thermal,
+                &observer,
+                0.1,
+                &loads,
+                thermal_controls(),
+                solve(),
+                cx,
+            )
+            .unwrap();
+        let mut expected = 300.0;
+        for _ in 0..4 {
+            expected += 0.025 / 0.2 * (2.0 * (310.0 - expected) + (320.0 - expected));
+        }
+        near(next.thermal.temperature_k(IDS[0]).unwrap(), expected, 1e-9);
+        near(next.report.external_heat_j, 0.2 * (expected - 300.0), 1e-9);
+        near(next.report.combined_residual_j, 0.0, 1e-9);
+        for (node, point) in NODES.iter().enumerate() {
+            for axis in 0..3 {
+                near(
+                    next.solid
+                        .equilibrium()
+                        .solution
+                        .displacement
+                        .displacement_m()[node][axis],
+                    0.0003 * (expected - 300.0) * point[axis],
+                    1e-10,
+                );
+            }
+        }
+        assert_eq!(
+            next.thermal.cells()[&IDS[0]].boundary,
+            thermal.cells()[&IDS[0]].boundary
+        );
+        assert_eq!(thermal.temperature_k(IDS[0]).unwrap(), 300.0);
+        assert_eq!(body.time_s(), 0.0);
+    });
+}
+
 #[derive(Clone,Debug,PartialEq)]
 struct Steps {count:usize,cancel_at:usize}
 impl DepositionObserver for Steps {

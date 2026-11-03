@@ -672,6 +672,142 @@ fn source_bound_free_dof_recovers_heating_reyield_reversal_and_separates_numeric
     });
 }
 
+#[derive(Clone, Default)]
+struct HeatPulse {
+    watts: f64,
+    delivered_j: f64,
+    intervals: Vec<(f64, f64)>,
+}
+impl DepositionObserver for HeatPulse {
+    type Error = DepositionError;
+    fn next_transition_time_s(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Option<f64>, Self::Error> {
+        checkpoint()?;
+        Ok((thermal.time_s() < 0.125).then_some(0.125))
+    }
+    fn sources(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        _: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
+        Ok([(
+            CELL,
+            if thermal.time_s() < 0.125 {
+                self.watts
+            } else {
+                0.0
+            },
+        )]
+        .into())
+    }
+    fn event(&mut self, _: &Event, _: &DepositionSimulation<'_>) -> Result<(), Self::Error> {
+        Ok(())
+    }
+    fn step(
+        &mut self,
+        start_s: f64,
+        duration_s: f64,
+        _: &BTreeMap<CellId, f64>,
+        _: &DepositionSimulation<'_>,
+        _: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), Self::Error> {
+        self.intervals.push((start_s, duration_s));
+        if start_s < 0.125 {
+            self.delivered_j += self.watts * duration_s;
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn source_transition_survives_finite_plastic_feedback_without_smearing_heat() {
+    context(|cx| {
+        let fixture = Fixture::new(CP, 0);
+        let endpoints = path(&fixture, false);
+        let expected = &endpoints[0];
+        let original = initial(&fixture, &endpoints);
+        let mut cell = original.cells()[&CELL].clone();
+        cell.boundary.source_w = 0.0;
+        let thermal = DepositionSimulation::new(
+            vec![TimedEvent {
+                time_s: 0.0,
+                event: Event::Birth(cell),
+            }],
+            &[(MaterialId(0), fixture.caloric.curve() as &dyn ThermalLaw)],
+            DepositionBudget {
+                max_cells: 1,
+                max_links: 0,
+                max_events: 1,
+                max_substeps: 16,
+            },
+        )
+        .unwrap()
+        .advance_to(0.0, thermal_config(), || Ok(()))
+        .unwrap()
+        .0;
+        let solid = bind(&fixture, &thermal, false, cx);
+        // Deliver the same independently manufactured endpoint heat as the
+        // native plasticity oracle, but finish the pulse inside a normal step.
+        let observer = HeatPulse {
+            watts: expected.boundary_heat_j / 0.125,
+            ..HeatPulse::default()
+        };
+        let next = solid
+            .advance(
+                &thermal,
+                &observer,
+                expected.time_s,
+                &expected.prescribed(),
+                &[(3, expected.free_force_n)],
+                [0.0; 3],
+                settings(),
+                controls(),
+                thermal_config(),
+                config(),
+                cx,
+            )
+            .unwrap();
+        assert_eq!(
+            next.observer().intervals,
+            [
+                (0.0, 0.125),
+                (0.125, 0.25),
+                (0.375, 0.25),
+                (0.625, 0.25),
+                (0.875, 0.125)
+            ]
+        );
+        close(next.observer().delivered_j, expected.boundary_heat_j, 1e-12);
+        close(
+            next.report().external_heat_j,
+            expected.boundary_heat_j,
+            1e-9,
+        );
+        close(
+            next.thermal().temperature_k(CELL).unwrap(),
+            expected.temperature_k,
+            2e-7,
+        );
+        close(
+            next.solid().mechanics().element_states()[0].alpha,
+            expected.increment.mechanical.state.alpha,
+            3e-9,
+        );
+        close(
+            next.report().combined_residual_j,
+            0.0,
+            config().energy_tolerance_j,
+        );
+        assert_eq!(observer.delivered_j, 0.0);
+        assert!(observer.intervals.is_empty());
+        assert_eq!(thermal.time_s(), 0.0);
+        assert_eq!(solid.time_s(), 0.0);
+    });
+}
+
 #[derive(Clone)]
 struct LateRefusal {
     completed_substeps: usize,

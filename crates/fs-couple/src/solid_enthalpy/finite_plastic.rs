@@ -558,6 +558,15 @@ impl<O: DepositionObserver> DepositionObserver for FiniteHeat<'_, '_, '_, O> {
     fn requires_step_interval(&self) -> bool {
         self.inner.requires_step_interval()
     }
+    fn next_transition_time_s(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Option<f64>, Self::Error> {
+        self.inner
+            .next_transition_time_s(thermal, checkpoint)
+            .map_err(FiniteThermoplasticError::Observer)
+    }
     fn sources(
         &mut self,
         thermal: &DepositionSimulation<'_>,

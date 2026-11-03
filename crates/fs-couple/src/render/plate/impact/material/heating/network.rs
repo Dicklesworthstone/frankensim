@@ -273,6 +273,24 @@ impl<O: DepositionObserver> DepositionObserver for MechanicalHeating<O> {
         }
         Ok(values)
     }
+    fn ambient_conductances(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
+        self.observer
+            .ambient_conductances(thermal, checkpoint)
+            .map_err(NetworkError::Observer)
+    }
+    fn reservoir_conductances(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
+        self.observer
+            .reservoir_conductances(thermal, checkpoint)
+            .map_err(NetworkError::Observer)
+    }
     fn heat_transfers(&mut self, thermal:&DepositionSimulation<'_>,
         checkpoint:&mut dyn FnMut()->Result<(),DepositionError>)
         ->Result<Vec<HeatTransfer>,Self::Error> {
@@ -301,4 +319,3 @@ impl<O: DepositionObserver> DepositionObserver for MechanicalHeating<O> {
         self.observer.step(start,dt,old,thermal,checkpoint).map_err(NetworkError::Observer)
     }
 }
-

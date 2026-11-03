@@ -281,6 +281,24 @@ impl<O: DepositionObserver> DepositionObserver for HeatObserver<'_, '_, '_, '_, 
         -> Result<BTreeMap<u64, f64>, O::Error> {
         self.inner.conductances(thermal, checkpoint).map_err(SolidThermalError::Observer)
     }
+    fn ambient_conductances(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        checkpoint: &mut dyn FnMut() -> core::result::Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, O::Error> {
+        self.inner
+            .ambient_conductances(thermal, checkpoint)
+            .map_err(SolidThermalError::Observer)
+    }
+    fn reservoir_conductances(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        checkpoint: &mut dyn FnMut() -> core::result::Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, O::Error> {
+        self.inner
+            .reservoir_conductances(thermal, checkpoint)
+            .map_err(SolidThermalError::Observer)
+    }
     fn heat_transfers(&mut self, thermal: &DepositionSimulation<'_>,
         checkpoint: &mut dyn FnMut() -> core::result::Result<(), DepositionError>)
         -> Result<Vec<HeatTransfer>, O::Error> {

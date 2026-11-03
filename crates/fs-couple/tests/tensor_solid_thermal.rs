@@ -147,6 +147,20 @@ impl DepositionObserver for OtherPhysics {
         ->Result<BTreeMap<u64,f64>,Self::Error> {
         self.conductances+=1; Ok(BTreeMap::from([(55,0.5)]))
     }
+    fn ambient_conductances(
+        &mut self,
+        _: &DepositionSimulation<'_>,
+        _: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
+        Ok(BTreeMap::from([(CellId(30), 0.2)]))
+    }
+    fn reservoir_conductances(
+        &mut self,
+        _: &DepositionSimulation<'_>,
+        _: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
+        Ok(BTreeMap::from([(CellId(10), 0.3)]))
+    }
     fn heat_transfers(&mut self,_:&DepositionSimulation<'_>,_:&mut dyn FnMut()->Result<(),DepositionError>)
         ->Result<Vec<HeatTransfer>,Self::Error> {
         self.transfers+=1; Ok(vec![HeatTransfer {a:CellId(10),b:CellId(30),power_w:0.0002}])
@@ -178,10 +192,15 @@ fn regional_maxwell_heat_shares_conduction_events_and_every_existing_observer_ho
         let body=body(&source,&[vec![1.,0.],vec![0.,1.]],cx,gate);
         let initial=body.history(&[0.001,0.001],&[0.1,0.1],InitialMemory::Instantaneous,gate).unwrap();
         let chart=curve(1.); let switch=0.0234375;
+        let ambient=Boundary {ambient_k:310.,htc_w_m2_k:0.7,..boundary(0.)};
+        let reservoir=Boundary {reservoir:Some(Reservoir {temperature_k:320.,
+            area_m2:0.2,conductance_w_k:9.}),..boundary(0.)};
         let heat=thermal(&chart,&[30,10],vec![
             TimedEvent {time_s:0.,event:Event::Contact(ThermalLink {id:55,a:CellId(30),b:CellId(10),
                 area_m2:0.1,conductance_w_k:0.})},
-            TimedEvent {time_s:switch,event:Event::Boundary(CellId(30),boundary(0.004))},
+            TimedEvent {time_s:0.,event:Event::Boundary(CellId(30),ambient)},
+            TimedEvent {time_s:0.,event:Event::Boundary(CellId(10),reservoir)},
+            TimedEvent {time_s:switch,event:Event::Boundary(CellId(30),Boundary {source_w:0.004,..ambient})},
         ],16);
         let mut force=vec![[0.;3];8];force[3][2]=0.01;force[7][2]=-0.02;
         let observer=OtherPhysics::default();
@@ -191,12 +210,17 @@ fn regional_maxwell_heat_shares_conduction_events_and_every_existing_observer_ho
         assert_eq!((obs.sources,obs.conductances,obs.transfers,obs.limits,obs.steps),(count,count,count,count,count));
         assert_eq!(obs.intervals.len(),count);assert!(obs.intervals.iter().any(|&(t,_)|t==switch));
         let mut direct=initial.clone(); let mut temperatures=[300.,300.]; let mut heats=[0.,0.];
+        let mut external_heat_j=0.;
         for &(start,dt) in &obs.intervals {
             let step=direct.advance(&force,dt,controls().energy_tolerance_j,gate).unwrap();
             let transfer=0.5*(temperatures[1]-temperatures[0])+0.0002;
-            let external_a=0.001+if start>=switch {0.004} else {0.};
+            // Independent bath powers use the physical G, not the deliberately
+            // different authored htc/reservoir coefficient retained in the cells.
+            let external_a=0.2*(310.-temperatures[0])+0.001+if start>=switch {0.004} else {0.};
+            let external_b=0.3*(320.-temperatures[1])+0.002;
+            external_heat_j+=dt*(external_a+external_b);
             temperatures[0]+=(step.element_heat_j[0]+dt*(external_a+transfer))/MASS;
-            temperatures[1]+=(step.element_heat_j[1]+dt*(0.002-transfer))/MASS;
+            temperatures[1]+=(step.element_heat_j[1]+dt*(external_b-transfer))/MASS;
             for i in 0..2 {heats[i]+=step.element_heat_j[i];}
         }
         for (index,id) in [30,10].into_iter().enumerate() {
@@ -205,11 +229,14 @@ fn regional_maxwell_heat_shares_conduction_events_and_every_existing_observer_ho
         }
         assert!((heats[0]-heats[1]).abs()>1e-8);
         assert_eq!(next.solid().material_history().state(),direct.material_history().state());
-        near(next.report().external_thermal_heat_j,0.003*0.0625+0.004*(0.0625-switch),1e-12);
+        near(next.report().external_thermal_heat_j,external_heat_j,1e-12);
+        assert!(external_heat_j>0.4);
         near(next.report().combined_residual_j,0.,1e-10);
         assert!(observer.intervals.is_empty());assert_eq!(observer.steps,0);
         // All original authored boundaries/conductances survive the overrides.
         assert_eq!(next.thermal().cells()[&CellId(30)].boundary.source_w,0.004);
+        assert_eq!(next.thermal().cells()[&CellId(30)].boundary.htc_w_m2_k,ambient.htc_w_m2_k);
+        assert_eq!(next.thermal().cells()[&CellId(10)].boundary.reservoir,reservoir.reservoir);
         assert_eq!(next.thermal().links()[&55].conductance_w_k,0.);
         let failed=OtherPhysics {fail_after:Some(0.02),..Default::default()};
         assert!(matches!(initial.advance_thermal_candidate(&heat,&failed,0.0625,&force,
