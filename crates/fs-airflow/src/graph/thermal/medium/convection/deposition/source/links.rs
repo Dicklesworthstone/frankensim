@@ -37,6 +37,9 @@ pub struct ConvectiveLinkSample<F> {
     pub heat_into_fluid_w: f64,
     pub material: F,
     pub thermal: ThermalFluidTransportState,
+    /// Forced-sphere fluid query at the ACTUAL wall temperature. Only its
+    /// viscosity enters Whitaker's correction; the primary state stays bulk.
+    pub surface: Option<SurfaceConvectionMaterialSample<F>>,
     /// None only at exact natural-convection thermal equilibrium.
     pub evaluation: Option<CellConvectionEvaluation>,
 }
@@ -85,7 +88,8 @@ impl<F> ResolvedLinkConvection<F> {
 /// and fixed conditions as the native caloric law; a generic transport trait
 /// cannot prove this identity or invent pressure/composition evolution. Retain
 /// prepared material laws across calls so nonlinear trials do not select new
-/// sources. Every returned material owner stays with its heat-transfer result.
+/// sources. Forced spheres query the same original fluid again at the wall
+/// temperature. Every returned owner stays with its heat-transfer result.
 ///
 /// This returns total conductances for existing links. Use them directly in
 /// `BackwardEulerStep` coefficients or the native observer's conductance hook:
@@ -169,27 +173,20 @@ pub fn evaluate_source_link_convection<F: ThermalFluidTransport, E>(
                 0.5 * wall_temperature_k + 0.5 * fluid_temperature_k
             }
         };
-        let material = resolve(binding, thermal, Temperature::new(property_temperature_k))
-            .map_err(|source| SourceCellConvectionError::Source {
-                cell: fluid_cell,
-                property_temperature_k,
-                source,
-            })?;
-        let snapshot = material
-            .thermal_transport_state()
-            .map_err(|error| ConvectionSourceError::Material(error.into()))?;
-        let transport = material
-            .transport_state()
-            .map_err(|error| ConvectionSourceError::Material(error.into()))?;
-        if snapshot.temperature_k() != property_temperature_k || snapshot.transport() != transport {
-            return Err(ConvectionSourceError::Invalid(
-                "fluid source does not match the requested temperature and transport state",
-            )
-            .into());
-        }
-        let law = binding.law.resolve(&snapshot)?;
+        let primary = material_at(fluid_cell, property_temperature_k, || {
+            resolve(binding, thermal, Temperature::new(property_temperature_k))
+        })?;
+        let surface = if matches!(binding.law, SourceCellConvectionLaw::ForcedSphere { .. }) {
+            check(&mut cancelled)?;
+            Some(material_at(fluid_cell, wall_temperature_k, || {
+                resolve(binding, thermal, Temperature::new(wall_temperature_k))
+            })?)
+        } else { None };
+        let law = binding.law.resolve(&primary.thermal,
+            surface.as_ref().map(|sample| &sample.thermal))?;
+        law.admit_area(link.area_m2, binding.characteristic_length)?;
         let evaluation = evaluate_convection_state(
-            &transport,
+            &primary.thermal.transport(),
             wall_temperature_k,
             Temperature::new(fluid_temperature_k),
             binding.characteristic_length,
@@ -221,8 +218,9 @@ pub fn evaluate_source_link_convection<F: ThermalFluidTransport, E>(
             area_m2: link.area_m2,
             conductance_w_k,
             heat_into_fluid_w,
-            material,
-            thermal: snapshot,
+            material: primary.material,
+            thermal: primary.thermal,
+            surface,
             evaluation,
         });
     }

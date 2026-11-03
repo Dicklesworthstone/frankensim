@@ -781,6 +781,38 @@ coefficient-frozen explicit steps: refine the timestep for temporal accuracy.
 Flow speed, pressure and composition keep their original authored/provider
 ownership; this adapter adds no fluid advection, momentum or pressure-work law.
 
+### Forced spheres on the original finite-cell heat owners
+
+`SourceCellConvectionLaw::ForcedSphere` admits Whitaker convection in both
+prescribed-reservoir cell boundaries and reciprocal finite-fluid links.
+The primary property convention is explicitly `Reservoir`: the actual
+fluid bulk supplies density, Cp, conductivity and viscosity for Re, Pr and
+h. The same source resolver is additionally queried at the current wall
+temperature; only that second fluid state's viscosity supplies the original
+bulk/surface correction. Mean-film substitution is refused.
+
+Both original material owners and their checked thermal views remain in the
+result through the optional `surface` sample. A shared query admission checks
+requested temperature and agreement between each owner's thermal and momentum
+transport views. The caller still binds one immutable source law, pressure and
+composition across these queries; a generic transport trait cannot prove that
+identity. Source-domain, viscosity-ratio and Reynolds restrictions propagate.
+
+Characteristic length is the physical sphere diameter, and exposed or linked
+area cannot exceed its complete surface `pi D^2`. Contact coverage and
+equal-and-opposite link heat retain the native thermal owners. Each represented
+sphere/patch must satisfy the isolated, isothermal correlation assumptions;
+this is not a local law for arbitrary nonisothermal curved surfaces. Neither
+a stagnant-gas conductance nor a second thermal store is added.
+
+The existing implicit heat/circuit residual and explicit source/link observers
+therefore re-query both property temperatures at their own actual trials and
+substeps. Four focused G1/G3/G4 regression sources cover independently
+calculated liquid-sphere heat, original source identity and domain refusals,
+implicit reciprocal energy and reversed endpoints, and native observed link
+advancement. Rust syntax/format and scoped whitespace checks passed; these
+new integration regressions were authored but not executed in this change.
+
 ### Reciprocal material convection on finite thermal links
 
 `source::links::evaluate_source_link_convection` resolves the original fluid

@@ -206,7 +206,7 @@ pub(in super::super) fn evaluate<M: ThermalFluidTransport>(
             wall_temperature_k,
             Temperature::new(fluid_temperature_k),
             binding.characteristic_length,
-            law.resolve(&snapshot).map_err(native_error)?,
+            law.resolve(&snapshot, None).map_err(native_error)?,
         ).map_err(|error| native_error(ConvectionSourceError::Material(error)))?;
         // Identical actual-source and signed old/new/crossing admission to
         // finite walls; maximum-speed envelopes are never substituted for Q.

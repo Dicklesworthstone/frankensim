@@ -7,6 +7,8 @@ mod observer;
 mod links;
 #[path = "film_source/heat_network.rs"]
 mod heat_network;
+#[path = "film_source/sphere.rs"]
+mod sphere;
 use fs_airflow::graph::thermal::medium::convection::deposition::source::*;
 use fs_evidence::ValidityDomain;
 use fs_matdb::{

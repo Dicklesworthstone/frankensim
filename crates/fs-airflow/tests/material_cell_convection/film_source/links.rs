@@ -7,6 +7,8 @@ mod observer;
 mod natural_geometry;
 #[path = "links/mixed_convection.rs"]
 mod mixed_convection;
+#[path = "links/sphere.rs"]
+mod sphere;
 use fs_airflow::graph::thermal::medium::convection::deposition::source::links::*;
 use fs_matdb::SelectionPolicy;
 use fs_material::phase::{HeatCapacitySourceQuery, ResolvedHeatCapacityCurve, SolidLiquidPhase};

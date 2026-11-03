@@ -30,6 +30,13 @@ pub enum SourceCellConvectionLaw {
         speed_m_s: f64,
         settings: ForcedConvectionSettings,
     },
+    /// Isolated isothermal sphere with Whitaker's original bulk/surface
+    /// property convention. Select `Reservoir` for the primary state; the
+    /// SAME resolver is additionally queried at the actual wall temperature.
+    /// Characteristic length is diameter. No film substitution is admitted.
+    ForcedSphere {
+        speed_m_s: f64,
+    },
     VerticalPlate {
         gravity_m_s2: f64,
     },
@@ -53,6 +60,13 @@ impl SourceCellConvectionLaw {
         self,
         convention: ConvectionPropertyTemperature,
     ) -> Result<(), ConvectionSourceError> {
+        if matches!(self, Self::ForcedSphere { .. })
+            && convention != ConvectionPropertyTemperature::Reservoir
+        {
+            return Err(ConvectionSourceError::Invalid(
+                "forced spheres require bulk properties plus separately resolved wall viscosity",
+            ));
+        }
         if matches!(
             self,
             Self::Natural {
@@ -76,6 +90,7 @@ impl SourceCellConvectionLaw {
     pub(crate) fn resolve(
         self,
         source: &ThermalFluidTransportState,
+        surface: Option<&ThermalFluidTransportState>,
     ) -> Result<CellConvectionLaw, ConvectionSourceError> {
         let expansion = || {
             source
@@ -93,6 +108,12 @@ impl SourceCellConvectionLaw {
                 correlation,
                 speed_m_s,
                 settings,
+            },
+            Self::ForcedSphere { speed_m_s } => CellConvectionLaw::ForcedSphere {
+                speed_m_s,
+                surface_transport: surface.ok_or(ConvectionSourceError::Invalid(
+                    "forced sphere is missing its original fluid evaluated at wall temperature",
+                ))?.transport(),
             },
             Self::VerticalPlate { gravity_m_s2 } => CellConvectionLaw::VerticalPlate {
                 gravity_m_s2,
@@ -130,6 +151,38 @@ pub struct CellConvectionMaterialSample<F> {
     pub property_temperature_k: f64,
     pub material: F,
     pub thermal: ThermalFluidTransportState,
+    /// Present for forced spheres. This is the SAME fluid at the actual wall
+    /// temperature; it has no separate thermal storage or mass.
+    pub surface: Option<SurfaceConvectionMaterialSample<F>>,
+}
+
+/// Original fluid property owner evaluated at the surface temperature.
+#[derive(Debug)]
+pub struct SurfaceConvectionMaterialSample<F> {
+    pub material: F,
+    pub thermal: ThermalFluidTransportState,
+}
+
+// One source/temperature admission for reservoir, film and surface queries.
+// Both finite-cell boundaries and reciprocal links retain the returned owner.
+pub(crate) fn material_at<F: ThermalFluidTransport, E>(
+    cell: CellId,
+    temperature_k: f64,
+    resolve: impl FnOnce() -> Result<F, E>,
+) -> Result<SurfaceConvectionMaterialSample<F>, SourceCellConvectionError<E>> {
+    let material = resolve().map_err(|source| SourceCellConvectionError::Source {
+        cell, property_temperature_k: temperature_k, source,
+    })?;
+    let thermal = material.thermal_transport_state()
+        .map_err(|error| ConvectionSourceError::Material(error.into()))?;
+    let transport = material.transport_state()
+        .map_err(|error| ConvectionSourceError::Material(error.into()))?;
+    if thermal.temperature_k() != temperature_k || thermal.transport() != transport {
+        return Err(ConvectionSourceError::Invalid(
+            "fluid source does not match the requested temperature and transport state",
+        ).into());
+    }
+    Ok(SurfaceConvectionMaterialSample { material, thermal })
 }
 
 /// Original heat-source result together with every retained material source.
@@ -177,7 +230,9 @@ impl<E: fmt::Debug> std::error::Error for SourceCellConvectionError<E> {}
 ///
 /// Call with the proposed enthalpy endpoint, not only the interval's initial
 /// state. The resolver receives the declared property temperature exactly once
-/// per cell, in CellId order. It must retain one material law across trials
+/// per primary state, in CellId order. Forced spheres additionally query the
+/// same resolver at the actual wall temperature and retain that second owner.
+/// It must retain one material law across temperatures and trials
 /// (for example a prepared `LiquidTemperatureLaw` or a fixed gas-mixture model)
 /// and preserve its pressure, composition, selected claims and source support.
 /// This generic transport interface cannot itself establish source identity.
@@ -253,37 +308,28 @@ pub fn evaluate_source_cell_convection<F: ThermalFluidTransport, E>(
                 0.5 * wall + 0.5 * binding.reference_temperature.value()
             }
         };
-        let material =
-            resolve(binding, Temperature::new(property_temperature_k)).map_err(|source| {
-                SourceCellConvectionError::Source {
-                    cell: binding.cell,
-                    property_temperature_k,
-                    source,
-                }
-            })?;
-        let snapshot = material
-            .thermal_transport_state()
-            .map_err(|error| ConvectionSourceError::Material(error.into()))?;
-        let transport = material
-            .transport_state()
-            .map_err(|error| ConvectionSourceError::Material(error.into()))?;
-        if snapshot.temperature_k() != property_temperature_k || snapshot.transport() != transport {
-            return Err(ConvectionSourceError::Invalid(
-                "fluid source does not match the requested temperature and transport state",
-            )
-            .into());
-        }
+        let primary = material_at(binding.cell, property_temperature_k, || {
+            resolve(binding, Temperature::new(property_temperature_k))
+        })?;
+        let surface = if matches!(binding.law, SourceCellConvectionLaw::ForcedSphere { .. }) {
+            check(&mut cancelled)?;
+            Some(material_at(binding.cell, wall, || {
+                resolve(binding, Temperature::new(wall))
+            })?)
+        } else { None };
         materials.push(CellConvectionMaterialSample {
             cell: binding.cell,
             property_temperature_k,
-            material,
-            thermal: snapshot,
+            material: primary.material,
+            thermal: primary.thermal,
+            surface,
         });
     }
     let mut resolved = Vec::with_capacity(ordered.len());
     for (binding, material) in ordered.iter().zip(&materials) {
         check(&mut cancelled)?;
-        let law = binding.law.resolve(&material.thermal)?;
+        let law = binding.law.resolve(&material.thermal,
+            material.surface.as_ref().map(|sample| &sample.thermal))?;
         resolved.push(MaterialConvectiveCell {
             cell: binding.cell,
             fluid: &material.thermal,

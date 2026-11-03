@@ -1,8 +1,9 @@
 //! Material-driven convection on the shared finite-cell enthalpy state.
 //!
 //! Prescribed-reservoir boundaries and reciprocal finite-fluid links use the
-//! same material/correlation owner. One original transport snapshot supplies
-//! Re or Ra, Pr and h per binding.
+//! same material/correlation owner. One primary transport snapshot supplies
+//! Re or Ra, Pr and k per binding. Forced spheres additionally retain the same
+//! fluid at wall temperature for the original viscosity correction.
 //! The original thermal owner supplies wall temperature and currently exposed
 //! area. Implicit solves evaluate every thermal trial; explicit observers
 //! re-evaluate at each native substep. Neither freezes the initial heat source.
@@ -44,6 +45,14 @@ pub enum CellConvectionLaw {
         speed_m_s: f64,
         settings: ForcedConvectionSettings,
     },
+    /// Whitaker's isolated isothermal sphere. The primary material supplies
+    /// BULK transport; this second fluid state supplies only wall viscosity.
+    /// Both states must retain one fluid, pressure, composition and source.
+    /// Use the source adapter to re-query the surface inside each heat trial.
+    ForcedSphere {
+        speed_m_s: f64,
+        surface_transport: FluidTransportState,
+    },
     /// Churchill-Chu isothermal vertical plate. Gravity is a nonnegative
     /// magnitude [m/s²]; volumetric expansion [1/K] is explicitly supplied.
     /// Negative expansion is admitted by the original vertical-plate owner.
@@ -67,6 +76,26 @@ pub enum CellConvectionLaw {
         settings: AidingVerticalPlateSettings,
         expansion_per_k: f64,
     },
+}
+
+impl CellConvectionLaw {
+    // A correlation's diameter describes the whole sphere, even when contact
+    // covers part of its surface. Neither a remaining patch nor a link may
+    // claim more than that whole surface.
+    pub(crate) fn admit_area(self, area_m2: f64, length: Length)
+        -> Result<(), ConvectionSourceError>
+    {
+        if matches!(self, Self::ForcedSphere { .. })
+            && (!length.value().is_finite() || length.value() <= 0.0
+                || !area_m2.is_finite() || area_m2 < 0.0
+                || area_m2 > core::f64::consts::PI * length.value() * length.value())
+        {
+            return Err(ConvectionSourceError::Invalid(
+                "sphere exposure needs positive diameter and area no greater than pi D squared",
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// One material source, reservoir and law on the whole currently exposed cell.
@@ -261,6 +290,7 @@ fn evaluate_bound_cells<'a>(
         check(&mut cancelled)?;
         let wall = thermal.temperature_k(binding.cell)?;
         let area = thermal.exposed_area_m2(binding.cell)?;
+        binding.law.admit_area(area, binding.characteristic_length)?;
         // Query the original source exactly once. Both group evaluation and
         // dimensional conversion below consume this same admitted snapshot.
         let transport = binding.fluid.transport_state()
@@ -315,6 +345,13 @@ pub(crate) fn evaluate_convection_state(
             }
             evaluate_forced_from_material(correlation, transport,
                 speed_m_s, length, settings).map(Some)
+        }
+        CellConvectionLaw::ForcedSphere { speed_m_s, surface_transport } => {
+            let result = evaluate_sphere_from_material(
+                transport, &surface_transport, speed_m_s, length,
+            )?;
+            let (_, nusselt, coefficient) = result.into_parts();
+            return Ok(Some(CellConvectionEvaluation { nusselt, coefficient }));
         }
         CellConvectionLaw::VerticalPlate { gravity_m_s2, expansion_per_k } => {
             natural(NaturalConvectionGeometry::VerticalPlate, gravity_m_s2, expansion_per_k)
