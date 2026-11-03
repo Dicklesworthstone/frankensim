@@ -1443,27 +1443,54 @@ fn momentum_from_kinematics(
     model: &ArticulatedModel,
     kinematics: &Kinematics,
 ) -> Result<ArticulatedMomentum, ArticulatedError> {
-    let mut momentum_world = Wrench::default();
-    let mut kinetic_energy = 0.0;
+    let mut linear = [Dd::ZERO; 3];
+    let mut angular = [Dd::ZERO; 3];
+    let mut kinetic_energy = Dd::ZERO;
     for (index, link) in model.links.iter().enumerate() {
         let velocity = kinematics.body_twist[index];
-        let momentum = link.inertia.momentum(velocity)?;
-        momentum_world = wrench_plus(
-            momentum_world,
-            momentum.transform_by(&kinematics.world_from_link[index]),
-        );
-        validate_wrench(momentum_world, "free_floating_momentum.world")?;
-        kinetic_energy += link.inertia.kinetic_energy(velocity)?;
+        let center = link.inertia.center_of_mass;
+        let linear_body =
+            (velocity.linear + velocity.angular.cross(center)).scale(link.inertia.mass);
+        let spin_body = link.inertia.inertia_com.apply(velocity.angular);
+        let pose = kinematics.world_from_link[index];
+        let linear_world = pose.rotation().rotate(linear_body)?;
+        for (sum, value) in linear
+            .iter_mut()
+            .zip([linear_world.x, linear_world.y, linear_world.z])
+        {
+            *sum = *sum + Dd::from_f64(value);
+        }
+        // A large counter-moving link or orbital term must not erase the
+        // momentum of another link or its independent central spin.
+        for moment in [
+            pose.rotation().rotate(spin_body)?,
+            pose.rotation().rotate(center.cross(linear_body))?,
+            pose.translation().cross(linear_world),
+        ] {
+            for (sum, value) in angular.iter_mut().zip([moment.x, moment.y, moment.z]) {
+                *sum = *sum + Dd::from_f64(value);
+            }
+        }
+        kinetic_energy = kinetic_energy + Dd::from_f64(link.inertia.kinetic_energy(velocity)?);
         ensure_finite_scalar(
-            kinetic_energy,
+            kinetic_energy.to_f64(),
             "free_floating_momentum.kinetic_energy",
             index,
         )?;
     }
+    let linear_momentum_world =
+        Vec3::new(linear[0].to_f64(), linear[1].to_f64(), linear[2].to_f64());
+    let angular_momentum_world = Vec3::new(
+        angular[0].to_f64(),
+        angular[1].to_f64(),
+        angular[2].to_f64(),
+    );
+    validate_vec3(linear_momentum_world, "free_floating_momentum.linear")?;
+    validate_vec3(angular_momentum_world, "free_floating_momentum.angular")?;
     Ok(ArticulatedMomentum {
-        linear_momentum_world: momentum_world.force,
-        angular_momentum_world: momentum_world.torque,
-        kinetic_energy,
+        linear_momentum_world,
+        angular_momentum_world,
+        kinetic_energy: kinetic_energy.to_f64(),
     })
 }
 
@@ -1482,10 +1509,10 @@ fn momentum_increment_from_kinematics(
         let old = before.body_twist[index];
         let new = after.body_twist[index];
         let delta = Twist::new(new.angular - old.angular, new.linear - old.linear);
-        let midpoint = old.scale(0.5).plus(new.scale(0.5));
         let center = link.inertia.center_of_mass;
         let delta_center = delta.linear + delta.angular.cross(center);
-        let midpoint_center = midpoint.linear + midpoint.angular.cross(center);
+        let old_center = old.linear + old.angular.cross(center);
+        let new_center = new.linear + new.angular.cross(center);
         let delta_linear_body = delta_center.scale(link.inertia.mass);
         let delta_spin_body = link.inertia.inertia_com.apply(delta.angular);
         let pose = before.world_from_link[index];
@@ -1508,15 +1535,33 @@ fn momentum_increment_from_kinematics(
                 *sum = *sum + Dd::from_f64(value);
             }
         }
-        for value in [
-            delta_linear_body.x * midpoint_center.x,
-            delta_linear_body.y * midpoint_center.y,
-            delta_linear_body.z * midpoint_center.z,
-            delta_spin_body.x * midpoint.angular.x,
-            delta_spin_body.y * midpoint.angular.y,
-            delta_spin_body.z * midpoint.angular.z,
-        ] {
-            energy = energy + Dd::from_f64(value);
+        for ((old, new), impulse) in [
+            old_center.x,
+            old_center.y,
+            old_center.z,
+            old.angular.x,
+            old.angular.y,
+            old.angular.z,
+        ]
+        .into_iter()
+        .zip([
+            new_center.x,
+            new_center.y,
+            new_center.z,
+            new.angular.x,
+            new.angular.y,
+            new.angular.z,
+        ])
+        .zip([
+            delta_linear_body.x,
+            delta_linear_body.y,
+            delta_linear_body.z,
+            delta_spin_body.x,
+            delta_spin_body.y,
+            delta_spin_body.z,
+        ]) {
+            energy = energy
+                + Dd::from_f64(impulse) * (Dd::from_f64(0.5 * old) + Dd::from_f64(0.5 * new));
         }
     }
     let change = ArticulatedMomentum {
@@ -1608,24 +1653,46 @@ pub fn apply_free_floating_impulses(
     let momentum_before = momentum_from_kinematics(model, &before)?;
     let momentum_after = momentum_from_kinematics(model, &after)?;
     let momentum_change = momentum_increment_from_kinematics(model, &before, &after)?;
-    let mut impulse_world = Wrench::default();
-    let mut impulse_work = 0.0;
+    let mut external = [Dd::ZERO; 6];
+    let mut work = Dd::ZERO;
     for (index, impulse) in body_impulses.iter().enumerate() {
-        impulse_world = wrench_plus(
-            impulse_world,
-            impulse.transform_by(&before.world_from_link[index]),
-        );
-        validate_wrench(impulse_world, "impulse.external_world")?;
-        let midpoint = before.body_twist[index]
-            .scale(0.5)
-            .plus(after.body_twist[index].scale(0.5));
-        impulse_work += impulse.pairing(midpoint);
-        ensure_finite_scalar(impulse_work, "impulse.work", index)?;
+        let pose = before.world_from_link[index];
+        let force = pose.rotation().rotate(impulse.force)?;
+        let torque = pose.rotation().rotate(impulse.torque)?;
+        let orbital = pose.translation().cross(force);
+        for (sum, value) in external
+            .iter_mut()
+            .zip(Wrench::new(torque, force).to_array())
+        {
+            *sum = *sum + Dd::from_f64(value);
+        }
+        for (sum, value) in external[..3]
+            .iter_mut()
+            .zip([orbital.x, orbital.y, orbital.z])
+        {
+            *sum = *sum + Dd::from_f64(value);
+        }
+        for ((old, new), applied) in before.body_twist[index]
+            .to_array()
+            .into_iter()
+            .zip(after.body_twist[index].to_array())
+            .zip(impulse.to_array())
+        {
+            work =
+                work + (Dd::from_f64(0.5 * old) + Dd::from_f64(0.5 * new)) * Dd::from_f64(applied);
+        }
+        ensure_finite_scalar(work.to_f64(), "impulse.work", index)?;
     }
     for (index, impulse) in joint_impulses.iter().enumerate() {
-        impulse_work += impulse * (0.5 * joint_velocity[index] + 0.5 * joint_velocity_after[index]);
-        ensure_finite_scalar(impulse_work, "impulse.work", index)?;
+        work = work
+            + Dd::from_f64(*impulse)
+                * (Dd::from_f64(0.5 * joint_velocity[index])
+                    + Dd::from_f64(0.5 * joint_velocity_after[index]));
+        ensure_finite_scalar(work.to_f64(), "impulse.work", index)?;
     }
+    let impulse_world = wrench_from_array(external.map(Dd::to_f64));
+    validate_wrench(impulse_world, "impulse.external_world")?;
+    let impulse_work = work.to_f64();
     let kinetic_work_residual = momentum_change.kinetic_energy - impulse_work;
     ensure_finite_scalar(kinetic_work_residual, "impulse.kinetic_work_residual", 0)?;
     Ok(FreeFloatingImpulseResponse {
