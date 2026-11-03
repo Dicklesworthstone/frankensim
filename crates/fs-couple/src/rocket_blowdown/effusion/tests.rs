@@ -897,3 +897,5 @@ fn gravity_reserve_keeps_representable_products_across_extreme_scales() {
     assert!(candidate.step().gravity_work_uncertainty_j >= 0.0);
     assert_eq!(before, saved);
 }
+
+mod trajectory;

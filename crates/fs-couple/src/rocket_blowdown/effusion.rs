@@ -13,6 +13,9 @@
 //! modeled. Fluxes and forcing are held for each first-order finite-gas step;
 //! changing temperature, composition or loads require caller time refinement.
 
+/// Bounded adaptive trajectories using the same native half-step transactions.
+pub mod trajectory;
+
 use super::GasRocketState;
 use fs_material::thermochemical_gas::energy::parcel::transfer::{
     snapshot::MAX_SNAPSHOT_TRANSFERS,

@@ -25591,3 +25591,40 @@ forcing (including disparate native masses), and complete rollback on refusal
 or cancellation. Its cumulative balances include both fluid half-cells.
 All five pair, five existing piston and seven heat tests passed native
 source-module validation; a full workspace Cargo build is not claimed.
+
+### Adaptive source-gas recoil trajectories
+
+`GasRocketState::advance_effusion_adaptive` advances a complete requested
+interval through the original loaded effusion owner. Each attempted interval
+compares one full step with two half steps, accepting only the two half steps.
+The gas discretization remains first order. Explicit dimensional tolerances and
+a relative tolerance bound the estimated local difference in temperature,
+pressure, every original species inventory, position and velocity. Mechanical
+relative scales use velocity increments and displacement beyond initial drift;
+a large coordinate origin or common boost cannot enlarge those scales.
+
+The controller deterministically halves rejected intervals and may double
+small-error accepted intervals. Only the original typed gross-withdrawal refusal
+is retried at a shorter step. Source-domain, frame, physical balance and other
+owner failures propagate. Minimum/maximum steps, attempts and accepted interval
+counts bound all work and retained history; each accepted interval stores two
+native reports. The final interval is shortened or split into a representable
+pair without silently discarding time. Nonadvancing half-step clocks, unmet
+accuracy at the minimum step, exhaustion or cancellation publish no partial
+trajectory endpoint.
+
+Compensated totals contain only accepted molecular mass, inertial exhaust
+momentum/energy, external impulse/work, signed conservation residuals and
+nonnegative gravity reserves. Original physical budgets apply per accepted
+native half step. Adaptive tolerances estimate local truncation error, with no
+certified or fixed global error budget. The complete accepted reports remain
+available for consumers needing their original source and species accounts.
+Outlets, normals and environment are held over the requested interval; the
+controller does not infer control events, resolve rotating gas, or replace the
+original thermochemical and mechanical laws.
+
+The `effusion_recoil` example retains fixed stepping by default and accepts
+optional adaptive mode plus world gravity and force vectors. Its CSV includes
+all three position, velocity and momentum components, cumulative external
+impulse/work, gravity reserves and accepted/rejected step counts. It uses the
+same explicitly synthetic gas fixture and authored aperture qualification.
