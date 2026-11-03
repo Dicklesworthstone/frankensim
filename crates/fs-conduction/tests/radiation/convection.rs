@@ -212,16 +212,21 @@ fn g0_enclosure_convection_requires_exact_trace_coverage() {
 }
 
 #[test]
-fn g0_g4_enclosure_convection_refuses_missing_law_cancellation_and_exhaustion() {
+fn g0_g4_enclosure_convection_refuses_unsupported_law_cancellation_and_exhaustion() {
     let mesh = two_disconnected_slabs();
     let enclosure = two_slab_enclosure(&mesh);
     let material = ConductivityModel::isotropic_declared(10.0).unwrap();
     let source = ScalarField::Uniform(0.0);
     for condition in [
-        ThermalBc::adiabatic(),
+        // Uniform zero Neumann flux is an admitted vacuum patch. A fixed
+        // temperature trace cannot also own a radiative natural-boundary law.
+        ThermalBc::dirichlet(400.0).unwrap(),
         ThermalBc::Robin {
             htc: ScalarField::Nodal(vec![5.0; mesh.vertex_count()]),
             t_ref: ScalarField::Uniform(300.0),
+        },
+        ThermalBc::Neumann {
+            outward_flux: ScalarField::Nodal(vec![0.0; mesh.vertex_count()]),
         },
     ] {
         let boundary = boundary(&mesh, condition);

@@ -476,3 +476,6 @@ fn mixed_enclosure_mean_control_calibrates_natural_and_air_inputs_from_one_probe
 
 #[path = "enclosure/vacuum.rs"]
 mod vacuum;
+
+#[path = "enclosure/open.rs"]
+mod open;

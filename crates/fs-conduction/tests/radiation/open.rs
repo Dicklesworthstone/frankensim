@@ -4,6 +4,111 @@ use super::*;
 use fs_conduction::radiation::{OpenDiffuseEnclosure, solve_with_open_gray_diffuse_enclosure};
 
 #[test]
+fn g1_open_radiosity_transpose_retains_the_independent_black_bath() {
+    use fs_conduction::radiation::EnclosureRadiosityLinearization;
+    let mesh = unit_mesh();
+    with_cx(|cx| {
+        for epsilon in [0.2, 1.0] {
+            let self_view = 0.75;
+            let model = OpenDiffuseEnclosure::new(cx,
+                vec![surface(&mesh, "wall", 1.0, epsilon)], vec![vec![self_view]],
+                evidence(), ViewFactorTolerance::default()).unwrap();
+            for ambient in [3.0_f64, 300.0] {
+                let temperature = 350.0_f64;
+                let bound = EnclosureRadiosityLinearization::new_open(
+                    cx, &model, &[temperature], ambient, 1e-8).unwrap();
+                let gradient = bound.pullback(cx, &[1.0], 1e-12, 32).unwrap();
+                // Eliminate all reflections independently: q = eps_eff sigma
+                // (Ts^4-Ta^4), eps_eff=eps(1-F)/(1-(1-eps)F).
+                let denominator = 1.0 - (1.0 - epsilon) * self_view;
+                let effective = epsilon * (1.0 - self_view) / denominator;
+                near(gradient.temperatures[0],
+                    4.0 * effective * STEFAN_BOLTZMANN_W_M2_K4 * temperature.powi(3), 2e-12);
+                near(gradient.ambient_temperature.unwrap(),
+                    -4.0 * effective * STEFAN_BOLTZMANN_W_M2_K4 * ambient.powi(3), 2e-12);
+                near(gradient.log_emissivities[0],
+                    epsilon * (1.0 - self_view).powi(2) / denominator.powi(2)
+                        * STEFAN_BOLTZMANN_W_M2_K4 * (temperature.powi(4) - ambient.powi(4)), 2e-12);
+                assert_eq!(gradient.temperatures.len(), 1);
+                assert_eq!(gradient.log_emissivities.len(), 1, "the black bath has no emissivity control");
+                let zero = bound.pullback(cx, &[0.0], 1e-12, 32).unwrap();
+                assert_eq!(zero.ambient_temperature, Some(0.0));
+                assert!(bound.pullback(cx, &[1.0, 0.0], 1e-12, 32).is_err(),
+                    "the bath is not an extra physical surface objective");
+            }
+        }
+    });
+}
+
+#[test]
+fn g1_open_enclosure_solid_dual_matches_an_independent_heat_balance() {
+    use fs_conduction::radiation::EnclosureRadiationGradient;
+    let mesh = unit_mesh();
+    let material = ConductivityModel::isotropic_declared(10.0).unwrap();
+    let source = ScalarField::Uniform(0.0);
+    with_cx(|cx| {
+        for h in [0.0_f64, 5.0] {
+            let boundary = ThermalBoundaryBuilder::new(&mesh)
+                .region("hot", |f| on_box_face(f.centroid[0], 0.0),
+                    ThermalBc::dirichlet(400.0).unwrap()).unwrap()
+                .region("wall", |f| on_box_face(f.centroid[0], 1.0),
+                    if h == 0.0 { ThermalBc::neumann(0.0).unwrap() }
+                    else { ThermalBc::robin(h, 300.0).unwrap() }).unwrap()
+                .adiabatic_remainder().finish().unwrap();
+            let model = OpenDiffuseEnclosure::new(cx,
+                vec![surface(&mesh, "wall", 1.0, 0.8)], vec![vec![0.25]],
+                evidence(), ViewFactorTolerance::default()).unwrap();
+            let problem = ConductionProblem {
+                mesh: &mesh, boundary: &boundary, material: &material,
+                element_materials: None, source: &source,
+            };
+            let mut config = config();
+            config.stop.residual_rtol = 1e-12;
+            let linear = LinearConfig { tolerance: 1e-9, ..config.linear };
+            let solved = solve_with_open_gray_diffuse_enclosure(cx, problem, None, &model,
+                280.0, config, CoupledRadiationConfig {
+                    max_iterations: 256, surface_temperature_atol_k: 1e-11,
+                    surface_temperature_rtol: 0.0, relaxation: 0.5,
+                }).unwrap();
+            let unchanged = solved.clone();
+            let selected = mesh.positions().iter().position(|p| p[0] == 1.0).unwrap();
+            let mut weights = vec![0.0; mesh.vertex_count()];
+            weights[selected] = 1.0;
+            let regions = if h == 0.0 { vec![] } else { vec!["wall"] };
+            let slopes = vec![0.0; regions.len()];
+            let feedback = vec![0.0; regions.len() * regions.len()];
+            let gradient = EnclosureRadiationGradient::pullback_open_with_reference_feedback(
+                cx, problem, None, linear, &solved.conduction.temperature,
+                &regions, &slopes, &feedback, &model, 280.0, 1e-8,
+                &weights, 8 * mesh.vertex_count()).unwrap();
+            assert_eq!(solved, unchanged, "the full transpose must preserve the accepted state");
+            let t = solved.conduction.temperature[selected];
+            let effective = 0.8 * 0.75 / 0.95;
+            let tangent = 10.0 + h + 4.0 * effective * STEFAN_BOLTZMANN_W_M2_K4 * t.powi(3);
+            near(gradient.ambient_temperature.unwrap(),
+                4.0 * effective * STEFAN_BOLTZMANN_W_M2_K4 * 280.0_f64.powi(3) / tangent, 2e-7);
+            near(gradient.emissivities[0],
+                -(0.75_f64 / 0.95).powi(2) * STEFAN_BOLTZMANN_W_M2_K4
+                    * (t.powi(4) - 280.0_f64.powi(4)) / tangent, 2e-7);
+            if h > 0.0 {
+                near(gradient.convection.references[0], h / tangent, 2e-7);
+                near(gradient.convection.log_htc[0], -h * (t - 300.0) / tangent, 2e-7);
+            } else {
+                assert!(gradient.convection.references.is_empty());
+            }
+            let mut stale = solved.conduction.temperature.clone();
+            stale[selected] += 0.1;
+            assert!(EnclosureRadiationGradient::pullback_open_with_reference_feedback(
+                cx, problem, None, linear, &stale, &regions, &slopes, &feedback,
+                &model, 280.0, 1e-8, &weights, 8 * mesh.vertex_count()).is_err());
+            assert!(EnclosureRadiationGradient::pullback_open_with_reference_feedback(
+                cx, problem, None, linear, &solved.conduction.temperature,
+                &regions, &slopes, &feedback, &model, 280.0, 1e-8, &weights, 0).is_err());
+        }
+    });
+}
+
+#[test]
 fn g1_open_radiosity_transpose_retains_bath_and_surface_controls_and_closed_limit() {
     use fs_conduction::radiation::EnclosureRadiosityLinearization;
     let mesh = two_disconnected_slabs();
@@ -30,6 +135,18 @@ fn g1_open_radiosity_transpose_retains_bath_and_surface_controls_and_closed_limi
             (value(0.4, 280.01)-value(0.4, 279.99))/0.02, 2e-8);
         near(gradient.log_emissivities[0]/0.4,
             (value(0.40001, 280.0)-value(0.39999, 280.0))/0.00002, 2e-8);
+        for (i, &temperature_bar) in gradient.temperatures.iter().enumerate() {
+            let response = |delta| {
+                let mut temperatures = [400.0, 300.0];
+                temperatures[i] += delta;
+                let result = model.solve(cx, &temperatures, 280.0).unwrap();
+                weights.iter().zip(&result.exchange.net_outward_flux_w_m2)
+                    .map(|(&w, &q)| w*q).sum::<f64>()
+            };
+            near(temperature_bar, (response(0.001)-response(-0.001))/0.002, 2e-8);
+        }
+        let cancelled = with_cancelled_cx(|cx| bound.pullback(cx, &weights, 1e-11, 32));
+        assert!(matches!(cancelled, Err(ConductionError::Cancelled { .. })));
         let zero = bound.pullback(cx, &[0.0; 2], 1e-11, 32).unwrap();
         assert_eq!(zero.ambient_temperature, Some(0.0));
         assert_eq!(zero.log_emissivities, vec![0.0; 2]);
