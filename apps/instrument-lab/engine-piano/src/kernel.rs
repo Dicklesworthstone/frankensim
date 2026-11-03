@@ -503,6 +503,8 @@ impl Description {
         Self::prepare_reduction_on(preset, courses, source_band_hz, spec, false)
     }
     /// Prepare the same reduced board with geometric axial termination rows.
+    /// The attachment's complete force frame participates in the source-mode
+    /// snapshots before reduction, so axial-only motion can be retained.
     /// Unlike the linear constructor, this requires every requested key to
     /// have a resolvable bridge attachment in the supplied geometry.
     pub fn with_axial_reduction_on(preset: &steinway_d::Preset, courses: Vec<Course>, source_band_hz: f64, spec: &str) -> Result<Self, String> {
@@ -513,7 +515,23 @@ impl Description {
         let options = board_geometry::ritz::RitzOptions::parse(spec)?;
         let keys: Vec<u8> = courses.iter().map(|c| c.midi).collect();
         let geometry = board_geometry::BoardGeometry::read(&preset.geometry)?;
-        let prepared = geometry.prepare_reduced(&keys, source_band_hz, retain_axial, false, false, false, &options)?;
+        let frames = if retain_axial {
+            use crate::refmods::board_geometry::motion::{SourceBridgeFrame, SourceBridgePort};
+            Some(geometry.bridge_attachments(&keys)?.into_iter().map(|attachment| {
+                // BoardGeometry is flat: the original bridge force is vertical.
+                // Its own attachment supplies the arm and signed horizontal
+                // string axis; the other transverse direction is axis cross z.
+                let primary = SourceBridgePort { triangle: attachment.triangle,
+                    weights: attachment.weights, arm_m: attachment.arm_m,
+                    direction: [0.0, 0.0, 1.0] };
+                SourceBridgeFrame { midi: attachment.midi, primary,
+                    secondary: SourceBridgePort {
+                        direction: [attachment.axis_out[1], -attachment.axis_out[0], 0.0], ..primary },
+                    axial: Some(SourceBridgePort { direction: attachment.axis_out, ..primary }) }
+            }).collect::<Vec<_>>())
+        } else { None };
+        let prepared = geometry.prepare_reduced_with_ports(&keys, source_band_hz, retain_axial,
+            false, false, false, &options, frames.as_deref())?;
         let bridge_axial_rows = if retain_axial { Self::axial_rows(&geometry, &prepared, &keys)? }
             else { Default::default() };
         if prepared.physical_damping.is_none() {
