@@ -9,6 +9,7 @@
 //! or an arbitrary articulated collision certificate.
 
 pub mod planes;
+pub mod translating;
 
 use super::{
     ArticulatedTrajectoryConfig, ArticulatedTrajectoryError, ArticulatedTrajectoryMomentum,
@@ -18,7 +19,7 @@ use super::{
     advance_mixed_articulated_events, finite_vector, poll,
 };
 use crate::articulated::contact_geometry::{ContactGeometryError, prepare_contact_frame};
-use crate::articulated::{BaseState, JointKind, forward_kinematics};
+use crate::articulated::{BaseState, JointKind};
 use crate::articulated_contacts::friction::{
     ArticulatedFrictionalContact, ArticulatedFrictionalContactResult,
 };
@@ -38,6 +39,7 @@ use planes::{
     AcceleratingPlane, MixedSphereSceneContactKey, MixedSphereSceneEventGeometry,
     MixedSphereSceneResult, PreparedPlanes, SpherePlaneLaw,
 };
+use translating::{CentrePath, PreparedGeometry};
 
 type Impact =
     ArticulatedFrictionalContactResult<FrictionalContactResult, MixedArticulatedImpulseResponse>;
@@ -110,6 +112,15 @@ pub enum MixedSphereError {
         sphere: u64,
         plane: u64,
         time: f64,
+    },
+    /// Original Cartesian acceleration cannot resolve the admitted affine
+    /// native joint path. Residual and allowance have units of m/s².
+    UnresolvedLinkPath {
+        system_index: usize,
+        link_index: usize,
+        time: f64,
+        acceleration_residual: f64,
+        allowed_acceleration_residual: f64,
     },
     /// No nonpenetrating native endpoint/witness was found in 64 time neighbours.
     UnresolvedGeometry {
@@ -255,7 +266,7 @@ fn advance_scene(
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<MixedSphereSceneResult, MixedSphereError> {
     poll(&mut cancelled)?;
-    let (pairs, commands) = admit(
+    let geometry = PreparedGeometry::carriers(
         systems,
         spheres,
         laws,
@@ -263,6 +274,30 @@ fn advance_scene(
         controls,
         !planes.is_empty(),
     )?;
+    advance_prepared(
+        systems,
+        geometry,
+        planes,
+        plane_laws,
+        start_time_s,
+        controls,
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn advance_prepared(
+    systems: &[System<'_>],
+    geometry: PreparedGeometry,
+    planes: &[AcceleratingPlane],
+    plane_laws: &[SpherePlaneLaw],
+    start_time_s: f64,
+    controls: MixedSphereControls,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<MixedSphereSceneResult, MixedSphereError> {
+    let spheres = &geometry.spheres;
+    let pairs = &geometry.pairs;
+    let commands = &geometry.commands;
     let plane_geometry = PreparedPlanes::admit(spheres, planes, plane_laws, pairs.len())?;
     let mut states: Vec<_> = systems.iter().map(|system| system.state.clone()).collect();
     let origin = controls.trajectory.angular_origin_world;
@@ -276,17 +311,20 @@ fn advance_scene(
     let mut clock = start_time_s;
     while elapsed < controls.trajectory.duration {
         poll(&mut cancelled)?;
+        let paths = geometry.paths(systems, &states, elapsed, &mut cancelled)?;
         let horizon =
             (controls.trajectory.duration - elapsed).min(controls.trajectory.maximum_smooth_step);
         let mut encounter: Option<(f64, u64)> = None;
-        for &pair in &pairs {
+        for &pair in pairs {
             poll(&mut cancelled)?;
             work.query(controls)?;
-            let path = sphere_path(path_input(pair, spheres, &states, &commands, horizon)?)
-                .map_err(|error| MixedSphereError::Path {
-                    pair: pair.ids(),
-                    time: elapsed,
-                    error,
+            let path =
+                sphere_path(path_input(pair, spheres, &paths, horizon)?).map_err(|error| {
+                    MixedSphereError::Path {
+                        pair: pair.ids(),
+                        time: elapsed,
+                        error,
+                    }
                 })?;
             if let Some(hit) = path.first_entering_contact {
                 if hit.relative_normal_speed.abs() <= controls.trajectory.contact.velocity_tolerance
@@ -303,8 +341,7 @@ fn advance_scene(
         }
         if let Some(hit) = plane_geometry.encounter(
             spheres,
-            &states,
-            &commands,
+            &paths,
             elapsed,
             horizon,
             controls,
@@ -355,11 +392,9 @@ fn advance_scene(
             let candidate = step.as_ref().map_or(states.as_slice(), |s| &s.states_after);
             let observation = observe(
                 systems,
-                spheres,
-                &pairs,
+                &geometry,
                 &plane_geometry,
-                &commands,
-                &states,
+                &paths,
                 candidate,
                 duration,
                 elapsed,
@@ -480,11 +515,29 @@ fn admit(
     controls: MixedSphereControls,
     allow_single: bool,
 ) -> Result<(Vec<Pair>, Vec<CentreCommand>), MixedSphereError> {
+    admit_window(systems, clock, controls)?;
+    if (systems.len() < 2 && !allow_single) || systems.len() != spheres.len() {
+        return Err(MixedSphereError::Invalid(
+            "one enclosing carrier sphere per system required",
+        ));
+    }
+    let pairs = admit_pairs(spheres, laws, controls)?;
+    let commands = systems
+        .iter()
+        .zip(spheres)
+        .map(|(system, sphere)| admit_carrier(system, *sphere))
+        .collect::<Result<_, _>>()?;
+    Ok((pairs, commands))
+}
+
+fn admit_window(
+    systems: &[System<'_>],
+    clock: f64,
+    controls: MixedSphereControls,
+) -> Result<(), MixedSphereError> {
     super::event_schedule(systems.len(), &[], controls.trajectory)?;
     super::admit_states(systems, clock)?;
     if systems.is_empty()
-        || (systems.len() < 2 && !allow_single)
-        || systems.len() != spheres.len()
         || !(1..=21).contains(&controls.maximum_pairs)
         || controls.maximum_events > 64
         || !(1..=1_000_000).contains(&controls.maximum_geometry_queries)
@@ -497,7 +550,102 @@ fn admit(
             "invalid sphere scene or work bounds",
         ));
     }
-    let count = systems.len() * (systems.len() - 1) / 2;
+    Ok(())
+}
+
+fn admit_carrier(
+    system: &System<'_>,
+    sphere: ContactSphere,
+) -> Result<CentreCommand, MixedSphereError> {
+    if !sphere.radius_m.is_finite() || sphere.radius_m <= 0.0 {
+        return Err(MixedSphereError::Invalid(
+            "positive finite sphere radius required",
+        ));
+    }
+    for link in system.model.links() {
+        if link.inertia().center_of_mass() != Vec3::default()
+            || link.parent_from_child_zero().translation() != Vec3::default()
+            || !matches!(link.joint().kind(), JointKind::Fixed | JointKind::Revolute)
+        {
+            return Err(MixedSphereError::Invalid(
+                "coincident carrier origins/COMs and fixed/revolute joints required",
+            ));
+        }
+        let inertia = link.inertia();
+        let matrix = inertia.inertia_com().m;
+        let scale = matrix[0].max(matrix[4]).max(matrix[8]);
+        let rms = (scale.sqrt() / inertia.mass().sqrt())
+            * (0.5 * (matrix[0] / scale + matrix[4] / scale + matrix[8] / scale)).sqrt();
+        if !rms.is_finite() || rms > sphere.radius_m {
+            return Err(MixedSphereError::Invalid(
+                "inertia exceeds spherical enclosure",
+            ));
+        }
+    }
+    if system.loads.external_body_wrench.len() != system.model.link_count()
+        || system.loads.generalized_force.len() != system.model.dof_count()
+    {
+        return Err(MixedSphereError::Invalid(
+            "native load dimensions must match model",
+        ));
+    }
+    let command = match system.state {
+        State::Free(_) => {
+            if system.model.links()[0].joint().kind() != JointKind::Fixed
+                || system
+                    .loads
+                    .external_body_wrench
+                    .iter()
+                    .any(|w| w.force != Vec3::default())
+            {
+                return Err(MixedSphereError::Invalid(
+                    "free carrier requires a fixed root and gravity-only translation",
+                ));
+            }
+            CentreCommand {
+                acceleration_world: system.loads.gravity_world,
+                angular_velocity_world: Vec3::default(),
+            }
+        }
+        State::Prescribed(state) => {
+            if state.base.acceleration_body.angular != Vec3::default() {
+                return Err(MixedSphereError::Invalid(
+                    "prescribed carrier requires constant world angular velocity",
+                ));
+            }
+            let base = state.base;
+            CentreCommand {
+                acceleration_world: base.world_from_base.rotation().rotate(
+                    base.acceleration_body.linear
+                        + base.twist_body.angular.cross(base.twist_body.linear),
+                )?,
+                angular_velocity_world: base
+                    .world_from_base
+                    .rotation()
+                    .rotate(base.twist_body.angular)?,
+            }
+        }
+    };
+    if !finite_vector(command.acceleration_world) || !finite_vector(command.angular_velocity_world)
+    {
+        return Err(MixedSphereError::Invalid(
+            "nonfinite centre/support command",
+        ));
+    }
+    Ok(command)
+}
+
+fn admit_pairs(
+    spheres: &[ContactSphere],
+    laws: &[SpherePairLaw],
+    controls: MixedSphereControls,
+) -> Result<Vec<Pair>, MixedSphereError> {
+    if spheres.is_empty() || spheres.len() > 7 {
+        return Err(MixedSphereError::Invalid(
+            "one to seven declared spheres required",
+        ));
+    }
+    let count = spheres.len() * (spheres.len() - 1) / 2;
     if count > controls.maximum_pairs || laws.len() != count {
         return Err(MixedSphereError::Invalid(
             "complete bounded pair laws required",
@@ -508,85 +656,13 @@ fn admit(
     if ids.windows(2).any(|pair| pair[0] == pair[1]) {
         return Err(MixedSphereError::Invalid("duplicate sphere identity"));
     }
-    let mut commands = Vec::with_capacity(systems.len());
-    for (system, sphere) in systems.iter().zip(spheres) {
-        if !sphere.radius_m.is_finite() || sphere.radius_m <= 0.0 {
-            return Err(MixedSphereError::Invalid(
-                "positive finite sphere radius required",
-            ));
-        }
-        for link in system.model.links() {
-            if link.inertia().center_of_mass() != Vec3::default()
-                || link.parent_from_child_zero().translation() != Vec3::default()
-                || !matches!(link.joint().kind(), JointKind::Fixed | JointKind::Revolute)
-            {
-                return Err(MixedSphereError::Invalid(
-                    "coincident carrier origins/COMs and fixed/revolute joints required",
-                ));
-            }
-            let inertia = link.inertia();
-            let matrix = inertia.inertia_com().m;
-            let scale = matrix[0].max(matrix[4]).max(matrix[8]);
-            let rms = (scale.sqrt() / inertia.mass().sqrt())
-                * (0.5 * (matrix[0] / scale + matrix[4] / scale + matrix[8] / scale)).sqrt();
-            if !rms.is_finite() || rms > sphere.radius_m {
-                return Err(MixedSphereError::Invalid(
-                    "inertia exceeds spherical enclosure",
-                ));
-            }
-        }
-        if system.loads.external_body_wrench.len() != system.model.link_count()
-            || system.loads.generalized_force.len() != system.model.dof_count()
-        {
-            return Err(MixedSphereError::Invalid(
-                "native load dimensions must match model",
-            ));
-        }
-        let command = match system.state {
-            State::Free(_) => {
-                if system.model.links()[0].joint().kind() != JointKind::Fixed
-                    || system
-                        .loads
-                        .external_body_wrench
-                        .iter()
-                        .any(|w| w.force != Vec3::default())
-                {
-                    return Err(MixedSphereError::Invalid(
-                        "free carrier requires a fixed root and gravity-only translation",
-                    ));
-                }
-                CentreCommand {
-                    acceleration_world: system.loads.gravity_world,
-                    angular_velocity_world: Vec3::default(),
-                }
-            }
-            State::Prescribed(state) => {
-                if state.base.acceleration_body.angular != Vec3::default() {
-                    return Err(MixedSphereError::Invalid(
-                        "prescribed carrier requires constant world angular velocity",
-                    ));
-                }
-                let base = state.base;
-                CentreCommand {
-                    acceleration_world: base.world_from_base.rotation().rotate(
-                        base.acceleration_body.linear
-                            + base.twist_body.angular.cross(base.twist_body.linear),
-                    )?,
-                    angular_velocity_world: base
-                        .world_from_base
-                        .rotation()
-                        .rotate(base.twist_body.angular)?,
-                }
-            }
-        };
-        if !finite_vector(command.acceleration_world)
-            || !finite_vector(command.angular_velocity_world)
-        {
-            return Err(MixedSphereError::Invalid(
-                "nonfinite centre/support command",
-            ));
-        }
-        commands.push(command);
+    if spheres
+        .iter()
+        .any(|sphere| !sphere.radius_m.is_finite() || sphere.radius_m <= 0.0)
+    {
+        return Err(MixedSphereError::Invalid(
+            "positive finite sphere radius required",
+        ));
     }
     let mut ordered = laws.to_vec();
     ordered.sort_unstable_by_key(|law| (law.first, law.second));
@@ -626,7 +702,7 @@ fn admit(
             law: *law,
         });
     }
-    Ok((pairs, commands))
+    Ok(pairs)
 }
 
 fn base(state: &State) -> BaseState {
@@ -651,24 +727,22 @@ fn coordinates(value: Vec3) -> [f64; 3] {
 fn path_input(
     pair: Pair,
     spheres: &[ContactSphere],
-    states: &[State],
-    commands: &[CentreCommand],
+    centres: &[CentrePath],
     duration: f64,
 ) -> Result<AcceleratedSphereInput, MixedSphereError> {
     Ok(AcceleratedSphereInput {
         motion: SweptSphereInput {
             relative_position_world: coordinates(
-                base(&states[pair.first]).world_from_base.translation()
-                    - base(&states[pair.second]).world_from_base.translation(),
+                centres[pair.first].position_world - centres[pair.second].position_world,
             ),
             relative_velocity_world: coordinates(
-                centre_velocity(&states[pair.first])? - centre_velocity(&states[pair.second])?,
+                centres[pair.first].velocity_world - centres[pair.second].velocity_world,
             ),
             radius_sum: spheres[pair.first].radius_m + spheres[pair.second].radius_m,
             duration_s: duration,
         },
         relative_acceleration_world: coordinates(
-            commands[pair.first].acceleration_world - commands[pair.second].acceleration_world,
+            centres[pair.first].acceleration_world - centres[pair.second].acceleration_world,
         ),
     })
 }
@@ -684,10 +758,16 @@ fn support_path(
         .rotation()
         .rotate(initial.twist_body.linear)?;
     let sample = |time: f64| -> Result<BaseState, PrescribedBaseMotionError> {
-        let rotation = So3::exp(So3Tangent {
-            angular: command.angular_velocity_world.scale(time),
-        })?
-        .compose(initial.world_from_base.rotation())?;
+        let rotation = if command.angular_velocity_world == Vec3::default() {
+            // A translating support retains the exact stored orientation;
+            // composing an identity must not re-round a fixed guide frame.
+            initial.world_from_base.rotation()
+        } else {
+            So3::exp(So3Tangent {
+                angular: command.angular_velocity_world.scale(time),
+            })?
+            .compose(initial.world_from_base.rotation())?
+        };
         let position = initial.world_from_base.translation()
             + velocity.scale(time)
             + command.acceleration_world.scale(time).scale(0.5 * time);
@@ -718,11 +798,9 @@ struct Observation {
 #[allow(clippy::too_many_arguments)]
 fn observe(
     systems: &[System<'_>],
-    spheres: &[ContactSphere],
-    pairs: &[Pair],
+    geometry: &PreparedGeometry,
     planes: &PreparedPlanes,
-    commands: &[CentreCommand],
-    before: &[State],
+    before: &[CentrePath],
     after: &[State],
     duration: f64,
     elapsed: f64,
@@ -731,30 +809,16 @@ fn observe(
     work: &mut Work,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Option<Observation>, MixedSphereError> {
-    let mut roots = Vec::new();
-    let mut kinematics = Vec::new();
-    if event_pair.is_some() {
-        for (index, (system, state)) in systems.iter().zip(after).enumerate() {
-            poll(cancelled)?;
-            let input = state.contact_system(system.model);
-            let native = forward_kinematics(
-                system.model,
-                base(state),
-                input.joint_position,
-                input.joint_velocity,
-            )
-            .map_err(|error| ArticulatedTrajectoryError::Contact {
-                event_index: 0,
-                time: elapsed + duration,
-                error: ArticulatedContactError::Dynamics {
-                    system_index: index,
-                    error,
-                },
-            })?;
-            roots.push(native.world_from_link[0]);
-            kinematics.push(native);
-        }
-    }
+    let spheres = &geometry.spheres;
+    let pairs = &geometry.pairs;
+    let snapshot = geometry.snapshot(
+        systems,
+        after,
+        event_pair.is_some(),
+        elapsed + duration,
+        cancelled,
+    )?;
+    let kinematics = &snapshot.kinematics;
     let mut observation = Observation {
         contacts: Vec::new(),
         keys: Vec::new(),
@@ -764,22 +828,22 @@ fn observe(
     for &pair in pairs {
         poll(cancelled)?;
         work.query(controls)?;
-        let path = sphere_path(path_input(pair, spheres, before, commands, duration)?).map_err(
-            |error| MixedSphereError::Path {
+        let path = sphere_path(path_input(pair, spheres, before, duration)?).map_err(|error| {
+            MixedSphereError::Path {
                 pair: pair.ids(),
                 time: elapsed,
                 error,
-            },
-        )?;
-        let relative = base(&after[pair.first]).world_from_base.translation()
-            - base(&after[pair.second]).world_from_base.translation();
+            }
+        })?;
+        let relative = snapshot.centres[pair.first].position_world
+            - snapshot.centres[pair.second].position_world;
         // Admit the ACTUAL native endpoint through the same geometry owner
         // that starts the next interval. Its deterministic norm can differ by
         // an ULP from std::hypot, and the native centre subtraction need not
         // equal the analytic path's rounded endpoint. Retry an earlier time
         // rather than publish a state the next original query would penetrate.
         work.query(controls)?;
-        let endpoint = match sphere_path(path_input(pair, spheres, after, commands, 0.0)?) {
+        let endpoint = match sphere_path(path_input(pair, spheres, &snapshot.centres, 0.0)?) {
             Ok(path) => path,
             Err(SweptSphereError::InitialPenetration) => return Ok(None),
             Err(error) => {
@@ -804,16 +868,24 @@ fn observe(
             work.query(controls)?;
             let normal = unit_normal(relative)
                 .map_err(|_| MixedSphereError::Invalid("unresolvable sphere normal"))?;
-            let first_arm = roots[pair.first]
-                .rotation()
-                .inverse()
-                .rotate(normal.scale(-spheres[pair.first].radius_m))?;
-            let second_arm = roots[pair.second]
-                .rotation()
-                .inverse()
-                .rotate(normal.scale(spheres[pair.second].radius_m))?;
-            let first_point = roots[pair.first].transform_point(first_arm)?;
-            let second_point = roots[pair.second].transform_point(second_arm)?;
+            let first_centre = geometry.attachments[pair.first].centre;
+            let second_centre = geometry.attachments[pair.second].centre;
+            let first_pose =
+                kinematics[first_centre.system_index].world_from_link[first_centre.link_index];
+            let second_pose =
+                kinematics[second_centre.system_index].world_from_link[second_centre.link_index];
+            let first_arm = first_centre.point_body
+                + first_pose
+                    .rotation()
+                    .inverse()
+                    .rotate(normal.scale(-spheres[pair.first].radius_m))?;
+            let second_arm = second_centre.point_body
+                + second_pose
+                    .rotation()
+                    .inverse()
+                    .rotate(normal.scale(spheres[pair.second].radius_m))?;
+            let first_point = first_pose.transform_point(first_arm)?;
+            let second_point = second_pose.transform_point(second_arm)?;
             let material_gap = normal.dot(first_point - second_point);
             if !material_gap.is_finite() {
                 return Err(MixedSphereError::Invalid("nonfinite actual sphere witness"));
@@ -831,14 +903,12 @@ fn observe(
                 let contact = ArticulatedFrictionalContact {
                     id: pair.id,
                     point: LinkContactPoint {
-                        system_index: pair.first,
-                        link_index: 0,
                         point_body: first_arm,
+                        ..first_centre
                     },
                     other: ContactCounterpart::Body(LinkContactPoint {
-                        system_index: pair.second,
-                        link_index: 0,
                         point_body: second_arm,
+                        ..second_centre
                     }),
                     normal_world: relative,
                     tangent_world: normal.cross(axis),
@@ -858,7 +928,7 @@ fn observe(
                     contact.normal_world,
                     contact.tangent_world,
                     pair.id as usize,
-                    &kinematics,
+                    kinematics,
                 ) {
                     Ok(_) => {}
                     Err(ContactGeometryError::NonCollinearContact { .. }) => return Ok(None),
@@ -881,10 +951,10 @@ fn observe(
     }
     if !planes.observe(
         spheres,
+        &geometry.attachments,
         before,
-        after,
-        commands,
-        &kinematics,
+        &snapshot.centres,
+        kinematics,
         duration,
         elapsed,
         event_pair.is_some(),

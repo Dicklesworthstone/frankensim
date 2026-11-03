@@ -5949,3 +5949,56 @@ and atomic condition/rank/energy/speed/cancellation refusals. Source/API and
 independent mathematical review were completed. Native compilation, execution
 of these regressions, and pinned formatting are **UNRUN** in this increment:
 executor replacement removed the Rust toolchain and cached native environment.
+
+
+## Automatic contact on translating articulated links
+
+`articulated_contacts::trajectory::mixed::spheres::translating::advance_translating_sphere_scene`
+accepts explicit `SceneSphere::TranslatingLink` surfaces alongside the existing
+balanced `Carrier` geometry. Link surfaces attach to original native
+material-point frames; their radii do not infer enclosure of link inertia or
+omitted shapes. Each system uses one geometry mode. At most one sphere belongs
+to a connected component of fixed joints, and every declared sphere pair and
+sphere/plane pair has an explicit law, including distinct moving links within
+the same tree.
+
+Translating links require a prescribed base with exactly zero angular velocity
+and angular acceleration, constant world translational acceleration, and
+fixed/prismatic joints. Arbitrary fixed frame offsets/rotations, COM offsets,
+full inertias, serial or branched topology, held native joint efforts/body
+wrenches and world gravity retain their original meanings. Fixed link
+orientations make the prismatic mass matrix constant. Native ABA and the
+original point-motion map supply complete quadratic centre paths with genuine
+cross-link mass coupling and finite recoil.
+
+Before discovery, DD accumulation of original fixed joint axes times native
+generalized accelerations, plus base acceleration, independently checks the
+Cartesian acceleration. `UnresolvedLinkPath` refuses unresolved gravity/support
+cancellation at the physical acceleration scale; it never substitutes a
+repaired acceleration. Native joint admission also bounds interior coordinate
+extrema: for a turning time t* in (0,h), q(t*)=q0+v0*t*/2 lies between q0 and
+the existing midpoint predictor q0+v0*h/2. Initial/predictor/endpoint admission
+therefore suffices without additional synthetic FK passes.
+
+The shared original sphere/ballistic owners check complete paths. Actual native
+endpoints and regenerated material witnesses retain strict nonpenetration and
+bounded earlier-time retries. Simultaneous native contact retains joint/base
+coupling, six-component support impulses, signed actuator/plane/base work, and
+actual DD momentum/energy accounts. Limits, cancellation or late failure
+publish no partial state. Existing bounds remain: seven spheres, 21 body
+pairs, 21 planes, native link limits, 64 events, and explicit smooth-attempt
+and geometry-query budgets; active-contact overflow refuses.
+
+Coverage is floating analytic and applies only to configured spherical
+surfaces. Rotating offset/revolute/helical link paths, omitted shapes, arbitrary
+support commands, sustained contact, interval-certified CCD and thermal
+allocation remain outside this entry.
+
+Seven groups in `tests/articulated_translating_sphere_scene.rs` passed using
+the original numerical owners in a bounded native Rust test graph: offset
+drive/conveyor reactions, nonorthogonal serial mass coupling, same-tree
+contact, mixed free recoil/covariance, hidden quadratic entry, atomic
+joint-limit/cancellation refusal, and a finite-data gravity-cancellation
+no-miss adversary. The twelve existing mixed sphere and sphere/plane groups
+also passed. Formatting of all four changed source/test files passed. This
+validation does not claim a full-workspace or DSR run.

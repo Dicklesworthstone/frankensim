@@ -5,10 +5,10 @@
 //! instantaneous plane motion. The parent supplies the original native smooth
 //! dynamics, one simultaneous body/plane impact and DD window accounting.
 
+use super::translating::{CentrePath, SphereAttachment};
 use super::{
-    CentreCommand, ContactSphere, MixedArticulatedTrajectoryResult, MixedSphereControls,
-    MixedSphereError, Observation, SpherePairLaw, State, System, Work, base, centre_velocity,
-    finite_vector, poll,
+    ContactSphere, MixedArticulatedTrajectoryResult, MixedSphereControls, MixedSphereError,
+    Observation, SpherePairLaw, System, Work, finite_vector, poll,
 };
 use crate::articulated::Kinematics;
 use crate::articulated::contact_geometry::prepare_contact_frame;
@@ -264,18 +264,16 @@ impl PreparedPlanes {
         &self,
         pair: PlanePair,
         sphere: ContactSphere,
-        state: &State,
-        command: CentreCommand,
+        centre: CentrePath,
         sample: PlaneSample,
         duration: f64,
     ) -> Result<BallisticContactInput, MixedSphereError> {
         let normal = self.normals[pair.plane];
         Ok(BallisticContactInput {
-            gap: normal.dot(base(state).world_from_base.translation() - sample.point)
-                - sphere.radius_m,
-            relative_normal_speed: normal.dot(centre_velocity(state)? - sample.velocity),
+            gap: normal.dot(centre.position_world - sample.point) - sphere.radius_m,
+            relative_normal_speed: normal.dot(centre.velocity_world - sample.velocity),
             relative_normal_acceleration: normal
-                .dot(command.acceleration_world - self.planes[pair.plane].acceleration_world),
+                .dot(centre.acceleration_world - self.planes[pair.plane].acceleration_world),
             duration_s: duration,
         })
     }
@@ -284,8 +282,7 @@ impl PreparedPlanes {
     pub(super) fn encounter(
         &self,
         spheres: &[ContactSphere],
-        states: &[State],
-        commands: &[CentreCommand],
+        centres: &[CentrePath],
         elapsed: f64,
         horizon: f64,
         controls: MixedSphereControls,
@@ -300,8 +297,7 @@ impl PreparedPlanes {
             let input = self.input(
                 pair,
                 spheres[pair.sphere],
-                &states[pair.sphere],
-                commands[pair.sphere],
+                centres[pair.sphere],
                 samples[pair.plane],
                 horizon,
             )?;
@@ -338,9 +334,9 @@ impl PreparedPlanes {
     pub(super) fn observe(
         &self,
         spheres: &[ContactSphere],
-        before: &[State],
-        after: &[State],
-        commands: &[CentreCommand],
+        attachments: &[SphereAttachment],
+        before: &[CentrePath],
+        after: &[CentrePath],
         kinematics: &[Kinematics],
         duration: f64,
         elapsed: f64,
@@ -358,8 +354,7 @@ impl PreparedPlanes {
             let input = self.input(
                 pair,
                 spheres[pair.sphere],
-                &before[pair.sphere],
-                commands[pair.sphere],
+                before[pair.sphere],
                 first[pair.plane],
                 duration,
             )?;
@@ -376,9 +371,8 @@ impl PreparedPlanes {
                 }
             }
             let normal = self.normals[pair.plane];
-            let actual_gap = normal.dot(
-                base(&after[pair.sphere]).world_from_base.translation() - last[pair.plane].point,
-            ) - spheres[pair.sphere].radius_m;
+            let actual_gap = normal.dot(after[pair.sphere].position_world - last[pair.plane].point)
+                - spheres[pair.sphere].radius_m;
             if !path_gap.is_finite() || !actual_gap.is_finite() {
                 return Err(MixedSphereError::Invalid(
                     "nonfinite complete sphere/plane path gap",
@@ -390,17 +384,18 @@ impl PreparedPlanes {
             }
             if event && actual_gap <= controls.event_gap_tolerance_m {
                 work.query(controls)?;
-                let root = kinematics[pair.sphere].world_from_link[0];
-                let arm = root
-                    .rotation()
-                    .inverse()
-                    .rotate(normal.scale(-spheres[pair.sphere].radius_m))?;
+                let centre = attachments[pair.sphere].centre;
+                let pose = kinematics[centre.system_index].world_from_link[centre.link_index];
+                let arm = centre.point_body
+                    + pose
+                        .rotation()
+                        .inverse()
+                        .rotate(normal.scale(-spheres[pair.sphere].radius_m))?;
                 let contact = ArticulatedFrictionalContact {
                     id: pair.id,
                     point: LinkContactPoint {
-                        system_index: pair.sphere,
-                        link_index: 0,
                         point_body: arm,
+                        ..centre
                     },
                     other: ContactCounterpart::PrescribedPlane {
                         point_world: last[pair.plane].point,
