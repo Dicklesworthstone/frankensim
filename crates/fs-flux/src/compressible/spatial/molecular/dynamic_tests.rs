@@ -5,6 +5,9 @@ use crate::compressible::spatial::molecular::sgs::{
 };
 use fs_lbm::sgs3::dynamic::{DynamicSgsError, PeriodicDynamicSgs};
 
+#[path = "dynamic/channel_tests.rs"]
+mod channel;
+
 fn config(averaging: DynamicAveraging) -> DynamicSubgridConfig {
     DynamicSubgridConfig {
         model: DynamicSgsConfig {

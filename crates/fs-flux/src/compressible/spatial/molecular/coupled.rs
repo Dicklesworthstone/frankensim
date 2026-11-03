@@ -131,6 +131,52 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
         self.molecular.dynamic_thermal_subgrid_config()
     }
 
+    /// Fit independent channel stress/heat through both original molecular
+    /// halves. Explicit lower/upper no-slip walls retain molecular wall heat,
+    /// prescribed wall work and the complete conservative interval transaction.
+    #[cfg(feature = "experimental-sgs")]
+    pub fn with_channel_dynamic_thermal_sgs(
+        flow: Euler3d,
+        law: L,
+        config: sgs::ChannelDynamicThermalSubgridConfig,
+        walls: [MolecularWall3d; 2],
+        maximum_subgrid_workspace_bytes: usize,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, MolecularError> {
+        poll(&mut cancelled)?;
+        config.validate()?;
+        let normal = sgs::channel_axis(&flow.grid, flow.boundaries)?;
+        let required =
+            MolecularTransport3d::<L>::required_channel_dynamic_thermal_sgs_workspace_bytes(&flow)?;
+        if required > maximum_subgrid_workspace_bytes {
+            return Err(fs_lbm::sgs3::dynamic::DynamicSgsError::WorkspaceBytes {
+                required,
+                maximum: maximum_subgrid_workspace_bytes,
+            }
+            .into());
+        }
+        let mut result = Self::new(flow, law, &mut cancelled)?;
+        for (side, wall) in walls.into_iter().enumerate() {
+            result = result.with_wall(BoundarySide::ALL[2 * normal + side], wall)?;
+        }
+        result.molecular.sgs = Some(sgs::SubgridTransport::new_channel_dynamic_thermal(
+            &result.accepted,
+            config,
+            &result.molecular.walls,
+            maximum_subgrid_workspace_bytes,
+        )?);
+        poll(&mut cancelled)?;
+        Ok(result)
+    }
+
+    /// Exact channel controls; other closure geometries return None.
+    #[cfg(feature = "experimental-sgs")]
+    pub fn channel_dynamic_thermal_subgrid_config(
+        &self,
+    ) -> Option<sgs::ChannelDynamicThermalSubgridConfig> {
+        self.molecular.channel_dynamic_thermal_subgrid_config()
+    }
+
     /// Exact local controls; `None` for molecular-only or dynamic SGS flow.
     #[cfg(feature = "experimental-sgs")]
     pub fn subgrid_config(&self) -> Option<sgs::SubgridConfig> {

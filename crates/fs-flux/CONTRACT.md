@@ -1432,6 +1432,50 @@ per-cell storage. This remains a periodic low-Mach gradient-diffusion
 exploration model; it does not close all filtered compressible energy terms
 or qualify arbitrary cell aspect ratios or turbulent DNS agreement.
 
+### Dynamic stress and heat in resolved planar gas channels
+
+With `experimental-sgs`, both frozen-gas molecular owners expose
+`with_channel_dynamic_thermal_sgs` and
+`ChannelDynamicThermalSubgridConfig { momentum, heat }`. Admission requires a
+fixed uniform Cartesian grid, at least three cells on every axis, two periodic
+directions and one reflecting wall pair. The three constant cell widths may
+differ. The caller supplies explicit lower/upper `MolecularWall3d::NoSlip`
+conditions: finite tangential wall velocities and adiabatic or source-admitted
+isothermal temperatures. Each preparation reads the current owner walls, so
+later valid `with_wall` changes participate in the fit; changing an active
+channel wall to slip refuses.
+
+The shared channel Favre--Germano core test-filters only the homogeneous
+periodic plane with a nine-cell box and averages each fit's numerator and
+denominator over that plane. Physical directional derivatives retain all three
+cell widths and the current half-cell wall conditions. Adiabatic temperature
+uses the physical zero-normal-gradient condition without imposing that
+condition on its variable-density Favre-filtered field. Momentum viscosity
+and temperature diffusivity are fitted independently; zero eddy viscosity does
+not disable heat. Negative fits follow the core's zero-backscatter policy;
+positive coefficient and eddy/molecular bounds refuse instead of clipping.
+
+Interior faces use the original conservative stress, stress work and heat
+operator, adding `mean(rho*nu_t)` to shear viscosity and
+`mean(rho*alpha_t)*Cp(T_face)` to conductivity from the original caloric source.
+The original molecular bulk viscosity is retained. Modeled stress and heat
+vanish at the physical wall: the native molecular half-cell traction, Fourier
+heat and prescribed-wall-velocity work remain their sole owners. Fits and total
+parabolic estimates are refreshed at every original SSP stage and retry,
+including both molecular halves of `MolecularEuler3d`. The existing complete
+interval transaction owns accepted cells, time, reports and boundary impulses;
+no separate heating source or acceptance path is introduced.
+
+The caller's additional SGS capacity budget covers all filter, primitive
+staging and coefficient arrays: nominally 256 bytes/cell, excluding existing
+molecular/Euler workspaces, fixed metadata and allocator overhead. These arrays
+are reused without per-stage allocation. Periodic constructors keep their
+existing geometry and numerical arithmetic. This is a low-Mach resolved-wall
+exploration model requiring adequate normal resolution; it supplies no
+coarse-grid wall function, curved/open channel treatment, SGS kinetic-energy
+equation, compressible pressure-dilatation or shock closure. Acceptance renders
+refuse, and no turbulent DNS or arbitrary-aspect-ratio accuracy is established.
+
 ### Evolving composition on the shared Cartesian discretization
 
 `compressible::mixture::MixtureEuler2d` advances every canonical species mass

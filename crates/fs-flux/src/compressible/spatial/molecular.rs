@@ -147,6 +147,17 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                 "wall requires a reflecting Euler side",
             ));
         }
+        #[cfg(feature = "experimental-sgs")]
+        if matches!(wall, MolecularWall3d::SlipAdiabatic)
+            && self
+                .sgs
+                .as_ref()
+                .is_some_and(sgs::SubgridTransport::requires_no_slip_wall)
+        {
+            return Err(MolecularError::Invalid(
+                "channel dynamic transport requires no-slip walls",
+            ));
+        }
         if let MolecularWall3d::NoSlip { velocity, thermal } = wall {
             if velocity.iter().any(|v| !v.is_finite()) || velocity[side.axis()] != 0.0 {
                 return Err(MolecularError::Invalid(
@@ -490,7 +501,7 @@ fn spatial<L: TransportLaw>(
     }
     #[cfg(feature = "experimental-sgs")]
     if let Some(sgs) = subgrid.as_mut() {
-        sgs.prepare(primitive, gradient, cancelled)?;
+        sgs.prepare(primitive, gradient, walls, cancelled)?;
     }
     let mut maximum_diffusivity: f64 = 0.0;
     for axis in 0..3 {

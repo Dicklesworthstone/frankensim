@@ -70,7 +70,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
     }
 }
 
-fn required_bytes(cells: usize) -> Result<usize, MolecularError> {
+pub(super) fn required_bytes(cells: usize) -> Result<usize, MolecularError> {
     let fields =
         cells
             .checked_mul(7 * core::mem::size_of::<f64>())
@@ -89,9 +89,15 @@ pub(super) struct DynamicThermalTransport {
     pub(super) config: DynamicThermalSubgridConfig,
     momentum: PeriodicDynamicSgs,
     heat: PeriodicDynamicScalar,
-    density: Vec<f64>,
-    velocity: Vec<[f64; 3]>,
-    temperature: Vec<f64>,
+    work: ThermalWorkspace,
+}
+
+/// Same-stage primitive staging and conservative coefficients shared by the
+/// periodic and channel fits. Geometry remains with each paired filter owner.
+pub(super) struct ThermalWorkspace {
+    pub(super) density: Vec<f64>,
+    pub(super) velocity: Vec<[f64; 3]>,
+    pub(super) temperature: Vec<f64>,
     rho_diffusivity: Vec<f64>,
 }
 
@@ -113,20 +119,13 @@ impl SubgridTransport {
                 maximum_bytes,
             )?,
             heat: PeriodicDynamicScalar::new(flow.grid.shape, maximum_bytes)?,
-            density: allocated(n, 0.0)?,
-            velocity: allocated(n, [0.0; 3])?,
-            temperature: allocated(n, 0.0)?,
-            rho_diffusivity: allocated(n, 0.0)?,
+            work: ThermalWorkspace::new(n)?,
         };
         let dynamic_viscosity = allocated(n, 0.0)?;
         let bytes = closure.momentum.workspace_bytes()
             + closure.heat.workspace_bytes()
-            + (closure.density.capacity()
-                + closure.temperature.capacity()
-                + closure.rho_diffusivity.capacity()
-                + dynamic_viscosity.capacity())
-                * core::mem::size_of::<f64>()
-            + closure.velocity.capacity() * core::mem::size_of::<[f64; 3]>();
+            + closure.work.workspace_bytes()
+            + dynamic_viscosity.capacity() * core::mem::size_of::<f64>();
         dynamic::admit_bytes(bytes, maximum_bytes)?;
         Ok(Self {
             closure: SubgridClosure::DynamicThermal(closure),
@@ -142,6 +141,77 @@ impl DynamicThermalTransport {
         dynamic_viscosity: &mut [f64],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), MolecularError> {
+        self.work.stage(primitive, cancelled)?;
+        self.momentum.prepare_with_scalar(
+            self.config.momentum,
+            self.config.heat,
+            &self.work.density,
+            &self.work.velocity,
+            &self.work.temperature,
+            &mut self.heat,
+            &mut *cancelled,
+        )?;
+        self.work.store_transport(
+            primitive,
+            self.momentum.viscosities(),
+            self.heat.diffusivities(),
+            dynamic_viscosity,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn face_coefficients(
+        &self,
+        gas: &FrozenGas,
+        left: usize,
+        right: usize,
+        axis: usize,
+        face: usize,
+        temperature: f64,
+        pressure: f64,
+        mu_t: f64,
+        molecular_mu: f64,
+        molecular_conductivity: f64,
+    ) -> Result<(f64, f64), MolecularError> {
+        self.work.face_coefficients(
+            gas,
+            left,
+            right,
+            axis,
+            face,
+            temperature,
+            pressure,
+            mu_t,
+            molecular_mu,
+            molecular_conductivity,
+            self.config.momentum.maximum_eddy_to_molecular,
+            self.config.heat.maximum_diffusivity_to_molecular,
+        )
+    }
+}
+
+impl ThermalWorkspace {
+    pub(super) fn new(cells: usize) -> Result<Self, MolecularError> {
+        Ok(Self {
+            density: allocated(cells, 0.0)?,
+            velocity: allocated(cells, [0.0; 3])?,
+            temperature: allocated(cells, 0.0)?,
+            rho_diffusivity: allocated(cells, 0.0)?,
+        })
+    }
+
+    pub(super) fn workspace_bytes(&self) -> usize {
+        (self.density.capacity() + self.temperature.capacity() + self.rho_diffusivity.capacity())
+            * core::mem::size_of::<f64>()
+            + self.velocity.capacity() * core::mem::size_of::<[f64; 3]>()
+    }
+
+    pub(super) fn stage(
+        &mut self,
+        primitive: &[Primitive],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), MolecularError> {
         for (cell, p) in primitive.iter().enumerate() {
             if cell % 64 == 0 {
                 poll(cancelled)?;
@@ -150,18 +220,20 @@ impl DynamicThermalTransport {
             self.velocity[cell] = p.velocity;
             self.temperature[cell] = p.temperature;
         }
-        self.momentum.prepare_with_scalar(
-            self.config.momentum,
-            self.config.heat,
-            &self.density,
-            &self.velocity,
-            &self.temperature,
-            &mut self.heat,
-            &mut *cancelled,
-        )?;
+        Ok(())
+    }
+
+    pub(super) fn store_transport(
+        &mut self,
+        primitive: &[Primitive],
+        viscosity: &[f64],
+        diffusivity: &[f64],
+        dynamic_viscosity: &mut [f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), MolecularError> {
         for (cell, ((p, &nu), mu)) in primitive
             .iter()
-            .zip(self.momentum.viscosities())
+            .zip(viscosity)
             .zip(dynamic_viscosity)
             .enumerate()
         {
@@ -169,7 +241,7 @@ impl DynamicThermalTransport {
                 poll(cancelled)?;
             }
             *mu = p.density * nu;
-            self.rho_diffusivity[cell] = p.density * self.heat.diffusivities()[cell];
+            self.rho_diffusivity[cell] = p.density * diffusivity[cell];
             if !mu.is_finite() || !self.rho_diffusivity[cell].is_finite() {
                 return Err(MolecularError::Invalid(
                     "unrepresentable dynamic thermal SGS transport",
@@ -193,6 +265,8 @@ impl DynamicThermalTransport {
         mu_t: f64,
         molecular_mu: f64,
         molecular_conductivity: f64,
+        maximum_viscosity_ratio: f64,
+        maximum_diffusivity_ratio: f64,
     ) -> Result<(f64, f64), MolecularError> {
         let rho_alpha = 0.5 * self.rho_diffusivity[left] + 0.5 * self.rho_diffusivity[right];
         if mu_t == 0.0 && rho_alpha == 0.0 {
@@ -200,12 +274,12 @@ impl DynamicThermalTransport {
         }
         if mu_t != 0.0 {
             let ratio = mu_t / molecular_mu;
-            if !ratio.is_finite() || ratio > self.config.momentum.maximum_eddy_to_molecular {
+            if !ratio.is_finite() || ratio > maximum_viscosity_ratio {
                 return Err(MolecularError::SubgridViscosityRatio {
                     axis,
                     face,
                     observed: ratio,
-                    maximum: self.config.momentum.maximum_eddy_to_molecular,
+                    maximum: maximum_viscosity_ratio,
                 });
             }
         }
@@ -223,12 +297,12 @@ impl DynamicThermalTransport {
             }
             let conductivity = rho_alpha * cp;
             let ratio = conductivity / molecular_conductivity;
-            if !ratio.is_finite() || ratio > self.config.heat.maximum_diffusivity_to_molecular {
+            if !ratio.is_finite() || ratio > maximum_diffusivity_ratio {
                 return Err(MolecularError::SubgridThermalDiffusivityRatio {
                     axis,
                     face,
                     observed: ratio,
-                    maximum: self.config.heat.maximum_diffusivity_to_molecular,
+                    maximum: maximum_diffusivity_ratio,
                 });
             }
             conductivity

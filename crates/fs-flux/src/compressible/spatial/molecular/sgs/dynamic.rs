@@ -65,7 +65,9 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
     pub fn dynamic_subgrid_config(&self) -> Option<DynamicSubgridConfig> {
         self.sgs.as_ref().and_then(|sgs| match &sgs.closure {
             SubgridClosure::Dynamic(dynamic) => Some(dynamic.config),
-            SubgridClosure::Local { .. } | SubgridClosure::DynamicThermal(_) => None,
+            SubgridClosure::Local { .. }
+            | SubgridClosure::DynamicThermal(_)
+            | SubgridClosure::ChannelDynamicThermal(_) => None,
         })
     }
 }

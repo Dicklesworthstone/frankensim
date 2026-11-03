@@ -29,6 +29,10 @@ pub use fs_lbm::sgs3::dynamic::scalar::DynamicScalarConfig;
 pub use fs_lbm::sgs3::dynamic::{DynamicAveraging, DynamicSgsConfig, DynamicSgsReport};
 mod thermal;
 pub use thermal::DynamicThermalSubgridConfig;
+mod channel;
+pub use channel::ChannelDynamicThermalSubgridConfig;
+pub(in crate::compressible::spatial) use channel::{channel_axis, channel_wall_values};
+pub use fs_lbm::sgs3::dynamic::channel::{ChannelDynamicScalarConfig, ChannelDynamicSgsConfig};
 
 /// Explicit subgrid controls; enabling the Cargo feature alone changes no flow.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -84,7 +88,9 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
     pub fn subgrid_config(&self) -> Option<SubgridConfig> {
         self.sgs.as_ref().and_then(|s| match &s.closure {
             SubgridClosure::Local { config, .. } => Some(*config),
-            SubgridClosure::Dynamic(_) | SubgridClosure::DynamicThermal(_) => None,
+            SubgridClosure::Dynamic(_)
+            | SubgridClosure::DynamicThermal(_)
+            | SubgridClosure::ChannelDynamicThermal(_) => None,
         })
     }
 }
@@ -103,9 +109,14 @@ enum SubgridClosure {
     },
     Dynamic(dynamic::DynamicTransport),
     DynamicThermal(thermal::DynamicThermalTransport),
+    ChannelDynamicThermal(channel::ChannelDynamicThermalTransport),
 }
 
 impl SubgridTransport {
+    pub(super) fn requires_no_slip_wall(&self) -> bool {
+        matches!(self.closure, SubgridClosure::ChannelDynamicThermal(_))
+    }
+
     pub(super) fn new(flow: &Euler3d, config: SubgridConfig) -> Result<Self, MolecularError> {
         let widths = flow.grid.spacing.map(|h| h * config.filter_width_factor);
         let filter_width = flow.grid.cell_volume().cbrt() * config.filter_width_factor;
@@ -128,6 +139,7 @@ impl SubgridTransport {
         &mut self,
         primitive: &[Primitive],
         gradient: &[[[f64; 3]; 3]],
+        walls: &[MolecularWall3d; 6],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), MolecularError> {
         let (config, widths, filter_width) = match &mut self.closure {
@@ -141,6 +153,9 @@ impl SubgridTransport {
             }
             SubgridClosure::DynamicThermal(dynamic) => {
                 return dynamic.prepare(primitive, &mut self.dynamic_viscosity, cancelled);
+            }
+            SubgridClosure::ChannelDynamicThermal(dynamic) => {
+                return dynamic.prepare(primitive, walls, &mut self.dynamic_viscosity, cancelled);
             }
         };
         if config.model.coefficient() == 0.0 {
@@ -193,6 +208,20 @@ impl SubgridTransport {
                 dynamic.config.model.maximum_eddy_to_molecular,
             ),
             SubgridClosure::DynamicThermal(dynamic) => {
+                return dynamic.face_coefficients(
+                    gas,
+                    left,
+                    right,
+                    axis,
+                    face,
+                    temperature,
+                    pressure,
+                    mu_t,
+                    molecular_mu,
+                    molecular_conductivity,
+                );
+            }
+            SubgridClosure::ChannelDynamicThermal(dynamic) => {
                 return dynamic.face_coefficients(
                     gas,
                     left,
