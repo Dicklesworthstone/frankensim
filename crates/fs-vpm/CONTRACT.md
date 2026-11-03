@@ -1,6 +1,7 @@
 # CONTRACT: fs-vpm
 
-Vortex particle method (2-D inviscid core): vorticity-native wake dynamics.
+Vortex particle methods: 2-D advection and viscous diffusion, plus finite-core
+connected 3-D wakes.
 
 ## Purpose and layer
 
@@ -104,10 +105,10 @@ cost/poll refusal without partial publication.
 
 ## No-claim boundaries
 
-- v0 is the INVISCID 2-D core by DIRECT `O(N²)` Biot–Savart. The FMM /
+- The original 2-D advection core uses DIRECT `O(N²)` Biot–Savart. The FMM /
   treecode acceleration for large particle counts (the whole point of the
   method at scale) is the fuller deliverable, staged.
-- Particle-strength-exchange viscosity and dynamically stretched 3-D
+- Three-dimensional particle-strength-exchange viscosity and dynamically stretched 3-D
   filaments/rings remain deferred. The connected 3-D wake's prescribed
   geometry and reduced finite-core model are specified below.
 - The HYBRID BEM+VPM airfoil (pitching/plunging unsteady lift vs Theodorsen —
@@ -123,9 +124,76 @@ cost/poll refusal without partial publication.
   establish cancellation under multi-threaded signal races or a wall-time
   latency bound.
 - Retired from v1 (owner decision 2026-09-01, bead frankensim-rc-root-q61wp.25):
-  FMM-accelerated Biot–Savart, particle-strength-exchange viscosity, remeshing,
+  FMM-accelerated Biot–Savart, 3-D particle-strength-exchange viscosity, remeshing,
   and the BEM+VPM hybrid are NOT scheduled; the promise is preserved in deferred
   epic frankensim-rc-root-q61wp.43 and un-parks only behind a consumer journey.
+
+## Conservative 2-D viscous diffusion
+
+The diffusion-focused implementation adds `diffusion::PseDiffusion` and two
+checked entries without changing the existing inviscid model:
+
+- `diffuse_with_cx(cx, particles, areas_m2, dt, steps, law, budget)` evolves
+  circulation on fixed quadrature sites.
+- `simulate_viscous_with_cx(cx, particles, areas_m2, dt, steps, core, law, budget)`
+  composes two diffusion half steps around the original checked RK4 advection.
+
+`PseDiffusion::new(nu, epsilon)` declares a constant nonnegative kinematic
+viscosity in m²/s and a positive Gaussian kernel width in metres. Every original
+particle has an independently supplied positive quadrature area in m²;
+`omega_i = Gamma_i/A_i`. The area stays with that particle under the existing
+incompressible advection. Areas, the diffusion width and the algebraic velocity
+core are distinct inputs. No material property or quadrature support is inferred
+from a particle's circulation.
+
+The spatial law is
+
+```text
+dGamma_i/dt = sum_j k_ij (A_i Gamma_j - A_j Gamma_i)
+k_ij = 4 nu exp(-|x_i-x_j|²/epsilon²) / (pi epsilon^4).
+```
+
+The Gaussian's second moment is 2 along each axis, giving the Laplacian in the
+resolved quadrature/kernel limit. This uses the positive integral-operator PSE
+construction of Degond and Mas-Gallic (1989), DOI
+`10.1090/S0025-5718-1989-0983559-9`. Each unordered pair is solved analytically:
+its vorticity difference decays as `exp(-k_ij (A_i+A_j) dt)`. A forward half
+sweep followed by the fully reversed half sweep gives second-order splitting
+at fixed sites. The moving entry uses `D(dt/2) A(dt) D(dt/2)` with the same
+circulation inventory, checked advection buffers, work meter and final acceptance.
+
+Each pair transfers equal and opposite circulation and contracts the
+vorticity range and area-weighted enstrophy. These properties hold for signed
+vorticity and for stiff diffusion without an explicit diffusion CFL or clipping,
+up to floating-point roundoff. `expm1` retains small exchanges; scaled area
+weights and a logarithmic fallback avoid spurious overflow/underflow in stiff
+or rescaled inputs. This is an integrator property, not permission to skip time
+refinement. Zero viscosity recovers the original advection bits and work counts.
+
+Successful pure-diffusion runs use `S N(N-1)` unordered pair visits; the moving
+entry adds `2 S N(N-1)` visits to the existing `4 S N²` advection visits. Identity
+diffusion skips these visits. Each visit is one logical work unit under the
+existing `VpmBudget` and ambient `Cx` budget. Pure diffusion owns one particle
+vector; coupled advection reuses the original scratch without another buffer.
+There is no dense pair matrix, pair cache, tail cutoff or per-step allocation.
+Cancellation is checked within the existing 256-work-unit bound, and failed
+input/domain/budget/finite-output checks publish no state.
+
+`tests/diffusion.rs` checks unequal-area analytical pair relaxation, signed
+maximum principle and weighted enstrophy, Gaussian/Lamb–Oseen spatial
+refinement, independent three-site temporal modes, dimensional rescaling, and
+zero/positive-viscosity coupled trajectories. These are G0/G1/G3 implementation
+checks, not measured-fluid validation or a machine-performance claim.
+
+Scope: constant-viscosity 2-D bulk diffusion on an explicitly supplied finite
+cloud. Continuum accuracy requires overlapping, sufficiently regular quadrature
+and domain padding; advection can degrade that regularity. Diffusion cannot
+populate absent sites. Remeshing, physical walls, particle insertion,
+variable-viscosity stress, 3-D stretching and viscous boundary shedding remain
+outside this entry. Pair conservation does not give exact linear/angular impulse
+on arbitrary finite clouds. The velocity core remains algebraic, not a Gaussian
+heat kernel. This bounded 2-D addition does not close the deferred 3-D/FMM/BEM
+epic or change the existing inviscid thrust-screening consumer.
 
 ## Finite-core connected 3-D wake
 

@@ -13,11 +13,15 @@
 //! and the total circulation is CONSERVED. The checked production entry point
 //! admits particle, step, pair-work, logical live-memory, and ambient `Cx` budgets
 //! before allocation, then polls cancellation inside every all-pairs sweep.
+//! The optional [`diffusion`] owner adds constant-viscosity particle-strength
+//! exchange to this same checked advection path, with explicit quadrature areas.
 
 use core::f64::consts::PI;
 use fs_exec::{AdmittedBudget, BudgetConsumption, BudgetRefusal, Cx};
 
 pub mod coarsen3d;
+/// Conservative viscous diffusion and its composition with checked advection.
+pub mod diffusion;
 pub mod farfield3d;
 pub mod filament3d;
 pub mod images3d;
@@ -54,10 +58,11 @@ impl VortexParticle {
 pub struct VpmBudget {
     /// Maximum input particles.
     pub max_particles: usize,
-    /// Maximum RK4 steps, including the zero-particle case where pair work is
+    /// Maximum time steps, including the zero-particle case where pair work is
     /// zero but step overhead is not.
     pub max_steps: usize,
-    /// Maximum source-target contributions (`4 * particles^2 * steps`).
+    /// Maximum pair visits. Advection uses `4 * particles^2 * steps`;
+    /// the diffusion entry points also charge their unordered pair sweeps.
     pub max_pair_evaluations: u64,
     /// Maximum logical peak bytes owned by the run's particle/velocity
     /// payload buffers. Allocator metadata and capacity rounding are not
@@ -86,6 +91,15 @@ impl VpmBudget {
 /// Why a checked VPM run refused admission or publication.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VpmError {
+    /// A per-particle physical field does not match the particle inventory.
+    LengthMismatch {
+        /// Name of the mismatched field.
+        field: &'static str,
+        /// Number of particles.
+        expected: usize,
+        /// Number of supplied field values.
+        actual: usize,
+    },
     /// A scalar input was NaN, infinite, or outside its admitted sign domain.
     InvalidScalar {
         /// Stable field name, including an indexed particle component when
@@ -143,6 +157,14 @@ pub enum VpmError {
 impl core::fmt::Display for VpmError {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::LengthMismatch {
+                field,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "VPM {field} needs {expected} values, received {actual}"
+            ),
             Self::InvalidScalar {
                 field,
                 bits,
@@ -203,9 +225,10 @@ impl From<BudgetRefusal> for VpmError {
 pub struct VpmRun {
     /// Final particle state, published only after the final checkpoint.
     pub particles: Vec<VortexParticle>,
-    /// Completed RK4 steps.
+    /// Completed time steps of the selected advection/diffusion path.
     pub steps_completed: usize,
-    /// Exact source-target contributions charged by the run.
+    /// Exact pair visits charged by the run: ordered source-target visits for
+    /// advection and unordered pair visits for diffusion.
     pub pair_evaluations: u64,
     /// Exact logical work charged to the ambient `Cx`: input validation and
     /// copy, pair contributions, RK4 displacement/combine work, and one
@@ -686,6 +709,19 @@ pub fn simulate_with_cx(
     core: f64,
     budget: VpmBudget,
 ) -> Result<VpmRun, VpmError> {
+    simulate_impl(cx, particles, dt, steps, core, budget, None)
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn simulate_impl(
+    cx: &Cx<'_>,
+    particles: &[VortexParticle],
+    dt: f64,
+    steps: usize,
+    core: f64,
+    budget: VpmBudget,
+    diffusion: Option<(&[f64], diffusion::PseDiffusion)>,
+) -> Result<VpmRun, VpmError> {
     if !dt.is_finite() {
         return Err(invalid_scalar("dt", dt, None));
     }
@@ -699,7 +735,27 @@ pub fn simulate_with_cx(
 
     admit_cap("particles", particles.len(), budget.max_particles)?;
     admit_cap("steps", steps, budget.max_steps)?;
-    let plan = VpmPlan::checked(particles.len(), steps)?;
+    if let Some((areas, _)) = diffusion {
+        diffusion::validate_inputs(particles.len(), areas, dt)?;
+    }
+    let active_diffusion =
+        diffusion.filter(|(_, law)| law.kinematic_viscosity_m2_s() > 0.0 && dt > 0.0);
+    let mut plan = VpmPlan::checked(particles.len(), steps)?;
+    if active_diffusion.is_some() {
+        let visits = diffusion::pair_work(particles.len(), steps, 2)?;
+        plan.pair_evaluations =
+            plan.pair_evaluations
+                .checked_add(visits)
+                .ok_or(VpmError::PlanOverflow {
+                    resource: "viscous pair evaluations",
+                })?;
+        plan.work_units = plan
+            .work_units
+            .checked_add(visits)
+            .ok_or(VpmError::PlanOverflow {
+                resource: "viscous total work",
+            })?;
+    }
     if plan.pair_evaluations > budget.max_pair_evaluations {
         return Err(VpmError::CapExceeded {
             resource: "pair evaluations",
@@ -722,6 +778,9 @@ pub fn simulate_with_cx(
     for (index, particle) in particles.iter().copied().enumerate() {
         meter.unit(&mut accountant, cx, "fs-vpm.input", || {
             validate_particle(particle, index)?;
+            if let Some((areas, _)) = diffusion {
+                diffusion::validate_area(areas[index], index)?;
+            }
             state.push(particle);
             Ok(())
         })?;
@@ -730,6 +789,19 @@ pub fn simulate_with_cx(
 
     let mut pair_evaluations = 0_u64;
     for _ in 0..steps {
+        if let Some((areas, law)) = active_diffusion {
+            diffusion::symmetric_sweep(
+                &mut state,
+                areas,
+                law,
+                dt,
+                0.25,
+                &mut pair_evaluations,
+                &mut meter,
+                &mut accountant,
+                cx,
+            )?;
+        }
         checked_velocities(
             &state,
             core2,
@@ -827,6 +899,19 @@ pub fn simulate_with_cx(
         meter.unit(&mut accountant, cx, "fs-vpm.step-commit", || Ok(()))?;
         core::mem::swap(&mut state, &mut scratch.next);
         scratch.next.clear();
+        if let Some((areas, law)) = active_diffusion {
+            diffusion::symmetric_sweep(
+                &mut state,
+                areas,
+                law,
+                dt,
+                0.25,
+                &mut pair_evaluations,
+                &mut meter,
+                &mut accountant,
+                cx,
+            )?;
+        }
         meter.boundary(&mut accountant, cx, "fs-vpm.step-complete")?;
     }
 
