@@ -23982,6 +23982,23 @@ native regressions cover an unaligned analytic translation-limit stop at cold
 and previously transferred hot sources, resticking and renewed sliding, exact
 rotating multisite native-path parity, and late outer rollback with retry.
 
+`friction_heat::rigid_cohesive::interval::apply_rigid_cohesive_interval_heat`
+composes that native interval with the existing finite-body heat network.
+Accepted per-site friction and surviving-bond viscosity sums supply heat once,
+including sliding before a final static substep; rejected stopping trials and
+fracture never become caloric heat. Original body/material/area assignments are
+shared with the fixed-step adapter. The largest normal jump over the initial
+and every accepted local endpoint must stay closed, so intermediate opening
+cannot be hidden by final reclosure. The native interval's rollback checkpoint
+encloses the thermal/source solve and final cancellation gate; both complete
+owners publish together. Whole-interval mechanical and caloric energy close
+independently. Thermal transport uses interval-average physical power and one
+backward-Euler endpoint: shorter complete intervals refine heating timing, and
+this frozen-coefficient split does not imply closed temperature feedback or
+surface-entropy closure. The focused heat/interval regression covers analytical
+stopping heat with signed body conduction, static hold and breakaway, late
+thermal/cancellation rollback, and native opening followed by reclosure.
+
 ## Independently dynamic loads in causal shell resonance
 
 `MaterialShellImage::prepare_coating_resonance_with_load` and the corresponding

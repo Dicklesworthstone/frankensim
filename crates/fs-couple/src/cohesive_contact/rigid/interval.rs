@@ -32,6 +32,9 @@ pub struct RigidCohesiveIntervalSite {
     pub viscous_dissipation_j: f64,
     pub friction_dissipation_j: f64,
     pub cohesive_spatial_work_j: f64,
+    /// Maximum over the original incoming endpoint and every accepted straight
+    /// local material path. Rejected trial paths do not contribute.
+    pub maximum_normal_jump_m: f64,
 }
 
 /// Complete requested interval. The native owner's observations retain the
@@ -78,7 +81,10 @@ impl<'a> RigidCohesiveSystem<'a> {
         duration_s: f64,
         controls: RigidCohesiveIntervalConfig,
     ) -> Result<RigidCohesiveInterval, RigidCohesiveError> {
-        self.interval_inner(loads, duration_s, controls, None)
+        self.advance_interval_with_acceptance(loads, duration_s, controls, None, |_| {
+            Ok::<(), RigidCohesiveError>(())
+        })
+        .map(|(interval, ())| interval)
     }
 
     pub fn advance_interval_under_gate(
@@ -88,16 +94,23 @@ impl<'a> RigidCohesiveSystem<'a> {
         controls: RigidCohesiveIntervalConfig,
         gate: &CancelGate,
     ) -> Result<RigidCohesiveInterval, RigidCohesiveError> {
-        self.interval_inner(loads, duration_s, controls, Some(gate))
+        self.advance_interval_with_acceptance(loads, duration_s, controls, Some(gate), |_| {
+            Ok::<(), RigidCohesiveError>(())
+        })
+        .map(|(interval, ())| interval)
     }
 
-    fn interval_inner(
+    /// An external physical owner accepts the complete native interval before
+    /// either publishes. Its callback must stage its own payload; callback or
+    /// final-cancellation refusal restores the whole original native checkpoint.
+    pub(crate) fn advance_interval_with_acceptance<P, E: From<RigidCohesiveError>>(
         &mut self,
         loads: [RigidCohesiveLoad; 2],
         duration_s: f64,
         controls: RigidCohesiveIntervalConfig,
         gate: Option<&CancelGate>,
-    ) -> Result<RigidCohesiveInterval, RigidCohesiveError> {
+        accept: impl FnOnce(&RigidCohesiveInterval) -> Result<P, E>,
+    ) -> Result<(RigidCohesiveInterval, P), E> {
         poll(gate)?;
         positive(duration_s)?;
         positive(controls.minimum_step_s)?;
@@ -108,18 +121,24 @@ impl<'a> RigidCohesiveSystem<'a> {
             || controls.maximum_total_material_evaluations == 0
             || controls.maximum_total_iterations == 0
         {
-            return Err(RigidCohesiveError::Budget(
-                "nonzero rigid interval work limits required",
-            ));
+            return Err(
+                RigidCohesiveError::Budget("nonzero rigid interval work limits required").into(),
+            );
         }
         let end_time = finite(self.time_s + duration_s)?;
         if end_time <= self.time_s || self.thermal_active {
             return Err(RigidCohesiveError::Invalid(
                 "rigid interval clock or active temperature stage",
-            ));
+            )
+            .into());
         }
         let original = Checkpoint::new(self)?;
-        let result = self.run_interval(loads, end_time, controls, gate);
+        let result: Result<(RigidCohesiveInterval, P), E> = (|| {
+            let interval = self.run_interval(loads, end_time, controls, gate)?;
+            let payload = accept(&interval)?;
+            poll(gate)?;
+            Ok((interval, payload))
+        })();
         if result.is_err() {
             original.restore(self);
         }
@@ -392,7 +411,10 @@ impl RigidCohesiveInterval {
         sites
             .try_reserve_exact(system.sites.len())
             .map_err(|_| RigidCohesiveError::Budget("interval site accounts"))?;
-        sites.resize(system.sites.len(), RigidCohesiveIntervalSite::default());
+        sites.extend(system.sites.iter().map(|site| RigidCohesiveIntervalSite {
+            maximum_normal_jump_m: site.point.numerical().material().jump_m()[0],
+            ..RigidCohesiveIntervalSite::default()
+        }));
         Ok(Self {
             initial_time_s: system.time_s,
             time_s: system.time_s,
@@ -454,6 +476,7 @@ impl RigidCohesiveInterval {
             )?;
             total.cohesive_spatial_work_j =
                 finite(total.cohesive_spatial_work_j + site.spatial_work_j)?;
+            total.maximum_normal_jump_m = total.maximum_normal_jump_m.max(site.jump_m[0]);
         }
         for body in 0..2 {
             let force = loads[body].force_world_n.add(

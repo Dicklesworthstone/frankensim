@@ -9,6 +9,9 @@ use fs_thermal::enthalpy::*;
 use std::cell::Cell;
 use std::collections::BTreeMap;
 
+#[path = "heat/interval.rs"]
+mod interval;
+
 struct Caloric;
 impl ThermalLaw for Caloric {
     fn temperature_k(&self, h: f64) -> Result<f64, DepositionError> {

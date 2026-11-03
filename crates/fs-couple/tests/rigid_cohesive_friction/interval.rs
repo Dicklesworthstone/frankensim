@@ -1,7 +1,7 @@
 //! Native interval stopping, complete path accounts and outer rollback.
 use super::*;
 
-fn controls() -> RigidCohesiveIntervalConfig {
+pub(super) fn controls() -> RigidCohesiveIntervalConfig {
     RigidCohesiveIntervalConfig {
         minimum_step_s: 1e-14,
         reversal_time_tolerance_s: 1e-12,
@@ -15,7 +15,7 @@ fn controls() -> RigidCohesiveIntervalConfig {
 
 // Finite, very large rotational inertias isolate the analytic translation limit
 // without suppressing native rotational equations or their actual work.
-fn translation_fixture<'a>(
+pub(super) fn translation_fixture<'a>(
     bond: &'a ResolvedBilinearCohesive,
     friction: &'a ResidualCoulombSource,
     incoming: f64,
@@ -188,7 +188,7 @@ fn unaligned_native_stop_preserves_current_temperature_then_resticks_and_breaks_
     }
 }
 
-fn rotating_fixture<'a>(
+pub(super) fn rotating_fixture<'a>(
     bond: &'a ResolvedBilinearCohesive,
     friction: &'a ResidualCoulombSource,
 ) -> RigidCohesiveSystem<'a> {
@@ -215,6 +215,9 @@ fn interval_retains_spread_rotating_sites_and_sums_original_native_paths() {
     let mut interval_owner = rotating_fixture(&bond, &friction);
     let mut ordinary = rotating_fixture(&bond, &friction);
     let mut sums = [RigidCohesiveIntervalSite::default(); 3];
+    for (sum, site) in sums.iter_mut().zip(ordinary.sites()) {
+        sum.maximum_normal_jump_m = site.point().numerical().material().jump_m()[0];
+    }
     for _ in 0..2 {
         ordinary.step([RigidCohesiveLoad::ZERO; 2]).unwrap();
         for (sum, site) in sums.iter_mut().zip(ordinary.site_frames()) {
@@ -223,6 +226,7 @@ fn interval_retains_spread_rotating_sites_and_sums_original_native_paths() {
             sum.viscous_dissipation_j += site.viscous_dissipation_j;
             sum.friction_dissipation_j += site.friction.unwrap().friction_dissipation_j;
             sum.cohesive_spatial_work_j += site.spatial_work_j;
+            sum.maximum_normal_jump_m = sum.maximum_normal_jump_m.max(site.jump_m[0]);
         }
     }
     let interval = interval_owner

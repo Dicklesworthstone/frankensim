@@ -23,6 +23,9 @@ use std::collections::BTreeSet;
 
 pub use super::cohesive::{CohesiveHeatConductivity, CohesiveHeatControls, CohesiveHeatSource};
 
+/// Finite-body heat across native stopping and resticking intervals.
+pub mod interval;
+
 /// Explicit map from one original native material to its thermal cells.
 /// The two entries passed to `apply_rigid_cohesive_heat` follow native A/B order.
 #[derive(Clone, Copy)]
@@ -198,60 +201,14 @@ fn apply_rigid_cohesive_heat_inner<'a, 't, P, E>(
         }
     };
     check()?;
-    if mechanical.time_s() != thermal.time_s()
-        || contacts.is_empty()
-        || contacts.len() != mechanical.sites().len()
-        || contacts.len() > controls.maximum_interfaces
-        || bodies[0].body_id == bodies[1].body_id
-        || bodies
-            .iter()
-            .zip(mechanical.bodies())
-            .any(|(a, b)| a.mechanical_material != b.material())
-    {
-        return Err(RigidCohesiveHeatError::Invalid(
-            "complete synchronized original body/site assignment required",
-        ));
-    }
-    let mut ordered: Vec<_> = contacts.iter().collect();
-    ordered.sort_by_key(|c| c.route.link_id());
-    let mut seen = BTreeSet::new();
-    for contact in &ordered {
-        check()?;
-        let site =
-            mechanical
-                .sites()
-                .get(contact.site_index)
-                .ok_or(RigidCohesiveHeatError::Invalid(
-                    "unknown original cohesive site",
-                ))?;
-        let original = site.point();
-        let point = original.numerical();
-        let area = point.area_m2();
-        let other = contact.route.contact_area_m2();
-        if !seen.insert(contact.site_index)
-            || point.material().jump_m()[0] > 0.0
-            || (area - other).abs() > 64.0 * f64::EPSILON * area.max(other)
-            || !contact.temperature_guess_k.is_finite()
-            || contact.temperature_guess_k <= 0.0
-        {
-            return Err(RigidCohesiveHeatError::Invalid(
-                "unique closed reference patches with matching face areas required",
-            ));
-        }
-        for (id, body) in contact.route.cells().into_iter().zip(&bodies) {
-            let cell = thermal
-                .cells()
-                .get(&id)
-                .ok_or(RigidCohesiveHeatError::Invalid(
-                    "missing original thermal receiver",
-                ))?;
-            if cell.body_id != body.body_id || cell.material_id != body.thermal_material {
-                return Err(RigidCohesiveHeatError::Invalid(
-                    "thermal face changed native A/B body or material assignment",
-                ));
-            }
-        }
-    }
+    let ordered = ordered_heat_contacts(
+        mechanical,
+        thermal,
+        bodies,
+        contacts,
+        controls.maximum_interfaces,
+        gate,
+    )?;
     let old_energy = mechanical.total_energy_j()?;
     let target = mechanical.next_step_time_s()?;
     let routes: Vec<_> = ordered.iter().map(|c| c.route).collect();
@@ -356,4 +313,75 @@ fn apply_rigid_cohesive_heat_inner<'a, 't, P, E>(
         combined_energy_residual_j: report.1,
         summed_energy_residual_j: report.2,
     })
+}
+
+/// Shared original body/area attachment admission for one step or an interval.
+fn ordered_heat_contacts<'c, 'r, E>(
+    mechanical: &RigidCohesiveSystem<'_>,
+    thermal: &DepositionSimulation<'_>,
+    bodies: [RigidCohesiveHeatBody<'_>; 2],
+    contacts: &'c [RigidCohesiveHeatContact<'r>],
+    maximum_interfaces: usize,
+    gate: &CancelGate,
+) -> Result<Vec<&'c RigidCohesiveHeatContact<'r>>, RigidCohesiveHeatError<E>> {
+    if gate.is_requested() {
+        return Err(DepositionError::Cancelled.into());
+    }
+    if mechanical.time_s() != thermal.time_s()
+        || contacts.is_empty()
+        || contacts.len() != mechanical.sites().len()
+        || contacts.len() > maximum_interfaces
+        || bodies[0].body_id == bodies[1].body_id
+        || bodies
+            .iter()
+            .zip(mechanical.bodies())
+            .any(|(a, b)| a.mechanical_material != b.material())
+    {
+        return Err(RigidCohesiveHeatError::Invalid(
+            "complete synchronized original body/site assignment required",
+        ));
+    }
+    let mut ordered: Vec<_> = contacts.iter().collect();
+    ordered.sort_by_key(|c| c.route.link_id());
+    let mut seen = BTreeSet::new();
+    for contact in &ordered {
+        if gate.is_requested() {
+            return Err(DepositionError::Cancelled.into());
+        }
+        let site =
+            mechanical
+                .sites()
+                .get(contact.site_index)
+                .ok_or(RigidCohesiveHeatError::Invalid(
+                    "unknown original cohesive site",
+                ))?;
+        let original = site.point();
+        let point = original.numerical();
+        let area = point.area_m2();
+        let other = contact.route.contact_area_m2();
+        if !seen.insert(contact.site_index)
+            || point.material().jump_m()[0] > 0.0
+            || (area - other).abs() > 64.0 * f64::EPSILON * area.max(other)
+            || !contact.temperature_guess_k.is_finite()
+            || contact.temperature_guess_k <= 0.0
+        {
+            return Err(RigidCohesiveHeatError::Invalid(
+                "unique closed reference patches with matching face areas required",
+            ));
+        }
+        for (id, body) in contact.route.cells().into_iter().zip(&bodies) {
+            let cell = thermal
+                .cells()
+                .get(&id)
+                .ok_or(RigidCohesiveHeatError::Invalid(
+                    "missing original thermal receiver",
+                ))?;
+            if cell.body_id != body.body_id || cell.material_id != body.thermal_material {
+                return Err(RigidCohesiveHeatError::Invalid(
+                    "thermal face changed native A/B body or material assignment",
+                ));
+            }
+        }
+    }
+    Ok(ordered)
 }
