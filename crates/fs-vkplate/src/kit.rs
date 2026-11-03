@@ -1615,6 +1615,82 @@ mod air_mode_tests {
         assert!(flipped > 1e-3, "the energy check cannot see a flipped coupling: {flipped}");
     }
 
+    /// Two point "heads" on three air modes, the first two sharing one shape with opposite signs on the
+    /// second head (an odd axial order). Every step, from the instrument's own state, a dense hand step of the
+    /// same system (each mode with its own weights) must give the instrument's air coordinates and its head
+    /// increments k^2 f / m to rounding (a few ulps of the terms; the increment also to 1e-12 of itself), and a
+    /// planted wrong sign on the shared shape must miss by orders. Energy alone cannot see a wrong shape or
+    /// sign (those couplings conserve too); a free-running trajectory comparison also carries rounding amplified
+    /// by the heads' slow motion over thousands of steps (1.2e-9 of scale here), so the comparison is per step.
+    #[test]
+    fn the_shape_factored_air_step_matches_a_dense_hand_step() {
+        let k = 1.0 / 144000.0;
+        let mass = [4.0e-3, 1.5e-3];
+        let kappa = [1.0e7, 2.0e7, 3.0e7];
+        let wt2: Vec<f64> = [600.0, 1100.0, 1900.0].iter().map(|f: &f64| (2.0 - 2.0 * (2.0 * PI * f * k).cos()) / (k * k)).collect();
+        let shape = [0usize, 0, 1];
+        let gs = [[1.2e-3, -0.7e-3], [0.9e-3, 0.4e-3]];
+        let sign = [[1.0, 1.0, 1.0], [1.0, -1.0, 1.0]];
+        let w0 = [1e-4, -0.5e-4];
+        let eps = f64::EPSILON;
+        // the largest discrepancy of the instrument's step from the dense hand step, in units of its rounding
+        // allowance, when the instrument carries `sign_b` on the second head
+        let run = |sign_b: [f64; 3]| -> f64 {
+            let mut ins = Instrument::new(144000.0);
+            let heads = [ins.add(Body::point("a", mass[0])), ins.add(Body::point("b", mass[1]))];
+            for j in 0..2 {
+                ins.bodies[heads[j]].w[0] = w0[j];
+                ins.bodies[heads[j]].wp[0] = w0[j];
+            }
+            let signs = [sign[0], sign_b];
+            ins.air_modes.push(AirModes {
+                kappa: kappa.to_vec(),
+                wt2: wt2.clone(),
+                x: vec![0.0; 3],
+                xp: vec![0.0; 3],
+                shape: shape.to_vec(),
+                heads: (0..2).map(|j| (heads[j], gs[j].to_vec(), signs[j].to_vec())).collect(),
+                y: vec![0.0; 3],
+                q: vec![0.0; 2],
+            });
+            let g = |j: usize, m: usize| sign[j][m] * gs[j][shape[m]];
+            let mut out: [f64; 0] = [];
+            let mut worst: f64 = 0.0;
+            for _ in 0..5000 {
+                let w = [0, 1].map(|j| ins.bodies[heads[j]].w[0]);
+                let wp = [0, 1].map(|j| ins.bodies[heads[j]].wp[0]);
+                let (x, xp) = (ins.air_modes[0].x.clone(), ins.air_modes[0].xp.clone());
+                let mut f = [0.0; 2];
+                let mut xn = [0.0; 3];
+                for m in 0..3 {
+                    let s = g(0, m) * w[0] + g(1, m) * w[1] - x[m];
+                    for j in 0..2 {
+                        f[j] += -kappa[m] * s * g(j, m);
+                    }
+                    xn[m] = 2.0 * x[m] - xp[m] + k * k * wt2[m] * s;
+                }
+                ins.step(&mut out);
+                for m in 0..3 {
+                    let allow = 8.0 * eps * (2.0 * x[m].abs() + xp[m].abs() + (xn[m] - 2.0 * x[m] + xp[m]).abs()) + f64::MIN_POSITIVE;
+                    worst = worst.max((ins.air_modes[0].x[m] - xn[m]).abs() / allow);
+                }
+                for j in 0..2 {
+                    let hand = k * k * f[j] / mass[j];
+                    let got = ins.bodies[heads[j]].w[0] - 2.0 * w[j] + wp[j];
+                    let allow = 1e-12 * hand.abs() + 8.0 * eps * (2.0 * w[j].abs() + wp[j].abs()) + f64::MIN_POSITIVE;
+                    worst = worst.max((got - hand).abs() / allow);
+                }
+            }
+            worst
+        };
+        let correct = run(sign[1]);
+        // planted: the shared shape's odd-order mode carries the even one's sign on the far head
+        let planted = run([1.0, 1.0, 1.0]);
+        eprintln!("factored vs dense air step, per step in rounding allowances: worst {correct:.3}; planted wrong sign {planted:.3e}");
+        assert!(correct <= 1.0, "the factored step leaves the dense step by {correct} rounding allowances");
+        assert!(planted >= 1e3, "the per-step check cannot see a wrong sign: {planted}");
+    }
+
     /// The air modes' admission term on the snare (890 modes to 8 kHz) is an upper bound on the largest
     /// eigenvalue of their Gram matrix (built densely, mode by mode, and power-iterated: a lower estimate of
     /// it), and no larger than the trace bound it replaced.
