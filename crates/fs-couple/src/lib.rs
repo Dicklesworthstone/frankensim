@@ -76,6 +76,8 @@ pub mod finite_solid;
 pub mod inelastic_impact;
 /// Original signed frame modes and power-conjugate physical vibration ports.
 pub mod frame_vibration;
+/// Finite-inertia guided walls coupled to native free-surface liquid momentum.
+pub mod free_surface_wall;
 pub mod flue_loop;
 pub mod gesture_path;
 mod gas_field_input;

@@ -56,6 +56,33 @@ fn vector_si(
 }
 
 impl MaterialFreeSurface3<'_> {
+    /// Propose one original wall-driven physical step without changing this liquid.
+    ///
+    /// Uses the identical native candidate and complete SI/source/speed/mass
+    /// admission as [`Self::step_with_planar_wall_motion_si`]. Coupled mechanics
+    /// can therefore test different wall velocities from one accepted state
+    /// without first copying its full population history a second time.
+    /// The returned candidate retains the original immutable material/scaling.
+    ///
+    /// # Errors
+    /// All original fully flooded tangent-wall, source-domain, native-step,
+    /// representability, mass and cancellation refusals remain operative.
+    pub fn planar_wall_motion_candidate_si(
+        &self,
+        wall: PlanarWall3,
+        velocity_m_s: [f64; 3],
+        maximum_relative_mass_defect: f64,
+        gate: &CancelGate,
+    ) -> Result<(Self, MaterialPlanarWallMotionReport3), MaterialLbmError> {
+        self.planar_wall_motion_candidate_inner(
+            wall,
+            velocity_m_s,
+            maximum_relative_mass_defect,
+            gate,
+            None,
+        )
+    }
+
     /// Advance the original liquid with one fully flooded moving planar wall.
     ///
     /// Velocity is prescribed tangentially in the same inertial frame as
@@ -144,7 +171,10 @@ impl MaterialFreeSurface3<'_> {
             velocity_m_s,
             maximum_relative_mass_defect,
             gate,
-            Some((maximum_density_excursion, GasPressureField3::Cell(&pressure))),
+            Some((
+                maximum_density_excursion,
+                GasPressureField3::Cell(&pressure),
+            )),
         )
     }
 
@@ -197,6 +227,25 @@ impl MaterialFreeSurface3<'_> {
         gate: &CancelGate,
         gas_pressure: Option<(f64, GasPressureField3<'_>)>,
     ) -> Result<MaterialPlanarWallMotionReport3, MaterialLbmError> {
+        let (candidate, report) = self.planar_wall_motion_candidate_inner(
+            wall,
+            velocity_m_s,
+            maximum_relative_mass_defect,
+            gate,
+            gas_pressure,
+        )?;
+        *self = candidate;
+        Ok(report)
+    }
+
+    fn planar_wall_motion_candidate_inner(
+        &self,
+        wall: PlanarWall3,
+        velocity_m_s: [f64; 3],
+        maximum_relative_mass_defect: f64,
+        gate: &CancelGate,
+        gas_pressure: Option<(f64, GasPressureField3<'_>)>,
+    ) -> Result<(Self, MaterialPlanarWallMotionReport3), MaterialLbmError> {
         if gate.is_requested() {
             return Err(FreeSurfaceError3::Cancelled.into());
         }
@@ -306,7 +355,12 @@ impl MaterialFreeSurface3<'_> {
         if gate.is_requested() {
             return Err(FreeSurfaceError3::Cancelled.into());
         }
-        self.lattice = candidate;
-        Ok(report)
+        Ok((
+            Self {
+                lattice: candidate,
+                scaling: self.scaling,
+            },
+            report,
+        ))
     }
 }

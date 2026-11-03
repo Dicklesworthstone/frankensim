@@ -793,6 +793,15 @@ impl FreeSurface3 {
         &self.grid
     }
 
+    /// Fixed complete domain dimensions, including inactive gas and solid cells.
+    /// Coupled native trials can bound plane scans and possible later tile
+    /// activation before cloning population state.
+    #[must_use]
+    pub fn domain_cells(&self) -> [usize; 3] {
+        let (nx, ny, nz) = self.grid.tile_dims();
+        [nx * TILE, ny * TILE, nz * TILE]
+    }
+
     /// The authoritative native molecular collision law. Local material/SGS
     /// relaxation does not replace this reference law.
     #[must_use]
