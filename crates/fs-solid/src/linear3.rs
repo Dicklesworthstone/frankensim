@@ -2048,6 +2048,26 @@ impl core::fmt::Display for TetElasticError {
 impl std::error::Error for TetElasticError {}
 
 impl TetLinearElasticProblem<'_> {
+    /// Check that the declared displacement supports remove all six rigid
+    /// motions of every connected component. Coupled static field solvers use
+    /// this same admission before eliminating possibly nonzero prescribed
+    /// displacements; a zero load is not evidence that a singular body is held.
+    pub fn validate_static_constraints(&self, cx: &Cx<'_>) -> Result<(), TetElasticError> {
+        cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+        self.validate_budget()?;
+        free_dof_map(
+            self.nodes_m.len(),
+            self.fixed_dofs,
+            self.budget.maximum_free_dofs,
+        )?;
+        for (element, tet) in self.tetrahedra.iter().enumerate() {
+            cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+            validate_connectivity(element, tet, self.nodes_m.len())?;
+        }
+        validate_rigid_mode_constraints(self.nodes_m, self.tetrahedra, self.fixed_dofs)?;
+        cx.checkpoint().map_err(|_| TetElasticError::Cancelled)
+    }
+
     /// Assemble reduced stiffness and consistent mass matrices.
     ///
     /// Cancellation is polled before allocation and at every element

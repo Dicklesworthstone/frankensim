@@ -12445,6 +12445,46 @@ Amplitude limits are caller-admitted model restrictions, not sourced strength
 or breakdown measurements. It is a bounded MR59 implementation, not closure
 of that bead's full tensor/electrostatic/structural qualification.
 
+## Spatial tensor piezoelectric sensors and actuators
+
+`piezoelectric::spatial::TetPiezoelectricModel` composes the original P1
+`fs-solid` stiffness/mass and `fs-em` tetrahedral dielectric weak form above
+both owners. One source-bound `TensorPiezoelectric` applies uniformly or one
+applies per tetrahedron. Every tensor must explicitly occupy the nonzero mesh
+frame. With `E=-grad(phi)`, the static system is
+`[K G; G^T -K_e] [u,phi] = [f,-q]`, where both reciprocal blocks use the same
+`G=integral B^T e^T grad(N) dV`. Prepared matrices are reusable across load
+cases; source tensors are neither reinverted nor replaced by actuator gains.
+
+`solve` accepts nodal forces, integrated volume-charge loads, prescribed
+displacement DOFs and disjoint equipotential exterior-face electrodes.
+`ElectrodeCondition::Voltage` fixes potential; `Charge` prescribes TOTAL
+electrode charge and solves its shared potential. `Charge(0)` represents an
+isolated uncharged electrode. Other exterior faces are insulating. Point
+contacts, overlapping electrodes, duplicate supports, unresolved mechanical
+rigid modes and absent voltage references on electrical components refuse.
+Potential differences remove arbitrary common voltage from fields and work.
+
+Native MINRES uses diagonal equilibration, bounded iterations/corrections and
+an independently recomputed residual. Acceptance separately checks forces in
+newtons, free-node/floating-electrode charge in coulombs, and internal storage
+against actual proportional-load ramp work in joules. Reaction work is counted
+only at prescribed coordinates; free coordinates use their imposed loads.
+Every cell must satisfy caller-declared strain-norm and electric-field bounds.
+Geometry/work budgets and `Cx` cancellation checks bound assembly/solve work;
+refusal or cancellation publishes no partial field. The solution retains
+nodal displacement/potential, cell constitutive fields, support reactions,
+electrode charges and the complete work/residual account.
+
+G1/G3/G4 synthetic cases in `tests/piezoelectric_spatial.rs` cover axial,
+transverse and shear actuation, loaded open/short stiffness and sensing,
+nonzero total-charge control, mesh/tensor rotation, voltage-gauge invariance,
+support work and refusals. Scope is fixed-geometry, fixed-condition, reversible
+small-strain static response. Spatial/time error certification, measured
+material validation, transient waves, acoustic radiation, exterior fringing,
+thermal updates, dielectric/mechanical loss, hysteresis, depoling and breakdown
+are not supplied by this spatial owner.
+
 ## Regional material walls in native duct propagation
 
 `bernoulli_aperture::wall::material::RegionalMaterialWallDg` retains one original

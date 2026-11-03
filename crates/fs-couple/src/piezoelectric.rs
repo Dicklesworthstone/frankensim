@@ -15,6 +15,9 @@ use fs_phs::{
     DescriptorPortHamiltonian, PhsError, PortHamiltonian, StepRecord, Storage, step_descriptor,
 };
 
+/// Spatial tensor electromechanics on the native solid and dielectric operators.
+pub mod spatial;
+
 /// Explicit caller-admitted small-signal operating envelope. These bounds are
 /// model restrictions, not invented measured strength or breakdown data.
 #[derive(Clone, Copy, Debug, PartialEq)]

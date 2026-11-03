@@ -153,6 +153,13 @@ fn rotated_piezoacoustic_modes_preserve_speeds_and_satisfy_gauss_law() {
             0.0,
         );
         let field = before.field_per_displacement_gradient_v_m[i];
+        // These fields are per UNIT strain, typically 10^9 V/m. Test the
+        // angular constraint after scaling so cancellation in large products
+        // cannot be mistaken for a nonzero transverse electric field.
+        let field_scale = field
+            .iter()
+            .fold(0.0_f64, |scale, value| scale.max(value.abs()));
+        let field = field.map(|value| value / field_scale.max(f64::MIN_POSITIVE));
         for j in 0..3 {
             near(field[j] * n[(j + 1) % 3] - field[(j + 1) % 3] * n[j], 0.0);
         }
