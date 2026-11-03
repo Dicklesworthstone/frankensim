@@ -138,6 +138,35 @@ pub(super) fn step(
     accountant: &mut AdmittedBudget<'_>,
     cx: &Cx<'_>,
 ) -> Result<(), VpmError> {
+    weighted_step(
+        state,
+        areas,
+        dt,
+        1.0,
+        core,
+        law,
+        completed_pairs,
+        meter,
+        accountant,
+        cx,
+    )
+}
+
+// A separate positive fraction preserves resolvable subnormal physical time.
+// The adaptive owner uses this exact existing Strang map for full/half trials.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn weighted_step(
+    state: &mut [VortexParticle],
+    areas: &[f64],
+    dt: f64,
+    fraction: f64,
+    core: f64,
+    law: PseDiffusion,
+    completed_pairs: &mut u64,
+    meter: &mut WorkMeter,
+    accountant: &mut AdmittedBudget<'_>,
+    cx: &Cx<'_>,
+) -> Result<(), VpmError> {
     let diffuse = dt > 0.0 && law.kinematic_viscosity_m2_s() > 0.0;
     if diffuse {
         diffusion::symmetric_sweep(
@@ -145,7 +174,7 @@ pub(super) fn step(
             areas,
             law,
             dt,
-            0.25,
+            0.25 * fraction,
             completed_pairs,
             meter,
             accountant,
@@ -153,7 +182,16 @@ pub(super) fn step(
         )?;
     }
     if dt > 0.0 {
-        super::symmetric_sweep(state, dt, core, completed_pairs, meter, accountant, cx)?;
+        super::weighted_symmetric_sweep(
+            state,
+            dt,
+            core,
+            fraction,
+            completed_pairs,
+            meter,
+            accountant,
+            cx,
+        )?;
     }
     if diffuse {
         diffusion::symmetric_sweep(
@@ -161,7 +199,7 @@ pub(super) fn step(
             areas,
             law,
             dt,
-            0.25,
+            0.25 * fraction,
             completed_pairs,
             meter,
             accountant,

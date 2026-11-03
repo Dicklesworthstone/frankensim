@@ -450,6 +450,47 @@ evolving-core model or measured performance claim is added.
 `tests/conservative_viscous.rs` checks zero-viscosity equivalence, analytical
 dipole decay and travel, refinement, signed-cloud behavior and refusals.
 
+### Adaptive coupled motion and diffusion
+
+`conservative::adaptive::simulate_viscous_with_cx` completes an explicit
+duration while controlling both sampled vorticity and particle trajectories.
+The original `D(h/2) A(h) D(h/2)` step is compared with two half steps;
+only the fine positive-time state is accepted. Position error uses the
+Euclidean norm divided by three times an explicit absolute metre tolerance.
+Circulation uses the existing area-weighted absolute-vorticity/relative
+estimate. A small circulation error cannot hide inaccurate particle motion.
+
+The existing viscous owner now accepts an internal positive time fraction,
+so the full/half trials share the original pair maps, ordering, validation
+and checkpoints. Keeping the fraction separate from the physical time avoids
+erasing a representable subnormal interval before multiplication by a large
+rate. The old fixed-step and scheduled callers still use exactly fraction one.
+The same dyadic controller, robust scaled-error arithmetic, public budgets
+and complete-window result are shared with fixed-site adaptive diffusion.
+
+Each diffusion substage evaluates its actual moved geometry. Both Gaussian
+and compact laws are supported; no pinned neighbor graph is used after motion.
+With P=N(N-1), an active trial charges 9P pair visits and 6P diffusion-kernel
+evaluations for positive viscosity, or 3P advection visits for zero viscosity.
+Total logical work is N + attempts*(2N + pair_visits_per_trial + 4).
+Three particle buffers are reserved once; there is no per-trial allocation.
+Zero duration and fewer than two particles preserve input bits using one
+particle buffer, while still validating all areas and physical controls.
+
+Rejected trials count toward aggregate attempts/work/pair budgets. A tolerance
+floor, invalid physical stage, cancellation or exhausted budget publishes no
+partial trajectory. The accepted fine maps preserve the original circulation
+and vorticity-range/enstrophy properties. Advection's impulse conservation
+does not repair PSE's finite-cloud impulse error.
+
+This is temporal error estimation for the original direct 2-D particle model,
+not a global error certificate, spatial-remeshing controller, wall treatment,
+variable-viscosity stress law or three-dimensional viscous solver.
+`tests/adaptive_viscous.rs` checks the independent decaying-dipole
+translation/strength solution, geometry-changing clouds against the original
+refined owner, identities, resource counts and transactional refusal.
+
+
 ## Prescribed affine flow on conservative 2-D vortices
 
 `conservative::ambient::{simulate_with_cx, simulate_viscous_with_cx}` adds one

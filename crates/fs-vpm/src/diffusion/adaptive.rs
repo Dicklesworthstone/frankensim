@@ -40,11 +40,12 @@ pub struct AdaptiveBudget {
     pub max_particles: usize,
     /// Maximum complete or attempted coarse/fine trials.
     pub max_attempts: usize,
-    /// Maximum pair updates; every active trial uses exactly 6 E.
+    /// Maximum pair updates across all trials; each physical owner declares
+    /// its original advection/diffusion pair work.
     pub max_pair_evaluations: u64,
     /// Logical work ceiling admitted against the ambient context up front.
     pub max_work_units: u64,
-    /// Maximum owned vector payload, excluding the borrowed prepared graph.
+    /// Maximum owned vector payload, excluding borrowed inputs/prepared graphs.
     pub max_live_bytes: usize,
 }
 
@@ -63,7 +64,8 @@ pub struct AdaptiveRun {
     pub attempts: usize,
     /// Actual pair visits, including rejected candidates.
     pub pair_evaluations: u64,
-    /// Actual pair-kernel evaluations; two per edge when the trial dt changes.
+    /// Actual diffusion-kernel evaluations. Prepared graphs cache two per edge;
+    /// moving evolution evaluates the current geometry at each diffusion visit.
     pub fraction_evaluations: u64,
     /// Actual charged logical work.
     pub work_units: u64,
@@ -260,8 +262,7 @@ impl PreparedPse {
                 .checked_add(pairs_per_trial)
                 .ok_or(overflow("adaptive accumulated pair work"))?;
             admit_count("pair evaluations", next_pairs, budget.max_pair_evaluations)?;
-            let remaining = duration_s - elapsed;
-            let h = dt.min(remaining);
+            let (h, endpoint) = trial_time(elapsed, dt, duration_s)?;
             let refresh_fractions = cached_dt_bits != Some(h.to_bits());
             let trial_work = base_trial_work
                 .checked_add(if refresh_fractions { e64 } else { 0 })
@@ -270,17 +271,6 @@ impl PreparedPse {
                 .checked_add(trial_work)
                 .ok_or(overflow("adaptive accumulated work"))?;
             admit_count("adaptive work", next_work, budget.max_work_units)?;
-            let endpoint = if h == remaining {
-                duration_s
-            } else {
-                elapsed + h
-            };
-            if h <= 0.0 || endpoint <= elapsed {
-                return Err(AdaptiveError::TimeStagnation {
-                    elapsed_bits: elapsed.to_bits(),
-                    dt_bits: h.to_bits(),
-                });
-            }
             // Buffers retain their reserved capacity between all trials.
             coarse.clear();
             fine.clear();
@@ -375,26 +365,10 @@ impl PreparedPse {
                 elapsed = endpoint;
                 accepted += 1;
                 max_accepted_error_ratio = max_accepted_error_ratio.max(error_ratio);
-                if error_ratio <= 0.125 {
-                    dt = (h + h).min(options.max_dt_s).max(options.min_dt_s);
-                } else {
-                    dt = h.max(options.min_dt_s);
-                }
+                dt = next_step(options, h, error_ratio, elapsed)?;
             } else {
                 rejected += 1;
-                if h <= options.min_dt_s {
-                    return Err(AdaptiveError::ToleranceUnreachable {
-                        dt_bits: h.to_bits(),
-                        error_ratio_bits: error_ratio.to_bits(),
-                    });
-                }
-                dt = (h * 0.5).max(options.min_dt_s);
-                if dt >= h {
-                    return Err(AdaptiveError::TimeStagnation {
-                        elapsed_bits: elapsed.to_bits(),
-                        dt_bits: dt.to_bits(),
-                    });
-                }
+                dt = next_step(options, h, error_ratio, elapsed)?;
             }
         }
         meter.flush(&mut accountant, "fs-vpm.pse-adaptive-finalize")?;
@@ -445,6 +419,26 @@ fn sweep(
 }
 
 fn normalized_error(old: f64, coarse: f64, fine: f64, area: f64, options: AdaptiveOptions) -> f64 {
+    scaled_error(
+        old,
+        coarse,
+        fine,
+        area,
+        options.absolute_vorticity_tolerance_s_inv,
+        options.relative_tolerance,
+    )
+}
+
+// Shared dimensionless second-order error estimate. Absolute scale converts
+// the owner's physical tolerance to the conserved field's units.
+pub(crate) fn scaled_error(
+    old: f64,
+    coarse: f64,
+    fine: f64,
+    absolute_scale: f64,
+    absolute_tolerance: f64,
+    relative_tolerance: f64,
+) -> f64 {
     if fine == coarse {
         return 0.0;
     }
@@ -455,15 +449,13 @@ fn normalized_error(old: f64, coarse: f64, fine: f64, area: f64, options: Adapti
     } else {
         (fine / scale - coarse / scale).abs() / 3.0
     };
-    let absolute = area * options.absolute_vorticity_tolerance_s_inv;
+    let absolute = absolute_scale * absolute_tolerance;
     let normalized_absolute = if absolute.is_normal() {
         absolute / scale
     } else {
-        det::exp(
-            det::ln(area) + det::ln(options.absolute_vorticity_tolerance_s_inv) - det::ln(scale),
-        )
+        det::exp(det::ln(absolute_scale) + det::ln(absolute_tolerance) - det::ln(scale))
     };
-    let relative = options.relative_tolerance * (old.abs().max(fine.abs()) / scale);
+    let relative = relative_tolerance * (old.abs().max(fine.abs()) / scale);
     let denominator = normalized_absolute + relative;
     let ratio = numerator / denominator;
     if numerator > 0.0 && denominator.is_normal() && ratio.is_finite() {
@@ -478,11 +470,11 @@ fn normalized_error(old: f64, coarse: f64, fine: f64, area: f64, options: Adapti
         let field_scale = fine.abs().max(coarse.abs());
         det::ln(field_scale) + det::ln((fine / field_scale - coarse / field_scale).abs())
     };
-    let absolute_log = det::ln(area) + det::ln(options.absolute_vorticity_tolerance_s_inv);
-    let relative_log = if options.relative_tolerance == 0.0 {
+    let absolute_log = det::ln(absolute_scale) + det::ln(absolute_tolerance);
+    let relative_log = if relative_tolerance == 0.0 {
         f64::NEG_INFINITY
     } else {
-        det::ln(options.relative_tolerance) + det::ln(old.abs().max(fine.abs()))
+        det::ln(relative_tolerance) + det::ln(old.abs().max(fine.abs()))
     };
     let largest = absolute_log.max(relative_log);
     let denominator_log =
@@ -490,7 +482,7 @@ fn normalized_error(old: f64, coarse: f64, fine: f64, area: f64, options: Adapti
     det::exp(log_difference - det::ln(3.0) - denominator_log)
 }
 
-fn validate_options(duration: f64, options: AdaptiveOptions) -> Result<(), VpmError> {
+pub(crate) fn validate_options(duration: f64, options: AdaptiveOptions) -> Result<(), VpmError> {
     if !duration.is_finite() || duration < 0.0 {
         return Err(invalid_scalar("adaptive duration", duration, None));
     }
@@ -524,15 +516,19 @@ fn validate_options(duration: f64, options: AdaptiveOptions) -> Result<(), VpmEr
     Ok(())
 }
 
-fn overflow(resource: &'static str) -> VpmError {
+pub(crate) fn overflow(resource: &'static str) -> VpmError {
     VpmError::PlanOverflow { resource }
 }
 
-fn count(value: usize, resource: &'static str) -> Result<u64, VpmError> {
+pub(crate) fn count(value: usize, resource: &'static str) -> Result<u64, VpmError> {
     u64::try_from(value).map_err(|_| overflow(resource))
 }
 
-fn admit_count(resource: &'static str, required: u64, maximum: u64) -> Result<(), VpmError> {
+pub(crate) fn admit_count(
+    resource: &'static str,
+    required: u64,
+    maximum: u64,
+) -> Result<(), VpmError> {
     if required > maximum {
         return Err(VpmError::CapExceeded {
             resource,
@@ -541,4 +537,54 @@ fn admit_count(resource: &'static str, required: u64, maximum: u64) -> Result<()
         });
     }
     Ok(())
+}
+
+// Shared positive-time controller for fixed-site and moving physical owners.
+pub(crate) fn trial_time(
+    elapsed: f64,
+    dt: f64,
+    duration: f64,
+) -> Result<(f64, f64), AdaptiveError> {
+    let remaining = duration - elapsed;
+    let h = dt.min(remaining);
+    let endpoint = if h == remaining {
+        duration
+    } else {
+        elapsed + h
+    };
+    if h <= 0.0 || endpoint <= elapsed {
+        return Err(AdaptiveError::TimeStagnation {
+            elapsed_bits: elapsed.to_bits(),
+            dt_bits: h.to_bits(),
+        });
+    }
+    Ok((h, endpoint))
+}
+
+pub(crate) fn next_step(
+    options: AdaptiveOptions,
+    h: f64,
+    error_ratio: f64,
+    elapsed: f64,
+) -> Result<f64, AdaptiveError> {
+    if error_ratio <= 0.125 {
+        return Ok((h + h).min(options.max_dt_s).max(options.min_dt_s));
+    }
+    if error_ratio <= 1.0 {
+        return Ok(h.max(options.min_dt_s));
+    }
+    if h <= options.min_dt_s {
+        return Err(AdaptiveError::ToleranceUnreachable {
+            dt_bits: h.to_bits(),
+            error_ratio_bits: error_ratio.to_bits(),
+        });
+    }
+    let dt = (h * 0.5).max(options.min_dt_s);
+    if dt >= h {
+        return Err(AdaptiveError::TimeStagnation {
+            elapsed_bits: elapsed.to_bits(),
+            dt_bits: dt.to_bits(),
+        });
+    }
+    Ok(dt)
 }
