@@ -15,6 +15,12 @@
 //! in each coordinate on a trilinear map, so two points are insufficient.
 //! Mass is independent of the strain formulation and is never lumped.
 //!
+//! Source-integrated elementwise thermal expansion enters the same projected
+//! weak form. Thermal equilibrium retains full nodal support reactions and
+//! integrates stress and stored energy from that same assumed-strain field.
+//! Temperature gradients within an element require a separately admitted
+//! pressure/eigenstrain projection and are not silently averaged here.
+//!
 //! The returned ordinary stiffness/mass pencil feeds the existing spectral
 //! and linear-dynamics owners. Supports are homogeneous displacement DOFs.
 //! Geometry admission samples corners, centre and integration points; this
@@ -29,6 +35,13 @@ use crate::linear::Formulation;
 use fs_exec::Cx;
 use fs_feec::highorder::quad1d::gauss_legendre;
 use std::collections::BTreeSet;
+
+pub use super::{
+    QuadraticElementThermalResponse as Hex8ElementThermalResponse,
+    QuadraticThermalResponse as Hex8ThermalResponse,
+};
+
+mod thermal;
 
 /// A conforming eight-node small-strain solid on its reference geometry.
 #[derive(Debug, Clone, Copy)]
@@ -57,7 +70,7 @@ impl Hex8ElasticProblem<'_> {
     /// free-body rigid modes are allowed; downstream owners decide which
     /// constraints a particular static or dynamic operation requires.
     pub fn assemble(&self, cx: &Cx<'_>) -> Result<TetElasticAssembly, TetElasticError> {
-        let minimum_probe = self.validate(cx)?;
+        let minimum_probe = self.validate(true, cx)?;
         let stiffness_rule = tensor_rule(self.stiffness_points_per_dir);
         let extra_mass_rule = (self.stiffness_points_per_dir < 3).then(|| tensor_rule(3));
         let mass_rule = extra_mass_rule.as_deref().unwrap_or(&stiffness_rule);
@@ -71,21 +84,7 @@ impl Hex8ElasticProblem<'_> {
             self.formulation,
             &stiffness_rule,
             mass_rule,
-            |nodes, reference, element, point| {
-                let p = hex8_point(
-                    nodes,
-                    reference,
-                    self.budget.minimum_scaled_jacobian,
-                    element,
-                    point,
-                )?;
-                Ok(isoparametric::Point {
-                    shapes: p.shapes,
-                    gradients: p.gradients,
-                    determinant: p.determinant_m3,
-                    scaled_jacobian: p.scaled_jacobian,
-                })
-            },
+            |nodes, reference, element, point| self.point(nodes, reference, element, point),
             |_, _| None,
             cx,
         )?;
@@ -93,7 +92,29 @@ impl Hex8ElasticProblem<'_> {
         Ok(assembly)
     }
 
-    fn validate(&self, cx: &Cx<'_>) -> Result<f64, TetElasticError> {
+    fn point(
+        &self,
+        nodes: [[f64; 3]; 8],
+        reference: [f64; 3],
+        element: usize,
+        point: usize,
+    ) -> Result<isoparametric::Point<8>, TetElasticError> {
+        let p = hex8_point(
+            nodes,
+            reference,
+            self.budget.minimum_scaled_jacobian,
+            element,
+            point,
+        )?;
+        Ok(isoparametric::Point {
+            shapes: p.shapes,
+            gradients: p.gradients,
+            determinant: p.determinant_m3,
+            scaled_jacobian: p.scaled_jacobian,
+        })
+    }
+
+    fn validate(&self, require_free_dofs: bool, cx: &Cx<'_>) -> Result<f64, TetElasticError> {
         cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
         if self.nodes_m.is_empty() || self.hexahedra.is_empty() {
             return Err(TetElasticError::EmptyMesh);
@@ -153,7 +174,7 @@ impl Hex8ElasticProblem<'_> {
             }
         }
         let free = full - fixed.len();
-        if free == 0 {
+        if require_free_dofs && free == 0 {
             return Err(TetElasticError::NoFreeDofs);
         }
         if free > self.budget.maximum_free_dofs {

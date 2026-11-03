@@ -1,4 +1,4 @@
-//! Quadratic thermal equilibrium and work-conjugate response on one frozen mesh.
+//! Isoparametric thermal equilibrium and work-conjugate response on one frozen mesh.
 //! Numerical iteration remains in fs-solver; geometry, integration and material
 //! admission remain in the existing isoparametric owners.
 use super::super::{
@@ -6,20 +6,22 @@ use super::super::{
     TetStaticSolveConfig, add_nodal_forces_to_thermal_load, euclidean_norm, hash_usize,
     validate_rigid_mode_constraints,
 };
-use super::{Point, assemble, mandel_b, thermal_load};
-use crate::linear::Jacobi;
+use super::{
+    Point, StrainProjection, assemble_with_formulation, mandel_b, thermal_load_with_formulation,
+};
+use crate::linear::{Formulation, Jacobi};
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
 use fs_solver::krylov::CgState;
 use fs_solver::op::{CsrOp, LinearOp};
 
-/// Integrated response of one quadratic element in mesh-frame Mandel coordinates.
+/// Integrated response of one isoparametric element in mesh-frame Mandel coordinates.
 ///
 /// Strain and stress are volume-weighted averages over the stiffness rule.
-/// Quadratic strain varies within each element: these are neither pointwise
-/// stresses nor peak-stress estimates. Energy integrates the actual quadratic
-/// field before averaging, so bending energy is retained even when mean strain
-/// vanishes. All values use the undeformed reference geometry.
+/// These are neither pointwise stresses nor peak-stress estimates. Energy
+/// integrates the actual compatible or B-bar assumed field before averaging,
+/// so bending energy is retained even when mean strain vanishes. All values
+/// use the undeformed reference geometry and the parent response's formulation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct QuadraticElementThermalResponse {
     mean_elastic_strain_mandel: [f64; 6],
@@ -29,13 +31,15 @@ pub struct QuadraticElementThermalResponse {
 }
 
 impl QuadraticElementThermalResponse {
-    /// Volume average of compatible strain minus the thermal eigenstrain.
+    /// Volume average of the selected strain field minus thermal eigenstrain.
+    /// B-bar reports its assumed strain, not the raw compatible strain.
     #[must_use]
     pub const fn mean_elastic_strain_mandel(&self) -> &[f64; 6] {
         &self.mean_elastic_strain_mandel
     }
 
-    /// Volume average of actual Cauchy stress C(Bu - epsilon_free) [Pa].
+    /// Volume average of C(Bu - epsilon_free) [Pa], with the same compatible
+    /// or B-bar columns as stiffness, source load and internal force.
     #[must_use]
     pub const fn mean_stress_mandel_pa(&self) -> &[f64; 6] {
         &self.mean_stress_mandel_pa
@@ -64,6 +68,7 @@ impl QuadraticElementThermalResponse {
 /// solve/strain controls and the full result.
 #[derive(Debug, Clone, PartialEq)]
 pub struct QuadraticThermalResponse {
+    formulation: Formulation,
     displacement_m: Vec<[f64; 3]>,
     elements: Vec<QuadraticElementThermalResponse>,
     nodal_internal_force_n: Vec<[f64; 3]>,
@@ -78,6 +83,12 @@ pub struct QuadraticThermalResponse {
 }
 
 impl QuadraticThermalResponse {
+    /// Strain formulation used consistently in stiffness, loads and recovery.
+    #[must_use]
+    pub const fn formulation(&self) -> Formulation {
+        self.formulation
+    }
+
     /// Compatible displacement on every geometry node [m].
     #[must_use]
     pub fn displacement_m(&self) -> &[[f64; 3]] {
@@ -166,6 +177,43 @@ pub(in crate::linear3) fn solve<const N: usize, const D: usize, R: Copy>(
     maximum_absolute_mandel_strain: f64,
     cx: &Cx<'_>,
 ) -> Result<QuadraticThermalResponse, TetElasticError> {
+    solve_with_formulation::<N, D, R>(
+        nodes_m,
+        elements,
+        materials,
+        thermal,
+        nodal_forces_n,
+        fixed_dofs,
+        budget,
+        Formulation::Standard,
+        stiffness_rule,
+        mass_rule,
+        evaluate,
+        config,
+        mesh_frame,
+        maximum_absolute_mandel_strain,
+        cx,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::linear3) fn solve_with_formulation<const N: usize, const D: usize, R: Copy>(
+    nodes_m: &[[f64; 3]],
+    elements: &[[usize; N]],
+    materials: TetMaterialField<'_>,
+    thermal: QuadraticThermalStrainField<'_>,
+    nodal_forces_n: Option<&[(usize, f64)]>,
+    fixed_dofs: &[usize],
+    budget: TetAssemblyBudget,
+    formulation: Formulation,
+    stiffness_rule: &[(R, f64)],
+    mass_rule: &[(R, f64)],
+    evaluate: impl Fn([[f64; 3]; N], R, usize, usize) -> Result<Point<N>, TetElasticError>,
+    config: TetStaticSolveConfig,
+    mesh_frame: ContentHash,
+    maximum_absolute_mandel_strain: f64,
+    cx: &Cx<'_>,
+) -> Result<QuadraticThermalResponse, TetElasticError> {
     cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
     if !(config.relative_residual_tolerance.is_finite()
         && config.relative_residual_tolerance > 0.0
@@ -183,13 +231,14 @@ pub(in crate::linear3) fn solve<const N: usize, const D: usize, R: Copy>(
             what: "mesh frame must be nonzero and strain ceiling must be finite and positive",
         });
     }
-    let load = thermal_load::<N, D, R>(
+    let load = thermal_load_with_formulation::<N, D, R>(
         nodes_m,
         elements,
         materials,
         thermal,
         fixed_dofs,
         budget,
+        formulation,
         stiffness_rule,
         mass_rule,
         &evaluate,
@@ -207,13 +256,14 @@ pub(in crate::linear3) fn solve<const N: usize, const D: usize, R: Copy>(
     } else {
         validate_rigid_mode_constraints(nodes_m, elements, fixed_dofs)?;
         cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
-        let assembly = assemble::<N, D, R>(
+        let assembly = assemble_with_formulation::<N, D, R>(
             nodes_m,
             elements,
             materials,
             Some(thermal),
             fixed_dofs,
             budget,
+            formulation,
             stiffness_rule,
             mass_rule,
             &evaluate,
@@ -278,6 +328,8 @@ pub(in crate::linear3) fn solve<const N: usize, const D: usize, R: Copy>(
         cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
         let nodes = connectivity.map(|node| nodes_m[node]);
         let material = materials.at(element);
+        let projection =
+            StrainProjection::prepare(nodes, element, formulation, stiffness_rule, &evaluate, cx)?;
         identity.update(&material.density_kg_m3.to_bits().to_le_bytes());
         let mut mean_elastic_strain_mandel = [0.0; 6];
         let mut mean_stress_mandel_pa = [0.0; 6];
@@ -285,15 +337,33 @@ pub(in crate::linear3) fn solve<const N: usize, const D: usize, R: Copy>(
         let mut energy = 0.0;
         for (point, &(reference, weight)) in stiffness_rule.iter().enumerate() {
             cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
-            let p = evaluate(nodes, reference, element, point)?;
+            let compatible_point;
+            let p = if let Some(prepared) = projection.point(point) {
+                prepared
+            } else {
+                compatible_point = evaluate(nodes, reference, element, point)?;
+                &compatible_point
+            };
             let material = thermal.material_at(material, element, point)?;
-            let b = mandel_b::<N, D>(p.gradients);
+            let free_strain = &thermal.at(element, point).free_strain_mandel;
+            if formulation == Formulation::BBar {
+                // A projection must not hide an inadmissible compatible
+                // displacement field. Bound it independently of assumed strain.
+                elastic_strain_at(
+                    &mandel_b::<N, D>(p.gradients),
+                    connectivity,
+                    &displacement_m,
+                    free_strain,
+                    maximum_absolute_mandel_strain,
+                )?;
+            }
+            let b = projection.columns::<D>(p);
             let (elastic, stress) = elastic_response_at(
                 &b,
                 connectivity,
                 &displacement_m,
                 &material.stiffness_mandel_pa,
-                &thermal.at(element, point).free_strain_mandel,
+                free_strain,
                 maximum_absolute_mandel_strain,
             )?;
             let dv = weight * p.determinant;
@@ -387,6 +457,7 @@ pub(in crate::linear3) fn solve<const N: usize, const D: usize, R: Copy>(
     identity.update(&elastic_energy_j.to_bits().to_le_bytes());
     cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
     Ok(QuadraticThermalResponse {
+        formulation,
         displacement_m,
         elements: response,
         nodal_internal_force_n,
@@ -414,6 +485,28 @@ fn elastic_response_at<const N: usize, const D: usize>(
     free_strain_mandel: &[f64; 6],
     maximum_absolute_mandel_strain: f64,
 ) -> Result<([f64; 6], [f64; 6]), TetElasticError> {
+    let elastic = elastic_strain_at(
+        b,
+        connectivity,
+        displacement_m,
+        free_strain_mandel,
+        maximum_absolute_mandel_strain,
+    )?;
+    let stress: [f64; 6] = core::array::from_fn(|i| {
+        (0..6).fold(0.0, |sum, j| {
+            stiffness_mandel_pa[i][j].mul_add(elastic[j], sum)
+        })
+    });
+    Ok((elastic, stress))
+}
+
+fn elastic_strain_at<const N: usize, const D: usize>(
+    b: &[[f64; D]; 6],
+    connectivity: &[usize; N],
+    displacement_m: &[[f64; 3]],
+    free_strain_mandel: &[f64; 6],
+    maximum_absolute_mandel_strain: f64,
+) -> Result<[f64; 6], TetElasticError> {
     let total: [f64; 6] = core::array::from_fn(|i| {
         (0..D).fold(0.0, |sum, d| {
             b[i][d].mul_add(displacement_m[connectivity[d / 3]][d % 3], sum)
@@ -429,10 +522,5 @@ fn elastic_response_at<const N: usize, const D: usize>(
             what: "quadrature total or elastic strain exceeds the finite small-strain ceiling",
         });
     }
-    let stress: [f64; 6] = core::array::from_fn(|i| {
-        (0..6).fold(0.0, |sum, j| {
-            stiffness_mandel_pa[i][j].mul_add(elastic[j], sum)
-        })
-    });
-    Ok((elastic, stress))
+    Ok(elastic)
 }
