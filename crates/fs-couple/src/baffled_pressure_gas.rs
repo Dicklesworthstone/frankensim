@@ -170,16 +170,32 @@ impl BaffledPressure {
     pub(crate) fn align_gas_latency(
         &mut self, report: &mut GasPropagationReport, latency: usize,
     ) -> Result<(), String> {
-        let extra = latency.checked_sub(report.additional_latency_samples)
+        self.align_material_latency(&mut report.additional_latency_samples, latency)
+    }
+
+    // The same cold shift and stale-report admission serve every material law.
+    pub(super) fn align_material_latency(
+        &mut self, current: &mut usize, latency: usize,
+    ) -> Result<(), String> {
+        if *current != self.material_path_delay {
+            return Err("material receiver alignment report does not match its causal padding".into());
+        }
+        let extra = latency.checked_sub(*current)
             .ok_or("material receiver alignment cannot remove causal padding")?;
         self.add_gas_padding(extra)?;
-        report.additional_latency_samples = latency;
+        *current = latency;
         Ok(())
     }
 
     // Shared cold shift for a single aperture or an exact per-tile bank.
     // Only numerical padding changes; original physical paths remain intact.
     pub(super) fn add_gas_padding(&mut self, extra: usize) -> Result<(), String> {
+        if self.started {
+            return Err("material receiver alignment requires a cold receiver".into());
+        }
+        if self.directional_velocity.is_some() {
+            return Err("material receiver alignment does not admit a directional velocity bank".into());
+        }
         if extra == 0 { return Ok(()); }
         let last = self.delay_samples.1.checked_add(extra)
             .filter(|&last| last < MAX_HISTORY)

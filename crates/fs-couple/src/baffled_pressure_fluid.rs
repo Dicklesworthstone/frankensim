@@ -19,6 +19,16 @@ pub struct FluidPropagation {
     pub limits: FluidPropagationLimits,
 }
 
+impl FluidPropagation {
+    pub(super) fn rayleigh_medium(&self) -> RayleighMedium {
+        let acoustic = self.absorption.state().acoustic();
+        RayleighMedium {
+            density: acoustic.density_kg_m3(),
+            sound_speed: acoustic.sound_speed_m_s(),
+        }
+    }
+}
+
 /// Per-path material transfers, before the shared sinc and causal padding.
 #[derive(Clone, Debug)]
 pub struct FluidPropagationReport {
@@ -33,6 +43,25 @@ pub struct FluidPropagationReport {
 }
 
 impl BaffledPressure {
+    /// Align independently prepared fluid receivers before accepting any trace.
+    /// Use the greatest `additional_latency_samples` in their original reports
+    /// to sum pressures on a common numerical clock. Physical travel, source
+    /// attenuation, relative phase, quadrature and filter receipts stay intact.
+    /// The added padding appears once in [`Self::filter_delay_samples`].
+    ///
+    /// Receivers must use the same output clock and derivative reconstruction.
+    /// Supply this receiver's own unchanged report. A stale padding value,
+    /// decreasing latency, exhausted history budget, or any previously accepted
+    /// trace refuses before changing the receiver or report. Even a silent
+    /// accepted trace advances the clock and closes this cold operation.
+    pub fn align_fluid_latency(
+        &mut self,
+        report: &mut FluidPropagationReport,
+        latency: usize,
+    ) -> Result<(), String> {
+        self.align_material_latency(&mut report.additional_latency_samples, latency)
+    }
+
     /// Observe a flat vibrating surface through its original stationary fluid.
     /// Classical absorption is applied on each exact surface-to-receiver path
     /// before summing signed source contributions. It is not a filter on the
@@ -57,11 +86,7 @@ impl BaffledPressure {
         propagation: &FluidPropagation,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(Self, FluidPropagationReport), String> {
-        let acoustic = propagation.absorption.state().acoustic();
-        let medium = RayleighMedium {
-            density: acoustic.density_kg_m3(),
-            sound_speed: acoustic.sound_speed_m_s(),
-        };
+        let medium = propagation.rayleigh_medium();
         let (receiver, paths) = Self::new_multirate_material_differentiating(
             surface,
             inputs,

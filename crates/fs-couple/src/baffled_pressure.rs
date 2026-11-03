@@ -177,6 +177,8 @@ pub struct BaffledPressure {
     interpolation_delay: usize,
     /// Common causal padding of independently prepared material paths.
     material_path_delay: usize,
+    /// True after the first complete trace advances any accepted history.
+    started: bool,
     head: usize,
     modes: usize,
     rate: f64,
@@ -199,7 +201,7 @@ impl Clone for BaffledPressure {
             decimator:self.decimator.clone(),differentiate_velocity:self.differentiate_velocity,
             pressure_derivative:self.pressure_derivative.clone(),
             interpolation_delay:self.interpolation_delay,material_path_delay:self.material_path_delay,
-            head:self.head,modes:self.modes,rate:self.rate,
+            started:self.started,head:self.head,modes:self.modes,rate:self.rate,
             position_m:self.position_m,delay_samples:self.delay_samples };
         if transposed {copy.tap_history=copy.history.as_ptr() as usize;}
         copy
@@ -342,7 +344,9 @@ impl BaffledPressure {
     /// pairs per sample). Only the rounding changes. `mode_pressures` is refused afterwards: the
     /// history then holds velocities. Returns false, changing nothing, for other receivers:
     /// their derivative is convolved into a decimation stage, which does not commute.
+    /// Any previously accepted trace refuses before changing a filter or history.
     pub fn differentiate_pressure(&mut self) -> Result<bool, String> {
+        if self.started { return Err("pressure differentiation requires a cold receiver".into()); }
         if !self.differentiate_velocity || self.decimator.input_frames() != 1 {return Ok(false);}
         let derivative = antialias::Decimator::new_differentiating(1, 1, self.rate as u32)?;
         debug_assert_eq!(derivative.delay_output_frames(), self.decimator.delay_output_frames());
@@ -388,7 +392,7 @@ impl BaffledPressure {
             taps:Vec::new(),packed_weights:Vec::new(),tap_offsets:Vec::new(),tap_history:0,
             previous_velocity:vec![0.0;modes],acceleration:vec![0.0;modes],head:0,modes,rate:f64::from(rate),
             decimator:antialias::Decimator::new(1,modes)?,differentiate_velocity:false,pressure_derivative:None,interpolation_delay:0,
-            material_path_delay:0,
+            material_path_delay:0,started:false,
             position_m,delay_samples:(first,last) };
         receiver.prepare_taps();
         Ok(receiver)
@@ -510,6 +514,7 @@ impl BaffledPressure {
     }
 
     fn accept_trace(&mut self, velocity: &[f64]) {
+        self.started = true;
         let ratio = self.decimator.input_frames();
         let filtered = self.decimator.pending_output();
         let transposed = self.tap_history == self.history.as_ptr() as usize;

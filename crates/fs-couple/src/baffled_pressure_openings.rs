@@ -5,6 +5,7 @@
 use super::{BaffledPressure, CircularOutletReceiver, RayleighMedium, MAX_RAYLEIGH_INPUTS};
 use std::collections::BTreeMap;
 use super::gas::{GasPropagation, GasPropagationReport};
+use super::fluid::{FluidPropagation, FluidPropagationReport};
 use fs_material::gas::GasState;
 
 /// Physical duct-port binding and complete substep traces, shared by wind sources.
@@ -268,6 +269,43 @@ impl BaffledPressure {
         receiver: CircularOutletReceiver, gas: &GasState,
         propagation: &GasPropagation, cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(Self, GasPropagationReport), String> {
+        let surface = Self::material_opening_surface(
+            openings, mechanics_rate, output_rate, receiver, gas.into(), cancelled,
+        )?;
+        Self::new_multirate_gas_differentiating(&surface, openings.len(),
+            mechanics_rate, output_rate, receiver.position_m, gas, propagation, cancelled)
+    }
+
+    /// Original circular flow apertures radiating through one actual fluid.
+    /// The complete source snapshot supplies density, sound speed and explicit
+    /// classical bulk absorption on each original quadrature path. Signed
+    /// volume flows, disk directivity and relative physical delay reach the
+    /// shared Rayleigh owner before pressure is summed.
+    ///
+    /// Every disk receives one common numerical padding. Separately prepared
+    /// receivers can use [`Self::align_fluid_latency`] while still cold.
+    /// Geometry, overlap, resolved-band, clock, work and cancellation admission
+    /// are shared with the gas API. This is an infinite rigid baffle with
+    /// prescribed flow, without free-surface or acoustic-reaction physics.
+    pub fn circular_openings_multirate_fluid_differentiating(
+        openings: &[CircularOpening], mechanics_rate: u32, output_rate: u32,
+        receiver: CircularOutletReceiver, propagation: &FluidPropagation,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(Self, FluidPropagationReport), String> {
+        let surface = Self::material_opening_surface(
+            openings, mechanics_rate, output_rate, receiver,
+            propagation.rayleigh_medium(), cancelled,
+        )?;
+        Self::new_multirate_fluid_differentiating(&surface, openings.len(),
+            mechanics_rate, output_rate, receiver.position_m, propagation, cancelled)
+    }
+
+    // One geometry/admission owner; the selected material supplies only rho/c.
+    fn material_opening_surface(
+        openings: &[CircularOpening], mechanics_rate: u32, output_rate: u32,
+        receiver: CircularOutletReceiver, medium: RayleighMedium,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<super::SurfaceSample>, String> {
         Self::opening_clock_ratio(mechanics_rate, output_rate)?;
         Self::admit_openings(openings, receiver)?;
         if receiver.maximum_frequency_hz > 0.45 * f64::from(output_rate) {
@@ -279,7 +317,7 @@ impl BaffledPressure {
             let local = CircularOutletReceiver { position_m: [
                 receiver.position_m[0] - opening.center_m[0],
                 receiver.position_m[1] - opening.center_m[1], receiver.position_m[2]], ..receiver };
-            for mut sample in Self::circular_surface(opening.radius_m, local, gas.into())? {
+            for mut sample in Self::circular_surface(opening.radius_m, local, medium)? {
                 sample.position_m[0] += opening.center_m[0];
                 sample.position_m[1] += opening.center_m[1];
                 let weight = sample.mode_shape[0];
@@ -288,8 +326,7 @@ impl BaffledPressure {
                 surface.push(sample);
             }
         }
-        Self::new_multirate_gas_differentiating(&surface, openings.len(),
-            mechanics_rate, output_rate, receiver.position_m, gas, propagation, cancelled)
+        Ok(surface)
     }
 
     fn opening_clock_ratio(mechanics: u32, output: u32) -> Result<usize, String> {

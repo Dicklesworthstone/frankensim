@@ -5916,6 +5916,19 @@ clarinet is one filling of those objects.
   against independently calculated bulk-viscosity attenuation; all original
   gas path semantics remain in the same owner.
 
+  `circular_openings_multirate_fluid_differentiating` exposes the same liquid
+  and real-gas propagation to native volume-flow apertures. Circular quadrature,
+  overlap/band/clock admission and signed input ordering share their original
+  gas-path owner. `align_fluid_latency` aligns separately prepared receivers on
+  the same output/reconstruction clock without changing physical path receipts.
+  It refuses stale padding, decreasing latency, history overflow, directional
+  velocity banks, and any accepted trace, including a silent multirate packet
+  before pressure arrives. Rejected packets remain cold; clones preserve the
+  accepted-clock state. The existing cold-only `differentiate_pressure` change
+  likewise refuses after stepping. G1/G3 tests cover independent piston
+  directivity and signed split-versus-joint transfer and waveform equivalence;
+  G0 verifies refused reconfiguration leaves the live history and report intact.
+
   Offline acoustic assemblies apply every selected observer law through
   `air_path::propagate_pressure_history_with_model`: ISO's complex Debye
   phase, the classical law's declared in-band minimum phase, and molecular
