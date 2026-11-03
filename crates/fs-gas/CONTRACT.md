@@ -3629,17 +3629,18 @@ material or advection pass is claimed.
 `SharedRecoilWorkspace` advances fixed gas amounts against one common
 `SlidingSupport` along an authored scalar axis. Each `SharedRecoilCell`
 retains its own density, volume, momentum and nonnegative frozen linear and
-quadratic resistance coefficients. The original exact reduced-mass pair
-mechanics is composed in a palindromic Strang sweep. This is a convergent
-approximation to simultaneous shared-support dynamics, not a sequence of
-independent masses or an exact many-cell decay formula. Single-active-cell
-intervals reuse the exact original pair map.
+quadratic resistance coefficients. For unequal linear rates or quadratic drag, the original exact reduced-mass
+pair mechanics is composed in a palindromic Strang sweep. This general path
+approximates simultaneous shared-support dynamics with one common inertia.
+Single-active-cell intervals reuse the exact original pair map. Multiple
+active cells with one common linear rate and no quadratic drag use the exact
+collective/deviation modes described below.
 
 Bounded step doubling estimates local errors in each velocity, physical slip
 heat and Galilean-invariant work. The support velocity is included. Dimensional
 velocity/energy tolerances and a relative tolerance are separate from the
-strict endpoint momentum and energy budgets in `RecoilControl`. For multiple
-active cells, each candidate interval also resolves the resistance scale:
+strict endpoint momentum and energy budgets in `RecoilControl`. On the general
+refined path, each candidate interval also resolves the resistance scale:
 `h*(max(k_i) + sum(m_i/M*k_i)) <= 0.5`, with
 `k_i=a_i+2*b_i*R` and R the initial velocity-hull width of the support and active cells. This prevents
 saturated split pair maps from masquerading as resolved heat allocation.
@@ -3731,3 +3732,45 @@ the constrained editing environment. This entry is adiabatic chemistry plus
 Euler transport; molecular transport, finite-wall heat and leakage retain
 their separate owners. Symmetric splitting alone establishes no accuracy
 order, entropy-stability theorem or combustion-mechanism validity.
+
+### Exact collective modes for common linear shared-support drag
+
+When every active gas amount has the same positive linear acceleration
+coefficient and zero quadratic coefficient, the shared recoil workspace uses
+the exact collective/deviation solution. Active gas mean/support slip decays
+at `a*(1+sum(m_i)/M)`; differences between gas velocities decay at `a`.
+Arbitrary gas masses and unequal initial velocities are retained. The mode
+uses O(cells) work and one accepted attempt, including stiff/light-support
+cases that would otherwise exhaust the generic resolved-step budget.
+Disconnected zero-coefficient cells keep their original state and do not
+enter the collective mass.
+
+Per-cell physical slip heat and support work use integrated exponential
+moments with explicit cancellation-safe weak-coupling evaluation. In
+particular, an initially comoving cell retains its induced second-order
+impulse and third-order heat. Work remains separate from heat; no kinetic
+roundoff residual is relabelled dissipation. Existing actual endpoint
+momentum/energy acceptance, compensated accumulators, cancellation and
+private-candidate publication remain authoritative. Unequal-rate or
+quadratic shared systems retain the original bounded refined solver, and
+the one-active-cell path retains the original exact pair calculation.
+
+The original network support owner receives this exact mode through its
+existing workspace call. No network clock, source splitting, caloric storage
+or material-coefficient ownership changes. Source coefficients remain frozen
+over the original supplied interval; an exact frozen mechanical solution does
+not establish accuracy of a changing material law or the complete multiphysics
+composition.
+
+Twenty-one focused actual-source native tests passed: four new collective
+regressions, seven shared-support regressions, and ten original drag/pair
+regressions. Independent high-precision references cover unequal masses and
+initial velocities, individual heat/work, boosts and cell order, both sides
+of the moment-evaluation switch, initially comoving cubic heat, sub-ULP mass
+contrast, overflowed but fully decayed exponents, disconnected cells, and
+cancellation at every exposed checkpoint with exact retry and workspace reuse.
+The run compiled the actual controls, mechanics, shared solver and drag with
+fs-math/fs-qty; unrelated surrounding error variants were explicit fixtures.
+The added stiff common-rate network regression was source-reviewed and
+formatter-parsed but not compiled or executed. Full Cargo/network/material
+verification is not claimed by this selected-source run.

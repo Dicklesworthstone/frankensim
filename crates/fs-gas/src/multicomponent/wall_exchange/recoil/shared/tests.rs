@@ -419,7 +419,7 @@ fn single_active_edge_preserves_original_exact_pair_and_disconnected_cells() {
 }
 
 #[test]
-fn stiff_shared_relaxation_resolves_rates_or_refuses_instead_of_false_heat_convergence() {
+fn common_linear_stiff_relaxation_is_exact_and_unequal_rates_retain_bounded_refusal() {
     let cells = [cell(2.0, 4.0, 100.0, 0.0), cell(5.0, -1.2, 100.0, 0.0)];
     let support = SlidingSupport {
         mass_kg: 3.0,
@@ -437,7 +437,8 @@ fn stiff_shared_relaxation_resolves_rates_or_refuses_instead_of_false_heat_conve
             || false,
         )
         .unwrap();
-    assert!(result.accepted_steps >= 67);
+    assert_eq!(result.accepted_steps, 1);
+    assert_eq!(result.attempted_steps, 1);
     for i in 0..2 {
         close(
             result.cells[i].momentum / cells[i].density_kg_m3,
@@ -448,8 +449,15 @@ fn stiff_shared_relaxation_resolves_rates_or_refuses_instead_of_false_heat_conve
         close(result.cells[i].work_to_gas_j, reference.3[i], 1e-6);
         assert!((-1.2..=4.0).contains(&(result.cells[i].momentum / cells[i].density_kg_m3)));
     }
+    let unequal = [
+        cells[0],
+        SharedRecoilCell {
+            linear_rate_per_s: 130.0,
+            ..cells[1]
+        },
+    ];
     let refused = workspace.advance(
-        &cells,
+        &unequal,
         Time::new(100.0),
         support,
         SharedRecoilControl {
@@ -466,6 +474,8 @@ fn stiff_shared_relaxation_resolves_rates_or_refuses_instead_of_false_heat_conve
         ))
     ));
 }
+
+mod collective_linear;
 
 #[test]
 fn cancellation_at_each_boundary_and_input_refusals_leave_exact_retry() {

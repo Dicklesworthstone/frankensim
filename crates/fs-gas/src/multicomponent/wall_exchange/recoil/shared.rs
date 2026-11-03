@@ -1,11 +1,13 @@
 //! One finite axial support coupled to several fixed gas amounts.
 //!
-//! The exact pair recoil maps are composed symmetrically and refined on the
-//! common physical interval. A resolved-rate cap prevents saturated pair maps
-//! from masquerading as an accurate simultaneous solution.
+//! Common linear resistance uses exact collective and deviation modes. Other
+//! laws compose exact pair maps symmetrically with bounded time refinement;
+//! a resolved-rate cap prevents falsely converged saturated pair projections.
 
 use super::{RecoilControl, RecoilLaw, SlidingSupport, Time, WallExchangeError, mechanics};
 use super::{nonnegative, poll, positive};
+
+mod collective_linear;
 
 /// One fixed gas amount and its frozen acceleration law against the support.
 /// Coefficients are active even when this cell initially has zero slip.
@@ -33,7 +35,8 @@ pub struct SharedRecoilCellUpdate {
     pub gas_impulse_ns: f64,
     /// Integrated support work entering this gas amount [J].
     pub work_to_gas_j: f64,
-    /// Nonnegative physical relative-slip loss in the pair subflows [J].
+    /// Nonnegative physical relative-slip loss [J], integrated analytically
+    /// for common linear rates or through the refined exact pair subflows.
     pub slip_dissipation_j: f64,
 }
 
@@ -97,10 +100,13 @@ pub struct SharedRecoilUpdate<'a> {
     /// Actual gas/support kinetic change plus all slip heat [J].
     pub energy_residual_j: f64,
     /// Sum of accepted local maximum velocity estimates [m/s], not a bound.
+    /// Exact pair/collective modes have no splitting error and return zero;
+    /// this is not a floating-point error certificate.
     pub velocity_error_estimate_m_s: f64,
     /// Sum of accepted local maximum per-cell heat/work estimates [J], not a bound.
     pub energy_error_estimate_j: f64,
-    /// Accepted adaptive intervals; each uses the two refined Strang steps.
+    /// Accepted intervals: one exact pair/collective interval, or adaptive
+    /// intervals that each use the two refined Strang steps.
     pub accepted_steps: usize,
     /// Attempted intervals, including all discarded refinements.
     pub attempted_steps: usize,
@@ -177,6 +183,9 @@ impl SharedRecoilWorkspace {
     /// estimate is trusted. Very stiff multi-cell problems can exhaust the
     /// explicit work budget; they never silently become sequential equilibrium
     /// projections. A single active cell uses the original exact pair once.
+    /// A common positive linear rate with no quadratic terms instead uses the
+    /// exact collective/deviation modes in one O(cells) pass, including each
+    /// cell's physical heat and work, without a stiffness step restriction.
     ///
     /// These are temporal error estimates, not certified error enclosures.
     /// No moving volume, thermal law, external drive or branch-axis mapping is
@@ -257,6 +266,12 @@ impl SharedRecoilWorkspace {
                     dt,
                     support.velocity_m_s,
                 )?);
+                accepted_steps = 1;
+                attempted_steps = 1;
+            } else if let Some(updated) =
+                collective_linear::advance(cells, &mut self.accepted, dt, support, &mut cancelled)?
+            {
+                next_support = updated;
                 accepted_steps = 1;
                 attempted_steps = 1;
             } else {

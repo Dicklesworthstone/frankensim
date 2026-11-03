@@ -347,17 +347,31 @@ fn shared_source_cancellation_preserves_prior_publication_and_exact_retry() {
     }
     let mut n = network(&g, &[2.0], false);
     let before = fields(&n);
-    let mut limited = uniform_operator(&n, contact)
-        .with_shared_branch_supports(
-            vec![Some(support(0.3, 0.5))],
-            SharedRecoilControl {
-                maximum_steps: 1,
-                ..time_control()
+    // Unequal rates retain the adaptive path; a common linear rate now has
+    // an exact collective solution even for a one-attempt budget.
+    let mut limited = NetworkWallOperator::new(
+        &n,
+        vec![vec![
+            contact,
+            WallContact {
+                drag: WallDrag::Linear { rate_per_s: 5.0 },
+                ..contact
             },
-            1e-10,
-            || false,
-        )
-        .unwrap();
+        ]],
+        vec![],
+        || false,
+    )
+    .unwrap()
+    .with_shared_branch_supports(
+        vec![Some(support(0.3, 0.5))],
+        SharedRecoilControl {
+            maximum_steps: 1,
+            ..time_control()
+        },
+        1e-10,
+        || false,
+    )
+    .unwrap();
     assert!(
         limited
             .advance_for(&mut n, Time::new(0.4), controls(), || false)
@@ -553,4 +567,90 @@ fn shared_transport_admits_actual_slip_and_rejects_unsupported_final_slip() {
     assert!(wall.last_report().is_none());
     wall.advance_for(&mut n, Time::new(0.01), controls(), || false)
         .unwrap();
+}
+
+#[test]
+fn stiff_common_rate_branch_advances_with_one_shared_mechanical_step() {
+    let g = gas(1, false, 0.0);
+    let branch = MixtureEuler1d::new(
+        g.clone(),
+        Length::new(0.5),
+        0.4,
+        vec![
+            g.conserved(&[1.0], 0.6, 2.0).unwrap(),
+            g.conserved(&[2.0], -0.2, 4.0).unwrap(),
+        ],
+        Boundaries::Periodic,
+        || false,
+    )
+    .unwrap();
+    let mut n = MixtureNetwork1d::new(vec![branch], vec![], vec![], || false).unwrap();
+    let before = fields(&n);
+    let initial_support = support(1e-6, -0.3);
+    let rate = 3.0_f64;
+    let dt = 1.0_f64;
+    let mut wall = uniform_operator(&n, adiabatic(rate))
+        .with_shared_branch_supports(
+            vec![Some(initial_support)],
+            SharedRecoilControl {
+                maximum_steps: 1,
+                ..time_control()
+            },
+            1e-10,
+            || false,
+        )
+        .unwrap();
+    let report = wall
+        .advance_for(&mut n, Time::new(dt), controls(), || false)
+        .unwrap();
+    // Independent collective/deviation modes. The support mode has rate
+    // 1,800,003/s while the two gas deviations retain the physical rate 3/s.
+    let masses = [0.2_f64, 0.4_f64];
+    let velocities = [0.6_f64, -0.2_f64];
+    let gas_mass = masses.into_iter().sum::<f64>();
+    let gas_mean = (masses[0] * velocities[0] + masses[1] * velocities[1]) / gas_mass;
+    let mean_slip = gas_mean - initial_support.velocity_m_s;
+    let collective_rate = rate * (1.0 + gas_mass / initial_support.mass_kg);
+    let center = (gas_mass * gas_mean + initial_support.mass_kg * initial_support.velocity_m_s)
+        / (gas_mass + initial_support.mass_kg);
+    let collective_decay = (-collective_rate * dt).exp();
+    let expected_support =
+        center - gas_mass / (gas_mass + initial_support.mass_kg) * mean_slip * collective_decay;
+    let exposure = |a: f64| -(-a * dt).exp_m1() / a;
+    let mut heat = 0.0;
+    let mut gas_change = 0.0;
+    for i in 0..2 {
+        let deviation = velocities[i] - gas_mean;
+        let expected_velocity = center
+            + initial_support.mass_kg / (gas_mass + initial_support.mass_kg)
+                * mean_slip
+                * collective_decay
+            + deviation * (-rate * dt).exp();
+        let expected_heat = masses[i]
+            * rate
+            * (deviation * deviation * exposure(2.0 * rate)
+                + 2.0 * deviation * mean_slip * exposure(rate + collective_rate)
+                + mean_slip * mean_slip * exposure(2.0 * collective_rate));
+        let old = before.0[0][i].as_cell();
+        let cell = n.branches()[0].cell(i).unwrap();
+        let velocity = g.primitive(cell, || false).unwrap().velocity;
+        let energy_change = 0.2 * (cell.energy - old.energy);
+        let kinetic_change =
+            0.5 * masses[i] * (velocity - velocities[i]) * (velocity + velocities[i]);
+        close(velocity, expected_velocity, 2e-12);
+        close(energy_change - kinetic_change, expected_heat, 3e-12);
+        assert_eq!(cell.partial_densities, old.partial_densities);
+        heat += expected_heat;
+        gas_change += energy_change;
+    }
+    close(
+        wall.branch_shared_support(0).unwrap().velocity_m_s,
+        expected_support,
+        2e-12,
+    );
+    let exchange = wall.accepted_branch_shared_support_exchange(0).unwrap();
+    close(report.drag_heating_j, heat, 3e-12);
+    close(gas_change + exchange.kinetic_energy_change_j, 0.0, 3e-12);
+    close(exchange.momentum_residual_ns, 0.0, 3e-12);
+    assert_eq!(n.time(), Time::new(0.0));
 }
