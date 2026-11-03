@@ -665,7 +665,7 @@ fn admission<E>(
     Ok(end_time)
 }
 
-fn native_input<'a>(
+pub(super) fn native_input<'a>(
     model: &'a ArticulatedModel,
     state: &'a MixedArticulatedTrajectoryState,
 ) -> MixedArticulatedContactSystem<'a> {
@@ -780,7 +780,7 @@ fn kinematics<E>(
         .collect()
 }
 
-fn totals<E>(
+pub(super) fn totals<E>(
     systems: &[MixedArticulatedTrajectorySystem<'_>],
     states: &[MixedArticulatedTrajectoryState],
     origin: Vec3,

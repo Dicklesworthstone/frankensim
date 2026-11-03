@@ -6,6 +6,8 @@
 //! independent endpoint gap checks are not continuous collision detection.
 
 pub mod mixed;
+/// Held-force configuration complementarity through original native motion.
+pub mod sustained;
 
 use super::friction::{
     ArticulatedFrictionalContact, ArticulatedFrictionalContactResult,

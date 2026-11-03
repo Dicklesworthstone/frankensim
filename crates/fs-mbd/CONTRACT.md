@@ -5559,3 +5559,43 @@ and thermal loss partition remain outside this API. The focused tests in
 work, hidden entry and grazing, mixed simultaneous contact, covariance and
 permutation, repeated continuation, resource/refusal atomicity and pair-only
 compatibility.
+
+
+## Sustained articulated plane forces through native motion
+
+`articulated_contacts::step::sustained::step_sustained_articulated_planes`
+couples the original force/displacement contact owner to original free and
+prescribed spatial-motion owners. Every native trial starts from the same
+accepted state and applies gravity, actuator effort, body wrenches and contact
+point forces together at both midpoint stages. A resting force equilibrium
+therefore balances gravity without a velocity reset or force-kick impact loss.
+All points on each articulated tree retain the original full ABA coupling.
+
+Planes have fixed frames and constant material velocity, including conveyor
+motion. One held-force solve couples normal configuration complementarity and
+Coulomb tangential displacement. Original relative material displacements,
+plane source work, frictional dissipation, gravity and actuator/body work,
+prescribed support work, actual momentum increments and independent source
+impulses remain separate. The result distinguishes native integration error
+from the defect between midpoint contact work and held-force displacement
+work. No numerical defect is assigned to thermal heat.
+
+The result is explicitly `ArticulatedSustainedStepCandidate<P>`: a physically
+audited local candidate requiring caller-owned complete-path, omitted-feature,
+contact-mode and any additional determinacy admission. Native midpoint/end
+observations alone do not prove these properties. Strict final nonpenetration,
+nonnegative normal force, cone/complementarity/passivity and work/momentum
+checks apply; approaching impact states require an impact owner. A tiny signed
+inactive remainder may trigger one exact-zero inactive warm-start restart of
+the original solver, followed by fresh native replay and unchanged admission.
+The original response/outer-iteration budgets are shared across both attempts;
+no solved force, pose or velocity is clipped into acceptance.
+
+Input states remain borrowed on all errors. Bounds retain 128 systems, 4096
+total links and 21 contacts, with original native joint/state/source limits and
+cancellation. This entry adds neither generic contact discovery nor a complete
+Moreau--Jean scheme, a global Painleve/uniqueness classifier, frictional thermal
+partition, rotating contact frames or interacting sliding body-pair surfaces.
+`tests/articulated_sustained_contact.rs` covers exact resting support, moving
+belts, raising planes, accelerating prescribed supports, zero-force detachment
+and atomic path/impact/budget/cancellation/native-limit refusals.
