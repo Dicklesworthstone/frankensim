@@ -91,6 +91,15 @@ fn physical(
     payload: Option<(usize, &PayloadState)>,
     boost: Vec3,
 ) -> Observables {
+    physical_many(model, state, payload, boost)
+}
+
+fn physical_many<'p>(
+    model: &ArticulatedModel,
+    state: &FreeFloatingMotionState,
+    payloads: impl IntoIterator<Item = (usize, &'p PayloadState)>,
+    boost: Vec3,
+) -> Observables {
     let kinematics = kinematics(model, state);
     let mut bodies: Vec<_> = model
         .links()
@@ -105,7 +114,7 @@ fn physical(
             )
         })
         .collect();
-    if let Some((target, incoming)) = payload {
+    for (target, incoming) in payloads {
         bodies.push((
             target,
             incoming.inertia,
@@ -656,3 +665,6 @@ fn locked_capture_admits_the_constrained_endpoint_and_refuses_atomically() {
     ));
     assert_eq!((model, state, payload), retained);
 }
+
+#[path = "articulated_payload_capture/batch.rs"]
+mod batch;

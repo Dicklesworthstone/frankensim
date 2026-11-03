@@ -10,6 +10,11 @@
 //! discovery, finite-duration grasping, mass flux and a thermal destination for
 //! the removed relative kinetic energy remain caller-owned physical models.
 
+/// Simultaneous capture of multiple rigid payloads by one articulated tree.
+#[path = "inventory/batch.rs"]
+mod batch;
+pub use batch::{PayloadBatchCapture, PayloadCaptureInput, capture_payloads};
+
 /// Conservative payload release with optional internal separation impulses.
 #[path = "inventory/release.rs"]
 pub mod release;
@@ -29,18 +34,21 @@ use super::reconfigure::constraints::{
 use super::reconfigure::{
     self, ReconfigurationControls, ReconfigurationError, audit_momentum, state_kinematics,
 };
+use super::spatial_loads::implicit::ImplicitSpatialError;
 use super::spatial_loads::implicit::distance::{
     BilateralImpulseConfig, BilateralImpulseResponse, BilateralLoop, BilateralLoopError,
 };
-use super::spatial_loads::implicit::ImplicitSpatialError;
-use super::{FreeFloatingMotionError, FreeFloatingMotionState, MAX_FREE_FLOATING_STEP_LINKS};
+use super::{
+    FreeFloatingMotionError, FreeFloatingMotionState, MAX_FREE_FLOATING_STEP_LINKS, SpatialSum,
+};
 use crate::articulated::{
     ArticulatedError, ArticulatedModel, ArticulatedMomentum, BaseState, FreeFloatingBaseState,
     Kinematics, Link, SpatialInertia, forward_kinematics, free_floating_impulse_delta,
-    inverse_dynamics, momentum_from_kinematics, validate_slice, validate_twist, validate_vec3,
+    inverse_dynamics, momentum_from_kinematics, validate_slice, validate_twist,
 };
 use core::fmt;
 use fs_ga::{GaError, Mat3, Se3, Twist, Vec3, Wrench};
+use fs_math::dd::Dd;
 
 /// A free rigid payload, with inertia and twist expressed in its own body frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -284,10 +292,35 @@ pub fn capture_payload(
     controls: PayloadControls<'_>,
     cancelled: impl FnMut() -> bool,
 ) -> Result<PayloadCapture, PayloadError> {
-    capture_evaluated(
-        model, state, target_link, payload, constraints, controls, None, cancelled,
-    )
-    .map(|step| step.capture)
+    let result = capture_payloads(
+        model,
+        state,
+        &[PayloadCaptureInput {
+            target_link,
+            payload,
+        }],
+        constraints,
+        controls,
+        cancelled,
+    )?;
+    // The singleton entry retains the same native batch solve and accounting;
+    // only the one-element inventory/result containers are unwrapped.
+    let PayloadBatchCapture {
+        model_after,
+        state_after,
+        mut attachments,
+        mut payloads_after,
+        removed_relative_energy_j,
+        balance,
+    } = result;
+    Ok(PayloadCapture {
+        model_after,
+        state_after,
+        attachment: attachments.remove(0),
+        payload_after: payloads_after.remove(0),
+        removed_relative_energy_j,
+        balance,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -709,49 +742,67 @@ fn system_totals(
     extra: Option<(usize, &PayloadState)>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<SystemTotals, PayloadError> {
+    system_totals_many(model, state, kin, extra, cancelled)
+}
+
+fn system_totals_many<'p>(
+    model: &ArticulatedModel,
+    state: &FreeFloatingMotionState,
+    kin: &Kinematics,
+    extras: impl IntoIterator<Item = (usize, &'p PayloadState)>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<SystemTotals, PayloadError> {
     poll(cancelled)?;
-    let mut momentum = momentum_from_kinematics(model, kin)?;
+    let momentum = momentum_from_kinematics(model, kin)?;
+    let mut world = SpatialSum::default();
+    world.add_world_wrench(
+        momentum.linear_momentum_world,
+        momentum.angular_momentum_world,
+        &[],
+    );
+    let mut kinetic = Dd::from_f64(momentum.kinetic_energy);
     poll(cancelled)?;
-    let mut external = Vec::with_capacity(model.link_count());
+    let mut sums = Vec::with_capacity(model.link_count());
     for (index, link) in model.links().iter().enumerate() {
         if index % 64 == 0 {
             poll(cancelled)?;
         }
         let value = link.inertia().momentum(kin.body_twist[index])?;
-        external.push(Wrench::new(
-            value.torque.scale(-1.0),
-            value.force.scale(-1.0),
-        ));
+        let mut sum = SpatialSum::default();
+        sum.add_world_wrench(value.force.scale(-1.0), value.torque.scale(-1.0), &[]);
+        sums.push(sum);
     }
-    if let Some((target, payload)) = extra {
+    for (index, (target, payload)) in extras.into_iter().enumerate() {
+        if index % 64 == 0 {
+            poll(cancelled)?;
+        }
         let body = payload.inertia.momentum(payload.twist_body)?;
-        let world = body.transform_by(&payload.world_from_body);
-        momentum.linear_momentum_world = momentum.linear_momentum_world + world.force;
-        momentum.angular_momentum_world = momentum.angular_momentum_world + world.torque;
-        validate_vec3(
-            momentum.linear_momentum_world,
-            "payload total linear momentum",
-        )?;
-        validate_vec3(
-            momentum.angular_momentum_world,
-            "payload total angular momentum",
-        )?;
-        momentum.kinetic_energy = finite(
-            momentum.kinetic_energy + payload.inertia.kinetic_energy(payload.twist_body)?,
-            "payload lab kinetic energy",
-        )?;
+        let at_world = body.transform_by(&payload.world_from_body);
+        world.add_world_wrench(at_world.force, at_world.torque, &[]);
+        kinetic = kinetic + Dd::from_f64(payload.inertia.kinetic_energy(payload.twist_body)?);
         let link_from_payload = kin.world_from_link[target]
             .inverse()?
             .compose(payload.world_from_body)?;
         let at_link = body.transform_by(&link_from_payload);
-        external[target] = add_wrench(
-            external[target],
-            Wrench::new(at_link.torque.scale(-1.0), at_link.force.scale(-1.0)),
-        );
+        sums[target].add_world_wrench(at_link.force.scale(-1.0), at_link.torque.scale(-1.0), &[]);
+    }
+    let world = world.checked_wrench("payload world momentum")?;
+    let momentum = ArticulatedMomentum {
+        angular_momentum_world: world.torque,
+        linear_momentum_world: world.force,
+        kinetic_energy: finite(kinetic.to_f64(), "payload lab kinetic energy")?,
+    };
+    let mut external = Vec::with_capacity(sums.len());
+    for (index, sum) in sums.into_iter().enumerate() {
+        if index % 64 == 0 {
+            poll(cancelled)?;
+        }
+        external.push(sum.checked_wrench("payload projected link momentum")?);
     }
     poll(cancelled)?;
-    // Zero-velocity RNEA projects the independently evaluated body momenta
-    // through native joint subspaces. External wrenches are subtracted there.
+    // Zero-velocity RNEA projects independently evaluated body momenta through
+    // the original joint subspaces. Each incoming body contributes once at its
+    // target's virtual link; the native owner subtracts external wrenches.
     let zero = vec![0.0; model.dof_count()];
     let evaluated = inverse_dynamics(
         model,
@@ -788,33 +839,40 @@ fn energy_in_frame(
     boost: Vec3,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<f64, PayloadError> {
-    let mut total = 0.0;
+    energy_in_frame_many(model, kin, extra, boost, cancelled)
+}
+
+fn energy_in_frame_many<'p>(
+    model: &ArticulatedModel,
+    kin: &Kinematics,
+    extras: impl IntoIterator<Item = &'p PayloadState>,
+    boost: Vec3,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<f64, PayloadError> {
+    let mut total = Dd::ZERO;
     for (index, link) in model.links().iter().enumerate() {
         if index % 64 == 0 {
             poll(cancelled)?;
         }
-        total = finite(
-            total
-                + link.inertia().kinetic_energy(twist_in_frame(
-                    kin.body_twist[index],
-                    kin.world_from_link[index],
-                    boost,
-                )?)?,
-            "payload common-frame kinetic energy",
-        )?;
+        total = total
+            + Dd::from_f64(link.inertia().kinetic_energy(twist_in_frame(
+                kin.body_twist[index],
+                kin.world_from_link[index],
+                boost,
+            )?)?);
     }
-    if let Some(payload) = extra {
-        total = finite(
-            total
-                + payload.inertia.kinetic_energy(twist_in_frame(
-                    payload.twist_body,
-                    payload.world_from_body,
-                    boost,
-                )?)?,
-            "payload common-frame kinetic energy",
-        )?;
+    for (index, payload) in extras.into_iter().enumerate() {
+        if index % 64 == 0 {
+            poll(cancelled)?;
+        }
+        total = total
+            + Dd::from_f64(payload.inertia.kinetic_energy(twist_in_frame(
+                payload.twist_body,
+                payload.world_from_body,
+                boost,
+            )?)?);
     }
-    Ok(total)
+    finite(total.to_f64(), "payload common-frame kinetic energy")
 }
 
 #[allow(clippy::too_many_arguments)]

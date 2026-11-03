@@ -6033,3 +6033,53 @@ and mathematical review were completed, including an exact-rational check of
 the geared-slider reaction and work equations. Native compilation, test
 execution, and pinned formatting are **UNRUN** after executor replacement
 removed the Rust toolchain and cached native environment.
+
+## Simultaneous finite payload capture on a moving articulated tree
+
+`articulated::motion::inventory::capture_payloads` accepts a nonempty set of
+independent full-inertia payloads attached to any existing links at their actual
+poses. Every attachment is measured against the original accepted configuration.
+One cloned link inventory accumulates all loaded tensors, followed by one native
+model construction and one free-floating articulated-body momentum solve.
+Topology, link frames, joints, base pose and joint coordinates remain unchanged.
+There is no sequential capture dynamics or dense generalized mass assembly.
+
+Original per-link momentum and every incoming spin/orbital contribution use the
+existing compensated spatial sum in one translating inertial frame. The final
+loaded model supplies the coupled base and joint recoil. Existing ideal constant
+gear/lock rows reuse their original prepared response on that loaded inertia
+before final speed admission. A transient velocity from an isolated or partially
+loaded capture cannot reject an admissible simultaneous endpoint.
+
+The same native accounting reconstructs complete world and projected base/joint
+momenta independently. Removed relative energy sums original retained-body and
+incoming-payload velocity-change quadratics against the ONE final state, retaining
+shared recoil terms. Common-frame endpoint energy and finite gear work remain
+separate checks with independent allowances; neither rounding defect nor gear
+work is assigned to heat. Singleton `capture_payload` uses this same owner.
+
+Repeated target links return existing opaque release handles in input order.
+Their exact prefix inertias describe inventory identities, not intermediate
+physical motion. Handles on a given link release in reverse input order through
+the original release owner; different links can release independently. The
+physical result is permutation invariant to numerical accuracy, while handle
+ordering follows the authored inventory order. Each combined mass increment
+must remain representable under the original inertia admission.
+
+Outside existing optional constraint response, assembly, momentum and energy
+passes require O(links + payloads) work/storage. Additional loops poll every 64
+entries, and indivisible native tree passes retain the 4096-link bound. All
+failure paths leave inputs unchanged and publish no partial model, motion or
+attachment. Contact discovery, overlap validity, finite grasp dynamics, capture
+of an independently articulated mechanism and thermal conversion remain outside
+this instantaneous rigid attachment model.
+
+Five focused G0/G1/G3/G4 regression groups cover analytic different-link recoil
+and small loss under a billion-scale common velocity; opposite incoming spins
+whose individual captures violate a speed bound but joint capture satisfies it;
+reverse repeated-link release recovering exact retained inventory; independent
+COM/screw and all-piece parallel-axis sums for mixed joints and full tensors;
+input permutations and fixed-scene/boost covariance; singleton equality and
+existing locked-joint response; and late inventory, work and final-cancellation
+refusal with exact retry. Pinned nightly Rust formatting/parsing completed.
+Native compilation and numerical execution remain unrun in this session.
