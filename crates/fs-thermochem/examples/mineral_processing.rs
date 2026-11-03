@@ -22,6 +22,8 @@
 //! and an Elsner endpoint consuming a finite dissolved-O2 inventory.
 //! Sodium hydroxide and cubic sodium cyanide dissolution resolve reacted solid
 //! mass to explicit sodium counterions and hydroxide/cyanide equivalents.
+//! Separate NBS lime modes retain compatible CaO, crystalline Ca(OH)2 and Ca2+
+//! sources for slaking, acid neutralization and the reverse hydrolysis endpoint.
 //! `--help` lists every supported reaction and required pack order.
 //! Prefix a source-pack invocation with `--equilibrium` to also resolve standard
 //! entropy and derive Gibbs energy and log equilibrium constants from enthalpy
@@ -69,9 +71,12 @@ struct ReactionCase {
     equation: &'static str,
 }
 
-const REACTIONS: [&str; 43] = [
+const REACTIONS: [&str; 46] = [
     "lime-hydration",
     "hydrated-lime-neutralization",
+    "lime-hydration-nbs1989",
+    "hydrated-lime-neutralization-nbs1989",
+    "calcium-hydroxide-precipitation",
     "magnesite-calcination",
     "magnetite-oxidation",
     "cuprous-oxide-oxidation",
@@ -151,6 +156,58 @@ fn case(name: &str) -> Result<ReactionCase, Box<dyn Error>> {
                 "source-phase-liquid",
             ],
             equation: "Ca(OH)2(portlandite) + 2 H+(aq) -> Ca[2+](aq) + 2 H2O(l), hydrated-lime neutralization",
+        },
+        "lime-hydration-nbs1989" => ReactionCase {
+            reaction: MineralReaction::LimeHydration,
+            reference: NBS_REFERENCE,
+            packs: &[
+                "calcium-oxide-solid-nbs1989-thermochemistry",
+                "water-liquid-nbs1989-thermochemistry",
+                "calcium-hydroxide-solid-nbs1989-thermochemistry",
+            ],
+            species: &["CaO(s)", "H2O(l)", "Ca(OH)2(s)"],
+            phase_axes: &[
+                "source-phase-solid",
+                "source-phase-liquid",
+                "source-phase-solid",
+            ],
+            equation: "CaO(cr) + H2O(l) -> Ca(OH)2(cr), declared NBS quicklime hydration",
+        },
+        "hydrated-lime-neutralization-nbs1989" => ReactionCase {
+            reaction: MineralReaction::HydratedLimeNeutralization,
+            reference: NBS_REFERENCE,
+            packs: &[
+                "calcium-hydroxide-solid-nbs1989-thermochemistry",
+                "hydrogen-ion-aqueous-nbs1989",
+                "calcium-ion-aqueous-nbs1989",
+                "water-liquid-nbs1989-thermochemistry",
+            ],
+            species: &["Ca(OH)2(s)", "H+(aq)", "Ca[2+](aq)", "H2O(l)"],
+            phase_axes: &[
+                "source-phase-solid",
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+                "source-phase-liquid",
+            ],
+            equation: "Ca(OH)2(cr) + 2 H+(aq) -> Ca[2+](aq) + 2 H2O(l), declared NBS hydrated-lime neutralization",
+        },
+        "calcium-hydroxide-precipitation" => ReactionCase {
+            reaction: MineralReaction::CalciumHydroxidePrecipitation,
+            reference: NBS_REFERENCE,
+            packs: &[
+                "calcium-ion-aqueous-nbs1989",
+                "water-liquid-nbs1989-thermochemistry",
+                "calcium-hydroxide-solid-nbs1989-thermochemistry",
+                "hydrogen-ion-aqueous-nbs1989",
+            ],
+            species: &["Ca[2+](aq)", "H2O(l)", "Ca(OH)2(s)", "H+(aq)"],
+            phase_axes: &[
+                "source-phase-aqueous",
+                "source-phase-liquid",
+                "source-phase-solid",
+                "source-phase-aqueous",
+            ],
+            equation: "Ca[2+](aq) + 2 H2O(l) -> Ca(OH)2(cr) + 2 H+(aq), reverse NBS neutralization endpoint; finite phase equilibrium is a separate coupled solve",
         },
         "magnesite-calcination" => ReactionCase {
             reaction: MineralReaction::MagnesiteCalcination,

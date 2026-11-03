@@ -25,6 +25,9 @@
 //! are supplied separately. Hydrated-lime neutralization follows the EPA acid
 //! mine drainage design manual:
 //! <https://nepis.epa.gov/Exe/ZyPURL.cgi?Dockey=20007H0I.TXT>.
+//! Calcium-hydroxide precipitation is the exact reverse neutralization
+//! endpoint, written in hydrolysis form for a shared finite-solid/pH solve.
+//! Its presence alone supplies neither a saturation state nor a rate.
 //! Ferric hydrolysis to goethite follows USGS Open-File Report 2005-1148:
 //! <https://pubs.usgs.gov/of/2005/1148/of2005-1148.pdf>. Combining two
 //! hydrolysis extents with three hydrated-lime neutralizations gives the
@@ -155,6 +158,9 @@ pub enum MineralReaction {
     DolomiteBicarbonateNeutralization,
     /// Ca(OH)2(s) + 2 H+ -> Ca2+ + 2 H2O(l).
     HydratedLimeNeutralization,
+    /// Ca2+(aq) + 2 H2O(l) -> Ca(OH)2(s) + 2 H+(aq).
+    /// The selected crystalline source controls the solid identity; no rate is implied.
+    CalciumHydroxidePrecipitation,
     /// Cu2CO3(OH)2(s) + 4 H+ -> 2 Cu2+ + CO2(aq) + 3 H2O(l).
     /// Stoichiometric dissolved-copper endpoint, not an ore-recovery prediction.
     MalachiteAcidLeach,
@@ -370,6 +376,16 @@ impl MineralReaction {
                     ("H+(aq)", &[0, 1, 0], 1, -2),
                     ("Ca[2+](aq)", &[1, 0, 0], 2, 1),
                     ("H2O(l)", &[0, 2, 1], 0, 2),
+                ],
+            ),
+            Self::CalciumHydroxidePrecipitation => (
+                "calcium-hydroxide-precipitation",
+                &["Ca", "H", "O"],
+                &[
+                    ("Ca[2+](aq)", &[1, 0, 0], 2, -1),
+                    ("H2O(l)", &[0, 2, 1], 0, -2),
+                    ("Ca(OH)2(s)", &[1, 2, 2], 0, 1),
+                    ("H+(aq)", &[0, 1, 0], 1, 2),
                 ],
             ),
             Self::MalachiteAcidLeach => (

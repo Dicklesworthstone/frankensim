@@ -50,6 +50,7 @@ fn all_reference_reactions_conserve_and_rebuild_identically() {
         CalciteBicarbonateNeutralization,
         DolomiteBicarbonateNeutralization,
         HydratedLimeNeutralization,
+        CalciumHydroxidePrecipitation,
         MalachiteAcidLeach,
         MalachiteCarbonicAcidLeach,
         GoldCyanidation,
