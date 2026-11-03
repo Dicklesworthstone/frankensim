@@ -134,6 +134,68 @@ fn mixed_generated() -> (LayeredWall, [f64; 2]) {
 }
 
 #[test]
+fn g1_generated_layers_use_local_source_domains_and_distinct_contact_fluxes() {
+    // q_in=100, generated heat/area=20 then -40. The first layer's
+    // Kirchhoff drop is 110*0.65; the second's is 100*0.7.
+    let hot_interface = (700.0_f64.powi(2) - 2000.0 * 110.0 * 0.65).sqrt();
+    let contact = (hot_interface - 400.0) / 120.0;
+    let wall = disjoint_sources(contact, 450.0);
+    let answer = with_cx(|cx| {
+        wall.solve_temperature_dependent_with_generation(
+            cx,
+            [700.0, 300.0],
+            3.0,
+            &[20.0 / 0.65, -40.0 / 0.7],
+            generated_options([250.0, 750.0]),
+        )
+    })
+    .unwrap();
+    close(answer.boundary_fluxes_w_per_m2[0], 100.0);
+    close(answer.boundary_fluxes_w_per_m2[1], 80.0);
+    close(answer.generated_heat_rate_w, -60.0);
+    close(answer.reservoir_heat_rates_w.iter().sum(), -60.0);
+    close(answer.energy_residual_w, 0.0);
+    close(
+        answer.layer_temperatures[0].face_temperatures_k[1],
+        hot_interface,
+    );
+    close(answer.layer_temperatures[1].face_temperatures_k[0], 400.0);
+    close(answer.layer_temperatures[1].face_temperatures_k[1], 300.0);
+    close(
+        with_cx(|cx| answer.temperature_at(cx, 1, 0.35)).unwrap(),
+        (400.0_f64.powi(2) - 1000.0 * (120.0 * 0.35 - 20.0 / 0.7 * 0.35_f64.powi(2))).sqrt(),
+    );
+    assert_eq!(answer.wall, wall);
+
+    // The first layer can be exactly isothermal at the sole intersection of
+    // its source and the declared envelope. Its zero-width flux bracket must
+    // still evaluate the physical q_in=0 candidate.
+    let touching = LayeredWall::new(
+        vec![
+            curve("isothermal", 1.0, vec![(300.0, 1.0), (400.0, 1.0)]),
+            curve("heat removal", 1.0, vec![(400.0, 1.0), (500.0, 1.0)]),
+        ],
+        vec![0.0],
+        [0.0; 2],
+    )
+    .unwrap();
+    let exact = with_cx(|cx| {
+        touching.solve_temperature_dependent_with_generation(
+            cx,
+            [400.0, 500.0],
+            1.0,
+            &[0.0, -200.0],
+            generated_options([400.0, 500.0]),
+        )
+    })
+    .unwrap();
+    assert_eq!(exact.layer_temperatures[0].face_temperatures_k, [400.0; 2]);
+    close(exact.boundary_fluxes_w_per_m2[0], 0.0);
+    close(exact.boundary_fluxes_w_per_m2[1], -200.0);
+    close(exact.energy_residual_w, 0.0);
+}
+
+#[test]
 fn g1_g3_generated_stack_closes_local_contacts_films_and_signed_energy() {
     let (wall, reservoirs) = mixed_generated();
     let opts = generated_options([280.0, 400.0]);
@@ -338,8 +400,20 @@ fn g0_g4_generation_refuses_hidden_extrema_unsupported_domains_and_unfunded_work
         ))
         .is_err()
     );
+    // A broad declared envelope does not demand invented source data below
+    // 290 K; the actual 300..304 K profile is fully supported.
+    let broad = with_cx(|cx| {
+        wall.solve_temperature_dependent_with_generation(
+            cx,
+            [300.0; 2],
+            1.0,
+            &[20.0],
+            generated_options([280.0, 320.0]),
+        )
+    })
+    .unwrap();
+    close(broad.layer_temperatures[0].maximum_temperature_k, 304.0);
     for interval in [
-        [280.0, 310.0],
         [300.0, 300.0],
         [310.0, 300.0],
         [0.0, 310.0],

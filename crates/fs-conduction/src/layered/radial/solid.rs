@@ -215,7 +215,7 @@ impl SolidRadialLayeredBody {
             )?;
             generated_heat = next;
             physical_generated.push(power);
-            laws.push(ConductivityIntegral::new(
+            laws.push(ConductivityIntegral::new_local(
                 cx,
                 &layer.conductivity,
                 low,
@@ -233,9 +233,9 @@ impl SolidRadialLayeredBody {
         let mut maximum_residual = 0.0_f64;
         for index in (0..self.wall.layers.len()).rev() {
             checkpoint(cx, index)?;
-            admitted(outer, [low, high])?;
             let layer = &self.wall.layers[index];
             let law = &laws[index];
+            admitted(outer, law.interval())?;
             let inlet = faces[index];
             let outlet = faces[index + 1];
             let expected_drop = finite(

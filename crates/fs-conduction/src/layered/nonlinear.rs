@@ -3,9 +3,11 @@
 //! A layer obeys q L = integral(k(T), T_right..T_left). Exact trapezoidal
 //! segment integrals and a scaled quadratic inverse preserve each original
 //! source knot. One bounded monotone shooting solve determines common flux.
-//! Every table must support the entire reservoir interval; this conservative
-//! admission deliberately refuses some narrower per-layer domains that a
-//! separately justified solve might support. No source extrapolation occurs.
+//! Each table only needs to support its own layer's actual temperatures.
+//! A trial above a local source interval needs more heat flux; a trial below
+//! it needs less. Positive conductivity makes every downstream temperature
+//! monotone in that flux, so these refusals bound the same shooting root
+//! without evaluating or extrapolating an unsupported material state.
 
 use super::{LayeredWall, checkpoint, finite, invalid, positive};
 use crate::{ConductionError, ConductivityTable};
@@ -115,6 +117,30 @@ pub(super) struct ConductivityIntegral {
 }
 
 impl ConductivityIntegral {
+    /// Restrict the physical temperature envelope to this material's source.
+    /// The envelope bounds the solution, not the validity of every material
+    /// in a heterogeneous stack. Each trial must still admit its local faces.
+    pub(super) fn new_local(
+        cx: &Cx<'_>,
+        table: &ConductivityTable,
+        low: f64,
+        high: f64,
+    ) -> Result<Self, ConductionError> {
+        let (local_low, local_high) = match table.span() {
+            crate::material::TemperatureSpan::Unbounded => (low, high),
+            crate::material::TemperatureSpan::Sampled { low: a, high: b } => {
+                if b < low {
+                    table.span().check(low)?;
+                }
+                if a > high {
+                    table.span().check(high)?;
+                }
+                (low.max(a), high.min(b))
+            }
+        };
+        Self::new(cx, table, local_low, local_high)
+    }
+
     pub(super) fn new(
         cx: &Cx<'_>,
         table: &ConductivityTable,
@@ -150,7 +176,27 @@ impl ConductivityIntegral {
     fn value(&self, segment: usize, temperature: f64) -> f64 {
         let (t0, k0) = self.knots[segment];
         let (t1, k1) = self.knots[segment + 1];
-        ((temperature - t0) / (t1 - t0)).mul_add(k1 - k0, k0)
+        if temperature == t0 {
+            return k0;
+        }
+        if temperature == t1 {
+            return k1;
+        }
+        let fraction = (temperature - t0) / (t1 - t0);
+        if fraction <= 0.5 {
+            fraction.mul_add(k1 - k0, k0)
+        } else {
+            ((t1 - temperature) / (t1 - t0)).mul_add(k0 - k1, k1)
+        }
+    }
+
+    pub(super) fn interval(&self) -> [f64; 2] {
+        [self.knots[0].0, self.knots[self.knots.len() - 1].0]
+    }
+
+    fn check_temperature(&self, temperature: f64) -> Result<(), ConductionError> {
+        let [low, high] = self.interval();
+        crate::material::TemperatureSpan::Sampled { low, high }.check(temperature)
     }
 
     pub(super) fn integral(
@@ -159,6 +205,8 @@ impl ConductivityIntegral {
         low: f64,
         high: f64,
     ) -> Result<f64, ConductionError> {
+        self.check_temperature(low)?;
+        self.check_temperature(high)?;
         if low == high {
             return Ok(0.0);
         }
@@ -195,6 +243,7 @@ impl ConductivityIntegral {
         drop: f64,
     ) -> Result<Option<f64>, ConductionError> {
         finite("conductivity integral drop", drop)?;
+        self.check_temperature(start)?;
         if drop == 0.0 {
             return Ok(Some(start));
         }
@@ -265,6 +314,12 @@ struct Trial {
     cold_reservoir: f64,
 }
 
+enum Shot {
+    TooHot,
+    TooCold,
+    Complete(Trial),
+}
+
 // A linear film/contact temperature drop, or a proved cold-boundary crossing.
 fn resistance_drop(
     temperature: f64,
@@ -289,10 +344,11 @@ impl LayeredWall {
     /// Solve positive piecewise-linear k(T) without freezing any source curve.
     ///
     /// All original source knots are integrated exactly in real arithmetic.
-    /// Each source table must cover the complete positive reservoir interval,
+    /// Each source table must cover its own actual layer-face temperatures,
     /// at its original fixed moisture, pressure and other query coordinates.
-    /// This stronger domain admission is explicit; the existing constant solve
-    /// continues to check only actual layer-face temperatures.
+    /// Disjoint material intervals are admissible across a finite contact
+    /// resistance; external reservoirs may be outside a material's interval
+    /// behind an explicit surface film. No unsupported source value is used.
     ///
     /// A bounded monotone flux search starts from the hotter reservoir; it never
     /// evaluates an out-of-domain trial temperature. A candidate is returned
@@ -316,6 +372,14 @@ impl LayeredWall {
         let forward = reservoir_temperatures_k[0] >= reservoir_temperatures_k[1];
         let cold = reservoir_temperatures_k[0].min(reservoir_temperatures_k[1]);
         let hot = reservoir_temperatures_k[0].max(reservoir_temperatures_k[1]);
+        for (side, layer) in [0, self.layers.len() - 1].into_iter().enumerate() {
+            if self.surface_resistances_m2_k_per_w[side] == 0.0 {
+                self.layers[layer]
+                    .conductivity
+                    .span()
+                    .check(reservoir_temperatures_k[side])?;
+            }
+        }
         let mut laws = Vec::with_capacity(self.layers.len());
         let mut minimum_resistance =
             self.surface_resistances_m2_k_per_w[0] + self.surface_resistances_m2_k_per_w[1];
@@ -325,7 +389,7 @@ impl LayeredWall {
         }
         for (index, layer) in self.layers.iter().enumerate() {
             checkpoint(cx, index)?;
-            let law = ConductivityIntegral::new(cx, &layer.conductivity, cold, hot)?;
+            let law = ConductivityIntegral::new_local(cx, &layer.conductivity, cold, hot)?;
             let mut maximum = 0.0f64;
             for (knot, point) in law.knots.iter().enumerate() {
                 if knot % 128 == 0 {
@@ -367,11 +431,17 @@ impl LayeredWall {
         for iteration in 1..=options.max_iterations {
             checkpoint(cx, iteration)?;
             match self.shoot(cx, &laws, hot, cold, forward, trial_flux)? {
-                None => {
+                Shot::TooCold => {
                     high_flux = trial_flux;
                     bracketed = true;
                 }
-                Some(trial) => {
+                Shot::TooHot => {
+                    low_flux = trial_flux;
+                    if !bracketed {
+                        high_flux = finite("nonlinear wall bracketing flux", high_flux * 2.0)?;
+                    }
+                }
+                Shot::Complete(trial) => {
                     last_temperature_residual = trial.cold_reservoir - cold;
                     if last_temperature_residual <= options.temperature_tolerance_k
                         && (bracketed || last_temperature_residual == 0.0)
@@ -428,7 +498,7 @@ impl LayeredWall {
         cold: f64,
         forward: bool,
         flux: f64,
-    ) -> Result<Option<Trial>, ConductionError> {
+    ) -> Result<Shot, ConductionError> {
         let first_surface = if forward { 0 } else { 1 };
         let Some(mut temperature) = resistance_drop(
             hot,
@@ -437,7 +507,7 @@ impl LayeredWall {
             cold,
         )?
         else {
-            return Ok(None);
+            return Ok(Shot::TooCold);
         };
         let mut faces = vec![[0.0; 2]; self.layers.len()];
         for position in 0..self.layers.len() {
@@ -447,13 +517,20 @@ impl LayeredWall {
             } else {
                 self.layers.len() - 1 - position
             };
+            let [low, high] = laws[index].interval();
+            if temperature < low {
+                return Ok(Shot::TooCold);
+            }
+            if temperature > high {
+                return Ok(Shot::TooHot);
+            }
             let amount = finite(
                 "layer conductivity integral",
                 flux * self.layers[index].thickness_m,
             )?;
             positive("layer conductivity integral", amount)?;
             let Some(cooled) = laws[index].cool(cx, temperature, amount)? else {
-                return Ok(None);
+                return Ok(Shot::TooCold);
             };
             faces[index] = if forward {
                 [temperature, cooled]
@@ -470,7 +547,7 @@ impl LayeredWall {
                     cold,
                 )?
                 else {
-                    return Ok(None);
+                    return Ok(Shot::TooCold);
                 };
                 temperature = next;
             }
@@ -482,9 +559,9 @@ impl LayeredWall {
             cold,
         )?
         else {
-            return Ok(None);
+            return Ok(Shot::TooCold);
         };
-        Ok(Some(Trial {
+        Ok(Shot::Complete(Trial {
             faces,
             cold_reservoir,
         }))

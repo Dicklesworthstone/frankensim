@@ -49,6 +49,71 @@ fn shell_moments(cylinder: bool, r: f64) -> (f64, f64) {
 }
 
 #[test]
+fn generated_solid_core_and_shell_keep_separate_source_support() {
+    for cylinder in [true, false] {
+        let dimension = if cylinder { 2.0 } else { 3.0 };
+        let (distance, _) = shell_moments(cylinder, 2.0);
+        let cold_slope = 100.0 * distance / 35_000.0;
+        let make = |core_maximum: f64| {
+            LayeredWall::new(
+                vec![
+                    curve(
+                        "hot core",
+                        1.0,
+                        vec![(550.0, 0.55), (core_maximum, core_maximum / 1000.0)],
+                    ),
+                    curve(
+                        "cold shell",
+                        1.0,
+                        vec![(250.0, 250.0 * cold_slope), (450.0, 450.0 * cold_slope)],
+                    ),
+                ],
+                vec![2.0],
+                [0.0; 2],
+            )
+            .unwrap()
+        };
+        let model = solid(cylinder, make(750.0), 3.0);
+        let answer = with_cx(|cx| {
+            model.solve_temperature_dependent_with_generation(
+                cx,
+                300.0,
+                &[dimension * 100.0, 0.0],
+                controls(),
+            )
+        })
+        .unwrap();
+        // q at the unit-radius core surface is 100 W/m2. The source
+        // integral to the centre is q*r/2=50 W/m, while the contact
+        // contributes 200 K and the shell's Kirchhoff drop gives 100 K.
+        close(
+            answer.layer_temperatures[0].face_temperatures_k[0],
+            460_000.0_f64.sqrt(),
+        );
+        close(answer.layer_temperatures[0].face_temperatures_k[1], 600.0);
+        close(answer.layer_temperatures[1].face_temperatures_k[0], 400.0);
+        close(answer.layer_temperatures[1].face_temperatures_k[1], 300.0);
+        close(
+            answer.reservoir_heat_rate_w,
+            100.0 * model.reference_area_m2(),
+        );
+        close(answer.energy_residual_w, 0.0);
+        // The actual 678 K centre must still be refused by a 670 K source
+        // ceiling, even though the interface is supported at 600 K.
+        let narrow = solid(cylinder, make(670.0), 3.0);
+        assert!(
+            with_cx(|cx| narrow.solve_temperature_dependent_with_generation(
+                cx,
+                300.0,
+                &[dimension * 100.0, 0.0],
+                controls(),
+            ))
+            .is_err()
+        );
+    }
+}
+
+#[test]
 fn solid_core_affine_conductivity_has_regular_signed_exact_profiles() {
     for cylinder in [true, false] {
         let m = if cylinder { 2.0 } else { 3.0 };

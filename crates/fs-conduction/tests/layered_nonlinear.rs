@@ -291,14 +291,16 @@ fn g0_g3_real_query_owner_preserves_source_knots_context_and_receipts() {
 }
 
 #[test]
-fn g0_full_reservoir_support_is_explicit_and_constant_path_is_unchanged() {
+fn g1_material_support_is_local_to_the_solid_behind_surface_films() {
     let layer = curve("bounded constant", 1.0, vec![(300.0, 1.0), (500.0, 1.0)]);
     let wall = LayeredWall::new(vec![layer], vec![], [1.0; 2]).unwrap();
-    assert!(with_cx(|cx| wall.solve(cx, [290.0, 510.0], 1.0)).is_ok());
-    assert!(matches!(
-        with_cx(|cx| wall.solve_temperature_dependent(cx, [290.0, 510.0], 1.0, options(),)),
-        Err(ConductionError::OutsideTemperatureSpan { .. })
-    ));
+    let constant = with_cx(|cx| wall.solve(cx, [290.0, 510.0], 1.0)).unwrap();
+    let nonlinear =
+        with_cx(|cx| wall.solve_temperature_dependent(cx, [290.0, 510.0], 1.0, options())).unwrap();
+    close(nonlinear.heat_flux_w_per_m2, constant.heat_flux_w_per_m2);
+    close(nonlinear.heat_flux_w_per_m2, -220.0 / 3.0);
+    close(nonlinear.layer_temperatures[0].left_k, 290.0 + 220.0 / 3.0);
+    close(nonlinear.layer_temperatures[0].right_k, 510.0 - 220.0 / 3.0);
     let generated = with_cx(|cx| {
         wall.solve_temperature_dependent_with_generation(
             cx,
@@ -321,6 +323,105 @@ fn g0_full_reservoir_support_is_explicit_and_constant_path_is_unchanged() {
         generated.layer_temperatures[0].face_temperatures_k[1],
         510.0 - 220.0 / 3.0,
     );
+}
+
+fn disjoint_sources(contact: f64, cold_maximum: f64) -> LayeredWall {
+    LayeredWall::new(
+        vec![
+            curve("hot material", 0.65, vec![(550.0, 0.55), (750.0, 0.75)]),
+            curve(
+                "cold material",
+                0.7,
+                vec![(250.0, 0.5), (cold_maximum, cold_maximum / 500.0)],
+            ),
+        ],
+        vec![contact],
+        [0.0; 2],
+    )
+    .unwrap()
+}
+
+#[test]
+fn g1_g3_disjoint_material_domains_close_their_own_kirchhoff_and_contact_laws() {
+    // Independent q=100 W/m2 construction:
+    // hot: integral_600^700 (T/1000)dT / 0.65 = 100;
+    // contact: (600-400)/2 = 100;
+    // cold: integral_300^400 (T/500)dT / 0.7 = 100.
+    // Neither material supports the other material's temperatures.
+    let wall = disjoint_sources(2.0, 450.0);
+    let solve = |wall: &LayeredWall, temperatures| {
+        with_cx(|cx| wall.solve_temperature_dependent(cx, temperatures, 3.0, options())).unwrap()
+    };
+    let answer = solve(&wall, [700.0, 300.0]);
+    close(answer.heat_flux_w_per_m2, 100.0);
+    close(answer.heat_rate_w, 300.0);
+    for (row, [left, right]) in answer
+        .layer_temperatures
+        .iter()
+        .zip([[700.0, 600.0], [400.0, 300.0]])
+    {
+        close(row.left_k, left);
+        close(row.right_k, right);
+        close(row.recomputed_flux_w_per_m2, 100.0);
+    }
+    assert_eq!(answer.wall, wall);
+    let mirrored = LayeredWall::new(
+        wall.layers().iter().rev().cloned().collect(),
+        vec![2.0],
+        [0.0; 2],
+    )
+    .unwrap();
+    let reversed = solve(&mirrored, [300.0, 700.0]);
+    close(reversed.heat_flux_w_per_m2, -100.0);
+    for (a, b) in answer
+        .layer_temperatures
+        .iter()
+        .zip(reversed.layer_temperatures.iter().rev())
+    {
+        close(a.left_k, b.right_k);
+        close(a.right_k, b.left_k);
+    }
+    assert_eq!(answer, solve(&wall, [700.0, 300.0]));
+}
+
+#[test]
+fn g0_local_support_never_extrapolates_an_actual_interface_or_prescribed_face() {
+    // A missing contact cannot bridge these disjoint source intervals.
+    // With the contact present, lowering the cold source ceiling below its
+    // required 400 K interface also makes the physical root unsupported.
+    for wall in [disjoint_sources(0.0, 450.0), disjoint_sources(2.0, 380.0)] {
+        let before = wall.clone();
+        assert!(
+            with_cx(|cx| wall.solve_temperature_dependent(cx, [700.0, 300.0], 1.0, options()))
+                .is_err()
+        );
+        assert_eq!(wall, before);
+    }
+    assert!(matches!(
+        with_cx(
+            |cx| disjoint_sources(2.0, 450.0).solve_temperature_dependent(
+                cx,
+                [800.0, 300.0],
+                1.0,
+                options(),
+            )
+        ),
+        Err(ConductionError::OutsideTemperatureSpan { .. })
+    ));
+    let unsupported = LayeredWall::new(
+        vec![curve(
+            "no possible state",
+            0.1,
+            vec![(800.0, 1.0), (900.0, 2.0)],
+        )],
+        vec![],
+        [1.0; 2],
+    )
+    .unwrap();
+    assert!(matches!(
+        with_cx(|cx| unsupported.solve_temperature_dependent(cx, [700.0, 300.0], 1.0, options())),
+        Err(ConductionError::OutsideTemperatureSpan { .. })
+    ));
 }
 
 #[test]

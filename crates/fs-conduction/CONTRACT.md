@@ -837,8 +837,13 @@ disk exhaustion and the unchanged asupersync dependency exceeding the shared
 Varying conductivity is refused by the constant solve entry point. The separate
 `LayeredWall::solve_temperature_dependent` entry point integrates every positive
 piecewise-linear source segment with a scaled analytic inverse and bounded
-monotone common-flux shooting. Each source table must support the entire reservoir
-interval at its original fixed nonthermal context. Caller-declared iteration,
+monotone common-flux shooting. Each source table must support its own actual
+layer-face temperatures at its original fixed nonthermal context. Layer-local
+intervals may be disjoint across finite contact resistance, and reservoir
+temperatures may lie outside a material's support behind a surface film.
+Positive conductivity makes every downstream temperature decrease with the
+shooting flux; an unsupported hot/cold trial therefore narrows that same flux
+bracket without evaluating an out-of-domain constitutive value. Caller-declared iteration,
 temperature and constitutive-flux limits gate the returned candidate. Cancellation
 is checked between layers and every 128 source segments. Effective resistance and
 transmittance belong to this boundary pair; they are not tangent conductances.
@@ -849,10 +854,11 @@ temperature is recovered from the original positive piecewise-linear k(T).
 Its possible interior extremum is recovered analytically and admitted before
 a candidate can be returned. The inlet flux is determined by bounded monotone
 shooting; face fluxes, contact jumps and surface films all use local flux.
-`NonlinearGenerationOptions` declares a positive common material-temperature
-interval supported by every source table plus the existing work/residual
-limits. This is conservative admission, not extrapolation; reservoirs may lie
-outside that interval behind explicit nonzero films. No rejected trial evaluates
+`NonlinearGenerationOptions` declares a positive temperature envelope plus the
+existing work/residual limits. Each layer intersects that envelope with its own
+original source interval and checks both faces and interior extrema against
+this local support. Reservoirs may lie outside the envelope behind explicit
+nonzero films. No rejected trial evaluates
 an unsupported conductivity. A single O(layers) trial buffer is reused, and
 source inversion begins at the active segment found by binary search.
 The result retains material-card identities and receipts, both outward reservoir
@@ -876,7 +882,7 @@ cached geometry leaf supplies integrated reciprocal area and distributed-source
 moments to the existing Kirchhoff/shooting owner. Cylindrical logarithms use
 ln_1p, thin-shell source moments avoid subtractive cancellation, and stationary
 radii invert swept volume without subtracting nearly equal radii. Conductivity
-integration, common source-domain admission, interior extremum checks, work
+integration, layer-local source admission, interior extremum checks, work
 limits and cancellation remain shared with the planar path.
 
 Reports distinguish total signed radial heat rate from the local Q/A flux;
@@ -899,6 +905,13 @@ temperature span remains the caller's duty, including thickness-dependent
 product declarations. G0/G1/G3/G4 cases in `tests/layered.rs` exercise the
 analytical series-resistance law, contact jumps, exact source context,
 material/thickness substitution, reversal, subdivision and transactional refusal.
+
+Local-source regressions additionally recover independent Kirchhoff/contact
+balances for disjoint hot and cold materials, films outside material support,
+signed generation, cylindrical and spherical shells, and heated solid cores.
+Prescribed faces, actual interfaces and interior extrema outside their original
+source support still refuse. The source integrals, inverse profiles, physical
+areas, heat accounts and caller tolerances retain their original owners.
 
 ## Growing deposition thermal network (issue #1)
 
@@ -2784,105 +2797,7 @@ authority.
   its residual budget does not bound temporal discretization error. Analytic
   source/contact tests cover simultaneous heating and cooling, both-body
   sources, signed cooling and side exchange.
-  The caller commits the support only after its coupled specimen transaction
-  accepts. The existing string-runtime integration test verifies temperature,
-  damping and pressure feedback, support energy debit and late-refusal retry.
-  The Biot gate alone does not prove initially uniform temperature or the
-  validity of homogenizing a rapid local source. Cross-crate G1/G4 tests in
-  `fs-couple/tests/string_specimen.rs` consume this production path.
-- PCB HOMOGENIZATION IS CONSUMED, NOT REINTERPRETED. This crate uses the
-  nominal tensor and retains its constituent property receipts. Coverage
-  provenance, Reuss/Voigt structural bounds, propagated principal bounds,
-  scale-separation evidence, and the explicit via-array no-claim remain on the
-  caller-owned `PcbHomogenizedConductivity`. The PDE comparison runs its
-  lower/nominal/upper tensors; it does not certify probability, physical board
-  accuracy, trace-scale temperatures, or a nonlinear QoI uncertainty band.
-
-**Numerical scope.**
-
-- The production material/boundary frontend is P1 (FEEC 0-form) only, on
-  body-fitted TET complexes. Level-A P2 fixtures directly exercise the
-  high-order `fs-feec` simplex operator; there is no general higher-order
-  thermal frontend, no hex frontend, and no CutFEM frontend.
-- Flux recovery (`element_heat_flux`) returns the element-average discrete
-  flux `−<K(T_h)>_e ∇T_h`, retained as one constant vector per element. It
-  remains one order lower than temperature, is not interelement flux-conserving,
-  and carries no superconvergence claim.
-- The energy balance checks the assembled operator against an independent
-  post-integration of the SAME boundary data. It catches a sign or scale error
-  in one of those two paths, not an error in the data itself.
-- Internal contact contributions cancel from the global energy balance. The
-  report exposes each interface's integrated A-to-B heat rate, but that is not
-  a local flux-conservation certificate or an interface-error estimator.
-- `RobinFlux` is an ATTRIBUTION of the convective total, not a local error
-  bound. Restricting the balance's own post-integration to one trace inherits
-  exactly that rule's exactness — face-constant `h`, linear `T_ref` — and
-  nothing stronger. In particular, `mean_htc · area · (mean_wall −
-  mean_reference)` is NOT `heat_rate_w` when `h` varies over the region: the
-  heat rate is the integral, the means are area-weighted diagnostics, and the
-  two coincide only in the uniform-`h` case. A downstream consumer that
-  reconstructs heat from the means is computing a different quantity.
-- A per-surface heat rate is not a conjugate coupling. Nothing here solves a
-  fluid side, raises a downstream `T_ref` by the heat a trace removed, or
-  closes a solid-to-air balance; `T_ref` remains declared data. Those are
-  bead `f85xj.5.7`.
-- The series uncertainty budget is a conservative sum of stated symmetric
-  half-widths, not a probabilistic convolution and not a confidence
-  certificate. Correlation among terms is not modeled; one `Unstated` term
-  makes the complete half-width unavailable. Contact-resistance adjoints are
-  not exposed.
-
-**Evidence scope — read this before quoting an order.**
-
-- The G1 orders are OBSERVED, not proven. Each gate says: on these meshes, for
-  these coefficients and data, the fitted log-log slope sits within
-  `fs_mms::ORDER_GATE_TOLERANCE` of the P₁ rate. Nothing is established about
-  other meshes, other coefficients, or non-smooth data.
-- **P₁ on these structured Kuhn meshes reproduces exact solutions up to CUBIC
-  at the nodes** (measured:
-  `tests/conformance.rs::polynomial_reproduction_at_the_nodes`). A ladder run on
-  a quadratic or cubic solution therefore measures the INTERPOLATION error
-  `‖T − I_h T‖`, which does not depend on `K` at all. The two Dirichlet ladders
-  use a QUARTIC solution for exactly this reason; the Neumann and Robin ladders
-  stay on lower-order solutions because those keep the BOUNDARY DATA exactly
-  representable in the P₁ trace space, which is what those cases test. Anyone
-  reading those two ladders as evidence about the interior operator is reading
-  more than is there.
-- A residual is not an error bound. This crate reports residuals, an energy
-  balance, and observed orders. It ships NO certified bound on `‖T − T_h‖` and
-  no continuum goal-oriented (DWR) estimate. The `ConductionReport` deliberately
-  has no field that could be mistaken for one.
-  `ConductivityDesign::discrete_goal_error` evaluates the discrete identity
-  `J(T_discrete) - J(T_approximate) = z^T (b - A T_approximate)` for a linear
-  free-dof goal, using the same operator and Dirichlet lift as the primal.
-  It recomputes and checks the dual residual, retains signed free-dof
-  contributions, and refuses cancellation, nonfinite data/results or a stalled
-  dual. Goal normalization protects Krylov norms under unit rescaling.
-  These contributions are not elementwise DWR indicators. A mesh-error caller
-  still needs an enriched space, coarse-field prolongation and consistent goal
-  assembly; evaluating the solved mesh alone cannot establish mesh convergence.
-  The focused `tests/adjoint.rs::discrete_goal_error_*` tests compare against an
-  independent primal goal difference and check scaling, resolved/zero goals,
-  invalid data, exhausted iterations and cancellation. They do not establish
-  continuum effectivity, a certified bound, or an adaptive CLI solve loop.
-  `adjoint::compare_discrete_goal` additionally compares two full fields under
-  the production linear or nonlinear operator, including heterogeneous k(T)
-  and declared matching-P1 contact. It checks the reference primal residual
-  and prescribed temperatures, then reuses the PCG or actual nonsymmetric
-  K'(T) transpose solve. Its signed contributions are
-  `lambda_i [R(T_reference)-R(T_approximate)]_i`; its separately retained
-  `linearization_remainder` is the measured goal change minus their sum.
-  This includes finite nonlinear truncation and remaining dual arithmetic
-  error, so a consumer must account for its magnitude. It is an observation
-  between supplied discrete fields, never a bound on the continuum solution.
-  A kink at the reference, extrapolation, unverified reference, changed fixed
-  data, failed Krylov solve or cancellation refuses. The existing adjoint
-  target checks linear equivalence/unit scaling, quadratic remainder scaling
-  for a genuinely nonlinear material, and these refusal boundaries.
-  `RobinGoalLinearization` extends this two-field seam to consumer-owned
-  reference feedback. It retains the same checked solid residuals and actual
-  material/contact tangent without another primal solve, exposes the existing
-  Robin pullback, and verifies `J_s^T lambda - W^T wall_adjoint = weights`
+  The …1720 tokens truncated… pullback, and verifies `J_s^T lambda - W^T wall_adjoint = weights`
   against the ORIGINAL goal norm. Supplied reference changes correct both
   the reference primal and the two-field residual by the exact integrated
   Robin loads. Fixed adjoints remain zero and both complete residuals must

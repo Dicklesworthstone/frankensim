@@ -18,9 +18,10 @@ use fs_exec::Cx;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NonlinearGenerationOptions {
     /// Closed positive interval containing every material temperature, K.
-    /// Every layer must support the entire interval. This conservative common
-    /// interval is caller-declared; it is never inferred by extrapolating a
-    /// table. Reservoirs outside it are allowed behind nonzero surface films.
+    /// Each layer uses the intersection with its original source interval;
+    /// its own faces and interior extrema must remain inside that intersection.
+    /// The envelope is caller-declared, never inferred by extrapolating a table.
+    /// Reservoirs outside it are allowed behind nonzero surface films.
     pub temperature_interval_k: [f64; 2],
     /// Shooting budget and temperature/constitutive-flux residual tolerances.
     pub solver: NonlinearWallOptions,
@@ -218,6 +219,14 @@ impl LayeredWall {
                     "a prescribed face lies outside the material interval",
                 ));
             }
+            if surfaces[boundary] == 0.0 {
+                let layer = if boundary == 0 {
+                    0
+                } else {
+                    self.layers.len() - 1
+                };
+                self.layers[layer].conductivity.span().check(temperature)?;
+            }
         }
         let mut laws = Vec::with_capacity(self.layers.len());
         let mut generation = Vec::with_capacity(self.layers.len());
@@ -239,25 +248,31 @@ impl LayeredWall {
             }
             total_generation = finite("cumulative generation", total_generation + amount)?;
             generation.push(amount);
-            laws.push(ConductivityIntegral::new(
+            laws.push(ConductivityIntegral::new_local(
                 cx,
                 &layer.conductivity,
                 low,
                 high,
             )?);
         }
-        // Both first-layer endpoints must lie in [low,high]. Therefore its
+        // Both first-layer endpoints must lie in its own source interval. Its
         // integral drop lies in [-capacity,capacity], bounding the inlet flux
         // regardless of generation in later layers or external reservoirs.
-        let capacity = laws[0].integral(cx, low, high)?;
+        let [first_low, first_high] = laws[0].interval();
+        let capacity = laws[0].integral(cx, first_low, first_high)?;
         let half_width = capacity / shapes[0].resistance();
-        positive("inlet flux bracket half-width", half_width)?;
+        finite("inlet flux bracket half-width", half_width)?;
+        if half_width < 0.0 || (capacity > 0.0 && half_width == 0.0) {
+            return Err(invalid(
+                "inlet flux bracket half-width is not representable",
+            ));
+        }
         let center = -shapes[0].weighted_flux(0.0, generation[0]);
         let mut bracket = [
             finite("inlet flux lower bound", center - half_width)?,
             finite("inlet flux upper bound", center + half_width)?,
         ];
-        if bracket[0] >= bracket[1] {
+        if bracket[0] > bracket[1] || (half_width > 0.0 && bracket[0] == bracket[1]) {
             return Err(invalid("inlet flux bracket is not representable"));
         }
         let mut rows = Vec::with_capacity(self.layers.len());
@@ -275,7 +290,6 @@ impl LayeredWall {
                 contacts,
                 surfaces,
                 flux,
-                [low, high],
                 &mut rows,
             )? {
                 Shot::TooHot => bracket[0] = flux,
@@ -359,7 +373,6 @@ impl LayeredWall {
         contacts: &[f64],
         surfaces: [f64; 2],
         inlet_flux: f64,
-        interval: [f64; 2],
         rows: &mut Vec<NonlinearGeneratedLayerTemperatures>,
     ) -> Result<Shot, ConductionError> {
         let mut temperature = finite(
@@ -370,6 +383,7 @@ impl LayeredWall {
         let mut produced = 0.0;
         for (index, (layer, law)) in self.layers.iter().zip(laws).enumerate() {
             checkpoint(cx, index)?;
+            let interval = law.interval();
             if temperature < interval[0] {
                 return Ok(Shot::TooCold);
             }

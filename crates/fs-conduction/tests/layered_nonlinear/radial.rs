@@ -93,6 +93,56 @@ fn radial_zero_source_recovers_logarithmic_and_inverse_radius_resistance() {
 }
 
 #[test]
+fn radial_interfaces_bridge_disjoint_original_material_intervals() {
+    for cylinder in [true, false] {
+        let [hot_distance, _, _] = integrals(cylinder, 0.5, 1.0, 0.5);
+        let [cold_distance, _, _] = integrals(cylinder, 1.0, 2.0, 0.5);
+        // q_ref=100. Independent Kirchhoff drops give 700 ->600 K
+        // and 400 ->300 K, with a 200 K contact jump at the actual area.
+        let hot_slope = 100.0 * hot_distance / 65_000.0;
+        let cold_slope = 100.0 * cold_distance / 35_000.0;
+        let wall = LayeredWall::new(
+            vec![
+                curve(
+                    "hot shell",
+                    0.5,
+                    vec![(550.0, 550.0 * hot_slope), (750.0, 750.0 * hot_slope)],
+                ),
+                curve(
+                    "cold shell",
+                    1.0,
+                    vec![(250.0, 250.0 * cold_slope), (450.0, 450.0 * cold_slope)],
+                ),
+            ],
+            vec![if cylinder { 4.0 } else { 8.0 }],
+            [0.0; 2],
+        )
+        .unwrap();
+        let model = shell(cylinder, wall, 0.5);
+        let answer = with_cx(|cx| {
+            model.solve_temperature_dependent_with_generation(
+                cx,
+                [700.0, 300.0],
+                &[0.0; 2],
+                NonlinearGenerationOptions {
+                    temperature_interval_k: [250.0, 750.0],
+                    solver: options(),
+                },
+            )
+        })
+        .unwrap();
+        close(answer.layer_temperatures[0].face_temperatures_k[1], 600.0);
+        close(answer.layer_temperatures[1].face_temperatures_k[0], 400.0);
+        close(
+            answer.reservoir_heat_rates_w[1],
+            100.0 * model.reference_area_m2(),
+        );
+        close(answer.energy_residual_w, 0.0);
+        assert_eq!(answer.wall(), model.wall());
+    }
+}
+
+#[test]
 fn radial_generation_recovers_nonlinear_hot_and_cold_spots_and_full_energy() {
     for cylinder in [true, false] {
         let model = shell(cylinder, affine_wall(2.0), 1.0);
