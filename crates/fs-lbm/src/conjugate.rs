@@ -175,7 +175,9 @@ pub use unsteady::{
 /// including weak counterflow diffusion and dimensional exponential fitting.
 /// Version 5 selects the nearest physical wall surface, rather than nearest
 /// solid-cell centre, for LVEL distance and moving-wall velocity references.
-pub const CHT_SEMANTICS_VERSION: u32 = 5;
+/// Version 6 retains incoming tangential momentum separately on counterflowing
+/// half-faces of a pressure opening and admits authored backflow velocities.
+pub const CHT_SEMANTICS_VERSION: u32 = 6;
 
 /// Structured refusal from any stage of the conjugate pipeline.
 #[derive(Debug, Clone, PartialEq)]

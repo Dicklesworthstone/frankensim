@@ -25,8 +25,10 @@
 //! correction uses the same linearization (`u' = 2 d p'_inside`). The steady
 //! state is therefore one fixed point of the discrete equations, independent
 //! of the relaxation, also where the outflow is not fully developed.
-//! Openings pass flow in either direction. Incoming tangential momentum is
-//! zero; heat transport requires its own explicit backflow temperature.
+//! Openings pass flow in either direction. Incoming tangential momentum uses
+//! the configured external velocity (zero by default); the pressure solve
+//! still determines normal velocity. Heat transport requires its own explicit
+//! backflow temperature. This advected value is not a viscous velocity trace.
 //! Pressures share one declared gauge (the removed reference hydrostatic
 //! pressure for Boussinesq forcing), not an absolute thermodynamic EOS.
 //!
@@ -113,10 +115,12 @@ pub enum FvBoundary {
         /// Inflow velocity vector.
         velocity: [f64; 3],
     },
-    /// Prescribed (zero) pressure with zero-gradient velocity.
+    /// Prescribed (zero) pressure with zero-gradient velocity. Incoming
+    /// tangential momentum uses [`SimpleConfig::backflow_tangential_velocity_m_s`].
     Outlet,
     /// Prescribed static gauge pressure with zero-gradient velocity. Flow may
-    /// enter or leave; incoming tangential momentum is zero, as for `Outlet`.
+    /// enter or leave; incoming tangential momentum uses
+    /// [`SimpleConfig::backflow_tangential_velocity_m_s`], as for `Outlet`.
     /// The thermal owner separately supplies any backflow temperature/enthalpy.
     Pressure {
         /// Finite signed pressure [Pa] in the same reference as every other
@@ -390,6 +394,18 @@ const PRESSURE_POLISH_PASSES: usize = 4;
 pub struct SimpleConfig {
     /// One rule per domain face in [`Face3::ALL`] order.
     pub faces: [FvBoundary; 6],
+    /// External velocity carried by incoming fluid at each Pressure/Outlet
+    /// face, in world axes and m/s. None retains zero incoming tangential
+    /// momentum. Some requires a finite vector with zero normal component;
+    /// pressure and continuity determine normal velocity. Closed faces and
+    /// prescribed Inlet faces require None. Face order is [`Face3::ALL`].
+    ///
+    /// Only inward portions of the staggered boundary carry this value;
+    /// outward portions carry the solved interior velocity. This supplies no
+    /// viscous velocity trace, shear traction, kinetic-energy/heat boundary
+    /// account, or time-dependent reservoir. The separate zero-tangential-trace
+    /// pressure-work heating model refuses nonzero values.
+    pub backflow_tangential_velocity_m_s: [Option<[f64; 3]>; 6],
     /// Convection scheme for momentum.
     pub scheme: ConvectionScheme,
     /// Momentum under-relaxation in `(0, 1)`.
@@ -442,6 +458,7 @@ impl SimpleConfig {
     pub const fn new(faces: [FvBoundary; 6]) -> Self {
         Self {
             faces,
+            backflow_tangential_velocity_m_s: [None; 6],
             scheme: ConvectionScheme::PowerLaw,
             velocity_relaxation: 0.7,
             max_iterations: 3000,
@@ -795,7 +812,7 @@ fn cell_of(n: [usize; 3], c: [usize; 3]) -> usize {
 }
 
 impl<'a> Solver<'a> {
-    #[allow(clippy::too_many_lines)] // one constructor of the solver state
+    #[allow(clippy::too_many_lines)]// one constructor of the solver state
     pub(super) fn new(
         domain: &'a VoxelDomain,
         fluid: &FluidProperties,
@@ -1674,7 +1691,12 @@ impl<'a> Solver<'a> {
     /// flow's momentum scale (under-relaxation cancels at `u = u_old`, so
     /// this is the residual of the unrelaxed steady equations).
     #[allow(clippy::too_many_lines)] // one staggered control-volume assembly
-    fn momentum(&mut self, a: usize, solve: bool, gate: &CancelGate) -> Result<MomentumResidual, ChtError> {
+    fn momentum(
+        &mut self,
+        a: usize,
+        solve: bool,
+        gate: &CancelGate,
+    ) -> Result<MomentumResidual, ChtError> {
         let rows = self.comps[a].unknowns.len();
         if rows == 0 {
             self.momentum_rms[a] = 0.0;
@@ -1780,11 +1802,10 @@ impl<'a> Solver<'a> {
                     let third = 3 - a - d;
                     let w3 = width(third, f[third]);
                     let side_area = length * w3;
-                    let edge_flux = {
-                        let vm = self.vel[d][self.cell_face(d, minus_cell, plus)];
-                        let vp = self.vel[d][self.cell_face(d, plus_cell, plus)];
-                        s * advective_density * w3 * (0.5 * w_minus).mul_add(vm, 0.5 * w_plus * vp)
-                    };
+                    let vm = self.vel[d][self.cell_face(d, minus_cell, plus)];
+                    let vp = self.vel[d][self.cell_face(d, plus_cell, plus)];
+                    let edge_flux = s * advective_density * w3
+                        * (0.5 * w_minus).mul_add(vm, 0.5 * w_plus * vp);
                     let outside = if plus {
                         f[d] + 1 >= self.n[d]
                     } else {
@@ -1858,9 +1879,27 @@ impl<'a> Solver<'a> {
                                 }
                                 rhs += cross_shear;
                                 net_out += edge_flux;
-                                if edge_flux < 0.0 {
-                                    // Backflow carries zero tangential momentum.
-                                    a_p += -edge_flux;
+                                // Each half-face selects its own donor. A
+                                // recirculating mouth can import AND export
+                                // momentum even when its net mass flux is zero.
+                                // Retain the original arithmetic when both
+                                // portions flow in the same direction.
+                                let incoming = if (vm < 0.0 && vp > 0.0)
+                                    || (vm > 0.0 && vp < 0.0)
+                                {
+                                    let scale = s * advective_density * w3;
+                                    (-(scale * (0.5 * w_minus * vm))).max(0.0)
+                                        + (-(scale * (0.5 * w_plus * vp))).max(0.0)
+                                } else {
+                                    (-edge_flux).max(0.0)
+                                };
+                                if incoming > 0.0 {
+                                    a_p += incoming;
+                                    if let Some(velocity) = self.config
+                                        .backflow_tangential_velocity_m_s[2 * d + usize::from(plus)]
+                                    {
+                                        rhs = incoming.mul_add(velocity[a], rhs);
+                                    }
                                 }
                             }
                         }
@@ -2261,6 +2300,23 @@ pub(super) fn admit(
     for (side, rule) in config.faces.iter().enumerate() {
         let axis = side / 2;
         let inward = if side % 2 == 0 { 1.0 } else { -1.0 };
+        if let Some(velocity) = config.backflow_tangential_velocity_m_s[side] {
+            if rule.prescribed_pressure().is_none() {
+                return Err(ChtError::InvalidInput {
+                    field: "simple.backflow_tangential_velocity_m_s",
+                    reason: format!("backflow momentum on face {side} requires a pressure opening"),
+                });
+            }
+            for value in velocity {
+                finite("simple.backflow_tangential_velocity_m_s", value)?;
+            }
+            if velocity[axis] != 0.0 {
+                return Err(ChtError::InvalidInput {
+                    field: "simple.backflow_tangential_velocity_m_s",
+                    reason: format!("pressure determines normal velocity on opening {side}"),
+                });
+            }
+        }
         match *rule {
             FvBoundary::Wall { velocity } => {
                 for v in velocity {

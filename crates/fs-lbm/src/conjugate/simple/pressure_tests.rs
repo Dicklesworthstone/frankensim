@@ -207,6 +207,160 @@ fn pressure_opening_refuses_nonfinite_and_unrepresentable_boundary_differences()
     ));
 }
 
+// One actual MAC momentum predictor, with a resolved normal carrier frozen
+// while solving its transverse component. Independent three-row equations
+// below include the declared relaxation; this is not a pressure-flow mock.
+fn opening_transverse_predictor(axis: usize, reverse: bool, counterflow: bool) -> [f64; 3] {
+    let tangent = (axis + 1) % 3;
+    let mut dims = [1; 3];
+    dims[axis] = 3;
+    dims[tangent] = 2;
+    let domain = VoxelDomain::new(dims[0], dims[1], dims[2], 1.0).unwrap();
+    let mut faces = [FvBoundary::Symmetry; 6];
+    faces[2 * axis] = FvBoundary::Pressure { pressure_pa: 0.0 };
+    faces[2 * axis + 1] = FvBoundary::Pressure { pressure_pa: 0.0 };
+    let source = 2 * axis + usize::from(reverse);
+    // Outlet is the same pressure opening, including when it receives flow.
+    faces[source] = FvBoundary::Outlet;
+    let mut config = SimpleConfig::new(faces);
+    config.scheme = ConvectionScheme::Upwind;
+    config.velocity_relaxation = 0.5;
+    config.momentum_tolerance = 1e-12;
+    let mut external = [0.0; 3];
+    external[tangent] = 0.25;
+    config.backflow_tangential_velocity_m_s[source] = Some(external);
+    external[tangent] = -7.0;
+    config.backflow_tangential_velocity_m_s[source ^ 1] = Some(external);
+    let fluid = fluid();
+    admit(&domain, &fluid, &config).unwrap();
+    let mut solver = Solver::new(&domain, &fluid, &config);
+    let sign = if reverse { -1.0 } else { 1.0 };
+    if counterflow {
+        // Equal incoming/outgoing half-faces: net flux is zero, but incoming
+        // reservoir momentum and outgoing interior momentum are both real.
+        for row in 0..2 {
+            let mut face = [0; 3];
+            face[axis] = if reverse { 3 } else { 0 };
+            face[tangent] = row;
+            let index = solver.comps[axis].index(face);
+            solver.vel[axis][index] = if row == 0 { sign } else { -sign };
+        }
+    } else {
+        solver.vel[axis].fill(sign);
+    }
+    solver.momentum(tangent, true, &CancelGate::new()).unwrap();
+    std::array::from_fn(|position| {
+        let mut face = [0; 3];
+        face[axis] = if reverse { 2 - position } else { position };
+        face[tangent] = 1;
+        solver.vel[tangent][solver.comps[tangent].index(face)]
+    })
+}
+
+#[test]
+fn pressure_opening_backflow_momentum_obeys_each_half_face_budget_on_all_axes() {
+    for axis in 0..3 {
+        for reverse in [false, true] {
+            for counterflow in [false, true] {
+                // rho=1, mu=1/4, unit geometry, alpha=1/2. Ordinary inflow
+                // carries 1/4 N; opposed half-flows carry 1/8 N even at net Q=0.
+                let (diagonal, lower, upper, incoming, outgoing_rate) = if counterflow {
+                    ([2.5, 2.0, 1.5], 0.25, 0.25, 0.125, 0.5)
+                } else {
+                    ([3.5, 4.0, 3.5], 1.25, 0.25, 0.25, 1.0)
+                };
+                let middle = (lower * incoming / diagonal[0])
+                    / (diagonal[1] - lower * upper / diagonal[0] - upper * lower / diagonal[2]);
+                let expected = [
+                    (incoming + upper * middle) / diagonal[0],
+                    middle,
+                    lower * middle / diagonal[2],
+                ];
+                let actual = opening_transverse_predictor(axis, reverse, counterflow);
+                for (&a, &b) in actual.iter().zip(&expected) {
+                    assert!(
+                        (a - b).abs() < 1e-12,
+                        "axis={axis}, reverse={reverse}, counterflow={counterflow}: {actual:?} != {expected:?}"
+                    );
+                }
+                // Sum the independently represented boundary momentum, normal
+                // viscous resistance and numerical under-relaxation terms.
+                let outgoing = outgoing_rate * actual[if counterflow { 0 } else { 2 }];
+                let viscous = 0.5 * actual.iter().sum::<f64>();
+                let relaxation: f64 = actual
+                    .iter()
+                    .zip(diagonal)
+                    .map(|(&velocity, diagonal)| 0.5 * diagonal * velocity)
+                    .sum();
+                assert!((incoming - outgoing - viscous - relaxation).abs() < 1e-12);
+            }
+        }
+    }
+}
+
+#[test]
+fn pressure_opening_backflow_momentum_reaches_steady_and_transient_native_flow() {
+    let gate = CancelGate::new();
+    let (domain, mut config) = channel(4, 0, 0.5, 0.0);
+    let baseline = simple_flow(&domain, &fluid(), &config, &gate).unwrap();
+    config.backflow_tangential_velocity_m_s[0] = Some([0.0; 3]);
+    config.backflow_tangential_velocity_m_s[1] = Some([0.0; 3]);
+    assert_eq!(
+        simple_flow(&domain, &fluid(), &config, &gate).unwrap(),
+        baseline
+    );
+    config.backflow_tangential_velocity_m_s[0] = Some([0.0, 0.03, 0.0]);
+    let driven = simple_flow(&domain, &fluid(), &config, &gate).unwrap();
+    assert!(driven.velocity_m_s.iter().any(|v| v[1].abs() > 1e-6));
+    assert!(driven.report.max_divergence_m3_s < 1e-10);
+    let mut time = UnsteadyConfig::new(0.1, 3);
+    time.inner_tolerance = 1e-8;
+    time.inner_iterations = 300;
+    let started = simple_unsteady(&domain, &fluid(), &config, &time, |_| 1.0, &gate).unwrap();
+    assert!(started.flow.velocity_m_s.iter().any(|v| v[1].abs() > 1e-7));
+    assert!(started.flow.report.max_divergence_m3_s < 1e-10);
+}
+
+#[test]
+fn pressure_opening_backflow_momentum_refuses_unsupported_components_and_work_model() {
+    let (domain, original) = channel(4, 0, 0.5, 0.0);
+    for (face, velocity) in [
+        (0, [0.1, 0.0, 0.0]),
+        (0, [0.0, f64::NAN, 0.0]),
+        (0, [0.0, f64::INFINITY, 0.0]),
+        (2, [0.1, 0.0, 0.0]),
+    ] {
+        let mut config = original.clone();
+        config.backflow_tangential_velocity_m_s[face] = Some(velocity);
+        assert!(matches!(
+            admit(&domain, &fluid(), &config),
+            Err(ChtError::InvalidInput {
+                field: "simple.backflow_tangential_velocity_m_s",
+                ..
+            })
+        ));
+    }
+    let mut prescribed = original.clone();
+    prescribed.faces[0] = FvBoundary::Inlet {
+        velocity: [0.1, 0.0, 0.0],
+    };
+    prescribed.backflow_tangential_velocity_m_s[0] = Some([0.0, 0.1, 0.0]);
+    assert!(admit(&domain, &fluid(), &prescribed).is_err());
+    let controls = viscous_heat::ViscousHeatControls {
+        maximum_reynolds: 0.1,
+        power_tolerance_w: 1e-8,
+    };
+    let mut config = original;
+    config.backflow_tangential_velocity_m_s[0] = Some([0.0; 3]);
+    assert!(
+        viscous_heat::pressure::admit_pressure_work_heating(&domain, &config, controls).is_ok()
+    );
+    config.backflow_tangential_velocity_m_s[0] = Some([0.0, 0.03, 0.0]);
+    assert!(
+        viscous_heat::pressure::admit_pressure_work_heating(&domain, &config, controls).is_err()
+    );
+}
+
 #[test]
 fn pressure_projection_polishes_quiet_component_before_caloric_transport() {
     use crate::conjugate::{

@@ -3597,16 +3597,32 @@ so `simple_flow` -> `solve_energy` / `march_energy` is the conjugate chain.
   caller's reference (the removed reference hydrostatic state in Boussinesq
   runs). This incompressible load is not absolute gas pressure and does not
   update density or a material EOS. Opening velocities are solved in either
-  direction, with zero incoming tangential momentum. The existing energy owner
-  supplies backflow temperature/enthalpy; no reservoir thermal state is inferred
-  from pressure. Momentum is iterated relative to one fixed numerical datum and
-  that datum is restored on public pressure output, so common pressure offsets
-  do not contaminate small pressure-gradient residuals. Native material momentum
+  direction. `SimpleConfig::backflow_tangential_velocity_m_s` optionally supplies
+  the external tangential velocity carried by incoming fluid on each opening;
+  absence retains zero incoming tangential momentum. Vectors are finite, have
+  zero normal component, and are allowed only on Pressure/Outlet faces. Pressure
+  and continuity still determine the normal velocity. Each of the two half-face
+  portions of a transverse staggered control volume selects its own donor:
+  simultaneous inflow and outflow exchange momentum even when their net volume
+  flux is zero. Outgoing fluid carries the solved interior velocity. This is
+  advected momentum, not an imposed viscous trace, shear traction, or an audited
+  reservoir kinetic-energy/heat supply. The shared steady/transient momentum
+  operator uses the same condition; the normal pressure equation is unchanged.
+  The existing energy owner supplies backflow temperature/enthalpy; no reservoir
+  thermal state is inferred from pressure. Momentum is iterated relative to one
+  fixed numerical datum and that datum is restored on public pressure output, so
+  common pressure offsets do not contaminate small pressure-gradient residuals.
+  Native material momentum
   checkpoints retain the datum. Face fans retain their ambient-zero reference.
   Nonfinite pressure and unrepresentable pressure differences refuse at admission.
   Focused G1/G3 `pressure_opening` tests cover planar Poiseuille refinement,
   pressure datum/offset invariance, reversed flow on all axes, source-viscosity
   scaling, the existing backflow heat transport, and transient start-up.
+  Backflow-momentum regressions independently close the actual three-row MAC
+  predictor's momentum budget, including mixed-sign half-face fluxes, axis/flow
+  reversal, zero-default equivalence, native steady/transient response and
+  unsupported boundary/work-model refusal. Test presence alone is not an
+  executed validation or mesh-convergence claim.
 - Momentum uses shared power-law, exponential, or upwind coefficients with `a_P / alpha`
   under-relaxation (alpha in (0, 1); SIMPLEC's `d` degenerates at 1). Closed
   components of the pressure correction are pinned.
@@ -4988,6 +5004,10 @@ trace. Tangential reaction shear performs zero work. This is a distinct opt-in
 from legacy static-pressure/zero-gradient openings; it does not prescribe zero
 tangential traction. Other planes remain walls/symmetry. The original closed
 and inertial heating modes retain their existing boundary admission.
+Nonzero `backflow_tangential_velocity_m_s` refuses in this zero-trace work model;
+an explicitly zero vector is equivalent to the existing absent value. The
+ordinary pressure-opening momentum option does not silently add unaccounted
+reservoir shear work to this separate heat-producing mode.
 
 Native mouth momentum rows mirror one interior cell, but their physical work
 volume is HALF that cell. The normal stress coefficient is doubled in that

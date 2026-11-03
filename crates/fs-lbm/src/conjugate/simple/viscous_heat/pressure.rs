@@ -49,6 +49,13 @@ pub(in crate::conjugate) fn admit_pressure_work_heating(
     for (side, face) in config.faces.iter().enumerate() {
         match face {
             FvBoundary::Pressure { .. } | FvBoundary::Outlet => {
+                if config.backflow_tangential_velocity_m_s[side]
+                    .is_some_and(|velocity| velocity != [0.0; 3])
+                {
+                    return Err(invalid_power(
+                        "pressure-work heat requires zero tangential reservoir velocity",
+                    ));
+                }
                 if axis.is_some_and(|a| a != side / 2) {
                     return Err(invalid_power(
                         "pressure-work heat needs one opposed reservoir-mouth pair",
@@ -80,6 +87,8 @@ pub(in crate::conjugate) fn admit_pressure_work_heating(
     let mut closed = config.clone();
     closed.faces[2 * axis] = FvBoundary::Symmetry;
     closed.faces[2 * axis + 1] = FvBoundary::Symmetry;
+    closed.backflow_tangential_velocity_m_s[2 * axis] = None;
+    closed.backflow_tangential_velocity_m_s[2 * axis + 1] = None;
     admit_heating(domain, &closed, controls)?;
     Ok(axis)
 }
