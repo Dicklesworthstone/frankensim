@@ -76,6 +76,30 @@ impl<'s> PreparedTensorSolidBody<'s> {
         controls: PreparedTensorControls,
         gate: &CancelGate,
     ) -> Result<Self> {
+        Self::prepare(projection, dt_s, None, controls, gate)
+    }
+
+    /// Prepare exact linear-in-time nodal force intervals on the same original
+    /// solid. `force_scale_n` is a positive numerical conditioning scale, not a
+    /// force limit or a material parameter. The retained source, geometry and
+    /// clock stay fixed; no motion mode or original material point is removed.
+    pub fn new_affine(
+        projection: ProjectedViscoSolid<'s>,
+        dt_s: f64,
+        force_scale_n: f64,
+        controls: PreparedTensorControls,
+        gate: &CancelGate,
+    ) -> Result<Self> {
+        Self::prepare(projection, dt_s, Some(force_scale_n), controls, gate)
+    }
+
+    fn prepare(
+        projection: ProjectedViscoSolid<'s>,
+        dt_s: f64,
+        force_scale_n: Option<f64>,
+        controls: PreparedTensorControls,
+        gate: &CancelGate,
+    ) -> Result<Self> {
         poll(gate)?;
         if projection.coordinates() > controls.maximum_coordinates
             || projection.material_points().len() > controls.maximum_material_points
@@ -85,15 +109,28 @@ impl<'s> PreparedTensorSolidBody<'s> {
                 "original solid exceeds prepared coordinate, point or element capacity",
             ));
         }
-        let body = PreparedTensorBody::from_mass_matrix(
-            projection.coordinates(),
-            projection.mass_matrix_kg().to_vec(),
-            projection.material_points().to_vec(),
-            projection.point_elements().to_vec(),
-            dt_s,
-            controls,
-            gate,
-        )?;
+        let body = if let Some(force_scale_n) = force_scale_n {
+            PreparedTensorBody::from_mass_matrix_affine(
+                projection.coordinates(),
+                projection.mass_matrix_kg().to_vec(),
+                projection.material_points().to_vec(),
+                projection.point_elements().to_vec(),
+                dt_s,
+                force_scale_n,
+                controls,
+                gate,
+            )?
+        } else {
+            PreparedTensorBody::from_mass_matrix(
+                projection.coordinates(),
+                projection.mass_matrix_kg().to_vec(),
+                projection.material_points().to_vec(),
+                projection.point_elements().to_vec(),
+                dt_s,
+                controls,
+                gate,
+            )?
+        };
         if body.heat_group_count() != projection.element_count() {
             return Err(PreparedSolidError::Invalid(
                 "each original element must retain its material heat channel",
@@ -142,6 +179,15 @@ impl PreparedTensorSolidStep {
     pub fn element_heat_j(&self) -> &[f64] {
         &self.material.heat_by_group_j
     }
+}
+
+/// Complete affine-force interval with original nodal work-conjugate moments.
+#[derive(Clone, Debug)]
+pub struct PreparedTensorSolidAffineStep {
+    pub motion: PreparedTensorSolidStep,
+    /// Integral from s=0 to 1 of s * v_node(t0 + h*s) ds [m/s].
+    /// The original nodal work is h * sum(F0 * mean_v + (F1-F0) * first_v).
+    pub first_nodal_velocity_moment_mps: Vec<[f64; 3]>,
 }
 
 /// Accepted state borrows one immutable source projection and prepared cache.
@@ -211,6 +257,66 @@ impl PreparedTensorSolidHistory<'_, '_> {
             material,
             mean_nodal_velocity_mps: velocity,
             nodal_work_error_j: defect_j,
+        })
+    }
+
+    /// Advance F(s)=(1-s)*F0+s*F1 for 0<=s<=1, using the prepared source flow
+    /// and positive material loss on that complete continuous trajectory.
+    /// Both endpoint force fields use the same original projection. The two
+    /// velocity moments expand through its conjugate nodal map, including zero
+    /// velocity on fixed rows. Original nodal work is checked against the
+    /// independently integrated force/velocity product before state publication.
+    pub fn advance_affine(
+        &mut self,
+        nodal_force_start_n: &[[f64; 3]],
+        nodal_force_end_n: &[[f64; 3]],
+        gate: &CancelGate,
+    ) -> Result<PreparedTensorSolidAffineStep> {
+        poll(gate)?;
+        let projection = &self.solid.projection;
+        let force_start = projection.project_nodal_force(nodal_force_start_n, gate)?;
+        let force_end = projection.project_nodal_force(nodal_force_end_n, gate)?;
+        let mut candidate = self.inner.clone();
+        let affine = candidate.advance_affine(&force_start, &force_end, gate)?;
+        let velocity = projection.expand_nodal(&affine.motion.mean_velocity_mps, gate)?;
+        let first_velocity = projection.expand_nodal(&affine.first_velocity_moment_mps, gate)?;
+        let dt = self.solid.body.duration_s();
+        let (mut work, mut correction) = (0.0, 0.0);
+        for (((start, end), mean), first) in nodal_force_start_n
+            .iter()
+            .zip(nodal_force_end_n)
+            .zip(&velocity)
+            .zip(&first_velocity)
+        {
+            poll(gate)?;
+            for axis in 0..3 {
+                for term in [
+                    start[axis] * (dt * (mean[axis] - first[axis])),
+                    end[axis] * (dt * first[axis]),
+                ] {
+                    let increment = term - correction;
+                    let next = work + increment;
+                    correction = (next - work) - increment;
+                    work = next;
+                }
+            }
+        }
+        let defect_j = work - affine.motion.energy.supplied_work_j;
+        if !defect_j.is_finite() || defect_j.abs() > self.solid.work_allowance_j {
+            return Err(PreparedSolidError::Work {
+                defect_j,
+                allowance_j: self.solid.work_allowance_j,
+            });
+        }
+        poll(gate)?;
+        self.inner = candidate;
+        Ok(PreparedTensorSolidAffineStep {
+            motion: PreparedTensorSolidStep {
+                material: affine.motion,
+                mean_nodal_velocity_mps: velocity,
+                nodal_work_error_j: defect_j,
+            },
+            first_nodal_velocity_moment_mps: first_velocity,
         })
     }
 }

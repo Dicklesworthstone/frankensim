@@ -22,6 +22,9 @@ const CORNERS: [[f64; 3]; 4] = [
     [0.0, 0.0, 0.2],
 ];
 
+#[path = "tensor_solid_prepared/affine.rs"]
+mod affine;
+
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>, &CancelGate) -> R) -> R {
     let gate = CancelGate::new_clock_free();
     fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default()).scope(|arena| {

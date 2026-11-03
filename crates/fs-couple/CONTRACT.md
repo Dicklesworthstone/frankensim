@@ -23371,16 +23371,22 @@ input preserves accepted state.
 
 `examples/prepared_tensor_solid.rs` runs a complete free TET10 with anisotropic,
 nonproportional Kelvin and Maxwell source tensors, original consistent inertia,
-explicit 1e-5 affine initial strain and instantaneous memory. A balanced +/-0.1 N
-nodal pair acts for 24 intervals, followed by free release through interval 480
-at 48 kHz. CSV includes extension, equilibrium/kinetic/Maxwell storage, external
-work, physical heat and balance errors. The native run reaches 10 ms with positive
-material heat 5.431477558e-5 J and maximum cumulative balance error 5.976e-17 J;
-the original nodal-work mapping defect is zero in this fixture. Source data are
-synthetic; this is complete assembly/projection/motion evidence, not experimental
-calibration, spatial convergence or a real-time performance guarantee. Focused
-native validation passes these two tests, the six prepared-material tests and the
-example; it does not assert a full workspace Cargo, DSR or RCH result.
+explicit 1e-5 affine initial strain and instantaneous memory. Its balanced nodal
+pair now uses exact affine intervals: force magnitude rises from 0 to 0.2 N over
+12 intervals, falls to zero over the next 12, and then releases freely through
+interval 480 at 48 kHz. Each side's pulse impulse is 5e-5 N*s. All 90 physical
+states remain; affine force records require 120 propagation coordinates.
+CSV includes extension, equilibrium/kinetic/Maxwell storage, external work,
+physical heat and balance errors.
+
+The native affine example reaches 10 ms with extension 2.175098106e-6 m,
+positive material heat 5.432572103e-5 J, maximum cumulative balance error
+3.557e-17 J and maximum original nodal-work mapping defect 1.805e-20 J.
+Source data are synthetic; this is complete assembly/projection/motion evidence,
+not experimental calibration, spatial convergence or a real-time guarantee.
+Focused native validation passes six existing prepared-material tests, three
+new affine-material tests, five solid tests and the updated example. It does
+not assert a full workspace Cargo, DSR or RCH result.
 
 <!-- porous-load-thermal-receiver:start -->
 ### Opt-in native thermal destination for passive backing absorption
@@ -23498,3 +23504,34 @@ intervals. It explicitly falsifies average-force times displacement as work
 (maximum observed difference 2.485e-8 J). All six existing prepared-material
 tests remain green. This is original-source native numerical verification,
 not experimental material qualification or a full workspace Cargo/DSR/RCH pass.
+
+## Affine nodal loading of complete original solids
+
+`PreparedTensorSolidBody::new_affine` prepares the same original
+`ProjectedViscoSolid` for endpoint-interpolated nodal force fields.
+`PreparedTensorSolidHistory::advance_affine` projects both endpoints through
+the original basis, advances the prepared tensor trajectory, and expands both
+mean velocity and the first normalized temporal velocity moment through the
+same nodal map. Fixed rows have zero velocity and work. The adapter checks
+original nodal moment work against the independently integrated material-runtime
+force/velocity work before publishing its O(state) candidate history.
+
+Three native tests in `tests/tensor_solid_prepared/affine.rs` exercise the real
+source assembly and full prepared consumer. A complete TET10 retains all 30
+mechanical coordinates, 27 material points and 90 physical states; its affine
+propagation has 120 coordinates and its separate native observer has 180.
+The original consistent-mass body force produces the analytical rigid
+translation under linearly changing acceleration, with independently checked
+displacement, velocity, impulse, work and both velocity moments. Its measured
+nodal-work discrepancy is 4.236e-19 J in magnitude and physical material loss
+stays within the declared zero-strain tolerance.
+
+A deforming TET10 triangular pulse has the same physical endpoint, external
+work and original Kelvin/Maxwell heat when its intervals are split into 1, 2
+and 4 parts. Original sparse K/M and original spring-factor storage are
+recomputed independently; maximum measured physical balance error across these
+runs is 4.089e-17 J. All three heat totals agree within 3.721e-18 J. This is an
+exact-affine subdivision identity up to floating-point error, not evidence of
+spatial convergence or arbitrary-load resolution. A supported TET4 test checks
+fixed-row loads do no work and malformed endpoint fields preserve accepted
+state. The original two held-solid tests remain green.

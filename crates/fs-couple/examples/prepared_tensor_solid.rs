@@ -9,7 +9,10 @@
 //! or a mesh/time convergence qualification. The reference tetrahedron is free
 //! to translate and rotate within small-strain kinematics. Its initial affine
 //! extension and unrelaxed Maxwell memory are specified initial conditions.
-//! A balanced axial force pair acts for 24 intervals, followed by free release.
+//! A balanced axial force pair rises linearly from zero to 0.2 N in 12 intervals,
+//! falls to zero in the next 12, and is followed by free release. Its impulse
+//! equals the earlier 0.1 N held pulse over 24 intervals. Affine source work is
+//! integrated along the full trajectory, including its force/velocity covariance.
 //! The elapsed times include this example's observations and CSV formatting;
 //! they are not a performance benchmark or a real-time guarantee.
 
@@ -61,7 +64,7 @@ fn controls() -> PreparedTensorControls {
     PreparedTensorControls {
         maximum_coordinates: 30,
         maximum_material_points: 64,
-        maximum_state_coordinates: 90,
+        maximum_state_coordinates: 120,
         maximum_heat_groups: 1,
         maximum_preparation_bytes: 512 * 1024 * 1024,
         maximum_preparation_multiply_terms: 1_000_000_000_000,
@@ -140,8 +143,14 @@ fn run(cx: &Cx<'_>, gate: &CancelGate) -> Result<()> {
         Ok(_) => return Err("the original full-memory capacity refusal was not reproduced".into()),
     }
     let dt = 1.0 / 48000.0;
-    let body = PreparedTensorSolidBody::new(projection, dt, controls(), gate)?;
-    if coordinates != 30 || point_count != 27 || body.material_body().state_dimension() != 90 {
+    let force_scale_n = 0.2;
+    let body =
+        PreparedTensorSolidBody::new_affine(projection, dt, force_scale_n, controls(), gate)?;
+    if coordinates != 30
+        || point_count != 27
+        || body.material_body().state_dimension() != 90
+        || body.material_body().propagation_state_dimension() != 120
+    {
         return Err(
             "the complete TET10 fixture did not retain its expected source dimensions".into(),
         );
@@ -174,13 +183,15 @@ fn run(cx: &Cx<'_>, gate: &CancelGate) -> Result<()> {
         })
         .sum();
     eprintln!(
-        "synthetic TET10: coordinates={coordinates}, material_points={point_count}, original_states={original_states}, original_exponential_block={original_block}, prepared_states={}, relaxation_time_s=0.004, reference_mass_kg={:.9e}",
+        "synthetic TET10: coordinates={coordinates}, material_points={point_count}, original_states={original_states}, original_exponential_block={original_block}, physical_prepared_states={}, affine_propagation_states={}, relaxation_time_s=0.004, reference_mass_kg={:.9e}",
         body.material_body().state_dimension(),
+        body.material_body().propagation_state_dimension(),
         source.equilibrium().total_mass_kg,
     );
     eprintln!(
-        "source_and_flow_preparation_ms={:.3}; force_pair=+/-0.1N for 24 intervals; dt_s={dt:.9e}; tip_extension=x_displacement(corner1)-x_displacement(corner0)",
+        "source_and_flow_preparation_ms={:.3}; force_profile=balanced_triangular_pair; force_pair_peak_n=0.2; rise_intervals=12; fall_intervals=12; pulse_impulse_each_n_s={:.9e}; force_coordinate_scale_n={force_scale_n}; dt_s={dt:.9e}; tip_extension=x_displacement(corner1)-x_displacement(corner0)",
         cold_start.elapsed().as_secs_f64() * 1000.0,
+        0.1 * 24.0 * dt,
     );
 
     let stdout = std::io::stdout();
@@ -197,13 +208,25 @@ fn run(cx: &Cx<'_>, gate: &CancelGate) -> Result<()> {
     let warm_start = Instant::now();
     let mut maximum_balance = 0.0_f64;
     let mut maximum_nodal_work_error = 0.0_f64;
-    for interval in 0..480 {
-        let mut force = [[0.0; 3]; 10];
-        if interval < 24 {
-            force[0][0] = -0.1;
-            force[1][0] = 0.1;
+    let pulse = |sample: usize| {
+        if sample <= 12 {
+            0.2 * sample as f64 / 12.0
+        } else if sample < 24 {
+            0.2 * (24 - sample) as f64 / 12.0
+        } else {
+            0.0
         }
-        let step = history.advance(&force, gate)?;
+    };
+    for interval in 0..480 {
+        let mut force_start = [[0.0; 3]; 10];
+        let mut force_end = [[0.0; 3]; 10];
+        force_start[0][0] = -pulse(interval);
+        force_start[1][0] = pulse(interval);
+        force_end[0][0] = -pulse(interval + 1);
+        force_end[1][0] = pulse(interval + 1);
+        let step = history
+            .advance_affine(&force_start, &force_end, gate)?
+            .motion;
         let displacement = history.nodal_displacement_m(gate)?;
         let energy = step.material.energy;
         maximum_balance = maximum_balance.max(energy.cumulative_balance_error_j.abs());
