@@ -1,13 +1,16 @@
 //! Adaptive finite-vessel supply and discharge through the shared controller.
 //!
-//! Prescribed sources remain instantaneously comoving and thermochemically held
-//! throughout the requested interval. Each native half step resamples the actual
-//! finite gas. Its original source admission, gross withdrawal and complete
+//! Sources remain thermochemically held and either instantaneously comoving or
+//! fixed in the declared inertial frame throughout the requested interval.
+//! Each native half step resamples the actual finite gas and ambient relative
+//! velocity. Original source admission, gross withdrawal and complete
 //! momentum/energy budgets remain binding; rejected trials contribute no receipts.
 
 use super::super::{
     EffusionOutlet, EffusionRocketEnvironment, EffusionRocketSolve, GasRocketState,
-    exchange::{EffusionExchangeStep, EffusionExchangeStream, EffusionReservoirPort},
+    exchange::{
+        EffusionAmbientPort, EffusionExchangeStep, EffusionExchangeStream, EffusionReservoirPort,
+    },
 };
 use super::{EffusionAdaptiveSolve, EffusionTrajectoryError, integrate, poll};
 use fs_material::thermochemical_gas::energy::GasEnergySolve;
@@ -144,12 +147,52 @@ impl GasRocketState {
         endpoint: GasEnergySolve,
         solve: EffusionRocketSolve,
         adaptive: EffusionAdaptiveSolve,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<EffusionExchangeTrajectoryCandidate, EffusionTrajectoryError> {
+        self.advance_effusion_exchange_with_ambient_adaptive(
+            environment,
+            vacuum_outlets,
+            reservoir_ports,
+            &[],
+            duration_s,
+            endpoint,
+            solve,
+            adaptive,
+            cancelled,
+        )
+    }
+
+    /// Resolve vacuum, comoving supply and fixed inertial ambient capture with
+    /// the SAME source-species error axis, trial clock and accepted receipts.
+    ///
+    /// Every coarse and fine physical trial recalculates ambient velocity minus
+    /// that trial's actual starting vessel velocity. Sources and their inertial
+    /// velocities remain prescribed; incoming distributions do not silently
+    /// track the accelerating vessel across accepted steps. The underlying
+    /// finite step freezes its sampled relative moments and remains first order.
+    ///
+    /// Active ambient species join the original estimator axis, including
+    /// species initially absent from the vessel. Geometrically closed sources
+    /// remain inactive. Per-step source/drift admission and physical budgets
+    /// precede acceptance; cancellation or exhaustion publishes no partial state.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_effusion_exchange_with_ambient_adaptive(
+        &self,
+        environment: EffusionRocketEnvironment,
+        vacuum_outlets: &[EffusionOutlet<'_>],
+        reservoir_ports: &[EffusionReservoirPort<'_>],
+        ambient_ports: &[EffusionAmbientPort<'_>],
+        duration_s: f64,
+        endpoint: GasEnergySolve,
+        solve: EffusionRocketSolve,
+        adaptive: EffusionAdaptiveSolve,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<EffusionExchangeTrajectoryCandidate, EffusionTrajectoryError> {
         poll(&mut cancelled)?;
         if vacuum_outlets
             .len()
             .checked_add(reservoir_ports.len())
+            .and_then(|n| n.checked_add(ambient_ports.len()))
             .is_none_or(|n| n > MAX_SNAPSHOT_TRANSFERS)
         {
             return Err(EffusionTrajectoryError::Invalid(
@@ -159,7 +202,13 @@ impl GasRocketState {
         let sources = reservoir_ports
             .iter()
             .filter(|p| p.area_m2 > 0.0)
-            .map(|p| p.source);
+            .map(|p| p.source)
+            .chain(
+                ambient_ports
+                    .iter()
+                    .filter(|p| p.area_m2 > 0.0)
+                    .map(|p| p.source),
+            );
         let window = integrate(
             self,
             sources,
@@ -167,10 +216,11 @@ impl GasRocketState {
             adaptive,
             |state, dt, cancel| {
                 state
-                    .advance_effusion_exchange(
+                    .advance_effusion_exchange_with_ambient(
                         environment,
                         vacuum_outlets,
                         reservoir_ports,
+                        ambient_ports,
                         dt,
                         endpoint,
                         solve,

@@ -1,4 +1,5 @@
 //! G1/G3/G4: shared-controller parity, new species, accepted receipts and refusal.
+mod ambient;
 use super::*;
 use crate::rocket_blowdown::effusion::{
     exchange::{EffusionExchangeStep, EffusionReservoirPort},

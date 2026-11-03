@@ -26402,3 +26402,31 @@ Galilean boosts of BOTH source and vessel, complete physical accounts and
 final-drift/frame/source/cancellation refusal. Rustfmt parsing and source/API
 review passed; native compilation and execution remain unverified with the
 missing constellation sibling manifests.
+
+### Adaptive inertial ambient exchange and executable trajectory input
+
+`GasRocketState::advance_effusion_exchange_with_ambient_adaptive` refreshes each
+fixed-world source's relative velocity at every coarse and fine physical trial.
+It reuses the common step-doubling controller and accepted-only gross/net
+accounts, without a second mechanical integrator or species solver. Active
+ambient source species join the original estimator axis even when absent from
+the initial vessel. Original source, speed, gross withdrawal and conservation
+admission remain active on every native candidate. The source velocity stays
+fixed while the vessel accelerates; rejected trials spend no material and emit
+no receipts. This is a first-order local error estimate, not a certified global
+accuracy bound or a continuous source-domain enclosure.
+
+The existing `effusion_feed` executable accepts `--inertial-source VX VY VZ
+MAX_RELATIVE_SPEED`, `--vessel-velocity VX VY VZ`, and `--adaptive` while retaining
+the original positional gas/geometry inputs and default comoving fixed steps.
+Bounded parsing refuses duplicate, incomplete or nonfinite velocity options.
+CSV rows retain separate gross streams, authoritative net accounts, original
+species fractions and residuals, and append accepted native substeps, attempted
+intervals and rejected intervals. Its explicitly authored synthetic aperture
+and drift qualification make no claim of empirical validation.
+
+Focused regressions specify changing-velocity resampling, refinement against
+512 genuine native fixed steps, full interval accounts, new ambient species,
+inactive foreign sources and late cancellation rollback. Rustfmt parsing and
+direct production/fixture/example API review passed; native execution remains
+unverified with the missing constellation dependencies.
