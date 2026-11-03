@@ -1,5 +1,45 @@
 # fs-material — CONTRACT
 
+## Time-dependent grinding population balance
+
+`comminution::kinetics::SelectionBreakageModel` binds the original
+`SizeRedistributionCard` daughter mass fractions to one explicitly supplied
+inverse-second selection rate per class. Its version-1 constitutive law is
+`constant-selection-breakage`; parameter names are
+`selection-rate:<class-id>`. A finite typed `grinding-contact-time` window
+must start at zero. Source hashes, provenance, specimen identity and all
+operating conditions remain attached. Positive-rate classes require strictly
+finer daughters; a zero-rate class is an absorbing sink. Missing fines classes,
+self daughters for an active class, invalid units and unsupported conditions
+refuse. Selection rates are not inferred from mineral identity, Mohs hardness,
+Bond work index or rotation speed.
+
+The discrete mass balance is
+`dm_i/dt = -S_i m_i + sum_j b_ij S_j m_j`.
+For constant rates, `prepare` evaluates a nonnegative Poisson uniformization
+with `q=max(S)` and `P=I+Q/q`. The explicit approximation caps the event
+count at K and assigns the remaining probability to `P^K`. It does not drop
+tail mass or renormalize the source columns. The reported nominal L1 bound is
+twice the Poisson-tail bound; binary64 rounding and source uncertainty are
+separate. The original redistribution owner must accept the resulting columns
+without repair. Preparation refuses `q*t>64`, exhausted term/product budgets,
+unrepresentable positive arithmetic or cancellation, without a partial result.
+
+`KineticGrindingPass` retains both original cards, its exact typed preparation
+point, elapsed contact time and numerical-work report. Its transition is
+directly usable by the existing grinding-circuit API at that point.
+`transform` uses the original `ParticleStream` owner to transport dry solids
+and every assayed element congruently; carrier water is unchanged. This
+constant-rate model supplies particle-size evolution, not mineral liberation,
+a residence-time distribution, power draw, media wear or plant calibration.
+
+Seven G0/G1/G3 regression groups cover independent equal-rate Erlang and
+unequal-rate solutions, explicit truncation error, dry/element/water closure,
+zero-time/zero-rate identity, split-interval consistency, source-domain
+admission, cancellation and work bounds. Run the synthetic tin-bearing example
+with `cargo run -p fs-material --example mineral_grinding_kinetics` to compare
+30 and 120 seconds and inspect all balance residuals and tail bounds.
+
 ## Finite-batch reaction with reagent depletion
 
 `reaction_batch::BilinearBatchReaction` binds an existing exactly conserved

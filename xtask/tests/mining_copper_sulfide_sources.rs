@@ -63,7 +63,12 @@ const SOURCES: &[Source] = &[
 fn workspace() -> PathBuf {
     std::env::var_os("CARGO_WORKSPACE_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().into())
+        .unwrap_or_else(|| {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .into()
+        })
 }
 
 fn packs() -> &'static [NormalizedPack] {
@@ -84,10 +89,10 @@ fn packs() -> &'static [NormalizedPack] {
                 let target = out.join(format!("{}.fsmatpk", source.pack));
                 let run = Command::new(env!("CARGO_BIN_EXE_xtask"))
                     .args(["matdb-pack", "--manifest"])
-                    .arg(workspace().join(format!(
-                        "data/matdb/seed-v1/{}/manifest.tsv",
-                        source.pack
-                    )))
+                    .arg(
+                        workspace()
+                            .join(format!("data/matdb/seed-v1/{}/manifest.tsv", source.pack)),
+                    )
                     .arg("--out")
                     .arg(&target)
                     .env("CARGO_WORKSPACE_DIR", workspace())
@@ -106,7 +111,10 @@ fn packs() -> &'static [NormalizedPack] {
                     NormalizedPack::from_bytes_verified(decoded.content_hash(), &bytes).unwrap();
                 assert_eq!(pack.pack_id(), source.pack);
                 assert_eq!(pack.to_bytes(), bytes);
-                assert_eq!(pack.claims().claims_ordered().count(), if source.solid_phase.is_none() { 6 } else { 4 });
+                assert_eq!(
+                    pack.claims().claims_ordered().count(),
+                    if source.solid_phase.is_none() { 6 } else { 4 }
+                );
                 pack
             })
             .collect()
@@ -119,7 +127,11 @@ fn semantic(kind: QuantityKind) -> QuantitySpec {
 
 fn context(source: &Source) -> QueryPoint {
     let mut point = QueryPoint::new()
-        .with_quantity("temperature", semantic(QuantityKind::AbsoluteTemperature), 298.15)
+        .with_quantity(
+            "temperature",
+            semantic(QuantityKind::AbsoluteTemperature),
+            298.15,
+        )
         .unwrap()
         .with_quantity("pressure", semantic(QuantityKind::Pressure), 100000.0)
         .unwrap();
@@ -144,7 +156,9 @@ fn context(source: &Source) -> QueryPoint {
         ]);
     }
     for (axis, value) in axes {
-        point = point.with_quantity(axis, QuantitySpec::dimensional(Dims::NONE), value).unwrap();
+        point = point
+            .with_quantity(axis, QuantitySpec::dimensional(Dims::NONE), value)
+            .unwrap();
     }
     point
 }
@@ -152,9 +166,25 @@ fn context(source: &Source) -> QueryPoint {
 fn properties(source: &Source) -> [(&'static str, Dims, f64); 4] {
     [
         ("molar-mass", MASS, source.values[0] * 0.001),
-        ("standard-molar-formation-enthalpy", ENERGY, source.values[1] * 1000.0),
-        ("standard-molar-formation-gibbs-energy", ENERGY, source.values[2] * 1000.0),
-        (if source.solid_phase.is_some() { "standard-molar-entropy" } else { "conventional-standard-molar-entropy" }, ENTROPY, source.values[3]),
+        (
+            "standard-molar-formation-enthalpy",
+            ENERGY,
+            source.values[1] * 1000.0,
+        ),
+        (
+            "standard-molar-formation-gibbs-energy",
+            ENERGY,
+            source.values[2] * 1000.0,
+        ),
+        (
+            if source.solid_phase.is_some() {
+                "standard-molar-entropy"
+            } else {
+                "conventional-standard-molar-entropy"
+            },
+            ENTROPY,
+            source.values[3],
+        ),
     ]
 }
 
@@ -163,12 +193,24 @@ fn copper_sulfide_reference_rows_compile_and_replay_in_typed_si() {
     let mut checked = 0;
     for (source, pack) in SOURCES.iter().zip(packs()) {
         for (name, dims, expected) in properties(source) {
-            let answer = pack.claims().query_typed(
-                &PropertyKey::new(name, dims), &context(source), SelectionPolicy::SingleClaimOnly,
-            ).unwrap();
-            assert!((answer.evidence.value.value - expected).abs() <= 2e-14 * expected.abs().max(1.0), "{} {name}", source.pack);
+            let answer = pack
+                .claims()
+                .query_typed(
+                    &PropertyKey::new(name, dims),
+                    &context(source),
+                    SelectionPolicy::SingleClaimOnly,
+                )
+                .unwrap();
+            assert!(
+                (answer.evidence.value.value - expected).abs() <= 2e-14 * expected.abs().max(1.0),
+                "{} {name}",
+                source.pack
+            );
             assert_eq!(answer.evidence.value.dims, dims);
-            assert_eq!(answer.evidence.value.uncertainty, UncertaintyModel::Unstated);
+            assert_eq!(
+                answer.evidence.value.uncertainty,
+                UncertaintyModel::Unstated
+            );
             assert!(answer.receipt.observation_backed);
             assert!(!answer.receipt.source_hashes.is_empty());
             pack.claims().verify_receipt(&answer.receipt).unwrap();
@@ -183,21 +225,55 @@ fn copper_sulfide_reference_rows_compile_and_replay_in_typed_si() {
 #[test]
 fn sources_refuse_temperature_pressure_phase_and_reference_substitution() {
     for (source, pack) in SOURCES.iter().zip(packs()) {
-        let phase_axis = source.solid_phase.unwrap_or("source-ionic-reference-hydrogen-zero");
+        let phase_axis = source
+            .solid_phase
+            .unwrap_or("source-ionic-reference-hydrogen-zero");
         let points = [
             QueryPoint::new(),
-            context(source).with_quantity("temperature", semantic(QuantityKind::AbsoluteTemperature), 300.0).unwrap(),
-            context(source).with_quantity("pressure", semantic(QuantityKind::Pressure), 101325.0).unwrap(),
-            context(source).with(USGS, 0.0).unwrap().with("source-elemental-reference-janaf", 1.0).unwrap(),
+            context(source)
+                .with_quantity(
+                    "temperature",
+                    semantic(QuantityKind::AbsoluteTemperature),
+                    300.0,
+                )
+                .unwrap(),
+            context(source)
+                .with_quantity("pressure", semantic(QuantityKind::Pressure), 101325.0)
+                .unwrap(),
+            context(source)
+                .with(USGS, 0.0)
+                .unwrap()
+                .with("source-elemental-reference-janaf", 1.0)
+                .unwrap(),
             context(source).with(phase_axis, 0.0).unwrap(),
-            context(source).with("source-specimen-qualified", 1.0).unwrap(),
+            context(source)
+                .with("source-specimen-qualified", 1.0)
+                .unwrap(),
         ];
         for point in points {
             for (name, dims, _) in properties(source) {
-                assert!(pack.claims().query_typed(&PropertyKey::new(name, dims), &point, SelectionPolicy::SingleClaimOnly).is_err(), "{} {name}", source.pack);
+                assert!(
+                    pack.claims()
+                        .query_typed(
+                            &PropertyKey::new(name, dims),
+                            &point,
+                            SelectionPolicy::SingleClaimOnly
+                        )
+                        .is_err(),
+                    "{} {name}",
+                    source.pack
+                );
             }
         }
-        assert!(pack.claims().query_typed(&PropertyKey::new("specific-heat-capacity", Dims([2, 0, -2, -1, 0, 0])), &context(source), SelectionPolicy::SingleClaimOnly).is_err());
+        assert!(
+            pack.claims()
+                .query_typed(
+                    &PropertyKey::new("specific-heat-capacity", Dims([2, 0, -2, -1, 0, 0])),
+                    &context(source),
+                    SelectionPolicy::SingleClaimOnly
+                )
+                .is_err()
+        );
     }
 }
 
@@ -205,11 +281,46 @@ fn sources_refuse_temperature_pressure_phase_and_reference_substitution() {
 fn copper_ionic_entropy_and_sulfur_atom_basis_remain_distinct() {
     let copper = &SOURCES[4];
     let pack = &packs()[4];
-    assert!(pack.claims().query_typed(&PropertyKey::new("standard-molar-entropy", ENTROPY), &context(copper), SelectionPolicy::SingleClaimOnly).is_err());
-    let conventional = pack.claims().query_typed(&PropertyKey::new("conventional-standard-molar-entropy", ENTROPY), &context(copper), SelectionPolicy::SingleClaimOnly).unwrap();
+    assert!(
+        pack.claims()
+            .query_typed(
+                &PropertyKey::new("standard-molar-entropy", ENTROPY),
+                &context(copper),
+                SelectionPolicy::SingleClaimOnly
+            )
+            .is_err()
+    );
+    let conventional = pack
+        .claims()
+        .query_typed(
+            &PropertyKey::new("conventional-standard-molar-entropy", ENTROPY),
+            &context(copper),
+            SelectionPolicy::SingleClaimOnly,
+        )
+        .unwrap();
     assert_eq!(conventional.evidence.value.value, -98.0);
     assert_eq!(SOURCES[5].values[0], 32.066);
-    let sulfur = packs()[5].claims().query_typed(&PropertyKey::new("molar-mass", MASS), &context(&SOURCES[5]), SelectionPolicy::SingleClaimOnly).unwrap();
+    let sulfur = packs()[5]
+        .claims()
+        .query_typed(
+            &PropertyKey::new("molar-mass", MASS),
+            &context(&SOURCES[5]),
+            SelectionPolicy::SingleClaimOnly,
+        )
+        .unwrap();
     assert!((sulfur.evidence.value.value - 0.032066).abs() < 1e-16);
-    assert!(packs()[5].claims().query_typed(&PropertyKey::new("molar-mass", MASS), &context(&SOURCES[5]).with("source-phase-sulfur-orthorhombic", 0.0).unwrap().with("source-phase-sulfur-monoclinic", 1.0).unwrap(), SelectionPolicy::SingleClaimOnly).is_err());
+    assert!(
+        packs()[5]
+            .claims()
+            .query_typed(
+                &PropertyKey::new("molar-mass", MASS),
+                &context(&SOURCES[5])
+                    .with("source-phase-sulfur-orthorhombic", 0.0)
+                    .unwrap()
+                    .with("source-phase-sulfur-monoclinic", 1.0)
+                    .unwrap(),
+                SelectionPolicy::SingleClaimOnly
+            )
+            .is_err()
+    );
 }

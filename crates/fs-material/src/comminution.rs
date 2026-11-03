@@ -32,6 +32,10 @@ mod inverse;
 #[path = "comminution/breakage.rs"]
 pub mod breakage;
 
+/// Constant selection-rate population balances over the original daughter classes.
+#[path = "comminution/kinetics.rs"]
+pub mod kinetics;
+
 /// Closed grinding/classification balances with explicit source applicability.
 #[path = "comminution/circuit.rs"]
 pub mod circuit;
