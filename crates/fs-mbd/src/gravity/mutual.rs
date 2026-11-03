@@ -6,6 +6,12 @@
 //! This is an O(N²) direct monopole model, with O(N) scratch, not an FMM, softened
 //! particle model, finite-body multipole expansion, or contact solver. Native
 //! full-inertia rotation is retained but receives no monopole gravity torque.
+//! The explicitly selected quadrupole extension adds conservative spin/orbital
+//! exchange between bounded extended bodies without changing this monopole lane.
+
+/// Opt-in mutual second-mass-moment gravity with finite-source recoil.
+pub mod quadrupole;
+pub use quadrupole::{MutualQuadrupoleGravity, MutualQuadrupoleLoad};
 
 use super::{GravityError, finite, poll, same_frame};
 use crate::{
@@ -100,15 +106,7 @@ impl MutualGravity {
             ));
         }
         let count = states.len();
-        // Divide an even factor first, avoiding a spurious intermediate overflow.
-        let previous = count.saturating_sub(1);
-        let pair_count = if count % 2 == 0 {
-            (count / 2).checked_mul(previous)
-        } else {
-            count.checked_mul(previous / 2)
-        }
-        .filter(|&pairs| pairs <= self.maximum_pairs)
-        .ok_or(GravityError::Invalid("mutual gravity pair budget exceeded"))?;
+        let pair_count = self.pair_count(count)?;
         let mut force_sums = storage(count)?;
         for (&state, &mass) in states.iter().zip(properties) {
             poll(&mut cancelled)?;
@@ -204,32 +202,12 @@ impl MutualGravity {
                     .state_after,
             );
         }
-        for i in 0..states.len() {
-            for j in i + 1..states.len() {
-                poll(&mut cancelled)?;
-                let start = states[j]
-                    .pose()
-                    .position_world()
-                    .sub(states[i].pose().position_world());
-                let end = candidates[j]
-                    .pose()
-                    .position_world()
-                    .sub(candidates[i].pose().position_world());
-                let change = end.sub(start);
-                let length = change.stable_norm("mutual gravity drift displacement")?;
-                if length > 0.0 {
-                    let direction =
-                        Vec3::new(change.x / length, change.y / length, change.z / length);
-                    let fraction = (-finite(start.dot(direction))? / length).clamp(0.0, 1.0);
-                    if fraction > 0.0 && fraction < 1.0 {
-                        // Interpolating two opposite endpoints can leave a
-                        // rounding residual at an exact source crossing. Use
-                        // |start × end| / |end-start| for an interior minimum.
-                        self.admit_radius(segment_line_distance(start, end, length)?)?;
-                    }
-                }
-            }
-        }
+        check_drift_separations(
+            states,
+            &candidates,
+            |_, _, radius| self.admit_radius(radius).map(|_| ()),
+            &mut cancelled,
+        )?;
         let after = self.load(frame, &candidates, properties, &mut cancelled)?;
         for (state, &force) in candidates.iter_mut().zip(&after.forces_world) {
             poll(&mut cancelled)?;
@@ -251,6 +229,18 @@ impl MutualGravity {
         })
     }
 
+    fn pair_count(self, count: usize) -> Result<usize, GravityError> {
+        // Divide an even factor first, avoiding a spurious intermediate overflow.
+        let previous = count.saturating_sub(1);
+        if count % 2 == 0 {
+            (count / 2).checked_mul(previous)
+        } else {
+            count.checked_mul(previous / 2)
+        }
+        .filter(|&pairs| pairs <= self.maximum_pairs)
+        .ok_or(GravityError::Invalid("mutual gravity pair budget exceeded"))
+    }
+
     fn admit_separation(self, displacement: Vec3) -> Result<f64, GravityError> {
         let radius = displacement.stable_norm("mutual gravity separation")?;
         self.admit_radius(radius)
@@ -265,6 +255,41 @@ impl MutualGravity {
             Ok(radius)
         }
     }
+}
+
+// Endpoints are admitted by the two load samples. Inspect every interior
+// minimum of the actual straight relative split drift with the same pair domain.
+fn check_drift_separations(
+    states: &[RigidBodyState],
+    candidates: &[RigidBodyState],
+    mut admit_radius: impl FnMut(usize, usize, f64) -> Result<(), GravityError>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), GravityError> {
+    for i in 0..states.len() {
+        for j in i + 1..states.len() {
+            poll(cancelled)?;
+            let start = states[j]
+                .pose()
+                .position_world()
+                .sub(states[i].pose().position_world());
+            let end = candidates[j]
+                .pose()
+                .position_world()
+                .sub(candidates[i].pose().position_world());
+            let change = end.sub(start);
+            let length = change.stable_norm("mutual gravity drift displacement")?;
+            if length > 0.0 {
+                let direction = Vec3::new(change.x / length, change.y / length, change.z / length);
+                let fraction = (-finite(start.dot(direction))? / length).clamp(0.0, 1.0);
+                if fraction > 0.0 && fraction < 1.0 {
+                    // Equal opposite endpoints must detect an exact crossing;
+                    // interpolating them can instead leave a rounding residual.
+                    admit_radius(i, j, segment_line_distance(start, end, length)?)?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn kick(state: RigidBodyState, force: Vec3, duration: f64) -> Result<RigidBodyState, GravityError> {

@@ -438,8 +438,48 @@ enclosure of a true curved encounter: callers must resolve near-field motion.
 potential derivatives, the two-body Kepler period and second-order apocenter error,
 20-orbit energy/momentum behavior, frame/boost/permutation covariance, reversal,
 native rotated-inertia spin, hidden interior source crossing and late cancellation
-(G1/G2/G3). Finite-body mutual multipoles, self-energy within a body, collisions,
-deformation, external loads, variable mass, adaptivity and FMM remain outside scope.
+(G1/G2/G3). This monopole lane does not include finite-body effects. Self-energy
+within a body, collisions, deformation, external loads, variable mass, adaptivity
+and FMM remain outside this closed-system map.
+
+### Recoiling extended bodies and tidal spin/orbital exchange
+
+The explicit `MutualGravity::quadrupole` extension borrows one declared COM
+bounding radius per original body and reuses its full native inertia. For
+`d = x_j-x_i`, `n = d/r` and `Q = m_j I_i + m_i I_j` in world axes, one pair owns
+`U = -G*m_i*m_j/r + G*(3*n.Q.n-tr(Q))/(2*r^3)`. Both COM forces and both individual
+gravity-gradient torques differentiate this potential. Each shape correction
+reacts on its source; the same pair force is applied with opposite signs.
+The noncentral orbital moment balances the two spin torques. No source is fixed
+and no after-the-fact momentum correction is used.
+
+The second-moment force, potential and torque arithmetic is shared with the
+original fixed-source quadrupole owner. Native `begin_verlet`/`finish` stages
+advance all bodies with simultaneous endpoint loads and the original full-inertia
+free rotation. The existing system receipt carries both kinetic energies, pair
+potential, linear momentum and total orbital-plus-spin angular momentum. The
+resolved fixed-step map is second order and symmetric; energy has a timestep
+defect and is not claimed to be exact.
+
+The sum of the two bounding radii divided by separation must not exceed an
+explicit ratio strictly below one. Radius values, necessary inertia/radius
+consistency, the original separation cutoff and pair budget are admitted.
+Both endpoints and every closest straight split-drift separation meet the same
+combined-radius bound. Overlapping declared bounds cannot pass. These are caller
+shape declarations and an approximate far-field domain, not a certified support
+or truncation-error bound or an enclosure of a true curved encounter.
+
+Work remains O(N^2), scratch O(N), and pair evaluation performs no tensor
+decomposition. Original compensated reductions, allocation refusals, per-body/
+pair cancellation and all-or-nothing publication are retained. Derived
+coefficients that cannot be represented refuse rather than discard a correction.
+Quadrupole-quadrupole products, higher moments, resolved near-field mass geometry,
+deformation and contact remain outside this opt-in model.
+
+`tests/mutual_quadrupole.rs` adds independent translation/rotation derivatives,
+full rotated inertia, body permutation, closed-system tidal momentum exchange
+and reversal, a resolved 36-pair mass-cloud potential oracle with fourth-moment
+refinement, combined-radius/interior-drift refusal, budgets and late cancellation.
 
 ## Configuration-dependent loads on the original rigid integrator
 

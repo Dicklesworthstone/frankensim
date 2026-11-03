@@ -260,39 +260,69 @@ impl RigidGravityField for QuadrupoleGravity {
         if self.body_radius_m / radius > self.maximum_radius_ratio {
             return Err(GravityError::OutsideExpansionDomain);
         }
-        let principal = properties.principal_inertia_body();
-        let trace = finite(principal.x + principal.y + principal.z)?;
-        // Necessary (not sufficient) consistency of declared COM bounding sphere:
-        // tr(I)/(2m) = mean squared mass radius <= bounding radius squared.
-        if (0.5 * trace / properties.mass()).sqrt()
-            > self.body_radius_m * (1.0 + 32.0 * f64::EPSILON)
-        {
-            return Err(GravityError::Invalid(
-                "inertia exceeds declared body radius",
-            ));
-        }
-        let n_body = pose.orientation().rotate_world_to_body(n);
-        // This is the existing full inertia action; no per-query diagonalization.
-        let inertia_n_body = properties.angular_momentum_body_checked(n_body)?;
-        let n_inertia_n = n_body.dot(inertia_n_body);
+        let trace = quadrupole_inertia_trace(properties, self.body_radius_m)?;
         let mu_over_r3 = finite(-specific_potential / radius / radius)?;
-        let correction_potential = finite(0.5 * mu_over_r3 * (3.0 * n_inertia_n - trace))?;
-        let inertia_n_world = pose.orientation().rotate_body_to_world(inertia_n_body);
-        let correction_force = n
-            .scale(5.0 * n_inertia_n - trace)
-            .sub(inertia_n_world.scale(2.0))
-            .scale(1.5 * mu_over_r3 / radius);
+        let correction = quadrupole_correction(pose, properties, n, radius, mu_over_r3, trace)?;
         GravityLoad {
             wrench: Wrench {
                 force_world: n
                     .scale((specific_potential / radius) * properties.mass())
-                    .add(correction_force),
-                torque_body: n_body.cross(inertia_n_body).scale(3.0 * mu_over_r3),
+                    .add(correction.wrench.force_world),
+                torque_body: correction.wrench.torque_body,
             },
-            potential_energy_j: properties.mass() * specific_potential + correction_potential,
+            potential_energy_j: properties.mass() * specific_potential
+                + correction.potential_energy_j,
         }
         .validate()
     }
+}
+
+// Shared second-mass-moment owner for fixed-source and recoiling pair gravity.
+// The COM radius is a caller declaration; this necessary inertia check does not
+// reconstruct a body's shape or certify its complete support.
+fn quadrupole_inertia_trace(
+    properties: MassProperties,
+    body_radius_m: f64,
+) -> Result<f64, GravityError> {
+    let principal = properties.principal_inertia_body();
+    let trace = finite(principal.x + principal.y + principal.z)?;
+    if (0.5 * trace / properties.mass()).sqrt()
+        > body_radius_m * (1.0 + 32.0 * f64::EPSILON)
+    {
+        return Err(GravityError::Invalid(
+            "inertia exceeds declared body radius",
+        ));
+    }
+    Ok(trace)
+}
+
+// n points from the other COM/source to this body. This returns only the
+// quadrupole contribution, so a mutual pair counts its monopole exactly once.
+fn quadrupole_correction(
+    pose: Pose,
+    properties: MassProperties,
+    n: Vec3,
+    radius: f64,
+    mu_over_r3: f64,
+    trace: f64,
+) -> Result<GravityLoad, GravityError> {
+    let n_body = pose.orientation().rotate_world_to_body(n);
+    let inertia_n_body = properties.angular_momentum_body_checked(n_body)?;
+    let n_inertia_n = n_body.dot(inertia_n_body);
+    let correction_potential = finite(0.5 * mu_over_r3 * (3.0 * n_inertia_n - trace))?;
+    let inertia_n_world = pose.orientation().rotate_body_to_world(inertia_n_body);
+    let correction_force = n
+        .scale(5.0 * n_inertia_n - trace)
+        .sub(inertia_n_world.scale(2.0))
+        .scale(1.5 * mu_over_r3 / radius);
+    GravityLoad {
+        wrench: Wrench {
+            force_world: correction_force,
+            torque_body: n_body.cross(inertia_n_body).scale(3.0 * mu_over_r3),
+        },
+        potential_energy_j: correction_potential,
+    }
+    .validate()
 }
 
 /// Second-order kick/drift/kick under a spatial gravity field.
