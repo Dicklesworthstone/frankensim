@@ -6341,6 +6341,46 @@ The earlier wet/DGM/pore/adsorption selection passed test typechecking at commit
 successfully. Full-workspace validation and execution of the expanded coupled
 suite, including subsequent network/effusion changes, remain unverified.
 
+### Effusion into an absorbing vacuum
+
+`ClosedGasParcel::effusive_flux_to_vacuum` uses the same original molecular
+beam and source qualification with exactly zero incident flux. Vacuum has no
+invented temperature, dilute trace composition, pressure floor or finite
+receiver. Each species escapes at its own molar-mass-dependent rate with the
+original `h_i(T)-R*T/(2*M_i)` crossing energy. Polyatomic caloric behavior still
+comes from the original NASA source, including temperature-dependent heat
+capacity. Zero geometric area stays inactive; zero transmission retains source
+admission.
+
+`network::transport::effusion::vacuum::step_candidate` composes independent
+vacuum outlets with the existing nozzle, diffusion, porous, membrane, dusty-gas
+and reciprocal effusion paths on one original snapshot. Outgoing boundary
+species share every internal path's original gross-withdrawal allowance. The
+same source-relative boundary owner applies `dm_into=-dm_out` and the explicit
+`+dm_out*R*T/(2*M_i)` correction before one caloric reconstruction per gas.
+Thus remaining gas cools and fractionates without subtracting large formation
+energies, borrowing newly arrived mass or applying nozzle enthalpy to a
+molecular beam. Original source/qualification checks also apply to the actual
+combined endpoints and later coupled endpoint admission.
+
+The returned open-system account records escaped species and energy explicitly;
+gas-only entropy can decrease and no vacuum reservoir temperature or closed
+entropy certificate is invented. If no outlet emits, the original closed
+window audit remains in force. This is an explicit first-order, fixed-volume,
+locally Maxwellian model with caller-controlled temporal refinement. It does
+not model pump performance, receiver filling, long accommodating pores, bulk
+drift, a resolved jet or complete depletion of a finite gas inventory.
+
+Focused G1/G3/G4 tests cover independent monatomic, diatomic and variable-heat-
+capacity finite-step balances, reference invariance, binary fractionation,
+convergence to analytic adiabatic blowdown, shared internal/vacuum withdrawal,
+source-domain limits, canonical ordering, closure and atomic cancellation.
+`effusion_blowdown` is a runnable CSV example using the existing explicitly
+synthetic mixture-file loader and caller-authored aperture qualification.
+Rustfmt parsing and source/API review passed; these new Rust numerical tests
+and the example were not executed because required constellation sibling
+checkouts are absent in the current environment.
+
 ## Source-bound Prony histories and exact stress control
 
 `visco::stress_control::StressControlledMaxwell` extends the existing

@@ -11,6 +11,9 @@
 //! Do not add another gas law for the same aperture or use this interface as a
 //! long accommodating pore without a separate wall-energy/transport owner.
 
+/// Finite gas networks with explicitly open, zero-return-beam vacuum outlets.
+pub mod vacuum;
+
 use std::collections::BTreeMap;
 
 use super::super::super::super::snapshot::{MAX_SNAPSHOT_PARCELS, MAX_SNAPSHOT_TRANSFERS};

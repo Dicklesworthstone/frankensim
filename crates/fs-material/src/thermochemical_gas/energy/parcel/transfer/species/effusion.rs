@@ -21,6 +21,9 @@
 //! of the retained gas catalog over the entire authored T/p support. No mean
 //! free path, thinness, species selectivity or empirical accuracy is inferred.
 
+/// Molecular escape into a true vacuum, with no invented receiver state.
+pub mod vacuum;
+
 use super::{
     ClosedGasParcel, GasEnergyError, SpeciesId, Sum, catalog, invalid, poll, positive,
     source_enthalpy, source_error,
