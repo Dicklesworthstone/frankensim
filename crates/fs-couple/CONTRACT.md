@@ -23770,3 +23770,40 @@ evidence, not rigorous spectral completeness or damping enclosures.
 physical decay, a real material relaxation root, contour quadrature refinement,
 full cross-mode memory and single-component assembly parity, source/resource
 refusals, cancellation and exact replay (G0/G1/G3/G4).
+
+
+### Continuous harmonic scattering of the original multimodal line
+
+`ContinuousModalLine::prepare_harmonic_scattering` exposes the same complete
+physical duct/load system through the shared `fs_phs::harmonic::scattering`
+owner. Every external inlet mode and every unbound mouth mode uses exactly
+the original runtime's pressure-wave reference and port order. The reference
+feedback is closed in the original continuous operator before factorization;
+the accepted runtime state and time step do not enter that calculation.
+
+The returned model retains all original duct and attached load states and
+physical resistances. Responses report original complex state, pressure,
+physical volume-flow inputs and independently calculated material/load heat,
+together with incident/reflected wave amplitudes and powers. Wave-reference
+exchange remains a boundary account, not added material dissipation. One
+frequency factorization can serve several incident-wave vectors. Preparation,
+factorization and query use explicit shared harmonic/scattering budgets and
+cooperative cancellation without changing accepted runtime history.
+
+A static mouth conductance retains its original ordinary-input source slots;
+set those slots to zero for the unforced termination. A dynamic mouth load
+retains all of its original state and consumes the interconnected mouth slots.
+Regional gas density/compressibility and mutual load coupling are unchanged.
+The scalar positive reference is a wave-coordinate convention, not a matched
+evanescent characteristic. This adapter supplies no new radiation law, physical
+material validation, spatial accuracy band, steady-state convergence guarantee
+or continuum mode-completeness claim.
+
+`tests/continuous_modal_scattering.rs` exercises a two-mode cylinder's analytic
+reflection/transmission on three axial rungs with port, rigid and pressure-
+release ends; reverse-port reciprocity and shared-factor reuse; a regional
+two-mode dynamic mouth with independent original oscillator/direct-conductance
+heat; bitwise harmonic-query independence from accepted history and three
+runtime clocks; and a static load's original ordinary source slots with no
+artificial memory states (G1/G3). The synthetic axial ladder is numerical
+evidence for that declared source, not measured-material validation.

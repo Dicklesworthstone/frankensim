@@ -327,6 +327,37 @@ impl ContinuousModalLine {
     pub fn system(&self) -> &PortHamiltonian {
         self.flow.system()
     }
+
+    /// Prepare the CONTINUOUS harmonic wave response of this complete original
+    /// duct/load system. All inlet modes and every unbound mouth mode use the
+    /// SAME reference feedback as the exact runtime, closed before factorization.
+    /// No time-step transfer, mean-wave substitution or bare impedance inverse.
+    ///
+    /// Returned source slots are incident pressure waves at `wave_ports()` and
+    /// ordinary volume-flow inputs elsewhere. With a static mouth conductance,
+    /// its retained mouth input slots must be zero to reproduce an unforced load.
+    /// Original duct/load state, physical heat and boundary wave powers stay
+    /// separate. This query is independent of the accepted physical history and
+    /// runtime clock; it does not establish a spatial or material accuracy band.
+    pub fn prepare_harmonic_scattering(
+        &self,
+        harmonic_budget: fs_phs::harmonic::HarmonicBudget,
+        scattering_budget: fs_phs::harmonic::scattering::ScatteringBudget,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<fs_phs::harmonic::scattering::ScatteringModel, fs_phs::harmonic::HarmonicError>
+    {
+        let model = fs_phs::harmonic::HarmonicModel::from_ode(
+            self.system(),
+            harmonic_budget,
+            &mut cancelled,
+        )?;
+        fs_phs::harmonic::scattering::ScatteringModel::new(
+            model,
+            self.flow.ports(),
+            scattering_budget,
+            cancelled,
+        )
+    }
     /// Accepted complete state: duct [potential; M*pressure], followed by every
     /// original load coordinate when attached.
     pub fn state(&self) -> &[f64] {
