@@ -1,6 +1,9 @@
 //! G1/G3/G4: original nonlinear film work, finite enthalpy and one accepted clock.
 //! Manufactured SI rheology and caloric charts test coupling, not fluid data.
 
+#[path = "power_law_film_heat/feedback.rs"]
+mod feedback;
+
 use fs_blake3::ContentHash;
 use fs_couple::render::plate::impact::material::heating::transport::CoupledThermalStep;
 use fs_couple::render::plate::impact::material::heating::{

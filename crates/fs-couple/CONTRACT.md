@@ -26389,9 +26389,48 @@ and thermal-network paths retain one accepted mechanical/thermal clock and
 publish all owners together.
 
 Unselected work retains its mechanical-loss ownership. Selected heat transfers
-internally once and is deducted once from remaining mechanical loss. Rheology
-coefficients remain frozen; this does not infer temperature feedback, wall/fluid
-partition, fluid inventory, sliding entrainment, or cavitation.
+internally once and is deducted once from remaining mechanical loss. The heat
+route alone holds rheology coefficients fixed; temperature feedback requires
+the explicit material binding below. It does not infer wall/fluid partition,
+fluid inventory, sliding entrainment or cavitation.
+
+### Finite-temperature feedback into the original power-law pressure law
+
+`LiquidFilmImpactSystem::new_with_power_law` adds complete canonical per-channel
+`LiquidPowerLawFilmChannelBinding` coverage in the original power-law island
+namespace. It explicitly selects `K(T)=K_ref*mu_source(T)/mu_source(T_ref)`, with
+positive caller-supplied reference consistency in Pa s^n, pinned
+`LiquidTemperatureLaw` claims/context, and the unchanged native flow index and
+physical core shear rate. The original viscosity supplies a dimensionless
+ratio; it is not reinterpreted as power-law consistency. This separable
+thermo-rheological approximation requires caller justification. Sourced
+viscosity alone does not establish K_ref or temperature-independent n/core.
+
+Each original finite liquid store supplies the selected channel's temperature.
+The existing material-card, fully-liquid, constant-density/mass/volume and
+per-sample relative-source-viscosity gates remain authoritative. Every channel
+of a selected original island must be covered once; distinct passages retain
+their own source law and temperature without averaging constitutive values.
+Power-law, sliding and normal film insertion indices stay independent.
+
+The native `PowerLawFilm` compiles the proposed consistency and core pressure
+operator, retaining geometry, domains, solver budgets, nonlinear force and
+directional tangent. A completed mechanical sample charges its original
+physical Q*delta_p once at the previously accepted coefficients. All proposed
+sources and operators stage inside the existing contact/enthalpy/mechanical
+transaction before infallible accepted-boundary swaps. Failure or cancellation
+preserves motion, heat, clock, laws and source receipts. Thermal-network
+conduction uses the same transaction and can change local resistance.
+`into_power_law_parts` retains fixed reference coefficients so rebinding an
+already warm system does not compound the temperature shift.
+
+Six focused regression groups cover independent shear-profile work for
+thinning/Newtonian/thickening laws with both Newton images, local channel
+flow/heat, canonical binding order and warm rebind, source/thermal/step-change
+refusals with exact retry, and network-conduction feedback. Source parsing and
+scoped whitespace checks passed; native compilation and execution remain
+unverified. Temperature-dependent n/core, non-Newtonian Barus pressure coupling,
+sliding power-law films and a spatial gap-temperature PDE are not supplied.
 
 Four focused regression groups cover independently integrated thinning,
 Newtonian and thickening shear work, finite caloric and momentum balances,

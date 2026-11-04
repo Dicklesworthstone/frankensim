@@ -309,5 +309,15 @@ impl PreparedImpactSystem {
             std::mem::swap(&mut self.inner.sliding_films[*index], film);
         }
     }
+
+    // Thermally shifted consistency preserves the existing nonlinear owner,
+    // native tangent, mechanical histories and prepared numerical workspace.
+    pub(crate) fn swap_power_law_films(
+        &mut self, updates: &mut [(usize, super::squeeze::power_law::PowerLawFilm)],
+    ) {
+        for (index, film) in updates {
+            std::mem::swap(&mut self.inner.power_law_films[*index], film);
+        }
+    }
 }
 
