@@ -113,7 +113,10 @@ impl FourierSeries {
 
     /// Multiply two retained trigonometric polynomials without aliasing.
     ///
-    /// A shared real-FFT plan evaluates both inputs on the smallest
+    /// Sparse inputs are convolved directly in coefficient space. This keeps
+    /// weak generated partials that would disappear when added to stronger
+    /// components on a sampling grid, and leaves absent harmonics exactly zero.
+    /// Dense inputs use a shared real-FFT plan on the smallest
     /// power-of-two grid strictly above twice the sum of their degrees,
     /// then transforms their pointwise product. Strict oversampling also
     /// resolves a sine at the product's highest frequency: placing that
@@ -122,13 +125,14 @@ impl FourierSeries {
     /// modes. All sum/difference harmonics are retained, with no threshold
     /// truncation. Modes above the known product degree are set to zero.
     ///
-    /// Work is O(N log N), temporary storage O(N), where N is the output
-    /// resolution. Constant multiplication uses coefficient scaling.
+    /// Work is O(N + K L) for K L <= N, otherwise O(N log N), with O(N)
+    /// temporary storage. K and L count nonzero input coefficients, and N is
+    /// the output resolution. Constant multiplication uses coefficient scaling.
     /// This is algebra of the retained interpolants; it cannot recover
     /// frequencies already aliased when the inputs were constructed.
     ///
     /// The inputs are independently scaled by exact powers of two during
-    /// the transforms and sample multiplication. This keeps the result
+    /// convolution or transform arithmetic. This keeps the result
     /// invariant under reciprocal changes in the inputs' physical units,
     /// even when their unscaled FFT buffers would overflow or underflow.
     ///
@@ -155,9 +159,19 @@ impl FourierSeries {
             .and_then(|size| size.checked_add(1))
             .and_then(usize::checked_next_power_of_two)
             .expect("Fourier product grid size overflows usize");
-        let fft = RealFft::new(n);
         let left_exponent = self.amplitude_exponent();
         let right_exponent = other.amplitude_exponent();
+        let count = |series: &Self| {
+            series
+                .coeffs
+                .iter()
+                .filter(|c| c.re != 0.0 || c.im != 0.0)
+                .count()
+        };
+        if (count(self) as u128) * (count(other) as u128) <= n as u128 {
+            return self.sparse_product(other, n, left_exponent, right_exponent);
+        }
+        let fft = RealFft::new(n);
         let mut products = self.padded_samples(&fft, n, left_degree, left_exponent);
         let right = other.padded_samples(&fft, n, right_degree, right_exponent);
         for (left, right) in products.iter_mut().zip(right) {
@@ -193,6 +207,73 @@ impl FourierSeries {
                 }
             })
             .collect();
+        FourierSeries { coeffs, n }
+    }
+
+    // Convolve the conjugate-symmetric full spectrum without constructing its
+    // negative half. Interior input coefficients already have full-spectrum
+    // weight; the original Nyquist coefficient needs a factor of one half.
+    // Normalizing before that factor preserves representable subnormal results.
+    fn sparse_product(
+        &self,
+        other: &Self,
+        n: usize,
+        left_exponent: i32,
+        right_exponent: i32,
+    ) -> FourierSeries {
+        let modes = |series: &Self, exponent: i32| -> Vec<(usize, C64)> {
+            series
+                .coeffs
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| c.re != 0.0 || c.im != 0.0)
+                .map(|(k, c)| {
+                    let exponent = -exponent - i32::from(k == series.n / 2);
+                    (
+                        k,
+                        C64::new(
+                            scale_pow2(c.re, exponent),
+                            if k == 0 {
+                                0.0
+                            } else {
+                                scale_pow2(c.im, exponent)
+                            },
+                        ),
+                    )
+                })
+                .collect()
+        };
+        let left = modes(self, left_exponent);
+        let right = modes(other, right_exponent);
+        let mut coeffs = vec![C64::ZERO; n / 2 + 1];
+        let mut errors = vec![C64::ZERO; n / 2 + 1];
+        for &(j, a) in &left {
+            for &(k, b) in &right {
+                let sum = a * b;
+                accumulate(&mut coeffs[j + k], &mut errors[j + k], sum);
+                if j != 0 && k != 0 {
+                    let difference = a * b.conj();
+                    let difference = if j == k {
+                        C64::from_re(2.0 * difference.re)
+                    } else if j < k {
+                        difference.conj()
+                    } else {
+                        difference
+                    };
+                    let index = j.abs_diff(k);
+                    accumulate(&mut coeffs[index], &mut errors[index], difference);
+                }
+            }
+        }
+        let exponent = left_exponent + right_exponent;
+        for (coefficient, error) in coeffs.iter_mut().zip(errors) {
+            coefficient.re = scale_pow2(coefficient.re + error.re, exponent);
+            coefficient.im = scale_pow2(coefficient.im + error.im, exponent);
+            assert!(
+                coefficient.re.is_finite() && coefficient.im.is_finite(),
+                "Fourier product coefficient is not representable as finite f64"
+            );
+        }
         FourierSeries { coeffs, n }
     }
 
@@ -274,6 +355,22 @@ impl FourierSeries {
             .skip(from)
             .fold(0.0f64, |m, c| m.max(c.abs()))
     }
+}
+
+// Componentwise Neumaier accumulation retains small intermodulation terms
+// through cancellation of stronger contributions to the same harmonic.
+fn accumulate(sum: &mut C64, error: &mut C64, value: C64) {
+    fn scalar(sum: &mut f64, error: &mut f64, value: f64) {
+        let next = *sum + value;
+        *error += if sum.abs() >= value.abs() {
+            (*sum - next) + value
+        } else {
+            (value - next) + *sum
+        };
+        *sum = next;
+    }
+    scalar(&mut sum.re, &mut error.re, value.re);
+    scalar(&mut sum.im, &mut error.im, value.im);
 }
 
 // Shared with the budgeted constructor: scale in the existing sample buffer,
