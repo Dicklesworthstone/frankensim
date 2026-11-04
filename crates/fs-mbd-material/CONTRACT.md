@@ -1577,3 +1577,37 @@ retention, original native twist with full world momentum/kinetic accounting,
 continued affine deformation, selection order, resource limits and late
 cancellation/retry. Targeted Rust syntax/format and whitespace checks passed;
 native compilation and test execution remain outstanding.
+
+## Driven unsteady sphere with retained Basset history
+
+`UnsteadySphereMotion::step_with_wrench` admits a finite world-frame
+centre-of-mass drive held over one native step. Its force enters the same
+midpoint elimination as steady Stokes resistance, instantaneous added mass
+and every reciprocal fluid-memory branch. The immutable previous motion and
+all accepted branch states survive a refusal or cancellation. Repeated calls
+can change the force without resetting the viscous prehistory. The zero-drive
+`step` delegates to this same path.
+
+The receipt keeps `fluid_wrench` separate from the applied load. The original
+rigid-body owner advances using their sum. `applied_work_j` uses the actual
+native midpoint velocity; the work residual is stored energy change plus
+viscous heat minus applied work. The impulse residual subtracts the held
+applied impulse as well as effective weight. Drive work is neither fluid
+kinetic storage nor viscous heat. Nonfinite/unrepresentable drive arithmetic,
+nonzero torque, excess Reynolds number, work/impulse failures and cancellation
+publish no body or fluid state.
+
+This extends the excitation of the existing nonrotating, unbounded,
+quiescent-start Newtonian unsteady Stokes model, not its physical domain.
+Smooth forcing should be sampled at the temporal midpoint with a resolved
+time ladder; discontinuous held forces belong at step boundaries. The
+spectral cutoffs and branch count still require refinement over the intended
+observation window. No angular Basset operator, nonlinear convection,
+moving background flow, walls or unrepresented initial slip/prehistory is
+inferred.
+
+The native creeping-flow regressions add a three-axis imposed-force ladder
+against an independent continuum branch-cut inversion, changing-force
+storage/heat/impulse closure and native trajectory identity, zero-drive
+equivalence after forcing, and late-cancellation/retry plus invalid-drive
+atomicity. These are numerical model checks, not experimental validation.

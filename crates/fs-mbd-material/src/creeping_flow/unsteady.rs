@@ -1,4 +1,4 @@
-//! Unsteady Stokes settling with reciprocal fluid inertia and Basset memory.
+//! Driven unsteady Stokes motion with reciprocal fluid inertia and Basset memory.
 //!
 //! For a nonrotating no-slip sphere in a quiescent unbounded Newtonian fluid,
 //! Z(s) = 6*pi*mu*a*(1 + a*sqrt(s/nu)) + rho*V*s/2. The body's weight and
@@ -57,6 +57,8 @@ pub struct UnsteadySphereStep {
     pub added_mass_force_world_n: Vec3,
     /// Steady Stokes loss plus all branch dashpot loss, never stored energy.
     pub viscous_heat_j: f64,
+    /// Work of the separately supplied centre-of-mass driving force.
+    pub applied_work_j: f64,
     pub added_mass_energy_change_j: f64,
     pub memory_energy_change_j: f64,
     /// Added mass and branch generalized momentum, not total field momentum.
@@ -226,9 +228,36 @@ impl<F: FluidTransport + ?Sized> UnsteadySphereMotion<'_, '_, '_, F> {
     pub fn step(
         &self,
         controls: UnsteadyStepControls,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<(Self, UnsteadySphereStep), Error> {
+        self.step_with_wrench(Wrench::ZERO, controls, cancelled)
+    }
+
+    /// Advance with a world-frame centre-of-mass force held over this step.
+    ///
+    /// The drive enters the same native midpoint solve as fluid added mass,
+    /// steady drag and every existing memory branch. Calling this repeatedly
+    /// with time-dependent forces retains all accepted viscous prehistory.
+    /// Sample a smooth drive at the temporal midpoint and refine dt to resolve
+    /// it; piecewise-constant drive discontinuities belong at step boundaries.
+    /// Applied work uses the actual native midpoint velocity and is distinct
+    /// from both stored fluid energy and dissipated heat. Momentum admission
+    /// includes the applied impulse. The nonrotating translational Basset law
+    /// refuses every nonzero applied torque; it does not infer spin drag.
+    pub fn step_with_wrench(
+        &self,
+        applied: Wrench,
+        controls: UnsteadyStepControls,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<(Self, UnsteadySphereStep), Error> {
         poll(&mut cancelled)?;
+        vector(applied.force_world)?;
+        vector(applied.torque_body)?;
+        if applied.torque_body != Vec3::ZERO {
+            return Err(Error::Invalid(
+                "unsteady translational sphere drag requires zero applied torque",
+            ));
+        }
         let dt = positive(controls.duration_s)?;
         positive(controls.maximum_energy_defect_j)?;
         positive(controls.maximum_momentum_defect_ns)?;
@@ -262,6 +291,7 @@ impl<F: FluidTransport + ?Sized> UnsteadySphereMotion<'_, '_, '_, F> {
         let resistance = finite(self.sphere.resistance_kg_s + memory_resistance)?;
         let force = vector(
             effective_weight
+                .add(applied.force_world)
                 .sub(v0.scale(self.sphere.resistance_kg_s))
                 .add(history_at_start),
         )?;
@@ -286,8 +316,12 @@ impl<F: FluidTransport + ?Sized> UnsteadySphereMotion<'_, '_, '_, F> {
             )?,
             torque_body: Vec3::ZERO,
         };
+        let total_wrench = Wrench {
+            force_world: vector(wrench.force_world.add(applied.force_world))?,
+            torque_body: Vec3::ZERO,
+        };
         let dynamics =
-            RigidBodyIntegrator::new(self.sphere.gravity).step(self.state, p, wrench, dt)?;
+            RigidBodyIntegrator::new(self.sphere.gravity).step(self.state, p, total_wrench, dt)?;
         self.sphere
             .load_frame(self.body.frame(), dynamics.state_after, &mut cancelled)?;
         let v1 = dynamics.state_after.center_of_mass_velocity_world(p)?;
@@ -320,7 +354,14 @@ impl<F: FluidTransport + ?Sized> UnsteadySphereMotion<'_, '_, '_, F> {
                 + added_energy
                 + memory_energy,
         )?;
-        let energy_defect = finite(stored + heat)?;
+        let applied_power = finite(applied.force_world.dot(vm))?;
+        let applied_work = finite(dt * applied_power)?;
+        if applied_power != 0.0 && applied_work == 0.0 {
+            return Err(Error::Invalid(
+                "unsteady drive work vanished in conversion to energy",
+            ));
+        }
+        let energy_defect = finite(stored + heat - applied_work)?;
         if energy_defect.abs() > controls.maximum_energy_defect_j {
             return Err(Error::EnergyDefect {
                 defect_j: energy_defect,
@@ -335,7 +376,7 @@ impl<F: FluidTransport + ?Sized> UnsteadySphereMotion<'_, '_, '_, F> {
                 .sub(self.state.linear_momentum_world())
                 .add(fluid_impulse)
                 .add(far_field)
-                .sub(effective_weight.scale(dt)),
+                .sub(vector(effective_weight.add(applied.force_world))?.scale(dt)),
         )?;
         if norm(momentum_residual)? > controls.maximum_momentum_defect_ns {
             return Err(Error::MomentumDefect {
@@ -361,6 +402,7 @@ impl<F: FluidTransport + ?Sized> UnsteadySphereMotion<'_, '_, '_, F> {
                 history_force_world_n: history_force,
                 added_mass_force_world_n: added_force,
                 viscous_heat_j: heat,
+                applied_work_j: applied_work,
                 added_mass_energy_change_j: added_energy,
                 memory_energy_change_j: memory_energy,
                 spectral_fluid_momentum_change_ns: fluid_impulse,

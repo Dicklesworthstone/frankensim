@@ -1,5 +1,6 @@
 //! G1/G3/G4: analytic Basset impedance/settling, source changes and atomic memory.
 use super::*;
+use fs_mbd::{Vec3 as NativeVec3, Wrench};
 use fs_mbd_material::creeping_flow::unsteady::{BassetResolution, UnsteadyStepControls};
 
 fn resolution(lo: f64, hi: f64, intervals: usize) -> BassetResolution {
@@ -252,4 +253,239 @@ fn restart_and_late_cancellation_preserve_the_same_body_and_fluid_history() {
             })
             .is_err()
     );
+}
+
+#[test]
+fn imposed_force_converges_to_independent_basset_step_response_in_three_axes() {
+    let source = sphere(2000.0);
+    let body = source.principal_body(1e-12, || false).unwrap();
+    let material = fluid(1000.0, 1.0);
+    let medium =
+        CreepingSphere::new(&material, RADIUS, Gravity::ZERO, NativeVec3::ZERO, limits()).unwrap();
+    let rest = body
+        .state_from_kinematics(Se3::identity(), Twist::zero())
+        .unwrap();
+    let applied = Wrench {
+        force_world: NativeVec3::new(1e-4, -2e-4, 3e-4),
+        torque_body: NativeVec3::ZERO,
+    };
+    let c = 6.0 * core::f64::consts::PI * RADIUS;
+    let moving_mass = 2500.0 * 4.0 * core::f64::consts::PI * RADIUS.powi(3) / 3.0;
+    let b = c * (RADIUS.powi(2) / 0.001).sqrt();
+    let target = 0.1;
+    // Independent branch-cut quadrature of the continuum transfer function.
+    let exact = applied
+        .force_world
+        .scale(settling_fraction(target, moving_mass, c, b) / c);
+    let mut previous = f64::INFINITY;
+    for (lo, hi, branches, steps) in [
+        (0.01, 100.0, 32, 50),
+        (0.001, 1000.0, 128, 200),
+        (0.0001, 10000.0, 256, 800),
+    ] {
+        let mut motion = medium
+            .unsteady_motion(&body, rest, resolution(lo, hi, branches), || false)
+            .unwrap();
+        let dt = target / f64::from(steps);
+        let mut heat = 0.0;
+        let mut work = 0.0;
+        let mut stored = 0.0;
+        for _ in 0..steps {
+            let before = motion.state();
+            let (next, audit) = motion
+                .step_with_wrench(applied, step_controls(dt), || false)
+                .unwrap();
+            let displacement = next
+                .state()
+                .pose()
+                .position_world()
+                .sub(before.pose().position_world());
+            assert!((audit.applied_work_j - applied.force_world.dot(displacement)).abs() < 1e-18);
+            assert!(audit.viscous_heat_j >= 0.0);
+            assert!(audit.momentum_residual_ns.norm_squared().sqrt() < 1e-16);
+            heat += audit.viscous_heat_j;
+            work += audit.applied_work_j;
+            stored += audit.stored_energy_change_j;
+            motion = next;
+        }
+        let actual = motion
+            .state()
+            .center_of_mass_velocity_world(body.properties())
+            .unwrap();
+        let relative_error = actual.sub(exact).norm_squared().sqrt() / exact.norm_squared().sqrt();
+        assert!(
+            relative_error < previous * 0.2,
+            "driven Basset ladder: {relative_error} >= {previous}"
+        );
+        previous = relative_error;
+        assert!(work > heat && heat > 0.0);
+        assert!((stored + heat - work).abs() < 1e-11 * work);
+    }
+    assert!(previous < 3e-4);
+}
+
+#[test]
+fn changing_drives_retain_fluid_memory_and_close_native_work_and_impulse() {
+    let source = sphere(2000.0);
+    let body = source.principal_body(1e-12, || false).unwrap();
+    let material = fluid(1000.0, 1.0);
+    let medium =
+        CreepingSphere::new(&material, RADIUS, Gravity::ZERO, NativeVec3::ZERO, limits()).unwrap();
+    let rest = body
+        .state_from_kinematics(Se3::identity(), Twist::zero())
+        .unwrap();
+    let mut motion = medium
+        .unsteady_motion(&body, rest, resolution(0.001, 1000.0, 64), || false)
+        .unwrap();
+    let dt = 0.001;
+    let mut applied_work = 0.0;
+    let mut heat = 0.0;
+    let mut imposed_impulse = NativeVec3::ZERO;
+    let mut exterior_impulse = NativeVec3::ZERO;
+    for step in 0..400 {
+        let t = (f64::from(step) + 0.5) * dt;
+        let applied = Wrench {
+            force_world: NativeVec3::new(
+                1e-4 * (25.0 * t).cos(),
+                2e-4 * (17.0 * t).sin(),
+                if step < 200 { 1e-4 } else { -1e-4 },
+            ),
+            torque_body: NativeVec3::ZERO,
+        };
+        let before = motion.state();
+        let (next, audit) = motion
+            .step_with_wrench(applied, step_controls(dt), || false)
+            .unwrap();
+        let total = Wrench {
+            force_world: audit.fluid_wrench.force_world.add(applied.force_world),
+            torque_body: NativeVec3::ZERO,
+        };
+        // The original native owner supplies the accepted body trajectory.
+        let native = RigidBodyIntegrator::new(Gravity::ZERO)
+            .step(before, body.properties(), total, dt)
+            .unwrap();
+        assert_eq!(native, audit.dynamics);
+        applied_work += applied.force_world.dot(
+            next.state()
+                .pose()
+                .position_world()
+                .sub(before.pose().position_world()),
+        );
+        heat += audit.viscous_heat_j;
+        imposed_impulse = imposed_impulse.add(applied.force_world.scale(dt));
+        exterior_impulse = exterior_impulse.add(audit.far_field_impulse_ns);
+        motion = next;
+    }
+    let velocity = motion
+        .state()
+        .center_of_mass_velocity_world(body.properties())
+        .unwrap();
+    let mut energy =
+        0.5 * (body.properties().mass() + motion.added_mass_kg()) * velocity.norm_squared();
+    let mut momentum = velocity.scale(body.properties().mass() + motion.added_mass_kg());
+    for (branch, fluid_velocity) in motion
+        .branches()
+        .iter()
+        .zip(motion.fluid_velocities_world_m_s())
+    {
+        energy += 0.5 * branch.mass_kg * fluid_velocity.norm_squared();
+        momentum = momentum.add(fluid_velocity.scale(branch.mass_kg));
+    }
+    assert!(
+        motion
+            .fluid_velocities_world_m_s()
+            .iter()
+            .any(|v| v.norm_squared() > 0.0)
+    );
+    assert!((energy + heat - applied_work).abs() < 1e-11 * applied_work.abs());
+    assert!(
+        momentum
+            .add(exterior_impulse)
+            .sub(imposed_impulse)
+            .norm_squared()
+            .sqrt()
+            < 1e-15
+    );
+    let (ordinary, ordinary_audit) = motion.step(step_controls(dt), || false).unwrap();
+    let (explicit_zero, zero_audit) = motion
+        .step_with_wrench(Wrench::ZERO, step_controls(dt), || false)
+        .unwrap();
+    assert_eq!(ordinary.state(), explicit_zero.state());
+    assert_eq!(
+        ordinary.fluid_velocities_world_m_s(),
+        explicit_zero.fluid_velocities_world_m_s()
+    );
+    assert_eq!(ordinary_audit, zero_audit);
+}
+
+#[test]
+fn driven_unsteady_refusal_and_late_cancellation_leave_all_history_unchanged() {
+    let source = sphere(2000.0);
+    let body = source.principal_body(1e-12, || false).unwrap();
+    let material = fluid(1000.0, 1.0);
+    let medium =
+        CreepingSphere::new(&material, RADIUS, Gravity::ZERO, NativeVec3::ZERO, limits()).unwrap();
+    let rest = body
+        .state_from_kinematics(Se3::identity(), Twist::zero())
+        .unwrap();
+    let motion = medium
+        .unsteady_motion(&body, rest, resolution(0.001, 1000.0, 64), || false)
+        .unwrap();
+    let drive = Wrench {
+        force_world: NativeVec3::new(1e-4, 0.0, 0.0),
+        torque_body: NativeVec3::ZERO,
+    };
+    let (motion, _) = motion
+        .step_with_wrench(drive, step_controls(0.001), || false)
+        .unwrap();
+    let state = motion.state();
+    let time = motion.time_s();
+    let history = motion.fluid_velocities_world_m_s().to_vec();
+    let mut polls = 0;
+    let (expected, expected_audit) = motion
+        .step_with_wrench(drive, step_controls(0.001), || {
+            polls += 1;
+            false
+        })
+        .unwrap();
+    let mut visited = 0;
+    assert!(matches!(
+        motion.step_with_wrench(drive, step_controls(0.001), || {
+            visited += 1;
+            visited == polls
+        }),
+        Err(CreepingFlowError::Cancelled)
+    ));
+    for invalid in [
+        Wrench {
+            force_world: NativeVec3::new(f64::NAN, 0.0, 0.0),
+            ..Wrench::ZERO
+        },
+        Wrench {
+            torque_body: NativeVec3::new(0.0, 1e-12, 0.0),
+            ..Wrench::ZERO
+        },
+        Wrench {
+            force_world: NativeVec3::new(1e20, 0.0, 0.0),
+            ..Wrench::ZERO
+        },
+    ] {
+        assert!(
+            motion
+                .step_with_wrench(invalid, step_controls(0.001), || false)
+                .is_err()
+        );
+    }
+    assert_eq!(motion.state(), state);
+    assert_eq!(motion.time_s(), time);
+    assert_eq!(motion.fluid_velocities_world_m_s(), history);
+    let (retried, retried_audit) = motion
+        .step_with_wrench(drive, step_controls(0.001), || false)
+        .unwrap();
+    assert_eq!(retried.state(), expected.state());
+    assert_eq!(
+        retried.fluid_velocities_world_m_s(),
+        expected.fluid_velocities_world_m_s()
+    );
+    assert_eq!(retried_audit, expected_audit);
 }
