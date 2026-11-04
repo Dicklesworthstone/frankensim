@@ -95,21 +95,22 @@ impl Prepared {
             .len()
             .checked_mul(2)
             .ok_or_else(|| invalid("plane-stress displacement count overflows"))?;
-        // Validate public material fields and local controls before allocating
-        // reference geometry. This also checks stability at the original state.
-        Hyperelastic::new(
-            problem.material.model.clone(),
-            problem.material.stretch_limit,
-        )
-        .and_then(|law| match constraint {
-            Constraint::FiniteBulk => law
-                .plane_stress_state(&[1.0, 0.0, 0.0, 1.0], local)
-                .map(|_| ()),
-            Constraint::Incompressible => law
-                .incompressible_plane_stress_state(&[1.0, 0.0, 0.0, 1.0], local)
-                .map(|_| ()),
-        })
-        .map_err(|error| material_error(0, error))?;
+        // Validate every original law and its transverse equilibrium before
+        // allocating geometry. Uniform material admission is performed once.
+        problem.validate_materials_with(|| checkpoint(cx))?;
+        for index in 0..problem.material.material_count().unwrap_or(1) {
+            checkpoint(cx)?;
+            let material = problem.element_material(index)?;
+            match constraint {
+                Constraint::FiniteBulk => material
+                    .plane_stress_state(&[1.0, 0.0, 0.0, 1.0], local)
+                    .map(|_| ()),
+                Constraint::Incompressible => material
+                    .incompressible_plane_stress_state(&[1.0, 0.0, 0.0, 1.0], local)
+                    .map(|_| ()),
+            }
+            .map_err(|error| material_error(index, error))?;
+        }
         for (_, edges) in &mesh.patches {
             if edges
                 .iter()
@@ -187,10 +188,17 @@ impl Prepared {
 
     fn for_points(
         &self,
+        problem: &HyperProblem<'_>,
         u: &[f64],
         load: f64,
         cx: &Cx<'_>,
-        mut visit: impl FnMut(usize, &Element, &Point, [f64; 4]) -> Result<(), SolidError>,
+        mut visit: impl FnMut(
+            usize,
+            &Element,
+            &Point,
+            &Hyperelastic,
+            [f64; 4],
+        ) -> Result<(), SolidError>,
     ) -> Result<(), SolidError> {
         checkpoint(cx)?;
         if u.len() != self.ndof || !load.is_finite() || u.iter().any(|v| !v.is_finite()) {
@@ -199,6 +207,7 @@ impl Prepared {
             ));
         }
         for (index, element) in self.elements.iter().enumerate() {
+            let material = problem.element_material(index)?;
             if !element.positive_orientation(Some(u)) {
                 return Err(SolidError::MaterialRefused {
                     what: format!("plane-stress element {index} is inverted or folded"),
@@ -211,7 +220,7 @@ impl Prepared {
                     &element.nodes[..element.arity],
                     u,
                 );
-                visit(index, element, point, [f[0], f[1], f[3], f[4]])?;
+                visit(index, element, point, material, [f[0], f[1], f[3], f[4]])?;
             }
         }
         checkpoint(cx)
@@ -227,48 +236,52 @@ impl Prepared {
     ) -> Result<(Vec<f64>, Csr), SolidError> {
         let mut residual = vec![0.0; self.ndof];
         let mut coo = Coo::new(self.ndof, self.ndof);
-        self.for_points(u, load, cx, |index, element, point, f| {
-            let (piola, tangent) = match self.constraint {
-                Constraint::FiniteBulk => problem
-                    .material
-                    .plane_stress(&f, self.local)
-                    .map(|response| (response.piola, response.tangent)),
-                Constraint::Incompressible => problem
-                    .material
-                    .incompressible_plane_stress(&f, self.local)
-                    .map(|response| (response.piola, response.tangent)),
-            }
-            .map_err(|error| material_error(index, error))?;
-            for (a, &na) in element.nodes[..element.arity].iter().enumerate() {
-                for i in 0..2 {
-                    let ia = 2 * na + i;
-                    if fixed.contains_key(&ia) {
-                        continue;
-                    }
-                    residual[ia] += point.weight
-                        * (piola[2 * i] * point.gradients[a][0]
-                            + piola[2 * i + 1] * point.gradients[a][1]);
-                    for (b, &nb) in element.nodes[..element.arity].iter().enumerate() {
-                        for k in 0..2 {
-                            let ib = 2 * nb + k;
-                            if fixed.contains_key(&ib) {
-                                continue;
-                            }
-                            let mut value = 0.0;
-                            for j in 0..2 {
-                                for l in 0..2 {
-                                    value += tangent[2 * i + j][2 * k + l]
-                                        * point.gradients[a][j]
-                                        * point.gradients[b][l];
+        self.for_points(
+            problem,
+            u,
+            load,
+            cx,
+            |index, element, point, material, f| {
+                let (piola, tangent) = match self.constraint {
+                    Constraint::FiniteBulk => material
+                        .plane_stress(&f, self.local)
+                        .map(|response| (response.piola, response.tangent)),
+                    Constraint::Incompressible => material
+                        .incompressible_plane_stress(&f, self.local)
+                        .map(|response| (response.piola, response.tangent)),
+                }
+                .map_err(|error| material_error(index, error))?;
+                for (a, &na) in element.nodes[..element.arity].iter().enumerate() {
+                    for i in 0..2 {
+                        let ia = 2 * na + i;
+                        if fixed.contains_key(&ia) {
+                            continue;
+                        }
+                        residual[ia] += point.weight
+                            * (piola[2 * i] * point.gradients[a][0]
+                                + piola[2 * i + 1] * point.gradients[a][1]);
+                        for (b, &nb) in element.nodes[..element.arity].iter().enumerate() {
+                            for k in 0..2 {
+                                let ib = 2 * nb + k;
+                                if fixed.contains_key(&ib) {
+                                    continue;
                                 }
+                                let mut value = 0.0;
+                                for j in 0..2 {
+                                    for l in 0..2 {
+                                        value += tangent[2 * i + j][2 * k + l]
+                                            * point.gradients[a][j]
+                                            * point.gradients[b][l];
+                                    }
+                                }
+                                coo.push(ia, ib, point.weight * value);
                             }
-                            coo.push(ia, ib, point.weight * value);
                         }
                     }
                 }
-            }
-            Ok(())
-        })?;
+                Ok(())
+            },
+        )?;
         problem.for_traction(load, |dof, value| {
             if !fixed.contains_key(&dof) {
                 residual[dof] -= value;
@@ -295,14 +308,12 @@ impl Prepared {
         cx: &Cx<'_>,
     ) -> Result<f64, SolidError> {
         let mut potential = 0.0;
-        self.for_points(u, load, cx, |index, _, point, f| {
+        self.for_points(problem, u, load, cx, |index, _, point, material, f| {
             let energy_density = match self.constraint {
-                Constraint::FiniteBulk => problem
-                    .material
+                Constraint::FiniteBulk => material
                     .plane_stress_state(&f, self.local)
                     .map(|state| state.energy_density_pa),
-                Constraint::Incompressible => problem
-                    .material
+                Constraint::Incompressible => material
                     .incompressible_plane_stress_state(&f, self.local)
                     .map(|state| state.energy_density_pa),
             }
@@ -411,9 +422,9 @@ impl HyperProblem<'_> {
     ) -> Result<Vec<PlaneStressState>, SolidError> {
         let prepared = Prepared::new(self, local, Constraint::FiniteBulk, cx)?;
         let mut states = Vec::new();
-        prepared.for_points(u, 0.0, cx, |index, _, _, f| {
+        prepared.for_points(self, u, 0.0, cx, |index, _, _, material, f| {
             states.push(
-                self.material
+                material
                     .plane_stress_state(&f, local)
                     .map_err(|error| material_error(index, error))?,
             );
@@ -465,9 +476,9 @@ impl HyperProblem<'_> {
     ) -> Result<Vec<IncompressiblePlaneStressState>, SolidError> {
         let prepared = Prepared::new(self, local, Constraint::Incompressible, cx)?;
         let mut states = Vec::new();
-        prepared.for_points(u, 0.0, cx, |index, _, _, f| {
+        prepared.for_points(self, u, 0.0, cx, |index, _, _, material, f| {
             states.push(
-                self.material
+                material
                     .incompressible_plane_stress_state(&f, local)
                     .map_err(|error| material_error(index, error))?,
             );

@@ -90,13 +90,71 @@ pub struct NewtonReport {
 /// A displacement/traction field on a patch.
 pub type VecField<'m> = &'m dyn Fn(f64, f64) -> [f64; 2];
 
+/// Native hyperelastic laws in mesh-element order.
+///
+/// A single law is uniform. Arrays, vectors and borrowed slices assign exactly
+/// one original law per element; no coefficients or fibre directions are
+/// averaged across an interface. The selected law is borrowed before the
+/// element's quadrature/AD work, without cloning materials in the assembly loop.
+///
+/// Implementations must keep the mapping fixed while a problem is borrowed.
+/// `None` from `material_count` declares the same uniform law at every index.
+pub trait HyperelasticMaterials {
+    /// Exact number of element laws, or `None` for a uniform law.
+    fn material_count(&self) -> Option<usize>;
+    /// Original law at this element, or `None` for missing coverage.
+    fn material_at(&self, element: usize) -> Option<&Hyperelastic>;
+}
+
+impl HyperelasticMaterials for Hyperelastic {
+    fn material_count(&self) -> Option<usize> {
+        None
+    }
+
+    fn material_at(&self, _: usize) -> Option<&Hyperelastic> {
+        Some(self)
+    }
+}
+
+impl HyperelasticMaterials for Vec<Hyperelastic> {
+    fn material_count(&self) -> Option<usize> {
+        Some(self.len())
+    }
+
+    fn material_at(&self, element: usize) -> Option<&Hyperelastic> {
+        self.get(element)
+    }
+}
+
+impl<const N: usize> HyperelasticMaterials for [Hyperelastic; N] {
+    fn material_count(&self) -> Option<usize> {
+        Some(N)
+    }
+
+    fn material_at(&self, element: usize) -> Option<&Hyperelastic> {
+        self.get(element)
+    }
+}
+
+impl HyperelasticMaterials for &[Hyperelastic] {
+    fn material_count(&self) -> Option<usize> {
+        Some(self.len())
+    }
+
+    fn material_at(&self, element: usize) -> Option<&Hyperelastic> {
+        self.get(element)
+    }
+}
+
 /// A finite-strain problem on a body-fitted mesh (plane strain by default).
 /// [`Self::solve_plane_stress`] admits traction-free thickness relaxation.
 pub struct HyperProblem<'m> {
     /// The mesh.
     pub mesh: &'m Mesh2,
-    /// The material card.
-    pub material: &'m Hyperelastic,
+    /// A uniform original law, or exactly one law per mesh element.
+    /// Existing `&Hyperelastic` inputs remain uniform; pass `&Vec<Hyperelastic>`,
+    /// an array reference, or a borrowed slice reference for heterogeneous bodies.
+    pub material: &'m dyn HyperelasticMaterials,
     /// Dirichlet patches (ramped by the load factor).
     pub dirichlet: Vec<(Patch, VecField<'m>)>,
     /// Dead-load traction patches (ramped by the load factor).
@@ -106,6 +164,47 @@ pub struct HyperProblem<'m> {
 }
 
 impl HyperProblem<'_> {
+    fn element_material(&self, element: usize) -> Result<&Hyperelastic, SolidError> {
+        self.material
+            .material_at(element)
+            .ok_or_else(|| SolidError::InvalidInput {
+                what: format!("hyperelastic material missing at element {element}"),
+            })
+    }
+
+    fn validate_materials(&self) -> Result<(), SolidError> {
+        self.validate_materials_with(|| Ok(()))
+    }
+
+    fn validate_materials_with(
+        &self,
+        mut checkpoint: impl FnMut() -> Result<(), SolidError>,
+    ) -> Result<(), SolidError> {
+        let count = self.material.material_count();
+        if let Some(count) = count
+            && count != self.mesh.elems.len()
+        {
+            return Err(SolidError::InvalidInput {
+                what: format!(
+                    "hyperelastic field has {count} laws for {} elements",
+                    self.mesh.elems.len()
+                ),
+            });
+        }
+        // The cards have public coefficients. Validate each original law once
+        // on entry, including laws beyond the first element.
+        for element in 0..count.unwrap_or(1) {
+            checkpoint()?;
+            let material = self.element_material(element)?;
+            Hyperelastic::new(material.model.clone(), material.stretch_limit).map_err(|error| {
+                SolidError::MaterialRefused {
+                    what: format!("hyperelastic element {element}: {error}"),
+                }
+            })?;
+        }
+        Ok(())
+    }
+
     /// Solve by load stepping + globalized Newton; returns nodal
     /// displacements and the convergence evidence.
     ///
@@ -122,6 +221,10 @@ impl HyperProblem<'_> {
         projection: Projection<'_, '_>,
     ) -> Result<(Vec<[f64; 2]>, NewtonReport), SolidError> {
         checkpoint(projection)?;
+        // Reduced formulations already admitted every law during preparation.
+        if projection.is_none() {
+            self.validate_materials()?;
+        }
         if !(self.settings.tol.is_finite() && self.settings.tol > 0.0 && self.settings.tol < 1.0)
             || self.settings.max_iters == 0
             || self.settings.load_steps == 0
@@ -303,7 +406,7 @@ impl HyperProblem<'_> {
                 .assemble_with_projection(u, load, fixed, projection)
                 .map(|(residual, _)| residual);
         }
-        let mut residual = self.unconstrained_residual(u, load)?;
+        let mut residual = self.force_residual(u, load)?;
         for &dof in fixed.keys() {
             residual[dof] = 0.0;
         }
@@ -374,6 +477,7 @@ impl HyperProblem<'_> {
         u: &[f64],
         load: f64,
     ) -> Result<(Vec<f64>, fs_sparse::Csr), SolidError> {
+        self.validate_materials()?;
         self.assemble(u, load, &BTreeMap::new())
     }
 
@@ -388,14 +492,19 @@ impl HyperProblem<'_> {
     /// [`SolidError::MaterialRefused`] when the material rejects `u`, or
     /// [`SolidError::UnknownPatch`] for an unknown traction patch.
     pub fn unconstrained_residual(&self, u: &[f64], load: f64) -> Result<Vec<f64>, SolidError> {
+        self.validate_materials()?;
+        self.force_residual(u, load)
+    }
+
+    fn force_residual(&self, u: &[f64], load: f64) -> Result<Vec<f64>, SolidError> {
         let mut resid = vec![0.0; u.len()];
-        for conn in &self.mesh.elems {
+        for (element, conn) in self.mesh.elems.iter().enumerate() {
+            let material = self.element_material(element)?;
             for &(xi, eta, w) in &quad_points(conn.len()) {
                 let (_, grads, det) = shapes_at(&self.mesh.nodes, conn, xi, eta);
                 let wq = w * det;
                 let f = Self::def_grad(&grads, conn, u);
-                let p = self
-                    .material
+                let p = material
                     .piola(&f)
                     .map_err(|e| SolidError::MaterialRefused {
                         what: format!("{e:?}"),
@@ -416,6 +525,7 @@ impl HyperProblem<'_> {
     /// when the material refuses it).
     #[must_use]
     pub fn potential_energy(&self, u: &[f64], load: f64) -> Option<f64> {
+        self.validate_materials().ok()?;
         self.try_energy(u, load)
     }
 
@@ -473,20 +583,19 @@ impl HyperProblem<'_> {
         let ndof = u.len();
         let mut resid = vec![0.0f64; ndof];
         let mut coo = Coo::new(ndof, ndof);
-        for conn in &self.mesh.elems {
+        for (element, conn) in self.mesh.elems.iter().enumerate() {
+            let material = self.element_material(element)?;
             let nn = conn.len();
             for &(xi, eta, w) in &quad_points(nn) {
                 let (_, grads, det) = shapes_at(&self.mesh.nodes, conn, xi, eta);
                 let wq = w * det;
                 let f = Self::def_grad(&grads, conn, u);
-                let p = self
-                    .material
+                let p = material
                     .piola(&f)
                     .map_err(|e| SolidError::MaterialRefused {
                         what: format!("{e:?}"),
                     })?;
-                let a_mat = self
-                    .material
+                let a_mat = material
                     .tangent(&f)
                     .map_err(|e| SolidError::MaterialRefused {
                         what: format!("{e:?}"),
@@ -560,7 +669,8 @@ impl HyperProblem<'_> {
     /// state — the line search treats that as "worse").
     fn try_energy(&self, u: &[f64], load: f64) -> Option<f64> {
         let mut internal = 0.0f64;
-        for conn in &self.mesh.elems {
+        for (element, conn) in self.mesh.elems.iter().enumerate() {
+            let material = self.element_material(element).ok()?;
             for &(xi, eta, w) in &quad_points(conn.len()) {
                 let (_, grads, det) = shapes_at(&self.mesh.nodes, conn, xi, eta);
                 let f = Self::def_grad(&grads, conn, u);
@@ -568,7 +678,10 @@ impl HyperProblem<'_> {
                 if !(j.is_finite() && j > 0.0) {
                     return None;
                 }
-                internal += w * det * self.material.energy(&f);
+                // Each original law owns its stretch/domain admission. A
+                // permissive neighbour cannot authorize this trial state.
+                material.check_state(&f).ok()?;
+                internal += w * det * material.energy(&f);
             }
         }
         let mut external = 0.0f64;
@@ -595,11 +708,13 @@ impl crate::continuation::PathResidual for HyperProblem<'_> {
     }
 
     fn residual(&self, u: &[f64], lambda: f64) -> Result<Vec<f64>, SolidError> {
+        self.validate_materials()?;
         let fixed = self.fixed_dofs(lambda)?;
         Ok(self.assemble(u, lambda, &fixed)?.0)
     }
 
     fn tangent(&self, u: &[f64], lambda: f64) -> Result<fs_sparse::Csr, SolidError> {
+        self.validate_materials()?;
         let fixed = self.fixed_dofs(lambda)?;
         Ok(self.assemble(u, lambda, &fixed)?.1)
     }

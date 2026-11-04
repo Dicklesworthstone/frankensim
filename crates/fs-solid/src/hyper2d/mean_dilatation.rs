@@ -94,12 +94,8 @@ impl Prepared {
         if mesh.nodes.iter().flatten().any(|x| !x.is_finite()) {
             return Err(invalid("mean-dilatation coordinates must be finite"));
         }
-        // Public material fields can have changed after construction.
-        Hyperelastic::new(
-            problem.material.model.clone(),
-            problem.material.stretch_limit,
-        )
-        .map_err(|e| refused(format!("{e:?}")))?;
+        // Coverage and every original law are admitted before geometry.
+        problem.validate_materials_with(|| checkpoint(cx))?;
         for (_, edges) in &mesh.patches {
             if edges
                 .iter()
@@ -184,9 +180,10 @@ impl Prepared {
         self.validate_state(u, load)?;
         let mut residual = vec![0.0; self.ndof];
         let mut coo = Coo::new(self.ndof, self.ndof);
-        for element in &self.elements {
+        for (index, element) in self.elements.iter().enumerate() {
             checkpoint(cx)?;
-            let local = element.admitted_motion(problem.material, u)?;
+            let material = problem.element_material(index)?;
+            let local = element.admitted_motion(material, u)?;
             let mut force = [0.0; 8];
             let mut stiffness = [[0.0; 8]; 8];
             for column in 0..8 {
@@ -195,7 +192,7 @@ impl Prepared {
                     re: Dual64::<8>::variable(local[i], i),
                     eps: [Dual64::<8>::constant(if i == column { 1.0 } else { 0.0 })],
                 });
-                let energy = element.energy(problem.material, &variables);
+                let energy = element.energy(material, &variables);
                 if column == 0 {
                     force = energy.re.eps;
                 }
@@ -252,10 +249,11 @@ impl Prepared {
         checkpoint(cx)?;
         self.validate_state(u, load)?;
         let mut value = 0.0;
-        for element in &self.elements {
+        for (index, element) in self.elements.iter().enumerate() {
             checkpoint(cx)?;
-            let local = element.admitted_motion(problem.material, u)?;
-            value += element.energy(problem.material, &local);
+            let material = problem.element_material(index)?;
+            let local = element.admitted_motion(material, u)?;
+            value += element.energy(material, &local);
         }
         problem.for_traction(load, |dof, force| value -= force * u[dof])?;
         if !value.is_finite() {
@@ -417,10 +415,11 @@ impl HyperProblem<'_> {
         let prepared = Prepared::new(self, cx)?;
         prepared.validate_state(u, 0.0)?;
         let mut states = Vec::with_capacity(prepared.elements.len());
-        for element in &prepared.elements {
+        for (index, element) in prepared.elements.iter().enumerate() {
             checkpoint(cx)?;
-            let local = element.admitted_motion(self.material, u)?;
-            states.push(element.state(self.material, &local)?);
+            let material = self.element_material(index)?;
+            let local = element.admitted_motion(material, u)?;
+            states.push(element.state(material, &local)?);
         }
         checkpoint(cx)?;
         Ok(states)

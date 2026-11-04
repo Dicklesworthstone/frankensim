@@ -559,7 +559,17 @@ impl Hyperelastic {
         spectral::principal_stretches(f)
     }
 
-    fn check_state(&self, f: &[f64; 9]) -> Result<(), MaterialError> {
+    /// Admit orientation and the declared principal-stretch domain.
+    ///
+    /// This performs the same deformation checks as stress and tangent
+    /// evaluation without computing their derivatives. Energy-only consumers
+    /// can retain the original material domain during backtracking.
+    ///
+    /// # Errors
+    /// Invalid public stretch limits return [`MaterialError::Parameters`].
+    /// Nonfinite, inverted or out-of-domain deformation returns
+    /// [`MaterialError::State`].
+    pub fn check_state(&self, f: &[f64; 9]) -> Result<(), MaterialError> {
         // These fields are public, so a caller may have changed the limit
         // since construction. An invalid domain must not disable admission.
         if !self.stretch_limit.is_finite() || self.stretch_limit < 1.0 {
