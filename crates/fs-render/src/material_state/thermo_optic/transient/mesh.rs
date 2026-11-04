@@ -1,7 +1,7 @@
 //! Native ray and bundle traversal through a continuous P1 thermal mesh.
 //!
-//! Faces join only through the original vertex IDs. One reference glass and
-//! thermo-optic law apply throughout; shared nodal temperatures therefore give
+//! Faces join only through the original vertex IDs. One phase-index law
+//! applies throughout; shared nodal temperatures therefore give
 //! continuous n, although grad(n) can jump. Such a face changes curvature but
 //! introduces no Fresnel interface or instantaneous direction jump. Native
 //! adaptive integration evaluates the original element on each side of the
@@ -31,7 +31,7 @@ use crate::gradient_index::event::{
     propagate_to_boundary_with_control,
 };
 use crate::gradient_index::thermal::TemperatureField;
-use crate::gradient_index::{GradientIndexError, GradientIndexPropagation};
+use crate::gradient_index::{GradientIndexError, GradientIndexField, GradientIndexPropagation};
 use crate::material_state::thermo_optic::{MaterialThermoOpticField, ThermoOpticFieldError};
 use core::cell::Cell;
 use fs_exec::Cx;
@@ -42,6 +42,8 @@ mod transition;
 use transition::{MeshBoundary, Transition};
 /// Original angular coordinates across unsmoothed thermal gradient jumps.
 pub mod bundle;
+/// Original IF97/IAPWS water transport on the same thermal mesh.
+pub mod water;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ElementFace {
@@ -185,6 +187,26 @@ impl<'a> P1ConductionMesh<'a> {
             binding.snapshot_identity(),
         )?;
         let prepared = original.prepare(wavelength_nm)?;
+        self.propagate_prepared(
+            cx, &cursor, &prepared, ray, transverse_axis, wavelength_nm, max_distance_m, options,
+        )
+    }
+
+    // Material preparation stays with each original law. Geometry, event
+    // continuation and whole-path budgets share this one unchanged owner.
+    #[allow(clippy::too_many_arguments)]
+    fn propagate_prepared<F: GradientIndexField>(
+        &self,
+        cx: &Cx<'_>,
+        cursor: &MeshTemperature<'a>,
+        prepared: &F,
+        ray: Ray,
+        transverse_axis: Vec3,
+        wavelength_nm: f64,
+        max_distance_m: f64,
+        options: P1MeshOptions,
+    ) -> Result<P1MeshPropagation, P1MeshError> {
+        let start = cursor.current.get();
         let mut boundary = MeshBoundary::new(
             start.boundary_oracle(options.boundary_id, options.event.surface_tolerance_m)?,
         );
@@ -216,7 +238,7 @@ impl<'a> P1ConductionMesh<'a> {
             }
             let remaining = (Dd::from_f64(max_distance_m) - sums[0]).to_f64();
             let segment = propagate_to_boundary_with_control(
-                &prepared,
+                prepared,
                 &mut boundary,
                 current_ray,
                 current_axis,

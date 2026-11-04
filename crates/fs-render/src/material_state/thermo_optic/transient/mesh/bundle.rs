@@ -20,7 +20,7 @@ use crate::gradient_index::bundle::event::{
     propagate_seeded_bundle_to_boundary_with_control,
 };
 use crate::gradient_index::bundle::{
-    BundleOptions, RayBundlePropagation, propagate_bundle_with_control,
+    BundleOptions, RayBundlePropagation, SecondOrderIndexField, propagate_bundle_with_control,
 };
 
 /// Whole-mesh geometry/work controls plus native angular-column tolerances.
@@ -100,10 +100,30 @@ impl<'a> P1ConductionMesh<'a> {
             binding.snapshot_identity(),
         )?;
         let prepared = original.prepare(wavelength_nm)?;
+        self.propagate_bundle_prepared(
+            cx, &cursor, &prepared, ray, transverse_axis, wavelength_nm, max_distance_m, options,
+        )
+    }
+
+    // The original variational/face-coordinate transport is shared by glass
+    // and water; each prepared law supplies its complete nonlinear index jet.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn propagate_bundle_prepared<F: SecondOrderIndexField>(
+        &self,
+        cx: &Cx<'_>,
+        cursor: &MeshTemperature<'a>,
+        prepared: &F,
+        ray: Ray,
+        transverse_axis: Vec3,
+        wavelength_nm: f64,
+        max_distance_m: f64,
+        options: P1MeshBundleOptions,
+    ) -> Result<P1MeshBundlePropagation, P1MeshError> {
+        let start = cursor.current.get();
         // The native zero-length launch establishes the immutable angular basis
         // and validates the source/ray. Every later call retains those columns.
         let mut bundle = propagate_bundle_with_control(
-            &prepared,
+            prepared,
             ray,
             transverse_axis,
             wavelength_nm,
@@ -148,7 +168,7 @@ impl<'a> P1ConductionMesh<'a> {
             let seed = bundle.continuation();
             let (result, in_coordinate_collar) = if let Some(departure) = departure {
                 propagate_seeded_bundle_across_continuous_plane_with_control(
-                    &prepared,
+                    prepared,
                     &mut boundary,
                     &seed,
                     remaining,
@@ -159,7 +179,7 @@ impl<'a> P1ConductionMesh<'a> {
             } else {
                 (
                     propagate_seeded_bundle_to_boundary_with_control(
-                        &prepared,
+                        prepared,
                         &mut boundary,
                         &seed,
                         remaining,
