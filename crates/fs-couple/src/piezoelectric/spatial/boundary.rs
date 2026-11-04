@@ -4,11 +4,16 @@ use super::{ElectrodeCondition, PiezoelectricElectrode, Result, invalid, poll};
 use fs_exec::Cx;
 use std::collections::BTreeMap;
 
+#[derive(Clone)]
 pub(super) struct BoundaryMap {
     pub index: Vec<Option<usize>>,
     pub prescribed: Vec<f64>,
     pub rhs: Vec<f64>,
     pub voltage_reference: Vec<f64>,
+    /// First prescribed-voltage electrode in each connected electric component.
+    /// Retaining its identity lets transient sources change their gauge without
+    /// rebuilding the mesh connectivity or confusing equal voltage values.
+    pub voltage_reference_electrode: Vec<usize>,
 }
 
 fn root(parent: &mut [usize], mut node: usize) -> usize {
@@ -128,18 +133,21 @@ pub(super) fn prepare_boundary(
         .map(|node| root(&mut parent, node))
         .collect::<Vec<_>>();
     let mut references = vec![None; n];
-    for electrode in electrodes {
+    for (id, electrode) in electrodes.iter().enumerate() {
         if let ElectrodeCondition::Voltage(voltage) = electrode.condition {
-            references[components[electrode.nodes[0]]].get_or_insert(voltage);
+            references[components[electrode.nodes[0]]].get_or_insert((voltage, id));
         }
     }
     let mut voltage_reference = Vec::with_capacity(n);
+    let mut voltage_reference_electrode = Vec::with_capacity(n);
     for &component in &components {
-        voltage_reference.push(references[component].ok_or_else(|| {
+        let (voltage, id) = references[component].ok_or_else(|| {
             invalid(
                 "each connected dielectric/electrode component needs an explicit voltage reference",
             )
-        })?);
+        })?;
+        voltage_reference.push(voltage);
+        voltage_reference_electrode.push(id);
     }
     let mut index = vec![None; full_dofs];
     let mut next = 0;
@@ -199,5 +207,6 @@ pub(super) fn prepare_boundary(
         prescribed,
         rhs,
         voltage_reference,
+        voltage_reference_electrode,
     })
 }

@@ -17,6 +17,11 @@ use fs_material::state_point::MaterialPropertySelection;
 use fs_material::tensor::{mandel_rotation, rotation};
 use fs_solid::linear3::TetAssemblyBudget;
 
+#[path = "piezoelectric/spatial_transient.rs"]
+mod transient;
+#[path = "piezoelectric/spatial_transient_load.rs"]
+mod transient_load;
+
 const FRAME: ContentHash = ContentHash([79; 32]);
 const LENGTH: f64 = 1e-3;
 const STIFFNESS: [f64; 6] = [11e10, 13e10, 10e10, 5e10, 6e10, 7e10];

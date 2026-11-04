@@ -14203,6 +14203,64 @@ material validation, transient waves, acoustic radiation, exterior fringing,
 thermal updates, dielectric/mechanical loss, hysteresis, depoling and breakdown
 are not supplied by this spatial owner.
 
+### Consistent-mass spatial piezoelectric transients
+
+`piezoelectric::spatial::transient::TetPiezoelectricTransient` advances the
+original spatial tensor model's displacement, nodal velocity and electric
+field together. The original consistent solid mass supplies mechanical
+inertia; the dielectric field remains electroquasistatic. An implicit midpoint
+increment uses `K + 4 M / dt^2`, the same reciprocal coupling blocks and the
+native equilibrated MINRES solve. Native operators and source tensors remain
+prepared; fixed support and electrode topology are cached. Free rigid motion
+is admitted through inertia and does not require artificial static supports.
+
+Initialization retains supplied displacement and velocity and solves their
+matching electrostatics. Subsequent fixed support values and electrode types
+remain unchanged. Voltage, total electrode charge and volume-charge values
+are endpoint inputs, linearly interpolated within the step; applied force is
+the caller's midpoint value. Each candidate reconstructs midpoint and endpoint
+cell fields, checks the declared small-signal envelope and force/charge
+residuals, and independently closes kinetic plus strain/electric storage
+against `F_mid dot delta_u + phi_mid dot delta_Q`. Relative potentials retain
+gauge invariance. No partial mechanical or electrical state is published after
+source, numerical, work-budget or cancellation refusal.
+
+This is a fixed-reference, constant-coefficient, reversible small-strain
+model. The midpoint method is second order for smooth forcing and adds no
+model damping; an energy balance does not establish time or mesh convergence.
+General circuits, radiation, dielectric/structural loss, nonlinear switching,
+thermal updates and experimental validation remain outside this spatial path.
+`piezoelectric_plate` exercises an actual finite-plate voltage ramp followed by
+charge-preserving electrode disconnection and computed open-circuit ringing.
+
+`transient::load::step_with_loads_candidate` adds original source-resolved
+`ResolvedConductor` resistors between electrodes in the same retained electrical
+reference component. Existing voltage electrodes take endpoint voltage drives;
+charge electrodes take held external current drives. A symmetric negative
+`dt/(2R)` conductance block enters the same sparse coupled assembly. Its solved
+midpoint voltage gives actual resistor current and transferred charge, which
+update the native midpoint/endpoint Gauss constraints before publication.
+There is no mechanical damping substitute or separate circuit iteration.
+
+The ordinary candidate report retains net electrode work into the body. A
+separate enclosing report independently closes the body energy change and
+positive conductor Joule heat against mechanical and external electrical source
+work. Per-load records retain the original conductor, signed current, transferred
+charge and heat; that heat belongs to the load, not the ceramic. Temperature
+evolution and general RLC networks are not inferred. Synthetic RC exponential,
+current/voltage drive and mechanically excited harvesting tests exercise this
+same field solve, including orientation, gauge and transactional refusal checks.
+
+The reduced rod/circuit path also accepts
+`TensorPiezoelectric::longitudinal(direction)` without a second scalar material
+card. The original complete material source, tensor/frame and oriented cut
+survive circuit stepping. The reduction imposes uniaxial stress and longitudinal
+electric field; transverse mechanical relaxation is retained, but insulating
+side faces and finite-wavelength accuracy are not inferred. Synthetic
+`tests/piezoelectric/circuit/tensor.rs` cases compare actual current, motion and
+Joule heat to an independent midpoint oracle and check co-rotation. Scalar
+ceramic thermal refresh refuses these reductions explicitly.
+
 ## Regional material walls in native duct propagation
 
 `bernoulli_aperture::wall::material::RegionalMaterialWallDg` retains one original

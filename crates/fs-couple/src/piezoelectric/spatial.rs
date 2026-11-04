@@ -11,8 +11,9 @@
 //! TOTAL free charge (zero is an isolated, initially uncharged electrode).
 //! Remaining exterior faces are electrically insulating. A voltage reference
 //! is required on each connected body. Coefficients and reference geometry are
-//! fixed. This is a static linear model, not a transient, ferroelectric,
-//! breakdown, loss, acoustic-radiation or exterior-fringing-field model.
+//! fixed. Static solves and the [`transient`] consistent-mass midpoint model
+//! share these operators. Neither supplies ferroelectricity, breakdown, loss,
+//! acoustic radiation or exterior fringing fields.
 
 use fs_blake3::ContentHash;
 use fs_em::electrostatic::tetrahedral::{
@@ -31,6 +32,9 @@ use fs_sparse::{Coo, Csr};
 
 mod boundary;
 use boundary::{BoundaryMap, prepare_boundary};
+
+/// Resolved electromechanical motion with consistent inertia and charge balance.
+pub mod transient;
 
 /// Electrical condition on a complete conducting surface electrode.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -123,6 +127,22 @@ fn poll(cx: &Cx<'_>) -> Result<()> {
 }
 fn positive(x: f64) -> bool {
     x.is_finite() && x > 0.0
+}
+
+fn validate_controls(controls: TetPiezoelectricControls) -> Result<()> {
+    if !positive(controls.relative_tolerance)
+        || controls.relative_tolerance >= 1.0
+        || controls.maximum_iterations == 0
+        || !positive(controls.force_tolerance_n)
+        || !positive(controls.charge_tolerance_c)
+        || !positive(controls.energy_tolerance_j)
+        || !positive(controls.maximum_strain_norm)
+        || controls.maximum_strain_norm >= 1.0
+        || !positive(controls.maximum_electric_field_v_m)
+    {
+        return Err(invalid("positive finite solve/amplitude controls required"));
+    }
+    Ok(())
 }
 
 /// Prepared, immutable native operators. Assembly is reused across voltage,
@@ -344,17 +364,9 @@ impl<'a> TetPiezoelectricModel<'a> {
         cx: &Cx<'_>,
     ) -> Result<TetPiezoelectricSolution> {
         poll(cx)?;
+        validate_controls(controls)?;
         let n = self.nodes_m.len();
-        if !positive(controls.relative_tolerance)
-            || controls.relative_tolerance >= 1.0
-            || controls.maximum_iterations == 0
-            || !positive(controls.force_tolerance_n)
-            || !positive(controls.charge_tolerance_c)
-            || !positive(controls.energy_tolerance_j)
-            || !positive(controls.maximum_strain_norm)
-            || controls.maximum_strain_norm >= 1.0
-            || !positive(controls.maximum_electric_field_v_m)
-            || nodal_forces_n.len() != n
+        if nodal_forces_n.len() != n
             || nodal_free_charge_c.len() != n
             || nodal_forces_n
                 .iter()
@@ -392,7 +404,7 @@ impl<'a> TetPiezoelectricModel<'a> {
             budget: self.budget,
         }
         .validate_static_constraints(cx)?;
-        let (matrix, rhs) = self.reduced_system(&boundary, cx)?;
+        let (matrix, rhs) = self.reduced_system(&boundary, 0.0, &[], cx)?;
         let (solution, iterations, relative_residual) =
             equilibrated_solve(matrix, rhs, controls, cx)?;
         let mut full = boundary.prescribed.clone();
@@ -426,7 +438,13 @@ impl<'a> TetPiezoelectricModel<'a> {
         )
     }
 
-    fn reduced_system(&self, boundary: &BoundaryMap, cx: &Cx<'_>) -> Result<(Csr, Vec<f64>)> {
+    fn reduced_system(
+        &self,
+        boundary: &BoundaryMap,
+        mass_coefficient_s2: f64,
+        additional_entries: &[(usize, usize, f64)],
+        cx: &Cx<'_>,
+    ) -> Result<(Csr, Vec<f64>)> {
         let mut matrix = Coo::new(boundary.rhs.len(), boundary.rhs.len());
         let mut rhs = boundary.rhs.clone();
         let mut add = |row: usize, col: usize, value: f64| -> Result<()> {
@@ -449,6 +467,12 @@ impl<'a> TetPiezoelectricModel<'a> {
             for (&col, &value) in cols.iter().zip(vals) {
                 add(row, col, value)?;
             }
+            if mass_coefficient_s2 != 0.0 {
+                let (cols, vals) = self.solid.mass.row(row);
+                for (&col, &value) in cols.iter().zip(vals) {
+                    add(row, col, mass_coefficient_s2 * value)?;
+                }
+            }
             let (cols, vals) = self.coupling.row(row);
             for (&col, &value) in cols.iter().zip(vals) {
                 add(row, nu + col, value)?;
@@ -461,6 +485,10 @@ impl<'a> TetPiezoelectricModel<'a> {
             for (&col, &value) in cols.iter().zip(vals) {
                 add(nu + row, nu + col, -value)?;
             }
+        }
+        for &(row, col, value) in additional_entries {
+            poll(cx)?;
+            add(row, col, value)?;
         }
         if rhs.iter().any(|v| !v.is_finite()) {
             return Err(invalid("reduced load is not representable"));

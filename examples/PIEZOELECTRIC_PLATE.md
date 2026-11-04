@@ -14,6 +14,23 @@ solve replaces the driven electrode by an isolated conductor with the first
 solve's total charge: its voltage is then an unknown shared by the entire
 electrode. Both solves include electrical feedback on mechanical deformation.
 
+The example then starts the same finite plate at rest and ramps the voltage
+difference from 0 to 100 V over 400 ns, in 20 ns steps. The consistent native
+mass matrix now evolves its nodal velocities and displacement while the
+dielectric equation solves the simultaneous electric field. After the ramp,
+the driven electrode is disconnected at its **computed charge**. The plate
+keeps its accepted displacement and velocity, and the isolated sensor voltage
+changes with its subsequent free motion. The printed samples include thickness
+change, voltage and accumulated energy drift. The timestep and coarse mesh are
+illustrative numerical inputs, not a converged prediction of a physical device.
+A second trajectory starts from that identical accepted state with a declared
+1 kΩ external resistor. Its current changes the electrode charge inside the
+same coupled solve, changing the mechanical motion as well. The final report
+shows the resulting voltage, deformation, resistor heat and complete energy
+defect. The resistor is an explicitly authored Ohmic load, with resistivity
+`1e-3 Ω m`, length `10 mm` and area `0.01 mm²`; it is not a measured PZT loss
+or a temperature-dependent resistor model.
+
 ## Data and conventions
 
 The source is PIEZO.COM's
@@ -68,12 +85,45 @@ It accepts one tensor or one tensor per tetrahedron, explicit material/mesh
 frames, nonzero prescribed displacements, nodal force and volume-charge loads,
 and prescribed-voltage or total-charge electrodes. The sparse operators are
 prepared once for repeated load cases. The full native consistent mass matrix
-is available, but the spatial solver in this increment is static.
+also drives `spatial::transient::TetPiezoelectricTransient`. Its implicit
+midpoint solve uses `K + 4 M / dt²`, the same reciprocal coupling matrix and
+the original electrostatic operator. Electrical potential has no artificial
+inertia. Fixed supports and electrode topology are prepared once; force is a
+midpoint input and prescribed charge or voltage varies between endpoints.
+
+Every accepted step independently checks momentum and charge balance, as well
+as the change in kinetic, strain and electric storage against actual mechanical
+and electrical work. The closed isolated response has no energy source or loss.
+Initialization solves the electric field at the supplied displacement; it does
+not reset the mechanical state to static equilibrium. Candidate construction
+leaves the original state intact if a solve, material envelope or cancellation
+check fails.
+
+For loaded devices, `transient::load::step_with_loads_candidate` accepts
+source-bound resistors and voltage or current drives on the retained electrode
+types. The additional conductance enters the original sparse solve; there is
+no separate load iteration or substituted mechanical damping. A load report
+separates external electrical supply from native Ohmic heat while keeping the
+original conductor source attached. The ordinary candidate's work report has
+the smaller accounting boundary of the body alone. Resistors must connect
+electrodes in the same retained electrical reference component.
+
+The same full tensor also supplies the existing reduced rod and circuit models
+through `TensorPiezoelectric::longitudinal(direction)`. This explicitly imposes
+uniaxial stress and a longitudinal electric field while retaining transverse
+mechanical relaxation. It keeps the original source claims and a receipt naming
+the tensor, frame and oriented cut. It does not impose insulating side faces or
+solve fringing fields. The existing scalar thermal-coefficient model refuses
+tensor reductions until a tensor-aware thermal law is supplied.
 
 The model assumes infinitesimal strain, linear reversible constitutive laws,
 fixed geometry and electroquasistatic fields inside the meshed dielectric.
-It does not add finite-device resonances, transient circuit loading, exterior
-fringing, loss, hysteresis, depoling, breakdown or thermal coefficient evolution.
+The spatial transient resolves the modes retained by its mesh, with temporal
+dispersion from the chosen timestep. It supports the described resistive loads,
+but does not add general RLC circuits, exterior fringing, acoustic radiation,
+internal dielectric/structural loss, hysteresis, depoling, breakdown or thermal
+coefficient evolution. Resistor dissipation is reported at the original load;
+the example does not evolve resistor temperature or add its heat to the ceramic.
 The existing longitudinal circuit/thermal transducer remains available for
 those already-supported reduced coupling paths. Synthetic G1/G3 regressions
 test the numerical equations and frame/boundary conventions; they do not

@@ -78,10 +78,12 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<()> {
     }
 }
 
-/// Source-bound geometry with material axis 3 along the rod. Positive extension
-/// is tensile; positive terminal voltage is the drop along +3 and positive Q is
-/// charge on the electrode at its beginning. Reversing poling changes signed
-/// d33 in the material input; a world rotation does not change these local scalars.
+/// Source-bound geometry along the resolved material direction: axis 3 for a
+/// scalar source, or the explicit cut retained by `TensorPiezoelectric::longitudinal`.
+/// Positive extension is tensile; positive terminal voltage is the drop along
+/// that direction and positive Q is charge on the electrode at its beginning.
+/// Reversing the cut or poling changes signed coupling. Co-rotating the tensor
+/// and cut preserves the same local circuit and mechanical response.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PiezoelectricRod {
     material: LongitudinalPiezoelectric,

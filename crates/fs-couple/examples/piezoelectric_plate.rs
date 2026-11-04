@@ -6,6 +6,8 @@
 use fs_blake3::ContentHash;
 use fs_couple::piezoelectric::spatial::{
     ElectrodeCondition, PiezoelectricElectrode, TetPiezoelectricControls, TetPiezoelectricModel,
+    transient::TetPiezoelectricTransient,
+    transient::load::{ElectrodeDrive, ResistiveElectrodeLoad},
 };
 use fs_evidence::ValidityDomain;
 use fs_exec::{CancelGate, Cx};
@@ -13,6 +15,7 @@ use fs_matdb::{
     ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey,
     PropertyValue, Provenance, QueryPoint, UncertaintyModel,
 };
+use fs_material::conductor::{ELECTRICAL_RESISTIVITY_DIMS, resolve_uniform_conductor};
 use fs_material::piezoelectric::tensor::{TensorPiezoelectric, waves::PiezoelectricWaveCondition};
 use fs_material::state_point::MaterialPropertySelection;
 use fs_solid::linear3::TetAssemblyBudget;
@@ -97,6 +100,183 @@ fn nominal_material() -> Result<TensorPiezoelectric, Box<dyn std::error::Error>>
     )?)
 }
 
+fn declared_load() -> Result<ResistiveElectrodeLoad, Box<dyn std::error::Error>> {
+    // An explicitly authored 1 kohm circuit load, not a measured ceramic loss.
+    // rho=1e-3 ohm m, length=10 mm and area=0.01 mm^2 define R=rho L/A.
+    let mut claims = ClaimSet::new();
+    claims.insert_claim(PropertyClaim {
+        key: PropertyKey::new("electrical_resistivity", ELECTRICAL_RESISTIVITY_DIMS),
+        value: PropertyValue::Scalar {
+            value: 1e-3,
+            dims: ELECTRICAL_RESISTIVITY_DIMS,
+        },
+        validity: ValidityDomain::unconstrained(),
+        uncertainty: UncertaintyModel::Unstated,
+        interpolation: InterpolationPolicy::ConstantWithinValidity,
+        observations: vec![],
+        provenance: Provenance {
+            source: "authored fixed Ohmic load for the piezoelectric plate example".into(),
+            license: "CC0-1.0".into(),
+            artifact: None,
+        },
+    })?;
+    let card = MaterialCard::assemble(
+        MaterialStateId {
+            chemistry: "authored external resistor".into(),
+            phase: "solid".into(),
+            process: "declared constant resistivity; no temperature model".into(),
+            revision: 0,
+        },
+        claims,
+        vec![],
+    )?;
+    Ok(ResistiveElectrodeLoad {
+        electrodes: [1, 0],
+        conductor: std::sync::Arc::new(resolve_uniform_conductor(
+            &card,
+            &QueryPoint::new(),
+            MaterialPropertySelection::SingleClaimOnly,
+            0.01,
+            1e-8,
+        )?),
+    })
+}
+
+/// Drive the actual finite plate, then disconnect its driven electrode without
+/// changing its charge, displacement or velocity. The open electrode voltage
+/// subsequently follows the computed motion, rather than an imposed waveform.
+fn transient_response(
+    model: &TetPiezoelectricModel<'_>,
+    supports: &[(usize, f64)],
+    bottom: &[usize],
+    top: &[usize],
+    zeros: &[[f64; 3]],
+    zero_charge: &[f64],
+    controls: TetPiezoelectricControls,
+    cx: &Cx<'_>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut body = TetPiezoelectricTransient::new(
+        model,
+        supports,
+        &[
+            PiezoelectricElectrode {
+                nodes: bottom,
+                condition: ElectrodeCondition::Voltage(0.0),
+            },
+            PiezoelectricElectrode {
+                nodes: top,
+                condition: ElectrodeCondition::Voltage(0.0),
+            },
+        ],
+        zeros,
+        zeros,
+        zero_charge,
+        controls,
+        cx,
+    )?;
+    let thickness = |u: &[[f64; 3]]| {
+        top.iter().map(|&i| u[i][2]).sum::<f64>() / top.len() as f64
+            - bottom.iter().map(|&i| u[i][2]).sum::<f64>() / bottom.len() as f64
+    };
+    let dt = 2e-8;
+    let mut supplied = 0.0;
+    println!("Transient: 400 ns linear 0-to-100 V ramp; native consistent mass, dt=20 ns.");
+    for i in 1..=20 {
+        let candidate = body.step_candidate(
+            dt,
+            &[
+                ElectrodeCondition::Voltage(0.0),
+                ElectrodeCondition::Voltage(-5.0 * f64::from(i)),
+            ],
+            zeros,
+            zero_charge,
+            controls,
+            cx,
+        )?;
+        supplied += candidate.step().electrical_work_j + candidate.step().mechanical_work_j;
+        body = candidate.into_parts().0;
+    }
+    println!(
+        "End of ramp: thickness change={:.6} nm, kinetic energy={:.9e} J, accumulated work defect={:.3e} J",
+        thickness(body.state().displacement_m()) * 1e9,
+        body.state().kinetic_energy_j(),
+        body.state().total_energy_j() - supplied,
+    );
+
+    // Rebind with the actual accepted total charge. This is a matched open
+    // circuit, not a projection to zero charge or a sudden short circuit.
+    let charge = body.state().electrodes()[1].charge_c;
+    let open = [
+        ElectrodeCondition::Voltage(0.0),
+        ElectrodeCondition::Charge(charge),
+    ];
+    let mut isolated = TetPiezoelectricTransient::new(
+        model,
+        supports,
+        &[
+            PiezoelectricElectrode {
+                nodes: bottom,
+                condition: open[0],
+            },
+            PiezoelectricElectrode {
+                nodes: top,
+                condition: open[1],
+            },
+        ],
+        body.state().displacement_m(),
+        body.state().velocity_m_s(),
+        zero_charge,
+        controls,
+        cx,
+    )?;
+    let initial_energy = isolated.state().total_energy_j();
+    if (initial_energy - body.state().total_energy_j()).abs() > controls.energy_tolerance_j {
+        return Err("charge-preserving electrode disconnection changed stored energy".into());
+    }
+    let mut loaded = isolated.clone();
+    let load = declared_load()?;
+    let drives = [ElectrodeDrive::Voltage(0.0), ElectrodeDrive::Current(0.0)];
+    let mut resistor_heat = 0.0;
+    println!(
+        "Isolated sensor: time since disconnection [us], thickness change [nm], voltage [V], energy drift [J]"
+    );
+    for i in 1..=100 {
+        isolated = isolated
+            .step_candidate(dt, &open, zeros, zero_charge, controls, cx)?
+            .into_parts()
+            .0;
+        let (candidate, report) = loaded.step_with_loads_candidate(
+            dt,
+            &drives,
+            std::slice::from_ref(&load),
+            zeros,
+            zero_charge,
+            controls,
+            cx,
+        )?;
+        resistor_heat += report.joule_heat_j;
+        loaded = candidate.into_parts().0;
+        if i % 20 == 0 {
+            let state = isolated.state();
+            println!(
+                "{:.3}, {:.6}, {:.9}, {:.3e}",
+                state.time_s() * 1e6,
+                thickness(state.displacement_m()) * 1e9,
+                state.electrodes()[1].voltage_v,
+                state.total_energy_j() - initial_energy
+            );
+        }
+    }
+    println!(
+        "Same initial state with authored 1 kohm load: thickness change={:.6} nm, voltage={:.9} V, resistor heat={:.9e} J, energy defect={:.3e} J",
+        thickness(loaded.state().displacement_m()) * 1e9,
+        loaded.state().electrodes()[1].voltage_v,
+        resistor_heat,
+        loaded.state().total_energy_j() + resistor_heat - initial_energy,
+    );
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let material = nominal_material()?;
     let sources = [material];
@@ -174,6 +354,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Frozen local {condition:?} phase speeds [m/s]: {:?}",waves.mechanical.modes.map(|m|m.phase_speed_m_s));
             println!("Frozen local {condition:?} energy velocities [m/s]: {:?}",waves.mechanical.modes.map(|m|m.energy_velocity_m_s));
         }
+        transient_response(&model,&supports,&bottom,&top,&zero_forces,&zero_charge,controls,&cx)?;
         Ok(())
     })
 }
