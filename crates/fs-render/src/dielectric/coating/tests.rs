@@ -62,6 +62,102 @@ fn entries(matrix: Mueller) -> [f64; 4] {
 }
 
 #[test]
+fn g3_bare_interfaces_keep_native_smooth_and_rough_transport_outside_visible_light() {
+    let normal = Vec3::new(0.0, 0.0, 1.0);
+    let wo = Vec3::new(0.3, 0.0, (1.0_f64 - 0.09).sqrt());
+    let bare = DielectricSurface::try_rough(0.2).unwrap();
+    for reverse in [false, true] {
+        let (eta_i, eta_t) = if reverse { (1.5, 1.0) } else { (1.0, 1.5) };
+        for wavelength in [250.0, 550.0, 1550.0, 10_000.0] {
+            let interface = bare.interface(wavelength, reverse).unwrap();
+            for branch in [0.0, 0.9] {
+                assert_eq!(
+                    interface
+                        .sample_smooth(normal, wo, eta_i, eta_t, branch)
+                        .unwrap(),
+                    crate::dielectric::sample_smooth_dielectric(normal, wo, eta_i, eta_t, branch,)
+                        .unwrap(),
+                );
+                let native = crate::dielectric::sample_rough_dielectric(
+                    normal, wo, eta_i, eta_t, 0.2, 0.17, 0.63, branch,
+                )
+                .unwrap();
+                let sample = interface
+                    .sample_rough(normal, wo, eta_i, eta_t, 0.2, 0.17, 0.63, branch)
+                    .unwrap();
+                assert_eq!(sample, native);
+                if let Some(sample) = sample {
+                    assert_eq!(
+                        interface
+                            .evaluate_rough(normal, wo, sample.direction, eta_i, eta_t, 0.2)
+                            .unwrap(),
+                        crate::dielectric::evaluate_rough_dielectric(
+                            normal,
+                            wo,
+                            sample.direction,
+                            eta_i,
+                            eta_t,
+                            0.2,
+                        )
+                        .unwrap(),
+                    );
+                }
+            }
+        }
+    }
+    for invalid in [0.0, -0.0, -1.0, f64::INFINITY, f64::NAN] {
+        assert!(matches!(
+            bare.interface(invalid, false),
+            Err(DielectricError::InvalidWavelength)
+        ));
+    }
+}
+
+#[test]
+fn g0_nonvisible_bare_admission_does_not_extend_original_film_support() {
+    // A zero-thickness compact film still owns its original Cauchy source.
+    for thickness_nm in [0.0, 120.0] {
+        let coated = surface(&[layer(1.4, thickness_nm)], 1);
+        for reverse in [false, true] {
+            assert!(coated.interface(550.0, reverse).is_ok());
+            assert!(matches!(
+                coated.interface(1550.0, reverse),
+                Err(DielectricError::InvalidWavelength)
+            ));
+        }
+    }
+    let empty = DielectricCoatingStack::try_new_in_band(&[], (1200.0, 1800.0)).unwrap();
+    let indices = core::array::from_fn(|i| {
+        DielectricIorSample::try_new_in_band(1000.0 + 125.0 * i as f64, 1.4).unwrap()
+    });
+    let layer = CoherentDielectricCoating::try_new(
+        TabulatedIor::try_new_in_band(indices, 125.0).unwrap(),
+        120e-9,
+        source(),
+    )
+    .unwrap();
+    let layers = [layer];
+    let infrared = DielectricCoatingStack::try_new_in_band(&layers, (1200.0, 1800.0)).unwrap();
+    for stack in [empty, infrared] {
+        for reverse in [false, true] {
+            assert!(
+                stack
+                    .interface(1550.0, reverse)
+                    .unwrap()
+                    .fresnel(0.8, 1.0, 1.5)
+                    .is_ok()
+            );
+            for outside in [550.0, 1199.0, 1801.0] {
+                assert!(matches!(
+                    stack.interface(outside, reverse),
+                    Err(DielectricError::InvalidWavelength)
+                ));
+            }
+        }
+    }
+}
+
+#[test]
 fn g1_transmitted_and_reflected_signed_fields_match_independent_airy() {
     // Independent Python cmath nested-interface scattering recursion, retaining
     // t01*t_below*exp(i delta)/(1+r01*r_below*exp(2i delta)). Transmission is
@@ -406,9 +502,10 @@ fn g1_weak_transmission_keeps_smooth_and_rough_sampling_support() {
 
 #[test]
 fn g1_exit_critical_roundoff_uses_native_snell_classification() {
-    // Native (n_i/n_t)^2*sin² rounds to one here while n_t²-n_i²*sin²
-    // rounds positive. The latter must not invent transmitted flux for a
-    // native TIR ray; the signed response uses the same critical zero root.
+    // The ratio-based sin² calculation rounds to one at the original cosine,
+    // but the exact binary64 inputs give positive transmitted normal squared
+    // 3.7434066644227618394460881557844072642e-16. Retain this physical
+    // propagating branch and the adjacent binary64 rays on either side.
     let (eta_i, eta_t, cosine) = (
         2.048_747_980_327_861,
         1.846_015_323_252_327_5,
@@ -416,34 +513,51 @@ fn g1_exit_critical_roundoff_uses_native_snell_classification() {
     );
     let coated = surface(&[layer(2.4, 100.0)], 1);
     let interface = coated.interface(550.0, false).unwrap();
-    let bare = crate::dielectric::fresnel_dielectric(cosine, eta_i, eta_t).unwrap();
+    let evanescent_cosine = f64::from_bits(cosine.to_bits() - 2);
+    let bare = crate::dielectric::fresnel_dielectric(evanescent_cosine, eta_i, eta_t).unwrap();
     assert!(bare.total_internal_reflection);
-    assert!(eta_t * eta_t - eta_i * eta_i * (1.0 - cosine * cosine) > 0.0);
-    let critical = interface.fresnel_polarized(cosine, eta_i, eta_t).unwrap();
-    assert!(critical.scalar.total_internal_reflection);
-    assert_eq!(critical.scalar.transmitted_cosine, bare.transmitted_cosine);
-    assert_eq!(critical.scalar.transmittance, 0.0);
-    assert_eq!(critical.transmission, Mueller([[0.0; 4]; 4]));
-    close(critical.scalar.reflectance, 1.0, 2.0e-15);
-    // Three adjacent representable cosines reach the first native propagating
-    // result in this fixture. Its small positive flux must also be retained.
-    let propagating_cosine = f64::from_bits(cosine.to_bits() + 3);
-    let bare = crate::dielectric::fresnel_dielectric(propagating_cosine, eta_i, eta_t).unwrap();
-    assert!(!bare.total_internal_reflection);
-    let propagating = interface
-        .fresnel_polarized(propagating_cosine, eta_i, eta_t)
+    let evanescent = interface
+        .fresnel_polarized(evanescent_cosine, eta_i, eta_t)
         .unwrap();
-    assert!(!propagating.scalar.total_internal_reflection);
+    assert!(evanescent.scalar.total_internal_reflection);
     assert_eq!(
-        propagating.scalar.transmitted_cosine,
+        evanescent.scalar.transmitted_cosine,
         bare.transmitted_cosine
     );
-    assert!(propagating.scalar.transmittance > 0.0);
-    close(
-        propagating.scalar.reflectance + propagating.scalar.transmittance,
-        1.0,
-        2.0e-14,
-    );
+    assert_eq!(evanescent.scalar.transmittance, 0.0);
+    assert_eq!(evanescent.transmission, Mueller([[0.0; 4]; 4]));
+    close(evanescent.scalar.reflectance, 1.0, 2.0e-15);
+    // Independent 90-digit decimal evaluation from exact binary64 inputs.
+    // The first entry is adjacent to the evanescent cosine above.
+    for (propagating_cosine, transmitted_cosine) in [
+        (
+            f64::from_bits(cosine.to_bits() - 1),
+            7.109_058_727_775_48e-9,
+        ),
+        (cosine, 1.048_089_096_473_242_3e-8),
+        (
+            f64::from_bits(cosine.to_bits() + 3),
+            1.696_408_422_737_746_4e-8,
+        ),
+    ] {
+        let bare = crate::dielectric::fresnel_dielectric(propagating_cosine, eta_i, eta_t).unwrap();
+        assert!(!bare.total_internal_reflection);
+        close(bare.transmitted_cosine, transmitted_cosine, 4.0e-23);
+        let propagating = interface
+            .fresnel_polarized(propagating_cosine, eta_i, eta_t)
+            .unwrap();
+        assert!(!propagating.scalar.total_internal_reflection);
+        assert_eq!(
+            propagating.scalar.transmitted_cosine,
+            bare.transmitted_cosine
+        );
+        assert!(propagating.scalar.transmittance > 0.0);
+        close(
+            propagating.scalar.reflectance + propagating.scalar.transmittance,
+            1.0,
+            2.0e-14,
+        );
+    }
 }
 
 #[test]

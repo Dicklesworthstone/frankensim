@@ -90,6 +90,12 @@ differentiable lift). Pure Rust throughout.
   exact visible-constructor parameter agreement. These declarations do not
   establish measurement accuracy, a causal complex-index fit or validity of
   weak-absorption geometric optics for strongly absorbing media.
+  Bare `DielectricSurface::interface` accepts positive finite vacuum
+  wavelengths, including UV and infrared, using the supplied actual adjacent
+  phase indices. Smooth/GGX sampling, evaluation and reverse densities retain
+  the same native Fresnel and radiance arithmetic at every admitted wavelength.
+  Compact Cauchy coatings remain visible-only, including zero-thickness films;
+  borrowed original stacks continue to enforce their own source support.
 - **Coherent coatings on transmitting dielectrics:** `DielectricSurface` owns
   an optional source-bound `DielectricCoating`, separate from homogeneous glass
   and bulk Beer-Lambert absorption. It admits the existing one-to-four-law
@@ -260,7 +266,7 @@ differentiable lift). Pure Rust throughout.
   Synthetic infrared fixtures check independent homogeneous/affine path laws,
   quadratic focusing, Planck emission through the same absorbing path, Stokes
   attenuation and common-band refusal. This does not broaden visible-only
-  analytic materials, color observers, rough surfaces or compact coatings.
+  analytic materials, color observers or compact coatings.
   Missing or nonpositive tabulated group derivatives suppress the delay claim
   while retaining supported phase propagation. `PolarizedBeam` consumes the
   propagator directly: all Stokes power components receive integrated
@@ -527,6 +533,13 @@ differentiable lift). Pure Rust throughout.
   callback shares the original walk and uses stack-only accumulation; public
   forward-power APIs retain their original behavior. Source spectra remain
   independently calibrated, with no inferred emissivity or thermal coupling.
+  `RadianceSpectrum::try_new_in_band` retains 2--1024 ordered original source
+  knots over their inclusive positive vacuum-wavelength band; interpolation
+  refuses extrapolation. Native monochromatic camera paths can therefore use
+  infrared surface emission with original dispersive media and absorption.
+  Legacy visible constructors retain their exact numerical behavior. RGB
+  environment reconstruction and CIE raster output remain visible-only;
+  extending an optical material does not create missing emitted source data.
   Environment maps require caller radiometric
   calibration and are sampled only after proven homogeneous escape. Any
   positive absorption on the remaining infinite tail extinguishes external

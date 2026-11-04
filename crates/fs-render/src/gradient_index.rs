@@ -866,4 +866,6 @@ fn transverse(direction: Vec3, reference: Vec3) -> Option<Vec3> {
 }
 
 #[cfg(test)]
+mod spectral_tests;
+#[cfg(test)]
 mod tests;

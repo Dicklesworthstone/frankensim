@@ -359,8 +359,13 @@ fn g3_original_film_adapter_shares_explicit_transmission_and_native_critical_roo
     let coating = film(2.4, 100e-9);
     let cosine = 0.433_724_397_570_750_8_f64;
     let (eta_i, eta_t) = (2.048_747_980_327_861, 1.846_015_323_252_327_5);
+    // Exact-input high-precision Snell evaluation places the boundary between
+    // the two preceding representable cosines. The original cosine propagates
+    // even though the naive ratio-based sin² expression rounds to one.
     for (cosine, tir) in [
-        (cosine, true),
+        (f64::from_bits(cosine.to_bits() - 2), true),
+        (f64::from_bits(cosine.to_bits() - 1), false),
+        (cosine, false),
         (f64::from_bits(cosine.to_bits() + 3), false),
     ] {
         let actual =

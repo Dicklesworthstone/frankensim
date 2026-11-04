@@ -94,13 +94,26 @@ pub struct RadianceSpectrum {
 }
 
 impl RadianceSpectrum {
+    /// Retain a visible source spanning exactly 380–780 nm. Nonvisible source
+    /// data must use [`Self::try_new_in_band`] with its own explicit support.
     pub fn try_new(knots: Vec<(f64, f64)>) -> Result<Self, CameraRadianceError> {
-        if !(2..=MAX_RADIANCE_KNOTS).contains(&knots.len())
-            || knots.first().map(|x| x.0) != Some(LAMBDA_MIN)
+        if knots.first().map(|x| x.0) != Some(LAMBDA_MIN)
             || knots.last().map(|x| x.0) != Some(LAMBDA_MAX)
+        {
+            return Err(CameraRadianceError::InvalidSpectrum);
+        }
+        Self::try_new_in_band(knots)
+    }
+
+    /// Retain original emitted radiance over its first/last positive finite
+    /// vacuum wavelengths. Linear interpolation never extends that source band.
+    /// This enables monochromatic radiometric paths; it does not extend the
+    /// visible CIE observer or infer a spectrum from RGB data.
+    pub fn try_new_in_band(knots: Vec<(f64, f64)>) -> Result<Self, CameraRadianceError> {
+        if !(2..=MAX_RADIANCE_KNOTS).contains(&knots.len())
             || knots
                 .iter()
-                .any(|&(w, r)| !w.is_finite() || !r.is_finite() || r < 0.0)
+                .any(|&(w, r)| !w.is_finite() || w <= 0.0 || !r.is_finite() || r < 0.0)
             || knots.windows(2).any(|pair| pair[0].0 >= pair[1].0)
         {
             return Err(CameraRadianceError::InvalidSpectrum);
@@ -119,8 +132,15 @@ impl RadianceSpectrum {
         &self.knots
     }
 
+    /// Inclusive source support in vacuum nanometres.
+    #[must_use]
+    pub fn wavelength_bounds_nm(&self) -> (f64, f64) {
+        (self.knots[0].0, self.knots[self.knots.len() - 1].0)
+    }
+
     pub fn evaluate(&self, wavelength_nm: f64) -> Result<f64, CameraRadianceError> {
-        if !wavelength_nm.is_finite() || !(LAMBDA_MIN..=LAMBDA_MAX).contains(&wavelength_nm) {
+        let (minimum, maximum) = self.wavelength_bounds_nm();
+        if !wavelength_nm.is_finite() || !(minimum..=maximum).contains(&wavelength_nm) {
             return Err(CameraRadianceError::Optics(
                 DielectricError::InvalidWavelength,
             ));
@@ -211,6 +231,13 @@ impl<'a> EnvironmentRadiance<'a> {
     }
 
     fn evaluate(&self, direction: Vec3, wavelength_nm: f64) -> Result<f64, CameraRadianceError> {
+        // RGB reconstruction only declares a visible spectrum. Admitting an
+        // infrared ray through native glass must not extrapolate that source.
+        if !wavelength_nm.is_finite() || !(LAMBDA_MIN..=LAMBDA_MAX).contains(&wavelength_nm) {
+            return Err(CameraRadianceError::Optics(
+                DielectricError::InvalidWavelength,
+            ));
+        }
         if self.scale_w_m2_sr_nm == 0.0 {
             return Ok(0.0);
         }

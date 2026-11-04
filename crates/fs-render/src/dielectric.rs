@@ -1049,12 +1049,19 @@ impl DielectricSurface {
     /// Shared Fresnel/sampling owner for one vacuum wavelength. `reverse` is
     /// true when incident from the object's interior, including reverse-PDF
     /// evaluation of a transmitted edge. Roughness remains a separate input.
+    /// A bare boundary accepts positive finite wavelengths; the caller supplies
+    /// the actual adjacent phase indices at that wavelength. Compact Cauchy
+    /// coatings retain their visible support, even when every film is zero thick.
     pub fn interface(
         &self,
         wavelength_nm: f64,
         reverse: bool,
     ) -> Result<DielectricInterface<'_>, DielectricError> {
-        validate_wavelength(wavelength_nm)?;
+        if self.coating.is_some() {
+            validate_wavelength(wavelength_nm)?;
+        } else if !wavelength_nm.is_finite() || wavelength_nm <= 0.0 {
+            return Err(DielectricError::InvalidWavelength);
+        }
         Ok(DielectricInterface::new(
             self.coating.as_ref(),
             wavelength_nm,
