@@ -3,6 +3,9 @@
 //! tight-clearance squeeze, the friction cone, and the differentiable
 //! contact gradient — all against exact SDF charts.
 
+#[path = "contact/source.rs"]
+mod source;
+
 use fs_cutfem::sdf::{Circle, CutSdf, HalfPlane};
 use fs_material::hyper::{Hyperelastic, HyperelasticModel};
 use fs_solid::SolidError;

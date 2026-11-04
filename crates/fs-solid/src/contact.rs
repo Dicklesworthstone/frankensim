@@ -25,7 +25,12 @@
 
 use crate::SolidError;
 use crate::hyper2d::HyperProblem;
+use fs_contact::interface_binding::thermal_friction::{
+    FrictionQueryAxisKind, SourceThermalCoulomb,
+};
 use fs_cutfem::CutSdf;
+use fs_matdb::QueryPoint;
+use fs_material::state_point::ResolvedInterfaceStatePoint;
 
 /// IPC log-barrier: `b(d) = −κ(d−d̂)²·ln(d/d̂)` for `0 < d < d̂`,
 /// zero for `d ≥ d̂`, divergent as `d → 0⁺`.
@@ -144,6 +149,120 @@ impl Friction {
     }
 }
 
+/// One original ordered interface sampled by the native contact lag.
+///
+/// The sourced entry uses SI coordinates, moduli and time. Its plane-strain
+/// normal reaction is force per out-of-plane depth [N/m]. Temperatures and
+/// other external conditions are held over the interval. Declared sliding-speed
+/// coordinates are replaced by the actual relative tangential increment / dt.
+/// The Huber model has no exact static constraint or internal slip history;
+/// unequal static/kinetic coefficients and accumulated-distance sources refuse.
+#[derive(Clone, Debug)]
+pub struct ContactFrictionBinding<'a> {
+    /// Immutable source selection; every lag retains these original claims.
+    pub law: &'a SourceThermalCoulomb,
+    /// Complete source query, with explicit held temperatures and conditions.
+    pub conditions: QueryPoint,
+    /// Explicit tributary contact width [m] for the primary pressure axis.
+    /// The actual nodal reaction divided by this width is nominal pressure [Pa].
+    /// Required exactly when that source owns a primary nominal-pressure axis;
+    /// it is neither inferred from the barrier nor a resolved contact area.
+    pub nominal_contact_width_m: Option<f64>,
+}
+
+/// Source and actual mechanical query from the final accepted friction lag.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ContactFrictionSample {
+    pub law_identity: fs_blake3::ContentHash,
+    pub source: ResolvedInterfaceStatePoint,
+    pub coefficient: f64,
+    pub normal_reaction_n_per_m: f64,
+    /// Relative secant speed in the final tangent frame, not Newton-step speed.
+    pub relative_speed_m_s: f64,
+}
+
+struct FrictionSources<'a, 's> {
+    bindings: &'a [Option<ContactFrictionBinding<'s>>],
+    dt_s: f64,
+}
+
+impl ContactFrictionBinding<'_> {
+    fn sample(
+        &self,
+        node: usize,
+        normal_reaction: f64,
+        slip: f64,
+        dt_s: f64,
+    ) -> Result<ContactFrictionSample, SolidError> {
+        let refused = |reason: &str| SolidError::InvalidInput {
+            what: format!("contact friction source at node {node}: {reason}"),
+        };
+        let speed = slip.abs() / dt_s;
+        if !speed.is_finite() {
+            return Err(refused("relative secant speed is not finite"));
+        }
+        let mut point = self.conditions.clone();
+        match (
+            &self.law.axes().nominal_pressure,
+            self.nominal_contact_width_m,
+        ) {
+            (Some(axis), Some(width)) if width.is_finite() && width > 0.0 => {
+                point = point
+                    .with(axis, normal_reaction / width)
+                    .map_err(|error| refused(&error.to_string()))?;
+            }
+            (None, None) => {}
+            _ => {
+                return Err(refused(
+                    "one positive contact width is required for the pressure axis",
+                ));
+            }
+        }
+        for axis in self.law.query_axes() {
+            match axis.kind {
+                FrictionQueryAxisKind::SlidingSpeed => {
+                    point = point
+                        .with(&axis.name, speed)
+                        .map_err(|error| refused(&error.to_string()))?;
+                }
+                FrictionQueryAxisKind::Temperature => {}
+                FrictionQueryAxisKind::NominalPressure => {
+                    return Err(refused(
+                        "only the primary nominal-pressure axis has a mechanical owner",
+                    ));
+                }
+                FrictionQueryAxisKind::AccumulatedDistance => {
+                    return Err(refused(
+                        "quasistatic Huber increments do not supply accumulated arc length",
+                    ));
+                }
+            }
+        }
+        let (source, law) = self
+            .law
+            .coefficients_at_query(&point)
+            .map_err(|error| refused(&error.to_string()))?;
+        let mu = law
+            .static_coefficient()
+            .map_err(|error| refused(&error.to_string()))?;
+        let kinetic = law
+            .zero_speed_kinetic_coefficient()
+            .map_err(|error| refused(&error.to_string()))?;
+        if mu != kinetic {
+            return Err(refused(
+                "the Huber lane requires equal static and kinetic coefficients",
+            ));
+        }
+        Ok(ContactFrictionSample {
+            law_identity: self.law.identity(),
+            source,
+            coefficient: mu,
+            normal_reaction_n_per_m: normal_reaction,
+            relative_speed_m_s: speed,
+        })
+    }
+}
+
 /// The contact-augmented static problem.
 pub struct ContactProblem<'a> {
     /// The elastic core (materials, Dirichlet, tractions).
@@ -191,6 +310,9 @@ pub struct ContactSolution {
     /// The body's friction work plus `friction_work` equals this value.
     /// Zero for stationary obstacles; not trajectory-integrated actuator work.
     pub friction_support_work: f64,
+    /// Final source queries in original nodal order for the sourced entry.
+    /// Inactive nodes have None. Empty for the constant-coefficient entry.
+    pub friction_sources: Vec<Option<ContactFrictionSample>>,
     /// Final residual max-norm.
     pub residual: f64,
 }
@@ -301,19 +423,59 @@ impl<'p, 'a> ContactTrajectory<'p, 'a> {
         load: f64,
         surface_displacement: &[[f64; 2]],
     ) -> Result<ContactSolution, SolidError> {
+        self.advance_inner(dt_s, load, surface_displacement, None)
+    }
+
+    /// Advance with original per-node material/interface sources. Temperatures
+    /// are held explicit inputs; the accepted normal load and relative secant
+    /// speed drive every final source query. Source failure or unconverged lags
+    /// leave time, displacement and all accumulated work unchanged.
+    ///
+    /// The same source identities should be retained across physical intervals;
+    /// changing a binding is an explicit model change, not history evolution.
+    ///
+    /// # Errors
+    /// Source/timed-solve refusals and unrepresentable time or accumulated work.
+    pub fn advance_with_sources(
+        &mut self,
+        dt_s: f64,
+        load: f64,
+        surface_displacement: &[[f64; 2]],
+        bindings: &[Option<ContactFrictionBinding<'_>>],
+    ) -> Result<ContactSolution, SolidError> {
+        self.advance_inner(dt_s, load, surface_displacement, Some(bindings))
+    }
+
+    fn advance_inner(
+        &mut self,
+        dt_s: f64,
+        load: f64,
+        surface_displacement: &[[f64; 2]],
+        bindings: Option<&[Option<ContactFrictionBinding<'_>>]>,
+    ) -> Result<ContactSolution, SolidError> {
         let time_s = self.time_s + dt_s;
         if !dt_s.is_finite() || dt_s <= 0.0 || !time_s.is_finite() || time_s <= self.time_s {
             return Err(SolidError::InvalidInput {
                 what: "contact time step must advance finite physical time".to_string(),
             });
         }
-        let solution = self.problem.solve_timed_from(
-            load,
-            &self.u,
-            surface_displacement,
-            dt_s,
-            self.regularization_speed,
-        )?;
+        let solution = match bindings {
+            Some(bindings) => self.problem.solve_timed_from_with_sources(
+                load,
+                &self.u,
+                surface_displacement,
+                dt_s,
+                self.regularization_speed,
+                bindings,
+            )?,
+            None => self.problem.solve_timed_from(
+                load,
+                &self.u,
+                surface_displacement,
+                dt_s,
+                self.regularization_speed,
+            )?,
+        };
         let body: f64 = solution
             .friction_reactions
             .iter()
@@ -650,7 +812,7 @@ impl ContactProblem<'_> {
         load: f64,
         reference_u: &[f64],
     ) -> Result<ContactSolution, SolidError> {
-        self.solve_increment(load, reference_u, None, self.friction)
+        self.solve_increment(load, reference_u, None, self.friction, None)
     }
 
     /// Solve with prescribed obstacle material displacement at each solid node.
@@ -675,7 +837,13 @@ impl ContactProblem<'_> {
         reference_u: &[f64],
         surface_displacement: &[[f64; 2]],
     ) -> Result<ContactSolution, SolidError> {
-        self.solve_increment(load, reference_u, Some(surface_displacement), self.friction)
+        self.solve_increment(
+            load,
+            reference_u,
+            Some(surface_displacement),
+            self.friction,
+            None,
+        )
     }
 
     /// Solve a quasistatic physical interval using relative-velocity friction.
@@ -701,6 +869,68 @@ impl ContactProblem<'_> {
         dt_s: f64,
         regularization_speed: f64,
     ) -> Result<ContactSolution, SolidError> {
+        let friction = self.timed_friction(dt_s, regularization_speed)?;
+        self.solve_increment(
+            load,
+            reference_u,
+            Some(surface_displacement),
+            friction,
+            None,
+        )
+    }
+
+    /// Solve the original velocity-regularized contact with one optional source
+    /// binding per node. Every active node requires a binding; no global mu or
+    /// material-name fallback supplies a missing source. `self.friction` must be
+    /// enabled: its round budget is retained and its mu is replaced everywhere
+    /// by each source coefficient. The timed smoothing width remains unchanged.
+    ///
+    /// Normal loads, tangent frames and source coefficients refresh together at
+    /// each outer lag. Source evaluation stays outside inner Newton iterations.
+    /// The final refreshed physical residual must meet the original tolerance;
+    /// frozen-coefficient convergence alone cannot accept a candidate. Nonlinear
+    /// source dependence can exhaust that budget; no global uniqueness is claimed.
+    ///
+    /// All source inputs use SI and the plane-strain unit-depth convention.
+    /// Temperatures are prescribed over this interval, not updated from friction
+    /// work. Secant speed and endpoint work share the original discretization;
+    /// their continuous-time accuracy requires temporal refinement.
+    ///
+    /// # Errors
+    /// Original timed-contact refusals, missing active bindings, invalid source
+    /// domains, unsupported source coordinates or unequal static/kinetic values.
+    /// Borrowed sources, conditions and reference displacements never mutate.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_timed_from_with_sources(
+        &self,
+        load: f64,
+        reference_u: &[f64],
+        surface_displacement: &[[f64; 2]],
+        dt_s: f64,
+        regularization_speed: f64,
+        bindings: &[Option<ContactFrictionBinding<'_>>],
+    ) -> Result<ContactSolution, SolidError> {
+        let friction = self.timed_friction(dt_s, regularization_speed)?;
+        if friction.is_none() || bindings.len() != self.node_count() {
+            return Err(SolidError::InvalidInput {
+                what: "sourced friction requires enabled friction and one binding slot per node"
+                    .to_string(),
+            });
+        }
+        self.solve_increment(
+            load,
+            reference_u,
+            Some(surface_displacement),
+            friction,
+            Some(&FrictionSources { bindings, dt_s }),
+        )
+    }
+
+    fn timed_friction(
+        &self,
+        dt_s: f64,
+        regularization_speed: f64,
+    ) -> Result<Option<Friction>, SolidError> {
         let width = dt_s * regularization_speed;
         if !dt_s.is_finite()
             || dt_s <= 0.0
@@ -714,8 +944,7 @@ impl ContactProblem<'_> {
                     .to_string(),
             });
         }
-        let friction = self.friction.map(|f| Friction { eps_v: width, ..f });
-        self.solve_increment(load, reference_u, Some(surface_displacement), friction)
+        Ok(self.friction.map(|f| Friction { eps_v: width, ..f }))
     }
 
     #[allow(clippy::too_many_lines)] // contact Newton + audited line search is one proof path
@@ -725,6 +954,7 @@ impl ContactProblem<'_> {
         reference_u: &[f64],
         surface_displacement: Option<&[[f64; 2]]>,
         friction: Option<Friction>,
+        sources: Option<&FrictionSources<'_, '_>>,
     ) -> Result<ContactSolution, SolidError> {
         self.validate_inputs(load)?;
         self.validate_state_len(reference_u)?;
@@ -790,6 +1020,7 @@ impl ContactProblem<'_> {
                 surface_displacement,
                 &u,
                 fr,
+                sources,
             )?),
             None => None,
         };
@@ -951,8 +1182,9 @@ impl ContactProblem<'_> {
             if stalled {
                 return Err(SolidError::NewtonStalled { history });
             }
-            // Refresh only the normal load and tangent frame. Numerical
-            // iterations must never advance the physical slip reference.
+            // Refresh normal load, tangent frame and any original source at
+            // the actual candidate. Numerical iterations never advance the
+            // physical slip reference, source history or temperature.
             if let Some(fr) = friction {
                 lag = Some(FrictionLag::capture(
                     self,
@@ -960,6 +1192,7 @@ impl ContactProblem<'_> {
                     surface_displacement,
                     &u,
                     fr,
+                    sources,
                 )?);
                 residual = self.residual_norm_at(&u, load, lag.as_ref())?;
                 lag_history.push(residual);
@@ -1018,6 +1251,7 @@ impl ContactProblem<'_> {
             friction_reactions,
             friction_work,
             friction_support_work,
+            friction_sources: lag.and_then(|lag| lag.sources).unwrap_or_default(),
             iterations,
             residual,
             u,
@@ -1132,6 +1366,8 @@ struct FrictionLag<'a> {
     surface_displacement: Option<&'a [[f64; 2]]>,
     /// Per node: (unit tangent, lagged normal force magnitude).
     frames: Vec<([f64; 2], f64)>,
+    /// Present only on the source-bound route; inactive nodes have no query.
+    sources: Option<Vec<Option<ContactFrictionSample>>>,
 }
 
 impl<'a> FrictionLag<'a> {
@@ -1141,6 +1377,7 @@ impl<'a> FrictionLag<'a> {
         surface_displacement: Option<&'a [[f64; 2]]>,
         u: &[f64],
         settings: Friction,
+        sources: Option<&FrictionSources<'_, '_>>,
     ) -> Result<Self, SolidError> {
         let mut frames = Vec::with_capacity(cp.node_count());
         for i in 0..cp.node_count() {
@@ -1166,11 +1403,43 @@ impl<'a> FrictionLag<'a> {
             }
             frames.push(([-g[1] / gn, g[0] / gn], lambda));
         }
-        Ok(Self {
+        let mut lag = Self {
             settings,
             reference_u,
             surface_displacement,
             frames,
+            sources: None,
+        };
+        if let Some(sources) = sources {
+            let mut samples = Vec::with_capacity(cp.node_count());
+            for (i, &(tangent, normal)) in lag.frames.iter().enumerate() {
+                if tangent == [0.0; 2] {
+                    samples.push(None);
+                    continue;
+                }
+                let binding =
+                    sources.bindings[i]
+                        .as_ref()
+                        .ok_or_else(|| SolidError::InvalidInput {
+                            what: format!("active contact node {i} has no friction source binding"),
+                        })?;
+                samples.push(Some(binding.sample(
+                    i,
+                    normal,
+                    lag.slip(u, i),
+                    sources.dt_s,
+                )?));
+            }
+            lag.sources = Some(samples);
+        }
+        Ok(lag)
+    }
+
+    fn coefficient(&self, node: usize) -> f64 {
+        self.sources.as_ref().map_or(self.settings.mu, |sources| {
+            sources[node]
+                .as_ref()
+                .map_or(0.0, |sample| sample.coefficient)
         })
     }
 
@@ -1203,13 +1472,13 @@ impl<'a> FrictionLag<'a> {
         self.frames
             .iter()
             .enumerate()
-            .map(|(i, (_, lambda))| self.settings.mu * lambda * self.huber(self.slip(u, i)))
+            .map(|(i, (_, lambda))| self.coefficient(i) * lambda * self.huber(self.slip(u, i)))
             .sum()
     }
 
     fn add_residual(&self, u: &[f64], r: &mut [f64]) {
         for (i, &(t, lambda)) in self.frames.iter().enumerate() {
-            let g = self.settings.mu * lambda * self.huber_d1(self.slip(u, i));
+            let g = self.coefficient(i) * lambda * self.huber_d1(self.slip(u, i));
             for a in 0..2 {
                 r[2 * i + a] += g * t[a];
             }
@@ -1222,7 +1491,7 @@ impl<'a> FrictionLag<'a> {
         let ndof = r.len();
         for (i, &(t, lambda)) in self.frames.iter().enumerate() {
             let slip = self.slip(u, i);
-            let coef = self.settings.mu * lambda;
+            let coef = self.coefficient(i) * lambda;
             let g = coef * self.huber_d1(slip);
             let k = if slip.abs() < self.settings.eps_v {
                 coef / self.settings.eps_v
@@ -1247,7 +1516,7 @@ impl<'a> FrictionLag<'a> {
         for (i, &(t, lambda)) in self.frames.iter().enumerate() {
             let slip = self.slip(u, i).abs();
             if slip >= self.settings.eps_v {
-                let k = self.settings.mu * lambda / slip;
+                let k = self.coefficient(i) * lambda / slip;
                 for a in 0..2 {
                     for b in 0..2 {
                         h[(2 * i + a) * ndof + 2 * i + b] += k * t[a] * t[b];
@@ -1263,7 +1532,7 @@ impl<'a> FrictionLag<'a> {
             .enumerate()
             .map(|(i, (_, lambda))| {
                 let slip = self.slip(u, i);
-                self.settings.mu * lambda * self.huber_d1(slip) * slip
+                self.coefficient(i) * lambda * self.huber_d1(slip) * slip
             })
             .sum()
     }
@@ -1372,6 +1641,7 @@ mod tests {
                 eps_v: 0.01,
                 rounds: 1,
             },
+            None,
         )
         .expect("lag");
         for slip in [0.0, 0.001, 0.04, -0.04] {

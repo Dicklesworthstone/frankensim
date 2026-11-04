@@ -1,5 +1,29 @@
 # fs-solid CONTRACT
 
+## Original interface friction in quasistatic obstacle contact
+
+`contact::ContactProblem::solve_timed_from_with_sources` and
+`ContactTrajectory::advance_with_sources` bind every active node to an original
+`SourceThermalCoulomb` interface. Normal load, tangent frame and source coefficient
+refresh together in the existing outer lag. Inner Newton solves retain the
+existing convex frozen Huber potential. Final acceptance checks the refreshed
+physical residual and returns the actual per-node source queries and law IDs.
+
+Inputs use SI and the native plane-strain unit-depth convention: nodal normal
+reaction is N/m, and an explicitly supplied tributary contact width gives Pa.
+Temperature coordinates remain prescribed; sliding speed is the actual relative
+tangential displacement over the physical interval, including surface motion.
+Missing active bindings, source-domain failures and unsupported history/pressure
+coordinates refuse. No fallback coefficient supplies unavailable material data.
+
+This lane requires equal static and kinetic source values. Huber regularization
+permits creep and supplies no exact static hysteresis, accumulated arc history,
+thermal feedback or heat allocation. Its secant speed and endpoint work retain
+the original temporal-refinement requirement. Source failures and unconverged
+lags publish no trajectory state or work. Constant sources preserve the original
+coefficient path; focused G1/G3/G4 contact tests exercise native equilibria,
+local temperature/pressure/speed response, final-query closure and rollback.
+
 ## Graded reference density on native HEX8 solids
 
 `linear3::hex8::Hex8ElasticProblem::assemble_with_reference_density` accepts
