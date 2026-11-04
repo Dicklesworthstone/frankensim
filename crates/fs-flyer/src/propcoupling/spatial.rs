@@ -95,21 +95,6 @@ impl DiskAxes {
         Ok(factors)
     }
 
-    #[cfg(test)]
-    #[test]
-    fn large_radius_regression() {
-        let axes = Self::new([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]).unwrap();
-        let unit = axes.wash_factors([0.5, 0.25, 0.125], [[0.0; 3]; 2], 1.0).unwrap();
-        let huge = axes.wash_factors(
-            [0.5e155, 0.25e155, 0.125e155],
-            [[0.0; 3]; 2],
-            1.0e155,
-        ).unwrap();
-        for i in 0..2 {
-            assert!((unit[i] - huge[i]).abs() < 1e-12);
-        }
-    }
-
     pub(crate) fn wash_map(
         &self,
         strips: &[StripSpec],
@@ -276,4 +261,33 @@ pub fn coupled_step_with_section_frames(
         Some(*axes),
         Some(frames),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DiskAxes;
+
+    #[test]
+    fn wash_is_invariant_under_uniform_geometric_scaling() {
+        let axes = DiskAxes::new([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]).unwrap();
+        let point = [0.5, 0.25, 0.125];
+        let expected = axes.wash_factors(point, [[0.0; 3]; 2], 1.0).unwrap();
+        for scale in [1.0e-150, 1.0, 1.0e155] {
+            let actual = axes
+                .wash_factors(point.map(|x| x * scale), [[0.0; 3]; 2], scale)
+                .unwrap();
+            for i in 0..2 {
+                assert!((expected[i] - actual[i]).abs() < 1.0e-12);
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_wash_geometry_still_refuses() {
+        let axes = DiskAxes::new([[1.0, 0.0, 0.0]; 2]).unwrap();
+        for radius in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(axes.wash_factors([0.0; 3], [[0.0; 3]; 2], radius).is_err());
+        }
+        assert!(axes.wash_factors([f64::NAN; 3], [[0.0; 3]; 2], 1.0).is_err());
+    }
 }
