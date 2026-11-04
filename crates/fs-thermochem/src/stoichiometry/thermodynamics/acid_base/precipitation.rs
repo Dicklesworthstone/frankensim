@@ -17,7 +17,7 @@
 use super::*;
 use fs_math::det;
 
-/// One finite 1:1 salt consuming a cation and an acid family's terminal anion.
+/// One finite integer-stoichiometry salt and its original acid/base families.
 pub mod salt;
 
 /// Source-bound, exactly conserved hydrolysis phase and its aqueous owner.
@@ -459,3 +459,4 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<()> {
         Ok(())
     }
 }
+

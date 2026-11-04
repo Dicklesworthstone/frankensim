@@ -4,6 +4,36 @@ use fs_math::det;
 
 const LN_10: f64 = core::f64::consts::LN_10;
 
+/// Prepared identities, source owner and bounded inventory buffers for nested
+/// phase trials. Only declared amounts may vary after the original admission.
+pub(super) struct PreparedAcidBase<'a> {
+    model: &'a IdealAcidBaseSystem,
+    ordered: Vec<f64>,
+    spectators: Vec<SpectatorIon>,
+    basis: f64,
+    options: SpeciationOptions,
+}
+
+/// Compact accepted charge root. The complete species/source report is built
+/// only after the enclosing phase solve accepts its component inventories.
+#[derive(Clone, Copy)]
+pub(super) struct AcidBaseTrial {
+    point: Point,
+    bracket: [f64; 2],
+    iterations: usize,
+}
+impl AcidBaseTrial {
+    pub(super) fn ph(&self) -> f64 {
+        self.point.ph
+    }
+    pub(super) fn ph_bracket(&self) -> [f64; 2] {
+        self.bracket
+    }
+    pub(super) fn iterations(&self) -> usize {
+        self.iterations
+    }
+}
+
 impl IdealAcidBaseSystem {
     /// Solve all declared families simultaneously on one explicit ideal basis.
     /// Supply every analytical-family total exactly once, including zero pools.
@@ -39,19 +69,35 @@ impl IdealAcidBaseSystem {
         gas_weights: &[Option<gas_liquid::GasWeight>],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<AcidBaseSpeciation> {
-        poll(&mut cancelled)?;
-        if !gas_weights.is_empty() && gas_weights.len() != self.inner.families.len() {
-            return Err(AcidBaseError::Invalid(
-                "gas weights must match the family axis",
-            ));
-        }
+        let prepared = self.prepare_speciation(
+            totals,
+            spectators,
+            amount_at_unit_activity,
+            options,
+            &mut cancelled,
+        )?;
+        let trial = prepared.solve_partitioned(gas_weights, &mut cancelled)?;
+        prepared.finish_partitioned(trial, gas_weights, &mut cancelled)
+    }
+
+    /// Admit and order the original species once for repeated phase trials.
+    /// This is internal to the existing chemistry owners, not a new activity law.
+    pub(super) fn prepare_speciation(
+        &self,
+        totals: &[(String, Amount)],
+        spectators: &[SpectatorIon],
+        amount_at_unit_activity: Amount,
+        options: SpeciationOptions,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PreparedAcidBase<'_>> {
+        poll(cancelled)?;
         let basis = amount_at_unit_activity.value();
         if !basis.is_finite() || basis <= 0.0 {
             return Err(AcidBaseError::Invalid(
                 "common amount at unit activity must be positive",
             ));
         }
-        let mut bracket = options.ph_bracket.map(|x| x.value());
+        let bracket = options.ph_bracket.map(|x| x.value());
         if bracket.iter().any(|x| !x.is_finite())
             || bracket[0] >= bracket[1]
             || !(bracket[1] - bracket[0]).is_finite()
@@ -87,7 +133,7 @@ impl IdealAcidBaseSystem {
                 ));
             }
         }
-        let mut ordered: Vec<_> = self
+        let ordered: Vec<_> = self
             .inner
             .families
             .iter()
@@ -120,74 +166,13 @@ impl IdealAcidBaseSystem {
                 ));
             }
         }
-        let evaluate = |ph, cancelled: &mut _| {
-            point(
-                &self.inner,
-                &ordered,
-                &spectators,
-                basis,
-                ph,
-                gas_weights,
-                cancelled,
-            )
-        };
-        let lower = evaluate(bracket[0], &mut cancelled)?;
-        let upper = evaluate(bracket[1], &mut cancelled)?;
-        // Charge decreases strictly with pH: free H+ decreases, OH- increases,
-        // and every family's mean charge decreases as it loses protons.
-        if lower.charge < 0.0 || upper.charge > 0.0 {
-            return Err(AcidBaseError::OutsideBracket);
-        }
-        let (answer, iterations) = if lower.charge == 0.0 {
-            bracket = [bracket[0]; 2];
-            (lower, 0)
-        } else if upper.charge == 0.0 {
-            bracket = [bracket[1]; 2];
-            (upper, 0)
-        } else {
-            let mut accepted = None;
-            for iteration in 1..=options.max_iterations {
-                let ph = bracket[0] + 0.5 * (bracket[1] - bracket[0]);
-                if ph == bracket[0] || ph == bracket[1] {
-                    return Err(AcidBaseError::Arithmetic(
-                        "pH inversion reached floating resolution",
-                    ));
-                }
-                let value = evaluate(ph, &mut cancelled)?;
-                let tolerance = options.absolute_charge_tolerance.value()
-                    + options.relative_charge_tolerance.value() * value.unsigned_charge;
-                positive(tolerance, "charge tolerance loses range")?;
-                if bracket[1] - bracket[0] <= options.ph_tolerance.value()
-                    && value.charge.abs() <= tolerance
-                {
-                    accepted = Some((value, iteration));
-                    break;
-                }
-                if value.charge > 0.0 {
-                    bracket[0] = ph;
-                } else {
-                    bracket[1] = ph;
-                }
-            }
-            accepted.ok_or(AcidBaseError::Budget)?
-        };
-        // The original aqueous report owns only dissolved stocks, while the
-        // enclosing gas owner retains the finite cross-phase totals.
-        for (index, total) in ordered.iter_mut().enumerate() {
-            if let Some(Some(weight)) = gas_weights.get(index) {
-                let fractions = fractions(&self.inner.families[index], -answer.ph * LN_10)?;
-                *total = weight.partition(*total, fractions[weight.neutral])?[0];
-            }
-        }
-        self.report(
-            &ordered,
+        Ok(PreparedAcidBase {
+            model: self,
+            ordered,
             spectators,
             basis,
-            answer,
-            bracket,
-            iterations,
-            &mut cancelled,
-        )
+            options,
+        })
     }
 
     fn report(
@@ -268,6 +253,177 @@ impl IdealAcidBaseSystem {
     }
 }
 
+impl PreparedAcidBase<'_> {
+    /// Canonical slot lookup is paid once when preparing the enclosing owner.
+    pub(super) fn spectator_index(&self, species: &SpeciesId) -> Option<usize> {
+        self.spectators
+            .binary_search_by(|ion| ion.species.cmp(species))
+            .ok()
+    }
+
+    pub(super) fn set_family_total(&mut self, index: usize, amount: Amount) -> Result<()> {
+        nonnegative(amount.value(), "invalid prepared family amount")?;
+        let target = self
+            .ordered
+            .get_mut(index)
+            .ok_or(AcidBaseError::Invalid("prepared family index"))?;
+        *target = amount.value();
+        Ok(())
+    }
+
+    pub(super) fn set_spectator_amount(&mut self, index: usize, amount: Amount) -> Result<()> {
+        nonnegative(amount.value(), "invalid prepared spectator amount")?;
+        let target = self
+            .spectators
+            .get_mut(index)
+            .ok_or(AcidBaseError::Invalid("prepared spectator index"))?;
+        target.amount = amount;
+        Ok(())
+    }
+
+    /// Same charge equation and acceptance bounds, with no trial allocation.
+    pub(super) fn solve(&self, cancelled: &mut impl FnMut() -> bool) -> Result<AcidBaseTrial> {
+        self.solve_partitioned(&[], cancelled)
+    }
+
+    fn solve_partitioned(
+        &self,
+        gas_weights: &[Option<gas_liquid::GasWeight>],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<AcidBaseTrial> {
+        if !gas_weights.is_empty() && gas_weights.len() != self.model.inner.families.len() {
+            return Err(AcidBaseError::Invalid(
+                "gas weights must match the family axis",
+            ));
+        }
+        let options = self.options;
+        let mut bracket = options.ph_bracket.map(|x| x.value());
+        let evaluate = |ph, cancelled: &mut _| {
+            point(
+                &self.model.inner,
+                &self.ordered,
+                &self.spectators,
+                self.basis,
+                ph,
+                gas_weights,
+                cancelled,
+            )
+        };
+        let lower = evaluate(bracket[0], cancelled)?;
+        let upper = evaluate(bracket[1], cancelled)?;
+        // Charge decreases strictly with pH: free H+ decreases, OH- increases,
+        // and every family's mean charge decreases as it loses protons.
+        if lower.charge < 0.0 || upper.charge > 0.0 {
+            return Err(AcidBaseError::OutsideBracket);
+        }
+        let (answer, iterations) = if lower.charge == 0.0 {
+            bracket = [bracket[0]; 2];
+            (lower, 0)
+        } else if upper.charge == 0.0 {
+            bracket = [bracket[1]; 2];
+            (upper, 0)
+        } else {
+            let mut accepted = None;
+            for iteration in 1..=options.max_iterations {
+                let ph = bracket[0] + 0.5 * (bracket[1] - bracket[0]);
+                if ph == bracket[0] || ph == bracket[1] {
+                    return Err(AcidBaseError::Arithmetic(
+                        "pH inversion reached floating resolution",
+                    ));
+                }
+                let value = evaluate(ph, cancelled)?;
+                let tolerance = options.absolute_charge_tolerance.value()
+                    + options.relative_charge_tolerance.value() * value.unsigned_charge;
+                positive(tolerance, "charge tolerance loses range")?;
+                if bracket[1] - bracket[0] <= options.ph_tolerance.value()
+                    && value.charge.abs() <= tolerance
+                {
+                    accepted = Some((value, iteration));
+                    break;
+                }
+                if value.charge > 0.0 {
+                    bracket[0] = ph;
+                } else {
+                    bracket[1] = ph;
+                }
+            }
+            accepted.ok_or(AcidBaseError::Budget)?
+        };
+        Ok(AcidBaseTrial {
+            point: answer,
+            bracket,
+            iterations,
+        })
+    }
+
+    /// Identical terminal-member arithmetic to the complete aqueous report.
+    pub(super) fn terminal_activity(&self, index: usize, trial: &AcidBaseTrial) -> Result<f64> {
+        let family = self
+            .model
+            .inner
+            .families
+            .get(index)
+            .ok_or(AcidBaseError::Invalid("prepared terminal family index"))?;
+        let fractions = fractions(family, det::ln(trial.point.h))?;
+        let amount = member_amount(self.ordered[index], fractions[family.species.len() - 1])?;
+        if amount == 0.0 {
+            Ok(0.0)
+        } else {
+            positive(amount / self.basis, "family activity loses range")
+        }
+    }
+
+    /// Restore the inventories of the accepted trial before consuming these
+    /// buffers. A stale trial cannot publish a report for different charge data.
+    pub(super) fn finish(
+        self,
+        trial: AcidBaseTrial,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<AcidBaseSpeciation> {
+        self.finish_partitioned(trial, &[], cancelled)
+    }
+
+    fn finish_partitioned(
+        mut self,
+        trial: AcidBaseTrial,
+        gas_weights: &[Option<gas_liquid::GasWeight>],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<AcidBaseSpeciation> {
+        let restored = point(
+            &self.model.inner,
+            &self.ordered,
+            &self.spectators,
+            self.basis,
+            trial.ph(),
+            gas_weights,
+            cancelled,
+        )?;
+        if restored != trial.point {
+            return Err(AcidBaseError::Invalid(
+                "accepted aqueous trial no longer matches the prepared inventories",
+            ));
+        }
+        // The original aqueous report owns only dissolved stocks, while the
+        // enclosing gas owner retains the finite cross-phase totals.
+        for (index, total) in self.ordered.iter_mut().enumerate() {
+            if let Some(Some(weight)) = gas_weights.get(index) {
+                let fractions = fractions(&self.model.inner.families[index], -trial.ph() * LN_10)?;
+                *total = weight.partition(*total, fractions[weight.neutral])?[0];
+            }
+        }
+        self.model.report(
+            &self.ordered,
+            self.spectators,
+            self.basis,
+            trial.point,
+            trial.bracket,
+            trial.iterations,
+            cancelled,
+        )
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
 struct Point {
     ph: f64,
     h: f64,

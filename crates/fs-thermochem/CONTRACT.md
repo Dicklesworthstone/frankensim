@@ -489,21 +489,38 @@ exercise acid suppression and declared-base promotion of precipitation. The
 ## Finite salt precipitation coupled to an analytical acid family
 
 `acid_base::precipitation::salt::SaltPrecipitation` binds one exactly conserved
-1:1 precipitation equation between an independent cation and the terminal
-anion of an existing acid/base family, optionally consuming solvent water.
-Every family, water autoprotolysis and the selected phase retains its original
-compatible formation-Gibbs sources. The cation and analytical family totals
-both include material initially in the selected solid. At each trial, the
-same aqueous owner solves all protonation states and charge balance with the
-remaining dissolved component amounts. Precipitation cannot borrow a missing
-cation or keep the dissolved family total fixed while consuming that family.
+integer-stoichiometry precipitation equation p M + q A -> solid, optionally
+consuming solvent water. M is an independent cation; A is the terminal anion of
+an existing acid/base family. Positive original coefficients p and q satisfy
+exact charge balance, and the source equation has one solid formula unit.
+The original 1:1 construction and results remain supported.
 
-The outer solve uses the logarithm of the dissolved limiting component,
-retaining positive traces when most material is solid. The excess component
-stays explicit. The all-dissolved endpoint must satisfy the absence inequality;
-a present phase must close its saturation residual and both component balances.
-Numerical pH resolution contributes to the outer convergence test. Work limits,
-caller bounds, source refusals and cancellation produce no partial partition.
+Every family, water autoprotolysis and the selected phase retains its original
+compatible formation-Gibbs sources. Cation and analytical family totals include
+p and q component units per mole of selected solid. At each trial the same
+aqueous owner solves all protonation states and charge balance. Saturation
+uses the original ion activities to powers p and q. Precipitation cannot borrow
+a missing component or retain a dissolved family total while consuming it.
+
+The outer logarithmic variable is the limiting dissolved formula-equivalent
+amount (cation/p or family/q), retaining positive traces independently of a
+large solid stock. The excess component remains explicit. Compensated
+stoichiometric comparisons preserve nearly tied inventories and avoid overflow
+of a representable partition. The all-dissolved endpoint must satisfy the
+absence inequality; a present phase must close saturation and both component
+balances with their original coefficients. The anion coefficient also scales
+the retained inner-pH uncertainty bound. Work limits, caller bounds, source
+refusals and cancellation publish no partial partition.
+
+The original aqueous owner prepares canonical identities and inventory buffers
+once per phase solve. Nested salt trials change only the selected family and
+cation amounts, reuse the original scalar charge equation, and retain compact
+pH results without constructing complete species reports. One final source-
+backed aqueous report is materialized after restoring the accepted amounts.
+Public aqueous and finite-gas entrypoints reuse this same prepared path.
+Focused native tests retain the original 1:1/gas/complex/hydrolysis coverage
+and add 3:2 salts, both limiting inventories, common ions, finite exhaustion,
+positive traces and difficult stoichiometric scaling.
 
 `ScoroditePrecipitation` supplies the Fe/As/O/H-conserved dihydrate equation.
 The `scorodite_partition` example and `mining_scorodite_sources` integration use

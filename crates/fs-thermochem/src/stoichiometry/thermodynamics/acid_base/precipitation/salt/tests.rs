@@ -1,5 +1,7 @@
 //! Manufactured exact-chemistry salt/acid equilibria, not measured solubility.
 
+mod stoichiometry;
+
 use super::*;
 use crate::{
     ChargeVector, ElementId, ElementalMatrix, MolarEnergyQuantityV1, ReactionId,
