@@ -2,8 +2,8 @@
 //!
 //! Wavelengths are vacuum nanometres.  Each table stores the absolute real
 //! refractive index `eta` and extinction coefficient `k`; Fresnel evaluation
-//! divides both by the incident dielectric index before solving the exact
-//! complex interface equations.  Built-in metal tables are representative
+//! retains the absolute indices when solving the exact complex interface
+//! equations.  Built-in metal tables are representative
 //! look-development assets, not measurements of a specimen or finish.
 //! An explicitly supplied [`CoherentDielectricCoating`] or
 //! [`CoherentAbsorbingCoating`] or [`CoherentPeriodicCoating`] adds local film interference without
@@ -28,7 +28,7 @@ pub use multilayer::{
 };
 
 /// Bit semantics of table validation, interpolation, and Fresnel evaluation.
-pub const CONDUCTOR_OPTICS_SEMANTICS_VERSION: u32 = 2;
+pub const CONDUCTOR_OPTICS_SEMANTICS_VERSION: u32 = 3;
 /// Bit semantics of the single-scattering isotropic-GGX conductor BSDF.
 pub const CONDUCTOR_BSDF_SEMANTICS_VERSION: u32 = 1;
 /// Fixed number of knots in a conductor optical table.
@@ -556,19 +556,11 @@ pub fn fresnel_conductor(
         return Ok(1.0);
     }
 
-    let cosine = incidence_cosine;
-    let relative = Complex::new(
-        transmitted_eta / incident_eta,
-        -transmitted_k / incident_eta,
+    let [perpendicular, parallel] = thin_film::polarization::bare_amplitudes(
+        incident_eta,
+        ComplexIor { eta: transmitted_eta, k: transmitted_k },
+        incidence_cosine,
     );
-    let one = Complex::new(1.0, 0.0);
-    let sine_squared = 1.0 - cosine * cosine;
-    let transmitted_cosine =
-        complex_sqrt(one - Complex::new(sine_squared, 0.0) / relative.square());
-    let parallel =
-        (relative * cosine - transmitted_cosine) / (relative * cosine + transmitted_cosine);
-    let perpendicular = (Complex::new(cosine, 0.0) - relative * transmitted_cosine)
-        / (Complex::new(cosine, 0.0) + relative * transmitted_cosine);
     let reflectance = 0.5 * (parallel.norm_squared() + perpendicular.norm_squared());
     if !reflectance.is_finite() || !(-1.0e-12..=1.0 + 1.0e-12).contains(&reflectance) {
         return Err(ConductorError::NumericalFailure);
@@ -641,6 +633,20 @@ impl core::ops::Div for Complex {
             (self.im * rhs.re - self.re * rhs.im) / denominator,
         )
     }
+}
+
+// Form q² = (n0*cos(theta))² + (eta-n0)*(eta+n0) - k² + 2i*eta*k.
+// Subtracting n0²*(1-cos²) from the complex index squared loses the entire
+// incident normal wave at grazing incidence, especially for matched media.
+// Reuse the dielectric critical-ray precision ladder before adding loss.
+fn longitudinal_wave_squared(incident_eta: f64, transmitted: ComplexIor, cosine: f64) -> Complex {
+    let lossless = crate::dielectric::dielectric_transmitted_normal_squared(
+        cosine, incident_eta, transmitted.eta,
+    );
+    Complex::new(
+        (-transmitted.k).mul_add(transmitted.k, lossless),
+        2.0 * transmitted.eta * transmitted.k,
+    )
 }
 
 fn complex_sqrt(value: Complex) -> Complex {
@@ -928,6 +934,24 @@ mod tests {
     }
 
     #[test]
+    fn near_matched_grazing_reflection_matches_high_precision_fresnel() {
+        // Independent 100-digit complex Fresnel at the exact binary64 inputs.
+        // Computing sin² as 1-cos² formerly turned the first two almost
+        // transparent interfaces into 67% and 99.996% reflectors respectively.
+        for (incident, eta, k, cosine, expected) in [
+            (1.0, 1.0, 1e-20, 1e-9, 2.499_625_082_790_864_7e-5),
+            (1.0, 1.0, 1e-30, 1e-10, 2.500_000_000_000_000_2e-21),
+            (1.5, 1.5, 1e-22, 1e-10, 1.111_037_044_306_425_8e-5),
+            (1.0, 1.000_000_000_001, 1e-8, 1e-5, 0.818_586_450_500_027_4),
+        ] {
+            assert_close(
+                fresnel_conductor(incident, eta, k, cosine).unwrap(), expected,
+                2e-13 * expected, "near-matched grazing high-precision reference",
+            );
+        }
+    }
+
+    #[test]
     fn normal_grazing_and_common_scale_relations_hold() {
         for (incident, eta, k) in [(1.0, 0.2, 3.0), (1.33, 2.7, 4.1), (1.0, 4.0, 2.5)] {
             let expected = ((eta - incident) * (eta - incident) + k * k)
@@ -943,8 +967,10 @@ mod tests {
                 1.0_f64.to_bits()
             );
             let base = fresnel_conductor(incident, eta, k, 0.37).unwrap();
-            let scaled = fresnel_conductor(incident * 2.0, eta * 2.0, k * 2.0, 0.37).unwrap();
-            assert_close(scaled, base, 2.0e-14, "common IOR scale");
+            for scale in [2.0, 2.0_f64.powi(-400), 2.0_f64.powi(-900)] {
+                let scaled = fresnel_conductor(incident * scale, eta * scale, k * scale, 0.37).unwrap();
+                assert_close(scaled, base, 2.0e-14, "common IOR scale");
+            }
         }
     }
 

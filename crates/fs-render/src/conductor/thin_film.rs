@@ -485,14 +485,14 @@ mod tests {
                 )
                 .unwrap(),
             );
-        // Fresnel semantics v2 intentionally invalidates cached v1 responses
-        // after correcting weak-absorption square-root cancellation. The
+        // Fresnel semantics v3 intentionally invalidates cached v2 responses
+        // after correcting near-matched grazing reflection cancellation. The
         // established table/coating identity payload order is unchanged.
         assert_eq!(
             *optics.content_identity().as_bytes(),
             [
-                145, 239, 174, 33, 139, 22, 138, 103, 69, 194, 245, 136, 121, 201, 215, 120, 68, 71,
-                183, 178, 34, 224, 136, 252, 142, 19, 79, 128, 60, 125, 134, 142
+                83, 153, 120, 190, 20, 177, 110, 72, 162, 80, 77, 31, 185, 90, 157, 205, 44, 152,
+                161, 76, 121, 31, 37, 212, 229, 240, 90, 231, 174, 191, 56, 87
             ],
         );
     }

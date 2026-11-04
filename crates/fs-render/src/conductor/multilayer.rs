@@ -688,7 +688,9 @@ impl LayerTransfer {
             return Self::IDENTITY;
         }
         let n_squared = Complex::new(ior.eta, ior.k).square();
-        let q_squared = n_squared - Complex::new(geometry.transverse_squared, 0.0);
+        let q_squared = super::longitudinal_wave_squared(
+            geometry.incident_eta, ior, geometry.cosine,
+        );
         let phase_scale = core::f64::consts::TAU * (thickness_m * 1.0e9) / geometry.wavelength_nm;
         let (cosine, sine_over_q, propagation_log_scale) =
             super::absorbing_film::propagation_with_scale(q_squared, phase_scale);
@@ -856,7 +858,9 @@ fn response_as<const TRANSMISSION: bool, Kind: ResponseKind>(
     }
     let n_squared = Complex::new(geometry.substrate.eta, geometry.substrate.k).square();
     let q = geometry.exit_normal.unwrap_or_else(|| {
-        super::thin_film::forward_sqrt(n_squared - Complex::new(geometry.transverse_squared, 0.0))
+        super::thin_film::forward_sqrt(super::longitudinal_wave_squared(
+            geometry.incident_eta, geometry.substrate, geometry.cosine,
+        ))
     });
     let incident = [
         geometry.incident_eta * geometry.cosine,

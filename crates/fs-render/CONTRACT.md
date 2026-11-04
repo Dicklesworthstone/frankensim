@@ -1046,10 +1046,16 @@ differentiable lift). Pure Rust throughout.
   diffraction, finite-roughness approximation or mirror-caustic connector.
   Scalar complex square roots compute the larger component first and recover
   the smaller from `2uv=y`, retaining weak absorption on the total-reflection
-  side. Optical semantics version 2 changes evaluation identities to distinguish
-  this numerical correction; authored tables, coatings and source metadata
-  retain their original values. Independent high-precision Fresnel references
-  cover both sides of the weakly absorbing substrate's critical angle.
+  side. The shared scalar/polarized bare amplitudes factor index contrast and
+  rationalize weak reflected waves. Bare, single-film, multilayer and per-film
+  heating evaluations retain the incident normal wave in the longitudinal
+  wavevector even when a grazing `cos²` is smaller than machine epsilon.
+  Optical semantics version 3 distinguishes this evaluation from cancellation
+  that could turn an almost matched transparent interface into a mirror;
+  authored tables, coatings and source metadata retain their original values.
+  Independent high-precision Fresnel/Airy references cover weak absorption on
+  both sides of critical incidence, matched grazing media, reflection phase,
+  one-ulp film contrast and coherent reflection/absorption energy closure.
   `ConductorOptics::with_coating(CoherentDielectricCoating)` additionally admits
   one explicitly source-bound transparent isotropic film: the shared visible
   Cauchy, Sellmeier or tabulated phase-index law and a uniform thickness in metres, from

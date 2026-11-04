@@ -42,7 +42,7 @@ impl Layer {
         }
         let n_squared = Complex::new(ior.eta, ior.k).square();
         let q = crate::conductor::thin_film::forward_sqrt(
-            n_squared - Complex::new(geometry.transverse_squared, 0.0),
+            crate::conductor::longitudinal_wave_squared(geometry.incident_eta, ior, geometry.cosine),
         );
         let depth = core::f64::consts::TAU * (thickness * 1e9) / geometry.wavelength_nm;
         let phase = q.re * depth;

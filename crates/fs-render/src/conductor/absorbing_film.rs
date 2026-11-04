@@ -242,11 +242,12 @@ pub(super) fn reflection_amplitudes(
     thickness_m: f64,
 ) -> [Complex; 2] {
     let n0_squared = incident_eta * incident_eta;
-    let transverse_squared = n0_squared * (1.0 - cosine * cosine);
     let n1_squared = Complex::new(film.eta, film.k).square();
-    let q1_squared = n1_squared - Complex::new(transverse_squared, 0.0);
+    let q1_squared = super::longitudinal_wave_squared(incident_eta, film, cosine);
     let n2_squared = Complex::new(substrate.eta, substrate.k).square();
-    let q2 = super::thin_film::forward_sqrt(n2_squared - Complex::new(transverse_squared, 0.0));
+    let q2 = super::thin_film::forward_sqrt(super::longitudinal_wave_squared(
+        incident_eta, substrate, cosine,
+    ));
     let phase_scale = core::f64::consts::TAU * (thickness_m * 1.0e9) / wavelength_nm;
     let (cos_phase, sin_phase_over_q) = propagation(q1_squared, phase_scale);
     let q0 = incident_eta * cosine;

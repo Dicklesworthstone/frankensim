@@ -2,8 +2,8 @@
 //!
 //! The characteristic-matrix assembly is shared with scalar coated Fresnel.
 //! Both bare and coated amplitudes use exp(-i omega t), n = eta + i k.
-//! Conjugating n leaves scalar reflectance unchanged but reverses the U/V
-//! phase coupling, so the scalar bare-metal convention cannot be copied as-is.
+//! Scalar and polarized consumers share these amplitudes. Conjugating n would
+//! leave scalar reflectance unchanged but reverse the U/V phase coupling.
 
 use super::{Complex, ComplexIor, forward_sqrt, propagation, reflection};
 use crate::conductor::{CoherentCoating, ConductorError, ConductorOptics};
@@ -121,11 +121,12 @@ pub(super) fn coated_amplitudes(
 ) -> [Complex; 2] {
     let n0_squared = incident_eta * incident_eta;
     let n1_squared = film_eta * film_eta;
-    let transverse_squared = n0_squared * (1.0 - cosine * cosine);
     let q0 = incident_eta * cosine;
-    let q1_squared = n1_squared - transverse_squared;
+    let q1_squared = crate::dielectric::dielectric_transmitted_normal_squared(
+        cosine, incident_eta, film_eta,
+    );
     let n2_squared = Complex::new(substrate.eta, substrate.k).square();
-    let q2 = forward_sqrt(n2_squared - Complex::new(transverse_squared, 0.0));
+    let q2 = forward_sqrt(super::super::longitudinal_wave_squared(incident_eta, substrate, cosine));
     let phase_scale = core::f64::consts::TAU * (thickness_m * 1.0e9) / wavelength_nm;
     let (cos_phase, sin_phase_over_q) = propagation(q1_squared, phase_scale);
     let r_s = reflection(q0, q2, cos_phase,
@@ -136,6 +137,16 @@ pub(super) fn coated_amplitudes(
 }
 
 pub(in crate::conductor) fn bare_amplitudes(incident_eta: f64, substrate: ComplexIor, cosine: f64) -> [Complex; 2] {
+    let maximum_index = incident_eta.max(substrate.eta).max(substrate.k);
+    if maximum_index < 1e-40 {
+        // Fresnel amplitudes depend only on index ratios. An exact binary
+        // rescaling preserves adjacent indices while preventing underflow in
+        // the absolute-index products (including subnormal input indices).
+        let exponent = maximum_index.to_bits() >> 52;
+        let scale = f64::from_bits((2046 - exponent) << 52);
+        return bare_amplitudes(incident_eta * scale,
+            ComplexIor { eta: substrate.eta * scale, k: substrate.k * scale }, cosine);
+    }
     let n = Complex::new(substrate.eta, substrate.k);
     if cosine == 1.0 {
         let incident = Complex::new(incident_eta, 0.0);
@@ -144,12 +155,37 @@ pub(in crate::conductor) fn bare_amplitudes(incident_eta: f64, substrate: Comple
     }
     let n0_squared = incident_eta * incident_eta;
     let n2_squared = n.square();
-    let q2 = forward_sqrt(n2_squared - Complex::new(n0_squared * (1.0 - cosine * cosine), 0.0));
+    let q2 = super::super::complex_sqrt(super::super::longitudinal_wave_squared(
+        incident_eta, substrate, cosine,
+    ));
     let q0 = incident_eta * cosine;
-    [
-        reflection(q0, q2, 1.0, 0.0, 0.0),
-        reflection(q0 / n0_squared, q2 / n2_squared, 1.0, 0.0, 0.0),
-    ]
+    let s_sum = Complex::new(q0, 0.0) + q2;
+    let s_difference = Complex::new(q0, 0.0) - q2;
+    let p_sum = n2_squared * cosine + q2 * incident_eta;
+    let p_difference = n2_squared * cosine - q2 * incident_eta;
+    let mut amplitudes = [s_difference / s_sum, p_difference / p_sum];
+    let weak_s = s_difference.norm_squared() < 0.0625 * s_sum.norm_squared();
+    let weak_p = p_difference.norm_squared() < 0.0625 * p_sum.norm_squared();
+    if weak_s || weak_p {
+        // Rationalize only weak reflected waves. Their direct numerator
+        // subtracts nearly equal admittances and can erase small index/loss
+        // contrast. Retain direct evaluation for near-unit reflection.
+        let contrast = Complex::new(
+            (-substrate.k).mul_add(substrate.k,
+                (substrate.eta - incident_eta) * (substrate.eta + incident_eta)),
+            2.0 * substrate.eta * substrate.k,
+        );
+        if weak_s {
+            amplitudes[0] = contrast * -1.0 / s_sum.square();
+        }
+        if weak_p {
+            amplitudes[1] = contrast
+                * ((n2_squared + Complex::new(n0_squared, 0.0)) * (cosine * cosine)
+                    - Complex::new(n0_squared, 0.0))
+                / p_sum.square();
+        }
+    }
+    amplitudes
 }
 
 fn passive_amplitude(value: Complex) -> Result<Complex, ConductorError> {
@@ -216,6 +252,74 @@ mod tests {
             let out = matrix.apply(Stokes::try_new(1.0,0.0,0.6,0.8).unwrap());
             close(out.i,r); close(out.u,-0.6*r); close(out.v,-0.8*r);
             assert_eq!(matrix.0[3][2],0.0);
+        }
+    }
+
+    #[test]
+    fn weak_grazing_reflection_retains_complex_phase_and_power() {
+        // Independent 100-digit complex Fresnel at the exact binary64 inputs.
+        // The real amplitude is second order in weak extinction; direct
+        // subtraction of interface admittances previously erased it.
+        for (k, cosine, expected_real, expected_imaginary) in [
+            (1e-20, 1e-9, -4.999_125_206_194_155_3e-5, -4.999_375_131_216_493e-3),
+            (1e-30, 1e-10, -5.000_000_000_000_000_5e-21, -5.000_000_000_000_000_2e-11),
+        ] {
+            let amplitudes = bare_amplitudes(1.0, ComplexIor { eta: 1.0, k }, cosine);
+            for amplitude in amplitudes {
+                for (actual, expected) in [(amplitude.re, expected_real), (amplitude.im, expected_imaginary)] {
+                    assert!((actual - expected).abs() <= 2e-13 * expected.abs(),
+                        "{actual:.17e} != {expected:.17e}");
+                }
+            }
+            let law = optics(1.0, k, None);
+            let matrix = law.fresnel_mueller(550.0, 1.0, cosine).unwrap();
+            let power = law.fresnel(550.0, 1.0, cosine).unwrap();
+            assert_eq!(matrix.0[0][0], power);
+            assert!((matrix.0[2][2] - power).abs() < 2e-13 * power);
+            let balance = law.power_balance(550.0, 1.0, cosine).unwrap();
+            for pol in 0..2 {
+                assert!((balance.reflected[pol] - power).abs() < 2e-13 * power);
+                assert!((balance.reflected[pol] + balance.absorbed[pol] - 1.0).abs() < 2e-13);
+            }
+        }
+    }
+
+    #[test]
+    fn grazing_coherent_films_match_independent_airy_power() {
+        use crate::conductor::{CoatingLayer, CoherentCoatingStack};
+        // Independent 100-digit Airy sums, with exact binary64 input values.
+        // A one-ulp real-index contrast and a weakly absorbing matched film
+        // both require the original incident normal wave in q².
+        let substrate = optics(1.0, 1e-20, None);
+        let transparent = CoherentDielectricCoating::try_new(
+            CauchyIor::try_constant(1.000_000_000_000_000_2).unwrap(), 1e-4,
+            ConductorSource::try_new(fs_blake3::ContentHash([89; 32]),
+                ConductorDataStatus::Representative).unwrap(),
+        ).unwrap();
+        let lossy = absorbing(1.0, 2e-20, 1e-4);
+        for (law, layer, expected) in [
+            (substrate.with_coating(transparent), CoatingLayer::Dielectric(&transparent),
+                2.252_433_203_247_032_5e-5),
+            (substrate.with_absorbing_coating(lossy), CoatingLayer::Absorbing(&lossy),
+                2.499_625_082_816_963_5e-5),
+        ] {
+            let layers = [layer];
+            let stack = CoherentCoatingStack::try_new(&layers).unwrap();
+            for actual in [
+                law.fresnel(550.0, 1.0, 1e-9).unwrap(),
+                law.fresnel_mueller(550.0, 1.0, 1e-9).unwrap().0[0][0],
+                stack.fresnel(&substrate, 550.0, 1.0, 1e-9).unwrap(),
+                stack.fresnel_mueller(&substrate, 550.0, 1.0, 1e-9).unwrap().0[0][0],
+            ] {
+                assert!((actual - expected).abs() <= 2e-11 * expected,
+                    "{actual:.17e} != {expected:.17e}");
+            }
+            let work = law.layer_power_balance(550.0, 1.0, 1e-9).unwrap();
+            for pol in 0..2 {
+                assert!((work.total.reflected[pol] - expected).abs() <= 2e-11 * expected);
+                let absorbed = work.substrate_absorbed[pol] + work.layer_absorbed()[0][pol];
+                assert!((work.total.reflected[pol] + absorbed - 1.0).abs() < 2e-11);
+            }
         }
     }
 
