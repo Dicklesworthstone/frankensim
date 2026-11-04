@@ -102,7 +102,6 @@ pub(super) fn consistent_mass_with_thickness(
         ([C, C, D], V),
     ];
     let mut m = [0.0; 324];
-    let slots = [0, 1, 5, 6, 7, 11, 12, 13, 17];
     for (n, weight) in rule {
         let h = n[0] * thickness[0] + n[1] * thickness[1] + n[2] * thickness[2];
         let translation = s.density * h * g.area_m2 * weight;
@@ -112,31 +111,7 @@ pub(super) fn consistent_mass_with_thickness(
                 what: "variable-thickness shell inertia is unrepresentable",
             });
         }
-        for i in 0..3 {
-            for j in i..3 {
-                for c in 0..5 {
-                    let value = n[i] * n[j] * if c < 3 { translation } else { rotary };
-                    m[18 * (6 * i + c) + 6 * j + c] += value;
-                    if i != j {
-                        m[18 * (6 * j + c) + 6 * i + c] += value;
-                    }
-                }
-            }
-        }
-        let spin: [f64; 9] = std::array::from_fn(|i| match i % 3 {
-            0 => 0.5 * g.gradient[i / 3][1],
-            1 => -0.5 * g.gradient[i / 3][0],
-            _ => n[i / 3],
-        });
-        for i in 0..9 {
-            for j in i..9 {
-                let value = rotary * spin[i] * spin[j];
-                m[18 * slots[i] + slots[j]] += value;
-                if i != j {
-                    m[18 * slots[j] + slots[i]] += value;
-                }
-            }
-        }
+        accumulate_point(&mut m, g, n, translation, rotary);
     }
     if m.iter().any(|v| !v.is_finite()) {
         return Err(PlateError::BadSection {
@@ -144,4 +119,151 @@ pub(super) fn consistent_mass_with_thickness(
         });
     }
     Ok(m)
+}
+
+/// Admission is shared by numerical assembly and measured-shell mass reporting.
+pub(super) fn validate_reference_density(
+    facets: usize,
+    density: &[[f64; 3]],
+) -> Result<(), PlateError> {
+    if density.len() != facets {
+        return Err(PlateError::SectionCount {
+            expected: facets,
+            actual: density.len(),
+        });
+    }
+    if density
+        .iter()
+        .flatten()
+        .any(|rho| !rho.is_finite() || *rho <= 0.0)
+    {
+        return Err(PlateError::BadSection {
+            what: "shell reference density needs three positive finite corner values per facet",
+        });
+    }
+    Ok(())
+}
+
+/// Exact original-volume mass for two P1 fields on a reference triangle.
+/// The cross terms retain correlation between measured thickness and density.
+pub(super) fn reference_mass_kg(
+    area_m2: f64,
+    thickness: [f64; 3],
+    density: [f64; 3],
+) -> Result<f64, PlateError> {
+    let mut mass = 0.0;
+    for i in 0..3 {
+        for j in 0..3 {
+            mass +=
+                area_m2 * density[i] * thickness[j] * if i == j { 1.0 / 6.0 } else { 1.0 / 12.0 };
+        }
+    }
+    if !mass.is_finite() || mass <= 0.0 {
+        return Err(PlateError::BadSection {
+            what: "graded shell reference mass is unrepresentable",
+        });
+    }
+    Ok(mass)
+}
+
+/// P1 density and optional P1 thickness on the original P1/director kinetic field.
+/// The density is mass per original volume, constant through each local thickness.
+/// Keeping all sixteen positive weights makes every local kinetic contribution
+/// nonnegative, including the original relative drilling-rate gauge.
+pub(super) fn consistent_mass_with_reference_density(
+    g: &FacetGeometry,
+    section: &PlateSection,
+    thickness: Option<[f64; 3]>,
+    density: [f64; 3],
+) -> Result<[f64; 324], PlateError> {
+    if density[0] == density[1] && density[1] == density[2] {
+        // Retain the existing arithmetic, even for a measured thickness field.
+        let mut uniform = *section;
+        uniform.density = density[0];
+        return match thickness {
+            Some(h) => consistent_mass_with_thickness(g, &uniform, h),
+            None => consistent_mass(g, &uniform),
+        };
+    }
+    let thickness = thickness.unwrap_or([section.thickness; 3]);
+    // Four-point Gauss-Legendre on [0,1], followed by the Duffy map
+    // (N0,N1,N2)=((1-u)(1-v),u,(1-u)v), Jacobian 2*A*(1-u).
+    // rho*h^3*Ni*Nj has degree six in barycentric coordinates. After the
+    // map its degree is at most seven in u and six in v, so 4x4 is exact.
+    const POINTS: [f64; 4] = [
+        0.06943184420297371,
+        0.33000947820757187,
+        0.6699905217924281,
+        0.9305681557970262,
+    ];
+    const WEIGHTS: [f64; 4] = [
+        0.17392742256872693,
+        0.32607257743127305,
+        0.32607257743127305,
+        0.17392742256872693,
+    ];
+    let mut m = [0.0; 324];
+    for (i, u) in POINTS.into_iter().enumerate() {
+        for (j, v) in POINTS.into_iter().enumerate() {
+            let n = [(1.0 - u) * (1.0 - v), u, (1.0 - u) * v];
+            let h = n[0] * thickness[0] + n[1] * thickness[1] + n[2] * thickness[2];
+            let rho = n[0] * density[0] + n[1] * density[1] + n[2] * density[2];
+            let weight = 2.0 * (1.0 - u) * WEIGHTS[i] * WEIGHTS[j];
+            let translation = rho * h * g.area_m2 * weight;
+            let rotary = translation * h * h / 12.0;
+            if !translation.is_finite()
+                || translation <= 0.0
+                || !rotary.is_finite()
+                || rotary <= 0.0
+            {
+                return Err(PlateError::BadSection {
+                    what: "graded shell inertia is unrepresentable",
+                });
+            }
+            accumulate_point(&mut m, g, n, translation, rotary);
+        }
+    }
+    if m.iter().any(|v| !v.is_finite()) {
+        return Err(PlateError::BadSection {
+            what: "graded shell kinetic integral overflow",
+        });
+    }
+    Ok(m)
+}
+
+// The same physical velocity/director and drilling-rate basis for both measured
+// thickness and graded reference density; no independent inertia model is added.
+fn accumulate_point(
+    m: &mut [f64; 324],
+    g: &FacetGeometry,
+    n: [f64; 3],
+    translation: f64,
+    rotary: f64,
+) {
+    for i in 0..3 {
+        for j in i..3 {
+            for c in 0..5 {
+                let value = n[i] * n[j] * if c < 3 { translation } else { rotary };
+                m[18 * (6 * i + c) + 6 * j + c] += value;
+                if i != j {
+                    m[18 * (6 * j + c) + 6 * i + c] += value;
+                }
+            }
+        }
+    }
+    let slots = [0, 1, 5, 6, 7, 11, 12, 13, 17];
+    let spin: [f64; 9] = std::array::from_fn(|i| match i % 3 {
+        0 => 0.5 * g.gradient[i / 3][1],
+        1 => -0.5 * g.gradient[i / 3][0],
+        _ => n[i / 3],
+    });
+    for i in 0..9 {
+        for j in i..9 {
+            let value = rotary * spin[i] * spin[j];
+            m[18 * slots[i] + slots[j]] += value;
+            if i != j {
+                m[18 * slots[j] + slots[i]] += value;
+            }
+        }
+    }
 }

@@ -4,7 +4,8 @@
 //! a second FEM or a reconstruction algorithm. It retains the supplied vertices,
 //! triangles, nodal thickness and per-facet isotropic material. No smoothing,
 //! welding, hole filling, resampling or inferred manufacturing data is applied.
-use super::{ShellMesh, ShellModel, ShellSupport, FacetGeometry, CstDktMass, assemble_with_inertia, DRILLING_ALPHA};
+use super::{ShellMesh, ShellModel, ShellSupport, FacetGeometry, CstDktMass,
+    assemble_with_inertia, assemble_with_reference_inertia, DRILLING_ALPHA};
 use super::profile::{ProfileBudget, ProfileShell};
 use crate::{PlateError, PlateSection};
 use std::collections::{BTreeMap, BTreeSet};
@@ -158,6 +159,51 @@ impl MeshShell {
         let thickness = (mass == CstDktMass::Consistent).then_some(self.nodal_thickness_m.as_slice());
         assemble_with_inertia(&self.mesh, &self.sections, false, nodes, support,
             DRILLING_ALPHA, mass, thickness)
+    }
+
+    /// Assemble the original elastic sections with explicit P1 reference density
+    /// and the measured P1 thickness. Values are [kg/m³], three per facet in
+    /// its original corner order; material jumps may retain different values
+    /// on either side of an edge. These densities replace each section's scalar
+    /// density in consistent inertia, not in the unchanged elastic law.
+    ///
+    /// The kinetic integral retains density/thickness correlation, the actual
+    /// center of mass and director inertia. The same mass reaches modal and
+    /// pressure-port consumers. This is an authored fixed reference inventory,
+    /// not a current-temperature density refresh or a mass-transfer model.
+    /// [`Self::mass_with_reference_density_kg`] reports its exact total; the
+    /// survey's original `mass_kg` continues to describe its original materials.
+    /// # Errors
+    /// Invalid density count/values, measured thickness, supports, or assembly arithmetic.
+    pub fn assemble_with_reference_density(&self, reference_corner_density_kg_m3: &[[f64;3]],
+        nodes: &[usize], support: ShellSupport) -> Result<ShellModel, PlateError> {
+        assemble_with_reference_inertia(&self.mesh, &self.sections, false, nodes, support,
+            DRILLING_ALPHA, CstDktMass::Consistent, Some(&self.nodal_thickness_m),
+            Some(reference_corner_density_kg_m3))
+    }
+
+    /// Integrate the supplied original density with the measured thickness [kg].
+    /// Both fields are P1: averaging either before multiplying would lose their
+    /// correlation. No geometry, source material or accepted state is changed.
+    /// # Errors
+    /// Invalid density/thickness fields, reference geometry or unrepresentable mass.
+    pub fn mass_with_reference_density_kg(&self, reference_corner_density_kg_m3: &[[f64;3]])
+        -> Result<f64, PlateError> {
+        self.mesh.validate()?;
+        super::inertia::validate_reference_density(self.mesh.tris.len(), reference_corner_density_kg_m3)?;
+        if self.nodal_thickness_m.len() != self.mesh.nodes.len()
+            || self.nodal_thickness_m.iter().any(|h| !h.is_finite() || *h <= 0.0) {
+            return Err(bad("shell reference mass requires positive finite thickness at every node"));
+        }
+        let mut mass = 0.0;
+        for (e, (tri, density)) in self.mesh.tris.iter().zip(reference_corner_density_kg_m3).enumerate() {
+            mass += super::inertia::reference_mass_kg(self.mesh.facet(e)?.area_m2,
+                tri.map(|node| self.nodal_thickness_m[node]), *density)?;
+        }
+        if !mass.is_finite() || mass <= 0.0 {
+            return Err(bad("graded shell reference mass sum is unrepresentable"));
+        }
+        Ok(mass)
     }
 }
 

@@ -639,6 +639,35 @@ factorial-moment affine velocity/director integration through degree five,
 frame changes, three subdivision levels, sparse positive-definite supported
 mass, and explicit legacy profile equivalence.
 
+### Graded reference density in CST/DKT shells
+
+`assemble_shell[_sections|_materials]_with_reference_density` and
+`MeshShell::assemble_with_reference_density` accept three positive densities
+[kg/m³] in each original facet's corner order. The P1 field replaces only the
+section's scalar reference density; neighboring facets may disagree at a shared
+vertex, so material interfaces are not averaged together. The existing elastic
+sections, support map and consistent translational/director mass remain the
+owners of stiffness, dynamics and modal normalization. These entry points are
+explicitly consistent-only; legacy lumped APIs retain their original behavior.
+
+Measured shells integrate P1 density and P1 thickness together. Sixteen positive
+Gauss–Duffy points integrate `rho*h*Ni*Nj` and `rho*h^3*Ni*Nj/12` through degree
+six, including the existing relative drilling-rate gauge, which still vanishes
+for all six rigid motions. Uniform density delegates to the original mass
+kernel and retains its arithmetic, including measured nonuniform thickness.
+`MeshShell::mass_with_reference_density_kg` integrates the same reference
+inventory analytically, including density/thickness correlation. The survey's
+original `mass_kg` continues to describe its original piecewise constant
+materials; the explicit field does not mutate that specimen or invent a source
+measurement, live thermal density update or mass-transfer law.
+
+`tests/shell_reference_density.rs` checks independent complete spatial inertia,
+degree-six director storage, equal-mass redistribution, sharp interface and
+uniform-limit equivalence, malformed fields, density-scaled native elastic
+eigenvalues and the existing mass-normalized acoustic pressure port. No new
+eigensolver, acoustic model or time integrator is introduced; those consumers
+receive the resulting physical mass matrix.
+
 ### Three-dimensional beam inertia
 
 `shell::stiffened::timoshenko::{segment_matrices, assemble_beam_chain}` and
