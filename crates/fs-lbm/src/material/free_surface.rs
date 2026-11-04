@@ -47,6 +47,10 @@ pub mod enthalpy;
 pub mod wetting;
 /// Source viscosity at the actual shear rate, without inventing thermal data.
 pub mod rheology;
+mod sgs;
+pub use sgs::{
+    MaterialFreeSurfaceSgsConfig3, MaterialFreeSurfaceSgsError3, MaterialFreeSurfaceSgsReport3,
+};
 
 /// One reference source state and its physical-to-lattice conversion.
 ///

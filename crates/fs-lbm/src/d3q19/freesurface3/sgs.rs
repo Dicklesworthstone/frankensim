@@ -29,6 +29,7 @@ use fs_exec::CancelGate;
 use fs_math::det;
 
 mod gradient;
+mod motion;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum FreeSurfaceSgsError3 {

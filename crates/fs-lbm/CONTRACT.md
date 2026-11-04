@@ -10811,3 +10811,31 @@ The cases independently check the liquid-half-cell/surface-convection root,
 mean-film source queries, held and live geometry, finite-gas reciprocal energy,
 changing PLIC ownership and a late constitutive refusal followed by accepted
 retry. Their coefficient evidence carries an estimate and no calibrated model.
+
+## Moving-wall WALE/Vreman with material SI receipts
+
+`planar_wall_velocity_field_gradient_sgs_candidate` and its publishing entry
+prepare the explicit full-gradient closure from accepted interior liquid
+velocities, then pass its local relaxation map into the original face-field wall
+candidate. The same collision supplies reflected populations and actual wall
+impulse, torque, residual couple and actuator work. Empty interface carriers
+retain molecular relaxation; occupied-liquid stencil and viscosity-ratio
+refusals remain unchanged. Zero coefficient passes no local tau map, preserving
+original wall trajectories and receipts on admitted support.
+
+The corresponding `MaterialFreeSurface3` SI entries retain the original
+material, force frame, capillarity, pressure datum and source/scenario limits.
+Filter width uses `Delta_lu = Delta_m/dx`; viscosity uses `dx²/dt`, volume
+`dx³`, and integrated deviatoric dissipation `rho0*dx⁵/dt³`. All native checks
+and SI conversions finish before publication of the same candidate. Positive
+quantities lost to conversion underflow and nonfinite receipts refuse.
+One native clone is used; no thermal route history is allocated.
+
+The scope remains a fixed, fully flooded tangential wall, with gradients
+reconstructed from interior liquid. This supplies neither a wall model nor heat
+deposition or turbulence validation. Four focused regression groups cover
+disabled-coefficient BGK/TRT parity, enabled physical evolution and reciprocal
+wrench/work with independent SI conversions, stencil/budget/cancellation refusal,
+and a late SI conversion failure preserving the accepted native flow.
+Native compilation, formatting and execution of these new regressions were
+unavailable when this extension was committed.
