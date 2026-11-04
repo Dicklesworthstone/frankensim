@@ -29,7 +29,8 @@ impl<'a, 'm> PreparedLayerConduction<'a, 'm> {
     /// distances and fixed contact resistance as `bindings()`. Planar and
     /// radial bindings retain their physical metrics and ordered cell coverage.
     /// Attachment probes source support and scalar-solve controls. Other links
-    /// and all reservoir faces keep their native bulk-conductivity semantics.
+    /// retain their native coefficients; `ImplicitLayerBoundary` independently
+    /// attaches source-integrated reservoir and ambient faces.
     pub fn implicit_link_laws(
         &self,
         config: LayerConductionConfig,
@@ -99,7 +100,7 @@ impl ImplicitLinkLaw for ImplicitLayerLink<'_, '_, '_> {
     }
 }
 
-fn temperature_slope(layer: &ResolvedConductionLayer<'_>, h: f64, temperature: f64) -> Result<f64, DepositionError> {
+pub(super) fn temperature_slope(layer: &ResolvedConductionLayer<'_>, h: f64, temperature: f64) -> Result<f64, DepositionError> {
     let caloric = layer.caloric_curve();
     let knots = caloric.knots();
     // At a closed upper source endpoint use the admitted left derivative.

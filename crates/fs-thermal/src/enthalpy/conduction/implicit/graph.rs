@@ -46,6 +46,23 @@ pub struct ImplicitConductionGraph<'a> {
     inner: ImplicitConductionChain<'a>,
 }
 impl<'a> ImplicitConductionGraph<'a> {
+    /// Replace selected reservoir and ambient fluxes in the same original
+    /// residual and Jacobian. See the chain method for original caloric,
+    /// geometric and boundary-channel ownership requirements.
+    pub fn with_boundary_laws(
+        self,
+        thermal: &DepositionSimulation<'_>,
+        reservoirs: &[(CellId, &'a dyn super::boundary::ImplicitBoundaryLaw)],
+        ambient: &[(CellId, &'a dyn super::boundary::ImplicitBoundaryLaw)],
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, ImplicitConductionError> {
+        Ok(Self {
+            inner: self
+                .inner
+                .with_boundary_laws(thermal, reservoirs, ambient, checkpoint)?,
+        })
+    }
+
     /// Replace selected bulk-series links with original integrated conductive
     /// fluxes and their full tangents. The same attachment and ownership rules
     /// as [`ImplicitConductionChain::with_link_laws`] apply.

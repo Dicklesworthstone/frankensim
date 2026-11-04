@@ -1,6 +1,194 @@
 //! One caloric cell can conduct through two separately owned physical baths.
+use super::super::boundary::{
+    ImplicitBoundaryGeometry, ImplicitBoundaryLaw, ImplicitBoundaryState,
+};
 use super::*;
 use crate::observers::{CoupledObservers, ObserverCouplingError};
+
+// Independent exact integral for the existing test law k(T)=T/100. The
+// production material adapter uses its original piecewise-linear source owner.
+struct IntegratedBoundary<'a>(&'a Law);
+impl ImplicitBoundaryLaw for IntegratedBoundary<'_> {
+    fn caloric_law(&self) -> &dyn ThermalLaw {
+        self.0
+    }
+
+    fn state_at_specific_enthalpy(
+        &self,
+        h: f64,
+        bath: f64,
+        geometry: ImplicitBoundaryGeometry,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<ImplicitBoundaryState, DepositionError> {
+        checkpoint()?;
+        if geometry.surface_resistance_m2_k_w != 0.0 {
+            return Err(DepositionError::MaterialDomain);
+        }
+        let state = self.0.state_at_specific_enthalpy(h)?;
+        let metric = geometry.area_m2 / geometry.half_distance_m;
+        Ok(ImplicitBoundaryState {
+            conductance_w_k: metric * (state.temperature_k + bath) / 200.0,
+            power_enthalpy_derivative_w_kg_j: metric * state.temperature_k / 100.0
+                * state.temperature_slope_kg_k_j,
+        })
+    }
+}
+
+#[test]
+fn integrated_boundary_fluxes_share_exact_energy_jacobian_and_bath_entropy() {
+    let law = Law {
+        nonlinear_k: true,
+        plateau: false,
+    };
+    let exact = IntegratedBoundary(&law);
+    let boundary = baths(700.0, 300.0);
+    let (mut thermal, _) = setup(
+        &law,
+        &[500.0],
+        Some(300.0),
+        vec![TimedEvent {
+            time_s: 0.0,
+            event: Event::Boundary(CellId(0), boundary),
+        }],
+    );
+    let mass = 2.5;
+    thermal.cells.get_mut(&CellId(0)).unwrap().mass_kg = mass;
+    let conduction = ConductionObserver::new(
+        &thermal,
+        &[(MaterialId(0), &law)],
+        &[],
+        &[ConductiveReservoir {
+            cell_id: CellId(0),
+            half_distance_m: 1.0,
+            surface_resistance_m2_k_w: 0.0,
+        }],
+        || Ok(()),
+    )
+    .unwrap()
+    .with_ambient_faces(&thermal, &[ambient(0.0)], || Ok(()))
+    .unwrap();
+    let chain =
+        ImplicitConductionChain::new(&thermal, &conduction, &[(MaterialId(0), &law)], || Ok(()))
+            .unwrap()
+            .with_boundary_laws(
+                &thermal,
+                &[(CellId(0), &exact)],
+                &[(CellId(0), &exact)],
+                || Ok(()),
+            )
+            .unwrap();
+    let graph = ImplicitConductionGraph::new(
+        &thermal,
+        &conduction,
+        &[(MaterialId(0), &law)],
+        ImplicitConductionLinearControls::default(),
+        || Ok(()),
+    )
+    .unwrap()
+    .with_boundary_laws(
+        &thermal,
+        &[(CellId(0), &exact)],
+        &[(CellId(0), &exact)],
+        || Ok(()),
+    )
+    .unwrap();
+    let dt = 0.25;
+    let mut workspace = ImplicitConductionWorkspace::new(1).unwrap();
+    let endpoint = chain.endpoint(&thermal, &mut || Ok(())).unwrap();
+    chain
+        .jacobian(&thermal, &endpoint, dt, &mut workspace, &mut || Ok(()))
+        .unwrap();
+    near(
+        workspace.diagonal[0],
+        1.0 + dt * 3.0 * 500.0 / (100.0 * mass),
+        1e-14,
+    );
+    // m(T-T0)=dt*[.01*(Ta²-T²)+.005*(Tr²-T²)], solved independently.
+    let rhs = mass * 500.0 + dt * (0.01 * 700.0_f64.powi(2) + 0.005 * 300.0_f64.powi(2));
+    let quadratic = dt * 0.015;
+    let expected = 2.0 * rhs / (mass + (mass * mass + 4.0 * quadratic * rhs).sqrt());
+    for result in [
+        chain.advance_to(&thermal, dt, controls(dt), &mut workspace, || Ok(())),
+        graph.advance_to(&thermal, dt, controls(dt), &mut workspace, || Ok(())),
+    ] {
+        let (next, report) = result.unwrap();
+        near(next.temperature_k(CellId(0)).unwrap(), expected, 1e-10);
+        let ambient_heat = dt * 0.01 * (700.0_f64.powi(2) - expected * expected);
+        let reservoir_heat = dt * 0.005 * (300.0_f64.powi(2) - expected * expected);
+        near(
+            report.energy.external_heat_j,
+            ambient_heat + reservoir_heat,
+            1e-9,
+        );
+        near(
+            report.energy.stored_energy_change_j,
+            mass * (expected - 500.0),
+            1e-9,
+        );
+        near(report.energy.residual_j, 0.0, 1e-9);
+        near(
+            report.entropy.reservoir_entropy_input_j_k,
+            ambient_heat / 700.0 + reservoir_heat / 300.0,
+            1e-11,
+        );
+        assert_eq!(next.cells[&CellId(0)].boundary, boundary);
+        assert_eq!(report.energy.substeps, 1);
+    }
+}
+
+#[test]
+fn integrated_boundary_binding_refuses_other_calorics_and_duplicate_channels() {
+    let law = Law {
+        nonlinear_k: true,
+        plateau: false,
+    };
+    let different = Law {
+        nonlinear_k: true,
+        plateau: false,
+    };
+    let exact = IntegratedBoundary(&law);
+    let unrelated = IntegratedBoundary(&different);
+    let (thermal, conduction) = setup(&law, &[500.0], Some(300.0), vec![]);
+    let build = || {
+        ImplicitConductionChain::new(&thermal, &conduction, &[(MaterialId(0), &law)], || Ok(()))
+            .unwrap()
+    };
+    assert!(
+        build()
+            .with_boundary_laws(&thermal, &[(CellId(0), &unrelated)], &[], || Ok(()))
+            .is_err()
+    );
+    assert!(
+        build()
+            .with_boundary_laws(
+                &thermal,
+                &[(CellId(0), &exact), (CellId(0), &exact)],
+                &[],
+                || Ok(())
+            )
+            .is_err()
+    );
+    assert!(
+        build()
+            .with_boundary_laws(&thermal, &[], &[(CellId(0), &exact)], || Ok(()))
+            .is_err()
+    );
+    assert!(
+        build()
+            .with_boundary_laws(&thermal, &[(CellId(9), &exact)], &[], || Ok(()))
+            .is_err()
+    );
+    let chain = build()
+        .with_boundary_laws(&thermal, &[(CellId(0), &exact)], &[], || Ok(()))
+        .unwrap();
+    assert!(
+        chain
+            .with_boundary_laws(&thermal, &[(CellId(0), &exact)], &[], || Ok(()))
+            .is_err()
+    );
+    assert_eq!(thermal.time_s(), 0.0);
+    assert_eq!(thermal.cells[&CellId(0)].specific_h_j_kg, 500.0);
+}
 
 fn baths(ambient_k: f64, reservoir_k: f64) -> Boundary {
     Boundary {

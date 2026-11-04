@@ -1,4 +1,6 @@
 use super::*;
+#[path = "boundary.rs"]
+mod boundary;
 use fs_material::thermal::conduction::phase::PreparedPhaseConductivity;
 use fs_thermal::enthalpy::conduction::{ConductiveLink, ConductivityLaw, ConductionObserver};
 use fs_thermal::enthalpy::conduction::implicit::{

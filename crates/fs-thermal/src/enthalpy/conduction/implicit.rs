@@ -50,6 +50,11 @@ use contact::{ImplicitContactLaw, ImplicitContactState};
 pub mod link;
 use link::{ImplicitLinkLaw, ImplicitLinkState};
 
+/// Integrated material-to-bath fluxes on original reservoir and ambient faces.
+#[path = "implicit/boundary.rs"]
+pub mod boundary;
+use boundary::{ImplicitBoundaryGeometry, ImplicitBoundaryLaw, ImplicitBoundaryState};
+
 /// One fused constitutive query, with derivatives on the same enthalpy chart.
 /// At a genuine corner the material owner explicitly selects its one-sided
 /// generalized derivative. The original residual still decides acceptance.
@@ -230,6 +235,8 @@ pub struct ImplicitConductionChain<'a> {
     topology: LinearTopology,
     contacts: BTreeMap<u64, &'a dyn ImplicitContactLaw>,
     link_laws: BTreeMap<u64, &'a dyn ImplicitLinkLaw>,
+    reservoir_laws: BTreeMap<CellId, &'a dyn ImplicitBoundaryLaw>,
+    ambient_laws: BTreeMap<CellId, &'a dyn ImplicitBoundaryLaw>,
 }
 
 struct Endpoint {
@@ -238,6 +245,8 @@ struct Endpoint {
     boundary_values: BoundaryConductances,
     contacts: BTreeMap<u64, ImplicitContactState>,
     link_states: BTreeMap<u64, ImplicitLinkState>,
+    reservoir_states: BTreeMap<CellId, ImplicitBoundaryState>,
+    ambient_states: BTreeMap<CellId, ImplicitBoundaryState>,
 }
 
 impl<'a> ImplicitConductionChain<'a> {
@@ -303,6 +312,8 @@ impl<'a> ImplicitConductionChain<'a> {
             topology,
             contacts: BTreeMap::new(),
             link_laws: BTreeMap::new(),
+            reservoir_laws: BTreeMap::new(),
+            ambient_laws: BTreeMap::new(),
         };
         result.admit(thermal, &mut checkpoint)?;
         result.endpoint(thermal, &mut checkpoint)?;
@@ -479,9 +490,11 @@ impl<'a> ImplicitConductionChain<'a> {
                         thermal.cells[&binding.b].specific_h_j_kg,
                     ],
                     binding.geometry,
-                    thermal.contact_patch(id).ok_or(ImplicitConductionError::Invalid(
-                        "implicit flux link disappeared",
-                    ))?,
+                    thermal
+                        .contact_patch(id)
+                        .ok_or(ImplicitConductionError::Invalid(
+                            "implicit flux link disappeared",
+                        ))?,
                     checkpoint,
                 )?;
                 state.admit()?;
@@ -522,8 +535,35 @@ impl<'a> ImplicitConductionChain<'a> {
             );
         }
         let mut boundary_values = BoundaryConductances::default();
+        let mut reservoir_states = BTreeMap::new();
+        let mut ambient_states = BTreeMap::new();
         for (&id, binding) in &self.conduction.reservoirs {
             checkpoint()?;
+            if let Some(law) = self.reservoir_laws.get(&id) {
+                let cell = &thermal.cells[&id];
+                let reservoir = cell
+                    .boundary
+                    .reservoir
+                    .ok_or(ImplicitConductionError::Invalid(
+                        "implicit flux reservoir disappeared",
+                    ))?;
+                let state = law.state_at_specific_enthalpy(
+                    cell.specific_h_j_kg,
+                    reservoir.temperature_k,
+                    ImplicitBoundaryGeometry {
+                        area_m2: binding.area_m2,
+                        half_distance_m: binding.geometry.half_distance_m,
+                        surface_resistance_m2_k_w: binding.geometry.surface_resistance_m2_k_w,
+                    },
+                    checkpoint,
+                )?;
+                state.admit()?;
+                boundary_values
+                    .reservoir_w_k
+                    .insert(id, state.conductance_w_k);
+                reservoir_states.insert(id, state);
+                continue;
+            }
             let k = states[self.index[&id]].conductivity_w_m_k;
             let g = surface_conductance_w_k(
                 binding.area_m2,
@@ -535,6 +575,25 @@ impl<'a> ImplicitConductionChain<'a> {
         }
         for (&id, binding) in &self.conduction.ambient_faces {
             checkpoint()?;
+            if let Some(law) = self.ambient_laws.get(&id) {
+                let cell = &thermal.cells[&id];
+                let state = law.state_at_specific_enthalpy(
+                    cell.specific_h_j_kg,
+                    cell.boundary.ambient_k,
+                    ImplicitBoundaryGeometry {
+                        area_m2: binding.area_m2,
+                        half_distance_m: binding.geometry.half_distance_m,
+                        surface_resistance_m2_k_w: binding.geometry.surface_resistance_m2_k_w,
+                    },
+                    checkpoint,
+                )?;
+                state.admit()?;
+                boundary_values
+                    .ambient_w_k
+                    .insert(id, state.conductance_w_k);
+                ambient_states.insert(id, state);
+                continue;
+            }
             let g = surface_conductance_w_k(
                 binding.area_m2,
                 binding.geometry.half_distance_m,
@@ -550,6 +609,8 @@ impl<'a> ImplicitConductionChain<'a> {
             boundary_values,
             contacts,
             link_states,
+            reservoir_states,
+            ambient_states,
         })
     }
 
@@ -682,7 +743,9 @@ impl<'a> ImplicitConductionChain<'a> {
             if area < 0.0 {
                 return Err(DepositionError::Arithmetic.into());
             }
-            let mut derivative = if let Some(binding) = self.conduction.ambient_faces.get(&id) {
+            let mut derivative = if let Some(boundary) = endpoint.ambient_states.get(&id) {
+                -boundary.power_enthalpy_derivative_w_kg_j
+            } else if let Some(binding) = self.conduction.ambient_faces.get(&id) {
                 let g = endpoint.boundary_values.ambient_w_k[&id];
                 let dg = conductance_derivative(
                     g,
@@ -696,16 +759,20 @@ impl<'a> ImplicitConductionChain<'a> {
                 -(area * cell.boundary.htc_w_m2_k) * state.temperature_slope_kg_k_j
             };
             if let Some(reservoir) = cell.boundary.reservoir {
-                let binding = self.conduction.reservoirs[&id];
-                let g = endpoint.boundary_values.reservoir_w_k[&id];
-                let dg = conductance_derivative(
-                    g,
-                    binding.area_m2,
-                    binding.geometry.half_distance_m,
-                    state,
-                )?;
-                derivative += dg * (reservoir.temperature_k - state.temperature_k)
-                    - g * state.temperature_slope_kg_k_j;
+                if let Some(boundary) = endpoint.reservoir_states.get(&id) {
+                    derivative -= boundary.power_enthalpy_derivative_w_kg_j;
+                } else {
+                    let binding = self.conduction.reservoirs[&id];
+                    let g = endpoint.boundary_values.reservoir_w_k[&id];
+                    let dg = conductance_derivative(
+                        g,
+                        binding.area_m2,
+                        binding.geometry.half_distance_m,
+                        state,
+                    )?;
+                    derivative += dg * (reservoir.temperature_k - state.temperature_k)
+                        - g * state.temperature_slope_kg_k_j;
+                }
             }
             add_entry(workspace, i, i, -dt * derivative / cell.mass_kg)?;
         }

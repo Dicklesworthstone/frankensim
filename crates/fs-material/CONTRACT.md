@@ -8916,9 +8916,10 @@ temperature spans, pure-phase restrictions and the admitted left derivative
 at an upper source endpoint remain explicit. No database query, identity
 construction or allocation occurs in a link evaluation. These are source-free
 quasi-steady half-cell reconstructions; transient spatial/time refinement and
-material uncertainty remain separate. Reservoir faces retain their native
-bulk-conductivity model. Focused layer-network regressions exercise the actual
-chain/graph solve, affine-k closed-form heat and derivatives, disjoint source
+material uncertainty remain separate. Boundary faces retain their native
+bulk-conductivity model unless an `ImplicitLayerBoundary` is attached. Focused
+layer-network regressions exercise the actual chain/graph solve, affine-k
+closed-form heat and derivatives, disjoint source
 spans across contact, source endpoints and transactional refusals.
 
 `thermal::conduction::LayerGeometry` admits planar, concentric cylindrical and
@@ -13543,3 +13544,28 @@ or empirical material qualification.
 Seven focused regressions cover analytic off-grid kinetics, time-rescaling
 equivalence, mixed heating/cooling history and energy, source/quantity/support
 ownership, refusals, and implicit self-heating for both integrators.
+
+## Source-integrated implicit reservoir and ambient fluxes
+
+`thermal::conduction::network::ImplicitLayerBoundary` borrows an original
+`ResolvedConductionLayer` and prepares one planar centre-to-face geometry and
+areal film resistance. It uses the existing material-to-bath Kirchhoff integral
+and bounded face solve at every native implicit trial. The secant conductance
+and complete outward dQ/dh share the same source and caloric branch, including
+the admitted left derivative at an upper source endpoint. No source query,
+allocation or separate heat-capacity account occurs during evaluation.
+
+The original chain or graph supplies each actual reservoir or ambient bath
+temperature, owns accepted enthalpy, heat and entropy, and splits authored bath
+events at their exact times. A cell may have both separately covered channels.
+Original area, distance, resistance and caloric object must match; unselected
+faces retain their native coefficients. A bath outside conductivity support is
+admitted only through a finite film whose solved material face stays supported.
+Zero film requires the prescribed material face itself to remain supported.
+
+Focused source-network tests cover affine-k analytic backward Euler, both bath
+channels, simultaneous distinct baths, finite-film temperatures and tangents,
+source boundaries, exact events, cancellation and deterministic retry. These
+are numerical implementation checks. The half-cell reconstruction is
+quasi-steady and pure-phase; it does not resolve internal face storage, fluid
+boundary layers, multidimensional spreading or a moving phase interface.

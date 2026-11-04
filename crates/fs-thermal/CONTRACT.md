@@ -1511,4 +1511,32 @@ extrema, invalid ownership/topology and cancellation. These checks concern
 spatial face reconstruction and stated discrete equations, not a blanket TVD,
 global convergence or arbitrary-source maximum-principle claim.
 
+## Integrated material-to-bath fluxes in implicit enthalpy transport
+
+`ImplicitConductionChain::with_boundary_laws` and the graph equivalent attach
+complete original-law fluxes to existing reservoir and ambient faces. The
+native backward-Euler owner still applies the signed heat once, stores the
+original mass times specific energy, and accounts for entropy at the actual
+bath temperature. Authored boundaries, their separate covered/exposed areas,
+event times and caloric objects remain unchanged.
+
+`ImplicitBoundaryLaw` supplies a passive secant and the analytic derivative of
+the complete outward power with respect to specific enthalpy. The original
+Newton operator uses its negative derivative in the heat-into-cell residual,
+including the original cell-mass factor. Unselected channels preserve their
+bulk-conductivity behavior. This seam admits exact source-integrated half-cell
+conduction and a film jump without freezing conductivity at the bulk state or
+adding another surface heat source. Material owners enforce support at the
+actual material face; an external bath is not itself a material sample.
+
+Attachment rejects duplicate or missing channels and substituted caloric
+objects. Every endpoint invokes the same source law; event changes therefore
+refresh the physical bath without changing source ownership. Cancellation,
+invalid source states and failed convergence publish no thermal candidate.
+Independent quadratic one-cell and Jacobian regressions exercise simultaneous
+hot/cold baths, unequal cell mass, chain/graph agreement and native heat/entropy
+closure. This remains a fixed-geometry, first-order thermal reduction; no
+spatial convergence or empirical material-accuracy claim follows from its
+algebraic energy residual.
+
 
