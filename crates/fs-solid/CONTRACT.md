@@ -47,6 +47,23 @@ against independent monomial integration on affine and warped bricks, retain
 centroid and constrained-mass moments, verify native eigenvalue scaling, and
 exercise invalid density/count and cancellation refusals.
 
+`hyper3::plastic::hex::dynamics::FiniteThermoplasticHexMotion::try_new_with_reference_density`
+carries the same positive corner-density representation into native finite
+thermoplastic motion, point mobility and impulses. Its independent 27-point
+reference mass rule is exact on warped trilinear cells; the original eight
+constitutive points, Standard/mean-dilatation formulation and all histories
+remain unchanged. The explicit profile and immutable consistent mass survive
+heating, plastic flow, finite deformation and impulses. Reported cell densities
+are volume-weighted inventory means, never substitutes for the graded inertia.
+`reference_acceleration_load_n` projects an original-node acceleration through
+that same mass, preserving density-weighted force and moment at supported nodes.
+The scalar constructor shares this exact reference rule; a constant explicit
+profile reproduces its mass bits on both affine and warped bricks.
+`hyper_plastic_hex_dynamics/density.rs` checks independent
+polynomial inventory, first/kinetic moments, equal-mass redistribution changing
+supported mobility, hot-history continuation and atomic refusal. This is
+authored reference data, not material calibration or mass transport.
+
 ## Prestressed Standard and B-bar HEX8 vibration
 
 `linear3::hex8::Hex8ElasticProblem::solve_thermal_tangent` and

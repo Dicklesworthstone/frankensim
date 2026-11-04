@@ -1,6 +1,11 @@
 //! G0/G1 momentum, retained-history relaxation and distinct physical/numerical
 //! energy checks for native finite Hex8 inertia. Coefficients are synthetic.
 
+#[path = "hyper_plastic_hex_dynamics/acceleration.rs"]
+mod acceleration;
+#[path = "hyper_plastic_hex_dynamics/density.rs"]
+mod density;
+
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_material::plastic::finite::thermal::{
@@ -255,6 +260,123 @@ fn completely_free_hex_obeys_exact_uniform_backward_euler_momentum_with_original
 }
 
 #[test]
+fn warped_hex_impulses_and_arrest_use_exact_reference_inertia() {
+    with_cx(|cx| {
+        // Reference map on [0,1]^3: (x, y(1+a*x), z(1+b*x)). Its
+        // determinant is 1+(a+b)*x+a*b*x^2, so a two-point mass rule misses
+        // the degree-four term in N_0^2 det(J), even though total mass is exact.
+        let (a, b) = (0.5, 0.25);
+        let (sum, product) = (a + b, a * b);
+        let nodes = NODES.map(|[x, y, z]| [x, y * (1.0 + a * x), z * (1.0 + b * x)]);
+        let rho = DENSITY[0];
+        let target = [0.8, -0.3, 0.2];
+        // Closed-form first mass column, without quadrature or assembled-mass
+        // reads. M^{-1}(M e_0 target) must recover the one-node velocity field.
+        let x_low = 1.0 / 3.0 + sum / 12.0 + product / 30.0;
+        let x_high = 1.0 / 6.0 + sum / 12.0 + product / 20.0;
+        let column = NODES.map(|[x, y, z]| {
+            rho * if x == 0.0 { x_low } else { x_high }
+                * if y == 0.0 { 1.0 / 3.0 } else { 1.0 / 6.0 }
+                * if z == 0.0 { 1.0 / 3.0 } else { 1.0 / 6.0 }
+        });
+        let impulses: Vec<_> = (0..24)
+            .map(|dof| (dof, column[dof / 3] * target[dof % 3]))
+            .collect();
+        let mass = rho * (1.0 + sum / 2.0 + product / 3.0);
+        let kinetic = 0.5 * rho * x_low / 9.0 * norm2(target);
+        let momentum_weight = rho / 4.0 * (0.5 + sum / 6.0 + product / 12.0);
+        // Exact integrals of physical position times rho*N_0. Their cross
+        // product with target gives angular momentum about the physical origin.
+        let first_moment = [
+            rho / 4.0 * x_high,
+            rho / 12.0
+                * (0.5 + (2.0 * a + b) / 6.0 + (a * a + 2.0 * product) / 12.0 + a * a * b / 20.0),
+            rho / 12.0
+                * (0.5 + (a + 2.0 * b) / 6.0 + (2.0 * product + b * b) / 12.0 + a * b * b / 20.0),
+        ];
+        let angular = [
+            first_moment[1] * target[2] - first_moment[2] * target[1],
+            first_moment[2] * target[0] - first_moment[0] * target[2],
+            first_moment[0] * target[1] - first_moment[1] * target[0],
+        ];
+        let impulse_controls = SolidImpulseControls {
+            solve: CheckedCgConfig {
+                tolerance: 1e-13,
+                max_iterations: 64,
+                max_corrections: 2,
+            },
+            maximum_workspace_components: 4096,
+            linear_tolerance_kg_m_s: 1e-11,
+            angular_tolerance_kg_m2_s: 1e-11,
+            work_tolerance_j: 1e-11,
+        };
+        for formulation in [
+            FiniteHexFormulation::Standard,
+            FiniteHexFormulation::MeanDilatation,
+        ] {
+            let solid = FiniteThermoplasticHexSolid::try_new(
+                &nodes,
+                &HEX,
+                vec![family()],
+                &[300.0],
+                formulation,
+                HexAssemblyBudget {
+                    maximum_tangent_entries: 768,
+                    ..HexAssemblyBudget::default()
+                },
+                cx,
+            )
+            .unwrap();
+            let motion =
+                FiniteThermoplasticHexMotion::try_new(solid, &DENSITY, &[[0.0; 3]; 8], cx).unwrap();
+            let candidate = motion
+                .impulse_candidate(&[], &impulses, [0.0; 3], impulse_controls, cx)
+                .unwrap();
+            for (node, velocity) in candidate.motion.velocity_mps().iter().enumerate() {
+                for axis in 0..3 {
+                    let expected = if node == 0 { target[axis] } else { 0.0 };
+                    near(velocity[axis], expected, 2e-11, 0.0);
+                }
+            }
+            near(candidate.motion.reference_mass_kg(), mass, 2e-13, 0.0);
+            near(candidate.impulse.kinetic_after_j, kinetic, 2e-12, 0.0);
+            near(candidate.impulse.applied_work_j, kinetic, 2e-12, 0.0);
+            for axis in 0..3 {
+                near(
+                    candidate.impulse.after.linear_kg_m_s[axis],
+                    momentum_weight * target[axis],
+                    2e-12,
+                    0.0,
+                );
+                near(
+                    candidate.impulse.after.angular_kg_m2_s[axis],
+                    angular[axis],
+                    2e-12,
+                    0.0,
+                );
+            }
+            assert_eq!(
+                candidate.motion.solid().quadrature_states(),
+                motion.solid().quadrature_states()
+            );
+            assert_eq!(motion.velocity_mps(), &[[0.0; 3]; 8]);
+            // The subsequent physical interval must retain that same mass.
+            // Holding the original positions arrests the field; its kinetic
+            // energy is numerical backward-Euler loss, never material heat.
+            let held: Vec<_> = (0..24).map(|dof| (dof, 0.0)).collect();
+            let arrested = candidate
+                .motion
+                .advance(&[300.0], &held, &[], 0.01, settings(), controls(), cx)
+                .unwrap();
+            near(arrested.inertia.kinetic_before_j, kinetic, 2e-12, 0.0);
+            near(arrested.inertia.kinetic_after_j, 0.0, 2e-12, 0.0);
+            near(arrested.inertia.numerical_loss_j, kinetic, 2e-12, 0.0);
+            near(arrested.material_energy.caloric_heat_j, 0.0, 2e-12, 0.0);
+        }
+    });
+}
+
+#[test]
 fn held_yielded_hex_relaxes_creep_and_arrests_motion_without_heating_numerical_kinetic_loss() {
     with_cx(|cx| {
         let law = family()
@@ -409,123 +531,6 @@ fn held_yielded_hex_relaxes_creep_and_arrests_motion_without_heating_numerical_k
                 old_creep = creep;
             }
             assert!(old_q < 0.1 * first_q && old_creep > first_creep);
-        }
-    });
-}
-
-#[test]
-fn warped_hex_impulses_and_arrest_use_exact_reference_inertia() {
-    with_cx(|cx| {
-        // Reference map on [0,1]^3: (x, y(1+a*x), z(1+b*x)). Its
-        // determinant is 1+(a+b)*x+a*b*x^2, so a two-point mass rule misses
-        // the degree-four term in N_0^2 det(J), even though total mass is exact.
-        let (a, b) = (0.5, 0.25);
-        let (sum, product) = (a + b, a * b);
-        let nodes = NODES.map(|[x, y, z]| [x, y * (1.0 + a * x), z * (1.0 + b * x)]);
-        let rho = DENSITY[0];
-        let target = [0.8, -0.3, 0.2];
-        // Closed-form first mass column, without quadrature or assembled-mass
-        // reads. M^{-1}(M e_0 target) must recover the one-node velocity field.
-        let x_low = 1.0 / 3.0 + sum / 12.0 + product / 30.0;
-        let x_high = 1.0 / 6.0 + sum / 12.0 + product / 20.0;
-        let column = NODES.map(|[x, y, z]| {
-            rho * if x == 0.0 { x_low } else { x_high }
-                * if y == 0.0 { 1.0 / 3.0 } else { 1.0 / 6.0 }
-                * if z == 0.0 { 1.0 / 3.0 } else { 1.0 / 6.0 }
-        });
-        let impulses: Vec<_> = (0..24)
-            .map(|dof| (dof, column[dof / 3] * target[dof % 3]))
-            .collect();
-        let mass = rho * (1.0 + sum / 2.0 + product / 3.0);
-        let kinetic = 0.5 * rho * x_low / 9.0 * norm2(target);
-        let momentum_weight = rho / 4.0 * (0.5 + sum / 6.0 + product / 12.0);
-        // Exact integrals of physical position times rho*N_0. Their cross
-        // product with target gives angular momentum about the physical origin.
-        let first_moment = [
-            rho / 4.0 * x_high,
-            rho / 12.0
-                * (0.5 + (2.0 * a + b) / 6.0 + (a * a + 2.0 * product) / 12.0 + a * a * b / 20.0),
-            rho / 12.0
-                * (0.5 + (a + 2.0 * b) / 6.0 + (2.0 * product + b * b) / 12.0 + a * b * b / 20.0),
-        ];
-        let angular = [
-            first_moment[1] * target[2] - first_moment[2] * target[1],
-            first_moment[2] * target[0] - first_moment[0] * target[2],
-            first_moment[0] * target[1] - first_moment[1] * target[0],
-        ];
-        let impulse_controls = SolidImpulseControls {
-            solve: CheckedCgConfig {
-                tolerance: 1e-13,
-                max_iterations: 64,
-                max_corrections: 2,
-            },
-            maximum_workspace_components: 4096,
-            linear_tolerance_kg_m_s: 1e-11,
-            angular_tolerance_kg_m2_s: 1e-11,
-            work_tolerance_j: 1e-11,
-        };
-        for formulation in [
-            FiniteHexFormulation::Standard,
-            FiniteHexFormulation::MeanDilatation,
-        ] {
-            let solid = FiniteThermoplasticHexSolid::try_new(
-                &nodes,
-                &HEX,
-                vec![family()],
-                &[300.0],
-                formulation,
-                HexAssemblyBudget {
-                    maximum_tangent_entries: 768,
-                    ..HexAssemblyBudget::default()
-                },
-                cx,
-            )
-            .unwrap();
-            let motion =
-                FiniteThermoplasticHexMotion::try_new(solid, &DENSITY, &[[0.0; 3]; 8], cx).unwrap();
-            let candidate = motion
-                .impulse_candidate(&[], &impulses, [0.0; 3], impulse_controls, cx)
-                .unwrap();
-            for (node, velocity) in candidate.motion.velocity_mps().iter().enumerate() {
-                for axis in 0..3 {
-                    let expected = if node == 0 { target[axis] } else { 0.0 };
-                    near(velocity[axis], expected, 2e-11, 0.0);
-                }
-            }
-            near(candidate.motion.reference_mass_kg(), mass, 2e-13, 0.0);
-            near(candidate.impulse.kinetic_after_j, kinetic, 2e-12, 0.0);
-            near(candidate.impulse.applied_work_j, kinetic, 2e-12, 0.0);
-            for axis in 0..3 {
-                near(
-                    candidate.impulse.after.linear_kg_m_s[axis],
-                    momentum_weight * target[axis],
-                    2e-12,
-                    0.0,
-                );
-                near(
-                    candidate.impulse.after.angular_kg_m2_s[axis],
-                    angular[axis],
-                    2e-12,
-                    0.0,
-                );
-            }
-            assert_eq!(
-                candidate.motion.solid().quadrature_states(),
-                motion.solid().quadrature_states()
-            );
-            assert_eq!(motion.velocity_mps(), &[[0.0; 3]; 8]);
-            // The subsequent physical interval must retain that same mass.
-            // Holding the original positions arrests the field; its kinetic
-            // energy is numerical backward-Euler loss, never material heat.
-            let held: Vec<_> = (0..24).map(|dof| (dof, 0.0)).collect();
-            let arrested = candidate
-                .motion
-                .advance(&[300.0], &held, &[], 0.01, settings(), controls(), cx)
-                .unwrap();
-            near(arrested.inertia.kinetic_before_j, kinetic, 2e-12, 0.0);
-            near(arrested.inertia.kinetic_after_j, 0.0, 2e-12, 0.0);
-            near(arrested.inertia.numerical_loss_j, kinetic, 2e-12, 0.0);
-            near(arrested.material_energy.caloric_heat_j, 0.0, 2e-12, 0.0);
         }
     });
 }

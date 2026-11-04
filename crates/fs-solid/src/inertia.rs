@@ -282,11 +282,40 @@ impl ReferenceMass {
                 "one positive reference density per hex and complete nodal components required",
             ));
         }
+        Self::from_hex8_density_quadrature(
+            geometry.zip(densities).map(|(geometry, &density)| {
+                let (nodes, points) = geometry?;
+                Ok((
+                    nodes,
+                    points.map(|(shapes, weight)| (shapes, weight, density)),
+                ))
+            }),
+            ndofs,
+            cx,
+        )
+    }
+
+    /// Same nonnegative Hex8 mass kernel with an explicitly admitted density
+    /// at each reference quadrature point. The geometry owner selects the rule
+    /// and may refuse its original geometry before any matrix is published.
+    /// Scalar callers retain their original accumulation order.
+    pub(crate) fn from_hex8_density_quadrature<Q>(
+        geometry: impl ExactSizeIterator<Item = Result<([usize; 8], Q), InertiaError>>,
+        ndofs: usize,
+        cx: &Cx<'_>,
+    ) -> Result<Self, InertiaError>
+    where
+        Q: IntoIterator<Item = ([f64; 8], f64, f64)>,
+    {
+        checkpoint(cx)?;
+        if ndofs == 0 || !ndofs.is_multiple_of(3) {
+            return Err(invalid("complete Hex8 nodal components required"));
+        }
         let mut mass = Coo::new(ndofs, ndofs);
         let mut reference_mass_kg = 0.0;
-        for (geometry, &density) in geometry.zip(densities) {
+        for entry in geometry {
             checkpoint(cx)?;
-            let (nodes, points) = geometry?;
+            let (nodes, points) = entry?;
             if nodes.iter().any(|&node| node >= ndofs / 3)
                 || (0..8).any(|a| nodes[..a].contains(&nodes[a]))
             {
@@ -295,16 +324,18 @@ impl ReferenceMass {
                 ));
             }
             let mut local = [[0.0; 8]; 8];
-            for (shapes, weight) in points {
+            for (shapes, weight, density) in points {
                 if !weight.is_finite()
                     || weight <= 0.0
+                    || !density.is_finite()
+                    || density <= 0.0
                     || shapes
                         .iter()
                         .any(|n| !n.is_finite() || *n <= 0.0 || *n > 1.0)
                     || (shapes.iter().sum::<f64>() - 1.0).abs() > 64.0 * f64::EPSILON
                 {
                     return Err(invalid(
-                        "positive full Hex8 quadrature with partition of unity required",
+                        "positive Hex8 reference density and quadrature with partition of unity required",
                     ));
                 }
                 let point_mass = finite(density * weight)?;

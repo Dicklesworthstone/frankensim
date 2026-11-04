@@ -50,7 +50,13 @@ pub struct FiniteThermoplasticHexMotion<'a, L: FiniteThermalJ2Material = AffineT
     solid: FiniteThermoplasticHexSolid<'a, L>,
     velocity_mps: Vec<[f64; 3]>,
     reference_density_kg_m3: Arc<[f64]>,
+    reference_corner_density_kg_m3: Option<Arc<[[f64; 8]]>>,
     mass: Arc<ReferenceMass>,
+}
+
+enum ReferenceHexDensity<'a> {
+    Cell(&'a [f64]),
+    Corners(&'a [[f64; 8]]),
 }
 
 /// Fully admitted candidate; the borrowed previous motion remains unchanged.
@@ -92,6 +98,49 @@ impl<'a, L: FiniteThermalJ2Material> FiniteThermoplasticHexMotion<'a, L> {
         velocity_mps: &[[f64; 3]],
         cx: &Cx<'_>,
     ) -> Result<Self, FiniteThermoplasticHexError> {
+        Self::with_density(
+            solid,
+            ReferenceHexDensity::Cell(reference_density_kg_m3),
+            velocity_mps,
+            cx,
+        )
+    }
+
+    /// Bind a positive trilinear reference-density field, with eight corner
+    /// values [kg/m³] per cell in original connectivity order. Cell profiles
+    /// may be discontinuous. Three Gauss points per direction integrate
+    /// `rho_0 N_a N_b det(J_0)` exactly, up to rounding, even on warped Hex8s.
+    /// The eight original constitutive points and their histories are unchanged.
+    ///
+    /// This profile shares the exact mass rule with the scalar constructor.
+    /// An elementwise constant profile preserves the scalar mass bits on both
+    /// affine and warped bricks.
+    /// Density, reference mass and its moments persist through thermal/plastic
+    /// deformation and impulses. No current-temperature density is resampled.
+    ///
+    /// # Errors
+    /// Invalid density, original geometry at a mass point, motion or assembly
+    /// budget, unrepresentable mass, or cancellation before publication.
+    pub fn try_new_with_reference_density(
+        solid: FiniteThermoplasticHexSolid<'a, L>,
+        corner_density_kg_m3: &[[f64; 8]],
+        velocity_mps: &[[f64; 3]],
+        cx: &Cx<'_>,
+    ) -> Result<Self, FiniteThermoplasticHexError> {
+        Self::with_density(
+            solid,
+            ReferenceHexDensity::Corners(corner_density_kg_m3),
+            velocity_mps,
+            cx,
+        )
+    }
+
+    fn with_density(
+        solid: FiniteThermoplasticHexSolid<'a, L>,
+        density: ReferenceHexDensity<'_>,
+        velocity_mps: &[[f64; 3]],
+        cx: &Cx<'_>,
+    ) -> Result<Self, FiniteThermoplasticHexError> {
         checkpoint(cx)?;
         if velocity_mps.len() != solid.displacement_m.len()
             || velocity_mps
@@ -119,50 +168,104 @@ impl<'a, L: FiniteThermalJ2Material> FiniteThermoplasticHexMotion<'a, L> {
             ))
             .into());
         }
-        // On warped Q1 maps, det(J) is quadratic in each coordinate. Shape
-        // products raise the mass integrand to degree four, beyond the material
-        // rule's two-point exactness. Build the exact reference rule once per
-        // cell, then retain only the assembled immutable mass.
-        let (coordinate, weight) = gauss_legendre(3);
-        let mass = ReferenceMass::from_hex8_quadrature(
-            solid.elements.iter().enumerate().map(|(index, element)| {
-                let positions = element.nodes.map(|node| solid.nodes_m[node]);
-                let mut points = [([0.0; 8], 0.0); 27];
-                for i in 0..3 {
-                    for j in 0..3 {
-                        for k in 0..3 {
-                            let q = 9 * i + 3 * j + k;
-                            let point = hex8_point(
-                                positions,
-                                [coordinate[i], coordinate[j], coordinate[k]],
-                                solid.budget.minimum_scaled_jacobian,
-                                index,
-                                q,
-                            )
-                            .map_err(|error| {
-                                InertiaError::InvalidInput {
-                                    what: error.to_string(),
-                                }
-                            })?;
-                            points[q] = (
-                                point.shapes,
-                                point.determinant_m3 * weight[i] * weight[j] * weight[k],
-                            );
-                        }
+        let ndofs = solid.displacement_m.as_flattened().len();
+        // det(J) is quadratic in each coordinate on a warped Q1 map. Constant
+        // density needs degree-four mass integration; a Q1 density needs five.
+        // One shared 27-point rule supplies both without additional histories.
+        let (coordinates, weights) = gauss_legendre(3);
+        let reference_points = |index, nodes: [usize; 8]| {
+            let positions = nodes.map(|node| solid.nodes_m[node]);
+            let mut points = [([0.0; 8], 0.0); 27];
+            for (q, entry) in points.iter_mut().enumerate() {
+                cx.checkpoint().map_err(|_| InertiaError::Cancelled)?;
+                let [i, j, k] = [q / 9, (q / 3) % 3, q % 3];
+                let point = hex8_point(
+                    positions,
+                    [coordinates[i], coordinates[j], coordinates[k]],
+                    solid.budget.minimum_scaled_jacobian,
+                    index,
+                    q,
+                )
+                .map_err(|error| InertiaError::InvalidInput {
+                    what: error.to_string(),
+                })?;
+                *entry = (
+                    point.shapes,
+                    point.determinant_m3 * weights[i] * weights[j] * weights[k],
+                );
+            }
+            Ok(points)
+        };
+        let (mass, reference_density_kg_m3, reference_corner_density_kg_m3) = match density {
+            ReferenceHexDensity::Cell(densities) => (
+                ReferenceMass::from_hex8_quadrature(
+                    solid.elements.iter().enumerate().map(|(index, element)| {
+                        Ok((element.nodes, reference_points(index, element.nodes)?))
+                    }),
+                    densities,
+                    ndofs,
+                    cx,
+                )
+                .map_err(inertia_error)?,
+                Arc::from(densities),
+                None,
+            ),
+            ReferenceHexDensity::Corners(densities) => {
+                if densities.len() != solid.elements.len() {
+                    return Err(invalid(
+                        "one eight-corner reference density profile per hex required",
+                    )
+                    .into());
+                }
+                for rho in densities {
+                    checkpoint(cx)?;
+                    if rho.iter().any(|value| !value.is_finite() || *value <= 0.0) {
+                        return Err(invalid(
+                            "positive finite Hex8 corner reference densities required",
+                        )
+                        .into());
                     }
                 }
-                Ok((element.nodes, points))
-            }),
-            reference_density_kg_m3,
-            solid.displacement_m.as_flattened().len(),
-            cx,
-        )
-        .map_err(inertia_error)?;
+                let mut means = Vec::with_capacity(densities.len());
+                let geometry = solid.elements.iter().zip(densities).enumerate().map(
+                    |(index, (element, rho))| {
+                        let uniform = rho.iter().all(|value| *value == rho[0]);
+                        let mut points = [([0.0; 8], 0.0, 0.0); 27];
+                        let (mut volume, mut inventory) = (0.0, 0.0);
+                        for (entry, (shapes, weight)) in points
+                            .iter_mut()
+                            .zip(reference_points(index, element.nodes)?)
+                        {
+                            let density = if uniform {
+                                rho[0]
+                            } else {
+                                (0..8).map(|a| shapes[a] * rho[a]).sum()
+                            };
+                            *entry = (shapes, weight, density);
+                            volume += weight;
+                            inventory += weight * density;
+                        }
+                        let mean = if uniform { rho[0] } else { inventory / volume };
+                        if !mean.is_finite() || mean <= 0.0 {
+                            return Err(InertiaError::InvalidInput {
+                                what: "unrepresentable Hex8 mean reference density".into(),
+                            });
+                        }
+                        means.push(mean);
+                        Ok((element.nodes, points))
+                    },
+                );
+                let mass = ReferenceMass::from_hex8_density_quadrature(geometry, ndofs, cx)
+                    .map_err(inertia_error)?;
+                (mass, Arc::from(means), Some(Arc::from(densities)))
+            }
+        };
         checkpoint(cx)?;
         Ok(Self {
             solid,
             velocity_mps: velocity_mps.to_vec(),
-            reference_density_kg_m3: Arc::from(reference_density_kg_m3),
+            reference_density_kg_m3,
+            reference_corner_density_kg_m3,
             mass: Arc::new(mass),
         })
     }
@@ -176,14 +279,66 @@ impl<'a, L: FiniteThermalJ2Material> FiniteThermoplasticHexMotion<'a, L> {
         &self.velocity_mps
     }
 
-    /// Original reference density in cell order, retained through deformation.
+    /// Original volume-weighted mean reference density per cell. These means
+    /// report inventory; they never replace the graded consistent mass.
     pub fn reference_density_kg_m3(&self) -> &[f64] {
         &self.reference_density_kg_m3
+    }
+
+    /// Original corner profiles, if explicitly supplied, retained unchanged.
+    pub fn reference_corner_density_kg_m3(&self) -> Option<&[[f64; 8]]> {
+        self.reference_corner_density_kg_m3.as_deref()
     }
 
     /// Original integrated mass; thermal/plastic volume changes cannot alter it.
     pub fn reference_mass_kg(&self) -> f64 {
         self.mass.reference_mass_kg()
+    }
+
+    /// Project a trilinear reference acceleration through the retained mass, M*a.
+    ///
+    /// One acceleration vector [m/s²] is supplied per original node. The full
+    /// nodal forces [N] retain supported coordinates and the original density's
+    /// force and moment; a uniform field therefore gives uniform free-body
+    /// acceleration even on a graded or warped brick. Cell-mean density and
+    /// nodal mass lumping cannot replace this consistent projection.
+    ///
+    /// Supply the result as held dead loads to [`Self::advance`] exactly once.
+    /// Density is not resampled at the current temperature or geometry. A
+    /// changing acceleration field, its potential and its tangent remain the
+    /// caller's responsibility.
+    ///
+    /// # Errors
+    /// Refuses a wrong node count, nonfinite acceleration or force, and
+    /// cancellation before returning the complete load vector.
+    pub fn reference_acceleration_load_n(
+        &self,
+        acceleration_m_s2: &[[f64; 3]],
+        cx: &Cx<'_>,
+    ) -> Result<Vec<(usize, f64)>, FiniteThermoplasticHexError> {
+        checkpoint(cx)?;
+        if acceleration_m_s2.len() != self.solid.nodes_m.len()
+            || acceleration_m_s2.iter().flatten().any(|a| !a.is_finite())
+        {
+            return Err(
+                invalid("one finite acceleration vector per original node required").into(),
+            );
+        }
+        let forces = self
+            .mass
+            .action(acceleration_m_s2.as_flattened(), cx)
+            .map_err(inertia_error)?;
+        let mut loads = Vec::with_capacity(forces.len());
+        for (dof, force) in forces.into_iter().enumerate() {
+            if dof % 256 == 0 {
+                checkpoint(cx)?;
+            }
+            if force != 0.0 {
+                loads.push((dof, force));
+            }
+        }
+        checkpoint(cx)?;
+        Ok(loads)
     }
 
     /// Advance one actual physical interval with absolute supports and held
@@ -251,6 +406,7 @@ impl<'a, L: FiniteThermalJ2Material> FiniteThermoplasticHexMotion<'a, L> {
                 solid: step.solid,
                 velocity_mps,
                 reference_density_kg_m3: Arc::clone(&self.reference_density_kg_m3),
+                reference_corner_density_kg_m3: self.reference_corner_density_kg_m3.clone(),
                 mass: Arc::clone(&self.mass),
             },
             equilibrium: step.equilibrium,
