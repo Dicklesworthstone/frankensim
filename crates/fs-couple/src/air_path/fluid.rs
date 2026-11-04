@@ -30,8 +30,9 @@ pub enum FluidPropagationModel {
     ClassicalMinimumPhase,
     /// Exact spatial acoustic branch of the linear homogeneous
     /// Navier–Stokes–Fourier equations, retaining attenuation and dispersion.
-    /// The observer currently admits the same `omega*tau <= 0.01` band as
-    /// the classical path; this is a supported regime, not an error bound.
+    /// This branch is not restricted by the classical weak-loss threshold.
+    /// Material/continuum validity, unresolved acoustic/thermal branches and
+    /// the finite response-design budget still limit its applicability.
     ThermoviscousDispersion,
 }
 
@@ -53,8 +54,9 @@ pub struct FluidPropagationReceipt {
     pub truncated_energy: f64,
     /// Caller-selected numerical relative-energy ceiling; no ISO uncertainty.
     pub maximum_truncated_energy: f64,
-    /// Worst `omega*tau` in the sampled band; at most the shared supported limit.
-    /// Thermoviscous selection uses the full acoustic root within this band.
+    /// Worst `omega*tau` in the sampled band. Classical selection requires
+    /// the shared weak-loss limit; full thermoviscous selection retains this
+    /// diagnostic without imposing a weak-loss approximation on its root.
     pub maximum_weak_loss_parameter: f64,
     /// DC group delay of the actual retained FIR [s].
     pub low_frequency_delay_s: f64,
@@ -101,8 +103,13 @@ impl FluidObserverFilter {
     /// Thermoviscous propagation uses the original complex acoustic root;
     /// finite-band realization and its reported numerical latency remain
     /// approximations controlled by `maximum_truncated_energy`.
-    /// Both models require `omega*tau <= CLASSICAL_VALIDITY_OMEGA_TAU` through
-    /// Nyquist and propagate material/branch refusals without changing laws.
+    /// Only the classical model requires
+    /// `omega*tau <= CLASSICAL_VALIDITY_OMEGA_TAU` through Nyquist. The exact
+    /// thermoviscous branch may exceed that threshold, but must still resolve
+    /// throughout the sampled band and fit the original finite FIR budget.
+    /// Constant-coefficient, Newtonian-continuum and source frequency support
+    /// remain the caller's responsibility; this is not a finite-wavefront model.
+    /// Both selections propagate material/branch refusals without changing laws.
     pub fn with_model(
         absorption: ClassicalBulkAbsorption,
         range_m: f64,
@@ -187,8 +194,7 @@ pub fn propagate_pressure_history_with_model(
     if pressure_pa.iter().any(|value| !value.is_finite()) {
         return Err(invalid("fluid observer pressure must be finite"));
     }
-    let (response, receipt) =
-        response(absorption, range_m, dt, maximum_truncated_energy, model)?;
+    let (response, receipt) = response(absorption, range_m, dt, maximum_truncated_energy, model)?;
     if range_m != 0.0 {
         convolve_pressure_history(pressure_pa, &response.taps)?;
     }
@@ -211,15 +217,12 @@ fn response(
     let maximum_weak_loss_parameter = absorption
         .weak_loss_parameter(core::f64::consts::PI * rate)
         .map_err(|_| invalid("fluid observer weak-loss parameter is unrepresentable"))?;
-    if maximum_weak_loss_parameter > CLASSICAL_VALIDITY_OMEGA_TAU {
-        return Err(invalid(match model {
-            FluidPropagationModel::ClassicalMinimumPhase => {
-                "fluid observer Nyquist band exceeds classical weak-loss applicability"
-            }
-            FluidPropagationModel::ThermoviscousDispersion => {
-                "fluid observer Nyquist band exceeds its supported thermoviscous regime"
-            }
-        }));
+    if model == FluidPropagationModel::ClassicalMinimumPhase
+        && maximum_weak_loss_parameter > CLASSICAL_VALIDITY_OMEGA_TAU
+    {
+        return Err(invalid(
+            "fluid observer Nyquist band exceeds classical weak-loss applicability",
+        ));
     }
     let response =
         design_observer_response_with_budget(range_m, rate, Some(maximum_truncated_energy), |n| {
@@ -284,7 +287,9 @@ fn thermoviscous_transfer(
     let log_magnitude = -wave.im * range_m;
     let phase = -(wave.re - omega / absorption.state().acoustic().sound_speed_m_s()) * range_m;
     if !log_magnitude.is_finite() || !phase.is_finite() {
-        return Err(invalid("fluid thermoviscous path transfer is unrepresentable"));
+        return Err(invalid(
+            "fluid thermoviscous path transfer is unrepresentable",
+        ));
     }
     let magnitude = det::exp(log_magnitude);
     let (sin, cos) = det::sin_cos(phase);

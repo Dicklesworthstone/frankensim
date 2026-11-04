@@ -148,6 +148,10 @@ fn viscous_wave(omega: f64) -> [f64; 2] {
     [omega / 1200.0 * re, omega / 1200.0 * im]
 }
 
+fn strongly_viscous_liquid() -> ClassicalBulkAbsorption {
+    ClassicalBulkAbsorption::from_material(&viscous_liquid().state(), 5000.0).unwrap()
+}
+
 fn complex_transfer(taps: &[f64], omega_dt: f64) -> [f64; 2] {
     taps.iter().enumerate().fold([0.0; 2], |[re, im], (n, h)| {
         [
@@ -162,14 +166,23 @@ fn g1_thermoviscous_filter_retains_independent_complex_viscous_phase() {
     let source = viscous_liquid();
     let (dt, range) = (1.0 / 48_000.25, 20.0);
     let filter = FluidObserverFilter::with_model(
-        source, range, dt, 1e-12, FluidPropagationModel::ThermoviscousDispersion,
+        source,
+        range,
+        dt,
+        1e-12,
+        FluidPropagationModel::ThermoviscousDispersion,
     )
     .unwrap();
     let receipt = filter.receipt();
-    assert_eq!(receipt.model, FluidPropagationModel::ThermoviscousDispersion);
+    assert_eq!(
+        receipt.model,
+        FluidPropagationModel::ThermoviscousDispersion
+    );
     assert_eq!(receipt.sample_rate_hz, 1.0 / dt);
     assert!(receipt.truncated_energy <= 1e-12);
-    assert!((receipt.receiver_delay_s + receipt.low_frequency_delay_s - range / 1200.0).abs() < 1e-16);
+    assert!(
+        (receipt.receiver_delay_s + receipt.low_frequency_delay_s - range / 1200.0).abs() < 1e-16
+    );
     for frequency in [0.0, 1500.0, 6000.0, 12_000.0, 18_000.0] {
         let omega = core::f64::consts::TAU * frequency;
         let [wave_re, wave_im] = viscous_wave(omega);
@@ -188,51 +201,124 @@ fn g1_thermoviscous_filter_retains_independent_complex_viscous_phase() {
             "{frequency}: {actual:?} != {expected:?}"
         );
         if frequency > 0.0 {
-            assert!(expected[1] > 0.0, "this viscous fixture has positive excess FFT phase");
+            assert!(
+                expected[1] > 0.0,
+                "this viscous fixture has positive excess FFT phase"
+            );
         }
     }
     let legacy = FluidObserverFilter::new(source, range, dt, 1e-12).unwrap();
     let explicit = FluidObserverFilter::with_model(
-        source, range, dt, 1e-12, FluidPropagationModel::ClassicalMinimumPhase,
+        source,
+        range,
+        dt,
+        1e-12,
+        FluidPropagationModel::ClassicalMinimumPhase,
     )
     .unwrap();
     assert_eq!(legacy.taps(), explicit.taps());
     assert_eq!(legacy.receipt(), explicit.receipt());
 }
 
+/// G1: the full acoustic branch is usable beyond the leading-order loss
+/// regime. Cp=Cv gives an independent closed-form longitudinal solution,
+/// so this tests both admission and the actual retained complex response.
+#[test]
+fn g1_strong_loss_uses_full_dispersion_while_classical_still_refuses() {
+    let source = strongly_viscous_liquid();
+    let (dt, range) = (1.0 / 48_000.25, 0.05);
+    assert!(FluidObserverFilter::new(source, range, dt, 1e-10).is_err());
+    let filter = FluidObserverFilter::with_model(
+        source,
+        range,
+        dt,
+        1e-10,
+        FluidPropagationModel::ThermoviscousDispersion,
+    )
+    .unwrap();
+    let receipt = filter.receipt();
+    assert!(receipt.maximum_weak_loss_parameter > 0.5);
+    assert_eq!(receipt.absorption, source);
+    assert_eq!(receipt.sample_rate_hz, 1.0 / dt);
+    assert!(receipt.truncated_energy <= receipt.maximum_truncated_energy);
+    assert!(
+        (receipt.receiver_delay_s + receipt.low_frequency_delay_s - range / 1200.0).abs() < 1e-16
+    );
+    for frequency in [0.0, 1500.0, 6000.0, 12_000.0, 18_000.0, 23_000.0] {
+        let omega = core::f64::consts::TAU * frequency;
+        let x = omega * (4.0 * 5.0 / 3.0 + 5000.0) / (1000.0 * 1200.0_f64.powi(2));
+        let norm = 1.0_f64.hypot(x);
+        let re = ((norm + 1.0) / (2.0 * norm * norm)).sqrt();
+        let im = x / (2.0 * norm * norm * re);
+        let wave_re = omega / 1200.0 * re;
+        let wave_im = omega / 1200.0 * im;
+        let magnitude = (-wave_im * range).exp();
+        let phase = -(wave_re - omega / 1200.0) * range;
+        let expected = [magnitude * phase.cos(), magnitude * phase.sin()];
+        let [re, im] = complex_transfer(filter.taps(), omega * dt);
+        let (sin, cos) = (omega * receipt.latency_s).sin_cos();
+        let actual = [re * cos - im * sin, re * sin + im * cos];
+        assert!(
+            (actual[0] - expected[0]).hypot(actual[1] - expected[1]) < 2e-4,
+            "{frequency}: {actual:?} != {expected:?}"
+        );
+        if frequency >= 18_000.0 {
+            let classical = (-(omega / 1200.0) * 0.5 * x * range).exp();
+            assert!(
+                (magnitude - classical).abs() > 0.02,
+                "the fixture must distinguish exact absorption from quadratic loss"
+            );
+            assert!(
+                expected[1] > 0.05,
+                "the fixture must distinguish physical dispersion from an amplitude-only filter"
+            );
+        }
+    }
+}
+
 #[test]
 fn g3_selected_models_share_batch_and_streaming_without_circular_wrap() {
-    for model in [
-        FluidPropagationModel::ClassicalMinimumPhase,
-        FluidPropagationModel::ThermoviscousDispersion,
+    for (model, source, range, budget) in [
+        (
+            FluidPropagationModel::ClassicalMinimumPhase,
+            viscous_liquid(),
+            20.0,
+            1e-12,
+        ),
+        (
+            FluidPropagationModel::ThermoviscousDispersion,
+            viscous_liquid(),
+            20.0,
+            1e-12,
+        ),
+        (
+            FluidPropagationModel::ThermoviscousDispersion,
+            strongly_viscous_liquid(),
+            0.05,
+            1e-10,
+        ),
     ] {
-        let (dt, range) = (1.0 / 48_000.25, 20.0);
-        let mut filter = FluidObserverFilter::with_model(
-            viscous_liquid(), range, dt, 1e-12, model,
-        )
-        .unwrap();
+        let dt = 1.0 / 48_000.25;
+        let mut filter = FluidObserverFilter::with_model(source, range, dt, budget, model).unwrap();
         let count = 3 * filter.taps().len() + 37;
         let original: Vec<f64> = (0..count)
             .map(|n| (0.31 * n as f64).sin() + if n == count - 1 { 2.0 } else { 0.0 })
             .collect();
-        let streaming: Vec<f64> = original.iter()
+        let streaming: Vec<f64> = original
+            .iter()
             .map(|&p| filter.process(p).unwrap())
             .collect();
         let mut batch = original;
-        let receipt = propagate_pressure_history_with_model(
-            &mut batch, dt, range, viscous_liquid(), 1e-12, model,
-        )
-        .unwrap();
+        let receipt =
+            propagate_pressure_history_with_model(&mut batch, dt, range, source, budget, model)
+                .unwrap();
         assert_eq!(&receipt, filter.receipt());
         for (actual, expected) in batch.iter().zip(&streaming) {
             assert!((actual - expected).abs() < 4e-12, "{model:?}");
         }
         let mut late = vec![0.0; count];
         late[count - 1] = 1.0;
-        propagate_pressure_history_with_model(
-            &mut late, dt, range, viscous_liquid(), 1e-12, model,
-        )
-        .unwrap();
+        propagate_pressure_history_with_model(&mut late, dt, range, source, budget, model).unwrap();
         assert!(late[..count - 1].iter().all(|value| value.abs() < 2e-14));
         assert!((late[count - 1] - filter.taps()[0]).abs() < 2e-14);
     }
@@ -246,8 +332,10 @@ fn g3_thermoviscous_physical_path_transfer_composes() {
         let a = thermoviscous_transfer(&source, omega, 1.5).unwrap();
         let b = thermoviscous_transfer(&source, omega, 2.25).unwrap();
         let whole = thermoviscous_transfer(&source, omega, 3.75).unwrap();
-        assert!((whole.re - (a.re * b.re - a.im * b.im))
-            .hypot(whole.im - (a.re * b.im + a.im * b.re)) < 1e-14);
+        assert!(
+            (whole.re - (a.re * b.re - a.im * b.im)).hypot(whole.im - (a.re * b.im + a.im * b.re))
+                < 1e-14
+        );
     }
 }
 
@@ -258,8 +346,8 @@ fn g0_thermoviscous_admission_is_atomic_and_zero_range_is_exact() {
     for (dt, range, budget) in [
         (0.0, 20.0, 1e-12),
         (f64::NAN, 20.0, 1e-12),
-        (1e-15, 20.0, 1e-12),
-        (1e200, 20.0, 1e-12), // nonzero acoustic loss underflows: refuse
+        (f64::MIN_POSITIVE, 20.0, 1e-12), // Nyquist overflows representation
+        (1e200, 20.0, 1e-12),             // nonzero acoustic loss underflows: refuse
         (1.0 / 48_000.0, -1.0, 1e-12),
         (1.0 / 48_000.0, f64::INFINITY, 1e-12),
         (1.0 / 48_000.0, 20.0, 0.0),
@@ -267,28 +355,75 @@ fn g0_thermoviscous_admission_is_atomic_and_zero_range_is_exact() {
         (1.0 / 48_000.0, 20.0, f64::NAN),
     ] {
         let mut pressure = original.clone();
-        assert!(propagate_pressure_history_with_model(
-            &mut pressure, dt, range, viscous_liquid(), budget, model,
-        ).is_err());
+        assert!(
+            propagate_pressure_history_with_model(
+                &mut pressure,
+                dt,
+                range,
+                viscous_liquid(),
+                budget,
+                model,
+            )
+            .is_err()
+        );
         assert_eq!(pressure, original);
     }
     let mut pressure = original.clone();
     let receipt = propagate_pressure_history_with_model(
-        &mut pressure, 1.0 / 48_000.0, 0.0, viscous_liquid(), 1e-12, model,
+        &mut pressure,
+        1.0 / 48_000.0,
+        0.0,
+        viscous_liquid(),
+        1e-12,
+        model,
     )
     .unwrap();
     assert_eq!(pressure, original);
     assert_eq!(receipt.model, model);
     assert_eq!(receipt.taps, 1);
     assert_eq!(receipt.receiver_delay_s, 0.0);
-    let mut filter = FluidObserverFilter::with_model(
-        viscous_liquid(), 20.0, 1.0 / 48_000.0, 1e-12, model,
-    )
-    .unwrap();
+    let mut filter =
+        FluidObserverFilter::with_model(viscous_liquid(), 20.0, 1.0 / 48_000.0, 1e-12, model)
+            .unwrap();
     filter.process(0.75).unwrap();
     let mut unchanged = filter.clone();
     assert!(filter.process(f64::NAN).is_err());
     for sample in [1.0, -1.0, 0.0, 0.2] {
-        assert_eq!(filter.process(sample).unwrap(), unchanged.process(sample).unwrap());
+        assert_eq!(
+            filter.process(sample).unwrap(),
+            unchanged.process(sample).unwrap()
+        );
     }
+}
+
+/// G0: selecting the exact model does not bypass its physical branch refusal.
+#[test]
+fn g0_strong_loss_acoustic_thermal_branch_crossing_refuses_atomically() {
+    let state = ThermoviscousFluidState::try_new(
+        FluidAcousticState::try_new(1.0, 1.0).unwrap(),
+        FluidTransportState::try_new(1.0, 3.0, 3.0, 0.375).unwrap(),
+        2.0,
+    )
+    .unwrap();
+    let source = ClassicalBulkAbsorption::from_material(&state, 0.0).unwrap();
+    // gamma=1.5, nu=0.5, chi=1: acoustic/thermal roots coalesce at omega=1.
+    let dt = core::f64::consts::PI / 2.0;
+    let mut pressure = [1.0, -0.0, -2.0];
+    let original = pressure.map(f64::to_bits);
+    let error = propagate_pressure_history_with_model(
+        &mut pressure,
+        dt,
+        0.05,
+        source,
+        1e-10,
+        FluidPropagationModel::ThermoviscousDispersion,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        AcousticRealizeError::InvalidDescription {
+            what: "fluid thermoviscous acoustic branch could not be evaluated",
+        }
+    ));
+    assert_eq!(pressure.map(f64::to_bits), original);
 }

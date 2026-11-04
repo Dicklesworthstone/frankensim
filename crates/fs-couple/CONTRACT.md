@@ -8066,8 +8066,9 @@ clarinet is one filling of those objects.
   reusing the existing response design, FIR stepping and linear convolution.
   The sample clock remains exactly `1/dt`. Numerical tail-energy tolerance is
   explicit and is not derived from terrestrial-air uncertainty. Admission
-  requires `omega*tau <= 0.01` through Nyquist; this supported-regime threshold
-  is not an error bound. The retained material, selected model, actual FIR DC
+  of the classical approximation requires `omega*tau <= 0.01` through Nyquist;
+  this supported-regime threshold is not an error bound. The retained material,
+  selected model, actual FIR DC
   delay, remaining `r/c0 - delay`, numerical padding and tail energy are
   reported. Nonfinite input/output refuses atomically. Existing constructors
   retain the classical finite-band minimum-phase approximation.
@@ -8081,7 +8082,15 @@ clarinet is one filling of those objects.
   reconstructed from its magnitude. `r/c0` is a reference delay, not a finite
   wavefront of the parabolic Navier–Stokes–Fourier equations. Branch refusals
   propagate; no molecular spectrum, boundary thermal mode or temperature
-  evolution is added. The same conservative Nyquist guard remains explicit.
+  evolution is added. This full acoustic branch admits strong absorption beyond
+  the classical `omega*tau <= 0.01` threshold; the maximum parameter remains an
+  explicit diagnostic. Every sampled branch must resolve and the original FIR
+  energy, length and representability limits still apply. Material frequency
+  support and constant-coefficient Newtonian-continuum applicability remain the
+  caller's responsibility; this is no rarefied-fluid or experimental-validation
+  claim. Independent viscous-root tests distinguish the strong-loss magnitude
+  and phase from quadratic attenuation, retain batch/streaming parity and
+  atomic acoustic/thermal branch refusal, and keep the classical guard intact.
 
   `pcm_wav::baffled::BaffledPressure::new_multirate_fluid_differentiating`
   composes that same fluid filter on each original surface path. Gas and
