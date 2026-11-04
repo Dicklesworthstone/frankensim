@@ -32,6 +32,9 @@ use fs_mbd::{DynamicsError, MassProperties, MomentumImpulseReceipt, Pose, RigidB
 
 pub mod planar;
 
+/// Physical bulk viscous heat on the original finite-cell thermal timeline.
+pub mod heating;
+
 /// Finite guided translation on the original nonlinear moving-domain flow.
 pub mod translating;
 
@@ -396,8 +399,34 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> GuidedStokesMotion<'s, 'm, 'a, F> {
         pressure_offsets_pa: &[Option<f64>],
         external_force_n: f64,
         controls: GuidedStokesControls,
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<GuidedStokesStep, GuidedStokesError> {
+        let (state, step) = self.propose_step(
+            timestep_s,
+            force_density,
+            exterior,
+            pressure_offsets_pa,
+            external_force_n,
+            controls,
+            cancelled,
+        )?;
+        self.state = state;
+        Ok(step)
+    }
+
+    // Both ordinary stepping and thermal composition use this same native
+    // proposal. Neither fluid nor body history changes before acceptance.
+    #[allow(clippy::too_many_arguments)]
+    fn propose_step(
+        &self,
+        timestep_s: f64,
+        force_density: &dyn Fn([f64; 2]) -> [f64; 2],
+        exterior: &[MaterialStokesBoundary<'_>],
+        pressure_offsets_pa: &[Option<f64>],
+        external_force_n: f64,
+        controls: GuidedStokesControls,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(GuidedStokesState, GuidedStokesStep), GuidedStokesError> {
         poll(&mut cancelled)?;
         let dt = timestep_s;
         let time = self.state.time_s + dt;
@@ -591,34 +620,37 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> GuidedStokesMotion<'s, 'm, 'a, F> {
         }
         let accepted_velocity = flow.velocity_dofs().to_vec();
         poll(&mut cancelled)?;
-        self.state = GuidedStokesState {
+        let state = GuidedStokesState {
             body,
             velocity: accepted_velocity,
             displacement_m: q1,
             time_s: time,
         };
-        Ok(GuidedStokesStep {
-            flow,
-            boundary_load: load,
-            momentum,
-            body_after: body,
-            time_s: time,
-            speed_m_s: speed,
-            fluid_force_n: force,
-            fluid_force_slope_n_s_m: slope,
-            guide_force_n: guide_force,
-            guide_torque_n_m: guide_torque,
-            interface_work_j: interface_work,
-            external_work_j: external_work,
-            body_kinetic_change_j: kinetic_change,
-            spring_energy_change_j: spring_change,
-            damping_loss_j: damping_loss,
-            mechanical_time_discretization_loss_j: temporal_loss,
-            fluid_kinetic_change_j: fluid_energy_change,
-            bulk_viscous_dissipation_j: viscous_heat,
-            force_residual_n: force_residual,
-            mechanical_work_residual_j: work_residual,
-        })
+        Ok((
+            state,
+            GuidedStokesStep {
+                flow,
+                boundary_load: load,
+                momentum,
+                body_after: body,
+                time_s: time,
+                speed_m_s: speed,
+                fluid_force_n: force,
+                fluid_force_slope_n_s_m: slope,
+                guide_force_n: guide_force,
+                guide_torque_n_m: guide_torque,
+                interface_work_j: interface_work,
+                external_work_j: external_work,
+                body_kinetic_change_j: kinetic_change,
+                spring_energy_change_j: spring_change,
+                damping_loss_j: damping_loss,
+                mechanical_time_discretization_loss_j: temporal_loss,
+                fluid_kinetic_change_j: fluid_energy_change,
+                bulk_viscous_dissipation_j: viscous_heat,
+                force_residual_n: force_residual,
+                mechanical_work_residual_j: work_residual,
+            },
+        ))
     }
 }
 

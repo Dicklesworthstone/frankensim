@@ -1815,9 +1815,22 @@ depth and timestep. Source-backed rheology supplies the accepted endpoint
 viscosities; a rigid frame translation or spin does not add strain heat.
 This is BDF1 endpoint quadrature, not an exact integral along the unobserved
 within-step trajectory. Physical wall-slip loss, mechanical dashpots, SIP,
-upwind and backward-Euler numerical losses remain separate. No thermal state
-is updated and this diagnostic does not establish a coupled energy theorem.
+upwind and backward-Euler numerical losses remain separate. Ordinary motion
+steps do not update thermal state; this diagnostic does not establish a coupled
+energy theorem.
 Nonfinite physical heat refuses before any body or fluid history is committed.
+
+`GuidedStokesMotion::step_with_heating` deposits that same native endpoint
+strain heat into original finite thermal cells over the identical interval.
+The explicit triangle-to-cell map must match the original x/y triangle prisms
+extruded along +z, including centrelines, depth, volume, surface and frozen-density
+mass. Native thermal subcycling preserves caloric laws, authored sources,
+contacts, reservoirs and scheduled events; generated heat never replaces a
+boundary source. Both clocks must agree, and motion plus thermal history publish
+only after the native flow/body and thermal gates and final cancellation pass.
+This first-order one-way split retains frozen fluid transport and fixed geometry;
+it adds no advection, thermoviscosity or global energy/passivity theorem. Caloric
+identity remains caller-authored because a transport snapshot cannot supply it.
 
 The existing motion regressions now independently check zero strain heat in
 an accelerating uniform translation, analytic Couette heating under rigid
