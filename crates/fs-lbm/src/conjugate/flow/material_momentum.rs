@@ -7,7 +7,7 @@ use super::{
     MaterialAdvectionInput, MaterialAdvectionStep, MaterialDensityMomentumControls,
     MaterialDensityMomentumInput, MaterialDensityMomentumReport, MaterialDensityMomentumStep,
     MaterialMomentumControls, MaterialMomentumInput, MaterialMomentumStep, MaterialVolumeSource,
-    VoxelDomain, finite, finite_positive, poll, poll_every,
+    StaggeredBoundaryPressure, VoxelDomain, finite, finite_positive, poll, poll_every,
 };
 
 mod viscous;
@@ -97,6 +97,60 @@ impl FlowField {
         controls: MaterialMomentumAdvanceControls,
         gate: &CancelGate,
     ) -> Result<MaterialMomentumAdvance, ChtError> {
+        self.advance_material_momentum_with_reservoirs(domain, faces, None, input, controls, gate)
+    }
+
+    /// Advance the same conserved material inventories under reservoir pressures
+    /// on the actual staggered open faces. Each pressure impulse acts through
+    /// the original current-density half-cell inertia, reaches cell momentum
+    /// once, and drives the SAME mass routes carrying enthalpy and momentum.
+    /// Spatial heads may balance gravity or drive inflow, outflow and backflow.
+    ///
+    /// The borrowed profile has the admission and gauge convention of
+    /// [`Self::project_density_volume_source_with_pressure_profile`]. It supplies
+    /// mechanical correction pressure, not a thermodynamic EOS state. Every
+    /// actual incoming boundary still needs its explicit material and velocity.
+    /// Reservoir work stays in the native mechanical reports; it does not heat
+    /// the liquid or alter the supplied enthalpy reference. An enclosing total-
+    /// energy owner must retain its existing pressure-flow/enthalpy convention.
+    ///
+    /// The first-order split, stage budgets and atomic refusal guarantees of
+    /// [`Self::advance_material_momentum`] remain in force. No second pressure
+    /// solve or rebuilt mass-route operator is introduced.
+    ///
+    /// # Errors
+    /// An invalid pressure profile or any original mechanics, material,
+    /// momentum, incoming-state or cancellation refusal returns no candidate.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_material_momentum_with_pressure_profile(
+        &self,
+        domain: &VoxelDomain,
+        faces: [FlowFace; 6],
+        profile: StaggeredBoundaryPressure<'_>,
+        input: MaterialMomentumAdvanceInput<'_>,
+        controls: MaterialMomentumAdvanceControls,
+        gate: &CancelGate,
+    ) -> Result<MaterialMomentumAdvance, ChtError> {
+        self.advance_material_momentum_with_reservoirs(
+            domain,
+            faces,
+            Some(profile),
+            input,
+            controls,
+            gate,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_material_momentum_with_reservoirs(
+        &self,
+        domain: &VoxelDomain,
+        faces: [FlowFace; 6],
+        profile: Option<StaggeredBoundaryPressure<'_>>,
+        input: MaterialMomentumAdvanceInput<'_>,
+        controls: MaterialMomentumAdvanceControls,
+        gate: &CancelGate,
+    ) -> Result<MaterialMomentumAdvance, ChtError> {
         poll(gate)?;
         if controls.mechanics.projection != controls.material.projection {
             return Err(refuse(
@@ -142,29 +196,42 @@ impl FlowField {
                 }
             };
         }
+        let mechanical_input = MaterialDensityMomentumInput {
+            mass_kg: input.material.mass_kg,
+            momentum_kg_m_s: input.momentum_kg_m_s,
+            acceleration_m_s2: input.acceleration_m_s2,
+            force_density_n_m3: input.force_density_n_m3,
+            target_outflow_m3_s: &target_outflow,
+        };
+        let mechanics = match profile {
+            Some(profile) => self.force_project_material_momentum_with_pressure_profile(
+                domain,
+                faces,
+                profile,
+                mechanical_input,
+                controls.mechanics,
+                gate,
+            )?,
+            None => self.force_project_material_momentum(
+                domain,
+                faces,
+                mechanical_input,
+                controls.mechanics,
+                gate,
+            )?,
+        };
         let MaterialDensityMomentumStep {
             momentum_kg_m_s: kicked_momentum,
             density_kg_m3: _,
             reconstruction,
-            evolution: ForcedDensityProjection {
-                projection,
-                forcing,
-                report: force_projection,
-            },
+            evolution:
+                ForcedDensityProjection {
+                    projection,
+                    forcing,
+                    report: force_projection,
+                },
             report: feedback,
-        } = self.force_project_material_momentum(
-            domain,
-            faces,
-            MaterialDensityMomentumInput {
-                mass_kg: input.material.mass_kg,
-                momentum_kg_m_s: input.momentum_kg_m_s,
-                acceleration_m_s2: input.acceleration_m_s2,
-                force_density_n_m3: input.force_density_n_m3,
-                target_outflow_m3_s: &target_outflow,
-            },
-            controls.mechanics,
-            gate,
-        )?;
+        } = mechanics;
         let transport =
             advect_projected_material(domain, projection, input.material, controls.material, gate)?;
         let no_additional_impulse = vec![[0.0; 3]; n];

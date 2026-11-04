@@ -1,5 +1,7 @@
 //! G1/G3/G4: composed native mechanics and accepted material momentum routes.
 
+mod pressure;
+
 use super::*;
 use crate::conjugate::flow::{
     AdvectedMaterial, DensityForceControls, DensityMomentumReconstructionControls,

@@ -9812,6 +9812,18 @@ mismatched clocks/gates, missing inflow velocity, native budgets, cancellation
 and exact retry. Independent arithmetic checks were evaluated separately;
 Rust compilation, rustfmt and native test execution were unavailable.
 
+`advance_material_momentum_with_pressure_profile` extends that same step to
+authored reservoir heads on native open faces. The fresh current-density
+pressure impulse drives one accepted material transport, retaining its
+original mass, enthalpy and momentum routes. Incoming/backflow material and
+velocity remain explicit. Mechanical correction pressure does not become a
+thermodynamic EOS, pressure heat or an extra enthalpy source; its reservoir
+work retains the native gauge and the enclosing owner's flow-work convention.
+No stage returns partial inventory on profile, source, solve or budget refusal.
+Two regression sources independently derive unequal-density pressure-driven
+inventories and hydrostatic gravity cancellation, including large pressure
+references, exact empty-profile parity and late-failure retry.
+
 ### Endpoint-sampled D3Q19 force histories
 
 `BoundaryGrid3::step_with_endpoint_force_scale` and its pooled counterpart
