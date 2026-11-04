@@ -172,6 +172,100 @@ impl SosModalStorage {
         Ok(())
     }
 
+    /// Exact continuous effort Jacobian applied to a physical state direction.
+    ///
+    /// Both inputs and the output use the original interleaved
+    /// `[q_0, p_0, q_1, p_1, ...]` mass-normalized coordinates. For a symmetric
+    /// stress channel, differentiating `c (q^T E q) E q` gives
+    /// `c [(q^T E q) E v + 2 (q^T E v) E q]`. The linear displacement rows add
+    /// `omega^2 v_q`; momentum rows are exactly `v_p`. Off-diagonal modal
+    /// interactions, negative channel entries and all stress channels remain.
+    ///
+    /// This differentiates the ORIGINAL [`Storage::gradient`], including any
+    /// roundoff-sized coupling asymmetry accepted by [`Self::validate`]: the
+    /// quadratic form's directional derivative is `v^T E q + q^T E v` rather
+    /// than assuming these two represented contractions are identical. For an
+    /// exactly symmetric channel this is the Hamiltonian Hessian action.
+    ///
+    /// No matrix, finite-difference state, or temporary vector is allocated.
+    /// Two matrix-vector passes per channel keep memory constant and work
+    /// `O(channel_count * mode_count^2)`. Traversal order is fixed. Original
+    /// model admission is rechecked because its frequency/channel fields are
+    /// public. A periodic or variational solver can use
+    /// `|x, v, out| storage.hessian_action(x, v, out).is_ok()` as its analytic
+    /// action, without a dependency on that solver's crate.
+    ///
+    /// This is a continuous constitutive tangent, not the endpoint Jacobian of
+    /// a discrete-gradient time step. It establishes neither harmonic
+    /// truncation accuracy nor nonlinear orbit stability by itself.
+    ///
+    /// # Errors
+    /// Refuses invalid storage, incomplete/nonfinite inputs, a wrong output
+    /// length, or unrepresentable intermediate/output arithmetic. Shape/input
+    /// admission leaves `out` unchanged; after an arithmetic error its contents
+    /// are unspecified.
+    pub fn hessian_action(
+        &self,
+        state: &[f64],
+        direction: &[f64],
+        out: &mut [f64],
+    ) -> Result<(), NlModalError> {
+        self.validate()?;
+        let n = self.n_modes();
+        let dimension = n.checked_mul(2).ok_or(NlModalError::Parameter {
+            what: "modal tangent dimension overflow",
+        })?;
+        if state.len() != dimension
+            || direction.len() != dimension
+            || out.len() != dimension
+            || state.iter().chain(direction).any(|v| !v.is_finite())
+        {
+            return Err(NlModalError::Parameter {
+                what: "modal tangent needs complete finite state/direction and matching output",
+            });
+        }
+        for (k, omega) in self.omegas.iter().enumerate() {
+            out[2 * k] = omega * omega * direction[2 * k];
+            out[2 * k + 1] = direction[2 * k + 1];
+        }
+        for channel in &self.channels {
+            let mut form = 0.0;
+            let mut form_direction = 0.0;
+            for k in 0..n {
+                let mut eq = 0.0;
+                let mut ev = 0.0;
+                for j in 0..n {
+                    let entry = channel.coupling[k * n + j];
+                    eq += entry * state[2 * j];
+                    ev += entry * direction[2 * j];
+                }
+                form += state[2 * k] * eq;
+                form_direction += direction[2 * k] * eq + state[2 * k] * ev;
+            }
+            if !form.is_finite() || !form_direction.is_finite() {
+                return Err(NlModalError::Parameter {
+                    what: "modal tangent channel contraction overflow",
+                });
+            }
+            for k in 0..n {
+                let mut eq = 0.0;
+                let mut ev = 0.0;
+                for j in 0..n {
+                    let entry = channel.coupling[k * n + j];
+                    eq += entry * state[2 * j];
+                    ev += entry * direction[2 * j];
+                }
+                out[2 * k] += channel.coefficient * (form * ev + form_direction * eq);
+            }
+        }
+        if out.iter().any(|v| !v.is_finite()) {
+            return Err(NlModalError::Parameter {
+                what: "modal tangent output overflow",
+            });
+        }
+        Ok(())
+    }
+
     /// `q^T E q` for channel `ch` given the interleaved state.
     fn quadratic_form(&self, ch: &StressChannel, x: &[f64]) -> f64 {
         let n = self.n_modes();

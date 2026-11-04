@@ -334,6 +334,172 @@ fn admitted_roundoff_asymmetry_preserves_discrete_work() {
     assemble(storage, &[0.0; 2], &[0.0; 2]).expect("within the existing symmetry tolerance");
 }
 
+#[test]
+fn g1_hessian_action_retains_duffing_hardening_and_coupled_transverse_stiffness() {
+    let storage = SosModalStorage {
+        omegas: vec![2.0, 3.0],
+        channels: vec![
+            StressChannel {
+                coefficient: 5.0,
+                coupling: vec![1.0, 0.0, 0.0, 0.0],
+            },
+            StressChannel {
+                coefficient: 7.0,
+                coupling: vec![0.0, -1.0, -1.0, 0.0],
+            },
+        ],
+    };
+    // V = 5*q0^4/4 + 7*q0^2*q1^2. Even while q1 is zero, its tangent
+    // stiffness receives 14*q0^2 from the full cross-mode interaction.
+    let state = [0.4, 1.2, 0.0, -0.7];
+    let direction = [-0.2, 0.9, 0.3, -0.6];
+    let mut actual = [f64::NAN; 4];
+    storage
+        .hessian_action(&state, &direction, &mut actual)
+        .unwrap();
+    let expected = [
+        (4.0 + 15.0 * state[0] * state[0]) * direction[0],
+        direction[1],
+        (9.0 + 14.0 * state[0] * state[0]) * direction[2],
+        direction[3],
+    ];
+    for (actual, expected) in actual.iter().zip(expected) {
+        assert!((actual - expected).abs() < 3.0e-15);
+    }
+    storage
+        .hessian_action(&[0.0; 4], &direction, &mut actual)
+        .unwrap();
+    assert_eq!(
+        actual,
+        [
+            4.0 * direction[0],
+            direction[1],
+            9.0 * direction[2],
+            direction[3]
+        ]
+    );
+}
+
+#[test]
+fn g1_hessian_action_matches_original_string_and_plate_efforts() {
+    let string = kirchhoff_carrier_string(&guitar_string(), 3).unwrap();
+    let plate = von_karman_ss_plate(
+        &steel_plate(),
+        &[
+            SineMode { m: 1, n: 1 },
+            SineMode { m: 1, n: 3 },
+            SineMode { m: 2, n: 1 },
+        ],
+        &modes_grid(4, 3),
+    )
+    .unwrap()
+    .storage;
+    let state = [0.001, 0.2, -0.0007, -0.4, 0.0005, 0.3];
+    let direction = [0.0003, -0.6, 0.0004, 0.2, -0.0008, 0.7];
+    let other = [-0.0002, 0.8, 0.0001, -0.2, 0.0005, -0.3];
+    for storage in [&string, &plate] {
+        let mut actual = [f64::NAN; 6];
+        storage
+            .hessian_action(&state, &direction, &mut actual)
+            .unwrap();
+        let mut gradient = [[0.0; 6]; 4];
+        // The effort is cubic. This fourth-order difference differentiates it
+        // exactly in exact arithmetic, independently of the tangent formula.
+        let epsilon = 0.01;
+        for (out, step) in gradient.iter_mut().zip([-2.0, -1.0, 1.0, 2.0]) {
+            let point: [f64; 6] = std::array::from_fn(|k| state[k] + step * epsilon * direction[k]);
+            storage.gradient(&point, out);
+        }
+        for k in 0..6 {
+            let reference = (gradient[0][k] - 8.0 * gradient[1][k] + 8.0 * gradient[2][k]
+                - gradient[3][k])
+                / (12.0 * epsilon);
+            assert!(
+                (actual[k] - reference).abs() < 2.0e-11 * reference.abs().max(1.0),
+                "coordinate {k}: tangent {} versus effort derivative {reference}",
+                actual[k]
+            );
+        }
+        let mut other_action = [0.0; 6];
+        storage
+            .hessian_action(&state, &other, &mut other_action)
+            .unwrap();
+        let forward: f64 = actual.iter().zip(other).map(|(a, v)| a * v).sum();
+        let reverse: f64 = other_action.iter().zip(direction).map(|(a, v)| a * v).sum();
+        assert!((forward - reverse).abs() < 2.0e-12 * forward.abs().max(1.0));
+    }
+}
+
+#[test]
+fn g3_hessian_action_preserves_the_admitted_gradient_asymmetry() {
+    let forward = 1.0;
+    let reverse = 1.0 + 5.0e-11;
+    let storage = SosModalStorage {
+        omegas: vec![1.0, 1.0],
+        channels: vec![StressChannel {
+            coefficient: 1.0,
+            coupling: vec![0.0, forward, reverse, 0.0],
+        }],
+    };
+    let mut actual = [0.0; 4];
+    storage
+        .hessian_action(&[1.0, 0.0, 0.0, 0.0], &[0.0, 0.0, 1.0, 0.0], &mut actual)
+        .unwrap();
+    let expected = 1.0 + (forward + reverse) * reverse;
+    assert!((actual[2] - expected).abs() < 2.0 * f64::EPSILON * expected);
+    // Replacing the original asymmetric contraction by 2*v^T E q would
+    // silently differentiate a different force law even inside admission.
+    assert!((actual[2] - (1.0 + 2.0 * reverse * reverse)).abs() > 4.0e-11);
+}
+
+#[test]
+fn g0_hessian_action_refuses_incomplete_inputs_and_unrepresentable_results() {
+    let mut storage = SosModalStorage {
+        omegas: vec![2.0],
+        channels: vec![StressChannel {
+            coefficient: 3.0,
+            coupling: vec![1.0],
+        }],
+    };
+    for (state, direction) in [
+        (vec![0.0], vec![0.0; 2]),
+        (vec![0.0; 2], vec![0.0]),
+        (vec![f64::NAN, 0.0], vec![0.0; 2]),
+        (vec![0.0; 2], vec![0.0, f64::INFINITY]),
+    ] {
+        let mut out = [17.0; 2];
+        assert!(
+            storage
+                .hessian_action(&state, &direction, &mut out)
+                .is_err()
+        );
+        assert_eq!(out, [17.0; 2]);
+    }
+    assert!(
+        storage
+            .hessian_action(&[0.0; 2], &[0.0; 2], &mut [0.0])
+            .is_err()
+    );
+    assert!(
+        storage
+            .hessian_action(&[1.0e200, 0.0], &[1.0, 0.0], &mut [0.0; 2])
+            .is_err()
+    );
+    storage.channels[0].coefficient = -1.0;
+    assert!(
+        storage
+            .hessian_action(&[0.0; 2], &[0.0; 2], &mut [0.0; 2])
+            .is_err()
+    );
+    storage.channels[0].coefficient = 3.0;
+    storage.channels[0].coupling.clear();
+    assert!(
+        storage
+            .hessian_action(&[0.0; 2], &[0.0; 2], &mut [0.0; 2])
+            .is_err()
+    );
+}
+
 fn steel_plate() -> VkPlateParams {
     VkPlateParams {
         lx: 0.4,

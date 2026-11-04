@@ -27,6 +27,20 @@ the crash cascade with structurally exact energy accounting.
   through the existing fs-phs residual and analytic-tangent interface.
   Admission-sized coupling asymmetry retains its small energy-gradient
   remainder as well.
+  `hessian_action(state, direction, out)` supplies the exact continuous
+  directional derivative of this same effort law for harmonic-balance and
+  variational solvers. Each symmetric channel contributes
+  `c [(q^T E q) E v + 2 (q^T E v) E q]`, plus the original linear modal
+  stiffness and unit momentum derivative. The admitted roundoff asymmetry is
+  retained through `v^T E q + q^T E v`; no symmetrization changes the coded
+  force law. Evaluation uses fixed-order matrix-vector contractions, constant
+  temporary memory, and no allocation, dense Hessian or finite differences.
+  It validates public model data and input extents, refuses nonfinite
+  arithmetic, and costs O(stress count × mode count²). G1 tests compare the
+  full tangent with independent effort derivatives for native string/plate
+  models and scalar/cross-mode analytic stiffness; G3 checks reciprocity and
+  preservation of admitted asymmetry. The action is not a discrete-gradient
+  step Jacobian, a harmonic truncation bound, or an orbit-stability claim.
 - `assemble(storage, zetas, strike_weights)` — the pHS: symplectic
   pair blocks, per-mode viscous damping `R = diag(0, 2 zeta w)`
   (zetas come from the caller; the visco-damping facility's per-mode
