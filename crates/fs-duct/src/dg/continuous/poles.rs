@@ -12,11 +12,16 @@ use fs_la::nonlinear_eig::{
     MAX_NONLINEAR_POLE_DIMENSION, NonlinearEigError, NonlinearPole, PoleEvaluation,
     newton_pole_with_cancel,
 };
+use fs_la::pole_response::PoleResponseError;
 use fs_material::gas::GasState;
 use fs_math::{c64::C64, det};
 
+mod residue;
+pub use residue::DgPoleResidue;
+
 pub use fs_la::nonlinear_eig::PoleOptions;
 pub use fs_la::nonlinear_eig::beyn::{BeynOptions, Ellipse as ResonanceRegion};
+pub use fs_la::pole_response::PoleResponseOptions;
 
 /// Original pressure participation of one homogeneous free mode.
 #[derive(Clone, Debug, PartialEq)]
@@ -94,6 +99,8 @@ pub enum DgPoleError {
     Solve(NonlinearEigError),
     /// Shared contour admission, quadrature, count, conditioning or refinement.
     Contour(BeynError),
+    /// Shared simple-pole response admission, factorization or original-row audit.
+    Response(PoleResponseError),
     /// A numerically near-real contour candidate did not refine locally as a
     /// real eigenpair of the original equations; its imaginary part is not cut.
     RealModeUnresolved {
@@ -121,6 +128,11 @@ impl From<NonlinearEigError> for DgPoleError {
 impl From<BeynError> for DgPoleError {
     fn from(value: BeynError) -> Self {
         Self::Contour(value)
+    }
+}
+impl From<PoleResponseError> for DgPoleError {
+    fn from(value: PoleResponseError) -> Self {
+        Self::Response(value)
     }
 }
 impl core::fmt::Display for DgPoleError {

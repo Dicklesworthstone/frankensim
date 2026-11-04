@@ -3331,6 +3331,44 @@ one-shot and repeated-result parity; and probe, budget, band and cancellation
 refusals without source changes.
 
 
+### Excitation and observation of a simple DG resonance
+
+`PreparedDgPoles::port_residue` evaluates the Laurent residue of the original
+pressure/volume-flow transfer matrix at one supplied simple pole. It retains
+every original acoustic and material-memory coordinate. One cancellable
+`fs_la::pole_response::PreparedPole` bordered factorization supplies true
+left/right forcing participation for every original port. The pencil
+`(s I-L)/scale` and volume-flow forcing `B/scale` use identical conditioning;
+pressure observations retain the original `B^T`. The coefficient is
+`R_ij=(B_i^T x)(y^T B_j)/(y^T x)` [Pa/m3], so locally
+`Z_ij(s)=R_ij/(s-s0)+regular(s)`. Complex phase and exact zero participation
+survive; neither a modal-pressure square nor an observability cutoff replaces
+the nonnormal excitation factor. The result retains the original port order,
+an independently checked original DG pole residual, the shared numerical
+pole residual/correction and each forcing column's original bordered-row
+residual. These backward checks are not a transfer forward-error certificate.
+
+The supplied pole's cached physical observations are not trusted. The current
+generator, original material-frequency band, dimension, payload, work and
+residual limits are checked before publication. `PoleResponseOptions` bounds
+the complete query: physical evaluation/maps/results are reserved before the
+shared numerical factor, and `max_vectors` must admit every original port.
+The source must have at least one port. One factor serves all port pairs in
+O(n^3+p*n^2+p^2) work; no second adjoint owner is introduced.
+Repeated/defective modes can refuse; no simple residue is assigned by
+regularizing the physical equations.
+Cancellation or refusal changes no source history. This local principal part
+does not certify a full spectrum, fit a reduced model, predict an audible
+peak against its background, or prove continuum accuracy. Unit tests compare
+complex residues to an independent damped-oscillator rational response and
+check pencil-scale/mode-gauge invariance and a dark real relaxation mode.
+`tests/dg_resonance_residues.rs` checks cylinder multiport residues, including a
+pressure-node side port, against analytic standing-wave participation on three
+spatial discretizations. A second three-rung ladder compares the complex
+viscothermal residue to the differentiated original scalar telegraph law,
+with every original material memory retained. Forged pole reports, capacity
+limits and mid-computation cancellation are also refused (G0/G1/G3/G4).
+
 ### Original molecular relaxation in the complete multimodal duct
 
 `ModalGalerkin::with_molecular_relaxation` attaches an evaluated original `RelaxationState` to every retained axial/radial pressure coordinate. It preserves the full spatial stiffness, geometry, original gas state and physical face maps. The canonical acoustic prefix remains `[q; p]`, with `p=M_inf*P` using the original frozen bulk modulus; source mass and inverse-mass accessors report this actual map. One unit-storage thermal coordinate per spatial coordinate and every positive original reservoir follow the acoustic prefix. Equal relaxation times remain separate, zero-capacity processes remain identifiable in the borrowed-law metadata, and an empty law leaves all original matrices bitwise intact.
