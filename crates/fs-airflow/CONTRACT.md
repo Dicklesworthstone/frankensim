@@ -3547,12 +3547,33 @@ A comparison envelope admits the entire standalone held interval's mean-flow
 Reynolds support. Source, history-owner, regime, arithmetic, native-solver and
 cancellation refusal leave accepted history unchanged.
 
-Geometry, density and viscosity are fixed. Assumptions are stationary rigid
-no-slip walls and axially developed incompressible Newtonian flow. The original
+`LaminarPipe::with_source` continues a different original material snapshot on
+the same physical pipe without resetting mean flow, viscous profile memory,
+kinetic energy or accepted time. It retains the original dimensionless diffusion
+basis and pole ordering; no eigensolve is repeated. Actual source viscosity
+rescales all viscous gains and rates together, leaving their storage weights
+unchanged. Every proposal samples its source once and repeats the original
+frequency-band complex-response and wall-loss admission. A newly prepared
+propagator evaluates the continued history under that source's Reynolds support.
+Old owners/preparations remain immutable. Failed source, band, regime or
+arithmetic proposals leave the original history available for continuation.
+
+Geometry and density are fixed; even a one-ULP density change refuses because
+altering the finite pipe's mass/kinetic storage needs its own conservation owner.
+Viscosity is spatially uniform and held on each accepted interval; the caller
+owns the thermal or composition path and time refinement. This continuation
+does not infer temperature evolution, radial property gradients or fluid mixing.
+Focused G1/G3 regressions continue a developing profile through a source change,
+compare with independently initialized equivalent Stokes evolution, recover the
+viscous-time rescaling of unforced decay and heat, and exercise density, renewed
+band and Reynolds refusals with untouched accepted history.
+
+Assumptions are stationary rigid no-slip walls and axially developed
+incompressible Newtonian flow. The original
 viscous spectrum retains sampled frequency-band/error admission; arbitrary
 startup has no inherited time-domain error certificate. Entrance effects,
 turbulence onset, radial heat transport, cavitation, compressibility and
-changing material history require other owners. Gas use additionally needs
+changing density require other owners. Gas use additionally needs
 caller-qualified low-Mach/frozen-density support. Native regressions exercise
 independent radial Stokes startup/reversal and kinetic energy, harmonic phase
 and power, finite-reservoir composition, and atomic history/regime admission.

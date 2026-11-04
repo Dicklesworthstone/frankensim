@@ -383,3 +383,226 @@ fn laminar_pipe_history_regime_and_pressure_gauge_are_admitted_atomically() {
         );
     });
 }
+
+#[test]
+fn viscosity_continuation_preserves_developing_profile_and_matches_fresh_material_evolution() {
+    struct Source {
+        calls: std::cell::Cell<usize>,
+        state: FluidTransportState,
+    }
+    impl FluidTransport for Source {
+        fn transport_state(&self) -> Result<FluidTransportState, MaterialError> {
+            self.calls.set(self.calls.get() + 1);
+            Ok(self.state)
+        }
+    }
+    with_cx(|cx| {
+        let old = make(cx, 0.001);
+        let fresh = make(cx, 0.004);
+        let mut state = old.steady_state(VolumetricFlowRate::new(0.0), 0.0).unwrap();
+        let mut equivalent = fresh
+            .steady_state(VolumetricFlowRate::new(0.0), 0.0)
+            .unwrap();
+        old.prepare(cx, 0.05)
+            .unwrap()
+            .advance(cx, &mut state, [Pressure::new(100.0), Pressure::new(0.0)])
+            .unwrap();
+        // Independently create the same nonsteady physical profile on the new
+        // material: mu -> 4mu, dp -> 4dp and t -> t/4 leave Stokes u(r) fixed.
+        fresh
+            .prepare(cx, 0.0125)
+            .unwrap()
+            .advance(
+                cx,
+                &mut equivalent,
+                [Pressure::new(400.0), Pressure::new(0.0)],
+            )
+            .unwrap();
+        let before = state.clone();
+        assert!(
+            state.coordinates[1..]
+                .iter()
+                .zip(&old.flow_scales[1..])
+                .any(|(x, scale)| (x / scale - state.volume_flow_m3_s()).abs()
+                    > 1e-4 * state.volume_flow_m3_s())
+        );
+        let next = old
+            .with_source(
+                cx,
+                Source {
+                    calls: std::cell::Cell::new(0),
+                    state: fluid(0.004),
+                },
+            )
+            .unwrap();
+        assert_eq!(next.source().calls.get(), 1);
+        assert!(Arc::ptr_eq(&next.basis, &old.basis));
+        assert_eq!(state.coordinates(), before.coordinates());
+        assert_eq!(state.kinetic_energy_j(), before.kinetic_energy_j());
+        assert_eq!(state.accepted_time_s(), before.accepted_time_s());
+        assert_eq!(
+            next.steady_resistance_pa_s_m3(),
+            4.0 * old.steady_resistance_pa_s_m3()
+        );
+        assert_eq!(old.transport(), fluid(0.001));
+
+        let pressure = [Pressure::new(-30.0), Pressure::new(0.0)];
+        let updated = next
+            .prepare(cx, 0.1)
+            .unwrap()
+            .advance(cx, &mut state, pressure)
+            .unwrap();
+        let reference = fresh
+            .prepare(cx, 0.1)
+            .unwrap()
+            .advance(cx, &mut equivalent, pressure)
+            .unwrap();
+        let energy_scale = before.kinetic_energy_j();
+        let flow_scale = before.volume_flow_m3_s();
+        near(
+            updated.final_volume_flow_m3_s,
+            reference.final_volume_flow_m3_s,
+            flow_scale,
+            3e-10,
+        );
+        near(
+            updated.average_volume_flow_m3_s,
+            reference.average_volume_flow_m3_s,
+            flow_scale,
+            3e-10,
+        );
+        near(
+            state.profile_memory_energy_j(),
+            equivalent.profile_memory_energy_j(),
+            energy_scale,
+            3e-10,
+        );
+        near(
+            updated.native.supplied,
+            reference.native.supplied,
+            energy_scale,
+            3e-10,
+        );
+        near(
+            updated.native.dissipated,
+            reference.native.dissipated,
+            energy_scale,
+            3e-10,
+        );
+        assert!(updated.native.dissipated > 0.0);
+        near(updated.native.balance_residual(), 0.0, energy_scale, 3e-12);
+        assert_eq!(state.accepted_time_s(), 0.05 + 0.1);
+        assert_eq!(next.source().calls.get(), 1);
+    });
+}
+
+#[test]
+fn viscosity_continuation_changes_decay_time_without_changing_profile_energy() {
+    with_cx(|cx| {
+        let old = make(cx, 0.001);
+        let mut state = old
+            .steady_state(VolumetricFlowRate::new(2e-7), 0.0)
+            .unwrap();
+        // Build a genuinely changing profile before the viscosity switch.
+        old.prepare(cx, 0.03)
+            .unwrap()
+            .advance(cx, &mut state, [Pressure::new(0.0); 2])
+            .unwrap();
+        let initial_energy = state.kinetic_energy_j();
+        let initial_flow = state.volume_flow_m3_s();
+        let mut slow = state.clone();
+        let next = old.with_source(cx, fluid(0.004)).unwrap();
+        let rapid = next
+            .prepare(cx, 0.1)
+            .unwrap()
+            .advance(cx, &mut state, [Pressure::new(0.0); 2])
+            .unwrap();
+        // Unforced Stokes diffusion depends on integral(mu/rho dt). A 4x
+        // viscosity interval loses the same energy in a quarter of the time.
+        let reference = old
+            .prepare(cx, 0.4)
+            .unwrap()
+            .advance(cx, &mut slow, [Pressure::new(0.0); 2])
+            .unwrap();
+        near(
+            state.volume_flow_m3_s(),
+            slow.volume_flow_m3_s(),
+            initial_flow,
+            3e-10,
+        );
+        near(
+            state.kinetic_energy_j(),
+            slow.kinetic_energy_j(),
+            initial_energy,
+            3e-10,
+        );
+        near(
+            rapid.native.dissipated,
+            reference.native.dissipated,
+            initial_energy,
+            3e-10,
+        );
+        near(
+            4.0 * rapid.displaced_volume_m3,
+            reference.displaced_volume_m3,
+            initial_flow,
+            3e-10,
+        );
+        near(
+            rapid.native.dissipated,
+            initial_energy - state.kinetic_energy_j(),
+            initial_energy,
+            3e-12,
+        );
+        assert_eq!(rapid.native.supplied, 0.0);
+    });
+}
+
+#[test]
+fn viscosity_continuation_renews_band_and_reynolds_support_and_refuses_density_change() {
+    with_cx(|cx| {
+        let mut settings = spec();
+        settings.band_rad_s = [0.01, 30.0];
+        let old = LaminarPipe::try_new(
+            cx,
+            fluid(0.001),
+            settings,
+            &ZkDiffusiveBasis::new(16).unwrap(),
+        )
+        .unwrap();
+        let mut state = old
+            .steady_state(VolumetricFlowRate::new(1e-6), 1.0)
+            .unwrap();
+        let before = state.clone();
+        let different_density =
+            FluidTransportState::try_new(1000.0 + 1e-12, 4200.0, 0.6, 0.001).unwrap();
+        assert!(matches!(
+            old.with_source(cx, different_density),
+            Err(LaminarPipeError::Invalid(
+                "viscosity continuation requires exactly unchanged pipe density"
+            ))
+        ));
+        // The old band is not grandfathered into an underresolved new source.
+        assert!(old.with_source(cx, fluid(1e-9)).is_err());
+        let next = old.with_source(cx, fluid(0.0005)).unwrap();
+        assert_eq!(next.wall_memory().band_rad_s(), settings.band_rad_s);
+        assert!(next.wall_memory().max_real_loss_error() <= settings.maximum_relative_wall_error);
+        assert!(matches!(
+            next.prepare(cx, 0.01)
+                .unwrap()
+                .advance(cx, &mut state, [Pressure::new(0.0); 2],),
+            Err(LaminarPipeError::Resistance(
+                ResistanceError::Reynolds { .. }
+            ))
+        ));
+        assert_eq!(state.coordinates(), before.coordinates());
+        assert_eq!(state.accepted_time_s(), before.accepted_time_s());
+        // A failed proposal has not invalidated the original source or history.
+        assert!(
+            old.prepare(cx, 0.01)
+                .unwrap()
+                .advance(cx, &mut state, [Pressure::new(0.0); 2],)
+                .is_ok()
+        );
+    });
+}

@@ -14,8 +14,10 @@
 //! therefore NOT all heat. At steady flow z_j=Q, this storage recovers the
 //! circular parabolic profile's kinetic factor 4/3, at every pole count.
 //!
-//! Walls are stationary, rigid and no-slip. Radius, density and viscosity stay
-//! fixed over this owner's history. Entrance flow, profile-dependent convection,
+//! Walls are stationary, rigid and no-slip. Radius and density stay fixed over
+//! this owner's history. Uniform viscosity may change between held intervals
+//! through [`LaminarPipe::with_source`] without discarding the viscous profile.
+//! Entrance flow, profile-dependent convection,
 //! compressibility, cavitation and transition prediction remain outside it.
 //! Gas use requires caller-qualified low-Mach/frozen-density support: a transport
 //! snapshot alone does not supply sound-speed or absolute-pressure admission.
@@ -91,6 +93,8 @@ impl From<GraphError> for LaminarPipeError {
 pub struct LaminarPipe<M> {
     source: M,
     transport: FluidTransportState,
+    spec: LaminarPipeSpec,
+    basis: Arc<ZkDiffusiveBasis>,
     law: MaterialFlowResistance,
     memory: ZkDiffusive,
     inertance: f64,
@@ -166,6 +170,17 @@ impl<M: FluidTransport> LaminarPipe<M> {
             spec.maximum_reynolds,
         )?;
         let transport = source.transport_state()?;
+        Self::from_transport(cx, source, transport, spec, Arc::new(basis.clone()), law)
+    }
+
+    fn from_transport(
+        cx: &Cx<'_>,
+        source: M,
+        transport: FluidTransportState,
+        spec: LaminarPipeSpec,
+        basis: Arc<ZkDiffusiveBasis>,
+        law: MaterialFlowResistance,
+    ) -> Result<Self, LaminarPipeError> {
         let rho = transport.density_kg_m3();
         let mu = transport.dynamic_viscosity_pa_s();
         // Unit gamma/Pr select ONLY the existing viscous branch: these are
@@ -239,6 +254,8 @@ impl<M: FluidTransport> LaminarPipe<M> {
         Ok(Self {
             source,
             transport,
+            spec,
+            basis,
             law,
             memory,
             inertance,
@@ -247,6 +264,51 @@ impl<M: FluidTransport> LaminarPipe<M> {
             system,
             identity: Arc::new(()),
         })
+    }
+
+    /// Continue the same physical pipe with a new original material source.
+    ///
+    /// Geometry, density, pole ordering and the declared physical frequency
+    /// band remain fixed. The new source is sampled once, and its actual
+    /// viscosity rebinds the SAME dimensionless diffusion basis, with renewed
+    /// complex-response and wall-loss error admission. No eigensolve is repeated.
+    ///
+    /// For fixed density, all viscous gains and rates scale as `mu`, while
+    /// their storage weights `gain/rate` do not. Existing energy-normalized
+    /// history and its clock therefore remain compatible, including nonsteady
+    /// profiles. No fictitious impulse, profile reset or heat is introduced at
+    /// this coefficient change. Prepare a new propagator on the returned owner
+    /// for the next interval; it admits Reynolds support using the NEW source.
+    /// The old owner and its prepared coefficients remain immutable.
+    ///
+    /// This supports piecewise-held, spatially uniform Newtonian viscosity.
+    /// It is not a thermal evolution, radial temperature, expansion or mixing
+    /// model. Density must agree EXACTLY: changing finite-pipe mass or storage
+    /// requires an explicit mass/energy owner and cannot be a viscosity update.
+    /// Source, density, band, arithmetic or cancellation refusal leaves both
+    /// the original pipe and every accepted state untouched.
+    pub fn with_source<N: FluidTransport>(
+        &self,
+        cx: &Cx<'_>,
+        source: N,
+    ) -> Result<LaminarPipe<N>, LaminarPipeError> {
+        checkpoint(cx)?;
+        let transport = source.transport_state()?;
+        if transport.density_kg_m3() != self.transport.density_kg_m3() {
+            return Err(LaminarPipeError::Invalid(
+                "viscosity continuation requires exactly unchanged pipe density",
+            ));
+        }
+        let mut next = LaminarPipe::from_transport(
+            cx,
+            source,
+            transport,
+            self.spec,
+            Arc::clone(&self.basis),
+            self.law,
+        )?;
+        next.identity = Arc::clone(&self.identity);
+        Ok(next)
     }
 
     pub const fn source(&self) -> &M {
