@@ -187,7 +187,7 @@ impl Law {
     }
     fn rows(&self) -> usize {
         match self {
-            Self::Film(law) => law.row_count(),
+            Self::Film(law) => law.budget_size(),
             Self::Substrate(law) => law.budget_size(),
         }
     }
@@ -213,10 +213,14 @@ impl Law {
         thermal: &DepositionSimulation<'_>,
         cell: CellId,
         material: MaterialId,
-    ) -> Result<Option<ConductorOptics>, SurfaceHeatingError> {
+    ) -> Result<Option<Resolved>, SurfaceHeatingError> {
         match self {
-            Self::Film(law) => law.coordinate_at(thermal, cell, material).map(|_| None),
-            Self::Substrate(law) => law.validate_native(thermal, cell, material),
+            Self::Film(law) => law
+                .validate_native(thermal, cell, material)
+                .map(|value| value.map(Resolved::Film)),
+            Self::Substrate(law) => law
+                .validate_native(thermal, cell, material)
+                .map(|value| value.map(Resolved::Substrate)),
         }
     }
 }
@@ -498,8 +502,9 @@ impl<const N: usize> SurfaceOpticalHeating<N> {
     /// surface observer. Each film and substrate reads its own receiving cell;
     /// fixed entries keep their explicitly declared temperature support.
     ///
-    /// `max_total_optical_knots` counts each distinct film/substrate law's rows
-    /// once. Source/segment/evaluation budgets are the existing native budgets.
+    /// `max_total_optical_knots` counts each distinct law's authored rows or
+    /// complete original material-property bundle once. Source, segment and
+    /// evaluation budgets are the existing native budgets.
     /// Repeated identical stacks share response packets, including after a law
     /// changes. Accepted-start coefficients require temporal refinement.
     #[allow(clippy::too_many_arguments)]
@@ -765,13 +770,16 @@ impl<const N: usize> CoatingFeedbackState<N> {
                 bound.receiver.thermal_cell,
                 bound.receiver.material_id,
             )? {
-                // Film/row wavelength support is fixed and was admitted with
-                // each stack. Original material wavelengths may move with T;
-                // recheck every bound mode against this fresh substrate once.
+                // Authored row support is fixed. Original film or substrate
+                // wavelengths may move with T; recheck each bound incidence
+                // against this fresh source without repeating the field solve.
                 for &group in &bound.groups {
                     checkpoint()?;
                     for wavelength in self.model.stacks[group].incidence.wavelengths_nm {
-                        optics.complex_ior(wavelength)?;
+                        match &optics {
+                            Resolved::Film(film) => film.complex_ior(wavelength)?,
+                            Resolved::Substrate(substrate) => substrate.complex_ior(wavelength)?,
+                        };
                     }
                 }
             }

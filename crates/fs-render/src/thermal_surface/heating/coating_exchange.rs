@@ -755,7 +755,7 @@ fn admit_optical_law_rows<'a>(
         if let CoatingOpticsModel::Law(law) = film {
             if laws.insert((0, *law.identity().as_bytes())) {
                 *rows = rows
-                    .checked_add(law.row_count())
+                    .checked_add(law.budget_size())
                     .ok_or(NativeCoatingExchangeError::Budget)?;
             }
         }

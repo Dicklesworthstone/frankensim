@@ -6819,6 +6819,45 @@ analytic Fresnel heating with matching Planck emission, native IR bath heating,
 cooling and equilibrium, strict transparent limits, budgets and dark rollback.
 <!-- material-temperature-conductor:end -->
 
+<!-- material-temperature-coating:start -->
+### Original material claims drive transparent and absorbing finite films
+
+With `material-state` and `optical-heating`,
+`SurfaceCoatingLaw::try_material_temperature` binds the complete original
+`SpectralConductorStatePoint` n/k schema to an explicitly typed native absolute
+temperature and fixed physical film thickness. This source schema admits k=0;
+the existing finite-film owner preserves exact transparency and transmission,
+including when a film becomes absorbing after external heating. Each refresh
+requeries the original selected wavelength, n/k and auxiliary claims together.
+Neither a new temperature table nor a replacement claim or alpha-to-k fit is
+inferred. Other source coordinates and quantity meanings remain fixed.
+
+The original `CoherentAbsorbingCoating` supplies interference, positive layer
+absorption and reflected/transmitted power in opaque or transmitting stacks.
+Native heat receives only the film's actual absorbed watts. The same law feeds
+`NativeCoatingEmission` and the existing coating exchange families, retaining
+directional/spectral reciprocity and original per-film temperatures. Transparent
+films emit and absorb exactly zero in this model; transmitted power never
+becomes a thermal credit. Complete material-property counts use the existing
+shared-law budgets, and immutable card/source data share storage across clones.
+
+Endpoint validation refreshes source support even during dark intervals and
+checks every bound incident wavelength against the refreshed film before any
+thermal candidate is published. Auxiliary source expiry, moving bands, invalid
+native constants or cancellation preserve the original accepted state. Caller
+temperature bounds restrict evaluation without certifying an intervening path.
+Five focused tests cover original claim pins and nonlinear temperature laws,
+transparent-to-absorbing heating against independent two-interface slab powers,
+matching SI Planck emission, infrared bath heating/cooling/equilibrium, complete
+property budgets and dark opaque/transmitting rollback.
+
+This retains the native finite, coherent, locally planar, isotropic film model
+and its thickness/index limits. A film is isothermal in its assigned native
+cell; thermalization is prompt and accepted-start optical feedback is explicit.
+No thermal expansion, arbitrary depth profile, phase-mixture rule, bulk thermal
+card association, unsupported spectral tail or new caloric integrator is added.
+<!-- material-temperature-coating:end -->
+
 ## Source-bounded quantum-efficiency detector channels
 
 `spectral::detector::QuantumEfficiencySensor<C>` retains 1–16 external

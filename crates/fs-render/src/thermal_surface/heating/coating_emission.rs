@@ -185,7 +185,7 @@ impl Resolver {
                     ResolvedFilm::Lossless(*optics)
                 }
                 CoatingOpticsModel::Law(law) => {
-                    self.law(0, law.identity(), law.row_count())?;
+                    self.law(0, law.identity(), law.budget_size())?;
                     let key = (
                         film.receiver.thermal_cell,
                         film.receiver.material_id,

@@ -13,10 +13,23 @@ use fs_blake3::{ContentHash, DomainHasher};
 use fs_thermal::enthalpy::{CellId, DepositionSimulation, MaterialId, ThermalStorageBasis};
 use std::sync::Arc;
 
+#[cfg(feature = "material-state")]
+mod material;
+
 #[derive(Clone, Copy, Debug)]
 enum Coordinate {
     Temperature,
     SpecificEnthalpy(ContentHash),
+}
+
+#[derive(Clone, Debug)]
+enum Model {
+    Rows {
+        source: ConductorSource,
+        rows: Arc<[(f64, CoherentAbsorbingCoating)]>,
+    },
+    #[cfg(feature = "material-state")]
+    Material(Arc<material::MaterialTemperatureCoating>),
 }
 
 /// An explicit constitutive law for one uniform passive coherent film.
@@ -30,14 +43,16 @@ enum Coordinate {
 ///
 /// [CoherentAbsorbingCoating] continues to own wavelength interpolation,
 /// passivity and coherent propagation. Neither state nor wavelength support
-/// is extrapolated. Evaluation allocates no memory; clones share admitted rows.
+/// is extrapolated. Row evaluation allocates no memory; clones share admitted
+/// rows. With `material-state`, a material law instead refreshes the complete
+/// original selected claims at the native temperature, including transparent
+/// states and independently evolving source wavelengths.
 #[derive(Clone, Debug)]
 pub struct SurfaceCoatingLaw {
     identity: ContentHash,
-    source: ConductorSource,
     coordinate: Coordinate,
     temperature_bounds_k: (f64, f64),
-    rows: Arc<[(f64, CoherentAbsorbingCoating)]>,
+    model: Model,
 }
 
 impl SurfaceCoatingLaw {
@@ -167,10 +182,12 @@ impl SurfaceCoatingLaw {
         retained.extend_from_slice(rows);
         Ok(Self {
             identity: hash.finalize(),
-            source,
             coordinate,
             temperature_bounds_k,
-            rows: retained.into(),
+            model: Model::Rows {
+                source,
+                rows: retained.into(),
+            },
         })
     }
 
@@ -179,8 +196,22 @@ impl SurfaceCoatingLaw {
         self.identity
     }
 
+    /// Authored state rows. An original material model has no fitted rows.
     pub fn row_count(&self) -> usize {
-        self.rows.len()
+        match &self.model {
+            Model::Rows { rows, .. } => rows.len(),
+            #[cfg(feature = "material-state")]
+            Model::Material(_) => 0,
+        }
+    }
+
+    /// Storage/query budget units: authored rows or every original source property.
+    pub(crate) fn budget_size(&self) -> usize {
+        match &self.model {
+            Model::Rows { rows, .. } => rows.len(),
+            #[cfg(feature = "material-state")]
+            Model::Material(source) => source.property_count(),
+        }
     }
 
     pub fn temperature_bounds_k(&self) -> (f64, f64) {
@@ -195,8 +226,7 @@ impl SurfaceCoatingLaw {
     }
 
     pub fn specific_enthalpy_bounds_j_kg(&self) -> Option<(f64, f64)> {
-        self.caloric_identity()
-            .map(|_| (self.rows[0].0, self.rows[self.rows.len() - 1].0))
+        self.caloric_identity().map(|_| self.coordinate_bounds())
     }
 
     /// Evaluate at an active native cell with its actual material and, for an
@@ -251,6 +281,26 @@ impl SurfaceCoatingLaw {
         Ok(coordinate)
     }
 
+    /// Requery original material claims at an endpoint, even in darkness.
+    /// Row support was admitted at construction; a material law returns its
+    /// freshly resolved film so bound wavelengths can be checked without a
+    /// second query or a coherent field solve.
+    pub(crate) fn validate_native(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        cell: CellId,
+        material: MaterialId,
+    ) -> Result<Option<CoherentAbsorbingCoating>, SurfaceHeatingError> {
+        let coordinate = self.coordinate_at(thermal, cell, material)?;
+        #[cfg(feature = "material-state")]
+        if let Model::Material(source) = &self.model {
+            return source.coating_at_temperature(coordinate).map(Some);
+        }
+        #[cfg(not(feature = "material-state"))]
+        let _ = coordinate;
+        Ok(None)
+    }
+
     /// Evaluate a temperature-coordinate law directly. An h-coordinate law
     /// refuses because temperature alone cannot resolve latent states. Use
     /// [Self::resolve] to check the actual native receiver and material.
@@ -292,9 +342,8 @@ impl SurfaceCoatingLaw {
     }
 
     fn check_coordinate(&self, coordinate: f64) -> Result<(), SurfaceHeatingError> {
-        if !coordinate.is_finite()
-            || !(self.rows[0].0..=self.rows[self.rows.len() - 1].0).contains(&coordinate)
-        {
+        let (minimum, maximum) = self.coordinate_bounds();
+        if !coordinate.is_finite() || !(minimum..=maximum).contains(&coordinate) {
             return Err(invalid(
                 "surface coating state is outside its constitutive coordinate support",
             ));
@@ -302,17 +351,29 @@ impl SurfaceCoatingLaw {
         Ok(())
     }
 
+    fn coordinate_bounds(&self) -> (f64, f64) {
+        match &self.model {
+            Model::Rows { rows, .. } => (rows[0].0, rows[rows.len() - 1].0),
+            #[cfg(feature = "material-state")]
+            Model::Material(_) => self.temperature_bounds_k,
+        }
+    }
+
     pub(crate) fn coating_at_coordinate(
         &self,
         coordinate: f64,
     ) -> Result<CoherentAbsorbingCoating, SurfaceHeatingError> {
         self.check_coordinate(coordinate)?;
-        let upper = self
-            .rows
+        let (source, rows) = match &self.model {
+            Model::Rows { source, rows } => (*source, rows),
+            #[cfg(feature = "material-state")]
+            Model::Material(source) => return source.coating_at_temperature(coordinate),
+        };
+        let upper = rows
             .partition_point(|(x, _)| *x < coordinate)
-            .clamp(1, self.rows.len() - 1);
-        let (a, left) = self.rows[upper - 1];
-        let (b, right) = self.rows[upper];
+            .clamp(1, rows.len() - 1);
+        let (a, left) = rows[upper - 1];
+        let (b, right) = rows[upper];
         let fraction = (coordinate - a) / (b - a);
         let mut samples = left.samples();
         for (sample, rhs) in samples.iter_mut().zip(right.samples()) {
@@ -326,7 +387,7 @@ impl SurfaceCoatingLaw {
             samples,
             left.thickness_m(),
             left.max_knot_span_nm(),
-            self.source,
+            source,
         )?)
     }
 }

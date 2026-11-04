@@ -80,7 +80,14 @@ fn state_resolves_complex_index_before_coherent_absorption() {
         constant.at_temperature(300.0).unwrap(),
         constant.at_temperature(631.25).unwrap()
     );
-    assert!(Arc::ptr_eq(&law.rows, &law.clone().rows));
+    let cloned = law.clone();
+    let Model::Rows { rows, .. } = &law.model else {
+        panic!("authored coating rows")
+    };
+    let Model::Rows { rows: other, .. } = &cloned.model else {
+        panic!("cloned authored coating rows")
+    };
+    assert!(Arc::ptr_eq(rows, other));
 }
 
 // G0: exact transparent endpoints and representable weak losses stay distinct.
