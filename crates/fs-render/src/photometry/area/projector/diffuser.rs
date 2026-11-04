@@ -88,15 +88,7 @@ impl PreparedDiffuser {
         let active =
             law.scattered_fraction > 0.0 && law.transmission > 0.0 && gobo.data.maximum > 0.0;
         let (half_width_m, integral) = if active {
-            let widths = law.half_slope_widths.map(|slope| distance_m * slope);
-            for (width, size) in widths.iter().zip([gobo.width_m(), gobo.height_m()]) {
-                if !width.is_finite()
-                    || *width <= 0.0
-                    || !(0.5 * size + *width).next_up().is_finite()
-                {
-                    return Err(SourceError::NumericalRange);
-                }
-            }
+            let widths = Self::metric_half_widths(law, gobo, distance_m)?;
             (widths, Some(Arc::new(PositiveIntegral::try_new(gobo)?)))
         } else {
             ([0.0; 2], None)
@@ -107,6 +99,35 @@ impl PreparedDiffuser {
             integral,
         })
     }
+
+    /// Retune support for the same immutable gobo after native lens admission.
+    /// Only metric widths depend on distance; the positive integral is shared.
+    pub(super) fn with_distance(
+        &self,
+        gobo: &GoboTransmission,
+        distance_m: f64,
+    ) -> Result<Self, SourceError> {
+        let mut result = self.clone();
+        if self.integral.is_some() {
+            result.half_width_m = Self::metric_half_widths(self.law, gobo, distance_m)?;
+        }
+        Ok(result)
+    }
+
+    fn metric_half_widths(
+        law: ParaxialBoxDiffuser,
+        gobo: &GoboTransmission,
+        distance_m: f64,
+    ) -> Result<[f64; 2], SourceError> {
+        let widths = law.half_slope_widths.map(|slope| distance_m * slope);
+        for (width, size) in widths.iter().zip([gobo.width_m(), gobo.height_m()]) {
+            if !width.is_finite() || *width <= 0.0 || !(0.5 * size + *width).next_up().is_finite() {
+                return Err(SourceError::NumericalRange);
+            }
+        }
+        Ok(widths)
+    }
+
     pub(super) fn is_identity(&self) -> bool {
         self.law.scattered_fraction == 0.0 && self.law.transmission == 1.0
     }
@@ -615,5 +636,95 @@ mod tests {
             PreparedDiffuser::try_new(law, &gobo, 1.0e-200),
             Err(SourceError::NumericalRange)
         ));
+    }
+
+    #[test]
+    fn g1_lens_refresh_reuses_the_frost_integral_and_retunes_its_metric_support() {
+        let gobo = GoboTransmission::try_new(2.0, 1.0, 2, 1, vec![0.0, 1.0]).unwrap();
+        let law = ParaxialBoxDiffuser::try_new([0.25, 0.125], 1.0, 0.8).unwrap();
+        let base = ThinLensProjector::try_new(RigidTransform::identity(), 1.0, 0.5, gobo.clone())
+            .unwrap()
+            .with_diffuser(law)
+            .unwrap();
+        let original = base.diffuser.as_ref().unwrap();
+        let original_mask = original.mask(&gobo, 0.1, 0.0).unwrap();
+        for (distance, focal_length) in [(1.0, 0.5), (1.0, 0.75), (2.0, 1.0)] {
+            let updated = base.with_lens_distances(distance, focal_length).unwrap();
+            let prepared = updated.diffuser.as_ref().unwrap();
+            assert!(Arc::ptr_eq(
+                original.integral.as_ref().unwrap(),
+                prepared.integral.as_ref().unwrap()
+            ));
+            assert_eq!(prepared.law, law);
+            assert_eq!(
+                updated.transmitted_fraction().to_bits(),
+                base.transmitted_fraction().to_bits()
+            );
+            assert_eq!(
+                prepared.half_width_m,
+                original.half_width_m.map(|width| distance * width)
+            );
+            // The kernel stays inside the outer gobo boundary and straddles
+            // the dark/clear step at x=0: its clear fraction is 1/2 + x/(2w).
+            let mask = prepared.mask(&gobo, 0.1, 0.0).unwrap();
+            close(mask, 0.8 * (0.5 + 0.1 / (2.0 * prepared.half_width_m[0])));
+            if distance == 1.0 {
+                assert_eq!(mask.to_bits(), original_mask.to_bits());
+            } else {
+                assert!(mask < original_mask);
+            }
+        }
+        assert_eq!(original.half_width_m, law.half_slope_widths());
+        assert_eq!(
+            original.mask(&gobo, 0.1, 0.0).unwrap().to_bits(),
+            original_mask.to_bits()
+        );
+    }
+
+    #[test]
+    fn g0_lens_refresh_keeps_inactive_frost_unallocated_and_refuses_bad_widths() {
+        for (power, scattered, transmission) in [(1.0, 0.0, 1.0), (1.0, 1.0, 0.0), (0.0, 1.0, 1.0)]
+        {
+            let gobo = GoboTransmission::try_new(2.0, 1.0, 1, 1, vec![power]).unwrap();
+            let law = ParaxialBoxDiffuser::try_new([0.25; 2], scattered, transmission).unwrap();
+            let base = ThinLensProjector::try_new(RigidTransform::identity(), 1.0, 0.5, gobo)
+                .unwrap()
+                .with_diffuser(law)
+                .unwrap();
+            let updated = base.with_lens_distances(2.0, 1.0).unwrap();
+            let prepared = updated.diffuser.as_ref().unwrap();
+            assert!(prepared.integral.is_none());
+            assert_eq!(prepared.half_width_m, [0.0; 2]);
+            assert_eq!(prepared.law, law);
+            assert_eq!(
+                updated.transmitted_fraction().to_bits(),
+                base.transmitted_fraction().to_bits()
+            );
+        }
+        for (size, angle, distance) in [(1.0, 1.0e-200, 1.0e-150), (1.0e154, 1.2, 1.0e308)] {
+            let gobo = GoboTransmission::try_new(size, size, 1, 1, vec![1.0]).unwrap();
+            let law = ParaxialBoxDiffuser::try_new([angle; 2], 1.0, 1.0).unwrap();
+            let base =
+                ThinLensProjector::try_new(RigidTransform::identity(), 1.0, 0.5, gobo.clone())
+                    .unwrap()
+                    .with_diffuser(law)
+                    .unwrap();
+            // The lens is admissible on its own; the retained frost law would
+            // acquire a zero or infinite metric width at the new distance.
+            assert!(
+                ThinLensProjector::try_new(
+                    RigidTransform::identity(),
+                    distance,
+                    0.5 * distance,
+                    gobo
+                )
+                .is_ok()
+            );
+            assert!(matches!(
+                base.with_lens_distances(distance, 0.5 * distance),
+                Err(SourceError::NumericalRange)
+            ));
+            assert_eq!(base.gobo_distance_m(), 1.0);
+        }
     }
 }

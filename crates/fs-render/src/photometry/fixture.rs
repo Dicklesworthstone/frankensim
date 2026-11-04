@@ -9,7 +9,9 @@
 //!
 //! Shared optics are a linear dimmer and a spatially uniform passive spectral
 //! filter, applied independently to each source's already calibrated spectrum.
-//! They do not represent a shared refracting lens, spatial mask, or interaction
+//! Optional lens-distance scales retune each finite projector through its native
+//! owner while sharing prepared assets and retaining individual optical laws.
+//! These controls do not represent a shared refracting lens or interaction
 //! between emitters. Assembly does not redistribute power between emitters.
 //! Reassemble from the original fixture data when controls change.
 
@@ -84,6 +86,7 @@ pub struct FixtureGeometry {
 pub struct FixtureOpticalState {
     dimmer: f64,
     transmittance: [f64; SPECTRAL_BINS],
+    lens_scale: [f64; 2],
 }
 
 impl Default for FixtureOpticalState {
@@ -91,6 +94,7 @@ impl Default for FixtureOpticalState {
         Self {
             dimmer: 1.0,
             transmittance: [1.0; SPECTRAL_BINS],
+            lens_scale: [1.0; 2],
         }
     }
 }
@@ -111,7 +115,41 @@ impl FixtureOpticalState {
         Ok(Self {
             dimmer,
             transmittance,
+            lens_scale: [1.0; 2],
         })
+    }
+
+    /// Scale each finite projector's original gobo distance and focal length.
+    /// Both dimensionless factors must be positive and finite. Frames, gobos,
+    /// splitters, diffuser laws, spectra and calibrated power are retained.
+    ///
+    /// These are physical lens controls, not calibrated DMX channels: changing
+    /// either distance can change both field angle and focus. The original
+    /// thin-lens owner handles real images, collimation and virtual images.
+    /// Nonidentity scales require every authored emitter to be a finite
+    /// projector, including dark emitters; unsupported source kinds refuse
+    /// during assembly with their fixture/emitter identity. Empty fixtures
+    /// remain valid. Unit scales preserve the original path exactly.
+    pub fn with_lens_scale(
+        mut self,
+        gobo_distance_scale: f64,
+        focal_length_scale: f64,
+    ) -> Result<Self, SourceError> {
+        let scale = [gobo_distance_scale, focal_length_scale];
+        if scale
+            .iter()
+            .any(|value| !value.is_finite() || *value <= 0.0)
+        {
+            return Err(SourceError::InvalidDistribution);
+        }
+        self.lens_scale = scale;
+        Ok(self)
+    }
+
+    /// Shared dimensionless `[gobo_distance_scale, focal_length_scale]`.
+    #[must_use]
+    pub const fn lens_scale(&self) -> [f64; 2] {
+        self.lens_scale
     }
 
     /// Additional linear attenuation; individual emitter dimmers are retained.
@@ -196,6 +234,12 @@ pub enum FixtureError {
     InvalidFixtureId(FixtureId),
     /// An emitter ID was zero or repeated within its fixture.
     InvalidEmitterId(FixtureEmitterIdentity),
+    /// Nonidentity shared lens controls require an authored finite projector.
+    /// A point angular law or Lambertian surface has no lens distances to scale.
+    UnsupportedLensControl {
+        /// Stable fixture and emitter identities, including a dark emitter.
+        identity: FixtureEmitterIdentity,
+    },
     /// Native geometry object identities must be unique across the rig/scene.
     DuplicateGeometryId(u64),
     /// A finite source names an absent geometry slot or repeats another finite
@@ -345,6 +389,9 @@ impl PhotometricRig {
                 if emitter.id.0 == 0 || !emitter_ids.insert(emitter.id) {
                     return Err(FixtureError::InvalidEmitterId(identity));
                 }
+                if fixture.optics.lens_scale != [1.0; 2] {
+                    return Err(FixtureError::UnsupportedLensControl { identity });
+                }
                 let source = emitter
                     .source
                     .transformed(fixture.transform)
@@ -369,12 +416,34 @@ impl PhotometricRig {
                 if geometry >= fixture.geometry.len() || !emitting_geometry.insert(geometry) {
                     return Err(FixtureError::InvalidSurfaceBinding { identity, geometry });
                 }
-                let source = emitter
+                let mut source = emitter
                     .source
                     .dimmed(fixture.optics.dimmer)
                     .and_then(|source| source.filtered(fixture.optics.transmittance))
-                    .map_err(|error| FixtureError::Source { identity, error })?
-                    .bound_to_primitive(geometry_start + geometry);
+                    .map_err(|error| FixtureError::Source { identity, error })?;
+                if fixture.optics.lens_scale != [1.0; 2] {
+                    let projector = source
+                        .projector()
+                        .ok_or(FixtureError::UnsupportedLensControl { identity })?;
+                    let [gobo_scale, focal_scale] = fixture.optics.lens_scale;
+                    let distances = [
+                        projector.gobo_distance_m() * gobo_scale,
+                        projector.focal_length_m() * focal_scale,
+                    ];
+                    if distances
+                        .iter()
+                        .any(|value| !value.is_finite() || *value <= 0.0)
+                    {
+                        return Err(FixtureError::Source {
+                            identity,
+                            error: SourceError::NumericalRange,
+                        });
+                    }
+                    source = source
+                        .with_lens_distances(distances[0], distances[1])
+                        .map_err(|error| FixtureError::Source { identity, error })?;
+                }
+                let source = source.bound_to_primitive(geometry_start + geometry);
                 flux.add(source.flux_lm());
                 rig.surfaces.push(source);
                 rig.surface_identities.push(identity);

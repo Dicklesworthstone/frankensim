@@ -262,6 +262,41 @@ impl ThinLensProjector {
         })
     }
 
+    /// Change the positive gobo separation and focal length in metres.
+    ///
+    /// The original optical frame, gobo, splitter, diffuser law and passive
+    /// transmission are retained. Native lens admission recomputes focus and
+    /// radiance; changing the gobo distance refreshes only the diffuser's
+    /// metric widths and shares its prepared integral. Focal-length-only
+    /// changes retain the complete prepared diffuser. Equal distances return
+    /// an unchanged clone, and refusal leaves this snapshot intact.
+    pub fn with_lens_distances(
+        &self,
+        gobo_distance_m: f64,
+        focal_length_m: f64,
+    ) -> Result<Self, SourceError> {
+        if gobo_distance_m == self.gobo_distance_m && focal_length_m == self.focal_length_m {
+            return Ok(self.clone());
+        }
+        let mut result = Self::try_new(
+            self.frame,
+            gobo_distance_m,
+            focal_length_m,
+            self.gobo.clone(),
+        )?;
+        result.beam_splitter = self.beam_splitter.clone();
+        result.diffuser = if gobo_distance_m == self.gobo_distance_m {
+            self.diffuser.clone()
+        } else {
+            self.diffuser
+                .as_ref()
+                .map(|diffuser| diffuser.with_distance(&self.gobo, gobo_distance_m))
+                .transpose()?
+        };
+        result.transmitted_fraction = self.transmitted_fraction;
+        Ok(result)
+    }
+
     /// Replace outgoing beam replication with this ideal passive splitter.
     ///
     /// Gobo geometry, focus and the clear-output calibration are retained.
@@ -715,5 +750,110 @@ mod tests {
                 .focus_distance_m(),
             Some(-2.0)
         );
+    }
+
+    #[test]
+    fn g1_lens_refresh_preserves_assets_and_updates_native_focus_and_radiance() {
+        let frame =
+            RigidTransform::try_new([0.0, 0.0, 0.2_f64.sin(), 0.2_f64.cos()], [0.3, -0.2, 0.1])
+                .unwrap();
+        let gobo = GoboTransmission::try_new(0.2, 0.4, 2, 1, vec![0.25, 1.0]).unwrap();
+        let splitter =
+            ParaxialBeamSplitter::try_new(vec![ProjectorBeam::try_new([0.0; 2], 0.7).unwrap()])
+                .unwrap();
+        let base = ThinLensProjector::try_new(frame, 1.0, 0.5, gobo)
+            .unwrap()
+            .with_beam_splitter(splitter)
+            .unwrap();
+        let point = Point3::new(0.0, 0.0, 0.0);
+        let direction = Vec3::new(-0.02, 0.01, 1.0);
+        let original = base
+            .luminance_per_clear_flux_per_area(point, direction)
+            .unwrap();
+        let identity = base.with_lens_distances(1.0, 0.5).unwrap();
+        assert_eq!(
+            identity
+                .luminance_per_clear_flux_per_area(point, direction)
+                .unwrap()
+                .to_bits(),
+            original.to_bits()
+        );
+
+        let updated = base.with_lens_distances(2.0, 1.0).unwrap();
+        assert_eq!(updated.frame(), frame);
+        assert_eq!(updated.focus_distance_m(), Some(2.0));
+        assert!(Arc::ptr_eq(&base.gobo.data, &updated.gobo.data));
+        assert!(std::ptr::eq(
+            base.beam_splitter().unwrap().beams(),
+            updated.beam_splitter().unwrap().beams(),
+        ));
+        assert_eq!(
+            updated.transmitted_fraction().to_bits(),
+            base.transmitted_fraction().to_bits()
+        );
+        // The ray remains in the fully transmitting cell. Its independent law
+        // is s² / gobo_area * splitter_power / cos(theta)^4.
+        let expected = 4.0 / (0.2 * 0.4) * 0.7 * (1.0_f64 + 0.02 * 0.02 + 0.01 * 0.01).powi(2);
+        let actual = updated
+            .luminance_per_clear_flux_per_area(point, direction)
+            .unwrap();
+        assert!((actual - expected).abs() <= 2.0e-14 * expected);
+        assert!((actual - 4.0 * original).abs() <= 2.0e-14 * actual);
+        let focused = base.with_lens_distances(1.0, 0.75).unwrap();
+        assert!((focused.focus_distance_m().unwrap() - 3.0).abs() < 2.0e-14);
+        assert_eq!(
+            base.with_lens_distances(1.0, 1.0)
+                .unwrap()
+                .focus_distance_m(),
+            None
+        );
+        assert_eq!(
+            base.with_lens_distances(1.0, 2.0)
+                .unwrap()
+                .focus_distance_m(),
+            Some(-2.0)
+        );
+        assert_eq!(base.gobo_distance_m(), 1.0);
+        assert_eq!(base.focal_length_m(), 0.5);
+        assert_eq!(base.focus_distance_m(), Some(1.0));
+        assert_eq!(
+            base.luminance_per_clear_flux_per_area(point, direction)
+                .unwrap()
+                .to_bits(),
+            original.to_bits()
+        );
+    }
+
+    #[test]
+    fn g0_lens_refresh_refuses_invalid_and_unrepresentable_distances() {
+        let base = ThinLensProjector::try_new(
+            RigidTransform::identity(),
+            1.0,
+            0.5,
+            GoboTransmission::try_new(0.2, 0.4, 1, 1, vec![1.0]).unwrap(),
+        )
+        .unwrap();
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(matches!(
+                base.with_lens_distances(bad, 0.5),
+                Err(SourceError::InvalidDistribution)
+            ));
+            assert!(matches!(
+                base.with_lens_distances(1.0, bad),
+                Err(SourceError::InvalidDistribution)
+            ));
+        }
+        for (gobo_distance, focal_length) in [
+            (f64::MAX, f64::MAX),
+            (f64::from_bits(1), f64::from_bits(1)),
+            (1.0, f64::from_bits(1)),
+        ] {
+            assert!(matches!(
+                base.with_lens_distances(gobo_distance, focal_length),
+                Err(SourceError::NumericalRange)
+            ));
+        }
+        assert_eq!(base.gobo_distance_m(), 1.0);
+        assert_eq!(base.focal_length_m(), 0.5);
     }
 }

@@ -3762,6 +3762,32 @@ shared controls, native camera/probe parity, visible luminance, stale binding
 refusal, haze, cancellation/replay and a 300-fixture point-emitter rig.
 These functional cases do not establish throughput or general physical bounds.
 
+#### Shared physical lens controls
+
+`FixtureOpticalState::with_lens_scale` applies positive finite multipliers to
+each emitter's original gobo separation and focal length. The existing native
+thin-lens model owns the coupled field-angle/focus response, including real
+images, exact collimation and virtual images. These are physical distances,
+not calibrated DMX zoom/focus channels. Nonidentity controls refuse point and
+ordinary Lambertian emitters, including dark emitters; unit scales preserve
+their existing behavior and empty fixtures remain valid.
+
+`ThinLensProjector::with_lens_distances` retains each source's optical frame,
+gobo, splitter, diffuser law and passive transmission. Focal-only changes share
+the prepared diffuser unchanged; changing gobo distance updates its two metric
+widths while sharing the existing positive integral tree. No texel traversal,
+tree rebuild or new per-ray operation is introduced by lens refresh.
+`PhotometricAreaEmitter::with_lens_distances` preserves clear and emitted
+lumens bit-for-bit, including prior spectral attenuation and projector losses.
+Fixture assembly reports unrepresentable distances and unsupported controls
+with the original fixture/emitter identity. The original snapshots stay intact.
+
+Native regressions check analytical focus/radiance, prepared-asset sharing,
+diffuser support, identity controls and refusals. Fixture regressions compare
+shared controls against independently configured native camera/probe paths.
+These checks retain the existing ideal-projector and unknown calibration/model
+error scope; no measured performance or manufactured-lens accuracy is claimed.
+
 ### Direct and native transport
 
 `PhotometricScene` borrows the original tracer primitives, native mesh BVHs and

@@ -135,6 +135,26 @@ impl PhotometricAreaEmitter {
         Ok(self)
     }
 
+    /// Change the existing ideal projector's physical lens distances while
+    /// retaining its original mask, splitter, diffuser, frame and calibration.
+    /// Clear and emitted lumens are preserved bit-for-bit: these distances
+    /// redistribute ray power without changing passive transmission. A source
+    /// without projector optics refuses instead of inventing a pupil model.
+    pub fn with_lens_distances(
+        &self,
+        gobo_distance_m: f64,
+        focal_length_m: f64,
+    ) -> Result<Self, SourceError> {
+        let projector = self
+            .projector
+            .as_ref()
+            .ok_or(SourceError::InvalidDistribution)?
+            .with_lens_distances(gobo_distance_m, focal_length_m)?;
+        let mut result = self.clone();
+        result.projector = Some(projector);
+        Ok(result)
+    }
+
     /// Apply a spatially uniform passive spectral filter to emitted ray power.
     ///
     /// Both clear-output and currently emitted lumens decrease by the photopic

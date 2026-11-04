@@ -38,6 +38,9 @@ use fs_render::volumes::VolumeGrid;
 use fs_render::volumes::transport::scattering::{MassScatteringSpectrum, ScatteringGrid};
 use fs_render::volumes::transport::{AbsorbingGrid, AbsorbingGridBudget, MassAbsorptionSpectrum};
 
+#[path = "photometric_fixtures/lens_controls.rs"]
+mod lens_controls;
+
 fn with_cx<R>(run: impl FnOnce(&Cx<'_>, &CancelGate) -> R) -> R {
     let gate = CancelGate::new_clock_free();
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
