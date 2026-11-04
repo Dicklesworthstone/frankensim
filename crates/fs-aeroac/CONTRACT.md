@@ -150,6 +150,22 @@ material scaling and domain/representability refusals.
   native Eulerian pressure view carries the actual emission/arrival timestamps
   and residual; the retained fluid-frame `1/kappa` is not the laboratory
   observed source-time rate, which is exactly one for these fixed endpoints.
+  `UniformFlowFrame` also maps accepted laboratory events into one shared
+  fluid-rest frame: position uses the explicit reference event, velocity is
+  relative to the fluid, and acceleration/time/source strengths are unchanged.
+  `PreparedKinematicTrajectory::in_uniform_flow` transforms each original knot
+  before the existing quintic compilation and whole-span speed admission, with
+  no intermediate knot array or added runtime allocation. Both paths must bind
+  the identical frame and original fluid. The existing moving-receiver causal
+  owner and `fs-couple` pressure renderer then retain their original root,
+  clearance, bandwidth, finite-history and cancellation policies. Explicit
+  laboratory kinematic observation uses the inverse map. The general pair's
+  whole-window rate bound remains conservative; instantaneous clock metadata
+  uses both fluid-relative velocities without multiplying pressure by it.
+  `tests/moving_receiver/uniform_flow.rs` checks moving/accelerating source and
+  receiver pressure against independently differentiated convected Green
+  potentials, actual source-time rate, bitwise zero-flow parity, large reference
+  events, relative-Mach admission and frame/domain/resource refusals.
 - `curle3d::moving::trajectory::PreparedSourceTrajectory` binds a finite C2
   quintic position history to the original microphone and fluid. Its position,
   velocity and acceleration come from the same accepted-knot interpolant.

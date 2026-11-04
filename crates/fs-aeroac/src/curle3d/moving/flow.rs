@@ -22,8 +22,10 @@
 //! Both laboratory endpoints are stationary, so the observed frequency equals
 //! the source frequency even though propagation is direction dependent.
 //! This is a homogeneous lossless free-field pressure operator. Shear/refraction,
-//! boundaries, molecular relaxation, source motion relative to the laboratory,
-//! particle velocity, acoustic energy flux and source feedback are not supplied.
+//! boundaries, molecular relaxation, particle velocity, acoustic energy flux
+//! and source feedback are not supplied by this pressure owner. Moving
+//! laboratory paths use [`UniformFlowFrame`] with the original accepted
+//! trajectory and source/receiver owners.
 
 use super::{
     CompactSourceStrength, MovingCompactLimits, MovingCompactObserver, PreparedMovingCompactSample,
@@ -34,6 +36,124 @@ use crate::curle3d::CompactSourcePhasor;
 use crate::curle3d::statistics::{finite, invalid, nonfinite};
 use fs_material::fluid_acoustics::FluidAcousticState;
 use fs_math::{c64::C64, dd::Dd, det};
+
+/// A shared fluid-rest coordinate frame for accepted laboratory trajectories.
+///
+/// The Galilean map is `x' = x - origin - U*(t-epoch)`, `v' = v-U`, `a' = a`.
+/// Time, volume injection, force vectors and their time derivatives retain
+/// their physical units and values. The explicit reference event keeps large
+/// absolute laboratory positions and clock epochs out of the interpolant.
+/// Both paths of a causal observation must retain the SAME frame.
+///
+/// This is a constant-velocity transformation, not a spatially varying-flow
+/// model. The original trajectory owner admits source and microphone speeds
+/// relative to the fluid; changing frames does not relax those Mach limits.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct UniformFlowFrame {
+    velocity_m_s: [f64; 3],
+    reference_time_s: f64,
+    reference_position_m: [f64; 3],
+}
+
+impl UniformFlowFrame {
+    /// Bind a finite fluid velocity and one explicit laboratory reference event.
+    pub fn new(
+        velocity_m_s: [f64; 3],
+        reference_time_s: f64,
+        reference_position_m: [f64; 3],
+    ) -> Result<Self, AeroacError> {
+        if !reference_time_s.is_finite()
+            || velocity_m_s
+                .iter()
+                .chain(&reference_position_m)
+                .any(|v| !v.is_finite())
+        {
+            return Err(nonfinite("uniform-flow reference frame"));
+        }
+        Ok(Self {
+            velocity_m_s,
+            reference_time_s,
+            reference_position_m,
+        })
+    }
+
+    /// Uniform fluid velocity relative to the laboratory [m/s].
+    pub const fn velocity_m_s(self) -> [f64; 3] {
+        self.velocity_m_s
+    }
+    /// Original laboratory clock epoch [s].
+    pub const fn reference_time_s(self) -> f64 {
+        self.reference_time_s
+    }
+    /// Laboratory position assigned zero fluid-frame position at the epoch [m].
+    pub const fn reference_position_m(self) -> [f64; 3] {
+        self.reference_position_m
+    }
+
+    /// Transform one laboratory event before the original quintic compilation.
+    pub fn to_fluid_frame(
+        self,
+        time_s: f64,
+        laboratory: SourceKinematics,
+    ) -> Result<SourceKinematics, AeroacError> {
+        self.transform(time_s, laboratory, false)
+    }
+
+    /// Read one interpolated event back in the original laboratory frame.
+    /// This observation changes neither accepted knots nor acoustic coefficients.
+    pub fn to_laboratory_frame(
+        self,
+        time_s: f64,
+        fluid: SourceKinematics,
+    ) -> Result<SourceKinematics, AeroacError> {
+        self.transform(time_s, fluid, true)
+    }
+
+    fn transform(
+        self,
+        time_s: f64,
+        original: SourceKinematics,
+        to_laboratory: bool,
+    ) -> Result<SourceKinematics, AeroacError> {
+        if !time_s.is_finite()
+            || original
+                .position_m
+                .iter()
+                .chain(&original.velocity_m_s)
+                .chain(&original.acceleration_m_s2)
+                .any(|v| !v.is_finite())
+        {
+            return Err(nonfinite("uniform-flow kinematic event"));
+        }
+        let dt = Dd::from_f64(time_s) - Dd::from_f64(self.reference_time_s);
+        let mut transformed = original;
+        for axis in 0..3 {
+            let velocity = Dd::from_f64(self.velocity_m_s[axis]);
+            let drift = velocity * dt;
+            let origin = Dd::from_f64(self.reference_position_m[axis]);
+            let position = Dd::from_f64(original.position_m[axis]);
+            let speed = Dd::from_f64(original.velocity_m_s[axis]);
+            let (position, speed) = if to_laboratory {
+                (position + origin + drift, speed + velocity)
+            } else {
+                (position - origin - drift, speed - velocity)
+            };
+            transformed.position_m[axis] = position.to_f64();
+            transformed.velocity_m_s[axis] = speed.to_f64();
+        }
+        if transformed
+            .position_m
+            .iter()
+            .chain(&transformed.velocity_m_s)
+            .any(|v| !v.is_finite())
+        {
+            return Err(invalid(
+                "uniform-flow kinematic transform is unrepresentable",
+            ));
+        }
+        Ok(transformed)
+    }
+}
 
 /// One fixed laboratory microphone in a homogeneous subsonic fluid flow.
 /// Sources bound to this receiver share its original fluid, velocity and frame.

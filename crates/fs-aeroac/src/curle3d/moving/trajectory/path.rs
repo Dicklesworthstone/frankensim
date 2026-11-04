@@ -10,6 +10,7 @@ use super::{
     velocity_hull_mach,
 };
 use crate::AeroacError;
+use crate::curle3d::moving::flow::UniformFlowFrame;
 use fs_ivl::Interval;
 use fs_material::fluid_acoustics::FluidAcousticState;
 
@@ -30,6 +31,7 @@ pub(super) struct KinematicSegment {
 #[derive(Debug)]
 pub struct PreparedKinematicTrajectory {
     pub(super) medium: FluidAcousticState,
+    flow_frame: Option<UniformFlowFrame>,
     pub(super) segments: Vec<KinematicSegment>,
     pub(super) declared_maximum_mach: f64,
     maximum_mach: f64,
@@ -46,6 +48,49 @@ impl PreparedKinematicTrajectory {
     pub fn new(
         medium: FluidAcousticState,
         samples: &[TimedSourceKinematics],
+        maximum_mach: f64,
+        budget: TrajectoryBudget,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, AeroacError> {
+        Self::compile(medium, samples, None, maximum_mach, budget, cancelled)
+    }
+
+    /// Prepare accepted laboratory motion in one homogeneous moving fluid.
+    ///
+    /// Position and velocity are transformed at each accepted event, before
+    /// the SAME original C2 quintic is compiled and bounded. Acceleration and
+    /// physical timestamps are unchanged. No intermediate knot array is made;
+    /// preparation storage/work and allocation-free queries retain the original
+    /// budgets. `maximum_mach` bounds speed relative to the fluid, including
+    /// every interior point of every segment.
+    ///
+    /// Prepare the microphone with the same `frame`, then use the existing
+    /// `PreparedMovingReceiverSource` and accepted-history renderer. Their
+    /// causal solver, pressure coefficients and observed source-clock rate
+    /// automatically use both paths' fluid-relative motion. The general
+    /// whole-window Doppler bound remains conservative.
+    pub fn in_uniform_flow(
+        medium: FluidAcousticState,
+        samples: &[TimedSourceKinematics],
+        frame: UniformFlowFrame,
+        maximum_mach: f64,
+        budget: TrajectoryBudget,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, AeroacError> {
+        Self::compile(
+            medium,
+            samples,
+            Some(frame),
+            maximum_mach,
+            budget,
+            cancelled,
+        )
+    }
+
+    fn compile(
+        medium: FluidAcousticState,
+        samples: &[TimedSourceKinematics],
+        flow_frame: Option<UniformFlowFrame>,
         maximum_mach: f64,
         budget: TrajectoryBudget,
         cancelled: &mut impl FnMut() -> bool,
@@ -74,7 +119,15 @@ impl PreparedKinematicTrajectory {
             ));
         }
         let c = medium.sound_speed_m_s();
-        admit_knot(samples[0], c, maximum_mach)?;
+        let transform = |mut sample: TimedSourceKinematics| -> Result<_, AeroacError> {
+            if let Some(frame) = flow_frame {
+                sample.kinematics =
+                    frame.to_fluid_frame(sample.source_time_s, sample.kinematics)?;
+            }
+            Ok(sample)
+        };
+        let mut first = transform(samples[0])?;
+        admit_knot(first, c, maximum_mach)?;
         let mut segments = Vec::new();
         segments
             .try_reserve_exact(count)
@@ -83,14 +136,14 @@ impl PreparedKinematicTrajectory {
         let mut admitted_mach = 0.0_f64;
         for pair in samples.windows(2) {
             poll(cancelled)?;
-            admit_knot(pair[1], c, maximum_mach)?;
-            if pair[1].source_time_s <= pair[0].source_time_s {
+            let last = transform(pair[1])?;
+            admit_knot(last, c, maximum_mach)?;
+            if last.source_time_s <= first.source_time_s {
                 return Err(invalid("kinematic trajectory times must increase strictly"));
             }
             // Arrival fields belong only to the fixed-receiver adapter. The
             // shared polynomial evaluator never reads these placeholders.
-            let (polynomial, bounds, stationary) =
-                QuinticSegment::compile(pair[0], pair[1], 0.0, 0.0)?;
+            let (polynomial, bounds, stationary) = QuinticSegment::compile(first, last, 0.0, 0.0)?;
             let bound = admit_speed(
                 bounds,
                 stationary,
@@ -105,10 +158,12 @@ impl PreparedKinematicTrajectory {
                 polynomial,
                 position_bounds: bounds.position,
             });
+            first = last;
         }
         poll(cancelled)?;
         Ok(Self {
             medium,
+            flow_frame,
             segments,
             declared_maximum_mach: maximum_mach,
             maximum_mach: admitted_mach,
@@ -119,6 +174,10 @@ impl PreparedKinematicTrajectory {
     /// Original material snapshot, shared by both paths of a prepared pair.
     pub const fn medium(&self) -> FluidAcousticState {
         self.medium
+    }
+    /// Original explicit laboratory-to-fluid frame, if motion was authored in flow.
+    pub const fn flow_frame(&self) -> Option<UniformFlowFrame> {
+        self.flow_frame
     }
     /// Complete physical event-time domain [s], inclusive.
     pub fn time_interval_s(&self) -> [f64; 2] {
@@ -142,10 +201,19 @@ impl PreparedKinematicTrajectory {
     pub fn segment_count(&self) -> usize {
         self.segments.len()
     }
-    /// Read the original accepted-knot interpolant and its two derivatives.
+    /// Read the accepted-knot interpolant and its two derivatives in the fluid
+    /// rest frame used by the original acoustic solver.
     /// An out-of-domain query refuses instead of extending a trajectory.
     pub fn kinematics_at(&self, time_s: f64) -> Result<SourceKinematics, AeroacError> {
         self.segment_at(time_s)?.evaluate(time_s, true)
+    }
+
+    /// Observe the same represented motion in its original laboratory frame.
+    /// Quiescent trajectories return their original interpolant directly.
+    pub fn laboratory_kinematics_at(&self, time_s: f64) -> Result<SourceKinematics, AeroacError> {
+        let state = self.kinematics_at(time_s)?;
+        self.flow_frame
+            .map_or(Ok(state), |frame| frame.to_laboratory_frame(time_s, state))
     }
 
     pub(super) fn segment_at(&self, time_s: f64) -> Result<&QuinticSegment, AeroacError> {

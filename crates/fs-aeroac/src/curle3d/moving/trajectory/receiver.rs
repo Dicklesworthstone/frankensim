@@ -48,7 +48,8 @@ pub struct PreparedMovingReceiverSample {
     /// Original Eulerian pressure coefficients at the microphone's position.
     /// Its `source_time_rate()` remains the fixed-position factor `1/kappa`.
     pub pressure: PreparedMovingCompactSample,
-    /// Accepted-knot microphone kinematics at exactly the requested time.
+    /// Accepted-knot microphone kinematics in the shared fluid rest frame at
+    /// exactly the requested time. Its path also exposes laboratory kinematics.
     pub receiver_kinematics: SourceKinematics,
     /// Actual `d tau/d t` along this microphone path, including both motions.
     pub observed_source_time_rate: f64,
@@ -56,7 +57,9 @@ pub struct PreparedMovingReceiverSample {
 
 /// Borrowed source/receiver motion admitted for one finite observation window.
 ///
-/// Both paths retain one original homogeneous, quiescent, lossless medium.
+/// Both paths retain one original homogeneous, lossless medium and the same
+/// explicit rest frame. Laboratory paths in a uniform flow share one original
+/// `UniformFlowFrame`; mixing independently shifted frames refuses.
 /// Endpoint roots prove continuous history coverage because both paths are
 /// strictly subsonic. Clearance is admitted with conservative interval bounds
 /// over source/receiver span pairs, pruning events outside the sound cone.
@@ -85,6 +88,7 @@ impl<'a> PreparedMovingReceiverSource<'a> {
         let [first, last] = config.receiver_time_interval_s;
         let [receiver_first, receiver_last] = receiver.time_interval_s();
         if source.medium() != receiver.medium()
+            || source.flow_frame() != receiver.flow_frame()
             || !first.is_finite()
             || !last.is_finite()
             || first > last

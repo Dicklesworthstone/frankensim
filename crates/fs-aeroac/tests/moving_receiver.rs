@@ -12,6 +12,9 @@ use fs_aeroac::curle3d::moving::{
 use fs_material::fluid_acoustics::FluidAcousticState;
 use std::f64::consts::PI;
 
+#[path = "moving_receiver/uniform_flow.rs"]
+mod uniform_flow;
+
 fn medium() -> FluidAcousticState {
     FluidAcousticState::try_new(1.2, 300.0).unwrap()
 }
