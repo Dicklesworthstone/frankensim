@@ -89,6 +89,9 @@ pub mod gravity;
 /// Immutable reference preparation for repeated finite-deformation evaluation.
 pub mod prepared;
 
+/// Original per-element stress, total strain, volume and material potential.
+pub mod response;
+
 /// Complete signed vibration spectra about the native finite-strain equilibrium.
 pub mod vibration;
 

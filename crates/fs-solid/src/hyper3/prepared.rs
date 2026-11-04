@@ -90,6 +90,46 @@ impl<L: FiniteStrainPotential> PreparedHyperTetProblem<'_, L> {
         Ok(f)
     }
 
+    /// Constant stress, total strain, volume and potential on every original P1 cell.
+    ///
+    /// Uses the original cached geometry and material field in connectivity
+    /// order. Material interfaces remain discontinuous; no nodal averaging or
+    /// constitutive tangent is needed. Potential semantics remain with the law.
+    ///
+    /// # Errors
+    /// Malformed displacement, material-domain refusal, unrepresentable fields
+    /// or cancellation. No partial field or constitutive update is published.
+    pub fn element_responses(
+        &self,
+        displacement_m: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<Vec<super::response::HyperTetElementResponse>, HyperTetError> {
+        super::response::recover_all(&self.problem, &self.elements, displacement_m, cx)
+    }
+
+    /// Recover one original element using only its four nodal displacements.
+    ///
+    /// Calls the supplied observation once for each original node, in original
+    /// local-node order. This avoids a full-mesh displacement/result buffer.
+    /// Material/source admission uses the total F and original law together;
+    /// callback-owned side effects are outside this read-only observation.
+    ///
+    /// # Errors
+    /// Missing element, nonfinite displacement, invalid total deformation,
+    /// source/material refusal, unrepresentable response or cancellation.
+    pub fn element_response_with(
+        &self,
+        element: usize,
+        displacement_at_node: impl FnMut(usize) -> [f64; 3],
+        cx: &Cx<'_>,
+    ) -> Result<super::response::HyperTetElementResponse, HyperTetError> {
+        let deformation = self.deformation_gradient_with(element, displacement_at_node, cx)?;
+        let response =
+            super::response::recover(&self.problem, element, &self.elements[element], deformation)?;
+        checkpoint(cx)?;
+        Ok(response)
+    }
+
     pub(super) fn evaluate(
         &self,
         displacement_m: &[f64],
