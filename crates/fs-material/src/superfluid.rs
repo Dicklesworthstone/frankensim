@@ -15,7 +15,8 @@
 //! positive normal and superfluid fractions; the zero-temperature and normal-
 //! fluid endpoints need their own limiting models. Friction is a homogeneous
 //! local source update with a declared coefficient, not vortex generation,
-//! vortex-line evolution, wall friction, or a nonlinear thermal feedback solve.
+//! vortex-line evolution, or a nonlinear thermal feedback solve. Normal wall
+//! viscosity has its own explicit permeability closure in [`normal_wall`].
 
 use crate::MaterialError;
 use crate::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
@@ -23,6 +24,10 @@ use fs_math::det;
 
 /// Source-backed helium-II reference points with their original domain limits.
 pub mod helium;
+
+/// Normal-component drag against stationary walls at authored permeability.
+pub mod normal_wall;
+pub use normal_wall::{NormalViscousWall, NormalWallRelaxation, NormalWallStep};
 
 /// Explicit SI properties at ONE equilibrium state; no material-name defaults.
 #[derive(Clone, Copy, Debug, PartialEq)]

@@ -180,6 +180,22 @@ cover analytic anisotropic decay/rotation, reactive zero heat, weak/strong
 limits, momentum/heat closure, semigroup and frame covariance, the angular
 force average, and source refusal.
 
+`NormalViscousWall` supplies positive authored permeability on the fluid-volume
+basis, with steady circular-capillary `R²/8` and parallel-plate full-gap²/12
+helpers. Normal shear viscosity drives `F_n=-eta*v_n/k`, with normal inertia
+`rho_n`; superfluid velocity is unchanged and the stationary wall receives
+the opposite external impulse. `prepare_normal_wall_relaxation` evaluates
+the exact frozen exponential source once for an allocation-free spatial batch.
+Its heat is lost normal kinetic energy, separately owned from mutual friction;
+the caller deposits it once. Weak impulse/heat, strong decay tails and scaled
+rate arithmetic are retained. This reduced law assumes laminar, fully developed,
+continuum no-slip flow at low Womersley number. It does not resolve transverse
+startup profiles, oscillatory boundary layers, entrance effects, porous
+tortuosity, moving walls, or second viscosity. A spatial composition must
+separately control its time error. `tests/superfluid_viscosity.rs` checks
+Poiseuille resistance, component and wall impulses, heat balance, coflow versus
+superflow, semigroup/rotation, weak/stiff limits and finite-domain refusal.
+
 ## Continuous gold leaching with oxygen uptake and stripping
 
 `cyanide_leach::flow::aeration::AeratedCyanidationCstr` attaches the original
