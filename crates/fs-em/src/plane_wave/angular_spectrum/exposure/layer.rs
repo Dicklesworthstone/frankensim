@@ -6,7 +6,7 @@
 //! contains the signed change of electromagnetic/polarization storage.
 
 use super::*;
-use crate::plane_wave::layers::{FIELD_PREPARATION_WORKSPACE_BYTES, PreparedLayerField};
+use crate::plane_wave::layers::FIELD_PREPARATION_WORKSPACE_BYTES;
 
 mod reservoir;
 use reservoir::{LossLaw, PoleTransfer};
@@ -275,7 +275,9 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
             .checked_mul(per_frequency_pairs)
             .ok_or_else(|| bad("film exposure preparation work overflow"))?;
         let shared_layer_bytes = n
-            .checked_mul(core::mem::size_of::<[PreparedLayerField<'_, '_>; 2]>())
+            .checked_mul(core::mem::size_of::<
+                super::super::layers::PreparedMode<'_, '_>,
+            >())
             .and_then(|v| v.checked_mul(one_sided_count))
             .ok_or_else(|| bad("film exposure workspace overflow"))?;
         let cache_bytes = law

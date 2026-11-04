@@ -4,7 +4,9 @@
 //! Right-face samples share its frequency, transverse coordinates and phase
 //! clock. Each Fourier bin uses the original two-port illumination solve;
 //! amplitudes interfere before outgoing power, interior fields or heat form.
-//! Both exterior light cones must contain the entire grid. No bin is removed.
+//! Both exterior light cones must contain every occupied source bin. Exactly
+//! empty unsupported bins retain their grid positions without a port solve.
+//! No nonzero coefficient is removed or filtered.
 //!
 //! The cache retains both native source columns for every bin and film. This
 //! costs O(points * layers) storage once; subsequent exterior/interior planes
@@ -71,7 +73,7 @@ struct IlluminatedMode<'s, 'm> {
 /// is changed. A failure or cancellation publishes no partially prepared owner.
 pub struct PreparedAngularSpectrumIllumination<'b, 's, 'm> {
     beam: &'b PlanarAngularSpectrum<'s, 'm>,
-    modes: Vec<IlluminatedMode<'s, 'm>>,
+    modes: Vec<Option<IlluminatedMode<'s, 'm>>>,
     layer_power_w: Vec<f64>,
     power: AngularSpectrumIlluminationPower,
     workspace_bytes: usize,
@@ -84,19 +86,48 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
     /// this left beam. Samples are peak V/m at the right physical face, with
     /// the left beam's transverse carrier removed when that carrier is nonzero.
     ///
-    /// A lossy, critical or evanescent exterior refuses even for a dark input
-    /// bin: the complete declared two-port source space must be propagating.
+    /// A lossy exterior refuses even for darkness. Every occupied bin must
+    /// propagate in both exterior ports. Exactly empty unsupported bins may
+    /// oversample that source space without introducing an evanescent input.
     pub fn prepare_illumination(
         &self,
         right_tangential_e_v_per_m: &[[C64; 2]],
         limits: AngularSpectrumIlluminationLimits,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<PreparedAngularSpectrumIllumination<'_, 's, 'm>, AngularSpectrumError> {
+        self.prepare_illumination_input(right_tangential_e_v_per_m, limits, true, cancelled)
+    }
+
+    /// Add authored right-face Fourier amplitudes in the same signed FFT
+    /// order and peak V/m normalization as `prepare_modes`. No analysis FFT
+    /// or filtering is performed. Coefficients describe the envelope after
+    /// removing the left beam's carrier. Both sources share the original
+    /// transverse coordinates and clock; all occupied bins must propagate in
+    /// both exterior ports, including bins illuminated from only one face.
+    pub fn prepare_illumination_modes(
+        &self,
+        right_tangential_modes_v_per_m: &[[C64; 2]],
+        limits: AngularSpectrumIlluminationLimits,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<PreparedAngularSpectrumIllumination<'_, 's, 'm>, AngularSpectrumError> {
+        self.prepare_illumination_input(right_tangential_modes_v_per_m, limits, false, cancelled)
+    }
+
+    fn prepare_illumination_input(
+        &self,
+        input: &[[C64; 2]],
+        limits: AngularSpectrumIlluminationLimits,
+        analyze_samples: bool,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<PreparedAngularSpectrumIllumination<'_, 's, 'm>, AngularSpectrumError> {
         poll(&mut cancelled)?;
         let n = self.modes.len();
         let layers = self.source.layer_count();
-        if right_tangential_e_v_per_m.len() != n {
+        if input.len() != n {
             return Err(bad("right-face Ex/Ey must cover the original beam grid"));
+        }
+        if self.source.exit_permittivity_f_m().im != 0.0 {
+            return Err(bad("two-sided beam requires lossless exterior media"));
         }
         let layer_mode_pairs = n
             .checked_mul(2)
@@ -106,7 +137,7 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
         // each with four complex values per film. Vec headers are in the mode.
         let per_point = layers
             .checked_mul(4 * core::mem::size_of::<[[C64; 2]; 2]>())
-            .and_then(|v| v.checked_add(core::mem::size_of::<IlluminatedMode<'_, '_>>()))
+            .and_then(|v| v.checked_add(core::mem::size_of::<Option<IlluminatedMode<'_, '_>>>()))
             .and_then(|v| {
                 v.checked_add(2 * core::mem::size_of::<C64>() + core::mem::size_of::<f64>())
             })
@@ -127,48 +158,38 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
         {
             return Err(bad("two-sided beam exceeds its work or workspace budget"));
         }
-        for (index, (sample, mode)) in right_tangential_e_v_per_m
-            .iter()
-            .zip(&self.modes)
-            .enumerate()
-        {
+        for (index, sample) in input.iter().enumerate() {
             if index % 256 == 0 {
                 poll(&mut cancelled)?;
             }
             if !sample.iter().all(|&z| finite(z)) {
                 return Err(bad("right-face Ex/Ey must be finite"));
             }
-            if mode.exit_kz.im != 0.0
-                || mode.exit_kz.re <= 0.0
-                || self.source.exit_permittivity_f_m().im != 0.0
-            {
-                return Err(bad(
-                    "two-sided beam requires both complete exterior light cones",
-                ));
-            }
         }
         let mut ex = Vec::with_capacity(n);
         let mut ey = Vec::with_capacity(n);
-        for (index, sample) in right_tangential_e_v_per_m.iter().enumerate() {
+        for (index, sample) in input.iter().enumerate() {
             if index % 256 == 0 {
                 poll(&mut cancelled)?;
             }
             ex.push(fft_complex(sample[0]));
             ey.push(fft_complex(sample[1]));
         }
-        let mut line = vec![FftComplex::default(); self.grid.width.max(self.grid.height)];
-        let mut scratch = line.clone();
-        for field in [&mut ex, &mut ey] {
-            transform(
-                self.grid,
-                &self.x_fft,
-                &self.y_fft,
-                field,
-                &mut line,
-                &mut scratch,
-                true,
-                &mut cancelled,
-            )?;
+        if analyze_samples {
+            let mut line = vec![FftComplex::default(); self.grid.width.max(self.grid.height)];
+            let mut scratch = line.clone();
+            for field in [&mut ex, &mut ey] {
+                transform(
+                    self.grid,
+                    &self.x_fft,
+                    &self.y_fft,
+                    field,
+                    &mut line,
+                    &mut scratch,
+                    true,
+                    &mut cancelled,
+                )?;
+            }
         }
         let area = (self.grid.width as f64 * self.grid.spacing_m[0])
             * (self.grid.height as f64 * self.grid.spacing_m[1]);
@@ -178,9 +199,19 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
         let mut heat = [0.0; MAX_LAYERS];
         for (index, mode) in self.modes.iter().enumerate() {
             poll(&mut cancelled)?;
+            let right_e = [complex(ex[index]), complex(ey[index])];
+            if mode.is_dormant() || mode.exit_kz.im != 0.0 || mode.exit_kz.re <= 0.0 {
+                if mode.incident_e == [C64::ZERO; 2] && right_e == [C64::ZERO; 2] {
+                    modes.push(None);
+                    continue;
+                }
+                return Err(bad(
+                    "two-sided occupied modes must propagate in both exterior ports",
+                ));
+            }
             let p = basis(mode.kx, mode.ky);
             let left = polarized(mode.incident_e, p);
-            let right = polarized([complex(ex[index]), complex(ey[index])], p);
+            let right = polarized(right_e, p);
             let input = [[left[0], right[0]], [left[1], right[1]]];
             let te = self
                 .source
@@ -206,11 +237,11 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
                     *sum = *sum + Dd::from_f64(area * value);
                 }
             }
-            modes.push(IlluminatedMode {
+            modes.push(Some(IlluminatedMode {
                 prepared,
                 input,
                 outgoing,
-            });
+            }));
         }
         let values = sums.map(Dd::to_f64);
         let layer_power_w: Vec<_> = layer_sums[..layers].iter().map(|s| s.to_f64()).collect();
@@ -253,6 +284,7 @@ impl<'b, 's, 'm> PreparedAngularSpectrumIllumination<'b, 's, 'm> {
     pub fn layer_absorbed_power_w(&self, layer: usize) -> Option<f64> {
         self.layer_power_w.get(layer).copied()
     }
+
     /// Exact cycle-mean heat in one film depth interval over the complete
     /// original periodic cell, in watts. Both face amplitudes interfere in
     /// the native positive loss modes before powers are formed.
@@ -271,6 +303,20 @@ impl<'b, 's, 'm> PreparedAngularSpectrumIllumination<'b, 's, 'm> {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<f64, AngularSpectrumError> {
         poll(&mut cancelled)?;
+        let layer = self
+            .source()
+            .layer(layer_index)
+            .ok_or_else(|| bad("depth-interval film index is out of range"))?;
+        if !start_depth_m.is_finite()
+            || !end_depth_m.is_finite()
+            || start_depth_m < 0.0
+            || end_depth_m < start_depth_m
+            || end_depth_m > layer.thickness_m
+        {
+            return Err(bad(
+                "depth interval must be ordered and inside the original film",
+            ));
+        }
         let grid = self.beam.grid;
         let area =
             (grid.width as f64 * grid.spacing_m[0]) * (grid.height as f64 * grid.spacing_m[1]);
@@ -279,6 +325,9 @@ impl<'b, 's, 'm> PreparedAngularSpectrumIllumination<'b, 's, 'm> {
             if index % 64 == 0 {
                 poll(&mut cancelled)?;
             }
+            let Some(mode) = mode else {
+                continue;
+            };
             for p in 0..2 {
                 let interval = mode.prepared[p].prepare_depth_interval(
                     layer_index,
@@ -335,6 +384,11 @@ impl<'b, 's, 'm> PreparedAngularSpectrumIllumination<'b, 's, 'm> {
             if index % 64 == 0 {
                 poll(&mut cancelled)?;
             }
+            let Some(illumination) = illumination else {
+                electric.push([C64::ZERO; 3]);
+                magnetic.push([C64::ZERO; 3]);
+                continue;
+            };
             let p = basis(mode.kx, mode.ky);
             let mut e = [C64::ZERO; 3];
             let mut h = [C64::ZERO; 3];
@@ -450,6 +504,11 @@ impl<'b, 's, 'm> PreparedAngularSpectrumIllumination<'b, 's, 'm> {
             if index % 64 == 0 {
                 poll(&mut cancelled)?;
             }
+            let Some(illumination) = illumination else {
+                electric.push([C64::ZERO; 3]);
+                magnetic.push([C64::ZERO; 3]);
+                continue;
+            };
             let te = illumination.prepared[0]
                 .prepare_point(layer_index, depth_m)?
                 .evaluate(illumination.input[0])?;
@@ -488,6 +547,9 @@ impl<'b, 's, 'm> PreparedAngularSpectrumIllumination<'b, 's, 'm> {
         let mut sums = [Dd::ZERO; 3];
         for (mode, illumination) in self.beam.modes.iter().zip(&self.modes) {
             poll(&mut cancelled)?;
+            let Some(illumination) = illumination else {
+                continue;
+            };
             let p = basis(mode.kx, mode.ky);
             for polarization in 0..2 {
                 let pressure = illumination.prepared[polarization]

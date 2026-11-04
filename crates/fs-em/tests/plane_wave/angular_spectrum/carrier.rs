@@ -384,8 +384,11 @@ fn carrier_admission_and_exposure_boundaries_are_explicit() {
         )
         .is_err()
     );
+    // Only the constant envelope's DC bin is occupied; shifted dark bins
+    // outside the cone do not forbid this physical near-grazing plane wave.
+    assert!(prepare([0.99, 0.0], limits()).is_ok());
     assert!(matches!(
-        prepare([0.99, 0.0], limits()),
+        prepare([1.01, 0.0], limits()),
         Err(AngularSpectrumError::IncidentLightCone { .. })
     ));
     assert!(prepare([f64::NAN, 0.0], limits()).is_err());

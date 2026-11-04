@@ -2581,14 +2581,23 @@ a conductivity attached from another material snapshot.
 samples at the incident face of an original `PlanarDielectricLayers`. The input
 is one explicitly periodic, band-limited rectangular cell in physical metres;
 x varies fastest. Both grid dimensions are powers of two, capped at 4096 to
-bound a single uninterruptible FFT pencil. All incident Fourier bins must lie
-strictly inside the incident light cone. No modes are silently removed,
-windowed or renormalized. A caller approximating an isolated beam must resolve
+bound a single uninterruptible FFT pencil. Every nonzero incident Fourier mode
+must lie strictly inside the incident light cone. Exactly zero unsupported
+bins may oversample that spectrum; they retain their physical wavevectors and
+FFT positions without evaluating an invalid film response or dividing by an
+absent longitudinal wave number. No tolerance removes small nonzero modes,
+including analysis-FFT residuals. No modes are silently removed, windowed or
+renormalized. A caller approximating an isolated beam must resolve
 its bandwidth and converge the cell/padding independently; an authored hard
 aperture's unresolved high spatial frequencies are not synthesized.
 
-The original `fs-fft` plans analyze both complex components once. Every mode
-uses its actual conserved transverse wave number and its own TE/TM response
+The original `fs-fft` plans analyze both complex sampled components once.
+`prepare_modes` instead accepts authored peak Ex/Ey Fourier amplitudes in V/m,
+with the same signed FFT order and negative Nyquist convention, without an
+extra 1/N factor or analysis FFT. This permits explicit band-limited
+interference fields on fine observation grids without inferring a source
+filter. Every supported mode uses its conserved transverse wave number and
+TE/TM response
 from the original source/material/film owner. Complex amplitudes combine before
 forming intensity. Source epsilon and mu remain distinct; scalar refractive
 index or normal-incidence transmission cannot replace their vector response.
@@ -2615,6 +2624,9 @@ after propagation into an absorbing exit is computed from the actual field,
 without relabeling it as film absorption. Local flux retains interference and
 its sign. Numerical-storage and FFT-work budgets precede allocation; source
 response work is bounded by the admitted grid and original 64-layer maximum.
+Storage and work limits conservatively cover the full declared grid. Dormant
+bins retain empty entries in the shared film and two-sided response caches;
+field, heat, force, coherence and exposure queries preserve their zero fields.
 Cancellation polls between rows, pencils and bounded mode batches, publishing
 no partial field. Further planes require six separable FFTs and linear modal
 work, with no repeated constitutive or film solve. This is an operation-count
@@ -2625,7 +2637,11 @@ signed power, and evanescent decay. Source-backed integration regressions cover
 original-film reduction, an independent direct Fourier diffraction series,
 TIR, exact critical TE/TM fields and finite tangential flux, independent
 critical-load film matrices, both one-sided critical limits, Debye film/exit
-loss, budgets and cancellation. Their Cargo execution
+loss, budgets and cancellation. Oversampling regressions additionally cover
+uniform sampled/modal equivalence, analytic opposite-mode fringes and finite
+apertures, coherent versus independent-factor observations, interior electric
+nodes under counterillumination, smallest-subnormal unsupported-mode refusal,
+budget boundaries, cancellation and replay. Their Cargo execution
 requires the workspace constellation dependencies. This feature does not add
 transients, incident near-field excitation, rough/finite film edges, arbitrary
 three-dimensional scattering, or empirical material-frequency qualification.
@@ -2638,8 +2654,9 @@ The physical field is that envelope times `exp(-i*k_carrier·x)`. Every
 Fourier wavevector receives the carrier before its original TE/TM film solve,
 Snell refraction, vector Maxwell reconstruction and propagation. Incidence
 angles are therefore continuous rather than quantized to the envelope's FFT
-bins. The complete shifted grid must fit inside the incident light cone;
-critical and evanescent exit waves retain their existing physical treatment.
+bins. Every occupied shifted mode must fit inside the incident light cone;
+exactly empty unsupported bins retain their positions without a film solve.
+Critical and evanescent exit waves retain their existing physical treatment.
 The original `prepare` is exactly the zero-carrier case.
 
 Carrier phases retain double-double products during argument reduction and
@@ -2772,10 +2789,15 @@ must debit the reported absorption only once.
 `PlanarAngularSpectrum::prepare_illumination` adds an explicitly coherent
 right-face Ex/Ey grid to an original left-face beam. Both fields share the
 original frequency, transverse coordinates, periodic cell and phasor clock.
-Every spatial bin uses the existing `PreparedLayerIllumination` for both TE
-and TM, with fixed tangential axes on both faces. Both complete exterior light
-cones must propagate in lossless media; critical, evanescent and lossy source
-ports refuse even when a supplied amplitude is zero. No bin is discarded.
+Every supported spatial bin uses the existing `PreparedLayerIllumination` for
+both TE and TM, with fixed tangential axes on both faces.
+`prepare_illumination_modes` accepts the right-face peak Fourier amplitudes
+directly, with the same ordering and normalization as `prepare_modes`.
+Both exterior media must remain lossless, including for a dark source. Every
+bin occupied from either face must propagate in both exterior ports; an
+occupied critical or evanescent port refuses even when the other face is dark.
+Only bins exactly empty on both faces may bypass an unsupported two-port solve,
+retaining their original grid positions. No nonzero coefficient is discarded.
 
 The prepared owner reports positive incoming/outgoing watts per face and
 original positive per-film absorption. Each outgoing field is the coherent sum

@@ -7,7 +7,10 @@
 //! phase and its own TE/TM stack response. Exact kz propagation, Ez and all H
 //! components follow Maxwell's equations; there is no paraxial approximation.
 //!
-//! The entire incident grid must lie strictly inside the incident light cone.
+//! Every nonzero incident mode must lie strictly inside the incident light cone.
+//! Exactly zero exterior bins may oversample that supported spectrum. No
+//! tolerance removes nonzero modes; authored band-limited coefficients can use
+//! `prepare_modes` without introducing analysis-FFT roundoff outside the cone.
 //! Evanescent transmission and tunnelling remain supported by the original
 //! films. Transmitted tangential E and H retain the finite field at an exactly
 //! critical exit without dividing by its zero normal wavenumber. No spectral
@@ -200,9 +203,35 @@ struct Mode {
     absorbed_power_w: f64,
 }
 
+impl Mode {
+    // A zero incidence cosine marks an unsupported, exactly empty source bin.
+    // Retain its physical wave numbers and FFT position, but never evaluate
+    // a film response or divide by its absent longitudinal wave number.
+    fn dormant(kx: f64, ky: f64) -> Self {
+        Self {
+            kx,
+            ky,
+            incidence_cosine: 0.0,
+            incident_kz: 0.0,
+            exit_kz: C64::ZERO,
+            incident_e: [C64::ZERO; 2],
+            reflected_e: [C64::ZERO; 2],
+            transmitted_e_te_tm: [C64::ZERO; 2],
+            transmitted_h_te_tm: [C64::ZERO; 2],
+            reflected_power_w: 0.0,
+            transmitted_power_w: 0.0,
+            absorbed_power_w: 0.0,
+        }
+    }
+
+    fn is_dormant(&self) -> bool {
+        self.incidence_cosine == 0.0
+    }
+}
+
 /// One prepared coherent beam and its original material/film owner. The two
-/// input FFTs and all angle-dependent film solves happen once. Each additional
-/// plane needs six separable FFTs and O(N) propagation/reconstruction work;
+/// input FFTs (for samples) and angle-dependent film solves happen once. Each
+/// additional plane needs six separable FFTs and O(N) propagation/reconstruction work;
 /// neither the material laws nor the film recursion are reevaluated there.
 pub struct PlanarAngularSpectrum<'s, 'm> {
     source: &'s PlanarDielectricLayers<'m>,
@@ -221,6 +250,9 @@ pub struct PlanarAngularSpectrum<'s, 'm> {
 }
 
 impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
+    /// Analyze physical samples on the declared periodic grid. Nonzero
+    /// coefficients outside the incident light cone refuse, including small
+    /// FFT residuals; use `prepare_modes` for an authored band-limited source.
     pub fn prepare(
         source: &'s PlanarDielectricLayers<'m>,
         grid: AngularSpectrumGrid,
@@ -244,8 +276,9 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
     /// All original mode wavevectors are shifted before applying Snell's law,
     /// polarization, Maxwell reconstruction and propagation. No angular
     /// rounding, paraxial approximation, resampling or spectral truncation is
-    /// involved. The whole shifted grid must remain inside the incident light
-    /// cone; its exit may propagate, reach critical incidence, or be evanescent.
+    /// involved. Every occupied shifted mode must remain inside the incident
+    /// light cone; exactly empty unsupported bins remain dormant. Its exit may
+    /// propagate, reach critical incidence, or be evanescent.
     ///
     /// Carrier phases are prepared once and reused by all field queries,
     /// including film interiors, partial coherence and two-sided illumination.
@@ -258,6 +291,54 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
         carrier_rad_m: [f64; 2],
         incident_tangential_e_v_per_m: &[[C64; 2]],
         limits: AngularSpectrumLimits,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, AngularSpectrumError> {
+        Self::prepare_input(
+            source,
+            grid,
+            carrier_rad_m,
+            incident_tangential_e_v_per_m,
+            limits,
+            true,
+            cancelled,
+        )
+    }
+
+    /// Prepare authored Fourier coefficients without an analysis FFT or carrier.
+    ///
+    /// Each Ex/Ey coefficient is a peak amplitude in V/m multiplying
+    /// exp(-i*(kx*x+ky*y)) at the first film face, with no extra 1/N factor.
+    /// The row-major order is the original signed FFT order: zero, positive
+    /// bins, then negative bins, with a negative Nyquist bin on even axes.
+    /// Zero coefficients outside the incident light cone are retained as
+    /// dormant grid positions; any nonzero grazing/evanescent input refuses.
+    /// This does not infer, filter, window or renormalize a source spectrum.
+    /// All original storage/work limits and six-component field paths apply.
+    pub fn prepare_modes(
+        source: &'s PlanarDielectricLayers<'m>,
+        grid: AngularSpectrumGrid,
+        incident_tangential_modes_v_per_m: &[[C64; 2]],
+        limits: AngularSpectrumLimits,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, AngularSpectrumError> {
+        Self::prepare_input(
+            source,
+            grid,
+            [0.0; 2],
+            incident_tangential_modes_v_per_m,
+            limits,
+            false,
+            cancelled,
+        )
+    }
+
+    fn prepare_input(
+        source: &'s PlanarDielectricLayers<'m>,
+        grid: AngularSpectrumGrid,
+        carrier_rad_m: [f64; 2],
+        input: &[[C64; 2]],
+        limits: AngularSpectrumLimits,
+        analyze_samples: bool,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, AngularSpectrumError> {
         poll(&mut cancelled)?;
@@ -272,13 +353,13 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
                 .filter(|&bytes| bytes <= limits.maximum_workspace_bytes)
                 .ok_or_else(|| bad("carrier exceeds its workspace budget"))?;
         }
-        if incident_tangential_e_v_per_m.len() != n {
-            return Err(bad("finite Ex/Ey samples must cover the declared grid"));
+        if input.len() != n {
+            return Err(bad("finite Ex/Ey inputs must cover the declared grid"));
         }
-        for chunk in incident_tangential_e_v_per_m.chunks(256) {
+        for chunk in input.chunks(256) {
             poll(&mut cancelled)?;
             if !chunk.iter().flatten().all(|&e| finite(e)) {
-                return Err(bad("finite Ex/Ey samples must cover the declared grid"));
+                return Err(bad("finite Ex/Ey inputs must cover the declared grid"));
             }
         }
         let omega = source.angular_frequency_rad_s();
@@ -298,22 +379,6 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
             || exit_omega_epsilon.im > 0.0
         {
             return Err(bad("wave number or magnetic admittance is unrepresentable"));
-        }
-        // Admit ALL bins before allocating FFT plans or evaluating the films.
-        // Real transverse wave numbers are conserved across every interface.
-        let maximum_component = |count, spacing, carrier: f64| {
-            [count / 2, (count - 1) / 2]
-                .map(|bin| (carrier + transverse_number(bin, count, spacing)).abs())
-                .into_iter()
-                .fold(0.0, f64::max)
-        };
-        let max_kx = maximum_component(grid.width, grid.spacing_m[0], carrier_rad_m[0]);
-        let max_ky = maximum_component(grid.height, grid.spacing_m[1], carrier_rad_m[1]);
-        if det::hypot(max_kx / k, max_ky / k) >= 1.0 {
-            return Err(AngularSpectrumError::IncidentLightCone {
-                column: grid.width / 2,
-                row: grid.height / 2,
-            });
         }
         let x_fft = Fft::new(grid.width);
         poll(&mut cancelled)?;
@@ -344,37 +409,31 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
         }
         let mut ex = Vec::with_capacity(n);
         let mut ey = Vec::with_capacity(n);
-        for (index, sample) in incident_tangential_e_v_per_m.iter().enumerate() {
+        for (index, sample) in input.iter().enumerate() {
             if index % 256 == 0 {
                 poll(&mut cancelled)?;
             }
             ex.push(fft_complex(sample[0]));
             ey.push(fft_complex(sample[1]));
         }
-        let mut line = vec![FftComplex::default(); grid.width.max(grid.height)];
-        let mut scratch = line.clone();
         // Coefficients multiply exp(-i k_t.r_t), so fs-fft INVERSE analyzes the
         // samples, including its 1/N normalization. FORWARD synthesizes them.
-        transform(
-            grid,
-            &x_fft,
-            &y_fft,
-            &mut ex,
-            &mut line,
-            &mut scratch,
-            true,
-            &mut cancelled,
-        )?;
-        transform(
-            grid,
-            &x_fft,
-            &y_fft,
-            &mut ey,
-            &mut line,
-            &mut scratch,
-            true,
-            &mut cancelled,
-        )?;
+        if analyze_samples {
+            let mut line = vec![FftComplex::default(); grid.width.max(grid.height)];
+            let mut scratch = line.clone();
+            for field in [&mut ex, &mut ey] {
+                transform(
+                    grid,
+                    &x_fft,
+                    &y_fft,
+                    field,
+                    &mut line,
+                    &mut scratch,
+                    true,
+                    &mut cancelled,
+                )?;
+            }
+        }
         let mut modes = Vec::with_capacity(n);
         let mut power = AngularSpectrumPower {
             incident_w: 0.0,
@@ -391,15 +450,22 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
                 let kx =
                     carrier_rad_m[0] + transverse_number(column, grid.width, grid.spacing_m[0]);
                 let ky = carrier_rad_m[1] + transverse_number(row, grid.height, grid.spacing_m[1]);
+                if !kx.is_finite() || !ky.is_finite() {
+                    return Err(bad("transverse wave number is unrepresentable"));
+                }
+                let incident_e = [complex(ex[index]), complex(ey[index])];
                 let sine = det::hypot(kx / k, ky / k);
                 let cosine = det::sqrt((1.0 - sine) * (1.0 + sine));
                 if !cosine.is_finite() || cosine <= 0.0 {
+                    if incident_e == [C64::ZERO; 2] {
+                        modes.push(Mode::dormant(kx, ky));
+                        continue;
+                    }
                     return Err(AngularSpectrumError::IncidentLightCone { column, row });
                 }
                 let te = source.response(cosine, Polarization::Te)?;
                 let tm = source.response(cosine, Polarization::Tm)?;
                 let exit_kz = te.exit_normal_wavenumber_rad_m;
-                let incident_e = [complex(ex[index]), complex(ey[index])];
                 let p = basis(kx, ky);
                 let a = polarized(incident_e, p);
                 let reflected_e = cartesian(
@@ -601,6 +667,9 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
         side: AngularSpectrumSide,
         distance_from_face_m: f64,
     ) -> Result<([C64; 3], [C64; 3]), AngularSpectrumError> {
+        if mode.is_dormant() {
+            return Ok(([C64::ZERO; 3], [C64::ZERO; 3]));
+        }
         let mut e = [C64::ZERO; 3];
         let mut h = [C64::ZERO; 3];
         let mut add = |kz, omega_mu, transverse, distance| -> Result<(), AngularSpectrumError> {

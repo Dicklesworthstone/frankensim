@@ -774,7 +774,7 @@ fn dark_counterbeam_recovers_native_fields_heat_and_force_with_exact_budget_boun
 }
 
 #[test]
-fn counterbeam_refuses_lossy_or_nonpropagating_right_exterior_even_when_dark() {
+fn counterbeam_refuses_lossy_or_occupied_nonpropagating_right_exterior() {
     let dense = material(4.0, 1.0);
     let sparse = material(1.0, 1.0);
     let stack =
@@ -785,7 +785,9 @@ fn counterbeam_refuses_lossy_or_nonpropagating_right_exterior_even_when_dark() {
         height: 1,
         spacing_m: [2.5, 1.0],
     };
-    let input = vec![[C64::ONE, C64::ZERO]; 4];
+    let input: Vec<_> = (0..4)
+        .map(|i| [C64::from_re(if i % 2 == 0 { 1.0 } else { -1.0 }), C64::ZERO])
+        .collect();
     let beam = PlanarAngularSpectrum::prepare(&stack, g, &input, limits(), || false).unwrap();
     assert!(beam.radiation_force(|| false).is_ok());
     assert!(
