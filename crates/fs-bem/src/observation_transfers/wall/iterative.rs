@@ -9,8 +9,8 @@ use fs_solver::krylov::SolveReport;
 
 mod response;
 pub use response::{
-    BoundaryPortImpedance, IterativeBoundaryResponse, IterativeCoherentDirectivity,
-    IterativeDirectivityOptions, IterativeFarFieldSample,
+    BoundaryPortImpedance, IterativeBoundaryPower, IterativeBoundaryResponse,
+    IterativeCoherentDirectivity, IterativeDirectivityOptions, IterativeFarFieldSample,
 };
 
 /// Explicit spatial/numerical controls; the material and physical sources are

@@ -1807,6 +1807,25 @@ complete physical matrix. A negative measured margin remains negative. These
 coordinate-dependent diagnostics are not an in-loop reciprocal/passive rational
 realization or an error bound for the continuum problem.
 
+`IterativeBoundaryResponse::coherent_boundary_power` integrates the same
+finite-source fields directly, without another solve or a source-pair matrix.
+Original signed pressure, actual normal velocity and prescribed source velocity
+are superposed before the quadratic work. The result separates source input,
+signed outward boundary work and absorption by the original local wall laws,
+including all coherent cross terms. Absorption uses the original frequency-bound
+`Re(beta)*|p|^2/(2*rho*c)`; actual velocity comes from the retained solve, making
+the returned balance a measured identity rather than an imposed closure.
+An apparent-work scale normalizes the balance even when signed active powers
+cancel. Binary-scaled fields and compensated sums preserve tiny/large drives and
+quiet fields between cancelling sources; nonrepresentable nonzero work refuses.
+No negative outward work is clipped and no per-source absorption sum replaces
+interference. Two source/panel passes have an explicit product budget, admitted
+before the material query, with bounded cancellation polling and no partial
+output. Storage is linear in panels plus sources. Compact and hybrid source
+banks refuse this finite-work-port operation because their retained compact
+columns are scattered fields and do not define point-source self work. These
+discrete work diagnostics do not bound BEM/FMM or continuum error.
+
 `far_field` returns total outgoing amplitudes under `p ~ F exp(ikr)/r` using
 the original integrated triangle phase owner and exact direct volume monopoles
 and force dipoles. Force amplitudes are `-i k (direction dot F)/(4 pi)` times

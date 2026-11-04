@@ -195,6 +195,53 @@ fn retained_multibody_fields_supply_loading_receivers_and_coherent_wall_work() {
         .sum();
     assert!((absorbed - incoherent).abs() > 1e-6 * absorbed);
 
+    let work = 2 * rates.len() as u64 * surface.areas().len() as u64;
+    let coherent = retained
+        .coherent_boundary_power(&rates, work, &gate)
+        .unwrap();
+    assert_eq!(coherent.omega_rad_s, omega);
+    assert_eq!(coherent.operator_hash, retained.operator_hash());
+    assert_eq!(coherent.source_panel_products, work);
+    assert!((coherent.input_power_w - direct_drive_work).abs() < 2e-12 * scale);
+    assert!((coherent.outward_power_w - exterior_flux).abs() < 2e-12 * scale);
+    assert!((coherent.absorbed_power_w - absorbed).abs() < 2e-12 * scale);
+    assert!(coherent.relative_balance < 2e-12);
+    assert!(coherent.apparent_power_scale_w >= coherent.input_power_w.abs());
+
+    // The same phases and physical fields, over 580 decades of power.
+    // Neither squaring the raw rates nor normalizing all fields to one SI
+    // scale would preserve this range without avoidable overflow/underflow.
+    for amplitude in [1e-145, 1.0, 1e145] {
+        let transformed = rates.map(|rate| C64::new(-rate.im, rate.re).scale(amplitude));
+        let changed = retained
+            .coherent_boundary_power(&transformed, work, &gate)
+            .unwrap();
+        for (actual, reference) in [
+            (changed.input_power_w, coherent.input_power_w),
+            (changed.outward_power_w, coherent.outward_power_w),
+            (changed.absorbed_power_w, coherent.absorbed_power_w),
+            (
+                changed.apparent_power_scale_w,
+                coherent.apparent_power_scale_w,
+            ),
+        ] {
+            let expected = (reference * amplitude) * amplitude;
+            assert!(
+                (actual / expected - 1.0).abs() < 2e-12,
+                "{actual:e} != {expected:e}"
+            );
+        }
+        assert!(changed.relative_balance < 2e-12);
+    }
+    let zero = retained
+        .coherent_boundary_power(&[C64::ZERO; 2], work, &gate)
+        .unwrap();
+    assert_eq!(zero.input_power_w, 0.0);
+    assert_eq!(zero.outward_power_w, 0.0);
+    assert_eq!(zero.absorbed_power_w, 0.0);
+    assert_eq!(zero.apparent_power_scale_w, 0.0);
+    assert_eq!(zero.relative_balance, 0.0);
+
     // Removing the passive body changes the same finite radiator's physical
     // load and microphones, not just a later directional display.
     let (bare_surface, bare_sources, bare_traces, bare_boundary) = fixture(0, None);
@@ -221,6 +268,89 @@ fn retained_multibody_fields_supply_loading_receivers_and_coherent_wall_work() {
     let pressure: Vec<_> = observed.transfer.iter().step_by(4).copied().collect();
     let bare_pressure: Vec<_> = bare_observed.transfer.iter().step_by(4).copied().collect();
     assert!(relative(&pressure, &bare_pressure) > 1e-4);
+}
+
+#[test]
+fn coherent_boundary_work_retains_quiet_fields_between_large_cancelling_sources() {
+    let (surface, _, traces, boundary) = fixture(0, Some([0.06, 0.0, 0.02]));
+    let gate = CancelGate::new_clock_free();
+    // The last mode reverses the original signed shape. Its positive rate
+    // cancels the first mode, while the middle mode carries the quiet field.
+    let sources: Vec<_> = (0..3)
+        .map(|i| SourceId::StructuralMode(format!("shape-{i}")))
+        .collect();
+    let modes = [
+        traces[0].clone(),
+        traces[0].clone(),
+        traces[0].iter().map(|v| -v).collect(),
+    ];
+    let owner = IterativeBoundaryObservation::for_surface(
+        &surface,
+        medium(),
+        &sources,
+        &modes,
+        &receivers(),
+        boundary,
+        options(128),
+        &gate,
+    )
+    .unwrap();
+    let mut response = owner
+        .solve_frequency(TAU * 700.0, 6 * surface.areas().len(), &gate)
+        .unwrap();
+    // Preserve exact +/- columns for this arithmetic test. Independent GMRES
+    // roundoff is not source cancellation accuracy and is tested elsewhere.
+    let positive = response.solutions[0].clone();
+    response.solutions[1] = positive.clone();
+    response.solutions[2].pressure = positive.pressure.iter().map(|&v| -v).collect();
+    response.solutions[2].velocity = positive.velocity.iter().map(|&v| -v).collect();
+    let work = 6 * surface.areas().len() as u64;
+    let reference = response
+        .coherent_boundary_power(&[C64::ZERO, C64::ONE, C64::ZERO], work, &gate)
+        .unwrap();
+    let quiet = response
+        .coherent_boundary_power(
+            &[C64::from_re(1e300), C64::ONE, C64::from_re(1e300)],
+            work,
+            &gate,
+        )
+        .unwrap();
+    for (actual, expected) in [
+        (quiet.input_power_w, reference.input_power_w),
+        (quiet.outward_power_w, reference.outward_power_w),
+        (quiet.absorbed_power_w, reference.absorbed_power_w),
+    ] {
+        assert!(
+            (actual / expected - 1.0).abs() < 2e-12,
+            "{actual:e} != {expected:e}"
+        );
+    }
+    assert!(quiet.relative_balance < 2e-12);
+    // Finite input is insufficient when its nonzero physical work cannot be
+    // represented. Do not report either infinity or an artificial zero loss.
+    for amplitude in [1e300, 1e-300] {
+        assert!(
+            response
+                .coherent_boundary_power(
+                    &[C64::ZERO, C64::from_re(amplitude), C64::ZERO],
+                    work,
+                    &gate,
+                )
+                .is_err()
+        );
+    }
+    // A defect in the retained actual velocity must remain visible in both
+    // signed flux and closure; rebuilding velocity from beta would hide it.
+    for velocity in &mut response.solutions[1].velocity {
+        *velocity = -*velocity;
+    }
+    let perturbed = response
+        .coherent_boundary_power(&[C64::ZERO, C64::ONE, C64::ZERO], work, &gate)
+        .unwrap();
+    assert!(perturbed.outward_power_w < 0.0);
+    assert!((perturbed.outward_power_w / reference.outward_power_w + 1.0).abs() < 2e-12);
+    assert!((perturbed.balance_w / reference.outward_power_w - 2.0).abs() < 2e-12);
+    assert!(perturbed.relative_balance > 1e-6);
 }
 
 #[test]
@@ -342,6 +472,17 @@ fn signed_structural_port_keeps_work_units_and_refuses_unfunded_consumers() {
     assert!(ports.acoustic_impedance().is_err());
     assert!(ports.resisting_efforts(&[C64::ONE]).is_err());
     let rates = [C64::new(0.4, -0.2), C64::new(-2e-6, 3e-6)];
+    assert!(response.coherent_boundary_power(&rates, 0, &gate).is_err());
+    assert!(
+        response
+            .coherent_boundary_power(&rates[..1], u64::MAX, &gate)
+            .is_err()
+    );
+    assert!(
+        response
+            .coherent_boundary_power(&[C64::ONE, C64::from_re(f64::NAN)], u64::MAX, &gate)
+            .is_err()
+    );
     let efforts = ports.resisting_efforts(&rates).unwrap();
     for row in 0..2 {
         let expected =
@@ -357,6 +498,12 @@ fn signed_structural_port_keeps_work_units_and_refuses_unfunded_consumers() {
     ));
     assert!(matches!(
         response.velocity_port_impedance(4, u64::MAX, &gate),
+        Err(IterativeObservationError::Transfer(
+            TransferError::Cancelled
+        ))
+    ));
+    assert!(matches!(
+        response.coherent_boundary_power(&rates, u64::MAX, &gate),
         Err(IterativeObservationError::Transfer(
             TransferError::Cancelled
         ))
@@ -391,6 +538,11 @@ fn point_response_retains_total_observation_but_has_no_finite_self_port() {
     let response = owner
         .solve_frequency(omega, 2 * surface.areas().len(), &gate)
         .unwrap();
+    assert!(
+        response
+            .coherent_boundary_power(&[C64::ONE], u64::MAX, &gate)
+            .is_err()
+    );
     assert_eq!(
         response.source_monopole(0).unwrap().unwrap().position_m,
         point[0].position_m

@@ -53,10 +53,10 @@ pub use radiation::{PreparedRadiationObservation, PreparedRadiationOptions, Radi
 mod wall;
 pub use wall::{
     BoundaryObservationBake, BoundaryPortImpedance, IterativeBoundaryObservation,
-    IterativeBoundaryObservationBake, IterativeBoundaryResponse, IterativeCoherentDirectivity,
-    IterativeDirectivityOptions, IterativeFarFieldSample, IterativeObservationError,
-    IterativeObservationOptions, IterativeObservationSample, IterativeSourceReport, LocalBoundary,
-    LocalBoundaryObservation, LocalWall, LowerBandWindow,
+    IterativeBoundaryObservationBake, IterativeBoundaryPower, IterativeBoundaryResponse,
+    IterativeCoherentDirectivity, IterativeDirectivityOptions, IterativeFarFieldSample,
+    IterativeObservationError, IterativeObservationOptions, IterativeObservationSample,
+    IterativeSourceReport, LocalBoundary, LocalBoundaryObservation, LocalWall, LowerBandWindow,
 };
 
 /// Largest admitted DFT/CQ size. Work budgets may be stricter.

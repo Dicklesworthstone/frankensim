@@ -11,6 +11,8 @@ pub mod directivity;
 pub use directivity::{
     IterativeCoherentDirectivity, IterativeDirectivityOptions, IterativeFarFieldSample,
 };
+mod work;
+pub use work::IterativeBoundaryPower;
 
 /// Immutable exp(-i omega t) fields at one positive physical frequency.
 /// Point-source solutions are scattered fields; finite-source solutions are
