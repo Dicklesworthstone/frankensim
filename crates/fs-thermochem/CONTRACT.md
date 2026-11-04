@@ -2725,3 +2725,34 @@ of pure and partial-mixture fugacity and all caloric departures down to
 energy/entropy Cv identities. These numerical limits do not extend the
 physical validity of the source EOS or establish a continuum-flow regime.
 
+## Homogeneous binary square-gradient constitutive owner
+
+`solution::gradient::BinarySquareGradientV1` retains the exact original binary
+regular-solution pair at one admitted temperature, an explicit positive site
+concentration `c` [mol/m³], and nonnegative square-gradient coefficient
+`kappa` [J/m]. It supplies the homogeneous exchange chemical potential,
+convex-split potential and positive implicit curvature used by spatial
+miscibility evolution. Local cells are never independently replaced by bulk
+coexistence states. In the spinodal-capable `chi > 2` regime, zero `kappa`
+refuses; the convex/ideal regime admits zero for the diffusion limit.
+
+The spatial energy density is `c*g_mix(x,T) + kappa*|grad x|²/2`.
+`kappa` is an independently qualified interfacial constitutive parameter;
+it is not a liquid-liquid surface tension [J/m²]. Constant `c` assumes equal,
+fixed partial molar volumes. Unequal species molar masses are permitted, but a
+spatial consumer must declare the molar/volume reference frame.
+
+Both composition coordinates remain independently represented. Pure-state
+mixing energy is defined, while requesting a finite logarithmic chemical
+potential at a pure endpoint refuses. Near the critical composition, the
+exchange-potential series retains the small cubic term after cancellation;
+direct free-energy increments retain the critical fourth-order contribution,
+trace changes and exact endpoint reversal without subtracting two large
+absolute energies. The split treats logarithmic entropy, negative-chi
+interactions and gradient energy implicitly; positive-chi concavity uses the
+previous composition. The owner supplies constitutive quantities only, with no
+time integrator or claim of nucleation kinetics.
+
+Five focused native tests cover original-energy derivatives, reversible and
+trace increments, critical higher-order terms, the convex-split energy bound
+for both signs of chi, and endpoint/regularization admission.

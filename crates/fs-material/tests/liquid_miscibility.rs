@@ -2,6 +2,8 @@
 //! deliberately nonideal; these fixtures are not measurements of real liquids.
 #[path = "liquid_miscibility/caloric.rs"]
 mod caloric;
+#[path = "liquid_miscibility/gradient.rs"]
+mod gradient;
 #[path = "liquid_miscibility/mixing.rs"]
 mod mixing;
 
@@ -32,12 +34,15 @@ fn composition(basis: CompositionBasis) -> QuantitySpec {
     quantity(QuantityKind::Composition(basis))
 }
 fn card(basis: CompositionBasis, upper_x: f64) -> MaterialCard {
+    card_with_density(basis, upper_x, [1000.0, 1100.0, 800.0])
+}
+fn card_with_density(basis: CompositionBasis, upper_x: f64, density: [f64; 3]) -> MaterialCard {
     let mut claims = ClaimSet::new();
     for (name, spec, values) in [
         (
             DENSITY_PROPERTY,
             QuantitySpec::dimensional(Density::DIMS),
-            [1000.0, 1100.0, 800.0],
+            density,
         ),
         (
             SPECIFIC_HEAT_CAPACITY_PROPERTY,

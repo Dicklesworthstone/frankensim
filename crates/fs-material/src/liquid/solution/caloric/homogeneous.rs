@@ -15,7 +15,7 @@
 //! account. Transport Cp retains the same independent source qualification as
 //! the parent caloric adapter.
 
-use super::super::{BinaryLiquidError, positive_value};
+use super::super::positive_value;
 use super::{
     BinaryCaloricErrorV1, BinaryCaloricSolveV1, BinaryCaloricStateV1, BinaryLiquidCaloricBalance,
     BinaryLiquidCaloricError, BinaryLiquidCaloricLaw, SourceOwner, poll,
@@ -114,48 +114,20 @@ impl BinaryLiquidCaloricLaw<'_, '_> {
             .evaluate_composition(temperature, component_moles.map(|n| n / total_moles))
             .map_err(BinaryCaloricErrorV1::from)?;
         let fractions = homogeneous.mole_fractions();
-        if (component_moles[0] > 0.0 && fractions[0] == 0.0)
-            || (component_moles[1] > 0.0 && fractions[0] == 1.0)
-        {
-            return Err(BinaryLiquidError::Arithmetic(
-                "nonzero component lost in the source's first-species coordinate",
-            )
-            .into());
-        }
-        poll(&mut cancelled)?;
-        let point = self
-            .liquid
-            .point
-            .clone()
-            .with(&self.liquid.temperature_axis, temperature.value())
-            .and_then(|point| point.with(&self.liquid.composition_axis, fractions[0]))
-            .map_err(|_| {
-                BinaryLiquidError::Invalid(
-                    "homogeneous feed violates source coordinate conventions",
-                )
-            })?;
-        let material = self
-            .liquid
-            .reference
-            .at_query_point(self.liquid.card, &point)
-            .map_err(BinaryLiquidError::from)?;
-        let component_mass = self.liquid.component_masses(component_moles)?;
-        let mass_kg = positive_value(
-            component_mass[0] + component_mass[1],
-            "homogeneous feed mass",
-        )?;
-        let volume_m3 = positive_value(
-            mass_kg / material.density_kg_m3(),
-            "homogeneous feed volume",
+        let phase = self.liquid.resolve_homogeneous_phase(
+            temperature,
+            fractions,
+            component_moles,
+            &mut cancelled,
         )?;
         poll(&mut cancelled)?;
         Ok(ResolvedHomogeneousBinaryLiquidFeed {
             owner: Arc::clone(&self.owner),
             caloric,
             homogeneous,
-            material,
-            mass_kg,
-            volume_m3,
+            material: phase.liquid,
+            mass_kg: phase.mass_kg,
+            volume_m3: phase.volume_m3,
         })
     }
 

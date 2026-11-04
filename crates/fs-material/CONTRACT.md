@@ -12963,3 +12963,36 @@ state once. Per-species lookups no longer repeat full composition conversion
 and allocation, and no independent mass-fraction model or approximate cache is
 introduced. Existing finite-species and conservation cases exercise the shared
 values; no runtime performance measurement is claimed.
+
+## Original liquid sources in a spatial miscibility field
+
+`liquid::solution::gradient` exposes `homogeneous_cell` and
+`BinaryLiquidSquareGradientLaw` for finite-rate spatial liquid compositions.
+Each cell retains the original homogeneous regular-solution state, including
+metastable and spinodal states, and resolves the actual liquid properties
+through the original card, claim selection and query context. A bulk
+coexistence solve is not performed independently in each spatial cell.
+
+The adapter binds the exact original pair to an explicit
+`BinarySquareGradientV1`. Every resolved cell compares its source-derived
+volume against `(n_A+n_B)/c`; the caller supplies a numerical relative
+allowance in `[0,1e-6]`. An incompatible density source refuses instead of
+being replaced by an invented mixing rule. Agreement at one composition does
+not qualify equal partial molar volumes for an entire mixture. The gradient
+coefficient and the physical range of this volume model remain explicit
+constitutive inputs.
+
+The existing equilibrium-phase resolver and homogeneous caloric feed now
+share this same source-refresh path. Original component inventories, molar
+masses, phase mass/volume and source receipts remain intact. A positive trace
+that cannot survive the source's single first-species composition coordinate
+refuses explicitly, including in a coexisting phase. The spatial cell wrapper
+does not claim local equilibrium or change the homogeneous caloric feed's
+relaxation model.
+
+Focused integration tests cover homogeneous spinodal cells versus the
+original bulk split, source identity and volume/mass consistency with unequal
+molar masses, incompatible density/pair refusal, source-domain limits, traces,
+empty inventory and cancellation. These material integration tests require
+the normal material/runtime build; the dependency-light thermochemistry tests
+do not substitute for that gate.

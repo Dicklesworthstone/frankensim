@@ -22,6 +22,9 @@ use fs_qty::Temperature;
 /// Pure-component calorics and closed isobaric thermal equilibrium.
 pub mod caloric;
 
+/// Homogeneous binary chemical potentials and explicit square-gradient energy.
+pub mod gradient;
+
 /// Finite solid/liquid partition for an explicitly declared neutral solute.
 pub mod solubility;
 

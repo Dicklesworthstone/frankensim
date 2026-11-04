@@ -17,6 +17,8 @@
 
 /// Closed isobaric mixing/heating from the original pure-liquid Cp sources.
 pub mod caloric;
+/// Source-resolved homogeneous cells for finite-rate diffuse interfaces.
+pub mod gradient;
 mod mixing;
 pub use mixing::BinaryLiquidMixing;
 
@@ -263,32 +265,12 @@ impl<'a> BinaryLiquidSolutionLaw<'a> {
         }
         let mut resolved = Vec::with_capacity(phases.len());
         for (phase, amounts) in phases.iter().zip(inventories) {
-            poll(&mut cancelled)?;
-            let point = self
-                .point
-                .clone()
-                .with(&self.temperature_axis, temperature.value())
-                .and_then(|point| point.with(&self.composition_axis, phase.mole_fraction_a()))
-                .map_err(|_| {
-                    BinaryLiquidError::Invalid("equilibrium violates source coordinate conventions")
-                })?;
-            let liquid = self.reference.at_query_point(self.card, &point)?;
-            let component_mass = self.component_masses(amounts)?;
-            let mass = positive_value(component_mass[0] + component_mass[1], "phase mass")?;
-            let volume = positive_value(mass / liquid.density_kg_m3(), "phase volume")?;
-            let moles = positive_value(amounts[0] + amounts[1], "phase amount")?;
-            let concentration = positive_value(moles / volume, "phase molar concentration")?;
-            resolved.push(ResolvedBinaryLiquidPhase {
-                liquid,
+            resolved.push(self.resolve_homogeneous_phase(
                 temperature,
-                species: self.thermodynamics.species().clone(),
-                mole_fractions: phase.mole_fractions(),
-                component_moles: amounts,
-                mass_fractions: [component_mass[0] / mass, component_mass[1] / mass],
-                mass_kg: mass,
-                volume_m3: volume,
-                molar_concentration_mol_m3: concentration,
-            });
+                phase.mole_fractions(),
+                amounts,
+                &mut cancelled,
+            )?);
         }
         let mass = self.component_masses(component_moles)?;
         let total_mass = positive_value(mass[0] + mass[1], "total mass")?;
@@ -305,6 +287,49 @@ impl<'a> BinaryLiquidSolutionLaw<'a> {
             total_mass_kg: total_mass,
             total_volume_m3: volume,
             owner: Arc::clone(&self.owner),
+        })
+    }
+
+    // Shared material refresh for an equilibrium phase or an evolving local
+    // homogeneous field cell. Thermodynamic selection belongs to the caller.
+    fn resolve_homogeneous_phase(
+        &self,
+        temperature: Temperature,
+        fractions: [f64; 2],
+        amounts: [f64; 2],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ResolvedBinaryLiquidPhase, BinaryLiquidError> {
+        poll(cancelled)?;
+        if (amounts[0] > 0.0 && fractions[0] == 0.0) || (amounts[1] > 0.0 && fractions[0] == 1.0) {
+            return Err(BinaryLiquidError::Arithmetic(
+                "nonzero component lost in the source's first-species coordinate",
+            ));
+        }
+        let point = self
+            .point
+            .clone()
+            .with(&self.temperature_axis, temperature.value())
+            .and_then(|point| point.with(&self.composition_axis, fractions[0]))
+            .map_err(|_| {
+                BinaryLiquidError::Invalid("liquid violates source coordinate conventions")
+            })?;
+        let liquid = self.reference.at_query_point(self.card, &point)?;
+        let component_mass = self.component_masses(amounts)?;
+        let mass = positive_value(component_mass[0] + component_mass[1], "phase mass")?;
+        let volume = positive_value(mass / liquid.density_kg_m3(), "phase volume")?;
+        let moles = positive_value(amounts[0] + amounts[1], "phase amount")?;
+        let concentration = positive_value(moles / volume, "phase molar concentration")?;
+        poll(cancelled)?;
+        Ok(ResolvedBinaryLiquidPhase {
+            liquid,
+            temperature,
+            species: self.thermodynamics.species().clone(),
+            mole_fractions: fractions,
+            component_moles: amounts,
+            mass_fractions: [component_mass[0] / mass, component_mass[1] / mass],
+            mass_kg: mass,
+            volume_m3: volume,
+            molar_concentration_mol_m3: concentration,
         })
     }
 
@@ -333,7 +358,8 @@ impl<'a> BinaryLiquidSolutionLaw<'a> {
     }
 }
 
-/// One homogeneous equilibrium liquid with a conserved component inventory.
+/// One source-resolved homogeneous liquid with a conserved component inventory.
+/// The enclosing equilibrium or field-cell result states its thermodynamic role.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedBinaryLiquidPhase {
     liquid: ResolvedLiquidState,
@@ -356,7 +382,7 @@ impl ResolvedBinaryLiquidPhase {
     pub const fn liquid(&self) -> &ResolvedLiquidState {
         &self.liquid
     }
-    /// Equilibrium compositions in thermodynamic species order, on a molar basis.
+    /// Local compositions in thermodynamic species order, on a molar basis.
     pub const fn mole_fractions(&self) -> [f64; 2] {
         self.mole_fractions
     }
