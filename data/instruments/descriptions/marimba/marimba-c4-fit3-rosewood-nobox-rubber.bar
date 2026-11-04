@@ -1,0 +1,31 @@
+frankensim.bar-card.v1
+# Marimba C4, on a loss law fitted through three printed rosewood bars; everything else as the rendered C4 card.
+name	marimba-c4-fit3-rosewood-nobox-rubber
+source	Bar outline: J. La Favre, lafavre.us/marimba-bars.htm, table of an unnamed commercial 5-octave marimba with rosewood bars: C4 row, length 15 in, width 2 1/8 in, thickness 0.92 in. Wood: A. Chaigne and V. Doutaut, Numerical simulations of xylophones. I, J. Acoust. Soc. Am. 101(1), 539-557 (1997), Table I p.544, Rosewood bar: E 2.13e10, density 1015, eta 2.35e-7 s, gamma_B 51.58 1/s, through the packs named below (E and density are read from the pack of Doutaut and Chaigne 1994, which prints the same values). Ratios: USDA Wood Handbook FPL-GTR-282, Honduras mahogany, stand-in. Mallet: the same Table I, Korogi No. 4 rubber, K 3.7e7, 23.6 g, measured on a padouk bar; 1.0 m/s and strike 15.9 cm of 29.3 cm as the paper's Fig. 8.
+note	NOT in the source: the undercut (solved here in the engine, modes only, a circular arc, half reach 112.446 mm, middle 8.309 mm, so f1 sits at equal temperament and f2 = 4 f1, from the builder's statement for its own padouk bars on the same page; the rosewood table prints no arch length and no tuning). Strike fraction carried from the xylophone bar; no marimba strike is printed. Not the recording's bar or mallet: Iowa states no bar wood and no bar outline; the recording's file names a cord mallet or a roll, and a Korogi rubber xylophone mallet is not that mallet. No resonator: a marimba has a tube under each bar, this render has none. The loss is a fit through three printed rosewood bars, two of D. latifolia and one unidentified Dalbergia from Madagascar, tried after seeing the 7.3x decay gap on A3, with no recording number in it.
+length_m	0.381
+width_m	0.053974999999999995
+thickness_m	0.023368
+profile	arc
+profile_arc	0.42735416745990124	0.008309174513845663	0
+wood_density	data/matdb/seed-v1/mallet-boxwood-rosewood-bar-doutaut-chaigne-jp4-1994/properties.tsv
+wood_youngs_longitudinal	data/matdb/seed-v1/mallet-boxwood-rosewood-bar-doutaut-chaigne-jp4-1994/properties.tsv
+wood_ratios	data/matdb/seed-v1/mahogany-honduras-fpl-gtr282/properties.tsv
+mesh_counts	56	6	3
+mesh_rungs	1
+band_hz	3520.0
+windows	10
+strike_fraction	0.5426621160409557
+receiver_m	0.1142067332827586	0.2	1
+bem_stride	1
+gas	crates/fs-couple/examples/dry-air-20c.gas
+loss	data/instruments/descriptions/bars/rosewood-loss-fit3-test.tsv
+mallet_contact_pack	contact-rubber-mallet-on-padouk-bar-chaigne-doutaut1997
+mallet_contact	data/matdb/seed-v1/contact-rubber-mallet-on-padouk-bar-chaigne-doutaut1997/contact.tsv
+mallet_properties	data/matdb/seed-v1/mallet-rubber-padouk-bar-chaigne-doutaut1997/properties.tsv
+mallet_speed_m_s	1.0
+duration_s	4.0
+substeps	32
+rate_hz	48000
+full_scale_pa	2.0
+maximum_relative_halfwidth	1e-7

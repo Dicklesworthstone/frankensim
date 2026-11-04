@@ -7,7 +7,7 @@
   "physics_present": [
     "The bar outline from J. La Favre's table of an unnamed commercial 5-octave marimba with rosewood bars, on a 56 x 6 x 3 mesh",
     "Rosewood stiffness and density from Chaigne and Doutaut 1997 (JASA 101, Table I): E 2.13e10, density 1015. The other elastic ratios are Honduras mahogany's, a stand-in (USDA Wood Handbook)",
-    "A loss law fit through three printed rosewood bars, gamma_B 14.526 1/s and eta 1.0759e-6 s: Bremaud and Sprossmann, both Dalbergia latifolia, and Brancheriau, an unidentified Dalbergia. It was tried after we saw f1 decaying too fast, and no recording number entered it. It spans 393 to 945 Hz, so A3's f1 and third mode, C5's second mode and Eb6's f1 are extrapolated. The scale's strikes are still on the first loss row",
+    "A loss law fit through three printed rosewood bars, gamma_B 14.526 1/s and eta 1.0759e-6 s: Bremaud and Sprossmann, both Dalbergia latifolia, and Brancheriau, an unidentified Dalbergia. It was tried after we saw f1 decaying too fast, and no recording number entered it. It spans 393 to 945 Hz, so A3's f1 and third mode, C5's second mode and Eb6's f1 are extrapolated",
     "A circular-arc undercut solved in the engine from the modes alone, for f1 at equal temperament and f2 = 4 f1, the tuning the builder states for its own padouk bars; the third mode isn't aimed at. On Eb6 the arch length is the one the builder prints on its padouk table and only f1 is solved, because the builder says that register is tuned to the fundamental only",
     "A Hertz contact mallet, Chaigne and Doutaut's hard rubber row at 1.0 m/s, with the strike point carried from the xylophone bar",
     "Burton-Miller boundary-element radiation up to the band each page states, with no box"
