@@ -36,8 +36,8 @@ pub use transmission::{LayeredTransmission, TransmittingLayers};
 /// Coherent refraction and P/S conversion into an original isotropic solid.
 pub mod elastic;
 pub use elastic::{
-    ElasticPlateLayers, ElasticTransmittingLayers, LayeredElasticPlateTransmission,
-    LayeredElasticTransmission,
+    ElasticPlateLayers, ElasticPlateStack, ElasticPlateStackLayer, ElasticTransmittingLayers,
+    LayeredElasticPlateTransmission, LayeredElasticTransmission,
 };
 /// Incoherent incident-power weighting of the original angular responses.
 pub mod angular;

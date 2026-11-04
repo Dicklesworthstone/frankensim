@@ -246,16 +246,7 @@ fn transmit_state_with_layers<E: From<MaterialError>>(
             },
         )?;
     }
-    let (reflection, entering) = reflected_state(pressure, velocity)?;
-    let denominator = pressure + velocity;
-    let denominator_abs = denominator.abs();
-    amplitude.add(core::f64::consts::LN_2 - det::ln(denominator_abs));
-    amplitude.phase = amplitude.phase * divided(denominator.conj(), denominator_abs);
-    Ok(TransmittedState {
-        reflection,
-        entering,
-        amplitude,
-    })
+    TransmittedState::from_pair(pressure, velocity, amplitude).map_err(E::from)
 }
 
 pub(super) struct TransmittedState {
@@ -264,6 +255,25 @@ pub(super) struct TransmittedState {
     amplitude: LogAmplitude,
 }
 impl TransmittedState {
+    /// Finish any bounded pressure/normal-velocity propagation in the same
+    /// original incident normalization, retaining its accumulated scalar.
+    pub(super) fn from_pair(
+        pressure: C64,
+        velocity: C64,
+        mut amplitude: LogAmplitude,
+    ) -> Result<Self, MaterialError> {
+        let (reflection, entering) = reflected_state(pressure, velocity)?;
+        let denominator = pressure + velocity;
+        let denominator_abs = denominator.abs();
+        amplitude.add(core::f64::consts::LN_2 - det::ln(denominator_abs));
+        amplitude.phase = amplitude.phase * divided(denominator.conj(), denominator_abs);
+        Ok(Self {
+            reflection,
+            entering,
+            amplitude,
+        })
+    }
+
     /// Receiver coefficient times its common transmitted amplitude. Multiply
     /// in log magnitude before rounding a deeply attenuated wave to zero.
     pub fn coefficient(&self, coefficient: C64) -> Result<C64, MaterialError> {
@@ -374,7 +384,7 @@ impl LogAmplitude {
         };
         self.log = sum;
     }
-    fn rotate(&mut self, radians: f64) {
+    pub(super) fn rotate(&mut self, radians: f64) {
         if self.log == f64::NEG_INFINITY {
             return;
         }

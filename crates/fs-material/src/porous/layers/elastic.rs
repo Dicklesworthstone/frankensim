@@ -24,6 +24,8 @@
 
 pub mod plate;
 pub use plate::{ElasticPlateLayers, LayeredElasticPlateTransmission};
+pub mod stack;
+pub use stack::{ElasticPlateStack, ElasticPlateStackLayer};
 
 use super::transmission::transmit_state;
 use super::{

@@ -13199,3 +13199,27 @@ its molecular volume for nonvisible scattering; visible constant-source arithmet
 is retained. The original wavelength-independent depolarization and nonabsorbing,
 dilute independent-molecule assumptions remain. No measured dataset, resonance
 model, gas absorption or unbounded extrapolation is inferred.
+
+## Coherent fluid-coupled elastic plate stacks
+
+`ElasticPlateStack` composes up to 64 ordered original isotropic elastic plates
+and existing equivalent-fluid sections at one frequency. Every nonzero plate
+has independent shear-free faces; positive fluid or porous-fluid separation is
+required between nonzero solids. Original density, Christoffel speeds, material
+identity, response regime and strain ceiling remain attached. One original
+incident/saturating fluid snapshot is shared, with distinct fluid sources reused
+across gaps and receiver.
+
+The same tangential wavenumber and bounded pressure/normal-velocity pair cross
+every section. Shared P/S parity propagation, original normalized fluid transfer
+and compensated logarithmic transmission retain mode conversion, coherent
+plate/cavity resonances, critical angles and evanescent tunneling. Pressure or
+velocity nodes and exact transmission zero do not become admittance poles.
+Preparation allocates bounded storage; incidence queries allocate nothing.
+
+Solid plates and receiving fluid are lossless; absorption belongs only to original
+porous sections. Bonded laminates, anisotropy, solid damping, lateral boundaries,
+finite-drive admission and reconstructed interior fields remain outside this
+owner. Thirty-eight native controls pass, including an independent 12-boundary-
+equation double-plate oracle over 128 configurations, coherent cavity tunneling,
+reciprocity, critical/zero/thick limits and original single-plate regressions.

@@ -290,24 +290,24 @@ impl<'a> ElasticPlateLayers<'a> {
     }
 }
 
-struct PlateBoundary {
-    pressure: C64,
-    velocity: C64,
-    transmission: f64,
-    transmission_log_scale: f64,
+pub(super) struct PlateBoundary {
+    pub(super) pressure: C64,
+    pub(super) velocity: C64,
+    pub(super) transmission: f64,
+    pub(super) transmission_log_scale: f64,
 }
 
 // C=cos(k_n h), H=sin(k_n h)/cos(theta), L=cos(theta)*sin(k_n h),
 // each multiplied by exp(-attenuation). All three are real on either outgoing
 // lossless branch, including the critical cosine=0 limit H=k*h.
-struct BoundedWave {
+pub(super) struct BoundedWave {
     c: f64,
     h: f64,
     l: f64,
     attenuation: f64,
 }
 
-fn bounded_wave(
+pub(super) fn bounded_wave(
     cosine: C64,
     kn: C64,
     k: f64,
@@ -372,6 +372,21 @@ fn parity_boundary(
     zeta: f64,
     load: C64,
 ) -> Result<PlateBoundary, MaterialError> {
+    parity_boundary_pair(p, s, ss, speed_ratio, zeta, C64::ONE, load)
+}
+
+// The same shear-free parity reduction accepts any homogeneous downstream
+// pressure/velocity pair. Neither a pressure/velocity zero nor a plate
+// transmission zero is divided out when fluid-coupled plates are composed.
+pub(super) fn parity_boundary_pair(
+    p: BoundedWave,
+    s: BoundedWave,
+    ss: f64,
+    speed_ratio: f64,
+    zeta: f64,
+    exit_pressure: C64,
+    exit_velocity: C64,
+) -> Result<PlateBoundary, MaterialError> {
     let a = (-2.0 * ss).mul_add(ss, 1.0);
     let aa = a * a;
     let b = 4.0 * speed_ratio * ss * ss;
@@ -394,11 +409,55 @@ fn parity_boundary(
     let difference = product_sum(ep, oq, -op, eq);
     let pressure_product = 2.0 * ep * op;
     let velocity_product = 2.0 * eq * oq;
-    let load_scale = magnitude_scale(load).max(1.0);
-    let scaled_load = divided(load, load_scale);
-    let pressure = C64::from_re(difference / load_scale)
-        + C64::new(-scaled_load.im, scaled_load.re).scale(pressure_product);
-    let velocity = scaled_load.scale(difference) + C64::new(0.0, velocity_product / load_scale);
+    let load_scale = magnitude_scale(exit_pressure).max(magnitude_scale(exit_velocity));
+    if !finite(exit_pressure) || !finite(exit_velocity) || load_scale == 0.0 {
+        return Err(bad(
+            "elastic plate receiving boundary pair is unrepresentable",
+        ));
+    }
+    let scaled_load = divided(exit_velocity, load_scale);
+    let (pressure, velocity) = if exit_pressure == C64::ONE {
+        // Retain the original single-plate arithmetic exactly.
+        (
+            C64::from_re(difference / load_scale)
+                + C64::new(-scaled_load.im, scaled_load.re).scale(pressure_product),
+            scaled_load.scale(difference) + C64::new(0.0, velocity_product / load_scale),
+        )
+    } else {
+        let scaled_pressure = divided(exit_pressure, load_scale);
+        // A downstream cavity may cancel the two complex contributions at a
+        // resonance. Preserve the product tails before rounding each sum.
+        (
+            C64::new(
+                product_sum(
+                    difference,
+                    scaled_pressure.re,
+                    -pressure_product,
+                    scaled_load.im,
+                ),
+                product_sum(
+                    difference,
+                    scaled_pressure.im,
+                    pressure_product,
+                    scaled_load.re,
+                ),
+            ),
+            C64::new(
+                product_sum(
+                    difference,
+                    scaled_load.re,
+                    -velocity_product,
+                    scaled_pressure.im,
+                ),
+                product_sum(
+                    difference,
+                    scaled_load.im,
+                    velocity_product,
+                    scaled_pressure.re,
+                ),
+            ),
+        )
+    };
 
     let direct = product_sum(ep, oq, op, eq);
     let direct_scale = (ep * oq).abs() + (op * eq).abs();
@@ -431,4 +490,73 @@ fn parity_boundary(
         transmission,
         transmission_log_scale,
     })
+}
+
+#[cfg(test)]
+mod pair_tests {
+    use super::*;
+
+    #[test]
+    fn pressure_and_velocity_nodes_keep_projective_linearity() {
+        let solve = |pressure, velocity| {
+            let cp = (1.0_f64 - (0.4_f64 / 0.6).powi(2)).sqrt();
+            let cs = (1.0_f64 - 0.4_f64.powi(2)).sqrt();
+            parity_boundary_pair(
+                bounded_wave(C64::from_re(cp), C64::from_re(3.0 * cp), 3.0, 0.7).unwrap(),
+                bounded_wave(C64::from_re(cs), C64::from_re(5.0 * cs), 5.0, 0.7).unwrap(),
+                0.4,
+                0.6,
+                0.2,
+                pressure,
+                velocity,
+            )
+            .unwrap()
+        };
+        let physical = |pair: PlateBoundary| {
+            let scale = det::exp(-pair.transmission_log_scale) / pair.transmission;
+            [pair.pressure.scale(scale), pair.velocity.scale(scale)]
+        };
+        let factor = C64::new(-0.7, 1.3);
+        for (pressure, velocity) in [(C64::ZERO, C64::ONE), (C64::ONE, C64::ZERO)] {
+            let original = physical(solve(pressure, velocity));
+            let scaled = physical(solve(pressure * factor, velocity * factor));
+            for component in 0..2 {
+                assert!((scaled[component] - original[component] * factor).abs() < 3e-14);
+            }
+        }
+    }
+
+    #[test]
+    fn exact_plate_transmission_zero_retains_a_nonzero_pressure_pair() {
+        // Exact phase limit k_Pn*h=pi, k_Sn*h=3pi/2, c_S/c_P=0.8.
+        // The shared tangential slowness gives sin²(theta_S)=0.352. Both
+        // parity channels have zero normal velocity, so T=0 and R=1; the
+        // homogeneous pressure pair must survive without dividing by T.
+        let ss = 0.352_f64.sqrt();
+        let cs = (1.0_f64 - 0.352).sqrt();
+        let pair = parity_boundary_pair(
+            BoundedWave {
+                c: -1.0,
+                h: 0.0,
+                l: 0.0,
+                attenuation: 0.0,
+            },
+            BoundedWave {
+                c: 0.0,
+                h: -1.0 / cs,
+                l: -cs,
+                attenuation: 0.0,
+            },
+            ss,
+            0.8,
+            0.5,
+            C64::ONE,
+            C64::ONE,
+        )
+        .unwrap();
+        assert_eq!(pair.transmission, 0.0);
+        assert_eq!(pair.velocity, C64::ZERO);
+        assert!(finite(pair.pressure) && pair.pressure != C64::ZERO);
+        assert!(pair.transmission_log_scale.is_finite());
+    }
 }
