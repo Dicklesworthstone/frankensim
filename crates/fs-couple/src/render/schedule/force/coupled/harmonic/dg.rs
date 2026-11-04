@@ -10,6 +10,10 @@ use fs_duct::dg::{DgBoundary, DgDuct, DgHarmonicResponse, PortId};
 use fs_vfit::mimo::load::PreparedMimoLoad;
 
 mod operator;
+mod frequency;
+pub use frequency::{DgHarmonicBranchDerivative, DgHarmonicChannelDerivative,
+    DgHarmonicTerminalDerivative, DgLoadedModalHarmonicFrequencyResponse,
+    TerminalChannelHarmonicDerivative};
 /// Free modes of the full original mechanical, material and acoustic pencil.
 pub mod poles;
 
@@ -252,12 +256,6 @@ impl CoupledModalSystem {
         let binding = operator::DgBinding::new(n, &view, inlet, flow_column,
             terminal, branches, &branch_views, channels, gate)?;
         binding.admit_frequency(omega_rad_s, gate)?;
-        let terminal_ports = binding.terminal_ports;
-        let terminal_dimension = binding.terminal_dimension;
-        let branch_offsets = &binding.branch_offsets;
-        let branch_ports = &binding.branch_ports;
-        let junction_columns = &binding.junction_columns;
-        let terminal_columns = &binding.terminal_columns;
         let channel_dimension = binding.channel_dimension;
         let extra = binding.additional_dimension()?;
         let full_dimension = n.checked_add(self.radiation.as_ref().map_or(0, |r| r.model.poles.len()))
@@ -274,8 +272,7 @@ impl CoupledModalSystem {
         let dimension = operator.dimension;
         let offset = operator.original_dimension;
         let s = C64::new(0.0, -omega_rad_s);
-        let operator::AppendedDg { terminal_source, terminal_offset, flow_offset,
-            junction_offset, channel_offsets } = binding.append(offset, flow_column,
+        let appended = binding.append(offset, flow_column,
                 16 * dimension * dimension,
                 &mut operator::AcEntries { values: &mut operator.values, dimension, s }, gate)?;
         let (state, relative) = solve_harmonic(
@@ -285,6 +282,35 @@ impl CoupledModalSystem {
             self.config.solve_relative_tolerance,
             gate,
         )?;
+        self.observe_harmonic_dg_state(omega_rad_s, force, inlet, flow_column, branches,
+            &binding, &appended, &state, relative, maximum_work, gate)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn observe_harmonic_dg_state(
+        &self, omega_rad_s: f64, force: &[C64], inlet: PortId, flow_column: &[f64],
+        branches: &[DgBranchLoad], binding: &operator::DgBinding<'_>,
+        appended: &operator::AppendedDg, state: &[C64], relative: f64,
+        maximum_work: usize, gate: &CancelGate,
+    ) -> Result<DgLoadedModalHarmonicResponse, DgHarmonicCouplingError> {
+        let n = self.mode_count();
+        let dimension = state.len();
+        let offset = dimension - binding.additional_dimension()?;
+        let s = C64::new(0.0, -omega_rad_s);
+        let view = binding.view;
+        let branch_views = binding.branch_views;
+        let terminal_ports = binding.terminal_ports;
+        let terminal_dimension = binding.terminal_dimension;
+        let branch_offsets = &binding.branch_offsets;
+        let branch_ports = &binding.branch_ports;
+        let junction_columns = &binding.junction_columns;
+        let terminal_columns = &binding.terminal_columns;
+        let channels = binding.channels;
+        let terminal_source = &appended.terminal_source;
+        let terminal_offset = appended.terminal_offset;
+        let flow_offset = appended.flow_offset;
+        let junction_offset = appended.junction_offset;
+        let channel_offsets = &appended.channel_offsets;
         let flow = s * projection(flow_column, &state[..n]);
         let mut inflows = Vec::with_capacity(terminal_ports.len() + 1);
         inflows.push((inlet, flow));
@@ -343,7 +369,7 @@ impl CoupledModalSystem {
             )
             .map_err(|e| duct_error(e, gate))?;
         let mut branch_responses = Vec::with_capacity(branches.len());
-        for (index, (branch, original)) in branches.iter().zip(&branch_views).enumerate() {
+        for (index, (branch, original)) in branches.iter().zip(branch_views).enumerate() {
             poll(Some(gate))?;
             let local_offset = offset + branch_offsets[index];
             let junction_flow = state[junction_offset + index];

@@ -211,7 +211,7 @@ impl CoupledModalSystem {
         )
     }
 
-    fn harmonic_frequency_rhs(
+    pub(super) fn harmonic_frequency_rhs(
         &self,
         omega: f64,
         state: &[C64],
@@ -277,7 +277,7 @@ impl CoupledModalSystem {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn observe_harmonic_frequency_derivative(
+    pub(super) fn observe_harmonic_frequency_derivative(
         &self,
         response: ModalHarmonicResponse,
         force: &[C64],

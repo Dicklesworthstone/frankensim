@@ -28,6 +28,27 @@ impl Entries for AcEntries<'_> {
     }
 }
 
+// D'= -i*linear, so -D'*x = i*linear*x. Each nonzero dynamic
+// coefficient is assigned exactly once by append_source; rigid closures clear
+// their original algebraic rows. No derivative matrix or terminal copy is kept.
+struct FrequencyAction<'a> {
+    rhs: &'a mut [C64],
+    state: &'a [C64],
+}
+impl Entries for FrequencyAction<'_> {
+    fn dimension(&self) -> usize {
+        self.state.len()
+    }
+    fn set(&mut self, row: usize, column: usize, _: f64, linear: f64) {
+        if linear != 0.0 {
+            self.rhs[row] = self.rhs[row] + C64::new(0.0, linear) * self.state[column];
+        }
+    }
+    fn clear_row(&mut self, row: usize) {
+        self.rhs[row] = C64::ZERO;
+    }
+}
+
 /// Source columns borrow the caller's views; no operator or physical basis is
 /// copied, fitted, projected or inferred from a time-step transition.
 pub(super) struct DgBinding<'a> {
@@ -249,7 +270,6 @@ impl<'a> DgBinding<'a> {
         let terminal_offset = offset + self.acoustic_dimension;
         let flow_offset = terminal_offset + self.terminal_dimension;
         let junction_offset = flow_offset + self.terminal_ports.len();
-        let channel_offset = junction_offset + self.branch_views.len();
         if offset
             .checked_add(self.additional_dimension()?)
             .is_none_or(|end| end > matrix.dimension())
@@ -271,6 +291,38 @@ impl<'a> DgBinding<'a> {
                     })
             })
             .transpose()?;
+        let channel_offsets =
+            self.append_source(offset, flow_column, terminal_source.as_ref(), matrix, gate)?;
+        Ok(AppendedDg {
+            terminal_source,
+            terminal_offset,
+            flow_offset,
+            junction_offset,
+            channel_offsets,
+        })
+    }
+
+    // All AC and tangent entries consume the SAME source coefficients and
+    // original algebraic rows. The retained terminal realization is reused;
+    // evaluating its derivative never re-realizes or inverts the terminal.
+    fn append_source(
+        &self,
+        offset: usize,
+        flow_column: &[f64],
+        terminal_source: Option<&MimoStateSpace>,
+        matrix: &mut impl Entries,
+        gate: &CancelGate,
+    ) -> Result<Vec<usize>, DgHarmonicCouplingError> {
+        let terminal_offset = offset + self.acoustic_dimension;
+        let flow_offset = terminal_offset + self.terminal_dimension;
+        let junction_offset = flow_offset + self.terminal_ports.len();
+        let channel_offset = junction_offset + self.branch_views.len();
+        if offset
+            .checked_add(self.additional_dimension()?)
+            .is_none_or(|end| end > matrix.dimension())
+        {
+            return Err(invalid("continuous acoustic entries exceed the complete pencil").into());
+        }
         let width = self.view.dimension();
         let source = self.view.generator_per_s();
         for i in 0..width {
@@ -314,7 +366,7 @@ impl<'a> DgBinding<'a> {
                 matrix.set(junction, start + i, -b, 0.0);
             }
         }
-        if let Some(load) = &terminal_source {
+        if let Some(load) = terminal_source {
             let ports = self.terminal_ports.len();
             for (j, &(relative, column)) in self.terminal_columns.iter().enumerate() {
                 poll(Some(gate))?;
@@ -398,12 +450,35 @@ impl<'a> DgBinding<'a> {
                 matrix.set(flow_row, flow_row, 1.0, 0.0);
             }
         }
-        Ok(AppendedDg {
-            terminal_source,
-            terminal_offset,
-            flow_offset,
-            junction_offset,
-            channel_offsets,
-        })
+        Ok(channel_offsets)
+    }
+
+    pub fn apply_frequency_derivative(
+        &self,
+        offset: usize,
+        flow_column: &[f64],
+        appended: &AppendedDg,
+        state: &[C64],
+        rhs: &mut [C64],
+        gate: &CancelGate,
+    ) -> Result<(), DgHarmonicCouplingError> {
+        poll(Some(gate))?;
+        if state.len() != rhs.len() || state.iter().chain(rhs.iter()).any(|&v| !complex_finite(v)) {
+            return Err(
+                invalid("complete finite joint state and frequency forcing required").into(),
+            );
+        }
+        self.append_source(
+            offset,
+            flow_column,
+            appended.terminal_source.as_ref(),
+            &mut FrequencyAction { rhs, state },
+            gate,
+        )?;
+        if rhs.iter().any(|&v| !complex_finite(v)) {
+            return Err(invalid("original acoustic frequency tangent forcing overflows").into());
+        }
+        poll(Some(gate))?;
+        Ok(())
     }
 }
