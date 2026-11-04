@@ -27,9 +27,12 @@
 //! one Newton solve from the previous converged state with the prescribed
 //! increment taken through the consistent linearization `K_ff d = -r_f -
 //! K_fp dp`; a step that increases the residual is halved. The gate is
-//! `||r_f|| <= relative_tolerance * force_scale`. The scale bounds actual
-//! element stress forces on free rows, with the external free-force norm and
-//! the largest accepted scale in this increment retained through unloading.
+//! `||r_f|| <= relative_tolerance * force_scale`. The scale uses actual
+//! assembled internal and external free forces. A connected displacement/lift
+//! scale, capped by the element-stress force bound, retains roundoff-level
+//! equilibria with zero applied force without growing with an unrelated
+//! constrained stress or an unused bulk penalty. The largest accepted scale
+//! in this increment is retained through unloading.
 //! Reactions on unrelated fixed bodies and rigid translations do not weaken
 //! the gate. After convergence each element history is committed.
 //!
@@ -451,9 +454,8 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
                     if let (Some(prescribed), Some(bounds)) = (prescribed, &mut force_bounds)
                         && !prescribed[3 * node + i]
                     {
-                        // Cauchy-Schwarz for B_column : sigma in the tensor
-                        // metric. It remains nonzero at a traction-free row
-                        // when individual stress components cancel there.
+                        // This is only a cap on the connected-equation scale,
+                        // never a free-force normalization by itself.
                         let b_norm =
                             fs_math::det::sqrt((0..6).map(|v| WEIGHT[v] * col[v] * col[v]).sum());
                         bounds[3 * node + i] += element.volume * b_norm * stress_norm;

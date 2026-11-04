@@ -533,3 +533,50 @@ fn hex_admission_bounds_memory_geometry_raw_strain_and_rotation() {
     p.nodes_m = &folded;
     assert!(with_cx(|cx| p.internal_force(&vec![0.0; 24], &virgin, cx)).is_err());
 }
+
+#[test]
+fn hex_free_force_is_independent_of_uncoupled_constrained_stress() {
+    use fs_material::OrthotropicElastic;
+
+    let (nodes, cells) = mesh([1, 1, 1], |s, t, v| [s, t, v]);
+    let strain_x = 0.001;
+    let strain_y = 1e-5;
+    for formulation in [Formulation::Standard, Formulation::BBar] {
+        for modulus_x in [2.0, 2e5] {
+            let law =
+                OrthotropicElastic::new([modulus_x, 2.0, 3.0], [0.0; 3], [1.0; 3], 0.02).unwrap();
+            let initial: Vec<_> = nodes
+                .iter()
+                .flat_map(|p| [strain_x * p[0], 0.0, 0.0])
+                .collect();
+            let mut prescribed = Vec::new();
+            let mut forces = Vec::new();
+            for (node, p) in nodes.iter().enumerate() {
+                prescribed.push((3 * node, initial[3 * node]));
+                prescribed.push((3 * node + 2, 0.0));
+                if p[1] == 0.0 {
+                    prescribed.push((3 * node + 1, 0.0));
+                } else {
+                    // Uniform yy traction on the unit top face, four vertices.
+                    forces.push((3 * node + 1, 0.5 * strain_y));
+                }
+            }
+            let states = vec![(); 8];
+            let mut p = problem(&nodes, &cells, &law, &prescribed, &[1.0]);
+            p.formulation = formulation;
+            p.nodal_forces_n = &forces;
+            p.settings.relative_tolerance = 1e-6;
+            let solved = with_cx(|cx| p.solve_from(&initial, &states, cx)).unwrap();
+            assert!(solved.increments[0].residual_history.len() >= 2);
+            for (point, displacement) in nodes.iter().zip(&solved.displacement_m) {
+                close(displacement[1], strain_y * point[1], 2e-10);
+            }
+            let internal =
+                with_cx(|cx| p.internal_force(solved.displacement_m.as_flattened(), &states, cx))
+                    .unwrap();
+            for &(dof, force) in &forces {
+                close(internal[dof], force, 2e-10);
+            }
+        }
+    }
+}

@@ -824,3 +824,66 @@ fn nonlinear_backstress_material_uses_the_general_global_solver() {
         );
     }
 }
+
+#[test]
+fn plane_free_force_is_independent_of_uncoupled_constrained_stress() {
+    use fs_material::OrthotropicElastic;
+
+    let strain_x = 0.001;
+    let strain_y = 1e-5;
+    for mesh in [
+        Mesh2::quads(1.0, 1.0, 1, 1),
+        Mesh2::triangles(1.0, 1.0, 1, 1),
+    ] {
+        for formulation in [Formulation::Standard, Formulation::BBar] {
+            if formulation == Formulation::BBar && mesh.elems[0].len() != 4 {
+                continue;
+            }
+            for modulus_x in [2.0, 2e5] {
+                let law = OrthotropicElastic::new([modulus_x, 2.0, 3.0], [0.0; 3], [1.0; 3], 0.02)
+                    .unwrap();
+                let initial: Vec<_> = mesh
+                    .nodes
+                    .iter()
+                    .flat_map(|p| [strain_x * p[0], 0.0])
+                    .collect();
+                let mut prescribed = Vec::new();
+                let mut forces = Vec::new();
+                for (node, p) in mesh.nodes.iter().enumerate() {
+                    prescribed.push((2 * node, initial[2 * node]));
+                    if p[1] == 0.0 {
+                        prescribed.push((2 * node + 1, 0.0));
+                    } else {
+                        // Uniform yy traction on the unit top edge, thickness 1.
+                        forces.push((2 * node + 1, strain_y));
+                    }
+                }
+                let states = vec![
+                    ReducedState {
+                        strain: [strain_x, 0.0, 0.0, 0.0, 0.0, 0.0],
+                        history: (),
+                    };
+                    mesh.elems.iter().map(Vec::len).sum()
+                ];
+                let mut p = problem(&mesh, &law, &prescribed, &[1.0]);
+                p.plane = PlaneKind::Strain;
+                p.formulation = formulation;
+                p.thickness_m = 1.0;
+                p.nodal_forces_n = &forces;
+                p.settings.relative_tolerance = 1e-6;
+                let solved = with_cx(|cx| p.solve_from(&initial, &states, cx)).unwrap();
+                assert!(solved.increments[0].residual_history.len() >= 2);
+                for (point, displacement) in mesh.nodes.iter().zip(&solved.displacement_m) {
+                    close(displacement[1], strain_y * point[1], 2e-10);
+                }
+                let internal = with_cx(|cx| {
+                    p.internal_force(solved.displacement_m.as_flattened(), &states, cx)
+                })
+                .unwrap();
+                for &(dof, force) in &forces {
+                    close(internal[dof], force, 2e-10);
+                }
+            }
+        }
+    }
+}

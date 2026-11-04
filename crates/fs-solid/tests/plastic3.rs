@@ -787,3 +787,128 @@ fn fully_prescribed_solid_refuses_nonfinite_constitutive_history() {
         ));
     });
 }
+
+#[test]
+fn uncoupled_constrained_stress_cannot_hide_a_free_elastic_force() {
+    use fs_material::OrthotropicElastic;
+
+    let nodes = [[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    let tets = [[0, 1, 2, 3]];
+    let strain_y = 1e-4;
+    let modulus_y = 2.0;
+    let force = modulus_y * strain_y / 6.0;
+    for modulus_x in [2.0, 2e6, 2e12] {
+        let law =
+            OrthotropicElastic::new([modulus_x, modulus_y, 3.0], [0.0; 3], [1.0; 3], 0.02).unwrap();
+        for translation in [0.0, 13.0] {
+            let mut initial = [translation; 12];
+            initial[3] += 1e-3;
+            let prescribed: Vec<_> = initial
+                .iter()
+                .copied()
+                .enumerate()
+                .filter(|(dof, _)| *dof != 7)
+                .collect();
+            let problem = SmallStrainTetProblem {
+                nodes_m: &nodes,
+                tetrahedra: &tets,
+                laws: SmallStrainLawField::Uniform(&law),
+                prescribed_m: &prescribed,
+                nodal_forces_n: &[(7, force)],
+                load_path: &[1.0],
+                budget: TetAssemblyBudget::standard(),
+                settings: IncrementSettings::default(),
+            };
+            // The material has no Poisson coupling. The existing xx stress
+            // cannot act on the only free y DOF. The old Cauchy-Schwarz scale
+            // accepted the initial zero y displacement at the stiff rung.
+            let solved = with_cx(|cx| problem.solve_from(&initial, &[()], cx)).unwrap();
+            assert!(solved.increments[0].residual_history.len() >= 2);
+            assert!((solved.element_strain[0][1] - strain_y).abs() < 2e-14);
+            assert!((solved.element_stress[0][1] / 6.0 - force).abs() < 7e-15);
+            let reaction_y: f64 = prescribed
+                .iter()
+                .zip(&solved.increments[0].reactions_n)
+                .filter(|((dof, _), _)| dof % 3 == 1)
+                .map(|(_, reaction)| reaction)
+                .sum();
+            assert!((reaction_y + force).abs() < 7e-15);
+        }
+    }
+}
+
+#[test]
+fn resumed_zero_load_equilibrium_keeps_a_connected_deformation_scale() {
+    let nodes = [[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    let tets = [[0, 1, 2, 3]];
+    let law = IsotropicElastic::new(170e9, 0.29, 0.02).unwrap();
+    let strain_x = 0.001;
+    let mut initial = [0.0; 12];
+    initial[3] = strain_x;
+    initial[7] = -law.poisson * strain_x;
+    initial[11] = -law.poisson * strain_x;
+    let prescribed: Vec<_> = initial
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(|(dof, _)| *dof != 7 && *dof != 11)
+        .collect();
+    let problem = SmallStrainTetProblem {
+        nodes_m: &nodes,
+        tetrahedra: &tets,
+        laws: SmallStrainLawField::Uniform(&law),
+        prescribed_m: &prescribed,
+        nodal_forces_n: &[],
+        load_path: &[1.0],
+        budget: TetAssemblyBudget::standard(),
+        settings: IncrementSettings::default(),
+    };
+    let solved = with_cx(|cx| problem.solve_from(&initial, &[()], cx)).unwrap();
+    // Analytic uniaxial state: cancellation of the x/y/z constitutive forces
+    // leaves only roundoff transverse traction. Do not require exact zero.
+    assert_eq!(solved.displacement_m.as_flattened(), &initial);
+    assert!(solved.increments[0].residual_history.last().unwrap() <= &1e-10);
+}
+
+#[test]
+fn unused_bulk_penalty_cannot_certify_a_deviatoric_force_imbalance() {
+    let nodes = [[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    let tets = [[0, 1, 2, 3]];
+    let law = IsotropicElastic::new(2.0, 0.499_999_999_999, 0.02).unwrap();
+    let strain = 0.001;
+    let mut initial = [0.0; 12];
+    initial[3] = strain;
+    initial[7] = -strain;
+    let prescribed: Vec<_> = initial
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(|(dof, _)| *dof != 7)
+        .collect();
+    // The initial trace is zero, so sigma_yy = -2 mu*strain, independent of
+    // lambda. A grouped tangent alone is O(lambda*strain) and would silently
+    // accept this real 1e-6 N force error before any Newton correction.
+    let force = -2.0 * law.lame().1 * strain / 6.0 + 1e-6;
+    let problem = SmallStrainTetProblem {
+        nodes_m: &nodes,
+        tetrahedra: &tets,
+        laws: SmallStrainLawField::Uniform(&law),
+        prescribed_m: &prescribed,
+        nodal_forces_n: &[(7, force)],
+        load_path: &[1.0],
+        budget: TetAssemblyBudget::standard(),
+        settings: IncrementSettings {
+            max_newton_iterations: 1,
+            ..IncrementSettings::default()
+        },
+    };
+    // One iteration cannot provide the post-correction convergence check.
+    // The original imbalance must consume this budget instead of claiming an
+    // unchanged state is equilibrated under a huge unused bulk normalization.
+    let error = with_cx(|cx| problem.solve_from(&initial, &[()], cx)).unwrap_err();
+    assert!(matches!(
+        error,
+        fs_solid::SmallStrainTetError::NewtonStalled { history, .. }
+            if history[0] > 1e-6
+    ));
+}

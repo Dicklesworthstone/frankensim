@@ -753,7 +753,7 @@ impl<L: SmallStrainLaw> SmallStrainPlaneProblem<'_, L> {
             }
             let mut trial = self.evaluate(&elements, &u, &states, &fixed, &mut workspace, cx)?;
             let mut scale = norm(free.iter().map(|&d| external[d]))
-                .max(trial.force_scale)
+                .max(norm(free.iter().map(|&d| trial.force[d])))
                 .max(f64::MIN_POSITIVE);
             let mut history = Vec::new();
             let mut fallbacks = 0;
@@ -778,19 +778,54 @@ impl<L: SmallStrainLaw> SmallStrainPlaneProblem<'_, L> {
                 }
                 let mut rhs: Vec<f64> = residual.iter().map(|r| -r).collect();
                 let mut coo = Coo::new(free.len(), free.len());
+                let mut connected_scale = 0.0_f64;
                 // A fully prescribed body needs only a checked material update.
                 if !free.is_empty() {
                     let full = self.assemble(&elements, &trial, cx)?;
                     for (row, &d) in free.iter().enumerate() {
                         let (cols, values) = full.row(d);
+                        let mut deformation = [0.0_f64; 2];
+                        let mut lifting = 0.0_f64;
                         for (&c, &v) in cols.iter().zip(values) {
                             if fixed[c] {
                                 rhs[row] = (-v).mul_add(dp[c], rhs[row]);
+                                lifting = v.mul_add(dp[c], lifting);
                             } else {
                                 coo.push(row, row_of[c], v);
                             }
+                            if v != 0.0 {
+                                let component = c % 2;
+                                let difference = u[c] - u[2 * (d / 2) + component];
+                                deformation[component] =
+                                    v.mul_add(difference, deformation[component]);
+                            }
                         }
+                        // Keep opposing component forces and actual fixed-DOF
+                        // lifts, but remove rigid translations and within-
+                        // component quadrature cancellation before the norm.
+                        let row_scale = deformation.iter().map(|v| v.abs()).sum::<f64>();
+                        if !row_scale.is_finite() || !lifting.is_finite() {
+                            return Err(invalid(
+                                "connected equilibrium force scale is not representable",
+                            ));
+                        }
+                        connected_scale = connected_scale.hypot(row_scale.max(lifting.abs()));
                     }
+                }
+                if !connected_scale.is_finite() {
+                    return Err(invalid(
+                        "connected equilibrium force norm is not representable",
+                    ));
+                }
+                // Neither the full stress norm nor a bulk-dominated tangent
+                // may loosen equilibrium by itself. Actual free forces remain
+                // the primary scale; this bounded fallback only supplies a
+                // reference for cancellation at zero-load equilibrium.
+                scale = scale.max(connected_scale.min(trial.force_scale));
+                *history.last_mut().expect("current residual was recorded") = before / scale;
+                if !pending && before <= self.settings.relative_tolerance * scale {
+                    converged = true;
+                    break;
                 }
                 let (direction, fallback) = solve_increment_linear(
                     &coo.assemble(),
@@ -826,9 +861,7 @@ impl<L: SmallStrainLaw> SmallStrainPlaneProblem<'_, L> {
                             let after = norm(free.iter().map(|&d| next.force[d] - external[d]));
                             if pending
                                 || after < before
-                                || after
-                                    <= self.settings.relative_tolerance
-                                        * scale.max(next.force_scale)
+                                || after <= self.settings.relative_tolerance * scale
                             {
                                 accepted = Some((candidate, next));
                                 break;
@@ -845,7 +878,8 @@ impl<L: SmallStrainLaw> SmallStrainPlaneProblem<'_, L> {
                     return Err(SmallStrainPlaneError::NewtonStalled { increment, history });
                 };
                 u = candidate;
-                scale = scale.max(next.force_scale); // Rejected proposals cannot weaken acceptance.
+                // Only accepted actual free forces enlarge this history.
+                scale = scale.max(norm(free.iter().map(|&d| next.force[d])));
                 trial = next;
             }
             if !converged {

@@ -17,7 +17,9 @@ pub(crate) trait IncrementOperator {
 
     fn initial_states(&self) -> Vec<Self::State>;
 
-    /// Internal force and a bound on element stress forces on free rows.
+    /// Internal force and an upper cap on element stress forces on free rows.
+    /// The cap alone must not normalize equilibrium: it can include stresses
+    /// orthogonal to the row's work-conjugate strain direction.
     fn internal(
         &self,
         states: &[Self::State],
@@ -130,13 +132,9 @@ pub(crate) fn solve<O: IncrementOperator>(
         let mut history = Vec::new();
         let mut fallbacks = 0usize;
         let mut converged = false;
-        let (mut f_int, initial_scale) = operator.internal(&states, &u, scale_rows, cx)?;
-        let mut static_force_scale = initial_scale.max(external_free_norm);
-        let mut elastic_free_norm = if inertia.is_some() {
-            free.iter().fold(0.0_f64, |n, &d| n.hypot(f_int[d]))
-        } else {
-            0.0
-        };
+        let (mut f_int, mut stress_force_cap) = operator.internal(&states, &u, scale_rows, cx)?;
+        let mut elastic_free_norm = free.iter().fold(0.0_f64, |n, &d| n.hypot(f_int[d]));
+        let mut static_force_scale = elastic_free_norm.max(external_free_norm);
         if let Some(inertia) = inertia {
             inertia.add_force(&u, &mut f_int, cx)?;
         }
@@ -153,7 +151,8 @@ pub(crate) fn solve<O: IncrementOperator>(
             } else {
                 static_force_scale.max(f64::MIN_POSITIVE)
             };
-            let relative = norm(&residual) / scale;
+            let before = norm(&residual);
+            let relative = before / scale;
             history.push(relative);
             if !pending_any && relative <= settings.relative_tolerance {
                 converged = true;
@@ -168,14 +167,55 @@ pub(crate) fn solve<O: IncrementOperator>(
             }
             let mut coo = Coo::new(free.len(), free.len());
             let mut rhs: Vec<f64> = residual.iter().map(|r| -r).collect();
+            let mut connected_scale = 0.0_f64;
             for (row, &dof) in free.iter().enumerate() {
                 let (cols, vals) = full.row(dof);
+                let mut deformation = [0.0_f64; 3];
+                let mut lifting = 0.0_f64;
                 for (&c, &v) in cols.iter().zip(vals) {
                     if is_prescribed[c] {
                         rhs[row] = (-v).mul_add(dp_full[c], rhs[row]);
+                        lifting = v.mul_add(dp_full[c], lifting);
                     } else {
                         coo.push(row, row_of[c], v);
                     }
+                    if inertia.is_none() && v != 0.0 {
+                        let component = c % 3;
+                        let difference = u[c] - u[3 * (dof / 3) + component];
+                        deformation[component] = v.mul_add(difference, deformation[component]);
+                    }
+                }
+                if inertia.is_none() {
+                    // Contract each displacement component before taking its
+                    // magnitude. This retains cancellation of affine fields
+                    // against B-bar's mean-zero correction; a translation has
+                    // no deformation scale. Opposing x/y/z elastic forces and
+                    // prescribed lifts still provide a physical reference for
+                    // a nearly equilibrated state with zero applied load.
+                    let row_scale = deformation.iter().map(|v| v.abs()).sum::<f64>();
+                    if !row_scale.is_finite() || !lifting.is_finite() {
+                        return Err(SmallStrainTetError::InvalidInput {
+                            what: "connected equilibrium force scale is not representable".into(),
+                        });
+                    }
+                    connected_scale = connected_scale.hypot(row_scale.max(lifting.abs()));
+                }
+            }
+            if inertia.is_none() {
+                if !connected_scale.is_finite() {
+                    return Err(SmallStrainTetError::InvalidInput {
+                        what: "connected equilibrium force norm is not representable".into(),
+                    });
+                }
+                // A large tangent by itself (e.g. an unused bulk penalty) must
+                // not weaken the actual-force gate. Conversely, a large stress
+                // unrelated to this equation cannot provide the reference.
+                static_force_scale = static_force_scale.max(connected_scale.min(stress_force_cap));
+                let relative = before / static_force_scale.max(f64::MIN_POSITIVE);
+                *history.last_mut().expect("current residual was recorded") = relative;
+                if !pending_any && relative <= settings.relative_tolerance {
+                    converged = true;
+                    break;
                 }
             }
             let (direction, fallback) = solve_increment_linear(
@@ -187,7 +227,6 @@ pub(crate) fn solve<O: IncrementOperator>(
                 cx,
             )?;
             fallbacks += usize::from(fallback);
-            let before = norm(&residual);
             let mut alpha = 1.0f64;
             let mut accepted = None;
             for _ in 0..=settings.max_backtracks {
@@ -210,11 +249,8 @@ pub(crate) fn solve<O: IncrementOperator>(
                         }
                         Err(error) => return Err(error),
                     };
-                let trial_elastic_free_norm = if inertia.is_some() {
-                    free.iter().fold(0.0_f64, |n, &d| n.hypot(f_trial[d]))
-                } else {
-                    0.0
-                };
+                let trial_elastic_free_norm =
+                    free.iter().fold(0.0_f64, |n, &d| n.hypot(f_trial[d]));
                 if let Some(inertia) = inertia {
                     inertia.add_force(&trial, &mut f_trial, cx)?;
                 }
@@ -231,9 +267,10 @@ pub(crate) fn solve<O: IncrementOperator>(
             u = trial;
             f_int = f_trial;
             elastic_free_norm = trial_elastic_free_norm;
+            stress_force_cap = trial_scale;
             // Rejected proposals cannot loosen the force gate. Retain the
             // largest accepted physical scale through unloading.
-            static_force_scale = static_force_scale.max(trial_scale);
+            static_force_scale = static_force_scale.max(trial_elastic_free_norm);
         }
         if !converged {
             return Err(SmallStrainTetError::NewtonStalled { increment, history });
