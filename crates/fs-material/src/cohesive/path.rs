@@ -52,7 +52,7 @@ impl<'a> CohesivePoint<'a> {
         let (step, mean_intact) =
             self.trial_over_time_integrated(jump_m, dt_s, energy_tolerance_j_m2)?;
         let mut mean = mean_equilibrium(self, &step.equilibrium.point)?;
-        if let Some(viscosity) = self.law.viscosity {
+        if let Some(viscosity) = self.law.viscosity.filter(|_| mean_intact > 0.0) {
             let eta = [
                 viscosity.normal_pa_s_m(),
                 viscosity.tangential_pa_s_m(),

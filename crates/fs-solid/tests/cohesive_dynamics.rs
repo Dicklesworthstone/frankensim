@@ -203,6 +203,56 @@ fn prescribed_jump_external_force_and_physical_viscosity_have_independent_work()
 }
 
 #[test]
+fn failed_adhesive_keeps_native_fast_motion_and_reclosure_after_its_dashpots_disappear() {
+    with_cx(|cx| {
+        let assembled = scalar_tet(cx);
+        let mass = CsrOp::symmetric(assembled.mass);
+        let elastic = CsrOp::symmetric(assembled.stiffness);
+        let law = law().with_viscosity(CohesiveViscosity::new(4.0, 7.0, 0.1).unwrap());
+        let system = CohesiveSystem::new(&elastic, vec![patch(&law)], budget()).unwrap();
+        // Rupture slowly within the adhesive rate domain before adopting the
+        // same state and original consistent mass as a detached moving solid.
+        let accepted = system
+            .bonded_state()
+            .solve_over_time(&[0.06], &[[0.0; 3]], 0.2, config().solve, cx)
+            .unwrap()
+            .state;
+        let u0 = accepted.displacements_m()[0];
+        close(u0, 0.006, 1e-12);
+        assert!(accepted.points()[0].failed());
+        for velocity in [0.8, -1.2] {
+            let motion = accepted
+                .clone()
+                .into_dynamics(&mass, vec![velocity], 0.0, config())
+                .unwrap();
+            let h = 0.01;
+            let step = motion.advance(&[0.0], &[[0.0; 3]], h, cx).unwrap();
+            let u = step.motion.state().displacements_m()[0];
+            assert!((u - u0).abs() / h > 0.1);
+            assert!(step.motion.state().points()[0].failed());
+            assert_eq!(step.viscous_dissipated_j, 0.0);
+            assert_eq!(step.cohesive_energy_j.dissipated, 0.0);
+            close(
+                step.kinetic_after_j + step.bulk_stored_after_j + step.cohesive_stored_after_j,
+                0.5 * 0.1 * velocity * velocity + 0.5 * 10.0 * u0 * u0,
+                1e-10,
+            );
+            if velocity > 0.0 {
+                // Independent midpoint solution of M u'' + K_bulk u = 0;
+                // detached adhesive contributes neither stiffness nor viscosity.
+                let expected = (u0 * (1.0 - 25.0 * h * h) + h * velocity) / (1.0 + 25.0 * h * h);
+                close(u, expected, 1e-12);
+                assert_eq!(step.mean_traction_pa[0], [0.0; 3]);
+            } else {
+                assert!(u < 0.0);
+                assert!(step.mean_traction_pa[0][0] < 0.0);
+                close(step.cohesive_stored_after_j, 0.5 * 10.0 * u * u, 1e-12);
+            }
+        }
+    });
+}
+
+#[test]
 fn adopting_a_softened_solid_preserves_damage_and_releases_its_actual_energy() {
     with_cx(|cx| {
         let assembled = scalar_tet(cx);

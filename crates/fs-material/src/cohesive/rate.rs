@@ -27,7 +27,11 @@ pub struct CohesiveViscosity {
 }
 impl CohesiveViscosity {
     /// Both normal and isotropic shear viscosities must be positive, finite SI
-    /// values. The rate bound applies to the Euclidean jump-rate norm in m/s.
+    /// values. The rate bound applies to the Euclidean jump-rate norm in m/s
+    /// whenever bonds survive at the beginning of the interval, including an
+    /// interval that completely ruptures them. Once previously accepted failure
+    /// removes all dashpots, this bound no longer limits detached motion or the
+    /// independent normal compression penalty.
     pub fn new(
         normal_pa_s_m: f64,
         tangential_pa_s_m: f64,
@@ -138,6 +142,12 @@ impl<'a> CohesivePoint<'a> {
         let Some(viscosity) = self.law.viscosity else {
             return Ok((equilibrium.into(), 0.0));
         };
+        // No dashpot survives anywhere on a path starting fully failed. Its
+        // adhesive rate applicability must not block detached motion/reclosure.
+        // Check OLD failure: a newly rupturing path still dissipates viscosity.
+        if self.failed() {
+            return Ok((equilibrium.into(), 0.0));
+        }
         let delta = core::array::from_fn::<_, 3, _>(|i| jump_m[i] - self.jump[i]);
         let rate = delta.map(|v| v / dt_s);
         if norm(rate)? > viscosity.maximum_rate_m_s {

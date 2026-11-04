@@ -217,6 +217,80 @@ fn tiny_softening_intervals_retain_positive_loss_and_refusals_are_atomic() {
 }
 
 #[test]
+fn ruptured_bonds_allow_fast_separation_and_reclosure_without_dashpot_work() {
+    // The old adhesive's viscosity domain cannot restrict detached fragment
+    // motion. Compression still does reversible work on the original surface.
+    for law in [law(), mixed()] {
+        let failed = law
+            .bonded_point()
+            .trial_over_time([0.006, 0.0, 0.0], 0.2, 1e-8)
+            .unwrap()
+            .equilibrium
+            .point;
+        assert!(failed.failed());
+        for end in [[0.008, 0.002, -0.001], [-0.001, 0.002, -0.001]] {
+            let (step, mean, pressure) = failed
+                .trial_over_time_with_damage_weighted_compression(end, 0.001, 1e-8)
+                .unwrap();
+            let closed = end[0].min(0.0);
+            let stored = 0.5 * 2e9 * closed * closed;
+            let mean_normal = if closed < 0.0 {
+                stored / (end[0] - 0.006)
+            } else {
+                0.0
+            };
+            assert_eq!(step.traction_pa, [2e9 * closed, 0.0, 0.0]);
+            close(mean[0], mean_normal, 1e-13);
+            assert_eq!([mean[1], mean[2]], [0.0; 2]);
+            close(pressure, -mean_normal, 1e-13);
+            close(step.total_work_j_m2(), stored, 1e-13);
+            assert_eq!(step.viscous_dissipated_j_m2, 0.0);
+            assert_eq!(step.equilibrium.energy.dissipated, 0.0);
+            assert!(step.equilibrium.point.failed());
+            assert_eq!(
+                step.branch_tangent_pa_m,
+                step.equilibrium.branch_tangent_pa_m
+            );
+        }
+        assert_eq!(failed.jump_m(), [0.006, 0.0, 0.0]);
+        assert!(matches!(
+            failed.trial_over_time([0.03, 0.0, 0.0], 0.001, 1e-8),
+            Err(CohesiveError::SeparationLimit)
+        ));
+        assert!(
+            failed
+                .trial_over_time([0.008, 0.0, 0.0], 0.0, 1e-8)
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn rate_applicability_still_covers_every_interval_that_starts_with_surviving_bonds() {
+    for law in [law(), mixed()] {
+        let virgin = law.bonded_point();
+        let damaged = virgin
+            .trial_over_time([0.002, 0.0, 0.0], 0.2, 1e-8)
+            .unwrap()
+            .equilibrium
+            .point;
+        assert!(damaged.damage() > 0.0 && !damaged.failed());
+        for old in [virgin, damaged] {
+            // Even an endpoint beyond complete rupture traverses live dashpots.
+            assert!(matches!(
+                old.trial_over_time([0.006, 0.0, 0.0], 0.001, 1e-8),
+                Err(CohesiveError::Invalid(
+                    "cohesive jump rate exceeds declared applicability"
+                ))
+            ));
+            let admitted = old.trial_over_time([0.006, 0.0, 0.0], 0.2, 1e-8).unwrap();
+            assert!(admitted.equilibrium.point.failed());
+            assert!(admitted.viscous_dissipated_j_m2 > 0.0);
+        }
+    }
+}
+
+#[test]
 fn complete_rupture_ramp_retains_the_analytic_logarithmic_viscous_work() {
     // G0/G3: independent integral for a monotonic full-rupture ramp:
     // mean(1-d) = onset*failure*ln(failure/onset)/((failure-onset)*end).
