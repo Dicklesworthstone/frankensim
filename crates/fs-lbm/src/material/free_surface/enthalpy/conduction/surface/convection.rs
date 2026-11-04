@@ -17,8 +17,8 @@ pub struct FreeSurfaceConvectionQuery<'a> {
     /// Index into the original call's surface contacts.
     pub patch_index: usize,
     pub surface: FreeSurfaceInterfaceFace,
-    /// Cartesian unit normal from liquid into gas. Reconstructed curved and
-    /// height-graph surfaces are not admitted by this bounded interface.
+    /// Actual unit normal from liquid into gas, from the original Cartesian,
+    /// height-graph or local PLIC geometry at this thermal/native epoch.
     pub outward_normal: [f64; 3],
     pub surface_temperature_k: f64,
     /// Current prescribed reservoir or original finite-atmosphere parcel.
@@ -29,7 +29,7 @@ pub struct FreeSurfaceConvectionQuery<'a> {
     pub film: &'a ResolvedThermochemicalGasState,
 }
 
-/// A call-local, repeatable constitutive evaluation for a physical plate patch.
+/// A call-local, repeatable constitutive evaluation for a physical surface patch.
 ///
 /// The provider must validate its geometry, physical characteristic length and
 /// correlation regime on every query, including equilibrium. Its coefficient
@@ -47,6 +47,16 @@ pub trait FreeSurfaceGasConvection {
         &self,
         query: FreeSurfaceConvectionQuery<'_>,
     ) -> Result<Option<Evidence<FreeSurfaceHeatTransferCoefficient>>, FreeSurfaceEnthalpyError>;
+
+    /// Explicitly admit spatially uniform AUTHORED boundary data when a local
+    /// `UniformReservoir` exposes new PLIC owners. Coefficients may depend on
+    /// current temperature and geometry, but old patch indices must not encode
+    /// different flow, dimensions or source models. Newly exposed patches use
+    /// the original uniform boundary's index zero and their actual live face.
+    /// The default refuses this capability; fixed-owner evolution needs none.
+    fn admits_uniform_boundary_evolution(&self) -> bool {
+        false
+    }
 }
 
 /// Exact gas-side law applied to this surface sample.
@@ -86,7 +96,87 @@ pub(super) fn cartesian_normal(face: FreeSurfaceGasFace) -> Result<[f64; 3], Err
     Ok(normal)
 }
 
+pub(super) fn admit_normal(normal: [f64; 3]) -> Result<[f64; 3], Error> {
+    let square = normal.into_iter().map(|x| x * x).sum::<f64>();
+    let length = fs_math::det::sqrt(square);
+    if normal.into_iter().any(|x| !x.is_finite())
+        || !length.is_finite()
+        || (length - 1.0).abs() > 64.0 * f64::EPSILON
+    {
+        return Err(Error::Invalid(
+            "surface convection requires the original finite unit outward normal",
+        ));
+    }
+    Ok(normal)
+}
+
+// An accepted thermal source cannot silently be reused after its orientation
+// changes. The native endpoint path instead solves with its own live normal.
+pub(super) fn admit_prepared_normal(
+    sample: &FreeSurfaceInterfaceSample,
+    live: [f64; 3],
+) -> Result<(), Error> {
+    if let Some(used) = sample.convection_outward_normal {
+        let live = admit_normal(live)?;
+        let difference = used
+            .into_iter()
+            .zip(live)
+            .map(|(a, b)| (a - b) * (a - b))
+            .sum::<f64>();
+        if fs_math::det::sqrt(difference) > 64.0 * f64::EPSILON {
+            return Err(Error::Invalid(
+                "prepared surface convection has stale native orientation",
+            ));
+        }
+    }
+    Ok(())
+}
+
 impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
+    // Geometry is held during thermal substeps/Newton trials, so reconstruct
+    // once here instead of repeating native interface work for every scalar
+    // coefficient query. Existing surface admission has already checked every
+    // owner and its physical area against the same reconstruction.
+    pub(in super::super) fn surface_convection_normals(
+        &self,
+        surfaces: &[FreeSurfaceInterfaceContact<'_>],
+        gate: &CancelGate,
+    ) -> Result<Vec<[f64; 3]>, Error> {
+        let reconstructed: Option<BTreeMap<_, _>> =
+            if self.local_thermocapillary_surface().is_some() {
+                Some(
+                    self.local_interface_patches(gate)?
+                        .into_iter()
+                        .map(|p| ((p.liquid, p.liquid), p.outward_normal))
+                        .collect(),
+                )
+            } else if self.height_graph_thermocapillary_surface().is_some() {
+                Some(
+                    self.height_graph_interface_patches(gate)?
+                        .into_iter()
+                        .map(|p| ((p.liquid, p.gas), p.outward_normal))
+                        .collect(),
+                )
+            } else {
+                None
+            };
+        let mut normals = Vec::with_capacity(surfaces.len());
+        for contact in surfaces {
+            poll(gate)?;
+            let face = contact.surface.face;
+            let normal = if let Some(patches) = &reconstructed {
+                *patches.get(&(face.liquid, face.gas)).ok_or(Error::Invalid(
+                    "surface convection has no original reconstructed patch owner",
+                ))?
+            } else {
+                cartesian_normal(face)?
+            };
+            normals.push(admit_normal(normal)?);
+        }
+        poll(gate)?;
+        Ok(normals)
+    }
+
     /// Solve liquid/gas/radiation exchange with an admitted gas convection law.
     ///
     /// All surface contacts use the same provider; `patch_index` can select
@@ -96,10 +186,13 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
     /// second resistance: the supplied h replaces k_g/d_g in the shared root.
     /// The liquid half-cell resistance and original radiation remain present.
     ///
-    /// Only Cartesian planar faces are admitted. This retains the original
-    /// held-geometry thermal/native-flow split and its refinement requirement;
-    /// it does not model evaporation, resolved gas flow or arbitrary curved
-    /// deforming surfaces. Implicit trials, when selected, use this same law.
+    /// Cartesian, height-graph and local PLIC patches use their ORIGINAL areas,
+    /// owners and outward normals. A provider must admit the actual surface
+    /// geometry and physical length; accepting a reconstructed patch does not
+    /// make a planar correlation valid on an arbitrary curved boundary. Thermal
+    /// substeps/implicit trials share held geometry. Post-flow queries use the
+    /// newly reconstructed geometry and supply no extra heat. The original
+    /// thermal/native-flow split and refinement requirements remain in force.
     #[allow(clippy::too_many_arguments)]
     pub fn step_with_surface_convection(
         &mut self,

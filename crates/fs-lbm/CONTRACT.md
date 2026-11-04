@@ -10360,7 +10360,7 @@ passed Rust parsing and scoped whitespace checks; native compilation and
 execution remain pending. No measured accuracy or performance result is
 claimed for this extension.
 
-## Source-backed gas convection on planar moving-liquid interfaces
+## Source-backed gas convection on moving-liquid interfaces
 
 `MaterialFreeSurfaceEnthalpy3::step_with_surface_convection` and
 `step_with_finite_gas_surface_convection` evaluate a call-local
@@ -10388,11 +10388,14 @@ surfaces. Finite solid cells and contacts participate through their original
 thermal owner; electrical and separate liquid environmental paths retain their
 implicit exclusions.
 
-This bounded entry admits explicit Cartesian planar faces. Height-graph and
-local reconstructed surfaces refuse. A higher owner must declare the physical
-plate geometry, whole-plate characteristic length and held relative gas flow;
-a grid face is not a new boundary-layer entrance. The working plate adapter is
+This entry admits the original Cartesian, height-graph and local PLIC surface
+geometry. Its provider receives the actual unit outward normal, physical area
+and current patch owner. A higher owner must still admit its physical surface
+model, characteristic length and held relative gas flow; a grid patch is not a
+new boundary-layer entrance. The existing plate adapter is
 `fs-airflow::graph::thermal::medium::convection::PlanarFreeSurfaceConvection`.
+It admits a planar surface in world coordinates, including reconstructed planar
+geometry, but does not supply an empirical law for a curved interface.
 The held-geometry thermal/native-flow split, isothermal-patch and held-property
 assumptions still require time, mesh and model assessment. No gas momentum,
 evaporation, arbitrary curved-surface law or total mechanical-energy closure is
@@ -10593,3 +10596,29 @@ five-store backward-Euler equations with distinct material capacities, evolving
 contact/film sources, radiation and one shared gas; a separately solved
 prescribed-reservoir contact; and late source/cancellation rollback followed by
 an identical accepted retry.
+
+## Convection on original reconstructed liquid interfaces
+
+Thermal substeps and implicit trials cache normals once from the original held
+height-graph or PLIC reconstruction, after existing complete-owner and area
+admission. Native endpoint queries use the newly reconstructed owners, areas
+and normals. The accepted `FreeSurfaceInterfaceSample` retains the exact
+`convection_outward_normal` used at that epoch. Reusing a prepared thermal
+sample against changed native orientation refuses, alongside existing stale
+owner and area checks. Native endpoint evaluation updates surface-temperature
+and capillary samples; it supplies no second heat debit or gas advance.
+
+Local `UniformReservoir` evolution additionally requires the provider's
+explicit `admits_uniform_boundary_evolution` capability. The default refuses.
+The capability declares spatially uniform authored flow, dimensions and source
+boundary data; a coefficient may still depend on actual temperatures and local
+geometry. Newly exposed owners use original boundary index zero and their real
+face. Existing uniform-source/context admission remains authoritative, and
+fixed-owner evolution retains its original owner-change refusal.
+
+Manufactured positive normal-dependent coefficients test actual curved
+height-graph and PLIC paths without asserting a flat-plate model for curvature.
+The cases independently check the liquid-half-cell/surface-convection root,
+mean-film source queries, held and live geometry, finite-gas reciprocal energy,
+changing PLIC ownership and a late constitutive refusal followed by accepted
+retry. Their coefficient evidence carries an estimate and no calibrated model.

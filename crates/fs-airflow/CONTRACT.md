@@ -3342,8 +3342,11 @@ volumetric expansion and the full actual interface/bulk temperature difference.
 The original correlation evidence is moved into the accepted surface sample;
 no surrogate gas, constant-h default or extra heat integrator is supplied.
 
-The declared normal must match the actual Cartesian liquid-to-gas face. Forced
-flow is a prescribed gas velocity RELATIVE to the liquid surface, must be
+The declared and actual liquid-to-gas normals must be finite unit vectors that
+agree in world coordinates, including planar Cartesian, height-graph and PLIC
+interfaces. Unit length, direction agreement and tangency admit only
+`64 * f64::EPSILON` normalization roundoff, with no empirical angular allowance.
+Forced flow is a prescribed gas velocity RELATIVE to the liquid surface, must be
 tangent, and explicitly selects the existing laminar or turbulent average plate
 card with its original regime limits. Natural gravity must describe a vertical
 or horizontal plate; the outward normal and signed temperature difference select
@@ -3369,12 +3372,24 @@ height, or horizontal area/perimeter. It is never reset to a mesh-face width.
 Applying the mean isothermal-plate correlation to surface patches assumes an
 approximately isothermal declared physical plate and locally held film
 properties. Relative speed and geometry remain held during the original
-thermal/native-flow split. Inclined, curved, enclosed and evaporating surfaces,
-and mixed opposing/crossflow cases, require other physical models and refuse. The original liquid
+thermal/native-flow split. Curved, enclosed and evaporating surfaces require
+other physical models. Natural convection inclined to gravity and mixed
+opposing/crossflow cases still refuse; no gas velocity or gravity component is
+projected into an admitted orientation. The original liquid
 half-cell, radiation, finite-gas reciprocal balance, thermal interval admission
 and rollback remain owned by fs-lbm. The production adapter's unit tests compare
 with the original correlation and independent plate equation, source-pressure
 response, gravity orientation, equilibrium admission and explicit refusals.
+World-rotation regressions cover both forced regimes, natural vertical and
+horizontal branches in both heat directions, aiding mixed flow and its pure
+limits, plus non-tangent flow and small but physical orientation mismatches.
+
+The single-plate provider explicitly admits uniform boundary evolution: its
+authored plate frame, dimensions and flow do not depend on old patch indices.
+Coefficients still depend on the actual trial temperatures and original film
+source. Newly exposed native patches must pass every material and actual-normal
+check against the same declared plate; the capability does not admit curvature,
+a different local flow or an unsupported natural-convection inclination.
 
 ## Reversible total-pressure hydraulic nodes and physical static tractions
 

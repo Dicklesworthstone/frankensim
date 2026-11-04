@@ -3,6 +3,9 @@
 use super::*;
 use fs_lbm::material::free_surface::enthalpy::thermocapillary::HeightGraphThermocapillarity;
 
+#[path = "surface_height_graph/convection.rs"]
+mod convection;
+
 fn height(u: f64, v: f64) -> f64 {
     // A smooth convex cap with a mixed slope, crossing lattice layers. Its
     // positive Laplace loading stays inside the native graph fill envelope;

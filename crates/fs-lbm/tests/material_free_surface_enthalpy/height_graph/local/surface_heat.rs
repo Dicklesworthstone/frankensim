@@ -10,6 +10,9 @@ use fs_lbm::material::free_surface::enthalpy::conduction::{
 #[path = "../../../nsf3_thermochemical/source.rs"]
 mod gas_source;
 
+#[path = "surface_heat/convection.rs"]
+mod convection;
+
 #[cfg(feature = "implicit-enthalpy-coupling")]
 #[path = "surface_heat/implicit.rs"]
 mod implicit;

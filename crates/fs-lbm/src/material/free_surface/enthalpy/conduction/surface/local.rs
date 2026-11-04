@@ -203,6 +203,7 @@ impl Conduction<'_, '_> {
                         "prepared local surface temperature has stale geometry",
                     ));
                 }
+                convection::admit_prepared_normal(sample, patch.outward_normal)?;
             }
             self.surface_endpoint.clone()
         } else {
@@ -244,6 +245,7 @@ impl Conduction<'_, '_> {
                 samples.push(self.solve_surface_on(
                     index,
                     live,
+                    Some(patch.outward_normal),
                     liquid.clone(),
                     temperature,
                     &mut || checkpoint(gate),

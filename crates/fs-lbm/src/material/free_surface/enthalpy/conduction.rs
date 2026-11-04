@@ -180,6 +180,9 @@ struct Conduction<'a, 'm> {
     surfaces: &'a [FreeSurfaceInterfaceContact<'a>],
     surface_solve: FreeSurfaceInterfaceSolve,
     surface_convection: Option<&'a dyn surface::convection::FreeSurfaceGasConvection>,
+    // Original native normals, resolved once for the held thermal geometry.
+    // Native endpoint queries receive freshly reconstructed normals instead.
+    surface_convection_normals: Vec<[f64; 3]>,
     maximum_surface_patches: usize,
     surface_stress: bool,
     surface_endpoints: Vec<CellId>,
@@ -779,13 +782,19 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         gate: &CancelGate,
     ) -> Result<FreeSurfaceConductionReport, Error> {
         poll(gate)?;
-        if surface_convection.is_some()
-            && (surfaces.is_empty()
-                || self.height_graph_thermocapillary_surface().is_some()
-                || self.local_thermocapillary_surface().is_some())
+        if surface_convection.is_some() && surfaces.is_empty() {
+            return Err(Error::Invalid(
+                "gas surface convection requires complete exposed surface patches",
+            ));
+        }
+        if surface_solve.local_boundary_evolution
+            == surface::LocalSurfaceBoundaryEvolution::UniformReservoir
+            && surface_convection.is_some_and(|provider| {
+                !provider.admits_uniform_boundary_evolution()
+            })
         {
             return Err(Error::Invalid(
-                "gas surface convection requires explicit Cartesian planar patches",
+                "evolving uniform reservoirs require explicitly uniform convection boundary data",
             ));
         }
         if gas_pressure.is_some()
@@ -1088,6 +1097,11 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         let radiation_endpoints = self.admit_radiation(radiation, &cell_id, dx, gate)?;
         let body_radiation = self.admit_body_radiation(bodies, dx, gate)?;
         let surface_endpoints = self.admit_surfaces(surfaces, surface_solve, &cell_id, dx, gate)?;
+        let surface_convection_normals = if surface_convection.is_some() {
+            self.surface_convection_normals(surfaces, gate)?
+        } else {
+            Vec::new()
+        };
         let mut powers = BTreeMap::new();
         let mut absolute_heat = 0.0;
         let mut external_heat = 0.0;
@@ -1200,6 +1214,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             surfaces,
             surface_solve,
             surface_convection,
+            surface_convection_normals,
             maximum_surface_patches: controls.maximum_faces
                 - (other_faces - surfaces.len())
                 - solid_link_count

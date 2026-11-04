@@ -219,6 +219,7 @@ impl Conduction<'_, '_> {
                                 "prepared surface temperature has stale graph geometry",
                             ));
                         }
+                        convection::admit_prepared_normal(sample, patch.outward_normal)?;
                     }
                 }
                 self.surface_endpoint.clone()
@@ -227,6 +228,7 @@ impl Conduction<'_, '_> {
                 for (index, contact) in self.surfaces.iter().enumerate() {
                     poll(gate)?;
                     let mut live = contact.surface;
+                    let mut live_normal = None;
                     if let Some(patches) = &patches {
                         let patch = patches.get(&column(live.face.liquid, normal_axis)).ok_or(
                             Error::Invalid("advected surface temperature has no live graph column"),
@@ -235,6 +237,9 @@ impl Conduction<'_, '_> {
                         live.face.gas = patch.gas;
                         live.face.area_m2 =
                             environment::finite(patch.area * scaling.cell_size_m().powi(2))?;
+                        live_normal = Some(patch.outward_normal);
+                    } else if self.surface_convection.is_some() {
+                        live_normal = Some(convection::cartesian_normal(live.face)?);
                     }
                     let location = FreeSurface3::transport_location(live.face.liquid)
                         .ok_or(Error::Invalid("unrepresentable solved-surface cell"))?;
@@ -249,6 +254,7 @@ impl Conduction<'_, '_> {
                     samples.push(self.solve_surface_on(
                         index,
                         live,
+                        live_normal,
                         liquid.clone(),
                         temperature,
                         &mut || checkpoint(gate),

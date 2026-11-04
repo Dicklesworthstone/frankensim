@@ -10,6 +10,8 @@ mod source;
 
 #[path = "mixed_tests.rs"]
 mod mixed;
+#[path = "orientation_tests.rs"]
+mod orientation;
 
 fn query<'a>(
     wall: f64,

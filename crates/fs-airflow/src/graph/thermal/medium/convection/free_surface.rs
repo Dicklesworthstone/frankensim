@@ -55,7 +55,7 @@ pub enum PlanarFreeSurfaceHeatLaw {
     },
 }
 
-/// A declared physical isothermal plate patch on Cartesian moving-liquid faces.
+/// A declared physical isothermal plate patch in the moving liquid's world frame.
 ///
 /// `characteristic_length` is the WHOLE physical plate's streamwise length for
 /// forced flow, height for a vertical natural/mixed plate, or area/perimeter for a
@@ -67,12 +67,19 @@ pub enum PlanarFreeSurfaceHeatLaw {
 /// approximately isothermal with locally held film properties. Spatially varying
 /// wall temperatures require refinement/model assessment; this is not a resolved
 /// gas boundary layer. Unsupported regimes fail instead of switching models.
-/// Curved, inclined, enclosed and evaporating surfaces are outside this adapter.
+/// The authored unit normal must match the actual liquid-to-gas normal, including
+/// reconstructed planar interfaces. Unit length, direction agreement and
+/// tangency admit only `64 * f64::EPSILON` normalization roundoff; this is not
+/// an empirical angular allowance. Gas speed and gravity are never projected
+/// onto an otherwise unsupported orientation.
+///
+/// Curved, enclosed and evaporating surfaces are outside this adapter. Natural
+/// convection admits only vertical/horizontal plates relative to actual gravity.
 /// Mixed convection admits only the declared aiding vertical-plate model, not
-/// opposing flow or crossflow. Reconstructed free-surface modes refuse in fs-lbm.
+/// opposing flow or crossflow. Geometry and area remain with the liquid owner.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PlanarFreeSurfaceConvection {
-    /// Signed Cartesian unit normal, outward from the liquid into gas.
+    /// Physical unit normal, outward from the liquid into gas.
     pub outward_normal: [f64; 3],
     pub characteristic_length: Length,
     pub law: PlanarFreeSurfaceHeatLaw,
@@ -100,7 +107,12 @@ fn thermal_film(
     Ok(thermal)
 }
 
-fn magnitude(vector: [f64; 3]) -> Result<f64, FreeSurfaceEnthalpyError> {
+// One roundoff allowance for dimensionless unit length and orientation tests.
+// Comparing vector differences, rather than 1 - dot(a,b), does not admit a
+// sqrt(epsilon)-sized tilt when nearly parallel dot products round to one.
+const DIRECTION_ROUNDOFF: f64 = 64.0 * f64::EPSILON;
+
+fn direction(vector: [f64; 3]) -> Result<([f64; 3], f64), FreeSurfaceEnthalpyError> {
     if vector.into_iter().any(|x| !x.is_finite()) {
         return Err(invalid(
             "plate convection requires a finite physical vector",
@@ -112,14 +124,48 @@ fn magnitude(vector: [f64; 3]) -> Result<f64, FreeSurfaceEnthalpyError> {
             "plate convection requires a nonzero finite physical vector",
         ));
     }
-    let value =
-        scale * fs_math::det::sqrt(vector.into_iter().map(|x| (x / scale) * (x / scale)).sum());
-    if !value.is_finite() || value <= 0.0 {
+    let scaled = vector.map(|x| x / scale);
+    let length = fs_math::det::sqrt(scaled.into_iter().map(|x| x * x).sum());
+    // Plate-up is only a direction and can be normalized even if its raw
+    // magnitude overflows. Physical speed/gravity and unit normals separately
+    // admit their returned magnitude before using it.
+    Ok((scaled.map(|x| x / length), scale * length))
+}
+
+fn physical_vector(vector: [f64; 3]) -> Result<([f64; 3], f64), FreeSurfaceEnthalpyError> {
+    let (unit, magnitude) = direction(vector)?;
+    if !magnitude.is_finite() || magnitude <= 0.0 {
         return Err(invalid(
             "plate convection requires a nonzero finite physical vector",
         ));
     }
-    Ok(value)
+    Ok((unit, magnitude))
+}
+
+fn unit_normal(vector: [f64; 3]) -> Result<[f64; 3], FreeSurfaceEnthalpyError> {
+    let (unit, magnitude) = physical_vector(vector)?;
+    if (magnitude - 1.0).abs() > DIRECTION_ROUNDOFF {
+        return Err(invalid("plate convection requires physical unit normals"));
+    }
+    Ok(unit)
+}
+
+fn aligned(a: [f64; 3], b: [f64; 3]) -> bool {
+    a.into_iter()
+        .zip(b)
+        .map(|(x, y)| (x - y) * (x - y))
+        .sum::<f64>()
+        <= DIRECTION_ROUNDOFF * DIRECTION_ROUNDOFF
+}
+
+fn tangent(normal: [f64; 3], direction: [f64; 3]) -> bool {
+    normal
+        .into_iter()
+        .zip(direction)
+        .map(|(x, y)| x * y)
+        .sum::<f64>()
+        .abs()
+        <= DIRECTION_ROUNDOFF
 }
 
 impl FreeSurfaceGasConvection for PlanarFreeSurfaceConvection {
@@ -128,20 +174,11 @@ impl FreeSurfaceGasConvection for PlanarFreeSurfaceConvection {
         query: FreeSurfaceConvectionQuery<'_>,
     ) -> Result<Option<Evidence<FreeSurfaceHeatTransferCoefficient>>, FreeSurfaceEnthalpyError>
     {
-        let axis = self
-            .outward_normal
-            .iter()
-            .position(|&x| x == 1.0 || x == -1.0)
-            .ok_or_else(|| invalid("plate normal must be a signed Cartesian unit vector"))?;
-        if self
-            .outward_normal
-            .iter()
-            .enumerate()
-            .any(|(i, &x)| i != axis && x != 0.0)
-            || query.outward_normal != self.outward_normal
-        {
+        let normal = unit_normal(self.outward_normal)?;
+        let actual_normal = unit_normal(query.outward_normal)?;
+        if !aligned(normal, actual_normal) {
             return Err(invalid(
-                "the declared plate normal must match its actual Cartesian liquid/gas face",
+                "the declared plate normal must match its actual liquid/gas surface",
             ));
         }
         if !self.characteristic_length.value().is_finite()
@@ -165,8 +202,8 @@ impl FreeSurfaceGasConvection for PlanarFreeSurfaceConvection {
                 regime,
                 relative_velocity_m_s,
             } => {
-                let speed = magnitude(relative_velocity_m_s)?;
-                if relative_velocity_m_s[axis] != 0.0 {
+                let (flow, speed) = physical_vector(relative_velocity_m_s)?;
+                if !tangent(actual_normal, flow) {
                     return Err(invalid(
                         "forced plate convection requires relative gas flow tangent to the surface",
                     ));
@@ -194,21 +231,13 @@ impl FreeSurfaceGasConvection for PlanarFreeSurfaceConvection {
                 .map_err(original)?
             }
             PlanarFreeSurfaceHeatLaw::Natural { gravity_m_s2 } => {
-                let gravity = magnitude(gravity_m_s2)?;
-                let geometry = if gravity_m_s2[axis] == 0.0 {
+                let (down, gravity) = physical_vector(gravity_m_s2)?;
+                let geometry = if tangent(actual_normal, down) {
                     NaturalConvectionGeometry::VerticalPlate
-                } else if gravity_m_s2
-                    .iter()
-                    .enumerate()
-                    .all(|(i, &x)| i == axis || x == 0.0)
-                {
-                    NaturalConvectionGeometry::HorizontalPlate(
-                        if gravity_m_s2[axis] * self.outward_normal[axis] < 0.0 {
-                            HorizontalPlateFacing::Up
-                        } else {
-                            HorizontalPlateFacing::Down
-                        },
-                    )
+                } else if aligned(actual_normal, down) {
+                    NaturalConvectionGeometry::HorizontalPlate(HorizontalPlateFacing::Down)
+                } else if aligned(actual_normal.map(|x| -x), down) {
+                    NaturalConvectionGeometry::HorizontalPlate(HorizontalPlateFacing::Up)
                 } else {
                     return Err(invalid(
                         "natural plate convection supports only gravity-aligned horizontal or vertical plates",
@@ -250,7 +279,10 @@ impl FreeSurfaceGasConvection for PlanarFreeSurfaceConvection {
                 gravity_m_s2,
                 maximum_relative_density_departure,
             } => {
-                if plate_up[axis] != 0.0 || relative_velocity_m_s[axis] != 0.0 {
+                let (up, _) = direction(plate_up)?;
+                let tangent_flow = relative_velocity_m_s == [0.0; 3]
+                    || tangent(actual_normal, direction(relative_velocity_m_s)?.0);
+                if !tangent(actual_normal, up) || !tangent_flow {
                     return Err(invalid(
                         "aiding vertical-plate axis and relative gas flow must be tangent to the actual face",
                     ));
@@ -291,6 +323,13 @@ impl FreeSurfaceGasConvection for PlanarFreeSurfaceConvection {
         };
         let (_, _, coefficient) = evaluated.into_parts();
         Ok(Some(coefficient))
+    }
+
+    fn admits_uniform_boundary_evolution(&self) -> bool {
+        // One authored plate frame, whole-plate length and external-flow law
+        // apply independently of old patch indices. Newly reconstructed faces
+        // must still pass every actual-normal and material-state check above.
+        true
     }
 }
 

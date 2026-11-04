@@ -136,6 +136,9 @@ pub struct FreeSurfaceInterfaceSample {
     pub gas: ResolvedThermochemicalGasState,
     /// Gas-film conduction or the exact correlation evidence used at this Ts.
     pub gas_heat_transfer: FreeSurfaceGasHeatTransfer,
+    /// Actual native outward normal supplied to the convection provider at this
+    /// epoch. None for the original stagnant-film law, which is orientation-free.
+    pub convection_outward_normal: Option<[f64; 3]>,
     pub liquid_temperature_k: f64,
     pub surface_temperature_k: f64,
     /// Total hemispherical coefficient at the actual solved interface T.
@@ -686,7 +689,14 @@ impl Conduction<'_, '_> {
         tl: f64,
         check: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<FreeSurfaceInterfaceSample, Error> {
-        self.solve_surface_on(index, self.surfaces[index].surface, liquid, tl, check)
+        let normal = if self.surface_convection.is_some() {
+            Some(*self.surface_convection_normals.get(index).ok_or(Error::Invalid(
+                "surface convection is missing its original geometric normal",
+            ))?)
+        } else {
+            None
+        };
+        self.solve_surface_on(index, self.surfaces[index].surface, normal, liquid, tl, check)
     }
 
     // Native graph motion can change the exposed cell and area. Reuse exactly
@@ -696,6 +706,7 @@ impl Conduction<'_, '_> {
         &self,
         index: usize,
         surface: FreeSurfaceInterfaceFace,
+        outward_normal: Option<[f64; 3]>,
         liquid: ResolvedLiquidState,
         tl: f64,
         check: &mut dyn FnMut() -> Result<(), DepositionError>,
@@ -801,7 +812,9 @@ impl Conduction<'_, '_> {
                 let coefficient = convection.coefficient(FreeSurfaceConvectionQuery {
                     patch_index: index,
                     surface,
-                    outward_normal: convection::cartesian_normal(surface.face)?,
+                    outward_normal: convection::admit_normal(outward_normal.ok_or(
+                        Error::Invalid("surface convection is missing its live outward normal"),
+                    )?)?,
                     surface_temperature_k: ts,
                     bulk: &bulk,
                     film: &gas,
@@ -864,6 +877,7 @@ impl Conduction<'_, '_> {
                     liquid_conductivity,
                     gas,
                     gas_heat_transfer,
+                    convection_outward_normal: self.surface_convection.and(outward_normal),
                     liquid_temperature_k: tl,
                     surface_temperature_k: ts,
                     emissivity,
