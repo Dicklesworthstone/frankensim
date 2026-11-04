@@ -45,6 +45,7 @@ pub use plane::{IdealAcousticPlane, IdealPlaneBoundary, PreparedHalfSpaceObserve
 /// Coherent volume injection into an explicitly uniform subsonic mean flow.
 pub mod convected;
 mod wedge;
+pub(super) use wedge::{multiply as image_matrix_product, reflection as image_reflection_matrix};
 
 /// Applicability of the prescribed three-dimensional source transfer.
 pub const COMPACT_FIELD_SCOPE: &str = "Prescribed compact 3D volume flow [m³/s] and force on fluid [N]; \

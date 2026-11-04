@@ -187,7 +187,7 @@ fn check_opening(planes: [IdealAcousticPlane; 2], order: usize) -> Result<(), Ae
     Ok(())
 }
 
-fn reflection(normal: [f64; 3]) -> Matrix {
+pub(crate) fn reflection(normal: [f64; 3]) -> Matrix {
     core::array::from_fn(|row| {
         core::array::from_fn(|col| {
             let identity = if row == col { 1.0 } else { 0.0 };
@@ -197,7 +197,7 @@ fn reflection(normal: [f64; 3]) -> Matrix {
     })
 }
 
-fn multiply(left: Matrix, right: Matrix) -> Matrix {
+pub(crate) fn multiply(left: Matrix, right: Matrix) -> Matrix {
     core::array::from_fn(|row| {
         core::array::from_fn(|col| {
             (0..3)

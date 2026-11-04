@@ -345,7 +345,15 @@ fn observer_adapter_retains_model_boundary_and_supports_preparation_cancellation
     let molecular = PreparedCompactSourceObserver::new_molecular(state, 180.0, [0.0, 0.0, 2.0], &[[0.0; 3]], 1).unwrap();
     assert!(matches!(PreparedCompactRadiatedPower::from_observer(&molecular, budget(1)),
         Err(AeroacError::InvalidParameter { .. })));
+    let plane = fs_aeroac::curle3d::IdealAcousticPlane::new([0.0, 0.0, -1.0], [0.0, 0.0, 1.0],
+        fs_aeroac::curle3d::IdealPlaneBoundary::Rigid).unwrap();
+    let reflected_molecular = molecular.with_plane(plane, 2).unwrap();
+    assert!(matches!(PreparedCompactRadiatedPower::from_half_space(&reflected_molecular, budget(2)),
+        Err(AeroacError::InvalidParameter { .. })));
     let observer = PreparedCompactSourceObserver::new(medium(), 180.0, [0.0, 0.0, 2.0], &[[0.0; 3]], 1).unwrap();
     assert!(matches!(PreparedCompactRadiatedPower::from_observer_cancellable(&observer, budget(1), || true),
         Err(AeroacError::Cancelled { .. })));
 }
+
+#[path = "compact_power/reflection.rs"]
+mod reflection;

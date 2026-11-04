@@ -9,11 +9,18 @@
 //!
 //! This is cycle-average power in a homogeneous LOSSLESS exterior. It is not
 //! local pressure squared, the sum of individual source powers, or a lossy
-//! medium's emitted power. Prescribed compact-source and common-clock
-//! assumptions remain those of the original field observer.
+//! medium's emitted power. For an original ideal-plane/corner/wedge observer,
+//! the same integral includes the complete coherent image group. Its energy
+//! pattern is invariant under that group, so division by its order gives the
+//! power into the physical fluid solid angle. Images are never independent
+//! sources. Prescribed-source and common-clock assumptions remain unchanged.
 
+use super::array::{image_matrix_product, image_reflection_matrix};
 use super::statistics::{finite, invalid, nonfinite};
-use super::{CompactSourcePhasor, PreparedCompactSourceObserver};
+use super::{
+    CompactSourcePhasor, IdealAcousticPlane, PreparedCompactSourceObserver,
+    PreparedHalfSpaceObserver,
+};
 use crate::AeroacError;
 use fs_material::fluid_acoustics::FluidAcousticState;
 use fs_math::special::{SphericalBesselMoments, spherical_bessel_moments};
@@ -22,12 +29,16 @@ use fs_math::{c64::C64, dd::Dd, det};
 /// Authority of the homogeneous, lossless compact-source power integral.
 pub const COMPACT_POWER_SCOPE: &str = "Cycle-average full-sphere power of prescribed compact 3D volume flow [m^3/s] and force on fluid [N]; homogeneous stationary lossless free space, with no finite-source validation, moving sources, scattering, absorption, mutual loading or measured-SPL qualification.";
 
+/// Authority of power into the physical domain of an original ideal image group.
+pub const COMPACT_IDEAL_BOUNDARY_POWER_SCOPE: &str = "Cycle-average power of prescribed compact 3D volume flow [m^3/s] and force on fluid [N] into the original homogeneous stationary lossless ideal-plane, perpendicular-corner or pi/m-wedge fluid domain; complete direct/image interference, with no finite wall impedance, general diffraction, absorption, source feedback or measured-SPL qualification.";
+
 /// Admission bounds for geometry preparation and each coherent evaluation.
 #[derive(Clone, Copy, Debug)]
 pub struct RadiatedPowerBudget {
-    /// Maximum original source count, including colocated or silent sources.
+    /// Maximum source paths, including colocated or silent sources and every
+    /// ideal-wall image. Free-space preparation has one path per source.
     pub max_sources: usize,
-    /// Maximum square of the original source count, checked before allocation.
+    /// Maximum square of the source-path count, checked before allocation.
     /// Bounds grouping and the cached pair operator, including repeated group sums.
     pub max_source_pairs: usize,
 }
@@ -37,11 +48,11 @@ pub struct RadiatedPowerBudget {
 pub struct RadiatedPowerModeBudget {
     /// Maximum authored factors, including zero factors.
     pub max_modes: usize,
-    /// Maximum original source-count squared times factor count.
+    /// Maximum source-path-count squared times factor count, including images.
     pub max_source_pair_mode_products: usize,
 }
 
-/// Outward power integrated over the complete sphere, with peak normalization.
+/// Outward power integrated over the original physical exterior solid angle.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CompactRadiatedPower {
     /// Time-average watts, including all declared interference.
@@ -63,6 +74,17 @@ struct PairMoment {
     moments: SphericalBesselMoments,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct SourceImage {
+    source: usize,
+    position_m: [f64; 3],
+    force_transform: [[f64; 3]; 3],
+    sign: f64,
+    group: usize,
+}
+
+const IDENTITY: [[f64; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+
 /// Cached analytic angular integral for actual compact-source positions.
 ///
 /// Exactly equal positions are grouped, preserving the original input order
@@ -71,9 +93,9 @@ struct PairMoment {
 /// moment decrements remain separate from one and one-third, so a weak dipole
 /// or monopole pair is not lost by subtracting two rounded O(1) powers.
 ///
-/// For N supplied sources and M distinct positions, preparation is O(N^2)
-/// and retains O(N + M^2) data. Immutable application allocates nothing, uses
-/// no trigonometry, and takes O(N M + M^2) work: group sums are recomputed
+/// For P direct/image paths and M distinct path positions, preparation is O(P^2)
+/// and retains O(P + M^2) data. Immutable application allocates nothing, uses
+/// no trigonometry, and takes O(P M + M^2) work: group sums are recomputed
 /// when needed instead of requiring mutable or caller-owned scratch.
 /// Double-double field and quadratic reductions retain small cancellation
 /// residuals; this is not a certified enclosure or a relative guarantee near
@@ -89,6 +111,10 @@ pub struct PreparedCompactRadiatedPower {
     pairs: Vec<PairMoment>,
     flow_gain: Dd,
     force_gain: Dd,
+    // Empty for free space. Otherwise source-major complete image groups map
+    // every path back to the SAME original physical source and coherence factor.
+    images: Vec<SourceImage>,
+    image_group_size: usize,
 }
 
 impl PreparedCompactRadiatedPower {
@@ -131,7 +157,10 @@ impl PreparedCompactRadiatedPower {
     /// The observer position does not enter total radiated power. A molecular
     /// observer explicitly refuses: attenuation changes flux with radius, so
     /// neither lossless power nor power at infinity is its emitted source power.
-    /// No temporary position array is allocated.
+    /// Original ideal walls retain their exact finite image group and Cartesian
+    /// force transforms. Full-image sphere power is divided by the group order
+    /// to integrate only the physical fluid domain. Preparation budgets count
+    /// all paths; every later source vector still names only physical sources.
     pub fn from_observer(
         observer: &PreparedCompactSourceObserver,
         budget: RadiatedPowerBudget,
@@ -147,19 +176,92 @@ impl PreparedCompactRadiatedPower {
     ) -> Result<Self, AeroacError> {
         poll(&mut cancelled)?;
         if observer.molecular_state().is_some() {
-            return Err(invalid("full-sphere compact power requires a lossless exterior"));
+            return Err(invalid(
+                "full-sphere compact power requires a lossless exterior",
+            ));
         }
-        Self::prepare(
-            observer.acoustic(),
-            observer.frequency_hz(),
-            observer.source_count(),
+        if observer.reflection_planes().is_empty() {
+            return Self::prepare(
+                observer.acoustic(),
+                observer.frequency_hz(),
+                observer.source_count(),
+                budget,
+                |index| {
+                    observer
+                        .source_position_m(index)
+                        .ok_or_else(|| invalid("compact power source index is unavailable"))
+                },
+                &mut cancelled,
+            );
+        }
+        Self::prepare_image_domain(
+            observer,
+            observer.reflection_planes(),
+            observer.reflection_wedge_order(),
             budget,
-            |index| {
-                observer.source_position_m(index)
-                    .ok_or_else(|| invalid("compact power source index is unavailable"))
-            },
             &mut cancelled,
         )
+    }
+
+    /// Preserve the original separate direct/reflected half-space owner.
+    /// Both paths of every physical source contribute coherently before the
+    /// exact hemisphere integral; material, source phases and plane survive.
+    pub fn from_half_space(
+        observer: &PreparedHalfSpaceObserver,
+        budget: RadiatedPowerBudget,
+    ) -> Result<Self, AeroacError> {
+        Self::from_half_space_cancellable(observer, budget, || false)
+    }
+
+    /// Bounded half-space preparation with no partial owner on cancellation.
+    pub fn from_half_space_cancellable(
+        observer: &PreparedHalfSpaceObserver,
+        budget: RadiatedPowerBudget,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, AeroacError> {
+        poll(&mut cancelled)?;
+        if observer.direct().molecular_state().is_some() {
+            return Err(invalid(
+                "compact boundary power requires a lossless exterior",
+            ));
+        }
+        Self::prepare_image_domain(
+            observer.direct(),
+            &[observer.plane()],
+            None,
+            budget,
+            &mut cancelled,
+        )
+    }
+
+    fn prepare_image_domain(
+        observer: &PreparedCompactSourceObserver,
+        planes: &[IdealAcousticPlane],
+        wedge_order: Option<usize>,
+        budget: RadiatedPowerBudget,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, AeroacError> {
+        let (mut images, image_group_size) =
+            source_images(observer, planes, wedge_order, budget, cancelled)?;
+        let mut prepared = Self::prepare(
+            observer.acoustic(),
+            observer.frequency_hz(),
+            images.len(),
+            budget,
+            |index| Ok(images[index].position_m),
+            cancelled,
+        )?;
+        for (group_index, group) in prepared.groups.iter().enumerate() {
+            poll(cancelled)?;
+            for &path in &prepared.members[group.members.clone()] {
+                images[path].group = group_index;
+            }
+        }
+        prepared.source_count = observer.source_count();
+        prepared.images = images;
+        prepared.image_group_size = image_group_size;
+        poll(cancelled)?;
+        Ok(prepared)
     }
 
     #[allow(clippy::float_cmp)] // Only exactly equal coordinates permit field coalescing.
@@ -172,22 +274,31 @@ impl PreparedCompactRadiatedPower {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, AeroacError> {
         poll(cancelled)?;
-        let source_pairs = source_count.checked_mul(source_count)
+        let source_pairs = source_count
+            .checked_mul(source_count)
             .ok_or_else(|| invalid("compact power source-pair count overflows"))?;
         if source_count > budget.max_sources || source_pairs > budget.max_source_pairs {
             return Err(invalid("compact power exceeds source/pair budget"));
         }
         let omega = core::f64::consts::TAU * frequency_hz;
         let k = omega / acoustic.sound_speed_m_s();
-        if [frequency_hz, omega, k].iter().any(|value| !value.is_finite() || *value <= 0.0) {
-            return Err(invalid("compact power frequency and wave number must be positive finite"));
+        if [frequency_hz, omega, k]
+            .iter()
+            .any(|value| !value.is_finite() || *value <= 0.0)
+        {
+            return Err(invalid(
+                "compact power frequency and wave number must be positive finite",
+            ));
         }
         let root_impedance = Dd::from_f64(acoustic.characteristic_impedance_pa_s_m()).sqrt();
         let base_gain = Dd::from_f64(k) / Dd::from_f64(8.0 * core::f64::consts::PI).sqrt();
         // These gains turn source coefficients into sqrt(watt) angular amplitudes.
         let flow_gain = base_gain * root_impedance;
         let force_gain = base_gain / root_impedance;
-        if [flow_gain, force_gain].iter().any(|value| !finite_dd(*value) || value.hi <= 0.0) {
+        if [flow_gain, force_gain]
+            .iter()
+            .any(|value| !finite_dd(*value) || value.hi <= 0.0)
+        {
             return Err(invalid("compact power normalization is not representable"));
         }
         for index in 0..source_count {
@@ -198,9 +309,11 @@ impl PreparedCompactRadiatedPower {
         }
         let mut groups = Vec::<PositionGroup>::new();
         let mut members = Vec::new();
-        groups.try_reserve_exact(source_count)
+        groups
+            .try_reserve_exact(source_count)
             .map_err(|_| invalid("compact power group allocation exceeds available memory"))?;
-        members.try_reserve_exact(source_count)
+        members
+            .try_reserve_exact(source_count)
             .map_err(|_| invalid("compact power member allocation exceeds available memory"))?;
         for first in 0..source_count {
             poll(cancelled)?;
@@ -215,30 +328,59 @@ impl PreparedCompactRadiatedPower {
                     members.push(index);
                 }
             }
-            groups.push(PositionGroup { position_m: point, members: start..members.len() });
+            groups.push(PositionGroup {
+                position_m: point,
+                members: start..members.len(),
+            });
         }
         // The admitted N^2 bounds this triangular M^2 count without overflow.
         let pair_count = groups.len() * groups.len().saturating_sub(1) / 2;
         let mut pairs = Vec::new();
-        pairs.try_reserve_exact(pair_count)
+        pairs
+            .try_reserve_exact(pair_count)
             .map_err(|_| invalid("compact power pair allocation exceeds available memory"))?;
         for (i, a) in groups.iter().enumerate() {
             poll(cancelled)?;
             for b in &groups[..i] {
                 poll(cancelled)?;
-                let displacement: [f64; 3] = core::array::from_fn(|axis| a.position_m[axis] - b.position_m[axis]);
-                let distance = det::hypot(det::hypot(displacement[0], displacement[1]), displacement[2]);
+                let displacement: [f64; 3] =
+                    core::array::from_fn(|axis| a.position_m[axis] - b.position_m[axis]);
+                let distance = det::hypot(
+                    det::hypot(displacement[0], displacement[1]),
+                    displacement[2],
+                );
                 let phase_distance = k * distance;
-                if [distance, phase_distance].iter().any(|value| !value.is_finite() || *value <= 0.0) {
-                    return Err(invalid("compact power source separation is not representable"));
+                if [distance, phase_distance]
+                    .iter()
+                    .any(|value| !value.is_finite() || *value <= 0.0)
+                {
+                    return Err(invalid(
+                        "compact power source separation is not representable",
+                    ));
                 }
-                let moments = spherical_bessel_moments(phase_distance)
-                    .ok_or_else(|| invalid("compact power spherical moments are not representable"))?;
-                pairs.push(PairMoment { direction: displacement.map(|value| value / distance), moments });
+                let moments = spherical_bessel_moments(phase_distance).ok_or_else(|| {
+                    invalid("compact power spherical moments are not representable")
+                })?;
+                pairs.push(PairMoment {
+                    direction: displacement.map(|value| value / distance),
+                    moments,
+                });
             }
         }
         poll(cancelled)?;
-        Ok(Self { acoustic, frequency_hz, source_count, source_pairs, groups, members, pairs, flow_gain, force_gain })
+        Ok(Self {
+            acoustic,
+            frequency_hz,
+            source_count,
+            source_pairs,
+            groups,
+            members,
+            pairs,
+            flow_gain,
+            force_gain,
+            images: Vec::new(),
+            image_group_size: 1,
+        })
     }
 
     /// Original fluid-acoustic snapshot, without a substituted medium.
@@ -259,7 +401,28 @@ impl PreparedCompactRadiatedPower {
         self.source_count
     }
 
-    /// Number of exactly distinct source positions; close positions stay distinct.
+    /// Number of retained direct/image paths. Original source vectors always
+    /// have [`Self::source_count`] entries, never one entry per image.
+    #[must_use]
+    pub fn source_path_count(&self) -> usize {
+        if self.image_group_size == 1 {
+            self.source_count
+        } else {
+            self.images.len()
+        }
+    }
+
+    /// Physical exterior domain and original source-model authority.
+    #[must_use]
+    pub const fn scope(&self) -> &'static str {
+        if self.image_group_size == 1 {
+            COMPACT_POWER_SCOPE
+        } else {
+            COMPACT_IDEAL_BOUNDARY_POWER_SCOPE
+        }
+    }
+
+    /// Number of exactly distinct direct/image positions; close positions stay distinct.
     #[must_use]
     pub fn position_count(&self) -> usize {
         self.groups.len()
@@ -281,7 +444,7 @@ impl PreparedCompactRadiatedPower {
     ) -> Result<CompactRadiatedPower, AeroacError> {
         let power = self.coherent_power(sources, &mut cancelled)?;
         poll(&mut cancelled)?;
-        finish(power)
+        finish(power, self.scope())
     }
 
     /// Power of explicit source factors with E[xi_r conj(xi_s)] = delta_rs.
@@ -315,7 +478,9 @@ impl PreparedCompactRadiatedPower {
             return Err(invalid("compact power factors exceed the mode/pair budget"));
         }
         if modes.iter().any(|mode| mode.len() != self.source_count) {
-            return Err(invalid("each compact power factor requires one vector per original source"));
+            return Err(invalid(
+                "each compact power factor requires one vector per original source",
+            ));
         }
         let mut power = Dd::ZERO;
         for mode in modes {
@@ -324,14 +489,18 @@ impl PreparedCompactRadiatedPower {
             power = power + contribution;
         }
         poll(&mut cancelled)?;
-        finish(power)
+        finish(power, self.scope())
     }
 
-    /// O(N) specialization for caller-declared mutually uncorrelated sources.
+    /// Specialization for caller-declared mutually uncorrelated physical sources.
     ///
     /// Colocated sources are still uncorrelated here: their fields must not be
     /// coalesced. Coherent Q/F components within one source are retained; their
-    /// monopole/dipole cross term integrates to zero over a complete sphere.
+    /// monopole/dipole cross term integrates to zero over a complete free-space
+    /// sphere. With ideal walls each source remains coherent with all its own
+    /// images, including Q/F cross terms over the physical solid angle. Work
+    /// is O(N) in free space and O(N g²) for an image group of order g, without
+    /// allocating sparse source factors or repeating the full array integral.
     pub fn evaluate_independent_sources(
         &self,
         sources: &[CompactSourcePhasor],
@@ -347,6 +516,11 @@ impl PreparedCompactRadiatedPower {
     ) -> Result<CompactRadiatedPower, AeroacError> {
         poll(&mut cancelled)?;
         self.check_count(sources)?;
+        if self.image_group_size != 1 {
+            let power = self.independent_image_power(sources, &mut cancelled)?;
+            poll(&mut cancelled)?;
+            return finish(power, self.scope());
+        }
         let mut power = Dd::ZERO;
         for source in sources {
             poll(&mut cancelled)?;
@@ -355,7 +529,7 @@ impl PreparedCompactRadiatedPower {
             power = power + self.normalized(sum)?.colocated_power();
         }
         poll(&mut cancelled)?;
-        finish(power)
+        finish(power, self.scope())
     }
 
     fn coherent_power(
@@ -366,9 +540,16 @@ impl PreparedCompactRadiatedPower {
         poll(cancelled)?;
         self.check_count(sources)?;
         let mut total = SourceSum::default();
-        for source in sources {
-            poll(cancelled)?;
-            total.add(*source)?;
+        if self.image_group_size == 1 {
+            for source in sources {
+                poll(cancelled)?;
+                total.add(*source)?;
+            }
+        } else {
+            for image in &self.images {
+                poll(cancelled)?;
+                total.add_image(sources[image.source], *image)?;
+            }
         }
         let mut power = self.normalized(total)?.colocated_power();
         let mut pair_index = 0;
@@ -382,8 +563,13 @@ impl PreparedCompactRadiatedPower {
                 pair_index += 1;
             }
         }
-        validate_power(power)?;
-        Ok(power)
+        let physical_power = if self.image_group_size == 1 {
+            power
+        } else {
+            power / Dd::from_f64(self.image_group_size as f64)
+        };
+        validate_power(physical_power)?;
+        Ok(physical_power)
     }
 
     fn group_sum(
@@ -395,9 +581,60 @@ impl PreparedCompactRadiatedPower {
         let mut sum = SourceSum::default();
         for &index in &self.members[group.members.clone()] {
             poll(cancelled)?;
-            sum.add(sources[index])?;
+            if self.image_group_size == 1 {
+                sum.add(sources[index])?;
+            } else {
+                let image = self.images[index];
+                sum.add_image(sources[image.source], image)?;
+            }
         }
         self.normalized(sum)
+    }
+
+    fn independent_image_power(
+        &self,
+        sources: &[CompactSourcePhasor],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Dd, AeroacError> {
+        let mut power = Dd::ZERO;
+        for (source, images) in sources
+            .iter()
+            .zip(self.images.chunks_exact(self.image_group_size))
+        {
+            poll(cancelled)?;
+            let mut total = SourceSum::default();
+            for &image in images {
+                poll(cancelled)?;
+                total.add_image(*source, image)?;
+            }
+            let mut source_power = self.normalized(total)?.colocated_power();
+            for (index, &a) in images.iter().enumerate().skip(1) {
+                let mut sum = SourceSum::default();
+                sum.add_image(*source, a)?;
+                let left = self.normalized(sum)?;
+                for &b in &images[..index] {
+                    poll(cancelled)?;
+                    if a.group == b.group {
+                        continue;
+                    }
+                    let mut sum = SourceSum::default();
+                    sum.add_image(*source, b)?;
+                    let right = self.normalized(sum)?;
+                    let hi = a.group.max(b.group);
+                    let lo = a.group.min(b.group);
+                    let pair = self.pairs[hi * (hi - 1) / 2 + lo];
+                    let correction = if a.group > b.group {
+                        pair.correction(left, right)
+                    } else {
+                        pair.correction(right, left)
+                    };
+                    source_power = source_power + correction + correction;
+                }
+            }
+            validate_power(source_power)?;
+            power = power + source_power;
+        }
+        Ok(power / Dd::from_f64(self.image_group_size as f64))
     }
 
     fn normalized(&self, sum: SourceSum) -> Result<RadiatingSource, AeroacError> {
@@ -415,7 +652,9 @@ impl PreparedCompactRadiatedPower {
         if sources.len() == self.source_count {
             Ok(())
         } else {
-            Err(invalid("compact power needs one vector per original source"))
+            Err(invalid(
+                "compact power needs one vector per original source",
+            ))
         }
     }
 }
@@ -424,7 +663,10 @@ impl PairMoment {
     fn correction(self, a: RadiatingSource, b: RadiatingSource) -> Dd {
         let an = a.project(self.direction);
         let bn = b.project(self.direction);
-        let force_product = a.force.iter().zip(b.force)
+        let force_product = a
+            .force
+            .iter()
+            .zip(b.force)
             .fold(Dd::ZERO, |sum, (x, y)| sum + x.real_product(y));
         let mixed = a.volume.imaginary_product(bn) + an.imaginary_product(b.volume);
         self.moments.j0_minus_one * a.volume.real_product(b.volume)
@@ -432,6 +674,97 @@ impl PairMoment {
             - self.moments.j2 * an.real_product(bn)
             + self.moments.j1 * mixed
     }
+}
+
+// Reconstruct the already admitted image group with the same plane geometry,
+// DD reflection matrices and ordered compositions as the field owner. Paths
+// are source-major so an independent physical source can retain its complete
+// image interference without constructing an N-entry sparse factor.
+fn source_images(
+    observer: &PreparedCompactSourceObserver,
+    planes: &[IdealAcousticPlane],
+    wedge_order: Option<usize>,
+    budget: RadiatedPowerBudget,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(Vec<SourceImage>, usize), AeroacError> {
+    let group_size = wedge_order.map_or(1 << planes.len(), |m| 2 * m);
+    let paths = observer
+        .source_count()
+        .checked_mul(group_size)
+        .ok_or_else(|| invalid("compact image path count overflows"))?;
+    let pairs = paths
+        .checked_mul(paths)
+        .ok_or_else(|| invalid("compact image pair count overflows"))?;
+    if paths > budget.max_sources || pairs > budget.max_source_pairs {
+        return Err(invalid("compact image paths exceed source/pair budget"));
+    }
+    let mut images = Vec::new();
+    images
+        .try_reserve_exact(paths)
+        .map_err(|_| invalid("compact image allocation exceeds available memory"))?;
+    for source in 0..observer.source_count() {
+        poll(cancelled)?;
+        let position = observer
+            .source_position_m(source)
+            .ok_or_else(|| invalid("compact image source position is unavailable"))?;
+        if let Some(order) = wedge_order {
+            let first = image_reflection_matrix(planes[0].inward_normal());
+            let step =
+                image_matrix_product(image_reflection_matrix(planes[1].inward_normal()), first);
+            let mut rotation = SourceImage {
+                source,
+                position_m: position,
+                force_transform: IDENTITY,
+                sign: 1.0,
+                group: 0,
+            };
+            let mut mirror = SourceImage {
+                source,
+                position_m: planes[0].reflected_position(position)?,
+                force_transform: first,
+                sign: planes[0].boundary().sign(),
+                group: 0,
+            };
+            let step_sign = planes[0].boundary().sign() * planes[1].boundary().sign();
+            for index in 0..order {
+                poll(cancelled)?;
+                images.push(rotation);
+                images.push(mirror);
+                if index + 1 < order {
+                    for image in [&mut rotation, &mut mirror] {
+                        image.position_m = planes[1]
+                            .reflected_position(planes[0].reflected_position(image.position_m)?)?;
+                        image.force_transform = image_matrix_product(step, image.force_transform);
+                        image.sign *= step_sign;
+                    }
+                }
+            }
+        } else {
+            for mask in 0..group_size {
+                poll(cancelled)?;
+                let mut image = SourceImage {
+                    source,
+                    position_m: position,
+                    force_transform: IDENTITY,
+                    sign: 1.0,
+                    group: 0,
+                };
+                for (index, plane) in planes.iter().enumerate() {
+                    if mask & (1 << index) != 0 {
+                        image.position_m = plane.reflected_position(image.position_m)?;
+                        image.force_transform = image_matrix_product(
+                            image_reflection_matrix(plane.inward_normal()),
+                            image.force_transform,
+                        );
+                        image.sign *= plane.boundary().sign();
+                    }
+                }
+                images.push(image);
+            }
+        }
+    }
+    poll(cancelled)?;
+    Ok((images, group_size))
 }
 
 #[derive(Clone, Copy, Default)]
@@ -447,7 +780,10 @@ impl ComplexDd {
     }
 
     fn scale(self, value: Dd) -> Self {
-        Self { re: self.re * value, im: self.im * value }
+        Self {
+            re: self.re * value,
+            im: self.im * value,
+        }
     }
 
     fn real_product(self, other: Self) -> Dd {
@@ -471,12 +807,38 @@ struct SourceSum {
 
 impl SourceSum {
     fn add(&mut self, source: CompactSourcePhasor) -> Result<(), AeroacError> {
-        if !finite(source.volume_flow_m3_s) || source.force_on_fluid_n.iter().any(|value| !finite(*value)) {
+        if !finite(source.volume_flow_m3_s)
+            || source.force_on_fluid_n.iter().any(|value| !finite(*value))
+        {
             return Err(nonfinite("compact power source amplitude"));
         }
         self.volume.add(source.volume_flow_m3_s);
         for (sum, value) in self.force.iter_mut().zip(source.force_on_fluid_n) {
             sum.add(value);
+        }
+        Ok(())
+    }
+
+    fn add_image(
+        &mut self,
+        source: CompactSourcePhasor,
+        image: SourceImage,
+    ) -> Result<(), AeroacError> {
+        if !finite(source.volume_flow_m3_s)
+            || source.force_on_fluid_n.iter().any(|value| !finite(*value))
+        {
+            return Err(nonfinite("compact image source amplitude"));
+        }
+        self.volume.add(source.volume_flow_m3_s.scale(image.sign));
+        for (row, sum) in self.force.iter_mut().enumerate() {
+            for (axis, value) in source.force_on_fluid_n.iter().enumerate() {
+                if *value == C64::ZERO || image.force_transform[row][axis] == 0.0 {
+                    continue;
+                }
+                let coefficient = Dd::from_f64(image.sign * image.force_transform[row][axis]);
+                sum.re = sum.re + Dd::from_f64(value.re) * coefficient;
+                sum.im = sum.im + Dd::from_f64(value.im) * coefficient;
+            }
         }
         Ok(())
     }
@@ -491,7 +853,10 @@ struct RadiatingSource {
 impl RadiatingSource {
     fn colocated_power(self) -> Dd {
         self.volume.real_product(self.volume)
-            + self.force.iter().fold(Dd::ZERO, |sum, value| sum + value.real_product(*value))
+            + self
+                .force
+                .iter()
+                .fold(Dd::ZERO, |sum, value| sum + value.real_product(*value))
                 / Dd::from_f64(3.0)
     }
 
@@ -520,14 +885,19 @@ fn validate_power(power: Dd) -> Result<(), AeroacError> {
     }
 }
 
-fn finish(power: Dd) -> Result<CompactRadiatedPower, AeroacError> {
+fn finish(power: Dd, scope: &'static str) -> Result<CompactRadiatedPower, AeroacError> {
     validate_power(power)?;
-    Ok(CompactRadiatedPower { power_w: power.to_f64(), scope: COMPACT_POWER_SCOPE })
+    Ok(CompactRadiatedPower {
+        power_w: power.to_f64(),
+        scope,
+    })
 }
 
 fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), AeroacError> {
     if cancelled() {
-        Err(AeroacError::Cancelled { what: "compact radiated power" })
+        Err(AeroacError::Cancelled {
+            what: "compact radiated power",
+        })
     } else {
         Ok(())
     }

@@ -1417,3 +1417,41 @@ three native LBM patch-load groups, these targets typecheck through full native
 fs-aeroac production and unit sources after concurrent boundary changes were
 merged. These runtime tests and turbulent acoustic benchmarks were not executed
 in this session; no measured-spectrum or SPL qualification is claimed.
+
+## Radiated power in original ideal reflecting domains
+
+`PreparedCompactRadiatedPower::from_observer` retains the original folded
+perpendicular-plane or pi/m-wedge image group. `from_half_space` binds the
+separate direct/reflected owner without rebuilding a field observer. Both use
+the original physical source positions, material snapshot, wall signs and
+Cartesian force-reflection matrices. The complete image pressure transforms by
+the wall's sign, so its intensity is invariant under the finite reflection
+group. The existing analytic full-sphere integral divided by that group's order
+is therefore the power into the physical fluid solid angle. Free-space
+preparation retains its original arithmetic and full-sphere meaning.
+
+For one monopole a height h above a plane, the result is
+`P/P_free = 1 + s*sinc(2kh)`, where s is +1 for a rigid wall and -1 for pressure
+release. Normal and tangential dipoles retain their different reflection
+parities; volume/force cross terms remain. Existing DD moment decrements retain
+weak pressure-release radiation without subtracting two rounded unit powers.
+No clipping or positivity repair is applied.
+
+Every input/coherence-factor entry still names one physical source. Images of
+that source stay coherent even when different physical sources are declared
+independent. Source/path metadata and scopes distinguish the physical domain.
+Preparation budgets count all P direct/image paths and P² work before image
+allocation; factor budgets include that same expanded pair count. Coherent
+application reuses cached spherical moments without allocation or trigonometry.
+Independent-source work is O(N g²) for N physical sources and group order g,
+without allocating sparse factors; the original free-space O(N) path remains.
+Cancellation/refusal publishes no partial owner or power.
+
+G1/G3 cases in `tests/compact_power/reflection.rs` cover analytic monopole and
+both dipole parities, tiny release nulls, original physical hemisphere flux,
+rotated/translated geometry, physical wedge flux and corner equivalence,
+source-factor identity, expanded budgets and cancellation/replay. The model
+remains prescribed compact sources in a stationary homogeneous lossless fluid
+with ideal infinite walls. Molecular absorption still refuses; finite wall
+impedance, general diffraction, source feedback and experimental SPL authority
+are not inferred.
