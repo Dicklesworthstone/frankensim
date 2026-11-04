@@ -19,6 +19,7 @@ use fs_geom::Point3;
 mod rough;
 mod emission;
 mod thermal;
+mod diffuse_thermal;
 mod spatial_thermal;
 mod spectral;
 

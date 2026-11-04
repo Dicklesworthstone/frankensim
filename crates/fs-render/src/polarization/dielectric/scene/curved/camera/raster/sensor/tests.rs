@@ -4,14 +4,17 @@ use crate::dielectric::{
     BeerLambertAbsorption, DielectricGlass, DielectricIorSample, GlassProvenance, TabulatedIor,
 };
 use crate::gradient_index::{GradientIndexError, GradientIndexField, GradientIndexSample};
+#[cfg(feature = "volumes")]
 use crate::polarization::dielectric::scene::PathTermination;
 use crate::polarization::dielectric::scene::curved::camera::{
     EmissionSides, RadianceSpectrum, SurfaceEmitter,
 };
+#[cfg(feature = "volumes")]
 use crate::polarization::dielectric::scene::curved::participating::{
     CurvedRayleighMedium, CurvedRayleighScene,
 };
 use crate::polarization::dielectric::scene::curved::{CurvedPolarizedScene, SceneMedium};
+#[cfg(feature = "volumes")]
 use crate::volumes::transport::scattering::{MassScatteringSpectrum, PhaseFunction};
 use fs_blake3::ContentHash;
 use fs_geom::{Point3, Vec3};
@@ -221,6 +224,7 @@ fn g0_missing_source_support_and_cancelled_transport_never_publish_black_channel
     });
 }
 
+#[cfg(feature = "volumes")]
 #[test]
 fn g3_infrared_detector_preserves_native_scattering_weights_and_volume_refusals() {
     with_cx(|cx, _| {

@@ -24,6 +24,8 @@ use fs_math::det;
 
 mod spatial;
 pub use spatial::{SpatialVolumeEmitter, TemperatureField};
+mod surface;
+pub use surface::DiffuseThermalEmitter;
 #[cfg(feature = "material-state")]
 pub use spatial::AxialGasTemperatureField;
 

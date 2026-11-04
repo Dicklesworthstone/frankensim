@@ -12,7 +12,9 @@
 //! irradiance, calibrated count, shot noise, gain or display color is inferred.
 
 use super::*;
+#[cfg(feature = "volumes")]
 use crate::polarization::dielectric::scene::curved::camera::participating::CurvedRayleighCameraScene;
+#[cfg(feature = "volumes")]
 use crate::polarization::dielectric::scene::curved::participating::CurvedRayleighTraceSettings;
 use crate::spectral::detector::{DetectorWavelength, QuantumEfficiencySensor};
 use fs_math::dd::Dd;
@@ -54,6 +56,7 @@ impl<const C: usize> CurvedSensorPixelSample<C> {
 }
 
 /// The same detector observation through native molecular/particle scattering.
+#[cfg(feature = "volumes")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CurvedRayleighSensorPixelSample<const CHANNELS: usize> {
     pixel: CurvedSensorPixelSample<CHANNELS>,
@@ -61,6 +64,7 @@ pub struct CurvedRayleighSensorPixelSample<const CHANNELS: usize> {
     free_flight_draws: [u32; CAMERA_WAVELENGTHS],
 }
 
+#[cfg(feature = "volumes")]
 impl<const C: usize> CurvedRayleighSensorPixelSample<C> {
     pub const fn pixel_sample(&self) -> &CurvedSensorPixelSample<C> {
         &self.pixel
@@ -120,6 +124,7 @@ impl CurvedCameraRaster<'_> {
     /// transport. Each wavelength retains its own source spectrum, phase law,
     /// geometry and free-flight counter. Zero scattering preserves the entire
     /// surface-only detector result; unresolved volume paths abort all channels.
+    #[cfg(feature = "volumes")]
     #[allow(clippy::too_many_arguments)]
     pub fn sample_pixel_sensor_rayleigh<const C: usize>(
         &self,

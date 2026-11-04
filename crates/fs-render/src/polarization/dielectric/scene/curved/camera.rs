@@ -35,6 +35,8 @@
 //! Emission is added before the same path reflects or transmits; it does not
 //! replace the surface's optical interaction. Supplied radiance is independently
 //! calibrated: no thermal emissivity or material/source energy coupling is inferred.
+//! Explicit diffuse thermal bindings instead query the original finite-band
+//! Planck/Kirchhoff owner and verify the native surface's reciprocal reflectance.
 //! An environment is evaluated only after proven homogeneous escape. Nonzero
 //! homogeneous absorption over the remaining infinite path gives exactly zero;
 //! optional isothermal LTE volume sources supply their own finite thermal tail.
@@ -64,7 +66,7 @@ mod emission;
 use emission::SurfaceEmission;
 
 mod thermal;
-pub use thermal::{IsothermalVolumeEmitter, SpatialVolumeEmitter, TemperatureField};
+pub use thermal::{DiffuseThermalEmitter, IsothermalVolumeEmitter, SpatialVolumeEmitter, TemperatureField};
 #[cfg(feature = "material-state")]
 pub use thermal::AxialGasTemperatureField;
 
@@ -350,6 +352,7 @@ impl CameraRadianceSample {
 pub struct CurvedCameraScene<'s, 'm> {
     scene: &'s CurvedPolarizedScene<'m>,
     emitters: Vec<Option<&'s SurfaceEmitter>>,
+    diffuse_thermal_emitters: Vec<Option<DiffuseThermalEmitter>>,
     environment: Option<EnvironmentRadiance<'s>>,
     volume_emitters: Vec<Option<IsothermalVolumeEmitter>>,
     spatial_volume_emitters: Vec<Option<SpatialVolumeEmitter<'s>>>,
@@ -410,6 +413,7 @@ impl<'s, 'm> CurvedCameraScene<'s, 'm> {
         Ok(Self {
             scene,
             emitters: slots,
+            diffuse_thermal_emitters: Vec::new(),
             environment,
             volume_emitters: Vec::new(),
             spatial_volume_emitters: Vec::new(),

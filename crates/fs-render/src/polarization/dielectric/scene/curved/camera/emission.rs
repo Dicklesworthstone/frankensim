@@ -81,7 +81,10 @@ impl<'a, 's, 'm> SurfaceEmission<'a, 's, 'm> {
     }
 
     #[cfg(feature = "volumes")]
-    pub(super) fn observe_volume(&mut self, path: &CurvedPathResult) -> Result<(), CurvedSceneError> {
+    pub(super) fn observe_volume(
+        &mut self,
+        path: &CurvedPathResult,
+    ) -> Result<(), CurvedSceneError> {
         self.add_thermal(path, false).map_err(|error| {
             self.error = Some(error);
             CurvedSceneError::NumericalRange
@@ -94,9 +97,11 @@ impl<'a, 's, 'm> SurfaceEmission<'a, 's, 'm> {
         terminal: bool,
     ) -> Result<(), CameraRadianceError> {
         if !self.camera.spatial_volume_emitters.is_empty() {
-            let increment = finite_nonnegative(path.reduced_volume_emission - self.spatial_emission)?;
+            let increment =
+                finite_nonnegative(path.reduced_volume_emission - self.spatial_emission)?;
             if increment != 0.0 {
-                let emitted = super::thermal::weighted_source(increment, self.initial_index, 1.0, 1.0)?;
+                let emitted =
+                    super::thermal::weighted_source(increment, self.initial_index, 1.0, 1.0)?;
                 self.radiance = finite_nonnegative(self.radiance + emitted)?;
             }
             self.spatial_emission = path.reduced_volume_emission;
@@ -139,26 +144,47 @@ impl<'a, 's, 'm> SurfaceEmission<'a, 's, 'm> {
         let contact = path
             .last_contact()
             .ok_or(CameraRadianceError::NumericalRange)?;
-        let Some(emitter) = self
+        let emitter = self
             .camera
             .emitters
             .get(contact.witness.boundary_id)
-            .ok_or(CameraRadianceError::NumericalRange)?
-        else {
-            return Ok(());
+            .ok_or(CameraRadianceError::NumericalRange)?;
+        let thermal = self
+            .camera
+            .diffuse_thermal_emitters
+            .get(contact.witness.boundary_id)
+            .and_then(Option::as_ref);
+        let (object_id, sides) = match (emitter, thermal) {
+            (Some(emitter), None) => (emitter.object_id, emitter.sides),
+            (None, Some(thermal)) => (thermal.object_id(), EmissionSides::Both),
+            (None, None) => return Ok(()),
+            (Some(_), Some(_)) => return Err(CameraRadianceError::NumericalRange),
         };
-        if emitter.object_id != contact.object_id {
+        if object_id != contact.object_id {
             return Err(CameraRadianceError::NumericalRange);
         }
         let beam = path.beam();
         // Sidedness belongs to the original geometry, not a face-forwarded
         // normal, sampled facet or authored normal perturbation.
-        if emitter.sides == EmissionSides::Front
-            && contact.witness.normal.dot(beam.ray().dir) >= 0.0
-        {
+        if sides == EmissionSides::Front && contact.witness.normal.dot(beam.ray().dir) >= 0.0 {
             return Ok(());
         }
-        let emitted = emitter.spectrum.evaluate(beam.wavelength_nm())?;
+        let emitted = match (emitter, thermal) {
+            (Some(emitter), None) => emitter.spectrum.evaluate(beam.wavelength_nm())?,
+            (None, Some(thermal)) => {
+                // This source's original Kirchhoff/Planck law emits into
+                // vacuum. Keep actual local phase-index admission separate
+                // from the reciprocal camera-to-source radiance conversion.
+                if phase_index(beam.medium(), beam.wavelength_nm())? != 1.0 {
+                    return Err(CameraRadianceError::UnsupportedSurface { object_id });
+                }
+                thermal
+                    .surface()
+                    .radiance_w_m2_sr_nm(beam.wavelength_nm())
+                    .map_err(CameraRadianceError::Thermal)?
+            }
+            _ => return Err(CameraRadianceError::NumericalRange),
+        };
         if emitted == 0.0 || mis_weight == 0.0 {
             return Ok(());
         }
@@ -215,9 +241,12 @@ impl<'a, 's, 'm> SurfaceEmission<'a, 's, 'm> {
         }
         let result = result?;
         let terminal = path(&result);
-        if matches!(terminal.termination(),
-            PathTermination::Opaque | PathTermination::Escaped | PathTermination::RejectedMicrofacet)
-        {
+        if matches!(
+            terminal.termination(),
+            PathTermination::Opaque
+                | PathTermination::Escaped
+                | PathTermination::RejectedMicrofacet
+        ) {
             self.add_thermal(terminal, true)?;
         }
         Ok((result, self.radiance))

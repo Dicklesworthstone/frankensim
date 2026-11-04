@@ -193,34 +193,38 @@ fn g1_chromatic_pupil_rays_change_actual_native_surface_visibility_and_preserve_
             3.0 * 6000.0 * f64::from(lit) / 4.0,
             1e-9,
         );
-        let spectrum = MassScatteringSpectrum::source_table(
-            &[(8000.0, 0.0), (14000.0, 0.0)],
-            ContentHash([83; 32]),
-        )
-        .unwrap();
-        let phase = PhaseFunction::Rayleigh;
-        let volumes = [Some(
-            CurvedRayleighMedium::try_new(&spectrum, 1.0, &phase).unwrap(),
-        )];
-        let scattering = CurvedRayleighScene::try_new(cx, &native, &volumes).unwrap();
-        let participating = CurvedRayleighCameraScene::try_new(cx, &scene, &scattering).unwrap();
-        let replay = raster
-            .sample_pixel_sensor_rayleigh(
-                cx,
-                &participating,
-                &sensor,
-                0,
-                CurvedRayleighTraceSettings {
-                    surfaces: settings(),
-                    max_volume_events: 1,
-                },
-                73,
-                0,
-                4,
+        #[cfg(feature = "volumes")]
+        {
+            let spectrum = MassScatteringSpectrum::source_table(
+                &[(8000.0, 0.0), (14000.0, 0.0)],
+                ContentHash([83; 32]),
             )
             .unwrap();
-        assert_eq!(*replay.pixel_sample(), sample);
-        assert_eq!(*replay.volume_events(), [0; CAMERA_WAVELENGTHS]);
+            let phase = PhaseFunction::Rayleigh;
+            let volumes = [Some(
+                CurvedRayleighMedium::try_new(&spectrum, 1.0, &phase).unwrap(),
+            )];
+            let scattering = CurvedRayleighScene::try_new(cx, &native, &volumes).unwrap();
+            let participating =
+                CurvedRayleighCameraScene::try_new(cx, &scene, &scattering).unwrap();
+            let replay = raster
+                .sample_pixel_sensor_rayleigh(
+                    cx,
+                    &participating,
+                    &sensor,
+                    0,
+                    CurvedRayleighTraceSettings {
+                        surfaces: settings(),
+                        max_volume_events: 1,
+                    },
+                    73,
+                    0,
+                    4,
+                )
+                .unwrap();
+            assert_eq!(*replay.pixel_sample(), sample);
+            assert_eq!(*replay.volume_events(), [0; CAMERA_WAVELENGTHS]);
+        }
     });
 }
 

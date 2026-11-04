@@ -6874,3 +6874,29 @@ state. Refresh re-evaluates pinned source claims, readmits the original family
 and reconstructs the binding atomically. Focused controls include high-index
 infrared sources, full-fit pole refusal outside absorption support, original
 claim identity and source-state evolution.
+
+
+### Native diffuse thermal surfaces on spectral camera paths
+
+`CurvedCameraScene::with_diffuse_thermal_emitters` binds immutable
+`DiffuseThermalEmitter` values to original native geometry. Each value retains
+one `SpectralDiffuseThermalSurface`; its `reflectance_spectrum()` supplies the
+same finite-band opaque Kirchhoff law to the scene's depolarizing diffuse
+interaction. Binding checks the complete numerical knot/value identity, or
+admits an opaque terminating surface only for emissivity identically one.
+Unknown geometry, duplicate thermal bindings and calibrated emitters on the
+same object refuse. Both physical faces follow the original thermal owner's
+per-side convention. Actual emitting contacts require phase index exactly one,
+so a vacuum Planck spectrum is never inferred for an immersed surface.
+
+The existing emission accumulator evaluates the original Planck/emissivity
+law at each actual path wavelength before reflection. It preserves source-band
+refusals, reciprocal radiance conversion and native scattering weights. QE
+pixels therefore observe thermal infrared energy and wavelength-correct
+photoelectron-rate integrals without tabulating or fitting Planck radiance.
+Preparation stores one bounded indexed source table; per-ray queries allocate
+nothing. Observation does not advance, cool or mutate the original thermal
+state. These sources currently use emitter-hit transport; no thermal area-light
+proposal or additional cooling owner is inferred. Detector surface transport
+remains available without `volumes`; only the scattering-specific detector
+APIs and corresponding tests require that feature.
