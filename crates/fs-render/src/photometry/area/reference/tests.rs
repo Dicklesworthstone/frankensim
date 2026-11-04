@@ -12,17 +12,17 @@ use fs_exec::{Budget, CancelGate, ExecMode, StreamKey};
 use fs_geom::{Point3, Vec3};
 use std::f64::consts::PI;
 
-fn with_cx<R>(f: impl FnOnce(&Cx<'_>, &CancelGate) -> R) -> R {
+pub(super) fn with_cx<R>(f: impl FnOnce(&Cx<'_>, &CancelGate) -> R) -> R {
     let gate = CancelGate::new_clock_free();
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
     pool.scope(|arena| f(&Cx::new(&gate, arena,
         StreamKey { seed: 173, kernel_id: 0x4152_4546, tile: 0, iteration: 0 },
         Budget::INFINITE, ExecMode::Deterministic), &gate))
 }
-fn material() -> Material {
+pub(super) fn material() -> Material {
     Material::SpectralDiffuse { reflectance: SpectralReflectance::constant(0.0).unwrap() }
 }
-fn panel(a: f64, b: f64, h: f64, front: bool) -> Primitive {
+pub(super) fn panel(a: f64, b: f64, h: f64, front: bool) -> Primitive {
     Primitive { shape: Shape::Mesh(TriMesh::new(
         vec![[-a,-b,h],[a,-b,h],[a,b,h],[-a,b,h]],
         if front { vec![[0,2,1],[0,3,2]] } else { vec![[0,1,2],[0,2,3]] },
@@ -31,21 +31,21 @@ fn panel(a: f64, b: f64, h: f64, front: bool) -> Primitive {
 fn source(sides: EmissionSidedness) -> PhotometricAreaEmitter {
     PhotometricAreaEmitter::try_new(0,1000.0,1.0,SourceSpectrum::equal_energy(),sides).unwrap()
 }
-fn probe(p: [f64;3], n: [f64;3]) -> IlluminanceProbe {
+pub(super) fn probe(p: [f64;3], n: [f64;3]) -> IlluminanceProbe {
     IlluminanceProbe::try_new(Point3::new(p[0],p[1],p[2]),Vec3::new(n[0],n[1],n[2])).unwrap()
 }
-fn mass(source: &PhotometricAreaEmitter) -> f64 {
+pub(super) fn mass(source: &PhotometricAreaEmitter) -> f64 {
     source.spectrum().bins_w_per_lumen_nm().iter().enumerate()
         .map(|(i,&p)| p*observer::xyz_at_bin(i)[1]*BIN_WIDTH_NM*LUMINOUS_EFFICACY_LM_W).sum()
 }
-fn check(r: AreaReferenceIlluminance, expected: f64) {
+pub(super) fn check(r: AreaReferenceIlluminance, expected: f64) {
     assert_eq!(r.numerical.kind,NumericalKind::Enclosure);
     assert!(r.numerical.lo <= expected && r.numerical.hi >= expected,"{r:?}; expected={expected}");
     assert!((r.lux-expected).abs() <= r.numerical_error_bound_lux);
     assert!(r.total_error_bound_lux.is_none());
 }
 // Independent antiderivative of h²/(x²+y²+h²)² over the source rectangle.
-fn rectangle_factor(a: f64,b: f64,h: f64,x: f64,y: f64) -> f64 {
+pub(super) fn rectangle_factor(a: f64,b: f64,h: f64,x: f64,y: f64) -> f64 {
     let f=|x:f64,y:f64| {
         let ax=(x*x+h*h).sqrt(); let by=(y*y+h*h).sqrt();
         0.5*(x/ax*(y/ax).atan()+y/by*(x/by).atan())

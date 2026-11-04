@@ -3788,6 +3788,40 @@ shared controls against independently configured native camera/probe paths.
 These checks retain the existing ideal-projector and unknown calibration/model
 error scope; no measured performance or manufactured-lens accuracy is claimed.
 
+#### Bounded direct-area references for fixture rigs
+
+`UnoccludedAreaReference::new_with_rig` and
+`OccludedAreaReference::new_with_rig` admit the mounted rig's finite emitters,
+followed by supplemental scene-level bindings. The occluded owner's
+`new_with_rig_and_medium` also prepares the existing homogeneous or native
+spectral-grid extinction model. These references bound the selected finite
+component; point-source illuminance remains a separate calculation.
+
+A shared borrowed-binding preparation resolves the original native scene
+indices once. Mesh admission, model hashing, source-face exclusion and spectral
+weight lookup all use those resolved indices. Calibrated source objects and
+geometry are not cloned or replaced. Prepared `AreaReferenceBinding` records
+retain each native primitive and optional fixture/emitter identity, including
+dark sources; supplemental/flat sources have no fixture identity. The original
+reference and progressive-job `source_bindings()` accessors expose this metadata
+without duplicating it in every receiver result.
+
+All interval area integration, visibility classification, adaptive patch
+refinement and spectral extinction remain with their existing owners. Flat
+inputs retain the same numeric traversal and model identity. Existing
+preparation/output/work budgets and complete-receiver cancellation publication
+remain in effect. Missing/stale mounts and duplicate emission bindings refuse.
+
+Projectors still refuse, including dark projectors: the analytical source law
+is uniform Lambertian emission. The occluded reference includes direct
+absorption and out-scattering, with unresolved shadows retained as intervals;
+it omits in-scattering, reflection, refraction and thermal emission. Exhausted
+work budgets retain their existing termination and enclosure rather than a
+tolerance pass. Source-construction, calibration, discretization and total
+physical error remain unqualified. Regressions compare transformed/reordered
+rigs against analytical and flat references, spectral-grid source mapping,
+shadow/haze calculations, explicit refusals and cancellation/replay.
+
 ### Direct and native transport
 
 `PhotometricScene` borrows the original tracer primitives, native mesh BVHs and

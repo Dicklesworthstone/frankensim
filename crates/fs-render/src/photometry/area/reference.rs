@@ -19,6 +19,7 @@ use super::{EmissionSidedness, PhotometricAreaEmitter};
 use crate::charts::TriMesh;
 use crate::instances::{RigidTransform, SharedGeometry};
 use crate::photometry::{CalculationGrid, IlluminanceProbe, Receivers};
+use crate::photometry::fixture::{FixtureEmitterIdentity, FixtureError, PhotometricRig};
 use crate::photometry::observer;
 use crate::photometry::source::{BIN_WIDTH_NM, LUMINOUS_EFFICACY_LM_W};
 use crate::tracer::{Material, Primitive, Shape};
@@ -63,6 +64,8 @@ pub enum AreaReferenceError {
     InvalidGeometry,
     /// Only static opaque mesh/rigid-instance, uniform Lambertian sources qualify.
     UnsupportedSource,
+    /// Missing or stale mounted fixture geometry, retaining its source identity.
+    Fixture(FixtureError),
     /// A required finite positive geometric/radiometric quantity was unresolved.
     NumericalRange,
     /// Receiver separation from this source triangle's plane was not established.
@@ -80,6 +83,20 @@ impl core::fmt::Display for AreaReferenceError {
 impl std::error::Error for AreaReferenceError {}
 impl From<fs_exec::Cancelled> for AreaReferenceError {
     fn from(_: fs_exec::Cancelled) -> Self { Self::Cancelled }
+}
+impl From<FixtureError> for AreaReferenceError {
+    fn from(error: FixtureError) -> Self {
+        match error { FixtureError::Cancelled => Self::Cancelled, error => Self::Fixture(error) }
+    }
+}
+
+/// One admitted finite source in original source order, including dark sources.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AreaReferenceBinding {
+    /// Resolved primitive in the original native scene.
+    pub primitive_index: usize,
+    /// Fixture and local emitter identities; absent for supplemental/flat sources.
+    pub identity: Option<FixtureEmitterIdentity>,
 }
 
 type Vector = [Interval; 3];
@@ -103,6 +120,7 @@ struct Face {
 /// identity is not a complete scene hash and does not imply unobstructed rays.
 pub struct UnoccludedAreaReference {
     faces: Vec<Face>,
+    bindings: Vec<AreaReferenceBinding>,
     identity: ContentHash,
     max_outputs: usize,
 }
@@ -115,18 +133,42 @@ impl UnoccludedAreaReference {
         primitives: &[Primitive], sources: &[PhotometricAreaEmitter],
         budget: AreaReferenceBudget, cx: &Cx<'_>,
     ) -> Result<Self, AreaReferenceError> {
+        Self::from_bindings(primitives, sources.iter().map(|s| (s.primitive_index(), s)),
+            sources.len(), &[], budget, cx)
+    }
+
+    /// Prepare the rig's finite component, then supplemental scene bindings.
+    /// Mount its original geometry first with [`PhotometricRig::append_geometry_to`].
+    /// Point emitters are not part of this direct-area result. Projectors refuse;
+    /// source-construction and fixture calibration error remain outside the bound.
+    pub fn new_with_rig(
+        primitives: &[Primitive], rig: &PhotometricRig, supplemental: &[PhotometricAreaEmitter],
+        budget: AreaReferenceBudget, cx: &Cx<'_>,
+    ) -> Result<Self, AreaReferenceError> {
+        let bindings = rig_bindings(primitives, rig, supplemental, budget, cx)?;
+        Self::from_bindings(primitives, bindings.iter().copied(), bindings.len(),
+            rig.surface_emitter_identities(), budget, cx)
+    }
+
+    fn from_bindings<'source>(
+        primitives: &[Primitive], sources: impl Iterator<Item = (usize, &'source PhotometricAreaEmitter)> + Clone,
+        count: usize, identities: &[FixtureEmitterIdentity], budget: AreaReferenceBudget, cx: &Cx<'_>,
+    ) -> Result<Self, AreaReferenceError> {
         cx.checkpoint()?;
-        if sources.len() > budget.max_emitters { return Err(AreaReferenceError::Budget); }
+        if count > budget.max_emitters { return Err(AreaReferenceError::Budget); }
         let mut total = 0_usize;
         let mut indices = Vec::new();
-        indices.try_reserve_exact(sources.len()).map_err(|_| AreaReferenceError::Allocation)?;
-        for source in sources {
+        indices.try_reserve_exact(count).map_err(|_| AreaReferenceError::Allocation)?;
+        let mut bindings = Vec::new();
+        bindings.try_reserve_exact(count).map_err(|_| AreaReferenceError::Allocation)?;
+        for (index, (primitive_index, source)) in sources.clone().enumerate() {
             cx.checkpoint()?;
-            let (mesh, _) = mesh(primitives, source)?;
+            let (mesh, _) = mesh(primitives, primitive_index, source)?;
             if mesh.triangles.is_empty() { return Err(AreaReferenceError::InvalidGeometry); }
             total = total.checked_add(mesh.triangles.len()).ok_or(AreaReferenceError::Budget)?;
             if total > budget.max_triangles { return Err(AreaReferenceError::Budget); }
-            indices.push(source.primitive_index());
+            indices.push(primitive_index);
+            bindings.push(AreaReferenceBinding { primitive_index, identity: identities.get(index).copied() });
         }
         indices.sort_unstable();
         if indices.windows(2).any(|w| w[0] == w[1]) { return Err(AreaReferenceError::InvalidGeometry); }
@@ -136,15 +178,15 @@ impl UnoccludedAreaReference {
         hash.update(&AREA_REFERENCE_SEMANTICS_VERSION.to_le_bytes());
         hash.update(&fs_ivl::INTERVAL_SEMANTICS_VERSION.to_le_bytes());
         hash.update(&fs_ivl::angle::ANGLE_ENCLOSURE_SEMANTICS_VERSION.to_le_bytes());
-        hash.update(&(sources.len() as u64).to_le_bytes());
-        for source in sources {
+        hash.update(&(count as u64).to_le_bytes());
+        for (primitive_index, source) in sources {
             cx.checkpoint()?;
-            let (mesh, placement) = mesh(primitives, source)?;
+            let (mesh, placement) = mesh(primitives, primitive_index, source)?;
             let first = faces.len();
             let mut area = zero();
             let mut keys = Vec::new();
             keys.try_reserve_exact(mesh.triangles.len()).map_err(|_| AreaReferenceError::Allocation)?;
-            hash.update(&(source.primitive_index() as u64).to_le_bytes());
+            hash.update(&(primitive_index as u64).to_le_bytes());
             hash.update(&(mesh.triangles.len() as u64).to_le_bytes());
             let both = source.sidedness() == EmissionSidedness::Both;
             hash.update(&[u8::from(both)]);
@@ -178,7 +220,7 @@ impl UnoccludedAreaReference {
                 let face_area = mul(mul(mul(point(0.5), length), point(scale)), point(scale));
                 if !finite(face_area) || face_area.lo() <= 0.0 { return Err(AreaReferenceError::NumericalRange); }
                 area = add(area, face_area);
-                faces.push(Face { origin_face: (source.primitive_index(), triangle_index), vertices, perpendicular, area: face_area, luminance: zero(), both_sides: both });
+                faces.push(Face { origin_face: (primitive_index, triangle_index), vertices, perpendicular, area: face_area, luminance: zero(), both_sides: both });
             }
             keys.sort_unstable();
             if keys.windows(2).any(|w| w[0] == w[1]) { return Err(AreaReferenceError::InvalidGeometry); }
@@ -203,8 +245,13 @@ impl UnoccludedAreaReference {
             for face in &mut faces[first..] { cx.checkpoint()?; face.luminance = luminance; }
         }
         cx.checkpoint()?;
-        Ok(Self { faces, identity: hash.finalize(), max_outputs: budget.max_outputs })
+        Ok(Self { faces, bindings, identity: hash.finalize(), max_outputs: budget.max_outputs })
     }
+
+    /// Native primitive and optional fixture/emitter attribution for each source.
+    /// The reference owns this metadata; no rig or source object is retained.
+    #[must_use]
+    pub fn source_bindings(&self) -> &[AreaReferenceBinding] { &self.bindings }
 
     /// Enclose selected-source direct illuminance under the named assumptions.
     /// A difficult horizon/near-collinear edge falls back to a positive geometric
@@ -325,14 +372,34 @@ impl<'a> UnoccludedAreaJob<'a> {
     /// Only completed receiver results; uncomputed probes are not reported as zero.
     #[must_use]
     pub fn results(&self) -> &[AreaReferenceIlluminance] { &self.values }
+
+    /// Source attribution shared by every result in this job.
+    #[must_use]
+    pub fn source_bindings(&self) -> &[AreaReferenceBinding] { self.reference.source_bindings() }
     /// Every admitted receiver has been published.
     #[must_use]
     pub fn is_complete(&self) -> bool { self.values.len() == self.count }
 }
 
-fn mesh<'a>(primitives: &'a [Primitive], source: &PhotometricAreaEmitter) -> Result<(&'a TriMesh, Option<RigidTransform>), AreaReferenceError> {
+fn rig_bindings<'a>(
+    primitives: &[Primitive], rig: &'a PhotometricRig, supplemental: &'a [PhotometricAreaEmitter],
+    budget: AreaReferenceBudget, cx: &Cx<'_>,
+) -> Result<Vec<(usize, &'a PhotometricAreaEmitter)>, AreaReferenceError> {
+    cx.checkpoint()?;
+    let count = rig.surface_sources().len().checked_add(supplemental.len()).ok_or(AreaReferenceError::Budget)?;
+    if count > budget.max_emitters { return Err(AreaReferenceError::Budget); }
+    let mut bindings = rig.bind_surfaces(primitives, cx)?;
+    bindings.try_reserve_exact(supplemental.len()).map_err(|_| AreaReferenceError::Allocation)?;
+    for source in supplemental {
+        cx.checkpoint()?;
+        bindings.push((source.primitive_index(), source));
+    }
+    Ok(bindings)
+}
+
+fn mesh<'a>(primitives: &'a [Primitive], primitive_index: usize, source: &PhotometricAreaEmitter) -> Result<(&'a TriMesh, Option<RigidTransform>), AreaReferenceError> {
     if source.projector().is_some() { return Err(AreaReferenceError::UnsupportedSource); }
-    let primitive = primitives.get(source.primitive_index()).ok_or(AreaReferenceError::InvalidGeometry)?;
+    let primitive = primitives.get(primitive_index).ok_or(AreaReferenceError::InvalidGeometry)?;
     if primitive.emission.is_some() || matches!(primitive.material, Material::Dielectric { .. }) {
         return Err(AreaReferenceError::UnsupportedSource);
     }
@@ -466,3 +533,5 @@ fn hash_range(hash: &mut DomainHasher, value: Interval) { hash_float(hash, value
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod fixture_tests;

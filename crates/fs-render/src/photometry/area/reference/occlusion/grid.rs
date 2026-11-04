@@ -27,8 +27,8 @@ pub(super) struct PreparedAreaGrid<'field> {
     identity: ContentHash,
 }
 impl<'field> PreparedAreaGrid<'field> {
-    pub(super) fn new(
-        medium: PhotometricMedium<'field>, sources: &[PhotometricAreaEmitter],
+    pub(super) fn new<'source>(
+        medium: PhotometricMedium<'field>, sources: impl Iterator<Item = (usize, &'source PhotometricAreaEmitter)>, count: usize,
         budget: GridEnclosureBudget, cx: &Cx<'_>,
     ) -> Result<Self, AreaOcclusionError> {
         cx.checkpoint()?;
@@ -49,8 +49,8 @@ impl<'field> PreparedAreaGrid<'field> {
         // Source count is already admitted by AreaReferenceBudget. The extra
         // storage is 80 intervals plus one sum and one index per source, never
         // a Cartesian product with the grid's independent optical palettes.
-        prepared.try_reserve_exact(sources.len()).map_err(|_| AreaOcclusionError::Allocation)?;
-        for source in sources {
+        prepared.try_reserve_exact(count).map_err(|_| AreaOcclusionError::Allocation)?;
+        for (primitive, source) in sources {
             cx.checkpoint()?;
             let weights: [Interval; SPECTRAL_BINS] = std::array::from_fn(|bin| mul(
                 point(source.spectrum().bins_w_per_lumen_nm()[bin]),
@@ -58,7 +58,7 @@ impl<'field> PreparedAreaGrid<'field> {
             ));
             let sum = weights.iter().copied().fold(zero(), add);
             if !finite(sum) || sum.lo() <= 0.0 { return Err(AreaReferenceError::NumericalRange.into()); }
-            prepared.push(SourceWeights { primitive: source.primitive_index(), weights, sum });
+            prepared.push(SourceWeights { primitive, weights, sum });
         }
         prepared.sort_unstable_by_key(|source| source.primitive);
         cx.checkpoint()?;

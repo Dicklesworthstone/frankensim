@@ -206,6 +206,26 @@ impl<'scene> OccludedAreaReference<'scene> {
         primitives: &'scene [Primitive], sources: &[PhotometricAreaEmitter],
         preparation: AreaReferenceBudget, cx: &Cx<'_>,
     ) -> Result<Self, AreaOcclusionError> {
+        Self::from_bindings(primitives, sources.iter().map(|s| (s.primitive_index(), s)),
+            sources.len(), &[], preparation, cx)
+    }
+
+    /// Bound the mounted rig's finite-source component plus supplemental sources.
+    /// Point emitters are excluded. Original opaque geometry, including fixture
+    /// bodies, supplies visibility; projector sources still refuse explicitly.
+    pub fn new_with_rig(
+        primitives: &'scene [Primitive], rig: &PhotometricRig, supplemental: &[PhotometricAreaEmitter],
+        preparation: AreaReferenceBudget, cx: &Cx<'_>,
+    ) -> Result<Self, AreaOcclusionError> {
+        let bindings = rig_bindings(primitives, rig, supplemental, preparation, cx)?;
+        Self::from_bindings(primitives, bindings.iter().copied(), bindings.len(),
+            rig.surface_emitter_identities(), preparation, cx)
+    }
+
+    fn from_bindings<'source>(
+        primitives: &'scene [Primitive], bindings: impl Iterator<Item = (usize, &'source PhotometricAreaEmitter)> + Clone,
+        count: usize, identities: &[FixtureEmitterIdentity], preparation: AreaReferenceBudget, cx: &Cx<'_>,
+    ) -> Result<Self, AreaOcclusionError> {
         cx.checkpoint()?;
         for primitive in primitives {
             cx.checkpoint()?;
@@ -213,7 +233,7 @@ impl<'scene> OccludedAreaReference<'scene> {
                 return Err(AreaOcclusionError::TransmissiveGeometry);
             }
         }
-        let sources = UnoccludedAreaReference::new(primitives, sources, preparation, cx)?;
+        let sources = UnoccludedAreaReference::from_bindings(primitives, bindings, count, identities, preparation, cx)?;
         let mut hash = DomainHasher::new("org.frankensim.photometry.occluded-area.v3");
         hash.update(&AREA_OCCLUSION_SEMANTICS_VERSION.to_le_bytes());
         hash.update(&fs_ivl::decay::DECAY_ENCLOSURE_SEMANTICS_VERSION.to_le_bytes());
@@ -223,6 +243,10 @@ impl<'scene> OccludedAreaReference<'scene> {
         cx.checkpoint()?;
         Ok(Self { sources, primitives, visibility, attenuation: PreparedAttenuation::vacuum(), grid: None, identity: hash.finalize() })
     }
+
+    /// Source-order primitive and fixture/emitter attribution for these bounds.
+    #[must_use]
+    pub fn source_bindings(&self) -> &[AreaReferenceBinding] { self.sources.source_bindings() }
 
     /// Replace vacuum (or a previous medium) with the original homogeneous gray
     /// medium's immutable absorption/out-scattering coefficients. This does not
@@ -249,12 +273,35 @@ impl<'scene> OccludedAreaReference<'scene> {
         medium: PhotometricMedium<'scene>, preparation: AreaReferenceBudget,
         grid_budget: GridEnclosureBudget, cx: &Cx<'_>,
     ) -> Result<Self, AreaOcclusionError> {
-        let mut result = Self::new(primitives, sources, preparation, cx)?;
+        let bindings = sources.iter().map(|s| (s.primitive_index(), s));
+        Self::from_bindings(primitives, bindings.clone(), sources.len(), &[], preparation, cx)?
+            .with_prepared_medium(medium, bindings, sources.len(), grid_budget, cx)
+    }
+
+    /// The same finite rig component with original homogeneous/grid extinction.
+    /// Spectra follow the resolved native source slots. Absorption and
+    /// out-scattering are included; in-scattering and point light are omitted.
+    pub fn new_with_rig_and_medium(
+        primitives: &'scene [Primitive], rig: &PhotometricRig, supplemental: &[PhotometricAreaEmitter],
+        medium: PhotometricMedium<'scene>, preparation: AreaReferenceBudget,
+        grid_budget: GridEnclosureBudget, cx: &Cx<'_>,
+    ) -> Result<Self, AreaOcclusionError> {
+        let bindings = rig_bindings(primitives, rig, supplemental, preparation, cx)?;
+        Self::from_bindings(primitives, bindings.iter().copied(), bindings.len(),
+            rig.surface_emitter_identities(), preparation, cx)?
+            .with_prepared_medium(medium, bindings.iter().copied(), bindings.len(), grid_budget, cx)
+    }
+
+    fn with_prepared_medium<'source>(
+        mut self, medium: PhotometricMedium<'scene>,
+        bindings: impl Iterator<Item = (usize, &'source PhotometricAreaEmitter)>, count: usize,
+        grid_budget: GridEnclosureBudget, cx: &Cx<'_>,
+    ) -> Result<Self, AreaOcclusionError> {
         match medium {
-            PhotometricMedium::Homogeneous(medium) => Ok(result.with_homogeneous_medium(&medium)),
+            PhotometricMedium::Homogeneous(medium) => Ok(self.with_homogeneous_medium(&medium)),
             medium => {
-                result.grid = Some(PreparedAreaGrid::new(medium, sources, grid_budget, cx)?);
-                Ok(result)
+                self.grid = Some(PreparedAreaGrid::new(medium, bindings, count, grid_budget, cx)?);
+                Ok(self)
             }
         }
     }
@@ -526,6 +573,9 @@ impl<'a, 'scene> OccludedAreaJob<'a, 'scene> {
     /// Completed receiver prefix only.
     #[must_use]
     pub fn results(&self) -> &[OccludedAreaIlluminance] { &self.values }
+    /// Source attribution shared by every result in this job.
+    #[must_use]
+    pub fn source_bindings(&self) -> &[AreaReferenceBinding] { self.reference.source_bindings() }
     /// Every receiver has a result; inspect termination for requested accuracy.
     #[must_use]
     pub fn is_complete(&self) -> bool { self.values.len() == self.count }
