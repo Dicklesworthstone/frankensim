@@ -35,7 +35,7 @@ impl<F> AsRef<HeatNetworkSample> for EnclosedGasHeatSample<F> {
     }
 }
 
-/// Complete heat assembly with quasi-steady horizontal gas gaps between walls.
+/// Complete heat assembly with quasi-steady horizontal or inclined gas gaps.
 ///
 /// Both wall caloric states, material resistance, contact laws and enclosure
 /// radiation are evaluated at the SAME proposed thermal endpoint. Gas storage

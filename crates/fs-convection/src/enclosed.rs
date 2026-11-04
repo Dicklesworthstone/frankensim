@@ -1,4 +1,4 @@
-//! Horizontal limit of the original Hollands air-layer correlation.
+//! Horizontal and bounded inclined Hollands air-layer correlations.
 //!
 //! Source: Hollands, Raithby and Unny, report COO-2597-2 (1976), §4,
 //! Eq. (4-1), printed p.15; doi:10.2172/7125623. The authors reproduce
@@ -7,50 +7,18 @@
 //! expressions reduce to the branches below. The pure conduction branch
 //! also applies to stable horizontal stratification; this is an analytic
 //! limit, not an extrapolation of a buoyant power law to negative Ra.
+//! The inclined implementation cites the EnergyPlus Engineering Reference's
+//! explicit reproduction of the equation; see that card's distinct source.
 
 use super::{
     Ambition, CorrelationCard, CorrelationId, DiscrepancyBasis, ModelCard, SourceProvenance,
-    ValidityDomain, det,
+    ValidityDomain,
 };
 
-pub(super) fn nusselt(signed_rayleigh: f64) -> f64 {
-    if signed_rayleigh <= 1708.0 {
-        return 1.0;
-    }
-    // Subtraction before division retains the small onset excess. This is
-    // algebraically the source's 1 - 1708/Ra, not a smoothed transition.
-    let onset = 1.44 * ((signed_rayleigh - 1708.0) / signed_rayleigh);
-    let high_rayleigh = if signed_rayleigh > 5830.0 {
-        det::pow(signed_rayleigh / 5830.0, 1.0 / 3.0) - 1.0
-    } else {
-        0.0
-    };
-    1.0 + onset + high_rayleigh
-}
-
-/// Absolute partials avoid an elasticity divided by signed/zero Rayleigh.
-/// The source's positive parts are continuous but kink at 1708 and 5830.
-pub(super) fn partial(signed_rayleigh: f64, axis: &str) -> Option<f64> {
-    if axis == "Re" {
-        return None;
-    }
-    if axis != "Ra" {
-        return Some(0.0);
-    }
-    if signed_rayleigh == 1708.0 || signed_rayleigh == 5830.0 {
-        return None;
-    }
-    if signed_rayleigh < 1708.0 {
-        return Some(0.0);
-    }
-    let onset = (1.44 * 1708.0 / signed_rayleigh) / signed_rayleigh;
-    let high_rayleigh = if signed_rayleigh > 5830.0 {
-        det::pow(signed_rayleigh / 5830.0, 1.0 / 3.0) / (3.0 * signed_rayleigh)
-    } else {
-        0.0
-    };
-    Some(onset + high_rayleigh)
-}
+mod transfer;
+pub(super) use transfer::{
+    horizontal_nusselt as nusselt, horizontal_partial as partial, inclined_nusselt, inclined_partial,
+};
 
 pub(super) fn card() -> CorrelationCard {
     let id = CorrelationId::HollandsHorizontalAirLayer;
@@ -83,6 +51,45 @@ pub(super) fn card() -> CorrelationCard {
                 "forced throughflow, moving-wall shear, evaporation, radiation included as gas heat, or rarefied gas",
                 "non-air fluids inferred only from Pr, non-Boussinesq property variation, or transient gas storage comparable to wall storage",
                 "smooth derivatives across the physical branch switches Ra=1708 and Ra=5830",
+            ].into_iter().map(str::to_string).collect(),
+            0.20,
+        ),
+        discrepancy_basis: DiscrepancyBasis::EngineeringAllowance,
+    }
+}
+
+pub(super) fn inclined_card() -> CorrelationCard {
+    let id = CorrelationId::HollandsInclinedAirLayer;
+    CorrelationCard {
+        id,
+        source: SourceProvenance {
+            citation: "Hollands, Unny, Raithby and Konicek, Free Convective Heat Transfer Across Inclined Air Layers, J. Heat Transfer 98(2), 1976, 189-193; equation reproduced in EnergyPlus 8.3 Engineering Reference, Solar Collectors, Integral-collector-storage, Heat Transfer Coefficients",
+            identifier: "doi:10.1115/1.3450517; https://bigladdersoftware.com/epx/docs/8-3/engineering-reference/solar-collectors.html#heat-transfer-coefficients",
+        },
+        model: ModelCard::new(
+            id.name(), "1.0.0", Ambition::Solid,
+            [
+                "parallel rigid isothermal walls containing continuum air heated from below, without imposed flow",
+                "full-gravity Ra = g beta (T_lower-T_upper) gap^3/(nu alpha); angle measured from horizontal and represented explicitly in degrees",
+                "properties at the mean of the actual two wall temperatures; length is the full normal gas gap",
+                "the source's sin(1.8 theta)^1.6 correction is retained; replacing only Ra with Ra cos(theta) is not this model",
+                "Nu includes gas conduction and buoyant convection together; radiation is separate and no second gas Fourier conductance may be added",
+                "0..=60 degrees is a conservative implementation subset of the original reported inclination measurements, not an additional experimental validation claim",
+                "Pr interval [0.70,0.72] is a conservative implementation admission around air Pr near 0.71, not a source-published validation range; Pr alone cannot identify air",
+                "gap/minimum whole-plate span <0.1 is an explicit thin-layer admission on both spans, not a mesh-cell dimension",
+                "Ra<=1e5 retains the original published experimental ceiling; subcritical projected Ra and zero driving use the total conduction limit Nu=1",
+                "quasi-steady transfer neglects gas thermal storage and requires bounded property/density variation; wall storage remains with the thermal owner",
+            ].into_iter().map(str::to_string).collect(),
+            ValidityDomain::unconstrained()
+                .with("Ra", 0.0, 1.0e5)
+                .with("Pr", 0.70, 0.72)
+                .with("aspect_ratio", 0.0, 0.1_f64.next_down())
+                .with("inclination_degrees", 0.0, 60.0),
+            [
+                "inclined heating from above, non-air media inferred from Pr alone, or inclination above 60 degrees",
+                "non-isothermal/curved walls, small lateral spans, sidewall thermal bridges, throughflow, wall shear or phase change",
+                "non-Boussinesq property variation, rarefied gas or resolved transient gas storage",
+                "smooth derivatives at projected-Rayleigh branch switches Ra cos(theta)=1708 or 5830",
             ].into_iter().map(str::to_string).collect(),
             0.20,
         ),

@@ -8,8 +8,9 @@ use super::{
 };
 use super::mixed::AidingVerticalPlate;
 
-const INPUT_AXES: [&str; 6] = [
+const INPUT_AXES: [&str; 7] = [
     "Re", "Pr", "L_over_Dh", "aspect_ratio", "Ra", "mu_bulk_over_surface",
+    "inclination_degrees",
 ];
 
 impl CorrelationInputs {
@@ -17,8 +18,8 @@ impl CorrelationInputs {
     /// evidence's `sensitivity.d_qoi` map.
     ///
     /// Entries are **absolute** derivatives `dNu/dx` for the supplied
-    /// independent inputs `Re`, `Pr`, `L_over_Dh`, `aspect_ratio`, `Ra`, and
-    /// `mu_bulk_over_surface`.
+    /// independent inputs `Re`, `Pr`, `L_over_Dh`, `aspect_ratio`, `Ra`,
+    /// `mu_bulk_over_surface`, and `inclination_degrees` (per degree).
     /// Pe and Gz are dependent groups: their chain rules are included, never
     /// exposed as extra independent coordinates. The heating/cooling branch
     /// stays fixed, including at Pr = 1 where its two values coincide but its
@@ -53,6 +54,16 @@ impl CorrelationInputs {
             let derivative = if id == CorrelationId::HollandsHorizontalAirLayer {
                 if input_is_interior(&evaluation, axis) {
                     super::enclosed::partial(evaluation.groups()["Ra"], axis)
+                } else {
+                    None
+                }
+            } else if id == CorrelationId::HollandsInclinedAirLayer {
+                if input_is_interior(&evaluation, axis) {
+                    super::enclosed::inclined_partial(
+                        evaluation.groups()["Ra"],
+                        evaluation.groups()["inclination_degrees"],
+                        axis,
+                    )
                 } else {
                     None
                 }
@@ -100,6 +111,7 @@ fn input_is_interior(evaluation: &NusseltEvaluation, axis: &'static str) -> bool
         "aspect_ratio" => &["aspect_ratio"],
         "Ra" => &["Ra"],
         "mu_bulk_over_surface" => &["mu_bulk_over_surface"],
+        "inclination_degrees" => &["inclination_degrees"],
         _ => return false,
     };
     evaluation.evidence().model.in_domain
@@ -239,8 +251,10 @@ fn input_elasticity(
             "mu_bulk_over_surface" => 0.25 * (nu - 2.0) / nu,
             _ => 0.0,
         },
-        // Its signed/zero-Rayleigh partials are evaluated directly above.
-        CorrelationId::HollandsHorizontalAirLayer => return Ok(None),
+        // Signed/zero-Rayleigh and angle partials are evaluated directly above.
+        CorrelationId::HollandsHorizontalAirLayer | CorrelationId::HollandsInclinedAirLayer => {
+            return Ok(None);
+        }
     };
     finite_derivative(value, "Nusselt input elasticity").map(Some)
 }

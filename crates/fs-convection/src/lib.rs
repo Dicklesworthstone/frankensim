@@ -87,12 +87,14 @@ pub enum CorrelationId {
     WhitakerSphere,
     /// Total gas conduction and natural convection between horizontal isothermal walls.
     HollandsHorizontalAirLayer,
+    /// Total transfer in an inclined high-aspect-ratio air gap heated from below.
+    HollandsInclinedAirLayer,
 }
 
 impl CorrelationId {
     /// Complete catalog order. This is stable audit order, not a selection
     /// preference.
-    pub const ALL: [CorrelationId; 20] = [
+    pub const ALL: [CorrelationId; 21] = [
         Self::CircularDuctLaminarCwt,
         Self::CircularDuctLaminarChf,
         Self::CircularDuctHausen,
@@ -113,6 +115,7 @@ impl CorrelationId {
         Self::ChurchillSphere,
         Self::WhitakerSphere,
         Self::HollandsHorizontalAirLayer,
+        Self::HollandsInclinedAirLayer,
     ];
 
     /// Stable model-card identifier.
@@ -145,6 +148,7 @@ impl CorrelationId {
             Self::ChurchillSphere => "convection.churchill-sphere",
             Self::WhitakerSphere => "convection.whitaker-sphere",
             Self::HollandsHorizontalAirLayer => "convection.hollands-horizontal-air-layer",
+            Self::HollandsInclinedAirLayer => "convection.hollands-inclined-air-layer",
         }
     }
 
@@ -195,6 +199,9 @@ impl CorrelationId {
             }
             Self::HollandsHorizontalAirLayer => {
                 "Nu_gap = 1 for signed Ra <= 1708; otherwise 1 + 1.44(1-1708/Ra) + max(0,(Ra/5830)^(1/3)-1); Ra = g beta (T_lower-T_upper) gap^3/(nu alpha)"
+            }
+            Self::HollandsInclinedAirLayer => {
+                "Nu = 1 + 1.44 (1-1708 sin(1.8 theta)^1.6/(Ra cos(theta))) max(0,1-1708/(Ra cos(theta))) + max(0,(Ra cos(theta)/5830)^(1/3)-1); theta from horizontal"
             }
         }
     }
@@ -273,6 +280,7 @@ pub struct CorrelationInputs {
     aspect_ratio: Option<f64>,
     rayleigh: Option<f64>,
     viscosity_ratio: Option<f64>,
+    inclination_degrees: Option<f64>,
     direction: ThermalDirection,
 }
 
@@ -287,6 +295,7 @@ impl CorrelationInputs {
             aspect_ratio: None,
             rayleigh: None,
             viscosity_ratio: None,
+            inclination_degrees: None,
             direction: ThermalDirection::HeatingFluid,
         }
     }
@@ -301,6 +310,7 @@ impl CorrelationInputs {
             aspect_ratio: None,
             rayleigh: Some(rayleigh),
             viscosity_ratio: None,
+            inclination_degrees: None,
             direction: ThermalDirection::HeatingFluid,
         }
     }
@@ -326,6 +336,28 @@ impl CorrelationInputs {
         Self::natural(signed_rayleigh, prandtl).with_aspect_ratio(gap_over_min_span)
     }
 
+    /// Inclined sealed air gap heated from below, with angle measured from
+    /// horizontal in DEGREES. The full-gravity, gap-based Rayleigh number must
+    /// be nonnegative; the original source's cosine and sine corrections are
+    /// applied inside the correlation, not to this supplied Ra beforehand.
+    ///
+    /// The implementation admits only 0..=60 degrees and Ra<=1e5, with the
+    /// same explicit air/whole-span policy as the horizontal gap. Exact rest
+    /// and subcritical projected Ra retain total gas conduction Nu=1. Heating
+    /// from above at nonzero tilt is not the horizontal stable limit and must
+    /// not be represented by an absolute Rayleigh number or swapped walls.
+    #[must_use]
+    pub const fn inclined_air_layer(
+        rayleigh: f64,
+        prandtl: f64,
+        gap_over_min_span: f64,
+        inclination_degrees: f64,
+    ) -> Self {
+        let mut inputs = Self::natural(rayleigh, prandtl).with_aspect_ratio(gap_over_min_span);
+        inputs.inclination_degrees = Some(inclination_degrees);
+        inputs
+    }
+
     /// Aiding mixed-convection point with nonnegative Reynolds and Rayleigh
     /// magnitudes and positive Prandtl number. Both flow drivers cannot vanish.
     ///
@@ -342,6 +374,7 @@ impl CorrelationInputs {
             aspect_ratio: None,
             rayleigh: Some(rayleigh),
             viscosity_ratio: None,
+            inclination_degrees: None,
             direction: ThermalDirection::HeatingFluid,
         }
     }
@@ -354,7 +387,7 @@ impl CorrelationInputs {
     }
 
     /// Declare the selected geometry's aspect ratio. Rectangular ducts use
-    /// minor/major side in `(0, 1]`; the enclosed horizontal air layer uses
+    /// minor/major side in `(0, 1]`; the enclosed air-layer cards use
     /// gap/minimum whole-plate span in `(0, 0.1)`.
     #[must_use]
     pub const fn with_aspect_ratio(mut self, ratio: f64) -> Self {
@@ -413,12 +446,18 @@ impl CorrelationInputs {
                     &mut groups,
                     "Ra",
                     value,
-                    mixed || id == CorrelationId::ChurchillSphere,
+                    mixed || matches!(
+                        id,
+                        CorrelationId::ChurchillSphere | CorrelationId::HollandsInclinedAirLayer
+                    ),
                 )?;
             }
         }
         if let Some(value) = self.viscosity_ratio {
             insert_group(&mut groups, "mu_bulk_over_surface", value, false)?;
+        }
+        if let Some(value) = self.inclination_degrees {
+            insert_group(&mut groups, "inclination_degrees", value, true)?;
         }
         if let (Some(re), Some(pr)) = (self.reynolds, self.prandtl) {
             insert_group(&mut groups, "Pe", re * pr, mixed)?;
@@ -899,6 +938,9 @@ fn evaluate_formula(
                 * det::pow(group("mu_bulk_over_surface"), 0.25)
         }
         CorrelationId::HollandsHorizontalAirLayer => enclosed::nusselt(group("Ra")),
+        CorrelationId::HollandsInclinedAirLayer => {
+            enclosed::inclined_nusselt(group("Ra"), group("inclination_degrees"))
+        }
     }
 }
 
@@ -1020,6 +1062,7 @@ fn card_for(id: CorrelationId) -> CorrelationCard {
     };
     let (source, validity, assumptions, failures, discrepancy_rel, discrepancy_basis) = match id {
         CorrelationId::HollandsHorizontalAirLayer => return enclosed::card(),
+        CorrelationId::HollandsInclinedAirLayer => return enclosed::inclined_card(),
         CorrelationId::CircularDuctLaminarCwt => (
             SHAH_LONDON,
             fully_developed(),

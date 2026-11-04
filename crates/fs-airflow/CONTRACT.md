@@ -861,7 +861,7 @@ against the analytic constant-property solution across three timestep sizes.
 They also check native CFL budget enforcement, zero external heat, distinct
 applied/endpoint sources, late support failure and cancellation.
 
-### Enclosed horizontal air layers between finite walls
+### Enclosed horizontal and inclined air layers between finite walls
 
 `source::enclosure::evaluate_source_enclosed_gas_layers` supplies total gas-gap
 conductance to an original reciprocal thermal link. Both endpoints are finite
@@ -871,21 +871,34 @@ ordering. Actual caloric wall temperatures determine the full contrast and the
 mean temperature used to query one original gas material, retained with its
 thermal snapshot and original correlation evidence on every trial.
 
-The shared `HollandsHorizontalAirLayer` card owns the onset and gas conduction
+At `inclination_degrees=0`, the shared `HollandsHorizontalAirLayer` card owns the onset and gas conduction
 limit. Stable heating from above, subcritical heating from below, zero gravity
 and exact equilibrium retain `Nu=1`; an unstable admitted layer adds buoyant
 transfer. This is TOTAL gas heat: no second Fourier gas path or generated pair
 of source rates is added. The native link alone debits and credits the same
 heat and includes its conductance in the original timestep bound.
 
+Positive wall-plane angles through 60 degrees use the shared
+`HollandsInclinedAirLayer` card with the FULL gravity-based Rayleigh number.
+Its normal driving and along-slope sine correction remain inside the original
+correlation owner. Merely projecting gravity into the horizontal relation is
+not the inclined model. A negative signed Rayleigh number at positive tilt
+refuses; the horizontal stable conduction limit cannot establish an inclined
+heated-from-above model. The actual declared angle is retained with each
+source sample and correlation evaluation. The original observer and complete
+heat assembly consume this same evaluator, including during nonlinear trials.
+
 Bindings declare the normal gap, both complete rectangular plate spans,
-gravity and an explicit maximum `|beta delta_T|` in `[0,1)`. The native link
+full gravity, wall-plane inclination in degrees and an explicit maximum
+`|beta delta_T|` in `[0,1)`. The native link
 must cover that full rectangle on both walls within floating-point roundoff and have zero
 authored conductance. Thin-layer geometry, air-only source support and all
 Rayleigh/Prandtl limits remain with the original card. A matching Pr is not
 evidence that a non-air fluid is supported. Wall temperatures must represent
 uniform isothermal faces; this adapter does not replace resolved wall gradients,
-gas thermal storage, inclined cavities, sidewall bridges or radiation.
+gas thermal storage, angles above 60 degrees, inclined heated-from-above
+circulation, sidewall bridges or radiation. The caller must bind the actual
+wall orientation; the link's endpoint ordering is not an inclination model.
 
 `source::enclosure::observer::SourceEnclosedGasLayerObserver` reevaluates the
 gas at every actual explicit substep and accepted endpoint, retaining applied

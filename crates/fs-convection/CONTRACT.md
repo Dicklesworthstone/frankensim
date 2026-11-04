@@ -21,7 +21,7 @@ correlation.
 
 ## Public types and semantics
 
-- `CorrelationId` names twenty implemented relations: circular-duct 3.66 and
+- `CorrelationId` names twenty-one implemented relations: circular-duct 3.66 and
   4.36 limits; a thermally developing circular-duct relation; rectangular-
   duct constant-temperature and constant-flux limits; one simultaneously
   developing constant-temperature rectangular-duct table slice at
@@ -36,11 +36,12 @@ correlation.
   Churchill isolated-sphere natural convection, including its conductive limit;
   and Whitaker forced convection over an isolated sphere with explicit
   bulk/surface viscosity correction; and Hollands horizontal enclosed air-layer
-  transfer, including gas conduction and stable/subcritical limits.
+  transfer, including gas conduction and stable/subcritical limits; and Hollands
+  inclined air-gap transfer with the explicit source inclination correction.
 - `CorrelationCard` combines an `fs-evidence::ModelCard`, bibliographic
   provenance, and `DiscrepancyBasis`.
 - `CorrelationInputs` makes Re, Pr, L/Dh, aspect ratio, Ra, bulk/surface
-  viscosity ratio, and the
+  viscosity ratio, inclination in degrees, and the
   heating/cooling convention explicit. Pe is deterministically derived from
   Re and Pr when both exist; Gz is deterministically derived as
   `Re Pr/(L/Dh)` when all three inputs exist. `mixed(Re, Ra, Pr)` supplies both
@@ -48,7 +49,9 @@ correlation.
   vertical alignment. The dimensional owner checks the actual signs.
   `horizontal_air_layer(signed_Ra, Pr, gap_over_min_span)` retains the enclosure's
   stability sign and its whole-plate aspect ratio instead of an external-flow
-  length or a mesh-cell width.
+  length or a mesh-cell width. `inclined_air_layer(Ra, Pr, gap_over_min_span,
+  inclination_degrees)` retains full-gravity Ra and the physical inclination
+  separately; the source formula applies its own gravity projection.
 - `evaluate` returns `NusseltEvaluation` only after every shared
   `ValidityDomain` axis is present and inside its inclusive bounds.
 - `NusseltEvaluation::heat_transfer_coefficient` returns
@@ -77,7 +80,8 @@ correlation.
    driver must be positive. The isolated sphere admits Ra=0 as the physical
    steady conduction limit Nu=2. The horizontal enclosed air layer retains
    finite signed Ra, with stable and zero-driving total conduction Nu=1.
-   All other supplied groups remain positive.
+   The inclined air layer admits nonnegative Ra and angles in [0, 60] degrees,
+   retaining Nu=1 below the projected onset. Other supplied groups remain positive.
 3. Every successful value carries exactly the selected model card, its
    validity domain, assumptions, discrepancy, and deterministic evaluation
    provenance.
@@ -130,6 +134,38 @@ and `5830`, or at the unstable domain endpoint. Unrelated interior partials
 remain available. G0/G3 tests in `tests/enclosed_air_layer.rs` compare independent
 high-precision arithmetic, stability, source limits, continuity and typed scaling.
 
+## Inclined enclosed air layer
+
+`HollandsInclinedAirLayer` implements the inclined equation reproduced in the
+[EnergyPlus 8.3 Engineering Reference, Heat Transfer Coefficients](https://bigladdersoftware.com/epx/docs/8-3/engineering-reference/solar-collectors.html#heat-transfer-coefficients),
+citing [Hollands et al. (1976)](https://doi.org/10.1115/1.3450517). With inclination
+`theta` measured from horizontal, `R = Ra cos(theta)`, and `x+ = max(0, x)`, it uses
+`Nu = 1 + 1.44 (1 - 1708 sin(1.8 theta)^1.6/R) (1 - 1708/R)+
++ ((R/5830)^(1/3) - 1)+`. The first factor is not clipped; it is nonnegative
+whenever its multiplied onset is active in this admitted domain. At zero or
+subcritical projected Ra the implementation returns exactly one before dividing.
+Replacing only Ra with its normal gravity component would omit a source term.
+
+This card requires nonnegative full-gravity Ra through `1e5` and angle in
+`[0, 60]` **degrees**. The 60-degree ceiling is an explicit conservative
+implementation subset of the original measurements. Air identity, mean-wall
+properties, full normal gap, `gap/minimum_span < 0.1`, Pr admission `[0.70, 0.72]`,
+and quasi-steady storage assumptions follow the horizontal card's policy. The
+coefficient includes total gas conduction plus convection; radiation remains
+separate. Heating from above at nonzero inclination refuses: taking an absolute
+Ra or swapping wall temperatures would falsely change the physical orientation.
+Vertical cavities, non-air fluids, ventilation and wall shear remain unsupported.
+
+Zero inclination shares the original horizontal arithmetic bit for bit; the
+signed horizontal card retains its existing source identity and stable branch.
+Analytic partials use the full-gravity Ra and angle **per degree**, including both
+source inclination terms. Ra and angle partials are unavailable at projected
+branch switches `R=1708` and `R=5830`; validity endpoints omit only the partial
+that crosses them. Unrelated admitted partials stay available. The numerical
+leaf and `tests/inclined_air_layer.rs` compare independent high-precision values
+and derivatives, source/domain refusals, horizontal compatibility and typed
+conductance scaling. These are implementation checks, not experimental validation.
+
 ## Error model
 
 `CorrelationError` is total and teaching:
@@ -144,7 +180,7 @@ No library path panics for caller input.
 
 ## Determinism class
 
-Formula powers, logarithms, and square roots use `fs-math::det`; polynomial
+Formula powers, logarithms, trigonometry and square roots use `fs-math::det`; polynomial
 evaluation has a fixed Horner tree. Evaluation provenance binds the stable
 card id, direction convention, sorted group names, and exact float bits. The
 source-region marker is deterministically derived from the already-bound card

@@ -43,6 +43,7 @@ fn gap() -> SourceEnclosedGasLayer {
         gap: Length::new(GAP),
         plate_spans: SPANS.map(Length::new),
         gravity_m_s2: 9.81,
+        inclination_degrees: 0.0,
         maximum_relative_density_departure: 0.1,
     }
 }
@@ -277,7 +278,13 @@ fn with_case<T>(
 
 // Independent Hollands algebra and Stefan-Boltzmann parallel-plate balance.
 // The gas properties still come from the original manufactured material law.
-fn gap_conductance(gas: &ThermochemicalGasModel, pressure: f64, lower: f64, upper: f64) -> f64 {
+fn gap_conductance(
+    gas: &ThermochemicalGasModel,
+    pressure: f64,
+    lower: f64,
+    upper: f64,
+    inclination_degrees: f64,
+) -> f64 {
     let sample = gas
         .evaluate(&gas_source::point(0.5 * lower + 0.5 * upper, pressure))
         .unwrap();
@@ -287,22 +294,28 @@ fn gap_conductance(gas: &ThermochemicalGasModel, pressure: f64, lower: f64, uppe
         * s.density.powi(2)
         * s.specific_heat_cp
         / (s.dynamic_viscosity * s.thermal_conductivity);
-    let nu = if ra <= 1708.0 {
+    let angle = inclination_degrees.to_radians();
+    let normal_ra = ra * angle.cos();
+    let nu = if normal_ra <= 1708.0 {
         1.0
     } else {
-        1.0 + 1.44 * (1.0 - 1708.0 / ra) + ((ra / 5830.0).cbrt() - 1.0).max(0.0)
+        1.0 + 1.44
+            * (1.0 - 1708.0 / normal_ra)
+            * (1.0 - 1708.0 * (1.8 * angle).sin().powf(1.6) / normal_ra)
+            + ((normal_ra / 5830.0).cbrt() - 1.0).max(0.0)
     };
     GAP_AREA * s.thermal_conductivity / GAP * nu
 }
 
-fn reference(gas: &ThermochemicalGasModel, pressure: f64) -> [f64; 3] {
+fn reference(gas: &ThermochemicalGasModel, pressure: f64, inclination_degrees: f64) -> [f64; 3] {
     let evaluate = |lower: f64| {
         let resistance = 1.0 + 0.02 * (lower - 300.0);
         let ratio = DT / (2.0 * CAPACITANCE * resistance);
         let charge = INITIAL_CHARGE * (1.0 - ratio) / (1.0 + ratio);
         let joule = (INITIAL_CHARGE.powi(2) - charge.powi(2)) / (2.0 * CAPACITANCE);
         let upper = 290.0 + joule / (MASS * CP) - (lower - 310.0);
-        let gas_power = gap_conductance(gas, pressure, lower, upper) * (lower - upper);
+        let gas_power =
+            gap_conductance(gas, pressure, lower, upper, inclination_degrees) * (lower - upper);
         let radiation = 5.670_374_419e-8 * GAP_AREA * (lower.powi(4) - upper.powi(4))
             / (2.0 / EMISSIVITY - 1.0);
         (
@@ -327,118 +340,127 @@ fn reference(gas: &ThermochemicalGasModel, pressure: f64) -> [f64; 3] {
 
 #[test]
 fn gas_gap_changes_actual_circuit_and_wall_storage_with_closed_radiation() {
-    with_case(true, true, |cx, _, heat, thermal, gas| {
-        let saved = thermal.cells().clone();
-        let layers = [gap()];
-        let mut results = Vec::new();
-        for pressure in [50000.0, 100000.0] {
-            let resolve =
-                |_: &SourceEnclosedGasLayer, _: &DepositionSimulation<'_>, t: Temperature| {
-                    gas.evaluate(&gas_source::point(t.value(), pressure))
-                };
-            let initial =
-                evaluate_source_enclosed_gas_layers(&thermal, &layers, 1, resolve, || false)
+    for inclination_degrees in [0.0, 45.0] {
+        with_case(true, true, |cx, _, heat, thermal, gas| {
+            let saved = thermal.cells().clone();
+            let layers = [SourceEnclosedGasLayer {
+                inclination_degrees,
+                ..gap()
+            }];
+            let mut results = Vec::new();
+            for pressure in [50000.0, 100000.0] {
+                let resolve =
+                    |_: &SourceEnclosedGasLayer, _: &DepositionSimulation<'_>, t: Temperature| {
+                        gas.evaluate(&gas_source::point(t.value(), pressure))
+                    };
+                let initial =
+                    evaluate_source_enclosed_gas_layers(&thermal, &layers, 1, resolve, || false)
+                        .unwrap();
+                assert!(heat.prepare(cx, &thermal).is_err());
+                let prepared = heat
+                    .prepare_with_link_conductances(cx, &thermal, initial.conductances_w_k())
                     .unwrap();
-            assert!(heat.prepare(cx, &thermal).is_err());
-            let prepared = heat
-                .prepare_with_link_conductances(cx, &thermal, initial.conductances_w_k())
+                let assembly = SourceEnclosedGasHeatAssembly {
+                    heat: &prepared,
+                    layers: &layers,
+                    maximum_layers: 1,
+                    resolve_gas: resolve,
+                };
+                let coefficients = assembly.resolve_heat(cx, &thermal).unwrap();
+                let circuit = MaterialCircuit::new(
+                    CircuitGraph {
+                        node_count: 2,
+                        branches: vec![
+                            (
+                                1,
+                                0,
+                                Branch::Capacitor {
+                                    farads: CAPACITANCE,
+                                },
+                            ),
+                            (1, 0, Branch::Resistor { ohms: 0.0 }),
+                        ],
+                        transformers: vec![],
+                    },
+                    coefficients.bulk.resistors,
+                    vec![],
+                    vec![INITIAL_CHARGE],
+                    &[],
+                )
                 .unwrap();
-            let assembly = SourceEnclosedGasHeatAssembly {
-                heat: &prepared,
-                layers: &layers,
-                maximum_layers: 1,
-                resolve_gas: resolve,
-            };
-            let coefficients = assembly.resolve_heat(cx, &thermal).unwrap();
-            let circuit = MaterialCircuit::new(
-                CircuitGraph {
-                    node_count: 2,
-                    branches: vec![
-                        (
-                            1,
-                            0,
-                            Branch::Capacitor {
-                                farads: CAPACITANCE,
-                            },
-                        ),
-                        (1, 0, Branch::Resistor { ohms: 0.0 }),
-                    ],
-                    transformers: vec![],
-                },
-                coefficients.bulk.resistors,
-                vec![],
-                vec![INITIAL_CHARGE],
-                &[],
-            )
-            .unwrap();
-            let destinations = prepared.resistor_destinations();
-            let routes = prepared.heat_destinations(&thermal).unwrap();
-            let mut solve = controls();
-            solve.maximum_cells = 2;
-            solve.newton.linear_restart = 2;
-            // The existing contact/circuit driver consumes this complete
-            // HeatAssembly resolver; no gap-specific evolution exists.
-            let next = contacts::step_candidate(
-                &thermal,
-                DT,
-                CircuitEnthalpyInput {
-                    circuit: &circuit,
-                    ports: &[],
-                    destinations: &destinations,
-                },
-                &routes,
-                solve,
-                &[0.0; 2],
-                |state| assembly.resolve_heat(cx, state),
-                || false,
-            )
-            .unwrap();
-            let actual = [
-                next.thermal().temperature_k(BODY).unwrap(),
-                next.thermal().temperature_k(UPPER).unwrap(),
-                next.circuit().charges_c()[0],
-            ];
-            for (a, b) in actual.into_iter().zip(reference(gas, pressure)) {
-                near(a, b, 1e-8);
+                let destinations = prepared.resistor_destinations();
+                let routes = prepared.heat_destinations(&thermal).unwrap();
+                let mut solve = controls();
+                solve.maximum_cells = 2;
+                solve.newton.linear_restart = 2;
+                // The existing contact/circuit driver consumes this complete
+                // HeatAssembly resolver; no gap-specific evolution exists.
+                let next = contacts::step_candidate(
+                    &thermal,
+                    DT,
+                    CircuitEnthalpyInput {
+                        circuit: &circuit,
+                        ports: &[],
+                        destinations: &destinations,
+                    },
+                    &routes,
+                    solve,
+                    &[0.0; 2],
+                    |state| assembly.resolve_heat(cx, state),
+                    || false,
+                )
+                .unwrap();
+                let actual = [
+                    next.thermal().temperature_k(BODY).unwrap(),
+                    next.thermal().temperature_k(UPPER).unwrap(),
+                    next.circuit().charges_c()[0],
+                ];
+                for (a, b) in actual
+                    .into_iter()
+                    .zip(reference(gas, pressure, inclination_degrees))
+                {
+                    near(a, b, 1e-8);
+                }
+                let sample = &next.report().source.material;
+                let gap = &sample.gas_layers.samples()[0];
+                assert_eq!(gap.inclination_degrees, inclination_degrees);
+                near(gap.lower_temperature_k, actual[0], 1e-12);
+                near(gap.upper_temperature_k, actual[1], 1e-12);
+                near(
+                    gap.property_temperature_k,
+                    0.5 * actual[0] + 0.5 * actual[1],
+                    1e-12,
+                );
+                near(gap.material.state().pressure, pressure, 1e-8);
+                assert_eq!(
+                    gap.material.source_packs(),
+                    initial.samples()[0].material.source_packs()
+                );
+                near(
+                    gap.conductance_w_k,
+                    gap_conductance(gas, pressure, actual[0], actual[1], inclination_degrees),
+                    1e-12,
+                );
+                assert!(gap.heat_into_upper_w > 0.0);
+                let radiation = sample.heat.radiation.as_ref().unwrap();
+                assert!(radiation.sources_w()[&BODY] < 0.0 && radiation.sources_w()[&UPPER] > 0.0);
+                let external = next.report().non_electrical_heat_j - DT * radiation.net_heat_w();
+                near(external, 0.0, 1e-10);
+                near(
+                    next.thermal().energy_j() - thermal.energy_j()
+                        + (actual[2].powi(2) - INITIAL_CHARGE.powi(2)) / (2.0 * CAPACITANCE),
+                    0.0,
+                    1e-8,
+                );
+                assert_eq!(thermal.cells(), &saved);
+                assert_eq!(circuit.charges_c(), &[INITIAL_CHARGE]);
+                assert_eq!(next.thermal().links()[&GAP_LINK].conductance_w_k, 0.0);
+                results.push(actual);
             }
-            let sample = &next.report().source.material;
-            let gap = &sample.gas_layers.samples()[0];
-            near(gap.lower_temperature_k, actual[0], 1e-12);
-            near(gap.upper_temperature_k, actual[1], 1e-12);
-            near(
-                gap.property_temperature_k,
-                0.5 * actual[0] + 0.5 * actual[1],
-                1e-12,
-            );
-            near(gap.material.state().pressure, pressure, 1e-8);
-            assert_eq!(
-                gap.material.source_packs(),
-                initial.samples()[0].material.source_packs()
-            );
-            near(
-                gap.conductance_w_k,
-                gap_conductance(gas, pressure, actual[0], actual[1]),
-                1e-12,
-            );
-            assert!(gap.heat_into_upper_w > 0.0);
-            let radiation = sample.heat.radiation.as_ref().unwrap();
-            assert!(radiation.sources_w()[&BODY] < 0.0 && radiation.sources_w()[&UPPER] > 0.0);
-            let external = next.report().non_electrical_heat_j - DT * radiation.net_heat_w();
-            near(external, 0.0, 1e-10);
-            near(
-                next.thermal().energy_j() - thermal.energy_j()
-                    + (actual[2].powi(2) - INITIAL_CHARGE.powi(2)) / (2.0 * CAPACITANCE),
-                0.0,
-                1e-8,
-            );
-            assert_eq!(thermal.cells(), &saved);
-            assert_eq!(circuit.charges_c(), &[INITIAL_CHARGE]);
-            assert_eq!(next.thermal().links()[&GAP_LINK].conductance_w_k, 0.0);
-            results.push(actual);
-        }
-        assert!((results[0][0] - results[1][0]).abs() > 1e-3);
-        assert!((results[0][2] - results[1][2]).abs() > 1e-6);
-    });
+            assert!((results[0][0] - results[1][0]).abs() > 1e-3);
+            assert!((results[0][2] - results[1][2]).abs() > 1e-6);
+        });
+    }
 }
 
 #[test]

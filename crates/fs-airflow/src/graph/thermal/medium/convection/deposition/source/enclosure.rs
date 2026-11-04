@@ -1,19 +1,19 @@
-//! Enclosed horizontal air layers on original reciprocal thermal links.
+//! Enclosed horizontal or inclined air layers on reciprocal thermal links.
 //!
 //! Both endpoints are finite isothermal WALLS. The intervening gas layer has
 //! negligible storage in this quasi-steady approximation; it is not a third
 //! thermal cell or a prescribed-temperature reservoir. The original link owns
 //! both energy transfers, area coverage and the outgoing-conductance bound.
 
-/// Reevaluate the original material at each accepted explicit thermal substep.
-pub mod observer;
 /// Gas gaps in complete native heat, radiation and circuit assemblies.
 pub mod heat;
+/// Reevaluate the original material at each accepted explicit thermal substep.
+pub mod observer;
 
 use super::super::CellConvectionEvaluation;
 use super::*;
 
-/// One complete rectangular air gap between two horizontal isothermal walls.
+/// One complete rectangular air gap between two parallel isothermal walls.
 ///
 /// `lower_cell` declares the physically lower wall independently of the link's
 /// endpoint ordering. `gap` is the normal wall separation; `plate_spans` are
@@ -21,6 +21,11 @@ use super::*;
 /// exposed-area remainders or contact patches. The native link must cover the
 /// full rectangle on BOTH sides, and its authored conductance must be zero: the selected
 /// Nusselt relation already includes the gas's Fourier conduction exactly once.
+/// `inclination_degrees` is the actual wall-plane angle from horizontal, not
+/// the angle between gravity and the wall plane. Zero retains the original
+/// signed horizontal law; positive angles through 60 degrees select the full
+/// inclined heated-from-below law, including its along-slope correction.
+/// The caller owns this physical orientation; mesh coordinates do not infer it.
 ///
 /// Mean-temperature source properties are a Boussinesq approximation. The
 /// caller explicitly bounds `|beta * (T_lower - T_upper)|` below one. In
@@ -34,8 +39,12 @@ pub struct SourceEnclosedGasLayer {
     pub lower_cell: CellId,
     pub gap: Length,
     pub plate_spans: [Length; 2],
-    /// Nonnegative gravity magnitude; the declared walls are horizontal.
+    /// Nonnegative full gravity magnitude, not its wall-normal projection.
     pub gravity_m_s2: f64,
+    /// Wall-plane angle from horizontal in [0, 60] degrees. At a positive
+    /// angle, negative signed Rayleigh refuses instead of using the horizontal
+    /// stable-layer shortcut. Rebind after changing physical orientation.
+    pub inclination_degrees: f64,
     /// Explicit relative-density-departure bound in [0, 1).
     pub maximum_relative_density_departure: f64,
 }
@@ -50,6 +59,7 @@ pub struct EnclosedGasLayerSample<F> {
     pub upper_temperature_k: f64,
     pub property_temperature_k: f64,
     pub gap_m: f64,
+    pub inclination_degrees: f64,
     pub area_m2: f64,
     pub conductance_w_k: f64,
     /// Signed lower-to-upper heat. The original link applies its exact opposite
@@ -57,7 +67,7 @@ pub struct EnclosedGasLayerSample<F> {
     pub heat_into_upper_w: f64,
     pub material: F,
     pub thermal: ThermalFluidTransportState,
-    /// Includes the analytic Nu=1 limit at equilibrium and stable stratification.
+    /// Includes Nu=1 at equilibrium and for stable horizontal stratification.
     /// A finite gap therefore retains its conductive coupling when delta T is zero.
     pub evaluation: CellConvectionEvaluation,
 }
@@ -171,11 +181,13 @@ pub fn evaluate_source_enclosed_gas_layers<F: ThermalFluidTransport, E>(
             .any(|x| !x.is_finite() || x <= 0.0)
             || !binding.gravity_m_s2.is_finite()
             || binding.gravity_m_s2 < 0.0
+            || !binding.inclination_degrees.is_finite()
+            || !(0.0..=60.0).contains(&binding.inclination_degrees)
             || !binding.maximum_relative_density_departure.is_finite()
             || !(0.0..1.0).contains(&binding.maximum_relative_density_departure)
         {
             return Err(ConvectionSourceError::Invalid(
-                "gas layers require positive finite dimensions, nonnegative gravity and a density bound in [0,1)",
+                "gas layers require positive dimensions, nonnegative gravity, inclination in [0,60] degrees and a density bound in [0,1)",
             ).into());
         }
         let area = finite(width * length)?;
@@ -207,7 +219,7 @@ pub fn evaluate_source_enclosed_gas_layers<F: ThermalFluidTransport, E>(
         let aspect = finite(gap / width.min(length))?;
         if aspect <= 0.0 || aspect >= 0.1 {
             return Err(ConvectionSourceError::Invalid(
-                "horizontal gas layers require gap divided by each whole span below 0.1",
+                "gas layers require gap divided by each whole span below 0.1",
             )
             .into());
         }
@@ -263,15 +275,29 @@ pub fn evaluate_source_enclosed_gas_layers<F: ThermalFluidTransport, E>(
         let minimum_span = binding.plate_spans[0]
             .value()
             .min(binding.plate_spans[1].value());
-        let nusselt = fs_convection::evaluate(
-            CorrelationId::HollandsHorizontalAirLayer,
-            CorrelationInputs::horizontal_air_layer(
-                signed_rayleigh,
-                transport.prandtl(),
-                binding.gap.value() / minimum_span,
-            ),
-        )
-        .map_err(|error| ConvectionSourceError::Material(error.into()))?;
+        let aspect = binding.gap.value() / minimum_span;
+        let (correlation, inputs) = if binding.inclination_degrees == 0.0 {
+            (
+                CorrelationId::HollandsHorizontalAirLayer,
+                CorrelationInputs::horizontal_air_layer(
+                    signed_rayleigh,
+                    transport.prandtl(),
+                    aspect,
+                ),
+            )
+        } else {
+            (
+                CorrelationId::HollandsInclinedAirLayer,
+                CorrelationInputs::inclined_air_layer(
+                    signed_rayleigh,
+                    transport.prandtl(),
+                    aspect,
+                    binding.inclination_degrees,
+                ),
+            )
+        };
+        let nusselt = fs_convection::evaluate(correlation, inputs)
+            .map_err(|error| ConvectionSourceError::Material(error.into()))?;
         let coefficient = nusselt
             .heat_transfer_coefficient(
                 ThermalConductivity::new(transport.thermal_conductivity_w_m_k()),
@@ -295,6 +321,7 @@ pub fn evaluate_source_enclosed_gas_layers<F: ThermalFluidTransport, E>(
             upper_temperature_k,
             property_temperature_k,
             gap_m: binding.gap.value(),
+            inclination_degrees: binding.inclination_degrees,
             area_m2: link.area_m2,
             conductance_w_k,
             heat_into_upper_w,

@@ -10,6 +10,9 @@ use fs_material::thermochemical_gas::ThermochemicalGasModel;
 #[path = "../../finite_gas_convection/source.rs"]
 mod gas_source;
 
+#[path = "enclosure/inclined.rs"]
+mod inclined;
+
 const GAP: f64 = 0.018;
 const SPANS: [f64; 2] = [0.2, 0.3];
 const GAP_AREA: f64 = SPANS[0] * SPANS[1];
@@ -22,6 +25,7 @@ fn binding() -> SourceEnclosedGasLayer {
         gap: Length::new(GAP),
         plate_spans: SPANS.map(Length::new),
         gravity_m_s2: 9.81,
+        inclination_degrees: 0.0,
         maximum_relative_density_departure: 0.1,
     }
 }
@@ -97,6 +101,15 @@ fn pair<'a>(
 
 // Independent dimensional algebra and source horizontal-layer expression.
 fn expected(model: &ThermochemicalGasModel, lower: f64, upper: f64) -> (f64, f64, f64) {
+    expected_at_inclination(model, lower, upper, 0.0)
+}
+
+fn expected_at_inclination(
+    model: &ThermochemicalGasModel,
+    lower: f64,
+    upper: f64,
+    inclination_degrees: f64,
+) -> (f64, f64, f64) {
     let gas = model
         .evaluate(&gas_source::point(0.5 * lower + 0.5 * upper, PRESSURE))
         .unwrap();
@@ -108,10 +121,15 @@ fn expected(model: &ThermochemicalGasModel, lower: f64, upper: f64) -> (f64, f64
         .unwrap();
     let ra = 9.81 * beta * (lower - upper) * GAP.powi(3) * s.density.powi(2) * s.specific_heat_cp
         / (s.dynamic_viscosity * s.thermal_conductivity);
-    let nu = if ra <= 1708.0 {
+    let angle = inclination_degrees.to_radians();
+    let normal_ra = ra * angle.cos();
+    let nu = if normal_ra <= 1708.0 {
         1.0
     } else {
-        1.0 + 1.44 * (1.0 - 1708.0 / ra) + ((ra / 5830.0).cbrt() - 1.0).max(0.0)
+        1.0 + 1.44
+            * (1.0 - 1708.0 / normal_ra)
+            * (1.0 - 1708.0 * (1.8 * angle).sin().powf(1.6) / normal_ra)
+            + ((normal_ra / 5830.0).cbrt() - 1.0).max(0.0)
     };
     (ra, nu, GAP_AREA * nu * s.thermal_conductivity / GAP)
 }
@@ -167,7 +185,11 @@ fn horizontal_layer_uses_physical_lower_wall_and_retains_finite_conduction_at_re
 fn implicit_layer_resolves_actual_endpoint_mean_and_closes_both_original_wall_energies() {
     let chart = gas_source::body_curve();
     let model = gas_source::model_transport(1.0, true);
-    for initial in [[410.0, 390.0], [390.0, 410.0]] {
+    for (initial, inclination_degrees) in [
+        ([410.0, 390.0], 0.0),
+        ([390.0, 410.0], 0.0),
+        ([410.0, 390.0], 45.0),
+    ] {
         for reversed in [false, true] {
             let thermal = pair(&chart, initial, reversed, 0.0);
             let saved = thermal.cells().clone();
@@ -181,7 +203,11 @@ fn implicit_layer_resolves_actual_endpoint_mean_and_closes_both_original_wall_en
                 let transfer = 0.5 * lo + 0.5 * hi;
                 let lower = initial[0] - direction * transfer / capacities[0];
                 let upper = initial[1] + direction * transfer / capacities[1];
-                if transfer - dt * expected(&model, lower, upper).2 * (lower - upper).abs() > 0.0 {
+                if transfer
+                    - dt * expected_at_inclination(&model, lower, upper, inclination_degrees).2
+                        * (lower - upper).abs()
+                    > 0.0
+                {
                     hi = transfer;
                 } else {
                     lo = transfer;
@@ -210,7 +236,10 @@ fn implicit_layer_resolves_actual_endpoint_mean_and_closes_both_original_wall_en
                     |state| {
                         let result = evaluate_source_enclosed_gas_layers(
                             state,
-                            &[binding()],
+                            &[SourceEnclosedGasLayer {
+                                inclination_degrees,
+                                ..binding()
+                            }],
                             1,
                             |_, _, t| model.evaluate(&gas_source::point(t.value(), PRESSURE)),
                             || false,
@@ -228,6 +257,7 @@ fn implicit_layer_resolves_actual_endpoint_mean_and_closes_both_original_wall_en
                 .unwrap();
             let (next, result, audit) = trial.accept(1e-8, 1e-8, || Ok(())).unwrap();
             let sample = &result.samples()[0];
+            assert_eq!(sample.inclination_degrees, inclination_degrees);
             near(
                 sample.property_temperature_k,
                 0.5 * endpoint[0] + 0.5 * endpoint[1],
