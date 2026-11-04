@@ -197,7 +197,7 @@ pub fn segment_wave_with_loss<M: ThermoviscousFluid + ?Sized>(
     Ok(thermoviscous_wave_from_state(&state, radius, omega, loss)?)
 }
 
-fn thermoviscous_wave_from_state(
+pub(crate) fn thermoviscous_wave_from_state(
     state: &ThermoviscousFluidState,
     radius: f64,
     omega: f64,

@@ -2631,6 +2631,36 @@ free surface, capillarity, bulk absorption, mean flow or phase motion are
 inferred by the radiation model. The infinite-baffle and finite-mode limits of
 the original owner remain in force.
 
+`modal::PreparedModalDuct::{input_impedance_from_material,
+mouth_response_from_material}` now admit that same original `FluidAcoustics`
+response to the complete retained radial pressure/volume-flow basis. Their
+`*_with_loss` counterparts use one `ThermoviscousFluid` snapshot, including its
+actual Cp/Cv and transport coefficients, at every station radius. The original
+material is evaluated once per query; propagation and the full same-fluid
+flanged matrix reuse that immutable snapshot. No liquid or real gas is coerced
+into `GasState`. The gas and material paths share one modal-wave expansion,
+one radius-junction/reflection recurrence and one physical observation transform.
+
+`modal::fluid::MouthBoundary` distinguishes zero-flow `Rigid`, zero-pressure
+`PressureRelease`, and complete coupled `Flanged` radiation on EVERY retained
+mode. `Flanged` retains every original modal cross term rather than condensing
+to a scalar mouth load. Material sound speed sets both the axial wavenumbers
+`k_n² = (omega/c)² - (gamma_n/r)²` and the reported throat cutoffs; density sets
+the pressure/flow impedance scale. Exact lossless endpoint cutoffs retain their
+finite pressure/constant-flow solution, while genuine input-impedance poles
+still refuse. The original hole-free axisymmetric cylindrical/conical staircase,
+mode/slice refinement axes, flanged `ka` admission and infinite-baffle exterior
+remain unchanged. Bessel/wide-tube higher-mode wall loss retains the disclosed
+plane-ZK approximation, not a new per-mode thermoviscous eigenproblem. These
+methods supply neither azimuthal modes, continuous profiles, compliant walls,
+bulk absorption, nor evolving phase boundaries.
+
+Focused G1/G3 controls in `modal/fluid/tests.rs` compare liquid propagating and
+evanescent modes with independent pressure/flow ODE solutions, compare cutoff
+and stepped-bore responses with a global endpoint-equation solve, retain native
+gas results, close full radiated power for source-EOS water, and check one-source
+evaluation, material wall dissipation and original source/admission refusals.
+
 G1/G3 regressions in `tests/fluid_acoustics/flanged.rs` check the independent
 low-frequency piston asymptote, gas bit equivalence, source-water impedance
 scaling, multimodal reciprocity and positive radiated power, an analytic loaded

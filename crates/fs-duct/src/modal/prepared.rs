@@ -20,6 +20,9 @@ pub(super) struct PreparedJunction {
 /// evaluation recomputes propagation and the physical load from its supplied
 /// material state, so pressure, temperature and composition substitutions remain
 /// live. This is the same staircase model, not a different approximation.
+/// Original gas/liquid materials can use [`Self::input_impedance_from_material`]
+/// and [`Self::mouth_response_from_material`]; their complete snapshots also
+/// supply the full same-fluid radiation boundary in [`fluid::MouthBoundary`].
 pub struct PreparedModalDuct<'a> {
     source: &'a Duct,
     pub(super) n_modes: usize,

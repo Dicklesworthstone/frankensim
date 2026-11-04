@@ -67,6 +67,9 @@ pub const MAX_MODES: usize = 8;
 /// Mouth modal flow from the same loaded staircase reflection recurrence.
 pub mod outlet;
 
+/// Multimodal propagation and complete mouth radiation from gas/liquid materials.
+pub mod fluid;
+
 /// Full-state lossless continuous-profile spatial image for exact time evolution.
 pub mod time_domain;
 
@@ -346,6 +349,14 @@ fn modal_wave_with_cutoff_reference(
     gammas: &[f64], admit_cutoff: bool,
 ) -> Result<ModalWave, DuctError> {
     let wave: SegmentWave = segment_wave(state, radius, omega, loss)?;
+    modal_wave_from_plane_wave(wave, radius, gammas, admit_cutoff)
+}
+
+// Expand the original material owner's plane wave in the retained radial basis.
+// No density, caloric relation or transport law is inferred by this projection.
+fn modal_wave_from_plane_wave(
+    wave: SegmentWave, radius: f64, gammas: &[f64], admit_cutoff: bool,
+) -> Result<ModalWave, DuctError> {
     let k0 = wave.wavenumber;
     let zc0 = wave.characteristic_impedance;
     let n = gammas.len() + 1;
@@ -753,6 +764,12 @@ fn mm_evaluate_prepared(
     observe_mouth: bool,
 ) -> Result<outlet::MouthResponse, DuctError> {
     let response = mm_wave_response_prepared(geometry, state, omega, loss, load, observe_mouth, true)?;
+    physical_response(response)
+}
+
+// Recover physical pressure/flow observations from the common recurrence,
+// including its private finite references at exact transverse cutoffs.
+fn physical_response(response: ModalWaveResponse) -> Result<outlet::MouthResponse, DuctError> {
     let input = response.input;
     let z_in = impedance_from_reflection(
         &input.reflection_matrix, &input.characteristic_impedances, input.n_modes,
@@ -838,7 +855,6 @@ fn mm_wave_response_prepared(
     let mouth_wave = modal_wave_with_cutoff_reference(
         state, mouth, omega, loss, gammas, admit_boundary_cutoff,
     )?;
-    let mut min_shear = mouth_wave.shear_number;
     // Ideal boundary conditions apply pointwise over the entire mouth:
     // U = Zc^-1 (a-b) = 0 gives R = +I, and P = a+b = 0 gives R = -I.
     // A scalar radiation load instead retains the matched higher-mode closure.
@@ -883,6 +899,34 @@ fn mm_wave_response_prepared(
         // Only scalar radiation/table loads leave higher modes matched.
         r
     };
+    mm_propagate_prepared(
+        geometry, omega, state.sound_speed, mouth_ka, mouth_wave, r_load,
+        observe_mouth, admit_boundary_cutoff,
+        |radius, admit_cutoff| {
+            modal_wave_with_cutoff_reference(state, radius, omega, loss, gammas, admit_cutoff)
+        },
+    )
+}
+
+// One numerical owner for all admitted source materials. The source supplies
+// each actual station's wave; the original geometry, decaying propagation,
+// junction pressure/flow equations and mouth observation remain unchanged.
+#[allow(clippy::too_many_arguments)]
+fn mm_propagate_prepared(
+    geometry: &PreparedModalDuct<'_>,
+    omega: f64,
+    sound_speed: f64,
+    mouth_ka: f64,
+    mouth_wave: ModalWave,
+    r_load: Vec<C64>,
+    observe_mouth: bool,
+    admit_boundary_cutoff: bool,
+    mut wave_at: impl FnMut(f64, bool) -> Result<ModalWave, DuctError>,
+) -> Result<ModalWaveResponse, DuctError> {
+    let n = geometry.n_modes;
+    let stations = &geometry.stations;
+    let mouth = mouth_wave.radius;
+    let mut min_shear = mouth_wave.shear_number;
     let mut mouth_flow = observe_mouth.then(|| outlet::terminal_flow(&r_load, &mouth_wave.zc, n));
 
     // Recurse from the mouth backward: load -> propagate through the
@@ -905,9 +949,7 @@ fn mm_wave_response_prepared(
     propagate(&mut r, &mut mouth_flow, &wave_here, stations[last].length)?;
     for idx in (0..last).rev() {
         let st = &stations[idx];
-        let wave_up = modal_wave_with_cutoff_reference(
-            state, st.radius, omega, loss, gammas, idx != 0 || admit_boundary_cutoff,
-        )?;
+        let wave_up = wave_at(st.radius, idx != 0 || admit_boundary_cutoff)?;
         min_shear = min_shear.min(wave_up.shear_number);
         if let Some(junction) = &geometry.junctions[idx] {
             r = outlet::junction(
@@ -927,9 +969,9 @@ fn mm_wave_response_prepared(
         .iter()
         .map(|s| s.radius)
         .fold(f64::INFINITY, f64::min);
-    let cutoffs = gammas
+    let cutoffs = geometry.gammas
         .iter()
-        .map(|g| state.sound_speed * g / (core::f64::consts::TAU * throat))
+        .map(|g| sound_speed * g / (core::f64::consts::TAU * throat))
         .collect();
     Ok(ModalWaveResponse {
         inlet_radius_m: wave_here.radius,
