@@ -1,5 +1,34 @@
 # CONTRACT: fs-conduction
 
+## Capacity storage with open reflected radiation and live contacts
+
+The existing backward-Euler enclosure owner now accepts `OpenDiffuseEnclosure`
+alongside closed exchange. `advance_prescribed_with_open_enclosure_radiation`
+retains ordinary capacity responses; the matching
+`TemperatureContacts::advance_capacity_with_open_enclosure_radiation` and
+`advance_capacity_newton_with_open_enclosure_radiation` entries retain the
+original source-surface fixed point and complete bulk/contact Newton responses.
+Every trial uses the same old field and admitted step. Geometry and the prepared
+radiosity operator stay fixed; no additional time integrator or material law is
+introduced.
+
+Fresh contact and radiative loads enter the complete nodal joule residual,
+including prescribed-temperature storage reactions. Only physical-surface watts
+enter the solid's outward radiation account; the independently evaluated black
+reservoir closes the radiosity system without cancelling the solid's external
+heat. Authored Neumann heat and original convection remain distinct, so only
+convection can heat transported air. Applied patch loads contain only physical
+surfaces, while fresh radiosity retains the separate reservoir row.
+
+The original surface, residual, energy and work gates remain in force. All
+nested responses, Newton updates, backtracks and Krylov iterations are counted.
+Cancellation, source refusal or exhausted work publishes no accepted endpoint.
+Focused regressions in `tests/temperature_contact/radiation.rs` use independent
+two-surface gray exchange and original nodal assembly to check both heat signs,
+source-curve/surface agreement, prescribed reactions, work and rollback. Native
+execution remains pending; syntax checks establish no runtime pass. This adds
+no open-capacity radiation adjoint, pointwise model or temporal-error certificate.
+
 ## Live source contacts with open radiative cavities
 
 `TemperatureContacts::solve_steady_newton_with_open_gray_diffuse_enclosure`

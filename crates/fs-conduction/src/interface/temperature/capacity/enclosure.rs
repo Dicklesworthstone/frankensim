@@ -1,8 +1,9 @@
-//! Live capacity/contact responses inside the existing closed-enclosure owner.
+//! Live capacity/contact responses inside the existing enclosure owner.
 
 use fs_exec::Cx;
 
-use crate::radiation::{EnclosureExchangeReport, GrayDiffuseEnclosure};
+use crate::radiation::{EnclosureExchangeReport, GrayDiffuseEnclosure, OpenDiffuseEnclosure,
+    enclosure_exchange::PreparedEnclosure};
 use crate::transient::backward_euler::{
     BackwardEuler, EndpointEvaluation, NonlinearStepConfig, StepConfig, StepSolution,
     enclosure::EnclosureStepResponse,
@@ -13,7 +14,7 @@ use super::super::{
     ContactIterationConfig, TemperatureContactEvaluation, TemperatureContacts, invalid, poll,
 };
 
-/// One unchanged capacity field accepted against live contact and closed exchange.
+/// One unchanged capacity field accepted against live contact and reflected exchange.
 #[derive(Debug)]
 pub struct ContactCapacityEnclosureStep {
     /// Last numerical response, with its applied contact and enclosure boundary.
@@ -24,7 +25,8 @@ pub struct ContactCapacityEnclosureStep {
     /// Pinned sources freshly queried at the returned field.
     pub physical_contacts: TemperatureContactEvaluation,
     /// Fresh full residual and storage balance, with original convection and
-    /// Neumann heat separated from internal reflected exchange.
+    /// Neumann heat separated from radiation. The black bath of an open model
+    /// stays outside the physical-surface outward heat sum.
     pub physical: EndpointEvaluation,
     /// Frozen reflected boundary used by the final numerical response.
     pub combined_boundary: ThermalBoundary,
@@ -49,7 +51,7 @@ impl TemperatureContacts<'_, '_> {
     /// only freshly audited complete contact/radiation balance may be accepted.
     /// The shared enclosure owner preserves authored convection and Neumann
     /// loads, prescribed-node storage reactions and internal radiative heat.
-    /// No pointwise/open exchange or monolithic radiation tangent is supplied.
+    /// No pointwise exchange or monolithic radiation tangent is supplied.
     #[allow(clippy::too_many_arguments)]
     pub fn advance_capacity_with_enclosure_radiation(
         &self,
@@ -64,10 +66,27 @@ impl TemperatureContacts<'_, '_> {
         enclosure: &GrayDiffuseEnclosure,
         radiation_config: AmbientRadiationConfig,
     ) -> Result<ContactCapacityEnclosureStep, ConductionError> {
+        let prepared = PreparedEnclosure::Closed(enclosure.prepare_radiosity(cx)?);
         self.capacity_enclosure(
             cx, engine, problem, old, dt_s, step_config, nonlinear, coupling,
-            None, enclosure, radiation_config,
+            None, &prepared, radiation_config,
         )
+    }
+
+    /// Compose source-surface contact with open area-mean enclosure exchange.
+    /// Each trial retains the same old temperature; only the complete freshly
+    /// queried contact/radiation endpoint may become accepted history. Physical
+    /// surface heat and the independently evaluated black-bath row stay distinct.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_capacity_with_open_enclosure_radiation(
+        &self, cx: &Cx<'_>, engine: &BackwardEuler<'_>, problem: ConductionProblem<'_>,
+        old: &[f64], dt_s: f64, step_config: StepConfig,
+        nonlinear: Option<NonlinearStepConfig>, coupling: ContactIterationConfig,
+        enclosure: &OpenDiffuseEnclosure, ambient_temperature_k: f64,
+        radiation_config: AmbientRadiationConfig,
+    ) -> Result<ContactCapacityEnclosureStep, ConductionError> {
+        self.capacity_enclosure(cx, engine, problem, old, dt_s, step_config, nonlinear,
+            coupling, None, &PreparedEnclosure::Open(enclosure, ambient_temperature_k), radiation_config)
     }
 
     /// Use the complete bulk/contact Newton response inside that same closed
@@ -90,10 +109,28 @@ impl TemperatureContacts<'_, '_> {
         enclosure: &GrayDiffuseEnclosure,
         radiation_config: AmbientRadiationConfig,
     ) -> Result<ContactCapacityEnclosureStep, ConductionError> {
+        let prepared = PreparedEnclosure::Closed(enclosure.prepare_radiosity(cx)?);
         self.capacity_enclosure(
             cx, engine, problem, old, dt_s, step_config, Some(nonlinear), coupling,
-            Some(max_face_pairs), enclosure, radiation_config,
+            Some(max_face_pairs), &prepared, radiation_config,
         )
+    }
+
+    /// Retain complete bulk/contact Newton responses inside that same open
+    /// exchange iteration. Original source support, physical gates, immutable
+    /// history and every nested work allowance remain in force. This adds no
+    /// contact/radiation adjoint or arbitrary-law convergence claim.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_capacity_newton_with_open_enclosure_radiation(
+        &self, cx: &Cx<'_>, engine: &BackwardEuler<'_>, problem: ConductionProblem<'_>,
+        old: &[f64], dt_s: f64, step_config: StepConfig, nonlinear: NonlinearStepConfig,
+        coupling: ContactIterationConfig, max_face_pairs: usize,
+        enclosure: &OpenDiffuseEnclosure, ambient_temperature_k: f64,
+        radiation_config: AmbientRadiationConfig,
+    ) -> Result<ContactCapacityEnclosureStep, ConductionError> {
+        self.capacity_enclosure(cx, engine, problem, old, dt_s, step_config, Some(nonlinear),
+            coupling, Some(max_face_pairs),
+            &PreparedEnclosure::Open(enclosure, ambient_temperature_k), radiation_config)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -108,7 +145,7 @@ impl TemperatureContacts<'_, '_> {
         nonlinear: Option<NonlinearStepConfig>,
         coupling: ContactIterationConfig,
         max_face_pairs: Option<usize>,
-        enclosure: &GrayDiffuseEnclosure,
+        enclosure: &PreparedEnclosure<'_>,
         radiation_config: AmbientRadiationConfig,
     ) -> Result<ContactCapacityEnclosureStep, ConductionError> {
         poll(cx, 0)?;

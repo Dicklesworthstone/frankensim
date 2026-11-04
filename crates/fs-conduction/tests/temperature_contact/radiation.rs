@@ -705,3 +705,203 @@ fn g4_capacity_live_contact_enclosure_refusal_preserves_history_and_retry() {
         assert_eq!(history, before);
     });
 }
+
+fn open_capacity_enclosure(cx: &Cx<'_>, mesh: &ConductionMesh)
+    -> fs_conduction::radiation::OpenDiffuseEnclosure {
+    use fs_conduction::radiation::{OpenDiffuseEnclosure, ViewFactorEvidence, ViewFactorTolerance};
+    OpenDiffuseEnclosure::new(cx, closed_capacity_enclosure(mesh).surfaces().to_vec(),
+        vec![vec![0.0, 0.25], vec![0.25, 0.0]],
+        ViewFactorEvidence::Analytic { geometry: "manufactured reciprocal open exchange".into() },
+        ViewFactorTolerance { row_sum_abs: 1e-12, reciprocity_rel: 1e-12 }).unwrap()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_open_capacity_physics(
+    cx: &Cx<'_>, engine: &BackwardEuler<'_>, problem: ConductionProblem<'_>,
+    contacts: &TemperatureContacts<'_, '_>, old: &[f64],
+    model: &fs_conduction::radiation::OpenDiffuseEnclosure, ambient: f64,
+    solved: &fs_conduction::interface::temperature::capacity::ContactCapacityEnclosureStep,
+    convection: bool, source_w: f64,
+) {
+    let dt = 0.35;
+    let t = &solved.conduction.temperature;
+    let current = contacts.evaluate(cx, problem.boundary, t).unwrap();
+    assert_eq!(current.states(), solved.physical_contacts.states());
+    let audit = engine.evaluate_prescribed_open_enclosure_endpoint(cx, problem,
+        Some(current.frozen_interfaces()), old, t, dt, step_config(), model, ambient,
+        AmbientRadiationConfig::default()).unwrap();
+    assert_eq!(audit.radiosity, solved.radiation.radiosity);
+    assert_eq!(audit.physical.residual_norm_j, solved.physical.residual_norm_j);
+    assert!(audit.physical.residual_norm_j <= coupling().residual_tolerance_j);
+    assert!(audit.physical.energy_residual_j.abs() <= step_config().energy_tolerance_j);
+    assert_eq!(solved.radiation.applied_heat_w.len(), 2, "only physical traces receive loads");
+    assert_eq!(audit.radiosity.net_outward_heat_w.len(), 3, "the bath keeps its own row");
+
+    // Independent two-by-two gray radiosity solve relative to the black bath.
+    // Surface area is 0.5 m2, epsilon=0.2, and mutual view factor is 0.25.
+    let means = [(t[0] + t[1] + t[3]) / 3.0, (t[4] + t[5] + t[7]) / 3.0];
+    let emission = means.map(|mean| 0.2 * STEFAN_BOLTZMANN_W_M2_K4
+        * (mean - ambient) * (mean + ambient) * (mean * mean + ambient * ambient));
+    let reflected = 0.8 * 0.25;
+    let radiosity = [(emission[0] + reflected * emission[1]) / (1.0 - reflected * reflected),
+        (emission[1] + reflected * emission[0]) / (1.0 - reflected * reflected)];
+    let heat = [0.5 * (radiosity[0] - 0.25 * radiosity[1]),
+        0.5 * (radiosity[1] - 0.25 * radiosity[0])];
+    let radiation: f64 = heat.iter().sum();
+    for (i, q) in heat.iter().enumerate() { near(audit.radiosity.net_outward_heat_w[i], *q, 1e-10); }
+    near(-audit.radiosity.net_outward_heat_w[2], radiation, 1e-10);
+    near(audit.physical.radiation_out_w, radiation, 1e-10);
+
+    // Assemble original conduction/contact and add physical surface watts
+    // directly, independently of the production shifted-boundary adapter.
+    let system = fs_conduction::assemble::assemble_operator_with_interfaces(cx,
+        problem.mesh, problem.boundary, problem.material, problem.source,
+        t, current.frozen_interfaces()).unwrap();
+    let mut spatial = fs_conduction::assemble::full_residual(&system, t);
+    for (vertices, q) in [([0, 1, 3], heat[0]), ([4, 5, 7], heat[1])] {
+        for vertex in vertices { spatial[vertex] += q / 3.0; }
+    }
+    let stored = t.iter().zip(old).enumerate().map(|(i, (&new, &old))|
+        if i < 4 { 10.0 * (new - old) / 24.0 } else { 20.0 * (new - old) / 24.0 })
+        .collect::<Vec<_>>();
+    let storage: f64 = stored.iter().sum();
+    let residual = spatial.iter().zip(&stored).enumerate()
+        .filter(|(i, _)| !problem.boundary.dirichlet().iter().any(|&(v, _)| v == *i))
+        .map(|(_, (&load, &storage))| (storage + dt * load).powi(2)).sum::<f64>().sqrt();
+    near(residual, audit.physical.residual_norm_j, 1e-10);
+    let reaction: f64 = problem.boundary.dirichlet().iter()
+        .map(|&(v, _)| spatial[v] + stored[v] / dt).sum();
+    near(reaction, audit.physical.dirichlet_in_w, 1e-10);
+    let convective = if convection { means[0] - 297.0 } else { 0.0 };
+    let neumann = 0.5 * (0.2 + if convection { 0.0 } else { -0.4 });
+    near(audit.physical.convective_out_w, convective, 1e-10);
+    near(audit.physical.neumann_out_w, neumann, 1e-12);
+    near(audit.physical.source_w, source_w, 1e-12);
+    near(audit.physical.stored_energy_change_j, storage, 1e-10);
+    near(storage, dt * (source_w + reaction - neumann - convective - radiation),
+        step_config().energy_tolerance_j);
+    assert!(radiation.abs() > 1.0, "a zero external radiation account would fail this balance");
+    assert_eq!(solved.radiation.solid_iterations, solved.nonlinear_updates);
+    assert_eq!(solved.radiation.krylov_iterations, solved.krylov_iterations);
+    assert!(solved.krylov_iterations <= solved.thermal_responses * step_config().linear.max_iterations);
+    assert!(solved.nonlinear_updates <= solved.thermal_responses * nonlinear().max_iterations);
+}
+
+#[test]
+fn g1_open_capacity_contact_keeps_storage_and_black_reservoir_heat_separate() {
+    context(&CancelGate::new_clock_free(), |cx| {
+        let mesh = mesh();
+        let engine = BackwardEuler::per_element(cx, &mesh, &[
+            VolumetricHeatCapacity::declared(10.0).unwrap(),
+            VolumetricHeatCapacity::declared(20.0).unwrap(),
+        ]).unwrap();
+        let model = open_capacity_enclosure(cx, &mesh);
+        let curve = card(false); let surface = surface_card();
+        let source = source(); let material = material(true); let history = old();
+        for convection in [false, true] {
+            let boundary = closed_capacity_boundary(&mesh, convection, None);
+            let curve_contacts = contacts(cx, &mesh, &boundary, &curve);
+            let surface_contacts = contacts(cx, &mesh, &boundary, &surface);
+            let problem = ConductionProblem { mesh: &mesh, boundary: &boundary,
+                material: &material, source: &source, element_materials: None };
+            for ambient in [290.0, 370.0] {
+                let newton = curve_contacts.advance_capacity_newton_with_open_enclosure_radiation(
+                    cx, &engine, problem, &history, 0.35, step_config(), nonlinear(), coupling(), 1,
+                    &model, ambient, AmbientRadiationConfig::default()).unwrap();
+                let picard = surface_contacts.advance_capacity_with_open_enclosure_radiation(
+                    cx, &engine, problem, &history, 0.35, step_config(), Some(nonlinear()), coupling(),
+                    &model, ambient, AmbientRadiationConfig::default()).unwrap();
+                assert_eq!(newton.thermal_responses, newton.radiation.iterations);
+                assert!(picard.thermal_responses > picard.radiation.iterations);
+                assert!(picard.thermal_responses <= coupling().max_iterations * picard.radiation.iterations);
+                assert_eq!(newton.physical.radiation_out_w.is_sign_positive(), ambient == 290.0);
+                for (&a, &b) in newton.conduction.temperature.iter().zip(&picard.conduction.temperature) {
+                    near(a, b, 2e-7);
+                }
+                check_open_capacity_physics(cx, &engine, problem, &curve_contacts, &history,
+                    &model, ambient, &newton, convection, 5.0);
+                check_open_capacity_physics(cx, &engine, problem, &surface_contacts, &history,
+                    &model, ambient, &picard, convection, 5.0);
+                if !convection && ambient == 290.0 {
+                    let fixed = engine.advance_prescribed_with_open_enclosure_radiation(
+                        cx, problem, Some(newton.physical_contacts.frozen_interfaces()), &history,
+                        0.35, step_config(), Some(nonlinear()), &model, ambient,
+                        AmbientRadiationConfig::default()).unwrap();
+                    for (&a, &b) in newton.conduction.temperature.iter().zip(&fixed.conduction.temperature) {
+                        near(a, b, 2e-7);
+                    }
+                }
+            }
+        }
+        assert_eq!(history, old());
+    });
+}
+
+#[test]
+fn g1_open_capacity_contact_keeps_prescribed_node_storage_and_radiation_reactions() {
+    context(&CancelGate::new_clock_free(), |cx| {
+        let mesh = mesh();
+        let engine = BackwardEuler::per_element(cx, &mesh, &[
+            VolumetricHeatCapacity::declared(10.0).unwrap(),
+            VolumetricHeatCapacity::declared(20.0).unwrap(),
+        ]).unwrap();
+        let model = open_capacity_enclosure(cx, &mesh);
+        let card = card(false); let material = material(true);
+        let source = ScalarField::Uniform(0.0); let history = [300.0; 8];
+        for bath in [290.0, 350.0] {
+            let boundary = closed_capacity_boundary(&mesh, false, Some(bath));
+            let contacts = contacts(cx, &mesh, &boundary, &card);
+            let problem = ConductionProblem { mesh: &mesh, boundary: &boundary,
+                material: &material, source: &source, element_materials: None };
+            let solved = contacts.advance_capacity_newton_with_open_enclosure_radiation(
+                cx, &engine, problem, &history, 0.35, step_config(), nonlinear(), coupling(), 1,
+                &model, 280.0, AmbientRadiationConfig::default()).unwrap();
+            for &(vertex, prescribed) in boundary.dirichlet() {
+                assert_eq!(solved.conduction.temperature[vertex], prescribed);
+            }
+            check_open_capacity_physics(cx, &engine, problem, &contacts, &history,
+                &model, 280.0, &solved, false, 0.0);
+        }
+        assert_eq!(history, [300.0; 8]);
+    });
+}
+
+#[test]
+fn g4_open_capacity_contact_refusals_keep_history_and_retry_unchanged() {
+    context(&CancelGate::new_clock_free(), |cx| {
+        let mesh = mesh(); let boundary = closed_capacity_boundary(&mesh, true, None);
+        let model = open_capacity_enclosure(cx, &mesh); let card = card(false);
+        let contacts = contacts(cx, &mesh, &boundary, &card);
+        let engine = BackwardEuler::per_element(cx, &mesh, &[
+            VolumetricHeatCapacity::declared(10.0).unwrap(),
+            VolumetricHeatCapacity::declared(20.0).unwrap(),
+        ]).unwrap();
+        let material = material(true); let source = source(); let history = old();
+        let problem = ConductionProblem { mesh: &mesh, boundary: &boundary,
+            material: &material, source: &source, element_materials: None };
+        let run = |cx: &Cx<'_>, ambient, radiation| contacts.advance_capacity_newton_with_open_enclosure_radiation(
+            cx, &engine, problem, &history, 0.35, step_config(), nonlinear(), coupling(), 1,
+            &model, ambient, radiation);
+        for invalid in [f64::NAN, f64::INFINITY, 0.0, -1.0] {
+            assert!(run(cx, invalid, AmbientRadiationConfig::default()).is_err());
+        }
+        assert!(run(cx, 290.0, AmbientRadiationConfig { max_iterations: 1,
+            temperature_tolerance_k: 1e6, ..Default::default() }).is_err());
+        assert!(run(cx, 290.0, AmbientRadiationConfig { max_iterations: usize::MAX, ..Default::default() }).is_err());
+        let outside = [400.0; 8];
+        assert!(contacts.advance_capacity_newton_with_open_enclosure_radiation(
+            cx, &engine, problem, &outside, 0.35, step_config(), nonlinear(), coupling(), 1,
+            &model, 290.0, AmbientRadiationConfig::default()).is_err());
+        assert_eq!(outside, [400.0; 8]);
+        let gate = CancelGate::new_clock_free(); gate.request();
+        context(&gate, |stopped| assert!(matches!(run(stopped, 290.0, AmbientRadiationConfig::default()),
+            Err(ConductionError::Cancelled { .. }))));
+        let retry = run(cx, 290.0, AmbientRadiationConfig::default()).unwrap();
+        let fresh = run(cx, 290.0, AmbientRadiationConfig::default()).unwrap();
+        assert_eq!(retry.conduction.temperature, fresh.conduction.temperature);
+        assert_eq!(retry.physical_contacts.states(), fresh.physical_contacts.states());
+        assert_eq!(retry.radiation.radiosity, fresh.radiation.radiosity);
+        assert_eq!(retry.thermal_responses, fresh.thermal_responses);
+        assert_eq!(history, old());
+    });
+}
