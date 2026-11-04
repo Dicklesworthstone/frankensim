@@ -28,9 +28,10 @@
 //! The contact child composes simultaneous mixed rigid/solid impact events and
 //! bounded geometry-admitted trajectories, including an explicitly first-order
 //! force/contact/kinetic-drift split for loaded contact.
-//! No evolving heat equation, plasticity, moving supports,
-//! fluid feedback, mixed incompressible formulation or continuous-in-time
-//! nonintersection claim is made.
+//! This P1 motion body supplies no evolving heat equation, plasticity, moving
+//! supports, fluid feedback, mixed incompressible formulation or continuous-time
+//! nonintersection claim. The same material binding can separately be borrowed
+//! by native P2/P1 mixed owners, including its held thermal reference.
 
 /// Native stationary gravity evaluated on the current material configuration.
 pub mod gravity;
@@ -40,6 +41,9 @@ pub mod thermal;
 
 /// Source-bound local waves through the original reference-deformation tangent.
 pub mod acoustic;
+
+/// Original thermal references in native mixed displacement/pressure solids.
+pub mod mixed;
 
 /// Power-conjugate point impulses on the original consistent reference mass.
 pub mod impulse;

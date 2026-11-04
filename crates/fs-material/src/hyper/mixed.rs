@@ -52,13 +52,18 @@ pub struct MixedPointState {
     pub remainder_potential_pa: f64,
     /// Physical bulk storage at the pressure-reconstructed volume, in Pa.
     pub bulk_stored_pa: f64,
-    /// Pressure-reconstructed volume `J(p)`; one for an exact constraint.
+    /// Pressure-reconstructed volume in the caller's reference. Native laws
+    /// report `J(p)` (one for an exact constraint); a held thermal reference
+    /// reports `Jth*J(p)` (the thermal volume for elastic incompressibility).
     pub bulk_volume_ratio: f64,
-    /// Pressure complementary potential, in Pa; zero for an exact constraint.
+    /// Pressure conjugate in the caller's reference, in Pa. Native exact
+    /// incompressibility gives zero; a held thermal reference additionally
+    /// carries the linear offset `p*(Jth-1)` without physical bulk storage.
     pub bulk_complementary_pa: f64,
     /// First Piola stress, row-major, in Pa.
     pub first_piola_pa: [f64; 9],
-    /// `dPi/dp = J(F)-J(p)`, dimensionless.
+    /// `dPi/dp`, dimensionless: native `J(F)-J(p)`, or
+    /// `J(F)-Jth*J(p)` after a held thermal-reference pullback.
     pub pressure_residual: f64,
     /// Actual trial volume `det(F)`; weak pressure equations need not make
     /// this equal to `bulk_volume_ratio` at each quadrature point.
@@ -74,7 +79,8 @@ pub struct MixedPointResponse {
     pub tangent_pa: [[f64; 9]; 9],
     /// Both `dP/dp` and `d(pressure_residual)/dF`, in row-major order.
     pub pressure_coupling: [f64; 9],
-    /// `d(pressure_residual)/dp=-dJ(p)/dp`, in Pa^-1.
+    /// `d(pressure_residual)/dp`, in Pa^-1. Native laws give `-dJ(p)/dp`;
+    /// an original-volume thermal pullback multiplies it by `Jth`.
     pub pressure_tangent_per_pa: f64,
 }
 

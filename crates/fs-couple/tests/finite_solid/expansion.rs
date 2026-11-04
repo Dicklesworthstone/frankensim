@@ -20,7 +20,7 @@ fn key(axis: usize) -> PropertyKey {
     PropertyKey::new(format!("engineering_length_change_{axis}"), Dims::NONE)
 }
 
-fn card(stretches: [f64; 3], source_axis: &str, stress_axis: bool) -> MaterialCard {
+pub(super) fn card(stretches: [f64; 3], source_axis: &str, stress_axis: bool) -> MaterialCard {
     let base = source_card(6.0, 1.0, false, false);
     let mut claims = base.claims().clone();
     // Nonzero fitted datum offsets ensure rebasing is a ratio of lengths,
@@ -107,7 +107,7 @@ fn frame(q: [[f64; 3]; 3]) -> ExpansionThermalFrame {
     }
 }
 
-fn bind_expansion(card: &MaterialCard, q: [[f64; 3]; 3], temperature: f64) -> FiniteSolidMaterial {
+pub(super) fn bind_expansion(card: &MaterialCard, q: [[f64; 3]; 3], temperature: f64) -> FiniteSolidMaterial {
     let thermal = ExpansionThermalReference::try_new(
         card,
         path(card, false, "T", point(300.0)),

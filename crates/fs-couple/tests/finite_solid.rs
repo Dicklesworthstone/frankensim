@@ -10,6 +10,8 @@ mod expansion;
 mod gravity;
 #[path = "finite_solid/impulse.rs"]
 mod impulse;
+#[path = "finite_solid/mixed.rs"]
+mod mixed;
 #[path = "finite_solid/pressure.rs"]
 mod pressure;
 #[path = "finite_solid/reference_density.rs"]
