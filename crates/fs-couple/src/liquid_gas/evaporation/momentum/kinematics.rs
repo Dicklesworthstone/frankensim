@@ -107,10 +107,11 @@ pub(super) fn advance_many(
 }
 
 pub(super) fn velocity(mass: f64, momentum: [f64; 3]) -> Option<[f64; 3]> {
+    if !mass.is_finite() || mass <= 0.0 {
+        return None;
+    }
     let result = momentum.map(|p| p / mass);
-    (mass.is_finite()
-        && mass > 0.0
-        && momentum.iter().chain(&result).all(|v| v.is_finite())
+    (momentum.iter().chain(&result).all(|v| v.is_finite())
         && !(0..3).any(|d| momentum[d] != 0.0 && result[d] == 0.0))
     .then_some(result)
 }
