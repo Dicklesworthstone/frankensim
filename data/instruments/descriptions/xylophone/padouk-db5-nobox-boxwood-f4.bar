@@ -1,0 +1,30 @@
+frankensim.bar-card.v1
+# Padouk Db5, the printed Table I bar, cut solved in the engine, eta read from Fig. 4, no box, printed boxwood mallet.
+name	padouk-db5-nobox-boxwood-f4
+source	Bar: A. Chaigne and V. Doutaut, Numerical simulations of xylophones. I, J. Acoust. Soc. Am. 101(1), 539-557 (1997), Table I p.544: Bar No. 5 (G4, 397 Hz), xylophone CONCORDE X4001, padouk, L 29.3 cm, b 3.7 cm, h 1.9 cm edge; E, density, gamma_B through the packs named below. Eta 3.86e-7 s is read by us from Fig. 4 of the same paper (alpha = 6.11 + 7.62e-6 f^2, Eq. 19), 4.22 times Table I's 9.16e-8; we cannot say why the two differ and they may not be the same bar. Ratios: USDA Wood Handbook FPL-GTR-282, Honduras mahogany, stand-in.
+note	NOT in the source: the undercut's shape on this note (solved here in the engine, a circular arc, reach 72.34 mm, middle 13.435 mm, so f1 sits at equal temperament and f2 = 3 f1; the printed bar itself is tuned about 1:4 at 397 Hz, Table II; the 1:3 target is from xylophone tuning practice in print, not from the recording). No resonator is in this render. Mallet: the printed boxwood row, 0.474 m/s, strike 18.2 cm, Table I and Fig. 9. Iowa's bars are not known to be padouk.
+length_m	0.293
+width_m	0.037
+thickness_m	0.019
+profile	arc
+profile_arc	0.4729600022461816	0.013435	0
+wood_density	data/matdb/seed-v1/padouk-bar-chaigne-doutaut1997/properties.tsv
+wood_youngs_longitudinal	data/matdb/seed-v1/padouk-bar-chaigne-doutaut1997/properties.tsv
+wood_ratios	data/matdb/seed-v1/mahogany-honduras-fpl-gtr282/properties.tsv
+mesh_counts	56	6	3
+mesh_rungs	1
+band_hz	7496.289
+windows	10
+strike_fraction	0.621160409556314
+receiver_m	0.08782827520170149	0.2	1
+bem_stride	1
+gas	crates/fs-couple/examples/dry-air-20c.gas
+loss	data/instruments/descriptions/bars/padouk-loss-fig4curve-chaigne-doutaut1997.tsv
+mallet_contact_pack	contact-boxwood-mallet-on-padouk-bar-chaigne-doutaut1997
+mallet_contact	data/matdb/seed-v1/contact-boxwood-mallet-on-padouk-bar-chaigne-doutaut1997/contact.tsv
+mallet_properties	data/matdb/seed-v1/mallet-boxwood-padouk-bar-chaigne-doutaut1997/properties.tsv
+mallet_speed_m_s	0.474
+duration_s	4.0
+substeps	32
+rate_hz	48000
+full_scale_pa	0.5
