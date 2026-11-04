@@ -85,7 +85,7 @@ impl TwoFluidChannel {
         }
         let n = self.cells();
         force.validate(n + 1, &self.material, cancelled)?;
-        let before = energy(&self.accepted, self.cell_volume, cancelled)?;
+        let before = self.energy_with_profile(false, cancelled)?;
         for i in 0..=n {
             if i % 128 == 0 {
                 poll(cancelled)?;
@@ -106,8 +106,11 @@ impl TwoFluidChannel {
             self.pending[mode].faces[0] = port_modes[0][mode];
             self.pending[mode].faces[n] = port_modes[1][mode];
         }
+        if let Some(profile) = &mut self.normal_profile {
+            profile.copy_pending(cancelled)?;
+        }
         self.friction_half_step(friction, dt / 2.0, cancelled)?;
-        let (source_work, residual, wall_impulse) = if self.normal_wall_rate_s_inv > 0.0 {
+        let (source_work, residual, wall_impulse) = if self.uses_viscous_wave_operator() {
             // Normal drag, authored force and the midpoint wave gradient share
             // one exact face evolution. Splitting large force kicks around
             // stiff wall drag would destroy forced equilibrium/fourth sound.
@@ -150,7 +153,7 @@ impl TwoFluidChannel {
         }
         self.friction_half_step(friction, dt / 2.0, cancelled)?;
         self.validate_pending_with_limits(physical_limits, cancelled)?;
-        let after = energy(&self.pending, self.cell_volume, cancelled)?;
+        let after = self.energy_with_profile(true, cancelled)?;
         let mut heat = 0.0;
         let mut correction = 0.0;
         let mut viscous_heat = 0.0;
@@ -307,6 +310,16 @@ impl TwoFluidChannel {
             let v = self.material.barycentric_velocity_m_s(change.velocity)?[0];
             let w = self.material.counterflow_velocity_m_s(change.velocity)?[0];
             let next = self.modes.face_to_modes(v, w);
+            if let Some(profile) = &mut self.normal_profile {
+                // This authored closure acts on the section mean. Its uniform
+                // acceleration changes all normal modes equally, preserving
+                // their deviations and excess kinetic energy. A local radial
+                // vortex-drag law would require a different physical model.
+                profile.lift_mean(
+                    i,
+                    change.velocity.normal_m_s[0] - sample.normal_velocity_m_s,
+                );
+            }
             self.pending[0].faces[i] = next[0];
             self.pending[1].faces[i] = next[1];
             let heat = change.dissipated_energy_j_m3 * self.cell_volume * 0.5;

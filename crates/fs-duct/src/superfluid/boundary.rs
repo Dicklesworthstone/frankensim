@@ -138,7 +138,7 @@ impl TwoFluidChannel {
             // Prescribing outward Q subtracts lambda*k_Q*Q from the cell
             // RHS. Midpoint temperature contributes half the solved response.
             // Energy conjugacy makes k_Q*temperature_column nonnegative.
-            let multiplier = if self.normal_wall_rate_s_inv > 0.0 {
+            let multiplier = if self.uses_viscous_wave_operator() {
                 // The wall rotates the cell operators. Energy conjugacy in
                 // ANY orthonormal cell basis gives C*k_Q = theta/(A*T0), so
                 // the response is a positive square with the same factors
@@ -394,7 +394,7 @@ impl TwoFluidChannel {
 
     fn impermeable_response_multipliers(&self, dt: f64) -> Result<[f64; 2], ChannelError> {
         let bulk = self.modes.face_to_modes(1.0, 0.0);
-        if self.normal_wall_rate_s_inv == 0.0 {
+        if !self.uses_viscous_wave_operator() {
             // Retain the original zero-wall response arithmetic.
             return Ok([0, 1].map(|m| {
                 let c = self.modes.speed[m];

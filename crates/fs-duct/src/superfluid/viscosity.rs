@@ -1,15 +1,353 @@
-//! Exponentially fitted normal-wall drag on the original staggered wave owner.
+//! Exponentially fitted normal-wall dynamics on the original staggered wave owner.
 //!
 //! In energy coordinates, x' = -C div(y), y' = -C grad(x) - R y + f.
 //! R damps only the normal component. Freeze the gradient at midpoint x,
 //! integrate each face exactly, and use its interval mean in the cell equation.
 //! Eliminating faces leaves two scalar tridiagonals after a 2x2 rotation.
 //! This retains the clamped-normal fourth-sound limit without a drag time-step
-//! restriction. The authored Darcy closure still assumes a quasisteady
-//! transverse velocity profile; this is not a resolved viscous boundary layer.
+//! restriction. Scalar Darcy drag assumes a quasisteady transverse profile.
+//! The optional Stokes spectrum instead stores positive-weight normal modes;
+//! their weighted phi2 changes only the same 2x2 cell operator, while their
+//! history and extra kinetic energy remain in the original channel owner.
 
 use super::*;
-use fs_math::det;
+use fs_material::superfluid::{
+    NormalViscousFactors, NormalViscousSpectrum, PreparedNormalViscousSpectrum,
+};
+
+/// Interior-face transverse velocities, scaled by sqrt(rho_n). The original
+/// face field stores their weighted section mean. Keeping independent accepted
+/// and pending memory makes response probes and rejected heat callbacks atomic.
+#[derive(Debug)]
+pub(super) struct NormalProfileMemory {
+    pub spectrum: NormalViscousSpectrum,
+    accepted: Vec<f64>,
+    pending: Vec<f64>,
+    mean_history: Vec<f64>,
+    density_root: f64,
+    prepared: Option<(f64, PreparedNormalViscousSpectrum)>,
+}
+
+impl NormalProfileMemory {
+    pub fn new(spectrum: NormalViscousSpectrum, cells: usize) -> Result<Self, ChannelError> {
+        let count = spectrum.modes().len();
+        let entries = (cells - 1)
+            .checked_mul(count)
+            .filter(|n| *n <= isize::MAX as usize / core::mem::size_of::<f64>())
+            .ok_or(ChannelError::Capacity)?;
+        Ok(Self {
+            spectrum,
+            accepted: filled(entries)?,
+            pending: filled(entries)?,
+            mean_history: filled(cells - 1)?,
+            density_root: spectrum.material().normal_density_kg_m3().sqrt(),
+            prepared: None,
+        })
+    }
+
+    pub fn initialize_pending(
+        &mut self,
+        normal: &[f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), ChannelError> {
+        let count = self.spectrum.modes().len();
+        for (face, row) in self.pending.chunks_exact_mut(count).enumerate() {
+            if face % 128 == 0 {
+                poll(cancelled)?;
+            }
+            row.fill(self.density_root * normal[face + 1]);
+        }
+        poll(cancelled)
+    }
+
+    pub fn initialize_steady_pending(
+        &mut self,
+        fields: &[Field; 2],
+        modes: Modes,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), ChannelError> {
+        let coefficients = self.spectrum.modes();
+        if coefficients
+            .iter()
+            .any(|mode| !positive(mode.decay_rate_s_inv))
+        {
+            return Err(ChannelError::Invalid(
+                "steady normal profile requires positive viscous relaxation rates",
+            ));
+        }
+        let slowest = coefficients
+            .iter()
+            .map(|mode| mode.decay_rate_s_inv)
+            .fold(f64::INFINITY, f64::min);
+        let mut normalization = 0.0;
+        let mut correction = 0.0;
+        for mode in coefficients {
+            accumulate(
+                &mut normalization,
+                &mut correction,
+                mode.weight * (slowest / mode.decay_rate_s_inv),
+            );
+        }
+        if !positive(normalization) {
+            return Err(ChannelError::Invalid(
+                "steady normal profile normalization is unresolved",
+            ));
+        }
+        for (face, row) in self
+            .pending
+            .chunks_exact_mut(coefficients.len())
+            .enumerate()
+        {
+            if face % 128 == 0 {
+                poll(cancelled)?;
+            }
+            let velocity = modes.face(
+                self.spectrum.material(),
+                [fields[0].faces[face + 1], fields[1].faces[face + 1]],
+            );
+            let mean = self.density_root * velocity.normal_velocity_m_s;
+            for (value, mode) in row.iter_mut().zip(coefficients) {
+                *value = mean * ((slowest / mode.decay_rate_s_inv) / normalization);
+            }
+        }
+        poll(cancelled)
+    }
+
+    pub fn copy_pending(
+        &mut self,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), ChannelError> {
+        for (accepted, pending) in self.accepted.chunks(128).zip(self.pending.chunks_mut(128)) {
+            poll(cancelled)?;
+            pending.copy_from_slice(accepted);
+        }
+        Ok(())
+    }
+
+    pub fn publish(&mut self) {
+        core::mem::swap(&mut self.accepted, &mut self.pending);
+    }
+
+    pub fn lift_mean(&mut self, face: usize, delta_normal_m_s: f64) {
+        let count = self.spectrum.modes().len();
+        let offset = (face - 1) * count;
+        let increment = self.density_root * delta_normal_m_s;
+        for value in &mut self.pending[offset..offset + count] {
+            *value += increment;
+        }
+    }
+
+    pub fn mode_velocity(&self, face: usize, mode: usize) -> Option<f64> {
+        let count = self.spectrum.modes().len();
+        if face == 0 || face > self.mean_history.len() || mode >= count {
+            return None;
+        }
+        Some(self.accepted[(face - 1) * count + mode] / self.density_root)
+    }
+
+    pub fn excess_energy(
+        &self,
+        pending: bool,
+        volume: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<f64, ChannelError> {
+        let data = if pending {
+            &self.pending
+        } else {
+            &self.accepted
+        };
+        let coefficients = self.spectrum.modes();
+        let mut total = 0.0;
+        let mut correction = 0.0;
+        for (face, row) in data.chunks_exact(coefficients.len()).enumerate() {
+            if face % 128 == 0 {
+                poll(cancelled)?;
+            }
+            // Center about one mode before taking the weighted mean. Uniform
+            // states have exactly zero variance, even for a large bulk speed.
+            let anchor = row[0];
+            let mut mean_offset = 0.0;
+            let mut mean_correction = 0.0;
+            for (&value, mode) in row.iter().zip(coefficients) {
+                accumulate(
+                    &mut mean_offset,
+                    &mut mean_correction,
+                    mode.weight * (value - anchor),
+                );
+            }
+            for (&value, mode) in row.iter().zip(coefficients) {
+                let deviation = (value - anchor) - mean_offset;
+                accumulate(
+                    &mut total,
+                    &mut correction,
+                    (0.5 * volume * mode.weight * deviation) * deviation,
+                );
+            }
+        }
+        if total.is_finite() && total >= 0.0 {
+            Ok(total)
+        } else {
+            Err(ChannelError::Invalid(
+                "normal profile kinetic energy is not representable",
+            ))
+        }
+    }
+
+    pub fn validate_pending(
+        &self,
+        fields: &[Field; 2],
+        modes: Modes,
+        speed_limit: f64,
+        physical_limits: bool,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), ChannelError> {
+        let coefficients = self.spectrum.modes();
+        for (face, row) in self.pending.chunks_exact(coefficients.len()).enumerate() {
+            if face % 128 == 0 {
+                poll(cancelled)?;
+            }
+            let mut mean = 0.0;
+            let mut mean_correction = 0.0;
+            let mut scale = 0.0;
+            let mut speed_squared = 0.0;
+            for (&value, mode) in row.iter().zip(coefficients) {
+                let velocity = value / self.density_root;
+                accumulate(&mut mean, &mut mean_correction, mode.weight * value);
+                scale += mode.weight * value.abs();
+                speed_squared += (mode.weight * velocity) * velocity;
+            }
+            let physical = modes.face(
+                self.spectrum.material(),
+                [fields[0].faces[face + 1], fields[1].faces[face + 1]],
+            );
+            let target = self.density_root * physical.normal_velocity_m_s;
+            // A clamped normal mean may vanish by cancellation while the
+            // superfluid remains mobile. Its reconstruction error is set by
+            // the uncancelled kinetic coordinates, not by tiny v_n alone.
+            scale +=
+                target.abs() + fields[0].faces[face + 1].abs() + fields[1].faces[face + 1].abs();
+            if ![mean, scale, speed_squared, target]
+                .into_iter()
+                .all(f64::is_finite)
+                || speed_squared < 0.0
+                || (physical_limits && speed_squared.sqrt() > speed_limit)
+            {
+                return Err(ChannelError::Domain {
+                    field: "normal profile RMS speed",
+                    index: face + 1,
+                });
+            }
+            if (mean - target).abs() > 16384.0 * f64::EPSILON * scale {
+                return Err(ChannelError::Domain {
+                    field: "normal profile mean",
+                    index: face + 1,
+                });
+            }
+        }
+        poll(cancelled)
+    }
+
+    fn prepare(&mut self, dt: f64) -> Result<(), ChannelError> {
+        if self.prepared.as_ref().is_none_or(|(step, _)| *step != dt) {
+            self.prepared = Some((dt, self.spectrum.prepare(dt)?));
+        }
+        Ok(())
+    }
+
+    fn prepared(&self, dt: f64) -> Result<&PreparedNormalViscousSpectrum, ChannelError> {
+        self.prepared
+            .as_ref()
+            .filter(|(step, _)| *step == dt)
+            .map(|(_, factors)| factors)
+            .ok_or(ChannelError::Invalid(
+                "normal profile factors are not prepared for this interval",
+            ))
+    }
+
+    fn phi2(&self, dt: f64) -> Result<f64, ChannelError> {
+        let mut mean = 0.0;
+        let mut correction = 0.0;
+        for mode in self.prepared(dt)?.modes() {
+            accumulate(&mut mean, &mut correction, mode.weight * mode.factors.phi2);
+        }
+        Ok(mean)
+    }
+
+    fn prepare_history(
+        &mut self,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), ChannelError> {
+        let prepared = &self
+            .prepared
+            .as_ref()
+            .ok_or(ChannelError::Invalid("normal profile factors are missing"))?
+            .1;
+        let coefficients = prepared.modes();
+        for (face, (row, history)) in self
+            .pending
+            .chunks_exact(coefficients.len())
+            .zip(&mut self.mean_history)
+            .enumerate()
+        {
+            if face % 128 == 0 {
+                poll(cancelled)?;
+            }
+            *history = 0.0;
+            let mut correction = 0.0;
+            for (&value, mode) in row.iter().zip(coefficients) {
+                accumulate(
+                    history,
+                    &mut correction,
+                    mode.weight * mode.factors.phi1 * value,
+                );
+            }
+        }
+        poll(cancelled)
+    }
+
+    // Next mean, interval mean, heat density, signed impulse loss in normalized
+    // coordinates, and its uncancelled scale. All per-mode factors are prepared
+    // before entering the spatial loops.
+    fn advance_face(&mut self, face: usize, increment: f64) -> Result<[f64; 5], ChannelError> {
+        let prepared = &self
+            .prepared
+            .as_ref()
+            .ok_or(ChannelError::Invalid("normal profile factors are missing"))?
+            .1;
+        let coefficients = prepared.modes();
+        let offset = (face - 1) * coefficients.len();
+        let row = &mut self.pending[offset..offset + coefficients.len()];
+        let mut totals = [0.0; 5];
+        let mut corrections = [0.0; 5];
+        for (value, mode) in row.iter_mut().zip(coefficients) {
+            let f = mode.factors;
+            let next = f.decay * *value + f.phi1 * increment;
+            let mean = f.phi1 * *value + f.phi2 * increment;
+            let first = f.heat_initial_root * (*value + f.heat_shift * increment);
+            let second = f.heat_forced_root * increment;
+            let heat = (mode.weight * first) * first + (mode.weight * second) * second;
+            let loss = mode.weight * (f.loss * *value + f.drag_forced * increment);
+            let values = [
+                mode.weight * next,
+                mode.weight * mean,
+                heat,
+                loss,
+                loss.abs(),
+            ];
+            if !values.into_iter().all(f64::is_finite) || !next.is_finite() {
+                return Err(ChannelError::Domain {
+                    field: "normal profile update",
+                    index: face,
+                });
+            }
+            for i in 0..5 {
+                accumulate(&mut totals[i], &mut corrections[i], values[i]);
+            }
+            *value = next;
+        }
+        Ok(totals)
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct ViscousWaveChange {
@@ -63,62 +401,18 @@ impl ViscousOperator {
         let lambda = channel.modes.speed.map(|c| c * dt / channel.dx);
         let normal_flux = [lambda[0] * normal[0], lambda[1] * normal[1]];
         let superfluid_flux = [lambda[0] * superfluid[0], lambda[1] * superfluid[1]];
-        let s = channel.normal_wall_rate_s_inv * dt;
-        let decay = det::exp(-s);
-        let loss = -det::expm1(-s);
-        let (phi1, phi2, drag_forced, heat_shift, heat_forced) = if s < 0.125 {
-            // phi2(-s) = 1/2 - s/6 + s^2/24 - ...
-            // Evaluate it before phi1 so the small drag impulse never comes
-            // from subtracting two nearly equal unit coefficients.
-            let mut term = 0.5;
-            let mut phi2 = term;
-            for denominator in 3..=13 {
-                term *= -s / f64::from(denominator);
-                phi2 += term;
-            }
-            let drag_forced = s * phi2;
-            let square = s * s;
-            let shift = 0.5
-                + square
-                    * (-1.0 / 24.0
-                        + square
-                            * (1.0 / 240.0
-                                + square
-                                    * (-17.0 / 40320.0
-                                        + square
-                                            * (31.0 / 725760.0 - square * 691.0 / 159667200.0))));
-            let heat_forced = s
-                * (1.0 / 12.0
-                    + square
-                        * (-1.0 / 120.0
-                            + square
-                                * (17.0 / 20160.0
-                                    + square
-                                        * (-31.0 / 362880.0
-                                            + square
-                                                * (691.0 / 79833600.0
-                                                    - square * 5461.0 / 6227020800.0)))));
-            (1.0 - drag_forced, phi2, drag_forced, shift, heat_forced)
-        } else {
-            // The reciprocal ordering also handles an overflowed rate*dt:
-            // its exponentially small transient is already unrepresentable.
-            let inverse = if s.is_finite() {
-                1.0 / s
-            } else {
-                (1.0 / channel.normal_wall_rate_s_inv) / dt
-            };
-            let phi1 = loss * inverse;
-            let drag_forced = 1.0 - phi1;
-            let shift = det::tanh(0.5 * s) * inverse;
-            (
-                phi1,
-                drag_forced * inverse,
-                drag_forced,
-                shift,
-                (1.0 - 2.0 * shift) * inverse,
-            )
+        let factors = NormalViscousFactors::try_new(channel.normal_wall_rate_s_inv, dt)?;
+        let decay = factors.decay;
+        let loss = factors.loss;
+        let phi1 = factors.phi1;
+        let phi2 = match &channel.normal_profile {
+            Some(profile) => profile.phi2(dt)?,
+            None => factors.phi2,
         };
-        let heat_initial = -0.5 * det::expm1(-2.0 * s);
+        let drag_forced = factors.drag_forced;
+        let heat_initial_root = factors.heat_initial_root;
+        let heat_shift = factors.heat_shift;
+        let heat_forced_root = factors.heat_forced_root;
 
         // This dimensionless matrix is bounded by the admitted Courant step;
         // physical sound speeds need not be squared to find its rotation.
@@ -164,17 +458,17 @@ impl ViscousOperator {
                 phi1,
                 phi2,
                 drag_forced,
-                heat_initial,
+                heat_initial_root,
                 heat_shift,
-                heat_forced,
+                heat_forced_root,
                 r[0],
                 r[1],
                 cross,
             ]
             .into_iter()
             .all(f64::is_finite)
-            || heat_initial < 0.0
-            || heat_forced < 0.0
+            || heat_initial_root < 0.0
+            || heat_forced_root < 0.0
             || cross.abs() > 1024.0 * f64::EPSILON * (diagonal[0] + diagonal[1])
         {
             return Err(ChannelError::Invalid(
@@ -198,9 +492,9 @@ impl ViscousOperator {
             phi1,
             phi2,
             drag_forced,
-            heat_initial_root: heat_initial.sqrt(),
+            heat_initial_root,
             heat_shift,
-            heat_forced_root: heat_forced.sqrt(),
+            heat_forced_root,
         })
     }
 
@@ -228,6 +522,7 @@ impl ViscousOperator {
     fn base_flux(
         &self,
         pending: &[Field; 2],
+        profile: Option<&NormalProfileMemory>,
         mode: usize,
         face: usize,
         dt: f64,
@@ -242,14 +537,18 @@ impl ViscousOperator {
         }
         let old = self.components(y);
         let body = self.force_increment(force, face, dt);
-        self.normal_rotated_flux[mode] * (self.phi1 * old[0] + self.phi2 * body[0])
+        let normal_history = match profile {
+            Some(profile) => profile.mean_history[face - 1],
+            None => self.phi1 * old[0],
+        };
+        self.normal_rotated_flux[mode] * (normal_history + self.phi2 * body[0])
             + self.superfluid_rotated_flux[mode] * (old[1] + 0.5 * body[1])
     }
 }
 
 impl TwoFluidChannel {
     pub(super) fn wave_cell_rotation(&self, dt: f64) -> Result<[[f64; 2]; 2], ChannelError> {
-        if self.normal_wall_rate_s_inv == 0.0 {
+        if !self.uses_viscous_wave_operator() {
             Ok([[1.0, 0.0], [0.0, 1.0]])
         } else {
             Ok(ViscousOperator::new(self, dt)?.cell_rows)
@@ -262,6 +561,10 @@ impl TwoFluidChannel {
         force: BodyForce<'_>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<ViscousWaveChange, ChannelError> {
+        if let Some(profile) = &mut self.normal_profile {
+            profile.prepare(dt)?;
+            profile.prepare_history(cancelled)?;
+        }
         let operator = ViscousOperator::new(self, dt)?;
         let n = self.cells();
         let mut residual: f64 = 0.0;
@@ -272,7 +575,14 @@ impl TwoFluidChannel {
             let r = operator.r[mode];
             let work = &mut self.workspace[mode];
             super::step::factor_midpoint(work, r, dt, cancelled)?;
-            let mut left_flux = operator.base_flux(&self.pending, mode, 0, dt, force);
+            let mut left_flux = operator.base_flux(
+                &self.pending,
+                self.normal_profile.as_ref(),
+                mode,
+                0,
+                dt,
+                force,
+            );
             for i in 0..n {
                 if i % 128 == 0 {
                     poll(cancelled)?;
@@ -285,7 +595,14 @@ impl TwoFluidChannel {
                 if i + 1 < n {
                     laplacian += old(i + 1) - center;
                 }
-                let right_flux = operator.base_flux(&self.pending, mode, i + 1, dt, force);
+                let right_flux = operator.base_flux(
+                    &self.pending,
+                    self.normal_profile.as_ref(),
+                    mode,
+                    i + 1,
+                    dt,
+                    force,
+                );
                 work.rhs[i] = center + r * laplacian - (right_flux - left_flux);
                 left_flux = right_flux;
             }
@@ -351,27 +668,30 @@ impl TwoFluidChannel {
                 body[0] - dot(operator.normal_flux, gradient),
                 body[1] - dot(operator.superfluid_flux, gradient),
             ];
-            let next = [
-                operator.decay * old[0] + operator.phi1 * increment[0],
-                old[1] + increment[1],
-            ];
-            let mean = [
-                operator.phi1 * old[0] + operator.phi2 * increment[0],
-                old[1] + 0.5 * increment[1],
-            ];
+            let normal = if let Some(profile) = &mut self.normal_profile {
+                profile.advance_face(i, increment[0])?
+            } else {
+                // The material owner supplies the same positive two-square
+                // heat integral for the scalar Darcy closure and every
+                // transverse Stokes mode. No kinetic-store subtraction.
+                let first =
+                    operator.heat_initial_root * (old[0] + operator.heat_shift * increment[0]);
+                let second = operator.heat_forced_root * increment[0];
+                let loss = operator.loss * old[0] + operator.drag_forced * increment[0];
+                [
+                    operator.decay * old[0] + operator.phi1 * increment[0],
+                    operator.phi1 * old[0] + operator.phi2 * increment[0],
+                    first * first + second * second,
+                    loss,
+                    loss.abs(),
+                ]
+            };
+            let next = [normal[0], old[1] + increment[1]];
+            let mean = [normal[1], old[1] + 0.5 * increment[1]];
             let y = [0, 1].map(|m| operator.normal[m] * next[0] + operator.superfluid[m] * next[1]);
-            // For z'=-rate*z+g, s=rate*dt, w=dt*g, t=tanh(s/2):
-            // integral(rate*z^2 dt) =
-            // (1-exp(-2s))/2 * (z0+t*w/s)^2 + (s-2t)*w^2/s^2.
-            // This positive two-square form avoids subtracting kinetic stores
-            // and remains accurate both for tiny drag and forced stiff flow.
-            let first = operator.heat_initial_root * (old[0] + operator.heat_shift * increment[0]);
-            let second = operator.heat_forced_root * increment[0];
-            let heat = self.cell_volume * (first * first + second * second);
+            let heat = self.cell_volume * normal[2];
             let work = self.cell_volume * dot(body, mean);
-            let impulse = -self.cell_volume
-                * operator.density_root[0]
-                * (operator.loss * old[0] + operator.drag_forced * increment[0]);
+            let impulse = -self.cell_volume * operator.density_root[0] * normal[3];
             if ![y[0], y[1], heat, work, impulse]
                 .into_iter()
                 .all(f64::is_finite)
@@ -387,7 +707,7 @@ impl TwoFluidChannel {
             self.pending_viscous_heat_j[i] += 0.5 * heat;
             accumulate(&mut body_work, &mut work_correction, work);
             accumulate(&mut wall_impulse, &mut impulse_correction, impulse);
-            impulse_scale += impulse.abs();
+            impulse_scale += self.cell_volume * operator.density_root[0] * normal[4];
         }
         poll(cancelled)?;
         if ![body_work, wall_impulse, impulse_scale]

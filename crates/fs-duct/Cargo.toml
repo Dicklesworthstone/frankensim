@@ -68,3 +68,7 @@ required-features = ["superfluid"]
 [[test]]
 name = "superfluid_viscosity"
 required-features = ["superfluid"]
+
+[[test]]
+name = "superfluid_normal_profile"
+required-features = ["superfluid"]

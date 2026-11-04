@@ -14,21 +14,25 @@
 //! Each step checks the original equations, physical limits and energy balance
 //! before publishing. Cancellation polls are bounded by 128 cells.
 //!
-//! Explicit mutual friction uses exact local material updates in a symmetric
-//! split. Optional normal-fluid wall viscosity uses an exponentially fitted
-//! wave/source step, retaining the clamped-normal fourth-sound limit without
-//! resolving the fast wall-relaxation time. Both losses are exported as heat
+//! Explicit section-mean mutual friction uses exact material updates in a
+//! symmetric split. Optional normal-fluid wall viscosity uses an exponentially
+//! fitted wave/source step, retaining the clamped-normal fourth-sound limit
+//! without resolving the fast wall-relaxation time. A circular/slit Stokes
+//! spectrum can retain unsteady transverse normal-profile memory and its
+//! additional kinetic energy. Both losses are exported as heat
 //! once; they are not injected into the linear temperature perturbation.
 //! Reported storage is wave availability, not absolute internal energy.
 //! The boundary thermal wave work is `T' q/T0`, distinct from transported heat.
-//! The authored wall permeability is a quasisteady laminar closure. Nonlinear
-//! heating/phase feedback, vortex geometry/evolution, critical velocities,
-//! resolved oscillatory boundary layers, longitudinal/second viscosities,
-//! Kapitza resistance and arbitrary geometry are outside this linear model.
+//! The scalar permeability option is quasisteady; the spectral option resolves
+//! an authored number of transverse laminar modes with an explicit passive
+//! high-mode approximation. Neither includes local radial vortex friction,
+//! nonlinear heating/phase feedback, vortex geometry/evolution, critical
+//! velocities, longitudinal/second viscosities, Kapitza resistance, entrance
+//! effects or arbitrary transverse geometry.
 
 use fs_la::tridiagonal::{TridiagonalError, TridiagonalWorkspace};
 use fs_material::MaterialError;
-use fs_material::superfluid::{NormalViscousWall, TwoFluidState};
+use fs_material::superfluid::{NormalViscousSpectrum, NormalViscousWall, TwoFluidState};
 
 mod boundary;
 mod modes;
@@ -96,6 +100,8 @@ impl<E: std::error::Error + 'static> std::error::Error for HeatStepError<E> {}
 pub struct LinearizationLimits {
     pub max_pressure_perturbation_pa: f64,
     pub max_temperature_perturbation_k: f64,
+    /// Bounds component section means and, when configured, normal-profile RMS.
+    /// It is not a claim about a resolved local critical velocity at the wall.
     pub max_component_speed_m_s: f64,
 }
 
@@ -147,7 +153,10 @@ impl BoundaryVelocities {
     };
 }
 
-/// Explicit local counterflow drag. No vortex density or coefficient is inferred.
+/// Explicit section-mean counterflow drag. No vortex density or coefficient is inferred.
+/// With a transverse normal profile, its uniform normal acceleration changes
+/// every modal velocity equally and leaves profile deviations unchanged. This
+/// does not assert a spatially resolved radial vortex-drag law.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum MutualFriction {
     #[default]
@@ -172,6 +181,7 @@ pub enum MutualFriction {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ChannelStep {
     pub time_s: f64,
+    /// Includes the positive excess kinetic energy of any transverse profile.
     pub wave_energy_before_j: f64,
     pub wave_energy_after_j: f64,
     pub boundary_wave_work_j: f64,
@@ -259,6 +269,7 @@ pub struct TwoFluidChannel {
     material: TwoFluidState,
     normal_wall: Option<NormalViscousWall>,
     normal_wall_rate_s_inv: f64,
+    normal_profile: Option<viscosity::NormalProfileMemory>,
     length_m: f64,
     area_m2: f64,
     dx: f64,
@@ -321,6 +332,7 @@ impl TwoFluidChannel {
             material,
             normal_wall: None,
             normal_wall_rate_s_inv: 0.0,
+            normal_profile: None,
             length_m,
             area_m2,
             dx,
@@ -363,9 +375,42 @@ impl TwoFluidChannel {
         Ok(channel)
     }
 
+    /// Create a channel with unsteady transverse normal-flow memory.
+    ///
+    /// The supplied circular/slit spectrum retains 1..=32 exact Stokes modes
+    /// and one positive high-mode approximation. It preserves the total normal
+    /// inertia and steady Poiseuille resistance while resolving the selected
+    /// relaxation times. The spectrum and channel must share the SAME frozen
+    /// material. Area is the total fluid area; parallel identical passages may
+    /// share one spectrum without silently introducing a porous-volume factor.
+    ///
+    /// All profile memory, wall heat and wall impulse belong to the interior
+    /// dual volumes. Endpoint half-cell dynamics remain the boundary owner's
+    /// responsibility. No step allocates; storage is O(cells * modes), and the
+    /// longitudinal wave solve still uses two original scalar tridiagonals.
+    pub fn try_new_with_normal_profile(
+        material: TwoFluidState,
+        length_m: f64,
+        area_m2: f64,
+        cells: usize,
+        limits: LinearizationLimits,
+        spectrum: NormalViscousSpectrum,
+    ) -> Result<Self, ChannelError> {
+        if material != *spectrum.material() {
+            return Err(ChannelError::Invalid(
+                "normal profile and channel require the same frozen material",
+            ));
+        }
+        let mut channel = Self::try_new(material, length_m, area_m2, cells, limits)?;
+        channel.normal_profile = Some(viscosity::NormalProfileMemory::new(spectrum, cells)?);
+        Ok(channel)
+    }
+
     /// Initialize physical perturbations and both component velocities.
     /// There are N cell values and N+1 face values. Allowed only before stepping.
-    /// Refusal/cancellation leaves the original fields intact.
+    /// A configured normal profile starts with every modal velocity equal to
+    /// the authored section mean: there is no initial excess profile energy.
+    /// Refusal/cancellation leaves the original fields and profile intact.
     pub fn initialize(
         &mut self,
         pressure_pa: &[f64],
@@ -402,18 +447,88 @@ impl TwoFluidChannel {
             self.pending[0].faces[i] = value[0];
             self.pending[1].faces[i] = value[1];
         }
+        if let Some(profile) = &mut self.normal_profile {
+            profile.initialize_pending(normal_m_s, &mut cancelled)?;
+        }
         self.validate_pending(&mut cancelled)?;
-        energy(&self.pending, self.cell_volume, &mut cancelled)?;
+        self.energy_with_profile(true, &mut cancelled)?;
         poll(&mut cancelled)?;
         core::mem::swap(&mut self.accepted, &mut self.pending);
+        if let Some(profile) = &mut self.normal_profile {
+            profile.publish();
+        }
+        Ok(())
+    }
+
+    /// Seed the normal modes with their steady Poiseuille shape before stepping.
+    ///
+    /// The authored mean velocity, pressure, temperature and superfluid
+    /// velocity are preserved. Modes are proportional to inverse relaxation
+    /// rate, normalized to keep their weighted mean. Their extra kinetic
+    /// energy is admitted explicitly. Every rate must be positive; a zero-
+    /// viscosity spectrum has no selected steady viscous profile. Cancellation
+    /// or a velocity/energy refusal leaves accepted memory and fields intact.
+    pub fn initialize_normal_profile_steady(
+        &mut self,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(), ChannelError> {
+        poll(&mut cancelled)?;
+        if self.time_s != 0.0 {
+            return Err(ChannelError::Invalid(
+                "steady normal profile can only be initialized before stepping",
+            ));
+        }
+        let speed_limit = self.profile_speed_limit();
+        let profile = self.normal_profile.as_mut().ok_or(ChannelError::Invalid(
+            "steady normal initialization requires a transverse spectrum",
+        ))?;
+        profile.initialize_steady_pending(&self.accepted, self.modes, &mut cancelled)?;
+        profile.validate_pending(
+            &self.accepted,
+            self.modes,
+            speed_limit,
+            true,
+            &mut cancelled,
+        )?;
+        let storage = energy(&self.accepted, self.cell_volume, &mut cancelled)?
+            + profile.excess_energy(true, self.cell_volume, &mut cancelled)?;
+        if !storage.is_finite() {
+            return Err(ChannelError::Invalid(
+                "steady normal profile energy is not representable",
+            ));
+        }
+        poll(&mut cancelled)?;
+        profile.publish();
         Ok(())
     }
 
     pub const fn material(&self) -> &TwoFluidState {
         &self.material
     }
+    /// Authored scalar Darcy wall only. A dynamic transverse model is reported
+    /// separately by normal_viscous_spectrum, without implying a DC end load.
     pub const fn normal_viscous_wall(&self) -> Option<NormalViscousWall> {
         self.normal_wall
+    }
+    /// Dynamic normal-wall model, distinct from the scalar Darcy closure.
+    pub fn normal_viscous_spectrum(&self) -> Option<&NormalViscousSpectrum> {
+        self.normal_profile
+            .as_ref()
+            .map(|profile| &profile.spectrum)
+    }
+    /// One accepted normal-profile mode velocity in m/s. Interior faces are
+    /// numbered 1..N-1; endpoints have no profile state owned by this channel.
+    /// The final mode is the declared unresolved high-mode approximation.
+    pub fn normal_profile_mode_velocity_m_s(&self, face: usize, mode: usize) -> Option<f64> {
+        self.normal_profile.as_ref()?.mode_velocity(face, mode)
+    }
+    /// Positive normal kinetic energy in excess of the section-mean storage.
+    /// This is already included in wave_energy_j and the step energy reports.
+    pub fn normal_profile_excess_energy_j(&self) -> Result<f64, ChannelError> {
+        match &self.normal_profile {
+            Some(profile) => profile.excess_energy(false, self.cell_volume, &mut || false),
+            None => Ok(0.0),
+        }
     }
     pub fn cells(&self) -> usize {
         self.accepted[0].cells.len()
@@ -475,8 +590,10 @@ impl TwoFluidChannel {
             ],
         ))
     }
+    /// Total quadratic wave availability, including transverse normal-profile
+    /// kinetic energy. This is not absolute helium internal energy.
     pub fn wave_energy_j(&self) -> Result<f64, ChannelError> {
-        energy(&self.accepted, self.cell_volume, &mut || false)
+        self.energy_with_profile(false, &mut || false)
     }
 
     /// Advance both sound modes, honoring imposed component flows at both ends.
@@ -527,6 +644,9 @@ impl TwoFluidChannel {
             &mut self.last_viscous_heat_j,
             &mut self.pending_viscous_heat_j,
         );
+        if let Some(profile) = &mut self.normal_profile {
+            profile.publish();
+        }
         self.time_s = report.time_s;
         self.total_heat_j += report.mutual_friction_heat_j;
         self.total_viscous_heat_j += report.normal_viscous_heat_j;
@@ -614,7 +734,49 @@ impl TwoFluidChannel {
                 });
             }
         }
+        if let Some(profile) = &self.normal_profile {
+            profile.validate_pending(
+                &self.pending,
+                self.modes,
+                self.profile_speed_limit(),
+                physical_limits,
+                cancelled,
+            )?;
+        }
         Ok(())
+    }
+
+    fn profile_speed_limit(&self) -> f64 {
+        self.limits
+            .max_component_speed_m_s
+            .min(0.1 * self.modes.speed[1])
+    }
+
+    fn uses_viscous_wave_operator(&self) -> bool {
+        self.normal_profile.is_some() || self.normal_wall_rate_s_inv > 0.0
+    }
+
+    fn energy_with_profile(
+        &self,
+        pending: bool,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<f64, ChannelError> {
+        let fields = if pending {
+            &self.pending
+        } else {
+            &self.accepted
+        };
+        let mut total = energy(fields, self.cell_volume, cancelled)?;
+        if let Some(profile) = &self.normal_profile {
+            total += profile.excess_energy(pending, self.cell_volume, cancelled)?;
+        }
+        if total.is_finite() {
+            Ok(total)
+        } else {
+            Err(ChannelError::Invalid(
+                "profile wave energy is not representable",
+            ))
+        }
     }
 }
 
