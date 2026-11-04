@@ -1314,6 +1314,13 @@ impl FreeSurface3 {
                 // Pull-stream with gas reconstruction (2-D port).
                 let populations = self.grid.populations(slot, lane);
                 let rho_pre: f64 = populations.iter().sum();
+                let sigma = self.local_sigma.as_ref()
+                    .map_or(self.sigma, |field| field[&(key, lane)]);
+                if !crate::admit_explicit_capillary_density(sigma, rho_pre) {
+                    return Err(FreeSurfaceError3::Transport(
+                        "surface tension exceeds conservative explicit capillary-wave bound at current density",
+                    ));
+                }
                 let mut u_pre = [
                     populations
                         .iter()
@@ -1429,6 +1436,13 @@ impl FreeSurface3 {
                 }
                 if let Some(coefficients) = body_pressure_source {
                     forcing::close_body_pressure(&mut new_f, coefficients)?;
+                }
+                if sigma > 0.0
+                    && !crate::admit_explicit_capillary_density(sigma, new_f.iter().sum())
+                {
+                    return Err(FreeSurfaceError3::Transport(
+                        "surface tension exceeds conservative explicit capillary-wave bound at streamed density",
+                    ));
                 }
                 new_populations.push((key, lane, new_f));
             }

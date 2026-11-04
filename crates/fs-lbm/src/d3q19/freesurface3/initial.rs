@@ -218,6 +218,12 @@ impl FreeSurface3 {
                     "fill, density or cell mass is inadmissible",
                 ));
             }
+            if !crate::admit_explicit_capillary_density(sigma, state.density) {
+                return Err(refused(
+                    Some(c),
+                    "surface tension exceeds conservative explicit capillary-wave bound at initial density",
+                ));
+            }
             let speed = state.velocity[0]
                 .hypot(state.velocity[1])
                 .hypot(state.velocity[2]);

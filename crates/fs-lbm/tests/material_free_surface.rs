@@ -364,3 +364,111 @@ fn g0_zero_speed_and_positive_pressure_do_not_admit_underresolved_capillary_wave
                 if reason.contains("capillary-wave")));
     });
 }
+
+#[test]
+fn g1_native_capillary_admission_uses_actual_density_independently_of_fill() {
+    use fs_lbm::core2::Grid;
+    use fs_lbm::d3q19::freesurface3::{FreeSurfaceError3, FreeSurfaceInitialCell3};
+    use fs_lbm::freesurface::{ContactModel, FreeSurface};
+
+    let gate = fs_exec::CancelGate::new_clock_free();
+    with_cx(&gate, |cx| {
+        for density in [0.25_f64, 0.5, 1.0, 2.0] {
+            // Independent shortest-wave dispersion with dx = dt = 1.
+            // The existing reference-density ceiling remains in force too.
+            let sigma = 0.9 * density.min(1.0) / (4.0 * core::f64::consts::PI);
+            let wave_speed = (core::f64::consts::PI * sigma / density).sqrt();
+            assert!(2.0 * wave_speed < 1.0);
+            for fill_fraction in [0.01, 0.5, 1.0] {
+                let state = FreeSurfaceInitialCell3 {
+                    coordinates: [3; 3], fill_fraction, density, velocity: [0.0; 3],
+                };
+                let flow = FreeSurface3::from_cells([8; 3], 0.8, [0.0; 3], sigma,
+                    ContactModel3::Neutral, &[], &[state], cx).unwrap();
+                near(flow.sample_at(3, 3, 3).unwrap().density, density, 3e-15);
+                near(flow.ledger_mass(), density * fill_fraction, 3e-15);
+            }
+            let mut grid = Grid::uniform(8, 8, 0.8);
+            grid.f.fill(fs_lbm::equilibrium(density, 0.0, 0.0));
+            let flow = FreeSurface::new(grid.clone(), sigma, ContactModel::Neutral);
+            near(flow.ledger_mass(), 64.0 * density, 3e-15);
+
+            if density < 1.0 {
+                let excessive = 1.1 * density / (4.0 * core::f64::consts::PI);
+                assert!(excessive < fs_lbm::EXPLICIT_CAPILLARY_LATTICE_LIMIT);
+                assert!(2.0 * (core::f64::consts::PI * excessive / density).sqrt() > 1.0);
+                let state = FreeSurfaceInitialCell3 {
+                    coordinates: [3; 3], fill_fraction: 0.5, density, velocity: [0.0; 3],
+                };
+                assert!(matches!(FreeSurface3::from_cells([8; 3], 0.8, [0.0; 3],
+                    excessive, ContactModel3::Neutral, &[], &[state], cx),
+                    Err(FreeSurfaceError3::InvalidInitialState { coordinates: Some([3, 3, 3]), reason })
+                        if reason.contains("capillary-wave") && reason.contains("density")));
+                assert!(std::panic::catch_unwind(||
+                    FreeSurface::new(grid, excessive, ContactModel::Neutral)).is_err());
+            }
+        }
+    });
+}
+
+#[test]
+fn g0_pressure_rarefaction_refuses_unresolved_capillary_waves_before_publication() {
+    use fs_lbm::core2::{Cell, Grid};
+    use fs_lbm::d3q19::freesurface3::FreeSurfaceError3;
+    use fs_lbm::freesurface::{ContactModel, FreeSurface, FreeSurfacePressureError2};
+
+    let gate = fs_exec::CancelGate::new_clock_free();
+    let sigma = 0.075;
+    let gas_pressure = -0.5 * CS2;
+    // The incoming planar gas-link weights sum to 1/6 in both lattices.
+    // Anti-population reconstruction at rho_boundary=1/2 therefore gives
+    // rho_next = 1 + 2*(1/6)*(1/2 - 1) = 5/6. Its capillary waves are too
+    // fast even though the initial density and prescribed pressure are valid.
+    let endpoint_density = 5.0 / 6.0;
+    assert!(2.0 * (core::f64::consts::PI * sigma).sqrt() < 1.0);
+    assert!(2.0 * (core::f64::consts::PI * sigma / endpoint_density).sqrt() > 1.0);
+
+    let mut grid = Grid::uniform(8, 8, 0.8);
+    grid.periodic_y = false;
+    for y in 4..8 {
+        for x in 0..8 {
+            let cell = grid.idx(x, y);
+            grid.flags[cell] = Cell::Gas;
+        }
+    }
+    let mut no_tension = FreeSurface::new(grid.clone(), 0.0, ContactModel::Neutral);
+    no_tension.step_with_gas_pressure(&gate, 0.6, |_| Ok(gas_pressure)).unwrap();
+    near(no_tension.grid.moments(no_tension.grid.idx(4, 3)).rho, endpoint_density, 3e-15);
+
+    let mut dense = FreeSurface::new(grid, sigma, ContactModel::Neutral);
+    let before = dense.clone();
+    assert!(matches!(dense.step_with_gas_pressure(&gate, 0.6, |_| Ok(gas_pressure)),
+        Err(FreeSurfacePressureError2::Invalid { reason, .. })
+            if reason.contains("capillary-wave") && reason.contains("streamed density")));
+    assert_eq!(dense.grid.f, before.grid.f);
+    assert_eq!(dense.grid.flags, before.grid.flags);
+    assert_eq!(dense.mass, before.mass);
+    assert_eq!(dense.carry.to_bits(), before.carry.to_bits());
+
+    let mut no_tension = FreeSurface3::new(8, 8, 8, 0.8, [0.0; 3], 0.0,
+        ContactModel3::Neutral, |_, _, z| z < 4).unwrap();
+    no_tension.step_with_gas_pressure(&gate, 0.6, |_| Ok(gas_pressure)).unwrap();
+    near(no_tension.sample_at(4, 4, 3).unwrap().density, endpoint_density, 3e-15);
+
+    let mut sparse = FreeSurface3::new(8, 8, 8, 0.8, [0.0; 3], sigma,
+        ContactModel3::Neutral, |_, _, z| z < 4).unwrap();
+    let before = sparse.clone();
+    assert!(matches!(sparse.step_with_gas_pressure(&gate, 0.6, |_| Ok(gas_pressure)),
+        Err(FreeSurfaceError3::Transport(reason))
+            if reason.contains("capillary-wave") && reason.contains("streamed density")));
+    assert_eq!(sparse.grid().state_bits(), before.grid().state_bits());
+    assert_eq!(sparse.ledger_mass().to_bits(), before.ledger_mass().to_bits());
+    assert_eq!(sparse.conversions(), before.conversions());
+    for z in 0..8 {
+        for y in 0..8 {
+            for x in 0..8 {
+                assert_eq!(sparse.sample_at(x, y, z), before.sample_at(x, y, z));
+            }
+        }
+    }
+}

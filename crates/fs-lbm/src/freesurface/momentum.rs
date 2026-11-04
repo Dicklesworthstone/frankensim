@@ -306,6 +306,11 @@ impl FreeSurface {
             if !rho.is_finite() || rho <= 0.0 {
                 return Err(invalid("finite positive wet-cell density required"));
             }
+            if !crate::admit_explicit_capillary_density(self.sigma, rho) {
+                return Err(invalid(
+                    "surface tension exceeds conservative explicit capillary-wave domain at current density",
+                ));
+            }
             admit_velocity(self.grid.moments(i).u)?;
         }
         Ok(())

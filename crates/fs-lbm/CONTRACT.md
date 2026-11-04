@@ -5581,6 +5581,14 @@ complete LBM/VOF stability or convergence. Positive reconstructed density and
 zero advective Mach alone do not satisfy it. The dense D2Q9 constructor and
 every public-sigma step, sparse D3Q19 construction, physical source scaling,
 and local/extrapolated thermocapillary source updates share the same bound.
+The native owners additionally require `sigma_lattice/rho_lattice <= 1/(4*pi)`
+at each actual wet-cell density; the reference-density coefficient ceiling
+remains in force. Liquid density, not tracked mass or fill fraction, sets this
+inertia. Transferred initial states, mutable dense states, local source fields,
+height-column averages and local interface extrapolations all enforce it.
+Streaming checks both the current and candidate endpoint density before
+publishing any populations or tracked mass, so prescribed pressure rarefaction
+cannot silently leave the accepted liquid outside its capillary-wave domain.
 No collision/curvature/pressure evolution is changed for admitted states.
 The helper `maximum_capillary_timestep_s` exposes the physical maximum before
 constructing a plan; `capillary_timestep_ratio` reports its consumed fraction.
@@ -5589,6 +5597,10 @@ interface extrapolation increases that exceed the bound refuse before accepted
 fluid/thermal state publication. The focused G0/G1 tests check independent
 wave dispersion, dx^(3/2) and material scaling, positive-pressure refusal,
 zero-tension behavior and unchanged state after rejected coefficient updates.
+Nonunit-density and partial-fill regressions exercise the native constructors;
+independent planar pressure reconstruction (`rho_next = 5/6`) exercises atomic
+2-D/3-D rarefaction refusal. Thermocapillary regressions retain the old source
+map when local density or a column average makes the new coefficient unsafe.
 These checks do not establish measured capillary-wave convergence.
 
 ### Prescribed gas pressure on the native free surface

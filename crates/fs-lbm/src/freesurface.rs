@@ -360,8 +360,9 @@ impl FreeSurface {
     ///
     /// # Panics
     /// If surface tension is outside the conservative explicit capillary-wave
-    /// domain [`crate::EXPLICIT_CAPILLARY_LATTICE_LIMIT`], or a fluid cell touches
-    /// a gas cell after interface insertion (impossible by construction).
+    /// domain [`crate::EXPLICIT_CAPILLARY_LATTICE_LIMIT`] at the reference or
+    /// actual wet-cell density, or a fluid cell touches a gas cell after
+    /// interface insertion (impossible by construction).
     #[must_use]
     pub fn new(mut grid: Grid, sigma: f64, contact: ContactModel) -> FreeSurface {
         assert!(
@@ -393,8 +394,14 @@ impl FreeSurface {
         let mut mass = vec![0.0f64; nx * ny];
         for (i, m) in mass.iter_mut().enumerate().take(nx * ny) {
             match grid.flags[i] {
-                Cell::Fluid => *m = grid.f[i].iter().sum(),
-                Cell::Interface => *m = 0.5 * grid.f[i].iter().sum::<f64>(),
+                Cell::Fluid | Cell::Interface => {
+                    let density = grid.f[i].iter().sum();
+                    assert!(
+                        crate::admit_explicit_capillary_density(sigma, density),
+                        "surface tension exceeds conservative explicit capillary-wave domain at initial density"
+                    );
+                    *m = if grid.flags[i] == Cell::Fluid { density } else { 0.5 * density };
+                }
                 _ => {}
             }
         }
@@ -636,8 +643,9 @@ impl FreeSurface {
     /// + stream, conversion cascade with conservative redistribution.
     ///
     /// # Panics
-    /// If the publicly editable surface tension leaves the conservative
-    /// explicit capillary-wave domain. Refuses before mutating physical state.
+    /// If the surface tension or actual pre-step/streamed liquid density leaves
+    /// the conservative explicit capillary-wave domain. Refuses before mutating
+    /// physical state.
     /// Also refuses a changed planar wall topology or a conflicting legacy
     /// contact model after assigning an equilibrium angle.
     /// An inadmissible density-dependent gas-pressure endpoint also panics
@@ -707,6 +715,12 @@ impl FreeSurface {
                 }
                 // Stream (pull) with reconstruction from gas sources.
                 let mm = self.grid.moments(i);
+                if !crate::admit_explicit_capillary_density(self.sigma, mm.rho) {
+                    return Err(FreeSurfacePressureError2::Invalid {
+                        coordinates: Some([x, y]),
+                        reason: "surface tension exceeds conservative explicit capillary-wave domain at current density",
+                    });
+                }
                 // Curvature, physical velocity and the Guo half-source frame
                 // are common to this cell. Only a distinct link load requires
                 // another gas equilibrium evaluation.
@@ -781,6 +795,17 @@ impl FreeSurface {
                             reason: "density-dependent gas pressure exceeds population roundoff",
                         });
                     }
+                }
+                if self.sigma > 0.0
+                    && !crate::admit_explicit_capillary_density(
+                        self.sigma,
+                        new_f[i].iter().sum(),
+                    )
+                {
+                    return Err(FreeSurfacePressureError2::Invalid {
+                        coordinates: Some([x, y]),
+                        reason: "surface tension exceeds conservative explicit capillary-wave domain at streamed density",
+                    });
                 }
             }
         }
@@ -1264,15 +1289,25 @@ mod capillary_tests {
     }
 
     #[test]
-    fn g0_public_capillarity_change_refuses_before_the_dense_step_mutates_state() {
-        let mut sim = planar_wall_fixture();
-        let populations = sim.grid.f.clone();
-        let mass = sim.mass.clone();
-        let flags = sim.grid.flags.clone();
-        sim.sigma = 1.01 * crate::EXPLICIT_CAPILLARY_LATTICE_LIMIT;
-        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sim.step())).is_err());
-        assert_eq!(sim.grid.f, populations);
-        assert_eq!(sim.mass, mass);
-        assert_eq!(sim.grid.flags, flags);
+    fn g0_public_capillarity_or_density_change_refuses_before_the_dense_step_mutates_state() {
+        for reduce_density in [false, true] {
+            let mut sim = planar_wall_fixture();
+            if reduce_density {
+                sim.sigma = 0.06;
+                let cell = sim.grid.idx(2, 4);
+                assert_eq!(sim.grid.flags[cell], Cell::Interface);
+                sim.grid.f[cell] = equilibrium(0.5, 0.0, 0.0);
+                sim.mass[cell] *= 0.5;
+            } else {
+                sim.sigma = 1.01 * crate::EXPLICIT_CAPILLARY_LATTICE_LIMIT;
+            }
+            let populations = sim.grid.f.clone();
+            let mass = sim.mass.clone();
+            let flags = sim.grid.flags.clone();
+            assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sim.step())).is_err());
+            assert_eq!(sim.grid.f, populations);
+            assert_eq!(sim.mass, mass);
+            assert_eq!(sim.grid.flags, flags);
+        }
     }
 }

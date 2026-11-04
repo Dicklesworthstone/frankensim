@@ -440,9 +440,16 @@ impl FreeSurface3 {
                     "extrapolated surface tension exceeds native pressure-boundary domain",
                 ));
             }
-            if !crate::admit_explicit_capillary_coefficient(surface_sigma) {
+            let (key, lane) = patch.location;
+            let slot = self.grid.slot_of(key).expect("active");
+            if !crate::admit_explicit_capillary_coefficient(surface_sigma)
+                || !crate::admit_explicit_capillary_density(
+                    surface_sigma,
+                    self.grid.populations(slot, lane).iter().sum(),
+                )
+            {
                 return Err(invalid(
-                    "extrapolated surface tension exceeds conservative explicit capillary-wave bound",
+                    "extrapolated surface tension exceeds conservative explicit capillary-wave bound at current density",
                 ));
             }
             let normal_gradient = dot(gradient, patch.outward_normal);
@@ -571,9 +578,16 @@ impl FreeSurface3 {
                     "extended surface tension exceeds native pressure-boundary domain",
                 ));
             }
-            if !crate::admit_explicit_capillary_coefficient(value) {
+            let (key, lane) = location;
+            let slot = self.grid.slot_of(key).expect("active");
+            if !crate::admit_explicit_capillary_coefficient(value)
+                || !crate::admit_explicit_capillary_density(
+                    value,
+                    self.grid.populations(slot, lane).iter().sum(),
+                )
+            {
                 return Err(invalid(
-                    "extended surface tension exceeds conservative explicit capillary-wave bound",
+                    "extended surface tension exceeds conservative explicit capillary-wave bound at current density",
                 ));
             }
             extension.push((location, value));

@@ -38,6 +38,7 @@ impl FreeSurface3 {
         let mut count = 0;
         for (&key, tile) in &self.tiles {
             check_cancel(gate)?;
+            let slot = self.grid.slot_of(key).expect("active");
             for (lane, cell) in tile.cells.iter().enumerate() {
                 if *cell == Cell3::Gas {
                     continue;
@@ -53,9 +54,14 @@ impl FreeSurface3 {
                         "local surface tension exceeds native pressure-boundary domain",
                     ));
                 }
-                if !crate::admit_explicit_capillary_coefficient(sigma) {
+                if !crate::admit_explicit_capillary_coefficient(sigma)
+                    || !crate::admit_explicit_capillary_density(
+                        sigma,
+                        self.grid.populations(slot, lane).iter().sum(),
+                    )
+                {
                     return Err(invalid(
-                        "local surface tension exceeds conservative explicit capillary-wave bound",
+                        "local surface tension exceeds conservative explicit capillary-wave bound at current density",
                     ));
                 }
                 count += 1;
@@ -403,8 +409,10 @@ impl FreeSurface3 {
             }
         }
         let mut forces = BTreeMap::new();
+        let mut interface_sigma = Vec::new();
         for (&key, tile) in &self.tiles {
             check_cancel(gate)?;
+            let slot = self.grid.slot_of(key).expect("active");
             for (lane, &cell) in tile.cells.iter().enumerate() {
                 if cell != Cell3::Interface {
                     continue;
@@ -412,11 +420,27 @@ impl FreeSurface3 {
                 let p = Self::transport_coordinates(MassLocation3::Cell(key, lane))
                     .ok_or(invalid("unlocated height-graph interface"))?;
                 let column = columns[p[tangent[0]] + shape[0] * p[tangent[1]]];
-                sigma.insert((key, lane), column.sigma);
+                // A column average can raise sigma in its least-dense cell,
+                // even when every original source coefficient was admitted.
+                if !crate::admit_explicit_capillary_coefficient(column.sigma)
+                    || !crate::admit_explicit_capillary_density(
+                        column.sigma,
+                        self.grid.populations(slot, lane).iter().sum(),
+                    )
+                {
+                    return Err(invalid(
+                        "height-graph surface tension exceeds conservative explicit capillary-wave bound at current density",
+                    ));
+                }
+                interface_sigma.push(((key, lane), column.sigma));
                 if tile.mass[lane] > 0.0 && column.force != [0.0; 3] {
                     forces.insert((key, lane), column.force);
                 }
             }
+        }
+        check_cancel(gate)?;
+        for (location, value) in interface_sigma {
+            sigma.insert(location, value);
         }
         Ok(forces)
     }
@@ -610,6 +634,29 @@ mod tests {
         *changed.last_entry().unwrap().get_mut() = 1.01 * crate::EXPLICIT_CAPILLARY_LATTICE_LIMIT;
         assert!(matches!(surface.rebind_surface_tensions(changed, &gate),
             Err(FreeSurfaceError3::Transport(reason)) if reason.contains("capillary-wave")));
+        assert_eq!(surface.local_sigma.as_ref(), Some(&accepted));
+        assert_eq!(surface.grid().state_bits(), before);
+        assert_eq!(surface.ledger_mass().to_bits(), mass);
+    }
+
+    #[test]
+    fn g0_local_capillarity_uses_liquid_density_and_preserves_the_accepted_field() {
+        let gate = CancelGate::new_clock_free();
+        let mut surface = FreeSurface3::new(8, 8, 8, 0.8, [0.0; 3], 0.01,
+            ContactModel3::Neutral, |_, _, z| z < 4).unwrap();
+        let accepted = field(&surface, |_| 0.02);
+        surface.rebind_surface_tensions(accepted.clone(), &gate).unwrap();
+        let (&(key, lane), _) = accepted.last_key_value().unwrap();
+        let slot = surface.grid.slot_of(key).unwrap();
+        surface.grid.set_populations(slot, lane, equilibrium3(0.5, [0.0; 3]));
+        surface.tiles.get_mut(&key).unwrap().mass[lane] *= 0.5;
+        let before = surface.grid().state_bits();
+        let mass = surface.ledger_mass().to_bits();
+        let mut changed = accepted.clone();
+        changed.insert((key, lane), 0.06);
+        assert!(matches!(surface.rebind_surface_tensions(changed, &gate),
+            Err(FreeSurfaceError3::Transport(reason))
+                if reason.contains("capillary-wave") && reason.contains("density")));
         assert_eq!(surface.local_sigma.as_ref(), Some(&accepted));
         assert_eq!(surface.grid().state_bits(), before);
         assert_eq!(surface.ledger_mass().to_bits(), mass);
@@ -876,5 +923,32 @@ mod tests {
                 assert_eq!(value, original[&(key, lane)]);
             }
         }
+    }
+
+    #[test]
+    fn g0_height_graph_capillary_average_cannot_overload_a_less_dense_cell() {
+        let gate = CancelGate::new_clock_free();
+        let mut surface = graph_surface(2, 1, |u, v| 3.7 + 0.3 * (u - 4.0 + v - 4.0));
+        // This column crosses two cell layers. Its thin upper layer has less
+        // liquid inertia but shares the volume-averaged surface coefficient.
+        let (slot, lane) = surface.grid.resolve_source(4, 4, 4).unwrap();
+        let key = surface.grid.active_keys()[slot];
+        assert_eq!(surface.tiles[&key].cells[lane], Cell3::Interface);
+        assert!(surface.fill(key, lane) > 0.01 && surface.fill(key, lane) < 0.1);
+        surface.grid.set_populations(slot, lane, equilibrium3(0.2, [0.0; 3]));
+        surface.tiles.get_mut(&key).unwrap().mass[lane] *= 0.2;
+        let mut sigma = field(&surface, |_| 0.06);
+        sigma.insert((key, lane), 0.005);
+        surface.admit_surface_tensions(&sigma, &gate).unwrap();
+        let before = sigma.clone();
+        let populations = surface.grid().state_bits();
+        assert!(matches!(surface.height_graph_marangoni_forces(
+            HeightGraphSurface3 {
+                axis: 2, outward_sign: 1, maximum_slope: 0.6, minimum_fill: 0.01,
+            }, &mut sigma, &gate),
+            Err(FreeSurfaceError3::Transport(reason))
+                if reason.contains("capillary-wave") && reason.contains("density")));
+        assert_eq!(sigma, before);
+        assert_eq!(surface.grid().state_bits(), populations);
     }
 }

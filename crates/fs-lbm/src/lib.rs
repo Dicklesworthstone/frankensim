@@ -110,6 +110,19 @@ pub(crate) fn admit_explicit_capillary_coefficient(sigma: f64) -> bool {
         && sigma <= EXPLICIT_CAPILLARY_LATTICE_LIMIT * (1.0 + 16.0 * f64::EPSILON)
 }
 
+/// Apply the same wave-resolution bound to actual liquid inertia. Lattice
+/// density is relative to the material reference, so the wave speed depends on
+/// `sigma / density`; fill fraction is not a substitute for liquid density.
+/// Dividing avoids overflow in a density-times-limit comparison and rejects
+/// an unrepresentably fast wave without squaring its speed.
+pub(crate) fn admit_explicit_capillary_density(sigma: f64, density: f64) -> bool {
+    sigma.is_finite()
+        && sigma >= 0.0
+        && density.is_finite()
+        && density > 0.0
+        && admit_explicit_capillary_coefficient(sigma / density)
+}
+
 /// The D2Q9 equilibrium distribution at density `rho` and velocity `(ux, uy)`.
 #[must_use]
 pub fn equilibrium(rho: f64, ux: f64, uy: f64) -> [f64; Q] {
