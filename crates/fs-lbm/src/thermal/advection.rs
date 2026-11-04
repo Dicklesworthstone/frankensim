@@ -12,6 +12,7 @@
 //! temporal order of the complete partitioned buoyancy/source solver.
 
 use core::ops::Range;
+use super::boundary::{ThermalWall, ThermalWallExchange};
 
 /// One vector per cell; retained by transactional snapshots, never by a
 /// step-local relaxation field. Wall entries are unused.
@@ -179,6 +180,26 @@ impl<const D: usize, const Q: usize> AxisLattice<D, Q> {
         shape: [usize; D],
         walls: Option<[f64; 2]>,
     ) {
+        self.stream_with_walls(
+            populations,
+            post,
+            shape,
+            walls.map(|temperatures| temperatures.map(ThermalWall::Temperature)),
+        );
+    }
+
+    /// Pull the same native populations with stationary halfway wall laws.
+    /// Both wall accounts come from actual reflected normal links, so heat is
+    /// measured independently of storage/source residuals. In-plane directions
+    /// remain periodic; `None` retains the fully periodic path and zero reports.
+    /// The original checked solver admits the laws and complete candidate.
+    pub(crate) fn stream_with_walls(
+        &self,
+        populations: &mut [[f64; Q]],
+        post: &[f64],
+        shape: [usize; D],
+        walls: Option<[ThermalWall; 2]>,
+    ) -> [ThermalWallExchange; 2] {
         let mut stride = [1; D];
         for axis in 1..D {
             stride[axis] = stride[axis - 1] * shape[axis - 1];
@@ -190,6 +211,35 @@ impl<const D: usize, const Q: usize> AxisLattice<D, Q> {
         } else {
             0..cells
         };
+        let mut exchange = [ThermalWallExchange::default(); 2];
+        if walls.is_some() {
+            for side in &mut exchange {
+                side.min_temperature = f64::INFINITY;
+                side.max_temperature = f64::NEG_INFINITY;
+            }
+        }
+        let mut correction = [[0.0; 2]; 2];
+        let inverse_plane = 1.0 / plane as f64;
+        // Fixed-order compensated reductions require no boundary arrays.
+        let mut record = |side: usize, incoming: f64, outgoing: f64, wall: f64| {
+            let report = &mut exchange[side];
+            if wall.is_finite() {
+                // Comparisons deliberately preserve a NaN recorded earlier.
+                if wall < report.min_temperature { report.min_temperature = wall; }
+                if wall > report.max_temperature { report.max_temperature = wall; }
+            } else {
+                report.min_temperature = f64::NAN;
+                report.max_temperature = f64::NAN;
+            }
+            let values = [incoming - outgoing, wall * inverse_plane];
+            let totals = [&mut report.heat_in, &mut report.mean_temperature];
+            for (column, (total, value)) in totals.into_iter().zip(values).enumerate() {
+                let increment = value - correction[side][column];
+                let next = *total + increment;
+                correction[side][column] = (next - *total) - increment;
+                *total = next;
+            }
+        };
         for cell in active {
             let mut incoming = [0.0; Q];
             incoming[0] = post[Q * cell];
@@ -198,12 +248,18 @@ impl<const D: usize, const Q: usize> AxisLattice<D, Q> {
                 let negative = self.negative[axis];
                 if let Some([bottom, top]) = walls.filter(|_| axis == D - 1) {
                     incoming[positive] = if cell < 2 * plane {
-                        2.0f64.mul_add(self.weights[positive] * bottom, -post[Q * cell + negative])
+                        let outgoing = post[Q * cell + negative];
+                        let (reflected, wall) = bottom.reflect(outgoing, self.weights[positive]);
+                        record(0, reflected, outgoing, wall);
+                        reflected
                     } else {
                         post[Q * (cell - plane) + positive]
                     };
                     incoming[negative] = if cell >= cells - 2 * plane {
-                        2.0f64.mul_add(self.weights[negative] * top, -post[Q * cell + positive])
+                        let outgoing = post[Q * cell + positive];
+                        let (reflected, wall) = top.reflect(outgoing, self.weights[negative]);
+                        record(1, reflected, outgoing, wall);
+                        reflected
                     } else {
                         post[Q * (cell + plane) + negative]
                     };
@@ -225,6 +281,7 @@ impl<const D: usize, const Q: usize> AxisLattice<D, Q> {
             }
             populations[cell] = incoming;
         }
+        exchange
     }
 
     /// One prescribed source half-kick at fixed physical velocity.
@@ -269,3 +326,7 @@ mod tests;
 #[cfg(test)]
 #[path = "advection/tensor_tests.rs"]
 mod tensor_tests;
+
+#[cfg(test)]
+#[path = "advection/boundary_tests.rs"]
+mod boundary_tests;

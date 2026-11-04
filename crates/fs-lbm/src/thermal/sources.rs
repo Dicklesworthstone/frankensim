@@ -13,6 +13,7 @@ pub mod sgs3;
 pub mod transport;
 
 use super::{ThermalForcingError, ThermalLbm};
+use super::boundary::{ThermalWall, ThermalWallError, ThermalWallExchange};
 use crate::core2::{Cell, CollisionModel2};
 use crate::d3q19::{CollisionModel3, ThermalLbm3};
 
@@ -56,12 +57,23 @@ pub enum ThermalSourceError {
     Material(crate::material::MaterialLbmError),
     /// Existing external-force admission rejected the candidate.
     Force(ThermalForcingError),
+    /// The selected thermal boundary declaration is invalid.
+    Wall(ThermalWallError),
     /// A candidate temperature is outside the caller's interval.
     Temperature {
         /// Linear cell index.
         cell: usize,
         /// Candidate temperature in lattice coordinates.
         value: f64,
+    },
+    /// A resolved halfway wall trace leaves the admitted scalar interval.
+    WallTemperature {
+        /// Bottom = 0, top = 1.
+        wall: usize,
+        /// Smallest individual trace on this wall.
+        minimum: f64,
+        /// Largest individual trace on this wall.
+        maximum: f64,
     },
     /// The independent thermal balance exceeds the requested tolerance.
     Balance {
@@ -75,7 +87,10 @@ impl core::fmt::Display for ThermalSourceError {
             Self::Invalid(what) => write!(f, "thermal source: {what}"),
             Self::Material(error) => write!(f, "thermal source: {error}"),
             Self::Force(error) => write!(f, "thermal source: {error}"),
+            Self::Wall(error) => write!(f, "thermal source: {error}"),
             Self::Temperature { cell, value } => write!(f, "thermal source temperature {value} at cell {cell} is outside its admitted range"),
+            Self::WallTemperature { wall, minimum, maximum } => write!(f,
+                "thermal source wall {wall} trace [{minimum}, {maximum}] is outside its admitted range"),
             Self::Balance { defect } => write!(f, "thermal source balance defect {defect} exceeds tolerance"),
         }
     }
@@ -126,8 +141,10 @@ pub(crate) trait Slab<const D: usize, const Q: usize>: Sized {
     fn populations(&self) -> &[[f64; Q]];
     fn source_half_kick(&mut self, heat: &[f64], plane: usize);
     fn snapshot(&self) -> (Self, [f64; Q]);
+    // Original coordinate anchors, retained for physical-unit consistency checks.
     fn walls(&self) -> (f64, f64);
-    fn incoming() -> (usize, usize);
+    fn thermal_walls(&self) -> [ThermalWall; 2];
+    fn wall_exchange(&self) -> Option<[ThermalWallExchange; 2]>;
     fn flow_valid(&self) -> bool;
     fn advance(&mut self, forces: &[[f64; D]]) -> Result<(), ThermalForcingError>;
     fn momentum_relaxation(&self) -> &[f64];
@@ -139,11 +156,15 @@ pub(crate) trait Slab<const D: usize, const Q: usize>: Sized {
 
 fn invalid(what: &'static str) -> ThermalSourceError { ThermalSourceError::Invalid(what) }
 
-fn check_temperatures<const Q: usize>(pops: &[[f64; Q]], range: [f64; 2]) -> Result<(), ThermalSourceError> {
-    for (cell, pop) in pops.iter().enumerate() {
+fn check_temperatures<const Q: usize>(
+    pops: &[[f64; Q]], plane: usize, range: [f64; 2],
+) -> Result<(), ThermalSourceError> {
+    // Ghost wall planes carry no thermal storage. Flux/film surfaces have
+    // resolved traces, not the constructor's unused ghost temperatures.
+    for (offset, pop) in pops[plane..pops.len()-plane].iter().enumerate() {
         let value: f64 = pop.iter().sum();
         if !pop.iter().all(|p| p.is_finite()) || !value.is_finite() || value < range[0] || value > range[1] {
-            return Err(ThermalSourceError::Temperature { cell, value });
+            return Err(ThermalSourceError::Temperature { cell: offset + plane, value });
         }
     }
     Ok(())
@@ -192,13 +213,17 @@ fn source_step_impl<S: Slab<D, Q>, const D: usize, const Q: usize, R>(
         return Err(invalid("source and force fields must be finite"));
     }
     if heat[..plane].iter().chain(&heat[cells-plane..]).any(|x| *x != 0.0) {
-        return Err(invalid("wall source entries must be zero; wall temperatures are prescribed"));
+        return Err(invalid("ghost wall source entries must be zero; use the thermal wall law for surface heat"));
     }
     if !state.flow_valid() { return Err(invalid("invalid thermal/flow state or unsupported slab topology")); }
-    check_temperatures(state.populations(), limits.temperature_range)?;
-    let (bottom, top) = state.walls();
-    if ![bottom, top].iter().all(|t| t.is_finite() && *t >= limits.temperature_range[0] && *t <= limits.temperature_range[1]) {
-        return Err(invalid("wall temperatures are outside the admitted interval"));
+    check_temperatures(state.populations(), plane, limits.temperature_range)?;
+    for wall in state.thermal_walls() {
+        wall.validate().map_err(ThermalSourceError::Wall)?;
+        if let ThermalWall::Temperature(temperature) = wall
+            && (temperature < limits.temperature_range[0] || temperature > limits.temperature_range[1])
+        {
+            return Err(invalid("prescribed wall temperature is outside the admitted interval"));
+        }
     }
     let source: f64 = heat[plane..cells-plane].iter().sum();
     if !source.is_finite() { return Err(invalid("summed source is not representable")); }
@@ -209,12 +234,12 @@ fn source_step_impl<S: Slab<D, Q>, const D: usize, const Q: usize, R>(
         }
     }
     if let Some(field) = diffusion { field.admit(cells)?; }
-    let (mut candidate, weights) = state.snapshot();
+    let (mut candidate, _) = state.snapshot();
     if let Some(field) = transport {
         candidate.momentum_relaxation_mut().copy_from_slice(field.momentum);
     }
     candidate.source_half_kick(heat, plane);
-    check_temperatures(candidate.populations(), limits.temperature_range)?;
+    check_temperatures(candidate.populations(), plane, limits.temperature_range)?;
     if let Some(field) = diffusion {
         candidate.advance_tensor(forces, field)?;
     } else {
@@ -224,17 +249,26 @@ fn source_step_impl<S: Slab<D, Q>, const D: usize, const Q: usize, R>(
         }
     }
     if !candidate.flow_valid() { return Err(invalid("transport produced an inadmissible flow state")); }
-    check_temperatures(candidate.populations(), limits.temperature_range)?;
-    // Anti-bounce-back gives incoming = 2*w*Twall - outgoing. Therefore the
-    // independently measured link exchange is 2*(incoming - w*Twall).
-    // Measure BEFORE the second source kick, which is not wall transport.
-    let (qb, qt) = S::incoming();
-    let bottom_wall: f64 = candidate.populations()[plane..2*plane].iter()
-        .map(|p| 2.0 * (p[qb] - weights[qb] * bottom)).sum();
-    let top_wall: f64 = candidate.populations()[cells-2*plane..cells-plane].iter()
-        .map(|p| 2.0 * (p[qt] - weights[qt] * top)).sum();
+    check_temperatures(candidate.populations(), plane, limits.temperature_range)?;
+    // The streaming owner measures incoming minus outgoing on each actual
+    // reflected pair. This remains valid for flux/film/insulated walls and
+    // does not reconstruct exterior heat from the volume balance residual.
+    // Its trace is sampled before the second source kick, which is not wall heat.
+    let wall_exchange = candidate.wall_exchange().ok_or(invalid("missing thermal wall exchange"))?;
+    for (wall, exchange) in wall_exchange.iter().enumerate() {
+        if !exchange.mean_temperature.is_finite()
+            || !exchange.min_temperature.is_finite() || !exchange.max_temperature.is_finite()
+            || exchange.min_temperature < limits.temperature_range[0]
+            || exchange.max_temperature > limits.temperature_range[1]
+        {
+            return Err(ThermalSourceError::WallTemperature {
+                wall, minimum: exchange.min_temperature, maximum: exchange.max_temperature,
+            });
+        }
+    }
+    let [bottom_wall, top_wall] = wall_exchange.map(|exchange| exchange.heat_in);
     candidate.source_half_kick(heat, plane);
-    check_temperatures(candidate.populations(), limits.temperature_range)?;
+    check_temperatures(candidate.populations(), plane, limits.temperature_range)?;
     let stored_change: f64 = candidate.populations()[plane..cells-plane].iter()
         .zip(&state.populations()[plane..cells-plane])
         .map(|(after, before)| after.iter().zip(before).map(|(a,b)| a-b).sum::<f64>()).sum();
@@ -292,11 +326,13 @@ impl Slab<2, 5> for ThermalLbm {
             grid: self.grid.clone(), gpop: self.gpop.clone(), tau_g: self.tau_g,
             t_bottom: self.t_bottom, t_top: self.t_top, gbeta: self.gbeta,
             t_ref: self.t_ref, scratch: Vec::new(),
+            wall_boundaries: self.wall_boundaries, wall_exchange: self.wall_exchange,
             advection_history: self.advection_history.clone(),
         }, super::W5)
     }
     fn walls(&self) -> (f64, f64) { (self.t_bottom, self.t_top) }
-    fn incoming() -> (usize, usize) { (2, 4) }
+    fn thermal_walls(&self) -> [ThermalWall; 2] { self.thermal_walls() }
+    fn wall_exchange(&self) -> Option<[ThermalWallExchange; 2]> { self.wall_exchange }
     fn flow_valid(&self) -> bool {
         let g = &self.grid;
         flow_valid(&g.f, &g.tau, &g.fext, self.tau_g) && self.gbeta.is_finite() && self.t_ref.is_finite()
@@ -349,10 +385,12 @@ impl Slab<3, 7> for ThermalLbm3 {
         s.gpop.clone_from(&self.gpop);
         s.advection_history.clone_from(&self.advection_history);
         s.t_bottom = self.t_bottom; s.t_top = self.t_top; s.t_ref = self.t_ref;
+        s.wall_boundaries = self.wall_boundaries; s.wall_exchange = self.wall_exchange;
         (s, weights)
     }
     fn walls(&self) -> (f64, f64) { (self.t_bottom, self.t_top) }
-    fn incoming() -> (usize, usize) { (5, 6) }
+    fn thermal_walls(&self) -> [ThermalWall; 2] { self.thermal_walls() }
+    fn wall_exchange(&self) -> Option<[ThermalWallExchange; 2]> { self.wall_exchange }
     fn flow_valid(&self) -> bool {
         flow_valid(&self.grid.f, &self.grid.tau, &self.grid.fext, self.tau_g) && self.gbeta.is_finite() && self.t_ref.is_finite()
             && self.momentum_relaxation_valid(&self.grid.tau)
@@ -414,6 +452,8 @@ mod history_tests {
             reference.advance(&forces).unwrap();
         }
         let before = actual.populations().to_vec();
+        let before_walls = actual.thermal_walls();
+        let before_exchange = actual.wall_exchange();
         let mut heat = vec![0.0; cells];
         for cell in plane..cells - plane {
             heat[cell] = 0.0002 * ((cell % 7) as f64 - 3.0);
@@ -427,6 +467,8 @@ mod history_tests {
         );
         assert_eq!(rejected, Err(invalid("test endpoint rejection")));
         assert_eq!(actual.populations(), before.as_slice());
+        assert_eq!(actual.thermal_walls(), before_walls);
+        assert_eq!(actual.wall_exchange(), before_exchange);
         // The next accepted source steps must retain the same warmed
         // derivative as the ordinary solver, not restart it in each clone.
         // This catches both rollback leaks and omission from snapshot().
@@ -436,6 +478,7 @@ mod history_tests {
                 &mut actual, &zeros, &forces, limits, |_| Ok(()),
             ).unwrap();
             assert_eq!(actual.populations(), reference.populations());
+            assert_eq!(actual.wall_exchange(), reference.wall_exchange());
         }
     }
 
@@ -452,5 +495,60 @@ mod history_tests {
         three.perturb(0.012);
         three_reference.perturb(0.012);
         reject_then_advance::<_, 3, 7>(three, three_reference, [1e-5, -2e-6, 3e-6]);
+    }
+
+    #[test]
+    fn g0_flux_and_film_laws_survive_source_snapshots_and_endpoint_rejection() {
+        let walls = [
+            ThermalWall::HeatFlux(0.0002),
+            ThermalWall::Convective { transfer: 0.04, ambient: 0.0 },
+        ];
+        let mut two = ThermalLbm::slab(7, 10, 0.9, 0.8, 1e-5);
+        let mut two_reference = ThermalLbm::slab(7, 10, 0.9, 0.8, 1e-5);
+        two.set_thermal_walls(walls).unwrap();
+        two_reference.set_thermal_walls(walls).unwrap();
+        reject_then_advance::<_, 2, 5>(two, two_reference, [1e-5, -2e-6]);
+
+        let mut three = ThermalLbm3::slab(5, 3, 10, 0.9, 0.8, 1e-5);
+        let mut three_reference = ThermalLbm3::slab(5, 3, 10, 0.9, 0.8, 1e-5);
+        three.set_thermal_walls(walls).unwrap();
+        three_reference.set_thermal_walls(walls).unwrap();
+        reject_then_advance::<_, 3, 7>(three, three_reference, [1e-5, -2e-6, 3e-6]);
+    }
+
+    #[test]
+    fn g4_local_wall_trace_refuses_even_when_its_mean_and_fluid_are_in_range() {
+        let limits = ThermalSourceLimits {
+            max_cells: 8, temperature_range: [0.0, 1.0], balance_tolerance: 1e-12,
+        };
+        let walls = [ThermalWall::Adiabatic, ThermalWall::Temperature(0.0)];
+        let mut two = ThermalLbm::slab(2, 2, 0.9, 0.8, 0.0);
+        two.set_thermal_walls(walls).unwrap();
+        let cell = two.grid.idx(0, 1);
+        // Retain cell temperature while changing its nonequilibrium normal
+        // flux. After collision one insulated wall trace is negative, although
+        // both fluid temperatures and the mean lower-wall trace remain in [0,1].
+        two.gpop[cell][4] += 0.8;
+        two.gpop[cell][0] -= 0.8;
+        let before = two.gpop.clone();
+        let refusal = two.step_with_sources(&[0.0; 8], &[[0.0; 2]; 8], limits);
+        assert!(matches!(refusal,
+            Err(ThermalSourceError::WallTemperature { wall: 0, minimum, maximum })
+                if minimum < 0.0 && maximum <= 1.0));
+        assert_eq!(two.gpop, before);
+        assert_eq!(two.last_wall_exchange(), None);
+
+        let mut three = ThermalLbm3::slab(2, 1, 2, 0.9, 0.8, 0.0);
+        three.set_thermal_walls(walls).unwrap();
+        let cell = three.grid.idx(0, 0, 1);
+        three.gpop[cell][6] += 0.6;
+        three.gpop[cell][0] -= 0.6;
+        let before = three.gpop.clone();
+        let refusal = three.step_with_sources(&[0.0; 8], &[[0.0; 3]; 8], limits);
+        assert!(matches!(refusal,
+            Err(ThermalSourceError::WallTemperature { wall: 0, minimum, maximum })
+                if minimum < 0.0 && maximum <= 1.0));
+        assert_eq!(three.gpop, before);
+        assert_eq!(three.last_wall_exchange(), None);
     }
 }

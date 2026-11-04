@@ -2,7 +2,7 @@
 //!
 //! Only the two periodic tangent directions are test-filtered. Each z layer
 //! fits its own coefficient, with the actual stationary halfway velocity and
-//! fixed-temperature wall conditions in normal derivatives. The original
+//! prescribed-temperature or insulating wall conditions in normal derivatives. The original
 //! source owner measures wall heat and publishes the complete candidate.
 //! This remains resolved-wall, low-Mach Boussinesq sensible-temperature
 //! transport; modeled mechanical dissipation is diagnostic, not a heat source.
@@ -13,6 +13,7 @@ use crate::sgs3::dynamic::channel::{
     ScalarWall,
 };
 use crate::sgs3::dynamic::{DynamicSgsError, DynamicSgsReport, scalar::DynamicScalarReport};
+use crate::thermal::boundary::ThermalWall;
 
 /// Independent plane-averaged fits. No turbulent Prandtl number is prescribed.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -161,6 +162,9 @@ impl ThermalLbm3 {
     /// Guo-centered velocity, density and temperature. Neither fit wraps across
     /// the plates. Molecular rates come from the caller or original slab;
     /// coefficients are frozen for one source/flow/temperature step.
+    /// Active prescribed temperatures and zero-flux walls supply the scalar
+    /// derivatives. Nonzero flux/Robin walls refuse: their spatially varying
+    /// traces require a boundary filter this owner does not currently provide.
     ///
     /// Zero viscosity and zero diffusivity each preserve their original rate
     /// bits independently. Preparation allocates nothing and polls cancellation
@@ -175,6 +179,24 @@ impl ThermalLbm3 {
     ) -> Result<ThermalChannelSgsReport, ThermalSgsError> {
         poll(gate)?;
         config.validate()?;
+        let mut scalar_walls = [ScalarWall::ZeroGradient; 2];
+        for (scalar, wall) in scalar_walls.iter_mut().zip(self.thermal_walls()) {
+            wall.validate()
+                .map_err(|_| ThermalSgsError::Invalid("invalid thermal wall for channel SGS"))?;
+            *scalar = match wall {
+                ThermalWall::Temperature(value) => ScalarWall::Value(value),
+                ThermalWall::Adiabatic => ScalarWall::ZeroGradient,
+                ThermalWall::HeatFlux(flux) if flux == 0.0 => ScalarWall::ZeroGradient,
+                ThermalWall::Convective { transfer, .. } if transfer == 0.0 => {
+                    ScalarWall::ZeroGradient
+                }
+                ThermalWall::HeatFlux(_) | ThermalWall::Convective { .. } => {
+                    return Err(ThermalSgsError::Invalid(
+                        "channel SGS needs prescribed-temperature or zero-flux walls; nonzero flux/film traces need a local boundary filter",
+                    ));
+                }
+            };
+        }
         let (cells, plane) = self.layout()?;
         let fluid = cells - 2 * plane;
         if workspace.filter.shape() != [self.grid.nx, self.grid.ny, self.grid.nz - 2]
@@ -217,10 +239,7 @@ impl ThermalLbm3 {
             &workspace.velocity,
             [[0.0; 3]; 2],
             &workspace.temperature,
-            [
-                ScalarWall::Value(self.t_bottom),
-                ScalarWall::Value(self.t_top),
-            ],
+            scalar_walls,
             &mut workspace.scalar,
             || gate.is_requested(),
         )?;

@@ -7,9 +7,12 @@
 
 pub mod sources;
 pub mod tensor;
+/// Thermal boundary laws on the existing stationary halfway slab walls.
+pub mod boundary;
 pub(crate) mod advection;
 pub(crate) mod forcing;
 pub use forcing::ThermalForcingError;
+use boundary::{ThermalWall, ThermalWallError, ThermalWallExchange};
 
 use crate::core2::{Cell, Grid};
 use crate::{CS2, Q};
@@ -39,6 +42,8 @@ pub struct ThermalLbm {
     pub gbeta: f64,
     /// Reference temperature.
     pub t_ref: f64,
+    pub(crate) wall_boundaries: Option<[ThermalWall; 2]>,
+    pub(crate) wall_exchange: Option<[ThermalWallExchange; 2]>,
     advection_history: advection::FluxHistory<2>,
     scratch: Vec<[f64; Q]>,
 }
@@ -87,6 +92,8 @@ impl ThermalLbm {
             t_top,
             gbeta,
             t_ref: 0.5,
+            wall_boundaries: None,
+            wall_exchange: None,
             advection_history: advection::FluxHistory::default(),
             scratch: Vec::new(),
         }
@@ -102,6 +109,48 @@ impl ThermalLbm {
     #[must_use]
     pub fn diffusivity(&self) -> f64 {
         CS2 * (self.tau_g - 0.5)
+    }
+
+    /// Set bottom/top thermal laws without changing populations, buoyancy or
+    /// the temperature coordinate. The laws persist through ordinary and
+    /// checked source/transport steps. Invalid declarations leave state intact.
+    /// These are stationary impermeable planar walls; they add no solid storage.
+    pub fn set_thermal_walls(&mut self, walls: [ThermalWall; 2]) -> Result<(), ThermalWallError> {
+        for wall in walls { wall.validate()?; }
+        self.wall_boundaries = Some(walls);
+        self.wall_exchange = None;
+        Ok(())
+    }
+
+    /// Restore the original prescribed `t_bottom` and `t_top` boundaries.
+    pub fn reset_thermal_walls(&mut self) {
+        self.wall_boundaries = None;
+        self.wall_exchange = None;
+    }
+
+    /// Active bottom/top laws in the solver's scalar and per-step flux units.
+    #[must_use]
+    pub fn thermal_walls(&self) -> [ThermalWall; 2] {
+        self.wall_boundaries.unwrap_or([
+            ThermalWall::Temperature(self.t_bottom), ThermalWall::Temperature(self.t_top),
+        ])
+    }
+
+    /// Actual incoming-minus-outgoing link heat and halfway-wall temperatures
+    /// from the last completed transport step. No report exists before stepping
+    /// or after changing the laws. A checked rejection preserves the old report.
+    #[must_use]
+    pub const fn last_wall_exchange(&self) -> Option<[ThermalWallExchange; 2]> {
+        self.wall_exchange
+    }
+
+    fn wall_temperature_difference(&self) -> f64 {
+        match self.thermal_walls() {
+            [ThermalWall::Temperature(bottom), ThermalWall::Temperature(top)] => bottom - top,
+            _ => self.wall_exchange.map_or(f64::NAN, |walls| {
+                walls[0].mean_temperature - walls[1].mean_temperature
+            }),
+        }
     }
 
     /// Restart the thermal derivative after directly replacing temperature
@@ -153,7 +202,7 @@ impl ThermalLbm {
 
     /// One coupled step: freeze buoyancy from T, collide/stream temperature
     /// at the input physical velocity, then advance flow under the frozen
-    /// force. Fixed-temperature walls use anti-bounce-back.
+    /// force. The selected wall laws share the original halfway reflection.
     pub fn step(&mut self) {
         self.step_with_forces_inner(None, None, None);
     }
@@ -238,12 +287,13 @@ impl ThermalLbm {
                 |cell| grid.moments(cell).u,
             );
         }
-        advection::D2Q5.stream(
+        let walls = self.thermal_walls();
+        self.wall_exchange = Some(advection::D2Q5.stream_with_walls(
             &mut self.gpop,
             self.scratch.as_flattened(),
             [nx, ny],
-            Some([self.t_bottom, self.t_top]),
-        );
+            Some(walls),
+        ));
         self.grid.step(&mut self.scratch);
     }
 
@@ -260,7 +310,10 @@ impl ThermalLbm {
         ke
     }
 
-    /// Nusselt number: 1 + ⟨u_y·T⟩·H / (α·ΔT).
+    /// Volume Nusselt diagnostic: 1 + ⟨u_y·T⟩·H / (α·ΔT).
+    /// With flux/film walls, ΔT is the last measured mean wall contrast;
+    /// before its first step this returns NaN. A zero contrast is singular.
+    /// A steady source-free slab is needed to interpret this as wall transfer.
     #[must_use]
     pub fn nusselt(&self) -> f64 {
         let (nx, ny) = (self.grid.nx, self.grid.ny);
@@ -276,15 +329,17 @@ impl ThermalLbm {
             }
         }
         adv /= count as f64;
-        1.0 + adv * h / (self.diffusivity() * (self.t_bottom - self.t_top))
+        1.0 + adv * h / (self.diffusivity() * self.wall_temperature_difference())
     }
 
-    /// The Rayleigh number of the current configuration.
+    /// Rayleigh diagnostic based on prescribed or last measured mean wall
+    /// contrast and the original background diffusivity. Flux/film walls need
+    /// one completed step; before that this returns NaN.
     #[must_use]
     pub fn rayleigh(&self) -> f64 {
         let h = (self.grid.ny - 2) as f64;
         let nu = CS2 * (self.grid.tau[self.grid.idx(0, 1)] - 0.5);
-        self.gbeta * (self.t_bottom - self.t_top) * h * h * h / (nu * self.diffusivity())
+        self.gbeta * self.wall_temperature_difference() * h * h * h / (nu * self.diffusivity())
     }
 }
 

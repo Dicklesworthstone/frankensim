@@ -239,6 +239,152 @@ fn g0_channel_fits_use_guo_centered_velocity_and_same_wall_temperatures() {
 }
 
 #[test]
+fn g0_channel_sgs_uses_active_temperature_overrides_for_fit_and_transport() {
+    let gate = CancelGate::new_clock_free();
+    let mut state = ThermalLbm3::slab(5, 4, 5, 0.8, 0.9, 0.0);
+    seed(&mut state);
+    let mut reference = state.snapshot().0;
+    reference.t_bottom = 0.4;
+    reference.t_top = 0.2;
+    state
+        .set_thermal_walls([ThermalWall::Temperature(0.4), ThermalWall::Temperature(0.2)])
+        .unwrap();
+    let n = state.gpop.len();
+    let mut work = state.thermal_channel_sgs_workspace(usize::MAX).unwrap();
+    let mut old = reference.thermal_channel_sgs_workspace(usize::MAX).unwrap();
+    let actual = state
+        .prepare_thermal_channel_sgs(config(), None, &mut work, &gate)
+        .unwrap();
+    let expected = reference
+        .prepare_thermal_channel_sgs(config(), None, &mut old, &gate)
+        .unwrap();
+    assert_eq!(actual, expected);
+    assert_eq!(work.scalar.diffusivities(), old.scalar.diffusivities());
+    let heat = vec![0.0; n];
+    let force = vec![[0.0; 3]; n];
+    let actual = state
+        .step_with_sources_and_channel_sgs(
+            &heat,
+            &force,
+            config(),
+            None,
+            &mut work,
+            limits(n),
+            &gate,
+        )
+        .unwrap();
+    let expected = reference
+        .step_with_sources_and_channel_sgs(
+            &heat,
+            &force,
+            config(),
+            None,
+            &mut old,
+            limits(n),
+            &gate,
+        )
+        .unwrap();
+    assert_eq!(actual, expected);
+    assert_eq!(state.gpop, reference.gpop);
+    assert_eq!(state.grid.f, reference.grid.f);
+    assert_eq!(state.last_wall_exchange(), reference.last_wall_exchange());
+}
+
+#[test]
+fn g0_channel_sgs_insulation_uses_native_neumann_filter_and_zero_wall_heat() {
+    let gate = CancelGate::new_clock_free();
+    for walls in [
+        [ThermalWall::Adiabatic; 2],
+        [
+            ThermalWall::HeatFlux(0.0),
+            ThermalWall::Convective {
+                transfer: 0.0,
+                ambient: -9.0,
+            },
+        ],
+    ] {
+        let mut state = ThermalLbm3::slab(5, 4, 5, 0.8, 0.9, 0.0);
+        seed(&mut state);
+        state.set_thermal_walls(walls).unwrap();
+        let n = state.gpop.len();
+        let mut work = state.thermal_channel_sgs_workspace(usize::MAX).unwrap();
+        let mut oracle = state.thermal_channel_sgs_workspace(usize::MAX).unwrap();
+        let actual = state
+            .prepare_thermal_channel_sgs(config(), None, &mut work, &gate)
+            .unwrap();
+        // Independently invoke the original filter with physical zero normal
+        // derivatives. A stale 1/0 Dirichlet fit does not match these fields.
+        let (momentum, heat) = oracle
+            .filter
+            .prepare_with_scalar(
+                config().momentum,
+                config().heat,
+                &work.density,
+                &work.velocity,
+                [[0.0; 3]; 2],
+                &work.temperature,
+                [ScalarWall::ZeroGradient; 2],
+                &mut oracle.scalar,
+                || gate.is_requested(),
+            )
+            .unwrap();
+        assert_eq!(actual.momentum_fit, momentum);
+        assert_eq!(actual.heat_fit, heat);
+        assert_eq!(work.scalar.diffusivities(), oracle.scalar.diffusivities());
+        let result = state
+            .step_with_sources_and_channel_sgs(
+                &vec![0.0; n],
+                &vec![[0.0; 3]; n],
+                config(),
+                None,
+                &mut work,
+                limits(n),
+                &gate,
+            )
+            .unwrap();
+        assert_eq!(result.heat.bottom_wall, 0.0);
+        assert_eq!(result.heat.top_wall, 0.0);
+        assert!(result.heat.stored_change.abs() < 2e-12);
+    }
+}
+
+#[test]
+fn g4_channel_sgs_refuses_unresolved_flux_or_film_traces_without_publication() {
+    let gate = CancelGate::new_clock_free();
+    let mut state = ThermalLbm3::slab(5, 4, 5, 0.8, 0.9, 0.0);
+    seed(&mut state);
+    let n = state.gpop.len();
+    let mut work = state.thermal_channel_sgs_workspace(usize::MAX).unwrap();
+    for wall in [
+        ThermalWall::HeatFlux(0.0001),
+        ThermalWall::Convective {
+            transfer: 0.03,
+            ambient: 0.0,
+        },
+    ] {
+        let walls = [wall, ThermalWall::Temperature(0.0)];
+        state.set_thermal_walls(walls).unwrap();
+        let before = bits(&state);
+        let exchange = state.last_wall_exchange();
+        assert!(matches!(
+            state.step_with_sources_and_channel_sgs(
+                &vec![0.0; n],
+                &vec![[0.0; 3]; n],
+                config(),
+                None,
+                &mut work,
+                limits(n),
+                &gate,
+            ),
+            Err(ThermalSgsError::Invalid(_))
+        ));
+        assert_eq!(bits(&state), before);
+        assert_eq!(state.thermal_walls(), walls);
+        assert_eq!(state.last_wall_exchange(), exchange);
+    }
+}
+
+#[test]
 fn g0_channel_budget_heat_cap_source_cancellation_and_retry_are_atomic() {
     let gate = CancelGate::new_clock_free();
     let mut state = ThermalLbm3::slab(5, 4, 5, 0.8, 0.9, 0.0);
