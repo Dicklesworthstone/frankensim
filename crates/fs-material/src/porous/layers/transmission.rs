@@ -109,6 +109,16 @@ impl<'a> TransmittingLayers<'a> {
         &self.receiver
     }
 
+    /// beta=Z0*v_n/p in exp(+i omega t), from the original scaled entrance
+    /// pressure/velocity pair. Unlike reconstructing it from rounded R, this
+    /// retains weak conductance when R rounds to unity. A pressure node has no
+    /// finite Robin representation and refuses. No loss integration is done.
+    pub fn normalized_surface_admittance(&self, cosine: f64) -> Result<C64, MaterialError> {
+        let (state, _, _) =
+            self.surface_state_with_layers(cosine, |_, _| Ok::<_, MaterialError>(()))?;
+        state.normalized_surface_admittance(cosine)
+    }
+
     /// Exact planar reflection/refraction/transmission within the admitted
     /// material model. Critical incidence (receiving k_n=0) remains finite.
     pub fn scattering(&self, cosine: f64) -> Result<LayeredTransmission, MaterialError> {
@@ -120,32 +130,7 @@ impl<'a> TransmittingLayers<'a> {
         cosine: f64,
         observe: impl FnMut(usize, LayerTransfer) -> Result<(), E>,
     ) -> Result<LayeredTransmission, E> {
-        if !cosine.is_finite() || cosine <= 0.0 || cosine > 1.0 {
-            return Err(bad("layer transmission needs incidence cosine in (0,1]").into());
-        }
-        let q = normal_wavenumber_ratio(
-            self.speed_ratio,
-            cosine,
-            self.prepared.fluid().acoustic().sound_speed_m_s(),
-            self.receiver.sound_speed_m_s(),
-        );
-        let receiving_kn = q.scale(self.prepared.k0);
-        if !finite(receiving_kn) || (q != C64::ZERO && receiving_kn == C64::ZERO) {
-            return Err(bad("receiving normal wavenumber is unrepresentable").into());
-        }
-        // Y_receiver/Y_incident = (rho_incident/rho_receiver)*q/cos(theta).
-        // Never divide by receiving k_n: it may be exactly zero at criticality.
-        let load = if q == C64::ZERO {
-            C64::ZERO
-        } else {
-            let value = positive_product_ratio(self.density_ratio, magnitude_scale(q), cosine)?;
-            if q.re > 0.0 {
-                C64::from_re(value)
-            } else {
-                C64::new(0.0, -value)
-            }
-        };
-        let state = transmit_state_with_layers(&self.prepared, cosine, C64::ONE, load, observe)?;
+        let (state, load, receiving_kn) = self.surface_state_with_layers(cosine, observe)?;
         let reflection = state.reflection;
         let transmission = state.coefficient(C64::ONE)?;
         // Compute weighted power before underflowing |T|^2. A small pressure
@@ -179,6 +164,40 @@ impl<'a> TransmittingLayers<'a> {
             transmitted_fraction: transmitted,
             absorbed_fraction: absorbed,
         })
+    }
+
+    pub(super) fn surface_state_with_layers<E: From<MaterialError>>(
+        &self,
+        cosine: f64,
+        observe: impl FnMut(usize, LayerTransfer) -> Result<(), E>,
+    ) -> Result<(TransmittedState, C64, C64), E> {
+        if !cosine.is_finite() || cosine <= 0.0 || cosine > 1.0 {
+            return Err(bad("layer transmission needs incidence cosine in (0,1]").into());
+        }
+        let q = normal_wavenumber_ratio(
+            self.speed_ratio,
+            cosine,
+            self.prepared.fluid().acoustic().sound_speed_m_s(),
+            self.receiver.sound_speed_m_s(),
+        );
+        let receiving_kn = q.scale(self.prepared.k0);
+        if !finite(receiving_kn) || (q != C64::ZERO && receiving_kn == C64::ZERO) {
+            return Err(bad("receiving normal wavenumber is unrepresentable").into());
+        }
+        // Y_receiver/Y_incident = (rho_incident/rho_receiver)*q/cos(theta).
+        // Never divide by receiving k_n: it may be exactly zero at criticality.
+        let load = if q == C64::ZERO {
+            C64::ZERO
+        } else {
+            let value = positive_product_ratio(self.density_ratio, magnitude_scale(q), cosine)?;
+            if q.re > 0.0 {
+                C64::from_re(value)
+            } else {
+                C64::new(0.0, -value)
+            }
+        };
+        let state = transmit_state_with_layers(&self.prepared, cosine, C64::ONE, load, observe)?;
+        Ok((state, load, receiving_kn))
     }
 }
 
@@ -237,6 +256,10 @@ pub(super) fn transmit_state_with_layers<E: From<MaterialError>>(
 pub(super) struct TransmittedState {
     pub reflection: C64,
     pub entering: f64,
+    entrance_pressure: C64,
+    entrance_velocity: C64,
+    // Common scaled pressure/velocity factor before incident normalization.
+    entrance_scale_log: f64,
     amplitude: LogAmplitude,
 }
 impl TransmittedState {
@@ -248,6 +271,7 @@ impl TransmittedState {
         mut amplitude: LogAmplitude,
     ) -> Result<Self, MaterialError> {
         let (reflection, entering) = reflected_state(pressure, velocity)?;
+        let entrance_scale_log = amplitude.log;
         let denominator = pressure + velocity;
         let denominator_abs = denominator.abs();
         amplitude.add(core::f64::consts::LN_2 - det::ln(denominator_abs));
@@ -255,8 +279,49 @@ impl TransmittedState {
         Ok(Self {
             reflection,
             entering,
+            entrance_pressure: pressure,
+            entrance_velocity: velocity,
+            entrance_scale_log,
             amplitude,
         })
+    }
+
+    pub(super) fn normalized_surface_admittance(&self, cosine: f64) -> Result<C64, MaterialError> {
+        if self.entrance_pressure == C64::ZERO {
+            return Err(bad("transmitting surface has a pressure node, not finite admittance"));
+        }
+        let beta = (self.entrance_velocity / self.entrance_pressure).scale(cosine);
+        if !finite(beta) || beta.re < 0.0 {
+            return Err(bad("transmitting surface admittance is nonfinite or active"));
+        }
+        Ok(beta)
+    }
+
+    /// Log amplitude for unit entrance pressure, before any squared field or
+    /// incident-power fraction can underflow. The same normalization supplies
+    /// independent local-loss integration and receiving-fluid power.
+    pub(super) fn surface_pressure_log(&self) -> Result<f64, MaterialError> {
+        if self.entrance_pressure == C64::ZERO {
+            return Err(bad("transmitting surface power needs finite entrance pressure"));
+        }
+        Ok(-det::ln(self.entrance_pressure.abs()))
+    }
+
+    pub(super) fn transmitted_surface_conductance(
+        &self,
+        load: C64,
+        cosine: f64,
+    ) -> Result<f64, MaterialError> {
+        if load.re == 0.0 {
+            return Ok(0.0);
+        }
+        let logarithm = det::ln(cosine) + det::ln(load.re)
+            + 2.0 * (self.entrance_scale_log + self.surface_pressure_log()?);
+        let conductance = det::exp(logarithm);
+        if !conductance.is_finite() || conductance < 0.0 {
+            return Err(bad("transmitted surface conductance is unrepresentable"));
+        }
+        Ok(conductance)
     }
 
     /// Receiver coefficient times its common transmitted amplitude. Multiply
@@ -408,5 +473,97 @@ impl LogAmplitude {
             return Err(bad("layer transmission phase is unrepresentable"));
         }
         Ok((self.phase * divided(direction, norm)).scale(magnitude))
+    }
+}
+
+#[cfg(test)]
+mod surface_tests {
+    use super::*;
+    use crate::fluid_acoustics::thermoviscous::ThermoviscousFluidState;
+    use crate::fluid_transport::FluidTransportState;
+    use crate::porous::{PorousCard, PorousFluidLaw};
+    use crate::porous::layers::absorption::{LayerAbsorptionBudget, LayerAbsorptionError};
+
+    fn fluid() -> ThermoviscousFluidState {
+        ThermoviscousFluidState::from_heat_capacity_ratio(
+            FluidAcousticState::try_new(1.2, 340.0).unwrap(),
+            FluidTransportState::try_new(1.2, 1005.0, 0.0257, 1.81e-5).unwrap(),
+            1.4,
+        ).unwrap()
+    }
+
+    #[test]
+    fn surface_admittance_keeps_weak_receiving_conductance() {
+        let gas = fluid();
+        let receiver = FluidAcousticState::try_new(1.2e18, 340.0).unwrap();
+        let stack = TransmittingLayers::new(&gas, &receiver, 2000.0, &[]).unwrap();
+        let scattering = stack.scattering(1.0).unwrap();
+        assert_eq!(scattering.pressure_reflection, C64::ONE);
+        let beta = stack.normalized_surface_admittance(1.0).unwrap();
+        assert!((beta.re / 1e-18 - 1.0).abs() < 1e-14);
+        assert_eq!(beta.im, 0.0);
+        let power = stack.normal_surface_power(
+            LayerAbsorptionBudget { max_layers: 0 }, || false,
+        ).unwrap();
+        assert_eq!(power.absorbed_conductance, 0.0);
+        assert!((power.transmitted_conductance / beta.re - 1.0).abs() < 2e-13);
+
+        let node = TransmittedState::from_pair(
+            C64::ZERO, C64::ONE, LogAmplitude::new(0.0),
+        ).unwrap();
+        assert!(node.normalized_surface_admittance(1.0).is_err());
+    }
+
+    #[test]
+    fn transmitting_surface_separates_positive_heat_from_outgoing_power() {
+        let gas = fluid();
+        let receiver = gas.acoustic();
+        let law = PorousFluidLaw::try_new(PorousCard::basotect_foam02(), 1.81e-5).unwrap();
+        let omega = core::f64::consts::TAU * 700.0;
+        let lossless = TransmittingLayers::new(
+            &gas, &receiver, omega, &[Layer::FluidGap { thickness_m: 0.03 }],
+        ).unwrap();
+        let budget = LayerAbsorptionBudget { max_layers: 1 };
+        let power = lossless.normal_surface_power(budget, || false).unwrap();
+        assert_eq!(power.absorbed_conductance, 0.0);
+        assert!((power.transmitted_conductance - 1.0).abs() < 2e-13);
+        for thickness_m in [0.03, 1e-20] {
+            let stack = TransmittingLayers::new(
+                &gas, &receiver, omega, &[Layer::Porous { law: &law, thickness_m }],
+            ).unwrap();
+            let power = stack.normal_surface_power(budget, || false).unwrap();
+            let original = stack.layer_absorption(1.0, 1.0, budget, || false).unwrap();
+            let scattering = stack.scattering(1.0).unwrap();
+            let surface_pressure_squared = (C64::ONE + scattering.pressure_reflection).norm_sq();
+            assert!(power.absorbed_conductance > 0.0, "even sub-roundoff heat must survive");
+            assert!(power.transmitted_conductance > 0.0);
+            assert!((power.absorbed_conductance * surface_pressure_squared
+                / original.absorbed_fraction - 1.0).abs() < 2e-12);
+            assert!((power.transmitted_conductance * surface_pressure_squared
+                / original.transmitted_fraction - 1.0).abs() < 2e-12);
+            assert!(power.balance_residual.abs() < 2e-12 * power.normalized_admittance.re);
+        }
+    }
+
+    #[test]
+    fn transmitting_surface_power_retains_native_work_and_cancellation_limits() {
+        let gas = fluid();
+        let receiver = gas.acoustic();
+        let stack = TransmittingLayers::new(
+            &gas, &receiver, 2000.0, &[Layer::FluidGap { thickness_m: 0.03 }],
+        ).unwrap();
+        assert!(matches!(
+            stack.normal_surface_power(LayerAbsorptionBudget { max_layers: 0 }, || false),
+            Err(LayerAbsorptionError::Invalid(_))
+        ));
+        let mut polls = 0;
+        assert!(matches!(
+            stack.normal_surface_power(LayerAbsorptionBudget { max_layers: 1 }, || {
+                polls += 1;
+                polls == 2
+            }),
+            Err(LayerAbsorptionError::Cancelled)
+        ));
+        assert!(stack.normalized_surface_admittance(0.0).is_err());
     }
 }

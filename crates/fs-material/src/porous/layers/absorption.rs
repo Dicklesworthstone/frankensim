@@ -33,6 +33,19 @@ pub struct LayerAbsorptionBudget {
     pub max_layers: usize,
 }
 
+/// Normal-incidence power per squared TOTAL entrance pressure. Each real
+/// coefficient multiplies |p_surface|²/(2*Z0) to give mean flux [W/m²].
+/// The input admittance uses exp(+i omega t). Absorption comes from the native
+/// positive viscous/thermal integrals; transmission leaves into the lossless
+/// receiving fluid. The measured residual is retained, never redistributed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LayerSurfacePower {
+    pub normalized_admittance: C64,
+    pub absorbed_conductance: f64,
+    pub transmitted_conductance: f64,
+    pub balance_residual: f64,
+}
+
 /// Work in one declared layer, in the original exposed-to-rear order.
 /// The fractions use incident normal power through the physical face. The
 /// viscous term includes BOTH normal and tangential particle velocity.
@@ -161,6 +174,63 @@ impl RigidBackedLayers<'_> {
 }
 
 impl TransmittingLayers<'_> {
+    /// Separate irreversible layer loss from outgoing receiving-fluid power
+    /// for a locally reacting normal-incidence boundary. Normalize the retained
+    /// fields to TOTAL entrance pressure before their positive loss integrals;
+    /// weak heat is not recovered from a rounded reflection or power residual.
+    /// Uses one bounded propagation and one loss pass, with per-layer polling.
+    /// Ordinary scattering/admittance queries do not perform this integration.
+    pub fn normal_surface_power(
+        &self,
+        budget: LayerAbsorptionBudget,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<LayerSurfacePower, LayerAbsorptionError> {
+        let prepared = self.prepared_layers();
+        admit(prepared.layer_count(), 1.0, 1.0, budget, &mut cancelled)?;
+        let mut transfers = [LayerTransfer::default(); MAX_LAYERS];
+        let (state, load, _) =
+            self.surface_state_with_layers::<LayerAbsorptionError>(1.0, |i, step| {
+                poll(&mut cancelled)?;
+                transfers[i] = step;
+                Ok(())
+            })?;
+        let normalized_admittance = state.normalized_surface_admittance(1.0)?;
+        let transmitted_conductance = state.transmitted_surface_conductance(load, 1.0)?;
+        let (_, total) = integrate_layers(
+            prepared,
+            1.0,
+            1.0,
+            &transfers,
+            state.surface_pressure_log()?,
+            &mut cancelled,
+        )?;
+        let absorbed_conductance = total.to_f64();
+        let balance_residual = (Dd::from_f64(normalized_admittance.re)
+            - total
+            - Dd::from_f64(transmitted_conductance))
+        .to_f64();
+        let scale = normalized_admittance.re
+            .max(absorbed_conductance)
+            .max(transmitted_conductance);
+        let tolerance = 1024.0 * f64::EPSILON * (prepared.layer_count() as f64 + 1.0) * scale;
+        if !absorbed_conductance.is_finite()
+            || absorbed_conductance < 0.0
+            || !balance_residual.is_finite()
+            || balance_residual.abs() > tolerance
+        {
+            return Err(LayerAbsorptionError::Invalid(
+                "surface loss and transmission disagree with entrance work",
+            ));
+        }
+        poll(&mut cancelled)?;
+        Ok(LayerSurfacePower {
+            normalized_admittance,
+            absorbed_conductance,
+            transmitted_conductance,
+            balance_residual,
+        })
+    }
+
     /// The same local positive loss integrals with the actual outgoing-fluid
     /// termination. The original R/T amplitudes and receiving power weights
     /// are unchanged; this report resolves loss independently of their residual.
@@ -293,54 +363,16 @@ fn partition(
     transfers: &[LayerTransfer; MAX_LAYERS],
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<LayerAbsorption, LayerAbsorptionError> {
-    let mut layers = [LayerAbsorbedPower::default(); MAX_LAYERS];
-    let mut total = Dd::ZERO;
-    // The incident pressure is one: p_front + Z_ref*v_front = 2. Only
-    // magnitude is needed; a common phase cancels in every work integral.
+    // Preserve the original unit-incident-pressure normalization and arithmetic.
     let front = transfers[0];
-    let mut amplitude = LogAmplitude::new(if stack.layer_count() == 0 {
+    let amplitude_log = if stack.layer_count() == 0 {
         0.0
     } else {
         core::f64::consts::LN_2 - det::ln((front.front_pressure + front.front_velocity).abs())
-    });
-    for (i, layer) in stack.layers.iter().enumerate() {
-        poll(cancelled)?;
-        let step = transfers[i];
-        let d = layer.source.thickness_m();
-        if d == 0.0 {
-            continue;
-        }
-        let front_log = amplitude.log;
-        let kn = step.normal_wavenumber;
-        amplitude.add(if kn.im == 0.0 {
-            -log_scaled(16.0, step.normalization)
-        } else {
-            kn.im * d - log_scaled(8.0, step.normalization)
-        });
-        if let Some(response) = layer.porous {
-            let [viscous, thermal] = layer_loss(
-                stack,
-                cosine,
-                d,
-                &response,
-                step,
-                [front_log, amplitude.log],
-            )?;
-            let absorbed = viscous + thermal;
-            let power = incident_power_w * absorbed;
-            if !power.is_finite() || !absorbed.is_finite() {
-                return Err(LayerAbsorptionError::Invalid(
-                    "layer absorbed power is unrepresentable",
-                ));
-            }
-            layers[i] = LayerAbsorbedPower {
-                viscous_absorbed_fraction: viscous,
-                thermal_absorbed_fraction: thermal,
-                absorbed_power_w: power,
-            };
-            total = total + Dd::from_f64(viscous) + Dd::from_f64(thermal);
-        }
-    }
+    };
+    let (layers, total) = integrate_layers(
+        stack, cosine, incident_power_w, transfers, amplitude_log, cancelled,
+    )?;
     finish_partition(
         incident_power_w,
         outgoing,
@@ -397,6 +429,58 @@ pub(super) fn finish_partition(
         layers,
         layer_count,
     })
+}
+
+fn integrate_layers(
+    stack: &RigidBackedLayers<'_>,
+    cosine: f64,
+    incident_power_w: f64,
+    transfers: &[LayerTransfer; MAX_LAYERS],
+    amplitude_log: f64,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<([LayerAbsorbedPower; MAX_LAYERS], Dd), LayerAbsorptionError> {
+    let mut layers = [LayerAbsorbedPower::default(); MAX_LAYERS];
+    let mut total = Dd::ZERO;
+    let mut amplitude = LogAmplitude::new(amplitude_log);
+    for (i, layer) in stack.layers.iter().enumerate() {
+        poll(cancelled)?;
+        let step = transfers[i];
+        let d = layer.source.thickness_m();
+        if d == 0.0 {
+            continue;
+        }
+        let front_log = amplitude.log;
+        let kn = step.normal_wavenumber;
+        amplitude.add(if kn.im == 0.0 {
+            -log_scaled(16.0, step.normalization)
+        } else {
+            kn.im * d - log_scaled(8.0, step.normalization)
+        });
+        if let Some(response) = layer.porous {
+            let [viscous, thermal] = layer_loss(
+                stack,
+                cosine,
+                d,
+                &response,
+                step,
+                [front_log, amplitude.log],
+            )?;
+            let absorbed = viscous + thermal;
+            let power = incident_power_w * absorbed;
+            if !power.is_finite() || !absorbed.is_finite() {
+                return Err(LayerAbsorptionError::Invalid(
+                    "layer absorbed power is unrepresentable",
+                ));
+            }
+            layers[i] = LayerAbsorbedPower {
+                viscous_absorbed_fraction: viscous,
+                thermal_absorbed_fraction: thermal,
+                absorbed_power_w: power,
+            };
+            total = total + Dd::from_f64(viscous) + Dd::from_f64(thermal);
+        }
+    }
+    Ok((layers, total))
 }
 
 pub(super) fn layer_loss(

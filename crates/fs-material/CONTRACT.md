@@ -11205,6 +11205,28 @@ The focused regression source covers independent matrices, reciprocity,
 subdivision, critical/TIR phase, matched delays, thick absorption, extreme
 contrast, original-source sampling and admission.
 
+The normal-incidence local-boundary view uses
+`TransmittingLayers::normalized_surface_admittance` directly from the same
+scaled entrance pressure/velocity pair; it does not reconstruct a weak load
+from rounded reflection. Native beta is `Z0*v_n/p` in exp(+i omega t), and a
+true entrance pressure node refuses a finite Robin representation. Ordinary
+reflection, transmission and admittance queries perform no heat integration.
+
+The explicit `normal_surface_power` query returns `LayerSurfacePower` with
+independent irreversible-loss and outgoing-receiver conductances. Each
+coefficient multiplies total entrance `|p|^2/(2*Z0)` to obtain W/m². The original
+positive viscous/thermal integrals are normalized to that entrance pressure
+before any squared-field underflow; heat is not a reflected/transmitted power
+difference. Compensated log amplitudes retain receiver flux independently.
+The residual against `Re(beta)` remains visible and is never redistributed.
+Matched lossless backing has zero heat while accepting transmitted power.
+This query retains the native explicit layer allowance, fixed storage and
+cancellation in both propagation and loss passes. Focused regressions cover
+weak receiving conductance, sub-roundoff porous heat, matched lossless loading,
+native incident-power equivalence, pressure-node refusal and bounded work.
+This is a planar local normal-incidence power account, not a finite receiving
+geometry, transient thermal solve or elastic-backed extension.
+
 `Layer::FluidLayer` additionally retains a borrowed original `FluidAcoustics`
 source for each finite homogeneous layer, so differing density and sound speed
 participate in the same oblique reflection/transmission solve. Repeated uses of
