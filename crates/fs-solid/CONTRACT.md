@@ -825,6 +825,39 @@ equivalence and finite-deformation support reactions with independent formulas.
 These synthetic regressions require native execution; they do not establish
 experimental material calibration or mesh convergence.
 
+## Native three-dimensional hyperelastic continuation
+
+`HyperTetProblem::prepare_continuation` binds the original prepared P1
+tetrahedra, hyperelastic material adapters, homogeneous supports and dead
+nodal/reference-volume loads to the existing bordered pseudo-arclength owner.
+Explicit positive displacement and force scales define dimensionless free
+coordinates and force residuals. Fixed coordinates are eliminated from the
+path metric; their original applied loads remain in the recovered reactions.
+The native consistent tangent is restricted directly in canonical sparse-row
+order and scaled by L/F, without another material law or repeated COO sorting.
+
+`start_from` admits an actual physical equilibrium against the same force
+equation. `advance` returns a complete candidate, preserving its input even
+when a later requested step fails or is cancelled. `response` recovers metres,
+newtons, stored energy, det F and explicit free-force residuals. The existing
+public `PathState` contains dimensionless free coordinates and trace values;
+its tangent and step control survive split/resume. `PathResidual::checkpoint`
+adds a backward-compatible cancellation hook at corrector and controlled
+FGMRES boundaries; dense factorizations remain bounded leaves of at most
+1024 coordinates. Original element-attributed material errors survive the
+generic continuation boundary.
+
+The native `hyper3_continuation` tests include independently derived
+Neo-Hookean lateral contraction, energy/reactions, extreme physical rescaling,
+force/tangent derivatives, checkpoint/cancellation refusals and a descending
+branch past the original logarithmic Neo-Hookean law's large-dilation fold.
+That fold is a constitutive verification fixture, not calibrated rubber
+behavior or a geometric-buckling result. Event locations remain diagnostics;
+no mixed-incompressibility, follower-load continuation, moving supports,
+branch-uniqueness or continuum stability certificate is supplied. Full native
+assembly/API tests require the complete workspace; generic numerical-kernel
+execution alone does not establish that broader coverage.
+
 ## Prepared finite-deformation reference geometry
 
 `hyper3::prepared::PreparedHyperTetProblem` retains admitted reference shape

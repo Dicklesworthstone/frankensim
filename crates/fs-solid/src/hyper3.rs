@@ -101,6 +101,9 @@ pub mod visco;
 /// Taylor–Hood finite-strain solids with an independent continuous pressure field.
 pub mod mixed;
 
+/// Prepared, dimensionless dead-load paths through three-dimensional limit points.
+pub mod continuation;
+
 /// Newton / load-stepping controls.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HyperTetSettings {

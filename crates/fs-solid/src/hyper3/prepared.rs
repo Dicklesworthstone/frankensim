@@ -90,7 +90,11 @@ impl<L: FiniteStrainPotential> PreparedHyperTetProblem<'_, L> {
         Ok(f)
     }
 
-    fn evaluate(&self, displacement_m: &[f64], cx: &Cx<'_>) -> Result<Evaluated, HyperTetError> {
+    pub(super) fn evaluate(
+        &self,
+        displacement_m: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<Evaluated, HyperTetError> {
         checkpoint(cx)?;
         self.problem.check_len(displacement_m)?;
         let state = self

@@ -21,7 +21,7 @@
 //! proves split runs are bit-identical to straight runs.
 
 use crate::SolidError;
-use fs_solver::nonlinear::FgmresState;
+use fs_solver::nonlinear::{FgmresState, SolverRunProgress};
 use fs_solver::op::LinearOp;
 use fs_sparse::Csr;
 use fs_sparse::precond::IdentityPrecond;
@@ -29,6 +29,12 @@ use std::fmt::Write as _;
 
 /// A parameterized equilibrium residual `R(u, λ) = R_int(u) − λ F_ext`.
 pub trait PathResidual {
+    /// Bounded cancellation hook, polled at path/corrector boundaries and
+    /// around every restarted-Krylov callback. Existing pure problems need no
+    /// context. Dense factorizations up to 1024 DOFs remain bounded leaves.
+    fn checkpoint(&self) -> Result<(), SolidError> {
+        Ok(())
+    }
     /// DOF count.
     fn ndof(&self) -> usize;
     /// The residual at (u, λ).
@@ -210,7 +216,8 @@ impl LinearOp for Bordered<'_> {
     }
 }
 
-fn bordered_solve(
+fn bordered_solve<P: PathResidual>(
+    problem: &P,
     k: &Csr,
     load: &[f64],
     tangent: &[f64],
@@ -218,12 +225,16 @@ fn bordered_solve(
     rhs: &[f64],
     arc_rhs: f64,
 ) -> Result<Vec<f64>, SolidError> {
+    problem.checkpoint()?;
     let n = load.len();
     if k.nrows() != n || k.ncols() != n || tangent.len() != n || rhs.len() != n {
         return Err(invalid("continuation tangent/residual dimensions disagree"));
     }
     let mut scales = Vec::with_capacity(n + 1);
     for (i, force) in load.iter().enumerate() {
+        if i % 256 == 0 {
+            problem.checkpoint()?;
+        }
         let (_, values) = k.row(i);
         if values.iter().any(|x| !x.is_finite()) {
             return Err(invalid("nonfinite continuation tangent"));
@@ -284,16 +295,37 @@ fn bordered_solve(
             dense[n * size + i] = tangent[i] / op.scales[n];
         }
         dense[n * size + n] = lambda_tangent / op.scales[n];
+        problem.checkpoint()?;
         if let Ok(factor) = fs_la::factor::lu(&dense, size) {
+            problem.checkpoint()?;
             let mut x = b.clone();
             factor.solve(&mut x);
+            problem.checkpoint()?;
             if relative_residual(&x) <= 1e-10 {
+                problem.checkpoint()?;
                 return Ok(x);
             }
         }
     }
     let mut state = FgmresState::new(&b, (n + 1).min(64));
-    let _ = state.run(&op, &IdentityPrecond, &b, 1e-11, 320);
+    let mut interruption = None;
+    let report = state.run_controlled(&op, &IdentityPrecond, &b, 1e-11, 320, &mut || {
+        if let Err(error) = problem.checkpoint() {
+            interruption = Some(error);
+            true
+        } else {
+            false
+        }
+    });
+    if let Some(error) = interruption {
+        return Err(error);
+    }
+    if report.progress != SolverRunProgress::Complete {
+        return Err(SolidError::InternalInvariant {
+            what: format!("continuation Krylov callback failed: {:?}", report.progress),
+        });
+    }
+    problem.checkpoint()?;
     let rel_residual = relative_residual(&state.x);
     if !rel_residual.is_finite() || rel_residual > 1e-10 {
         return Err(SolidError::SolveFailed {
@@ -301,6 +333,7 @@ fn bordered_solve(
             rel_residual,
         });
     }
+    problem.checkpoint()?;
     Ok(state.x)
 }
 
@@ -329,6 +362,7 @@ pub fn advance<P: PathResidual>(
     settings: &ArcSettings,
     steps: usize,
 ) -> Result<(), SolidError> {
+    problem.checkpoint()?;
     let n = problem.ndof();
     let tangent_length = norm(&state.tangent.0).hypot(state.tangent.1);
     if n == 0
@@ -366,6 +400,7 @@ pub fn advance<P: PathResidual>(
         ));
     }
     for _ in 0..steps {
+        problem.checkpoint()?;
         let k = problem.tangent(&state.u, state.lambda)?;
         if k.nrows() != n
             || k.ncols() != n
@@ -388,6 +423,7 @@ pub fn advance<P: PathResidual>(
             // The last row orients the new tangent along the previous one.
             // No inverse of K is needed at a simple fold.
             let v = bordered_solve(
+                problem,
                 &k,
                 &fext,
                 &state.tangent.0,
@@ -405,11 +441,13 @@ pub fn advance<P: PathResidual>(
         // without a λ̇ flip = branch-point candidate.
         let limit_point = state.step > 0 && lam_dot * state.tangent.1 < 0.0;
         let definite = is_positive_definite(&k);
+        problem.checkpoint()?;
         let branch_point =
             state.step > 0 && definite != state.last_definite && lam_dot * state.tangent.1 > 0.0;
         // Corrector with step halving.
         let mut ds = state.ds;
         loop {
+            problem.checkpoint()?;
             match correct(
                 problem,
                 &fext,
@@ -421,6 +459,7 @@ pub fn advance<P: PathResidual>(
                 settings,
             ) {
                 Ok((u1, l1, iters)) => {
+                    problem.checkpoint()?;
                     if limit_point {
                         state.events.push(PathEvent::LimitPoint {
                             lambda: state.lambda,
@@ -449,6 +488,7 @@ pub fn advance<P: PathResidual>(
                     };
                     break;
                 }
+                Err(SolidError::Cancelled) => return Err(SolidError::Cancelled),
                 Err(_) if ds > settings.ds_min => {
                     ds = (ds * 0.25).max(settings.ds_min);
                 }
@@ -475,6 +515,7 @@ fn correct<P: PathResidual>(
     let mut lam = l0 + ds * lam_dot;
     let mut history = Vec::new();
     for it in 0..=settings.max_corrector_iters {
+        problem.checkpoint()?;
         if u.iter().any(|x| !x.is_finite()) || !lam.is_finite() {
             return Err(invalid("nonfinite continuation trial"));
         }
@@ -495,6 +536,7 @@ fn correct<P: PathResidual>(
             - ds;
         history.push(rn);
         if rn <= settings.tol && arc.abs() <= settings.tol {
+            problem.checkpoint()?;
             return Ok((u, lam, it));
         }
         if it == settings.max_corrector_iters {
@@ -504,7 +546,7 @@ fn correct<P: PathResidual>(
         // Solve the complete Newton equations, including any accumulated arc
         // defect. At a simple fold this matrix is regular although K is not.
         let neg_r: Vec<f64> = r.iter().map(|x| -x).collect();
-        let delta = bordered_solve(&k, fext, u_dot, lam_dot, &neg_r, -arc)?;
+        let delta = bordered_solve(problem, &k, fext, u_dot, lam_dot, &neg_r, -arc)?;
         for (ui, du) in u.iter_mut().zip(&delta) {
             *ui += du;
         }
