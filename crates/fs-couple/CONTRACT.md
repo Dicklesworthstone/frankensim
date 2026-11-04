@@ -29703,14 +29703,21 @@ shifts, bounded geometry/work/trials, cancellation and late native refusal.
 
 `liquid_transfer::transfer_interface_mass` atomically moves a finite packet
 between two original `MaterialFreeSurfaceEnthalpy3` interface inventories at the
-same accepted physical time. Explicit Cartesian grid origins must map both
-cell centers to one point, and both trajectories must retain the same borrowed
+same accepted physical time. Explicit Cartesian grid origins and validated
+grid-to-world orientations must map both cell centers to one point, and both
+trajectories must retain the same borrowed
 surface source, liquid temperature law and caloric curve. Native withdrawal
 carries the actual donor velocity with zero actuator work; native receiver
 mixing changes its populations and deposits the physical relative kinetic loss
 as enthalpy once. Receiver credit uses the donor's represented withdrawal.
 Actual two-owner mass, linear momentum and enthalpy-plus-kinetic residuals must
-fit the supplied native budgets before either owner publishes. Cancellation,
+fit the supplied native budgets before either owner publishes. Donor velocity
+is rotated into receiver axes before native mixing, and both actual momentum
+increments are rotated into world axes before the joint balance. Native
+participant reports keep their original local axes. Identical grid axes skip
+the velocity round trip. These fixed coordinate rotations do not introduce
+moving-reference-frame work, resample either lattice or deposit extra heat.
+Cancellation,
 source/clock/geometry mismatch, capacity or speed refusal preserves both states.
 The original timelines continue from the accepted fills, motion and enthalpy.
 
@@ -29732,7 +29739,8 @@ a resolved connector, pipe, jet, phase change or pressure-work model. It adds no
 compressible internal-energy, capillary-energy or whole-flow energy theorem.
 G1/G3/G4 integration tests independently read complete native mass, linear and
 angular momentum, and enthalpy-plus-kinetic inventories, and exercise unequal
-velocities, mixing heat, datum/boost covariance, chained continuation and atomic
+velocities, mixing heat, independent grid rotations and world angular momentum
+about an offset origin, datum/boost covariance, chained continuation and atomic
 refusals. These are synthetic conservation tests, not experimental validation.
 
 ### Effusive vessels under gravity and external force

@@ -20,6 +20,7 @@ use fs_material::liquid::surface::{LiquidCapillarity, resolve_liquid_surface_sta
 use fs_material::liquid_temperature::{LiquidTemperatureLaw, LiquidViscosityBasis};
 use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve, SolidLiquidPhase};
 use fs_material::state_point::MaterialPropertySelection;
+use fs_mbd::{UnitQuaternion, Vec3};
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{Dims, QuantitySpec, Temperature};
 
@@ -41,6 +42,8 @@ fn transfer(mass_kg: f64) -> LiquidMassTransfer {
         receiver: CELL,
         donor_origin_m: ORIGIN,
         receiver_origin_m: ORIGIN,
+        donor_axes_to_world: UnitQuaternion::IDENTITY,
+        receiver_axes_to_world: UnitQuaternion::IDENTITY,
         mass_kg,
     }
 }
@@ -50,6 +53,28 @@ fn with_pair(
     boost: [f64; 3],
     receiver_fill: f64,
     receiver_speed_bound: f64,
+    f: impl FnOnce(
+        &mut MaterialFreeSurfaceEnthalpy3<'_, '_>,
+        &mut MaterialFreeSurfaceEnthalpy3<'_, '_>,
+        &CancelGate,
+    ),
+) {
+    with_oriented_pair(
+        datum,
+        boost,
+        receiver_fill,
+        receiver_speed_bound,
+        [UnitQuaternion::IDENTITY; 2],
+        f,
+    );
+}
+
+fn with_oriented_pair(
+    datum: f64,
+    boost: [f64; 3],
+    receiver_fill: f64,
+    receiver_speed_bound: f64,
+    axes: [UnitQuaternion; 2],
     f: impl FnOnce(
         &mut MaterialFreeSurfaceEnthalpy3<'_, '_>,
         &mut MaterialFreeSurfaceEnthalpy3<'_, '_>,
@@ -163,8 +188,9 @@ fn with_pair(
             fs_exec::Budget::INFINITE,
             fs_exec::ExecMode::Deterministic,
         );
-        let make = |fill, velocity: [f64; 3], h, maximum_speed| {
-            let velocity_m_s = core::array::from_fn(|d| velocity[d] + boost[d]);
+        let make = |fill, velocity: [f64; 3], h, maximum_speed, axes: UnitQuaternion| {
+            let world = core::array::from_fn(|d| velocity[d] + boost[d]);
+            let velocity_m_s = local_vector(axes, world);
             let mut cells = Vec::new();
             for z in 1..=6 {
                 for y in 1..=6 {
@@ -200,12 +226,13 @@ fn with_pair(
                 )
                 .unwrap()
         };
-        let mut donor = make(0.6, [0.04, -0.02, 0.01], 200_000.0, 0.1);
+        let mut donor = make(0.6, [0.04, -0.02, 0.01], 200_000.0, 0.1, axes[0]);
         let mut receiver = make(
             receiver_fill,
             [-0.03, 0.02, -0.01],
             100_000.0,
             receiver_speed_bound,
+            axes[1],
         );
         f(&mut donor, &mut receiver, &gate);
     });
@@ -228,6 +255,25 @@ fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
 
 // Direct original state readback, independently of native transfer receipts.
 fn totals(liquid: &MaterialFreeSurfaceEnthalpy3<'_, '_>) -> [f64; 8] {
+    totals_in_frame(liquid, ORIGIN, UnitQuaternion::IDENTITY, [0.0; 3])
+}
+
+fn world_vector(axes: UnitQuaternion, value: [f64; 3]) -> [f64; 3] {
+    let value = axes.rotate_body_to_world(Vec3::new(value[0], value[1], value[2]));
+    [value.x, value.y, value.z]
+}
+
+fn local_vector(axes: UnitQuaternion, value: [f64; 3]) -> [f64; 3] {
+    let value = axes.rotate_world_to_body(Vec3::new(value[0], value[1], value[2]));
+    [value.x, value.y, value.z]
+}
+
+fn totals_in_frame(
+    liquid: &MaterialFreeSurfaceEnthalpy3<'_, '_>,
+    origin: [f64; 3],
+    axes: UnitQuaternion,
+    balance_origin: [f64; 3],
+) -> [f64; 8] {
     let mut result = [0.0; 8]; // mass, H+K, P[3], L[3]
     for z in 0..8 {
         for y in 0..8 {
@@ -235,8 +281,10 @@ fn totals(liquid: &MaterialFreeSurfaceEnthalpy3<'_, '_>) -> [f64; 8] {
                 if let Some(cell) = liquid.flow().sample_at_si(x, y, z).unwrap() {
                     let mass = cell.density_kg_m3 * cell.fill_fraction * DX.powi(3);
                     let h = liquid.specific_enthalpy_at([x, y, z]).unwrap();
-                    let p = cell.velocity_m_s.map(|v| mass * v);
-                    let r = core::array::from_fn(|d| ([x, y, z][d] as f64 + 0.5) * DX + ORIGIN[d]);
+                    let p = world_vector(axes, cell.velocity_m_s).map(|v| mass * v);
+                    let local = core::array::from_fn(|d| ([x, y, z][d] as f64 + 0.5) * DX);
+                    let rotated = world_vector(axes, local);
+                    let r = core::array::from_fn(|d| rotated[d] + origin[d] - balance_origin[d]);
                     let angular = cross(r, p);
                     result[0] += mass;
                     result[1] +=
@@ -250,6 +298,108 @@ fn totals(liquid: &MaterialFreeSurfaceEnthalpy3<'_, '_>) -> [f64; 8] {
         }
     }
     result
+}
+
+#[test]
+fn g3_rotated_grid_transfer_conserves_world_momentum_and_physical_mixing_heat() {
+    let frames = [
+        [UnitQuaternion::IDENTITY; 2],
+        [
+            UnitQuaternion::new(0.0, 0.0, 0.0, 1.0).unwrap(),
+            UnitQuaternion::new(0.5, 0.5, 0.5, 0.5).unwrap(),
+        ],
+        [
+            UnitQuaternion::new(0.61, 0.23, -0.4, 0.7).unwrap(),
+            UnitQuaternion::new(0.4, -0.6, 0.2, 0.3).unwrap(),
+        ],
+        [
+            UnitQuaternion::IDENTITY,
+            UnitQuaternion::new(0.4, -0.6, 0.2, 0.3).unwrap(),
+        ],
+    ];
+    let mut reference_heat = None;
+    for axes in frames {
+        for boost in [[0.0; 3], [0.02, -0.01, 0.01]] {
+            with_oriented_pair(0.0, boost, 0.3, 0.1, axes, |donor, receiver, gate| {
+                // Align the actual cell centers at one world point, then measure
+                // angular momentum about a different, explicitly fixed point.
+                let common_point = [0.375, -0.75, 1.5];
+                let origins = axes.map(|rotation| {
+                    let offset = world_vector(rotation, CELL.map(|c| (c as f64 + 0.5) * DX));
+                    core::array::from_fn(|d| common_point[d] - offset[d])
+                });
+                let balance_origin = [0.2, -0.3, 0.5];
+                let combined =
+                    |a: &MaterialFreeSurfaceEnthalpy3<'_, '_>,
+                     b: &MaterialFreeSurfaceEnthalpy3<'_, '_>| {
+                        let a = totals_in_frame(a, origins[0], axes[0], balance_origin);
+                        let b = totals_in_frame(b, origins[1], axes[1], balance_origin);
+                        core::array::from_fn::<_, 8, _>(|d| a[d] + b[d])
+                    };
+                let initial = combined(donor, receiver);
+                let a = donor.flow().sample_at_si(3, 3, 3).unwrap().unwrap();
+                let b = receiver.flow().sample_at_si(3, 3, 3).unwrap().unwrap();
+                let donor_velocity = world_vector(axes[0], a.velocity_m_s);
+                let receiver_velocity = world_vector(axes[1], b.velocity_m_s);
+                let mass = b.density_kg_m3 * b.fill_fraction * DX.powi(3);
+                let packet = LiquidMassTransfer {
+                    donor_origin_m: origins[0],
+                    receiver_origin_m: origins[1],
+                    donor_axes_to_world: axes[0],
+                    receiver_axes_to_world: axes[1],
+                    ..transfer(1e-7)
+                };
+                let report =
+                    transfer_interface_mass(donor, receiver, packet, controls(), gate).unwrap();
+                assert_eq!(report.point_m, common_point);
+                let incoming = report.receiver.exchange.mass_change_kg;
+                let actual = receiver.flow().sample_at_si(3, 3, 3).unwrap().unwrap();
+                let actual_velocity = world_vector(axes[1], actual.velocity_m_s);
+                for d in 0..3 {
+                    near(
+                        actual_velocity[d],
+                        (mass * receiver_velocity[d] + incoming * donor_velocity[d])
+                            / (mass + incoming),
+                        2e-14,
+                    );
+                }
+                let heat = 0.5 * mass * incoming / (mass + incoming)
+                    * (0..3)
+                        .map(|d| (donor_velocity[d] - receiver_velocity[d]).powi(2))
+                        .sum::<f64>();
+                near(report.receiver.mixing_heat_j, heat, 5e-23);
+                if let Some(expected) = reference_heat {
+                    near(report.receiver.mixing_heat_j, expected, 5e-23);
+                } else {
+                    reference_heat = Some(report.receiver.mixing_heat_j);
+                }
+                assert_eq!(report.donor.mechanical_work_j, 0.0);
+                for (d, (after, before)) in combined(donor, receiver)
+                    .into_iter()
+                    .zip(initial)
+                    .enumerate()
+                {
+                    near(after, before, if d == 1 { 5e-12 } else { 2e-18 });
+                }
+                let out = world_vector(axes[0], report.donor.exchange.momentum_change_kg_m_s);
+                let input = world_vector(axes[1], report.receiver.exchange.momentum_change_kg_m_s);
+                for d in 0..3 {
+                    near(report.momentum_defect_kg_m_s[d], out[d] + input[d], 1e-24);
+                }
+
+                // A bad geometric frame refuses before either native proposal
+                // publishes, even when its material and velocity data are valid.
+                let (before_a, before_b) = (donor.clone(), receiver.clone());
+                let bad = LiquidMassTransfer {
+                    receiver_origin_m: [0.0; 3],
+                    ..packet
+                };
+                assert!(transfer_interface_mass(donor, receiver, bad, controls(), gate).is_err());
+                unchanged(donor, &before_a);
+                unchanged(receiver, &before_b);
+            });
+        }
+    }
 }
 
 fn combined(
