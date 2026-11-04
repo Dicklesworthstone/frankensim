@@ -1,5 +1,8 @@
 //! Ordered interface conditions from two original material/enthalpy states.
 //! No interfacial temperature, pressure, phase fraction or mixture is inferred.
+/// Original ordered contact resistance for finite kinetic phase inventories.
+pub mod crystallization;
+
 use super::source::{ThermalMaterialError, ThermalMaterialPoint};
 use crate::phase::EquilibriumPhaseState;
 use fs_matdb::{InterfaceSystemCard, MaterialCard, QueryPoint};
