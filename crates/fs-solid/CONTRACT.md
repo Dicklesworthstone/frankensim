@@ -1,5 +1,28 @@
 # fs-solid CONTRACT
 
+## Graded reference density on native HEX8 solids
+
+`linear3::hex8::Hex8ElasticProblem::assemble_with_reference_density` accepts
+eight positive finite corner densities in kg/m³ per element. Density uses the
+original nonnegative Q1 interpolation, with discontinuities between elements
+permitted. The existing shared isoparametric owner integrates consistent mass
+and total inventory; Standard and B-bar stiffness retain their original paths.
+Constrained elimination does not remove mass from total-inventory reporting.
+
+Three Gauss points in each direction integrate `rho*N_a*N_b*det(J)` on a
+trilinear map: its coordinatewise degree is at most five. The existing mass
+rule therefore needs no increased quadrature work. An identical uniform
+material-density profile retains the scalar path bitwise. The resulting mass
+pencil feeds native modes and dynamics without replacing the graded field by
+its mean. Reference inventory is held fixed through subsequent motion; this
+does not introduce density transport, thermal inventory refresh, finite-strain
+kinematics or global map-injectivity certification.
+
+The `hex8_elastic` G0/G1/G3/G4 regressions compare every matrix coefficient
+against independent monomial integration on affine and warped bricks, retain
+centroid and constrained-mass moments, verify native eigenvalue scaling, and
+exercise invalid density/count and cancellation refusals.
+
 ## Prestressed Standard and B-bar HEX8 vibration
 
 `linear3::hex8::Hex8ElasticProblem::solve_thermal_tangent` and

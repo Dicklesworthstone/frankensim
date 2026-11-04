@@ -29,7 +29,7 @@
 //! does not certify global injectivity of a warped brick. No finite-strain,
 //! general shear-locking or continuum-convergence claim is made.
 
-use super::hex::{HEX27_REFERENCE_NODES, hex8_point};
+use super::hex::{HEX27_REFERENCE_NODES, hex8_point, hex8_shapes};
 use super::{
     TetAssemblyBudget, TetElasticAssembly, TetElasticError, TetMaterialField, isoparametric,
 };
@@ -73,7 +73,57 @@ impl Hex8ElasticProblem<'_> {
     /// free-body rigid modes are allowed; downstream owners decide which
     /// constraints a particular static or dynamic operation requires.
     pub fn assemble(&self, cx: &Cx<'_>) -> Result<TetElasticAssembly, TetElasticError> {
+        self.assemble_reference_density(None, cx)
+    }
+
+    /// Assemble consistent inertia from eight positive reference densities
+    /// [kg/m³] per element, in the same corner order as `hexahedra`.
+    ///
+    /// Density is trilinear in the original element coordinates; distinct
+    /// elements may carry discontinuous profiles. The nonnegative Q1 shapes
+    /// preserve positivity without averaging away centres of mass or rotary
+    /// inertia. Stiffness and Standard/B-bar strain projection are unchanged.
+    /// The result feeds the existing native spectral and dynamics owners.
+    ///
+    /// The original mass rule already integrates this field exactly, up to
+    /// floating-point error: `rho * N_a * N_b * det(J)` has degree at most five
+    /// in each reference coordinate, even on a warped trilinear brick. Three
+    /// Gauss points per direction suffice. Mass is reference inventory and
+    /// must not be refreshed from current volume or temperature during motion.
+    ///
+    /// A profile equal to the original material density preserves the scalar
+    /// path bitwise. Invalid count/density, original mesh/budget refusals, and
+    /// cancellation return errors without publishing a partial assembly.
+    pub fn assemble_with_reference_density(
+        &self,
+        corner_density_kg_m3: &[[f64; 8]],
+        cx: &Cx<'_>,
+    ) -> Result<TetElasticAssembly, TetElasticError> {
+        self.assemble_reference_density(Some(corner_density_kg_m3), cx)
+    }
+
+    fn assemble_reference_density(
+        &self,
+        corner_density_kg_m3: Option<&[[f64; 8]]>,
+        cx: &Cx<'_>,
+    ) -> Result<TetElasticAssembly, TetElasticError> {
         let minimum_probe = self.validate(true, cx)?;
+        if let Some(densities) = corner_density_kg_m3 {
+            if densities.len() != self.hexahedra.len() {
+                return Err(TetElasticError::MaterialCountMismatch {
+                    expected: self.hexahedra.len(),
+                    got: densities.len(),
+                });
+            }
+            for density in densities {
+                cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+                if density.iter().any(|rho| !rho.is_finite() || *rho <= 0.0) {
+                    return Err(TetElasticError::InvalidMaterial {
+                        what: "HEX8 corner reference densities must be finite and positive",
+                    });
+                }
+            }
+        }
         let stiffness_rule = tensor_rule(self.stiffness_points_per_dir);
         let extra_mass_rule = (self.stiffness_points_per_dir < 3).then(|| tensor_rule(3));
         let mass_rule = extra_mass_rule.as_deref().unwrap_or(&stiffness_rule);
@@ -88,7 +138,20 @@ impl Hex8ElasticProblem<'_> {
             &stiffness_rule,
             mass_rule,
             |nodes, reference, element, point| self.point(nodes, reference, element, point),
-            |_, _| None,
+            |element, reference| {
+                let density = corner_density_kg_m3?[element];
+                if density
+                    .iter()
+                    .all(|rho| *rho == self.materials.at(element).density_kg_m3)
+                {
+                    None
+                } else if density.iter().all(|rho| *rho == density[0]) {
+                    Some(density[0])
+                } else {
+                    let weights = hex8_shapes(reference).0;
+                    Some((0..8).map(|a| weights[a] * density[a]).sum())
+                }
+            },
             cx,
         )?;
         assembly.minimum_scaled_jacobian = assembly.minimum_scaled_jacobian.min(minimum_probe);

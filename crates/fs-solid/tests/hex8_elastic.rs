@@ -392,6 +392,179 @@ fn g1_native_time_consumer_uses_the_same_supported_mass_and_stiffness() {
     });
 }
 
+// Exact integral of x^power (1+a*x) (1+b*x) (1+gradient*x).
+// This polynomial oracle uses no element shape or numerical quadrature code.
+fn graded_axis_moment(a: f64, b: f64, gradient: f64, power: usize) -> f64 {
+    [
+        1.0,
+        a + b + gradient,
+        a * b + gradient * (a + b),
+        gradient * a * b,
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(degree, value)| {
+        if (degree + power).is_multiple_of(2) {
+            2.0 * value / (degree + power + 1) as f64
+        } else {
+            0.0
+        }
+    })
+    .sum()
+}
+
+#[test]
+fn g1_g3_graded_density_retains_exact_mass_moments_on_warped_hex8() {
+    with_cx(false, |cx| {
+        let material = coupled_material();
+        let gradients = [0.4, -0.2, 0.3];
+        let densities = [CORNERS.map(|p| {
+            material.density_kg_m3
+                * (0..3)
+                    .map(|axis| 1.0 + gradients[axis] * p[axis])
+                    .product::<f64>()
+        })];
+        for (nodes, warp) in [(CORNERS, [0.0; 3]), (warped(), [0.12, 0.08, 0.06])] {
+            let [a, b, c] = warp;
+            let exact_integral = |left: [f64; 3], right: [f64; 3]| {
+                let moment = |powers: [usize; 3]| {
+                    (0..3)
+                        .map(|axis| {
+                            graded_axis_moment(
+                                left[axis],
+                                right[axis],
+                                gradients[axis],
+                                powers[axis],
+                            )
+                        })
+                        .product::<f64>()
+                };
+                material.density_kg_m3
+                    * (moment([0; 3])
+                        - a * b * moment([0, 0, 2])
+                        - a * c * moment([0, 2, 0])
+                        - b * c * moment([2, 0, 0])
+                        + 2.0 * a * b * c * moment([1; 3]))
+            };
+            let mut previous_mass = None;
+            for form in FORMS {
+                let p = problem(&nodes, &material, form);
+                let scalar = p.assemble(cx).unwrap();
+                let graded = p.assemble_with_reference_density(&densities, cx).unwrap();
+                assert_eq!(scalar.stiffness.to_dense(), graded.stiffness.to_dense());
+                near(
+                    graded.total_mass_kg,
+                    exact_integral([0.0; 3], [0.0; 3]),
+                    3e-13,
+                );
+                let mass = graded.mass.to_dense();
+                for i in 0..24 {
+                    for j in 0..24 {
+                        let expected = if i % 3 == j % 3 {
+                            exact_integral(CORNERS[i / 3], CORNERS[j / 3]) / 64.0
+                        } else {
+                            0.0
+                        };
+                        near(mass[i * 24 + j], expected, 4e-14);
+                    }
+                }
+                if let Some(previous) = previous_mass.replace(mass.clone()) {
+                    assert_eq!(previous, mass);
+                }
+                // Original inventory reporting does not discard constrained mass.
+                let mut supported = p;
+                supported.fixed_dofs = &[0, 1, 2];
+                let supported = supported
+                    .assemble_with_reference_density(&densities, cx)
+                    .unwrap();
+                assert_eq!(supported.total_mass_kg, graded.total_mass_kg);
+                let reduced = supported.mass.to_dense();
+                for i in 0..21 {
+                    for j in 0..21 {
+                        assert_eq!(reduced[i * 21 + j], mass[(i + 3) * 24 + j + 3]);
+                    }
+                }
+                // For an affine cube, the exact first moment is rho_0*8*g/3.
+                if warp == [0.0; 3] {
+                    let translation: Vec<_> = (0..24)
+                        .map(|i| if i % 3 == 0 { 1.0 } else { 0.0 })
+                        .collect();
+                    for axis in 0..3 {
+                        let coordinate: Vec<_> =
+                            CORNERS.iter().flat_map(|p| [p[axis], 0.0, 0.0]).collect();
+                        near(
+                            work(&mass, &translation, &coordinate),
+                            8.0 * material.density_kg_m3 * gradients[axis] / 3.0,
+                            2e-13,
+                        );
+                    }
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn g0_g3_graded_density_preserves_uniform_path_and_native_frequency_scaling() {
+    with_cx(false, |cx| {
+        let material = coupled_material();
+        let p = problem(&CORNERS, &material, Formulation::BBar);
+        let scalar = p.assemble(cx).unwrap();
+        let uniform = p
+            .assemble_with_reference_density(&[[material.density_kg_m3; 8]], cx)
+            .unwrap();
+        assert_eq!(scalar.mass.to_dense(), uniform.mass.to_dense());
+        assert_eq!(
+            scalar.total_mass_kg.to_bits(),
+            uniform.total_mass_kg.to_bits()
+        );
+        let densities = [CORNERS.map(|[r, s, t]| 2.5 + 0.4 * r - 0.3 * s + 0.2 * t)];
+        let original = p.assemble_with_reference_density(&densities, cx).unwrap();
+        let scaled = p
+            .assemble_with_reference_density(&[densities[0].map(|rho| 4.0 * rho)], cx)
+            .unwrap();
+        let modes = |assembly: &fs_solid::linear3::TetElasticAssembly| {
+            fs_modal::eigh_gen_dense(
+                &assembly.stiffness.to_dense(),
+                &assembly.mass.to_dense(),
+                24,
+            )
+            .unwrap()
+        };
+        for (a, b) in modes(&original).iter().zip(modes(&scaled)).skip(6) {
+            near(a.lambda, 4.0 * b.lambda, 2e-10 * a.lambda);
+        }
+    });
+}
+
+#[test]
+fn g0_g4_graded_density_rejects_invalid_inventory_and_cancellation() {
+    with_cx(false, |cx| {
+        let material = coupled_material();
+        let p = problem(&CORNERS, &material, Formulation::Standard);
+        assert!(matches!(
+            p.assemble_with_reference_density(&[], cx),
+            Err(TetElasticError::MaterialCountMismatch { .. })
+        ));
+        for invalid in [0.0, -1.0, f64::INFINITY, f64::NAN] {
+            let mut density = [2.5; 8];
+            density[7] = invalid;
+            assert!(matches!(
+                p.assemble_with_reference_density(&[density], cx),
+                Err(TetElasticError::InvalidMaterial { .. })
+            ));
+        }
+    });
+    with_cx(true, |cx| {
+        let material = coupled_material();
+        assert!(matches!(
+            problem(&CORNERS, &material, Formulation::Standard)
+                .assemble_with_reference_density(&[[2.5; 8]], cx),
+            Err(TetElasticError::Cancelled)
+        ));
+    });
+}
+
 #[test]
 fn g0_g4_geometry_constraints_quadrature_budgets_and_cancellation_refuse() {
     with_cx(false, |cx| {
