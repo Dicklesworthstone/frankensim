@@ -948,6 +948,26 @@ impl ViscoElements {
         &self.equilibrium
     }
 
+    /// Number of original material elements, in mesh connectivity order.
+    pub fn element_count(&self) -> usize {
+        self.elements.len()
+    }
+
+    /// Original reference volume from the consistent-mass quadrature [m³].
+    /// It is retained across coefficient changes and includes supported nodes.
+    pub fn element_reference_volume_m3(&self, element: usize) -> Option<f64> {
+        self.equilibrium.element_volumes_m3.get(element).copied()
+    }
+
+    /// Original physical inventory [kg], before support elimination.
+    /// The retained reference density is never replaced by a later source query.
+    pub fn element_reference_mass_kg(&self, element: usize) -> Option<f64> {
+        Some(
+            self.elements.get(element)?.density_kg_m3
+                * self.element_reference_volume_m3(element)?,
+        )
+    }
+
     /// Original admitted mesh nodes in the same order as the full mass and
     /// material displacement. Source refreshes retain this reference geometry.
     pub fn reference_nodes_m(&self) -> &[[f64; 3]] {
@@ -1152,6 +1172,29 @@ pub struct ViscoElementState<'a> {
     parameter_work_j: f64,
 }
 
+/// One original element's work and physical loss over the accepted strain ramp.
+/// All entries use the same positive material quadrature as force assembly.
+/// Kelvin and Maxwell loss is integrated by the constitutive owner; it is not
+/// inferred from a global energy defect or distributed by element mass.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ViscoElementStep {
+    /// Endpoint storage and cumulative constitutive work/loss [J].
+    /// Source-parameter work remains in the separate history account.
+    pub energy: ViscoEnergy,
+    /// Change of Helmholtz storage over this interval [J].
+    pub stored_energy_change_j: f64,
+    /// Exact signed mechanical-strain work over this interval [J].
+    pub step_work_j: f64,
+    /// Original element mean nodal force times actual displacement increment
+    /// [J], including prescribed support motion.
+    pub step_mechanical_work_j: f64,
+    /// Signed imposed-eigenstrain work [J], separate from physical heat.
+    pub step_eigenstrain_work_j: f64,
+    /// Independently integrated nonnegative Kelvin and Maxwell heat [J].
+    /// This increment survives large cumulative work and loss counters.
+    pub step_dissipated_j: f64,
+}
+
 /// Work-conjugate force observation for one admitted prescribed-history step.
 pub struct ViscoForceStep {
     /// Endpoint internal force at every DOF [N]. Inertia and applied-load
@@ -1177,9 +1220,17 @@ pub struct ViscoForceStep {
     pub step_eigenstrain_work_j: f64,
     /// Nonnegative integrated heat during this step, without clamping.
     pub step_dissipated_j: f64,
+    /// Original per-element accounts, in mesh connectivity order. Physical
+    /// heat can enter the matching caloric cells without mode/DOF attribution.
+    pub element_steps: Vec<ViscoElementStep>,
 }
 
-impl ViscoElementState<'_> {
+impl<'a> ViscoElementState<'a> {
+    /// Immutable original geometry, reference inventory and current sources.
+    pub const fn system(&self) -> &'a ViscoElements {
+        self.system
+    }
+
     /// Accepted full node-major displacement, including prescribed supports [m].
     pub fn displacement_m(&self) -> &[f64] {
         &self.displacement_m
@@ -1238,10 +1289,12 @@ impl ViscoElementState<'_> {
         let mut step_work_j = 0.0;
         let mut step_dissipated_j = 0.0;
         let mut step_eigenstrain_work_j = 0.0;
+        let mut element_steps = Vec::with_capacity(self.system.elements.len());
         let target = thermal
             .map(|s| s.as_ref())
             .or(self.thermal_strains.as_deref());
         for (element, (e, states)) in self.system.elements.iter().zip(&mut histories).enumerate() {
+            let mut element_step = ViscoElementStep::default();
             for (point, (p, state)) in e.points.iter().zip(states).enumerate() {
                 checkpoint(cx)?;
                 let delta_free =
@@ -1259,6 +1312,7 @@ impl ViscoElementState<'_> {
                     p.validate_compatible_strain(&e.law, &e.dofs, u_new, strain)?;
                     strain
                 };
+                let old_stored = state.stored;
                 let response = e.law.step_with_mean(state, strain, dt_s)?;
                 let stress = response.stress;
                 if stress
@@ -1273,25 +1327,53 @@ impl ViscoElementState<'_> {
                 }
                 for (b, &d) in p.b.iter().zip(&e.dofs) {
                     force[d] += p.volume_m3 * b.iter().zip(stress).map(|(a, s)| a * s).sum::<f64>();
-                    mean_force[d] += p.volume_m3
+                    let mean_contribution = p.volume_m3
                         * b.iter()
                             .zip(response.mean_stress)
                             .map(|(a, s)| a * s)
                             .sum::<f64>();
+                    mean_force[d] += mean_contribution;
+                    element_step.step_mechanical_work_j +=
+                        mean_contribution * (u_new[d] - self.displacement_m[d]);
                 }
                 energy.stored_j += p.volume_m3 * state.stored;
                 energy.work_j += p.volume_m3 * state.work;
                 energy.dissipated_j += p.volume_m3 * state.dissipated;
                 step_work_j += p.volume_m3 * response.step_work;
                 step_dissipated_j += p.volume_m3 * response.step_dissipated;
-                step_eigenstrain_work_j -= p.volume_m3
+                let eigenstrain_work = p.volume_m3
                     * response
                         .mean_stress
                         .iter()
                         .zip(delta_free)
                         .map(|(s, e)| s * e)
                         .sum::<f64>();
+                step_eigenstrain_work_j -= eigenstrain_work;
+                element_step.energy.stored_j += p.volume_m3 * state.stored;
+                element_step.energy.work_j += p.volume_m3 * state.work;
+                element_step.energy.dissipated_j += p.volume_m3 * state.dissipated;
+                element_step.stored_energy_change_j += p.volume_m3 * (state.stored - old_stored);
+                element_step.step_work_j += p.volume_m3 * response.step_work;
+                element_step.step_dissipated_j += p.volume_m3 * response.step_dissipated;
+                element_step.step_eigenstrain_work_j -= eigenstrain_work;
             }
+            if [
+                element_step.energy.stored_j,
+                element_step.energy.work_j,
+                element_step.energy.dissipated_j,
+                element_step.stored_energy_change_j,
+                element_step.step_work_j,
+                element_step.step_mechanical_work_j,
+                element_step.step_eigenstrain_work_j,
+                element_step.step_dissipated_j,
+            ]
+            .iter()
+            .any(|value| !value.is_finite())
+                || element_step.step_dissipated_j < 0.0
+            {
+                return Err(ViscoElementError::NonFiniteResult);
+            }
+            element_steps.push(element_step);
         }
         let step_mechanical_work_j = mean_force
             .iter()
@@ -1347,6 +1429,7 @@ impl ViscoElementState<'_> {
             step_mechanical_work_j,
             step_eigenstrain_work_j,
             step_dissipated_j,
+            element_steps,
         })
     }
 }

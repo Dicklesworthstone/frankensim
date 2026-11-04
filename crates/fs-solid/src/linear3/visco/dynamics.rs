@@ -224,6 +224,11 @@ impl ViscoElements {
 }
 
 impl<'a> ViscoDynamicOperator<'a> {
+    /// Immutable original solid whose tensors, quadrature and inertia are used.
+    pub const fn system(&self) -> &'a ViscoElements {
+        self.system
+    }
+
     /// Fixed positive duration represented by this prepared operator [s].
     pub const fn duration_s(&self) -> f64 {
         self.dt_s
@@ -295,7 +300,12 @@ impl<'a> ViscoDynamicOperator<'a> {
     }
 }
 
-impl ViscoDynamicState<'_, '_> {
+impl<'p, 'a> ViscoDynamicState<'p, 'a> {
+    /// Original fixed-duration sparse operator; no material memory is rebuilt.
+    pub const fn operator(&self) -> &'p ViscoDynamicOperator<'a> {
+        self.prepared
+    }
+
     /// Original accepted quadrature history and full nodal displacement.
     pub fn material_history(&self) -> &ViscoElementState<'_> {
         &self.material
