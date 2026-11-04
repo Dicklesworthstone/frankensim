@@ -20,7 +20,7 @@
 //! worker budgets, including indivisible sparse symbolic/factorization leaves.
 //! These are native numerical payload limits, not a process-memory guarantee.
 
-use super::{VibrationError, invalid};
+use super::{ReferenceDensityInput, RetainedReferenceDensity, VibrationError, invalid};
 use crate::hyper3::pressure::ClosedTetPressureSurface;
 use crate::hyper3::{HyperTetError, HyperTetProblem, HyperTetSolution, checkpoint};
 use fs_exec::Cx;
@@ -36,7 +36,7 @@ use fs_sparse::Csr;
 pub struct HyperTetVibrationWindows<'a, L: HyperelasticMaterial = Hyperelastic> {
     problem: HyperTetProblem<'a, L>,
     held_pressure: Option<(&'a ClosedTetPressureSurface, f64)>,
-    reference_density_kg_m3: Vec<f64>,
+    reference_density: RetainedReferenceDensity,
     equilibrium: HyperTetSolution,
     free_dofs: Vec<usize>,
     stiffness_n_m: Csr,
@@ -136,7 +136,38 @@ impl<'a, L: HyperelasticMaterial> HyperTetProblem<'a, L> {
         options: &SliceOptions,
         cx: &Cx<'_>,
     ) -> Result<HyperTetVibrationWindows<'a, L>, VibrationError> {
-        self.solve_vibration_windows_impl(reference_density_kg_m3, None, None, plan, options, cx)
+        self.solve_vibration_windows_impl(
+            ReferenceDensityInput::PerElement(reference_density_kg_m3),
+            None,
+            None,
+            plan,
+            options,
+            cx,
+        )
+    }
+
+    /// The same signed sparse windows with a positive P1 reference density on
+    /// the original mesh nodes. Native cubic moment integration supplies the
+    /// complete consistent mass, without centroid sampling or cell averaging.
+    /// The retained nodal field and all original spectral budgets are preserved.
+    ///
+    /// # Errors
+    /// Nodal-density admission and all errors of [`Self::solve_vibration_windows`].
+    pub fn solve_vibration_windows_with_nodal_density(
+        &self,
+        reference_nodal_density_kg_m3: &[f64],
+        plan: &WindowPlan,
+        options: &SliceOptions,
+        cx: &Cx<'_>,
+    ) -> Result<HyperTetVibrationWindows<'a, L>, VibrationError> {
+        self.solve_vibration_windows_impl(
+            ReferenceDensityInput::Nodal(reference_nodal_density_kg_m3),
+            None,
+            None,
+            plan,
+            options,
+            cx,
+        )
     }
 
     /// Re-equilibrate one dead-load endpoint from an initial iterate, then
@@ -152,7 +183,31 @@ impl<'a, L: HyperelasticMaterial> HyperTetProblem<'a, L> {
         cx: &Cx<'_>,
     ) -> Result<HyperTetVibrationWindows<'a, L>, VibrationError> {
         self.solve_vibration_windows_impl(
-            reference_density_kg_m3,
+            ReferenceDensityInput::PerElement(reference_density_kg_m3),
+            Some(initial_displacement_m),
+            None,
+            plan,
+            options,
+            cx,
+        )
+    }
+
+    /// Re-equilibrate from an initial iterate while retaining the original P1
+    /// nodal density in every requested signed window. The initial iterate and
+    /// one-load-step rules of [`Self::solve_vibration_windows_from`] apply.
+    ///
+    /// # Errors
+    /// Nodal-density and native initial-iterate/spectral refusals.
+    pub fn solve_vibration_windows_from_with_nodal_density(
+        &self,
+        initial_displacement_m: &[f64],
+        reference_nodal_density_kg_m3: &[f64],
+        plan: &WindowPlan,
+        options: &SliceOptions,
+        cx: &Cx<'_>,
+    ) -> Result<HyperTetVibrationWindows<'a, L>, VibrationError> {
+        self.solve_vibration_windows_impl(
+            ReferenceDensityInput::Nodal(reference_nodal_density_kg_m3),
             Some(initial_displacement_m),
             None,
             plan,
@@ -177,7 +232,33 @@ impl<'a, L: HyperelasticMaterial> HyperTetProblem<'a, L> {
         cx: &Cx<'_>,
     ) -> Result<HyperTetVibrationWindows<'a, L>, VibrationError> {
         self.solve_vibration_windows_impl(
-            reference_density_kg_m3,
+            ReferenceDensityInput::PerElement(reference_density_kg_m3),
+            None,
+            Some((surface, pressure_pa)),
+            plan,
+            options,
+            cx,
+        )
+    }
+
+    /// Original closed-pressure equilibrium and signed sparse windows with a
+    /// positive P1 nodal reference density. Pressure contributes its original
+    /// follower tangent exactly once; finite deformation never refreshes mass.
+    ///
+    /// # Errors
+    /// Nodal-density and native pressure/equilibrium/spectral refusals.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_vibration_windows_with_nodal_density_and_pressure(
+        &self,
+        surface: &'a ClosedTetPressureSurface,
+        pressure_pa: f64,
+        reference_nodal_density_kg_m3: &[f64],
+        plan: &WindowPlan,
+        options: &SliceOptions,
+        cx: &Cx<'_>,
+    ) -> Result<HyperTetVibrationWindows<'a, L>, VibrationError> {
+        self.solve_vibration_windows_impl(
+            ReferenceDensityInput::Nodal(reference_nodal_density_kg_m3),
             None,
             Some((surface, pressure_pa)),
             plan,
@@ -189,7 +270,7 @@ impl<'a, L: HyperelasticMaterial> HyperTetProblem<'a, L> {
     #[allow(clippy::too_many_arguments)]
     fn solve_vibration_windows_impl(
         &self,
-        reference_density_kg_m3: &[f64],
+        density: ReferenceDensityInput<'_>,
         initial: Option<&[f64]>,
         held_pressure: Option<(&'a ClosedTetPressureSurface, f64)>,
         plan: &WindowPlan,
@@ -219,7 +300,7 @@ impl<'a, L: HyperelasticMaterial> HyperTetProblem<'a, L> {
             reduced[dof] = index;
         }
         let mass_kg = restrict(
-            &self.reference_mass_matrix(reference_density_kg_m3, cx)?,
+            &density.mass_matrix(self, cx)?,
             None,
             &free_dofs,
             &reduced,
@@ -257,10 +338,11 @@ impl<'a, L: HyperelasticMaterial> HyperTetProblem<'a, L> {
         drop(fixed);
         let spectrum = slice_windows(&stiffness_n_m, &mass_kg, plan, options, cx)
             .map_err(VibrationError::Modal)?;
+        let reference_density = density.retain(self.tetrahedra, cx)?;
         let result = HyperTetVibrationWindows {
             problem: *self,
             held_pressure,
-            reference_density_kg_m3: reference_density_kg_m3.to_vec(),
+            reference_density,
             equilibrium,
             free_dofs,
             stiffness_n_m,
@@ -285,9 +367,15 @@ impl<L: HyperelasticMaterial> HyperTetVibrationWindows<'_, L> {
         self.held_pressure
     }
 
-    /// Conserved mass per original volume, in tetrahedron order.
+    /// Conserved mass per original volume, in tetrahedron order. For a graded
+    /// field these are inventory means; the retained mass uses all nodal moments.
     pub fn reference_density_kg_m3(&self) -> &[f64] {
-        &self.reference_density_kg_m3
+        &self.reference_density.cell_means_kg_m3
+    }
+
+    /// Complete original P1 nodal density, or None for cellwise constant density.
+    pub fn reference_nodal_density_kg_m3(&self) -> Option<&[f64]> {
+        self.reference_density.nodal_kg_m3.as_deref()
     }
 
     /// Accepted native equilibrium; no stress reset or foreign state injection.

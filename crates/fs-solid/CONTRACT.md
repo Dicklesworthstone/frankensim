@@ -1082,6 +1082,19 @@ constitutive field from inertia. G0/G1/G3 regressions in
 energy against independent quadrature, positive definiteness, scalar bit
 parity, shared-vertex/permuted assembly and refusal boundaries.
 
+The native `hyper3::vibration` dense and sparse-window owners also accept this
+original P1 field through their `with_nodal_density` variants, including initial
+iterates and held closed-surface pressure. They reuse the same consistent-mass
+assembly before nonlinear work, preserve the material and pressure tangents,
+and retain every original nodal density. The existing cell-density accessor
+reports cell means for inventory only; these means never replace the modal
+mass. Neither deformed volume nor a refreshed material density changes this
+closed-body inertia. Tests in `hyper3_reference_density.rs` specify exact
+finite-stretch modal mass, equal-total-mass redistribution, density scaling,
+uniform bit parity, dense/sparse agreement, the independent pressure-loaded
+three-mode spectrum, and invalid-density/cancellation refusals. The original
+dense DOF cap, sparse spectral budgets and signed-mode limitations remain.
+
 `tet10::QuadraticTetProblem::assemble_with_reference_density` carries graded
 reference inertia into the same native quadratic stiffness/mass pencil. Each
 element supplies four positive corner densities, interpolated with P1 reference

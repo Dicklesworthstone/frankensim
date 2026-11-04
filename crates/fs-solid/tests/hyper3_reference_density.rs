@@ -3,6 +3,8 @@
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_material::hyper::{Hyperelastic, HyperelasticModel};
+use fs_solid::hyper3::pressure::ClosedTetPressureSurface;
+use fs_solid::hyper3::vibration::{VibrationError, VibrationSettings};
 use fs_solid::{HyperTetError, HyperTetProblem, HyperTetSettings, HyperelasticLawField};
 use fs_sparse::Csr;
 
@@ -282,6 +284,327 @@ fn invalid_inventory_geometry_budget_and_cancellation_return_no_matrix() {
         assert!(matches!(
             p.reference_mass_matrix_with_nodal_density(&DENSITY, cx),
             Err(HyperTetError::Cancelled)
+        ));
+    });
+}
+
+fn vibration_settings() -> VibrationSettings {
+    VibrationSettings {
+        maximum_free_dofs: 128,
+        relative_residual_tolerance: 1e-9,
+    }
+}
+
+fn modal_close(actual: f64, expected: f64) {
+    assert!(actual.is_finite() && expected.is_finite());
+    assert!(
+        (actual - expected).abs() <= 2e-8 * expected.abs(),
+        "{actual:.17e} != {expected:.17e}"
+    );
+}
+
+fn window_plan(lower: f64, upper: f64) -> fs_modal::WindowPlan {
+    fs_modal::WindowPlan {
+        windows: vec![(lower, upper)],
+        threads: 1,
+        maximum_windows: 1,
+        maximum_bytes: 32 * 1024 * 1024,
+        maximum_relative_halfwidth: 1e-8,
+        coordinates: None,
+    }
+}
+
+fn window_options() -> fs_modal::SliceOptions {
+    fs_modal::SliceOptions {
+        max_lanczos: 256,
+        ritz_tol: 1e-12,
+        ldlt: fs_sparse::LdltOptions {
+            max_factor_bytes: Some(16 * 1024 * 1024),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+#[test]
+fn graded_vibration_retains_exact_modal_mass_through_finite_stretch() {
+    with_cx(|cx, _| {
+        let law = material();
+        let fixed: Vec<_> = (0..12)
+            .filter(|&dof| dof != 3)
+            .map(|dof| (dof, 0.0))
+            .collect();
+        for stretch in [1.0_f64, 1.3, 1.6] {
+            // F=diag(s,1,1); direct differentiation of the neo-Hookean
+            // energy gives P11=2s+(3ln(s)-2)/s and dP11/ds below.
+            let piola = 2.0 * stretch + (3.0 * stretch.ln() - 2.0) / stretch;
+            let tangent = 2.0 + (2.0 + 3.0 * (1.0 - stretch.ln())) / stretch.powi(2);
+            let forces = [(3, piola / 6.0)];
+            let mut p = problem(&NODES, &TETS, &law);
+            p.prescribed_m = &fixed;
+            p.nodal_forces_n = &forces;
+            p.settings.load_steps = 4;
+            let spectrum = p
+                .solve_vibration_with_nodal_density(&DENSITY, vibration_settings(), cx)
+                .unwrap();
+            assert_eq!(spectrum.free_dofs(), &[3]);
+            assert_eq!(spectrum.reference_nodal_density_kg_m3(), Some(&DENSITY[..]));
+            close(spectrum.reference_density_kg_m3()[0], 6.0);
+            modal_close(1.0 + spectrum.equilibrium().displacement_m[1][0], stretch);
+            // Integral (3+12X) X^2 dV = 3/60 + 12/120 = 0.15 kg.
+            // This mass is unchanged even when the current volume grows by s.
+            close(spectrum.mass_kg()[0], 0.15);
+            modal_close(spectrum.stiffness_n_m()[0], tangent / 6.0);
+            modal_close(spectrum.modes()[0].lambda, tangent / 0.9);
+            close(
+                spectrum.modes()[0].phi[0].powi(2) * spectrum.mass_kg()[0],
+                1.0,
+            );
+        }
+    });
+}
+
+#[test]
+fn equal_total_mass_keeps_density_distribution_and_uniform_vibration_bits() {
+    with_cx(|cx, _| {
+        let law = material();
+        let fixed: Vec<_> = (0..12)
+            .filter(|&dof| dof != 3)
+            .map(|dof| (dof, 0.0))
+            .collect();
+        let mut p = problem(&NODES, &TETS, &law);
+        p.prescribed_m = &fixed;
+        let moved = [15.0, 3.0, 3.0, 3.0];
+        let dense = p
+            .solve_vibration_with_nodal_density(&DENSITY, vibration_settings(), cx)
+            .unwrap();
+        let relocated = p
+            .solve_vibration_with_nodal_density(&moved, vibration_settings(), cx)
+            .unwrap();
+        assert_eq!(dense.equilibrium(), relocated.equilibrium());
+        assert_eq!(dense.stiffness_n_m(), relocated.stiffness_n_m());
+        close(
+            dense.reference_density_kg_m3()[0],
+            relocated.reference_density_kg_m3()[0],
+        );
+        close(relocated.mass_kg()[0], 1.0 / 12.0);
+        close(dense.modes()[0].lambda, 70.0 / 9.0);
+        close(relocated.modes()[0].lambda, 14.0);
+        let scaled = p
+            .solve_vibration_with_nodal_density(
+                &DENSITY.map(|rho| 4.0 * rho),
+                vibration_settings(),
+                cx,
+            )
+            .unwrap();
+        assert_eq!(dense.equilibrium(), scaled.equilibrium());
+        assert_eq!(dense.stiffness_n_m(), scaled.stiffness_n_m());
+        close(scaled.mass_kg()[0], 4.0 * dense.mass_kg()[0]);
+        close(scaled.modes()[0].lambda, 0.25 * dense.modes()[0].lambda);
+
+        let cellwise = p.solve_vibration(&[7.3], vibration_settings(), cx).unwrap();
+        let uniform = p
+            .solve_vibration_with_nodal_density(&[7.3; 4], vibration_settings(), cx)
+            .unwrap();
+        assert_eq!(cellwise.reference_nodal_density_kg_m3(), None);
+        assert_eq!(
+            cellwise.reference_density_kg_m3(),
+            uniform.reference_density_kg_m3()
+        );
+        assert_eq!(cellwise.equilibrium(), uniform.equilibrium());
+        assert_eq!(cellwise.mass_kg(), uniform.mass_kg());
+        assert_eq!(cellwise.stiffness_n_m(), uniform.stiffness_n_m());
+        assert_eq!(
+            cellwise.modes()[0].lambda.to_bits(),
+            uniform.modes()[0].lambda.to_bits()
+        );
+        assert_eq!(cellwise.modes()[0].phi, uniform.modes()[0].phi);
+    });
+}
+
+#[test]
+fn graded_initial_iterates_and_sparse_windows_reuse_the_same_physical_pencil() {
+    with_cx(|cx, _| {
+        let law = material();
+        let fixed: Vec<_> = (0..12)
+            .filter(|&dof| dof != 3)
+            .map(|dof| (dof, 0.0))
+            .collect();
+        let stretch = 1.2_f64;
+        let forces = [(
+            3,
+            (2.0 * stretch + (3.0 * stretch.ln() - 2.0) / stretch) / 6.0,
+        )];
+        let mut p = problem(&NODES, &TETS, &law);
+        p.prescribed_m = &fixed;
+        p.nodal_forces_n = &forces;
+        p.settings.load_steps = 1;
+        let mut initial = [0.0; 12];
+        initial[3] = 0.18; // Deliberately not the accepted endpoint, 0.20.
+        let dense = p
+            .solve_vibration_from_with_nodal_density(&initial, &DENSITY, vibration_settings(), cx)
+            .unwrap();
+        modal_close(1.0 + dense.equilibrium().displacement_m[1][0], stretch);
+        let lambda = dense.modes()[0].lambda;
+        let plan = window_plan(0.8 * lambda, 1.2 * lambda);
+        let options = window_options();
+        let sparse = p
+            .solve_vibration_windows_from_with_nodal_density(
+                &initial, &DENSITY, &plan, &options, cx,
+            )
+            .unwrap();
+        assert_eq!(dense.equilibrium(), sparse.equilibrium());
+        assert_eq!(sparse.reference_nodal_density_kg_m3(), Some(&DENSITY[..]));
+        assert_eq!(
+            sparse.reference_density_kg_m3(),
+            dense.reference_density_kg_m3()
+        );
+        assert_eq!(
+            sparse.mass_kg().get(0, 0).to_bits(),
+            dense.mass_kg()[0].to_bits()
+        );
+        assert_eq!(
+            sparse.stiffness_n_m().get(0, 0).to_bits(),
+            dense.stiffness_n_m()[0].to_bits()
+        );
+        assert_eq!(sparse.spectrum().reports[0].expected, 1);
+        modal_close(sparse.spectrum().reports[0].modes[0].lambda, lambda);
+        let direct = p
+            .solve_vibration_windows_with_nodal_density(&DENSITY, &plan, &options, cx)
+            .unwrap();
+        modal_close(direct.spectrum().reports[0].modes[0].lambda, lambda);
+        close(direct.mass_kg().get(0, 0), 0.15);
+    });
+}
+
+#[test]
+fn graded_pressure_spectrum_keeps_follower_tangent_and_original_mass() {
+    with_cx(|cx, _| {
+        let law = material();
+        let fixed: Vec<_> = (0..12)
+            .filter(|dof| ![3, 7, 11].contains(dof))
+            .map(|dof| (dof, 0.0))
+            .collect();
+        let mut p = problem(&NODES, &TETS, &law);
+        p.prescribed_m = &fixed;
+        p.settings.load_steps = 6;
+        let surface = ClosedTetPressureSurface::new(&NODES, &TETS, p.budget, 16, cx).unwrap();
+        let stretch = 0.9_f64;
+        let log_j = 3.0 * stretch.ln();
+        let pressure = -(2.0 * stretch + (3.0 * log_j - 2.0) / stretch) / stretch.powi(2);
+        let diagonal = 2.0 + (2.0 + 3.0 * (1.0 - log_j)) / stretch.powi(2);
+        let off_diagonal = 3.0 / stretch.powi(2) + pressure * stretch;
+        let dense = p
+            .solve_vibration_with_nodal_density_and_pressure(
+                &surface,
+                pressure,
+                &DENSITY,
+                vibration_settings(),
+                cx,
+            )
+            .unwrap();
+        let (retained_surface, retained_pressure) = dense.held_pressure().unwrap();
+        assert!(core::ptr::eq(retained_surface, &surface));
+        assert_eq!(retained_pressure.to_bits(), pressure.to_bits());
+        let masses = [0.15, 1.0 / 12.0, 1.0 / 12.0];
+        for i in 0..3 {
+            modal_close(1.0 + dense.equilibrium().displacement_m[i + 1][i], stretch);
+            for j in 0..3 {
+                close(
+                    dense.mass_kg()[3 * i + j],
+                    if i == j { masses[i] } else { 0.0 },
+                );
+                modal_close(
+                    dense.stiffness_n_m()[3 * i + j],
+                    (if i == j { diagonal } else { off_diagonal }) / 6.0,
+                );
+            }
+        }
+        // The y-z antisymmetric mode decouples. The other two eigenvalues
+        // are the roots of the independent two-dimensional whitened pencil.
+        let a = diagonal / (6.0 * masses[0]);
+        let d = (diagonal + off_diagonal) / (6.0 * masses[1]);
+        let b = 2.0_f64.sqrt() * off_diagonal / (6.0 * (masses[0] * masses[1]).sqrt());
+        let gap = ((a - d).powi(2) + 4.0 * b * b).sqrt();
+        let mut expected = [
+            (a + d - gap) / 2.0,
+            (diagonal - off_diagonal) / (6.0 * masses[1]),
+            (a + d + gap) / 2.0,
+        ];
+        expected.sort_by(f64::total_cmp);
+        for (mode, target) in dense.modes().iter().zip(expected) {
+            modal_close(mode.lambda, target);
+        }
+        let plan = window_plan(0.5 * expected[0], 1.5 * expected[2]);
+        let sparse = p
+            .solve_vibration_windows_with_nodal_density_and_pressure(
+                &surface,
+                pressure,
+                &DENSITY,
+                &plan,
+                &window_options(),
+                cx,
+            )
+            .unwrap();
+        assert_eq!(dense.equilibrium(), sparse.equilibrium());
+        assert_eq!(sparse.reference_nodal_density_kg_m3(), Some(&DENSITY[..]));
+        assert_eq!(sparse.spectrum().reports[0].expected, 3);
+        for (mode, target) in sparse.spectrum().reports[0].modes.iter().zip(expected) {
+            modal_close(mode.lambda, target);
+        }
+        assert_eq!(sparse.mass_kg().to_dense(), dense.mass_kg());
+        assert_eq!(sparse.stiffness_n_m().to_dense(), dense.stiffness_n_m());
+    });
+}
+
+#[test]
+fn graded_vibration_refuses_invalid_density_before_equilibrium_and_cancels() {
+    with_cx(|cx, gate| {
+        let law = material();
+        let fixed: Vec<_> = (0..12)
+            .filter(|&dof| dof != 3)
+            .map(|dof| (dof, 0.0))
+            .collect();
+        let mut p = problem(&NODES, &TETS, &law);
+        p.prescribed_m = &fixed;
+        p.settings.load_steps = 1;
+        let mut invalid_initial = [0.0; 12];
+        invalid_initial[3] = 5.0; // Outside the original material's domain.
+        let plan = window_plan(1.0, 100.0);
+        let options = window_options();
+        for density in [
+            &DENSITY[..3],
+            &[3.0, 0.0, 3.0, 3.0],
+            &[3.0, f64::NAN, 3.0, 3.0],
+        ] {
+            assert!(matches!(
+                p.solve_vibration_from_with_nodal_density(
+                    &invalid_initial,
+                    density,
+                    vibration_settings(),
+                    cx
+                ),
+                Err(VibrationError::Solid(HyperTetError::InvalidInput { .. }))
+            ));
+            assert!(matches!(
+                p.solve_vibration_windows_from_with_nodal_density(
+                    &invalid_initial,
+                    density,
+                    &plan,
+                    &options,
+                    cx
+                ),
+                Err(VibrationError::Solid(HyperTetError::InvalidInput { .. }))
+            ));
+        }
+        gate.request();
+        assert!(matches!(
+            p.solve_vibration_with_nodal_density(&DENSITY, vibration_settings(), cx),
+            Err(VibrationError::Solid(HyperTetError::Cancelled))
+        ));
+        assert!(matches!(
+            p.solve_vibration_windows_with_nodal_density(&DENSITY, &plan, &options, cx),
+            Err(VibrationError::Solid(HyperTetError::Cancelled))
         ));
     });
 }

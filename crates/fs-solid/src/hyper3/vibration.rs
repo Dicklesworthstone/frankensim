@@ -5,6 +5,9 @@
 //! No additional initial-stress matrix is added to the finite-strain tangent.
 //! All free coordinates and signed eigenvalues are retained; rigid and unstable
 //! modes are not clipped or converted into real vibration frequencies.
+//! Density may be cellwise constant or a positive P1 reference field. Both
+//! routes retain the original consistent inertia through finite deformation;
+//! averaging a graded density before constructing the pencil is not equivalent.
 //!
 //! This bounded dense route freezes hyperelastic material conditions, dead
 //! loads and optional uniform closed-surface pressure. The latter contributes
@@ -77,20 +80,84 @@ impl std::error::Error for VibrationError {
 
 /// One immutable equilibrium and its complete original free-coordinate pencil.
 ///
-/// Density is per original reference volume, in element order. The geometry,
-/// material/source adapters, prescribed positions and dead loads remain borrowed
-/// together. The modes describe infinitesimal perturbations with zero increments
+/// Density is per original reference volume, with its original spatial basis.
+/// Geometry, material/source adapters, prescribed positions and dead loads remain
+/// borrowed together. The modes describe infinitesimal perturbations with zero increments
 /// on prescribed DOFs; their mass-normalized shapes use the retained free map.
 #[derive(Debug)]
 pub struct HyperTetVibration<'a, L: HyperelasticMaterial = Hyperelastic> {
     problem: HyperTetProblem<'a, L>,
     held_pressure: Option<(&'a ClosedTetPressureSurface, f64)>,
-    reference_density_kg_m3: Vec<f64>,
+    reference_density: RetainedReferenceDensity,
     equilibrium: HyperTetSolution,
     free_dofs: Vec<usize>,
     stiffness_n_m: Vec<f64>,
     mass_kg: Vec<f64>,
     modes: Vec<ModePair>,
+}
+
+/// Select the existing mass owner without reinterpreting one spatial basis as
+/// another. The result retains cell means only for inventory reporting.
+#[derive(Clone, Copy)]
+enum ReferenceDensityInput<'a> {
+    PerElement(&'a [f64]),
+    Nodal(&'a [f64]),
+}
+
+#[derive(Debug)]
+struct RetainedReferenceDensity {
+    cell_means_kg_m3: Vec<f64>,
+    nodal_kg_m3: Option<Vec<f64>>,
+}
+
+impl ReferenceDensityInput<'_> {
+    fn mass_matrix<L: HyperelasticMaterial>(
+        self,
+        problem: &HyperTetProblem<'_, L>,
+        cx: &Cx<'_>,
+    ) -> Result<Csr, HyperTetError> {
+        match self {
+            Self::PerElement(density) => problem.reference_mass_matrix(density, cx),
+            Self::Nodal(density) => problem.reference_mass_matrix_with_nodal_density(density, cx),
+        }
+    }
+
+    /// Retain an already admitted field. The means never enter the mass solve.
+    fn retain(
+        self,
+        tetrahedra: &[[usize; 4]],
+        cx: &Cx<'_>,
+    ) -> Result<RetainedReferenceDensity, HyperTetError> {
+        checkpoint(cx)?;
+        let retained = match self {
+            Self::PerElement(density) => RetainedReferenceDensity {
+                cell_means_kg_m3: density.to_vec(),
+                nodal_kg_m3: None,
+            },
+            Self::Nodal(density) => {
+                let mut means = Vec::with_capacity(tetrahedra.len());
+                for nodes in tetrahedra {
+                    checkpoint(cx)?;
+                    let rho = nodes.map(|node| density[node]);
+                    // The P1 volume mean is the four-vertex mean. Normalize
+                    // before adding, just as the native inertia owner does.
+                    let mean = if rho.iter().all(|value| value.to_bits() == rho[0].to_bits()) {
+                        rho[0]
+                    } else {
+                        let scale = rho.into_iter().fold(0.0_f64, f64::max);
+                        scale * (0.25 * rho.iter().map(|value| value / scale).sum::<f64>())
+                    };
+                    means.push(mean);
+                }
+                RetainedReferenceDensity {
+                    cell_means_kg_m3: means,
+                    nodal_kg_m3: Some(density.to_vec()),
+                }
+            }
+        };
+        checkpoint(cx)?;
+        Ok(retained)
+    }
 }
 
 fn invalid(what: &str) -> HyperTetError {
@@ -147,7 +214,36 @@ impl<'a, L: HyperelasticMaterial> HyperTetProblem<'a, L> {
         settings: VibrationSettings,
         cx: &Cx<'_>,
     ) -> Result<HyperTetVibration<'a, L>, VibrationError> {
-        self.solve_vibration_impl(reference_density_kg_m3, None, None, settings, cx)
+        self.solve_vibration_impl(
+            ReferenceDensityInput::PerElement(reference_density_kg_m3),
+            None,
+            None,
+            settings,
+            cx,
+        )
+    }
+
+    /// The same equilibrium and complete spectrum with a positive P1 density
+    /// field on the original mesh nodes. The native mass owner integrates
+    /// `rho * N_a * N_b` exactly; equal cell means do not erase different
+    /// material distributions. Density is admitted before nonlinear work and
+    /// neither it nor the reference mass is rescaled by the accepted deformation.
+    ///
+    /// # Errors
+    /// Nodal-density admission and all errors of [`Self::solve_vibration`].
+    pub fn solve_vibration_with_nodal_density(
+        &self,
+        reference_nodal_density_kg_m3: &[f64],
+        settings: VibrationSettings,
+        cx: &Cx<'_>,
+    ) -> Result<HyperTetVibration<'a, L>, VibrationError> {
+        self.solve_vibration_impl(
+            ReferenceDensityInput::Nodal(reference_nodal_density_kg_m3),
+            None,
+            None,
+            settings,
+            cx,
+        )
     }
 
     /// Original pressure-loaded equilibrium and its complete signed spectrum.
@@ -170,7 +266,31 @@ impl<'a, L: HyperelasticMaterial> HyperTetProblem<'a, L> {
         cx: &Cx<'_>,
     ) -> Result<HyperTetVibration<'a, L>, VibrationError> {
         self.solve_vibration_impl(
-            reference_density_kg_m3,
+            ReferenceDensityInput::PerElement(reference_density_kg_m3),
+            None,
+            Some((surface, pressure_pa)),
+            settings,
+            cx,
+        )
+    }
+
+    /// Held closed-surface pressure with the original positive P1 density.
+    /// The pressure tangent, material tangent and supports are identical to
+    /// [`Self::solve_vibration_with_pressure`]; only the explicit spatial
+    /// density basis changes. The complete original nodal field is retained.
+    ///
+    /// # Errors
+    /// Nodal-density and native pressure/vibration refusals.
+    pub fn solve_vibration_with_nodal_density_and_pressure(
+        &self,
+        surface: &'a ClosedTetPressureSurface,
+        pressure_pa: f64,
+        reference_nodal_density_kg_m3: &[f64],
+        settings: VibrationSettings,
+        cx: &Cx<'_>,
+    ) -> Result<HyperTetVibration<'a, L>, VibrationError> {
+        self.solve_vibration_impl(
+            ReferenceDensityInput::Nodal(reference_nodal_density_kg_m3),
             None,
             Some((surface, pressure_pa)),
             settings,
@@ -193,7 +313,29 @@ impl<'a, L: HyperelasticMaterial> HyperTetProblem<'a, L> {
         cx: &Cx<'_>,
     ) -> Result<HyperTetVibration<'a, L>, VibrationError> {
         self.solve_vibration_impl(
-            reference_density_kg_m3,
+            ReferenceDensityInput::PerElement(reference_density_kg_m3),
+            Some(initial_displacement_m),
+            None,
+            settings,
+            cx,
+        )
+    }
+
+    /// Re-equilibrate from an initial iterate with the same original positive
+    /// P1 reference density. The initial field is not treated as an accepted
+    /// state; [`Self::solve_vibration_from`]'s one-load-step rule still applies.
+    ///
+    /// # Errors
+    /// Nodal-density and native initial-iterate/vibration refusals.
+    pub fn solve_vibration_from_with_nodal_density(
+        &self,
+        initial_displacement_m: &[f64],
+        reference_nodal_density_kg_m3: &[f64],
+        settings: VibrationSettings,
+        cx: &Cx<'_>,
+    ) -> Result<HyperTetVibration<'a, L>, VibrationError> {
+        self.solve_vibration_impl(
+            ReferenceDensityInput::Nodal(reference_nodal_density_kg_m3),
             Some(initial_displacement_m),
             None,
             settings,
@@ -203,7 +345,7 @@ impl<'a, L: HyperelasticMaterial> HyperTetProblem<'a, L> {
 
     fn solve_vibration_impl(
         &self,
-        reference_density_kg_m3: &[f64],
+        density: ReferenceDensityInput<'_>,
         initial: Option<&[f64]>,
         held_pressure: Option<(&'a ClosedTetPressureSurface, f64)>,
         settings: VibrationSettings,
@@ -239,11 +381,7 @@ impl<'a, L: HyperelasticMaterial> HyperTetProblem<'a, L> {
         }
         // Admit mass before the nonlinear work. Neither density nor reference
         // volume is updated to the deformed geometry or statically lumped.
-        let mass_kg = dense_restriction(
-            &self.reference_mass_matrix(reference_density_kg_m3, cx)?,
-            &free_dofs,
-            cx,
-        )?;
+        let mass_kg = dense_restriction(&density.mass_matrix(self, cx)?, &free_dofs, cx)?;
         let equilibrium = match held_pressure {
             Some((surface, pressure)) => self.solve_with_pressure(surface, pressure, cx)?,
             None => match initial {
@@ -302,11 +440,11 @@ impl<'a, L: HyperelasticMaterial> HyperTetProblem<'a, L> {
                 });
             }
         }
-        checkpoint(cx)?;
+        let reference_density = density.retain(self.tetrahedra, cx)?;
         Ok(HyperTetVibration {
             problem: *self,
             held_pressure,
-            reference_density_kg_m3: reference_density_kg_m3.to_vec(),
+            reference_density,
             equilibrium,
             free_dofs,
             stiffness_n_m,
@@ -330,8 +468,15 @@ impl<L: HyperelasticMaterial> HyperTetVibration<'_, L> {
     }
 
     /// Conserved mass density per original volume, in tetrahedron order.
+    /// For a graded field these are cell means for inventory reporting; the
+    /// mass matrix retains the full field's first and second moments.
     pub fn reference_density_kg_m3(&self) -> &[f64] {
-        &self.reference_density_kg_m3
+        &self.reference_density.cell_means_kg_m3
+    }
+
+    /// Original P1 nodal density, or None for the cellwise-density model.
+    pub fn reference_nodal_density_kg_m3(&self) -> Option<&[f64]> {
+        self.reference_density.nodal_kg_m3.as_deref()
     }
 
     /// Native accepted equilibrium, including finite support reactions.
