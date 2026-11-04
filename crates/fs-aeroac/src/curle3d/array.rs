@@ -40,6 +40,8 @@ use fs_math::{c64::C64, det};
 
 mod plane;
 pub use plane::{IdealAcousticPlane, IdealPlaneBoundary, PreparedHalfSpaceObserver};
+/// Coherent volume injection into an explicitly uniform subsonic mean flow.
+pub mod convected;
 
 /// Applicability of the prescribed three-dimensional source transfer.
 pub const COMPACT_FIELD_SCOPE: &str = "Prescribed compact 3D volume flow [m³/s] and force on fluid [N]; \

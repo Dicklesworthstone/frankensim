@@ -1051,3 +1051,44 @@ reference calculations agree with the eight-state time-domain products
 within 6.67e-16 maximum absolute error; Uniform and Triangular weighted
 real-time quadrature agree within 1.32e-14 and 2.69e-14. This scoped execution
 and these references are not a full-crate build or repository quality gate.
+
+## Coherent volume sources in uniform subsonic flow
+
+`curle3d::array::convected::PreparedConvectedMonopoleObserver` extends the
+prescribed volume-source lane to a constant laboratory-frame fluid velocity.
+The original `FluidAcousticState` supplies density and adiabatic sound speed;
+all sources and the observer remain fixed. The source injects volume at the
+mean velocity with no extra force or entropy. Force-dipole wakes, nonuniform
+or vortical mean flows, boundaries, absorption, source compactness validation
+and reciprocal source loading remain outside this owner.
+
+The original `moving::flow::UniformFlowCompactObserver` supplies every source
+path's pressure coefficient and travel time through its Galilean moving-source
+law. The array adds the exact convected Green potential's particle velocity
+through its spatial gradient, using the SAME retained travel phase once.
+The original downstream rationalization and explicit subsonic Mach margin
+remain authoritative. Source phases are summed before quadratic observables, and
+the original shared complex accumulation and source-factor statistics retain
+coherent cancellation and complex partial correlation. A harmonic-line export
+feeds the existing finite-window owner without adding another delay.
+
+Pressure-work intensity `<p u>` is distinct from total quadratic perturbation
+transport `J=<p u>+U<E>`, with
+`E=p²/(2 rho c²)+rho |u|²/2`. The latter satisfies
+`partial_t E + div J = 0` away from sources for the declared uniform-flow
+linearized Euler system; it does not claim the change in total mean-flow energy.
+Both coherent and ensemble outputs retain this distinction. Preparation is
+O(N), retaining four complex coefficients per source; field applications are
+allocation-free O(N), and authored factor applications O(N rank). Source-count,
+factor-work, distance, finite-range and cancellation checks remain explicit.
+
+Nine G0/G1/G3/G4 regressions cover original-owner pressure/delay parity,
+analytic quiescent and axial/transverse
+fields, finite-difference Euler/continuity and energy divergence, coherent nulls
+and partial coherence, material scaling, coordinate transforms, flow-reversal
+reciprocity, nearly sonic admitted travel times, work refusal and cancellation.
+They pass a focused native exact-source leaf build using the production
+`FluidAcousticState` implementation, production complex statistics and complete
+`fs-math` crate, plus the original Galilean pressure and moving-source owners,
+with nominal error carriers only. This is not a full-crate
+Cargo/DSR gate or experimental source validation.

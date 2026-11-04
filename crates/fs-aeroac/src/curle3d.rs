@@ -25,6 +25,10 @@ pub use array::{
     CoherentCompactField, CompactSourcePhasor, IdealAcousticPlane, IdealPlaneBoundary,
     PreparedCompactSourceObserver, PreparedHalfSpaceObserver,
 };
+pub use array::convected::{
+    ConvectedMonopoleField, ConvectedMonopoleLimits, ConvectedMonopoleStatistics,
+    PreparedConvectedMonopoleObserver,
+};
 pub use power::{
     CompactRadiatedPower, PreparedCompactRadiatedPower, RadiatedPowerBudget,
     RadiatedPowerModeBudget,
