@@ -4,7 +4,13 @@ written with its source or labelled ASSUMPTION in PROVENANCE.tsv beside the tabl
 recording or mode frequency. cello_bridge_19g.py then sets the bridge to its published mass; the two together write
 data/instruments/geometry/cello-castelbarco-1697-shell (check_cello_shell.py reproduces it byte for byte).
 
-usage: python3 -I cello_specimen.py CANNONE_DIR OUT_DIR   (OUT_DIR must not exist)
+usage: python3 -I cello_specimen.py CANNONE_DIR OUT_DIR [fholes=RASTER_RUNS.tsv]   (OUT_DIR must not exist)
+
+fholes=RASTER_RUNS.tsv (optional): the two hole rasters traced from the LOCM drawing itself (frankensim.specimen-raster-runs.v1,
+already in this specimen's plan mm), used in place of the scaled Cannone holes; the top's island follows them, and the
+f_hole_* rows of PROVENANCE.tsv then state the trace and its scored checks (TRACE_* below) instead of the placement.
+The trace of image 0021 is data/instruments/geometry/cello-castelbarco-1697-shell/fholes-trace-image0021.tsv (kept as data;
+the tools that traced it are not in the tree). No table of that directory is made with it.
 
 Sources (values in mm unless stated):
   LOC   = Library of Congress catalog record 2022560102, Stradivari cello "Castelbarco" 1697, via the repo table
@@ -35,6 +41,12 @@ import numpy as np
 
 SRC = sys.argv[1].rstrip("/") + "/"
 OUT = sys.argv[2].rstrip("/") + "/"
+TRACE = None
+for arg in sys.argv[3:]:
+    key, eq, value = arg.partition("=")
+    if key != "fholes" or not eq or not value or TRACE is not None:
+        raise SystemExit("refusing: %r; the only option is one fholes=RASTER_RUNS.tsv" % arg)
+    TRACE = value
 if os.path.exists(OUT):
     raise SystemExit("refusing: %s exists" % OUT)
 os.makedirs(OUT)
@@ -321,6 +333,13 @@ for h in (1, 2):
                 k = j
             else:
                 k += 1
+if TRACE:
+    tl = open(TRACE, encoding="utf-8").read().splitlines()
+    if tl[:2] != ["frankensim.specimen-raster-runs.v1", "hole\tz_mm\tx_start_mm\tx_end_mm"]:
+        raise SystemExit("refusing: %s is not a two-hole raster-runs table" % TRACE)
+    fh_rows = [(int(f[0]), float(f[1]), float(f[2]), float(f[3])) for f in (l.split("\t") for l in tl[2:] if l.strip())]
+    if sorted({r[0] for r in fh_rows}) != [1, 2]:
+        raise SystemExit("refusing: %s must hold hole 1 (bass) and hole 2 (treble)" % TRACE)
 write("top-plate-fholes.tsv", "frankensim.specimen-raster-runs.v1", ["hole", "z_mm", "x_start_mm", "x_end_mm"], fh_rows, ["%d", "%.2f", "%.2f", "%.2f"])
 fhr = np.array(fh_rows)
 for h in (1, 2):
@@ -367,6 +386,50 @@ prov("f_holes","scale %.4f / %.4f; rotation %.2f / %.2f deg about the upper eye;
 prov("f_hole_check", "eye diameters upper %.2f / %.2f (LOCM 13.5 / 13.0), lower %.2f / %.2f (LOCM 19.7 / 19.2) mm; notch inner edges %.2f apart (LOCM 162.0); lower eye edge to the top outline %.2f / %.2f mm (LOCM 32.8 / 34.0 to the outside of the instrument); bridge plane z %.2f = %.2f mm below the top edge, %.2f / %.2f mm above the printed notch line (the bridge is not moved)" % (
     2 * H1["s"] * H1["r_up"], 2 * H2["s"] * H2["r_up"], 2 * H1["s"] * H1["r_lo"], 2 * H2["s"] * H2["r_lo"], H2["n2"][0] - H1["n2"][0], H1["lo_edge"], H2["lo_edge"],
     SZ * Z_NOTCH_C, Z_TOP - SZ * Z_NOTCH_C, STOP_P[1] - (Z_TOP - SZ * Z_NOTCH_C), STOP_P[2] - (Z_TOP - SZ * Z_NOTCH_C)), "check", "computed from the placed holes; not fitted")
+if TRACE:
+    # The f_hole_* rows state the trace instead (image 0021 trace, run8: classify.py, measure.py v2, not in the tree; the checks were
+    # scored against predictions stamped before measuring). Points in this plan's mm: x = (px - 1504.0) / 5.9284,
+    # z = -227.53 - (py - 1395) / 5.9284 (the bass notch row at the printed 419 below the top edge, z 191.47).
+    if abs(Z_TOP - 191.47) > 0.005:
+        raise SystemExit("refusing: the trace was placed with the top edge at z 191.47, this specimen has %.3f" % Z_TOP)
+    T_EYE = {(1, "up"): (-58.13, -174.46, 6.61), (2, "up"): (57.54, -173.40, 6.01), (1, "lo"): (-119.70, -270.05, 9.60), (2, "lo"): (119.58, -266.07, 9.21)}
+    T_NOTCH = {1: (-79.87, -227.53), 2: (80.54, -224.83)}
+    lo_t = {h: float(dist_to_poly(cpoly_t, np.array([T_EYE[(h, "lo")][:2]]))[0]) - T_EYE[(h, "lo")][2] for h in (1, 2)}
+    fh_new = [
+        ("f_hole_length", "%.1f / %.1f mm (bass / treble), end to end" % (FH_LEN_P[1], FH_LEN_P[2]), "LOCM",
+         "%s; CHECK only: the traced holes are 130.78 / 128.24 mm eye to eye over the arch (130.24 / 127.23 projected), so the printed lengths are eye to eye; the traced wing tips reach beyond the eyes" % LOCM_REF),
+        ("f_hole_upper_eye_spacing", "%.1f mm between the upper eyes' inner edges (103.0 by tape)" % UP_INNER, "LOCM",
+         "%s; USED for the trace scale, one of three chords (611.0 px on the drawing: 5.9723 px/mm)" % LOCM_REF),
+        ("f_hole_upper_eye_diameter", "%.1f / %.1f mm (bass / treble)" % (UP_DIA[1], UP_DIA[2]), "LOCM",
+         "%s; CHECK only: traced across-body widths over the arch 13.22 / 12.07 mm; treble -0.93 is a KNOWN MISS (T3, see f_hole_check)" % LOCM_REF),
+        ("f_hole_lower_eye_spacing_inner", "%.1f mm between the lower eyes' inner edges" % LO_INNER, "LOCM",
+         "%s; USED for the trace scale, one of three chords (1307.2 px: 5.9416 px/mm)" % LOCM_REF),
+        ("f_hole_lower_eye_spacing_outer", "%.1f mm between the lower eyes' outer edges" % LO_OUTER, "LOCM",
+         "%s; CHECK only: 258.12 mm on the trace at the mean scale" % LOCM_REF),
+        ("f_hole_stop", "%.0f / %.0f mm from the top edge to the notches (bass / treble)" % (STOP_P[1], STOP_P[2]), "LOCM",
+         "%s ('bass ff hole higher than treble'); USED for the bass hole only: the drawing is moved along z until the bass stem's inner notch lies %.1f mm below the top edge (z %.2f), notch z %.2f; the treble notch follows as drawn, %.2f mm below the top edge: KNOWN MISS (T9, see f_hole_check)" % (
+             LOCM_REF, STOP_P[1], Z_TOP, T_NOTCH[1][1], Z_TOP - T_NOTCH[2][1])),
+        ("f_hole_lower_eye_diameter", "%.1f / %.1f mm (bass / treble)" % (LO_DIA[1], LO_DIA[2]), "LOCM",
+         "%s; CHECK only: traced across-body widths over the arch 19.55 / 18.10 mm; treble -1.10 is a KNOWN MISS (T3, see f_hole_check)" % LOCM_REF),
+        ("f_hole_notch_gap", "%.1f mm between the notches" % NOTCH_GAP_P, "LOCM",
+         "%s; USED for the trace scale, one of three chords (951.1 px: 5.8712 px/mm); at the mean scale the traced notches are 160.44 mm apart (-1.56)" % LOCM_REF),
+        ("f_hole_lower_eye_to_edge", "%.1f / %.1f mm from the lower eye to the outside of the instrument (bass / treble)" % (LO_EDGE_P[1], LO_EDGE_P[2]), "LOCM",
+         "%s; CHECK only, not used: traced lower eye circle edge to the mapped top outline %.2f / %.2f mm" % (LOCM_REF, lo_t[1], lo_t[2])),
+        ("f_hole_shape", "traced from the LOCM drawing (image 0021) at 5.9284 px/mm: hole = the pixels darker than the half-intensity threshold between the hole and wood medians (53.1 between 20.1 and 86.1); the drawn ink lines are masked and each masked segment is decided from its two ends; the four necks are constructed as capsules at the printed widths 1.4 / 1.3 / 1.3 / 1.3 mm between the drawing's tip markers; cut into 0.5 mm raster rows", "LOCM",
+         "ASSUMPTIONS: the drawing is a plan view at one scale (its caliper chords run over the arch, which adds 0.54 / 1.01 mm to the traced lengths); the centre line is the mean chord midpoint (x 1504.0 px); no rotation (the drawing's chords tilt treble side up by 0.53 to 0.96 deg); the lit wall band inside the treble eyes' rims (0.5 to 0.85 mm) is wood by the half-intensity rule; the necks are not measured"),
+        ("f_holes", "traced: %d / %d raster runs, z extents %.1f / %.1f mm, areas %.0f / %.0f mm2; upper eyes (%.2f, %.2f) / (%.2f, %.2f), lower eyes (%.2f, %.2f) / (%.2f, %.2f), notches (%.2f, %.2f) / (%.2f, %.2f)" % (
+            int((fhr[:, 0] == 1).sum()), int((fhr[:, 0] == 2).sum()), H1["len2"], H2["len2"], H1["area2"], H2["area2"], *T_EYE[(1, "up")][:2], *T_EYE[(2, "up")][:2],
+            *T_EYE[(1, "lo")][:2], *T_EYE[(2, "lo")][:2], *T_NOTCH[1], *T_NOTCH[2]), "LOCM",
+         "scale = mean of the three printed chords (upper eyes inner 102.3, notches 162.0, lower eyes inner 220.0; +0.74 / -0.96 / +0.22 %% from the mean); eye centres = circle fits to the traced eye boundaries (radii %.2f, %.2f / %.2f, %.2f mm)" % (
+             T_EYE[(1, "up")][2], T_EYE[(1, "lo")][2], T_EYE[(2, "up")][2], T_EYE[(2, "lo")][2])),
+        ("f_hole_check", "scored against predictions stamped before measuring: eye widths over the arch upper 13.22 / 12.07 (LOCM 13.5 / 13.0), lower 19.55 / 18.10 (19.7 / 19.2) mm; lengths eye to eye over the arch 130.78 / 128.24 (130.5 / 128.5); notch gap 160.44 (162.0); treble stop 416.30 (420); bridge plane z %.2f = %.2f mm below the top edge, %.2f / %.2f mm above the traced notches (the bridge is not moved)" % (
+            SZ * Z_NOTCH_C, Z_TOP - SZ * Z_NOTCH_C, SZ * Z_NOTCH_C - T_NOTCH[1][1], SZ * Z_NOTCH_C - T_NOTCH[2][1]), "check",
+         "KNOWN MISSES, kept as measured (the trace is placed as stamped; nothing is moved after measuring): T9 the treble stop is 3.70 mm short of the printed 420 (tolerance 1.0): the drawing's treble notch lies 2.70 mm above its bass notch and all three chords tilt treble side up (-0.53, -0.96, -0.96 deg); T3 the treble eyes are 0.93 / 1.10 mm narrower than printed (tolerance 0.5): the lit wall band inside their rims is wood by the half-intensity rule. In tolerance: the bass eyes (-0.28, -0.15) and both lengths (+0.28, -0.26)"),
+    ]
+    at = [i for i, p in enumerate(PROV) if p[0].startswith("f_hole")]
+    if at != list(range(at[0], at[0] + len(fh_new))):
+        raise SystemExit("refusing: the f_hole rows are not the %d contiguous rows the trace replaces" % len(fh_new))
+    PROV[at[0]:at[0] + len(fh_new)] = fh_new
 
 # island between the holes for the top's 'centre at sound post' thickness
 isl = []
