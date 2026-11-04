@@ -288,3 +288,77 @@ impl<'a, const N: usize> GearedPropulsion<'a, N> {
         Ok(self)
     }
 }
+
+#[cfg(test)]
+mod load_admission_tests {
+    use super::*;
+    use fs_wing::{SurfaceId, flat_surface};
+
+    #[test]
+    fn grouped_lift_refuses_invalid_reference_and_incomplete_fields() {
+        let panels = flat_surface(SurfaceId::WingLower, 4.0, 1.0, 0.0, 0.0, 2, 1).unwrap();
+        let strips = (0..2)
+            .map(|j| StripSpec {
+                panel_indices: vec![j],
+                chord_m: 1.0,
+                twist_rad: 0.0,
+            })
+            .collect::<Vec<_>>();
+        let properties = vec![
+            SectionProperties {
+                camber_ratio: 0.0,
+                attached_cd: 0.01,
+                canard_gain: 0.0,
+                induced_drag_group: 0,
+            };
+            2
+        ];
+        let groups = [InducedDragGroup {
+            span_m: 4.0,
+            oswald_e: 0.8,
+        }];
+        let surfaces = LiftingSurfaces::new(&panels, &strips, &properties, &groups).unwrap();
+        let velocity = [[12.0, 0.0, 0.0]; 2];
+        let alpha = [0.05; 2];
+        let fields = AerodynamicFields {
+            gamma: &[],
+            strip_alpha_eff_rad: &alpha,
+            strip_velocity_mps: Some(&velocity),
+            thrust_n: [0.0; 2],
+            torque_nm: [0.0; 2],
+            oblique: None,
+        };
+        let loads = [Vec3::new(0.0, 0.0, -10.0)];
+        let evaluate = |rho, speed: [f64; 3], groups: &[Vec3]| {
+            surfaces.additional_wrench(rho, vec(speed), [0.0; 3], &fields, groups)
+        };
+        assert!(evaluate(1.225, [12.0, 0.0, 0.0], &loads).is_ok());
+        for speed in [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [f64::NAN, 0.0, 0.0],
+            [f64::MAX, 0.0, 0.0],
+        ] {
+            assert_eq!(evaluate(1.225, speed, &loads).unwrap_err().code, "lifting-surfaces-invalid");
+        }
+        assert_eq!(evaluate(0.0, [12.0, 0.0, 0.0], &loads).unwrap_err().code, "lifting-surfaces-invalid");
+        assert_eq!(evaluate(1.225, [12.0, 0.0, 0.0], &[]).unwrap_err().code, "lifting-surfaces-invalid");
+        assert_eq!(
+            evaluate(1.225, [12.0, 0.0, 0.0], &[Vec3::new(f64::MAX, 0.0, 0.0)])
+                .unwrap_err()
+                .code,
+            "lifting-surfaces-invalid"
+        );
+        let short_velocity = &velocity[..1];
+        let bad_fields = AerodynamicFields {
+            strip_velocity_mps: Some(short_velocity),
+            ..fields
+        };
+        assert_eq!(
+            surfaces.additional_wrench(1.225, vec([12.0, 0.0, 0.0]), [0.0; 3], &bad_fields, &loads)
+                .unwrap_err()
+                .code,
+            "lifting-surfaces-invalid"
+        );
+    }
+}
