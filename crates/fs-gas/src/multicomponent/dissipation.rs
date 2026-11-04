@@ -12,7 +12,7 @@ pub(super) mod evolve;
 mod face;
 mod law;
 pub(in crate::multicomponent) mod reservoir;
-mod stabilized;
+pub(in crate::multicomponent) mod stabilized;
 
 pub use face::{PlanarTransport, SpatialTransport, TransportFaceReport, WallThermalCondition};
 #[cfg(feature = "material")]

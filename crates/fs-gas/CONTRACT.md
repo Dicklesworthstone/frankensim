@@ -2333,6 +2333,49 @@ this operator. Native source-linked
 checks are supplementary: `dsr quality --tool frankensim` is unavailable here
 (`dsr: command not found`), so no workspace DSR verdict is claimed.
 
+### Stabilized molecular intervals with finite plenum storage
+
+`NetworkDissipationOperator::advance_stabilized_for` opts the original complete
+network operator into second-order Runge–Kutta–Legendre (RKL2) macrosteps.
+`advance_stabilized_with_reservoirs_for` retains prescribed exterior baths on
+the same path. Both reuse the axial Legendre coefficients and branch recurrence,
+the existing network spatial kernel, and the original source/geometry admission
+and final publication owner. Each finite plenum evolves with its actual volume
+and the sum of every incident port flux. Branch fields, plenum inventories and
+signed endpoint transfers follow the same recurrence, including its negative
+weights, so internal species and energy exchange remains equal and opposite.
+The stationary plenum's support retains each port's local axial impulse.
+
+`StabilizedDissipationControl` retains the original rate and residual controls.
+The global rate includes all branch cells and every finite-plenum port rate
+divided by its volume. For `s` stages the estimated forward-step interval is
+extended by `(s*s+s-2)/4`; the original source, caloric, constitutive and global
+rate checks run at every intermediate state and the final endpoint. Refused
+trials halve the whole macrostep and restart from its cached original RHS.
+Stage, attempt, halving and cumulative actual-RHS budgets are bounded; an
+accepted `s`-stage macrostep uses `s+1` spatial evaluations. The report separates
+the unscaled parabolic number, its stability-extension-scaled value, the largest
+accepted stage count and actual work, including discarded attempts. Composing
+owners can carry that same work counter across both molecular halves and
+complete-step retries without publishing trial reports.
+
+The three existing conservative state arrays are reused. Anchor-face,
+anchor-plenum-RHS and endpoint-recurrence buffers are reserved lazily and reused
+without per-stage allocation. Admission, signed branch/port/exterior balances,
+and complete-duration publication are shared with SSPRK2. Cancellation, budget
+exhaustion or source refusal preserves all accepted fields, clocks and reports.
+
+The physical macrostep cap remains an explicit accuracy choice; there is no
+temporal error estimator, unconditional nonlinear positivity guarantee or
+entropy certificate. Authored regressions independently evaluate a finite-volume
+two-pool Legendre eigenmode with a stiff small plenum, Fourier relaxation and
+temporal refinement with unequal heat capacities, and an affine three-storage
+bath/plenum matrix polynomial. They also check actual stability work versus SSP,
+signed endpoint and finite-inventory transfers, zero net diffusive mass,
+orientation and formation-gauge invariance, late cancellation, cumulative work
+refusal and reuse. The work comparison is a stability comparison, not a claim
+of equal temporal error. Test execution is not implied by this contract.
+
 ### Exterior molecular baths through complete network transactions
 
 `NetworkDissipationOperator::advance_with_reservoirs_for` supplies one optional

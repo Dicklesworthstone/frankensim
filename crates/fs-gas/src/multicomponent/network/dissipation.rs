@@ -9,7 +9,8 @@
 //! axial momentum; different branch axes are never added into scalar momentum.
 //!
 //! The inherited constant-area, dilute-gas and estimated-parabolic restrictions
-//! remain in force. No Soret/Dufour model or entropy certificate is implied.
+//! remain in force. Thermal cross coupling requires its authored source law;
+//! no entropy certificate is implied.
 
 use super::{MixtureNetwork1d, NetworkTotals, PlenumConnection, PortExchange, empty_exchange};
 use crate::multicomponent::dissipation::{
@@ -23,13 +24,16 @@ use fs_qty::{Length, Time};
 use fs_thermochem::transport::maxwell_stefan::{MaxwellStefanV1, MaxwellStefanWorkspaceV1};
 
 mod evolve;
+mod stabilized;
+
+pub use stabilized::StabilizedNetworkDissipationReport;
 
 /// Complete molecular interval; the accepted network clock is unchanged.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NetworkDissipationReport {
     /// Complete requested molecular duration [s].
     pub elapsed: Time,
-    /// Accepted globally synchronized SSPRK2 substeps.
+    /// Accepted globally synchronized SSPRK2 substeps or RKL2 macrosteps.
     pub accepted_steps: usize,
     /// Rejected and halved complete network substeps.
     pub rejected_steps: usize,
@@ -85,6 +89,11 @@ struct Workspace {
     plenum_corrections: Vec<f64>,
     plenum_rates: Vec<f64>,
     endpoints_a: Vec<f64>,
+    // Allocated only by the opt-in RKL2 path; the original three state arrays
+    // also hold its anchor and two previous stages.
+    stabilized_faces: Vec<f64>,
+    stabilized_plenum_rhs: Vec<f64>,
+    stabilized_endpoint_changes: Vec<f64>,
     endpoint_changes: Vec<f64>,
     endpoint_corrections: Vec<f64>,
     branch_before: Vec<Totals>,
@@ -257,6 +266,9 @@ impl<L: TransportLaw> NetworkDissipationOperator<L> {
             plenum_corrections: allocated(plenum_count * m, 0.0)?,
             plenum_rates: allocated(plenum_count, 0.0)?,
             endpoints_a: allocated(branch_count * 2 * m, 0.0)?,
+            stabilized_faces: Vec::new(),
+            stabilized_plenum_rhs: Vec::new(),
+            stabilized_endpoint_changes: Vec::new(),
             endpoint_changes: allocated(branch_count * 2 * m, 0.0)?,
             endpoint_corrections: allocated(branch_count * 2 * m, 0.0)?,
             branch_before: allocated(branch_count, super::empty_totals(n))?,

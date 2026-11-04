@@ -118,12 +118,12 @@ impl<L: TransportLaw> DissipationOperator<L> {
     }
 }
 
-fn extent(stages: usize) -> f64 {
+pub(in crate::multicomponent) fn extent(stages: usize) -> f64 {
     let s = stages as f64;
     (s * s + s - 2.0) / 4.0
 }
 
-fn b(stage: usize) -> f64 {
+pub(in crate::multicomponent) fn b(stage: usize) -> f64 {
     if stage < 2 {
         1.0 / 3.0
     } else {
@@ -132,7 +132,7 @@ fn b(stage: usize) -> f64 {
     }
 }
 
-fn reserve_evaluation(
+pub(in crate::multicomponent) fn reserve_evaluation(
     evaluations: &mut usize,
     maximum: usize,
     elapsed: f64,
@@ -147,7 +147,11 @@ fn reserve_evaluation(
     Ok(())
 }
 
-fn check_rate(step: f64, rate: f64, maximum: f64) -> Result<(), DissipationError> {
+pub(in crate::multicomponent) fn check_rate(
+    step: f64,
+    rate: f64,
+    maximum: f64,
+) -> Result<(), DissipationError> {
     let number = step * rate;
     if !number.is_finite() || number > maximum * (1.0 + 8.0 * f64::EPSILON) {
         return Err(DissipationError::ParabolicNumber {
@@ -159,7 +163,7 @@ fn check_rate(step: f64, rate: f64, maximum: f64) -> Result<(), DissipationError
 }
 
 #[allow(clippy::too_many_arguments)]
-fn recurrence(
+pub(in crate::multicomponent) fn recurrence(
     gas: &MixtureGas,
     mesh: &Mesh1d,
     anchor: &[f64],

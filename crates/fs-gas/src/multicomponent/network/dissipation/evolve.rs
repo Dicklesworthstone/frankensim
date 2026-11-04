@@ -9,7 +9,7 @@ use crate::multicomponent::evolve::totals;
 use crate::multicomponent::{Cell, MAX_SPECIES, sum};
 
 #[derive(Clone, Copy)]
-enum Input {
+pub(super) enum Input {
     Current,
     Stage,
 }
@@ -22,70 +22,10 @@ pub(super) fn advance<L: TransportLaw>(
     reservoirs: Option<&[[Option<Cell<'_>>; 2]]>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<NetworkDissipationReport, DissipationError> {
-    poll(cancelled)?;
-    controls.validate()?;
-    if !duration.value().is_finite() || duration.value() < 0.0 {
-        return Err(DissipationError::Invalid(
-            "nonnegative finite molecular duration required",
-        ));
-    }
-    if owner.gas != *network.gas()
-        || owner.law.source() != owner.gas.source()
-        || owner.connections != network.connections
-        || owner.endpoint_connections != network.endpoint_connections
-        || owner.branches.len() != network.branches.len()
-        || owner.plenum_volumes.len() != network.plenums.len()
-    {
-        return Err(DissipationError::Invalid(
-            "molecular operator and network ownership differ",
-        ));
-    }
-    let reservoirs = if owner.admit_reservoirs(reservoirs, cancelled)? {
-        reservoirs
-    } else {
-        None
-    };
-    let n = owner.gas.species_count();
-    let m = n + 2;
-    for (index, (branch, shape)) in network.branches.iter().zip(&owner.branches).enumerate() {
-        poll(cancelled)?;
-        if branch.gas != owner.gas
-            || branch.mesh != shape.mesh
-            || branch.boundaries != shape.boundaries
-        {
-            return Err(DissipationError::Invalid(
-                "molecular branch geometry or boundary changed",
-            ));
-        }
-        let destination = &mut owner.work.current
-            [shape.cell_start * m..(shape.cell_start + branch.cell_count()) * m];
-        for (source, target) in branch.states.chunks(1024).zip(destination.chunks_mut(1024)) {
-            poll(cancelled)?;
-            target.copy_from_slice(source);
-        }
-        owner.work.branch_before[index] =
-            totals(&branch.states, shape.mesh.volumes(), n, cancelled)?;
-    }
-    for (index, plenum) in network.plenums.iter().enumerate() {
-        poll(cancelled)?;
-        if !positive(plenum.volume_m3) {
-            return Err(DissipationError::Invalid(
-                "molecular plenum volume must be positive",
-            ));
-        }
-        // The entry point admitted the accepted binding (rigid) or the composing
-        // owner explicitly supplied motion. Use this interval's actual volume in
-        // every inventory, parabolic bound and molecular update, without changing
-        // the accepted operator binding until whole-step publication.
-        owner.plenum_volumes[index] = plenum.volume_m3;
-        let start = (owner.plenum_cell_start + index) * m;
-        owner.work.current[start..start + n].copy_from_slice(&plenum.state.partial_densities);
-        owner.work.current[start + n] = 0.0;
-        owner.work.current[start + n + 1] = plenum.state.energy;
-    }
-    let before = network_totals(owner, &owner.work.current, cancelled)?;
-    owner.work.endpoint_changes.fill(0.0);
-    owner.work.endpoint_corrections.fill(0.0);
+    let (before, active_reservoirs) =
+        prepare(owner, network, duration, controls, reservoirs, cancelled)?;
+    let reservoirs = if active_reservoirs { reservoirs } else { None };
+    let m = owner.gas.species_count() + 2;
     let mut elapsed = 0.0;
     let mut accepted_steps = 0;
     let mut rejected_steps = 0;
@@ -205,6 +145,120 @@ pub(super) fn advance<L: TransportLaw>(
             });
         }
     }
+    finish(
+        owner,
+        network,
+        duration,
+        before,
+        Progress {
+            accepted_steps,
+            rejected_steps,
+            maximum_parabolic,
+            maximum_gradient,
+            maximum_mass_frame,
+        },
+        cancelled,
+    )
+}
+
+// Both integrators share admission, original field gathering and publication.
+pub(super) fn prepare<L: TransportLaw>(
+    owner: &mut NetworkDissipationOperator<L>,
+    network: &MixtureNetwork1d,
+    duration: Time,
+    controls: DissipationControl,
+    reservoirs: Option<&[[Option<Cell<'_>>; 2]]>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(NetworkTotals, bool), DissipationError> {
+    poll(cancelled)?;
+    controls.validate()?;
+    if !duration.value().is_finite() || duration.value() < 0.0 {
+        return Err(DissipationError::Invalid(
+            "nonnegative finite molecular duration required",
+        ));
+    }
+    if owner.gas != *network.gas()
+        || owner.law.source() != owner.gas.source()
+        || owner.connections != network.connections
+        || owner.endpoint_connections != network.endpoint_connections
+        || owner.branches.len() != network.branches.len()
+        || owner.plenum_volumes.len() != network.plenums.len()
+    {
+        return Err(DissipationError::Invalid(
+            "molecular operator and network ownership differ",
+        ));
+    }
+    let active_reservoirs = owner.admit_reservoirs(reservoirs, cancelled)?;
+    let n = owner.gas.species_count();
+    let m = n + 2;
+    for (index, (branch, shape)) in network.branches.iter().zip(&owner.branches).enumerate() {
+        poll(cancelled)?;
+        if branch.gas != owner.gas
+            || branch.mesh != shape.mesh
+            || branch.boundaries != shape.boundaries
+        {
+            return Err(DissipationError::Invalid(
+                "molecular branch geometry or boundary changed",
+            ));
+        }
+        let destination = &mut owner.work.current
+            [shape.cell_start * m..(shape.cell_start + branch.cell_count()) * m];
+        for (source, target) in branch.states.chunks(1024).zip(destination.chunks_mut(1024)) {
+            poll(cancelled)?;
+            target.copy_from_slice(source);
+        }
+        owner.work.branch_before[index] =
+            totals(&branch.states, shape.mesh.volumes(), n, cancelled)?;
+    }
+    for (index, plenum) in network.plenums.iter().enumerate() {
+        poll(cancelled)?;
+        if !positive(plenum.volume_m3) {
+            return Err(DissipationError::Invalid(
+                "molecular plenum volume must be positive",
+            ));
+        }
+        // The entry point admitted the accepted binding (rigid) or the composing
+        // owner explicitly supplied motion. Use this interval's actual volume in
+        // every inventory, parabolic bound and molecular update, without changing
+        // the accepted operator binding until whole-step publication.
+        owner.plenum_volumes[index] = plenum.volume_m3;
+        let start = (owner.plenum_cell_start + index) * m;
+        owner.work.current[start..start + n].copy_from_slice(&plenum.state.partial_densities);
+        owner.work.current[start + n] = 0.0;
+        owner.work.current[start + n + 1] = plenum.state.energy;
+    }
+    let before = network_totals(owner, &owner.work.current, cancelled)?;
+    owner.work.endpoint_changes.fill(0.0);
+    owner.work.endpoint_corrections.fill(0.0);
+    Ok((before, active_reservoirs))
+}
+
+#[derive(Default)]
+pub(super) struct Progress {
+    pub accepted_steps: usize,
+    pub rejected_steps: usize,
+    pub maximum_parabolic: f64,
+    pub maximum_gradient: f64,
+    pub maximum_mass_frame: f64,
+}
+
+pub(super) fn finish<L: TransportLaw>(
+    owner: &mut NetworkDissipationOperator<L>,
+    network: &mut MixtureNetwork1d,
+    duration: Time,
+    before: NetworkTotals,
+    progress: Progress,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<NetworkDissipationReport, DissipationError> {
+    let n = owner.gas.species_count();
+    let m = n + 2;
+    let Progress {
+        accepted_steps,
+        rejected_steps,
+        maximum_parabolic,
+        maximum_gradient,
+        maximum_mass_frame,
+    } = progress;
     let after = network_totals(owner, &owner.work.current, cancelled)?;
     let mut external = super::super::Accumulator::new(n);
     for (index, shape) in owner.branches.iter().enumerate() {
@@ -338,7 +392,7 @@ pub(super) fn advance<L: TransportLaw>(
     Ok(report)
 }
 
-fn spatial<L: TransportLaw>(
+pub(super) fn spatial<L: TransportLaw>(
     owner: &mut NetworkDissipationOperator<L>,
     input: Input,
     controls: DissipationControl,
@@ -521,7 +575,7 @@ fn spatial<L: TransportLaw>(
     Ok(aggregate)
 }
 
-fn forward<L: TransportLaw>(
+pub(super) fn forward<L: TransportLaw>(
     owner: &mut NetworkDissipationOperator<L>,
     input: Input,
     dt: f64,
@@ -601,7 +655,7 @@ fn network_totals<L: TransportLaw>(
     Ok(total.totals())
 }
 
-fn compensated_add(
+pub(super) fn compensated_add(
     sum: &mut f64,
     correction: &mut f64,
     value: f64,

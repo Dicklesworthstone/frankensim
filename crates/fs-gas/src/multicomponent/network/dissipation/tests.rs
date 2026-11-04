@@ -1,5 +1,6 @@
 //! Independent finite-volume molecular/thermal port balances and decay laws.
 pub(in crate::multicomponent::network) mod reservoir;
+mod stabilized;
 use super::*;
 use crate::multicomponent::dissipation::{
     ConstantTransport, TransportCoefficients, TransportDomain,
