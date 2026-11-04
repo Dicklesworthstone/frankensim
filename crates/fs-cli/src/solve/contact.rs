@@ -414,7 +414,7 @@ pub(super) fn admit(
             .any(|output| output.name.contains("adjoint"));
     // Steady and capacity ambient radiation and steady closed/open enclosures reuse
     // complete contact Newton responses or the bounded source-surface fixed point.
-    // Capacity also shares the closed patch-mean enclosure iteration.
+    // Capacity also shares the closed/open patch-mean enclosure iteration.
     // Total enthalpy has a distinct owner that differentiates local P1
     // emission and enclosure reflection inside the same contact/storage state.
     let unsupported_radiation = setup.radiation.as_ref().is_some_and(|declaration| {
@@ -423,8 +423,7 @@ pub(super) fn admit(
     }) || setup.enclosure_radiation.as_ref().is_some_and(|declaration| {
         let pointwise = declaration.spatial_model == Some(fs_project::RadiationSpatialModel::Pointwise);
         !((enthalpy_contact && pointwise)
-            || (!pointwise && (transient.is_none()
-                || (capacity_contact && declaration.ambient_temperature.is_none()))))
+            || (!pointwise && (transient.is_none() || capacity_contact)))
     });
     let unsupported_adjoint = adjoint && (
         (transient.is_some() && !capacity_adjoint)
@@ -447,8 +446,8 @@ pub(super) fn admit(
     {
         return Err(conduction_error(
             "cli-solve-conduction-contact-composition",
-            "temperature-varying native contact admits steady base/uniform-ladder solves with prescribed, natural or airflow convection and optional area-mean ambient or closed/open enclosure radiation, or capacity/total-enthalpy transient solves with prescribed, scheduled, natural or transported-air boundaries; capacity also admits area-mean ambient and closed-enclosure radiation, while total enthalpy admits pointwise ambient/enclosure radiation. Selected-node adjoints admit steady prescribed, natural or transported-air boundaries and optional whole-law contact controls. Capacity final/sampled-peak adjoints admit prescribed or scheduled thermal boundaries; this requested composition needs additional complete contact feedback",
-            "use an admitted storage and boundary composition; steady contact adjoints require prescribed, natural or transported-air boundaries without radiation or prescribed-temperature controls; capacity contact adjoints require temperature-final-adjoint or temperature-sampled-peak-adjoint with prescribed or scheduled boundaries and no derived convection or radiation; steady radiation admits area-mean ambient and closed/open enclosures, while capacity admits ambient or closed-enclosure exchange; pointwise emission and open-enclosure histories require total enthalpy; never replace the contact law by a frozen resistance",
+            "temperature-varying native contact admits steady base/uniform-ladder solves with prescribed, natural or airflow convection and optional area-mean ambient or closed/open enclosure radiation, or capacity/total-enthalpy transient solves with prescribed, scheduled, natural or transported-air boundaries; capacity also admits area-mean ambient and closed/open enclosure radiation, while total enthalpy admits pointwise ambient/enclosure radiation. Selected-node adjoints admit steady prescribed, natural or transported-air boundaries and optional whole-law contact controls. Capacity final/sampled-peak adjoints admit prescribed or scheduled thermal boundaries; this requested composition needs additional complete contact feedback",
+            "use an admitted storage and boundary composition; steady contact adjoints require prescribed, natural or transported-air boundaries without radiation or prescribed-temperature controls; capacity contact adjoints require temperature-final-adjoint or temperature-sampled-peak-adjoint with prescribed or scheduled boundaries and no derived convection or radiation; steady and capacity radiation admit area-mean ambient and closed/open enclosure exchange; pointwise emission requires total enthalpy; never replace the contact law by a frozen resistance",
         ));
     }
     Ok(())

@@ -67,7 +67,7 @@ fn natural() -> ThermalBoundaryCondition {
     }
 }
 
-fn run_radiating(f: &Fixture, source: &Path, contact: &Path, ledger: &Path) -> fs_cli::CommandOutput {
+pub(super) fn run_radiating(f: &Fixture, source: &Path, contact: &Path, ledger: &Path) -> fs_cli::CommandOutput {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     fs_cli::run(vec!["--json".into(), "solve".into(), source.display().to_string(),
         ledger.display().to_string(), "--materials".into(),

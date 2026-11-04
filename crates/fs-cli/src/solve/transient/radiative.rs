@@ -1,7 +1,6 @@
 //! Select the physical radiation owner once; all capacity coupling loops share
 //! its solve, work evidence, and fresh endpoint audit.
 
-use fs_conduction::radiation::GrayDiffuseEnclosure;
 use fs_conduction::interface::temperature::{ContactIterationConfig, TemperatureContacts};
 use fs_conduction::transient::backward_euler::EndpointEvaluation;
 use super::*;
@@ -63,7 +62,7 @@ pub(super) fn advance(
     temperature_contacts: Option<&TemperatureContacts<'_, '_>>,
     contact_config: Option<contact::Config>, old: &[f64], dt_s: f64,
     config: StepConfig, nonlinear: Option<NonlinearStepConfig>,
-    lowering: &radiation::LoweredRadiation, model: Option<&GrayDiffuseEnclosure>,
+    lowering: &radiation::LoweredRadiation, model: Option<&enclosure::Model>,
     deadline: Option<(Instant, f64)>,
 ) -> Result<Step, SolveRefusal> {
     poll(cx, deadline)?;
@@ -72,7 +71,9 @@ pub(super) fn advance(
     {
         return Err(bad("capacity radiation requires matching live contacts and controls without duplicate frozen interfaces"));
     }
-    if lowering.is_enclosure() != model.is_some() {
+    if lowering.is_enclosure() != model.is_some()
+        || lowering.open_ambient_temperature_k().is_some() != model.is_some_and(enclosure::Model::is_open)
+    {
         return Err(bad("capacity radiation iteration lost its exact enclosure model"));
     }
     if temperature_contacts.is_some() {
@@ -147,7 +148,7 @@ pub(super) fn advance(
         let physical_energy = PhysicalEnergy {
             neumann_out_w: solved.physical_neumann_out_w,
             robin_out_w: solved.endpoint.convective_out_w
-                + report.radiosity.enclosure_energy_closure_w,
+                + model.surface_heat_w(&report.radiosity)?,
             dirichlet_in_w: solved.physical_dirichlet_in_w,
             net_input_w: solved.net_input_w,
             energy_residual_j: solved.endpoint.physical_energy_residual_j,
@@ -220,7 +221,7 @@ pub(super) fn advance(
 pub(super) fn refresh(
     cx: &Cx<'_>,
     endpoint: &mut RadiativeEndpoint,
-    model: Option<&GrayDiffuseEnclosure>,
+    model: Option<&enclosure::Model>,
     physical: &EndpointEvaluation,
     physical_residual_tolerance_j: f64,
     deadline: Option<(Instant, f64)>,
@@ -239,7 +240,7 @@ pub(super) fn refresh(
             )
         }
         RadiativeEndpoint::Enclosure { endpoint, solid_solves, nonlinear_backtracks } => {
-            let model = model.ok_or_else(|| bad("capacity radiation refresh lost its closed enclosure"))?;
+            let model = model.ok_or_else(|| bad("capacity radiation refresh lost its enclosure"))?;
             enclosure::refresh(
                 cx, endpoint, model, physical, physical_residual_tolerance_j,
                 *solid_solves, *nonlinear_backtracks, deadline,
@@ -256,7 +257,7 @@ pub(super) fn evaluate(
     cx: &Cx<'_>, engine: &BackwardEuler<'_>, problem: ConductionProblem<'_>,
     interfaces: Option<&ThermalInterfaces>, old: &[f64], candidate: &[f64],
     dt_s: f64, config: StepConfig, lowering: Option<&radiation::LoweredRadiation>,
-    model: Option<&GrayDiffuseEnclosure>, deadline: Option<(Instant, f64)>,
+    model: Option<&enclosure::Model>, deadline: Option<(Instant, f64)>,
 ) -> Result<EndpointEvaluation, SolveRefusal> {
     poll(cx, deadline)?;
     if lowering.is_some_and(radiation::LoweredRadiation::is_enclosure) != model.is_some() {
@@ -264,9 +265,12 @@ pub(super) fn evaluate(
     }
     let physical = if let Some(model) = model {
         let lowering = lowering.ok_or_else(|| bad("enclosure endpoint lost its radiation policy"))?;
-        engine.evaluate_prescribed_enclosure_endpoint(
-            cx, problem, interfaces, old, candidate, dt_s, config, model, lowering.config,
-        ).map_err(lower)?.physical
+        match model {
+            enclosure::Model::Closed(model) => engine.evaluate_prescribed_enclosure_endpoint(
+                cx, problem, interfaces, old, candidate, dt_s, config, model, lowering.config),
+            enclosure::Model::Open(model, ambient) => engine.evaluate_prescribed_open_enclosure_endpoint(
+                cx, problem, interfaces, old, candidate, dt_s, config, model, *ambient, lowering.config),
+        }.map_err(lower)?.physical
     } else {
         engine.evaluate_prescribed_endpoint(
             cx, problem, interfaces, old, candidate, dt_s, config,

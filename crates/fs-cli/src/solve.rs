@@ -304,7 +304,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// live-contact endpoint transpose, including the full prescribed-bath lift.
 /// Version 116 composes steady live contact with open enclosure radiation,
 /// retaining physical-surface heat separately from the explicit black reservoir.
-pub const SOLVE_DRIVER_VERSION: u32 = 116;
+/// Version 117 admits capacity trajectories with open enclosure exchange,
+/// including live contact, natural convection and transported-air feedback.
+pub const SOLVE_DRIVER_VERSION: u32 = 117;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";

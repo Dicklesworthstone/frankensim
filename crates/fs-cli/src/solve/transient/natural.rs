@@ -121,7 +121,7 @@ pub(super) fn advance(
     step_config: StepConfig,
     nonlinear: Option<NonlinearStepConfig>,
     radiation: Option<&radiation::LoweredRadiation>,
-    enclosure: Option<&fs_conduction::radiation::GrayDiffuseEnclosure>,
+    enclosure: Option<&super::enclosure::Model>,
     airflow: Option<&exchange::ConjugatePath>,
     laws: &[boundary_law::NaturalLaw],
     pressure_pa: f64,

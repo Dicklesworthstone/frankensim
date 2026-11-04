@@ -6,7 +6,7 @@ use fs_conduction::radiation::{OpenDiffuseEnclosure, solve_with_open_gray_diffus
 pub(in crate::solve::radiation) struct OpenResult {
     model: OpenDiffuseEnclosure,
     ambient_temperature_k: f64,
-    report: CoupledRadiationReport,
+    report: EnclosureReport,
     decomposition_residual_w: f64,
     contact_work: Option<ContactEnclosureWork>,
 }
@@ -102,7 +102,7 @@ pub(super) fn solve(
         enclosure: Some(EnclosureResult::Open(OpenResult {
             model,
             ambient_temperature_k: ambient_k,
-            report: solved.radiation,
+            report: EnclosureReport::Steady(solved.radiation),
             decomposition_residual_w: decomposition,
             contact_work: None,
         })),
@@ -155,9 +155,32 @@ impl SolidSolution {
             radiation_thermal_responses: Some(work.thermal_responses),
             combined_boundary: Some(applied_boundary),
             enclosure: Some(EnclosureResult::Open(OpenResult { model, ambient_temperature_k,
-                report: radiation, decomposition_residual_w: decomposition, contact_work: Some(work),
+                report: EnclosureReport::Steady(radiation), decomposition_residual_w: decomposition, contact_work: Some(work),
             })),
         })
+    }
+
+    /// Retain the original capacity endpoint without re-solving or substituting
+    /// a steady balance. Storage and prescribed reactions stay with its time owner.
+    pub(in crate::solve) fn from_open_enclosure_endpoint(
+        conduction: ConductionSolution, model: OpenDiffuseEnclosure,
+        ambient_temperature_k: f64, endpoint: super::super::EnclosureEndpoint,
+    ) -> Self {
+        Self {
+            conduction, convective_fluxes: Some(endpoint.convective_robin_fluxes),
+            convective_out: Some(endpoint.convective_out_w), radiation: None, pointwise: None,
+            radiation_thermal_responses: None, combined_boundary: Some(endpoint.combined_boundary),
+            enclosure: Some(EnclosureResult::Open(OpenResult {
+                model, ambient_temperature_k,
+                report: EnclosureReport::Transient {
+                    radiation: endpoint.report, time_integration: endpoint.time_integration,
+                    dt_s: endpoint.dt_s, residual_j: endpoint.physical_residual_norm_j,
+                    threshold_j: endpoint.physical_residual_tolerance_j,
+                    energy_residual_j: endpoint.physical_energy_residual_j,
+                },
+                decomposition_residual_w: endpoint.decomposition_residual_w, contact_work: None,
+            })),
+        }
     }
 }
 
@@ -182,8 +205,39 @@ impl OpenResult {
             .ok_or_else(|| bad("open exchange lost its black environment"))?
             .value;
         let n = self.model.surfaces().len();
-        let actual = &self.report.equilibrium.nonlinear_radiosity;
-        let applied = &self.report.radiosity;
+        let (actual, applied_heat, mut detail, scope) = match &self.report {
+            EnclosureReport::Steady(report) => (
+                &report.equilibrium.nonlinear_radiosity, report.radiosity.net_outward_heat_w.as_slice(),
+                format!("\"solid_solves\":{},\"surface_iterations\":{},\"max_heat_mismatch_w\":{},\"nonlinear_residual_w\":{},\"nonlinear_residual_threshold_w\":{}",
+                    thermal_responses.unwrap_or(report.iterations + 1), report.iterations,
+                    num(report.equilibrium.max_patch_heat_mismatch_w)?, num(report.equilibrium.residual_w)?,
+                    num(report.equilibrium.residual_threshold_w)?),
+                if self.contact_work.is_some() { CONTACT_SCOPE } else { SCOPE },
+            ),
+            EnclosureReport::Transient {
+                radiation, time_integration, dt_s, residual_j, threshold_j, energy_residual_j,
+            } => (
+                &radiation.radiosity, radiation.applied_heat_w.as_slice(),
+                format!("\"time_integration\":{},\"time_step_s\":{},\"solid_solves\":{},\"radiation_trials\":{},\"solid_iterations\":{},\"krylov_iterations\":{},\"max_heat_mismatch_w\":{},\"nonlinear_residual_j\":{},\"nonlinear_residual_threshold_j\":{},\"nonlinear_residual_w\":{},\"nonlinear_residual_threshold_w\":{},\"physical_energy_residual_j\":{}",
+                    json_string(time_integration), num(*dt_s)?, thermal_responses.unwrap_or(radiation.iterations),
+                    radiation.iterations, radiation.solid_iterations, radiation.krylov_iterations,
+                    num(radiation.max_heat_mismatch_w)?, num(*residual_j)?, num(*threshold_j)?,
+                    num(*residual_j / *dt_s)?, num(*threshold_j / *dt_s)?, num(*energy_residual_j)?),
+                CAPACITY_SCOPE,
+            ),
+        };
+        if actual.net_outward_heat_w.len() != n + 1 || applied_heat.len() < n {
+            return Err(bad("open enclosure receipt lost its original surface and black-reservoir rows"));
+        }
+        if let Some(work) = self.contact_work {
+            let EnclosureReport::Steady(report) = &self.report else {
+                return Err(bad("steady contact work cannot replace capacity trajectory counts"));
+            };
+            detail.push_str(&format!(
+                ",\"radiation_responses\":{},\"solid_iterations\":{},\"krylov_iterations\":{},\"residual_evaluations\":{},\"jacobian_assemblies\":{}",
+                report.iterations + 1, work.nonlinear_iterations, work.krylov_iterations,
+                work.residual_evaluations, work.jacobian_assemblies));
+        }
         let mut rows = Vec::with_capacity(n);
         for (i, (surface, source)) in self
             .model
@@ -201,7 +255,7 @@ impl OpenResult {
                 num(source.emissivity.value())?, num(source.emissivity.temperature_k())?,
                 num(surface.area_m2())?, num(actual.surface_temperatures_k[i])?,
                 num(self.model.view_factors().factors()[i][n])?,
-                num(applied.net_outward_heat_w[i])?, num(actual.net_outward_heat_w[i])?,
+                num(applied_heat[i])?, num(actual.net_outward_heat_w[i])?,
                 num(actual.radiosity_w_m2[i])?, num(actual.irradiation_w_m2[i])?,
             ));
         }
@@ -229,12 +283,8 @@ impl OpenResult {
                 json_string(generator)
             ),
         };
-        let detail = self.contact_work.map_or_else(String::new, |work| format!(
-            ",\"radiation_responses\":{},\"solid_iterations\":{},\"krylov_iterations\":{},\"residual_evaluations\":{},\"jacobian_assemblies\":{}",
-            self.report.iterations + 1, work.nonlinear_iterations, work.krylov_iterations,
-            work.residual_evaluations, work.jacobian_assemblies));
         Ok(format!(
-            "{{\"model\":\"open-gray-diffuse-enclosure\",\"surfaces\":[{}],\"view_factors\":[{}],\"view_factor_identity\":{},\"view_factor_evidence\":{origin},\"ambient_temperature_k\":{},\"ambient_effective_area_m2\":{},\"ambient_absorbed_w\":{},\"ambient_radiosity_w_m2\":{},\"ambient_irradiation_w_m2\":{},\"enclosure_energy_closure_w\":{},\"convective_out_w\":{},\"radiative_out_w\":{},\"nonlinear_radiative_out_w\":{},\"decomposition_residual_w\":{},\"solid_solves\":{},\"surface_iterations\":{},\"max_heat_mismatch_w\":{},\"nonlinear_residual_w\":{},\"nonlinear_residual_threshold_w\":{},\"radiosity_residual_w_m2\":{},\"authority\":\"Estimated\",\"no_claim\":{}{detail}}}",
+            "{{\"model\":\"open-gray-diffuse-enclosure\",\"surfaces\":[{}],\"view_factors\":[{}],\"view_factor_identity\":{},\"view_factor_evidence\":{origin},\"ambient_temperature_k\":{},\"ambient_effective_area_m2\":{},\"ambient_absorbed_w\":{},\"ambient_radiosity_w_m2\":{},\"ambient_irradiation_w_m2\":{},\"enclosure_energy_closure_w\":{},\"convective_out_w\":{},\"radiative_out_w\":{},\"nonlinear_radiative_out_w\":{},\"decomposition_residual_w\":{},{detail},\"radiosity_residual_w_m2\":{},\"authority\":\"Estimated\",\"no_claim\":{}}}",
             rows.join(","),
             factors.join(","),
             json_string(&self.model.view_factors().identity().to_hex()),
@@ -245,19 +295,15 @@ impl OpenResult {
             num(actual.irradiation_w_m2[n])?,
             num(actual.enclosure_energy_closure_w)?,
             num(convective_out_w)?,
-            num(applied.net_outward_heat_w[..n].iter().sum())?,
+            num(applied_heat[..n].iter().sum())?,
             num(actual.net_outward_heat_w[..n].iter().sum())?,
             num(self.decomposition_residual_w)?,
-            thermal_responses.unwrap_or(self.report.iterations + 1),
-            self.report.iterations,
-            num(self.report.equilibrium.max_patch_heat_mismatch_w)?,
-            num(self.report.equilibrium.residual_w)?,
-            num(self.report.equilibrium.residual_threshold_w)?,
             num(actual.linear_residual_max_w_m2)?,
-            json_string(if self.contact_work.is_some() { CONTACT_SCOPE } else { SCOPE }),
+            json_string(scope),
         ))
     }
 }
 
 const SCOPE: &str = "Opaque diffuse gray physical surfaces exchange reflected radiation and see a single prescribed black environment through their exact row deficits. Actual mesh areas admit reciprocity; supplied factors are not geometrically certified. The black environment has no solid degree of freedom. Its power is independently evaluated and stays outside air convection. This steady path uses patch-mean fourth-power emission, frozen source-backed emissivity and the shared complete nonlinear residual gate; initialization needs a conductive or convective thermal anchor. Use explicit pointwise total-enthalpy storage for vacuum cooling histories. Requested steady nominal derivatives include complete reflected exchange, each physical emissivity and one shared bath temperature through the same thermal dual. Moving visibility, participating media, spectral or directional surfaces, continuum error bounds and experimental validation are not claimed.";
 const CONTACT_SCOPE: &str = "Live source-backed contact and heterogeneous conduction share the original open gray-diffuse patch-mean radiosity iteration. The unchanged final field retains freshly queried contact and physical radiation residuals, reservoir reactions and watt gates. The explicit black environment has no solid degree of freedom; its independently evaluated heat stays outside the physical-surface outward sum and transported-air convection. Source emissivity, view factors and joint state remain fixed; supplied factors are not geometrically certified. All nested contact and numerical responses are counted. This bounded steady composition supplies no contact/radiation derivative, arbitrary-law convergence or uniqueness, pointwise emission, continuum bound or experimental validation.";
+const CAPACITY_SCOPE: &str = "Original volumetric capacity, bulk conductivity and any live source contacts advance through the shared backward-Euler endpoint and open area-mean radiosity iteration. Every trial retains the same physical old field. Fresh physical-surface heat enters the nodal residual, prescribed-node storage reaction and solid energy balance; the independent black-reservoir row has no solid capacity and remains outside the solid outward heat sum. Original convection alone heats transported air. Fixed emissivity sources, geometry and view factors retain their admitted authority and domains. All nested thermal and numerical responses are counted. This composition supplies no open-capacity radiation adjoint, pointwise emission, arbitrary-law convergence or uniqueness, continuum or continuous-time error certificate, or experimental validation.";

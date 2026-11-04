@@ -215,7 +215,7 @@ pub(super) fn advance(
     step_config: StepConfig,
     nonlinear: Option<NonlinearStepConfig>,
     radiation: Option<&radiation::LoweredRadiation>,
-    enclosure: Option<&fs_conduction::radiation::GrayDiffuseEnclosure>,
+    enclosure: Option<&super::enclosure::Model>,
     path: &exchange::ConjugatePath,
     deadline: Option<(Instant, f64)>,
 ) -> Result<AirflowStep, SolveRefusal> {

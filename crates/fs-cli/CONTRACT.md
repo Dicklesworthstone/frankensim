@@ -1,5 +1,38 @@
 # CONTRACT: fs-cli
 
+## Capacity storage in open radiative cavities — driver 117
+
+Declared regional heat-capacity trajectories now compose live source contacts
+with open area-mean gray-diffuse enclosures. The existing backward-Euler and
+reflected-radiosity owners retain the same accepted old field on every trial;
+the CLI adds no time integrator or radiation solver. Scalar/curve contacts use
+the complete bulk/contact Newton response, source surfaces use their bounded
+fixed point, and ordinary fixed interfaces share the same enclosure path.
+
+One exact surface/view-factor binding serves both time grids, every workload
+event and all prescribed, natural, transported-air and mixed cooling trials.
+Acceptance re-queries the unchanged contact endpoint with fresh reflected heat,
+actual convection coefficients and actual air references. The independent
+black-reservoir row has no solid trace or capacity. Only physical-surface heat
+enters the solid energy sum and prescribed-node storage reaction; the complete
+radiosity closure still includes the bath. Original convection alone heats air.
+
+Per-step and final receipts retain applied and fresh physical patch heat,
+independently evaluated bath power, original source identities and complete
+contact/radiation/Newton/backtrack/Krylov work. Cancellation, exhausted budgets
+and refused source queries publish no accepted partial history. Driver 117
+invalidates prior cached producer results. Pointwise capacity emission,
+area-mean open total-enthalpy histories and open-capacity radiation adjoints
+remain unsupported; existing admitted contact-only trajectory adjoints and
+pointwise total-enthalpy open radiation retain their own owners.
+
+Focused numerical and native regressions independently reconstruct reflected
+bath heat, storage, scheduled input, live contact queries and convection-only
+air gain. They cover both source algorithms, static-contact reuse, fixed-node
+storage reactions, domain/budget/cancellation refusal and deterministic retry.
+The resource-constrained implementation session checked Rust syntax and diffs;
+native runtime execution remains required.
+
 ## Live source contacts in open radiative cavities — driver 116
 
 Steady base and uniform-ladder cooling solves now compose source-backed matching
@@ -14,8 +47,8 @@ the solid's outward balance; the independent black-reservoir row closes the
 radiation system. Original convection alone reaches air transport. Receipts
 retain the actual field, source states, separate reservoir heat, and every nested
 contact, nonlinear and Krylov response. The new driver version invalidates
-earlier cached producer results. Contact/radiation adjoints, steady pointwise
-emission and capacity-storage open-cavity histories remain unsupported.
+earlier cached producer results. Contact/radiation adjoints and steady pointwise
+emission remain unsupported. Driver 117 adds capacity-storage open-cavity histories.
 
 ## Source-caloric cooling scenes
 
@@ -2854,7 +2887,9 @@ Native uncertainty studies bind that same `radiation-reservoir-temperature`
 coordinate through `enclosure-environment`, changing only the explicit open
 bath. Transient calibration consumes the matching pointwise enthalpy bath
 control over the selected prefix; absent, closed or ambiguous owners refuse.
-Patch-mean open transients and continuum bounds still refuse explicitly.
+Driver 117 adds patch-mean open trajectories with declared regional capacity,
+including live source contacts. Patch-mean open total-enthalpy histories,
+open-capacity radiation adjoints and continuum bounds still refuse explicitly.
 The existing native tests exercise independent reflected heat equations in
 both directions and real pointwise vacuum histories with original enthalpy
 storage. Native adjoint regressions compare fresh complete trajectories under
@@ -3535,8 +3570,10 @@ Accepted outer natural/air audits refresh the physical enclosure boundary,
 reservoir reactions and convection at the same unchanged field. Retained
 applied patch heat and all counted work remain attached to their actual solve.
 Enclosure callbacks, nested contact responses, Newton updates, backtracks and
-Krylov work keep their separate bounded counts. Capacity contact still refuses
-pointwise radiation, open-enclosure histories and trajectory derivatives.
+Krylov work keep their separate bounded counts. Later drivers add prescribed
+contact-only trajectory adjoints (115) and open-enclosure capacity histories
+(117). Pointwise capacity radiation and capacity contact/radiation derivatives
+remain unsupported.
 Focused native and imported-project regressions accompany the integration;
 syntax checks do not replace their required native execution.
 
