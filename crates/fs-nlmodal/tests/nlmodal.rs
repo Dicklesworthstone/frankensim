@@ -527,6 +527,84 @@ fn g1_high_mode_plate_couplings_match_analytic_harmonic_integrals() {
 }
 
 #[test]
+fn sparse_high_overtone_plate_preserves_exact_mode_scaling() {
+    // Dilating all spatial half-wave indices by an odd integer divides each
+    // triple-sine integral by that integer. Hessians contribute its fourth
+    // power, so E grows by scale^2 while the Airy coefficient falls by scale^4.
+    // This is a spatial algebra check, not a claim that such high frequencies
+    // lie in the material's physical thin-plate validity band.
+    let params = steel_plate();
+    let disp = [SineMode { m: 1, n: 3 }, SineMode { m: 6, n: 8 }];
+    let stress = [SineMode { m: 4, n: 6 }, SineMode { m: 3, n: 5 }];
+    let base = von_karman_ss_plate(&params, &disp, &stress).unwrap();
+    let scale = 4097_usize;
+    let dilate = |mode: SineMode| SineMode {
+        m: scale * mode.m,
+        n: scale * mode.n,
+    };
+    let high = von_karman_ss_plate(&params, &disp.map(dilate), &stress.map(dilate)).unwrap();
+    let scale2 = (scale as f64).powi(2);
+    assert_eq!(high.quadrature_residual, 0.0);
+    for (low, high) in base.storage.channels.iter().zip(&high.storage.channels) {
+        assert!((high.coefficient * scale2 * scale2 / low.coefficient - 1.0).abs() < 2.0e-14);
+        for (&low, &high) in low.coupling.iter().zip(&high.coupling) {
+            if low == 0.0 {
+                assert_eq!(high, 0.0);
+            } else {
+                assert!((high / (scale2 * low) - 1.0).abs() < 2.0e-14);
+            }
+        }
+    }
+    // This pair has near-cancelling normal/shear geometry: their integer
+    // numerator is -1 although the individual terms have magnitude 776/777.
+    // The weak physical interaction must survive the large mode dilation.
+    assert!(high.storage.channels[0].coupling[1] > 0.0);
+    for k in 0..disp.len() {
+        let low_beta = single_mode_beta(&base.storage, k);
+        let high_beta = single_mode_beta(&high.storage, k);
+        assert!((high_beta / low_beta - 1.0).abs() < 3.0e-14);
+    }
+}
+
+#[test]
+fn analytic_plate_refuses_nonfinite_sources_and_unrepresentable_indices() {
+    let modes = [SineMode { m: 1, n: 1 }];
+    for params in [
+        VkPlateParams {
+            young: f64::INFINITY,
+            ..steel_plate()
+        },
+        VkPlateParams {
+            pretension_n_m: f64::INFINITY,
+            ..steel_plate()
+        },
+        VkPlateParams {
+            lx: f64::INFINITY,
+            ..steel_plate()
+        },
+        VkPlateParams {
+            h: f64::MAX,
+            ..steel_plate()
+        },
+    ] {
+        assert!(von_karman_ss_plate(&params, &modes, &modes).is_err());
+    }
+    if usize::BITS > 53 {
+        assert!(
+            von_karman_ss_plate(
+                &steel_plate(),
+                &[SineMode {
+                    m: usize::MAX,
+                    n: 1
+                }],
+                &modes,
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
 fn coupling_is_nonvacuous_and_certified_against_asymmetry() {
     let model =
         von_karman_ss_plate(&steel_plate(), &modes_grid(2, 2), &modes_grid(3, 3)).expect("plate");

@@ -52,27 +52,31 @@ the crash cascade with structurally exact energy accounting.
   rectangle, in-plane movable edges). Channel coefficients
   `E h / (2 xi_j^4)`. Optional isotropic pretension `T` [N/m]
   raises the linear spectrum `ω² = (D k⁴ + T k²)/(ρ h)` without
-  changing the Airy channels. The Hessian bracket is separated exactly into
-  products of one-dimensional sine/sine/sine and sine/cosine/cosine
-  integrals: O(Q) work per mode triple and order instead of a Q-by-Q grid.
-  Reflection parity makes forbidden channels exactly zero. Signed
-  off-diagonal interactions and mass/stress normalizations are retained.
-  Coupling integrals use Gauss-Legendre quadrature
-  whose order SCALES with the highest half-wave **index sum**
-  `m+n` (not `max(m,n)` — a 0.20×0.15×2 mm panel with three odd–odd
-  modes sat at 1.3e-8). Certified by a second
-  independent order judged against max(channel scale, 1e-12 x global
-  scale) — entrywise relative comparison falsely refuses
-  analytically-zero entries, and an ALL-zero channel's own scale is
-  pure roundoff (both executed); the residual is returned, not
-  hidden. The two orders share the quadrature engine, so the
-  certificate is a CONVERGENCE check, not an independent-route one. Stress-mode count is a SEPARATE truncation from the
-  displacement count (both explicit inputs).
-  G1 compares the separated kernel with independent pointwise two-dimensional
-  area integration and checks the assembled high-mode tensor against analytic
-  product-to-sum integrals, including both signs of off-diagonal coupling,
-  symmetry, and forbidden-channel zeros. These verify the same retained
-  continuum model; they do not close modal or Airy-basis truncation error.
+  changing the Airy channels. The Hessian bracket is separated into exact
+  integer trigonometric products. For odd `s+a+b`, the triple-sine integral
+  on [0,1] is `-4 s a b / (pi (s+a+b)(s+a-b)(s-a+b)(s-a-b))`; for even
+  sums it is zero. The sine/cosine/cosine integral follows by multiplying
+  this result by `(a²+b²-s²)/(2ab)`. These are product-to-sum identities,
+  not fitted coefficients. Signed integer differences preserve near-resonant
+  overlaps; the combined normal/shear polynomial uses exact i128 arithmetic
+  when representable and f64 otherwise. Reflection parity makes forbidden
+  channels exactly zero. Signed off-diagonal interactions and mass/stress
+  normalizations are retained. Assembly costs O(stress count × displacement
+  count²), with no quadrature order increasing with the highest mode index.
+  Each index must be exactly representable in f64 (at most 2^53), and
+  nonfinite material, geometry, or assembled storage is refused.
+  `quadrature_residual` is zero for this analytic constructor; that denotes
+  absence of quadrature truncation, not a bound on all numerical errors.
+  Stress-mode count remains a SEPARATE truncation from the displacement
+  count (both explicit inputs).
+  G1 compares the exact kernel with independent pointwise two-dimensional
+  area integration at two Gauss orders and checks the assembled tensor against
+  direct product-to-sum integration. Regressions retain far-separated small
+  overlaps, near-resonance, signed weak shear/normal cancellation, exact parity
+  zeros, permutation symmetry, and the known odd-integer scaling of a sparse
+  high-overtone model. These verify the same retained continuum model; they
+  do not close modal or Airy-basis truncation, time-step convergence, or the
+  material's physical high-frequency validity band.
 - `von_karman_sampled_plate` / `SampledPlateMode` — same Airy
   channels from a regular sampled `w` grid. Second-order FD is the
   production stencil (FE `w` is C⁰). Second vs fourth Hessians

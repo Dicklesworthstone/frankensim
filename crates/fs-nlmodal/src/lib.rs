@@ -20,8 +20,8 @@
 //! - [`von_karman_ss_plate`] — simply-supported rectangular plate with
 //!   ANALYTIC sine modes for displacement AND Airy stress (both are
 //!   biharmonic eigenfunctions on the SS rectangle); coupling
-//!   integrals by Gauss-Legendre quadrature, certified by a second
-//!   independent order.
+//!   integrals by exact trigonometric products, with integer-mode
+//!   selection rules and no spatial quadrature aliasing.
 //! - [`von_karman_sampled_plate`] — the same Airy channels from a
 //!   *sampled* displacement grid (FE, clamped, orthotropic). Membrane
 //!   stress stays the analytic sine Airy basis (in-plane movable).
@@ -518,13 +518,16 @@ pub struct VkModel {
     pub disp_modes: Vec<SineMode>,
     /// Stress mode list (index-aligned with `storage.channels`).
     pub stress_modes: Vec<SineMode>,
-    /// Worst relative disagreement between the two quadrature orders
-    /// — the tensor-convergence certificate, logged not hidden.
+    /// Worst relative disagreement between the two spatial approximations
+    /// for sampled modes. Zero for [`von_karman_ss_plate`], whose integrals
+    /// are analytic and do not have a quadrature truncation error. Zero does
+    /// not certify the separate displacement/stress modal truncations.
     pub quadrature_residual: f64,
 }
 
 /// Gauss-Legendre nodes/weights on [0, 1] (order-n rule; nodes by
 /// Newton on the Legendre recurrence — deterministic).
+#[cfg(test)]
 fn gauss_01(order: usize) -> (Vec<f64>, Vec<f64>) {
     let mut nodes = Vec::with_capacity(order);
     let mut weights = Vec::with_capacity(order);
@@ -567,6 +570,7 @@ fn gauss_01(order: usize) -> (Vec<f64>, Vec<f64>) {
 /// modes on the SS rectangle, integrated by the given quadrature.
 /// `L(f, g) = f_xx g_yy + f_yy g_xx - 2 f_xy g_xy`. Shapes are UNIT
 /// sine products; normalization factors are applied by the caller.
+#[cfg(test)]
 fn coupling_integral(
     lx: f64,
     ly: f64,
@@ -612,6 +616,64 @@ fn coupling_integral(
     (normal - shear) * lx * ly
 }
 
+/// Exact integral of three integer sine modes on [0, 1]. Product-to-sum
+/// gives -4*s*a*b / (pi*(s+a+b)*(s+a-b)*(s-a+b)*(s-a-b)) when their
+/// sum is odd, and zero otherwise. Keeping the signed differences in
+/// integer arithmetic avoids losing a near-resonant difference at high
+/// mode numbers; the factored expression avoids cancellation of four
+/// nearly equal reciprocal frequencies for well-separated modes.
+fn triple_sine_integral(s: usize, a: usize, b: usize) -> f64 {
+    if (s ^ a ^ b) & 1 == 0 {
+        return 0.0;
+    }
+    let mut indices = [s, a, b];
+    indices.sort_unstable();
+    let [s, a, b] = indices.map(|index| index as i128);
+    let denominator =
+        (s + a + b) as f64 * (s + a - b) as f64 * (s - a + b) as f64 * (s - a - b) as f64;
+    -4.0 * (s as f64) * (a as f64) * (b as f64) / (core::f64::consts::PI * denominator)
+}
+
+/// Exact separated Hessian bracket. In one axis,
+/// integral sin(s)cos(a)cos(b) / integral sin(s)sin(a)sin(b)
+/// is (a^2+b^2-s^2)/(2*a*b). Substitution cancels the four modal
+/// wavenumbers in the shear term. The remaining integer polynomial is
+/// evaluated exactly whenever i128 can hold it, retaining weak couplings
+/// that would lose precision when the normal and shear terms nearly cancel.
+fn analytic_coupling_integral(lx: f64, ly: f64, s: SineMode, a: SineMode, b: SineMode) -> f64 {
+    if (s.m ^ a.m ^ b.m) & 1 == 0 || (s.n ^ a.n ^ b.n) & 1 == 0 {
+        return 0.0;
+    }
+    let square = |x: usize| (x as i128) * (x as i128);
+    let (ax, ay, bx, by, sx, sy) = (
+        square(a.m),
+        square(a.n),
+        square(b.m),
+        square(b.n),
+        square(s.m),
+        square(s.n),
+    );
+    let (dx, dy) = (ax + bx - sx, ay + by - sy);
+    let numerator = ax
+        .checked_mul(by)
+        .and_then(|v| ay.checked_mul(bx).and_then(|w| v.checked_add(w)))
+        .and_then(|v| v.checked_mul(2))
+        .and_then(|v| dx.checked_mul(dy).and_then(|w| v.checked_sub(w)))
+        .map_or_else(
+            || {
+                2.0 * ((ax as f64) * (by as f64) + (ay as f64) * (bx as f64))
+                    - (dx as f64) * (dy as f64)
+            },
+            |v| v as f64,
+        );
+    let pi = core::f64::consts::PI;
+    let scale = (pi / lx) * (pi / ly) * pi * pi;
+    0.5 * numerator
+        * triple_sine_integral(s.m, a.m, b.m)
+        * triple_sine_integral(s.n, a.n, b.n)
+        * scale
+}
+
 /// Parameter/mode-list validation for [`von_karman_ss_plate`].
 fn validate_vk_inputs(
     params: &VkPlateParams,
@@ -639,6 +701,14 @@ fn validate_vk_inputs(
             what: "plate parameters",
         });
     }
+    if [lx, ly, h, young, nu, rho, pretension_n_m]
+        .iter()
+        .any(|value| !value.is_finite())
+    {
+        return Err(NlModalError::Parameter {
+            what: "finite plate parameters",
+        });
+    }
     if disp_modes.is_empty() || stress_modes.is_empty() {
         return Err(NlModalError::Parameter {
             what: "empty mode list",
@@ -648,6 +718,14 @@ fn validate_vk_inputs(
         if md.m == 0 || md.n == 0 {
             return Err(NlModalError::Parameter {
                 what: "sine mode indices start at 1",
+            });
+        }
+        // Exact integer-to-f64 conversion of each half-wave index is needed
+        // by the frequencies and analytic overlap. This bound also keeps
+        // all sums of index squares representable in the i128 calculation.
+        if md.m as u128 > (1_u128 << 53) || md.n as u128 > (1_u128 << 53) {
+            return Err(NlModalError::Parameter {
+                what: "sine mode indices must be exactly representable in f64",
             });
         }
     }
@@ -665,13 +743,6 @@ fn validate_vk_inputs(
     Ok(())
 }
 
-/// Raw two-order quadrature results for one stress channel.
-struct RawChannel {
-    xi4: f64,
-    pairs: Vec<(usize, usize, f64, f64)>,
-    scale: f64,
-}
-
 /// Build the von Karman modal model for a simply-supported rectangle.
 ///
 /// Displacement modes are MASS-NORMALIZED sine products (`rho h
@@ -683,12 +754,15 @@ struct RawChannel {
 ///
 /// The stress-mode count is a SEPARATE truncation from the
 /// displacement count (the literature uses more stress modes); both
-/// lists are explicit inputs. The coupling tensor is computed at two
-/// independent quadrature orders and REFUSES on disagreement.
+/// lists are explicit inputs. Integer trigonometric products give the
+/// coupling tensor analytically, including exact reflection-parity zeros.
+/// Assembly costs O(stress_modes * disp_modes²), independently of the
+/// largest half-wave index; it does not sample and alias spatial harmonics.
+/// The separate modal truncations still need physical convergence checks.
 ///
 /// # Errors
-/// [`NlModalError`] on bad parameters or a failed quadrature
-/// certificate.
+/// [`NlModalError`] on bad parameters, unrepresentable mode indices, or
+/// nonfinite assembled storage.
 pub fn von_karman_ss_plate(
     params: &VkPlateParams,
     disp_modes: &[SineMode],
@@ -720,82 +794,37 @@ pub fn von_karman_ss_plate(
     let phi_norm = det::sqrt(4.0 / (rho * h * lx * ly));
     let psi_norm = det::sqrt(4.0 / (lx * ly));
     let nq = disp_modes.len();
-    // Quadrature order scales with the highest half-wave SUM in the
-    // integrand (executed: fixed order 24 left ~5 points per wave and
-    // a 1e-4 cross-order disagreement); ~5 points per half-wave with
-    // margin, and the certification order is offset AND coprime-ish.
-    let max_sum = {
-        let max_d = disp_modes.iter().map(|m| m.m + m.n).max().unwrap_or(1);
-        let max_s = stress_modes.iter().map(|m| m.m + m.n).max().unwrap_or(1);
-        max_s + 2 * max_d
-    };
-    let order_a = 32 + 8 * max_sum;
-    let (nodes_a, w_a) = gauss_01(order_a);
-    let (nodes_b, w_b) = gauss_01(order_a + 13);
-    // Two passes (review findings, both executed): entrywise relative
-    // comparison falsely refuses analytically-zero selection-rule
-    // ENTRIES, and an ALL-zero channel's own scale is pure roundoff
-    // (measured 0.75 "relative"), so residuals are judged against
-    // max(channel scale, 1e-12 * GLOBAL scale, dimensional floor).
-    let mut raw_channels: Vec<RawChannel> = Vec::with_capacity(stress_modes.len());
-    let mut global_scale = f64::MIN_POSITIVE;
+    let matrix_len = nq.checked_mul(nq).ok_or(NlModalError::Parameter {
+        what: "plate coupling matrix dimensions",
+    })?;
+    let mut channels = Vec::with_capacity(stress_modes.len());
     for &sm in stress_modes {
         let xi4 = {
             let k2 = (sm.m as f64 * pi / lx) * (sm.m as f64 * pi / lx)
                 + (sm.n as f64 * pi / ly) * (sm.n as f64 * pi / ly);
             k2 * k2
         };
-        let mut pairs = Vec::with_capacity(nq * (nq + 1) / 2);
-        let mut scale = f64::MIN_POSITIVE;
+        let mut e = vec![0.0; matrix_len];
         for p in 0..nq {
             for q in 0..=p {
-                let raw_a =
-                    coupling_integral(lx, ly, sm, disp_modes[p], disp_modes[q], &nodes_a, &w_a);
-                let raw_b =
-                    coupling_integral(lx, ly, sm, disp_modes[p], disp_modes[q], &nodes_b, &w_b);
-                scale = scale.max(raw_a.abs()).max(raw_b.abs());
-                pairs.push((p, q, raw_a, raw_b));
+                let raw = analytic_coupling_integral(lx, ly, sm, disp_modes[p], disp_modes[q]);
+                let value = psi_norm * phi_norm * phi_norm * raw;
+                e[p * nq + q] = value;
+                e[q * nq + p] = value;
             }
         }
-        global_scale = global_scale.max(scale);
-        raw_channels.push(RawChannel { xi4, pairs, scale });
-    }
-    // Dimensional floor for the judge scale: when EVERY channel is a
-    // selection-rule zero (executed: single-mode fixtures), even the
-    // global scale is roundoff; a characteristic nonzero integral has
-    // magnitude ~ kmin^4 * area, which anchors the comparison in
-    // physical units.
-    let kmin2 = (pi / lx) * (pi / lx) + (pi / ly) * (pi / ly);
-    let char_scale = kmin2 * kmin2 * lx * ly;
-    let mut channels = Vec::with_capacity(stress_modes.len());
-    let mut worst_rel = 0.0f64;
-    for rc in raw_channels {
-        let judge_scale = rc
-            .scale
-            .max(1.0e-12 * global_scale)
-            .max(1.0e-8 * char_scale);
-        let mut e = vec![0.0; nq * nq];
-        for (p, q, raw_a, raw_b) in rc.pairs {
-            worst_rel = worst_rel.max((raw_a - raw_b).abs() / judge_scale);
-            let v = psi_norm * phi_norm * phi_norm * raw_b;
-            e[p * nq + q] = v;
-            e[q * nq + p] = v;
-        }
         channels.push(StressChannel {
-            coefficient: young * h / (2.0 * rc.xi4),
+            coefficient: young * h / (2.0 * xi4),
             coupling: e,
         });
     }
-    if worst_rel > 3.0e-8 {
-        return Err(NlModalError::QuadratureMismatch {
-            residual: worst_rel,
-        });
-    }
+    let storage = SosModalStorage { omegas, channels };
+    storage.validate()?;
     Ok(VkModel {
-        storage: SosModalStorage { omegas, channels },
+        storage,
         disp_modes: disp_modes.to_vec(),
         stress_modes: stress_modes.to_vec(),
-        quadrature_residual: worst_rel,
+        quadrature_residual: 0.0,
     })
 }
 
@@ -1349,8 +1378,8 @@ pub fn single_mode_beta(storage: &SosModalStorage, k: usize) -> f64 {
 #[cfg(test)]
 mod fd_probe {
     use super::{
-        SineMode, SosModalStorage, StressChannel, coupling_integral, fd_coupling, fd_d2, gauss_01,
-        sample_sine,
+        SineMode, SosModalStorage, StressChannel, analytic_coupling_integral, coupling_integral,
+        fd_coupling, fd_d2, gauss_01, sample_sine, triple_sine_integral,
     };
     use fs_phs::Storage;
 
@@ -1398,6 +1427,7 @@ mod fd_probe {
             (mode(3, 5), mode(6, 2), mode(4, 6)),
             (mode(4, 4), mode(4, 6), mode(1, 1)),
             (mode(3, 5), mode(13, 9), mode(1, 1)),
+            (mode(4, 6), mode(1, 3), mode(6, 8)),
             (mode(2, 1), mode(1, 1), mode(1, 1)),
         ];
         for order in [96, 109] {
@@ -1412,9 +1442,39 @@ mod fd_probe {
                     );
                     let swapped = coupling_integral(lx, ly, s, b, a, &nodes, &weights);
                     assert!((actual - swapped).abs() < 2.0e-12 * actual.abs().max(1.0));
+                    let analytic = analytic_coupling_integral(lx, ly, s, a, b);
+                    assert!(
+                        (analytic - expected).abs() < 2.0e-10 * expected.abs().max(1.0),
+                        "analytic bracket: {s:?}, {a:?}, {b:?}: {analytic} vs {expected}"
+                    );
+                    assert_eq!(analytic, analytic_coupling_integral(lx, ly, s, b, a));
                 }
             }
         }
+    }
+
+    #[test]
+    fn exact_spatial_harmonics_retain_far_overlap_and_near_resonance() {
+        // For a=b=1, integrate sin(s*pi*x)*(1-cos(2*pi*x))/2.
+        // Combining the antiderivatives before floating point gives this
+        // independent reduced identity, including its sign for s>2.
+        for s in [1_usize, 3, 257, 1_000_001] {
+            let sf = s as f64;
+            let expected = -4.0 / (core::f64::consts::PI * sf * (sf * sf - 4.0));
+            let actual = triple_sine_integral(s, 1, 1);
+            assert!((actual / expected - 1.0).abs() < 4.0 * f64::EPSILON);
+            assert_eq!(actual, triple_sine_integral(1, s, 1));
+            assert_eq!(actual, triple_sine_integral(1, 1, s));
+        }
+        // A sum-frequency neighbour has a denominator factor of exactly one.
+        // Mode differences must be formed before conversion to floating point.
+        let n = 1_000_000_usize;
+        let actual = triple_sine_integral(2 * n + 1, n, n);
+        let nf = n as f64;
+        let expected =
+            -4.0 * nf * nf / (core::f64::consts::PI * (4.0 * nf + 1.0) * (2.0 * nf + 1.0));
+        assert!((actual / expected - 1.0).abs() < 4.0 * f64::EPSILON);
+        assert_eq!(triple_sine_integral(2 * n, n, n), 0.0);
     }
 
     #[test]
