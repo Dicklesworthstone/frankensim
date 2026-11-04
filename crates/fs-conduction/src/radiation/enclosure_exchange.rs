@@ -67,7 +67,7 @@ pub(crate) fn bind_traces(
 
 // The black bath of an open enclosure has no solid trace. Both callers bind
 // exactly the physical surfaces through the same natural-boundary rules.
-pub(super) fn bind_surface_traces(
+pub(crate) fn bind_surface_traces(
     cx: &Cx<'_>,
     problem: ConductionProblem<'_>,
     surfaces: &[RadiationSurface],

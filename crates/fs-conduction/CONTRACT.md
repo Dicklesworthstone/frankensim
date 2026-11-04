@@ -1,5 +1,24 @@
 # CONTRACT: fs-conduction
 
+## Live source contacts with open radiative cavities
+
+`TemperatureContacts::solve_steady_newton_with_open_gray_diffuse_enclosure`
+and `solve_steady_with_open_gray_diffuse_enclosure` compose the original complete
+contact Newton or source-surface Picard response with `OpenDiffuseEnclosure`.
+Closed and open exchange share one contact/radiosity iteration and unchanged-field
+endpoint audit. The pinned source laws, heterogeneous conductivity, physical
+traces, original thermal anchor and bounded response counts remain authoritative.
+
+The black environment has no solid degree of freedom. Fresh physical-surface
+loads enter free residuals and prescribed-temperature reactions; only those
+surface heat rows enter the solid energy balance. The independently evaluated
+reservoir row closes the radiation system and never cancels the solid's external
+heat or enters transported air. Original convection stays separate. Acceptance
+requires the original contact residual, heat closure, patch mismatch and radiosity
+watt gates; cancellation and source-domain refusal publish no candidate. This
+steady patch-mean composition adds no contact/radiation adjoint, pointwise model,
+transient open-cavity storage or continuum-error certificate.
+
 ## Nonlinear generated-layer temperature derivatives
 
 `NonlinearGeneratedLayeredWallSolution::temperature_profile` borrows one
