@@ -8667,6 +8667,20 @@ None.
     default-feature build) and never falls back to the linear bore. Build:
     `cargo build --release -p fs-couple --bin music_render --features
     nonlinear-brass`.
+    The optional row `mouth_reservoir <volume_m3> <feed_area_m2>
+    <initial_pressure_pa> <initial_temperature_k>` realizes the finite mouth
+    above in this same engine. Its initial pressure is absolute; the existing
+    blowing-pressure track controls the upstream held feed relative to room.
+    Volume, pressure and temperature must be finite and positive; feed area
+    is finite and nonnegative. The row requires `bore nonlinear` and refuses
+    duplicate records or either series-noise row. The initial temperature is
+    admitted by the original source at realization. Without the row the held
+    mouth remains the default. `LipDescription::mouth_reservoir` retains the
+    authored record; `LipPerformance::finite_mouth_state` and
+    `finite_mouth_report` expose the actual accepted owner when the feature
+    is built. Parser/render regressions check scalar and feature refusal,
+    source admission, sealed-storage independence from feed gestures, and
+    positive-area feed filling in the real nonlinear renderer.
     The wall memory is admitted per radius by `fs_phs::ZkDiffusiveBasis` on the
     declared band: on 20-8000 Hz at 1 %, 24 poles resolve radii up to about
     6 mm and 64 (the fs-phs cap) up to about 35 mm; a 61 mm trumpet bell needs

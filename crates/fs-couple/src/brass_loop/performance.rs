@@ -25,6 +25,7 @@
 //! lip <mass_kg> <stiffness_n_m> <damping_n_s_m> <width_m> <rest_gap_m> <face_area_m2>
 //! lip_source <free text to end of line>      required provenance sentence
 //! cup_volume_m3 <volume>
+//! mouth_reservoir <volume_m3> <feed_area_m2> <initial_pressure_pa> <initial_temperature_k>  optional; finite upstream gas on bore nonlinear
 //! termination <flanged|unflanged|ideal_open>
 //! modes <n_modes> <extra_slices>
 //! mouth_flow_tail_tol <relative_energy>      optional; default 1e-10 (the line ladder's own)
@@ -41,6 +42,17 @@
 //! schedule
 //! <canonical GestureSchedule bytes: blowing-pressure, optional pre-stress>
 //! ```
+//!
+//! `mouth_reservoir` attaches a rigid adiabatic upstream gas volume to
+//! `bore nonlinear`. Its pressure and temperature evolve with the bore's
+//! signed mass and enthalpy exchanges. The blowing-pressure track controls
+//! the held feed reservoir through the authored effective opening; it never
+//! resets storage. Initial pressure is absolute, whereas the track is relative
+//! to room pressure. Zero feed area seals the supply. Feed and stored gas use
+//! the bore's original thermochemical source. The existing jet/constriction
+//! noise rows refuse with finite storage until their source work is closed.
+//! This compact gas volume supplies no anatomical lung, neck-inertia or
+//! moving-wall model. Without this row the held mouth is unchanged.
 //!
 //! `modal_baffle` explicitly selects the complete flanged modal radiation load
 //! and observes every signed mouth mode at the declared finite-distance point.
@@ -184,6 +196,22 @@ pub struct NonlinearBoreRecord {
     pub wall_tolerance: f64,
 }
 
+/// A finite upstream gas volume and its feed opening, before source admission.
+///
+/// The blowing-pressure track controls the feed, not the stored pressure.
+/// This record requires the original thermochemical nonlinear bore.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FiniteMouthRecord {
+    /// Fixed, acoustically compact storage volume [m^3].
+    pub volume_m3: f64,
+    /// Effective source-owned nozzle feed area [m^2]; zero seals the supply.
+    pub feed_area_m2: f64,
+    /// Initial absolute storage pressure [Pa].
+    pub initial_pressure_pa: f64,
+    /// Initial storage temperature [K], admitted by the bore's source at build.
+    pub initial_temperature_k: f64,
+}
+
 const NONLINEAR_FEATURE: &str = "bore nonlinear needs fs-couple's nonlinear-brass feature (build music_render with --features nonlinear-brass)";
 
 /// A parsed, validated, not yet realized performance.
@@ -210,6 +238,7 @@ pub struct LipDescription {
     blow_track: String,
     tension_track: Option<String>,
     nonlinear: Option<(NonlinearBoreRecord, ThermochemicalGasModel)>,
+    mouth_reservoir: Option<FiniteMouthRecord>,
     jet_noise: Option<JetNoiseCard>,
     constriction_noise: Option<ConstrictionNoiseCard>,
     lip_mode2: Option<LipMode2>,
@@ -426,6 +455,7 @@ impl LipDescription {
         let mut mouth_flow_max_taps: Option<usize> = None;
         let mut modal_baffle: Option<ModalOutletOptions> = None;
         let mut nonlinear: Option<NonlinearBoreRecord> = None;
+        let mut mouth_reservoir: Option<FiniteMouthRecord> = None;
         let mut jet_noise: Option<JetNoiseCard> = None;
         let mut constriction_noise: Option<ConstrictionNoiseCard> = None;
         let mut ambient_words = None;
@@ -533,6 +563,22 @@ impl LipDescription {
                 "cup_volume_m3" => {
                     let value = f.positive()?;
                     once(&mut cup, value, &f)?;
+                    f.finish()?;
+                }
+                "mouth_reservoir" => {
+                    let volume_m3 = f.positive()?;
+                    let feed_area_m2 = f.number()?;
+                    if feed_area_m2 < 0.0 {
+                        return f.err("feed area must be non-negative; zero seals the supply");
+                    }
+                    let initial_pressure_pa = f.positive()?;
+                    let initial_temperature_k = f.positive()?;
+                    once(&mut mouth_reservoir, FiniteMouthRecord {
+                        volume_m3,
+                        feed_area_m2,
+                        initial_pressure_pa,
+                        initial_temperature_k,
+                    }, &f)?;
                     f.finish()?;
                 }
                 "termination" => {
@@ -721,6 +767,12 @@ impl LipDescription {
         }
         let blow_track =
             blow_track.ok_or_else(|| "a blowing-pressure track is required".to_string())?;
+        if mouth_reservoir.is_some() && nonlinear.is_none() {
+            return Err("mouth_reservoir requires bore nonlinear and its original thermochemical source".into());
+        }
+        if mouth_reservoir.is_some() && (jet_noise.is_some() || constriction_noise.is_some()) {
+            return Err("mouth_reservoir does not close the work of jet_noise or constriction_noise".into());
+        }
         if modal_baffle.is_some()
             && (termination != Some(Termination::FlangedOpen) || nonlinear.is_some())
         {
@@ -821,6 +873,7 @@ impl LipDescription {
             blow_track,
             tension_track,
             nonlinear,
+            mouth_reservoir,
             jet_noise,
             constriction_noise,
             lip_mode2,
@@ -850,6 +903,12 @@ impl LipDescription {
     #[must_use]
     pub const fn constriction_noise(&self) -> Option<&ConstrictionNoiseCard> {
         self.constriction_noise.as_ref()
+    }
+
+    /// Finite upstream storage and its feed, if the file declares it.
+    #[must_use]
+    pub const fn mouth_reservoir(&self) -> Option<&FiniteMouthRecord> {
+        self.mouth_reservoir.as_ref()
     }
 
     /// The `bore nonlinear` record and the ambient source model it evolves,
@@ -1074,7 +1133,7 @@ impl LipDescription {
         mouth_radius_m: f64,
         medium: RayleighMedium,
     ) -> Result<LipPerformance, String> {
-        use super::nonlinear::{NonlinearClock, NonlinearLip};
+        use super::nonlinear::{FiniteMouthSpec, NonlinearClock, NonlinearLip};
         use fs_duct::nonlinear::bore::{WallGas, WallMemory};
         use fs_duct::nonlinear::{CaloricDomain, FrozenGas};
         use fs_qty::Temperature;
@@ -1113,6 +1172,15 @@ impl LipDescription {
             self.cup_volume_m3,
             clock,
         )?;
+        let lip = match self.mouth_reservoir {
+            Some(record) => lip.with_finite_mouth(FiniteMouthSpec {
+                volume_m3: record.volume_m3,
+                feed_area_m2: record.feed_area_m2,
+                initial_pressure_pa: record.initial_pressure_pa,
+                initial_temperature_k: record.initial_temperature_k,
+            }).map_err(|e| format!("mouth_reservoir refused: {e}"))?,
+            None => lip,
+        };
         let lip = match self.jet_noise {
             Some(card) => lip.with_jet_noise(card).map_err(|e| format!("jet_noise refused: {e}"))?,
             None => lip,
@@ -1523,6 +1591,27 @@ impl LipPerformance {
     #[must_use]
     pub fn first_order_fallbacks(&self) -> Option<u64> {
         self.engine.first_order_fallbacks()
+    }
+
+    /// Actual accepted finite upstream pressure, temperature and gas inventory.
+    /// Absent for a linear bore or the nonlinear held-mouth default.
+    #[cfg(feature = "nonlinear-brass")]
+    #[must_use]
+    pub fn finite_mouth_state(&self) -> Option<super::nonlinear::FiniteMouthState> {
+        match &self.engine {
+            Engine::Linear { .. } => None,
+            Engine::Nonlinear(lip) => lip.finite_mouth_state(),
+        }
+    }
+
+    /// Last accepted finite-mouth exchange on the native gas clock.
+    #[cfg(feature = "nonlinear-brass")]
+    #[must_use]
+    pub fn finite_mouth_report(&self) -> Option<&super::nonlinear::FiniteMouthReport> {
+        match &self.engine {
+            Engine::Linear { .. } => None,
+            Engine::Nonlinear(lip) => lip.finite_mouth_report(),
+        }
     }
 
     /// The opt-in lip jet noise's open-gate mechanics steps so far by how much of the band each could represent at the
@@ -2373,6 +2462,145 @@ mod tests {
     }
 
     const NONLINEAR_RECORD: &str = "bore nonlinear 0.0024 16 1 64 20 8000 1e-2\n";
+
+    const FINITE_MOUTH_RECORD: &str = "mouth_reservoir 2e-5 0 106325 293.15\n";
+
+    #[test]
+    fn finite_mouth_record_requires_a_physical_nonlinear_owner_and_admitted_scalars() {
+        assert_eq!(LipDescription::from_bytes(fixture("").as_bytes()).unwrap().mouth_reservoir(), None);
+        let error = LipDescription::from_bytes(fixture(FINITE_MOUTH_RECORD).as_bytes()).unwrap_err();
+        assert!(error.contains("mouth_reservoir") && error.contains("bore nonlinear"), "{error}");
+        for (row, reason) in [
+            ("mouth_reservoir 0 0 106325 293.15\n", "positive"),
+            ("mouth_reservoir 2e-5 -1 106325 293.15\n", "non-negative"),
+            ("mouth_reservoir 2e-5 0 0 293.15\n", "positive"),
+            ("mouth_reservoir 2e-5 0 106325 NaN\n", "finite"),
+            ("mouth_reservoir 2e-5 0 106325\n", "missing field"),
+            ("mouth_reservoir 2e-5 0 106325 293.15 7\n", "extra field"),
+        ] {
+            let error = LipDescription::from_bytes(fixture(row).as_bytes()).unwrap_err();
+            assert!(error.contains("mouth_reservoir") && error.contains(reason), "{row}: {error}");
+        }
+        let duplicate = format!("{FINITE_MOUTH_RECORD}{FINITE_MOUTH_RECORD}");
+        let error = LipDescription::from_bytes(fixture(&duplicate).as_bytes()).unwrap_err();
+        assert!(error.contains("may only appear once"), "{error}");
+    }
+
+    #[test]
+    fn finite_mouth_record_refuses_unclosed_series_noise_in_either_row_order() {
+        for noise in [
+            "jet_noise 7 1.3e-3 0.045 0.115 1700\n",
+            "constriction_noise 7 0.006\n",
+        ] {
+            for extra in [
+                format!("{NONLINEAR_RECORD}{FINITE_MOUTH_RECORD}{noise}"),
+                format!("{noise}{FINITE_MOUTH_RECORD}{NONLINEAR_RECORD}"),
+            ] {
+                let error = LipDescription::from_bytes(fixture(&extra).as_bytes()).unwrap_err();
+                assert!(error.contains("mouth_reservoir") && error.contains("work"), "{error}");
+            }
+        }
+    }
+
+    #[cfg(not(feature = "nonlinear-brass"))]
+    #[test]
+    fn finite_mouth_record_cannot_silently_select_a_linear_engine_without_the_feature() {
+        let rows = format!("{NONLINEAR_RECORD}{FINITE_MOUTH_RECORD}");
+        let error = LipDescription::from_bytes(fixture(&rows).as_bytes()).unwrap_err();
+        assert!(error.contains("nonlinear-brass"), "{error}");
+    }
+
+    #[cfg(feature = "nonlinear-brass")]
+    fn finite_description(row: &str, pressure: &str) -> LipDescription {
+        use fs_material::gas_species::input::ThermochemicalPhase;
+        let packs = gas_test_support::packs("specimen-gas", 0.029, 3.5, 200.0);
+        let bindings = [packs.binding()];
+        let sources = ThermochemicalSources {
+            species: &bindings,
+            water_species: None,
+            phase: ThermochemicalPhase::FrozenGas,
+        };
+        let steady = format!(
+            "frankensim-gesture-schedule-v1\n\
+             control_rate_hz\t700\n\
+             tracks\t1\n\
+             track\tblow\tblowing-pressure\n\
+             initial\tpressure-pa\t{pressure}\n\
+             events\t0\n"
+        );
+        let rows = format!("{NONLINEAR_RECORD}{row}");
+        let text = fixture(&rows)
+            .replace("moist_air 293.15 101325 0", SPECIMEN)
+            .replace("audio 24000 2400", "audio 24000 32")
+            .replace(SCHEDULE, &steady);
+        LipDescription::from_bytes_with_gas_sources(text.as_bytes(), Some(&sources)).unwrap()
+    }
+
+    #[cfg(feature = "nonlinear-brass")]
+    #[test]
+    fn finite_mouth_row_reaches_the_real_lip_and_a_sealed_supply_ignores_feed_gestures() {
+        let render = |pressure: &str| {
+            let description = finite_description(FINITE_MOUTH_RECORD, pressure);
+            assert_eq!(description.mouth_reservoir(), Some(&FiniteMouthRecord {
+                volume_m3: 2e-5,
+                feed_area_m2: 0.0,
+                initial_pressure_pa: 106_325.0,
+                initial_temperature_k: 293.15,
+            }));
+            let mut performance = description.build().unwrap();
+            assert!(matches!(performance.info().bore, LipBoreInfo::Nonlinear(_)));
+            let before = performance.finite_mouth_state().unwrap();
+            performance.apply_controls(0).unwrap();
+            assert_eq!(performance.finite_mouth_state().unwrap(), before);
+            performance.record_mouthpiece();
+            let mut radiated = [0.0; 32];
+            performance.block(&mut radiated).unwrap();
+            assert!(radiated.iter().all(|p| p.is_finite()));
+            let after = performance.finite_mouth_state().unwrap();
+            assert!(after.mass_kg < before.mass_kg);
+            assert!(after.pressure_pa < before.pressure_pa);
+            assert!(after.temperature_k < before.temperature_k);
+            let report = performance.finite_mouth_report().unwrap();
+            assert_eq!(report.after, after);
+            assert_eq!(report.feed_mass_kg, 0.0);
+            assert_eq!(report.feed_energy_j, 0.0);
+            let mouthpiece = performance.mouthpiece_pressure().to_vec();
+            assert!(mouthpiece.iter().all(|p| p.is_finite()));
+            assert!(mouthpiece.iter().any(|p| *p > 1.0), "the stored charge must drive the actual bore");
+            (after, mouthpiece)
+        };
+        let (quiet_feed, quiet_trace) = render("0e0");
+        let (pressurized_feed, pressurized_trace) = render("5e4");
+        assert_eq!(quiet_feed, pressurized_feed, "zero feed area isolates stored gas from the gesture");
+        assert!(quiet_trace.iter().zip(pressurized_trace)
+            .all(|(a, b)| a.to_bits() == b.to_bits()));
+    }
+
+    #[cfg(feature = "nonlinear-brass")]
+    #[test]
+    fn finite_mouth_feed_gesture_fills_storage_in_the_rendered_nonlinear_loop() {
+        let description = finite_description("mouth_reservoir 2e-5 4e-6 101325 293.15\n", "3e3");
+        let mut performance = description.build().unwrap();
+        let before = performance.finite_mouth_state().unwrap();
+        performance.apply_controls(0).unwrap();
+        assert_eq!(performance.finite_mouth_state().unwrap(), before);
+        performance.record_mouthpiece();
+        performance.block(&mut [0.0; 32]).unwrap();
+        let after = performance.finite_mouth_state().unwrap();
+        let report = performance.finite_mouth_report().unwrap();
+        assert!(after.pressure_pa > before.pressure_pa + 10.0);
+        assert!(after.mass_kg > before.mass_kg);
+        assert!(report.feed_mass_kg > 0.0 && report.feed_energy_j > 0.0);
+        assert!(performance.mouthpiece_pressure().iter().any(|p| *p > 1.0));
+    }
+
+    #[cfg(feature = "nonlinear-brass")]
+    #[test]
+    fn finite_mouth_initial_temperature_keeps_the_original_source_domain() {
+        let description = finite_description("mouth_reservoir 2e-5 0 106325 1200\n", "0e0");
+        let error = description.build().err().expect("initial gas leaves the source's caloric domain");
+        assert!(error.contains("mouth_reservoir"), "{error}");
+    }
     #[cfg(feature = "nonlinear-brass")]
     const SPECIMEN: &str = "thermochemical 293.15 101325 mole 1 specimen-gas 1";
 
