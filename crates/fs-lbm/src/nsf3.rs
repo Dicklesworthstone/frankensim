@@ -93,7 +93,8 @@ pub use mann_inflow::{NsfFrozenMannApplied, NsfFrozenMannConfig, NsfFrozenMannEr
 #[cfg(feature = "turbulent-inflow")]
 pub use mann_inflow::{NsfEvolvingMannApplied, NsfEvolvingMannConfig,
     NsfEvolvingMannError, NsfEvolvingMannInflow, NsfEvolvingMannIntervalBudget,
-    NsfEvolvingMannIntervalReport, NsfEvolvingMannTrial};
+    NsfEvolvingMannIntervalReport, NsfEvolvingMannTrial, NsfEvolvingMannAverageBudget,
+    NsfEvolvingMannAverageReport, NsfEvolvingMannAverageTrial};
 mod open_boundary;
 use open_boundary::{BoundaryFlux, CharacteristicPatchBinding, IncomingPopulations, OpenFaces};
 pub use open_boundary::{

@@ -26,6 +26,7 @@ mod evolving;
 pub use evolving::{
     NsfEvolvingMannApplied, NsfEvolvingMannConfig, NsfEvolvingMannError, NsfEvolvingMannInflow,
     NsfEvolvingMannIntervalBudget, NsfEvolvingMannIntervalReport, NsfEvolvingMannTrial,
+    NsfEvolvingMannAverageBudget, NsfEvolvingMannAverageReport, NsfEvolvingMannAverageTrial,
 };
 
 /// Every flow, frame, clock and work choice is caller-authored.

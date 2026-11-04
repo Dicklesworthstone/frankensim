@@ -11516,3 +11516,41 @@ Exterior surface velocity must be tangential to every physical face crossed by a
 The receipt reuses `WallMomentumExchange3` and reads actual outgoing and corrected incoming populations. Boundary-relative impulse follows Wen et al., https://arxiv.org/abs/1303.0625. Separate fluid-population, wall-velocity mass, and angular terms retain `wall + fluid_population = wall_velocity_mass`; measured population mass change is also reported. Torque acts at the halfway intersection. Wall work is the sum of actual link impulse dotted with prescribed wall velocity; its negative is actuator work supplied to the fluid. This is boundary mechanical work, not a thermal balance or a claim that fluid kinetic-energy change equals input work. Canonical compensated reductions are independent of worker count. Collision, motion, final-state, receipt and cancellation checks all finish before the original population/step-count publication.
 
 `tests/lattice3_moving_walls.rs` covers analytical Couette velocity, viscous drag and wall power, initial half-space momentum, zero-slip entrainment, changing drives with per-cell viscosity, native momentum/mass and relative angular identities, zero-wall bit parity, worker counts 1/2/7, refusal and post-stream cancellation/retry.
+
+## Native CFD intervals driven by OU timestep means
+
+`NsfEvolvingMannInflow::preview_time_averaged_boundary_interval` is an opt-in
+consumer of `fs_atmo::mann_field::fixed_step::MannStepAverage`. Each original
+native CFD step receives the exact linear velocity mean over its corresponding
+advected OU interval, including the inlet's existing point/face/cell observation,
+proper coordinate rotation and optional harmonic slip-plane correction. The
+original source gas, actual ghost locations and reservoir profile rebind remain
+authoritative. No second flow solve or extra convection displacement is added.
+
+An external prepared mean workspace is reused with the inlet's temporal trial and
+profile buffers and the original single characteristic fluid candidate. Whole-
+interval bounds cover native cell steps, normal draws (four per mode for prior
+catch-up, eight per mode per averaged step) and all `steps + 1` spatial profiles.
+Catch-up runs only after native interval eligibility and cell work are admitted.
+The final instantaneous profile is restored at the common fluid/source endpoint;
+ordinary same-time apply is idempotent and the endpoint checkpoint path is
+unchanged. Trial acceptance publishes both fluid and atmosphere; refusal,
+cancellation or dropping the trial publishes neither. The external mean can
+retain a rejected candidate observation and is explicitly scratch, not a third
+accepted owner.
+
+The original interval retains its chronological mass, energy, pressure-work and
+exchange-variation accounts. These are the native fluxes produced by a velocity
+held at its exact linear step mean, not exact averages of nonlinear momentum or
+energy fluxes. Spatial/advective Nyquist admissions remain active; OU noise is not
+band-limited. No added SGS kinetic energy, acoustic source or higher-order CFD
+accuracy is asserted.
+
+Three regression groups cover independently constructed ghost controls through
+all six wall/spatial policies and native transfer accounts, bound-clock catch-up,
+whole-interval budget admission before OU work, cancellation/drop/retry, final
+profile idempotence and changed native flow with unchanged source endpoints.
+The full native fs-lbm library and unit tests with `turbulent-inflow` and the
+boundary-SGS integration targets typecheck; these new CFD tests were not executed
+in the resource-limited session. The underlying atmosphere's 33 Mann-field tests
+were executed successfully.

@@ -13,6 +13,10 @@ mod interval;
 pub use interval::{
     NsfEvolvingMannIntervalBudget, NsfEvolvingMannIntervalReport, NsfEvolvingMannTrial,
 };
+mod step_average;
+pub use step_average::{
+    NsfEvolvingMannAverageBudget, NsfEvolvingMannAverageReport, NsfEvolvingMannAverageTrial,
+};
 
 /// Both inlet policies use the same physical-frame and boundary refusals.
 pub type NsfEvolvingMannError = NsfFrozenMannError;
