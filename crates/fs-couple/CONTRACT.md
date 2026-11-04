@@ -2738,6 +2738,24 @@ budget remain authoritative. The accepted field arrays move into an owned
 snapshot without cloning and publish with their exact refreshed operator and
 thermal history.
 
+`step_moving_contact_candidate` also admits explicitly bound resistive joints
+whose adjacent original conductor cells are stationary. Moving bulk may remain
+elsewhere in the same native domain. Each trial resolves the retained electrical
+contact law at both original source-side material states and partitions its
+surface loss once into the declared thermal receivers. Bulk cell heat excludes
+that surface loss; the total Joule ledger includes both. A moving or sliding
+resistive interface still refuses because this path owns no surface motion work.
+
+`heat::step_spatial_moving_conduction_candidate` composes this same native solve
+with any existing complete `HeatAssembly`, retaining its typed source sample and
+errors. Thermal contacts, layers, reservoirs, radiation and finite coolant paths
+therefore refresh at the same endpoint as current and electrical contact heat.
+Thermal interface resistance remains distinct from electrical contact resistance;
+this composition adds neither a second caloric inventory nor a second heat solve.
+`tests/spatial_conduction_enthalpy/contacts/motion.rs` checks independent current-
+driven two-cell temperatures, separate thermal and electrical contact laws,
+subdivision, motoring/generating work, zero-motion parity and atomic refusals.
+
 Signed boundary electrical work and Lorentz mechanical work are retained
 separately. The shared driver receives electrical input minus mechanical
 output, and independently closes that against Joule heat and finite thermal

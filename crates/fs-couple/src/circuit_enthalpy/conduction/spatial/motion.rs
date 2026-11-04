@@ -16,6 +16,9 @@ pub struct SpatialMovingConductionThermalStep {
     pub start_s: f64,
     pub end_s: f64,
     pub field: SpatialMovingConductionSnapshot,
+    /// Stationary interface losses and their explicit receiving-cell partition.
+    /// This surface heat is included in `heat_j` and deposited exactly once.
+    pub contacts: Vec<SpatialConductionContactHeat>,
     /// Conductor-frame Joule heat already deposited into the finite cells [J].
     pub heat_j: f64,
     /// Signed electrical work INTO the conductor at its native boundary [J].
@@ -54,13 +57,17 @@ impl<C: SpatialConductorMaterial> ThermalDriver for Candidate<C> {
 }
 
 /// One jointly admitted thermal history, source operator and motion-work report.
-pub struct SpatialMovingConductionEnthalpyCandidate<'t, C = ResolvedConductorState> {
+pub struct SpatialMovingConductionEnthalpyCandidate<
+    't,
+    C = ResolvedConductorState,
+    S = MaterialNetworkSample,
+> {
     thermal: DepositionSimulation<'t>,
     problem: SpatialConduction<C>,
-    report: CircuitEnthalpyReport<MaterialNetworkSample, SpatialMovingConductionThermalStep>,
+    report: CircuitEnthalpyReport<S, SpatialMovingConductionThermalStep>,
 }
 
-impl<'t, C: SpatialConductorMaterial> SpatialMovingConductionEnthalpyCandidate<'t, C> {
+impl<'t, C: SpatialConductorMaterial, S> SpatialMovingConductionEnthalpyCandidate<'t, C, S> {
     pub fn thermal(&self) -> &DepositionSimulation<'t> {
         &self.thermal
     }
@@ -69,9 +76,7 @@ impl<'t, C: SpatialConductorMaterial> SpatialMovingConductionEnthalpyCandidate<'
         &self.problem
     }
 
-    pub fn report(
-        &self,
-    ) -> &CircuitEnthalpyReport<MaterialNetworkSample, SpatialMovingConductionThermalStep> {
+    pub fn report(&self) -> &CircuitEnthalpyReport<S, SpatialMovingConductionThermalStep> {
         &self.report
     }
 
@@ -82,7 +87,7 @@ impl<'t, C: SpatialConductorMaterial> SpatialMovingConductionEnthalpyCandidate<'
     ) -> (
         DepositionSimulation<'t>,
         SpatialConduction<C>,
-        CircuitEnthalpyReport<MaterialNetworkSample, SpatialMovingConductionThermalStep>,
+        CircuitEnthalpyReport<S, SpatialMovingConductionThermalStep>,
     ) {
         (self.thermal, self.problem, self.report)
     }
@@ -102,7 +107,8 @@ impl SpatialConductionThermalNetwork<'_> {
     ///
     /// Voltage and distributed-current boundary traces retain their native
     /// meaning; current-only open components retain their charge-neutral gauge.
-    /// Finite-resistance contacts refuse until they own moving surface work.
+    /// For finite-resistance stationary interfaces use
+    /// [`Self::step_moving_contact_candidate`] with explicit heat bindings.
     /// All original material identities, volume/mass guards, source domains,
     /// thermal links, events, solve budgets and cancellation gates apply.
     /// Rejected trials publish neither the thermal nor electrical endpoint.
@@ -128,16 +134,52 @@ impl SpatialConductionThermalNetwork<'_> {
         initial_energy_increments_j: &[f64],
         cancelled: impl FnMut() -> bool,
     ) -> Result<SpatialMovingConductionEnthalpyCandidate<'t, C>, Error> {
-        let cancel = RefCell::new(cancelled);
-        check(&cancel)?;
-        let dt = self.admit_step(
+        self.step_moving_contact_candidate(
             thermal,
             target_s,
             problem,
+            boundary,
+            motion,
+            &[],
             assembly,
+            field_controls,
             controls,
             initial_energy_increments_j,
-        )?;
+            cancelled,
+        )
+    }
+
+    /// Advance moving bulk conductors and stationary resistive interfaces in
+    /// the same finite-enthalpy endpoint.
+    ///
+    /// Each interface must have zero prescribed velocity in both adjacent
+    /// tetrahedra. The native field refuses moving or sliding interfaces, which
+    /// require a separate surface-work law. Every accepted trial refreshes the
+    /// original interface source at its two receiving temperature/phase states.
+    /// Its declared heat partition deposits the native contact loss alongside
+    /// bulk conductor-frame loss exactly once. Terminal work minus bulk Lorentz
+    /// output closes both losses and the original finite thermal storage.
+    ///
+    /// Geometry, field and prescribed-motion validity, work budgets, source
+    /// domains and transactional refusals are those of
+    /// [`Self::step_moving_candidate`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_moving_contact_candidate<'t, C: SpatialConductorMaterial>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        problem: &SpatialConduction<C>,
+        boundary: &SpatialConductionBoundary,
+        motion: SpatialConductionMotion<'_>,
+        contact_bindings: &[ConductionContactThermal<'_>],
+        assembly: WeightedAssemblyLimits,
+        field_controls: ConductionControls,
+        controls: CircuitEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<SpatialMovingConductionEnthalpyCandidate<'t, C>, Error> {
+        let cancel = RefCell::new(cancelled);
+        check(&cancel)?;
         let network = MaterialNetwork {
             cells: self.cells,
             resistors: &[],
@@ -146,12 +188,15 @@ impl SpatialConductionThermalNetwork<'_> {
         let prepared = network
             .prepare_with_bases(thermal, &[], || (*cancel.borrow_mut())())
             .map_err(material)?;
-        let (thermal, problem, report) = self.step_driver_candidate_with_geometry(
+        self.step_moving_resolved_candidate(
             thermal,
             target_s,
             problem,
-            &[],
+            boundary,
+            motion,
+            contact_bindings,
             assembly,
+            field_controls,
             controls,
             initial_energy_increments_j,
             |trial| {
@@ -160,13 +205,63 @@ impl SpatialConductionThermalNetwork<'_> {
                     .map_err(material)
             },
             |sample| sample,
+            &cancel,
+        )
+    }
+
+    // One moving-field/contact driver for the ordinary material network and
+    // complete sourced heat assemblies; only their existing heat resolver varies.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub(crate) fn step_moving_resolved_candidate<
+        't,
+        C: SpatialConductorMaterial,
+        S,
+        E: From<ConductionThermalError>,
+    >(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        problem: &SpatialConduction<C>,
+        boundary: &SpatialConductionBoundary,
+        motion: SpatialConductionMotion<'_>,
+        contact_bindings: &[ConductionContactThermal<'_>],
+        assembly: WeightedAssemblyLimits,
+        field_controls: ConductionControls,
+        controls: CircuitEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+        resolve: impl Fn(
+            &DepositionSimulation<'t>,
+        ) -> Result<CircuitThermalCoefficients<S>, CircuitEnthalpyError<E>>,
+        sample: impl Fn(&S) -> &MaterialNetworkSample,
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<SpatialMovingConductionEnthalpyCandidate<'t, C, S>, CircuitEnthalpyError<E>> {
+        let dt = self
+            .admit_step(
+                thermal,
+                target_s,
+                problem,
+                assembly,
+                controls,
+                initial_energy_increments_j,
+            )
+            .map_err(map_conduction_error)?;
+        let (thermal, problem, report) = self.step_driver_candidate_with_geometry(
+            thermal,
+            target_s,
+            problem,
+            contact_bindings,
+            assembly,
+            controls,
+            initial_energy_increments_j,
+            resolve,
+            sample,
             None,
             |_| Ok(None),
             &[],
             |_| Ok(Vec::new()),
             &[],
-            |next, _resistors, _contacts, remaining| {
-                check(&cancel)?;
+            |next, _resistors, contact_owner, remaining| {
+                check(cancel).map_err(map_conduction_error)?;
                 if remaining == 0 {
                     return Err(CircuitEnthalpyError::CircuitBudget);
                 }
@@ -174,7 +269,8 @@ impl SpatialConductionThermalNetwork<'_> {
                     .solve_with_motion(boundary, motion, field_controls, &mut || {
                         (*cancel.borrow_mut())()
                     })
-                    .map_err(field_error)?;
+                    .map_err(field_error)
+                    .map_err(map_conduction_error)?;
                 let heat_j = finite(dt * field.joule_power_w())?;
                 let terminal_work_j = finite(dt * field.terminal_power_w())?;
                 let mechanical_work_j = finite(dt * field.mechanical_power_w())?;
@@ -183,12 +279,15 @@ impl SpatialConductionThermalNetwork<'_> {
                     || finite(heat_j - net_supplied_work_j)?.abs()
                         > controls.total_energy_tolerance_j
                 {
-                    return Err(invalid(
+                    return Err(map_conduction_error(invalid(
                         "conductor-frame heat, terminal work and Lorentz work do not close",
-                    ));
+                    )));
                 }
+                let contacts = contact_owner
+                    .heat(field.contact_response())
+                    .map_err(map_conduction_error)?;
                 let field = field.into_snapshot();
-                check(&cancel)?;
+                check(cancel).map_err(map_conduction_error)?;
                 Ok((
                     Candidate {
                         problem: next,
@@ -196,6 +295,7 @@ impl SpatialConductionThermalNetwork<'_> {
                             start_s: thermal.time_s(),
                             end_s: target_s,
                             field,
+                            contacts,
                             heat_j,
                             terminal_work_j,
                             mechanical_work_j,
@@ -205,8 +305,13 @@ impl SpatialConductionThermalNetwork<'_> {
                     1,
                 ))
             },
-            |candidate| (candidate.step.field.cell_joule_power_w(), &[]),
-            &cancel,
+            |candidate| {
+                (
+                    candidate.step.field.cell_joule_power_w(),
+                    &candidate.step.contacts,
+                )
+            },
+            cancel,
         )?;
         Ok(SpatialMovingConductionEnthalpyCandidate {
             thermal,

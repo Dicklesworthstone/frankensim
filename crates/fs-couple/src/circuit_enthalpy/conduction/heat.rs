@@ -6,7 +6,7 @@
 mod assembly;
 pub use assembly::{
     ConductionHeatError, step_response_field_circuit_candidate, step_spatial_conduction_candidate,
-    step_spatial_conduction_circuit_candidate,
+    step_spatial_conduction_circuit_candidate, step_spatial_moving_conduction_candidate,
 };
 
 use super::circuit::response::{
