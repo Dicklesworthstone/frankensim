@@ -197,6 +197,32 @@ fn g0_extreme_products_preserve_representable_viscosity_and_shifted_slopes() {
     close(state.scaled_shear_derivative_pa_s(), -0.45e-300, 2e-12);
 }
 
+#[test]
+fn g0_subnormal_shape_preserves_the_finite_viscosity_and_stress_tangent() {
+    let n = 0.4615;
+    let curve = CarreauYasuda::new(1e300, 0.0, 1e300, n, 2.0, [0.0, 1e300]).unwrap();
+    let law = ThermalCarreauYasuda::new(
+        curve,
+        *model(0.5, 2.0, ViscosityShiftMode::Vertical).temperature_shift(),
+        ViscosityShiftMode::Vertical,
+    );
+    let state = law.evaluate(300.0, 1e300).unwrap();
+    let log_shape = (n - 1.0) * (1e300_f64.ln() + 1e300_f64.ln());
+    let rounded_shape = log_shape.exp();
+    assert!(rounded_shape > 0.0 && rounded_shape < f64::MIN_POSITIVE);
+    let expected = (1e300_f64.ln() + log_shape).exp();
+    // Multiplication after rounding this nonzero subnormal would overestimate
+    // viscosity by about 24%, despite the response itself being a normal f64.
+    assert!((1e300 * rounded_shape / expected - 1.0).abs() > 0.2);
+    close(state.dynamic_viscosity_pa_s(), expected, 2e-12);
+    close(state.stress_tangent_pa_s(), n * expected, 2e-12);
+    close(
+        state.scaled_shear_derivative_pa_s(),
+        -(1.0 - n) * expected,
+        2e-12,
+    );
+}
+
 #[derive(Debug)]
 struct CountedFluid {
     state: FluidTransportState,

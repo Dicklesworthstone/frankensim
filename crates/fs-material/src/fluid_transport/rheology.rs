@@ -193,11 +193,12 @@ impl CarreauYasuda {
         // when the transition exponent or lambda*rate is extreme.
         let log_shape = (self.power_index - 1.0) * softened;
         let shape = det::exp(log_shape);
-        let excess = if shape > 0.0 {
+        let excess = if shape.is_normal() {
             delta * shape
         } else {
-            // An underflowed shape can still carry a finite viscosity when
-            // multiplied by a large declared zero-shear plateau.
+            // Underflowed or subnormal shapes lose relative precision before a
+            // large zero-shear plateau can restore a normal viscosity. Form the
+            // combined magnitude in log space, before that rounding occurs.
             det::exp(self.log_excess_pa_s + log_shape)
         };
         let viscosity = if log_shape > -core::f64::consts::LN_2 {
