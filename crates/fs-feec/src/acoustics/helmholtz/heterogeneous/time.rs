@@ -14,9 +14,10 @@
 //! inverse or material resampling enters subsequent pulse steps.
 //!
 //! Sources are inward velocity traces evaluated at the time-step midpoint.
-//! Boundary admittance is REAL, passive and memoryless. A frequency-dependent
-//! or reactive complex impedance needs its own causal internal state and is
-//! deliberately not admitted by this interface. The physical source is
+//! The base boundary admittance is REAL, passive and memoryless. The
+//! [`mechanical`] composition retains the original `WallPin`'s causal surface
+//! mass, compliance and resistance on the same full pressure trace. Arbitrary
+//! frequency samples are not substituted for internal states. The physical source is
 //! frozen; there is no mean flow, bulk heat, vorticity mode or thermal evolution.
 //!
 //! Midpoint is second order and passive for these forms, but is not an exact
@@ -33,6 +34,9 @@ use super::{
 use fs_math::{c64::C64, dd::Dd, det};
 use fs_sparse::direct::{DirectOrdering, LdltFactor, LdltOptions, SymbolicLdlt};
 use fs_sparse::{Coo, Csr};
+
+/// Causal distributed mechanical walls on the original pressure trace.
+pub mod mechanical;
 
 /// Instantaneous outward velocity law `v_out = Y p`, with `Y >= 0`.
 #[derive(Clone, Debug)]
@@ -385,7 +389,23 @@ impl<'m, 'f, 'c> PreparedHeterogeneousTime<'m, 'f, 'c> {
         self.validate_state(initial)?;
         // The SAME original real trace projection supplies both dynamics and work.
         let load = self.model.geometry.boundary_linear_load(inward_velocity)?;
+        self.step_projected(initial, &load, cancelled)
+    }
+
+    // Original sparse midpoint solve with an already projected volume load.
+    // Mechanical-wall condensation uses this same factor/correction path;
+    // its physical boundary work is checked separately after reconstruction.
+    fn step_projected(
+        &self,
+        initial: &HeterogeneousTimeState<'_, '_, '_>,
+        load: &[f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<HeterogeneousTimeStep<'m, 'f, 'c>, HeterogeneousError> {
         poll(cancelled)?;
+        self.validate_state(initial)?;
+        if load.len() != self.model.ndof() || load.iter().any(|value| !value.is_finite()) {
+            return Err(invalid("finite original transient load coordinates required").into());
+        }
         let (initial_energy, initial_roundoff) = self.energy_with_roundoff(initial, cancelled)?;
         let mut next = self.state(&initial.potential, &initial.pressure)?;
         let mut midpoint_p = initial.pressure.clone();
@@ -412,7 +432,9 @@ impl<'m, 'f, 'c> PreparedHeterogeneousTime<'m, 'f, 'c> {
                 &next,
                 &midpoint_p,
                 &midpoint_psi,
-                &load,
+                &self.conductance,
+                load,
+                None,
                 cancelled,
             )?;
             if backward_error <= self.limits.residual_tolerance {
@@ -420,7 +442,7 @@ impl<'m, 'f, 'c> PreparedHeterogeneousTime<'m, 'f, 'c> {
                     initial,
                     &next,
                     &midpoint_p,
-                    &load,
+                    load,
                     initial_energy,
                     initial_roundoff,
                     backward_error,
@@ -462,7 +484,9 @@ impl<'m, 'f, 'c> PreparedHeterogeneousTime<'m, 'f, 'c> {
         next: &HeterogeneousTimeState<'_, '_, '_>,
         midpoint_p: &[f64],
         midpoint_psi: &[f64],
+        conductance: &Csr,
         load: &[f64],
+        outward_load: Option<&[f64]>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(Vec<f64>, f64), HeterogeneousError> {
         let h = Dd::from_f64(self.duration_s);
@@ -472,6 +496,10 @@ impl<'m, 'f, 'c> PreparedHeterogeneousTime<'m, 'f, 'c> {
             poll(cancelled)?;
             let mut value = -h * Dd::from_f64(load[row]);
             let mut scale = self.duration_s * load[row].abs();
+            if let Some(outward) = outward_load {
+                value = value + h * Dd::from_f64(outward[row]);
+                scale += self.duration_s * outward[row].abs();
+            }
             let (cols, entries) = self.model.mass.row(row);
             for (&col, &entry) in cols.iter().zip(entries) {
                 let delta = Dd::from_f64(next.pressure[col]) - Dd::from_f64(initial.pressure[col]);
@@ -480,7 +508,7 @@ impl<'m, 'f, 'c> PreparedHeterogeneousTime<'m, 'f, 'c> {
                 scale += term.to_f64().abs();
             }
             for (matrix, field) in [
-                (&self.conductance, midpoint_p),
+                (conductance, midpoint_p),
                 (&self.model.stiffness, midpoint_psi),
             ] {
                 let (cols, entries) = matrix.row(row);

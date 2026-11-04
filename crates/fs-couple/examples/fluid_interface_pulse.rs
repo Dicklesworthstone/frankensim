@@ -3,19 +3,29 @@
 //! cargo run -p fs-couple --example fluid_interface_pulse -- air-water 12 1600 1e-6 8
 //! Arguments: CASE GRID STEPS DT_S ANGLE_DEG. CASE is air-water or cold-hot-air.
 //! GRID must be even so the interface x=0.5 m conforms to tetrahedron faces.
+//! Append `wall SIGMA_KG_M2 K_PA_M R_PA_S_M` to replace the x=1 outlet with
+//! the original causal WallPin law, for example `wall 0.5 1000000 50`.
+//! These three values explicitly declare a local surface mass, spring and
+//! resistance; they are illustrative inputs, not a measured material card.
 //!
 //! The one-metre cube starts with a compact pressure-potential packet in its
 //! left fluid. Its propagation direction is tilted by ANGLE_DEG in the xy plane.
 //! Dry air uses the existing USSA1976 gas specification at 100 kPa and 300 K;
 //! the right side uses either the same gas at 600 K or original IF97 region-1
 //! water at 100 kPa and 300 K. No density or sound speed is independently fitted.
-//! All exterior faces have local real admittance 1/(rho*c) from their own fluid.
+//! Other exterior faces have local real admittance 1/(rho*c) from their own fluid.
 //! That outlet is exact for normally incident plane waves only, so oblique waves
 //! may reflect there. The internal fluid interface is resolved by the full FE
 //! pressure space. This example does not impose a ray/Snell approximation.
+//! The optional wall retains displacement/velocity on every original boundary
+//! DOF. Returned energy and frequency-dependent phase belong to that causal
+//! mechanical law; only its resistance produces wall heat. The fluid geometry
+//! is fixed and linear, and the local wall has no lateral shell/bending modes.
 //!
 //! Stdout contains the final original nodal pressure/potential field as CSV;
 //! stderr contains time, physical energy and independently evaluated step work.
+//! Acoustic storage, wall kinetic/elastic storage, signed fluid-to-wall work,
+//! real outlet loss and actual wall dissipation are reported separately.
 //! Refine GRID and DT_S independently: implicit stability is not phase accuracy,
 //! and the compact pulse needs several elements across its spatial width. The
 //! materials and interface are frozen; this does not evolve heat or mass transfer.
@@ -25,21 +35,38 @@ use std::error::Error;
 use fs_couple::cavity_modal::interior::heterogeneous::regions::FluidRegionsInterior;
 use fs_feec::acoustics::helmholtz::heterogeneous::time::{
     HeterogeneousTimeLimits, ResistiveBoundary,
+    mechanical::{MechanicalBoundary, MechanicalTimeLimits},
 };
 use fs_feec::acoustics::helmholtz::{HelmholtzFe, Medium};
 use fs_material::fluid_acoustics::FluidAcoustics;
 use fs_material::gas::{GasSpec, GasState};
 use fs_math::det;
+use fs_phs::WallPin;
 use fs_qty::{Pressure, Temperature};
 use fs_thermochem::water::if97::{If97Region, If97State};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<_> = std::env::args().collect();
-    if args.len() != 6 {
+    if args.len() != 6 && args.len() != 10 {
         return Err(
-            "usage: fluid_interface_pulse air-water|cold-hot-air GRID STEPS DT_S ANGLE_DEG".into(),
+            "usage: fluid_interface_pulse air-water|cold-hot-air GRID STEPS DT_S ANGLE_DEG [wall SIGMA_KG_M2 K_PA_M R_PA_S_M]".into(),
         );
     }
+    let wall = if args.len() == 10 {
+        if args[6] != "wall" {
+            return Err("optional boundary must be wall SIGMA_KG_M2 K_PA_M R_PA_S_M".into());
+        }
+        let pin = WallPin {
+            surface_density: args[7].parse()?,
+            stiffness_per_area: args[8].parse()?,
+            resistance: args[9].parse()?,
+        };
+        // Reuse the original law's admission before allocating the volume mesh.
+        fs_phs::wall_specific_impedance(&pin, 1.0)?;
+        Some(pin)
+    } else {
+        None
+    };
     let grid: usize = args[2].parse()?;
     let steps: usize = args[3].parse()?;
     let dt: f64 = args[4].parse()?;
@@ -95,6 +122,19 @@ fn main() -> Result<(), Box<dyn Error>> {
         3,
         &mut || false,
     )?;
+    let is_wall_face =
+        |face: &[u32; 3]| wall.is_some() && face.iter().all(|&v| positions[v as usize][0] == 1.0);
+    let walls: Vec<_> = wall
+        .into_iter()
+        .map(|wall| MechanicalBoundary {
+            faces: geometry
+                .boundary_faces()
+                .into_iter()
+                .filter(is_wall_face)
+                .collect(),
+            wall,
+        })
+        .collect();
     let mut boundaries = Vec::with_capacity(2);
     for region in 0..2 {
         let state = acoustic
@@ -105,7 +145,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .into_iter()
             .filter(|face| {
                 let x = face.iter().map(|&v| positions[v as usize][0]).sum::<f64>() / 3.0;
-                usize::from(x > 0.5) == region
+                !is_wall_face(face) && usize::from(x > 0.5) == region
             })
             .collect();
         boundaries.push(ResistiveBoundary {
@@ -118,13 +158,17 @@ fn main() -> Result<(), Box<dyn Error>> {
             state.sound_speed_m_s()
         );
     }
-    let prepared = acoustic.operator().prepare_time(
+    let prepared = acoustic.operator().prepare_time_with_walls(
         dt,
         &boundaries,
-        HeterogeneousTimeLimits {
-            max_dofs: 16_000,
-            max_factor_bytes: 512 * 1024 * 1024,
-            ..HeterogeneousTimeLimits::default()
+        &walls,
+        MechanicalTimeLimits {
+            acoustic: HeterogeneousTimeLimits {
+                max_dofs: 16_000,
+                max_factor_bytes: 512 * 1024 * 1024,
+                ..HeterogeneousTimeLimits::default()
+            },
+            ..MechanicalTimeLimits::default()
         },
         &mut || false,
     )?;
@@ -150,20 +194,30 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let mut state = prepared.state(&potential, &pressure)?;
     eprintln!(
-        "time_s,kinetic_j,compression_j,input_work_j,boundary_dissipation_j,balance_residual_j"
+        "time_s,kinetic_j,compression_j,wall_kinetic_j,wall_elastic_j,input_work_j,boundary_dissipation_j,wall_dissipation_j,wall_work_j,balance_residual_j"
     );
     let energy = prepared.energy(&state)?;
-    eprintln!("0,{},{},0,0,0", energy.kinetic_j, energy.compression_j);
+    eprintln!(
+        "0,{},{},{},{},0,0,0,0,0",
+        energy.acoustic.kinetic_j,
+        energy.acoustic.compression_j,
+        energy.wall_kinetic_j,
+        energy.wall_elastic_j
+    );
     for index in 1..=steps {
         let step = prepared.step(&state, &[], &mut || false)?;
         let energy = prepared.energy(&step.state)?;
         eprintln!(
-            "{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{}",
             index as f64 * dt,
-            energy.kinetic_j,
-            energy.compression_j,
+            energy.acoustic.kinetic_j,
+            energy.acoustic.compression_j,
+            energy.wall_kinetic_j,
+            energy.wall_elastic_j,
             step.work.input_work_j,
             step.work.boundary_dissipation_j,
+            step.work.wall_dissipation_j,
+            step.work.wall_work_j,
             step.work.balance_residual_j()
         );
         state = step.state;

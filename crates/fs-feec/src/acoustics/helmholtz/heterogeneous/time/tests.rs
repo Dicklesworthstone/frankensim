@@ -5,12 +5,12 @@ use crate::highorder::simplex::LocalFn;
 use fs_modal::SliceOptions;
 use fs_rep_mesh::TetComplex;
 
-const MEDIUM: Medium = Medium {
+pub(super) const MEDIUM: Medium = Medium {
     density_kg_m3: 1.3,
     sound_speed_m_s: 2.0,
 };
 
-fn brick(nx: usize, lengths: [f64; 3]) -> (TetComplex, Vec<[f64; 3]>) {
+pub(super) fn brick(nx: usize, lengths: [f64; 3]) -> (TetComplex, Vec<[f64; 3]>) {
     let (complex, mut positions) = masked_cube_grid(nx, 1, 1, &|_, _, _| true);
     for point in &mut positions {
         point[0] *= lengths[0] / nx as f64;
@@ -20,7 +20,7 @@ fn brick(nx: usize, lengths: [f64; 3]) -> (TetComplex, Vec<[f64; 3]>) {
     (complex, positions)
 }
 
-fn plane(geometry: &HelmholtzFe<'_>, x: f64) -> Vec<[u32; 3]> {
+pub(super) fn plane(geometry: &HelmholtzFe<'_>, x: f64) -> Vec<[u32; 3]> {
     geometry
         .boundary_faces()
         .into_iter()
@@ -31,7 +31,7 @@ fn plane(geometry: &HelmholtzFe<'_>, x: f64) -> Vec<[u32; 3]> {
         .collect()
 }
 
-fn uniform<'f, 'c>(geometry: &'f HelmholtzFe<'c>) -> HeterogeneousHelmholtzFe<'f, 'c> {
+pub(super) fn uniform<'f, 'c>(geometry: &'f HelmholtzFe<'c>) -> HeterogeneousHelmholtzFe<'f, 'c> {
     HeterogeneousHelmholtzFe::new(
         geometry,
         4,
@@ -43,7 +43,7 @@ fn uniform<'f, 'c>(geometry: &'f HelmholtzFe<'c>) -> HeterogeneousHelmholtzFe<'f
 
 // Pointwise P2 interpolation in the ORIGINAL hierarchical basis. Its edge
 // shape is lambda_a lambda_b, hence the four-times midpoint correction.
-fn p2(geometry: &HelmholtzFe<'_>, field: impl Fn([f64; 3]) -> f64) -> Vec<f64> {
+pub(super) fn p2(geometry: &HelmholtzFe<'_>, field: impl Fn([f64; 3]) -> f64) -> Vec<f64> {
     assert_eq!(geometry.order(), 2);
     let mut coefficients = vec![0.0; geometry.ndof()];
     for (element, tet) in geometry.tetrahedra().iter().enumerate() {

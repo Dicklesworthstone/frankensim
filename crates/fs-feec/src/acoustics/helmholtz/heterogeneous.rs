@@ -56,6 +56,8 @@ pub enum HeterogeneousError {
     Acoustic(AcousticFeError),
     /// The original complex LU owner refused.
     Factor(LuComplexError),
+    /// The original passive mechanical wall owner refused its physical data.
+    Wall(fs_phs::PhsError),
     /// The caller cancelled; no partial field/factor is returned.
     Cancelled,
     /// A declared preparation limit would be exceeded.

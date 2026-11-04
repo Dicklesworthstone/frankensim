@@ -1632,3 +1632,45 @@ binding refusals. These new tests have not been executed in the current
 environment; pinned rustfmt parsing and source/API review do not replace native
 validation. Midpoint stability does not certify phase accuracy: time-step,
 geometry, h/p and material quadrature refinement remain separate obligations.
+
+### Causal distributed mechanical boundaries
+
+`heterogeneous::time::mechanical` composes the original `fs_phs::WallPin`
+surface mass, stiffness and resistance with that same full pressure solver.
+Every active original H1 boundary coordinate retains displacement `w` and
+outward normal velocity `v`; no uniform piston or diagonal surface mass replaces
+the pressure trace. The original symmetric face quadrature supplies
+`W = integral(phi_i phi_j)`. Its area enters exactly once in fluid feedback
+`+W v`, wall storage `(sigma v^T W v + K w^T W w)/2`, resistor loss
+`r v^T W v`, and pressure work `p^T W v`. Wall coefficients are specific to
+unit area, matching the original `WallPin` admission and units.
+
+For constant coefficients on a patch, midpoint eliminates the original law
+`sigma v_dot + r v + K w = p` to a positive effective admittance
+`1/(2 sigma/h + r + h K/2)` and an explicit history. The existing sparse
+factor and residual-correction owner solve the condensed acoustic equation;
+all wall histories then reconstruct from that same solution. The effective
+admittance is an algebraic coefficient, never a physical heat account.
+Independent checks retain the uncondensed fluid and wall equations, acoustic
+and wall storage changes, actual resistor loss, and signed fluid-to-wall work.
+Lossless walls can return stored energy. Imported and returned wall states
+remain bound to their exact prepared configuration, and refusal never advances
+an accepted participant. Admission adds a default 4096 summed wall-trace DOF
+cap, each with two physical coordinates, to the original acoustic limits.
+
+Mechanical and real Robin faces must be pairwise disjoint; imposed velocity
+may share either. Adjacent mechanical patches have independent local states
+at shared edges. This is a frozen, linear, locally reacting wall with fixed
+fluid geometry, without lateral shell/bending waves or inferred material data.
+The existing source-backed `LocalMaterialWall::base_patch` can supply its
+elastic/Kelvin-Voigt `WallPin` through the coupling layer. Its Maxwell arms
+cannot be discarded: this entry point does not admit that hereditary reduction.
+
+Five focused tests specify exact polynomial wall/fluid motion and pressure work
+under independent area and amplitude scaling, a nonuniform P2 wall's analytic
+fourth-order energy moment and release, reflection phase across the original
+wall resonance with three temporal rungs, exact original evolution with no
+mechanical walls, and resource/overlap/source-binding refusals. Native execution
+remains pending in the current environment; source
+review and pinned rustfmt parsing establish neither numerical test passage nor
+full material or shell-model validity.
