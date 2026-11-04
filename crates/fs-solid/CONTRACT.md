@@ -6330,6 +6330,29 @@ rotation and free-axis frame covariance, and late native refusal/retry.
 These integration tests require the real constellation runtime and native
 solid owners; formatting alone does not establish that these gates pass.
 
+The same owners' `apply_sourced_elliptic_impacts` methods bind original
+`SourceThermalEllipticCoulomb` laws by contact ID and input order. Each active
+contact samples both pinned principal sources from its actual native incoming
+relative tangent velocity and explicit temperature/pressure/query/impact role.
+The source sampler owns domain, units, authority, claim identity and original
+history admission. Every accepted path coordinate, native slip, transported
+texture and finite-step temperature survives the instantaneous source refresh.
+Inactive rows remain mechanically present but do not query or alter history;
+malformed gap/tolerance values cannot masquerade as inactive contacts.
+
+The reusable callback entry performs queries in canonical ID order only after
+native kinematic and mobility assembly. Returned histories remain private
+through the complete native impulse and physical-law/work audit; all body and
+history publication follows the final successful gate without fallible work.
+Accepted histories need not implement `Clone`. Callback-owned memory/evaluation
+budgets, interior mutation and external effects remain outside this candidate
+transaction. No source pressure, time increment, travel or impact-heat partition
+is inferred. Three G1/G3/G4 groups in the nested source tests cover actual
+relative-speed sampling and explicit roles on both complete owners, inactive
+history preservation, ID/order covariance, material refusal, invalid activation,
+and late native refusal with unchanged-state retry. These share the same native
+integration lane and original runtime requirements above.
+
 
 ### Simultaneous Coulomb impacts with moving solid supports
 

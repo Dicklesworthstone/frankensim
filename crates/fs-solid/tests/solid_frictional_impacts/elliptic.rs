@@ -1,5 +1,8 @@
 //! G1/G3/G4 directional impulses through the actual complete solid owners.
 
+#[path = "elliptic/source.rs"]
+mod source;
+
 use super::*;
 use fs_contact::frictional_multicontact::elliptic::{
     EllipticFriction, EllipticFrictionalContactError,

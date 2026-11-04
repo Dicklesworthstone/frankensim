@@ -45,6 +45,7 @@ fs-evidence = { path = "../fs-evidence" }
 fs-ivl = { path = "../fs-ivl" }
 fs-mms = { path = "../fs-mms" }
 fs-thermal = { path = "../fs-thermal" }
+fs-tribo = { path = "../fs-tribo" }
 
 [[test]]
 name = "koiter"

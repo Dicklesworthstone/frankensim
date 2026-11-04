@@ -5,6 +5,9 @@
 //! transpose. Every normal/shear and intercontact mobility block is retained;
 //! the native witness remains labeled in the contact owner's mapped basis.
 
+/// Original material source queries and native impulses accepted together.
+pub mod source;
+
 use super::*;
 use fs_contact::frictional_multicontact::elliptic::{
     EllipticContactResiduals, EllipticFriction, EllipticFrictionalContact,

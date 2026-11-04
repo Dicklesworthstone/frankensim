@@ -2794,6 +2794,7 @@ dependencies = [
  "fs-solver",
  "fs-sparse",
  "fs-thermal",
+ "fs-tribo",
 ]
 
 [[package]]
