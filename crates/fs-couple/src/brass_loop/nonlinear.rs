@@ -34,7 +34,7 @@ use fs_phs::linear_exact::{LinearPropagator, LinearSplit, step_split};
 use fs_phs::{PortHamiltonian, mass_spring_damper};
 
 use super::{BrassBlockDiag, BrassControl, LipIsland, prepare_lip, zero_crossing_lock_hz};
-use crate::turbulence_noise::{JetNoiseCard, LipJetNoise};
+use crate::turbulence_noise::{JetNoiseCard, JetNoiseCoverage, LipJetNoise};
 
 /// How the nonlinear bore is cut, clocked and walled.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -170,8 +170,9 @@ impl NonlinearLip {
     }
 
     /// Attach the opt-in lip jet noise before any step: a series pressure source added to the blowing pressure that drives
-    /// the lip (its force) and the mouth reservoir the lip channel meters from, of rms `gain rho U_j^2 / 2` over
-    /// `St_h = f h / U_j` in `[st_lo, st_hi]`, shut while `Re_h = mdot / (w mu)` is below the card's onset or the jet flow is
+    /// the lip (its force) and the mouth reservoir the lip channel meters from, of rms `gain rho U_j^2 / 2` inside the band
+    /// `St_h = f h / U_j` in `[st_lo, st_hi]` (a band reaching the gas step's Nyquist frequency keeps only its part below
+    /// it), shut while `Re_h = mdot / (w mu)` is below the card's onset or the jet flow is
     /// not forward (see [`LipJetNoise`] for the law, what it rests on and the label). It runs once per gas step on the
     /// previous gas step's metered mass flow and gap. A lip without it is bit-identical to one built before this existed; a
     /// gate that never opens adds exactly zero.
@@ -181,6 +182,12 @@ impl NonlinearLip {
     pub fn with_jet_noise(mut self, card: JetNoiseCard) -> Result<Self, String> {
         self.jet_noise = Some(LipJetNoise::new(card).map_err(str::to_string)?);
         Ok(self)
+    }
+
+    /// The lip jet noise's open-gate gas steps so far by how much of the band each could represent; `None` without the row.
+    #[must_use]
+    pub fn jet_noise_coverage(&self) -> Option<JetNoiseCoverage> {
+        self.jet_noise.as_ref().map(LipJetNoise::coverage)
     }
 
     /// Apply a control-rate change between blocks. A held bore has no valves.

@@ -1324,6 +1324,14 @@ impl Engine {
             Self::Nonlinear(lip) => Some(lip.bore().first_order_fallbacks()),
         }
     }
+
+    fn jet_noise_coverage(&self) -> Option<crate::turbulence_noise::JetNoiseCoverage> {
+        match self {
+            Self::Linear { voice, .. } => voice.jet_noise_coverage(),
+            #[cfg(feature = "nonlinear-brass")]
+            Self::Nonlinear(lip) => lip.jet_noise_coverage(),
+        }
+    }
 }
 
 /// A realized performance: the lip, the bore and the microphone, advanced
@@ -1377,6 +1385,13 @@ impl LipPerformance {
     #[must_use]
     pub fn first_order_fallbacks(&self) -> Option<u64> {
         self.engine.first_order_fallbacks()
+    }
+
+    /// The opt-in lip jet noise's open-gate mechanics steps so far by how much of the band each could represent at the
+    /// lip's clock; `None` without the `jet_noise` row.
+    #[must_use]
+    pub fn jet_noise_coverage(&self) -> Option<crate::turbulence_noise::JetNoiseCoverage> {
+        self.engine.jet_noise_coverage()
     }
 
     /// Start recording the pressure at the mouthpiece (the internal pressure the

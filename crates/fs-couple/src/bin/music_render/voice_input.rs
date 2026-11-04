@@ -76,6 +76,13 @@ pub(super) fn run_with_gas_sources(
         ),
         Err(why) => format!("{{\"refused\":{}}}", json_string(why)),
     };
+    // Only a performance with the `jet_noise` row writes this; without it the sidecar is byte for byte what it was.
+    let jet_band = performance.jet_noise_coverage().map_or_else(String::new, |c| {
+        format!(
+            "\"jet_noise_band\":{{\"open_gate_steps\":{},\"whole\":{},\"truncated\":{},\"silent\":{}}},",
+            c.open_gate(), c.whole, c.truncated, c.silent
+        )
+    });
     let provenance = format!(
         "{{\"schema\":\"frankensim-music-render-provenance-v1\",\"fixture\":\"voice-input\",\
          \"sample_rate_hz\":{RATE},\"samples\":{samples},\"block\":{block},\
@@ -89,7 +96,7 @@ pub(super) fn run_with_gas_sources(
          \"microphone_m\":[{:e},{:e},{:e}],\"mouth_flow_taps\":{},\"mouth_flow_rungs\":{},\
          \"passive_tract_formants_hz\":{passive},\
          \"peak_glottal_flow_m3_s\":{:e},\"closed_fraction\":{:e},\
-         \"max_force_passes\":{},\"mean_force_passes\":{:e},\
+         \"max_force_passes\":{},\"mean_force_passes\":{:e},{jet_band}\
          \"model_scope\":\"lumped fold pHS on a plane-wave series tract with TMM viscothermal loss and a declared radiation load; mouth flow radiated through an infinite-baffle circular opening, no head diffraction, nasal branch or side cavity; the supraglottal pressure is never the output\"}}{gas_sources}}}",
         description.full_scale_pa, rendered.clipped, rendered.peak_pa, rendered.rms_pa,
         info.mechanics_rate_hz, info.two_mass, info.sections, info.tract_length_m,

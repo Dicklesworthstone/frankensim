@@ -48,13 +48,16 @@
 //! THE VOICE JET NOISE ([`JetNoiseCard`], [`GlottalJetNoise`]): the second opt-in glottal source, beside the one above and
 //! not a replacement for it. It is Stevens' form (a series pressure source proportional to the pressure drop across the
 //! constriction) with Verge's measured fraction and band from a flue jet, applied to the glottal jet as an extrapolation;
-//! see [`JetNoiseCard`] for the law, what each part rests on, and the label a page must carry. It uses the band-limited
-//! core [`BandedGaussian`] under its own kernel id [`GLOTTAL_JET_NOISE_KERNEL`] and, like the flue's `jet_noise` row, five
-//! required fields and no default.
+//! see [`JetNoiseCard`] for the law, what each part rests on, and the label a page must carry. It draws through the
+//! flue row's band-pass [`ButterworthBandGaussian`] under its own kernel id [`GLOTTAL_JET_NOISE_KERNEL`] and, like the
+//! flue's `jet_noise` row, has five required fields and no default.
 //!
-//! THE FLUE JET NOISE FILTER ([`ButterworthBandGaussian`]): the flue's `jet_noise` row alone draws through one 2-pole
-//! Butterworth band-pass, Verge's prescribed shape, normalised so that the rms inside the card's band is the card's gain;
-//! see that type for the source and what it does not claim.
+//! THE JET NOISE FILTER ([`ButterworthBandGaussian`]): the flue's, the voice's and the brass lip's `jet_noise` rows draw
+//! through one 2-pole Butterworth band-pass, Verge's prescribed shape, normalised so that the rms inside the card's band
+//! is the card's gain. A band that reaches the step's Nyquist frequency keeps only its part below it, at the whole band's
+//! density, and a band wholly above it is silent ([`BandCoverage`]); see that type for the source and what it does not
+//! claim. [`BandedGaussian`], the band these rows drew through before, is kept unchanged only as the tests' planted
+//! reference.
 
 use fs_math::det;
 use fs_rand::{Stream, StreamKey};
@@ -115,7 +118,7 @@ impl ColouredGaussian {
 }
 
 /// Kernel id of the flue jet-noise stream in `fs_rand`'s `(seed, kernel, tile)` key: "jetn". The flue driver
-/// ([`BandedGaussian`] under this id) never touches the glottal stream or the flue island's onset-seed stream.
+/// ([`ButterworthBandGaussian`] under this id) never touches the glottal stream or the flue island's onset-seed stream.
 pub const FLUE_JET_NOISE_KERNEL: u32 = 0x6a65_746e;
 
 /// The matched-pole coefficient of a first-order low-pass of cutoff `cutoff_hz` at step `dt`.
@@ -250,7 +253,7 @@ impl BandBiquad {
 }
 
 /// Gaussian noise through ONE 2-pole Butterworth band-pass (a biquad), normalised so that its rms INSIDE the -3 dB edges
-/// is one: the flue `jet_noise` row's filter (MB 17116), and no other source's. It is Verge's own recipe for the flue
+/// is one: the filter of the flue's, the voice's and the brass lip's `jet_noise` rows. It is Verge's own recipe for the flue
 /// source, white noise through "an order two Butterworth pass-band digital filter" (M. P. Verge, PhD thesis, TU Eindhoven
 /// 1995, sec. 6.5, p. 196). The recipe names no edges, and Verge never ran it: "In the results presented later, we,
 /// however, did not use a turbulence noise source" (p. 198). One biquad has 6 dB/oct skirts, the slope of the pedestal
@@ -260,10 +263,19 @@ impl BandBiquad {
 /// over that band, so the normalisation is in-band: the analog section puts
 /// exactly half its power inside its edges, the bilinear one a little more (0.51-0.56 at the flue's settings), and the
 /// total rms is about 1.4 times the in-band rms. [`BandedGaussian`] (two first-order low-passes, normalised on the
-/// whole band) put only 0.26 of its power inside the same edges, 5.8 dB below the card's gain; it is kept unchanged for
-/// the voice's and the lip's jet rows. The coefficients and the normalisation follow the edges every step
+/// whole band) put only 0.26 of its power inside the same edges, 5.8 dB below the card's gain; it is kept unchanged,
+/// used by no row, as the tests' planted reference. The coefficients and the normalisation follow the edges every step
 /// (quasi-stationary, like [`BandedGaussian::step`]); the filter is direct form I, so a coefficient change acts on
 /// stored inputs and outputs, not on a hidden state.
+///
+/// AT NYQUIST (the voice and lip rows). The edges follow the jet, and a fast jet through a
+/// narrow gap puts them above the step's Nyquist frequency `f_N = 1 / (2 dt)`. A band with `f_lo < f_N <= f_hi` keeps
+/// only `[f_lo, f_N)`, at the whole band's mean in-band density (unit power over `f_hi - f_lo`, so power
+/// `(f_N - f_lo) / (f_hi - f_lo)` there). It is drawn through a first-order high-pass at `f_lo` (prewarped: -3 dB at
+/// exactly `f_lo`), the band-pass's own lower skirt (6 dB/oct). Nothing is renormalised into the narrower band:
+/// Verge gives no spectrum above his band, and moving its power below Nyquist would be a number made here. A band with
+/// `f_lo >= f_N` is silent. A band wholly below Nyquist is the band-pass above, bit for bit what it was before this
+/// rule. [`ButterworthBandGaussian::step_with_coverage`] says which of the three a step was.
 #[derive(Clone, Debug)]
 pub struct ButterworthBandGaussian {
     white: Stream,
@@ -280,17 +292,29 @@ impl ButterworthBandGaussian {
         Self { white: StreamKey { seed, kernel, tile: 0 }.stream(), x1: 0.0, x2: 0.0, y1: 0.0, y2: 0.0 }
     }
 
-    /// One sample for -3 dB edges `f_lo_hz < f_hi_hz` and step `dt` seconds, of unit rms inside the edges. Edges that are
-    /// not ordered and positive, or an upper edge at or above the Nyquist frequency, count as closed and are
+    /// One sample for -3 dB edges `f_lo_hz < f_hi_hz` and step `dt` seconds, of unit rms inside the edges. An upper edge at
+    /// or above the Nyquist frequency keeps the band's part below it (the type's AT NYQUIST); edges that are not ordered,
+    /// positive and finite, or a lower edge at or above the Nyquist frequency, count as closed and are
     /// [`ButterworthBandGaussian::skip`].
     pub fn step(&mut self, f_lo_hz: f64, f_hi_hz: f64, dt: f64) -> f64 {
-        let Some(q) = BandBiquad::design(f_lo_hz, f_hi_hz, dt) else {
-            return self.skip();
+        self.step_with_coverage(f_lo_hz, f_hi_hz, dt).0
+    }
+
+    /// [`Self::step`], and how much of the band this step could represent.
+    pub fn step_with_coverage(&mut self, f_lo_hz: f64, f_hi_hz: f64, dt: f64) -> (f64, BandCoverage) {
+        if let Some(q) = BandBiquad::design(f_lo_hz, f_hi_hz, dt) {
+            let x = self.white.next_normal();
+            let y = q.b0 * (x - self.x2) - q.a1 * self.y1 - q.a2 * self.y2;
+            (self.x2, self.x1, self.y2, self.y1) = (self.x1, x, self.y1, y);
+            return (y / det::sqrt(q.in_band_variance), BandCoverage::Whole);
+        }
+        let Some(h) = TruncatedHighPass::design(f_lo_hz, f_hi_hz, dt) else {
+            return (self.skip(), BandCoverage::Silent);
         };
         let x = self.white.next_normal();
-        let y = q.b0 * (x - self.x2) - q.a1 * self.y1 - q.a2 * self.y2;
+        let y = h.b0 * (x - self.x1) - h.a1 * self.y1;
         (self.x2, self.x1, self.y2, self.y1) = (self.x1, x, self.y1, y);
-        y / det::sqrt(q.in_band_variance)
+        (y * det::sqrt(h.fraction / h.in_band_variance), BandCoverage::Truncated)
     }
 
     /// A step with the source closed: exactly one white sample is drawn (the stream index does not depend on how long
@@ -299,6 +323,106 @@ impl ButterworthBandGaussian {
         let _ = self.white.next_normal();
         (self.x1, self.x2, self.y1, self.y2) = (0.0, 0.0, 0.0, 0.0);
         0.0
+    }
+}
+
+/// How much of a jet-noise band one step can represent at its clock (Nyquist `f_N = 1 / (2 dt)`); see
+/// [`ButterworthBandGaussian`]'s AT NYQUIST.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BandCoverage {
+    /// The whole band lies below `f_N`: the 2-pole band-pass.
+    Whole,
+    /// `f_lo < f_N <= f_hi`: only `[f_lo, f_N)` is emitted, at the whole band's mean in-band density.
+    Truncated,
+    /// The lower edge is at or above `f_N` (or the edges are unusable): nothing in the band can be represented.
+    Silent,
+}
+
+/// A jet-noise source's open-gate steps counted by [`BandCoverage`]. A step with the gate shut is not counted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct JetNoiseCoverage {
+    /// Open-gate steps whose whole band lies below Nyquist.
+    pub whole: u64,
+    /// Open-gate steps whose band straddles Nyquist (only the part below it emitted).
+    pub truncated: u64,
+    /// Open-gate steps whose band lies wholly at or above Nyquist (silent although the gate was open).
+    pub silent: u64,
+}
+
+impl JetNoiseCoverage {
+    fn count(&mut self, coverage: BandCoverage) {
+        match coverage {
+            BandCoverage::Whole => self.whole += 1,
+            BandCoverage::Truncated => self.truncated += 1,
+            BandCoverage::Silent => self.silent += 1,
+        }
+    }
+
+    /// Every open-gate step.
+    #[must_use]
+    pub const fn open_gate(&self) -> u64 {
+        self.whole + self.truncated + self.silent
+    }
+}
+
+/// The variance on `[f_lo, f_N)` of the prewarped first-order high-pass `s / (s + a)`, `a = u_lo = tan theta_lo`, for a
+/// unit white input: `(2/pi) int_{theta_lo}^{pi/2} sin^2 / (sin^2 + a^2 cos^2) d theta` (`theta = pi f dt`,
+/// `|H|^2 = u^2 / (u^2 + a^2)` with `u = tan theta`). In `u` it is `(2/pi) int_a^inf u^2 / ((u^2 + a^2)(1 + u^2)) du
+/// = (2/pi) (pi/2 - atan a - a pi / 4) / (1 - a^2)`; near `a = 1`, where that is 0/0, the integrand in `theta` is smooth and
+/// 16-point Gauss-Legendre is used instead (a test checks both against brute force).
+fn high_pass_variance_to_nyquist(theta_lo: f64, u_lo: f64) -> f64 {
+    let (pi, a) = (core::f64::consts::PI, u_lo);
+    if (1.0 - a * a).abs() > 0.05 {
+        return core::f64::consts::FRAC_2_PI * (0.5 * pi - det::atan(a) - 0.25 * pi * a) / (1.0 - a * a);
+    }
+    let half_pi = core::f64::consts::FRAC_PI_2;
+    let (mid, half) = (0.5 * (theta_lo + half_pi), 0.5 * (half_pi - theta_lo));
+    let mut sum = 0.0;
+    for &(node, weight) in &GAUSS_LEGENDRE_16 {
+        for x in [-node, node] {
+            let theta = mid + half * x;
+            let (s, c) = (det::sin(theta), det::cos(theta));
+            sum += weight * (s * s) / (s * s + u_lo * u_lo * c * c);
+        }
+    }
+    sum * half * core::f64::consts::FRAC_2_PI
+}
+
+/// The truncated band, `f_lo < f_N <= f_hi`: one first-order high-pass with -3 dB at exactly `f_lo` (prewarped bilinear
+/// map of `s / (s + u_lo)`: `b0 = 1 / (1 + u_lo)`, `a1 = (u_lo - 1) / (1 + u_lo)`;
+/// `y[n] = b0 (x[n] - x[n-1]) - a1 y[n-1]`), its variance on `[f_lo, f_N)` and the power that part of the band carries at
+/// the whole band's density, `fraction = (f_N - f_lo) / (f_hi - f_lo)`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TruncatedHighPass {
+    b0: f64,
+    a1: f64,
+    in_band_variance: f64,
+    fraction: f64,
+}
+
+impl TruncatedHighPass {
+    /// None unless the edges are ordered, positive and finite, the lower edge below Nyquist and the upper edge at or
+    /// above it.
+    fn design(f_lo_hz: f64, f_hi_hz: f64, dt: f64) -> Option<Self> {
+        if !(f_lo_hz > 0.0
+            && f_hi_hz > f_lo_hz
+            && f_hi_hz.is_finite()
+            && dt > 0.0
+            && dt.is_finite()
+            && f_lo_hz * dt < 0.5
+            && f_hi_hz * dt >= 0.5)
+        {
+            return None;
+        }
+        let theta_lo = core::f64::consts::PI * f_lo_hz * dt;
+        let u_lo = det::tan(theta_lo);
+        let in_band_variance = high_pass_variance_to_nyquist(theta_lo, u_lo);
+        let fraction = (0.5 / dt - f_lo_hz) / (f_hi_hz - f_lo_hz);
+        if !(u_lo > 0.0 && u_lo.is_finite() && in_band_variance > 0.0 && in_band_variance.is_finite() && fraction > 0.0) {
+            return None;
+        }
+        let a0 = 1.0 + u_lo;
+        Some(Self { b0: 1.0 / a0, a1: (u_lo - 1.0) / a0, in_band_variance, fraction })
     }
 }
 
@@ -446,7 +570,7 @@ pub const GLOTTAL_JET_NOISE_KERNEL: u32 = 0x676a_6574;
 ///
 /// THE LAW (the form is Stevens', the constant is Verge's, and putting the two on the glottis is an EXTRAPOLATION).
 /// A pressure source in series with the glottal channel, proportional to the pressure drop across the constriction, of rms
-/// `gain * rho U_j^2 / 2` over the band `St_h = f h / U_j` in `[st_lo, st_hi]`, shut while `Re_h = U_j h / nu` is below
+/// `gain * rho U_j^2 / 2` inside the band `St_h = f h / U_j` in `[st_lo, st_hi]`, shut while `Re_h = U_j h / nu` is below
 /// `re_on`. `U_j = Q / (L h)` is the speed of the glottal jet (`Q` the glottal flow, `L` the fold length, `h` the gap), so
 /// `Re_h = Q / (L nu)`: the gap cancels and the gate is a flow threshold. The form, a sound-pressure source proportional to
 /// the pressure drop across a constriction with weak dependence on its area, is Stevens (1971, JASA 50:1180); Krane (2005,
@@ -458,7 +582,9 @@ pub const GLOTTAL_JET_NOISE_KERNEL: u32 = 0x676a_6574;
 /// jet as an extrapolation; Stevens 1971 gives the form (a pressure source proportional to the pressure drop), not this
 /// constant"). The numbers are the card's; nothing here supplies, tunes or reads one from a recording.
 ///
-/// MEASURED SHORTFALL (SunnySnow, 2026-11-03, rendered on the 14 straight-tone site cards with this constant): the noise the
+/// MEASURED SHORTFALL (SunnySnow, 2026-11-03, rendered on the 14 straight-tone site cards with this constant, through the
+/// band this row used before, [`BandedGaussian`], whose rms inside the band was 2.8 to 5.8 dB under the gain at the
+/// tests' settings; not re-measured on the present band): the noise the
 /// law adds is about 53-64 dB under the harmonic power on the F4 notes (grader hnr, ours side, before and after), against a
 /// total inter-harmonic power 28-33 dB under it in the recordings the grader compares with; no number from those recordings
 /// enters the code. So at Verge's constant the law is about 20-30 dB too weak on the glottis: it leaves the grader's
@@ -503,13 +629,15 @@ impl JetNoiseCard {
     }
 }
 
-/// The glottal jet-noise source of one island: the card, its band-limited stream and the last step's flow and gap.
+/// The glottal jet-noise source of one island: the card, its band-limited stream, the last step's flow and gap, and the
+/// open-gate steps counted by how much of the band each could represent.
 #[derive(Clone, Debug)]
 pub struct GlottalJetNoise {
     card: JetNoiseCard,
-    noise: BandedGaussian,
+    noise: ButterworthBandGaussian,
     last_flow_m3_s: f64,
     last_gap_m: f64,
+    coverage: JetNoiseCoverage,
 }
 
 impl GlottalJetNoise {
@@ -520,11 +648,18 @@ impl GlottalJetNoise {
     pub fn new(card: JetNoiseCard) -> Result<Self, &'static str> {
         card.validate()?;
         Ok(Self {
-            noise: BandedGaussian::new(card.seed, GLOTTAL_JET_NOISE_KERNEL),
+            noise: ButterworthBandGaussian::new(card.seed, GLOTTAL_JET_NOISE_KERNEL),
             card,
             last_flow_m3_s: 0.0,
             last_gap_m: 0.0,
+            coverage: JetNoiseCoverage::default(),
         })
+    }
+
+    /// The open-gate steps so far, by how much of the band each could represent.
+    #[must_use]
+    pub const fn coverage(&self) -> JetNoiseCoverage {
+        self.coverage
     }
 
     /// The card.
@@ -551,7 +686,8 @@ impl GlottalJetNoise {
             return 0.0;
         }
         let per_hz = speed / h;
-        let w = self.noise.step(self.card.strouhal_lo * per_hz, self.card.strouhal_hi * per_hz, dt);
+        let (w, coverage) = self.noise.step_with_coverage(self.card.strouhal_lo * per_hz, self.card.strouhal_hi * per_hz, dt);
+        self.coverage.count(coverage);
         self.card.gain * 0.5 * rho * speed * speed * w
     }
 
@@ -575,14 +711,16 @@ pub const LIP_JET_NOISE_KERNEL: u32 = 0x6c6a_6574;
 ///
 /// Measured on SilentBluff's V1 Bb4 hold (Cullen embouchure 19, 11.42 kPa, `--mouthpiece-wav` tap and the engine's own lip equation
 /// run offline): `Re_h >= 1700` on 56 % of the steady hold, in every cycle, peaking above 5400; the source is 11.7 Pa rms while the
-/// gate is open, 61 dB under the cup's AC rms. Kept additive on purpose: it repeats the arithmetic of [`GlottalJetNoise`] so that
+/// gate is open, 61 dB under the cup's AC rms (through the band this row used before, [`BandedGaussian`], whose whole-band
+/// rms was the gain). Kept additive on purpose: it repeats the arithmetic of [`GlottalJetNoise`] so that
 /// the landed voice path is untouched.
 #[derive(Clone, Debug)]
 pub struct LipJetNoise {
     card: JetNoiseCard,
-    noise: BandedGaussian,
+    noise: ButterworthBandGaussian,
     last_flow_m3_s: f64,
     last_gap_m: f64,
+    coverage: JetNoiseCoverage,
 }
 
 impl LipJetNoise {
@@ -593,11 +731,18 @@ impl LipJetNoise {
     pub fn new(card: JetNoiseCard) -> Result<Self, &'static str> {
         card.validate()?;
         Ok(Self {
-            noise: BandedGaussian::new(card.seed, LIP_JET_NOISE_KERNEL),
+            noise: ButterworthBandGaussian::new(card.seed, LIP_JET_NOISE_KERNEL),
             card,
             last_flow_m3_s: 0.0,
             last_gap_m: 0.0,
+            coverage: JetNoiseCoverage::default(),
         })
+    }
+
+    /// The open-gate samples so far, by how much of the band each could represent.
+    #[must_use]
+    pub const fn coverage(&self) -> JetNoiseCoverage {
+        self.coverage
     }
 
     /// The card.
@@ -623,7 +768,8 @@ impl LipJetNoise {
             return 0.0;
         }
         let per_hz = speed / h;
-        let w = self.noise.step(self.card.strouhal_lo * per_hz, self.card.strouhal_hi * per_hz, dt);
+        let (w, coverage) = self.noise.step_with_coverage(self.card.strouhal_lo * per_hz, self.card.strouhal_hi * per_hz, dt);
+        self.coverage.count(coverage);
         self.card.gain * 0.5 * rho * speed * speed * w
     }
 
@@ -880,7 +1026,7 @@ mod tests {
         assert!((q.in_band_variance / (0.5 * b) - 1.0).abs() < 1.0e-5, "{} against b/2 = {}", q.in_band_variance, 0.5 * b);
     }
 
-    /// MB 17116's planted negative: the in-band rms of a long stream is one for this filter, and the same estimator puts
+    /// The planted negative: the in-band rms of a long stream is one for this filter, and the same estimator puts
     /// the old band (two one-pole low-passes, whole-band normalisation) 5.8 dB below it.
     #[test]
     fn butterworth_band_noise_has_unit_rms_inside_its_edges_where_the_old_band_is_5_8_db_low() {
@@ -920,7 +1066,7 @@ mod tests {
         let per_step = before / 6;
         assert_eq!(per_step * 6, before, "six open steps must advance the stream evenly");
         assert_eq!(open.step(2500.0, 1000.0, dt), 0.0);
-        assert_eq!(open.step(1000.0, 30_000.0, dt), 0.0, "an upper edge above Nyquist is a closed band");
+        assert_eq!(open.step(30_000.0, 40_000.0, dt), 0.0, "a lower edge above Nyquist is a closed band");
         assert_eq!(open.white.index(), before + 2 * per_step);
         assert_eq!((open.x1, open.y1), (0.0, 0.0), "a closed band clears the section");
         let run = |seed, kernel| {
@@ -936,6 +1082,96 @@ mod tests {
         assert_ne!(run(7, FLUE_JET_NOISE_KERNEL), banded, "same white stream, another filter");
     }
 
+    fn high_pass_power(h: &TruncatedHighPass, f_hz: f64, dt: f64) -> f64 {
+        let w = core::f64::consts::TAU * f_hz * dt;
+        let (nr, ni) = (h.b0 * (1.0 - w.cos()), h.b0 * w.sin());
+        let (dr, di) = (1.0 + h.a1 * w.cos(), -h.a1 * w.sin());
+        (nr * nr + ni * ni) / (dr * dr + di * di)
+    }
+
+    /// The Nyquist rule. A band below Nyquist is the band-pass; one straddling it keeps `[f_lo, f_N)` at the whole band's
+    /// density, power `(f_N - f_lo) / (f_hi - f_lo)` there (planted negative: renormalising the whole band into the
+    /// narrower one would put 1 there, 3 dB more at this band); one wholly above it is silent and still draws one normal.
+    #[test]
+    fn butterworth_band_noise_straddling_nyquist_keeps_the_band_density_below_it_and_is_silent_wholly_above_it() {
+        let dt = 1.0 / 48_000.0;
+        let mut g = ButterworthBandGaussian::new(23, FLUE_JET_NOISE_KERNEL);
+        assert_eq!(g.step_with_coverage(1000.0, 2500.0, dt).1, BandCoverage::Whole);
+        assert_eq!(g.step_with_coverage(12_000.0, 36_000.0, dt).1, BandCoverage::Truncated);
+        assert_eq!(g.step_with_coverage(1000.0, 24_000.0, dt).1, BandCoverage::Truncated, "an upper edge AT Nyquist");
+        assert_eq!(g.step_with_coverage(24_000.0, 36_000.0, dt).1, BandCoverage::Silent, "a lower edge AT Nyquist");
+        assert_eq!(g.step_with_coverage(30_000.0, 40_000.0, dt).1, BandCoverage::Silent);
+        assert_eq!(g.step_with_coverage(1000.0, f64::INFINITY, dt).1, BandCoverage::Silent);
+        // The high-pass: -3 dB at f_lo, 1 at Nyquist, 6 dB per octave below, and its variance on [f_lo, f_N) by brute force.
+        let (f_lo, f_hi) = (12_000.0, 36_000.0);
+        let h = TruncatedHighPass::design(f_lo, f_hi, dt).unwrap();
+        assert!((high_pass_power(&h, f_lo, dt) - 0.5).abs() < 1.0e-12, "{}", high_pass_power(&h, f_lo, dt));
+        assert!((high_pass_power(&h, 0.5 / dt, dt) - 1.0).abs() < 1.0e-12);
+        let pi = core::f64::consts::PI;
+        let at_u = |u: f64| high_pass_power(&h, u.atan() / (pi * dt), dt);
+        let u_lo = (pi * f_lo * dt).tan();
+        let slope = (at_u(u_lo / 8.0) / at_u(u_lo / 16.0)).sqrt();
+        assert!((slope - 2.0).abs() < 0.02, "skirt x{slope} per octave");
+        // Both branches of the variance (closed form, and Gauss-Legendre near u_lo = 1 where the closed form is 0/0).
+        for lo in [1000.0, 8000.0, 11_800.0, 12_000.0, 20_000.0, 23_000.0] {
+            let h = TruncatedHighPass::design(lo, f_hi, dt).unwrap();
+            let intervals = 200_000;
+            let step = (0.5 / dt - lo) / intervals as f64;
+            let mut brute = high_pass_power(&h, lo, dt) + high_pass_power(&h, 0.5 / dt, dt);
+            for i in 1..intervals {
+                brute += if i % 2 == 1 { 4.0 } else { 2.0 } * high_pass_power(&h, lo + i as f64 * step, dt);
+            }
+            brute *= step / 3.0 * 2.0 * dt;
+            assert!((h.in_band_variance - brute).abs() < 1.0e-9 * brute, "f_lo {lo}: {} against {brute}", h.in_band_variance);
+        }
+        assert!((h.fraction - 0.5).abs() < 1.0e-15);
+        // The stream: mean square on [f_lo, f_N) is the fraction (the Nyquist bin itself left out of the estimate).
+        let n = 1usize << 19;
+        let mut g = ButterworthBandGaussian::new(23, FLUE_JET_NOISE_KERNEL);
+        for _ in 0..4096 {
+            g.step(f_lo, f_hi, dt);
+        }
+        let xs: Vec<f64> = (0..n).map(|_| g.step(f_lo, f_hi, dt)).collect();
+        let below = in_band_mean_square(&xs, f_lo, 0.5 / dt - 1.0, dt);
+        assert!((below / 0.5 - 1.0).abs() < 0.06, "mean square {below} on [f_lo, f_N) against the density's 0.5");
+        // One normal per step on every branch.
+        let mut a = ButterworthBandGaussian::new(9, FLUE_JET_NOISE_KERNEL);
+        let mut b = ButterworthBandGaussian::new(9, FLUE_JET_NOISE_KERNEL);
+        for _ in 0..6 {
+            a.step(1000.0, 2500.0, dt);
+        }
+        let (start, per_step) = (a.white.index(), a.white.index() / 6);
+        assert_ne!(a.step(f_lo, f_hi, dt), 0.0);
+        assert_eq!(a.step(30_000.0, 40_000.0, dt), 0.0);
+        assert_eq!(a.white.index(), start + 2 * per_step);
+        for _ in 0..8 {
+            b.step(f_lo, f_hi, dt);
+        }
+        assert_eq!(b.white.index(), 8 * per_step);
+    }
+
+    /// The flue pages never reach Nyquist, so their bytes must not move: below Nyquist every sample is, bit for bit, the
+    /// section as it stood before the truncation rule (that arithmetic written out here), along a sweep of edges.
+    #[test]
+    fn butterworth_band_noise_below_nyquist_is_bit_for_bit_the_band_pass_alone() {
+        let dt = 1.0 / 288_000.0;
+        let mut g = ButterworthBandGaussian::new(13, FLUE_JET_NOISE_KERNEL);
+        let mut white = StreamKey { seed: 13, kernel: FLUE_JET_NOISE_KERNEL, tile: 0 }.stream();
+        let (mut x1, mut x2, mut y1, mut y2) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+        for i in 0..20_000u32 {
+            let speed = 5.0 + 30.0 * f64::from(i % 1000) / 1000.0;
+            let per_hz = speed / 1.13e-3;
+            let (f_lo, f_hi) = (0.045 * per_hz, 0.115 * per_hz);
+            let q = BandBiquad::design(f_lo, f_hi, dt).unwrap();
+            let x = white.next_normal();
+            let y = q.b0 * (x - x2) - q.a1 * y1 - q.a2 * y2;
+            (x2, x1, y2, y1) = (x1, x, y1, y);
+            let (got, coverage) = g.step_with_coverage(f_lo, f_hi, dt);
+            assert_eq!(coverage, BandCoverage::Whole);
+            assert_eq!(got.to_bits(), (y / det::sqrt(q.in_band_variance)).to_bits(), "sample {i}");
+        }
+    }
+
     const RHO: f64 = 1.15;
     const MU: f64 = 1.9e-5;
 
@@ -943,27 +1179,38 @@ mod tests {
         JetNoiseCard { seed: 21, gain: 1.3e-3, strouhal_lo: 0.045, strouhal_hi: 0.115, reynolds_onset: 1700.0 }
     }
 
-    /// Gauntlet G3. The series pressure's rms is `gain rho U_j^2 / 2` at the jet speed `Q / (L h)`, so it goes as the
-    /// square of the speed (the pressure-drop-proportional form).
+    /// Gauntlet G3. The series pressure's rms INSIDE the band `St_h` in `[st_lo, st_hi]` is `gain rho U_j^2 / 2` at the jet
+    /// speed `Q / (L h)`, so it goes as the square of the speed (the pressure-drop-proportional form). Planted negative: the
+    /// band this row drew through before, at the same edges and scale, measures 5.8 dB low on the same estimator.
     #[test]
-    fn glottal_jet_noise_rms_is_gain_times_the_dynamic_pressure_and_goes_as_the_square_of_the_jet_speed() {
-        let (l, h, dt) = (0.014, 0.8e-3, 1.0 / 192_000.0);
-        let rms_at = |speed: f64| {
+    fn glottal_jet_noise_in_band_rms_is_gain_times_the_dynamic_pressure_and_goes_as_the_square_of_the_jet_speed() {
+        let (l, h, dt, n) = (0.014, 0.8e-3, 1.0 / 192_000.0, 1usize << 19);
+        let band = |speed: f64| (0.045 * speed / h, 0.115 * speed / h);
+        let in_band_rms = |speed: f64| {
             let mut s = GlottalJetNoise::new(jet_card()).unwrap();
             s.record(speed * l * h, h);
             for _ in 0..4096 {
                 s.pressure_pa(l, 1.0e3, RHO, MU, dt);
             }
-            let n = 1usize << 17;
-            let ss: f64 = (0..n).map(|_| { let p = s.pressure_pa(l, 1.0e3, RHO, MU, dt); p * p }).sum();
-            (ss / n as f64).sqrt()
+            let xs: Vec<f64> = (0..n).map(|_| s.pressure_pa(l, 1.0e3, RHO, MU, dt)).collect();
+            assert_eq!(s.coverage(), JetNoiseCoverage { whole: (n + 4096) as u64, truncated: 0, silent: 0 });
+            let (f_lo, f_hi) = band(speed);
+            in_band_mean_square(&xs, f_lo, f_hi, dt).sqrt()
         };
         let u = 40.0;
         let expected = 1.3e-3 * 0.5 * RHO * u * u;
-        let measured = rms_at(u);
-        assert!((measured / expected - 1.0).abs() < 0.04, "rms {measured} against gain rho U^2 / 2 = {expected}");
-        let doubled = rms_at(2.0 * u);
-        assert!((doubled / measured - 4.0).abs() < 0.25, "twice the speed must give four times the rms, got {}", doubled / measured);
+        let measured = in_band_rms(u);
+        assert!((measured / expected - 1.0).abs() < 0.03, "in-band rms {measured} against gain rho U^2 / 2 = {expected}");
+        let doubled = in_band_rms(2.0 * u);
+        assert!((doubled / measured - 4.0).abs() < 0.2, "twice the speed must give four times the rms, got {}", doubled / measured);
+        let (f_lo, f_hi) = band(u);
+        let mut old = BandedGaussian::new(21, GLOTTAL_JET_NOISE_KERNEL);
+        for _ in 0..4096 {
+            old.step(f_lo, f_hi, dt);
+        }
+        let olds: Vec<f64> = (0..n).map(|_| expected * old.step(f_lo, f_hi, dt)).collect();
+        let old_db = 20.0 * (in_band_mean_square(&olds, f_lo, f_hi, dt).sqrt() / expected).log10();
+        assert!((old_db + 5.8).abs() < 0.5, "the old band's in-band level {old_db} dB re gain rho U^2 / 2");
     }
 
     /// With `Re_h = U_j h / nu` and `U_j = Q / (L h)` the gap cancels: the gate is a flow threshold `Q = Re_on L nu`.
@@ -998,11 +1245,12 @@ mod tests {
         for _ in 0..4096 {
             s.pressure_pa(l, vmax, RHO, MU, dt);
         }
-        let n = 1usize << 16;
+        let n = 1usize << 18;
         let xs: Vec<f64> = (0..n).map(|_| s.pressure_pa(l, vmax, RHO, MU, dt)).collect();
-        let rms = (xs.iter().map(|x| x * x).sum::<f64>() / n as f64).sqrt();
+        // The band is that of the CLAMPED speed: St_h * vmax / h.
+        let rms = in_band_mean_square(&xs, 0.045 * vmax / 0.3e-3, 0.115 * vmax / 0.3e-3, dt).sqrt();
         let expected = 1.3e-3 * 0.5 * RHO * vmax * vmax;
-        assert!((rms / expected - 1.0).abs() < 0.05, "rms {rms} against the clamped {expected}");
+        assert!((rms / expected - 1.0).abs() < 0.05, "in-band rms {rms} against the clamped {expected}");
         // A gap so small that the clamped jet is nowhere near turbulent is shut by the gate (Re_h on the CLAMPED speed).
         let mut tiny = GlottalJetNoise::new(jet_card()).unwrap();
         tiny.record(5.0e-4, 1.0e-9);
@@ -1049,21 +1297,32 @@ mod tests {
     const LIP_WIDTH: f64 = 9.0e-3;
 
     /// Gauntlet G3, the POSITIVE case planted on an open gap: a 1 mm lip gap passing 9e-4 m^3/s is a 100 m/s jet at
-    /// `Re_h = Q / (w nu) = 6000`, well past the 1700 gate; the source is then nonzero and its rms is `gain rho U_j^2 / 2`.
+    /// `Re_h = Q / (w nu) = 6000`, well past the 1700 gate; the source is then nonzero and its rms INSIDE the band
+    /// (4500-11500 Hz, below the 16 kHz Nyquist) is `gain rho U_j^2 / 2`. Planted negative: the band this row drew through
+    /// before measures 2.75 dB low there on the same estimator.
     #[test]
-    fn lip_jet_noise_speaks_on_a_planted_open_gap_with_rms_gain_times_the_dynamic_pressure() {
+    fn lip_jet_noise_speaks_on_a_planted_open_gap_with_in_band_rms_gain_times_the_dynamic_pressure() {
         let mut s = LipJetNoise::new(jet_card()).unwrap();
         s.record(9.0e-4, 1.0e-3);
         let bound = 1.0e3; // far above the 100 m/s jet: the clamp is not what is read here
         for _ in 0..4096 {
             s.pressure_pa(LIP_WIDTH, bound, RHO, MU, LIP_DT);
         }
-        let n = 1usize << 17;
+        let n = 1usize << 18;
         let xs: Vec<f64> = (0..n).map(|_| s.pressure_pa(LIP_WIDTH, bound, RHO, MU, LIP_DT)).collect();
         assert!(xs.iter().filter(|x| **x != 0.0).count() > n * 99 / 100, "an open gate speaks on (almost) every sample");
-        let rms = (xs.iter().map(|x| x * x).sum::<f64>() / n as f64).sqrt();
+        assert_eq!(s.coverage(), JetNoiseCoverage { whole: (n + 4096) as u64, truncated: 0, silent: 0 });
+        let (f_lo, f_hi) = (4500.0, 11_500.0);
+        let rms = in_band_mean_square(&xs, f_lo, f_hi, LIP_DT).sqrt();
         let expected = 1.3e-3 * 0.5 * RHO * 100.0 * 100.0;
-        assert!((rms / expected - 1.0).abs() < 0.04, "rms {rms} against gain rho U^2 / 2 = {expected}");
+        assert!((rms / expected - 1.0).abs() < 0.03, "in-band rms {rms} against gain rho U^2 / 2 = {expected}");
+        let mut old = BandedGaussian::new(21, LIP_JET_NOISE_KERNEL);
+        for _ in 0..4096 {
+            old.step(f_lo, f_hi, LIP_DT);
+        }
+        let olds: Vec<f64> = (0..n).map(|_| expected * old.step(f_lo, f_hi, LIP_DT)).collect();
+        let old_db = 20.0 * (in_band_mean_square(&olds, f_lo, f_hi, LIP_DT).sqrt() / expected).log10();
+        assert!((old_db + 2.75).abs() < 0.5, "the old band's in-band level {old_db} dB re gain rho U^2 / 2");
     }
 
     /// Gauntlet G0/G3 planted negative (MB 16406): reverse flow, where the mouth pressure is at or below the cup pressure, and
@@ -1085,17 +1344,38 @@ mod tests {
         assert_eq!(s.pressure_pa(LIP_WIDTH, 0.0, RHO, MU, LIP_DT), 0.0);
     }
 
-    /// With `Re_h = U_j h / nu` and `U_j = Q / (w h)` the gap cancels: the gate is the flow threshold `Q = Re_on w nu`.
+    /// With `Re_h = U_j h / nu` and `U_j = Q / (w h)` the gap cancels: the gate is the flow threshold `Q = Re_on w nu`, at
+    /// every gap (the gate's opening is read from the open-gate count, which does not depend on where the band lies). At
+    /// 1.01 times the threshold the jet is `0.0284 / h` m/s: at 1 mm its band (1280-3260 Hz) lies below the 16 kHz Nyquist
+    /// and the source speaks; at 0.35 mm (10.4-26.6 kHz) it straddles Nyquist and the part below speaks; at 0.2 mm
+    /// (31.9-81.6 kHz) it lies wholly above Nyquist, and the open gate is silent.
     #[test]
     fn lip_jet_noise_gate_is_a_flow_threshold_because_the_gap_cancels() {
         let q_on = 1700.0 * LIP_WIDTH * (MU / RHO);
-        for h in [0.2e-3, 0.6e-3, 1.5e-3] {
+        for h in [0.2e-3, 0.35e-3, 0.6e-3, 1.0e-3, 1.5e-3] {
             let mut shut = LipJetNoise::new(jet_card()).unwrap();
             shut.record(0.99 * q_on, h);
             assert!((0..64).all(|_| shut.pressure_pa(LIP_WIDTH, 1.0e3, RHO, MU, LIP_DT) == 0.0), "below the flow threshold at gap {h}");
+            assert_eq!(shut.coverage().open_gate(), 0, "the gate stays shut below the flow threshold at gap {h}");
             let mut open = LipJetNoise::new(jet_card()).unwrap();
             open.record(1.01 * q_on, h);
-            assert!((0..64).any(|_| open.pressure_pa(LIP_WIDTH, 1.0e3, RHO, MU, LIP_DT) != 0.0), "above the flow threshold at gap {h}");
+            let xs: Vec<f64> = (0..64).map(|_| open.pressure_pa(LIP_WIDTH, 1.0e3, RHO, MU, LIP_DT)).collect();
+            assert_eq!(open.coverage().open_gate(), 64, "the gate opens above the flow threshold at gap {h}");
+            let speaks = xs.iter().any(|x| *x != 0.0);
+            match h {
+                h if h > 0.3e-3 && h < 0.4e-3 => {
+                    assert_eq!(open.coverage().truncated, 64, "the band straddles Nyquist at gap {h}");
+                    assert!(speaks, "the part of the band below Nyquist speaks at gap {h}");
+                }
+                h if h < 0.3e-3 => {
+                    assert_eq!(open.coverage().silent, 64, "the band lies wholly above Nyquist at gap {h}");
+                    assert!(!speaks, "nothing in the band can be represented at gap {h}");
+                }
+                _ => {
+                    assert_eq!(open.coverage().whole, 64, "the band fits below Nyquist at gap {h}");
+                    assert!(speaks, "the source speaks at gap {h}");
+                }
+            }
         }
     }
 

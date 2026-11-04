@@ -6178,7 +6178,10 @@ ends, prewarped so they are exact at the mechanics clock, and scaled by the exac
 variance the section has inside the band (16-point Gauss-Legendre), so `GAIN` is the
 in-band rms; outside the band the skirts fall at 6 dB/octave, like the pedestal of
 Verge's Fig. 5.15a (p. 160), and the whole stream's rms is about 1.4 times the
-in-band rms. An upper edge at or above Nyquist draws silence. The stream is keyed by
+in-band rms. A band that reaches the mechanics clock's Nyquist frequency keeps only
+its part below it, at the whole band's density, and a band wholly above it is silent
+(the rule the voice's and the lip's rows need; no flue band reaches Nyquist, and
+below it every sample is bit for bit the band-pass alone). The stream is keyed by
 `SEED` and its own kernel id
 (`FLUE_JET_NOISE_KERNEL`), not the island's onset-seed stream: exactly one normal is
 drawn per sample whether the gate is open or shut, so a gate that never opens leaves
@@ -6193,8 +6196,9 @@ pipe), are valid only near the Reynolds number and W/h where it was measured, an
 nothing here shapes the spectrum beyond one section's skirts or tunes a gain to a
 recording. Until 2026-11-03 the band was a difference of two one-pole low-passes
 normalised on the whole band, which put 0.26 of its power inside the band and so
-delivered `GAIN` 5.8 dB low there; that filter (`BandedGaussian`) remains, unchanged,
-only for the voice's and the brass lip's jet rows.
+delivered `GAIN` 5.8 dB low there; that filter (`BandedGaussian`) remains, unchanged
+and used by no row, as the tests' planted reference. The voice's and the brass lip's
+jet rows draw through this row's band-pass, under their own kernel ids.
 
 `bernoulli_aperture::slit_channel` resolves fixed, fully developed planar
 Newtonian momentum from the retained `GasState` density and viscosity. Its

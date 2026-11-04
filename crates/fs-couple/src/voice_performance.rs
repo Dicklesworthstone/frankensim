@@ -823,6 +823,13 @@ impl VoicePerformance {
         self.receiver.filter_delay_samples()
     }
 
+    /// The opt-in glottal jet noise's open-gate mechanics steps so far by how much of the band each could represent at the
+    /// mechanics clock; `None` without the `jet_noise` row.
+    #[must_use]
+    pub fn jet_noise_coverage(&self) -> Option<crate::turbulence_noise::JetNoiseCoverage> {
+        self.jet_noise.as_ref().map(GlottalJetNoise::coverage)
+    }
+
     /// Source-side summaries so far.
     #[must_use]
     pub fn stats(&self) -> VoiceStats {

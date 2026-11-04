@@ -152,8 +152,9 @@ pub const FLUE_SEED_KERNEL: u32 = 0x666c_7565; // "flue"
 /// `reynolds_onset`. The band's shape is Verge's own recipe, white noise through one 2-pole Butterworth band-pass
 /// (sec. 6.5, p. 196; never run by him, p. 198), here with its -3 dB edges at the two Strouhal ends, so it falls at
 /// 6 dB/oct outside them like the pedestal of his Fig. 5.15a (p. 160), and the rms of the whole stream is about 1.4 times
-/// the in-band rms ([`ButterworthBandGaussian`]; an upper edge at or above Nyquist draws silence). The band filter before it
-/// (MB 17116) put 0.26 of its power inside the band, so it delivered the card's gain 5.8 dB low there.
+/// the in-band rms ([`ButterworthBandGaussian`]; a band reaching Nyquist keeps only its part below it, and one wholly above
+/// it is silent: no flue band comes near it). The band filter before it
+/// put 0.26 of its power inside the band, so it delivered the card's gain 5.8 dB low there.
 /// `U_j = sqrt(2 P_f / rho)` is VERGE'S jet velocity (the maximum jet velocity of his eq. 2.12) from the
 /// driving (foot) pressure `P_f`, the instantaneous blowing pressure upstream of the windway; it is NOT the card speed of
 /// the loop (the windway's bulk or centre speed): the measurement defines its gain, its floor and its band on `U_j`, and a
@@ -3017,7 +3018,7 @@ mod forced_jet_tests {
     #[test]
     fn g3_jet_noise_in_band_rms_is_gain_times_the_foot_pressure_and_so_scales_with_the_square_of_verges_jet_velocity() {
         // U_j = sqrt(2 P_f / rho): 100 Pa -> 12.9 m/s, 400 Pa -> 25.8 m/s (U_j doubles); the rms INSIDE St_h in [ST_LO, ST_HI]
-        // (581-1485 Hz, then 1162-2969 Hz) is gain * rho U_j^2 / 2 = gain * P_f, within 3 % (MB 17116). Planted negative: the
+        // (581-1485 Hz, then 1162-2969 Hz) is gain * rho U_j^2 / 2 = gain * P_f, within 3 %. Planted negative: the
         // band filter this path had before, at the same edges and scale, measures 5.8 dB low on the same estimator.
         let (h, rho, nu, dt, count) = (1.0e-3, 1.2, 1.5e-5, 1.0 / 48_000.0, 1usize << 19);
         let band = |foot_pa: f64| {

@@ -381,13 +381,23 @@ pub(super) fn run_with_gas_sources(
     let fallbacks = performance.first_order_fallbacks().map_or_else(String::new, |n| {
         format!(",\"nonlinear_first_order_fallback_steps\":{n}")
     });
+    // Only a performance with the `jet_noise` row writes this; without it the sidecar is byte for byte what it was.
+    let jet_band = performance.jet_noise_coverage().map_or_else(String::new, |c| {
+        format!(
+            "\"jet_noise_band\":{{\"open_gate_steps\":{},\"whole\":{},\"truncated\":{},\"silent\":{}}},",
+            c.open_gate(),
+            c.whole,
+            c.truncated,
+            c.silent
+        )
+    });
     let provenance = format!(
         "{{\"schema\":\"frankensim-music-render-provenance-v1\",\"fixture\":\"lip-input\",\
          \"sample_rate_hz\":{},\"samples\":{samples},\"block\":{block},\
          \"full_scale_pa\":{:e},\"clipped_samples\":{},\"peak_pa\":{:e},\"rms_pa\":{:e},\
          \"wav_blake3\":\"{wav_hash}\",\
          \"encoder\":\"fs_couple::pcm_wav (mono PCM16, never peak-normalized)\",{},\
-         \"lip_windows_0p1s\":[{}],\
+         \"lip_windows_0p1s\":[{}],{jet_band}\
          \"observation\":{{\"mechanics_sample_rate_hz\":{mechanics_rate_hz},\"output_sample_rate_hz\":{},\"ratio\":{ratio},\
          \"filter\":\"none: the baffled receiver differentiates and delays the mouth flow of every mechanical sample\",\
          \"resampled\":false,\"declared_band_hz\":{}}}{fallbacks}{gas_sources}}}",

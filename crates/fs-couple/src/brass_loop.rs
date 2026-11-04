@@ -36,7 +36,7 @@ use fs_phs::{PortHamiltonian, mass_spring_damper};
 use crate::mm_line::{
     CupState, MmBankLoad, MmLineBank, MmLineConfig, MmLineError, cup_junction_boundary, cup_port,
 };
-use crate::turbulence_noise::{JetNoiseCard, LipJetNoise};
+use crate::turbulence_noise::{JetNoiseCard, JetNoiseCoverage, LipJetNoise};
 use fs_duct::Duct;
 
 /// File-driven lip-valve performances observed at a baffled microphone.
@@ -188,16 +188,23 @@ impl BrassVoice {
     }
 
     /// Attach the opt-in lip jet noise before any sample is rendered: a series pressure source added to the lip's driving
-    /// pressure (the force on the lip and the head of the flow solve alike), of rms `gain rho U_j^2 / 2` over
-    /// `St_h = f h / U_j` in `[st_lo, st_hi]`, shut while `Re_h = Q / (w nu)` is below the card's onset or the jet flow is
-    /// not forward (see [`LipJetNoise`] for the law, what it rests on and the label). A voice without it is bit-identical
-    /// to one built before this existed; a gate that never opens adds exactly zero.
+    /// pressure (the force on the lip and the head of the flow solve alike), of rms `gain rho U_j^2 / 2` inside the band
+    /// `St_h = f h / U_j` in `[st_lo, st_hi]` (a band reaching the loop's Nyquist frequency keeps only its part below it),
+    /// shut while `Re_h = Q / (w nu)` is below the card's onset or the jet flow is not forward (see [`LipJetNoise`] for the
+    /// law, what it rests on and the label). A voice without it is bit-identical to one built before this existed; a gate
+    /// that never opens adds exactly zero.
     ///
     /// # Errors
     /// [`MmLineError::Invalid`] with the reason [`JetNoiseCard::validate`] gives.
     pub fn with_jet_noise(mut self, card: JetNoiseCard) -> Result<BrassVoice, MmLineError> {
         self.jet_noise = Some(LipJetNoise::new(card).map_err(|what| MmLineError::Invalid { what })?);
         Ok(self)
+    }
+
+    /// The lip jet noise's open-gate samples so far by how much of the band each could represent; `None` without the row.
+    #[must_use]
+    pub fn jet_noise_coverage(&self) -> Option<JetNoiseCoverage> {
+        self.jet_noise.as_ref().map(LipJetNoise::coverage)
     }
 
     /// Apply a control-rate delta (BETWEEN blocks; D17 lift for valve
