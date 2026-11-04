@@ -14,7 +14,7 @@
   "physics_missing": [
     "A resonator tube: a real marimba hangs a tuned tube under each bar. At equal modal velocity A3's f1 radiates 32 dB less than its third mode, and the A3 recording has lines at 3.00, 5.00 and 7.00 f1 that we read as the closed tube's odd modes, untested",
     "The recording's mallet: the A3 and C5 recordings use a cord mallet, and Eb6's is a roll with no mallet named. The recordings differ in mallet as well as tube, and these renders can't separate the two",
-    "The right decay: f1 falls at 226.0 dB/s against the recording's 31.1 on A3, and at 235.0 against 59.7 on C5. A tube gives the bar one more way to lose energy, so the missing tube shouldn't explain that; that is reasoning, not a test. Eb6's recording is a roll, so it gives no decay to compare",
+    "The right decay: f1 falls at 226.0 dB/s against the recording's 31.1 on A3, and at 235.0 against 59.7 on C5. The loss row comes from Chaigne and Doutaut's xylophone bar, and at A3 nearly all of f1's rate is that row's constant term. The same authors write that marimba bars have lower internal damping and stronger tube coupling than xylophone bars, and that decay times with and without the tube clearly differ on marimbas in the low range. So the row and the missing tube may both matter; neither has been tested here. Eb6's recording is a roll, so it gives no decay to compare",
     "A printed undercut: the rosewood table prints no arch length and no tuning, so we don't know that a maker would cut what the engine solved",
     "The recording's bar: Iowa states no bar wood and no bar outline",
     "A printed marimba strike point",
