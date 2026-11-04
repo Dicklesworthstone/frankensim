@@ -1,6 +1,10 @@
 use super::*;
 use crate::charts::Ray;
 use crate::conductor::{CoherentDielectricCoating, ConductorDataStatus, ConductorSource};
+use crate::gradient_index::bundle::{
+    BundleError, BundleOptions, IndexHessian, ProjectionOptions, QuadraticIndexField,
+    propagate_bundle,
+};
 use crate::gradient_index::{AffineIndexField, GradientIndexOptions, propagate};
 use crate::polarization::Stokes;
 use crate::polarization::dielectric::fresnel_dielectric_polarized;
@@ -249,4 +253,123 @@ fn admitted_extreme_contrast_retains_normal_transmission_and_finite_tir_phase() 
         .apply(Stokes::try_new(1.0, 0.0, 1.0, 0.0).unwrap());
     near(result.i, 1.0, 1.0e-15);
     near(result.degree(), 1.0, 1.0e-15);
+}
+
+#[test]
+fn high_index_quadratic_lenses_retain_exact_focusing_and_physical_path_integrals() {
+    let origin = Point3::new(0.0, 0.0, 0.0);
+    let axis = Vec3::new(0.0, 0.0, 1.0);
+    let distance = 0.6_f64;
+    for index in [4.0, 9.0] {
+        let glass = DielectricGlass::new(
+            constant_index(index),
+            BeerLambertAbsorption::try_constant(0.2).unwrap(),
+            GlassProvenance::Custom,
+        );
+        for sign in [-1.0, 1.0] {
+            let curvature = sign * 4.0 * index;
+            let field = QuadraticIndexField::try_new(
+                &glass,
+                origin,
+                Vec3::new(0.0, 0.0, 0.0),
+                IndexHessian::try_new([curvature, curvature, 0.0], [0.0; 3]).unwrap(),
+                Aabb::new(Point3::new(-0.1, -0.1, -0.1), Point3::new(0.1, 0.1, 1.0)),
+            )
+            .unwrap();
+            let ray = Ray { origin, dir: axis };
+            let options = BundleOptions {
+                integration: GradientIndexOptions {
+                    position_tolerance_m: 1.0e-12,
+                    direction_tolerance: 1.0e-12,
+                    optical_path_tolerance_m: 1.0e-12,
+                    optical_depth_tolerance: 1.0e-12,
+                    relative_tolerance: 1.0e-12,
+                    ..GradientIndexOptions::default()
+                },
+                position_derivative_tolerance_m: 1.0e-12,
+                direction_derivative_tolerance: 1.0e-12,
+            };
+            let bundle = propagate_bundle(
+                &field,
+                ray,
+                Vec3::new(1.0, 0.0, 0.0),
+                1550.0,
+                distance,
+                options,
+            )
+            .unwrap();
+            // On axis n is constant, but the exact variations obey X''=+/-4X.
+            // This compares the full differential integrator with the analytic
+            // ray-tube solution, independently of finitely separated test rays.
+            let (position, direction) = if sign < 0.0 {
+                (0.5 * (2.0 * distance).sin(), (2.0 * distance).cos())
+            } else {
+                (0.5 * (2.0 * distance).sinh(), (2.0 * distance).cosh())
+            };
+            for (column, basis) in bundle
+                .angular_derivatives()
+                .into_iter()
+                .zip(bundle.launch_basis())
+            {
+                near(column.position_m_per_rad.dot(basis), position, 3.0e-11);
+                near(column.direction_per_rad.dot(basis), direction, 3.0e-11);
+            }
+            let path = bundle.propagation();
+            near(path.ray.origin.z, distance, 2.0e-14);
+            near(path.optical_path_length_m, index * distance, 3.0e-14);
+            near(
+                path.group_optical_path_length_m.unwrap(),
+                index * distance,
+                3.0e-14,
+            );
+            near(path.optical_depth, 0.2 * distance, 2.0e-15);
+            let projection = bundle
+                .project_at_endpoint(axis, ProjectionOptions::default())
+                .unwrap();
+            near(
+                projection.area_per_solid_angle_m2(),
+                position * position,
+                4.0e-11,
+            );
+            near(
+                projection.point_source_irradiance(2.0).unwrap(),
+                2.0 * (-0.2 * distance).exp() / (position * position),
+                3.0e-10,
+            );
+            assert!(
+                propagate_bundle(
+                    &field,
+                    ray,
+                    Vec3::new(1.0, 0.0, 0.0),
+                    1100.0,
+                    distance,
+                    options,
+                )
+                .is_err()
+            );
+        }
+    }
+}
+
+#[test]
+fn quadratic_index_enclosure_still_refuses_nonphysical_or_unrepresentable_regions() {
+    let origin = Point3::new(0.0, 0.0, 0.0);
+    let bounds = Aabb::new(Point3::new(-1.0, -1.0, -1.0), Point3::new(1.0, 1.0, 1.0));
+    for (index, curvature) in [(4.0, -8.0), (1.0e153, 1.0e155)] {
+        let glass = DielectricGlass::new(
+            constant_index(index),
+            BeerLambertAbsorption::CLEAR,
+            GlassProvenance::Custom,
+        );
+        assert!(matches!(
+            QuadraticIndexField::try_new(
+                &glass,
+                origin,
+                Vec3::new(0.0, 0.0, 0.0),
+                IndexHessian::try_new([curvature, 0.0, 0.0], [0.0; 3]).unwrap(),
+                bounds,
+            ),
+            Err(BundleError::InvalidDifferential)
+        ));
+    }
 }

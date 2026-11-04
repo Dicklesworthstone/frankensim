@@ -164,6 +164,10 @@ impl<'a> QuadraticIndexField<'a> {
     /// An outward interval enclosure admits the complete box, including its
     /// interior extrema, over every supported wavelength. Conservative refusal
     /// is possible for a box whose enclosure is wider than its exact range.
+    /// The complete enclosure must satisfy the native real-index domain,
+    /// including its squared-index arithmetic headroom. High-index infrared
+    /// materials retain their original spectral support and are not restricted
+    /// to the legacy visible-glass interval.
     pub fn try_new(
         glass: &'a DielectricGlass,
         reference: Point3,
@@ -199,10 +203,8 @@ impl<'a> QuadraticIndexField<'a> {
             } else {
                 Interval::point(n) + offset
             };
-            if !range.lo().is_finite()
-                || !range.hi().is_finite()
-                || range.lo() < 1.0
-                || range.hi() > 3.0
+            if !crate::dielectric::admitted_dielectric_index(range.lo())
+                || !crate::dielectric::admitted_dielectric_index(range.hi())
             {
                 return Err(BundleError::InvalidDifferential);
             }

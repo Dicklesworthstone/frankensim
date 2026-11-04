@@ -379,7 +379,12 @@ differentiable lift). Pure Rust throughout.
   Native homogeneous and affine fields provide exact zero Hessians. A bounded
   `QuadraticIndexField` retains native spectral dispersion, group index and
   absorption, admitting its entire spatial box with interval arithmetic,
-  including interior extrema. The allocation-free augmented Dormand--Prince
+  including interior extrema. Its complete interval shares the native
+  real-index and squared-index headroom checks, so supported high-index
+  infrared optics retain quadratic focusing and defocusing without a stale
+  visible-glass cap. Analytic axial ray-tube checks retain phase/group path
+  length, absorption, footprint area and irradiance for these indices.
+  The allocation-free augmented Dormand--Prince
   state controls both angular-derivative columns alongside the central ray,
   differentiates direction normalization and retains explicit step budgets
   and cancellation. Uniform fields use a one-sample analytic fast path.
