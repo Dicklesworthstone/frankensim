@@ -4,6 +4,9 @@ on:
     branches: [main]
     paths:
       - 'crates/fs-airflow/**'
+      - 'crates/fs-convection/**'
+      - 'crates/fs-lbm/src/conjugate/buoyant.rs'
+      - 'crates/fs-lbm/tests/conjugate.rs'
       - 'crates/fs-cli/src/network_command*'
       - 'crates/fs-cli/src/network_command/**'
       - 'crates/fs-cli/Cargo.toml'
@@ -52,6 +55,11 @@ jobs:
           PYCODE
             cargo run --manifest-path tools/bootstrap/Cargo.toml -- --offline
           fi
+      - name: Test enclosure convection and coupled buoyancy
+        run: |
+          cargo test -p fs-convection --all-targets -- --test-threads=1
+          cargo test -p fs-airflow --test material_cell_convection -- --test-threads=1
+          cargo test -p fs-lbm --test conjugate natural_convection -- --test-threads=1
       - name: Test material stored cooling and radiative heat partition
         shell: bash
         run: |
