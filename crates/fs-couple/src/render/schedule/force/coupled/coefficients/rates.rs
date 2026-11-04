@@ -118,7 +118,7 @@ impl CoupledModalSystem {
         self.prepare_material_mobility(updates, damping, CoefficientEndpoint::Staged, gate)
     }
 
-    fn prepare_material_mobility(
+    pub(in crate::render::schedule::force::coupled) fn prepare_material_mobility(
         &self, updates: &[MaterialRelaxationTime], damping: &[ModalDampingRate],
         endpoint: CoefficientEndpoint, gate: &CancelGate,
     ) -> Result<PreparedMaterialRelaxationTimes, ModalCouplingError> {

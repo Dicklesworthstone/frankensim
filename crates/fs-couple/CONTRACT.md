@@ -30552,6 +30552,28 @@ rows, preserves other material/ambient drag, and changes no accepted state,
 stored energy, mode ordering or clock. Changed rates invalidate old heat and
 forcing preparations even when a free mode's diagnostic ratio is unchanged.
 
+`CoupledModalSystem::set_component_damping_rates` also exposes those continuing
+intrinsic rates to callers of the generic coupled owner. A sorted, unique list
+of `damping::ComponentDampingRate` selects original `(component, mode)` pairs
+and replaces their complete finite nonnegative rates, including drag on free
+coordinates. It uses the existing material-mobility transaction and original
+ordinary/prepared/harmonic-only construction budgets. Mechanical coordinates,
+Maxwell memory, radiation state, connection coefficients, sample clock and
+previous interval reports survive unchanged; the instantaneous change supplies
+no impulse, work or heat. Empty and unchanged batches rebuild nothing and
+allocate nothing. Invalid input, cancellation and failed operator preparation
+leave the accepted owner intact. The caller owns the complete intrinsic rate
+and its physical/temporal applicability; selective source-temperature updates
+continue to use the source-bound thermal owner.
+
+`tests/coupled_damping_update.rs` exercises underdamped, critical and overdamped
+continuation against closed-form motion, independently integrated component
+and connection heat, warm Maxwell/radiation histories against the continuous
+physical ODE (ordinary) and the existing average-velocity exchange (prepared),
+selective free-coordinate updates across components, harmonic-only response,
+and atomic refusal. These are numerical tests of the supplied law, not measured
+material-source validation.
+
 Focused regressions cover a damped free coordinate's separate component/link
 heat and harmonic force response, source-selective viscosity refresh, and
 held/ramp/harmonic broadband convolutions. These extend the existing finite
