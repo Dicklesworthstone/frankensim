@@ -92,7 +92,15 @@ impl RetreatGeometry {
     /// Use this for gas-volume/diluteness admission. `FrontGeometry::volume_m3`
     /// instead counts only the phase mass that can deposit or sublime.
     pub fn occupied_volume_m3(self, mass_kg: f64) -> Result<f64, SublimationError> {
-        let deposit = self.at_mass(mass_kg)?.volume_m3;
+        if !mass_kg.is_finite() || mass_kg < 0.0 {
+            return Err(invalid("nonnegative finite phase mass required"));
+        }
+        // Volume admission needs no radius/thickness inversion; moving owners
+        // already derived the exposed geometry once for this same endpoint.
+        let deposit = mass_kg / self.density_kg_m3;
+        if !deposit.is_finite() || mass_kg > 0.0 && deposit == 0.0 {
+            return Err(invalid("phase volume is unrepresentable"));
+        }
         let core = match self.shape {
             Shape::SphericalCoating { core_radius_m } => {
                 ((4.0 * PI / 3.0 * core_radius_m) * core_radius_m) * core_radius_m

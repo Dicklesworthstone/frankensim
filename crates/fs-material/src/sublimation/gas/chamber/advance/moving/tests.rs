@@ -200,3 +200,97 @@ fn stale_area_density_missing_shapes_and_nondilute_volume_refuse_even_at_zero_ti
     assert_eq!(empty.gas(),&gas);
     assert_eq!(empty.geometry()[&1].initial,empty.geometry()[&1].final_geometry);
 }
+
+/// G0/G3: coupled mass/energy closure and live moving-area feedback.
+#[test]
+fn deposition_on_curved_substrates_conserves_coating_mass_and_uses_growing_area() {
+    let catalog = fixture::catalog(0.0);
+    let binding = fixture::binding(0.0);
+    let chart = fixture::chart(&catalog, &binding);
+    let invert = |h| fixture::temperature(h, chart);
+    let phase = fixture::phase();
+    let gas = fixture::gas(&catalog, 350.0, 1600.0);
+    let core_radius = 0.0005;
+    let length = 0.001;
+    let pi = core::f64::consts::PI;
+    for (shape, spherical) in [
+        (RetreatGeometry::spherical_coating(917.0, core_radius).unwrap(), true),
+        (RetreatGeometry::cylindrical_coating(917.0, core_radius, length).unwrap(), false),
+    ] {
+        let rows = [surface(1, &phase, &binding, chart, 300.0, shape, &invert)];
+        let moving = advance_chamber_adaptive_moving(&rows, &geometry(shape), None,
+            &gas, &catalog, 0.01, controls(), || false).unwrap();
+        let fixed = advance_chamber_adaptive(&rows, &gas, &catalog,
+            0.01, controls(), || false).unwrap();
+        let growth = moving.geometry()[&1];
+        let final_geometry = growth.final_geometry;
+        assert!(final_geometry.mass_kg > growth.initial.mass_kg);
+        assert!(final_geometry.extent_m > growth.initial.extent_m);
+        assert!(final_geometry.area_m2 > growth.initial.area_m2);
+        assert!(growth.normal_recession_m < 0.0);
+        // Updated collision area must affect the finite-inventory trajectory,
+        // not merely decorate an endpoint produced with a frozen area.
+        assert!(final_geometry.mass_kg > fixed.endpoint().surfaces()[0].solid.mass_kg);
+        assert_eq!(moving.history().endpoint().surfaces()[0].solid.area_m2,
+            final_geometry.area_m2);
+        let h = final_geometry.extent_m;
+        let volume = if spherical {
+            4.0*pi*h*(core_radius*core_radius+core_radius*h+h*h/3.0)
+        } else {
+            pi*length*h*(2.0*core_radius+h)
+        };
+        let area = if spherical {
+            4.0*pi*(core_radius+h).powi(2)
+        } else {
+            2.0*pi*length*(core_radius+h)
+        };
+        fixture::near(final_geometry.mass_kg, 917.0*volume, 1e-20);
+        fixture::near(final_geometry.area_m2, area, 1e-19);
+        // The inert core contributes geometry, never consumable vapor mass.
+        fixture::near(gas.species_mass_kg(&binding.species).unwrap()
+            -moving.gas().species_mass_kg(&binding.species).unwrap(),
+            final_geometry.mass_kg-growth.initial.mass_kg, 1e-14);
+        fixture::near(moving.history().audit().mass_residual_kg, 0.0, 1e-14);
+        fixture::near(moving.history().audit().energy_residual_j, 0.0, 1e-7);
+        fixture::near(moving.history().audit().solid_stream_energy_residual_j, 0.0, 1e-7);
+        fixture::near(moving.history().audit().gas_stream_energy_residual_j, 0.0, 1e-7);
+    }
+}
+
+/// G0: substrate displacement enters initial and evolved approximation bounds.
+#[test]
+fn coating_substrate_displacement_is_admitted_at_both_initial_and_endpoint_mass() {
+    let catalog = fixture::catalog(0.0);
+    let binding = fixture::binding(0.0);
+    let chart = fixture::chart(&catalog, &binding);
+    let invert = |h| fixture::temperature(h, chart);
+    let phase = fixture::phase();
+    let gas = fixture::gas(&catalog, 350.0, 800.0);
+    for shape in [RetreatGeometry::spherical_coating(917.0, 0.02).unwrap(),
+        RetreatGeometry::cylindrical_coating(917.0, 0.02, 0.02).unwrap()] {
+        let rows = [surface(1, &phase, &binding, chart, 300.0, shape, &invert)];
+        let initial_volume = shape.occupied_volume_m3(rows[0].solid.mass_kg).unwrap();
+        // The seed by itself is dilute, but its substrate is not within this cap.
+        assert!(shape.at_mass(rows[0].solid.mass_kg).unwrap().volume_m3
+            < gas.volume_m3()*geometry(shape).maximum_solid_volume_fraction);
+        assert!(advance_chamber_adaptive_moving(&rows, &geometry(shape), None,
+            &gas, &catalog, 0.0, controls(), || false).is_err());
+        let admitted = MovingChamberGeometry {
+            maximum_solid_volume_fraction: 0.01, ..geometry(shape)
+        };
+        let accepted = advance_chamber_adaptive_moving(&rows, &admitted, None,
+            &gas, &catalog, 0.0001, controls(), || false).unwrap();
+        let final_mass = accepted.geometry()[&1].final_geometry.mass_kg;
+        let final_volume = shape.occupied_volume_m3(final_mass).unwrap();
+        assert!(final_volume > initial_volume);
+        let limited = MovingChamberGeometry {
+            maximum_solid_volume_fraction: 0.5*(initial_volume+final_volume)/gas.volume_m3(),
+            ..admitted
+        };
+        limited.admit_interval(&rows, &gas, &mut || false).unwrap();
+        // Check the actual accepted molecular endpoint against the geometric
+        // displacement bound, including the same inert core at both ends.
+        let mut endpoint = accepted.history().endpoint().clone();
+        assert!(limited.refresh_endpoint(&rows, &mut endpoint, &mut || false).is_err());
+    }
+}

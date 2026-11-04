@@ -6,13 +6,17 @@
 //! owners, shared inventory allowance and error controller remain unchanged.
 //!
 //! This is explicitly a dilute-body approximation: gas volume is held fixed,
-//! and total solid volume must remain below a declared fraction of it, at most
-//! 1%. This bounds geometric displacement relative to gas volume, NOT omitted
+//! and total occupied solid volume, including inert coating substrates, must
+//! remain below a declared fraction of it, at most 1%. This bounds geometric
+//! displacement relative to gas volume, NOT omitted
 //! pressure-work energy or total physical error. No gas-volume work, surface
 //! free energy, Kelvin pressure, mesh/contact update or new phase is inferred.
 //! Original laws must describe constant-density, uniform, shape-preserving
 //! bodies. Complete finite-energy extinction is still refused by the molecular
 //! kernel; the separate thermostatted front has an explicit extinction event.
+//! A coating core supplies geometry and displacement only. The caloric law
+//! describes the deposit; substrate heat storage and conduction through its
+//! interface require an explicit thermal coupling and are not inferred here.
 
 use super::{
     GasChamberAdvanceCandidate, GasChamberAdvanceError, GasChamberAdvanceSolve,
@@ -26,7 +30,8 @@ use std::collections::BTreeMap;
 #[derive(Clone, Debug, PartialEq)]
 pub struct MovingChamberGeometry {
     pub surfaces: BTreeMap<u64, RetreatGeometry>,
-    /// Sum of every selected solid volume / fixed gas volume, in (0,0.01].
+    /// Sum of selected occupied volumes, including inert coating substrates,
+    /// divided by fixed gas volume, in (0,0.01].
     /// This is an approximation-domain choice, not measured validation.
     pub maximum_solid_volume_fraction: f64,
     /// Absolute radius/thickness error scale [m], added to the same relative
@@ -75,7 +80,7 @@ impl MovingChamberGeometry {
     fn volume_admission(&self, volume: f64, gas: &ClosedGasParcel) -> Result<(), GasSurfaceError> {
         let fraction = volume / gas.volume_m3();
         if !fraction.is_finite() || fraction < 0.0 || fraction > self.maximum_solid_volume_fraction {
-            Err(GasSurfaceError::Invalid("phase volume exceeded declared fixed-gas-volume approximation"))
+            Err(GasSurfaceError::Invalid("occupied phase/substrate volume exceeded declared fixed-gas-volume approximation"))
         } else { Ok(()) }
     }
     pub(super) fn admit_interval(&self, surfaces: &[GasChamberSurface<'_>], gas: &ClosedGasParcel,
@@ -93,7 +98,7 @@ impl MovingChamberGeometry {
             }
             let t = (surface.temperature_from_enthalpy)(surface.solid.specific_enthalpy_j_kg)?;
             geometry.admit_density(surface.law.properties(t)?.solid_density_kg_m3)?;
-            volumes.add(physical.volume_m3)?;
+            volumes.add(geometry.occupied_volume_m3(surface.solid.mass_kg)?)?;
         }
         self.volume_admission(volumes.value()?, gas)
     }
@@ -116,7 +121,7 @@ impl MovingChamberGeometry {
             }
             row.solid.area_m2 = physical.area_m2;
             row.recession_m = geometry.recession_m(original.solid.mass_kg, row.solid.mass_kg)?;
-            volumes.add(physical.volume_m3)?;
+            volumes.add(geometry.occupied_volume_m3(row.solid.mass_kg)?)?;
         }
         self.volume_admission(volumes.value()?, endpoint.gas())
     }
