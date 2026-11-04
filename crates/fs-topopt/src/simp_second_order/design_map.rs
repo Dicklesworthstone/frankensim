@@ -14,6 +14,10 @@ pub(super) struct DesignMap<'a> {
     pub(super) volume_projected: Vec<f64>,
     first: Vec<f64>,
     second: Vec<f64>,
+    // The mechanical realization's occupancy slope; robust inventory uses a
+    // different projection. Retain the original arithmetic instead of dividing
+    // a tiny SIMP slope to reconstruct it in frequency derivatives.
+    stiffness_projection_first: Vec<f64>,
     projection_first: Vec<f64>,
     projection_second: Vec<f64>,
 }
@@ -94,6 +98,7 @@ impl<'a> DesignMap<'a> {
         let mut moduli = Vec::with_capacity(n);
         let mut first = Vec::with_capacity(n);
         let mut second = Vec::with_capacity(n);
+        let mut stiffness_projection_first = Vec::with_capacity(n);
         let mut projection_first = Vec::with_capacity(n);
         let mut projection_second = Vec::with_capacity(n);
         for (e, &rt) in filtered.iter().enumerate() {
@@ -114,6 +119,7 @@ impl<'a> DesignMap<'a> {
                 "SIMP modulus",
             )?);
             let dh = finite(heaviside_derivative(rt, p.beta, p.eta), "projection slope")?;
+            stiffness_projection_first.push(dh);
             let ddh = finite(
                 heaviside_second_derivative(rt, p.beta, p.eta),
                 "projection curvature",
@@ -158,6 +164,7 @@ impl<'a> DesignMap<'a> {
                 volume_projected,
                 first,
                 second,
+                stiffness_projection_first,
                 projection_first,
                 projection_second,
             },
@@ -178,6 +185,32 @@ impl<'a> DesignMap<'a> {
                 control.checkpoint(stage)?;
             }
             local.push(finite(self.first[e] * gradient[e], quantity)?);
+        }
+        Ok(self.filter.try_apply_transpose(&local, control)?)
+    }
+
+    /// Pull both stiffness and actual mechanical occupancy through ONE
+    /// transpose filter. Robust inventory dilation is not an inertial field.
+    pub(super) fn pullback_stiffness_and_mass_gradient(
+        &self,
+        modulus: &[f64],
+        mass_fraction: &[f64],
+        control: &mut SolveControl<'_>,
+    ) -> Result<Vec<f64>, ComplianceError> {
+        if modulus.len() != self.first.len() || mass_fraction.len() != self.first.len() {
+            return Err(ComplianceError::InvalidInput(
+                "modal design gradient shape mismatch",
+            ));
+        }
+        let mut local = Vec::with_capacity(self.first.len());
+        for e in 0..self.first.len() {
+            if e % 256 == 0 {
+                control.checkpoint("simp-thermal-frequency-pullback")?;
+            }
+            local.push(finite(
+                self.first[e] * modulus[e] + self.stiffness_projection_first[e] * mass_fraction[e],
+                "SIMP thermal frequency gradient",
+            )?);
         }
         Ok(self.filter.try_apply_transpose(&local, control)?)
     }

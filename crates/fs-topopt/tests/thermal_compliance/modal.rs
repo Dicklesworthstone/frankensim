@@ -1,5 +1,8 @@
 //! G1/G3: reference-mass modes, signed thermal prestress and the complete adjoint.
 
+#[path = "modal/simp.rs"]
+mod simp;
+
 use super::*;
 use fs_spectral::generalized::GeneralizedError;
 use fs_topopt::elasticity::second_order::thermal::modal::{
