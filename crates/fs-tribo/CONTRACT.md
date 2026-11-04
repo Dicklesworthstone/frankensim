@@ -1015,6 +1015,26 @@ publication. Zero `alpha` preserves the original arithmetic, and uniform or
 per-channel viscosity refreshes continue accepted liquid content without reset.
 No extra nonlinear solve or iteration buffer is introduced.
 
+`CavitatingFilm::advance_with_liquid` continues the ORIGINAL accepted inventory
+through an explicit endpoint material change. The same active-set equation now
+balances `rho_next * (V_next*theta_next + dt*div Q_next)` against
+`rho_old * V_old*theta_old`. Original mass is reconstructed with the old density,
+never by reinterpreting retained volume at the new one. Uniform endpoint density
+also applies to reservoir inflow. The original geometric graph and common Barus
+coefficient stay fixed; new per-channel viscosities are referenced to the new
+reservoir pressure, and the rupture-normalized transform is rebuilt at the new
+`p_c`. Heating can increase filling or expel liquid through existing passages;
+cooling can reduce filling or draw liquid in. No inventory is reinitialized.
+
+The returned `CavitationContinuation` contains the new native owner and matching
+candidate state for joint acceptance. Changed liquid data receive a distinct
+state identity; neither epoch can reinterpret the other's accepted mass.
+Viscosity-only changes retain the established compatible state identity, and
+unchanged inputs preserve the original trajectory. Invalid data, an unresolved
+sealed full-liquid expansion or late cancellation publish nothing. This is a
+first-order endpoint constitutive split with caller-owned temperature and time
+refinement, not a caloric, latent-heat or thermal-advection solver.
+
 Rupture, starvation and reformation change retained liquid content, preserving
 mass under wall motion and refill. Each candidate reports cell and global liquid
 mass residuals, signed boundary mass, absolute pressures, face fluxes and the
@@ -1028,8 +1048,9 @@ accepted state unchanged. Geometry remains capped at 64 cells, 256 channels and
 from reinterpreting retained content as a different mass; immutable model clones
 can continue the same state. Iterations allocate no memory.
 
-This is an isothermal incompressible-liquid, negligible-void-mass lubrication
-model. Content is not vapor mass; missing liquid volume is not a latent-heat
+This is a pressure-independent liquid-density, negligible-void-mass lubrication
+model, with explicit endpoint source changes available. Content is not vapor
+mass; missing liquid volume is not a latent-heat
 receipt. Endpoint forces do not certify time-integrated coupled work. Finite
 vapor density, bubble inertia, dissolved gas, EHL, thermal evolution and sealed
 full-liquid compression require additional owners. Focused G0/G1/G3/G5 tests
@@ -1039,6 +1060,10 @@ transactional refusals and deterministic replay. Barus regressions additionally
 compare the native full-film solution, reconstruct heterogeneous face fluxes and
 cell mass, exercise rupture/refill/reformation and viscosity continuation, and
 check absolute-pressure shifts, the zero-alpha history, and atomic refusals.
+Six endpoint-material regressions independently check drained thermal expansion,
+sealed cavity heating/cooling, shared-face mass at changing density, refreshed
+Barus refill, unchanged-history identity and transactional refusals. The original
+before-mass receipt remains exactly the preceding accepted after-mass receipt.
 No experimental accuracy or cross-ISA execution claim follows from these tests.
 
 ## Error model

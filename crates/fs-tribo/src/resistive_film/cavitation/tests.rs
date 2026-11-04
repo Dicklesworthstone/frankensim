@@ -1,6 +1,8 @@
 use super::*;
 use crate::resistive_film::{FilmCell, FilmChannel, FilmLimits, GapPort};
 
+mod thermal;
+
 fn gap(reference: f64, closure: f64) -> GapPort {
     GapPort {
         reference_m: reference,

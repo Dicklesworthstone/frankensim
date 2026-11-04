@@ -15,11 +15,14 @@
 //! is used. This remains the classical Reynolds approximation with negligible
 //! cross-gap pressure variation, not a full high-pressure EHL model.
 //!
-//! This is the isothermal, incompressible-liquid, negligible-void-mass thin-film
-//! approximation. `theta` is retained lubricant content, not vapor mass. Bubble
-//! inertia, finite vapor density, latent heat, dissolved-gas transport, elastic
-//! deformation and thermal feedback need their own owners. In particular, a
-//! fully filled sealed pocket cannot be compressed by this model.
+//! Each step uses a spatially uniform, pressure-independent liquid density and
+//! negligible void mass. An explicit endpoint material refresh can change
+//! density, viscosity and rupture pressure while conserving the OLD retained
+//! mass; temperature and energy remain with the caller's original thermal
+//! owner. `theta` is retained lubricant content, not vapor mass. Bubble inertia,
+//! finite vapor density, latent heat, dissolved-gas transport and elastic
+//! deformation need their own owners. A fully filled sealed pocket cannot be
+//! compressed, including by prescribed thermal expansion.
 //!
 //! Reference: H. G. Elrod, "A Cavitation Algorithm", Journal of Lubrication
 //! Technology 103 (1981), 350--354, DOI 10.1115/1.3251669. This implementation
@@ -32,10 +35,10 @@ use super::{FilmError, MAX_CELLS, MAX_CHANNELS, MAX_PORTS, ResistiveFilm, dot, f
 use fs_math::det;
 use std::sync::Arc;
 
-/// Explicit frozen liquid and reservoir data, all in SI units.
+/// Explicit liquid and reservoir data, frozen within each step, in SI units.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CavitationLiquid {
-    /// Constant liquid density [kg m^-3]. Void mass is neglected explicitly.
+    /// Uniform, pressure-independent density [kg m^-3]. Void mass is neglected.
     pub density_kg_m3: f64,
     /// Absolute rupture/reformation pressure [Pa], supplied by a material law.
     pub cavitation_pressure_pa: f64,
@@ -126,6 +129,17 @@ pub struct CavitationStep {
     pub generalized_force: Vec<f64>,
     /// Direct liquid-mass accounting for this candidate.
     pub report: CavitationReport,
+}
+
+/// A conservative material transition and its matching candidate inventory.
+/// The caller must accept both together after its complete thermal/mechanical
+/// proposal succeeds. No accepted owner is changed while constructing this pair.
+#[derive(Clone, Debug)]
+pub struct CavitationContinuation {
+    /// Refreshed native coefficients, sharing the original geometric graph.
+    pub film: CavitatingFilm,
+    /// Candidate state and fluxes computed from the original accepted mass.
+    pub step: CavitationStep,
 }
 
 /// Cavitating liquid storage and transport on the existing geometric owner.
@@ -399,7 +413,55 @@ impl CavitatingFilm {
         dt_s: f64,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<CavitationStep, FilmError> {
-        self.advance_kernel(state, q_next, entrainment_m3_s, dt_s, &mut cancelled)
+        self.advance_kernel(self, state, q_next, entrainment_m3_s, dt_s, &mut cancelled)
+    }
+
+    /// Advance the ORIGINAL inventory using explicit endpoint liquid data.
+    ///
+    /// The backward-Euler balance is
+    /// `rho_next * (V_next * theta_next + dt * div Q_next) = rho_old * V_old * theta_old`.
+    /// Changing density therefore changes filling or expels/admits liquid through
+    /// the existing channels; it never reinterprets the old volume as new mass.
+    /// The original accepted pressure is validated against its OLD liquid, then
+    /// the same active-set kernel solves complementarity at the NEW rupture
+    /// pressure. No old state is reset or clamped.
+    ///
+    /// Viscosities follow original channel order and are referenced to the NEW
+    /// absolute reservoir pressure. The original common Barus coefficient and
+    /// geometry remain fixed; the rupture-normalized pressure transform is
+    /// rebuilt consistently. Uniform density applies to both the film and
+    /// incoming reservoir liquid within this step.
+    ///
+    /// This is an endpoint constitutive split for prescribed temperature/data,
+    /// not a thermal integrator, phase-transfer or latent-heat model. The caller
+    /// owns source validity, the temperature proposal and temporal refinement.
+    /// Return values publish together; failure or cancellation changes neither
+    /// the original coefficients nor the accepted liquid state. A changed liquid
+    /// receives a distinct state identity so neither epoch can reinterpret the
+    /// other's inventory. A viscosity-only refresh retains state compatibility.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_liquid(
+        &self,
+        state: &CavitatingFilmState,
+        q_next: &[f64],
+        entrainment_m3_s: &[f64],
+        dt_s: f64,
+        liquid: CavitationLiquid,
+        channel_viscosities_pa_s: &[f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<CavitationContinuation, FilmError> {
+        poll(&mut cancelled)?;
+        self.validate_state(state)?;
+        let geometry = self
+            .geometry
+            .with_channel_viscosities(channel_viscosities_pa_s)?;
+        let mut film = Self::new(geometry, liquid, self.solve)?;
+        if liquid == self.liquid {
+            film.owner = Arc::clone(&self.owner);
+        }
+        let step =
+            film.advance_kernel(self, state, q_next, entrainment_m3_s, dt_s, &mut cancelled)?;
+        Ok(CavitationContinuation { film, step })
     }
 
     // Keep one numerical kernel for all caller cancellation closures. Dynamic
@@ -407,6 +469,7 @@ impl CavitatingFilm {
     #[allow(clippy::too_many_lines, clippy::large_stack_arrays)]
     fn advance_kernel(
         &self,
+        previous: &Self,
         state: &CavitatingFilmState,
         q_next: &[f64],
         entrainment_m3_s: &[f64],
@@ -414,7 +477,7 @@ impl CavitatingFilm {
         cancelled: &mut dyn FnMut() -> bool,
     ) -> Result<CavitationStep, FilmError> {
         poll(cancelled)?;
-        self.validate_state(state)?;
+        previous.validate_state(state)?;
         self.geometry.validate_configuration(q_next)?;
         if !dt_s.is_finite()
             || dt_s <= 0.0
@@ -431,6 +494,8 @@ impl CavitatingFilm {
         let mut old_liquid_volume = [0.0; MAX_CELLS];
         let mut conductance = [0.0; MAX_CHANNELS];
         let mut full = [false; MAX_CELLS];
+        let previous_density = previous.liquid.density_kg_m3;
+        let density = self.liquid.density_kg_m3;
         for (i, cell) in self.geometry.cells.iter().enumerate() {
             let h0 = cell.gap.reference_m - dot(&cell.gap.closure, state.configuration());
             let h1 = cell.gap.reference_m - dot(&cell.gap.closure, q_next);
@@ -440,10 +505,20 @@ impl CavitatingFilm {
                 return fail("unrepresentable cavitating-film volume");
             }
             b[i * n + i] = volume[i];
-            rhs[i] = old_liquid_volume[i];
-            full[i] = old_liquid_volume[i] > volume[i]
-                || (old_liquid_volume[i] == volume[i]
-                    && state.pressure_pa[i] > self.liquid.cavitation_pressure_pa);
+            // Normalize the OLD mass by the endpoint density only for the
+            // solve. Keep its original volume for independent mass accounting.
+            // Equal density preserves the established arithmetic bit for bit.
+            rhs[i] = if previous_density == density {
+                old_liquid_volume[i]
+            } else {
+                (previous_density * old_liquid_volume[i]) / density
+            };
+            if !rhs[i].is_finite() || (old_liquid_volume[i] > 0.0 && rhs[i] == 0.0) {
+                return fail("unrepresentable cavitating-film material mass transfer");
+            }
+            full[i] = rhs[i] > volume[i]
+                || (rhs[i] == volume[i]
+                    && state.pressure_pa[i] > previous.liquid.cavitation_pressure_pa);
         }
         let boundary_potential = self.pressure_law.ambient_potential;
         for (k, (edge, factor)) in self
@@ -555,6 +630,7 @@ impl CavitatingFilm {
                 entrainment_m3_s,
                 dt_s,
                 iteration,
+                previous_density,
                 &volume,
                 &old_liquid_volume,
                 &conductance,
@@ -573,6 +649,7 @@ impl CavitatingFilm {
         entrainment: &[f64],
         dt: f64,
         iterations: usize,
+        previous_density: f64,
         volume: &[f64; MAX_CELLS],
         old_volume: &[f64; MAX_CELLS],
         conductance: &[f64; MAX_CHANNELS],
@@ -582,6 +659,7 @@ impl CavitatingFilm {
     ) -> Result<CavitationStep, FilmError> {
         let n = self.cell_count();
         let rho = self.liquid.density_kg_m3;
+        let density_changed = previous_density != rho;
         let mut residual = [0.0; MAX_CELLS];
         let mut scales = [0.0; MAX_CELLS];
         let mut forces = [0.0; MAX_PORTS];
@@ -591,8 +669,15 @@ impl CavitatingFilm {
         let mut before = 0.0;
         let mut after = 0.0;
         for i in 0..n {
-            residual[i] = volume[i] * theta[i] - old_volume[i];
-            scales[i] = (volume[i] * theta[i]).abs().max(old_volume[i].abs());
+            if density_changed {
+                let old_mass = previous_density * old_volume[i];
+                let new_mass = rho * (volume[i] * theta[i]);
+                residual[i] = new_mass - old_mass;
+                scales[i] = new_mass.abs().max(old_mass.abs());
+            } else {
+                residual[i] = volume[i] * theta[i] - old_volume[i];
+                scales[i] = (volume[i] * theta[i]).abs().max(old_volume[i].abs());
+            }
             before += old_volume[i];
             after += volume[i] * theta[i];
         }
@@ -623,11 +708,16 @@ impl CavitatingFilm {
                 + entrainment[k] * donor;
             flows[k] = flux;
             let amount = dt * flux;
-            residual[edge.from] += amount;
-            scales[edge.from] += amount.abs();
+            let balance_amount = if density_changed {
+                rho * amount
+            } else {
+                amount
+            };
+            residual[edge.from] += balance_amount;
+            scales[edge.from] += balance_amount.abs();
             if let Some(j) = edge.to {
-                residual[j] -= amount;
-                scales[j] += amount.abs();
+                residual[j] -= balance_amount;
+                scales[j] += balance_amount.abs();
             } else {
                 boundary += amount;
                 boundary_scale += amount.abs();
@@ -637,10 +727,11 @@ impl CavitatingFilm {
         // pressure excess. Force, domain checks and retained pressure use p.
         let excess = potential;
         let mut max_residual = 0.0_f64;
+        let residual_scale = if density_changed { 1.0 } else { rho };
         for i in 0..n {
-            let r = rho * residual[i];
+            let r = residual_scale * residual[i];
             let tolerance = self.solve.absolute_mass_tolerance_kg
-                + self.solve.relative_mass_tolerance * rho * scales[i];
+                + self.solve.relative_mass_tolerance * residual_scale * scales[i];
             if !r.is_finite() || !tolerance.is_finite() || r.abs() > tolerance {
                 return fail("cavitating-film cell liquid-mass balance exceeds tolerance");
             }
@@ -654,11 +745,28 @@ impl CavitatingFilm {
                 forces[j] += self.geometry.cells[i].area_m2 * gauge * weight;
             }
         }
-        let mass_residual = rho * (after - before + boundary);
-        let tolerance = self.solve.absolute_mass_tolerance_kg
-            + self.solve.relative_mass_tolerance
-                * rho
-                * (before.abs() + after.abs() + boundary_scale);
+        // Rebuild each accepted total in its OWN density epoch. In particular,
+        // before uses exactly the previous step's mass arithmetic, not a round
+        // trip through the normalized right-hand side of the new solve.
+        let before_mass = previous_density * before;
+        let after_mass = rho * after;
+        let boundary_mass = rho * boundary;
+        let (mass_residual, tolerance) = if density_changed {
+            (
+                after_mass - before_mass + boundary_mass,
+                self.solve.absolute_mass_tolerance_kg
+                    + self.solve.relative_mass_tolerance
+                        * (before_mass.abs() + after_mass.abs() + rho * boundary_scale),
+            )
+        } else {
+            (
+                rho * (after - before + boundary),
+                self.solve.absolute_mass_tolerance_kg
+                    + self.solve.relative_mass_tolerance
+                        * rho
+                        * (before.abs() + after.abs() + boundary_scale),
+            )
+        };
         if !mass_residual.is_finite()
             || !tolerance.is_finite()
             || mass_residual.abs() > tolerance
@@ -666,7 +774,7 @@ impl CavitatingFilm {
                 .iter()
                 .any(|x| !x.is_finite())
             || flows[..self.channel_count()].iter().any(|x| !x.is_finite())
-            || !((before + after + boundary.abs()) * rho).is_finite()
+            || !(before_mass + after_mass + boundary_mass.abs()).is_finite()
         {
             return fail("cavitating-film global liquid-mass or force closure failed");
         }
@@ -682,9 +790,9 @@ impl CavitatingFilm {
         };
         self.validate_state(&candidate)?;
         let report = CavitationReport {
-            liquid_mass_before_kg: rho * before,
-            liquid_mass_after_kg: rho * after,
-            boundary_mass_out_kg: rho * boundary,
+            liquid_mass_before_kg: before_mass,
+            liquid_mass_after_kg: after_mass,
+            boundary_mass_out_kg: boundary_mass,
             mass_residual_kg: mass_residual,
             maximum_cell_mass_residual_kg: max_residual,
             minimum_liquid_fraction: theta[..n].iter().copied().fold(1.0, f64::min),
