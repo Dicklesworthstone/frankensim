@@ -13,8 +13,9 @@ use super::*;
 /// Exactly one opposed pair of Pressure/Outlet planes is required; remaining
 /// planes are walls/symmetry. At each mouth the configured pressure denotes
 /// normal mechanical traction, while the tangential velocity trace is zero.
-/// Pressure work is independently -sum((p_res-p_ref)*Q_out), never a residual
-/// converted to heat. This shares native stress and physical dissipation with
+/// Pressure work is independently -sum((p_res-p_ref)*Q_out) over the original
+/// faces, retaining any spatial pressure profile, never a residual converted
+/// to heat. This shares native stress and physical dissipation with
 /// the closed Stokes owner; it has no transient/open kinetic-energy claim.
 pub fn creeping_flow_with_pressure_work_heat(
     domain: &VoxelDomain,
@@ -87,6 +88,8 @@ pub(in crate::conjugate) fn admit_pressure_work_heating(
     let mut closed = config.clone();
     closed.faces[2 * axis] = FvBoundary::Symmetry;
     closed.faces[2 * axis + 1] = FvBoundary::Symmetry;
+    closed.pressure_profiles_pa[2 * axis] = None;
+    closed.pressure_profiles_pa[2 * axis + 1] = None;
     closed.backflow_tangential_velocity_m_s[2 * axis] = None;
     closed.backflow_tangential_velocity_m_s[2 * axis + 1] = None;
     admit_heating(domain, &closed, controls)?;
@@ -206,15 +209,16 @@ impl Solver<'_> {
         };
         for side in 0..2 {
             let face = 2 * a + side;
-            let pressure = self.faces[face]
-                .prescribed_pressure()
-                .expect("admitted pressure mouth")
-                - self.pressure_reference_pa;
             for c in 0..self.domain.cell_count() {
                 if c % 256 == 0 {
                     poll(gate)?;
                 }
                 if self.domain.is_fluid(c) && self.domain.neighbor(c, face).is_none() {
+                    let pressure = self
+                        .config
+                        .pressure_at(face, self.n, self.domain.coords(c))
+                        .expect("admitted pressure mouth")
+                        - self.pressure_reference_pa;
                     power[face] = finite_value(
                         "pressure_heat.reservoir_work",
                         power[face] - pressure * field.outward(self.domain, c, face),

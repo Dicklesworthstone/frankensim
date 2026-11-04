@@ -37,6 +37,8 @@
 //! backflow temperature. This advected value is not a viscous velocity trace.
 //! Pressures share one declared gauge (the removed reference hydrostatic
 //! pressure for Boussinesq forcing), not an absolute thermodynamic EOS.
+//! Optional pressure profiles retain each original opening face's value;
+//! a hydrostatic or other spatial loading is never averaged over the plane.
 //!
 //! # Fans and resistances
 //!
@@ -404,6 +406,18 @@ const PRESSURE_POLISH_PASSES: usize = 4;
 pub struct SimpleConfig {
     /// One rule per domain face in [`Face3::ALL`] order.
     pub faces: [FvBoundary; 6],
+    /// Optional static pressure at every original face of each Pressure/Outlet
+    /// plane [Pa], replacing that plane's uniform pressure. Entries use the
+    /// same gauge as `faces`; None retains the original uniform boundary.
+    /// X planes index `y + ny*z`, Y planes `x + nx*z`, Z planes `x + nx*y`.
+    /// Each vector covers the complete plane, including inactive solid faces;
+    /// only fluid-exposed values load momentum. Every value must be finite.
+    ///
+    /// A profile is fixed during a solve and follows the native static-pressure
+    /// opening (or the explicitly selected traction-mouth model). It does not
+    /// prescribe velocity, alter material density, interpolate a continuous
+    /// exterior field or supply a pressure-dependent thermodynamic EOS.
+    pub pressure_profiles_pa: [Option<Vec<f64>>; 6],
     /// External velocity carried by incoming fluid at each Pressure/Outlet
     /// face, in world axes and m/s. None retains zero incoming tangential
     /// momentum. Some requires a finite vector with zero normal component;
@@ -464,9 +478,70 @@ impl SimpleConfig {
         } else {
             self.faces
                 .iter()
-                .find_map(|face| face.prescribed_pressure())
+                .enumerate()
+                .find_map(|(side, face)| {
+                    face.prescribed_pressure().map(|uniform| {
+                        self.pressure_profiles_pa[side]
+                            .as_ref()
+                            .and_then(|profile| profile.first().copied())
+                            .unwrap_or(uniform)
+                    })
+                })
                 .unwrap_or(0.0)
         }
+    }
+
+    // Use the original Cartesian face indexing, shared by momentum loading
+    // and pressure-work quadrature. The normal coordinate is irrelevant.
+    fn pressure_at(&self, side: usize, n: [usize; 3], at: [usize; 3]) -> Option<f64> {
+        self.faces[side].prescribed_pressure().map(|uniform| {
+            self.pressure_profiles_pa[side]
+                .as_ref()
+                .map_or(uniform, |profile| {
+                    let index = match side / 2 {
+                        0 => at[1] + n[1] * at[2],
+                        1 => at[0] + n[0] * at[2],
+                        _ => at[0] + n[0] * at[1],
+                    };
+                    profile[index]
+                })
+        })
+    }
+
+    fn admit_pressure_data(&self, domain: &VoxelDomain, reference: f64) -> Result<(), ChtError> {
+        let n = domain.dims();
+        for (side, face) in self.faces.iter().enumerate() {
+            if let Some(profile) = &self.pressure_profiles_pa[side] {
+                if face.prescribed_pressure().is_none() {
+                    return Err(ChtError::InvalidInput {
+                        field: "simple.pressure_profiles_pa",
+                        reason: format!("profile on face {side} requires a pressure opening"),
+                    });
+                }
+                let axis = side / 2;
+                if profile.len() != n[(axis + 1) % 3] * n[(axis + 2) % 3] {
+                    return Err(ChtError::InvalidInput {
+                        field: "simple.pressure_profiles_pa",
+                        reason: format!(
+                            "profile on face {side} must cover its original boundary plane"
+                        ),
+                    });
+                }
+                for &pressure in profile {
+                    finite("simple.pressure_profiles_pa", pressure)?;
+                    finite(
+                        "simple.pressure_difference_pa",
+                        2.0 * (pressure - reference),
+                    )?;
+                }
+            } else if let Some(pressure) = face.prescribed_pressure() {
+                finite(
+                    "simple.pressure_difference_pa",
+                    2.0 * (pressure - reference),
+                )?;
+            }
+        }
+        Ok(())
     }
 
     /// Defaults with the given face rules.
@@ -474,6 +549,7 @@ impl SimpleConfig {
     pub const fn new(faces: [FvBoundary; 6]) -> Self {
         Self {
             faces,
+            pressure_profiles_pa: [None, None, None, None, None, None],
             backflow_tangential_velocity_m_s: [None; 6],
             scheme: ConvectionScheme::PowerLaw,
             momentum_reconstruction: MomentumReconstruction::DonorCell,
@@ -1537,14 +1613,8 @@ impl<'a> Solver<'a> {
             "simple.momentum_pressure_reference_pa",
             state.pressure_reference_pa,
         )?;
-        for face in self.faces {
-            if let Some(pressure) = face.prescribed_pressure() {
-                finite(
-                    "simple.pressure_difference_pa",
-                    2.0 * (pressure - state.pressure_reference_pa),
-                )?;
-            }
-        }
+        self.config
+            .admit_pressure_data(self.domain, state.pressure_reference_pa)?;
         // Opening a formerly constrained face retains its exact zero speed.
         // Closing one is admissible only if it already satisfies the new
         // constraint. Never clip a live velocity and silently delete its
@@ -2047,8 +2117,9 @@ impl<'a> Solver<'a> {
             let drop = match comp.kind[index] {
                 Kind::Outlet(_) => {
                     let plus = f[a] != 0;
-                    let boundary = self.faces[2 * a + usize::from(plus)]
-                        .prescribed_pressure()
+                    let boundary = self
+                        .config
+                        .pressure_at(2 * a + usize::from(plus), self.n, f)
                         .expect("pressure-opening topology");
                     let pressure = boundary - self.pressure_reference_pa;
                     if pressure == 0.0 {
@@ -2422,15 +2493,7 @@ pub(super) fn admit(
             FvBoundary::Symmetry | FvBoundary::Outlet => {}
         }
     }
-    let reference = config.pressure_reference_pa();
-    for face in config.faces {
-        if let Some(pressure) = face.prescribed_pressure() {
-            finite(
-                "simple.pressure_difference_pa",
-                2.0 * (pressure - reference),
-            )?;
-        }
-    }
+    config.admit_pressure_data(domain, config.pressure_reference_pa())?;
     if let Some(fan) = config.fan
         && !matches!(config.faces[fan.face as usize], FvBoundary::Inlet { .. })
     {

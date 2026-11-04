@@ -536,3 +536,230 @@ fn pressure_opening_native_momentum_restart_retains_its_numerical_datum() {
     assert_eq!(restored.pressure_reference_pa, solver.pressure_reference_pa);
     assert_eq!(restored.vel, solver.vel);
 }
+
+fn plane_profile(
+    domain: &VoxelDomain,
+    side: usize,
+    pressure: impl Fn([f64; 3]) -> f64,
+) -> Vec<f64> {
+    let axis = side / 2;
+    let n = domain.dims();
+    let plane = if side % 2 == 0 { 0 } else { n[axis] - 1 };
+    let boundary = if side % 2 == 0 {
+        0.0
+    } else {
+        (0..n[axis]).map(|i| domain.width(axis, i)).sum()
+    };
+    (0..domain.cell_count())
+        .filter_map(|cell| {
+            let at = domain.coords(cell);
+            (at[axis] == plane).then(|| {
+                let mut point = domain.center(at[0], at[1], at[2]);
+                point[axis] = boundary;
+                pressure(point)
+            })
+        })
+        .collect()
+}
+
+#[test]
+fn spatial_pressure_uniform_profiles_retain_native_results_on_every_axis() {
+    let gate = CancelGate::new();
+    for axis in 0..3 {
+        for (inlet, outlet) in [(0.5, 0.0), (0.0, 0.5)] {
+            let (domain, mut config) = channel(4, axis, inlet, outlet);
+            let uniform = simple_flow(&domain, &fluid(), &config, &gate).unwrap();
+            config.pressure_profiles_pa[2 * axis] =
+                Some(plane_profile(&domain, 2 * axis, |_| inlet));
+            config.pressure_profiles_pa[2 * axis + 1] =
+                Some(plane_profile(&domain, 2 * axis + 1, |_| outlet));
+            // Profiles replace the scalar pressure, including the datum.
+            config.faces[2 * axis] = FvBoundary::Pressure { pressure_pa: -99.0 };
+            config.faces[2 * axis + 1] = FvBoundary::Outlet;
+            let resolved = simple_flow(&domain, &fluid(), &config, &gate).unwrap();
+            assert_eq!(resolved, uniform);
+        }
+    }
+}
+
+#[test]
+fn spatial_pressure_balances_hydrostatic_force_without_changing_channel_flow() {
+    let gate = CancelGate::new();
+    let fluid = fluid();
+    for axis in 0..3 {
+        let gravity_axis = (axis + 1) % 3;
+        let wall_axis = (axis + 2) % 3;
+        let mut widths = [vec![1.0], vec![1.0], vec![1.0]];
+        widths[axis] = vec![0.25, 0.5, 0.75, 0.5];
+        widths[gravity_axis] = vec![0.25, 0.75, 1.0];
+        widths[wall_axis] = vec![0.25; 4];
+        let domain = VoxelDomain::graded(widths).unwrap();
+        let mut faces = [FvBoundary::Symmetry; 6];
+        faces[2 * axis] = FvBoundary::Pressure { pressure_pa: 0.5 };
+        faces[2 * axis + 1] = FvBoundary::Outlet;
+        faces[2 * wall_axis] = FvBoundary::wall();
+        faces[2 * wall_axis + 1] = FvBoundary::wall();
+        let mut config = SimpleConfig::new(faces);
+        config.tolerance = 1e-10;
+        config.pressure_tolerance = 1e-12;
+        let mu = vec![0.25; domain.cell_count()];
+        let uniform = simple_flow_with_viscosity(&domain, &fluid, &mu, &config, &gate).unwrap();
+        let pressure = |point: [f64; 3]| 16.0 - 0.25 * point[axis] - 0.25 * point[gravity_axis];
+        for side in [2 * axis, 2 * axis + 1] {
+            config.pressure_profiles_pa[side] = Some(plane_profile(&domain, side, pressure));
+        }
+        let mut force = [0.0; 3];
+        force[gravity_axis] = -0.25;
+        let force = vec![force; domain.cell_count()];
+        let loaded =
+            simple_flow_with_viscosity_and_force(&domain, &fluid, &mu, &force, &config, &gate)
+                .unwrap();
+        for (actual, reference) in loaded.velocity_m_s.iter().zip(&uniform.velocity_m_s) {
+            for component in 0..3 {
+                assert!((actual[component] - reference[component]).abs() < 2e-8);
+            }
+        }
+        for (cell, &actual) in loaded.pressure_pa.iter().enumerate() {
+            let at = domain.coords(cell);
+            assert!((actual - pressure(domain.center(at[0], at[1], at[2]))).abs() < 2e-7);
+        }
+        // Pure hydrostatics is an exact fixed point of the same discrete
+        // momentum equations. Seed the analytic state to isolate the spatial
+        // force balance from a near-zero-flow relative stopping criterion.
+        let hydrostatic = |point: [f64; 3]| 16.0 - 0.25 * point[gravity_axis];
+        for side in [2 * axis, 2 * axis + 1] {
+            config.pressure_profiles_pa[side] = Some(plane_profile(&domain, side, hydrostatic));
+        }
+        admit(&domain, &fluid, &config).unwrap();
+        let mut rest = Solver::new(&domain, &fluid, &config);
+        rest.set_material_transport(&mu, Some(&force), &gate)
+            .unwrap();
+        for cell in 0..domain.cell_count() {
+            let at = domain.coords(cell);
+            rest.pressure[cell] =
+                hydrostatic(domain.center(at[0], at[1], at[2])) - rest.pressure_reference_pa;
+        }
+        for component in 0..3 {
+            assert_eq!(rest.momentum(component, false, &gate).unwrap().rms, 0.0);
+        }
+        assert!(rest.vel.iter().flatten().all(|&velocity| velocity == 0.0));
+    }
+}
+
+#[test]
+fn spatial_pressure_drives_opposed_channel_streams_and_ignores_solid_faces() {
+    use crate::conjugate::Voxel;
+
+    let mut domain = VoxelDomain::graded([vec![0.25; 8], vec![0.5; 5], vec![1.0]]).unwrap();
+    for x in 0..8 {
+        domain.set(x, 2, 0, Voxel::Solid(0));
+    }
+    let mut faces = [FvBoundary::Symmetry; 6];
+    faces[0] = FvBoundary::Outlet;
+    faces[1] = FvBoundary::Outlet;
+    faces[2] = FvBoundary::wall();
+    faces[3] = FvBoundary::wall();
+    let mut config = SimpleConfig::new(faces);
+    config.tolerance = 1e-10;
+    config.pressure_tolerance = 1e-12;
+    config.pressure_profiles_pa[0] = Some(vec![0.5, 0.5, 1e12, -0.25, -0.25]);
+    config.pressure_profiles_pa[1] = Some(vec![0.0, 0.0, -1e12, 0.0, 0.0]);
+    let solved = simple_flow(&domain, &fluid(), &config, &CancelGate::new()).unwrap();
+    // Each channel has H=1, L=2, mu=1/4 and two transverse cells:
+    // Q=dp H^3/(12 mu L)*(1+2/2^2), with each pressure sign retained.
+    let low = solved.field.flux_x(8, 0, 0) + solved.field.flux_x(8, 1, 0);
+    let high = solved.field.flux_x(8, 3, 0) + solved.field.flux_x(8, 4, 0);
+    assert!((low - 0.125).abs() < 1e-8, "{low}");
+    assert!((high + 0.0625).abs() < 1e-8, "{high}");
+    assert_eq!(solved.field.flux_x(0, 2, 0), 0.0);
+    assert_eq!(solved.field.flux_x(8, 2, 0), 0.0);
+}
+
+#[test]
+fn spatial_pressure_work_uses_each_original_face_and_closes_physical_heat() {
+    use super::viscous_heat::{ViscousHeatControls, creeping_flow_with_pressure_work_heat};
+
+    let domain = VoxelDomain::graded([vec![0.5, 1.0, 1.5], vec![0.75, 1.25], vec![1.0]]).unwrap();
+    let mut faces = [FvBoundary::Symmetry; 6];
+    faces[0] = FvBoundary::Outlet;
+    faces[1] = FvBoundary::Outlet;
+    faces[2] = FvBoundary::wall();
+    faces[3] = FvBoundary::wall();
+    let mut config = SimpleConfig::new(faces);
+    config.tolerance = 1e-12;
+    config.pressure_tolerance = 1e-12;
+    config.momentum_tolerance = 1e-10;
+    config.pressure_profiles_pa[0] = Some(vec![2.0, 6.0]);
+    config.pressure_profiles_pa[1] = Some(vec![0.0; 2]);
+    let controls = ViscousHeatControls {
+        maximum_reynolds: 0.1,
+        power_tolerance_w: 1e-7,
+    };
+    let mu = vec![100.0; domain.cell_count()];
+    let gate = CancelGate::new();
+    let (flow, heat) =
+        creeping_flow_with_pressure_work_heat(&domain, &fluid(), &mu, &config, controls, &gate)
+            .unwrap();
+    let supply = 2.0 * flow.field.flux_x(0, 0, 0) + 6.0 * flow.field.flux_x(0, 1, 0);
+    assert!(supply > 0.0);
+    assert!((supply - heat.supplied_pressure_power_w).abs() < 1e-10);
+    assert!((supply - heat.heat_w).abs() < controls.power_tolerance_w);
+    // The area-mean pressure times the integrated flow loses the covariance.
+    let mean = (0.75 * 2.0 + 1.25 * 6.0) / 2.0;
+    let averaged = mean * (flow.field.flux_x(0, 0, 0) + flow.field.flux_x(0, 1, 0));
+    assert!((averaged - supply).abs() > 1e-5 * supply);
+    for profile in config.pressure_profiles_pa.iter_mut().flatten() {
+        for pressure in profile {
+            *pressure += 1024.0;
+        }
+    }
+    let (shifted, shifted_heat) =
+        creeping_flow_with_pressure_work_heat(&domain, &fluid(), &mu, &config, controls, &gate)
+            .unwrap();
+    assert_eq!(shifted.velocity_m_s, flow.velocity_m_s);
+    assert_eq!(shifted_heat.cell_heat_w, heat.cell_heat_w);
+    assert_eq!(shifted_heat.pressure_power_w, heat.pressure_power_w);
+    assert!(shifted_heat.residual_w.abs() < controls.power_tolerance_w);
+}
+
+#[test]
+fn spatial_pressure_refuses_incompatible_shape_role_values_and_cancellation() {
+    let (domain, config) = channel(4, 0, 0.5, 0.0);
+    let gate = CancelGate::new();
+    for values in [vec![], vec![0.0; 3], vec![0.0, 0.0, f64::NAN, 0.0]] {
+        let mut invalid = config.clone();
+        invalid.pressure_profiles_pa[0] = Some(values);
+        assert!(matches!(
+            simple_flow(&domain, &fluid(), &invalid, &gate),
+            Err(ChtError::InvalidInput {
+                field: "simple.pressure_profiles_pa",
+                ..
+            })
+        ));
+    }
+    let mut invalid = config.clone();
+    invalid.pressure_profiles_pa[2] = Some(vec![0.0; 8]);
+    assert!(matches!(
+        simple_flow(&domain, &fluid(), &invalid, &gate),
+        Err(ChtError::InvalidInput {
+            field: "simple.pressure_profiles_pa",
+            ..
+        })
+    ));
+    invalid = config.clone();
+    invalid.pressure_profiles_pa[0] = Some(vec![-f64::MAX, f64::MAX, 0.0, 0.0]);
+    assert!(matches!(
+        simple_flow(&domain, &fluid(), &invalid, &gate),
+        Err(ChtError::InvalidInput {
+            field: "simple.pressure_difference_pa",
+            ..
+        })
+    ));
+    let mut valid = config;
+    valid.pressure_profiles_pa[0] = Some(vec![0.5; 4]);
+    gate.request();
+    assert!(matches!(
+        simple_flow(&domain, &fluid(), &valid, &gate),
+        Err(ChtError::Cancelled)
+    ));
+}

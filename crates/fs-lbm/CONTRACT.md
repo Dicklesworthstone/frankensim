@@ -1,5 +1,30 @@
 # CONTRACT: fs-lbm
 
+## Spatial reservoir pressures on native SIMPLE faces
+
+`SimpleConfig::pressure_profiles_pa` optionally replaces each Pressure/Outlet
+plane's uniform value with the static pressure at every original Cartesian
+boundary face. The profiles retain the original staggered geometry, ghost
+pressure momentum load, SIMPLEC correction, body-force coupling and transient
+state. Plane values use x-fast indexing with the normal coordinate omitted;
+solid faces receive no load. No interpolation or plane averaging is implicit.
+
+The original numerical pressure datum is removed before momentum assembly and
+restored only for pressure readback. Restart admission checks the profile against
+the retained datum. The existing Stokes reservoir-traction heating mode samples
+pressure times volume flow at each original face, preserving spatial covariance
+and the same relative-gauge work account. Uniform profiles reproduce the existing
+uniform solve, and omitting profiles preserves its API behavior.
+
+Focused G1/G3 regressions cover every axis, graded-grid hydrostatic loading with
+throughflow, a discrete hydrostatic rest state, independently driven counterflow
+channels separated by solid voxels, pressure-work/physical-heat closure and gauge
+shifts. Malformed, nonfinite or overconstraining profiles refuse. These are fixed
+spatial pressure data for the existing incompressible model; material density,
+thermodynamic pressure, time-dependent reservoirs and exterior interpolation
+remain with their respective owners. Exact rest-state verification is a spatial
+operator check, not a new near-zero-flow convergence guarantee.
+
 ## Original-source conduction with phase/resistance feedback
 
 The conductive phase-resistance thermal-volume momentum entries prepare
