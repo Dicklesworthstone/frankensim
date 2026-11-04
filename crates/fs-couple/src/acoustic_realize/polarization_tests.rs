@@ -1,6 +1,7 @@
 //! G0/G3: unsupported transverse motion cannot disappear during composition.
 use super::*;
-use fs_scenario::{BendingRelaxationBranch, Listener, PronyBending};
+use fs_scenario::Listener;
+use fs_scenario::acoustic::{BendingRelaxationBranch, PronyBending};
 
 fn assembly(prony: bool) -> AcousticAssembly {
     AcousticAssembly {

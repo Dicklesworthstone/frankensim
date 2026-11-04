@@ -1,7 +1,7 @@
 //! G1/G3: original contact laws and line measures survive both moving-end clocks.
 use super::*;
 use crate::thin_plate::CompactBody;
-use fs_scenario::{BendingRelaxationBranch, PronyBending};
+use fs_scenario::acoustic::{BendingRelaxationBranch, PronyBending};
 
 fn obstacle() -> UnilateralObstacle {
     UnilateralObstacle {
