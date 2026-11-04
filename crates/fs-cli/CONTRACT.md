@@ -3451,3 +3451,29 @@ physical audit; no hidden final solve replaces the accepted field. This extends
 the admitted physical composition without inventing a unique derivative for
 source-surface corners. Steady contact with enclosure/pointwise radiation and
 contact/radiation adjoints remain explicitly unsupported.
+
+### Live capacity contact with ambient radiation — driver 110
+
+Regional heat-capacity trajectories now compose source-backed contact with the
+existing area-mean ambient gray-radiation owner. Each radiative trial invokes
+the complete contact response from the original old temperature. Scalar and
+continuous-curve sources retain coupled contact/bulk Newton; source surfaces
+retain their bounded contact fixed point. The accepted unchanged field passes
+a fresh contact query, radiative boundary evaluation, full nodal joule residual
+and separate storage/heat check.
+
+Prescribed, natural-convection and transported-air paths all use that shared
+response. Mixed cooling retains natural convection outside the complete air
+solve. Each outer audit uses its actual convection coefficients and marched air
+references together with freshly queried contact and radiative heat. Internal
+contact transfer, natural-reservoir heat, transported-air heat and ambient
+radiation retain distinct accounts. Radiation never enters the air heat gain.
+
+Radiation trials and nested contact thermal responses have separate counters;
+all Newton updates, backtracks and Krylov work participate in the existing
+combined limits. Inner tolerances tighten to meet the surrounding physical
+target. The last numerical response remains distinct from the complete physical
+audit. This is the existing area-mean emission model, not pointwise radiation.
+Capacity contact with reflected enclosures and transient contact adjoints
+remain unsupported. The focused native and imported-project regressions require
+native execution; formatter parsing alone does not establish runtime correctness.

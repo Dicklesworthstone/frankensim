@@ -11,6 +11,8 @@ use fs_qty::QtyAny;
 mod convection;
 #[path = "transient_storage/airflow.rs"]
 mod airflow;
+#[path = "transient_storage/radiation.rs"]
+mod radiation;
 
 const INITIAL_K: f64 = 293.15;
 const CP: f64 = 10.0;

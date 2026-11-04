@@ -140,8 +140,8 @@ pub(super) fn advance(
     {
         return Err(bad("natural convection requires matching live contacts and controls without duplicate frozen interfaces"));
     }
-    if temperature_contacts.is_some() && (radiation.is_some() || enclosure.is_some()) {
-        return Err(bad("capacity natural convection with live contacts does not admit radiation"));
+    if temperature_contacts.is_some() {
+        contact::admit_radiation(radiation, enclosure)?;
     }
     if contact_config.is_some_and(|controls| {
         !(controls.residual_tolerance_j.is_finite() && controls.residual_tolerance_j > 0.0)
@@ -192,6 +192,9 @@ pub(super) fn advance(
     let max_airflow_endpoint_evaluations = boundary_law::MAX_ITERATIONS
         .checked_mul(airflow.map_or(0, |_| 2))
         .ok_or_else(|| bad("mixed transient airflow audit allowance overflows"))?;
+    let max_radiation_trials = max_airflow_iterations
+        .checked_mul(radiation.map_or(0, |lowering| lowering.config.max_iterations))
+        .ok_or_else(|| bad("natural-convection radiation callback allowance overflows"))?;
     let max_solid_solves = max_airflow_iterations.checked_mul(radiation_factor)
         .and_then(|count| count.checked_mul(contact_config.map_or(1, contact::Config::max_responses)))
         .ok_or_else(|| bad("natural-convection/contact/airflow/radiation work allowance overflows"))?;
@@ -249,7 +252,7 @@ pub(super) fn advance(
             let initial = if let Some(contacts) = temperature_contacts {
                 contact::evaluate(
                     cx, engine, initial_problem, contacts, old, &predictor,
-                    dt_s, step_config, deadline,
+                    dt_s, step_config, radiation, enclosure, deadline,
                 )?.0
             } else {
                 radiative::evaluate(
@@ -291,7 +294,7 @@ pub(super) fn advance(
         }
         let trial_problem = ConductionProblem { boundary: &boundary, ..problem };
         let mut air_trial = None;
-        let (mut endpoint, nonlinear_evidence, radiation_evidence, radiative) =
+        let (mut endpoint, nonlinear_evidence, mut radiation_evidence, mut radiative) =
             if let Some(path) = airflow {
                 let solved = conjugate::advance(
                     cx, engine, trial_problem, interfaces, temperature_contacts, inner_contact,
@@ -302,7 +305,7 @@ pub(super) fn advance(
                 count(&mut airflow_endpoint_evaluations, solved.endpoint_evaluations,
                     max_airflow_endpoint_evaluations)?;
                 count(&mut solid_solves, solved.solid_solves, max_solid_solves)?;
-                count(&mut radiation_trials, solved.radiation_trials, max_solid_solves)?;
+                count(&mut radiation_trials, solved.radiation_trials, max_radiation_trials)?;
                 count(&mut krylov_iterations, solved.krylov_iterations, max_krylov)?;
                 count(&mut nonlinear_updates, solved.nonlinear_updates, max_updates)?;
                 count(&mut nonlinear_backtracks, solved.nonlinear_backtracks, max_backtracks)?;
@@ -320,7 +323,7 @@ pub(super) fn advance(
                     air_heat_gain_w: solved.air_heat_gain_w,
                 });
                 (solved.endpoint, solved.nonlinear_evidence, solved.radiation_evidence, solved.radiation)
-            } else if let Some(contacts) = temperature_contacts {
+            } else if let Some(contacts) = temperature_contacts.filter(|_| radiation.is_none()) {
                 let controls = inner_contact
                     .ok_or_else(|| bad("natural convection lost its live contact controls"))?;
                 let solved = contact::advance(
@@ -336,11 +339,12 @@ pub(super) fn advance(
                 (solved.conduction, "null".to_string(), "null".to_string(), None)
             } else if let Some(lowering) = radiation {
                 let solved = radiative::advance(
-                    cx, engine, trial_problem, interfaces, old, dt_s, inner_step,
+                    cx, engine, trial_problem, interfaces, temperature_contacts, inner_contact,
+                    old, dt_s, inner_step,
                     inner_nonlinear, lowering, enclosure, deadline,
                 )?;
                 count(&mut solid_solves, solved.solid_solves, max_solid_solves)?;
-                count(&mut radiation_trials, solved.solid_solves, max_solid_solves)?;
+                count(&mut radiation_trials, solved.radiation_trials, max_radiation_trials)?;
                 count(&mut krylov_iterations, solved.krylov_iterations, max_krylov)?;
                 count(&mut nonlinear_updates, solved.nonlinear_updates, max_updates)?;
                 count(&mut nonlinear_backtracks, solved.nonlinear_backtracks, max_backtracks)?;
@@ -406,7 +410,7 @@ pub(super) fn advance(
         let (physical, physical_contacts) = if let Some(contacts) = temperature_contacts {
             let (evaluation, states) = contact::evaluate(
                 cx, engine, physical_problem, contacts, old, &endpoint.temperature,
-                dt_s, step_config, deadline,
+                dt_s, step_config, radiation, enclosure, deadline,
             )?;
             (evaluation, Some(states))
         } else {
@@ -478,16 +482,11 @@ pub(super) fn advance(
             let receipt = boundary_law::receipt_fragment(&converged, iteration)?;
             if let Some(states) = &physical_contacts {
                 // Flux and heat reports describe the same unchanged field
-                // under the freshly queried contact and natural boundary.
-                endpoint.contact_fluxes = states.frozen_interfaces()
-                    .fluxes(&endpoint.temperature).map_err(lower)?;
-                endpoint.robin_fluxes = physical.convective_robin_fluxes.clone();
-                endpoint.source_w = physical.source_w;
-                endpoint.neumann_out_w = physical.neumann_out_w;
-                endpoint.robin_out_w = physical.convective_out_w;
-                endpoint.dirichlet_in_w = physical.dirichlet_in_w;
-                endpoint.stored_energy_change_j = physical.stored_energy_change_j;
-                endpoint.energy_residual_j = physical.energy_residual_j;
+                // under the freshly queried contact, radiation and convection.
+                contact::publish_physical(&mut endpoint, &physical, states)?;
+                if let Some(radiation) = radiative.as_mut() {
+                    radiation_evidence = radiative::refresh_ambient(radiation, &physical, target)?;
+                }
             }
             let contact_evidence = match (contact_config, physical_contacts.as_ref()) {
                 (Some(controls), Some(states)) => Some(contact::step_receipt(

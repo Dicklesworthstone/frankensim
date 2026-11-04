@@ -17,7 +17,7 @@ use fs_conduction::assemble::DofMap;
 use fs_conduction::interface::temperature::TemperatureContacts;
 use fs_conduction::transient::VolumetricHeatCapacity;
 use fs_conduction::transient::backward_euler::{
-    BackwardEuler, NonlinearStepConfig, NonlinearStepSolution, RadiationStepSolution, StepConfig,
+    BackwardEuler, NonlinearStepConfig, NonlinearStepSolution, StepConfig,
     StepSolution,
 };
 use fs_conduction::{
@@ -284,8 +284,14 @@ fn nonlinear_row(solved: &NonlinearStepSolution) -> Result<String, SolveRefusal>
     ))
 }
 
-fn radiation_row(solved: &RadiationStepSolution) -> Result<String, SolveRefusal> {
-    let report = &solved.radiation;
+fn radiation_row(
+    report: &fs_conduction::AmbientRadiationReport,
+    convective_out_w: f64,
+    physical_residual_norm_j: f64,
+    physical_residual_tolerance_j: f64,
+    physical_energy_residual_j: f64,
+    physical_dirichlet_in_w: f64,
+) -> Result<String, SolveRefusal> {
     let patches = report.patches.iter().map(|row| {
         Ok(format!(
             "{{\"region\":{},\"area_m2\":{},\"mean_temperature_k\":{},\"applied_heat_w\":{},\"nonlinear_heat_w\":{},\"heat_mismatch_w\":{},\"heat_tolerance_w\":{}}}",
@@ -298,11 +304,11 @@ fn radiation_row(solved: &RadiationStepSolution) -> Result<String, SolveRefusal>
     Ok(format!(
         "{{\"iterations\":{},\"solid_iterations\":{},\"krylov_iterations\":{},\"convective_out_w\":{},\"radiative_out_w\":{},\"nonlinear_radiative_out_w\":{},\"max_temperature_change_k\":{},\"max_heat_mismatch_w\":{},\"decomposition_residual_w\":{},\"physical_residual_norm_j\":{},\"physical_residual_tolerance_j\":{},\"physical_energy_residual_j\":{},\"physical_dirichlet_in_w\":{},\"patches\":[{}]}}",
         report.iterations, report.solid_iterations, report.krylov_iterations,
-        number(solved.convective_out_w)?, number(report.applied_radiation_out_w)?,
+        number(convective_out_w)?, number(report.applied_radiation_out_w)?,
         number(report.nonlinear_radiation_out_w)?, number(report.max_temperature_change_k)?,
         number(report.max_heat_mismatch_w)?, number(report.decomposition_residual_w)?,
-        number(solved.physical_residual_norm_j)?, number(solved.physical_residual_tolerance_j)?,
-        number(solved.physical_energy_residual_j)?, number(solved.physical_dirichlet_in_w)?,
+        number(physical_residual_norm_j)?, number(physical_residual_tolerance_j)?,
+        number(physical_energy_residual_j)?, number(physical_dirichlet_in_w)?,
         patches.join(","),
     ))
 }
@@ -456,7 +462,7 @@ fn march(
         let mut physical_target_j = None;
         let mut physical_energy = None;
         let (endpoint, nonlinear_evidence, krylov_iterations) = if let Some(contacts) = temperature_contacts
-            .filter(|_| natural.is_empty() && airflow.is_none())
+            .filter(|_| natural.is_empty() && airflow.is_none() && radiation.is_none())
         {
             let solved = contact::advance(
                 cx, engine, step_problem, contacts,
@@ -551,13 +557,19 @@ fn march(
             (solved.endpoint, solved.nonlinear_evidence, solved.krylov_iterations)
         } else if let Some(radiation) = radiation {
             let solved = radiative::advance(
-                cx, engine, step_problem, interfaces, &old, dt, config,
+                cx, engine, step_problem, interfaces, temperature_contacts, contact_config,
+                &old, dt, config,
                 nonlinear, radiation, enclosure, deadline,
             )?;
+            if let Some(receipt) = solved.contact_evidence.as_ref() {
+                contact_evidence = receipt.clone();
+                contact_responses = contact_responses.checked_add(solved.solid_solves)
+                    .ok_or_else(|| bad("radiative capacity contact response count overflows"))?;
+            }
             radiative_row = solved.radiation_evidence;
             physical_target_j = Some(solved.physical_residual_tolerance_j);
             physical_energy = Some(solved.physical_energy);
-            radiation_trials += solved.solid_solves;
+            radiation_trials += solved.radiation_trials;
             nonlinear_updates += solved.nonlinear_updates;
             nonlinear_backtracks += solved.nonlinear_backtracks;
             maximum_physical_energy_residual_j = maximum_physical_energy_residual_j
@@ -1000,8 +1012,11 @@ pub(super) fn solve(
     } else { 0 };
     let max_airflow_iterations_per_step = airflow_factor.checked_mul(natural_factor)
         .ok_or_else(|| bad("coupled interface iteration allowance overflows"))?;
-    let max_solid_solves_per_step = max_airflow_iterations_per_step.checked_mul(radiation_factor)
-        .and_then(|responses| responses.checked_mul(contact_factor))
+    let max_radiation_trials_per_step = max_airflow_iterations_per_step
+        .checked_mul(radiation_factor)
+        .ok_or_else(|| bad("coupled radiation trial allowance overflows"))?;
+    let max_solid_solves_per_step = max_radiation_trials_per_step
+        .checked_mul(contact_factor)
         .ok_or_else(|| bad("coupled solid response allowance overflows"))?;
     let max_krylov_per_step = linear
         .max_iterations
@@ -1174,7 +1189,7 @@ pub(super) fn solve(
         };
         format!(
             "{{\"method\":\"{method}\",\"max_trials_per_step\":{},\"max_trials_per_coupling_iteration\":{},\"max_krylov_iterations_per_solid_solve\":{},\"max_krylov_iterations_per_step\":{max_krylov_per_step},\"coarse_trials\":{},\"fine_trials\":{},\"total_trials\":{radiation_trials},\"maximum_physical_energy_residual_j\":{},\"history\":\"unchanged-physical-old-temperature-in-every-trial\",\"nonlinear_detail\":\"per-step nonlinear rows describe the final inner solve; radiation rows include that evaluation's trials; trajectory counters include every outer convection evaluation\"}}",
-            max_solid_solves_per_step, lowering.config.max_iterations, linear.max_iterations,
+            max_radiation_trials_per_step, lowering.config.max_iterations, linear.max_iterations,
             coarse.radiation_trials, fine.radiation_trials,
             number(coarse.maximum_physical_energy_residual_j
                 .max(fine.maximum_physical_energy_residual_j))?,

@@ -10,7 +10,7 @@ use super::*;
 pub(super) mod enthalpy;
 
 pub(super) const MAX_RESPONSES: usize = 64;
-pub(super) const NO_CLAIM: &str = "Source-backed matching contact queries each pinned resistance law at the arithmetic mean of its two independent face-temperature means. Pressure, finish, medium, geometry and claim selection remain fixed. Every counted contact trial uses the same immutable old field; the accepted unchanged endpoint passes freshly queried complete nodal joule-residual and separate storage/heat gates. Published contact heat and reservoir reactions describe that physical endpoint, while inner Krylov residuals describe its counted numerical response. Contact heat is internal transfer and is not added to external input. Scalar and continuous linear source curves share the complete capacity/bulk/contact Newton solve, with generalized primal source tangents at curve knots and inward source endpoints; every physical trial still passes its pinned source query. Surface laws retain the bounded contact fixed point. Neither algorithm establishes arbitrary-law convergence or uniqueness. This capacity path does not supply total-enthalpy storage; declared total-enthalpy trajectories use the separate shared contact/enthalpy owner with complete Newton tangents for scalar/continuous-curve sources and a bounded physical fixed point for source surfaces. Natural-convection trials use these same live contact responses and the original old temperature. Acceptance re-queries contact and evaluates the complete unchanged endpoint under its updated physical convection coefficient, with all nested responses counted. Transported-air callbacks use these same contact-aware capacity responses. Natural convection can enclose complete air solves on distinct targets, followed by a fresh combined contact/natural/air audit. Only forced convection heats air; off-path reservoir heat and internal contact transfer retain separate accounts. All nested responses, Newton updates, backtracks and Krylov iterations are counted. Radiation and trajectory derivatives are not supplied for temperature-varying contact by this capacity adapter.";
+pub(super) const NO_CLAIM: &str = "Source-backed matching contact queries each pinned resistance law at the arithmetic mean of its two independent face-temperature means. Pressure, finish, medium, geometry and claim selection remain fixed. Every counted contact trial uses the same immutable old field; the accepted unchanged endpoint passes freshly queried complete nodal joule-residual and separate storage/heat gates. Published contact heat and reservoir reactions describe that physical endpoint, while inner Krylov residuals describe its counted numerical response. Contact heat is internal transfer and is not added to external input. Scalar and continuous linear source curves share the complete capacity/bulk/contact Newton solve, with generalized primal source tangents at curve knots and inward source endpoints; every physical trial still passes its pinned source query. Surface laws retain the bounded contact fixed point. Neither algorithm establishes arbitrary-law convergence or uniqueness. This capacity path does not supply total-enthalpy storage; declared total-enthalpy trajectories use the separate shared contact/enthalpy owner with complete Newton tangents for scalar/continuous-curve sources and a bounded physical fixed point for source surfaces. Natural-convection trials use these same live contact responses and the original old temperature. Acceptance re-queries contact and evaluates the complete unchanged endpoint under its updated physical convection coefficient, with all nested responses counted. Transported-air callbacks use these same contact-aware capacity responses. Natural convection can enclose complete air solves on distinct targets, followed by a fresh combined contact/natural/air audit. Area-mean ambient gray radiation encloses these same contact responses inside each prescribed or derived-boundary trial; predictor and accepted physical audits include the actual radiative law. Only forced convection heats air; radiative and off-path reservoir heat and internal contact transfer retain separate accounts. Radiation callbacks and all nested contact responses, Newton updates, backtracks and Krylov iterations are counted separately. Enclosure/pointwise radiation and trajectory derivatives are not supplied for temperature-varying contact by this capacity adapter.";
 
 pub(super) const fn method(coupled_newton: bool) -> &'static str {
     if coupled_newton {
@@ -44,6 +44,18 @@ pub(super) struct Step {
     pub(super) krylov_iterations: usize,
     pub(super) nonlinear_updates: usize,
     pub(super) nonlinear_backtracks: usize,
+}
+
+pub(super) fn admit_radiation(
+    lowering: Option<&radiation::LoweredRadiation>,
+    model: Option<&fs_conduction::radiation::GrayDiffuseEnclosure>,
+) -> Result<(), SolveRefusal> {
+    if model.is_some()
+        || lowering.is_some_and(|row| row.is_enclosure() || row.is_pointwise())
+    {
+        return Err(bad("live capacity contact admits area-mean ambient radiation, not enclosure or pointwise radiation"));
+    }
+    Ok(())
 }
 
 /// The full physical residual is in joules, independent of the temperature
@@ -90,19 +102,42 @@ pub(super) fn evaluate(
     cx: &Cx<'_>, engine: &BackwardEuler<'_>, problem: ConductionProblem<'_>,
     contacts: &TemperatureContacts<'_, '_>, old: &[f64], candidate: &[f64],
     dt_s: f64, config: StepConfig,
+    lowering: Option<&radiation::LoweredRadiation>,
+    model: Option<&fs_conduction::radiation::GrayDiffuseEnclosure>,
     deadline: Option<(Instant, f64)>,
 ) -> Result<(EndpointEvaluation, TemperatureContactEvaluation), SolveRefusal> {
     poll(cx, deadline)?;
+    admit_radiation(lowering, model)?;
     if old.len() != problem.mesh.vertex_count() || candidate.len() != old.len() {
         return Err(bad("contact capacity audit requires complete original and candidate fields"));
     }
     let actual = contacts.evaluate(cx, problem.boundary, candidate).map_err(lower)?;
     poll(cx, deadline)?;
-    let physical = engine.evaluate_prescribed_endpoint(
-        cx, problem, Some(actual.frozen_interfaces()), old, candidate, dt_s, config, None,
-    ).map_err(lower)?;
+    let physical = radiative::evaluate(
+        cx, engine, problem, Some(actual.frozen_interfaces()), old, candidate, dt_s,
+        config, lowering, model, deadline,
+    )?;
     poll(cx, deadline)?;
     Ok((physical, actual))
+}
+
+/// Publish physical heat at the unchanged counted field. Original convection
+/// stays separate in its trace rows; total outward Robin heat includes radiation.
+pub(super) fn publish_physical(
+    conduction: &mut StepSolution,
+    physical: &EndpointEvaluation,
+    contacts: &TemperatureContactEvaluation,
+) -> Result<(), SolveRefusal> {
+    conduction.contact_fluxes = contacts.frozen_interfaces()
+        .fluxes(&conduction.temperature).map_err(lower)?;
+    conduction.robin_fluxes = physical.convective_robin_fluxes.clone();
+    conduction.source_w = physical.source_w;
+    conduction.neumann_out_w = physical.neumann_out_w;
+    conduction.robin_out_w = physical.convective_out_w + physical.radiation_out_w;
+    conduction.dirichlet_in_w = physical.dirichlet_in_w;
+    conduction.stored_energy_change_j = physical.stored_energy_change_j;
+    conduction.energy_residual_j = physical.energy_residual_j;
+    Ok(())
 }
 
 /// The accepted boundary owner supplies its fresh physical audit and all
@@ -166,15 +201,7 @@ pub(super) fn advance(
     // The counted inner solve and physical audit describe the same unchanged
     // field. Publish freshly queried contact heat and physical reservoirs;
     // its inner Krylov residual remains explicitly numerical solve evidence.
-    conduction.contact_fluxes = accepted.physical_contacts.frozen_interfaces()
-        .fluxes(&conduction.temperature).map_err(lower)?;
-    conduction.robin_fluxes = accepted.physical.convective_robin_fluxes;
-    conduction.source_w = accepted.physical.source_w;
-    conduction.neumann_out_w = accepted.physical.neumann_out_w;
-    conduction.robin_out_w = accepted.physical.convective_out_w;
-    conduction.dirichlet_in_w = accepted.physical.dirichlet_in_w;
-    conduction.stored_energy_change_j = accepted.physical.stored_energy_change_j;
-    conduction.energy_residual_j = accepted.physical.energy_residual_j;
+    publish_physical(&mut conduction, &accepted.physical, &accepted.physical_contacts)?;
     poll(cx, deadline)?;
     Ok(Step {
         conduction, receipt, responses: accepted.iterations,
