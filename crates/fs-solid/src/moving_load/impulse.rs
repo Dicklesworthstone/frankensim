@@ -44,6 +44,12 @@ pub struct MovingShellImpulse {
     pub energy_residual_j: f64,
 }
 
+pub(super) struct ShellImpulseTrial {
+    pub(super) state: crate::shell_time::DynamicState,
+    pub(super) reactions: Vec<f64>,
+    pub(super) report: MovingShellImpulse,
+}
+
 impl MovingShellMotion<'_> {
     /// Apply localized event impulses to the original complete native inertia.
     ///
@@ -72,8 +78,18 @@ impl MovingShellMotion<'_> {
     pub fn apply_impulses(
         &mut self,
         impulses: &[ShellPointImpulse],
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<MovingShellImpulse, MovingLoadError> {
+        let trial = self.trial_impulses(impulses, cancelled)?;
+        Ok(self.accept_impulses(trial))
+    }
+
+    // Contact consumers must audit the actual stored candidate before commit.
+    pub(super) fn trial_impulses(
+        &mut self,
+        impulses: &[ShellPointImpulse],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<ShellImpulseTrial, MovingLoadError> {
         poll(&mut cancelled)?;
         let load = self.model.project_components(
             impulses.len(),
@@ -193,10 +209,8 @@ impl MovingShellMotion<'_> {
             .model
             .reactions(&next, self.supports.as_ref(), &self.full_load)?;
         poll(&mut cancelled)?;
-        self.state = next;
-        self.reactions = reactions;
-        Ok(MovingShellImpulse {
-            time_s: self.state.time_s,
+        let report = MovingShellImpulse {
+            time_s: next.time_s,
             applied_impulse: load.resultant,
             support_impulse,
             momentum_change,
@@ -205,6 +219,17 @@ impl MovingShellMotion<'_> {
             support_work_j,
             kinetic_energy_change_j,
             energy_residual_j,
+        };
+        Ok(ShellImpulseTrial {
+            state: next,
+            reactions,
+            report,
         })
+    }
+
+    pub(super) fn accept_impulses(&mut self, trial: ShellImpulseTrial) -> MovingShellImpulse {
+        self.state = trial.state;
+        self.reactions = trial.reactions;
+        trial.report
     }
 }

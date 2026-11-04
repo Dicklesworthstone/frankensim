@@ -781,6 +781,48 @@ cross-point blocks against analytic nodal inertia, independently inventory
 payload work, check simultaneous physical events and reciprocity, and retain
 constrained/redundant null directions, dense budgets and cancellation purity.
 
+### Native simultaneous normal impacts
+
+`prepare_normal_impacts` binds fixed material points, unit separating normals
+and native law controls to the original shell model. One directed normal
+mass solve per contact constructs the complete `J_f M_ff^-1 J_f^T`, including
+all cross-contact and finite-payload coupling. The retained LU, original
+point transpose and shared material sampler own the response. The prepared
+matrix is reusable; the native 64-contact cap, original point budget and
+checked original matrix-entry/byte limits bound its allocation.
+
+`apply_normal_impacts` receives explicit instantaneous plane positions and
+surface velocities. It derives signed gaps and relative normal speeds from
+actual shell observations; penetration refuses. Every geometry-active row,
+including initially separating rows, enters one original
+`fs-contact::multicontact::solve_normal_impacts` call. That owner supplies
+Newton restitution, complementarity, global relative-work admission and
+SPD/PSD determinacy. No pairwise impact sequence or restitution change is
+introduced; zero restitution gives its perfectly inelastic projection.
+
+One aggregate native impulse trial refreshes force equilibrium but retains
+accepted motion until measured endpoint speeds, complementarity, full-mass
+linear/reference-angular impulse, and kinetic/source/support work pass.
+Obstacle work and original driven-pin work remain separate. Redundant
+impulses retain the native `UniqueVelocity` classification: individual loads
+and separate source/support work shares describe a checked representative,
+while combined physical work is audited. Incompatible prescribed motion
+still refuses through the native range/work admission.
+
+Displacement, held forces, support motion, time and step count stay fixed.
+Every geometry, law, impulse, accounting or cancellation refusal is atomic.
+Zero-impulse events leave even acceleration and regular reactions unchanged.
+Relative mechanical loss has no automatic heat/damage allocation. Event
+timing and contact-set completeness remain caller-owned; this retains the
+original reference-frame, small-rotation shell scope without CCD, penetration
+repair, sustained forces or finite-rotation claims.
+
+The three native groups in `tests/moving_load/normal_impact.rs` cover analytic
+simultaneous offset impacts and global restitution refusal, independently
+condensed anisotropic payload inertia with moving-plane/driven-pin work,
+and actual post-trial audit refusal, cancellation/retry, redundant contact
+motion, incompatible source work, model identity and no-impulse parity.
+
 ## Momentum-stable shell integration
 
 `shell_time::step_newmark` solves the effective mass equation for acceleration,

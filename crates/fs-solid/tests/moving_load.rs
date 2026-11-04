@@ -15,6 +15,9 @@ mod impulse;
 #[path = "moving_load/inverse_inertia.rs"]
 mod inverse_inertia;
 
+#[path = "moving_load/normal_impact.rs"]
+mod normal_impact;
+
 fn plate() -> ShellPlate {
     ShellPlate {
         nodes: vec![

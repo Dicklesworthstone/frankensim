@@ -28,6 +28,13 @@ pub use impulse::{MovingShellImpulse, ShellPointImpulse};
 mod inverse_inertia;
 pub use inverse_inertia::ShellPointInverseInertia;
 
+#[path = "moving_load/normal_impact.rs"]
+mod normal_impact;
+pub use normal_impact::{
+    PreparedShellNormalImpacts, ShellNormalImpactControls, ShellNormalImpactError,
+    ShellNormalImpactReport, ShellNormalImpactSite, ShellObstacleMotion,
+};
+
 /// A reference material location on one original triangle.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ShellLoadPoint {
