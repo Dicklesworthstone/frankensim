@@ -29,6 +29,9 @@ mod rheology;
 #[path = "mushy/unsteady.rs"]
 mod unsteady;
 
+#[path = "mushy/liquid_carrier.rs"]
+mod liquid_carrier;
+
 fn phase_curve(card: &MaterialCard, rho: [f64; 2]) -> EquilibriumEnthalpyPhaseCurve {
     EquilibriumEnthalpyPhaseCurve::try_new(
         card.content_hash(),

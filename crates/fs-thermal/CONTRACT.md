@@ -2,8 +2,9 @@
 
 ## Crystallization in spatial heat exchange and finite molds
 
-`enthalpy::crystallization::CrystallizationSimulation` adopts activated cells
-from the original `DepositionSimulation`. Bound materials receive a private
+`enthalpy::crystallization::CrystallizationSimulation` can attach before the
+first scheduled birth or adopt active all-amorphous cells from the original
+`DepositionSimulation`. Bound materials receive a private
 kinetic exposure; unbound molds/substrates keep their original caloric laws,
 storage basis and thermal slope bounds. All cells exchange heat through the
 existing link, boundary and CFL operator. Mass, geometry, cell/material IDs and
@@ -11,6 +12,19 @@ the original extensive thermal-storage account remain with that owner.
 Attachment requires the original thermal law and kinetic parent branch to
 carry the same complete caloric identity. Agreement at one starting state is
 insufficient; unidentified or crossing-but-different caloric curves refuse.
+
+Birth, contact, separation and boundary events use that original timeline's
+admission and coverage owner, in authored order. Every thermal/kinetic interval
+ends at the next event or target; target-time births activate without aging.
+Each newly deposited bound cell starts with explicitly zero exposure and its
+unchanged incoming enthalpy. Existing cells retain their exposure, and ordinary
+molds receive no crystal history. Precrystallized inflow requires an explicit
+history-transfer model and is not inferred. Empty intervals consume no thermal
+steps; events do not renew the whole-advance substep budget. Incoming mass and
+birth enthalpy enter their original accounts once, while heat residuals retain
+cell-relative differences. A late birth-domain refusal or cancellation rolls
+back the entire candidate, including its schedule cursor. Manual endpoint
+boundary changes require due events to have been processed first.
 
 Each candidate resolves crystallinity and temperature together through the
 shared constitutive core. Crystal mass is part of the existing specimen mass,
@@ -21,10 +35,12 @@ accepted history. Cloning checkpoints time, enthalpy and exposure; identical
 time partitions replay bitwise. Endpoint boundary/conductance changes use the
 original physical ownership and coverage checks.
 
-The eleven focused regressions cover adiabatic and spatial calorimetry,
+Focused regressions cover adiabatic and spatial calorimetry,
 recalescence while cooling, different-Cp finite-mold exchange, timestep
 refinement, source/identity/budget refusal, initial-chart roundoff, ordinary-cell
-domain failures and atomic cancellation/restart. This fixed-reference-geometry,
+domain failures and atomic cancellation/restart, as well as independently aged
+scheduled births, finite-mold contact/separation and continuation across events.
+This fixed-reference-geometry,
 uniform-cell reduction has first-order heat transport and explicit kinetic
 timestep limits. Conductivity evolution requires a declared supplied law;
 front morphology, remelting, moving geometry and mechanical work feedback are
@@ -44,12 +60,26 @@ Isothermal stepping returns the required thermostat heat. Nonisothermal
 stepping integrates exposure with explicit midpoint while reconstructing both
 midpoint and endpoint temperatures on the same enthalpy account. Work and
 caloric tolerances are bounded, cancellation publishes no candidate, and
-out-of-domain or melting trajectories refuse. Immutable source owners may
+out-of-domain or unsupported remelting trajectories refuse. Immutable source owners may
 supply positive whole-domain heat-capacity lower bounds to accelerate caloric
-inversion; generic laws retain safeguarded bracket convergence. Eight focused
-native Rust tests pass, covering analytic JMAK, adiabatic recalescence with
+inversion; generic laws retain safeguarded bracket convergence. Eleven focused
+native core Rust tests pass, covering analytic JMAK, adiabatic recalescence with
 unequal heat capacities, second-order time refinement, accelerated affine and
 nonlinear inversion, datum shifts, endpoint behavior and cancellation.
+
+The declared source domain may extend above melting for completely amorphous
+feed. Both original caloric branches and the kinetic source must cover that
+full domain; no chart is extrapolated. The supplied Nakamura rate must be
+exactly zero at and above melting, and positive queried rates refuse instead
+of being clamped. Once any nonzero crystalline mass fraction exists, direct
+state queries and enthalpy inversion restrict temperature to the original
+domain at or below melting. Cooling superheated amorphous feed enters the same
+conservative crystallization account; reheating crystals above melting still
+requires a separate remelting model. The core regressions include superheated
+cooling, source-domain/rate refusal and crystal-preserving melting-boundary
+checks. A growing-timeline regression deposits 550 K feed against a finite mold
+and follows sensible cooling into crystallization without a second latent heat
+source; it requires the full native thermal dependency graph to execute.
 
 This is an irreversible isokinetic constitutive model with explicit caller
 parameters and applicability. It supplies no material calibration, stochastic
@@ -206,6 +236,46 @@ selective recirculation and the optional entropy audit refuse. Focused G0/G1
 regressions cover component conservation, downstream propagation, phase
 enthalpy outside the gas inversion domain, the original thermal energy account,
 and these unsupported conditions. This does not add transient species storage.
+
+### Liquid enthalpy through a stationary solid skeleton
+
+`Advected::with_liquid_carrier` retains the original total-cell `mass*h`
+storage while a closed, balanced mass graph carries only the liquid phase's
+enthalpy. For an admitted pure-substance isothermal latent plateau, liquid
+carries the liquid-side plateau enthalpy during coexistence and its original
+specific enthalpy when fully liquid. The component reference is evaluated on
+that same carried-enthalpy function. Circulation at the melting temperature
+therefore preserves stationary solid fractions, while incoming superheat can
+melt material through the existing energy account without a second latent
+heat source or an independent phase-fraction integrator.
+
+The descriptor requires the complete original phase chart and retained
+caloric identity, affine liquid mass fraction on the plateau, equal constant
+phase densities and fixed cell mass consistent with density times volume.
+The public generic constructor requires the caller to provide the original
+complete chart; selected temperature samples do not establish that binding.
+Every flowing donor and receiver must contain liquid. Closed local mass
+balance, conservative pair transfers, the existing combined explicit CFL and
+implicit energy residual remain authoritative. The carried-enthalpy slope is
+zero on the plateau and one in the liquid branch, so the original total-mass
+outflow bound remains conservative.
+
+The native `MaterialFlowFeedback::with_liquid_carrier` adapter passes the
+original pointer-bound phase curve's full knots and retains the descriptor
+through explicit graph rebuilds and implicit Stokes endpoints. It requires
+the existing physical creeping-flow heating owner. Native velocity represents
+liquid volume flux per total face area; homogeneous retained inertia refuses
+in both attachment orders. Open or selective streams, stationary species,
+bulk-enthalpy entropy auditing and nonempty bulk-enthalpy reconstruction also
+refuse until their own phase-specific closures are supplied. Alloy melting
+ranges, unequal phase densities and moving solid skeletons are outside this
+model.
+
+Five thermal regressions cover isothermal circulation, large datum shifts,
+implicit latent melting by superheat, fully liquid equivalence and admission
+failures. Two native flow regressions exercise repeated physical wall-heating
+epochs and the implicit Stokes energy equations. These integration tests
+require the full native thermal/flow dependency graph to execute.
 
 ## Sublimation and deposition
 

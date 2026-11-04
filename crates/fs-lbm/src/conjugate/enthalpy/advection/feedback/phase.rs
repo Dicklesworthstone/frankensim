@@ -148,8 +148,10 @@ where
     /// An all-solid zero-drive epoch has exactly zero flow and heat without
     /// a momentum solve or invented viscosity. Its report has zero iterations.
     ///
-    /// This retains the existing homogeneous single-velocity enthalpy/porosity
-    /// approximation. It does not supply moving solid mechanics, residual stress,
+    /// This defaults to the homogeneous single-velocity enthalpy/porosity
+    /// approximation. `Self::with_liquid_carrier` instead carries liquid h
+    /// through the stationary solid in the admitted closed Stokes model.
+    /// It does not supply moving solid mechanics, residual stress,
     /// shrinkage, separate phase velocities or free surfaces. Retained native
     /// momentum and its physical/numerical energy account may be selected with
     /// `with_unsteady_momentum` and the unsteady heating attachments. Newly
@@ -217,6 +219,7 @@ where
             buoyancy: None,
             external_force_n_m3: None,
             mushy: Some(law),
+            liquid_carrier: None,
             porous: None,
             porous_endpoint: Vec::new(),
             phase_conduction: None,
@@ -313,7 +316,7 @@ where
     }
 }
 
-fn admit_phase_config(config: &SimpleConfig) -> Result<(), DepositionError> {
+pub(super) fn admit_phase_config(config: &SimpleConfig) -> Result<(), DepositionError> {
     if config.turbulence != Turbulence::Laminar
         || config.fan.is_some()
         || !config.internal_fans.is_empty()

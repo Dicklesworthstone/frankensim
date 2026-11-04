@@ -14,6 +14,10 @@
 //! Species mixing, density/volume changes, pressure work and phase-dependent
 //! mobility need their own models; no velocity or melt motion is inferred here.
 
+/// Liquid-carried energy through an explicitly stationary solid skeleton.
+#[path = "advection/liquid.rs"]
+pub mod liquid;
+
 /// Stationary species balances on the same prescribed flow graph, including
 /// bounded inlet-fed recirculation.
 // enthalpy.rs loads this file by #[path], so a bare `mod` would resolve beside it.
@@ -180,6 +184,7 @@ pub struct Advected<O> {
     reference_cells: BTreeMap<CellId, CellId>,
     selective_outlets: BTreeMap<u64, SelectiveOutlet>,
     stationary_species: Option<species::StationarySpecies>,
+    liquid_carrier: Option<liquid::LiquidEnthalpyCarrier>,
     boundary_pending: Option<BoundaryPending>,
     pending: Option<Pending>,
     audit: AdvectionAudit,
@@ -233,7 +238,7 @@ impl<O> Advected<O> {
         let reference_cells = component_references(&flows);
         Ok(Self { inner, flows, boundaries: Vec::new(), reference_cells,
             selective_outlets: BTreeMap::new(),
-            stationary_species: None, boundary_pending: None,
+            stationary_species: None, liquid_carrier: None, boundary_pending: None,
             pending: None, audit: AdvectionAudit::default(), entropy: None })
     }
     /// Replace the complete inlet/outlet data at an accepted endpoint. The
@@ -243,6 +248,9 @@ impl<O> Advected<O> {
     /// infer reservoir pressure, velocity, mixing or momentum.
     pub fn with_boundaries(mut self, mut boundaries: Vec<MassBoundary>, max_connections: usize)
         -> Result<Self, DepositionError> {
+        if self.liquid_carrier.is_some() && !boundaries.is_empty() {
+            return Err(invalid("liquid-carrier transport requires a closed mass-flow graph"));
+        }
         if self.flows.len().checked_add(boundaries.len()).is_none_or(|n| n > max_connections) {
             return Err(DepositionError::Budget("mass-flow connections"));
         }
@@ -273,6 +281,9 @@ impl<O> Advected<O> {
     pub fn with_selective_outlets(
         mut self, outlets: Vec<SelectiveOutlet>, max_species: usize,
     ) -> Result<Self, DepositionError> {
+        if self.liquid_carrier.is_some() && !outlets.is_empty() {
+            return Err(invalid("liquid-carrier transport has no selective-outlet closure"));
+        }
         if outlets.len() > self.boundaries.len() {
             return Err(DepositionError::Budget("selective mass-flow outlets"));
         }
@@ -313,8 +324,16 @@ impl<O> Advected<O> {
     fn reference_h(&self, thermal: &DepositionSimulation<'_>, id: CellId)
         -> Result<f64, DepositionError> {
         let reference = self.reference_cells.get(&id).unwrap_or(&id);
-        thermal.cells().get(reference).map(|cell| cell.specific_h_j_kg)
-            .ok_or(invalid("inactive advective reference cell"))
+        let cell = thermal.cells().get(reference)
+            .ok_or(invalid("inactive advective reference cell"))?;
+        self.carried_h(cell)
+    }
+
+    fn carried_h(&self, cell: &super::DepositedCell) -> Result<f64, DepositionError> {
+        match &self.liquid_carrier {
+            Some(carrier) => carrier.carried_h(cell),
+            None => Ok(cell.specific_h_j_kg),
+        }
     }
 }
 
@@ -348,6 +367,14 @@ impl<O: DepositionObserver> DepositionObserver for Advected<O> {
         check: &mut dyn FnMut() -> Result<(), DepositionError>)
         -> Result<BTreeMap<CellId, f64>, Self::Error> {
         check()?;
+        if let Some(carrier) = &self.liquid_carrier {
+            if !self.boundaries.is_empty() || self.stationary_species.is_some()
+                || !self.selective_outlets.is_empty() || self.entropy.is_some()
+            {
+                return Err(invalid("liquid-carrier transport requires a closed graph without species or bulk-entropy mixing").into());
+            }
+            carrier.admit_law(thermal)?;
+        }
         if !self.selective_outlets.is_empty() && self.stationary_species.is_none() {
             return Err(invalid("selective outlets require stationary species admission").into());
         }
@@ -451,9 +478,13 @@ impl<O: DepositionObserver> DepositionObserver for Advected<O> {
                 return Err(invalid("advection across different material IDs requires a composition model").into());
             }
             let (up, down) = if up_id == a.id { (a, b) } else { (b, a) };
+            let carried_h = self.carried_h(up)?;
+            // A stationary solid can neither donate nor accept a nonzero
+            // liquid mass flux. Zero-rate constrained faces remain admissible.
+            if self.liquid_carrier.is_some() { self.carried_h(down)?; }
             let reference_h = self.reference_h(thermal, up.id)?;
-            let power_w = finite(rate * finite(up.specific_h_j_kg - reference_h)?)?;
-            let gross_power_w = finite(rate * up.specific_h_j_kg)?;
+            let power_w = finite(rate * finite(carried_h - reference_h)?)?;
+            let gross_power_w = finite(rate * carried_h)?;
             let out = rates.entry(up.id).or_default();
             out[1] = finite(out[1] + rate)?;
             let incoming = rates.entry(down.id).or_default();

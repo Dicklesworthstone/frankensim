@@ -165,6 +165,11 @@ impl LimitedEnthalpyReconstruction {
         flow: &Advected<()>,
         checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), DepositionError> {
+        if flow.liquid_carrier.is_some() {
+            return Err(invalid(
+                "bulk-enthalpy reconstruction has no liquid-carrier phase closure",
+            ));
+        }
         for (&id, bound) in &self.cells {
             checkpoint()?;
             let cell = thermal

@@ -11,6 +11,7 @@
 use std::collections::BTreeMap;
 
 use fs_conduction::transient::deposition::advection::{Advected, AdvectionAudit};
+use fs_conduction::transient::deposition::advection::liquid::LiquidEnthalpyCarrier;
 use fs_conduction::transient::deposition::{
     CellId, DepositedCell, DepositionError, DepositionObserver, DepositionSimulation, Event,
     HeatTransfer, series_conductance_w_k,
@@ -55,6 +56,7 @@ use viscous::ViscousHeating;
 pub use viscous::ViscousHeatingAudit;
 mod phase_conduction;
 use phase_conduction::PhaseConduction;
+mod liquid_carrier;
 mod unsteady;
 use crate::conjugate::unsteady::MaterialMomentum;
 
@@ -224,6 +226,7 @@ pub struct MaterialFlowFeedback<'a, F, R, O, T = FluidTransportState> {
     buoyancy: Option<([f64; 3], fn(&F) -> f64)>,
     external_force_n_m3: Option<Vec<[f64; 3]>>,
     mushy: Option<&'a MushyPhaseLaw<'a>>,
+    liquid_carrier: Option<LiquidEnthalpyCarrier>,
     porous: Option<Vec<Option<PermeabilityTemperatureLaw<'a>>>>,
     porous_endpoint: Vec<PorousFlowSample>,
     phase_conduction: Option<PhaseConduction<'a>>,
@@ -303,6 +306,7 @@ where
             buoyancy: None,
             external_force_n_m3: None,
             mushy: None,
+            liquid_carrier: None,
             porous: None,
             porous_endpoint: Vec::new(),
             phase_conduction: None,
@@ -395,8 +399,9 @@ where
     /// permeability, implicitly in native momentum. The same native face
     /// fluxes transport total h, including latent energy, exactly once.
     ///
-    /// This is the declared homogeneous single-velocity enthalpy/porosity
-    /// approximation, not separate moving-liquid/stationary-solid transport.
+    /// The default is the declared homogeneous single-velocity enthalpy/porosity
+    /// approximation. `Self::with_liquid_carrier` optionally transports the
+    /// liquid's enthalpy through a stationary solid in a closed Stokes domain.
     /// It retains the underlying callback's source receipts and context; it
     /// does not promote raw permeability/model data to measured authority.
     /// Below the model's minimum liquid volume fraction (including fully
@@ -1082,8 +1087,10 @@ where
             .ok_or(invalid("unfinished material-flow source epoch"))?;
         // Rebuilding the graph keeps the accepted wrapped physical history.
         // It does not call begin() again or reset another owner's work counter.
-        let mut advected = Advected::new(old.into_inner(), flows, self.input.max_connections)?
-            .with_boundaries(boundaries, self.input.max_connections)?;
+        let mut advected = self.bind_liquid_carrier(
+            Advected::new(old.into_inner(), flows, self.input.max_connections)?
+                .with_boundaries(boundaries, self.input.max_connections)?,
+        )?;
         let mut sources = advected
             .sources(thermal, check)
             .map_err(MaterialFlowError::Inner)?;

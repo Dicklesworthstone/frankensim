@@ -341,6 +341,9 @@ impl<O> Advected<O> {
         mut self, species: Vec<String>, inlets: Vec<InletSpecies>,
         max_cells: usize, max_species: usize,
     ) -> Result<Self, DepositionError> {
+        if self.liquid_carrier.is_some() {
+            return Err(invalid("liquid-carrier transport has no stationary-species closure"));
+        }
         self.stationary_species = Some(StationarySpecies::solve(
             &self.flows, &self.boundaries, species, inlets, max_cells, max_species,
             &self.selective_outlets,

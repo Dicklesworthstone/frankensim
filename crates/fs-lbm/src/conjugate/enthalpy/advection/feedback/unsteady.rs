@@ -52,6 +52,11 @@ where
     /// SIMPLEC's existing max_iterations/tolerance bound each momentum step.
     pub fn with_unsteady_momentum(mut self) -> Result<Self, MaterialFlowError<O::Error>> {
         check_gate(self.gate, &mut || Ok(()))?;
+        if self.liquid_carrier.is_some() {
+            return Err(invalid(
+                "liquid-only carriage through stationary solid requires the closed creeping-flow owner, not homogeneous inertia",
+            ).into());
+        }
         if self.unsteady.is_some() || self.applied.is_some() {
             return Err(invalid(
                 "attach retained momentum before the first advance; an accepted flow history cannot be replaced by rest",

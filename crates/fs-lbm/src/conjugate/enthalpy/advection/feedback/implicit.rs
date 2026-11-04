@@ -281,9 +281,10 @@ where
                         proposal.input,
                         &mut || check(),
                     )?;
-                    let transport = Advected::new((), flows, proposal.input.max_connections)?
-                        .with_boundaries(boundaries, proposal.input.max_connections)?
-                        .endpoint_transport(state, || check())?;
+                    let transport = proposal.bind_liquid_carrier(
+                        Advected::new((), flows, proposal.input.max_connections)?
+                            .with_boundaries(boundaries, proposal.input.max_connections)?,
+                    )?.endpoint_transport(state, || check())?;
                     let mut sources_w = transport.heat.bulk.sources_w;
                     let stream_w = sources_w.values().try_fold(0.0, |s, &p| finite(s + p))?;
                     let power = epoch

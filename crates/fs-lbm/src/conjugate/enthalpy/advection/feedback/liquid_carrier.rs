@@ -1,0 +1,86 @@
+//! Source-bound liquid enthalpy on the native stationary-skeleton Stokes flow.
+
+use super::*;
+use fs_conduction::transient::deposition::advection::liquid::LiquidCarrierKnot;
+
+impl<'a, F: Clone, R, O: DepositionObserver, T: FlowTransportSnapshot>
+    MaterialFlowFeedback<'a, F, R, O, T>
+where
+    R: Clone + FnMut(usize, &DepositedCell, f64) -> Result<F, MaterialError>,
+{
+    /// Carry liquid enthalpy through the stationary solid while the original
+    /// thermal cells retain the complete sensible/latent mixture energy.
+    ///
+    /// Requires the already bound original pure-substance phase chart, equal
+    /// constant phase density, and closed creeping flow with physical viscous
+    /// heating (`with_viscous_heating` or `with_body_force_heating`). The native
+    /// velocity is interpreted as liquid volume flux per total cell-face area.
+    /// The stationary solid carries no mass flux or reaction work. Every native
+    /// liquid mass rate remains locally balanced, so changes in liquid inventory
+    /// are exactly the melting/freezing supplied by the original h chart.
+    ///
+    /// At coexistence a donor carries its liquid-side enthalpy, independently
+    /// of how much stationary solid remains; fully liquid donors retain their
+    /// original h. Isothermal circulation therefore cannot homogenize solid
+    /// fractions. Superheat, conduction, Joule and viscous heat still melt the
+    /// same original cells, and latent energy is never supplied twice.
+    ///
+    /// Attach before the first advance. Transient homogeneous inertia, open
+    /// mass boundaries, non-isothermal alloy coexistence, unequal density and
+    /// moving skeletons are unsupported. No liquid-occupancy inertia or separate
+    /// phase momentum is inferred. Explicit and implicit Stokes thermal paths
+    /// use the same original `Advected` owner and source-bound descriptor.
+    pub fn with_liquid_carrier(mut self) -> Result<Self, MaterialFlowError<O::Error>> {
+        check_gate(self.gate, &mut || Ok(()))?;
+        if self.unsteady.is_some() || self.applied.is_some()
+            || self.viscous_heating.as_ref().is_none_or(|heat| heat.pressure_work)
+        {
+            return Err(invalid(
+                "liquid carriage requires closed physical Stokes heating before the first advance",
+            ).into());
+        }
+        phase::admit_phase_config(self.config)?;
+        let phase = self.mushy.ok_or(invalid(
+            "liquid carriage requires the original stationary phase-mobility source",
+        ))?;
+        if phase.fixed_density_kg_m3() != Some(self.density_kg_m3) {
+            return Err(invalid("liquid carriage requires equal constant phase density").into());
+        }
+        let mut knots = Vec::with_capacity(phase.curve().knots().len());
+        for (index, knot) in phase.curve().knots().iter().enumerate() {
+            if index % 256 == 0 { check_gate(self.gate, &mut || Ok(()))?; }
+            knots.push(LiquidCarrierKnot {
+                specific_enthalpy_j_kg: knot.specific_enthalpy_j_kg,
+                temperature_k: knot.temperature_k,
+                liquid_mass_fraction: knot.liquid_mass_fraction,
+                bulk_density_kg_m3: knot.bulk_density_kg_m3,
+            });
+        }
+        let carrier = LiquidEnthalpyCarrier::from_source_chart(
+            self.input.material_id, self.input.caloric, &knots,
+            || check_gate(self.gate, &mut || Ok(())),
+        )?;
+        self.advected = Some(self.advected.take()
+            .ok_or(invalid("unfinished material-flow source epoch"))?
+            .with_liquid_carrier(carrier)?);
+        self.liquid_carrier = Some(carrier);
+        Ok(self)
+    }
+}
+
+impl<F, R, O, T> MaterialFlowFeedback<'_, F, R, O, T> {
+    /// The original liquid-carrier chart, absent for homogeneous bulk-h transport.
+    pub fn liquid_carrier(&self) -> Option<&LiquidEnthalpyCarrier> {
+        self.liquid_carrier.as_ref()
+    }
+
+    pub(super) fn bind_liquid_carrier<P>(
+        &self,
+        advected: Advected<P>,
+    ) -> Result<Advected<P>, DepositionError> {
+        match self.liquid_carrier {
+            Some(carrier) => advected.with_liquid_carrier(carrier),
+            None => Ok(advected),
+        }
+    }
+}
