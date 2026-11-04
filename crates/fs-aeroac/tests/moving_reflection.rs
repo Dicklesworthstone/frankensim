@@ -318,6 +318,76 @@ fn reflected_doppler_uses_the_image_receiver_velocity() {
 }
 
 #[test]
+fn moving_microphone_retains_weak_force_after_image_path_cancellation() {
+    let source = path(&[-0.2, 0.3], |_| fixed([1.0, 0.0, 0.0]));
+    let receiver = path(&[0.0, 0.1, 0.2], |time| SourceKinematics {
+        position_m: [3.0 + 10.0 * (time - 0.1), 0.0, 0.0],
+        velocity_m_s: [10.0, 0.0, 0.0],
+        acceleration_m_s2: [0.0; 3],
+    });
+    let weak_force = 2.0_f64.powi(-60);
+    for parity in 0..2 {
+        let observer = MovingReflectionObserver::new(
+            &receiver,
+            &walls(parity, 1),
+            2,
+            bounds(),
+            &mut || false,
+        )
+        .unwrap();
+        let reflected = PreparedReflectedMovingReceiverSource::new(
+            &source,
+            &observer,
+            config([0.05, 0.15]),
+            bounds(),
+            pairs(),
+            &mut || false,
+        )
+        .unwrap();
+        let direct = reflected.prepare_path(0, 0.1, &mut || false).unwrap();
+        let image = reflected.prepare_path(1, 0.1, &mut || false).unwrap();
+        let sign = if parity == 0 { 1.0 } else { -1.0 };
+        let early_time = image.pressure.source_time_s();
+        let duration = direct.pressure.source_time_s() - early_time;
+        assert!(duration > 0.0);
+        assert_ne!(direct.observed_source_time_rate, 1.0);
+
+        // The receiver crosses x=3 at this event. A physical quadratic
+        // volume history cancels the strong monopoles at distances 2 and 4;
+        // a weak steady normal force retains its two near-field pressures.
+        let history = |time| {
+            let u = (time - early_time) / duration;
+            let early_rate = -2.0 * sign;
+            let slope = 1.0 - early_rate;
+            CompactSourceStrength {
+                volume_flow_m3_s: duration * u * (early_rate + 0.5 * slope * u),
+                volume_flow_rate_m3_s2: early_rate + slope * u,
+                force_on_fluid_n: [weak_force, 0.0, 0.0],
+                ..CompactSourceStrength::default()
+            }
+        };
+        let direct_sample = direct
+            .pressure
+            .evaluate(history(direct.pressure.source_time_s()))
+            .unwrap();
+        let image_sample = image
+            .pressure
+            .evaluate(history(image.pressure.source_time_s()))
+            .unwrap();
+        assert_eq!(direct_sample.pressure_pa + image_sample.pressure_pa, 0.0);
+        let expected = weak_force * (0.25 - sign * 0.0625) / (4.0 * PI);
+        near(
+            reflected
+                .pressure_at(0.1, &mut |time| Ok(history(time)), &mut || false)
+                .unwrap(),
+            expected,
+            1e-13,
+            0.0,
+        );
+    }
+}
+
+#[test]
 fn a_microphone_moving_on_a_release_wall_retains_exact_pressure_cancellation() {
     let source = path(&[-0.3, -0.04, 0.4], source);
     let receiver = path(&[0.0, 0.2], |t| SourceKinematics {

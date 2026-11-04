@@ -390,6 +390,16 @@ impl PreparedMovingCompactSample {
         &self,
         strength: CompactSourceStrength,
     ) -> Result<MovingCompactSample, AeroacError> {
+        let (sample, _) = self.evaluate_with_pressure_dd(strength)?;
+        Ok(sample)
+    }
+
+    // Keep weak source components available to the coherent image-path sum.
+    // The public sample and all per-path overflow checks remain unchanged.
+    fn evaluate_with_pressure_dd(
+        &self,
+        strength: CompactSourceStrength,
+    ) -> Result<(MovingCompactSample, Dd), AeroacError> {
         let values = [
             strength.volume_flow_m3_s,
             strength.volume_flow_rate_m3_s2,
@@ -429,7 +439,7 @@ impl PreparedMovingCompactSample {
         {
             return Err(nonfinite("moving compact pressure"));
         }
-        Ok(sample)
+        Ok((sample, total))
     }
 }
 

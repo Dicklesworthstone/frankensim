@@ -137,6 +137,65 @@ fn stationary_transient_images_recover_harmonic_corner_interference_and_each_del
     }
 }
 
+#[test]
+fn weak_force_survives_destructive_interference_between_retarded_paths() {
+    let base = prepare(
+        observer([3.0, 0.0, 0.0], 300.0, 0.0, 0.05),
+        &samples(&[-0.1, 0.1], |_| SourceKinematics {
+            position_m: [1.0, 0.0, 0.0],
+            ..SourceKinematics::default()
+        }),
+    );
+    let weak_force = 2.0_f64.powi(-60);
+    for parity in 0..2 {
+        let images = IdealReflectionObserver::new(*base.observer(), &walls(parity, 1), 2)
+            .unwrap();
+        let reflected = PreparedReflectedSourceTrajectory::new(
+            &base,
+            &images,
+            reflection_budget(),
+            &mut || false,
+        )
+        .unwrap();
+        let direct = reflected.prepare_path(0, 0.0, 1e-14, &mut || false).unwrap();
+        let image = reflected.prepare_path(1, 0.0, 1e-14, &mut || false).unwrap();
+        let sign = if parity == 0 { 1.0 } else { -1.0 };
+        let early_time = image.source_time_s();
+        let duration = direct.source_time_s() - early_time;
+        assert!(duration > 0.0);
+
+        // One smooth quadratic Q(t) has Qdot=1 on the direct path and
+        // Qdot=-2*sign on the twice-as-long image path. Their monopole
+        // pressures cancel, while a constant normal force retains its
+        // near-field pressure, including the reflected force orientation.
+        let history = |time| {
+            let u = (time - early_time) / duration;
+            let early_rate = -2.0 * sign;
+            let slope = 1.0 - early_rate;
+            CompactSourceStrength {
+                volume_flow_m3_s: duration * u * (early_rate + 0.5 * slope * u),
+                volume_flow_rate_m3_s2: early_rate + slope * u,
+                force_on_fluid_n: [weak_force, 0.0, 0.0],
+                ..CompactSourceStrength::default()
+            }
+        };
+        let direct_sample = direct.evaluate(history(direct.source_time_s())).unwrap();
+        let image_sample = image.evaluate(history(image.source_time_s())).unwrap();
+        assert!(direct_sample.dipole_pressure_pa > 0.0);
+        // Rounding each path first erases the complete physical residual.
+        assert_eq!(direct_sample.pressure_pa + image_sample.pressure_pa, 0.0);
+        let expected = weak_force * (0.25 - sign * 0.0625) / (4.0 * PI);
+        near(
+            reflected
+                .pressure_at(0.0, 1e-14, &mut |time| Ok(history(time)), &mut || false)
+                .unwrap(),
+            expected,
+            1e-13,
+            0.0,
+        );
+    }
+}
+
 fn image_vector(v: [f64; 3], mask: usize) -> [f64; 3] {
     core::array::from_fn(|i| if mask & (1 << i) == 0 { v[i] } else { -v[i] })
 }
