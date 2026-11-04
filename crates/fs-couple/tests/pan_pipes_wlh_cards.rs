@@ -11,6 +11,9 @@
 //! The test parses each card with the reader and checks what the posted render depends on: the exact length, the `flue` record in the reader's field order (`flue_width_m, flue_height_m, cut_up_m,
 //! labium_offset_m, jet_angle_rad, mouth_loss_rel`), the order of the jet rows, the forced jet with its spreading law, the momentum drive at weight 1 on the bore's area, the contraction row, the
 //! `jet_noise` record with its onset Reynolds number 700, and the blowing-pressure hold with its 50 ms onset ramp and its release.
+//!
+//! Cost: the reader builds a renderer for every card it parses, which takes minutes in a release build (175.4 s for the four on ts2), so one test pins all four cards by their bytes and rows (the length, the
+//! `flue` record, the jet rows, the contraction row and the two blowing-pressure event rows) and a second test parses ONE card, B4 (the shortest tube), and checks what the reader makes of it.
 
 use fs_couple::flue_loop::forced_jet::JetSpreadingLaw;
 use fs_couple::flue_loop::momentum_drive::EQ1_KAPPA;
@@ -31,14 +34,15 @@ const B4: &str = include_str!(
     "../../../data/instruments/descriptions/pan-pipes/pan-pipes-b4-forced-jet-spreading-half-width-offset-re700.performance"
 );
 
-/// (note, card, posted byte length, `flue` row, blowing-pressure hold in Pa, [width, height, cut-up, labium offset] in m)
-const CARDS: [(&str, &str, usize, &str, f64, [f64; 4]); 4] = [
+/// (note, card, posted byte length, `flue` row, the blowing-pressure hold as written in the card's first event row,
+/// [width, height, cut-up, labium offset] in m)
+const CARDS: [(&str, &str, usize, &str, &str, [f64; 4]); 4] = [
     (
         "D3",
         D3,
         2359,
         "flue 0.02033 0.00200 0.010053 0.0010863 0 0",
-        117.47,
+        "1.1747e2",
         [0.02033, 0.00200, 0.010053, 0.0010863],
     ),
     (
@@ -46,7 +50,7 @@ const CARDS: [(&str, &str, usize, &str, f64, [f64; 4]); 4] = [
         G3,
         2357,
         "flue 0.01794 0.00176 0.008943 0.0009616 0 0",
-        156.80,
+        "1.568e2",
         [0.01794, 0.00176, 0.008943, 0.0009616],
     ),
     (
@@ -54,7 +58,7 @@ const CARDS: [(&str, &str, usize, &str, f64, [f64; 4]); 4] = [
         D4,
         2358,
         "flue 0.01506 0.00143 0.007635 0.0008028 0 0",
-        234.93,
+        "2.3493e2",
         [0.01506, 0.00143, 0.007635, 0.0008028],
     ),
     (
@@ -62,10 +66,13 @@ const CARDS: [(&str, &str, usize, &str, f64, [f64; 4]); 4] = [
         B4,
         2358,
         "flue 0.01201 0.00100 0.006300 0.0006175 0 0",
-        395.11,
+        "3.9511e2",
         [0.01201, 0.00100, 0.006300, 0.0006175],
     ),
 ];
+
+/// The one card the reader is run on (a renderer per card costs minutes).
+const PARSED: &str = "B4";
 
 fn rows(card: &'static str, prefix: &str) -> Vec<&'static str> {
     card.lines()
@@ -74,8 +81,8 @@ fn rows(card: &'static str, prefix: &str) -> Vec<&'static str> {
 }
 
 #[test]
-fn the_posted_pan_pipe_cards_keep_their_bytes_rows_and_half_width_offset() {
-    for (note, card_text, bytes, flue_row, hold, flue) in CARDS {
+fn the_posted_pan_pipe_cards_keep_their_bytes_and_rows() {
+    for (note, card_text, bytes, flue_row, hold, _) in CARDS {
         assert_eq!(
             card_text.len(),
             bytes,
@@ -111,73 +118,90 @@ fn the_posted_pan_pipe_cards_keep_their_bytes_rows_and_half_width_offset() {
             rows(card_text, "jet_transfer ").is_empty(),
             "{note}: the card has no `jet_transfer` row"
         );
-
-        let card = FlueFilePerformance::from_bytes(
-            card_text.as_bytes(),
-            256,
-            &CancelGate::new_clock_free(),
-        )
-        .unwrap_or_else(|e| panic!("{note}: the posted card parses: {e:?}"));
-        let geometry = card.geometry();
-        for (name, got, want) in [
-            ("flue width", geometry.flue_width_m, flue[0]),
-            ("flue height", geometry.flue_height_m, flue[1]),
-            ("cut-up", geometry.cut_up_m, flue[2]),
-            ("labium offset", geometry.labium_offset_m, flue[3]),
-            ("jet angle", geometry.jet_angle_rad, 0.0),
-            ("mouth loss", geometry.mouth_loss_rel, 0.0),
-        ] {
-            assert_eq!(got.to_bits(), f64::to_bits(want), "{note}: {name}");
-        }
-
-        let voice = card.renderer().voice();
-        let kernel = voice.forced_jet().expect("the forced jet attaches");
-        assert_eq!(kernel.spreading(), JetSpreadingLaw::Fletcher1976, "{note}");
-        let drive = voice
-            .momentum_drive()
-            .expect("the momentum drive is attached");
-        assert_eq!(drive.kappa().to_bits(), EQ1_KAPPA.to_bits(), "{note}");
         assert_eq!(
-            drive.bore_area_m2().to_bits(),
-            card.geometry().bore_area_m2.to_bits(),
-            "{note}"
-        );
-        assert!(
-            voice.mouth_contraction().is_some(),
-            "{note}: the contraction row is attached"
-        );
-        let noise = voice.jet_noise().expect("the jet_noise row attaches");
-        assert_eq!(noise.seed, 14, "{note}");
-        for (name, got, want) in [
-            ("gain", noise.gain, 1.3e-3),
-            ("St_h low", noise.strouhal_lo, 0.045),
-            ("St_h high", noise.strouhal_hi, 0.115),
-            ("onset Re_h", noise.reynolds_onset, 700.0),
-        ] {
-            assert_eq!(got.to_bits(), f64::to_bits(want), "{note}: {name}");
-        }
-
-        let tracks = card.renderer().schedule().tracks();
-        assert_eq!(tracks.len(), 1, "{note}");
-        assert_eq!(tracks[0].id, "blow", "{note}");
-        let pressures: Vec<f64> = tracks[0]
-            .events
-            .iter()
-            .map(|event| match event.value {
-                GestureValue::PressurePa(pa) => pa,
-                ref other => panic!("{note}: a blowing-pressure event, not {other:?}"),
-            })
-            .collect();
-        assert_eq!(pressures, [hold, 0.0], "{note}: the hold, then the release");
-        assert_eq!(
-            tracks[0].events[0].transition_s.to_bits(),
-            5.0e-2f64.to_bits(),
-            "{note}: the 50 ms onset ramp"
-        );
-        assert_eq!(
-            tracks[0].events[1].transition_s.to_bits(),
-            1.05e-2f64.to_bits(),
-            "{note}: the 10.5 ms release"
+            rows(card_text, "event\t"),
+            [
+                format!("event\t0e0\t5e-2\tpressure-pa\t{hold}"),
+                "event\t2.2e0\t1.05e-2\tpressure-pa\t0e0".to_string()
+            ],
+            "{note}: the 50 ms onset ramp to the hold, then the 10.5 ms release"
         );
     }
+}
+
+#[test]
+fn the_reader_makes_the_forced_jet_the_momentum_drive_and_the_noise_of_one_posted_card() {
+    let (note, card_text, _, _, hold, flue) = CARDS
+        .into_iter()
+        .find(|(note, ..)| *note == PARSED)
+        .expect("the parsed card is one of the four");
+    let card =
+        FlueFilePerformance::from_bytes(card_text.as_bytes(), 256, &CancelGate::new_clock_free())
+            .unwrap_or_else(|e| panic!("{note}: the posted card parses: {e:?}"));
+    let geometry = card.geometry();
+    for (name, got, want) in [
+        ("flue width", geometry.flue_width_m, flue[0]),
+        ("flue height", geometry.flue_height_m, flue[1]),
+        ("cut-up", geometry.cut_up_m, flue[2]),
+        ("labium offset", geometry.labium_offset_m, flue[3]),
+        ("jet angle", geometry.jet_angle_rad, 0.0),
+        ("mouth loss", geometry.mouth_loss_rel, 0.0),
+    ] {
+        assert_eq!(got.to_bits(), f64::to_bits(want), "{note}: {name}");
+    }
+
+    let voice = card.renderer().voice();
+    let kernel = voice.forced_jet().expect("the forced jet attaches");
+    assert_eq!(kernel.spreading(), JetSpreadingLaw::Fletcher1976, "{note}");
+    let drive = voice
+        .momentum_drive()
+        .expect("the momentum drive is attached");
+    assert_eq!(drive.kappa().to_bits(), EQ1_KAPPA.to_bits(), "{note}");
+    assert_eq!(
+        drive.bore_area_m2().to_bits(),
+        card.geometry().bore_area_m2.to_bits(),
+        "{note}"
+    );
+    assert!(
+        voice.mouth_contraction().is_some(),
+        "{note}: the contraction row is attached"
+    );
+    let noise = voice.jet_noise().expect("the jet_noise row attaches");
+    assert_eq!(noise.seed, 14, "{note}");
+    for (name, got, want) in [
+        ("gain", noise.gain, 1.3e-3),
+        ("St_h low", noise.strouhal_lo, 0.045),
+        ("St_h high", noise.strouhal_hi, 0.115),
+        ("onset Re_h", noise.reynolds_onset, 700.0),
+    ] {
+        assert_eq!(got.to_bits(), f64::to_bits(want), "{note}: {name}");
+    }
+
+    let tracks = card.renderer().schedule().tracks();
+    assert_eq!(tracks.len(), 1, "{note}");
+    assert_eq!(tracks[0].id, "blow", "{note}");
+    let pressures: Vec<f64> = tracks[0]
+        .events
+        .iter()
+        .map(|event| match event.value {
+            GestureValue::PressurePa(pa) => pa,
+            ref other => panic!("{note}: a blowing-pressure event, not {other:?}"),
+        })
+        .collect();
+    let want_hold: f64 = hold.parse().expect("the hold is a number");
+    assert_eq!(
+        pressures,
+        [want_hold, 0.0],
+        "{note}: the hold, then the release"
+    );
+    assert_eq!(
+        tracks[0].events[0].transition_s.to_bits(),
+        5.0e-2f64.to_bits(),
+        "{note}: the 50 ms onset ramp"
+    );
+    assert_eq!(
+        tracks[0].events[1].transition_s.to_bits(),
+        1.05e-2f64.to_bits(),
+        "{note}: the 10.5 ms release"
+    );
 }

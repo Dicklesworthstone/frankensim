@@ -10,6 +10,9 @@
 //! The test parses each card with the reader and checks what the posted render depends on: the exact length, the `flue` record in the reader's field order (`flue_width_m, flue_height_m,
 //! cut_up_m, labium_offset_m, jet_angle_rad, mouth_loss_rel`), the `jet_spreading` law the forced jet attaches, the `jet_noise` record with its onset Reynolds number 700, the blowing-pressure
 //! hold and its release, and that no `momentum_drive` or `jet_transfer` row is present.
+//!
+//! Cost: the reader builds a renderer for every card it parses, which takes minutes in a release build (234.6 s for the four on ts2), so one test pins all four cards by their bytes and rows (the length, the
+//! `flue` record, the jet rows, the contraction row and the two blowing-pressure event rows) and a second test parses ONE card, B5 (the one with the open-chimney `inner` rows), and checks what the reader makes of it.
 
 use fs_couple::flue_loop::forced_jet::JetSpreadingLaw;
 use fs_couple::flue_loop::network::performance::file::FlueFilePerformance;
@@ -29,13 +32,16 @@ const D6: &str = include_str!(
     "../../../data/instruments/descriptions/tin-whistle/tin-whistle-d6-fletcher-spreading-borrowed-offset-re700.performance"
 );
 
-/// (note, card, posted byte length, blowing-pressure hold in Pa)
-const CARDS: [(&str, &str, usize, f64); 4] = [
-    ("D5", D5, 2112, 93.447),
-    ("G5", G5, 2280, 151.84),
-    ("B5", B5, 2390, 198.32),
-    ("D6", D6, 2167, 292.44),
+/// (note, card, posted byte length, the blowing-pressure hold as written in the card's first event row)
+const CARDS: [(&str, &str, usize, &str); 4] = [
+    ("D5", D5, 2112, "9.3447e1"),
+    ("G5", G5, 2280, "1.5184e2"),
+    ("B5", B5, 2390, "1.9832e2"),
+    ("D6", D6, 2167, "2.9244e2"),
 ];
+
+/// The one card the reader is run on (a renderer per card costs minutes).
+const PARSED: &str = "B5";
 
 fn rows(card: &'static str, prefix: &str) -> Vec<&'static str> {
     card.lines()
@@ -44,7 +50,7 @@ fn rows(card: &'static str, prefix: &str) -> Vec<&'static str> {
 }
 
 #[test]
-fn the_posted_whistle_cards_keep_their_bytes_rows_and_borrowed_offset() {
+fn the_posted_whistle_cards_keep_their_bytes_and_rows() {
     for (note, card_text, bytes, hold) in CARDS {
         assert_eq!(
             card_text.len(),
@@ -77,55 +83,72 @@ fn the_posted_whistle_cards_keep_their_bytes_rows_and_borrowed_offset() {
                 "{note}: the card has no `{absent}` row"
             );
         }
-
-        let card = FlueFilePerformance::from_bytes(
-            card_text.as_bytes(),
-            256,
-            &CancelGate::new_clock_free(),
-        )
-        .unwrap_or_else(|e| panic!("{note}: the posted card parses: {e:?}"));
-        let geometry = card.geometry();
-        for (name, got, want) in [
-            ("flue width", geometry.flue_width_m, 8.0e-3),
-            ("flue height", geometry.flue_height_m, 1.48e-3),
-            ("cut-up", geometry.cut_up_m, 5.30e-3),
-            ("labium offset", geometry.labium_offset_m, 0.203e-3),
-            ("jet angle", geometry.jet_angle_rad, 0.0),
-            ("mouth loss", geometry.mouth_loss_rel, 0.0),
-        ] {
-            assert_eq!(got.to_bits(), f64::to_bits(want), "{note}: {name}");
-        }
-
-        let voice = card.renderer().voice();
-        let kernel = voice.forced_jet().expect("the forced jet attaches");
-        assert_eq!(kernel.spreading(), JetSpreadingLaw::Fletcher1976, "{note}");
-        let noise = voice.jet_noise().expect("the jet_noise row attaches");
-        assert_eq!(noise.seed, 14, "{note}");
-        for (name, got, want) in [
-            ("gain", noise.gain, 1.3e-3),
-            ("St_h low", noise.strouhal_lo, 0.045),
-            ("St_h high", noise.strouhal_hi, 0.115),
-            ("onset Re_h", noise.reynolds_onset, 700.0),
-        ] {
-            assert_eq!(got.to_bits(), f64::to_bits(want), "{note}: {name}");
-        }
-
-        let tracks = card.renderer().schedule().tracks();
-        assert_eq!(tracks.len(), 1, "{note}");
-        assert_eq!(tracks[0].id, "blow", "{note}");
-        let pressures: Vec<f64> = tracks[0]
-            .events
-            .iter()
-            .map(|event| match event.value {
-                GestureValue::PressurePa(pa) => pa,
-                ref other => panic!("{note}: a blowing-pressure event, not {other:?}"),
-            })
-            .collect();
-        assert_eq!(pressures, [hold, 0.0], "{note}: the hold, then the release");
         assert_eq!(
-            tracks[0].events[0].transition_s.to_bits(),
-            1.25e-2f64.to_bits(),
-            "{note}: the 12.5 ms onset ramp"
+            rows(card_text, "event\t"),
+            [
+                format!("event\t0e0\t1.25e-2\tpressure-pa\t{hold}"),
+                "event\t2.2e0\t1.05e-2\tpressure-pa\t0e0".to_string()
+            ],
+            "{note}: the 12.5 ms onset ramp to the hold, then the 10.5 ms release"
         );
     }
+}
+
+#[test]
+fn the_reader_makes_the_forced_jet_the_spreading_and_the_noise_of_one_posted_card() {
+    let (note, card_text, _, hold) = CARDS
+        .into_iter()
+        .find(|(note, ..)| *note == PARSED)
+        .expect("the parsed card is one of the four");
+    let card =
+        FlueFilePerformance::from_bytes(card_text.as_bytes(), 256, &CancelGate::new_clock_free())
+            .unwrap_or_else(|e| panic!("{note}: the posted card parses: {e:?}"));
+    let geometry = card.geometry();
+    for (name, got, want) in [
+        ("flue width", geometry.flue_width_m, 8.0e-3),
+        ("flue height", geometry.flue_height_m, 1.48e-3),
+        ("cut-up", geometry.cut_up_m, 5.30e-3),
+        ("labium offset", geometry.labium_offset_m, 0.203e-3),
+        ("jet angle", geometry.jet_angle_rad, 0.0),
+        ("mouth loss", geometry.mouth_loss_rel, 0.0),
+    ] {
+        assert_eq!(got.to_bits(), f64::to_bits(want), "{note}: {name}");
+    }
+
+    let voice = card.renderer().voice();
+    let kernel = voice.forced_jet().expect("the forced jet attaches");
+    assert_eq!(kernel.spreading(), JetSpreadingLaw::Fletcher1976, "{note}");
+    let noise = voice.jet_noise().expect("the jet_noise row attaches");
+    assert_eq!(noise.seed, 14, "{note}");
+    for (name, got, want) in [
+        ("gain", noise.gain, 1.3e-3),
+        ("St_h low", noise.strouhal_lo, 0.045),
+        ("St_h high", noise.strouhal_hi, 0.115),
+        ("onset Re_h", noise.reynolds_onset, 700.0),
+    ] {
+        assert_eq!(got.to_bits(), f64::to_bits(want), "{note}: {name}");
+    }
+
+    let tracks = card.renderer().schedule().tracks();
+    assert_eq!(tracks.len(), 1, "{note}");
+    assert_eq!(tracks[0].id, "blow", "{note}");
+    let pressures: Vec<f64> = tracks[0]
+        .events
+        .iter()
+        .map(|event| match event.value {
+            GestureValue::PressurePa(pa) => pa,
+            ref other => panic!("{note}: a blowing-pressure event, not {other:?}"),
+        })
+        .collect();
+    let want_hold: f64 = hold.parse().expect("the hold is a number");
+    assert_eq!(
+        pressures,
+        [want_hold, 0.0],
+        "{note}: the hold, then the release"
+    );
+    assert_eq!(
+        tracks[0].events[0].transition_s.to_bits(),
+        1.25e-2f64.to_bits(),
+        "{note}: the 12.5 ms onset ramp"
+    );
 }
