@@ -1583,6 +1583,25 @@ reported rather than set to zero. Only negative quadratic-form residues
 bounded by assembly roundoff are zeroed. Evanescent propagation introduces
 no bulk heat.
 
+`HeterogeneousHelmholtzFe::probe` prepares a one-sided observation using the
+original hierarchical basis and physical barycentric gradients retained from
+assembly. It queries the caller's original frozen material once at the exact
+element/position, applies the same coherent density/sound-speed checks as
+assembly, and retains that local `Medium`; it never uses the geometry owner's
+uniform medium or averages across an interface. Caller-owned source identity
+remains the caller's responsibility. Subsequent fields reuse the local stencil
+without allocations, material queries or numerical differencing. Harmonic
+samples recover pressure, its gradient, `v = i grad(p)/(omega rho)`, and active
+and reactive parts of `p conj(v)/2`. Coherent amplitudes are combined before
+forming intensity. Transient samples require a state from the exact original
+operator and recover `v = -grad(psi)/rho` with instantaneous flux `p v`.
+Reactive evanescent flow is retained and is not interpreted as heat or normal
+transported power. Pointwise gradient/flux error has its own h/p convergence
+obligation; probes do not impose continuity or correct the solved field.
+Focused checks cover analytic P1–P4 gradients on skew/reordered tetrahedra,
+one-sided density-jump velocity, propagating/standing/evanescent flux, a solved
+Snell intensity mesh ladder, and transient gauge-invariant velocity/flux.
+
 Focused regressions cover homogeneous mode recovery, a matched traveling
 wave and its energy/work, same-speed density-interface reflection, analytic
 continuous sound-speed travel time, subcritical and evanescent Snell fields

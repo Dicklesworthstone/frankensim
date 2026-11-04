@@ -43,6 +43,9 @@ pub use harmonic::{
     PreparedHeterogeneous, VelocityTrace,
 };
 
+mod observation;
+pub use observation::{HarmonicAcousticSample, HeterogeneousProbe, TransientAcousticSample};
+
 /// Broadband evolution in the original pressure-potential coordinates.
 pub mod time;
 
@@ -125,6 +128,27 @@ fn finite(value: C64) -> bool {
     value.re.is_finite() && value.im.is_finite()
 }
 
+fn medium_coefficients(medium: Medium) -> Result<(f64, f64), AcousticFeError> {
+    if !medium.density_kg_m3.is_finite() || medium.density_kg_m3 <= 0.0 {
+        return Err(AcousticFeError::InvalidMedium { what: "density" });
+    }
+    if !medium.sound_speed_m_s.is_finite() || medium.sound_speed_m_s <= 0.0 {
+        return Err(AcousticFeError::InvalidMedium {
+            what: "sound speed",
+        });
+    }
+    let inverse_density = 1.0 / medium.density_kg_m3;
+    let compressibility = inverse_density / medium.sound_speed_m_s / medium.sound_speed_m_s;
+    if !inverse_density.is_finite()
+        || inverse_density <= 0.0
+        || !compressibility.is_finite()
+        || compressibility <= 0.0
+    {
+        return Err(invalid("unrepresentable heterogeneous acoustic coefficients"));
+    }
+    Ok((inverse_density, compressibility))
+}
+
 /// Physical eigenpairs of the heterogeneous rigid-wall cavity.
 ///
 /// These are deliberately distinct from the homogeneous owner's `k^2` modes.
@@ -150,6 +174,7 @@ pub struct HeterogeneousHelmholtzFe<'f, 'c> {
     stiffness: Csr,
     mass: Csr,
     quadrature_order: usize,
+    barycentric_gradients: Vec<[[f64; 3]; 4]>,
 }
 
 impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
@@ -207,18 +232,7 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
                     }
                 }
                 let medium = material_at(element, point)?;
-                if !medium.density_kg_m3.is_finite() || medium.density_kg_m3 <= 0.0 {
-                    return Err(AcousticFeError::InvalidMedium { what: "density" }.into());
-                }
-                if !medium.sound_speed_m_s.is_finite() || medium.sound_speed_m_s <= 0.0 {
-                    return Err(AcousticFeError::InvalidMedium {
-                        what: "sound speed",
-                    }
-                    .into());
-                }
-                let inverse_density = 1.0 / medium.density_kg_m3;
-                let compressibility =
-                    inverse_density / medium.sound_speed_m_s / medium.sound_speed_m_s;
+                let (inverse_density, compressibility) = medium_coefficients(medium)?;
                 let wk = weight * jacobian * inverse_density;
                 let wm = weight * jacobian * compressibility;
                 if !wk.is_finite() || wk <= 0.0 || !wm.is_finite() || wm <= 0.0 {
@@ -289,6 +303,7 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
             stiffness,
             mass,
             quadrature_order,
+            barycentric_gradients: metrics.grads,
         })
     }
 
@@ -376,18 +391,7 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
         element: usize,
         barycentric: [f64; 4],
     ) -> Result<C64, HeterogeneousError> {
-        if pressure_pa.len() != self.ndof()
-            || element >= self.geometry.tetrahedra().len()
-            || barycentric
-                .iter()
-                .any(|b| !b.is_finite() || *b < 0.0 || *b > 1.0)
-            || (barycentric.iter().sum::<f64>() - 1.0).abs() > 32.0 * f64::EPSILON
-        {
-            return Err(invalid(
-                "pressure sample requires original coefficients and barycentric point",
-            )
-            .into());
-        }
+        self.validate_sample(pressure_pa.len(), element, barycentric)?;
         let mut result = C64::ZERO;
         for (dof, shape) in self.geometry.space.element_dofs(element) {
             result = result + pressure_pa[dof].scale(shape.eval(barycentric, self.geometry.order));
@@ -396,6 +400,26 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
             return Err(invalid("nonfinite pressure sample").into());
         }
         Ok(result)
+    }
+
+    fn validate_sample(
+        &self,
+        coefficient_count: usize,
+        element: usize,
+        barycentric: [f64; 4],
+    ) -> Result<(), AcousticFeError> {
+        if coefficient_count != self.ndof()
+            || element >= self.geometry.tetrahedra().len()
+            || barycentric
+                .iter()
+                .any(|b| !b.is_finite() || *b < 0.0 || *b > 1.0)
+            || (barycentric.iter().sum::<f64>() - 1.0).abs() > 32.0 * f64::EPSILON
+        {
+            return Err(invalid(
+                "pressure sample requires original coefficients and barycentric point",
+            ));
+        }
+        Ok(())
     }
 }
 
