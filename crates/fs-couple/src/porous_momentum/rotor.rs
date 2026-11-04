@@ -8,7 +8,7 @@
 //! The original lattice law and rigid midpoint integrator own every candidate.
 
 use super::*;
-use fs_lbm::d3q19::{BoundaryLink3, FaceBoundary3, LinearResistance3};
+use fs_lbm::d3q19::{BoundaryLink3, LinearResistance3};
 use fs_mbd::{Gravity, RigidBodyIntegrator, StepReceipt, Wrench};
 
 /// Physical, rotation-invariant support, centred at the native body COM.
@@ -35,7 +35,8 @@ pub struct PorousRotorControls {
     /// tolerance apply to rim speed; maximum speed bounds fluid and rotor rim
     /// at both endpoints and every trial. No new angular-speed unit is implied.
     pub flow: PorousMomentumControls,
-    /// Absolute native midpoint angle during this tick; refine phase in time.
+    /// Absolute native midpoint rotation increment during this tick; refine
+    /// phase in time. Spherical rotation uses this as the Cayley increment bound.
     pub maximum_rotation_rad: f64,
 }
 
@@ -122,15 +123,7 @@ impl AxisymmetricPorousRotor {
         poll(gate)?;
         units.admit()?;
         body.kinetic_energy(properties)?;
-        let cells = fluid
-            .dimensions()
-            .into_iter()
-            .try_fold(1usize, |n, d| n.checked_mul(d))
-            .ok_or(invalid("rotor domain cell count overflow"))?;
-        if cells == 0
-            || cells > maximum_cells
-            || fluid.boundaries() != BoundarySpec3::new([FaceBoundary3::stationary_wall(); 6])
-            || body.linear_momentum_world() != Vec3::ZERO
+        if body.linear_momentum_world() != Vec3::ZERO
             || !cylinder.axis_world.is_finite()
             || (norm(cylinder.axis_world) - 1.0).abs() > 64.0 * f64::EPSILON
             || [cylinder.radius_m, cylinder.half_height_m]
@@ -173,21 +166,7 @@ impl AxisymmetricPorousRotor {
                 ));
             }
         }
-        let [nx, ny, nz] = dimensions;
-        for z in 0..nz {
-            for y in 0..ny {
-                for x in 0..nx {
-                    if x % 256 == 0 {
-                        poll(gate)?;
-                    }
-                    if fluid.is_solid(x, y, z) {
-                        return Err(invalid("porous rotor excludes voxel solids"));
-                    }
-                }
-            }
-        }
-        let links = fluid.boundary_links();
-        poll(gate)?;
+        let (cells, links) = closed_domain(&fluid, maximum_cells, gate)?;
         Ok(Self {
             fluid,
             body,
@@ -262,27 +241,10 @@ impl AxisymmetricPorousRotor {
         let units = self.units.admit()?;
         let radius = self.cylinder.radius_m;
         let omega0 = self.angular_speed_rad_s()?;
+        c.admit(units, self.cells)?;
         if !external_torque_nm.is_finite()
-            || !c.balance_origin_m.is_finite()
-            || !(1..=64).contains(&c.maximum_iterations)
-            || !(2..=16384).contains(&c.maximum_native_trials)
-            || c.maximum_trial_cells < self.cells
-            || [
-                c.velocity_scale_m_s,
-                c.maximum_speed_m_s,
-                c.difference_step,
-                c.linear_tolerance_kg_m_s,
-                c.angular_tolerance_kg_m2_s,
-                c.midpoint_tolerance_m_s,
-                c.position_tolerance_m,
-                c.work_tolerance_j,
-                controls.maximum_rotation_rad,
-            ]
-            .iter()
-            .any(|x| !x.is_finite() || *x <= 0.0)
-            || !c.relative_mass_tolerance.is_finite()
-            || !(0.0..1.0).contains(&c.relative_mass_tolerance)
-            || c.maximum_speed_m_s / units.velocity > fs_lbm::MACH_LIMIT * fs_lbm::CS2.sqrt()
+            || !controls.maximum_rotation_rad.is_finite()
+            || controls.maximum_rotation_rad <= 0.0
             || omega0.abs() * radius > c.maximum_speed_m_s
         {
             return Err(invalid(

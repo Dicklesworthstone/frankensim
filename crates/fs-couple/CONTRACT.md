@@ -30603,6 +30603,43 @@ not run: the full Cargo/DSR workspace remains unavailable with missing sibling
 checkouts. These limits do not establish full optical-depth, thermal-time or
 material-data convergence.
 
+## Three-axis porous rotation with native gyroscopic recoil
+
+`porous_momentum::spherical::SphericalPorousBody` couples the original D3Q19
+fluid to a finite native rigid inertia whose center is fixed and whose three
+rotational degrees of freedom remain free. Radial isotropic Darcy/Forchheimer
+coefficients inside a fully contained sphere make the porous support invariant
+under every attitude. Authored mass, principal inertia, initial orientation and
+spin remain native data; anisotropic inertia can precess. The six box walls are
+stationary, with no voxel solids. The guide cancels force at the center only,
+so all components of the measured distributed fluid torque reach the body.
+
+Each three-coordinate Newton--Krylov trial invokes the original rigid
+Euler-top/Cayley integrator and original nonlinear fluid collision, streaming
+and endpoint forcing. The residual uses actual endpoint world spin change
+against measured fluid torque and the supplied world external couple. The
+accepted candidate is independently replayed through both original owners.
+Radial resistance and independent fluid-force callbacks are sampled once per
+eligible cell per tick, and native trial/cell budgets bound the solve.
+
+For the native Cayley update, Rbar=(R0+R1)/2 maps body torque into spatial
+impulse, while Omega=R0*omega_body_mid=R1*omega_body_mid is its work-conjugate
+world angular velocity. The skeleton field Omega cross (x-center) uses that
+same velocity. A normalized midpoint quaternion or averaged endpoint world
+angular velocity is not substituted. Native attitude phase still requires time
+refinement; the declared rotation bound limits h*|Omega|.
+
+The receipt retains native mechanics and fluid exchange, independently reduced
+fluid momentum, actual body spin change, wall and guide impulses, external work,
+body kinetic change, drag work and relative dissipation. Participant momentum
+residual norms and constitutive/interface/rigid work defects are summed in
+absolute value before admission, so opposing defects cannot mask one another.
+The remaining fluid kinetic change is explicitly transport/pressure/collision
+work, not physical heat or a complete fluid-energy certificate. Failed trials
+leave the original body and populations untouched. This extension does not
+remap a general rotating mask, model moving exterior walls, or infer apparent
+fluid inertia or evolving porosity.
+
 ## Finite axisymmetric porous-rotor momentum
 
 `porous_momentum::rotor::AxisymmetricPorousRotor` couples a native finite

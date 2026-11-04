@@ -17,6 +17,8 @@
 
 #[path = "porous_momentum/rotor.rs"]
 pub mod rotor;
+#[path = "porous_momentum/spherical.rs"]
+pub mod spherical;
 
 use fs_exec::CancelGate;
 use fs_lbm::d3q19::{
@@ -102,6 +104,72 @@ pub struct PorousMomentumControls {
     pub work_tolerance_j: f64,
     pub relative_mass_tolerance: f64,
     pub balance_origin_m: Vec3,
+}
+
+impl PorousMomentumControls {
+    fn admit(self, units: Units, cells: usize) -> Result<(), PorousMomentumError> {
+        if !self.balance_origin_m.is_finite()
+            || !(1..=64).contains(&self.maximum_iterations)
+            || !(2..=16384).contains(&self.maximum_native_trials)
+            || self.maximum_trial_cells < cells
+            || [
+                self.velocity_scale_m_s,
+                self.maximum_speed_m_s,
+                self.difference_step,
+                self.linear_tolerance_kg_m_s,
+                self.angular_tolerance_kg_m2_s,
+                self.midpoint_tolerance_m_s,
+                self.position_tolerance_m,
+                self.work_tolerance_j,
+            ]
+            .iter()
+            .any(|x| !x.is_finite() || *x <= 0.0)
+            || !self.relative_mass_tolerance.is_finite()
+            || !(0.0..1.0).contains(&self.relative_mass_tolerance)
+            || self.maximum_speed_m_s / units.velocity > fs_lbm::MACH_LIMIT * fs_lbm::CS2.sqrt()
+        {
+            return Err(invalid(
+                "bounded solve, explicit units and physical tolerances required",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Shared fixed support admission, bounded before native wall-link allocation.
+fn closed_domain(
+    fluid: &BoundaryGrid3,
+    maximum_cells: usize,
+    gate: &CancelGate,
+) -> Result<(usize, Vec<fs_lbm::d3q19::BoundaryLink3>), PorousMomentumError> {
+    use fs_lbm::d3q19::FaceBoundary3;
+    let cells = fluid
+        .dimensions()
+        .into_iter()
+        .try_fold(1usize, |n, d| n.checked_mul(d))
+        .ok_or(invalid("porous domain cell count overflow"))?;
+    if cells == 0
+        || cells > maximum_cells
+        || fluid.boundaries() != BoundarySpec3::new([FaceBoundary3::stationary_wall(); 6])
+    {
+        return Err(invalid("bounded stationary closed box required"));
+    }
+    let [nx, ny, nz] = fluid.dimensions();
+    for z in 0..nz {
+        for y in 0..ny {
+            for x in 0..nx {
+                if x % 256 == 0 {
+                    poll(gate)?;
+                }
+                if fluid.is_solid(x, y, z) {
+                    return Err(invalid("porous rotation excludes voxel solids"));
+                }
+            }
+        }
+    }
+    let links = fluid.boundary_links();
+    poll(gate)?;
+    Ok((cells, links))
 }
 
 #[derive(Debug)]
@@ -289,27 +357,9 @@ impl PeriodicPorousSkeleton {
         poll(gate)?;
         let units = self.units.admit()?;
         let before_v = self.body.center_of_mass_velocity_world(self.properties)?;
+        c.admit(units, self.cells)?;
         if law.linear.skeleton_velocity != [0.0; 3]
             || !external_force_n.is_finite()
-            || !c.balance_origin_m.is_finite()
-            || !(1..=64).contains(&c.maximum_iterations)
-            || !(2..=16384).contains(&c.maximum_native_trials)
-            || c.maximum_trial_cells < self.cells
-            || [
-                c.velocity_scale_m_s,
-                c.maximum_speed_m_s,
-                c.difference_step,
-                c.linear_tolerance_kg_m_s,
-                c.angular_tolerance_kg_m2_s,
-                c.midpoint_tolerance_m_s,
-                c.position_tolerance_m,
-                c.work_tolerance_j,
-            ]
-            .iter()
-            .any(|x| !x.is_finite() || *x <= 0.0)
-            || !c.relative_mass_tolerance.is_finite()
-            || !(0.0..1.0).contains(&c.relative_mass_tolerance)
-            || c.maximum_speed_m_s / units.velocity > fs_lbm::MACH_LIMIT * fs_lbm::CS2.sqrt()
             || norm(before_v) > c.maximum_speed_m_s
         {
             return Err(invalid(

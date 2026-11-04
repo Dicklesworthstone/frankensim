@@ -1,4 +1,7 @@
 //! Native populations, finite polar inertia, and independently reconstructed wrenches.
+#[path = "porous_rotor/spherical.rs"]
+mod spherical;
+
 use fs_couple::porous_momentum::rotor::{
     AxisymmetricPorousRotor, PorousRotorControls, PorousRotorCylinder, PorousRotorResistance,
 };
