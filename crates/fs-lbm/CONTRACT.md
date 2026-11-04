@@ -9854,6 +9854,35 @@ Two regression sources independently derive unequal-density pressure-driven
 inventories and hydrostatic gravity cancellation, including large pressure
 references, exact empty-profile parity and late-failure retry.
 
+### Uniform reservoirs through the existing material pressure owner
+
+`ReservoirPressure` adds six optional uniform plane pressures in Pa alongside
+the existing borrowed `StaggeredBoundaryPressure` profile. The generalized
+`force_and_project_density_with_reservoir_pressure`,
+`force_project_material_momentum_with_reservoir_pressure` and
+`advance_material_momentum_with_reservoir_pressure` entries accept either input.
+Uniform reservoirs need no staggered pressure buffers or profile allocation.
+Each supplied plane value must be finite and its face role must be `Free`;
+`None` retains zero pressure. Existing profile and zero-pressure APIs remain.
+
+Both representations feed the existing native projection, `PressureReadback`,
+force/pressure feedback and accepted material routes. Component-relative
+impulse/work arithmetic, the authored public pressure gauge and original
+transactional admission are retained. No second pressure map, solve or impulse
+owner is introduced. Reservoir work remains in the existing mechanical accounts;
+material transport still carries exactly `M*h`, with explicit incoming material
+and velocity. Pressure work is not added again to enthalpy, and no EOS or new
+total-energy closure is inferred from the reservoir input.
+
+Additional native material regressions check analytic pressure-driven flow and
+reversal, actual mass/enthalpy/momentum transfer, a graded density jump with
+bit-identical physical results under a `1e12 Pa` common datum, and hydrostatic
+rest at a stratified side opening. Uniform plane and published spatial-profile
+entries give identical complete material results. Invalid plane data, missing
+inflow state, invalid profiles, cancellation and retry retain refusal semantics.
+All 64 focused native tests passed, including the previously published profile
+tests; this is not a full workspace build.
+
 ### Endpoint-sampled D3Q19 force histories
 
 `BoundaryGrid3::step_with_endpoint_force_scale` and its pooled counterpart

@@ -143,7 +143,7 @@ pub use flow::{
     MaterialDensityMomentumReport, MaterialDensityMomentumStep, MaterialMomentumControls,
     MaterialMomentumInput, MaterialMomentumReport,
     MaterialMomentumStep, MaterialVolumeSource, PiecewiseThermalVolumeControls, ProjectionReport,
-    StaggeredBoundaryPressure, ThermalVolumeControls, ThermalVolumeStep, lbm_duct_flow,
+    ReservoirPressure, StaggeredBoundaryPressure, ThermalVolumeControls, ThermalVolumeStep, lbm_duct_flow,
 };
 pub use natural::{BuoyancyConfig, NaturalConvection, NaturalConvectionReport, natural_convection};
 pub use radiation::{
@@ -349,3 +349,4 @@ fn finite(field: &'static str, value: f64) -> Result<(), ChtError> {
         })
     }
 }
+

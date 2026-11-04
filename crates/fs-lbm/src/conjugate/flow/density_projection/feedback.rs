@@ -1,11 +1,11 @@
 //! Conservative native force/pressure impulses returned to transported cells.
 
 use super::{
-    CancelGate, ChtError, DensityForceControls, DensityForceInput, DensityMomentumReconstruction,
-    DensityMomentumReconstructionControls, DensityMomentumReconstructionReport,
-    DensityProjectionControls, FlowFace, FlowField, ForcedDensityProjection, PressureReadback,
-    StaggeredBoundaryPressure, Sum, VoxelDomain, face_dual_mass, finite, finite_positive,
-    nonnegative, poll, poll_every, refuse,
+    BoundaryPressure, CancelGate, ChtError, DensityForceControls, DensityForceInput,
+    DensityMomentumReconstruction, DensityMomentumReconstructionControls,
+    DensityMomentumReconstructionReport, DensityProjectionControls, FlowFace, FlowField,
+    ForcedDensityProjection, PressureReadback, ReservoirPressure, StaggeredBoundaryPressure, Sum,
+    VoxelDomain, face_dual_mass, finite, finite_positive, nonnegative, poll, poll_every, refuse,
 };
 
 /// Original extensive material state and authored sources for one fresh kick.
@@ -170,10 +170,34 @@ impl FlowField {
         controls: MaterialDensityMomentumControls,
         gate: &CancelGate,
     ) -> Result<MaterialDensityMomentumStep, ChtError> {
+        self.force_project_material_momentum_with_reservoir_pressure(
+            domain, faces, profile, input, controls, gate,
+        )
+    }
+
+    /// Return one native force/pressure impulse to original material momentum
+    /// using either six optional plane pressures in Pa or a borrowed spatial
+    /// profile. Uniform reservoirs need no staggered pressure buffers. Both
+    /// inputs reuse the existing component-relative pressure and work readback.
+    /// Reservoir work remains mechanical and does not alter material enthalpy.
+    ///
+    /// # Errors
+    /// Nonfinite pressure, pressure on a held plane, invalid profile, or any
+    /// refusal of [`Self::force_project_material_momentum_with_pressure_profile`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn force_project_material_momentum_with_reservoir_pressure<'p>(
+        &self,
+        domain: &VoxelDomain,
+        faces: [FlowFace; 6],
+        reservoir_pressure: impl Into<ReservoirPressure<'p>>,
+        input: MaterialDensityMomentumInput<'_>,
+        controls: MaterialDensityMomentumControls,
+        gate: &CancelGate,
+    ) -> Result<MaterialDensityMomentumStep, ChtError> {
         self.force_project_material_momentum_with_optional_pressure(
             domain,
             faces,
-            Some(profile),
+            Some(reservoir_pressure.into().admit(faces, gate)?),
             input,
             controls,
             gate,
@@ -185,7 +209,7 @@ impl FlowField {
         &self,
         domain: &VoxelDomain,
         faces: [FlowFace; 6],
-        profile: Option<StaggeredBoundaryPressure<'_>>,
+        boundary_pressure: Option<BoundaryPressure<'_>>,
         input: MaterialDensityMomentumInput<'_>,
         controls: MaterialDensityMomentumControls,
         gate: &CancelGate,
@@ -220,7 +244,7 @@ impl FlowField {
             .force_and_project_density_with_optional_pressure(
                 domain,
                 faces,
-                profile,
+                boundary_pressure,
                 DensityForceInput {
                     density_kg_m3: &reconstructed.density_kg_m3,
                     acceleration_m_s2: input.acceleration_m_s2,
@@ -235,7 +259,7 @@ impl FlowField {
             held: self,
             domain,
             faces,
-            profile,
+            boundary_pressure,
             pressure_readback: pressure_readback.as_ref(),
             input,
             controls,
@@ -260,7 +284,7 @@ struct Exchange<'a> {
     held: &'a FlowField,
     domain: &'a VoxelDomain,
     faces: [FlowFace; 6],
-    profile: Option<StaggeredBoundaryPressure<'a>>,
+    boundary_pressure: Option<BoundaryPressure<'a>>,
     pressure_readback: Option<&'a PressureReadback>,
     input: MaterialDensityMomentumInput<'a>,
     controls: MaterialDensityMomentumControls,
@@ -392,10 +416,18 @@ impl Exchange<'_> {
             let force =
                 dt * (native_mass * self.input.acceleration_m_s2[axis] + area * force_per_area);
             let difference = self.pressure_readback.map_or_else(
-                || self.evolution.projection.pressure_correction_pa[c]
-                    - neighbor.map_or(0.0, |n| self.evolution.projection.pressure_correction_pa[n]),
-                |readback| readback.difference(c, neighbor,
-                    self.profile.and_then(|p| p.value(axis, slot)).unwrap_or(0.0)),
+                || {
+                    self.evolution.projection.pressure_correction_pa[c]
+                        - neighbor
+                            .map_or(0.0, |n| self.evolution.projection.pressure_correction_pa[n])
+                },
+                |readback| {
+                    readback.difference(
+                        c,
+                        neighbor,
+                        self.boundary_pressure.map_or(0.0, |p| p.value(f, slot)),
+                    )
+                },
             );
             let pressure = sign * dt * area * difference;
             (force, pressure)

@@ -2,8 +2,8 @@
 
 use super::{
     BoundaryPressure, CancelGate, ChtError, DensityProjection, DensityProjectionControls, FlowFace,
-    FlowField, PressureReadback, StaggeredBoundaryPressure, Sum, VoxelDomain, face_dual_mass,
-    finite, finite_positive, nonnegative, poll, poll_every, refuse,
+    FlowField, PressureReadback, ReservoirPressure, StaggeredBoundaryPressure, Sum, VoxelDomain,
+    face_dual_mass, finite, finite_positive, nonnegative, poll, poll_every, refuse,
 };
 
 /// Frozen material density and prescribed physical body force for one step.
@@ -248,10 +248,44 @@ impl FlowField {
         force_controls: DensityForceControls,
         gate: &CancelGate,
     ) -> Result<ForcedDensityProjection, ChtError> {
+        self.force_and_project_density_with_reservoir_pressure(
+            domain,
+            faces,
+            profile,
+            input,
+            target_outflow_m3_s,
+            projection_controls,
+            force_controls,
+            gate,
+        )
+    }
+
+    /// Apply the original force/pressure stage with either six optional plane
+    /// pressures in Pa or a borrowed [`StaggeredBoundaryPressure`] profile.
+    /// Uniform reservoirs need no staggered pressure buffers. Both inputs use
+    /// the same native relative-pressure readback and per-face opening work;
+    /// large common pressure references do not degrade the impulse calculation.
+    /// Pressure must not also be included in the authored body force.
+    ///
+    /// # Errors
+    /// Nonfinite pressure, pressure on a held plane, invalid profile, or any
+    /// refusal of [`Self::force_and_project_density_with_pressure_profile`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn force_and_project_density_with_reservoir_pressure<'p>(
+        &self,
+        domain: &VoxelDomain,
+        faces: [FlowFace; 6],
+        reservoir_pressure: impl Into<ReservoirPressure<'p>>,
+        input: DensityForceInput<'_>,
+        target_outflow_m3_s: &[f64],
+        projection_controls: DensityProjectionControls,
+        force_controls: DensityForceControls,
+        gate: &CancelGate,
+    ) -> Result<ForcedDensityProjection, ChtError> {
         self.force_and_project_density_with_optional_pressure(
             domain,
             faces,
-            Some(profile),
+            Some(reservoir_pressure.into().admit(faces, gate)?),
             input,
             target_outflow_m3_s,
             projection_controls,
@@ -266,7 +300,7 @@ impl FlowField {
         &self,
         domain: &VoxelDomain,
         faces: [FlowFace; 6],
-        profile: Option<StaggeredBoundaryPressure<'_>>,
+        boundary_pressure: Option<BoundaryPressure<'_>>,
         input: DensityForceInput<'_>,
         target_outflow_m3_s: &[f64],
         projection_controls: DensityProjectionControls,
@@ -281,7 +315,7 @@ impl FlowField {
             force_controls,
             gate,
         )?;
-        let (projection, pressure_readback) = match profile {
+        let (projection, pressure_readback) = match boundary_pressure {
             None => (
                 predicted.field.project_density_volume_source(
                     domain,
@@ -293,13 +327,13 @@ impl FlowField {
                 )?,
                 None,
             ),
-            Some(profile) => {
+            Some(boundary_pressure) => {
                 let (projection, readback) = predicted
                     .field
                     .project_density_volume_source_with_pressure_readback(
                         domain,
                         faces,
-                        BoundaryPressure::Profile(profile),
+                        boundary_pressure,
                         input.density_kg_m3,
                         target_outflow_m3_s,
                         projection_controls,
@@ -314,7 +348,7 @@ impl FlowField {
             &projection,
             domain,
             faces,
-            profile,
+            boundary_pressure,
             pressure_readback.as_ref(),
             input,
             projection_controls.duration_s,
@@ -542,7 +576,7 @@ fn audit_combined(
     projected: &DensityProjection,
     domain: &VoxelDomain,
     faces: [FlowFace; 6],
-    profile: Option<StaggeredBoundaryPressure<'_>>,
+    boundary_pressure: Option<BoundaryPressure<'_>>,
     pressure_readback: Option<&PressureReadback>,
     input: DensityForceInput<'_>,
     duration_s: f64,
@@ -584,7 +618,7 @@ fn audit_combined(
                         readback.difference(
                             c,
                             nb,
-                            profile.and_then(|p| p.value(axis, slot)).unwrap_or(0.0),
+                            boundary_pressure.map_or(0.0, |p| p.value(f, slot)),
                         )
                     },
                 );

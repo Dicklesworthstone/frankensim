@@ -7,7 +7,8 @@ use super::{
     MaterialAdvectionInput, MaterialAdvectionStep, MaterialDensityMomentumControls,
     MaterialDensityMomentumInput, MaterialDensityMomentumReport, MaterialDensityMomentumStep,
     MaterialMomentumControls, MaterialMomentumInput, MaterialMomentumStep, MaterialVolumeSource,
-    StaggeredBoundaryPressure, VoxelDomain, finite, finite_positive, poll, poll_every,
+    ReservoirPressure, StaggeredBoundaryPressure, VoxelDomain, finite, finite_positive, poll,
+    poll_every,
 };
 
 mod viscous;
@@ -131,10 +132,40 @@ impl FlowField {
         controls: MaterialMomentumAdvanceControls,
         gate: &CancelGate,
     ) -> Result<MaterialMomentumAdvance, ChtError> {
+        self.advance_material_momentum_with_reservoir_pressure(
+            domain, faces, profile, input, controls, gate,
+        )
+    }
+
+    /// Advance the original material owners with either six optional reservoir
+    /// plane pressures in Pa or a borrowed spatial profile. Uniform reservoirs
+    /// require no staggered pressure buffers. The existing profile method and
+    /// this entry share one force/projection/feedback stage and one set of
+    /// accepted mass routes, with no extra pressure or momentum solve.
+    ///
+    /// Opening pressure work stays in `transport.projection.report` and the
+    /// composed kinetic accounts. Material advection still carries exactly
+    /// `M*h`, with explicit incoming state and velocity for every actual inflow;
+    /// pressure work is not added again to enthalpy. These remain separate
+    /// mechanical and enthalpy accounts, without a new EOS or total-energy law.
+    ///
+    /// # Errors
+    /// Nonfinite pressure, pressure on a held plane, invalid profile, or any
+    /// refusal of [`Self::advance_material_momentum_with_pressure_profile`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_material_momentum_with_reservoir_pressure<'p>(
+        &self,
+        domain: &VoxelDomain,
+        faces: [FlowFace; 6],
+        reservoir_pressure: impl Into<ReservoirPressure<'p>>,
+        input: MaterialMomentumAdvanceInput<'_>,
+        controls: MaterialMomentumAdvanceControls,
+        gate: &CancelGate,
+    ) -> Result<MaterialMomentumAdvance, ChtError> {
         self.advance_material_momentum_with_reservoirs(
             domain,
             faces,
-            Some(profile),
+            Some(reservoir_pressure.into()),
             input,
             controls,
             gate,
@@ -146,7 +177,7 @@ impl FlowField {
         &self,
         domain: &VoxelDomain,
         faces: [FlowFace; 6],
-        profile: Option<StaggeredBoundaryPressure<'_>>,
+        reservoir_pressure: Option<ReservoirPressure<'_>>,
         input: MaterialMomentumAdvanceInput<'_>,
         controls: MaterialMomentumAdvanceControls,
         gate: &CancelGate,
@@ -203,15 +234,16 @@ impl FlowField {
             force_density_n_m3: input.force_density_n_m3,
             target_outflow_m3_s: &target_outflow,
         };
-        let mechanics = match profile {
-            Some(profile) => self.force_project_material_momentum_with_pressure_profile(
-                domain,
-                faces,
-                profile,
-                mechanical_input,
-                controls.mechanics,
-                gate,
-            )?,
+        let mechanics = match reservoir_pressure {
+            Some(reservoir_pressure) => self
+                .force_project_material_momentum_with_reservoir_pressure(
+                    domain,
+                    faces,
+                    reservoir_pressure,
+                    mechanical_input,
+                    controls.mechanics,
+                    gate,
+                )?,
             None => self.force_project_material_momentum(
                 domain,
                 faces,

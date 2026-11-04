@@ -659,7 +659,7 @@ fn independent_field_impulse_and_cell_readbacks_refuse_tampering_without_mutatio
         held: &field,
         domain: &domain,
         faces,
-        profile: None,
+        boundary_pressure: None,
         pressure_readback: None,
         input,
         controls: controls(),

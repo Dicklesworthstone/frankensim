@@ -56,6 +56,61 @@ pub struct StaggeredBoundaryPressure<'a> {
     pub z_pa: &'a [Option<f64>],
 }
 
+/// Open-face reservoir correction pressure for composed native flow owners.
+/// A uniform plane array needs no staggered profile allocation. A borrowed
+/// profile retains the original spatial head and native face layout. Both use
+/// the same pressure projection, half-cell inertia and mechanical work account;
+/// neither supplies a thermodynamic reservoir state.
+#[derive(Debug, Clone, Copy)]
+pub enum ReservoirPressure<'a> {
+    /// Uniform pressures in Pa on `[x-, x+, y-, y+, z-, z+]`; `None` means zero.
+    /// A supplied value must be finite and its plane must be `Free`.
+    Planes([Option<f64>; 6]),
+    /// Separate pressure at each original staggered boundary face.
+    Profile(StaggeredBoundaryPressure<'a>),
+}
+
+impl From<[Option<f64>; 6]> for ReservoirPressure<'_> {
+    fn from(planes: [Option<f64>; 6]) -> Self {
+        Self::Planes(planes)
+    }
+}
+
+impl<'a> From<StaggeredBoundaryPressure<'a>> for ReservoirPressure<'a> {
+    fn from(profile: StaggeredBoundaryPressure<'a>) -> Self {
+        Self::Profile(profile)
+    }
+}
+
+impl<'a> ReservoirPressure<'a> {
+    fn admit(
+        self,
+        faces: [FlowFace; 6],
+        gate: &CancelGate,
+    ) -> Result<BoundaryPressure<'a>, ChtError> {
+        poll(gate)?;
+        match self {
+            Self::Planes(planes) => {
+                for (f, pressure) in planes.iter().enumerate() {
+                    if let Some(pressure) = pressure {
+                        finite("flow.boundary_pressure_pa", *pressure)?;
+                        if faces[f] != FlowFace::Free {
+                            return Err(refuse(
+                                "flow.boundary_pressure_pa",
+                                "pressure is only admissible on a Free face",
+                            ));
+                        }
+                    }
+                }
+                Ok(BoundaryPressure::Planes(planes.map(|p| p.unwrap_or(0.0))))
+            }
+            // Original projection admission checks the native layout and roles
+            // before indexing a profile or allocating its corrected field.
+            Self::Profile(profile) => Ok(BoundaryPressure::Profile(profile)),
+        }
+    }
+}
+
 impl StaggeredBoundaryPressure<'_> {
     fn value(self, axis: usize, slot: usize) -> Option<f64> {
         [self.x_pa, self.y_pa, self.z_pa][axis][slot]
@@ -107,6 +162,15 @@ impl StaggeredBoundaryPressure<'_> {
 enum BoundaryPressure<'a> {
     Planes([f64; 6]),
     Profile(StaggeredBoundaryPressure<'a>),
+}
+
+impl BoundaryPressure<'_> {
+    fn value(self, f: usize, slot: usize) -> f64 {
+        match self {
+            Self::Planes(values) => values[f],
+            Self::Profile(profile) => profile.value(f / 2, slot).unwrap_or(0.0),
+        }
+    }
 }
 
 /// Independent flux and mechanical-energy readback of the returned field.
@@ -195,10 +259,7 @@ pub(super) struct FrozenDensity<'a> {
 
 impl FrozenDensity<'_> {
     pub(super) fn boundary_pressure_pa(&self, f: usize, slot: usize) -> f64 {
-        match self.boundary_pressure {
-            BoundaryPressure::Planes(values) => values[f],
-            BoundaryPressure::Profile(profile) => profile.value(f / 2, slot).unwrap_or(0.0),
-        }
+        self.boundary_pressure.value(f, slot)
     }
 
     pub(super) fn boundary_potential(&self, f: usize, slot: usize, reference_pa: f64) -> f64 {
@@ -329,22 +390,12 @@ impl FlowField {
         controls: DensityProjectionControls,
         gate: &CancelGate,
     ) -> Result<DensityProjection, ChtError> {
-        poll(gate)?;
-        for (f, pressure) in boundary_pressure_pa.iter().enumerate() {
-            if let Some(pressure) = pressure {
-                finite("flow.boundary_pressure_pa", *pressure)?;
-                if faces[f] != FlowFace::Free {
-                    return Err(refuse(
-                        "flow.boundary_pressure_pa",
-                        "pressure is only admissible on a Free face",
-                    ));
-                }
-            }
-        }
+        let boundary_pressure =
+            ReservoirPressure::Planes(boundary_pressure_pa).admit(faces, gate)?;
         self.project_density_volume_source_with_reservoirs(
             domain,
             faces,
-            BoundaryPressure::Planes(boundary_pressure_pa.map(|p| p.unwrap_or(0.0))),
+            boundary_pressure,
             density_kg_m3,
             target_outflow_m3_s,
             controls,
