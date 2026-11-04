@@ -27,6 +27,8 @@ pub use band::{
 };
 mod welch;
 pub use welch::{PreparedRadiatingWelchBin, RadiatingWelchLimits};
+mod source_control;
+pub use source_control::PreparedRadiatingSourceControl;
 
 /// The complete interior propagation owner, never a substituted scalar loss.
 #[derive(Clone, Copy)]

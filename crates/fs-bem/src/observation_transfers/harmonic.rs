@@ -489,6 +489,9 @@ pub use momentum::{
     PreparedWelchSurfaceMomentum,
 };
 
+mod source_map;
+pub use source_map::HarmonicSourceMapLimits;
+
 mod control;
 pub use control::{
     HarmonicControlLimits, HarmonicEnergyGradient, HarmonicFieldCovector,

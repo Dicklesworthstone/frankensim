@@ -10,6 +10,7 @@ mod angular;
 mod band;
 mod molecular;
 mod welch;
+mod source_control;
 
 const FIELD_BUDGET: HarmonicWorkBudget = HarmonicWorkBudget {
     maximum_products: 100_000,

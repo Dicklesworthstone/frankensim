@@ -2978,3 +2978,30 @@ and physical/work/storage admission with cancellation/replay. These execute
 the production retained-field and control algorithms with real fs-math.
 They do not execute a boundary solve or establish geometry/material gradients.
 Full Cargo/DSR remains unavailable without the sibling constellation checkouts.
+
+
+### Loaded upstream source coordinates on retained harmonic fields
+
+`PreparedHarmonicObservation::compose_sources` composes an explicitly authored
+complex source map with every retained pressure/velocity column. It retains
+the original frequency, physical receiver geometry, medium and storage-law
+capability. Matrix entries have original-coordinate SI units divided by new-
+coordinate SI units. DD products and accumulation precede the final C64
+conversion. The new producer hash includes the original producer, both ordered
+source identities, physical field metadata and the entire transformation.
+
+`SourceId::OpenCircuitPressure` and `PrescribedVolumeFlow` describe upstream
+Pa and signed m³/s controls. They cannot be submitted as raw panel-velocity
+traces. The original energy, Hermitian pullback and real Cartesian Hessian
+owners apply unchanged to the composed field; no reciprocity or passivity
+claim is inferred from arbitrary supplied source maps. The fs-couple loaded
+network adapter supplies its actual mutually loaded generator-to-opening map.
+
+Preparation admits complete source/receiver extents, finite map entries,
+products and logical storage, including silent columns, before composition.
+Refusal/cancellation publishes no field. Five native composition tests cover
+complex forward/adjoint chain rules, weak product cancellation, transformation
+identity, admission and preservation of relaxing-medium energy refusal. Three
+additional loaded-network tests exercise the production consumer with analytic
+retained operators; full original material/graph/BEM assembly remains unrun
+because required constellation checkouts are absent.

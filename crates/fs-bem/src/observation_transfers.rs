@@ -34,6 +34,7 @@ mod scattering;
 pub use scattering::{CompactSourceSpec, ForceDipoleSpec, PointSourceSpec, ScatteringObservation};
 mod harmonic;
 pub use harmonic::{
+    HarmonicSourceMapLimits,
     HarmonicControlLimits, HarmonicEnergyGradient, HarmonicFieldCovector,
     PreparedHarmonicEnergyControl,
     HarmonicMomentumLimits, HarmonicVolumeQuadrature, HarmonicWaveMomentumFlux,
@@ -83,6 +84,14 @@ pub enum SourceId {
     /// Prescribed force ON the fluid [N] along its declared unit direction.
     /// This coordinate is neither a volume flow nor a force derivative.
     PointForce(String),
+    /// Upstream open-circuit generator pressure [Pa], before its complete
+    /// source impedance. Admitted by a retained source map, never as a raw
+    /// boundary velocity trace or an independent exterior point source.
+    OpenCircuitPressure(String),
+    /// Upstream prescribed volume flow [m³/s] in its original owner's signed
+    /// convention. A retained source map carries it to physical exterior
+    /// sources; it is not automatically an outward aperture flow.
+    PrescribedVolumeFlow(String),
 }
 impl SourceId {
     fn name(&self) -> &str {
@@ -90,7 +99,21 @@ impl SourceId {
             Self::StructuralMode(s)
             | Self::ApertureVolumeFlow(s)
             | Self::PointVolumeFlow(s)
-            | Self::PointForce(s) => s,
+            | Self::PointForce(s)
+            | Self::OpenCircuitPressure(s)
+            | Self::PrescribedVolumeFlow(s) => s,
+        }
+    }
+
+    // Stable declaration tags; existing source hashes retain their encoding.
+    fn hash_kind(&self) -> u8 {
+        match self {
+            Self::StructuralMode(_) => 0,
+            Self::ApertureVolumeFlow(_) => 1,
+            Self::PointVolumeFlow(_) => 2,
+            Self::PointForce(_) => 3,
+            Self::OpenCircuitPressure(_) => 4,
+            Self::PrescribedVolumeFlow(_) => 5,
         }
     }
 }
@@ -440,12 +463,7 @@ impl TransferDeclaration {
             h.update(&(n as u64).to_le_bytes());
         }
         for s in &self.sources {
-            h.update(&[match s {
-                SourceId::StructuralMode(_) => 0,
-                SourceId::ApertureVolumeFlow(_) => 1,
-                SourceId::PointVolumeFlow(_) => 2,
-                SourceId::PointForce(_) => 3,
-            }]);
+            h.update(&[s.hash_kind()]);
             h.update(&(s.name().len() as u64).to_le_bytes());
             h.update(s.name().as_bytes());
         }
@@ -1098,9 +1116,9 @@ impl<'a> BemObservation<'a> {
             if iterative.is_some_and(fs_exec::CancelGate::is_requested) {
                 return Err(TransferError::Cancelled);
             }
-            if matches!(
+            if !matches!(
                 source,
-                SourceId::PointVolumeFlow(_) | SourceId::PointForce(_)
+                SourceId::StructuralMode(_) | SourceId::ApertureVolumeFlow(_)
             ) || source.name().is_empty()
                 || trace.len() != surface.areas().len()
                 || trace.iter().any(|v| !v.is_finite())

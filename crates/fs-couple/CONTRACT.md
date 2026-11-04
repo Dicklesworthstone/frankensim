@@ -30792,3 +30792,65 @@ molecular constitutive solve. The native proof does not execute original
 material, graph or BEM assembly. One additional public original-assembly band
 regression is authored but unrun. Full Cargo/DSR remains unavailable because
 seven constellation sibling repositories are absent.
+
+
+### Loaded generator coordinates for physical exterior energy control
+
+`PreparedRadiatingNetwork::source_control` binds the original canonical
+generator bank to the original BEM source-control owner. Open-circuit pressure
+controls remain Pa before the full source impedance; prescribed volume flows
+remain graph-inflow m³/s. The retained complete loaded port-flow map supplies
+each actual opening as `Q_out = -U_graph`. Full mutual exterior loading,
+source impedance, mutual generator impedance, original propagation, receiver
+geometry, frequency and gas remain those of the borrowed preparation.
+Neither an independent outlet actuator nor an additional radiation-power
+debit is introduced.
+
+`PreparedRadiatingSourceControl` retains the exact original owner, canonical
+source identities and defaults. Its `observation()` is the composed original
+p/u map; `energy_control()` returns the unchanged
+`PreparedHarmonicEnergyControl`. Thus original BEM value/Cartesian complex
+gradient, Hermitian pullback and matrix-free HVP operate in actual generator
+coordinates, including unselected disturbances and dark inputs. Quadrature
+retains original receiver indices and m³ weights. The objective is exterior
+residual cycle-mean energy in J with the original peak-phasor factor 1/4;
+it is not generator heat, an actuator penalty, or a geometry/material
+derivative. Source limits/scales use each original coordinate's SI unit.
+
+The narrow `PreparedHarmonicObservation::compose_sources` factory accepts an
+explicit new-source-major, old-source-minor complex matrix at one frequency.
+It performs DD composition before one final round-down, preserving weak
+product cancellation and all four p/u components. Original frequency,
+medium, physical receivers and nondispersive-storage capability survive.
+The new producer hash binds the original producer, both ordered source
+identities, receiver geometry, medium, frequency, capability and every complex
+matrix entry. It never silently inherits an identity omitting the source law.
+Existing source-kind hash tags are unchanged; new
+`SourceId::OpenCircuitPressure` and `PrescribedVolumeFlow` represent upstream
+coordinates truthfully and are explicitly refused as raw panel traces.
+
+Cold admission bounds complete composition products, source/transfer counts,
+logical input/retained identity bytes and field storage before composition;
+fixed caps remain 4096 sources, 64 million products and 256 MiB logical cold
+storage. The loaded-network adapter retains its original 32-source/32-port
+caps and bounded stack scratch. Silent columns still undergo complete
+identity, shape, finite-value and budget checks. No partial composed owner is
+published on refusal/cancellation. Repeated physical field, energy-gradient,
+pullback and HVP applications use the original allocation-free numerical
+owners and repeat no boundary or network solve.
+
+Validation boundary: five passing native tests execute the production BEM
+source-composition factory, including complex Hermitian chain rules, a
+`(1+d)(1-d)-1 = -d²` product-cancellation residual, transformation identity,
+silent-input admission and preservation of the relaxing-exterior storage
+refusal. Three more passing native tests execute the production loaded-source
+adapter with retained original duct/BEM operators and independently specified
+passive mutual outlet loading plus separated-monopole p/u. Mixed Pa/m³/s
+controls agree with analytic energy, all four Cartesian finite differences,
+analytic HVP, the physical opening sign and the loaded-source Hermitian
+pullback; signed network work is unchanged. Budget, opening identity,
+cancellation and replay are covered. This native proof does not execute
+original graph, material or BEM assembly. Two original-assembly regressions
+are also authored (mixed-SI fresh-field derivatives and full mutual generator
+impedance/raw-trace refusal) but unrun. Full Cargo/DSR remains unavailable
+because seven constellation sibling repositories are absent.
