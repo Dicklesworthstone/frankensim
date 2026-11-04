@@ -10,10 +10,12 @@
 //!
 //! An element is a bounded, one-sided field. Its native four-face oracle stops
 //! curved propagation before a gradient jump or a thermal-contact discontinuity.
-//! A new element/material must be selected at such an event. No global mesh
-//! locator, automatic face crossing, geometry deformation, or interpolation
-//! between thermal times is inferred. The caller selects one accepted immutable
-//! thermal state and its original mesh, and retains its snapshot identity when
+//! The optional [`mesh`] owner continues primal rays across original shared
+//! vertex-ID faces in one continuous temperature/material field. Distinct
+//! contact nodes still stop propagation. No global mesh locator, geometry
+//! deformation, or interpolation between thermal times is inferred. The caller
+//! selects one accepted immutable thermal state and its original mesh, retaining
+//! its snapshot identity when
 //! constructing `MaterialThermoOpticField`.
 //!
 //! A pointwise enthalpy reconstruction T(h(x)) is generally not P1 T. Its nodal
@@ -31,6 +33,8 @@ use fs_geom::{Point3, Vec3};
 
 mod boundary;
 pub use boundary::ConductionElementBoundary;
+/// Bounded native primal-ray traversal across conforming temperature elements.
+pub mod mesh;
 
 /// Immutable original mesh and complete P1 nodal temperature field. Preparation
 /// validates once in O(vertices), without allocating or copying the state.
