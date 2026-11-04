@@ -343,8 +343,11 @@ impl CalculationGrid {
 pub struct IlluminanceEstimate {
     /// Unscattered direct illuminance in lux (lm/m²).
     pub lux: f64,
-    /// No rigorous floating-point enclosure is currently supplied. The
-    /// analytic formula has no sampling variance, which does not make it exact.
+    /// Numerical evidence supplied by the producing calculation. Point-source
+    /// connectors report `NoClaim`: an analytic formula without sampling
+    /// variance is not exact floating-point arithmetic. Area-reference
+    /// contributions enclose only their explicitly declared numerical model;
+    /// that enclosure does not establish total physical accuracy.
     pub numerical: NumericalCertificate,
     /// Bound on calibration, geometry, observer and omitted reflected/scattered
     /// contributions. `None` means unknown, not zero or a confidence interval.
@@ -354,7 +357,8 @@ pub struct IlluminanceEstimate {
 /// One emitter's direct contribution, retaining its original flat source index.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EmitterIlluminance {
-    /// Index used by source diagnostics and native transport sampling.
+    /// Index in the producing scene's source list or area reference's
+    /// `source_bindings()`. Point and finite-source index spaces are separate.
     pub source: usize,
     /// Separate fixture and emitter identities when assembled from a rig.
     /// Independent flat source inputs have no fixture identity.

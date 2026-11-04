@@ -4053,6 +4053,46 @@ physical error remain unqualified. Regressions compare transformed/reordered
 rigs against analytical and flat references, spectral-grid source mapping,
 shadow/haze calculations, explicit refusals and cancellation/replay.
 
+#### Finite-emitter and fixture illuminance attribution
+
+Both area-reference owners provide `illuminance_breakdown` at a receiver.
+`AreaIlluminanceBreakdown<T>` retains the original native aggregate result and
+adds ordered `EmitterIlluminance` and `FixtureIlluminance` records. Emitter
+indices resolve through the reference's `source_bindings()`; fixture and local
+emitter identities remain distinct. Dark emitters stay present. Every original
+rig fixture retains a record, including empty and point-only fixtures whose
+finite-source contribution is zero. Supplemental sources contribute to the
+total and emitter list with no invented fixture identity.
+
+Attribution runs alongside one existing numerical solve. The unoccluded owner
+collects its original analytical face intervals. The occluded owner retains a
+separate raw interval and intersected enclosure for each source, updating them
+with the original parent-replacement operation whenever a patch is split.
+Resolved leaves remain accounted for even when they leave the adaptive
+frontier. Global accumulation, patch priority, work/depth budget, termination,
+diagnostic counters and numerical-model identity retain their original values.
+Each source update uses its original root's stored source slot; it performs no
+additional visibility, angular-integral or extinction query.
+
+The new query checks `1 + emitters + fixtures` against the preparation budget's
+`max_outputs` before allocating attribution or adaptive-frontier storage.
+Reservations are fallible, cancellation publishes no partial breakdown, and
+the original aggregate/progressive queries retain their existing behavior.
+Fixture labels and surface ranges are copied from the already-admitted rig;
+they do not alter the numeric model hash or clone source/mesh data.
+
+Component values are interval midpoints with conditional numerical enclosures.
+Their separately rounded midpoints and fixture reductions need not reproduce
+the aggregate's last bit or endpoints. They share the global adaptive solve
+and do not claim an independent tolerance pass per emitter or fixture. These
+results cover only the selected uniform-Lambertian finite direct component;
+point light, in-scattering, indirect transport and projector optics retain
+their existing separate calculations or refusals. Calibration, spectral/field
+discretization and total physical error remain unknown. Functional regressions
+exercise transformed rigs, dark/empty/supplemental identities, adaptive shadows,
+spectral extinction, budget refusal, cancellation and representative large rigs
+without throughput or general physical-error claims.
+
 ### Direct and native transport
 
 `PhotometricScene` borrows the original tracer primitives, native mesh BVHs and

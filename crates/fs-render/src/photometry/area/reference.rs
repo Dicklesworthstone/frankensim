@@ -18,10 +18,12 @@
 use super::{EmissionSidedness, PhotometricAreaEmitter};
 use crate::charts::TriMesh;
 use crate::instances::{RigidTransform, SharedGeometry};
-use crate::photometry::{CalculationGrid, IlluminanceProbe, Receivers};
-use crate::photometry::fixture::{FixtureEmitterIdentity, FixtureError, PhotometricRig};
+use crate::photometry::fixture::{
+    AssembledFixture, FixtureEmitterIdentity, FixtureError, PhotometricRig,
+};
 use crate::photometry::observer;
 use crate::photometry::source::{BIN_WIDTH_NM, LUMINOUS_EFFICACY_LM_W};
+use crate::photometry::{CalculationGrid, IlluminanceProbe, Receivers};
 use crate::tracer::{Material, Primitive, Shape};
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_evidence::NumericalCertificate;
@@ -29,7 +31,10 @@ use fs_exec::Cx;
 use fs_ivl::{Interval, angle::atan2_upper_half_plane};
 use std::io::{self, Write};
 
+mod breakdown;
 pub mod occlusion;
+pub use breakdown::AreaIlluminanceBreakdown;
+use breakdown::{Attribution, FixtureSources, fixture_sources};
 
 /// Version of the reference's geometry, clipping and numerical interpretation.
 pub const AREA_REFERENCE_SEMANTICS_VERSION: u32 = 1;
@@ -41,7 +46,8 @@ pub struct AreaReferenceBudget {
     pub max_emitters: usize,
     /// Maximum total bound triangles; preparation also uses one emitter's keys.
     pub max_triangles: usize,
-    /// Maximum retained receiver results in one progressive job.
+    /// Maximum retained receiver results in one progressive job, or combined
+    /// total/emitter/fixture entries in one requested illuminance breakdown.
     pub max_outputs: usize,
 }
 
@@ -102,6 +108,8 @@ pub struct AreaReferenceBinding {
 type Vector = [Interval; 3];
 
 struct Face {
+    // Original finite-source slot, retained by every occlusion subdivision.
+    source: usize,
     // Original face identity for source-endpoint exclusion in occlusion queries.
     origin_face: (usize, usize),
     vertices: [Vector; 3],
@@ -115,12 +123,14 @@ struct Face {
 /// Immutable prepared numerical view of the original selected emitters.
 ///
 /// World-coordinate enclosures and source normalizations are prepared once.
-/// Receiver queries use O(triangles) work and fixed local storage, with no
-/// per-receiver allocation. Only the selected source geometry is retained; the
+/// Aggregate queries use O(triangles) work and fixed local storage, with no
+/// per-receiver allocation; breakdowns reserve bounded attribution arrays.
+/// Only the selected source geometry and copied rig attribution are retained; the
 /// identity is not a complete scene hash and does not imply unobstructed rays.
 pub struct UnoccludedAreaReference {
     faces: Vec<Face>,
     bindings: Vec<AreaReferenceBinding>,
+    fixtures: Vec<FixtureSources>,
     identity: ContentHash,
     max_outputs: usize,
 }
@@ -130,11 +140,13 @@ impl UnoccludedAreaReference {
     /// No source/material object is modified. Duplicate/coincident faces within
     /// a source refuse as in native area admission. Projectors refuse explicitly.
     pub fn new(
-        primitives: &[Primitive], sources: &[PhotometricAreaEmitter],
-        budget: AreaReferenceBudget, cx: &Cx<'_>,
+        primitives: &[Primitive],
+        sources: &[PhotometricAreaEmitter],
+        budget: AreaReferenceBudget,
+        cx: &Cx<'_>,
     ) -> Result<Self, AreaReferenceError> {
         Self::from_bindings(primitives, sources.iter().map(|s| (s.primitive_index(), s)),
-            sources.len(), &[], budget, cx)
+            sources.len(), &[], &[], budget, cx)
     }
 
     /// Prepare the rig's finite component, then supplemental scene bindings.
@@ -142,20 +154,29 @@ impl UnoccludedAreaReference {
     /// Point emitters are not part of this direct-area result. Projectors refuse;
     /// source-construction and fixture calibration error remain outside the bound.
     pub fn new_with_rig(
-        primitives: &[Primitive], rig: &PhotometricRig, supplemental: &[PhotometricAreaEmitter],
-        budget: AreaReferenceBudget, cx: &Cx<'_>,
+        primitives: &[Primitive],
+        rig: &PhotometricRig,
+        supplemental: &[PhotometricAreaEmitter],
+        budget: AreaReferenceBudget,
+        cx: &Cx<'_>,
     ) -> Result<Self, AreaReferenceError> {
         let bindings = rig_bindings(primitives, rig, supplemental, budget, cx)?;
         Self::from_bindings(primitives, bindings.iter().copied(), bindings.len(),
-            rig.surface_emitter_identities(), budget, cx)
+            rig.surface_emitter_identities(), rig.fixtures(), budget, cx)
     }
 
     fn from_bindings<'source>(
-        primitives: &[Primitive], sources: impl Iterator<Item = (usize, &'source PhotometricAreaEmitter)> + Clone,
-        count: usize, identities: &[FixtureEmitterIdentity], budget: AreaReferenceBudget, cx: &Cx<'_>,
+        primitives: &[Primitive],
+        sources: impl Iterator<Item = (usize, &'source PhotometricAreaEmitter)> + Clone,
+        count: usize,
+        identities: &[FixtureEmitterIdentity],
+        fixtures: &[AssembledFixture],
+        budget: AreaReferenceBudget,
+        cx: &Cx<'_>,
     ) -> Result<Self, AreaReferenceError> {
         cx.checkpoint()?;
         if count > budget.max_emitters { return Err(AreaReferenceError::Budget); }
+        let fixtures = fixture_sources(fixtures, cx)?;
         let mut total = 0_usize;
         let mut indices = Vec::new();
         indices.try_reserve_exact(count).map_err(|_| AreaReferenceError::Allocation)?;
@@ -179,7 +200,7 @@ impl UnoccludedAreaReference {
         hash.update(&fs_ivl::INTERVAL_SEMANTICS_VERSION.to_le_bytes());
         hash.update(&fs_ivl::angle::ANGLE_ENCLOSURE_SEMANTICS_VERSION.to_le_bytes());
         hash.update(&(count as u64).to_le_bytes());
-        for (primitive_index, source) in sources {
+        for (source_index, (primitive_index, source)) in sources.enumerate() {
             cx.checkpoint()?;
             let (mesh, placement) = mesh(primitives, primitive_index, source)?;
             let first = faces.len();
@@ -220,7 +241,7 @@ impl UnoccludedAreaReference {
                 let face_area = mul(mul(mul(point(0.5), length), point(scale)), point(scale));
                 if !finite(face_area) || face_area.lo() <= 0.0 { return Err(AreaReferenceError::NumericalRange); }
                 area = add(area, face_area);
-                faces.push(Face { origin_face: (primitive_index, triangle_index), vertices, perpendicular, area: face_area, luminance: zero(), both_sides: both });
+                faces.push(Face { source: source_index, origin_face: (primitive_index, triangle_index), vertices, perpendicular, area: face_area, luminance: zero(), both_sides: both });
             }
             keys.sort_unstable();
             if keys.windows(2).any(|w| w[0] == w[1]) { return Err(AreaReferenceError::InvalidGeometry); }
@@ -245,7 +266,13 @@ impl UnoccludedAreaReference {
             for face in &mut faces[first..] { cx.checkpoint()?; face.luminance = luminance; }
         }
         cx.checkpoint()?;
-        Ok(Self { faces, bindings, identity: hash.finalize(), max_outputs: budget.max_outputs })
+        Ok(Self {
+            faces,
+            bindings,
+            fixtures,
+            identity: hash.finalize(),
+            max_outputs: budget.max_outputs,
+        })
     }
 
     /// Native primitive and optional fixture/emitter attribution for each source.
@@ -257,7 +284,34 @@ impl UnoccludedAreaReference {
     /// A difficult horizon/near-collinear edge falls back to a positive geometric
     /// upper bound, not a guessed branch. Such triangles are counted in the result.
     pub fn illuminance(
-        &self, cx: &Cx<'_>, probe: &IlluminanceProbe,
+        &self,
+        cx: &Cx<'_>,
+        probe: &IlluminanceProbe,
+    ) -> Result<AreaReferenceIlluminance, AreaReferenceError> {
+        self.evaluate(cx, probe, None)
+    }
+
+    /// Attribute this same unoccluded finite-area solve to original sources and
+    /// fixtures. Point light is excluded. Dark emitters and empty/point-only
+    /// fixtures retain zero entries; supplemental sources retain no fixture ID.
+    /// The total and its numerical identity match [`Self::illuminance`].
+    /// Bounded storage counts the total, emitters and fixtures against
+    /// `AreaReferenceBudget::max_outputs`; refusal publishes no partial result.
+    pub fn illuminance_breakdown(
+        &self,
+        cx: &Cx<'_>,
+        probe: &IlluminanceProbe,
+    ) -> Result<AreaIlluminanceBreakdown<AreaReferenceIlluminance>, AreaReferenceError> {
+        let mut attribution = Attribution::new(self, cx)?;
+        let total = self.evaluate(cx, probe, Some(&mut attribution))?;
+        attribution.finish(self, total, cx)
+    }
+
+    fn evaluate(
+        &self,
+        cx: &Cx<'_>,
+        probe: &IlluminanceProbe,
+        mut attribution: Option<&mut Attribution>,
     ) -> Result<AreaReferenceIlluminance, AreaReferenceError> {
         cx.checkpoint()?;
         let p = probe.position_m();
@@ -280,8 +334,12 @@ impl UnoccludedAreaReference {
             if !face.both_sides && side.lo() > 0.0 { continue; }
             let (factor, coarse) = projected_triangle(vectors, normal, face.area);
             coarse_triangles += usize::from(coarse);
-            range = nonnegative(add(range, mul(face.luminance, factor)));
+            let contribution = mul(face.luminance, factor);
+            range = nonnegative(add(range, contribution));
             if !finite(range) { return Err(AreaReferenceError::NumericalRange); }
+            if let Some(attribution) = attribution.as_deref_mut() {
+                attribution.add_root(face.source, contribution)?;
+            }
         }
         let lux = range.lo() + (range.hi() - range.lo()) * 0.5;
         let error = sub(point(lux), point(range.lo())).hi()

@@ -203,28 +203,38 @@ impl<'scene> OccludedAreaReference<'scene> {
     /// All scene geometry participates, including non-emitting and back-facing
     /// source faces. Dielectrics, animated/chart shapes and projectors refuse.
     pub fn new(
-        primitives: &'scene [Primitive], sources: &[PhotometricAreaEmitter],
-        preparation: AreaReferenceBudget, cx: &Cx<'_>,
+        primitives: &'scene [Primitive],
+        sources: &[PhotometricAreaEmitter],
+        preparation: AreaReferenceBudget,
+        cx: &Cx<'_>,
     ) -> Result<Self, AreaOcclusionError> {
         Self::from_bindings(primitives, sources.iter().map(|s| (s.primitive_index(), s)),
-            sources.len(), &[], preparation, cx)
+            sources.len(), &[], &[], preparation, cx)
     }
 
     /// Bound the mounted rig's finite-source component plus supplemental sources.
     /// Point emitters are excluded. Original opaque geometry, including fixture
     /// bodies, supplies visibility; projector sources still refuse explicitly.
     pub fn new_with_rig(
-        primitives: &'scene [Primitive], rig: &PhotometricRig, supplemental: &[PhotometricAreaEmitter],
-        preparation: AreaReferenceBudget, cx: &Cx<'_>,
+        primitives: &'scene [Primitive],
+        rig: &PhotometricRig,
+        supplemental: &[PhotometricAreaEmitter],
+        preparation: AreaReferenceBudget,
+        cx: &Cx<'_>,
     ) -> Result<Self, AreaOcclusionError> {
         let bindings = rig_bindings(primitives, rig, supplemental, preparation, cx)?;
         Self::from_bindings(primitives, bindings.iter().copied(), bindings.len(),
-            rig.surface_emitter_identities(), preparation, cx)
+            rig.surface_emitter_identities(), rig.fixtures(), preparation, cx)
     }
 
     fn from_bindings<'source>(
-        primitives: &'scene [Primitive], bindings: impl Iterator<Item = (usize, &'source PhotometricAreaEmitter)> + Clone,
-        count: usize, identities: &[FixtureEmitterIdentity], preparation: AreaReferenceBudget, cx: &Cx<'_>,
+        primitives: &'scene [Primitive],
+        bindings: impl Iterator<Item = (usize, &'source PhotometricAreaEmitter)> + Clone,
+        count: usize,
+        identities: &[FixtureEmitterIdentity],
+        fixtures: &[AssembledFixture],
+        preparation: AreaReferenceBudget,
+        cx: &Cx<'_>,
     ) -> Result<Self, AreaOcclusionError> {
         cx.checkpoint()?;
         for primitive in primitives {
@@ -233,7 +243,15 @@ impl<'scene> OccludedAreaReference<'scene> {
                 return Err(AreaOcclusionError::TransmissiveGeometry);
             }
         }
-        let sources = UnoccludedAreaReference::from_bindings(primitives, bindings, count, identities, preparation, cx)?;
+        let sources = UnoccludedAreaReference::from_bindings(
+            primitives,
+            bindings,
+            count,
+            identities,
+            fixtures,
+            preparation,
+            cx,
+        )?;
         let mut hash = DomainHasher::new("org.frankensim.photometry.occluded-area.v3");
         hash.update(&AREA_OCCLUSION_SEMANTICS_VERSION.to_le_bytes());
         hash.update(&fs_ivl::decay::DECAY_ENCLOSURE_SEMANTICS_VERSION.to_le_bytes());
@@ -269,12 +287,15 @@ impl<'scene> OccludedAreaReference<'scene> {
     /// a refusal returns no partial receiver. Emission and in-scattering remain
     /// omitted even when the same medium also supplies them to the path tracer.
     pub fn new_with_medium(
-        primitives: &'scene [Primitive], sources: &[PhotometricAreaEmitter],
-        medium: PhotometricMedium<'scene>, preparation: AreaReferenceBudget,
-        grid_budget: GridEnclosureBudget, cx: &Cx<'_>,
+        primitives: &'scene [Primitive],
+        sources: &[PhotometricAreaEmitter],
+        medium: PhotometricMedium<'scene>,
+        preparation: AreaReferenceBudget,
+        grid_budget: GridEnclosureBudget,
+        cx: &Cx<'_>,
     ) -> Result<Self, AreaOcclusionError> {
         let bindings = sources.iter().map(|s| (s.primitive_index(), s));
-        Self::from_bindings(primitives, bindings.clone(), sources.len(), &[], preparation, cx)?
+        Self::from_bindings(primitives, bindings.clone(), sources.len(), &[], &[], preparation, cx)?
             .with_prepared_medium(medium, bindings, sources.len(), grid_budget, cx)
     }
 
@@ -282,13 +303,17 @@ impl<'scene> OccludedAreaReference<'scene> {
     /// Spectra follow the resolved native source slots. Absorption and
     /// out-scattering are included; in-scattering and point light are omitted.
     pub fn new_with_rig_and_medium(
-        primitives: &'scene [Primitive], rig: &PhotometricRig, supplemental: &[PhotometricAreaEmitter],
-        medium: PhotometricMedium<'scene>, preparation: AreaReferenceBudget,
-        grid_budget: GridEnclosureBudget, cx: &Cx<'_>,
+        primitives: &'scene [Primitive],
+        rig: &PhotometricRig,
+        supplemental: &[PhotometricAreaEmitter],
+        medium: PhotometricMedium<'scene>,
+        preparation: AreaReferenceBudget,
+        grid_budget: GridEnclosureBudget,
+        cx: &Cx<'_>,
     ) -> Result<Self, AreaOcclusionError> {
         let bindings = rig_bindings(primitives, rig, supplemental, preparation, cx)?;
         Self::from_bindings(primitives, bindings.iter().copied(), bindings.len(),
-            rig.surface_emitter_identities(), preparation, cx)?
+            rig.surface_emitter_identities(), rig.fixtures(), preparation, cx)?
             .with_prepared_medium(medium, bindings.iter().copied(), bindings.len(), grid_budget, cx)
     }
 
@@ -308,15 +333,46 @@ impl<'scene> OccludedAreaReference<'scene> {
 
     /// Bound one receiver. Progressive jobs reuse the bounded frontier allocation.
     pub fn illuminance(
-        &self, cx: &Cx<'_>, probe: &IlluminanceProbe, budget: AreaOcclusionBudget,
+        &self,
+        cx: &Cx<'_>,
+        probe: &IlluminanceProbe,
+        budget: AreaOcclusionBudget,
     ) -> Result<OccludedAreaIlluminance, AreaOcclusionError> {
         cx.checkpoint()?;
         let mut workspace = Workspace::new(budget, self.sources.faces.len())?;
-        self.evaluate(cx, probe, budget, &mut workspace)
+        self.evaluate(cx, probe, budget, &mut workspace, None)
+    }
+
+    /// Attribute the same adaptive direct-area solve without assigning separate
+    /// per-emitter tolerances or rerunning visibility/extinction. The native
+    /// total, global budget, termination and numerical identity are unchanged.
+    /// Components retain finite-source/fixture identities, including dark and
+    /// empty entries; point light and in-scattering remain excluded.
+    /// The output cap is checked before frontier allocation, and cancelled or
+    /// refused queries publish no partial breakdown.
+    pub fn illuminance_breakdown(
+        &self,
+        cx: &Cx<'_>,
+        probe: &IlluminanceProbe,
+        budget: AreaOcclusionBudget,
+    ) -> Result<AreaIlluminanceBreakdown<OccludedAreaIlluminance>, AreaOcclusionError> {
+        let mut attribution = Attribution::new(&self.sources, cx).map_err(|error| match error {
+            AreaReferenceError::Budget => AreaOcclusionError::Budget,
+            AreaReferenceError::Allocation => AreaOcclusionError::Allocation,
+            error => AreaOcclusionError::from(error),
+        })?;
+        let mut workspace = Workspace::new(budget, self.sources.faces.len())?;
+        let total = self.evaluate(cx, probe, budget, &mut workspace, Some(&mut attribution))?;
+        Ok(attribution.finish(&self.sources, total, cx)?)
     }
 
     fn evaluate(
-        &self, cx: &Cx<'_>, probe: &IlluminanceProbe, budget: AreaOcclusionBudget, work: &mut Workspace,
+        &self,
+        cx: &Cx<'_>,
+        probe: &IlluminanceProbe,
+        budget: AreaOcclusionBudget,
+        work: &mut Workspace,
+        mut attribution: Option<&mut Attribution>,
     ) -> Result<OccludedAreaIlluminance, AreaOcclusionError> {
         cx.checkpoint()?;
         work.frontier.clear();
@@ -349,6 +405,9 @@ impl<'scene> OccludedAreaReference<'scene> {
             evaluations += 1;
             raw = nonnegative(add(raw, patch.range));
             if !finite(raw) { return Err(AreaReferenceError::NumericalRange.into()); }
+            if let Some(attribution) = attribution.as_deref_mut() {
+                attribution.add_root(face.source, patch.range)?;
+            }
             uncertain += usize::from(patch.uncertain);
             coarse += usize::from(patch.coarse);
             varying += usize::from(patch.varying);
@@ -373,6 +432,14 @@ impl<'scene> OccludedAreaReference<'scene> {
             // the separately intersected enclosure as this accumulator.
             raw = replace_parent(raw, parent.range, children[0].range, children[1].range)?;
             enclosed = enclosed.intersect(raw).ok_or(AreaReferenceError::NumericalRange)?;
+            if let Some(attribution) = attribution.as_deref_mut() {
+                attribution.replace(
+                    self.sources.faces[parent.root].source,
+                    parent.range,
+                    children[0].range,
+                    children[1].range,
+                )?;
+            }
             uncertain -= usize::from(parent.uncertain);
             coarse -= usize::from(parent.coarse);
             varying -= usize::from(parent.varying);
@@ -456,7 +523,12 @@ fn midpoint_and_error(range: Interval) -> (f64, f64) {
     (mid, sub(point(mid), point(range.lo())).hi().max(sub(point(range.hi()), point(mid)).hi()))
 }
 
-fn replace_parent(total: Interval, parent: Interval, a: Interval, b: Interval) -> Result<Interval, AreaReferenceError> {
+pub(super) fn replace_parent(
+    total: Interval,
+    parent: Interval,
+    a: Interval,
+    b: Interval,
+) -> Result<Interval, AreaReferenceError> {
     let lower = add(add(sub(point(total.lo()), point(parent.lo())), point(a.lo())), point(b.lo())).lo().max(0.0);
     let upper = add(add(sub(point(total.hi()), point(parent.hi())), point(a.hi())), point(b.hi())).hi();
     if !lower.is_finite() || !upper.is_finite() || lower > upper { return Err(AreaReferenceError::NumericalRange); }
@@ -564,7 +636,7 @@ impl<'a, 'scene> OccludedAreaJob<'a, 'scene> {
                 Receivers::Probes(probes) => probes[index],
                 Receivers::Grid(grid) => grid.probe(index).map_err(|_| AreaReferenceError::NumericalRange)?,
             };
-            let value = self.reference.evaluate(cx, &probe, self.budget, &mut self.work)?;
+            let value = self.reference.evaluate(cx, &probe, self.budget, &mut self.work, None)?;
             cx.checkpoint()?;
             self.values.push(value);
         }
