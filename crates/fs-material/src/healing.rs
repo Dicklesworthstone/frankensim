@@ -5,6 +5,8 @@
 //! exactly on its piecewise-linear rate curve and a linear temperature path.
 //! Cooling pauses development where the declared rate is zero; reheating keeps
 //! all earlier exposure. No material-specific mobility or strength is invented.
+//! [`kinetics`] integrates the existing WLF/Arrhenius temperature-shift laws
+//! directly along that same thermal path, without introducing a mobility table.
 //!
 //! Equivalent-time motivation: Seppala et al., Soft Matter 13 (2017), 6761-6769,
 //! doi:10.1039/C7SM00950J. A scalar dose does not model chain orientation,
@@ -16,6 +18,9 @@ use core::fmt;
 /// Explicit, separately supplied mapping into a frozen cohesive law.
 pub mod strength;
 
+/// Non-isothermal welding exposure from the canonical temperature-shift laws.
+pub mod kinetics;
+
 /// Refusals do not mutate accepted contact history.
 #[derive(Debug, Clone, PartialEq)]
 pub enum HealingError {
@@ -25,6 +30,8 @@ pub enum HealingError {
     Temperature(f64),
     /// Integrated dose outside the supplied strength-map domain.
     Dose(f64),
+    /// The requested mobility integral exceeded its declared work/depth budget.
+    IntegrationBudget,
 }
 
 impl fmt::Display for HealingError {

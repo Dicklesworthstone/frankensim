@@ -4,6 +4,7 @@ use fs_material::healing::{MobilityKnot, MobilityTable};
 use fs_material::healing::strength::{StrengthKnot, StrengthMap};
 
 mod mixed_mode;
+mod kinetics;
 
 struct Sensible;
 impl ThermalLaw for Sensible {

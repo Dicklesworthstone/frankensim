@@ -5689,6 +5689,33 @@ physics/API review completed; native compilation and tests for the extension
 remain unexecuted because this worker exhausted shared memory/storage in its
 unchanged runtime dependency.
 
+## Non-isothermal polymer welding kinetics
+
+`healing::kinetics::ShiftedMobility` consumes the original
+`visco::temperature::TemperatureShift` and an explicitly supplied reference
+mobility, using `r(T) = r_ref/a_T(T)` for both Arrhenius and WLF calibrations.
+The dimensionless exposure enters the existing `ContactHistory`,
+`StrengthMap` and deposited-contact observer; no second history or material
+table is introduced. Seppala et al. (2017), doi:10.1039/C7SM00950J, equation 5,
+motivates the reduced-time integral, not any default material coefficients.
+
+Isothermal increments use exact rate-times-duration arithmetic. Changing
+temperature follows the consumer's actual linear ramp, with allocation-free
+adaptive Simpson quadrature and explicit absolute/relative dose tolerances,
+evaluation count and recursion-depth ceilings. The returned error is a
+numerical estimate, not a certified bound or calibration uncertainty. An
+optional authored zero-mobility cutoff is split before integration; it cannot
+extend the original shift domain or imply a glass-transition temperature.
+Invalid paths and exhausted quadrature budgets refuse the whole increment.
+
+Focused tests compare both models with independent high-precision integral
+fixtures, including a steep WLF ramp, and exercise reference-rate orientation,
+cutoff crossings, temperature-path subdivision, retained exposure and bounded
+refusal. The native deposition tests carry the original finite-cell thermal
+ramp into dose and cohesive strength, with atomic domain refusal. Contact
+area creation, crystallization, degradation, calibration and concurrent
+development of an already damaged mechanical bond remain outside this model.
+
 ## Dose-dependent opening and shear adhesion
 
 `healing::strength::StrengthMap::new_mixed_mode` maps one original contact's

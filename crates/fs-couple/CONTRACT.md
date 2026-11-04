@@ -28934,6 +28934,29 @@ compare analytic inertial unloading and three-capacity diffusion after thermal
 weakening, continued cooling without healing, and late source/cancellation
 rollback (G1/G3/G4).
 
+`propose_deformable_cohesive_layer_heat_with_deformation` and its
+`with_temperature_and_deformation` counterpart admit tensile and compressive
+extension of that same surviving adhesive layer. `CohesiveLayerDeformation`
+declares the absolute normal and Euclidean shear strain bounds relative to
+original layer thickness. Both endpoints are checked; the native straight
+constitutive path and irreversible damage preserve those bounds within the
+step. Complete rupture refuses before thermal trials, requiring a separate
+crack/contact transition. Partial damage retains its fracture account without
+being interpreted as missing thermal area.
+
+The fixed-area, laterally uniform layer has endpoint thickness `L0 + g_n`.
+`ThirdBodyHeatStep::with_layer_normal_stretch` uses the physical half-thickness
+in each original series resistance, retaining physical spatial conductivity,
+both contact resistances, body half-distances and original mass/caloric storage.
+The report exposes `layer_normal_stretch`. Ambient side-area convection refuses
+on this path; explicitly owned total sources and reservoirs retain their units.
+Edge overlap, lateral-area changes, open cracks and closed thermoelastic
+feedback remain outside the model. Existing closed-reference entries preserve
+their original behavior. Focused `friction_heat/cohesive/layer/stretch.rs`
+regressions compare native inertial motion and viscous heat with independent
+physical-length three-cell balances, zero-extension parity, progressive damage,
+source-temperature weakening and transactional strain/rupture refusals.
+
 ### Prescribed source temperature with native cohesive heating
 
 `apply_rigid_cohesive_heat_with_temperature` stages one successor of each
