@@ -15,18 +15,22 @@
 //! necessary, particularly for a light wall. All trials start from the same
 //! accepted fluid; trial history never becomes physical elapsed time.
 
-/// Fixed-center finite-inertia rotation driven by the original liquid links.
-pub mod rotor;
 /// Joint tangential translation and axial spin through the same liquid links.
 pub mod planar;
+/// Fixed-center finite-inertia rotation driven by the original liquid links.
+pub mod rotor;
 
 use fs_exec::CancelGate;
 use fs_lbm::d3q19::freesurface3::PlanarWall3;
 use fs_lbm::material::MaterialLbmError;
-use fs_lbm::material::free_surface::{MaterialFreeSurface3, MaterialPlanarWallMotionReport3};
+use fs_lbm::material::free_surface::{
+    MaterialFreeSurface3, MaterialPlanarRigidWallMotion3, MaterialPlanarRigidWallReport3,
+    MaterialPlanarWallMotionReport3,
+};
+use fs_math::dd::Dd;
 use fs_mbd::{DynamicsError, MassProperties, MomentumImpulseReceipt, Pose, RigidBodyState, Vec3};
 
-/// Explicit root, physical-balance and complete native-trial allowances.
+/// Explicit midpoint domain, physical-balance and complete native-trial allowances.
 #[derive(Clone, Copy, Debug)]
 pub struct GuidedWallControls {
     /// Finite ordered bracket for the signed MIDPOINT wall speed [m/s].
@@ -42,6 +46,10 @@ pub struct GuidedWallControls {
     pub maximum_relative_mass_defect: f64,
     /// Absolute scalar-root and represented vector-impulse allowance [kg m/s].
     pub momentum_absolute_kg_m_s: f64,
+    /// Full orbital-plus-spin impulse allowance about `balance_origin_m` [kg m²/s].
+    pub angular_momentum_absolute_kg_m2_s: f64,
+    /// Fixed inertial origin for the complete wall angular-momentum balance [m].
+    pub balance_origin_m: Vec3,
     /// Absolute mismatch of native wall and rigid midpoint velocities [m/s].
     pub midpoint_absolute_m_s: f64,
     /// Absolute mechanical boundary-work defect allowance [J].
@@ -74,24 +82,26 @@ pub enum GuidedWallError {
         /// Caller-supplied accumulated trial-cell ceiling.
         maximum: usize,
     },
-    /// The admitted speed bracket does not enclose the coupled momentum root.
+    /// The admitted speed interval does not contain the coupled momentum root.
     Unbracketed {
-        /// Coupled impulse residual at the lower speed [kg m/s].
+        /// Native affine prediction of the impulse residual at the lower speed [kg m/s].
         lower_residual_kg_m_s: f64,
-        /// Coupled impulse residual at the upper speed [kg m/s].
+        /// Native affine prediction of the impulse residual at the upper speed [kg m/s].
         upper_residual_kg_m_s: f64,
     },
-    /// No strictly interior representable speed remains before root acceptance.
+    /// The final native replay did not meet the scalar midpoint balance.
     Unresolved {
         /// Native trials already evaluated.
         native_trials: usize,
-        /// Smaller-magnitude endpoint impulse defect [kg m/s].
+        /// Actual final native impulse defect [kg m/s].
         residual_kg_m_s: f64,
     },
     /// Actual native endpoint impulse, shared velocity or work failed admission.
     Balance {
         /// Represented wall increment minus guided and external impulses.
         momentum_residual_kg_m_s: Vec3,
+        /// Represented orbital-plus-spin increment minus all applied moments.
+        angular_momentum_residual_kg_m2_s: Vec3,
         /// Actual rigid midpoint minus imposed native liquid wall velocity.
         midpoint_residual_m_s: Vec3,
         /// Mechanical boundary-work defect, never assigned to heat.
@@ -135,8 +145,11 @@ pub struct GuidedFreeSurfaceWall<'a> {
 pub struct GuidedWallStep<'a> {
     /// Continue subsequent intervals from this complete accepted candidate.
     pub motion: GuidedFreeSurfaceWall<'a>,
-    /// Unmodified original SI liquid wall-exchange receipt.
+    /// Translational view of the original SI liquid wall-exchange receipt.
     pub wall: MaterialPlanarWallMotionReport3,
+    /// Complete native link force/moment receipt at the free half-drift COM.
+    /// Zero spin retains the original uniform-velocity population arithmetic.
+    pub wrench: MaterialPlanarRigidWallReport3,
     /// Fixed-pose native impulse receipt. `motion.body()` additionally includes
     /// midpoint translation; orientation and angular momentum are unchanged.
     pub momentum: MomentumImpulseReceipt,
@@ -145,12 +158,25 @@ pub struct GuidedWallStep<'a> {
     /// Translational guide impulse ON the wall in the native numerical pressure
     /// datum. This closes raw momentum; it is not an absolute physical load.
     pub raw_guide_impulse_world: Vec3,
+    /// Guide's pure angular impulse about `wrench.motion.origin_m` [kg m²/s].
+    /// This cancels the actual native liquid moment and keeps wall spin zero.
+    pub raw_guide_angular_impulse_world: Vec3,
     /// Guide reaction inferred from the native pressure-perturbation load.
     /// This diagnostic is NOT substituted into raw population momentum.
     pub pressure_perturbation_guide_impulse_world: Vec3,
+    /// Guide couple from the perturbation traction at the same COM [kg m²/s].
+    pub pressure_perturbation_guide_angular_impulse_world: Vec3,
     /// Physical normal/transverse guide impulse when an absolute pressure
     /// reference was explicitly bound to the liquid. No reference is invented.
     pub absolute_guide_impulse_world: Option<Vec3>,
+    /// Guide couple including an explicitly bound absolute pressure [kg m²/s].
+    pub absolute_guide_angular_impulse_world: Option<Vec3>,
+    /// Inertial origin of the following complete angular account [m].
+    pub balance_origin_m: Vec3,
+    /// Actual wall orbital-plus-spin momentum increment about that origin [kg m²/s].
+    pub angular_momentum_change_world: Vec3,
+    /// Actual angular increment minus liquid, guide and applied-force moments.
+    pub angular_momentum_residual_kg_m2_s: Vec3,
     /// Actual velocity imposed in the accepted native liquid trial.
     pub midpoint_velocity_world: Vec3,
     /// Represented rigid midpoint minus that imposed liquid wall velocity.
@@ -172,7 +198,7 @@ pub struct GuidedWallStep<'a> {
 
 struct Trial<'a> {
     liquid: MaterialFreeSurface3<'a>,
-    wall: MaterialPlanarWallMotionReport3,
+    wall: MaterialPlanarRigidWallReport3,
     speed: f64,
     residual: f64,
     scale: f64,
@@ -185,8 +211,8 @@ impl<'a> GuidedFreeSurfaceWall<'a> {
     /// to `wall`; it is normalized once. The native body must have zero spin
     /// and translate only along that guide, up to arithmetic roundoff. Its pose
     /// tracks material translation along the unchanged planar domain wall.
-    /// Native link arms are unavailable, so the rotational guide reaction is
-    /// unresolved and no total-angular-momentum claim is made.
+    /// The original liquid link arms supply the guide's full reaction couple;
+    /// orbital and spin momentum remain separate from pressure-datum diagnostics.
     ///
     /// `maximum_cells` bounds the complete domain, including gas and solid
     /// cells, before any trial clone or native plane scan. Time below is elapsed
@@ -276,11 +302,12 @@ impl<'a> GuidedFreeSurfaceWall<'a> {
 
     /// Advance one ORIGINAL liquid timestep with a held signed guide force [N].
     ///
-    /// Solve 2m(w-v0) = J_wall(w)·t + F dt. Bracketed secant trials use the
-    /// complete native wall response; a midpoint fallback guarantees bracket
-    /// contraction. No empirical drag/added mass or force-frame replacement is
-    /// supplied. Native trial failures refuse the whole interval. A user may
-    /// provide a narrower physical bracket or refine the original liquid dt.
+    /// Solve 2m(w-v0) = J_wall(w)·t + F dt using the original reflection's affine
+    /// response. One pilot supplies its exact scalar resistance; one replay at
+    /// the proposed midpoint supplies the accepted populations and full wrench.
+    /// An already balanced pilot needs no replay. The explicit speed interval
+    /// still bounds admission. No empirical drag/added mass or second fluid
+    /// algorithm is supplied; every native failure refuses the whole interval.
     ///
     /// Successful liquid and body candidates escape together only after actual
     /// representable impulse, shared midpoint, work, pose and cancellation
@@ -295,80 +322,87 @@ impl<'a> GuidedFreeSurfaceWall<'a> {
         self.admit(external_force_n, controls)?;
         let mut trials = 0;
         let mut trial_cells = 0;
-        let lower = self.trial(
-            controls.midpoint_speed_bracket_m_s[0],
+        let initial = self
+            .body
+            .center_of_mass_velocity_world(self.properties)?
+            .dot(self.tangent);
+        let [lower, upper] = controls.midpoint_speed_bracket_m_s;
+        let pilot = self.trial(
+            initial.clamp(lower, upper),
             external_force_n,
             controls,
             &mut trials,
             &mut trial_cells,
             gate,
         )?;
-        if converged(&lower, controls)? {
-            return self.finish(lower, external_force_n, controls, trials, trial_cells, gate);
+        if converged(&pilot, controls)? {
+            return self.finish(pilot, external_force_n, controls, trials, trial_cells, gate);
         }
-        let mut lo = (lower.speed, lower.residual);
-        drop(lower);
-        let upper = self.trial(
-            controls.midpoint_speed_bracket_m_s[1],
-            external_force_n,
-            controls,
-            &mut trials,
-            &mut trial_cells,
-            gate,
+        let axis = normal_axis(self.wall);
+        let tangents = [
+            component(self.tangent, (axis + 1) % 3),
+            component(self.tangent, (axis + 2) % 3),
+        ];
+        let mut resistance = Dd::ZERO;
+        for i in 0..2 {
+            for j in 0..2 {
+                resistance = resistance
+                    + Dd::from_f64(tangents[i])
+                        * Dd::from_f64(pilot.wall.fluid_response[i][j])
+                        * Dd::from_f64(tangents[j]);
+            }
+        }
+        let resistance = finite(resistance.to_f64())?;
+        if resistance < 0.0 {
+            return Err(invalid("native guided wall resistance must be nonnegative"));
+        }
+        let half_slope =
+            Dd::from_f64(self.properties.mass()) + Dd::from_f64(0.5) * Dd::from_f64(resistance);
+        let speed = finite(
+            (Dd::from_f64(pilot.speed)
+                - Dd::from_f64(0.5) * Dd::from_f64(pilot.residual) / half_slope)
+                .to_f64(),
         )?;
-        if converged(&upper, controls)? {
-            return self.finish(upper, external_force_n, controls, trials, trial_cells, gate);
-        }
-        let mut hi = (upper.speed, upper.residual);
-        drop(upper);
-        if lo.1 >= 0.0 || hi.1 <= 0.0 {
+        if speed < lower || speed > upper {
+            let residual_at = |value| {
+                finite(
+                    (Dd::from_f64(pilot.residual)
+                        + Dd::from_f64(2.0)
+                            * half_slope
+                            * (Dd::from_f64(value) - Dd::from_f64(pilot.speed)))
+                    .to_f64(),
+                )
+            };
             return Err(GuidedWallError::Unbracketed {
-                lower_residual_kg_m_s: lo.1,
-                upper_residual_kg_m_s: hi.1,
+                lower_residual_kg_m_s: residual_at(lower)?,
+                upper_residual_kg_m_s: residual_at(upper)?,
             });
         }
-        loop {
-            // Scale before division; forming hi.residual-lo.residual can overflow.
-            let scale = (-lo.1).max(hi.1);
-            let a = -lo.1 / scale;
-            let b = hi.1 / scale;
-            let fraction = a / (a + b);
-            let fraction = if (0.1..=0.9).contains(&fraction) {
-                fraction
-            } else {
-                0.5
-            };
-            let speed = lo.0 * (1.0 - fraction) + hi.0 * fraction;
-            if !speed.is_finite() || speed <= lo.0 || speed >= hi.0 {
-                return Err(GuidedWallError::Unresolved {
-                    native_trials: trials,
-                    residual_kg_m_s: if -lo.1 < hi.1 { lo.1 } else { hi.1 },
-                });
-            }
-            let candidate = self.trial(
-                speed,
-                external_force_n,
-                controls,
-                &mut trials,
-                &mut trial_cells,
-                gate,
-            )?;
-            if converged(&candidate, controls)? {
-                return self.finish(
-                    candidate,
-                    external_force_n,
-                    controls,
-                    trials,
-                    trial_cells,
-                    gate,
-                );
-            }
-            if candidate.residual < 0.0 {
-                lo = (speed, candidate.residual);
-            } else {
-                hi = (speed, candidate.residual);
-            }
+        // The immutable pilot is discarded before allocating the accepted
+        // replay. Trials never coexist as additional physical liquid histories.
+        drop(pilot);
+        let candidate = self.trial(
+            speed,
+            external_force_n,
+            controls,
+            &mut trials,
+            &mut trial_cells,
+            gate,
+        )?;
+        if !converged(&candidate, controls)? {
+            return Err(GuidedWallError::Unresolved {
+                native_trials: trials,
+                residual_kg_m_s: candidate.residual,
+            });
         }
+        self.finish(
+            candidate,
+            external_force_n,
+            controls,
+            trials,
+            trial_cells,
+            gate,
+        )
     }
 
     fn admit(&self, force: f64, c: GuidedWallControls) -> Result<(), GuidedWallError> {
@@ -378,6 +412,7 @@ impl<'a> GuidedFreeSurfaceWall<'a> {
             .scaling()
             .velocity_si(self.liquid.scaling().flow().u_lattice)?;
         if !force.is_finite()
+            || !c.balance_origin_m.is_finite()
             || !lo.is_finite()
             || !hi.is_finite()
             || lo >= hi
@@ -391,6 +426,7 @@ impl<'a> GuidedFreeSurfaceWall<'a> {
             || c.relative_tolerance >= 1.0
             || [
                 c.momentum_absolute_kg_m_s,
+                c.angular_momentum_absolute_kg_m2_s,
                 c.midpoint_absolute_m_s,
                 c.work_absolute_j,
             ]
@@ -433,20 +469,31 @@ impl<'a> GuidedFreeSurfaceWall<'a> {
         }
         *trial_cells = required;
         *trials += 1;
-        let (liquid, wall) = self.liquid.planar_wall_motion_candidate_si(
-            self.wall,
-            array(self.tangent.scale(speed)),
+        let before_velocity = self.body.center_of_mass_velocity_world(self.properties)?;
+        let dt = self.liquid.scaling().timestep_s();
+        // A kick at the free half-drift COM followed by the other half drift
+        // produces the same midpoint translation used by `finish`. Moments
+        // therefore share the actual impulse configuration, even off-center.
+        let origin = self
+            .body
+            .pose()
+            .position_world()
+            .add(before_velocity.scale(0.5 * dt));
+        let (liquid, wall) = self.liquid.planar_rigid_wall_motion_candidate_si(
+            MaterialPlanarRigidWallMotion3 {
+                wall: self.wall,
+                origin_m: array(origin),
+                velocity_at_origin_m_s: array(self.tangent.scale(speed)),
+                angular_speed_rad_s: 0.0,
+            },
             c.maximum_relative_mass_defect,
             gate,
         )?;
         poll(gate)?;
-        let initial = self
-            .body
-            .center_of_mass_velocity_world(self.properties)?
-            .dot(self.tangent);
+        let initial = before_velocity.dot(self.tangent);
         let change = finite((self.properties.mass() * (speed - initial)) * 2.0)?;
         let impulse = finite(vector(wall.wall_impulse_kg_m_s).dot(self.tangent))?;
-        let external = force * self.liquid.scaling().timestep_s();
+        let external = force * dt;
         let residual = finite((change - impulse) - external)?;
         let scale = change.abs().max(impulse.abs()).max(external.abs());
         Ok(Trial {
@@ -486,7 +533,7 @@ impl<'a> GuidedFreeSurfaceWall<'a> {
             .state_after
             .center_of_mass_velocity_world(self.properties)?;
         let midpoint = before_v.scale(0.5).add(after_v.scale(0.5));
-        let imposed = vector(trial.wall.velocity_m_s);
+        let imposed = vector(trial.wall.motion.velocity_at_origin_m_s);
         let midpoint_residual = midpoint.sub(imposed);
         let guide = guided.sub(wall_impulse);
         let momentum_residual = momentum.linear_increment_world.sub(guided).sub(external);
@@ -522,18 +569,6 @@ impl<'a> GuidedFreeSurfaceWall<'a> {
             velocity_scale,
         )?;
         let work_limit = allowance(c.work_absolute_j, c.relative_tolerance, work_scale)?;
-        if !momentum_residual.is_finite()
-            || !midpoint_residual.is_finite()
-            || norm(momentum_residual) > impulse_limit
-            || norm(midpoint_residual) > midpoint_limit
-            || work_residual.abs() > work_limit
-        {
-            return Err(GuidedWallError::Balance {
-                momentum_residual_kg_m_s: momentum_residual,
-                midpoint_residual_m_s: midpoint_residual,
-                work_residual_j: work_residual,
-            });
-        }
         let max_speed = self
             .liquid
             .scaling()
@@ -574,11 +609,66 @@ impl<'a> GuidedFreeSurfaceWall<'a> {
             .wall
             .absolute_wall_force_n
             .map(|load| guide_from(vector(load).scale(dt)));
+        let guide_couple = vector(trial.wall.wall_angular_impulse_kg_m2_s).scale(-1.0);
+        let perturbation_couple =
+            vector(trial.wall.pressure_perturbation_wall_torque_nm).scale(-dt);
+        let absolute_couple = trial
+            .wall
+            .absolute_wall_torque_nm
+            .map(|moment| vector(moment).scale(-dt));
         if !guide.is_finite()
             || !perturbation_guide.is_finite()
             || absolute_guide.is_some_and(|value| !value.is_finite())
+            || !guide_couple.is_finite()
+            || !perturbation_couple.is_finite()
+            || absolute_couple.is_some_and(|value| !value.is_finite())
         {
             return Err(invalid("guide reaction is unrepresentable"));
+        }
+        // Difference actual stored endpoints before forming the orbital moment.
+        // delta(x cross p) = (x0-o) cross delta_p + delta_x cross p1.
+        // Spin stays exactly zero. Liquid and guide couples at the free
+        // half-drift COM cancel, while their net force retains its orbital arm.
+        let difference = |after: Vec3, before: Vec3| {
+            core::array::from_fn(|d| Dd::from_f64(array(after)[d]) - Dd::from_f64(array(before)[d]))
+        };
+        let p1 = body.linear_momentum_world();
+        let delta_p = difference(p1, self.body.linear_momentum_world());
+        let initial_arm = difference(old_pose.position_world(), c.balance_origin_m);
+        let travel = difference(pose.position_world(), old_pose.position_world());
+        let initial_orbital = cross_dd(initial_arm, delta_p);
+        let transport_orbital = cross_dd(travel, array(p1).map(Dd::from_f64));
+        let angular_change: [Dd; 3] =
+            core::array::from_fn(|d| initial_orbital[d] + transport_orbital[d]);
+        let net_impulse = core::array::from_fn(|d| {
+            Dd::from_f64(array(guided)[d]) + Dd::from_f64(array(external)[d])
+        });
+        let impulse_arm = difference(vector(trial.wall.motion.origin_m), c.balance_origin_m);
+        let angular_input = cross_dd(impulse_arm, net_impulse);
+        let angular_residual = vector(core::array::from_fn(|d| {
+            (angular_change[d] - angular_input[d]).to_f64()
+        }));
+        let angular_change = vector(angular_change.map(Dd::to_f64));
+        let angular_limit = allowance(
+            c.angular_momentum_absolute_kg_m2_s,
+            c.relative_tolerance,
+            norm(angular_change).max(norm(vector(angular_input.map(Dd::to_f64)))),
+        )?;
+        if !momentum_residual.is_finite()
+            || !angular_change.is_finite()
+            || !angular_residual.is_finite()
+            || !midpoint_residual.is_finite()
+            || norm(momentum_residual) > impulse_limit
+            || norm(angular_residual) > angular_limit
+            || norm(midpoint_residual) > midpoint_limit
+            || work_residual.abs() > work_limit
+        {
+            return Err(GuidedWallError::Balance {
+                momentum_residual_kg_m_s: momentum_residual,
+                angular_momentum_residual_kg_m2_s: angular_residual,
+                midpoint_residual_m_s: midpoint_residual,
+                work_residual_j: work_residual,
+            });
         }
         let time_s = finite(self.time_s + dt)?;
         if time_s <= self.time_s {
@@ -601,12 +691,19 @@ impl<'a> GuidedFreeSurfaceWall<'a> {
         poll(gate)?;
         Ok(GuidedWallStep {
             motion,
-            wall: trial.wall,
+            wall: translational_receipt(trial.wall),
+            wrench: trial.wall,
             momentum,
             external_impulse_world: external,
             raw_guide_impulse_world: guide,
+            raw_guide_angular_impulse_world: guide_couple,
             pressure_perturbation_guide_impulse_world: perturbation_guide,
+            pressure_perturbation_guide_angular_impulse_world: perturbation_couple,
             absolute_guide_impulse_world: absolute_guide,
+            absolute_guide_angular_impulse_world: absolute_couple,
+            balance_origin_m: c.balance_origin_m,
+            angular_momentum_change_world: angular_change,
+            angular_momentum_residual_kg_m2_s: angular_residual,
             midpoint_velocity_world: imposed,
             midpoint_residual_m_s: midpoint_residual,
             momentum_residual_kg_m_s: momentum_residual,
@@ -617,6 +714,36 @@ impl<'a> GuidedFreeSurfaceWall<'a> {
             trial_cells,
         })
     }
+}
+
+// A view of one native receipt, not another boundary solve or force model.
+fn translational_receipt(
+    wrench: MaterialPlanarRigidWallReport3,
+) -> MaterialPlanarWallMotionReport3 {
+    MaterialPlanarWallMotionReport3 {
+        wall: wrench.motion.wall,
+        velocity_m_s: wrench.motion.velocity_at_origin_m_s,
+        fluid_impulse_kg_m_s: wrench.fluid_impulse_kg_m_s,
+        wall_impulse_kg_m_s: wrench.wall_impulse_kg_m_s,
+        reference_pressure_fluid_impulse_kg_m_s: wrench.reference_pressure_fluid_impulse_kg_m_s,
+        pressure_perturbation_wall_force_n: wrench.pressure_perturbation_wall_force_n,
+        absolute_wall_force_n: wrench.absolute_wall_force_n,
+        fluid_work_j: wrench.fluid_work_j,
+        wall_work_j: wrench.wall_work_j,
+        wetted_area_m2: wrench.wetted_area_m2,
+        mass_before_kg: wrench.mass_before_kg,
+        mass_after_kg: wrench.mass_after_kg,
+        relative_mass_defect: wrench.relative_mass_defect,
+        maximum_speed_m_s: wrench.maximum_speed_m_s,
+    }
+}
+
+fn cross_dd(a: [Dd; 3], b: [Dd; 3]) -> [Dd; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
 }
 
 fn converged(trial: &Trial<'_>, controls: GuidedWallControls) -> Result<bool, GuidedWallError> {
@@ -666,4 +793,3 @@ fn normal_axis(wall: PlanarWall3) -> usize {
         PlanarWall3::ZMin | PlanarWall3::ZMax => 2,
     }
 }
-

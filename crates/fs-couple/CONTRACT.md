@@ -28073,8 +28073,12 @@ material-bound D3Q19 free-surface liquid and a native finite-mass rigid state.
 One fully flooded planar wall translates along an explicit unit tangent guide,
 with no normal displacement or spin. Each accepted step solves the shared
 midpoint velocity against the ACTUAL native wall impulse and an optional held
-guide force. Safeguarded scalar secant/bisection reuses the native liquid owner;
-no fitted drag, added-mass coefficient or replacement fluid algorithm is used.
+guide force. One native rigid-wall pilot at zero spin supplies the original
+reflection's affine scalar resistance; one native replay at the resulting
+midpoint supplies the accepted populations and complete wrench. An already
+balanced pilot needs no replay. The authored midpoint-speed interval remains
+an admission bound. No fitted drag, added-mass coefficient or replacement fluid
+algorithm is used, and the final native impulse must independently close.
 
 All trials start from the same accepted fluid. A new immutable native wall
 candidate API shares exactly the existing moving-wall admission and receipts,
@@ -28083,22 +28087,31 @@ aggregate trial-cell work and trial count are bounded before the respective
 scan or allocation. Only the accepted candidate advances the liquid, rigid
 momentum, midpoint displacement, elapsed time and accepted-step count together.
 
-The native rigid impulse receipt, actual midpoint mismatch and liquid boundary
-work must meet separate physical tolerances. Small representable impulse/work
+The native rigid impulse receipt, actual midpoint mismatch, full angular
+momentum and liquid boundary work must meet separate physical tolerances.
+Small representable impulse/work
 defects are retained without subtracting a large kinetic-energy baseline.
 The raw guide reaction closes native numerical momentum; pressure-perturbation
-and explicitly pressure-referenced physical support loads remain separate.
+and explicitly pressure-referenced physical support forces AND couples remain
+separate. The full native link torque is taken about the free half-drift COM;
+the guide cancels that couple to hold zero spin. Liquid, guide and applied force
+retain their orbital moment about the caller's fixed balance origin. Actual
+stored endpoint increments close that angular account without subtracting large
+absolute angular momenta or allowing numerical pressure to inflate its budget.
 An absolute load is not invented when the source has no pressure reference.
 
-This guided translation owner does not evolve moving occupancy, wall
-rotation or a complete angular-momentum audit. The native link-moment and affine
-response APIs are consumed by the rotor and joint planar wall owners.
+This guided translation owner does not evolve moving occupancy or wall
+rotation. Its native link-moment and affine response owner is the SAME one used
+by the rotor and joint planar wall paths; no new reflection kernel is added.
 Original isothermal VOF viscosity, forcing, capillarity and phase
 conversion keep their numerical/physical limits; boundary work balance does
-not turn that discretization into an energy-conserving thermal fluid. Five
+not turn that discretization into an energy-conserving thermal fluid. The wall
+angular account does not certify the liquid's other boundaries or VOF conversion.
+Six
 integration regressions cover independent D3Q19/finite-inertia momentum and
-work oracles, bitwise native replay and continuation, pressure-datum shifts,
-bounded geometry/work/trials, cancellation and late native liquid refusal.
+work oracles, per-link moments at an off-center COM, shifted angular origins,
+bitwise native population replay and continuation, pressure-datum force/couple
+shifts, bounded geometry/work/trials, cancellation and late native refusal.
 
 ## Finite native liquid-to-liquid momentum transfer
 

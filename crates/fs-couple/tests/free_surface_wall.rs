@@ -119,10 +119,12 @@ fn body(mass: f64, speed: f64, tangent: Vec3) -> RigidBodyState {
 fn controls() -> GuidedWallControls {
     GuidedWallControls {
         midpoint_speed_bracket_m_s: [-0.05, 0.05],
-        maximum_native_trials: 24,
-        maximum_trial_cells: 24 * CELLS,
+        maximum_native_trials: 2,
+        maximum_trial_cells: 2 * CELLS,
         maximum_relative_mass_defect: 1e-12,
         momentum_absolute_kg_m_s: 1e-15,
+        angular_momentum_absolute_kg_m2_s: 1e-17,
+        balance_origin_m: Vec3::ZERO,
         midpoint_absolute_m_s: 1e-10,
         work_absolute_j: 1e-16,
         relative_tolerance: 1e-11,
@@ -224,16 +226,14 @@ fn actual_finite_wall_and_liquid_match_independent_reflection_and_momentum_oracl
                 1e-14,
             );
             near(step.mechanical_work_residual_j, 0.0, 1e-16);
-            assert!(
-                step.native_trials <= 4,
-                "affine native response should resolve promptly"
-            );
+            assert_eq!(step.native_trials, 2, "one native pilot and one replay");
             assert_eq!(step.trial_cells, step.native_trials * CELLS);
             assert_eq!(step.motion.liquid().lattice().grid().steps(), 1);
             assert_eq!(step.motion.accepted_steps(), 1);
             near(step.motion.time_s(), DT, 0.0);
             assert_eq!(step.motion.liquid().scaling().material(), &source);
             assert!(step.absolute_guide_impulse_world.is_none());
+            assert!(step.absolute_guide_angular_impulse_world.is_none());
             assert_eq!(motion.body(), old_body);
             assert_eq!(motion.liquid().lattice().grid().state_bits(), original_bits);
         }
@@ -272,10 +272,31 @@ fn accepted_midpoint_replays_native_populations_and_continues_the_physical_histo
                 &gate,
             )
             .unwrap();
-        assert_eq!(step.wall, expected);
+        assert_eq!(
+            step.wall.fluid_impulse_kg_m_s,
+            expected.fluid_impulse_kg_m_s
+        );
+        assert_eq!(step.wall.wall_impulse_kg_m_s, expected.wall_impulse_kg_m_s);
+        assert_eq!(step.wall.mass_after_kg, expected.mass_after_kg);
+        // The rigid owner sums local link work with compensation; the old
+        // uniform owner dots the final force resultant with its velocity.
+        near(step.wall.fluid_work_j, expected.fluid_work_j, 1e-19);
         assert_eq!(
             step.motion.liquid().lattice().grid().state_bits(),
             replay.lattice().grid().state_bits()
+        );
+        let (rigid_replay, wrench) = motion
+            .liquid()
+            .planar_rigid_wall_motion_candidate_si(
+                step.wrench.motion,
+                controls().maximum_relative_mass_defect,
+                &gate,
+            )
+            .unwrap();
+        assert_eq!(step.wrench, wrench);
+        assert_eq!(
+            step.motion.liquid().lattice().grid().state_bits(),
+            rigid_replay.lattice().grid().state_bits()
         );
         let mean = 0.5 * (old_speed + speed(&step.motion));
         near(step.external_work_j, force * DT * mean, 1e-17);
@@ -331,6 +352,14 @@ fn numerical_and_absolute_pressure_guide_reactions_are_separate_and_do_no_tangen
         first.raw_guide_impulse_world,
         shifted.raw_guide_impulse_world
     );
+    assert_eq!(
+        first.raw_guide_angular_impulse_world,
+        shifted.raw_guide_angular_impulse_world
+    );
+    assert_eq!(
+        first.pressure_perturbation_guide_angular_impulse_world,
+        shifted.pressure_perturbation_guide_angular_impulse_world
+    );
     near(
         first.pressure_perturbation_guide_impulse_world.z,
         0.0,
@@ -353,6 +382,170 @@ fn numerical_and_absolute_pressure_guide_reactions_are_separate_and_do_no_tangen
         first.absolute_guide_impulse_world.unwrap().z
     );
     near(first.raw_guide_work_j, 0.0, 1e-18);
+    let origin = first.wrench.motion.origin_m;
+    let pressure_arm = Vec3::new(4.0 * DX - origin[0], 4.0 * DX - origin[1], -origin[2]);
+    let expected_shift = pressure_arm.cross(Vec3::new(0.0, 0.0, 1000.0 * AREA * DT));
+    let actual_shift = shifted
+        .absolute_guide_angular_impulse_world
+        .unwrap()
+        .sub(first.absolute_guide_angular_impulse_world.unwrap());
+    for (actual, expected) in [
+        (actual_shift.x, expected_shift.x),
+        (actual_shift.y, expected_shift.y),
+        (actual_shift.z, expected_shift.z),
+    ] {
+        near(actual, expected, 1e-18);
+    }
+}
+
+// Independent five-link D3Q19 half-space quadrature at a resting, flooded ZMin
+// wall. The per-link application point is essential: replacing this sum by
+// the plane centroid crossed with the total force loses diagonal-link moments.
+fn resting_wall_wrench(velocity: Vec3, origin: Vec3) -> (Vec3, Vec3) {
+    let mut linear = Vec3::ZERO;
+    let mut angular = Vec3::ZERO;
+    let lattice_velocity = velocity.scale(DT / DX);
+    for y in 0..8 {
+        for x in 0..8 {
+            for (direction, weight) in [
+                (Vec3::new(0.0, 0.0, 1.0), 1.0 / 18.0),
+                (Vec3::new(1.0, 0.0, 1.0), 1.0 / 36.0),
+                (Vec3::new(-1.0, 0.0, 1.0), 1.0 / 36.0),
+                (Vec3::new(0.0, 1.0, 1.0), 1.0 / 36.0),
+                (Vec3::new(0.0, -1.0, 1.0), 1.0 / 36.0),
+            ] {
+                let impulse = direction.scale(
+                    (2.0 * weight + 6.0 * weight * direction.dot(lattice_velocity))
+                        * CELL_MASS
+                        * DX
+                        / DT,
+                );
+                let point = Vec3::new(
+                    (x as f64 + 0.5 - 0.5 * direction.x) * DX,
+                    (y as f64 + 0.5 - 0.5 * direction.y) * DX,
+                    0.0,
+                );
+                linear = linear.sub(impulse);
+                angular = angular.sub(point.sub(origin).cross(impulse));
+            }
+        }
+    }
+    (linear, angular)
+}
+
+#[test]
+fn off_center_guided_wall_retains_link_couples_and_origin_covariant_angular_momentum() {
+    let source = source(0.1);
+    let gate = CancelGate::new_clock_free();
+    let tangent = Vec3::new(0.6, 0.8, 0.0);
+    let mass = 2.0 * WALL_IMPEDANCE_KG;
+    let initial = RigidBodyState::new(
+        Pose::new(
+            Vec3::new(-0.01, 0.025, -0.003),
+            Pose::identity().orientation(),
+        )
+        .unwrap(),
+        tangent.scale(mass * 0.02),
+        Vec3::ZERO,
+    )
+    .unwrap();
+    let motion = GuidedFreeSurfaceWall::new(
+        liquid(&source, Some(100_000.0)),
+        properties(mass),
+        initial,
+        PlanarWall3::ZMin,
+        tangent,
+        CELLS,
+        &gate,
+    )
+    .unwrap();
+    let force = 0.001;
+    let mut c = controls();
+    c.balance_origin_m = Vec3::new(0.015, -0.004, 0.017);
+    let first = motion.step_candidate(force, c, &gate).unwrap();
+    let midpoint = (2.0 * mass * 0.02 + force * DT) / (2.0 * mass + WALL_IMPEDANCE_KG);
+    near(first.midpoint_velocity_world.dot(tangent), midpoint, 1e-12);
+    let origin = Vec3::new(
+        first.wrench.motion.origin_m[0],
+        first.wrench.motion.origin_m[1],
+        first.wrench.motion.origin_m[2],
+    );
+    let (wall_impulse, wall_moment) = resting_wall_wrench(tangent.scale(midpoint), origin);
+    let observed_moment = Vec3::new(
+        first.wrench.wall_angular_impulse_kg_m2_s[0],
+        first.wrench.wall_angular_impulse_kg_m2_s[1],
+        first.wrench.wall_angular_impulse_kg_m2_s[2],
+    );
+    assert!(observed_moment.dot(observed_moment) > 1e-16);
+    let after = first.motion.body();
+    let actual_change = after
+        .pose()
+        .position_world()
+        .sub(c.balance_origin_m)
+        .cross(after.linear_momentum_world())
+        .sub(
+            initial
+                .pose()
+                .position_world()
+                .sub(c.balance_origin_m)
+                .cross(initial.linear_momentum_world()),
+        );
+    let applied = origin
+        .sub(c.balance_origin_m)
+        .cross(
+            wall_impulse
+                .add(first.raw_guide_impulse_world)
+                .add(first.external_impulse_world),
+        )
+        .add(wall_moment)
+        .add(first.raw_guide_angular_impulse_world);
+    for axis in 0..3 {
+        let component = |v: Vec3| [v.x, v.y, v.z][axis];
+        near(
+            first.wrench.wall_impulse_kg_m_s[axis],
+            component(wall_impulse),
+            1e-17,
+        );
+        near(component(observed_moment), component(wall_moment), 1e-18);
+        near(
+            component(first.raw_guide_angular_impulse_world),
+            -component(wall_moment),
+            1e-18,
+        );
+        near(
+            component(first.angular_momentum_change_world),
+            component(actual_change),
+            1e-19,
+        );
+        near(component(actual_change), component(applied), 1e-18);
+        near(
+            component(first.angular_momentum_residual_kg_m2_s),
+            0.0,
+            1e-19,
+        );
+    }
+    assert_eq!(after.angular_momentum_body(), Vec3::ZERO);
+    assert_eq!(first.native_trials, 2);
+
+    let shift = Vec3::new(0.03, -0.04, 0.02);
+    c.balance_origin_m = c.balance_origin_m.add(shift);
+    let shifted = motion.step_candidate(force, c, &gate).unwrap();
+    assert_eq!(first.motion.body(), shifted.motion.body());
+    assert_eq!(first.wrench, shifted.wrench);
+    let expected = first.angular_momentum_change_world.sub(
+        shift.cross(
+            after
+                .linear_momentum_world()
+                .sub(initial.linear_momentum_world()),
+        ),
+    );
+    for (actual, expected) in [
+        (shifted.angular_momentum_change_world.x, expected.x),
+        (shifted.angular_momentum_change_world.y, expected.y),
+        (shifted.angular_momentum_change_world.z, expected.z),
+    ] {
+        near(actual, expected, 1e-19);
+    }
 }
 
 #[test]
@@ -494,8 +687,7 @@ fn native_late_liquid_speed_refusal_preserves_wall_and_liquid_together() {
     assert_eq!(motion.time_s(), 0.0);
 }
 
-#[path = "free_surface_wall/rotor.rs"]
-mod rotor;
 #[path = "free_surface_wall/planar.rs"]
 mod planar;
-
+#[path = "free_surface_wall/rotor.rs"]
+mod rotor;

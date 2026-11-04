@@ -13,6 +13,7 @@ use fs_mbd::{MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3};
 const IMPEDANCE: f64 = CELL_MASS * 64.0 / 3.0;
 const SPIN_IMPEDANCE: f64 = 224.0 * CELL_MASS * DX * DX;
 
+#[path = "planar/thermal.rs"]
 mod thermal;
 
 fn controls() -> PlanarWallControls {

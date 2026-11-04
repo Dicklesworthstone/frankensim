@@ -215,9 +215,15 @@ fn g1_thermal_constant_properties_reproduce_original_finite_wall_on_all_planes()
             )
             .unwrap();
             let h0 = liquid.total_enthalpy_j().unwrap();
-            let mut thermal =
-                FreeSurfaceThermalPlanarWall::new(liquid, properties, body, wall, CELLS, gate)
-                    .unwrap();
+            let mut thermal = FreeSurfaceThermalPlanarWall::new(
+                liquid.clone(),
+                properties,
+                body,
+                wall,
+                CELLS,
+                gate,
+            )
+            .unwrap();
             let force = tangent([0.0003, -0.0002, 0.0], axis(wall));
             for index in 1..=2 {
                 let reference = plain.step_candidate(force, 1e-7, controls(), gate).unwrap();
