@@ -284,7 +284,12 @@ impl<'b, 'm> PlanarHarmonicWindings<'b, 'm> {
     }
 }
 
-impl HarmonicWindingExposure<'_, '_, '_> {
+impl<'p, 'b, 'm> HarmonicWindingExposure<'p, 'b, 'm> {
+    /// Original material, geometry and DC-bias owner used by every spectral line.
+    pub fn model(&self) -> &'p PlanarHarmonicWindings<'b, 'm> {
+        self.model
+    }
+
     pub fn distinct_frequencies(&self) -> usize {
         self.lines.len()
     }

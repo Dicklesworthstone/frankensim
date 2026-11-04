@@ -9,6 +9,9 @@
 
 /// Circuit-driven nonlinear fields with the same material and heat receivers.
 pub mod nonlinear;
+/// Coherent AC winding exposure deposited on the original thermal timeline.
+#[cfg(feature = "harmonic-winding-heating")]
+pub mod harmonic;
 
 use super::magnetic::{
     MagneticRoutes, MagneticThermalNetwork, check, invalid, material, same_material,

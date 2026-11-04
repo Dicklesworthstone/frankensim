@@ -1,5 +1,38 @@
 # CONTRACT: fs-couple
 
+## Coherent winding heat on the native enthalpy timeline
+
+The opt-in `harmonic-winding-heating` feature adds
+`MagneticThermalNetwork::step_harmonic_winding_candidate`. The original
+`HarmonicWindingExposure` integrates its resolved AC fields on exactly
+[thermal.time_s(), target_s]; carrier/beat interference and same-frequency
+cancellation survive into the receiving cells. Eddy, driven-solid and stranded
+heat use original source/triangle identities and whole-volume routes. Physical
+Joule heat is deposited once. Terminal work and incremental magnetic energy
+change enter the same local/global native thermal audit.
+
+The existing material network, finite caloric stores, source-based conduction,
+boundary handling and backward-Euler/Newton solver remain authoritative. The AC
+observation is computed once and borrowed across material/Jacobian trials; no
+field re-solve or spectral reintegration occurs there. `circuit_trials` counts
+material/thermal evaluations in this adapter. Consecutive intervals retain the
+original physical phase clock.
+
+This is a frozen-electromagnetic-law receiver: thermally mapped electrical
+sources must be independent of evolving temperature, refreshed coefficients and
+selected sources must agree, and fixed-magnetic-law admission remains mandatory.
+Thermal transport may depend on actual trial temperatures. Whole solid volumes,
+constant geometry/density, original caloric/card identities, source support,
+events, work budgets and cancellation retain their refusals. Temperature-dependent
+electrical/magnetic feedback, DC operating heat, switch-on history, hysteresis,
+moving geometry and finite-amplitude saturation require other owners. Thermal
+transport accuracy remains first order and requires time refinement.
+
+Four G1/G3/G4 cases in `tests/harmonic_winding_heat.rs` cover independent two-body
+temperatures and conduction, physical source work, consecutive interval
+additivity, complete cancellation and transactional source/geometry/event/
+budget/interruption refusal. Native workspace execution remains a separate gate.
+
 ## Molecular graph propagation reaches loaded exterior sound
 
 `driving_point::network::radiation::RadiatingNetwork::bind_molecular` binds original

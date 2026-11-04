@@ -89,6 +89,8 @@ fs-evidence = { path = "../fs-evidence" }
 workspace = true
 
 [features]
+# Coherent winding heat and magnetic work on the native enthalpy timeline.
+harmonic-winding-heating = ["fs-em/harmonic-exposure"]
 # Closed-channel two-fluid friction heat on the original thermal timeline.
 superfluid = ["fs-duct/superfluid"]
 # Fixed-reference Stokes or native translating/rotating ALE fluid/body mechanics.
