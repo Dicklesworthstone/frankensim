@@ -18755,6 +18755,34 @@ does not rerun its BEM producer. Prepared radiation/material-ingress paths and
 full typed-port/workspace audits are not newly claimed by the bounded
 verification projection.
 
+#### Prescribed-temperature continuation of attached JKR on the full network
+
+`SourceNormalModalSystem::apply_jkr_source_refresh[_with_admission]` accepts
+the original immutable held-indentation `SourceJkrThermalRefresh` at actual
+accepted native approach. It validates the complete original JKR source and
+canonical predecessor/successor responses, attached phase, geometry, force and
+energy limits, and positive original mechanical load-line slope. The same
+physical work row and gap bind the refreshed original source. Native
+coordinates, velocities, sample clock, modal/link coefficients, Maxwell memory,
+all native stores and accumulated losses remain unchanged; the cached native
+compliance stays valid.
+
+The original signed parameter supply is checked against actual contact
+potential change independently of the network's energy datum. It is not a
+caloric transfer or a thermal update of the native bulk models. A receiving
+candidate and final cancellation check precede publication. Source/history
+mismatch, lost equilibrium, work/force/domain refusal or cancellation preserve
+the previous source and all accepted native history.
+
+Heating can move the original attached fold inside the caller's old trial
+interval. Subsequent scalar solves intersect the unchanged authored approach
+limits with the current original JKR domain; accepted geometry is never clipped
+and no caller bound is widened. This permits a still-stable heated contact to
+continue while refusing motion through its new pull-off boundary. Focused tests
+retain native Maxwell history through changed source forces and signed work,
+exercise an outward step using this shifted lower bracket, and check no-op,
+foreign/stale-source, receiving-refusal and late-cancellation behavior.
+
 ## Adhesive junctions on the native modal network
 
 `friction::adhesive::AdhesiveModalBinding` attaches an explicit real area,

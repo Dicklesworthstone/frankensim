@@ -6,7 +6,9 @@
 //! The same source-owned path effort and endpoint derivative used by
 //! `BoundNormalStorage` act through the unchanged physical work column.
 //!
-//! Sources and geometry are frozen. Contact work uses the straight approach
+//! Geometry is fixed; sources are held within each mechanical interval and
+//! may change through the explicit temperature continuation at its boundary.
+//! Contact work uses the straight approach
 //! path between native endpoints, as in the existing DMT network coupling.
 //! Attached JKR stays on its explicitly selected branch; its fold/domain and
 //! unresolved mechanical branch refuse. This is a finite-step conservative
@@ -20,6 +22,8 @@ use fs_exec::CancelGate;
 use fs_math::dd::Dd;
 
 mod solve;
+/// Explicit contact-source temperature changes at unchanged original native state.
+pub mod temperature;
 
 /// Explicit physical support and accuracy controls; bounds never clip a state.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -28,7 +32,8 @@ pub struct SourceNormalModalConfig {
     pub maximum_iterations: usize,
     /// Maximum absolute held reaction and endpoint constitutive force [N].
     pub maximum_force_n: f64,
-    /// Finite caller-selected approach interval inside the original source [m].
+    /// Finite caller-selected approach interval, initially inside the source [m].
+    /// Refreshed JKR trials also remain inside its current attached domain.
     pub minimum_approach_m: f64,
     pub maximum_approach_m: f64,
     pub force_absolute_tolerance_n: f64,
@@ -293,12 +298,24 @@ impl SourceNormalModalSystem {
         )?;
         self.network.prepare_prediction(external, Some(gate))?;
         let free_increment = dot(self.contact.work_column(), &self.network.free_delta)?;
+        // A prescribed source refresh may move the JKR fold. Keep the authored
+        // bounds and accepted geometry unchanged; only narrow the trial chart
+        // to the current original attached branch, never extrapolate it.
+        let mut solve_config = self.config;
+        if let NormalLawSource::JkrAttached(source) = self.contact.source() {
+            solve_config.minimum_approach_m = solve_config
+                .minimum_approach_m
+                .max(source.minimum_attached_indentation_m());
+            solve_config.maximum_approach_m = solve_config
+                .maximum_approach_m
+                .min(source.envelope().maximum_indentation_m);
+        }
         let solution = solve::solve(
             self.contact.source(),
             before,
             free_increment,
             self.compliance_m_per_n,
-            self.config,
+            solve_config,
             gate,
         )?;
         for ((held, input), weight) in self
