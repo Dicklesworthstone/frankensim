@@ -390,7 +390,10 @@ pub fn march_with_element_materials(
 }
 
 impl<'m> TransientProblem<'m> {
-    fn spatial<'s>(self, element_materials: Option<&'s ElementMaterials>) -> ConductionProblem<'s>
+    pub(crate) fn spatial<'s>(
+        self,
+        element_materials: Option<&'s ElementMaterials>,
+    ) -> ConductionProblem<'s>
     where
         'm: 's,
     {
@@ -426,7 +429,10 @@ pub fn march_with_capacity(
     march_inner(cx, problem, &storage, config, initial, steps)
 }
 
-fn admit_linear_models(cx: &Cx<'_>, problem: ConductionProblem<'_>) -> Result<(), ConductionError> {
+pub(crate) fn admit_linear_models(
+    cx: &Cx<'_>,
+    problem: ConductionProblem<'_>,
+) -> Result<(), ConductionError> {
     if let Some(materials) = problem.element_materials {
         materials.validate_for(problem.mesh)?;
     }
@@ -451,7 +457,7 @@ fn admit_linear_models(cx: &Cx<'_>, problem: ConductionProblem<'_>) -> Result<()
     Ok(())
 }
 
-fn validate_material_temperature(
+pub(crate) fn validate_material_temperature(
     cx: &Cx<'_>,
     problem: ConductionProblem<'_>,
     storage: &backward_euler::BackwardEuler<'_>,

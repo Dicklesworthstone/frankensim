@@ -169,8 +169,8 @@ impl<'m> BackwardEuler<'m> {
             capacity_temperature_spans: Some(spans) })
     }
 
-    // The theta owner uses this exact prepared P1 storage and source admission.
-    pub(super) fn capacitance(&self) -> &Csr { &self.capacity }
+    // Theta and duty-cycle owners share this prepared P1 storage and source admission.
+    pub(crate) fn capacitance(&self) -> &Csr { &self.capacity }
 
     /// Retained density/Cp source bundles. Empty for explicitly declared storage.
     #[must_use]

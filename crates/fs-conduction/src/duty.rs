@@ -45,14 +45,17 @@
 //! because the gap is exactly the integration error the caller chose by
 //! picking a scheme and a step.
 
-use crate::ConductionError;
+use crate::{ConductionError, ConductionProblem};
 use crate::assemble::{
     DofMap, assemble_operator, assemble_operator_with_element_materials, assemble_source_load,
     reduce_matrix_and_lift,
 };
 use crate::field::ScalarField;
 use crate::material::ElementMaterials;
-use crate::transient::{TransientConfig, TransientProblem, assemble_capacitance};
+use crate::transient::{
+    HeatCapacity, TransientConfig, TransientProblem, admit_linear_models,
+    validate_material_temperature,
+};
 use fs_exec::Cx;
 use fs_qty::Dims;
 use fs_scenario::envelope::{AxisPoint, DutyWeighting, EnvelopeDutyCycle};
@@ -452,10 +455,10 @@ pub fn march_duty_cycle(
     initial: &[f64],
     limit_k: f64,
 ) -> Result<DutyCycleSolution, ConductionError> {
-    march_duty_cycle_inner(
+    march_duty_cycle_with_capacity(
         cx,
-        problem,
-        None,
+        problem.spatial(None),
+        HeatCapacity::Uniform(problem.capacity),
         config,
         cycle,
         base_power_w,
@@ -482,19 +485,10 @@ pub fn march_duty_cycle_with_element_materials(
     initial: &[f64],
     limit_k: f64,
 ) -> Result<DutyCycleSolution, ConductionError> {
-    materials.validate_for(problem.mesh)?;
-    for e in 0..problem.mesh.element_count() {
-        if materials.model_for(e)?.is_temperature_dependent() {
-            return Err(ConductionError::Config {
-                parameter: "conductivity",
-                what: "duty-cycle marching received a temperature-dependent conductivity; the transient path admits constant conductivity only".to_string(),
-            });
-        }
-    }
-    march_duty_cycle_inner(
+    march_duty_cycle_with_capacity(
         cx,
-        problem,
-        Some(materials),
+        problem.spatial(Some(materials)),
+        HeatCapacity::Uniform(problem.capacity),
         config,
         cycle,
         base_power_w,
@@ -503,30 +497,48 @@ pub fn march_duty_cycle_with_element_materials(
     )
 }
 
+/// March a power schedule with declared or source-bound heterogeneous storage.
+///
+/// The original heat-capacity owner prepares one P1 capacitance matrix for the
+/// whole cycle. Per-element and material-ID distributions preserve local
+/// thermal inertia. Source-derived capacities retain the selected density/Cp
+/// claims and support. Material-ID capacity rows use the original conductivity
+/// assignment; use `MaterialHeatCapacity::isotropic_conductivity` for a
+/// same-card pairing.
+///
+/// Every incident source-temperature domain is checked at the initial field,
+/// after prescribed-temperature lifting and at every accepted endpoint. A
+/// failure returns no partial cycle. Constant-property storage and conductivity
+/// are required; temperature-dependent calorics and phase changes belong to the
+/// existing primary-enthalpy history owner.
+///
+/// Only the full-load volumetric source follows the schedule. Authored Robin
+/// and Neumann heat, the theta rule, and the source-energy audit keep their
+/// original meanings. Capacity, the spatial operator and its preconditioner
+/// are prepared once and reused for every interval.
+///
+/// # Errors
+/// Capacity/assignment admission and source-domain refusals, plus every refusal
+/// documented by [`march_duty_cycle`].
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-fn march_duty_cycle_inner(
+pub fn march_duty_cycle_with_capacity(
     cx: &Cx<'_>,
-    problem: TransientProblem<'_>,
-    element_materials: Option<&ElementMaterials>,
+    problem: ConductionProblem<'_>,
+    capacity: HeatCapacity<'_>,
     config: &TransientConfig,
     cycle: &DutyCycle,
     base_power_w: f64,
     initial: &[f64],
     limit_k: f64,
 ) -> Result<DutyCycleSolution, ConductionError> {
-    let TransientProblem {
+    admit_linear_models(cx, problem)?;
+    let ConductionProblem {
         mesh,
         boundary,
         material,
         source,
-        capacity,
+        element_materials,
     } = problem;
-    if element_materials.is_none() && material.is_temperature_dependent() {
-        return Err(ConductionError::Config {
-            parameter: "conductivity",
-            what: "duty-cycle marching received a temperature-dependent conductivity; the transient path admits constant conductivity only".to_string(),
-        });
-    }
     if !base_power_w.is_finite() || base_power_w < 0.0 {
         return Err(duty_error(
             "base power",
@@ -542,11 +554,16 @@ fn march_duty_cycle_inner(
         });
     }
 
+    for &value in initial {
+        crate::require_finite("initial temperature", value)?;
+    }
     let dt = config.dt_s();
     let steps = admit_whole_steps(cycle, dt)?;
+    let storage = capacity.prepare(cx, mesh, element_materials)?;
+    validate_material_temperature(cx, problem, &storage, initial)?;
 
     let dofs = DofMap::new(boundary, n)?;
-    let capacitance = assemble_capacitance(cx, mesh, capacity)?;
+    let capacitance = storage.capacitance();
     let source_load = assemble_source_load(cx, mesh, source)?;
     // Keep the authored boundary load separate from the scheduled volumetric
     // power. In particular, zero duty must not switch a Robin bath to 0 K or
@@ -562,7 +579,7 @@ fn march_duty_cycle_inner(
 
     let theta = config.theta();
     let op = {
-        let lhs = scaled_sum(&capacitance, 1.0, &system.operator, theta * dt);
+        let lhs = scaled_sum(capacitance, 1.0, &system.operator, theta * dt);
         let (a_ff, _) = reduce_matrix_and_lift(&lhs, &dofs);
         CsrOp::symmetric(a_ff)
     };
@@ -572,6 +589,7 @@ fn march_duty_cycle_inner(
     for &vertex in dofs.fixed() {
         temperature[vertex] = dofs.prescribed()[vertex];
     }
+    validate_material_temperature(cx, problem, &storage, &temperature)?;
 
     let initial_peak = temperature.iter().fold(f64::NEG_INFINITY, |a, b| a.max(*b));
     let mut peak = initial_peak;
@@ -636,6 +654,7 @@ fn march_duty_cycle_inner(
             crate::require_finite("duty-cycle temperature", updated)?;
             temperature[vertex] = updated;
         }
+        validate_material_temperature(cx, problem, &storage, &temperature)?;
 
         let step_peak = temperature.iter().fold(f64::NEG_INFINITY, |a, b| a.max(*b));
         if step_peak > peak {

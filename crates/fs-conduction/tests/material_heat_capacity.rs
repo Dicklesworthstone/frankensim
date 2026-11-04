@@ -1000,3 +1000,6 @@ fn g0_varying_nonpositive_and_out_of_support_sources_are_not_frozen_or_replaced(
         .is_err()
     );
 }
+
+#[path = "material_heat_capacity/duty.rs"]
+mod duty;

@@ -1491,6 +1491,19 @@ boundary lifting and at every accepted endpoint. Borrowed material source
 objects retain the original receipts; a returned temperature field does not
 itself own a new material card.
 
+`duty::march_duty_cycle_with_capacity` uses that same prepared storage for
+scheduled volumetric power. Uniform, per-element, material-ID and source-bound
+density/Cp capacities retain their distinct thermal inertia throughout the
+cycle. The original conductivity and capacity domains admit every initial,
+prescribed and accepted nodal temperature; an unsupported endpoint returns no
+partial cycle. Existing uniform-capacity duty APIs delegate to this owner.
+Boundary heat remains independent of the power schedule, while capacity,
+conductivity and the linear preconditioner are prepared once. The existing
+windowed audit continues to report scheduled source energy. Independent
+regressions in `tests/material_heat_capacity/duty.rs` cover material-specific
+diffusion eigenmodes under a ramp, conservative heat exchange across a
+two-material interface and transactional source-domain refusals.
+
 `march_with_capacity_and_source_scale_gradient` computes the existing exact
 linear discrete adjoint using that same prepared capacity and an accepted
 physical temperature for conductivity assembly. It does not query a
