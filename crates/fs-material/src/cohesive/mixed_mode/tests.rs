@@ -300,3 +300,123 @@ fn analytic_initiation_resolves_compression_switch_and_shear_reversal() {
         );
     }
 }
+
+fn strongly_anisotropic(toughness_ratio: f64, exponent: f64) -> MixedModeParameters {
+    MixedModeParameters {
+        normal_stiffness_pa_m: 1e9,
+        tangential_stiffness_pa_m: 1e9,
+        normal_strength_pa: (2e9_f64).sqrt(),
+        tangential_strength_pa: (2e11_f64).sqrt(),
+        mode_i_fracture_energy_j_m2: toughness_ratio,
+        mode_ii_fracture_energy_j_m2: 100.0 * toughness_ratio,
+        bk_exponent: exponent,
+    }
+}
+
+#[test]
+fn mode_consistent_admission_opens_strongly_anisotropic_bond_fracture() {
+    // G1: GI=2 is smaller than the pure-shear initiation energy 100, which
+    // previously refused this law. No physical mode combines those two values.
+    // For eta=1 the ratio Gc/E0 has its minimum at a pure mode, where it is 2.
+    // eta=2 has a small interior minimum that still remains above 1.
+    for exponent in [1.0, 2.0] {
+        let p = strongly_anisotropic(2.0, exponent);
+        let law = BilinearCohesive::new_mixed_mode(p, 2e9, 0.02).unwrap();
+        for beta in [0.0_f64, 0.005, 0.1, 0.5, 0.9, 1.0] {
+            let direction = [(1.0 - beta).sqrt(), beta.sqrt(), 0.0];
+            let strength_coordinate = ((p.normal_stiffness_pa_m * direction[0]
+                / p.normal_strength_pa)
+                .powi(2)
+                + (p.tangential_stiffness_pa_m * direction[1] / p.tangential_strength_pa).powi(2))
+            .sqrt();
+            let onset = 1.0 / strength_coordinate;
+            let toughness = p.mode_i_fracture_energy_j_m2
+                + (p.mode_ii_fracture_energy_j_m2 - p.mode_i_fracture_energy_j_m2)
+                    * beta.powf(exponent);
+            let failure = 2.0 * toughness / (1e9 * onset);
+            assert!(failure > onset);
+            let middle = (onset + failure) * 0.5;
+            let loading = law
+                .bonded_point()
+                .trial(direction.map(|x| middle * x), 1e-9)
+                .unwrap();
+            let expected = p.normal_stiffness_pa_m * onset * 0.5;
+            for i in 0..3 {
+                close(loading.traction_pa[i], expected * direction[i], 1e-11);
+            }
+            let failed = loading
+                .point
+                .trial(direction.map(|x| 1.01 * failure * x), 1e-9)
+                .unwrap();
+            assert!(failed.point.failed());
+            close(loading.energy.work + failed.energy.work, toughness, 1e-12);
+            close(failed.point.dissipated_j_m2(), toughness, 1e-12);
+        }
+    }
+}
+
+#[test]
+fn positive_pure_mode_softening_does_not_hide_an_interior_invalid_mode() {
+    // G0/G1: both pure modes have Gc/E0=1.001. Linear BK is admissible,
+    // but quadratic BK has a minimum near beta=.005 and fails there.
+    let p = strongly_anisotropic(1.001, 1.0);
+    assert!(BilinearCohesive::new_mixed_mode(p, 2e9, 0.02).is_ok());
+    let p = MixedModeParameters {
+        bk_exponent: 2.0,
+        ..p
+    };
+    let beta = 0.005_f64;
+    let toughness = 1.001 * (1.0 + 99.0 * beta * beta);
+    let onset_energy = 1.0 / (1.0 - beta + beta / 100.0);
+    assert!(toughness < onset_energy);
+    assert!(BilinearCohesive::new_mixed_mode(p, 2e9, 0.02).is_err());
+
+    // A coarse angular grid would miss this inadmissible opening-dominated
+    // interval: the minimum is near beta=5e-9, but both endpoints are positive.
+    let p = MixedModeParameters {
+        tangential_strength_pa: (2e17_f64).sqrt(),
+        mode_i_fracture_energy_j_m2: 1.0 + 1e-10,
+        mode_ii_fracture_energy_j_m2: 1e8 * (1.0 + 1e-10),
+        ..p
+    };
+    let beta = 5e-9_f64;
+    let toughness = (1.0 + 1e-10) * (1.0 + (1e8 - 1.0) * beta * beta);
+    let onset_energy = 1.0 / (1.0 - beta + beta / 1e8);
+    assert!(toughness < onset_energy);
+    assert!(BilinearCohesive::new_mixed_mode(p, 2e9, 2.0).is_err());
+
+    // Very large eta concentrates the minimum closer to pure shear than one
+    // f64 spacing. The complete bracket, not its rounded midpoint, must be
+    // screened. At beta=.9 Gc is still 2 while initiation energy exceeds 9.
+    let p = strongly_anisotropic(2.0, 1e20);
+    assert!(BilinearCohesive::new_mixed_mode(p, 2e9, 0.02).is_err());
+}
+
+#[test]
+fn mode_admission_preserves_energy_scaling_and_reversed_strength_order() {
+    // G3: scaling every stiffness/strength/toughness by the same positive
+    // factor preserves separations and the complete mode admissibility domain.
+    for scale in [1e-100, 1.0, 1e100] {
+        for reverse in [false, true] {
+            let mut p = strongly_anisotropic(2.0, 2.5);
+            if reverse {
+                core::mem::swap(&mut p.normal_strength_pa, &mut p.tangential_strength_pa);
+                core::mem::swap(
+                    &mut p.mode_i_fracture_energy_j_m2,
+                    &mut p.mode_ii_fracture_energy_j_m2,
+                );
+            }
+            p.normal_stiffness_pa_m *= scale;
+            p.tangential_stiffness_pa_m *= scale;
+            p.normal_strength_pa *= scale;
+            p.tangential_strength_pa *= scale;
+            p.mode_i_fracture_energy_j_m2 *= scale;
+            p.mode_ii_fracture_energy_j_m2 *= scale;
+            let law = BilinearCohesive::new_mixed_mode(p, 2e9 * scale, 0.02).unwrap();
+            let jump = [0.0001, 0.0002, 0.0001];
+            let trial = law.bonded_point().trial(jump, 1e-8 * scale).unwrap();
+            assert!(trial.energy.defect.abs() < 1e-8 * scale);
+            assert!(trial.point.damage() >= 0.0 && trial.point.damage() <= 1.0);
+        }
+    }
+}

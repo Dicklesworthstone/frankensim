@@ -77,9 +77,10 @@ impl BilinearCohesive {
     /// selected mixed envelope is available on each point after initiation.
     /// Compression retains the existing independent undamaged penalty.
     ///
-    /// Both pure-mode failure distances must fit the separation limit. A
-    /// conservative all-mode screen requires twice the smaller toughness to
-    /// exceed the larger pure-mode initiation energy norm squared. The range
+    /// Both pure-mode failure distances must fit the separation limit. The
+    /// complete BK mode interval must retain a positive softening branch at
+    /// its own quadratic initiation energy. Coefficients from different modes
+    /// are never combined into a fictitious worst-case adhesive. The range
     /// limit still applies if a nonproportional path rotates after initiation.
     pub fn new_mixed_mode(
         parameters: MixedModeParameters,
@@ -118,15 +119,7 @@ impl BilinearCohesive {
         }
         let a = positive(p.normal_strength_pa / det::sqrt(p.normal_stiffness_pa_m))?;
         let b = positive(p.tangential_strength_pa / det::sqrt(p.tangential_stiffness_pa_m))?;
-        let maximum_onset_energy = positive(a.max(b) * a.max(b))?;
-        if 0.5 * maximum_onset_energy
-            >= p.mode_i_fracture_energy_j_m2
-                .min(p.mode_ii_fracture_energy_j_m2)
-        {
-            return Err(CohesiveError::Invalid(
-                "mixed-mode envelope has no positive softening interval",
-            ));
-        }
+        admit_softening_interval(p, positive((0.5 * a) * a)?, positive((0.5 * b) * b)?)?;
         positive((p.tangential_stiffness_pa_m * maximum_separation_m) * maximum_separation_m)?;
         law.mixed_mode = Some(p);
         Ok(law)
@@ -137,6 +130,83 @@ impl BilinearCohesive {
     pub const fn mixed_mode_parameters(&self) -> Option<MixedModeParameters> {
         self.mixed_mode
     }
+}
+
+// At shear-energy fraction beta the quadratic strength criterion gives
+// E0(beta) = 1 / ((1-beta)/EI0 + beta/EII0), where EI0 = Tn^2/(2Kn).
+// A positive bilinear branch requires Gc(beta)/E0(beta) > 1 throughout [0,1].
+// Normalize both positive factors before multiplication to retain SI rescaling
+// and avoid large reciprocal energies. Ordinary mechanical steps do no work here.
+fn admit_softening_interval(
+    p: MixedModeParameters,
+    normal_onset_energy: f64,
+    shear_onset_energy: f64,
+) -> Result<(), CohesiveError> {
+    // Preserve the inexpensive sufficient screen for ordinary well-separated
+    // envelopes, including repeated source-bound thermal coefficient refreshes.
+    let relative_guard = 1.0 + 64.0 * f64::EPSILON;
+    if p.mode_i_fracture_energy_j_m2
+        .min(p.mode_ii_fracture_energy_j_m2)
+        / normal_onset_energy.max(shear_onset_energy)
+        > relative_guard
+    {
+        return Ok(());
+    }
+    let minimum_onset = normal_onset_energy.min(shear_onset_energy);
+    let maximum_toughness = p
+        .mode_i_fracture_energy_j_m2
+        .max(p.mode_ii_fracture_energy_j_m2);
+    let a = positive(minimum_onset / normal_onset_energy)?;
+    let b = positive(minimum_onset / shear_onset_energy)?;
+    let gi = positive(p.mode_i_fracture_energy_j_m2 / maximum_toughness)?;
+    let gii = positive(p.mode_ii_fracture_energy_j_m2 / maximum_toughness)?;
+    let threshold = positive(minimum_onset / maximum_toughness)?;
+    let mut minimum = (gi * a).min(gii * b);
+    // Except when toughness AND initiation energy increase towards shear with
+    // eta>1, the product is monotone or concave, so the endpoints suffice.
+    // In the remaining case its second derivative changes sign at most once;
+    // the convex prefix contains the only possible interior minimum.
+    if gii > gi && a > b && p.bk_exponent > 1.0 {
+        let inv = 1.0 / (p.bk_exponent + 1.0);
+        let convex_end = (((p.bk_exponent - 1.0) * inv) * (a / (a - b))).min(1.0);
+        let derivative = |beta: f64| {
+            let power = det::pow(beta, p.bk_exponent);
+            let toughness = (1.0 - power) * gi + power * gii;
+            let compliance = (1.0 - beta) * a + beta * b;
+            (gii - gi) * (1.0 - inv) * det::pow(beta, p.bk_exponent - 1.0) * compliance
+                - (a - b) * inv * toughness
+        };
+        if derivative(convex_end) > 0.0 {
+            let mut low = 0.0;
+            let mut high = convex_end;
+            // Locate the sole minimum on the convex interval. This is a
+            // construction-time bounded scalar solve, independent of meshes.
+            for _ in 0..64 {
+                let mid = low + 0.5 * (high - low);
+                if derivative(mid) > 0.0 {
+                    high = mid;
+                } else {
+                    low = mid;
+                }
+            }
+            // Gc increases and the reciprocal onset energy decreases over
+            // this bracket. Their separate lower endpoints bound the entire
+            // unresolved interval, even if eta concentrates the minimum closer
+            // to beta=1 than one floating-point spacing can represent.
+            let power = det::pow(low, p.bk_exponent);
+            let lower_toughness = (1.0 - power) * gi + power * gii;
+            let lower_compliance = (1.0 - high) * a + high * b;
+            minimum = minimum.min(lower_toughness * lower_compliance);
+        }
+    }
+    // An unresolved near-zero softening interval is refused rather than being
+    // admitted on a last-bit comparison of two independently rounded products.
+    if !minimum.is_finite() || minimum <= threshold * relative_guard {
+        return Err(CohesiveError::Invalid(
+            "mixed-mode envelope has no resolved positive softening interval",
+        ));
+    }
+    Ok(())
 }
 
 impl MixedModeHistory {

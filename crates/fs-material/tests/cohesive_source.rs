@@ -595,3 +595,43 @@ fn thermal_successor_cannot_switch_envelopes_even_with_the_same_source_bundle() 
     assert!(hotter.law().mixed_mode_parameters().is_some());
     assert_eq!(hotter.resolved().properties().len(), 11);
 }
+
+#[test]
+fn strongly_anisotropic_source_reaches_original_adhesive_failure_path() {
+    // G1: retain actual mode-specific source values. The opening toughness is
+    // below the shear initiation energy, but each physical mode has positive
+    // softening; comparing those unrelated extrema used to reject the card.
+    let mut claims = mixed_mode_claims();
+    claims[3] = claim(COHESIVE_TANGENTIAL_STRENGTH_PROPERTY, Pressure::DIMS, 1.6e6);
+    claims[4] = claim(
+        COHESIVE_MODE_I_FRACTURE_ENERGY_PROPERTY,
+        FRACTURE_ENERGY_PER_AREA_DIMS,
+        40.0,
+    );
+    claims[5] = claim(
+        COHESIVE_MODE_II_FRACTURE_ENERGY_PROPERTY,
+        FRACTURE_ENERGY_PER_AREA_DIMS,
+        6400.0,
+    );
+    let card = card(claims, "synthetic strong shear adhesion");
+    let source = resolve_mixed_mode_bilinear_cohesive(
+        &card,
+        &QueryPoint::new().with("T", 300.0).unwrap(),
+        MaterialPropertySelection::SingleClaimOnly,
+        0.02,
+    )
+    .unwrap();
+    assert_eq!(source.resolved().card_identity(), card.content_hash());
+    assert_eq!(source.resolved().properties().len(), 8);
+    for (jump, expected_work) in [([0.001, 0.0, 0.0], 40.0), ([0.0, 0.01, 0.0], 6400.0)] {
+        let (step, mean) = source
+            .law()
+            .bonded_point()
+            .trial_with_mean_traction(jump, 1e-8)
+            .unwrap();
+        assert!(step.point.failed());
+        assert!((step.energy.work - expected_work).abs() < 1e-9);
+        let actual_work = (0..3).map(|i| mean[i] * jump[i]).sum::<f64>();
+        assert!((actual_work - expected_work).abs() < 1e-9);
+    }
+}

@@ -5972,6 +5972,18 @@ nonproportional post-initiation paths retain exact analytic work/storage/loss
 accounting and cannot reselect toughness or heal. The onset-mix freeze is a
 declared model extension, not experimental qualification of arbitrary histories.
 
+Admission compares the BK toughness with the quadratic initiation energy of
+that same mode over the complete shear-energy fraction interval. In particular,
+a tough, high-strength shear branch no longer causes a false refusal through an
+unphysical combination with the opening branch's smaller toughness. The ratio
+`Gc(beta) * ((1-beta)/EI0 + beta/EII0)`, with `EI0 = Tn^2/(2Kn)`, must remain
+above one. Endpoint limits and the sole possible interior minimum are checked
+with scaled arithmetic and a bounded deterministic derivative solve at law
+construction; no mode sampling or extra work enters mechanical increments.
+Unresolved near-zero softening intervals still refuse. G1/G3 regressions cover
+strong mode anisotropy, exact proportional fracture work, narrow inadmissible
+interior modes, reversed strength ordering and coherent energy rescaling.
+
 The consistent algorithmic tangent includes the sensitivity of the initiation
 crossing and selected toughness when a trial first initiates damage. It can be
 nonsymmetric; the existing Newton/FGMRES owner consumes it without an SPD
