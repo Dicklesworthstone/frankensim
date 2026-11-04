@@ -3641,3 +3641,48 @@ linear/angular momentum and kinetic work. Linear and nonlinear field-integration
 tests also gain full/subset native-work and selection/cancellation checks;
 those two full field test binaries were not executed in this resource-limited
 session. No full Cargo, DSR or cross-platform result is claimed.
+
+### Joint finite-aperture and finite-shutter optical observations
+
+`AngularSpectrumExposure` and `AngularSpectrumExposureEnsemble` now expose
+`measure_aperture` and `measure_illumination_aperture`. They integrate the
+original continuous modal fields over a uniform axis-aligned rectangle and
+the authored normalized uniform or triangular shutter. The reading contains
+six electric/magnetic mean squares, the full signed vector Poynting flux,
+and signed Cartesian z-directed power in watts through the rectangle.
+Frequency grouping, source clocks, polarization, propagating/evanescent
+fields and both original illumination faces retain their existing owners.
+
+Deterministic means and real factors retain carrier sum and difference
+terms. Proper-complex factors retain difference interference with their
+one-half normalization applied once. Independent factor banks add moments;
+within-bank spatial, temporal and inter-face coherence remains intact.
+Exact separable harmonic kernels require no spatial quadrature, time stepping,
+new FFT, material solve or dense source covariance. Real-field contractions
+use the original shared `HarmonicProduct::centered_gram_dd` weights, retaining
+grouped double-double amplitudes and applying the combined spatial/temporal
+center phase once per mode and frequency. Start coordinates and half-width
+phases remain separate, preserving tiny translated interference nulls without
+rounding the detector width into its position.
+
+Checked admission bounds ordered mode/frequency contractions by
+`N² * sum(F_bank²)` before query allocation. Spatial pair caches require
+`O(width² + height²)` storage, center rotations require `O(N * F_bank)` work,
+and banks stream one at a time. The conservative peak workspace includes the
+largest original bank query, retained double-double fields and spatial caches;
+overflow, finite-value and bounded cancellation checks remain explicit.
+The original periodic source continuation still applies across cell edges.
+This observation does not infer absorptivity, detector edge diffraction,
+back-action or unprovided source statistics.
+
+Seven focused joint-observation tests and five original monochromatic
+aperture tests pass natively. They cover independent space/time/phase
+quadrature of all nine moments, carrier/beat averaging, proper coherence,
+partitions, full-cell/Nyquist behavior, resource admission and cancellation,
+and translated weak-null regressions for uniform/triangular shutters with
+unequal widths down to `1e-50`. Native probes exercise the production
+contraction and shared harmonic/math owners; they do not execute material
+or Maxwell reconstruction. Three additional original-source integration
+tests cover film/evanescent fields, multi-frequency coherence and mixed
+two-face ensembles, but remain unexecuted without the sibling constellation.
+No full Cargo, DSR, cross-platform or experimental-validation result is claimed.

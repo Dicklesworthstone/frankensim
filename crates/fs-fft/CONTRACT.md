@@ -824,3 +824,11 @@ and BEM propagation owners. Eleven native estimator tests and the four
 original physical 2D consumer tests pass after rebuilding/relinking; new
 coverage includes exact angular-frequency matching and representable
 normal/subnormal conversion alongside explicit range refusals.
+
+`HarmonicProduct::centered_gram_dd` exposes the existing centered cosine/cosine
+and sine/sine double-double weights without changing their numerical owner.
+Joint spatial/temporal observers can compose independent symmetric windows
+and apply one combined center phase, preserving weak translated interference
+nulls instead of separately rounding spatial and temporal rotations. Callers
+still own the original center phase and source clock; these weights alone
+are not the translated product or an additional phase-average assumption.

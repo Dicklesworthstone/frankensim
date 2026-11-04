@@ -20,6 +20,11 @@ use fs_math::dd::Dd;
 mod sources;
 use sources::{ExposureLine, ExposureLines, ExposureSide};
 
+mod aperture;
+pub use aperture::{
+    AngularSpectrumExposureApertureLimits, AngularSpectrumExposureApertureReading,
+};
+
 mod stress;
 pub use stress::{
     AngularSpectrumExposureStressField, AngularSpectrumExposureStressLimits,
@@ -460,12 +465,55 @@ impl<'b, 's, 'm> AngularSpectrumExposure<'b, 's, 'm> {
         &self,
         group: usize,
         cancelled: &mut F,
+        modal_field: impl FnMut(
+            ExposureLine<'b, 's, 'm>,
+            &mut F,
+        ) -> Result<(Vec<[C64; 3]>, Vec<[C64; 3]>), AngularSpectrumError>,
+    ) -> Result<Vec<[C64; 6]>, AngularSpectrumError> {
+        let sums = self.frequency_modal_parts_with(group, cancelled, modal_field)?;
+        let mut field = Vec::new();
+        field
+            .try_reserve_exact(sums.len())
+            .map_err(|_| bad("exposure group allocation failed"))?;
+        for (i, sum) in sums.into_iter().enumerate() {
+            if i % 64 == 0 {
+                poll(cancelled)?;
+            }
+            let value: [C64; 6] =
+                std::array::from_fn(|c| C64::new(sum[c][0].to_f64(), sum[c][1].to_f64()));
+            if value.iter().any(|&z| !finite(z)) {
+                return Err(bad("coherent exposure field is unrepresentable"));
+            }
+            field.push(value);
+        }
+        Ok(field)
+    }
+
+    // Retain original grouped low components for observers that rotate fields
+    // before a near-null quadratic contraction. Ordinary field consumers keep
+    // their existing C64 rounding through frequency_modal_field_with above.
+    fn frequency_modal_parts(
+        &self,
+        group: usize,
+        side: ExposureSide,
+        distance: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<[[Dd; 2]; 6]>, AngularSpectrumError> {
+        self.frequency_modal_parts_with(group, cancelled, |line, cancelled| {
+            line.modal_field(side, distance, cancelled)
+        })
+    }
+
+    fn frequency_modal_parts_with<F: FnMut() -> bool>(
+        &self,
+        group: usize,
+        cancelled: &mut F,
         mut modal_field: impl FnMut(
             ExposureLine<'b, 's, 'm>,
             &mut F,
         )
             -> Result<(Vec<[C64; 3]>, Vec<[C64; 3]>), AngularSpectrumError>,
-    ) -> Result<Vec<[C64; 6]>, AngularSpectrumError> {
+    ) -> Result<Vec<[[Dd; 2]; 6]>, AngularSpectrumError> {
         let n = self.anchor.modes.len();
         let mut sums = Vec::new();
         sums.try_reserve_exact(n)
@@ -474,7 +522,7 @@ impl<'b, 's, 'm> AngularSpectrumExposure<'b, 's, 'm> {
             if i % 256 == 0 {
                 poll(cancelled)?;
             }
-            sums.push([Dd::ZERO; 12]);
+            sums.push([[Dd::ZERO; 2]; 6]);
         }
         let indices =
             &self.source_indices[self.group_offsets[group]..self.group_offsets[group + 1]];
@@ -487,27 +535,20 @@ impl<'b, 's, 'm> AngularSpectrumExposure<'b, 's, 'm> {
                     poll(cancelled)?;
                 }
                 for (c, z) in e.iter().chain(h).enumerate() {
-                    add(&mut sum[2 * c], z.re);
-                    add(&mut sum[2 * c + 1], z.im);
+                    add(&mut sum[c][0], z.re);
+                    add(&mut sum[c][1], z.im);
                 }
             }
         }
-        let mut field = Vec::new();
-        field
-            .try_reserve_exact(n)
-            .map_err(|_| bad("exposure group allocation failed"))?;
-        for (i, sum) in sums.into_iter().enumerate() {
+        for (i, sum) in sums.iter().enumerate() {
             if i % 64 == 0 {
                 poll(cancelled)?;
             }
-            let value: [C64; 6] =
-                std::array::from_fn(|c| C64::new(sum[2 * c].to_f64(), sum[2 * c + 1].to_f64()));
-            if value.iter().any(|&z| !finite(z)) {
+            if sum.iter().flatten().any(|v| !v.hi.is_finite() || !v.lo.is_finite()) {
                 return Err(bad("coherent exposure field is unrepresentable"));
             }
-            field.push(value);
         }
-        Ok(field)
+        Ok(sums)
     }
 
     // Replace modal vectors with their original samples in the same retained

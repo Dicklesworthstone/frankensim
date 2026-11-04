@@ -388,6 +388,17 @@ pub struct HarmonicProduct {
 }
 
 impl HarmonicProduct {
+    /// Centered cosine/cosine and sine/sine Gram weights, before the two
+    /// carrier rotations. Symmetry makes centered mixed cosine/sine means zero.
+    ///
+    /// Separable spatial/temporal observers may compose these weights and
+    /// apply one joint center phase to retained DD field amplitudes. The
+    /// original source clock and each interval midpoint must still be applied;
+    /// these weights alone do not describe the original uncentered product.
+    pub fn centered_gram_dd(self) -> [Dd; 2] {
+        [self.cos_cos, self.sin_sin]
+    }
+
     /// Average `Re[a exp(-i omega_a t)] * Re[b exp(-i omega_b t)]`.
     pub fn mean_real_product(self, a: C64, b: C64) -> Result<f64, WindowError> {
         self.mean_real_product_dd(a, b).map(Dd::to_f64)
