@@ -7,6 +7,9 @@ use crate::transient::backward_euler::{
 };
 use super::{ContactIterationConfig, TemperatureContactEvaluation, TemperatureContacts, invalid, poll};
 
+mod radiation;
+pub use radiation::ContactCapacityRadiationStep;
+
 /// One counted field, its applied contact operator, and a fresh physical audit.
 #[derive(Debug)]
 pub struct ContactCapacityStep {

@@ -155,11 +155,25 @@ impl BackwardEuler<'_> {
         }
         let mut radiation_out_w = 0.0;
         if let Some(patches) = patches {
+            // An explicitly zero-flux radiation trace has no original Robin
+            // row. Its actual area/temperature is available on the evaluated
+            // combined boundary, without inventing a convective heat port.
+            let radiation_traces = if patches.iter().any(|patch|
+                !convective_robin_fluxes.iter().any(|flux| flux.region == patch.region()))
+            {
+                let (_, traces) = energy_balance(
+                    self.mesh, &combined_boundary, problem.source, &physical.system, &dofs, candidate,
+                );
+                poll(cx, n)?;
+                Some(traces)
+            } else { None };
             for (index, patch) in patches.iter().enumerate() {
                 poll(cx, index)?;
                 let flux = convective_robin_fluxes.iter()
                     .find(|flux| flux.region == patch.region())
-                    .ok_or_else(|| invalid("evaluated radiation patch has no convective trace"))?;
+                    .or_else(|| radiation_traces.as_ref().and_then(|traces|
+                        traces.iter().find(|flux| flux.region == patch.region())))
+                    .ok_or_else(|| invalid("evaluated radiation patch has no physical trace"))?;
                 let heat_w = finite(
                     patch.heat_flux_w_m2(flux.mean_wall_temperature_k)? * flux.area_m2,
                 )?;

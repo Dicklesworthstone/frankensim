@@ -332,6 +332,40 @@ Geometry, pressure, contact area and all nonthermal source coordinates remain
 fixed. This is backward Euler with constant prepared heat capacity; variable
 caloric storage and latent heat remain owned by the primary-enthalpy path.
 
+`TemperatureContacts::advance_capacity_with_ambient_radiation` and
+`advance_capacity_newton_with_ambient_radiation` compose those same capacity
+responses with the existing area-mean ambient gray-patch iterator. Source
+surfaces retain the bounded contact fixed point; continuous curves can use the
+complete bulk/contact Newton tangent. Each contact and radiation trial receives
+the original full old temperature field. Radiation changes only its applied
+Robin secant and never advances capacity history or reapplies source energy.
+
+The original patch-temperature and watt gates remain active. Acceptance also
+re-queries the pinned contact sources and evaluates the complete endpoint with
+its actual radiation coefficient. Both the free-node joule residual and the
+separate physical and reported storage/heat accounts must pass the original
+absolute contact and energy gates. Inner contact and numerical tolerances only
+tighten. Prescribed reactions include fixed-node storage once; internal contact
+heat is not an external input. Radiation-only zero-flux traces use their actual
+combined-boundary area and temperature without inventing convection rows.
+
+`ContactCapacityRadiationStep` keeps the final applied-secant numerical response
+separate from its fresh physical contact states and `EndpointEvaluation`.
+`radiation.iterations` counts radiation callbacks; `thermal_responses` counts
+all nested contact responses. Newton updates, backtracks and Krylov work include
+discarded trials and are bounded by checked products of the existing controls.
+This is a bounded nested iteration, not a monolithic radiation tangent or a
+contact/radiation derivative. Enclosure and pointwise exchange are outside this
+capacity entry point.
+
+Focused G1/G4 cases in `tests/temperature_contact/radiation.rs` compare curve
+Newton with original source-surface fixed points, independently reconstruct
+P1 storage/residual and reservoir heat, cover radiation-only and convective
+traces, charge both prescribed-bath jump directions, and check bounded refusal,
+cancellation and exact retry. Native execution of these added cases remains
+pending the authoring environment's unchanged dependency/tooling blocker;
+syntax validation does not establish numerical execution.
+
 ## Material-state spatial ambient radiation
 
 `MaterialPointwiseAmbientRadiation` resolves original surface emissivity at each
