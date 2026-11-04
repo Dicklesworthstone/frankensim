@@ -27,6 +27,9 @@ mod layer;
 #[path = "cohesive/interval.rs"]
 mod interval;
 
+#[path = "cohesive/cooling.rs"]
+mod cooling;
+
 fn material(viscous: bool) -> ResolvedBilinearCohesive {
     material_and_card(viscous, None).0
 }

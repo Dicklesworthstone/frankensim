@@ -18974,6 +18974,46 @@ with analytical kinetic loss and finite-volume temperatures, static hold and
 breakaway, two growing-damage patches sharing finite thermal capacity, late
 thermal refusal/cancellation, and opening followed by reclosure.
 
+`friction_heat::cohesive::cooling::propose_deformable_cohesive_cooling`
+connects original native inertia/deformation to `FractureCooling` through actual
+debonding, detached motion and reclosure. Every original patch must have the
+same ID, exact reference area, immutable law and complete accepted point in
+both owners; mechanical, thermal and last-synchronized clocks must agree.
+The caller declares the fixed-reference face coincidence and ordered thermal
+cell/body/material correspondence, which the reduced jump map cannot infer.
+An exact target clock supplies the same represented interval to native mechanics
+and timed cohesive loss replay. The original structural and thermal bounds apply.
+
+The declared staggered order is one native mechanical proposal, native thermal
+transport with OLD closure, then endpoint contact/history synchronization and
+physical heat deposition. Opening/reclosure changes the NEXT thermal interval.
+The original thermal owner retains caloric/latent storage, scheduled external
+inputs and births, and independent bonded/reclosed conductances. Reclosure
+cannot heal the failed bond. Every patch requires explicit, independent fracture
+and bond-viscosity heat fractions and receiving-side splits; each unconverted
+remainder remains in the report. Native mechanical and timed material replay
+losses must agree, and only NEW losses are deposited once. Nonzero residual
+friction refuses until its own receiving/heat owner is declared.
+
+An independent compensated endpoint balance reduces original per-cell enthalpy
+changes and `delta(K + U_bulk + U_bond)` plus nonthermal fracture/viscosity, minus
+applied/prescribed work, incoming birth energy and external thermal input. It
+must agree with thermal-transport plus loss-transfer residuals minus the native
+input-oriented mechanical residual. Converted heat is internal to this combined
+system and is not deducted again as external input. Every native and combined
+gate, including final cancellation, precedes publication of both candidates.
+The source coefficients remain frozen: thermal source refresh, event localization,
+moving contact area/frames and strong thermal feedback remain explicit separate
+operations. Refine coupling times for the stated first-order split.
+
+Four focused regressions in `tests/friction_heat/cohesive/cooling.rs` cover an
+analytical inertial rupture with independently integrated fracture/viscous work,
+finite-cell heat, nonbinary synchronized clocks, continued detached motion and
+reclosure with changed conductance; native latent storage and zero conversion;
+foreign law/history/area/clock and unowned-friction refusal; and late caloric
+domain/cancellation rollback with exact retry. These are manufactured analytical
+references, not specimen calibration.
+
 
 ### Prepared articulated contacts and same-step finite-cell thermal feedback
 
