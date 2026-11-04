@@ -13711,3 +13711,21 @@ independently prescribes shear stress, checks actual relaxation/rate and
 `mu*g^2` heating, source replacement invariance, temperature/shear changes to
 momentum/thermal populations, common `a=2` SI/lattice parity, and transactional
 calibration refusal.
+
+## Independent heat and work in the driven-mixture first law
+
+`DrivenMixtureEquilibriumParcel::advance` checks the independently supplied
+heat, outward boundary work and represented internal-energy change with the
+existing error-free `TwoSum` primitives. Its reported first-law residual is
+`Delta U + W_by - Q`; it retains the low part of `Q - W_by` instead of comparing
+only against that rounded target. If target rounding alone exceeds the actual
+extensive energy allowance, admission refuses before any phase query. The
+accepted source increment receives the same compensated physical audit.
+
+This prevents a small heat input from disappearing beside much larger
+mechanical work. The original equilibrium solver, source bounds, tolerances,
+mass/species inventory and transactional publication remain the owners. The
+allocation-free correction changes accounting precision, not the constitutive
+model or physical heat/work convention. Focused numerical regressions cover a
+false-zero binary64 balance, exact closed/insulated accounts, nonfinite inputs,
+and early refusal with the parcel unchanged.

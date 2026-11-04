@@ -18,6 +18,8 @@ use crate::thermochemical_gas::nonideal::flash::equilibrium::{
 use fs_qty::{Pressure, Temperature};
 use fs_thermochem::eos::peng_robinson::phase_screen::PengRobinsonPhaseScreenOptionsV1;
 
+mod balance;
+
 /// One accepted coupled heat/work/volume endpoint.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DrivenMixtureEquilibriumStep {
@@ -32,7 +34,8 @@ pub struct DrivenMixtureEquilibriumStep {
     pub requested_internal_energy_change_j: f64,
     /// Original source-integrated internal-energy change [J].
     pub stored_energy_change_j: f64,
-    /// `Delta U - (Q - W_by)` [J].
+    /// Compensated `Delta U + W_by - Q` [J], retaining independently supplied
+    /// heat and work even when their rounded difference loses small heat.
     pub first_law_residual_j: f64,
     /// Original EOS volume minus the prescribed physical volume [m3].
     pub volume_residual_m3: f64,
@@ -93,8 +96,12 @@ impl DrivenMixtureEquilibriumParcel {
         if !positive(mass_kg) {
             return Err(E::Invalid("positive finite driven-mixture mass required"));
         }
-        let state =
-            model.evaluate_phase_equilibrium(temperature, pressure, phase_options, &mut cancelled)?;
+        let state = model.evaluate_phase_equilibrium(
+            temperature,
+            pressure,
+            phase_options,
+            &mut cancelled,
+        )?;
         let volume_m3 = mass_kg * source_specific_volume(&state);
         let parcel = Self::checked(model, state, mass_kg, volume_m3)?;
         poll(&mut cancelled)?;
@@ -134,7 +141,9 @@ impl DrivenMixtureEquilibriumParcel {
         if !(mass_kg * state.specific_internal_energy_j_kg()).is_finite()
             || !positive(mass_kg * source_specific_volume(&state))
         {
-            return Err(E::Invalid("driven-mixture extensive state is unrepresentable"));
+            return Err(E::Invalid(
+                "driven-mixture extensive state is unrepresentable",
+            ));
         }
         Ok(Self {
             model,
@@ -192,7 +201,9 @@ impl DrivenMixtureEquilibriumParcel {
         controls.validate()?;
         poll(&mut cancelled)?;
         if !heat_j.is_finite() || !boundary_work_by_mixture_j.is_finite() {
-            return Err(E::Invalid("finite driven-mixture heat and boundary work required"));
+            return Err(E::Invalid(
+                "finite driven-mixture heat and boundary work required",
+            ));
         }
         let final_specific_volume = admit_inventory(self.mass_kg, final_volume_m3)?;
         let volume_change_m3 = final_volume_m3 - self.volume_m3;
@@ -227,23 +238,37 @@ impl DrivenMixtureEquilibriumParcel {
         let change_j_kg = requested_internal_energy_change_j / self.mass_kg;
         let tolerance_j = self.mass_kg * controls.internal_energy_tolerance_j_kg;
         let tolerance_m3 = self.mass_kg * controls.specific_volume_tolerance_m3_kg;
+        // Q - W is the nearest representable target. If its rounding alone
+        // exceeds the physical allowance, no represented energy can close the
+        // original accounts; refuse before spending phase-equilibrium work.
+        let target_rounding_residual_j = balance::residual(
+            requested_internal_energy_change_j,
+            heat_j,
+            boundary_work_by_mixture_j,
+        );
         if !change_j_kg.is_finite()
             || !positive(tolerance_j)
             || !positive(tolerance_m3)
+            || !target_rounding_residual_j.is_finite()
+            || target_rounding_residual_j.abs() > tolerance_j
             || spacing(final_volume_m3) > tolerance_m3
             || requested_internal_energy_change_j != 0.0 && change_j_kg == 0.0
         {
-            return Err(E::Invalid("driven-mixture target or tolerances are unrepresentable"));
+            return Err(E::Invalid(
+                "driven-mixture target or tolerances are unrepresentable",
+            ));
         }
 
-        let solved = self.model.phase_equilibrium_internal_energy_volume_increment(
-            Temperature::new(self.state.temperature_k()),
-            Pressure::new(self.state.pressure_pa()),
-            final_specific_volume,
-            change_j_kg,
-            controls,
-            &mut cancelled,
-        )?;
+        let solved = self
+            .model
+            .phase_equilibrium_internal_energy_volume_increment(
+                Temperature::new(self.state.temperature_k()),
+                Pressure::new(self.state.pressure_pa()),
+                final_specific_volume,
+                change_j_kg,
+                controls,
+                &mut cancelled,
+            )?;
         let increment = solved.accepted_increment_j_kg().ok_or(E::Invalid(
             "driven-mixture source internal-energy increment is missing",
         ))?;
@@ -253,7 +278,7 @@ impl DrivenMixtureEquilibriumParcel {
 
         let stored_energy_change_j = self.mass_kg * increment;
         let first_law_residual_j =
-            stored_energy_change_j - requested_internal_energy_change_j;
+            balance::residual(stored_energy_change_j, heat_j, boundary_work_by_mixture_j);
         let volume_residual_m3 =
             self.mass_kg * source_specific_volume(solved.state()) - final_volume_m3;
         let entropy_change_j_k = self.mass_kg * entropy;
@@ -333,8 +358,7 @@ impl DrivenMixtureEquilibriumParcel {
             &mut cancelled,
         )?;
         let reservoir_entropy_change_j_k = -heat_j / reservoir_temperature_k;
-        let entropy_production_j_k =
-            equilibrium.entropy_change_j_k + reservoir_entropy_change_j_k;
+        let entropy_production_j_k = equilibrium.entropy_change_j_k + reservoir_entropy_change_j_k;
         if !reservoir_entropy_change_j_k.is_finite()
             || !entropy_production_j_k.is_finite()
             || entropy_production_j_k < -entropy_tolerance_j_k

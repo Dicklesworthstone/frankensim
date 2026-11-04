@@ -2,10 +2,8 @@
 use super::{close, common};
 use common::{MIXTURE_MASS, model, source};
 use fs_material::thermochemical_gas::nonideal::flash::{
-    equilibrium::{
-        PhaseEnthalpyControls,
-        volume::PhaseEnergyVolumeControls,
-    },
+    ThermochemicalFlashError,
+    equilibrium::{PhaseEnthalpyControls, volume::PhaseEnergyVolumeControls},
     parcel::driven::DrivenMixtureEquilibriumParcel,
 };
 use fs_qty::{Pressure, Temperature};
@@ -80,14 +78,33 @@ fn g3_same_first_law_target_is_invariant_to_large_species_energy_datums() {
     let delta_u = mass * 303_558.384_745_911_1;
     let heat = 60_000.0;
     let work = heat - delta_u;
-    let ra = a.advance(final_volume, heat, work, controls(), || false).unwrap();
-    let rb = b.advance(final_volume, heat, work, controls(), || false).unwrap();
+    let ra = a
+        .advance(final_volume, heat, work, controls(), || false)
+        .unwrap();
+    let rb = b
+        .advance(final_volume, heat, work, controls(), || false)
+        .unwrap();
 
-    assert_eq!(a.state().temperature_k().to_bits(), b.state().temperature_k().to_bits());
-    assert_eq!(a.state().pressure_pa().to_bits(), b.state().pressure_pa().to_bits());
-    assert_eq!(a.state().density_kg_m3().to_bits(), b.state().density_kg_m3().to_bits());
-    assert_eq!(ra.stored_energy_change_j.to_bits(), rb.stored_energy_change_j.to_bits());
-    assert_eq!(ra.entropy_change_j_k.to_bits(), rb.entropy_change_j_k.to_bits());
+    assert_eq!(
+        a.state().temperature_k().to_bits(),
+        b.state().temperature_k().to_bits()
+    );
+    assert_eq!(
+        a.state().pressure_pa().to_bits(),
+        b.state().pressure_pa().to_bits()
+    );
+    assert_eq!(
+        a.state().density_kg_m3().to_bits(),
+        b.state().density_kg_m3().to_bits()
+    );
+    assert_eq!(
+        ra.stored_energy_change_j.to_bits(),
+        rb.stored_energy_change_j.to_bits()
+    );
+    assert_eq!(
+        ra.entropy_change_j_k.to_bits(),
+        rb.entropy_change_j_k.to_bits()
+    );
 }
 
 #[test]
@@ -114,6 +131,41 @@ fn g0_exact_rest_is_bitwise_and_skips_all_phase_work() {
 }
 
 #[test]
+fn g4_small_heat_lost_in_a_large_work_target_refuses_before_phase_queries() {
+    let mut parcel = DrivenMixtureEquilibriumParcel::from_pressure_temperature(
+        source(),
+        0.2,
+        Temperature::new(220.0),
+        Pressure::new(3e6),
+        controls().phase.phase_options(),
+        || false,
+    )
+    .unwrap();
+    let before = parcel.clone();
+    let mut polls = 0;
+    let error = parcel
+        .advance(
+            parcel.volume_m3(),
+            1.1,
+            -9_999_999_999_999_998.0,
+            controls(),
+            || {
+                polls += 1;
+                false
+            },
+        )
+        .unwrap_err();
+    assert_eq!(
+        error,
+        ThermochemicalFlashError::Invalid(
+            "driven-mixture target or tolerances are unrepresentable",
+        ),
+    );
+    assert_eq!(polls, 1);
+    assert_eq!(parcel, before);
+}
+
+#[test]
 fn g4_refusal_and_final_cancellation_leave_complete_state_unchanged() {
     let make = || {
         DrivenMixtureEquilibriumParcel::from_pressure_temperature(
@@ -128,9 +180,11 @@ fn g4_refusal_and_final_cancellation_leave_complete_state_unchanged() {
     };
     let mut parcel = make();
     let before = parcel.clone();
-    assert!(parcel
-        .advance(parcel.volume_m3(), f64::NAN, 0.0, controls(), || false)
-        .is_err());
+    assert!(
+        parcel
+            .advance(parcel.volume_m3(), f64::NAN, 0.0, controls(), || false)
+            .is_err()
+    );
     assert_eq!(parcel, before);
 
     let final_volume = 0.1 / 36.471_975_375_322_785;
@@ -146,12 +200,14 @@ fn g4_refusal_and_final_cancellation_leave_complete_state_unchanged() {
         })
         .unwrap();
     let mut replay = 0usize;
-    assert!(parcel
-        .advance(final_volume, heat, work, controls(), || {
-            replay += 1;
-            replay == polls
-        })
-        .is_err());
+    assert!(
+        parcel
+            .advance(final_volume, heat, work, controls(), || {
+                replay += 1;
+                replay == polls
+            })
+            .is_err()
+    );
     assert_eq!(replay, polls);
     assert_eq!(parcel, before);
 
@@ -160,7 +216,6 @@ fn g4_refusal_and_final_cancellation_leave_complete_state_unchanged() {
         .unwrap();
     assert_eq!(parcel, control);
 }
-
 
 #[test]
 fn g1_reservoir_audit_accepts_second_law_and_refuses_too_cold_source_atomically() {
