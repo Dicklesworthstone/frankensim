@@ -23,6 +23,9 @@ use fs_solid::linear3::{
 };
 use fs_solver::LinearOp;
 
+/// Physical thermal stress constraints and exact adjoint curvature.
+pub mod stress;
+
 /// One independently equilibrated thermal and mechanical load case.
 #[derive(Debug, Clone, Copy)]
 pub struct ThermalLoadCase<'a> {
@@ -369,6 +372,30 @@ impl<'a> ThermalComplianceGoal<'a> {
         direction: &[f64],
         control: &mut SolveControl<'_>,
     ) -> Result<Vec<f64>, ComplianceError> {
+        let du = self.case_tangent(index, direction, control)?;
+        let el = self.base.elasticity;
+        let u = &self.base.displacements[index];
+        let forces = &self.cases[index].element_forces_n;
+        let mut result = self.base.bilinear(&du, u, control)?;
+        for (cell, tet) in el.tets.iter().enumerate() {
+            if cell % 256 == 0 {
+                control.checkpoint("thermal-hessian-contraction")?;
+            }
+            let local = gather(el, tet, &du);
+            let work: f64 = forces[cell].iter().zip(local).map(|(f, u)| f * u).sum();
+            result[cell] = finite(2.0 * (work - result[cell]), "thermal case Hessian action")?;
+        }
+        Ok(result)
+    }
+
+    // Shared physical tangent: equivalent loads and stiffness have the same
+    // original weights. Virtual derivatives do not inherit strain-domain caps.
+    fn case_tangent(
+        &self,
+        index: usize,
+        direction: &[f64],
+        control: &mut SolveControl<'_>,
+    ) -> Result<Vec<f64>, ComplianceError> {
         let el = self.base.elasticity;
         let u = &self.base.displacements[index];
         let forces = &self.cases[index].element_forces_n;
@@ -399,16 +426,7 @@ impl<'a> ThermalComplianceGoal<'a> {
         let (du, _) = self
             .base
             .solve(&rhs, control, "thermal-compliance-tangent")?;
-        let mut result = self.base.bilinear(&du, u, control)?;
-        for (cell, tet) in el.tets.iter().enumerate() {
-            if cell % 256 == 0 {
-                control.checkpoint("thermal-hessian-contraction")?;
-            }
-            let local = gather(el, tet, &du);
-            let work: f64 = forces[cell].iter().zip(local).map(|(f, u)| f * u).sum();
-            result[cell] = finite(2.0 * (work - result[cell]), "thermal case Hessian action")?;
-        }
-        Ok(result)
+        Ok(du)
     }
 }
 
