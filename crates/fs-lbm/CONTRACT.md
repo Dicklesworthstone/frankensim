@@ -10140,3 +10140,43 @@ wall-rotor regressions also pass after sharing the incoming-population momentum
 helper. These are direct original numerical-owner checks with only unused
 runtime/pool and unrelated module wrappers omitted; full workspace Cargo,
 DSR, cross-ISA and performance gates were not executed.
+
+## Source-backed gas convection on planar moving-liquid interfaces
+
+`MaterialFreeSurfaceEnthalpy3::step_with_surface_convection` and
+`step_with_finite_gas_surface_convection` evaluate a call-local
+`FreeSurfaceGasConvection` inside the original zero-storage surface solve.
+Each trial receives its actual interface temperature, current original gas
+bulk state, and the same selected gas source claims at the mean interface/bulk
+temperature and current pressure/composition. A positive finite coefficient
+replaces only `Gg = kg A/dg` with `Gg = h A`; it does not add another gas film or
+remove the liquid half-cell resistance or gray radiation. The exact coefficient
+evidence and original film source remain in `FreeSurfaceInterfaceSample`.
+`None` is accepted only at exact interface/gas thermal equilibrium. A failed
+correlation, unsupported source, invalid coefficient or unrepresentable
+conductance refuses the complete transaction.
+
+The same borrowed provider remains attached to every cloned thermal observer,
+nonlinear trial and endpoint evaluation. Existing positive pairwise surface
+elimination supplies the signed liquid/gas/radiant heat and the explicit
+capacity-based interval bound. The finite atmosphere stores exactly the
+opposite gas heat on each original thermal substep; its new temperature, EOS
+pressure and source properties feed subsequent trials. Optional pressure loading
+uses this same parcel through the existing native pressure owner. Accepted
+liquid, wall and gas states still publish together. The existing opt-in implicit
+prescribed-reservoir residual also calls the provider at its trial endpoint;
+its original finite-body/gas and other coupling exclusions remain in force.
+
+This bounded entry admits explicit Cartesian planar faces. Height-graph and
+local reconstructed surfaces refuse. A higher owner must declare the physical
+plate geometry, whole-plate characteristic length and held relative gas flow;
+a grid face is not a new boundary-layer entrance. The working plate adapter is
+`fs-airflow::graph::thermal::medium::convection::PlanarFreeSurfaceConvection`.
+The held-geometry thermal/native-flow split, isothermal-patch and held-property
+assumptions still require time, mesh and model assessment. No gas momentum,
+evaporation, arbitrary curved-surface law or total mechanical-energy closure is
+introduced. Focused regressions in
+`tests/material_free_surface_enthalpy/conduction/surface/convection.rs` exercise
+the actual surface root and liquid resistance, finite-gas reciprocal energy and
+step admission, exact equilibrium, late refusal with identical accepted retry,
+and the original implicit endpoint residual.

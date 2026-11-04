@@ -194,6 +194,10 @@ pub enum FreeSurfaceEnthalpyError {
     /// The original finite-atmosphere internal-energy owner refused.
     #[cfg(feature = "enthalpy-coupling")]
     Gas(fs_material::thermochemical_gas::energy::GasEnergyError),
+    /// A gas-side surface correlation refused its geometry or material state.
+    /// The higher correlation owner retains its original error description.
+    #[cfg(feature = "enthalpy-coupling")]
+    Convection(String),
     /// The original scalar electrical source could not adopt the liquid bundle.
     #[cfg(feature = "enthalpy-coupling")]
     Conductor(fs_material::conductor::ConductorError),
@@ -224,6 +228,8 @@ impl core::fmt::Display for FreeSurfaceEnthalpyError {
             Self::Thermal(e) => write!(f, "free-surface conduction: {e}"),
             #[cfg(feature = "enthalpy-coupling")]
             Self::Gas(e) => write!(f, "free-surface finite atmosphere: {e}"),
+            #[cfg(feature = "enthalpy-coupling")]
+            Self::Convection(e) => write!(f, "free-surface gas convection: {e}"),
             #[cfg(feature = "enthalpy-coupling")]
             Self::Conductor(e) => write!(f, "free-surface electrical source: {e}"),
             #[cfg(feature = "implicit-enthalpy-coupling")]

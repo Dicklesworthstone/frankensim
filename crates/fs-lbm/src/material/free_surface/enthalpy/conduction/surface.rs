@@ -1,7 +1,9 @@
-//! A zero-storage surface shared by liquid conduction, gas film and radiation.
+//! A zero-storage surface shared by liquid conduction, gas transfer and radiation.
 //!
 //! The finite-volume liquid half-cell uses its current bulk conductivity. The
 //! gas conductivity is resolved at the solved mean surface/bulk-gas temperature.
+//! A call-local convection law may replace its stagnant-film conductance using
+//! that same original gas state and the actual trial interface temperature.
 //! Eliminating that surface gives three positive pairwise conductances, so the
 //! existing thermal owner can conserve heat and bound BOTH finite capacities.
 
@@ -15,6 +17,13 @@ use fs_material::thermochemical_gas::{ResolvedThermochemicalGasState, Thermochem
 mod local;
 mod stress;
 pub use local::{FreeSurfaceLocalPatch, LocalSurfaceBoundaryEvolution};
+
+/// Call-local gas convection on the same solved liquid surface and heat owner.
+pub mod convection;
+pub use convection::{
+    FreeSurfaceConvectionQuery, FreeSurfaceGasConvection, FreeSurfaceGasHeatTransfer,
+    FreeSurfaceHeatTransferCoefficient,
+};
 
 /// Source-resolved implicit surface exchange on the original thermal owner.
 #[cfg(feature = "implicit-enthalpy-coupling")]
@@ -124,6 +133,8 @@ pub struct FreeSurfaceInterfaceSample {
     pub liquid_conductivity: FreeSurfaceConductivity,
     /// Original gas sources at (surface_temperature_k + gas_temperature_k)/2.
     pub gas: ResolvedThermochemicalGasState,
+    /// Gas-film conduction or the exact correlation evidence used at this Ts.
+    pub gas_heat_transfer: FreeSurfaceGasHeatTransfer,
     pub liquid_temperature_k: f64,
     pub surface_temperature_k: f64,
     /// Total hemispherical coefficient at the actual solved interface T.
@@ -415,6 +426,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             surfaces,
             solve,
             None,
+            None,
             gate,
         )?;
         Ok(viscous::FreeSurfaceViscousConductionReport {
@@ -450,7 +462,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
     ) -> Result<viscous::FreeSurfaceViscousConductionReport, Error> {
         self.step_with_finite_gas_surface_exchange_inner(
             faces, heat, controls, bodies, contacts, interfaces, gas, surfaces,
-            gas_controls, solve, None, with_viscous_heating, gate,
+            gas_controls, solve, None, None, with_viscous_heating, gate,
         )
     }
 
@@ -487,7 +499,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
     ) -> Result<viscous::FreeSurfaceViscousConductionReport, Error> {
         self.step_with_finite_gas_surface_exchange_inner(
             faces, heat, controls, bodies, contacts, interfaces, gas, surfaces,
-            gas_controls, solve, Some(maximum_density_excursion), with_viscous_heating, gate,
+            gas_controls, solve, None, Some(maximum_density_excursion), with_viscous_heating, gate,
         )
     }
 
@@ -504,6 +516,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         surfaces: &[FreeSurfaceInterfaceFace],
         gas_controls: GasEnergySolve,
         solve: FreeSurfaceInterfaceSolve,
+        convection: Option<&dyn FreeSurfaceGasConvection>,
         maximum_density_excursion: Option<f64>,
         with_viscous_heating: bool,
         gate: &CancelGate,
@@ -546,6 +559,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             &[],
             &boundaries,
             solve,
+            convection,
             Some(&mut candidate),
             gate,
         )?;
@@ -776,10 +790,34 @@ impl Conduction<'_, '_> {
             let (emissivity, emissivity_source) =
                 surface.emissivity.resolve(self.law, &liquid, ts)?;
             let radiation = emissivity * STEFAN_BOLTZMANN * surface.face.area_m2;
-            let gg = environment::finite(
-                gas.state().thermal_conductivity * surface.face.area_m2
-                    / surface.face.distances_m[1],
-            )?;
+            let (gg, gas_heat_transfer) = if let Some(convection) = self.surface_convection {
+                let coefficient = convection.coefficient(FreeSurfaceConvectionQuery {
+                    patch_index: index,
+                    surface,
+                    outward_normal: convection::cartesian_normal(surface.face)?,
+                    surface_temperature_k: ts,
+                    bulk: &bulk,
+                    film: &gas,
+                })?;
+                let h = match &coefficient {
+                    Some(evidence) if evidence.value.value().is_finite()
+                        && evidence.value.value() > 0.0 => evidence.value.value(),
+                    None if ts == tg => 0.0,
+                    _ => return Err(Error::Invalid(
+                        "surface convection needs positive finite h, or exact thermal equilibrium",
+                    )),
+                };
+                let conductance = environment::finite(h * surface.face.area_m2)?;
+                if h > 0.0 && conductance == 0.0 {
+                    return Err(Error::Invalid("surface convective conductance underflowed to zero"));
+                }
+                (conductance, FreeSurfaceGasHeatTransfer::Convection(coefficient))
+            } else {
+                (environment::finite(
+                    gas.state().thermal_conductivity * surface.face.area_m2
+                        / surface.face.distances_m[1],
+                )?, FreeSurfaceGasHeatTransfer::StagnantFilm)
+            };
             let gr = if radiation == 0.0 {
                 0.0
             } else {
@@ -818,6 +856,7 @@ impl Conduction<'_, '_> {
                     liquid,
                     liquid_conductivity,
                     gas,
+                    gas_heat_transfer,
                     liquid_temperature_k: tl,
                     surface_temperature_k: ts,
                     emissivity,

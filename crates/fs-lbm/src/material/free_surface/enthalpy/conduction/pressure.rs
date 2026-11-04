@@ -219,6 +219,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             boundaries.surfaces,
             boundaries.surface_solve,
             None,
+            None,
             gas_pressure,
             gate,
         )?;

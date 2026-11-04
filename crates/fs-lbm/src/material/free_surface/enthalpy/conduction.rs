@@ -179,6 +179,7 @@ struct Conduction<'a, 'm> {
     radiation_absolute_heat_j: f64,
     surfaces: &'a [FreeSurfaceInterfaceContact<'a>],
     surface_solve: FreeSurfaceInterfaceSolve,
+    surface_convection: Option<&'a dyn surface::convection::FreeSurfaceGasConvection>,
     maximum_surface_patches: usize,
     surface_stress: bool,
     surface_endpoints: Vec<CellId>,
@@ -697,7 +698,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         self.advance_with_thermal_boundaries(
             faces, heat, controls, viscous, bodies, contacts, interfaces,
             environment, radiation, &[], FreeSurfaceInterfaceSolve::default(),
-            finite_atmosphere, gate,
+            None, finite_atmosphere, gate,
         )
     }
 
@@ -715,6 +716,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         radiation: &[FreeSurfaceRadiationFace],
         surfaces: &[FreeSurfaceInterfaceContact<'_>],
         surface_solve: FreeSurfaceInterfaceSolve,
+        surface_convection: Option<&dyn surface::convection::FreeSurfaceGasConvection>,
         finite_atmosphere: Option<&mut atmosphere::FiniteAtmosphere>,
         gate: &CancelGate,
     ) -> Result<FreeSurfaceConductionReport, Error> {
@@ -730,6 +732,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             radiation,
             surfaces,
             surface_solve,
+            surface_convection,
             finite_atmosphere,
             None,
             gate,
@@ -750,11 +753,21 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         radiation: &[FreeSurfaceRadiationFace],
         surfaces: &[FreeSurfaceInterfaceContact<'_>],
         surface_solve: FreeSurfaceInterfaceSolve,
+        surface_convection: Option<&dyn surface::convection::FreeSurfaceGasConvection>,
         finite_atmosphere: Option<&mut atmosphere::FiniteAtmosphere>,
         gas_pressure: Option<(f64, GasPressureField<'_>)>,
         gate: &CancelGate,
     ) -> Result<FreeSurfaceConductionReport, Error> {
         poll(gate)?;
+        if surface_convection.is_some()
+            && (surfaces.is_empty()
+                || self.height_graph_thermocapillary_surface().is_some()
+                || self.local_thermocapillary_surface().is_some())
+        {
+            return Err(Error::Invalid(
+                "gas surface convection requires explicit Cartesian planar patches",
+            ));
+        }
         if gas_pressure.is_some()
             && finite_atmosphere
                 .as_deref()
@@ -1166,6 +1179,7 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
             radiation_absolute_heat_j: 0.0,
             surfaces,
             surface_solve,
+            surface_convection,
             maximum_surface_patches: controls.maximum_faces
                 - (other_faces - surfaces.len())
                 - solid_link_count

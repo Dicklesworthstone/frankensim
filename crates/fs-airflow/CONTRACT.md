@@ -3267,3 +3267,35 @@ endpoint Mach refusal. Ownership, geometry, cancellation and crossing support
 are exercised in those same tests. Source/API review was completed; Rust
 parsing, compilation and native numerical execution were unavailable, so these
 regression sources are not reported as executed.
+
+## Original gas correlations on planar moving-liquid heat interfaces
+
+`graph::thermal::medium::convection::PlanarFreeSurfaceConvection` implements
+fs-lbm's call-local surface coefficient provider. It consumes the original
+source gas already resolved by the moving-liquid owner at the actual trial
+mean-film temperature. Forced plate Reynolds/Prandtl groups and `h = Nu k/L`
+use that same source state. Natural plates additionally use its original
+volumetric expansion and the full actual interface/bulk temperature difference.
+The original correlation evidence is moved into the accepted surface sample;
+no surrogate gas, constant-h default or extra heat integrator is supplied.
+
+The declared normal must match the actual Cartesian liquid-to-gas face. Forced
+flow is a prescribed gas velocity RELATIVE to the liquid surface, must be
+tangent, and explicitly selects the existing laminar or turbulent average plate
+card with its original regime limits. Natural gravity must describe a vertical
+or horizontal plate; the outward normal and signed temperature difference select
+the existing stable/unstable horizontal branch. Geometry, source and physical
+driving inputs are admitted even at exact equilibrium, where natural heat is
+zero without inventing a finite-Rayleigh coefficient.
+
+Characteristic length means the whole physical streamwise plate length, vertical
+height, or horizontal area/perimeter. It is never reset to a mesh-face width.
+Applying the mean isothermal-plate correlation to surface patches assumes an
+approximately isothermal declared physical plate and locally held film
+properties. Relative speed and geometry remain held during the original
+thermal/native-flow split. Inclined, curved, enclosed, evaporating and mixed
+surfaces require other physical models and refuse here. The original liquid
+half-cell, radiation, finite-gas reciprocal balance, thermal interval admission
+and rollback remain owned by fs-lbm. The production adapter's unit tests compare
+with the original correlation and independent plate equation, source-pressure
+response, gravity orientation, equilibrium admission and explicit refusals.

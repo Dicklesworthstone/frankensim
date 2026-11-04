@@ -103,8 +103,15 @@ pub fn model_transport_with_reference(
 ) -> ThermochemicalGasModel {
     let a = packs("A", 0.028, 3.5, 1.8e-5, 0.026, variable_transport, energy_reference_k);
     let b = packs("B", 0.004, 2.5, 2.0e-5, 0.08, variable_transport, energy_reference_k);
-    from_packs(&[a.binding(), b.binding()], Composition::new(
-        CompositionBasis::MoleFraction, vec![fraction, 1.0-fraction]).unwrap(), None).unwrap()
+    let composition = Composition::new(
+        CompositionBasis::MoleFraction, vec![fraction, 1.0-fraction]).unwrap();
+    // The mixture owner admits active species only, as in with_composition.
+    // Preserve pure endpoints without an invented trace of the absent gas.
+    let (sources, fractions): (Vec<_>, Vec<_>) = [a.binding(), b.binding()].into_iter()
+        .zip(composition.fractions().iter().copied())
+        .filter(|(_, fraction)| *fraction > 0.0).unzip();
+    from_packs(&sources, Composition::new(
+        CompositionBasis::MoleFraction, fractions).unwrap(), None).unwrap()
 }
 pub fn point(t: f64, p: f64) -> QueryPoint {
     QueryPoint::new().with_quantity("temperature", typed(QuantityKind::AbsoluteTemperature), t).unwrap()

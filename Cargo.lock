@@ -966,6 +966,7 @@ dependencies = [
  "fs-ivl",
  "fs-la",
  "fs-ladder",
+ "fs-lbm",
  "fs-matdb",
  "fs-material",
  "fs-math",

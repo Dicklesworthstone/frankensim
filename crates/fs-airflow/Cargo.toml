@@ -36,6 +36,8 @@ fs-ivl = { path = "../fs-ivl" }
 # The CHT fidelity ladder: fs-airflow supplies the real correlation-rung
 # transfer that replaces the Refine1d demonstrator.
 fs-ladder = { path = "../fs-ladder" }
+# Correlation heat on the original material moving-liquid interface owner.
+fs-lbm = { path = "../fs-lbm", features = ["enthalpy-coupling"] }
 fs-math = { path = "../fs-math" }
 # Native energy-audited fluid inertance; no duplicate momentum integrator.
 fs-phs = { path = "../fs-phs" }

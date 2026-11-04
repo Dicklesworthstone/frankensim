@@ -6,6 +6,9 @@ use fs_lbm::material::free_surface::enthalpy::conduction::{
 };
 use fs_material::thermochemical_gas::energy::{GasEnergySolve, IsochoricGasParcel};
 
+#[path = "surface/convection.rs"]
+mod convection;
+
 fn face(surroundings_k: f64) -> FreeSurfaceInterfaceFace {
     FreeSurfaceInterfaceFace {
         face: FreeSurfaceGasFace {
