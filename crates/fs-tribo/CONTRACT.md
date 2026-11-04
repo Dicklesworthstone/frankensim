@@ -1051,6 +1051,30 @@ same flux. Reservoir pressure and incoming liquid content are explicit; partial
 reservoir filling is admissible only at cavitation pressure. No material name,
 pressure floor, artificial leakage or replacement gap supplies missing physics.
 
+`CavitatingFilm::with_reservoirs` binds independent absolute pressure and incoming
+liquid content to every original exterior channel. Internal channels explicitly
+carry no reservoir; closed exterior passages retain their authored condition.
+The same active-set solve now supports pressure-fed through-flow, starvation,
+rupture and reformation with separate supplies. Original liquid inventory and
+state identity survive rebinding. The common ambient datum remains the opposing
+mechanical pressure and reference of the original viscosity law; it is not
+silently replaced by whichever supply is encountered first.
+
+Boundary Barus potentials are compiled once, shared by immutable clones and
+used by both assembly and the independent mass-flux audit. Pressure/content
+complementarity and finite-pressure admission apply to each supply. Uniform
+explicit supplies reproduce the original trajectory exactly. Viscosity refresh
+preserves the supplied conditions; endpoint material refresh retains their
+absolute pressures and contents, rebuilds their potentials at the new rupture
+pressure and refuses an incompatible supply without publishing a candidate.
+
+Five focused regressions compare the saturated result with the native full-film
+pressure solver and an independent Barus integral; exercise starvation/refill,
+flow reversal, material-density transition and exact uniform compatibility;
+and check topology, pressure/content domain, barrier and cancellation refusal.
+These are prescribed reservoirs with mass accounting, not finite reservoir
+storage or a claim of time-integrated thermal/mechanical energy closure.
+
 A common Barus law now uses `chi=(1-exp(-alpha*(p-p_c)))/alpha`, with channel
 conductances multiplied by `exp(alpha*(p_ambient-p_c))`; supplied viscosities
 remain referenced to the reservoir pressure. Zero potential is exactly rupture,

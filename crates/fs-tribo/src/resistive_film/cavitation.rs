@@ -42,11 +42,24 @@ pub struct CavitationLiquid {
     pub density_kg_m3: f64,
     /// Absolute rupture/reformation pressure [Pa], supplied by a material law.
     pub cavitation_pressure_pa: f64,
-    /// Absolute pressure [Pa] at every `FilmChannel::to == None` reservoir.
+    /// Absolute default reservoir pressure [Pa]. Also the fixed opposing
+    /// mechanical pressure and reference pressure of the supplied viscosities.
+    /// Explicit reservoir conditions do not move this reference.
     pub ambient_pressure_pa: f64,
     /// Reservoir liquid content for incoming Couette transport. Must be one
     /// above cavitation pressure; partial filling is admitted only at `p_c`.
     pub ambient_liquid_fraction: f64,
+}
+
+/// Prescribed supply on one original exterior channel. Pressure is absolute;
+/// the film's mechanical and viscosity reference remains in [`CavitationLiquid`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CavitationReservoir {
+    /// Absolute supply pressure [Pa], at or above the liquid rupture pressure.
+    pub pressure_pa: f64,
+    /// Incoming Couette liquid content. A pressurized supply must be full;
+    /// starvation is admitted only at the rupture pressure.
+    pub liquid_fraction: f64,
 }
 
 /// Work cap and tolerances for the actual cell and global liquid-mass balances.
@@ -150,6 +163,13 @@ pub struct CavitatingFilm {
     liquid: CavitationLiquid,
     solve: CavitationSolveConfig,
     pressure_law: PressureTransform,
+    reservoirs: Option<Arc<[BoundReservoir]>>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct BoundReservoir {
+    condition: Option<CavitationReservoir>,
+    potential: f64,
 }
 
 /// Fluidity is normalized at rupture, while the supplied viscosities remain
@@ -168,22 +188,15 @@ impl PressureTransform {
         let excess = liquid.ambient_pressure_pa - liquid.cavitation_pressure_pa;
         let scaled = alpha * excess;
         let fluidity_scale = if alpha == 0.0 { 1.0 } else { det::exp(scaled) };
-        let ambient_potential = if scaled == 0.0 {
-            excess
-        } else {
-            excess * (-det::expm1(-scaled) / scaled)
-        };
-        if !fluidity_scale.is_finite()
-            || !ambient_potential.is_finite()
-            || alpha * ambient_potential >= 1.0
-        {
+        if !fluidity_scale.is_finite() {
             return fail("unrepresentable cavitating-film Barus reference pressure");
         }
-        let result = Self {
+        let mut result = Self {
             alpha,
             fluidity_scale,
-            ambient_potential,
+            ambient_potential: 0.0,
         };
+        result.ambient_potential = result.potential_at(excess)?;
         result.validate_viscosities(geometry)?;
         Ok(result)
     }
@@ -196,6 +209,23 @@ impl PressureTransform {
             return fail("unrepresentable cavitating-film viscosity at rupture");
         }
         Ok(())
+    }
+
+    fn potential_at(self, excess: f64) -> Result<f64, FilmError> {
+        let scaled = self.alpha * excess;
+        if !scaled.is_finite() {
+            return fail("unrepresentable cavitating-film reservoir pressure transform");
+        }
+        let potential = if scaled == 0.0 {
+            excess
+        } else {
+            excess * (-det::expm1(-scaled) / scaled)
+        };
+        if !potential.is_finite() || potential < 0.0 {
+            return fail("unrepresentable cavitating-film reservoir pressure potential");
+        }
+        self.relative_fluidity(potential)?;
+        Ok(potential)
     }
 
     fn relative_fluidity(self, potential: f64) -> Result<f64, FilmError> {
@@ -265,7 +295,113 @@ impl CavitatingFilm {
             liquid,
             solve,
             pressure_law,
+            reservoirs: None,
         })
+    }
+
+    /// Bind one explicit supply to EVERY original exterior channel. Internal
+    /// channels require `None`; boundary channels require `Some`, including
+    /// currently closed passages. Conditions are held during a step, and their
+    /// original Barus potentials are compiled once at binding.
+    ///
+    /// Rebinding preserves the accepted liquid inventory and its identity.
+    /// Different supply pressures can therefore drive through-flow and refill
+    /// without resetting existing cavities. The reference pressure, opposing
+    /// normal load, density and viscosity law remain those of `liquid()`.
+    /// This prescribes sources; it does not create reservoir storage or a
+    /// thermal/work integrator. Rebinding failure leaves this owner untouched.
+    pub fn with_reservoirs(
+        &self,
+        reservoirs: &[Option<CavitationReservoir>],
+    ) -> Result<Self, FilmError> {
+        let bindings = self.compile_reservoirs(reservoirs.iter().copied())?;
+        let mut film = self.clone();
+        film.reservoirs = Some(bindings);
+        Ok(film)
+    }
+
+    /// Conditions in original channel order, with `None` on internal channels.
+    /// A film constructed with `new` reports its common ambient conditions.
+    pub fn reservoir_conditions(
+        &self,
+    ) -> impl ExactSizeIterator<Item = Option<CavitationReservoir>> + '_ {
+        self.geometry.channels.iter().enumerate().map(|(k, edge)| {
+            if edge.to.is_some() {
+                None
+            } else {
+                self.reservoirs.as_ref().map_or(
+                    Some(CavitationReservoir {
+                        pressure_pa: self.liquid.ambient_pressure_pa,
+                        liquid_fraction: self.liquid.ambient_liquid_fraction,
+                    }),
+                    |bindings| bindings[k].condition,
+                )
+            }
+        })
+    }
+
+    fn compile_reservoirs(
+        &self,
+        reservoirs: impl ExactSizeIterator<Item = Option<CavitationReservoir>>,
+    ) -> Result<Arc<[BoundReservoir]>, FilmError> {
+        if reservoirs.len() != self.channel_count() {
+            return fail("cavitating-film reservoir count must match original channels");
+        }
+        let mut bindings = Vec::with_capacity(self.channel_count());
+        for (k, (edge, condition)) in self.geometry.channels.iter().zip(reservoirs).enumerate() {
+            if edge.to.is_none() != condition.is_some() {
+                return fail("cavitating-film reservoir binding does not match channel topology");
+            }
+            let potential = if let Some(value) = condition {
+                let gauge = value.pressure_pa - self.liquid.ambient_pressure_pa;
+                if !value.pressure_pa.is_finite()
+                    || value.pressure_pa < self.liquid.cavitation_pressure_pa
+                    || !gauge.is_finite()
+                    || gauge.abs() > self.geometry.limits.maximum_pressure_pa
+                    || !value.liquid_fraction.is_finite()
+                    || !(0.0..=1.0).contains(&value.liquid_fraction)
+                    || (value.pressure_pa > self.liquid.cavitation_pressure_pa
+                        && value.liquid_fraction != 1.0)
+                {
+                    return fail("invalid cavitating-film reservoir pressure or liquid content");
+                }
+                let potential = self
+                    .pressure_law
+                    .potential_at(value.pressure_pa - self.liquid.cavitation_pressure_pa)?;
+                let relative = self.pressure_law.relative_fluidity(potential)?;
+                let viscosity = self.geometry.channel_viscosities_pa_s()[k]
+                    / (self.pressure_law.fluidity_scale * relative);
+                if !viscosity.is_finite() || viscosity <= 0.0 {
+                    return fail("unrepresentable cavitating-film reservoir viscosity");
+                }
+                potential
+            } else {
+                0.0
+            };
+            bindings.push(BoundReservoir {
+                condition,
+                potential,
+            });
+        }
+        Ok(bindings.into())
+    }
+
+    fn boundary_potential(&self, channel: usize) -> f64 {
+        self.reservoirs
+            .as_ref()
+            .map_or(self.pressure_law.ambient_potential, |bindings| {
+                bindings[channel].potential
+            })
+    }
+
+    fn boundary_liquid_fraction(&self, channel: usize) -> f64 {
+        self.reservoirs
+            .as_ref()
+            .map_or(self.liquid.ambient_liquid_fraction, |bindings| {
+                bindings[channel]
+                    .condition
+                    .map_or(0.0, |r| r.liquid_fraction)
+            })
     }
 
     /// Continue the SAME retained liquid inventory with a new dynamic viscosity.
@@ -289,6 +425,7 @@ impl CavitatingFilm {
             liquid: self.liquid,
             solve: self.solve,
             pressure_law: self.pressure_law,
+            reservoirs: self.reservoirs.clone(),
         })
     }
 
@@ -307,6 +444,7 @@ impl CavitatingFilm {
             liquid: self.liquid,
             solve: self.solve,
             pressure_law: self.pressure_law,
+            reservoirs: self.reservoirs.clone(),
         })
     }
 
@@ -331,7 +469,7 @@ impl CavitatingFilm {
         self.geometry.channels.len()
     }
 
-    /// Full liquid at the declared reservoir pressure. An initial state is an
+    /// Full liquid at the declared reference pressure. An initial state is an
     /// initial condition, not a solution of steady transport or wall motion.
     pub fn initial_state(&self, q: &[f64]) -> Result<CavitatingFilmState, FilmError> {
         self.initialize(q, &[1.0; MAX_CELLS][..self.cell_count()])
@@ -427,8 +565,10 @@ impl CavitatingFilm {
     /// pressure. No old state is reset or clamped.
     ///
     /// Viscosities follow original channel order and are referenced to the NEW
-    /// absolute reservoir pressure. The original common Barus coefficient and
-    /// geometry remain fixed; the rupture-normalized pressure transform is
+    /// absolute reference pressure. Explicit reservoir pressures and contents
+    /// stay fixed and must remain admissible at the new rupture pressure; a
+    /// default uniform reservoir follows the new ambient data. The common
+    /// Barus coefficient and geometry remain fixed; the pressure transform is
     /// rebuilt consistently. Uniform density applies to both the film and
     /// incoming reservoir liquid within this step.
     ///
@@ -456,6 +596,10 @@ impl CavitatingFilm {
             .geometry
             .with_channel_viscosities(channel_viscosities_pa_s)?;
         let mut film = Self::new(geometry, liquid, self.solve)?;
+        if let Some(bindings) = &self.reservoirs {
+            film.reservoirs =
+                Some(film.compile_reservoirs(bindings.iter().map(|binding| binding.condition))?);
+        }
         if liquid == self.liquid {
             film.owner = Arc::clone(&self.owner);
         }
@@ -520,7 +664,6 @@ impl CavitatingFilm {
                 || (rhs[i] == volume[i]
                     && state.pressure_pa[i] > previous.liquid.cavitation_pressure_pa);
         }
-        let boundary_potential = self.pressure_law.ambient_potential;
         for (k, (edge, factor)) in self
             .geometry
             .channels
@@ -552,11 +695,11 @@ impl CavitatingFilm {
                 b[i * n + donor] += e;
                 b[j * n + donor] -= e;
             } else {
-                rhs[i] += ag * boundary_potential;
+                rhs[i] += ag * self.boundary_potential(k);
                 if e >= 0.0 {
                     b[i * n + i] += e;
                 } else {
-                    rhs[i] -= e * self.liquid.ambient_liquid_fraction;
+                    rhs[i] -= e * self.boundary_liquid_fraction(k);
                 }
             }
         }
@@ -682,13 +825,13 @@ impl CavitatingFilm {
             after += volume[i] * theta[i];
         }
         let boundary_excess = self.liquid.ambient_pressure_pa - self.liquid.cavitation_pressure_pa;
-        let boundary_potential = self.pressure_law.ambient_potential;
         for (k, edge) in self.geometry.channels.iter().enumerate() {
+            let boundary_potential = self.boundary_potential(k);
             let donor = if entrainment[k] >= 0.0 {
                 theta[edge.from]
             } else {
                 edge.to
-                    .map_or(self.liquid.ambient_liquid_fraction, |j| theta[j])
+                    .map_or(self.boundary_liquid_fraction(k), |j| theta[j])
             };
             if self.pressure_law.alpha != 0.0 {
                 for chi in [
