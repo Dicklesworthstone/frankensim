@@ -3407,7 +3407,7 @@ mod forced_jet_tests {
         // The band holds 8 station half-widths, rounded up to whole spacings.
         let band = kernel.step_response().resolution().half_height;
         assert!(band >= forced_jet::BAND_HALF_HEIGHT * beta && band < forced_jet::BAND_HALF_HEIGHT * beta + PLUMBING.spacing);
-        assert!(fletcher.island.provenance.contains("jet spreading: fletcher-1976 (an organ-flue Pitot measurement (E4 pipe, flue 0.25-1.0 mm) applied to a flute lip jet"));
+        assert!(fletcher.island.provenance.contains("jet spreading: fletcher-1976 (an organ-flue Pitot measurement (E4 pipe, flue 0.25-1.0 mm) carried to this jet, not measured on it"));
         let bickley = spread_voice(forced_jet::JetSpreadingLaw::Bickley);
         let kb = bickley.forced_jet().unwrap();
         let (beta_b, _) = kb.station_spread().unwrap();

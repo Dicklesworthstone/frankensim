@@ -8542,7 +8542,7 @@ None.
   reads that same speed. `bickley`: the laminar Bickley jet at the
   response's Reynolds number, matched at the exit, `beta = (1 + 6 x /
   Re)^(2/3)`. `fletcher-1976`: an organ-flue Pitot measurement (E4 pipe,
-  flue 0.25-1.0 mm) applied to a flute lip jet, Fletcher 1976 eqs. 4-6,
+  flue 0.25-1.0 mm) carried to the card's jet, not measured on it, Fletcher 1976 eqs. 4-6,
   `phi` 5 deg (Table I), `b = W`, `db/dx = 2 tan phi`. The voice
   provenance and the render sidecar (`flue_input.jet_response.spreading`:
   law, `source`, station width and centre speed, virtual origin, band, cut

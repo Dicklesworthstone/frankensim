@@ -670,8 +670,8 @@ own) and the station's volume flux (`beta(X)^(1/2)` times its own). With `moment
 `v0` is the station's centre speed. The two laws:
 - `bickley`: the laminar Bickley jet at the integration's Reynolds number, matched at the exit,
   `beta = (1 + 6 x/Re)^(2/3)`, with a virtual origin `Re/6` exit half-widths upstream;
-- `fletcher-1976`: an organ-flue Pitot measurement (E4 pipe, flue 0.25-1.0 mm) applied to a flute
-  lip jet. Fletcher (JASA 60, 1976) eq. 5 `W = W0 + 2 x tan phi` with `phi` 5 deg (Table I),
+- `fletcher-1976`: an organ-flue Pitot measurement (E4 pipe, flue 0.25-1.0 mm) carried to the
+  card's jet, not measured on it. Fletcher (JASA 60, 1976) eq. 5 `W = W0 + 2 x tan phi` with `phi` 5 deg (Table I),
   eq. 6 `V = V0 (W0/W)^(1/2)`, and `b = W` by the volume flux of his eq. 4 profile, so
   `db/dx = 2 tan phi = 0.175`.
 

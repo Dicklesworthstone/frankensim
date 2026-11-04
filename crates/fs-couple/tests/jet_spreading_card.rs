@@ -1,6 +1,6 @@
 //! The card row `jet_spreading LAW` (MB 97), parsed on the committed D4 flute card at the coarse
 //! forced-jet row. LAW is required and only `bickley` (the laminar Bickley jet matched at the exit)
-//! and `fletcher-1976` (an organ-flue Pitot measurement applied to a flute lip jet) are accepted.
+//! and `fletcher-1976` (an organ-flue Pitot measurement carried to the card's jet) are accepted.
 //! The row needs `jet_response` before it, and goes after `momentum_drive` when both are present.
 //! A card without the row has the parallel base and the unspread cut.
 
@@ -60,13 +60,13 @@ fn both_laws_attach_and_a_card_without_the_row_is_unspread() {
 }
 
 /// The voice provenance and the render sidecar print `source()`; Fletcher's law must say it is
-/// an organ-flue measurement carried over to a flute lip jet (MB 125).
+/// an organ-flue measurement carried over to the card's jet, not measured on it (MB 125, MB 1349).
 #[test]
 fn each_law_names_where_it_comes_from() {
     let fletcher = JetSpreadingLaw::Fletcher1976.source();
     assert!(
         fletcher.starts_with(
-            "an organ-flue Pitot measurement (E4 pipe, flue 0.25-1.0 mm) applied to a flute lip jet: "
+            "an organ-flue Pitot measurement (E4 pipe, flue 0.25-1.0 mm) carried to this jet, not measured on it: "
         ),
         "{fletcher}"
     );

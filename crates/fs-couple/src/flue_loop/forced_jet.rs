@@ -49,8 +49,8 @@
 //! - `bickley`: the laminar Bickley jet at the integration's own Reynolds number, matched to the
 //!   exit's width and centre speed, `beta = (1 + 6 x / Re)^(2/3)` (virtual origin `Re / 6`
 //!   half-widths upstream of the exit; the centreline momentum balance with `u_c^2 b` conserved).
-//! - `fletcher-1976`: an organ-flue Pitot measurement (E4 pipe, flue 0.25-1.0 mm) applied to a
-//!   flute lip jet. Fletcher (JASA 60(4), 1976, p. 926) writes the jet as
+//! - `fletcher-1976`: an organ-flue Pitot measurement (E4 pipe, flue 0.25-1.0 mm) carried to the
+//!   card's jet, not measured on it. Fletcher (JASA 60(4), 1976, p. 926) writes the jet as
 //!   `V exp[-pi (y - y0)^2 / 4 W^2]` (eq. 4) with `W = W0 + 2 x tan phi` (eq. 5) and
 //!   `V = V0 (W0 / W)^(1/2)` (eq. 6, momentum conserved), and lists `phi` = 5 deg (Table I). Its
 //!   volume flux `2 V W` is the Bickley jet's `2 U b`, so `b = W` and `db/dx = 2 tan phi`. His
@@ -290,8 +290,8 @@ impl JetSpreadingLaw {
                 "the laminar Bickley jet at this Re matched at the exit, beta = (1 + 6 x/Re)^(2/3)"
             }
             Self::Fletcher1976 => {
-                "an organ-flue Pitot measurement (E4 pipe, flue 0.25-1.0 mm) applied to a flute lip \
-                 jet: Fletcher 1976 eqs. 4-6, phi 5 deg (Table I), b = W, db/dx = 2 tan phi"
+                "an organ-flue Pitot measurement (E4 pipe, flue 0.25-1.0 mm) carried to this jet, not \
+                 measured on it: Fletcher 1976 eqs. 4-6, phi 5 deg (Table I), b = W, db/dx = 2 tan phi"
             }
         }
     }
