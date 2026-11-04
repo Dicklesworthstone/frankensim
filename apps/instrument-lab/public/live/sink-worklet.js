@@ -124,7 +124,11 @@ class FsLiveSink extends AudioWorkletProcessor {
       const take = Math.min(available, frames - written);
       for (let c = 0; c < output.length; c++) {
         const source = head.channels[head.channels.length === 1 ? 0 : Math.min(c, head.channels.length - 1)];
-        output[c].set(source.subarray(head.offset, head.offset + take), written);
+        // Piano chunks normally fill one quantum. Copy those directly rather
+        // than allocating a temporary typed-array view on the audio thread.
+        const samples = head.offset === 0 && take === source.length
+          ? source : source.subarray(head.offset, head.offset + take);
+        output[c].set(samples, written);
       }
       head.offset += take;
       written += take;
