@@ -145,3 +145,65 @@ fn continuous_field_uses_the_scheduled_source_and_same_physical_microphone() {
     assert!(norm > 0.0 && difference > 1e-8 * norm);
     assert_ne!(voice(&a).reed_y.to_bits(), voice(&b).reed_y.to_bits());
 }
+
+// ---- `open_hole_interaction tmmi EPSILON` (opt-in radiation coupling of the open holes and the bell) ----
+
+/// The fixture bore with two open holes 47.5 mm apart; the lengths sum exactly to the field length.
+fn holed(text: &str) -> String {
+    text.replace("termination flanged", "exterior 300 101325 0\ntermination flanged")
+        .replace("segments 1\ncylinder 0.0015 0.57",
+            "segments 5\ncylinder 0.0015 0.285\nhole 0.0013 0.0005 0.0015 1\ncylinder 0.0015 0.0475\n\
+             hole 0.0013 0.0005 0.0015 1\ncylinder 0.0015 0.2375")
+}
+fn with_row(text: &str, row: &str) -> String {
+    text.replace("compile_limits", &format!("{row}\ncompile_limits"))
+}
+fn continuous_load(text: &str, outlet_temperature: f64) -> Result<ReedPerformance, ReedPerformanceError> {
+    ReedPerformance::from_bytes_with_field_resolution(
+        text.as_bytes(), 113, ObservationPolicy::Diagnostic, None, field(outlet_temperature),
+        GasFieldResolution::Continuous(fs_duct::RiccatiSteps(16)),
+    )
+}
+fn pressure_of(text: &str) -> Vec<f64> {
+    let mut p = continuous_load(text, 280.0).unwrap();
+    let mut out = vec![0.0; p.info.samples as usize];
+    for chunk in out.chunks_mut(113) { p.pressure_block(chunk).unwrap(); }
+    assert!(out.iter().all(|x| x.is_finite()));
+    out
+}
+fn distance(a: &[f64], b: &[f64]) -> f64 {
+    a.iter().zip(b).map(|(x, y)| (x - y).powi(2)).sum::<f64>().sqrt()
+}
+
+#[test]
+fn the_open_hole_interaction_row_is_off_by_default_and_reaches_the_rendered_pressure() {
+    let base = holed(&source());
+    let plain = pressure_of(&base);
+    assert_eq!(plain, pressure_of(&base));
+    let norm = plain.iter().map(|x| x * x).sum::<f64>().sqrt();
+    let coupled = pressure_of(&with_row(&base, "open_hole_interaction tmmi 2"));
+    let weak = pressure_of(&with_row(&base, "open_hole_interaction tmmi 1e15"));
+    let (dc, dw) = (distance(&plain, &coupled), distance(&plain, &weak));
+    assert!(norm > 0.0 && dc > 1.0e-9 * norm, "coupled differs: {dc} of {norm}");
+    // Vanishing coupling reproduces the independent holes far more closely than eps = 2 does.
+    assert!(dw < 0.1 * dc, "decoupled {dw} vs coupled {dc}");
+}
+
+#[test]
+fn the_open_hole_interaction_row_is_validated_and_needs_a_continuous_binding() {
+    let base = holed(&source());
+    for bad in [
+        "open_hole_interaction tmmi 0", "open_hole_interaction tmmi -2", "open_hole_interaction tmmi nan",
+        "open_hole_interaction tmmi inf", "open_hole_interaction tmmi", "open_hole_interaction tmmi 2 3",
+        "open_hole_interaction foo 2", "open_hole_interaction",
+    ] {
+        assert!(continuous_load(&with_row(&base, bad), 280.0).is_err(), "{bad}");
+    }
+    let declared = with_row(&base, "open_hole_interaction tmmi 2");
+    assert!(continuous_load(&declared, 280.0).is_ok());
+    // A midpoint binding has no continuous operator to couple; a uniform field gives the regional
+    // wrapper no continuous binding either.
+    assert!(ReedPerformance::from_bytes_with_gas_field(declared.as_bytes(), 113,
+        ObservationPolicy::Diagnostic, None, field(280.0), 8).is_err());
+    assert!(continuous_load(&declared, 300.0).is_err());
+}

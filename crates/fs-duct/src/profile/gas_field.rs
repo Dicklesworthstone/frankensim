@@ -11,6 +11,7 @@ use crate::compose::{
     ComposeOptions, CompositionMode, InputReflection, PreparedChain, PreparedOpenHole, TwoPort,
     compose_chain, compose_chain_reflection, open_hole_flows, prepare_open_hole,
 };
+use crate::interaction::{CoupledPort, CoupledSolution, OpenHoleInteraction};
 use crate::{Duct, DuctError, DuctResponse, LossModel, OpenHoleFlow, Segment, Termination};
 use fs_material::MaterialError;
 use fs_material::gas::GasState;
@@ -115,6 +116,8 @@ pub struct GasFieldDuct {
     inlet: GasState,
     outlet: GasState,
     one_way_time_s: f64,
+    /// Opt-in coupling of the open holes' radiation (TMMI); `None` is the original model.
+    interaction: Option<OpenHoleInteraction>,
 }
 
 impl GasFieldDuct {
@@ -193,6 +196,7 @@ impl GasFieldDuct {
             inlet,
             outlet,
             one_way_time_s: length / inlet.sound_speed,
+            interaction: None,
         };
         if field.uniform_state().is_some() {
             return Ok(result);
@@ -373,6 +377,69 @@ impl GasFieldDuct {
         self.one_way_time_s
     }
 
+    /// Opt in to the TMMI coupling of the open holes' and the bell's radiation
+    /// (`OpenHoleInteraction`). The response, the reflection and the hole mouth
+    /// flows then come from the coupled solve on this field, every opening
+    /// radiating into one exterior. Without it the binding is unchanged.
+    #[must_use]
+    pub fn with_open_hole_interaction(mut self, interaction: OpenHoleInteraction) -> Self {
+        self.interaction = Some(interaction);
+        self
+    }
+    /// The declared open-hole radiation coupling, if any.
+    pub const fn open_hole_interaction(&self) -> Option<OpenHoleInteraction> {
+        self.interaction
+    }
+    /// The coupling that acts: it needs at least one open hole to couple.
+    fn active_interaction(&self) -> Option<OpenHoleInteraction> {
+        self.interaction.filter(|_| !crate::collect_open_hole_sites(&self.duct).is_empty())
+    }
+
+    /// One coupled solve at one frequency. Every opening, hole and bell, radiates into the
+    /// single exterior that couples them, and each chimney keeps its own local gas.
+    fn coupled_solution(
+        &self,
+        interaction: OpenHoleInteraction,
+        omega: f64,
+        loss: LossModel,
+        termination: Termination,
+        exterior: Option<&GasState>,
+        wall: WallModel<'_>,
+    ) -> Result<(CoupledSolution, PreparedChain, Vec<PreparedOpenHole>, Option<C64>, f64), DuctError> {
+        if termination == Termination::IdealOpen {
+            return Err(bad("open-hole interaction needs a closed or radiating end, not an ideal-open one"));
+        }
+        let radiation = self.exterior(exterior)?;
+        let radius = self.duct.segments.last().expect("admitted duct").outlet_radius();
+        let (chain, holes) = self.chain_with_holes_controlled(
+            omega, loss, Some(radiation), wall, true, &mut || false)?;
+        let (load, mouth_ka) = crate::exterior::termination_impedance(
+            termination, &self.outlet, radiation, radius, omega)?;
+        let gases: Vec<(usize, GasState)> = if self.holes.is_empty() {
+            (0..self.duct.segments.len()).map(|index| (index, self.inlet)).collect()
+        } else {
+            self.holes.iter().map(|hole| (hole.segment, hole.gas)).collect()
+        };
+        let mut open = holes.iter();
+        let mut ports = Vec::with_capacity(holes.len());
+        for (segment, gas) in gases {
+            let Segment::ToneHole { hole_radius, chimney_height, bore_radius, state } =
+                self.duct.segments[segment] else { continue };
+            if crate::hole_sigma(state) > 0.0 {
+                let site = open.next().expect("one prepared hole per open hole");
+                ports.push(CoupledPort::open_hole(
+                    site.axial_position_m, &gas, radiation, hole_radius, chimney_height,
+                    bore_radius, omega, loss, wall)?);
+            }
+        }
+        let length: f64 = self.duct.segments.iter().map(Segment::axial_length).sum();
+        let bell = load.map(|z| CoupledPort::open_end(length, z));
+        let solved = crate::interaction::solve(
+            &chain, &holes, &ports, bell, radiation, omega, interaction,
+            ComposeOptions::default().maximum_condition)?;
+        Ok((solved, chain, holes, load, mouth_ka))
+    }
+
     /// Open and vented mouths in authored order, with no closed-hole sources.
     /// Travel times use the same admitted primitive field and quadrature as the
     /// feedback operator; they never use an averaged or exterior sound speed.
@@ -485,6 +552,9 @@ impl GasFieldDuct {
         wall: WallModel<'_>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PreparedChain, DuctError> {
+        if self.active_interaction().is_some() {
+            return Err(bad("a coupled open-hole interaction has no per-block chain; use response, reflection or the hole flows"));
+        }
         self.chain_with_holes_controlled(omega, loss, exterior, wall, false, cancelled)
             .map(|(chain, _)| chain)
     }
@@ -662,6 +732,33 @@ impl GasFieldDuct {
             .last()
             .expect("admitted duct")
             .outlet_radius();
+        if let Some(interaction) = self.active_interaction() {
+            let (solved, chain, holes, load, mouth_ka) =
+                self.coupled_solution(interaction, omega, loss, termination, exterior, wall)?;
+            // The hole mouth and chimney flows are the coupled ones; each hole's nonlinear
+            // orifice port keeps its independent chimney (see the module `interaction`).
+            let mut flows = if observe_holes {
+                open_hole_flows(&chain, &holes, load, ComposeOptions::default())?
+            } else {
+                Vec::new()
+            };
+            for ((flow, mouth), inflow) in
+                flows.iter_mut().zip(&solved.hole_mouth_flows).zip(&solved.hole_chimney_inflows)
+            {
+                flow.u_hole_over_u_in = *mouth;
+                flow.u_chimney_in_over_u_in = *inflow;
+            }
+            return Ok((DuctResponse {
+                omega,
+                impedance: solved.input_impedance,
+                min_shear_number: chain.min_shear_number,
+                mouth_ka,
+                u_mouth_over_u_in: solved.bell_flow,
+                p_mouth_over_u_in: if load.is_none() { C64::ZERO } else { solved.bell_pressure },
+                condition_estimate: solved.condition,
+                composition: CompositionMode::Scattering,
+            }, flows));
+        }
         if self.field.uniform_state().is_some() {
             if observe_holes {
                 return crate::exterior::input_impedance_and_holes(&self.duct, &self.inlet,
@@ -723,6 +820,24 @@ impl GasFieldDuct {
         &self, omega: f64, loss: LossModel, termination: Termination,
         exterior: Option<&GasState>, wall: WallModel<'_>,
     ) -> Result<InputReflection, DuctError> {
+        if let Some(interaction) = self.active_interaction() {
+            let (solved, chain, ..) =
+                self.coupled_solution(interaction, omega, loss, termination, exterior, wall)?;
+            // r = (Z - R) / (Z + R), scaled so that a large resonant Z stays representable.
+            let reference = chain.reference_impedance;
+            let z = solved.input_impedance;
+            let scale = z.re.abs().max(z.im.abs()).max(reference);
+            let (zs, rs) = (z.scale(1.0 / scale), C64::from_re(reference / scale));
+            let denominator = zs + rs;
+            if denominator.abs() == 0.0 {
+                return Err(DuctError::Singular);
+            }
+            return Ok(InputReflection {
+                reflection: (zs - rs) / denominator,
+                reference_impedance: reference,
+                condition_estimate: solved.condition,
+            });
+        }
         let radiation = self.exterior(exterior)?;
         let chain = self.chain_with_wall_exterior_controlled(omega, loss, exterior, wall, &mut || false)?;
         let radius = self

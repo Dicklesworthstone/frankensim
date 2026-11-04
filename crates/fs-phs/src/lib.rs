@@ -2943,9 +2943,18 @@ pub fn baffled_piston_impedance(
 /// radius `a`.
 ///
 /// Isolated disc (`a` missing or `b ≥ a`) is the Laplace-BEM
-/// `8/(3π) b`. On a finite bore the Dalmont–Nederveen–Joly
-/// polynomial in `d = b/a` shortens that length — the missing
-/// term that left the Ernoult holes systematically flat.
+/// `8/(3π) b`. On a finite bore the polynomial in `d = b/a` below
+/// shortens that length — the missing term that left the Ernoult
+/// holes systematically flat.
+///
+/// Source of the polynomial: Lefebvre and Scavone, J. Acoust. Soc.
+/// Am. 131(4), 2012, Eq. (13), which attributes it to Dubos et al.
+/// 1999, Eq. (73). The paper prints it as `t_i = (0.82 − 0.193 d −
+/// 1.09 d² + 1.27 d³ − 0.71 d⁴) b − t_a^(o)/4`; this function omits
+/// the last term (the series length is applied separately in the
+/// junction). The primary of Dubos et al. was not opened. The same
+/// paper's refit (Eq. 31 with Eq. 32 at 400 Hz) differs from this
+/// polynomial by at most 3.5 % over `d` = 0.3..0.8.
 #[must_use]
 pub fn side_hole_inner_length(hole_radius: f64, bore_radius: f64) -> f64 {
     let b = hole_radius;

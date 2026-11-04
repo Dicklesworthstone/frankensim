@@ -115,6 +115,9 @@ mod chimney;
 pub use chimney::{
     PROFILED_CHIMNEY_LIMITATION, profiled_tone_hole_junction, profiled_tone_hole_shunt,
 };
+/// Opt-in external radiation interaction between open tone holes and the bell (TMMI).
+mod interaction;
+pub use interaction::OpenHoleInteraction;
 
 use fs_la::eigen_complex::lu_complex;
 use fs_material::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
@@ -320,7 +323,9 @@ pub enum Segment {
     /// the chain — compact T-junction `series(Z_s/2) · shunt(Z_h) ·
     /// series(Z_s/2)` with Nederveen `t_s = −0.37 b²/a` on an open
     /// hole (closed pads stay a pure shunt).
-    /// OPEN: chimney mass with Dalmont inner matching on `b/a`
+    /// OPEN: chimney mass with inner matching on `b/a` (Lefebvre and
+    /// Scavone 2012 Eq. 13, from Dubos et al. 1999 Eq. 73; see
+    /// `fs_phs::side_hole_inner_length`)
     /// plus wall-flanged `0.8216 b` and flanged radiation resistance.
     /// CLOSED: the chimney cavity's compliance.
     ToneHole {
@@ -917,7 +922,8 @@ fn chimney_thermal_g(
 /// Shunt impedance of a tone hole at `omega`.
 ///
 /// The chimney is a short cylinder: OPEN is that run plus a
-/// flanged mouth (Dalmont inner matching on `b/a` is extra
+/// flanged mouth (the inner matching on `b/a`, Lefebvre and Scavone
+/// 2012 Eq. 13 from Dubos et al. 1999 Eq. 73, is extra
 /// length; the `0.8216 b` mass lives in the termination, or
 /// the Rayleigh piston above `ka = 1`). CLOSED is the same
 /// run with a rigid cap. A compact chimney reprints the

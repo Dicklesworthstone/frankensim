@@ -1122,3 +1122,209 @@ fn varying_media_across_open_holes_are_admitted_and_closed_pads_stay_local_shunt
         Err(DuctError::Cancelled { completed_steps: 1 })
     ));
 }
+
+// ---- Opt-in radiation interaction between the open holes and the bell (TMMI) ----
+
+fn interaction(epsilon: f64) -> crate::OpenHoleInteraction {
+    crate::OpenHoleInteraction::new(epsilon).unwrap()
+}
+
+/// The independent owner and the same binding with the interaction declared.
+fn owners(geometry: &Duct, source: &AxialGasField, epsilon: f64) -> (GasFieldDuct, GasFieldDuct) {
+    let plain = GasFieldDuct::new(geometry, source, RiccatiSteps(16)).unwrap();
+    let coupled = plain.clone().with_open_hole_interaction(interaction(epsilon));
+    (plain, coupled)
+}
+
+/// Frequency of the |Z| maximum inside [low, high] Hz, in cents re `reference` Hz: the best point of a
+/// 1-cent grid refined by the parabola through it and its two neighbours in ln |Z|.
+fn peak_cents(owner: &GasFieldDuct, low: f64, high: f64, reference: f64) -> f64 {
+    let exterior = *owner.outlet_gas();
+    let (lo, hi) = (1200.0 * (low / reference).log2(), 1200.0 * (high / reference).log2());
+    let n = (hi - lo).round() as usize;
+    let magnitude = |cents: f64| {
+        owner
+            .response(TAU * reference * (cents / 1200.0).exp2(), LossModel::Bessel,
+                Termination::FlangedOpen, Some(&exterior))
+            .unwrap()
+            .impedance
+            .abs()
+            .ln()
+    };
+    let values: Vec<f64> = (0..=n).map(|i| magnitude(lo + i as f64)).collect();
+    let best = (1..n).max_by(|&a, &b| values[a].total_cmp(&values[b])).unwrap();
+    let (y0, y1, y2) = (values[best - 1], values[best], values[best + 1]);
+    lo + best as f64 + 0.5 * (y0 - y2) / (y0 - 2.0 * y1 + y2)
+}
+
+#[test]
+fn a_declared_interaction_on_a_bore_with_no_open_hole_changes_nothing() {
+    let source = field([300.0, 340.0], [0.8, 0.4], 101325.0);
+    let geometry = fingered_bore([crate::HoleState::Closed, crate::HoleState::Closed]);
+    let (plain, coupled) = owners(&geometry, &source, 2.0);
+    assert_eq!(coupled.open_hole_interaction().unwrap().epsilon(), 2.0);
+    assert!(plain.open_hole_interaction().is_none());
+    for loss in [LossModel::Lossless, LossModel::Bessel] {
+        for frequency in [210.0, 470.0, 900.0] {
+            let omega = TAU * frequency;
+            let a = plain.response(omega, loss, Termination::FlangedOpen, None).unwrap();
+            let b = coupled.response(omega, loss, Termination::FlangedOpen, None).unwrap();
+            assert_eq!(a.impedance, b.impedance);
+            assert_eq!(a.u_mouth_over_u_in, b.u_mouth_over_u_in);
+            let ra = plain.reflection(omega, loss, Termination::FlangedOpen, None).unwrap();
+            let rb = coupled.reflection(omega, loss, Termination::FlangedOpen, None).unwrap();
+            assert_eq!(ra.reflection, rb.reflection);
+        }
+    }
+}
+
+#[test]
+fn negligible_coupling_reproduces_the_independent_response_reflection_and_hole_flows() {
+    // With eps -> infinity the mutual impedance vanishes: the coupled assembly (chimney matrices, self
+    // radiation, series halves, admittance two-ports, nodal solve) must close to the independent owner.
+    let geometry = fingered_bore3([crate::HoleState::Open, crate::HoleState::Closed, crate::HoleState::Open]);
+    for source in [
+        field([300.0, 340.0], [0.8, 0.4], 101325.0),
+        field([300.0, 300.0], [0.8, 0.8], 101325.0),
+    ] {
+        let (plain, coupled) = owners(&geometry, &source, 1.0e15);
+        let exterior = *plain.outlet_gas();
+        for termination in [Termination::FlangedOpen, Termination::Closed] {
+            for frequency in [150.0, 310.0, 470.0, 900.0, 2400.0] {
+                let omega = TAU * frequency;
+                let (a, holes_a) = plain.response_with_wall_and_holes(
+                    omega, LossModel::Bessel, termination, Some(&exterior), WallModel::Rigid).unwrap();
+                let (b, holes_b) = coupled.response_with_wall_and_holes(
+                    omega, LossModel::Bessel, termination, Some(&exterior), WallModel::Rigid).unwrap();
+                assert!(relative(b.impedance, a.impedance) < 1.0e-8, "{frequency} {:?} {:?}", b.impedance, a.impedance);
+                assert!((b.u_mouth_over_u_in - a.u_mouth_over_u_in).abs() < 1.0e-8 * (1.0 + a.u_mouth_over_u_in.abs()));
+                assert!((b.p_mouth_over_u_in - a.p_mouth_over_u_in).abs() < 1.0e-8 * (1.0 + a.p_mouth_over_u_in.abs()));
+                assert_eq!(holes_a.len(), 2);
+                for (x, y) in holes_a.iter().zip(&holes_b) {
+                    assert!(relative(y.u_hole_over_u_in, x.u_hole_over_u_in) < 1.0e-7, "{frequency}");
+                    assert!(relative(y.u_chimney_in_over_u_in, x.u_chimney_in_over_u_in) < 1.0e-7);
+                }
+                let ra = plain.reflection(omega, LossModel::Bessel, termination, Some(&exterior)).unwrap();
+                let rb = coupled.reflection(omega, LossModel::Bessel, termination, Some(&exterior)).unwrap();
+                assert!((rb.reflection - ra.reflection).abs() < 1.0e-8, "{frequency}");
+                assert_eq!(ra.reference_impedance, rb.reference_impedance);
+            }
+        }
+    }
+}
+
+#[test]
+fn the_interaction_flattens_a_close_open_pair_and_the_full_space_factor_halves_it() {
+    // Two open holes 12 mm apart: the lowest resonance falls (Lefebvre, Scavone and Kergomard 2013:
+    // "reduce slightly the lower resonance frequencies"); to first order the shift goes as 1 / eps.
+    let source = field([300.0, 300.0], [0.8, 0.8], 101325.0);
+    let (plain, half_space) = owners(&close_open_pair(), &source, 2.0);
+    let (_, full_space) = owners(&close_open_pair(), &source, 4.0);
+    let base = peak_cents(&plain, 150.0, 450.0, 200.0);
+    let shift2 = peak_cents(&half_space, 150.0, 450.0, 200.0) - base;
+    let shift4 = peak_cents(&full_space, 150.0, 450.0, 200.0) - base;
+    assert!(shift2 < -0.5 && shift2 > -40.0, "{shift2}");
+    assert!(shift4 < 0.0 && (shift4 / shift2 > 0.35) && (shift4 / shift2 < 0.65), "{shift2} {shift4}");
+}
+
+#[test]
+fn the_interaction_refuses_vents_an_ideal_open_end_and_the_per_block_chain() {
+    let source = field([300.0, 300.0], [0.8, 0.8], 101325.0);
+    let omega = TAU * 300.0;
+    let (_, vented) = owners(
+        &fingered_bore3([crate::HoleState::Open, crate::HoleState::Vent(0.4), crate::HoleState::Open]),
+        &source, 2.0);
+    assert!(vented.response(omega, LossModel::Bessel, Termination::FlangedOpen, None).is_err());
+    let (plain, coupled) = owners(
+        &fingered_bore3([crate::HoleState::Open, crate::HoleState::Closed, crate::HoleState::Open]),
+        &source, 2.0);
+    assert!(coupled.response(omega, LossModel::Bessel, Termination::IdealOpen, None).is_err());
+    assert!(coupled.response(omega, LossModel::Bessel, Termination::FlangedOpen, None).is_ok());
+    // A coupled radiation matrix has no per-block chain; the independent owner keeps it.
+    assert!(coupled.chain_controlled(omega, LossModel::Bessel, &mut || false).is_err());
+    assert!(plain.chain_controlled(omega, LossModel::Bessel, &mut || false).is_ok());
+}
+
+/// The posted clarinet card's bore and holes (`segments` rows), with the card's hole state as open or closed.
+fn card_duct(text: &str) -> Duct {
+    let mut segments = Vec::new();
+    for line in text.lines() {
+        let w: Vec<&str> = line.split_whitespace().collect();
+        let v = |i: usize| w[i].parse::<f64>().unwrap();
+        match w.first().copied() {
+            Some("cylinder") => segments.push(Segment::Cylinder { radius: v(1), length: v(2) }),
+            Some("cone") => segments.push(Segment::Cone { inlet_radius: v(1), outlet_radius: v(2), length: v(3) }),
+            Some("hole") => segments.push(Segment::ToneHole {
+                hole_radius: v(1),
+                chimney_height: v(2),
+                bore_radius: v(3),
+                state: if v(4) > 0.5 { crate::HoleState::Open } else { crate::HoleState::Closed },
+            }),
+            _ => {}
+        }
+    }
+    Duct { segments }
+}
+
+fn clarinet_card(note: &str) -> Duct {
+    let path = format!(
+        "{}/../../data/instruments/descriptions/clarinet/performances/BbClar.mf.{note}.performance",
+        env!("CARGO_MANIFEST_DIR"));
+    card_duct(&std::fs::read_to_string(path).unwrap())
+}
+
+fn clarinet_field(duct: &Duct) -> AxialGasField {
+    let length: f64 = duct.segments.iter().map(Segment::axial_length).sum();
+    AxialGasField::new(
+        vec![0.0, length],
+        101325.0,
+        vec![primitive(300.0, 0.8), primitive(300.0, 0.8)],
+        gas_model(),
+        QueryPoint::new(),
+        ThermochemicalPhase::FrozenGas,
+    )
+    .unwrap()
+}
+
+#[test]
+fn the_posted_clarinet_cards_shift_as_the_independent_transfer_matrix_model_predicts() {
+    // Passive |Z| peak with and without the TMMI coupling (eps = 2) on the posted F4 and G4 cards (12 and 14
+    // open holes plus the bell), cents re the nominal pitch. An independent plane-wave transfer-matrix model
+    // (Zwikker-Kosten losses, the same chimney and radiation laws, nodal TMMI solve) gives -8.8 and -9.1
+    // cent on the profile card; the bands below leave room for the different test gas. D3 has no open
+    // hole and must not move at all.
+    let d3 = clarinet_card("D3");
+    let (plain, coupled) = owners(&d3, &clarinet_field(&d3), 2.0);
+    let exterior = *plain.outlet_gas();
+    for frequency in [140.0, 148.0, 155.0, 450.0, 3000.0] {
+        let omega = TAU * frequency;
+        let a = plain.response(omega, LossModel::Bessel, Termination::FlangedOpen, Some(&exterior)).unwrap();
+        let b = coupled.response(omega, LossModel::Bessel, Termination::FlangedOpen, Some(&exterior)).unwrap();
+        assert_eq!(a.impedance, b.impedance);
+    }
+    for (note, nominal, band) in [("F4", 349.23, (-11.0, -6.5)), ("G4", 392.0, (-11.5, -6.5))] {
+        let duct = clarinet_card(note);
+        let (plain, coupled) = owners(&duct, &clarinet_field(&duct), 2.0);
+        let (lo, hi) = (nominal * (-100.0_f64 / 1200.0).exp2(), nominal * (250.0_f64 / 1200.0).exp2());
+        let (p_plain, p_coupled) = (peak_cents(&plain, lo, hi, nominal), peak_cents(&coupled, lo, hi, nominal));
+        let shift = p_coupled - p_plain;
+        eprintln!("TMMI {note}: passive peak {p_plain:+.3} cent, coupled {p_coupled:+.3}, shift {shift:+.3}; gas {:?}", plain.inlet_gas());
+        assert!(shift > band.0 && shift < band.1, "{note}: {shift}");
+    }
+}
+
+#[test]
+fn the_coupled_clarinet_response_is_admitted_at_every_frequency_of_the_line_realization() {
+    // The reed line is realized from the reflection on a uniform grid up to Nyquist (24 kHz at 48 kHz).
+    let duct = clarinet_card("G4");
+    let (_, coupled) = owners(&duct, &clarinet_field(&duct), 2.0);
+    let exterior = *coupled.outlet_gas();
+    let mut worst: f64 = 0.0;
+    for step in 1..=480 {
+        let omega = TAU * 50.0 * f64::from(step);
+        let r = coupled.reflection(omega, LossModel::Bessel, Termination::FlangedOpen, Some(&exterior))
+            .unwrap_or_else(|error| panic!("{} Hz: {error:?}", 50 * step));
+        worst = worst.max(r.reflection.abs());
+    }
+    assert!(worst <= 1.0 + 1.0e-9, "|r| reaches {worst}");
+}

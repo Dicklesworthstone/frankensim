@@ -116,6 +116,26 @@ impl RegionalDuct {
         self.continuous.as_ref()
     }
 
+    /// Opt in to the TMMI coupling of the open holes' and bell's radiation
+    /// (Lefebvre, Scavone and Kergomard 2013; `fs_duct::OpenHoleInteraction`).
+    /// The response, reflection and hole flows of the continuous binding then
+    /// come from the coupled solve, every opening radiating into this binding's
+    /// exterior gas. Axial distances only: an upper bound for holes on opposite
+    /// sides of the bore. A tabulated (baked) mouth load refuses it.
+    ///
+    /// # Errors
+    /// Only a continuous gas-field binding carries it; any other binding refuses.
+    pub fn with_open_hole_interaction(
+        mut self,
+        interaction: fs_duct::OpenHoleInteraction,
+    ) -> Result<Self, DuctError> {
+        let Some(field) = self.continuous.take() else {
+            return Err(invalid("open-hole interaction needs a continuous gas-field binding"));
+        };
+        self.continuous = Some(field.with_open_hole_interaction(interaction));
+        Ok(self)
+    }
+
     /// Apply a supplied axial T/composition field to a bore without changing
     /// its physics code. Each authored cylinder/cone gets exactly
     /// `cells_per_segment` midpoint cells, with at most 64 total records.

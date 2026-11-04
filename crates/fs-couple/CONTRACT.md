@@ -7089,6 +7089,20 @@ regional interfaces, arbitrary terminal loads and characteristic-line shortcuts.
 silently turn an open hole into a non-radiating source. Closed holes remain
 loads only. This retains the existing sampled-transfer and infinite-baffle
 approximations, rather than adding a new radiation or transport law.
+
+`RegionalDuct::with_open_hole_interaction` and the optional reed-card record
+`open_hole_interaction tmmi EPSILON` (immediately before `compile_limits`, on a
+`gas_field continuous` binding with no molecular bore; EPSILON 2 as the paper
+prints it) opt in to the Lefebvre, Scavone and Kergomard (2013) coupling of the
+open holes' and the bell's radiation that `fs-duct` documents for
+`GasFieldDuct::with_open_hole_interaction`: feedback, reflection and the
+observed hole flows come from one coupled solve. It is off unless declared and
+then every code path is the original. The distances are axial (an upper bound),
+and a segment-gas or midpoint binding, a uniform gas field (which gives the
+wrapper no continuous binding), a vent fraction, an ideal-open end or a baked
+mouth load each refuse by name rather than being ignored. The receiver's
+pre-arrival travel times and each hole's nonlinear orifice port keep the
+independent chimney.
 A focused impulse regression covers the combined wall/field changes to
 both incoming feedback and causal external microphone pressure.
 

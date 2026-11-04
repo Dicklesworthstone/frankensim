@@ -165,6 +165,32 @@ continuity; G0/G3 cover identical-gas bits, closed-hole isolation, pressure
 scaling, invalid media, a warm field feeding a complete hole cluster, and the
 mutual law across a gradient (gas-independent `t_m`, continuity in the
 gradient, supersaturated chords and inexact fractions still refusing).
+`GasFieldDuct::with_open_hole_interaction(OpenHoleInteraction::new(eps))` is an
+opt-in law and off unless declared. The open holes and the bell radiate into
+one exterior and are coupled through the monopole mutual radiation impedance of
+Lefebvre, Scavone and Kergomard (Acta Acustica 99, 2013, arXiv 1207.5490, "TMMI")
+Eq. 16, `Z_nm = j k rho c exp(-j k d) / (eps pi d)`, conjugated here for
+`e^{-i omega t}`, with `eps = 2` as printed for every pair of openings (4 is a
+full space). Each hole keeps its own chimney, loss, wall, local gas and flanged
+self radiation as the diagonal term; the bore between consecutive openings is
+solved exactly as admittance two-ports on one nodal system, so `eps -> infinity`
+reproduces the independent response to rounding (tested to 1e-8 on both fields,
+both terminations, response, reflection and hole flows). Response, reflection
+and the hole mouth flows use the coupled solve (reported as `Scattering`); it
+has no per-block chain, and `chain_*` refuses by name. Scope: the distances are
+the AXIAL distances between hole stations, because the hole azimuths are not
+known, which is an upper bound for holes on opposite sides of the bore; every
+open hole must be fully open (a vent fraction has no single mouth flow);
+`Termination::IdealOpen` and a tabulated (baked) mouth load refuse; the
+nonlinear orifice port of each hole keeps its independent chimney. The monopole
+matrix exceeds the finite-size self resistance by 1 to 9 per cent between
+0.1 and 8 kHz, so it is not positive semi-definite and the `admit_coupled`
+check is deliberately not used: each solve refuses a negative input resistance,
+and a test checks `|r| <= 1` on a 50 Hz grid up to 24 kHz for the 14-hole G4
+card. An independent plane-wave transfer-matrix model (Zwikker-Kosten losses,
+the same chimney and radiation laws) predicts the passive-peak shift on the
+posted F4 and G4 cards (-8.57 and -8.87 cent in the test gas) and the Rust
+solve agrees to 0.01 cent; D3, with no open hole, is bit-identical.
 `GasFieldDuct::response_with_wall_and_holes` retains open/vented chimney flows
 from their actual locations in that same stable cascade. Uniform and varying
 fields share one chimney/series-branch preparation and flow-reconstruction
@@ -451,8 +477,9 @@ fit and cannot call this L3 owner; no default consumer is migrated here.
   numerical-resolution rungs against the independent Kirchhoff loss limit.
 - `Segment::ToneHole` + `HoleState` + `tone_hole_shunt` — side
   branch (`[[1,0],[1/Z_h,1]]`). The chimney is a short cylinder:
-  OPEN is that run plus a flanged mouth (Dalmont inner length
-  on `b/a`; `0.8216 a` or the Rayleigh piston lives in the
+  OPEN is that run plus a flanged mouth (inner length on `b/a`,
+  Lefebvre and Scavone 2012 Eq. 13 from Dubos et al. 1999 Eq. 73, without its
+  `-t_a^(o)/4` term; `0.8216 a` or the Rayleigh piston lives in the
   termination). CLOSED is the same run with a rigid cap. A
   compact chimney reprints lumped `L`/`C`; a long one carries
   its own quarter-wave. `tone_hole_shunt_wall` and
@@ -627,7 +654,8 @@ pipe `Z_in = +i Zc cot(kL)`.
   cone under a cylinder. There is no new `Segment` variant.
   - The chimney is the plane-wave chain of its sections, terminated flanged
     open, rigid closed, or as the vent admittance blend.
-  - The junction keeps the cylindrical hole's Dalmont inner length (it
+  - The junction keeps the cylindrical hole's inner length (Lefebvre and
+    Scavone 2012 Eq. 13 from Dubos et al. 1999 Eq. 73; it
     extends a cylindrical first section, otherwise a cylinder of the
     bore-side radius is prepended) and the Nederveen series length, at the
     bore-side radius. There is no mutual term.

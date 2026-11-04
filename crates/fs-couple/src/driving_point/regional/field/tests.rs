@@ -704,3 +704,37 @@ fn material_wall_with_continuous_gas_reaches_feedback_and_outlet_pressure() {
 }
 
 mod steady;
+
+#[test]
+fn the_regional_binding_carries_the_open_hole_interaction_and_refuses_a_segment_binding() {
+    use fs_duct::{HoleState, OpenHoleInteraction, RiccatiSteps, WallModel};
+
+    let radius = 0.0015;
+    let hole = |state| Segment::ToneHole { hole_radius: 0.0013, chimney_height: 0.0005, bore_radius: radius, state };
+    let geometry = Duct { segments: vec![
+        Segment::Cylinder { radius, length: 0.285 }, hole(HoleState::Open),
+        Segment::Cylinder { radius, length: 0.0475 }, hole(HoleState::Open),
+        Segment::Cylinder { radius, length: 0.2375 },
+    ] };
+    let source = field(360.0);
+    let outside = *source.state_at(0.0).unwrap().state();
+    let plain = RegionalDuct::from_continuous_gas_field(&geometry, &source, RiccatiSteps(16))
+        .unwrap().with_exterior_gas(outside).unwrap();
+    let interaction = OpenHoleInteraction::new(2.0).unwrap();
+    let coupled = plain.clone().with_open_hole_interaction(interaction).unwrap();
+    assert_eq!(coupled.continuous_gas_field().unwrap().open_hole_interaction(), Some(interaction));
+    assert!(plain.continuous_gas_field().unwrap().open_hole_interaction().is_none());
+    let mut moved = 0;
+    for frequency in [180.0, 430.0, 900.0, 2500.0] {
+        let omega = TAU * frequency;
+        let a = plain.reflection_with_wall(omega, LossModel::Bessel, Termination::FlangedOpen, WallModel::Rigid).unwrap();
+        let b = coupled.reflection_with_wall(omega, LossModel::Bessel, Termination::FlangedOpen, WallModel::Rigid).unwrap();
+        assert!(b.abs() <= 1.0 + 1.0e-9);
+        moved += usize::from((a - b).abs() > 1.0e-9);
+    }
+    assert!(moved >= 3, "the coupling reaches the reflection the reed line is realized from");
+    // A segment-gas binding has no continuous operator: refused by name, never ignored.
+    let gases = vec![outside; geometry.segments.len()];
+    let segment_bound = RegionalDuct::new(&geometry, &gases).unwrap();
+    assert!(segment_bound.with_open_hole_interaction(interaction).is_err());
+}

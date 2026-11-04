@@ -18,6 +18,10 @@
 //! attack envelope; all retained reed and bore state survives release and resume.
 //! Optional `slit_length LENGTH_M` after the reed record selects the shared
 //! quasisteady viscous slit from the exact inlet gas, including axial fields.
+//! Optional `open_hole_interaction tmmi EPSILON` before `compile_limits`, on a
+//! `gas_field continuous` binding, couples the radiation of the open holes and the
+//! bell through the TMMI mutual impedance (EPSILON 2 as the paper prints it).
+//! The distances are axial, an upper bound; it is off unless declared.
 //! Legacy `listener_m` selects bore pressure plus the compact-jet proxy.
 //! `baffled_outlet` selects Rayleigh observation of the admitted openings.
 //! Neither is measured calibration; the underlying reed mechanics are shared.
@@ -869,6 +873,22 @@ impl ReedPerformance {
                 &mut r, &gas_records[0], gas_field.as_ref().map(|(field, _)| field),
             )?)
         } else { None };
+        let open_hole_interaction = if r.lines.clone().next()
+            .and_then(|line| line.split_ascii_whitespace().next()) == Some("open_hole_interaction") {
+            let mut row = r.row("open_hole_interaction")?;
+            let line = row.line;
+            if row.word()? != "tmmi" {
+                return Err(bad(line, "open_hole_interaction names its law: `open_hole_interaction tmmi EPSILON`"));
+            }
+            let epsilon = row.positive()?;
+            row.finish()?;
+            if !matches!(&gas_field, Some((_, GasFieldResolution::Continuous(_)))) || molecular.is_some() {
+                return Err(bad(line,
+                    "open_hole_interaction needs a continuous gas_field binding and no molecular bore"));
+            }
+            Some(fs_duct::OpenHoleInteraction::new(epsilon).map_err(|_| bad(line,
+                "open_hole_interaction needs a positive finite radiation-space factor"))?)
+        } else { None };
         let mut row = r.row("compile_limits")?;
         let max_work: u64 = row.parse()?;
         let max_controls = row.count(MAX_CONTROLS)?;
@@ -1020,6 +1040,11 @@ impl ReedPerformance {
                     ReedPerformanceError::Model(AcousticRealizeError::Duct(source))
                 }
             })?;
+            let regional = match open_hole_interaction {
+                Some(interaction) => regional.with_open_hole_interaction(interaction)
+                    .map_err(|source| ReedPerformanceError::Model(AcousticRealizeError::Duct(source)))?,
+                None => regional,
+            };
             segment_gases = regional.segment_gases().to_vec();
             let medium = observer_medium(baffled, &air, regional.outlet_gas());
             let observer =
