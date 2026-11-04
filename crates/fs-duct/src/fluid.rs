@@ -356,6 +356,47 @@ pub fn duct_chain_with_loss<M: ThermoviscousFluid + ?Sized>(
     )?)
 }
 
+/// Reuse one already admitted material in a rigid graph edge, optionally
+/// retaining block indices at every original authored segment boundary.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn duct_chain_from_snapshot(
+    duct: &Duct,
+    acoustic: &FluidAcousticState,
+    thermoviscous: Option<&ThermoviscousFluidState>,
+    omega: f64,
+    loss: LossModel,
+    cone_slices: ConeSlices,
+    options: ComposeOptions,
+    boundary_indices: Option<&mut Vec<usize>>,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<PreparedChain, DuctError> {
+    admit_geometry(duct, options, &mut cancelled)?;
+    if thermoviscous.is_none() && loss != LossModel::Lossless {
+        return Err(bad(
+            "wall diffusion requires the original thermoviscous material",
+        ));
+    }
+    let reference = wave_from_state(acoustic, duct.segments[0].inlet_radius(), omega)?
+        .characteristic_impedance
+        .re;
+    chain_from_waves_at_reference_with_boundaries(
+        &duct.segments,
+        acoustic,
+        omega,
+        WallModel::Rigid,
+        cone_slices,
+        options,
+        loss == LossModel::Lossless,
+        reference,
+        boundary_indices,
+        &mut cancelled,
+        &mut |radius| match thermoviscous {
+            Some(state) => thermoviscous_wave_from_state(state, radius, omega, loss),
+            None => wave_from_state(acoustic, radius, omega),
+        },
+    )
+}
+
 fn admit_geometry(
     duct: &Duct,
     options: ComposeOptions,
@@ -423,8 +464,41 @@ fn chain_from_waves_at_reference(
     cancelled: &mut impl FnMut() -> bool,
     wave_at: &mut impl FnMut(f64) -> Result<SegmentWave, DuctError>,
 ) -> Result<PreparedChain, DuctError> {
+    chain_from_waves_at_reference_with_boundaries(
+        segments,
+        state,
+        omega,
+        wall,
+        cone_slices,
+        options,
+        radius_independent_bulk,
+        reference,
+        None,
+        cancelled,
+        wave_at,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn chain_from_waves_at_reference_with_boundaries(
+    segments: &[Segment],
+    state: &FluidAcousticState,
+    omega: f64,
+    wall: WallModel<'_>,
+    cone_slices: ConeSlices,
+    options: ComposeOptions,
+    radius_independent_bulk: bool,
+    reference: f64,
+    mut boundary_indices: Option<&mut Vec<usize>>,
+    cancelled: &mut impl FnMut() -> bool,
+    wave_at: &mut impl FnMut(f64) -> Result<SegmentWave, DuctError>,
+) -> Result<PreparedChain, DuctError> {
     let mut blocks = Vec::new();
     let mut min_shear_number = f64::INFINITY;
+    if let Some(indices) = &mut boundary_indices {
+        indices.clear();
+        indices.push(0);
+    }
     for (index, segment) in segments.iter().enumerate() {
         poll(cancelled, index)?;
         match *segment {
@@ -488,6 +562,9 @@ fn chain_from_waves_at_reference(
                 blocks.push(TwoPort::from_wave(segment, &wave, reference)?);
             }
             Segment::ToneHole { .. } => unreachable!("branch geometry refused before assembly"),
+        }
+        if let Some(indices) = &mut boundary_indices {
+            indices.push(blocks.len());
         }
     }
     Ok(PreparedChain {

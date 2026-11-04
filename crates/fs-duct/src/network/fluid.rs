@@ -26,13 +26,15 @@ use super::{
     NetworkSourceResponse, PortSource, PortTermination, PreparedNetworkSources, bad,
     finite_impedance, loaded,
 };
-use crate::compose::{ComposeOptions, MAX_COMPOSITION_BLOCKS, compose_scattering};
+use crate::compose::{
+    ComposeOptions, MAX_COMPOSITION_BLOCKS, PreparedChain, TwoPort, compose_scattering,
+};
 use crate::fluid::{FluidDuctError, boundary_from_state};
-use crate::{ConeSlices, LossModel, WallModel};
+use crate::{ConeSlices, DuctError, LossModel, SegmentWave};
 use fs_material::fluid_acoustics::thermoviscous::{ThermoviscousFluid, ThermoviscousFluidState};
 use fs_material::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
 
-fn admit(net: &DuctNetwork, omega: f64) -> Result<(), FluidDuctError> {
+pub(super) fn admit(net: &DuctNetwork, omega: f64) -> Result<(), FluidDuctError> {
     net.validate()?;
     if !omega.is_finite() || omega <= 0.0 {
         return Err(bad("material network frequency must be positive and finite").into());
@@ -65,11 +67,10 @@ pub fn prepare_sources<M: FluidAcoustics + ?Sized>(
     coupled: Option<&CoupledTermination>,
 ) -> Result<PreparedNetworkSources, FluidDuctError> {
     admit(net, omega)?;
-    let state = material.acoustic_state()?;
+    let state = MaterialSnapshot::Acoustic(material.acoustic_state()?);
     prepare_snapshot(
         net,
         &state,
-        None,
         omega,
         LossModel::Lossless,
         ConeSlices::Auto,
@@ -101,11 +102,10 @@ pub fn prepare_sources_with_loss<M: ThermoviscousFluid + ?Sized>(
     coupled: Option<&CoupledTermination>,
 ) -> Result<PreparedNetworkSources, FluidDuctError> {
     admit(net, omega)?;
-    let state = material.thermoviscous_state()?;
+    let state = MaterialSnapshot::Thermoviscous(material.thermoviscous_state()?);
     prepare_snapshot(
         net,
-        &state.acoustic(),
-        Some(&state),
+        &state,
         omega,
         loss,
         cone_slices,
@@ -176,11 +176,108 @@ fn drive_default(
     Ok(response)
 }
 
+/// One immutable original query shared by graph, spatial and spectral owners.
+#[derive(Clone, Copy)]
+pub(super) enum MaterialSnapshot {
+    Acoustic(FluidAcousticState),
+    Thermoviscous(ThermoviscousFluidState),
+}
+
+impl MaterialSnapshot {
+    pub(super) fn acoustic(self) -> FluidAcousticState {
+        match self {
+            Self::Acoustic(state) => state,
+            Self::Thermoviscous(state) => state.acoustic(),
+        }
+    }
+
+    fn thermoviscous(&self) -> Option<&ThermoviscousFluidState> {
+        match self {
+            Self::Acoustic(_) => None,
+            Self::Thermoviscous(state) => Some(state),
+        }
+    }
+
+    pub(super) fn wave(
+        &self,
+        radius: f64,
+        omega: f64,
+        loss: LossModel,
+    ) -> Result<SegmentWave, DuctError> {
+        match self {
+            Self::Thermoviscous(state) => {
+                crate::fluid::thermoviscous_wave_from_state(state, radius, omega, loss)
+            }
+            Self::Acoustic(state) if loss == LossModel::Lossless => {
+                crate::fluid::wave_from_state(state, radius, omega)
+            }
+            Self::Acoustic(_) => Err(bad(
+                "wall diffusion requires the original thermoviscous material",
+            )),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn chain(
+        &self,
+        edge: &super::NetworkEdge,
+        omega: f64,
+        loss: LossModel,
+        cones: ConeSlices,
+        options: ComposeOptions,
+        boundaries: Option<&mut Vec<usize>>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<PreparedChain, DuctError> {
+        crate::fluid::duct_chain_from_snapshot(
+            &edge.duct,
+            &self.acoustic(),
+            self.thermoviscous(),
+            omega,
+            loss,
+            cones,
+            options,
+            boundaries,
+            cancelled,
+        )
+    }
+
+    fn boundary(
+        &self,
+        omega: f64,
+        load: &super::NetworkLoad,
+    ) -> Result<Option<fs_math::c64::C64>, FluidDuctError> {
+        Ok(
+            boundary_from_state(&self.acoustic(), self.thermoviscous(), omega, load)?
+                .map(finite_impedance)
+                .transpose()?,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn edge_operator(
+        &self,
+        edge: &super::NetworkEdge,
+        omega: f64,
+        loss: LossModel,
+        cones: ConeSlices,
+        blocks: &mut usize,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(TwoPort, f64), DuctError> {
+        let options = ComposeOptions {
+            maximum_condition: MAX_NETWORK_CONDITION,
+            maximum_blocks: MAX_COMPOSITION_BLOCKS - *blocks,
+            ..ComposeOptions::default()
+        };
+        let chain = self.chain(edge, omega, loss, cones, options, None, &mut cancelled)?;
+        *blocks += chain.blocks.len();
+        compose_scattering(&chain.blocks, options, &mut cancelled)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn prepare_snapshot(
     net: &DuctNetwork,
-    acoustic: &FluidAcousticState,
-    thermoviscous: Option<&ThermoviscousFluidState>,
+    state: &MaterialSnapshot,
     omega: f64,
     loss: LossModel,
     cone_slices: ConeSlices,
@@ -197,42 +294,39 @@ fn prepare_snapshot(
         bank,
         loads,
         coupled,
+        |edge| Ok(state.edge_operator(edge, omega, loss, cone_slices, &mut blocks, || false)?),
+        |load, _node| state.boundary(omega, load),
+    )
+}
+
+pub(super) fn prepare_spatial_snapshot(
+    net: &DuctNetwork,
+    state: &MaterialSnapshot,
+    cones: ConeSlices,
+    request: &super::field::NetworkFieldRequest<'_>,
+    selected: &[usize],
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<(PreparedNetworkSources, Vec<[fs_math::c64::C64; 4]>), FluidDuctError> {
+    let mut blocks = 0usize;
+    loaded::prepare_spatial_with_operators(
+        net,
+        request.omega,
+        request.sources,
+        request.source_bank,
+        request.loads,
+        request.coupled_load,
+        selected,
         |edge| {
-            let options = ComposeOptions {
-                maximum_condition: MAX_NETWORK_CONDITION,
-                maximum_blocks: MAX_COMPOSITION_BLOCKS - blocks,
-                ..ComposeOptions::default()
-            };
-            let chain = if let Some(state) = thermoviscous {
-                crate::fluid::duct_chain_with_loss(
-                    &edge.duct,
-                    state,
-                    omega,
-                    loss,
-                    WallModel::Rigid,
-                    cone_slices,
-                    options,
-                    || false,
-                )?
-            } else {
-                crate::fluid::duct_chain(
-                    &edge.duct,
-                    acoustic,
-                    omega,
-                    WallModel::Rigid,
-                    cone_slices,
-                    options,
-                    || false,
-                )?
-            };
-            blocks += chain.blocks.len();
-            Ok(compose_scattering(&chain.blocks, options, &mut || false)?)
+            Ok(state.edge_operator(
+                edge,
+                request.omega,
+                request.loss,
+                cones,
+                &mut blocks,
+                &mut cancelled,
+            )?)
         },
-        |load, _node| {
-            Ok(boundary_from_state(acoustic, thermoviscous, omega, load)?
-                .map(finite_impedance)
-                .transpose()?)
-        },
+        |load, _node| state.boundary(request.omega, load),
     )
 }
 

@@ -978,6 +978,42 @@ pub(super) fn prepare_spatial_transfers(
     let system = retained_source_system(
         net, exterior, media, omega, loss, sources, bank, loads, coupled,
     )?;
+    spatial_from_retained(omega, &system, selected_edges)
+}
+
+/// Material edges and boundaries share the original loaded inverse and the
+/// same directed endpoint extraction as the gas field path.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn prepare_spatial_with_operators<E: From<DuctError>>(
+    net: &DuctNetwork,
+    omega: f64,
+    sources: &[PortSource],
+    bank: Option<&CoupledSourceBank>,
+    loads: &[PortTermination],
+    coupled: Option<&CoupledTermination>,
+    selected_edges: &[usize],
+    edge_operator: impl FnMut(&NetworkEdge) -> Result<(crate::compose::TwoPort, f64), E>,
+    boundary_operator: impl FnMut(&NetworkLoad, usize) -> Result<Option<C64>, E>,
+) -> Result<(PreparedNetworkSources, Vec<[C64; 4]>), E> {
+    net.validate()?;
+    let system = retained_source_system_admitted(
+        net,
+        omega,
+        sources,
+        bank,
+        loads,
+        coupled,
+        edge_operator,
+        boundary_operator,
+    )?;
+    Ok(spatial_from_retained(omega, &system, selected_edges)?)
+}
+
+fn spatial_from_retained(
+    omega: f64,
+    system: &RetainedSourceSystem<'_>,
+    selected_edges: &[usize],
+) -> Result<(PreparedNetworkSources, Vec<[C64; 4]>), DuctError> {
     let wave = &system.wave;
     let count = wave.driven.len();
     let mut pressure = vec![C64::ZERO; system.labels.len() * count];

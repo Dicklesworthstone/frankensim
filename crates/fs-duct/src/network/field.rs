@@ -6,11 +6,17 @@
 //! directed volume flow is positive from the edge's `from` node to its `to`
 //! node. Boundary work and finite-window flux are not local dissipated heat.
 
+use super::fluid::MaterialSnapshot;
 use super::*;
-use crate::compose::{ComposeOptions, TwoPort};
+use crate::compose::{ComposeOptions, PreparedChain, TwoPort};
+use crate::fluid::FluidDuctError;
 use fs_fft::harmonic_window::{HarmonicProduct, HarmonicWindow, ProperHarmonicProduct};
+use fs_material::fluid_acoustics::FluidAcoustics;
+use fs_material::fluid_acoustics::thermoviscous::ThermoviscousFluid;
 use fs_math::dd::Dd;
 
+#[cfg(test)]
+mod material_tests;
 mod welch;
 pub use welch::NetworkFieldBinStatistics;
 
@@ -157,6 +163,91 @@ impl PreparedNetworkFields {
         Self::prepare(net, media.exterior_gas(), Some(media), request, cancelled)
     }
 
+    /// Interior pressure, directed flow and particle velocity from one original
+    /// acoustic material. The same snapshot supplies every graph edge, mouth
+    /// load and physical probe. Source and finite-window observations reuse the
+    /// native transfer bank. This constructor requires `request.loss=Lossless`.
+    ///
+    /// # Errors
+    /// Original material/graph/probe refusals, non-lossless requests, exhausted
+    /// work bounds or cancellation. No partial field bank is published.
+    pub fn from_material<M: FluidAcoustics + ?Sized>(
+        net: &DuctNetwork,
+        material: &M,
+        request: &NetworkFieldRequest<'_>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, FluidDuctError> {
+        poll(&mut cancelled, 0)?;
+        if request.loss != LossModel::Lossless {
+            return Err(
+                bad("acoustic-only field material cannot supply requested wall diffusion").into(),
+            );
+        }
+        super::fluid::admit(net, request.omega)?;
+        let state = MaterialSnapshot::Acoustic(material.acoustic_state()?);
+        Self::from_snapshot(net, &state, crate::ConeSlices::Auto, request, cancelled)
+    }
+
+    /// The same native interior fields with the requested original wall-loss
+    /// law and explicit lossy-cone resolution. One complete material snapshot
+    /// supplies rho, c, viscosity, conductivity and Cp/Cv throughout the solve.
+    ///
+    /// # Errors
+    /// Original material, transport, geometry, source/load, probe and work
+    /// admissions; cancellation preserves the existing bounded dense-solve seam.
+    pub fn from_material_with_loss<M: ThermoviscousFluid + ?Sized>(
+        net: &DuctNetwork,
+        material: &M,
+        cone_slices: crate::ConeSlices,
+        request: &NetworkFieldRequest<'_>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, FluidDuctError> {
+        poll(&mut cancelled, 0)?;
+        super::fluid::admit(net, request.omega)?;
+        let state = MaterialSnapshot::Thermoviscous(material.thermoviscous_state()?);
+        Self::from_snapshot(net, &state, cone_slices, request, cancelled)
+    }
+
+    fn from_snapshot(
+        net: &DuctNetwork,
+        state: &MaterialSnapshot,
+        cone_slices: crate::ConeSlices,
+        request: &NetworkFieldRequest<'_>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, FluidDuctError> {
+        poll(&mut cancelled, 0)?;
+        super::fluid::admit(net, request.omega)?;
+        let acoustic = state.acoustic();
+        Self::prepare_with_operators(
+            net,
+            request,
+            |_edge| (acoustic.density_kg_m3(), acoustic.sound_speed_m_s()),
+            |selected, cancelled| {
+                super::fluid::prepare_spatial_snapshot(
+                    net,
+                    state,
+                    cone_slices,
+                    request,
+                    selected,
+                    cancelled,
+                )
+            },
+            |edge, options, boundaries, cancelled| {
+                Ok(state.chain(
+                    edge,
+                    request.omega,
+                    request.loss,
+                    cone_slices,
+                    options,
+                    Some(boundaries),
+                    cancelled,
+                )?)
+            },
+            |_edge, radius| Ok(state.wave(radius, request.omega, request.loss)?),
+            cancelled,
+        )
+    }
+
     fn prepare(
         net: &DuctNetwork,
         exterior: &GasState,
@@ -167,6 +258,74 @@ impl PreparedNetworkFields {
         poll(&mut cancelled, 0)?;
         net.validate()?;
         validate_medium(exterior, request.omega)?;
+        let gas_at = |edge: &NetworkEdge| {
+            media.map_or(exterior, |binding| {
+                binding
+                    .edge_gas(&edge.id)
+                    .expect("regional edge identities admitted")
+            })
+        };
+        Self::prepare_with_operators(
+            net,
+            request,
+            |edge| {
+                let gas = gas_at(edge);
+                (gas.density, gas.sound_speed)
+            },
+            |selected, _cancelled| {
+                super::loaded::prepare_spatial_transfers(
+                    net,
+                    exterior,
+                    media,
+                    request.omega,
+                    request.loss,
+                    request.sources,
+                    request.source_bank,
+                    request.loads,
+                    request.coupled_load,
+                    selected,
+                )
+            },
+            |edge, options, boundaries, cancelled| {
+                crate::compose::duct_chain_with_segment_boundaries(
+                    &edge.duct,
+                    gas_at(edge),
+                    exterior,
+                    request.omega,
+                    request.loss,
+                    crate::WallModel::Rigid,
+                    options,
+                    edge.corrections == JunctionCorrections::ChainLocal,
+                    Some(boundaries),
+                    cancelled,
+                )
+                .map(|(chain, _)| chain)
+            },
+            |edge, radius| crate::segment_wave(gas_at(edge), radius, request.omega, request.loss),
+            cancelled,
+        )
+    }
+
+    // Only constitutive and loaded-endpoint operators vary. Probe admission,
+    // prefix/suffix scattering, source columns and field coordinates remain
+    // one algorithm for the gas and original-material entry points.
+    fn prepare_with_operators<E: From<DuctError>>(
+        net: &DuctNetwork,
+        request: &NetworkFieldRequest<'_>,
+        medium: impl Fn(&NetworkEdge) -> (f64, f64),
+        mut spatial: impl FnMut(
+            &[usize],
+            &mut dyn FnMut() -> bool,
+        ) -> Result<(PreparedNetworkSources, Vec<[C64; 4]>), E>,
+        mut chain_at: impl FnMut(
+            &NetworkEdge,
+            ComposeOptions,
+            &mut Vec<usize>,
+            &mut dyn FnMut() -> bool,
+        ) -> Result<PreparedChain, E>,
+        wave_at: impl Fn(&NetworkEdge, f64) -> Result<crate::SegmentWave, E>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, E> {
         let budget = request.budget;
         if request.source_clock.trim().is_empty()
             || request.probes.is_empty()
@@ -176,9 +335,9 @@ impl PreparedNetworkFields {
             || budget.maximum_chain_blocks == 0
             || budget.maximum_chain_blocks > crate::compose::MAX_COMPOSITION_BLOCKS
         {
-            return Err(bad(
-                "spatial observation needs a clock and bounded nonempty probes",
-            ));
+            return Err(
+                bad("spatial observation needs a clock and bounded nonempty probes").into(),
+            );
         }
         let count = request
             .sources
@@ -190,7 +349,7 @@ impl PreparedNetworkFields {
             )
             .ok_or_else(|| bad("spatial source count overflows"))?;
         if count == 0 || count > MAX_NETWORK_PORTS {
-            return Err(bad("spatial observation needs 1..=32 sources"));
+            return Err(bad("spatial observation needs 1..=32 sources").into());
         }
         let mut edges: Vec<&NetworkEdge> = net.edges.iter().collect();
         edges.sort_unstable_by(|a, b| a.id.cmp(&b.id));
@@ -203,12 +362,8 @@ impl PreparedNetworkFields {
                 .binary_search_by(|edge| edge.id.cmp(&probe.edge_id))
                 .map_err(|_| bad("spatial probe names an unknown edge"))?;
             let edge = edges[edge_index];
-            let gas = media.map_or(exterior, |binding| {
-                binding
-                    .edge_gas(&edge.id)
-                    .expect("regional edge identities admitted")
-            });
-            locations.push(resolve_location(probe, edge, gas)?);
+            let (density, sound_speed) = medium(edge);
+            locations.push(resolve_location(probe, edge, density, sound_speed)?);
             probe_edges.push(edge_index);
             selected.push(edge_index);
         }
@@ -218,33 +373,17 @@ impl PreparedNetworkFields {
             .checked_mul(count)
             .ok_or_else(|| bad("spatial transfer count overflows"))?;
         if entries > budget.maximum_transfer_entries {
-            return Err(bad("spatial field transfer budget exceeded"));
+            return Err(bad("spatial field transfer budget exceeded").into());
         }
-        let (ports, endpoints) = super::loaded::prepare_spatial_transfers(
-            net,
-            exterior,
-            media,
-            request.omega,
-            request.loss,
-            request.sources,
-            request.source_bank,
-            request.loads,
-            request.coupled_load,
-            &selected,
-        )?;
+        let (ports, endpoints) = spatial(&selected, &mut cancelled)?;
         poll(&mut cancelled, request.probes.len())?;
         let mut pressure = vec![C64::ZERO; request.probes.len() * count];
         let mut flow = pressure.clone();
         let mut used_blocks = 0usize;
         for (selected_index, &edge_index) in selected.iter().enumerate() {
             let edge = edges[edge_index];
-            let gas = media.map_or(exterior, |binding| {
-                binding
-                    .edge_gas(&edge.id)
-                    .expect("regional edge identities admitted")
-            });
             if used_blocks == budget.maximum_chain_blocks {
-                return Err(bad("spatial propagation block budget exceeded"));
+                return Err(bad("spatial propagation block budget exceeded").into());
             }
             let options = ComposeOptions {
                 maximum_condition: MAX_NETWORK_CONDITION,
@@ -252,18 +391,7 @@ impl PreparedNetworkFields {
                 ..ComposeOptions::default()
             };
             let mut boundaries = Vec::with_capacity(edge.duct.segments.len() + 1);
-            let (chain, _) = crate::compose::duct_chain_with_segment_boundaries(
-                &edge.duct,
-                gas,
-                exterior,
-                request.omega,
-                request.loss,
-                crate::WallModel::Rigid,
-                options,
-                edge.corrections == JunctionCorrections::ChainLocal,
-                Some(&mut boundaries),
-                &mut cancelled,
-            )?;
+            let chain = chain_at(edge, options, &mut boundaries, &mut cancelled)?;
             used_blocks += chain.blocks.len();
             let reference = chain.reference_impedance;
             let mut prefix = Vec::with_capacity(chain.blocks.len() + 1);
@@ -305,8 +433,7 @@ impl PreparedNetworkFields {
                         } else if offset_m == length {
                             (prefix[after], suffix[after])
                         } else {
-                            let wave =
-                                crate::segment_wave(gas, radius, request.omega, request.loss)?;
+                            let wave = wave_at(edge, radius)?;
                             let a = TwoPort::from_wave(
                                 &Segment::Cylinder {
                                     radius,
@@ -343,7 +470,7 @@ impl PreparedNetworkFields {
                     let p = weighted(weights[0], incoming);
                     let q = weighted(weights[1], incoming);
                     if !finite(p) || !finite(q) {
-                        return Err(DuctError::Singular);
+                        return Err(DuctError::Singular.into());
                     }
                     pressure[probe_index * count + column] = p;
                     flow[probe_index * count + column] = q;
@@ -529,7 +656,8 @@ impl PreparedNetworkFields {
 fn resolve_location(
     probe: &NetworkFieldProbe,
     edge: &NetworkEdge,
-    gas: &GasState,
+    density_kg_m3: f64,
+    sound_speed_m_s: f64,
 ) -> Result<NetworkFieldLocation, DuctError> {
     let (segment, offset, radius) = match probe.section {
         NetworkFieldSection::Inlet { segment } => {
@@ -572,8 +700,8 @@ fn resolve_location(
         probe: probe.clone(),
         axial_position_m,
         area_m2,
-        density_kg_m3: gas.density,
-        sound_speed_m_s: gas.sound_speed,
+        density_kg_m3,
+        sound_speed_m_s,
     })
 }
 

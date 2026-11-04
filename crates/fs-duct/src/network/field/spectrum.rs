@@ -73,14 +73,98 @@ impl PreparedNetworkFieldSpectrum {
         Self::prepare(net, media.exterior_gas(), Some(media), request, cancelled)
     }
 
+    /// One original acoustic snapshot across every frequency, graph edge and
+    /// physical probe. All requested propagation laws must be Lossless; source
+    /// and exterior impedances remain the caller's frequency-specific laws.
+    /// The resulting bank uses the original coherent spectral interference and
+    /// finite-window observation machinery without resampling the material.
+    ///
+    /// # Errors
+    /// Original material/field admissions, a non-lossless line, frequency/work
+    /// bounds or cancellation. No partial spectral owner is returned.
+    pub fn from_material<M: FluidAcoustics + ?Sized>(
+        net: &DuctNetwork,
+        material: &M,
+        request: &NetworkFieldSpectrumRequest<'_>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, FluidDuctError> {
+        poll(&mut cancelled, 0)?;
+        Self::admit_shape(request)?;
+        if request
+            .frequencies
+            .iter()
+            .any(|line| line.loss != LossModel::Lossless)
+        {
+            return Err(bad(
+                "acoustic-only spectrum material cannot supply requested wall diffusion",
+            )
+            .into());
+        }
+        net.validate()?;
+        let state = MaterialSnapshot::Acoustic(material.acoustic_state()?);
+        Self::prepare_with(
+            request,
+            |local, cancelled| {
+                PreparedNetworkFields::from_snapshot(
+                    net,
+                    &state,
+                    crate::ConeSlices::Auto,
+                    local,
+                    cancelled,
+                )
+            },
+            cancelled,
+        )
+    }
+
+    /// The same material spectrum with one complete rho/c/transport/caloric
+    /// snapshot. Every line retains its requested wall-loss law at its actual
+    /// frequency, and all cones retain the explicit common refinement axis.
+    ///
+    /// # Errors
+    /// Original material, thermoviscous, geometry, field and spectral bounds or
+    /// cancellation. Source amplitude changes reuse the completed field bank.
+    pub fn from_material_with_loss<M: ThermoviscousFluid + ?Sized>(
+        net: &DuctNetwork,
+        material: &M,
+        cone_slices: crate::ConeSlices,
+        request: &NetworkFieldSpectrumRequest<'_>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, FluidDuctError> {
+        poll(&mut cancelled, 0)?;
+        Self::admit_shape(request)?;
+        net.validate()?;
+        let state = MaterialSnapshot::Thermoviscous(material.thermoviscous_state()?);
+        Self::prepare_with(
+            request,
+            |local, cancelled| {
+                PreparedNetworkFields::from_snapshot(net, &state, cone_slices, local, cancelled)
+            },
+            cancelled,
+        )
+    }
+
     fn prepare(
         net: &DuctNetwork,
         gas: &GasState,
         media: Option<&NetworkMedia>,
         request: &NetworkFieldSpectrumRequest<'_>,
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<Self, DuctError> {
-        poll(&mut cancelled, 0)?;
+        Self::prepare_with(
+            request,
+            |local, cancelled| {
+                if let Some(media) = media {
+                    PreparedNetworkFields::new_regional(net, media, local, cancelled)
+                } else {
+                    PreparedNetworkFields::new(net, gas, local, cancelled)
+                }
+            },
+            cancelled,
+        )
+    }
+
+    fn admit_shape(request: &NetworkFieldSpectrumRequest<'_>) -> Result<usize, DuctError> {
         let count = request.frequencies.len();
         if count == 0
             || count > MAX_FIELD_FREQUENCIES
@@ -91,6 +175,19 @@ impl PreparedNetworkFieldSpectrum {
                 "network field spectrum needs a clock and bounded nonempty frequencies",
             ));
         }
+        Ok(count)
+    }
+
+    fn prepare_with<E: From<DuctError>>(
+        request: &NetworkFieldSpectrumRequest<'_>,
+        mut field_at: impl FnMut(
+            &NetworkFieldRequest<'_>,
+            &mut dyn FnMut() -> bool,
+        ) -> Result<PreparedNetworkFields, E>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, E> {
+        poll(&mut cancelled, 0)?;
+        let count = Self::admit_shape(request)?;
         let mut previous = 0.0;
         let mut entries = 0usize;
         for (index, frequency) in request.frequencies.iter().enumerate() {
@@ -98,7 +195,8 @@ impl PreparedNetworkFieldSpectrum {
             if !frequency.omega.is_finite() || frequency.omega <= previous {
                 return Err(bad(
                     "network field frequencies must be positive and strictly increasing",
-                ));
+                )
+                .into());
             }
             previous = frequency.omega;
             let sources = frequency
@@ -121,9 +219,7 @@ impl PreparedNetworkFieldSpectrum {
         if entries > MAX_SPECTRAL_TRANSFERS
             || entries > request.spectrum_budget.maximum_retained_transfer_entries
         {
-            return Err(bad(
-                "network field spectrum exceeds its retained transfer budget",
-            ));
+            return Err(bad("network field spectrum exceeds its retained transfer budget").into());
         }
         let mut fields: Vec<PreparedNetworkFields> = storage(count)?;
         for (index, frequency) in request.frequencies.iter().enumerate() {
@@ -139,11 +235,7 @@ impl PreparedNetworkFieldSpectrum {
                 probes: request.probes,
                 budget: request.field_budget,
             };
-            let field = if let Some(media) = media {
-                PreparedNetworkFields::new_regional(net, media, &local, &mut cancelled)?
-            } else {
-                PreparedNetworkFields::new(net, gas, &local, &mut cancelled)?
-            };
+            let field = field_at(&local, &mut cancelled)?;
             if let Some(first) = fields.first() {
                 if field.port_response().source_coordinates()
                     != first.port_response().source_coordinates()
@@ -151,7 +243,8 @@ impl PreparedNetworkFieldSpectrum {
                 {
                     return Err(bad(
                         "network spectrum source coordinates or physical probes differ",
-                    ));
+                    )
+                    .into());
                 }
             }
             fields.push(field);
