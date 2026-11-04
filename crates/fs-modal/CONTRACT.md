@@ -1073,3 +1073,45 @@ invalid/overflow refusals, and a 32/64/128 interval chirp crossing resonance
 against an independently integrated physical ODE. Displacement, velocity,
 signed input work and positive heat each converge at second order while the
 existing reconstructed-force energy account closes.
+
+### Mixed coherent and statistical mechanical interference
+
+`harmonic::PreparedHarmonicInterferenceEnsemble` retains an explicitly authored
+deterministic mean plus real and jointly proper complex force factors through
+the same original coupled M/C/K pencil. Each factor spans its own complete
+coordinates and frequencies. Real factors have zero mean and identity real
+second moments. Proper factors have zero mean, identity conjugate second
+moments and zero pseudo-covariance; real/proper cross moments are zero.
+Physical coefficients include square-root statistical weights. There is no
+inferred independence law, Gaussian assumption or normalization of source PSDs.
+
+One existing harmonic response owner is prepared for each distinct frequency
+globally and solves all mean/factor right-hand sides at that frequency.
+Exact duplicate forces combine in DD within their own factor before solving;
+opposite forces in separate factors retain separate physical variance.
+Empty factors preserve their original indices, and a pure stochastic input
+needs no fabricated deterministic tone. Completely empty sources refuse.
+
+The coherent and statistical observers share the same six DD contractions of
+original-coordinate M*v, K*q, D*v and force, with D=(C+C^T)/2. Real factors
+retain sum and difference frequencies; proper factors retain the complete
+within-factor difference-frequency interference. Expected kinetic/elastic
+energy, input work, viscous heat, independent storage rate and power balance
+use the existing normalized uniform/triangular observation windows. The
+gyroscopic part changes response without being assigned dissipative heat.
+
+Count, payload and product-work admission precede factorization. At most 64
+random factors and 4096 authored tones are admitted, with the original 128-tone
+ceiling per bank. Ordering records and bank headers are included in the
+payload alongside 144*n retained scalar bytes per bank-frequency and one dense
+response preparation. Warm observation allocates nothing and performs
+6*n*sum_b(L_b^2) scalar products, with L_b the distinct frequencies in bank b.
+Different factors need no cross contractions, and no warm linear solve or
+matrix application occurs. These are work/storage bounds, not timing claims.
+
+This reports ensemble second moments, not variances of energy or other
+fourth-order statistics, random realizations, startup motion, inferred source
+coherence, or a general near-null accuracy certificate. Native regressions use
+independent real trajectories and finite mixed ensembles, exact duplicate
+cancellation versus independent factors, proper beats and DC, real/unitary
+factor-basis changes, coherent parity, and explicit resource/cancellation gates.

@@ -15,6 +15,12 @@ use fs_exec::Cx;
 use fs_fft::harmonic_window::{HarmonicProduct, HarmonicWindow, WindowError};
 use fs_math::{c64::C64, dd::Dd};
 
+mod ensemble;
+pub use ensemble::{
+    HarmonicEnsembleControls, HarmonicFactorStatistics, HarmonicForceFactor,
+    MAX_ENSEMBLE_FORCE_TONES, MAX_INTERFERENCE_FACTORS, PreparedHarmonicInterferenceEnsemble,
+};
+
 /// Hard ceiling on authored forcing tones. Exact duplicates are combined;
 /// nearby frequencies are never rounded together or discarded.
 pub const MAX_INTERFERENCE_TONES: usize = 128;
@@ -258,49 +264,103 @@ impl PreparedHarmonicInterference {
         window: HarmonicWindow,
         cx: &Cx<'_>,
     ) -> Result<HarmonicInterferenceMoments, HarmonicResponseError> {
+        let sums = observe_sums(
+            self.n,
+            &self.tones,
+            window,
+            HarmonicFactorStatistics::Real,
+            cx,
+        )?;
+        let result = finish_moments(sums)?;
         poll(cx)?;
-        let mut moments = [Dd::ZERO; 6];
-        for a in &self.tones {
-            for b in &self.tones {
-                poll(cx)?;
-                let kernel = window
-                    .product_kernel(a.omega, b.omega)
-                    .map_err(observation)?;
-                for i in 0..self.n {
-                    if i % 64 == 0 {
-                        poll(cx)?;
-                    }
-                    let q = parts(a.response.displacement[i]);
-                    let v = parts(a.response.velocity[i]);
-                    let mv = b.mass_velocity[i];
-                    let frequency = Dd::from_f64(b.omega);
-                    let ma = [checked(mv[1] * frequency)?, checked(-mv[0] * frequency)?];
-                    let values = [
-                        product(kernel, v, mv)? * Dd::from_f64(0.5),
-                        product(kernel, q, b.stiffness_displacement[i])? * Dd::from_f64(0.5),
-                        product(kernel, parts(a.force[i]), parts(b.response.velocity[i]))?,
-                        product(kernel, v, b.viscous_velocity[i])?,
-                        product(kernel, v, ma)?,
-                        product(kernel, v, b.stiffness_displacement[i])?,
-                    ];
-                    for (sum, value) in moments.iter_mut().zip(values) {
-                        *sum = checked(*sum + value)?;
-                    }
+        Ok(result)
+    }
+}
+
+// The deterministic owner and mixed-factor owner use exactly the same six
+// physical contractions. Each frequency pair prepares its temporal kernel once;
+// dispatch on the explicit law occurs outside the coordinate/product loop.
+fn observe_sums(
+    n: usize,
+    tones: &[Tone],
+    window: HarmonicWindow,
+    statistics: HarmonicFactorStatistics,
+    cx: &Cx<'_>,
+) -> Result<[Dd; 6], HarmonicResponseError> {
+    poll(cx)?;
+    let mut moments = [Dd::ZERO; 6];
+    for a in tones {
+        for b in tones {
+            poll(cx)?;
+            match statistics {
+                HarmonicFactorStatistics::Real => {
+                    let kernel = window
+                        .product_kernel(a.omega, b.omega)
+                        .map_err(observation)?;
+                    accumulate_pair(n, a, b, |x, y| product(kernel, x, y), &mut moments, cx)?;
+                }
+                HarmonicFactorStatistics::ProperComplex => {
+                    let kernel = window
+                        .proper_product_kernel(a.omega, b.omega)
+                        .map_err(observation)?;
+                    accumulate_pair(
+                        n,
+                        a,
+                        b,
+                        |x, y| kernel.mean_real_product_parts_dd(x, y).map_err(observation),
+                        &mut moments,
+                        cx,
+                    )?;
                 }
             }
         }
-        let stored = checked(moments[4] + moments[5])?;
-        let residual = checked(moments[2] - moments[3] - stored)?;
-        poll(cx)?;
-        Ok(HarmonicInterferenceMoments {
-            mean_kinetic_energy_j: moments[0].to_f64(),
-            mean_elastic_energy_j: moments[1].to_f64(),
-            mean_input_power_w: moments[2].to_f64(),
-            mean_viscous_power_w: moments[3].to_f64(),
-            mean_stored_energy_rate_w: stored.to_f64(),
-            power_balance_residual_w: residual.to_f64(),
-        })
     }
+    Ok(moments)
+}
+
+fn accumulate_pair(
+    n: usize,
+    a: &Tone,
+    b: &Tone,
+    product: impl Fn([Dd; 2], [Dd; 2]) -> Result<Dd, HarmonicResponseError>,
+    moments: &mut [Dd; 6],
+    cx: &Cx<'_>,
+) -> Result<(), HarmonicResponseError> {
+    for i in 0..n {
+        if i % 64 == 0 {
+            poll(cx)?;
+        }
+        let q = parts(a.response.displacement[i]);
+        let v = parts(a.response.velocity[i]);
+        let mv = b.mass_velocity[i];
+        let frequency = Dd::from_f64(b.omega);
+        let ma = [checked(mv[1] * frequency)?, checked(-mv[0] * frequency)?];
+        let values = [
+            product(v, mv)? * Dd::from_f64(0.5),
+            product(q, b.stiffness_displacement[i])? * Dd::from_f64(0.5),
+            product(parts(a.force[i]), parts(b.response.velocity[i]))?,
+            product(v, b.viscous_velocity[i])?,
+            product(v, ma)?,
+            product(v, b.stiffness_displacement[i])?,
+        ];
+        for (sum, value) in moments.iter_mut().zip(values) {
+            *sum = checked(*sum + value)?;
+        }
+    }
+    Ok(())
+}
+
+fn finish_moments(moments: [Dd; 6]) -> Result<HarmonicInterferenceMoments, HarmonicResponseError> {
+    let stored = checked(moments[4] + moments[5])?;
+    let residual = checked(moments[2] - moments[3] - stored)?;
+    Ok(HarmonicInterferenceMoments {
+        mean_kinetic_energy_j: moments[0].to_f64(),
+        mean_elastic_energy_j: moments[1].to_f64(),
+        mean_input_power_w: moments[2].to_f64(),
+        mean_viscous_power_w: moments[3].to_f64(),
+        mean_stored_energy_rate_w: stored.to_f64(),
+        power_balance_residual_w: residual.to_f64(),
+    })
 }
 
 fn admit_payload(
