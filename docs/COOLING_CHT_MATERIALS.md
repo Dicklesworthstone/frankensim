@@ -208,9 +208,17 @@ The next temperature trial is relaxed by one half; this does not relax the
 acceptance checks. `solver.max_iterations` bounds the coupled passes and each
 momentum solve, and the existing wall-time cancellation budget remains active.
 
-This steady mode supports laminar gas or liquid flow and isotropic sourced solids.
-Mixed frozen/authored/evolving material assignments, radiation, LVEL turbulence
-and compact components refuse explicitly in the steady source-feedback solve.
+This steady mode supports laminar gas or liquid flow and isotropic sourced solids,
+including the existing material `emissivity` and top-level `radiation` settings.
+Radiation uses fixed authored emissivity and the original gray diffuse surface
+exchange model. Geometry and Monte Carlo exchange factors are prepared once;
+physical radiative power, local material properties, buoyancy and optional
+source enthalpy converge at the same thermal endpoint. The radiative power
+tolerance is `r` above and the same coupled-pass budget bounds the iteration.
+This includes radiation as the only route for heat to leave a heated solid.
+
+Mixed frozen/authored/evolving material assignments, LVEL turbulence and compact
+components still refuse explicitly in the steady source-feedback solve.
 The distinct unsteady path below also supports source-integrated solid heat
 storage at fixed reference mass. Phase change, deformation and arbitrary
 anisotropic source conductivity remain outside these CLI paths.
@@ -225,6 +233,18 @@ For gases, the fluid endpoint reports temperature, density, heat capacity,
 dynamic viscosity and conductivity ranges; `samples_identity` hashes the actual
 numerical samples and retained thermochemical source receipts in cell order.
 Source or convergence failures publish no partial result.
+
+When radiation is active, `material_feedback.radiation` reports the physical
+`radiated_w`, `exposed_faces`, maximum cell power defect, relative power defect,
+`net_outflow_correction_w` and `physical_energy_residual_w`. The original
+`energy` fields retain the balance of the radiation tangent system actually
+solved. The correction replaces its free-cell radiative sink powers with the
+physical endpoint powers; fixed-temperature cells receive the matching
+thermostat correction and do not contribute to this net correction. The
+physical residual equals the original signed energy residual minus the
+correction. The top-level `radiation` summary reports the same physical power
+and actual exposed-face count. Omitting emissivity preserves the existing
+nonradiating path and reports a null material radiation field.
 
 JSON results include `material_inputs`, with the exact fluid coefficients and
 reference gas declaration, original thermochemical pack identities when used,

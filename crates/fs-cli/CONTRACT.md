@@ -32,6 +32,25 @@ laminar/fixed-geometry admission and first-order coupled time accuracy remain;
 omitting the opt-in preserves reference-Cp thermal behavior.
 `docs/COOLING_CHT_MATERIALS.md` specifies the input and reporting fields.
 
+## Steady material convection with radiation
+
+Steady `cooling-cht` material feedback accepts the existing solid `emissivity`
+and `radiation` controls. It passes them to the original material CHT solver,
+which converges source transport, buoyancy, optional source-law fluid enthalpy
+and physical gray diffuse surface power together. Geometry/exchange factors
+are cached once. The coupled-pass budget and `min(solver.tolerance, 1e-6)`
+relative radiation tolerance are explicit; no extra CLI heat solver is added.
+
+`material_feedback.radiation` exposes physical radiated power and face count,
+local power defects, net outflow correction and physical energy residual.
+The existing energy rows retain the actual solved tangent-system balance;
+the top-level radiation summary uses physical endpoint power. Nonradiating
+scenes retain the original path. Source selection and bytes remain immutable;
+laminar, fixed-geometry, Boussinesq and source-domain limits still apply.
+The real-binary regression exercises radiative cooling and physical closure
+with reference-Cp and source-enthalpy transport; it is authored but unrun in
+the resource-constrained implementation session.
+
 The stable command-line membrane for the Cooling 0.1 product workflow (bead
 `frankensim-extreal-program-f85xj.6.2`). The binary is named `frankensim`;
 the package is `fs-cli` so the workspace retains its flat `fs-*` crate

@@ -555,7 +555,7 @@ fn mode_json(axis: Option<&str>) -> String {
     })
 }
 
-pub(super) const EVOLVING_NO_CLAIM: &str = "steady laminar fixed-geometry Boussinesq flow and conservative conjugate heat transfer; original gas or liquid density, viscosity and conductivity and solid conductivity reevaluated at local temperature with source claims pinned; reference fluid density retained in inertia and continuity; heat advection uses reference Cp unless fluid_enthalpy selects original source h(T) with conservative first-order upwind; source density and Cp departures remain at most 5 percent; fixed thermodynamic pressure and composition; isotropic source solids; no compressibility, solid storage, melting, deformation, radiation, turbulence closure or phase-stability claim; staircase geometry and one declared resolution unless grid_convergence is requested; Estimated numerical evidence, not experimental validation";
+pub(super) const EVOLVING_NO_CLAIM: &str = "steady laminar fixed-geometry Boussinesq flow and conservative conjugate heat transfer; original gas or liquid density, viscosity and conductivity and solid conductivity reevaluated at local temperature with source claims pinned; reference fluid density retained in inertia and continuity; heat advection uses reference Cp unless fluid_enthalpy selects original source h(T) with conservative first-order upwind; source density and Cp departures remain at most 5 percent; fixed thermodynamic pressure and composition; isotropic source solids; optional gray diffuse solid-surface radiation uses fixed authored emissivity and shared Monte Carlo exchange factors, with physical radiative power closure at the material endpoint; original energy rows retain their solved radiation linearization and material_feedback.radiation reports its physical correction; no compressibility, solid storage, melting, deformation, participating-medium radiation, turbulence closure or phase-stability claim; staircase geometry and one declared resolution unless grid_convergence is requested; Estimated numerical evidence, not experimental validation";
 
 /// Independent units and limits for the nonlinear solid heat-storage solve.
 pub(super) fn storage_controls(
@@ -605,11 +605,12 @@ pub(super) fn solve(
     domain: &fs_lbm::conjugate::VoxelDomain,
     flow: &fs_lbm::conjugate::SimpleConfig,
     thermal: &fs_lbm::conjugate::ThermalSetup,
+    radiation: Option<&fs_lbm::conjugate::RadiationConfig>,
     gate: &fs_exec::CancelGate,
 ) -> Result<(
     fs_lbm::conjugate::FvFlow,
     fs_lbm::conjugate::EnergySolution,
-    usize,
+    fs_lbm::material::conjugate::buoyant::MaterialBuoyancyReport,
     String,
 )> {
     use fs_lbm::material::conjugate::buoyant::{MaterialBuoyancyConfig, MaterialBuoyancyError};
@@ -653,6 +654,7 @@ pub(super) fn solve(
         transport_relative_tolerance: relative,
         force_tolerance_n_m3: relative * force_scale,
         temperature_relaxation: 0.5,
+        radiation,
     };
     let failure = |error: MaterialBuoyancyError| match &error {
         MaterialBuoyancyError::Solver(source) => super::solver_failure(source),
@@ -687,18 +689,31 @@ pub(super) fn solve(
         sample.cell, sample.temperature_k, sample.conductivity_w_m_k[0], &sample.material,
     )), gate)?;
     let report = run.report;
+    let radiation_report = match report.radiation {
+        Some(radiation) => format!(concat!(
+            "{{\"radiated_w\":{},\"exposed_faces\":{},\"maximum_cell_power_defect_w\":{},",
+            "\"relative_power_defect\":{},\"net_outflow_correction_w\":{},",
+            "\"physical_energy_residual_w\":{}}}"),
+            super::num(radiation.radiated_w)?, radiation.exposed_faces,
+            super::num(radiation.maximum_cell_power_defect_w)?,
+            super::num(radiation.relative_power_defect)?,
+            super::num(radiation.net_outflow_correction_w)?,
+            super::num(radiation.physical_energy_residual_w)?),
+        None => "null".into(),
+    };
     let evidence = format!(concat!(
         "{{\"mode\":\"temperature-dependent\",\"passes\":{},",
         "\"temperature_defect_k\":{},\"transport_relative_defect\":{},\"force_defect_n_m3\":{},",
         "\"temperature_tolerance_k\":{},\"transport_relative_tolerance\":{},\"force_tolerance_n_m3\":{},",
         "\"max_relative_density_departure\":0.05,\"max_relative_specific_heat_departure\":0.05,\"solid_to_fluid_heat_w\":{},",
-        "\"fluid_endpoint\":{},\"solid_endpoint\":{},\"fluid_enthalpy\":{}}}"),
+        "\"fluid_endpoint\":{},\"solid_endpoint\":{},\"fluid_enthalpy\":{},\"radiation\":{}}}"),
         report.passes, super::num(report.temperature_defect_k)?,
         super::num(report.transport_relative_defect)?, super::num(report.force_defect_n_m3)?,
         super::num(controls.temperature_tolerance_k)?, super::num(controls.transport_relative_tolerance)?,
         super::num(controls.force_tolerance_n_m3)?,
-        super::num(run.energy.solid_to_fluid_heat_w(domain))?, fluid, solid, caloric_report);
-    Ok((run.flow, run.energy, report.passes, evidence))
+        super::num(run.energy.solid_to_fluid_heat_w(domain))?, fluid, solid, caloric_report,
+        radiation_report);
+    Ok((run.flow, run.energy, report, evidence))
 }
 
 /// Compact identities of the actual endpoint states, in original cell order.

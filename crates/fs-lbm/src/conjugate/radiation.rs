@@ -1000,6 +1000,63 @@ pub(crate) struct RadiationEndpoint {
     pub(crate) radiated_w: f64,
 }
 
+/// Difference of the original nonlinear radiation law and the solved tangent.
+pub(crate) struct RadiationPowerDefect {
+    pub(crate) difference_w: f64,
+    pub(crate) relative: f64,
+}
+
+impl RadiationEndpoint {
+    /// Sum all exposed faces into their original cells, retaining an arithmetic
+    /// scale for cancellation between absolute-temperature emission terms.
+    pub(crate) fn write_tangent_power(
+        &self,
+        temperature: &[f64],
+        power_w: &mut [f64],
+        arithmetic_w: &mut [f64],
+        gate: &CancelGate,
+    ) -> Result<(), ChtError> {
+        power_w.fill(0.0);
+        arithmetic_w.fill(0.0);
+        for (index, sink) in self.sinks.iter().enumerate() {
+            if index.is_multiple_of(1024) {
+                poll(gate)?;
+            }
+            power_w[sink.cell] +=
+                sink.conductance_w_k * (temperature[sink.cell] - sink.temperature_k);
+            arithmetic_w[sink.cell] +=
+                sink.conductance_w_k * (temperature[sink.cell].abs() + sink.temperature_k.abs());
+        }
+        Ok(())
+    }
+
+    /// Common steady/transient physical heat gate. `other_power_w` is the
+    /// cell's source/storage scale; no temperature change can waive this gate.
+    pub(crate) fn power_defect(
+        &self,
+        cell: usize,
+        tangent_w: f64,
+        tangent_arithmetic_w: f64,
+        other_power_w: f64,
+    ) -> Result<RadiationPowerDefect, ChtError> {
+        let difference_w = self.cell_power_w[cell] - tangent_w;
+        finite("radiation.power_defect_w", difference_w)?;
+        let scale = self.cell_power_w[cell]
+            .abs()
+            .max(tangent_w.abs())
+            .max(other_power_w);
+        finite("radiation.tangent_scale_w", tangent_arithmetic_w)?;
+        finite("radiation.power_scale_w", scale)?;
+        let roundoff = 64.0 * f64::EPSILON * self.cell_scale_w[cell]
+            + 64.0 * f64::EPSILON * tangent_arithmetic_w;
+        finite("radiation.power_roundoff_w", roundoff)?;
+        Ok(RadiationPowerDefect {
+            difference_w,
+            relative: (difference_w.abs() - roundoff).max(0.0) / scale.max(f64::MIN_POSITIVE),
+        })
+    }
+}
+
 impl Radiators {
     pub(crate) fn build(
         domain: &VoxelDomain,
@@ -1096,7 +1153,7 @@ impl Radiators {
         }
     }
 
-    fn counts(&self, rays_per_face: usize) -> (usize, usize, usize) {
+    pub(crate) fn counts(&self, rays_per_face: usize) -> (usize, usize, usize) {
         match self {
             Self::Escape(faces) => (faces.len(), faces.len() * rays_per_face, 0),
             Self::Exchange(model) => (model.faces.len(), model.rays(), model.patches()),
@@ -1208,6 +1265,57 @@ pub(crate) fn reference_temperature(setup: &ThermalSetup, radiation: &RadiationC
 #[cfg(test)]
 mod checked_irradiation_tests {
     use super::*;
+
+    #[test]
+    fn g0_radiative_power_gate_accumulates_faces_and_detects_nonlinear_heat() {
+        let factor = 0.8 * STEFAN_BOLTZMANN;
+        let (previous, next) = (300.0_f64, 400.0_f64);
+        let slope = 4.0 * factor * previous.powi(3);
+        let tangent = RadiationEndpoint {
+            // Two half-area faces of one cell share its physical heat row.
+            sinks: vec![
+                CellSink {
+                    cell: 0,
+                    conductance_w_k: 0.5 * slope,
+                    temperature_k: previous,
+                };
+                2
+            ],
+            cell_power_w: vec![0.0],
+            cell_scale_w: vec![2.0 * factor * previous.powi(4)],
+            radiated_w: 0.0,
+        };
+        let heat = factor * (next.powi(4) - previous.powi(4));
+        let physical = RadiationEndpoint {
+            sinks: Vec::new(),
+            cell_power_w: vec![heat],
+            cell_scale_w: vec![factor * (next.powi(4) + previous.powi(4))],
+            radiated_w: heat,
+        };
+        let mut power = [0.0];
+        let mut arithmetic = [0.0];
+        tangent
+            .write_tangent_power(&[next], &mut power, &mut arithmetic, &CancelGate::new())
+            .unwrap();
+        assert_eq!(power[0], slope * (next - previous));
+        let defect = physical
+            .power_defect(0, power[0], arithmetic[0], 0.0)
+            .unwrap();
+        assert!((defect.difference_w - (heat - power[0])).abs() < 1e-12);
+        assert!(
+            defect.relative > 0.3,
+            "a linear temperature tangent must not claim T^4 heat closure"
+        );
+
+        let roundoff = 16.0 * f64::EPSILON * physical.cell_scale_w[0];
+        assert_eq!(
+            physical
+                .power_defect(0, heat + roundoff, arithmetic[0], 0.0)
+                .unwrap()
+                .relative,
+            0.0
+        );
+    }
 
     // Exact equal-area parallel plates isolate the thermal radiosity solve
     // from Monte Carlo geometry error. Every emitted ray reaches its neighbor.

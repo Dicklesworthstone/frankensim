@@ -157,7 +157,7 @@ fn liquid(card: &MaterialCard) -> LiquidTemperatureLaw<'_> {
     .unwrap()
 }
 
-fn controls() -> MaterialBuoyancyConfig {
+fn controls() -> MaterialBuoyancyConfig<'static> {
     MaterialBuoyancyConfig {
         boussinesq: BoussinesqConfig {
             gravity_m_s2: [0.0; 3],
@@ -310,6 +310,115 @@ fn source_enthalpy_changes_actual_channel_heat_and_preserves_datum_direction_and
         temperatures.push(datum_temperatures[0]);
     }
     assert!(temperatures[0] - temperatures[1] > 2.9);
+}
+
+#[test]
+fn g1_radiating_source_solid_and_caloric_channel_share_one_steady_heat_balance() {
+    use fs_lbm::conjugate::{RadiationConfig, STEFAN_BOLTZMANN};
+
+    // At the independent target Ts=325 K, Tf=320 K, the original source
+    // solid has k=1.5 and the fluid k=1. Their half cells conduct 6 W.
+    // Cp=2+0.04*(T-300), so h(320)-h(310)=26 J/kg; mdot=6/26
+    // carries exactly those 6 W out. The remaining solid power radiates.
+    let fluid_card = card(0.04);
+    let fluid = liquid(&fluid_card);
+    let caloric = caloric(&fluid_card, 1e9, 340.0);
+    let solid_card = super::solid_feedback::card([0.02; 3], 340.0, false);
+    let source_solid = super::solid_feedback::law(&solid_card);
+    let bound = MaterialChtFluid::try_new(fluid.reference_state()).unwrap();
+    let mut domain = VoxelDomain::new(1, 2, 1, 1.0).unwrap();
+    domain.set(0, 0, 0, Voxel::Solid(0));
+    let mut boundaries = [FvBoundary::Symmetry; 6];
+    boundaries[0] = FvBoundary::Inlet {
+        velocity: [6.0 / 26.0, 0.0, 0.0],
+    };
+    boundaries[1] = FvBoundary::Outlet;
+    let mut flow = SimpleConfig::new(boundaries);
+    flow.tolerance = 1e-11;
+    let mut faces = [ThermalFace::Adiabatic; 6];
+    faces[0] = ThermalFace::Outflow {
+        backflow_temperature: 310.0,
+    };
+    faces[1] = faces[0];
+    let mut thermal = ThermalSetup::new(faces);
+    let radiated = 0.8 * STEFAN_BOLTZMANN * (325.0_f64.powi(4) - 300.0_f64.powi(4));
+    thermal.power_w = vec![6.0 + radiated, 0.0];
+    let radiation = RadiationConfig::new(vec![0.8], [Some(300.0); 6]);
+    let controls = MaterialBuoyancyConfig {
+        radiation: Some(&radiation),
+        ..controls()
+    };
+    let energy = EnergyConfig {
+        scheme: ConvectionScheme::Upwind,
+        ..EnergyConfig::default()
+    };
+    let gate = CancelGate::new();
+    for source_defined_solid in [false, true] {
+        let resolve = |_, t, _: &FluidTransportState| {
+            fluid
+                .at_temperature(Temperature::new(t))
+                .map_err(|error| MaterialError::State {
+                    what: error.to_string(),
+                })
+        };
+        let run = if source_defined_solid {
+            bound.solve_natural_convection_with_material_solids_and_enthalpy(
+                &domain,
+                std::slice::from_ref(&source_solid),
+                &flow,
+                &thermal,
+                &energy,
+                &[320.0; 2],
+                controls,
+                &caloric,
+                enthalpy_controls(),
+                &gate,
+                resolve,
+            )
+        } else {
+            bound.solve_natural_convection_with_enthalpy(
+                &domain,
+                &[SolidMaterial::new("reference plate", 1.5)],
+                &flow,
+                &thermal,
+                &energy,
+                &[320.0; 2],
+                controls,
+                &caloric,
+                enthalpy_controls(),
+                &gate,
+                resolve,
+            )
+        }
+        .unwrap();
+        let result = &run.convection;
+        near(result.energy.temperature[0], 325.0, 1e-9);
+        near(result.energy.temperature[1], 320.0, 1e-9);
+        near(result.energy.solid_to_fluid_heat_w(&domain), 6.0, 1e-8);
+        near(result.energy.report.balance.advective_outflow_w, 6.0, 1e-8);
+        near(result.report.radiation.unwrap().radiated_w, radiated, 1e-9);
+        assert!(
+            result
+                .report
+                .radiation
+                .unwrap()
+                .physical_energy_residual_w
+                .abs()
+                < 1e-8
+        );
+        assert!(
+            run.enthalpy.report.maximum_cell_flux_defect_w
+                <= enthalpy_controls().maximum_flux_defect_w
+        );
+        assert!(core::ptr::eq(run.caloric, &caloric));
+        if source_defined_solid {
+            assert_eq!(
+                result.solid_endpoint[0].material.card_identity(),
+                solid_card.content_hash()
+            );
+            near(result.solid_endpoint[0].conductivity_w_m_k[1], 1.5, 1e-9);
+        }
+    }
 }
 
 #[test]

@@ -417,6 +417,8 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
     /// The original transport resolver also admits every incident fluid cell
     /// at those boundary temperatures, including source support and both the
     /// reference-density and source-Cp departure bounds before solving flow.
+    /// Optional `config.radiation` participates in the same fixed point and
+    /// requires its original physical powers to close at this caloric endpoint.
     #[allow(clippy::too_many_arguments)]
     pub fn solve_natural_convection_with_enthalpy<
         'a,
@@ -430,7 +432,7 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
         thermal: &ThermalSetup,
         energy: &EnergyConfig,
         initial_temperature_k: &[f64],
-        config: MaterialBuoyancyConfig,
+        config: MaterialBuoyancyConfig<'_>,
         caloric: &'a C,
         enthalpy: MaterialEnthalpyConfig,
         gate: &CancelGate,
@@ -476,7 +478,7 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
         thermal: &ThermalSetup,
         energy: &EnergyConfig,
         initial_temperature_k: &[f64],
-        config: MaterialBuoyancyConfig,
+        config: MaterialBuoyancyConfig<'_>,
         caloric: &'a C,
         enthalpy: MaterialEnthalpyConfig,
         gate: &CancelGate,

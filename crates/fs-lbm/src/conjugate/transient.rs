@@ -588,14 +588,9 @@ pub(super) fn solve_step_with_fields(
             // constitutive evaluations; the next trial may still be supported.
             if supported {
                 let physical = radiators.endpoint(domain, &next.temperature, gate)?;
-                tangent_power.fill(0.0);
-                tangent_scale.fill(0.0);
-                for sink in &endpoint.sinks {
-                    tangent_power[sink.cell] += sink.conductance_w_k
-                        * (next.temperature[sink.cell] - sink.temperature_k);
-                    tangent_scale[sink.cell] += sink.conductance_w_k
-                        * (next.temperature[sink.cell].abs() + sink.temperature_k.abs());
-                }
+                endpoint.write_tangent_power(
+                    &next.temperature, &mut tangent_power, &mut tangent_scale, gate,
+                )?;
                 let mut lo = f64::INFINITY;
                 let mut hi = f64::NEG_INFINITY;
                 let mut change = 0.0f64;
@@ -606,21 +601,13 @@ pub(super) fn solve_step_with_fields(
                     lo = lo.min(t);
                     hi = hi.max(t);
                     change = change.max((t - iterate[cell]).abs());
-                    let defect = physical.cell_power_w[cell] - tangent_power[cell];
-                    finite("radiation.power_defect_w", defect)?;
-                    let scale = physical.cell_power_w[cell].abs()
-                        .max(tangent_power[cell].abs())
-                        .max(coefficients[cell] * (t - previous[cell]).abs())
+                    let scale = (coefficients[cell] * (t - previous[cell]).abs())
                         .max(setup.power_w.get(cell).copied().unwrap_or(0.0).abs());
-                    finite("radiation.tangent_scale_w", tangent_scale[cell])?;
-                    finite("radiation.power_scale_w", scale)?;
-                    let roundoff = 64.0 * f64::EPSILON * physical.cell_scale_w[cell]
-                        + 64.0 * f64::EPSILON * tangent_scale[cell];
-                    finite("radiation.power_roundoff_w", roundoff)?;
-                    power_residual = power_residual.max(
-                        (defect.abs() - roundoff).max(0.0) / scale.max(f64::MIN_POSITIVE),
-                    );
-                    if !fixed[cell] { correction_w += defect; }
+                    let defect = physical.power_defect(
+                        cell, tangent_power[cell], tangent_scale[cell], scale,
+                    )?;
+                    power_residual = power_residual.max(defect.relative);
+                    if !fixed[cell] { correction_w += defect.difference_w; }
                 }
                 finite("radiation.outflow_correction_w", correction_w)?;
                 let temperature_residual =

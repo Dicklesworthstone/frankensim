@@ -106,6 +106,7 @@ pub(crate) mod krylov;
 pub mod material_coupling;
 mod natural;
 mod radiation;
+pub(crate) use radiation::Radiators;
 mod simple;
 mod transient;
 pub mod turbulence;

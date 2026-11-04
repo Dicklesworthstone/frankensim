@@ -1473,11 +1473,6 @@ impl Scene {
             if turbulence != Turbulence::Laminar {
                 return Err(bad("temperature-dependent CHT requires laminar flow"));
             }
-            if root.get("transient").is_none()
-                && (root.get("radiation").is_some() || emissivities.iter().any(|e| *e > 0.0))
-            {
-                return Err(bad("steady temperature-dependent CHT does not support radiation"));
-            }
             if expansion.is_some() {
                 return Err(bad(
                     "temperature-dependent fluid density owns buoyancy; expansion_per_k cannot override it",
@@ -2179,6 +2174,11 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
         config.seed = scene.ray_seed;
         config.surface_exchange = scene.surface_exchange;
         config.patch_size = scene.patch_size;
+        if scene.temperature_dependent() && scene.transient.is_none() {
+            // Material and radiative powers converge in one bounded iteration.
+            config.max_iterations = scene.max_iterations;
+            config.tolerance = scene.tolerance.min(1e-6);
+        }
         config
     });
     // Steady energy on the time-averaged flow of an unsteady march.
@@ -2214,10 +2214,13 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
     let mut material_feedback = None;
     let (flow, energy, couplings): (FvFlow, EnergySolution, Option<usize>) =
         if scene.temperature_dependent() {
-            let (flow, energy, passes, evidence) =
-                material::solve(scene, &domain, &flow_config, &setup, gate)?;
+            let (flow, energy, report, evidence) =
+                material::solve(scene, &domain, &flow_config, &setup, radiation.as_ref(), gate)?;
+            if let Some(radiation) = report.radiation {
+                radiated = Some((radiation.radiated_w, report.passes, radiation.exposed_faces));
+            }
             material_feedback = Some(evidence);
-            (flow, energy, Some(passes))
+            (flow, energy, Some(report.passes))
         } else if let Some(gravity) = buoyant {
             let reference = scene
                 .reference
@@ -2639,6 +2642,12 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
             r.outflow_m3_s,
             b.relative_residual
         );
+        if let Some(evidence) = &material_feedback {
+            let _ = writeln!(out, "material_feedback={evidence}");
+        }
+        if let Some((power, iterations, _)) = radiated {
+            let _ = writeln!(out, "radiated_w={power:e}\nradiation_iterations={iterations}");
+        }
         if scene.turbulence != Turbulence::Laminar {
             let _ = writeln!(
                 out,

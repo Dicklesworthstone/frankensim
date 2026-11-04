@@ -228,7 +228,7 @@ fn unrepresentable_capacity_and_conflicting_eddy_input_refuse() {
     assert_eq!(setup, before);
 }
 
-fn natural_material_controls() -> MaterialBuoyancyConfig {
+fn natural_material_controls() -> MaterialBuoyancyConfig<'static> {
     MaterialBuoyancyConfig {
         boussinesq: BoussinesqConfig {
             gravity_m_s2: [-9.81, 0.0, 0.0],
@@ -240,7 +240,145 @@ fn natural_material_controls() -> MaterialBuoyancyConfig {
         transport_relative_tolerance: 1e-10,
         force_tolerance_n_m3: 1e-10,
         temperature_relaxation: 1.0,
+        radiation: None,
     }
+}
+
+#[test]
+fn g1_steady_material_radiation_closes_heat_and_source_feedback_without_a_temperature_anchor() {
+    use fs_lbm::conjugate::{RadiationConfig, STEFAN_BOLTZMANN};
+
+    // One solid face sees the surroundings with F=1. The insulated fluid
+    // reaches the plate temperature, so the independent steady law is
+    // P=eps*sigma*A*(T^4-T_ambient^4), even with source rho/mu/k feedback.
+    let mut domain = VoxelDomain::new(2, 1, 1, 1.0).unwrap();
+    domain.set(0, 0, 0, Voxel::Solid(0));
+    let source = FluidTransportState::try_new(1.0, 2.0, 1.0, 1.0).unwrap();
+    let bound = MaterialChtFluid::try_new(&source).unwrap();
+    let solids = [SolidMaterial::new("radiating plate", 2.0)];
+    let flow = SimpleConfig::new([FvBoundary::wall(); 6]);
+    let mut thermal = ThermalSetup::new([ThermalFace::Adiabatic; 6]);
+    let expected = 310.0_f64;
+    let power = 0.9 * STEFAN_BOLTZMANN * (expected.powi(4) - 300.0_f64.powi(4));
+    thermal.power_w = vec![power, 0.0];
+    let original = thermal.clone();
+    let gate = CancelGate::new();
+    for surface_exchange in [false, true] {
+        let mut radiation = RadiationConfig::new(vec![0.9], [Some(300.0); 6]);
+        radiation.surface_exchange = surface_exchange;
+        let controls = MaterialBuoyancyConfig {
+            radiation: Some(&radiation),
+            ..natural_material_controls()
+        };
+        let run = bound
+            .solve_natural_convection(
+                &domain,
+                &solids,
+                &flow,
+                &thermal,
+                &EnergyConfig::default(),
+                &[300.0; 2],
+                controls,
+                &gate,
+                |_, t, _| {
+                    FluidTransportState::try_new(
+                        1.0 - 0.001 * (t - 300.0),
+                        2.0,
+                        1.0 + 0.01 * (t - 300.0),
+                        1.0 / (1.0 + 0.05 * (t - 300.0)),
+                    )
+                },
+            )
+            .unwrap();
+        for &t in &run.energy.temperature {
+            near(t, expected, 1e-11);
+        }
+        let endpoint = &run.endpoint[0];
+        near(
+            endpoint
+                .material
+                .resolved_transport()
+                .dynamic_viscosity_pa_s(),
+            1.0 / 1.5,
+            1e-11,
+        );
+        near(
+            endpoint
+                .material
+                .resolved_transport()
+                .thermal_conductivity_w_m_k(),
+            1.1,
+            1e-11,
+        );
+        near(endpoint.force_n_m3[0], 0.0981, 1e-11);
+        let report = run.report.radiation.unwrap();
+        assert_eq!(report.exposed_faces, 1);
+        near(report.radiated_w, power, 1e-10);
+        assert!(report.relative_power_defect <= radiation.tolerance);
+        assert!(report.physical_energy_residual_w.abs() < 1e-9);
+        assert_eq!(run.energy.report.balance.boundary_outflow_w, 0.0);
+    }
+    assert_eq!(thermal, original);
+
+    // A loose material-temperature tolerance cannot waive nonlinear radiation.
+    // The radiation pass cap also limits the shared momentum/thermal loop.
+    let mut radiation = RadiationConfig::new(vec![0.9], [Some(300.0); 6]);
+    radiation.max_iterations = 1;
+    let controls = MaterialBuoyancyConfig {
+        temperature_tolerance_k: 100.0,
+        radiation: Some(&radiation),
+        ..natural_material_controls()
+    };
+    let failed = bound.solve_natural_convection(
+        &domain,
+        &solids,
+        &flow,
+        &thermal,
+        &EnergyConfig::default(),
+        &[300.0; 2],
+        controls,
+        &gate,
+        |_, _, _| Ok(source),
+    );
+    match failed {
+        Err(MaterialBuoyancyError::NotConverged(report)) => {
+            assert_eq!(report.passes, 1);
+            assert!(report.temperature_defect_k < controls.temperature_tolerance_k);
+            assert_eq!(report.transport_relative_defect, 0.0);
+            assert_eq!(report.force_defect_n_m3, 0.0);
+            assert!(report.radiation.unwrap().relative_power_defect > 1e-3);
+        }
+        _ => panic!("unresolved radiative heat must not pass a loose material tolerance"),
+    }
+
+    // A fixed plate's radiation belongs to its thermostat. Even an admitted
+    // coarse tangent must not invent a free-cell energy loss from that correction.
+    radiation.tolerance = 0.5;
+    thermal.power_w.fill(0.0);
+    thermal.fixed_temperature = vec![(0, expected)];
+    let controls = MaterialBuoyancyConfig {
+        temperature_tolerance_k: 100.0,
+        radiation: Some(&radiation),
+        ..natural_material_controls()
+    };
+    let fixed = bound
+        .solve_natural_convection(
+            &domain,
+            &solids,
+            &flow,
+            &thermal,
+            &EnergyConfig::default(),
+            &[300.0; 2],
+            controls,
+            &gate,
+            |_, _, _| Ok(source),
+        )
+        .unwrap();
+    let report = fixed.report.radiation.unwrap();
+    near(report.radiated_w, power, 1e-10);
+    assert!(report.maximum_cell_power_defect_w > 1.0);
+    assert_eq!(report.net_outflow_correction_w, 0.0);
+    assert!(report.physical_energy_residual_w.abs() < 1e-9);
 }
 
 #[test]
@@ -564,7 +702,7 @@ mod solid_feedback {
     fn quantity(kind: QuantityKind) -> QuantitySpec {
         QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static))
     }
-    fn card(slopes: [f64; 3], upper: f64, sharp: bool) -> MaterialCard {
+    pub(super) fn card(slopes: [f64; 3], upper: f64, sharp: bool) -> MaterialCard {
         let mut claims = ClaimSet::new();
         for (name, slope) in ["kx", "ky", "kz"].into_iter().zip(slopes) {
             let knots = if sharp {
@@ -586,7 +724,7 @@ mod solid_feedback {
         MaterialCard::assemble(MaterialStateId { chemistry: "synthetic thermal solid".into(),
             phase: "solid".into(), process: "numerical fixture".into(), revision: 0 }, claims, vec![]).unwrap()
     }
-    fn law(card: &MaterialCard) -> SolidConductivityLaw<'_> {
+    pub(super) fn law(card: &MaterialCard) -> SolidConductivityLaw<'_> {
         let point = QueryPoint::new().with_quantity("T", quantity(QuantityKind::AbsoluteTemperature), 300.0)
             .unwrap().with_quantity("pressure", quantity(QuantityKind::Pressure), 100000.0).unwrap();
         let requirements = ["kx", "ky", "kz"].map(|name| ScalarPropertyRequirement::try_with_quantity(

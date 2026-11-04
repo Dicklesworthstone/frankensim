@@ -1107,6 +1107,67 @@ mod evolving_materials {
     }
 
     #[test]
+    fn steady_material_radiation_closes_physical_power_with_both_caloric_modes() {
+        for source_enthalpy in [false, true] {
+            let name = format!("steady-material-radiation-{source_enthalpy}");
+            let (path, original) = prepare(&name, 0.2, 350.0);
+            let fluid_path = path.with_file_name(format!("{name}-liquid.fsmcdpk"));
+            let solid_path = path.with_file_name(format!("{name}-solid.fsmcdpk"));
+            let fluid_bytes = std::fs::read(&fluid_path).unwrap();
+            let solid_bytes = std::fs::read(&solid_path).unwrap();
+            // With no gravity or flow, this isolates the radiative heat path.
+            // The native material tests separately exercise coupled buoyancy.
+            let mut input = original
+                .replace("\"gravity_m_s2\":[0,-9.81,0]", "\"gravity_m_s2\":[0,0,0]")
+                .replace("\"x+\":{\"type\":\"wall\",\"temperature_k\":300}",
+                    "\"x+\":{\"type\":\"opening\",\"ambient_k\":300}");
+            if source_enthalpy {
+                input = input.replacen('{', r#"{"fluid_enthalpy":{
+                    "basis":"isobaric-cp","pressure_axis":"pressure",
+                    "minimum_temperature_k":290,"maximum_temperature_k":350,
+                    "maximum_flux_defect_w":1e-10},"#, 1);
+            }
+            std::fs::write(&path, &input).unwrap();
+            let (code, dark, error) = run(&path);
+            assert_eq!(code, 0, "{error}");
+            assert_eq!(dark.path(&["material_feedback", "radiation"]), Some(&J::Null));
+
+            let emitting = input
+                .replace("\"name\":\"wall\",\"source\"", "\"name\":\"wall\",\"emissivity\":0.8,\"source\"")
+                .replacen('{', r#"{"radiation":{"rays_per_face":64,"seed":9,"patch_size":1},"#, 1);
+            assert_ne!(emitting, input);
+            std::fs::write(&path, &emitting).unwrap();
+            let (code, bright, error) = run(&path);
+            assert_eq!(code, 0, "{error}");
+            assert_eq!(bright.str_field("solver"), Some("fv-simplec-material"));
+            assert!(f(&bright, &["max_solid_temperature_k"])
+                < f(&dark, &["max_solid_temperature_k"]) - 0.01);
+            let radiation = bright.path(&["material_feedback", "radiation"]).unwrap();
+            let power = f(radiation, &["radiated_w"]);
+            assert!(power > 0.0);
+            assert_eq!(power, f(&bright, &["radiation", "radiated_w"]));
+            assert!(f(radiation, &["exposed_faces"]) > 0.0);
+            assert_eq!(f(radiation, &["exposed_faces"]),
+                f(&bright, &["radiation", "exposed_faces"]));
+            assert!(f(radiation, &["relative_power_defect"]) <= 1e-10);
+            assert!(f(radiation, &["physical_energy_residual_w"]).abs() < 1e-7);
+            // The original balance describes the solved tangent system;
+            // adding its reported correction recovers physical radiation.
+            assert!((f(&bright, &["energy", "sink_outflow_w"])
+                + f(radiation, &["net_outflow_correction_w"]) - power).abs() < 1e-7);
+            assert_eq!(bright.path(&["material_inputs", "fluid"]),
+                dark.path(&["material_inputs", "fluid"]));
+            if source_enthalpy {
+                assert_eq!(bright.path(&["material_feedback", "fluid_enthalpy"])
+                    .unwrap().str_field("basis"), Some("isobaric-cp"));
+            }
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), emitting);
+            assert_eq!(std::fs::read(&fluid_path).unwrap(), fluid_bytes);
+            assert_eq!(std::fs::read(&solid_path).unwrap(), solid_bytes);
+        }
+    }
+
+    #[test]
     fn temperature_dependent_solid_pack_changes_heat_and_actual_liquid_flow() {
         let mut results = Vec::new();
         for (name, slope) in [("evolving-low", 0.0), ("evolving-high", 1.0)] {
@@ -1298,7 +1359,6 @@ mod evolving_materials {
             (insert("\"expansion_per_k\":0.001"), "density owns buoyancy"),
             (insert("\"reference_temperature_k\":301"), "conflicts with the original fluid"),
             (insert("\"transient\":{}"), "storage_temperature_range_k"),
-            (insert("\"radiation\":{}"), "does not support radiation"),
             (scene.replace("\"tolerance\":1e-10", "\"tolerance\":1e-10,\"turbulence\":\"lvel\""), "requires laminar"),
             (scene.replacen("\"mode\":\"temperature-dependent\",\"temperature_axis\":\"T\"",
                 "\"mode\":\"frozen\"", 1), "requires a source-backed fluid"),

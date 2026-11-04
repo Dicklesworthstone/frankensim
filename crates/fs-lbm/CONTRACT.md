@@ -546,6 +546,33 @@ work remain outside this steady single-phase entry. `material_conjugate`'s
 `source_enthalpy` regressions specify actual channel heat, source Cp(T) changes,
 reversed flow, datum invariance, local closure and atomic refusal.
 
+### Radiation in steady material convection
+
+`MaterialBuoyancyConfig::radiation` optionally borrows the original
+`RadiationConfig` for all four steady material-convection entries, including
+source-defined solids and source h(T). One cached `Radiators` geometry supplies
+the first and every subsequent thermal tangent. Original fluid rho/mu/k, solid
+conductivity, caloric transport and radiation are re-evaluated at the same
+temperature endpoint. The smaller material/radiation pass budget applies.
+
+Acceptance retains the original material and caloric gates and additionally
+checks every cell's physical radiative power against the assembled tangent,
+using the same normalization and roundoff allowance as native transient heat.
+Relaxation or a loose temperature tolerance cannot waive this heat gate.
+`MaterialRadiationReport` retains the original exposed-face count, heat escaping
+to the surroundings, local power defects and radiation-corrected global heat residual.
+The native `EnergySolution` report remains the actually solved tangent system;
+the separate net-outflow correction excludes fixed-cell radiation because its
+matching thermostat correction cancels. Surface exchange remains reciprocal.
+
+No second heat solver, extra material query context or radiation ray trace per
+pass is introduced. The absent-radiation path retains its original solves.
+Existing laminar/Boussinesq/source-domain bounds remain; compact junction aliases
+refuse this option because they do not own resolved radiating cell rows.
+Focused G0/G1 regressions specify multiple faces per heat row, nonlinear-power
+refusal, thermostat accounting, an independent Stefan–Boltzmann equilibrium,
+and a source-solid/source-enthalpy channel carrying 6 W alongside radiation.
+
 ### Source-caloric native transient convection
 
 `MaterialChtFluid::march_natural_convection_with_enthalpy` extends the SAME
