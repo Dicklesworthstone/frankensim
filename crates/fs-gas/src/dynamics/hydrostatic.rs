@@ -228,6 +228,13 @@ impl Euler1d {
         self.hydrostatic.as_ref()?.faces.get(face).copied()
     }
 
+    /// Integrated reference cell average and its cached source evaluation.
+    /// Cartesian extensions use this same thermodynamic reference without
+    /// replacing a volume average by a point sample at the cell centre.
+    pub fn hydrostatic_reference_cell(&self, cell: usize) -> Option<(Conserved, Primitive)> {
+        self.hydrostatic.as_ref()?.cells.get(cell).copied()
+    }
+
     /// Discrete gravitational potential energy, `sum rho_i V_i phi(x_i)` [J].
     ///
     /// Adding this to [`Self::totals`]' referenced energy gives the conserved

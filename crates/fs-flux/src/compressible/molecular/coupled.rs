@@ -94,13 +94,16 @@ impl<L: TransportLaw> MolecularEuler2d<L> {
         let molecular = MolecularTransport2d::new(&flow, law, &mut cancelled)?;
         let mut cells = allocated(flow.states.len(), State::default())?;
         cells.copy_from_slice(&flow.states);
-        let trial = Euler2d::new(
+        let mut trial = Euler2d::new(
             flow.gas.clone(),
             flow.grid,
             cells,
             flow.boundaries,
             &mut cancelled,
         )?;
+        if let Some((axis, reference)) = flow.atmosphere() {
+            trial.bind_isothermal_atmosphere(axis, reference, &mut cancelled)?;
+        }
         let faces = flow.boundary_impulses.len();
         Ok(Self {
             accepted: flow,

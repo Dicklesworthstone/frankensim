@@ -18,6 +18,9 @@ mod cartesian;
 /// Conservative acceleration and body-force work on the planar time owner.
 pub mod forcing;
 pub use forcing::{BodyForce2d, ForceChange2d, ForceControl2d, ForcingWorkspace2d};
+/// Source-owned stratified equilibrium and conservative gravitational work.
+pub mod hydrostatic;
+pub use hydrostatic::IsothermalAtmosphere;
 /// Evolving canonical species in the same conservative Cartesian discretization.
 pub mod mixture;
 /// Original-source Fourier heat transport and complete planar Newtonian stress.
@@ -339,7 +342,8 @@ pub struct StepReport {
     pub after: Totals,
     /// Net transfer into the domain, integrated over both stages.
     pub boundary_change: Totals,
-    /// Applied body impulse and mechanical work, separate from boundary transfer.
+    /// Applied body impulse and mechanical work, including retained gravity,
+    /// separate from boundary transfer.
     pub source_change: ForceChange2d,
     /// `after - before - boundary_change - source_change`.
     pub conservation_residual: Totals,
@@ -368,6 +372,7 @@ pub struct Euler2d {
     time: f64,
     last_step: Option<StepReport>,
     boundary_impulses: Vec<BoundaryImpulse>,
+    hydrostatic: Option<hydrostatic::HydrostaticBalance>,
     work: Workspace,
 }
 impl Euler2d {
@@ -404,6 +409,7 @@ impl Euler2d {
             time: 0.0,
             last_step: None,
             boundary_impulses: allocated(2 * (nx + ny), Totals::default())?,
+            hydrostatic: None,
             work: Workspace {
                 primitive,
                 slopes: allocated(8 * n, 0.0)?,
@@ -469,8 +475,10 @@ impl Euler2d {
     /// Every retry restarts from the accepted state. Cancellation or refusal
     /// preserves cells, clock, boundary loads and the last report. The supplied
     /// workspace is reused. A zero source retains ordinary-step semantics.
-    /// This explicit split is not hydrostatic well balancing or an implicit
-    /// velocity-dependent force model. Time-varying loads are held per interval.
+    /// These loads are additional to any retained hydrostatic gravity. The
+    /// explicit source split itself is not hydrostatic well balancing or an
+    /// implicit velocity-dependent force model. Time-varying loads are held
+    /// per interval.
     #[allow(clippy::too_many_arguments)]
     pub fn step_with_forcing(
         &mut self,
@@ -508,8 +516,12 @@ impl Euler2d {
             return Err(Error::Invalid("Cartesian duration, CFL or retry controls"));
         }
         let mut rate: f64 = 0.0;
-        for (p, q) in self.work.primitive.iter_mut().zip(&self.states) {
-            *p = q.primitive(&self.gas, &mut cancelled)?;
+        for (cell, (p, q)) in self.work.primitive.iter_mut().zip(&self.states).enumerate() {
+            *p = if let Some(balance) = &self.hydrostatic {
+                balance.primitive(&self.gas, &self.grid, cell, *q, &mut cancelled)?
+            } else {
+                q.primitive(&self.gas, &mut cancelled)?
+            };
             if let Some((_, force_controls, _)) = &forcing {
                 force_controls.admit_velocity::<Error>(p.velocity, p.sound_speed)?;
             }
@@ -531,12 +543,12 @@ impl Euler2d {
                     let (stats, source) = forcing::attempt(
                         &self.gas, &self.grid, self.boundaries, &self.states,
                         &mut self.work, workspace, *force, *force_controls,
-                        dt, controls.cfl, reconstruction, cancelled,
+                        dt, controls.cfl, reconstruction, self.hydrostatic.as_ref(), cancelled,
                     )?;
                     source_change = source;
                     return Ok(stats);
                 }
-                attempt(
+                let (stats, source) = attempt(
                     &self.gas,
                     &self.grid,
                     self.boundaries,
@@ -546,8 +558,11 @@ impl Euler2d {
                     controls.cfl,
                     reconstruction,
                     None,
+                    self.hydrostatic.as_ref(),
                     cancelled,
-                )
+                )?;
+                source_change = source;
+                Ok(stats)
             },
         )?;
         let cartesian::AcceptedStep {
@@ -611,9 +626,11 @@ fn attempt(
     cfl: f64,
     reconstruction: Reconstruction,
     force_controls: Option<ForceControl2d>,
+    hydrostatic: Option<&hydrostatic::HydrostaticBalance>,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<StageStats, Error> {
-    cartesian::rk2(cancelled, |final_stage, cancelled| {
+) -> Result<(StageStats, ForceChange2d), Error> {
+    let mut source = ForceChange2d::default();
+    let stats = cartesian::rk2::<Error, _>(cancelled, |final_stage, cancelled| {
         let stats = spatial(
             gas,
             grid,
@@ -625,10 +642,11 @@ fn attempt(
             &mut work.y_flux,
             reconstruction,
             force_controls,
+            hydrostatic,
             cancelled,
         )?;
         cartesian::check_cfl::<Error>(stats.rate * dt, cfl)?;
-        if final_stage {
+        let change = if final_stage {
             update(
                 gas,
                 grid,
@@ -640,8 +658,9 @@ fn attempt(
                 dt,
                 final_stage,
                 force_controls,
+                hydrostatic,
                 cancelled,
-            )?;
+            )?
         } else {
             update(
                 gas,
@@ -654,9 +673,14 @@ fn attempt(
                 dt,
                 false,
                 force_controls,
+                hydrostatic,
                 cancelled,
-            )?;
+            )?
+        };
+        for axis in 0..2 {
+            source.impulse[axis] += change.impulse[axis];
         }
+        source.work += change.work;
         capture_boundaries(
             grid,
             &work.x_flux,
@@ -667,7 +691,18 @@ fn attempt(
             cancelled,
         )?;
         Ok(stats)
-    })
+    })?;
+    if !source
+        .impulse
+        .into_iter()
+        .chain([source.work])
+        .all(f64::is_finite)
+    {
+        return Err(Error::Invalid(
+            "unrepresentable extensive gravitational source",
+        ));
+    }
+    Ok((stats, source))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -682,34 +717,66 @@ fn spatial(
     y_flux: &mut [NormalFaceFlux],
     reconstruction: Reconstruction,
     force_controls: Option<ForceControl2d>,
+    hydrostatic: Option<&hydrostatic::HydrostaticBalance>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<StageStats, Error> {
     let mut stats = StageStats::default();
-    for (p, q) in primitive.iter_mut().zip(states) {
-        *p = q.primitive(gas, &mut *cancelled)?;
+    for (cell, (p, q)) in primitive.iter_mut().zip(states).enumerate() {
+        *p = if let Some(balance) = hydrostatic {
+            balance.primitive(gas, grid, cell, *q, cancelled)?
+        } else {
+            q.primitive(gas, &mut *cancelled)?
+        };
         if let Some(controls) = force_controls {
             controls.admit_velocity::<Error>(p.velocity, p.sound_speed)?;
         }
     }
+    let variables = |cell: usize| {
+        if let Some(balance) = hydrostatic {
+            balance
+                .variables(grid, cell, primitive[cell])
+                .expect("relative coordinates admitted while decoding")
+        } else {
+            primitive[cell].array()
+        }
+    };
+    let admissible = |p: [f64; 4]| {
+        let t = (p[3] / p[0]) / gas.gas_constant();
+        p.into_iter().all(f64::is_finite)
+            && positive(p[0])
+            && positive(p[3])
+            && t >= gas.domain().minimum_temperature
+            && t <= gas.domain().maximum_temperature
+    };
+    let trace = |cell: usize, axis: usize, sign: f64, slope: &[f64]| {
+        let center = variables(cell);
+        if let Some(balance) = hydrostatic {
+            let reference = balance.trace(grid, cell, axis, sign);
+            let scale = [reference[0], 1.0, 1.0, reference[3]];
+            let baseline = std::array::from_fn(|d| scale[d] * center[d]);
+            if !admissible(baseline) {
+                // A far-from-reference trace may overflow or leave the source
+                // interval even at zero slope. Fall back to the admitted
+                // physical cell; never clip its conservative state or retry
+                // an impossible reference trace by endlessly reducing dt.
+                primitive[cell].array()
+            } else {
+                std::array::from_fn(|d| scale[d] * (center[d] + sign * slope[d]))
+            }
+        } else {
+            std::array::from_fn(|d| center[d] + sign * slope[d])
+        }
+    };
     stats.limited = cartesian::slopes::<Error>(
         grid,
         boundaries,
         4,
         [1, 2],
         reconstruction,
-        |k, d| primitive[k].array()[d],
+        |k, d| variables(k)[d],
         |_, _, _, _| Ok(0),
         slopes,
-        |k, _, sign, slope| {
-            let center = primitive[k].array();
-            let p: [f64; 4] = std::array::from_fn(|d| center[d] + sign * slope[d]);
-            let t = p[3] / (gas.gas_constant() * p[0]);
-            p.into_iter().all(f64::is_finite)
-                && positive(p[0])
-                && positive(p[3])
-                && t >= gas.domain().minimum_temperature
-                && t <= gas.domain().maximum_temperature
-        },
+        |k, axis, sign, slope| admissible(trace(k, axis, sign, slope)),
         cancelled,
     )?;
     cartesian::faces::<Error, _>(grid, boundaries, cancelled, |face, cancelled| {
@@ -724,9 +791,8 @@ fn spatial(
             return Ok(());
         }
         let reconstruct = |k: usize, sign: f64| -> NormalPrimitive {
-            let center = primitive[k].array();
-            let p: [f64; 4] =
-                std::array::from_fn(|d| center[d] + sign * slopes[(2 * k + axis) * 4 + d]);
+            let offset = (2 * k + axis) * 4;
+            let p = trace(k, axis, sign, &slopes[offset..offset + 4]);
             NormalPrimitive {
                 density: p[0],
                 normal_velocity: p[axis + 1],
@@ -734,7 +800,8 @@ fn spatial(
                 pressure: p[3],
             }
         };
-        let first_order = reconstruction == Reconstruction::FirstOrder;
+        // First order is constant relative to the atmosphere.
+        let first_order = reconstruction == Reconstruction::FirstOrder && hydrostatic.is_none();
         let flux = if let cartesian::FaceKind::Interior { left, right } = face.kind {
             if first_order {
                 gas.hllc_normal_flux(
@@ -842,8 +909,11 @@ fn update(
     dt: f64,
     final_stage: bool,
     force_controls: Option<ForceControl2d>,
+    hydrostatic: Option<&hydrostatic::HydrostaticBalance>,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<(), Error> {
+) -> Result<ForceChange2d, Error> {
+    let mut sum = [0.0; 2];
+    let mut correction = [0.0; 2];
     cartesian::update::<4, Error, _>(
         grid,
         4,
@@ -852,25 +922,55 @@ fn update(
         |k, d| original[k].array()[d],
         |k, d| stage[k].array()[d],
         |axis, face, d| {
-            flux_array(
+            let value = flux_array(
                 if axis == 0 {
                     x_flux[face]
                 } else {
                     y_flux[face]
                 },
                 axis,
-            )[d]
+            )[d];
+            if let Some(balance) = hydrostatic.filter(|b| b.axis == axis && d == axis + 1) {
+                // Cancel the actual reference traction before time scaling.
+                value - balance.traction(grid, face)
+            } else {
+                value
+            }
         },
         cancelled,
         |k, row, cancelled| {
             output[k] = State::from_array([row[0], row[1], row[2], row[3]]);
-            let primitive = output[k].primitive(gas, &mut *cancelled)?;
+            if let Some(balance) = hydrostatic {
+                let [perturbation, force, power] =
+                    balance.sources(grid, k, stage[k], x_flux, y_flux);
+                let scale = if final_stage { 0.5 * dt } else { dt };
+                output[k].momentum[balance.axis] += scale * perturbation;
+                output[k].energy += scale * power;
+                // Both SSP stages contribute half an interval to the account.
+                for (d, rate) in [force, power].into_iter().enumerate() {
+                    let y = (0.5 * dt * grid.cell_volume()) * rate - correction[d];
+                    let next = sum[d] + y;
+                    correction[d] = (next - sum[d]) - y;
+                    sum[d] = next;
+                }
+            }
+            let primitive = if let Some(balance) = hydrostatic {
+                balance.primitive(gas, grid, k, output[k], cancelled)?
+            } else {
+                output[k].primitive(gas, &mut *cancelled)?
+            };
             if let Some(controls) = force_controls {
                 controls.admit_velocity::<Error>(primitive.velocity, primitive.sound_speed)?;
             }
             Ok(())
         },
-    )
+    )?;
+    let mut change = ForceChange2d::default();
+    if let Some(balance) = hydrostatic {
+        change.impulse[balance.axis] = sum[0];
+        change.work = sum[1];
+    }
+    Ok(change)
 }
 
 fn capture_boundaries(

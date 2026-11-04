@@ -1261,6 +1261,47 @@ This is a single-run diagnostic under shared machine load, not a portable
 throughput guarantee or a repeated statistical benchmark. The direct numerical
 regressions remain the correctness gate.
 
+### Hydrostatic density stratification in the original planar owner
+
+`Euler2d::new_isothermal_atmosphere` initializes exponential volume averages
+and retains uniform gravity along x or y. It reuses the original `fs-gas`
+`IsothermalAtmosphere` integration and cached thermodynamic cell/face states;
+only a compact axial profile survives initialization. At least two cells and
+physical ends are required along gravity. The transverse axis retains its
+periodic, reflecting or transmissive semantics. `bind_isothermal_atmosphere`
+admits caller-authored disturbed averages before evolution, changes no state
+or energy gauge, and refuses replacement of an existing gravity declaration.
+
+Both first-order and MUSCL reconstruction use density and pressure relative
+to that reference, with physical velocities. This keeps a positive reduced-
+density atmosphere reconstructible instead of producing negative faces from
+large additive deviations. Relative coordinates must be representable; an
+inadmissible zero-slope physical face uses a local physical-cell trace without
+clipping its conservative state. Every evolving face retains the original
+source-owned Riemann or stationary-wall closure. Transmissive ends extrapolate
+the disturbance while continuing the reference to the physical face.
+
+Momentum cancels the source-resolved reference face pressure before time
+scaling, then adds `g*(rho-rho_reference)`. Gravity work uses the same shared
+mass fluxes as continuity. Consequently the SSP RK2 update conserves
+`sum V*(E + rho*phi)` with `phi=-g*(x-x_reference)`, up to floating-point
+arithmetic and boundary transport of `energy_flux + phi_face*mass_flux`.
+`gravitational_potential_energy()` exposes this midpoint potential coordinate;
+`StepReport::source_change` includes the actual gravitational impulse and work.
+The original accepted state, reports and boundary loads remain transactional.
+Additional authored forcing composes with this retained gravity, and the
+coupled molecular owner retains the same reference in its trial field.
+
+The isothermal reference is not a thermostat: disturbances evolve full gas
+energy and the original variable heat capacity. Native regressions cover
+exact resting states with more than 300:1 density contrast, both axes and both
+reconstructions, a two-dimensional disturbance, coarse strongly reduced-density
+states, closed gas-plus-potential conservation, open potential-energy transport,
+additional acceleration and atomic cancellation/reference refusal. This
+bounded reference method does not provide arbitrary hydrostatic profiles,
+rotating equilibria, three-dimensional or changing-composition well balancing,
+an invariant-domain theorem or experimental validation.
+
 ### Source-owned molecular transport in the same Cartesian gas
 
 `compressible::molecular::MolecularTransport2d` binds the original
@@ -1474,7 +1515,8 @@ retries allocate no additional arrays. Focused regressions cover unequal
 density acceleration versus volumetric forcing, variable-Cp signed work,
 spatial source fields, zero-source bit equality, force-driven Mach/CFL retries,
 budget refusal and final-checkpoint cancellation/replay. The same held-source
-and hydrostatic no-claim boundaries below apply.
+boundaries below apply. The split alone is not hydrostatic well balancing;
+the separately selected planar atmosphere reference above supplies that path.
 
 `MolecularEuler2d::step_with_forcing` reuses this forced interval between its
 original Fourier/Newtonian molecular halves. The complete split restarts from

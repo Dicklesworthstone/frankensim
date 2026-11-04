@@ -76,6 +76,7 @@ pub(super) fn attempt(
     dt: f64,
     cfl: f64,
     reconstruction: Reconstruction,
+    hydrostatic: Option<&hydrostatic::HydrostaticBalance>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(StageStats, ForceChange2d), Error> {
     for (cell, (source, target)) in states.iter().zip(&mut forcing_work.original).enumerate() {
@@ -94,7 +95,7 @@ pub(super) fn attempt(
         false,
         cancelled,
     )?;
-    let mut stats = super::attempt(
+    let (mut stats, gravity) = super::attempt(
         gas,
         grid,
         boundaries,
@@ -104,6 +105,7 @@ pub(super) fn attempt(
         cfl,
         reconstruction,
         Some(controls),
+        hydrostatic,
         cancelled,
     )?;
     let (second, endpoint_rate) = kick_field(
@@ -119,8 +121,10 @@ pub(super) fn attempt(
     cartesian::check_cfl::<Error>(endpoint_rate * dt, cfl)?;
     stats.rate = stats.rate.max(endpoint_rate);
     let source = ForceChange2d {
-        impulse: std::array::from_fn(|axis| first.impulse[axis] + second.impulse[axis]),
-        work: first.work + second.work,
+        impulse: std::array::from_fn(|axis| {
+            first.impulse[axis] + second.impulse[axis] + gravity.impulse[axis]
+        }),
+        work: first.work + second.work + gravity.work,
     };
     if !source
         .impulse
