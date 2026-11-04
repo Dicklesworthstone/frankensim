@@ -825,6 +825,39 @@ inventoried and measured in fs-couple `tests/integrator_warping_audit.rs`.
   1-DOF `mass_spring_damper` or a `modal_bank`. Music is not a
   special case.
 
+### Complete reciprocal rectangular power-port composition
+
+`interconnect_mapped` composes the original systems with `u_right = M*y_left`
+and `u_left = -M^T*y_right`. Physical signed areas, ratios and already assembled
+spatial weights use selected port-bank order. Selected inputs close internally;
+remaining external ports retain original left-then-right order. All original
+states, storage laws, constitutive discrete gradients, losses and source-square
+resistance witnesses remain. Zero/rank-deficient maps remove no coordinate.
+The existing canonical `interconnect` and `transformer` share this assembly,
+retaining their original signs and external-port conventions.
+
+The complete coupled skew operator goes to the existing native integrators.
+Declared quadratic owners can use the original exact ZOH/continuous-tone flow,
+without a held-interface approximation or an independent coupling split.
+Nonlinear storage keeps its original native law and temporal accuracy limits.
+This does not certify spatial interpolation or infer work from moving geometry.
+
+Composition chooses the cheaper native matrix contraction and carries both
+compensated words through its intermediate buffer; rounding each first-stage dot
+product could otherwise erase an entire small coupled mode. The final value and
+its opposite transpose come from the same represented coefficient. Nonfinite,
+overflowed or unrepresentable nonzero products refuse. `InterconnectionBudget`
+bounds states, original ports, conservative dense scratch and product/FMA work;
+there is no physical rank threshold, numerical input scale or 32-port cutoff.
+
+Four direct tests of the original production accumulator passed with the pinned
+Rust compiler, including product remainders and cancellation between 1e16-scale
+intermediate values. Seven native integration regression definitions cover
+analytic forced/damped unequal pistons, separate source work and original heat,
+full nonlinear pressure convergence, port ordering/orientation, legacy behavior,
+weak wide maps, capacities and the recovered unit-frequency mode. Full pHS
+compilation/execution remains outstanding under the shared runtime build limit.
+
 ## Invariants
 
 The cylindrical ZK owner uses ζ=rv√(-i) in +iω telegraph bookkeeping:

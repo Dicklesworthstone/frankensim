@@ -52,6 +52,9 @@ pub mod linear_exact;
 pub mod harmonic;
 /// Work-conjugate physical coupling of complete subsystems on different clocks.
 pub mod multirate;
+/// Complete reciprocal physical power-port composition.
+mod interconnection;
+pub use interconnection::{InterconnectionBudget, interconnect_mapped};
 /// Physical outlet volume flow on the original acoustic-chain state.
 pub mod acoustic_outlet;
 
@@ -2493,66 +2496,7 @@ pub fn interconnect(
     b: PortHamiltonian,
     pairs: &[(usize, usize)],
 ) -> Result<PortHamiltonian, PhsError> {
-    let (na, nb) = (a.n, b.n);
-    let n = na + nb;
-    // Validate pairing.
-    let mut used_a = vec![false; a.m];
-    let mut used_b = vec![false; b.m];
-    for &(pa, pb) in pairs {
-        if pa >= a.m || pb >= b.m || used_a[pa] || used_b[pb] {
-            return Err(PhsError::BadPortPairing);
-        }
-        used_a[pa] = true;
-        used_b[pb] = true;
-    }
-    // Composite J: block-diag(J_a, J_b) plus the skew coupling
-    // -Ga_p Gb_p^T / +Gb_p Ga_p^T over the paired columns.
-    let mut j = vec![0.0; n * n];
-    let mut r = vec![0.0; n * n];
-    for i in 0..na {
-        for k in 0..na {
-            j[i * n + k] = a.j[i * na + k];
-            r[i * n + k] = a.r[i * na + k];
-        }
-    }
-    for i in 0..nb {
-        for k in 0..nb {
-            j[(na + i) * n + na + k] = b.j[i * nb + k];
-            r[(na + i) * n + na + k] = b.r[i * nb + k];
-        }
-    }
-    for &(pa, pb) in pairs {
-        for i in 0..na {
-            for k in 0..nb {
-                let c = a.g[i * a.m + pa] * b.g[k * b.m + pb];
-                j[i * n + na + k] -= c;
-                j[(na + k) * n + i] += c;
-            }
-        }
-    }
-    // External ports: unpaired of a then unpaired of b.
-    let ext_a: Vec<usize> = (0..a.m).filter(|&p| !used_a[p]).collect();
-    let ext_b: Vec<usize> = (0..b.m).filter(|&p| !used_b[p]).collect();
-    let m = ext_a.len() + ext_b.len();
-    let mut g = vec![0.0; n * m];
-    for (col, &p) in ext_a.iter().enumerate() {
-        for i in 0..na {
-            g[i * m + col] = a.g[i * a.m + p];
-        }
-    }
-    for (col, &p) in ext_b.iter().enumerate() {
-        for i in 0..nb {
-            g[(na + i) * m + ext_a.len() + col] = b.g[i * b.m + p];
-        }
-    }
-    let resistance_witness = compose_resistance_witness(&[&a, &b], n, &r)?;
-    let storage = Box::new(SumStorage {
-        a: (a.storage, na),
-        b: (b.storage, nb),
-    });
-    let mut system = PortHamiltonian::new(n, m, j, r, g, storage)?;
-    system.resistance_witness = resistance_witness;
-    Ok(system)
+    interconnection::paired(a, b, pairs)
 }
 
 /// Transformer of ratio `n`: `u_a = n y_b`, `u_b = −n y_a`.
@@ -2571,65 +2515,7 @@ pub fn transformer(
     port_b: usize,
     ratio: f64,
 ) -> Result<PortHamiltonian, PhsError> {
-    if port_a >= a.m || port_b >= b.m {
-        return Err(PhsError::BadPortPairing);
-    }
-    if !ratio.is_finite() {
-        return Err(PhsError::Unadmitted {
-            what: "transformer ratio",
-        });
-    }
-    let (na, nb) = (a.n, b.n);
-    let n = na + nb;
-    let mut j = vec![0.0; n * n];
-    let mut r = vec![0.0; n * n];
-    for i in 0..na {
-        for k in 0..na {
-            j[i * n + k] = a.j[i * na + k];
-            r[i * n + k] = a.r[i * na + k];
-        }
-    }
-    for i in 0..nb {
-        for k in 0..nb {
-            j[(na + i) * n + na + k] = b.j[i * nb + k];
-            r[(na + i) * n + na + k] = b.r[i * nb + k];
-        }
-    }
-    for i in 0..na {
-        for k in 0..nb {
-            let c = ratio * a.g[i * a.m + port_a] * b.g[k * b.m + port_b];
-            // Opposite gyrator sign: u_a = n y_b, u_b = −n y_a.
-            j[i * n + na + k] += c;
-            j[(na + k) * n + i] -= c;
-        }
-    }
-    let ext_a: Vec<usize> = (0..a.m).filter(|&p| p != port_a).collect();
-    let ext_b: Vec<usize> = (0..b.m).filter(|&p| p != port_b).collect();
-    let m = ext_a.len() + ext_b.len();
-    let mut g = vec![0.0; n * m.max(1)];
-    if m > 0 {
-        g.truncate(n * m);
-        for (col, &p) in ext_a.iter().enumerate() {
-            for i in 0..na {
-                g[i * m + col] = a.g[i * a.m + p];
-            }
-        }
-        for (col, &p) in ext_b.iter().enumerate() {
-            for i in 0..nb {
-                g[(na + i) * m + ext_a.len() + col] = b.g[i * b.m + p];
-            }
-        }
-    } else {
-        g = Vec::new();
-    }
-    let resistance_witness = compose_resistance_witness(&[&a, &b], n, &r)?;
-    let storage = Box::new(SumStorage {
-        a: (a.storage, na),
-        b: (b.storage, nb),
-    });
-    let mut system = PortHamiltonian::new(n, m, j, r, g, storage)?;
-    system.resistance_witness = resistance_witness;
-    Ok(system)
+    interconnection::transformer(a, b, port_a, port_b, ratio)
 }
 
 /// Reduced storage: `H_r(xr) = H(V xr)`, gradient `V^T gradH(V xr)`.
