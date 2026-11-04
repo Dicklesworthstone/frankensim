@@ -266,6 +266,37 @@ and exercise numerical-rank, storage, work and domain refusals. This remains
 a local stationary-spectrum estimate: it supplies neither global discovery,
 tone count, damping, time-varying tracking nor measurement uncertainty.
 
+### Damped tones and double decay
+
+`harmonic::DampedToneFitPlan` fits a constant and the caller's supplied
+oscillatory decay poles through the same `FitDesign` Householder QR, full
+triangular conditioning, amplitude scaling and allocation-free `fit_into`
+owner. Each `DampedTonePole` supplies a positive frequency in hertz and a
+nonnegative amplitude decay rate in reciprocal seconds. Its two sampled
+columns are `exp(-decay*t) cos(2 pi f t)` and `exp(-decay*t) sin(2 pi f t)`.
+Frequency means the damped oscillation frequency, not the undamped natural
+frequency. Phasors use `a + i b` under `exp(-i omega t)` and refer to the first
+sample, before exponential attenuation; DC and residual RMS retain input units.
+
+Caller pole order is preserved. Equal frequencies with distinct decay rates
+can retain double decay, and distinct frequencies retain beating; neither is
+replaced by added stationary harmonics. Duplicate poles refuse. The existing
+sample-count, strict Nyquist, finite-value, storage and conditioning admissions
+also apply. Very close poles or envelopes that vanish before the oscillation
+is sampled refuse when the complete design is unresolved. Storage includes
+both retained physical parameters for each pole before allocation. Preparation
+and reuse have the same asymptotic costs as the stationary fit; zero decay
+reproduces the stationary design and fit bits exactly.
+
+The poles are inputs, not inferred parameters. This does not discover modes,
+identify damping, certify noisy-record separability, or remove aliased energy.
+Omitted modes or incorrect envelopes can bias fitted components and remain in
+the sampled residual. `tests/damped_tone_fit.rs` uses an independent damped
+oscillator initial-value solution, same-frequency double decay, close beating
+tones, time-origin attenuation/phase covariance, stationary-limit bit parity,
+physical-unit scaling and preloads, direct residual reconstruction, and typed
+rank/domain/storage refusals.
+
 ### Local fundamental-frequency refinement
 
 `harmonic::refine_harmonic_frequency` refines an independently supplied pitch

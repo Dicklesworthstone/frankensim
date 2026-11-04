@@ -12,14 +12,20 @@
 //! fundamental and amplitudes within explicit bounds and evaluation budgets.
 //! [`refine_tone_frequencies`] instead refines independent frequencies together,
 //! preserving physical inharmonicity and the interaction of close tones.
+//! [`DampedToneFitPlan`] retains supplied exponential decay rates as well as
+//! frequencies, fitting ringdowns and double decay through the same QR owner.
 //!
 //! The returned peak phasor is `a_h + i b_h` for `exp(-i w_h t)`, referenced
-//! to the first sample. It is twice the conjugate of the positive-frequency
-//! normalized DFT coefficient for a bin-centered real sinusoid.
+//! to the first sample. For an undamped bin-centered real sinusoid, it is
+//! twice the conjugate of the positive-frequency normalized DFT coefficient.
 
 use crate::C64;
 use fs_la::factor::{Qr, qr};
 use fs_math::det;
+
+#[path = "harmonic/damped.rs"]
+mod damped;
+pub use damped::{DampedToneFitPlan, DampedTonePole};
 
 #[path = "harmonic/frequency.rs"]
 mod frequency;
@@ -111,6 +117,8 @@ pub struct HarmonicFit {
     /// Fitted constant term, not the arithmetic mean of a partial-period record.
     pub dc: f64,
     /// Peak `exp(-i omega t)` phasors in the plan's tone or harmonic order.
+    /// For a damped plan, amplitudes are referenced to the first sample,
+    /// before applying each pole's exponential decay envelope.
     pub phasors: Vec<C64>,
     /// RMS of the unexplained sampled record, with denominator sample count.
     /// This is not a noise, aliasing, or physical model-error certificate.
@@ -153,7 +161,7 @@ pub struct ToneFitPlan {
     design: FitDesign,
 }
 
-// One factorization, scaling, and solve owner for both frequency declarations.
+// One factorization, scaling, and solve owner for all declared tone bases.
 #[derive(Debug, Clone)]
 struct FitDesign {
     samples: usize,
@@ -357,6 +365,29 @@ impl FitDesign {
         cycles_per_sample: impl Fn(usize) -> f64,
         budget: HarmonicFitBudget,
     ) -> Result<Self, HarmonicFitError> {
+        Self::with_envelopes(
+            sample_count,
+            timestep_s,
+            tones,
+            cycles_per_sample,
+            |_, _| 1.0,
+            0,
+            budget,
+        )
+    }
+
+    // The envelope is exactly one for the existing stationary plans. A damped
+    // plan supplies exp(-decay*t) and admits its additional retained pole data.
+    // Factorization, conditioning, input scaling and the fit itself stay shared.
+    fn with_envelopes(
+        sample_count: usize,
+        timestep_s: f64,
+        tones: usize,
+        cycles_per_sample: impl Fn(usize) -> f64,
+        envelope: impl Fn(usize, usize) -> f64,
+        extra_workspace_bytes: usize,
+        budget: HarmonicFitBudget,
+    ) -> Result<Self, HarmonicFitError> {
         if !timestep_s.is_finite() || timestep_s <= 0.0 {
             return Err(invalid("timestep must be positive and finite"));
         }
@@ -388,7 +419,9 @@ impl FitDesign {
         let entries = sample_count
             .checked_mul(columns)
             .ok_or_else(|| invalid("harmonic design size overflows"))?;
-        let workspace_bytes = fit_workspace_bytes(sample_count, tones)?;
+        let workspace_bytes = fit_workspace_bytes(sample_count, tones)?
+            .checked_add(extra_workspace_bytes)
+            .ok_or_else(|| invalid("harmonic workspace size overflows"))?;
         if workspace_bytes > budget.max_workspace_bytes {
             return Err(HarmonicFitError::BudgetExceeded {
                 required_bytes: workspace_bytes,
@@ -401,8 +434,9 @@ impl FitDesign {
             for k in 0..tones {
                 let theta = core::f64::consts::TAU * (cycles_per_sample(k) * j as f64);
                 let (s, c) = det::sin_cos(theta);
-                row[2 * k + 1] = c;
-                row[2 * k + 2] = s;
+                let amplitude = envelope(j, k);
+                row[2 * k + 1] = c * amplitude;
+                row[2 * k + 2] = s * amplitude;
             }
         }
         let factor = qr(&design, sample_count, columns);
