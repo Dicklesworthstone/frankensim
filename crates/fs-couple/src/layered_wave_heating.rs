@@ -45,7 +45,8 @@ pub mod interference;
 /// Accepted-temperature optical refresh on the same spatial thermal timeline.
 pub mod thermo_optical;
 pub use thermo_optical::{
-    ThermoOpticalLayer, ThermoOpticalSource, ThermoOpticalWaveHeating, ThermoOpticalWaveStep,
+    SpectralThermoOpticalSource, ThermoOpticalLayer, ThermoOpticalSource,
+    ThermoOpticalWaveHeating, ThermoOpticalWaveStep,
 };
 
 /// One monochromatic two-face drive in peak tangential E [V/m]. Both sources
@@ -470,3 +471,4 @@ impl<'p, 'b, 'a, 'm> PreparedLayeredWaveHeating<'p, 'b, 'a, 'm> {
         })
     }
 }
+

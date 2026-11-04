@@ -9,23 +9,28 @@
 //! electromagnetic storage, thermal emission or phase-change law.
 
 use super::*;
-use fs_em::plane_wave::{OpticalConductorResponse, OpticalMaterialResponse};
+use fs_em::plane_wave::{
+    OpticalConductorResponse, OpticalMaterialResponse, SpectralOpticalResponse,
+};
 use fs_matdb::MaterialCard;
 use fs_material::state_point::{
-    MaterialStatePointError, VisibleConductorStatePoint, VisibleOpticalStatePoint,
+    MaterialStatePointError, SpectralOpticalStatePoint, VisibleConductorStatePoint,
+    VisibleOpticalStatePoint,
 };
 
 mod sealed {
     pub trait Sealed {}
     impl Sealed for fs_material::state_point::VisibleConductorStatePoint {}
     impl Sealed for fs_material::state_point::VisibleOpticalStatePoint {}
+    impl Sealed for super::SpectralThermoOpticalSource {}
 }
 
 /// Original source families supported by this thermal/Maxwell bridge.
 /// Sealed implementations retain the complete source snapshot on refresh;
 /// arbitrary callbacks cannot replace source or constitutive admission.
 /// The default conductor type preserves existing callers. A
-/// `VisibleOpticalStatePoint` additionally supports mixed metal/glass layers.
+/// `VisibleOpticalStatePoint` additionally supports mixed metal/glass layers;
+/// `SpectralThermoOpticalSource` retains explicit finite-band infrared sources.
 pub trait ThermoOpticalSource: sealed::Sealed + Clone {
     fn resolved(&self) -> &ResolvedMaterialStatePoint;
     fn at_query_point(
@@ -73,6 +78,72 @@ impl ThermoOpticalSource for VisibleOpticalStatePoint {
     }
 }
 
+/// Original finite-band optics and their retained interpolation admission.
+///
+/// The source includes same-state magnetic permeability. Its n/k projection or
+/// original n/alpha table is consumed directly by the existing Maxwell owner.
+/// No source spectrum, nonmagnetic default or additional heat law is inferred.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SpectralThermoOpticalSource {
+    source: SpectralOpticalStatePoint,
+    maximum_knot_span_m: f64,
+}
+
+impl SpectralThermoOpticalSource {
+    /// Admit original source support, interpolation gaps and permeability.
+    /// The maximum gap is a positive finite vacuum length in SI metres;
+    /// frequency admission remains the original wave owner's responsibility.
+    pub fn try_new(
+        source: SpectralOpticalStatePoint,
+        maximum_knot_span_m: f64,
+    ) -> Result<Self, ReflectionError> {
+        SpectralOpticalResponse::try_new((&source).into(), maximum_knot_span_m)?;
+        Ok(Self {
+            source,
+            maximum_knot_span_m,
+        })
+    }
+
+    /// Original source family, complete material snapshot and selected claims.
+    #[must_use]
+    pub const fn source(&self) -> &SpectralOpticalStatePoint {
+        &self.source
+    }
+
+    /// Retained wavelength interpolation limit [vacuum m].
+    #[must_use]
+    pub const fn maximum_knot_span_m(&self) -> f64 {
+        self.maximum_knot_span_m
+    }
+}
+
+impl ThermoOpticalSource for SpectralThermoOpticalSource {
+    fn resolved(&self) -> &ResolvedMaterialStatePoint {
+        self.source.resolved()
+    }
+
+    fn at_query_point(
+        &self,
+        card: &MaterialCard,
+        point: &QueryPoint,
+    ) -> Result<Self, MaterialStatePointError> {
+        Ok(Self {
+            source: self.source.at_query_point(card, point)?,
+            maximum_knot_span_m: self.maximum_knot_span_m,
+        })
+    }
+
+    fn wave_response(&self, omega_rad_s: f64) -> Result<DielectricResponse<'_>, ReflectionError> {
+        // The thermal owner calls this after each cell refresh, before applying
+        // work and before publishing endpoints. Recheck gap/mu and the actual
+        // frequency together so a changed source band cannot silently extend.
+        let response =
+            SpectralOpticalResponse::try_new((&self.source).into(), self.maximum_knot_span_m)?;
+        response.permittivity_f_m(omega_rad_s)?;
+        Ok(DielectricResponse::SpectralOptical(response))
+    }
+}
+
 /// One original optical model and the immutable card that owns its selected
 /// claims. The complete snapshot includes the same-state magnetic permeability.
 #[derive(Debug)]
@@ -112,7 +183,7 @@ pub struct ThermoOpticalWaveStep<'t, S: ThermoOpticalSource = VisibleConductorSt
 }
 
 impl<'b, 'a, 'm, S: ThermoOpticalSource> ThermoOpticalWaveHeating<'b, 'a, 'm, S> {
-    /// Bind one original visible optical source per original thermal layer.
+    /// Bind one original admitted optical source per original thermal layer.
     /// Source cards, shared fixed conditions and temperature-axis conventions
     /// must agree with the existing conductivity/capacity owners. Exterior
     /// media, frequency, incidence and polarization remain held between steps.
@@ -270,3 +341,4 @@ impl<'b, 'a, 'm, S: ThermoOpticalSource> ThermoOpticalWaveHeating<'b, 'a, 'm, S>
         })
     }
 }
+

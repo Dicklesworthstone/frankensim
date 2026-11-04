@@ -29803,3 +29803,24 @@ Focused native checks exercise the original spatial molecular law, wall
 trace/lift/loss kernels and source-row resistance reconstruction. The authored
 loaded/unloaded exact-runtime regressions remain unexecuted in this workspace
 because the full constellation dependencies are unavailable.
+
+## Finite-band thermo-optical feedback
+
+`SpectralThermoOpticalSource` extends the same sealed source interface with
+explicit finite-band `SpectralOpticalStatePoint` families. Construction admits
+the original n/k projection or n/alpha table, a caller-declared maximum knot gap
+in vacuum metres, and the same-state magnetic permeability through
+`fs-em::plane_wave::SpectralOpticalResponse`. The existing thermo-optical driver
+refreshes each source at its actual accepted cell temperature, retains its
+original family, claims and gap limit, then readmits the current frequency,
+source band and permeability before applying coherent absorbed work and before
+publishing the thermal endpoint. Original source wavelength properties therefore
+reach the same coherent film and implicit heat owners without a visible-band
+clamp, substituted spectrum, nonmagnetic default or second energy debit.
+
+Focused infrared regression sources exercise mixed n/k and original n/alpha
+layers with nonuniform native cell temperatures, local caloric/conductive energy
+balance, successive accepted feedback steps, missing permeability, retained gap
+and frequency admission, and atomic endpoint-source refusal after the native
+thermal candidate is otherwise admissible. The existing fixed-geometry,
+quasi-steady split and timestep-convergence responsibility remain unchanged.
