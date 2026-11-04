@@ -386,7 +386,7 @@ fn convex_bounds(
     ))
 }
 
-fn triangle_proximity(
+pub(crate) fn triangle_proximity(
     point: Point3,
     vertices: [[f64; 3]; 3],
     triangle: u32,

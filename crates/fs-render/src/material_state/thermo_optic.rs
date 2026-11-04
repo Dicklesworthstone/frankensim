@@ -33,6 +33,8 @@ use crate::gradient_index::{
 pub mod conduction;
 /// Original temperature-dependent conductivity profiles, without source-knot smoothing.
 pub mod nonlinear_conduction;
+/// Original transient P1 temperature snapshots on their tetrahedral elements.
+pub mod transient;
 
 /// Temperature and the analytic gradient of that same immutable reconstruction.
 #[derive(Clone, Copy, Debug, PartialEq)]
