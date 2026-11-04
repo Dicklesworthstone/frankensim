@@ -1261,6 +1261,33 @@ segment velocity vanishes. G2 tests compare derivatives to the independently
 differenced whole field and check zero off-source curl for a closed inviscid
 sheet. This exact near-source API does not differentiate multipole far cells.
 
+`FarCell::exact_kinematics`, `FarField::exact_kinematics` and
+`hybrid_kinematics` extend the same analytic velocity/Jacobian through retained
+far sources. Every segment keeps its individual source core plus continued
+diffusion offset; the near part uses the far owner's admitted core mode,
+shedding interval and retained row ages. The complete hybrid sheet includes
+its closing bound line, so a consumer must not add that line again.
+`ImageSystem::exact_kinematics` and `grounded_hybrid_kinematics` evaluate the
+same physical sources and mirrored boundary devices. Velocity is a polar
+vector, vorticity is axial, and the reflected Jacobian is `R grad(u) R`.
+Images never enter physical circulation or impulse ledgers. Image construction
+checks both near and far clearance and finite reflected coordinates; a snapshot
+must be rebuilt after source geometry, age/core or mode changes.
+
+These queries allocate no sampling buffers and cost O(retained sources) per
+point. They use exact segment derivatives throughout, not derivatives of
+velocity-only multipole expansions or their switching conditions. There is no
+derivative-error claim for approximated or pruned sources. Invalid public source
+shapes, non-finite data/results, incompatible shedding intervals and singular
+active zero-core encounters refuse; a zero-strength segment has no singular
+physical contribution. `FarField::validate_kinematics_sources` exposes the
+successful allocation-free source preflight for downstream batch consumers.
+It does not establish nodal closure or completeness after pruning, and exact
+sampling deliberately ignores cached expansion moments. G0/G1/G3 regressions
+in `tests/hybrid_kinematics.rs` check mixed-core partition invariance, continued
+diffusion, independent velocity finite differences, axial reflection, plane
+derivatives, finite-core axis curl, malformed source refusal and far clearance.
+
 `node_circulation_residual` measures incoming minus outgoing circulation on the
 actual assembled edge strengths, including starting, tip, and closing-line
 nodes. The older `cell_net_circulation` entry point now reports this incident-edge

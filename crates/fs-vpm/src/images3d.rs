@@ -23,8 +23,11 @@
 //! real cells. The battery asserts the commutation per station and
 //! per cell, never as a totals-only sum.
 
-use crate::farfield3d::{FarCell, FarField, cell_from_segs_with_cores};
-use crate::filament3d::{FilamentWake, Refusal, ShedRow};
+use crate::farfield3d::{
+    FarCell, FarField, cell_from_segs_with_cores, hybrid_kinematics, sum_kinematics,
+    valid_near_kinematics_sources,
+};
+use crate::filament3d::{FilamentWake, Refusal, ShedRow, WakeKinematics};
 use fs_blake3::hash_domain;
 
 /// The certified image plane z = z0 (the wake must sit strictly
@@ -152,8 +155,9 @@ impl ImageSystem {
     /// rebuild after source geometry, diffusion state, or core mode changes.
     ///
     /// # Errors
-    /// Plane refusals (`image-plane-invalid`), invalid mode, or invalid
-    /// shedding interval/age/evolved core (`image-core-invalid`).
+    /// Plane refusals (`image-plane-invalid`), invalid mode, invalid
+    /// shedding interval/age/evolved core (`image-core-invalid`), or malformed
+    /// near/far source arrays (`wake-kinematics-source-invalid`).
     pub fn build(near: &FilamentWake, far: &FarField, plane: ImagePlane) -> Result<Self, Refusal> {
         plane.admit(near)?;
         far.mode.admit()?;
@@ -183,6 +187,30 @@ impl ImageSystem {
                 ],
             });
         }
+        far.validate_kinematics_sources(near)?;
+        let valid_reflection =
+            |p: &[f64; 3]| p[2] > plane.z0_m && plane.mirror(*p).iter().all(|x| x.is_finite());
+        if !near.line_nodes.iter().all(valid_reflection)
+            || !near
+                .rows
+                .iter()
+                .flat_map(|row| &row.nodes)
+                .all(valid_reflection)
+            || !far
+                .cells
+                .iter()
+                .flat_map(|cell| &cell.segs)
+                .all(|(a, b, _)| valid_reflection(a) && valid_reflection(b))
+        {
+            return Err(Refusal {
+                code: "image-plane-invalid",
+                message: "every near/far source must remain above the plane with finite reflection"
+                    .into(),
+                ranked_repairs: vec![
+                    "use a common certified plane for all retained physical sources".into(),
+                ],
+            });
+        }
         let mut src = near.digest().into_bytes();
         src.extend_from_slice(far.digest().as_bytes());
         let identity = image_identity(core::str::from_utf8(&src).unwrap_or(""), plane);
@@ -208,6 +236,28 @@ impl ImageSystem {
             v[2] += cv[2];
         }
         v
+    }
+
+    /// Exact image velocity and Jacobian of the retained near/far sources.
+    /// Mirrored endpoints and reversed circulations give the axial-vector
+    /// vorticity reflection `omega_image(p) = -R omega_source(R p)`.
+    ///
+    /// Uses the snapshot's actual source cores and diffusion offsets, never
+    /// the velocity-only multipole approximation. Sampling allocates nothing;
+    /// invalid/singular/non-finite samples return `None`. Rebuild this snapshot
+    /// after any physical source change, as for [`Self::eval`].
+    #[must_use]
+    pub fn exact_kinematics(&self, p: [f64; 3]) -> Option<WakeKinematics> {
+        if !valid_near_kinematics_sources(&self.near_image, self.core_growth_per_tick_m2) {
+            return None;
+        }
+        let mut out = self
+            .near_image
+            .induced_kinematics_with_core_growth(p, self.core_growth_per_tick_m2)?;
+        for cell in &self.far_image {
+            out = sum_kinematics(out, cell.exact_kinematics(p)?)?;
+        }
+        Some(out)
     }
 
     /// Access the mirrored far cells (battery oracle surface).
@@ -241,6 +291,29 @@ pub fn grounded_hybrid_velocity(
         nv[1] + fv[1] + iv[1],
         nv[2] + fv[2] + iv[2],
     ]
+}
+
+/// Exact physical near/far kinematics plus their image snapshot. The closing
+/// bound line is already included. The snapshot must belong to this same
+/// physical state; sampling never adds image sources to physical ledgers.
+///
+/// Source/derivative cost is linear in retained segments with no allocation.
+/// This uses exact retained sources throughout, including for the returned
+/// velocity. It does not differentiate approximate/pruned far-field cells.
+#[must_use]
+pub fn grounded_hybrid_kinematics(
+    near: &FilamentWake,
+    far: &FarField,
+    images: &ImageSystem,
+    p: [f64; 3],
+) -> Option<WakeKinematics> {
+    if far.near_core_growth_m2()? != images.core_growth_per_tick_m2 {
+        return None;
+    }
+    sum_kinematics(
+        hybrid_kinematics(near, far, p)?,
+        images.exact_kinematics(p)?,
+    )
 }
 
 /// The FORBIDDEN materialization (battery falsifier ONLY): append the

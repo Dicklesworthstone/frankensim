@@ -18,7 +18,9 @@
 //! (its bytes are hashed into the far-field digest) and physically
 //! feeds near/exact and far velocities as well as the pruning bounds.
 
-use crate::filament3d::{FilamentWake, Refusal, segment_velocity_with_core};
+use crate::filament3d::{
+    FilamentWake, Refusal, WakeKinematics, segment_kinematics_with_core, segment_velocity_with_core,
+};
 use fs_blake3::hash_domain;
 
 #[path = "farfield3d/advection.rs"]
@@ -229,6 +231,52 @@ impl FarCell {
         }
         v
     }
+
+    /// Exact retained-source velocity and spatial Jacobian, including each
+    /// source's own core and continued diffusion. No expansion cache is used:
+    /// the velocity-only multipole error bound does not bound its derivative.
+    ///
+    /// This allocation-free O(sources) query returns `None` for malformed
+    /// source arrays, non-finite data/results or a singular active zero-core
+    /// encounter. A zero-strength segment contributes zero even on its axis.
+    #[must_use]
+    pub fn exact_kinematics(&self, p: [f64; 3]) -> Option<WakeKinematics> {
+        if !self.kinematics_sources_valid() || p.iter().any(|x| !x.is_finite()) {
+            return None;
+        }
+        let mut out = WakeKinematics::default();
+        for ((a, b, gamma), core2) in self.segs.iter().zip(&self.source_core2_m2) {
+            if *gamma == 0.0 {
+                continue;
+            }
+            let source =
+                segment_kinematics_with_core(p, *a, *b, *core2 + self.diffusion_offset_m2)?;
+            for i in 0..3 {
+                out.velocity[i] += gamma * source.velocity[i];
+                for j in 0..3 {
+                    out.gradient[i][j] += gamma * source.gradient[i][j];
+                }
+            }
+        }
+        finite_kinematics(out)
+    }
+
+    pub(crate) fn kinematics_sources_valid(&self) -> bool {
+        self.segs.len() == self.source_core2_m2.len()
+            && self.diffusion_offset_m2.is_finite()
+            && self.diffusion_offset_m2 >= 0.0
+            && self
+                .segs
+                .iter()
+                .zip(&self.source_core2_m2)
+                .all(|((a, b, gamma), core2)| {
+                    gamma.is_finite()
+                        && a.iter().chain(b).all(|x| x.is_finite())
+                        && core2.is_finite()
+                        && *core2 >= 0.0
+                        && (core2 + self.diffusion_offset_m2).is_finite()
+                })
+    }
 }
 
 /// One pruned-cell audit row (receipt ingredient).
@@ -267,6 +315,48 @@ pub struct FarField {
 }
 
 impl FarField {
+    /// Admitted growth of squared near-row cores per retained shedding tick.
+    /// This uses the same physical mode and timestep as hybrid velocity;
+    /// `None` rejects an invalid mode, interval or unrepresentable growth.
+    #[must_use]
+    pub fn near_core_growth_m2(&self) -> Option<f64> {
+        self.mode.admit().ok()?;
+        if !self.shed_dt_s.is_finite() || self.shed_dt_s <= 0.0 {
+            return None;
+        }
+        let growth = self.mode.core_growth_m2(self.shed_dt_s);
+        (growth.is_finite() && growth >= 0.0).then_some(growth)
+    }
+
+    /// Validate all physical near/far source arrays before field sampling or
+    /// constructing an image snapshot. Successful admission allocates nothing.
+    /// Public expansion caches are deliberately ignored by exact kinematics.
+    ///
+    /// This checks shapes, finite source data, ages/cores and a shared shedding
+    /// interval. It does not certify nodal circulation closure, prove that no
+    /// cells were pruned, or validate a previously built image snapshot.
+    ///
+    /// # Errors
+    /// `wake-kinematics-source-invalid` for malformed or incompatible sources.
+    pub fn validate_kinematics_sources(&self, near: &FilamentWake) -> Result<(), Refusal> {
+        let valid = self.near_core_growth_m2().is_some_and(|growth| {
+            self.shed_dt_s == 1.0 / near.cert.shed_hz
+                && valid_near_kinematics_sources(near, growth)
+                && self.cells.iter().all(FarCell::kinematics_sources_valid)
+        });
+        if valid {
+            Ok(())
+        } else {
+            Err(Refusal {
+                code: "wake-kinematics-source-invalid",
+                message: "invalid near/far source geometry, circulation, age, core or schedule".into(),
+                ranked_repairs: vec![
+                    "use admitted source arrays with one finite nonnegative core per source and a shared shedding interval".into(),
+                ],
+            })
+        }
+    }
+
     /// Aggregate the OLDEST `n_rows` of `wake` into cells of
     /// `rows_per_cell` consecutive rows each, removing them from the
     /// near wake. Physical edges come from the exact near-wake traversal.
@@ -562,6 +652,23 @@ impl FarField {
         v
     }
 
+    /// Exact physical velocity and derivatives of all retained far sources.
+    /// Unlike `eval`, this never substitutes a multipole approximation. Cost
+    /// is linear in retained sources; no source/probe buffers are allocated.
+    /// Invalid data, singular active sources and non-finite results refuse.
+    #[must_use]
+    pub fn exact_kinematics(&self, p: [f64; 3]) -> Option<WakeKinematics> {
+        self.near_core_growth_m2()?;
+        if p.iter().any(|x| !x.is_finite()) {
+            return None;
+        }
+        let mut out = WakeKinematics::default();
+        for cell in &self.cells {
+            out = sum_kinematics(out, cell.exact_kinematics(p)?)?;
+        }
+        Some(out)
+    }
+
     /// Audited prune: drop every cell whose contribution bound at ALL
     /// probes is < `tol_mps`, with a per-cell per-probe EXACT
     /// spot-check that distrusts the bound.
@@ -708,6 +815,74 @@ pub fn hybrid_velocity(near: &FilamentWake, far: &FarField, p: [f64; 3]) -> [f64
     let nv = near.induced_velocity_with_core_growth(p, far.mode.core_growth_m2(far.shed_dt_s));
     let fv = far.eval(p);
     [nv[0] + fv[0], nv[1] + fv[1], nv[2] + fv[2]]
+}
+
+/// Exact retained near+far physical velocity and derivatives, including the
+/// sheet's closing bound line. Do not add that same line as a separate source.
+///
+/// Both partitions use their actual source cores and retained viscous ages.
+/// This differentiates the represented sources, not the velocity-only far
+/// expansion or its source-switching criterion. There is no derivative claim
+/// for pruned sources. Inputs are borrowed, no buffers are allocated, and
+/// invalid/singular/unrepresentable samples return `None` without mutation.
+#[must_use]
+pub fn hybrid_kinematics(
+    near: &FilamentWake,
+    far: &FarField,
+    p: [f64; 3],
+) -> Option<WakeKinematics> {
+    far.validate_kinematics_sources(near).ok()?;
+    let growth = far.near_core_growth_m2()?;
+    sum_kinematics(
+        near.induced_kinematics_with_core_growth(p, growth)?,
+        far.exact_kinematics(p)?,
+    )
+}
+
+pub(crate) fn valid_near_kinematics_sources(near: &FilamentWake, growth: f64) -> bool {
+    near.cert.admit().is_ok()
+        && growth.is_finite()
+        && growth >= 0.0
+        && near.line_nodes.len() == near.cert.n_stations + 1
+        && near.line_nodes.iter().flatten().all(|x| x.is_finite())
+        && near.rows.len() <= near.cert.max_rows
+        && near.downstream_gamma.as_ref().is_none_or(|gamma| {
+            !near.rows.is_empty()
+                && gamma.len() == near.cert.n_stations
+                && gamma.iter().all(|x| x.is_finite())
+        })
+        && near.rows.iter().all(|row| {
+            row.nodes.len() == near.cert.n_stations + 1
+                && row.nodes.iter().flatten().all(|x| x.is_finite())
+                && row.gamma.len() == near.cert.n_stations
+                && row.gamma.iter().all(|x| x.is_finite())
+                && row.age_ticks.is_finite()
+                && row.age_ticks >= 0.0
+                && row.core2_m2.is_finite()
+                && row.core2_m2 >= 0.0
+                && (row.core2_m2 + growth * row.age_ticks).is_finite()
+        })
+}
+
+pub(crate) fn sum_kinematics(mut a: WakeKinematics, b: WakeKinematics) -> Option<WakeKinematics> {
+    for i in 0..3 {
+        a.velocity[i] += b.velocity[i];
+        for j in 0..3 {
+            a.gradient[i][j] += b.gradient[i][j];
+        }
+    }
+    finite_kinematics(a)
+}
+
+fn finite_kinematics(value: WakeKinematics) -> Option<WakeKinematics> {
+    (value
+        .velocity
+        .iter()
+        .chain(value.gradient.iter().flatten())
+        .chain(value.vorticity().iter())
+        .all(|x| x.is_finite())
+        && value.divergence().is_finite())
+    .then_some(value)
 }
 
 /// V-10 receipt: hybrid wake buildup vs the fs-wakeref dense reference
