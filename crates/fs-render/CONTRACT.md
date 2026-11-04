@@ -3590,6 +3590,63 @@ Tables interpolate in cos(theta)/azimuth with exact cell solid-angle weights;
 this is the declared represented distribution, not an interpolation-error bound.
 Passive spectral filters reduce flux instead of renormalizing away attenuation.
 
+### Multi-emitter fixture assembly
+
+`photometry::fixture::PhotometricFixture` groups original `PhotometricSource`
+values under one proper-rigid fixture-to-world transform and a shared
+`FixtureOpticalState`. Each emitter retains its own local transform, normalized
+angular distribution, full spectrum and individually calibrated/dimmed/filtered
+lumens. Shared state is an additional linear dimmer and passive 80-bin spectral
+transmission. It is applied independently through the existing source admission
+and filter implementation: no fixture-wide flux normalization, RGB conversion,
+or redistribution between emitters occurs. Positive attenuation that underflows
+the represented flux or spectral filter computation refuses as `NumericalRange`
+instead of silently becoming physical opacity.
+
+`PhotometricRig::try_new` assembles an immutable world-space snapshot in fixture
+input order, then emitter input order. Dark emitters and empty fixtures retain
+their identities and ranges. Fixture IDs are nonzero and unique in the rig;
+emitter IDs are nonzero and unique within their fixture, so different fixtures
+may reuse a local emitter ID. `FixtureEmitterIdentity` explicitly carries both.
+Fixture metadata reports the compensated sum of post-control emitted lumens.
+Count limits cover fixtures, emitters and native geometry instances before
+output reservation. Assembly checks cancellation per fixture/emitter/body part
+and publishes no partial rig. Source data is never modified; changing controls
+means assembling a fresh snapshot from the original calibration.
+
+Optional fixture body parts retain native `GeometryInstance` handles, geometry
+identities and materials. Their local placements compose with the same fixture
+transform as the emitters. `append_geometry_to` mounts the resulting instances
+once into the caller's native primitive list without copying mesh data or
+changing existing primitive indices. Object IDs share the native static/animated
+namespace; collisions refuse. The append is staged, so cancellation/refusal
+leaves the primitive contents unchanged. Mount bodies before admitting the
+direct scene or native spectral scene; they then use the existing geometry,
+visibility and material rules, including all unsupported-physics refusals.
+
+Rig constructors on `PhotometricScene`, `PathIlluminanceJob` and
+`PathLuminanceJob` retain the source-to-fixture identity map through the native
+`FixtureLighting` path. Direct illuminance breakdowns report emitter and fixture
+contributions in lux using the original source connection/visibility calculation.
+Their total retains the original source-order compensated sum. Summing separately
+rounded fixture totals need not reproduce its last bit. Spectral image/probe
+results retain job-level identities; they do not claim per-emitter decomposition
+of sampled indirect paths. Direct and single-scattered images continue to use
+`LuminanceJob` on the admitted rig scene, and physical-camera spectral images use
+the original path integrator.
+
+The fixture layer adds no GDTF/MVR parser, finite-source substitute, shared lens
+solver, spatial mask, inter-emitter coupling or new transport/error model.
+Point emitters remain far-field delta-position sources; a body mesh does not
+make a point's front lens visibly emissive. Existing spectral discretization,
+calibration, geometry and omitted-transport no-claims below still apply. The
+fixture regression battery exercises transformed native geometry, independent
+controls, lux, spectral camera outputs, haze, cancellation/replay and a
+300-fixture multi-emitter rig. These are functional regressions with explicit
+test tolerances, not measured throughput or general physical error bounds.
+
+### Direct and native transport
+
 `PhotometricScene` borrows the original tracer primitives, native mesh BVHs and
 rigid mesh instances. Chart geometry refuses: a proximity-certified hit does
 not determine whether a surface is before a finite light-connection endpoint,

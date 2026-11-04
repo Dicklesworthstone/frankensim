@@ -8,7 +8,8 @@
 
 use super::*;
 use crate::camera::{Aperture, PhysicalCamera};
-use crate::photometry::area::PhotometricEmitters;
+use crate::photometry::area::PhotometricAreaEmitter;
+use crate::photometry::fixture::{FixtureEmitterIdentity, PhotometricRig};
 use crate::photometry::medium::HomogeneousMedium;
 use crate::photometry::path::{
     DiffuseTransportRemainder, DiffuseVacuumRemainder, PointFixtureSampling,
@@ -16,7 +17,8 @@ use crate::photometry::path::{
 use crate::photometry::source::{LUMINOUS_EFFICACY_LM_W, PhotometricSource};
 use crate::photometry::transport::PhotometricMedium;
 use crate::photometry::{
-    IlluminanceEstimate, IlluminanceProbe, PhotometricScene, PhotometryError, TransportOptions,
+    IlluminanceEstimate, IlluminanceProbe, PhotometricPointSources, PhotometricScene,
+    PhotometryError, TransportOptions,
 };
 use crate::volumes::transport::AbsorbingGrid;
 use crate::volumes::transport::scattering::{PhaseFunction, ScatteringGrid};
@@ -45,6 +47,7 @@ pub enum FixtureMedium<'view, 'field> {
 /// Immutable fixture state and finite transport support for one render job.
 pub(super) struct FixtureLighting<'a> {
     sources: &'a [PhotometricSource],
+    rig: Option<&'a PhotometricRig>,
     pub(super) geometry: std::sync::Arc<geometry::PreparedGeometry>,
     pub(super) areas: area::AreaLighting<'a>,
     options: TransportOptions,
@@ -79,19 +82,22 @@ pub(crate) struct FixtureTransport<'scene, 'field> {
 impl<'scene, 'field> FixtureTransport<'scene, 'field> {
     pub(crate) fn try_new_with_emitters(
         scene: &'scene Scene,
-        emitters: PhotometricEmitters<'scene>,
+        points: PhotometricPointSources<'scene>,
+        surfaces: &'scene [PhotometricAreaEmitter],
         medium: FixtureMedium<'scene, 'field>,
         options: TransportOptions,
         settings: Settings,
         cx: &Cx<'_>,
     ) -> Result<Self, PhotometryError> {
-        Self::try_admit(scene, emitters, medium, options, settings, true, cx)
+        Self::try_admit(scene, points, surfaces, medium, options, settings, true, cx)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn try_new_with_camera(
         scene: &'scene Scene,
         camera: &'scene PhysicalCamera,
-        emitters: PhotometricEmitters<'scene>,
+        points: PhotometricPointSources<'scene>,
+        surfaces: &'scene [PhotometricAreaEmitter],
         medium: FixtureMedium<'scene, 'field>,
         options: TransportOptions,
         settings: Settings,
@@ -99,16 +105,20 @@ impl<'scene, 'field> FixtureTransport<'scene, 'field> {
     ) -> Result<Self, PhotometryError> {
         // PhysicalCamera is immutable and already validated by its constructors.
         // Do not read the unused legacy camera during scene admission.
-        let mut transport = Self::try_admit(scene, emitters, medium, options, settings, false, cx)?;
+        let mut transport = Self::try_admit(
+            scene, points, surfaces, medium, options, settings, false, cx,
+        )?;
         transport.camera = Some(camera);
         Ok(transport)
     }
 
     /// Admit probe addresses without reading or validating the unused camera.
     /// The receiver index occupies the existing deterministic pixel address.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn try_for_probes_with_emitters(
         scene: &'scene Scene,
-        emitters: PhotometricEmitters<'scene>,
+        points: PhotometricPointSources<'scene>,
+        surfaces: &'scene [PhotometricAreaEmitter],
         medium: FixtureMedium<'scene, 'field>,
         options: TransportOptions,
         settings: Settings,
@@ -124,12 +134,16 @@ impl<'scene, 'field> FixtureTransport<'scene, 'field> {
             height: 1,
             ..settings
         };
-        Self::try_admit(scene, emitters, medium, options, settings, false, cx)
+        Self::try_admit(
+            scene, points, surfaces, medium, options, settings, false, cx,
+        )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn try_admit(
         scene: &'scene Scene,
-        emitters: PhotometricEmitters<'scene>,
+        points: PhotometricPointSources<'scene>,
+        surfaces: &'scene [PhotometricAreaEmitter],
         medium: FixtureMedium<'scene, 'field>,
         options: TransportOptions,
         settings: Settings,
@@ -137,7 +151,7 @@ impl<'scene, 'field> FixtureTransport<'scene, 'field> {
         cx: &Cx<'_>,
     ) -> Result<Self, PhotometryError> {
         cx.checkpoint()?;
-        let sources = emitters.points;
+        let sources = points.sources();
         if settings.spp == 0
             || settings.max_depth == 0
             || (settings.strategy == DirectStrategy::BsdfOnly
@@ -162,7 +176,7 @@ impl<'scene, 'field> FixtureTransport<'scene, 'field> {
         };
         let direct_scene = PhotometricScene::try_with_path_medium(
             &scene.primitives,
-            sources,
+            points,
             direct_medium,
             options,
             cx,
@@ -177,7 +191,7 @@ impl<'scene, 'field> FixtureTransport<'scene, 'field> {
                 Aperture::try_circular(0.0)?,
             )?;
         }
-        let areas = area::AreaLighting::try_new(scene, emitters.surfaces, cx)?;
+        let areas = area::AreaLighting::try_new(scene, surfaces, cx)?;
         let envelope = if sources.iter().all(|source| source.flux_lm() == 0.0) {
             areas.diffuse_envelope(scene, cx)?
         } else {
@@ -242,6 +256,7 @@ impl<'scene, 'field> FixtureTransport<'scene, 'field> {
             direct_scene,
             fixtures: FixtureLighting {
                 sources,
+                rig: points.rig(),
                 geometry,
                 areas,
                 options,
@@ -271,6 +286,14 @@ impl<'scene, 'field> FixtureTransport<'scene, 'field> {
 
     pub(crate) fn point_sampling(&self) -> PointFixtureSampling {
         self.fixtures.point_sampling
+    }
+
+    pub(crate) fn rig(&self) -> Option<&'scene PhotometricRig> {
+        self.fixtures.rig
+    }
+
+    pub(crate) fn emitter_identities(&self) -> Option<&'scene [FixtureEmitterIdentity]> {
+        self.fixtures.rig.map(PhotometricRig::emitter_identities)
     }
 
     pub(crate) const fn diffuse_vacuum_remainder(&self) -> Option<DiffuseVacuumRemainder> {

@@ -25,14 +25,14 @@ use fs_math::det;
 use crate::instances::RigidTransform;
 use crate::spectral::{LAMBDA_MAX, LAMBDA_MIN, QUAD_BINS};
 
-mod ray_partition;
-pub mod validation;
 /// Calibrated irradiance from differentiated curved ray bundles.
 pub mod bundle;
 /// Finite native-detector power through sampled refractive paths.
 pub mod finite_detector;
+mod ray_partition;
 /// Prepared sampling of calibrated angular source profiles.
 pub mod sampling;
+pub mod validation;
 
 /// Spectral bins shared with the existing spectral renderer.
 pub const SPECTRAL_BINS: usize = QUAD_BINS;
@@ -478,7 +478,13 @@ impl SourceSpectrum {
         let mut transmission = 0.0;
         for (index, value) in surviving.iter_mut().enumerate() {
             *value = self.bins[index] * transmittance[index];
+            if self.bins[index] > 0.0 && transmittance[index] > 0.0 && *value == 0.0 {
+                return Err(SourceError::NumericalRange);
+            }
             transmission += *value * LUMINOUS_EFFICACY_LM_W * photopic_weight_nm(index);
+        }
+        if transmission == 0.0 && surviving.iter().any(|value| *value > 0.0) {
+            return Err(SourceError::NumericalRange);
         }
         let spectrum = if transmission > 0.0 {
             Self::try_from_bins(surviving)?
@@ -520,7 +526,10 @@ impl PhotometricSource {
         }
         let emitted_flux_lm = lumens * dimmer;
         let peak_cd = emitted_flux_lm * distribution.peak_per_steradian();
-        if !peak_cd.is_finite() || spectrum.bins.iter().any(|v| !(peak_cd * *v).is_finite()) {
+        if (lumens > 0.0 && dimmer > 0.0 && emitted_flux_lm == 0.0)
+            || !peak_cd.is_finite()
+            || spectrum.bins.iter().any(|v| !(peak_cd * *v).is_finite())
+        {
             return Err(SourceError::NumericalRange);
         }
         let [x, y, z, w] = transform.rotation_xyzw();
@@ -558,6 +567,38 @@ impl PhotometricSource {
     #[must_use]
     pub const fn spectrum(&self) -> &SourceSpectrum {
         &self.spectrum
+    }
+
+    /// Place this source's current frame under a proper-rigid parent frame.
+    ///
+    /// The same calibrated flux, angular law and spectrum are admitted through
+    /// [`Self::try_new`]. No scale, beam-width change or flux renormalization is
+    /// introduced. Composition overflow is a numerical-range refusal.
+    pub fn transformed(&self, parent_to_world: RigidTransform) -> Result<Self, SourceError> {
+        let transform = parent_to_world
+            .compose(self.transform)
+            .map_err(|_| SourceError::NumericalRange)?;
+        Self::try_new(
+            transform,
+            self.emitted_flux_lm,
+            1.0,
+            self.distribution.clone(),
+            self.spectrum.clone(),
+        )
+    }
+
+    /// Apply an additional linear dimmer to the current emitted lumens.
+    ///
+    /// The original source is unchanged, so callers can assemble successive
+    /// fixture snapshots from its calibration without compounding attenuation.
+    pub fn dimmed(&self, dimmer: f64) -> Result<Self, SourceError> {
+        Self::try_new(
+            self.transform,
+            self.emitted_flux_lm,
+            dimmer,
+            self.distribution.clone(),
+            self.spectrum.clone(),
+        )
     }
 
     /// Luminous intensity in candela along a world-space outgoing direction.
@@ -725,10 +766,17 @@ impl PhotometricSource {
     /// returns a zero-flux source. Repeated filters multiply transmission.
     pub fn filtered(&self, transmittance: [f64; SPECTRAL_BINS]) -> Result<Self, SourceError> {
         let (spectrum, transmission) = self.spectrum.filtered(transmittance)?;
-        let mut result = self.clone();
-        result.emitted_flux_lm *= transmission;
-        result.spectrum = spectrum;
-        Ok(result)
+        let flux_lm = self.emitted_flux_lm * transmission;
+        if self.emitted_flux_lm > 0.0 && transmission > 0.0 && flux_lm == 0.0 {
+            return Err(SourceError::NumericalRange);
+        }
+        Self::try_new(
+            self.transform,
+            flux_lm,
+            1.0,
+            self.distribution.clone(),
+            spectrum,
+        )
     }
 }
 
@@ -969,6 +1017,45 @@ mod tests {
             source.filtered([0.0; SPECTRAL_BINS]).unwrap().flux_lm(),
             0.0
         );
+    }
+
+    #[test]
+    fn positive_attenuation_underflow_refuses_instead_of_discarding_energy() {
+        let source = PhotometricSource::try_new(
+            RigidTransform::identity(),
+            f64::MIN_POSITIVE,
+            1.0,
+            AngularDistribution::isotropic(),
+            SourceSpectrum::equal_energy(),
+        )
+        .unwrap();
+        assert!(matches!(
+            source.dimmed(f64::MIN_POSITIVE),
+            Err(SourceError::NumericalRange)
+        ));
+        assert!(matches!(
+            source.filtered([f64::MIN_POSITIVE; SPECTRAL_BINS]),
+            Err(SourceError::NumericalRange)
+        ));
+        assert_eq!(source.dimmed(0.0).unwrap().flux_lm(), 0.0);
+        assert_eq!(
+            source.filtered([0.0; SPECTRAL_BINS]).unwrap().flux_lm(),
+            0.0
+        );
+        let bright = PhotometricSource::try_new(
+            RigidTransform::identity(),
+            1.0e300,
+            1.0,
+            AngularDistribution::isotropic(),
+            SourceSpectrum::equal_energy(),
+        )
+        .unwrap();
+        let mut filter = [0.0; SPECTRAL_BINS];
+        filter[40] = f64::from_bits(1);
+        assert!(matches!(
+            bright.filtered(filter),
+            Err(SourceError::NumericalRange)
+        ));
     }
 
     #[test]

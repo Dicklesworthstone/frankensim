@@ -20,9 +20,10 @@ use crate::tracer::{AdaptivePixelAccumulator, RenderExecutionConfig, Sampler, Sc
 use fs_evidence::NumericalCertificate;
 use fs_exec::Cx;
 
-use super::area::PhotometricEmitters;
+use super::area::{PhotometricAreaEmitter, PhotometricEmitters};
+use super::fixture::{FixtureEmitterIdentity, PhotometricRig};
 use super::source::PhotometricSource;
-use super::{PhotometryError, TransportOptions};
+use super::{PhotometricPointSources, PhotometryError, TransportOptions};
 
 #[cfg(test)]
 mod camera_tests;
@@ -53,7 +54,9 @@ pub const PHOTOMETRIC_PATH_SEMANTICS_VERSION: u32 = 12;
 /// allocation or shared mutable sampler state.
 pub const MAX_POINT_CONNECTIONS_PER_VERTEX: u32 = 32;
 
-/// Point-fixture connection policy for the shared spectral path estimator.
+/// Point-source connection policy for the shared spectral path estimator.
+/// In a grouped rig the candidates are individual emitters, so a many-emitter
+/// fixture is not collapsed to one spectrum or one source-selection weight.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PointFixtureSampling {
     /// Evaluate every fixture at every surface/volume interaction. This is the
@@ -158,6 +161,62 @@ impl<'scene, 'field> PathLuminanceJob<'scene, 'field> {
         )
     }
 
+    /// Admit an assembled multi-emitter rig through the original spectral
+    /// image integrator. Mount the rig's body geometry once into
+    /// `scene.primitives` with [`PhotometricRig::append_geometry_to`] first.
+    /// Source indices and the rig snapshot remain attached to the job; each
+    /// emitter retains its own spectrum and angular law at every path vertex.
+    /// Supplemental `surfaces` bind calibrated area emission to the native
+    /// scene primitives and use the existing surface-light transport.
+    pub fn new_with_rig(
+        scene: &'scene Scene,
+        rig: &'scene PhotometricRig,
+        surfaces: &'scene [PhotometricAreaEmitter],
+        medium: PathMedium<'scene, 'field>,
+        options: TransportOptions,
+        settings: Settings,
+        cx: &Cx<'_>,
+    ) -> Result<Self, PhotometryError> {
+        Self::new_with_camera_choice(
+            scene,
+            None,
+            PhotometricPointSources::Rig(rig),
+            surfaces,
+            medium,
+            options,
+            settings,
+            cx,
+        )
+    }
+
+    /// The same grouped rig with an explicit native physical camera. The
+    /// physical output and aperture interpretation are those of
+    /// [`Self::new_with_camera`]; fixture grouping changes neither units nor
+    /// the deterministic sample addresses. Supplemental native area bindings
+    /// are admitted as in [`Self::new_with_rig`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_rig_camera(
+        scene: &'scene Scene,
+        camera: &'scene PhysicalCamera,
+        rig: &'scene PhotometricRig,
+        surfaces: &'scene [PhotometricAreaEmitter],
+        medium: PathMedium<'scene, 'field>,
+        options: TransportOptions,
+        settings: Settings,
+        cx: &Cx<'_>,
+    ) -> Result<Self, PhotometryError> {
+        Self::new_with_camera_choice(
+            scene,
+            Some(camera),
+            PhotometricPointSources::Rig(rig),
+            surfaces,
+            medium,
+            options,
+            settings,
+            cx,
+        )
+    }
+
     /// Admit calibrated point fixtures and finite mesh sources.
     ///
     /// Each surface binding supplies total emitted lumens and a visible
@@ -182,7 +241,16 @@ impl<'scene, 'field> PathLuminanceJob<'scene, 'field> {
         settings: Settings,
         cx: &Cx<'_>,
     ) -> Result<Self, PhotometryError> {
-        Self::new_with_camera_choice(scene, None, emitters, medium, options, settings, cx)
+        Self::new_with_camera_choice(
+            scene,
+            None,
+            PhotometricPointSources::Independent(emitters.points),
+            emitters.surfaces,
+            medium,
+            options,
+            settings,
+            cx,
+        )
     }
 
     /// Admit an explicit physical camera for calibrated spectral path images.
@@ -209,13 +277,24 @@ impl<'scene, 'field> PathLuminanceJob<'scene, 'field> {
         settings: Settings,
         cx: &Cx<'_>,
     ) -> Result<Self, PhotometryError> {
-        Self::new_with_camera_choice(scene, Some(camera), emitters, medium, options, settings, cx)
+        Self::new_with_camera_choice(
+            scene,
+            Some(camera),
+            PhotometricPointSources::Independent(emitters.points),
+            emitters.surfaces,
+            medium,
+            options,
+            settings,
+            cx,
+        )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn new_with_camera_choice(
         scene: &'scene Scene,
         camera: Option<&'scene PhysicalCamera>,
-        emitters: PhotometricEmitters<'scene>,
+        points: PhotometricPointSources<'scene>,
+        surfaces: &'scene [PhotometricAreaEmitter],
         medium: PathMedium<'scene, 'field>,
         options: TransportOptions,
         settings: Settings,
@@ -237,10 +316,10 @@ impl<'scene, 'field> PathLuminanceJob<'scene, 'field> {
             .ok_or(PhotometryError::OutputBudgetExceeded)?;
         let transport = match camera {
             Some(camera) => FixtureTransport::try_new_with_camera(
-                scene, camera, emitters, medium, options, settings, cx,
+                scene, camera, points, surfaces, medium, options, settings, cx,
             )?,
             None => FixtureTransport::try_new_with_emitters(
-                scene, emitters, medium, options, settings, cx,
+                scene, points, surfaces, medium, options, settings, cx,
             )?,
         };
         let mut moments = Vec::new();
@@ -293,6 +372,20 @@ impl<'scene, 'field> PathLuminanceJob<'scene, 'field> {
     #[must_use]
     pub fn point_sampling(&self) -> PointFixtureSampling {
         self.transport.point_sampling()
+    }
+
+    /// Assembled fixture/control snapshot retained with these physical results.
+    #[must_use]
+    pub fn rig(&self) -> Option<&'scene PhotometricRig> {
+        self.transport.rig()
+    }
+
+    /// Resolve each sampled point-source index to its fixture and local emitter.
+    /// The image remains an aggregate transport estimate; this mapping does not
+    /// claim per-emitter attribution of multiply reflected/scattered radiance.
+    #[must_use]
+    pub fn emitter_identities(&self) -> Option<&'scene [FixtureEmitterIdentity]> {
+        self.transport.emitter_identities()
     }
 
     #[cfg(test)]

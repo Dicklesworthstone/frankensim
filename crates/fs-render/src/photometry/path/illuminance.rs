@@ -1,9 +1,11 @@
 //! Incident illuminance from the same calibrated surface/volume paths as images.
 
-use crate::photometry::area::PhotometricEmitters;
+use crate::photometry::area::{PhotometricAreaEmitter, PhotometricEmitters};
+use crate::photometry::fixture::{FixtureEmitterIdentity, PhotometricRig};
 use crate::photometry::source::PhotometricSource;
 use crate::photometry::{
-    CalculationGrid, IlluminanceProbe, PhotometryError, Receivers, TransportOptions,
+    CalculationGrid, IlluminanceProbe, PhotometricPointSources, PhotometryError, Receivers,
+    TransportOptions,
 };
 use crate::tracer::photometric::FixtureTransport;
 use crate::tracer::{
@@ -150,6 +152,20 @@ impl<'scene, 'field> PathIlluminanceJob<'scene, 'field> {
         self.transport.point_sampling()
     }
 
+    /// Immutable assembled fixture/control snapshot used by these results.
+    #[must_use]
+    pub fn rig(&self) -> Option<&'scene PhotometricRig> {
+        self.transport.rig()
+    }
+
+    /// Retained source-index mapping to fixture and local emitter identities.
+    /// This is input attribution; sampled reflected/scattered contributions
+    /// are aggregate physical illuminance, not per-emitter estimates.
+    #[must_use]
+    pub fn emitter_identities(&self) -> Option<&'scene [FixtureEmitterIdentity]> {
+        self.transport.emitter_identities()
+    }
+
     #[cfg(test)]
     pub(crate) fn disable_acceleration_for_test(&mut self) {
         assert_eq!(self.completed, 0);
@@ -179,6 +195,37 @@ impl<'scene, 'field> PathIlluminanceJob<'scene, 'field> {
         )
     }
 
+    /// Admit receiver points with an assembled multi-emitter rig. Attach its
+    /// body geometry once to the native scene using
+    /// [`PhotometricRig::append_geometry_to`] before constructing the job.
+    /// Direct lux and all sampled surface/volume paths share the rig's exact
+    /// source order, calibrated spectra and transformed optical frames.
+    /// Supplemental native `surfaces` bindings contribute through the sampled
+    /// continuous component, as in [`Self::new_with_emitters`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_rig(
+        scene: &'scene Scene,
+        rig: &'scene PhotometricRig,
+        surfaces: &'scene [PhotometricAreaEmitter],
+        medium: PathMedium<'scene, 'field>,
+        probes: &'scene [IlluminanceProbe],
+        options: TransportOptions,
+        sampling: IlluminanceSampling,
+        cx: &Cx<'_>,
+    ) -> Result<Self, PhotometryError> {
+        Self::begin(
+            scene,
+            PhotometricPointSources::Rig(rig),
+            surfaces,
+            medium,
+            Receivers::Probes(probes),
+            probes.len(),
+            options,
+            sampling,
+            cx,
+        )
+    }
+
     /// Admit probes with calibrated point fixtures and finite mesh emitters.
     /// Finite-source illumination is sampled together with the incoming path;
     /// the deterministic `direct_lux` component remains the point-fixture sum.
@@ -194,7 +241,8 @@ impl<'scene, 'field> PathIlluminanceJob<'scene, 'field> {
     ) -> Result<Self, PhotometryError> {
         Self::begin(
             scene,
-            emitters,
+            PhotometricPointSources::Independent(emitters.points),
+            emitters.surfaces,
             medium,
             Receivers::Probes(probes),
             probes.len(),
@@ -227,6 +275,34 @@ impl<'scene, 'field> PathIlluminanceJob<'scene, 'field> {
         )
     }
 
+    /// Admit a calculation plane with a grouped rig, retaining the native
+    /// point-probe semantics and requiring no intermediate receiver array.
+    /// Supplemental native area bindings use the same sampled continuous
+    /// component as [`Self::new_with_rig`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn for_grid_with_rig(
+        scene: &'scene Scene,
+        rig: &'scene PhotometricRig,
+        surfaces: &'scene [PhotometricAreaEmitter],
+        medium: PathMedium<'scene, 'field>,
+        grid: CalculationGrid,
+        options: TransportOptions,
+        sampling: IlluminanceSampling,
+        cx: &Cx<'_>,
+    ) -> Result<Self, PhotometryError> {
+        Self::begin(
+            scene,
+            PhotometricPointSources::Rig(rig),
+            surfaces,
+            medium,
+            Receivers::Grid(grid),
+            grid.len(),
+            options,
+            sampling,
+            cx,
+        )
+    }
+
     /// Admit a calculation plane with calibrated point and finite mesh sources.
     /// As with [`Self::for_grid`], grid values are infinitesimal point samples.
     #[allow(clippy::too_many_arguments)]
@@ -241,7 +317,8 @@ impl<'scene, 'field> PathIlluminanceJob<'scene, 'field> {
     ) -> Result<Self, PhotometryError> {
         Self::begin(
             scene,
-            emitters,
+            PhotometricPointSources::Independent(emitters.points),
+            emitters.surfaces,
             medium,
             Receivers::Grid(grid),
             grid.len(),
@@ -254,7 +331,8 @@ impl<'scene, 'field> PathIlluminanceJob<'scene, 'field> {
     #[allow(clippy::too_many_arguments)]
     fn begin(
         scene: &'scene Scene,
-        emitters: PhotometricEmitters<'scene>,
+        points: PhotometricPointSources<'scene>,
+        surfaces: &'scene [PhotometricAreaEmitter],
         medium: PathMedium<'scene, 'field>,
         receivers: Receivers<'scene>,
         count: usize,
@@ -285,7 +363,8 @@ impl<'scene, 'field> PathIlluminanceJob<'scene, 'field> {
         };
         let transport = FixtureTransport::try_for_probes_with_emitters(
             scene,
-            emitters,
+            points,
+            surfaces,
             medium,
             options,
             settings,

@@ -28,6 +28,7 @@ use fs_geom::{Point3, Vec3};
 use std::sync::Arc;
 
 pub mod area;
+pub mod fixture;
 pub mod image;
 pub mod medium;
 pub mod observer;
@@ -35,6 +36,7 @@ pub mod path;
 pub mod source;
 pub mod transport;
 
+use fixture::{FixtureEmitterIdentity, FixtureId, PhotometricRig};
 use medium::{HomogeneousMedium, MediumError};
 use source::{PhotometricSource, SourceError};
 use transport::{PhotometricMedium, photopic_transmittance};
@@ -333,6 +335,67 @@ pub struct IlluminanceEstimate {
     pub total_error_bound_lux: Option<f64>,
 }
 
+/// One emitter's direct contribution, retaining its original flat source index.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EmitterIlluminance {
+    /// Index used by source diagnostics and native transport sampling.
+    pub source: usize,
+    /// Separate fixture and emitter identities when assembled from a rig.
+    /// Independent flat source inputs have no fixture identity.
+    pub identity: Option<FixtureEmitterIdentity>,
+    /// Unscattered, unreflected contribution in lux.
+    pub estimate: IlluminanceEstimate,
+}
+
+/// Direct illuminance summed over the emitters of one assembled fixture.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FixtureIlluminance {
+    /// Fixture identity, distinct from every emitter's local identity.
+    pub fixture: FixtureId,
+    /// Unscattered, unreflected contribution in lux.
+    pub estimate: IlluminanceEstimate,
+}
+
+/// Direct result and deterministic emitter/fixture attribution at one receiver.
+///
+/// The total uses the same ordered compensated sum as [`PhotometricScene::illuminance`].
+/// Fixture sums are separate reductions over their emitter ranges; re-summing
+/// those rounded values need not reproduce the total's last bit. This is direct
+/// illumination attribution only, not a decomposition of sampled path transport.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IlluminanceBreakdown {
+    /// Direct lux from every source in the original source order.
+    pub total: IlluminanceEstimate,
+    /// One result per emitter, including emitters with zero flux/contribution.
+    pub emitters: Vec<EmitterIlluminance>,
+    /// One result per fixture in caller order; empty for flat source inputs.
+    pub fixtures: Vec<FixtureIlluminance>,
+}
+
+/// Internal input preserves the identity map without changing the public flat
+/// `PhotometricEmitters` literal or allowing a map to be paired with other sources.
+#[derive(Clone, Copy)]
+pub(crate) enum PhotometricPointSources<'a> {
+    Independent(&'a [PhotometricSource]),
+    Rig(&'a PhotometricRig),
+}
+
+impl<'a> PhotometricPointSources<'a> {
+    pub(crate) fn sources(self) -> &'a [PhotometricSource] {
+        match self {
+            Self::Independent(sources) => sources,
+            Self::Rig(rig) => rig.sources(),
+        }
+    }
+
+    pub(crate) fn rig(self) -> Option<&'a PhotometricRig> {
+        match self {
+            Self::Independent(_) => None,
+            Self::Rig(rig) => Some(rig),
+        }
+    }
+}
+
 /// Immutable borrowed scene for a snapshot of fixture transforms/state.
 ///
 /// Geometry and opaque materials are exactly those used by the existing
@@ -347,6 +410,7 @@ pub struct PhotometricScene<'a> {
     primitives: &'a [Primitive],
     geometry: Arc<PreparedGeometry>,
     sources: &'a [PhotometricSource],
+    rig: Option<&'a PhotometricRig>,
     medium: PhotometricMedium<'a>,
     options: TransportOptions,
 }
@@ -375,6 +439,47 @@ impl<'a> PhotometricScene<'a> {
         )
     }
 
+    /// Admit an assembled multi-emitter rig through the existing direct and
+    /// homogeneous-haze paths. Attach fixture bodies to `primitives` once with
+    /// [`PhotometricRig::append_geometry_to`] before admission. Their geometry
+    /// then participates in the same native visibility index as the scene.
+    pub fn try_from_rig(
+        primitives: &'a [Primitive],
+        rig: &'a PhotometricRig,
+        medium: HomogeneousMedium,
+        options: TransportOptions,
+        cx: &Cx<'_>,
+    ) -> Result<Self, PhotometryError> {
+        Self::try_from_rig_with_medium(
+            primitives,
+            rig,
+            PhotometricMedium::Homogeneous(medium),
+            options,
+            cx,
+        )
+    }
+
+    /// Admit an assembled rig with the original physical medium snapshot.
+    /// Source indices retain fixture/emitter input order and can be resolved
+    /// with [`Self::emitter_identities`]. Geometry mounting is explicit as in
+    /// [`Self::try_from_rig`]; no second geometry or transport model is created.
+    pub fn try_from_rig_with_medium(
+        primitives: &'a [Primitive],
+        rig: &'a PhotometricRig,
+        medium: PhotometricMedium<'a>,
+        options: TransportOptions,
+        cx: &Cx<'_>,
+    ) -> Result<Self, PhotometryError> {
+        Self::admit(
+            primitives,
+            PhotometricPointSources::Rig(rig),
+            medium,
+            options,
+            false,
+            cx,
+        )
+    }
+
     /// Admit the same static scene with an original physical medium snapshot.
     /// Direct illuminance includes only fixture light which has neither
     /// scattered nor reflected. Temperature-dependent medium emission is not
@@ -387,7 +492,14 @@ impl<'a> PhotometricScene<'a> {
         options: TransportOptions,
         cx: &Cx<'_>,
     ) -> Result<Self, PhotometryError> {
-        Self::admit(primitives, sources, medium, options, false, cx)
+        Self::admit(
+            primitives,
+            PhotometricPointSources::Independent(sources),
+            medium,
+            options,
+            false,
+            cx,
+        )
     }
 
     /// The spectral path adapter supplies native tangent frames and dielectric
@@ -395,7 +507,7 @@ impl<'a> PhotometricScene<'a> {
     /// admission must retain the narrower material contract.
     pub(crate) fn try_with_path_medium(
         primitives: &'a [Primitive],
-        sources: &'a [PhotometricSource],
+        sources: PhotometricPointSources<'a>,
         medium: PhotometricMedium<'a>,
         options: TransportOptions,
         cx: &Cx<'_>,
@@ -405,12 +517,14 @@ impl<'a> PhotometricScene<'a> {
 
     fn admit(
         primitives: &'a [Primitive],
-        sources: &'a [PhotometricSource],
+        points: PhotometricPointSources<'a>,
         medium: PhotometricMedium<'a>,
         options: TransportOptions,
         native_paths: bool,
         cx: &Cx<'_>,
     ) -> Result<Self, PhotometryError> {
+        let sources = points.sources();
+        let rig = points.rig();
         cx.checkpoint()?;
         if !options.ray_epsilon_m.is_finite()
             || options.ray_epsilon_m <= 0.0
@@ -503,6 +617,7 @@ impl<'a> PhotometricScene<'a> {
             primitives,
             geometry: Arc::new(PreparedGeometry::try_new(primitives, cx)?),
             sources,
+            rig,
             medium,
             options,
         })
@@ -510,6 +625,19 @@ impl<'a> PhotometricScene<'a> {
 
     pub(crate) fn prepared_geometry(&self) -> Arc<PreparedGeometry> {
         Arc::clone(&self.geometry)
+    }
+
+    /// Immutable fixture snapshot used by this calculation, if supplied.
+    #[must_use]
+    pub const fn rig(&self) -> Option<&'a PhotometricRig> {
+        self.rig
+    }
+
+    /// Resolve source indices in diagnostics/results to fixture and local
+    /// emitter identities. Flat source admission returns `None`.
+    #[must_use]
+    pub fn emitter_identities(&self) -> Option<&'a [FixtureEmitterIdentity]> {
+        self.rig.map(PhotometricRig::emitter_identities)
     }
 
     #[cfg(test)]
@@ -528,17 +656,9 @@ impl<'a> PhotometricScene<'a> {
         cx.checkpoint()?;
         let mut total = CompensatedSum::default();
         for (index, source) in self.sources.iter().enumerate() {
-            cx.checkpoint()?;
-            if source.flux_lm() == 0.0 {
-                continue;
-            }
-            let connection = self.connection(cx, source, index, probe.position_m)?;
-            let cosine = probe.normal.dot(connection.towards_source).max(0.0);
-            if cosine == 0.0 || connection.illuminance_normal_lux == 0.0 {
-                continue;
-            }
-            if self.visible(cx, source.position_m(), &connection)? {
-                total.add(connection.illuminance_normal_lux * cosine);
+            let lux = self.emitter_illuminance(cx, source, index, probe)?;
+            if lux != 0.0 {
+                total.add(lux);
             }
         }
         let lux = total.finish()?;
@@ -547,6 +667,100 @@ impl<'a> PhotometricScene<'a> {
             numerical: NumericalCertificate::no_claim(),
             total_error_bound_lux: None,
         })
+    }
+
+    /// Evaluate direct lux with emitter and fixture attribution using exactly
+    /// the same connection, spectral extinction and visibility kernels as the
+    /// aggregate result. Result storage counts emitters, fixtures and the total
+    /// against `TransportOptions::max_outputs`. A cancelled/refused call returns
+    /// no partial breakdown.
+    pub fn illuminance_breakdown(
+        &self,
+        cx: &Cx<'_>,
+        probe: &IlluminanceProbe,
+    ) -> Result<IlluminanceBreakdown, PhotometryError> {
+        cx.checkpoint()?;
+        let fixture_count = self.rig.map_or(0, |rig| rig.fixtures().len());
+        let count = self
+            .sources
+            .len()
+            .checked_add(fixture_count)
+            .and_then(|count| count.checked_add(1))
+            .ok_or(PhotometryError::OutputBudgetExceeded)?;
+        if count > self.options.max_outputs {
+            return Err(PhotometryError::OutputBudgetExceeded);
+        }
+        let mut emitters = Vec::new();
+        emitters
+            .try_reserve_exact(self.sources.len())
+            .map_err(|_| PhotometryError::AllocationRefused)?;
+        let mut fixtures = Vec::new();
+        fixtures
+            .try_reserve_exact(fixture_count)
+            .map_err(|_| PhotometryError::AllocationRefused)?;
+        let identities = self.emitter_identities();
+        let mut total = CompensatedSum::default();
+        for (index, source) in self.sources.iter().enumerate() {
+            let lux = self.emitter_illuminance(cx, source, index, probe)?;
+            if lux != 0.0 {
+                total.add(lux);
+            }
+            emitters.push(EmitterIlluminance {
+                source: index,
+                identity: identities.map(|identities| identities[index]),
+                estimate: direct_estimate(lux),
+            });
+        }
+        if let Some(rig) = self.rig {
+            for fixture in rig.fixtures() {
+                cx.checkpoint()?;
+                let mut subtotal = CompensatedSum::default();
+                for emitter in &emitters[fixture.sources.clone()] {
+                    cx.checkpoint()?;
+                    if emitter.estimate.lux != 0.0 {
+                        subtotal.add(emitter.estimate.lux);
+                    }
+                }
+                fixtures.push(FixtureIlluminance {
+                    fixture: fixture.id,
+                    estimate: direct_estimate(subtotal.finish()?),
+                });
+            }
+        }
+        cx.checkpoint()?;
+        Ok(IlluminanceBreakdown {
+            total: direct_estimate(total.finish()?),
+            emitters,
+            fixtures,
+        })
+    }
+
+    fn emitter_illuminance(
+        &self,
+        cx: &Cx<'_>,
+        source: &PhotometricSource,
+        index: usize,
+        probe: &IlluminanceProbe,
+    ) -> Result<f64, PhotometryError> {
+        cx.checkpoint()?;
+        if source.flux_lm() == 0.0 {
+            return Ok(0.0);
+        }
+        let connection = self.connection(cx, source, index, probe.position_m)?;
+        let cosine = probe.normal.dot(connection.towards_source).max(0.0);
+        if cosine == 0.0 || connection.illuminance_normal_lux == 0.0 {
+            return Ok(0.0);
+        }
+        if self.visible(cx, source.position_m(), &connection)? {
+            let lux = connection.illuminance_normal_lux * cosine;
+            if lux.is_finite() {
+                Ok(lux)
+            } else {
+                Err(PhotometryError::NonFiniteResult)
+            }
+        } else {
+            Ok(0.0)
+        }
     }
 
     /// Evaluate a full row-major grid with private staging. On refusal there is
@@ -721,10 +935,24 @@ impl<'a, 'scene> IlluminanceJob<'a, 'scene> {
         &self.values
     }
 
+    /// Fixture/emitter identities retained with this job's source indices.
+    #[must_use]
+    pub fn emitter_identities(&self) -> Option<&'scene [FixtureEmitterIdentity]> {
+        self.scene.emitter_identities()
+    }
+
     /// Whether every declared receiver has completed.
     #[must_use]
     pub fn is_complete(&self) -> bool {
         self.values.len() == self.count
+    }
+}
+
+fn direct_estimate(lux: f64) -> IlluminanceEstimate {
+    IlluminanceEstimate {
+        lux,
+        numerical: NumericalCertificate::no_claim(),
+        total_error_bound_lux: None,
     }
 }
 

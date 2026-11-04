@@ -477,6 +477,19 @@ impl<'a, 'scene> LuminanceJob<'a, 'scene> {
         &self.values
     }
 
+    /// Fixture/emitter identities retained with the physical image's sources.
+    /// Luminance components remain aggregate surface and haze measurements.
+    #[must_use]
+    pub fn emitter_identities(&self) -> Option<&'scene [super::fixture::FixtureEmitterIdentity]> {
+        self.scene.emitter_identities()
+    }
+
+    /// Immutable fixture/control snapshot used by this image, if supplied.
+    #[must_use]
+    pub fn rig(&self) -> Option<&'scene super::fixture::PhotometricRig> {
+        self.scene.rig()
+    }
+
     /// Requested image dimensions.
     #[must_use]
     pub const fn dimensions(&self) -> (u32, u32) {
