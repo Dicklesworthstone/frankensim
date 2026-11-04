@@ -56,10 +56,22 @@ pub enum FlowFace {
     /// Open face whose supplied flux is held fixed by the projection (an
     /// analytic or measured inflow profile).
     Fixed,
-    /// Open face where the projection's correction potential vanishes, so
-    /// its flux adjusts to the interior field (an outflow, or an LBM on-site
-    /// boundary whose cell velocity is not the transported mass flux).
+    /// Open face whose flux adjusts to a prescribed correction pressure;
+    /// the original projection entry points prescribe zero. This can be an
+    /// inlet or outlet, or an LBM on-site boundary whose cell velocity is not
+    /// the transported mass flux.
     Free,
+}
+
+// Reuse the component map needed by the compatibility check to retain a
+// separate mechanical gauge for each open fluid region. Solving relative to
+// its first reservoir prevents a large common pressure from hiding small
+// driving differences in the Krylov residual or the face subtraction.
+struct ProjectionPotential {
+    cells: Vec<usize>,
+    values: Vec<f64>,
+    component: Vec<usize>,
+    reference_pressure_pa: Vec<f64>,
 }
 
 /// Volumetric fluxes (m^3/s, positive along `+axis`) through every cell face
@@ -369,7 +381,7 @@ impl FlowField {
         gate: &CancelGate,
     ) -> Result<ProjectionReport, ChtError> {
         self.project_with_density(domain, faces, tolerance, None, gate)
-            .map(|(report, _, _)| report)
+            .map(|(report, _)| report)
     }
 
     // The old geometric potential and the frozen-density pressure share one
@@ -384,7 +396,7 @@ impl FlowField {
         tolerance: f64,
         density: Option<&FrozenDensity<'_>>,
         gate: &CancelGate,
-    ) -> Result<(ProjectionReport, Vec<usize>, Vec<f64>), ChtError> {
+    ) -> Result<(ProjectionReport, ProjectionPotential), ChtError> {
         let max_divergence_before_m3_s = self.max_divergence(domain);
         let fluid: Vec<usize> = (0..domain.cell_count())
             .filter(|&c| domain.is_fluid(c))
@@ -401,6 +413,7 @@ impl FlowField {
         // cannot exchange fluid even when their global imbalances cancel.
         let mut component = vec![usize::MAX; n];
         let mut pins = Vec::new();
+        let mut reference_pressure_pa = Vec::new();
         for start in 0..n {
             if component[start] != usize::MAX {
                 continue;
@@ -409,6 +422,7 @@ impl FlowField {
             let mut stack = vec![start];
             component[start] = id;
             let mut drains = false;
+            let mut reference = None;
             let mut boundary_flux = 0.0f64;
             let mut boundary_compensation = 0.0f64;
             let mut boundary_scale = 0.0f64;
@@ -440,6 +454,10 @@ impl FlowField {
                         Some(_) => {}
                         None => {
                             drains |= faces[f] == FlowFace::Free;
+                            if faces[f] == FlowFace::Free && reference.is_none() {
+                                reference =
+                                    Some(density.map_or(0.0, |d| d.boundary_pressure_pa[f]));
+                            }
                             let q = self.outward(domain, c, f);
                             // Compensated boundary-only reduction: interior
                             // flux cancellation contributes no summation error.
@@ -479,6 +497,7 @@ impl FlowField {
                 });
             }
             pins.push((start, drains));
+            reference_pressure_pa.push(reference.unwrap_or(0.0));
         }
         let mut is_pinned = vec![false; n];
         let mut pinned_components = 0usize;
@@ -509,10 +528,15 @@ impl FlowField {
         };
         let mut coo = Coo::new(n, n);
         let mut b = vec![0.0f64; n];
+        let boundary_potential = |row: usize, f: usize| {
+            density.map_or(0.0, |d| {
+                d.boundary_potential(f, reference_pressure_pa[component[row]])
+            })
+        };
         for (row, &c) in fluid.iter().enumerate() {
             poll_every(gate, row)?;
             let mut diag = 0.0;
-            let rhs = match density {
+            let mut rhs = match density {
                 Some(density) if density.target_outflow_m3_s[c] != 0.0 => {
                     density.target_outflow_m3_s[c] - self.net_outflow(domain, c)
                 }
@@ -530,6 +554,12 @@ impl FlowField {
                         let g = conductance(c, f, None);
                         finite_positive("flow.projection_conductance", g)?;
                         diag += g;
+                        let value = boundary_potential(row, f);
+                        finite("flow.boundary_pressure_potential", value)?;
+                        // Preserve the original zero-boundary arithmetic.
+                        if value != 0.0 {
+                            rhs += g * value;
+                        }
                     }
                     _ => {}
                 }
@@ -551,6 +581,7 @@ impl FlowField {
                 diag += pin;
             }
             coo.push(row, row, diag);
+            finite("flow.projection_rhs", rhs)?;
             b[row] = rhs;
         }
         let a = scale_rows(&coo, &mut b);
@@ -573,7 +604,9 @@ impl FlowField {
                     Some(nb) if f % 2 == 1 && domain.is_fluid(nb) => {
                         -conductance(c, f, Some(nb)) * (phi[row_of[nb]] - phi[row])
                     }
-                    None if faces[f] == FlowFace::Free => conductance(c, f, None) * phi[row],
+                    None if faces[f] == FlowFace::Free => {
+                        conductance(c, f, None) * (phi[row] - boundary_potential(row, f))
+                    }
                     _ => continue,
                 };
                 let (slot, sign) = self.slot(domain, c, f);
@@ -591,7 +624,15 @@ impl FlowField {
             max_divergence_after_m3_s: self.max_divergence(domain),
             max_correction_m3_s,
         };
-        Ok((report, fluid, phi))
+        Ok((
+            report,
+            ProjectionPotential {
+                cells: fluid,
+                values: phi,
+                component,
+                reference_pressure_pa,
+            },
+        ))
     }
 }
 

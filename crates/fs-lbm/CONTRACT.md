@@ -3526,6 +3526,22 @@ electronics cooling (the wedge's second physics after steady conduction).
   analytic graded two-density pressure/flux/work on all axes, exact homogeneous
   legacy parity, fixed-boundary work, sealed source/sink compatibility,
   disconnected components, independent readback budgets and refusal rollback.
+- `project_density_volume_source_with_boundary_pressure` extends that same
+  native solve with finite authored pressure on each `Free` domain plane.
+  Pressure acts through the boundary half-cell inertia and can accelerate
+  inflow or outflow; specifying pressure on a velocity-prescribed `Wall` or
+  `Fixed` plane is refused. Each connected open region solves relative to its
+  first reservoir pressure, restores the authored gauge in cell readback, and
+  measures all pressure work in the same relative gauge. This retains small
+  pressure differences at a large common pressure without tolerance-driven
+  false convergence or catastrophic pressure-work cancellation. The additional
+  signed reservoir work is `dt sum(p_boundary Q_out)`; the independent identity
+  is `delta_K + projection_loss - source_work + fixed_work + reservoir_work = 0`.
+  The default zero-pressure entry retains its original flux arithmetic. Analytic
+  graded two-density tests cover both directions on all axes, homogeneous and
+  heterogeneous large-datum invariance, independent disconnected reservoirs,
+  and refusal rollback. This is a finite-duration mechanical pressure impulse;
+  it neither supplies a viscous steady-flow law nor updates a thermodynamic EOS.
 - `FlowField::predict_density_body_force` supplies native staggered momentum
   prediction from frozen physical density, uniform acceleration and an explicit
   cell body-force density. Each face integrates the same two half-cells as the

@@ -468,6 +468,7 @@ fn independent_energy_readback_refuses_inconsistent_pressure() {
         target_outflow_m3_s: &[0.2, 0.5],
         duration_s: 0.4,
         uniform_density: None,
+        boundary_pressure_pa: [0.0; 6],
     };
     let pressure = result
         .pressure_correction_pa
@@ -481,6 +482,12 @@ fn independent_energy_readback_refuses_inconsistent_pressure() {
         faces,
         &model,
         &pressure,
+        &ProjectionPotential {
+            cells: vec![0, 1],
+            values: Vec::new(),
+            component: vec![0, 0],
+            reference_pressure_pa: vec![0.0],
+        },
         result.report.projection,
         controls(),
         &CancelGate::new(),
@@ -493,4 +500,224 @@ fn independent_energy_readback_refuses_inconsistent_pressure() {
             ..
         }
     ));
+}
+
+#[test]
+fn reservoir_pressure_difference_accelerates_graded_density_in_either_direction() {
+    // A=6, h=[1,2], rho=[2,5]. The two boundary half-cells and the
+    // shared dual give total series inertia sum(M)/A = 12 kg/m^2.
+    // Therefore Q=dt*A*delta_p/12=.2*delta_p, K=loss=Q^2 and
+    // reservoir work=-dt*Q*delta_p. These are pressure impulses, not
+    // steady Poiseuille solutions (no viscous resistance is supplied).
+    for axis in 0..3 {
+        let mut widths = [vec![2.0], vec![3.0], vec![2.0]];
+        widths[axis] = vec![1.0, 2.0];
+        widths[(axis + 1) % 3] = vec![2.0];
+        widths[(axis + 2) % 3] = vec![3.0];
+        let domain = VoxelDomain::graded(widths).unwrap();
+        let mut faces = [FlowFace::Wall; 6];
+        faces[2 * axis] = FlowFace::Free;
+        faces[2 * axis + 1] = FlowFace::Free;
+        for difference in [-12.0, 12.0] {
+            let mut pressures = [None; 6];
+            pressures[2 * axis] = Some(80.0 + difference);
+            pressures[2 * axis + 1] = Some(80.0);
+            let initial = FlowField::quiescent(&domain);
+            let result = initial
+                .project_density_volume_source_with_boundary_pressure(
+                    &domain,
+                    faces,
+                    pressures,
+                    &[2.0, 5.0],
+                    &[0.0, 0.0],
+                    controls(),
+                    &CancelGate::new(),
+                )
+                .unwrap();
+            let flux = 0.2 * difference;
+            close(result.field.outward(&domain, 0, 2 * axis), -flux);
+            close(result.field.outward(&domain, 0, 2 * axis + 1), flux);
+            close(result.field.outward(&domain, 1, 2 * axis + 1), flux);
+            close(result.field.net_outflow(&domain, 0), 0.0);
+            close(result.field.net_outflow(&domain, 1), 0.0);
+            close(
+                result.pressure_correction_pa[0],
+                80.0 + 11.0 * difference / 12.0,
+            );
+            close(
+                result.pressure_correction_pa[1],
+                80.0 + 5.0 * difference / 12.0,
+            );
+            close(result.report.kinetic_energy_change_j, flux * flux);
+            close(result.report.projection_loss_j, flux * flux);
+            close(
+                result.report.open_boundary_pressure_work_j,
+                -0.4 * flux * difference,
+            );
+            close(result.report.pressure_source_work_j, 0.0);
+            close(result.report.fixed_boundary_pressure_work_j, 0.0);
+            close(result.report.energy_defect_j, 0.0);
+            assert_eq!(result.report.projection.pinned_components, 0);
+            assert_eq!(initial, FlowField::quiescent(&domain));
+        }
+    }
+}
+
+#[test]
+fn large_common_reservoir_pressure_preserves_small_driving_flux_and_work() {
+    let domain = VoxelDomain::graded([vec![1.0, 2.0], vec![2.0], vec![3.0]]).unwrap();
+    let faces = [
+        FlowFace::Free,
+        FlowFace::Free,
+        FlowFace::Wall,
+        FlowFace::Wall,
+        FlowFace::Wall,
+        FlowFace::Wall,
+    ];
+    let initial = FlowField::quiescent(&domain);
+    for density in [[2.0, 5.0], [5.0, 5.0]] {
+        let project = |datum: f64, difference: f64| {
+            initial
+                .project_density_volume_source_with_boundary_pressure(
+                    &domain,
+                    faces,
+                    [
+                        Some(datum + difference),
+                        Some(datum),
+                        None,
+                        None,
+                        None,
+                        None,
+                    ],
+                    &density,
+                    &[0.0, 0.0],
+                    controls(),
+                    &CancelGate::new(),
+                )
+                .unwrap()
+        };
+        let baseline = project(0.0, 16.0);
+        let shifted = project(1e12, 16.0);
+        assert_eq!(baseline.field, shifted.field);
+        assert_eq!(baseline.report, shifted.report);
+        assert!(shifted.report.kinetic_energy_change_j > 0.0);
+        let resting = project(1e12, 0.0);
+        assert_eq!(resting.field, initial);
+        assert_eq!(resting.pressure_correction_pa, vec![1e12, 1e12]);
+        assert_eq!(resting.report.projection.iterations, 0);
+        assert_eq!(resting.report.open_boundary_pressure_work_j, 0.0);
+    }
+}
+
+#[test]
+fn disconnected_reservoirs_choose_independent_pressure_references() {
+    let domain = VoxelDomain::from_fn(5, 1, 1, 1.0, |p| {
+        if p[0] > 2.0 && p[0] < 3.0 {
+            Voxel::Solid(0)
+        } else {
+            Voxel::Fluid
+        }
+    })
+    .unwrap();
+    let faces = [
+        FlowFace::Free,
+        FlowFace::Free,
+        FlowFace::Wall,
+        FlowFace::Wall,
+        FlowFace::Wall,
+        FlowFace::Wall,
+    ];
+    let initial = FlowField::quiescent(&domain);
+    let project = |pressures| {
+        initial
+            .project_density_volume_source_with_boundary_pressure(
+                &domain,
+                faces,
+                pressures,
+                &[2.0, 5.0, 0.0, 3.0, 7.0],
+                &[0.1, -0.1, 0.0, -0.1, 0.1],
+                controls(),
+                &CancelGate::new(),
+            )
+            .unwrap()
+    };
+    let baseline = project([None; 6]);
+    let shifted = project([Some(1e12), Some(-2e12), None, None, None, None]);
+    assert_eq!(baseline.field, shifted.field);
+    assert_eq!(baseline.report, shifted.report);
+    assert_eq!(shifted.pressure_correction_pa[0], 1e12);
+    assert_eq!(shifted.pressure_correction_pa[4], -2e12);
+    assert_eq!(shifted.pressure_correction_pa[2], 0.0);
+    close(shifted.field.flux_x(1, 0, 0), 0.1);
+    close(shifted.field.flux_x(4, 0, 0), -0.1);
+}
+
+#[test]
+fn reservoir_pressure_rejects_nonfinite_overconstrained_or_cancelled_inputs() {
+    let domain = VoxelDomain::new(2, 1, 1, 1.0).unwrap();
+    let initial = FlowField::quiescent(&domain);
+    let open = [
+        FlowFace::Free,
+        FlowFace::Free,
+        FlowFace::Wall,
+        FlowFace::Wall,
+        FlowFace::Wall,
+        FlowFace::Wall,
+    ];
+    for blocked in [FlowFace::Wall, FlowFace::Fixed] {
+        let mut faces = open;
+        faces[0] = blocked;
+        let error = initial
+            .project_density_volume_source_with_boundary_pressure(
+                &domain,
+                faces,
+                [Some(0.0), None, None, None, None, None],
+                &[2.0, 5.0],
+                &[0.0, 0.0],
+                controls(),
+                &CancelGate::new(),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ChtError::InvalidInput {
+                field: "flow.boundary_pressure_pa",
+                ..
+            }
+        ));
+    }
+    for pressures in [
+        [Some(f64::NAN), None, None, None, None, None],
+        [Some(f64::INFINITY), None, None, None, None, None],
+        [Some(-f64::MAX), Some(f64::MAX), None, None, None, None],
+    ] {
+        assert!(
+            initial
+                .project_density_volume_source_with_boundary_pressure(
+                    &domain,
+                    open,
+                    pressures,
+                    &[2.0, 5.0],
+                    &[0.0, 0.0],
+                    controls(),
+                    &CancelGate::new(),
+                )
+                .is_err()
+        );
+    }
+    let gate = CancelGate::new();
+    gate.request();
+    assert_eq!(
+        initial.project_density_volume_source_with_boundary_pressure(
+            &domain,
+            open,
+            [None; 6],
+            &[2.0, 5.0],
+            &[0.0, 0.0],
+            controls(),
+            &gate,
+        ),
+        Err(ChtError::Cancelled)
+    );
+    assert_eq!(initial, FlowField::quiescent(&domain));
 }

@@ -1,6 +1,8 @@
 //! Density-weighted pressure correction with an authored volume constraint.
 
-use super::{CancelGate, ChtError, FlowFace, FlowField, ProjectionReport, VoxelDomain};
+use super::{
+    CancelGate, ChtError, FlowFace, FlowField, ProjectionPotential, ProjectionReport, VoxelDomain,
+};
 use super::{finite, finite_positive, poll, poll_every};
 
 mod feedback;
@@ -47,15 +49,22 @@ pub struct DensityProjectionReport {
     pub kinetic_energy_after_j: f64,
     /// Signed kinetic-energy increment, evaluated without subtracting totals.
     pub kinetic_energy_change_j: f64,
-    /// `dt sum(p_c target_outflow_c)`, joules, using correction pressure.
+    /// `dt sum(p_c target_outflow_c)`, joules. Work uses pressure relative to
+    /// the first open reservoir in each fluid component (zero for sealed
+    /// components), so a common pressure offset cannot amplify solver error.
     pub pressure_source_work_j: f64,
     /// `dt sum(p_c Q_out)` on held `Fixed` faces, joules; subtracted from
     /// source work. The combined work is invariant to a sealed-component gauge.
     pub fixed_boundary_pressure_work_j: f64,
+    /// `dt sum(p_boundary Q_out)` on `Free` faces, joules, in the same
+    /// component gauge as source work. Negative values supply mechanical
+    /// energy from the reservoirs; positive values deliver it to them.
+    pub open_boundary_pressure_work_j: f64,
     /// Nonnegative `sum(M_face delta_u^2 / 2)`, joules. This numerical
     /// projection loss is reported separately and is never converted to heat.
     pub projection_loss_j: f64,
-    /// `delta_K + projection_loss - source_work + fixed_boundary_work`, joules.
+    /// `delta_K + projection_loss - source_work + fixed_boundary_work
+    /// + open_boundary_work`, joules, in the common component gauge.
     pub energy_defect_j: f64,
 }
 
@@ -64,9 +73,10 @@ pub struct DensityProjectionReport {
 pub struct DensityProjection {
     /// Actual corrected volumetric fluxes, m^3/s, in the original native layout.
     pub field: FlowField,
-    /// Cell pressure correction in Pa; zero in solids and at `Free` boundary
-    /// planes. A sealed component pins one fluid cell. This is not an absolute
-    /// thermodynamic pressure or an equation-of-state update.
+    /// Cell pressure correction in Pa, in the authored boundary-pressure
+    /// gauge; zero in solids. The original entry prescribes zero on `Free`
+    /// boundary planes. A sealed component pins one fluid cell. This is not
+    /// an absolute thermodynamic pressure or an equation-of-state update.
     pub pressure_correction_pa: Vec<f64>,
     /// Independent readback admitted before the result was returned.
     pub report: DensityProjectionReport,
@@ -77,9 +87,17 @@ pub(super) struct FrozenDensity<'a> {
     pub(super) target_outflow_m3_s: &'a [f64],
     duration_s: f64,
     pub(super) uniform_density: Option<f64>,
+    pub(super) boundary_pressure_pa: [f64; 6],
 }
 
 impl FrozenDensity<'_> {
+    pub(super) fn boundary_potential(&self, f: usize, reference_pa: f64) -> f64 {
+        let relative_pressure = self.boundary_pressure_pa[f] - reference_pa;
+        self.uniform_density.map_or(relative_pressure, |rho| {
+            relative_pressure / (rho / self.duration_s)
+        })
+    }
+
     fn face_mass(&self, domain: &VoxelDomain, c: usize, f: usize, nb: Option<usize>) -> f64 {
         face_dual_mass(domain, self.density_kg_m3, c, f, nb)
     }
@@ -155,7 +173,64 @@ impl FlowField {
         controls: DensityProjectionControls,
         gate: &CancelGate,
     ) -> Result<DensityProjection, ChtError> {
-        let density = self.admit_density_projection(
+        self.project_density_volume_source_with_boundary_pressure(
+            domain,
+            faces,
+            [None; 6],
+            density_kg_m3,
+            target_outflow_m3_s,
+            controls,
+            gate,
+        )
+    }
+
+    /// Project using prescribed reservoir correction pressures, in Pa, on
+    /// `Free` domain planes ordered `[x-, x+, y-, y+, z-, z+]`. `None` retains
+    /// the original zero pressure. A supplied pressure on a `Wall` or `Fixed`
+    /// face is refused: those faces already prescribe normal velocity.
+    ///
+    /// The face pressure acts at the boundary plane through the actual
+    /// adjacent half-cell inertia. Pressure differences can drive either
+    /// inflow or outflow, without an artificial outflow-only clamp. The solve
+    /// and work audit remove a common reservoir offset independently in each
+    /// connected fluid component; pressure readback restores the authored
+    /// gauge. Consequently atmospheric or other large reference pressures do
+    /// not hide a small pressure-driven acceleration in the solver tolerance.
+    /// Pressures are uniform on each authored domain plane; spatially varying
+    /// reservoir profiles and their thermodynamic states belong to the caller.
+    ///
+    /// All density, source, compatibility and rollback requirements of
+    /// [`Self::project_density_volume_source`] continue to apply. This entry
+    /// applies a pressure impulse for `duration_s`; it does not solve a steady
+    /// viscous duct or update a thermodynamic EOS.
+    ///
+    /// # Errors
+    /// A non-finite or velocity-overconstraining boundary pressure, or any
+    /// refusal documented by [`Self::project_density_volume_source`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn project_density_volume_source_with_boundary_pressure(
+        &self,
+        domain: &VoxelDomain,
+        faces: [FlowFace; 6],
+        boundary_pressure_pa: [Option<f64>; 6],
+        density_kg_m3: &[f64],
+        target_outflow_m3_s: &[f64],
+        controls: DensityProjectionControls,
+        gate: &CancelGate,
+    ) -> Result<DensityProjection, ChtError> {
+        poll(gate)?;
+        for (f, pressure) in boundary_pressure_pa.iter().enumerate() {
+            if let Some(pressure) = pressure {
+                finite("flow.boundary_pressure_pa", *pressure)?;
+                if faces[f] != FlowFace::Free {
+                    return Err(refuse(
+                        "flow.boundary_pressure_pa",
+                        "pressure is only admissible on a Free face",
+                    ));
+                }
+            }
+        }
+        let mut density = self.admit_density_projection(
             domain,
             faces,
             density_kg_m3,
@@ -163,8 +238,9 @@ impl FlowField {
             controls,
             gate,
         )?;
+        density.boundary_pressure_pa = boundary_pressure_pa.map(|p| p.unwrap_or(0.0));
         let mut field = self.clone();
-        let (projection, cells, potential) = field.project_with_density(
+        let (projection, potential) = field.project_with_density(
             domain,
             faces,
             controls.relative_tolerance,
@@ -172,16 +248,23 @@ impl FlowField {
             gate,
         )?;
         let mut pressure = vec![0.0; domain.cell_count()];
-        for (row, (&c, phi)) in cells.iter().zip(potential).enumerate() {
+        for (row, &c) in potential.cells.iter().enumerate() {
             poll_every(gate, row)?;
+            let phi = potential.values[row];
             pressure[c] = density
                 .uniform_density
                 .map_or(phi, |rho| phi * (rho / controls.duration_s));
             finite("flow.pressure_correction_pa", pressure[c])?;
         }
         let report = audit(
-            self, &field, domain, faces, &density, &pressure, projection, controls, gate,
+            self, &field, domain, faces, &density, &pressure, &potential, projection, controls,
+            gate,
         )?;
+        for (row, &c) in potential.cells.iter().enumerate() {
+            poll_every(gate, row)?;
+            pressure[c] += potential.reference_pressure_pa[potential.component[row]];
+            finite("flow.pressure_correction_pa", pressure[c])?;
+        }
         poll(gate)?;
         Ok(DensityProjection {
             field,
@@ -223,6 +306,7 @@ impl FlowField {
             target_outflow_m3_s,
             duration_s: controls.duration_s,
             uniform_density,
+            boundary_pressure_pa: [0.0; 6],
         };
         if let Some(reference) = uniform_density {
             finite_positive("flow.pressure_scale", reference / controls.duration_s)?;
@@ -346,6 +430,7 @@ fn audit(
     faces: [FlowFace; 6],
     density: &FrozenDensity<'_>,
     pressure: &[f64],
+    potential: &ProjectionPotential,
     projection: ProjectionReport,
     controls: DensityProjectionControls,
     gate: &CancelGate,
@@ -358,11 +443,10 @@ fn audit(
     let mut loss = Sum::default();
     let mut source_work = Sum::default();
     let mut boundary_work = Sum::default();
-    for c in 0..domain.cell_count() {
-        poll_every(gate, c)?;
-        if !domain.is_fluid(c) {
-            continue;
-        }
+    let mut open_work = Sum::default();
+    for (row, &c) in potential.cells.iter().enumerate() {
+        poll_every(gate, row)?;
+        let reference_pa = potential.reference_pressure_pa[potential.component[row]];
         let source = density.target_outflow_m3_s[c];
         let defect_before = before.net_outflow(domain, c) - source;
         let defect_after = after.net_outflow(domain, c) - source;
@@ -389,6 +473,10 @@ fn audit(
             loss.add(0.5 * mass * du * du);
             if nb.is_none() && faces[f] == FlowFace::Fixed {
                 boundary_work.add(controls.duration_s * pressure[c] * q1);
+            } else if nb.is_none() && faces[f] == FlowFace::Free {
+                open_work.add(
+                    controls.duration_s * (density.boundary_pressure_pa[f] - reference_pa) * q1,
+                );
             }
         }
     }
@@ -399,10 +487,12 @@ fn audit(
         loss.value,
         source_work.value,
         boundary_work.value,
+        open_work.value,
     ] {
         finite("flow.projection_energy", value)?;
     }
-    let energy_defect = change.value + loss.value - source_work.value + boundary_work.value;
+    let energy_defect =
+        change.value + loss.value - source_work.value + boundary_work.value + open_work.value;
     finite("flow.projection_energy_defect", energy_defect)?;
     if max_after > controls.maximum_volume_defect_m3_s {
         return Err(refuse(
@@ -431,6 +521,7 @@ fn audit(
         kinetic_energy_change_j: change.value,
         pressure_source_work_j: source_work.value,
         fixed_boundary_pressure_work_j: boundary_work.value,
+        open_boundary_pressure_work_j: open_work.value,
         projection_loss_j: loss.value,
         energy_defect_j: energy_defect,
     })
