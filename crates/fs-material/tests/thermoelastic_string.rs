@@ -106,11 +106,12 @@ fn g1_relaxation_strength_time_and_limits_by_hand() {
     assert_eq!(section.law().t0, T0);
     let modes = circular_thermal_modes();
     let base = section.base_time_s();
-    // omega tau << 1: Delta omega sum(w tau); omega tau >> 1: Delta sum(w / tau) / omega.
+    // Exact complete-spectrum moments, independent of the retained mode table:
+    // sum(w / xi^2) = 7/24 and sum(w * xi^2) = 4.
     let low = 1e-6 / base;
-    near(section.loss_tangent(low), delta * low * modes.iter().map(|m| m.1 * base / m.0.powi(2)).sum::<f64>(), 1e-9);
-    let high = 1e7 / base;
-    near(section.loss_tangent(high), delta / high * modes.iter().map(|m| m.1 * m.0.powi(2) / base).sum::<f64>(), 1e-6);
+    near(section.loss_tangent(low), delta * (7.0 / 24.0) * low * base, 1e-12);
+    let high = 1e20 / base;
+    near(section.loss_tangent(high), delta * 4.0 / (high * base), 2e-10);
     // At the first mode's corner the first term is w_1/2; the rest is bounded by their weight.
     let corner = modes[0].0.powi(2) / base;
     let rest: f64 = modes[1..].iter().map(|m| m.1).sum();
@@ -133,7 +134,7 @@ fn g1_doubling_the_radius_moves_the_curve_by_four() {
         near(large.loss_tangent(omega / 4.0), small.loss_tangent(omega), 1e-12);
     }
     assert_eq!(circular_relaxation_shape(0.0, 1.0), 0.0);
-    assert_eq!(circular_relaxation_shape(1.0, f64::NAN), 0.0);
+    assert!(circular_relaxation_shape(1.0, f64::NAN).is_nan());
 }
 
 // Planted negatives: a missing conductivity or heat capacity, a wrong

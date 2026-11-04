@@ -2426,12 +2426,22 @@ homogenization, the P2 milestone.
 - `section::ted::ConcentricThermoelasticBending` computes Zener thermoelastic
   bending loss of a homogeneous solid circular member from its one material
   state: `Delta = E alpha^2 T/(rho c_p)` with T from the state's single typed
-  absolute-temperature axis, and `visco::circular_ted`'s exact series over the
-  m = 1 Neumann thermal modes, `tau_n = rho c_p R^2/(k xi_n^2)` with
-  `J1'(xi_n) = 0` and weights `8/(xi_n^2 (xi_n^2 - 1))` (32 modes; omitted
-  weight below 2e-6). `xi_n` comes from a periodic-trapezoid `J1'` and is
-  checked against fs-math's certified J1; the weights against independent
-  projection integrals. Layered, hollow, untyped-temperature and incomplete
+  absolute-temperature axis, and the complete insulated-cylinder thermal
+  diffusion response in `visco::circular_ted`. An allocation-free Bessel
+  continued fraction and scaled asymptotics retain the infinite-spectrum
+  loss, its `7u/24` low-frequency and `4/u` high-frequency limits, and signed
+  frequency symmetry, where `u = omega rho c_p R^2/k`. Finite extreme scales
+  do not turn physical loss into zero through squared-frequency overflow;
+  invalid frequency or thermal time returns NaN. The scalar path does not
+  initialize thermal roots. The explicit 32-mode table remains available:
+  `tau_n = rho c_p R^2/(k xi_n^2)`, `J1'(xi_n) = 0`, and weights
+  `8/(xi_n^2 (xi_n^2 - 1))`. Its omitted static weight below 2e-6 does not
+  bound relative loss in the high-frequency tail. Independent high-precision
+  Bessel fixtures, spectral moments and extreme-scale checks cover the scalar
+  response; certified J1 and projection integrals check the explicit table.
+  This remains first-order weak thermoelastic coupling for a homogeneous
+  isotropic section with an insulated boundary. Layered, hollow,
+  untyped-temperature and incomplete
   inputs refuse. It is a lower bound on bending loss: intrinsic anelastic
   excess is the consumer's measured addend or a reported unknown.
 
