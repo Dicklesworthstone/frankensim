@@ -62,6 +62,7 @@ pub(crate) mod pressure;
 pub use pressure::GasPressureLink3;
 mod curvature;
 mod forcing;
+mod impulse;
 mod conversion_momentum;
 pub use conversion_momentum::ConversionMomentumReport3;
 mod geometry;

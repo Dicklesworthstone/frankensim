@@ -2,9 +2,16 @@
 
 ## Instantaneous loading of retained liquid mass
 
-`FreeSurface::apply_impulse_density` applies a resolved zero-duration input to
-the original D2Q9 populations. Inputs are lattice impulse per whole geometric
-cell, with integrated momentum/work understood per out-of-plane depth. Fluid
+The sparse D3Q19 owner scans the complete x-fastest input so loads on inactive,
+gas, solid or piston-occupied cells cannot disappear from the account. It stages
+only nonzero wet-cell proposals in canonical Morton/lane order and publishes
+only after the full requested count and balances agree. An all-zero input
+allocates no replacement storage; no full sparse owner clone is required.
+
+`FreeSurface::apply_impulse_density` and `FreeSurface3::apply_impulse_density`
+apply resolved zero-duration inputs to the original dense D2Q9 and sparse D3Q19
+populations. Inputs are lattice impulse per whole geometric cell. Integrated
+momentum/work is per out-of-plane depth in 2-D and a total in 3-D. Fluid
 inertia is the canonical population sum; interface inertia is its original
 tracked liquid mass. Equal impulses therefore produce larger velocity changes
 at partial fill. A source specified per occupied liquid volume must supply its
