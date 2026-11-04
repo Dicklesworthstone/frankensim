@@ -34,6 +34,8 @@ mod scattering;
 pub use scattering::{CompactSourceSpec, ForceDipoleSpec, PointSourceSpec, ScatteringObservation};
 mod harmonic;
 pub use harmonic::{
+    HarmonicControlLimits, HarmonicEnergyGradient, HarmonicFieldCovector,
+    PreparedHarmonicEnergyControl,
     HarmonicMomentumLimits, HarmonicVolumeQuadrature, HarmonicWaveMomentumFlux,
     HarmonicWaveMomentumStorage, HarmonicWaveMomentumTransfer,
     PreparedHarmonicSurfaceWaveMomentum, PreparedHarmonicVolumeWaveMomentum,

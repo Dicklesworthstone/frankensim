@@ -2942,3 +2942,39 @@ source cancellation. These compile the production retained-field, stress and
 Welch algorithms; they do not execute a BEM boundary solve or validate a
 material model. Full Cargo/DSR integration remains unavailable without the
 sibling constellation dependencies.
+
+### Coherent source adjoints and energy control
+
+`PreparedHarmonicObservation::source_pullback` applies the Hermitian adjoint
+of the original retained pressure/velocity map. Covectors use the explicit
+real-objective convention dJ = Re(sum conj(v) dfield); returned complex source
+gradients contain dJ/dRe(a) and dJ/dIm(a) in the original SourceId order and
+coordinate units. This does not invoke transpose reciprocity, re-solve the
+boundary, or differentiate the geometry, material law or propagation operator.
+The linear pullback remains valid for original relaxing-medium field maps.
+
+`PreparedHarmonicEnergyControl` binds nonnegative physical volume quadrature
+and optional peak pressure/velocity targets to that same operator. Its scalar
+objective is the cycle-mean residual energy metric
+sum V (|p-p_target|²/(rho*c²) + rho*|u-u_target|²)/4. Actual velocity remains
+essential at standing-wave pressure nodes. Targets must use the same receiver
+order, frequency, frame and phase reference; an authored target need not be a
+physically realizable field. This nondispersive energy law explicitly refuses
+relaxing exteriors, whose equilibrium sound speed is only readout calibration.
+
+Source products and target subtraction stay in DD until the complete residual
+is formed. Both objective gradients and target-independent Hessian-vector
+actions cost O(sources*receivers), reuse admitted scratch, and allocate nothing
+during queries. Repeated volume weights coalesce once. No dense Hessian or
+source finite-difference solves are introduced. Query refusal/cancellation
+publishes no control result and leaves preparation reusable. The separate
+caller-buffer pullback requires discarding output after runtime failure.
+
+Five native tests pass: complex adjoint duality on asymmetric complex maps;
+independent real-time energy and Cartesian source finite differences;
+matrix-free Hessian/positive-curvature checks; standing-wave/phase invariance
+and a cancelling control step; a unit target mismatch beside a 1e16 field;
+and physical/work/storage admission with cancellation/replay. These execute
+the production retained-field and control algorithms with real fs-math.
+They do not execute a boundary solve or establish geometry/material gradients.
+Full Cargo/DSR remains unavailable without the sibling constellation checkouts.

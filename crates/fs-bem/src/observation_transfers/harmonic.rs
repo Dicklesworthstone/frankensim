@@ -489,6 +489,12 @@ pub use momentum::{
     PreparedWelchSurfaceMomentum,
 };
 
+mod control;
+pub use control::{
+    HarmonicControlLimits, HarmonicEnergyGradient, HarmonicFieldCovector,
+    PreparedHarmonicEnergyControl,
+};
+
 pub(super) mod welch;
 
 mod exposure;
