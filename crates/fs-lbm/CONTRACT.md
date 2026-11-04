@@ -2971,6 +2971,20 @@ stationary arithmetic. The existing channel resolution and exploratory-use
 limits apply; arbitrary moving geometry and turbulent-flow qualification
 remain outside this API.
 
+The local Smagorinsky, WALE and Vreman closures use the same complete-wall
+admission through `prepare_channel_sgs_with_moving_walls`,
+`step_serial_with_channel_sgs_and_moving_walls` and the pooled counterpart.
+Their ordinary `SgsWorkspace3` is reused without a test filter or additional
+allocation. The actual wall-relative full gradient drives both the closure
+and its dissipation diagnostic, so translating the fluid and both plates
+together does not introduce artificial wall shear. Source molecular fields,
+independent collision rates, native impulse/work and atomic publication use
+the same owners as the dynamic path. A single normal fluid layer is admitted
+by the local quadratic stencil; there is no nonlocal-filter resolution claim.
+Zero wall drives retain the original stationary local-SGS arithmetic. Focused
+local regressions cover analytic Couette transport, co-motion, active-model
+frame changes, native/pooled equivalence and failure/retry boundaries.
+
 Five native regression definitions cover Couette dissipation and co-motion
 for both lattices and all wall normals, active-fit frame changes, material
 rates and original impulse receipts, serial/pooled and zero-drive identity,

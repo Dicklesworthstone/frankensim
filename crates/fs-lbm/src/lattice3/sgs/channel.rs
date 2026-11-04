@@ -1,4 +1,4 @@
-//! Plane-channel dynamic viscosity on the original native lattice step owner.
+//! Local and dynamic plane-channel viscosity on the original native lattice step owner.
 //!
 //! The unique nonperiodic axis defines two fixed halfway walls; both
 //! tangents remain periodic and homogeneous. No solid or wall cell enters the
@@ -15,7 +15,7 @@ use crate::sgs3::dynamic::channel::{ChannelDynamicSgs, ChannelDynamicSgsConfig};
 use crate::sgs3::{ChannelDynamicSgsWorkspace3, DynamicSgsStepReport};
 
 impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
-    fn admit_channel_dynamic_topology(
+    fn admit_channel_sgs_topology(
         &self,
         mut checkpoint: impl FnMut() -> Result<(), GridError3<L::Error>>,
     ) -> Result<usize, SgsStepError<L::Error>> {
@@ -46,7 +46,7 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
     // links. On this admitted all-fluid rectangle, its exact full link count
     // therefore proves that both physical walls are represented completely.
     // No per-cell lookup or additional workspace is needed for uniform planes.
-    fn channel_dynamic_wall_velocities(
+    fn channel_sgs_wall_velocities(
         &self,
         normal: usize,
         motion: &WallMotion3<'_, L, Q>,
@@ -77,7 +77,7 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
             if let Some(expected) = walls[side] {
                 if velocity != expected {
                     return Err(DynamicSgsError::Invalid(
-                        "channel dynamic SGS requires a uniform velocity on each wall plane",
+                        "channel SGS requires a uniform velocity on each wall plane",
                     )
                     .into());
                 }
@@ -95,6 +95,122 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
         Ok([lower, upper])
     }
 
+    /// Prepare local Smagorinsky, WALE or Vreman transport with the SAME wall
+    /// motion used by native streaming. The domain has exactly one nonperiodic
+    /// axis, two periodic tangents and no interior solids. The probe must contain
+    /// every reflected link on both walls, including a stationary partner.
+    /// Each wall has one uniform tangential velocity in native probe order.
+    ///
+    /// Current force-centered velocity and the physical halfway-wall values
+    /// supply the full gradient, local closure and shear-dissipation account.
+    /// The original molecular field and independent collision rates remain
+    /// authoritative. No test filter, extra workspace or step allocation is
+    /// added; the ordinary SGS workspace is reused. Zero drives preserve the
+    /// stationary arithmetic. This is an exploratory resolved-wall closure,
+    /// without a wall function, unresolved-energy model or acceptance claim.
+    pub fn prepare_channel_sgs_with_moving_walls(
+        &self,
+        cx: &Cx<'_>,
+        config: SgsConfig,
+        molecular: Option<&[L::Collision]>,
+        probe: &WallMomentumProbe3<L, Q>,
+        velocities: &[[f64; 3]],
+        workspace: &mut SgsWorkspace3<L::Collision>,
+    ) -> Result<SgsReport, SgsStepError<L::Error>> {
+        self.prepare_channel_sgs_with_motion(
+            config,
+            molecular,
+            workspace,
+            WallMotion3 { probe, velocities },
+            || cx.checkpoint().map_err(|_| GridError3::Cancelled),
+        )
+    }
+
+    /// Advance the local closure and prescribed walls in one original native
+    /// transaction. The returned wall impulse/work measures the actual stream;
+    /// the SGS report is its pre-step shear diagnostic, not integrated heat.
+    /// Preparation, collision, endpoint and receipt refusals leave accepted
+    /// populations, force and clock unchanged.
+    pub fn step_serial_with_channel_sgs_and_moving_walls(
+        &mut self,
+        cx: &Cx<'_>,
+        config: SgsConfig,
+        molecular: Option<&[L::Collision]>,
+        probe: &WallMomentumProbe3<L, Q>,
+        velocities: &[[f64; 3]],
+        workspace: &mut SgsWorkspace3<L::Collision>,
+    ) -> Result<(SgsReport, MovingWallMomentum3), SgsStepError<L::Error>> {
+        let report = self.prepare_channel_sgs_with_moving_walls(
+            cx, config, molecular, probe, velocities, workspace,
+        )?;
+        let walls = self.step_serial_with_moving_wall_momentum(
+            cx,
+            probe,
+            velocities,
+            Some(workspace.collisions()),
+        )?;
+        Ok((report, walls))
+    }
+
+    /// Identical local preparation followed by the original pooled moving-wall
+    /// owner. Canonical probe and cell order retain worker-count determinism;
+    /// the collision augmentation belongs only to this step.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_pooled_with_channel_sgs_and_moving_walls<P: KernelRunner>(
+        &mut self,
+        pool: &P,
+        gate: &CancelGate,
+        config: SgsConfig,
+        molecular: Option<&[L::Collision]>,
+        probe: &WallMomentumProbe3<L, Q>,
+        velocities: &[[f64; 3]],
+        workspace: &mut SgsWorkspace3<L::Collision>,
+    ) -> Result<(SgsReport, MovingWallMomentum3), SgsStepError<L::Error>> {
+        let report = self.prepare_channel_sgs_with_motion(
+            config,
+            molecular,
+            workspace,
+            WallMotion3 { probe, velocities },
+            || {
+                if gate.is_requested() {
+                    Err(GridError3::Cancelled)
+                } else {
+                    Ok(())
+                }
+            },
+        )?;
+        let walls = self.step_pooled_with_moving_wall_momentum(
+            pool,
+            gate,
+            probe,
+            velocities,
+            Some(workspace.collisions()),
+        )?;
+        Ok((report, walls))
+    }
+
+    fn prepare_channel_sgs_with_motion(
+        &self,
+        config: SgsConfig,
+        molecular: Option<&[L::Collision]>,
+        workspace: &mut SgsWorkspace3<L::Collision>,
+        motion: WallMotion3<'_, L, Q>,
+        mut checkpoint: impl FnMut() -> Result<(), GridError3<L::Error>>,
+    ) -> Result<SgsReport, SgsStepError<L::Error>> {
+        checkpoint()?;
+        config.validate()?;
+        let normal = self.admit_channel_sgs_topology(&mut checkpoint)?;
+        let walls = self.channel_sgs_wall_velocities(normal, &motion, &mut checkpoint)?;
+        self.prepare_sgs_with_forces_and_walls(
+            config,
+            molecular,
+            workspace,
+            None,
+            |_, _, positive| walls[usize::from(positive)],
+            checkpoint,
+        )
+    }
+
     /// Allocate the complete reusable macroscopic, collision and channel-filter
     /// payload. The wall normal is the grid's unique nonperiodic axis; at least
     /// two normal cells and three per periodic tangent are required. No solid
@@ -104,7 +220,7 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
         &self,
         maximum_bytes: usize,
     ) -> Result<ChannelDynamicSgsWorkspace3<L::Collision>, SgsStepError<L::Error>> {
-        let normal = self.admit_channel_dynamic_topology(|| Ok(()))?;
+        let normal = self.admit_channel_sgs_topology(|| Ok(()))?;
         let cells = self.f.len();
         let local = cells
             .checked_mul(4 * core::mem::size_of::<f64>() + core::mem::size_of::<L::Collision>())
@@ -321,12 +437,10 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
         mut checkpoint: impl FnMut() -> Result<(), GridError3<L::Error>>,
     ) -> Result<DynamicSgsStepReport, SgsStepError<L::Error>> {
         checkpoint()?;
-        let normal = self.admit_channel_dynamic_topology(&mut checkpoint)?;
+        let normal = self.admit_channel_sgs_topology(&mut checkpoint)?;
         config.validate()?;
         let walls = match motion {
-            Some(motion) => {
-                self.channel_dynamic_wall_velocities(normal, &motion, &mut checkpoint)?
-            }
+            Some(motion) => self.channel_sgs_wall_velocities(normal, &motion, &mut checkpoint)?,
             None => [[0.0; 3]; 2],
         };
         let cells = self.f.len();
@@ -371,5 +485,7 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
     }
 }
 
+#[cfg(test)]
+mod local_tests;
 #[cfg(test)]
 mod tests;

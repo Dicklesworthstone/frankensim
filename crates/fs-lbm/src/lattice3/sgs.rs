@@ -48,7 +48,9 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
     /// actual zero wall velocity, the cell centre, and its fluid neighbour.
     /// The normal derivative is exact for a quadratic profile at such walls;
     /// two opposed walls in a one-cell gap give the symmetric derivative zero.
-    /// These are this grid's existing boundaries; open/moving walls are absent.
+    /// This entry selects stationary walls. Translating planar walls use
+    /// [`Self::prepare_channel_sgs_with_moving_walls`], which binds gradients
+    /// and native streaming to the same physical wall velocities.
     ///
     /// The full velocity gradient is required by WALE. A cached macroscopic
     /// sweep avoids recomputing six neighbours' Q populations per cell. The
@@ -122,6 +124,28 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
         molecular: Option<&[L::Collision]>,
         workspace: &mut SgsWorkspace3<L::Collision>,
         forces: Option<&[[f64; 3]]>,
+        checkpoint: impl FnMut() -> Result<(), GridError3<L::Error>>,
+    ) -> Result<SgsReport, SgsStepError<L::Error>> {
+        self.prepare_sgs_with_forces_and_walls(
+            config,
+            molecular,
+            workspace,
+            forces,
+            |_, _, _| [0.0; 3],
+            checkpoint,
+        )
+    }
+
+    // The same resolved gradient owns both local SGS transport and its shear
+    // dissipation. Callers admitting moving walls must bind this callback to
+    // the exact native wall drive before preparing any collision field.
+    fn prepare_sgs_with_forces_and_walls(
+        &self,
+        config: SgsConfig,
+        molecular: Option<&[L::Collision]>,
+        workspace: &mut SgsWorkspace3<L::Collision>,
+        forces: Option<&[[f64; 3]]>,
+        mut wall_velocity: impl FnMut(usize, usize, bool) -> [f64; 3],
         mut checkpoint: impl FnMut() -> Result<(), GridError3<L::Error>>,
     ) -> Result<SgsReport, SgsStepError<L::Error>> {
         checkpoint()?;
@@ -165,7 +189,8 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
             if !(nu.is_finite() && nu > 0.0) {
                 return Err(SgsError::InvalidMolecularViscosity { cell }.into());
             }
-            let gradient = self.velocity_gradient(cell, &workspace.velocity);
+            let gradient =
+                self.velocity_gradient_with_walls(cell, &workspace.velocity, &mut wall_velocity);
             let eddy = eddy_viscosity(config.model, config.filter_width_lu, gradient)?;
             let ratio = eddy / nu;
             if !ratio.is_finite() || ratio > config.maximum_eddy_to_molecular {
