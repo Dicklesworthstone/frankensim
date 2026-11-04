@@ -15,13 +15,15 @@
 //! these coordinates are not automatically evanescent traveling-wave modes.
 
 use fs_duct::{DuctError, compose::TwoPort};
+use fs_feec::acoustics::thermoviscous::heat_source::ThermoviscousHeatSource;
 use fs_feec::acoustics::thermoviscous::time::{
-    PreparedThermoviscousTime, ThermoviscousCaloricReservoir, ThermoviscousTimeError,
-    ThermoviscousTimeLimits, ThermoviscousWallDiscretization, TangentialWallConductivity,
+    PreparedThermoviscousHeatTime, PreparedThermoviscousTime, TangentialWallConductivity,
+    ThermoviscousCaloricReservoir, ThermoviscousTimeError, ThermoviscousTimeLimits,
+    ThermoviscousWallDiscretization,
 };
 use fs_feec::acoustics::thermoviscous::{
-    ThermoviscousError, ThermoviscousFe, ThermoviscousField, ThermoviscousMedium,
-    ThermoviscousThermodynamics,
+    PreparedThermoviscous, PreparedThermoviscousScattering, ThermoviscousError, ThermoviscousFe,
+    ThermoviscousField, ThermoviscousMedium, ThermoviscousThermodynamics,
 };
 use fs_material::fluid_acoustics::thermoviscous::ThermoviscousFluid;
 use fs_material::fluid_transport::ThermalFluidTransport;
@@ -299,6 +301,22 @@ impl<'c, S> ThermoviscousInterior<'c, S> {
         &self.wall_sources
     }
 
+    /// Integrate a signed volumetric heat-release shape on the original P2
+    /// temperature basis once. A drive [W] multiplies this density [m^-3];
+    /// neither its sign nor its spatial integral is normalized away.
+    /// The returned source belongs to this exact immutable FE owner. The
+    /// callback is never revisited by prepared harmonic or causal evaluations.
+    pub fn volume_heat_source<'a>(
+        &'a self,
+        quadrature_order: usize,
+        density_per_m3: &mut impl FnMut(usize, [f64; 3]) -> Result<f64, ThermoviscousError>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ThermoviscousHeatSource<'a, 'c>, ThermoviscousSourceError> {
+        Ok(self
+            .fe
+            .volume_heat_source(quadrature_order, density_per_m3, cancelled)?)
+    }
+
     /// Causal full-field motion and work with this SAME immutable fluid source.
     /// The borrow retains the source, FE and structural model for every step.
     /// Original molecular capacities and rates own full P2 internal-temperature
@@ -343,6 +361,132 @@ impl<'c, S> ThermoviscousInterior<'c, S> {
         limits: ThermoviscousTimeLimits,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PreparedThermoviscousTime<'a, 'c>, ThermoviscousSourceError> {
+        let (frozen_cp, reservoirs) = self.time_calorics(duration_s, cancelled)?;
+        match normal_elements {
+            Some(elements) => {
+                let walls = ThermoviscousWallDiscretization {
+                    normal_elements: elements,
+                    maximum_frequency_hz: self.band_hz[1],
+                };
+                if self.wall_tangential_sources.is_empty() {
+                    Ok(self.fe.prepare_time_with_thermal_fields(
+                        duration_s,
+                        frozen_cp,
+                        &reservoirs,
+                        walls,
+                        limits,
+                        cancelled,
+                    )?)
+                } else {
+                    let transport: Vec<_> = self
+                        .wall_tangential_sources
+                        .iter()
+                        .map(|source| TangentialWallConductivity {
+                            isotropic_w_m_k: source.conductivity_w_m_k(),
+                        })
+                        .collect();
+                    Ok(self.fe.prepare_time_with_spatial_wall_fields(
+                        duration_s,
+                        frozen_cp,
+                        &reservoirs,
+                        walls,
+                        &transport,
+                        limits,
+                        cancelled,
+                    )?)
+                }
+            }
+            None => Ok(self.fe.prepare_time_with_caloric_reservoirs(
+                duration_s,
+                frozen_cp,
+                &reservoirs,
+                limits,
+                cancelled,
+            )?),
+        }
+    }
+
+    /// Prepare held heat release through the complete original fluid,
+    /// molecular and structural trajectory. Heat amplitudes are real watts;
+    /// pressure and force ports retain Pa and N/sqrt(kg).
+    ///
+    /// Source order and sign survive preparation. The work is the signed
+    /// integral of q' T'/T0 [J], without a harmonic factor of one-half; it is
+    /// acoustic available energy, not the first-order heat supplied to the
+    /// fixed equilibrium. Finite solids require explicit depth resolution via
+    /// `prepare_time_with_wall_diffusion_and_heat_sources`.
+    pub fn prepare_time_with_heat_sources<'a>(
+        &'a self,
+        duration_s: f64,
+        heat_sources: &[&ThermoviscousHeatSource<'_, '_>],
+        limits: ThermoviscousTimeLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PreparedThermoviscousHeatTime<'a, 'c>, ThermoviscousSourceError> {
+        self.prepare_heat_time_fields(duration_s, None, heat_sources, limits, cancelled)
+    }
+
+    /// Held heat release with every original fluid, molecular, structural and
+    /// finite-solid field. Depth elements follow `wall_sources()` order;
+    /// original in-plane wall transport is included when attached.
+    ///
+    /// Uses the same source band, wall-material admission and complete-state
+    /// preparation limits as `prepare_time_with_wall_diffusion`. Exceeding the
+    /// budget refuses preparation rather than dropping fields or heat sources.
+    pub fn prepare_time_with_wall_diffusion_and_heat_sources<'a>(
+        &'a self,
+        duration_s: f64,
+        normal_elements: &[usize],
+        heat_sources: &[&ThermoviscousHeatSource<'_, '_>],
+        limits: ThermoviscousTimeLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PreparedThermoviscousHeatTime<'a, 'c>, ThermoviscousSourceError> {
+        self.prepare_heat_time_fields(
+            duration_s,
+            Some(normal_elements),
+            heat_sources,
+            limits,
+            cancelled,
+        )
+    }
+
+    fn prepare_heat_time_fields<'a>(
+        &'a self,
+        duration_s: f64,
+        normal_elements: Option<&[usize]>,
+        heat_sources: &[&ThermoviscousHeatSource<'_, '_>],
+        limits: ThermoviscousTimeLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PreparedThermoviscousHeatTime<'a, 'c>, ThermoviscousSourceError> {
+        let (frozen_cp, reservoirs) = self.time_calorics(duration_s, cancelled)?;
+        let walls = normal_elements.map(|elements| ThermoviscousWallDiscretization {
+            normal_elements: elements,
+            maximum_frequency_hz: self.band_hz[1],
+        });
+        let transport = (!self.wall_tangential_sources.is_empty()).then(|| {
+            self.wall_tangential_sources
+                .iter()
+                .map(|source| TangentialWallConductivity {
+                    isotropic_w_m_k: source.conductivity_w_m_k(),
+                })
+                .collect::<Vec<_>>()
+        });
+        Ok(self.fe.prepare_time_with_heat_sources(
+            duration_s,
+            frozen_cp,
+            &reservoirs,
+            walls,
+            transport.as_deref(),
+            heat_sources,
+            limits,
+            cancelled,
+        )?)
+    }
+
+    fn time_calorics(
+        &self,
+        duration_s: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(f64, Vec<ThermoviscousCaloricReservoir>), ThermoviscousSourceError> {
         if cancelled() {
             return Err(ThermoviscousError::Cancelled.into());
         }
@@ -357,7 +501,7 @@ impl<'c, S> ThermoviscousInterior<'c, S> {
             .map_or(self.fe.medium().cp_j_kg_k, |source| {
                 source.frozen_cv_j_kg_k() + source.gas().specific_gas_constant
             });
-        let reservoirs: Vec<_> = self.relaxation.as_ref().map_or_else(Vec::new, |source| {
+        let reservoirs = self.relaxation.as_ref().map_or_else(Vec::new, |source| {
             source
                 .processes()
                 .iter()
@@ -367,34 +511,7 @@ impl<'c, S> ThermoviscousInterior<'c, S> {
                 })
                 .collect()
         });
-        match normal_elements {
-            Some(elements) => {
-                let walls = ThermoviscousWallDiscretization {
-                    normal_elements: elements,
-                    maximum_frequency_hz: self.band_hz[1],
-                };
-                if self.wall_tangential_sources.is_empty() {
-                    Ok(self.fe.prepare_time_with_thermal_fields(
-                        duration_s, frozen_cp, &reservoirs, walls, limits, cancelled,
-                    )?)
-                } else {
-                    let transport: Vec<_> = self.wall_tangential_sources.iter()
-                        .map(|source| TangentialWallConductivity {
-                            isotropic_w_m_k: source.conductivity_w_m_k(),
-                        }).collect();
-                    Ok(self.fe.prepare_time_with_spatial_wall_fields(
-                        duration_s, frozen_cp, &reservoirs, walls, &transport, limits, cancelled,
-                    )?)
-                }
-            },
-            None => Ok(self.fe.prepare_time_with_caloric_reservoirs(
-                duration_s,
-                frozen_cp,
-                &reservoirs,
-                limits,
-                cancelled,
-            )?),
-        }
+        Ok((frozen_cp, reservoirs))
     }
 
     fn heat_capacity(
@@ -427,6 +544,65 @@ impl<'c, S> ThermoviscousInterior<'c, S> {
         }
     }
 
+    /// Factor the original resolved owner once for repeated coherent traction,
+    /// structural-force and distributed-heat drives in exp(+i omega t).
+    /// Material Cp and the declared source band are applied before factoring;
+    /// molecular phase is converted from its original exp(-i omega t) law.
+    /// The returned owner borrows this source and reuses its original LU.
+    pub fn prepare_response<'a>(
+        &'a self,
+        frequency_hz: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PreparedThermoviscous<'a, 'c>, ThermoviscousSourceError> {
+        let cp = self.heat_capacity(frequency_hz, cancelled)?;
+        Ok(self
+            .fe
+            .prepare_with_heat_capacity(frequency_hz, cp, cancelled)?)
+    }
+
+    /// Factor loaded source-bound fields once in the FE's exp(+i omega t)
+    /// convention, with positive real pressure/flow resistances [Pa s/m^3].
+    /// The original owner recovers internal-source outgoing waves and complete
+    /// work from the same loaded LU; heat and wall drives remain coherent with
+    /// incident power waves. Unlike `duct_scattering`, this native field API
+    /// performs no conjugation of its inputs or outputs.
+    pub fn prepare_scattering<'a>(
+        &'a self,
+        frequency_hz: f64,
+        reference_resistance: &[f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PreparedThermoviscousScattering<'a, 'c>, ThermoviscousSourceError> {
+        let cp = self.heat_capacity(frequency_hz, cancelled)?;
+        Ok(self
+            .fe
+            .prepare_scattering(frequency_hz, cp, reference_resistance, cancelled)?)
+    }
+
+    /// Simultaneous coherent traction, structural force and volumetric heat
+    /// release in exp(+i omega t). Each heat drive [W] multiplies its original
+    /// signed spatial density [m^-3], before the coupled temperature/pressure
+    /// equations are solved. The original field accounts for signed source work
+    /// Re integral(conj(T'/T0) q')/2 [W] exactly once.
+    ///
+    /// Use `prepare_response` to reuse the same factorization across drives.
+    pub fn response_with_heat_sources(
+        &self,
+        frequency_hz: f64,
+        traction_pa: &[C64],
+        wall_forces_n_per_sqrt_kg: &[C64],
+        heat_sources: &[(&ThermoviscousHeatSource<'_, '_>, C64)],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ThermoviscousField, ThermoviscousSourceError> {
+        Ok(self
+            .prepare_response(frequency_hz, cancelled)?
+            .response_with_heat_sources(
+                traction_pa,
+                wall_forces_n_per_sqrt_kg,
+                heat_sources,
+                cancelled,
+            )?)
+    }
+
     /// Simultaneous traction excitation with all fields and work terms from
     /// the original mixed solve. Every pressure coefficient has units Pa.
     pub fn response(
@@ -435,10 +611,8 @@ impl<'c, S> ThermoviscousInterior<'c, S> {
         traction_pa: &[C64],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<ThermoviscousField, ThermoviscousSourceError> {
-        let cp = self.heat_capacity(frequency_hz, cancelled)?;
         Ok(self
-            .fe
-            .prepare_with_heat_capacity(frequency_hz, cp, cancelled)?
+            .prepare_response(frequency_hz, cancelled)?
             .response(traction_pa, cancelled)?)
     }
 
@@ -453,10 +627,8 @@ impl<'c, S> ThermoviscousInterior<'c, S> {
         wall_forces_n_per_sqrt_kg: &[C64],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<ThermoviscousField, ThermoviscousSourceError> {
-        let cp = self.heat_capacity(frequency_hz, cancelled)?;
         Ok(self
-            .fe
-            .prepare_with_heat_capacity(frequency_hz, cp, cancelled)?
+            .prepare_response(frequency_hz, cancelled)?
             .response_with_wall_forces(traction_pa, wall_forces_n_per_sqrt_kg, cancelled)?)
     }
 
