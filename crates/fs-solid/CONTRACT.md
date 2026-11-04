@@ -105,6 +105,26 @@ source work, full cross mass, simultaneous contacts and ordering, analytical
 elastic/viscous motion and continuation, impacts/stopping and transactional
 refusal. Runtime verification is recorded with the implementation commit.
 
+`CompleteSpectralSolid::advance_sustained_contacts` shares this same contact
+solve and full-coordinate physical admission. Its original complete basis and
+cached oscillator coefficients retain every elastic and rigid mode; no spectral
+cutoff, contact compliance, matrix clone or new factorization is introduced.
+Five reusable linear vectors supply each read-only force response. The ordinary
+affine advance and these responses share the original basis/mode kernels; the
+final native replay retains its original interval and cumulative work gates.
+An approximate basis admitted during preparation cannot bypass those gates.
+Native operators remain borrowed and each response's work is explicitly bounded.
+
+The path witness retains the actual dense or complete-spectrum owner, and the
+error preserves its native error type. Existing dense callers retain their
+default types. Source work, moving-surface work, relative friction and physical
+viscosity keep one shared audit. The conservative complete-spectrum owner adds
+no constitutive heat. Six focused `spectral_sustained_contact` regressions cover
+sticking/breakaway, circular sliding, moving surfaces and boosts, off-diagonal
+consistent mass, all-mode continuation and basis order/sign changes, and atomic
+refusals including the original physical work gate. Native execution is reported
+with the implementation commit.
+
 ## Native quadratic Maxwell force, contact and pressure drift
 
 `MixedViscoTetMotion::force_kick_candidate` integrates the accepted original

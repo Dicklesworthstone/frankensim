@@ -18,6 +18,7 @@ use fs_sparse::Csr;
 
 /// Exact cubic forces and continuous displacement moments for moving supports.
 pub mod polynomial;
+mod sustained;
 
 /// Required capacities and numerical allowances; no implicit defaults.
 #[derive(Clone, Copy, Debug)]
@@ -554,15 +555,7 @@ impl CompleteSpectralSolid {
         {
             return Err(invalid("complete finite force endpoints required"));
         }
-        let step = self
-            .steps
-            .checked_add(1)
-            .filter(|s| *s <= self.controls.maximum_steps)
-            .ok_or_else(|| invalid("accepted step budget exhausted"))?;
-        let time_s = step as f64 * self.dt_s;
-        if !time_s.is_finite() || time_s <= self.time_s() {
-            return Err(invalid("representable later clock required"));
-        }
+        let (step, time_s) = self.next_interval()?;
         let mut increment = zeros(n)?;
         for i in 0..n {
             increment[i] = force_end_n[i] - force_start_n[i];
@@ -575,24 +568,10 @@ impl CompleteSpectralSolid {
         let (mut q, mut v, mut mean_q) = (zeros(n)?, zeros(n)?, zeros(n)?);
         for i in 0..n {
             poll(cx)?;
-            let a = self.oscillators[i];
-            let (q0, v0, g, dg) = (
-                self.modal_displacement[i],
-                self.modal_velocity[i],
-                force[i],
-                delta[i],
-            );
-            q[i] = a.cosine.mul_add(
-                q0,
-                a.h_sinc.mul_add(v0, a.h2_cosc.mul_add(g, a.h2_sinc3 * dg)),
-            );
-            v[i] = a
-                .minus_h_lambda_sinc
-                .mul_add(q0, a.cosine.mul_add(v0, a.h_sinc.mul_add(g, a.h_cosc * dg)));
-            mean_q[i] = a.sinc.mul_add(
-                q0,
-                a.h_cosc.mul_add(v0, a.h2_sinc3.mul_add(g, a.h2_cosc4 * dg)),
-            );
+            let [position, velocity, mean] = self.affine_mode(i, force[i], delta[i]);
+            q[i] = position;
+            v[i] = velocity;
+            mean_q[i] = mean;
         }
         let displacement = reconstruct(&self.basis, &q, cx)?;
         let velocity = reconstruct(&self.basis, &v, cx)?;
@@ -666,6 +645,38 @@ impl CompleteSpectralSolid {
             energy,
         })
     }
+
+    // Same cached complete-mode propagation for ordinary affine intervals and
+    // read-only held-force contact responses. This is the only oscillator law.
+    fn affine_mode(&self, i: usize, g: f64, dg: f64) -> [f64; 3] {
+        let a = self.oscillators[i];
+        let (q0, v0) = (self.modal_displacement[i], self.modal_velocity[i]);
+        let q = a.cosine.mul_add(
+            q0,
+            a.h_sinc.mul_add(v0, a.h2_cosc.mul_add(g, a.h2_sinc3 * dg)),
+        );
+        let v = a
+            .minus_h_lambda_sinc
+            .mul_add(q0, a.cosine.mul_add(v0, a.h_sinc.mul_add(g, a.h_cosc * dg)));
+        let mean = a.sinc.mul_add(
+            q0,
+            a.h_cosc.mul_add(v0, a.h2_sinc3.mul_add(g, a.h2_cosc4 * dg)),
+        );
+        [q, v, mean]
+    }
+
+    fn next_interval(&self) -> Result<(u64, f64)> {
+        let step = self
+            .steps
+            .checked_add(1)
+            .filter(|s| *s <= self.controls.maximum_steps)
+            .ok_or_else(|| invalid("accepted step budget exhausted"))?;
+        let time_s = step as f64 * self.dt_s;
+        if !time_s.is_finite() || time_s <= self.time_s() {
+            return Err(invalid("representable later clock required"));
+        }
+        Ok((step, time_s))
+    }
 }
 
 fn check_operator(defect: f64, allowance: f64) -> Result<()> {
@@ -708,8 +719,12 @@ fn symmetric(matrix: &Csr, n: usize, tolerance: f64, cx: &Cx<'_>) -> Result<Vec<
     Ok(dense)
 }
 fn project(matrix: &[f64], x: &[f64], cx: &Cx<'_>) -> Result<Vec<f64>> {
+    let mut result = zeros(x.len())?;
+    project_into(matrix, x, &mut result, cx)?;
+    Ok(result)
+}
+fn project_into(matrix: &[f64], x: &[f64], result: &mut [f64], cx: &Cx<'_>) -> Result<()> {
     let n = x.len();
-    let mut result = zeros(n)?;
     for j in 0..n {
         poll(cx)?;
         result[j] = (0..n).fold(0.0, |s, i| matrix[i * n + j].mul_add(x[i], s));
@@ -717,11 +732,15 @@ fn project(matrix: &[f64], x: &[f64], cx: &Cx<'_>) -> Result<Vec<f64>> {
             return Err(invalid("projection overflow"));
         }
     }
-    Ok(result)
+    Ok(())
 }
 fn reconstruct(matrix: &[f64], x: &[f64], cx: &Cx<'_>) -> Result<Vec<f64>> {
+    let mut result = zeros(x.len())?;
+    reconstruct_into(matrix, x, &mut result, cx)?;
+    Ok(result)
+}
+fn reconstruct_into(matrix: &[f64], x: &[f64], result: &mut [f64], cx: &Cx<'_>) -> Result<()> {
     let n = x.len();
-    let mut result = zeros(n)?;
     for i in 0..n {
         poll(cx)?;
         result[i] = (0..n).fold(0.0, |s, j| matrix[i * n + j].mul_add(x[j], s));
@@ -729,7 +748,7 @@ fn reconstruct(matrix: &[f64], x: &[f64], cx: &Cx<'_>) -> Result<Vec<f64>> {
             return Err(invalid("reconstruction overflow"));
         }
     }
-    Ok(result)
+    Ok(())
 }
 fn quadratic(matrix: &[f64], x: &[f64], cx: &Cx<'_>) -> Result<f64> {
     let n = x.len();
