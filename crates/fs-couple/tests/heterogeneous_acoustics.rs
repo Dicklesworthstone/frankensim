@@ -80,6 +80,13 @@ fn uniform_original_source_recovers_physical_matrices_without_reference_fluid_sc
     assert!(std::ptr::eq(bound.source(), &source));
     assert!(std::ptr::eq(bound.operator().geometry(), &geometry));
     let gas = source.uniform_state().unwrap().state();
+    let probe = bound.probe(0, [0.25; 4]).unwrap();
+    assert_eq!(probe.medium(), Medium {
+        density_kg_m3: gas.density,
+        sound_speed_m_s: gas.sound_speed,
+    });
+    assert!(matches!(bound.probe(1, [0.25; 4]), Err(AxialGasInteriorError::Interior(_))));
+    assert!(matches!(bound.probe(0, [0.2; 4]), Err(AxialGasInteriorError::Interior(_))));
     for (physical, geometric, scale) in [
         (
             bound.operator().stiffness(),
@@ -145,6 +152,17 @@ fn primitive_gradient_changes_driven_pressure_and_retains_boundary_work() {
         assert!(result.input_power_w > 0.0);
         assert!(result.kinetic_energy_j > 0.0 && result.compressional_energy_j > 0.0);
         assert!(result.power_balance_residual_w().abs() < 1e-9 * result.input_power_w);
+        for element in [0, geometry.tetrahedra().len() / 2] {
+            let probe = bound.probe(element, [0.25; 4]).unwrap();
+            let original = source.state_at(axis().coordinate_m(probe.position_m()).unwrap()).unwrap();
+            assert_eq!(probe.medium(), Medium {
+                density_kg_m3: original.state().density,
+                sound_speed_m_s: original.state().sound_speed,
+            });
+            let sample = probe.harmonic(&result.pressure_pa, prepared.frequency_hz()).unwrap();
+            let p = bound.operator().pressure_at(&result.pressure_pa, element, [0.25; 4]).unwrap();
+            assert_eq!(sample.pressure_pa, p);
+        }
         responses.push(result.pressure_pa);
     }
     let norm = responses[0].iter().map(|p| p.norm_sq()).sum::<f64>();
@@ -171,7 +189,8 @@ fn material_jumps_require_conforming_tetrahedra_but_equal_cells_do_not() {
     let source = field(
         vec![0.0, 0.5, 1.0],
         vec![
-            primitive(300.0, 1.0),
+            // The inlet-only state also differs from the first physical cell.
+            primitive(450.0, 0.5),
             primitive(300.0, 1.0),
             primitive(600.0, 0.0),
         ],
@@ -185,7 +204,39 @@ fn material_jumps_require_conforming_tetrahedra_but_equal_cells_do_not() {
     ));
     let (complex, positions) = kuhn_cube(2);
     let conforming = HelmholtzFe::new(&complex, &positions, 1, PLACEHOLDER).unwrap();
-    assert!(AxialGasInterior::new(&conforming, &source, axis(), 3, &mut || false).is_ok());
+    let bound = AxialGasInterior::new(&conforming, &source, axis(), 3, &mut || false).unwrap();
+    let coefficients: Vec<_> = positions.iter().map(|point| C64::new(1.0, -point[0])).collect();
+    let mut sampled = [0_usize; 3];
+    for (element, tet) in conforming.tetrahedra().iter().enumerate() {
+        let center_x = tet.iter().map(|&v| 0.25 * positions[v as usize][0]).sum::<f64>();
+        let original = source.state_at(center_x).unwrap();
+        for (face_kind, station) in [0.0, 0.5, 1.0].into_iter().enumerate() {
+            if tet.iter().filter(|&&v| positions[v as usize][0] == station).count() != 3 {
+                continue;
+            }
+            let barycentric = tet.map(|v| if positions[v as usize][0] == station {
+                1.0 / 3.0
+            } else {
+                0.0
+            });
+            let probe = bound.probe(element, barycentric).unwrap();
+            assert_eq!(probe.medium(), Medium {
+                density_kg_m3: original.state().density,
+                sound_speed_m_s: original.state().sound_speed,
+            });
+            let sample = probe.harmonic(&coefficients, 1.0).unwrap();
+            let expected_v = 1.0 / (core::f64::consts::TAU * original.state().density);
+            assert!((sample.particle_velocity_m_s[0].re / expected_v - 1.0).abs() < 1e-12);
+            assert!((sample.active_intensity_w_m2[0] / (0.5 * expected_v) - 1.0).abs() < 1e-12);
+            if station == 0.0 || (station == 0.5 && center_x > 0.5) {
+                let endpoint = source.state_at(station).unwrap();
+                assert_ne!(probe.medium().density_kg_m3, endpoint.state().density,
+                    "one-sided FE trace must not adopt the source endpoint's other side");
+            }
+            sampled[face_kind] += 1;
+        }
+    }
+    assert!(sampled.into_iter().all(|count| count > 0));
     let equal = field(vec![0.0, 0.5, 1.0], vec![primitive(300.0, 1.0); 3], true);
     assert!(AxialGasInterior::new(&coarse, &equal, axis(), 3, &mut || false).is_ok());
 }

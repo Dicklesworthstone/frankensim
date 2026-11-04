@@ -10,7 +10,9 @@
 /// Original gas/liquid material sources on conforming tetrahedral regions.
 pub mod regions;
 
-use fs_feec::acoustics::helmholtz::heterogeneous::HeterogeneousHelmholtzFe;
+use fs_feec::acoustics::helmholtz::heterogeneous::{
+    HeterogeneousHelmholtzFe, HeterogeneousProbe,
+};
 use fs_feec::acoustics::helmholtz::{AcousticFeError, HelmholtzFe, Medium};
 use fs_material::MaterialError;
 use fs_material::gas_field::{AxialGasField, AxialGasSampling};
@@ -153,6 +155,7 @@ pub struct AxialGasInterior<'f, 'c, 's> {
     source: &'s AxialGasField,
     embedding: AxialGasEmbedding,
     operator: HeterogeneousHelmholtzFe<'f, 'c>,
+    cell_media: Vec<Option<Medium>>,
 }
 
 impl<'f, 'c, 's> AxialGasInterior<'f, 'c, 's> {
@@ -214,15 +217,31 @@ impl<'f, 'c, 's> AxialGasInterior<'f, 'c, 's> {
             density_kg_m3: state.state().density,
             sound_speed_m_s: state.state().sound_speed,
         });
-        let mut sample = |_: usize, point: [f64; 3]| -> Result<Medium, AxialGasInteriorError> {
+        // A conforming cellwise field has one exact medium per tetrahedron.
+        // Retain the first ORIGINAL assembly sample for one-sided observations
+        // at station planes, and avoid repeated source-state clones in quadrature.
+        let mut cell_media =
+            if source.sampling() == AxialGasSampling::CellwiseConstant && uniform.is_none() {
+                vec![None; geometry.tetrahedra().len()]
+            } else {
+                Vec::new()
+            };
+        let mut sample = |element: usize, point: [f64; 3]| -> Result<Medium, AxialGasInteriorError> {
             if let Some(medium) = uniform {
                 return Ok(medium);
             }
+            if let Some(medium) = cell_media.get(element).copied().flatten() {
+                return Ok(medium);
+            }
             let state = source.state_at(embedding.coordinate_m(point)?)?;
-            Ok(Medium {
+            let medium = Medium {
                 density_kg_m3: state.state().density,
                 sound_speed_m_s: state.state().sound_speed,
-            })
+            };
+            if let Some(slot) = cell_media.get_mut(element) {
+                *slot = Some(medium);
+            }
+            Ok(medium)
         };
         let operator =
             HeterogeneousHelmholtzFe::new(geometry, quadrature_order, &mut sample, cancelled)?;
@@ -230,6 +249,7 @@ impl<'f, 'c, 's> AxialGasInterior<'f, 'c, 's> {
             source,
             embedding,
             operator,
+            cell_media,
         })
     }
 
@@ -248,5 +268,40 @@ impl<'f, 'c, 's> AxialGasInterior<'f, 'c, 's> {
     #[must_use]
     pub const fn operator(&self) -> &HeterogeneousHelmholtzFe<'f, 'c> {
         &self.operator
+    }
+
+    /// Observe pressure, velocity and active/reactive energy flow using this
+    /// SAME source and embedding. Harmonic and transient fields share the probe.
+    ///
+    /// Continuous fields resolve the original primitive temperature/composition
+    /// at the actual observation position. Cellwise fields instead retain the
+    /// exact medium used to assemble the selected tetrahedron, including on
+    /// shared faces and at the inlet. Querying `state_at` at an interface alone
+    /// would select its endpoint convention, not necessarily this element's side.
+    pub fn probe(
+        &self,
+        element: usize,
+        barycentric: [f64; 4],
+    ) -> Result<HeterogeneousProbe<'_, 'f, 'c>, AxialGasInteriorError> {
+        self.operator.probe(element, barycentric, &mut |element, point| {
+            if let Some(state) = self.source.uniform_state() {
+                return Ok(Medium {
+                    density_kg_m3: state.state().density,
+                    sound_speed_m_s: state.state().sound_speed,
+                });
+            }
+            if self.source.sampling() == AxialGasSampling::CellwiseConstant {
+                return self.cell_media.get(element).copied().flatten().ok_or_else(|| {
+                    AcousticFeError::InvalidInput {
+                        what: "cellwise acoustic element has no original assembled medium",
+                    }.into()
+                });
+            }
+            let state = self.source.state_at(self.embedding.coordinate_m(point)?)?;
+            Ok(Medium {
+                density_kg_m3: state.state().density,
+                sound_speed_m_s: state.state().sound_speed,
+            })
+        })
     }
 }

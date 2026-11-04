@@ -11,8 +11,10 @@
 //! station 1 600 0 1
 //!
 //! Species IDs refer only to the explicitly supplied source packs. Output is
-//! pressure at original element centroids [Pa, exp(+i omega t)]. The rectangular
-//! cavity has length L and width/height L/5. A prescribed phased velocity on x=0
+//! complex peak pressure [Pa], particle velocity [m/s] and active/reactive
+//! intensity [W/m^2] at original element centroids, in exp(+i omega t).
+//! Each observation uses the same original local material as the wave equation.
+//! The rectangular cavity has length L and width/height L/5. A phased velocity on x=0
 //! excites transverse structure; x=L has a local passive impedance, while side
 //! walls are rigid. This outlet is not an exact multimode radiation condition.
 //! Refine GRID and frequency/wavelength resolution before interpreting results.
@@ -160,21 +162,28 @@ fn main() -> Result<()> {
         result.power_balance_residual_w(),
         result.backward_error
     );
-    println!("tet,x_m,y_m,z_m,pressure_re_pa,pressure_im_pa");
-    for (element, vertices) in geometry.tetrahedra().iter().enumerate() {
-        let center: [f64; 3] = std::array::from_fn(|axis| {
-            vertices
-                .iter()
-                .map(|&v| positions[v as usize][axis] * 0.25)
-                .sum()
-        });
-        let p = acoustic
-            .operator()
-            .pressure_at(&result.pressure_pa, element, [0.25; 4])?;
-        println!(
+    println!(concat!(
+        "tet,x_m,y_m,z_m,pressure_re_pa,pressure_im_pa,",
+        "velocity_x_re_m_s,velocity_x_im_m_s,velocity_y_re_m_s,velocity_y_im_m_s,",
+        "velocity_z_re_m_s,velocity_z_im_m_s,",
+        "active_intensity_x_w_m2,active_intensity_y_w_m2,active_intensity_z_w_m2,",
+        "reactive_intensity_x_w_m2,reactive_intensity_y_w_m2,reactive_intensity_z_w_m2"
+    ));
+    for element in 0..geometry.tetrahedra().len() {
+        let probe = acoustic.probe(element, [0.25; 4])?;
+        let sample = probe.harmonic(&result.pressure_pa, prepared.frequency_hz())?;
+        let center = probe.position_m();
+        print!(
             "{element},{:e},{:e},{:e},{:e},{:e}",
-            center[0], center[1], center[2], p.re, p.im
+            center[0], center[1], center[2], sample.pressure_pa.re, sample.pressure_pa.im
         );
+        for velocity in sample.particle_velocity_m_s {
+            print!(",{:e},{:e}", velocity.re, velocity.im);
+        }
+        for intensity in sample.active_intensity_w_m2.iter().chain(&sample.reactive_intensity_w_m2) {
+            print!(",{intensity:e}");
+        }
+        println!();
     }
     Ok(())
 }

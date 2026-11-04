@@ -11,6 +11,7 @@ use fs_feec::fixtures::two_tets;
 use fs_material::MaterialError;
 use fs_material::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
 use fs_material::gas::{GasSpec, GasState};
+use fs_math::c64::C64;
 use fs_qty::{Pressure, Temperature};
 use fs_sparse::Csr;
 use fs_thermochem::water::if97::{If97Region, If97State};
@@ -58,6 +59,30 @@ fn gas_water_interface_assembles_original_physical_states_and_shared_pressure_do
     assert_eq!(bound.region_state(0), Some(a));
     assert_eq!(bound.region_state(1), Some(b));
     assert_eq!(bound.region_state(2), None);
+
+    // The same geometrical point on the shared face has two explicit material
+    // traces. Velocity uses its original density, never the geometry placeholder
+    // or the other side's gas/liquid state.
+    let coefficients: Vec<_> = positions.iter().map(|point| {
+        C64::new(1.0, 1.0 - point.iter().sum::<f64>())
+    }).collect();
+    for (element, original) in [a, b].into_iter().enumerate() {
+        let barycentric = geometry.tetrahedra()[element].map(|v| {
+            if (1..=3).contains(&v) { 1.0 / 3.0 } else { 0.0 }
+        });
+        let probe = bound.probe(element, barycentric).unwrap();
+        assert_eq!(probe.medium(), Medium {
+            density_kg_m3: original.density_kg_m3(),
+            sound_speed_m_s: original.sound_speed_m_s(),
+        });
+        let sample = probe.harmonic(&coefficients, 1.0).unwrap();
+        let expected_v = 1.0 / (core::f64::consts::TAU * original.density_kg_m3());
+        near(sample.pressure_pa.re, 1.0);
+        for axis in 0..3 {
+            near(sample.particle_velocity_m_s[axis].re, expected_v);
+            near(sample.active_intensity_w_m2[axis], 0.5 * expected_v);
+        }
+    }
 
     // Volumes 1/6 and 1/3; the shared face is x+y+z=1. Vertex 0
     // belongs only to gas, vertex 4 only to water, vertices 1..3 to both.
@@ -148,6 +173,22 @@ fn one_query_per_used_source_freezes_coherent_coefficients_across_high_order_ele
             }
         }
     }
+    let mut coefficients = vec![C64::ZERO; geometry.ndof()];
+    for (vertex, point) in positions.iter().enumerate() {
+        coefficients[vertex] = C64::new(1.0, -point[0]);
+    }
+    for element in 0..geometry.tetrahedra().len() {
+        let probe = bound.probe(element, [0.25; 4]).unwrap();
+        assert_eq!(probe.medium(), Medium {
+            density_kg_m3: frozen.density_kg_m3(),
+            sound_speed_m_s: frozen.sound_speed_m_s(),
+        });
+        let sample = probe.harmonic(&coefficients, 1.0).unwrap();
+        near(sample.particle_velocity_m_s[0].re,
+            1.0 / (core::f64::consts::TAU * frozen.density_kg_m3()));
+    }
+    assert!(matches!(bound.probe(2, [0.25; 4]), Err(FluidRegionsInteriorError::Interior(_))));
+    assert!(matches!(bound.probe(0, [f64::NAN; 4]), Err(FluidRegionsInteriorError::Interior(_))));
     assert_eq!(used.queries.get(), 1);
     assert_eq!(unused.queries.get(), 0);
 }

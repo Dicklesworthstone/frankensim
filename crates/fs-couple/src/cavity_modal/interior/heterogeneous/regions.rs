@@ -8,7 +8,9 @@
 //! Gas, liquid, dense-fluid and sourced material-card owners all use the same
 //! `FluidAcoustics` interface; their phase and relaxation policies remain theirs.
 
-use fs_feec::acoustics::helmholtz::heterogeneous::HeterogeneousHelmholtzFe;
+use fs_feec::acoustics::helmholtz::heterogeneous::{
+    HeterogeneousHelmholtzFe, HeterogeneousProbe,
+};
 use fs_feec::acoustics::helmholtz::{AcousticFeError, HelmholtzFe, Medium};
 use fs_material::MaterialError;
 use fs_material::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
@@ -188,5 +190,27 @@ impl<'f, 'c, 's> FluidRegionsInterior<'f, 'c, 's> {
     #[must_use]
     pub fn operator(&self) -> &HeterogeneousHelmholtzFe<'f, 'c> {
         &self.operator
+    }
+
+    /// Prepare a one-sided pressure/velocity/intensity probe from the exact
+    /// frozen region snapshot used in assembly. Original sources are never
+    /// requeried, even if a caller-owned source has since changed. A point on
+    /// a shared face uses the explicitly selected tetrahedron's region.
+    pub fn probe(
+        &self,
+        element: usize,
+        barycentric: [f64; 4],
+    ) -> Result<HeterogeneousProbe<'_, 'f, 'c>, FluidRegionsInteriorError> {
+        self.operator.probe(element, barycentric, &mut |element, _| {
+            let state = self.region_state(self.element_regions[element]).ok_or(
+                AcousticFeError::InvalidInput {
+                    what: "acoustic region has no original assembled material state",
+                },
+            )?;
+            Ok(Medium {
+                density_kg_m3: state.density_kg_m3(),
+                sound_speed_m_s: state.sound_speed_m_s(),
+            })
+        })
     }
 }
