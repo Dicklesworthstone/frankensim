@@ -205,6 +205,32 @@ unit changes, rank-deficient and lossless loads, tiny physical damping, complex
 Hermitian refusal, physical work, budgets and cancellation. Existing unloaded
 harmonic regressions retain their original behavior and `port_load = None`.
 
+`solve_with_frequency_derivative` reuses that same prepared factor for the exact
+continuous frequency tangent, including authored `dF/domega` and the complete
+physical `dZ/domega`. Loaded owners require an explicit finite impedance-slope
+matrix; a zero matrix declares a locally constant load. The method applies
+`2 omega M + i C + i B Z B^T + i omega B Z_omega B^T` without constructing a
+second dense operator. Full mutual/nonproportional entries and physical port
+units remain. Independent binary normalization of the tangent RHS preserves
+the original force and high-Q response scales. It returns `q_omega`,
+`v_omega = -i(q + omega q_omega)`, physical port flow/effort slopes, and
+independently differentiated input, original viscous and absorbed boundary
+work. A second row audit reconstructs the differentiated equation from the
+published physical motion with uncancelled source bounds.
+
+`HarmonicFrequencyControls` admits added payload `8*n*p + 512*n + 384*p` bytes
+and work score `64*(n*n+n*p+p*p)+256*(n+p)` before allocation. Preparation's
+payload bound is `144*n*n + 128*n`, including its retained scaled mass/damping.
+No additional factor, finite difference, material law or peak search is created.
+M/C/K, geometry and the port map remain fixed; load causality, constitutive
+support and the supplied slope are the physical owner's responsibility.
+Frequency derivatives of a net load impedance do not identify its heat/storage
+split. G1/G3 tests in `tests/harmonic_frequency.rs` cover high-Q and DC limits,
+causal inertance/compliance and Maxwell loads, full mutual/nonreciprocal loads,
+complex source slopes, exact antiresonances, zero forcing, binary coordinate
+and time changes, independent work, explicit load-slope refusal, resources,
+cancellation and deterministic reuse.
+
 ### `time` (IRP M1.1-W1a; moved from `fs-couple::modal_acoustic_time`)
 
 `ModalAcousticTimeModel` is the generic fixed-rate realization of independent,

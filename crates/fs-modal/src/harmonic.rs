@@ -30,6 +30,10 @@ use crate::{ModalError, quadratic_fraction, quadratic_power_scale};
 mod impedance;
 use impedance::PreparedPortImpedance;
 pub use impedance::{HarmonicPortControls, HarmonicPortResponse};
+mod frequency;
+pub use frequency::{
+    HarmonicFrequencyControls, HarmonicFrequencyResponse, HarmonicPortFrequencyResponse,
+};
 
 /// Explicit size, numerical payload and solve-residual limits.
 #[derive(Clone, Copy, Debug)]
@@ -81,6 +85,13 @@ pub enum HarmonicResponseError {
         /// Caller-authored ceiling.
         cap: usize,
     },
+    /// The explicitly bounded, same-factor frequency tangent exceeds its work cap.
+    WorkBudget {
+        /// Requested frequency-tangent work score.
+        requested: u64,
+        /// Caller-authored maximum work score.
+        cap: u64,
+    },
     /// The common finite/symmetric damping admission rejected the source.
     Damping(ModalError),
     /// The mass matrix failed positive-definite admission.
@@ -125,6 +136,8 @@ pub struct PreparedHarmonicResponse {
     time_exponent: i32,
     coordinate_exponents: Vec<i32>,
     operator: Vec<C64>,
+    scaled_mass: Vec<f64>,
+    scaled_damping: Vec<f64>,
     damping: Vec<f64>,
     factor: Option<LuComplex>,
     port_load: Option<PreparedPortImpedance>,
@@ -352,6 +365,8 @@ impl PreparedHarmonicResponse {
             time_exponent,
             coordinate_exponents,
             operator,
+            scaled_mass: m,
+            scaled_damping: c,
             damping: damping.to_vec(),
             factor,
             port_load,
@@ -456,6 +471,15 @@ impl PreparedHarmonicResponse {
         force: &[C64],
         cx: &Cx<'_>,
     ) -> Result<HarmonicResponse, HarmonicResponseError> {
+        let (solution, force_exponent, relative_residual) = self.solve_force(force, cx)?;
+        self.observe(force, &solution, force_exponent, relative_residual, cx)
+    }
+
+    fn solve_force(
+        &self,
+        force: &[C64],
+        cx: &Cx<'_>,
+    ) -> Result<(Vec<C64>, i32, f64), HarmonicResponseError> {
         poll(cx)?;
         if force.len() != self.n || force.iter().any(|z| !finite(*z)) {
             return Err(invalid("one finite force phasor per coordinate required"));
@@ -479,7 +503,17 @@ impl PreparedHarmonicResponse {
             .enumerate()
             .map(|(i, &f)| scale_complex(f, -self.coordinate_exponents[i] - force_exponent))
             .collect::<Result<_, _>>()?;
-        let mut solution = rhs.clone();
+        let (solution, residual) = self.solve_normalized(&rhs, cx)?;
+        Ok((solution, force_exponent, residual))
+    }
+
+    fn solve_normalized(
+        &self,
+        rhs: &[C64],
+        cx: &Cx<'_>,
+    ) -> Result<(Vec<C64>, f64), HarmonicResponseError> {
+        poll(cx)?;
+        let mut solution = rhs.to_vec();
         if let Some(factor) = &self.factor {
             factor
                 .solve_with_cancel(&mut solution, || cx.checkpoint().is_err())
@@ -493,13 +527,24 @@ impl PreparedHarmonicResponse {
         if solution.iter().any(|z| !finite(*z)) {
             return Err(invalid("harmonic solution is not representable"));
         }
-        let relative_residual = backward_error(&self.operator, &solution, &rhs, self.n, cx)?;
+        let relative_residual = backward_error(&self.operator, &solution, rhs, self.n, cx)?;
         if relative_residual > self.maximum_relative_residual {
             return Err(HarmonicResponseError::Residual {
                 measured: relative_residual,
                 limit: self.maximum_relative_residual,
             });
         }
+        Ok((solution, relative_residual))
+    }
+
+    fn observe(
+        &self,
+        force: &[C64],
+        solution: &[C64],
+        force_exponent: i32,
+        relative_residual: f64,
+        cx: &Cx<'_>,
+    ) -> Result<HarmonicResponse, HarmonicResponseError> {
         let mut displacement = Vec::with_capacity(self.n);
         let mut velocity = Vec::with_capacity(self.n);
         for (i, &value) in solution.iter().enumerate() {
@@ -569,7 +614,7 @@ fn admit_size(n: usize, controls: HarmonicResponseControls) -> Result<(), Harmon
     }
     let bytes = n
         .checked_mul(n)
-        .and_then(|x| x.checked_mul(128))
+        .and_then(|x| x.checked_mul(144))
         .and_then(|x| n.checked_mul(128).and_then(|y| x.checked_add(y)))
         .ok_or(invalid("harmonic payload extent overflow"))?;
     if bytes > controls.maximum_payload_bytes {

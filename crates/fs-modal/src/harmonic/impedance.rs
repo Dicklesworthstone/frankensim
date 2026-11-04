@@ -40,16 +40,16 @@ pub struct HarmonicPortResponse {
 
 #[derive(Clone, Debug)]
 pub(super) struct PreparedPortImpedance {
-    coordinates: usize,
-    ports: usize,
-    force_map: Vec<f64>,
-    impedance: Vec<C64>,
+    pub(super) coordinates: usize,
+    pub(super) ports: usize,
+    pub(super) force_map: Vec<f64>,
+    pub(super) impedance: Vec<C64>,
 }
 
 pub(super) struct PortScaling {
     // B_ia / 2^(coordinate_i + port_a) has magnitude < 2. Port changes
     // are numerical congruences only; all returned flows/efforts use source units.
-    exponents: Vec<i32>,
+    pub(super) exponents: Vec<i32>,
     pub(super) minimum_time_exponent: i32,
 }
 
