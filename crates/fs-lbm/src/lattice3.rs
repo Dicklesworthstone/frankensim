@@ -10,6 +10,8 @@ use std::sync::Mutex;
 
 /// Finite-inertia tangential wall motion coupled to actual streamed drag.
 pub mod finite_wall;
+/// Instantaneous momentum input on the original D3Q19/D3Q27 populations.
+pub mod impulse;
 /// Prescribed tangential surface motion on the same fixed halfway walls.
 pub mod moving_walls;
 /// Source-preserving generalized-Newtonian viscosity on the existing 3-D step.

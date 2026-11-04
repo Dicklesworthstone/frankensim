@@ -40,7 +40,7 @@ impl ForcedLattice3<27> for crate::d3q27::D3q27 {
 /// Source history and populations are published together after both passes.
 pub struct ForcedGrid3<L: ForcedLattice3<Q>, const Q: usize> {
     pub(super) grid: Grid3<L, Q>,
-    forces: Vec<[f64; 3]>,
+    pub(super) forces: Vec<[f64; 3]>,
 }
 
 impl<L: ForcedLattice3<Q>, const Q: usize> ForcedGrid3<L, Q> {

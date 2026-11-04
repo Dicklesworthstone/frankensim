@@ -263,7 +263,8 @@ unavailable in the implementing session; numerical comparisons are separate.
 
 ## Instantaneous momentum input on the original fluid populations
 
-`Grid::apply_impulse_density` and `BoundaryGrid3::apply_impulse_density`
+`Grid::apply_impulse_density`, `BoundaryGrid3::apply_impulse_density`, and
+the shared `Grid3`/`ForcedGrid3` D3Q19 and D3Q27 entries
 accept one prescribed impulse density per original x-fastest cell. The input
 is already time-integrated: density is retained and `rho * delta_u = J`.
 The operation advances no collision, stream, geometry or time. Existing held
@@ -275,9 +276,15 @@ force-corrected nonequilibrium second moment instead of equilibrating away
 viscous stress. Actual population readback supplies momentum, mass roundoff,
 signed midpoint impulse work and stable kinetic-energy change. Explicit cell,
 low-Mach speed, momentum-defect and work-defect limits gate publication.
-The 2-D path reuses caller scratch; the tiled 3-D path reuses collision scratch
-without a new population or force allocation. Both cancel at bounded traversal
-boundaries and publish once, after the complete balance check.
+The 2-D path reuses caller scratch; the tiled 3-D path reuses collision scratch;
+the shared 3-D grids reuse their next-population buffer. No new population or
+force allocation is needed. All paths cancel at bounded traversal boundaries
+and publish once, after the complete balance check. The shared grid retains
+its original, possibly tighter Mach limit; `ForcedGrid3` uses each accepted
+cell's source frame and retains the source history. The impulse is delivered
+once, without being replayed by subsequent collision/forcing steps. These
+entries retain hydrodynamic stress for every native collision family; they
+do not assert translation or preservation of all higher kinetic moments.
 
 `MaterialScaling::{impulse_density_lattice, impulse_density_si}` converts
 N s/m³ using the same source density and dx/dt as the flow. Total 3-D impulses
@@ -289,7 +296,8 @@ and reciprocal rigid-body reaction remain responsibilities of the enclosing
 coupling owner. This is a low-Mach hydrodynamic velocity jump, not an
 incompressible projection, compressible shock model or thermal source.
 G0/G3 regressions in `tests/momentum_impulse.rs` cover independent moments and
-stress, signed work, subsequent native collision, SI scaling and atomic refusal.
+stress, signed work, subsequent native collision, SI scaling and atomic refusal,
+including all D3Q27 collision families with uniform and spatial force histories.
 
 ## Implicit anisotropic resistance on native D3Q19 momentum
 

@@ -34,6 +34,226 @@ fn close(a: f64, b: f64, tolerance: f64) {
     );
 }
 
+fn with_cx<R>(f: impl FnOnce(&fs_exec::Cx<'_>) -> R) -> R {
+    let gate = CancelGate::new_clock_free();
+    let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    pool.scope(|arena| {
+        let cx = fs_exec::Cx::new(
+            &gate,
+            arena,
+            fs_exec::StreamKey {
+                seed: 91827,
+                kernel_id: 1,
+                tile: 0,
+                iteration: 0,
+            },
+            fs_exec::Budget::INFINITE,
+            fs_exec::ExecMode::Deterministic,
+        );
+        f(&cx)
+    })
+}
+
+fn shared_grid_impulse<const N: usize, L: fs_lbm::lattice3::impulse::ImpulseLattice3<N>>(
+    model: L::Collision,
+    equilibrium: impl Fn(f64, [f64; 3]) -> [f64; N],
+) {
+    use fs_lbm::lattice3::{Grid3, GridBudget3, sources::ForcedGrid3};
+    let gate = CancelGate::new_clock_free();
+    let force = [0.0002, -0.0003, 0.0001];
+    let impulses: Vec<_> = (0..16)
+        .map(|i| [-0.004, 0.002 * (i % 3) as f64, -0.001])
+        .collect();
+    let e = L::E.map(|direction| direction.map(f64::from));
+    for spatial in [false, true] {
+        let initial = |p: [usize; 3]| {
+            let mut f = equilibrium(0.9 + 0.1 * p[0] as f64, [0.025, -0.015, 0.01]);
+            // Independent x-normal viscous stress on native rest/+x/-x indices.
+            f[0] -= 0.002;
+            f[1] += 0.001;
+            f[2] += 0.001;
+            f
+        };
+        let mut grid = Grid3::<L, N>::try_new(
+            [4, 2, 2],
+            model,
+            if spatial { [0.0; 3] } else { force },
+            [true; 3],
+            GridBudget3 {
+                maximum_cells: 16,
+                maximum_mach: 0.2,
+            },
+            |_| false,
+            initial,
+        )
+        .unwrap();
+        let forces: Vec<_> = (0..16)
+            .map(|i| {
+                if spatial {
+                    force.map(|f| f * (1.0 + 0.1 * i as f64))
+                } else {
+                    force
+                }
+            })
+            .collect();
+        let before = grid.populations().to_vec();
+        with_cx(|cx| {
+            let (report, after, stepped) = if spatial {
+                let mut owner = ForcedGrid3::try_new(grid, cx, forces.clone()).unwrap();
+                let report = owner
+                    .apply_impulse_density(&impulses, controls(), &gate)
+                    .unwrap();
+                assert_eq!(owner.forces(), forces);
+                assert_eq!(owner.completed_steps(), 0);
+                let after = owner.populations().to_vec();
+                owner.step_serial(cx, &[model; 16]).unwrap();
+                (report, after, owner.populations().to_vec())
+            } else {
+                let report = grid
+                    .apply_impulse_density(&impulses, controls(), &gate)
+                    .unwrap();
+                assert_eq!(grid.completed_steps(), 0);
+                let after = grid.populations().to_vec();
+                grid.step_serial(cx).unwrap();
+                (report, after, grid.populations().to_vec())
+            };
+            let mut kinetic = 0.0;
+            let mut after_momentum = [0.0; 3];
+            let mut stepped_momentum = [0.0; 3];
+            for i in 0..16 {
+                let old = moments(before[i], e, forces[i]);
+                let new = moments(after[i], e, forces[i]);
+                let evolved = moments(stepped[i], e, forces[i]);
+                close(new.0, old.0, 2e-15);
+                kinetic += new.3 - old.3;
+                for a in 0..3 {
+                    close(new.1[a] - old.1[a], impulses[i][a], 4e-16);
+                    after_momentum[a] += new.1[a];
+                    stepped_momentum[a] += evolved.1[a];
+                    for b in 0..3 {
+                        close(new.2[a][b], old.2[a][b], 2e-15);
+                    }
+                }
+            }
+            assert_eq!(report.affected_cells, 16);
+            close(report.work, kinetic, 2e-15);
+            for a in 0..3 {
+                let prescribed: f64 = forces.iter().map(|f| f[a]).sum();
+                close(stepped_momentum[a] - after_momentum[a], prescribed, 5e-14);
+            }
+        });
+    }
+}
+
+#[test]
+fn shared_d3q19_and_d3q27_receive_impulses_without_replaying_them_as_force() {
+    use fs_lbm::d3q27::*;
+    shared_grid_impulse::<19, fs_lbm::lattice3::D3q19>(
+        CollisionModel3::Bgk { tau: 0.9 },
+        equilibrium3,
+    );
+    for model in [
+        CollisionModel27::Bgk {
+            tau: 0.9,
+            equilibrium: Equilibrium27::Quadratic,
+        },
+        CollisionModel27::Bgk {
+            tau: 0.9,
+            equilibrium: Equilibrium27::Factorized,
+        },
+        CollisionModel27::Trt {
+            tau: 0.9,
+            magic: 3.0 / 16.0,
+            equilibrium: Equilibrium27::Factorized,
+        },
+        CollisionModel27::CentralMoment {
+            rates: Rates27 { omega: [1.2; 10] },
+        },
+        CollisionModel27::Cumulant {
+            rates: Rates27 { omega: [1.2; 10] },
+        },
+    ] {
+        shared_grid_impulse::<27, D3q27>(
+            CollisionConfig27 {
+                model,
+                maximum_mach: 0.2,
+            },
+            |rho, u| equilibrium27(rho, u, Equilibrium27::Factorized),
+        );
+    }
+}
+
+#[test]
+fn shared_grid_impulses_obey_original_mach_limit_and_publish_atomically() {
+    use fs_lbm::d3q27::*;
+    use fs_lbm::lattice3::{Grid3, GridBudget3};
+    let mut grid = Grid3::<D3q27, 27>::try_new(
+        [4, 2, 2],
+        CollisionConfig27 {
+            model: CollisionModel27::Bgk {
+                tau: 0.9,
+                equilibrium: Equilibrium27::Factorized,
+            },
+            maximum_mach: 0.2,
+        },
+        [0.0; 3],
+        [true; 3],
+        GridBudget3 {
+            maximum_cells: 16,
+            maximum_mach: 0.01,
+        },
+        |p| p == [3, 1, 1],
+        |_| equilibrium27(1.0, [0.0; 3], Equilibrium27::Factorized),
+    )
+    .unwrap();
+    let gate = CancelGate::new_clock_free();
+    let before: Vec<_> = grid
+        .populations()
+        .iter()
+        .map(|f| f.map(f64::to_bits))
+        .collect();
+    let mut impulses = [[0.001, 0.0, 0.0]; 16];
+    // A bad final fluid cell exercises failure after an otherwise valid prefix.
+    impulses[15] = [0.0; 3];
+    for bad in [0.02, f64::NAN, f64::INFINITY] {
+        impulses[14][0] = bad;
+        assert!(
+            grid.apply_impulse_density(&impulses, controls(), &gate)
+                .is_err()
+        );
+        let actual: Vec<_> = grid
+            .populations()
+            .iter()
+            .map(|f| f.map(f64::to_bits))
+            .collect();
+        assert_eq!(actual, before);
+    }
+    impulses[14][0] = 0.001;
+    impulses[15][0] = 0.001;
+    assert!(
+        grid.apply_impulse_density(&impulses, controls(), &gate)
+            .is_err()
+    );
+    impulses[15][0] = 0.0;
+    let cancelled = CancelGate::new_clock_free();
+    cancelled.request();
+    assert_eq!(
+        grid.apply_impulse_density(&impulses, controls(), &cancelled),
+        Err(ImpulseError::Cancelled)
+    );
+    let zero = grid
+        .apply_impulse_density(&[[0.0; 3]; 16], controls(), &gate)
+        .unwrap();
+    assert_eq!(zero.affected_cells, 0);
+    let actual: Vec<_> = grid
+        .populations()
+        .iter()
+        .map(|f| f.map(f64::to_bits))
+        .collect();
+    assert_eq!(actual, before);
+    assert_eq!(grid.completed_steps(), 0);
+}
+
 // Independent quadrature of the force-corrected moments; no production kick,
 // moment observer, or equilibrium difference is used as the oracle.
 fn moments<const D: usize, const N: usize>(
