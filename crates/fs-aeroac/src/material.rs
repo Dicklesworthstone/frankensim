@@ -15,7 +15,7 @@
 mod frequency;
 /// Same-material SI binding for the existing three-dimensional slot-jet rig.
 pub mod slot_jet_3d;
-pub use frequency::ForceFrequencyRefinement;
+pub use frequency::{ForceFrequencyRefinement, ForceToneFrequencyRefinement};
 pub use slot_jet_3d::{
     MaterialSlotJet3d, MaterialSlotJet3dRun, SlotJet3dForceHarmonics, SlotJet3dForceLine,
     SlotJet3dForceSpectrum, SlotJet3dForceTones, SlotJet3dSetup,
@@ -435,7 +435,7 @@ pub struct JetForceTones {
 }
 
 impl JetForceTones {
-    /// Exact positive frequencies [Hz], in the shared plan's increasing order.
+    /// Positive fitted frequencies [Hz], in the admitted increasing order.
     #[must_use]
     pub fn frequencies_hz(&self) -> &[f64] {
         &self.frequencies_hz
@@ -636,6 +636,42 @@ impl<F: FluidTransport + FluidAcoustics + ?Sized> MaterialJetLabiumRun<'_, F> {
             dc_force_n_m: summary.map(|s| s.dc),
             residual_rms_n_m: summary.map(|s| s.residual_rms),
         })
+    }
+
+    /// Jointly refine independent, possibly inharmonic force frequencies.
+    /// Every candidate reuses one L1 fit across both recorded axes, retaining
+    /// their physical relative amplitudes, independent DC and sample-zero phase.
+    /// The caller supplies a local seed and nonoverlapping interval per tone;
+    /// resolved lines continue through same-fluid Curle radiation in N/m.
+    ///
+    /// This is local stationary estimation, not unknown-source discovery,
+    /// alias removal or a statistical frequency certificate. Ill-conditioned
+    /// frequency separation refuses, including a requested but absent tone.
+    /// The total memory budget includes transposition of the accepted record.
+    pub fn fit_force_tones_refined(
+        &self,
+        initial_frequencies_hz: &[f64],
+        frequency_bounds_hz: &[[f64; 2]],
+        budget: fs_fft::harmonic::ToneFrequencyBudget,
+    ) -> Result<(JetForceTones, ForceToneFrequencyRefinement), fs_fft::harmonic::ToneFrequencyError>
+    {
+        let fit = frequency::refine_force_tones(
+            &self.force_series_n_m,
+            self.timestep_s,
+            initial_frequencies_hz,
+            frequency_bounds_hz,
+            budget,
+        )?;
+        Ok((
+            JetForceTones {
+                acoustic: self.acoustic,
+                frequencies_hz: fit.frequencies_hz,
+                force_n_m: fit.force,
+                dc_force_n_m: fit.summary.map(|s| s.dc),
+                residual_rms_n_m: fit.summary.map(|s| s.residual_rms),
+            },
+            fit.refinement,
+        ))
     }
 
     /// Radiate a caller-windowed force line [N/m] in the workspace's

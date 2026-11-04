@@ -344,7 +344,7 @@ pub struct SlotJet3dForceTones {
 }
 
 impl SlotJet3dForceTones {
-    /// Exact positive frequencies [Hz], in the fit plan's increasing order.
+    /// Positive fitted frequencies [Hz], in the admitted increasing order.
     #[must_use]
     pub fn frequencies_hz(&self) -> &[f64] {
         &self.frequencies_hz
@@ -530,6 +530,44 @@ impl<F: FluidTransport + FluidAcoustics + ?Sized> MaterialSlotJet3dRun<'_, F> {
             residual_rms_n: summary.map(|s| s.residual_rms),
         })
     }
+
+    /// Jointly refine independent frequencies from the integrated force axes.
+    /// Local nonoverlapping intervals preserve each tone's identity. The
+    /// common L1 owner uses both physical components without renormalizing
+    /// their relative strengths or imposing harmonic spacing. Original N
+    /// units, sample-zero phase, material and periodic span survive unchanged.
+    /// No absent spanwise force or isolated-source radiation is inferred.
+    ///
+    /// The complete workspace includes the transposed input. Unresolved
+    /// frequencies, Nyquist violations and incomplete convergence refuse.
+    pub fn fit_force_tones_refined(
+        &self,
+        initial_frequencies_hz: &[f64],
+        frequency_bounds_hz: &[[f64; 2]],
+        budget: fs_fft::harmonic::ToneFrequencyBudget,
+    ) -> Result<
+        (SlotJet3dForceTones, super::ForceToneFrequencyRefinement),
+        fs_fft::harmonic::ToneFrequencyError,
+    > {
+        let fit = super::frequency::refine_force_tones(
+            &self.force_series_n,
+            self.timestep_s,
+            initial_frequencies_hz,
+            frequency_bounds_hz,
+            budget,
+        )?;
+        Ok((
+            SlotJet3dForceTones {
+                acoustic: self.acoustic,
+                span_m: self.span_m,
+                frequencies_hz: fit.frequencies_hz,
+                force_n: fit.force,
+                dc_force_n: fit.summary.map(|s| s.dc),
+                residual_rms_n: fit.summary.map(|s| s.residual_rms),
+            },
+            fit.refinement,
+        ))
+    }
 }
 
 impl MaterialSlotJet3dRun<'_, GasState> {
@@ -544,6 +582,79 @@ impl MaterialSlotJet3dRun<'_, GasState> {
 mod tone_tests {
     use super::*;
     use fs_fft::harmonic::HarmonicFitBudget;
+
+    #[test]
+    fn g1_refined_independent_tones_preserve_periodic_cell_force_and_span() {
+        let gas = GasState::try_new_moist_air(300.0, 93_000.0, 0.2).unwrap();
+        let dt = 0.00025;
+        let frequencies = [137.3, 211.7];
+        let expected = [
+            [C64::new(0.02, -0.01), C64::new(-0.004, 0.008)],
+            [C64::new(0.003, 0.009), C64::new(0.014, -0.002)],
+        ];
+        let record = (0..1024)
+            .map(|i| {
+                let mut force = [0.05, -0.03];
+                for (frequency, phasors) in frequencies.iter().zip(expected) {
+                    let (s, c) = (core::f64::consts::TAU * frequency * i as f64 * dt).sin_cos();
+                    for axis in 0..2 {
+                        force[axis] += phasors[axis].re * c + phasors[axis].im * s;
+                    }
+                }
+                force
+            })
+            .collect();
+        // A manufactured force history exercises the material-run observation
+        // seam without making a flow-convergence or isolated-radiator claim.
+        let run = MaterialSlotJet3dRun {
+            material: &gas,
+            acoustic: gas.acoustic_state().unwrap(),
+            timestep_s: dt,
+            span_m: 0.013,
+            force_series_n: record,
+            final_plane_physical_mach_max: 0.0,
+            lattice_diagnostics: SlotJet3dDiagnostics {
+                mach_max_lattice: 0.0,
+                flux_plate_plane: 0.0,
+                flux_fringe_plane: 0.0,
+                reynolds: 0.0,
+                record_len: 1024,
+                strouhal_bin_width: 0.0,
+            },
+        };
+        let (fitted, diagnostics) = run
+            .fit_force_tones_refined(
+                &[137.7, 211.3],
+                &[[136.0, 139.0], [210.0, 213.0]],
+                fs_fft::harmonic::ToneFrequencyBudget {
+                    absolute_tolerance_hz: 1e-8,
+                    max_evaluations: 32,
+                    min_frequency_reciprocal_condition: 1e-9,
+                    fit: HarmonicFitBudget {
+                        max_workspace_bytes: 1_000_000,
+                        min_reciprocal_condition: 1e-10,
+                    },
+                },
+            )
+            .unwrap();
+        assert_eq!(fitted.span_m(), run.span_m());
+        assert_eq!(fitted.acoustic(), run.acoustic());
+        assert!(diagnostics.evaluations > 1 && diagnostics.evaluations <= 32);
+        assert!((fitted.dc_force_n[0] - 0.05).abs() < 1e-10);
+        assert!((fitted.dc_force_n[1] + 0.03).abs() < 1e-10);
+        assert!(fitted.residual_rms_n.iter().all(|x| *x < 1e-10));
+        for (index, frequency) in frequencies.iter().enumerate() {
+            let line = fitted.force_tone(index).unwrap();
+            assert!((line.frequency_hz - frequency).abs() < 1e-8);
+            assert_eq!(
+                line.acoustic_wavenumber_rad_m,
+                core::f64::consts::TAU * line.frequency_hz / gas.sound_speed
+            );
+            for axis in 0..2 {
+                assert!((line.force_n[axis] - expected[index][axis]).abs() < 1e-9);
+            }
+        }
+    }
 
     #[test]
     fn g1_refined_harmonics_retain_periodic_span_and_integrated_newtons() {

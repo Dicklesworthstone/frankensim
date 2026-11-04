@@ -503,6 +503,22 @@ report evaluations and remaining local correction, not frequency uncertainty.
 Focused checks cover a missing fundamental, weak cross-axis harmonics,
 physical phase and radiation, periodic-span units and total-budget refusals.
 
+`fit_force_tones_refined(seeds_hz, bounds_hz, frequency_budget)` extends both
+material-bound runs to several locally unknown, independent frequencies. Each
+tone retains a positive, ordered, nonoverlapping sub-Nyquist interval; no
+harmonic-spacing assumption is imposed on beating or inharmonic forces. One
+L1 variable-projection fit uses all recorded components with their original
+physical relative strengths. The frequencies, peak phasors and DC are solved
+jointly, with phase at the original first sample. The existing force-tone
+observers use those inferred frequencies and the original fluid for propagation.
+The 3-D result keeps its integrated N and periodic span. The complete storage
+budget includes transposed samples and assembled force arrays, while returned
+frequency and correction arrays are moved without duplication. Diagnostics
+expose candidate count, local corrections and joint frequency conditioning;
+none is an uncertainty bound. Missing or inseparable requested tones refuse,
+as do exhausted work and active bounds without convergence. This does not
+discover the number of sources, establish stationarity, or undo sample aliasing.
+
 The physical Mach envelope is strictly below 0.3 and is checked separately
 from numerical lattice Mach. Grid allocation is budgeted before construction.
 An observed speed-envelope violation refuses output; diagnostics sample the
