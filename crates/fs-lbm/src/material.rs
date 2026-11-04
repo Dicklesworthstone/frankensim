@@ -248,6 +248,36 @@ impl<F: FluidTransport + ?Sized> MaterialScaling<'_, F> {
         finite((acceleration_m_s2 * self.timestep_s) / self.velocity_scale, "lattice acceleration is unrepresentable")
     }
 
+    /// Signed impulse per physical fluid volume [N s/m³] to lattice momentum
+    /// density for `Grid::apply_impulse_density` and its D3Q19 counterpart.
+    /// The scale is `rho0 * dx/dt`; an impulse is already time-integrated and
+    /// must NOT be multiplied by another timestep. The actual local lattice
+    /// density still determines the resulting velocity jump.
+    pub fn impulse_density_lattice(&self, impulse_n_s_m3: f64) -> Result<f64, MaterialLbmError> {
+        finite(impulse_n_s_m3, "physical impulse density must be finite")?;
+        let scale = positive(self.transport.density_kg_m3() * self.velocity_scale,
+            "impulse density scale is unrepresentable")?;
+        let result = finite(impulse_n_s_m3 / scale, "lattice impulse density is unrepresentable")?;
+        if impulse_n_s_m3 != 0.0 && result == 0.0 {
+            return Err(MaterialLbmError::Invalid("nonzero impulse density underflows lattice units"));
+        }
+        Ok(result)
+    }
+
+    /// Signed lattice momentum density to physical impulse density [N s/m³].
+    /// To convert a summed `ImpulseReport` impulse to a total, multiply this
+    /// result by `dx³` in 3-D, or `dx²` for impulse per unit depth in 2-D.
+    pub fn impulse_density_si(&self, lattice_impulse: f64) -> Result<f64, MaterialLbmError> {
+        finite(lattice_impulse, "lattice impulse density must be finite")?;
+        let scale = positive(self.transport.density_kg_m3() * self.velocity_scale,
+            "impulse density scale is unrepresentable")?;
+        let result = finite(lattice_impulse * scale, "physical impulse density is unrepresentable")?;
+        if lattice_impulse != 0.0 && result == 0.0 {
+            return Err(MaterialLbmError::Invalid("nonzero impulse density underflows physical units"));
+        }
+        Ok(result)
+    }
+
     /// Incompressible pressure perturbation [Pa] about the material reference.
     /// This is not absolute gas pressure or a physical acoustic equation of state.
     pub fn pressure_perturbation_si(&self, lattice_density: f64) -> Result<f64, MaterialLbmError> {

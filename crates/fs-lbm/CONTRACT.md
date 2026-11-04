@@ -1,5 +1,35 @@
 # CONTRACT: fs-lbm
 
+## Instantaneous momentum input on the original fluid populations
+
+`Grid::apply_impulse_density` and `BoundaryGrid3::apply_impulse_density`
+accept one prescribed impulse density per original x-fastest cell. The input
+is already time-integrated: density is retained and `rho * delta_u = J`.
+The operation advances no collision, stream, geometry or time. Existing held
+forces, relaxation parameters and boundary data remain attached to the flow.
+
+One shared pointwise kernel evaluates the second-order equilibrium difference
+and the matching Guo half-source change algebraically. It retains the full
+force-corrected nonequilibrium second moment instead of equilibrating away
+viscous stress. Actual population readback supplies momentum, mass roundoff,
+signed midpoint impulse work and stable kinetic-energy change. Explicit cell,
+low-Mach speed, momentum-defect and work-defect limits gate publication.
+The 2-D path reuses caller scratch; the tiled 3-D path reuses collision scratch
+without a new population or force allocation. Both cancel at bounded traversal
+boundaries and publish once, after the complete balance check.
+
+`MaterialScaling::{impulse_density_lattice, impulse_density_si}` converts
+N s/m³ using the same source density and dx/dt as the flow. Total 3-D impulses
+include dx³; 2-D totals include dx² and are per unit depth. There is no second
+timestep factor. Only fully occupied `Cell::Fluid` receives a dense impulse;
+free-surface interface inertia belongs to its original mass owner. Static
+solid entries must be zero. Partial-saturation fictitious-fluid subtraction
+and reciprocal rigid-body reaction remain responsibilities of the enclosing
+coupling owner. This is a low-Mach hydrodynamic velocity jump, not an
+incompressible projection, compressible shock model or thermal source.
+G0/G3 regressions in `tests/momentum_impulse.rs` cover independent moments and
+stress, signed work, subsequent native collision, SI scaling and atomic refusal.
+
 ## D3Q27 TRT for wall-bounded laminar flow
 
 `CollisionModel27::Trt { tau, magic, equilibrium }` extends the original

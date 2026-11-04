@@ -25,6 +25,8 @@ pub mod core2;
 pub mod d3q19;
 pub mod d3q27;
 pub mod freesurface;
+/// Instantaneous momentum changes on the original low-Mach fluid populations.
+pub mod impulse;
 pub mod kinematics;
 pub mod lattice3;
 pub mod material;

@@ -4,6 +4,7 @@ use super::*;
 
 mod frame;
 pub use frame::RigidFrame3;
+mod impulse;
 
 /// Refusal before a flow or force-frame proposal is published.
 #[derive(Debug, Clone, PartialEq, Eq)]
