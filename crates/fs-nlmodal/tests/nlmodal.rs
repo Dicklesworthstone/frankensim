@@ -422,7 +422,8 @@ fn plate_construction_certificates() {
 fn small_thick_panel_certifies_three_odd_odd_modes() {
     // The couple-layer steel panel (0.20 × 0.15 × 2 mm) used to refuse
     // n_modes = 3 at the 1e-8 quadrature gate. Higher-order Gauss is
-    // the certificate, not a looser gate.
+    // the certificate, not a looser gate. Exercise a physically active
+    // odd-odd Airy channel: (2,1) is identically zero for this entire bank.
     let plate = VkPlateParams {
         lx: 0.20,
         ly: 0.15,
@@ -437,10 +438,14 @@ fn small_thick_panel_certifies_three_odd_odd_modes() {
         SineMode { m: 1, n: 3 },
         SineMode { m: 3, n: 1 },
     ];
-    let stress = vec![SineMode { m: 2, n: 1 }];
+    let stress = vec![SineMode { m: 1, n: 1 }];
     let model = von_karman_ss_plate(&plate, &disp, &stress).expect("small-panel VK");
     assert!(model.quadrature_residual < 3.0e-8);
     assert_eq!(model.storage.omegas.len(), 3);
+    for mode in 0..disp.len() {
+        let beta = single_mode_beta(&model.storage, mode);
+        assert!(beta.is_finite() && beta > 0.0, "mode {mode}: beta={beta}");
+    }
 }
 
 #[test]

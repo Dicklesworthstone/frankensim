@@ -514,6 +514,10 @@ impl VkBody {
     }
 
     /// Build from a thin plate.
+    /// The isotropic simply-supported path retains up to three odd-odd
+    /// displacement modes and the (1,1) Airy stress mode. This active stress
+    /// channel supplies quartic storage and cubic restoring forces; its finite
+    /// truncation is not a stress-basis convergence certificate.
     ///
     /// # Errors
     /// Section, modal-window, or nlmodal admission refusals.
@@ -535,10 +539,11 @@ impl VkBody {
     fn from_ss_sine(plate: ThinPlate, with_area: bool) -> Result<Self, AcousticRealizeError> {
         let n = plate.n_modes.clamp(1, 3);
         let disp = odd_odd_modes(n);
-        // Extra Airy channels above (2,1) trip the nlmodal quadrature
-        // certificate on this mesh; more displacement modes still
-        // couple through the one certified membrane channel.
-        let stress = vec![fs_nlmodal::SineMode { m: 2, n: 1 }];
+        // Odd-odd displacement modes have reflection-even Hessian brackets.
+        // Retain the lowest Airy mode with the same symmetry: an even index
+        // in either direction would make this entire stress channel zero.
+        // One Airy mode is an explicit stress truncation, not a convergence claim.
+        let stress = vec![fs_nlmodal::SineMode { m: 1, n: 1 }];
         let model = fs_nlmodal::von_karman_ss_plate(
             &fs_nlmodal::VkPlateParams {
                 lx: plate.length_m,
@@ -3185,6 +3190,63 @@ mod tests {
         ));
         assert!(piston_radiation_filter(f64::NAN, &gas, 48_000).is_err());
         assert!(piston_radiation_filter(0.05, &gas, 0).is_err());
+    }
+
+    /// G1/G3: the public nonlinear-body constructor must keep physical
+    /// membrane hardening, not merely construct an all-zero Airy channel.
+    #[test]
+    fn ss_von_karman_retains_quartic_storage_and_cubic_restoring_force() {
+        let mut plate = thermal_plate();
+        plate.thermoelastic = None;
+        plate.geometric_nonlinearity = true;
+        let pi = core::f64::consts::PI;
+        let (kx, ky) = (pi / plate.length_m, pi / plate.width_m);
+        let area = plate.length_m * plate.width_m;
+        let surface_mass = plate.density_kg_m3 * plate.thickness_m;
+        let phi_norm = (4.0 / (surface_mass * area)).sqrt();
+        let psi_norm = (4.0 / area).sqrt();
+        let k2 = kx * kx + ky * ky;
+        let rigidity =
+            plate.e1_pa * plate.thickness_m.powi(3) / (12.0 * (1.0 - plate.nu12 * plate.nu12));
+        let omega_squared = rigidity * k2 * k2 / surface_mass;
+        // Independent integral for displacement (1,1) and Airy (1,1):
+        // integral_0^1 sin^3(pi*x) dx = 4/(3*pi), whereas
+        // integral_0^1 sin(pi*x)*cos^2(pi*x) dx = 2/(3*pi).
+        // Insert these into 2*(phi_xx*phi_yy-phi_xy^2), retaining both
+        // mass normalization and the unit-normalized Airy function.
+        let coupling =
+            8.0 / (3.0 * pi * pi) * phi_norm.powi(2) * psi_norm * kx.powi(2) * ky.powi(2) * area;
+        let beta = plate.e1_pa * plate.thickness_m / (2.0 * k2 * k2) * coupling * coupling;
+        let close = |actual: f64, expected: f64| {
+            assert!(
+                (actual / expected - 1.0).abs() < 1.0e-8,
+                "actual={actual}, expected={expected}"
+            );
+        };
+        for modes in 1..=3 {
+            plate.n_modes = modes;
+            let body = VkBody::from_plate(plate).expect("active nonlinear SS body");
+            let mut previous = None;
+            for multiplier in [1.0, 2.0] {
+                // Center displacement is h/4 then h/2, in the same original
+                // mass-normalized coordinate consumed by the production body.
+                let q = multiplier * 0.25 * plate.thickness_m / phi_norm;
+                let mut x = vec![0.0; 2 * modes];
+                x[0] = q;
+                let mut effort = vec![0.0; x.len()];
+                body.sys.storage().gradient(&x, &mut effort);
+                let quartic = body.sys.hamiltonian(&x) - 0.5 * omega_squared * q * q;
+                let cubic = effort[0] - omega_squared * q;
+                assert!(quartic > 0.0 && cubic > 0.0);
+                close(quartic, 0.25 * beta * q.powi(4));
+                close(cubic, beta * q.powi(3));
+                if let Some((energy, force)) = previous {
+                    close(quartic, 16.0 * energy);
+                    close(cubic, 8.0 * force);
+                }
+                previous = Some((quartic, cubic));
+            }
+        }
     }
 
     #[test]
