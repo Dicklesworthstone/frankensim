@@ -103,6 +103,7 @@ impl<'a> P1ConductionMesh<'a> {
         let prepared = original.prepare(wavelength_nm)?;
         self.propagate_bundle_prepared(
             cx, &cursor, &prepared, ray, transverse_axis, wavelength_nm, max_distance_m, options,
+            |_, _| Ok(false),
         ).map_err(WaterMeshError::Mesh)
     }
 

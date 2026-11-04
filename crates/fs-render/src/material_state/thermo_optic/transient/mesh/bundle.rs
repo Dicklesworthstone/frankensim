@@ -102,6 +102,7 @@ impl<'a> P1ConductionMesh<'a> {
         let prepared = original.prepare(wavelength_nm)?;
         self.propagate_bundle_prepared(
             cx, &cursor, &prepared, ray, transverse_axis, wavelength_nm, max_distance_m, options,
+            |_, _| Ok(false),
         )
     }
 
@@ -118,6 +119,8 @@ impl<'a> P1ConductionMesh<'a> {
         wavelength_nm: f64,
         max_distance_m: f64,
         options: P1MeshBundleOptions,
+        additional_gradient_jump: impl Fn(P1ConductionElement<'a>, P1ConductionElement<'a>)
+            -> Result<bool, GradientIndexError>,
     ) -> Result<P1MeshBundlePropagation, P1MeshError> {
         let start = cursor.current.get();
         // The native zero-length launch establishes the immutable angular basis
@@ -239,7 +242,8 @@ impl<'a> P1ConductionMesh<'a> {
             }
             let neighbour = self.snapshot.element(next.element)?;
             let transition =
-                Transition::new(active, neighbour, next.local_face, p.ray.origin, witness);
+                Transition::new(active, neighbour, next.local_face, p.ray.origin, witness)
+                    .with_additional_gradient_jump(additional_gradient_jump(active, neighbour)?);
             departure = Some(transition.departure());
             boundary = MeshBoundary::with_transition(
                 neighbour.boundary_oracle(

@@ -13,6 +13,7 @@ pub(super) struct Transition<'a> {
     next_face: usize,
     origin: Point3,
     witness: BoundaryWitness,
+    additional_gradient_jump: bool,
 }
 
 impl<'a> Transition<'a> {
@@ -29,7 +30,13 @@ impl<'a> Transition<'a> {
             next_face,
             origin,
             witness,
+            additional_gradient_jump: false,
         }
+    }
+
+    pub(super) fn with_additional_gradient_jump(mut self, jump: bool) -> Self {
+        self.additional_gradient_jump = jump;
+        self
     }
 
     fn prepare(
@@ -126,7 +133,9 @@ impl<'a> MeshBoundary<'a> {
             .transition
             .as_ref()
             .ok_or(GradientIndexError::UnsupportedBoundaryDeparture)?;
-        if transition.previous.gradient == transition.next.gradient {
+        if transition.previous.gradient == transition.next.gradient
+            && !transition.additional_gradient_jump
+        {
             return Ok(());
         }
         let (_, witness) = triangle_proximity(

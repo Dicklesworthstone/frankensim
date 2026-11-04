@@ -388,23 +388,34 @@ struct MeshTemperature<'a> {
     previous: Cell<Option<P1ConductionElement<'a>>>,
 }
 
-impl MeshTemperature<'_> {
-    fn sample(&self, p: Point3) -> Result<(usize, TemperatureJet), GradientIndexError> {
+impl<'a> MeshTemperature<'a> {
+    // Joint physical fields must use this same native element/side decision
+    // and these exact coordinates, including inside a departure collar.
+    fn sample_barycentric(
+        &self,
+        p: Point3,
+    ) -> Result<(P1ConductionElement<'a>, [f64; 4]), GradientIndexError> {
         let current = self.current.get();
-        match current.sample_temperature_jet(p) {
-            Ok(jet) => Ok((current.element, jet)),
+        match current.barycentric(p) {
+            Ok(lambda) => Ok((current, lambda)),
             Err(TransientTemperatureFieldError::OutsideElement) => {
                 let previous = self
                     .previous
                     .get()
                     .ok_or(GradientIndexError::OutsideFieldDomain)?;
                 previous
-                    .sample_temperature_jet(p)
-                    .map(|jet| (previous.element, jet))
+                    .barycentric(p)
+                    .map(|lambda| (previous, lambda))
                     .map_err(TransientTemperatureFieldError::into_gradient_error)
             }
             Err(error) => Err(error.into_gradient_error()),
         }
+    }
+    fn sample(&self, p: Point3) -> Result<(usize, TemperatureJet), GradientIndexError> {
+        let (element, lambda) = self.sample_barycentric(p)?;
+        element.temperature_jet_at_barycentric(lambda)
+            .map(|jet| (element.element, jet))
+            .map_err(TransientTemperatureFieldError::into_gradient_error)
     }
 }
 impl TemperatureField for MeshTemperature<'_> {

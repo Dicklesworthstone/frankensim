@@ -29,6 +29,9 @@ use fs_geom::{Point3, Vec3};
 use fs_qty::Pressure;
 use fs_thermochem::water::if97::If97Region;
 
+/// Native joint water ray/bundle traversal on this original reconstruction.
+pub mod transport;
+
 /// A borrowed SI pressure view; neither representation copies or converts a buffer.
 /// Both variants mean absolute thermodynamic pressure, never gauge pressure.
 #[derive(Clone, Copy)]
