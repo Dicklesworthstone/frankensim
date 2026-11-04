@@ -32,6 +32,12 @@ use fs_math::{c64::C64, det};
 /// Coherent pressure and power transmission into a sourced receiving fluid.
 pub mod transmission;
 pub use transmission::{LayeredTransmission, TransmittingLayers};
+/// Incoherent incident-power weighting of the original angular responses.
+pub mod angular;
+pub use angular::{
+    AngularPower, AngularPowerBudget, AngularPowerError, DiffuseIncidence, IncidentPower,
+    MAX_ANGULAR_POWER_SAMPLES,
+};
 
 /// Bounded preparation storage and per-angle work.
 pub const MAX_LAYERS: usize = 64;

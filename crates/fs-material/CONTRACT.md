@@ -10563,6 +10563,34 @@ using the existing gas-state owner. Infinite planar, linear, stationary-fluid
 and rigid-frame scope remains; finite beams, shear waves, flow and continuous
 sound-speed gradients are not supplied by this layer model.
 
+### Diffuse and authored angular incident power
+
+`RigidBackedLayers::diffuse_power` and `TransmittingLayers::diffuse_power`
+integrate their SAME prepared extended-reaction responses over an isotropic
+incident hemisphere or an explicitly truncated cone. With incidence cosine
+`mu`, the incident normal-power measure is `mu dmu`; polar midpoint panels
+retain this projection exactly once. Original internal refraction, porous loss
+and receiving normal-admittance weighting are unchanged. Independent incoming
+directions add powers, never complex reflection amplitudes. Evanescent receiving
+fields carry zero transmitted normal power and do not become heat.
+
+`angular_power` instead consumes explicit incoherent directions and their
+already projected normal incident watts, including any authored solid-angle
+weights. Both paths independently accumulate reflected, transmitted and absorbed
+work with compensated sums. No clipping or energy-balance renormalization is
+applied. Queries allocate nothing or re-query material sources, poll cancellation
+per sample, and obey an explicit sample allowance plus a 65,536-sample hard cap.
+All-zero authored weights refuse because no normalized distribution exists;
+a declared diffuse distribution at zero watts retains coefficients and zero work.
+
+Polar resolution is a convergence axis, not a certified error tolerance. The
+`porous_layers` regression includes a three-rung comparison against independent
+transfer matrices integrated in polar angle, a truncated cone, separate
+directional power controls, exact lossless/matched limits, critical-refraction
+power bounds, original-source retention and cancellation/budget refusal. Infinite
+planar stationary rigid-frame assumptions remain; this does not predict finite
+specimen diffraction or certify a reverberant room's diffuse field.
+
 ### Finite reservoirs in transient dense membrane transport
 
 `membrane::transient::slab::finite` adds two explicit whole-reservoir molar

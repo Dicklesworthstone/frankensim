@@ -5,7 +5,10 @@ use fs_material::fluid_acoustics::thermoviscous::{ThermoviscousFluid, Thermovisc
 use fs_material::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 use fs_material::gas::{GasSpec, GasState};
-use fs_material::porous::layers::{Layer, MAX_LAYERS, RigidBackedLayers, TransmittingLayers};
+use fs_material::porous::layers::{
+    AngularPowerBudget, AngularPowerError, DiffuseIncidence, IncidentPower, Layer,
+    MAX_ANGULAR_POWER_SAMPLES, MAX_LAYERS, RigidBackedLayers, TransmittingLayers,
+};
 use fs_material::porous::{PorousCard, PorousFluidLaw};
 use fs_math::c64::C64;
 
@@ -1190,4 +1193,302 @@ fn transmission_prepares_both_original_sources_once_and_preserves_admission() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn angular_power_uses_incident_watts_without_averaging_complex_pressure_or_cosines_twice() {
+    let incident = fluid();
+    let law = foam();
+    let layers = [Layer::Porous {
+        law: &law,
+        thickness_m: 0.04,
+    }];
+    let rigid = RigidBackedLayers::new(&incident, core::f64::consts::TAU * 500.0, &layers).unwrap();
+    let transmitting = TransmittingLayers::new(
+        &incident,
+        &incident,
+        core::f64::consts::TAU * 500.0,
+        &layers,
+    )
+    .unwrap();
+    let samples = [
+        IncidentPower {
+            cosine: 1.0,
+            power_w: 2.0,
+        },
+        IncidentPower {
+            cosine: 0.25,
+            power_w: 6.0,
+        },
+        IncidentPower {
+            cosine: 0.5,
+            power_w: 0.0,
+        },
+    ];
+    let budget = AngularPowerBudget {
+        max_samples: samples.len(),
+    };
+    let first = rigid.reflection(1.0).unwrap();
+    let second = rigid.reflection(0.25).unwrap();
+    let result = rigid.angular_power(&samples, budget, || false).unwrap();
+    assert_eq!(result.incident_power_w, 8.0);
+    assert_eq!(result.evaluated_directions, 2);
+    assert_eq!(result.transmitted_power_w, 0.0);
+    assert!(
+        (result.absorbed_power_w
+            - (2.0 * first.absorbed_fraction + 6.0 * second.absorbed_fraction))
+            .abs()
+            < 1e-14
+    );
+    let coherent =
+        (first.pressure_reflection.scale(0.25) + second.pressure_reflection.scale(0.75)).norm_sq();
+    assert!((result.reflected_fraction - coherent).abs() > 1e-4);
+    assert!(result.balance_residual_w.abs() < 1e-13);
+
+    let result = transmitting
+        .angular_power(&samples, budget, || false)
+        .unwrap();
+    let first = transmitting.scattering(1.0).unwrap();
+    let second = transmitting.scattering(0.25).unwrap();
+    for (actual, expected) in [
+        (
+            result.reflected_power_w,
+            2.0 * first.reflected_fraction + 6.0 * second.reflected_fraction,
+        ),
+        (
+            result.transmitted_power_w,
+            2.0 * first.transmitted_fraction + 6.0 * second.transmitted_fraction,
+        ),
+        (
+            result.absorbed_power_w,
+            2.0 * first.absorbed_fraction + 6.0 * second.absorbed_fraction,
+        ),
+    ] {
+        assert!((actual - expected).abs() < 2e-14);
+    }
+    assert!(result.absorbed_power_w > 0.0 && result.transmitted_power_w > 0.0);
+    assert!(result.balance_residual_w.abs() < 1e-13);
+}
+
+#[test]
+fn diffuse_porous_absorption_refines_to_an_independent_polar_angle_integral() {
+    let incident = fluid();
+    let law = foam();
+    let layers = [
+        Layer::Porous {
+            law: &law,
+            thickness_m: 0.04,
+        },
+        Layer::FluidGap { thickness_m: 0.02 },
+    ];
+    let stack = RigidBackedLayers::new(&incident, core::f64::consts::TAU * 500.0, &layers).unwrap();
+    // Independent growing-transfer-matrix oracle in THETA rather than the
+    // production mu quadrature; coefficients include internal refraction.
+    for minimum_cosine in [0.0_f64, 0.4] {
+        let maximum_angle = minimum_cosine.acos();
+        let intervals = 16_384;
+        let width = maximum_angle / intervals as f64;
+        let mut reference = 0.0;
+        for i in 0..intervals {
+            let theta = (i as f64 + 0.5) * width;
+            let reflection = matrix_reflection(&stack, theta.cos());
+            reference += (1.0 - reflection.norm_sq()) * theta.cos() * theta.sin();
+        }
+        reference *= 2.0 * width / (1.0 - minimum_cosine * minimum_cosine);
+        let mut errors = Vec::new();
+        for samples in [16, 32, 64] {
+            let result = stack
+                .diffuse_power(
+                    7.0,
+                    DiffuseIncidence {
+                        minimum_cosine,
+                        polar_samples: samples,
+                    },
+                    AngularPowerBudget {
+                        max_samples: samples,
+                    },
+                    || false,
+                )
+                .unwrap();
+            assert_eq!(result.incident_power_w, 7.0);
+            assert_eq!(result.evaluated_directions, samples);
+            assert!(result.balance_residual_w.abs() < 5e-14);
+            errors.push((result.absorbed_fraction - reference).abs());
+        }
+        assert!(
+            errors[1] < 0.3 * errors[0],
+            "mu_min={minimum_cosine}: {errors:?}"
+        );
+        assert!(
+            errors[2] < 0.3 * errors[1],
+            "mu_min={minimum_cosine}: {errors:?}"
+        );
+        assert!(errors[2] < 5e-5, "mu_min={minimum_cosine}: {errors:?}");
+        if minimum_cosine == 0.0 {
+            assert!((reference - stack.reflection(1.0).unwrap().absorbed_fraction).abs() > 0.02);
+        }
+    }
+}
+
+#[test]
+fn diffuse_limits_keep_matched_transmission_critical_refraction_and_zero_absorption_distinct() {
+    let incident = fluid();
+    let budget = AngularPowerBudget { max_samples: 4096 };
+    let diffuse = DiffuseIncidence {
+        minimum_cosine: 0.0,
+        polar_samples: 4096,
+    };
+    let rigid = RigidBackedLayers::new(&incident, 1000.0, &[]).unwrap();
+    let reflection = rigid.diffuse_power(3.0, diffuse, budget, || false).unwrap();
+    assert_eq!(reflection.reflected_power_w, 3.0);
+    assert_eq!(reflection.absorbed_power_w, 0.0);
+    assert_eq!(reflection.transmitted_power_w, 0.0);
+    let matched = TransmittingLayers::new(&incident, &incident, 1000.0, &[]).unwrap();
+    let result = matched
+        .diffuse_power(3.0, diffuse, budget, || false)
+        .unwrap();
+    assert!(result.reflected_power_w < 1e-25);
+    assert!((result.transmitted_power_w - 3.0).abs() < 3e-14);
+    assert_eq!(result.absorbed_power_w, 0.0);
+
+    let receiver = FluidAcousticState::try_new(1.2, 680.0).unwrap();
+    let faster = TransmittingLayers::new(&incident, &receiver, 1000.0, &[]).unwrap();
+    let evanescent = faster.scattering(0.5).unwrap();
+    assert_eq!(evanescent.transmitted_fraction, 0.0);
+    assert!(evanescent.pressure_transmission.abs() > 0.0);
+    let result = faster
+        .diffuse_power(3.0, diffuse, budget, || false)
+        .unwrap();
+    // Only sin(theta)<c_inc/c_recv=1/2 carries transmitted power. Its diffuse
+    // incident-power share is 1/4, an independent exact upper bound.
+    assert!(result.transmitted_fraction > 0.0 && result.transmitted_fraction < 0.25);
+    assert_eq!(result.absorbed_power_w, 0.0);
+    assert!(result.balance_residual_w.abs() < 5e-14);
+    let zero = faster
+        .diffuse_power(0.0, diffuse, budget, || false)
+        .unwrap();
+    assert_eq!(zero.incident_power_w, 0.0);
+    assert_eq!(zero.reflected_power_w, 0.0);
+    assert_eq!(zero.transmitted_power_w, 0.0);
+    assert_eq!(zero.absorbed_power_w, 0.0);
+    assert_eq!(zero.transmitted_fraction, result.transmitted_fraction);
+}
+
+#[test]
+fn angular_queries_retain_sources_and_refuse_invalid_weights_budgets_and_cancellation() {
+    let incident = CountedFluid {
+        state: fluid(),
+        samples: Cell::new(0),
+    };
+    let receiver = CountedReceiver {
+        state: FluidAcousticState::try_new(2.4, 340.0).unwrap(),
+        samples: Cell::new(0),
+    };
+    let law = foam();
+    let stack = TransmittingLayers::new(
+        &incident,
+        &receiver,
+        core::f64::consts::TAU * 500.0,
+        &[Layer::Porous {
+            law: &law,
+            thickness_m: 0.03,
+        }],
+    )
+    .unwrap();
+    let budget = AngularPowerBudget { max_samples: 32 };
+    let diffuse = DiffuseIncidence {
+        minimum_cosine: 0.0,
+        polar_samples: 32,
+    };
+    let baseline = stack.diffuse_power(2.0, diffuse, budget, || false).unwrap();
+    assert_eq!(incident.samples.get(), 1);
+    assert_eq!(receiver.samples.get(), 1);
+    assert_eq!(
+        stack.diffuse_power(2.0, diffuse, budget, || true),
+        Err(AngularPowerError::Cancelled),
+    );
+    let mut checkpoints = 0;
+    assert_eq!(
+        stack.diffuse_power(2.0, diffuse, budget, || {
+            checkpoints += 1;
+            checkpoints == 10
+        }),
+        Err(AngularPowerError::Cancelled),
+    );
+    assert_eq!(
+        stack.diffuse_power(2.0, diffuse, budget, || false).unwrap(),
+        baseline
+    );
+    for maximum in [0, 31, MAX_ANGULAR_POWER_SAMPLES + 1] {
+        assert!(
+            stack
+                .diffuse_power(
+                    2.0,
+                    diffuse,
+                    AngularPowerBudget {
+                        max_samples: maximum
+                    },
+                    || false
+                )
+                .is_err()
+        );
+    }
+    for minimum in [-0.1, 1.0, f64::NAN, f64::INFINITY] {
+        assert!(
+            stack
+                .diffuse_power(
+                    2.0,
+                    DiffuseIncidence {
+                        minimum_cosine: minimum,
+                        ..diffuse
+                    },
+                    budget,
+                    || false
+                )
+                .is_err()
+        );
+    }
+    for power in [-1.0, f64::NAN, f64::INFINITY] {
+        assert!(
+            stack
+                .angular_power(
+                    &[IncidentPower {
+                        cosine: 1.0,
+                        power_w: power
+                    }],
+                    budget,
+                    || false
+                )
+                .is_err()
+        );
+    }
+    for cosine in [0.0, 1.01, f64::NAN, f64::INFINITY] {
+        assert!(
+            stack
+                .angular_power(
+                    &[IncidentPower {
+                        cosine,
+                        power_w: 0.0
+                    }],
+                    budget,
+                    || false
+                )
+                .is_err()
+        );
+    }
+    assert!(stack.angular_power(&[], budget, || false).is_err());
+    assert!(
+        stack
+            .angular_power(
+                &[IncidentPower {
+                    cosine: 1.0,
+                    power_w: 0.0
+                }],
+                budget,
+                || false
+            )
+            .is_err()
+    );
+    assert_eq!(incident.samples.get(), 1);
+    assert_eq!(receiver.samples.get(), 1);
 }
