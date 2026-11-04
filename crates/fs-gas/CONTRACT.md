@@ -4438,3 +4438,33 @@ Six focused regressions cover independent preload and midpoint-motion oracles,
 full storage/loss/momentum trajectories, distinct source gauges and species,
 chemical energy, an independent viscous-gas-heating oracle, exact zero-law
 reduction and final cancellation with both molecular bindings reusable.
+
+## Pressure-only outgoing gas boundaries
+
+The opt-in `FrozenGas::pressure_outlet_flux`, `pressure_outlet_normal_flux`
+and `pressure_outlet_spatial_flux` APIs impose a positive absolute downstream
+pressure on the same original caloric wave owner used by compact reservoirs.
+A compressive shock follows the source Hugoniot; an expansion follows the source
+entropy and acoustic invariant. The boundary samples the wave at the stationary
+face: a departing wave retains the interior state, and a straddling expansion
+uses its supported sonic state even when the unused far-field tail is colder
+than the source domain.
+
+The outgoing contact supplies density, temperature and all tangential velocities.
+Pressure traction and advected total enthalpy, including every kinetic component,
+enter one conservative face flux. The original sensible-energy gauge and
+full-trace precision admission remain in force. Primitive fast paths retain
+source admission without decoding a freshly reconstructed energy.
+
+A negative contact velocity is refused: pressure alone cannot determine incoming
+temperature, entropy or composition. Callers needing reversal must use a complete
+reservoir state. These local normal-wave boundaries do not claim nonreflection,
+a multidimensional exterior solution, molecular heat/stress boundary data, or
+an independently integrated reservoir. Boundary fluxes are oriented along the
+supplied coordinate, with `outward_normal` equal to -1 or +1.
+
+Focused G1 regressions compare subsonic compression and expansion, sonic limiting
+and supersonic departure against independent gamma-law relations and variable-Cp
+entropy/invariant integrals. G3 covers normal reversal, formation-reference
+invariance, both shear components and primitive/conserved parity. G4 covers
+backflow, invalid data, source precision and cancellation.

@@ -8,6 +8,50 @@ fn close(actual: f64, expected: f64) {
 }
 
 #[test]
+fn g3_pressure_outlet_transports_planar_shear_energy_and_reconstruction_consistently() {
+    let gas = gas(0.4, 1e18);
+    for normal in [-1.0, 1.0] {
+        let axial = gas.conserved(1.0, normal * 0.4, 1.0).unwrap();
+        let reference = gas
+            .pressure_outlet_flux(axial, normal, 0.8, || false)
+            .unwrap();
+        for tangent in [-3.0, 0.0, 2.0] {
+            let state = gas
+                .normal_conserved(1.0, normal * 0.4, tangent, 1.0)
+                .unwrap();
+            let flux = gas
+                .pressure_outlet_normal_flux(state, normal, 0.8, || false)
+                .unwrap();
+            close(flux.mass, reference.mass);
+            close(flux.normal_momentum, reference.momentum);
+            close(flux.transverse_momentum, reference.mass * tangent);
+            close(
+                flux.energy,
+                reference.energy + 0.5 * reference.mass * tangent * tangent,
+            );
+            let reconstructed = gas
+                .pressure_outlet_normal_flux_from_primitive(
+                    NormalPrimitive {
+                        density: 1.0,
+                        normal_velocity: normal * 0.4,
+                        transverse_velocity: tangent,
+                        pressure: 1.0,
+                    },
+                    normal,
+                    0.8,
+                    || false,
+                )
+                .unwrap();
+            close(reconstructed.mass, flux.mass);
+            close(reconstructed.normal_momentum, flux.normal_momentum);
+            close(reconstructed.transverse_momentum, flux.transverse_momentum);
+            close(reconstructed.energy, flux.energy);
+            close(reconstructed.signal_speed, flux.signal_speed);
+        }
+    }
+}
+
+#[test]
 fn g0_planar_flux_retains_original_one_dimensional_results() {
     let g = gas(0.0, 1e16);
     for (left, right) in [

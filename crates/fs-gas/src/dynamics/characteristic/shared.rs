@@ -22,6 +22,42 @@ pub(crate) struct PortState {
     pub signal_speed: f64,
 }
 
+/// Outgoing wave selected by a static backpressure, with no exterior caloric state.
+/// A reversed contact needs reservoir thermodynamics and is refused.
+pub(crate) fn pressure_outlet_state<L: CaloricLaw>(
+    gas: &L,
+    inside: Primitive,
+    backpressure: f64,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<PortState, Error<L::Error>> {
+    poll(cancelled)?;
+    if !positive(backpressure) {
+        return Err(Error::Invalid(
+            "pressure outlet needs positive absolute pressure",
+        ));
+    }
+    if inside.velocity >= inside.sound_speed && backpressure <= inside.pressure {
+        return port(inside, false, inside.velocity + inside.sound_speed);
+    }
+    let wave = match pressure_wave(gas, inside, backpressure, cancelled) {
+        Ok(wave) => wave,
+        Err(error) if cold_trial(&error) && backpressure < inside.pressure => {
+            // The remote fan tail can leave the caloric domain while the
+            // sonic state actually crossing the boundary remains supported.
+            let (state, signal) = cold_outflow(gas, inside, cancelled)?;
+            return port(state, false, signal);
+        }
+        Err(error) => return Err(error),
+    };
+    if wave.primitive.velocity < 0.0 {
+        return Err(Error::Invalid(
+            "pressure outlet backflow requires an exterior thermodynamic state",
+        ));
+    }
+    let state = sample_outflow(gas, inside, wave, cancelled)?;
+    port(state, false, wave.signal_speed)
+}
+
 pub(crate) fn reservoir_state<L: CaloricLaw>(
     duct: &L,
     reservoir: &L,

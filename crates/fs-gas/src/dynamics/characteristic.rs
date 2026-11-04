@@ -13,6 +13,58 @@ use crate::dynamics::wall::shared::WallError;
 use wave::pressure_wave;
 
 impl FrozenGas {
+    /// Outgoing Euler flux selected by a positive absolute backpressure [Pa].
+    ///
+    /// The original caloric source supplies compression shocks and isentropic
+    /// expansions. A fan crossing the boundary is sampled at its sonic state;
+    /// a departing supersonic wave leaves the interior trace unchanged. The
+    /// normal is -1 or +1; flux stays oriented along the increasing coordinate.
+    /// Backflow is refused because pressure alone cannot supply entering gas
+    /// temperature or entropy. A fixed pressure is not a nonreflecting outlet.
+    pub fn pressure_outlet_flux(
+        &self,
+        interior: Conserved,
+        outward_normal: f64,
+        backpressure: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<FaceFlux, Error> {
+        let inside = self.decode(interior, None, &mut cancelled)?;
+        let (face, signal) =
+            self.pressure_outlet_state(inside, outward_normal, backpressure, &mut cancelled)?;
+        self.face_flux(face, signal)
+    }
+
+    pub(super) fn pressure_outlet_state(
+        &self,
+        inside: Primitive,
+        outward_normal: f64,
+        backpressure: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(Primitive, f64), Error> {
+        poll(cancelled)?;
+        if !matches!(outward_normal, -1.0 | 1.0) {
+            return Err(Error::Invalid("pressure outlet outward normal"));
+        }
+        let port = shared::pressure_outlet_state(
+            self,
+            Primitive {
+                velocity: outward_normal * inside.velocity,
+                ..inside
+            },
+            backpressure,
+            cancelled,
+        )
+        .map_err(wave_error)?;
+        poll(cancelled)?;
+        Ok((
+            Primitive {
+                velocity: outward_normal * port.primitive.velocity,
+                ..port.primitive
+            },
+            port.signal_speed,
+        ))
+    }
+
     /// One-sided flux at a compact, stationary reservoir attached to a duct.
     ///
     /// Both states use this exact frozen source and energy reference. Reservoir

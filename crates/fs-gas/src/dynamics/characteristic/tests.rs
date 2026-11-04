@@ -273,3 +273,138 @@ fn driven_euler_boundaries_publish_actual_end_exchange_and_update_atomically() {
     assert_eq!(report.boundary_change.mass, 0.0);
     assert_eq!(report.boundary_change.energy, 0.0);
 }
+
+#[test]
+fn g1_pressure_outlet_matches_subsonic_gamma_waves_on_both_normals() {
+    let gas = gas(0.0, 0.0);
+    for normal in [-1.0, 1.0] {
+        let inside = gas.conserved(1.0, normal * 0.4, 1.0).unwrap();
+        for pressure in [0.8_f64, 1.0, 1.2] {
+            let density = if pressure > 1.0 {
+                (pressure + 1.0 / 6.0) / (1.0 + pressure / 6.0)
+            } else {
+                pressure.powf(1.0 / 1.4)
+            };
+            let velocity = 0.4 - gamma_wave(pressure);
+            let temperature = pressure / density;
+            let mass = normal * density * velocity;
+            let enthalpy = 3.5 * temperature - 0.0025 + 0.5 * velocity * velocity;
+            let flux = gas
+                .pressure_outlet_flux(inside, normal, pressure, || false)
+                .unwrap();
+            assert!((flux.mass - mass).abs() < 3e-9);
+            assert!((flux.momentum - (density * velocity * velocity + pressure)).abs() < 3e-9);
+            assert!((flux.energy - mass * enthalpy).abs() < 6e-9);
+            assert!(!flux.used_hll_fallback);
+        }
+    }
+}
+
+#[test]
+fn g1_pressure_outlet_samples_sonic_fans_and_departing_supersonic_waves() {
+    let gas = gas(0.0, 0.0);
+    let sound = 1.4_f64.sqrt();
+    let sonic = (2.0 * sound + 0.4 * 0.2) / 2.4;
+    let density = (sonic / sound).powf(5.0);
+    let pressure = (sonic / sound).powf(7.0);
+    for normal in [-1.0, 1.0] {
+        let inside = gas.conserved(1.0, normal * 0.2, 1.0).unwrap();
+        // The second target's unused far-field tail is below the source Tmin.
+        for backpressure in [0.1, 1e-12] {
+            let flux = gas
+                .pressure_outlet_flux(inside, normal, backpressure, || false)
+                .unwrap();
+            assert!((flux.mass - normal * density * sonic).abs() < 3e-9);
+            assert!((flux.momentum - (density * sonic * sonic + pressure)).abs() < 3e-9);
+            let enthalpy = 3.5 * pressure / density - 0.0025 + 0.5 * sonic * sonic;
+            assert!((flux.energy - flux.mass * enthalpy).abs() < 6e-9);
+        }
+        let supersonic = gas.conserved(1.0, normal * 3.0 * sound, 1.0).unwrap();
+        for backpressure in [0.1, 2.0] {
+            let flux = gas
+                .pressure_outlet_flux(supersonic, normal, backpressure, || false)
+                .unwrap();
+            let velocity = supersonic.momentum / supersonic.density;
+            assert_eq!(flux.mass, supersonic.momentum);
+            assert!((flux.momentum - (supersonic.momentum * velocity + 1.0)).abs() < 1e-11);
+            assert!((flux.energy - (supersonic.energy + 1.0) * velocity).abs() < 1e-10);
+        }
+    }
+}
+
+#[test]
+fn g1_pressure_outlet_retains_variable_heat_capacity_and_energy_reference() {
+    let gas = gas(0.4, 0.0);
+    let shifted = crate::dynamics::tests::gas(0.4, 1e18);
+    let pressure = 0.8_f64;
+    // Independent NASA fixture entropy integral: Cp(T)/T = 3.5/T + 0.4.
+    let mut lo = 0.5_f64;
+    let mut hi = 1.0_f64;
+    for _ in 0..100 {
+        let t = lo.midpoint(hi);
+        if 3.5 * t.ln() + 0.4 * (t - 1.0) < pressure.ln() {
+            lo = t;
+        } else {
+            hi = t;
+        }
+    }
+    let temperature = lo.midpoint(hi);
+    // Independent composite Simpson integration of the outgoing invariant.
+    let n = 256;
+    let dt = (1.0 - temperature) / n as f64;
+    let integrand = |t: f64| {
+        let cp = 3.5 + 0.4 * t;
+        cp / (cp / (cp - 1.0) * t).sqrt()
+    };
+    let mut integral = integrand(temperature) + integrand(1.0);
+    for i in 1..n {
+        integral += (if i % 2 == 0 { 2.0 } else { 4.0 }) * integrand(temperature + i as f64 * dt);
+    }
+    let velocity = 0.35 + integral * dt / 3.0;
+    let density = pressure / temperature;
+    let inside = gas.conserved(1.0, 0.35, 1.0).unwrap();
+    let flux = gas
+        .pressure_outlet_flux(inside, 1.0, pressure, || false)
+        .unwrap();
+    let equivalent = shifted
+        .pressure_outlet_flux(inside, 1.0, pressure, || false)
+        .unwrap();
+    assert_eq!(flux, equivalent);
+    assert!((flux.mass - density * velocity).abs() < 3e-9);
+    let enthalpy = 3.5 * temperature + 0.2 * temperature * temperature - gas.energy_reference()
+        + 0.5 * velocity * velocity;
+    assert!((flux.energy / flux.mass - enthalpy).abs() < 8e-9);
+}
+
+#[test]
+fn g4_pressure_outlet_refuses_backflow_invalid_data_and_cancellation() {
+    let gas = gas(0.0, 0.0);
+    let inside = gas.conserved(1.0, 0.2, 1.0).unwrap();
+    for pressure in [0.0, -1.0, f64::NAN, f64::INFINITY, 2.0] {
+        assert!(matches!(
+            gas.pressure_outlet_flux(inside, 1.0, pressure, || false),
+            Err(Error::Invalid(_))
+        ));
+    }
+    assert!(matches!(
+        gas.pressure_outlet_flux(inside, 0.0, 1.0, || false),
+        Err(Error::Invalid(_))
+    ));
+    let entering = gas.conserved(1.0, -0.2, 1.0).unwrap();
+    assert!(matches!(
+        gas.pressure_outlet_flux(entering, 1.0, 1.0, || false),
+        Err(Error::Invalid(_))
+    ));
+    assert_eq!(
+        gas.pressure_outlet_flux(inside, 1.0, 0.8, || true),
+        Err(Error::Cancelled)
+    );
+    let mut polls = 0;
+    assert_eq!(
+        gas.pressure_outlet_flux(inside, 1.0, 0.8, || {
+            polls += 1;
+            polls > 4
+        }),
+        Err(Error::Cancelled)
+    );
+}

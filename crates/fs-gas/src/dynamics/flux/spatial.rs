@@ -181,6 +181,46 @@ impl FrozenGas {
             .map(SpatialFaceFlux::from)
     }
 
+    /// Pressure-only outlet with both outgoing shear velocities and full energy.
+    /// See [`Self::pressure_outlet_flux`] for wave sampling and backflow policy.
+    pub fn pressure_outlet_spatial_flux(
+        &self,
+        state: SpatialConserved,
+        outward_normal: f64,
+        backpressure: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<SpatialFaceFlux, Error> {
+        let primitive = self.spatial_primitive(state, &mut cancelled)?;
+        self.trace_pressure_outlet(
+            state,
+            primitive,
+            outward_normal,
+            backpressure,
+            &mut cancelled,
+        )
+        .map(SpatialFaceFlux::from)
+    }
+
+    /// Source-admitted reconstructed trace for [`Self::pressure_outlet_spatial_flux`].
+    pub fn pressure_outlet_spatial_flux_from_primitive(
+        &self,
+        state: SpatialPrimitive,
+        outward_normal: f64,
+        backpressure: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<SpatialFaceFlux, Error> {
+        poll(&mut cancelled)?;
+        let (state, primitive) = self.spatial_state_at(state)?;
+        self.trace_pressure_outlet(
+            state,
+            primitive,
+            outward_normal,
+            backpressure,
+            &mut cancelled,
+        )
+        .map(SpatialFaceFlux::from)
+    }
+
     /// Exact thermally perfect shock/rarefaction at a stationary adiabatic slip
     /// wall. `outward_normal` is -1 or +1 along the supplied normal axis. There
     /// is no mass, tangential momentum or energy transfer through this wall.

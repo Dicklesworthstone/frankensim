@@ -343,6 +343,78 @@ impl FrozenGas {
         .map(NormalFaceFlux::from)
     }
 
+    /// Pressure-only outlet retaining the outgoing tangential velocity and energy.
+    /// See [`Self::pressure_outlet_flux`] for wave sampling and backflow policy.
+    pub fn pressure_outlet_normal_flux(
+        &self,
+        state: NormalConserved,
+        outward_normal: f64,
+        backpressure: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<NormalFaceFlux, Error> {
+        let primitive = self.normal_primitive(state, &mut cancelled)?;
+        self.trace_pressure_outlet(
+            state,
+            primitive,
+            outward_normal,
+            backpressure,
+            &mut cancelled,
+        )
+        .map(NormalFaceFlux::from)
+    }
+
+    /// Source-admitted reconstructed trace for [`Self::pressure_outlet_normal_flux`].
+    pub fn pressure_outlet_normal_flux_from_primitive(
+        &self,
+        state: NormalPrimitive,
+        outward_normal: f64,
+        backpressure: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<NormalFaceFlux, Error> {
+        poll(&mut cancelled)?;
+        let (state, primitive) = self.normal_state_at(state)?;
+        self.trace_pressure_outlet(
+            state,
+            primitive,
+            outward_normal,
+            backpressure,
+            &mut cancelled,
+        )
+        .map(NormalFaceFlux::from)
+    }
+
+    fn trace_pressure_outlet<const N: usize, Q: Trace<N>>(
+        &self,
+        state: Q,
+        primitive: Primitive,
+        outward_normal: f64,
+        backpressure: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<NumericalFlux<N>, Error> {
+        let (face, signal) =
+            self.pressure_outlet_state(primitive, outward_normal, backpressure, cancelled)?;
+        let normal = self.conserved(face.density, face.velocity, face.pressure)?;
+        let old = state.array();
+        let mut values = [0.0; N];
+        values[0] = normal.density;
+        values[1] = normal.momentum;
+        values[N - 1] = normal.energy;
+        // The outgoing contact transports each tangent without inventing an
+        // exterior shear state. Its kinetic energy crosses the same face once.
+        for k in 2..N - 1 {
+            let velocity = old[k] / old[0];
+            values[k] = face.density * velocity;
+            values[N - 1] += 0.5 * values[k] * velocity;
+        }
+        let (state, face) = self.admit_trace_precision(
+            Q::from_array(values),
+            face,
+            "pressure outlet cannot retain the declared caloric precision",
+        )?;
+        poll(cancelled)?;
+        flux(physical_flux(state, face), signal, false)
+    }
+
     fn normal_wall_interface(
         &self,
         state: NormalConserved,

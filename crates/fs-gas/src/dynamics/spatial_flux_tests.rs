@@ -7,6 +7,74 @@ fn close(actual: f64, expected: f64) {
     );
 }
 
+#[test]
+fn g3_pressure_outlet_retains_both_shear_components_and_full_spatial_work() {
+    let gas = gas(0.4, -1e18);
+    for normal in [-1.0, 1.0] {
+        let axial = gas.conserved(1.0, normal * 0.4, 1.0).unwrap();
+        let reference = gas
+            .pressure_outlet_flux(axial, normal, 0.8, || false)
+            .unwrap();
+        for tangent in [[0.0, 0.0], [2.0, -3.0], [-3.0, 2.0]] {
+            let primitive = SpatialPrimitive {
+                density: 1.0,
+                normal_velocity: normal * 0.4,
+                transverse_velocity: tangent,
+                pressure: 1.0,
+            };
+            let state = conserved(&gas, primitive);
+            let flux = gas
+                .pressure_outlet_spatial_flux(state, normal, 0.8, || false)
+                .unwrap();
+            close(flux.mass, reference.mass);
+            close(flux.normal_momentum, reference.momentum);
+            for (index, velocity) in tangent.into_iter().enumerate() {
+                close(flux.transverse_momentum[index], reference.mass * velocity);
+            }
+            close(
+                flux.energy,
+                reference.energy + 0.5 * reference.mass * (tangent[0].powi(2) + tangent[1].powi(2)),
+            );
+            let reconstructed = gas
+                .pressure_outlet_spatial_flux_from_primitive(primitive, normal, 0.8, || false)
+                .unwrap();
+            for (actual, expected) in components(reconstructed).into_iter().zip(components(flux)) {
+                close(actual, expected);
+            }
+            assert!(!flux.used_hll_fallback);
+        }
+    }
+}
+
+#[test]
+fn g4_spatial_pressure_outlet_preserves_original_trace_admission() {
+    let gas = gas(0.0, 0.0);
+    let primitive = trace([1.0, 0.4, 2.0, -3.0, 1.0]);
+    assert_eq!(
+        gas.pressure_outlet_spatial_flux_from_primitive(primitive, 1.0, 0.8, || true),
+        Err(Error::Cancelled)
+    );
+    for invalid in [
+        SpatialPrimitive {
+            transverse_velocity: [f64::NAN, 0.0],
+            ..primitive
+        },
+        SpatialPrimitive {
+            transverse_velocity: [1e20, 0.0],
+            ..primitive
+        },
+        SpatialPrimitive {
+            normal_velocity: -0.4,
+            ..primitive
+        },
+    ] {
+        assert!(
+            gas.pressure_outlet_spatial_flux_from_primitive(invalid, 1.0, 1.0, || false)
+                .is_err()
+        );
+    }
+}
+
 fn components(f: SpatialFaceFlux) -> [f64; 6] {
     [
         f.mass,
