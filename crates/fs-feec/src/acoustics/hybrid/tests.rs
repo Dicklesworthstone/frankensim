@@ -1,4 +1,7 @@
 use super::*;
+
+mod mechanical_sources;
+mod sources;
 use crate::acoustics::helmholtz::boundary_layer::thermal_wall::{
     ConductiveThermalWall, ThermalBacking, ThermalWallDepth, WallThermalTransport,
 };

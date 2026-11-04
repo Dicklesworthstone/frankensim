@@ -27,12 +27,17 @@
 //! original fields, and independently integrated work reuse those factors.
 //! All fields use exp(+i omega t). Real-reference power coordinates also retain
 //! reactive traces; they are not conventional evanescent traveling waves.
+//!
+//! Internal mechanical and spatial heat sources contribute b_source to the
+//! original loaded relation b=S a+b_source. Their outgoing waves participate
+//! in the SAME reciprocal interface closure; the passive S matrix is unchanged.
 
 use super::helmholtz::boundary_layer::BoundaryLayerPower;
 use super::helmholtz::multiport::{
     InteriorMultiport, InteriorPortResponse, PhysicalTrace, PreparedInteriorScattering,
 };
 use super::helmholtz::{AcousticFeError, Medium};
+use super::thermoviscous::heat_source::ThermoviscousHeatSource;
 use super::thermoviscous::{
     PreparedThermoviscousScattering, ThermoviscousError, ThermoviscousFe, ThermoviscousField,
     ThermoviscousMedium, ThermoviscousPower,
@@ -149,6 +154,7 @@ impl<'a, 'c> HybridInterior<'a, 'c> {
     /// Pair modes on the same physical triangulation. The coordinate rank must
     /// match and remain nonsingular; unselected modes remain external in the
     /// order Helmholtz then LNS, each preserving its original mode order.
+    /// Source-driven sealed compositions may have no external modes.
     /// Only geometry-identical faces are admitted; nonmatching mortar meshes
     /// and approximate geometric welding are not silently inferred.
     pub fn new(
@@ -170,11 +176,8 @@ impl<'a, 'c> HybridInterior<'a, 'c> {
             || thermoviscous_modes.len() != m
             || !valid(helmholtz_modes, nh)
             || !valid(thermoviscous_modes, nl)
-            || 2 * m == nh + nl
         {
-            return Err(HybridError::InvalidInput(
-                "interface indices/rank or no external ports",
-            ));
+            return Err(HybridError::InvalidInput("interface indices/rank"));
         }
         let hfaces = collect_faces(&helmholtz.physical_modes, helmholtz_modes);
         let lfaces = collect_faces(&thermoviscous.physical_modes, thermoviscous_modes);
@@ -465,6 +468,9 @@ pub struct PreparedHybrid<'a, 'c> {
 #[derive(Debug, Clone, Copy)]
 pub struct HybridPower {
     pub external_input_w: f64,
+    /// Signed work of original structural forces and spatial heat sources.
+    /// Port work, including the internal interface, is excluded.
+    pub source_input_w: f64,
     pub helmholtz_interface_w: f64,
     pub thermoviscous_interface_w: f64,
     pub helmholtz_wall: BoundaryLayerPower,
@@ -488,7 +494,7 @@ impl HybridPower {
     }
     #[must_use]
     pub fn balance_residual_w(self) -> f64 {
-        self.external_input_w - self.dissipated_w()
+        self.external_input_w + self.source_input_w - self.dissipated_w()
     }
 }
 
@@ -519,6 +525,15 @@ impl PreparedHybrid<'_, '_> {
         incident: &[C64],
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Vec<C64>, HybridError> {
+        self.complete_incident_with_sources(incident, None, cancelled)
+    }
+
+    fn complete_incident_with_sources(
+        &self,
+        incident: &[C64],
+        source_outgoing: Option<&[C64]>,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Vec<C64>, HybridError> {
         poll(cancelled)?;
         if incident.len() != self.external.len() || incident.iter().any(|&z| !finite(z)) {
             return Err(HybridError::InvalidInput(
@@ -527,14 +542,21 @@ impl PreparedHybrid<'_, '_> {
         }
         let n = self.reference.len();
         let ni = self.internal.len();
+        if source_outgoing
+            .is_some_and(|source| source.len() != n || source.iter().any(|&z| !finite(z)))
+        {
+            return Err(HybridError::InvalidInput(
+                "original outgoing source coordinates",
+            ));
+        }
         let b = self
             .internal
             .iter()
             .map(|&row| {
-                self.external
-                    .iter()
-                    .zip(incident)
-                    .fold(C64::ZERO, |sum, (&col, &a)| sum + self.s[row * n + col] * a)
+                self.external.iter().zip(incident).fold(
+                    source_outgoing.map_or(C64::ZERO, |source| source[row]),
+                    |sum, (&col, &a)| sum + self.s[row * n + col] * a,
+                )
             })
             .collect::<Vec<_>>();
         let mut a = (0..ni)
@@ -591,6 +613,54 @@ impl PreparedHybrid<'_, '_> {
         let all = self.complete_incident(incident, cancelled)?;
         let h = self.h.response(&all[..self.nh], cancelled)?;
         let l = self.l.response(&all[self.nh..], &mut || cancelled())?;
+        self.finish_response(h, l, cancelled)
+    }
+
+    /// Propagate original internal sources through both coupled regions.
+    ///
+    /// Structural forces and heat sources belong to the resolved LNS owner.
+    /// Complete external incident waves, mechanical forces and independently
+    /// phased heat amplitudes are simultaneous drives of one reciprocal system.
+    /// A single combined source solve supplies the affine outgoing offset;
+    /// the existing interface factor then closes its return waves. The final
+    /// original fields and source/loss work are recovered once per region.
+    /// No per-source field solve, added factorization or impedance inverse is
+    /// needed. The original modal-interface and boundary-layer limitations apply.
+    pub fn response_with_sources(
+        &self,
+        incident: &[C64],
+        wall_forces: &[C64],
+        heat_sources: &[(&ThermoviscousHeatSource<'_, '_>, C64)],
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<HybridResponse, HybridError> {
+        poll(cancelled)?;
+        if incident.len() != self.external.len() || incident.iter().any(|&z| !finite(z)) {
+            return Err(HybridError::InvalidInput(
+                "external incident wave coordinates",
+            ));
+        }
+        let mut source = vec![C64::ZERO; self.nh];
+        source.extend(
+            self.l
+                .source_outgoing(wall_forces, heat_sources, &mut || cancelled())?,
+        );
+        let all = self.complete_incident_with_sources(incident, Some(&source), cancelled)?;
+        let h = self.h.response(&all[..self.nh], cancelled)?;
+        let l = self.l.response_with_sources(
+            &all[self.nh..],
+            wall_forces,
+            heat_sources,
+            &mut || cancelled(),
+        )?;
+        self.finish_response(h, l, cancelled)
+    }
+
+    fn finish_response(
+        &self,
+        h: InteriorPortResponse,
+        l: ThermoviscousField,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<HybridResponse, HybridError> {
         let pressure = h
             .pressure_pa
             .iter()
@@ -625,6 +695,7 @@ impl PreparedHybrid<'_, '_> {
         let m = self.interface.helmholtz_modes.len();
         let power = HybridPower {
             external_input_w: work(&self.external),
+            source_input_w: l.moving_wall.external_input_w + l.power.heat_source_work_w,
             helmholtz_interface_w: work(&self.internal[..m]),
             thermoviscous_interface_w: work(&self.internal[m..]),
             helmholtz_wall: self
@@ -656,6 +727,7 @@ impl PreparedHybrid<'_, '_> {
             .chain(&interface_flow_residual_m3_s)
             .any(|&z| !finite(z))
             || !power.external_input_w.is_finite()
+            || !power.source_input_w.is_finite()
             || !power.interface_residual_w().is_finite()
         {
             return Err(HybridError::NonFinite);
