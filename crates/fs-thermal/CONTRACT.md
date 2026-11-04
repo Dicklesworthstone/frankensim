@@ -120,6 +120,34 @@ elapsed intervals can crystallize even with zero heat. This uniform quasistatic
 parcel supplies neither a moving mesh nor piston inertia, pressure evolution,
 spatial continuity or fluid momentum.
 
+### Implicit heat contact between finite kinetic parcels
+
+`pressure::exchange::exchange_heat` solves one shared signed heat transfer
+between two original isobaric parcels. Each nonlinear candidate advances both
+accepted inputs with opposite heats through their original adaptive phase
+owners. The backward-Euler contact equation uses both proposed endpoint
+temperatures; recalescence can reverse the initial thermal ordering. A finite
+donor cools as a receiver heats or melts. Zero conductance still advances both
+adiabatic histories, without creating a heat source.
+
+The caller admits a finite total conductance and a heat bracket that covers a
+root within both original domains. A bounded safeguarded scalar solve does not
+infer a conductivity mixture rule, contact area, moving geometry or uniqueness
+of the nonlinear root. Source failures propagate, comparison states never
+replace accepted inputs, and final cancellation publishes neither body. The
+contact residual is distinct from the caloric and combined noncancelling energy
+budgets. Opposite enthalpy transfers cancel while each original pressure load
+retains its own volume work; latent heat and pressure work are not additional
+enthalpy sources.
+
+Six native leaf regressions cover stiff unlike-capacity equilibration,
+recalescence-driven reversal, latent remelting and pressure work, insulation,
+represented time, source/domain/work refusals and atomic cancellation. Two
+actual-material integration cases use original caloric, density and entropy
+owners for contact-driven melting and crystallization; they require the full
+native material graph to execute. The single endpoint step has first-order
+thermal time error, separate from its inner phase-history estimates.
+
 ## Finite-rate crystallization and latent thermal feedback
 
 `crystallization::CrystallizationLaw` retains an independent Nakamura exposure

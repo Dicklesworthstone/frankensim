@@ -17,6 +17,10 @@
 #[path = "pressure/parcel.rs"]
 pub mod parcel;
 
+/// Implicit conservative heat exchange between two original phase inventories.
+#[path = "pressure/exchange.rs"]
+pub mod exchange;
+
 use super::{
     AdaptiveCrystallizationStep, CrystallizationAdaptivity, CrystallizationError,
     CrystallizationLaw, CrystallizationSolve, CrystallizationState, EquivalentAgeRemelting,
