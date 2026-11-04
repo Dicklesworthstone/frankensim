@@ -311,10 +311,73 @@ impl FlowField {
     ) -> Result<PreparedMaterialViscosity, ChtError> {
         poll(gate)?;
         let n = domain.cell_count();
+        if viscosity.sources.len() != n {
+            return Err(refuse("viscosity needs bounded original inventory"));
+        }
+        self.prepare_material_viscosity_with_source(
+            domain,
+            faces,
+            pressure_mouth_axis,
+            mass_kg,
+            momentum_kg_m_s,
+            viscosity.boundaries,
+            reconstruction_controls,
+            duration_s,
+            viscosity_controls,
+            gate,
+            |_| {
+                let mut molecular = vec![0.0; n];
+                for c in 0..n {
+                    poll_every(gate, c)?;
+                    match (domain.is_fluid(c), viscosity.sources[c]) {
+                        (true, Some(source)) => {
+                            let state = source.transport_state().map_err(|error| {
+                                ChtError::InvalidInput {
+                                    field: "flow.viscosity_source",
+                                    reason: format!("cell {c}: {error}"),
+                                }
+                            })?;
+                            admit_source(c, &state)?;
+                            molecular[c] = state.dynamic_viscosity_pa_s();
+                        }
+                        (false, None) => {}
+                        _ => {
+                            return Err(refuse(
+                                "viscosity sources must cover exactly the mobile cells",
+                            ));
+                        }
+                    }
+                }
+                Ok(molecular)
+            },
+        )
+    }
+
+    /// Resolve one molecular coefficient vector from the SAME original M/P
+    /// reconstruction that receives the native viscosity kick. A source owner
+    /// may observe physical shear on this field before evaluating its material
+    /// state, without another reconstruction or momentum solve. Fixed-solid
+    /// coefficient slots are placeholders and receive no fluid dissipation.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub(in crate::conjugate::flow) fn prepare_material_viscosity_with_source(
+        &self,
+        domain: &VoxelDomain,
+        faces: [FlowFace; 6],
+        pressure_mouth_axis: Option<usize>,
+        mass_kg: &[f64],
+        momentum_kg_m_s: &[[f64; 3]],
+        boundaries: [FvBoundary; 6],
+        reconstruction_controls: DensityMomentumReconstructionControls,
+        duration_s: f64,
+        viscosity_controls: MaterialViscosityControls,
+        gate: &CancelGate,
+        molecular_at_field: impl FnOnce(&FlowField) -> Result<Vec<f64>, ChtError>,
+    ) -> Result<PreparedMaterialViscosity, ChtError> {
+        poll(gate)?;
+        let n = domain.cell_count();
         if n > viscosity_controls.max_cells
             || n > reconstruction_controls.max_cells
             || mass_kg.len() != n
-            || viscosity.sources.len() != n
         {
             return Err(refuse("viscosity needs bounded original inventory"));
         }
@@ -327,29 +390,16 @@ impl FlowField {
             reconstruction_controls,
             gate,
         )?;
-        let mut molecular = vec![0.0; n];
+        let mut molecular = molecular_at_field(&reconstructed.field)?;
+        if molecular.len() != n {
+            return Err(refuse("molecular sources must match the original grid"));
+        }
         let mut first = None;
-        for c in 0..n {
+        for (c, &mu) in molecular.iter().enumerate() {
             poll_every(gate, c)?;
-            match (domain.is_fluid(c), viscosity.sources[c]) {
-                (true, Some(source)) => {
-                    let state =
-                        source
-                            .transport_state()
-                            .map_err(|error| ChtError::InvalidInput {
-                                field: "flow.viscosity_source",
-                                reason: format!("cell {c}: {error}"),
-                            })?;
-                    admit_source(c, &state)?;
-                    molecular[c] = state.dynamic_viscosity_pa_s();
-                    first.get_or_insert(molecular[c]);
-                }
-                (false, None) => {}
-                _ => {
-                    return Err(refuse(
-                        "viscosity sources must cover exactly the mobile cells",
-                    ));
-                }
+            if domain.is_fluid(c) {
+                finite_positive("flow.viscosity_source_mu", mu)?;
+                first.get_or_insert(mu);
             }
         }
         let reference = first.ok_or_else(|| refuse("viscosity requires mobile material"))?;
@@ -400,7 +450,7 @@ impl FlowField {
                 momentum_kg_m_s,
                 viscosity_pa_s: &molecular,
                 face_mass_kg: face_mass,
-                boundaries: viscosity.boundaries,
+                boundaries,
                 pressure_mouth_axis,
                 duration_s,
             },

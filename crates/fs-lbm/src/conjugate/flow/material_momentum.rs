@@ -12,6 +12,7 @@ use super::{
 };
 
 mod viscous;
+pub(in crate::conjugate::flow) use viscous::PreparedMaterialViscosity;
 pub use viscous::{
     MaterialMomentumViscosityInput, MaterialViscosityControls, MaterialViscosityReport,
     ViscousMaterialMomentumAdvance,

@@ -689,7 +689,6 @@ impl Solver<'_> {
     /// quadrature, including native half-cell walls and graded-cell edges.
     /// The observation must use a unit molecular coefficient, so its strain
     /// measure contains no viscosity, Darcy loss, pressure, forcing or LES.
-    #[cfg(feature = "enthalpy-coupling")]
     pub(in crate::conjugate) fn molecular_shear_rates(
         &self,
         gate: &CancelGate,

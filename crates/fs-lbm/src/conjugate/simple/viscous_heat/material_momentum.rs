@@ -80,6 +80,74 @@ fn refuse(reason: &str) -> ChtError {
     }
 }
 
+fn admit_split_boundaries(
+    boundaries: [FvBoundary; 6],
+    pressure_mouth_axis: Option<usize>,
+) -> Result<(), ChtError> {
+    if pressure_mouth_axis.is_some_and(|a| a >= 3)
+        || boundaries.iter().enumerate().any(|(f, b)| {
+            if pressure_mouth_axis == Some(f / 2) {
+                !matches!(b, FvBoundary::Outlet)
+            } else {
+                !matches!(b, FvBoundary::Wall { .. } | FvBoundary::Symmetry)
+            }
+        })
+    {
+        return Err(refuse(
+            "viscosity needs closed walls/symmetry or one opposed zero-pressure traction pair",
+        ));
+    }
+    Ok(())
+}
+
+/// Observe the physical shear invariant on an original reconstructed field.
+/// The unit molecular operator retains the existing symmetric-stress cell,
+/// shear-edge, half-cell wall and reservoir-mouth quadratures. No momentum
+/// solve, inertia, material coefficient or thermal source enters this sample.
+pub(in crate::conjugate) fn physical_shear_rates(
+    domain: &VoxelDomain,
+    field: &FlowField,
+    boundaries: [FvBoundary; 6],
+    pressure_mouth_axis: Option<usize>,
+    max_cells: usize,
+    gate: &CancelGate,
+) -> Result<Vec<f64>, ChtError> {
+    poll(gate)?;
+    if domain.cell_count() > max_cells || field.dims() != domain.dims() {
+        return Err(refuse("physical shear needs the bounded original grid"));
+    }
+    admit_split_boundaries(boundaries, pressure_mouth_axis)?;
+    let config = SimpleConfig::new(boundaries);
+    admit_molecular_boundaries(domain, &config)?;
+    poll(gate)?;
+    let mut sampler = Solver::with_molecular_coefficients(domain, 1.0, 1.0, &config);
+    sampler.molecular_viscosity = vec![1.0; domain.cell_count()];
+    sampler.pressure_work_axis = pressure_mouth_axis;
+    for (axis, fluxes) in field.face_arrays().into_iter().enumerate() {
+        if fluxes.len() != sampler.vel[axis].len() {
+            return Err(refuse(
+                "physical shear face arrays differ from the original grid",
+            ));
+        }
+        for (slot, &flux) in fluxes.iter().enumerate() {
+            if slot % 256 == 0 {
+                poll(gate)?;
+            }
+            let velocity = flux / sampler.comp_face_area(axis, slot);
+            finite("flow.rheology_physical_velocity", velocity)?;
+            if let Kind::Fixed(required) = sampler.comps[axis].kind[slot] {
+                if velocity != required {
+                    return Err(refuse(
+                        "physical shear cannot change a held normal velocity",
+                    ));
+                }
+            }
+            sampler.vel[axis][slot] = velocity;
+        }
+    }
+    sampler.molecular_shear_rates(gate)
+}
+
 fn budget(value: Dd, maximum: f64, reason: &str) -> Result<f64, ChtError> {
     let value = value.to_f64();
     finite("flow.material_viscosity_readback", value)?;
@@ -119,19 +187,7 @@ pub(in crate::conjugate) fn kick(
     {
         return Err(refuse("viscosity requires bounded original cells"));
     }
-    if input.pressure_mouth_axis.is_some_and(|a| a >= 3)
-        || input.boundaries.iter().enumerate().any(|(f, b)| {
-            if input.pressure_mouth_axis == Some(f / 2) {
-                !matches!(b, FvBoundary::Outlet)
-            } else {
-                !matches!(b, FvBoundary::Wall { .. } | FvBoundary::Symmetry)
-            }
-        })
-    {
-        return Err(refuse(
-            "viscosity needs closed walls/symmetry or one opposed zero-pressure traction pair",
-        ));
-    }
+    admit_split_boundaries(input.boundaries, input.pressure_mouth_axis)?;
     finite_positive("flow.viscosity_duration", input.duration_s)?;
     finite_positive("flow.viscosity_tolerance", controls.relative_tolerance)?;
     for bound in [

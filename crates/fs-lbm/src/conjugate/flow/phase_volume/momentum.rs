@@ -1,7 +1,7 @@
 //! Original-chart volume change, pressure impulse and conservative cell momentum.
 
 mod viscous;
-pub use viscous::ViscousThermalVolumeMomentumStep;
+pub use viscous::{ResolvedViscousThermalVolumeMomentumStep, ViscousThermalVolumeMomentumStep};
 
 use fs_material::phase::EquilibriumEnthalpyPhaseCurve;
 

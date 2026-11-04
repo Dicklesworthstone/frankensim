@@ -9917,6 +9917,38 @@ Analytic regression sources cover sealed expansion/contraction on all axes,
 continued evolution from actual endpoint momentum, reservoir gauge invariance
 and atomic late refusal. Compiler checks do not constitute numerical execution.
 
+## Native shear and source rheology on evolving liquid density
+
+`FlowField::advance_piecewise_thermal_volume_momentum_with_source_rheology`
+and its pressure-profile variant observe the physical cell RMS `sqrt(2 D:D)`
+on the same original M/P reconstruction used by molecular viscosity. The
+existing unit-molecular-coefficient stress quadrature retains native graded
+edges, solid obstacles, walls and reservoir mouths. The observation solves
+no momentum equation and adds no independent strain discretization.
+
+The resolver receives each original phase state and physical rate once.
+The standard material binding is
+`resolve_phase_transport_state_with_shear_for_volume_change`; the caller's
+resolver must consume those coordinates and retain its fixed source context.
+Returned phase state and source density must match the original chart exactly.
+Kinematic viscosity therefore converts with the actual admitted density.
+The result retains original rates and resolved source snapshots alongside the
+existing viscous thermal-volume momentum endpoint.
+
+This entry admits fully liquid mobile material with zero declared Darcy
+resistance. Original cells, declared incoming material, the actual molecular-
+heated intermediate states and transported endpoints must remain liquid.
+A phase needing solid or mushy support refuses atomically. Sensible expansion,
+the original volume constraint, mass/momentum routes, shared heat-error gate
+and separate numerical/mechanical accounts retain their existing owners.
+Each mobile cell is queried once and the native viscosity step runs once;
+thermal-volume trials repeat neither. Source viscosity is frozen at the
+original rate, so time refinement is required for nonlinear rheology.
+
+The focused native rheology regressions use a manufactured source-backed
+melting chart with changing sensible density and kinematic shear viscosity,
+constant-source equivalence, phase/source refusals, cancellation and retry.
+
 ## Molecular viscosity driving thermal density and phase volume
 
 `FlowField::advance_piecewise_thermal_volume_momentum_with_viscosity` and its

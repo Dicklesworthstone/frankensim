@@ -1,6 +1,10 @@
 //! Original molecular stress heats the same chart that owns material volume.
 
+mod rheology;
+pub use rheology::ResolvedViscousThermalVolumeMomentumStep;
+
 use super::*;
+use crate::conjugate::flow::material_momentum::PreparedMaterialViscosity;
 use crate::conjugate::flow::{
     MaterialMomentumViscosityInput, MaterialViscosityControls, MaterialViscosityReport,
 };
@@ -21,6 +25,35 @@ pub struct ViscousThermalVolumeMomentumStep {
     /// Assembly plus the accepted original caloric/transport defect, checked
     /// against the same native thermal-volume enthalpy budget.
     pub absolute_enthalpy_defect_j: f64,
+}
+
+fn admit_viscous_thermal_input(
+    domain: &VoxelDomain,
+    input: ThermalVolumeMomentumInput<'_>,
+    controls: ThermalVolumeMomentumControls,
+    gate: &CancelGate,
+) -> Result<f64, ChtError> {
+    poll(gate)?;
+    let n = domain.cell_count();
+    let transport = controls.volume.thermal.volume.transport;
+    if n > transport.max_cells
+        || n > controls.mechanics.forcing.max_cells
+        || controls.mechanics.projection != transport.projection
+        || input.volume.mass_kg.len() != n
+        || input.volume.phase_states.len() != n
+        || input.volume.net_enthalpy_increment_j.len() != n
+        || input.momentum_kg_m_s.len() != n
+        || input.force_density_n_m3.len() != n
+    {
+        return Err(refuse(
+            "viscous thermal evolution needs bounded original inventory and identical clocks",
+        ));
+    }
+    let heat_budget = transport.maximum_enthalpy_defect_j;
+    if !heat_budget.is_finite() || heat_budget < 0.0 {
+        return Err(refuse("invalid combined molecular thermal enthalpy budget"));
+    }
+    Ok(heat_budget)
 }
 
 impl FlowField {
@@ -135,26 +168,8 @@ impl FlowField {
         viscosity_controls: MaterialViscosityControls,
         gate: &CancelGate,
     ) -> Result<ViscousThermalVolumeMomentumStep, ChtError> {
-        poll(gate)?;
-        let n = domain.cell_count();
+        let heat_budget = admit_viscous_thermal_input(domain, input, controls, gate)?;
         let transport = controls.volume.thermal.volume.transport;
-        if n > transport.max_cells
-            || n > controls.mechanics.forcing.max_cells
-            || controls.mechanics.projection != transport.projection
-            || input.volume.mass_kg.len() != n
-            || input.volume.phase_states.len() != n
-            || input.volume.net_enthalpy_increment_j.len() != n
-            || input.momentum_kg_m_s.len() != n
-            || input.force_density_n_m3.len() != n
-        {
-            return Err(refuse(
-                "viscous thermal evolution needs bounded original inventory and identical clocks",
-            ));
-        }
-        let heat_budget = transport.maximum_enthalpy_defect_j;
-        if !heat_budget.is_finite() || heat_budget < 0.0 {
-            return Err(refuse("invalid combined molecular thermal enthalpy budget"));
-        }
         let viscous = self.prepare_material_viscosity(
             domain, faces, pressure_mouth_axis, input.volume.mass_kg,
             input.momentum_kg_m_s, viscosity, controls.mechanics.reconstruction,
@@ -171,6 +186,37 @@ impl FlowField {
                 Ok(())
             },
         )?;
+        self.finish_viscous_thermal_volume(
+            domain,
+            faces,
+            profile,
+            curve,
+            input,
+            controls,
+            viscosity_controls,
+            viscous,
+            heat_budget,
+            gate,
+        )
+    }
+
+    /// Consume the prepared impulse and physical heat without reconstructing
+    /// or sampling its original molecular source a second time.
+    #[allow(clippy::too_many_arguments)]
+    fn finish_viscous_thermal_volume(
+        &self,
+        domain: &VoxelDomain,
+        faces: [FlowFace; 6],
+        profile: Option<StaggeredBoundaryPressure<'_>>,
+        curve: &EquilibriumEnthalpyPhaseCurve,
+        input: ThermalVolumeMomentumInput<'_>,
+        controls: ThermalVolumeMomentumControls,
+        viscosity_controls: MaterialViscosityControls,
+        viscous: PreparedMaterialViscosity,
+        heat_budget: f64,
+        gate: &CancelGate,
+    ) -> Result<ViscousThermalVolumeMomentumStep, ChtError> {
+        let n = domain.cell_count();
         let mut combined = Vec::with_capacity(n);
         let mut assembly = Dd::ZERO;
         for cell in 0..n {

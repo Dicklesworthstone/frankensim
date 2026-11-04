@@ -47,6 +47,7 @@ pub use phase_volume::{
     ConductiveThermalVolumeMomentumControls, ConductiveThermalVolumeMomentumStep,
     ConductiveThermalVolumeReport, ConductiveThermalVolumeStep,
     ConductiveViscousThermalVolumeMomentumStep, PiecewiseThermalVolumeControls,
+    ResolvedViscousThermalVolumeMomentumStep,
     ThermalVolumeControls, ThermalVolumeMomentumControls, ThermalVolumeMomentumInput,
     ThermalVolumeMomentumStep, ThermalVolumeStep, ViscousThermalVolumeMomentumStep,
 };
