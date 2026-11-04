@@ -75,11 +75,7 @@ fn g1_sealed_heat_release_has_absolute_passive_caloric_work() {
     // A signed, unnormalized shape must retain both its sign and magnitude.
     let shape_integral = -2.5;
     let source = model
-        .volume_heat_source(
-            4,
-            &mut |_, _| Ok(shape_integral / volume),
-            &mut || false,
-        )
+        .volume_heat_source(4, &mut |_, _| Ok(shape_integral / volume), &mut || false)
         .unwrap();
     assert!((source.integrated_shape() - shape_integral).abs() < 5e-14);
     let drive = C64::new(0.001, 0.0003);
@@ -312,6 +308,152 @@ fn g4_heat_source_requires_its_original_owner_and_finite_cancel_correct_data() {
     ));
     assert!(matches!(
         prepared.response_with_heat_sources(&[], &[], &[(&source, C64::ONE)], &mut || true),
+        Err(ThermoviscousError::Cancelled)
+    ));
+}
+
+fn same_resolved_fields(actual: &ThermoviscousField, expected: &ThermoviscousField) {
+    for (a, b) in [
+        (&actual.pressure_pa, &expected.pressure_pa),
+        (&actual.temperature_k, &expected.temperature_k),
+        (&actual.inward_flow_m3_s, &expected.inward_flow_m3_s),
+    ] {
+        let scale = b.iter().map(|z| z.abs()).fold(1e-40, f64::max);
+        assert!(a.iter().zip(b).all(|(&x, &y)| (x - y).abs() < 2e-8 * scale));
+    }
+}
+
+#[test]
+fn g2_loaded_heat_source_matches_independent_pressure_flow_closure() {
+    let size = [0.004, 0.001, 0.0012];
+    let volume = size.iter().product::<f64>();
+    let (mesh, positions) = box_mesh([1, 2, 2], size);
+    let boundary = boundaries(&mesh, &positions, size, true);
+    let model =
+        ThermoviscousFe::new(&mesh, &positions, air(), &boundary, limits(), &mut || false).unwrap();
+    let source = model
+        .volume_heat_source(
+            4,
+            &mut |_, point| Ok(2.0 * point[0] / size[0] / volume),
+            &mut || false,
+        )
+        .unwrap();
+    let sources = [(&source, C64::new(0.0003, -0.0002))];
+    let cp = C64::new(970.0, -45.0);
+    let reference: [f64; 2] = [1.3e8, 0.7e8];
+    let incident = [C64::new(0.0001, 0.0002), C64::new(-0.0002, 0.00005)];
+    let unloaded = model
+        .prepare_with_heat_capacity(1700.0, cp, &mut || false)
+        .unwrap();
+    let source_only = unloaded
+        .response_with_heat_sources(&[C64::ZERO; 2], &[], &sources, &mut || false)
+        .unwrap();
+    let y = model
+        .admittance_with_heat_capacity(1700.0, cp, &mut || false)
+        .unwrap();
+    // Independent physical-port closure: Q=Y P+Q_source and
+    // P+R Q=2 sqrt(R) a. No scattering matrix enters this oracle.
+    let mut matrix = vec![C64::ZERO; 4];
+    let mut pressure = vec![C64::ZERO; 2];
+    for i in 0..2 {
+        pressure[i] = incident[i].scale(2.0 * reference[i].sqrt())
+            - source_only.inward_flow_m3_s[i].scale(reference[i]);
+        for j in 0..2 {
+            matrix[2 * i + j] =
+                y[2 * i + j].scale(reference[i]) + C64::from_re(if i == j { 1.0 } else { 0.0 });
+        }
+    }
+    lu_complex_with_cancel(&matrix, 2, || false)
+        .unwrap()
+        .solve_with_cancel(&mut pressure, || false)
+        .unwrap();
+    let expected = unloaded
+        .response_with_heat_sources(&pressure, &[], &sources, &mut || false)
+        .unwrap();
+    let loaded = model
+        .prepare_scattering(1700.0, cp, &reference, &mut || false)
+        .unwrap();
+    let actual = loaded
+        .response_with_sources(&incident, &[], &sources, &mut || false)
+        .unwrap();
+    same_resolved_fields(&actual, &expected);
+    assert_work(&actual);
+    let offset = loaded
+        .source_outgoing(&[], &sources, &mut || false)
+        .unwrap();
+    let scattering = loaded.scattering(&mut || false).unwrap();
+    let mut boundary_work = 0.0;
+    for i in 0..2 {
+        let outgoing = (actual.pressure_drive_pa[i]
+            - actual.inward_flow_m3_s[i].scale(reference[i]))
+        .scale(0.5 / reference[i].sqrt());
+        let expected = (0..2).fold(offset[i], |sum, j| {
+            sum + scattering[2 * i + j] * incident[j]
+        });
+        assert!((outgoing - expected).abs() < 2e-9 * (outgoing.abs() + expected.abs()));
+        boundary_work += 0.5 * (incident[i].norm_sq() - outgoing.norm_sq());
+    }
+    let scale = actual.power.dissipated_w().abs()
+        + actual.power.heat_source_work_w.abs()
+        + boundary_work.abs();
+    assert!(
+        (actual.power.input_w - boundary_work - actual.power.heat_source_work_w).abs()
+            < 2e-9 * scale
+    );
+    let emitted = loaded
+        .response_with_sources(&[C64::ZERO; 2], &[], &sources, &mut || false)
+        .unwrap();
+    assert_work(&emitted);
+    assert!(emitted.power.heat_source_work_w > emitted.power.dissipated_w());
+    assert!(offset.iter().any(|z| z.abs() > 0.0));
+}
+
+#[test]
+fn g4_loaded_sources_preserve_original_drives_owner_and_cancellation() {
+    let size = [0.004, 0.001, 0.0012];
+    let (mesh, positions) = box_mesh([1, 2, 2], size);
+    let boundary = boundaries(&mesh, &positions, size, true);
+    let make = || {
+        ThermoviscousFe::new(&mesh, &positions, air(), &boundary, limits(), &mut || false).unwrap()
+    };
+    let model = make();
+    let other = make();
+    let foreign = other
+        .volume_heat_source(4, &mut |_, _| Ok(1.0), &mut || false)
+        .unwrap();
+    let prepared = model
+        .prepare_scattering(
+            1700.0,
+            C64::from_re(air().cp_j_kg_k),
+            &[1e8; 2],
+            &mut || false,
+        )
+        .unwrap();
+    let incident = [C64::new(0.0001, 0.0002), C64::new(-0.0002, 0.00005)];
+    let original = prepared.response(&incident, &mut || false).unwrap();
+    let zero = prepared
+        .response_with_sources(&incident, &[], &[], &mut || false)
+        .unwrap();
+    assert_eq!(original.pressure_pa, zero.pressure_pa);
+    assert_eq!(original.temperature_k, zero.temperature_k);
+    assert_eq!(zero.power.heat_source_work_w, 0.0);
+    assert!(
+        prepared
+            .response_with_sources(&incident, &[], &[(&foreign, C64::ONE)], &mut || false)
+            .is_err()
+    );
+    assert!(
+        prepared
+            .response_with_sources(&incident[..1], &[], &[], &mut || false)
+            .is_err()
+    );
+    assert!(
+        prepared
+            .response_with_sources(&incident, &[C64::ONE], &[], &mut || false)
+            .is_err()
+    );
+    assert!(matches!(
+        prepared.response_with_sources(&incident, &[], &[], &mut || true),
         Err(ThermoviscousError::Cancelled)
     ));
 }

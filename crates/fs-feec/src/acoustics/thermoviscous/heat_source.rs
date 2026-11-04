@@ -18,8 +18,8 @@ use super::*;
 /// a signed heating/cooling distribution is performed. The retained model
 /// identity prevents reusing a source on a different mesh or thermal trace.
 pub struct ThermoviscousHeatSource<'a, 'c> {
-    model: &'a ThermoviscousFe<'c>,
-    load: Vec<f64>,
+    pub(super) model: &'a ThermoviscousFe<'c>,
+    pub(super) load: Vec<f64>,
     integral: f64,
 }
 
@@ -94,6 +94,68 @@ impl<'c> ThermoviscousFe<'c> {
     }
 }
 
+// The same physical RHS and source-work pairing serve traction and loaded
+// scattering solves. Port loads have no thermal entries.
+fn add_sources(
+    model: &ThermoviscousFe<'_>,
+    rhs: &mut [C64],
+    wall_forces: &[C64],
+    heat_sources: &[(&ThermoviscousHeatSource<'_, '_>, C64)],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), ThermoviscousError> {
+    poll(cancelled)?;
+    let wall_count = model.pressure_start - 3 * model.velocity_count;
+    if wall_forces.len() != wall_count
+        || wall_forces.iter().any(|z| !finite(*z))
+        || heat_sources
+            .iter()
+            .any(|(source, amplitude)| !std::ptr::eq(source.model, model) || !finite(*amplitude))
+    {
+        return Err(ThermoviscousError::InvalidInput(
+            "complete finite source drives and original heat-source owner required",
+        ));
+    }
+    for (i, &force) in wall_forces.iter().enumerate() {
+        let row = 3 * model.velocity_count + i;
+        rhs[row] = rhs[row] + force;
+    }
+    for &(source, amplitude) in heat_sources {
+        poll(cancelled)?;
+        for (entry, &coefficient) in rhs[model.temperature_start..].iter_mut().zip(&source.load) {
+            *entry = *entry + amplitude.scale(coefficient);
+        }
+    }
+    if rhs.iter().any(|&z| !finite(z)) {
+        return Err(ThermoviscousError::NonFinite);
+    }
+    Ok(())
+}
+
+fn field_with_source_work(
+    prepared: &PreparedThermoviscous<'_, '_>,
+    drive: &[C64],
+    wall_forces: &[C64],
+    x: &[C64],
+    rhs: &[C64],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<ThermoviscousField, ThermoviscousError> {
+    let mut field = prepared.field(drive, wall_forces, x, cancelled)?;
+    let start = prepared.model.temperature_start;
+    let mut work = Dd::from_f64(0.0);
+    for (&theta, &heat) in x[start..].iter().zip(&rhs[start..]) {
+        work = work
+            + Dd::from_f64(theta.re) * Dd::from_f64(heat.re)
+            + Dd::from_f64(theta.im) * Dd::from_f64(heat.im);
+    }
+    field.power.heat_source_work_w = 0.5 * work.to_f64();
+    field.power.input_w += field.power.heat_source_work_w;
+    if !field.power.heat_source_work_w.is_finite() || !field.power.input_w.is_finite() {
+        return Err(ThermoviscousError::NonFinite);
+    }
+    poll(cancelled)?;
+    Ok(field)
+}
+
 impl PreparedThermoviscous<'_, '_> {
     /// Simultaneous traction, structural-force and distributed heat excitation.
     ///
@@ -111,17 +173,8 @@ impl PreparedThermoviscous<'_, '_> {
     ) -> Result<ThermoviscousField, ThermoviscousError> {
         poll(cancelled)?;
         let model = self.model;
-        let wall_count = model.pressure_start - 3 * model.velocity_count;
-        if drive.len() != model.loads.len()
-            || wall_forces.len() != wall_count
-            || drive.iter().chain(wall_forces).any(|z| !finite(*z))
-            || heat_sources.iter().any(|(source, amplitude)| {
-                !std::ptr::eq(source.model, model) || !finite(*amplitude)
-            })
-        {
-            return Err(ThermoviscousError::InvalidInput(
-                "complete finite source drives and original heat-source owner required",
-            ));
+        if drive.len() != model.loads.len() || drive.iter().any(|z| !finite(*z)) {
+            return Err(ThermoviscousError::InvalidInput("traction drive"));
         }
         let mut rhs = vec![C64::ZERO; model.n];
         for (load, &pressure) in model.loads.iter().zip(drive) {
@@ -129,17 +182,7 @@ impl PreparedThermoviscous<'_, '_> {
                 *entry = *entry + pressure.scale(coefficient);
             }
         }
-        for (i, &force) in wall_forces.iter().enumerate() {
-            let row = 3 * model.velocity_count + i;
-            rhs[row] = rhs[row] + force;
-        }
-        for &(source, amplitude) in heat_sources {
-            poll(cancelled)?;
-            for (entry, &coefficient) in rhs[model.temperature_start..].iter_mut().zip(&source.load)
-            {
-                *entry = *entry + amplitude.scale(coefficient);
-            }
-        }
+        add_sources(model, &mut rhs, wall_forces, heat_sources, cancelled)?;
         let x = model.solve_system(
             &self.factor,
             &self.rows,
@@ -151,24 +194,98 @@ impl PreparedThermoviscous<'_, '_> {
             &rhs,
             cancelled,
         )?;
-        let mut field = self.field(drive, wall_forces, &x, cancelled)?;
-        // Only heat loads occupy temperature rows. Keep the original assembled
-        // source integral, not a loss remainder, as the acoustic work input.
-        let mut heat_work = Dd::from_f64(0.0);
-        for (&theta, &heat) in x[model.temperature_start..]
-            .iter()
-            .zip(&rhs[model.temperature_start..])
-        {
-            heat_work = heat_work
-                + Dd::from_f64(theta.re) * Dd::from_f64(heat.re)
-                + Dd::from_f64(theta.im) * Dd::from_f64(heat.im);
+        field_with_source_work(self, drive, wall_forces, &x, &rhs, cancelled)
+    }
+}
+
+impl PreparedThermoviscousScattering<'_, '_> {
+    fn solve_with_sources(
+        &self,
+        incident: &[C64],
+        wall_forces: &[C64],
+        heat_sources: &[(&ThermoviscousHeatSource<'_, '_>, C64)],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(Vec<C64>, Vec<C64>), ThermoviscousError> {
+        poll(cancelled)?;
+        if incident.len() != self.reference.len() || incident.iter().any(|&a| !finite(a)) {
+            return Err(ThermoviscousError::InvalidInput("incident power waves"));
         }
-        field.power.heat_source_work_w = 0.5 * heat_work.to_f64();
-        field.power.input_w += field.power.heat_source_work_w;
-        if !field.power.heat_source_work_w.is_finite() || !field.power.input_w.is_finite() {
+        let prepared = &self.inner;
+        let model = prepared.model;
+        let mut rhs = vec![C64::ZERO; model.n];
+        for (port, &a) in incident.iter().enumerate() {
+            poll(cancelled)?;
+            let pressure = a.scale(2.0 * self.roots[port]);
+            for (entry, &load) in rhs.iter_mut().zip(&model.loads[port]) {
+                *entry = *entry + pressure.scale(load);
+            }
+        }
+        add_sources(model, &mut rhs, wall_forces, heat_sources, cancelled)?;
+        let x = model.solve_system(
+            &prepared.factor,
+            &prepared.rows,
+            &prepared.columns,
+            std::f64::consts::TAU * prepared.frequency_hz,
+            prepared.cp,
+            &prepared.wall_admittances,
+            Some(&self.reference),
+            &rhs,
+            cancelled,
+        )?;
+        Ok((x, rhs))
+    }
+
+    /// Resolve incident waves together with original mechanical and heat sources.
+    ///
+    /// Structural forces use the complete retained wall basis; heat amplitudes
+    /// are in W. All sources share the original loaded LU. Actual port traction
+    /// is P=2 sqrt(R) a-R Q, so work includes energy emitted through a port even
+    /// when its incident wave is zero. Sources leave the passive scattering
+    /// matrix unchanged and contribute an affine outgoing-wave offset.
+    pub fn response_with_sources(
+        &self,
+        incident: &[C64],
+        wall_forces: &[C64],
+        heat_sources: &[(&ThermoviscousHeatSource<'_, '_>, C64)],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ThermoviscousField, ThermoviscousError> {
+        let (x, rhs) = self.solve_with_sources(incident, wall_forces, heat_sources, cancelled)?;
+        let drive = incident
+            .iter()
+            .enumerate()
+            .map(|(i, &a)| {
+                a.scale(2.0 * self.roots[i]) - self.inner.model.flow(&x, i).scale(self.reference[i])
+            })
+            .collect::<Vec<_>>();
+        if drive.iter().any(|&p| !finite(p)) {
+            return Err(ThermoviscousError::NonFinite);
+        }
+        field_with_source_work(&self.inner, &drive, wall_forces, &x, &rhs, cancelled)
+    }
+
+    /// Outgoing power waves produced by internal sources at zero incident drive.
+    ///
+    /// This is the affine term in b=S a+b_source, using these same positive
+    /// real reference resistances. It reuses the loaded LU without field-loss
+    /// quadrature. Use response_with_sources to recover complete fields/work.
+    pub fn source_outgoing(
+        &self,
+        wall_forces: &[C64],
+        heat_sources: &[(&ThermoviscousHeatSource<'_, '_>, C64)],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<C64>, ThermoviscousError> {
+        let incident = vec![C64::ZERO; self.reference.len()];
+        let (x, _) = self.solve_with_sources(&incident, wall_forces, heat_sources, cancelled)?;
+        let outgoing = self
+            .roots
+            .iter()
+            .enumerate()
+            .map(|(i, &root)| self.inner.model.flow(&x, i).scale(-root))
+            .collect::<Vec<_>>();
+        if outgoing.iter().any(|&z| !finite(z)) {
             return Err(ThermoviscousError::NonFinite);
         }
         poll(cancelled)?;
-        Ok(field)
+        Ok(outgoing)
     }
 }
