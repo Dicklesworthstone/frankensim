@@ -24,8 +24,9 @@
 //! iteration caps, prepared trigonometric AFT sums through `fs_math::det`,
 //! no RNG, canonical
 //! unknown ordering (DC, then per-harmonic Re/Im pairs, state-major).
-//! Quasi-periodic drift (torus birth) is a NAMED refusal in v1, never
-//! a wrong answer.
+//! The original shooting entry names suspected quasi-periodic drift as a
+//! refusal. The variational entry reports its discrete multipliers without
+//! inferring a torus or global stability from them.
 
 use fs_la::eigen_complex::{EigFailure, eig};
 use fs_la::factor::lu;
@@ -48,6 +49,13 @@ mod forced;
 pub use forced::{ContinuationScales, ScaledContinuationPoint, continue_branch_scaled_seeded};
 
 mod tangent;
+
+/// Consistent discrete shooting tangents, physical scaling and Floquet maps.
+pub mod shooting;
+pub use shooting::{
+    VariationalShootControls, VariationalShootError, VariationalShootOrbit,
+    solve_shooting_variational,
+};
 
 const TAU: f64 = core::f64::consts::TAU;
 
@@ -195,6 +203,11 @@ impl std::error::Error for OrbitError {}
 /// Its equivalence to that problem is the model implementer's obligation.
 pub type TimeDomainRhs<P> = fn(&P, f64, &[f64], &mut [f64]);
 
+/// Exact complete state Jacobian of the supplied explicit time realization.
+/// Fill every row-major entry of df/dx and return true. This is distinct from
+/// the island Jacobian: a mass operator or a realized port changes the flow.
+pub type TimeDomainStateJacobian<P> = fn(&P, f64, &[f64], &mut [f64]) -> bool;
+
 /// Exact state Jacobian of the original nonlinear island at one physical sample.
 ///
 /// Fill the complete row-major `dim() * dim()` matrix `d island_i / d x_j`
@@ -251,6 +264,17 @@ pub trait OrbitProblem {
     /// response needs an actual realization, including its state.
     /// No realization is inferred or numerically certified here.
     fn time_domain_rhs(&self) -> Option<TimeDomainRhs<Self>>
+    where
+        Self: Sized,
+    {
+        None
+    }
+
+    /// Exact derivative of [`Self::time_domain_rhs`] in the same full state.
+    /// Required by the variational shooting entry. A declared callback's refusal
+    /// is returned; it never silently becomes a trajectory finite difference.
+    /// An island tangent is not automatically a tangent of a general port.
+    fn time_domain_state_jacobian(&self) -> Option<TimeDomainStateJacobian<Self>>
     where
         Self: Sized,
     {
@@ -1118,7 +1142,8 @@ pub struct ShootBudget {
     pub steps_per_period: usize,
     /// Newton iteration cap.
     pub max_newton: usize,
-    /// Relative residual tolerance.
+    /// Relative residual tolerance for the original shooting entry. The
+    /// variational entry uses absolute scaled closure and phase tolerances.
     pub tolerance: f64,
 }
 
@@ -1152,32 +1177,8 @@ fn flow<P: OrbitProblem>(
     x0: &[f64],
     t_end: f64,
     steps: usize,
-) -> Vec<f64> {
-    let d = problem.dim();
-    let h = t_end / steps as f64;
-    let mut x = x0.to_vec();
-    let (mut k1, mut k2, mut k3, mut k4) = (vec![0.0; d], vec![0.0; d], vec![0.0; d], vec![0.0; d]);
-    let mut tmp = vec![0.0; d];
-    for j in 0..steps {
-        let t = h * j as f64;
-        rhs(problem, t, &x, &mut k1);
-        for i in 0..d {
-            tmp[i] = 0.5f64.mul_add(h * k1[i], x[i]);
-        }
-        rhs(problem, t + 0.5 * h, &tmp, &mut k2);
-        for i in 0..d {
-            tmp[i] = 0.5f64.mul_add(h * k2[i], x[i]);
-        }
-        rhs(problem, t + 0.5 * h, &tmp, &mut k3);
-        for i in 0..d {
-            tmp[i] = h.mul_add(k3[i], x[i]);
-        }
-        rhs(problem, t + h, &tmp, &mut k4);
-        for i in 0..d {
-            x[i] += h / 6.0 * (k4[i] + k1[i] + 2.0 * (k2[i] + k3[i]));
-        }
-    }
-    x
+) -> Result<Vec<f64>, OrbitError> {
+    shooting::legacy_flow(problem, rhs, x0, t_end, steps)
 }
 
 /// Shooting: Newton on the explicitly supplied time-domain period map.
@@ -1229,7 +1230,7 @@ pub fn solve_shooting<P: OrbitProblem>(
     let mut period = period_guess;
     let mut trace = Vec::new();
     for _ in 0..budget.max_newton {
-        let xt = flow(problem, rhs, &x0, period, budget.steps_per_period);
+        let xt = flow(problem, rhs, &x0, period, budget.steps_per_period)?;
         let r: Vec<f64> = (0..d).map(|i| xt[i] - x0[i]).collect();
         let rn = norm(&r);
         trace.push(rn);
@@ -1251,7 +1252,7 @@ pub fn solve_shooting<P: OrbitProblem>(
                 let h = 1.0e-7 * x0[col].abs().max(1.0e-3);
                 let mut xp = x0.clone();
                 xp[col] += h;
-                let xph = flow(problem, rhs, &xp, period, budget.steps_per_period);
+                let xph = flow(problem, rhs, &xp, period, budget.steps_per_period)?;
                 for row in 0..d {
                     mono[row * d + col] = (xph[row] - xt[row]) / h;
                 }
@@ -1290,8 +1291,8 @@ pub fn solve_shooting<P: OrbitProblem>(
                 h = 1.0e-7 * x0[col].abs().max(1.0e-3);
                 xp[col] += h;
             }
-            let xph = flow(problem, rhs, &xp, pp, budget.steps_per_period);
-            let xt0 = flow(problem, rhs, &x0, period, budget.steps_per_period);
+            let xph = flow(problem, rhs, &xp, pp, budget.steps_per_period)?;
+            let xt0 = flow(problem, rhs, &x0, period, budget.steps_per_period)?;
             for row in 0..d {
                 let base = xt0[row] - x0[row];
                 let pert = xph[row] - xp[row];
@@ -1315,7 +1316,7 @@ pub fn solve_shooting<P: OrbitProblem>(
                 }
             }
             if pp > 0.0 && pp.is_finite() {
-                let xt_try = flow(problem, rhs, &xp, pp, budget.steps_per_period);
+                let xt_try = flow(problem, rhs, &xp, pp, budget.steps_per_period)?;
                 let tn = det::sqrt(
                     (0..d)
                         .map(|i| (xt_try[i] - xp[i]) * (xt_try[i] - xp[i]))

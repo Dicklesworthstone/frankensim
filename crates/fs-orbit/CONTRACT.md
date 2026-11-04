@@ -71,6 +71,12 @@ API — never instrument-shaped.
   through the fs-la complex eigensolver). Admission requires the explicit
   time-domain callback; a frequency-only problem returns
   `TimeDomainUnavailable` before evaluating its island.
+- `VariationalShootControls` / `solve_shooting_variational` ->
+  `VariationalShootOrbit` adds the exact derivative of the discrete shooting
+  map, original physical state scales, full-state autonomous phase closure,
+  bounded cancellation and the complete scaled monodromy. It requires a
+  separately declared exact `time_domain_state_jacobian`; an island tangent
+  does not establish the derivative of a general mass or realized port.
 - `ContinuableProblem` / `ContinuationBudget` / `continue_branch` —
   TRUE pseudo-arclength (bordered corrector on coefficients and the
   parameter jointly), so parameter folds are traversed, not stalled
@@ -278,6 +284,68 @@ conservative families and hybrid cycles remain outside this entry's claim.
   Tikhonov jitter; the converged residual gate is unchanged. Autonomous
   parameter continuation does not use that regularization.
 
+## Consistent discrete variational shooting
+
+The variational entry requires the complete original explicit smooth flow and
+its row-major state Jacobian. Each callback must write every finite entry;
+an unavailable, false or incomplete tangent refuses without a trajectory-probe
+fallback. The frequency-domain island and port retain their own semantics.
+For example, an island Jacobian for `M*x'=g(t,x)` does not include the mass
+inverse required by `df/dx`. Realized memory coordinates cannot be omitted.
+
+One RK4 stage owner now serves both shooting entries. The new entry propagates
+the state and its full derivative at the same four source stages. An autonomous
+period column differentiates the actual discrete step size at every stage,
+including the stage-state chain rule. It is not replaced by the continuous
+endpoint vector field. The original entry retains its forward-difference
+Jacobian, original phase policy and Floquet classification, using the same
+primal stages; unwritten or nonfinite time-domain rows now refuse explicitly.
+
+Let `S=diag(state_scales)`. Newton operates on `z=S^-1*x`, with absolute
+infinity-norm closure tolerance `ShootBudget::tolerance` in this chart. Every
+physical state has its own positive scale: a large static preload cannot
+relax another state's tolerance. The autonomous period variable is
+`T/period_scale`. A fixed phase plane through the seed uses the normalized
+full scaled seed vector field, and its independent residual must meet the
+same tolerance. All original closure rows remain present; no first-coordinate
+motion assumption or row replacement is made. An autonomous cycle must exceed
+its declared normalized excursion floor, which must itself exceed closure
+tolerance. An equilibrium or unresolved short monotone drift cannot be
+accepted solely because its closure defect is small. Forced zero, static,
+tiny and turning-point responses remain admissible at their prescribed period.
+
+The returned `monodromy` is explicitly `S^-1*D(Phi_T)*S`, not an undisclosed
+original-unit matrix. Its eigenvalues come from the existing `fs-la` complex
+eigensolver. The autonomous `period_derivative` is recovered in original
+state units per second. Periodic state, physical residual trace, normalized
+closure and phase residuals, observed excursion and source/map counts are
+reported separately. Newton uses the existing dense LU, without jitter, and
+a bounded eight-trial halving line search; rejected trials count against the
+period-map cap. There is no reduced state, second integration algorithm or
+finite-difference monodromy in this entry.
+
+Before callbacks or numerical allocation, controls admit the complete state
+dimension (hard ceiling 256), positive scales, finite tolerances, iteration
+and period-map caps, and checked payload/work envelopes. For dimension `d`,
+the payload ceiling is `384*d^2 + 1024*d + 64*(max_newton+1)` bytes, excluding
+source/caller storage and allocator overhead. The work score is
+`maps*steps*(16*d^3+128*d^2+128*d) + (128*max_newton+8192)*d^3`; it is an
+admission envelope rather than measured FLOPs or a wall-clock guarantee.
+Stages reuse their storage. The shared allocation-free matrix-product kernel
+is called in row tiles, with cancellation between rows and before/after
+source callbacks. Dense LU/eigen calls remain separately bounded atomic stages.
+Cancellation or refusal returns no partial result and never mutates the source.
+
+This is a finite smooth discrete periodic-response and multiplier result.
+Source equivalence, temporal resolution, primitive period, continuous-orbit
+existence, conditioning and physical validity require separate evidence.
+The new entry reports multipliers without inferring a torus, global attraction,
+or hybrid saltation. Analytic tests cover mass-weighted explicit dynamics,
+time-periodic nonnormal maps, cubic forced response, nonisochronous autonomous
+cycles with a static first coordinate and large preload, physical-unit
+covariance, exact discrete period derivatives, deterministic replay and typed
+source/budget/cancellation refusals.
+
 ## Error model
 
 Typed `OrbitError`: `BadParameter`, `NewtonStalled` (with the full
@@ -294,6 +362,10 @@ answer), forwarded `Eigen`.
 `autonomous::AutonomousContinuationError` adds typed argument, cancellation
 and residual-evaluation-limit refusals while retaining native numerical errors.
 
+`VariationalShootError` adds invalid-control, cancellation, payload/work/map
+budget, unavailable explicit flow/tangent and source-stage refusal variants,
+and retains the original numerical `OrbitError` through `Numerical`.
+
 ## Determinism class
 
 Deterministic: bounded deterministic grid refinement, fixed iteration caps and step policies,
@@ -303,9 +375,11 @@ repeatability is a conformance case.
 ## Cancellation behavior
 
 Synchronous computation; no direct `Cx` dependency. Original HB/shooting and
-forced continuation do not poll cancellation. The new autonomous entry accepts
-an explicit cancellation callback; an adapter may supply its original `Cx`
-checkpoint. Native AFT residuals and dense LU factorizations remain atomic.
+forced continuation do not poll cancellation. The autonomous continuation and
+variational shooting entries accept explicit cancellation callbacks; adapters
+may supply their original `Cx` checkpoints. Native AFT residuals and shared
+dense LU/eigen calls remain atomic; variational source stages and row-tiled
+matrix products have explicit cancellation boundaries.
 
 ## Unsafe boundary
 
@@ -419,6 +493,8 @@ claims; source-call counts are not wall-clock performance measurements.
   formulation. The explicit callback is a model-supplied realization, not
   a proof of that equivalence. Frequency responses are never automatically
   inverted or assigned a state-space realization by the shooting solver.
-- The monodromy is forward-differenced, not a consistent tangent;
-  the I09 lattice's consistent-tangent element is a successor.
+- The original shooting entry's monodromy remains forward-differenced.
+  The additive variational entry differentiates its complete discrete RK4 map
+  exactly, but does not supply an adaptive, hybrid or matrix-free flow tangent,
+  a continuous-time error bound, or the rest of the I09 capability lattice.
 - Grazing/hybrid (non-smooth) islands are out of scope in v1.
