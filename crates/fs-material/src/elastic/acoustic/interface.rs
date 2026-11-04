@@ -22,6 +22,9 @@ use fs_blake3::ContentHash;
 use fs_la::eigen_complex::{LuComplexError, lu_complex_with_cancel};
 use fs_math::{c64::C64, dd::Dd, det};
 
+/// Coherent scattering and interior fields of a finite bonded elastic slab.
+pub mod layer;
+
 /// Physical side of the interface. The common normal points first to second.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ElasticSide {
@@ -177,6 +180,36 @@ impl<'a> IsotropicElasticInterface<'a> {
         cosine: f64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PreparedElasticInterface<'a>, MaterialError> {
+        let mut result = self.prepare_wave_traces(side, mode, cosine, cancelled)?;
+        // A fictitious split of the identical mechanical medium scatters no
+        // wave. This exact identity also removes the undriven homogeneous
+        // grazing channel that makes the unreduced boundary matrix singular.
+        if self.states[0].density_kg_m3() == self.states[1].density_kg_m3()
+            && self.states[0].stiffness_mandel_pa() == self.states[1].stiffness_mandel_pa()
+        {
+            for channel in 0..6 {
+                if result.incoming[channel].normal_power_factor_pa_s_m > 0.0 {
+                    result.scattering[(channel + 3) % 6][channel] = C64::ONE;
+                }
+            }
+            poll(cancelled)?;
+            return Ok(result);
+        }
+        result.prepare_psv(cancelled)?;
+        result.prepare_sh()?;
+        poll(cancelled)?;
+        Ok(result)
+    }
+
+    // Finite layers use the same exterior traces, including critical branches,
+    // without first solving a fictitious direct contact between their faces.
+    fn prepare_wave_traces(
+        &self,
+        side: ElasticSide,
+        mode: ElasticMode,
+        cosine: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PreparedElasticInterface<'a>, MaterialError> {
         poll(cancelled)?;
         if !cosine.is_finite() || cosine <= 0.0 || cosine > 1.0 {
             return Err(invalid("elastic incident cosine must be in (0,1]"));
@@ -228,31 +261,13 @@ impl<'a> IsotropicElasticInterface<'a> {
                 )?;
             }
         }
-        let mut result = PreparedElasticInterface {
+        Ok(PreparedElasticInterface {
             states: self.states,
             tangential_slowness_s_m: tangential,
             incoming,
             outgoing,
             scattering: [[C64::ZERO; 6]; 6],
-        };
-        // A fictitious split of the identical mechanical medium scatters no
-        // wave. This exact identity also removes the undriven homogeneous
-        // grazing channel that makes the unreduced boundary matrix singular.
-        if self.states[0].density_kg_m3() == self.states[1].density_kg_m3()
-            && self.states[0].stiffness_mandel_pa() == self.states[1].stiffness_mandel_pa()
-        {
-            for channel in 0..6 {
-                if result.incoming[channel].normal_power_factor_pa_s_m > 0.0 {
-                    result.scattering[(channel + 3) % 6][channel] = C64::ONE;
-                }
-            }
-            poll(cancelled)?;
-            return Ok(result);
-        }
-        result.prepare_psv(cancelled)?;
-        result.prepare_sh()?;
-        poll(cancelled)?;
-        Ok(result)
+        })
     }
 }
 
