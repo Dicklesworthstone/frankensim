@@ -3934,6 +3934,31 @@ bracket and a 256-iteration original flash budget, retaining the original
 strict tolerances. Its final rerun was blocked by shared disk exhaustion and
 remains unverified; neither that case nor the complete suite is claimed green.
 
+## Heat exchange between finite phase-equilibrium mixtures
+
+`material::phase_thermal` also couples two finite original mixture inventories
+through `exchange_isochoric_mixture_pair`, `exchange_isobaric_mixture_pair`, and
+`exchange_isochoric_isobaric_mixture_pair`. One implicit heat coordinate closes
+`Q = dt G (T_right(-Q) - T_left(Q))`. Positive Q heats the left participant;
+each side keeps its own species, pressure or volume constraint, original phase
+policy, and source calorics. Heat changes U for a rigid participant and H for a
+constant-pressure participant. Latent storage stays inside those original laws.
+
+`MixturePairThermalControl` declares independent source bounds and one shared
+heat/PT work budget. Both actual source heat increments, both endpoint heat
+equations, combined Delta U plus both outward pressure-volume works, and the
+sum of original entropy increments are checked before either parcel changes.
+The entropy tolerance permits only a declared numerical deficit. Neither
+external heat nor mass/species exchange enters this isolated thermal pair.
+Each prescribed pressure load receives its own boundary work.
+
+The last admitted pair is retained without an additional equilibrium solve.
+Zero duration/conductance or equal temperatures preserve both states without
+PT work. Source refusal, budget exhaustion, balance refusal, and final
+cancellation preserve both original inventories. This backward-Euler interface
+assumes uniform inventories and held conductance, with time refinement required;
+it does not supply spatial heat-exchanger geometry or phase-change kinetics.
+
 ## Adiabatic equilibrium mixture compressors and expanders
 
 With `material`, `material::phase_machinery::adiabatic_mixture_machine`

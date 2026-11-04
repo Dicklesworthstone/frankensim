@@ -20,6 +20,15 @@ use fs_material::thermochemical_gas::nonideal::flash::{
 };
 use fs_qty::Time;
 
+mod pair;
+pub use pair::{
+    IsobaricMixturePairThermalControl, IsobaricMixturePairThermalStep,
+    MixedMixturePairThermalControl, MixedMixturePairThermalStep,
+    MixturePairThermalControl, MixturePairThermalStep,
+    exchange_isobaric_mixture_pair, exchange_isochoric_isobaric_mixture_pair,
+    exchange_isochoric_mixture_pair,
+};
+
 /// Explicit heat bracket and source work for one original-law thermal interval.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MixtureThermalControl<C = PhaseEnergyVolumeControls> {
@@ -136,6 +145,7 @@ struct CaloricReport<R> {
     heat_change_j: f64,
     internal_energy_change_j: f64,
     boundary_work_j: f64,
+    entropy_change_j_k: f64,
     pt: usize,
     pressure: usize,
     eos: usize,
@@ -172,6 +182,7 @@ impl ThermalParcel for IsochoricMixtureEquilibriumParcel {
             heat_change_j: source.stored_energy_change_j,
             internal_energy_change_j: source.stored_energy_change_j,
             boundary_work_j: 0.0,
+            entropy_change_j_k: source.entropy_change_j_k,
             pt: source.pt_evaluations,
             pressure: source.pressure_evaluations,
             eos: source.eos_evaluation_upper_bound,
@@ -212,6 +223,7 @@ impl ThermalParcel for IsobaricMixtureEquilibriumParcel {
             heat_change_j: source.enthalpy_change_j,
             internal_energy_change_j: source.stored_energy_change_j,
             boundary_work_j: source.boundary_work_j,
+            entropy_change_j_k: source.entropy_change_j_k,
             pt: source.pt_evaluations,
             pressure: 0,
             eos: source.eos_evaluation_upper_bound,

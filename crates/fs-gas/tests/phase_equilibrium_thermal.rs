@@ -7,6 +7,9 @@
 #[path = "../../fs-material/tests/common/nonideal_flash.rs"]
 mod common;
 
+#[path = "phase_equilibrium_thermal/pair.rs"]
+mod pair;
+
 use common::{MIXTURE_MASS, model, source};
 use fs_gas::material::phase_thermal::{
     IsobaricMixtureThermalControl, MixtureThermalControl, exchange_isobaric_mixture_parcel,
