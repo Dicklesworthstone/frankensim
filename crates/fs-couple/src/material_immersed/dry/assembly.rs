@@ -317,9 +317,46 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize> ResolvedImmersedBodies<'a, 
         controls: DryBodyCouplingConfig3,
         gate: &CancelGate,
     ) -> Result<DryBodiesExchange3<N>, Error> {
+        self.step_forces_si_with_fluid_endpoint(authored, moment_origin_m, controls, gate, None)
+    }
+
+    /// Advance all physical dry bodies with the selected SI fluid-force field
+    /// scaled at the next endpoint, retaining the uniform force and original
+    /// source density, dx and dt. Reduced gravity and authored center loads
+    /// follow the same SI conversion and are applied once.
+    ///
+    /// Every simultaneous Newton probe uses old-force collision and measures
+    /// endpoint physical Guo momentum at the new scale. The full-fluid source
+    /// and each body's cached fictitious-interior source use the same force
+    /// trapezoid. Original dry inertia, sphere-pair films and solve gates remain.
+    ///
+    /// Returns the original native receipt in lattice units. Fluid, all bodies,
+    /// force scale and accepted clock publish together after every fallible
+    /// check. This adds no thermal work owner or coupled-order certificate.
+    pub fn step_forces_si_with_endpoint_fluid_force_scale(
+        &mut self,
+        authored: [[f64; 6]; N],
+        next_scale: f64,
+        moment_origin_m: [f64; 3],
+        controls: DryBodyCouplingConfig3,
+        gate: &CancelGate,
+    ) -> Result<DryBodiesExchange3<N>, Error> {
+        self.step_forces_si_with_fluid_endpoint(
+            authored, moment_origin_m, controls, gate, Some(next_scale),
+        )
+    }
+
+    fn step_forces_si_with_fluid_endpoint(
+        &mut self,
+        authored: [[f64; 6]; N],
+        moment_origin_m: [f64; 3],
+        controls: DryBodyCouplingConfig3,
+        gate: &CancelGate,
+        endpoint_force_scale: Option<f64>,
+    ) -> Result<DryBodiesExchange3<N>, Error> {
         let loads = self.prepare_step(authored, moment_origin_m, gate)?;
-        let report = match &self.native.surfaces {
-            CarrierSurfaces::Spheres { radii, film } => {
+        let report = match (&self.native.surfaces, endpoint_force_scale) {
+            (CarrierSurfaces::Spheres { radii, film }, None) => {
                 self.native.grid.step_with_dry_lubricated_spheres(
                     &mut self.native.samplers,
                     *radii,
@@ -331,7 +368,7 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize> ResolvedImmersedBodies<'a, 
                     gate,
                 )?
             }
-            CarrierSurfaces::Ellipsoids(shapes) => {
+            (CarrierSurfaces::Ellipsoids(shapes), None) => {
                 self.native.grid.step_with_dry_partial_saturation_bodies(
                     &mut self.native.samplers,
                     core::array::from_fn(|i| &shapes[i] as &dyn BodyFrameShape3),
@@ -340,6 +377,19 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize> ResolvedImmersedBodies<'a, 
                     loads.origin,
                     controls,
                     gate,
+                )?
+            }
+            (CarrierSurfaces::Spheres { radii, film }, Some(scale)) => {
+                self.native.grid.step_with_dry_lubricated_spheres_and_endpoint_force_scale(
+                    &mut self.native.samplers, *radii, &mut self.native.bodies,
+                    loads.impulses, *film, scale, loads.origin, controls, gate,
+                )?
+            }
+            (CarrierSurfaces::Ellipsoids(shapes), Some(scale)) => {
+                self.native.grid.step_with_dry_partial_saturation_bodies_and_endpoint_force_scale(
+                    &mut self.native.samplers,
+                    core::array::from_fn(|i| &shapes[i] as &dyn BodyFrameShape3),
+                    &mut self.native.bodies, loads.impulses, scale, loads.origin, controls, gate,
                 )?
             }
         };

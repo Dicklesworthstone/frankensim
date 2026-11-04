@@ -995,3 +995,288 @@ fn cut_cell_dry_assembly_matches_point_torques_and_origin_covariance() {
         }
     }
 }
+
+fn history_field([x, y, z]: [usize; 3]) -> [f64; 3] {
+    [(y as f64 - 3.1) * 3e-6, x as f64 * -2e-6, (z as f64 - 2.0) * 1e-6]
+}
+
+fn force_snapshot(grid: &BoundaryGrid3) -> Vec<[f64; 3]> {
+    let [nx, ny, nz] = grid.dimensions();
+    (0..nx * ny * nz)
+        .map(|i| grid.force_density(i % nx, (i / nx) % ny, i / (nx * ny)))
+        .collect()
+}
+
+#[test]
+fn endpoint_history_closes_independent_dry_assembly_momentum_and_interior_sources() {
+    let shape = BodyFrameEllipsoid3::sphere(1.2).unwrap();
+    let origin = [-0.4, 0.8, -1.3];
+    let gate = CancelGate::new();
+    let uniform = [2e-6, -1e-6, 3e-6];
+    let loads = [
+        [2e-6, -3e-6, 4e-6, 1e-6, -2e-6, 3e-6],
+        [-5e-6, 3e-6, 2e-6, -3e-6, 4e-6, -2e-6],
+    ];
+    for boundaries in [
+        BoundarySpec3::periodic(),
+        BoundarySpec3::new([FaceBoundary3::stationary_wall(); 6]),
+        BoundarySpec3::velocity_pressure_duct_z([0.001, -0.002, 0.012], 1.002),
+    ] {
+        let mut grid = BoundaryGrid3::new(12, 8, 8, 0.83, uniform, boundaries);
+        grid.rebind_force_field(history_field);
+        let mut bodies = pair();
+        bodies[0].center = [3.41, 3.92, 4.17];
+        bodies[1].center = [6.61, 4.09, 3.91];
+        for (a, b) in bodies.iter_mut().enumerate() {
+            b.velocity = [0.0001, -0.0002, 0.00015];
+            b.orientation = So3::exp(So3Tangent::new(Vec3::new(0.2, -0.15, 0.1))).unwrap();
+            b.angular_momentum_body = Vec3::new(1e-6, -2e-6, (a + 1) as f64 * 1.5e-6);
+        }
+        let initial = bodies;
+        let mut fields = samplers(&grid);
+        let mut independent = samplers(&grid);
+        let mut midpoint = samplers(&grid);
+        for scale in [2.0, 0.0, -1.0, 0.5] {
+            sample(&mut independent, bodies, &shape, false, &gate);
+            let before = momentum(&grid, &independent, bodies, origin);
+            sample(&mut midpoint, bodies, &shape, true, &gate);
+            let (old_full, old_inside) = forcing(&grid, &midpoint, origin);
+            let authored: [[f64; 6]; 2] = core::array::from_fn(|a| {
+                let arm = core::array::from_fn(|i| {
+                    bodies[a].center[i] + 0.5 * bodies[a].velocity[i] - origin[i]
+                });
+                let torque = cross(arm, loads[a][..3].try_into().unwrap());
+                core::array::from_fn(|i| loads[a][i] + if i < 3 { 0.0 } else { torque[i - 3] })
+            });
+            let report = grid
+                .step_with_dry_partial_saturation_bodies_and_endpoint_force_scale(
+                    &mut fields, [&shape, &shape], &mut bodies, loads, scale,
+                    origin, DryBodyCouplingConfig3::default(), &gate,
+                )
+                .unwrap();
+            sample(&mut independent, bodies, &shape, false, &gate);
+            let after = momentum(&grid, &independent, bodies, origin);
+            let (new_full, new_inside) = forcing(&grid, &midpoint, origin);
+            for i in 0..6 {
+                let full = 0.5 * old_full[i] + 0.5 * new_full[i];
+                let inside: [f64; 2] =
+                    core::array::from_fn(|a| 0.5 * old_inside[a][i] + 0.5 * new_inside[a][i]);
+                let exterior = full - inside.iter().sum::<f64>();
+                let forcing = report.native.coupling.forcing;
+                let open = report.native.coupling.open;
+                let source = if i < 3 { forcing.impulse[i] } else { forcing.angular_impulse[i - 3] };
+                let reservoir = if i < 3 { open.impulse[i] } else { open.angular_impulse[i - 3] };
+                close(source, full, 3e-15);
+                close(report.represented_fluid_forcing_impulse[i], exterior, 4e-15);
+                close(after[i] - before[i],
+                    authored.iter().map(|j| j[i]).sum::<f64>()
+                        + exterior + boundary(&report, i) + reservoir, 5e-10);
+                for a in 0..2 {
+                    close(report.interior_forcing_impulses[a][i], inside[a], 5e-16);
+                    close(report.interior_correction_impulses[a][i],
+                        report.interior[a][1].momentum[i]
+                            - report.interior[a][0].momentum[i] - inside[a], 4e-10);
+                    close(report.body_momentum_residuals[a][i], 0.0, 4e-10);
+                }
+                close(report.combined_momentum_residual[i], 0.0, 5e-10);
+            }
+            for (i, actual) in force_snapshot(&grid).into_iter().enumerate() {
+                let base = history_field([i % 12, (i / 12) % 8, i / 96]);
+                assert_eq!(actual, core::array::from_fn(|axis| uniform[axis] + scale * base[axis]));
+            }
+            for a in 0..2 {
+                assert_eq!(bodies[a].mass, initial[a].mass);
+                assert_eq!(bodies[a].inertia, initial[a].inertia);
+            }
+        }
+        assert_ne!(bodies[0].center, initial[0].center);
+        assert_ne!(bodies[1].angular_momentum_body, initial[1].angular_momentum_body);
+    }
+}
+
+#[test]
+fn zero_and_constant_endpoint_fields_retain_held_dry_assembly_bits() {
+    let shape = BodyFrameEllipsoid3::sphere(1.2).unwrap();
+    let gate = CancelGate::new();
+    for nonzero in [false, true] {
+        let make = || {
+            let mut grid = grid();
+            grid.rebind_force_field(|c| if nonzero { history_field(c) } else { [0.0; 3] });
+            grid
+        };
+        let (mut held, mut endpoint) = (make(), make());
+        let (mut a, mut b) = (pair(), pair());
+        let (mut sa, mut sb) = (samplers(&held), samplers(&endpoint));
+        for _ in 0..2 {
+            let external = [[1e-5, -2e-5, 3e-5, 2e-6, -3e-6, 4e-6]; 2];
+            let expected = held.step_with_dry_partial_saturation_bodies(
+                &mut sa, [&shape, &shape], &mut a, external, [0.0; 3],
+                DryBodyCouplingConfig3::default(), &gate,
+            ).unwrap();
+            let actual = endpoint.step_with_dry_partial_saturation_bodies_and_endpoint_force_scale(
+                &mut sb, [&shape, &shape], &mut b, external,
+                if nonzero { 1.0 } else { 0.0 }, [0.0; 3],
+                DryBodyCouplingConfig3::default(), &gate,
+            ).unwrap();
+            assert_eq!(actual, expected);
+            assert_eq!(a, b);
+            assert_eq!(snapshot(&held), snapshot(&endpoint));
+            assert_eq!(force_snapshot(&held), force_snapshot(&endpoint));
+        }
+    }
+}
+
+#[test]
+fn endpoint_dry_singleton_replays_the_original_single_owner_exactly() {
+    let make = || { let mut g = grid(); g.rebind_force_field(history_field); g };
+    let (mut one, mut multi) = (make(), make());
+    let (mut body, mut bodies) = (pair()[0], [pair()[0]]);
+    let (mut field, mut fields) = (BodyFrameSampler3::new(&one, 4).unwrap(), samplers(&multi));
+    let shape = BodyFrameEllipsoid3::sphere(1.2).unwrap();
+    let gate = CancelGate::new();
+    for scale in [0.0, -0.5, 2.0] {
+        let a = one.step_with_dry_partial_saturation_body_and_endpoint_force_scale(
+            &mut field, &shape, &mut body, [0.0; 6], scale, ORIGIN_FOR_HISTORY,
+            DryBodyCouplingConfig3::default(), &gate,
+        ).unwrap();
+        let b = multi.step_with_dry_partial_saturation_bodies_and_endpoint_force_scale(
+            &mut fields, [&shape], &mut bodies, [[0.0; 6]], scale, ORIGIN_FOR_HISTORY,
+            DryBodyCouplingConfig3::default(), &gate,
+        ).unwrap();
+        assert_eq!(body, bodies[0]);
+        assert_eq!(snapshot(&one), snapshot(&multi));
+        assert_eq!(force_snapshot(&one), force_snapshot(&multi));
+        assert_eq!(a.fluid, b.fluid);
+        assert_eq!(a.interior, b.interior[0]);
+        assert_eq!(a.interior_forcing_impulse, b.interior_forcing_impulses[0]);
+        assert_eq!(a.interior_correction_impulse, b.interior_correction_impulses[0]);
+        assert_eq!(a.combined_momentum_residual, b.combined_momentum_residual);
+        assert_eq!(a.candidate_evaluations, b.candidate_evaluations);
+        assert_eq!(a.represented_kinetic_energy_change, b.represented_kinetic_energy_change);
+    }
+}
+const ORIGIN_FOR_HISTORY: [f64; 3] = [-0.7, 0.4, 1.1];
+
+#[test]
+fn endpoint_cancellation_after_streaming_preserves_source_and_all_members_for_exact_retry() {
+    use std::cell::Cell;
+    struct CancellingShape<'a> {
+        shape: BodyFrameEllipsoid3,
+        gate: &'a CancelGate,
+        calls: Cell<usize>,
+        cancel_at: Cell<usize>,
+    }
+    impl BodyFrameShape3 for CancellingShape<'_> {
+        fn bounding_radius(&self) -> f64 {
+            self.shape.bounding_radius()
+        }
+        fn contains(&self, p: Vec3) -> bool {
+            let calls = self.calls.get() + 1;
+            self.calls.set(calls);
+            if calls == self.cancel_at.get() {
+                self.gate.request();
+            }
+            self.shape.contains(p)
+        }
+    }
+    let mut grid = grid();
+    let mut control = crate::grid();
+    grid.rebind_force_field(history_field);
+    control.rebind_force_field(history_field);
+    let accepted_force = force_snapshot(&grid);
+    let shape = BodyFrameEllipsoid3::sphere(1.2).unwrap();
+    let gate = CancelGate::new();
+    let cancelling = CancellingShape {
+        shape,
+        gate: &gate,
+        calls: Cell::new(0),
+        cancel_at: Cell::new(usize::MAX),
+    };
+    let mut bodies = pair();
+    let initial = bodies;
+    let mut control_bodies = bodies;
+    let mut fields = samplers(&grid);
+    let mut control_fields = samplers(&control);
+    fields[0]
+        .sample(bodies[0].center, bodies[0].orientation, &cancelling, &gate)
+        .unwrap();
+    let calls = cancelling.calls.get();
+    assert!(calls > 0);
+    // Initial inventory plus native start/midpoint/endpoint sampling complete
+    // before the dry owner resamples the streamed endpoint inventory.
+    cancelling.calls.set(0);
+    cancelling.cancel_at.set(4 * calls + calls / 2);
+    let populations = snapshot(&grid);
+    let loads = [[1e-4, 2e-5, -3e-5, 1e-5, -2e-5, 3e-5], [0.0; 6]];
+    let error = grid
+        .step_with_dry_partial_saturation_bodies_and_endpoint_force_scale(
+            &mut fields,
+            [&cancelling, &shape],
+            &mut bodies,
+            loads,
+            -0.5,
+            [0.0; 3],
+            DryBodyCouplingConfig3::default(),
+            &gate,
+        )
+        .unwrap_err();
+    assert_eq!(error, PartialSaturationError3::Cancelled);
+    assert!(cancelling.calls.get() > 4 * calls);
+    assert_eq!(bodies, initial);
+    assert_eq!(snapshot(&grid), populations);
+    assert_eq!(force_snapshot(&grid), accepted_force);
+    grid.voxelize_sdf(|_| 1.0);
+    let gate = CancelGate::new();
+    let actual = grid
+        .step_with_dry_partial_saturation_bodies_and_endpoint_force_scale(
+            &mut fields,
+            [&shape, &shape],
+            &mut bodies,
+            loads,
+            -0.5,
+            [0.0; 3],
+            DryBodyCouplingConfig3::default(),
+            &gate,
+        )
+        .unwrap();
+    let expected = control
+        .step_with_dry_partial_saturation_bodies_and_endpoint_force_scale(
+            &mut control_fields,
+            [&shape, &shape],
+            &mut control_bodies,
+            loads,
+            -0.5,
+            [0.0; 3],
+            DryBodyCouplingConfig3::default(),
+            &gate,
+        )
+        .unwrap();
+    assert_eq!(actual, expected);
+    assert_eq!(bodies, control_bodies);
+    assert_eq!(snapshot(&grid), snapshot(&control));
+}
+
+#[test]
+fn endpoint_invalid_scale_and_exhausted_real_candidate_preserve_all_accepted_state() {
+    let mut grid = grid();
+    grid.rebind_force_field(history_field);
+    let mut bodies = pair();
+    let original = bodies;
+    let populations = snapshot(&grid);
+    let force = force_snapshot(&grid);
+    let shape = BodyFrameEllipsoid3::sphere(1.2).unwrap();
+    let mut fields = samplers(&grid);
+    for scale in [f64::NAN, -1.0] {
+        let error = grid.step_with_dry_partial_saturation_bodies_and_endpoint_force_scale(
+            &mut fields, [&shape, &shape], &mut bodies, [[0.0, 0.0, 1e-4, 0.0, 0.0, 0.0]; 2],
+            scale, [0.0; 3],
+            DryBodyCouplingConfig3 { maximum_evaluations: 1, ..DryBodyCouplingConfig3::default() },
+            &CancelGate::new(),
+        ).unwrap_err();
+        assert!(matches!(error, PartialSaturationError3::Invalid { reason }
+            if reason.contains(if scale.is_nan() { "finite" } else { "budget" })));
+        assert_eq!(bodies, original);
+        assert_eq!(snapshot(&grid), populations);
+        assert_eq!(force_snapshot(&grid), force);
+    }
+}

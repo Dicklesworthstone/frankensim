@@ -527,6 +527,15 @@ fn translated_origin_dry_plane_retains_tangent_spin_couples_and_reservoir_work()
 
 #[test]
 fn shared_pair_and_plane_modes_preserve_physical_forcing_and_distinct_interior_sources() {
+    shared_pair_and_plane_source_history(false);
+}
+
+#[test]
+fn endpoint_pair_and_plane_films_preserve_actual_momentum_and_single_interior_sources() {
+    shared_pair_and_plane_source_history(true);
+}
+
+fn shared_pair_and_plane_source_history(endpoint: bool) {
     let mut grid = grid();
     grid.rebind_force_field(|[x, y, z]| {
         [x as f64 * 2e-7, y as f64 * -3e-7, (z as f64 - 2.0) * 1e-7]
@@ -556,7 +565,7 @@ fn shared_pair_and_plane_modes_preserve_physical_forcing_and_distinct_interior_s
     let mut fields = samplers(&grid);
     let mut midpoint = samplers(&grid);
     let gate = CancelGate::new();
-    for _ in 0..2 {
+    for scale in [-0.5, 1.5] {
         let incoming = bodies;
         sample(&mut fields, bodies, false);
         let before = momentum(&grid, &fields, bodies, origin);
@@ -569,8 +578,13 @@ fn shared_pair_and_plane_modes_preserve_physical_forcing_and_distinct_interior_s
             let torque = cross(arm, loads[a][..3].try_into().unwrap());
             core::array::from_fn(|i| loads[a][i] + if i < 3 { 0.0 } else { torque[i - 3] })
         });
-        let report = grid
-            .step_with_dry_lubricated_spheres_and_planes(
+        let report = if endpoint {
+            grid.step_with_dry_lubricated_spheres_and_planes_and_endpoint_force_scale(
+                &mut fields, [RADIUS; 2], &mut bodies, loads, model, &[plane], scale,
+                origin, DryBodyCouplingConfig3::default(), &gate,
+            ).unwrap()
+        } else {
+            grid.step_with_dry_lubricated_spheres_and_planes(
                 &mut fields,
                 [RADIUS; 2],
                 &mut bodies,
@@ -581,7 +595,17 @@ fn shared_pair_and_plane_modes_preserve_physical_forcing_and_distinct_interior_s
                 DryBodyCouplingConfig3::default(),
                 &gate,
             )
-            .unwrap();
+            .unwrap()
+        };
+        let (full, inside) = if endpoint {
+            let (next_full, next_inside) = forcing(&grid, &midpoint, origin);
+            (
+                core::array::from_fn(|i| 0.5 * full[i] + 0.5 * next_full[i]),
+                core::array::from_fn(|a| {
+                    core::array::from_fn(|i| 0.5 * inside[a][i] + 0.5 * next_inside[a][i])
+                }),
+            )
+        } else { (full, inside) };
         let after = momentum(&grid, &fields, bodies, origin);
         let r = report.motion;
         let film = r.native.coupling.lubrication;

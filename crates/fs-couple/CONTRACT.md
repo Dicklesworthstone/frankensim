@@ -27911,6 +27911,28 @@ and source/API review passed; compilation and execution remain unverified.
 This entry supplies no extra pressure-gradient body traction, endpoint-dependent
 constitutive load, finite heat storage or complete coupled temporal-order claim.
 
+### Endpoint-sampled fluid forcing on material assemblies
+
+`RetainedFluidBodies::step_forces_si_with_endpoint_fluid_force_scale` and
+`ResolvedImmersedBodies::step_forces_si_with_endpoint_fluid_force_scale` carry
+the selected SI spatial force field through the original simultaneous
+sphere/ellipsoid owner, including sphere-pair films. The uniform fluid force
+stays held; original reference density, dx/dt, authored center forces/couples
+and reduced weight retain the existing conversions. Physical dry assemblies
+measure endpoint Guo inventories and subtract each midpoint fictitious-interior
+trapezoidal source once within the full coupled solve. Returned native receipts
+retain explicit lattice units and shared boundary/source ownership.
+
+All SI conversion and next-clock admission precede native execution.
+Populations, all body poses/momenta, endpoint force and accepted clock advance
+together; no fallible post-publication conversion was added. Held entry points
+retain their original path. Plane-film and finite/shared-carrier material
+wrappers remain held in this increment. The native implementation passed the
+focused 39-check selection documented in fs-lbm; these two typed source-card
+wrapper implementations were reviewed and rustfmt-parser checked, but their
+complete constructor/dependency graph was not executed.
+
+
 ### SI reservoir boundaries on material immersed bodies
 
 `ImmersedDomain::with_boundaries` creates an explicit

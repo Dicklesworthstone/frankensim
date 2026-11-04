@@ -269,6 +269,34 @@ impl BoundaryGrid3 {
         .map(|(receipt, ())| receipt)
     }
 
+    /// Advance a simultaneous assembly with the prescribed force-field scale
+    /// sampled at the next endpoint. Collision and rigid response use the old
+    /// physical force; endpoint Guo inventories and open reconstruction use the
+    /// new one. The shared source receipt owns their trapezoidal impulse once.
+    /// The uniform force is held. This changes no rigid/film time integration
+    /// law and supplies no full-system temporal-order certificate.
+    ///
+    /// # Errors
+    /// Inherits the held-force assembly and endpoint-scale admission. Every
+    /// body, population and held force is preserved on refusal.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_partial_saturation_bodies_and_endpoint_force_scale<const N: usize>(
+        &mut self,
+        fractions: [&[f64]; N],
+        bodies: &mut [PartialSaturationBody3; N],
+        external: [[f64; 6]; N],
+        next_scale: f64,
+        origin: [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<PartialSaturationBodiesExchange3<N>> {
+        self.validate_immersed_endpoint_force_scale(next_scale, gate)?;
+        self.partial_saturation_resistance_transition_with_endpoint_force(
+            fractions, bodies, external, origin, gate, None, true, Some(next_scale),
+            |_, _, _, _| Ok(()),
+        )
+        .map(|(report, (), _)| report)
+    }
+
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     pub(in crate::d3q19::boundary) fn step_with_partial_saturation_bodies_checked<
         const N: usize,
@@ -350,6 +378,36 @@ impl BoundaryGrid3 {
         T,
         Vec<PlaneLubricationExchange3>,
     )> {
+        self.partial_saturation_resistance_transition_with_endpoint_force(
+            fractions, bodies, external, origin, gate, lubrication, publish, None, finish,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub(in crate::d3q19::boundary) fn partial_saturation_resistance_transition_with_endpoint_force<
+        const N: usize,
+        T,
+    >(
+        &mut self,
+        fractions: [&[f64]; N],
+        bodies: &mut [PartialSaturationBody3; N],
+        external: [[f64; 6]; N],
+        origin: [f64; 3],
+        gate: &CancelGate,
+        lubrication: Option<(SphereLubrication3, [f64; N], &[LubricationPlane3])>,
+        publish: bool,
+        endpoint_force_scale: Option<f64>,
+        finish: impl FnOnce(
+            &Self,
+            &[PartialSaturationBody3; N],
+            &PartialSaturationBodiesExchange3<N>,
+            &[PlaneLubricationExchange3],
+        ) -> Result<T>,
+    ) -> Result<(
+        PartialSaturationBodiesExchange3<N>,
+        T,
+        Vec<PlaneLubricationExchange3>,
+    )> {
         checkpoint(gate)?;
         if N == 0 {
             return Err(invalid("immersed assembly must contain at least one body"));
@@ -361,13 +419,14 @@ impl BoundaryGrid3 {
         if N == 1 && lubrication.is_none_or(|(_, _, planes)| planes.is_empty()) {
             let mut proposed = *bodies;
             let mut single = proposed[0];
-            let (_, (receipt, value)) = self.partial_saturation_body_transition(
+            let (_, (receipt, value)) = self.partial_saturation_body_step(
                 fractions[0],
                 &mut single,
                 external[0],
                 origin,
                 gate,
                 publish,
+                endpoint_force_scale,
                 |grid, after, exchange| {
                     proposed[0] = *after;
                     let receipt = PartialSaturationBodiesExchange3 {
@@ -603,7 +662,14 @@ impl BoundaryGrid3 {
                         reason: "assembly blended collision overflowed",
                     });
                 }
-                report.forcing.add(f, post, force, cell, origin)?;
+                if endpoint_force_scale.is_some() {
+                    report.forcing.add_endpoint(
+                        f, post, force, self.open_force(tile, lane, endpoint_force_scale),
+                        cell, origin,
+                    )?;
+                } else {
+                    report.forcing.add(f, post, force, cell, origin)?;
+                }
                 let open_mask = self.open_link_masks[tile].0[lane];
                 if open_mask != 0 {
                     open.add_links(&post, open_mask, cell, origin);
@@ -739,7 +805,9 @@ impl BoundaryGrid3 {
                 }
             }
         }
-        report.open = match self.reconstruct_immersed_open_faces(&mut next, open, origin, gate) {
+        report.open = match self.reconstruct_immersed_open_faces_with_endpoint_force(
+            &mut next, open, origin, gate, endpoint_force_scale,
+        ) {
             Ok(receipt) => receipt,
             Err(error) => {
                 self.next = Some(next);
@@ -761,6 +829,9 @@ impl BoundaryGrid3 {
         }
         if publish {
             core::mem::swap(&mut self.f, &mut next);
+            if let Some(scale) = endpoint_force_scale {
+                self.publish_endpoint_force_scale(scale);
+            }
             self.topology_locked = true;
         }
         self.next = Some(next);

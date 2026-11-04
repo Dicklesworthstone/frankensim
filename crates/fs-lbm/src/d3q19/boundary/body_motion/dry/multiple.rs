@@ -75,6 +75,7 @@ struct AssemblyStep<'a, const N: usize> {
     radii: [f64; N],
     inside_before: [ImmersedMomentum3; N],
     interior_forcing: Option<[[f64; 6]; N]>,
+    endpoint_force_scale: Option<f64>,
     lubrication: Option<(SphereLubrication3, &'a [LubricationPlane3])>,
     surfaces: Option<&'a PreparedSurfaces>,
     maximum_relative_volume_change: f64,
@@ -140,6 +141,39 @@ impl BoundaryGrid3 {
         .map(|(report, _)| report.motion)
     }
 
+    /// Advance physical dry bodies with a prescribed force-field scale sampled
+    /// at the next endpoint. The simultaneous 6N correction retains collision
+    /// at the old force and measures final physical Guo inventories at the new
+    /// force. Each midpoint fictitious-interior source subtracts the same force
+    /// trapezoid once, cached across every probe and backtrack.
+    ///
+    /// The uniform force remains held. Original dry inertia, rigid splitting,
+    /// geometry and bounded Newton admission are unchanged; this is not a
+    /// full-system temporal-order or geometric-conservation certificate.
+    ///
+    /// # Errors
+    /// Inherits dry-assembly and endpoint-force admission. Populations, all
+    /// bodies and the force-field scale publish only after every final account.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_dry_partial_saturation_bodies_and_endpoint_force_scale<const N: usize>(
+        &mut self,
+        samplers: &mut [BodyFrameSampler3; N],
+        shapes: [&dyn BodyFrameShape3; N],
+        bodies: &mut [MovingPartialSaturationBody3; N],
+        external: [[f64; 6]; N],
+        next_scale: f64,
+        origin: [f64; 3],
+        config: DryBodyCouplingConfig3,
+        gate: &CancelGate,
+    ) -> Result<DryBodiesExchange3<N>> {
+        self.validate_immersed_endpoint_force_scale(next_scale, gate)?;
+        self.step_with_dry_partial_saturation_resistance_with_endpoint_force(
+            samplers, shapes, bodies, external, origin, config, gate,
+            None, None, Some(next_scale),
+        )
+        .map(|(report, _)| report.motion)
+    }
+
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     pub(in crate::d3q19::boundary::body_motion) fn step_with_dry_partial_saturation_resistance<
         const N: usize,
@@ -155,6 +189,27 @@ impl BoundaryGrid3 {
         lubrication: Option<(SphereLubrication3, &[LubricationPlane3])>,
         surfaces: Option<&PreparedSurfaces>,
     ) -> Result<(DryLubricatedPlanesExchange3<N>, Option<SurfaceCandidate>)> {
+        self.step_with_dry_partial_saturation_resistance_with_endpoint_force(
+            samplers, shapes, bodies, external, origin, config, gate, lubrication, surfaces, None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub(in crate::d3q19::boundary::body_motion) fn step_with_dry_partial_saturation_resistance_with_endpoint_force<
+        const N: usize,
+    >(
+        &mut self,
+        samplers: &mut [BodyFrameSampler3; N],
+        shapes: [&dyn BodyFrameShape3; N],
+        bodies: &mut [MovingPartialSaturationBody3; N],
+        external: [[f64; 6]; N],
+        origin: [f64; 3],
+        config: DryBodyCouplingConfig3,
+        gate: &CancelGate,
+        lubrication: Option<(SphereLubrication3, &[LubricationPlane3])>,
+        surfaces: Option<&PreparedSurfaces>,
+        endpoint_force_scale: Option<f64>,
+    ) -> Result<(DryLubricatedPlanesExchange3<N>, Option<SurfaceCandidate>)> {
         checkpoint(gate)?;
         config.admit()?;
         if !(1..=8).contains(&N) || !origin.into_iter().all(f64::is_finite) {
@@ -165,7 +220,7 @@ impl BoundaryGrid3 {
         // A lone sphere without planes has no film partner. Keep the original
         // single-dry arithmetic exactly, including its convergence policy.
         if N == 1 && lubrication.is_none_or(|(_, planes)| planes.is_empty()) {
-            let single = self.step_with_dry_partial_saturation_body(
+            let single = self.dry_partial_saturation_transition(
                 &mut samplers[0],
                 &ShapeRef(shapes[0]),
                 &mut bodies[0],
@@ -173,6 +228,7 @@ impl BoundaryGrid3 {
                 origin,
                 config,
                 gate,
+                endpoint_force_scale,
             )?;
             return Ok((
                 DryLubricatedPlanesExchange3 {
@@ -233,6 +289,7 @@ impl BoundaryGrid3 {
             radii,
             inside_before,
             interior_forcing: None,
+            endpoint_force_scale,
             lubrication,
             surfaces,
             maximum_relative_volume_change: config.maximum_relative_volume_change,
@@ -363,6 +420,9 @@ impl BoundaryGrid3 {
             .ok_or_else(|| invalid("dry assembly streamed candidate is unavailable"))?;
         core::mem::swap(&mut self.f, &mut next);
         self.next = Some(next);
+        if let Some(scale) = endpoint_force_scale {
+            self.publish_endpoint_force_scale(scale);
+        }
         self.topology_locked = true;
         *bodies = current.bodies;
         Ok((
@@ -440,13 +500,14 @@ impl BoundaryGrid3 {
         let mut account_scale = norm(normalize(boundary, account_radius))
             + norm(normalize(plane_reaction, account_radius));
         for a in 0..N {
-            let (all, inside, slip) = self.dry_inventory(
+            let (all, inside, slip) = self.dry_inventory_with_endpoint_force(
                 true,
                 a == 0,
                 &samplers[a],
                 current.bodies[a],
                 step.origin,
                 step.gate,
+                step.endpoint_force_scale,
             )?;
             if inside != current.interior[a] || slip != current.slip[a] {
                 return Err(invalid(
@@ -603,7 +664,7 @@ impl BoundaryGrid3 {
             core::array::from_fn(|i| step.external[a][i] + impulse[i])
         });
         let mut bodies = step.initial;
-        let (coupled, surfaces) = self.moving_partial_saturation_resistance_transition(
+        let (coupled, surfaces) = self.moving_partial_saturation_resistance_transition_with_endpoint_force(
             samplers,
             step.shapes,
             &mut bodies,
@@ -613,6 +674,7 @@ impl BoundaryGrid3 {
             step.lubrication,
             false,
             step.surfaces,
+            step.endpoint_force_scale,
         )?;
         let native = coupled.motion;
         for body in &native.bodies {
@@ -636,7 +698,9 @@ impl BoundaryGrid3 {
             None => {
                 let mut forcing = [[0.0; 6]; N];
                 for a in 0..N {
-                    forcing[a] = self.dry_interior_forcing(&samplers[a], step.origin, step.gate)?;
+                    forcing[a] = self.dry_interior_forcing_with_endpoint_force(
+                        &samplers[a], step.origin, step.gate, step.endpoint_force_scale,
+                    )?;
                 }
                 step.interior_forcing = Some(forcing);
                 forcing
@@ -653,8 +717,10 @@ impl BoundaryGrid3 {
                 &ShapeRef(step.shapes[a]),
                 step.gate,
             )?;
-            let (_, inside, speed) =
-                self.dry_inventory(true, false, &samplers[a], bodies[a], step.origin, step.gate)?;
+            let (_, inside, speed) = self.dry_inventory_with_endpoint_force(
+                true, false, &samplers[a], bodies[a], step.origin, step.gate,
+                step.endpoint_force_scale,
+            )?;
             interior[a] = inside;
             slip[a] = speed;
             let delta = difference(

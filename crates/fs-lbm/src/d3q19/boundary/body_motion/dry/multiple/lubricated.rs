@@ -65,6 +65,32 @@ impl BoundaryGrid3 {
         .map(|report| report.motion)
     }
 
+    /// The same coupled dry-sphere/film solve with endpoint-sampled fluid
+    /// forcing. Each body's fictitious-interior source uses the shared force
+    /// trapezoid; pair-film exchange stays internal and is counted once.
+    ///
+    /// # Errors
+    /// Inherits the dry sphere/film and endpoint-force admission. Any refusal
+    /// preserves all bodies, fluid populations and the accepted source scale.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_dry_lubricated_spheres_and_endpoint_force_scale<const N: usize>(
+        &mut self,
+        samplers: &mut [BodyFrameSampler3; N],
+        radii: [f64; N],
+        bodies: &mut [MovingPartialSaturationBody3; N],
+        external: [[f64; 6]; N],
+        model: SphereLubrication3,
+        next_scale: f64,
+        origin: [f64; 3],
+        config: DryBodyCouplingConfig3,
+        gate: &CancelGate,
+    ) -> Result<DryBodiesExchange3<N>> {
+        self.step_with_dry_lubricated_spheres_and_planes_and_endpoint_force_scale(
+            samplers, radii, bodies, external, model, &[], next_scale, origin, config, gate,
+        )
+        .map(|report| report.motion)
+    }
+
     /// Advance physical dry spheres with shared sphere-pair/prescribed-plane films.
     ///
     /// The native resistance owner retains all shared-body and tangent/spin
@@ -109,13 +135,60 @@ impl BoundaryGrid3 {
         config: DryBodyCouplingConfig3,
         gate: &CancelGate,
     ) -> Result<DryLubricatedPlanesExchange3<N>> {
+        self.dry_lubricated_spheres_and_planes_transition(
+            samplers, radii, bodies, external, model, planes, origin, config, gate, None,
+        )
+    }
+
+    /// Endpoint fluid-force history through the original coupled sphere-pair
+    /// and prescribed-plane resistance owner. Plane reaction/work remain the
+    /// separate external film port; no source is applied twice to populations.
+    ///
+    /// # Errors
+    /// Inherits all held-force dry/film/plane checks and endpoint-scale admission.
+    /// Body, fluid and source state publish together after the final accounts.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_dry_lubricated_spheres_and_planes_and_endpoint_force_scale<const N: usize>(
+        &mut self,
+        samplers: &mut [BodyFrameSampler3; N],
+        radii: [f64; N],
+        bodies: &mut [MovingPartialSaturationBody3; N],
+        external: [[f64; 6]; N],
+        model: SphereLubrication3,
+        planes: &[LubricationPlane3],
+        next_scale: f64,
+        origin: [f64; 3],
+        config: DryBodyCouplingConfig3,
+        gate: &CancelGate,
+    ) -> Result<DryLubricatedPlanesExchange3<N>> {
+        self.validate_immersed_endpoint_force_scale(next_scale, gate)?;
+        self.dry_lubricated_spheres_and_planes_transition(
+            samplers, radii, bodies, external, model, planes, origin, config, gate,
+            Some(next_scale),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dry_lubricated_spheres_and_planes_transition<const N: usize>(
+        &mut self,
+        samplers: &mut [BodyFrameSampler3; N],
+        radii: [f64; N],
+        bodies: &mut [MovingPartialSaturationBody3; N],
+        external: [[f64; 6]; N],
+        model: SphereLubrication3,
+        planes: &[LubricationPlane3],
+        origin: [f64; 3],
+        config: DryBodyCouplingConfig3,
+        gate: &CancelGate,
+        endpoint_force_scale: Option<f64>,
+    ) -> Result<DryLubricatedPlanesExchange3<N>> {
         model.admit(radii)?;
         // Validate even the singleton fast path before it can publish. Plane
         // geometry/rate invariants are already enforced by its constructor.
         crate::d3q19::boundary::partial_saturation::lubrication::planes::admit_planes(planes)?;
         let spheres = radii
             .map(|r| BodyFrameEllipsoid3::sphere(r).expect("lubrication admitted every radius"));
-        self.step_with_dry_partial_saturation_resistance(
+        self.step_with_dry_partial_saturation_resistance_with_endpoint_force(
             samplers,
             core::array::from_fn(|a| &spheres[a] as &dyn BodyFrameShape3),
             bodies,
@@ -125,6 +198,7 @@ impl BoundaryGrid3 {
             gate,
             Some((model, planes)),
             None,
+            endpoint_force_scale,
         )
         .map(|(report, _)| report)
     }

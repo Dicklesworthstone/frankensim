@@ -66,7 +66,33 @@ impl BoundaryGrid3 {
         gate: &CancelGate,
     ) -> Result<MovingPartialSaturationBodiesExchange3<N>> {
         self.step_with_moving_partial_saturation_resistance(
-            samplers, shapes, bodies, external, origin, gate, None,
+            samplers, shapes, bodies, external, origin, gate, None, None,
+        )
+        .map(|report| report.motion)
+    }
+
+    /// Advance the same simultaneous moving assembly with the force-field scale
+    /// at the next endpoint. The old force owns collision and body response;
+    /// the next force owns endpoint Guo momentum and open-face reconstruction.
+    /// The shared forcing receipt integrates their trapezoid once.
+    ///
+    /// # Errors
+    /// Inherits the moving-body and endpoint-force admission. All accepted
+    /// populations, body poses/momenta and the source scale publish together.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_moving_partial_saturation_bodies_and_endpoint_force_scale<const N: usize>(
+        &mut self,
+        samplers: &mut [BodyFrameSampler3; N],
+        shapes: [&dyn BodyFrameShape3; N],
+        bodies: &mut [MovingPartialSaturationBody3; N],
+        external: [[f64; 6]; N],
+        next_scale: f64,
+        origin: [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<MovingPartialSaturationBodiesExchange3<N>> {
+        self.validate_immersed_endpoint_force_scale(next_scale, gate)?;
+        self.step_with_moving_partial_saturation_resistance(
+            samplers, shapes, bodies, external, origin, gate, None, Some(next_scale),
         )
         .map(|report| report.motion)
     }
@@ -109,6 +135,37 @@ impl BoundaryGrid3 {
             origin,
             gate,
             Some((model, &[])),
+            None,
+        )
+        .map(|report| report.motion)
+    }
+
+    /// Endpoint-sampled fluid forcing through the original simultaneous
+    /// sphere-pair film solve and both rigid half-drifts.
+    ///
+    /// # Errors
+    /// Inherits sphere/film and endpoint-force admission; refusal publishes no
+    /// body, fluid or force state. Film impulses are not applied to fluid again.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_lubricated_spheres_and_endpoint_force_scale<const N: usize>(
+        &mut self,
+        samplers: &mut [BodyFrameSampler3; N],
+        radii: [f64; N],
+        bodies: &mut [MovingPartialSaturationBody3; N],
+        external: [[f64; 6]; N],
+        model: SphereLubrication3,
+        next_scale: f64,
+        origin: [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<MovingPartialSaturationBodiesExchange3<N>> {
+        self.validate_immersed_endpoint_force_scale(next_scale, gate)?;
+        model.admit(radii)?;
+        let spheres = radii
+            .map(|r| BodyFrameEllipsoid3::sphere(r).expect("lubrication admitted every radius"));
+        self.step_with_moving_partial_saturation_resistance(
+            samplers,
+            core::array::from_fn(|a| &spheres[a] as &dyn BodyFrameShape3),
+            bodies, external, origin, gate, Some((model, &[])), Some(next_scale),
         )
         .map(|report| report.motion)
     }
@@ -151,6 +208,7 @@ impl BoundaryGrid3 {
             origin,
             gate,
             Some((model, planes)),
+            None,
         )
     }
 
@@ -164,8 +222,9 @@ impl BoundaryGrid3 {
         origin: [f64; 3],
         gate: &CancelGate,
         lubrication: Option<(SphereLubrication3, &[LubricationPlane3])>,
+        endpoint_force_scale: Option<f64>,
     ) -> Result<MovingLubricatedPlanesExchange3<N>> {
-        self.moving_partial_saturation_resistance_transition(
+        self.moving_partial_saturation_resistance_transition_with_endpoint_force(
             samplers,
             shapes,
             bodies,
@@ -175,6 +234,7 @@ impl BoundaryGrid3 {
             lubrication,
             true,
             None,
+            endpoint_force_scale,
         )
         .map(|(report, _)| report)
     }
@@ -193,6 +253,25 @@ impl BoundaryGrid3 {
         lubrication: Option<(SphereLubrication3, &[LubricationPlane3])>,
         publish: bool,
         surfaces: Option<&PreparedSurfaces>,
+    ) -> Result<(MovingLubricatedPlanesExchange3<N>, Option<SurfaceCandidate>)> {
+        self.moving_partial_saturation_resistance_transition_with_endpoint_force(
+            samplers, shapes, bodies, external, origin, gate, lubrication, publish, surfaces, None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub(super) fn moving_partial_saturation_resistance_transition_with_endpoint_force<const N: usize>(
+        &mut self,
+        samplers: &mut [BodyFrameSampler3; N],
+        shapes: [&dyn BodyFrameShape3; N],
+        bodies: &mut [MovingPartialSaturationBody3; N],
+        external: [[f64; 6]; N],
+        origin: [f64; 3],
+        gate: &CancelGate,
+        lubrication: Option<(SphereLubrication3, &[LubricationPlane3])>,
+        publish: bool,
+        surfaces: Option<&PreparedSurfaces>,
+        endpoint_force_scale: Option<f64>,
     ) -> Result<(MovingLubricatedPlanesExchange3<N>, Option<SurfaceCandidate>)> {
         checkpoint(gate)?;
         if N == 0 || !origin.into_iter().all(f64::is_finite) {
@@ -305,7 +384,7 @@ impl BoundaryGrid3 {
         }
         let frozen_before = frozen;
         let fields = core::array::from_fn(|a| samplers[a].fractions.as_slice());
-        let response = self.partial_saturation_resistance_transition(
+        let response = self.partial_saturation_resistance_transition_with_endpoint_force(
             fields,
             &mut frozen,
             external,
@@ -313,6 +392,7 @@ impl BoundaryGrid3 {
             gate,
             lubrication.map(|(model, _)| (model, radii, midpoint_planes)),
             publish,
+            endpoint_force_scale,
             |grid, exchanged, coupling, plane_reports| {
                 let mut accepted = initial;
                 let mut reports = [None; N];

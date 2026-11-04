@@ -8951,14 +8951,51 @@ uses the same source/reconstruction path. These are prescribed smooth fixed-shap
 histories, initialized with momentum-preserving field rebinding. They do not
 supply an implicit velocity-dependent load, a discontinuous force switch,
 complete coupled temporal order, or a thermodynamic fluid-energy/heat balance.
-Multi-body and film entry points retain their existing held-force semantics.
+Held-force entry points retain their original semantics; the simultaneous
+endpoint-force extension is specified below.
 
 Focused regressions specify zero-occupancy native parity across four collision
 models and periodic/wall/reservoir boundaries, independently reconstructed
 physical source work, light/neutral/heavy moving-body ramps and reversal through
 zero, cut-cell interior subtraction, exact held-path parity and atomic
-overflow/budget/late-cancellation refusal with retry. Rustfmt parsing and source
-review are available; native compilation and execution remain unverified.
+overflow/budget/late-cancellation refusal with retry. The native owners now
+compile and execute in the assembly selection below; the standalone
+`dry_partial_saturation_body3` target and full workspace were not run.
+
+### Endpoint fluid-force histories through simultaneous immersed assemblies
+
+`step_with_partial_saturation_bodies_and_endpoint_force_scale`, the moving
+assembly/sphere-film entries, and the physical dry assembly/sphere/prescribed-
+plane-film entries carry one selected endpoint source through the original
+shared collision, rigid split and resistance solve. Collision and reciprocal
+body response retain the accepted old force; final physical Guo inventories
+and velocity/pressure reservoir reconstruction use the next force. The shared
+full-fluid source integrates their trapezoidal impulse and angular impulse
+once. Dry assemblies subtract that same source over each distinct collision-
+midpoint interior, including cut-cell first moments, cached across the full
+coupled 6N Newton probes. The original positive masses, full tensors,
+conditioning, candidate limits, geometry and film law remain authoritative.
+
+Candidate probes never publish force or populations. All bodies, fluid and
+endpoint source publish only after final trajectory, film, population and
+independent momentum accounts. None callers and singleton delegation preserve
+their original arithmetic; no field clone or additional fluid stream is
+introduced per probe. New material assembly entries cover retained and physical
+dry sphere/ellipsoid consumers. Material plane-film and finite/shared-carrier
+entry points retain held-force semantics; this adds no complete coupled-order,
+implicit constitutive force, GCL or thermodynamic work claim.
+
+Focused selected native execution passed 39 tests across
+`dry_partial_saturation_bodies3`, `forced_partial_saturation3` and
+`dry_lubricated_spheres3`. Eight new checks reconstruct actual fluid-plus-body
+linear/angular inventories, distinct cut-cell source subtraction, open/wall/
+periodic transport, analytic ramp-source history, active pair/plane films,
+constant/zero/singleton parity and late refusal with exact retry. Original serial
+numerical owners and actual cached dependencies compile; unrelated pooled/SGS/
+frontend graphs are excluded. A subsequent current-source build retained the
+concurrent local-viscosity curved-wall owner and passed seven endpoint/history
+cases plus the original curved-wall halfway parity case. The full Cargo
+workspace and material source-card constructors were not executed.
 
 ### Simultaneous physical dry-body assemblies
 

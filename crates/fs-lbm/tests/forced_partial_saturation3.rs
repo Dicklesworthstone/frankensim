@@ -944,3 +944,134 @@ fn endpoint_forcing_with_zero_occupancy_matches_native_fluid_and_physical_source
         }
     }
 }
+
+fn ramp_field(cell: [usize; 3]) -> [f64; 3] {
+    let spatial = field(cell);
+    core::array::from_fn(|i| spatial[i] + [2e-6, -1e-6, 3e-6][i])
+}
+
+#[test]
+fn moving_endpoint_ramp_matches_analytic_source_history_and_actual_total_momentum() {
+    let shape = BodyFrameEllipsoid3::sphere(0.34).unwrap();
+    let external = [[0.00002, -0.00001, 0.00001, 0.000002, 0.000003, -0.000001]; 2];
+    for walls in [false, true] {
+        let mut grid = grid_with_model(walls, CollisionModel3::Bgk { tau: TAU });
+        grid.rebind_force_field(ramp_field);
+        let mut samplers = [
+            BodyFrameSampler3::new(&grid, 6).unwrap(),
+            BodyFrameSampler3::new(&grid, 6).unwrap(),
+        ];
+        let mut bodies = [moving(0), moving(1)];
+        let mut integrated = [0.0; 6];
+        for tick in 0..4 {
+            let before = snapshot(&grid);
+            let old = bodies;
+            let old_force: Vec<[f64; 3]> = (0..N * N * N)
+                .map(|i| grid.force_density(i % N, (i / N) % N, i / (N * N)))
+                .collect();
+            let next_scale = 1.0 + 0.2 * (tick + 1) as f64;
+            let report = if walls {
+                let film = fs_lbm::d3q19::SphereLubrication3::new(
+                    (TAU - 0.5) / 3.0, 0.1, 0.001, 1,
+                ).unwrap();
+                let receipt = grid.step_with_lubricated_spheres_and_endpoint_force_scale(
+                    &mut samplers, [0.34; 2], &mut bodies, external, film,
+                    next_scale, ORIGIN, &CancelGate::new(),
+                ).unwrap();
+                assert_eq!(receipt.coupling.lubrication.active_pairs, 1);
+                receipt
+            } else {
+                grid.step_with_moving_partial_saturation_bodies_and_endpoint_force_scale(
+                    &mut samplers, [&shape, &shape], &mut bodies, external,
+                    next_scale, ORIGIN, &CancelGate::new(),
+                ).unwrap()
+            };
+            let (_, mut p, mut h) = fluid_delta(&before, &grid);
+            let mut expected = [0.0; 6];
+            // Reconstruct the actual old/new physical Guo frames directly from
+            // populations and force fields, independent of the native receipt.
+            for z in 0..N {
+                for y in 0..N {
+                    for x in 0..N {
+                        let old_f = old_force[index([x, y, z])];
+                        let new_f = grid.force_density(x, y, z);
+                        let shape_f = ramp_field([x, y, z]);
+                        assert_eq!(new_f, core::array::from_fn(|i| UNIFORM[i] + next_scale * shape_f[i]));
+                        let frame = core::array::from_fn(|i| 0.5 * (new_f[i] - old_f[i]));
+                        let impulse = core::array::from_fn(|i| 0.5 * old_f[i] + 0.5 * new_f[i]);
+                        let arm = [x as f64 + 0.5 - ORIGIN[0], y as f64 + 0.5 - ORIGIN[1], z as f64 + 0.5 - ORIGIN[2]];
+                        let frame_h = cross(arm, frame);
+                        let torque = cross(arm, impulse);
+                        for i in 0..3 {
+                            p[i] += frame[i];
+                            h[i] += frame_h[i];
+                            expected[i] += impulse[i];
+                            expected[i + 3] += torque[i];
+                        }
+                    }
+                }
+            }
+            for a in 0..2 {
+                let initial = momentum(old[a]);
+                let after = momentum(bodies[a]);
+                let arm = core::array::from_fn(|i| old[a].center[i] + 0.5 * old[a].velocity[i] - ORIGIN[i]);
+                let torque = cross(arm, external[a][..3].try_into().unwrap());
+                for i in 0..3 {
+                    p[i] += after.0[i] - initial.0[i] - external[a][i];
+                    h[i] += after.1[i] - initial.1[i] - external[a][i + 3] - torque[i];
+                }
+                assert_eq!(report.bodies[a].coupling.forcing, Default::default());
+            }
+            for i in 0..3 {
+                close(p[i] - expected[i] - report.coupling.walls.fluid_population_impulse[i], 0.0, 3e-12);
+                close(h[i] - expected[i + 3]
+                    - report.coupling.walls.fluid_population_angular_impulse[i]
+                    - report.coupling.periodic.angular_momentum_change[i], 0.0, 1e-11);
+                close(report.coupling.forcing.impulse[i], expected[i], 3e-16);
+                close(report.coupling.forcing.angular_impulse[i], expected[i + 3], 2e-15);
+                integrated[i] += report.coupling.forcing.impulse[i];
+                integrated[i + 3] += report.coupling.forcing.angular_impulse[i];
+            }
+        }
+        // s(t)=1+0.2t: integrate exactly over t in [0,4]. Uniform force
+        // remains held, while both the nonzero mean and torque of the spatial
+        // field receive integral(s dt)=4+0.1*16=5.6.
+        let mut analytic = [0.0; 6];
+        for z in 0..N {
+            for y in 0..N {
+                for x in 0..N {
+                    let f = ramp_field([x, y, z]);
+                    let j = core::array::from_fn(|i| 4.0 * UNIFORM[i] + 5.6 * f[i]);
+                    let torque = cross([x as f64 + 0.5 - ORIGIN[0], y as f64 + 0.5 - ORIGIN[1], z as f64 + 0.5 - ORIGIN[2]], j);
+                    for i in 0..3 { analytic[i] += j[i]; analytic[i + 3] += torque[i]; }
+                }
+            }
+        }
+        for i in 0..6 { close(integrated[i], analytic[i], 7e-15); }
+    }
+}
+
+#[test]
+fn frozen_shared_cell_constant_and_zero_endpoint_fields_replay_held_bits() {
+    let fractions = fields();
+    for nonzero in [false, true] {
+        let make = || {
+            let mut g = grid_with_model(false, CollisionModel3::Bgk { tau: TAU });
+            if !nonzero { g.rebind_force_field(|_| [0.0; 3]); }
+            g
+        };
+        let (mut held, mut endpoint) = (make(), make());
+        let (mut a, mut b) = ([body(0), body(1)], [body(0), body(1)]);
+        let external = [[0.0; 6]; 2];
+        let expected = held.step_with_partial_saturation_bodies(
+            fractions.each_ref().map(Vec::as_slice), &mut a, external, ORIGIN, &CancelGate::new(),
+        ).unwrap();
+        let actual = endpoint.step_with_partial_saturation_bodies_and_endpoint_force_scale(
+            fractions.each_ref().map(Vec::as_slice), &mut b, external,
+            if nonzero { 1.0 } else { 0.0 }, ORIGIN, &CancelGate::new(),
+        ).unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(a, b);
+        assert_eq!(snapshot(&held), snapshot(&endpoint));
+    }
+}

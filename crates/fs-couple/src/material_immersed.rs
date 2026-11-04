@@ -460,6 +460,40 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize, S> RetainedFluidBodies<'a, 
         moment_origin_m: [f64; 3],
         gate: &CancelGate,
     ) -> Result<MovingPartialSaturationBodiesExchange3<N>, Error> {
+        self.step_forces_si_with_fluid_endpoint(
+            forces_and_center_couples, moment_origin_m, gate, None,
+        )
+    }
+
+    /// Advance all retained-fluid bodies and any sphere-pair films with a
+    /// prescribed scale of the selected SI volume-force field at the next
+    /// endpoint. The uniform force remains held. Original old-force collision
+    /// and endpoint Guo momentum/open reconstruction share one native tick;
+    /// the forcing receipt owns the trapezoidal physical source impulse once.
+    ///
+    /// Forces [N] and center couples [N m] retain their original conversion.
+    /// The returned receipt remains explicitly in lattice units. All fallible
+    /// conversion and native admission precede atomic source/body/fluid/clock
+    /// publication. This does not certify the full coupled temporal order.
+    pub fn step_forces_si_with_endpoint_fluid_force_scale(
+        &mut self,
+        forces_and_center_couples: [[f64; 6]; N],
+        next_scale: f64,
+        moment_origin_m: [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<MovingPartialSaturationBodiesExchange3<N>, Error> {
+        self.step_forces_si_with_fluid_endpoint(
+            forces_and_center_couples, moment_origin_m, gate, Some(next_scale),
+        )
+    }
+
+    fn step_forces_si_with_fluid_endpoint(
+        &mut self,
+        forces_and_center_couples: [[f64; 6]; N],
+        moment_origin_m: [f64; 3],
+        gate: &CancelGate,
+        endpoint_force_scale: Option<f64>,
+    ) -> Result<MovingPartialSaturationBodiesExchange3<N>, Error> {
         poll(gate)?;
         let next = self
             .accepted_steps
@@ -479,8 +513,8 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize, S> RetainedFluidBodies<'a, 
             }
         }
         let origin = convert(moment_origin_m, 1.0 / self.scaling.cell_size_m())?;
-        let report = match &self.surfaces {
-            CarrierSurfaces::Spheres { radii, film } => self.grid.step_with_lubricated_spheres(
+        let report = match (&self.surfaces, endpoint_force_scale) {
+            (CarrierSurfaces::Spheres { radii, film }, None) => self.grid.step_with_lubricated_spheres(
                 &mut self.samplers,
                 *radii,
                 &mut self.bodies,
@@ -489,7 +523,7 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize, S> RetainedFluidBodies<'a, 
                 origin,
                 gate,
             )?,
-            CarrierSurfaces::Ellipsoids(shapes) => {
+            (CarrierSurfaces::Ellipsoids(shapes), None) => {
                 self.grid.step_with_moving_partial_saturation_bodies(
                     &mut self.samplers,
                     core::array::from_fn(|a| &shapes[a] as &dyn BodyFrameShape3),
@@ -497,6 +531,19 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize, S> RetainedFluidBodies<'a, 
                     external,
                     origin,
                     gate,
+                )?
+            }
+            (CarrierSurfaces::Spheres { radii, film }, Some(scale)) => {
+                self.grid.step_with_lubricated_spheres_and_endpoint_force_scale(
+                    &mut self.samplers, *radii, &mut self.bodies, external,
+                    *film, scale, origin, gate,
+                )?
+            }
+            (CarrierSurfaces::Ellipsoids(shapes), Some(scale)) => {
+                self.grid.step_with_moving_partial_saturation_bodies_and_endpoint_force_scale(
+                    &mut self.samplers,
+                    core::array::from_fn(|a| &shapes[a] as &dyn BodyFrameShape3),
+                    &mut self.bodies, external, scale, origin, gate,
                 )?
             }
         };
