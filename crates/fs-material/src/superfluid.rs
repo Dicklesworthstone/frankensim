@@ -29,6 +29,14 @@ pub mod helium;
 pub mod normal_wall;
 pub use normal_wall::{NormalViscousWall, NormalWallRelaxation, NormalWallStep};
 
+/// Passive unsteady transverse normal-flow modes, including boundary-layer memory.
+pub mod normal_spectrum;
+pub use normal_spectrum::{
+    MAX_NORMAL_VISCOUS_MODES, MAX_RESOLVED_NORMAL_VISCOUS_MODES, NormalViscousFactors,
+    NormalViscousMode, NormalViscousSpectrum, NormalViscousTruncation, PreparedNormalViscousMode,
+    PreparedNormalViscousSpectrum,
+};
+
 /// Explicit SI properties at ONE equilibrium state; no material-name defaults.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TwoFluidProperties {
