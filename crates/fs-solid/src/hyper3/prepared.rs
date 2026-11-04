@@ -316,16 +316,37 @@ impl<L: FiniteStrainPotential> PreparedHyperTetProblem<'_, L> {
         tangent: bool,
         cx: &Cx<'_>,
     ) -> Result<super::gravity::GravityEvaluation, HyperTetError> {
-        let weights = super::gravity::bind_reference_weights(
+        let weights = self.bind_gravity_weights(density, cx)?;
+        self.gravity_evaluate_with_weights(&weights, displacement_m, field, tangent, cx)
+    }
+
+    /// Internal load owners retain these weights with this exact prepared mesh.
+    /// Repeated field evaluations must not rebind or average its mass inventory.
+    pub(super) fn bind_gravity_weights(
+        &self,
+        density: super::gravity::ReferenceGravityDensity<'_>,
+        cx: &Cx<'_>,
+    ) -> Result<super::gravity::ReferenceGravityWeights, HyperTetError> {
+        super::gravity::bind_reference_weights(
             &self.elements,
             self.problem.nodes_m.len(),
             density,
             cx,
-        )?;
+        )
+    }
+
+    pub(super) fn gravity_evaluate_with_weights(
+        &self,
+        weights: &super::gravity::ReferenceGravityWeights,
+        displacement_m: &[f64],
+        field: &super::gravity::GravityField3<'_>,
+        tangent: bool,
+        cx: &Cx<'_>,
+    ) -> Result<super::gravity::GravityEvaluation, HyperTetError> {
         super::gravity::evaluate(
             self.problem.nodes_m,
             &self.elements,
-            &weights,
+            weights,
             displacement_m,
             field,
             tangent,

@@ -869,33 +869,48 @@ experimental material calibration or mesh convergence.
 `HyperTetProblem::prepare_continuation` binds the original prepared P1
 tetrahedra, hyperelastic material adapters, homogeneous supports and dead
 nodal/reference-volume loads to the existing bordered pseudo-arclength owner.
-Explicit positive displacement and force scales define dimensionless free
-coordinates and force residuals. Fixed coordinates are eliminated from the
-path metric; their original applied loads remain in the recovered reactions.
-The native consistent tangent is restricted directly in canonical sparse-row
-order and scaled by L/F, without another material law or repeated COO sorting.
+`prepare_continuation_with_loads` additionally retains native current-area
+pressure and stationary spatial gravity. The pressure surface must match the
+exact reference geometry; original elementwise or P1 nodal density is bound
+once into fixed reference gravity weights. No current-volume mass update or
+cell-average replacement occurs.
 
+Explicit positive displacement and force scales define q=u/L and
+r=(f_int-lambda*f_ext(u))/F. Both the complete displacement tangent
+(K_int-lambda*K_ext)*L/F and the current parameter derivative f_ext(u)/F
+enter every bordered Newton linearization. Material, pressure and gravity
+rows are merged directly in canonical sparse order without another global
+COO buffer, sort or dense intermediate. The parameter scales the held force;
+spatial origins and free-surface planes remain fixed even for negative lambda.
+Nonuniform face patches retain their original nonsymmetric tangent.
+
+Fixed coordinates are eliminated from the path metric, while all supported
+dead, pressure and gravity loads remain in recovered reactions. `held_loads`
+retains the exact original bindings, including explicit zero fields.
 `start_from` admits an actual physical equilibrium against the same force
 equation. `advance` returns a complete candidate, preserving its input even
 when a later requested step fails or is cancelled. `response` recovers metres,
-newtons, stored energy, det F and explicit free-force residuals. The existing
-public `PathState` contains dimensionless free coordinates and trace values;
-its tangent and step control survive split/resume. `PathResidual::checkpoint`
-adds a backward-compatible cancellation hook at corrector and controlled
-FGMRES boundaries; dense factorizations remain bounded leaves of at most
-1024 coordinates. Original element-attributed material errors survive the
-generic continuation boundary.
+newtons, original material stored energy, det F and free-force residuals.
 
-The native `hyper3_continuation` tests include independently derived
-Neo-Hookean lateral contraction, energy/reactions, extreme physical rescaling,
-force/tangent derivatives, checkpoint/cancellation refusals and a descending
-branch past the original logarithmic Neo-Hookean law's large-dilation fold.
-That fold is a constitutive verification fixture, not calibrated rubber
-behavior or a geometric-buckling result. Event locations remain diagnostics;
-no mixed-incompressibility, follower-load continuation, moving supports,
-branch-uniqueness or continuum stability certificate is supplied. Full native
-assembly/API tests require the complete workspace; generic numerical-kernel
-execution alone does not establish that broader coverage.
+The public `PathState` retains dimensionless free coordinates and complete
+trace, tangent and step control for split/resume. `PathResidual::load_vector_at`
+admits state-dependent parameter derivatives while its default preserves
+constant dead loads. Checkpoints run at corrector and controlled FGMRES
+boundaries; dense factorizations remain bounded leaves. Original
+element-attributed material errors survive the generic boundary. The existing
+Cholesky branch diagnostic skips nonsymmetric or oversized tangents; it does
+not interpret a skipped measurement as a change of definiteness.
+
+Native `hyper3_continuation` tests include independent finite-strain force,
+energy/reactions, scaling, pressure/gravity derivatives, hydrostatic load
+turning points, field-domain refusals and atomic cancellation. These folds
+verify the declared constitutive/loading equations; they do not validate
+calibrated rubber behavior or geometric buckling. Generic original-source
+tests additionally exercise nonlinear parameter amplitudes, follower folds,
+bit-identical dead-load compatibility and sparse cancellation. Full native
+assembly/API tests require the complete workspace. Moving supports, evolving
+temperature/history, mixed incompressibility, branch uniqueness and continuum
+stability or flutter certificates remain outside this path interface.
 
 ## Prepared finite-deformation reference geometry
 

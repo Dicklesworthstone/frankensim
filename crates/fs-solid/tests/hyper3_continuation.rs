@@ -16,6 +16,9 @@ use fs_solid::{
 };
 use fs_sparse::{Coo, Csr};
 
+#[path = "hyper3_continuation/loads.rs"]
+mod loads;
+
 const TETS: [[usize; 4]; 1] = [[0, 1, 2, 3]];
 const DIAGONAL_SUPPORTS: [(usize, f64); 9] = [
     (0, 0.0),

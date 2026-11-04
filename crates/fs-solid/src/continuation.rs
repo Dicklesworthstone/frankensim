@@ -7,7 +7,8 @@
 //!
 //! Keller's bordered corrector: at arc state (u, λ) with predictor
 //! tangent (u̇, λ̇), each Newton step solves the full bordered system
-//! `[K, -F_ext; u̇ᵀ, λ̇]`. Unlike a Schur reduction using K⁻¹, this stays
+//! `[∂R/∂u, ∂R/∂λ; u̇ᵀ, λ̇]`, with both derivatives evaluated at the
+//! current trial state. Unlike a Schur reduction using K⁻¹, this stays
 //! regular at a simple fold even when K is singular. Small systems use
 //! pivoted LU; larger systems use matrix-free FGMRES on the generally
 //! nonsymmetric border. Step control reduces on failed correction and grows on
@@ -27,7 +28,11 @@ use fs_sparse::Csr;
 use fs_sparse::precond::IdentityPrecond;
 use std::fmt::Write as _;
 
-/// A parameterized equilibrium residual `R(u, λ) = R_int(u) − λ F_ext`.
+/// A parameterized equilibrium residual `R(u, λ)`.
+///
+/// Dead loads may use `R_int(u) − λ F_ext` and implement only
+/// [`Self::load_vector`]. Follower loads and nonlinear parameter amplitudes
+/// override [`Self::load_vector_at`] with the current `−∂R/∂λ`.
 pub trait PathResidual {
     /// Bounded cancellation hook, polled at path/corrector boundaries and
     /// around every restarted-Krylov callback. Existing pure problems need no
@@ -42,13 +47,28 @@ pub trait PathResidual {
     /// # Errors
     /// Material/state refusals as [`SolidError`].
     fn residual(&self, u: &[f64], lambda: f64) -> Result<Vec<f64>, SolidError>;
-    /// The tangent stiffness at (u, λ).
+    /// The complete displacement derivative `∂R/∂u` at fixed λ.
+    /// For `R = R_int(u) − λ F_ext(u)`, this includes the load derivative
+    /// `K_int(u) − λ ∂F_ext/∂u`, which need not be symmetric.
     ///
     /// # Errors
     /// Material/state refusals as [`SolidError`].
     fn tangent(&self, u: &[f64], lambda: f64) -> Result<Csr, SolidError>;
-    /// `−∂R/∂λ` (the reference load vector, zero on pinned DOFs).
+    /// Constant reference load for the default [`Self::load_vector_at`].
+    /// Existing dead-load problems return `−∂R/∂λ`, zero on pinned DOFs.
     fn load_vector(&self) -> Vec<f64>;
+    /// The parameter derivative `−∂R(u, λ)/∂λ` at fixed u.
+    ///
+    /// Evaluated at each predictor and each Newton linearization. For
+    /// `R = R_int(u) − a(λ) F_ext(u)`, return `a′(λ) F_ext(u)` with the
+    /// same scaling and constrained-DOF convention as the residual.
+    /// The default preserves the constant dead-load implementation.
+    ///
+    /// # Errors
+    /// Material, state, or cancellation refusals as [`SolidError`].
+    fn load_vector_at(&self, _u: &[f64], _lambda: f64) -> Result<Vec<f64>, SolidError> {
+        Ok(self.load_vector())
+    }
 }
 
 /// Continuation controls.
@@ -165,6 +185,22 @@ fn norm(x: &[f64]) -> f64 {
 
 fn invalid(what: &str) -> SolidError {
     SolidError::InvalidInput { what: what.into() }
+}
+
+fn checked_load_vector<P: PathResidual>(
+    problem: &P,
+    u: &[f64],
+    lambda: f64,
+) -> Result<Vec<f64>, SolidError> {
+    problem.checkpoint()?;
+    let load = problem.load_vector_at(u, lambda)?;
+    problem.checkpoint()?;
+    if load.len() != u.len() || load.iter().any(|x| !x.is_finite()) {
+        return Err(invalid(
+            "finite dimension-matched continuation load derivative required",
+        ));
+    }
+    Ok(load)
 }
 
 /// Row equilibration changes neither the equilibrium equation nor the arc
@@ -341,13 +377,26 @@ fn bordered_solve<P: PathResidual>(
 /// tangent stiffness. A path tangent Rayleigh quotient CANNOT see the
 /// transverse singularity of a symmetric bifurcation — factorization
 /// failure can. Gated to n ≤ 1024 (above that, detection is skipped
-/// and branch events are the caller's pencil-monitoring job).
-fn is_positive_definite(k: &Csr) -> bool {
+/// and branch events are the caller's pencil-monitoring job). A nonsymmetric
+/// follower tangent has no Cholesky definiteness interpretation; skip that
+/// diagnostic rather than infer a branch event from one matrix triangle.
+fn is_positive_definite(k: &Csr) -> Option<bool> {
     let n = k.nrows();
     if n > 1024 {
-        return true;
+        return None;
     }
-    fs_la::factor::cholesky(&k.to_dense(), n).is_ok()
+    let dense = k.to_dense();
+    let scale = dense
+        .iter()
+        .fold(f64::MIN_POSITIVE, |scale, x| scale.max(x.abs()));
+    for i in 0..n {
+        for j in 0..i {
+            if (dense[i * n + j] / scale - dense[j * n + i] / scale).abs() > 64.0 * f64::EPSILON {
+                return None;
+            }
+        }
+    }
+    Some(fs_la::factor::cholesky(&dense, n).is_ok())
 }
 
 /// Advance the path by `steps` pseudo-arclength steps.
@@ -393,14 +442,13 @@ pub fn advance<P: PathResidual>(
             "finite dimension-matched path and positive ordered continuation controls required",
         ));
     }
-    let fext = problem.load_vector();
-    if fext.len() != n || fext.iter().any(|x| !x.is_finite()) {
-        return Err(invalid(
-            "finite dimension-matched continuation load required",
-        ));
+    if steps == 0 {
+        // Even a validation-only call must refuse an invalid load derivative.
+        checked_load_vector(problem, &state.u, state.lambda)?;
     }
     for _ in 0..steps {
         problem.checkpoint()?;
+        let fext = checked_load_vector(problem, &state.u, state.lambda)?;
         let k = problem.tangent(&state.u, state.lambda)?;
         if k.nrows() != n
             || k.ncols() != n
@@ -442,15 +490,15 @@ pub fn advance<P: PathResidual>(
         let limit_point = state.step > 0 && lam_dot * state.tangent.1 < 0.0;
         let definite = is_positive_definite(&k);
         problem.checkpoint()?;
-        let branch_point =
-            state.step > 0 && definite != state.last_definite && lam_dot * state.tangent.1 > 0.0;
+        let branch_point = definite.is_some_and(|value| {
+            state.step > 0 && value != state.last_definite && lam_dot * state.tangent.1 > 0.0
+        });
         // Corrector with step halving.
         let mut ds = state.ds;
         loop {
             problem.checkpoint()?;
             match correct(
                 problem,
-                &fext,
                 &state.u,
                 state.lambda,
                 &u_dot,
@@ -472,7 +520,9 @@ pub fn advance<P: PathResidual>(
                             step: state.step,
                         });
                     }
-                    state.last_definite = definite;
+                    if let Some(value) = definite {
+                        state.last_definite = value;
+                    }
                     state.pending_switch = false;
                     state.u = u1;
                     state.lambda = l1;
@@ -503,7 +553,6 @@ pub fn advance<P: PathResidual>(
 #[allow(clippy::too_many_arguments)]
 fn correct<P: PathResidual>(
     problem: &P,
-    fext: &[f64],
     u0: &[f64],
     l0: f64,
     u_dot: &[f64],
@@ -542,11 +591,12 @@ fn correct<P: PathResidual>(
         if it == settings.max_corrector_iters {
             break;
         }
+        let fext = checked_load_vector(problem, &u, lam)?;
         let k = problem.tangent(&u, lam)?;
         // Solve the complete Newton equations, including any accumulated arc
         // defect. At a simple fold this matrix is regular although K is not.
         let neg_r: Vec<f64> = r.iter().map(|x| -x).collect();
-        let delta = bordered_solve(problem, &k, fext, u_dot, lam_dot, &neg_r, -arc)?;
+        let delta = bordered_solve(problem, &k, &fext, u_dot, lam_dot, &neg_r, -arc)?;
         for (ui, du) in u.iter_mut().zip(&delta) {
             *ui += du;
         }

@@ -58,9 +58,13 @@ pub(super) struct GravityEvaluation {
     pub potential_energy_j: f64,
 }
 
-#[derive(Clone, Copy)]
-pub(super) enum ReferenceGravityDensity<'a> {
+/// Positive mass density per original reference volume, never current volume.
+/// Nodal input retains the complete P1 field and its reference mass moments.
+#[derive(Debug, Clone, Copy)]
+pub enum ReferenceGravityDensity<'a> {
+    /// One fixed density [kg/m³] per original tetrahedron, in connectivity order.
     PerElement(&'a [f64]),
+    /// One fixed P1 density [kg/m³] per original mesh node.
     Nodal(&'a [f64]),
 }
 
@@ -82,7 +86,7 @@ fn finite(value: f64) -> Result<f64, HyperTetError> {
 }
 
 impl GravitySample3 {
-    fn validate(self) -> Result<Self, HyperTetError> {
+    pub(super) fn validate(self) -> Result<Self, HyperTetError> {
         finite(self.potential_j_kg)?;
         for value in self.acceleration_m_s2 {
             finite(value)?;

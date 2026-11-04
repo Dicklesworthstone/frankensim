@@ -3,19 +3,21 @@
 //! The native prepared tetrahedra own reference geometry, constitutive domains,
 //! internal force and dP/dF. The existing bordered continuation solver owns
 //! prediction, correction and step control. Only free coordinates enter its
-//! system: `q = u / displacement_m`, `r = (f_int - lambda f_ref) / force_n`.
-//! The reduced Jacobian is exactly `K L / F`.
+//! system: `q = u / displacement_m`, `r = (f_int - lambda f_ext(u)) / force_n`.
+//! The reduced Jacobian is `(K_int - lambda K_ext) L / F`; the load-parameter
+//! column is evaluated at each current predictor/corrector configuration.
 //!
 //! All supports are homogeneous and remain fixed; the load factor scales the
-//! original dead nodal and reference-volume body forces. A state records
+//! original dead nodal and reference-volume body forces and optional native
+//! current-area pressure and stationary gravity. A state records
 //! dimensionless FREE coordinates in [`HyperTetContinuation::free_dofs`] order.
 //! Use [`HyperTetContinuation::response`] for physical displacement, reactions
 //! and energy. A resumed state must satisfy this same problem's force equation.
 //! Each advance returns a complete candidate and cannot mutate its input,
 //! including when a later requested step or cancellation refuses.
 //!
-//! This adds no follower loading, moving supports, thermal/history evolution,
-//! mixed incompressibility or spatial stability certificate. P1 locking and
+//! This adds no moving supports, thermal/history evolution, mixed
+//! incompressibility or spatial stability certificate. P1 locking and
 //! discretization limitations remain those of the original solid. Path events
 //! are the generic solver's diagnostics, not certified bifurcation locations.
 
@@ -30,6 +32,10 @@ use super::prepared::PreparedHyperTetProblem;
 use super::{HyperTetError, HyperTetProblem, checkpoint};
 use crate::SolidError;
 use crate::continuation::{self, ArcSettings, PathResidual, PathState};
+
+mod loads;
+pub use loads::HyperTetPathLoads;
+use loads::PreparedPathLoads;
 
 /// Positive physical scales defining the dimensionless continuation equation.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -108,6 +114,7 @@ pub struct HyperTetContinuation<'a, L: HyperelasticMaterial = Hyperelastic> {
     reference_force_scaled: Vec<f64>,
     scales: HyperTetPathScales,
     tangent_scale: f64,
+    loads: Option<PreparedPathLoads<'a>>,
 }
 
 impl<'a, L: HyperelasticMaterial> HyperTetProblem<'a, L> {
@@ -119,6 +126,25 @@ impl<'a, L: HyperelasticMaterial> HyperTetProblem<'a, L> {
     pub fn prepare_continuation(
         &self,
         scales: HyperTetPathScales,
+        cx: &Cx<'_>,
+    ) -> Result<HyperTetContinuation<'a, L>, HyperTetContinuationError> {
+        self.prepare_continuation_with_loads(scales, HyperTetPathLoads::default(), cx)
+    }
+
+    /// Prepare a path with native pressure and/or stationary external gravity.
+    /// The parameter multiplies the current force of each original held field;
+    /// its exact displacement derivative enters the residual tangent once.
+    /// Reference gravity weights are bound once to this prepared geometry.
+    ///
+    /// All pressure variants retain their native field and source domains.
+    /// Nonuniform face patches may have a nonsymmetric tangent; path events
+    /// supply no conservative-stability or flutter certificate for them.
+    /// Field domains are checked at every evaluated configuration, including
+    /// the starting equilibrium. Material/reference mass is never evolved.
+    pub fn prepare_continuation_with_loads(
+        &self,
+        scales: HyperTetPathScales,
+        loads: HyperTetPathLoads<'a>,
         cx: &Cx<'_>,
     ) -> Result<HyperTetContinuation<'a, L>, HyperTetContinuationError> {
         checkpoint(cx)?;
@@ -137,6 +163,7 @@ impl<'a, L: HyperelasticMaterial> HyperTetProblem<'a, L> {
             ));
         }
         let prepared = self.prepare(cx)?;
+        let loads = PreparedPathLoads::prepare(self, &prepared, loads, cx)?;
         let reference_force_n =
             prepared.external_force_n(self.nodal_forces_n, self.body_force_n_m3, cx)?;
         let mut full_to_free = vec![0; reference_force_n.len()];
@@ -157,7 +184,7 @@ impl<'a, L: HyperelasticMaterial> HyperTetProblem<'a, L> {
         if reference_force_scaled
             .iter()
             .any(|value| !value.is_finite())
-            || !reference_force_scaled.iter().any(|&value| value != 0.0)
+            || (loads.is_none() && !reference_force_scaled.iter().any(|&value| value != 0.0))
         {
             return Err(invalid(
                 "finite nonzero normalized dead force on free coordinates required",
@@ -173,6 +200,7 @@ impl<'a, L: HyperelasticMaterial> HyperTetProblem<'a, L> {
             reference_force_scaled,
             scales,
             tangent_scale,
+            loads,
         })
     }
 }
@@ -191,6 +219,63 @@ impl<L: HyperelasticMaterial> HyperTetContinuation<'_, L> {
     /// Original complete dead load, including loads applied at fixed supports.
     pub fn reference_force_n(&self) -> &[f64] {
         &self.reference_force_n
+    }
+
+    /// Original pressure/density/field bindings, separate from the dead load.
+    /// An explicit zero field remains retained. No equivalent dead load replaces it.
+    pub fn held_loads(&self) -> HyperTetPathLoads<'_> {
+        self.loads
+            .as_ref()
+            .map_or_else(HyperTetPathLoads::default, |loads| loads.input)
+    }
+
+    fn load_n(
+        &self,
+        displacement: &[f64],
+        lambda: f64,
+        cx: &Cx<'_>,
+    ) -> Result<Vec<f64>, HyperTetContinuationError> {
+        let mut force = self.reference_force_n.clone();
+        if let Some(loads) = &self.loads {
+            loads.add_force(&self.prepared, displacement, &mut force, cx)?;
+        }
+        if force.iter().any(|force| !(lambda * force).is_finite()) {
+            return Err(invalid("applied continuation force is not representable"));
+        }
+        Ok(force)
+    }
+
+    fn scaled_load(
+        &self,
+        displacement: &[f64],
+        lambda: f64,
+        cx: &Cx<'_>,
+    ) -> Result<Vec<f64>, HyperTetContinuationError> {
+        let force = self.load_n(displacement, lambda, cx)?;
+        let scaled: Vec<_> = self
+            .free_dofs
+            .iter()
+            .map(|&dof| force[dof] / self.scales.force_n)
+            .collect();
+        if scaled.iter().any(|value| !value.is_finite()) {
+            return Err(invalid("normalized continuation load is not finite"));
+        }
+        checkpoint(cx)?;
+        Ok(scaled)
+    }
+
+    /// Exact negative load-parameter derivative of the normalized residual.
+    /// Follower loads are evaluated at the same physical configuration as q;
+    /// their directions, areas and gravity sampling positions are not frozen.
+    pub fn load_vector_at(
+        &self,
+        q: &[f64],
+        lambda: f64,
+        cx: &Cx<'_>,
+    ) -> Result<Vec<f64>, HyperTetContinuationError> {
+        checkpoint(cx)?;
+        let displacement = self.displacement(q, lambda)?;
+        self.scaled_load(&displacement, lambda, cx)
     }
 
     fn displacement(&self, q: &[f64], lambda: f64) -> Result<Vec<f64>, HyperTetContinuationError> {
@@ -226,10 +311,17 @@ impl<L: HyperelasticMaterial> HyperTetContinuation<'_, L> {
         checkpoint(cx)?;
         let u = self.displacement(q, lambda)?;
         let internal = self.prepared.internal_force(&u, cx)?;
+        let current_load;
+        let load = if self.loads.is_some() {
+            current_load = self.scaled_load(&u, lambda, cx)?;
+            &current_load
+        } else {
+            &self.reference_force_scaled
+        };
         let result: Vec<_> = self
             .free_dofs
             .iter()
-            .zip(&self.reference_force_scaled)
+            .zip(load)
             .map(|(&dof, force)| internal[dof] / self.scales.force_n - lambda * force)
             .collect();
         if result.iter().any(|value| !value.is_finite()) {
@@ -251,40 +343,20 @@ impl<L: HyperelasticMaterial> HyperTetContinuation<'_, L> {
         checkpoint(cx)?;
         let u = self.displacement(q, lambda)?;
         let full = self.prepared.tangent_matrix(&u, cx)?;
-        let n = self.free_dofs.len();
-        let mut rows = Vec::with_capacity(n + 1);
-        let mut columns = Vec::new();
-        let mut values = Vec::new();
-        rows.push(0);
-        for (row, &dof) in self.free_dofs.iter().enumerate() {
-            if row % 256 == 0 {
-                checkpoint(cx)?;
-            }
-            let (full_columns, full_values) = full.row(dof);
-            for (&column, &value) in full_columns.iter().zip(full_values) {
-                let free_column = self.full_to_free[column];
-                if free_column != usize::MAX {
-                    let scaled = value * self.tangent_scale;
-                    if !scaled.is_finite() {
-                        return Err(invalid("normalized native tangent is not finite"));
-                    }
-                    columns.push(free_column);
-                    values.push(scaled);
-                }
-            }
-            rows.push(values.len());
-        }
-        // Original rows are canonical and the free map is increasing. Restrict
-        // directly in O(nnz), without another COO buffer, duplicate reduction
-        // or sort at every predictor/corrector evaluation.
-        let tangent =
-            Csr::try_from_parts_with_checkpoint(n, n, rows, columns, values, || checkpoint(cx))?
-                .ok_or_else(|| SolidError::InternalInvariant {
-                    what: "canonical native tangent lost ordering during free-DOF restriction"
-                        .into(),
-                })?;
-        checkpoint(cx)?;
-        Ok(tangent)
+        let (pressure, gravity) = match &self.loads {
+            Some(loads) if lambda != 0.0 => loads.tangents(&self.prepared, &u, cx)?,
+            _ => (None, None),
+        };
+        loads::restrict_tangent(
+            &full,
+            pressure.as_ref(),
+            gravity.as_ref(),
+            lambda,
+            self.tangent_scale,
+            &self.free_dofs,
+            &self.full_to_free,
+            cx,
+        )
     }
 
     /// Start at the unloaded reference configuration, admitted as equilibrium.
@@ -382,10 +454,17 @@ impl<L: HyperelasticMaterial> HyperTetContinuation<'_, L> {
         checkpoint(cx)?;
         let u = self.displacement(&state.u, state.lambda)?;
         let evaluated = self.prepared.evaluate(&u, cx)?;
+        let current_load;
+        let load = if self.loads.is_some() {
+            current_load = self.load_n(&u, state.lambda, cx)?;
+            &current_load
+        } else {
+            &self.reference_force_n
+        };
         let residual: Vec<_> = evaluated
             .internal
             .iter()
-            .zip(&self.reference_force_n)
+            .zip(load)
             .map(|(internal, force)| internal - state.lambda * force)
             .collect();
         if residual.iter().any(|value| !value.is_finite()) {
@@ -460,5 +539,11 @@ impl<L: HyperelasticMaterial> PathResidual for PathAdapter<'_, '_, '_, '_, L> {
     }
     fn load_vector(&self) -> Vec<f64> {
         self.owner.reference_force_scaled.clone()
+    }
+    fn load_vector_at(&self, u: &[f64], lambda: f64) -> Result<Vec<f64>, SolidError> {
+        if self.owner.loads.is_none() {
+            return Ok(self.owner.reference_force_scaled.clone());
+        }
+        self.bridge(self.owner.load_vector_at(u, lambda, self.cx))
     }
 }
