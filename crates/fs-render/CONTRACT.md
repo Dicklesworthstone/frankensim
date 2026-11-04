@@ -3842,6 +3842,36 @@ the caller's native primitive list without copying meshes or changing existing
 primitive indices. Native static/animated object-ID collisions refuse. The
 append is staged, so cancellation/refusal leaves primitive contents unchanged.
 
+`replacement.replace_geometry_in(&previous, primitives, cx)` updates an already
+mounted rig between discrete lighting snapshots. Both rigs must contain the
+same native object-ID set; fixture/body ordering may differ. Every previous
+body, including non-emitting housing, must still be mounted exactly once with
+its original static instance, shared geometry handle, geometry identity,
+placement and material, and without a legacy emission override. Missing,
+duplicated, animated or stale targets and added/removed object IDs refuse
+before any scene edit. Refusals identify the previous fixture and native object
+where applicable.
+
+Replacement instances are staged with fallible allocation and cancellation
+checkpoints, followed by a final checkpoint before an infallible assignment
+phase. Cancellation observed during preparation exposes no partial update;
+cancellation arriving after the final checkpoint does not interrupt publication.
+The scene keeps its length and primitive ordering, unrelated primitives and
+supplemental area-emitter indices. Returned scene indices follow the replacement
+rig's geometry order. Native geometry handles remain shared rather than copying
+mesh buffers. Original and replacement rigs remain immutable, and the caller
+admits new lighting jobs against the replacement rig and updated scene through
+the usual geometry/transport owners.
+
+This operation does not interpolate poses or controls over an exposure, update
+an already prepared job, or claim incremental acceleration-structure refitting.
+It permits a new material or shared geometry under an unchanged native object
+ID; subsequent native job admission still validates the resulting optical and
+geometric inputs. Regression cases compare moved multi-emitter snapshots with
+fresh mounting, preserve independent controls and supplemental bindings, check
+atomic refusal/cancellation and exercise a representative 300-fixture update.
+These are functional cases, not throughput or physical error qualifications.
+
 Rig path constructors resolve each finite source's rig-local geometry slot to
 the actual scene slot by native object ID, independent of insertion offset or
 later primitive ordering. Missing bodies, duplicate object IDs and mismatched

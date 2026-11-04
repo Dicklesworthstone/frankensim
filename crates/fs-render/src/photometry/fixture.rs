@@ -423,7 +423,7 @@ pub struct AssembledFixture {
 /// Assembly refusals retain the fixture/emitter responsible for invalid data.
 #[derive(Debug)]
 pub enum FixtureError {
-    /// No partial rig or partial body append is published on cancellation.
+    /// No partial rig, body append or body replacement is published on cancellation.
     Cancelled,
     /// A fixture ID was zero or repeated.
     InvalidFixtureId(FixtureId),
@@ -443,6 +443,28 @@ pub enum FixtureError {
     },
     /// Native geometry object identities must be unique across the rig/scene.
     DuplicateGeometryId(u64),
+    /// Replacing mounted geometry requires the same native object-ID set.
+    GeometrySetMismatch {
+        /// First differing sorted ID in the previous snapshot, or no remaining ID.
+        previous: Option<u64>,
+        /// First differing sorted ID in the replacement, or no remaining ID.
+        replacement: Option<u64>,
+    },
+    /// A previous snapshot's body is absent from the scene being updated.
+    GeometryNotMounted {
+        /// Containing fixture in the previous snapshot.
+        fixture: FixtureId,
+        /// Native object identity required by that snapshot.
+        object_id: u64,
+    },
+    /// A mounted body differs from the previous snapshot, is animated, or has
+    /// legacy emission that a replacement must not silently discard.
+    GeometrySnapshotMismatch {
+        /// Containing fixture in the previous snapshot.
+        fixture: FixtureId,
+        /// Native object identity whose mounted state differs.
+        object_id: u64,
+    },
     /// A finite source names an absent geometry slot or repeats another finite
     /// source's slot. Each native primitive has one calibrated emission law.
     InvalidSurfaceBinding {
@@ -766,46 +788,19 @@ impl PhotometricRig {
         if self.surfaces.is_empty() {
             return Ok(Vec::new());
         }
-        let mut objects = reserved(primitives.len())?;
-        for (index, primitive) in primitives.iter().enumerate() {
-            cx.checkpoint()?;
-            let object_id = match &primitive.shape {
-                Shape::Instance(instance) => instance.object_id(),
-                Shape::AnimatedInstance(instance) => instance.object_id(),
-                _ => continue,
-            };
-            objects.push((object_id, index));
-        }
-        objects.sort_unstable_by_key(|&(id, _)| id);
-        cx.checkpoint()?;
+        let objects = scene_object_index(primitives, cx)?;
         let mut bindings = reserved(self.surfaces.len())?;
         for (source, &identity) in self.surfaces.iter().zip(&self.surface_identities) {
             cx.checkpoint()?;
             let body = &self.geometry[source.primitive_index()];
-            let original = &body.instance;
-            let object_id = original.object_id();
-            let slot = objects.partition_point(|&(id, _)| id < object_id);
-            let &(found_id, primitive_index) = objects
-                .get(slot)
-                .filter(|&&(id, _)| id == object_id)
-                .ok_or(FixtureError::SurfaceNotMounted {
+            let object_id = body.instance.object_id();
+            let primitive_index =
+                object_slot(&objects, object_id)?.ok_or(FixtureError::SurfaceNotMounted {
                     identity,
                     object_id,
                 })?;
-            if objects.get(slot + 1).is_some_and(|&(id, _)| id == found_id) {
-                return Err(FixtureError::DuplicateGeometryId(object_id));
-            }
             let primitive = &primitives[primitive_index];
-            let matches = match &primitive.shape {
-                Shape::Instance(instance) => {
-                    instance.geometry_identity() == original.geometry_identity()
-                        && instance.transform() == original.transform()
-                        && instance.geometry().ptr_eq(original.geometry())
-                        && primitive.material == body.material
-                }
-                _ => false,
-            };
-            if !matches {
+            if !mounted_body_matches(body, primitive) {
                 return Err(FixtureError::SurfaceGeometryMismatch {
                     identity,
                     object_id,
@@ -864,6 +859,153 @@ impl PhotometricRig {
         let start = primitives.len();
         primitives.extend(staged);
         Ok(start..primitives.len())
+    }
+
+    /// Replace a mounted rig's native bodies with this newly assembled snapshot.
+    ///
+    /// `previous` and `self` must contain the same native object-ID set, but may
+    /// order fixtures and body parts differently. Every previous body must still
+    /// be mounted exactly once with its original shared geometry, identity,
+    /// rigid transform, material and no legacy emission. Unrelated primitives
+    /// are retained. Replacement geometry handles, transforms and materials
+    /// come from this rig; meshes are never copied.
+    ///
+    /// The returned scene indices follow this rig's geometry order. No scene
+    /// slots are inserted, removed or reordered, so supplemental emitter
+    /// bindings keep their indices. Construct new native lighting/transport
+    /// jobs using this rig and the updated primitive list after success. Source
+    /// calibration, optical controls and physical admission stay with those
+    /// existing owners; this operation does not interpolate motion or retune
+    /// already prepared jobs.
+    ///
+    /// All validation, index allocation and replacement staging precede a final
+    /// cancellation checkpoint. After it, only complete native-instance moves
+    /// occur. Refusal or observed cancellation leaves every primitive unchanged;
+    /// cancellation arriving after the final checkpoint permits a complete
+    /// update. Preparation checkpoints per body and scene primitive, with
+    /// checkpoints around sorting. Sorting and the final moves are not
+    /// preemptible, and no wall-clock cancellation bound is claimed.
+    pub fn replace_geometry_in(
+        &self,
+        previous: &Self,
+        primitives: &mut [Primitive],
+        cx: &Cx<'_>,
+    ) -> Result<Vec<usize>, FixtureError> {
+        cx.checkpoint()?;
+        if self.geometry.is_empty() && previous.geometry.is_empty() {
+            return Ok(Vec::new());
+        }
+        let previous_objects = geometry_object_index(&previous.geometry, cx)?;
+        let replacement_objects = geometry_object_index(&self.geometry, cx)?;
+        for slot in 0..previous_objects.len().max(replacement_objects.len()) {
+            cx.checkpoint()?;
+            let previous_id = previous_objects.get(slot).map(|&(id, _)| id);
+            let replacement_id = replacement_objects.get(slot).map(|&(id, _)| id);
+            if previous_id != replacement_id {
+                return Err(FixtureError::GeometrySetMismatch {
+                    previous: previous_id,
+                    replacement: replacement_id,
+                });
+            }
+        }
+
+        let objects = scene_object_index(primitives, cx)?;
+        let mut indices = reserved(self.geometry.len())?;
+        indices.resize(self.geometry.len(), 0);
+        for (&(object_id, previous_index), &(_, replacement_index)) in
+            previous_objects.iter().zip(&replacement_objects)
+        {
+            cx.checkpoint()?;
+            let fixture_index = previous
+                .fixtures
+                .partition_point(|fixture| fixture.geometry.end <= previous_index);
+            let fixture = previous.fixtures[fixture_index].id;
+            let primitive_index = object_slot(&objects, object_id)?
+                .ok_or(FixtureError::GeometryNotMounted { fixture, object_id })?;
+            let primitive = &primitives[primitive_index];
+            if !mounted_body_matches(&previous.geometry[previous_index], primitive)
+                || primitive.emission.is_some()
+            {
+                return Err(FixtureError::GeometrySnapshotMismatch { fixture, object_id });
+            }
+            indices[replacement_index] = primitive_index;
+        }
+        let mut staged = reserved(self.geometry.len())?;
+        for body in &self.geometry {
+            cx.checkpoint()?;
+            staged.push(Primitive {
+                shape: Shape::Instance(body.instance.clone()),
+                material: body.material,
+                emission: None,
+            });
+        }
+        cx.checkpoint()?;
+        // `previous` keeps every original shared geometry alive. These moves
+        // neither allocate nor destroy the last geometry handle, and every
+        // destination index was validated before this publication boundary.
+        for (&index, primitive) in indices.iter().zip(staged) {
+            primitives[index] = primitive;
+        }
+        Ok(indices)
+    }
+}
+
+fn geometry_object_index(
+    geometry: &[FixtureGeometry],
+    cx: &Cx<'_>,
+) -> Result<Vec<(u64, usize)>, FixtureError> {
+    let mut objects = reserved(geometry.len())?;
+    for (index, body) in geometry.iter().enumerate() {
+        cx.checkpoint()?;
+        objects.push((body.instance.object_id(), index));
+    }
+    cx.checkpoint()?;
+    objects.sort_unstable_by_key(|&(id, _)| id);
+    cx.checkpoint()?;
+    Ok(objects)
+}
+
+fn scene_object_index(
+    primitives: &[Primitive],
+    cx: &Cx<'_>,
+) -> Result<Vec<(u64, usize)>, FixtureError> {
+    let mut objects = reserved(primitives.len())?;
+    for (index, primitive) in primitives.iter().enumerate() {
+        cx.checkpoint()?;
+        let object_id = match &primitive.shape {
+            Shape::Instance(instance) => instance.object_id(),
+            Shape::AnimatedInstance(instance) => instance.object_id(),
+            _ => continue,
+        };
+        objects.push((object_id, index));
+    }
+    cx.checkpoint()?;
+    objects.sort_unstable_by_key(|&(id, _)| id);
+    cx.checkpoint()?;
+    Ok(objects)
+}
+
+fn object_slot(objects: &[(u64, usize)], object_id: u64) -> Result<Option<usize>, FixtureError> {
+    let slot = objects.partition_point(|&(id, _)| id < object_id);
+    let Some(&(found_id, index)) = objects.get(slot).filter(|&&(id, _)| id == object_id) else {
+        return Ok(None);
+    };
+    if objects.get(slot + 1).is_some_and(|&(id, _)| id == found_id) {
+        return Err(FixtureError::DuplicateGeometryId(object_id));
+    }
+    Ok(Some(index))
+}
+
+fn mounted_body_matches(body: &FixtureGeometry, primitive: &Primitive) -> bool {
+    let original = &body.instance;
+    match &primitive.shape {
+        Shape::Instance(instance) => {
+            instance.geometry_identity() == original.geometry_identity()
+                && instance.transform() == original.transform()
+                && instance.geometry().ptr_eq(original.geometry())
+                && primitive.material == body.material
+        }
+        _ => false,
     }
 }
 
