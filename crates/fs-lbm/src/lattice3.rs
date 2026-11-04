@@ -13,6 +13,8 @@ pub mod rheology;
 mod sgs;
 /// Spatial and time-dependent force fields on the same native step owner.
 pub mod sources;
+/// Momentum-exchange drag and torque on selected stationary halfway walls.
+pub mod wall_loads;
 
 /// A fixed population lattice and its caller-selected collision law.
 pub trait Lattice3<const Q: usize>: Send + Sync + 'static {
@@ -287,6 +289,18 @@ impl<L: Lattice3<Q>, const Q: usize> Grid3<L, Q> {
         cx: &Cx<'_>,
         collisions: Option<&[L::Collision]>,
     ) -> Result<(), GridError3<L::Error>> {
+        self.step_serial_observed(cx, collisions, |_| Ok(()))
+    }
+    fn step_serial_observed<R>(
+        &mut self,
+        cx: &Cx<'_>,
+        collisions: Option<&[L::Collision]>,
+        observe: impl FnOnce(&Self) -> Result<R, GridError3<L::Error>>,
+    ) -> Result<R, GridError3<L::Error>> {
+        let step = self
+            .completed_steps
+            .checked_add(1)
+            .ok_or(GridError3::Input("step count overflow"))?;
         let data = StepData::<L, Q> {
             dims: self.dims,
             periodic: self.periodic,
@@ -306,10 +320,11 @@ impl<L: Lattice3<Q>, const Q: usize> Grid3<L, Q> {
             cx.checkpoint().map_err(|_| GridError3::Cancelled)?;
             data.process(&self.post, chunk, tile * 64, true)?;
         }
+        let receipt = observe(self)?;
         cx.checkpoint().map_err(|_| GridError3::Cancelled)?;
         std::mem::swap(&mut self.f, &mut self.next);
-        self.completed_steps += 1;
-        Ok(())
+        self.completed_steps = step;
+        Ok(receipt)
     }
     /// Real executor seam. The fixed partition never depends on worker count;
     /// each mutable chunk has one logical owner. Neither pass publishes early.
@@ -364,6 +379,19 @@ impl<L: Lattice3<Q>, const Q: usize> Grid3<L, Q> {
         gate: &CancelGate,
         collisions: Option<&[L::Collision]>,
     ) -> Result<(), GridError3<L::Error>> {
+        self.step_pooled_observed(pool, gate, collisions, |_| Ok(()))
+    }
+    fn step_pooled_observed<R, P: KernelRunner>(
+        &mut self,
+        pool: &P,
+        gate: &CancelGate,
+        collisions: Option<&[L::Collision]>,
+        observe: impl FnOnce(&Self) -> Result<R, GridError3<L::Error>>,
+    ) -> Result<R, GridError3<L::Error>> {
+        let step = self
+            .completed_steps
+            .checked_add(1)
+            .ok_or(GridError3::Input("step count overflow"))?;
         let data = StepData::<L, Q> {
             dims: self.dims,
             periodic: self.periodic,
@@ -377,12 +405,13 @@ impl<L: Lattice3<Q>, const Q: usize> Grid3<L, Q> {
         };
         run_pass(&data, &self.f, &mut self.post, false, pool, gate)?;
         run_pass(&data, &self.post, &mut self.next, true, pool, gate)?;
+        let receipt = observe(self)?;
         if gate.is_requested() {
             return Err(GridError3::Cancelled);
         }
         std::mem::swap(&mut self.f, &mut self.next);
-        self.completed_steps += 1;
-        Ok(())
+        self.completed_steps = step;
+        Ok(receipt)
     }
 }
 

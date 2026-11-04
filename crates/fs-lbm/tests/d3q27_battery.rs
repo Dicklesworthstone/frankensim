@@ -960,6 +960,256 @@ fn bits<L: fs_lbm::lattice3::Lattice3<Q>, const Q: usize>(grid: &Grid3<L, Q>) ->
 }
 
 #[test]
+fn wall_momentum_recovers_channel_pressure_without_spurious_drag() {
+    with_cx(|cx| {
+        let mut grid = Grid3::<D3q27, 27>::try_new(
+            [6, 4, 5],
+            config(CollisionModel27::Bgk {
+                tau: 0.8,
+                equilibrium: Equilibrium27::Factorized,
+            }),
+            [0.0; 3],
+            [true, false, true],
+            GridBudget3 {
+                maximum_cells: 120,
+                maximum_mach: 0.2,
+            },
+            |_| false,
+            |_| equilibrium27(1.3, [0.0; 3], Equilibrium27::Factorized),
+        )
+        .unwrap();
+        let probe = grid
+            .wall_momentum_probe(cx, [3.0, 0.0, 2.5], |link| link.exterior_faces[2])
+            .unwrap();
+        assert_eq!(probe.measured_links(), 6 * 5 * 9);
+        let load = grid
+            .step_serial_with_wall_momentum(cx, &probe, None)
+            .unwrap();
+        assert!((load.wall_impulse[1] + 1.3 * CS2_27 * 30.0).abs() < 1e-13);
+        assert!(load.wall_impulse[0].abs() < 1e-14);
+        assert!(load.wall_impulse[2].abs() < 1e-14);
+        assert!(load.wall_angular_impulse.iter().all(|v| v.abs() < 1e-13));
+    });
+}
+
+fn wall_balance<L: fs_lbm::lattice3::Lattice3<Q>, const Q: usize>(
+    collision: L::Collision,
+    equilibrium: impl Fn(f64, [f64; 3]) -> [f64; Q],
+) {
+    // G0/G3: an enclosed driven fluid exchanges exactly the measured impulse
+    // and torque with its exterior walls and off-centre obstacle. Diagonal
+    // links at multi-face corners must be counted once, not once per face.
+    let dims = [5, 4, 3];
+    let obstacle = [1, 2, 1];
+    let force = [2e-5, -3e-5, 1e-5];
+    let origin = [0.3, -0.7, 1.1];
+    let make_grid = || {
+        Grid3::<L, Q>::try_new(
+            dims,
+            collision,
+            force,
+            [false; 3],
+            GridBudget3 {
+                maximum_cells: 60,
+                maximum_mach: 0.2,
+            },
+            |p| p == obstacle,
+            |p| {
+                equilibrium(
+                    1.0 + 0.001 * p[0] as f64,
+                    [
+                        0.008 * p[1] as f64,
+                        -0.006 * p[2] as f64,
+                        0.004 * p[0] as f64,
+                    ],
+                )
+            },
+        )
+        .unwrap()
+    };
+    let momentum = |grid: &Grid3<L, Q>| {
+        let mut result = [0.0; 6];
+        for (cell, populations) in grid.populations().iter().enumerate() {
+            let p = [cell % 5, (cell / 5) % 4, cell / 20];
+            if p == obstacle {
+                continue;
+            }
+            let r: [f64; 3] = core::array::from_fn(|a| p[a] as f64 + 0.5 - origin[a]);
+            for (q, &population) in populations.iter().enumerate() {
+                let j = L::E[q].map(|e| f64::from(e) * population);
+                for a in 0..3 {
+                    result[a] += j[a];
+                }
+                result[3] += r[1] * j[2] - r[2] * j[1];
+                result[4] += r[2] * j[0] - r[0] * j[2];
+                result[5] += r[0] * j[1] - r[1] * j[0];
+            }
+        }
+        result
+    };
+    with_cx(|cx| {
+        let mut measured = make_grid();
+        let mut ordinary = make_grid();
+        let probe = measured.wall_momentum_probe(cx, origin, |_| true).unwrap();
+        let mut applied = [0.0; 6];
+        for cell in 0..60 {
+            let p = [cell % 5, (cell / 5) % 4, cell / 20];
+            if p == obstacle {
+                continue;
+            }
+            let r: [f64; 3] = core::array::from_fn(|a| p[a] as f64 + 0.5 - origin[a]);
+            for a in 0..3 {
+                applied[a] += force[a];
+            }
+            applied[3] += r[1] * force[2] - r[2] * force[1];
+            applied[4] += r[2] * force[0] - r[0] * force[2];
+            applied[5] += r[0] * force[1] - r[1] * force[0];
+        }
+        for _ in 0..4 {
+            let before = momentum(&measured);
+            let load = measured
+                .step_serial_with_wall_momentum(cx, &probe, None)
+                .unwrap();
+            ordinary.step_serial(cx).unwrap();
+            assert_eq!(bits(&measured), bits(&ordinary));
+            let after = momentum(&measured);
+            for (a, wall) in load
+                .wall_impulse
+                .into_iter()
+                .chain(load.wall_angular_impulse)
+                .enumerate()
+            {
+                assert!(
+                    (after[a] - before[a] + wall - applied[a]).abs() < 2e-12,
+                    "axis={a}, fluid={}, wall={wall}, drive={}",
+                    after[a] - before[a],
+                    applied[a]
+                );
+            }
+        }
+    });
+}
+
+#[test]
+fn wall_momentum_balances_native_d3q19_and_d3q27_force_and_torque() {
+    wall_balance::<D3q19, 19>(
+        fs_lbm::d3q19::CollisionModel3::Bgk { tau: 0.8 },
+        fs_lbm::d3q19::equilibrium3,
+    );
+    for model in [
+        CollisionModel27::Bgk {
+            tau: 0.8,
+            equilibrium: Equilibrium27::Factorized,
+        },
+        CollisionModel27::CentralMoment {
+            rates: rates(1.2, 0.8),
+        },
+        CollisionModel27::Cumulant {
+            rates: rates(1.2, 0.8),
+        },
+    ] {
+        wall_balance::<D3q27, 27>(config(model), |rho, u| {
+            equilibrium27(rho, u, Equilibrium27::Factorized)
+        });
+    }
+}
+
+#[test]
+fn wall_momentum_worker_invariance_material_field_and_refusal_are_atomic() {
+    with_cx(|cx| {
+        let mut serial = seeded_grid();
+        let probe = serial
+            .wall_momentum_probe(cx, [2.4, 3.1, 1.7], |link| link.solid_cell.is_some())
+            .unwrap();
+        assert_eq!(probe.measured_links(), 26);
+        let collisions: Vec<_> = (0..serial.populations().len())
+            .map(|i| {
+                config(CollisionModel27::Bgk {
+                    tau: 0.7 + (i % 3) as f64 * 0.1,
+                    equilibrium: Equilibrium27::Factorized,
+                })
+            })
+            .collect();
+        let mut receipts = Vec::new();
+        for _ in 0..5 {
+            receipts.push(
+                serial
+                    .step_serial_with_wall_momentum(cx, &probe, Some(&collisions))
+                    .unwrap(),
+            );
+        }
+        for workers in [1, 2, 7] {
+            let pool = TilePool::for_host(workers, SEED);
+            let gate = CancelGate::new_clock_free();
+            let mut grid = seeded_grid();
+            for expected in &receipts {
+                let actual = grid
+                    .step_pooled_with_wall_momentum(&pool, &gate, &probe, Some(&collisions))
+                    .unwrap();
+                assert_eq!(actual, *expected);
+            }
+            assert_eq!(bits(&grid), bits(&serial));
+        }
+        let mut grid = seeded_grid();
+        let before = bits(&grid);
+        let invalid = &collisions[..collisions.len() - 1];
+        assert!(
+            grid.step_serial_with_wall_momentum(cx, &probe, Some(invalid))
+                .is_err()
+        );
+        let gate = CancelGate::new_clock_free();
+        gate.request();
+        assert!(matches!(
+            grid.step_pooled_with_wall_momentum(&TilePool::for_host(2, SEED), &gate, &probe, None),
+            Err(GridError3::Cancelled)
+        ));
+        assert_eq!(bits(&grid), before);
+        assert_eq!(grid.completed_steps(), 0);
+        assert!(
+            grid.wall_momentum_probe(cx, [f64::NAN, 0.0, 0.0], |_| true)
+                .is_err()
+        );
+    });
+}
+
+#[test]
+fn wall_momentum_unrepresentable_torque_cannot_publish_a_step() {
+    with_cx(|cx| {
+        let mut grid = Grid3::<D3q27, 27>::try_new(
+            [3; 3],
+            config(CollisionModel27::Bgk {
+                tau: 0.8,
+                equilibrium: Equilibrium27::Factorized,
+            }),
+            [0.0; 3],
+            [false; 3],
+            GridBudget3 {
+                maximum_cells: 27,
+                maximum_mach: 0.2,
+            },
+            |_| false,
+            |_| equilibrium27(100.0, [0.0; 3], Equilibrium27::Factorized),
+        )
+        .unwrap();
+        let before = bits(&grid);
+        let probe = grid
+            .wall_momentum_probe(cx, [f64::MAX, 0.0, 0.0], |link| link.exterior_faces[2])
+            .unwrap();
+        assert!(matches!(
+            grid.step_serial_with_wall_momentum(cx, &probe, None),
+            Err(GridError3::NonFiniteCell { .. })
+        ));
+        assert_eq!(bits(&grid), before);
+        assert_eq!(grid.completed_steps(), 0);
+        // A fresh admissible probe can accept the same physical step.
+        let finite = grid.wall_momentum_probe(cx, [0.0; 3], |_| true).unwrap();
+        grid.step_serial_with_wall_momentum(cx, &finite, None)
+            .unwrap();
+        assert_eq!(grid.completed_steps(), 1);
+    });
+}
+
+#[test]
 fn d3q27_bitwise_worker_count_invariance() {
     let mut reference = seeded_grid();
     with_cx(|cx| {

@@ -2261,6 +2261,24 @@ step count on collision, pool or cancellation refusal. Cancellation is polled
 at each tile and before publication. The library spawns no threads itself;
 specialized D3Q19 sparse/boundary/SIMD owners are not redirected or duplicated.
 
+`Grid3::wall_momentum_probe` compiles selected solid or nonperiodic exterior
+halfway links once. `step_serial_with_wall_momentum` and its pooled counterpart
+return the wall impulse and torque from the actual outgoing post-collision and
+incoming streamed populations, including pressure and viscous traction. Each
+corner/edge link is counted once. The optional collision field retains the same
+material or SGS viscosity binding as the ordinary per-cell step. Only selected
+links are revisited for measurement; compensated sums use canonical link order
+for serial/worker-count agreement and resolve drag against cancelling pressure.
+The receipt and populations publish together: topology, arithmetic, collision
+or cancellation refusal leaves accepted state untouched. Positions are halfway
+intersections with cell centres at integer coordinates plus one half; torque
+uses that domain image about the explicit origin. Force scales by
+`rho_scale*dx^4/dt^2`, torque by `rho_scale*dx^5/dt^2`. This stationary-wall
+measurement does not add moving-wall work or a continuous-image torque model
+for bodies crossing periodic seams. The `wall_momentum_*` native battery checks
+channel pressure, force/torque balance with applied forcing and an obstacle,
+material-field stepping, unchanged populations and worker counts 1/2/7.
+
 AcousticScalingPlan::from_gas uses the supplied GasState nu=mu/rho and c plus
 explicit dx, maximum physical speed and Mach cap. It returns dt=sqrt(1/3)dx/c,
 nu_lu=nu*dt/dx^2, tau=0.5+3nu_lu and the existing ScalingPlan. Invalid,
