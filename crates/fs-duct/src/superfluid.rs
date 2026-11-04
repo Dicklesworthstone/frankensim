@@ -15,22 +15,26 @@
 //! before publishing. Cancellation polls are bounded by 128 cells.
 //!
 //! Explicit mutual friction uses exact local material updates in a symmetric
-//! split. Lost relative kinetic energy is exported as heat once; it is not
-//! silently injected into this first-order thermal perturbation equation.
+//! split. Optional normal-fluid wall viscosity uses an exponentially fitted
+//! wave/source step, retaining the clamped-normal fourth-sound limit without
+//! resolving the fast wall-relaxation time. Both losses are exported as heat
+//! once; they are not injected into the linear temperature perturbation.
 //! Reported storage is wave availability, not absolute internal energy.
 //! The boundary thermal wave work is `T' q/T0`, distinct from transported heat.
-//! Nonlinear heating/phase feedback, vortex geometry/evolution, critical velocities, normal
-//! viscous boundary layers, longitudinal viscosity, second viscosities,
+//! The authored wall permeability is a quasisteady laminar closure. Nonlinear
+//! heating/phase feedback, vortex geometry/evolution, critical velocities,
+//! resolved oscillatory boundary layers, longitudinal/second viscosities,
 //! Kapitza resistance and arbitrary geometry are outside this linear model.
 
 use fs_la::tridiagonal::{TridiagonalError, TridiagonalWorkspace};
 use fs_material::MaterialError;
-use fs_material::superfluid::TwoFluidState;
+use fs_material::superfluid::{NormalViscousWall, TwoFluidState};
 
 mod boundary;
 mod modes;
 mod momentum;
 mod step;
+mod viscosity;
 pub use boundary::{
     ChannelEnd, CounterflowEndsResponse, ImpermeableEndResponse, ImpermeableEndsResponse,
 };
@@ -184,9 +188,16 @@ pub struct ChannelStep {
     pub resolved_momentum_after_kg_m_s: f64,
     /// Authored force impulse on the N-1 interior dual volumes, in channel +x.
     pub interior_body_impulse_n_s: f64,
-    /// Actual resolved momentum change minus pressure and body impulses.
+    /// Impulse ON THE FLUID from stationary side walls, in channel +x.
+    /// Only resolved interior dual volumes are included; the support receives
+    /// the opposite impulse. This is external drag, not mutual friction.
+    pub interior_wall_impulse_n_s: f64,
+    /// Actual resolved momentum change minus pressure, body and wall impulses.
     pub resolved_momentum_defect_n_s: f64,
     pub mutual_friction_heat_j: f64,
+    /// Normal-fluid kinetic energy dissipated by the stationary viscous walls.
+    /// Exported separately from mutual friction, with the same cell heat route.
+    pub normal_viscous_heat_j: f64,
     pub wave_balance_defect_j: f64,
     /// First-order mass imported through the two explicit ports.
     pub boundary_mass_kg: f64,
@@ -196,6 +207,13 @@ pub struct ChannelStep {
     pub boundary_counterflow_heat_j: f64,
     /// Infinity-norm residual divided by the scale of the original linear solve.
     pub maximum_relative_linear_residual: f64,
+}
+
+impl ChannelStep {
+    /// Physical heat exported once by both dissipative mechanisms.
+    pub fn dissipated_heat_j(&self) -> f64 {
+        self.mutual_friction_heat_j + self.normal_viscous_heat_j
+    }
 }
 
 #[derive(Debug)]
@@ -239,6 +257,8 @@ impl SolveWorkspace {
 #[derive(Debug)]
 pub struct TwoFluidChannel {
     material: TwoFluidState,
+    normal_wall: Option<NormalViscousWall>,
+    normal_wall_rate_s_inv: f64,
     length_m: f64,
     area_m2: f64,
     dx: f64,
@@ -250,8 +270,12 @@ pub struct TwoFluidChannel {
     workspace: [SolveWorkspace; 2],
     last_heat_j: Vec<f64>,
     pending_heat_j: Vec<f64>,
+    last_viscous_heat_j: Vec<f64>,
+    pending_viscous_heat_j: Vec<f64>,
+    pending_dissipation_heat_j: Vec<f64>,
     time_s: f64,
     total_heat_j: f64,
+    total_viscous_heat_j: f64,
 }
 
 impl TwoFluidChannel {
@@ -295,6 +319,8 @@ impl TwoFluidChannel {
         }
         Ok(Self {
             material,
+            normal_wall: None,
+            normal_wall_rate_s_inv: 0.0,
             length_m,
             area_m2,
             dx,
@@ -306,9 +332,35 @@ impl TwoFluidChannel {
             workspace: [SolveWorkspace::new(cells)?, SolveWorkspace::new(cells)?],
             last_heat_j: filled(cells)?,
             pending_heat_j: filled(cells)?,
+            last_viscous_heat_j: filled(cells)?,
+            pending_viscous_heat_j: filled(cells)?,
+            pending_dissipation_heat_j: filled(cells)?,
             time_s: 0.0,
             total_heat_j: 0.0,
+            total_viscous_heat_j: 0.0,
         })
+    }
+
+    /// Create a channel with an authored stationary normal-fluid wall closure.
+    ///
+    /// The original material's normal viscosity and the wall permeability give
+    /// the distributed force `-eta_n*v_n/k`; the superfluid slips at the walls.
+    /// The model is uniform, laminar and quasisteady across the section. It does
+    /// not resolve oscillatory boundary layers, turbulence or a moving support.
+    /// End-half-cell inertia and drag belong to the boundary composition.
+    pub fn try_new_with_normal_wall(
+        material: TwoFluidState,
+        length_m: f64,
+        area_m2: f64,
+        cells: usize,
+        limits: LinearizationLimits,
+        wall: NormalViscousWall,
+    ) -> Result<Self, ChannelError> {
+        let rate = material.normal_wall_decay_rate_s_inv(wall)?;
+        let mut channel = Self::try_new(material, length_m, area_m2, cells, limits)?;
+        channel.normal_wall = Some(wall);
+        channel.normal_wall_rate_s_inv = rate;
+        Ok(channel)
     }
 
     /// Initialize physical perturbations and both component velocities.
@@ -360,6 +412,9 @@ impl TwoFluidChannel {
     pub const fn material(&self) -> &TwoFluidState {
         &self.material
     }
+    pub const fn normal_viscous_wall(&self) -> Option<NormalViscousWall> {
+        self.normal_wall
+    }
     pub fn cells(&self) -> usize {
         self.accepted[0].cells.len()
     }
@@ -379,6 +434,23 @@ impl TwoFluidChannel {
     /// An interior face's heat is split equally between its two adjacent cells.
     pub fn last_mutual_friction_heat_j(&self) -> &[f64] {
         &self.last_heat_j
+    }
+    pub const fn cumulative_normal_viscous_heat_j(&self) -> f64 {
+        self.total_viscous_heat_j
+    }
+    /// Normal wall heat from the last accepted step, in the original cell order.
+    pub fn last_normal_viscous_heat_j(&self) -> &[f64] {
+        &self.last_viscous_heat_j
+    }
+    /// Total physical heat from the last accepted step, without allocating.
+    pub fn last_dissipated_heat_j(&self) -> impl ExactSizeIterator<Item = f64> + '_ {
+        self.last_heat_j
+            .iter()
+            .zip(&self.last_viscous_heat_j)
+            .map(|(mutual, viscous)| mutual + viscous)
+    }
+    pub fn cumulative_dissipated_heat_j(&self) -> f64 {
+        self.total_heat_j + self.total_viscous_heat_j
     }
     /// Courant <= 1 accuracy policy; implicit midpoint is not a time-error estimator.
     pub fn maximum_step_s(&self) -> f64 {
@@ -421,7 +493,8 @@ impl TwoFluidChannel {
 
     /// Prepare the original thermal owner's candidate before publishing a wave step.
     ///
-    /// The callback receives the proposed report and per-cell frictional joules.
+    /// The callback receives the proposed report and per-cell total dissipated
+    /// joules, including mutual friction and the configured normal wall drag.
     /// It must return a private candidate without changing external accepted state.
     /// A thermal refusal or the final cancellation drops that candidate and leaves
     /// channel fields, clock and heat unchanged. On success the returned candidate
@@ -450,8 +523,13 @@ impl TwoFluidChannel {
         // stage_step already admitted the cumulative sum; publication cannot fail.
         core::mem::swap(&mut self.accepted, &mut self.pending);
         core::mem::swap(&mut self.last_heat_j, &mut self.pending_heat_j);
+        core::mem::swap(
+            &mut self.last_viscous_heat_j,
+            &mut self.pending_viscous_heat_j,
+        );
         self.time_s = report.time_s;
         self.total_heat_j += report.mutual_friction_heat_j;
+        self.total_viscous_heat_j += report.normal_viscous_heat_j;
     }
 
     fn validate_pending(&self, cancelled: &mut impl FnMut() -> bool) -> Result<(), ChannelError> {

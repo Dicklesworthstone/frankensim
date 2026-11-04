@@ -1,9 +1,71 @@
-# Superfluid heat transport and vortex friction
+# Superfluid heat transport, viscous walls and vortex friction
 
 The `superfluid` feature connects the finite-temperature Landau two-fluid
 material, the original two-sound channel, native rigid pistons, and the existing
 finite thermal timeline. A heater can now launch counterflow and second sound
 while its own finite caloric storage changes the heat it supplies.
+
+## Normal-fluid wall viscosity and fourth sound
+
+`NormalViscousWall` supplies an explicit permeability per fluid volume. The
+stationary-wall force is `F_n = -eta_n*v_n/k`; only the normal component feels
+this viscous force. The superfluid retains slip. The normal inertia is
+`rho_n`, and the walls receive an external impulse opposite to the fluid's.
+
+```rust,ignore
+use fs_material::superfluid::NormalViscousWall;
+use fs_duct::superfluid::TwoFluidChannel;
+
+let wall = NormalViscousWall::circular_capillary(radius_m)?; // k = R^2 / 8
+let channel = TwoFluidChannel::try_new_with_normal_wall(
+    material, length_m, area_m2, cells, limits, wall,
+)?;
+```
+
+`parallel_plates(full_gap_m)` supplies `k = gap^2/12`; `try_new(k)` accepts
+authored permeability. The geometry helpers are the steady laminar Poiseuille
+resistances. Their use requires a continuum no-slip normal fluid, a developed
+profile, small normal Reynolds number and low Womersley number. A material
+name or channel area alone does not establish those conditions. Porous-medium
+permeability must be converted to the stated fluid-volume basis; porosity and
+tortuosity are not inferred.
+
+The channel integrates normal-wall relaxation together with its midpoint
+pressure/temperature gradients and body forces. Cell balances use the exact
+interval-mean velocities. This avoids a force-splitting error in the stiff
+equilibrium `v_n = F_n*k/eta_n`, and lets a narrow passage approach the
+clamped-normal fourth-sound limit without an explicit viscous stability step.
+The existing wave Courant policy still governs temporal resolution. With zero
+viscosity, the original first/second-sound numerical path is retained exactly.
+
+The dissipative operator remains two scalar solves by the original native
+tridiagonal owner, preceded by a two-by-two rotation. Its work and storage are
+O(cells); there is no new dense solver, per-step heap allocation or per-face
+transcendental evaluation. Both mechanical and thermal endpoint responses
+use the same viscous operator and retain reciprocity.
+
+For zero thermal expansion, the independent clamped-normal limit is
+`c4^2 = f_s*c1^2 + f_n*c2^2`. Fourth sound emerges from the original two-fluid
+equations; a replacement sound speed is not fitted to the channel.
+
+`ChannelStep.normal_viscous_heat_j` and `interior_wall_impulse_n_s` keep wall
+heat and support impulse distinct from mutual friction and authored forces.
+`dissipated_heat_j()` sums both heat mechanisms. Existing mutual-friction-only
+accessors preserve their meaning; the channel additionally exposes normal-wall
+and combined heat histories. The native closed-channel and piston thermal
+compositions receive both losses through their existing mapped caloric cells,
+once per accepted step. Refusal or cancellation publishes neither loss.
+End-half-cell inertia and viscous forces remain the boundary owner's separate
+responsibility; the channel's distributed drag covers resolved interior dual
+volumes. The current piston composition includes their inertia and reports the
+interior wall reaction; it does not infer side-wall drag on those endpoint
+half volumes.
+
+This reduced model does not resolve transverse startup, high-frequency Stokes
+boundary layers, wall turbulence, longitudinal or second viscosities. The
+frozen two-fluid properties and small-signal thermal limits remain explicit.
+The wall-force convention and its frequency-dependent limitations follow
+[Kekutia and Chkhaidze, section 3](https://arxiv.org/abs/cond-mat/0604193).
 
 ## Run the finite heater example
 
@@ -68,10 +130,10 @@ and the contact's linearized availability loss. That availability loss is not
 extra heat to deposit. The coupled reference-heat account is not a nonlinear
 total-internal-energy theorem for helium or an arbitrary enthalpy-based solid.
 
-Optional mutual-friction losses remain in the channel's original per-cell heat
-field and report. This boundary contact does not redirect all distributed
-frictional heating into the heater. Existing closed-channel and piston thermal
-compositions remain available for explicitly mapped friction-heat destinations.
+Optional mutual-friction and normal-wall losses remain in the channel's
+per-cell heat fields and report. This boundary contact does not redirect all
+distributed heating into the heater. Existing closed-channel and piston thermal
+compositions remain available for explicitly mapped dissipative-heat destinations.
 
 ## Thermal boundary response for other couplings
 
@@ -112,7 +174,9 @@ does not silently assign a universal B value to a material name.
 
 ```bash
 cargo test -p fs-material --test superfluid
+cargo test -p fs-material --test superfluid_viscosity
 cargo test -p fs-duct --features superfluid --test superfluid_channel --test superfluid_ports
+cargo test -p fs-duct --features superfluid --test superfluid_viscosity
 cargo test -p fs-couple --features superfluid --test superfluid_counterflow --test superfluid_heat
 ```
 
@@ -122,3 +186,7 @@ latent storage, reference heat and linear availability balances, zero-contact
 identity, and atomic refusal/cancellation/retry. Vortex regressions cover
 direction, frame covariance, opposite impulses, decay, reactive rotation,
 weak/strong damping, the angular force average and channel equivalence.
+Viscous regressions add exact normal relaxation, stiff force balance,
+fourth-sound speed and refinement, zero-viscosity identity, reciprocal ports,
+external wall momentum, both heat mechanisms on native caloric cells, native
+piston reactions and all-owner refusal/cancellation.

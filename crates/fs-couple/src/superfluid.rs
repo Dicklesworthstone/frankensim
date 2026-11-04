@@ -1,4 +1,4 @@
-//! Closed-channel mutual-friction heat on the original finite thermal timeline.
+//! Closed-channel dissipative heat on the original finite thermal timeline.
 //!
 //! The channel prepares its wave endpoint and per-cell dissipated joules without
 //! publication. The original thermal owner advances its authored boundaries and
@@ -50,14 +50,14 @@ pub struct FrictionHeatControls {
 /// Both unchanged owner reports and the one internal energy transfer.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FrictionHeatReport {
-    /// Original channel step, including the physical friction debit.
+    /// Original channel step, including mutual-friction and normal-wall debits.
     pub channel: ChannelStep,
     /// Original thermal march, excluding the endpoint friction deposit.
     pub thermal_march: EnergyAudit,
     /// Original endpoint caloric update; its external heat is INTERNAL to this
     /// composed system and is not added to the thermal march's source account.
     pub heat_intake: EnergyAudit,
-    /// Deposited joules minus the original channel friction debit [J].
+    /// Deposited joules minus the original channel's total dissipative debit [J].
     pub transfer_residual_j: f64,
     /// Sum of the original wave, march, heat-intake and transfer residuals [J].
     pub combined_storage_residual_j: f64,
@@ -266,7 +266,7 @@ fn prepare_heat<'a>(
         controls.heat_energy_tolerance_j,
         || check(cancelled),
     )?;
-    let transfer_residual_j = heat_intake.external_heat_j - wave.mutual_friction_heat_j;
+    let transfer_residual_j = heat_intake.external_heat_j - wave.dissipated_heat_j();
     // Preserve the owners' cell-relative residuals. The wave balance already
     // accounts for any external force work; friction crosses this interface once.
     // Subtracting large absolute thermal energies can erase a small heat deposit.

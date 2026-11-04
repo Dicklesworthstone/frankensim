@@ -8,7 +8,7 @@ use fs_duct::superfluid::{
     BodyForce, CellSample, ChannelEnd, ComponentForceDensity, FaceSample, LinearizationLimits,
     MutualFriction, TwoFluidChannel,
 };
-use fs_material::superfluid::{TwoFluidProperties, TwoFluidState};
+use fs_material::superfluid::{NormalViscousWall, TwoFluidProperties, TwoFluidState};
 use fs_mbd::{MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3};
 
 const RHO: f64 = 8.0;
@@ -22,6 +22,18 @@ fn channel(
     relative: f64,
     pressure_limit: f64,
 ) -> TwoFluidChannel {
+    channel_with_wall(n, alpha, pressure, velocity, relative, pressure_limit, None)
+}
+
+fn channel_with_wall(
+    n: usize,
+    alpha: f64,
+    pressure: f64,
+    velocity: f64,
+    relative: f64,
+    pressure_limit: f64,
+    wall: Option<NormalViscousWall>,
+) -> TwoFluidChannel {
     let material = TwoFluidState::try_new(TwoFluidProperties {
         temperature_k: 2.0,
         density_kg_m3: RHO,
@@ -33,17 +45,17 @@ fn channel(
         normal_viscosity_pa_s: 0.03,
     })
     .unwrap();
-    let mut channel = TwoFluidChannel::try_new(
-        material,
-        1.0,
-        AREA,
-        n,
-        LinearizationLimits {
-            max_pressure_perturbation_pa: pressure_limit,
-            max_temperature_perturbation_k: 0.1,
-            max_component_speed_m_s: 0.2,
-        },
-    )
+    let limits = LinearizationLimits {
+        max_pressure_perturbation_pa: pressure_limit,
+        max_temperature_perturbation_k: 0.1,
+        max_component_speed_m_s: 0.2,
+    };
+    let mut channel = match wall {
+        Some(wall) => {
+            TwoFluidChannel::try_new_with_normal_wall(material, 1.0, AREA, n, limits, wall)
+        }
+        None => TwoFluidChannel::try_new(material, 1.0, AREA, n, limits),
+    }
     .unwrap();
     let mut normal = vec![velocity; n + 1];
     let mut superfluid = normal.clone();
@@ -410,14 +422,88 @@ fn spatial_component_and_piston_forces_keep_full_volume_impulse_and_actual_work(
     assert!(heat > 0.0);
 }
 
+#[test]
+fn stationary_wall_reaction_closes_native_pair_momentum_and_separate_heat() {
+    let wall = NormalViscousWall::try_new(0.0003).unwrap();
+    for n in [2, 24] {
+        let v0 = 0.007;
+        let mut fluid = channel_with_wall(n, 0.1, 0.1, v0, 0.02, 4.0, Some(wall));
+        let (mut bodies, properties, boundaries) = mechanics([0.02, 0.035], v0);
+        let p0 = total_momentum(&fluid, bodies, properties);
+        let e0 = total_energy(&fluid, bodies, properties);
+        let dt = 0.6 * fluid.maximum_step_s();
+        let mut wall_impulse = 0.0;
+        let mut mutual_heat = 0.0;
+        let mut viscous_heat = 0.0;
+        for _ in 0..12 {
+            let report = advance_balanced_piston_pair(
+                &mut fluid,
+                &mut bodies,
+                properties,
+                boundaries,
+                dt,
+                BodyForce::None,
+                [0.0; 2],
+                MutualFriction::Linear { gamma_kg_m3_s: 1.5 },
+                controls(),
+                || false,
+            )
+            .unwrap();
+            wall_impulse += report.channel.interior_wall_impulse_n_s;
+            mutual_heat += report.channel.mutual_friction_heat_j;
+            viscous_heat += report.channel.normal_viscous_heat_j;
+            // The stationary support supplies momentum but no mechanical work.
+            close(
+                report.external_impulse_world_n_s.y,
+                report.channel.interior_wall_impulse_n_s,
+                1e-20,
+            );
+            close(report.total_external_work_j, 0.0, 0.0);
+            close(
+                total_momentum(&fluid, bodies, properties),
+                p0 + wall_impulse,
+                3e-16,
+            );
+            close(
+                total_energy(&fluid, bodies, properties) + mutual_heat + viscous_heat,
+                e0,
+                3e-16,
+            );
+            close(report.combined_momentum_residual_world_n_s.y, 0.0, 2e-16);
+            close(report.combined_energy_residual_j, 0.0, 2e-16);
+            close(
+                fluid.cumulative_mutual_friction_heat_j(),
+                mutual_heat,
+                1e-18,
+            );
+            close(
+                fluid.cumulative_normal_viscous_heat_j(),
+                viscous_heat,
+                1e-18,
+            );
+            for end in report.ends {
+                close(
+                    end.body_impulse_outward_n_s + end.half_cell_impulse_outward_n_s,
+                    end.port_impulse_outward_n_s,
+                    2e-16,
+                );
+            }
+        }
+        assert!(wall_impulse < 0.0);
+        assert!(mutual_heat > 0.0 && viscous_heat > 0.0);
+    }
+}
+
 #[derive(Debug, PartialEq)]
 struct Snapshot {
     time: f64,
     energy: f64,
     heat: f64,
+    viscous_heat: f64,
     cells: Vec<CellSample>,
     faces: Vec<FaceSample>,
     last_heat: Vec<f64>,
+    last_viscous_heat: Vec<f64>,
     bodies: [RigidBodyState; 2],
 }
 
@@ -426,11 +512,13 @@ fn snapshot(fluid: &TwoFluidChannel, bodies: [RigidBodyState; 2]) -> Snapshot {
         time: fluid.time_s(),
         energy: fluid.wave_energy_j().unwrap(),
         heat: fluid.cumulative_mutual_friction_heat_j(),
+        viscous_heat: fluid.cumulative_normal_viscous_heat_j(),
         cells: (0..fluid.cells()).map(|i| fluid.cell(i).unwrap()).collect(),
         faces: (0..=fluid.cells())
             .map(|i| fluid.face(i).unwrap())
             .collect(),
         last_heat: fluid.last_mutual_friction_heat_j().to_vec(),
+        last_viscous_heat: fluid.last_normal_viscous_heat_j().to_vec(),
         bodies,
     }
 }
@@ -630,12 +718,21 @@ mod thermal_tests {
 
     #[test]
     fn driven_pair_deposits_each_friction_increment_once_and_closes_full_storage() {
+        check_driven_pair_heat(None);
+    }
+
+    #[test]
+    fn viscous_driven_pair_routes_both_losses_and_external_wall_impulse() {
+        check_driven_pair_heat(Some(NormalViscousWall::try_new(0.0003).unwrap()));
+    }
+
+    fn check_driven_pair_heat(wall: Option<NormalViscousWall>) {
         let law = Caloric {
             maximum_specific_energy_j_kg: 2.0,
         };
         let source = 1e-5;
         let mut thermal = thermal(&law, source);
-        let mut fluid = channel(N, 0.1, 0.4, 0.003, 0.02, 4.0);
+        let mut fluid = channel_with_wall(N, 0.1, 0.4, 0.003, 0.02, 4.0, wall);
         let original_material = *fluid.material();
         let (mut bodies, properties, boundaries) = mechanics([0.02, 0.035], 0.003);
         let ids = destinations();
@@ -649,6 +746,7 @@ mod thermal_tests {
         let p0 = total_momentum(&fluid, bodies, properties);
         let mut source_energy = 0.0;
         let mut total_heat = 0.0;
+        let mut wall_impulse = 0.0;
         for _ in 0..12 {
             let old_energy: Vec<_> = ids
                 .iter()
@@ -670,7 +768,8 @@ mod thermal_tests {
                 || false,
             )
             .unwrap();
-            total_heat += report.pair.channel.mutual_friction_heat_j;
+            total_heat += report.pair.channel.dissipated_heat_j();
+            wall_impulse += report.pair.channel.interior_wall_impulse_n_s;
             source_energy +=
                 report.pair.total_external_work_j + report.heat.thermal_march.external_heat_j;
             assert_eq!(thermal.time_s(), fluid.time_s());
@@ -683,7 +782,7 @@ mod thermal_tests {
             );
             close(
                 report.heat.heat_intake.external_heat_j,
-                report.pair.channel.mutual_friction_heat_j,
+                report.pair.channel.dissipated_heat_j(),
                 1e-18,
             );
             close(report.combined_storage_residual_j, 0.0, 1e-16);
@@ -691,7 +790,9 @@ mod thermal_tests {
                 let energy = thermal.cells()[id].specific_h_j_kg;
                 close(
                     CELL_MASS * (energy - old_energy[i]),
-                    source * dt + fluid.last_mutual_friction_heat_j()[i],
+                    source * dt
+                        + fluid.last_mutual_friction_heat_j()[i]
+                        + fluid.last_normal_viscous_heat_j()[i],
                     1e-18,
                 );
                 close(
@@ -708,7 +809,7 @@ mod thermal_tests {
             );
             close(
                 total_momentum(&fluid, bodies, properties),
-                p0 + (-external[0] + external[1]) * fluid.time_s(),
+                p0 + (-external[0] + external[1]) * fluid.time_s() + wall_impulse,
                 5e-16,
             );
             close(
@@ -718,6 +819,10 @@ mod thermal_tests {
             );
         }
         assert!(total_heat > 0.0);
+        if wall.is_some() {
+            assert!(fluid.cumulative_normal_viscous_heat_j() > 0.0);
+            assert!(wall_impulse != 0.0);
+        }
         assert!(
             bodies
                 .iter()
@@ -729,9 +834,18 @@ mod thermal_tests {
 
     #[test]
     fn caloric_and_final_cancellation_refusals_publish_none_of_the_four_owners() {
+        check_pair_heat_refusal(None);
+    }
+
+    #[test]
+    fn viscous_caloric_and_final_cancellation_refusals_preserve_all_owners() {
+        check_pair_heat_refusal(Some(NormalViscousWall::try_new(0.0003).unwrap()));
+    }
+
+    fn check_pair_heat_refusal(wall: Option<NormalViscousWall>) {
         let make = || {
             (
-                channel(N, 0.1, 0.4, 0.003, 0.02, 4.0),
+                channel_with_wall(N, 0.1, 0.4, 0.003, 0.02, 4.0, wall),
                 mechanics([0.02, 0.035], 0.003),
             )
         };

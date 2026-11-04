@@ -315,6 +315,7 @@ fn advance_pair_with<T, E: From<PistonError>>(
             let ends = [prepare_end(0)?, prepare_end(1)?];
             let sources = sum([
                 wave.interior_body_impulse_n_s,
+                wave.interior_wall_impulse_n_s,
                 -external_impulse[0],
                 -half_source_impulse[0],
                 external_impulse[1],
@@ -324,6 +325,7 @@ fn advance_pair_with<T, E: From<PistonError>>(
                 wave.resolved_momentum_after_kg_m_s,
                 -wave.resolved_momentum_before_kg_m_s,
                 -wave.interior_body_impulse_n_s,
+                -wave.interior_wall_impulse_n_s,
             ]));
             let mut energy =
                 Dd::from_f64(wave.wave_balance_defect_j) + Dd::from_f64(wave.boundary_wave_work_j);

@@ -131,7 +131,8 @@ impl TwoFluidChannel {
         let report = self
             .stage_step(dt_s, boundary, friction, force, &mut cancelled)
             .map_err(HeatStepError::Channel)?;
-        let candidate = prepare_heat(&report, &self.pending_heat_j).map_err(HeatStepError::Heat)?;
+        let candidate =
+            prepare_heat(&report, &self.pending_dissipation_heat_j).map_err(HeatStepError::Heat)?;
         poll(&mut cancelled).map_err(HeatStepError::Channel)?;
         self.publish_step(report);
         Ok((report, candidate))
@@ -173,7 +174,8 @@ impl TwoFluidChannel {
         let report = self
             .stage_forced_closed(dt_s, force, friction, &mut cancelled)
             .map_err(HeatStepError::Channel)?;
-        let candidate = prepare_heat(&report, &self.pending_heat_j).map_err(HeatStepError::Heat)?;
+        let candidate =
+            prepare_heat(&report, &self.pending_dissipation_heat_j).map_err(HeatStepError::Heat)?;
         poll(&mut cancelled).map_err(HeatStepError::Channel)?;
         self.publish_step(report.channel);
         Ok((report, candidate))
@@ -203,7 +205,8 @@ impl TwoFluidChannel {
         let after = channel.resolved_momentum_after_kg_m_s;
         let mut body = channel.interior_body_impulse_n_s;
         let mut correction = 0.0;
-        let mut scale = before.abs() + after.abs() + body.abs();
+        let mut scale =
+            before.abs() + after.abs() + body.abs() + channel.interior_wall_impulse_n_s.abs();
         let mut wall = channel.boundary_pressure_impulse_n_s;
         for (end, i) in [0, n].into_iter().enumerate() {
             let (_, _, density) = force.components(i, &self.material);
@@ -217,7 +220,8 @@ impl TwoFluidChannel {
             + wall[1].abs()
             + channel.boundary_pressure_impulse_n_s[0].abs()
             + channel.boundary_pressure_impulse_n_s[1].abs();
-        let defect = (after - before) - body - (wall[0] + wall[1]);
+        let defect =
+            (after - before) - body - (wall[0] + wall[1]) - channel.interior_wall_impulse_n_s;
         let tolerance = 65536.0 * f64::EPSILON * scale;
         if ![body, wall[0], wall[1], defect, tolerance]
             .into_iter()
@@ -323,14 +327,18 @@ impl TwoFluidChannel {
         force: BodyForce<'_>,
         dt: f64,
         pressure_impulse: [f64; 2],
+        wall_impulse_and_scale: [f64; 2],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<[f64; 4], ChannelError> {
         let (before, before_scale) = self.momentum_of(&self.accepted, cancelled)?;
         let (after, after_scale) = self.momentum_of(&self.pending, cancelled)?;
         let mut body = 0.0;
         let mut correction = 0.0;
-        let mut scale =
-            before_scale + after_scale + pressure_impulse[0].abs() + pressure_impulse[1].abs();
+        let mut scale = before_scale
+            + after_scale
+            + pressure_impulse[0].abs()
+            + pressure_impulse[1].abs()
+            + wall_impulse_and_scale[1];
         if force != BodyForce::None {
             for i in 1..self.cells() {
                 if i % 128 == 0 {
@@ -341,7 +349,10 @@ impl TwoFluidChannel {
                 scale += force.impulse_scale(i, &self.material, dt, self.cell_volume);
             }
         }
-        let defect = (after - before) - body - (pressure_impulse[0] + pressure_impulse[1]);
+        let defect = (after - before)
+            - body
+            - (pressure_impulse[0] + pressure_impulse[1])
+            - wall_impulse_and_scale[0];
         let tolerance = 65536.0 * f64::EPSILON * scale;
         if ![body, defect, tolerance].into_iter().all(f64::is_finite) {
             return Err(ChannelError::Invalid(

@@ -273,7 +273,8 @@ pub fn advance_balanced_piston(
                 body_impulse_outward_n_s: delta_momentum.dot(outward),
                 half_cell_impulse_outward_n_s: half_impulse,
                 stationary_support_impulse_x_n_s: -wave.boundary_pressure_impulse_n_s
-                    [1 - end_index],
+                    [1 - end_index]
+                    - wave.interior_wall_impulse_n_s,
                 body_kinetic_change_j: body_energy_change,
                 half_cell_kinetic_change_j: half_energy_change,
                 interface_momentum_residual_world_n_s: momentum_residual,

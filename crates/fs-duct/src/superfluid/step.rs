@@ -98,6 +98,8 @@ impl TwoFluidChannel {
             }
             if i < n {
                 self.pending_heat_j[i] = 0.0;
+                self.pending_viscous_heat_j[i] = 0.0;
+                self.pending_dissipation_heat_j[i] = 0.0;
             }
         }
         for mode in 0..2 {
@@ -105,20 +107,36 @@ impl TwoFluidChannel {
             self.pending[mode].faces[n] = port_modes[1][mode];
         }
         self.friction_half_step(friction, dt / 2.0, cancelled)?;
-        // Keep the exact force kicks adjacent to the wave update. Friction
-        // outside this affine midpoint block preserves static force balance.
-        let mut source_work = self.force_half_step(force, dt / 2.0, cancelled)?;
+        let (source_work, residual, wall_impulse) = if self.normal_wall_rate_s_inv > 0.0 {
+            // Normal drag, authored force and the midpoint wave gradient share
+            // one exact face evolution. Splitting large force kicks around
+            // stiff wall drag would destroy forced equilibrium/fourth sound.
+            let change = self.viscous_wave_step(dt, force, cancelled)?;
+            (
+                change.body_work_j,
+                change.relative_residual,
+                change.wall_impulse_n_s,
+            )
+        } else {
+            // Preserve the original zero-wall midpoint arithmetic, including
+            // its exact adjacent force kicks and friction outside the block.
+            let mut source_work = self.force_half_step(force, dt / 2.0, cancelled)?;
+            let mut residual: f64 = 0.0;
+            for mode in 0..2 {
+                residual = residual.max(midpoint(
+                    &self.accepted[mode].cells,
+                    &mut self.pending[mode],
+                    &mut self.workspace[mode],
+                    self.modes.speed[mode] * dt / self.dx,
+                    dt,
+                    cancelled,
+                )?);
+            }
+            source_work += self.force_half_step(force, dt / 2.0, cancelled)?;
+            (source_work, residual, [0.0; 2])
+        };
         let mut work = 0.0;
-        let mut residual: f64 = 0.0;
         for mode in 0..2 {
-            residual = residual.max(midpoint(
-                &self.accepted[mode].cells,
-                &mut self.pending[mode],
-                &mut self.workspace[mode],
-                self.modes.speed[mode] * dt / self.dx,
-                dt,
-                cancelled,
-            )?);
             let old = &self.accepted[mode].cells;
             let new = &self.pending[mode].cells;
             work += dt
@@ -127,7 +145,6 @@ impl TwoFluidChannel {
                 * (0.5 * (old[0] + new[0]) * port_modes[0][mode]
                     - 0.5 * (old[n - 1] + new[n - 1]) * port_modes[1][mode]);
         }
-        source_work += self.force_half_step(force, dt / 2.0, cancelled)?;
         if force != BodyForce::None {
             self.validate_pending_with_limits(physical_limits, cancelled)?;
         }
@@ -136,23 +153,53 @@ impl TwoFluidChannel {
         let after = energy(&self.pending, self.cell_volume, cancelled)?;
         let mut heat = 0.0;
         let mut correction = 0.0;
-        for (i, &value) in self.pending_heat_j.iter().enumerate() {
+        let mut viscous_heat = 0.0;
+        let mut viscous_correction = 0.0;
+        for i in 0..n {
             if i % 128 == 0 {
                 poll(cancelled)?;
             }
+            let value = self.pending_heat_j[i];
+            let viscous = self.pending_viscous_heat_j[i];
+            let combined = value + viscous;
+            if ![value, viscous, combined].into_iter().all(f64::is_finite)
+                || value < 0.0
+                || viscous < 0.0
+            {
+                return Err(ChannelError::Invalid(
+                    "cell dissipation heat is not representable",
+                ));
+            }
+            self.pending_dissipation_heat_j[i] = combined;
             accumulate(&mut heat, &mut correction, value);
+            accumulate(&mut viscous_heat, &mut viscous_correction, viscous);
         }
         let total_heat = self.total_heat_j + heat;
-        let defect = (after - before) - work - source_work + heat;
-        let scale = before + after + work.abs() + source_work.abs() + heat;
+        let total_viscous_heat = self.total_viscous_heat_j + viscous_heat;
+        let dissipated = heat + viscous_heat;
+        let total_dissipated = total_heat + total_viscous_heat;
+        let defect = (after - before) - work - source_work + dissipated;
+        let scale = before + after + work.abs() + source_work.abs() + dissipated;
         let tolerance = 32768.0 * f64::EPSILON * scale;
-        if ![heat, total_heat, work, source_work, defect, tolerance]
-            .into_iter()
-            .all(f64::is_finite)
+        if ![
+            heat,
+            total_heat,
+            viscous_heat,
+            total_viscous_heat,
+            dissipated,
+            total_dissipated,
+            work,
+            source_work,
+            defect,
+            tolerance,
+        ]
+        .into_iter()
+        .all(f64::is_finite)
             || heat < 0.0
+            || viscous_heat < 0.0
         {
             return Err(ChannelError::Invalid(
-                "wave work or friction heat is not representable",
+                "wave work or dissipation heat is not representable",
             ));
         }
         if defect.abs() > tolerance {
@@ -199,7 +246,8 @@ impl TwoFluidChannel {
             ));
         }
         poll(cancelled)?;
-        let momentum = self.audit_resolved_momentum(force, dt, pressure_impulse, cancelled)?;
+        let momentum =
+            self.audit_resolved_momentum(force, dt, pressure_impulse, wall_impulse, cancelled)?;
         Ok(ChannelStep {
             time_s: next_time,
             wave_energy_before_j: before,
@@ -210,8 +258,10 @@ impl TwoFluidChannel {
             resolved_momentum_before_kg_m_s: momentum[0],
             resolved_momentum_after_kg_m_s: momentum[1],
             interior_body_impulse_n_s: momentum[2],
+            interior_wall_impulse_n_s: wall_impulse[0],
             resolved_momentum_defect_n_s: momentum[3],
             mutual_friction_heat_j: heat,
+            normal_viscous_heat_j: viscous_heat,
             wave_balance_defect_j: defect,
             boundary_mass_kg: boundary_mass,
             boundary_entropy_j_k: boundary_entropy,
@@ -280,26 +330,7 @@ fn midpoint(
 ) -> Result<f64, ChannelError> {
     let n = old.len();
     let r = 0.25 * lambda * lambda;
-    if work.factor_step != Some(dt) {
-        work.factor_step = None;
-        work.boundary_inverse = [None; 2];
-        for i in 0..n {
-            if i % 128 == 0 {
-                poll(cancelled)?;
-            }
-            work.diagonal[i] = 1.0 + if i == 0 || i + 1 == n { r } else { 2.0 * r };
-            if i + 1 < n {
-                work.off_diagonal[i] = -r;
-            }
-        }
-        work.factor.factor(
-            &work.off_diagonal,
-            &work.diagonal,
-            &work.off_diagonal,
-            &mut *cancelled,
-        )?;
-        work.factor_step = Some(dt);
-    }
+    factor_midpoint(work, r, dt, cancelled)?;
     for i in 0..n {
         if i % 128 == 0 {
             poll(cancelled)?;
@@ -346,4 +377,36 @@ fn midpoint(
         ));
     }
     Ok(relative)
+}
+
+/// Factor the shared no-flux-end scalar operator. A channel's frozen wall and
+/// material make each modal coefficient a deterministic function of dt.
+pub(super) fn factor_midpoint(
+    work: &mut SolveWorkspace,
+    r: f64,
+    dt: f64,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), ChannelError> {
+    let n = work.diagonal.len();
+    if work.factor_step != Some(dt) {
+        work.factor_step = None;
+        work.boundary_inverse = [None; 2];
+        for i in 0..n {
+            if i % 128 == 0 {
+                poll(cancelled)?;
+            }
+            work.diagonal[i] = 1.0 + if i == 0 || i + 1 == n { r } else { 2.0 * r };
+            if i + 1 < n {
+                work.off_diagonal[i] = -r;
+            }
+        }
+        work.factor.factor(
+            &work.off_diagonal,
+            &work.diagonal,
+            &work.off_diagonal,
+            &mut *cancelled,
+        )?;
+        work.factor_step = Some(dt);
+    }
+    Ok(())
 }

@@ -10,7 +10,7 @@ use fs_duct::superfluid::{
     BodyForce, CellSample, ComponentForceDensity, FaceSample, LinearizationLimits, MutualFriction,
     TwoFluidChannel,
 };
-use fs_material::superfluid::{TwoFluidProperties, TwoFluidState};
+use fs_material::superfluid::{NormalViscousWall, TwoFluidProperties, TwoFluidState};
 use fs_thermal::enthalpy::{
     Boundary, CellGeometry, CellId, DepositedCell, DepositionBudget, DepositionError,
     DepositionSimulation, Event, MaterialId, StepConfig, ThermalLaw, ThermalStorageBasis,
@@ -40,6 +40,10 @@ impl ThermalLaw for CaloricLaw {
 }
 
 fn channel() -> TwoFluidChannel {
+    channel_with_wall(None)
+}
+
+fn channel_with_wall(wall: Option<NormalViscousWall>) -> TwoFluidChannel {
     let material = TwoFluidState::try_new(TwoFluidProperties {
         temperature_k: 2.0,
         density_kg_m3: 4.0,
@@ -51,17 +55,17 @@ fn channel() -> TwoFluidChannel {
         normal_viscosity_pa_s: 0.03,
     })
     .unwrap();
-    let mut channel = TwoFluidChannel::try_new(
-        material,
-        1.0,
-        0.01,
-        N,
-        LinearizationLimits {
-            max_pressure_perturbation_pa: 1.0,
-            max_temperature_perturbation_k: 0.02,
-            max_component_speed_m_s: 0.1,
-        },
-    )
+    let limits = LinearizationLimits {
+        max_pressure_perturbation_pa: 1.0,
+        max_temperature_perturbation_k: 0.02,
+        max_component_speed_m_s: 0.1,
+    };
+    let mut channel = match wall {
+        Some(wall) => {
+            TwoFluidChannel::try_new_with_normal_wall(material, 1.0, 0.01, N, limits, wall)
+        }
+        None => TwoFluidChannel::try_new(material, 1.0, 0.01, N, limits),
+    }
     .unwrap();
     let w: Vec<_> = (0..=N)
         .map(|i| 0.04 * (core::f64::consts::PI * i as f64 / N as f64).sin())
@@ -149,9 +153,11 @@ struct Snapshot {
     channel_momentum: f64,
     wave_energy: f64,
     cumulative_heat: f64,
+    cumulative_viscous_heat: f64,
     cells: Vec<CellSample>,
     faces: Vec<FaceSample>,
     heat: Vec<f64>,
+    viscous_heat: Vec<f64>,
     thermal_time: f64,
     thermal_cells: Vec<DepositedCell>,
 }
@@ -161,6 +167,7 @@ fn snapshot(channel: &TwoFluidChannel, thermal: &DepositionSimulation<'_>) -> Sn
         channel_momentum: channel.resolved_momentum_kg_m_s().unwrap(),
         wave_energy: channel.wave_energy_j().unwrap(),
         cumulative_heat: channel.cumulative_mutual_friction_heat_j(),
+        cumulative_viscous_heat: channel.cumulative_normal_viscous_heat_j(),
         cells: (0..channel.cells())
             .map(|i| channel.cell(i).unwrap())
             .collect(),
@@ -168,9 +175,203 @@ fn snapshot(channel: &TwoFluidChannel, thermal: &DepositionSimulation<'_>) -> Sn
             .map(|i| channel.face(i).unwrap())
             .collect(),
         heat: channel.last_mutual_friction_heat_j().to_vec(),
+        viscous_heat: channel.last_normal_viscous_heat_j().to_vec(),
         thermal_time: thermal.time_s(),
         thermal_cells: thermal.cells().values().cloned().collect(),
     }
+}
+
+#[test]
+fn viscous_and_mutual_losses_heat_original_cells_once_with_native_sources() {
+    let law = CaloricLaw {
+        heat_capacity_j_kg_k: 8.0,
+        max_specific_energy_j_kg: 2.0,
+    };
+    let wall = NormalViscousWall::try_new(0.003).unwrap();
+    let source_w = 0.0001;
+    let ids = destinations();
+    for driven in [false, true] {
+        let mut flow = channel_with_wall(Some(wall));
+        let mut heat = thermal(&law, source_w);
+        let dt = 0.2 * flow.maximum_step_s();
+        let initial_energy = flow.wave_energy_j().unwrap();
+        let mut mutual = 0.0;
+        let mut viscous = 0.0;
+        let mut external_work = 0.0;
+        for _ in 0..4 {
+            let old: Vec<_> = ids
+                .iter()
+                .map(|id| heat.cells()[id].specific_h_j_kg)
+                .collect();
+            let report = if driven {
+                advance_forced_closed_friction_heat(
+                    &mut flow,
+                    &mut heat,
+                    &ids,
+                    dt,
+                    BodyForce::Uniform(ComponentForceDensity {
+                        normal_n_m3: 0.04,
+                        superfluid_n_m3: -0.02,
+                    }),
+                    friction(),
+                    controls(),
+                    || false,
+                )
+                .unwrap()
+                .1
+            } else {
+                advance_closed_friction_heat(
+                    &mut flow,
+                    &mut heat,
+                    &ids,
+                    dt,
+                    friction(),
+                    controls(),
+                    || false,
+                )
+                .unwrap()
+            };
+            assert!(report.channel.mutual_friction_heat_j > 0.0);
+            assert!(report.channel.normal_viscous_heat_j > 0.0);
+            mutual += report.channel.mutual_friction_heat_j;
+            viscous += report.channel.normal_viscous_heat_j;
+            external_work += report.channel.body_force_work_j;
+            near(
+                report.heat_intake.external_heat_j,
+                report.channel.dissipated_heat_j(),
+                1e-4,
+            );
+            near(report.combined_storage_residual_j, 0.0, 1e-4);
+            for (i, (id, joules)) in ids.iter().zip(flow.last_dissipated_heat_j()).enumerate() {
+                near(
+                    joules,
+                    flow.last_mutual_friction_heat_j()[i] + flow.last_normal_viscous_heat_j()[i],
+                    1e-4,
+                );
+                near(
+                    MASS * (heat.cells()[id].specific_h_j_kg - old[i]),
+                    source_w * dt + joules,
+                    1e-4,
+                );
+                assert_eq!(heat.cells()[id].boundary.source_w, source_w);
+            }
+            let authored_heat = N as f64 * source_w * flow.time_s();
+            near(heat.energy_j(), authored_heat + mutual + viscous, 1e-4);
+            near(
+                flow.wave_energy_j().unwrap() + heat.energy_j() - initial_energy,
+                authored_heat + external_work,
+                1e-4,
+            );
+            near(flow.cumulative_mutual_friction_heat_j(), mutual, 1e-4);
+            near(flow.cumulative_normal_viscous_heat_j(), viscous, 1e-4);
+            near(flow.cumulative_dissipated_heat_j(), mutual + viscous, 1e-4);
+            assert_eq!(flow.time_s(), heat.time_s());
+            assert!(heat.uses_material_law(MaterialId(1), &law));
+        }
+    }
+}
+
+#[test]
+fn viscous_heat_refusal_and_late_cancellation_preserve_both_loss_histories() {
+    let wall = NormalViscousWall::try_new(0.003).unwrap();
+    let make = || channel_with_wall(Some(wall));
+    let law = CaloricLaw {
+        heat_capacity_j_kg_k: 8.0,
+        max_specific_energy_j_kg: 2.0,
+    };
+    let refused = CaloricLaw {
+        heat_capacity_j_kg_k: 8.0,
+        max_specific_energy_j_kg: 0.0,
+    };
+    let ids = destinations();
+    let dt = 0.2 * make().maximum_step_s();
+    let mut flow = make();
+    let mut cold = thermal(&refused, 0.0);
+    let before = snapshot(&flow, &cold);
+    assert!(matches!(
+        advance_closed_friction_heat(
+            &mut flow,
+            &mut cold,
+            &ids,
+            dt,
+            MutualFriction::None,
+            controls(),
+            || false,
+        ),
+        Err(FrictionHeatError::Thermal(DepositionError::MaterialDomain))
+    ));
+    assert_eq!(snapshot(&flow, &cold), before);
+
+    // Begin the cancelled interval with nonzero accepted heat in BOTH ledgers.
+    let mut baseline = make();
+    let mut baseline_heat = thermal(&law, 0.0);
+    advance_closed_friction_heat(
+        &mut baseline,
+        &mut baseline_heat,
+        &ids,
+        dt,
+        friction(),
+        controls(),
+        || false,
+    )
+    .unwrap();
+    let mut flow = make();
+    let mut heat = thermal(&law, 0.0);
+    advance_closed_friction_heat(
+        &mut flow,
+        &mut heat,
+        &ids,
+        dt,
+        friction(),
+        controls(),
+        || false,
+    )
+    .unwrap();
+    let before = snapshot(&flow, &heat);
+    assert!(before.cumulative_heat > 0.0 && before.cumulative_viscous_heat > 0.0);
+    let calls = Cell::new(0usize);
+    let expected = advance_closed_friction_heat(
+        &mut baseline,
+        &mut baseline_heat,
+        &ids,
+        dt,
+        friction(),
+        controls(),
+        || {
+            calls.set(calls.get() + 1);
+            false
+        },
+    )
+    .unwrap();
+    let count = Cell::new(0usize);
+    assert!(matches!(
+        advance_closed_friction_heat(
+            &mut flow,
+            &mut heat,
+            &ids,
+            dt,
+            friction(),
+            controls(),
+            || {
+                count.set(count.get() + 1);
+                count.get() == calls.get()
+            },
+        ),
+        Err(FrictionHeatError::Cancelled)
+    ));
+    assert_eq!(snapshot(&flow, &heat), before);
+    let retried = advance_closed_friction_heat(
+        &mut flow,
+        &mut heat,
+        &ids,
+        dt,
+        friction(),
+        controls(),
+        || false,
+    )
+    .unwrap();
+    assert_eq!(retried, expected);
+    assert_eq!(snapshot(&flow, &heat), snapshot(&baseline, &baseline_heat));
 }
 
 #[test]

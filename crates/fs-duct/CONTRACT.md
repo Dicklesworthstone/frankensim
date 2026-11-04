@@ -3286,6 +3286,41 @@ two-cell caloric equations, forced reciprocal response and refusal/retry.
 Thermal reservoirs and interface laws remain responsibilities of the coupled
 owner; the channel does not infer Kapitza conductance from a material name.
 
+### Stationary normal-fluid walls and fourth sound
+
+`try_new_with_normal_wall` retains an explicit `NormalViscousWall` permeability
+and the original material's normal viscosity. Its stationary-wall force is
+`F_n=-eta_n*v_n/k`; the superfluid slips and the external wall reaction is
+separate from mutual friction. The quasisteady laminar closure requires its
+authored geometry and low-Womersley regime; transverse startup, oscillatory
+boundary layers, turbulence, longitudinal/second viscosity and porous
+tortuosity are not inferred.
+
+Normal drag, midpoint thermodynamic gradients and authored body forces share
+one exact face evolution. Cell equations use its interval-mean velocities.
+An orthonormal two-by-two rotation reduces the resulting passive operator to
+the same two native tridiagonal solves and reusable endpoint columns, with
+O(cells) work/storage and no step allocation. Strong drag approaches the
+clamped-normal fourth-sound equations without a viscous step restriction;
+the original wave Courant accuracy policy remains. Body-force equilibrium
+is retained in this stiff limit. Zero viscosity preserves the original path.
+
+`normal_viscous_heat_j` and `interior_wall_impulse_n_s` report the separate
+loss and support impulse. Heat uses a positive exact integral, not subtraction
+of nearly equal kinetic stores. Mutual-only accessors retain their meaning;
+combined heat callbacks deliver both cell losses once to the original thermal
+owner. All fields, clocks and both cumulative/last-step heat ledgers publish
+together or remain unchanged. The native piston accounts include the external
+interior wall impulse. Endpoint half-volume inertia and wall forces belong
+to their explicit boundary composition; this distributed source acts only on
+resolved interior dual volumes.
+
+`superfluid_viscosity` tests independent exponential decay, stiff force
+balance, zero-viscosity identity, fourth-sound speed/refinement with and without
+thermal expansion, entropy polarization, reciprocal mechanical/thermal ports,
+nonnegative loss and refusal/cancellation. Native coupled heat and piston
+regressions reconstruct both heat stores and the external wall impulse.
+
 ### Explicit in-phase superfluid first sound
 
 `fs_material::superfluid::FirstSoundProjection` reaches the original

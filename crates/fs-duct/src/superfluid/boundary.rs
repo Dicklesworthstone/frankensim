@@ -1,4 +1,4 @@
-//! Mechanical and thermal endpoint response from the original two-mode operators.
+//! Mechanical and thermal endpoint response from the original wave operators.
 
 use super::*;
 
@@ -90,8 +90,8 @@ impl TwoFluidChannel {
     /// Query both thermal endpoint efforts on the original forced wave owner.
     ///
     /// Fixed total mass current makes the heat/temperature response reciprocal.
-    /// Finite thermal expansion, both sound modes, original mutual friction and
-    /// body forces remain active. The first friction half step is independent
+    /// Finite thermal expansion, both sound modes, authored normal-wall drag,
+    /// mutual friction and body forces remain active. The first friction half step is independent
     /// of proposed boundary flows and the second changes no cell temperature,
     /// so even Gorter-Mellink friction preserves this affine endpoint relation.
     ///
@@ -129,20 +129,28 @@ impl TwoFluidChannel {
             .face_to_modes(0.0, 1.0 / self.counterflow_heat_per_speed()?);
         let mut resistance = [[0.0; 2]; 2];
         let last = self.cells() - 1;
+        let rotation = self.wave_cell_rotation(dt_s)?;
         for mode in 0..2 {
-            let mut basis = [0.0; 2];
-            basis[mode] = 1.0;
             let temperature_column = self
                 .modes
-                .cell(&self.material, basis)
+                .cell(&self.material, rotation[mode])
                 .temperature_perturbation_k;
             // Prescribing outward Q subtracts lambda*k_Q*Q from the cell
             // RHS. Midpoint temperature contributes half the solved response.
             // Energy conjugacy makes k_Q*temperature_column nonnegative.
-            let multiplier = 0.5
-                * (self.modes.speed[mode] * dt_s / self.dx)
-                * heat_column[mode]
-                * temperature_column;
+            let multiplier = if self.normal_wall_rate_s_inv > 0.0 {
+                // The wall rotates the cell operators. Energy conjugacy in
+                // ANY orthonormal cell basis gives C*k_Q = theta/(A*T0), so
+                // the response is a positive square with the same factors
+                // used by the final exponentially fitted wave solve.
+                (0.5 * dt_s / self.dx / self.area_m2 / self.material.temperature_k()
+                    * temperature_column)
+                    * temperature_column
+            } else {
+                0.5 * (self.modes.speed[mode] * dt_s / self.dx)
+                    * heat_column[mode]
+                    * temperature_column
+            };
             if !multiplier.is_finite() || multiplier < 0.0 {
                 return Err(ChannelError::Invalid(
                     "counterflow thermal response is not representable",
@@ -225,7 +233,7 @@ impl TwoFluidChannel {
     }
 
     /// Query the exact coupled endpoint response on the original two-mode
-    /// midpoint operator, including authored force kicks and mutual friction.
+    /// wave operator, including authored forces, normal-wall drag and mutual friction.
     ///
     /// A force-only mechanical midpoint is a useful reference: a rigidly
     /// translating or freely accelerating fluid then needs no cancellation of
@@ -270,18 +278,15 @@ impl TwoFluidChannel {
             pressure[slot] =
                 0.5 * old.pressure_perturbation_pa + 0.5 * new.pressure_perturbation_pa;
         }
-        let bulk_column = self.modes.face_to_modes(1.0, 0.0);
+        let multipliers = self.impermeable_response_multipliers(dt_s)?;
         let mut resistance = [[0.0; 2]; 2];
         let last = self.cells() - 1;
         for mode in 0..2 {
-            let c = self.modes.speed[mode];
-            let k = bulk_column[mode];
-            let multiplier = (0.5 * (c * dt_s / self.dx) * k) * (c * k);
             for (column, end) in [0, last].into_iter().enumerate() {
                 let inverse =
                     endpoint_inverse(&mut self.workspace[mode], column, end, &mut cancelled)?;
                 for row in 0..2 {
-                    resistance[row][column] += multiplier * inverse[row];
+                    resistance[row][column] += multipliers[mode] * inverse[row];
                 }
             }
         }
@@ -362,7 +367,7 @@ impl TwoFluidChannel {
             ],
         );
         let pressure = 0.5 * old.pressure_perturbation_pa + 0.5 * new.pressure_perturbation_pa;
-        let bulk_column = self.modes.face_to_modes(1.0, 0.0);
+        let multipliers = self.impermeable_response_multipliers(dt_s)?;
         let mut resistance = 0.0;
         for mode in 0..2 {
             let inverse = endpoint_inverse(
@@ -371,13 +376,7 @@ impl TwoFluidChannel {
                 boundary_cell,
                 &mut cancelled,
             )?;
-            // In energy coordinates p=sum(c_m*k_m*P_m), k_m is the modal
-            // velocity produced by unit barycentric speed. A prescribed end
-            // adds -lambda*k_m*U to the midpoint RHS; midpoint pressure has
-            // the additional factor 1/2. This is the original Schur response.
-            let c = self.modes.speed[mode];
-            let k = bulk_column[mode];
-            resistance += (0.5 * (c * dt_s / self.dx) * k) * (c * k) * inverse[slot];
+            resistance += multipliers[mode] * inverse[slot];
         }
         let half_mass = self.boundary_half_mass_kg();
         if !pressure.is_finite() || !positive(resistance) || !positive(half_mass) {
@@ -391,6 +390,26 @@ impl TwoFluidChannel {
             pressure_velocity_impedance_pa_s_m: resistance,
             boundary_half_mass_kg: half_mass,
         })
+    }
+
+    fn impermeable_response_multipliers(&self, dt: f64) -> Result<[f64; 2], ChannelError> {
+        let bulk = self.modes.face_to_modes(1.0, 0.0);
+        if self.normal_wall_rate_s_inv == 0.0 {
+            // Retain the original zero-wall response arithmetic.
+            return Ok([0, 1].map(|m| {
+                let c = self.modes.speed[m];
+                (0.5 * (c * dt / self.dx) * bulk[m]) * (c * bulk[m])
+            }));
+        }
+        // Pressure is the effort conjugate to common component velocity.
+        // In modal coordinates p = (C*k_bulk).x. The wall's orthonormal cell
+        // rotation changes this column, while the endpoint Schur complement
+        // still contributes half the solved cell change to midpoint pressure.
+        let pressure = [self.modes.speed[0] * bulk[0], self.modes.speed[1] * bulk[1]];
+        Ok(self.wave_cell_rotation(dt)?.map(|row| {
+            let column = row[0] * pressure[0] + row[1] * pressure[1];
+            (0.5 * dt / self.dx * column) * column
+        }))
     }
 }
 
