@@ -82,6 +82,7 @@ fn all_reference_reactions_conserve_and_rebuild_identically() {
         PyriteOxidationFerrous,
         FerrousOxidationFerric,
         FerricPyriteOxidation,
+        ScoroditePrecipitation,
         PyriteOxidationFerricHydroxide,
         MagnesiteCalcination,
         MagnetiteOxidationToHematite,

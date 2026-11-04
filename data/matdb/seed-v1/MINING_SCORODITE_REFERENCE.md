@@ -112,3 +112,57 @@ are not represented by these nine profiles. They do not establish total
 mine-water solubility, a precipitation rate, permanent fixation or plant
 removal performance. The packs supply only point Gibbs data; no caloric
 properties, heat capacity or temperature extrapolation is inferred.
+
+## Run the coupled partition
+
+Compile the nine source profiles with the existing material-pack compiler,
+then run the `fs-thermochem` example from the repository root:
+
+```bash
+(
+  set -e
+  scorodite_pack_dir=target/scorodite-reference-packs
+  mkdir -p "$scorodite_pack_dir"
+  for profile in \
+    arsenic-acid-aqueous-nmk2014 \
+    dihydrogen-arsenate-ion-aqueous-nmk2014 \
+    hydrogen-arsenate-ion-aqueous-nmk2014 \
+    arsenate-ion-aqueous-nmk2014 \
+    iron-iii-ion-aqueous-nmk2014 \
+    scorodite-solid-nmk2014 \
+    water-liquid-nmk2014 \
+    hydrogen-ion-aqueous-nmk2014 \
+    hydroxide-ion-aqueous-nmk2014
+  do
+    cargo run -p xtask -- matdb-pack \
+      --manifest "data/matdb/seed-v1/$profile/manifest.tsv" \
+      --out "$scorodite_pack_dir/$profile.fsmatpk"
+  done
+  cargo run -p fs-thermochem --example scorodite_partition -- \
+    --materials "$scorodite_pack_dir"
+)
+```
+
+The default run exercises matched Fe/As inventories with three sodium
+stocks, an iron-limited stock, an arsenic-limited stock and a trace
+undersaturated stock. Each result includes the solid amount, all four
+arsenate fractions, shared pH, dissolved component amounts, both component
+balance residuals, charge residual, saturation residual and solver work.
+An undersaturated stock reports `SolidAbsent` instead of forcing a solid.
+
+Supply an explicit stock with:
+
+```bash
+cargo run -p fs-thermochem --example scorodite_partition -- \
+  --materials target/scorodite-reference-packs \
+  --stocks 0.02 0.02 0.04 0.06 10
+```
+
+The five values are total Fe, total analytical As(V), sodium, chloride
+and the common activity-normalization amount, all in moles. Both component
+totals include material initially present in scorodite. Sodium and chloride
+are explicit fixed spectator stocks; no counterions are inferred. With the
+unit-molality convention used here, a 10 mol normalization amount represents
+a fixed 10 kg solvent basis. It is not a solution-volume input. The result
+is a selected-phase equilibrium partition, not a treatment time or removal
+yield.

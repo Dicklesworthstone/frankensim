@@ -423,6 +423,41 @@ source/work/cancellation refusal. Actual USGS iron/goethite/H+/OH-/water packs
 exercise acid suppression and declared-base promotion of precipitation. The
 `mineral_precipitation` example exposes these ideal-solution calculations.
 
+## Finite salt precipitation coupled to an analytical acid family
+
+`acid_base::precipitation::salt::SaltPrecipitation` binds one exactly conserved
+1:1 precipitation equation between an independent cation and the terminal
+anion of an existing acid/base family, optionally consuming solvent water.
+Every family, water autoprotolysis and the selected phase retains its original
+compatible formation-Gibbs sources. The cation and analytical family totals
+both include material initially in the selected solid. At each trial, the
+same aqueous owner solves all protonation states and charge balance with the
+remaining dissolved component amounts. Precipitation cannot borrow a missing
+cation or keep the dissolved family total fixed while consuming that family.
+
+The outer solve uses the logarithm of the dissolved limiting component,
+retaining positive traces when most material is solid. The excess component
+stays explicit. The all-dissolved endpoint must satisfy the absence inequality;
+a present phase must close its saturation residual and both component balances.
+Numerical pH resolution contributes to the outer convergence test. Work limits,
+caller bounds, source refusals and cancellation produce no partial partition.
+
+`ScoroditePrecipitation` supplies the Fe/As/O/H-conserved dihydrate equation.
+The `scorodite_partition` example and `mining_scorodite_sources` integration use
+the NMK2014 arsenate/iron/scorodite evaluation with its CODATA-based water and
+ionic auxiliaries. The nine profiles preserve nine Gibbs values and eight
+reported uncertainty magnitudes; a reported uncertainty with unstated coverage
+does not acquire a confidence level or covariance. These profiles remain
+separate from the earlier NBS arsenic and iron evaluation.
+
+This is one selected pure phase in an ideal, fixed-solvent solution. It does
+not choose the stable solid assemblage, include ferric hydrolysis or dissolved
+iron-arsenate complexes, model nonideal activities or adsorption, predict
+nucleation/rates, or establish a mine-water treatment yield. The source is
+limited to 298.15 K and 100000 Pa; no hot pressure-oxidation extrapolation is
+inferred. Fe/As component and charge closure are distinct from finite-solvent
+H/O conservation.
+
 ## Coupled source-backed ideal aqueous acid/base speciation
 
 `stoichiometry::thermodynamics::acid_base::IdealAcidBaseSystem` couples

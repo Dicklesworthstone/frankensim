@@ -6,6 +6,11 @@ the compiler must reproduce them from the pinned manifest and source record.
 
 ## Mineral processing
 
+The [scorodite reference guide](MINING_SCORODITE_REFERENCE.md) supplies a
+separate, consistent NMK2014/CODATA Gibbs dataset. The finite salt-partition
+owner couples both Fe and As inventories to all four arsenate states and
+shared pH, exposing selected-phase equilibrium and undersaturation directly.
+
 The [ore work-index guide](MINING_BOND_WORK_INDEX.md) supplies five published
 SGS/Joanna Bond test specimens with 20 claims for work index, test feed/product
 sizes and closing screen. The material resolver retains each original test in

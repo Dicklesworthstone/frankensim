@@ -78,6 +78,10 @@
 //! the endpoint in *The influence of speciation in the removal of arsenic
 //! from mine waters* (2003), equation 1. It is not an elementary mechanism;
 //! the source reference data alone supply no rate, completion or removal claim.
+//! The separate scorodite endpoint retains FeAsO4.2H2O as one selected pure
+//! phase, as in Nordstrom, Majzlan and Königsberger (2014), Tables 8-10:
+//! <https://doi.org/10.2138/rmg.2014.79.4>. Its exactly conserved equation does
+//! not select that phase over competing solids or supply aqueous iron complexes.
 //! Free-cyanide peroxide oxidation and the separate cyanate-hydrolysis endpoint
 //! follow EPA 530-R-94-037, section 3.6, printed page 10:
 //! <https://archive.epa.gov/epawaste/nonhaz/industrial/special/web/pdf/cyanide.pdf>.
@@ -283,6 +287,9 @@ pub enum MineralReaction {
     /// Fe3+(aq) + 2 H2O(l) -> FeO(OH)(s, goethite) + 3 H+(aq).
     /// Phase-specific hydrolysis releases three protons per ferric ion.
     FerricHydrolysisGoethite,
+    /// Fe3+(aq) + AsO4(3-)(aq) + 2 H2O(l) -> FeAsO4.2H2O(s, scorodite).
+    /// One formula unit consumes one iron and one arsenic component.
+    ScoroditePrecipitation,
     /// 2 Fe3+(aq) + 3 Ca(OH)2(s) -> 2 FeO(OH)(s, goethite) + 3 Ca2+(aq) + 2 H2O(l).
     /// Combined hydrolysis and portlandite neutralization; extent is explicit.
     FerricGoethitePrecipitationWithHydratedLime,
@@ -782,6 +789,16 @@ impl MineralReaction {
                     ("H2O(l)", &[0, 1, 2], 0, -2),
                     ("FeO(OH)(s)", &[1, 2, 1], 0, 1),
                     ("H+(aq)", &[0, 0, 1], 1, 3),
+                ],
+            ),
+            Self::ScoroditePrecipitation => (
+                "scorodite-precipitation",
+                &["Fe", "As", "O", "H"],
+                &[
+                    ("Fe[3+](aq)", &[1, 0, 0, 0], 3, -1),
+                    ("AsO4[3-](aq)", &[0, 1, 4, 0], -3, -1),
+                    ("H2O(l)", &[0, 0, 1, 2], 0, -2),
+                    ("FeAsO4.2H2O(s)", &[1, 1, 6, 4], 0, 1),
                 ],
             ),
             Self::FerricGoethitePrecipitationWithHydratedLime => (
