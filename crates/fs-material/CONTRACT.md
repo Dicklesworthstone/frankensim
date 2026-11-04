@@ -13508,3 +13508,38 @@ energies. It does not supply expansion, entropy, caloric coupling or exact
 integration through a changing-temperature interval. Such trajectories require
 explicit temporal refinement, and the caller retains the original calibration
 and source qualifications. Shift the original reference law on each preparation.
+
+## Calibrated temperature kinetics in the original thermovisco and heat owner
+
+`ThermoMaxwell::with_temperature_shift` binds the shared WLF/Arrhenius
+declaration to an original constant relaxation-time multiplier. The multiplier
+remains the reference-time normalization; varying tabulated time scaling and
+second shifts refuse. Calibration must cover the complete mechanical temperature
+interval, contain the original reference temperature there, and leave every
+scaled branch time finite and positive. The analytic shift is evaluated at each
+actual mechanical/thermal trial temperature, without resampling a nonlinear
+curve or re-evaluating exponentials for elastic storage.
+
+`ResolvedThermoMaxwell::with_temperature_shift_from_source` binds explicit
+reference-temperature/C1/C2 or molar-activation-energy keys from the same immutable
+material card and fixed query context. Original claims are pinned, their full
+temperature-knot union and the reference-temperature sample are retained, and
+varying calibration coefficients or incomplete support refuse. Absolute kelvin
+and temperature-difference roles remain distinct when semantic quantities are
+provided; Arrhenius requires J/mol. The original mechanical samples and role
+keys remain intact; `temperature_shift_source()` exposes the calibration
+declaration and receipts.
+
+Existing backward-Euler and exact strain-ramp history/tangent paths consume
+these kinetics. Caloric feedback recomputes the same kinetics at the returned
+thermal temperature and deposits only physical dashpot loss through the existing
+entropy/internal-energy owner. Relaxation-time changes introduce no extra
+thermal work, branch resets, or second heat source. Exact strain ramps retain
+endpoint-frozen temperature coefficients and do not claim exact continuously
+varying-temperature integration; thermal refinement is still required. This is
+the executable temperature slice of M0.2-W4, without inferred moisture response
+or empirical material qualification.
+
+Seven focused regressions cover analytic off-grid kinetics, time-rescaling
+equivalence, mixed heating/cooling history and energy, source/quantity/support
+ownership, refusals, and implicit self-heating for both integrators.

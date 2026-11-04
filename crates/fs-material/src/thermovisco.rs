@@ -7,7 +7,10 @@
 //! interval. Changing temperature therefore still requires time refinement.
 //! Temperature changes never reset branch strains.
 //! All springs share an explicitly tabulated positive modulus multiplier and
-//! relaxation-time multiplier. Free thermal strain is a separate tabulated law.
+//! relaxation-time multiplier. An explicit [`ThermoMaxwell::with_temperature_shift`]
+//! attaches the shared WLF/Arrhenius law to constant reference relaxation scaling;
+//! each mechanical and heat-feedback trial then evaluates the exact shift at its
+//! proposed temperature. Free thermal strain is a separate tabulated law.
 //!
 //! The work audit separates mechanical work, thermal-eigenstrain work,
 //! modulus-change work, physical dashpot dissipation, and backward-Euler numerical
@@ -24,6 +27,9 @@ pub mod thermal;
 
 /// Source-backed coefficients shared by existing thermal and structural consumers.
 pub mod source;
+
+/// Exact calibrated viscous kinetics consumed by the existing history/heat owner.
+pub mod temperature;
 
 /// Temperature-dependent multipliers and stress-free thermal strain.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -88,13 +94,15 @@ pub struct ThermoMaxwell {
     knots: Vec<ThermalKnot>,
     limits: Limits,
     history_integration: HistoryIntegration,
+    temperature_shift: Option<crate::visco::temperature::TemperatureShift>,
 }
 
 impl ThermoMaxwell {
     /// Accept the `e_inf` and `terms` of an existing generalized-Maxwell model,
     /// plus explicit thermal data. At most 64 branches and 1024 knots are admitted.
-    /// Multipliers and free strain interpolate linearly in temperature. Supply
-    /// enough knots to resolve any chosen shift function; none is invented here.
+    /// Multipliers and free strain interpolate linearly in temperature. A table
+    /// with constant relaxation scaling can subsequently bind a calibrated
+    /// [`Self::with_temperature_shift`] without sampling its nonlinear kinetics.
     pub fn new(
         equilibrium_pa: f64,
         branches: Vec<(f64, f64)>,
@@ -127,7 +135,8 @@ impl ThermoMaxwell {
             return Err(Error::Invalid("temperature knots must strictly increase"));
         }
         Ok(Self { equilibrium_pa, branches, knots, limits,
-            history_integration: HistoryIntegration::BackwardEuler })
+            history_integration: HistoryIntegration::BackwardEuler,
+            temperature_shift: None })
     }
 
     /// Select history integration before creating material points. The immutable
@@ -268,7 +277,7 @@ impl<'a> Point<'a> {
     /// Applicability of the unknown strain/rate is checked on the final proposal.
     pub fn linearize(&self, temperature_k: f64, duration_s: f64) -> Result<AffineStress, Error> {
         positive(duration_s)?;
-        let thermal = self.law.at(temperature_k)?;
+        let thermal = self.law.kinetics_at(temperature_k)?;
         let old_e = self.mechanical_strain();
         let mut tangent = self.law.equilibrium_pa;
         let mut history = 0.0;
@@ -304,7 +313,7 @@ impl<'a> Point<'a> {
             return self.linearize(temperature_k, duration_s);
         }
         positive(duration_s)?;
-        let thermal = self.law.at(temperature_k)?;
+        let thermal = self.law.kinetics_at(temperature_k)?;
         let old_e = self.mechanical_strain();
         let mut tangent = 0.5 * self.law.equilibrium_pa;
         let mut history = tangent * old_e;
@@ -333,7 +342,7 @@ impl<'a> Point<'a> {
         } else { None };
         self.law.check_strain(total_strain)?;
         let old = self.law.at(self.temperature_k)?;
-        let thermal = self.law.at(temperature_k)?;
+        let thermal = self.law.kinetics_at(temperature_k)?;
         let e_old = self.mechanical_strain();
         let d_thermal = thermal.free_strain-old.free_strain;
         let d_total = total_strain-self.total_strain;

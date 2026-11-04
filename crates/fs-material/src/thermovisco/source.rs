@@ -20,6 +20,10 @@ use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{Dims, Pressure, QuantitySpec, Temperature, Time};
 use std::collections::BTreeSet;
 
+/// Original-source calibration for the shared WLF/Arrhenius kinetics.
+pub mod temperature;
+pub use temperature::{ResolvedTemperatureShift, TemperatureShiftSourceQuery};
+
 /// Explicit roles and source context; branch order is never sorted or inferred.
 #[derive(Clone, Copy, Debug)]
 pub struct ThermoMaxwellSourceQuery<'a> {
@@ -79,6 +83,7 @@ pub struct ResolvedThermoMaxwell {
     // Role order: equilibrium, each branch's E/tau, then scale/time/free strain.
     keys: Vec<PropertyKey>,
     temperature_axis: String,
+    temperature_shift_source: Option<ResolvedTemperatureShift>,
 }
 impl ResolvedThermoMaxwell {
     /// Resolve one continuously supported temperature line at fixed conditions.
@@ -259,6 +264,7 @@ impl ResolvedThermoMaxwell {
             samples,
             keys,
             temperature_axis: query.temperature_axis.into(),
+            temperature_shift_source: None,
         })
     }
 

@@ -49,13 +49,18 @@ fn reference() -> ViscoHyperelastic {
 fn shifts() -> [TemperatureShift; 2] {
     [
         TemperatureShift::new(
-            TemperatureShiftModel::WilliamsLandelFerry { c1: 2.0, c2_k: 70.0 },
+            TemperatureShiftModel::WilliamsLandelFerry {
+                c1: 2.0,
+                c2_k: 70.0,
+            },
             300.0,
             [280.0, 360.0],
         )
         .unwrap(),
         TemperatureShift::new(
-            TemperatureShiftModel::Arrhenius { activation_energy_j_mol: 35_000.0 },
+            TemperatureShiftModel::Arrhenius {
+                activation_energy_j_mol: 35_000.0,
+            },
             300.0,
             [280.0, 360.0],
         )
@@ -75,12 +80,19 @@ fn near(a: f64, b: f64, floor: f64) {
 fn calibrated_kinetics_reach_native_full_and_mixed_tangents() {
     let original = reference();
     let untouched = original.clone();
-    let accepted = original.step_response(&original.initial_state(), &F, 0.01).unwrap().state;
+    let accepted = original
+        .step_response(&original.initial_state(), &F, 0.01)
+        .unwrap()
+        .state;
     let accepted_remainder = original
         .step_remainder_response(&original.initial_remainder_state(), &F, 0.01)
-        .unwrap().state;
+        .unwrap()
+        .state;
     for shift in shifts() {
-        assert_eq!(shift.shift_hyperelastic(&original, 300.0).unwrap().law(), &original);
+        assert_eq!(
+            shift.shift_hyperelastic(&original, 300.0).unwrap().law(),
+            &original
+        );
         for temperature in [280.0, 325.0, 360.0] {
             let shifted = shift.shift_hyperelastic(&original, temperature).unwrap();
             let mut explicit = original.clone();
@@ -100,15 +112,29 @@ fn calibrated_kinetics_reach_native_full_and_mixed_tangents() {
                 actual.consistent_tangent(&G).unwrap(),
                 expected.consistent_tangent(&G).unwrap()
             );
-            let mixed = shifted.law().freeze_remainder(&accepted_remainder, 0.03).unwrap();
-            let mixed_reference = explicit.freeze_remainder(&accepted_remainder, 0.03).unwrap();
-            let a = mixed.mixed_response(&G, 3500.0, VolumetricTreatment::ExactIncompressible).unwrap();
-            let b = mixed_reference.mixed_response(&G, 3500.0, VolumetricTreatment::ExactIncompressible).unwrap();
+            let mixed = shifted
+                .law()
+                .freeze_remainder(&accepted_remainder, 0.03)
+                .unwrap();
+            let mixed_reference = explicit
+                .freeze_remainder(&accepted_remainder, 0.03)
+                .unwrap();
+            let a = mixed
+                .mixed_response(&G, 3500.0, VolumetricTreatment::ExactIncompressible)
+                .unwrap();
+            let b = mixed_reference
+                .mixed_response(&G, 3500.0, VolumetricTreatment::ExactIncompressible)
+                .unwrap();
             assert_eq!(a.state.first_piola_pa, b.state.first_piola_pa);
             assert_eq!(a.tangent_pa, b.tangent_pa);
             assert_eq!(
-                shifted.law().step_remainder_response(&accepted_remainder, &G, 0.03).unwrap(),
-                explicit.step_remainder_response(&accepted_remainder, &G, 0.03).unwrap()
+                shifted
+                    .law()
+                    .step_remainder_response(&accepted_remainder, &G, 0.03)
+                    .unwrap(),
+                explicit
+                    .step_remainder_response(&accepted_remainder, &G, 0.03)
+                    .unwrap()
             );
         }
     }
@@ -119,7 +145,10 @@ fn calibrated_kinetics_reach_native_full_and_mixed_tangents() {
 fn temperature_history_carries_metrics_and_obeys_reduced_time() {
     let original = reference();
     for shift in shifts() {
-        let loaded = original.step_response(&original.initial_state(), &F, 0.015).unwrap().state;
+        let loaded = original
+            .step_response(&original.initial_state(), &F, 0.015)
+            .unwrap()
+            .state;
         let mut physical = loaded.clone();
         let mut reduced = loaded.clone();
         // Each interval freezes its explicitly supplied temperature. Both
@@ -133,18 +162,33 @@ fn temperature_history_carries_metrics_and_obeys_reduced_time() {
             let shifted = shift.shift_hyperelastic(&original, temperature).unwrap();
             let old = physical.clone();
             // A temperature jump by itself neither resets memory nor adds heat.
-            let jump = shifted.law().step_response(&physical, &physical.deformation_gradient, 0.0).unwrap();
-            let same = original.step_response(&physical, &physical.deformation_gradient, 0.0).unwrap();
+            let jump = shifted
+                .law()
+                .step_response(&physical, &physical.deformation_gradient, 0.0)
+                .unwrap();
+            let same = original
+                .step_response(&physical, &physical.deformation_gradient, 0.0)
+                .unwrap();
             assert_eq!(jump, same);
             assert_eq!(jump.dissipated_pa, 0.0);
 
-            let a = shifted.law().step_response(&physical, &deformation, dt).unwrap();
-            let b = original.step_response(&reduced, &deformation, dt / shifted.state().factor()).unwrap();
+            let a = shifted
+                .law()
+                .step_response(&physical, &deformation, dt)
+                .unwrap();
+            let b = original
+                .step_response(&reduced, &deformation, dt / shifted.state().factor())
+                .unwrap();
             for (x, y) in a.first_piola_pa.iter().zip(b.first_piola_pa) {
                 near(*x, y, 1e5);
             }
-            for (x, y) in a.state.inverse_viscous_cauchy_green.iter().flatten()
-                .zip(b.state.inverse_viscous_cauchy_green.iter().flatten()) {
+            for (x, y) in a
+                .state
+                .inverse_viscous_cauchy_green
+                .iter()
+                .flatten()
+                .zip(b.state.inverse_viscous_cauchy_green.iter().flatten())
+            {
                 near(*x, *y, 1.0);
             }
             for (x, y) in [
@@ -157,7 +201,11 @@ fn temperature_history_carries_metrics_and_obeys_reduced_time() {
             }
             assert!(a.dissipated_pa >= 0.0);
             assert!(a.state.dissipated >= old.dissipated);
-            near(a.loading_work_pa - (a.state.stored - old.stored) - a.dissipated_pa, 0.0, 1e5);
+            near(
+                a.loading_work_pa - (a.state.stored - old.stored) - a.dissipated_pa,
+                0.0,
+                1e5,
+            );
             assert_eq!(physical, old);
             physical = a.state;
             reduced = b.state;
@@ -169,12 +217,18 @@ fn temperature_history_carries_metrics_and_obeys_reduced_time() {
 #[test]
 fn heating_accelerates_relaxation_without_changing_elastic_storage() {
     let original = reference();
-    let loaded = original.step_response(&original.initial_state(), &F, 0.0).unwrap().state;
+    let loaded = original
+        .step_response(&original.initial_state(), &F, 0.0)
+        .unwrap()
+        .state;
     for shift in shifts() {
         let cold = shift.shift_hyperelastic(&original, 280.0).unwrap();
         let hot = shift.shift_hyperelastic(&original, 360.0).unwrap();
         assert!(hot.state().factor() < cold.state().factor());
-        assert_eq!(hot.law().free_energy(&loaded, &F).unwrap(), cold.law().free_energy(&loaded, &F).unwrap());
+        assert_eq!(
+            hot.law().free_energy(&loaded, &F).unwrap(),
+            cold.law().free_energy(&loaded, &F).unwrap()
+        );
         let slow = cold.law().step_response(&loaded, &F, 0.02).unwrap();
         let fast = hot.law().step_response(&loaded, &F, 0.02).unwrap();
         assert!(fast.state.stored < slow.state.stored);
@@ -197,7 +251,13 @@ fn invalid_reference_or_shift_refuses_before_any_history_change() {
         let mut invalid = original.clone();
         invalid.branches[0].tau_s = tau;
         let error = shift.shift_hyperelastic(&invalid, 300.0).unwrap_err();
-        assert!(error.source().unwrap().downcast_ref::<MaterialError>().is_some());
+        assert!(
+            error
+                .source()
+                .unwrap()
+                .downcast_ref::<MaterialError>()
+                .is_some()
+        );
         assert!(matches!(error, HyperelasticTemperatureError::Material(_)));
     }
     let mut invalid_equilibrium = original.clone();
