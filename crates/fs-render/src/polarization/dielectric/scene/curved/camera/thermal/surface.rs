@@ -6,6 +6,7 @@
 //! accepted thermal state is observed only; this binding never advances heat.
 
 use super::super::{CameraRadianceError, CurvedCameraScene, Interaction};
+use crate::polarization::dielectric::scene::curved::CurvedPolarizedScene;
 use crate::spectral::SpectralReflectance;
 use crate::thermal_surface::SpectralDiffuseThermalSurface;
 use fs_exec::Cx;
@@ -48,6 +49,37 @@ impl DiffuseThermalEmitter {
             }
         })
     }
+
+    // Camera hits and native area proposals must admit the same complete
+    // Kirchhoff material; neither consumer may substitute a calibrated lamp.
+    pub(in super::super) fn admit_scene(
+        &self,
+        scene: &CurvedPolarizedScene<'_>,
+    ) -> Result<usize, CameraRadianceError> {
+        let invalid = || CameraRadianceError::InvalidEmitter {
+            object_id: self.object_id,
+        };
+        let index = scene
+            .bindings
+            .binary_search_by_key(&self.object_id, |binding| binding.object_id)
+            .map_err(|_| invalid())?;
+        match scene.bindings[index].interaction {
+            Interaction::DepolarizingDiffuse { reflectance, .. } => {
+                if scene.reflectances[reflectance] != self.reflectance_spectrum()? {
+                    return Err(invalid());
+                }
+            }
+            Interaction::Opaque
+                if self
+                    .surface
+                    .emissivity()
+                    .knots()
+                    .iter()
+                    .all(|&(_, epsilon)| epsilon == 1.0) => {}
+            _ => return Err(invalid()),
+        }
+        Ok(index)
+    }
 }
 
 impl CurvedCameraScene<'_, '_> {
@@ -84,28 +116,9 @@ impl CurvedCameraScene<'_, '_> {
                 let invalid = CameraRadianceError::InvalidEmitter {
                     object_id: emitter.object_id,
                 };
-                let index = self
-                    .scene
-                    .bindings
-                    .binary_search_by_key(&emitter.object_id, |binding| binding.object_id)
-                    .map_err(|_| invalid.clone())?;
+                let index = emitter.admit_scene(self.scene)?;
                 if slots[index].is_some() || self.emitters[index].is_some() {
                     return Err(invalid);
-                }
-                match self.scene.bindings[index].interaction {
-                    Interaction::DepolarizingDiffuse { reflectance, .. } => {
-                        if self.scene.reflectances[reflectance] != emitter.reflectance_spectrum()? {
-                            return Err(invalid);
-                        }
-                    }
-                    Interaction::Opaque
-                        if emitter
-                            .surface
-                            .emissivity()
-                            .knots()
-                            .iter()
-                            .all(|&(_, epsilon)| epsilon == 1.0) => {}
-                    _ => return Err(invalid),
                 }
                 slots[index] = Some(*emitter);
             }

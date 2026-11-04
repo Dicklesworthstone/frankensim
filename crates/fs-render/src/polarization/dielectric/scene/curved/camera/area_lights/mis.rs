@@ -201,7 +201,7 @@ impl CurvedAreaEmitter<'_, '_, '_> {
         cosine_receiver: f64,
         projection: ProjectionOptions,
     ) -> Result<(f64, f64), AreaEmitterError> {
-        if !core::ptr::eq(sample.emitter, self.emitter)
+        if !core::ptr::eq(sample.emitter, &self.emitter)
             || !core::ptr::eq(sample.instance, self.instance)
             || !core::ptr::eq(sample.support, &self.support)
         {
@@ -227,6 +227,7 @@ impl CurvedAreaEmitter<'_, '_, '_> {
             .map_err(|error| AreaEmitterError::Refractive(error.into()))?
             .area_per_solid_angle_m2();
         let source_index = geometric.propagation().initial_sample.phase_index();
+        self.emitter.admit_phase_index(source_index).map_err(AreaEmitterError::Camera)?;
         let receiver_index = geometric.propagation().final_sample.phase_index();
         let reverse_log_probability = bundle.reverse_branch_log_probability();
         if !(source_index > 0.0 && source_index.is_finite()
@@ -312,7 +313,7 @@ impl CurvedAreaEmitter<'_, '_, '_> {
             return Err(AreaEmitterError::NumericalRange);
         }
         Ok(Some(AreaEmitterSample {
-            emitter: self.emitter,
+            emitter: &self.emitter,
             instance: self.instance,
             support: &self.support,
             triangle,

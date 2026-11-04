@@ -155,8 +155,9 @@ fn g1_infrared_area_detector_keeps_nee_mis_and_physical_channel_weights() {
                     controls,
                     &mut workspace,
                     |event| {
-                        philox4x32_10([pixel, sample, event, 0x6372_7340 + lane as u32], key)
-                            .map(unit)
+                        let block =
+                            philox4x32_10([pixel, sample, event, 0x6372_7340 + lane as u32], key);
+                        core::array::from_fn(|i| unit(block[i]))
                     },
                     |event, binding| {
                         let draw = philox4x32_10(

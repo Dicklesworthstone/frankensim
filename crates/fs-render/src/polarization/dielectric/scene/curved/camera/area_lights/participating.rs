@@ -359,7 +359,7 @@ impl<'a, 'c, 's, 'm, 'o, 'l> CurvedRayleighAreaLightCameraScene<'a, 'c, 's, 'm, 
     ) -> Result<(), AreaLightCameraError> {
         let beam = *path.beam();
         let wavelength = beam.wavelength_nm();
-        if binding.source.emitter.spectrum().evaluate(wavelength)? == 0.0 { return Ok(()); }
+        if binding.source.emitter.evaluate(wavelength)? == 0.0 { return Ok(()); }
         cx.checkpoint()?;
         if work.samples >= settings.area_lights.max_area_samples {
             return Err(AreaLightCameraError::AreaSampleLimit);
@@ -462,7 +462,7 @@ impl<'a, 'c, 's, 'm, 'o, 'l> CurvedRayleighAreaLightCameraScene<'a, 'c, 's, 'm, 
         if !pdf.is_finite() || pdf <= 0.0 { return Err(AreaLightCameraError::NumericalRange); }
         for (slot, binding) in self.volume_bindings.iter().enumerate() {
             if binding.receiver_medium == path.medium_index()
-                && binding.source.emitter.spectrum().evaluate(path.beam().wavelength_nm())? > 0.0 {
+                && binding.source.emitter.evaluate(path.beam().wavelength_nm())? > 0.0 {
                 state.anchor = Some(ContinuationAnchor::Molecular(MolecularAnchor {
                     position: path.beam().ray().origin, medium: path.medium_index(), incoming,
                     outgoing: path.beam().ray().dir, pdf,

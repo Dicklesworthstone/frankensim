@@ -2,6 +2,7 @@
 
 mod support;
 mod sphere;
+mod thermal;
 
 use super::*;
 use crate::charts::{Ray, TriMesh};

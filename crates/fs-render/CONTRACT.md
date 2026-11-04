@@ -805,8 +805,8 @@ differentiable lift). Pure Rust throughout.
   regressions are authored but unexecuted in the implementation environment.
 
 - `camera::area_lights::CurvedAreaEmitter` prepares area sampling on original
-  native geometry and its exact `SurfaceEmitter`, directly from the surface
-  scene or an admitted camera emitter. Mesh sources may include all
+  native geometry and its original calibrated or thermal emission law,
+  directly from the surface scene or an admitted camera emitter. Mesh sources may include all
   original faces or an explicit strictly increasing face selection through
   `try_new_faces` / `from_camera_faces`; disconnected, noncoplanar and closed
   meshes retain original face winding and per-side radiance. `AreaEmitterLimits`
@@ -815,7 +815,7 @@ differentiable lift). Pure Rust throughout.
   predicates to reject positive-area coplanar overlap, including overlap with
   excluded faces. Shared edges and vertices remain zero-area contacts; no
   mesh-union or multiplicity correction is inferred. The triangle-area CDF
-  retains original geometry, frame and calibrated spectral radiance. Samples
+  retains original geometry, frame and the exact emission law. Samples
   retain the exact prepared support, original face index and represented
   conditional area PDF; proper-rigid placement preserves area. Native camera
   hit lookup reuses the original BVH, checks actual three-dimensional plane
@@ -835,6 +835,23 @@ differentiable lift). Pure Rust throughout.
   seeds do not establish image completeness. It does not add a second
   emission term to camera continuation. Singular caustic integration and
   coherent interference remain outside it.
+
+- Thermal area proposals retain the complete `DiffuseThermalEmitter` snapshot.
+  The thermal constructors and original `from_camera` constructors reuse native
+  geometry sampling and image discovery. NEE and complementary emitter hits
+  evaluate `epsilon(lambda)*B_lambda(T)` at the actual wavelength, without a
+  tabulated surrogate, extra pi/side factor or second heat step. Exact Kirchhoff
+  material agreement, source-band support and local index-one emission remain
+  required; camera matching includes temperature, emissivity and source identity.
+  `refresh_thermal_emitter` validates and atomically replaces only that snapshot,
+  preserving prepared mesh CDF/chart metadata and work limits. Its mutable
+  borrow excludes stale samples, and camera bindings must match the refreshed
+  state. `source_emitter()` returns an optional calibrated owner;
+  `source_thermal_emitter()` exposes the original thermal state. Native surface
+  and participating MIS share this source path. Focused native regression
+  fixtures cover Planck radiometry, complementary hits, thermal QE response,
+  geometry reuse and refusal; full renderer execution remains unavailable in
+  this implementation environment.
 
 - Native chart area emitters use the original owner's explicit
   `Chart::{surface_area, sample_surface_area, surface_area_pdf_at}` capability.
@@ -6920,6 +6937,16 @@ existing visible XYZ path and random-counter domains.
 scattering spectrum, phase law, free-flight draws and volume-event budget.
 Zero scattering preserves the complete surface detector sample bit for bit.
 Failure or cancellation publishes no partial channels or renormalized lanes.
+
+`sample_pixel_sensor_area_lights` and `sample_pixel_sensor_rayleigh_area_lights`
+observe finite-area emission through the same native source connections,
+complementary emitter-hit MIS and independent source-survival tracking as the
+color observer. Their original detector proposal supplies each wavelength;
+all channels share four paths and receive their own physical QE and photon
+weights only after complete path radiance is assembled. Generic area-pixel
+results retain the detector sample and original per-lane work accounting.
+Unsupported source bands, exhausted work or cancellation refuse the complete
+observation. No CIE conversion or additional light/survival weight is applied.
 
 Outputs are QE-weighted radiance in W/(m² sr) and collected-electron rate per
 m² sr, before pixel etendue, exposure and electronics. The existing aperture

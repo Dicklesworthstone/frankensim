@@ -24,7 +24,7 @@ fn g1_chart_source_preserves_native_area_placement_and_exact_preparation_owner()
         let duplicate = CurvedAreaEmitter::from_camera(cx, &camera, 2, 0).unwrap();
         assert!(source.support_overlaps(&duplicate));
         assert!(core::ptr::eq(source.source_instance(), &geometry.instances()[0]));
-        assert!(core::ptr::eq(source.source_emitter(), &emitters[0]));
+        assert!(core::ptr::eq(source.source_emitter().unwrap(), &emitters[0]));
         near(source.total_area_m2(), core::f64::consts::PI, 1e-14);
         assert!(matches!(source.sample_area([0.25, 0.5]), Err(AreaEmitterError::ContextRequired)));
         assert!(matches!(source.sample_area_with_context(cx, [1.0, 0.5]),

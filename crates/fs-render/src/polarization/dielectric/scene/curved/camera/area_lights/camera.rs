@@ -232,13 +232,14 @@ impl AreaLightCameraSample {
     pub const fn trace_evaluations(&self) -> u32 { self.work.traces }
     /// Native source-walk field work, including image membership replay.
     /// Local BSDF material lookups at a rough receiving contact are not
-    /// propagation steps and remain outside this integration-work counter.
+    /// propagation steps and remain outside this integration-work counter,
+    /// as does a thermal source's bounded local-vacuum admission probe.
     pub const fn field_evaluations(&self) -> u64 { self.work.fields }
     pub const fn query_work(&self) -> u64 { self.work.geometry }
 }
 
 /// Borrow prepared original source face selections and the original camera. Native
-/// camera geometry, materials, continuation draws and source spectra stay in
+/// camera geometry, materials, continuation draws and source laws stay in
 /// their owners; no replacement scene or per-ray allocation is introduced.
 pub struct CurvedAreaLightCameraScene<'a, 's, 'm, 'l> {
     pub(super) camera: &'a CurvedCameraScene<'s, 'm>,
@@ -370,7 +371,7 @@ impl<'a, 's, 'm, 'l> CurvedAreaLightCameraScene<'a, 's, 'm, 'l> {
         let wavelength = beam.wavelength_nm();
         for (index, binding) in self.bindings.iter().enumerate() {
             if binding.receiver_object_id != contact.object_id
-                || binding.source.emitter.spectrum().evaluate(wavelength)? == 0.0 {
+                || binding.source.emitter.evaluate(wavelength)? == 0.0 {
                 continue;
             }
             cx.checkpoint()?;
@@ -453,7 +454,7 @@ impl<'a, 's, 'm, 'l> CurvedAreaLightCameraScene<'a, 's, 'm, 'l> {
             if receiver_media(binding.interaction).is_some() {
                 for entry in self.bindings {
                     if entry.receiver_object_id == contact.object_id
-                        && entry.source.emitter.spectrum().evaluate(path.beam().wavelength_nm())? > 0.0 {
+                        && entry.source.emitter.evaluate(path.beam().wavelength_nm())? > 0.0 {
                         active_source = true;
                         break;
                     }
@@ -567,8 +568,7 @@ pub(super) fn validate_source_binding(
     let source_id = binding.source.emitter.object_id();
     let source_slot = camera.scene.bindings.binary_search_by_key(&source_id, |entry| entry.object_id)
         .map_err(|_| invalid())?;
-    if !camera.emitters.get(source_slot).and_then(|entry| *entry)
-        .is_some_and(|emitter| core::ptr::eq(emitter, binding.source.emitter)) {
+    if !binding.source.emitter.matches_camera(camera, source_slot) {
         return Err(invalid());
     }
     let expected_medium = match camera.scene.bindings[source_slot].interaction {
@@ -622,7 +622,9 @@ pub(super) fn emitter_weight_for_source(
             return Err(AreaLightCameraError::PathMismatch { binding: index });
         }
         let wavelength = path.beam().wavelength_nm();
-        if binding.source.emitter.spectrum().evaluate(wavelength)? == 0.0 { return Ok(1.0); }
+        binding.source.emitter.admit_local_medium(
+            camera.scene, sample.position_m(), path.medium_index(), wavelength)?;
+        if binding.source.emitter.evaluate(wavelength)? == 0.0 { return Ok(1.0); }
         cx.checkpoint()?;
         let target = anchor.target(sample.position_m(), binding.position_tolerance_m)
             .map_err(|error| connection_error(index, error))?;
