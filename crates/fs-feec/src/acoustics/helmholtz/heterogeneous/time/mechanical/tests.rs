@@ -34,6 +34,7 @@ fn exact_wall_motion_preserves_physical_area_storage_and_source_work() {
                 &[MechanicalBoundary {
                     faces: plane(&geometry, 1.0),
                     wall: pin,
+                    relaxation: Vec::new(),
                 }],
                 MechanicalTimeLimits::default(),
                 &mut || false,
@@ -129,6 +130,7 @@ fn nonuniform_full_trace_returns_stored_energy_and_only_resistance_makes_heat() 
                 &[MechanicalBoundary {
                     faces: plane(&geometry, 1.0),
                     wall: pin,
+                    relaxation: Vec::new(),
                 }],
                 MechanicalTimeLimits::default(),
                 &mut || false,
@@ -201,6 +203,24 @@ fn nonuniform_full_trace_returns_stored_energy_and_only_resistance_makes_heat() 
 
 #[test]
 fn reactive_wall_reflection_phase_agrees_with_original_impedance_and_time_refines() {
+    reflection_phase(&[]);
+}
+
+#[test]
+fn hereditary_wall_reflection_retains_both_phase_and_amplitude_under_time_refinement() {
+    reflection_phase(&[
+        AcousticWallRelaxation {
+            stiffness_per_area: 3.0,
+            relaxation_time_s: 0.08,
+        },
+        AcousticWallRelaxation {
+            stiffness_per_area: 2.0,
+            relaxation_time_s: 0.6,
+        },
+    ]);
+}
+
+fn reflection_phase(relaxation: &[AcousticWallRelaxation]) {
     let (complex, positions) = brick(8, [1.0, 0.1, 0.1]);
     let geometry = HelmholtzFe::new(&complex, &positions, 2, MEDIUM).unwrap();
     let model = uniform(&geometry);
@@ -215,7 +235,14 @@ fn reactive_wall_reflection_phase_agrees_with_original_impedance_and_time_refine
     // Frequencies straddle the original wall's sqrt(K/sigma) resonance.
     for omega in [2.0, 5.0] {
         // WallPin uses exp(-i omega t); FEEC uses exp(+i omega t).
-        let impedance = fs_phs::wall_specific_impedance(&pin, omega).unwrap().conj();
+        let mut impedance = fs_phs::wall_specific_impedance(&pin, omega).unwrap().conj();
+        // Independent continuous Maxwell transform: each arm contributes
+        // k*tau/(1+i*omega*tau) to pressure/velocity impedance.
+        for arm in relaxation {
+            impedance = impedance
+                + C64::from_re(arm.stiffness_per_area * arm.relaxation_time_s)
+                    / C64::new(1.0, omega * arm.relaxation_time_s);
+        }
         let admittance = impedance.recip();
         let harmonic = model
             .prepare(
@@ -271,6 +298,7 @@ fn reactive_wall_reflection_phase_agrees_with_original_impedance_and_time_refine
                     &[MechanicalBoundary {
                         faces: wall_faces.clone(),
                         wall: pin,
+                        relaxation: relaxation.to_vec(),
                     }],
                     MechanicalTimeLimits::default(),
                     &mut || false,
@@ -284,8 +312,27 @@ fn reactive_wall_reflection_phase_agrees_with_original_impedance_and_time_refine
                 .collect::<Vec<_>>();
             let displacement = v.iter().map(|v| v.im / omega).collect::<Vec<_>>();
             let velocity = v.iter().map(|v| v.re).collect::<Vec<_>>();
+            let memories = relaxation
+                .iter()
+                .map(|arm| {
+                    v.iter()
+                        .map(|v| {
+                            let w = C64::new(v.im / omega, -v.re / omega);
+                            (w.scale(det::sqrt(arm.stiffness_per_area))
+                                / C64::new(1.0, omega * arm.relaxation_time_s))
+                            .re
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
             let mut state = prepared
-                .state_with_walls(&potential, &pressure, &[displacement], &[velocity])
+                .state_with_wall_memory(
+                    &potential,
+                    &pressure,
+                    &[displacement],
+                    &[velocity],
+                    &[memories],
+                )
                 .unwrap();
             for index in 0..count {
                 let inward = 2.0 / z0 * det::cos(omega * (index as f64 + 0.5) * h);
@@ -394,6 +441,7 @@ fn wall_admission_limits_overlap_cancellation_and_state_binding_are_explicit() {
     let model = uniform(&geometry);
     let boundary = MechanicalBoundary {
         faces: plane(&geometry, 1.0),
+        relaxation: Vec::new(),
         wall: WallPin {
             surface_density: 0.4,
             stiffness_per_area: 3.0,
@@ -467,4 +515,312 @@ fn wall_admission_limits_overlap_cancellation_and_state_binding_are_explicit() {
     let mut invalid = boundary;
     invalid.wall.surface_density = 0.0;
     assert!(matches!(prepare(invalid), Err(HeterogeneousError::Wall(_))));
+}
+
+#[test]
+fn maxwell_wall_ramp_has_independent_storage_heat_and_area_scaling() {
+    let pin = WallPin {
+        surface_density: 0.4,
+        stiffness_per_area: 1.7,
+        resistance: 0.3,
+    };
+    let arms = vec![
+        AcousticWallRelaxation {
+            stiffness_per_area: 2.1,
+            relaxation_time_s: 0.03,
+        },
+        AcousticWallRelaxation {
+            stiffness_per_area: 1.4,
+            relaxation_time_s: 0.6,
+        },
+    ];
+    let viscosity: f64 = arms
+        .iter()
+        .map(|a| a.stiffness_per_area * a.relaxation_time_s)
+        .sum();
+    let h = 0.0125;
+    for height in [0.1, 0.3] {
+        let area = height * 0.2;
+        let (complex, positions) = brick(2, [1.0, height, 0.2]);
+        let geometry = HelmholtzFe::new(&complex, &positions, 2, MEDIUM).unwrap();
+        let model = uniform(&geometry);
+        let prepared = model
+            .prepare_time_with_walls(
+                h,
+                &[],
+                &[MechanicalBoundary {
+                    faces: plane(&geometry, 1.0),
+                    wall: pin,
+                    relaxation: arms.clone(),
+                }],
+                MechanicalTimeLimits::default(),
+                &mut || false,
+            )
+            .unwrap();
+        for amplitude in [1.0, 1e-8] {
+            let v = 0.02 * amplitude;
+            let w0 = 0.03 * amplitude;
+            // Continuous exact solution: each arm already follows a steady
+            // strain ramp, e_j=sqrt(k_j)*tau_j*v. Memory grows linearly;
+            // physical branch storage is constant while it dissipates k*tau*v².
+            let a = pin.stiffness_per_area * v / MEDIUM.sound_speed_m_s.powi(2);
+            let b = -MEDIUM.density_kg_m3 * v - a;
+            let p0 = (pin.resistance + viscosity) * v + pin.stiffness_per_area * w0;
+            let potential = p2(&geometry, |point| 0.5 * a * point[0].powi(2) + b * point[0]);
+            let pressure = p2(&geometry, |_| p0);
+            let displacement = restricted(&prepared, &p2(&geometry, |_| w0));
+            let velocity = restricted(&prepared, &p2(&geometry, |_| v));
+            let memories = arms
+                .iter()
+                .map(|arm| {
+                    restricted(
+                        &prepared,
+                        &p2(&geometry, |_| {
+                            det::sqrt(arm.stiffness_per_area) * (w0 - arm.relaxation_time_s * v)
+                        }),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let mut state = prepared
+                .state_with_wall_memory(
+                    &potential,
+                    &pressure,
+                    &[displacement],
+                    &[velocity],
+                    &[memories],
+                )
+                .unwrap();
+            let expected_memory: f64 = arms
+                .iter()
+                .map(|arm| {
+                    0.5 * area * arm.stiffness_per_area * (arm.relaxation_time_s * v).powi(2)
+                })
+                .sum();
+            let initial = prepared.energy(&state).unwrap();
+            assert!((initial.wall_relaxation_j / expected_memory - 1.0).abs() < 2e-12);
+            let source = plane(&geometry, 0.0)
+                .into_iter()
+                .map(|face| (face, [-b / MEDIUM.density_kg_m3; 3]))
+                .collect::<Vec<_>>();
+            let mut work = 0.0;
+            let mut heat = 0.0;
+            for step_index in 1..=6 {
+                let next = prepared.step(&state, &source, &mut || false).unwrap();
+                let time = step_index as f64 * h;
+                let w = w0 + v * time;
+                let p = (pin.resistance + viscosity) * v + pin.stiffness_per_area * w;
+                for &actual in &next.state.pressure_pa()[..positions.len()] {
+                    assert!((actual / p - 1.0).abs() < 5e-10);
+                }
+                for (j, arm) in arms.iter().enumerate() {
+                    let expected = restricted(
+                        &prepared,
+                        &p2(&geometry, |_| {
+                            det::sqrt(arm.stiffness_per_area) * (w - arm.relaxation_time_s * v)
+                        }),
+                    );
+                    for (&actual, expected) in next
+                        .state
+                        .wall_relaxation_memory(0, j)
+                        .unwrap()
+                        .iter()
+                        .zip(expected)
+                    {
+                        assert!((actual - expected).abs() < 1e-10 * amplitude);
+                    }
+                }
+                let energy = prepared.energy(&next.state).unwrap();
+                assert!((energy.wall_relaxation_j / expected_memory - 1.0).abs() < 2e-9);
+                let maxwell_heat = h * area * viscosity * v * v;
+                assert!(
+                    (next.work.wall_relaxation_dissipation_j / maxwell_heat - 1.0).abs() < 2e-9
+                );
+                assert!(
+                    (next.work.wall_dissipation_j
+                        / (h * area * (pin.resistance + viscosity) * v * v)
+                        - 1.0)
+                        .abs()
+                        < 2e-9
+                );
+                work += next.work.input_work_j;
+                heat += next.work.wall_dissipation_j;
+                assert!(
+                    (energy.total_j() + heat - initial.total_j() - work).abs()
+                        < 2e-9 * initial.total_j()
+                );
+                state = next.state;
+            }
+        }
+    }
+}
+
+#[test]
+fn nonuniform_wall_memory_can_release_energy_at_zero_displacement() {
+    let lengths = [1.0, 0.2, 0.3];
+    let area = lengths[1] * lengths[2];
+    let (complex, positions) = brick(2, lengths);
+    let geometry = HelmholtzFe::new(&complex, &positions, 2, MEDIUM).unwrap();
+    let model = uniform(&geometry);
+    let k = 2.5;
+    let tau = 0.02;
+    let h = 0.005;
+    let prepared = model
+        .prepare_time_with_walls(
+            h,
+            &[],
+            &[MechanicalBoundary {
+                faces: plane(&geometry, 1.0),
+                wall: WallPin {
+                    surface_density: 0.6,
+                    stiffness_per_area: 3.0,
+                    resistance: 0.0,
+                },
+                relaxation: vec![AcousticWallRelaxation {
+                    stiffness_per_area: k,
+                    relaxation_time_s: tau,
+                }],
+            }],
+            MechanicalTimeLimits::default(),
+            &mut || false,
+        )
+        .unwrap();
+    let amplitude = 0.01;
+    let memory = restricted(
+        &prepared,
+        &p2(&geometry, |point| {
+            det::sqrt(k) * amplitude * (1.0 + point[1] / lengths[1]).powi(2)
+        }),
+    );
+    let zeros = vec![0.0; geometry.ndof()];
+    let wall_zeros = vec![0.0; prepared.wall_dofs(0).unwrap().len()];
+    let mut state = prepared
+        .state_with_wall_memory(
+            &zeros,
+            &zeros,
+            &[wall_zeros.clone()],
+            &[wall_zeros],
+            &[vec![memory]],
+        )
+        .unwrap();
+    let initial = prepared.energy(&state).unwrap();
+    let expected = 0.5 * k * area * amplitude * amplitude * 31.0 / 5.0;
+    assert!((initial.wall_relaxation_j / expected - 1.0).abs() < 3e-12);
+    assert_eq!(initial.wall_elastic_j, 0.0);
+    assert_eq!(initial.wall_kinetic_j, 0.0);
+    assert_eq!(initial.acoustic.total_j(), 0.0);
+    let mut heat = 0.0;
+    for _ in 0..8 {
+        let step = prepared.step(&state, &[], &mut || false).unwrap();
+        assert_eq!(step.work.input_work_j, 0.0);
+        assert_eq!(step.work.boundary_dissipation_j, 0.0);
+        assert_eq!(
+            step.work.wall_dissipation_j,
+            step.work.wall_relaxation_dissipation_j
+        );
+        assert!(step.work.wall_relaxation_dissipation_j > 0.0);
+        assert!(step.work.wall_balance_residual_j().abs() < 2e-10 * expected);
+        assert!(step.work.acoustic_balance_residual_j().abs() < 2e-10 * expected);
+        heat += step.work.wall_dissipation_j;
+        state = step.state;
+    }
+    let energy = prepared.energy(&state).unwrap();
+    assert!(energy.acoustic.total_j() > 0.0);
+    assert!(energy.wall_relaxation_j < expected);
+    assert!((energy.total_j() + heat - expected).abs() < 2e-10 * expected);
+}
+
+#[test]
+fn hereditary_walls_require_complete_valid_memory_and_an_explicit_budget() {
+    let (complex, positions) = brick(1, [1.0; 3]);
+    let geometry = HelmholtzFe::new(&complex, &positions, 2, MEDIUM).unwrap();
+    let model = uniform(&geometry);
+    let boundary = MechanicalBoundary {
+        faces: plane(&geometry, 1.0),
+        wall: WallPin {
+            surface_density: 0.4,
+            stiffness_per_area: 3.0,
+            resistance: 0.1,
+        },
+        relaxation: vec![
+            AcousticWallRelaxation {
+                stiffness_per_area: 2.0,
+                relaxation_time_s: 0.1
+            };
+            2
+        ],
+    };
+    let prepared = model
+        .prepare_time_with_walls(
+            0.01,
+            &[],
+            &[boundary.clone()],
+            MechanicalTimeLimits::default(),
+            &mut || false,
+        )
+        .unwrap();
+    let count = prepared.wall_dofs(0).unwrap().len();
+    let zeros = vec![0.0; geometry.ndof()];
+    let wall_zeros = vec![vec![0.0; count]];
+    assert!(
+        prepared
+            .state_with_walls(&zeros, &zeros, &wall_zeros, &wall_zeros)
+            .is_err()
+    );
+    assert!(
+        prepared
+            .state_with_wall_memory(
+                &zeros,
+                &zeros,
+                &wall_zeros,
+                &wall_zeros,
+                &[vec![vec![0.0; count]]]
+            )
+            .is_err()
+    );
+    let memory = vec![vec![vec![0.01; count]; 2]];
+    let state = prepared
+        .state_with_wall_memory(&zeros, &zeros, &wall_zeros, &wall_zeros, &memory)
+        .unwrap();
+    assert!(matches!(
+        prepared.step(&state, &[], &mut || true),
+        Err(HeterogeneousError::Cancelled)
+    ));
+    assert_eq!(state.wall_relaxation_memory(0, 0).unwrap(), memory[0][0]);
+    for maximum in [0, 2 * count - 1, 2 * count] {
+        let result = model.prepare_time_with_walls(
+            0.01,
+            &[],
+            &[boundary.clone()],
+            MechanicalTimeLimits {
+                max_wall_relaxation_dofs: maximum,
+                ..MechanicalTimeLimits::default()
+            },
+            &mut || false,
+        );
+        assert_eq!(result.is_ok(), maximum == 2 * count);
+    }
+    for (k, tau) in [
+        (0.0, 0.1),
+        (-1.0, 0.1),
+        (1.0, 0.0),
+        (f64::NAN, 0.1),
+        (1.0, f64::INFINITY),
+    ] {
+        let mut invalid = boundary.clone();
+        invalid.relaxation[0] = AcousticWallRelaxation {
+            stiffness_per_area: k,
+            relaxation_time_s: tau,
+        };
+        assert!(
+            model
+                .prepare_time_with_walls(
+                    0.01,
+                    &[],
+                    &[invalid],
+                    MechanicalTimeLimits::default(),
+                    &mut || false
+                )
+                .is_err()
+        );
+    }
 }

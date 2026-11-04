@@ -1681,9 +1681,42 @@ Mechanical and real Robin faces must be pairwise disjoint; imposed velocity
 may share either. Adjacent mechanical patches have independent local states
 at shared edges. This is a frozen, linear, locally reacting wall with fixed
 fluid geometry, without lateral shell/bending waves or inferred material data.
-The existing source-backed `LocalMaterialWall::base_patch` can supply its
-elastic/Kelvin-Voigt `WallPin` through the coupling layer. Its Maxwell arms
-cannot be discarded: this entry point does not admit that hereditary reduction.
+`MechanicalBoundary::relaxation` admits the same positive surface-specific
+`AcousticWallRelaxation` spectrum used by the original acoustic chain owner.
+Each original trace coordinate retains every energy-normalized Maxwell memory
+`z_j`, with `e_j = sqrt(k_j) w - z_j` and `tau_j z_dot_j = e_j`.
+These branches add physical force `sqrt(k_j) e_j`, storage `e_j^T W e_j/2`
+and dissipation `e_j^T W e_j/tau_j`. Original consistent face mass is used
+for all three quantities, including off-diagonal and high-order trace terms.
+The branch equilibrium stiffness is not counted twice in `WallPin`.
+
+With `a_j = tau_j/(tau_j+h/2)`, branch condensation adds
+`h sum(a_j k_j)/2` to the same positive wall impedance and retains the old
+memory in the projected history. The original `RelaxationBranch` scalar
+midpoint owner reconstructs each memory after the joint pressure solve; no
+extra global factor, split relaxation stage, fit, or new matrix coordinate is
+introduced. Preparation and stepping remain linear in the number of retained
+wall memories beyond the existing sparse pressure solve. A separate default
+16384-coordinate memory limit admits the sum of trace DOFs times arm counts.
+Zero-arm walls retain their original arithmetic and physical storage.
+
+`state_with_wall_memory` imports the complete original arm histories.
+`state_with_walls` refuses a hereditary wall rather than silently inventing
+its past. `zero_state` and `state` explicitly start all walls and memories at
+rest. `wall_relaxation_j` is separate stored energy; the Maxwell dissipation
+subtotal is already included in total wall dissipation and must not be added
+again. Original uncondensed fluid, mechanical and memory residuals and the
+three signed energy balances admit the complete candidate transactionally.
+Material source, geometry, valid frequency band and time-resolution limits
+remain with the caller or material adapter. Midpoint's passivity does not
+establish accuracy for time steps larger than a material relaxation time.
+
+Focused hereditary regressions add continuous constant-velocity solutions
+with independent storage/heat and area/amplitude scaling, nonuniform P2
+prestress release from zero wall displacement, complete-state/budget/refusal
+checks, and complex reflected phase/amplitude against the independent Maxwell
+impedance over three time-step rungs. These are numerical-model checks, not
+experimental qualification of an arbitrary wall material.
 
 Five focused tests specify exact polynomial wall/fluid motion and pressure work
 under independent area and amplitude scaling, a nonuniform P2 wall's analytic

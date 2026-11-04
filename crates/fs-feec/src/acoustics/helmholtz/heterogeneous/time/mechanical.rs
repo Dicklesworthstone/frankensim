@@ -2,14 +2,19 @@
 //!
 //! The original [`WallPin`] supplies surface mass `sigma` [kg/m²], stiffness
 //! `K` [Pa/m] and resistance `r` [Pa s/m]. Positive displacement `w` and
-//! velocity `v` point OUT of the fluid: `sigma v_dot + r v + K w = p`.
+//! velocity `v` point OUT of the fluid. Optional original Maxwell arms retain
+//! energy-normalized memory `z_j`, with `e_j = sqrt(k_j) w - z_j`:
+//! `sigma v_dot + r v + K w + sum sqrt(k_j) e_j = p`,
+//! `tau_j z_dot_j = e_j`. Each arm stores `e_j^T W e_j/2` and dissipates
+//! `e_j^T W e_j/tau_j`; it is not an instantaneous fitted resistance.
 //! Every active original boundary coordinate retains both states. With the
 //! original face mass `W = integral(phi_i phi_j)`, wall energy is
 //! `(sigma v^T W v + K w^T W w)/2`, and fluid feedback is `+W v`.
 //! No patch-average piston, diagonal mass or extra area factor is substituted.
 //!
 //! One midpoint elimination gives
-//! `v_mid = (p_mid + 2 sigma v_0/h - K w_0)/(2 sigma/h + r + h K/2)`.
+//! `a_j = tau_j/(tau_j+h/2)` condenses each original Maxwell midpoint law.
+//! Its force is `a_j sqrt(k_j) (sqrt(k_j)(w_0+h v_mid/2)-z_j0)`.
 //! The positive effective admittance enters the ORIGINAL sparse acoustic
 //! factor; the history enters its original projected load. The same solve
 //! reconstructs all wall states, then checks the uncondensed equations and
@@ -19,7 +24,9 @@
 //! disjointness from real Robin patches. Adjacent mechanical patches retain
 //! independent states at their shared edges. Imposed velocity may share a
 //! wall face. This is the declared local wall law, not shell bending, lateral
-//! elastic waves, a hereditary material fit, or a moving fluid mesh.
+//! elastic waves, a material fit, or a moving fluid mesh. Relaxation coefficients
+//! and their material validity remain caller-owned. Midpoint is passive but
+//! still needs temporal refinement to resolve the declared relaxation times.
 
 use super::{
     BoundaryAdmittance, C64, Coo, Csr, Dd, HeterogeneousError, HeterogeneousHelmholtzFe,
@@ -27,7 +34,8 @@ use super::{
     PreparedHeterogeneousTime, RealVelocityTrace, ResistiveBoundary, energy_change, invalid, poll,
     positive_form, relative,
 };
-use fs_phs::WallPin;
+use fs_phs::acoustic_outlet::AcousticWallRelaxation;
+use fs_phs::{RelaxationBranch, WallPin};
 use std::collections::BTreeSet;
 
 /// Original surface-specific mechanical law on a complete boundary patch.
@@ -35,6 +43,9 @@ use std::collections::BTreeSet;
 pub struct MechanicalBoundary {
     pub faces: Vec<[u32; 3]>,
     pub wall: WallPin,
+    /// Complete positive Maxwell spectrum, in the same surface units as the
+    /// original acoustic wall owner. Empty means the original Kelvin wall.
+    pub relaxation: Vec<AcousticWallRelaxation>,
 }
 
 /// Existing acoustic admission plus an explicit full wall-state extent.
@@ -44,6 +55,9 @@ pub struct MechanicalTimeLimits {
     /// Sum of active boundary DOFs across patches; each has displacement and
     /// velocity. Patch CSR and O(ndof) work vectors are additional to factor bytes.
     pub max_wall_dofs: usize,
+    /// Sum of active trace DOFs times relaxation arms across all patches.
+    /// One energy-normalized memory coordinate is retained per entry.
+    pub max_wall_relaxation_dofs: usize,
 }
 
 impl Default for MechanicalTimeLimits {
@@ -51,6 +65,7 @@ impl Default for MechanicalTimeLimits {
         Self {
             acoustic: HeterogeneousTimeLimits::default(),
             max_wall_dofs: 4096,
+            max_wall_relaxation_dofs: 16384,
         }
     }
 }
@@ -62,6 +77,13 @@ struct PreparedWall {
     admittance: f64,
     inertia_weight: f64,
     spring_weight: f64,
+    relaxation: Vec<PreparedRelaxation>,
+}
+
+struct PreparedRelaxation {
+    branch: RelaxationBranch,
+    coupling: f64,
+    history_weight: f64,
 }
 
 /// One original acoustic factor with every declared distributed wall state.
@@ -78,6 +100,8 @@ pub struct MechanicalTimeState<'p, 'm, 'f, 'c> {
     acoustic: HeterogeneousTimeState<'m, 'f, 'c>,
     displacements: Vec<Vec<f64>>,
     velocities: Vec<Vec<f64>>,
+    // Patch, original arm, original hierarchical trace coordinate.
+    memories: Vec<Vec<Vec<f64>>>,
 }
 
 impl core::fmt::Debug for MechanicalTimeState<'_, '_, '_, '_> {
@@ -110,6 +134,13 @@ impl MechanicalTimeState<'_, '_, '_, '_> {
     pub fn wall_normal_velocity_m_s(&self, wall: usize) -> Option<&[f64]> {
         self.velocities.get(wall).map(Vec::as_slice)
     }
+    /// Original energy-normalized Maxwell memory, `z = sqrt(k) w` at rest
+    /// after complete relaxation. The arm's stored energy per area is
+    /// `(sqrt(k) w-z)^2/2`; this is not a displacement or pressure sample.
+    #[must_use]
+    pub fn wall_relaxation_memory(&self, wall: usize, arm: usize) -> Option<&[f64]> {
+        self.memories.get(wall)?.get(arm).map(Vec::as_slice)
+    }
 }
 
 /// Independently evaluated physical acoustic and wall storage [J].
@@ -118,12 +149,13 @@ pub struct MechanicalTimeEnergy {
     pub acoustic: HeterogeneousTimeEnergy,
     pub wall_kinetic_j: f64,
     pub wall_elastic_j: f64,
+    pub wall_relaxation_j: f64,
 }
 
 impl MechanicalTimeEnergy {
     #[must_use]
     pub fn total_j(self) -> f64 {
-        self.acoustic.total_j() + self.wall_kinetic_j + self.wall_elastic_j
+        self.acoustic.total_j() + self.wall_kinetic_j + self.wall_elastic_j + self.wall_relaxation_j
     }
 }
 
@@ -138,8 +170,11 @@ pub struct MechanicalTimeWork {
     pub input_work_j: f64,
     /// Dissipation of the original REAL Robin patches only.
     pub boundary_dissipation_j: f64,
-    /// `h sum r v_mid^T W v_mid`, never effective-admittance loss.
+    /// Original Kelvin resistance PLUS all original Maxwell arm dissipation,
+    /// never effective-admittance loss.
     pub wall_dissipation_j: f64,
+    /// Maxwell subtotal already included in `wall_dissipation_j`.
+    pub wall_relaxation_dissipation_j: f64,
     /// Signed fluid-to-wall exchange `h sum p_mid^T W v_mid`.
     pub wall_work_j: f64,
     /// Original uncondensed fluid and wall equations, not the stored factor.
@@ -218,6 +253,7 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
             .collect::<Vec<_>>();
         let (conductance, _) = self.admittance_matrices(&real, cancelled)?;
         let mut total = 0usize;
+        let mut total_memory = 0usize;
         let mut walls = Vec::with_capacity(boundaries.len());
         let mut effective = resistive.to_vec();
         for boundary in boundaries {
@@ -227,7 +263,32 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
                 .map_err(HeterogeneousError::Wall)?;
             let pin = boundary.wall;
             let inertia = 2.0 * (pin.surface_density / duration_s);
-            let impedance = inertia + pin.resistance + (0.5 * duration_s) * pin.stiffness_per_area;
+            let mut relaxation = Vec::with_capacity(boundary.relaxation.len());
+            let mut relaxed_midpoint_stiffness = pin.stiffness_per_area;
+            for arm in &boundary.relaxation {
+                poll(cancelled)?;
+                let branch = RelaxationBranch {
+                    projection: vec![1.0],
+                    stiffness: arm.stiffness_per_area,
+                    relaxation_time_s: arm.relaxation_time_s,
+                };
+                let coupling = branch
+                    .scalar_relaxed_memory(1.0)
+                    .map_err(HeterogeneousError::Wall)?;
+                // Same bounded weights as the original scalar midpoint owner.
+                let scale = arm.relaxation_time_s.max(0.5 * duration_s);
+                let tau = arm.relaxation_time_s / scale;
+                let half_h = (0.5 * duration_s) / scale;
+                let a = tau / (tau + half_h);
+                relaxed_midpoint_stiffness += a * arm.stiffness_per_area;
+                relaxation.push(PreparedRelaxation {
+                    branch,
+                    coupling,
+                    history_weight: a * coupling,
+                });
+            }
+            let impedance =
+                inertia + pin.resistance + (0.5 * duration_s) * relaxed_midpoint_stiffness;
             let admittance = 1.0 / impedance;
             let inertia_weight = inertia * admittance;
             let spring_weight = pin.stiffness_per_area * admittance;
@@ -238,6 +299,12 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
                 return Err(
                     invalid("mechanical wall midpoint coefficients are unrepresentable").into(),
                 );
+            }
+            for arm in &mut relaxation {
+                arm.history_weight *= admittance;
+                if !arm.history_weight.is_finite() || arm.history_weight <= 0.0 {
+                    return Err(invalid("wall memory coupling is unrepresentable").into());
+                }
             }
             // This is the SAME symmetric original face quadrature as Robin loading.
             let (global, _) = self.admittance_matrices(
@@ -261,6 +328,18 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
                     what: "distributed wall trace degrees of freedom",
                     requested: total,
                     maximum: limits.max_wall_dofs,
+                });
+            }
+            total_memory = dofs
+                .len()
+                .checked_mul(relaxation.len())
+                .and_then(|count| total_memory.checked_add(count))
+                .ok_or_else(|| invalid("mechanical wall memory extent overflow"))?;
+            if total_memory > limits.max_wall_relaxation_dofs {
+                return Err(HeterogeneousError::Limit {
+                    what: "distributed wall relaxation degrees of freedom",
+                    requested: total_memory,
+                    maximum: limits.max_wall_relaxation_dofs,
                 });
             }
             let mut local = Coo::new(dofs.len(), dofs.len());
@@ -287,6 +366,7 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
                 admittance,
                 inertia_weight,
                 spring_weight,
+                relaxation,
             });
         }
         let condensed = self.prepare_time(duration_s, &effective, limits.acoustic, cancelled)?;
@@ -323,6 +403,11 @@ impl<'m, 'f, 'c> PreparedMechanicalTime<'m, 'f, 'c> {
             acoustic: self.condensed.zero_state(),
             displacements: self.walls.iter().map(|w| vec![0.0; w.dofs.len()]).collect(),
             velocities: self.walls.iter().map(|w| vec![0.0; w.dofs.len()]).collect(),
+            memories: self
+                .walls
+                .iter()
+                .map(|w| vec![vec![0.0; w.dofs.len()]; w.relaxation.len()])
+                .collect(),
         }
     }
     /// Import the original acoustic field; every wall starts at rest.
@@ -336,7 +421,8 @@ impl<'m, 'f, 'c> PreparedMechanicalTime<'m, 'f, 'c> {
         state.acoustic = acoustic;
         Ok(state)
     }
-    /// Import every physical history in `wall_dofs` order, without normalization.
+    /// Import a nonhereditary wall in `wall_dofs` order. A wall with Maxwell
+    /// arms requires `state_with_wall_memory`; its past is never inferred.
     pub fn state_with_walls(
         &self,
         potential: &[f64],
@@ -344,8 +430,32 @@ impl<'m, 'f, 'c> PreparedMechanicalTime<'m, 'f, 'c> {
         displacements_m: &[Vec<f64>],
         velocities_m_s: &[Vec<f64>],
     ) -> Result<MechanicalTimeState<'_, 'm, 'f, 'c>, HeterogeneousError> {
+        if self.walls.iter().any(|w| !w.relaxation.is_empty()) {
+            return Err(invalid("complete original Maxwell wall memory is required").into());
+        }
+        self.state_with_wall_memory(
+            potential,
+            pressure,
+            displacements_m,
+            velocities_m_s,
+            &vec![Vec::new(); self.walls.len()],
+        )
+    }
+    /// Import every original physical history. Memory is indexed by patch,
+    /// original arm, then `wall_dofs`, and uses `RelaxationBranch`'s existing
+    /// energy-normalized coordinate. Even a zero-displacement wall may retain
+    /// prestress in its memory, so omitted histories are refused.
+    pub fn state_with_wall_memory(
+        &self,
+        potential: &[f64],
+        pressure: &[f64],
+        displacements_m: &[Vec<f64>],
+        velocities_m_s: &[Vec<f64>],
+        memories: &[Vec<Vec<f64>>],
+    ) -> Result<MechanicalTimeState<'_, 'm, 'f, 'c>, HeterogeneousError> {
         if displacements_m.len() != self.walls.len()
             || velocities_m_s.len() != self.walls.len()
+            || memories.len() != self.walls.len()
             || self.walls.iter().enumerate().any(|(index, wall)| {
                 displacements_m[index].len() != wall.dofs.len()
                     || velocities_m_s[index].len() != wall.dofs.len()
@@ -353,10 +463,14 @@ impl<'m, 'f, 'c> PreparedMechanicalTime<'m, 'f, 'c> {
                         .iter()
                         .chain(&velocities_m_s[index])
                         .any(|v| !v.is_finite())
+                    || memories[index].len() != wall.relaxation.len()
+                    || memories[index].iter().any(|arm| {
+                        arm.len() != wall.dofs.len() || arm.iter().any(|z| !z.is_finite())
+                    })
             })
         {
             return Err(invalid(
-                "finite complete original wall displacement/velocity fields required",
+                "finite complete original wall displacement, velocity and memory fields required",
             )
             .into());
         }
@@ -365,6 +479,7 @@ impl<'m, 'f, 'c> PreparedMechanicalTime<'m, 'f, 'c> {
             acoustic: self.condensed.state(potential, pressure)?,
             displacements: displacements_m.to_vec(),
             velocities: velocities_m_s.to_vec(),
+            memories: memories.to_vec(),
         })
     }
     fn validate_state(
@@ -397,6 +512,7 @@ impl<'m, 'f, 'c> PreparedMechanicalTime<'m, 'f, 'c> {
             acoustic,
             wall_kinetic_j: 0.0,
             wall_elastic_j: 0.0,
+            wall_relaxation_j: 0.0,
         };
         let mut roundoff = 0.0;
         for (index, wall) in self.walls.iter().enumerate() {
@@ -406,6 +522,17 @@ impl<'m, 'f, 'c> PreparedMechanicalTime<'m, 'f, 'c> {
             energy.wall_kinetic_j += 0.5 * pin.surface_density * kinetic;
             energy.wall_elastic_j += 0.5 * pin.stiffness_per_area * elastic;
             roundoff += 0.5 * (pin.surface_density * rk + pin.stiffness_per_area * re);
+            for (arm, memory) in wall.relaxation.iter().zip(&state.memories[index]) {
+                poll(cancelled)?;
+                let extension = state.displacements[index]
+                    .iter()
+                    .zip(memory)
+                    .map(|(&w, &z)| arm.coupling.mul_add(w, -z))
+                    .collect::<Vec<_>>();
+                let (stored, error) = positive_form(&wall.mass, &extension, cancelled)?;
+                energy.wall_relaxation_j += 0.5 * stored;
+                roundoff += 0.5 * error;
+            }
         }
         if !energy.total_j().is_finite() || !roundoff.is_finite() {
             return Err(invalid("mechanical acoustic storage is unrepresentable").into());
@@ -432,7 +559,8 @@ impl<'m, 'f, 'c> PreparedMechanicalTime<'m, 'f, 'c> {
             let history = initial.velocities[index]
                 .iter()
                 .zip(&initial.displacements[index])
-                .map(|(&v, &w)| wall.inertia_weight.mul_add(v, -wall.spring_weight * w))
+                .enumerate()
+                .map(|(i, (&v, &w))| wall.history(v, w, &initial.memories[index], i))
                 .collect::<Vec<_>>();
             let mut projected = vec![0.0; wall.dofs.len()];
             wall.mass.spmv(&history, &mut projected);
@@ -460,10 +588,12 @@ impl<'m, 'f, 'c> PreparedMechanicalTime<'m, 'f, 'c> {
             acoustic: acoustic.state,
             displacements: Vec::with_capacity(self.walls.len()),
             velocities: Vec::with_capacity(self.walls.len()),
+            memories: Vec::with_capacity(self.walls.len()),
         };
         let mut wall_load = vec![0.0; source.len()];
         let mut wall_change = 0.0;
         let mut wall_loss = 0.0;
+        let mut relaxation_loss = 0.0;
         let mut wall_loss_roundoff = 0.0;
         let mut wall_work = 0.0;
         let mut wall_work_roundoff = 0.0;
@@ -477,11 +607,13 @@ impl<'m, 'f, 'c> PreparedMechanicalTime<'m, 'f, 'c> {
             let mut velocity = Vec::with_capacity(wall.dofs.len());
             let mut middle_v = Vec::with_capacity(wall.dofs.len());
             let mut pressure = Vec::with_capacity(wall.dofs.len());
+            let mut memories = vec![Vec::with_capacity(wall.dofs.len()); wall.relaxation.len()];
+            let mut middle_extensions =
+                vec![Vec::with_capacity(wall.dofs.len()); wall.relaxation.len()];
             for (i, &dof) in wall.dofs.iter().enumerate() {
                 let p = midpoint_p[dof];
-                let history = wall
-                    .inertia_weight
-                    .mul_add(previous_v[i], -wall.spring_weight * previous_w[i]);
+                let history =
+                    wall.history(previous_v[i], previous_w[i], &initial.memories[index], i);
                 let v = wall.admittance.mul_add(p, history);
                 let end_v = v + (v - previous_v[i]);
                 let end_w = h.mul_add(v, previous_w[i]);
@@ -496,11 +628,41 @@ impl<'m, 'f, 'c> PreparedMechanicalTime<'m, 'f, 'c> {
                 let spring =
                     Dd::from_f64(h) * Dd::from_f64(pin.stiffness_per_area) * Dd::from_f64(mid_w);
                 let force = Dd::from_f64(h) * Dd::from_f64(p);
-                let defect = (momentum + drag + spring - force).to_f64();
-                let scale = [momentum, drag, spring, force]
-                    .iter()
-                    .map(|v| v.to_f64().abs())
-                    .sum::<f64>();
+                let mut hereditary = Dd::from_f64(0.0);
+                let mut hereditary_scale = 0.0;
+                for (j, arm) in wall.relaxation.iter().enumerate() {
+                    poll(cancelled)?;
+                    let z0 = initial.memories[index][j][i];
+                    let (z1, arm_force, _, _) = arm
+                        .branch
+                        .scalar_midpoint_step(previous_w[i], end_w, z0, h)
+                        .map_err(HeterogeneousError::Wall)?;
+                    let extension = Dd::from_f64(arm.coupling) * Dd::from_f64(mid_w)
+                        - (Dd::from_f64(z0) + Dd::from_f64(z1)) * Dd::from_f64(0.5);
+                    let change = Dd::from_f64(arm.branch.relaxation_time_s)
+                        * (Dd::from_f64(z1) - Dd::from_f64(z0));
+                    let relaxation = Dd::from_f64(h) * extension;
+                    let memory_scale = arm.branch.relaxation_time_s * (z0.abs() + z1.abs())
+                        + h * (arm.coupling * mid_w.abs() + f64::midpoint(z0, z1).abs());
+                    if !memory_scale.is_finite() || !extension.to_f64().is_finite() {
+                        return Err(invalid("mechanical memory residual overflow").into());
+                    }
+                    backward_error = backward_error
+                        .max(relative((change - relaxation).to_f64().abs(), memory_scale));
+                    let term = Dd::from_f64(h) * Dd::from_f64(arm.coupling) * extension;
+                    hereditary = hereditary + term;
+                    hereditary_scale += term.to_f64().abs();
+                    memories[j].push(z1);
+                    // Use the original condensed force to retain weak losses
+                    // when subtracting two large midpoint memories would round.
+                    middle_extensions[j].push(arm_force / arm.coupling);
+                }
+                let defect = (momentum + drag + spring + hereditary - force).to_f64();
+                let scale = hereditary_scale
+                    + [momentum, drag, spring, force]
+                        .iter()
+                        .map(|v| v.to_f64().abs())
+                        .sum::<f64>();
                 let kinematics = (Dd::from_f64(end_w)
                     - Dd::from_f64(previous_w[i])
                     - Dd::from_f64(h) * Dd::from_f64(mid_v))
@@ -536,8 +698,29 @@ impl<'m, 'f, 'c> PreparedMechanicalTime<'m, 'f, 'c> {
                 * energy_change(&wall.mass, previous_v, &velocity, cancelled)?
                 + pin.stiffness_per_area
                     * energy_change(&wall.mass, previous_w, &displacement, cancelled)?;
+            for (j, arm) in wall.relaxation.iter().enumerate() {
+                poll(cancelled)?;
+                let previous_extension = previous_w
+                    .iter()
+                    .zip(&initial.memories[index][j])
+                    .map(|(&w, &z)| arm.coupling.mul_add(w, -z))
+                    .collect::<Vec<_>>();
+                let next_extension = displacement
+                    .iter()
+                    .zip(&memories[j])
+                    .map(|(&w, &z)| arm.coupling.mul_add(w, -z))
+                    .collect::<Vec<_>>();
+                wall_change +=
+                    energy_change(&wall.mass, &previous_extension, &next_extension, cancelled)?;
+                let (loss, error) = positive_form(&wall.mass, &middle_extensions[j], cancelled)?;
+                let loss = (loss / arm.branch.relaxation_time_s) * h;
+                wall_loss += loss;
+                relaxation_loss += loss;
+                wall_loss_roundoff += (error / arm.branch.relaxation_time_s) * h;
+            }
             next.displacements.push(displacement);
             next.velocities.push(velocity);
+            next.memories.push(memories);
         }
         let (_, fluid_error) = core.physical_residual(
             &initial.acoustic,
@@ -572,6 +755,7 @@ impl<'m, 'f, 'c> PreparedMechanicalTime<'m, 'f, 'c> {
             input_work_j: input,
             boundary_dissipation_j: h * boundary_loss,
             wall_dissipation_j: wall_loss,
+            wall_relaxation_dissipation_j: relaxation_loss,
             wall_work_j: wall_work,
             backward_error,
         };
@@ -602,6 +786,19 @@ impl<'m, 'f, 'c> PreparedMechanicalTime<'m, 'f, 'c> {
         )?;
         poll(cancelled)?;
         Ok(MechanicalTimeStep { state: next, work })
+    }
+}
+
+impl PreparedWall {
+    fn history(&self, velocity: f64, displacement: f64, memory: &[Vec<f64>], dof: usize) -> f64 {
+        let mut history = self
+            .inertia_weight
+            .mul_add(velocity, -self.spring_weight * displacement);
+        for (arm, z) in self.relaxation.iter().zip(memory) {
+            let extension = arm.coupling.mul_add(displacement, -z[dof]);
+            history = (-arm.history_weight).mul_add(extension, history);
+        }
+        history
     }
 }
 

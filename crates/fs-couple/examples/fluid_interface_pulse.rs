@@ -7,6 +7,8 @@
 //! the original causal WallPin law, for example `wall 0.5 1000000 50`.
 //! These three values explicitly declare a local surface mass, spring and
 //! resistance; they are illustrative inputs, not a measured material card.
+//! Optional trailing `K_ARM_PA_M TAU_ARM_S` pairs retain every declared Maxwell
+//! memory, for example `wall 0.5 1000000 50 2000000 0.0002`.
 //!
 //! The one-metre cube starts with a compact pressure-potential packet in its
 //! left fluid. Its propagation direction is tilted by ANGLE_DEG in the xy plane.
@@ -19,7 +21,8 @@
 //! pressure space. This example does not impose a ray/Snell approximation.
 //! The optional wall retains displacement/velocity on every original boundary
 //! DOF. Returned energy and frequency-dependent phase belong to that causal
-//! mechanical law; only its resistance produces wall heat. The fluid geometry
+//! mechanical law; Kelvin resistance and Maxwell relaxation produce separately
+//! reported wall heat. The fluid geometry
 //! is fixed and linear, and the local wall has no lateral shell/bending modes.
 //!
 //! Stdout contains the final original nodal pressure/potential field as CSV;
@@ -41,18 +44,19 @@ use fs_feec::acoustics::helmholtz::{HelmholtzFe, Medium};
 use fs_material::fluid_acoustics::FluidAcoustics;
 use fs_material::gas::{GasSpec, GasState};
 use fs_math::det;
-use fs_phs::WallPin;
+use fs_phs::acoustic_outlet::AcousticWallRelaxation;
+use fs_phs::{RelaxationBranch, WallPin};
 use fs_qty::{Pressure, Temperature};
 use fs_thermochem::water::if97::{If97Region, If97State};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<_> = std::env::args().collect();
-    if args.len() != 6 && args.len() != 10 {
+    if args.len() != 6 && !(10..=42).contains(&args.len()) || args.len() % 2 != 0 {
         return Err(
-            "usage: fluid_interface_pulse air-water|cold-hot-air GRID STEPS DT_S ANGLE_DEG [wall SIGMA_KG_M2 K_PA_M R_PA_S_M]".into(),
+            "usage: fluid_interface_pulse air-water|cold-hot-air GRID STEPS DT_S ANGLE_DEG [wall SIGMA_KG_M2 K_PA_M R_PA_S_M [K_ARM_PA_M TAU_ARM_S]...]".into(),
         );
     }
-    let wall = if args.len() == 10 {
+    let wall = if args.len() >= 10 {
         if args[6] != "wall" {
             return Err("optional boundary must be wall SIGMA_KG_M2 K_PA_M R_PA_S_M".into());
         }
@@ -63,7 +67,21 @@ fn main() -> Result<(), Box<dyn Error>> {
         };
         // Reuse the original law's admission before allocating the volume mesh.
         fs_phs::wall_specific_impedance(&pin, 1.0)?;
-        Some(pin)
+        let mut relaxation = Vec::new();
+        for pair in args[10..].chunks_exact(2) {
+            let arm = AcousticWallRelaxation {
+                stiffness_per_area: pair[0].parse()?,
+                relaxation_time_s: pair[1].parse()?,
+            };
+            RelaxationBranch {
+                projection: vec![1.0],
+                stiffness: arm.stiffness_per_area,
+                relaxation_time_s: arm.relaxation_time_s,
+            }
+            .scalar_relaxed_memory(0.0)?;
+            relaxation.push(arm);
+        }
+        Some((pin, relaxation))
     } else {
         None
     };
@@ -122,17 +140,19 @@ fn main() -> Result<(), Box<dyn Error>> {
         3,
         &mut || false,
     )?;
+    let has_wall = wall.is_some();
     let is_wall_face =
-        |face: &[u32; 3]| wall.is_some() && face.iter().all(|&v| positions[v as usize][0] == 1.0);
+        |face: &[u32; 3]| has_wall && face.iter().all(|&v| positions[v as usize][0] == 1.0);
     let walls: Vec<_> = wall
         .into_iter()
-        .map(|wall| MechanicalBoundary {
+        .map(|(wall, relaxation)| MechanicalBoundary {
             faces: geometry
                 .boundary_faces()
                 .into_iter()
                 .filter(is_wall_face)
                 .collect(),
             wall,
+            relaxation,
         })
         .collect();
     let mut boundaries = Vec::with_capacity(2);
@@ -194,29 +214,32 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let mut state = prepared.state(&potential, &pressure)?;
     eprintln!(
-        "time_s,kinetic_j,compression_j,wall_kinetic_j,wall_elastic_j,input_work_j,boundary_dissipation_j,wall_dissipation_j,wall_work_j,balance_residual_j"
+        "time_s,kinetic_j,compression_j,wall_kinetic_j,wall_elastic_j,wall_relaxation_j,input_work_j,boundary_dissipation_j,wall_dissipation_j,wall_relaxation_dissipation_j,wall_work_j,balance_residual_j"
     );
     let energy = prepared.energy(&state)?;
     eprintln!(
-        "0,{},{},{},{},0,0,0,0,0",
+        "0,{},{},{},{},{},0,0,0,0,0,0",
         energy.acoustic.kinetic_j,
         energy.acoustic.compression_j,
         energy.wall_kinetic_j,
-        energy.wall_elastic_j
+        energy.wall_elastic_j,
+        energy.wall_relaxation_j
     );
     for index in 1..=steps {
         let step = prepared.step(&state, &[], &mut || false)?;
         let energy = prepared.energy(&step.state)?;
         eprintln!(
-            "{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{},{}",
             index as f64 * dt,
             energy.acoustic.kinetic_j,
             energy.acoustic.compression_j,
             energy.wall_kinetic_j,
             energy.wall_elastic_j,
+            energy.wall_relaxation_j,
             step.work.input_work_j,
             step.work.boundary_dissipation_j,
             step.work.wall_dissipation_j,
+            step.work.wall_relaxation_dissipation_j,
             step.work.wall_work_j,
             step.work.balance_residual_j()
         );
