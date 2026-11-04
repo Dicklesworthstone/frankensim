@@ -13,6 +13,10 @@
 //! uses `g = R_A^T (x_B-x_A)`, not three zero-length distance constraints. Its
 //! exact differential supplies the A-side geometric couple away from closure.
 
+/// Mixed material/joint impulse events with a fixed or driven support.
+#[path = "distance/prescribed.rs"]
+pub mod prescribed;
+
 use super::super::MaterialPoint;
 use super::super::bushing::coupled::CoupledSpatialBushing;
 use super::super::bushing::{self, BushingLaw, SpatialBushing};
@@ -172,8 +176,8 @@ impl Default for BilateralImpulseConfig {
 /// the original native coordinates; their work is already included in the
 /// original impulse receipt, not an additional source or inferred heat.
 #[derive(Debug, Clone, PartialEq)]
-pub struct BilateralImpulseResponse {
-    pub impulse: FreeFloatingImpulseResponse,
+pub struct BilateralImpulseResponse<I = FreeFloatingImpulseResponse> {
+    pub impulse: I,
     /// Flattened body-loop row interpretation; joint rows remain separate.
     pub rows: Vec<BilateralRow>,
     /// Body-loop impulses in N s, in the fixed event's material coordinates.
@@ -206,8 +210,9 @@ pub struct BilateralImpulseResponse {
     /// Objective lambda dot mean row rates, J. This separately observes rounding
     /// in the spatial wrench lift; it is not substituted for actual wrench work.
     pub row_constraint_work_j: f64,
-    /// Original total impulse work minus the two actual component works, J.
-    /// Retains rounding in summed impulses and public work receipts.
+    /// Original applied body/joint work minus the two actual component works, J.
+    /// Prescribed support work remains in its native receipt, outside this
+    /// partition. Retains rounding in summed impulses and public work receipts.
     pub work_partition_residual_j: f64,
 }
 
@@ -1865,6 +1870,22 @@ impl Mobility {
                 joints.fill(0.0);
             }
         }
+        Self::from_matrix(model, geometry, config, stage, matrix, k, columns, cancelled)
+    }
+
+    // Both boundary conditions use this original normalization, reciprocity,
+    // rank admission and retained factor; only their native mass probes differ.
+    #[allow(clippy::too_many_arguments)]
+    fn from_matrix(
+        model: &ArticulatedModel,
+        geometry: &Geometry,
+        config: DistanceLoopConfig,
+        stage: &'static str,
+        mut matrix: Vec<f64>,
+        k: usize,
+        columns: Vec<ImpulseColumn>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, DistanceLoopError> {
         validate_slice(&matrix, "distance_loop.mobility")?;
         let mut diagonal = Vec::with_capacity(k);
         for i in 0..k {

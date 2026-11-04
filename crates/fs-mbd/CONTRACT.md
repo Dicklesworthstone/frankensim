@@ -6603,3 +6603,36 @@ Rust parsing is separate from native compilation and numerical execution,
 which remain unrun while local storage is full and DSR/RCH are unavailable.
 Contact/fracture decisions, real actuator placement and finite-time forcing,
 supported-base ejection, mechanical-source evolution and heat remain external.
+
+### Supported mixed material/joint impulse events
+
+The prescribed-base boundary now composes existing distance/spherical material
+closures and constant gear/lock rows in one native event through
+`motion::spatial_loads::implicit::distance::prescribed::apply_impulses`.
+Native prescribed ABA supplies all material/joint cross-mobility columns and
+one final summed source/reaction response. Fixed/driven supports and mobile
+scalar root joints retain their actual geometry, full spatial inertia and
+independent six-component support reaction. Only the final physical endpoint
+receives native speed and representability admission.
+
+The original material geometry, finite-gap spherical couple, normalized
+reciprocity/rank admission and retained Cholesky factor are shared with the free
+mechanism. No dense generalized mass matrix, surrogate support mass or impulse
+to force conversion is introduced. Zero source admits existing geometry,
+tangency and full mixed rank without correcting finite admitted rate defects;
+empty rows delegate to the native prescribed impulse owner. The source and
+constraint work partition excludes signed support work, which remains in the
+native receipt. Rows do not engage themselves and no time is advanced.
+
+Five focused regressions were authored in
+`tests/articulated_prescribed_bilateral_impulses.rs`: independent scalar coupled
+mass references, fixed/driven support and world covariance, mobile roots,
+full COM/off-diagonal tensor and spherical finite-gap couples, finite-slip
+reaction work, empty/zero-source behavior, joint limits, combined rank,
+cancellation and deterministic retry. Source/API and independent analytical
+review completed. Available nightly-2026-08-31 rustfmt parsed the changed parent
+without rewriting it and formatted/checked both new files; this is not the
+repository-pinned toolchain. Native compilation and numerical Rust execution
+remain **UNRUN** here because nightly-2026-07-06, the complete dependency graph,
+DSR and RCH are unavailable. No benchmark, all-runtime or full-plan completion
+claim is made. The broader `frankensim-ext-mbd-core-vqqt` bead remains open.
