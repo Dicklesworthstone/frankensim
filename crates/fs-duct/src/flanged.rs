@@ -47,6 +47,9 @@ use fs_material::gas::GasState;
 use fs_math::{c64::C64, det};
 use std::sync::LazyLock;
 
+/// Coherent far-field observation of the same full radial mouth flows.
+pub mod observation;
+
 /// Production mode count, chosen from the measured mode ladder
 /// (`flanged_mode_ladder_converges_to_0p8216`).
 pub const FLANGED_MODES: usize = 16;
