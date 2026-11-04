@@ -40,6 +40,23 @@ radiation adjoint, trajectory derivative or continuum error certificate.
 
 ## Capacity storage with open reflected radiation and live contacts
 
+`ContactCapacityLinearization::pullback_with_robin_and_flux_feedback_and_resistance_controls`
+now composes the complete stored-energy/contact response with the existing
+enclosure mean-Robin and mean-flux factors. One original endpoint transpose
+supplies source, history, total-capacity and whole-contact-law controls;
+`EnclosureRadiationLinearization` remaps independent physical emissivities and
+the single open-bath temperature. The unchanged accepted field is revalidated
+against its original joule/energy targets before any derivative is used.
+The retained capacity matrix includes declared volume and bonded surface
+storage, without a second time factor or reconstructed volume-only operator.
+
+The existing enclosure/contact adjoint fixture reverses three nonuniform steps
+with nonlinear bulk transport, live source contacts, mixed Robin/flux patches
+and nonuniform surface capacity. Independent complete trajectory perturbations
+check contact, source, emissivity, bath, capacity and initial-temperature
+controls. A stale endpoint or insufficient factor allowance refuses. Native
+execution remains required; syntax checks do not establish a numerical pass.
+
 The existing backward-Euler enclosure owner now accepts `OpenDiffuseEnclosure`
 alongside closed exchange. `advance_prescribed_with_open_enclosure_radiation`
 retains ordinary capacity responses; the matching
@@ -64,8 +81,9 @@ Cancellation, source refusal or exhausted work publishes no accepted endpoint.
 Focused regressions in `tests/temperature_contact/radiation.rs` use independent
 two-surface gray exchange and original nodal assembly to check both heat signs,
 source-curve/surface agreement, prescribed reactions, work and rollback. Native
-execution remains pending; syntax checks establish no runtime pass. This adds
-no open-capacity radiation adjoint, pointwise model or temporal-error certificate.
+execution remains pending; syntax checks establish no runtime pass. The complete
+discrete adjoint above preserves this forward owner; no pointwise model or
+temporal-error certificate is added.
 
 ## Live source contacts with open radiative cavities
 
