@@ -8066,7 +8066,17 @@ clarinet is one filling of those objects.
   silently omitted. `PrestressedString.moving_end` selects
   that clock. Bow, obstacle stations, and blow/reed are leftover
   ports of `join_port` (Stribeck and Hunt–Crossley stay port
-  forces). Von Karman is the same plate pHS with quartic storage.
+  forces). Both moving-end ODE and descriptor clocks bind obstacle stations
+  through the shared contact admission and retain each physical line measure,
+  gap and law. `fs-dcontact` supplies the instantaneous normal reaction and
+  non-attractive Hunt–Crossley unloading at the actual conjugate port velocity;
+  `fs-tribo` supplies the existing declared scalar friction ramp using the same
+  elastic normal capacity as fixed-end contact. Stations are never relocated
+  and missing measures or gaps refuse. G1/G3 checks cover force-law parity,
+  nonzero loss, station-measure partition invariance and friction's effect on
+  observer pressure in both clocks, including retained Prony memory. The held-force clock
+  is unchanged; this wiring adds no finite-step contact-work closure claim.
+  Von Karman is the same plate pHS with quartic storage.
   `EA > 0` is `kirchhoff_carrier_moving_end` on the same
   free-fixed port. Fixed-fixed sines keep the one-way bridge
   force; with a plate the duct is still the ODE chain

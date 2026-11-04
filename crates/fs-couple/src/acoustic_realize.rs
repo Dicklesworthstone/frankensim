@@ -19,6 +19,8 @@ mod reed_ode;
 
 #[cfg(test)]
 mod polarization_tests;
+#[cfg(test)]
+mod moving_contact_tests;
 
 #[cfg(test)]
 use reed_ode::realize_reed_ode;
@@ -37,7 +39,7 @@ use crate::thin_plate::{
 };
 use crate::unilateral_contact::{
     modal_contact_forces, modal_friction_forces, modal_hunt_crossley_forces, slit_contact_force,
-    slit_lay,
+    slit_lay, station::StationContact,
 };
 /// Legacy sections-per-metre budget for default non-reed ODE duct paths.
 const SECTION_BUDGET: f64 = 8.0;
@@ -2088,11 +2090,9 @@ fn realize_dirac_join(
             mode_zeta(string, omega, wave_number, gas)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let obs_stations: Vec<f64> = obstacles
-        .iter()
-        .flat_map(|o| o.stations.iter().copied())
-        .collect();
-    let waveguide = moving_end_string_phs(string, &zetas, bow, &obs_stations)?;
+    let contacts = StationContact::prepare(obstacles)
+        .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+    let waveguide = moving_end_string_phs(string, &zetas, bow, &contacts)?;
     let n_string = waveguide.state_dim();
     let mut string_state = vec![0.0; n_string];
     if let Some(pluck) = pluck {
@@ -2224,7 +2224,7 @@ fn realize_dirac_join(
                 n_s,
                 string,
                 bow,
-                obstacles,
+                &contacts,
                 reed,
                 blow,
                 gas,
@@ -2242,7 +2242,7 @@ fn realize_dirac_join(
                 n_s,
                 string,
                 bow,
-                obstacles,
+                &contacts,
                 reed,
                 blow,
                 gas,
@@ -2262,7 +2262,7 @@ fn realize_dirac_join(
                 n_s,
                 string,
                 bow,
-                obstacles,
+                &contacts,
                 reed,
                 blow,
                 gas,
@@ -2313,11 +2313,11 @@ fn moving_end_string_phs(
     string: &PrestressedString,
     zetas: &[f64],
     bow: Option<BowStroke>,
-    obs_stations: &[f64],
+    contacts: &[StationContact],
 ) -> Result<fs_phs::PortHamiltonian, AcousticRealizeError> {
     let n = string.n_modes.max(1);
     let phi0 = det::sqrt(2.0 / (string.lin_density_kg_m * string.length_m));
-    let m = 1 + usize::from(bow.is_some()) + obs_stations.len();
+    let m = 1 + usize::from(bow.is_some()) + contacts.len();
     let mut g = vec![0.0; (2 * n) * m];
     for k in 0..n {
         let kappa = (k as f64 + 0.5) * core::f64::consts::PI / string.length_m;
@@ -2327,8 +2327,8 @@ fn moving_end_string_phs(
             g[(2 * k + 1) * m + col] = phi0 * det::cos(kappa * bow.station_frac * string.length_m);
             col += 1;
         }
-        for &s in obs_stations {
-            g[(2 * k + 1) * m + col] = phi0 * det::cos(kappa * s.clamp(0.0, 1.0) * string.length_m);
+        for contact in contacts {
+            g[(2 * k + 1) * m + col] = phi0 * det::cos(kappa * contact.station_frac() * string.length_m);
             col += 1;
         }
     }
@@ -2372,7 +2372,7 @@ fn leftover_u(
     n_s: usize,
     string: &PrestressedString,
     bow: Option<BowStroke>,
-    obstacles: &[UnilateralObstacle],
+    contacts: &[StationContact],
     reed: Option<BeatingReed>,
     blow: Option<VolumeVelocityPulse>,
     gas: &GasState,
@@ -2394,17 +2394,7 @@ fn leftover_u(
             .map_err(AcousticRealizeError::Nonlinear)?;
         col += 1;
     }
-    for spec in obstacles {
-        for (i, &s) in spec.stations.iter().enumerate() {
-            let opening = moving_end_opening(string, x, n_s, s);
-            let v = y.get(col).copied().unwrap_or(0.0);
-            let gap = spec.gaps_m.get(i).copied().unwrap_or(0.0);
-            let pen = (opening - gap).max(0.0);
-            let fel = -spec.stiffness * det::pow(pen, spec.alpha);
-            u[col] = fel - spec.internal_loss * spec.stiffness * det::pow(pen, spec.alpha) * v;
-            col += 1;
-        }
-    }
+    col = moving_end_contact_inputs(string, x, n_s, contacts, &y, &mut u, col)?;
     if let Some(port) = fluid_port {
         if port != col || port >= m {
             return Err(AcousticRealizeError::InvalidDescription {
@@ -2439,7 +2429,7 @@ fn leftover_u_ode(
     n_s: usize,
     string: &PrestressedString,
     bow: Option<BowStroke>,
-    obstacles: &[UnilateralObstacle],
+    contacts: &[StationContact],
     reed: Option<BeatingReed>,
     blow: Option<VolumeVelocityPulse>,
     gas: &GasState,
@@ -2462,20 +2452,7 @@ fn leftover_u_ode(
             .map_err(AcousticRealizeError::Nonlinear)?;
         col += 1;
     }
-    for spec in obstacles {
-        for (i, &s) in spec.stations.iter().enumerate() {
-            if col >= m {
-                break;
-            }
-            let opening = moving_end_opening(string, x, n_s, s);
-            let v = y.get(col).copied().unwrap_or(0.0);
-            let gap = spec.gaps_m.get(i).copied().unwrap_or(0.0);
-            let pen = (opening - gap).max(0.0);
-            let fel = -spec.stiffness * det::pow(pen, spec.alpha);
-            u[col] = fel - spec.internal_loss * spec.stiffness * det::pow(pen, spec.alpha) * v;
-            col += 1;
-        }
-    }
+    col = moving_end_contact_inputs(string, x, n_s, contacts, &y, &mut u, col)?;
     if let Some(port) = fluid_port {
         if port != col || port >= m {
             return Err(AcousticRealizeError::InvalidDescription {
@@ -2502,13 +2479,38 @@ fn leftover_u_ode(
     Ok(u)
 }
 
+// Both the free/duct ODE and common-velocity descriptor use these same physical
+// force ports, including original quadrature and the actual conjugate velocity.
+#[allow(clippy::too_many_arguments)]
+fn moving_end_contact_inputs(
+    string: &PrestressedString, x: &[f64], n_s: usize, contacts: &[StationContact],
+    velocities: &[f64], input: &mut [f64], start: usize,
+) -> Result<usize, AcousticRealizeError> {
+    let end = start.checked_add(contacts.len()).ok_or(AcousticRealizeError::InvalidDescription {
+        what: "moving-end contact port count overflows",
+    })?;
+    if n_s.checked_mul(2).is_none_or(|n| n > x.len())
+        || end > input.len() || velocities.len() != input.len()
+    {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "moving-end contact lost its original string state or force/velocity ports",
+        });
+    }
+    for (i, contact) in contacts.iter().enumerate() {
+        let opening = moving_end_opening(string, x, n_s, contact.station_frac());
+        input[start + i] = contact.force(opening, velocities[start + i])
+            .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+    }
+    Ok(end)
+}
+
 fn moving_end_opening(string: &PrestressedString, x: &[f64], n_s: usize, station: f64) -> f64 {
     let phi0 = det::sqrt(2.0 / (string.lin_density_kg_m * string.length_m));
     let mut y = 0.0;
     for k in 0..n_s {
         let kappa = (k as f64 + 0.5) * core::f64::consts::PI / string.length_m;
-        let phi = phi0 * det::cos(kappa * station.clamp(0.0, 1.0) * string.length_m);
-        y += x.get(2 * k).copied().unwrap_or(0.0) * phi;
+        let phi = phi0 * det::cos(kappa * station * string.length_m);
+        y += x[2 * k] * phi;
     }
     y
 }
