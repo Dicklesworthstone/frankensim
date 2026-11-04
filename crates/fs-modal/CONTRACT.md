@@ -144,16 +144,19 @@ mass-normalized damped modes (`time`, moved from fs-couple under owner decision 
 pencil `K - omega^2 M - i omega C` under `exp(-i omega t)`. The source mass,
 stiffness and viscous damping remain fully coupled; a mode count or a list of
 free-decay poles does not substitute for the forced port response. `try_new`
-accepts real exactly symmetric row-major matrices. `try_modal` supplies the
-mass-normalized diagonal stiffness convenience while retaining full damping;
+accepts real row-major matrices with exactly symmetric mass and stiffness.
+The velocity operator may contain symmetric viscous damping and skew
+gyroscopic coupling. `try_modal` supplies the mass-normalized diagonal
+stiffness convenience while retaining both velocity contributions;
 factored frequency detuning preserves narrow peaks and exact nominal resonance.
 
 An unloaded `try_modal` pencil with exactly zero off-diagonal damping uses
 compact diagonal storage. Every nonzero coupling, however small, and every
 port-loaded pencil retains the dense path. Layout selection uses the source
 damping, including at DC where its off-diagonals affect the frequency tangent.
-The complete caller-owned damping matrix still receives finite/symmetric
-admission and requires `O(n*n)` inspection. Subsequent compact assembly and
+The complete caller-owned velocity matrix still receives finite-entry
+admission and requires `O(n*n)` inspection. Its symmetric viscous part must
+pass the diagonal or dense PSD admission below. Subsequent compact assembly and
 prepared response/tangent evaluations use `O(n)` work and owned storage.
 No mode, damping term or physical coupling is approximated by this dispatch.
 
@@ -177,18 +180,30 @@ exactly diagonal pencils use scalar division. The response returns original
 coordinate displacement and velocity phasors, componentwise backward residual,
 and independent cycle-averaged input and viscous powers for peak amplitudes.
 The forcing convention is `v = -i omega q`, `P_in = Re(F^H v)/2` and
-`P_loss = Re(v^H C v)/2`. Source units and conjugate force/velocity projection
-remain the caller's responsibility. Physical radiation loss appears here only
-if its loading is actually included in the supplied pencil.
+`P_loss = Re(v^H D v)/2`, where `D=(C+C^T)/2`. Source units and conjugate
+force/velocity projection remain the caller's responsibility. Physical radiation
+loss appears here only if its loading is actually included in the supplied pencil.
 
-Mass must pass positive-definite admission. Exactly diagonal damping and
-stiffness receive nonnegative-coefficient checks. Coupled matrices pass a
-Jacobi PSD check after their own diagonal congruence, so a small indefinite
-subspace cannot hide behind a larger unrelated mode. The numerical allowance is
+Mass must pass positive-definite admission. The symmetric viscous part and
+stiffness receive nonnegative-coefficient checks when exactly diagonal.
+Coupled symmetric parts pass a Jacobi PSD check after their own diagonal
+congruence, so a small indefinite subspace cannot hide behind a larger
+unrelated mode. The numerical allowance is
 `64 n epsilon`; this is not an interval passivity proof. Source coefficients
 are never clipped, diagonalized or shifted. Zero damping and stiffness
 nullspaces remain intact; singular lossless resonances and unconstrained DC
 free motion refuse instead of manufacturing finite amplitudes.
+
+Gyroscopic coupling is retained with its original sign in the full dynamic
+operator and its analytic frequency tangent; it can split circular resonances
+and break reciprocity without introducing dissipation. PSD admission and work
+diagnostics take the symmetric part before accumulation, so large gyroscopic
+exchange cannot manufacture heat or hide an active viscous direction. This
+uses no extra dense matrix or factorization. Pure skew operators with zero
+viscous diagonals are admissible; finite source coefficients remain required.
+G1/G3 regressions cover both signed circular branches through their split
+resonances, lossless nonreciprocal transfer, analytic motion/heat frequency
+tangents and refusal of indefinite symmetric parts.
 
 Caller controls bound retained coordinates, peak numerical-array payload and
 relative solve residual. Dense owners admit `144*n*n + 128*n` bytes; compact

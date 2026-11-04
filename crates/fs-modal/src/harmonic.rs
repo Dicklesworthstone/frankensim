@@ -1,7 +1,9 @@
 //! Harmonic response of a retained mechanical pencil, under `exp(-i omega t)`.
 //!
 //! Solve `(K - omega^2 M - i omega C) q = F` without discarding any projected
-//! mass, stiffness, or damping entries. Resonance, antiresonance, phase and
+//! mass, stiffness, or velocity-coupling entries. The real velocity operator
+//! may contain both symmetric viscous damping and skew gyroscopic coupling.
+//! Resonance, antiresonance, phase and
 //! transfer between ports are properties of this forced system, not just its
 //! free-decay eigenvalues. Forces are peak phasors, so cycle-averaged power is
 //! `Re(F^H v)/2`, with `v = -i omega q`.
@@ -61,7 +63,8 @@ pub struct HarmonicResponse {
     pub relative_residual: f64,
     /// `Re(F^H v)/2` [W] for physical force/displacement coordinates.
     pub average_input_power_w: f64,
-    /// `Re(v^H C v)/2` [W], evaluated with the original complete damping matrix.
+    /// `Re(v^H D v)/2` [W], with the complete `D=(C+C^T)/2`. The skew
+    /// gyroscopic part does no work and is excluded before accumulation.
     /// Small signed roundoff is retained, never clipped into a passivity claim.
     pub average_viscous_power_w: f64,
     /// Physical load-port flow, effort and absorbed work, when a load is supplied.
@@ -172,9 +175,12 @@ impl MatrixLayout {
 }
 
 impl PreparedHarmonicResponse {
-    /// Prepare a complete real, exactly symmetric row-major `M,C,K` pencil.
-    /// `M` must be positive definite; `C` and `K` must pass numerical PSD
-    /// admission. Rigid coordinates and zero damping are permitted. Frequency
+    /// Prepare a complete real row-major `M,C,K` pencil. `M` and `K` must be
+    /// exactly symmetric; `M` must be positive definite, while `K` and the
+    /// symmetric viscous part `D=(C+C^T)/2` pass numerical PSD admission.
+    /// The skew part `G=(C-C^T)/2` is retained as gyroscopic coupling, including
+    /// its sign: it changes resonances and reciprocity but dissipates no energy.
+    /// Rigid coordinates and zero damping are permitted. Frequency
     /// is nonnegative [rad/s]. No mass whitening or diagonal projection is applied.
     ///
     /// Polls cancellation between dense admission stages, per assembly row,
@@ -276,8 +282,7 @@ impl PreparedHarmonicResponse {
         if layout == MatrixLayout::Dense {
             symmetric(mass, n)?;
             symmetric(stiffness, n)?;
-            crate::damping::validate_dense_damping(damping, n)
-                .map_err(HarmonicResponseError::Damping)?;
+            validate_velocity_coupling(damping, n)?;
         } else if mass
             .iter()
             .chain(damping)
@@ -434,7 +439,8 @@ impl PreparedHarmonicResponse {
     }
 
     /// Convenience for mass-normalized modes: `M=I`, `K=diag(omega_i^2)`.
-    /// The full supplied damping matrix is retained, including off-diagonals.
+    /// The full supplied velocity matrix is retained, including viscous
+    /// off-diagonals and skew gyroscopic terms, under the same PSD admission.
     /// Factored frequency detuning preserves exact resonance and narrow peaks.
     /// Exactly diagonal damping uses linear owned storage, solves and frequency
     /// tangents after inspecting the caller's complete damping matrix.
@@ -532,8 +538,7 @@ impl PreparedHarmonicResponse {
         // Bound coordinates and the minimum possible payload before scanning
         // the full caller-owned damping input. No numerical coupling threshold.
         admit_layout(n, controls, MatrixLayout::Diagonal)?;
-        crate::damping::validate_dense_damping(damping_per_s, n)
-            .map_err(HarmonicResponseError::Damping)?;
+        validate_velocity_coupling(damping_per_s, n)?;
         let mut layout = MatrixLayout::Diagonal;
         for i in 0..n {
             poll(cx)?;
@@ -727,7 +732,7 @@ impl PreparedHarmonicResponse {
             input += 0.5 * real_inner(force[i], velocity[i]);
             let mut cv = C64::ZERO;
             for j in self.layout.columns(i, self.n) {
-                cv = cv + velocity[j].scale(self.damping[self.layout.index(i, j, self.n)]);
+                cv = cv + velocity[j].scale(self.viscous_entry(i, j));
             }
             dissipation += 0.5 * real_inner(velocity[i], cv);
         }
@@ -756,6 +761,13 @@ impl PreparedHarmonicResponse {
             port_load,
             power_balance_residual_w: balance,
         })
+    }
+
+    fn viscous_entry(&self, row: usize, column: usize) -> f64 {
+        match self.layout {
+            MatrixLayout::Dense => symmetric_entry(&self.damping, self.n, row, column),
+            MatrixLayout::Diagonal => self.damping[row],
+        }
     }
 }
 
@@ -808,6 +820,24 @@ fn admit_layout(
     }
     Ok(())
 }
+fn validate_velocity_coupling(damping: &[f64], n: usize) -> Result<(), HarmonicResponseError> {
+    if n.checked_mul(n) != Some(damping.len()) {
+        return crate::damping::validate_dense_damping(damping, n)
+            .map_err(HarmonicResponseError::Damping);
+    }
+    if damping.iter().any(|v| !v.is_finite()) {
+        return Err(invalid("finite velocity-coupling entries required"));
+    }
+    // Retain the original symmetric material-damping refusal semantics.
+    // A nonsymmetric source is admitted through its viscous part later,
+    // without modifying the full operator used for motion and tangents.
+    if (0..n).all(|i| (0..n).all(|j| damping[i * n + j] == damping[j * n + i])) {
+        crate::damping::validate_dense_damping(damping, n)
+            .map_err(HarmonicResponseError::Damping)?;
+    }
+    Ok(())
+}
+
 fn symmetric(a: &[f64], n: usize) -> Result<(), HarmonicResponseError> {
     for i in 0..n {
         for j in 0..n {
@@ -835,12 +865,14 @@ fn require_psd(
     for i in 0..n {
         // A zero PSD diagonal requires an exactly zero row. Preserve true
         // nullspaces; neither a global norm nor diagonal jitter can hide these.
-        if a[i * n + i] < 0.0 || a[i * n + i] == 0.0 && (0..n).any(|j| a[i * n + j] != 0.0) {
+        if a[i * n + i] < 0.0
+            || a[i * n + i] == 0.0 && (0..n).any(|j| symmetric_entry(a, n, i, j) != 0.0)
+        {
             return Err(refusal(a[i * n + i]));
         }
         roots.push(a[i * n + i].sqrt());
     }
-    if (0..n).all(|i| (0..n).all(|j| i == j || a[i * n + j] == 0.0)) {
+    if (0..n).all(|i| (0..n).all(|j| i == j || symmetric_entry(a, n, i, j) == 0.0)) {
         return Ok(());
     }
     let mut normalized = vec![0.0; n * n];
@@ -855,7 +887,7 @@ fn require_psd(
             if roots[j] == 0.0 {
                 continue;
             }
-            let value = (a[i * n + j] / roots[i]) / roots[j];
+            let value = (symmetric_entry(a, n, i, j) / roots[i]) / roots[j];
             if !value.is_finite() || value.abs() > 1.0 + allowance {
                 return Err(refusal(1.0 - value.abs()));
             }
@@ -870,6 +902,23 @@ fn require_psd(
         return Err(refusal(minimum));
     }
     Ok(())
+}
+// The full C stays in the motion operator; only its symmetric part enters
+// passivity admission and physical heat. Equal pairs retain their exact bits,
+// including subnormals, and the alternate sum avoids overflow for large pairs.
+fn symmetric_entry(a: &[f64], n: usize, i: usize, j: usize) -> f64 {
+    let x = a[i * n + j];
+    let y = a[j * n + i];
+    if x == y {
+        x
+    } else {
+        let sum = x + y;
+        if sum.is_finite() {
+            0.5 * sum
+        } else {
+            0.5 * x + 0.5 * y
+        }
+    }
 }
 fn backward_error(
     a: &[C64],

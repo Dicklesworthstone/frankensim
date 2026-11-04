@@ -41,6 +41,101 @@ fn scalar_close(actual: f64, expected: f64, tolerance: f64) {
 }
 
 #[test]
+fn g1_gyroscopic_circular_forces_resolve_both_split_resonances() {
+    with_cx(&CancelGate::new(), |cx| {
+        // G*[1,i*s] = -i*s*g*[1,i*s]. Under exp(-i*w*t), each
+        // circular force therefore sees k-m*w²-s*g*w-i*d*w.
+        let (m, k, d) = (2.0, 18.0, 0.4);
+        let amplitude = C64::new(1.7, -0.3);
+        for g in [-4.0_f64, 4.0] {
+            for s in [-1.0, 1.0] {
+                let resonance = ((g * g + 4.0 * m * k).sqrt() - s * g) / (2.0 * m);
+                let polarization = C64::new(0.0, s);
+                let force = [amplitude, polarization * amplitude];
+                for w in [0.0, 1.0, resonance, 3.0, 6.0] {
+                    let p = PreparedHarmonicResponse::try_new(
+                        &[m, 0.0, 0.0, m],
+                        &[d, -g, g, d],
+                        &[k, 0.0, 0.0, k],
+                        2,
+                        w,
+                        controls(),
+                        cx,
+                    )
+                    .unwrap();
+                    let response = p.solve(&force, cx).unwrap();
+                    let q = amplitude / C64::new(k - m * w * w - s * g * w, -d * w);
+                    close(response.displacement[0], q, 6e-14);
+                    close(response.displacement[1], polarization * q, 6e-14);
+                    let heat = 0.5
+                        * d
+                        * response
+                            .velocity
+                            .iter()
+                            .map(|v| v.abs().powi(2))
+                            .sum::<f64>();
+                    if w == 0.0 {
+                        assert_eq!(response.average_viscous_power_w, 0.0);
+                    } else {
+                        scalar_close(response.average_viscous_power_w, heat, 4e-14);
+                        scalar_close(response.average_input_power_w, heat, 4e-13);
+                    }
+                    assert!(response.relative_residual < 2e-14);
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn g1_lossless_gyroscope_transfers_motion_without_creating_heat() {
+    with_cx(&CancelGate::new(), |cx| {
+        let p = PreparedHarmonicResponse::try_modal(
+            &[3.0, 3.0],
+            &[0.0, -4.0, 4.0, 0.0],
+            1.5,
+            controls(),
+            cx,
+        )
+        .unwrap();
+        let x = p.solve(&[C64::ONE, C64::ZERO], cx).unwrap();
+        let y = p.solve(&[C64::ZERO, C64::ONE], cx).unwrap();
+        // A gyroscopic device is passive but nonreciprocal. A symmetry repair
+        // would incorrectly erase this quadrature transfer and mode splitting.
+        close(x.displacement[1], -y.displacement[0], 4e-14);
+        assert!(x.displacement[1].im.abs() > 0.1);
+        for r in [x, y] {
+            assert_eq!(r.average_viscous_power_w, 0.0);
+            assert!(r.average_input_power_w.abs() < 2e-14);
+        }
+    });
+}
+
+#[test]
+fn g0_gyroscopic_terms_cannot_hide_an_active_symmetric_velocity_direction() {
+    with_cx(&CancelGate::new(), |cx| {
+        for c in [[1.0, -98.0, 102.0, 1.0], [0.0, -99.0, 101.0, 0.0]] {
+            assert!(matches!(
+                PreparedHarmonicResponse::try_modal(&[3.0, 4.0], &c, 1.5, controls(), cx),
+                Err(HarmonicResponseError::NotPositiveSemidefinite {
+                    matrix: "damping",
+                    ..
+                })
+            ));
+        }
+        for c in [
+            [1.0, f64::NAN, 2.0, 1.0],
+            [1.0, -f64::INFINITY, f64::INFINITY, 1.0],
+        ] {
+            assert!(matches!(
+                PreparedHarmonicResponse::try_modal(&[3.0, 4.0], &c, 1.5, controls(), cx),
+                Err(HarmonicResponseError::Invalid(_))
+            ));
+        }
+    });
+}
+
+#[test]
 fn g1_single_coordinate_resonance_phase_static_limit_and_power() {
     with_cx(&CancelGate::new(), |cx| {
         // m=5 kg, k=20 N/m -> omega_n=2 rad/s. At resonance the
@@ -484,7 +579,13 @@ fn g1_explicit_diagonal_modal_bank_uses_only_linear_authored_input() {
             .map(|i| if i == 0 { 0.1 } else { 0.5 + i as f64 / 16.0 })
             .collect();
         let rates: Vec<_> = (0..n)
-            .map(|i| if i == 0 { 2e-13 } else { 0.04 + (i % 7) as f64 / 32.0 })
+            .map(|i| {
+                if i == 0 {
+                    2e-13
+                } else {
+                    0.04 + (i % 7) as f64 / 32.0
+                }
+            })
             .collect();
         let force: Vec<_> = (0..n)
             .map(|i| C64::new(1.0 + (i % 5) as f64 / 8.0, (i % 3) as f64 / 16.0))
@@ -497,12 +598,11 @@ fn g1_explicit_diagonal_modal_bank_uses_only_linear_authored_input() {
         // All authored inputs are vectors. A dense damping matrix at this
         // extent would exceed 128 MiB; the payload budget is about 1 MiB.
         for w in [0.0, 0.1, 0.1 + 2e-13, 3.0] {
-            let response = PreparedHarmonicResponse::try_diagonal_modal(
-                &natural, &rates, w, bounded, cx,
-            )
-            .unwrap()
-            .solve(&force, cx)
-            .unwrap();
+            let response =
+                PreparedHarmonicResponse::try_diagonal_modal(&natural, &rates, w, bounded, cx)
+                    .unwrap()
+                    .solve(&force, cx)
+                    .unwrap();
             let mut expected_power = 0.0;
             for i in 0..n {
                 let a = C64::new((natural[i] - w) * (natural[i] + w), -w * rates[i]);
@@ -586,9 +686,7 @@ fn g0_explicit_diagonal_modal_inputs_and_singular_limits_refuse() {
             },
         ] {
             assert!(matches!(
-                PreparedHarmonicResponse::try_diagonal_modal(
-                    &[2.0], &[0.2], 1.0, bounded, cx
-                ),
+                PreparedHarmonicResponse::try_diagonal_modal(&[2.0], &[0.2], 1.0, bounded, cx),
                 Err(HarmonicResponseError::Budget { .. })
             ));
         }
@@ -597,9 +695,7 @@ fn g0_explicit_diagonal_modal_inputs_and_singular_limits_refuse() {
     gate.request();
     with_cx(&gate, |cx| {
         assert!(matches!(
-            PreparedHarmonicResponse::try_diagonal_modal(
-                &[2.0], &[0.2], 1.0, controls(), cx
-            ),
+            PreparedHarmonicResponse::try_diagonal_modal(&[2.0], &[0.2], 1.0, controls(), cx),
             Err(HarmonicResponseError::Cancelled)
         ));
     });

@@ -59,6 +59,91 @@ fn pair(a: C64, b: C64) -> f64 {
 }
 
 #[test]
+fn gyroscopic_frequency_tangent_keeps_circular_branch_and_physical_heat() {
+    with_cx(&CancelGate::new(), |cx| {
+        let (m, k, g, d) = (2.0, 18.0, 4.0_f64, 0.4);
+        let f = C64::new(1.2, -0.3);
+        for s in [-1.0, 1.0] {
+            let polarization = C64::new(0.0, s);
+            let resonance = ((g * g + 4.0 * m * k).sqrt() - s * g) / (2.0 * m);
+            for w in [0.0, 1.0, resonance, 3.0, 6.0] {
+                let p = PreparedHarmonicResponse::try_new(
+                    &[m, 0.0, 0.0, m],
+                    &[d, -g, g, d],
+                    &[k, 0.0, 0.0, k],
+                    2,
+                    w,
+                    controls(),
+                    cx,
+                )
+                .unwrap();
+                let result = p
+                    .solve_with_frequency_derivative(
+                        &[f, polarization * f],
+                        None,
+                        None,
+                        tangent_controls(),
+                        cx,
+                    )
+                    .unwrap();
+                let denominator = C64::new(k - m * w * w - s * g * w, -d * w);
+                let q = f / denominator;
+                let dq = C64::new(2.0 * m * w + s * g, d) * q / denominator;
+                let v = C64::new(0.0, -w) * q;
+                let dv = C64::new(0.0, -1.0) * (q + dq.scale(w));
+                close(result.displacement_derivative[0], dq, 2e-13);
+                close(result.displacement_derivative[1], polarization * dq, 2e-13);
+                close(result.velocity_derivative[0], dv, 2e-13);
+                let heat_slope = 2.0 * d * pair(v, dv);
+                assert!(
+                    (result.average_viscous_power_derivative - heat_slope).abs()
+                        < 3e-12 * (1.0 + heat_slope.abs())
+                );
+                assert!(
+                    result.power_balance_residual_derivative.abs()
+                        < 3e-12 * (1.0 + heat_slope.abs())
+                );
+                assert!(result.relative_derivative_residual < 1e-12);
+            }
+        }
+    });
+}
+
+#[test]
+fn gyroscopic_modal_coupling_survives_diagonal_dc_operator_and_tiny_coefficients() {
+    with_cx(&CancelGate::new(), |cx| {
+        for g in [-4.0, -1e-18, 1e-18, 4.0] {
+            let result = PreparedHarmonicResponse::try_modal(
+                &[1.0, 2.0],
+                &[0.0, -g, g, 0.0],
+                0.0,
+                controls(),
+                cx,
+            )
+            .unwrap()
+            .solve_with_frequency_derivative(
+                &[C64::ONE, C64::ZERO],
+                None,
+                None,
+                tangent_controls(),
+                cx,
+            )
+            .unwrap();
+            // K q = F is diagonal at DC, but K q_w = i G q retains
+            // the full signed gyroscope in the modal frequency tangent.
+            assert_eq!(result.response.displacement, [C64::ONE, C64::ZERO]);
+            assert_eq!(result.displacement_derivative[0], C64::ZERO);
+            close(
+                result.displacement_derivative[1],
+                C64::new(0.0, g / 4.0),
+                5e-14,
+            );
+            assert_eq!(result.average_viscous_power_derivative, 0.0);
+        }
+    });
+}
+
+#[test]
 fn scalar_frequency_source_and_dc_kinematics_match_closed_form() {
     with_cx(&CancelGate::new(), |cx| {
         let f = C64::new(2.0, -0.7);
@@ -859,25 +944,34 @@ fn explicit_diagonal_modal_matches_matrix_input_and_frequency_tangents() {
         let force = [C64::ONE, C64::new(0.3, -0.7), C64::ONE, C64::new(-0.2, 0.5)];
         let slope = [C64::new(0.1, -0.05); 4];
         for w in [0.0, 0.1 - 2e-13, 0.1, 0.1 + 2e-13, 1.5] {
-            let diagonal = PreparedHarmonicResponse::try_diagonal_modal(
-                &natural, &rates, w, controls(), cx,
-            )
-            .unwrap()
-            .solve_with_frequency_derivative(
-                &force, Some(&slope), None, tangent_controls(), cx,
-            )
-            .unwrap();
-            let matrix = PreparedHarmonicResponse::try_modal(
-                &natural, &full_damping, w, controls(), cx,
-            )
-            .unwrap()
-            .solve_with_frequency_derivative(
-                &force, Some(&slope), None, tangent_controls(), cx,
-            )
-            .unwrap();
+            let diagonal =
+                PreparedHarmonicResponse::try_diagonal_modal(&natural, &rates, w, controls(), cx)
+                    .unwrap()
+                    .solve_with_frequency_derivative(
+                        &force,
+                        Some(&slope),
+                        None,
+                        tangent_controls(),
+                        cx,
+                    )
+                    .unwrap();
+            let matrix =
+                PreparedHarmonicResponse::try_modal(&natural, &full_damping, w, controls(), cx)
+                    .unwrap()
+                    .solve_with_frequency_derivative(
+                        &force,
+                        Some(&slope),
+                        None,
+                        tangent_controls(),
+                        cx,
+                    )
+                    .unwrap();
             assert_eq!(diagonal.response.displacement, matrix.response.displacement);
             assert_eq!(diagonal.response.velocity, matrix.response.velocity);
-            assert_eq!(diagonal.displacement_derivative, matrix.displacement_derivative);
+            assert_eq!(
+                diagonal.displacement_derivative,
+                matrix.displacement_derivative
+            );
             assert_eq!(diagonal.velocity_derivative, matrix.velocity_derivative);
             assert_eq!(
                 diagonal.response.average_viscous_power_w.to_bits(),

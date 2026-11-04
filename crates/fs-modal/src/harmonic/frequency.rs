@@ -51,7 +51,8 @@ pub struct HarmonicFrequencyResponse {
     pub port_load: Option<HarmonicPortFrequencyResponse>,
     /// d Re(Fᴴ v)/2, including the authored force slope [W per rad/s].
     pub average_input_power_derivative: f64,
-    /// Independently evaluated d Re(vᴴ C v)/2 [W per rad/s].
+    /// Independently evaluated d Re(vᴴ D v)/2, `D=(C+Cᵀ)/2` [W per rad/s].
+    /// Gyroscopic coupling remains in motion but contributes no heat slope.
     pub average_viscous_power_derivative: f64,
     /// Input minus original structural and load-port power slopes [W per rad/s].
     pub power_balance_residual_derivative: f64,
@@ -206,7 +207,7 @@ impl PreparedHarmonicResponse {
             let mut cv_error = C64::ZERO;
             let mut cdv_error = C64::ZERO;
             for j in self.layout.columns(i, self.n) {
-                let c = self.damping[self.layout.index(i, j, self.n)];
+                let c = self.viscous_entry(i, j);
                 add(&mut cv, &mut cv_error, response.velocity[j].scale(c));
                 add(&mut cdv, &mut cdv_error, velocity_derivative[j].scale(c));
             }
