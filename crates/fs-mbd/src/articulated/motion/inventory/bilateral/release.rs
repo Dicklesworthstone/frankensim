@@ -1,7 +1,9 @@
 //! Release and ejection through the original mixed rigid-constraint response.
 
 use super::*;
-use crate::articulated::motion::inventory::release::{PayloadRelease, SeparationImpulse};
+use crate::articulated::motion::inventory::release::{
+    PayloadBatchRelease, PayloadRelease, PayloadReleaseInput, SeparationImpulse,
+};
 
 /// Original two-body release with the retained tree's simultaneous reaction.
 #[derive(Debug)]
@@ -12,6 +14,66 @@ pub struct BilateralPayloadRelease {
     /// Its source work concerns the retained tree alone in the lab frame.
     /// The release receipt pairs both sides of separation in its common frame.
     pub reaction: Option<BilateralImpulseResponse>,
+}
+
+/// One simultaneous release retaining all material and ideal joint constraints.
+#[derive(Debug)]
+pub struct BilateralPayloadBatchRelease {
+    /// All actual surviving bodies and their complete common-frame accounting.
+    pub release: PayloadBatchRelease,
+    /// Auxiliary retained-tree response to the summed separation source and
+    /// simultaneous row reactions, absent for exact empty-loop delegation.
+    pub reaction: Option<BilateralImpulseResponse>,
+}
+
+/// Detach several payloads through one closed mechanism at one physical instant.
+///
+/// All retained inertias are restored before a single mixed native impulse
+/// response transmits the accumulated point impulses and couples. Every
+/// detached body inherits the original loaded velocity field, then responds
+/// through its own full inertia. Pair work uses the same final retained state,
+/// preserving recoil cross terms between different separation sources.
+///
+/// On repeated targets, inputs must consume handles in reverse capture order;
+/// this orders inventory validation only. The physical event is simultaneous.
+/// Passive or exactly cancelling retained-side sources preserve state bits
+/// after geometry, tangent, rank and condition admission. The complete signed
+/// separation work and actual constraint work keep their independent limits.
+/// Empty material loops delegate to the original batch release exactly.
+///
+/// # Errors
+/// Empty/stale/misordered inventory, unresolved constraints, native endpoint,
+/// momentum/work/energy budgets or cancellation refuse atomically.
+#[allow(clippy::too_many_arguments)]
+pub fn release_payloads(
+    model: &ArticulatedModel,
+    state: &FreeFloatingMotionState,
+    inputs: &[PayloadReleaseInput<'_>],
+    loops: &[BilateralLoop],
+    rows: &[JointConstraint],
+    controls: PayloadControls<'_>,
+    config: BilateralImpulseConfig,
+    cancelled: impl FnMut() -> bool,
+) -> Result<BilateralPayloadBatchRelease, PayloadError> {
+    if loops.is_empty() {
+        return super::super::release::release_payloads(
+            model, state, inputs, rows, controls, cancelled,
+        )
+        .map(|release| BilateralPayloadBatchRelease {
+            release,
+            reaction: None,
+        });
+    }
+    super::super::release::release_payloads_evaluated(
+        model,
+        state,
+        inputs,
+        rows,
+        controls,
+        Some((loops, config)),
+        cancelled,
+    )
+    .map(|(release, reaction)| BilateralPayloadBatchRelease { release, reaction })
 }
 
 /// Detach retained inventory while material closures and gears transmit recoil.

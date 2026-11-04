@@ -5,24 +5,21 @@
 //! surviving systems through their native inverse inertias. No contact,
 //! fracture, collision geometry, or destination for mechanical work is inferred.
 
+/// Simultaneous release with shared retained-mechanism recoil.
+#[path = "release/batch.rs"]
+mod batch;
+pub(super) use batch::release_evaluated as release_payloads_evaluated;
+pub use batch::{PayloadBatchRelease, PayloadReleaseInput, ReleasedPayload, release_payloads};
+
 use super::{
-    PayloadAttachment, PayloadBalance, PayloadControls, PayloadError, PayloadState, account_boost,
-    energy_in_frame, finish_common_frame_balance, finite, payload_at_link, poll,
-    replace_link_inertia, system_totals, validate_inputs,
+    PayloadAttachment, PayloadBalance, PayloadControls, PayloadError, PayloadState, finite, poll,
 };
-use super::bilateral;
 use crate::articulated::motion::FreeFloatingMotionState;
+use crate::articulated::motion::reconfigure::constraints::JointConstraint;
 use crate::articulated::motion::spatial_loads::implicit::distance::{
-    BilateralImpulseConfig, BilateralImpulseResponse, BilateralLoop, joint,
+    BilateralImpulseConfig, BilateralImpulseResponse, BilateralLoop,
 };
-use crate::articulated::motion::reconfigure::constraints::{
-    JointConstraint, PreparedJointConstraints, admit_constraints, apply_rows,
-};
-use crate::articulated::motion::reconfigure::state_kinematics;
-use crate::articulated::{
-    ArticulatedModel, free_floating_impulse_delta, solve_floating_base_system, validate_twist,
-    validate_vec3, validate_wrench,
-};
+use crate::articulated::{ArticulatedModel, Link, validate_twist, validate_vec3, validate_wrench};
 use fs_ga::{Se3, Twist, Vec3, Wrench};
 
 /// One equal-and-opposite internal impulse at a shared physical point.
@@ -112,12 +109,19 @@ pub fn release_payload(
     cancelled: impl FnMut() -> bool,
 ) -> Result<PayloadRelease, PayloadError> {
     release_evaluated(
-        model, state, attachment, impulse, constraints, controls, None, cancelled,
+        model,
+        state,
+        attachment,
+        impulse,
+        constraints,
+        controls,
+        None,
+        cancelled,
     )
     .map(|(release, _)| release)
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn release_evaluated(
     model: &ArticulatedModel,
     state: &FreeFloatingMotionState,
@@ -126,243 +130,45 @@ pub(super) fn release_evaluated(
     constraints: &[JointConstraint],
     controls: PayloadControls<'_>,
     bilateral_rows: Option<(&[BilateralLoop], BilateralImpulseConfig)>,
-    mut cancelled: impl FnMut() -> bool,
+    cancelled: impl FnMut() -> bool,
 ) -> Result<(PayloadRelease, Option<BilateralImpulseResponse>), PayloadError> {
-    poll(&mut cancelled)?;
-    let target = attachment.target_link;
-    admit_attachment(model, attachment)?;
-    let retained_link = &attachment.retained_link;
-    let before = validate_inputs(model, state, target, constraints, controls, &mut cancelled)?;
-    let prescribed = impulse.unwrap_or_default();
-    admit_separation_impulse(prescribed)?;
-    let no_impulse = prescribed.impulse_on_payload_link_ns == Vec3::default()
-        && prescribed.couple_on_payload_link_nms == Vec3::default();
-    let payload_before = payload_at_link(
-        &before,
-        target,
-        attachment.link_from_payload,
-        attachment.payload_inertia,
-    )?;
-    let model_after = replace_link_inertia(model, target, retained_link.inertia())?;
-    let before_totals = system_totals(model, state, &before, None, &mut cancelled)?;
-    let boost = account_boost(model, &before)?;
-    let kinetic_before_j = energy_in_frame(model, &before, None, boost, &mut cancelled)?;
-    let mut prepared = if constraints.is_empty() || bilateral_rows.is_some() {
-        None
-    } else {
-        Some(PreparedJointConstraints::new(
-            &model_after,
-            &state.joint_position,
-            constraints,
-            controls.minimum_reciprocal_condition,
-            &mut cancelled,
-        )?)
-    };
-    let (impulse_on_retained_link, impulse_on_payload_body) =
-        separation_impulses(prescribed, attachment.link_from_payload)?;
-
-    let mut state_after = state.clone();
-    let mut payload_after = payload_before;
-    let mut multipliers = vec![0.0; constraints.len()];
-    let mut generalized_constraint_impulse = vec![0.0; 6 + model.dof_count()];
-    let mut bilateral_reaction = None;
-    if let Some((loops, config)) = bilateral_rows {
-        let mut body_impulses = vec![Wrench::default(); model.link_count()];
-        body_impulses[target] = impulse_on_retained_link;
-        let reaction = joint::apply_impulses(
-            &model_after,
-            state,
-            &vec![0.0; model.dof_count()],
-            &body_impulses,
-            loops,
-            constraints,
-            config,
-            &mut cancelled,
-        )?;
-        bilateral::admit_condition(reaction.reciprocal_condition, controls)?;
-        if !no_impulse {
-            state_after.base = reaction.impulse.base_after;
-            state_after.joint_velocity = reaction.impulse.joint_velocity_after.clone();
-            let payload_delta = solve_floating_base_system(
-                &payload_after.inertia.matrix()?,
-                impulse_on_payload_body,
-            )?;
-            poll(&mut cancelled)?;
-            payload_after.twist_body = payload_after.twist_body.plus(payload_delta);
-            validate_twist(payload_after.twist_body, "payload_release.payload_velocity")?;
-        }
-        // A passive release retains the original state bits after the same
-        // geometry, tangent and retained-inertia rank admission.
-        generalized_constraint_impulse = bilateral::project_constraint_impulses(
-            &model_after,
-            state,
-            &reaction.constraint_body_impulses,
-            &reaction.constraint_joint_impulses,
-            &mut cancelled,
-        )?;
-        multipliers = reaction.joint_multipliers.clone();
-        bilateral_reaction = Some(reaction);
-    } else if !no_impulse {
-        let mut body_impulses = vec![Wrench::default(); model.link_count()];
-        body_impulses[target] = impulse_on_retained_link;
-        let delta = free_floating_impulse_delta(
-            &model_after,
-            &state.joint_position,
-            &vec![0.0; model.dof_count()],
-            &body_impulses,
-        )?;
-        poll(&mut cancelled)?;
-        state_after.base.twist_body = state_after.base.twist_body.plus(delta.base);
-        add_joint_delta(
-            &mut state_after.joint_velocity,
-            &delta.joint,
-            &mut cancelled,
-        )?;
-        let payload_delta =
-            solve_floating_base_system(&payload_after.inertia.matrix()?, impulse_on_payload_body)?;
-        poll(&mut cancelled)?;
-        payload_after.twist_body = payload_after.twist_body.plus(payload_delta);
-        validate_twist(payload_after.twist_body, "payload_release.payload_velocity")?;
-        if let Some(mobility) = &mut prepared {
-            let rhs = apply_rows(constraints, &state_after.joint_velocity, &mut cancelled)?
-                .into_iter()
-                .map(|rate| -rate)
-                .collect::<Vec<_>>();
-            let reaction = mobility.solve_response(&rhs, &mut cancelled)?;
-            state_after.base.twist_body = state_after.base.twist_body.plus(reaction.base_delta);
-            add_joint_delta(
-                &mut state_after.joint_velocity,
-                &reaction.joint_delta,
-                &mut cancelled,
-            )?;
-            generalized_constraint_impulse[6..].copy_from_slice(&reaction.joint_effort);
-            multipliers = reaction.multipliers;
-        }
-    }
-    admit_constraints(
+    let (release, reaction) = release_payloads_evaluated(
+        model,
+        state,
+        &[PayloadReleaseInput {
+            attachment,
+            impulse,
+        }],
         constraints,
-        &state_after.joint_position,
-        &state_after.joint_velocity,
-        &mut cancelled,
-    )?;
-    let after = state_kinematics(&model_after, &state_after)?;
-    poll(&mut cancelled)?;
-    let after_totals = system_totals(
-        &model_after,
-        &state_after,
-        &after,
-        Some((target, &payload_after)),
-        &mut cancelled,
-    )?;
-    let kinetic_after_j = energy_in_frame(
-        &model_after,
-        &after,
-        Some(&payload_after),
-        boost,
-        &mut cancelled,
-    )?;
-    let supplied_work_j = if no_impulse {
-        0.0
-    } else {
-        let midpoint_link = centered(
-            before.body_twist[target],
-            before.world_from_link[target],
-            boost,
-        )?
-        .scale(0.5)
-        .plus(
-            centered(
-                after.body_twist[target],
-                after.world_from_link[target],
-                boost,
-            )?
-            .scale(0.5),
-        );
-        let midpoint_payload = centered(
-            payload_before.twist_body,
-            payload_before.world_from_body,
-            boost,
-        )?
-        .scale(0.5)
-        .plus(
-            centered(
-                payload_after.twist_body,
-                payload_after.world_from_body,
-                boost,
-            )?
-            .scale(0.5),
-        );
-        finite(
-            impulse_on_retained_link.pairing(midpoint_link)
-                + impulse_on_payload_body.pairing(midpoint_payload),
-            "release midpoint work",
-        )?
-    };
-    if supplied_work_j.abs() > controls.maximum_energy_exchange_j {
-        return Err(PayloadError::EnergyExchange {
-            energy_j: supplied_work_j,
-            maximum_j: controls.maximum_energy_exchange_j,
-        });
-    }
-    let constraint_work_j = if let Some(reaction) = &bilateral_reaction {
-        bilateral::constraint_work(
-            &reaction.constraint_body_impulses,
-            &reaction.constraint_joint_impulses,
-            &before,
-            &after,
-            &state.joint_velocity,
-            &state_after.joint_velocity,
-            boost,
-            &mut cancelled,
-        )?
-    } else {
-        let rates_before = apply_rows(constraints, &state.joint_velocity, &mut cancelled)?;
-        let rates_after = apply_rows(constraints, &state_after.joint_velocity, &mut cancelled)?;
-        let mut work = 0.0;
-        for ((&multiplier, &initial), &final_rate) in
-            multipliers.iter().zip(&rates_before).zip(&rates_after)
-        {
-            work = finite(
-                multiplier.mul_add(0.5 * initial + 0.5 * final_rate, work),
-                "release constraint work",
-            )?;
-        }
-        work
-    };
-    let energy_residual_j = finite(
-        kinetic_after_j - kinetic_before_j - supplied_work_j - constraint_work_j,
-        "release common-frame energy residual",
-    )?;
-    let balance = finish_common_frame_balance(
-        before_totals,
-        after_totals,
-        generalized_constraint_impulse,
-        multipliers,
-        constraint_work_j,
-        boost,
-        kinetic_before_j,
-        kinetic_after_j,
-        energy_residual_j,
         controls,
-        &mut cancelled,
+        bilateral_rows,
+        cancelled,
     )?;
-    poll(&mut cancelled)?;
+    let PayloadBatchRelease {
+        model_after,
+        state_after,
+        mut payloads_after,
+        supplied_work_j,
+        constraint_work_j,
+        balance,
+    } = release;
+    // One shared inventory/physics owner; unwrap only the singleton containers.
+    let payload = payloads_after.remove(0);
     Ok((
         PayloadRelease {
             model_after,
             state_after,
-            payload_after,
+            payload_after: payload.payload_after,
             supplied_work_j,
             constraint_work_j,
-            applied_impulse: impulse,
-            impulse_on_payload_body,
-            impulse_on_retained_link,
+            applied_impulse: payload.applied_impulse,
+            impulse_on_payload_body: payload.impulse_on_payload_body,
+            impulse_on_retained_link: payload.impulse_on_retained_link,
             balance,
         },
-        bilateral_reaction,
+        reaction,
     ))
 }
-
 fn centered(velocity: Twist, pose: Se3, boost: Vec3) -> Result<Twist, PayloadError> {
     let local_boost = pose.rotation().inverse().rotate(boost)?;
     let centered = Twist::new(velocity.angular, velocity.linear - local_boost);
@@ -395,6 +201,14 @@ pub(super) fn admit_attachment(
         .links()
         .get(attachment.target_link)
         .ok_or(PayloadError::Invalid("release target link"))?;
+    admit_attachment_link(loaded_link, attachment)
+}
+
+/// Check one exact inventory prefix without constructing an intermediate model.
+fn admit_attachment_link(
+    loaded_link: &Link,
+    attachment: &PayloadAttachment,
+) -> Result<(), PayloadError> {
     let retained_link = &attachment.retained_link;
     if loaded_link.name() != retained_link.name()
         || loaded_link.parent() != retained_link.parent()

@@ -6316,3 +6316,38 @@ permutation covariance, exact no-op and whole-inventory reuse, and late invalid
 inventory, aggregate caps and final cancellation/retry. The analytic fixture's
 source work is 41/5 J and sticking loss is 117/56 J; rational arithmetic checks
 those values independently of the native Rust implementation.
+
+
+### Simultaneous release with shared retained-mechanism recoil
+
+`inventory::release::release_payloads` and
+`inventory::bilateral::release::release_payloads` detach a nonempty payload
+collection in one physical event. Per-target handles validate exact retained
+inventory prefixes in reverse capture order; this ordering creates no
+intermediate dynamics. All outgoing bodies inherit the original loaded FK,
+all selected inertias are restored before one native tree response, and each
+payload receives its own full spatial-inertia response. The existing singleton
+release entries now unwrap the same batch owner. Supported inventory continues
+to reuse the original attachment and separation-wrench admission helpers.
+
+Compensated per-target source sums retain shared recoil. Passive and exactly
+cancelling tree sources preserve the retained state bits after constraint
+admission, while individual nonzero payload impulses still act. Every source
+pair uses the same final retained velocity, retaining cross terms and signed
+per-pair work; its DD total is independently capped by the existing absolute
+source-work allowance. Mixed material/joint reaction work and actual energy
+and momentum defects remain separately admitted. No heat or fracture law is
+inferred. Assembly/accounting outside the original bounded constraint solve is
+O(links + payloads), without sequential model rebuilds or a dense mass matrix.
+
+Five regression groups cover analytic shared recoil and a sequential-release
+counterexample, input permutations, exact empty delegation, reverse inventory
+and atomic cancellation, combined mixed-constraint endpoint limits, finite
+slip and signed work budgets, cancelling sources with nonzero payload recoil,
+and full-tensor/off-axis independent inverses with frame/boost covariance.
+Source/API review and exact-rational scalar checks completed. The four changed
+release source/test files pass edition-2024 parsing and formatting with available
+nightly-2026-08-31 rustfmt. Pinned July formatting, native compilation and
+numerical execution remain **UNRUN** because this runtime has no original
+FrankenSim native build graph, DSR or RCH. No passing native qualification is
+claimed.
