@@ -38,6 +38,11 @@ mod frequency;
 pub use frequency::{
     HarmonicFrequencyControls, HarmonicFrequencyResponse, HarmonicPortFrequencyResponse,
 };
+mod interference;
+pub use interference::{
+    HarmonicForceTone, HarmonicInterferenceControls, HarmonicInterferenceMoments,
+    MAX_INTERFERENCE_TONES, PreparedHarmonicInterference,
+};
 /// Local driven-response extrema and half-magnitude-squared linewidths.
 pub mod resonance;
 
@@ -83,6 +88,8 @@ pub struct HarmonicResponse {
 pub enum HarmonicResponseError {
     /// Invalid dimensions, domains, or unrepresentable arithmetic.
     Invalid(&'static str),
+    /// The physical observation window or its phase/product is unrepresentable.
+    Observation(fs_fft::harmonic_window::WindowError),
     /// Cancellation observed before publication.
     Cancelled,
     /// Explicit count or numerical-payload budget exceeded.

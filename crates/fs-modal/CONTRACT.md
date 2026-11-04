@@ -170,6 +170,43 @@ singular evaluator refusal, budgets and cancellation.
 
 ### `harmonic`: full forced response and resonance
 
+`harmonic::PreparedHarmonicInterference` prepares simultaneous coherent forces
+on one original real M/C/K pencil. Each distinct frequency uses the existing
+harmonic response owner; exactly repeated frequencies combine forces in DD
+before their solve. Nearby tones retain their separate frequencies and beats.
+The full coupled mass, stiffness and velocity operators remain intact, including
+nonproportional damping and signed gyroscopic terms. No diagonal modal projection
+or artificial loss is introduced. The source clock uses `exp(-i omega t)` and
+peak force amplitudes; DC contributes its actual real static displacement.
+
+The prepared observer applies M, K and D=(C+C^T)/2 to the original phasors once.
+An observation through `fs-fft::harmonic_window::HarmonicWindow` then integrates
+kinetic/elastic energy, signed input power, viscous power and the independently
+formed storage rate, retaining all cross-frequency and sum-frequency products.
+`F^T v - v^T D v - (v^T M a + v^T K q)` is reported as a balance residual.
+A uniform window's integrated storage rate is its endpoint energy difference;
+a triangular detector instead measures the weighted local rate. Powers from
+separately cycle-averaged tones are never substituted for the coherent result.
+
+Preparation admits at most 128 authored tones plus coordinate, peak-payload,
+response-residual and product-work ceilings. Exactly equal frequencies share one
+solve. Retained arrays use 144*n scalar bytes per distinct tone plus headers;
+the peak budget additionally covers one existing dense response preparation and
+bounded scratch. Warm observation allocates nothing and requires six scalar
+harmonic products per coordinate and ordered frequency pair, with one shared
+analytic kernel per pair and no matrix applications or solves. DD contractions
+preserve cancellation residuals until final output, without claiming relative
+accuracy at arbitrary nulls. Cancellation publishes no partial observation.
+
+This is the particular harmonic motion of the supplied finite-dimensional
+pencil, not a startup/free-decay solution, stochastic coherence inference,
+nonlinear mixing model, modal truncation certificate or broadband impedance.
+Singular frequencies retain the existing refusal. G1/G3 native tests in
+`tests/harmonic_interference.rs` compare against independent scalar/2x2 inverse
+solutions and real-signal quadrature; exercise coupled energy, gyroscopic work,
+short shutters, beating, DC, exact duplicate cancellation and source-clock
+shifts; and verify count, payload, product and singular-response refusals.
+
 `harmonic::PreparedHarmonicResponse` prepares the complete retained mechanical
 pencil `K - omega^2 M - i omega C` under `exp(-i omega t)`. The source mass,
 stiffness and viscous damping remain fully coupled; a mode count or a list of

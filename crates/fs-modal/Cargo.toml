@@ -13,6 +13,7 @@ layer = "L1"
 [dependencies]
 fs-alloc = { path = "../fs-alloc" }
 fs-exec = { path = "../fs-exec" }
+fs-fft = { path = "../fs-fft" }
 fs-la = { path = "../fs-la" }
 fs-math = { path = "../fs-math" }
 fs-sparse = { path = "../fs-sparse" }
