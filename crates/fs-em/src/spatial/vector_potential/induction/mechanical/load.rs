@@ -40,7 +40,7 @@ impl From<GaError> for SpatialLorentzLoadError {
 
 type Result<T> = core::result::Result<T, SpatialLorentzLoadError>;
 
-/// Source-bound mechanical forces from one selected induction stage.
+/// Source-bound mechanical forces from one selected electromagnetic snapshot.
 ///
 /// Nodal forces preserve all P1 virtual work, not only rigid-body work. The
 /// reduced wrench retains both net force and moment; extracting it is O(1)
@@ -54,14 +54,14 @@ pub struct SpatialLorentzLoads {
 }
 
 impl SpatialLorentzLoads {
-    /// Forces [N] in the original magnetic mesh's coordinates and vertex order.
+    /// Forces [N] in the original field mesh's coordinates and vertex order.
     pub fn nodal_forces_n(&self) -> &[[f64; 3]] {
         &self.nodal_forces_n
     }
 
     /// Canonical `[torque, force]` wrench in the receiving mechanical frame.
     ///
-    /// `placement` maps the magnetic mesh into that frame; `moment_origin_m`
+    /// `placement` maps the field mesh into that frame; `moment_origin_m`
     /// is expressed in the SAME receiving frame. Choose the receiving body's
     /// origin and axes for native `fs-mbd` body-wrench or impulse inputs.
     /// Forces are N and torques N m: multiply both by a held-load duration
@@ -85,7 +85,7 @@ impl SpatialLorentzLoads {
     ///
     /// Velocities use the same original coordinates and vertex order as the
     /// nodal loads. This also admits virtual velocities independently of the
-    /// prescribed velocity that generated the induction stage.
+    /// prescribed velocity that generated the field snapshot.
     pub fn power_w(
         &self,
         nodal_velocity_m_s: &[[f64; 3]],

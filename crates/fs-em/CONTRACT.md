@@ -28,6 +28,29 @@ shorted braking, loaded generation, motoring, layered current drive, anisotropic
 scene rotation/volume scaling, stationary parity and transactional refusals.
 These synthetic-law fixtures do not qualify an empirical machine or material.
 
+`SpatialMovingConductionField::lorentz_loads` transfers its SAME retained
+`J cross B` through the native P1 load kernel into original-vertex nodal forces
+and canonical `fs_ga` wrenches. Constant cell density integrates as `V*f/4` per
+vertex; selected-cell scattering preserves total force, torque and P1 virtual
+work. `lorentz_loads_for_velocity` additionally admits the receiver's actual
+P1 velocity only when each selected cell mean matches the prescribed motion.
+This local check prevents cancelling velocity/work defects and does not assume
+that arbitrary discontinuous cell motions admit a shared nodal trace. Original
+cell/source ownership, limits, canonical selection and cancellation are retained.
+These volume loads must not be added to overlapping induction or Maxwell loads.
+Consuming `into_snapshot()` transfers accepted arrays without copying them to
+an owned `SpatialMovingConductionSnapshot`; a coupled candidate retains the
+exact refreshed conductor alongside this diagnostic record. The snapshot has
+no topology-dependent force extraction or reattachment operation.
+
+Solved-field tests in `tests/spatial_conduction/motion/mechanical.rs` cover
+braking/generating/motoring force and torque, mesh refinement and shared nodes,
+selected-body physical power, affine P1 and transformed rigid virtual work,
+local velocity mismatch refusal, and native articulated-body linear/angular
+impulses. The finite held-load impulse uses its actual average-velocity kinetic
+work, including the quadratic impulse term; extraction does not re-solve the
+DC field for the subsequent mechanical velocity or close dynamic feedback.
+
 ## Consistent three-dimensional Lorentz loads for mechanical momentum
 
 `SpatialInductionCandidate::lorentz_loads` and its nonlinear counterpart

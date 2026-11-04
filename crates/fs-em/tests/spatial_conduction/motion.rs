@@ -2,6 +2,9 @@
 use super::*;
 use fs_em::spatial::conduction::motion::SpatialConductionMotion;
 
+#[path = "motion/mechanical.rs"]
+mod mechanical;
+
 fn scalar_problem(xs: &[f64], sigma: f64) -> SpatialConduction {
     let source = ResolvedConductorState::try_from_material(material(
         ElectricalPropertyBasis::Conductivity,
@@ -372,4 +375,75 @@ fn finite_contact_motion_requires_its_own_surface_work_law() {
             "moving electrical contacts require an owned surface work and heat law"
         ))
     ));
+}
+
+#[test]
+fn owned_motion_snapshot_moves_native_buffers_and_keeps_power_semantics() {
+    let problem = scalar_problem(&[0.0, 0.5, 1.0], 2.0);
+    let field = problem
+        .solve_with_motion(
+            &ends(&problem, 1.0, Some(0.4), 0.0),
+            SpatialConductionMotion {
+                velocity_m_s: &[[0.0, 0.8, 0.0]; 12],
+                flux_density_t: &[[0.0, 0.0, 1.5]; 12],
+            },
+            controls(),
+            &mut || false,
+        )
+        .unwrap();
+    let buffers = (
+        field.voltage_v().as_ptr(),
+        field.current_density_a_m2().as_ptr(),
+        field.conductor_field_v_m().as_ptr(),
+        field.cell_joule_power_w().as_ptr(),
+        field.cell_mechanical_power_w().as_ptr(),
+        field.lorentz_force_density_n_m3().as_ptr(),
+        field.velocity_m_s().as_ptr(),
+        field.flux_density_t().as_ptr(),
+    );
+    let had_report = field.solve_report().is_some();
+    let snapshot = field.into_snapshot();
+    // A coupled candidate can now move this exact material/topology owner.
+    let retained_owner = problem;
+    assert_eq!(
+        snapshot.current_density_a_m2().len(),
+        retained_owner.mesh().tets.len()
+    );
+    assert_eq!(
+        buffers,
+        (
+            snapshot.voltage_v().as_ptr(),
+            snapshot.current_density_a_m2().as_ptr(),
+            snapshot.conductor_field_v_m().as_ptr(),
+            snapshot.cell_joule_power_w().as_ptr(),
+            snapshot.cell_mechanical_power_w().as_ptr(),
+            snapshot.lorentz_force_density_n_m3().as_ptr(),
+            snapshot.velocity_m_s().as_ptr(),
+            snapshot.flux_density_t().as_ptr(),
+        )
+    );
+    near(snapshot.joule_power_w(), 1.28);
+    near(snapshot.mechanical_power_w(), -1.92);
+    near(snapshot.electrical_power_w(), -0.64);
+    near(snapshot.terminal_power_w(), -0.64);
+    near(snapshot.boundary_current_a(), 0.0);
+    near(snapshot.maximum_free_current_residual_a(), 0.0);
+    near(snapshot.power_balance_residual_w(), 0.0);
+    near(snapshot.work_pairing_residual_w(), 0.0);
+    near(snapshot.hodge_power_residual_w(), 0.0);
+    assert_eq!(snapshot.solve_report().is_some(), had_report);
+    assert!(snapshot.gauges().is_empty());
+    assert_eq!(
+        snapshot.nodal_applied_current_a().len(),
+        retained_owner.positions_m().len()
+    );
+    assert!(
+        snapshot
+            .nodal_boundary_current_a()
+            .iter()
+            .any(Option::is_some)
+    );
+    for electric in snapshot.electric_field_v_m() {
+        near(electric[0], -0.4);
+    }
 }

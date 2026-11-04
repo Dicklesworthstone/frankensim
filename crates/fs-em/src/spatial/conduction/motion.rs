@@ -11,6 +11,11 @@
 
 use super::*;
 
+mod mechanical;
+pub use crate::spatial::vector_potential::induction::mechanical::{
+    SpatialLorentzLoadError, SpatialLorentzLoadLimits, SpatialLorentzLoads,
+};
+
 /// Laboratory-frame prescribed fields on the original tetrahedra. A fixed
 /// Eulerian mesh requires motion to preserve the represented material/source
 /// occupancy, or a separately justified instantaneous quasistatic snapshot.
@@ -141,6 +146,7 @@ impl<C: SpatialConductorMaterial> SpatialConduction<C> {
     }
 }
 
+#[derive(Clone, Debug)]
 pub(super) struct MotionPower {
     conductor_field_v_m: Vec<[f64; 3]>,
     lorentz_force_density_n_m3: Vec<[f64; 3]>,
@@ -203,6 +209,20 @@ pub struct SpatialMovingConductionField<'a, C = ResolvedConductorState> {
 impl<C: SpatialConductorMaterial> SpatialMovingConductionField<'_, C> {
     pub fn problem(&self) -> &SpatialConduction<C> {
         self.problem
+    }
+    /// Consume this accepted result without copying its native field arrays.
+    ///
+    /// The caller must retain this exact `problem` when coupling the snapshot
+    /// to original cells or refreshed material sources. The snapshot has no
+    /// topology-dependent load or state-update operations, and cannot be
+    /// reattached to an unrelated field owner.
+    pub fn into_snapshot(self) -> SpatialMovingConductionSnapshot {
+        SpatialMovingConductionSnapshot {
+            velocity_m_s: self.velocity_m_s,
+            flux_density_t: self.flux_density_t,
+            field: self.field,
+            power: self.power,
+        }
     }
     pub fn voltage_v(&self) -> &[f64] {
         &self.field.voltage_v
@@ -268,6 +288,92 @@ impl<C: SpatialConductorMaterial> SpatialMovingConductionField<'_, C> {
         self.field.power_residual_w
     }
     /// Laboratory field power minus original weak nodal-current work [W].
+    pub fn hodge_power_residual_w(&self) -> f64 {
+        self.field.hodge_power_residual_w
+    }
+    pub fn gauges(&self) -> &[usize] {
+        &self.field.gauges
+    }
+    pub fn solve_report(&self) -> Option<&SolveReport> {
+        self.field.linear.as_ref()
+    }
+}
+
+/// Owned accepted diagnostics for a coupled candidate retaining its original
+/// `SpatialConduction` owner. Constructed only by consuming a solved field;
+/// storage transfers without allocating or cloning the native arrays.
+///
+/// Positive mechanical power goes TO the prescribed motion and terminal power
+/// goes INTO the conductor. Only conductor-frame Joule power is thermal heat.
+/// This diagnostic snapshot does not move geometry or update mechanical state.
+#[derive(Clone, Debug)]
+pub struct SpatialMovingConductionSnapshot {
+    velocity_m_s: Vec<[f64; 3]>,
+    flux_density_t: Vec<[f64; 3]>,
+    field: SpatialConductionField,
+    power: MotionPower,
+}
+
+impl SpatialMovingConductionSnapshot {
+    pub fn voltage_v(&self) -> &[f64] {
+        &self.field.voltage_v
+    }
+    pub fn velocity_m_s(&self) -> &[[f64; 3]] {
+        &self.velocity_m_s
+    }
+    pub fn flux_density_t(&self) -> &[[f64; 3]] {
+        &self.flux_density_t
+    }
+    /// Laboratory `E=-grad(V)` [V/m].
+    pub fn electric_field_v_m(&self) -> &[[f64; 3]] {
+        &self.field.electric_field_v_m
+    }
+    /// Conductor-frame `E'=E+u cross B` [V/m].
+    pub fn conductor_field_v_m(&self) -> &[[f64; 3]] {
+        &self.power.conductor_field_v_m
+    }
+    pub fn current_density_a_m2(&self) -> &[[f64; 3]] {
+        &self.field.current_density_a_m2
+    }
+    pub fn cell_joule_power_w(&self) -> &[f64] {
+        &self.field.cell_power_w
+    }
+    pub fn joule_power_w(&self) -> f64 {
+        self.field.power_w
+    }
+    pub fn lorentz_force_density_n_m3(&self) -> &[[f64; 3]] {
+        &self.power.lorentz_force_density_n_m3
+    }
+    pub fn cell_mechanical_power_w(&self) -> &[f64] {
+        &self.power.cell_mechanical_power_w
+    }
+    pub fn mechanical_power_w(&self) -> f64 {
+        self.power.mechanical_power_w
+    }
+    pub fn electrical_power_w(&self) -> f64 {
+        self.power.electrical_power_w
+    }
+    pub fn terminal_power_w(&self) -> f64 {
+        self.field.supplied_power_w
+    }
+    pub fn nodal_boundary_current_a(&self) -> &[Option<f64>] {
+        &self.field.nodal_boundary_current_a
+    }
+    pub fn nodal_applied_current_a(&self) -> &[f64] {
+        &self.field.nodal_applied_current_a
+    }
+    pub fn boundary_current_a(&self) -> f64 {
+        self.field.current_residual_a
+    }
+    pub fn maximum_free_current_residual_a(&self) -> f64 {
+        self.field.maximum_free_current_residual_a
+    }
+    pub fn work_pairing_residual_w(&self) -> f64 {
+        self.power.work_pairing_residual_w
+    }
+    pub fn power_balance_residual_w(&self) -> f64 {
+        self.field.power_residual_w
+    }
     pub fn hodge_power_residual_w(&self) -> f64 {
         self.field.hodge_power_residual_w
     }
