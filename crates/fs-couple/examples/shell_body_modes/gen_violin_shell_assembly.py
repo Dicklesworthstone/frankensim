@@ -47,14 +47,27 @@ ZSTEP = dict(top=float(opts.get("zone_step_top_mm", "0.2")), back=float(opts.get
 # foot_band_mm is the band of silhouette rows read as the bridge feet (3 mm on the violin's 35 mm bridge);
 # crossing_snap_mm moves an interior vertex nearer than this to the bass-bar / bass-foot crossing onto the crossing (mesh only);
 # rib_layers sets the layers across the rib height instead of ceil(max height / 0.9 H) (mesh only);
-# bridge_dp_mm is the Douglas-Peucker tolerance of the bridge outline and its cut-outs (0.3 mm).
+# bridge_dp_mm is the Douglas-Peucker tolerance of the bridge outline and its cut-outs (0.3 mm);
+# foot_tol_mm is the vertical tolerance (0.7 mm) for a bridge-outline vertex to count as lying on a foot's bottom edge: the scaled silhouette's bottom edge is a staircase whose
+# risers are the raster step (0.25 mm) times the bridge height scale (cello 2.65 -> 0.66 mm, double bass 4.52 -> 1.13 mm), so 0.7 mm cannot hold every vertex of one foot of a bass bridge
+# (mesh only: the foot nodes are replaced by the exact skin positions afterwards);
+# hole_seed=median-run seeds the f-hole removal at the middle cell of the longest occupied run of the median raster row instead of the (len // 2)-th occupied cell in row-major
+# order (the first cell of a row, on the hole's edge, which can fall outside the traced ring); the default row-major keeps the violin and cello meshes unchanged.
+# instrument=bass is the cello's route for a double bass specimen (data/instruments/geometry/double-bass-johannsson-shell): the cello's drive letters, centre-drive height
+# and endpin text, with a `specimen` row and drive labels of its own.
 INSTRUMENT = opts.get("instrument", "violin")
-if INSTRUMENT not in ("violin", "cello"):
-    raise SystemExit("instrument must be violin or cello")
+if INSTRUMENT not in ("violin", "cello", "bass"):
+    raise SystemExit("instrument must be violin, cello or bass")
 CELLO = INSTRUMENT == "cello"
+BASS = INSTRUMENT == "bass"
+LOW = CELLO or BASS  # the cello's drive letters (c, a), centre-drive height and endpin text
 FOOT_BAND = float(opts.get("foot_band_mm", "3.0"))
 FOOT_BAND_TEXT = "%.1f" % FOOT_BAND if "foot_band_mm" in opts else "3"  # the violin tables print the default as "3"
 BDP = float(opts.get("bridge_dp_mm", "0.3"))
+FOOT_TOL = float(opts.get("foot_tol_mm", "0.7"))
+HOLE_SEED = opts.get("hole_seed", "row-major")
+if HOLE_SEED not in ("row-major", "median-run"):
+    raise SystemExit("hole_seed must be row-major or median-run")
 NECK = opts.get("neck", "bem")
 if NECK not in ("bem", "ellipse"):
     raise SystemExit("neck must be bem or ellipse")
@@ -446,8 +459,19 @@ def f_hole_rings(h_ring):
         ring = resample_closed(smooth_closed(resample_closed(ring, 1.0), 1), h_ring)
         rings.append(ring)
         cj, ci = np.nonzero(occ)
-        k = len(cj) // 2
-        pts.append(np.array([x0 + (ci[k] + 0.5) * cell, z0 + (cj[k] + 0.5) * cell]))
+        if HOLE_SEED == "median-run":
+            # the middle cell of the longest occupied run of the median row. (The (len // 2)-th occupied cell in row-major order is the FIRST cell of a raster row and so lies on
+            # the hole's edge; after the ring simplification and smoothing it can fall outside the traced ring, and then the triangulator removes the whole plate inside the rib
+            # ring: a double bass top came out with 868 triangles instead of about 3000.)
+            rows_occ = np.unique(cj)
+            row_mid = int(rows_occ[len(rows_occ) // 2])
+            cols = ci[cj == row_mid]
+            runs_ = np.split(cols, np.nonzero(np.diff(cols) > 1)[0] + 1)
+            run_ = max(runs_, key=len)
+            pts.append(np.array([x0 + (int(run_[len(run_) // 2]) + 0.5) * cell, z0 + (row_mid + 0.5) * cell]))
+        else:
+            k = len(cj) // 2
+            pts.append(np.array([x0 + (ci[k] + 0.5) * cell, z0 + (cj[k] + 0.5) * cell]))
     return rings, pts
 
 
@@ -1140,7 +1164,7 @@ def main():
             idx = []
             for i, p in enumerate(bridge_poly):
                 yb = leg_bottom(p[0] / SC)
-                if xa_ <= p[0] <= xb_ and yb is not None and abs(p[1] - yb) < 0.7:
+                if xa_ <= p[0] <= xb_ and yb is not None and abs(p[1] - yb) < FOOT_TOL:
                     idx.append(i)
             assert idx and idx == list(range(idx[0], idx[-1] + 1)), ("foot edge not one contiguous run", idx)
             lo, hi = idx[0], idx[-1]
@@ -1294,9 +1318,11 @@ def main():
         how, r_eq, math.pi * r_eq ** 2, hole_area, "= the top thickness" if NECK == "ellipse" else "%.3f mm (the bore)" % neck_len, f_rigid, caveat))
     meta("scale_and_shift", "plan-view scale %.4f (declared sensitivity u-inplane-scale), thickness shift %.3f mm (declared sensitivity u-segmentation-error)" % (SC, T_SHIFT))
     meta("packs", ", ".join("%s=%s" % kv for kv in sorted(PACKS.items())))
+    if BASS:
+        meta("specimen", "DOUBLE BASS from Johannsson's published maker table (and Brown's total f-hole area) mapped onto the il Cannone tables (YellowDog, MB 16036/16912, after MaroonOak's cello route): a violin-form outline scaled to the bass table, no measured bass outline; every mapped value, its source and every ASSUMPTION in PROVENANCE.tsv of the specimen directory; not a scanned instrument")
     if CELLO:
         meta("specimen", "CELLO from published maker values mapped onto the il Cannone tables (MaroonOak, MB 15931): every mapped value, its source and every ASSUMPTION in PROVENANCE.tsv of the specimen directory; not a scanned instrument")
-    meta("omitted", "neck and upper block, tail block, tailpiece, strings, %s, linings and corner blocks, purfling, varnish, glue compliance, the button and tail-end notch features of the plates (end rows narrower than 10 mm)" % ("endpin" if CELLO else "chinrest"))
+    meta("omitted", "neck and upper block, tail block, tailpiece, strings, %s, linings and corner blocks, purfling, varnish, glue compliance, the button and tail-end notch features of the plates (end rows narrower than 10 mm)" % ("endpin" if LOW else "chinrest"))
     write(vol_inner, r_eq, neck_len)
 
 
@@ -1328,14 +1354,16 @@ def write(vol_inner_mm3, r_eq_mm, neck_len_mm):
             f.write("drive\tdiagnostic centre, along the director\t%s\t0.0\t%.6f\t-0.1\t0\t1\t0\n" % (first.name, first.nodes[0][1]))
         if BRIDGE_ON:
             contact = {(r[0], r[1]): r for r in table("string-contacts.tsv")[1]}  # string, contact, z, x, y, slopes
-            ends = (("C", "c"), ("A", "a")) if CELLO else (("G", "g"), ("E", "e"))  # the outer strings
-            for label, key in (("bass string (%s) at the bridge, along x" % ends[0][0], (ends[0][1], "bridge")), ("treble string (%s) at the bridge, along x" % ends[1][0], (ends[1][1], "bridge"))):
+            ends = (("C", "c"), ("A", "a")) if CELLO else (("E", "c"), ("G", "a")) if BASS else (("G", "g"), ("E", "e"))  # the outer strings
+            names = (("low string (E, specimen letter c) at the bridge, along x", "high string (G, specimen letter a) at the bridge, along x") if BASS
+                     else ("bass string (%s) at the bridge, along x" % ends[0][0], "treble string (%s) at the bridge, along x" % ends[1][0]))
+            for label, key in ((names[0], (ends[0][1], "bridge")), (names[1], (ends[1][1], "bridge"))):
                 r = contact[key]
                 p = to_plan(np.array([[float(r[3]), float(r[2])]]))[0]
                 f.write("drive\t%s\tbridge\t%.6f\t%.6f\t%.6f\t1\t0\t0\n" % (label, p[0] / 1000.0, float(r[4]) / 1000.0, p[1] / 1000.0))
             gz = to_plan(np.array([[0.0, float(contact[(ends[0][1], "bridge")][2])]]))[0]
             # the centre drive: the violin's fixed height; the cello's 2 mm below the mean string contact height
-            y_centre = np.mean([float(contact[(s, "bridge")][4]) for s in "cgda"]) + 2.0 if CELLO else -52.0
+            y_centre = np.mean([float(contact[(s, "bridge")][4]) for s in "cgda"]) + 2.0 if LOW else -52.0
             f.write("drive\tbridge centre, along y (into the top)\tbridge\t%.6f\t%.6f\t%.6f\t0\t1\t0\n" % (0.0, y_centre / 1000.0, gz[1] / 1000.0))
     for k, v in META:
         print(k, "=", v)

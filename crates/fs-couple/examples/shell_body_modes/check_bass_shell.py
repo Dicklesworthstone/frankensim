@@ -10,7 +10,7 @@ usage: python3 -I check_bass_shell.py [--repo REPO_ROOT] [--bin PATH_TO_material
      body length, width and cavity numbers the cards carry.
   B  table from the specimen (needs --generator; Linux x86-64 only, because the triangulation differs by architecture with the same numpy and triangle versions): the shell-assembly
      generator, run with the options of PROVENANCE-generator.tsv on the regenerated specimen, must write the committed table. Skipped, with the reason printed, when the machine is not
-     Linux x86-64, when `triangle` is missing, or when the generator on this checkout does not have the options (foot_tol_mm, foot_band_mm, crossing_snap_mm, rib_layers, bridge_dp_mm).
+     Linux x86-64, when `triangle` is missing, or when the generator on this checkout does not have the options (instrument, hole_seed, foot_tol_mm, foot_band_mm, crossing_snap_mm, rib_layers, bridge_dp_mm).
 
 Exit status 1 when any check that ran failed. Skips are printed, never silent.
 """
@@ -28,7 +28,7 @@ TABLE_MD5 = "3c12b931275bce326db4e0e58efae4bb"
 NOTES = (("E", "E1"), ("A", "A1"), ("D", "D2"), ("G", "G2"))
 SPRUCE_LB = "violin-spruce-norway-viala2020-shell-declared-lowband.fsmatpk"
 MAPLE_LB = "violin-maple-sycamore-sonderegger2013-shell-declared-lowband.fsmatpk"
-GEN_OPTIONS = ["neck=ellipse", "fanfix=move", "rib_layers=6", "foot_band_mm=13", "foot_tol_mm=1.5", "bridge_dp_mm=0.3", "crossing_snap_mm=3.8"]
+GEN_OPTIONS = ["instrument=bass", "hole_seed=median-run", "neck=ellipse", "fanfix=move", "rib_layers=6", "foot_band_mm=13", "foot_tol_mm=1.5", "bridge_dp_mm=0.3", "crossing_snap_mm=3.8"]
 FAILED = []
 
 
