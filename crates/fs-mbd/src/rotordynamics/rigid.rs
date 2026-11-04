@@ -28,6 +28,9 @@ use crate::articulated::SpatialInertia;
 use fs_ga::{So3, Vec3};
 use fs_math::c64::C64;
 
+mod unbalance;
+pub use unbalance::{PreparedRotorUnbalance, RotorUnbalanceKinematicsCotangent};
+
 /// Bound on supplied bearing and unbalance stations per rigid rotor query.
 pub const MAX_ROTOR_STATIONS: usize = 256;
 

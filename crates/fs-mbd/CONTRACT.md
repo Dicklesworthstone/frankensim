@@ -662,6 +662,27 @@ Signed-speed unbalance uses `A^T F`, and recovered bearing work keeps its sign.
 This is a rigid, constant-speed linearization, without flexible-shaft,
 spin-acceleration or asymmetric-rotor Floquet claims.
 
+`RigidRotor::prepare_unbalance` retains a separate transient physical load
+source for prescribed phase, signed speed and angular acceleration. Each
+station supplies `U*(Omega²*e_r - alpha*e_theta)` and the original axial
+force-to-bending-moment map. The tangential reaction remains present at zero
+speed during startup and changes sign under braking. The original nominal
+mass and inertia are unchanged. Phase is supplied independently from speed;
+the caller integrates the actual speed history and samples loads at the
+time-integration owner's evaluation times.
+
+Two compensated complex source moments give O(stations) preparation and
+fixed-size, allocation-free load queries. `force_vjp` returns analytical
+phase/speed/angular-acceleration cotangents at fixed source geometry, sharing
+the original load admission. Nonrepresentable assembled or phase-projected
+moments, products and cancellation refuse without publishing a partial source.
+This load source supplies neither a spin drive nor the additional physical
+operators needed for a general variable-spin tilt or flexible-shaft model.
+`tests/rigid_rotor_acceleration.rs` checks startup/braking forces and moments,
+steady-phasor and phase-origin equivalence, all three load derivatives, native
+four-coordinate translational response against an integrated acceleration
+oracle with second-order refinement, and cancellation/representability refusal.
+
 Focused regressions use independent Jeffcott amplitude/phase, gyroscopic circular
 mode splitting, dense coordinate congruence, cross-coupled/active work and
 original force residuals. A manufactured nonsymmetric rotor has an exact
