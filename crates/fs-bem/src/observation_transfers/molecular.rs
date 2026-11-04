@@ -20,7 +20,10 @@ use std::cell::RefCell;
 
 /// A single solved source bank for both reaction and finite receivers.
 pub mod prepared;
-pub use prepared::{MolecularResponseLimits, MolecularResponsePower, PreparedMolecularResponse};
+pub use prepared::{
+    MolecularAbsorptionLimits, MolecularAbsorptionReading, PreparedMolecularAbsorption,
+    MolecularResponseLimits, MolecularResponsePower, PreparedMolecularResponse,
+};
 
 #[path = "molecular/near_field.rs"]
 mod adaptive;

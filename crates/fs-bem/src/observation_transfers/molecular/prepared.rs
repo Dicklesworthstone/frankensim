@@ -19,6 +19,11 @@ use fs_fft::welch::WelchCrossSpectrum;
 use fs_material::relaxation::RelaxationState;
 use fs_math::c64::C64;
 
+mod absorption;
+pub use absorption::{
+    MolecularAbsorptionLimits, MolecularAbsorptionReading, PreparedMolecularAbsorption,
+};
+
 /// Additional live-storage and projection-work limits for the complete source
 /// response. The original `ComplexOptions` still bounds each BEM assembly.
 #[derive(Debug, Clone, Copy)]

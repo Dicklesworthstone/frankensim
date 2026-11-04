@@ -259,6 +259,30 @@ impl PreparedHarmonicObservation {
         Ok(field)
     }
 
+
+    // Pressure-only application of the same retained transfer bank. Molecular
+    // heat needs no velocity products, and preserves the original complex
+    // source summation and receiver/source ordering.
+    pub(super) fn pressure_field(
+        &self,
+        coefficients: &[C64],
+        receiver: usize,
+    ) -> Result<C64, TransferError> {
+        let mut sum = Sum::default();
+        for (source, &coefficient) in coefficients.iter().enumerate() {
+            sum.add(self.pressure_transfer(source, receiver) * coefficient);
+        }
+        let pressure = sum.finish();
+        if !finite(pressure) {
+            return Err(TransferError::Invalid("coherent harmonic pressure overflow"));
+        }
+        Ok(pressure)
+    }
+
+    pub(super) fn pressure_transfer(&self, source: usize, receiver: usize) -> C64 {
+        self.transfers[source * self.receivers.len() + receiver][0]
+    }
+
     /// O(sources × receivers), allocation-free. Sources share this observer's
     /// frequency and phase reference. On failure, discard the output buffer.
     pub fn evaluate_coherent(

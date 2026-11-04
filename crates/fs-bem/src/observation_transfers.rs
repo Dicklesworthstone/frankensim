@@ -26,6 +26,7 @@ mod reciprocal;
 pub use reciprocal::ReciprocalBemObservation;
 mod molecular;
 pub use molecular::{
+    MolecularAbsorptionLimits, MolecularAbsorptionReading, PreparedMolecularAbsorption,
     MolecularBemObservation, MolecularObservationError, MolecularObservationFormulation,
     MolecularReceiverError, MolecularReceiverQuadrature, MolecularResponseLimits,
     MolecularResponsePower, PreparedMolecularResponse,

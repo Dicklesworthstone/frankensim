@@ -3047,3 +3047,33 @@ production power arithmetic with fs-math, including coherent local energy
 balance and converging spherical-shell heat/flux closure. Source-bound BEM and
 scattering regressions are included; full Cargo integration remains unrun
 without the required sibling constellation checkouts.
+
+
+### Source-bank molecular volume absorption
+
+`PreparedMolecularResponse::prepare_absorption` binds an authored nonnegative
+`HarmonicVolumeQuadrature` to that same response's retained material, frequency,
+source order and receiver field bank. `PreparedMolecularAbsorption` evaluates
+local cycle-mean heat [W/m³] and its physical volume integral [W] for coherent
+source rates, positive coherence factors, or independent source second moments.
+It uses `Q = omega Im(1/K) |p|²/2` from the original relaxing caloric law.
+Coherent source amplitudes combine before products; independent factors combine
+afterward. No boundary work, wall loss, radiation or extra attenuation is added.
+
+Preparation coalesces repeated volume weights and evaluates the material once.
+Queries allocate nothing, repeat no boundary solve and form no dense covariance.
+Pressure-only source-map application costs O(S*R) for a coherent or independent
+bank and O(rank*S*R) for factors. Scaling pressure before squaring retains
+representable weak-loss heat; DD accumulation retains small positive density
+and volume contributions. Original receiver discrepancies remain available
+separately and do not become nonlinear heat error bounds.
+
+Source shape, finite values, positive geometry, rank, arithmetic and logical
+storage limits are explicit. A refused or cancelled query publishes no reading
+and the prepared owner remains reusable. A volume rule does not establish a
+closed-domain energy balance or spatial convergence, and no thermal evolution
+or acoustic-material feedback is inferred by this observer. Focused tests cover
+the original caloric/time-average identity, source interference, coherence
+rotation, volume partition, work/storage admission and cancellation/reuse.
+The new integrated Rust regressions remain unrun because the execution
+environment is unavailable.
