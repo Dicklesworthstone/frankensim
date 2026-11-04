@@ -28,6 +28,7 @@ use crate::material::{MaterialLbmError, plan_momentum_scaling};
 
 pub use crate::material::transport::rheology::RheologySolve;
 
+mod impulse;
 mod motion;
 
 /// Source, native flow or bounded constitutive solve refused this candidate.

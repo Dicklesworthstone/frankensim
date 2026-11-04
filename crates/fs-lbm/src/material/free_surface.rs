@@ -22,6 +22,13 @@ use crate::d3q19::sparse::MORTON_COORD_BITS;
 use crate::d3q19::{Q3, TILE};
 use crate::{CS2, ScalingPlan};
 
+mod impulse;
+pub use impulse::{
+    MaterialFreeSurfaceImpulseControls2, MaterialFreeSurfaceImpulseControls3,
+    MaterialFreeSurfaceImpulseError, MaterialFreeSurfaceImpulseReport2,
+    MaterialFreeSurfaceImpulseReport3,
+};
+
 mod initial;
 pub use initial::MaterialFreeSurfaceInitialCell3;
 mod forcing;

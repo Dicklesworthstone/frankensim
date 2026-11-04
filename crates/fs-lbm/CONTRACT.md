@@ -1,5 +1,36 @@
 # CONTRACT: fs-lbm
 
+## Physical impulses on source-bound liquid trajectories
+
+The original `MaterialFreeSurface2`, `MaterialFreeSurface3`,
+`MaterialFreeSurfaceEnthalpy3` and `MaterialFreeSurfaceRheology3` expose
+`apply_impulse_density` in N s/m³ per whole geometric cell. Conversion uses
+the retained material reference density and velocity scale. The native
+located liquid mass supplies the impulse inertia, including partial fill;
+the input is never multiplied by a timestep or silently weighted by fill.
+
+The 3-D receipt contains total momentum [kg m/s], mass [kg] and signed work
+[J]. The 2-D receipt uses the original mass per depth, giving momentum [kg/s],
+mass [kg/m] and signed work [J/m]. Explicit SI defect budgets and the original
+scenario speed ceiling remain binding. Nonfinite or nonzero-underflow
+conversions refuse. Actual SI momentum/work readback, including conversion
+roundoff, is checked through a native receipt-admission hook before the
+final cancellation poll and population publication. A failed conversion
+cannot leave an accepted native state behind.
+
+The thermal and source-rheology trajectories delegate to that same native
+liquid transaction. Exact canonical density and retained force-corrected
+stress preserve pressure/source coordinates to the native model's roundoff.
+Enthalpy, phase and material inventories, accepted constitutive samples,
+wetting history, held forces and physical clocks do not change. Mechanical
+impulse work remains a separate kinetic account; no heat or constitutive
+relaxation is fabricated at zero elapsed time. Subsequent native evolution
+retains the existing transport, molecular-heating and material owners.
+
+Physical conversion allocates one temporary input field. Sparse publication
+stages only affected wet cells; dense publication reuses existing scratch.
+Neither path clones a complete liquid, thermal or material owner.
+
 ## Instantaneous loading of retained liquid mass
 
 The sparse D3Q19 owner scans the complete x-fastest input so loads on inactive,

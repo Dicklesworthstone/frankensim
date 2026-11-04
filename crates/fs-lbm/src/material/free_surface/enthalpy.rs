@@ -43,6 +43,7 @@ use crate::d3q19::freesurface3::transport::MassLocation3;
 use crate::d3q19::freesurface3::{ConversionRedistribution3, FreeSurface3, FreeSurfaceError3};
 use crate::material::plan_momentum_scaling;
 
+mod impulse;
 mod transport;
 
 /// Conservative condensation/evaporation ingress on existing native interfaces.

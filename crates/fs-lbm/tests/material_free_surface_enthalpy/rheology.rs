@@ -7,6 +7,9 @@ use fs_lbm::material::free_surface::enthalpy::rheology::RheologySolve;
 use fs_material::liquid::surface::ResolvedLiquidSurfaceState;
 use fs_qty::Frequency;
 
+#[path = "rheology/impulse.rs"]
+mod impulse;
+
 #[path = "rheology/pressure.rs"]
 mod pressure;
 

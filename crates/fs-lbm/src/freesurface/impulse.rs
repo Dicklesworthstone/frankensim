@@ -35,6 +35,19 @@ impl FreeSurface {
         controls: ImpulseControls,
         gate: &CancelGate,
     ) -> Result<ImpulseReport<2>, ImpulseError> {
+        self.apply_impulse_density_with_receipt(impulses, controls, gate, Ok)
+    }
+
+    /// Admit a dependent receipt before publishing any original populations.
+    /// Physical wrappers use this for fallible unit conversion without cloning
+    /// the liquid owner or permitting a failure after accepted state changes.
+    pub(crate) fn apply_impulse_density_with_receipt<R>(
+        &mut self,
+        impulses: &[[f64; 2]],
+        controls: ImpulseControls,
+        gate: &CancelGate,
+        admit: impl FnOnce(ImpulseReport<2>) -> Result<R, ImpulseError>,
+    ) -> Result<R, ImpulseError> {
         poll(gate)?;
         let count = self
             .grid
@@ -88,10 +101,47 @@ impl FreeSurface {
             self.scratch.push(next);
         }
         let report = sum.finish(controls)?;
+        let changed = report.affected_cells != 0;
+        let report = admit(report)?;
         poll(gate)?;
-        if report.affected_cells != 0 {
+        if changed {
             core::mem::swap(&mut self.grid.f, &mut self.scratch);
         }
         Ok(report)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ContactModel, Grid};
+
+    #[test]
+    fn dependent_receipt_refusal_does_not_publish_native_populations() {
+        let mut liquid = FreeSurface::new(Grid::uniform(2, 2, 0.9), 0.0, ContactModel::Neutral);
+        let before = liquid.clone();
+        let controls = ImpulseControls {
+            max_cells: 4,
+            maximum_speed: 0.1,
+            maximum_momentum_defect: 1e-12,
+            maximum_work_defect: 1e-12,
+        };
+        let gate = CancelGate::new_clock_free();
+        let result = liquid.apply_impulse_density_with_receipt(
+            &[[0.001, 0.0]; 4],
+            controls,
+            &gate,
+            |report| {
+                assert_eq!(report.affected_cells, 4);
+                assert!(report.work > 0.0);
+                Err::<(), _>(ImpulseError::Invalid("dependent SI receipt refused"))
+            },
+        );
+        assert_eq!(result, Err(ImpulseError::Invalid("dependent SI receipt refused")));
+        assert_eq!(liquid.grid.f, before.grid.f);
+        assert_eq!(liquid.mass, before.mass);
+        assert_eq!(liquid.grid.flags, before.grid.flags);
+        assert_eq!(liquid.carry, before.carry);
+        assert!(liquid.apply_impulse_density(&[[0.001, 0.0]; 4], controls, &gate).is_ok());
     }
 }

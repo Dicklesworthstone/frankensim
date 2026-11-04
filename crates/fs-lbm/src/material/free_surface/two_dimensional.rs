@@ -58,9 +58,9 @@ pub struct MaterialFreeSurfaceSample2 {
 
 /// Original dense free-surface solver, with immutable source and unit binding.
 pub struct MaterialFreeSurface2<'a> {
-    lattice: FreeSurface,
+    pub(super) lattice: FreeSurface,
     scaling: MaterialFreeSurfaceScaling<'a>,
-    mass_per_depth_unit_kg_m: f64,
+    pub(super) mass_per_depth_unit_kg_m: f64,
 }
 
 impl<'a> MaterialFreeSurfaceScaling<'a> {

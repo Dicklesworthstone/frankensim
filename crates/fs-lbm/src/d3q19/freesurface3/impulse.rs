@@ -38,6 +38,19 @@ impl FreeSurface3 {
         controls: ImpulseControls,
         gate: &CancelGate,
     ) -> Result<ImpulseReport<3>, ImpulseError> {
+        self.apply_impulse_density_with_receipt(impulses, controls, gate, Ok)
+    }
+
+    /// Admit a dependent receipt before publishing any original populations.
+    /// Physical wrappers use this for fallible unit conversion without cloning
+    /// the liquid owner or permitting a failure after accepted state changes.
+    pub(crate) fn apply_impulse_density_with_receipt<R>(
+        &mut self,
+        impulses: &[[f64; 3]],
+        controls: ImpulseControls,
+        gate: &CancelGate,
+        admit: impl FnOnce(ImpulseReport<3>) -> Result<R, ImpulseError>,
+    ) -> Result<R, ImpulseError> {
         poll(gate)?;
         let [nx, ny, nz] = self.domain_cells();
         let count = nx
@@ -66,7 +79,7 @@ impl FreeSurface3 {
         }
         let mut sum = ImpulseSum::new();
         if requested == 0 {
-            let report = sum.finish(controls)?;
+            let report = admit(sum.finish(controls)?)?;
             poll(gate)?;
             return Ok(report);
         }
@@ -114,11 +127,47 @@ impl FreeSurface3 {
                 "nonzero impulse requires an original located liquid cell",
             ));
         }
-        let report = sum.finish(controls)?;
+        let report = admit(sum.finish(controls)?)?;
         poll(gate)?;
         for (slot, lane, populations) in replacements {
             self.grid.set_populations(slot, lane, populations);
         }
         Ok(report)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::d3q19::freesurface3::ContactModel3;
+
+    #[test]
+    fn cancellation_after_dependent_receipt_keeps_all_sparse_populations() {
+        let mut liquid = FreeSurface3::new(
+            4, 4, 4, 0.9, [0.0; 3], 0.0, ContactModel3::Neutral, |_, _, _| true,
+        ).unwrap();
+        let before = liquid.grid().state_bits();
+        let mass = liquid.ledger_mass();
+        let controls = ImpulseControls {
+            max_cells: 64,
+            maximum_speed: 0.1,
+            maximum_momentum_defect: 1e-12,
+            maximum_work_defect: 1e-12,
+        };
+        let gate = CancelGate::new_clock_free();
+        let result = liquid.apply_impulse_density_with_receipt(
+            &[[0.001, 0.0, 0.0]; 64],
+            controls,
+            &gate,
+            |report| {
+                assert_eq!(report.affected_cells, 64);
+                gate.request();
+                Ok(report)
+            },
+        );
+        assert_eq!(result, Err(ImpulseError::Cancelled));
+        assert_eq!(liquid.grid().state_bits(), before);
+        assert_eq!(liquid.ledger_mass(), mass);
+        assert_eq!(liquid.grid().steps(), 0);
     }
 }
