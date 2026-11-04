@@ -626,10 +626,19 @@ fn slipping_moving_body_closes_native_impulse_and_separate_interface_loss() {
             dt * cfg.depth_m * shear * shear / beta
         };
         near(step.interface_slip_dissipation_j, slip_loss, 2e-9);
+        let bulk_loss = dt * cfg.depth_m * shear * shear / mu;
+        near(step.bulk_viscous_dissipation_j, bulk_loss, 2e-9);
         near(
             step.interface_work_j,
             -cfg.depth_m * shear * speed * dt,
             2e-9,
+        );
+        // This steady Couette solution has no fluid storage or advection:
+        // supplied wall work splits into bulk shear heat and interface slip.
+        near(
+            step.bulk_viscous_dissipation_j + step.interface_slip_dissipation_j,
+            -step.interface_work_j,
+            4e-9,
         );
         near(step.mechanical_work_residual_j, 0.0, 3e-9);
         assert!(shear < mu * speed);

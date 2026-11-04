@@ -149,6 +149,7 @@ fn finite_container_translation_resolves_fluid_inertia_and_total_momentum() {
             let storage = 0.5 * total_mass * (step.speed_m_s + speed) * dv;
             let time_loss = 0.5 * total_mass * dv * dv;
             near(storage + time_loss, applied * dt * step.speed_m_s, 4e-8);
+            near(step.bulk_viscous_dissipation_j, 0.0, 1e-16);
             near(step.mechanical_work_residual_j, 0.0, 3e-9);
             assert!(
                 step.flow_solves <= 4,

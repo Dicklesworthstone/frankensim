@@ -157,6 +157,7 @@ fn linear_pressure_drives_two_translations_and_rotation_with_native_pose() {
         near(step.interface_work_j, work, 3e-10);
         near(step.body_kinetic_change_j, kinetic, 3e-10);
         near(step.mechanical_time_discretization_loss_j, kinetic, 3e-10);
+        near(step.bulk_viscous_dissipation_j, 0.0, 1e-16);
         near(step.mechanical_work_residual_j, 0.0, 3e-10);
         assert_eq!(step.boundary_load.origin_m, [0.2, 0.1]);
         assert_eq!(

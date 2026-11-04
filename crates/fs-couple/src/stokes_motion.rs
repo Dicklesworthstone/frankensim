@@ -194,8 +194,12 @@ pub struct GuidedStokesStep {
     /// Backward-Euler body inertia and spring loss [J]; numerical, not heat.
     pub mechanical_time_discretization_loss_j: f64,
     /// Change in original fluid kinetic energy over the declared depth [J].
-    /// This does not infer viscous heat or boundary/SIP dissipation.
+    /// This remains separate from physical and numerical dissipation.
     pub fluid_kinetic_change_j: f64,
+    /// Bulk fluid viscous heat [J], using BDF1 endpoint quadrature
+    /// `dt * depth * integral(2 mu D:D)`. This excludes wall slip and numerical
+    /// losses, is not an exact trajectory integral, and updates no thermal state.
+    pub bulk_viscous_dissipation_j: f64,
     /// Actual residual of the endpoint guided momentum equation [N].
     pub force_residual_n: f64,
     /// Body storage plus physical/numerical losses minus applied/interface work.
@@ -574,9 +578,12 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> GuidedStokesMotion<'s, 'm, 'a, F> {
             * (flow.kinetic_energy_j_per_m()
                 - self.fluid.transport().density_kg_m3()
                     * self.system.kinetic_energy(&self.state.velocity));
+        let viscous_heat =
+            dt * self.config.depth_m * flow.viscous_dissipation().total_power_w_per_m();
         if !guide_force.iter().all(|v| v.is_finite())
             || !guide_torque.is_finite()
             || !fluid_energy_change.is_finite()
+            || !viscous_heat.is_finite()
         {
             return Err(GuidedStokesError::Invalid(
                 "physical effort or energy overflow",
@@ -608,6 +615,7 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> GuidedStokesMotion<'s, 'm, 'a, F> {
             damping_loss_j: damping_loss,
             mechanical_time_discretization_loss_j: temporal_loss,
             fluid_kinetic_change_j: fluid_energy_change,
+            bulk_viscous_dissipation_j: viscous_heat,
             force_residual_n: force_residual,
             mechanical_work_residual_j: work_residual,
         })

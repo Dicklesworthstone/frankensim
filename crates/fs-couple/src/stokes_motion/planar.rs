@@ -201,6 +201,10 @@ pub struct PlanarStokesStep {
     pub mechanical_time_discretization_loss_j: f64,
     /// Native fluid kinetic-energy change over the declared depth [J].
     pub fluid_kinetic_change_j: f64,
+    /// Bulk fluid viscous heat [J], using BDF1 endpoint quadrature
+    /// `dt * depth * integral(2 mu D:D)`. This excludes wall slip and numerical
+    /// losses, is not an exact trajectory integral, and updates no thermal state.
+    pub bulk_viscous_dissipation_j: f64,
     /// Actual represented linear momentum residuals [N].
     pub force_residual_n: [f64; 2],
     /// Actual represented angular momentum residual [N m].
@@ -677,7 +681,9 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> PlanarStokesMotion<'s, 'm, 'a, F> {
             * (flow.kinetic_energy_j_per_m()
                 - self.fluid.transport().density_kg_m3()
                     * self.system.kinetic_energy(&self.state.velocity));
-        if !fluid_energy_change.is_finite() {
+        let viscous_heat =
+            dt * self.config.depth_m * flow.viscous_dissipation().total_power_w_per_m();
+        if !fluid_energy_change.is_finite() || !viscous_heat.is_finite() {
             return Err(PlanarStokesError::Invalid("physical fluid energy overflow"));
         }
         let accepted_velocity = flow.velocity_dofs().to_vec();
@@ -706,6 +712,7 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> PlanarStokesMotion<'s, 'm, 'a, F> {
             damping_loss_j: damping_loss,
             mechanical_time_discretization_loss_j: temporal_loss,
             fluid_kinetic_change_j: fluid_energy_change,
+            bulk_viscous_dissipation_j: viscous_heat,
             force_residual_n: [residual[0], residual[1]],
             torque_residual_n_m: residual[2],
             mechanical_work_residual_j: work_residual,

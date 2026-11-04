@@ -12,7 +12,8 @@
 //! fixed obstacles left behind by the moving mesh. Rotation, deformation,
 //! variable-density flow and general moving-mesh remapping remain separate.
 //! The guide supplies transverse forces and a couple explicitly. The reported
-//! body work identity does not establish whole-fluid passivity or viscous heat.
+//! body work identity does not establish whole-fluid passivity. Bulk viscous
+//! heat uses the accepted native strain and BDF1 endpoint quadrature.
 
 /// Finite translation with both momentum components free and orientation restrained.
 pub mod planar;
@@ -123,6 +124,10 @@ pub struct GuidedTranslationStep {
     pub damping_loss_j: f64,
     /// Backward-Euler body/spring loss; numerical, never assigned as heat.
     pub mechanical_time_discretization_loss_j: f64,
+    /// Bulk fluid viscous heat [J], using BDF1 endpoint quadrature
+    /// `dt * depth * integral(2 mu D:D)`. This excludes wall slip and numerical
+    /// losses, is not an exact trajectory integral, and updates no thermal state.
+    pub bulk_viscous_dissipation_j: f64,
     pub force_residual_n: f64,
     pub mechanical_work_residual_j: f64,
 }
@@ -401,6 +406,13 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> GuidedTranslationMotion<'s, 'm, 'a,
                 let impulse = momentum.linear_increment_world;
                 let numerical_loss =
                     impulse_time_loss(impulse, mass) + 0.5 * config.stiffness_n_m * dx * dx;
+                let viscous_heat = dt
+                    * config.depth_m
+                    * flow
+                        .relative_flow
+                        .solution
+                        .viscous_dissipation()
+                        .total_power_w_per_m();
                 let work = sum([
                     kinetic_change,
                     spring_change,
@@ -426,6 +438,7 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> GuidedTranslationMotion<'s, 'm, 'a,
                     numerical_loss,
                     work,
                     work_scale,
+                    viscous_heat,
                 ]
                 .into_iter()
                 .all(f64::is_finite)
@@ -460,6 +473,7 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> GuidedTranslationMotion<'s, 'm, 'a,
                     spring_energy_change_j: spring_change,
                     damping_loss_j: damping_loss,
                     mechanical_time_discretization_loss_j: numerical_loss,
+                    bulk_viscous_dissipation_j: viscous_heat,
                     force_residual_n: residual,
                     mechanical_work_residual_j: work,
                 });

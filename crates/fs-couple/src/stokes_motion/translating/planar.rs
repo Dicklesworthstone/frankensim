@@ -119,6 +119,10 @@ pub struct PlanarTranslationStep {
     /// Physical slip dissipation on the body [J], kept separately from body
     /// work, bulk viscosity and backward-Euler loss. No heat deposit is made.
     pub interface_slip_dissipation_j: f64,
+    /// Bulk fluid viscous heat [J], using BDF1 endpoint quadrature
+    /// `dt * depth * integral(2 mu D:D)`. This excludes wall slip and numerical
+    /// losses, is not an exact trajectory integral, and updates no thermal state.
+    pub bulk_viscous_dissipation_j: f64,
     pub external_work_j: f64,
     pub body_kinetic_change_j: f64,
     pub spring_energy_change_j: f64,
@@ -462,6 +466,13 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> PlanarTranslationMotion<'s, 'm, 'a,
             if (0..2).all(|i| residual[i].abs() <= limits[i]) {
                 let interface_work = sum(core::array::from_fn::<_, 2, _>(|i| force[i] * dx[i]));
                 let slip_loss = dt * cfg.depth_m * load.slip_dissipation_w_per_m;
+                let viscous_heat = dt
+                    * cfg.depth_m
+                    * flow
+                        .relative_flow
+                        .solution
+                        .viscous_dissipation()
+                        .total_power_w_per_m();
                 let external_work = sum(core::array::from_fn::<_, 2, _>(|i| {
                     external_force_n[i] * dx[i]
                 }));
@@ -490,7 +501,7 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> PlanarTranslationMotion<'s, 'm, 'a,
                 let torque = -cfg.depth_m * load.stress.moment_n;
                 if !terms
                     .into_iter()
-                    .chain([work, work_limit, torque, slip_loss])
+                    .chain([work, work_limit, torque, slip_loss, viscous_heat])
                     .all(f64::is_finite)
                 {
                     return Err(invalid(
@@ -515,6 +526,7 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> PlanarTranslationMotion<'s, 'm, 'a,
                     restraint_torque_n_m: torque,
                     interface_work_j: interface_work,
                     interface_slip_dissipation_j: slip_loss,
+                    bulk_viscous_dissipation_j: viscous_heat,
                     external_work_j: external_work,
                     body_kinetic_change_j: kinetic_change,
                     spring_energy_change_j: spring_change,

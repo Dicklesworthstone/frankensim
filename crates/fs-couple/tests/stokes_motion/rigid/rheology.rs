@@ -182,6 +182,20 @@ fn g1_g3_rheological_rotating_body_resolves_actual_shear_force_torque_and_slip()
             beta.map_or(0.0, |b| dt * cfg.depth_m * tau * tau / b),
             4e-8,
         );
+        // Heat must use the changing endpoint shear and its actual material
+        // viscosity, independently of wall-slip loss and rigid spin/boost.
+        near(
+            step.bulk_viscous_dissipation_j,
+            dt * cfg.depth_m * mu * gamma1 * gamma1,
+            2e-8,
+        );
+        assert!(
+            (step.bulk_viscous_dissipation_j
+                - dt * cfg.depth_m * material.dynamic_viscosity_pa_s() * gamma1 * gamma1)
+                .abs()
+                > 1e-5,
+            "a frozen reference viscosity must not replace endpoint rheology"
+        );
         near(step.mechanical_work_residual_j, 0.0, 4e-8);
         let flux = step.flow.boundary_transport_world(&selected, end).unwrap();
         near(flux.outward_mass_flux_kg_per_m_s, 0.0, 4e-8);

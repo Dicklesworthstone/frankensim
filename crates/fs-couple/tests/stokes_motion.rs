@@ -154,6 +154,9 @@ fn closed_translating_box_resolves_fluid_added_mass_and_complete_be_work() {
                 0.5 * fluid_mass * (step.speed_m_s + v0) * dv,
                 3e-10,
             );
+            // Uniform translation has no strain, even while its kinetic
+            // energy and backward-Euler inertia loss change.
+            near(step.bulk_viscous_dissipation_j, 0.0, 1e-16);
             near(step.mechanical_work_residual_j, 0.0, 2e-10);
             v0 = step.speed_m_s;
             q0 = q1;

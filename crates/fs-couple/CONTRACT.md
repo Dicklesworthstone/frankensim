@@ -1497,8 +1497,9 @@ linear moment. Native quaternion drift supplies the accepted orientation.
 Actual represented linear/angular momentum residuals have separate force and
 torque tolerances. Spring storage uses represented pose coordinates; physical
 dashpot loss and numerical backward-Euler loss remain distinct. Body work and
-fluid kinetic change are separate accounts, not a complete fluid/body energy
-or passivity claim. Body, fluid history, translation, angle and time publish
+fluid kinetic change and bulk viscous heating are separate accounts, not a
+complete fluid/body energy or passivity claim. Body, fluid history, translation,
+angle and time publish
 atomically after endpoint gates and cancellation checks. Transport is frozen
 once; five-solve source/boundary callbacks must be pure and fixed.
 
@@ -1549,7 +1550,8 @@ Spring storage, signed external/interface work, physical mechanical dashpot
 loss and numerical backward-Euler body/spring loss remain separate. The native
 fluid report retains world kinetic energy, momentum and moving-surface flux.
 The body work identity is not a complete fluid/body energy or passivity proof;
-no viscous heat or thermal-pressure feedback is inferred. The entire outer
+bulk viscous heat is evaluated from the accepted native strain without
+inferring thermal-pressure feedback. The entire outer
 mesh boundary also translates: endpoint callbacks supply WORLD conditions on
 that moving control surface, not stationary obstacles left behind by the
 body. Rotation, deformation, changing topology, variable density and general
@@ -1593,6 +1595,22 @@ Dashpot loss and backward-Euler mechanical loss are separate; the latter is not
 heat. Fluid kinetic change and conjugate interface work are exposed, but the
 body-work identity is not a global fluid/body energy or passivity proof. Native
 fluid viscous and SIP terms have not acquired an independent whole-system audit.
+
+All five fixed-reference, translating and rigid-ALE body/flow owners expose
+`bulk_viscous_dissipation_j`. It uses the native material solution's physical
+`2 mu D:D` integrated over cell areas, multiplied by the original extrusion
+depth and timestep. Source-backed rheology supplies the accepted endpoint
+viscosities; a rigid frame translation or spin does not add strain heat.
+This is BDF1 endpoint quadrature, not an exact integral along the unobserved
+within-step trajectory. Physical wall-slip loss, mechanical dashpots, SIP,
+upwind and backward-Euler numerical losses remain separate. No thermal state
+is updated and this diagnostic does not establish a coupled energy theorem.
+Nonfinite physical heat refuses before any body or fluid history is committed.
+
+The existing motion regressions now independently check zero strain heat in
+an accelerating uniform translation, analytic Couette heating under rigid
+spin/Galilean boosts, shear-dependent endpoint viscosity, and the steady
+moving-wall work split into bulk heat plus interfacial slip.
 
 `GuidedStokesMotion` remains fixed-reference, small-displacement linear
 incompressible Stokes, distinct from the finite-translation owner above. The

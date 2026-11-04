@@ -245,6 +245,13 @@ fn rotating_shear_closes_three_actual_momenta_and_physical_slip_work() {
                 _ => 0.0,
             };
             near(step.interface_slip_dissipation_j, expected_slip, 2e-8);
+            // Rigid spin and a Galilean boost contribute no viscous heat.
+            // The unit-area affine shear dissipates mu*gamma^2 per depth.
+            near(
+                step.bulk_viscous_dissipation_j,
+                dt * cfg.depth_m * mu * gamma * gamma,
+                2e-9,
+            );
             near(step.mechanical_work_residual_j, 0.0, 3e-8);
             let flux = step.flow.boundary_transport_world(&selected, end).unwrap();
             near(flux.outward_mass_flux_kg_per_m_s, 0.0, 3e-8);
