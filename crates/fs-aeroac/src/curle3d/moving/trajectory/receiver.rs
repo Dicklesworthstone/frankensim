@@ -17,6 +17,8 @@ use crate::curle3d::moving::MovingCompactLimits;
 use fs_ivl::Interval;
 use fs_math::dd::Dd;
 
+mod doppler;
+
 /// The finite observation window and its physical error limits.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MovingReceiverConfig {
@@ -107,14 +109,7 @@ impl<'a> PreparedMovingReceiverSource<'a> {
                 "moving receiver medium, finite window, clearance or work budget",
             ));
         }
-        let maximum_source_time_rate =
-            if source.maximum_mach() == 0.0 && receiver.maximum_mach() == 0.0 {
-                1.0
-            } else {
-                ((Interval::point(1.0) + Interval::point(receiver.maximum_mach()))
-                    / (Interval::point(1.0) - Interval::point(source.maximum_mach())))
-                .hi()
-            };
+        let maximum_source_time_rate = doppler::maximum_rate(source, receiver);
         if !maximum_source_time_rate.is_finite() || maximum_source_time_rate <= 0.0 {
             return Err(invalid("moving receiver Doppler bound is unrepresentable"));
         }
@@ -151,7 +146,10 @@ impl<'a> PreparedMovingReceiverSource<'a> {
     pub const fn config(&self) -> MovingReceiverConfig {
         self.config
     }
-    /// Conservative upper `d tau/d t <= (1+M_receiver)/(1-M_source)`.
+    /// Continuous upper observed source-clock rate. Intersects the original
+    /// independent-speed bound with a signed relative-velocity hull bound;
+    /// common translation therefore does not imply opposing-motion Doppler.
+    /// The bound includes velocities at DIFFERENT emission/receiver times.
     /// Additional geometric amplitude modulation still needs a bandwidth limit.
     pub const fn maximum_source_time_rate(&self) -> f64 {
         self.maximum_source_time_rate

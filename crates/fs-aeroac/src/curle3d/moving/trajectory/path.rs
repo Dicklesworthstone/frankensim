@@ -35,6 +35,10 @@ pub struct PreparedKinematicTrajectory {
     pub(super) segments: Vec<KinematicSegment>,
     pub(super) declared_maximum_mach: f64,
     maximum_mach: f64,
+    // Signed component hulls over all admitted Bernstein leaves, normalized
+    // by the SAME fluid sound speed. Cached once for every receiver sharing
+    // this path; the existing size_of-based payload budget includes them.
+    pub(super) velocity_mach_bounds: [Interval; 3],
     maximum_root_iterations: usize,
 }
 
@@ -128,6 +132,13 @@ impl PreparedKinematicTrajectory {
         };
         let mut first = transform(samples[0])?;
         admit_knot(first, c, maximum_mach)?;
+        let mut velocity_mach_bounds = first.kinematics.velocity_m_s.map(|v| {
+            if v == 0.0 {
+                Interval::point(0.0)
+            } else {
+                Interval::point(v) / Interval::point(c)
+            }
+        });
         let mut segments = Vec::new();
         segments
             .try_reserve_exact(count)
@@ -151,9 +162,20 @@ impl PreparedKinematicTrajectory {
                 maximum_mach,
                 budget,
                 &mut visited,
+                &mut velocity_mach_bounds,
                 cancelled,
             )?;
             admitted_mach = admitted_mach.max(bound);
+            // Evaluation returns the original knots exactly. Include them
+            // explicitly, alongside the continuous polynomial's leaf hulls.
+            for (axis, value) in last.kinematics.velocity_m_s.iter().enumerate() {
+                let endpoint = if *value == 0.0 {
+                    Interval::point(0.0)
+                } else {
+                    Interval::point(*value) / Interval::point(c)
+                };
+                velocity_mach_bounds[axis] = velocity_mach_bounds[axis].hull(endpoint);
+            }
             segments.push(KinematicSegment {
                 polynomial,
                 position_bounds: bounds.position,
@@ -167,6 +189,7 @@ impl PreparedKinematicTrajectory {
             segments,
             declared_maximum_mach: maximum_mach,
             maximum_mach: admitted_mach,
+            velocity_mach_bounds,
             maximum_root_iterations: budget.maximum_root_iterations,
         })
     }
@@ -246,6 +269,7 @@ fn admit_knot(knot: TimedSourceKinematics, c: f64, maximum_mach: f64) -> Result<
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn admit_speed(
     initial: BoundNode,
     stationary: bool,
@@ -253,6 +277,7 @@ fn admit_speed(
     maximum_mach: f64,
     budget: TrajectoryBudget,
     visited: &mut usize,
+    component_bounds: &mut [Interval; 3],
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<f64, AeroacError> {
     let mut stack = [initial; MAX_BOUND_DEPTH + 1];
@@ -276,6 +301,19 @@ fn admit_speed(
         };
         if mach.is_finite() && mach <= maximum_mach {
             admitted = admitted.max(mach);
+            // Reuse the actual accepted subdivision, not a knot-only sample
+            // or the looser initial parent hull. This adds fixed work per
+            // accepted leaf and no storage proportional to leaf count.
+            for control in &node.velocity {
+                for axis in 0..3 {
+                    let value = if stationary {
+                        Interval::point(0.0)
+                    } else {
+                        control[axis] / Interval::point(c)
+                    };
+                    component_bounds[axis] = component_bounds[axis].hull(value);
+                }
+            }
             continue;
         }
         if node.depth >= budget.maximum_subdivision_depth {
