@@ -23,10 +23,15 @@
 //! quiet-machine certification of the 40% target remain open.
 //!
 //! Conventions: forward is unnormalized; `inverse` scales by 1/n so
-//! inverse(forward(x)) = x. Sizes must be powers of two (structured
-//! rejection otherwise; mixed-radix general n is out of v1 scope).
+//! inverse(forward(x)) = x. [`Fft`] and the packed/multidimensional paths
+//! require powers of two. [`GeneralFft`] also admits exact odd, composite and
+//! prime record lengths through a cached Bluestein convolution, preserving
+//! the original sample count and frequency grid.
 
 use fs_math::det;
+
+mod arbitrary;
+pub use arbitrary::{GeneralFft, GeneralFftBudget, GeneralFftError};
 
 pub mod harmonic_window;
 

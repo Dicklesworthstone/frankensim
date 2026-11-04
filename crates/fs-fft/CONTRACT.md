@@ -7,6 +7,47 @@ transform path fs-cheb builds on). Layer: **L1 BEDROCK**. Depends on fs-math
 (strict-mode twiddles) and fs-simd (resolved exact-move/stage capsules).
 Plan §6.3.
 
+## Exact-length physical-record transforms
+
+`GeneralFft` admits positive arbitrary 1D complex record lengths, including
+odd and prime N. Power-of-two records call the original `Fft` directly and
+preserve its transform bits. Other sizes use Bluestein's chirp convolution
+with M = next_power_of_two(2*N-1), retaining the original N output bins and
+their spacing 1/(N*dt). Internal convolution padding does not extend the
+physical observation window or resample its clock. Forward transforms remain
+unnormalized and inverse transforms include 1/N.
+
+The original Stockham numerical owner supplies both convolution transforms.
+The chirp and transformed convolution kernel are cached at preparation;
+subsequent calls reuse caller scratch. Integer j*j modulo 2*N is formed in
+u128 before conversion to floating point, then reduced to an exact quadrant
+and small residual angle before strict trigonometry. This preserves weak
+quadrature components near quarter turns at large indices. Bluestein inputs
+are normalized by their largest component before convolution and restored to
+their physical scale afterward, avoiding unnecessary intermediate range loss.
+This does not extend f64's exponent range or certify arbitrary cancellations.
+
+`GeneralFftBudget` bounds N and the combined numeric plan/minimum-scratch
+payload before allocation. `required_workspace_bytes` performs allocation-free
+admission planning; `scratch_len` states the reusable complex buffer length.
+The count includes preparation temporaries and any recursive six-step row
+buffers, but excludes transformed data, extra caller scratch, stack and
+allocator metadata. Default evaluation allocates nothing; enabling the existing
+`frontier-sixstep` route retains its explicitly counted transient allocations.
+Work and storage are O(M log M) and O(M). This synchronous owner inherits the
+existing transform's lack of mid-kernel cancellation, not a deadline guarantee.
+
+Zero, inexact-integer or unaddressable sizes, sample/storage limits, malformed
+buffers and nonfinite inputs refuse. Buffer/input refusals preserve both
+buffers. Numerical overflow is reported; the direct in-place route may have
+modified data, while the Bluestein route publishes only complete finite output.
+The new G0/G1/G3 tests compare direct DFT sums, odd-grid highest positive tones,
+prime-length Parseval/round trips, physical amplitude scales, deterministic
+replay, original power-of-two bits, modular chirps and admission boundaries.
+These are finite-record DFT checks; no leakage removal, alias prevention,
+automatic tone discovery, PSD calibration, continuum-frequency error bound,
+new cross-ISA golden or throughput/roofline claim is added.
+
 `harmonic_window` supplies analytic normalized-window means and real-product
 moments for peak phasors `Re(a exp(-i omega t))`. Positive-time consumers
 conjugate their amplitudes. `HarmonicWindow` retains start and duration
@@ -408,7 +449,9 @@ authority-policy receipt move.
   reused across pencils) rather than blocking transposes or tiling on fs-exec.
 - N-D real transforms (r2c/c2r with only the first axis half-length) are not
   shipped; N-D is complex-in/complex-out. Callers pack real fields as `C64`.
-- No general-n (mixed-radix / Bluestein) support; power-of-two only.
+- `Fft`, packed real transforms and N-D plans retain their power-of-two
+  admission. `GeneralFft` supplies arbitrary-length 1D complex transforms;
+  arbitrary-length packed-real, DCT and N-D paths are not supplied.
 - The FrankenScipy Casebook is agreement evidence for its disclosed bounded
   fixtures, not a forward-error certificate. It does not establish Python
   SciPy execution, arbitrary-size, inverse/c2r, N-D, or DCT equivalence,
