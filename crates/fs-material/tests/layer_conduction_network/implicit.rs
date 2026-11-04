@@ -509,3 +509,139 @@ fn integrated_contacts_share_the_bulk_branch_and_its_admitted_endpoint_tangent()
         );
     }
 }
+
+
+#[test]
+fn integrated_contacts_preserve_radial_geometry_and_complete_tangents() {
+    use fs_material::thermal::conduction::{
+        LayerGeometry,
+        network::GeometricLayerLinkBinding,
+    };
+
+    let card = source();
+    let caloric = curve(&card);
+    let context = QueryPoint::new().with("T", 300.0).unwrap();
+    let layer = layer(&card, &caloric, &context);
+    let cylinder_length = 0.004 / (2.0 * core::f64::consts::PI * 0.02);
+    let geometries = [
+        LayerGeometry::cylindrical([0.01, 0.03], 0.02, cylinder_length).unwrap(),
+        LayerGeometry::spherical([0.01, 0.03], 0.02).unwrap(),
+    ];
+
+    for geometry in geometries {
+        let area = geometry.contact_area_m2();
+        let mut events: Vec<_> = [(1, 600.0), (2, 300.0)]
+            .into_iter()
+            .map(|(id, t)| TimedEvent {
+                time_s: 0.0,
+                event: Event::Birth(DepositedCell {
+                    id: CellId(id),
+                    segment_id: id,
+                    body_id: 1,
+                    material_id: MaterialId(1),
+                    mass_kg: 0.01,
+                    specific_h_j_kg: 100.0 * (t - 200.0),
+                    geometry: CellGeometry {
+                        start_m: [id as f64, 0.0, 0.0],
+                        end_m: [id as f64, 0.1, 0.0],
+                        volume_m3: 1e-5,
+                        surface_area_m2: 0.1,
+                    },
+                    boundary: Boundary {
+                        ambient_k: 300.0,
+                        htc_w_m2_k: 0.0,
+                        reservoir: None,
+                        source_w: 0.0,
+                    },
+                }),
+            })
+            .collect();
+        events.push(TimedEvent {
+            time_s: 0.0,
+            event: Event::Contact(ThermalLink {
+                id: 7,
+                a: CellId(1),
+                b: CellId(2),
+                area_m2: area,
+                conductance_w_k: 0.0,
+            }),
+        });
+        let old = DepositionSimulation::new(
+            events,
+            &[(MaterialId(1), &caloric)],
+            DepositionBudget {
+                max_cells: 2,
+                max_links: 1,
+                max_events: 3,
+                max_substeps: 100,
+            },
+        )
+        .unwrap()
+        .advance_to(
+            0.0,
+            StepConfig {
+                max_dt_s: 1.0,
+                energy_tolerance_j: 1e-8,
+            },
+            || Ok(()),
+        )
+        .unwrap()
+        .0;
+
+        let prepared = PreparedLayerConduction::new_geometric(
+            &old,
+            vec![GeometricLayerLinkBinding {
+                link: 7,
+                layers: [&layer; 2],
+                geometry,
+                contact_area_resistance_m2_k_w: 0.0,
+            }],
+            1,
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(prepared.geometries().next().unwrap().1, geometry);
+
+        let contact = AffineLayerContact {
+            caloric: [&caloric; 2],
+            bounds: [[0.0, 80_000.0]; 2],
+            reference_h: [35_000.0, 15_000.0],
+            resistance: 0.02,
+            derivatives: [2e-7, -1e-7],
+        };
+        let link = prepared
+            .implicit_link_laws(config())
+            .next()
+            .unwrap()
+            .with_contact(&contact)
+            .unwrap();
+        let native = ConductiveLink {
+            link_id: 7,
+            half_distances_m: geometry.equivalent_distances_m(),
+            contact_resistance_m2_k_w: 0.0,
+        };
+        let patch = old.contact_patch(7).unwrap();
+        let power = |h: [f64; 2]| {
+            let state = link
+                .state_at_specific_enthalpies(h, native, patch, &mut || Ok(()))
+                .unwrap();
+            let t = h.map(|value| caloric.temperature_at_specific_enthalpy(value).unwrap());
+            (state, state.conductance_w_k * (t[0] - t[1]))
+        };
+        let h = [35_000.0, 15_000.0];
+        let (state, _) = power(h);
+        for side in 0..2 {
+            let mut plus = h;
+            let mut minus = h;
+            plus[side] += 0.25;
+            minus[side] -= 0.25;
+            let finite_difference = (power(plus).1 - power(minus).1) / 0.5;
+            assert!(
+                (finite_difference - state.power_enthalpy_derivatives_w_kg_j[side]).abs() < 1e-8,
+                "radial geometry {geometry:?}, side {side}: finite difference {finite_difference}, tangent {:?}",
+                state.power_enthalpy_derivatives_w_kg_j,
+            );
+        }
+        assert_eq!(old.time_s(), 0.0);
+    }
+}
