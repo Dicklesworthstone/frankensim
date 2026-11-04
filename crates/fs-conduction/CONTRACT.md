@@ -1193,6 +1193,25 @@ rate-independent admission. Every physical reversal requires its own supplied
 segment: an undamaged closed loop has no retained point-history signature, so
 neither its existence nor its viscous work can be recovered from endpoints.
 
+`FractureCooling::transfer_temperature` explicitly connects the actual caloric
+cell temperatures to source-defined common- or mixed-mode bond weakening. Each
+complete update retains the original ordered interface card, selected claims,
+nonthermal coordinates, area, jump and irreversible history. The successor's
+temperature must equal the explicitly weighted two-cell temperature returned by
+`interface_temperature_k`; a stale or substituted source refuses. The original
+cohesive temperature law supplies fixed-jump parameter work, storage change and
+new damage loss, integrated on original area with a declared joule gate.
+Thermal failure immediately opens the existing thermal contact or selects its
+separately declared closed-failed conductance. Cooling cannot heal or rebond it.
+Both mechanical and thermal clocks must already describe the same endpoint, so
+an unfinished timed mechanical segment cannot be replayed under changed laws.
+No heat is inferred from parameter work or damage release, and no dashpot work
+occurs during the zero-duration transfer. Four focused G1/G3/G4 test groups cover
+heating/cooling through common, mixed and viscous sources, partial mode history,
+actual postfailure heat exchange, source/temperature refusals and cancellation.
+This is staggered endpoint coupling, not within-step fracture localization,
+resolved interfacial temperature, a cure law or a complete thermodynamic closure.
+
 > Beads `frankensim-extreal-program-f85xj.5.1`, `.5.3`, `.5.4`, and `.5.6`. The
 > cooling vertical's steady heat-conduction solve, matching-P1 contact rung,
 > first card-backed surface-radiation rung, and receipt-preserving PCB
