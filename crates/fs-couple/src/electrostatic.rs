@@ -1,4 +1,4 @@
-//! Computed free-charge body forces on the original mechanical volume mesh.
+//! Native electrostatic mechanical loads and resolved guided motion.
 //!
 //! The electric Lorentz term is `rho_free E` [N/m3]. Charges must be bound to
 //! the selected material, or transfer their momentum to it on the timescale
@@ -8,11 +8,14 @@
 //! charge, polarization traction, electrostriction and dielectric-interface
 //! forces are separate physical contributions, never inferred from this term.
 //!
-//! This adapter transfers one accepted, frozen-geometry field into the native
+//! The free-volume-charge adapter transfers one accepted field into the native
 //! solid load integral. It is not a charge-transport or moving-mesh integrator;
 //! it supplies neither electromagnetic feedback from the resulting deformation
 //! nor a closed electric/mechanical energy trajectory. Do not combine it with
 //! an enclosing Maxwell-stress load that already includes these same charges.
+
+/// Resolved moving capacitor geometry and reciprocal guided-body work.
+pub mod motion;
 
 use fs_em::spatial::electrostatic::SpatialElectricField;
 use fs_exec::Cx;
