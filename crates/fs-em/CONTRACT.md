@@ -1,5 +1,69 @@
 # fs-em contract
 
+## Resolved electrostatic forces, motion and floating electrodes
+
+The native planar and spatial electric fields now expose `virtual_work` for a
+complete original nodal displacement. One shared allocation-free cell
+contraction differentiates the actual P1 dielectric energy using original
+fields, gradients and physical volumes. Local displacement differences make
+common translation cancel exactly. With held electrode voltages the returned
+mechanical work is the energy derivative; with held charges it is the negative
+re-equilibrated energy derivative. This path admits fixed explicitly isotropic
+coefficients, with zero free volume/sheet charge, impressed polarization and
+imposed displacement. Tensor transport, electrostriction and unowned source
+work are refused. Virtual mesh work alone is not a finite trajectory or an
+automatic solid nodal-traction distribution.
+
+`SpatialElectrostatics::capacitance_matrix` extracts the full tetrahedral
+Maxwell matrix with one native solve per nonreference terminal. Electrical
+components follow physical volume connectivity and shared equipotential
+electrodes, with independent voltage references. The original stiffness Gram
+form is checked against native charge reactions; scalar and tensor source laws
+stay attached. Actual drives superpose retained relative potentials and recover
+the complete original field, checking actual-amplitude charge and energy.
+This is the homogeneous source-free response, not an implicit offset for fixed
+polarization, sheets or bulk space charge.
+
+`SpatialCapacitanceMatrix::prepare_floating` adds prescribed TOTAL floating
+free charge through the existing equilibrated dense Cholesky owner. Each
+electrical component must retain a voltage reference before factorization.
+The Schur matrix, affine induced retained charge and trapped-charge energy all
+remain available; trapped energy is already part of the native field store.
+Small charge-induced fields use component-relative voltages with separately
+retained reference values, so large independent common biases do not erase
+them. Recovery needs no further FE solve and retains original field/material,
+charge, energy and force-validity checks.
+
+`fs_couple::electrostatic::motion` connects a two-electrode planar field to
+a source-derived translating body. An authored affine mesh path retains vertex
+lineage, topology, cells, dielectric laws and extrusion thickness; all cell
+signed-area ratios must remain positive over its complete coordinate interval.
+This does not establish global nonintersection or contact. New coordinate
+trials rebuild the original Hodge and solve its field; accepted and reference
+responses are reused. The same analytic virtual work supplies instantaneous
+force. The existing native articulated impulse and bounded scalar feedback
+owners determine a common mechanical step, with fixed isolated charge or an
+ideal held voltage. Independent field-storage, signed electrical supply,
+native kinetic and external mechanical work checks gate publication. No
+discrepancy is assigned to heat or repaired by changing state.
+
+That motion is one guided electrostatic-equilibrium coordinate with frozen
+strain-independent scalar permittivity. The caller owns its physical mesh
+motion and complete moving inertia. Its reduced axial support wrench is not a
+recovered full electrode traction or torque. Finite source circuits,
+three-dimensional moving interfaces, electrostriction, polarization evolution,
+charge leakage/transport and electromagnetic propagation remain separate
+extensions. Energy admission does not certify continuum force or temporal
+error.
+
+Four multi-electrode, four floating-charge, seven native virtual-work and five
+guided-motion integration regressions are included with synthetic materials.
+The two exact production contraction-kernel tests compiled and passed with the
+pinned Rust toolchain. Full native field/coupling compilation and those twenty
+integration tests remain unexecuted in this environment because the shared
+host exhausted memory and writable disk before its required dependency build
+completed. Formatting/static source checks are not a substitute for that run.
+
 ## Three-dimensional terminal power under prescribed conductor motion
 
 `SpatialConduction::solve_with_motion` solves the original tetrahedral current

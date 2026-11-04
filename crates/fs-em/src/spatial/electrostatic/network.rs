@@ -7,6 +7,9 @@
 //! Only native solved potentials are retained; every actual drive recovers
 //! and checks the original cell field, weak reactions and dielectric energy.
 
+/// Reusable total-charge constraints on floating original electrodes.
+pub mod floating;
+
 use super::terminals::{electrode_faces, terminal_charge, voltage_boundary};
 use super::*;
 use std::collections::BTreeMap;

@@ -1,4 +1,7 @@
 //! Multi-electrode capacitor fields against independent series/block algebra.
+#[path = "network/floating.rs"]
+mod floating;
+
 use super::*;
 use fs_em::spatial::electrostatic::{SpatialCapacitanceControls, SpatialElectricField};
 
