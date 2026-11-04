@@ -10,7 +10,9 @@ pub use feedback::{
     MaterialDensityMomentumControls, MaterialDensityMomentumInput, MaterialDensityMomentumReport,
     MaterialDensityMomentumStep,
 };
+pub(super) use feedback::{admit_feedback_controls, scatter_projected_material_momentum};
 mod forcing;
+pub(super) use forcing::audit_combined;
 pub use forcing::{
     DensityForceControls, DensityForceInput, DensityForcePrediction, DensityForceReport,
     ForcedDensityProjection, ForcedDensityProjectionReport,
@@ -159,7 +161,7 @@ impl StaggeredBoundaryPressure<'_> {
 }
 
 #[derive(Clone, Copy)]
-enum BoundaryPressure<'a> {
+pub(super) enum BoundaryPressure<'a> {
     Planes([f64; 6]),
     Profile(StaggeredBoundaryPressure<'a>),
 }
@@ -226,7 +228,7 @@ pub struct DensityProjection {
 // maps and values; subtracting restored absolute pressures can lose a small
 // driving head under a large reservoir reference. No second pressure map or
 // solve is needed, and no private state is added to the public result.
-struct PressureReadback {
+pub(super) struct PressureReadback {
     potential: ProjectionPotential,
     uniform_pressure_scale: Option<f64>,
 }
@@ -472,7 +474,7 @@ impl FlowField {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn project_density_volume_source_with_pressure_readback<'a>(
+    pub(super) fn project_density_volume_source_with_pressure_readback<'a>(
         &self,
         domain: &VoxelDomain,
         faces: [FlowFace; 6],

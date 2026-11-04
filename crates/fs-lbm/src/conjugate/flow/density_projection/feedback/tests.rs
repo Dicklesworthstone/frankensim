@@ -664,7 +664,7 @@ fn independent_field_impulse_and_cell_readbacks_refuse_tampering_without_mutatio
         input,
         controls: controls(),
         reconstructed: &reconstructed,
-        evolution: &result.evolution,
+        projection: &result.evolution.projection,
     };
     exchange.admit(&gate).unwrap();
     assert!(matches!(
@@ -677,7 +677,7 @@ fn independent_field_impulse_and_cell_readbacks_refuse_tampering_without_mutatio
     let mut unrelated = result.evolution.clone();
     unrelated.projection.pressure_correction_pa[0] = 1.0;
     let wrong_pressure = Exchange {
-        evolution: &unrelated,
+        projection: &unrelated.projection,
         ..exchange
     };
     let candidate = wrong_pressure.scatter(&gate).unwrap();
@@ -692,7 +692,7 @@ fn independent_field_impulse_and_cell_readbacks_refuse_tampering_without_mutatio
     *wrong_start.field.face_mut(0, 1) = 1.0;
     let wrong_start = Exchange {
         reconstructed: &wrong_start,
-        evolution: &result.evolution,
+        projection: &result.evolution.projection,
         ..wrong_pressure
     };
     assert!(matches!(

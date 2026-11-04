@@ -3,9 +3,10 @@
 use super::{
     BoundaryPressure, CancelGate, ChtError, DensityForceControls, DensityForceInput,
     DensityMomentumReconstruction, DensityMomentumReconstructionControls,
-    DensityMomentumReconstructionReport, DensityProjectionControls, FlowFace, FlowField,
-    ForcedDensityProjection, PressureReadback, ReservoirPressure, StaggeredBoundaryPressure, Sum,
-    VoxelDomain, face_dual_mass, finite, finite_positive, nonnegative, poll, poll_every, refuse,
+    DensityMomentumReconstructionReport, DensityProjection, DensityProjectionControls, FlowFace,
+    FlowField, ForcedDensityProjection, PressureReadback, ReservoirPressure,
+    StaggeredBoundaryPressure, Sum, VoxelDomain, face_dual_mass, finite, finite_positive,
+    nonnegative, poll, poll_every, refuse,
 };
 
 /// Original extensive material state and authored sources for one fresh kick.
@@ -215,22 +216,7 @@ impl FlowField {
         gate: &CancelGate,
     ) -> Result<MaterialDensityMomentumStep, ChtError> {
         poll(gate)?;
-        for (name, maximum) in [
-            (
-                "flow.feedback_momentum_budget",
-                controls.maximum_feedback_momentum_defect_kg_m_s,
-            ),
-            (
-                "flow.feedback_angular_budget",
-                controls.maximum_feedback_angular_impulse_defect_kg_m2_s,
-            ),
-            (
-                "flow.feedback_energy_budget",
-                controls.maximum_feedback_energy_defect_j,
-            ),
-        ] {
-            nonnegative(name, maximum)?;
-        }
+        admit_feedback_controls(controls)?;
         let reconstructed = self.reconstruct_material_momentum(
             domain,
             faces,
@@ -255,20 +241,18 @@ impl FlowField {
                 controls.forcing,
                 gate,
             )?;
-        let exchange = Exchange {
-            held: self,
+        let (momentum, report) = scatter_projected_material_momentum(
+            self,
             domain,
             faces,
             boundary_pressure,
-            pressure_readback: pressure_readback.as_ref(),
+            pressure_readback.as_ref(),
             input,
             controls,
-            reconstructed: &reconstructed,
-            evolution: &evolution,
-        };
-        exchange.admit(gate)?;
-        let momentum = exchange.scatter(gate)?;
-        let report = exchange.audit(&momentum, gate)?;
+            &reconstructed,
+            &evolution.projection,
+            gate,
+        )?;
         poll(gate)?;
         Ok(MaterialDensityMomentumStep {
             momentum_kg_m_s: momentum,
@@ -280,6 +264,62 @@ impl FlowField {
     }
 }
 
+pub(in crate::conjugate::flow) fn admit_feedback_controls(
+    controls: MaterialDensityMomentumControls,
+) -> Result<(), ChtError> {
+    for (name, maximum) in [
+        (
+            "flow.feedback_momentum_budget",
+            controls.maximum_feedback_momentum_defect_kg_m_s,
+        ),
+        (
+            "flow.feedback_angular_budget",
+            controls.maximum_feedback_angular_impulse_defect_kg_m2_s,
+        ),
+        (
+            "flow.feedback_energy_budget",
+            controls.maximum_feedback_energy_defect_j,
+        ),
+    ] {
+        nonnegative(name, maximum)?;
+    }
+    Ok(())
+}
+
+/// Consume only an internally computed projection. Borrowing lets the thermal
+/// volume owner keep its accepted mass routes without copying their pressure
+/// field or applying the pressure impulse a second time.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::conjugate::flow) fn scatter_projected_material_momentum(
+    held: &FlowField,
+    domain: &VoxelDomain,
+    faces: [FlowFace; 6],
+    boundary_pressure: Option<BoundaryPressure<'_>>,
+    pressure_readback: Option<&PressureReadback>,
+    input: MaterialDensityMomentumInput<'_>,
+    controls: MaterialDensityMomentumControls,
+    reconstructed: &DensityMomentumReconstruction,
+    projection: &DensityProjection,
+    gate: &CancelGate,
+) -> Result<(Vec<[f64; 3]>, MaterialDensityMomentumReport), ChtError> {
+    let exchange = Exchange {
+        held,
+        domain,
+        faces,
+        boundary_pressure,
+        pressure_readback,
+        input,
+        controls,
+        reconstructed,
+        projection,
+    };
+    exchange.admit(gate)?;
+    let momentum = exchange.scatter(gate)?;
+    let report = exchange.audit(&momentum, gate)?;
+    poll(gate)?;
+    Ok((momentum, report))
+}
+
 struct Exchange<'a> {
     held: &'a FlowField,
     domain: &'a VoxelDomain,
@@ -289,7 +329,7 @@ struct Exchange<'a> {
     input: MaterialDensityMomentumInput<'a>,
     controls: MaterialDensityMomentumControls,
     reconstructed: &'a DensityMomentumReconstruction,
-    evolution: &'a ForcedDensityProjection,
+    projection: &'a DensityProjection,
 }
 
 struct FaceImpulse {
@@ -316,7 +356,7 @@ impl Exchange<'_> {
             || self.input.force_density_n_m3.len() != n
             || self.input.target_outflow_m3_s.len() != n
             || self.reconstructed.density_kg_m3.len() != n
-            || self.evolution.projection.pressure_correction_pa.len() != n
+            || self.projection.pressure_correction_pa.len() != n
         {
             return Err(refuse(
                 "flow.feedback_shape",
@@ -338,14 +378,10 @@ impl Exchange<'_> {
             }
             finite(
                 "flow.feedback_pressure",
-                self.evolution.projection.pressure_correction_pa[c],
+                self.projection.pressure_correction_pa[c],
             )?;
         }
-        for field in [
-            self.held,
-            &self.reconstructed.field,
-            &self.evolution.projection.field,
-        ] {
+        for field in [self.held, &self.reconstructed.field, &self.projection.field] {
             field.admit_density_field(
                 self.domain,
                 self.faces,
@@ -386,7 +422,7 @@ impl Exchange<'_> {
         let area = self.domain.face_area(c, axis);
         let (slot, sign) = self.held.slot(self.domain, c, f);
         let q0 = self.reconstructed.field.face(axis, slot);
-        let q1 = self.evolution.projection.field.face(axis, slot);
+        let q1 = self.projection.field.face(axis, slot);
         let expected_q0 = if held {
             self.held.face(axis, slot)
         } else {
@@ -417,9 +453,8 @@ impl Exchange<'_> {
                 dt * (native_mass * self.input.acceleration_m_s2[axis] + area * force_per_area);
             let difference = self.pressure_readback.map_or_else(
                 || {
-                    self.evolution.projection.pressure_correction_pa[c]
-                        - neighbor
-                            .map_or(0.0, |n| self.evolution.projection.pressure_correction_pa[n])
+                    self.projection.pressure_correction_pa[c]
+                        - neighbor.map_or(0.0, |n| self.projection.pressure_correction_pa[n])
                 },
                 |readback| {
                     readback.difference(
@@ -563,7 +598,7 @@ impl Exchange<'_> {
             for component in cross(center, local_p_error) {
                 angular_defect.add(component.abs());
             }
-            let volume_defect = self.evolution.projection.field.net_outflow(self.domain, c)
+            let volume_defect = self.projection.field.net_outflow(self.domain, c)
                 - self.input.target_outflow_m3_s[c];
             check_budget(
                 "flow.feedback_volume_budget",
@@ -571,10 +606,11 @@ impl Exchange<'_> {
                 self.controls.projection.maximum_volume_defect_m3_s,
             )?;
             let pressure_volume_defect = self.controls.projection.duration_s
-                * self.pressure_readback.map_or(
-                    self.evolution.projection.pressure_correction_pa[c],
-                    |readback| readback.cell_pressure(c),
-                )
+                * self
+                    .pressure_readback
+                    .map_or(self.projection.pressure_correction_pa[c], |readback| {
+                        readback.cell_pressure(c)
+                    })
                 * volume_defect;
             composition_defect.add(pressure_volume_defect);
             energy_defect.add(pressure_volume_defect.abs());

@@ -2,7 +2,12 @@
 
 mod conduction;
 pub use conduction::{
-    ConductiveThermalVolumeControls, ConductiveThermalVolumeReport, ConductiveThermalVolumeStep,
+    ConductiveThermalVolumeControls, ConductiveThermalVolumeReport,
+    ConductiveThermalVolumeStep,
+};
+mod momentum;
+pub use momentum::{
+    ThermalVolumeMomentumControls, ThermalVolumeMomentumInput, ThermalVolumeMomentumStep,
 };
 
 use fs_material::phase::{
@@ -11,9 +16,9 @@ use fs_material::phase::{
 
 use super::density_transport::{admit, advect_projected_material};
 use super::{
-    AdvectedMaterial, CancelGate, ChtError, FlowFace, FlowField, MaterialAdvectionControls,
-    MaterialAdvectionInput, MaterialAdvectionStep, MaterialVolumeSource, VoxelDomain, finite,
-    finite_positive, poll, poll_every,
+    AdvectedMaterial, CancelGate, ChtError, DensityProjection, FlowFace, FlowField,
+    MaterialAdvectionControls, MaterialAdvectionInput, MaterialAdvectionStep, MaterialVolumeSource,
+    VoxelDomain, finite, finite_positive, poll, poll_every,
 };
 
 /// Original material inventories and externally determined caloric increments.
@@ -288,7 +293,7 @@ impl FlowField {
         .map(|step| step.volume)
     }
 
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    #[allow(clippy::too_many_arguments)]
     fn advance_chart_volume(
         &self,
         domain: &VoxelDomain,
@@ -299,6 +304,41 @@ impl FlowField {
         thermal_controls: ThermalVolumeControls,
         gate: &CancelGate,
     ) -> Result<ThermalVolumeStep, ChtError> {
+        Self::advance_chart_volume_with_projection(
+            domain,
+            curve,
+            range,
+            input,
+            thermal_controls,
+            gate,
+            |density, source| {
+                self.project_density_volume_source(
+                    domain,
+                    faces,
+                    density,
+                    source,
+                    thermal_controls.volume.transport.projection,
+                    gate,
+                )
+                .map(|projection| (projection, ()))
+            },
+        )
+        .map(|(thermal, ())| thermal)
+    }
+
+    /// The original chart/transport loop retains only the accepted projection's
+    /// private readback. A mechanics consumer can audit that same pressure
+    /// impulse after acceptance, without another solve or a projection clone.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn advance_chart_volume_with_projection<T>(
+        domain: &VoxelDomain,
+        curve: &EquilibriumEnthalpyPhaseCurve,
+        range: ChartVolumeRange,
+        input: CoexistenceVolumeInput<'_>,
+        thermal_controls: ThermalVolumeControls,
+        gate: &CancelGate,
+        mut project: impl FnMut(&[f64], &[f64]) -> Result<(DensityProjection, T), ChtError>,
+    ) -> Result<(ThermalVolumeStep, T), ChtError> {
         poll(gate)?;
         if thermal_controls.max_volume_iterations == 0
             || !thermal_controls.source_relaxation.is_finite()
@@ -466,14 +506,7 @@ impl FlowField {
         let mut endpoint_density = vec![0.0; n];
         for source_iterations in 1..=thermal_controls.max_volume_iterations {
             poll(gate)?;
-            let projected = self.project_density_volume_source(
-                domain,
-                faces,
-                &density,
-                &volume_source,
-                controls.transport.projection,
-                gate,
-            )?;
+            let (projected, readback) = project(&density, &volume_source)?;
             let transport = advect_projected_material(
                 domain,
                 projected,
@@ -548,16 +581,19 @@ impl FlowField {
                         .pressure_source_work_j,
                 };
                 poll(gate)?;
-                return Ok(ThermalVolumeStep {
-                    volume: CoexistenceVolumeStep {
-                        transport,
-                        phase_states,
-                        volume_source_m3_s: volume_source,
-                        report,
+                return Ok((
+                    ThermalVolumeStep {
+                        volume: CoexistenceVolumeStep {
+                            transport,
+                            phase_states,
+                            volume_source_m3_s: volume_source,
+                            report,
+                        },
+                        source_iterations,
+                        mixing_volume_source_m3_s: mixing_source,
                     },
-                    source_iterations,
-                    mixing_volume_source_m3_s: mixing_source,
-                });
+                    readback,
+                ));
             }
             if density_law == Some(PhaseIntervalDensityLaw::AffineSpecificVolume) {
                 return Err(refuse(

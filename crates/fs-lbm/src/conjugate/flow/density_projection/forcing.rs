@@ -570,7 +570,7 @@ fn audit_force(
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-fn audit_combined(
+pub(in crate::conjugate::flow) fn audit_combined(
     before: &FlowField,
     predicted: &DensityForcePrediction,
     projected: &DensityProjection,

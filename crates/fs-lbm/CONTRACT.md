@@ -9836,6 +9836,36 @@ exact affine caloric law. Rust parsing, compilation and native numerical
 execution were unavailable in the delivery environment; source/API review
 does not establish those executed results.
 
+## Thermal density change with authoritative material momentum
+
+`FlowField::advance_piecewise_thermal_volume_momentum` couples the original
+chart-derived thermal/phase volume source to current material mass and
+extensive momentum. The pressure-profile variant retains native reservoir
+admission and component-relative pressure. The original density chart owns
+sensible expansion, latent density change and nonlinear mixing volume; there
+is no additional material mass source or fitted density law.
+
+Current M/P reconstruction and body-force prediction run once. Every bounded
+thermal-volume trial uses that same predictor and once-applied net caloric
+increment. Only the accepted trial supplies pressure impulse to the original
+cell momenta. The same accepted mass routes then transport the kicked momentum
+with zero additional impulse. Rejected trials do not advance physical time,
+and the composition adds no second pressure solve or projection clone.
+
+The returned mass, specific enthalpy, phase state and extensive momentum are
+the next inventory. Original controls, shared duration, source bounds,
+incoming material and velocity, local/global balances and cancellation remain
+required. A late refusal returns no partial endpoint. Pressure-source and
+reservoir work, projection/scatter losses and donor transport losses retain
+their separate native accounts; none silently becomes material heat.
+
+Phase mobility, solid support and the caloric/work convention remain explicit
+caller responsibilities. This first-order split supplies no solid stress,
+free-surface geometry, viscosity or pressure-dependent thermodynamic EOS.
+Analytic regression sources cover sealed expansion/contraction on all axes,
+continued evolution from actual endpoint momentum, reservoir gauge invariance
+and atomic late refusal. Compiler checks do not constitute numerical execution.
+
 ## Evolving material momentum on one native pressure and transport step
 
 `FlowField::advance_material_momentum` composes the existing current-mass
