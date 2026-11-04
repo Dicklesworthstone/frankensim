@@ -21,7 +21,7 @@ use super::super::MaterialPoint;
 use super::super::bushing::coupled::CoupledSpatialBushing;
 use super::super::bushing::{self, BushingLaw, SpatialBushing};
 use super::{
-    ArticulatedModel, Cell, EffortLaw, FallibleFiniteDifference, FiniteDifferenceError,
+    ArticulatedModel, Cell, EffortLaw, FallibleFiniteDifference, FiniteDifferenceError, ForcingLaw,
     FreeFloatingBaseState, FreeFloatingMotionError, FreeFloatingMotionState, ImplicitSpatialConfig,
     ImplicitSpatialError, MAX_FREE_FLOATING_STEP_LINKS, MidpointEquations, MidpointInitial,
     MomentumMap, NewtonKrylovConfig, NewtonKrylovState, NewtonReport, RefCell, SpatialMotionLoads,
@@ -314,6 +314,29 @@ pub struct MixedBilateralLoopStep {
     pub initial_joint_reaction_work_j: f64,
     /// Corresponding endpoint joint work, also included in the total.
     pub final_joint_reaction_work_j: f64,
+}
+
+/// Closed-mechanism motion driven by an actual implicit environmental law.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ForcedBilateralLoopStep<S = BilateralLoopStep> {
+    /// Original loop state, native impulse responses and physical accounts.
+    pub step: S,
+    /// Accepted complete midpoint after independently reapplying the actual
+    /// summed initial constraint impulse. The forcing law was last sampled here.
+    pub midpoint_state: FreeFloatingMotionState,
+    /// Trial minus momentum-derived midpoint COM velocity, in world m/s.
+    /// Its angular-origin contribution remains in the native smooth finalizer.
+    pub com_velocity_residual_world: Vec3,
+}
+
+impl ForcedBilateralLoopStep<MixedBilateralLoopStep> {
+    fn without_joint_rows(self) -> ForcedBilateralLoopStep {
+        ForcedBilateralLoopStep {
+            step: self.step.bilateral,
+            midpoint_state: self.midpoint_state,
+            com_velocity_residual_world: self.com_velocity_residual_world,
+        }
+    }
 }
 
 /// Result of the distance-only specialization; point-specific vectors are empty.
@@ -614,6 +637,62 @@ pub fn step_free_floating_bilateral_loops_with_effort(
     .map(|step| step.bilateral)
 }
 
+/// Resolve environmental wrenches, internal effort and rigid material closures
+/// in one simultaneous native midpoint/initial-impulse solve.
+///
+/// The callback receives elapsed time h/2 and the actual complete trial state,
+/// including the current initial constraint impulse, carrier pose, COM velocity
+/// and joint rates. Link-body wrenches about their original origins and internal
+/// effort slices are reset from held loads before every call. Spatial loads and
+/// finite diagonal bushings use the same stage. Numerical probes may leave the
+/// constraint manifold; the callback must be smooth and repeatable there.
+///
+/// The existing solve gains three COM-velocity unknowns. It uses the original
+/// forcing evaluator both during trials and during independent verification
+/// with the actual summed native initial impulse. That last sample owns smooth
+/// momentum and work; the callback is not repeated during finalization. Both
+/// native constraint events retain their actual quadratic work and complete
+/// recoil. Final position, physical tangency and mobility checks are unchanged.
+///
+/// The canonical next state is `step.state_after`, after the final tangent
+/// impulse. Its velocity can differ from the returned smooth midpoint. This
+/// adds no position projection, force freeze, constraint heat, branch enclosure
+/// or symplecticity claim. Resolve nonlinear motion and split discontinuities;
+/// callback-owned history must remain staged until the complete step succeeds.
+/// All original physical limits, bounded work and atomic refusals still apply.
+#[allow(clippy::too_many_arguments)]
+pub fn step_free_floating_bilateral_loops_with_forcing(
+    model: &ArticulatedModel,
+    state: &FreeFloatingMotionState,
+    loads: SpatialMotionLoads<'_>,
+    loops: &[BilateralLoop],
+    bushings: &[SpatialBushing],
+    duration: f64,
+    config: BilateralLoopConfig,
+    mut forcing: impl FnMut(
+        f64,
+        &FreeFloatingMotionState,
+        &mut [Wrench],
+        &mut [f64],
+    ) -> Result<(), FreeFloatingMotionError>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<ForcedBilateralLoopStep, BilateralLoopError> {
+    step_bilateral_forcing_evaluated(
+        model,
+        state,
+        loads,
+        loops,
+        &[],
+        bushings,
+        duration,
+        config,
+        None,
+        Some(&mut forcing),
+        cancelled,
+    )
+    .map(ForcedBilateralLoopStep::without_joint_rows)
+}
+
 /// Advance rigid loops with the original full passive stiffness and damping laws.
 ///
 /// Every entry of the prepared six-coordinate matrices acts at the same trial
@@ -686,6 +765,45 @@ pub fn step_free_floating_bilateral_loops_with_coupled_bushings_and_effort(
         cancelled,
     )
     .map(|step| step.bilateral)
+}
+
+/// Resolve the same environmental law and rigid closures with the original
+/// full passive six-coordinate bushing stiffness/damping matrices.
+///
+/// All cross-axis and translation/rotation constitutive terms participate in
+/// the simultaneous trial. See [`step_free_floating_bilateral_loops_with_forcing`]
+/// for the actual-stage callback, work, residual and refusal contracts.
+#[allow(clippy::too_many_arguments)]
+pub fn step_free_floating_bilateral_loops_with_coupled_bushings_and_forcing(
+    model: &ArticulatedModel,
+    state: &FreeFloatingMotionState,
+    loads: SpatialMotionLoads<'_>,
+    loops: &[BilateralLoop],
+    bushings: &[CoupledSpatialBushing],
+    duration: f64,
+    config: BilateralLoopConfig,
+    mut forcing: impl FnMut(
+        f64,
+        &FreeFloatingMotionState,
+        &mut [Wrench],
+        &mut [f64],
+    ) -> Result<(), FreeFloatingMotionError>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<ForcedBilateralLoopStep, BilateralLoopError> {
+    step_bilateral_forcing_evaluated(
+        model,
+        state,
+        loads,
+        loops,
+        &[],
+        bushings,
+        duration,
+        config,
+        None,
+        Some(&mut forcing),
+        cancelled,
+    )
+    .map(ForcedBilateralLoopStep::without_joint_rows)
 }
 
 /// Constant ideal gears/locks combined with distance and spherical closures.
@@ -795,6 +913,42 @@ pub mod joint {
         )
     }
 
+    /// Resolve environmental wrenches and internal effort together with all
+    /// original material and affine-joint rows, including their cross mobility.
+    /// Diagonal bushings use the same stage. The parent forcing contract applies.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_bushings_and_forcing(
+        model: &ArticulatedModel,
+        state: &FreeFloatingMotionState,
+        loads: SpatialMotionLoads<'_>,
+        loops: &[BilateralLoop],
+        rows: &[JointConstraint],
+        bushings: &[SpatialBushing],
+        duration: f64,
+        config: BilateralLoopConfig,
+        mut forcing: impl FnMut(
+            f64,
+            &FreeFloatingMotionState,
+            &mut [Wrench],
+            &mut [f64],
+        ) -> Result<(), FreeFloatingMotionError>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ForcedBilateralLoopStep<MixedBilateralLoopStep>, BilateralLoopError> {
+        step_bilateral_forcing_evaluated(
+            model,
+            state,
+            loads,
+            loops,
+            rows,
+            bushings,
+            duration,
+            config,
+            None,
+            Some(&mut forcing),
+            cancelled,
+        )
+    }
+
     /// The same simultaneous rows with complete passive six-coordinate matrices.
     #[allow(clippy::too_many_arguments)]
     pub fn step_with_coupled_bushings(
@@ -841,6 +995,41 @@ pub mod joint {
             duration,
             config,
             Some(&mut effort),
+            cancelled,
+        )
+    }
+
+    /// The same simultaneous environmental/actuator law and mixed rigid rows,
+    /// with full passive six-coordinate bushing matrices and native recoil.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_coupled_bushings_and_forcing(
+        model: &ArticulatedModel,
+        state: &FreeFloatingMotionState,
+        loads: SpatialMotionLoads<'_>,
+        loops: &[BilateralLoop],
+        rows: &[JointConstraint],
+        bushings: &[CoupledSpatialBushing],
+        duration: f64,
+        config: BilateralLoopConfig,
+        mut forcing: impl FnMut(
+            f64,
+            &FreeFloatingMotionState,
+            &mut [Wrench],
+            &mut [f64],
+        ) -> Result<(), FreeFloatingMotionError>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ForcedBilateralLoopStep<MixedBilateralLoopStep>, BilateralLoopError> {
+        step_bilateral_forcing_evaluated(
+            model,
+            state,
+            loads,
+            loops,
+            rows,
+            bushings,
+            duration,
+            config,
+            None,
+            Some(&mut forcing),
             cancelled,
         )
     }
@@ -1087,8 +1276,28 @@ fn step_bilateral_evaluated<B: BushingLaw>(
     duration: f64,
     config: BilateralLoopConfig,
     effort: Option<&mut EffortLaw<'_>>,
-    mut cancelled: impl FnMut() -> bool,
+    cancelled: impl FnMut() -> bool,
 ) -> Result<MixedBilateralLoopStep, BilateralLoopError> {
+    step_bilateral_forcing_evaluated(
+        model, state, loads, loops, joint_rows, bushings, duration, config, effort, None, cancelled,
+    )
+    .map(|result| result.step)
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn step_bilateral_forcing_evaluated<B: BushingLaw>(
+    model: &ArticulatedModel,
+    state: &FreeFloatingMotionState,
+    loads: SpatialMotionLoads<'_>,
+    loops: &[BilateralLoop],
+    joint_rows: &[JointConstraint],
+    bushings: &[B],
+    duration: f64,
+    config: BilateralLoopConfig,
+    effort: Option<&mut EffortLaw<'_>>,
+    forcing: Option<&mut ForcingLaw<'_>>,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<ForcedBilateralLoopStep<MixedBilateralLoopStep>, BilateralLoopError> {
     poll(&mut cancelled)?;
     validate_config(config.nonlinear)?;
     if !duration.is_finite() || duration <= 0.0 {
@@ -1206,10 +1415,18 @@ fn step_bilateral_evaluated<B: BushingLaw>(
     let mut guess = state.joint_velocity.clone();
     let w = state.base.twist_body.angular;
     guess.extend([w.x, w.y, w.z]);
+    if forcing.is_some() {
+        scales.extend([config.nonlinear.linear_velocity_scale; 3]);
+        let velocity = initial_coordinates
+            .linear_world
+            .scale(1.0 / initial_map.mass());
+        guess.extend([velocity.x, velocity.y, velocity.z]);
+    }
+    let stage_dimension = scales.len();
     for (x, s) in guess.iter_mut().zip(&scales) {
         *x /= s;
     }
-    guess.resize(n + 3 + count, 0.0);
+    guess.resize(stage_dimension + count, 0.0);
     let evaluations = Cell::new(0usize);
     let cancelled = RefCell::new(cancelled);
     let effort_values = if effort.is_some() {
@@ -1218,6 +1435,15 @@ fn step_bilateral_evaluated<B: BushingLaw>(
         Vec::new()
     };
     let effort = RefCell::new((effort, effort_values));
+    let forcing_values = if forcing.is_some() {
+        (
+            loads.held.external_body_wrench.to_vec(),
+            loads.held.generalized_force.to_vec(),
+        )
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    let forcing = RefCell::new((forcing, forcing_values));
     let charge = || -> Result<(), DistanceLoopError> {
         let used = evaluations.get();
         if used >= config.nonlinear.maximum_evaluations {
@@ -1237,7 +1463,7 @@ fn step_bilateral_evaluated<B: BushingLaw>(
         let mut kicked = state.clone();
         let mut coordinates = initial_coordinates;
         for (j, column) in initial_mobility.columns.iter().enumerate() {
-            let magnitude = x[n + 3 + j] * impulse_scales[j];
+            let magnitude = x[stage_dimension + j] * impulse_scales[j];
             for (v, dv) in kicked.joint_velocity.iter_mut().zip(&column.joint) {
                 *v += magnitude * dv;
             }
@@ -1261,16 +1487,26 @@ fn step_bilateral_evaluated<B: BushingLaw>(
             bushings,
         };
         let midpoint = {
+            let mut forcing = forcing.borrow_mut();
             let mut effort = effort.borrow_mut();
             let (law, values) = &mut *effort;
-            if let Some(law) = law.as_deref_mut() {
+            if let (Some(law), (wrenches, efforts)) = &mut *forcing {
+                equations.evaluate_with_forcing(
+                    &x[..stage_dimension],
+                    &mut **law,
+                    wrenches,
+                    efforts,
+                    None,
+                    &mut *cancel,
+                )?
+            } else if let Some(law) = law.as_deref_mut() {
                 equations.evaluate_with_effort(
-                    &x[..n + 3],
+                    &x[..stage_dimension],
                     Some((law, values.as_mut_slice())),
                     &mut *cancel,
                 )?
             } else {
-                equations.evaluate(&x[..n + 3], &mut *cancel)?
+                equations.evaluate(&x[..stage_dimension], &mut *cancel)?
             }
         };
         let q = advance(
@@ -1294,13 +1530,16 @@ fn step_bilateral_evaluated<B: BushingLaw>(
         poll(&mut *cancel)?;
         Ok(residual)
     };
-    let problem =
-        FallibleFiniteDifference::new(n + 3 + count, config.nonlinear.difference_step, residual)
-            .map_err(difference_error)?;
+    let problem = FallibleFiniteDifference::new(
+        stage_dimension + count,
+        config.nonlinear.difference_step,
+        residual,
+    )
+    .map_err(difference_error)?;
     let solver_config = NewtonKrylovConfig {
         absolute_tolerance: target,
         relative_tolerance: 0.,
-        linear_restart: config.nonlinear.krylov_restart.min(n + 3 + count),
+        linear_restart: config.nonlinear.krylov_restart.min(stage_dimension + count),
         max_linear_cycles: 8,
         forcing_minimum: 1e-3,
         forcing_maximum: 0.1,
@@ -1328,7 +1567,7 @@ fn step_bilateral_evaluated<B: BushingLaw>(
     if !report.converged {
         return Err(ImplicitSpatialError::Unresolved(report).into());
     }
-    let initial_impulse: Vec<_> = solver.x[n + 3..]
+    let initial_impulse: Vec<_> = solver.x[stage_dimension..]
         .iter()
         .zip(&impulse_scales)
         .map(|(x, s)| x * s)
@@ -1365,16 +1604,26 @@ fn step_bilateral_evaluated<B: BushingLaw>(
         bushings,
     };
     let actual_midpoint = {
+        let mut forcing = forcing.borrow_mut();
         let mut effort = effort.borrow_mut();
         let (law, values) = &mut *effort;
-        if let Some(law) = law.as_deref_mut() {
+        if let (Some(law), (wrenches, efforts)) = &mut *forcing {
+            equations.evaluate_with_forcing(
+                &solver.x[..stage_dimension],
+                &mut **law,
+                wrenches,
+                efforts,
+                None,
+                &mut *cancel,
+            )?
+        } else if let Some(law) = law.as_deref_mut() {
             equations.evaluate_with_effort(
-                &solver.x[..n + 3],
+                &solver.x[..stage_dimension],
                 Some((law, values.as_mut_slice())),
                 &mut *cancel,
             )?
         } else {
-            equations.evaluate(&solver.x[..n + 3], &mut *cancel)?
+            equations.evaluate(&solver.x[..stage_dimension], &mut *cancel)?
         }
     };
     let final_q = advance(
@@ -1400,6 +1649,10 @@ fn step_bilateral_evaluated<B: BushingLaw>(
     }
     let (initial_geometric_couple_impulse_world, initial_geometric_couple_work) =
         geometric_work(&before, &kicked_map.shape, kicked.base, &initial_impulse)?;
+    let midpoint_state = actual_midpoint.state.clone();
+    let com_velocity_residual_world = actual_midpoint
+        .com_velocity_residual_world
+        .unwrap_or_default();
     let midpoint = finish_midpoint(
         model,
         &kicked,
@@ -1527,7 +1780,7 @@ fn step_bilateral_evaluated<B: BushingLaw>(
         super::validate_vec3(value, "bilateral_loop.reaction_momentum")?;
     }
     poll(&mut *cancel)?;
-    Ok(MixedBilateralLoopStep {
+    let step = MixedBilateralLoopStep {
         initial_joint_multipliers: initial_impulse[loop_count..].to_vec(),
         final_joint_multipliers: final_impulse[loop_count..].to_vec(),
         initial_joint_impulse,
@@ -1569,6 +1822,11 @@ fn step_bilateral_evaluated<B: BushingLaw>(
             linear_momentum_balance_residual_world,
             angular_momentum_balance_residual_world,
         },
+    };
+    Ok(ForcedBilateralLoopStep {
+        step,
+        midpoint_state,
+        com_velocity_residual_world,
     })
 }
 

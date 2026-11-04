@@ -2,11 +2,13 @@
 use fs_ga::{Mat3, Se3, So3, So3Tangent, Twist, Vec3, Wrench};
 use fs_mbd::articulated::motion::spatial_loads::bushing::{MaterialFrame, SpatialBushing};
 use fs_mbd::articulated::motion::spatial_loads::implicit::distance::{
-    DistanceLoop, DistanceLoopConfig, DistanceLoopError, DistanceLoopStep, MAX_DISTANCE_LOOPS,
+    BilateralLoop, DistanceLoop, DistanceLoopConfig, DistanceLoopError, DistanceLoopStep,
+    MAX_DISTANCE_LOOPS, step_free_floating_bilateral_loops_with_forcing,
     step_free_floating_distance_loops, step_free_floating_distance_loops_with_bushings,
 };
 use fs_mbd::articulated::motion::spatial_loads::implicit::{
-    ImplicitSpatialError, step_free_floating_spatial_implicit,
+    ImplicitSpatialConfig, ImplicitSpatialError, step_free_floating_spatial_implicit,
+    step_free_floating_spatial_implicit_with_forcing,
 };
 use fs_mbd::articulated::motion::spatial_loads::{
     MaterialPoint, SpatialMotionLoads, WorldPointLoad,
@@ -926,4 +928,184 @@ fn late_cancellation_final_solve_budget_and_bad_geometry_keep_inputs_unchanged()
         ),
         Err(DistanceLoopError::Invalid(_))
     ));
+}
+
+fn triangle_environment(
+    model: &ArticulatedModel,
+    state: &FreeFloatingMotionState,
+    reduced: bool,
+    time: f64,
+    wrenches: &mut [Wrench],
+    effort: &mut [f64],
+) -> Result<(), FreeFloatingMotionError> {
+    let motion = forward_kinematics(
+        model,
+        BaseState::prescribed(
+            state.base.world_from_base,
+            state.base.twist_body,
+            Twist::zero(),
+        ),
+        &state.joint_position,
+        &state.joint_velocity,
+    )?;
+    let points = [
+        (1, Vec3::new(0.7, -0.1, 0.2)),
+        if reduced {
+            // Arm B has the fixed +pi/2 rotation in the independently assembled
+            // compound inertia: (.9,.2,-.1) maps to (-.2,.9,-.1) in arm A.
+            (1, Vec3::new(-0.2, 0.9, -0.1))
+        } else {
+            (2, Vec3::new(0.9, 0.2, -0.1))
+        },
+    ];
+    for (link, arm) in points {
+        let pose = motion.world_from_link[link];
+        let twist = motion.body_twist[link];
+        let point = pose.transform_point(arm)?;
+        let velocity = pose
+            .rotation()
+            .rotate(twist.linear + twist.angular.cross(arm))?;
+        let relative = Vec3::new(0.08, -0.03, 0.02) - velocity;
+        let force = relative.scale(0.5 + 0.8 * relative.norm())
+            + (Vec3::new(0.5, -0.2, 0.1) - point).scale(0.2)
+            + Vec3::new(0.15 + 0.1 * time, -0.07, 0.03 - 0.05 * time);
+        let local = pose.rotation().inverse().rotate(force)?;
+        wrenches[link].force = wrenches[link].force + local;
+        wrenches[link].torque = wrenches[link].torque + arm.cross(local);
+    }
+    if reduced {
+        effort[0] -= 0.4 * state.joint_velocity[0];
+    } else {
+        effort[0] -= 0.3 * state.joint_velocity[0];
+        effort[1] -= 0.1 * state.joint_velocity[1];
+    }
+    Ok(())
+}
+
+#[test]
+fn nonlinear_environment_on_closed_triangle_converges_to_independent_full_inertia_reduction() {
+    let (model, reduced, initial, mut reference, constraint) = triangle();
+    let loads = SpatialMotionLoads {
+        held: held(&[0.8, -0.2], &[ZERO; 3]),
+        world_points: &[],
+        connections: &[],
+    };
+    let reduced_loads = SpatialMotionLoads {
+        held: held(&[0.6], &[ZERO; 2]),
+        world_points: &[],
+        connections: &[],
+    };
+    let nonlinear = ImplicitSpatialConfig {
+        residual_tolerance: 1e-12,
+        ..Default::default()
+    };
+    let controls = DistanceLoopConfig {
+        nonlinear,
+        ..Default::default()
+    };
+    let duration = 0.3;
+    // The reference has one unconstrained joint and an independently assembled
+    // full non-diagonal inertia; it never calls the loop geometry or mobility.
+    for index in 0..256 {
+        let dt = duration / 256.0;
+        reference = step_free_floating_spatial_implicit_with_forcing(
+            &reduced,
+            &reference,
+            reduced_loads,
+            dt,
+            nonlinear,
+            |elapsed, stage, w, effort| {
+                triangle_environment(
+                    &reduced,
+                    stage,
+                    true,
+                    index as f64 * dt + elapsed,
+                    w,
+                    effort,
+                )
+            },
+            || false,
+        )
+        .unwrap()
+        .step
+        .spatial
+        .motion
+        .state_after;
+    }
+    let mut errors = Vec::new();
+    let mut work_defects = Vec::new();
+    for count in [8, 16, 32] {
+        let mut state = initial.clone();
+        let mut actual_reactions = 0.0;
+        let mut constraint_work = 0.0;
+        for index in 0..count {
+            let dt = duration / count as f64;
+            let mut last = None;
+            let mut calls = 0;
+            let result = step_free_floating_bilateral_loops_with_forcing(
+                &model,
+                &state,
+                loads,
+                &[BilateralLoop::Distance(constraint)],
+                &[],
+                dt,
+                controls,
+                |elapsed, stage, w, effort| {
+                    assert_eq!(w, &[ZERO; 3]);
+                    assert_eq!(effort, &[0.8, -0.2]);
+                    calls += 1;
+                    last = Some(stage.clone());
+                    triangle_environment(
+                        &model,
+                        stage,
+                        false,
+                        index as f64 * dt + elapsed,
+                        w,
+                        effort,
+                    )
+                },
+                || false,
+            )
+            .unwrap();
+            let step = &result.step;
+            assert_eq!(calls, step.residual_evaluations);
+            assert_eq!(last.as_ref(), Some(&result.midpoint_state));
+            account(step);
+            actual_reactions += step.initial_impulse_ns[0].abs() + step.final_impulse_ns[0].abs();
+            constraint_work += step.constraint_impulse_work;
+            state = step.state_after.clone();
+            let geometry = forward_kinematics(
+                &model,
+                BaseState::prescribed(
+                    state.base.world_from_base,
+                    state.base.twist_body,
+                    Twist::zero(),
+                ),
+                &state.joint_position,
+                &state.joint_velocity,
+            )
+            .unwrap();
+            let a = geometry.world_from_link[1]
+                .transform_point(constraint.a.point_body)
+                .unwrap();
+            let b = geometry.world_from_link[2]
+                .transform_point(constraint.b.point_body)
+                .unwrap();
+            close((b - a).norm(), constraint.length_m, 1e-9);
+            close(
+                state.joint_position[1] - state.joint_position[0],
+                core::f64::consts::FRAC_PI_2,
+                1e-9,
+            );
+            close(state.joint_velocity[1], state.joint_velocity[0], 1e-9);
+        }
+        assert!(actual_reactions > 1e-3);
+        errors.push(reduced_error(&state, &reference));
+        work_defects.push(constraint_work);
+    }
+    eprintln!("forced closed triangle errors {errors:?}; actual constraint work {work_defects:?}");
+    for pair in errors.windows(2) {
+        assert!((3.6..4.4).contains(&(pair[0] / pair[1])), "{errors:?}");
+    }
+    assert!(errors[2] < 1e-4, "{errors:?}");
 }

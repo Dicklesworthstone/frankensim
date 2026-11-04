@@ -4073,6 +4073,46 @@ finite-residual world torque and work, and atomic callback/limit/budget/
 cancellation refusals. All seven and five original implicit-effort regressions
 pass with the original native dynamics and numerical solver owners.
 
+## Environmental forcing in closed free-floating mechanisms
+
+`articulated::motion::spatial_loads::implicit::distance` now resolves smooth
+state-dependent environmental wrenches inside the original distance/point-loop
+solve. The diagonal and full-matrix bushing forcing entry points also compose
+with constant affine joint rows through `distance::joint`. The original
+nonlinear system gains three midpoint COM-velocity coordinates; all material
+and joint reaction multipliers remain in the same simultaneous solve.
+
+The forcing callback receives the actual complete trial state at elapsed time
+h/2, including carrier pose, velocity and the current initial constraint impulse.
+Native loaded ABA, inertia responses and material geometry remain authoritative.
+The final verification reapplies the actual summed native constraint impulse
+and samples the force law at that reconstructed midpoint. Its retained sample
+owns external impulse and work; finalization does not call the law again.
+Callbacks must be smooth and repeatable over numerical derivative probes,
+including probes outside the constraint manifold, and must stage their own
+history until the entire step succeeds.
+
+`ForcedBilateralLoopStep` retains the original loop receipt, accepted complete
+midpoint and physical COM-velocity residual. The canonical continuation state
+is the original `state_after`, after the final native tangent impulse. Both
+constraint events preserve actual finite carrier recoil and signed quadratic
+work. External work, genuine actuator work, passive storage/damping and
+constraint work remain distinct; a constraint-work defect is not heat.
+The original position, tangency, mobility, physical-limit, budget and cancellation
+gates remain in force. Held-load and effort-only paths retain their n+3 equations.
+
+This adds smooth environmental feedback to existing rigid closures, not contact
+activation, nonsmooth force histories, a nonlinear-branch enclosure or an
+energy-exact/symplectic constrained integrator.
+
+Four new physical/refusal cases pass with 28 existing native loop regressions.
+Independent reduced equations check coupled carrier translation/spin, full
+bushings, environmental drag, actual material/joint reactions and signed work.
+A nonlinear closed triangle converges at second order against an independently
+assembled full-inertia reduction. Diagonal/full paths, final-sample ownership
+and atomic late refusal are also covered. Both changed original test targets
+typecheck against the full actual production dependency graph.
+
 ## Rigid bilateral distance-loop motion with native reactions
 
 `articulated::motion::spatial_loads::implicit::distance` advances freely moving
