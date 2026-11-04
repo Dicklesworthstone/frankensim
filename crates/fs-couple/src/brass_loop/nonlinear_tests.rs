@@ -41,7 +41,7 @@ fn specimen_with_state() -> (FrozenGas, GasState) {
     (gas, state)
 }
 
-fn specimen() -> FrozenGas {
+pub(super) fn specimen() -> FrozenGas {
     specimen_with_state().0
 }
 
@@ -621,4 +621,80 @@ fn lip_constriction_noise_and_jet_noise_on_the_nonlinear_bore_add_in_the_same_se
     assert!(!same_bits(&pair, &constriction_only), "the jet noise reaches the cup beside the constriction noise");
     assert!(same_bits(&pair, &both(7)), "the pair repeats bit for bit");
     assert!(!same_bits(&pair, &both(8)), "another constriction seed gives another pair");
+}
+
+
+fn finite_spec(volume_m3: f64, feed_area_m2: f64) -> FiniteMouthSpec {
+    FiniteMouthSpec {
+        volume_m3,
+        feed_area_m2,
+        initial_pressure_pa: 106_325.0,
+        initial_temperature_k: 293.15,
+    }
+}
+
+#[test]
+fn finite_mouth_pressure_drives_the_actual_lip_without_a_control_reset() {
+    let mut lip = probe_lip().with_finite_mouth(finite_spec(2e-5, 0.0)).unwrap();
+    let before = lip.finite_mouth_state().unwrap();
+    // A changed gesture drives the upstream feed. It cannot create or erase
+    // stored gas, including when that feed is sealed.
+    lip.apply(BrassControl::SetBlowingPressure(35_000.0)).unwrap();
+    assert_eq!(lip.finite_mouth_state().unwrap(), before);
+    lip.apply(BrassControl::SetBlowingPressure(0.0)).unwrap();
+    assert_eq!(lip.finite_mouth_state().unwrap(), before);
+    let dt = lip.clock.gas_step_s();
+    let (_, _, face, _, drive, _) = lip.gas_step(dt).unwrap();
+    assert!((drive - 5000.0).abs() < 1e-8, "actual stored overpressure drives the lip");
+    assert!(face.mass_flow_kg_s > 0.0 && face.pressure_pa > lip.room.pressure);
+    let report = *lip.finite_mouth_report().unwrap();
+    assert_eq!(report.before, before);
+    assert_eq!(report.after, lip.finite_mouth_state().unwrap());
+    assert_eq!(report.feed_mass_kg, 0.0);
+    assert_eq!(report.feed_energy_j, 0.0);
+    assert!(report.bore_mass_kg > 0.0);
+    assert!(report.after.pressure_pa < before.pressure_pa);
+    assert!(report.after.temperature_k < before.temperature_k);
+    assert!(report.mass_residual_kg.abs() < 1e-12 * before.mass_kg);
+    assert!(report.energy_residual_j.abs() < 1e-12 * before.energy_j.abs());
+    for _ in 0..31 {
+        lip.gas_step(dt).unwrap();
+    }
+    assert!(lip.finite_mouth_state().unwrap().pressure_pa < report.after.pressure_pa);
+}
+
+#[test]
+fn refused_finite_mouth_stage_keeps_the_lip_and_storage_at_the_last_accepted_state() {
+    let mut lip = probe_lip().with_finite_mouth(finite_spec(1e-12, 0.0)).unwrap();
+    let before = lip.finite_mouth_state().unwrap();
+    let lip_state = lip.lip_state.clone();
+    let cells = lip.bore.solver().states().to_vec();
+    let clock = lip.bore.solver().time();
+    let face = lip.face_pa;
+    let dt = lip.clock.gas_step_s();
+    let refusal = lip.gas_step(dt).unwrap_err();
+    assert!(refusal.contains("CflExceeded"));
+    assert_eq!(lip.finite_mouth_state().unwrap(), before);
+    assert!(lip.finite_mouth_report().is_none());
+    assert_eq!(lip.lip_state, lip_state);
+    assert_eq!(lip.face_pa, face);
+    assert_eq!(lip.bore.solver().states(), cells);
+    assert_eq!(lip.bore.solver().time(), clock);
+}
+
+#[test]
+fn finite_mouth_is_attached_once_before_stepping_and_requires_closed_noise_work() {
+    let spec = finite_spec(2e-5, 1e-6);
+    assert!(probe_lip().with_finite_mouth(spec).unwrap().with_finite_mouth(spec).is_err());
+    let mut advanced = probe_lip();
+    advanced.apply(BrassControl::SetBlowingPressure(3000.0)).unwrap();
+    let dt = advanced.clock.gas_step_s();
+    advanced.gas_step(dt).unwrap();
+    assert!(advanced.with_finite_mouth(spec).is_err());
+    assert!(probe_lip().with_finite_mouth(spec).unwrap().with_jet_noise(jet_card(0.0, 7)).is_err());
+    assert!(probe_lip().with_jet_noise(jet_card(0.0, 7)).unwrap().with_finite_mouth(spec).is_err());
+    assert!(probe_lip().with_finite_mouth(spec).unwrap()
+        .with_constriction_noise(constriction_card(7, 0.006)).is_err());
+    assert!(probe_lip().with_constriction_noise(constriction_card(7, 0.006)).unwrap()
+        .with_finite_mouth(spec).is_err());
 }

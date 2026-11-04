@@ -17,14 +17,21 @@
 //! its static enthalpy plus `u^2 / 2` is the mouth's stagnation enthalpy, using
 //! the same source's temperature-dependent heat capacity. A closed lip is a wall.
 //!
+//! An optional finite mouth plenum stores mass and internal energy. The
+//! blowing-pressure control then feeds it through an authored opening, and
+//! the evolving plenum pressure drives the lip. Feed and lip exchanges share
+//! the bore's SSP-RK2 stages, including its retried trials.
+//!
 //! The lip steps once per gas step under the cup pressure of the previous
 //! step's first stage, and the gap is held through both stages. The radiated
 //! observer receives every mechanics sample's mean bell volume flow.
 //!
-//! Limits, stated rather than hidden: the mouth is a fixed reservoir at the
-//! room's temperature and composition (no breath heating or exhaled CO2);
-//! reverse flow discharges the cup's static state; one held bore without valves;
-//! the bell radiates as a rigid baffled piston.
+//! Limits: the held feed uses the room's temperature and frozen composition
+//! (no exhaled CO2). A finite mouth is rigid, adiabatic and acoustically compact;
+//! it is not an anatomical lung model. The existing lip's swept-volume work
+//! remains outside this approximation; gas-exchange conservation is not a
+//! whole lip/gas passivity claim. Reverse flow discharges the cup's static
+//! state; one held bore without valves; the bell is a rigid baffled piston.
 
 use fs_duct::Duct;
 use fs_duct::nonlinear::bore::{BoreSpec, NonlinearBore, WallGas, WallMemory, WallReceipt};
@@ -35,6 +42,10 @@ use fs_phs::{PortHamiltonian, mass_spring_damper};
 
 use super::{BrassBlockDiag, BrassControl, LipIsland, prepare_lip, zero_crossing_lock_hz};
 use crate::turbulence_noise::{ConstrictionNoise, ConstrictionNoiseCard, JetNoiseCard, JetNoiseCoverage, LipJetNoise};
+
+mod finite_mouth;
+pub use finite_mouth::{FiniteMouthReport, FiniteMouthSpec, FiniteMouthState};
+use finite_mouth::FiniteMouth;
 
 /// How the nonlinear bore is cut, clocked and walled.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -84,6 +95,7 @@ pub struct NonlinearLip {
     lip: LipIsland,
     blow_pa: f64,
     mouth: Primitive,
+    finite_mouth: Option<FiniteMouth>,
     clock: NonlinearClock,
     face_pa: f64,
     block_index: u64,
@@ -162,6 +174,7 @@ impl NonlinearLip {
             lip,
             blow_pa: 0.0,
             mouth: room,
+            finite_mouth: None,
             clock,
             face_pa: room.pressure,
             block_index: 0,
@@ -171,6 +184,42 @@ impl NonlinearLip {
             wall_viscosity_pa_s,
             reference_density_kg_m3,
         })
+    }
+
+    /// Attach finite upstream gas storage before any gas step.
+    ///
+    /// The blowing-pressure control becomes the held feed pressure; it never
+    /// resets the stored mass, energy or pressure. The actual mouth pressure
+    /// drives the lip. A zero feed area gives a sealed, precharged supply.
+    /// Every source state uses the bore's exact frozen caloric law.
+    ///
+    /// # Errors
+    /// Invalid storage or source data, repeated/late attachment, or a series
+    /// noise source whose work has no finite-inventory closure.
+    pub fn with_finite_mouth(mut self, spec: FiniteMouthSpec) -> Result<Self, String> {
+        if self.bore.solver().time().value() != 0.0 || self.finite_mouth.is_some() {
+            return Err("finite mouth must be attached once before any gas step".into());
+        }
+        if self.jet_noise.is_some() || self.constriction_noise.is_some() {
+            return Err("finite mouth does not close the work of jet_noise or constriction_noise".into());
+        }
+        let (supply, primitive) = FiniteMouth::new(&self.gas, spec, self.mouth)
+            .map_err(|e| format!("finite mouth refused: {e}"))?;
+        self.finite_mouth = Some(supply);
+        self.mouth = primitive;
+        Ok(self)
+    }
+
+    /// Current finite upstream storage; absent for the original held reservoir.
+    #[must_use]
+    pub fn finite_mouth_state(&self) -> Option<FiniteMouthState> {
+        self.finite_mouth.as_ref().map(|supply| supply.state(self.mouth))
+    }
+
+    /// Most recent accepted finite-mouth gas exchange, on the bore's clock.
+    #[must_use]
+    pub fn finite_mouth_report(&self) -> Option<&FiniteMouthReport> {
+        self.finite_mouth.as_ref().and_then(FiniteMouth::report)
     }
 
     /// Attach the opt-in lip jet noise before any step: a series pressure source added to the blowing pressure that drives
@@ -184,6 +233,9 @@ impl NonlinearLip {
     /// # Errors
     /// The reason [`JetNoiseCard::validate`] gives.
     pub fn with_jet_noise(mut self, card: JetNoiseCard) -> Result<Self, String> {
+        if self.finite_mouth.is_some() {
+            return Err("jet_noise has no finite-mouth work closure".into());
+        }
         self.jet_noise = Some(LipJetNoise::new(card).map_err(str::to_string)?);
         Ok(self)
     }
@@ -205,6 +257,9 @@ impl NonlinearLip {
     /// # Errors
     /// The reason [`ConstrictionNoiseCard::validate`] gives.
     pub fn with_constriction_noise(mut self, card: ConstrictionNoiseCard) -> Result<Self, String> {
+        if self.finite_mouth.is_some() {
+            return Err("constriction_noise has no finite-mouth work closure".into());
+        }
         self.constriction_noise = Some(ConstrictionNoise::new(card, self.clock.gas_step_s()).map_err(str::to_string)?);
         Ok(self)
     }
@@ -225,10 +280,15 @@ impl NonlinearLip {
                     .gas
                     .conserved(density, 0.0, pressure)
                     .map_err(|e| format!("mouth reservoir refused: {e}"))?;
-                self.mouth = self
+                let feed = self
                     .gas
                     .primitive(state, || false)
                     .map_err(|e| format!("mouth reservoir refused: {e}"))?;
+                if let Some(supply) = self.finite_mouth.as_mut() {
+                    supply.set_feed(feed);
+                } else {
+                    self.mouth = feed;
+                }
                 self.blow_pa = p;
             }
             BrassControl::SetLipTension(t) => {
@@ -300,12 +360,12 @@ impl NonlinearLip {
             for frame in 0..ratio {
                 let mut flow = 0.0;
                 for _ in 0..steps {
-                    let (gap, defect, face, outlet, drive) = self.gas_step(dt)?;
+                    let (gap, defect, face, outlet, drive, mouth_density) = self.gas_step(dt)?;
                     gap_min = gap_min.min(gap);
                     gap_max = gap_max.max(gap);
                     gap_acc += gap;
                     worst_defect = worst_defect.max(defect);
-                    let mouth_volume = face.mass_flow_kg_s.max(0.0) / self.mouth.density;
+                    let mouth_volume = face.mass_flow_kg_s.max(0.0) / mouth_density;
                     blow_work += drive * mouth_volume * dt;
                     bore_work += (face.pressure_pa - self.room.pressure) * face.mass_flow_kg_s
                         / self.room.density
@@ -335,15 +395,20 @@ impl NonlinearLip {
     // One gas step: lip under the last cup pressure, then the bore with the
     // lip face at both stages. Returns the gap, the lip supply defect, the
     // first-stage face, the mean bell volume flow and the driving pressure the
-    // step used (the blowing pressure, plus the opt-in jet noise).
-    fn gas_step(&mut self, dt: f64) -> Result<(f64, f64, LipFace, f64, f64), String> {
+    // step used, and the original mouth density for its volume-flow diagnostic.
+    fn gas_step(&mut self, dt: f64) -> Result<(f64, f64, LipFace, f64, f64, f64), String> {
         // The opt-in jet noise is a series pressure source in the lip's driving pressure: it adds to the force on the lip and
         // to the stagnation pressure of the mouth reservoir the lip channel meters from, as in the linear loop. It reads the
         // previous gas step's metered flow and gap, and its speed is bounded by the Bernoulli speed of the present pressure
         // drop. The opt-in constriction noise joins the same series drive beside it: it reads the previous gas step's forward
         // flow, its amplitude follows the held blowing pressure, and it needs no gap. Zero is not added and the mouth state is
         // not rebuilt, so a lip without either, or whose gates are shut, keeps `drive == blow_pa` and `mouth` bit for bit.
-        let mut drive = self.blow_pa;
+        let mouth_density = self.mouth.density;
+        let mut drive = if self.finite_mouth.is_some() {
+            self.mouth.pressure - self.room.pressure
+        } else {
+            self.blow_pa
+        };
         let mut mouth = self.mouth;
         let mut noisy = false;
         if let Some(source) = self.jet_noise.as_mut() {
@@ -391,23 +456,38 @@ impl NonlinearLip {
         )
         .map_err(|_| "lip island step refused".to_string())?;
         let defect = record.supply_defect().abs();
-        self.lip_state = record.x;
-        let gap = (self.lip.rest_gap_m + self.lip_state[0]).max(0.0);
+        let gap = (self.lip.rest_gap_m + record.x[0]).max(0.0);
         let opening = self.lip.width_m * gap;
         let inlet = self.bore.inlet_area_m2();
         let gas = &self.gas;
+        let mut finite_trial = self.finite_mouth.as_ref().map(|supply| supply.trial(mouth, dt, inlet));
         let mut first = None;
         let step = self
             .bore
             .step(|stage: &PortStage| {
-                let face = lip_face(gas, stage.left.1, mouth, opening, inlet)?;
-                if stage.stage == 0 {
-                    first = Some(face);
-                }
-                Ok(Some(face.flux))
+                let mut evaluate = |mouth| {
+                    let face = lip_face(gas, stage.left.1, mouth, opening, inlet)?;
+                    if stage.stage == 0 {
+                        first = Some(face);
+                    }
+                    Ok(face.flux)
+                };
+                let flux = if let Some(trial) = finite_trial.as_mut() {
+                    trial.flux(gas, stage, evaluate)?
+                } else {
+                    evaluate(mouth)?
+                };
+                Ok(Some(flux))
             })
             .map_err(|e| format!("nonlinear bore step refused: {e}"))?;
         let face = first.ok_or_else(|| "the bore offered no first stage".to_string())?;
+        if let Some(trial) = finite_trial {
+            let supply = self.finite_mouth.as_mut()
+                .ok_or_else(|| "finite mouth lost its accepted owner".to_string())?;
+            self.mouth = supply.commit(trial, &step.report)
+                .map_err(|e| format!("finite mouth commit refused: {e}"))?;
+        }
+        self.lip_state = record.x;
         self.face_pa = face.pressure_pa;
         if let Some(source) = self.jet_noise.as_mut() {
             // The metered mass flow as a volume flow at the reference density: `Re_h = Q rho / (w mu) = mdot / (w mu)` needs
@@ -418,7 +498,7 @@ impl NonlinearLip {
             // The same metered volume flow: the source needs it forward (positive), and a negative flow is silent.
             source.record(face.mass_flow_kg_s / self.reference_density_kg_m3);
         }
-        Ok((gap, defect, face, step.outlet_volume_flow_m3_s, drive))
+        Ok((gap, defect, face, step.outlet_volume_flow_m3_s, drive, mouth_density))
     }
 }
 

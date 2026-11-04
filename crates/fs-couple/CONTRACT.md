@@ -8586,8 +8586,8 @@ None.
 
 - `brass_loop::nonlinear` (feature `nonlinear-brass`, bead frankensim-giuhr,
   IRP M2.3-W2a): the same lip island on the shared nonlinear Euler bore
-  (`fs_duct::nonlinear::bore`). The mouth is a stagnation reservoir at room
-  temperature and room pressure plus the blow. Forward flow leaves it through
+  (`fs_duct::nonlinear::bore`). By default the mouth is a held stagnation
+  reservoir at room temperature and room pressure plus the blow. Forward flow leaves it through
   the source's isentropic nozzle at the face pressure; reverse flow leaves the
   bore's static end state into the mouth. The face pressure solves continuity
   between the metered lip flow and the bore's own end wave (a strictly
@@ -8608,6 +8608,35 @@ None.
   advances once per gas step by its exact zero-order-hold split under the face
   pressure. The bell flow is averaged per mechanics sample and observed by the
   multirate baffled receiver.
+  - **Finite mouth:** `with_finite_mouth(FiniteMouthSpec)` attaches an authored
+    rigid, adiabatic, acoustically compact upstream `fs_gas::Plenum`. Its
+    initial absolute pressure and temperature use the same frozen source as
+    the bore. The blowing-pressure control sets a held feed reservoir at room
+    temperature through an authored effective nozzle area; it never resets
+    the stored gas. Zero feed area makes a sealed precharged supply. Actual
+    stored pressure drives the lip. Forward and reverse feed use the donor's
+    source-owned nozzle and stagnation enthalpy; entering kinetic energy
+    thermalizes without being counted twice. Signed lip mass and total energy
+    use the identical boundary fluxes and SSP-RK2 stages as the actual bore.
+    Repeated stage-zero trials restart from accepted storage. Both candidates
+    pass original caloric admission and a compact-volume face-speed CFL of
+    0.45 before acceptance. The finite inventory and lip island publish only
+    after a successful bore step. The bore's existing post-gas wall-memory
+    refusal can still leave a partial step and requires ending the run.
+    `FiniteMouthState` exposes pressure, temperature, mass and sensible internal
+    energy; `FiniteMouthReport` retains accepted signed feed and native bore
+    exchanges, both storage residuals and the maximum stage CFL. Physical
+    energy adds the original source reference times mass. Candidate storage
+    needs no per-step heap allocation. Regressions exercise an independent
+    variable-Cp adiabatic tank law under step refinement, conserved bore-plus-
+    storage exchanges, reverse-flow filling/heating, feed reversal, rejected
+    and repeated stages, and actual lip forcing without control resets.
+    This is not an anatomical lung model: no feed-neck inertia, wall heat or
+    moving storage volume is implied. Existing lip swept-volume work remains
+    outside the approximation, so these gas budgets do not assert whole-loop
+    passivity. Jet/constriction series noise with finite storage refuses in
+    either attachment order until its work is closed; source-domain exits
+    refuse rather than clamp. Attach once before any gas step.
   - **Lip file:** `bore nonlinear <max_cell_m> <mechanics_per_output<=16>
     <gas_steps_per_mechanics<=64> <wall_poles> <band_lo_hz> <band_hi_hz>
     <wall_error<1>`. It needs `ambient thermochemical ...` with its source packs
