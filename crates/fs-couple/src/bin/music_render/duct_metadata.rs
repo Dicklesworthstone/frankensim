@@ -398,13 +398,18 @@ pub(super) fn reed_provenance(p: &fs_couple::render::schedule::reed::ReedPerform
             "bore-pressure-plus-compact-jet-proxy; not exterior microphone", String::new()),
         Some(info) => {
             let r = info.receiver;
+            // The grid latency is an observer artifact, not travel: it is
+            // recorded always, and removed only under the explicit opt-in.
+            let latency = info.pre_arrival_latency_samples;
+            let compensated = p.outlet_latency_discarded_samples() > 0;
             ("baffled-outlet",
                 "terminal-only Rayleigh pressure; same regional TMM and flanged feedback load; finite-history sampled approximation, not a certified broadband radiation match; no side-hole, jet, structural or room radiation; not measured calibration",
                 "terminal-only Rayleigh pressure in the bound exterior gas",
-                format!(",\"outlet_receiver\":{{\"position_m\":[{:e},{:e},{:e}],\"radius_m\":{:e},\"gas\":{},\"radial_rings\":{},\"angular_points\":{},\"maximum_frequency_hz\":{:e},\"fft_samples\":{},\"axial_delay_mechanical_samples\":{},\"exterior_delay_mechanical_samples\":[{},{}],\"priming_source_sample\":-1,\"delay_compensated\":false}}",
+                format!(",\"outlet_receiver\":{{\"position_m\":[{:e},{:e},{:e}],\"radius_m\":{:e},\"gas\":{},\"radial_rings\":{},\"angular_points\":{},\"maximum_frequency_hz\":{:e},\"fft_samples\":{},\"pre_arrival_latency_samples\":{latency},\"pre_arrival_latency_s\":{:e},\"pre_arrival_latency_compensated\":{compensated},\"axial_delay_mechanical_samples\":{},\"exterior_delay_mechanical_samples\":[{},{}],\"priming_source_sample\":-1,\"delay_compensated\":false}}",
                     r.position_m[0],r.position_m[1],r.position_m[2],info.radius_m,
                     gas_state(&info.gas),r.radial_rings,r.angular_points,r.maximum_frequency_hz,
-                    info.fft_samples,info.axial_delay_samples,info.exterior_delay_samples.0,
+                    info.fft_samples,latency as f64/f64::from(info.sample_rate_hz),
+                    info.axial_delay_samples,info.exterior_delay_samples.0,
                     info.exterior_delay_samples.1))
         }
     };

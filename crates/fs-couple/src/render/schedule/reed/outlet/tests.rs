@@ -195,6 +195,83 @@ fn delays_partitioning_and_request_refusals_preserve_the_complete_source() {
     assert_eq!(past_end, [321.0]);
 }
 
+fn with_outlet_latency(text: &str, block: usize, latency: OutletLatency) -> ReedPerformance {
+    ReedPerformance::from_bytes_with_sources_and_outlet_latency(text.as_bytes(), block,
+        ObservationPolicy::Diagnostic, None, |_| Err("no material cards".into()), latency).unwrap()
+}
+
+/// q15xc (MB new-mail 180). `OutletLatency::Compensate` emits the card's
+/// `audio` length, and it is bit for bit the retained output of the same card
+/// `latency` samples longer, from that card's sample `latency` on. `Retain` is
+/// the original constructor. Both the bell alone and bell plus hole.
+#[test]
+fn compensated_outlet_latency_is_a_longer_retained_render_shifted_bit_for_bit() {
+    let with_hole = SOURCE.replace(
+        "segments 2\ncylinder 0.0015 0.2\ncylinder 0.0015 0.3",
+        "segments 3\ncylinder 0.0015 0.2\nhole 0.0010 0.004 0.0015 1\ncylinder 0.0015 0.3",
+    );
+    assert!(with_hole.contains("\nhole 0.0010 0.004 0.0015 1\n"), "the fixture's bore changed");
+    for text in [SOURCE.as_str(), with_hole.as_str()] {
+        let mut compensated = with_outlet_latency(text, 37, OutletLatency::Compensate);
+        let samples = compensated.info().samples;
+        let info = compensated.outlet_receiver().unwrap();
+        let latency = compensated.outlet_latency_discarded_samples();
+        assert_eq!(latency, info.pre_arrival_latency_samples as u64);
+        assert_eq!(latency, (info.fft_samples / 4) as u64);
+        assert!(latency > 0 && latency < samples, "latency {latency} of {samples}");
+        let audio = format!("\naudio 48000 {samples} 2\n");
+        assert!(text.contains(&audio), "the fixture's audio record changed");
+        let longer = raw(&text.replace(&audio, &format!("\naudio 48000 {} 2\n", samples + latency)), 113);
+        assert_eq!(longer.len() as u64, samples + latency);
+        let mut out = vec![0.0; samples as usize];
+        for part in out.chunks_mut(37) { compensated.pressure_block(part).unwrap(); }
+        assert_eq!((compensated.samples_rendered(), compensated.remaining_samples()), (samples, 0));
+        let mut past_end = [321.0];
+        assert!(compensated.pressure_block(&mut past_end).is_err());
+        assert_eq!(past_end, [321.0]);
+        let shifted = &longer[latency as usize..];
+        assert_eq!(out.len(), shifted.len());
+        let differ = out.iter().zip(shifted).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+        assert_eq!(differ, 0, "compensated vs the longer card shifted by {latency}");
+        let mut retain = with_outlet_latency(text, 37, OutletLatency::Retain);
+        assert_eq!(retain.outlet_latency_discarded_samples(), 0);
+        let original = raw(text, 37);
+        let mut kept = vec![0.0; samples as usize];
+        for part in kept.chunks_mut(37) { retain.pressure_block(part).unwrap(); }
+        assert!(kept.iter().zip(&original).all(|(a, b)| a.to_bits() == b.to_bits()));
+        assert!(original.iter().zip(&longer).all(|(a, b)| a.to_bits() == b.to_bits()));
+    }
+    let legacy = SOURCE.replace(RECEIVER, "listener_m 0.5");
+    let error = ReedPerformance::from_bytes_with_sources_and_outlet_latency(legacy.as_bytes(), 37,
+        ObservationPolicy::Diagnostic, None, |_| Err("no material cards".into()),
+        OutletLatency::Compensate).err().unwrap();
+    assert!(error.to_string().contains("requires a baffled_outlet observer"), "{error}");
+}
+
+/// q15xc (MB new-mail 180): the recorded latency is `n / 4` on both the
+/// 16384- and the 32768-point outlet grids, and compensation drops exactly it.
+#[test]
+fn site_clarinet_outlet_latency_is_a_quarter_grid_on_16384_and_32768() {
+    const G3: &str = include_str!(
+        "../../../../../../../data/instruments/descriptions/clarinet/performances/BbClar.mf.G3.performance"
+    );
+    const A4: &str = include_str!(
+        "../../../../../../../data/instruments/descriptions/clarinet/performances/BbClar.mf.A4.performance"
+    );
+    for (label, text, grid) in [("G3", G3, 16384), ("A4", A4, 32768)] {
+        let retained = ReedPerformance::from_bytes(text.as_bytes(), 512)
+            .unwrap_or_else(|error| panic!("{label}: {error}"));
+        let info = retained.outlet_receiver().unwrap();
+        assert_eq!(info.fft_samples, grid, "{label}");
+        assert_eq!(info.pre_arrival_latency_samples, grid / 4, "{label}");
+        assert_eq!(retained.outlet_latency_discarded_samples(), 0, "{label}");
+        let compensated = with_outlet_latency(text, 512, OutletLatency::Compensate);
+        assert_eq!(compensated.outlet_receiver().unwrap().fft_samples, grid, "{label}");
+        assert_eq!(compensated.outlet_latency_discarded_samples(), (grid / 4) as u64, "{label}");
+        assert_eq!(compensated.remaining_samples(), compensated.info().samples, "{label}");
+    }
+}
+
 #[test]
 fn gas_changes_reach_physical_pressure_and_invalid_observation_retains_its_error() {
     let base = raw(&SOURCE, 37);

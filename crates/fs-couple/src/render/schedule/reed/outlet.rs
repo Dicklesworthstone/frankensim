@@ -45,6 +45,15 @@ impl TerminalObservation {
         }
         Ok(())
     }
+
+    /// The grid latency every mouth's observer shares, or `None` when the
+    /// mouths disagree: one output shift cannot then align them all.
+    pub(super) fn pre_arrival_latency_samples(&self) -> Option<usize> {
+        let latency = self.pressure.info().pre_arrival_latency_samples;
+        self.holes.iter()
+            .all(|hole| hole.info().pre_arrival_latency_samples == latency)
+            .then_some(latency)
+    }
 }
 
 pub(super) enum ObservationInput {
@@ -358,6 +367,8 @@ impl ReedPerformance {
     /// to observe every accepted outgoing wave. The legacy path retains its
     /// original block call. This is an observation adapter, not a new mechanical
     /// or control stepper. No real-time performance claim is made for this path.
+    /// Under [`OutletLatency::Compensate`] the first call first steps and drops
+    /// the grid latency's source samples through the same per-sample path.
     ///
     /// # Errors
     /// Request shape/horizon refuses before output or state changes. Physics
@@ -366,6 +377,11 @@ impl ReedPerformance {
     pub fn pressure_block(&mut self, output: &mut [f64]) -> Result<(), ReedPerformanceError> {
         self.validate_sample_count(output.len() as u64).map_err(ReedPerformanceError::Render)?;
         self.renderer.context().validate_block_len(output.len()).map_err(ReedPerformanceError::Render)?;
+        // Compensation exists only with a terminal (zero otherwise): leading
+        // samples step the same source and observers and are never emitted.
+        let pending = usize::try_from(self.outlet_latency_pending()).map_err(|_| {
+            ReedPerformanceError::Render(RenderError::Sizing { what: "outlet latency exceeds this host" })
+        })?;
         // The observer law acts on emitted pressure only, after the receiver:
         // the mechanics and feedback never see it.
         let Some(terminal) = &mut self.terminal else {
@@ -388,7 +404,7 @@ impl ReedPerformance {
             }
             return Ok(());
         };
-        for slot in output {
+        for index in 0..pending + output.len() {
             let mut proxy = [0.0];
             self.renderer.block(&mut proxy).map_err(ReedPerformanceError::Render)?;
             let RenderVoice::ReedBore(voice) = &self.renderer.context().voices[0] else {
@@ -412,7 +428,9 @@ impl ReedPerformance {
                     }
                 }
             }
-            *slot = sum;
+            if let Some(slot) = index.checked_sub(pending) {
+                output[slot] = sum;
+            }
         }
         Ok(())
     }

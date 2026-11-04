@@ -8,7 +8,7 @@ pub(super) fn run_with_gas_options(
     gas_options: &thermochemical::Options,
     required_schema: Option<&'static str>,
 ) -> Result<(), String> {
-    let (input, _, _, _, _, _, self_contained, attached_names) = options(args)?;
+    let (input, _, _, _, _, _, self_contained, attached_names, _) = options(args)?;
     if gas_options.record.is_some() {
         return Err(if self_contained {
             "--self-contained refuses external gas source files; wind gas records belong in the performance file"

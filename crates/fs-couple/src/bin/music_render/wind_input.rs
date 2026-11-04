@@ -9,7 +9,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 use fs_blake3::ContentHash;
 use fs_couple::pcm_wav::observation::{DecimatedRenderer, ObservationPolicy, PressureRenderer};
-use fs_couple::render::schedule::reed::{ReedPerformance, REED_PERFORMANCE_SCHEMA};
+use fs_couple::render::schedule::reed::{OutletLatency, ReedPerformance, REED_PERFORMANCE_SCHEMA};
 use fs_couple::bernoulli_aperture::performance::{ApertureObservation, AperturePerformance, CoupledAperture};
 use fs_couple::bernoulli_aperture::performance::file::{PlateValvePerformance, MAX_PLATE_VALVE_PERFORMANCE_BYTES, PLATE_VALVE_PERFORMANCE_SCHEMA};
 use fs_couple::bernoulli_aperture::radiation::BaffledRadiationLoad;
@@ -42,12 +42,14 @@ fn opening_loss_provenance<'a>(
 // The aperture-flow path, and whether `--labium` adds the labium displacement to it.
 type FlowsOption<'a> = Option<(&'a str, bool)>;
 
-fn options(args: &[String]) -> Result<(&str, &str, usize, bool, ObservationPolicy, FlowsOption<'_>, bool, Vec<&str>), String> {
+#[allow(clippy::type_complexity)]
+fn options(args: &[String]) -> Result<(&str, &str, usize, bool, ObservationPolicy, FlowsOption<'_>, bool, Vec<&str>, OutletLatency), String> {
     let mut paths = Vec::new();
     let mut flows = None;
     let mut labium = false;
     let mut block = None;
     let mut decimate = false;
+    let mut outlet_latency = OutletLatency::Retain;
     let mut self_contained = false;
     let mut attached_sources = Vec::new();
     let mut policy = ObservationPolicy::Diagnostic;
@@ -83,6 +85,12 @@ fn options(args: &[String]) -> Result<(&str, &str, usize, bool, ObservationPolic
                 if decimate { return Err("--decimate may only be supplied once".into()); }
                 decimate = true;
             }
+            "--compensate-outlet-latency" => {
+                if outlet_latency == OutletLatency::Compensate {
+                    return Err("--compensate-outlet-latency may only be supplied once".into());
+                }
+                outlet_latency = OutletLatency::Compensate;
+            }
             "--block" => {
                 if block.is_some() { return Err("--block may only be supplied once".into()); }
                 block = Some(iter.next().and_then(|v| v.parse::<usize>().ok())
@@ -102,9 +110,9 @@ fn options(args: &[String]) -> Result<(&str, &str, usize, bool, ObservationPolic
         return Err("--labium adds the labium jet displacement to --aperture-flows".into());
     }
     let [input, output] = paths.as_slice() else {
-        return Err("usage: music_render wind INPUT.performance OUT.wav [--block N] [--decimate] [--acceptance] [--aperture-flows FLOWS [--labium]] [--self-contained [--attached-source RELATIVE_PATH]...]".into());
+        return Err("usage: music_render wind INPUT.performance OUT.wav [--block N] [--decimate] [--acceptance] [--compensate-outlet-latency] [--aperture-flows FLOWS [--labium]] [--self-contained [--attached-source RELATIVE_PATH]...]".into());
     };
-    Ok((*input, *output, block.unwrap_or(512), decimate, policy, flows.map(|f| (f, labium)), self_contained, attached_sources))
+    Ok((*input, *output, block.unwrap_or(512), decimate, policy, flows.map(|f| (f, labium)), self_contained, attached_sources, outlet_latency))
 }
 
 // A physical propagation delay is source geometry, not an output/filter latency
@@ -1282,8 +1290,10 @@ fn load_with_sources(
     load_material: impl FnMut(&str) -> Result<NormalizedMaterialCardPack, String>,
 ) -> Result<Loaded, String> {
     load_with_all_sources(bytes, block, policy, sources, load_material,
-        |_| Err("MIMO radiation artifacts require an explicit source loader".into()), None)
+        |_| Err("MIMO radiation artifacts require an explicit source loader".into()), None,
+        OutletLatency::Retain)
 }
+#[allow(clippy::too_many_arguments)]
 fn load_with_all_sources(
     bytes: &[u8],
     block: usize,
@@ -1292,6 +1302,7 @@ fn load_with_all_sources(
     load_material: impl FnMut(&str) -> Result<NormalizedMaterialCardPack, String>,
     load_radiation: impl FnMut(&str) -> Result<Vec<u8>, String>,
     flow_tap: Option<(Box<dyn Write + Send>, bool)>,
+    outlet_latency: OutletLatency,
 ) -> Result<Loaded, String> {
     if flow_tap.is_some() && !bytes.starts_with(b"frankensim-flue-performance-v1\n") {
         return Err("--aperture-flows observes flue files only".into());
@@ -1439,7 +1450,7 @@ fn load_with_all_sources(
         Ok(Loaded{source:Box::new(p.into_renderer()),rate:i.sample_rate_hz,samples:i.samples,
             full_scale_pa:i.full_scale_pa,hash:i.input_hash,fixture:"plate-valve-input",source_json,observation_json:None})
     } else {
-        let p=ReedPerformance::from_bytes_with_sources(bytes,block,policy,sources,load_material).map_err(|e|e.to_string())?;
+        let p=ReedPerformance::from_bytes_with_sources_and_outlet_latency(bytes,block,policy,sources,load_material,outlet_latency).map_err(|e|e.to_string())?;
         let i=p.info();
         let observer_receipt=super::duct_metadata::reed_observer_json(&p).map_err(|e|e.to_string())?;
         let observer_json=format!("{}{}",super::duct_metadata::reed_provenance(&p),super::thermochemical::provenance(p.gas_records()));
@@ -1560,7 +1571,7 @@ fn run_with_prepared_sources(
     prepared: Option<attachments::AttachedSources>,
     required_schema: Option<&'static str>,
 ) -> Result<(), String> {
-    let (input, output, block, decimate, policy, flows, self_contained, attached_names) = options(args)?;
+    let (input, output, block, decimate, policy, flows, self_contained, attached_names, outlet_latency) = options(args)?;
     let output = Path::new(output);
     let sidecar = output.with_extension("provenance.json");
     if output == sidecar.as_path() || output.exists() || sidecar.exists() {
@@ -1585,6 +1596,13 @@ fn run_with_prepared_sources(
         if !direct && !field {
             return Err("resolved command requires frankensim-resolved-dg-performance-v1 or frankensim-resolved-thermoviscous-dg-performance-v1 source bytes".into());
         }
+    }
+    // Only the reed schema's baffled outlet observers carry a grid latency
+    // (`outlet_pre_arrival_latency`); flue, valve and DG observers have none.
+    if outlet_latency == OutletLatency::Compensate
+        && !bytes.strip_prefix(REED_PERFORMANCE_SCHEMA.as_bytes()).is_some_and(|rest| rest.starts_with(b"\n"))
+    {
+        return Err(format!("--compensate-outlet-latency applies to {REED_PERFORMANCE_SCHEMA} files only: no other wind observer has an outlet grid latency"));
     }
     let parent = Path::new(input).parent().unwrap_or(Path::new("."));
     let attached_sources = match prepared {
@@ -1632,7 +1650,7 @@ fn run_with_prepared_sources(
             return Err("MIMO radiation artifact exceeds 8 MiB".into());
         }
         Ok(bytes)
-    }, flow_tap)?;
+    }, flow_tap, outlet_latency)?;
     if decimate && loaded.observation_json.is_some() {
         return Err("this source already declares mechanical and output clocks; omit --decimate to avoid a second observer".into());
     }
@@ -1705,5 +1723,50 @@ mod tests {
             .unwrap();
         assert!(error.contains("diagnostic-only"), "{error}");
         assert!(load(physical.as_bytes(), 37, ObservationPolicy::Acceptance).is_ok());
+    }
+
+    #[test]
+    fn outlet_latency_compensation_is_an_explicit_once_only_opt_in() {
+        let args = vec!["source.performance".into(), "out.wav".into()];
+        assert_eq!(options(&args).unwrap().8, OutletLatency::Retain);
+        let mut compensated = args;
+        compensated.push("--compensate-outlet-latency".into());
+        assert_eq!(options(&compensated).unwrap().8, OutletLatency::Compensate);
+        compensated.push("--compensate-outlet-latency".into());
+        assert!(options(&compensated).is_err());
+        // A flue observer has no outlet grid latency: the flag refuses before any output.
+        let output = std::env::temp_dir().join(format!("q15xc-refused-{}.wav", std::process::id()));
+        let flue: Vec<String> = vec![
+            concat!(env!("CARGO_MANIFEST_DIR"), "/examples/flue-embouchure.performance").into(),
+            output.display().to_string(), "--compensate-outlet-latency".into()];
+        let error = run_with_gas_sources(&flue, None).unwrap_err();
+        assert!(error.contains("--compensate-outlet-latency applies to"), "{error}");
+        assert!(!output.exists());
+    }
+
+    /// q15xc (MB new-mail 180): the outlet_receiver record always carries the
+    /// grid latency, n / 4, in samples and seconds, and states whether the
+    /// output removed it. G3 converges on 16384 points, A4 on 32768.
+    #[test]
+    fn reed_outlet_record_states_the_grid_latency_and_its_compensation() {
+        const G3: &str = include_str!(
+            "../../../../../data/instruments/descriptions/clarinet/performances/BbClar.mf.G3.performance"
+        );
+        const A4: &str = include_str!(
+            "../../../../../data/instruments/descriptions/clarinet/performances/BbClar.mf.A4.performance"
+        );
+        for (label, text, grid, latency, compensated) in [
+            ("G3", G3, 16384_usize, OutletLatency::Retain, false),
+            ("A4", A4, 32768, OutletLatency::Compensate, true),
+        ] {
+            let loaded = load_with_all_sources(text.as_bytes(), 512, ObservationPolicy::Diagnostic, None,
+                |_| Err("no material cards".into()), |_| Err("no radiation artifacts".into()), None, latency)
+                .unwrap_or_else(|error| panic!("{label}: {error}"));
+            let record = format!(
+                "\"fft_samples\":{grid},\"pre_arrival_latency_samples\":{},\"pre_arrival_latency_s\":{:e},\"pre_arrival_latency_compensated\":{compensated},",
+                grid / 4, (grid / 4) as f64 / 48000.0);
+            assert!(loaded.source_json.contains(&record), "{label}: {record} not in {}", loaded.source_json);
+            assert_eq!(loaded.source.samples_rendered(), 0, "{label}");
+        }
     }
 }

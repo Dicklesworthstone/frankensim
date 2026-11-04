@@ -301,6 +301,25 @@ pub enum GasFieldResolution {
     Continuous(fs_duct::RiccatiSteps),
 }
 
+/// Whether the output keeps a baffled outlet observer's common grid latency.
+///
+/// Every observer on an `n`-point outlet grid emits its pressure
+/// [`outlet_pre_arrival_latency`](crate::driving_point::regional::outlet::outlet_pre_arrival_latency)
+/// `= n / 4` samples late ([`OutletReceiverInfo::pre_arrival_latency_samples`]).
+/// Physical axial and exterior travel delays are source geometry; neither
+/// choice removes them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OutletLatency {
+    /// The original output, sample for sample: the latency stays in it.
+    #[default]
+    Retain,
+    /// Run the same source and controls `latency` samples past the card's
+    /// `audio` horizon and drop the first `latency` output samples. The output
+    /// keeps the card's length and equals the retained output of a card
+    /// `latency` samples longer, from its sample `latency` on.
+    Compensate,
+}
+
 /// Finite pressure producer retaining the physical solver and schedule together.
 ///
 /// It implements the common pressure interface directly, so decimation and
@@ -321,6 +340,9 @@ pub struct ReedPerformance {
     observer_range_spread_m: Option<f64>,
     observer_omission: Result<ObserverOmission, AcousticRealizeError>,
     observer_law_declared: bool,
+    /// Leading source samples the output drops ([`OutletLatency::Compensate`]);
+    /// zero when the latency is retained.
+    outlet_latency_discard: u64,
 }
 impl ReedPerformance {
     /// Decode and admit all records before building or advancing the runtime.
@@ -382,6 +404,33 @@ impl ReedPerformance {
             None,
             None,
             &mut load_material,
+        )
+    }
+
+    /// [`Self::from_bytes_with_sources`] with an explicit [`OutletLatency`].
+    /// `Retain` is that constructor, sample for sample.
+    ///
+    /// # Errors
+    /// As [`Self::from_bytes_with_sources`]. `Compensate` also refuses without
+    /// a baffled outlet, when the mouths do not share one latency, or when the
+    /// extended source horizon exceeds the `audio` record's bounds.
+    pub fn from_bytes_with_sources_and_outlet_latency(
+        bytes: &[u8],
+        max_block: usize,
+        policy: ObservationPolicy,
+        sources: Option<&ThermochemicalSources<'_>>,
+        mut load_material: impl FnMut(&str) -> Result<fs_matdb::NormalizedMaterialCardPack, String>,
+        outlet_latency: OutletLatency,
+    ) -> Result<Self, ReedPerformanceError> {
+        Self::from_bytes_with_outlet_latency(
+            bytes,
+            max_block,
+            policy,
+            sources,
+            None,
+            None,
+            &mut load_material,
+            outlet_latency,
         )
     }
 
@@ -476,9 +525,32 @@ impl ReedPerformance {
         max_block: usize,
         policy: ObservationPolicy,
         sources: Option<&ThermochemicalSources<'_>>,
+        gas_field: Option<(fs_material::gas_field::AxialGasField, GasFieldResolution)>,
+        source_reed: Option<BeatingReed>,
+        load_material: &mut dyn FnMut(&str) -> Result<fs_matdb::NormalizedMaterialCardPack, String>,
+    ) -> Result<Self, ReedPerformanceError> {
+        Self::from_bytes_with_outlet_latency(
+            bytes,
+            max_block,
+            policy,
+            sources,
+            gas_field,
+            source_reed,
+            load_material,
+            OutletLatency::Retain,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_bytes_with_outlet_latency(
+        bytes: &[u8],
+        max_block: usize,
+        policy: ObservationPolicy,
+        sources: Option<&ThermochemicalSources<'_>>,
         mut gas_field: Option<(fs_material::gas_field::AxialGasField, GasFieldResolution)>,
         source_reed: Option<BeatingReed>,
         load_material: &mut dyn FnMut(&str) -> Result<fs_matdb::NormalizedMaterialCardPack, String>,
+        outlet_latency: OutletLatency,
     ) -> Result<Self, ReedPerformanceError> {
         if bytes.len() > MAX_REED_PERFORMANCE_BYTES || !(1..=65_536).contains(&max_block) {
             return Err(bad(
@@ -820,56 +892,65 @@ impl ReedPerformance {
                 "only blowing pressure is supported, at a control rate no greater than mechanics",
             ));
         }
-        let last_tick = (samples - 1) * u64::from(schedule.control_rate_hz) / u64::from(rate);
-        // One track emits at most one control per tick. Bound the compiler
-        // before it can allocate, including long constant-valued schedules.
-        if last_tick >= MAX_CONTROLS as u64 {
-            return Err(bad(
-                0,
-                "pressure compilation exceeds the 262144 control-tick budget",
-            ));
-        }
-        let last_time = last_tick as f64 / f64::from(schedule.control_rate_hz);
-        if track.events.iter().any(|event| event.time_s > last_time) {
-            return Err(bad(
-                0,
-                "an authored pressure command starts after the last observed control tick",
-            ));
-        }
-        let mut controls = compile_pressure_gestures(
-            &schedule,
-            &[PressureGestureBinding {
-                track: track.id.clone(),
-                voice: 0,
-            }],
-            rate,
-            samples,
-            max_work,
-        )
-        .map_err(ReedPerformanceError::Schedule)?;
-        if let Some(tongue) = tongue_contact {
-            if tongue.release_start_s > last_time {
+        // Controls for a source horizon: the card's `audio` samples, or those
+        // plus the outlet latency (`OutletLatency::Compensate`), exactly as a
+        // card that much longer compiles them.
+        let compile_controls = |horizon: u64| -> Result<_, ReedPerformanceError> {
+            let last_tick = (horizon - 1) * u64::from(schedule.control_rate_hz) / u64::from(rate);
+            // One track emits at most one control per tick. Bound the compiler
+            // before it can allocate, including long constant-valued schedules.
+            if last_tick >= MAX_CONTROLS as u64 {
                 return Err(bad(
                     0,
-                    "tongue_contact release starts after the last observed control tick",
+                    "pressure compilation exceeds the 262144 control-tick budget",
                 ));
             }
-            tongue.append_controls(
-                &mut controls,
+            let last_time = last_tick as f64 / f64::from(schedule.control_rate_hz);
+            if track.events.iter().any(|event| event.time_s > last_time) {
+                return Err(bad(
+                    0,
+                    "an authored pressure command starts after the last observed control tick",
+                ));
+            }
+            let mut controls = compile_pressure_gestures(
                 &schedule,
-                &track.id,
-                reed,
+                &[PressureGestureBinding {
+                    track: track.id.clone(),
+                    voice: 0,
+                }],
                 rate,
-                last_tick,
-            )?;
-        }
-        if controls.len() > max_controls {
-            return Err(bad(
-                0,
-                "compiled pressure controls exceed the declared storage budget",
-            ));
-        }
-        let info = ReedPerformanceInfo {
+                horizon,
+                max_work,
+            )
+            .map_err(ReedPerformanceError::Schedule)?;
+            if let Some(tongue) = tongue_contact {
+                if tongue.release_start_s > last_time {
+                    return Err(bad(
+                        0,
+                        "tongue_contact release starts after the last observed control tick",
+                    ));
+                }
+                tongue.append_controls(
+                    &mut controls,
+                    &schedule,
+                    &track.id,
+                    reed,
+                    rate,
+                    last_tick,
+                )?;
+            }
+            if controls.len() > max_controls {
+                return Err(bad(
+                    0,
+                    "compiled pressure controls exceed the declared storage budget",
+                ));
+            }
+            Ok(controls)
+        };
+        // The card's own horizon always compiles first, so a compensated
+        // render refuses every gesture the card itself does not observe.
+        let mut controls = compile_controls(samples)?;
+        let mut info = ReedPerformanceInfo {
             input_hash: hash_domain("org.frankensim.fs-couple.reed-performance.v1", bytes),
             sample_rate_hz: rate,
             samples,
@@ -984,6 +1065,33 @@ impl ReedPerformance {
         if let Some(length_m) = slit_length_m {
             voice.set_viscous_slit_length(length_m).map_err(ReedPerformanceError::Model)?;
         }
+        // The outlet builds use `samples` only to bound the round-trip delay,
+        // so a card `latency` samples longer builds the same voice and grid.
+        let outlet_latency_discard = match (outlet_latency, &terminal) {
+            (OutletLatency::Retain, _) => 0,
+            (OutletLatency::Compensate, None) => {
+                return Err(bad(
+                    0,
+                    "outlet latency compensation requires a baffled_outlet observer",
+                ));
+            }
+            (OutletLatency::Compensate, Some(terminal)) => {
+                terminal.pre_arrival_latency_samples().ok_or_else(|| {
+                    bad(0, "outlet latency compensation requires one latency on every mouth's grid")
+                })? as u64
+            }
+        };
+        let horizon = samples + outlet_latency_discard;
+        if outlet_latency_discard > 0 {
+            if horizon > 28_800_000 || horizon > u64::from(rate) * 600 {
+                return Err(bad(
+                    0,
+                    "the latency-compensated source horizon exceeds the audio record's 600 seconds/28800000 samples",
+                ));
+            }
+            controls = compile_controls(horizon)?;
+            info.compiled_controls = controls.len();
+        }
         let context = RenderContext::new(vec![RenderVoice::ReedBore(voice)], max_block);
         let renderer = ScheduledRenderer::new(context, controls, max_controls)
             .map_err(ReedPerformanceError::Render)?;
@@ -991,7 +1099,7 @@ impl ReedPerformance {
             .validate_sample_rate(rate)
             .map_err(ReedPerformanceError::Render)?;
         renderer
-            .validate_sample_count(samples)
+            .validate_sample_count(horizon)
             .map_err(ReedPerformanceError::Render)?;
         Ok(Self {
             info,
@@ -1007,6 +1115,7 @@ impl ReedPerformance {
             observer_range_spread_m,
             observer_omission,
             observer_law_declared: declared_law.is_some(),
+            outlet_latency_discard,
         })
     }
 
@@ -1128,15 +1237,29 @@ impl ReedPerformance {
     pub fn gas_records(&self) -> &[GasRecord] {
         &self.gas_records
     }
-    /// Remaining samples on the mechanical clock.
+    /// Remaining output samples on the mechanical clock.
     #[must_use]
     pub fn remaining_samples(&self) -> u64 {
-        self.info.samples - self.renderer.samples_rendered()
+        self.info.samples - self.output_samples_rendered()
+    }
+    /// Leading source samples this output drops: the outlet grid latency under
+    /// [`OutletLatency::Compensate`], zero when the latency is retained.
+    #[must_use]
+    pub const fn outlet_latency_discarded_samples(&self) -> u64 {
+        self.outlet_latency_discard
+    }
+    /// Output samples emitted, after any dropped leading source samples.
+    fn output_samples_rendered(&self) -> u64 {
+        self.renderer.samples_rendered().saturating_sub(self.outlet_latency_discard)
+    }
+    /// Leading source samples still to be stepped and dropped before output.
+    fn outlet_latency_pending(&self) -> u64 {
+        self.outlet_latency_discard.saturating_sub(self.renderer.samples_rendered())
     }
 }
 impl PressureRenderer for ReedPerformance {
     fn samples_rendered(&self) -> u64 {
-        self.renderer.samples_rendered()
+        self.output_samples_rendered()
     }
     fn max_block_len(&self) -> usize {
         self.renderer.context().max_block_len()
@@ -1148,7 +1271,7 @@ impl PressureRenderer for ReedPerformance {
         if self.last_outlet_error().is_some() {
             return Err(RenderError::Poisoned);
         }
-        self.renderer.validate_sample_count(samples)?;
+        self.renderer.validate_sample_count(samples.saturating_add(self.outlet_latency_pending()))?;
         if samples > self.remaining_samples() {
             return Err(RenderError::Sizing {
                 what: "requested pressure window exceeds the reed performance horizon",
