@@ -1,5 +1,6 @@
 //! Manufactured constitutive/source checks, not measured metal properties.
 mod joint_response;
+mod volume_change;
 
 use super::*;
 use crate::conductor::ElectricalPropertyBasis;

@@ -9216,6 +9216,31 @@ kinematic-to-dynamic conversion and strict departure bounds. It is authored but
 unrun in this implementation environment; no source or experimental validation
 is inferred from the synthetic fixture.
 
+## Phase transport on changing chart density
+
+`phase::transport::resolve_phase_transport_state_for_volume_change` resolves
+the original phase/source bundle when its consumer accounts for physical
+volume change. The original enthalpy chart and `MushyPhaseLaw` retain their
+temperature, phase, constituent-volume and mobility rules, including admitted
+unequal phase densities and sensible expansion. At each queried h, source
+density must match the chart's current bulk density exactly, including bits.
+No density tolerance, reference projection or replacement claim is introduced.
+
+The returned `ResolvedPhaseTransportState` preserves the original material
+receipts and existing `FluidTransport`/`PhaseTransport` interfaces. Kinematic
+viscosity converts using that same current density. Exact-solid classification
+still precedes liquid-only Cp/viscosity requirements; a solid has no fabricated
+fluid tuple. Original chart, mobility, source-domain and identity refusals remain
+active. Agreement at one sampled state does not establish source/chart agreement
+throughout an interval.
+
+The consumer must conserve mass and extensive enthalpy and account for occupied
+volume `M/rho` in geometry or continuity. Pressure work and phase support remain
+with their physical owners; this resolver supplies no EOS pressure update or
+momentum solve. Existing fixed-density, shear and bounded density-departure
+entry points retain their previous admission, and fixed-volume phase flow still
+requires its original constant-density condition.
+
 ## Affine eigenstrain in source tensor memory and thermodynamics
 
 `ProjectedTensorProny` retains explicitly admitted stress-free Mandel strain in

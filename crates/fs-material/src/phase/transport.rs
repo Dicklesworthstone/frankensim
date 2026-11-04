@@ -1,4 +1,4 @@
-//! Phase-first source snapshots for a fixed-density stationary melting model.
+//! Phase-first source snapshots on the original solid/liquid enthalpy chart.
 //!
 //! The original h chart decides solid/mushy/liquid topology before a liquid
 //! property is requested. Every state retains sourced density, conductivity
@@ -9,8 +9,10 @@
 //! The existing ThermalMaterialPoint updates T and an optional liquid MASS
 //! fraction coordinate from that same chart. The explicit shear entry also
 //! consumes the native physical rate; other context remains fixed.
-//! This is a constant equal-phase-density reduction, not a volume-change law,
-//! equilibrium solver, moving solid skeleton or free-surface model.
+//! The original entries retain their constant equal-phase-density reduction.
+//! The explicit volume-change entry instead requires exact agreement with the
+//! chart's current density. Its consumer must conserve mass and account for
+//! occupied-volume change. No equilibrium or volume-flow solver is added here.
 
 use crate::MaterialError;
 use crate::fluid_transport::{FluidTransport, FluidTransportState};
@@ -136,7 +138,45 @@ pub fn resolve_phase_transport_state(
     specific_enthalpy_j_kg: f64,
     query: PhaseTransportSourceQuery<'_>,
 ) -> Result<ResolvedPhaseTransportState, MaterialError> {
-    resolve_phase_transport_state_inner(law, specific_enthalpy_j_kg, query, None, None)
+    resolve_phase_transport_state_inner(
+        law,
+        specific_enthalpy_j_kg,
+        query,
+        None,
+        PhaseDensityAdmission::Fixed(None),
+    )
+}
+
+/// Resolve original transport sources for a consumer that evolves physical volume.
+///
+/// The original h chart and mobility law own temperature, phase, mass/volume
+/// fractions and current bulk density, including unequal phase densities and
+/// sensible expansion admitted by that law. The queried source density
+/// must match that chart density exactly at this h; no tolerance, reference
+/// projection, independent mixture rule or replacement density claim is used.
+/// Dynamic viscosity, conductivity, auxiliary liquid Cp and additional source
+/// properties retain the original state-point receipts. A kinematic-viscosity
+/// source is converted with this same actual density.
+///
+/// Exact solids still resolve only their defined properties and have no liquid
+/// transport tuple. The caller must preserve mass and extensive enthalpy and
+/// use the chart's occupied volume M/rho in its geometry/continuity owner; a
+/// fixed-volume flow cannot accept this snapshot merely because its sources
+/// resolve. Phase mobility, pressure work and momentum remain consumer-owned.
+/// Existing fixed-density and bounded density-departure entries keep their
+/// original admission. This function supplies no density or pressure solver.
+pub fn resolve_phase_transport_state_for_volume_change(
+    law: &MushyPhaseLaw<'_>,
+    specific_enthalpy_j_kg: f64,
+    query: PhaseTransportSourceQuery<'_>,
+) -> Result<ResolvedPhaseTransportState, MaterialError> {
+    resolve_phase_transport_state_inner(
+        law,
+        specific_enthalpy_j_kg,
+        query,
+        None,
+        PhaseDensityAdmission::OriginalChart,
+    )
 }
 
 /// Resolve bounded source-density departures for an explicit reference-mass model.
@@ -164,7 +204,7 @@ pub fn resolve_phase_transport_state_with_density_departure(
         specific_enthalpy_j_kg,
         query,
         None,
-        Some(maximum_relative_density_departure),
+        PhaseDensityAdmission::Fixed(Some(maximum_relative_density_departure)),
     )
 }
 
@@ -194,7 +234,7 @@ pub fn resolve_phase_transport_state_with_shear_rate(
         specific_enthalpy_j_kg,
         query,
         Some((shear_rate_axis, shear_rate_per_s)),
-        None,
+        PhaseDensityAdmission::Fixed(None),
     )
 }
 
@@ -223,8 +263,14 @@ pub fn resolve_phase_transport_state_with_shear_rate_and_density_departure(
         specific_enthalpy_j_kg,
         query,
         Some((shear_rate_axis, shear_rate_per_s)),
-        Some(maximum_relative_density_departure),
+        PhaseDensityAdmission::Fixed(Some(maximum_relative_density_departure)),
     )
+}
+
+#[derive(Clone, Copy)]
+enum PhaseDensityAdmission {
+    Fixed(Option<f64>),
+    OriginalChart,
 }
 
 fn resolve_phase_transport_state_inner(
@@ -232,11 +278,17 @@ fn resolve_phase_transport_state_inner(
     specific_enthalpy_j_kg: f64,
     query: PhaseTransportSourceQuery<'_>,
     shear: Option<(&str, f64)>,
-    maximum_relative_density_departure: Option<f64>,
+    density_admission: PhaseDensityAdmission,
 ) -> Result<ResolvedPhaseTransportState, MaterialError> {
-    let density = law.fixed_density_kg_m3().ok_or_else(|| {
-        invalid("phase transport requires exactly equal constant phase and chart densities")
-    })?;
+    let (fixed_density, maximum_relative_density_departure) = match density_admission {
+        PhaseDensityAdmission::Fixed(limit) => (
+            Some(law.fixed_density_kg_m3().ok_or_else(|| {
+                invalid("phase transport requires exactly equal constant phase and chart densities")
+            })?),
+            limit,
+        ),
+        PhaseDensityAdmission::OriginalChart => (None, None),
+    };
     if maximum_relative_density_departure
         .is_some_and(|limit| !limit.is_finite() || !(0.0..1.0).contains(&limit))
     {
@@ -246,6 +298,7 @@ fn resolve_phase_transport_state_inner(
     }
     // This must precede even the liquid-property requirement list.
     let mobility = law.classify_at_specific_enthalpy(specific_enthalpy_j_kg)?;
+    let density = fixed_density.unwrap_or_else(|| mobility.phase().bulk_density_kg_m3());
     let mut point = query.source.at(mobility.phase()).map_err(source_error)?;
     let mobile = mobility.mobile().is_some();
     if let Some((axis, rate)) = shear {
@@ -366,9 +419,14 @@ fn resolve_phase_transport_state_inner(
         None => source_density.to_bits() == density.to_bits(),
     };
     if !density_admitted || mobility.phase().bulk_density_kg_m3().to_bits() != density.to_bits() {
-        return Err(invalid(
-            "phase transport source density differs from the original fixed thermal mass density",
-        ));
+        return Err(invalid(match density_admission {
+            PhaseDensityAdmission::Fixed(_) => {
+                "phase transport source density differs from the original fixed thermal mass density"
+            }
+            PhaseDensityAdmission::OriginalChart => {
+                "phase transport source density differs from the original chart density at this enthalpy"
+            }
+        }));
     }
     let thermal_conductivity_w_m_k = value(THERMAL_CONDUCTIVITY_PROPERTY);
     let mobile_transport = if mobile {
