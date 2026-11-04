@@ -16,6 +16,8 @@ use crate::volumes::transport::scattering::{MassScatteringSpectrum, PhaseFunctio
 use fs_blake3::ContentHash;
 use fs_geom::{Point3, Vec3};
 
+mod geometric_dispersion;
+
 fn near(actual: f64, expected: f64, tolerance: f64) {
     assert!(
         (actual - expected).abs() <= tolerance,

@@ -82,8 +82,9 @@ struct Prescription {
 ///
 /// One to eight coincident ideal elements may combine positive and negative
 /// powers, including achromatic doublets. Every wavelength uses the exact
-/// native Cauchy, Sellmeier or tabulated phase index in its admitted visible
-/// band, 380–780 nm; neither a fitted Abbe number nor group index is used.
+/// native Cauchy, Sellmeier or tabulated phase index within their common source
+/// support; neither a fitted Abbe number nor group index is used. Source-bound
+/// infrared laws retain their own wavelength limits and knot-gap policies.
 /// The fixed sensor is conjugate to the declared focus at the reference
 /// wavelength. Its raster magnification is common to every spectral lane.
 ///
@@ -152,6 +153,18 @@ impl DispersiveThinLens {
     #[must_use]
     pub fn elements(&self) -> &[ThinLensElement] {
         &self.prescription.elements
+    }
+
+    /// Inclusive common support [vacuum nm] of the original material laws.
+    /// Construction requires the reference wavelength to belong to every law.
+    #[must_use]
+    pub fn wavelength_bounds_nm(&self) -> (f64, f64) {
+        self.elements()
+            .iter()
+            .fold((0.0_f64, f64::INFINITY), |(minimum, maximum), element| {
+                let (low, high) = element.ior.wavelength_bounds_nm();
+                (minimum.max(low), maximum.min(high))
+            })
     }
 
     /// Positive reference optical power in inverse metres (dioptres).
@@ -232,7 +245,7 @@ impl DispersiveThinLens {
         let distance = self.sensor_distance_m(camera.focus_distance_m)?;
         let half_tan = super::super::half_ratio(sensor, distance);
         if camera.aperture.is_pinhole()
-            || (camera.defocused_diffraction.is_none() && camera.layered_diffraction.is_none())
+            || camera.diffraction.is_some()
             || (focal - expected_focal).abs() > tolerance
             || radius / camera.focus_distance_m > Self::MAXIMUM_PARAXIAL_SLOPE
             || radius / distance > Self::MAXIMUM_PARAXIAL_SLOPE
@@ -419,6 +432,45 @@ mod tests {
     }
 
     #[test]
+    fn source_band_intersection_retains_infrared_phase_laws_and_knot_gaps() {
+        let wide_samples = core::array::from_fn(|i| {
+            let wavelength = 8000.0 + 750.0 * i as f64;
+            DielectricIorSample::try_new_in_band(wavelength, 1.5 + (11000.0 - wavelength) * 2e-5)
+                .unwrap()
+        });
+        assert!(TabulatedIor::try_new_in_band(wide_samples, 749.0).is_err());
+        let wide = TabulatedIor::try_new_in_band(wide_samples, 750.0).unwrap();
+        let narrow = TabulatedIor::try_new_in_band(
+            core::array::from_fn(|i| {
+                DielectricIorSample::try_new_in_band(9000.0 + 500.0 * i as f64, 1.6).unwrap()
+            }),
+            500.0,
+        )
+        .unwrap();
+        let lens = DispersiveThinLens::try_new(
+            11000.0,
+            &[
+                ThinLensElement::try_new(wide.into(), 20.0, -20.0).unwrap(),
+                ThinLensElement::try_new(narrow.into(), 10.0, -10.0).unwrap(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(lens.wavelength_bounds_nm(), (9000.0, 13000.0));
+        assert_eq!(lens.elements()[0].ior(), &DielectricIor::Tabulated(wide));
+        for wavelength in [9000.0, 9750.0, 11000.0, 12250.0, 13000.0] {
+            close(
+                lens.power_difference_per_m(wavelength).unwrap(),
+                (wavelength - 11000.0) * 8e-4,
+                2e-14,
+            );
+        }
+        for wavelength in [8999.0, 13001.0] {
+            assert!(lens.power_per_m(wavelength).is_err());
+            assert!(lens.power_difference_per_m(wavelength).is_err());
+        }
+    }
+
+    #[test]
     fn thin_element_prescription_refuses_unsupported_inputs() {
         let law = CauchyIor::try_constant(1.5).unwrap().into();
         let converging = ThinLensElement::try_new(law, 20.0, -20.0).unwrap();
@@ -457,9 +509,92 @@ impl PhysicalCamera {
     /// sharp at the reference wavelength, declare its plane with
     /// [`super::DefocusedDiffraction`] at the camera's focus distance.
     pub fn with_dispersive_lens(mut self, lens: DispersiveThinLens) -> Result<Self, CameraError> {
+        if self.defocused_diffraction.is_none() && self.layered_diffraction.is_none() {
+            return Err(CameraError::DispersiveLensOutsideModel);
+        }
         lens.admit_camera(&self)?;
         self.dispersive_lens = Some(lens);
         Ok(self)
+    }
+
+    /// Explicitly select geometric longitudinal chromatic aberration using
+    /// the original thin-element prescription and aperture sampler.
+    ///
+    /// The fixed sensor is conjugate to the reference focus. Each wavelength
+    /// therefore needs its own outgoing ray through the sampled pupil. This
+    /// geometric-optics approximation omits diffraction; it never superposes
+    /// geometric blur on the wave PSF. The original diffraction attachment
+    /// remains separate. The scene must supply refractive index exactly one
+    /// at the camera pupil, matching the prescription's exterior medium.
+    pub fn with_geometric_dispersive_lens(
+        mut self,
+        lens: DispersiveThinLens,
+    ) -> Result<Self, CameraError> {
+        if self.has_diffraction() {
+            return Err(CameraError::DispersiveLensOutsideModel);
+        }
+        lens.admit_camera(&self)?;
+        self.dispersive_lens = Some(lens);
+        Ok(self)
+    }
+
+    /// Generate separate geometric rays at supplied vacuum wavelengths [nm].
+    /// A shared original pupil draw couples the lanes without changing their
+    /// aperture-average radiance measure; every lane has unit camera weight.
+    /// Achromatic cameras reuse their original ray bit for bit.
+    ///
+    /// For pupil coordinate `p`, raster tangent `u`, sensor distance `t` and
+    /// native phase power `P(lambda)`, the backward ray has tangent
+    /// `u + p*(1/t-P(lambda))`. Since `1/t=P(reference)-1/focus`, the stable
+    /// material index difference supplies the chromatic change. Group index
+    /// does not determine this direction. All wavelengths retain the original
+    /// source bands/gaps and optical-opening admission `lambda/width <= 0.01`.
+    /// The entire pupil's outgoing paraxial slope must remain at most 0.1.
+    /// No wavelength extrapolation, diffraction, or lateral color is inferred.
+    pub fn generate_geometric_spectral_rays_from_tangent_offsets<const N: usize>(
+        &self,
+        cx: &Cx<'_>,
+        x_tan: f64,
+        y_tan: f64,
+        lens_sample: LensSample,
+        wavelengths_nm: &[f64; N],
+    ) -> Result<[crate::charts::Ray; N], CameraError> {
+        cx.checkpoint()?;
+        if self.has_diffraction() {
+            return Err(CameraError::DiffractionRequiresSpectralPath);
+        }
+        let Some(lens) = &self.dispersive_lens else {
+            return Ok([self.generate_ray_from_tangent_offsets(cx, x_tan, y_tan, lens_sample)?; N]);
+        };
+        self.admit_dispersive_raster(x_tan, y_tan)?;
+        self.diffraction_wavelength_range(wavelengths_nm)?;
+        let reference_ray =
+            self.generate_geometric_ray_from_tangent_offsets(cx, x_tan, y_tan, lens_sample)?;
+        let [pupil_x, pupil_y] = self.aperture.sample(lens_sample);
+        let raster_slope = det::hypot(x_tan, y_tan);
+        let mut rays = [reference_ray; N];
+        for (ray, &wavelength_nm) in rays.iter_mut().zip(wavelengths_nm) {
+            cx.checkpoint()?;
+            let difference = lens.power_difference_per_m(wavelength_nm)?;
+            let inverse_conjugate = difference - 1.0 / self.focus_distance_m;
+            let maximum_slope = raster_slope + self.aperture.radius_m() * inverse_conjugate.abs();
+            if !maximum_slope.is_finite()
+                || maximum_slope > DispersiveThinLens::MAXIMUM_PARAXIAL_SLOPE
+            {
+                return Err(CameraError::DispersiveLensOutsideModel);
+            }
+            if difference != 0.0 {
+                let x = x_tan + pupil_x * inverse_conjugate;
+                let y = y_tan + pupil_y * inverse_conjugate;
+                ray.dir = super::super::direct_unit(fs_geom::Vec3::new(
+                    self.forward.x + x * self.right.x + y * self.up.x,
+                    self.forward.y + x * self.right.y + y * self.up.y,
+                    self.forward.z + x * self.right.z + y * self.up.z,
+                ))?;
+            }
+        }
+        cx.checkpoint()?;
+        Ok(rays)
     }
 
     /// Selected material-based optical prescription, if explicitly enabled.

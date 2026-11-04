@@ -3538,13 +3538,13 @@ not require their approximate layer-occlusion composition.
 ### Native material dispersion in thin camera lenses
 
 With `tracer`, `ThinLensElement` and `DispersiveThinLens` explicitly enable
-longitudinal chromatic aberration in the existing finite-defocus and layered
-camera paths. A prescription contains one to eight coincident ideal thin
+longitudinal chromatic aberration in explicitly selected geometric,
+finite-defocus and layered camera paths. A prescription contains one to eight coincident ideal thin
 elements, each retaining its exact native `DielectricIor` (Cauchy, Sellmeier or
 tabulated phase index) and signed front/back surface curvatures in inverse
-metres. The exterior index is exactly one and wavelengths are vacuum nm in
-the native 380–780 nm support; group index is never substituted for phase
-index. No IOR fit, RGB conversion, external optics library or new pupil raster
+metres. The exterior index is exactly one and wavelengths are vacuum nm within
+the intersection of the original material laws’ source bands, including
+explicit infrared support; group index is never substituted for phase index. No IOR fit, RGB conversion, external optics library or new pupil raster
 is introduced. The immutable bounded prescription is shared across evaluated
 camera states; per-ray material evaluation and pupil propagation allocate
 nothing.
@@ -3585,6 +3585,22 @@ color displacement. Lens prescriptions cannot change within one shot and
 their full native material coefficients/tables enter AOV camera continuity.
 Without an explicitly attached lens, previous raster arithmetic, sampling
 paths and continuity bytes are unchanged.
+
+`PhysicalCamera::with_geometric_dispersive_lens` separately selects the
+geometric limit of the same prescription and original pupil sampler. The
+fixed sensor conjugate gives each wavelength its own tangent
+`u + p*(P(reference)-1/s-P(lambda))`, evaluated from the original compensated
+material index difference. `generate_geometric_spectral_rays_from_tangent_offsets`
+returns those separate rays with unit aperture-average camera weight. Native
+curved raster XYZ, QE and participating paths consume each lane’s own ray,
+retaining absorption, refraction, visibility and photon-energy weighting.
+Their actual launch phase index must equal the prescription’s index-one
+exterior; a mismatch refuses the complete pixel. Source bands/gaps,
+`lambda/opening_width <= 0.01`, and the full pupil’s outgoing paraxial slope
+remain admission conditions. This mode omits diffraction; shared-ray entry
+points refuse it, and curved raster still refuses wave diffraction without
+the original source-depth and clear-pupil proof. Achromatic cameras retain
+their existing ray arithmetic and Philox streams.
 
 Paraxial admission requires `a*abs(C_surface) <= 0.05`, object- and image-side
 pupil tangent slopes at most 0.1, and nominal raster chief-ray tangent radius

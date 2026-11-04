@@ -14,6 +14,10 @@ use fs_render::motion::{ShotTimeBounds, ShutterConvention, ShutterDistribution, 
 
 const TOLERANCE: f64 = 2.0e-12;
 
+#[cfg(feature = "tracer")]
+#[path = "camera/geometric_dispersion.rs"]
+mod geometric_dispersion;
+
 fn with_cx<R>(operation: impl FnOnce(&CancelGate, &Cx<'_>) -> R) -> R {
     let gate = CancelGate::new();
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());

@@ -77,8 +77,10 @@ pub enum CameraError {
     DefocusOutsideDiffractionModel,
     /// Thin-element prescription, reference wavelength or reference power is invalid.
     InvalidDispersiveLens,
-    /// Projection, wavelength, focus, or slope lies outside the thin-lens model.
+    /// Projection, wavelength, exterior medium, focus, or slope lies outside the thin-lens model.
     DispersiveLensOutsideModel,
+    /// A geometric dispersive lens needs a separate ray for each wavelength.
+    DispersionRequiresSpectralRays,
     /// A shot contains no keyframes.
     EmptyShot,
     /// Shot bounds or shot identity are invalid.
@@ -192,7 +194,7 @@ impl CameraError {
         const DISPERSIVE_LENS: &[CameraFix] = &[CameraFix {
             rank: 1,
             code: "admit_dispersive_thin_lens",
-            message: "use one to eight native visible-band thin elements, matching focal/sensor metadata, finite-defocus or layered diffraction, and paraxial pupil/raster slopes",
+            message: "use one to eight source-supported thin elements, an index-one exterior, matching focal/sensor metadata, an explicit geometric or diffraction policy, and paraxial pupil/raster slopes",
         }];
         const EXPOSURE_METADATA: &[CameraFix] = &[
             CameraFix {
@@ -267,7 +269,9 @@ impl CameraError {
             | Self::DiffractionRequiresSpectralPath
             | Self::DiffractionRequiresSourceDepth
             | Self::DefocusOutsideDiffractionModel => DIFFRACTION,
-            Self::InvalidDispersiveLens | Self::DispersiveLensOutsideModel => DISPERSIVE_LENS,
+            Self::InvalidDispersiveLens
+            | Self::DispersiveLensOutsideModel
+            | Self::DispersionRequiresSpectralRays => DISPERSIVE_LENS,
             Self::EmptyShot => EMPTY_SHOT,
             Self::InvalidShot => INVALID_SHOT,
             Self::InvalidKeyframes | Self::IncompatibleKeyframes | Self::InvalidInterpolation => {
@@ -306,7 +310,10 @@ impl fmt::Display for CameraError {
             }
             Self::InvalidDispersiveLens => "thin-element lens prescription is invalid",
             Self::DispersiveLensOutsideModel => {
-                "camera, wavelength or slope exceeds the dispersive thin-lens model"
+                "camera, wavelength, exterior medium or slope exceeds the dispersive thin-lens model"
+            }
+            Self::DispersionRequiresSpectralRays => {
+                "geometric dispersive camera requires a separate ray for each wavelength"
             }
             Self::EmptyShot => "camera shot has no keyframes",
             Self::InvalidShot => "camera shot bounds or identity are invalid",
@@ -1179,6 +1186,8 @@ impl PhysicalCamera {
 
     /// Generate a ray from horizontal and vertical tangent offsets. A pinhole
     /// executes the same operation order as the legacy tracer.
+    /// An explicitly dispersive geometric lens requires wavelength-specific
+    /// ray generation and refuses this achromatic entry point.
     pub fn generate_ray_from_tangent_offsets(
         &self,
         cx: &Cx<'_>,
@@ -1190,6 +1199,22 @@ impl PhysicalCamera {
         if self.has_diffraction() {
             return Err(CameraError::DiffractionRequiresSpectralPath);
         }
+        #[cfg(feature = "tracer")]
+        if self.dispersive_lens.is_some() {
+            return Err(CameraError::DispersionRequiresSpectralRays);
+        }
+        self.generate_geometric_ray_from_tangent_offsets(cx, x_tan, y_tan, lens_sample)
+    }
+
+    // Original achromatic arithmetic is also the exact reference-wavelength
+    // limit of the explicitly selected geometric dispersive prescription.
+    fn generate_geometric_ray_from_tangent_offsets(
+        &self,
+        cx: &Cx<'_>,
+        x_tan: f64,
+        y_tan: f64,
+        lens_sample: LensSample,
+    ) -> Result<Ray, CameraError> {
         if !x_tan.is_finite() || !y_tan.is_finite() {
             return Err(CameraError::NonFiniteInput);
         }

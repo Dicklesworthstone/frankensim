@@ -223,8 +223,11 @@ impl PhysicalCamera {
     /// Annuli coherently subtract the inner disk before squaring and use a
     /// narrow/broad Cauchy mixture that also covers their wider diffraction rings.
     /// The lens and diffraction draws must be independent
-    /// of pixel, wavelength, BSDF and shutter draws. Geometric cameras ignore
-    /// diffraction samples and wavelengths and return unit weights.
+    /// of pixel, wavelength, BSDF and shutter draws. Achromatic geometric
+    /// cameras ignore diffraction samples and wavelengths and return unit
+    /// weights. An explicit geometric dispersive lens requires
+    /// `generate_geometric_spectral_rays_from_tangent_offsets`: its different
+    /// lane directions cannot be represented by this shared-ray result.
     ///
     /// Wavelengths are in nanometres. Scalar admission requires `lambda/D <=
     /// 0.01` for every wavelength, using the inscribed pupil diameter for a

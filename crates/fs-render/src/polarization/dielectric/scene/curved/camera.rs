@@ -318,6 +318,7 @@ pub enum RadianceEndpoint {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CameraRadianceSample {
     radiance_w_m2_sr_nm: f64,
+    launch_phase_index: f64,
     transport_weight: f64,
     endpoint: RadianceEndpoint,
     path: CurvedPathResult,
@@ -325,6 +326,11 @@ pub struct CameraRadianceSample {
 impl CameraRadianceSample {
     pub const fn radiance_w_m2_sr_nm(&self) -> f64 {
         self.radiance_w_m2_sr_nm
+    }
+    /// Actual local phase index at the camera launch, before curved transport.
+    /// Optical camera consumers use this to admit their exterior medium.
+    pub const fn launch_phase_index(&self) -> f64 {
+        self.launch_phase_index
     }
     pub const fn transport_weight(&self) -> f64 {
         self.transport_weight
@@ -521,6 +527,7 @@ impl<'s, 'm> CurvedCameraScene<'s, 'm> {
             // in the Monte Carlo denominator instead of trying another facet.
             return Ok(CameraRadianceSample {
                 radiance_w_m2_sr_nm: surface_emission,
+                launch_phase_index: initial_index,
                 transport_weight: 0.0,
                 endpoint: RadianceEndpoint::RejectedMicrofacet {
                     object_id: contact.object_id,
@@ -591,6 +598,7 @@ impl<'s, 'm> CurvedCameraScene<'s, 'm> {
         cx.checkpoint()?;
         Ok(CameraRadianceSample {
             radiance_w_m2_sr_nm,
+            launch_phase_index: initial_index,
             transport_weight,
             endpoint,
             path,

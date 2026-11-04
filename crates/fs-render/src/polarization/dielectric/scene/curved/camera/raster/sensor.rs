@@ -21,7 +21,7 @@ use fs_math::dd::Dd;
 pub struct CurvedSensorPixelSample<const CHANNELS: usize> {
     qe_weighted_radiance_w_m2_sr: [f64; CHANNELS],
     photoelectron_rate_per_m2_sr: [f64; CHANNELS],
-    ray: Ray,
+    rays: [Ray; CAMERA_WAVELENGTHS],
     wavelengths: [DetectorWavelength<CHANNELS>; CAMERA_WAVELENGTHS],
     spectral: [CameraRadianceSample; CAMERA_WAVELENGTHS],
 }
@@ -37,8 +37,13 @@ impl<const C: usize> CurvedSensorPixelSample<C> {
     pub const fn photoelectron_rate_per_m2_sr(&self) -> &[f64; C] {
         &self.photoelectron_rate_per_m2_sr
     }
+    /// First lane's ray; use [`Self::camera_rays`] for a dispersive lens.
     pub const fn camera_ray(&self) -> Ray {
-        self.ray
+        self.rays[0]
+    }
+    /// Wavelength-specific camera rays in the detector sample order.
+    pub const fn camera_rays(&self) -> &[Ray; CAMERA_WAVELENGTHS] {
+        &self.rays
     }
     pub const fn detector_wavelengths(&self) -> &[DetectorWavelength<C>; CAMERA_WAVELENGTHS] {
         &self.wavelengths
@@ -175,7 +180,7 @@ impl CurvedCameraRaster<'_> {
         trace: impl FnMut(&Cx<'_>, Ray, f64, usize) -> Result<CameraRadianceSample, CameraRadianceError>,
     ) -> Result<CurvedSensorPixelSample<C>, CurvedRasterError> {
         let mut draws = None;
-        let (ray, _, spectral) = self.sample_packet_with_transport(
+        let (rays, _, spectral) = self.sample_packet_with_transport(
             cx,
             seed,
             pixel,
@@ -218,7 +223,7 @@ impl CurvedCameraRaster<'_> {
         Ok(CurvedSensorPixelSample {
             qe_weighted_radiance_w_m2_sr,
             photoelectron_rate_per_m2_sr,
-            ray,
+            rays,
             wavelengths,
             spectral,
         })

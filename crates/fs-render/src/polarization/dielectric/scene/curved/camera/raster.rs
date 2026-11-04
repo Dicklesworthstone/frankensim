@@ -1,6 +1,6 @@
 //! Physical-camera pixel samples with independent spectral curved paths.
 //!
-//! The existing pinhole/thin-lens camera supplies the geometric ray. Four
+//! The existing pinhole/thin-lens camera supplies geometric rays. Four
 //! rotated, stratified hero wavelengths each take their own native refractive
 //! path, so dispersion changes both visibility and radiance. No wavelength
 //! borrows the hero's geometry. Raster, lens, wavelength and boundary variates
@@ -12,6 +12,8 @@
 //! original SI spectral radiances and full native paths are retained alongside
 //! it. The ideal lens estimates an aperture average, as in the scalar tracer.
 //! Diffraction requires a source-depth model and is not admitted here.
+//! An explicit geometric dispersive lens retains its native pupil and phase
+//! index laws, generating a separate camera ray for every sampled wavelength.
 
 use super::{CameraRadianceError, CameraRadianceSample, CurvedCameraScene};
 use crate::camera::{CameraError, LensSample, PhysicalCamera};
@@ -75,7 +77,7 @@ impl core::error::Error for CurvedRasterError {}
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CurvedPixelSample {
     xyz: [f64; 3],
-    ray: Ray,
+    rays: [Ray; CAMERA_WAVELENGTHS],
     wavelengths_nm: [f64; CAMERA_WAVELENGTHS],
     spectral: [CameraRadianceSample; CAMERA_WAVELENGTHS],
 }
@@ -86,8 +88,15 @@ impl CurvedPixelSample {
     pub const fn xyz(&self) -> [f64; 3] {
         self.xyz
     }
+    /// The first spectral lane's camera ray; use [`Self::camera_rays`] when
+    /// an explicit geometric dispersive lens is selected.
     pub const fn camera_ray(&self) -> Ray {
-        self.ray
+        self.rays[0]
+    }
+    /// Camera rays in wavelength order. They coincide for an achromatic
+    /// camera; a geometric dispersive lens gives each lane its own ray.
+    pub const fn camera_rays(&self) -> &[Ray; CAMERA_WAVELENGTHS] {
+        &self.rays
     }
     pub const fn wavelengths_nm(&self) -> &[f64; CAMERA_WAVELENGTHS] {
         &self.wavelengths_nm
@@ -128,6 +137,7 @@ impl<'a> CurvedCameraRaster<'a> {
         if !(half_tan > 0.0 && (half_tan * aspect).is_finite()) {
             return Err(CameraError::InvalidProjection.into());
         }
+        camera.admit_dispersive_raster(half_tan * aspect, half_tan)?;
         Ok(Self {
             camera,
             width,
@@ -183,7 +193,7 @@ impl<'a> CurvedCameraRaster<'a> {
         sample: u32,
         trace: impl FnMut(&Cx<'_>, Ray, f64, usize) -> Result<CameraRadianceSample, CameraRadianceError>,
     ) -> Result<CurvedPixelSample, CurvedRasterError> {
-        let (ray, wavelengths_nm, spectral) = self.sample_packet_with_transport(
+        let (rays, wavelengths_nm, spectral) = self.sample_packet_with_transport(
             cx,
             seed,
             pixel,
@@ -213,7 +223,7 @@ impl<'a> CurvedCameraRaster<'a> {
         cx.checkpoint().map_err(CameraError::from)?;
         Ok(CurvedPixelSample {
             xyz,
-            ray,
+            rays,
             wavelengths_nm,
             spectral,
         })
@@ -236,7 +246,7 @@ impl<'a> CurvedCameraRaster<'a> {
         ) -> Result<CameraRadianceSample, CameraRadianceError>,
     ) -> Result<
         (
-            Ray,
+            [Ray; CAMERA_WAVELENGTHS],
             [f64; CAMERA_WAVELENGTHS],
             [CameraRadianceSample; CAMERA_WAVELENGTHS],
         ),
@@ -257,14 +267,28 @@ impl<'a> CurvedCameraRaster<'a> {
         let y_tan = (1.0
             - 2.0 * (f64::from(pixel / self.width) + unit(raster[1])) / f64::from(self.height))
             * self.half_tan;
-        let ray = self.camera.generate_ray_from_tangent_offsets(
-            &render_cx,
-            x_tan,
-            y_tan,
-            LensSample::try_new(unit(lens[0]), unit(lens[1]))?,
-        )?;
         let wavelengths_nm = wavelengths(unit(raster[2]))?;
-        let mut trace_lane = |lane: usize| trace(&render_cx, ray, wavelengths_nm[lane], lane);
+        let rays = self
+            .camera
+            .generate_geometric_spectral_rays_from_tangent_offsets(
+                &render_cx,
+                x_tan,
+                y_tan,
+                LensSample::try_new(unit(lens[0]), unit(lens[1]))?,
+                &wavelengths_nm,
+            )?;
+        let mut trace_lane = |lane: usize| {
+            let result = trace(&render_cx, rays[lane], wavelengths_nm[lane], lane)?;
+            if self.camera.dispersive_lens().is_some() && result.launch_phase_index() != 1.0 {
+                // The native prescription has an index-one exterior. Retain
+                // the actual transport launch index, including GRIN, rather
+                // than silently applying a vacuum lensmaker law underwater.
+                return Err(CurvedRasterError::Camera(
+                    CameraError::DispersiveLensOutsideModel,
+                ));
+            }
+            Ok(result)
+        };
         // Fixed storage and explicit propagation of the first failed lane.
         let spectral = [
             trace_lane(0)?,
@@ -272,7 +296,7 @@ impl<'a> CurvedCameraRaster<'a> {
             trace_lane(2)?,
             trace_lane(3)?,
         ];
-        Ok((ray, wavelengths_nm, spectral))
+        Ok((rays, wavelengths_nm, spectral))
     }
 }
 
