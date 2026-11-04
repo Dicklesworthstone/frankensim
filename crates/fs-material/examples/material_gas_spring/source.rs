@@ -23,6 +23,19 @@ pub fn point(t: f64, p: f64) -> Result<QueryPoint> {
         .with_quantity("pressure", typed(QuantityKind::Pressure), p)?)
 }
 pub fn load(text: &str, source: &str) -> Result<ThermochemicalGasModel> {
+    load_with_pressure_support(text, source, (1000.0, 1e7))
+}
+
+/// Author the pressure domain of these synthetic, pressure-independent curves.
+/// This constructs new source cards; it does not extrapolate measured material
+/// data or relax endpoint admission. `load` retains its original pressure range.
+pub fn load_with_pressure_support(
+    text: &str, source: &str, pressure_pa: (f64, f64),
+) -> Result<ThermochemicalGasModel> {
+    if !pressure_pa.0.is_finite() || !pressure_pa.1.is_finite()
+        || pressure_pa.0 <= 0.0 || pressure_pa.0 >= pressure_pa.1 {
+        return Err("synthetic pressure support needs finite positive increasing bounds".into());
+    }
     if text.len() > 65536 { return Err("synthetic mixture file exceeds 64 KiB".into()); }
     let provenance = Provenance { source: format!("SYNTHETIC example: {source}"),
         license: "CC0-1.0".into(), artifact: None };
@@ -65,7 +78,7 @@ pub fn load(text: &str, source: &str) -> Result<ThermochemicalGasModel> {
                     knots: vec![(200.0, value), (2000.0, 2.0*value)], dims },
                 validity: ValidityDomain::unconstrained()
                     .with_quantity("temperature", typed(QuantityKind::AbsoluteTemperature), 200.0, 2000.0)
-                    .with_quantity("pressure", typed(QuantityKind::Pressure), 1000.0, 1e7),
+                    .with_quantity("pressure", typed(QuantityKind::Pressure), pressure_pa.0, pressure_pa.1),
                 uncertainty: UncertaintyModel::Unstated, interpolation: InterpolationPolicy::LinearInside,
                 observations: vec![], provenance: provenance.clone() })?;
         }
@@ -82,6 +95,22 @@ pub fn load(text: &str, source: &str) -> Result<ThermochemicalGasModel> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn authored_low_pressure_support_keeps_default_source_domain() {
+        let text = "A 1 0.028 3.5 0 1.7e-5 0.025";
+        let default = load(text, "synthetic pressure test").unwrap();
+        assert_eq!(default, load_with_pressure_support(
+            text, "synthetic pressure test", (1000.0, 1e7)).unwrap());
+        let low = load_with_pressure_support(
+            text, "synthetic pressure test", (1e-6, 1e7)).unwrap();
+        assert!(default.evaluate(&point(400.0, 1.0).unwrap()).is_err());
+        assert!(low.evaluate(&point(400.0, 1.0).unwrap()).is_ok());
+        assert!(low.evaluate(&point(400.0, 1e-7).unwrap()).is_err());
+        for bounds in [(0.0, 1e7), (-1.0, 1e7), (2.0, 1.0),
+            (1.0, f64::INFINITY), (f64::NAN, 1e7)] {
+            assert!(load_with_pressure_support(text, "invalid pressure support", bounds).is_err());
+        }
+    }
     #[test]
     fn malformed_source_data_refuses_without_an_air_fallback() {
         for text in ["", "# only comment", "A 1 0.028 3.5 0 1e-5",

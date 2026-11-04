@@ -7141,6 +7141,71 @@ remains the default, and adaptive mode treats `dt_s` as its CSV reporting interv
 These are numerical checks with synthetic material sources, not measured
 validation of an aperture or collision regime.
 
+### Finite effusion receivers starting at exact vacuum
+
+`energy::parcel::evacuated::EvacuatedGasVolume` holds only the finite volume and
+auxiliary material-query axes. It has no gas temperature, composition or seed
+inventory; temperature/pressure query axes are refused. Positive received
+species inventories and an explicitly temperature-referenced internal energy
+initialize one ordinary `ClosedGasParcel` through the original composition,
+caloric, EOS and transport owners. The accepted total mass is stored directly.
+Actual represented species masses, EOS density times volume and source-relative
+storage are independently checked against fixed physical budgets.
+
+`network::transport::effusion::filling::step_candidate` captures the exact
+accepted species and molecular-energy corrections from the original donor's
+vacuum transaction. The receiver energy relative to the incoming species'
+internal energies at donor temperature is `sum_i dm_i R T_d/(2 M_i)`; the
+implementation consumes the native receipt rather than reconstructing a second
+beam law. A pure constant-Cv source therefore produces a first-fill temperature
+`T_r/T_d = 1 + R/(2 Cv_molar)`: 4/3 for a monatomic gas and 6/5 for a diatomic
+constant-capacity fixture. Mixtures fractionate according to their original
+species rates and transmissions. Zero receipt preserves an exactly evacuated
+receiver, including zero-area and zero-transmission cases.
+
+The existing closed-inventory/entropy owner now admits this zero-inventory
+initial receiver directly. Its original source increments and zero-amount
+mixing limit give actual pair mass, energy and entropy changes without a
+logarithm of zero or subtraction of arbitrary source datums. A large initial
+step that overfills a small receiver can conserve energy while decreasing
+entropy; it is refused with a typed `EntropyDecrease`. `filling::audit_pair`
+also checks later ordinary gas endpoints against the original donor plus
+vacuum, so a consumer can retain one conservation budget over many reports.
+
+`filling::trajectory::advance_candidate` compares a full first-fill interval
+with a half fill followed by a reciprocal finite-gas half step. Receiver
+backflow participates immediately in state, gross species-stream and relative
+energy error estimates. The original incident molar rate, receiving volume and
+maximum temperature in the receiver's solve bracket also bound the initial timestep, so a
+coarse trial cannot overfill a small receiver before source admission. This is
+a startup time ceiling, not a pressure floor or a restriction on subsequent
+thermal transpiration. Only the refined pair is accepted. Every remaining
+interval uses the existing adaptive network driver. Native calls, accepted
+intervals and retained rows share bounded effort; initialization history is
+reserved before continuation retains more rows. The complete original-to-
+final pair is independently checked against one fixed mass/energy/entropy
+budget. Refusals and late cancellation publish neither endpoint.
+
+These are lumped, thermalized, well-mixed, stationary-gas endpoints in fixed
+rigid vessels. Complete capture and equilibration of the molecular beam are
+authored assumptions; collisionless startup, molecular flight delay, adsorption,
+pumping, wall heat accommodation and moving-wall inertia are not resolved.
+Actual positive receiver states must satisfy their original material and
+aperture support. A source lower-pressure limit can prevent temporal refinement;
+no pressure floor or extrapolated material state is substituted. The local
+step-doubling estimate is not a certified global accuracy bound.
+
+The `effusion_receiver` CSV example starts with an exactly evacuated second
+chamber, then continues reciprocal adaptive transport through ordinary gas
+owners. It uses explicitly synthetic source coefficients and authored aperture
+qualification and an explicitly authored synthetic minimum pressure. Existing
+synthetic-loader callers keep their original pressure support. Empty receiver
+thermal/composition columns are blank. Added
+numerical fixtures cover molecular heating, selective mixture filling, source
+reference invariance, free-expansion entropy, entropy overshoot, reciprocal
+handoff, temporal refinement, source refusal and atomic cancellation; they are
+not empirical validation of a physical aperture or equilibration mechanism.
+
 ## Source-bound Prony histories and exact stress control
 
 `visco::stress_control::StressControlledMaxwell` extends the existing
