@@ -592,6 +592,7 @@ nav.sectionbar { margin-bottom: 0.4rem; }
 .anapage { display: flex; flex-direction: column; gap: 1rem; }
 .anahead h1 { margin: 0.25rem 0 0.35rem; }
 .anahead .lede { max-width: 54rem; margin: 0; }
+.anahead .anahow { max-width: 54rem; margin: 0.6rem 0 0; font-size: 0.9rem; color: var(--ink-2); }
 .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 0.6rem; }
 @media (min-width: 1100px) { .tiles { grid-template-columns: repeat(var(--tilecols, 4), 1fr); } }
 .tile { display: flex; flex-direction: column; gap: 0.1rem; background: var(--panel); border: 1px solid var(--line); border-top: 3px solid var(--gray); border-radius: 12px; padding: 0.65rem 0.8rem 0.7rem; }
