@@ -51,6 +51,9 @@ pub mod transfer;
 /// Coupled harmonic response, including nonproportional viscous damping.
 pub mod harmonic;
 
+/// Physical complex right mode shapes of complete mechanical quadratic pencils.
+pub mod quadratic_modes;
+
 mod windows;
 pub use windows::{MultiSliceReport, SliceTimingReceipt, WindowPlan, slice_windows};
 

@@ -73,6 +73,24 @@ mass-normalized damped modes (`time`, moved from fs-couple under owner decision 
   `quadratic_eigenvalues_with_cancel` shares this exact owner, adding an explicit
   per-window QR sweep cap and cancellation through native complex QR. The
   original entry point retains its 120-sweep cap and numerical arithmetic.
+- `quadratic_modes::PreparedQuadraticModes` retains the complete original
+  M/C/K and prepares binary coordinate/rate scaling plus a mass Cholesky once.
+  `refine` uses the shared fs-la bordered Newton owner and analytic quadratic
+  derivative to resolve one nearby simple pole and its complex right shape.
+  Published displacement is in original coordinates with `phi^H M phi = 1`;
+  velocity is the actual `s phi`. Full mutual inertia, nonproportional damping,
+  signed gyroscopic terms and active/unstable coefficients are preserved.
+  Physical recovery is independently gated by original M/C/K row contractions,
+  with the declared reference rate resolving zero-pole normalization. Explicit
+  bytes/work budgets include owner caches and the solver, and cancellation
+  publishes no partial mode. This is local refinement, not a complete spectrum,
+  eigenvalue enclosure or forward shape-error bound. Right modes alone do not
+  provide general force participation/residues or a diagonal forced-response
+  realization; those require left-mode information. Unresolved repeated or
+  defective poles refuse through the existing Newton owner. Seven native
+  `tests/complex_modes.rs` regressions cover analytic nonproportional phase,
+  gyroscopic handedness, full inertia, unit modal mass, coordinate/rate scaling,
+  active growth, rigid and defective poles, budgets, cancellation and replay.
 - `ModalError` — typed refusals with stable `FS-MODAL-*` display codes:
   dimension mismatch, mass-not-SPD, factorization refusal (wrapping the
   fs-sparse `FS-SPARSE-DIRECT-*` code and the shift), invalid window,
