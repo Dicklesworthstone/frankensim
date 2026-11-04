@@ -40,6 +40,8 @@ use fs_render::volumes::transport::{AbsorbingGrid, AbsorbingGridBudget, MassAbso
 
 #[path = "photometric_fixtures/aperture_controls.rs"]
 mod aperture_controls;
+#[path = "photometric_fixtures/area_breakdown.rs"]
+mod area_breakdown;
 #[path = "photometric_fixtures/lens_controls.rs"]
 mod lens_controls;
 #[path = "photometric_fixtures/mounted_updates.rs"]
