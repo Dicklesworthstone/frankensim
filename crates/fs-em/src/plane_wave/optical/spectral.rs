@@ -6,7 +6,8 @@ use fs_material::{
     field_storage::{FieldStorageError, linear_magnetic_permeability},
     state_point::{
         ResolvedMaterialStatePoint, SpectralComplexIndexStatePoint, SpectralConductorStatePoint,
-        SpectralOpticalStatePoint, SpectralTabulatedDielectricStatePoint,
+        SpectralOpticalStatePoint, SpectralSellmeierStatePoint,
+        SpectralTabulatedDielectricStatePoint,
     },
 };
 use fs_math::{c64::C64, det};
@@ -22,6 +23,8 @@ pub enum SpectralOpticalSource<'a> {
     ComplexIndex(&'a SpectralComplexIndexStatePoint),
     Conductor(&'a SpectralConductorStatePoint),
     TabulatedDielectric(&'a SpectralTabulatedDielectricStatePoint),
+    /// Original analytic coefficients with independently supported intensity loss.
+    DielectricSellmeier(&'a SpectralSellmeierStatePoint),
 }
 
 impl<'a> From<&'a SpectralOpticalStatePoint> for SpectralOpticalSource<'a> {
@@ -30,6 +33,9 @@ impl<'a> From<&'a SpectralOpticalStatePoint> for SpectralOpticalSource<'a> {
             SpectralOpticalStatePoint::Conductor(value) => Self::Conductor(value),
             SpectralOpticalStatePoint::TabulatedDielectric(value) => {
                 Self::TabulatedDielectric(value)
+            }
+            SpectralOpticalStatePoint::DielectricSellmeier(value) => {
+                Self::DielectricSellmeier(value)
             }
         }
     }
@@ -41,6 +47,7 @@ impl<'a> SpectralOpticalSource<'a> {
             Self::ComplexIndex(value) => value.resolved(),
             Self::Conductor(value) => value.resolved(),
             Self::TabulatedDielectric(value) => value.resolved(),
+            Self::DielectricSellmeier(value) => value.resolved(),
         }
     }
 
@@ -48,16 +55,17 @@ impl<'a> SpectralOpticalSource<'a> {
         match self {
             Self::ComplexIndex(value) => Some(value),
             Self::Conductor(value) => Some(value.complex_index()),
-            Self::TabulatedDielectric(_) => None,
+            Self::TabulatedDielectric(_) | Self::DielectricSellmeier(_) => None,
         }
     }
 }
 
-/// Piecewise source dispersion and absorption, on its original finite band.
+/// Original analytic or piecewise source dispersion and finite-band absorption.
 ///
 /// Scalar absolute permeability MUST belong to the same complete snapshot.
 /// The positive maximum knot span is authored in vacuum metres; it admits
-/// interpolation, not unresolved resonances or an error certificate. There is
+/// absorption/index-table interpolation, not analytic Sellmeier evaluation,
+/// unresolved resonances or an error certificate. There is
 /// no nonmagnetic default, visible clamp, extrapolation or additional Ohmic loss.
 /// These monochromatic data do not establish a causal time-domain reservoir
 /// or a two-sided group derivative at a piecewise-linear source knot.
@@ -96,6 +104,17 @@ impl<'a> SpectralOpticalResponse<'a> {
             for pair in index.samples().windows(2) {
                 admit_gap(pair[1].wavelength_m - pair[0].wavelength_m)?;
             }
+        } else if let SpectralOpticalSource::DielectricSellmeier(index) = source {
+            let (strengths, resonances) = index.sellmeier_coefficients_si();
+            let (lower, upper) = index.dispersion_wavelength_bounds_m();
+            if !dispersion::admits_sellmeier_band_m(strengths, resonances, [lower, upper]) {
+                return Err(ReflectionError::Invalid(
+                    "Sellmeier source requires positive finite index and no active pole in its complete fitted band",
+                ));
+            }
+            for pair in index.absorption_samples().windows(2) {
+                admit_gap(pair[1].wavelength_m - pair[0].wavelength_m)?;
+            }
         }
         let permeability_h_m = linear_magnetic_permeability(source.material())?;
         let index_to_sqrt_permittivity =
@@ -122,8 +141,9 @@ impl<'a> SpectralOpticalResponse<'a> {
     }
 
     /// Original n-i*k at an admitted angular frequency [rad/s]. Evaluation
-    /// allocates nothing. Dielectric n and intensity alpha are interpolated
-    /// before k=alpha*lambda_vac/(4*pi), retaining the original loss spectrum.
+    /// allocates nothing. Original Sellmeier n is evaluated analytically;
+    /// tabulated n and intensity alpha retain their interpolation before
+    /// k=alpha*lambda_vac/(4*pi), preserving the original loss spectrum.
     pub fn complex_index(self, omega_rad_s: f64) -> Result<C64, ReflectionError> {
         if let Some(index) = self.source.complex_index() {
             let wavelength = dispersion::wavelength_from_frequency(
@@ -134,8 +154,31 @@ impl<'a> SpectralOpticalResponse<'a> {
                 .map_err(FieldStorageError::from)?;
             return Ok(C64::new(value.eta, -value.k));
         }
+        if let SpectralOpticalSource::DielectricSellmeier(source) = self.source {
+            let (low, high) = source.wavelength_bounds_m();
+            let wavelength = dispersion::wavelength_from_frequency(
+                omega_rad_s,
+                FREQUENCY_WAVELENGTH_M,
+                [low, high],
+            )
+            .ok_or(ReflectionError::Invalid(
+                "wave frequency is outside the common Sellmeier and absorption source band",
+            ))?;
+            let (strengths, resonances) = source.sellmeier_coefficients_si();
+            let index = dispersion::sellmeier_index_m(strengths, resonances, wavelength).ok_or(
+                ReflectionError::Invalid("source Sellmeier phase index is unrepresentable"),
+            )?;
+            let alpha = source
+                .absorption_per_m_at(wavelength)
+                .map_err(FieldStorageError::from)?;
+            return dispersion::attenuating_index_m(index, alpha, wavelength).ok_or(
+                ReflectionError::Invalid(
+                    "source Sellmeier intensity absorption is unrepresentable",
+                ),
+            );
+        }
         let SpectralOpticalSource::TabulatedDielectric(source) = self.source else {
-            unreachable!("complex-index sources returned above")
+            unreachable!("complex-index and analytic sources returned above")
         };
         let (low, high) = source.wavelength_bounds_m();
         let wavelength = dispersion::wavelength_from_frequency(
@@ -205,6 +248,11 @@ impl<'a> SpectralOpticalResponse<'a> {
                     .at_query_point(card, point)
                     .map_err(FieldStorageError::from)?,
             ),
+            SpectralOpticalSource::DielectricSellmeier(value) => OwnedSource::DielectricSellmeier(
+                value
+                    .at_query_point(card, point)
+                    .map_err(FieldStorageError::from)?,
+            ),
         };
         let refreshed = RefreshedSpectralOpticalSource {
             source,
@@ -228,6 +276,10 @@ impl<'a> SpectralOpticalResponse<'a> {
                     SpectralOpticalSource::TabulatedDielectric(a),
                     SpectralOpticalSource::TabulatedDielectric(b),
                 ) => core::ptr::eq(a, b),
+                (
+                    SpectralOpticalSource::DielectricSellmeier(a),
+                    SpectralOpticalSource::DielectricSellmeier(b),
+                ) => core::ptr::eq(a, b),
                 _ => false,
             }
     }
@@ -238,6 +290,7 @@ enum OwnedSource {
     ComplexIndex(SpectralComplexIndexStatePoint),
     Conductor(SpectralConductorStatePoint),
     TabulatedDielectric(SpectralTabulatedDielectricStatePoint),
+    DielectricSellmeier(SpectralSellmeierStatePoint),
 }
 
 /// A fully admitted source refresh with its original interpolation policy.
@@ -257,6 +310,9 @@ impl RefreshedSpectralOpticalSource {
             OwnedSource::TabulatedDielectric(value) => {
                 SpectralOpticalSource::TabulatedDielectric(value)
             }
+            OwnedSource::DielectricSellmeier(value) => {
+                SpectralOpticalSource::DielectricSellmeier(value)
+            }
         }
     }
 
@@ -264,3 +320,6 @@ impl RefreshedSpectralOpticalSource {
         SpectralOpticalResponse::try_new(self.source(), self.maximum_knot_span_m)
     }
 }
+
+#[cfg(test)]
+mod sellmeier_tests;

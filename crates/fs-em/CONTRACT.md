@@ -3752,3 +3752,19 @@ space/time/phase quadrature, linear-analyzer scaling, basis rotation and a
 crossed-analyzer mean square near `5e-41`. Two additional original-source
 integration tests are committed but unrun without the sibling constellation;
 the native numerical probes do not execute Maxwell/material reconstruction.
+
+## Source-backed analytic finite-band Maxwell dispersion
+
+`SpectralOpticalSource::DielectricSellmeier` borrows the same original SI
+coefficients, explicit fit limits and independent intensity-absorption spectrum
+as the material and native-render owners. `SpectralOpticalResponse` admits the
+complete fitted interval and evaluates the original Sellmeier equation directly;
+only absorption is interpolated before `k = alpha*lambda_vac/(4*pi)`. The caller's
+maximum knot span applies to the original absorption samples, not a fabricated
+phase-index table. Frequency evaluation stays inside the common source domain.
+
+Scalar absolute permeability must still belong to the same complete state.
+Refresh retains exact source selection and rechecks the full domain. Original
+interface/layer consumers receive the same monochromatic response; this does
+not introduce a causal time-domain reservoir, inferred permeability, or
+out-of-band material behavior.

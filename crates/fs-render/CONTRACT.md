@@ -6842,3 +6842,19 @@ paths and absorption, deterministic replay, dark channels, molecular transport
 parity, volume limits and cancellation. The detector numerical module was
 executed against real fs_math; full native camera/material integration tests
 remain unexecuted without the complete constellation dependency checkouts.
+
+## Analytic spectral material bindings
+
+`MaterialOpticalBinding::try_spectral_sellmeier` carries the original finite-band
+material fit directly into `SellmeierIor::try_new_in_band`, converting source
+m² to native µm² and vacuum metres to nm exactly once. Pole and transparent-index
+admission covers the entire original fitted interval before intersection with
+the separately retained Beer intensity-absorption support. No sampled phase-index
+approximation replaces the analytic law or its group derivative. Native
+Snell/Fresnel, phase/group path and Beer consumers share that same accepted law.
+
+Bindings require matching complete physical state and retain explicit surface
+state. Refresh re-evaluates pinned source claims, readmits the original family
+and reconstructs the binding atomically. Focused controls include high-index
+infrared sources, full-fit pole refusal outside absorption support, original
+claim identity and source-state evolution.

@@ -29,7 +29,7 @@ pub(super) fn wavelength_from_frequency(
     if ![omega, frequency_wavelength, low, high, minimum, maximum]
         .iter()
         .all(|v| v.is_finite() && *v > 0.0)
-        || high <= low
+        || high < low
         || omega < minimum
         || omega > maximum
     {
@@ -63,7 +63,22 @@ pub(super) fn sellmeier_index(
         return None;
     }
     let wavelength_m = wavelength_nm * 1e-9;
+    sellmeier_index_m(strengths, resonances_m2, wavelength_m)
+}
+
+/// Evaluate the same original equation directly at an SI source wavelength.
+pub(super) fn sellmeier_index_m(
+    strengths: [f64; 3],
+    resonances_m2: [f64; 3],
+    wavelength_m: f64,
+) -> Option<f64> {
+    if !wavelength_m.is_finite() || wavelength_m <= 0.0 {
+        return None;
+    }
     let square_m2 = wavelength_m * wavelength_m;
+    if !square_m2.is_finite() || square_m2 <= 0.0 {
+        return None;
+    }
     let mut n_squared = Dd::from_f64(1.0);
     for (b, c) in strengths.into_iter().zip(resonances_m2) {
         if !b.is_finite() || b < 0.0 || !c.is_finite() || c < 0.0 {
@@ -88,17 +103,34 @@ pub(super) fn sellmeier_index(
 /// Positive strengths make n² monotone between poles; both band endpoints
 /// and exclusion of every active pole admit the complete visible interval.
 pub(super) fn admits_sellmeier_band(strengths: [f64; 3], resonances_m2: [f64; 3]) -> bool {
-    let bounds = VISIBLE_BAND_NM.map(|x| {
-        let m = x * 1e-9;
-        m * m
-    });
+    admits_sellmeier_band_m(strengths, resonances_m2, VISIBLE_BAND_NM.map(|x| x * 1e-9))
+}
+
+/// Admit an entire original fitted band, separately from any absorption knots.
+/// Endpoint checks use the same SI evaluator as the monochromatic response.
+pub(super) fn admits_sellmeier_band_m(
+    strengths: [f64; 3],
+    resonances_m2: [f64; 3],
+    wavelength_bounds_m: [f64; 2],
+) -> bool {
+    let bounds = wavelength_bounds_m.map(|value| value * value);
+    if wavelength_bounds_m[0] > wavelength_bounds_m[1]
+        || wavelength_bounds_m
+            .iter()
+            .any(|value| !value.is_finite() || *value <= 0.0)
+        || bounds
+            .iter()
+            .any(|value| !value.is_finite() || *value <= 0.0)
+    {
+        return false;
+    }
     !strengths
         .iter()
         .zip(resonances_m2)
         .any(|(&b, c)| b != 0.0 && c >= bounds[0] && c <= bounds[1])
-        && VISIBLE_BAND_NM
+        && wavelength_bounds_m
             .into_iter()
-            .all(|wavelength| sellmeier_index(strengths, resonances_m2, wavelength).is_some())
+            .all(|wavelength| sellmeier_index_m(strengths, resonances_m2, wavelength).is_some())
 }
 
 pub(super) fn attenuating_index(n: f64, alpha_per_m: f64, wavelength_nm: f64) -> Option<C64> {
@@ -143,6 +175,19 @@ pub(super) fn permittivity(index: C64, index_to_sqrt_permittivity: f64) -> Optio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exact_monochromatic_source_band_admits_only_its_original_frequency() {
+        let wavelength = 1.55e-6;
+        let constant = core::f64::consts::TAU * LIGHT_SPEED_M_S;
+        let omega = constant / wavelength;
+        assert_eq!(
+            wavelength_from_frequency(omega, constant, [wavelength; 2]),
+            Some(wavelength)
+        );
+        assert!(wavelength_from_frequency(omega.next_down(), constant, [wavelength; 2]).is_none());
+        assert!(wavelength_from_frequency(omega.next_up(), constant, [wavelength; 2]).is_none());
+    }
 
     #[test]
     fn power_absorption_has_exactly_one_factor_of_two_in_field_decay() {

@@ -95,11 +95,22 @@ impl VisibleSellmeierStatePoint {
 /// Absorption uses the same typed spectral or RGB source-selection rules as
 /// [`super::resolve_visible_dielectric_state_point`], including ambiguity and
 /// refusal of incomplete spectral data without an RGB fallback.
+/// Cards declaring either explicit Sellmeier fit limit must instead use
+/// [`super::resolve_spectral_sellmeier_state_point`]; the visible path cannot
+/// discard those bounds, including through a pinned coefficient selection.
 pub fn resolve_visible_sellmeier_state_point(
     card: &MaterialCard,
     point: &QueryPoint,
     selection: MaterialPropertySelection,
 ) -> Result<VisibleSellmeierStatePoint, MaterialStatePointError> {
+    if super::SPECTRAL_DIELECTRIC_SELLMEIER_WAVELENGTH_BOUNDS_M_PROPERTIES
+        .iter()
+        .any(|name| !card.claims_for(name).is_empty())
+    {
+        return Err(MaterialStatePointError::InvalidDerived {
+            quantity: "explicit_sellmeier_band_requires_spectral_source",
+        });
+    }
     let spectral = visible_dielectric_uses_spectral_absorption(card, &selection)?;
     let mut requirements = Vec::with_capacity(if spectral { 15 } else { 10 });
     for name in VISIBLE_DIELECTRIC_SELLMEIER_B_PROPERTIES {

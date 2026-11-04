@@ -2,8 +2,31 @@
 
 use super::*;
 use fs_material::state_point::{
-    SpectralConductorStatePoint, SpectralTabulatedDielectricStatePoint,
+    SpectralConductorStatePoint, SpectralSellmeierStatePoint, SpectralTabulatedDielectricStatePoint,
 };
+
+pub(super) fn spectral_sellmeier(
+    source: &SpectralSellmeierStatePoint,
+) -> Result<DielectricGlass, MaterialOpticalError> {
+    let (strengths, resonances_m2) = source.sellmeier_coefficients_si();
+    let (minimum_m, maximum_m) = source.dispersion_wavelength_bounds_m();
+    // Preserve the complete original fit domain, independently of absorption.
+    let index = SellmeierIor::try_new_in_band(
+        strengths,
+        resonances_m2.map(|value| value * 1.0e12),
+        (minimum_m * 1.0e9, maximum_m * 1.0e9),
+    )?;
+    let absorption = source
+        .absorption_samples()
+        .map(|sample| (sample.wavelength_m * 1.0e9, sample.absorption_per_m));
+    let glass = DielectricGlass::new(
+        index,
+        BeerLambertAbsorption::try_from_spectral_extinction_in_band(&absorption)?,
+        GlassProvenance::Custom,
+    );
+    glass.wavelength_bounds_nm()?;
+    Ok(glass)
+}
 
 pub(super) fn spectral_conductor(
     source: &SpectralConductorStatePoint,

@@ -13095,3 +13095,19 @@ Integration regressions retain actual mass/volume and source identity, compare
 the bound interface with its original core calculation, reject source-domain
 and density incompatibility, and preserve one-phase/cancellation behavior.
 These material integrations require the normal runtime build.
+
+## Source-backed finite-band analytic Sellmeier
+
+`SpectralSellmeierStatePoint` retains six original SI oscillator coefficients,
+two explicitly sourced fit limits in vacuum metres, and nine independently
+sourced intensity-absorption coordinates and values. All 26 claims, typed
+quantities, receipts and complete material state remain attached. The fit band
+and absorption support remain separate; consumers admit the complete fit
+before using their common domain. Refresh pins the original claims. A card
+with either explicit fit-limit property must use this resolver; the legacy
+visible resolver refuses rather than discarding that domain, even with pins.
+
+Explicit spectral tabulated indices admit ordinary real `n >= 1` with
+`n² <= f64::MAX/64` arithmetic headroom. Legacy visible source bounds remain.
+These source schemas provide neither missing transparency nor a measured
+material preset, and do not certify extrapolation beyond original support.

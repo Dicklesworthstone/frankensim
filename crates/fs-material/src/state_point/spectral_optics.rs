@@ -2,7 +2,8 @@
 //!
 //! Wavelength coordinates are material properties in SI metres, so the grid,
 //! coefficients, source claims and complete physical state share one identity.
-//! These explicitly selected schemas do not change the legacy visible resolver.
+//! Legacy visible sources retain their resolver; explicitly bounded dispersion
+//! must use this source path so its fitted support cannot be discarded.
 
 use super::{
     MaterialPropertySelection, MaterialStatePointError, ResolvedMaterialStatePoint,
@@ -14,6 +15,13 @@ use fs_blake3::{ContentHash, DomainHasher};
 use fs_matdb::{MaterialCard, PropertyKey, QueryPoint};
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{Dims, QuantitySpec};
+
+mod sellmeier;
+pub use sellmeier::{
+    SPECTRAL_DIELECTRIC_SELLMEIER_WAVELENGTH_BOUNDS_M_PROPERTIES,
+    SpectralDielectricAbsorptionSample, SpectralSellmeierStatePoint,
+    resolve_spectral_sellmeier_state_point,
+};
 
 /// Number of original knots retained by each finite-band optical table.
 pub const SPECTRAL_OPTICAL_SAMPLE_COUNT: usize = 9;
@@ -97,7 +105,7 @@ const INDEX_QUANTITY: QuantitySpec = QuantitySpec::dimensional(Dims::NONE);
 pub struct SpectralDielectricSample {
     /// Vacuum wavelength [m].
     pub wavelength_m: f64,
-    /// Absolute phase index in the native weakly absorbing domain `[1, 3]`.
+    /// Absolute phase index at least one, with a representable native square.
     pub phase_index: f64,
     /// Internal intensity absorption [power Np/m].
     pub absorption_per_m: f64,
@@ -221,7 +229,10 @@ impl SpectralTabulatedDielectricStatePoint {
                 INDEX_QUANTITY,
                 ScalarAdmissibility::StrictlyPositive,
             )?;
-            if !(1.0..=3.0).contains(&phase_index) {
+            if !phase_index.is_finite()
+                || phase_index < 1.0
+                || phase_index * phase_index > f64::MAX / 64.0
+            {
                 return Err(MaterialStatePointError::InvalidDerived {
                     quantity: "spectral_dielectric_phase_index",
                 });
@@ -285,6 +296,8 @@ pub enum SpectralOpticalStatePoint {
     Conductor(SpectralConductorStatePoint),
     /// Weakly absorbing real-index dielectric response.
     TabulatedDielectric(SpectralTabulatedDielectricStatePoint),
+    /// Original analytic Sellmeier fit and independently supported absorption.
+    DielectricSellmeier(SpectralSellmeierStatePoint),
 }
 
 impl SpectralOpticalStatePoint {
@@ -294,6 +307,7 @@ impl SpectralOpticalStatePoint {
         match self {
             Self::Conductor(source) => source.resolved(),
             Self::TabulatedDielectric(source) => source.resolved(),
+            Self::DielectricSellmeier(source) => source.resolved(),
         }
     }
 
@@ -303,6 +317,7 @@ impl SpectralOpticalStatePoint {
         match self {
             Self::Conductor(source) => source.identity(),
             Self::TabulatedDielectric(source) => source.identity(),
+            Self::DielectricSellmeier(source) => source.identity(),
         }
     }
 
@@ -317,6 +332,9 @@ impl SpectralOpticalStatePoint {
             Self::TabulatedDielectric(source) => source
                 .at_query_point(card, point)
                 .map(Self::TabulatedDielectric),
+            Self::DielectricSellmeier(source) => source
+                .at_query_point(card, point)
+                .map(Self::DielectricSellmeier),
         }
     }
 }

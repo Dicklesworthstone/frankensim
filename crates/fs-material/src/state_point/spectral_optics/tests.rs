@@ -385,7 +385,7 @@ fn g0_wavelength_order_passivity_and_native_dielectric_domain_are_readmitted() {
         ),
         (SPECTRAL_OPTICAL_WAVELENGTH_M_PROPERTIES[4], 9.0e-6),
         (SPECTRAL_DIELECTRIC_IOR_PROPERTIES[3], 0.99),
-        (SPECTRAL_DIELECTRIC_IOR_PROPERTIES[3], 3.01),
+        (SPECTRAL_DIELECTRIC_IOR_PROPERTIES[3], f64::MAX),
         (SPECTRAL_DIELECTRIC_ABSORPTION_PER_M_PROPERTIES[3], -0.1),
     ] {
         let card = card(true, |mut source| {
@@ -418,6 +418,30 @@ fn g0_wavelength_order_passivity_and_native_dielectric_domain_are_readmitted() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn g0_explicit_spectral_source_admits_high_index_with_native_square_headroom() {
+    for index in [4.0, (f64::MAX / 128.0).sqrt()] {
+        let card = card(true, |mut source| {
+            if SPECTRAL_DIELECTRIC_IOR_PROPERTIES.contains(&source.key.name()) {
+                constant(&mut source, index);
+            }
+            Some(source)
+        });
+        let state = resolve_spectral_tabulated_dielectric_state_point(
+            &card,
+            &point(450.0),
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        assert!(
+            state
+                .samples()
+                .iter()
+                .all(|sample| sample.phase_index == index)
+        );
+    }
 }
 
 #[test]

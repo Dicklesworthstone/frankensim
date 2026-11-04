@@ -2,10 +2,38 @@
 
 use super::*;
 use fs_material::state_point::{
-    SpectralConductorStatePoint, SpectralOpticalStatePoint, SpectralTabulatedDielectricStatePoint,
+    SpectralConductorStatePoint, SpectralOpticalStatePoint, SpectralSellmeierStatePoint,
+    SpectralTabulatedDielectricStatePoint,
 };
 
 impl MaterialOpticalBinding {
+    /// Bind an original analytic Sellmeier fit on its own source wavelength
+    /// domain. Its independent intensity-absorption spectrum is retained, and
+    /// only their common support is available to native transport. Exact phase
+    /// and group dispersion are never replaced by a sampled index table.
+    /// `None` selects a smooth surface; source state and surface remain explicit.
+    pub fn try_spectral_sellmeier(
+        accepted: &ResolvedMaterialStatePoint,
+        optical: &SpectralSellmeierStatePoint,
+        roughness_alpha: Option<f64>,
+        surface_state_identity: ContentHash,
+    ) -> Result<Self, MaterialOpticalError> {
+        Self::validate_state(accepted, optical.resolved(), surface_state_identity)?;
+        let glass = bulk_optics::spectral_sellmeier(optical)?;
+        let surface = match roughness_alpha {
+            Some(alpha) => DielectricSurface::try_rough(alpha)?,
+            None => DielectricSurface::SMOOTH,
+        };
+        let mut binding = Self::new(
+            accepted,
+            optical.resolved(),
+            surface_state_identity,
+            OpticalAppearance::Dielectric { glass, surface },
+        );
+        binding.optical_state_identity = optical.identity();
+        Ok(binding)
+    }
+
     /// Bind nine source-selected conductor knots on their original finite band.
     /// The shared complex-index owner already carries converted vacuum nm. The
     /// explicit positive maximum knot gap is an interpolation admission limit,
@@ -38,8 +66,8 @@ impl MaterialOpticalBinding {
     }
 
     /// Bind original finite-band phase-index and intensity-absorption knots.
-    /// This preserves the native weak-absorption model and its `[1, 3]` phase
-    /// index domain; it does not infer complex Fresnel or broadband emissivity.
+    /// This preserves the native weak-absorption model, including transparent
+    /// high-index sources; it does not infer complex Fresnel or broadband emissivity.
     /// Interpolation stays between source knots. `None` selects a smooth surface.
     pub fn try_spectral_tabulated_dielectric(
         accepted: &ResolvedMaterialStatePoint,
@@ -109,6 +137,20 @@ impl MaterialOpticalBinding {
                     self.surface_state_identity,
                 )
             }
+            (
+                OpticalAppearance::Dielectric { glass, surface },
+                SpectralOpticalStatePoint::DielectricSellmeier(source),
+            ) => {
+                if !matches!(glass.ior(), DielectricIor::Sellmeier(_)) {
+                    return Err(MaterialOpticalRefreshError::SourceMismatch);
+                }
+                Self::try_spectral_sellmeier(
+                    accepted,
+                    source,
+                    surface.roughness_alpha(),
+                    self.surface_state_identity,
+                )
+            }
             _ => return Err(MaterialOpticalRefreshError::SourceMismatch),
         }
         .map_err(MaterialOpticalRefreshError::Binding)?;
@@ -116,5 +158,7 @@ impl MaterialOpticalBinding {
     }
 }
 
+#[cfg(test)]
+mod sellmeier_tests;
 #[cfg(test)]
 mod tests;
