@@ -828,9 +828,23 @@ pipe `Z_in = +i Zc cot(kL)`.
   - Interior faces use the alternating flux (`q̂` from the left, `p̂` from the
     right). It is energy-conserving and optimal (`p + 1`) for every `p`;
     `K_q = -K_pᵀ` holds exactly through LGL summation by parts.
-  - Boundaries: `Closed`, `IdealOpen`, `Matched` (upwind characteristic)
-    and `Port(PortId)`. A port holds an inflow `q` over a step and returns
+  - Boundaries: `Closed`, `IdealOpen`, `Matched` (upwind characteristic),
+    `Resistive(DgResistance)` and `Port(PortId)`. A port holds an inflow `q` over a step and returns
     the exact impulse `ΔX = ∫ p dt`, so its work is exactly `e ΔX`.
+    `DgBoundary::resistive(R)` admits a finite positive pressure/volume-flow
+    resistance [Pa s/m3]. Its reflected pressure coefficient is
+    `(R-Zc)/(R+Zc)`, using the original endpoint medium and area; the outlet
+    and inlet use opposite outward-flow signs. The characteristic flux and
+    native positive boundary-loss squares belong to the same generator in
+    transient, harmonic, frequency-derivative and pole paths, including
+    molecular memory and material rebuilds. The legacy `matched_absorption_w`
+    field includes physical load absorption AND the nonnegative upwind residual
+    penalty. For peak phasors, `alpha=R/(R+Zc)`, `beta=Zc/(R+Zc)` and outward
+    sign `s`, physical load power is `R*|beta*(p/Zc+s*q)|²/2`; the extra
+    numerical loss is `|beta*p-s*alpha*Zc*q|²/(2*Zc)`. Their sum is the native
+    boundary loss used for the DG energy balance; it is not all physical heat.
+    This is a constant real load,
+    with no reactive, frequency-dependent or measured-radiation claim.
   - `propagator(dt, tol)` is the exact exponential, with no RK, trapezoid,
     implicit-midpoint or generalized-alpha step.
     - Without wall memory and with lossless boundaries the energy-coordinate operator is skew. It is
@@ -838,7 +852,7 @@ pipe `Z_in = +i Zc cot(kL)`.
       Jordan–Wielandt matrix (`householder_eigh`). The certificate is the
       larger of the relative singular residual and the basis orthogonality
       defects.
-    - `Matched` and viscothermal memory are dissipative and non-normal. They use a scaled Taylor
+    - `Matched`, `Resistive` and viscothermal memory are dissipative and non-normal. They use a scaled Taylor
       series with squaring, certified by a rigorous truncation bound carried
       through the squarings plus an a-posteriori halving estimate.
     - A certificate above `tol` refuses (`FS-DUCT-PROPAGATOR-CERTIFICATE`).
@@ -847,7 +861,7 @@ pipe `Z_in = +i Zc cot(kL)`.
   - `DgPropagator::step` returns each port's `ΔX` and an `EnergyLedgerRow`
     whose stored energy is that of the reconstructed physical state.
     - For the lossless image and lossless boundaries `E(t) - E(0) - W` is a conservation check.
-    - For `Matched` or wall memory the absorbed energy is inferred from the deficit
+    - For `Matched`, `Resistive` or wall memory the absorbed energy is inferred from the deficit
       (unclamped), so `balance_checked` is false.
   - Origin: QuietLotus's uncommitted 2026-10-16 work, reworked (see the
     commit for what changed).

@@ -6,7 +6,7 @@
 //! coordinates. Their Hermitian energy identity describes a complex modal
 //! envelope, not a finite-cycle average of a decaying real trajectory.
 
-use super::{DgBoundary, DgContinuous, DgDuct, DgMedium, DuctError, PortId, finite, invalid, poll};
+use super::{DgContinuous, DgDuct, DgMedium, DuctError, PortId, finite, invalid, poll};
 use fs_la::nonlinear_eig::beyn::{BeynError, BeynReport, beyn_with_cancel};
 use fs_la::nonlinear_eig::{
     MAX_NONLINEAR_POLE_DIMENSION, NonlinearEigError, NonlinearPole, PoleEvaluation,
@@ -54,7 +54,8 @@ pub struct DgResonancePole {
     pub wall_dissipation_w: f64,
     /// Original molecular exchange loss, separate from wall dissipation [W].
     pub molecular_dissipation_w: f64,
-    /// Original matched-boundary absorption for the complex modal envelope [W].
+    /// Original characteristic boundary loss for the complex modal envelope
+    /// [W], including physical load absorption and the upwind residual penalty.
     pub matched_absorption_w: f64,
     /// Independently evaluated 2 Re(s) H + D_wall + D_molecular + D_boundary.
     pub decay_power_residual_w: f64,
@@ -505,9 +506,9 @@ impl<M: DgMedium> PreparedDgPoles<'_, M> {
                 duct.outlet_area_m2(),
             ),
         ] {
-            if bc == DgBoundary::Matched {
-                let z = gas.density_kg_m3() * gas.sound_speed_m_s() / area;
-                boundary += 0.5 * (pressure[node].norm_sq() / z + z * flow[node].norm_sq());
+            let z = gas.density_kg_m3() * gas.sound_speed_m_s() / area;
+            if let Some((alpha, beta)) = bc.characteristic_weights(z) {
+                boundary += beta * pressure[node].norm_sq() / z + alpha * z * flow[node].norm_sq();
             }
         }
         let mut port_outputs = Vec::with_capacity(ports);

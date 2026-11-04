@@ -256,11 +256,10 @@ impl<M: DgMedium> DgContinuous<'_, M> {
                 self.duct.outlet_area_m2(),
             ),
         ] {
-            if boundary == DgBoundary::Matched {
-                let z = gas.density_kg_m3() * gas.sound_speed_m_s() / area;
-                matched_absorption_w += 0.5
-                    * ((pressure[node].conj() * pressure_pa[node]).re / z
-                        + z * (flow[node].conj() * volume_flow_m3_s[node]).re);
+            let z = gas.density_kg_m3() * gas.sound_speed_m_s() / area;
+            if let Some((alpha, beta)) = boundary.characteristic_weights(z) {
+                matched_absorption_w += beta * (pressure[node].conj() * pressure_pa[node]).re / z
+                    + alpha * z * (flow[node].conj() * volume_flow_m3_s[node]).re;
             }
         }
         let mut ports = Vec::with_capacity(self.ports().len());

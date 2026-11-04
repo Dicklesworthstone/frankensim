@@ -70,6 +70,44 @@ fn duct(walls: bool) -> DgDuct {
     }
 }
 
+#[test]
+fn molecular_attachment_retains_resistive_boundary_absorption() {
+    let gas = gas();
+    let zc = gas.density * gas.sound_speed / (core::f64::consts::PI * 0.001_f64.powi(2));
+    for resistance in [0.2 * zc, 4.0 * zc] {
+        let dg = DgDuct::new(
+            &Duct {
+                segments: vec![Segment::Cylinder {
+                    radius: 0.001,
+                    length: 0.05,
+                }],
+            },
+            &gas,
+            DgMesh {
+                elements: 2,
+                order: 3,
+            },
+            DgBoundary::Port(PortId(7)),
+            DgBoundary::resistive(resistance).unwrap(),
+        )
+        .unwrap()
+        .with_molecular_relaxation(law(gas.clone(), 1))
+        .unwrap();
+        let response = dg
+            .harmonic_response(
+                2000.0,
+                &[(PortId(7), C64::from_re(1e-8))],
+                20_000_000,
+                1e-10,
+                &mut || false,
+            )
+            .unwrap();
+        assert!(response.matched_absorption_w > 0.0);
+        assert!(response.molecular_dissipation_w > 0.0);
+        assert!(response.power_residual_w.abs() < 2e-8 * response.input_power_w);
+    }
+}
+
 // Eliminate the ACTUAL local energy matrix using an independent dense LU.
 // No production thermal-observation helper supplies the response.
 fn measured_compliance(duct: &DgDuct, omega: f64) -> C64 {

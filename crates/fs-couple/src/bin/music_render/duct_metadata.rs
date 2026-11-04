@@ -179,6 +179,7 @@ pub(super) fn dg_radiation_provenance(load: &fs_couple::dg_port::DgPortLoad) -> 
                 fs_duct::dg::DgBoundary::Closed => "closed",
                 fs_duct::dg::DgBoundary::IdealOpen => "ideal-open",
                 fs_duct::dg::DgBoundary::Matched => "matched",
+                fs_duct::dg::DgBoundary::Resistive(_) => "resistive",
                 fs_duct::dg::DgBoundary::Port(_) => "flow-port",
             };
             format!("{{\"port\":{},\"operator_identity\":\"{}\",\"outlet_boundary\":\"{outlet_boundary}\",\"length_m\":{:e},\"inlet_area_m2\":{:e},\"outlet_area_m2\":{:e},\"inlet_gas\":{},\"outlet_gas\":{},\"elements\":{},\"order\":{},\"total_dofs\":{},\"wall_band_rad_s\":{band}{molecular}}}",
@@ -304,6 +305,7 @@ pub(super) fn provenance(p:&PlateValvePerformance)->String {
             fs_duct::dg::DgBoundary::Closed => "closed",
             fs_duct::dg::DgBoundary::IdealOpen => "ideal-open",
             fs_duct::dg::DgBoundary::Matched => "matched",
+            fs_duct::dg::DgBoundary::Resistive(_) => "resistive",
             fs_duct::dg::DgBoundary::Port(_) => {
                 if load.radiation_record().is_some() { "computed-baffled" }
                 else { "causal-impedance-port" }

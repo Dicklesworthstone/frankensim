@@ -130,12 +130,12 @@ fn restore_pressure_boundaries(duct: &DgDuct, operator: &mut [f64], n: usize) {
         (duct.inlet, 0, 0, &duct.gas),
         (duct.outlet, last, local - 1, &duct.outlet_gas),
     ] {
-        if boundary != DgBoundary::Matched {
-            continue;
-        }
         let e = &duct.elements[element];
         let resistance = gas.density * gas.sound_speed / e.areas[node];
-        let factor = det::sqrt(0.5 / resistance);
+        let Some((_, beta)) = boundary.characteristic_weights(resistance) else {
+            continue;
+        };
+        let factor = det::sqrt(beta / resistance);
         let entries: Vec<_> = (0..local)
             .map(|i| {
                 (
@@ -338,7 +338,7 @@ impl DgDuct {
                 operator[i * total + j] = self.l_tilde[kept[i] * old_total + kept[j]];
             }
         }
-        // The original pressure-pressure block is only matched-boundary loss
+        // The original pressure-pressure block is characteristic boundary loss
         // plus the thermal arms being replaced. Re-form its original boundary
         // squares; subtracting large thermal rates would leave roundoff of
         // either sign in a physically lossless pressure direction.

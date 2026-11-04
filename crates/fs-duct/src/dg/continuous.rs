@@ -59,7 +59,10 @@ pub struct DgHarmonicResponse {
     pub wall_dissipation_w: f64,
     /// Internal molecular energy exchange, distinct from thermal wall loss [W].
     pub molecular_dissipation_w: f64,
-    /// Original matched characteristic boundaries' mean absorption [W].
+    /// Original matched or resistive boundary operator's mean loss [W].
+    /// Includes physical load absorption and the nonnegative upwind boundary
+    /// residual penalty; only the former is physical heat. The field name
+    /// predates finite-resistance terminations.
     pub matched_absorption_w: f64,
     pub input_power_w: f64,
     /// Independent wall, molecular and boundary loss minus input power [W].
@@ -267,7 +270,8 @@ impl<M: DgMedium> DgContinuous<'_, M> {
     /// Original equations are checked using the actual supplied port inflows.
     /// Work is charged as n^2*(ports+8), before allocating physical observations.
     /// The field map and positive wall-loss owner are reused for real/imaginary
-    /// quadratures; matched-boundary loss uses its actual endpoint gas and area.
+    /// quadratures; characteristic boundary loss uses its original medium,
+    /// area and load, including the nonnegative upwind residual penalty.
     pub fn observe_harmonic(
         &self,
         omega_rad_s: f64,
@@ -366,10 +370,11 @@ impl<M: DgMedium> DgContinuous<'_, M> {
                 self.duct.outlet_area_m2(),
             ),
         ] {
-            if boundary == DgBoundary::Matched {
-                let zc = gas.density_kg_m3() * gas.sound_speed_m_s() / area;
-                matched_absorption_w += 0.25
-                    * (pressure_pa[node].norm_sq() / zc + zc * volume_flow_m3_s[node].norm_sq());
+            let zc = gas.density_kg_m3() * gas.sound_speed_m_s() / area;
+            if let Some((alpha, beta)) = boundary.characteristic_weights(zc) {
+                matched_absorption_w += 0.5
+                    * (beta * pressure_pa[node].norm_sq() / zc
+                        + alpha * zc * volume_flow_m3_s[node].norm_sq());
             }
         }
         let mut ports = Vec::with_capacity(self.ports().len());

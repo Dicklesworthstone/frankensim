@@ -53,7 +53,7 @@
 //! $\Delta X = \int p\,dt$ of its conjugate pressure, so the exchanged work is exactly
 //! $e\,\Delta X$. Every ledger row reports the stored energy of the reconstructed physical
 //! state. For lossless boundaries the balance $E(t) - E(0) - W$ is a conservation check; for a
-//! `Matched` boundary the absorbed energy is inferred from the deficit, so that balance is not a
+//! `Matched` or `Resistive` boundary the loss is inferred from the deficit, so that balance is not a
 //! check (`balance_checked` is false).
 //!
 //! [`DgDuct::with_side_ports`] exposes existing interior faces as point flow
@@ -141,6 +141,31 @@ pub struct DgMesh {
     pub order: usize,
 }
 
+/// Positive, frequency-independent volume-flow resistance [Pa s/m3].
+///
+/// Admission excludes active, non-finite and singular loads. The private bit
+/// representation preserves exact boundary identity without admitting NaNs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DgResistance(u64);
+
+impl DgResistance {
+    /// Admit a passive resistance. Use [`DgBoundary::Closed`] or
+    /// [`DgBoundary::IdealOpen`] for the exactly lossless limiting boundaries.
+    pub fn new(resistance_pa_s_m3: f64) -> Result<Self, DuctError> {
+        if !resistance_pa_s_m3.is_finite() || resistance_pa_s_m3 <= 0.0 {
+            return Err(DuctError::BadParameter {
+                what: "DG boundary resistance must be finite and positive",
+            });
+        }
+        Ok(Self(resistance_pa_s_m3.to_bits()))
+    }
+
+    /// Physical pressure divided by outward volume flow [Pa s/m3].
+    pub const fn resistance_pa_s_m3(self) -> f64 {
+        f64::from_bits(self.0)
+    }
+}
+
 /// Boundary condition at the inlet ($x = 0$) or outlet ($x = L$) of a [`DgDuct`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DgBoundary {
@@ -150,11 +175,41 @@ pub enum DgBoundary {
     IdealOpen,
     /// Characteristic non-reflecting termination with local impedance $Z_c = \rho c / A$.
     Matched,
+    /// Passive real termination: pressure equals resistance times outward
+    /// volume flow. Reflection is $(R-Z_c)/(R+Z_c)$, using the original
+    /// boundary medium and area. This load has no reactive memory.
+    Resistive(DgResistance),
     /// Typed external port carrying held volume-flow effort $q_{\text{in}}$ [$\text{m}^3/\text{s}$]
     /// (into the domain) and returning conjugate boundary pressure $p$ [Pa] and integrated impulse
     /// $\Delta X = \int_0^{\Delta t} p(\tau)\,d\tau$ [$\text{Pa}\cdot\text{s}$] so port work is
     /// exact ($W = q_{\text{in}} \cdot \Delta X$).
     Port(PortId),
+}
+
+impl DgBoundary {
+    /// Construct a passive, frequency-independent resistive termination.
+    pub fn resistive(resistance_pa_s_m3: f64) -> Result<Self, DuctError> {
+        DgResistance::new(resistance_pa_s_m3).map(Self::Resistive)
+    }
+
+    /// Characteristic pressure/flow weights `(alpha, beta)`. Ratios avoid
+    /// overflowing `R + Zc` or losing a small positive loss via `1 +/- r`.
+    fn characteristic_weights(self, zc: f64) -> Option<(f64, f64)> {
+        match self {
+            Self::Matched => Some((0.5, 0.5)),
+            Self::Resistive(load) => {
+                let r = load.resistance_pa_s_m3();
+                Some(if r >= zc {
+                    let ratio = zc / r;
+                    (1.0 / (1.0 + ratio), ratio / (1.0 + ratio))
+                } else {
+                    let ratio = r / zc;
+                    (ratio / (1.0 + ratio), 1.0 / (1.0 + ratio))
+                })
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Held effort supplied to a [`DgBoundary::Port`] over one time step $\Delta t$.
@@ -590,9 +645,13 @@ fn hash_operator(
             DgBoundary::IdealOpen => (1, 0),
             DgBoundary::Matched => (2, 0),
             DgBoundary::Port(id) => (3, id.0),
+            DgBoundary::Resistive(_) => (4, 0),
         };
         hash.update(&[tag]);
         hash.update(&port.to_le_bytes());
+        if let DgBoundary::Resistive(load) = boundary {
+            hash.update(&load.0.to_le_bytes());
+        }
     }
     for element in elements {
         floats(&mut hash, &[element.x_left, element.length]);
@@ -982,13 +1041,15 @@ impl<M: DgMedium> DgDuct<M> {
                 // p_hat_L = 0, q_hat_L = q_0 => -e_0 (0 - p_0) = +e_0 p_0 in K_q
                 kq[in_node * field_dofs + in_node] += 1.0;
             }
-            DgBoundary::Matched => {
-                // Upwind characteristic flux exiting at x = 0 (p_hat_L = 0.5*(p_0 - Zc*q_0), q_hat_L = -0.5*(p_0/Zc - q_0)):
+            DgBoundary::Matched | DgBoundary::Resistive(_) => {
+                // p_hat_L = alpha*(p_0 - Zc*q_0),
+                // q_hat_L = -beta*(p_0/Zc - q_0). Outward flow is -q.
                 let zc0 = gas.density_kg_m3() * gas.sound_speed_m_s() / elements[0].areas[0];
-                kp[in_node * field_dofs + in_node] += 0.5;
-                d_pp[in_node * field_dofs + in_node] += 0.5 / zc0;
-                kq[in_node * field_dofs + in_node] += 0.5;
-                d_qq[in_node * field_dofs + in_node] += 0.5 * zc0;
+                let (alpha, beta) = inlet.characteristic_weights(zc0).unwrap();
+                kp[in_node * field_dofs + in_node] += alpha;
+                d_pp[in_node * field_dofs + in_node] += beta / zc0;
+                kq[in_node * field_dofs + in_node] += beta;
+                d_qq[in_node * field_dofs + in_node] += alpha * zc0;
             }
             DgBoundary::Port(port_id) => {
                 // Homogeneous part is Closed (q_hat_L = u_in, p_hat_L = p_0):
@@ -1015,13 +1076,14 @@ impl<M: DgMedium> DgDuct<M> {
                 // p_hat_R = 0, q_hat_R = q_R => +e_p (0 - p_R) = -e_p p_R in K_q
                 kq[out_node * field_dofs + out_node] -= 1.0;
             }
-            DgBoundary::Matched => {
+            DgBoundary::Matched | DgBoundary::Resistive(_) => {
                 let zc_l = outlet_gas.density_kg_m3() * outlet_gas.sound_speed_m_s()
                     / elements[last_elem].areas[n_local - 1];
-                kp[out_node * field_dofs + out_node] -= 0.5;
-                d_pp[out_node * field_dofs + out_node] += 0.5 / zc_l;
-                kq[out_node * field_dofs + out_node] -= 0.5;
-                d_qq[out_node * field_dofs + out_node] += 0.5 * zc_l;
+                let (alpha, beta) = outlet.characteristic_weights(zc_l).unwrap();
+                kp[out_node * field_dofs + out_node] -= alpha;
+                d_pp[out_node * field_dofs + out_node] += beta / zc_l;
+                kq[out_node * field_dofs + out_node] -= beta;
+                d_qq[out_node * field_dofs + out_node] += alpha * zc_l;
             }
             DgBoundary::Port(port_id) => {
                 // Inflow into domain at x = L is u_out = -q_hat_R, p_hat_R = p_R:
@@ -1044,8 +1106,9 @@ impl<M: DgMedium> DgDuct<M> {
         let d_pp_tilde = Self::scale_diag_operator(&elements, n_local, field_dofs, &d_pp, true);
         let d_qq_tilde = Self::scale_diag_operator(&elements, n_local, field_dofs, &d_qq, false);
 
-        let is_lossless_bcs =
-            !matches!(inlet, DgBoundary::Matched) && !matches!(outlet, DgBoundary::Matched);
+        let is_lossless_bcs = [inlet, outlet]
+            .iter()
+            .all(|bc| !matches!(bc, DgBoundary::Matched | DgBoundary::Resistive(_)));
         if is_lossless_bcs {
             DgDuct::admit_lossless_transpose_pair(&g_mat, &h_mat, field_dofs, n_local)?;
         }
