@@ -228,6 +228,16 @@ net directly from the original mean moment. Rates are per unit depth in m²/s;
 consumers supply density, depth, carried state and fixed-inventory continuity
 admission. The operator neither repairs divergence nor infers ALE mesh velocity.
 
+Pressure/divergence coupling uses the exact integrated BDM face moments:
+signed edge length for mean moments and zero for linear moments. The momentum
+transpose and retained pressure reactions use the same coefficients, preserving
+shared-face cancellation without reconstructed-derivative roundoff. Dense LU
+isolates exact prescribed velocity and pressure values before factorization;
+its existing two correction solves evaluate residuals of the original CSR
+equations with native double-double arithmetic. The original/scaled residual
+checks, reaction equations and sparse solver remain authoritative. These changes
+do not alter transported fluxes after solving or relax local continuity bounds.
+
 1. BDM1 basis reproduces its defining dofs (Kronecker to 3.7e-15),
    satisfies the divergence theorem per basis function (1.4e-15), and
    has single-valued normal traces across interior edges (3.6e-15)

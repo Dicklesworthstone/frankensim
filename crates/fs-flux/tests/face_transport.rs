@@ -159,3 +159,90 @@ fn original_net_moment_survives_large_counterflow_and_invalid_fields_refuse() {
         Err(FluxTransportError::UnrepresentableRate { edge: long_edge })
     );
 }
+
+#[test]
+fn nonaffine_bdf1_endpoints_preserve_local_continuity_near_stagnation() {
+    use fs_flux::{
+        MaterialFluxNumerics, MaterialFluxSystem, MaterialNavierStokesBoundary,
+        NavierStokesControls,
+    };
+    use fs_material::fluid_transport::FluidTransportState;
+
+    let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 4, 4));
+    let system = FluxSystem::new(&mesh);
+    let reference = FluidTransportState::try_new(2.0, 5.0, 0.2, 1.0).unwrap();
+    let fluid = MaterialFluxSystem::new(
+        &system,
+        &reference,
+        MaterialFluxNumerics {
+            linear_tolerance: 2e-13,
+            ..MaterialFluxNumerics::default()
+        },
+    )
+    .unwrap();
+    let walls = |_: [f64; 2]| [0.0; 2];
+    let boundaries: Vec<_> = (0..mesh.edges.len())
+        .filter(|&edge| mesh.is_boundary(edge))
+        .map(|edge| MaterialNavierStokesBoundary::Velocity {
+            edge,
+            value: &walls,
+        })
+        .collect();
+    let force = |p: [f64; 2]| [p[1] * (1.0 - p[1]), -p[0] * (1.0 - p[0])];
+    let mut previous = vec![0.0; system.n_u];
+    for step in 1..=2 {
+        let next = fluid
+            .bdf1_navier_stokes_mixed_rheology_step(
+                &force,
+                &boundaries,
+                &previous,
+                0.01,
+                NavierStokesControls {
+                    maximum_iterations: 40,
+                    relative_tolerance: 2e-11,
+                    ..NavierStokesControls::default()
+                },
+                |_, reference| Ok(*reference),
+            )
+            .unwrap();
+        let velocity = next.step.solution.velocity_dofs();
+        let faces = system.edge_volume_transport(velocity).unwrap();
+        for (edge, face) in faces.iter().enumerate() {
+            if mesh.is_boundary(edge) {
+                // Exact prescribed zero moments must not create ghost inflow.
+                assert_eq!(velocity[2 * edge], 0.0);
+                assert_eq!(velocity[2 * edge + 1], 0.0);
+                assert_eq!(face.along_normal_m2_s(), 0.0);
+                assert_eq!(face.against_normal_m2_s(), 0.0);
+            }
+        }
+        assert!(
+            next.step
+                .solution
+                .viscous_dissipation()
+                .total_power_w_per_m()
+                > 0.0
+        );
+        for (cell, edges) in mesh.tri_edges.iter().enumerate() {
+            let mut incoming = 0.0_f64;
+            let mut outgoing = 0.0_f64;
+            for &(edge, sign) in edges {
+                let face = faces[edge];
+                let [out, into] = if sign > 0.0 {
+                    [face.along_normal_m2_s(), face.against_normal_m2_s()]
+                } else {
+                    [face.against_normal_m2_s(), face.along_normal_m2_s()]
+                };
+                outgoing += out;
+                incoming += into;
+            }
+            // The fixed-inventory transport bound is relative to THIS cell's
+            // actual streams, so a global residual cannot hide a stagnant cell.
+            assert!(
+                (incoming - outgoing).abs() <= 64.0 * f64::EPSILON * incoming.max(outgoing),
+                "step {step}, cell {cell}: incoming={incoming:e}, outgoing={outgoing:e}"
+            );
+        }
+        previous = velocity.to_vec();
+    }
+}

@@ -12,7 +12,7 @@ layer = "L3"
 
 [features]
 default = ["continuum", "quarter-wave"]
-continuum = ["cavitation", "dep:fs-la", "dep:fs-material", "dep:fs-solid", "dep:fs-solver", "dep:fs-sparse", "dep:fs-time"]
+continuum = ["cavitation", "dep:fs-la", "dep:fs-material", "dep:fs-math", "dep:fs-solid", "dep:fs-solver", "dep:fs-sparse", "dep:fs-time"]
 cavitation = ["dep:fs-material", "dep:fs-la"]
 quarter-wave = []
 experimental-compressible = ["dep:fs-gas", "dep:fs-qty", "dep:fs-solver"]
@@ -23,6 +23,7 @@ experimental-sgs = ["experimental-compressible", "dep:fs-lbm", "dep:fs-thermoche
 fs-tribo = { path = "../fs-tribo" }
 fs-la = { path = "../fs-la", optional = true }
 fs-material = { path = "../fs-material", optional = true }
+fs-math = { path = "../fs-math", optional = true }
 fs-solid = { path = "../fs-solid", optional = true }
 fs-solver = { path = "../fs-solver", optional = true }
 fs-sparse = { path = "../fs-sparse", optional = true }

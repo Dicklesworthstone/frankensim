@@ -579,19 +579,20 @@ impl<'m> FluxSystem<'m> {
                         );
                     }
                 }
-                // Div coupling: b(u, q) = −∫ q div u; symmetric block.
-                let pdof = self.n_u + t;
-                if con[pdof].is_none() {
-                    coo.push(pdof, gi, -basis.div[i] * area);
+                // The defining mean normal moment gives the integrated
+                // divergence EXACTLY: sign*edge length for even DOFs, zero
+                // for odd DOFs. Reconstructed basis derivatives can lose this
+                // Gauss identity through cancellation. Use the same shared
+                // edge coefficient for B, its transpose and pressure reactions.
+                if i % 2 == 0 {
+                    let (edge, sign) = mesh.tri_edges[t][i / 2];
+                    let integrated_div = sign * mesh.edges[edge].len;
+                    let pdof = self.n_u + t;
+                    if con[pdof].is_none() {
+                        coo.push(pdof, gi, -integrated_div);
+                    }
+                    momentum_entry(&mut coo, &mut reactions, &con, gi, pdof, -integrated_div);
                 }
-                momentum_entry(
-                    &mut coo,
-                    &mut reactions,
-                    &con,
-                    gi,
-                    pdof,
-                    -basis.div[i] * area,
-                );
                 // BDF1 mass: (1/dt)(u, v) and (1/dt)(u_prev, v).
                 if inv_dt > 0.0 && (con[gi].is_none() || reactions.is_some()) {
                     for j in 0..6 {
@@ -942,19 +943,53 @@ impl<'m> FluxSystem<'m> {
         params: FluxParams,
     ) -> Result<FluxSolution, boundary::StokesBoundaryError> {
         if self.n <= 1500 {
-            let flat = a.to_dense();
-            let f = lu(&flat, self.n).map_err(|_| boundary::StokesBoundaryError::SingularSystem)?;
+            let mut flat = a.to_dense();
             let mut x = rhs.to_vec();
+            // Isolate prescribed velocity moments and pressure pins before
+            // factorization. Leaving their columns in the free equations lets
+            // pivoting contaminate exact zero wall flux with roundoff. This is
+            // ordinary elimination of known values; the original CSR operator
+            // and its reaction rows remain unchanged.
+            let prescribed: Vec<bool> = (0..self.n)
+                .map(|row| {
+                    let (columns, values) = a.row(row);
+                    columns == [row] && values == [1.0]
+                })
+                .collect();
+            for row in 0..self.n {
+                if prescribed[row] {
+                    continue;
+                }
+                let (columns, values) = a.row(row);
+                let mut reduced_rhs = fs_math::dd::Dd::from_f64(rhs[row]);
+                for (&column, &value) in columns.iter().zip(values) {
+                    if prescribed[column] {
+                        reduced_rhs = reduced_rhs
+                            - fs_math::dd::Dd::from_f64(value)
+                                * fs_math::dd::Dd::from_f64(rhs[column]);
+                        flat[row * self.n + column] = 0.0;
+                    }
+                }
+                x[row] = reduced_rhs.to_f64();
+            }
+            let f = lu(&flat, self.n).map_err(|_| boundary::StokesBoundaryError::SingularSystem)?;
             f.solve(&mut x);
             let mut ax = vec![0.0f64; self.n];
-            // Viscosity contrasts badly scale the velocity block against
-            // the exact continuity rows. Reuse the LU for two residual
-            // corrections: O(n²) work after O(n³) factorization, no extra
-            // buffer, and no loosening of the divergence tolerance.
+            // Reuse the same LU for two residual corrections. Accumulate
+            // the ORIGINAL CSR equations in double-double: ordinary SpMV
+            // cancellation can conceal continuity defects near stagnation,
+            // even while the global residual is already at f64 roundoff.
+            // The solve count and original equations do not change.
             for _ in 0..2 {
-                a.spmv(&x, &mut ax);
-                for i in 0..self.n {
-                    ax[i] = rhs[i] - ax[i];
+                for (row, residual) in ax.iter_mut().enumerate() {
+                    let (columns, values) = a.row(row);
+                    let mut defect = fs_math::dd::Dd::from_f64(rhs[row]);
+                    for (&column, &value) in columns.iter().zip(values) {
+                        defect = defect
+                            - fs_math::dd::Dd::from_f64(value)
+                                * fs_math::dd::Dd::from_f64(x[column]);
+                    }
+                    *residual = defect.to_f64();
                 }
                 f.solve(&mut ax);
                 for i in 0..self.n {
