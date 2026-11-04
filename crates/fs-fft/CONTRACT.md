@@ -200,6 +200,31 @@ closer than one FFT bin, phase origin, shared numerical results, and unresolved
 tone refusal. This is known-frequency estimation, not blind source separation
 or a claim that arbitrary close tones can be resolved in noisy records.
 
+`refine_tone_frequencies` and `refine_tone_frequencies_channels` now identify
+locally seeded independent frequencies without imposing harmonic spacing.
+Every tone has an explicit ordered, separated, sub-Nyquist search interval.
+The existing joint DC/sinusoid QR eliminates amplitudes, while a second QR
+solves all projected frequency derivatives together, retaining close-tone
+cross terms. For vector records, each channel retains independent phasors and
+its original common-unit amplitude weight. Streaming augmented derivative and
+residual blocks through compact QR factors costs O(E C (N K² + K³)) work and
+O(N K + K² + C K) storage; no normal equations or full channel-stack matrix
+is formed. The derivation is the projected/Kaufman Gauss--Newton form of the
+[O'Leary--Rust variable-projection algorithm](https://www.cs.umd.edu/users/oleary/software/varpro.pdf).
+Its omitted residual-dependent Jacobian term does not change the stationary
+gradient, but no global convergence or full-Newton claim is made.
+
+`ToneFrequencyBudget` separately gates the sinusoid design and the common-scale
+projected frequency Jacobian, and bounds the complete storage and candidate
+count. Unresolved/absent tones, active bounds, exhausted work and stagnation
+refuse. The convergence criterion is every **untruncated** frequency correction,
+not clipped motion or a small residual. Tests in `tests/tone_frequency.rs`
+recover beating unisons with a weak inharmonic partial, preserve phase origin
+and physical unit scaling, rotate vector components, retain omitted energy,
+and exercise numerical-rank, storage, work and domain refusals. This remains
+a local stationary-spectrum estimate: it supplies neither global discovery,
+tone count, damping, time-varying tracking nor measurement uncertainty.
+
 ### Local fundamental-frequency refinement
 
 `harmonic::refine_harmonic_frequency` refines an independently supplied pitch

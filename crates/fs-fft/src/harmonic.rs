@@ -10,6 +10,8 @@
 //! Neither plan estimates frequency or removes unmodeled tones. For a supplied
 //! local pitch seed, [`refine_harmonic_frequency`] jointly refines the common
 //! fundamental and amplitudes within explicit bounds and evaluation budgets.
+//! [`refine_tone_frequencies`] instead refines independent frequencies together,
+//! preserving physical inharmonicity and the interaction of close tones.
 //!
 //! The returned peak phasor is `a_h + i b_h` for `exp(-i w_h t)`, referenced
 //! to the first sample. It is twice the conjugate of the positive-frequency
@@ -24,6 +26,13 @@ mod frequency;
 pub use frequency::{
     HarmonicFrequencyBudget, HarmonicFrequencyChannelsFit, HarmonicFrequencyError,
     HarmonicFrequencyFit, refine_harmonic_frequency, refine_harmonic_frequency_channels,
+};
+
+#[path = "harmonic/tones.rs"]
+mod tones;
+pub use tones::{
+    ToneFrequencyBudget, ToneFrequencyChannelsFit, ToneFrequencyError, ToneFrequencyFit,
+    refine_tone_frequencies, refine_tone_frequencies_channels,
 };
 
 /// Explicit storage and conditioning limits for a prepared harmonic fit.
