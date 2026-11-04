@@ -1,5 +1,33 @@
 # fs-em contract
 
+## Three-dimensional terminal power under prescribed conductor motion
+
+`SpatialConduction::solve_with_motion` solves the original tetrahedral current
+problem with `J = Sigma(-grad(V) + u cross B)`. The actual motional weak load
+changes voltage and terminal current while reusing the original SPD Hodge,
+source-bearing scalar/rotated-tensor conductivity, current traces and gauges.
+An open component screens a conservative motional field without an invented
+short-circuit current. The stationary public API and field semantics remain
+unchanged; its recovery allocates no motion buffers.
+
+The accepted result retains the original field owner and prescribed cellwise
+velocity/B snapshots. It separates nonnegative conductor-frame Joule heat,
+`J cross B` force, signed mechanical output and signed boundary electrical input.
+Independent local, Hodge, terminal and current gates enforce
+`P_terminal = Q_Joule_rate + P_mechanical`; generation reverses electrical power
+without making heat negative. Only Joule power belongs in the thermal receiver.
+Additional assembly/recovery work and retained storage are linear in cells and
+vertices; the native sparse solve and its iteration limits remain authoritative.
+
+This is a nonrelativistic fixed-domain DC snapshot with prescribed piecewise
+constant B and velocity. It does not evolve induction, magnetic sources,
+mechanics, finite moving interfaces or thermal advection. Finite-resistance
+contacts refuse pending an owned moving-surface work/heat law. G0/G1/G3/G4
+fixtures in `tests/spatial_conduction/motion.rs` cover open-circuit screening,
+shorted braking, loaded generation, motoring, layered current drive, anisotropic
+scene rotation/volume scaling, stationary parity and transactional refusals.
+These synthetic-law fixtures do not qualify an empirical machine or material.
+
 ## Consistent three-dimensional Lorentz loads for mechanical momentum
 
 `SpatialInductionCandidate::lorentz_loads` and its nonlinear counterpart

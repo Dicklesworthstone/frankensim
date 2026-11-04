@@ -14,6 +14,7 @@ mod terminals;
 pub use terminals::SpatialResistance;
 mod matrix;
 pub use matrix::{SpatialConductanceControls, SpatialConductanceMatrix};
+pub mod motion;
 
 use super::{
     ScalarBoundary, SpatialGeometry, SpatialMagneticError, dot, prepare_geometry,
@@ -355,6 +356,29 @@ impl<C: SpatialConductorMaterial> SpatialConduction<C> {
         report: Option<SolveReport>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<SpatialConductionField> {
+        self.recover_field_with_motion(
+            relative,
+            traces,
+            None,
+            current_tolerance_a,
+            power_tolerance_w,
+            report,
+            cancelled,
+        )
+        .map(|(field, _)| field)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn recover_field_with_motion(
+        &self,
+        relative: Vec<f64>,
+        traces: ScalarBoundary,
+        motion: Option<&motion::PreparedMotion<'_>>,
+        current_tolerance_a: f64,
+        power_tolerance_w: f64,
+        report: Option<SolveReport>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(SpatialConductionField, Option<motion::MotionPower>)> {
         let ScalarBoundary {
             physical_prescribed,
             flux_load_wb: loads,
@@ -380,6 +404,9 @@ impl<C: SpatialConductorMaterial> SpatialConduction<C> {
                     .map(|(&j, &value)| value * relative[j])
                     .sum(),
             )?;
+            if let Some(motion) = motion {
+                applied[v] = finite(applied[v] - motion.load_a[v])?;
+            }
             hodge_power_w = finite(relative[v].mul_add(applied[v], hodge_power_w))?;
             let current = if physical_prescribed[v] {
                 Some(applied[v])
@@ -397,6 +424,7 @@ impl<C: SpatialConductorMaterial> SpatialConduction<C> {
         let mut electric_field_v_m = Vec::with_capacity(self.conductors.len());
         let mut current_density_a_m2 = Vec::with_capacity(self.conductors.len());
         let mut cell_power_w = Vec::with_capacity(self.conductors.len());
+        let mut transfer = motion.map(|_| motion::MotionPower::new(self.conductors.len()));
         let mut power_w = 0.0;
         for (cell, tet) in g.mesh.tets.iter().enumerate() {
             check(cancelled)?;
@@ -407,12 +435,21 @@ impl<C: SpatialConductorMaterial> SpatialConduction<C> {
                     *out = finite((-difference).mul_add(g.geometry.grads[cell][local][j], *out))?;
                 }
             }
-            let j = self.conductivity[cell].current_density_a_m2(e);
+            let mut conductor_e = e;
+            if let Some(motion) = motion
+                && motion.field_v_m[cell] != [0.0; 3]
+            {
+                for (axis, value) in conductor_e.iter_mut().enumerate() {
+                    *value = finite(*value + motion.field_v_m[cell][axis])?;
+                }
+            }
+            let j = self.conductivity[cell].current_density_a_m2(conductor_e);
             for value in j {
                 finite(value)?;
             }
-            let power = finite(dot(e, j) * g.geometry.vol_signed[cell].abs())?;
-            if power < 0.0 || (e.iter().any(|&x| x != 0.0) && power == 0.0) {
+            let volume = g.geometry.vol_signed[cell].abs();
+            let power = finite(dot(conductor_e, j) * volume)?;
+            if power < 0.0 || (conductor_e.iter().any(|&x| x != 0.0) && power == 0.0) {
                 return Err(SpatialConductionError::Invalid(
                     "positive conductivity lost nonzero irreversible heat",
                 ));
@@ -421,23 +458,39 @@ impl<C: SpatialConductorMaterial> SpatialConduction<C> {
             electric_field_v_m.push(e);
             current_density_a_m2.push(j);
             cell_power_w.push(power);
+            if let (Some(motion), Some(transfer)) = (motion, transfer.as_mut()) {
+                transfer.record(motion.prescribed, cell, e, conductor_e, j, power, volume)?;
+            }
         }
         let contacts = self.contact_response(&relative, cancelled)?;
         for contact in &contacts {
             check(cancelled)?;
             power_w = finite(power_w + contact.power_w)?;
         }
-        let power_residual_w = finite(power_w - supplied_power_w)?;
-        let hodge_power_residual_w = finite(power_w - hodge_power_w)?;
+        let (accounted_power_w, electrical_power_w, work_pairing_residual_w) = match &transfer {
+            Some(transfer) => (
+                finite(power_w + transfer.mechanical_power_w)?,
+                transfer.electrical_power_w,
+                transfer.work_pairing_residual_w,
+            ),
+            None => (power_w, power_w, 0.0),
+        };
+        let power_residual_w = finite(accounted_power_w - supplied_power_w)?;
+        let hodge_power_residual_w = finite(electrical_power_w - hodge_power_w)?;
         if current_residual_a.abs() > current_tolerance_a
             || maximum_free_current_residual_a > current_tolerance_a
             || power_residual_w.abs() > power_tolerance_w
             || hodge_power_residual_w.abs() > power_tolerance_w
+            || work_pairing_residual_w > power_tolerance_w
         {
             return Err(SpatialConductionError::Balance {
                 current_residual_a,
                 maximum_free_current_residual_a,
-                power_residual_w,
+                power_residual_w: if work_pairing_residual_w > power_tolerance_w {
+                    work_pairing_residual_w
+                } else {
+                    power_residual_w
+                },
                 hodge_power_residual_w,
             });
         }
@@ -447,7 +500,7 @@ impl<C: SpatialConductorMaterial> SpatialConduction<C> {
             .map(|(v, &value)| finite(value + references[self.components[v]]))
             .collect::<Result<Vec<_>>>()?;
         check(cancelled)?;
-        Ok(SpatialConductionField {
+        let field = SpatialConductionField {
             voltage_v,
             electric_field_v_m,
             current_density_a_m2,
@@ -463,7 +516,8 @@ impl<C: SpatialConductorMaterial> SpatialConduction<C> {
             hodge_power_residual_w,
             gauges,
             linear: report,
-        })
+        };
+        Ok((field, transfer))
     }
 }
 
