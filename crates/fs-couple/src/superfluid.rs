@@ -34,6 +34,9 @@ pub mod piston_pair;
 /// Reciprocal heat-driven counterflow on the original finite caloric timeline.
 pub mod counterflow;
 
+/// Reciprocal heat transport between two finite native thermal cells.
+pub mod counterflow_pair;
+
 /// Original thermal stepping controls plus explicit heat and combined-account gates.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FrictionHeatControls {

@@ -150,3 +150,11 @@ required-features = ["superfluid"]
 [[example]]
 name = "superfluid_heater"
 required-features = ["superfluid"]
+
+[[test]]
+name = "superfluid_counterflow_pair"
+required-features = ["superfluid"]
+
+[[example]]
+name = "superfluid_heat_link"
+required-features = ["superfluid"]

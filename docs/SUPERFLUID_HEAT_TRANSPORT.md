@@ -3,7 +3,9 @@
 The `superfluid` feature connects the finite-temperature Landau two-fluid
 material, the original two-sound channel, native rigid pistons, and the existing
 finite thermal timeline. A heater can now launch counterflow and second sound
-while its own finite caloric storage changes the heat it supplies.
+while its own finite caloric storage changes the heat it supplies. Two finite
+contacts can connect a heater and a thermal sink through the same channel,
+including an authored normal-fluid viscous wall model.
 
 ## Normal-fluid wall viscosity and fourth sound
 
@@ -44,9 +46,12 @@ O(cells); there is no new dense solver, per-step heap allocation or per-face
 transcendental evaluation. Both mechanical and thermal endpoint responses
 use the same viscous operator and retain reciprocity.
 
-For zero thermal expansion, the independent clamped-normal limit is
-`c4^2 = f_s*c1^2 + f_n*c2^2`. Fourth sound emerges from the original two-fluid
-equations; a replacement sound speed is not fitted to the channel.
+The independent clamped-normal limit is
+`c4^2 = f_s * [c_ad^2*(1-alpha*s*T0/cp)^2 + s^2*T0/cp]`.
+At zero thermal expansion this becomes `f_s*c1^2 + f_n*c2^2`. Tests retain the
+corresponding frozen entropy-per-volume polarization at finite expansion.
+Fourth sound emerges from the original two-fluid equations; a replacement
+sound speed is not fitted to the channel.
 
 `ChannelStep.normal_viscous_heat_j` and `interior_wall_impulse_n_s` keep wall
 heat and support impulse distinct from mutual friction and authored forces.
@@ -66,6 +71,26 @@ boundary layers, wall turbulence, longitudinal or second viscosities. The
 frozen two-fluid properties and small-signal thermal limits remain explicit.
 The wall-force convention and its frequency-dependent limitations follow
 [Kekutia and Chkhaidze, section 3](https://arxiv.org/abs/cond-mat/0604193).
+
+## Run the viscous heater-to-sink example
+
+```bash
+cargo run -p fs-couple --features superfluid --example superfluid_heat_link
+```
+
+This connects two finite native caloric cells through the sourced **1.8 K SVP
+helium-II** reference in an authored one-micrometre-radius, one-metre capillary.
+The permeability follows the steady circular-wall closure. The example starts
+from an independently derived quasisteady counterflow/fountain-pressure
+profile, then advances both finite temperatures and both contacts together.
+Its geometry, caloric capacities and conductances are demonstration inputs,
+not measured apparatus calibration. It prints normal relaxation rate, both
+temperature histories, heat power at each end, each finite cell's caloric
+balance, exported distributed viscous heat and wave availability.
+
+The spatial viscous heat remains separately exported. Depositing it into the
+two endpoint cells would require a declared physical heat route and would not
+follow from the boundary-contact model alone.
 
 ## Run the finite heater example
 
@@ -113,6 +138,29 @@ The source and sink must remain in the caller's declared small-signal range
 about the channel's frozen reference temperature. No nonlinear helium equation
 of state, phase crossing, evolving material coefficients, or uncalibrated
 Kapitza conductance is inferred.
+
+## Two finite thermal contacts
+
+`fs_couple::superfluid::counterflow_pair::advance_counterflow_heat_pair` accepts
+two `CounterflowThermalContact` values, one for each channel end. Contacts may
+be supplied in either order; reports use `[left, right]`. The cells must be
+distinct and belong to the same original thermal simulation, whose complete
+network and sources are advanced once.
+
+The two heat powers satisfy the contact laws together with the channel's full
+reciprocal 2x2 response. Each finite cell supplies its original monotone caloric
+chart, including nonlinear heat capacity or latent plateaux. The bounded
+coordinate solve makes only caloric probes; it does not rerun the wave or
+thermal network at each trial. Intermediate power or chart projections do not
+prematurely reject an admissible joint solution. Both final contact residuals
+must pass before one combined native heat intake and the physical wave step
+publish atomically.
+
+The existing `CounterflowHeatControls` apply to both contacts, with
+`max_iterations` bounding probes per endpoint. Each conductance may be zero;
+one active contact reduces to the single-contact equations. As in the original
+single-contact composition, thermal-network coupling is a first-order split
+and reference-state heat is distinct from quadratic wave availability.
 
 ## Three distinct thermal quantities
 
@@ -178,6 +226,7 @@ cargo test -p fs-material --test superfluid_viscosity
 cargo test -p fs-duct --features superfluid --test superfluid_channel --test superfluid_ports
 cargo test -p fs-duct --features superfluid --test superfluid_viscosity
 cargo test -p fs-couple --features superfluid --test superfluid_counterflow --test superfluid_heat
+cargo test -p fs-couple --features superfluid --test superfluid_counterflow_pair
 ```
 
 The contact tests include independent finite-capacity/two-cell equations,
@@ -190,3 +239,7 @@ Viscous regressions add exact normal relaxation, stiff force balance,
 fourth-sound speed and refinement, zero-viscosity identity, reciprocal ports,
 external wall momentum, both heat mechanisms on native caloric cells, native
 piston reactions and all-owner refusal/cancellation.
+Pair-contact regressions add independent coupled finite-capacity equations,
+nonlinear heater-to-sink transport with viscous walls, simultaneous latent
+plateaux, zero/one-contact limits, temporary power/chart projection, and
+complete thermal/wave/viscous-history refusal and cancellation.

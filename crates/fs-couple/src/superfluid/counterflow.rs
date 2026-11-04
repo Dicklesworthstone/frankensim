@@ -39,7 +39,8 @@ pub struct CounterflowThermalContact {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CounterflowHeatControls {
     pub thermal: StepConfig,
-    /// Maximum scalar caloric probes; 1..=128, without repeated wave solves.
+    /// Maximum scalar caloric probes per endpoint; 1..=128, without repeated
+    /// wave solves. The pair contact shares this bound for each of its ends.
     pub max_iterations: usize,
     pub max_abs_heat_power_w: f64,
     /// Allowed thermal-cell departure from T0, at most 10% of T0. This is a
@@ -361,7 +362,7 @@ fn solve_contact(
     }
 }
 
-fn admit_temperature(
+pub(super) fn admit_temperature(
     temperature: f64,
     reference: f64,
     controls: CounterflowHeatControls,
@@ -376,20 +377,20 @@ fn admit_temperature(
         Ok(())
     }
 }
-fn positive(value: f64) -> bool {
+pub(super) fn positive(value: f64) -> bool {
     value.is_finite() && value > 0.0
 }
-fn nonnegative(value: f64) -> bool {
+pub(super) fn nonnegative(value: f64) -> bool {
     value.is_finite() && value >= 0.0
 }
-fn check(cancelled: &impl Fn() -> bool) -> Result<(), CounterflowHeatError> {
+pub(super) fn check(cancelled: &impl Fn() -> bool) -> Result<(), CounterflowHeatError> {
     if cancelled() {
         Err(CounterflowHeatError::Cancelled)
     } else {
         Ok(())
     }
 }
-fn thermal_check(cancelled: &impl Fn() -> bool) -> Result<(), DepositionError> {
+pub(super) fn thermal_check(cancelled: &impl Fn() -> bool) -> Result<(), DepositionError> {
     if cancelled() {
         Err(DepositionError::Cancelled)
     } else {
