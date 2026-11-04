@@ -5,13 +5,21 @@ const OMEGA: f64 = 1000.0;
 const ZETA: f64 = 0.08;
 
 fn oscillator(modes: usize) -> CoupledModalSystem {
+    coupled_oscillator(modes, ZETA, vec![])
+}
+
+fn coupled_oscillator(
+    modes: usize,
+    damping_ratio: f64,
+    connections: Vec<ModalColumnConnection>,
+) -> CoupledModalSystem {
     let gate = CancelGate::new_clock_free();
     let model = ModalAcousticTimeModel::try_new(
         48_000,
         vec![
             ModalAcousticMode {
                 angular_frequency_rad_s: OMEGA,
-                damping_ratio: ZETA,
+                damping_ratio,
                 pressure_per_modal_velocity: C64::ZERO,
             };
             modes
@@ -21,7 +29,7 @@ fn oscillator(modes: usize) -> CoupledModalSystem {
     .unwrap();
     CoupledModalSystem::new_with_columns(
         vec![model],
-        vec![],
+        connections,
         ModalCouplingConfig {
             max_modes: 8,
             max_connections: 8,
@@ -298,4 +306,117 @@ fn modal_peak_refusals_preserve_source_errors_and_state() {
     assert_eq!(system.samples_rendered(), 0);
     assert!(system.material_memory().is_empty());
     assert!(system.radiation_state().is_empty());
+}
+
+#[test]
+fn band_survey_resolves_coupled_splitting_and_signed_mode_visibility() {
+    let gate = CancelGate::new_clock_free();
+    let system = coupled_oscillator(
+        2,
+        0.005,
+        vec![ModalColumnConnection {
+            column: vec![1.0, -1.0],
+            stiffness_n_m: 780_000.0,
+            damping_n_s_m: 0.0,
+            rest_extension_m: 0.0,
+        }],
+    );
+    let grid: Vec<_> = (0..=20).map(|i| 800.0 + 50.0 * i as f64).collect();
+    let survey_controls = ResonanceSurveyControls {
+        absolute_frequency_tolerance_rad_s: 1e-6,
+        relative_frequency_tolerance: 1e-12,
+        maximum_evaluations: 256,
+        maximum_peaks: 8,
+    };
+    let force = [C64::ONE, C64::ZERO];
+    let observation = ModalHarmonicObservation::Velocity(&[1.0, 0.0]);
+    let survey = system
+        .driven_resonances(&force, observation, &grid, survey_controls, 100_000, &gate)
+        .unwrap();
+    assert_eq!(survey.peaks.len(), 2);
+    assert_eq!(survey.interval_rad_s, (800.0, 1800.0));
+    assert_eq!(survey.grid_points, grid.len());
+    assert!(survey.evaluations <= survey_controls.maximum_evaluations);
+    for (peak, interval, free_frequency) in [
+        (&survey.peaks[0], (900.0, 1100.0), 1000.0),
+        (&survey.peaks[1], (1500.0, 1700.0), 1600.0),
+    ] {
+        let mut local_controls = controls();
+        local_controls.measure_half_power_bandwidth = false;
+        let isolated = system
+            .driven_resonance(
+                &force,
+                observation,
+                interval,
+                local_controls,
+                100_000,
+                &gate,
+            )
+            .unwrap();
+        assert!(
+            (peak.peak.angular_frequency_rad_s - isolated.peak.angular_frequency_rad_s).abs()
+                < 2e-6
+        );
+        assert!((peak.peak.angular_frequency_rad_s - free_frequency).abs() < 1.0);
+        assert!((peak.observation - isolated.observation).abs() < 1e-8);
+        assert!(peak.half_power.is_none());
+    }
+    // The same coupled system has two free modes, but a symmetric receiver
+    // observes only the symmetric mode and an antisymmetric receiver only the
+    // other. Survey the physical signed projection, not the pole count.
+    for (weights, expected) in [([1.0, 1.0], 1000.0), ([1.0, -1.0], 1600.0)] {
+        let selected = system
+            .driven_resonances(
+                &force,
+                ModalHarmonicObservation::Velocity(&weights),
+                &grid,
+                survey_controls,
+                100_000,
+                &gate,
+            )
+            .unwrap();
+        assert_eq!(selected.peaks.len(), 1);
+        frequency(selected.peaks[0].peak, expected);
+    }
+    assert_eq!(system.samples_rendered(), 0);
+    assert!(system.material_memory().is_empty());
+    assert!(system.radiation_state().is_empty());
+}
+
+#[test]
+fn band_survey_retains_native_work_and_cancellation_refusals() {
+    let gate = CancelGate::new_clock_free();
+    let system = oscillator(1);
+    let controls = ResonanceSurveyControls {
+        absolute_frequency_tolerance_rad_s: 1e-6,
+        relative_frequency_tolerance: 1e-12,
+        maximum_evaluations: 128,
+        maximum_peaks: 4,
+    };
+    let query = |work, gate: &CancelGate| {
+        system.driven_resonances(
+            &[C64::ONE],
+            ModalHarmonicObservation::Acceleration(&[1.0]),
+            &[600.0, 900.0, 1100.0, 1400.0],
+            controls,
+            work,
+            gate,
+        )
+    };
+    assert!(matches!(
+        query(1, &gate),
+        Err(ResonanceSurveyError::Search(ResonanceSearchError::Source(
+            ModalCouplingError::Invalid { .. }
+        )))
+    ));
+    gate.request();
+    assert!(matches!(
+        query(100_000, &gate),
+        Err(ResonanceSurveyError::Search(ResonanceSearchError::Source(
+            ModalCouplingError::Cancelled
+        ))) | Err(ResonanceSurveyError::Search(
+            ResonanceSearchError::Cancelled
+        ))
+    ));
+    assert_eq!(system.samples_rendered(), 0);
 }

@@ -3,11 +3,12 @@
 
 pub use super::super::resonance::{
     DrivenResonance, HalfPowerBandwidth, ModalHarmonicObservation, ResonanceControls,
-    ResonanceFrequency, ResonanceSearchError,
+    ResonanceFrequency, ResonanceSearchError, ResonanceSurvey, ResonanceSurveyControls,
+    ResonanceSurveyError,
 };
 use super::*;
 use fs_duct::dg::DgHarmonicDerivative;
-use fs_phs::harmonic::resonance::search_resonance;
+use fs_phs::harmonic::resonance::{search_resonance, survey_resonances};
 
 /// One fixed observation in the original source coordinates and physical units.
 /// Port IDs refer to the declared source, never to its current vector position.
@@ -39,6 +40,9 @@ pub enum DgHarmonicObservation<'a> {
 
 /// Search refusals retain the complete native modal/acoustic source error.
 pub type DgDrivenResonanceError = ResonanceSearchError<DgHarmonicCouplingError>;
+
+/// Band survey refusals preserve original modal/acoustic admission and solves.
+pub type DgResonanceSurveyError = ResonanceSurveyError<DgHarmonicCouplingError>;
 
 impl DgHarmonicObservation<'_> {
     fn validate(self, modes: usize) -> Result<(), DgHarmonicCouplingError> {
@@ -280,6 +284,104 @@ fn sample(
 }
 
 impl CoupledModalSystem {
+    /// Survey peaks resolved by a caller-supplied frequency grid with the
+    /// original bare DG duct attached. Force and observation stay fixed; the
+    /// complete joint modal/duct response supplies every analytic tangent.
+    ///
+    /// The sampling, completeness and total-work semantics are those of
+    /// [`Self::driven_resonances`]. Returned peaks have no inferred half-power
+    /// width. No state, material history or sample clock is advanced.
+    #[allow(clippy::too_many_arguments)]
+    pub fn driven_resonances_with_duct(
+        &self,
+        force: &[C64],
+        duct: &DgDuct,
+        inlet: PortId,
+        flow_column: &[f64],
+        observation: DgHarmonicObservation<'_>,
+        frequencies_rad_s: &[f64],
+        controls: ResonanceSurveyControls,
+        maximum_work_per_frequency: usize,
+        gate: &CancelGate,
+    ) -> Result<ResonanceSurvey, DgResonanceSurveyError> {
+        poll(Some(gate))
+            .map_err(|error| ResonanceSearchError::Source(DgHarmonicCouplingError::from(error)))?;
+        observation
+            .validate(self.mode_count())
+            .map_err(ResonanceSearchError::Source)?;
+        survey_resonances(
+            frequencies_rad_s,
+            controls,
+            || gate.is_requested(),
+            |omega, _, _| {
+                let result = self.harmonic_response_with_duct_frequency_derivative(
+                    omega,
+                    force,
+                    None,
+                    duct,
+                    inlet,
+                    flow_column,
+                    maximum_work_per_frequency,
+                    gate,
+                )?;
+                sample(observation, &result.response, Some(&result), gate)
+            },
+        )
+    }
+
+    /// Survey the observable peaks of the complete source-bound load over an
+    /// authored positive frequency grid. Modal/Maxwell coordinates, reciprocal
+    /// air, DG gas and wall memory, finite branches, mutual rational terminal
+    /// reactions, passages and rigid closures remain in every solve.
+    ///
+    /// The grid resolves candidate maxima of the chosen response; it does not
+    /// certify that all peaks are present. Exact destructive-interference zeros
+    /// may occur between peaks. A known rigid closure's flow still refuses, so
+    /// roundoff cannot masquerade as a flow resonance. Native source bands,
+    /// work, residual, Mach and cancellation checks remain in force.
+    ///
+    /// One total evaluation allowance includes sampling and refinement, with
+    /// one joint LU reused by each response/tangent pair. No linewidth is
+    /// inferred and no accepted state or source history changes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn driven_resonances_with_load(
+        &self,
+        force: &[C64],
+        load: &DgPortLoad,
+        flow_column: &[f64],
+        observation: DgHarmonicObservation<'_>,
+        frequencies_rad_s: &[f64],
+        controls: ResonanceSurveyControls,
+        maximum_work_per_frequency: usize,
+        gate: &CancelGate,
+    ) -> Result<ResonanceSurvey, DgResonanceSurveyError> {
+        poll(Some(gate))
+            .map_err(|error| ResonanceSearchError::Source(DgHarmonicCouplingError::from(error)))?;
+        observation
+            .validate(self.mode_count())
+            .map_err(ResonanceSearchError::Source)?;
+        observation
+            .admit_loaded_flow(load)
+            .map_err(ResonanceSearchError::Source)?;
+        survey_resonances(
+            frequencies_rad_s,
+            controls,
+            || gate.is_requested(),
+            |omega, _, _| {
+                let result = self.harmonic_response_with_load_frequency_derivative(
+                    omega,
+                    force,
+                    None,
+                    load,
+                    flow_column,
+                    maximum_work_per_frequency,
+                    gate,
+                )?;
+                sample(observation, &result.response, Some(&result), gate)
+            },
+        )
+    }
+
     /// Resolve a driven peak and optional half-power width with the complete
     /// original bare DG duct attached. The selected response is under FIXED
     /// authored force, not an inferred pressure/flow impedance or free pole.

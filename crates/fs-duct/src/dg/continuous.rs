@@ -5,6 +5,8 @@
 //! its spatial and constitutive-band errors remain separate from solve residuals.
 use super::*;
 mod frequency;
+/// Driven pressure peaks across an explicitly sampled physical frequency band.
+pub mod resonance;
 /// Free resonance and decay of the complete original material-memory operator.
 pub mod poles;
 /// Transactional source-bound adoption after a complete coupled trajectory.

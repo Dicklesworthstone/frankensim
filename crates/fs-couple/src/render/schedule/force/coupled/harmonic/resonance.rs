@@ -4,11 +4,11 @@
 
 use super::*;
 use fs_math::dd::Dd;
-use fs_phs::harmonic::resonance::search_resonance;
 pub use fs_phs::harmonic::resonance::{
     DrivenResonance, HalfPowerBandwidth, ResonanceControls, ResonanceFrequency,
-    ResonanceSearchError,
+    ResonanceSearchError, ResonanceSurvey, ResonanceSurveyControls, ResonanceSurveyError,
 };
+use fs_phs::harmonic::resonance::{search_resonance, survey_resonances};
 
 /// A fixed real observation of the original mass-normalized mechanical modes.
 /// Weights retain their signs and physical units without normalization. For a
@@ -28,6 +28,9 @@ pub enum ModalHarmonicObservation<'a> {
 
 /// Search refusals preserve the original coupled admission/solve error.
 pub type ModalDrivenResonanceError = ResonanceSearchError<ModalCouplingError>;
+
+/// Band survey refusals preserve native coupled errors and total search limits.
+pub type ModalResonanceSurveyError = ResonanceSurveyError<ModalCouplingError>;
 
 impl ModalHarmonicObservation<'_> {
     pub(super) fn validate(self, modes: usize) -> Result<(), ModalCouplingError> {
@@ -116,6 +119,38 @@ fn project(weights: &[f64], values: &[C64], gate: &CancelGate) -> Result<C64, Mo
     Ok(result)
 }
 
+fn sample(
+    system: &CoupledModalSystem,
+    force: &[C64],
+    observation: ModalHarmonicObservation<'_>,
+    omega: f64,
+    derivative: bool,
+    maximum_work: usize,
+    gate: &CancelGate,
+) -> Result<(C64, C64, f64), ModalCouplingError> {
+    if derivative {
+        let result = system.harmonic_response_with_frequency_derivative(
+            omega,
+            force,
+            None,
+            maximum_work,
+            gate,
+        )?;
+        let (value, slope) = observation.observe(&result.response, Some(&result), gate)?;
+        Ok((
+            value,
+            slope,
+            result
+                .relative_derivative_residual
+                .max(result.response.solve_relative_residual),
+        ))
+    } else {
+        let result = system.harmonic_response(omega, force, maximum_work, gate)?;
+        let (value, slope) = observation.observe(&result, None, gate)?;
+        Ok((value, slope, result.solve_relative_residual))
+    }
+}
+
 impl CoupledModalSystem {
     /// Resolve a local driven peak and optional half-power width of a FIXED
     /// physical displacement, velocity or acceleration observation under fixed force phasors.
@@ -153,29 +188,61 @@ impl CoupledModalSystem {
             controls,
             || gate.is_requested(),
             |omega, derivative, _| {
-                if derivative {
-                    let result = self.harmonic_response_with_frequency_derivative(
-                        omega,
-                        force,
-                        None,
-                        maximum_work_per_frequency,
-                        gate,
-                    )?;
-                    let (value, slope) =
-                        observation.observe(&result.response, Some(&result), gate)?;
-                    Ok((
-                        value,
-                        slope,
-                        result
-                            .relative_derivative_residual
-                            .max(result.response.solve_relative_residual),
-                    ))
-                } else {
-                    let result =
-                        self.harmonic_response(omega, force, maximum_work_per_frequency, gate)?;
-                    let (value, slope) = observation.observe(&result, None, gate)?;
-                    Ok((value, slope, result.solve_relative_residual))
-                }
+                sample(
+                    self,
+                    force,
+                    observation,
+                    omega,
+                    derivative,
+                    maximum_work_per_frequency,
+                    gate,
+                )
+            },
+        )
+    }
+
+    /// Discover and refine the driven peaks resolved by an authored frequency
+    /// grid, under one fixed force and signed physical observation. Every query
+    /// retains the complete connected mechanical, material and reciprocal-air
+    /// system. Interference can hide a free mode or shift an observed maximum.
+    ///
+    /// Frequencies are strictly increasing positive rad/s. The grid must resolve
+    /// the increasing/decreasing slopes around each desired peak; this is not a
+    /// spectral census or a proof that narrow peaks between samples are absent.
+    /// Exact sampled antiresonances are permitted. Peaks have no inferred width;
+    /// use [`Self::driven_resonance`] with a suitable isolated interval for that.
+    ///
+    /// The evaluation allowance covers the whole grid and all refinements.
+    /// Native LU tangents share each response factorization, and cached grid
+    /// endpoints require no additional solve. Native work limits and refusals
+    /// remain active. Accepted states, histories and sample clocks are unchanged.
+    pub fn driven_resonances(
+        &self,
+        force: &[C64],
+        observation: ModalHarmonicObservation<'_>,
+        frequencies_rad_s: &[f64],
+        controls: ResonanceSurveyControls,
+        maximum_work_per_frequency: usize,
+        gate: &CancelGate,
+    ) -> Result<ResonanceSurvey, ModalResonanceSurveyError> {
+        poll(Some(gate)).map_err(ResonanceSearchError::Source)?;
+        observation
+            .validate(self.mode_count())
+            .map_err(ResonanceSearchError::Source)?;
+        survey_resonances(
+            frequencies_rad_s,
+            controls,
+            || gate.is_requested(),
+            |omega, derivative, _| {
+                sample(
+                    self,
+                    force,
+                    observation,
+                    omega,
+                    derivative,
+                    maximum_work_per_frequency,
+                    gate,
+                )
             },
         )
     }

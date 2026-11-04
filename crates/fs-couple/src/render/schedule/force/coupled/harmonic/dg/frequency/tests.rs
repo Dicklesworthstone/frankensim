@@ -1069,3 +1069,104 @@ fn bare_loaded_peak_and_native_source_refusals_preserve_all_histories() {
     assert_eq!(system.radiation_state(), air);
     assert_eq!(system.samples_rendered(), 0);
 }
+
+#[test]
+fn resonance_surveys_keep_complete_load_observations_and_histories() {
+    use super::super::resonance::{
+        DgHarmonicObservation as Observe, ModalHarmonicObservation, ResonanceSearchError,
+        ResonanceSurveyControls, ResonanceSurveyError,
+    };
+    let gate = CancelGate::new_clock_free();
+    let system = oscillator();
+    let load = loaded(false, false);
+    let state = load.state().clone();
+    let branch_state = load.branches()[0].state().clone();
+    let terminal_state = load.terminal().unwrap().pole_states().to_vec();
+    let memory = system.material_memory().to_vec();
+    let air = system.radiation_state().to_vec();
+    let force = [C64::new(1e-5, -4e-6)];
+    let column = [0.003];
+    let controls = ResonanceSurveyControls {
+        absolute_frequency_tolerance_rad_s: 1e-4,
+        relative_frequency_tolerance: 1e-10,
+        maximum_evaluations: 128,
+        maximum_peaks: 4,
+    };
+    for observation in [
+        Observe::Modal(ModalHarmonicObservation::Acceleration(&[1.0])),
+        Observe::TerminalPressure(SIDE),
+    ] {
+        let survey = system
+            .driven_resonances_with_load(
+                &force,
+                &load,
+                &column,
+                observation,
+                &[1720.0, 1800.0, 1870.0, 1950.0],
+                controls,
+                WORK,
+                &gate,
+            )
+            .unwrap();
+        assert_eq!(survey.peaks.len(), 1);
+        let peak = &survey.peaks[0];
+        let original = system
+            .harmonic_response_with_load(
+                peak.peak.angular_frequency_rad_s,
+                &force,
+                &load,
+                &column,
+                WORK,
+                &gate,
+            )
+            .unwrap();
+        let expected = if matches!(observation, Observe::Modal(_)) {
+            C64::new(0.0, -original.modal.omega_rad_s) * original.modal.velocity_m_sqrt_kg_per_s[0]
+        } else {
+            let terminal = original.terminal.as_ref().unwrap();
+            terminal.pressure_pa[terminal
+                .ports
+                .iter()
+                .position(|port| *port == SIDE)
+                .unwrap()]
+        };
+        close(peak.observation, expected);
+        assert!(peak.half_power.is_none());
+        assert!(survey.maximum_relative_residual < 1e-11);
+    }
+    let bare_survey = system
+        .driven_resonances_with_duct(
+            &force,
+            &bare(),
+            INLET,
+            &column,
+            Observe::Modal(ModalHarmonicObservation::Velocity(&[1.0])),
+            &[1600.0, 1750.0, 1850.0, 1950.0],
+            controls,
+            WORK,
+            &gate,
+        )
+        .unwrap();
+    assert_eq!(bare_survey.peaks.len(), 1);
+    assert!(matches!(
+        system.driven_resonances_with_load(
+            &force,
+            &load,
+            &column,
+            Observe::ChannelFlow(OUTLET),
+            &[1720.0, 1800.0, 1870.0, 1950.0],
+            controls,
+            WORK,
+            &gate,
+        ),
+        Err(ResonanceSurveyError::Search(ResonanceSearchError::Source(
+            _
+        )))
+    ));
+    assert_eq!(load.state(), &state);
+    assert_eq!(load.branches()[0].state(), &branch_state);
+    assert_eq!(load.terminal().unwrap().pole_states(), terminal_state);
+    assert_eq!(system.material_memory(), memory);
+    assert_eq!(system.radiation_state(), air);
+    assert_eq!(system.samples_rendered(), 0);
+}
