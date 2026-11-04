@@ -148,6 +148,15 @@ accepts real exactly symmetric row-major matrices. `try_modal` supplies the
 mass-normalized diagonal stiffness convenience while retaining full damping;
 factored frequency detuning preserves narrow peaks and exact nominal resonance.
 
+An unloaded `try_modal` pencil with exactly zero off-diagonal damping uses
+compact diagonal storage. Every nonzero coupling, however small, and every
+port-loaded pencil retains the dense path. Layout selection uses the source
+damping, including at DC where its off-diagonals affect the frequency tangent.
+The complete caller-owned damping matrix still receives finite/symmetric
+admission and requires `O(n*n)` inspection. Subsequent compact assembly and
+prepared response/tangent evaluations use `O(n)` work and owned storage.
+No mode, damping term or physical coupling is approximated by this dispatch.
+
 Exact binary coordinate/time scaling reuses the quadratic-pencil owner. Native
 fs-la complex LU is cached per frequency for multiple force/receiver queries;
 exactly diagonal pencils use scalar division. The response returns original
@@ -158,16 +167,22 @@ The forcing convention is `v = -i omega q`, `P_in = Re(F^H v)/2` and
 remain the caller's responsibility. Physical radiation loss appears here only
 if its loading is actually included in the supplied pencil.
 
-Mass must pass positive-definite admission. Damping and stiffness pass a Jacobi
-PSD check after their own diagonal congruence, so a small indefinite subspace
-cannot hide behind a larger unrelated mode. The numerical allowance is
+Mass must pass positive-definite admission. Exactly diagonal damping and
+stiffness receive nonnegative-coefficient checks. Coupled matrices pass a
+Jacobi PSD check after their own diagonal congruence, so a small indefinite
+subspace cannot hide behind a larger unrelated mode. The numerical allowance is
 `64 n epsilon`; this is not an interval passivity proof. Source coefficients
 are never clipped, diagonalized or shifted. Zero damping and stiffness
 nullspaces remain intact; singular lossless resonances and unconstrained DC
 free motion refuse instead of manufacturing finite amplitudes.
 
 Caller controls bound retained coordinates, peak numerical-array payload and
-relative solve residual. Preparation/solves poll cancellation between dense
+relative solve residual. Dense owners admit `144*n*n + 128*n` bytes; compact
+modal owners admit `272*n` bytes without a dense eigensolver work limit.
+The compact owner's numerical arrays occupy `44*n` bytes; its preparation
+and single-response peaks are `76*n` and `92*n` bytes respectively. Caller
+input, allocator overhead and thread stacks are excluded. Preparation/solves
+poll cancellation between dense
 admission stages, per assembly/diagnostic row and inside LU. Cholesky/Jacobi
 admission is one indivisible bounded-size call. Inputs remain immutable and no
 partial response escapes a failure. Repeat arithmetic is deterministic on one
@@ -178,6 +193,9 @@ G1/G3 tests cover analytic resonance phase/linewidth, full nonproportional
 cluster damping, antiresonant port cancellation, a full two-coordinate pencil,
 reciprocity, unit-coordinate changes over 100 orders, physical power balance,
 free motion, singular limits, PSD refusal, budgets, cancellation and replay.
+Compact-path regressions include a 257-mode bank under its linear payload
+limit and a tiny physical coupling that requires dense admission and produces
+nonzero motion of an unforced coordinate.
 
 `try_with_port_impedance` and `try_modal_with_port_impedance` attach the complete
 frequency-dependent physical load `Z(omega)` through a real force map B. Flow is
@@ -219,8 +237,10 @@ work. A second row audit reconstructs the differentiated equation from the
 published physical motion with uncancelled source bounds.
 
 `HarmonicFrequencyControls` admits added payload `8*n*p + 512*n + 384*p` bytes
-and work score `64*(n*n+n*p+p*p)+256*(n+p)` before allocation. Preparation's
-payload bound is `144*n*n + 128*n`, including its retained scaled mass/damping.
+and dense work score `64*(n*n+n*p+p*p)+256*(n+p)` before allocation. An unloaded
+compact modal owner admits work score `320*n`, with the same `512*n` added
+payload bound. Its current tangent/audit arrays peak at `208*n` additional
+bytes. Both paths retain the admitted scaled mass/damping and reuse the factor.
 No additional factor, finite difference, material law or peak search is created.
 M/C/K, geometry and the port map remain fixed; load causality, constitutive
 support and the supplied slope are the physical owner's responsibility.
@@ -229,7 +249,9 @@ split. G1/G3 tests in `tests/harmonic_frequency.rs` cover high-Q and DC limits,
 causal inertance/compliance and Maxwell loads, full mutual/nonreciprocal loads,
 complex source slopes, exact antiresonances, zero forcing, binary coordinate
 and time changes, independent work, explicit load-slope refusal, resources,
-cancellation and deterministic reuse.
+cancellation and deterministic reuse. Compact-path tests cover a 129-mode
+bank under the linear work budget, agreement with the dense pencil, and a
+nonzero DC tangent from tiny off-diagonal source damping.
 
 ### `time` (IRP M1.1-W1a; moved from `fs-couple::modal_acoustic_time`)
 

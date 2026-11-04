@@ -372,3 +372,106 @@ fn g0_budgets_cancellation_nonfinite_forces_and_replay_are_transactional() {
         ));
     });
 }
+
+#[test]
+fn g1_large_diagonal_modal_bank_keeps_resonance_and_power_with_linear_payload() {
+    with_cx(&CancelGate::new(), |cx| {
+        let n = 257;
+        let natural: Vec<_> = (0..n)
+            .map(|i| if i == 0 { 0.1 } else { 1.0 + i as f64 / 8.0 })
+            .collect();
+        let mut damping = vec![0.0; n * n];
+        let force: Vec<_> = (0..n)
+            .map(|i| C64::new(1.0 + (i % 7) as f64 / 8.0, -((i % 5) as f64) / 16.0))
+            .collect();
+        for i in 0..n {
+            damping[i * n + i] = if i == 0 {
+                2e-13
+            } else {
+                0.02 + i as f64 / 1000.0
+            };
+        }
+        let compact = HarmonicResponseControls {
+            maximum_coordinates: n,
+            maximum_payload_bytes: 272 * n,
+            ..controls()
+        };
+        for frequency in [0.0, 0.1 - 2e-13, 0.1, 0.1 + 2e-13, 3.125] {
+            let prepared =
+                PreparedHarmonicResponse::try_modal(&natural, &damping, frequency, compact, cx)
+                    .unwrap();
+            let response = prepared.solve(&force, cx).unwrap();
+            let mut expected_power = 0.0;
+            for i in 0..n {
+                let c = damping[i * n + i];
+                let denominator = C64::new(
+                    (natural[i] - frequency) * (natural[i] + frequency),
+                    -frequency * c,
+                );
+                let q = force[i] / denominator;
+                let v = C64::new(0.0, -frequency) * q;
+                close(response.displacement[i], q, 5e-14);
+                close(response.velocity[i], v, 5e-14);
+                expected_power += 0.5 * c * v.norm_sq();
+            }
+            scalar_close(response.average_viscous_power_w, expected_power, 5e-14);
+            assert!(response.relative_residual < 3e-15);
+            assert!(response.power_balance_residual_w.abs() < 2e-12 * expected_power.max(1.0));
+            if frequency == 0.1 {
+                assert_eq!(response.displacement[0].re, 0.0);
+                close(response.velocity[0], C64::from_re(1.0 / 2e-13), 3e-15);
+            }
+            assert_eq!(
+                prepared.solve(&force, cx).unwrap().displacement,
+                response.displacement
+            );
+        }
+        let too_small = HarmonicResponseControls {
+            maximum_payload_bytes: compact.maximum_payload_bytes - 1,
+            ..compact
+        };
+        assert!(matches!(
+            PreparedHarmonicResponse::try_modal(&natural, &damping, 0.1, too_small, cx),
+            Err(HarmonicResponseError::Budget {
+                quantity: "numerical payload bytes", requested, ..
+            }) if requested == 272 * n
+        ));
+    });
+}
+
+#[test]
+fn g1_tiny_modal_coupling_keeps_dense_admission_and_nonzero_transfer() {
+    with_cx(&CancelGate::new(), |cx| {
+        let damping = [0.25, 1e-20, 1e-20, 0.5];
+        let compact_only = HarmonicResponseControls {
+            maximum_coordinates: 2,
+            maximum_payload_bytes: 272 * 2,
+            ..controls()
+        };
+        assert!(matches!(
+            PreparedHarmonicResponse::try_modal(&[1.0, 2.0], &damping, 1.0, compact_only, cx),
+            Err(HarmonicResponseError::Budget {
+                quantity: "numerical payload bytes",
+                requested: 832,
+                ..
+            })
+        ));
+        let dense = HarmonicResponseControls {
+            maximum_payload_bytes: 832,
+            ..compact_only
+        };
+        let response = PreparedHarmonicResponse::try_modal(&[1.0, 2.0], &damping, 1.0, dense, cx)
+            .unwrap()
+            .solve(&[C64::ONE, C64::ZERO], cx)
+            .unwrap();
+        // Independent two-coordinate inverse: the unforced second mode still
+        // moves, even though this coupling is much smaller than epsilon*C_ii.
+        let a = C64::new(0.0, -0.25);
+        let b = C64::new(0.0, -1e-20);
+        let d = C64::new(3.0, -0.5);
+        let determinant = a * d - b * b;
+        close(response.displacement[0], d / determinant, 5e-14);
+        close(response.displacement[1], -b / determinant, 5e-14);
+        assert!(response.displacement[1].abs() > 0.0);
+    });
+}

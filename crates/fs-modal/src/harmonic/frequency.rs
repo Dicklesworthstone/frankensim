@@ -6,8 +6,8 @@
 //! operator. The original factor, binary scaling and source coordinates remain.
 
 use super::{
-    HarmonicResponse, HarmonicResponseError, PreparedHarmonicResponse, finite, invalid, poll,
-    real_inner, scale, scale_complex,
+    HarmonicResponse, HarmonicResponseError, MatrixLayout, PreparedHarmonicResponse, finite,
+    invalid, poll, real_inner, scale, scale_complex,
 };
 use crate::quadratic_fraction;
 use fs_exec::Cx;
@@ -21,6 +21,7 @@ pub struct HarmonicFrequencyControls {
     pub maximum_additional_payload_bytes: usize,
     /// Work score 64*(n²+n*p+p²)+256*(n+p), including both solves, original
     /// physical observations and the independently reconstructed tangent audit.
+    /// An exactly diagonal unloaded modal owner uses 320*n instead.
     /// The factorization was admitted when preparing the owner.
     pub maximum_work: u64,
 }
@@ -115,14 +116,14 @@ impl PreparedHarmonicResponse {
                 ));
             }
         };
-        admit(self.n, ports, controls)?;
+        admit(self.n, ports, self.layout, controls)?;
         let (solution, force_exponent, relative) = self.solve_force(force, cx)?;
         let response = self.observe(force, &solution, force_exponent, relative, cx)?;
         let state_exponent = vector_exponent(&solution);
-        let normalized = solution
-            .iter()
-            .map(|&z| scale_complex(z, -state_exponent))
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut normalized = Vec::with_capacity(self.n);
+        for &z in &solution {
+            normalized.push(scale_complex(z, -state_exponent)?);
+        }
         let action = self.frequency_action(&normalized, impedance_derivative, cx)?;
         let action_exponent =
             force_exponent + state_exponent + action.exponent - self.time_exponent;
@@ -204,8 +205,8 @@ impl PreparedHarmonicResponse {
             let mut cdv = C64::ZERO;
             let mut cv_error = C64::ZERO;
             let mut cdv_error = C64::ZERO;
-            for j in 0..self.n {
-                let c = self.damping[i * self.n + j];
+            for j in self.layout.columns(i, self.n) {
+                let c = self.damping[self.layout.index(i, j, self.n)];
                 add(&mut cv, &mut cv_error, response.velocity[j].scale(c));
                 add(&mut cdv, &mut cdv_error, velocity_derivative[j].scale(c));
             }
@@ -340,11 +341,12 @@ impl PreparedHarmonicResponse {
         for i in 0..self.n {
             poll(cx)?;
             let mut correction = C64::ZERO;
-            for (j, &q) in state.iter().enumerate() {
+            for j in self.layout.columns(i, self.n) {
+                let q = state[j];
                 if q == C64::ZERO {
                     continue;
                 }
-                let at = i * self.n + j;
+                let at = self.layout.index(i, j, self.n);
                 let mass = if mu == 0.0 {
                     0.0
                 } else {
@@ -488,8 +490,9 @@ impl PreparedHarmonicResponse {
             let mut correction = C64::ZERO;
             let mut envelope =
                 source.abs() + scale(action.envelope[i], action_exponent - exponent)?;
-            for (j, &dq) in tangent.iter().enumerate() {
-                let coefficient = self.operator[i * self.n + j];
+            for j in self.layout.columns(i, self.n) {
+                let dq = tangent[j];
+                let coefficient = self.operator[self.layout.index(i, j, self.n)];
                 add(&mut residual, &mut correction, coefficient * dq);
                 envelope += coefficient.abs() * dq.abs();
             }
@@ -518,6 +521,7 @@ impl PreparedHarmonicResponse {
 fn admit(
     n: usize,
     p: usize,
+    layout: MatrixLayout,
     controls: HarmonicFrequencyControls,
 ) -> Result<(), HarmonicResponseError> {
     let (nn, pp) = (n as u128, p as u128);
@@ -530,7 +534,12 @@ fn admit(
             cap: controls.maximum_additional_payload_bytes,
         });
     }
-    let work = 64 * (nn * nn + nn * pp + pp * pp) + 256 * (nn + pp);
+    let structural_entries = if layout == MatrixLayout::Diagonal {
+        nn
+    } else {
+        nn * nn
+    };
+    let work = 64 * (structural_entries + nn * pp + pp * pp) + 256 * (nn + pp);
     let requested = u64::try_from(work).map_err(|_| invalid("frequency work extent overflow"))?;
     if requested > controls.maximum_work {
         return Err(HarmonicResponseError::WorkBudget {

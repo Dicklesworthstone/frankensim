@@ -663,3 +663,186 @@ fn missing_load_slope_budgets_cancellation_and_bad_inputs_refuse_without_mutatio
         );
     });
 }
+
+#[test]
+fn large_diagonal_modal_frequency_tangent_uses_linear_work_and_preserves_narrow_peaks() {
+    with_cx(&CancelGate::new(), |cx| {
+        let n = 129;
+        let natural: Vec<_> = (0..n)
+            .map(|i| if i == 0 { 0.1 } else { i as f64 + 1.0 })
+            .collect();
+        let mut damping = vec![0.0; n * n];
+        for i in 0..n {
+            damping[i * n + i] = if i == 0 {
+                2e-13
+            } else {
+                0.05 + i as f64 / 100.0
+            };
+        }
+        let force: Vec<_> = (0..n)
+            .map(|i| C64::new(1.0 + (i % 3) as f64, -0.25))
+            .collect();
+        let slope: Vec<_> = (0..n)
+            .map(|i| C64::new(0.2, (i % 4) as f64 / 8.0))
+            .collect();
+        let compact = HarmonicResponseControls {
+            maximum_coordinates: n,
+            maximum_payload_bytes: 272 * n,
+            ..controls()
+        };
+        let linear = HarmonicFrequencyControls {
+            maximum_additional_payload_bytes: 512 * n,
+            maximum_work: 320 * n as u64,
+        };
+        for w in [0.0, 0.1 - 2e-13, 0.1, 0.1 + 2e-13, 9.25] {
+            let prepared =
+                PreparedHarmonicResponse::try_modal(&natural, &damping, w, compact, cx).unwrap();
+            let result = prepared
+                .solve_with_frequency_derivative(&force, Some(&slope), None, linear, cx)
+                .unwrap();
+            let mut expected_input = 0.0;
+            let mut expected_viscous = 0.0;
+            let mut power_envelope = 0.0;
+            for i in 0..n {
+                let c = damping[i * n + i];
+                let a = C64::new((natural[i] - w) * (natural[i] + w), -w * c);
+                let q = force[i] / a;
+                let dq = (slope[i] + C64::new(2.0 * w, c) * q) / a;
+                let v = C64::new(0.0, -w) * q;
+                let dv = C64::new(0.0, -1.0) * (q + dq.scale(w));
+                close(result.response.displacement[i], q, 6e-14);
+                close(result.displacement_derivative[i], dq, 8e-14);
+                close(result.velocity_derivative[i], dv, 8e-14);
+                expected_input += 0.5 * (pair(slope[i], v) + pair(force[i], dv));
+                expected_viscous += c * pair(v, dv);
+                power_envelope += 0.5 * (slope[i].abs() * v.abs() + force[i].abs() * dv.abs())
+                    + c * v.abs() * dv.abs();
+            }
+            // At an extremely narrow peak the signed power slope cancels
+            // large terms; use their uncancelled physical envelope as scale.
+            let power_tolerance = 2e-12 * power_envelope.max(1.0);
+            assert!(
+                (result.average_input_power_derivative - expected_input).abs() < power_tolerance
+            );
+            assert!(
+                (result.average_viscous_power_derivative - expected_viscous).abs()
+                    < power_tolerance
+            );
+            assert!(result.power_balance_residual_derivative.abs() < power_tolerance);
+            assert!(result.relative_derivative_residual < 3e-14);
+            let insufficient_work = HarmonicFrequencyControls {
+                maximum_work: linear.maximum_work - 1,
+                ..linear
+            };
+            assert!(matches!(
+                prepared.solve_with_frequency_derivative(
+                    &force, Some(&slope), None, insufficient_work, cx
+                ),
+                Err(HarmonicResponseError::WorkBudget { requested, .. })
+                    if requested == linear.maximum_work
+            ));
+        }
+    });
+}
+
+#[test]
+fn compact_modal_and_dense_frequency_responses_agree_at_dc_and_resonance() {
+    with_cx(&CancelGate::new(), |cx| {
+        let natural = [1.0, 2.0, 3.0, 4.0];
+        let mut mass = [0.0; 16];
+        let mut damping = [0.0; 16];
+        let mut stiffness = [0.0; 16];
+        for i in 0..4 {
+            mass[i * 4 + i] = 1.0;
+            damping[i * 4 + i] = [0.125, 0.0, 0.25, 1e-9][i];
+            stiffness[i * 4 + i] = natural[i] * natural[i];
+        }
+        let force = [C64::new(1.0, -0.2), C64::ONE, C64::new(-0.3, 0.7), C64::ONE];
+        let slope = [C64::new(0.1, -0.3); 4];
+        for w in [0.0, 0.3, 1.0, 3.1, 4.0] {
+            let compact =
+                PreparedHarmonicResponse::try_modal(&natural, &damping, w, controls(), cx)
+                    .unwrap()
+                    .solve_with_frequency_derivative(
+                        &force,
+                        Some(&slope),
+                        None,
+                        tangent_controls(),
+                        cx,
+                    )
+                    .unwrap();
+            let dense = PreparedHarmonicResponse::try_new(
+                &mass,
+                &damping,
+                &stiffness,
+                4,
+                w,
+                controls(),
+                cx,
+            )
+            .unwrap()
+            .solve_with_frequency_derivative(&force, Some(&slope), None, tangent_controls(), cx)
+            .unwrap();
+            for i in 0..4 {
+                close(
+                    compact.response.displacement[i],
+                    dense.response.displacement[i],
+                    6e-14,
+                );
+                close(
+                    compact.displacement_derivative[i],
+                    dense.displacement_derivative[i],
+                    8e-14,
+                );
+                close(
+                    compact.velocity_derivative[i],
+                    dense.velocity_derivative[i],
+                    8e-14,
+                );
+            }
+            assert!(
+                (compact.average_viscous_power_derivative - dense.average_viscous_power_derivative)
+                    .abs()
+                    <= 3e-12 * dense.average_viscous_power_derivative.abs().max(1.0)
+            );
+        }
+    });
+}
+
+#[test]
+fn tiny_off_diagonal_damping_remains_in_the_dc_frequency_derivative() {
+    with_cx(&CancelGate::new(), |cx| {
+        let coupling = 1e-18;
+        let prepared = PreparedHarmonicResponse::try_modal(
+            &[1.0, 2.0],
+            &[0.25, coupling, coupling, 0.5],
+            0.0,
+            controls(),
+            cx,
+        )
+        .unwrap();
+        let result = prepared
+            .solve_with_frequency_derivative(
+                &[C64::ONE, C64::ZERO],
+                None,
+                None,
+                tangent_controls(),
+                cx,
+            )
+            .unwrap();
+        // The DC dynamic operator is diagonal, but its derivative is not:
+        // K q_w = i C q. Compactness must be decided from the physical pencil.
+        assert_eq!(result.response.displacement[1], C64::ZERO);
+        close(
+            result.displacement_derivative[0],
+            C64::new(0.0, 0.25),
+            5e-14,
+        );
+        close(
+            result.displacement_derivative[1],
+            C64::new(0.0, coupling / 4.0),
+            5e-14,
+        );
+        assert!(result.displacement_derivative[1].abs() > 0.0);
+    });
+}

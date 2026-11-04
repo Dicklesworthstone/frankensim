@@ -42,6 +42,8 @@ pub struct HarmonicResponseControls {
     pub maximum_coordinates: usize,
     /// Conservative peak bytes of owned numerical arrays, including preparation
     /// and one solve. Caller input, allocator overhead and thread stacks are excluded.
+    /// Dense owners admit `144*n*n + 128*n`; exactly diagonal, unloaded modal
+    /// owners admit `272*n` without allocating dense coefficient matrices.
     pub maximum_payload_bytes: usize,
     /// Maximum componentwise relative backward error of the dynamic solve.
     /// This is not a forward-error bound near an ill-conditioned resonance.
@@ -131,6 +133,7 @@ impl std::error::Error for HarmonicResponseError {}
 #[derive(Clone, Debug)]
 pub struct PreparedHarmonicResponse {
     n: usize,
+    layout: MatrixLayout,
     angular_frequency_rad_s: f64,
     scaled_frequency: f64,
     time_exponent: i32,
@@ -142,6 +145,30 @@ pub struct PreparedHarmonicResponse {
     factor: Option<LuComplex>,
     port_load: Option<PreparedPortImpedance>,
     maximum_relative_residual: f64,
+}
+
+// Only an exactly diagonal source without a port load may use this layout.
+// In particular, a small off-diagonal damping entry is never a sparsity test.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MatrixLayout {
+    Dense,
+    Diagonal,
+}
+
+impl MatrixLayout {
+    fn columns(self, row: usize, n: usize) -> core::ops::Range<usize> {
+        match self {
+            Self::Dense => 0..n,
+            Self::Diagonal => row..row + 1,
+        }
+    }
+
+    fn index(self, row: usize, column: usize, n: usize) -> usize {
+        match self {
+            Self::Dense => row * n + column,
+            Self::Diagonal => row,
+        }
+    }
 }
 
 impl PreparedHarmonicResponse {
@@ -173,6 +200,7 @@ impl PreparedHarmonicResponse {
             cx,
             None,
             None,
+            MatrixLayout::Dense,
         )
     }
 
@@ -213,6 +241,7 @@ impl PreparedHarmonicResponse {
             cx,
             None,
             Some(load),
+            MatrixLayout::Dense,
         )
     }
 
@@ -227,28 +256,50 @@ impl PreparedHarmonicResponse {
         cx: &Cx<'_>,
         modal_frequencies: Option<&[f64]>,
         port_load: Option<PreparedPortImpedance>,
+        layout: MatrixLayout,
     ) -> Result<Self, HarmonicResponseError> {
         poll(cx)?;
-        admit_size(n, controls)?;
-        if n.checked_mul(n) != Some(mass.len())
+        admit_layout(n, controls, layout)?;
+        let entries = match layout {
+            MatrixLayout::Dense => n.checked_mul(n),
+            MatrixLayout::Diagonal => Some(n),
+        };
+        if entries != Some(mass.len())
             || damping.len() != mass.len()
             || stiffness.len() != mass.len()
         {
-            return Err(invalid("M,C,K must contain exactly n*n entries"));
+            return Err(invalid("M,C,K dimensions must match their storage layout"));
         }
         if !angular_frequency_rad_s.is_finite() || angular_frequency_rad_s < 0.0 {
             return Err(invalid("finite nonnegative driving frequency required"));
         }
-        symmetric(mass, n)?;
-        symmetric(stiffness, n)?;
-        crate::damping::validate_dense_damping(damping, n)
-            .map_err(HarmonicResponseError::Damping)?;
-        if (0..n).any(|i| mass[i * n + i] <= 0.0) {
+        if layout == MatrixLayout::Dense {
+            symmetric(mass, n)?;
+            symmetric(stiffness, n)?;
+            crate::damping::validate_dense_damping(damping, n)
+                .map_err(HarmonicResponseError::Damping)?;
+        } else if mass
+            .iter()
+            .chain(damping)
+            .chain(stiffness)
+            .any(|v| !v.is_finite())
+            || damping.iter().chain(stiffness).any(|&v| v < 0.0)
+        {
+            return Err(invalid(
+                "finite nonnegative diagonal modal coefficients required",
+            ));
+        }
+        if (0..n).any(|i| mass[layout.index(i, i, n)] <= 0.0) {
             return Err(HarmonicResponseError::MassNotPositiveDefinite);
         }
-        let coordinate_exponents: Vec<_> = (0..n)
-            .map(|i| quadratic_fraction(mass[i * n + i]).1.div_euclid(2))
-            .collect();
+        let mut coordinate_exponents = Vec::with_capacity(n);
+        for i in 0..n {
+            coordinate_exponents.push(
+                quadratic_fraction(mass[layout.index(i, i, n)])
+                    .1
+                    .div_euclid(2),
+            );
+        }
         let mut time_exponent = if angular_frequency_rad_s == 0.0 {
             i32::MIN
         } else {
@@ -256,15 +307,16 @@ impl PreparedHarmonicResponse {
         };
         for i in 0..n {
             poll(cx)?;
-            for j in 0..n {
+            for j in layout.columns(i, n) {
+                let index = layout.index(i, j, n);
                 let coordinate = coordinate_exponents[i] + coordinate_exponents[j];
-                if damping[i * n + j] != 0.0 {
+                if damping[index] != 0.0 {
                     time_exponent =
-                        time_exponent.max(quadratic_fraction(damping[i * n + j]).1 - coordinate);
+                        time_exponent.max(quadratic_fraction(damping[index]).1 - coordinate);
                 }
-                if stiffness[i * n + j] != 0.0 {
+                if stiffness[index] != 0.0 {
                     time_exponent = time_exponent.max(
-                        (quadratic_fraction(stiffness[i * n + j]).1 - coordinate + 1).div_euclid(2),
+                        (quadratic_fraction(stiffness[index]).1 - coordinate + 1).div_euclid(2),
                     );
                 }
             }
@@ -286,31 +338,36 @@ impl PreparedHarmonicResponse {
             time_exponent = 0;
         }
         let transform = |a: &[f64], order: i32| -> Result<Vec<f64>, HarmonicResponseError> {
-            a.iter()
-                .enumerate()
-                .map(|(index, &v)| {
-                    scale(
-                        v,
-                        -coordinate_exponents[index / n]
-                            - coordinate_exponents[index % n]
-                            - order * time_exponent,
-                    )
-                })
-                .collect()
+            let mut transformed = Vec::with_capacity(a.len());
+            for (index, &v) in a.iter().enumerate() {
+                let (row, column) = match layout {
+                    MatrixLayout::Dense => (index / n, index % n),
+                    MatrixLayout::Diagonal => (index, index),
+                };
+                transformed.push(scale(
+                    v,
+                    -coordinate_exponents[row]
+                        - coordinate_exponents[column]
+                        - order * time_exponent,
+                )?);
+            }
+            Ok(transformed)
         };
         let m = transform(mass, 0)?;
         let c = transform(damping, 1)?;
         let k = transform(stiffness, 2)?;
         poll(cx)?;
-        cholesky(&m, n).map_err(|_| HarmonicResponseError::MassNotPositiveDefinite)?;
-        require_psd(&c, n, "damping", cx)?;
-        require_psd(&k, n, "stiffness", cx)?;
+        if layout == MatrixLayout::Dense {
+            cholesky(&m, n).map_err(|_| HarmonicResponseError::MassNotPositiveDefinite)?;
+            require_psd(&c, n, "damping", cx)?;
+            require_psd(&k, n, "stiffness", cx)?;
+        }
         let mu = scale(angular_frequency_rad_s, -time_exponent)?;
-        let mut operator = vec![C64::ZERO; n * n];
+        let mut operator = vec![C64::ZERO; mass.len()];
         for i in 0..n {
             poll(cx)?;
-            for j in 0..n {
-                let index = i * n + j;
+            for j in layout.columns(i, n) {
+                let index = layout.index(i, j, n);
                 // Compensate the first multiplication in mu*(mu*M), so a
                 // near-resonant detuning is not lost in two rounded products.
                 let product = mu * m[index];
@@ -340,10 +397,11 @@ impl PreparedHarmonicResponse {
                 cx,
             )?;
         }
-        let diagonal = (0..n).all(|i| (0..n).all(|j| i == j || operator[i * n + j] == C64::ZERO));
+        let diagonal = layout == MatrixLayout::Diagonal
+            || (0..n).all(|i| (0..n).all(|j| i == j || operator[i * n + j] == C64::ZERO));
         let factor = if diagonal {
             for i in 0..n {
-                if operator[i * n + i] == C64::ZERO {
+                if operator[layout.index(i, i, n)] == C64::ZERO {
                     return Err(HarmonicResponseError::Singular {
                         angular_frequency_rad_s,
                         pivot: i,
@@ -360,6 +418,7 @@ impl PreparedHarmonicResponse {
         poll(cx)?;
         Ok(Self {
             n,
+            layout,
             angular_frequency_rad_s,
             scaled_frequency: mu,
             time_exponent,
@@ -377,6 +436,8 @@ impl PreparedHarmonicResponse {
     /// Convenience for mass-normalized modes: `M=I`, `K=diag(omega_i^2)`.
     /// The full supplied damping matrix is retained, including off-diagonals.
     /// Factored frequency detuning preserves exact resonance and narrow peaks.
+    /// Exactly diagonal damping uses linear owned storage, solves and frequency
+    /// tangents after inspecting the caller's complete damping matrix.
     pub fn try_modal(
         natural_frequencies_rad_s: &[f64],
         damping_per_s: &[f64],
@@ -438,21 +499,52 @@ impl PreparedHarmonicResponse {
     ) -> Result<Self, HarmonicResponseError> {
         let n = natural_frequencies_rad_s.len();
         poll(cx)?;
-        admit_size(n, controls)?;
-        let mut m = vec![0.0; n * n];
-        let mut k = vec![0.0; n * n];
+        // Bound coordinates and the minimum possible payload before scanning
+        // the full caller-owned damping input. No numerical coupling threshold.
+        admit_layout(n, controls, MatrixLayout::Diagonal)?;
+        crate::damping::validate_dense_damping(damping_per_s, n)
+            .map_err(HarmonicResponseError::Damping)?;
+        let mut layout = MatrixLayout::Diagonal;
+        for i in 0..n {
+            poll(cx)?;
+            if port_load.is_some() || (0..n).any(|j| i != j && damping_per_s[i * n + j] != 0.0) {
+                layout = MatrixLayout::Dense;
+                break;
+            }
+        }
+        admit_layout(n, controls, layout)?;
+        let entries = if layout == MatrixLayout::Diagonal {
+            n
+        } else {
+            n * n
+        };
+        let mut m = vec![0.0; entries];
+        let mut k = vec![0.0; entries];
+        let mut diagonal_damping = if layout == MatrixLayout::Diagonal {
+            Vec::with_capacity(n)
+        } else {
+            Vec::new()
+        };
         for (i, &w) in natural_frequencies_rad_s.iter().enumerate() {
             if !w.is_finite() || w < 0.0 || !(w * w).is_finite() || w != 0.0 && w * w == 0.0 {
                 return Err(invalid(
                     "finite nonnegative modal frequencies with representable stiffness required",
                 ));
             }
-            m[i * n + i] = 1.0;
-            k[i * n + i] = w * w;
+            let index = layout.index(i, i, n);
+            m[index] = 1.0;
+            k[index] = w * w;
+            if layout == MatrixLayout::Diagonal {
+                diagonal_damping.push(damping_per_s[i * n + i]);
+            }
         }
         Self::prepare(
             &m,
-            damping_per_s,
+            if layout == MatrixLayout::Diagonal {
+                &diagonal_damping
+            } else {
+                damping_per_s
+            },
             &k,
             n,
             angular_frequency_rad_s,
@@ -460,6 +552,7 @@ impl PreparedHarmonicResponse {
             cx,
             Some(natural_frequencies_rad_s),
             port_load,
+            layout,
         )
     }
 
@@ -498,11 +591,13 @@ impl PreparedHarmonicResponse {
         if force_exponent == i32::MIN {
             force_exponent = 0;
         }
-        let rhs: Vec<_> = force
-            .iter()
-            .enumerate()
-            .map(|(i, &f)| scale_complex(f, -self.coordinate_exponents[i] - force_exponent))
-            .collect::<Result<_, _>>()?;
+        let mut rhs = Vec::with_capacity(self.n);
+        for (i, &f) in force.iter().enumerate() {
+            rhs.push(scale_complex(
+                f,
+                -self.coordinate_exponents[i] - force_exponent,
+            )?);
+        }
         let (solution, residual) = self.solve_normalized(&rhs, cx)?;
         Ok((solution, force_exponent, residual))
     }
@@ -521,13 +616,14 @@ impl PreparedHarmonicResponse {
         } else {
             for (i, value) in solution.iter_mut().enumerate() {
                 poll(cx)?;
-                *value = *value / self.operator[i * self.n + i];
+                *value = *value / self.operator[self.layout.index(i, i, self.n)];
             }
         }
         if solution.iter().any(|z| !finite(*z)) {
             return Err(invalid("harmonic solution is not representable"));
         }
-        let relative_residual = backward_error(&self.operator, &solution, rhs, self.n, cx)?;
+        let relative_residual =
+            backward_error(&self.operator, &solution, rhs, self.n, self.layout, cx)?;
         if relative_residual > self.maximum_relative_residual {
             return Err(HarmonicResponseError::Residual {
                 measured: relative_residual,
@@ -562,8 +658,8 @@ impl PreparedHarmonicResponse {
             poll(cx)?;
             input += 0.5 * real_inner(force[i], velocity[i]);
             let mut cv = C64::ZERO;
-            for (j, &v) in velocity.iter().enumerate() {
-                cv = cv + v.scale(self.damping[i * self.n + j]);
+            for j in self.layout.columns(i, self.n) {
+                cv = cv + velocity[j].scale(self.damping[self.layout.index(i, j, self.n)]);
             }
             dissipation += 0.5 * real_inner(velocity[i], cv);
         }
@@ -596,6 +692,13 @@ impl PreparedHarmonicResponse {
 }
 
 fn admit_size(n: usize, controls: HarmonicResponseControls) -> Result<(), HarmonicResponseError> {
+    admit_layout(n, controls, MatrixLayout::Dense)
+}
+fn admit_layout(
+    n: usize,
+    controls: HarmonicResponseControls,
+    layout: MatrixLayout,
+) -> Result<(), HarmonicResponseError> {
     if n == 0
         || !controls.maximum_relative_residual.is_finite()
         || controls.maximum_relative_residual <= 0.0
@@ -612,11 +715,18 @@ fn admit_size(n: usize, controls: HarmonicResponseControls) -> Result<(), Harmon
             cap: controls.maximum_coordinates,
         });
     }
-    let bytes = n
-        .checked_mul(n)
-        .and_then(|x| x.checked_mul(144))
-        .and_then(|x| n.checked_mul(128).and_then(|y| x.checked_add(y)))
-        .ok_or(invalid("harmonic payload extent overflow"))?;
+    let bytes = match layout {
+        MatrixLayout::Dense => n
+            .checked_mul(n)
+            .and_then(|x| x.checked_mul(144))
+            .and_then(|x| n.checked_mul(128).and_then(|y| x.checked_add(y))),
+        // Compact owner: 44*n bytes (three real diagonals, one complex
+        // diagonal, coordinate exponents). Modal input construction and its
+        // scaled stiffness peak at another 32*n; one primal response peaks
+        // at another 48*n. Exact-capacity vectors keep both below 272*n.
+        MatrixLayout::Diagonal => n.checked_mul(272),
+    }
+    .ok_or(invalid("harmonic payload extent overflow"))?;
     if bytes > controls.maximum_payload_bytes {
         return Err(HarmonicResponseError::Budget {
             quantity: "numerical payload bytes",
@@ -624,8 +734,10 @@ fn admit_size(n: usize, controls: HarmonicResponseControls) -> Result<(), Harmon
             cap: controls.maximum_payload_bytes,
         });
     }
-    admit_jacobi_eigh(n)
-        .map_err(|_| invalid("dense PSD admission extent exceeds fs-la work cap"))?;
+    if layout == MatrixLayout::Dense {
+        admit_jacobi_eigh(n)
+            .map_err(|_| invalid("dense PSD admission extent exceeds fs-la work cap"))?;
+    }
     Ok(())
 }
 fn symmetric(a: &[f64], n: usize) -> Result<(), HarmonicResponseError> {
@@ -696,6 +808,7 @@ fn backward_error(
     x: &[C64],
     b: &[C64],
     n: usize,
+    layout: MatrixLayout,
     cx: &Cx<'_>,
 ) -> Result<f64, HarmonicResponseError> {
     let scale = x
@@ -711,10 +824,11 @@ fn backward_error(
         poll(cx)?;
         let mut residual = -normalized(b[i]);
         let mut denominator = normalized(b[i]).abs();
-        for j in 0..n {
+        for j in layout.columns(i, n) {
             let value = normalized(x[j]);
-            residual = residual + a[i * n + j] * value;
-            denominator += a[i * n + j].abs() * value.abs();
+            let coefficient = a[layout.index(i, j, n)];
+            residual = residual + coefficient * value;
+            denominator += coefficient.abs() * value.abs();
         }
         let error = if denominator == 0.0 {
             0.0
