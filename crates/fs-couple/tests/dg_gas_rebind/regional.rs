@@ -6,7 +6,7 @@ use fs_duct::dg::DgSidePort;
 const BRANCH: PortId = PortId(8);
 const BRANCH_LENGTH: f64 = 0.015;
 
-fn branched(main: &AxialGasField, branch: &AxialGasField) -> DgPortLoad {
+pub(super) fn branched(main: &AxialGasField, branch: &AxialGasField) -> DgPortLoad {
     let duct = DgDuct::new_with_gas_field(
         &Duct {
             segments: vec![Segment::Cylinder {

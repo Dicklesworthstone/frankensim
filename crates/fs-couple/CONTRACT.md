@@ -14448,6 +14448,36 @@ transfer with per-cell momentum and kinetic work in both channel geometries,
 and refusal/cancellation/exact retry. Native execution and measured physical
 validation remain separate gates. This advances MR05/MR06/MR33/MR67.
 
+### Original viscous and molecular heat in the complete finite-gas load
+
+`DgPortLoad::step_with_finite_gas_viscous_molecular_heat_controlled` explicitly
+returns physical heat belonging to the main finite gas inventory. One original
+native trial solves the inlet, outlet and finite-branch junction flows. The
+main bore's source-positive viscous and molecular observers consume those
+EXACT held inputs and the complete original state. Independent budgets cover
+their sequential preparations; no state is truncated to fit the 128-coordinate
+source-integral limit. Absent bore sources require no preparation budget.
+
+Original resolved slit/circular terminal passages belonging to the main gas
+contribute their positive viscous loss. Branch passages retain their independent
+gas ownership. Backward-Euler numerical loss, solid and thermal-wall loss,
+independent-branch loss and signed exterior exchange are not assigned to this
+gas. Channel pressure work also pays kinetic storage and numerical loss and
+cannot be substituted for the viscous term.
+
+The existing caloric/parameter-work solve deposits the internal heat once and
+deducts it once from exported loss. `FiniteGasDgPortStep` keeps raw native loss,
+main molecular heat, main viscous heat, terminal viscous heat and exported loss
+separate. The original source, volume, material-memory and cancellation gates
+remain atomic. A prepared complete trial is reusable without advancing an
+accepted state or repeating the acoustic solve. Active bore heat on the
+continuous-port backend still requires its own trajectory integral and refuses.
+
+Focused regressions independently reconstruct slit and circular shear heat,
+NASA caloric energy, actual held-port source integrals, branch ownership and
+late-cancellation rollback. They are authored and parsed; native compilation
+and execution remain unverified in this environment.
+
 ## Finite thermochemical feedback through the moving aperture
 
 `ApertureDg::step_with_finite_gas_controlled` composes the same complete-load

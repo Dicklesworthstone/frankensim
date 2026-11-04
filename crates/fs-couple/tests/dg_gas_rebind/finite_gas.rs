@@ -1,4 +1,6 @@
 //! Finite thermodynamic energy reaches original moving-aperture trajectories.
+#[path = "finite_gas/heat.rs"]
+mod heat;
 use super::*;
 use fs_couple::dg_port::finite_gas::{FiniteGasDgError, FiniteGasDgLoss, FiniteGasDgSolve};
 use fs_material::thermochemical_gas::energy::parcel::ClosedGasParcel;

@@ -10,10 +10,15 @@
 /// Original multi-parcel transport through complete continuing acoustic loads.
 pub mod transport;
 
+mod heat;
+pub(crate) use heat::PreparedFiniteGasDgPortHeat;
+use heat::SourceHeat;
+
 use super::{DgGasRefresh, DgPortGasUpdate, DgPortLoad, DgTerminalChannelKind};
 use crate::acoustic_realize::AcousticRealizeError;
 pub use crate::bernoulli_aperture::wall::material::{
-    FiniteGasDgBackground, FiniteGasDgError, FiniteGasDgLoss, FiniteGasDgSolve,
+    FiniteGasDgBackground, FiniteGasDgError, FiniteGasDgHeatBudget, FiniteGasDgLoss,
+    FiniteGasDgSolve,
 };
 use crate::bernoulli_aperture::wall::material::{
     admit_finite_gas_controls, finite_gas_field, finite_gas_stored_change, heated_finite_gas,
@@ -42,10 +47,20 @@ pub struct FiniteGasDgPortStep<S> {
     pub work_by_gas_j: f64,
     pub work_residual_j: f64,
     pub gas_energy_residual_j: f64,
-    /// Original loss exported from this accounting boundary. Channel viscosity
-    /// and numerical loss retain their distinct original reports; neither is
-    /// guessed to be heat deposited in this well-mixed inventory.
+    /// Original complete bore/branch/channel loss, before internal gas heat is
+    /// removed. Original channel frames distinguish physical and numerical loss.
     pub acoustic_dissipation_j: f64,
+    /// Original main-bore molecular relaxation deposited in its finite gas [J].
+    pub molecular_heat_j: f64,
+    /// Original main-bore Poiseuille/diffusion viscosity deposited in its gas [J].
+    pub viscous_heat_j: f64,
+    /// Physical viscous heat from finite passages belonging to the MAIN gas
+    /// inventory [J]. Independent branch passages and BE numerical loss are
+    /// excluded; channel pressure work includes storage and is never added here.
+    pub terminal_viscous_heat_j: f64,
+    /// Original complete loss less those three internal heat transfers [J].
+    /// Thermal-wall, solid, independent-branch and numerical losses remain exports.
+    pub exported_acoustic_dissipation_j: f64,
     /// Signed original rational terminal and optional driven-mouth exchange [J].
     /// Already excluded from net acoustic port work; never subtract it twice.
     pub terminal_work_j: f64,
@@ -175,6 +190,16 @@ pub(crate) fn admit_background<S, E>(
     work: f64,
     controls: FiniteGasDgSolve,
 ) -> Result<(f64, f64), FiniteGasDgError<E>> {
+    admit_background_with_heat(gas, background, work, 0.0, controls)
+}
+
+fn admit_background_with_heat<S, E>(
+    gas: &ClosedGasParcel,
+    background: &FiniteGasDgBackground<S>,
+    work: f64,
+    internal_heat_j: f64,
+    controls: FiniteGasDgSolve,
+) -> Result<(f64, f64), FiniteGasDgError<E>> {
     if background.gas.volume_m3() != gas.volume_m3()
         || !background.supplied_heat_j.is_finite()
         || !background.transported_enthalpy_j.is_finite()
@@ -186,8 +211,8 @@ pub(crate) fn admit_background<S, E>(
         ));
     }
     let gas_change = finite_gas_stored_change(gas, &background.gas);
-    let gas_residual =
-        ((gas_change + work) - background.supplied_heat_j) - background.transported_enthalpy_j;
+    let gas_residual = ((gas_change + work - internal_heat_j) - background.supplied_heat_j)
+        - background.transported_enthalpy_j;
     if !gas_change.is_finite()
         || !gas_residual.is_finite()
         || gas_residual.abs() > controls.energy_tolerance_j
@@ -229,13 +254,30 @@ pub(crate) fn feedback_error<E>(
 pub(crate) fn prepare_after_step<S, E, C: FnMut() -> bool>(
     original: &DgPortLoad,
     marched: &DgPortLoad,
+    output: DgStepOutput,
+    gas: &ClosedGasParcel,
+    controls: FiniteGasDgSolve,
+    evolve: impl FnMut(&ClosedGasParcel, f64, f64, &mut C) -> Result<FiniteGasDgBackground<S>, E>,
+    cancelled: &mut C,
+) -> Result<FiniteGasDgPortCandidate<S>, FiniteGasDgError<E>> {
+    prepare_after_step_with_heat(
+        original, marched, output, gas, controls, SourceHeat::default(), evolve, cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_after_step_with_heat<S, E, C: FnMut() -> bool>(
+    original: &DgPortLoad,
+    marched: &DgPortLoad,
     mut output: DgStepOutput,
     gas: &ClosedGasParcel,
     controls: FiniteGasDgSolve,
+    heat: SourceHeat,
     mut evolve: impl FnMut(&ClosedGasParcel, f64, f64, &mut C) -> Result<FiniteGasDgBackground<S>, E>,
     cancelled: &mut C,
 ) -> Result<FiniteGasDgPortCandidate<S>, FiniteGasDgError<E>> {
     admit_initial(original, gas, controls, cancelled)?;
+    let internal_heat_j = heat.total_j()?;
     if original.state().step_count().checked_add(1) != Some(marched.state().step_count())
         || output.ledger.step != marched.state().step_count()
         || original.duct().operator_identity() != marched.duct().operator_identity()
@@ -290,6 +332,12 @@ pub(crate) fn prepare_after_step<S, E, C: FnMut() -> bool>(
             "finite gas feedback requires the actual complete acoustic storage and exchanges",
         ));
     }
+    let exported_dissipation = dissipation - internal_heat_j;
+    if internal_heat_j > 0.0 && exported_dissipation < -controls.energy_tolerance_j {
+        return Err(FiniteGasDgError::Invalid(
+            "original gas heat exceeds the complete native decrement beyond its energy allowance",
+        ));
+    }
     let original_field = original
         .duct()
         .gas_field()
@@ -307,7 +355,8 @@ pub(crate) fn prepare_after_step<S, E, C: FnMut() -> bool>(
             let background = evolve(gas, original.propagator().dt(), work, cancelled)
                 .map_err(FiniteGasDgError::Background)?;
             check(cancelled)?;
-            let (gas_change, gas_residual) = admit_background(gas, &background, work, controls)?;
+            let (gas_change, gas_residual) =
+                admit_background_with_heat(gas, &background, work, internal_heat_j, controls)?;
             let replacement = finite_gas_field(original_field, &background.gas)?;
             let mut load = marched.clone();
             let refresh = load
@@ -329,6 +378,10 @@ pub(crate) fn prepare_after_step<S, E, C: FnMut() -> bool>(
                         work_residual_j: residual,
                         gas_energy_residual_j: gas_residual,
                         acoustic_dissipation_j: dissipation,
+                        molecular_heat_j: heat.main.molecular_heat_j,
+                        viscous_heat_j: heat.main.viscous_heat_j,
+                        terminal_viscous_heat_j: heat.terminal_viscous_heat_j,
+                        exported_acoustic_dissipation_j: exported_dissipation,
                         terminal_work_j,
                         combined_energy_residual_j: 0.0,
                         trials,
@@ -345,7 +398,7 @@ pub(crate) fn prepare_after_step<S, E, C: FnMut() -> bool>(
     // acoustic row's net port work already excludes the rational exterior.
     let residual = ((candidate.step.gas_energy_change_j
         + (candidate.load.stored_energy_j() - original.stored_energy_j())
-        + dissipation)
+        + exported_dissipation)
         - output.ledger.port_work_step_j
         - candidate.step.supplied_heat_j)
         - candidate.step.transported_enthalpy_j;

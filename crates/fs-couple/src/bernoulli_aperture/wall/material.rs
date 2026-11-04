@@ -28,6 +28,7 @@ pub(crate) use local::finite_gas::{
     FiniteGasDgInternalHeat,
     admit_controls as admit_finite_gas_controls, field as finite_gas_field,
     heated as heated_finite_gas, stored_change as finite_gas_stored_change,
+    prepare_internal_heat as prepare_finite_gas_internal_heat,
 };
 
 pub use local::finite_gas::transport::{
