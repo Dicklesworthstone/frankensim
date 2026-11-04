@@ -63,7 +63,7 @@ impl CoherentDielectricCoating {
         })
     }
 
-    /// Visible-band phase-index law, with no inferred material preset.
+    /// Original phase-index law and source band, with no inferred preset.
     #[must_use]
     pub const fn ior(self) -> DielectricIor {
         self.ior
@@ -102,6 +102,7 @@ impl CoherentDielectricCoating {
                 for coefficient in strengths.into_iter().chain(resonances_um2) {
                     hasher.update(&coefficient.to_bits().to_le_bytes());
                 }
+                law.update_identity_band(hasher);
             }
             DielectricIor::Tabulated(law) => {
                 hasher.update(b"coherent-dielectric-coating.tabulated.v1");

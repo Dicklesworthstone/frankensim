@@ -1044,6 +1044,7 @@ impl Material {
                         let (strengths, resonances_um2) = law.coefficients();
                         update_material_scalars(&mut hasher, strengths);
                         update_material_scalars(&mut hasher, resonances_um2);
+                        law.update_identity_band(&mut hasher);
                     }
                     DielectricIor::Tabulated(ior) => {
                         hasher.update(&[4]);
@@ -9935,6 +9936,7 @@ fn update_physical_camera_continuity(hasher: &mut DomainHasher, camera: &Physica
                     let (strengths, resonances_um2) = law.coefficients();
                     update_continuity_f64s(hasher, strengths);
                     update_continuity_f64s(hasher, resonances_um2);
+                    law.update_identity_band(hasher);
                 }
                 DielectricIor::Tabulated(law) => {
                     hasher.update(&[2]);
@@ -19509,6 +19511,29 @@ mod tests {
         assert_eq!(diffuse.content_identity(), diffuse.content_identity());
         assert_ne!(diffuse.content_identity(), smoother.content_identity());
         assert_ne!(smoother.content_identity(), rougher.content_identity());
+    }
+
+    #[test]
+    fn sellmeier_material_identity_retains_original_source_band() {
+        use crate::dielectric::SellmeierIor;
+
+        let make = |ior| Material::Dielectric {
+            glass: DielectricGlass::new(ior, BeerLambertAbsorption::CLEAR, GlassProvenance::Custom),
+            surface: DielectricSurface::SMOOTH,
+        };
+        let coefficients = ([1.1, 0.2, 0.8], [0.01, 0.04, 100.0]);
+        let original = make(SellmeierIor::try_new(coefficients.0, coefficients.1).unwrap());
+        let explicit_visible = make(
+            SellmeierIor::try_new_in_band(coefficients.0, coefficients.1, (380.0, 780.0)).unwrap(),
+        );
+        let broad = make(
+            SellmeierIor::try_new_in_band(coefficients.0, coefficients.1, (300.0, 2500.0)).unwrap(),
+        );
+        assert_eq!(
+            original.content_identity(),
+            explicit_visible.content_identity()
+        );
+        assert_ne!(original.content_identity(), broad.content_identity());
     }
 
     #[test]

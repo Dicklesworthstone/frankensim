@@ -47,6 +47,17 @@ differentiable lift). Pure Rust throughout.
   air-relative catalog data need an explicit conversion/refit before physical
   accuracy is claimed. There is no built-in measured-glass preset or claim for
   anomalous/absorptive resonance, transient propagation or pulse broadening.
+  `SellmeierIor::try_new_in_band` retains an explicit positive finite vacuum-
+  wavelength interval for original oscillator coefficients and analytic group
+  index. The closed interval excludes every active pole; monotone endpoint
+  checks retain the transparent `[1, 3]` phase-index domain. Nonrepresentable
+  squared-micrometre bounds and queries outside the source interval refuse.
+  No table fit or extrapolation is introduced through native fields, interfaces,
+  coherent films or thermal-source consumers. Effective glass support still
+  intersects original absorption. The legacy constructor retains its visible
+  arithmetic and identities; nondefault bands enter material, camera, film and
+  thermal optical identities. This does not broaden the CIE observer or confer
+  measurement authority on supplied coefficients.
   `TabulatedIor` extends the same phase-law owner with nine ordered absolute
   index samples spanning exactly 380--780 nm, with gaps at most 100 nm and
   bounded linear interpolation. Every knot is retained in material identity.

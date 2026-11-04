@@ -19,6 +19,8 @@ pub use coating::{
 
 #[cfg(test)]
 mod absorption_band_tests;
+#[cfg(test)]
+mod sellmeier_band_tests;
 
 const PI: f64 = core::f64::consts::PI;
 const MIN_ROUGHNESS_ALPHA: f64 = 1.0e-4;
@@ -171,8 +173,10 @@ impl CauchyIor {
 /// Coefficients describe an absolute phase index at vacuum wavelengths. Importers
 /// must convert/refit air-relative catalog data before claiming absolute accuracy;
 /// accepting coefficients does not authenticate a measurement. The transparent
-/// visible-band model admits nonnegative oscillator strengths and squared
-/// resonances, no active pole in 380--780 nm, and phase indices in `[1, 3]`.
+/// model admits nonnegative oscillator strengths and squared resonances, no
+/// active pole in the declared wavelength band, and phase indices in `[1, 3]`.
+/// The legacy constructor retains 380--780 nm; another source-supported band
+/// requires [`Self::try_new_in_band`], without fitting or extrapolation.
 /// Absorption resonances and anomalous dispersion require a complex-index model.
 ///
 /// With `B_i, C_i >= 0`, every active term is nonincreasing between its poles.
@@ -183,16 +187,46 @@ impl CauchyIor {
 pub struct SellmeierIor {
     strengths: [f64; 3],
     resonances_um2: [f64; 3],
+    wavelength_bounds_nm: (f64, f64),
 }
 
 impl SellmeierIor {
-    /// Admit dimensionless strengths and squared resonance wavelengths in µm².
+    /// Admit dimensionless strengths and squared resonance wavelengths in µm²
+    /// over the original visible support, 380--780 vacuum nanometres.
     pub fn try_new(strengths: [f64; 3], resonances_um2: [f64; 3]) -> Result<Self, DielectricError> {
-        let min_square = (LAMBDA_MIN * 1.0e-3) * (LAMBDA_MIN * 1.0e-3);
-        let max_square = (LAMBDA_MAX * 1.0e-3) * (LAMBDA_MAX * 1.0e-3);
+        Self::try_new_in_band(strengths, resonances_um2, (LAMBDA_MIN, LAMBDA_MAX))
+    }
+
+    /// Admit the original analytic coefficients over an explicitly declared
+    /// closed source band in vacuum nanometres. No coefficient fit, derivative
+    /// interpolation, or extension of a previously admitted law is performed.
+    ///
+    /// Bounds must be positive, finite and ordered, with representable nonzero
+    /// squared micrometre wavelengths. Equal bounds admit one wavelength.
+    /// Active poles at either endpoint or anywhere inside are refused before
+    /// the monotone phase-index endpoint checks. These are numerical checks,
+    /// not a certificate that the source describes a physical specimen.
+    pub fn try_new_in_band(
+        strengths: [f64; 3],
+        resonances_um2: [f64; 3],
+        wavelength_bounds_nm: (f64, f64),
+    ) -> Result<Self, DielectricError> {
+        let (minimum, maximum) = wavelength_bounds_nm;
+        let min_square = (minimum * 1.0e-3) * (minimum * 1.0e-3);
+        let max_square = (maximum * 1.0e-3) * (maximum * 1.0e-3);
+        if !minimum.is_finite()
+            || !maximum.is_finite()
+            || minimum <= 0.0
+            || minimum > maximum
+            || min_square <= 0.0
+            || !max_square.is_finite()
+        {
+            return Err(DielectricError::InvalidWavelength);
+        }
         let mut candidate = Self {
             strengths,
             resonances_um2,
+            wavelength_bounds_nm,
         };
         for i in 0..3 {
             let strength = strengths[i];
@@ -214,14 +248,23 @@ impl SellmeierIor {
                 candidate.resonances_um2[i] = 0.0;
             }
         }
-        candidate.eval(LAMBDA_MIN)?;
-        candidate.eval(LAMBDA_MAX)?;
+        candidate.eval(minimum)?;
+        candidate.eval(maximum)?;
         Ok(candidate)
     }
 
-    /// Evaluate the visible-band absolute phase index at a vacuum wavelength.
+    /// Original closed vacuum-wavelength support, in nanometres.
+    #[must_use]
+    pub const fn wavelength_bounds_nm(&self) -> (f64, f64) {
+        self.wavelength_bounds_nm
+    }
+
+    /// Evaluate the absolute phase index without extending the declared band.
     pub fn eval(&self, wavelength_nm: f64) -> Result<f64, DielectricError> {
-        validate_wavelength(wavelength_nm)?;
+        let (minimum, maximum) = self.wavelength_bounds_nm;
+        if !wavelength_nm.is_finite() || !(minimum..=maximum).contains(&wavelength_nm) {
+            return Err(DielectricError::InvalidWavelength);
+        }
         let wavelength_um = wavelength_nm * 1.0e-3;
         let square = wavelength_um * wavelength_um;
         let mut index_squared = 1.0;
@@ -258,19 +301,30 @@ impl SellmeierIor {
         Ok(group)
     }
 
-    /// Canonical strengths and squared resonance wavelengths in µm².
+    /// Canonical strengths and squared resonance wavelengths in µm². Complete
+    /// model identity also retains [`Self::wavelength_bounds_nm`].
     #[must_use]
     pub const fn coefficients(self) -> ([f64; 3], [f64; 3]) {
         (self.strengths, self.resonances_um2)
     }
 
-    /// Whether the phase index changes over the admitted visible interval.
+    /// Whether the admitted law has wavelength-dependent phase index.
     #[must_use]
     pub fn is_dispersive(&self) -> bool {
         self.strengths
             .into_iter()
             .zip(self.resonances_um2)
             .any(|(strength, resonance)| strength > 0.0 && resonance > 0.0)
+    }
+
+    /// Keep legacy identity bytes unchanged while distinguishing an explicitly
+    /// different source band in every material, film, and camera consumer.
+    pub(crate) fn update_identity_band(&self, hasher: &mut fs_blake3::DomainHasher) {
+        if self.wavelength_bounds_nm != (LAMBDA_MIN, LAMBDA_MAX) {
+            hasher.update(b"declared-sellmeier-wavelength-band.v1");
+            hasher.update(&self.wavelength_bounds_nm.0.to_bits().to_le_bytes());
+            hasher.update(&self.wavelength_bounds_nm.1.to_bits().to_le_bytes());
+        }
     }
 }
 
@@ -340,7 +394,7 @@ impl TabulatedIor {
     /// Admit nine original real-index samples over their actual first/last
     /// wavelengths, with a positive finite caller-declared maximum gap in nm.
     /// Linear interpolation stays inside this closed band. This is an explicit
-    /// table declaration, not an extension of a visible Cauchy/Sellmeier law.
+    /// table declaration, not an extension of an existing analytic law.
     pub fn try_new_in_band(
         samples: [DielectricIorSample; DIELECTRIC_SPECTRAL_SAMPLE_COUNT],
         max_knot_span_nm: f64,
@@ -439,13 +493,14 @@ pub enum DielectricIor {
 }
 
 impl DielectricIor {
-    /// Actual declared vacuum-wavelength support. Original analytic dispersion
-    /// laws retain their visible band; only an explicitly bounded table admits
-    /// another band. An algebraic formula is not permission to extrapolate it.
+    /// Actual declared vacuum-wavelength support. The original Cauchy law is
+    /// visible; Sellmeier and tabulated laws can retain another explicit band.
+    /// An algebraic formula is not permission to extrapolate it.
     #[must_use]
     pub const fn wavelength_bounds_nm(&self) -> (f64, f64) {
         match self {
-            Self::Cauchy(_) | Self::Sellmeier(_) => (LAMBDA_MIN, LAMBDA_MAX),
+            Self::Cauchy(_) => (LAMBDA_MIN, LAMBDA_MAX),
+            Self::Sellmeier(ior) => ior.wavelength_bounds_nm(),
             Self::Tabulated(ior) => ior.wavelength_bounds_nm(),
         }
     }

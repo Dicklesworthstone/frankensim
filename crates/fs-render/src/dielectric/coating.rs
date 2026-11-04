@@ -112,8 +112,8 @@ impl<'a> DielectricCoatingStack<'a> {
 
     /// Admit original real-index layers over an explicitly declared vacuum-
     /// wavelength band. Every layer must cover the complete requested interval,
-    /// including zero-thickness layers. Original Cauchy/Sellmeier laws therefore
-    /// retain their visible validity; nonvisible real laws use bounded tables.
+    /// including zero-thickness layers. Cauchy retains visible support;
+    /// Sellmeier and tabulated films retain their own explicitly declared band.
     pub fn try_new_in_band(
         layers: &'a [CoherentDielectricCoating],
         wavelength_bounds_nm: (f64, f64),

@@ -743,6 +743,7 @@ fn hash_ior(hash: &mut DomainHasher, ior: DielectricIor) {
             for value in strengths.into_iter().chain(resonances_um2) {
                 hash.update(&value.to_bits().to_le_bytes());
             }
+            law.update_identity_band(hash);
         }
         DielectricIor::Tabulated(law) => {
             hash.update(&[2]);
