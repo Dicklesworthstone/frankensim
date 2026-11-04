@@ -1,4 +1,4 @@
-//! G1/G3/G4: adaptive physical trajectories through the original gas owners.
+//! G0/G1/G3/G4: adaptive physical trajectories through the original gas owners.
 //! Synthetic caloric/transport inputs verify equations, not measured accuracy.
 use super::*;
 use crate::thermochemical_gas::{
@@ -562,4 +562,120 @@ fn g4_source_refusal_work_limits_and_late_cancellation_publish_no_endpoint() {
         })
     ));
     assert_eq!(gases, original);
+}
+
+#[test]
+fn g1_drifting_reservoir_refines_with_shifted_datum_window_energy() {
+    use crate::thermochemical_gas::energy::parcel::transfer::species::effusion::{
+        drift::EffusiveDriftInterface, momentum::EffusiveMomentumInterface,
+    };
+    let gases = BTreeMap::from([(0, pure(2.5, 1e12, 400.0, 200.0))]);
+    let original = gases.clone();
+    let source = pure(2.5, 1e12, 500.0, 300.0);
+    let saved_source = source.clone();
+    let law = EffusiveDriftInterface::try_new(
+        EffusiveMomentumInterface::try_new(
+            interface(source.model(), 1.0),
+            "synthetic uncollimated nondeflecting angular source",
+        )
+        .unwrap(),
+        1000.0,
+        "synthetic collisionless moving incidence over original gas support",
+    )
+    .unwrap();
+    let drifting = [EffusionDriftingReservoirLink {
+        id: 11,
+        parcel: 0,
+        reservoir: &source,
+        interface: &law,
+        area_m2: AREA,
+        relative_bulk_velocity_m_s: [-120.0, 180.0, 0.0],
+        outward_unit_normal: [1.0, 0.0, 0.0],
+    }];
+    let solves = endpoints(&gases);
+    let duration = 8.0;
+    let native = |steps: u32| {
+        let mut current = gases.clone();
+        for _ in 0..steps {
+            current = reservoir::step_candidate_with_drift(
+                &current,
+                GasTransportPaths::default(),
+                &[],
+                &[],
+                &drifting,
+                duration / f64::from(steps),
+                &solves,
+                physical(),
+                || false,
+            )
+            .unwrap()
+            .into_parts()
+            .0;
+        }
+        current
+    };
+    let coordinates = |parcels: &BTreeMap<u64, ClosedGasParcel>| {
+        let gas = &parcels[&0];
+        [
+            gas.mass_kg(),
+            gas.state().state().temperature,
+            gas.state().state().pressure,
+        ]
+    };
+    let relative_error = |a: [f64; 3], b: [f64; 3]| {
+        a.into_iter()
+            .zip(b)
+            .map(|(x, y)| (x / y - 1.0).abs())
+            .fold(0.0, f64::max)
+    };
+    // This reference uses the SAME original drift/energy transaction; a
+    // second refinement checks its numerical resolution for this comparison.
+    let coarse_reference = coordinates(&native(512));
+    let reference = coordinates(&native(1024));
+    let reference_difference = relative_error(coarse_reference, reference);
+    assert!(reference_difference < 2e-5, "{reference_difference}");
+    let mut errors = Vec::new();
+    for tolerance in [5e-4, 5e-5, 5e-6] {
+        let result = advance_candidate(
+            &gases,
+            GasTransportPaths::default(),
+            &[],
+            &[],
+            &drifting,
+            duration,
+            &solves,
+            physical(),
+            adaptive(tolerance),
+            || false,
+        )
+        .unwrap();
+        let report = result.step();
+        assert!(report.accepted_intervals > 1);
+        assert_eq!(report.boundaries.len(), 1);
+        let boundary = &report.boundaries[0];
+        assert!(boundary.incoming_mass_kg > 0.0 && boundary.outgoing_mass_kg > 0.0);
+        near(
+            result.parcels()[&0].mass_kg() - gases[&0].mass_kg(),
+            boundary.net_mass_into_gas_kg,
+            physical().exchange.mass_tolerance_kg,
+        );
+        assert!(report.balance.energy_residual_j.abs() <= physical().exchange.energy_tolerance_j);
+        assert!(
+            report.balance.accumulated_energy_residual_j.abs()
+                <= physical().exchange.energy_tolerance_j
+        );
+        assert!(
+            report
+                .accepted_steps
+                .iter()
+                .all(|s| s.drifting_reservoirs.len() == 1)
+        );
+        errors.push(relative_error(coordinates(result.parcels()), reference));
+    }
+    assert!(errors[2] < 3e-4, "{errors:?}");
+    for pair in errors.windows(2) {
+        assert!(pair[1] < 0.6 * pair[0], "{errors:?}");
+    }
+    assert_eq!(gases, original);
+    assert_eq!(source, saved_source);
 }

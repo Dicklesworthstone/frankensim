@@ -6990,10 +6990,14 @@ The accumulated native caloric residual is retained and checked separately.
 All conservation budgets apply once to the entire interval, without multiplication
 by the number of steps. Open paths make no closed-system entropy claim.
 
-G1/G3/G4 fixtures cover monatomic and diatomic analytic vacuum blowdown over three
-tolerance rungs, shared gross-withdrawal retries, deterministic caloric-reference
-invariance, new-species supply through two finite chambers with vacuum
-fractionation, source refusal, work exhaustion and late cancellation. The
+G0/G1/G3/G4 fixtures cover monatomic and diatomic analytic vacuum blowdown over
+three tolerance rungs, shared gross-withdrawal retries, deterministic caloric-
+reference invariance, new-species supply through two finite chambers with vacuum
+fractionation, source refusal, work exhaustion and late cancellation. A
+bidirectional drifting-reservoir fixture checks refinement against two native
+reference resolutions with a large caloric datum. An intentionally perturbed
+endpoint must fail the independent storage-energy audit even when its original
+native receipts retain small closure residuals. The
 `effusion_blowdown` example accepts a final `fixed|adaptive` argument; fixed mode
 remains the default, and adaptive mode treats `dt_s` as its CSV reporting interval.
 These are numerical checks with synthetic material sources, not measured
