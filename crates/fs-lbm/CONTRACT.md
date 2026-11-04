@@ -3100,23 +3100,39 @@ Both `NsfFrozenMannInflow` and `NsfEvolvingMannInflow` expose
 `with_plane_wall(MannPlaneWall)`. The original atmosphere supplies a
 harmonic no-penetration correction before the existing frame rotation,
 physical-unit conversion, gas admission and atomic profile publication.
-The plane belongs to the Mann frame; every actual exterior ghost centre must
-lie in its upper half-space. Mean velocity must be tangential, and the frozen
+The plane belongs to the Mann frame; every actual exterior ghost observation
+footprint must lie in its upper half-space. Mean velocity must be tangential, and the frozen
 adapter also requires tangential convection because it translates query
 coordinates. Tangency uses the admitted rotation's roundoff scale without
 altering the supplied velocities.
 
 The wall observation reads the same frozen snapshot or evolving trial
-quadratures and adds no numerical arrays. Rejected samples and cancellation
-preserve the accepted profile and atmosphere; retries use the original
-temporal owner. Box/face averaging combined with wall blocking refuses in
-both attachment orders because the homogeneous sinc gain does not average
-the evanescent wall correction. This is point-sampled slip-plane conditioning,
-without a viscous no-slip layer, wall-generated turbulence or calibrated
-near-ground spectrum. Four native regressions cover rotated profiles, exact
-wall-normal values, incompatible settings and evolving rollback/replay.
-All four pass in the native debug build, together with the ten existing Mann
-inlet tests covering original, filtered and evolving boundary behavior.
+quadratures. Point sampling adds no numerical arrays. Face and cell averages
+prepare fs-atmo's complete `MannWallBoxFilter`, retaining both the homogeneous
+wave and the evanescent correction over the original rotated ghost footprint.
+The original native gas/force/energy owner consumes this resolved mean velocity;
+nonlinear momentum/energy fluxes are not averaged and missing variance is not
+restored. `wall_spatial_filter()` exposes the prepared observation for the
+source's two-position filtered-covariance query. `spatial_filter()` continues
+to expose only homogeneous observations.
+
+Both attachment orders use one selected filter. Adding a plane after an
+average rebuilds it within the retained byte allowance; old gains are released
+before replacement. `with_plane_wall_cancellable` exposes cancellation during
+that preparation. The evolving owner also admits the actual total numerical
+capacity against its existing workspace limit. Per-query samples allocate no
+filter arrays or random draws. The complete footprint, not just its centre,
+must remain above the plane: partially submerged support refuses instead of
+being clipped or renormalized. Rejected samples and cancellation preserve the
+accepted profile and atmosphere; retries use the original temporal owner.
+
+This remains outer-flow slip-plane conditioning, without a viscous no-slip
+layer, wall-generated turbulence or calibrated near-ground spectra. Regression
+coverage includes independent physical-space quadrature of actual rotated
+ghost-cell/face averages, both attachment orders, finite capacity, footprint
+refusals, native energy exchange, idempotent clocks, and evolving retry after
+cancellation or boundary refusal. Existing point-sampling regressions retain
+their wall-normal and source-history checks.
 
 ### Source-owned NASA9 energy and local transport in the NSF grid
 

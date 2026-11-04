@@ -19,6 +19,7 @@ use crate::lattice3::Lattice3;
 use fs_atmo::mann_field::HomogeneousMannField;
 use fs_atmo::mann_field::filter::MannBoxFilter;
 use fs_atmo::mann_field::wall::MannPlaneWall;
+use fs_atmo::mann_field::wall::filter::MannWallBoxFilter;
 use fs_math::det;
 
 mod evolving;
@@ -139,7 +140,37 @@ pub struct NsfFrozenMannInflow {
 struct SpatialAverage {
     dx_m: f64,
     face_axis: Option<usize>,
-    filter: MannBoxFilter,
+    maximum_filter_bytes: usize,
+    filter: SpatialFilter,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum SpatialFilter {
+    Homogeneous(MannBoxFilter),
+    Wall(MannWallBoxFilter),
+}
+
+impl SpatialFilter {
+    fn workspace_bytes(&self) -> usize {
+        match self {
+            Self::Homogeneous(filter) => filter.workspace_bytes(),
+            Self::Wall(filter) => filter.workspace_bytes(),
+        }
+    }
+
+    fn homogeneous(&self) -> Option<&MannBoxFilter> {
+        match self {
+            Self::Homogeneous(filter) => Some(filter),
+            Self::Wall(_) => None,
+        }
+    }
+
+    fn wall(&self) -> Option<&MannWallBoxFilter> {
+        match self {
+            Self::Wall(filter) => Some(filter),
+            Self::Homogeneous(_) => None,
+        }
+    }
 }
 
 fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
@@ -200,15 +231,7 @@ fn speed(velocity: [f64; 3]) -> f64 {
 
 // Test tangency after the authored rotation, at the same roundoff scale
 // as frame admission. Scaling avoids overflowing the velocity projection.
-fn admit_plane_wall(
-    config: NsfFrozenMannConfig,
-    has_average: bool,
-) -> Result<(), NsfFrozenMannError> {
-    if has_average {
-        return Err(NsfFrozenMannError::Input(
-            "Mann plane blocking currently requires point observations",
-        ));
-    }
+fn admit_plane_wall(config: NsfFrozenMannConfig) -> Result<(), NsfFrozenMannError> {
     for velocity in [config.mean_velocity_m_s, config.convection_velocity_m_s] {
         let scale = velocity.iter().fold(0.0_f64, |m, &u| m.max(u.abs()));
         if scale != 0.0 {
@@ -230,6 +253,7 @@ fn prepare_spatial_average(
     field_to_grid: [[f64; 3]; 3],
     dx_m: f64,
     face_axis: Option<usize>,
+    wall: Option<MannPlaneWall>,
     maximum_filter_bytes: usize,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<SpatialAverage, NsfFrozenMannError> {
@@ -244,17 +268,26 @@ fn prepare_spatial_average(
             field_to_grid[axis].map(|v| 0.5 * dx_m * v)
         }
     });
-    let filter = MannBoxFilter::prepare(model, half_edges, maximum_filter_bytes, &mut cancelled)
-        .map_err(|error| {
-            if error.code == "mann-filter-cancelled" {
-                NsfFrozenMannError::Cancelled
-            } else {
-                NsfFrozenMannError::Atmosphere(error)
-            }
-        })?;
+    let filter = match wall {
+        Some(wall) => MannWallBoxFilter::prepare(
+            model,
+            wall,
+            half_edges,
+            maximum_filter_bytes,
+            &mut cancelled,
+        )
+        .map(SpatialFilter::Wall),
+        None => MannBoxFilter::prepare(model, half_edges, maximum_filter_bytes, &mut cancelled)
+            .map(SpatialFilter::Homogeneous),
+    }
+    .map_err(|error| match error.code {
+        "mann-filter-cancelled" | "mann-wall-filter-cancelled" => NsfFrozenMannError::Cancelled,
+        _ => NsfFrozenMannError::Atmosphere(error),
+    })?;
     Ok(SpatialAverage {
         dx_m,
         face_axis,
+        maximum_filter_bytes,
         filter,
     })
 }
@@ -307,11 +340,42 @@ impl NsfFrozenMannInflow {
 
     /// Apply harmonic no-penetration blocking at a plane in the Mann frame.
     /// Mean velocity and frozen convection must be tangent within the admitted
-    /// rotation's roundoff scale. Actual sampled ghost centres must lie on or
-    /// above the plane. This supplies slip, not a resolved viscous wall layer.
-    /// Box/face averaging and wall blocking currently refuse in either order.
-    pub fn with_plane_wall(mut self, wall: MannPlaneWall) -> Result<Self, NsfFrozenMannError> {
-        admit_plane_wall(self.config, self.averaging.is_some())?;
+    /// rotation's roundoff scale. Every actual ghost observation footprint must
+    /// lie on or above the plane. This supplies slip, not a viscous wall layer.
+    /// An existing average is rebuilt using its retained filter byte allowance.
+    pub fn with_plane_wall(self, wall: MannPlaneWall) -> Result<Self, NsfFrozenMannError> {
+        self.with_plane_wall_cancellable(wall, || false)
+    }
+
+    /// Bounded preparation when a plane is attached after a spatial average.
+    /// The old gains are released before preparing the new complete wall
+    /// observation; no source amplitudes or accepted grid state are changed.
+    pub fn with_plane_wall_cancellable(
+        mut self,
+        wall: MannPlaneWall,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, NsfFrozenMannError> {
+        if cancelled() {
+            return Err(NsfFrozenMannError::Cancelled);
+        }
+        admit_plane_wall(self.config)?;
+        if let Some(average) = self.averaging.take() {
+            let (dx, axis, bytes) = (
+                average.dx_m,
+                average.face_axis,
+                average.maximum_filter_bytes,
+            );
+            drop(average);
+            self.averaging = Some(prepare_spatial_average(
+                self.snapshot.model(),
+                self.config.field_to_grid,
+                dx,
+                axis,
+                Some(wall),
+                bytes,
+                cancelled,
+            )?);
+        }
         self.wall = Some(wall);
         Ok(self)
     }
@@ -363,30 +427,40 @@ impl NsfFrozenMannInflow {
         maximum_filter_bytes: usize,
         cancelled: impl FnMut() -> bool,
     ) -> Result<Self, NsfFrozenMannError> {
-        if self.wall.is_some() {
-            return Err(NsfFrozenMannError::Input(
-                "Mann plane blocking currently requires point observations",
-            ));
-        }
+        // This builder consumes self; release any replaced numerical gains
+        // before admitting the single selected observation's workspace.
+        self.averaging = None;
         self.averaging = Some(prepare_spatial_average(
             self.snapshot.model(),
             self.config.field_to_grid,
             dx_m,
             face_axis,
+            self.wall,
             maximum_filter_bytes,
             cancelled,
         )?);
         Ok(self)
     }
 
-    /// Prepared observation filter, including its physical half-edge vectors.
+    /// Prepared homogeneous observation filter and its physical half edges.
+    /// Point and plane-blocked observations return `None`; the latter expose
+    /// their complete operator through [`Self::wall_spatial_filter`].
     /// Pass it to `snapshot().covariance_filtered` for the retained field's
     /// represented space-time covariance. The frozen inlet itself has no OU
     /// amplitude decorrelation: its temporal covariance is the zero-lag field
     /// covariance evaluated at the convection-displaced separation.
     #[must_use]
     pub fn spatial_filter(&self) -> Option<&MannBoxFilter> {
-        self.averaging.as_ref().map(|averaging| &averaging.filter)
+        self.averaging.as_ref()?.filter.homogeneous()
+    }
+
+    /// Prepared complete wall observation, including the evanescent correction
+    /// and its physical footprint. Pass this to the snapshot's
+    /// `covariance_wall_blocked_filtered` with both observation positions; wall
+    /// blocking loses vertical homogeneity. No unresolved variance is restored.
+    #[must_use]
+    pub fn wall_spatial_filter(&self) -> Option<&MannWallBoxFilter> {
+        self.averaging.as_ref()?.filter.wall()
     }
 
     #[must_use]
@@ -434,10 +508,15 @@ impl NsfFrozenMannInflow {
                 averaging: self.averaging.as_ref(),
             },
             &mut states,
-            |point, filter| match self.wall {
-                Some(wall) => self.snapshot.sample_wall_blocked(point, wall),
-                None => match filter {
-                    Some(filter) => self.snapshot.sample_filtered(point, filter),
+            |point, filter| match filter {
+                Some(SpatialFilter::Wall(filter)) => {
+                    self.snapshot.sample_wall_blocked_filtered(point, filter)
+                }
+                Some(SpatialFilter::Homogeneous(filter)) => {
+                    self.snapshot.sample_filtered(point, filter)
+                }
+                None => match self.wall {
+                    Some(wall) => self.snapshot.sample_wall_blocked(point, wall),
                     None => self.snapshot.sample(point),
                 },
             },
@@ -464,7 +543,7 @@ fn sample_profile<L: Lattice3<27>>(
     states: &mut Vec<NsfReservoirTileState>,
     mut sample: impl FnMut(
         [f64; 3],
-        Option<&MannBoxFilter>,
+        Option<&SpatialFilter>,
     ) -> Result<fs_atmo::FlowSample, fs_atmo::Refusal>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<SampledProfile, NsfFrozenMannError> {

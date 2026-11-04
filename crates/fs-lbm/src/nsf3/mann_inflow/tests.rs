@@ -523,7 +523,8 @@ fn g1_plane_blocked_frozen_mann_uses_the_original_rotated_ghost_profile() {
         let applied = inlet.apply(&mut grid, 0).unwrap();
         for tile in grid.reservoir_aperture_tile_states(0).unwrap() {
             let at = [
-                controls.grid_origin_in_field_m[0] - 0.5 * dx
+                controls.grid_origin_in_field_m[0]
+                    - 0.5 * dx
                     - controls.convection_velocity_m_s[1]
                         * (applied.sampled_time_s - controls.reference_time_s),
                 controls.grid_origin_in_field_m[1] - (tile.cell[0] as f64 + 0.5) * dx,
@@ -544,25 +545,9 @@ fn g1_plane_blocked_frozen_mann_uses_the_original_rotated_ghost_profile() {
 }
 
 #[test]
-fn g4_plane_blocked_frozen_mann_refuses_filters_normal_mean_and_outside_samples() {
+fn g4_plane_blocked_frozen_mann_refuses_normal_mean_and_outside_samples() {
     let mut grid = build_grid(1, false);
     let wall = MannPlaneWall::new(0.0).unwrap();
-    let make = || NsfFrozenMannInflow::new(snapshot(2.0), config()).unwrap();
-    for face in [false, true] {
-        let averaged = if face {
-            make().with_face_average(&grid, 0, 16 * 8, || false)
-        } else {
-            make().with_cell_average(&grid, 16 * 8, || false)
-        }.unwrap();
-        assert!(matches!(averaged.with_plane_wall(wall), Err(NsfFrozenMannError::Input(_))));
-        let blocked = make().with_plane_wall(wall).unwrap();
-        let result = if face {
-            blocked.with_face_average(&grid, 0, 16 * 8, || false)
-        } else {
-            blocked.with_cell_average(&grid, 16 * 8, || false)
-        };
-        assert!(matches!(result, Err(NsfFrozenMannError::Input(_))));
-    }
     for convection in [false, true] {
         let mut controls = config();
         if convection {
@@ -571,7 +556,9 @@ fn g4_plane_blocked_frozen_mann_refuses_filters_normal_mean_and_outside_samples(
             controls.mean_velocity_m_s[2] = 0.01;
         }
         assert!(matches!(
-            NsfFrozenMannInflow::new(snapshot(2.0), controls).unwrap().with_plane_wall(wall),
+            NsfFrozenMannInflow::new(snapshot(2.0), controls)
+                .unwrap()
+                .with_plane_wall(wall),
             Err(NsfFrozenMannError::Input(_))
         ));
     }
@@ -581,17 +568,196 @@ fn g4_plane_blocked_frozen_mann_refuses_filters_normal_mean_and_outside_samples(
         field_to_grid: [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]],
         ..config()
     };
-    let wall = MannPlaneWall::new(controls.grid_origin_in_field_m[2] - 4.5 * grid.law.dx_m)
-        .unwrap();
+    let wall =
+        MannPlaneWall::new(controls.grid_origin_in_field_m[2] - 4.5 * grid.law.dx_m).unwrap();
     let inlet = NsfFrozenMannInflow::new(snapshot(2.0), controls)
         .unwrap()
         .with_plane_wall(wall)
         .unwrap();
     let before = (grid.state_hash(), grid.force.clone(), grid.div.clone());
-    let profile = grid.reservoir_aperture_tile_states(0).unwrap().collect::<Vec<_>>();
+    let profile = grid
+        .reservoir_aperture_tile_states(0)
+        .unwrap()
+        .collect::<Vec<_>>();
     let source = inlet.snapshot().checkpoint();
-    assert!(matches!(inlet.apply(&mut grid, 0), Err(NsfFrozenMannError::Atmosphere(_))));
-    assert_eq!((grid.state_hash(), grid.force.clone(), grid.div.clone()), before);
-    assert_eq!(grid.reservoir_aperture_tile_states(0).unwrap().collect::<Vec<_>>(), profile);
+    assert!(matches!(
+        inlet.apply(&mut grid, 0),
+        Err(NsfFrozenMannError::Atmosphere(_))
+    ));
+    assert_eq!(
+        (grid.state_hash(), grid.force.clone(), grid.div.clone()),
+        before
+    );
+    assert_eq!(
+        grid.reservoir_aperture_tile_states(0)
+            .unwrap()
+            .collect::<Vec<_>>(),
+        profile
+    );
     assert_eq!(inlet.snapshot().checkpoint(), source);
+}
+
+// Independent physical-space tensor-product Gauss integration of the original
+// point observation. The aperture tests use the actual rotated ghost footprint.
+fn average_wall_velocity(
+    source: &HomogeneousMannField,
+    center: [f64; 3],
+    edges: [[f64; 3]; 3],
+    wall: MannPlaneWall,
+) -> [f64; 3] {
+    let nodes: [(f64, f64); 5] = [
+        (-0.906_179_845_938_664, 0.236_926_885_056_189),
+        (-0.538_469_310_105_683, 0.478_628_670_499_366),
+        (0.0, 0.568_888_888_888_889),
+        (0.538_469_310_105_683, 0.478_628_670_499_366),
+        (0.906_179_845_938_664, 0.236_926_885_056_189),
+    ];
+    let mut mean = [0.0; 3];
+    for (x, wx) in nodes {
+        for (y, wy) in nodes {
+            for (z, wz) in nodes {
+                let point = core::array::from_fn(|i| {
+                    center[i] + x * edges[0][i] + y * edges[1][i] + z * edges[2][i]
+                });
+                let sample = source.sample_wall_blocked(point, wall).unwrap();
+                for i in 0..3 {
+                    mean[i] += 0.125 * wx * wy * wz * sample.u[i];
+                }
+            }
+        }
+    }
+    mean
+}
+
+#[test]
+fn g1_wall_filtered_frozen_inlets_match_physical_averages_in_both_attachment_orders() {
+    for face in [false, true] {
+        let mut grid = build_grid(1, false);
+        let controls = config();
+        let dx = grid.law.dx_m;
+        // Keep the entire authored floating-point footprint above the plane;
+        // separate rounded origin/centre sums need one outward plane ulp.
+        let wall = MannPlaneWall::new((controls.grid_origin_in_field_m[2] + 3.0 * dx).next_down())
+            .unwrap();
+        let make = || NsfFrozenMannInflow::new(snapshot(2.0), controls).unwrap();
+        let average = |source: NsfFrozenMannInflow| {
+            if face {
+                source.with_face_average(&grid, 0, 16 * 64, || false)
+            } else {
+                source.with_cell_average(&grid, 16 * 64, || false)
+            }
+            .unwrap()
+        };
+        let inlet = average(make().with_plane_wall(wall).unwrap());
+        let reversed = average(make()).with_plane_wall(wall).unwrap();
+        assert_eq!(inlet, reversed);
+        assert!(inlet.spatial_filter().is_none());
+        let filter = inlet.wall_spatial_filter().unwrap();
+        assert_eq!(filter.wall(), wall);
+        let edges = [
+            [0.0, -0.5 * dx, 0.0],
+            if face { [0.0; 3] } else { [0.5 * dx, 0.0, 0.0] },
+            [0.0, 0.0, 0.5 * dx],
+        ];
+        assert_eq!(filter.half_edges_m(), edges);
+        let retained = inlet.snapshot().checkpoint();
+        let applied = inlet.apply(&mut grid, 0).unwrap();
+        let mut differs_from_point = false;
+        for tile in grid.reservoir_aperture_tile_states(0).unwrap() {
+            let at = [
+                controls.grid_origin_in_field_m[0]
+                    - 0.5 * dx
+                    - controls.convection_velocity_m_s[1]
+                        * (applied.sampled_time_s - controls.reference_time_s),
+                controls.grid_origin_in_field_m[1] - (tile.cell[0] as f64 + 0.5) * dx,
+                controls.grid_origin_in_field_m[2] + (tile.cell[2] as f64 + 0.5) * dx,
+            ];
+            let mean = average_wall_velocity(inlet.snapshot(), at, edges, wall);
+            let expected = [-mean[1], controls.mean_velocity_m_s[1] + mean[0], mean[2]];
+            for i in 0..3 {
+                assert!((tile.state.velocity_m_s[i] - expected[i]).abs() < 3e-11);
+            }
+            let point = inlet.snapshot().sample_wall_blocked(at, wall).unwrap().u;
+            differs_from_point |= mean.iter().zip(point).any(|(a, b)| (a - b).abs() > 1e-9);
+        }
+        assert!(differs_from_point);
+        assert_eq!(inlet.snapshot().checkpoint(), retained);
+        assert_eq!(inlet.apply(&mut grid, 0).unwrap(), applied);
+        assert!(grid.step().unwrap().residual_rel < 1e-10);
+    }
+}
+
+#[test]
+fn g4_wall_filtered_frozen_inlets_bound_workspace_and_refuse_partial_support() {
+    let mut grid = build_grid(1, false);
+    let make = || NsfFrozenMannInflow::new(snapshot(2.0), config()).unwrap();
+    let wall =
+        MannPlaneWall::new((config().grid_origin_in_field_m[2] + 3.0 * grid.law.dx_m).next_down())
+            .unwrap();
+    let source = make()
+        .with_plane_wall(wall)
+        .unwrap()
+        .with_cell_average(&grid, 16 * 64, || false)
+        .unwrap();
+    let bytes = source.wall_spatial_filter().unwrap().workspace_bytes();
+    for wall_first in [false, true] {
+        let result = if wall_first {
+            make()
+                .with_plane_wall(wall)
+                .unwrap()
+                .with_cell_average(&grid, bytes - 1, || false)
+        } else {
+            make()
+                .with_cell_average(&grid, bytes - 1, || false)
+                .unwrap()
+                .with_plane_wall(wall)
+        };
+        assert!(
+            matches!(result, Err(NsfFrozenMannError::Atmosphere(error)) if error.code == "mann-wall-filter-budget")
+        );
+    }
+    let mut polls = 0;
+    assert!(matches!(
+        make()
+            .with_cell_average(&grid, bytes, || false)
+            .unwrap()
+            .with_plane_wall_cancellable(wall, || {
+                polls += 1;
+                polls == 4
+            }),
+        Err(NsfFrozenMannError::Cancelled)
+    ));
+    // Every ghost centre remains above this plane, but the bottom quarter of
+    // the first footprint lies below it. Neither truncate nor renormalize it.
+    let outside = MannPlaneWall::new(wall.height_m() + 0.25 * grid.law.dx_m).unwrap();
+    let source = source.with_plane_wall(outside).unwrap();
+    let before = (
+        grid.state_hash(),
+        grid.force.clone(),
+        grid.div.clone(),
+        grid.cumulative_ledger(),
+    );
+    let accepted = grid
+        .reservoir_aperture_tile_states(0)
+        .unwrap()
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        source.apply(&mut grid, 0),
+        Err(NsfFrozenMannError::Atmosphere(_))
+    ));
+    assert_eq!(
+        (
+            grid.state_hash(),
+            grid.force.clone(),
+            grid.div.clone(),
+            grid.cumulative_ledger()
+        ),
+        before
+    );
+    assert_eq!(
+        grid.reservoir_aperture_tile_states(0)
+            .unwrap()
+            .collect::<Vec<_>>(),
+        accepted
+    );
 }

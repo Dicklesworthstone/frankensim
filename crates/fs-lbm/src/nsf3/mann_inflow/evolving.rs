@@ -224,16 +224,58 @@ impl NsfEvolvingMannInflow {
     pub const fn config(&self) -> NsfEvolvingMannConfig {
         self.config
     }
+    /// Homogeneous spatial filter; plane-blocked averages use
+    /// [`Self::wall_spatial_filter`] instead.
     pub fn spatial_filter(&self) -> Option<&MannBoxFilter> {
-        self.averaging.as_ref().map(|a| &a.filter)
+        self.averaging.as_ref()?.filter.homogeneous()
+    }
+    /// Complete spatial wall observation for the accepted source and its
+    /// represented two-point covariance. This is absent for point sampling.
+    pub fn wall_spatial_filter(&self) -> Option<&MannWallBoxFilter> {
+        self.averaging.as_ref()?.filter.wall()
     }
 
     /// Observe the accepted/trial Mann realization through a harmonic slip
-    /// plane in its own frame. The mean must be tangent; every ghost centre
-    /// must be in the exact upper half-space. OU draws and clocks are unchanged.
-    /// Combining this with box/face averaging refuses in either order.
-    pub fn with_plane_wall(mut self, wall: MannPlaneWall) -> Result<Self, NsfEvolvingMannError> {
-        admit_plane_wall(self.config.frame(), self.averaging.is_some())?;
+    /// plane in its own frame. The mean must be tangent; every ghost observation
+    /// footprint must be in the upper half-space. OU draws and clocks are
+    /// unchanged. Existing averages retain their explicit filter byte allowance.
+    pub fn with_plane_wall(self, wall: MannPlaneWall) -> Result<Self, NsfEvolvingMannError> {
+        self.with_plane_wall_cancellable(wall, || false)
+    }
+
+    /// Rebuild an already selected spatial average with the complete harmonic
+    /// wall correction, within both its retained gain budget and the whole
+    /// inlet's workspace bound. The consumed old gains are released first.
+    pub fn with_plane_wall_cancellable(
+        mut self,
+        wall: MannPlaneWall,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, NsfEvolvingMannError> {
+        if cancelled() {
+            return Err(NsfEvolvingMannError::Cancelled);
+        }
+        admit_plane_wall(self.config.frame())?;
+        if let Some(average) = self.averaging.take() {
+            let (dx, axis, bytes) = (
+                average.dx_m,
+                average.face_axis,
+                average.maximum_filter_bytes,
+            );
+            drop(average);
+            let remaining = self
+                .maximum_workspace_bytes
+                .saturating_sub(self.workspace_bytes());
+            self.averaging = Some(prepare_spatial_average(
+                self.field.model(),
+                self.config.field_to_grid,
+                dx,
+                axis,
+                Some(wall),
+                bytes.min(remaining),
+                cancelled,
+            )?);
+        }
+        admit_bytes(self.workspace_bytes(), self.maximum_workspace_bytes)?;
         self.wall = Some(wall);
         Ok(self)
     }
@@ -266,11 +308,7 @@ impl NsfEvolvingMannInflow {
         maximum_filter_bytes: usize,
         cancelled: impl FnMut() -> bool,
     ) -> Result<Self, NsfEvolvingMannError> {
-        if self.wall.is_some() {
-            return Err(NsfEvolvingMannError::Input(
-                "Mann plane blocking currently requires point observations",
-            ));
-        }
+        self.averaging = None;
         let remaining = self
             .maximum_workspace_bytes
             .saturating_sub(self.workspace_bytes());
@@ -279,6 +317,7 @@ impl NsfEvolvingMannInflow {
             self.config.field_to_grid,
             self.binding.dx_m,
             face_axis,
+            self.wall,
             maximum_filter_bytes.min(remaining),
             cancelled,
         )?);
@@ -373,10 +412,15 @@ impl NsfEvolvingMannInflow {
                 averaging: self.averaging.as_ref(),
             },
             &mut self.profile,
-            |point, filter| match self.wall {
-                Some(wall) => self.trial.sample_wall_blocked(point, wall),
-                None => match filter {
-                    Some(filter) => self.trial.sample_filtered(point, filter),
+            |point, filter| match filter {
+                Some(SpatialFilter::Wall(filter)) => {
+                    self.trial.sample_wall_blocked_filtered(point, filter)
+                }
+                Some(SpatialFilter::Homogeneous(filter)) => {
+                    self.trial.sample_filtered(point, filter)
+                }
+                None => match self.wall {
+                    Some(wall) => self.trial.sample_wall_blocked(point, wall),
                     None => self.trial.sample(point),
                 },
             },
