@@ -12654,8 +12654,13 @@ bound uses the minimum pure sensible capacity: changing equilibrium
 compositions adds nonnegative heat capacity for the symmetric pair law.
 No second integrator or approximate latent-heat chart is introduced. This is
 bulk, fixed-composition isobaric storage; phase-resolved transport must still
-be refreshed through the original material adapter. Optional entropy,
-advection and identity-dependent thermal capabilities remain unavailable.
+be refreshed through the original material adapter. The entropy capability
+uses the SAME pure Cp/T integrals and accepted phase mixing entropy, divided
+by the retained reference mass. Both enthalpy endpoints must be admitted;
+a nonzero interval unresolved by the caloric inversion refuses. Existing
+entropy-aware thermal advances can therefore audit changing liquid phases.
+External source watts still do not define a reservoir entropy. Advection and
+identity-dependent thermal capabilities remain unavailable.
 
 Focused source tests cover ordered molar conversion, original source retention,
 unequal-temperature mixing with variable Cp, closed heating/cooling, exact

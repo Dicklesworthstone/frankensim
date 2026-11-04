@@ -319,3 +319,137 @@ fn g0_equilibrium_caloric_totals_obey_the_same_gibbs_identity() {
         );
     }
 }
+
+#[test]
+fn g1_entropy_integrates_original_affine_cp_and_resolves_small_temperature_steps() {
+    let cp = PureLiquidHeatCapacityV1::new(
+        SpeciesId::new("A").unwrap(),
+        Temperature::new(100.0),
+        [(100.0, 10.0), (300.0, 30.0), (500.0, 20.0)]
+            .into_iter()
+            .map(|(t, c)| (Temperature::new(t), MolarThermalQuantityV1::new(c)))
+            .collect(),
+    )
+    .unwrap();
+    // Cp=0.1T below 300 K, and Cp=45-0.05T above it.
+    let expected = 5.0 + 45.0 * (4.0_f64 / 3.0).ln();
+    let change = cp
+        .entropy_change_j_per_mol_k(Temperature::new(200.0), Temperature::new(400.0))
+        .unwrap();
+    near(change, expected, 2e-13);
+    assert_eq!(
+        cp.entropy_change_j_per_mol_k(Temperature::new(400.0), Temperature::new(200.0))
+            .unwrap(),
+        -change
+    );
+    let t = 350.0_f64;
+    let tiny = cp
+        .entropy_change_j_per_mol_k(Temperature::new(t), Temperature::new(t.next_up()))
+        .unwrap();
+    let expected = (27.5 / t) * (t.next_up() - t);
+    near(tiny, expected, expected * 2e-14);
+    assert_eq!(
+        cp.entropy_change_j_per_mol_k(Temperature::new(t), Temperature::new(t))
+            .unwrap(),
+        0.0
+    );
+    assert!(
+        cp.entropy_change_j_per_mol_k(Temperature::new(99.0), Temperature::new(t))
+            .is_err()
+    );
+
+    let smallest = f64::from_bits(1);
+    let cp = source("A", smallest);
+    assert_eq!(
+        cp.entropy_change_j_per_mol_k(Temperature::new(100.0), Temperature::new(400.0))
+            .unwrap(),
+        smallest * 4.0_f64.ln(),
+    );
+    assert!(matches!(
+        cp.entropy_change_j_per_mol_k(Temperature::new(t), Temperature::new(t.next_up())),
+        Err(BinaryCaloricErrorV1::Arithmetic(_))
+    ));
+}
+
+#[test]
+fn g1_equilibrium_entropy_includes_phase_redistribution_and_obeys_clausius_bounds() {
+    let model = model(0.0, 900.0, [80.0, 120.0]);
+    let cold = pure(&model, 300.0, [2.0, 3.0]);
+    let hot = pure(&model, 500.0, [2.0, 3.0]);
+    let dilute = 0.070_720_181_679_944_8;
+    let ideal = |x: f64| x * x.ln() + (1.0 - x) * (1.0 - x).ln();
+    let sensible = 520.0 * (5.0_f64 / 3.0).ln();
+    let expected = sensible - 5.0 * R * (ideal(0.4) - ideal(dilute));
+    let change = model.entropy_change_j_per_k(&cold, &hot).unwrap();
+    near(change, expected, 2e-11);
+    assert!(change > sensible);
+    assert_eq!(model.entropy_change_j_per_k(&hot, &cold).unwrap(), -change);
+    let heat = model.enthalpy_change_j(&cold, &hot).unwrap();
+    assert!(heat / 500.0 < change && change < heat / 300.0);
+    assert_eq!(model.entropy_change_j_per_k(&cold, &cold).unwrap(), 0.0);
+
+    // For an LCST pair (B<0), heating creates phases. The equilibrium excess
+    // Cp contribution is still positive and the same dH/T bounds apply.
+    let lcst = super::tests::model(4.0, -900.0, [100.0; 2]);
+    let cold = pure(&lcst, 300.0, [2.0, 3.0]);
+    let hot = pure(&lcst, 600.0, [2.0, 3.0]);
+    assert_eq!(cold.equilibrium().unwrap().phases().len(), 1);
+    assert_eq!(hot.equilibrium().unwrap().phases().len(), 2);
+    let change = lcst.entropy_change_j_per_k(&cold, &hot).unwrap();
+    let heat = lcst.enthalpy_change_j(&cold, &hot).unwrap();
+    assert!(heat / 600.0 < change && change < heat / 300.0);
+    assert!(change > 500.0 * 2.0_f64.ln());
+}
+
+#[test]
+fn g0_entropy_retains_small_changes_and_requires_the_original_inventory() {
+    let model = model(0.0, 0.0, [100.0; 2]);
+    let t = 700.0_f64;
+    let initial = pure(&model, t, [1e15, 1e15]);
+    let final_state = pure(&model, t.next_up(), [1e15, 1e15]);
+    let expected = 2e17 * ((t.next_up() - t) / t).ln_1p();
+    let change = model
+        .entropy_change_j_per_k(&initial, &final_state)
+        .unwrap();
+    near(change, expected, 1e-11);
+    assert_eq!(
+        model
+            .entropy_change_j_per_k(&final_state, &initial)
+            .unwrap(),
+        -change
+    );
+    let changed = pure(&model, t, [2e15, 1e15]);
+    assert!(model.entropy_change_j_per_k(&initial, &changed).is_err());
+    let other = super::tests::model(0.0, 0.0, [101.0, 100.0]);
+    assert!(
+        other
+            .entropy_change_j_per_k(&initial, &final_state)
+            .is_err()
+    );
+    let cold = pure(&model, 300.0, [f64::from_bits(1), 0.0]);
+    let hot = pure(&model, 300.0_f64.next_up(), [f64::from_bits(1), 0.0]);
+    assert!(matches!(
+        model.entropy_change_j_per_k(&cold, &hot),
+        Err(BinaryCaloricErrorV1::Arithmetic(_))
+    ));
+}
+
+#[test]
+fn g3_adiabatic_demixing_increases_total_entropy_on_the_original_heat_balance() {
+    let model = model(0.0, 900.0, [100.0; 2]);
+    let initial = model
+        .homogeneous(Temperature::new(300.0), [2.0, 1.0])
+        .unwrap();
+    let result = model.add_heat(&initial, 0.0, controls(), || false).unwrap();
+    assert!(
+        model
+            .entropy_change_j_per_k(&initial, result.final_state())
+            .unwrap()
+            > 0.0
+    );
+    near(
+        result.energy_residual_j(),
+        0.0,
+        controls().energy_tolerance_j,
+    );
+}

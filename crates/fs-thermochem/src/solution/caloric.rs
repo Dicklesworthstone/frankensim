@@ -19,6 +19,8 @@ use crate::{MolarThermalQuantityV1, SpeciesId, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_
 use fs_qty::Temperature;
 use std::sync::Arc;
 
+mod entropy;
+
 /// Maximum source points per pure-component heat-capacity curve.
 pub const MAX_LIQUID_CALORIC_KNOTS_V1: usize = 4096;
 

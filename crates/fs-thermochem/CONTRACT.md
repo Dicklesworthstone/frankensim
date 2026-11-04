@@ -120,6 +120,24 @@ caloric law. Evaluation is allocation-free after constructing bounded source
 curves, apart from shared-owner reference counting; no source querying occurs
 inside the root loop.
 
+
+Relative entropy uses the SAME source curves and accepted phase states.
+`PureLiquidHeatCapacityV1::entropy_change_j_per_mol_k` analytically integrates
+each original affine Cp segment divided by temperature. Positive endpoint
+weights, local series and scaled sums retain small temperature increments;
+underflow of a nonzero contribution refuses. Reversing the endpoints negates
+the same ascending integration.
+
+`BinaryLiquidCaloricModelV1::entropy_change_j_per_k` requires identical
+component inventories and the original caloric owner. It combines direct
+pure-component Cp/T increments with the actual homogeneous or equilibrium
+mixing-entropy change, before extensive scaling. For fixed-composition
+isobaric equilibrium endpoints this includes phase redistribution in dH/T.
+Accepted source/phase/root budgets still limit precision. Prescribed heat
+alone supplies no entropy account for an unspecified external reservoir.
+Focused tests cover affine Cp, tiny increments, subnormal arithmetic, source
+and inventory refusal, UCST/LCST Clausius bounds and adiabatic demixing.
+
 G0/G1/G3 tests in `src/solution/caloric/tests.rs` check exact source integrals,
 ideal unequal-capacity temperature mixing, both heat-of-mixing signs, an
 independent high-precision two-phase thermal root, the additional equilibrium

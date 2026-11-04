@@ -10,8 +10,9 @@
 //! species, infer interphase conductances, or change reference cell geometry.
 //! Numeric thermal trials do not refresh mixture transport: publish resolved
 //! phases through the original source-bound law when those properties are used.
-//! Entropy, advection binding and hashed caloric identity remain unavailable;
-//! consumers requiring those optional capabilities must refuse them.
+//! Entropy uses the same pure Cp/T integrals and accepted mixing phases.
+//! Advection binding and hashed caloric identity remain unavailable; consumers
+//! requiring those optional capabilities must refuse them.
 
 use super::{
     BinaryCaloricSolveV1, BinaryCaloricStateV1, BinaryLiquidCaloricError, BinaryLiquidCaloricLaw,
@@ -216,6 +217,39 @@ impl ThermalLaw for BinaryLiquidThermalStorage {
     }
     fn maximum_temperature_slope(&self) -> f64 {
         self.maximum_slope
+    }
+    fn specific_entropy_change_j_kg_k(
+        &self,
+        initial_h_j_kg: f64,
+        final_h_j_kg: f64,
+    ) -> Result<Option<f64>, DepositionError> {
+        self.admit(initial_h_j_kg)
+            .and_then(|()| self.admit(final_h_j_kg))
+            .map_err(|_| DepositionError::MaterialDomain)?;
+        if initial_h_j_kg == final_h_j_kg {
+            return Ok(Some(0.0));
+        }
+        let initial = self
+            .caloric_state_at_specific_enthalpy(initial_h_j_kg, || false)
+            .map_err(|_| DepositionError::MaterialDomain)?;
+        let final_state = self
+            .caloric_state_at_specific_enthalpy(final_h_j_kg, || false)
+            .map_err(|_| DepositionError::MaterialDomain)?;
+        let change = self
+            .owner
+            .model
+            .entropy_change_j_per_k(&initial, &final_state)
+            .map_err(|_| DepositionError::MaterialDomain)?
+            / self.mass_kg;
+        // The accepted numerical inverse must resolve the requested interval.
+        // Never turn an unresolved positive heat interval into zero entropy.
+        if !change.is_finite()
+            || (final_h_j_kg > initial_h_j_kg && change <= 0.0)
+            || (final_h_j_kg < initial_h_j_kg && change >= 0.0)
+        {
+            return Err(DepositionError::MaterialDomain);
+        }
+        Ok(Some(change))
     }
 }
 
