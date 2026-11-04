@@ -44,7 +44,7 @@ pub use adaptive::{AdaptiveCrystallizationStep, CrystallizationAdaptivity};
 
 #[path = "crystallization/remelting.rs"]
 mod remelting;
-pub use remelting::EquivalentAgeRemelting;
+pub use remelting::{CrystallizationCaloricTransition, EquivalentAgeRemelting};
 
 /// A refusal publishes no physical state or history increment.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -152,6 +152,14 @@ impl Default for CrystallizationSolve {
             specific_enthalpy_tolerance_j_kg: 1e-8,
             temperature_tolerance_k: 1e-9,
         }
+    }
+}
+
+impl CrystallizationSolve {
+    /// Validate the original bounded caloric inversion controls without
+    /// evaluating a material source or changing a physical state.
+    pub fn validate(self) -> Result<(), CrystallizationError> {
+        check_solve(self)
     }
 }
 

@@ -33,6 +33,22 @@ pub struct EquivalentAgeRemelting {
     latent_enthalpy_j_kg: f64,
 }
 
+/// A caloric transition with exactly zero elapsed physical time.
+///
+/// Irreversible growth exposure is frozen. An explicitly selected equilibrium
+/// remelting law can only reduce the surviving crystal fraction and its
+/// equivalent age. The signed enthalpy increment owns sensible and latent heat
+/// together; the caller must debit the corresponding physical energy source.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CrystallizationCaloricTransition {
+    pub initial: CrystallizationState,
+    pub state: CrystallizationState,
+    /// Heat INTO unit mass, exactly `h_final - h_initial`, J/kg.
+    pub specific_heat_j_kg: f64,
+    /// Original branch-mixture enthalpy minus final stored enthalpy, J/kg.
+    pub caloric_residual_j_kg: f64,
+}
+
 impl EquivalentAgeRemelting {
     pub const fn identity(self) -> [u8; 32] {
         self.config.identity
@@ -51,6 +67,72 @@ impl EquivalentAgeRemelting {
 }
 
 impl CrystallizationLaw<'_> {
+    /// Apply an instantaneous enthalpy change without accumulating kinetic age.
+    ///
+    /// This is the caloric response to an already accounted energy transfer,
+    /// such as dissipated elastic storage. It does not assign a fictitious
+    /// duration, grow crystals during cooling, or add latent heat a second time.
+    /// With no remelting model, the original exposure and fraction stay fixed;
+    /// heating beyond their admitted phase/domain boundary refuses. An explicit
+    /// remelting model uses its original plateau projection and equivalent-age
+    /// rule, allowing partial/complete melting and subsequent sensible superheat.
+    ///
+    /// An unchanged stored enthalpy preserves the accepted state bitwise,
+    /// including an admitted caloric residual, even when K(T) is positive.
+    /// Original state, controls and prepared-model binding are still checked.
+    /// Every inverse/projection uses the original bounded solver; cancellation
+    /// or refusal publishes no transition and leaves all caller state untouched.
+    pub fn apply_specific_enthalpy(
+        &self,
+        current: CrystallizationState,
+        final_h_j_kg: f64,
+        solve: CrystallizationSolve,
+        remelting: Option<EquivalentAgeRemelting>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<CrystallizationCaloricTransition, CrystallizationError> {
+        check_cancelled(&mut cancelled)?;
+        self.validate_state(current, solve)?;
+        if let Some(model) = remelting {
+            if self.equivalent_age_remelting()? != model {
+                return Err(CrystallizationError::StateMismatch);
+            }
+        }
+        let heat = finite(final_h_j_kg - current.specific_enthalpy_j_kg)?;
+        let state = if heat == 0.0 {
+            current
+        } else {
+            match remelting {
+                Some(model) => {
+                    self.remelting_state_at_enthalpy(
+                        final_h_j_kg,
+                        current.exposure,
+                        solve,
+                        model,
+                        &mut cancelled,
+                    )?
+                    .0
+                }
+                None => {
+                    self.state_at_enthalpy(final_h_j_kg, current.exposure, solve, &mut cancelled)?
+                }
+            }
+        };
+        let residual = finite(
+            self.specific_enthalpy_j_kg(state.temperature_k, state.crystalline_mass_fraction)?
+                - state.specific_enthalpy_j_kg,
+        )?;
+        if residual.abs() > solve.specific_enthalpy_tolerance_j_kg {
+            return Err(CrystallizationError::NonConverged);
+        }
+        check_cancelled(&mut cancelled)?;
+        Ok(CrystallizationCaloricTransition {
+            initial: current,
+            state,
+            specific_heat_j_kg: heat,
+            caloric_residual_j_kg: residual,
+        })
+    }
+
     /// Explicitly select instantaneous equilibrium remelting and equivalent age.
     ///
     /// Both original branches and the kinetic law must admit Tm. Their existing
@@ -247,3 +329,7 @@ impl CrystallizationLaw<'_> {
 #[cfg(test)]
 #[path = "remelting/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "remelting/impulse_tests.rs"]
+mod impulse_tests;
