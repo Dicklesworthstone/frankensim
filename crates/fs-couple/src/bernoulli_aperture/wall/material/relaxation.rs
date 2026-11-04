@@ -225,6 +225,30 @@ impl WallRelaxation {
         Ok(())
     }
 
+    // Shared admission for the graph and distributed FE midpoint owners.
+    // Surface units remove patch area without changing either temporal limit.
+    pub(crate) fn validate_local_time_step(&self, wall: fs_phs::WallPin, dt: f64)
+        -> Result<(), AcousticRealizeError>
+    {
+        if !dt.is_finite() || dt <= 0.0 {
+            return Err(invalid("material wall clock must be positive and finite"));
+        }
+        let mut instantaneous = wall.stiffness_per_area;
+        let factor = instantaneous / self.material.e_inf;
+        for &(modulus, tau) in &self.material.terms {
+            if modulus == 0.0 { continue; }
+            if dt / tau > self.max_dt_over_tau {
+                return Err(invalid("material wall clock does not resolve a retained relaxation time"));
+            }
+            instantaneous += factor * modulus;
+        }
+        let angular_step = dt * fs_math::det::sqrt(instantaneous / wall.surface_density);
+        if !angular_step.is_finite() || angular_step > self.max_angular_step {
+            return Err(invalid("material wall clock does not resolve its instantaneous membrane frequency"));
+        }
+        Ok(())
+    }
+
     pub(super) fn load(&self, patch: WallPatch, young: f64, band: [f64; 2])
         -> Result<RelaxationImpedanceSpec, AcousticRealizeError>
     {
@@ -265,19 +289,7 @@ impl BoundMaterialWall {
     pub fn validate_time_step(&self, dt: f64) -> Result<(), AcousticRealizeError> {
         if !dt.is_finite() || dt <= 0.0 { return Err(invalid("material wall clock must be positive and finite")); }
         if let WallMaterialLoss::Maxwell(source) = &self.source.loss {
-            let mut instantaneous = self.patch.wall.stiffness_per_area;
-            let factor = instantaneous / source.material.e_inf;
-            for &(modulus, tau) in &source.material.terms {
-                if modulus == 0.0 { continue; }
-                if dt / tau > source.max_dt_over_tau {
-                    return Err(invalid("material wall clock does not resolve a retained relaxation time"));
-                }
-                instantaneous += factor * modulus;
-            }
-            let angular_step = dt * fs_math::det::sqrt(instantaneous / self.patch.wall.surface_density);
-            if !angular_step.is_finite() || angular_step > source.max_angular_step {
-                return Err(invalid("material wall clock does not resolve its instantaneous membrane frequency"));
-            }
+            source.validate_local_time_step(self.patch.wall, dt)?;
         }
         Ok(())
     }

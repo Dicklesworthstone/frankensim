@@ -9,6 +9,8 @@
 
 /// Original gas/liquid material sources on conforming tetrahedral regions.
 pub mod regions;
+/// Source-bound cylindrical membrane reflection in the distributed time solver.
+pub mod mechanical;
 
 use fs_feec::acoustics::helmholtz::heterogeneous::{
     HeterogeneousHelmholtzFe, HeterogeneousProbe,

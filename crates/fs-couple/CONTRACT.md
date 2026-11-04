@@ -696,6 +696,28 @@ Its exterior local impedances are exact only for normal plane waves. The example
 requires independent spatial and time-step refinement; source thermodynamics,
 interfaces and bulk coefficients remain frozen throughout the pulse.
 
+`heterogeneous::mechanical::MaterialMechanicalTime` binds original
+`LocalMaterialWall` sources to the same full spatial time operator. Each patch
+explicitly supplies its cylindrical axis, radius and relative geometry tolerance;
+the actual boundary vertices and outward normals must approximate that
+cylinder's lateral surface. Caps, incompatible radii/normals and non-thin source
+walls refuse. The source's axial restraint and hoop/axial material directions
+remain binding. Facet and time refinement remain caller responsibilities; this
+is locally reacting cylindrical membrane motion, not arbitrary plate bending,
+lateral shell waves, pressure prestress or evolving geometry/materials.
+
+The existing source reduction supplies surface mass, equilibrium stiffness,
+viscosity and every positive original Maxwell arm without fitting. Actual FE
+face area enters once through the consistent trace mass. Original source
+identities, exact-zero source records and the intersection of applicability
+bands remain attached; a declared band is not an input filter. The original
+Maxwell relaxation-time and instantaneous-frequency clock limits apply before
+preparation. All states, memory storage, dissipation and pressure feedback use
+the native implicit owner, including its resource, cancellation and source-state
+binding refusals. `material_mechanical_acoustics` exercises source impedance and
+reflection, native transient parity, physical memory work and source/geometry
+admission with synthetic constitutive records.
+
 ## Actual curved TET10 contact through native momentum owners
 
 `inelastic_impact::surface::quadratic::QuadraticSolidContactSurface` binds the
