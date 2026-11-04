@@ -11,6 +11,12 @@ use super::*;
 use crate::plane_wave::layers::{FIELD_PREPARATION_WORKSPACE_BYTES, PreparedLayerField};
 use fs_math::dd::Dd;
 
+mod correlation;
+pub use correlation::{
+    AngularSpectrumCorrelationLimits, AngularSpectrumInterferenceStatistics,
+    AngularSpectrumMutualCoherence, AngularSpectrumObservation,
+};
+
 /// Whole-factor-bank limits for one query. The conservative workspace includes
 /// one original beam's complete workspace and accumulation/output planes,
 /// including streamed and ensemble heat. Internal queries additionally admit

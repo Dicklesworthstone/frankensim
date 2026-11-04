@@ -4048,6 +4048,52 @@ volume/Poynting/film power balance, lossless TIR, and exact workspace admission,
 darkness and transactional refusal. These synthetic constitutive checks do not
 qualify a measured substrate or infer thermal evolution.
 
+### Two-point electric coherence and explicitly analyzed interference
+
+The original monochromatic source-factor owner now exposes
+`AngularSpectrumCoherence::mutual_coherence` between two exterior observations.
+Each observation supplies a side, a finite nonnegative distance from that side's
+film face, and finite physical x/y coordinates in the original periodic cell or
+its continuation. The same per-mode Maxwell reconstruction serves both existing
+FFT planes and these direct samples: material response, longitudinal fields,
+critical transmitted modes and incident/reflected propagation signs are shared.
+Prepared inverse-FFT coefficients already include 1/N; direct synthesis uses
+exp(-i(kx*x+ky*y)) without another normalization. DD arithmetic retains the
+authored wave-number/coordinate products through phase reduction and field sums.
+
+The returned local blocks and cross block retain
+W_ab[i,j] = sum_m E_a,m[i] E_b,m[j]* / 2 in V²/m². Swapping observations takes
+the conjugate transpose. An explicit complex Cartesian analyzer is w†E, including
+conjugation of its dimensionless weights. Projected moments therefore report
+Gamma_ab = <a b*>, and combining a + exp(+i phi)b gives
+Ia + Ib + 2 Re(exp(-i phi)Gamma_ab). Visibility is 2|Gamma_ab|/(Ia+Ib);
+it is undefined for two dark arms and zero for exactly one dark arm. Projection
+checks nonnegative finite intensities and the Cauchy-Schwarz bound, with a bounded
+final-rounding allowance. The direct recombination query combines each factor's
+fields before its positive square, preserving weak dark-port residuals that
+subtraction of rounded local/cross moments can erase. Uncorrelated source factors
+still add only as second moments. These are electric mean-square observables,
+not detector watts, an inferred polarizer output state, or detector back-action.
+
+Each query admits exactly 2*M*N mode reconstructions for M factors and N original
+Fourier modes. It uses no FFT, heap allocation, fresh material solve or dense
+spatial covariance. The fixed logical numerical workspace includes result
+tensors, two synthesized vector fields and a mode's E/H buffers; scalar compiler
+temporaries, borrowed source/factor storage and earlier retained results are
+excluded. The direct query admits the same conservative workspace bound.
+Cancellation is checked on entry, between factors, at most every 32 mode pairs,
+and before publication. Rank-zero darkness still validates geometry, analyzers,
+relative phase, budgets and cancellation. No isolated-aperture, continuum-
+convergence or relative-error guarantee at arbitrary cancellation is inferred.
+
+The focused correlation tests supply independent Young-style visibility with
+identical arm intensities, a positive 2^-59 dark-port residual, lossy Airy
+reflection/transmission and standing-wave phases, evanescent phase/decay,
+two-dimensional FFT normalization and longitudinal-field parity, conjugate
+symmetry, unitary factor rotation, complex analyzer handedness and admission
+boundaries. Native execution of this addition was blocked by an unavailable
+execution host; these cases are authored regressions, not a claimed passing run.
+
 ## Finite detectors for the original partially coherent beam
 
 `AngularSpectrumCoherence::measure_aperture` observes the original ensemble

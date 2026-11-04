@@ -49,8 +49,9 @@ pub use layers::{
 mod coherence;
 pub use coherence::{
     AngularSpectrumCoherence, AngularSpectrumCoherenceField, AngularSpectrumCoherenceLayerField,
-    AngularSpectrumCoherenceLimits, AngularSpectrumPointStatistics,
-    PreparedAngularSpectrumCoherenceLayer,
+    AngularSpectrumCoherenceLimits, AngularSpectrumCorrelationLimits,
+    AngularSpectrumInterferenceStatistics, AngularSpectrumMutualCoherence, AngularSpectrumObservation,
+    AngularSpectrumPointStatistics, PreparedAngularSpectrumCoherenceLayer,
 };
 
 mod force;
@@ -498,61 +499,72 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
             if index % 64 == 0 {
                 poll(&mut cancelled)?;
             }
-            let mut e = [C64::ZERO; 3];
-            let mut h = [C64::ZERO; 3];
-            let mut add =
-                |kz, omega_mu, transverse, distance| -> Result<(), AngularSpectrumError> {
-                    let phase = propagation(kz, distance)
-                        .ok_or_else(|| bad("propagation phase is unrepresentable"))?;
-                    let (em, hm) = fields(mode.kx, mode.ky, kz, omega_mu, transverse)
-                        .ok_or_else(|| bad("longitudinal or magnetic field is unrepresentable"))?;
-                    for c in 0..3 {
-                        e[c] = e[c] + em[c] * phase;
-                        h[c] = h[c] + hm[c] * phase;
-                    }
-                    Ok(())
-                };
-            if matches!(
-                side,
-                AngularSpectrumSide::Incident | AngularSpectrumSide::TotalIncidentSide
-            ) {
-                add(
-                    C64::from_re(mode.incident_kz),
-                    self.incident_omega_mu,
-                    mode.incident_e,
-                    -distance_from_face_m,
-                )?;
-            }
-            if matches!(
-                side,
-                AngularSpectrumSide::Reflected | AngularSpectrumSide::TotalIncidentSide
-            ) {
-                add(
-                    C64::from_re(-mode.incident_kz),
-                    self.incident_omega_mu,
-                    mode.reflected_e,
-                    -distance_from_face_m,
-                )?;
-            }
-            if side == AngularSpectrumSide::Transmitted {
-                let phase = propagation(mode.exit_kz, distance_from_face_m)
-                    .ok_or_else(|| bad("propagation phase is unrepresentable"))?;
-                let (em, hm) = fields_from_tangential(
-                    mode.kx,
-                    mode.ky,
-                    self.exit_omega_epsilon,
-                    self.exit_omega_mu,
-                    mode.transmitted_e_te_tm,
-                    mode.transmitted_h_te_tm,
-                )
-                .ok_or_else(|| bad("longitudinal or magnetic field is unrepresentable"))?;
-                e = em.map(|value| value * phase);
-                h = hm.map(|value| value * phase);
-            }
+            let (e, h) = self.mode_field(mode, side, distance_from_face_m)?;
             electric.push(e);
             magnetic.push(h);
         }
         Ok((electric, magnetic))
+    }
+
+    // Shared by FFT planes and direct coherence samples. Callers admit the
+    // observation distance and own cancellation; this is one bounded mode.
+    fn mode_field(
+        &self,
+        mode: &Mode,
+        side: AngularSpectrumSide,
+        distance_from_face_m: f64,
+    ) -> Result<([C64; 3], [C64; 3]), AngularSpectrumError> {
+        let mut e = [C64::ZERO; 3];
+        let mut h = [C64::ZERO; 3];
+        let mut add = |kz, omega_mu, transverse, distance| -> Result<(), AngularSpectrumError> {
+            let phase = propagation(kz, distance)
+                .ok_or_else(|| bad("propagation phase is unrepresentable"))?;
+            let (em, hm) = fields(mode.kx, mode.ky, kz, omega_mu, transverse)
+                .ok_or_else(|| bad("longitudinal or magnetic field is unrepresentable"))?;
+            for c in 0..3 {
+                e[c] = e[c] + em[c] * phase;
+                h[c] = h[c] + hm[c] * phase;
+            }
+            Ok(())
+        };
+        if matches!(
+            side,
+            AngularSpectrumSide::Incident | AngularSpectrumSide::TotalIncidentSide
+        ) {
+            add(
+                C64::from_re(mode.incident_kz),
+                self.incident_omega_mu,
+                mode.incident_e,
+                -distance_from_face_m,
+            )?;
+        }
+        if matches!(
+            side,
+            AngularSpectrumSide::Reflected | AngularSpectrumSide::TotalIncidentSide
+        ) {
+            add(
+                C64::from_re(-mode.incident_kz),
+                self.incident_omega_mu,
+                mode.reflected_e,
+                -distance_from_face_m,
+            )?;
+        }
+        if side == AngularSpectrumSide::Transmitted {
+            let phase = propagation(mode.exit_kz, distance_from_face_m)
+                .ok_or_else(|| bad("propagation phase is unrepresentable"))?;
+            let (em, hm) = fields_from_tangential(
+                mode.kx,
+                mode.ky,
+                self.exit_omega_epsilon,
+                self.exit_omega_mu,
+                mode.transmitted_e_te_tm,
+                mode.transmitted_h_te_tm,
+            )
+            .ok_or_else(|| bad("longitudinal or magnetic field is unrepresentable"))?;
+            e = em.map(|value| value * phase);
+            h = hm.map(|value| value * phase);
+        }
+        Ok((e, h))
     }
 
     // All exterior and internal planes use these same six transforms and
