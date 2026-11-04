@@ -10,6 +10,8 @@ use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 use fs_material::gas::{GasSpec, GasState};
 use std::cell::Cell;
 
+mod sources;
+
 fn liquid() -> FluidAcousticState {
     // Authored coefficients for analytic controls, not measured water data.
     FluidAcousticState::try_new(1000.0, 1500.0).unwrap()

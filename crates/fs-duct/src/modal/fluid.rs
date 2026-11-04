@@ -13,11 +13,13 @@
 //! modes, compliant walls and evolving phase boundaries are not supplied here.
 
 use super::{
-    ModalResponse, PreparedModalDuct, mm_propagate_prepared, modal_wave_from_plane_wave,
-    physical_response, reflection_from_impedance,
+    ModalReflectionResponse, ModalResponse, ModalWaveResponse, PreparedModalDuct,
+    mm_propagate_prepared, modal_wave_from_plane_wave, physical_response,
+    reflection_from_impedance,
 };
 use crate::fluid::{FluidDuctError, thermoviscous_wave_from_state, wave_from_state};
-use crate::modal::outlet::MouthResponse;
+use crate::modal::outlet::{self, MouthResponse, MouthSourceResponse, MouthWaveResponse};
+use crate::network::PortExcitation;
 use crate::{DuctError, LossModel, SegmentWave};
 use fs_material::fluid_acoustics::thermoviscous::ThermoviscousFluid;
 use fs_material::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
@@ -55,8 +57,8 @@ impl PreparedModalDuct<'_> {
         omega: f64,
         boundary: MouthBoundary,
     ) -> Result<ModalResponse, FluidDuctError> {
-        self.evaluate_material(material, omega, boundary, false)
-            .map(|response| response.input)
+        let response = self.evaluate_material(material, omega, boundary, false, true)?;
+        Ok(physical_response(response)?.input)
     }
 
     /// Complete physical mouth-flow map and input impedance from the same
@@ -74,7 +76,8 @@ impl PreparedModalDuct<'_> {
         omega: f64,
         boundary: MouthBoundary,
     ) -> Result<MouthResponse, FluidDuctError> {
-        self.evaluate_material(material, omega, boundary, true)
+        let response = self.evaluate_material(material, omega, boundary, true, true)?;
+        Ok(physical_response(response)?)
     }
 
     /// The same modal input impedance with material-driven viscous/thermal wall
@@ -96,8 +99,9 @@ impl PreparedModalDuct<'_> {
         loss: LossModel,
         boundary: MouthBoundary,
     ) -> Result<ModalResponse, FluidDuctError> {
-        self.evaluate_material_with_loss(material, omega, loss, boundary, false)
-            .map(|response| response.input)
+        let response =
+            self.evaluate_material_with_loss(material, omega, loss, boundary, false, true)?;
+        Ok(physical_response(response)?.input)
     }
 
     /// Complete physical mouth-flow map from the same material and wall-loss
@@ -112,7 +116,135 @@ impl PreparedModalDuct<'_> {
         loss: LossModel,
         boundary: MouthBoundary,
     ) -> Result<MouthResponse, FluidDuctError> {
-        self.evaluate_material_with_loss(material, omega, loss, boundary, true)
+        let response =
+            self.evaluate_material_with_loss(material, omega, loss, boundary, true, true)?;
+        Ok(physical_response(response)?)
+    }
+
+    /// Native input reflection from one original acoustic material, without
+    /// forming an input impedance. Inlet flow nodes remain finite reflected
+    /// waves. The returned response supports the original real-reference and
+    /// coherent [`ModalReflectionResponse::drive_sources`] boundary solves.
+    ///
+    /// Native characteristic coordinates still refuse an exact endpoint
+    /// cutoff. Use [`Self::drive_sources_from_material`] for physical source
+    /// fields at that cutoff; its finite propagation reference stays private.
+    ///
+    /// # Errors
+    /// As [`Self::input_impedance_from_material`], except an input-impedance
+    /// pole alone is not a refusal; singular native endpoint coordinates are.
+    pub fn input_reflection_from_material<M: FluidAcoustics + ?Sized>(
+        &self,
+        material: &M,
+        omega: f64,
+        boundary: MouthBoundary,
+    ) -> Result<ModalReflectionResponse, FluidDuctError> {
+        Ok(self
+            .evaluate_material(material, omega, boundary, false, false)?
+            .input)
+    }
+
+    /// Native input reflection with the same single material snapshot and
+    /// wall law as [`Self::input_impedance_from_material_with_loss`].
+    ///
+    /// # Errors
+    /// As [`Self::input_reflection_from_material`], plus original transport,
+    /// caloric and wall-diffusion admission failures.
+    pub fn input_reflection_from_material_with_loss<M: ThermoviscousFluid + ?Sized>(
+        &self,
+        material: &M,
+        omega: f64,
+        loss: LossModel,
+        boundary: MouthBoundary,
+    ) -> Result<ModalReflectionResponse, FluidDuctError> {
+        Ok(self
+            .evaluate_material_with_loss(material, omega, loss, boundary, false, false)?
+            .input)
+    }
+
+    /// Native reflected waves and physical mouth-flow observation from one
+    /// material solve. Retain this response to drive multiple coherent source
+    /// vectors without repeating propagation. Input-impedance poles do not
+    /// require an inverse or prevent observing the mouth motion.
+    ///
+    /// # Errors
+    /// As [`Self::input_reflection_from_material`], including native endpoint
+    /// cutoff refusals. Physical cutoff drives use [`Self::drive_sources_from_material`].
+    pub fn mouth_waves_from_material<M: FluidAcoustics + ?Sized>(
+        &self,
+        material: &M,
+        omega: f64,
+        boundary: MouthBoundary,
+    ) -> Result<MouthWaveResponse, FluidDuctError> {
+        let response = self.evaluate_material(material, omega, boundary, true, false)?;
+        Ok(outlet::wave_response(response)?)
+    }
+
+    /// Native reflected waves and physical mouth motion with the original
+    /// material's wall diffusion. Source work and mouth observation reuse the
+    /// same wave solution as [`Self::mouth_waves_from_material`].
+    ///
+    /// # Errors
+    /// As [`Self::input_reflection_from_material_with_loss`].
+    pub fn mouth_waves_from_material_with_loss<M: ThermoviscousFluid + ?Sized>(
+        &self,
+        material: &M,
+        omega: f64,
+        loss: LossModel,
+        boundary: MouthBoundary,
+    ) -> Result<MouthWaveResponse, FluidDuctError> {
+        let response =
+            self.evaluate_material_with_loss(material, omega, loss, boundary, true, false)?;
+        Ok(outlet::wave_response(response)?)
+    }
+
+    /// Drive the original material duct with physical inlet source laws and
+    /// observe every mouth mode, including at an exact transverse cutoff.
+    ///
+    /// Each [`PortExcitation`] prescribes volume flow or `P + Zs U = p_open`
+    /// with a finite passive complex source impedance. The original coherent
+    /// source solver supplies inlet pressure/flow, signed generator work,
+    /// source resistance dissipation and mouth flow. It never forms the input
+    /// impedance. Finite private references at cutoff do not escape as native
+    /// characteristic impedances or change the physical power pairing.
+    ///
+    /// An unforced, exactly disconnected free mode remains at zero amplitude;
+    /// an inconsistent or singular source-connected system still refuses.
+    /// One original material snapshot supplies propagation and radiation.
+    ///
+    /// # Errors
+    /// Original material/propagation refusals or source-boundary failures from
+    /// [`ModalReflectionResponse::drive_sources`]. A pole of the undriven
+    /// input impedance alone does not prevent a finite driven solution.
+    pub fn drive_sources_from_material<M: FluidAcoustics + ?Sized>(
+        &self,
+        material: &M,
+        omega: f64,
+        boundary: MouthBoundary,
+        sources: &[PortExcitation],
+    ) -> Result<MouthSourceResponse, FluidDuctError> {
+        let response = self.evaluate_material(material, omega, boundary, true, true)?;
+        Ok(outlet::wave_response(response)?.drive_sources(sources)?)
+    }
+
+    /// Physical source drive with one complete material snapshot and its
+    /// admitted wall diffusion. The native source equations and source work
+    /// accounting are exactly those of [`Self::drive_sources_from_material`].
+    ///
+    /// # Errors
+    /// As [`Self::drive_sources_from_material`], plus original transport,
+    /// caloric and wall-diffusion admission failures.
+    pub fn drive_sources_from_material_with_loss<M: ThermoviscousFluid + ?Sized>(
+        &self,
+        material: &M,
+        omega: f64,
+        loss: LossModel,
+        boundary: MouthBoundary,
+        sources: &[PortExcitation],
+    ) -> Result<MouthSourceResponse, FluidDuctError> {
+        let response =
+            self.evaluate_material_with_loss(material, omega, loss, boundary, true, true)?;
+        Ok(outlet::wave_response(response)?.drive_sources(sources)?)
     }
 
     fn evaluate_material<M: FluidAcoustics + ?Sized>(
@@ -121,12 +253,19 @@ impl PreparedModalDuct<'_> {
         omega: f64,
         boundary: MouthBoundary,
         observe_mouth: bool,
-    ) -> Result<MouthResponse, FluidDuctError> {
+        admit_boundary_cutoff: bool,
+    ) -> Result<ModalWaveResponse, FluidDuctError> {
         admit_frequency(omega)?;
         let state = material.acoustic_state()?;
-        evaluate_snapshot(self, &state, omega, boundary, observe_mouth, |radius| {
-            wave_from_state(&state, radius, omega)
-        })
+        evaluate_snapshot(
+            self,
+            &state,
+            omega,
+            boundary,
+            observe_mouth,
+            admit_boundary_cutoff,
+            |radius| wave_from_state(&state, radius, omega),
+        )
     }
 
     fn evaluate_material_with_loss<M: ThermoviscousFluid + ?Sized>(
@@ -136,7 +275,8 @@ impl PreparedModalDuct<'_> {
         loss: LossModel,
         boundary: MouthBoundary,
         observe_mouth: bool,
-    ) -> Result<MouthResponse, FluidDuctError> {
+        admit_boundary_cutoff: bool,
+    ) -> Result<ModalWaveResponse, FluidDuctError> {
         admit_frequency(omega)?;
         let state = material.thermoviscous_state()?;
         evaluate_snapshot(
@@ -145,6 +285,7 @@ impl PreparedModalDuct<'_> {
             omega,
             boundary,
             observe_mouth,
+            admit_boundary_cutoff,
             |radius| thermoviscous_wave_from_state(&state, radius, omega, loss),
         )
     }
@@ -165,14 +306,15 @@ fn evaluate_snapshot(
     omega: f64,
     boundary: MouthBoundary,
     observe_mouth: bool,
+    admit_boundary_cutoff: bool,
     mut plane_wave: impl FnMut(f64) -> Result<SegmentWave, DuctError>,
-) -> Result<MouthResponse, FluidDuctError> {
+) -> Result<ModalWaveResponse, FluidDuctError> {
     let n = geometry.n_modes;
     let radius = geometry.mouth_radius_m();
     let mut wave_at = |radius, admit_cutoff| {
         modal_wave_from_plane_wave(plane_wave(radius)?, radius, &geometry.gammas, admit_cutoff)
     };
-    let mouth_wave = wave_at(radius, true)?;
+    let mouth_wave = wave_at(radius, admit_boundary_cutoff)?;
     let r_load = match boundary {
         MouthBoundary::Flanged => {
             // The snapshot implements FluidAcoustics directly: the original
@@ -200,7 +342,7 @@ fn evaluate_snapshot(
             matrix
         }
     };
-    let response = mm_propagate_prepared(
+    Ok(mm_propagate_prepared(
         geometry,
         omega,
         state.sound_speed_m_s(),
@@ -208,10 +350,9 @@ fn evaluate_snapshot(
         mouth_wave,
         r_load,
         observe_mouth,
-        true,
+        admit_boundary_cutoff,
         wave_at,
-    )?;
-    Ok(physical_response(response)?)
+    )?)
 }
 
 #[cfg(test)]
