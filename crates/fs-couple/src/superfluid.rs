@@ -31,6 +31,9 @@ pub mod piston;
 /// Two freely moving native bodies with reciprocal channel pressure and forcing.
 pub mod piston_pair;
 
+/// Reciprocal heat-driven counterflow on the original finite caloric timeline.
+pub mod counterflow;
+
 /// Original thermal stepping controls plus explicit heat and combined-account gates.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FrictionHeatControls {
