@@ -12,6 +12,7 @@ use fs_em::plane_wave::{
 use fs_math::det;
 
 mod absorption;
+mod aperture;
 
 fn limits() -> AngularSpectrumLimits {
     AngularSpectrumLimits {

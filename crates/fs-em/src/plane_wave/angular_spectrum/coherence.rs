@@ -230,6 +230,83 @@ impl<'b, 's, 'm> AngularSpectrumCoherence<'b, 's, 'm> {
         Ok(finish(self.grid(), sums, false, &mut cancelled)?.field)
     }
 
+    /// Cycle-mean signed Poynting transport through a finite rectangle. Each
+    /// original factor retains its coherent cross-mode interference; mutually
+    /// uncorrelated factors add only as vector flux and integrated watts.
+    /// This observes the original periodic continuation, not detector heat.
+    ///
+    /// For F factors on N=W*H modes, `maximum_mode_pairs` bounds the aggregate
+    /// F*N*(W+H) axis contractions. The common W²+H² aperture kernels are
+    /// prepared once. Peak buffer admission includes one original beam's
+    /// workspace, those kernels and one DD contraction plane, as in the
+    /// coherent owner; it does not multiply temporary storage by F. No FFT or
+    /// new material solve is needed. An empty bank accepts zero query budgets
+    /// after validating the observation distance and checking cancellation.
+    pub fn measure_aperture(
+        &self,
+        side: AngularSpectrumSide,
+        distance_from_face_m: f64,
+        aperture: AngularSpectrumAperture,
+        limits: AngularSpectrumApertureLimits,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<AngularSpectrumApertureReading, AngularSpectrumError> {
+        poll(&mut cancelled)?;
+        if !distance_from_face_m.is_finite() || distance_from_face_m < 0.0 {
+            return Err(bad("field distance must be finite and nonnegative"));
+        }
+        if self.factors.is_empty() {
+            poll(&mut cancelled)?;
+            return Ok(AngularSpectrumApertureReading {
+                mean_poynting_w_m2: [0.0; 3],
+                normal_power_w: 0.0,
+            });
+        }
+        let grid = self.grid();
+        let pairs = grid
+            .width
+            .checked_add(grid.height)
+            .and_then(|axes| self.anchor.modes.len().checked_mul(axes))
+            .and_then(|pairs| pairs.checked_mul(self.factors.len()))
+            .ok_or_else(|| bad("coherence aperture work overflow"))?;
+        if pairs > limits.maximum_mode_pairs {
+            return Err(bad("coherence aperture exceeds its aggregate work budget"));
+        }
+        let prepared = aperture::PreparedAperture::prepare(
+            grid,
+            aperture,
+            self.anchor.workspace_bytes(),
+            limits,
+            |column| self.anchor.modes[column].kx,
+            |row| self.anchor.modes[row * grid.width].ky,
+            &mut cancelled,
+        )?;
+        let mut flux = [Dd::ZERO; 3];
+        let mut power = Dd::ZERO;
+        for factor in self.factors {
+            let (electric, magnetic) =
+                factor.modal_field(side, distance_from_face_m, &mut cancelled)?;
+            let reading = prepared.measure(&electric, &magnetic, &mut cancelled)?;
+            for (sum, value) in flux.iter_mut().zip(reading.mean_poynting_w_m2) {
+                add(sum, value)?;
+            }
+            add(&mut power, reading.normal_power_w)?;
+        }
+        let mean_poynting_w_m2 = flux.map(Dd::to_f64);
+        let normal_power_w = power.to_f64();
+        if mean_poynting_w_m2
+            .iter()
+            .chain(&[normal_power_w])
+            .any(|v| !v.is_finite())
+        {
+            return Err(bad("coherence aperture transport is unrepresentable"));
+        }
+        poll(&mut cancelled)?;
+        Ok(AngularSpectrumApertureReading {
+            mean_poynting_w_m2,
+            normal_power_w,
+        })
+    }
+
     /// Reconstruct ensemble dielectric/Joule heat in the original exit
     /// half-space, measured inward from the final film face. Every original
     /// factor keeps its vector interference and longitudinal electric field;

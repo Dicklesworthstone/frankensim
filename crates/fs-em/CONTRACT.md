@@ -4047,3 +4047,30 @@ coherent versus independent cancellation, complex unitary factor mixing with
 volume/Poynting/film power balance, lossless TIR, and exact workspace admission,
 darkness and transactional refusal. These synthetic constitutive checks do not
 qualify a measured substrate or infer thermal evolution.
+
+## Finite detectors for the original partially coherent beam
+
+`AngularSpectrumCoherence::measure_aperture` observes the original ensemble
+through a finite rectangle using the same vector diffraction and analytic
+rectangle operator as a coherent beam. Every factor retains its spatial
+interference; independent factors add signed Poynting components and original
+integrated watts in DD, without summing their fields or reapplying a half factor.
+This retains partial fringe visibility and complex unitary factor-basis
+invariance. Reflected transport keeps its physical negative sign.
+
+For F factors on N=W*H modes, the query admits aggregate F*N*(W+H) axis
+contractions before reconstruction. The common W²+H² spatial kernels are
+prepared once from the exact original source/grid. Each factor streams through
+one shared operator; peak numerical buffers comprise one coherent-beam
+workspace, the axis caches and one DD contraction plane. No additional FFT,
+material solve, factor-sized scratch bank or sampled-field interpolation is
+introduced. Empty factor banks validate the depth and check cancellation, then
+return darkness with zero query budgets and no detector allocation.
+
+The three G1/G3/G0/G4 regression groups in `tests/plane_wave/coherence/aperture.rs`
+cover independent analytic fringe and vector-flux references, whole-cell power,
+complex factor-basis changes, original coherent-owner parity, signed reflection,
+aggregate work and peak-storage admission, rank-zero depths and cancellation
+with replay. Detector heat, quantum efficiency, finite-edge convergence and
+source temporal coherence remain outside this monochromatic periodic-field
+observation model.
