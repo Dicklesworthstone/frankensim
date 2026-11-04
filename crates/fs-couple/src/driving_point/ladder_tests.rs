@@ -61,6 +61,92 @@ fn line_taps(line: &DelayedFilter, n: usize) -> Vec<f64> {
     out
 }
 
+/// G1/G3: a causal manufactured resonator has an independently known impulse
+/// response and peak. The ladder checks the realized taps, not its own samples.
+#[test]
+fn impedance_ladder_measures_response_and_reuses_original_queries() {
+    let dt = 1.0 / f64::from(RATE_HZ);
+    let radius = 0.98_f64;
+    let angle = 0.3_f64;
+    let gain = (1.0 - radius).powi(2);
+    let response = |omega: f64| {
+        let z = C64::new((omega * dt).cos(), (omega * dt).sin());
+        C64::from_re(gain)
+            / (C64::ONE - z.scale(2.0 * radius * angle.cos()) + (z * z).scale(radius * radius))
+    };
+    let mut queries = std::collections::BTreeSet::new();
+    let ladder = LineLadder { max_taps: 4096, ..LineLadder::default() };
+    let (line, receipt) = super::realize_impedance_response(
+        10.0, dt, response(0.0).re, 0.0, vec![], &ladder, |omega| {
+            assert!(queries.insert(omega.to_bits()), "original query was repeated");
+            Ok(response(omega))
+        },
+    ).unwrap();
+    assert!(receipt.rungs_tried.len() >= 3);
+    assert_eq!(queries.len(), receipt.n_fft / 2);
+    assert_eq!(receipt.rungs_tried[0].peak_shift_cents, f64::INFINITY);
+    assert!(receipt.rungs_tried[0].tail_energy > ladder.tail_tol);
+    assert!(receipt.tail_energy > 0.0 && receipt.tail_energy < ladder.tail_tol);
+    assert!(receipt.peak_shift_cents < ladder.peak_tol_cents);
+    assert!(receipt.pole_states.is_empty() && line.exact_poles().is_empty());
+    let (_, taps) = line.quiescent_fir().unwrap();
+    let measured_tail = taps[3 * (taps.len() / 4)..].iter().map(|x| x * x).sum::<f64>()
+        / taps.iter().map(|x| x * x).sum::<f64>();
+    assert!((receipt.tail_energy / measured_tail - 1.0).abs() < 1e-12);
+    for (index, &value) in taps.iter().enumerate() {
+        let expected = gain * radius.powi(index as i32)
+            * ((index + 1) as f64 * angle).sin() / angle.sin();
+        assert!((value - expected).abs() < 2e-10 * gain);
+    }
+    let peaks = super::impedance_ir_peaks(taps, dt, 0.0).unwrap();
+    let expected = (angle.cos() * (1.0 + radius * radius) / (2.0 * radius)).acos()
+        / (core::f64::consts::TAU * dt);
+    assert!((1200.0 * (peaks[0] / expected).log2()).abs() < 1e-5);
+    for multiple in [0.8, 1.0, 1.3] {
+        let omega = multiple * core::f64::consts::TAU * expected;
+        let actual = super::impedance_ir_response(taps, dt, 0.0, omega);
+        assert!((actual - response(omega)).abs() < 1e-10 * response(omega).abs());
+    }
+}
+
+/// G0/G1: dispersive wall loss cannot be converted to an oscillator at the
+/// lossless frequency with a real lossless residue, even for a very small loss.
+#[test]
+fn lossy_cylinder_preserves_dispersion_instead_of_inventing_exact_poles() {
+    let gas = air20();
+    let radius = 0.4;
+    let length = 0.5;
+    let duct = Duct { segments: vec![Segment::Cylinder { radius, length }] };
+    let lossless = super::extract_lossless_cylinder_poles(
+        &duct, &gas, LossModel::Lossless, Termination::Closed, 2_000, None,
+    ).unwrap();
+    assert!(!lossless.is_empty());
+    for loss in [LossModel::Bessel, LossModel::WideTube] {
+        let poles = super::extract_lossless_cylinder_poles(
+            &duct, &gas, loss, Termination::Closed, 2_000, None,
+        ).unwrap();
+        assert!(poles.is_empty());
+        let omega = core::f64::consts::PI * gas.sound_speed / length;
+        let wave = fs_duct::segment_wave(&gas, radius, omega, loss).unwrap();
+        assert!(wave.wavenumber.im * gas.sound_speed / omega < 1.0e-3);
+        assert!(wave.wavenumber.re * length > core::f64::consts::PI * (1.0 + 1e-5));
+    }
+    let result = realize_impedance_line(
+        &duct, &gas, LossModel::Bessel, Termination::Closed, 2_000, None,
+        &LineLadder { max_taps: 512, ..LineLadder::default() },
+    );
+    match result {
+        Err(DrivingPointError::LadderUnconverged { tail_energy, tail_tol, .. }) => {
+            assert!(tail_energy.is_finite() && tail_energy > tail_tol);
+        }
+        other => panic!("unresolved lossy ring-down was accepted: {other:?}"),
+    }
+    assert!(matches!(realize_impedance_line(
+        &duct, &gas, LossModel::WideTube, Termination::Closed, 2_000, None,
+        &LineLadder::default(),
+    ), Err(DrivingPointError::Invalid { .. })));
+}
+
 /// (a) G1/G2: 3 m conical horn at f_s = 48 kHz (`2L/c ≈ 839` samples):
 /// `realize_line` advances past `4096` to `>= 16384` taps, achieving
 /// `tail_energy < 1e-10` and first-three-peak shift `< 0.05` cents relative
@@ -303,9 +389,9 @@ fn tract_f2_converges() {
 
 /// (c) G1/G2: Closed 0.02 m cylinder of radius 0.005 m (`V = π r² L`):
 /// push a constant volume velocity `u0 = 1e-6 m^3/s` into `impedance_line`
-/// for `N = 4096` steps at `f_s = 48 kHz`; linear regression of `p(t)` over
-/// `[200, 4000]` samples has slope `(ρ c² / V) u0` within `1%`, and `p(N)`
-/// does not decay back toward zero.
+/// past its finite FIR history. The late slope is the Bessel ISOTHERMAL
+/// `(ρ c² / (γ V)) u0`, also checked against the original low-frequency TMM.
+/// Thermal relaxation must not leave a permanently adiabatic storage pole.
 #[test]
 fn closed_volume_compliance_retained() {
     let t0 = Instant::now();
@@ -316,11 +402,12 @@ fn closed_volume_compliance_retained() {
     let duct = Duct {
         segments: vec![Segment::Cylinder { radius, length }],
     };
-    let n_steps = 4096usize;
+    let n_fft = 4096usize;
+    let n_steps = 2 * n_fft;
     let u0 = 1.0e-6_f64;
     let dt = 1.0 / f64::from(RATE_HZ);
 
-    let mut line = impedance_line(&duct, &gas, Termination::Closed, RATE_HZ, n_steps, None)
+    let mut line = impedance_line(&duct, &gas, Termination::Closed, RATE_HZ, n_fft, None)
         .expect("closed 2 cm cavity realizes");
     assert!(
         line.compliance_gain() > 0.0,
@@ -332,20 +419,28 @@ fn closed_volume_compliance_retained() {
         p.push(line.push(u0).expect("step"));
     }
 
-    // Linear regression of p(t) over [200..=4000] against t = k * dt.
-    let slice = &p[200..=4000];
+    let static_gain = gas.density * gas.sound_speed * gas.sound_speed / (gas.gamma * volume);
+    let low_omega = 1.0e-3;
+    let low_response = input_impedance_wall(
+        &duct, &gas, low_omega, LossModel::Bessel, Termination::Closed, None,
+    ).unwrap();
+    assert!((low_omega * low_response.impedance.im / static_gain - 1.0).abs() < 1e-7);
+    assert!((line.compliance_gain() / static_gain - 1.0).abs() < 1e-14);
+
+    // The residual FIR is exhausted; only physical static storage can grow.
+    let slice = &p[n_fft..];
     let count = slice.len() as f64;
-    let mean_t = (200..=4000).map(|k| k as f64 * dt).sum::<f64>() / count;
+    let mean_t = (n_fft..n_steps).map(|k| k as f64 * dt).sum::<f64>() / count;
     let mean_p = slice.iter().sum::<f64>() / count;
     let mut num = 0.0_f64;
     let mut den = 0.0_f64;
     for (idx, &pk) in slice.iter().enumerate() {
-        let t = (200 + idx) as f64 * dt;
+        let t = (n_fft + idx) as f64 * dt;
         num += (t - mean_t) * (pk - mean_p);
         den += (t - mean_t) * (t - mean_t);
     }
     let observed_slope = num / den;
-    let expected_slope = (gas.density * gas.sound_speed * gas.sound_speed / volume) * u0;
+    let expected_slope = static_gain * u0;
     let rel_err = (observed_slope - expected_slope).abs() / expected_slope;
     let p_end = *p.last().expect("non-empty");
     let expected_p_end = expected_slope * (n_steps as f64 * dt);

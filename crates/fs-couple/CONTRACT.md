@@ -31609,3 +31609,32 @@ budget/source/cancellation/global-conservation refusal. These added native
 Rust tests have not been executed in this session: DSR and the executor are
 unavailable. Source review and independent floating-point balance algebra do
 not establish a native compilation or test pass.
+
+## Dispersive impedance resonance realization
+
+`driving_point::realize_impedance_line` retains explicit resonance states only
+for the analytic lossless rigid cylinder. A real-frequency viscothermal wave
+number does not identify a complex pole or its residue: Bessel dispersion and
+decay remain in the original TMM samples, rather than being replaced by an
+oscillator at the lossless frequency. Nested FFT rungs reuse even samples and
+measure the residual FIR's last-quarter energy and the first three peaks of
+the actual FIR-plus-compliance response. At least two measured rungs are needed
+for a finite peak-shift result. The original geometry, wall, radiation and gas
+refusals remain in force. The exact lossless modal path is unchanged.
+
+Both adaptive and explicit-size Bessel impedance callers retain the isothermal
+static gain `rho*c^2/(gamma*V)` for supported sealed rigid volumes. The public
+geometric helper still reports its documented adiabatic gain. The finite real
+part uses the original TMM's 1e-3 rad/s quasi-static probe; mouth-pressure
+transfers never receive a sealed-volume compliance state. Fixed-size callers
+retain an explicitly unqualified FFT length. The adaptive caller refuses
+unresolved high-Q decay or Nyquist truncation at its tap cap; no damping, gain
+repair or spectral taper makes that refusal disappear. `WideTube` is a
+high-shear approximation without admitted DC support and refuses this full-band
+realization; the Bessel owner is required instead. These sampled numerical
+checks do not certify passivity between samples, continuum error, all resonances
+or experimental acoustic validity.
+
+Focused G0/G1/G3 regressions cover a causal resonator's independent impulse
+response and peak, even-bin reuse, actual tail measurements, dispersive
+high-Q refusal, original Bessel isothermal storage and lossless ring-down.

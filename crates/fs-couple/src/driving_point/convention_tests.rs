@@ -91,15 +91,17 @@ fn energy_fractions(taps: &[f64], pre_end: usize) -> (f64, f64, f64) {
 /// Pinned `e^{-iωt}` DTFT on the realization FFT grid: `H(ω_k) = conj(DFT(h)[k])`,
 /// including the analytical `n >= N` step tail `c / (1 - e^{+i ω_k Δt})` when the line
 /// carries an explicit `PoleState::Compliance` integrator plateau `c = g_comp Δt`.
-fn dtft_grid_e_minus_iwt(taps: &[f64]) -> Vec<C64> {
+fn dtft_grid_e_minus_iwt(taps: &[f64], compliance_step: f64) -> Vec<C64> {
     let n = taps.len();
     let fft = Fft::new(n);
     let mut buf: Vec<FftC64> = taps.iter().map(|&x| FftC64::new(x, 0.0)).collect();
     let mut scratch = vec![FftC64::new(0.0, 0.0); n];
     fft.forward(&mut buf, &mut scratch);
     let mut out: Vec<C64> = buf.into_iter().map(|c| C64::new(c.re, -c.im)).collect();
-    if n >= 4 && out[0].re > n as f64 {
-        let c = out[0].re / (n as f64 - 0.5);
+    // A finite static resistance also contributes to the DC bin. It cannot
+    // be mistaken for unbounded compliance; use the original owner's gain.
+    if compliance_step > 0.0 {
+        let c = compliance_step;
         for (k, slot) in out.iter_mut().enumerate().take(n / 2).skip(1) {
             let half_theta = core::f64::consts::PI * k as f64 / n as f64;
             let cot = half_theta.cos() / half_theta.sin();
@@ -405,8 +407,8 @@ fn impedance_and_characteristic_lines_agree() {
 
         let z_taps = line_taps(&z_line, N_FFT);
         let r_taps = line_taps(&r_line, N_FFT);
-        let z_dtft = dtft_grid_e_minus_iwt(&z_taps);
-        let r_dtft = dtft_grid_e_minus_iwt(&r_taps);
+        let z_dtft = dtft_grid_e_minus_iwt(&z_taps, z_line.compliance_gain() * dt);
+        let r_dtft = dtft_grid_e_minus_iwt(&r_taps, r_line.compliance_gain() * dt);
 
         let mut worst_z_rel = 0.0f64;
         let mut worst_r_rel = 0.0f64;
@@ -489,8 +491,8 @@ fn impedance_line_closed_volume_compliance_low_band() {
     )
     .expect("closed 2 cm compliance cavity realizes");
     let taps = line_taps(&line, n_fft);
-    let z_dtft = dtft_grid_e_minus_iwt(&taps);
     let dt = 1.0 / f64::from(sample_rate_hz);
+    let z_dtft = dtft_grid_e_minus_iwt(&taps, line.compliance_gain() * dt);
     let bulk_modulus = gas.density * gas.sound_speed * gas.sound_speed;
 
     let mut worst_rel = 0.0f64;

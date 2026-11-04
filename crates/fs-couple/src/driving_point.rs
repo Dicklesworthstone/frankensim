@@ -27,9 +27,6 @@ use fs_vfit::discretize::{DelayedFilter, DiscretizeError, RealizeError, reflecta
 /// Passivity tolerance on the 4x-oversampled reflectance grid (`|R(e^{iωΔt})| <= 1 + 1e-12`).
 pub const PASSIVITY_TOL: f64 = 1.0e-12;
 
-/// Lightly-damped modal pole threshold (`σ / ω < 1e-3`) for explicit ZOH [`PoleState::Resonance`] extraction.
-pub const LIGHT_DAMPING_RATIO_MAX: f64 = 1.0e-3;
-
 /// The static reflection is supplied separately from positive-frequency bins.
 /// Tables have an explicit DC limit; they never extrapolate or splice a fit.
 #[derive(Clone, Copy)]
@@ -79,10 +76,11 @@ pub enum PoleState {
     /// `ω = 0` integrator for closed volumes (`p_comp[n+1] = p_comp[n] + gain * dt * u[n]`),
     /// peeled before the DFT so `Z(0)` is not zeroed.
     Compliance {
-        /// Static cavity stiffness gain `g_comp = ρ c² / V` [Pa / m³].
+        /// Static cavity stiffness [Pa/m³]: `ρ c² / V` for lossless gas,
+        /// `ρ c² / (γ V)` for the Bessel isothermal low-frequency limit.
         gain: f64,
     },
-    /// Lightly damped pole (`sigma / omega < 1e-3`) stepped by exact ZOH
+    /// An analytically established pole stepped by exact ZOH
     /// `z_{n+1} = exp((-sigma + i*omega)*dt) * z_n + ...` so ring-down length is independent of `n_fft`.
     Resonance {
         /// Angular frequency `ω` [rad/s].
@@ -1102,9 +1100,10 @@ pub(crate) fn characteristic_line_response_with_poles(
     Ok((line, realization))
 }
 
-/// Extract lightly-damped (`σ / ω < 1e-3`) normal-mode resonance poles below Nyquist
-/// for a uniform cylinder with rigid walls and `Closed` or `IdealOpen` termination.
-fn extract_lightly_damped_cylinder_poles(
+/// Exact lossless normal modes below Nyquist for a uniform rigid cylinder.
+/// Real-axis viscothermal wavenumbers do not determine complex poles or
+/// residues: those responses stay in the original frequency-domain owner.
+fn extract_lossless_cylinder_poles(
     physics: &Duct,
     gas: &GasState,
     loss: LossModel,
@@ -1112,7 +1111,8 @@ fn extract_lightly_damped_cylinder_poles(
     sample_rate_hz: u32,
     wall: Option<&WallPin>,
 ) -> Result<Vec<(f64, f64, C64)>, DrivingPointError> {
-    if wall.is_some()
+    if !matches!(loss, LossModel::Lossless)
+        || wall.is_some()
         || physics.segments.len() != 1
         || !matches!(termination, Termination::Closed | Termination::IdealOpen)
     {
@@ -1124,6 +1124,7 @@ fn extract_lightly_damped_cylinder_poles(
     if !(radius > 0.0 && length > 0.0 && radius.is_finite() && length.is_finite()) {
         return Ok(Vec::new());
     }
+    segment_wave(gas, radius, 1.0, LossModel::Lossless).map_err(DrivingPointError::Duct)?;
     let area = core::f64::consts::PI * radius * radius;
     let volume = area * length;
     let residue_re = gas.density * gas.sound_speed * gas.sound_speed / volume;
@@ -1147,11 +1148,7 @@ fn extract_lightly_damped_cylinder_poles(
         if omega_m >= 0.999 * omega_nyq {
             break;
         }
-        let wave = segment_wave(gas, radius, omega_m, loss).map_err(DrivingPointError::Duct)?;
-        let sigma_m = (wave.wavenumber.im * gas.sound_speed).max(0.0);
-        if sigma_m / omega_m < LIGHT_DAMPING_RATIO_MAX {
-            poles.push((omega_m, sigma_m, C64::from_re(residue_re)));
-        }
+        poles.push((omega_m, 0.0, C64::from_re(residue_re)));
     }
     Ok(poles)
 }
@@ -1159,8 +1156,17 @@ fn extract_lightly_damped_cylinder_poles(
 /// Realize a causal driving-point impedance line with explicit `PoleState::Compliance`
 /// and `PoleState::Resonance` decomposition and [`LineRealization`] receipt.
 ///
+/// Exact resonance states are available for the analytic lossless cylinder.
+/// Dispersive losses remain in the original TMM response. Its residual FIR
+/// doubles until measured tail energy and the first three response peaks agree
+/// between adjacent rungs. Every even frequency bin is reused. High-Q decay or
+/// Nyquist truncation that cannot fit the declared history refuses; no lossless
+/// frequency, fitted damping, taper, or fabricated convergence is substituted.
+/// `WideTube` has no admitted static limit and must use `Bessel` for this
+/// full-band time-domain realization.
+///
 /// # Errors
-/// Empty geometry, non-positive sample rate, TMM refusal, or discrete filter refusal.
+/// Invalid geometry/clock/ladder, TMM refusal, unresolved FIR, or discrete filter refusal.
 pub fn realize_impedance_line(
     physics: &Duct,
     gas: &GasState,
@@ -1181,13 +1187,17 @@ pub fn realize_impedance_line(
             what: "positive sample rate required",
         });
     }
+    if matches!(loss, LossModel::WideTube) {
+        return Err(DrivingPointError::Invalid {
+            what: "full-band impedance needs a DC-admissible loss law; use Bessel instead of WideTube",
+        });
+    }
     let max_taps = validate_ladder(ladder)?;
     let dt = 1.0 / f64::from(sample_rate_hz);
     let geo_delay = 2.0 * length / gas.sound_speed / dt;
 
-    let compliance_gain =
-        sealed_volume_compliance_gain(physics, gas, termination, wall).unwrap_or(0.0);
-    let resonance_poles = extract_lightly_damped_cylinder_poles(
+    let compliance_gain = impedance_compliance_gain(physics, gas, loss, termination, wall);
+    let resonance_poles = extract_lossless_cylinder_poles(
         physics,
         gas,
         loss,
@@ -1239,31 +1249,198 @@ pub fn realize_impedance_line(
         return Ok((line, realization));
     }
 
-    let line = build_impedance_filter(
-        physics,
-        gas,
-        loss,
-        termination,
-        dt,
-        n_fft,
-        wall,
-        compliance_gain,
-        &resonance_poles,
-    )?;
-    let taps = line.history();
-    let _ = taps;
-    let realization = LineRealization {
-        n_fft,
-        tail_energy: 0.0,
-        peak_shift_cents: 0.0,
-        pole_states,
-        rungs_tried: vec![LineRung {
-            n_fft,
-            tail_energy: 0.0,
-            peak_shift_cents: 0.0,
-        }],
+    let response_at = |omega| {
+        input_impedance_wall(physics, gas, omega, loss, termination, wall)
+            .map(|response| impedance_observable(response, termination))
     };
-    Ok((line, realization))
+    // Preserve the finite real part of the original quasi-static response;
+    // the singular imaginary compliance is carried by its explicit state.
+    let dc = response_at(1.0e-3).map_err(DrivingPointError::Duct)?.re;
+    realize_impedance_response(
+        geo_delay, dt, dc, compliance_gain, pole_states, ladder, response_at,
+    )
+}
+
+fn impedance_compliance_gain(
+    physics: &Duct, gas: &GasState, loss: LossModel,
+    termination: Termination, wall: Option<&WallPin>,
+) -> f64 {
+    let adiabatic = sealed_volume_compliance_gain(physics, gas, termination, wall)
+        .unwrap_or(0.0);
+    // The original Bessel thermal function tends to one at DC: the gas bulk
+    // modulus is rho*c^2/gamma, not its high-frequency adiabatic value.
+    if matches!(loss, LossModel::Bessel) { adiabatic / gas.gamma } else { adiabatic }
+}
+
+fn impedance_observable(response: DuctResponse, termination: Termination) -> C64 {
+    match termination {
+        Termination::Closed | Termination::IdealOpen => response.impedance,
+        Termination::UnflangedOpen
+        | Termination::UnflangedThinWall { .. }
+        | Termination::FlangedOpen => response.p_mouth_over_u_in,
+    }
+}
+
+/// The complete playback response, including its retained static storage.
+fn impedance_ir_response(ir: &[f64], dt: f64, compliance_gain: f64, omega: f64) -> C64 {
+    let theta = omega * dt;
+    let (sin_step, cos_step) = fs_math::det::sin_cos(theta);
+    let mut phase = C64::ONE;
+    let step = C64::new(cos_step, sin_step);
+    let mut response = C64::ZERO;
+    for (index, &tap) in ir.iter().enumerate() {
+        if index != 0 && index.is_multiple_of(64) {
+            let (sine, cosine) = fs_math::det::sin_cos(theta * index as f64);
+            phase = C64::new(cosine, sine);
+        }
+        response = response + phase.scale(tap);
+        phase = phase * step;
+    }
+    if compliance_gain > 0.0 {
+        let (sine, cosine) = fs_math::det::sin_cos(0.5 * theta);
+        response.im += 0.5 * compliance_gain * dt * cosine / sine;
+    }
+    response
+}
+
+// Fourfold zero padding locates peaks of the ACTUAL FIR + compliance response.
+// Refinement reads its continuous DTFT, not the samples that authored the FIR.
+// This is a finite sampled peak check, not a proof of spectrum completeness.
+fn impedance_ir_peaks(
+    ir: &[f64], dt: f64, compliance_gain: f64,
+) -> Result<Vec<f64>, DrivingPointError> {
+    let count = 4 * ir.len();
+    let fft = Fft::new(count);
+    let mut data = vec![FftC64::new(0.0, 0.0); count];
+    let scale = ir.iter().map(|value| value.abs()).fold(0.0_f64, f64::max)
+        .max(compliance_gain * dt);
+    if scale == 0.0 {
+        return Ok(Vec::new());
+    }
+    if !scale.is_finite() {
+        return Err(DrivingPointError::Invalid { what: "unrepresentable impedance response scale" });
+    }
+    for (entry, &value) in data.iter_mut().zip(ir) {
+        entry.re = value / scale;
+    }
+    let mut scratch = vec![FftC64::new(0.0, 0.0); count];
+    fft.forward(&mut data, &mut scratch);
+    let spacing = core::f64::consts::TAU / (count as f64 * dt);
+    let mut amplitude = vec![0.0; count / 2 + 1];
+    for index in 1..=count / 2 {
+        let mut value = C64::new(data[index].re, -data[index].im);
+        if compliance_gain > 0.0 {
+            let (sine, cosine) = fs_math::det::sin_cos(core::f64::consts::PI * index as f64 / count as f64);
+            value.im += 0.5 * (compliance_gain * dt / scale) * cosine / sine;
+        }
+        amplitude[index] = value.abs();
+        if !amplitude[index].is_finite() {
+            return Err(DrivingPointError::Invalid { what: "nonfinite impedance peak response" });
+        }
+    }
+    let mut peaks = Vec::with_capacity(3);
+    for index in 2..count / 2 {
+        if amplitude[index] <= amplitude[index - 1]
+            || amplitude[index] <= amplitude[index + 1]
+        {
+            continue;
+        }
+        let mut left = (index - 1) as f64 * spacing;
+        let mut right = (index + 1) as f64 * spacing;
+        let ratio = 0.5 * (5.0_f64.sqrt() - 1.0);
+        let mut a = right - ratio * (right - left);
+        let mut b = left + ratio * (right - left);
+        let mut fa = impedance_ir_response(ir, dt, compliance_gain, a).abs();
+        let mut fb = impedance_ir_response(ir, dt, compliance_gain, b).abs();
+        for _ in 0..32 {
+            if fa >= fb {
+                right = b;
+                b = a;
+                fb = fa;
+                a = right - ratio * (right - left);
+                fa = impedance_ir_response(ir, dt, compliance_gain, a).abs();
+            } else {
+                left = a;
+                a = b;
+                fa = fb;
+                b = left + ratio * (right - left);
+                fb = impedance_ir_response(ir, dt, compliance_gain, b).abs();
+            }
+        }
+        if !fa.is_finite() || !fb.is_finite() {
+            return Err(DrivingPointError::Invalid { what: "nonfinite refined impedance response" });
+        }
+        peaks.push(f64::midpoint(left, right) / core::f64::consts::TAU);
+        if peaks.len() == 3 { break; }
+    }
+    Ok(peaks)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn realize_impedance_response(
+    geo_delay: f64, dt: f64, dc_impedance: f64, compliance_gain: f64,
+    pole_states: Vec<PoleState>, ladder: &LineLadder,
+    mut response_at: impl FnMut(f64) -> Result<C64, DuctError>,
+) -> Result<(DelayedFilter, LineRealization), DrivingPointError> {
+    let max_taps = validate_ladder(ladder)?;
+    if !geo_delay.is_finite() || geo_delay <= 0.0 || !dc_impedance.is_finite() {
+        return Err(DrivingPointError::Invalid { what: "finite positive delay and finite static response required" });
+    }
+    let initial = ((4.0 * geo_delay).ceil().min(max_taps as f64) as usize)
+        .max(256).next_power_of_two().min(max_taps);
+    let mut count = initial.min((max_taps / 2).max(256));
+    let mut samples: Vec<C64> = Vec::new();
+    let mut previous_peaks: Vec<f64> = Vec::new();
+    let mut rungs = Vec::new();
+    loop {
+        let mut next = vec![C64::ZERO; count / 2 + 1];
+        next[0] = C64::from_re(dc_impedance);
+        if samples.is_empty() {
+            for (index, value) in next.iter_mut().enumerate().skip(1) {
+                *value = response_at(core::f64::consts::TAU * index as f64 / (count as f64 * dt))?;
+            }
+        } else {
+            for (index, &value) in samples.iter().enumerate() { next[2 * index] = value; }
+            for index in (1..count / 2).step_by(2) {
+                next[index] = response_at(core::f64::consts::TAU * index as f64 / (count as f64 * dt))?;
+            }
+        }
+        samples = next;
+        let ir = impedance_ir_from_spectrum(dt, &samples, compliance_gain, &[])?;
+        let scale = ir.iter().map(|value| value.abs()).fold(0.0_f64, f64::max);
+        let tail_energy = if scale > 0.0 {
+            let total: f64 = ir.iter().map(|value| (value / scale).powi(2)).sum();
+            let tail: f64 = ir[3 * (count / 4)..].iter().map(|value| (value / scale).powi(2)).sum();
+            tail / total
+        } else { 0.0 };
+        let peaks = impedance_ir_peaks(&ir, dt, compliance_gain)?;
+        let peak_shift_cents = if rungs.is_empty() || peaks.len() != previous_peaks.len() {
+            f64::INFINITY
+        } else {
+            previous_peaks.iter().zip(&peaks)
+                .map(|(&a, &b)| (1200.0 * (b / a).log2()).abs())
+                .fold(0.0_f64, f64::max)
+        };
+        rungs.push(LineRung { n_fft: count, tail_energy, peak_shift_cents });
+        if count as f64 > geo_delay + 2.0
+            && tail_energy < ladder.tail_tol && peak_shift_cents < ladder.peak_tol_cents
+        {
+            let line = DelayedFilter::from_impulse_response(dt, ir)
+                .and_then(|line| line.with_exact_poles(compliance_gain, &[]))
+                .map_err(DrivingPointError::Discrete)?;
+            return Ok((line, LineRealization {
+                n_fft: count, tail_energy, peak_shift_cents, pole_states, rungs_tried: rungs,
+            }));
+        }
+        if count == max_taps {
+            return Err(DrivingPointError::LadderUnconverged {
+                max_taps, tail_energy, tail_tol: ladder.tail_tol,
+                peak_shift_cents, peak_tol_cents: ladder.peak_tol_cents,
+            });
+        }
+        previous_peaks = peaks;
+        count *= 2;
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1278,15 +1455,12 @@ fn build_impedance_filter(
     compliance_gain: f64,
     resonance_poles: &[(f64, f64, C64)],
 ) -> Result<DelayedFilter, DrivingPointError> {
-    build_impedance_response_filter(dt, n_fft, 0.0, compliance_gain, resonance_poles, |omega| {
-        let response = input_impedance_wall(physics, gas, omega, loss, termination, wall)?;
-        Ok(match termination {
-            Termination::Closed | Termination::IdealOpen => response.impedance,
-            Termination::UnflangedOpen
-            | Termination::UnflangedThinWall { .. }
-            | Termination::FlangedOpen => response.p_mouth_over_u_in,
-        })
-    })
+    let response_at = |omega| {
+        input_impedance_wall(physics, gas, omega, loss, termination, wall)
+            .map(|response| impedance_observable(response, termination))
+    };
+    let dc = response_at(1.0e-3).map_err(DrivingPointError::Duct)?.re;
+    build_impedance_response_filter(dt, n_fft, dc, compliance_gain, resonance_poles, response_at)
 }
 
 fn build_impedance_response_filter(
@@ -1294,6 +1468,26 @@ fn build_impedance_response_filter(
     resonance_poles: &[(f64, f64, C64)],
     mut response_at: impl FnMut(f64) -> Result<C64, DuctError>,
 ) -> Result<DelayedFilter, DrivingPointError> {
+    let mut samples = vec![C64::ZERO; n_fft / 2 + 1];
+    samples[0] = C64::from_re(dc_impedance);
+    for (index, sample) in samples.iter_mut().enumerate().skip(1) {
+        let omega = core::f64::consts::TAU * index as f64 / (n_fft as f64 * dt);
+        *sample = response_at(omega).map_err(DrivingPointError::Duct)?;
+    }
+    let ir = impedance_ir_from_spectrum(dt, &samples, compliance_gain, resonance_poles)?;
+    DelayedFilter::from_impulse_response(dt, ir)
+        .and_then(|f| f.with_exact_poles(compliance_gain, resonance_poles))
+        .map_err(DrivingPointError::Discrete)
+}
+
+fn impedance_ir_from_spectrum(
+    dt: f64, samples: &[C64], compliance_gain: f64,
+    resonance_poles: &[(f64, f64, C64)],
+) -> Result<Vec<f64>, DrivingPointError> {
+    if samples.iter().any(|value| !value.re.is_finite() || !value.im.is_finite()) {
+        return Err(DrivingPointError::Invalid { what: "nonfinite original impedance sample" });
+    }
+    let n_fft = 2 * (samples.len() - 1);
     // Prepare the SAME coefficients that the committing playback owner uses.
     // The four zero taps merely satisfy its FIR-port shape; no output is sampled
     // and no history is advanced while evaluating the response below.
@@ -1304,10 +1498,10 @@ fn build_impedance_response_filter(
     let mut buf = vec![FftC64::new(0.0, 0.0); n_fft];
     let pole_dc = pole_response.resonance_response_e_minus_iwt(0.0)
         .map_err(DrivingPointError::Discrete)?;
-    buf[0] = FftC64::new(dc_impedance - pole_dc.re, 0.0);
+    buf[0] = FftC64::new(samples[0].re - pole_dc.re, 0.0);
     for k in 1..=n_fft / 2 {
         let omega = core::f64::consts::TAU * k as f64 / (n_fft as f64 * dt);
-        let mut z = response_at(omega).map_err(DrivingPointError::Duct)?;
+        let mut z = samples[k];
         if compliance_gain > 0.0 && k < n_fft / 2 {
             // Peel the discrete trapezoidal compliance integrator:
             // Z_comp(ω_k) = +i (g_comp * dt / 2) cot(ω_k dt / 2) under e^{-iωt}.
@@ -1327,15 +1521,17 @@ fn build_impedance_response_filter(
     let mut scratch = vec![FftC64::new(0.0, 0.0); n_fft];
     fft.inverse(&mut buf, &mut scratch);
     let ir: Vec<f64> = buf.iter().map(|c| c.re).collect();
-    DelayedFilter::from_impulse_response(dt, ir)
-        .and_then(|f| f.with_exact_poles(compliance_gain, resonance_poles))
-        .map_err(DrivingPointError::Discrete)
+    if ir.iter().any(|value| !value.is_finite()) {
+        return Err(DrivingPointError::Invalid { what: "nonfinite impedance impulse response" });
+    }
+    Ok(ir)
 }
 
 /// Causal driving-point impedance as the same FIR + pole-state port object.
 ///
 /// Samples `Z(ω)` (closed) or the mouth transfer `p/u` (open) on the
-/// DFT grid of the run, peeling `PoleState::Compliance` (`g_comp = ρ c² / V`)
+/// DFT grid of the run, peeling the Bessel isothermal `PoleState::Compliance`
+/// (`g_comp = ρ c² / (γ V)`)
 /// before the IFFT for sealed cavities so a closed volume retains its static
 /// compliance without `1/(iω)` wrap-around aliasing. Like [`characteristic_line`],
 /// TMM `Z` (`e^{-iωt}`) is conjugated onto the DFT grid (`e^{+iωt}`) so the
@@ -1368,8 +1564,9 @@ pub fn impedance_line<'a>(
     }
     let dt = 1.0 / f64::from(sample_rate_hz);
     let n_fft = n.clamp(256, 8192).next_power_of_two();
-    let compliance_gain =
-        sealed_volume_compliance_gain(physics, gas, termination, wall).unwrap_or(0.0);
+    let compliance_gain = impedance_compliance_gain(
+        physics, gas, LossModel::Bessel, termination, wall,
+    );
     build_impedance_filter(
         physics,
         gas,
