@@ -1,0 +1,28 @@
+frankensim.matdb-source.v1
+observation	identity	Pure crystalline scorodite FeAsO4.2H2O, NMK2014 reference	Nordstrom, Majzlan and Konigsberger (2014), Table 9 p. 229	This is bulk crystalline scorodite with ferric iron and As(V), including exactly two waters of crystallization per FeAsO4. The reference is not amorphous ferric arsenate, parascorodite, kankite, a surface precipitate or an arsenic-bearing tailings specimen. The pure solid has unit activity when present.
+observation	standard	Selected formation Gibbs energy at 298.15 K and 1 bar	https://doi.org/10.2138/rmg.2014.79.4, Table 9	The printed standard molar formation Gibbs energy is -1284.8 +/- 2.9 kJ/mol, attributed by the review to Majzlan et al. (2012a). The separate source-reported-formation-gibbs-uncertainty scalar preserves the printed plus/minus magnitude without assuming a probability distribution, guaranteed interval or cross-species covariance. Runtime uncertainty remains Unstated. No enthalpy, entropy or heat-capacity claim is made by this pack.
+observation	scope	A selected solid phase and explicitly matched dissolution reaction	https://doi.org/10.2138/rmg.2014.79.4, pp. 229-232, equations 10-14	Both claims require source-elemental-reference-nmk2014, source-phase-scorodite and source-arsenic-oxidation-state-v. The standard dissolution reaction is FeAsO4.2H2O(cr) -> Fe3+(aq) + AsO4(3-)(aq) + 2 H2O(l). Match the review's four arsenate states, Fe3+ and CODATA water values. Competing Fe(III) oxyhydroxides can cause incongruent dissolution at pH above about 2 to 4; crystal size, aging and preparation affect observed solubility. An ideal model selecting only scorodite does not predict these effects, total mine-water solubility, precipitation kinetics, permanent fixation or plant removal yield. No temperature extrapolation is supplied.
+scalar	formation-gibbs-energy	identity,standard,scope	gf	-1284.8	kJ/mol	tabulated
+scalar	formation-gibbs-source-uncertainty	identity,standard,scope	gf_error	2.9	kJ/mol	tabulated
+uncertainty	formation-gibbs-energy	unstated	-	-	-	-
+uncertainty	formation-gibbs-source-uncertainty	unstated	-	-	-	-
+validity	formation-gibbs-energy	temperature	298.15	298.15	K
+validity	formation-gibbs-source-uncertainty	temperature	298.15	298.15	K
+validity	formation-gibbs-energy	pressure	100000	100000	Pa
+validity	formation-gibbs-source-uncertainty	pressure	100000	100000	Pa
+validity	formation-gibbs-energy	standard	1	1	1
+validity	formation-gibbs-source-uncertainty	standard	1	1	1
+validity	formation-gibbs-energy	convention	1	1	1
+validity	formation-gibbs-source-uncertainty	convention	1	1	1
+validity	formation-gibbs-energy	phase	1	1	1
+validity	formation-gibbs-source-uncertainty	phase	1	1	1
+validity	formation-gibbs-energy	pure	1	1	1
+validity	formation-gibbs-source-uncertainty	pure	1	1	1
+validity	formation-gibbs-energy	mineral	1	1	1
+validity	formation-gibbs-source-uncertainty	mineral	1	1	1
+validity	formation-gibbs-energy	oxidation	1	1	1
+validity	formation-gibbs-source-uncertainty	oxidation	1	1	1
+validity	formation-gibbs-energy	reference	1	1	1
+validity	formation-gibbs-source-uncertainty	reference	1	1	1
+validity	formation-gibbs-energy	specimen	0	0	1
+validity	formation-gibbs-source-uncertainty	specimen	0	0	1

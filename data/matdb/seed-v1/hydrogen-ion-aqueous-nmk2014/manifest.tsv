@@ -1,0 +1,17 @@
+frankensim.matdb-manifest.v3
+pack_id	hydrogen-ion-aqueous-nmk2014
+redistribution	permitted	Attributed numerical facts and original notes only; no source document or table layout is redistributed
+citation	Cox, Wagman and Medvedev (1989), CODATA Key Values for Thermodynamics; official selected values https://codata.info/resources/databases/key1.html (HTML sha256 88049de2c7700bf44d233dacee019ac70c9b46ad280596270ebb3d5d0235d460). Conventional zero Gibbs reference: Grenthe et al., Chemical Thermodynamics of Uranium, OECD Nuclear Energy Agency, Table IV.1 p. 64, H+ row; https://cms.oecd-nea.org/upload/docs/application/pdf/2019-12/uranium.pdf. Matched aqueous reference: Nordstrom, Majzlan and Konigsberger (2014), Tables 8-9 and p. 229, https://doi.org/10.2138/rmg.2014.79.4; accessed 2026-11-04
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	nmk2014-codata-auxiliary	properties.tsv	material-tsv-v1
+property	gf	standard-molar-formation-gibbs-energy	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	pressure	pressure	pressure
+axis	standard	source-standard-state	dimensional
+axis	convention	source-elemental-reference-nmk2014	dimensional
+axis	phase	source-phase-aqueous	dimensional
+axis	aqueous	source-aqueous-unit-activity-infinite-dilution	dimensional
+axis	ionic	source-ionic-reference-hydrogen-zero	dimensional
+axis	individual	source-individual-ion	dimensional
+axis	reference	engineering-reference-model	dimensional
+axis	specimen	source-specimen-qualified	dimensional

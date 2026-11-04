@@ -1,0 +1,16 @@
+frankensim.matdb-source.v1
+observation	identity	Conventional aqueous hydrogen ion H+, CODATA auxiliary for NMK2014	Cox, Wagman and Medvedev (1989); OECD NEA Chemical Thermodynamics of Uranium, Table IV.1 p. 64	This is the aqueous individual-ion thermodynamic reference H+(aq), with unit activity referenced to infinite dilution. It is not gaseous atomic hydrogen, molecular hydrogen or a measured stock-acid concentration.
+observation	standard	Conventional zero formation Gibbs energy at 298.15 K and 1 bar	https://cms.oecd-nea.org/upload/docs/application/pdf/2019-12/uranium.pdf, Table IV.1 p. 64	The source prints formation Gibbs energy 0.000 kJ/mol for H+(aq). The zero defines the conventional individual-ion scale and is not a measurement with an experimentally estimated error. No source-reported-formation-gibbs-uncertainty scalar is invented for it. The schema uncertainty is Unstated, with the defining-convention meaning retained here.
+observation	scope	Matched individual-ion reference	https://doi.org/10.2138/rmg.2014.79.4, Tables 8-9; https://codata.info/resources/databases/key1.html	This point claim requires source-elemental-reference-nmk2014 and both individual-ion reference flags. It anchors the matched arsenate protonation and water autoprotolysis calculations; it does not define solution pH without an activity or concentration model and a charge/stock account. No temperature extrapolation is supplied.
+scalar	formation-gibbs-energy	identity,standard,scope	gf	0.000	kJ/mol	tabulated
+uncertainty	formation-gibbs-energy	unstated	-	-	-	-
+validity	formation-gibbs-energy	temperature	298.15	298.15	K
+validity	formation-gibbs-energy	pressure	100000	100000	Pa
+validity	formation-gibbs-energy	standard	1	1	1
+validity	formation-gibbs-energy	convention	1	1	1
+validity	formation-gibbs-energy	phase	1	1	1
+validity	formation-gibbs-energy	aqueous	1	1	1
+validity	formation-gibbs-energy	ionic	1	1	1
+validity	formation-gibbs-energy	individual	1	1	1
+validity	formation-gibbs-energy	reference	1	1	1
+validity	formation-gibbs-energy	specimen	0	0	1

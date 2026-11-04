@@ -1,0 +1,28 @@
+frankensim.matdb-source.v1
+observation	identity	Aqueous hydroxide OH-, CODATA auxiliary for NMK2014	Cox, Wagman and Medvedev (1989); OECD NEA Chemical Thermodynamics of Uranium, Table IV.1 p. 64	This is the free individual hydroxide ion OH-(aq), not a metal hydroxide solid, a hydroxo complex or a commercial caustic solution. It uses the conventional H+(aq)=0 ionic reference and aqueous unit activity referenced to infinite dilution.
+observation	standard	CODATA-derived formation Gibbs energy and stated uncertainty	https://cms.oecd-nea.org/upload/docs/application/pdf/2019-12/uranium.pdf, Table IV.1 p. 64; https://codata.info/resources/databases/key1.html	The NEA table prints standard molar formation Gibbs energy -157.220 +/- 0.072 kJ/mol and identifies it as internally calculated, rounded to three decimal places. Its heading says the listed errors are total uncertainties corresponding in principle to a statistical 95 percent confidence interval. The main Gibbs claim therefore carries an absolute half-width of 0.072 kJ/mol at confidence 0.95, preserving that qualification. The separate source-reported-formation-gibbs-uncertainty scalar retains the literal magnitude, with no uncertainty-on-uncertainty invented. No normal distribution or cross-species covariance is asserted.
+observation	scope	CODATA hydroxide for the matched water autoprotolysis account	https://doi.org/10.2138/rmg.2014.79.4, p. 229; https://codata.info/resources/databases/key1.html	The source-elemental-reference-nmk2014 flag identifies compatible auxiliary use with the NMK2014 selection. CODATA gives OH- formation enthalpy -230.015 kJ/mol and conventional entropy -10.900 J/(mol K); with the compatible water and elemental references these imply -157.2198886 kJ/mol before source rounding. The pack retains the published rounded Gibbs value only. H2O(l) -> H+ + OH- gives 79.920 kJ/mol from the matched rounded values. This supplies no nonideal electrolyte correction or temperature extrapolation.
+scalar	formation-gibbs-energy	identity,standard,scope	gf	-157.220	kJ/mol	tabulated
+scalar	formation-gibbs-source-uncertainty	identity,standard,scope	gf_error	0.072	kJ/mol	tabulated
+uncertainty	formation-gibbs-energy	absolute	0.072	kJ/mol	0.95	1
+uncertainty	formation-gibbs-source-uncertainty	unstated	-	-	-	-
+validity	formation-gibbs-energy	temperature	298.15	298.15	K
+validity	formation-gibbs-source-uncertainty	temperature	298.15	298.15	K
+validity	formation-gibbs-energy	pressure	100000	100000	Pa
+validity	formation-gibbs-source-uncertainty	pressure	100000	100000	Pa
+validity	formation-gibbs-energy	standard	1	1	1
+validity	formation-gibbs-source-uncertainty	standard	1	1	1
+validity	formation-gibbs-energy	convention	1	1	1
+validity	formation-gibbs-source-uncertainty	convention	1	1	1
+validity	formation-gibbs-energy	phase	1	1	1
+validity	formation-gibbs-source-uncertainty	phase	1	1	1
+validity	formation-gibbs-energy	aqueous	1	1	1
+validity	formation-gibbs-source-uncertainty	aqueous	1	1	1
+validity	formation-gibbs-energy	ionic	1	1	1
+validity	formation-gibbs-source-uncertainty	ionic	1	1	1
+validity	formation-gibbs-energy	individual	1	1	1
+validity	formation-gibbs-source-uncertainty	individual	1	1	1
+validity	formation-gibbs-energy	reference	1	1	1
+validity	formation-gibbs-source-uncertainty	reference	1	1	1
+validity	formation-gibbs-energy	specimen	0	0	1
+validity	formation-gibbs-source-uncertainty	specimen	0	0	1

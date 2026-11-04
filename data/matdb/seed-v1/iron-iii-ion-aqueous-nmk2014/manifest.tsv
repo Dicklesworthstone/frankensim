@@ -1,0 +1,18 @@
+frankensim.matdb-manifest.v3
+pack_id	iron-iii-ion-aqueous-nmk2014
+redistribution	permitted	Attributed numerical facts and original notes only; no source document or table layout is redistributed
+citation	Nordstrom, Majzlan and Konigsberger (2014), Reviews in Mineralogy and Geochemistry 79, 217-255, Table 9 p. 229; https://doi.org/10.2138/rmg.2014.79.4; author-deposited full text https://www.researchgate.net/publication/267751439_Thermodynamic_Properties_for_Arsenic_Minerals_and_Aqueous_Species (PDF sha256 1a63faf42405186c1cbacf10a2bf9a989022eb8efbf8c4702b5ebedc5f41c2c0). Adopted from Parker and Khodakovsky (1995), Thermodynamic Properties of the Aqueous Ions (2+ and 3+) of Iron and the Key Compounds of Iron, JPCRD 24, 1699-1745; https://doi.org/10.1063/1.555964; https://srd.nist.gov/jpcrdreprint/1.555964.pdf (sha256 ff7f8aee30aac01e8f42a89c579ddd1c6df5ec39fc82b91e2d8992e435335bef); accessed 2026-11-04
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	nmk2014-standard-reference	properties.tsv	material-tsv-v1
+property	gf	standard-molar-formation-gibbs-energy	dimensional
+property	gf_error	source-reported-formation-gibbs-uncertainty	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	pressure	pressure	pressure
+axis	standard	source-standard-state	dimensional
+axis	convention	source-elemental-reference-nmk2014	dimensional
+axis	phase	source-phase-aqueous	dimensional
+axis	aqueous	source-aqueous-unit-activity-infinite-dilution	dimensional
+axis	ionic	source-ionic-reference-hydrogen-zero	dimensional
+axis	individual	source-individual-ion	dimensional
+axis	reference	engineering-reference-model	dimensional
+axis	specimen	source-specimen-qualified	dimensional

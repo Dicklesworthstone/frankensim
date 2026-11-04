@@ -1,0 +1,26 @@
+frankensim.matdb-source.v1
+observation	identity	Neutral aqueous arsenic acid H3AsO4, As(V), NMK2014 reference	Nordstrom, Majzlan and Konigsberger (2014), Table 8 p. 227	This is the undissociated aqueous As(V) acid, not total dissolved arsenic, an arsenate ion, arsenous acid or a solid. The thermodynamic standard is aqueous unit activity referenced to infinite dilution.
+observation	standard	Evaluated formation Gibbs energy at 298.15 K and 1 bar	https://doi.org/10.2138/rmg.2014.79.4, Table 8	The printed standard molar formation Gibbs energy is -766.420 +/- 0.35 kJ/mol. The separate source-reported-formation-gibbs-uncertainty scalar preserves the printed plus/minus magnitude, not a probability distribution, guaranteed interval or propagated reaction uncertainty. The review does not assign a common confidence level or cross-species covariance to these selected rows; both runtime uncertainty models remain Unstated.
+observation	scope	Matched NMK2014 aqueous arsenate and scorodite reference	https://doi.org/10.2138/rmg.2014.79.4, pp. 229-232	Both claims require source-elemental-reference-nmk2014 and source-arsenic-oxidation-state-v. This evaluated family uses the review's own arsenate selection, Parker and Khodakovsky (1995) Fe3+, and CODATA (1989) water auxiliary values. Do not substitute NBS arsenate values or a scorodite solubility product derived with a different arsenate selection. This point Gibbs reference supplies no temperature extrapolation, reaction rate or plant arsenic-removal yield.
+scalar	formation-gibbs-energy	identity,standard,scope	gf	-766.420	kJ/mol	tabulated
+scalar	formation-gibbs-source-uncertainty	identity,standard,scope	gf_error	0.35	kJ/mol	tabulated
+uncertainty	formation-gibbs-energy	unstated	-	-	-	-
+uncertainty	formation-gibbs-source-uncertainty	unstated	-	-	-	-
+validity	formation-gibbs-energy	temperature	298.15	298.15	K
+validity	formation-gibbs-source-uncertainty	temperature	298.15	298.15	K
+validity	formation-gibbs-energy	pressure	100000	100000	Pa
+validity	formation-gibbs-source-uncertainty	pressure	100000	100000	Pa
+validity	formation-gibbs-energy	standard	1	1	1
+validity	formation-gibbs-source-uncertainty	standard	1	1	1
+validity	formation-gibbs-energy	convention	1	1	1
+validity	formation-gibbs-source-uncertainty	convention	1	1	1
+validity	formation-gibbs-energy	phase	1	1	1
+validity	formation-gibbs-source-uncertainty	phase	1	1	1
+validity	formation-gibbs-energy	aqueous	1	1	1
+validity	formation-gibbs-source-uncertainty	aqueous	1	1	1
+validity	formation-gibbs-energy	oxidation	1	1	1
+validity	formation-gibbs-source-uncertainty	oxidation	1	1	1
+validity	formation-gibbs-energy	reference	1	1	1
+validity	formation-gibbs-source-uncertainty	reference	1	1	1
+validity	formation-gibbs-energy	specimen	0	0	1
+validity	formation-gibbs-source-uncertainty	specimen	0	0	1
