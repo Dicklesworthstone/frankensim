@@ -9628,7 +9628,7 @@ must retain the original coefficients' full solution and operating support.
 `osmosis::solubility::FiniteSolubilitySolution` composes the original L1
 `IdealSolubilityV1` pair laws with the shared dissolved-particle thermodynamics.
 It retains 1–64 explicit neutral components sharing one solvent, each with a
-fixed total and separate dissolved/solid amounts. Only dissolved particles
+current total and separate dissolved/solid amounts. Only dissolved particles
 contribute to osmotic pressure and water activity. Pure-solvent removal can
 precipitate excess solute; dilution redissolves the same finite solid stock,
 including complete solid exhaustion. The dissolved-only `AqueousSolution` API
@@ -9658,10 +9658,39 @@ and unchanged state after invalid, shared-storage or water-activity refusal.
 The model assumes independent nonreacting neutral solutes, instantaneous
 equilibrium, negligible solute/solid volume and an incompressible solvent.
 It does not supply electrolyte dissociation, common-ion or pH chemistry,
-nonideal activities, mixed crystals, hydrate water, nucleation/rate laws or
-heat feedback. Caller-declared pair parameters retain their original numerical
+nonideal activities, mixed crystals, hydrate water or nucleation/rate laws.
+Energy-balanced updates require the explicit caloric adapter below.
+Caller-declared pair parameters retain their original numerical
 authority; the constructor does not authenticate measured solubility data.
 
+
+### Energy-balanced finite material solutions
+
+`FiniteSolubilitySolution::add_heat` connects the current material reservoir to
+the original L1 `SolubilityCaloricModelV1`. It requires exact agreement on solvent
+identity, incompressible molar volume, ordered components and every original
+solubility-law parameter. It prepares the live dissolved and TOTAL inventories,
+including stocks already changed by membrane transport, and preserves the
+original solvent volume exactly. Positive or negative heat is closed by the
+shared thermal owner; the returned material solution is repartitioned at that
+solved temperature using the same original laws and stocks.
+
+`FiniteSolubilityHeatStep` carries both the accepted material endpoint and the
+original first-law balance. Aqueous concentrations, osmotic pressure and water
+activity therefore follow the new temperature and dissolved amounts. The
+operation borrows its input and publishes nothing on incompatible sources,
+unsupported heat, original material refusal or late cancellation. Ownership
+can be moved out of the result for subsequent material evolution without
+copying the accepted phase inventories.
+
+This adapter adds no caloric constitutive law or transport integrator. It uses
+the L1 owner's explicit common solid/dissolved Cp assumption, instantaneous
+independent neutral-solute equilibrium and fixed-pressure, fixed-volume
+incompressible-solvent convention. It does not claim simultaneous thermal
+membrane transport or variable-pressure work. Four focused regressions check
+independent sensible-plus-dissolution heat across exhaustion and recrystallization,
+updated transported stocks, exact solvent volume, consistency of both accepted
+views, source incompatibility, unsupported heat and transactional cancellation.
 
 ## Shared cavitation coefficients and frozen mixture acoustics
 

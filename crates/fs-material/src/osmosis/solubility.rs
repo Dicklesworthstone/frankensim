@@ -10,8 +10,12 @@
 //! The independent pair approximation excludes electrolyte dissociation,
 //! common-ion effects, chemical reactions, mixed crystals, nonideal activities,
 //! solute partial volumes and crystal water. Equilibrium is instantaneous: this
-//! owner supplies neither nucleation nor dissolution rates or heat feedback.
+//! owner supplies neither nucleation nor dissolution rates. The caloric adapter
+//! closes phase-change heat with explicitly declared compatible heat capacities.
 //! Numerical pair parameters do not establish measured material authority.
+
+/// Energy-balanced heating and cooling of the original finite phase owner.
+pub mod caloric;
 
 use std::sync::Arc;
 
