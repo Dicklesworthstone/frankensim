@@ -20,6 +20,107 @@ const MODAL_OMEGA: f64 = 1800.0;
 const MODAL_DRAG: f64 = 3.0;
 const TERMINAL_OMEGA: f64 = 1300.0;
 
+pub(super) fn pole_preparation() -> super::poles::DgPolePreparation {
+    super::poles::DgPolePreparation { reference_rate_per_s: 1800.0,
+        maximum_dimension: 256, maximum_payload_bytes: 64 << 20,
+        maximum_work: 100_000_000 }
+}
+pub(super) fn pole_options() -> super::poles::PoleOptions {
+    super::poles::PoleOptions { spectral_scale: 1800.0, step_tolerance: 1e-12,
+        residual_tolerance: 1e-11, max_iterations: 32, max_dimension: 256,
+        max_dense_bytes: 64 << 20, max_work: 1_000_000_000 }
+}
+
+#[test]
+fn matched_terminal_pole_converges_to_the_physical_loaded_oscillator() {
+    // G1: a uniform duct terminated by its characteristic impedance presents
+    // Zc at the inlet. The physical oscillator has c=MODAL_DRAG+b^2*Zc;
+    // solve that quadratic directly, with no peak/linewidth-to-pole conversion.
+    let gate = CancelGate::new_clock_free();
+    let system = oscillator();
+    let (zc, _, _, column) = coefficients();
+    let rate = 0.5 * (MODAL_DRAG + column * column * zc);
+    let expected = C64::new(-rate, -det::sqrt(MODAL_OMEGA.powi(2) - rate * rate));
+    let mut errors = Vec::new();
+    for elements in [1, 2, 4] {
+        let source = MimoModel { ports: 1, poles: vec![], residues: vec![],
+            d: vec![zc], e: vec![0.0], reciprocal: true };
+        let terminal = PreparedMimoLoad::new(&source, DT, MimoLoadLimits {
+            band_rad_s: [1.0, core::f64::consts::PI / DT],
+            sampled_passivity_points: 33, max_states: 8, max_memory_bytes: 1 << 20,
+        }).unwrap();
+        let duct = DgDuct::new(&Duct { segments: vec![Segment::Cylinder {
+            radius: RADIUS, length: LENGTH }] }, &gas(), DgMesh { elements, order: 2 },
+            DgBoundary::Port(INLET), DgBoundary::Port(TERMINAL)).unwrap();
+        let load = DgPortLoad::new_with_terminal(duct, DT, 1e-11,
+            MAX_DG_PROPAGATOR_DOFS, terminal).unwrap();
+        let original = load.state().clone();
+        let prepared = system.prepare_resonance_poles_with_load(
+            &load, &[column], pole_preparation(), &gate).unwrap();
+        let response = system.harmonic_response_with_load(
+            -expected.im, &[C64::from_re(1e-4)], &load, &[column], WORK, &gate).unwrap();
+        let seed = prepared.seed_from_harmonic_response(&response).unwrap();
+        let pole = prepared.resonance_pole(C64::new(-40.0, expected.im),
+            &seed, &pole_options(), &gate).unwrap();
+        let error = (pole.laplace_pole_per_s - expected).abs() / expected.abs();
+        let impedance_error = (pole.inlet_pressure_pa - pole.inlet_flow_m3_s.scale(zc)).abs()
+            / pole.inlet_pressure_pa.abs();
+        errors.push((error, impedance_error));
+        assert!(pole.relative_residual < 1e-11);
+        assert_eq!(load.state(), &original);
+        assert_eq!(system.samples_rendered(), 0);
+    }
+    // The target is the continuum characteristic load. Its finite DG image
+    // keeps a separate spatial error; no numerical eigen-residual certifies it.
+    for pair in errors.windows(2) {
+        assert!(pair[1].0 < 0.3 * pair[0].0 + 1e-10);
+        assert!(pair[1].1 < 0.3 * pair[0].1 + 1e-9);
+    }
+    assert!(errors[2].0 < 5e-7);
+    assert!(errors[2].1 < 1e-5);
+}
+
+#[test]
+fn a_dark_real_material_relaxation_survives_the_complete_loaded_pencil() {
+    // G1/G3: this positive-storage Maxwell coordinate has zero mechanical
+    // projection. Its exact pole -1/tau must not disappear during elimination.
+    let gate = CancelGate::new_clock_free();
+    let system = oscillator().with_material_relaxation(vec![fs_phs::RelaxationBranch {
+        projection: vec![0.0, 0.0], stiffness: 3.0, relaxation_time_s: 0.002,
+    }], None, &gate).unwrap();
+    let load = loaded(1, 25.0);
+    let prepared = system.prepare_resonance_poles_with_load(&load, &[coefficients().3],
+        pole_preparation(), &gate).unwrap();
+    let memory = prepared.coordinates().material_memory.start;
+    let mut seed = vec![C64::ZERO; prepared.dimension()];
+    seed[memory] = C64::ONE;
+    let pole = prepared.resonance_pole(C64::from_re(-490.0), &seed,
+        &pole_options(), &gate).unwrap();
+    assert!((pole.laplace_pole_per_s - C64::from_re(-500.0)).abs() < 1e-10);
+    assert_eq!(pole.laplace_pole_per_s.im, 0.0);
+    assert_eq!(pole.inlet_flow_m3_s, C64::ZERO);
+    assert_eq!(pole.inlet_pressure_pa, C64::ZERO);
+    assert_eq!(pole.state[memory], C64::ONE);
+    assert!(pole.state.iter().enumerate().all(|(i, value)|
+        i == memory || *value == C64::ZERO));
+
+    let mut small = pole_preparation();
+    small.maximum_payload_bytes = 1;
+    assert!(system.prepare_resonance_poles_with_load(&load, &[coefficients().3], small, &gate).is_err());
+    small = pole_preparation(); small.maximum_dimension = prepared.dimension() - 1;
+    assert!(system.prepare_resonance_poles_with_load(&load, &[coefficients().3], small, &gate).is_err());
+    let mut limited = pole_options(); limited.max_work = 1;
+    assert!(prepared.resonance_pole(C64::from_re(-490.0), &seed, &limited, &gate).is_err());
+    assert!(prepared.resonance_pole(C64::new(-1.0, -1e6), &seed, &pole_options(), &gate).is_err());
+    let cancelled = CancelGate::new_clock_free(); cancelled.request();
+    assert!(prepared.resonance_pole(C64::from_re(-490.0), &seed, &pole_options(), &cancelled).is_err());
+    assert!(system.prepare_resonance_poles_with_load(&load, &[coefficients().3],
+        pole_preparation(), &cancelled).is_err());
+    assert_eq!(system.samples_rendered(), 0);
+    assert_eq!(load.state().step_count(), 0);
+    assert!(load.terminal().unwrap().pole_states().iter().all(|z| *z == C64::ZERO));
+}
+
 fn gas() -> GasState {
     GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101325.0).unwrap()
 }

@@ -9,6 +9,10 @@ use crate::bernoulli_aperture::slit_channel::harmonic::ChannelHarmonicResponse;
 use fs_duct::dg::{DgBoundary, DgDuct, DgHarmonicResponse, PortId};
 use fs_vfit::mimo::load::PreparedMimoLoad;
 
+mod operator;
+/// Free modes of the full original mechanical, material and acoustic pencil.
+pub mod poles;
+
 /// Original terminal real-state phasors and physical outward port exchange.
 /// The admitted source's passivity reports do not supply a generic storage
 /// matrix, so no terminal stored energy or heat is invented here.
@@ -242,135 +246,20 @@ impl CoupledModalSystem {
     ) -> Result<DgLoadedModalHarmonicResponse, DgHarmonicCouplingError> {
         poll(Some(gate))?;
         let view = duct.continuous_operator();
-        view.admit_frequency(omega_rad_s)
-            .map_err(|e| duct_error(e, gate))?;
         let n = self.mode_count();
-        let terminal_ports = terminal.map_or(&[][..], |(_, ports)| ports);
-        let sealed = branches
-            .iter()
-            .filter(|branch| branch.duct().outlet() == DgBoundary::Closed)
-            .count();
-        if flow_column.len() != n
-            || flow_column.iter().any(|b| !b.is_finite())
-            || !flow_column.iter().any(|b| *b != 0.0)
-            || view.ports().len() != terminal_ports.len() + 1 + sealed
-            || terminal.is_some_and(|(owner, ports)| owner.ports() != ports.len())
-            || terminal_ports
-                .iter()
-                .enumerate()
-                .any(|(i, id)| *id == inlet || terminal_ports[..i].contains(id))
-        {
-            return Err(invalid("continuous modal/DG coupling requires a complete original volume projection and one distinct terminal channel for every non-inlet port").into());
-        }
-        // Count every original finite cell and its pressure multiplier before
-        // any appended arrays or dense operator are allocated. Source channels
-        // already own their immutable M/A/G; borrowing them allocates nothing.
-        let mut channel_dimension = 0usize;
-        for (index, channel) in channels.iter().enumerate() {
-            poll(Some(gate))?;
-            if !terminal_ports.contains(&channel.input().port)
-                || channels[..index].iter().any(|other| other.input().port == channel.input().port)
-            {
-                return Err(invalid("continuous gaps require distinct original exterior terminal ports").into());
-            }
-            if let Some(original) = channel.channel() {
-                let field = original.continuous_operator()?;
-                channel_dimension = channel_dimension.checked_add(field.dimension())
-                    .and_then(|value| value.checked_add(1))
-                    .ok_or_else(|| invalid("continuous terminal field dimension overflow"))?;
-            }
-        }
-        let pressure_column = &view
-            .ports()
-            .iter()
-            .find(|(id, _)| *id == inlet)
-            .ok_or_else(|| invalid("continuous DG inlet is absent from its source basis"))?
-            .1;
-        let branch_views: Vec<_> = branches
-            .iter()
-            .map(|branch| branch.duct().continuous_operator())
-            .collect();
-        let mut acoustic_dimension = view.dimension();
-        let mut branch_offsets = Vec::with_capacity(branches.len());
-        let mut branch_ports = Vec::with_capacity(branches.len());
-        let mut junction_columns = Vec::with_capacity(branches.len());
-        for (index, (branch, original)) in branches.iter().zip(&branch_views).enumerate() {
-            poll(Some(gate))?;
-            original
-                .admit_frequency(omega_rad_s)
-                .map_err(|e| duct_error(e, gate))?;
-            let DgBoundary::Port(branch_inlet) = branch.duct().inlet() else {
-                return Err(invalid("continuous finite branch lost its original inlet flow port").into());
-            };
-            let branch_outlet = match branch.duct().outlet() {
-                DgBoundary::Port(outlet) => Some(outlet),
-                DgBoundary::Closed => None,
-                _ => return Err(invalid("continuous finite branch lost its admitted distal boundary").into()),
-            };
-            if original.ports().len() != 1 + usize::from(branch_outlet.is_some())
-                || branch_outlet == Some(branch_inlet)
-                || terminal_ports.contains(&branch.port()) != branch_outlet.is_some()
-                || branches[..index]
-                    .iter()
-                    .any(|other| other.port() == branch.port())
-            {
-                return Err(invalid("continuous finite branches require distinct owned junctions and complete original terminal channels").into());
-            }
-            let bore_column = &view
-                .ports()
-                .iter()
-                .find(|(id, _)| *id == branch.port())
-                .ok_or_else(|| invalid("continuous finite branch lost its main-bore junction"))?
-                .1;
-            let inlet_column = &original
-                .ports()
-                .iter()
-                .find(|(id, _)| *id == branch_inlet)
-                .ok_or_else(|| invalid("continuous finite branch lost its inlet pressure trace"))?
-                .1;
-            branch_offsets.push(acoustic_dimension);
-            branch_ports.push((branch_inlet, branch_outlet));
-            junction_columns.push((bore_column.as_slice(), inlet_column.as_slice()));
-            acoustic_dimension = acoustic_dimension
-                .checked_add(original.dimension())
-                .ok_or_else(|| invalid("continuous finite branch dimension overflow"))?;
-        }
-        let terminal_columns: Vec<_> = terminal_ports
-            .iter()
-            .map(|id| {
-                let (original, offset, local_id) =
-                    match branches.iter().position(|branch| branch.port() == *id) {
-                        Some(index) => (
-                            &branch_views[index],
-                            branch_offsets[index],
-                            branch_ports[index].1.ok_or_else(||
-                                invalid("sealed branch cannot occupy an exterior harmonic channel"))?,
-                        ),
-                        None => (&view, 0, *id),
-                    };
-                original
-                    .ports()
-                    .iter()
-                    .find(|(port, _)| *port == local_id)
-                    .map(|(_, column)| (offset, column.as_slice()))
-                    .ok_or_else(|| {
-                        invalid("continuous terminal channel names an undeclared DG port")
-                    })
-            })
-            .collect::<Result<_, _>>()?;
-        let terminal_view = terminal.map(|(owner, _)| owner.continuous_operator());
-        if let Some(owner) = &terminal_view {
-            owner
-                .admit_frequency(omega_rad_s)
-                .map_err(|error| invalid(error.0))?;
-        }
-        let terminal_dimension = terminal_view.as_ref().map_or(0, |owner| owner.dimension());
-        let extra = acoustic_dimension
-            .checked_add(terminal_dimension)
-            .and_then(|value| value.checked_add(terminal_ports.len()))
-            .and_then(|value| value.checked_add(branches.len()))
-            .and_then(|value| value.checked_add(channel_dimension))
-            .ok_or_else(|| invalid("continuous terminal harmonic dimension overflow"))?;
+        let branch_views: Vec<_> = branches.iter()
+            .map(|branch| branch.duct().continuous_operator()).collect();
+        let binding = operator::DgBinding::new(n, &view, inlet, flow_column,
+            terminal, branches, &branch_views, channels, gate)?;
+        binding.admit_frequency(omega_rad_s, gate)?;
+        let terminal_ports = binding.terminal_ports;
+        let terminal_dimension = binding.terminal_dimension;
+        let branch_offsets = &binding.branch_offsets;
+        let branch_ports = &binding.branch_ports;
+        let junction_columns = &binding.junction_columns;
+        let terminal_columns = &binding.terminal_columns;
+        let channel_dimension = binding.channel_dimension;
+        let extra = binding.additional_dimension()?;
         let full_dimension = n.checked_add(self.radiation.as_ref().map_or(0, |r| r.model.poles.len()))
             .and_then(|value| value.checked_add(extra))
             .ok_or_else(|| invalid("continuous channel joint dimension overflow"))?;
@@ -384,139 +273,11 @@ impl CoupledModalSystem {
         let mut operator = self.harmonic_operator(omega_rad_s, force, extra, operator_work, gate)?;
         let dimension = operator.dimension;
         let offset = operator.original_dimension;
-        let terminal_offset = offset + acoustic_dimension;
-        let flow_offset = terminal_offset + terminal_dimension;
-        let junction_offset = flow_offset + terminal_ports.len();
-        let channel_offset = junction_offset + branches.len();
-        let source = view.generator_per_s();
-        let terminal_source = terminal_view
-            .as_ref()
-            .map(|owner| {
-                owner
-                    .state_space(16 * dimension * dimension, &mut || gate.is_requested())
-                    .map_err(|error| {
-                        if gate.is_requested() {
-                            ModalCouplingError::Cancelled
-                        } else {
-                            invalid(error.0)
-                        }
-                    })
-            })
-            .transpose()?;
         let s = C64::new(0.0, -omega_rad_s);
-        for i in 0..view.dimension() {
-            poll(Some(gate))?;
-            for j in 0..view.dimension() {
-                operator.values[(offset + i) * dimension + offset + j] =
-                    C64::from_re(-source[i * view.dimension() + j]);
-            }
-            let diagonal = (offset + i) * dimension + offset + i;
-            operator.values[diagonal] = operator.values[diagonal] + s;
-            for (j, &b) in flow_column.iter().enumerate() {
-                // D_modal q + b B^T x = F; (s I-L)x - s B b^T q = 0.
-                let coupling = pressure_column[i] * b;
-                operator.values[j * dimension + offset + i] = C64::from_re(coupling);
-                operator.values[(offset + i) * dimension + j] = -s.scale(coupling);
-            }
-        }
-        for (index, original) in branch_views.iter().enumerate() {
-            let branch_offset = offset + branch_offsets[index];
-            let width = original.dimension();
-            let source = original.generator_per_s();
-            for i in 0..width {
-                poll(Some(gate))?;
-                for j in 0..width {
-                    operator.values[(branch_offset + i) * dimension + branch_offset + j] =
-                        C64::from_re(-source[i * width + j]) + if i == j { s } else { C64::ZERO };
-                }
-            }
-            // Main outward q and branch inward q share one multiplier. Its
-            // equation enforces the ORIGINAL pressure traces, not an impedance
-            // condensation, including when either isolated duct is singular.
-            let junction = junction_offset + index;
-            for (i, &b) in junction_columns[index].0.iter().enumerate() {
-                operator.values[(offset + i) * dimension + junction] = C64::from_re(b);
-                operator.values[junction * dimension + offset + i] = C64::from_re(b);
-            }
-            for (i, &b) in junction_columns[index].1.iter().enumerate() {
-                operator.values[(branch_offset + i) * dimension + junction] = C64::from_re(-b);
-                operator.values[junction * dimension + branch_offset + i] = C64::from_re(-b);
-            }
-        }
-        if let Some(load) = &terminal_source {
-            let ports = terminal_ports.len();
-            for (j, &(relative_offset, column)) in terminal_columns.iter().enumerate() {
-                poll(Some(gate))?;
-                let terminal_duct_offset = offset + relative_offset;
-                for (i, &b) in column.iter().enumerate() {
-                    operator.values[(terminal_duct_offset + i) * dimension + flow_offset + j] =
-                        C64::from_re(b);
-                    operator.values[(flow_offset + j) * dimension + terminal_duct_offset + i] =
-                        C64::from_re(b);
-                }
-            }
-            for i in 0..terminal_dimension {
-                poll(Some(gate))?;
-                for j in 0..terminal_dimension {
-                    operator.values[(terminal_offset + i) * dimension + terminal_offset + j] =
-                        C64::from_re(-load.a[i * terminal_dimension + j])
-                            + if i == j { s } else { C64::ZERO };
-                }
-                for j in 0..ports {
-                    operator.values[(terminal_offset + i) * dimension + flow_offset + j] =
-                        C64::from_re(-load.b[i * ports + j]);
-                    operator.values[(flow_offset + j) * dimension + terminal_offset + i] =
-                        C64::from_re(-load.c[j * terminal_dimension + i]);
-                }
-            }
-            for i in 0..ports {
-                for j in 0..ports {
-                    operator.values[(flow_offset + i) * dimension + flow_offset + j] =
-                        C64::from_re(-load.d[i * ports + j]);
-                }
-            }
-        }
-        let mut channel_offsets = Vec::with_capacity(channels.len());
-        let mut next_channel = channel_offset;
-        for channel in channels {
-            poll(Some(gate))?;
-            channel_offsets.push(next_channel);
-            let port = terminal_ports.iter().position(|id| *id == channel.input().port)
-                .ok_or_else(|| invalid("continuous channel lost its original terminal row"))?;
-            let flow_row = flow_offset + port;
-            if let Some(original) = channel.channel() {
-                let field = original.continuous_operator()?;
-                let width = field.dimension();
-                let drop = next_channel + width;
-                let mass = field.cell_masses_kg();
-                let area = field.cell_areas_m2();
-                let shear = field.face_conductances_kg_s();
-                // Keep p_duct-p_exterior=drop and Q=A^T v simultaneously;
-                // no isolated duct, exterior, or gap impedance is inverted.
-                operator.values[flow_row * dimension + drop] = C64::from_re(-1.0);
-                operator.values[drop * dimension + flow_row] = C64::from_re(1.0);
-                for i in 0..width {
-                    poll(Some(gate))?;
-                    let row = next_channel + i;
-                    operator.values[row * dimension + row] =
-                        C64::from_re(shear[i] + shear[i + 1]) + s.scale(mass[i]);
-                    if i != 0 {
-                        operator.values[row * dimension + row - 1] = C64::from_re(-shear[i]);
-                    }
-                    if i + 1 != width {
-                        operator.values[row * dimension + row + 1] = C64::from_re(-shear[i + 1]);
-                    }
-                    operator.values[row * dimension + drop] = C64::from_re(-area[i]);
-                    operator.values[drop * dimension + row] = C64::from_re(-area[i]);
-                }
-                next_channel = drop + 1;
-            } else {
-                // The exterior still sees its complete original state and
-                // mutual matrix; this row supplies a rigid reaction, Q=0.
-                operator.values[flow_row * dimension..(flow_row + 1) * dimension].fill(C64::ZERO);
-                operator.values[flow_row * dimension + flow_row] = C64::from_re(1.0);
-            }
-        }
+        let operator::AppendedDg { terminal_source, terminal_offset, flow_offset,
+            junction_offset, channel_offsets } = binding.append(offset, flow_column,
+                16 * dimension * dimension,
+                &mut operator::AcEntries { values: &mut operator.values, dimension, s }, gate)?;
         let (state, relative) = solve_harmonic(
             &operator.values,
             dimension,

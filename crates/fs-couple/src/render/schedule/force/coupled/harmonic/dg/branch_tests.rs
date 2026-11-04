@@ -24,6 +24,86 @@ const BRANCH_RADIUS: f64 = 0.004;
 const BRANCH_LENGTH: f64 = 0.35;
 
 #[test]
+fn loaded_poles_retain_branch_gap_fields_and_strictly_proper_mutual_closure() {
+    // G0/G3: no terminal D inverse exists. The closed channel still has an
+    // exterior reaction, while the finite branch retains its own outlet gap.
+    // Port permutation must preserve the complex pole and physical input ratio.
+    let system = oscillator();
+    let gate = CancelGate::new_clock_free();
+    for circular in [false, true] {
+      let mut reference: Option<(C64, C64)> = None;
+      for reverse in [false, true] {
+        let load = loaded(1, true, true, reverse).with_terminal_channels(vec![
+            DgTerminalChannelInput { port: SIDE, kind: super::terminal_tests::gap_kind(circular) },
+            DgTerminalChannelInput { port: OUTLET, kind: DgTerminalChannelKind::Closed },
+        ], 8).unwrap();
+        let original = load.state().clone();
+        let original_branch = load.branches()[0].state().clone();
+        let prepared = system.prepare_resonance_poles_with_load(&load, &[0.1 * column()],
+            super::terminal_tests::pole_preparation(), &gate).unwrap();
+        let response = system.harmonic_response_with_load(1790.0, &[C64::from_re(1e-6)],
+            &load, &[0.1 * column()], WORK, &gate).unwrap();
+        let seed = prepared.seed_from_harmonic_response(&response).unwrap();
+        let pole = prepared.resonance_pole(C64::new(-3.0, -1800.0), &seed,
+            &super::terminal_tests::pole_options(), &gate).unwrap();
+        let layout = prepared.coordinates();
+        let s = pole.laplace_pole_per_s;
+        let state = &pole.state;
+        assert!(s.re < 0.0 && s.im < 0.0);
+        let ratio = pole.inlet_pressure_pa / state[0];
+        if let Some((old, pressure)) = reference {
+            assert!((old - s).abs() < 2e-9 * old.abs());
+            assert!((pressure - ratio).abs() < 2e-8 * pressure.abs());
+        } else { reference = Some((s, ratio)); }
+        let input_index = layout.terminal_flow.iter().position(|(id, _)| *id == SIDE).unwrap();
+        let closed_index = layout.terminal_flow.iter().position(|(id, _)| *id == OUTLET).unwrap();
+        let q = state[layout.terminal_flow[input_index].1];
+        let closed = state[layout.terminal_flow[closed_index].1];
+        assert!(q.abs() > 0.0);
+        assert!(closed.abs() < 1e-10 * q.abs());
+        for (i, &(_, index)) in layout.terminal_flow.iter().enumerate() {
+            let x = state[layout.terminal_state.start + i];
+            let lhs = (s + C64::from_re(600.0)) * x;
+            assert!((lhs - state[index]).abs()
+                < 2e-9 * (q.abs() + lhs.abs() + state[index].abs()));
+        }
+        let original_source = source(true, true);
+        let exterior = original_source.residues[0][0] / (s + C64::from_re(600.0)) * q;
+        let closed_exterior = original_source.residues[0][2] / (s + C64::from_re(600.0)) * q;
+        assert!(closed_exterior.abs() > 0.0);
+        let branch = &load.branches()[0];
+        let branch_view = branch.duct().continuous_operator();
+        let branch_span = layout.branch_energy[0].1.clone();
+        let outlet = &branch_view.ports().iter().find(|(id, _)| *id == OUTLET).unwrap().1;
+        let pressure = projection(outlet, &state[branch_span]);
+        let channel = &layout.channels[0];
+        let dp = state[channel.pressure_drop.unwrap()];
+        assert!((pressure - exterior - dp).abs()
+            < 2e-9 * (pressure.abs() + exterior.abs() + dp.abs()));
+        let field = load.terminal_channels()[0].channel().unwrap().continuous_operator().unwrap();
+        let velocities = &state[channel.velocity_cells.clone()];
+        let area = field.cell_areas_m2();
+        let mass = field.cell_masses_kg();
+        let shear = field.face_conductances_kg_s();
+        let field_flow = projection(area, velocities);
+        assert!((field_flow - q).abs() < 2e-9 * (field_flow.abs() + q.abs()));
+        for i in 0..velocities.len() {
+            let inertia = s.scale(mass[i]) * velocities[i];
+            let left = velocities[i] - if i == 0 { C64::ZERO } else { velocities[i - 1] };
+            let right = velocities[i] - if i + 1 == velocities.len() { C64::ZERO } else { velocities[i + 1] };
+            let resistance = left.scale(shear[i]) + right.scale(shear[i + 1]);
+            let pressure_force = dp.scale(area[i]);
+            assert!((inertia + resistance - pressure_force).abs()
+                < 2e-9 * (inertia.abs() + resistance.abs() + pressure_force.abs()));
+        }
+        assert_eq!(load.state(), &original);
+        assert_eq!(load.branches()[0].state(), &original_branch);
+        assert!(load.terminal().unwrap().pole_states().iter().all(|z| *z == C64::ZERO));
+      }
+    }
+}
+
+#[test]
 fn finite_gap_observes_the_branch_outlet_while_closed_mutual_terminal_keeps_its_reaction() {
     let system = oscillator();
     let omega = 1300.0;
