@@ -3020,3 +3020,30 @@ identity, admission and preservation of relaxing-medium energy refusal. Three
 additional loaded-network tests exercise the production consumer with analytic
 retained operators; full original material/graph/BEM assembly remains unrun
 because required constellation checkouts are absent.
+
+
+### Source-bound molecular absorption and local energy transport
+
+`MolecularRadiation::observe_power`,
+`PreparedMolecularNearField::evaluate_power`, and
+`MolecularScatteredField::total_power_at` return the original adaptive acoustic
+fields together with active intensity [W/m²] and molecular heat density [W/m³].
+For peak phasors with exp(-i omega t), they use I = Re(p conj(v))/2 and
+Q = omega Im(1/K) |p|²/2, with K evaluated from the original `RelaxationState`.
+Away from sources these obey div(I) = -Q. Total scattering pressure and velocity
+are formed before the quadratic observation, preserving interference heat.
+
+Prepared queries retain the original material, frequency and geometry checks.
+Power costs O(receivers), evaluates the caloric law once, and adds no propagation
+loss or field solve. Scaling pressure before squaring preserves representable
+weak-loss heating; nonfinite results and cancellation publish no power result.
+Returned field quadrature discrepancies retain their existing meaning and are
+not error bounds on the nonlinear power observation.
+
+This exterior accounts for molecular relaxation only. Wall absorption, shear
+viscosity, heat conduction, temperature evolution and physical volume integration
+require their own models or caller quadrature. Four native tests execute the
+production power arithmetic with fs-math, including coherent local energy
+balance and converging spherical-shell heat/flux closure. Source-bound BEM and
+scattering regressions are included; full Cargo integration remains unrun
+without the required sibling constellation checkouts.

@@ -12,12 +12,17 @@
 //! the caller's band. It may be zero only as an explicit omission/assumption;
 //! shear viscosity does not determine it. If it represents internal
 //! relaxation, adding that same relaxation again would double-count loss.
-//! No wall loss, molecular spectrum, dispersion, scattering or phase transfer
-//! is inferred. Original source support and frequency validity stay with the
-//! caller. This numerical snapshot grants no additional source authority.
+//! [`ClassicalBulkAbsorption::thermoviscous_wavenumber`] also exposes the
+//! homogeneous linear Navier--Stokes--Fourier acoustic branch, including its
+//! coupled attenuation and phase dispersion. Neither path infers wall loss,
+//! molecular spectra or scattering. Original source support and frequency
+//! validity stay with the caller; this snapshot grants no source authority.
 
 use super::{ThermoviscousFluid, ThermoviscousFluidState};
 use crate::MaterialError;
+use fs_math::c64::C64;
+
+mod dispersion;
 
 /// Prepared classical bulk absorption, with no per-frequency material queries.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -108,6 +113,41 @@ impl ClassicalBulkAbsorption {
         }
         Ok(alpha)
     }
+
+    /// Complex acoustic wavenumber [rad/m] of the full homogeneous linear
+    /// Navier--Stokes--Fourier equations at real angular frequency [rad/s].
+    ///
+    /// For `exp(i k r - i omega t)`, `Re(k)` is the spatial phase rate and
+    /// `Im(k) >= 0` is pressure-amplitude attenuation. Intensity decays as
+    /// `exp(-2 Im(k) r)`. The acoustic branch continues from `k = omega/c`
+    /// at zero frequency; the separate thermal diffusion mode is not returned.
+    /// This is an allocation-free evaluation of the original frozen density,
+    /// adiabatic sound speed, Cp/Cv, shear/bulk viscosity and conductivity,
+    /// with no ideal-gas substitution or per-frequency material query.
+    ///
+    /// Unlike [`Self::absorption_np_per_m`], the attenuation is not truncated
+    /// to its weak-loss limit. The same original continuum, linear-response
+    /// and constant-coefficient validity limits still apply. Unresolved
+    /// acoustic/thermal branch crossings and unrepresentable results refuse.
+    /// Molecular relaxation or wall losses are not added; a bulk viscosity
+    /// already representing relaxation must not be counted again. Fourier
+    /// heat conduction and Newtonian viscosity are parabolic, so this model
+    /// does not establish a finite wavefront at `r/c`.
+    pub fn thermoviscous_wavenumber(&self, omega_rad_s: f64) -> Result<C64, MaterialError> {
+        let acoustic = self.state.acoustic();
+        let transport = self.state.transport();
+        let c = acoustic.sound_speed_m_s();
+        let longitudinal_diffusivity = (4.0 / 3.0) * transport.kinematic_viscosity_m2_s()
+            + self.bulk_viscosity_pa_s / acoustic.density_kg_m3();
+        dispersion::acoustic_wavenumber(
+            omega_rad_s,
+            c,
+            (longitudinal_diffusivity / c) / c,
+            (transport.thermal_diffusivity_m2_s() / c) / c,
+            self.state.heat_capacity_ratio(),
+        )
+        .map_err(invalid)
+    }
 }
 
 fn invalid(what: &str) -> MaterialError {
@@ -164,6 +204,38 @@ mod tests {
             bulk.weak_loss_parameter(20.0).unwrap(),
             2.0 * bulk.weak_loss_parameter(10.0).unwrap()
         );
+    }
+
+
+    #[test]
+    fn g1_full_dispersion_retains_original_state_and_classical_limit() {
+        for cv in [4.0, 8.0] {
+            for bulk in [0.0, 0.002] {
+                let original = fluid(cv);
+                let law = ClassicalBulkAbsorption::from_material(&original, bulk).unwrap();
+                let omega = 0.01;
+                let wave = law.thermoviscous_wavenumber(omega).unwrap();
+                assert!((wave.im / law.absorption_np_per_m(omega).unwrap() - 1.0).abs() < 1e-8);
+                assert!((wave.re / (omega / 10.0) - 1.0).abs() < 1e-8);
+                assert_eq!(law.state(), original);
+                assert_eq!(law.thermoviscous_wavenumber(0.0).unwrap(), C64::ZERO);
+            }
+        }
+    }
+
+    #[test]
+    fn g3_full_dispersion_does_not_extend_the_quadratic_loss_approximation() {
+        let shear_bulk = ClassicalBulkAbsorption::from_material(&fluid(8.0), 0.002).unwrap();
+        let thermal = ClassicalBulkAbsorption::from_material(&fluid(4.0), 0.002).unwrap();
+        let omega = 1000.0;
+        let viscous_wave = shear_bulk.thermoviscous_wavenumber(omega).unwrap();
+        let thermal_wave = thermal.thermoviscous_wavenumber(omega).unwrap();
+        assert!(thermal_wave.im > viscous_wave.im);
+        assert!((thermal_wave.im / thermal.absorption_np_per_m(omega).unwrap() - 1.0).abs() > 0.01);
+        assert!((thermal_wave.re / (omega / 10.0) - 1.0).abs() > 1e-3);
+        for bad in [-1.0, f64::NAN, f64::INFINITY, f64::MAX] {
+            assert!(thermal.thermoviscous_wavenumber(bad).is_err());
+        }
     }
 
     #[test]

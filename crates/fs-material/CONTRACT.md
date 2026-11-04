@@ -9103,6 +9103,22 @@ model with constant bulk viscosity over the caller's supported band, not a
 dispersion, phase-change, wall-loss or experimental-validation claim. Adding
 resolved relaxation already included in the supplied bulk viscosity is invalid.
 
+The same prepared owner exposes `thermoviscous_wavenumber(omega)` for the
+acoustic branch of the full homogeneous linear Navier--Stokes--Fourier spatial
+dispersion relation. It retains the original real-fluid density, adiabatic sound
+speed, Cp/Cv, viscosity and conductivity. For `exp(i k r - i omega t)`, `Im(k)`
+is amplitude attenuation and `Re(k)` supplies the associated phase; the separate
+thermal diffusion mode is not returned. A rationalized quadratic root avoids
+cancellation at weak loss and Cp/Cv close to one, with allocation-free constant
+work per frequency. Zero frequency is exact; nonpassive, unrepresentable or
+unresolved acoustic/thermal branches refuse, including roundoff near the
+discriminant cut. The leading attenuation recovers Stokes--Kirchhoff, while
+finite-frequency corrections satisfy the original continuity, momentum and
+energy equations. This does not supply molecular spectra, boundary layers,
+nonlinear response or experimental validity outside the original coefficients'
+supported band. The parabolic transport equations do not establish a finite
+wavefront; an observer's `r/c` reference delay is a numerical convention.
+
 `fluid_acoustics::FluidAcoustics` admits one immutable acoustic snapshot with
 positive finite density, adiabatic sound speed, bulk modulus `K_s = rho c²`,
 compressibility `1/K_s` and plane-wave impedance `rho c`. Gas adapters reuse the
