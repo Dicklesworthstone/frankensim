@@ -100,6 +100,20 @@ material scaling and domain/representability refusals.
   signed directivity, rigid motion, density independence and refusals. This is
   an ideal free-space transfer for prescribed forces, not validation of a
   source model, finite-size compactness, enclosure scattering or measured SPL.
+  `field_at_retarded` also accepts the original physical force impulse [N s]
+  at that same retarded time, and returns all three particle-velocity components
+  plus instantaneous signed `p u` energy flux. Its `1/r³` impulse and `1/r²`
+  force tensors retain transverse motion even at a pressure node; the `1/r`
+  term alone has the plane-wave relation. The caller owns the integration
+  constant and complete source history; no block-local reset or inferred
+  impulse is permitted. Cached coefficients and double-double reductions make
+  evaluation constant-work and allocation-free, and keep small residual
+  amplitudes when Cartesian forces cancel. Unrepresentable velocity/flux
+  refuses without narrowing the pressure-only API. G1/G3 tests compare the
+  full harmonic owner and cycle-mean intensity, the source-free momentum law,
+  pressure-null transverse motion, signed amplitude and quadratic flux scaling,
+  inverse-density response and nonfinite histories. The same compact linear
+  one-way model limits remain; no source dynamics or radiation reaction is added.
 - `curle3d::moving::MovingCompactObserver` prepares eight real pressure
   coefficients for physical Q/Qdot and force/force-rate at one emission event,
   retaining Doppler amplitude, source acceleration and near-field induction.
