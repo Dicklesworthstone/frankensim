@@ -7,6 +7,9 @@ use super::PressureRenderer;
 use crate::render::RenderError;
 use fs_aeroac::observation::{HarmonicSampleBudget, HarmonicSampleClock, PreparedHarmonicField};
 
+mod channels;
+pub use channels::{HarmonicOutputChannel, HarmonicOutputSource, HarmonicPressureFrameRenderer};
+
 /// A fixed receiver's coherent harmonic pressure in physical pascals.
 ///
 /// The original field is borrowed, retaining its source and propagation

@@ -1,7 +1,7 @@
 //! Explicit high-resolution pressure export; no normalization or invented tails.
-//! WAVEFORMATEXTENSIBLE preserves sample precision and mono/stereo channel order.
+//! WAVEFORMATEXTENSIBLE preserves sample precision and supplied channel order.
 //! https://learn.microsoft.com/en-us/windows/win32/api/mmreg/ns-mmreg-waveformatextensible
-use super::WavError;
+use super::{MAX_WAV_CHANNELS, WavError, write_extensible_fields};
 
 /// Output storage, independent of the mechanics and physical pressure scale.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -16,15 +16,17 @@ fn invalid(what: &'static str) -> WavError { WavError::InvalidInput { what } }
 fn u16_le(out: &mut Vec<u8>, x: u16) { out.extend_from_slice(&x.to_le_bytes()); }
 fn u32_le(out: &mut Vec<u8>, x: u32) { out.extend_from_slice(&x.to_le_bytes()); }
 
-/// Encode complete mono or interleaved left/right pressure frames.
+/// Encode complete pressure frames with 1..=64 interleaved channels.
 ///
-/// The SAME explicit `full_scale_pa` maps to +1 in either channel. PCM24 maps
+/// The SAME explicit `full_scale_pa` maps to +1 in every channel. PCM24 maps
 /// this to 8388607; -full scale maps to -8388607, keeping symmetric pressure
 /// scaling. Out-of-range PCM refuses instead of saturating. Float32 retains
 /// representable excursions beyond +/-1, but a player may clip them: attenuate
 /// explicitly before fixed-point playback. Neither format changes the source
 /// clock, peak-normalizes, adds dither, or reconstructs previously quantized data.
 /// Floating export rounds f64 to f32 and is not a bit-exact f64 archive.
+/// Arrays above stereo have a zero speaker mask: ordered direct outputs without
+/// speaker assignments or downmixing. Retain channel identities with the file.
 ///
 /// # Errors
 /// Invalid/empty/incomplete frames, nonfinite pressure, invalid clock/scale,
@@ -32,9 +34,9 @@ fn u32_le(out: &mut Vec<u8>, x: u32) { out.extend_from_slice(&x.to_le_bytes()); 
 /// All samples and lengths are admitted before output allocation.
 pub fn encode_pressure_wav(pressure_pa: &[f64], sample_rate_hz: u32, channels: u16,
     full_scale_pa: f64, encoding: Encoding) -> Result<Vec<u8>, WavError> {
-    if !matches!(channels, 1 | 2) || pressure_pa.is_empty()
+    if !(1..=MAX_WAV_CHANNELS).contains(&channels) || pressure_pa.is_empty()
         || pressure_pa.len() % usize::from(channels) != 0 {
-        return Err(invalid("high-resolution WAV needs complete nonempty mono/stereo frames"));
+        return Err(invalid("high-resolution WAV needs complete nonempty 1..=64 channel frames"));
     }
     if sample_rate_hz == 0 || !full_scale_pa.is_finite() || full_scale_pa <= 0.0 {
         return Err(invalid("WAV needs a positive clock and finite positive pressure full scale"));
@@ -70,11 +72,8 @@ pub fn encode_pressure_wav(pressure_pa: &[f64], sample_rate_hz: u32, channels: u
     out.extend_from_slice(b"RIFF"); u32_le(&mut out, riff); out.extend_from_slice(b"WAVEfmt ");
     u32_le(&mut out, 40); u16_le(&mut out, 0xfffe); u16_le(&mut out, channels);
     u32_le(&mut out, sample_rate_hz); u32_le(&mut out, byte_rate); u16_le(&mut out, align);
-    u16_le(&mut out, bytes * 8); u16_le(&mut out, 22); u16_le(&mut out, bytes * 8);
-    u32_le(&mut out, if channels == 1 { 4 } else { 3 }); // center or left/right
-    // PCM/IEEE_FLOAT subtype GUID, serialized by its little-endian fields.
-    u32_le(&mut out, if floating { 3 } else { 1 });
-    out.extend_from_slice(&[0, 0, 0x10, 0, 0x80, 0, 0, 0xaa, 0, 0x38, 0x9b, 0x71]);
+    u16_le(&mut out, bytes * 8);
+    write_extensible_fields(&mut out, channels, bytes * 8, if floating { 3 } else { 1 });
     if floating {
         out.extend_from_slice(b"fact"); u32_le(&mut out, 4); u32_le(&mut out, frames);
     }
@@ -170,6 +169,21 @@ mod tests {
             for scale in [0.0, -1.0, f64::NAN, f64::INFINITY] {
                 assert!(encode_pressure_wav(&[0.0], 48_000, 1, scale, format).is_err());
             }
+        }
+    }
+
+    #[test]
+    fn array_channels_retain_direct_order_scale_and_float_frame_count() {
+        let p = [0.25, -0.5, 1e-6, -1e-6, 0.125, -0.25, 0.75, -1.0];
+        for encoding in [Encoding::Pcm24, Encoding::Float32] {
+            let array = encode_pressure_wav(&p, 48_000, 4, 1.0, encoding).unwrap();
+            let mono = encode_pressure_wav(&p, 48_000, 1, 1.0, encoding).unwrap();
+            let header = if encoding == Encoding::Pcm24 { 68 } else { 80 };
+            assert_eq!(read_u32(&array, 40), 0);
+            assert_eq!(&array[22..24], &[4, 0]);
+            assert_eq!(&array[header..], &mono[header..]);
+            if encoding == Encoding::Float32 { assert_eq!(read_u32(&array, 68), 2); }
+            assert!(encode_pressure_wav(&[0.0; 65], 48_000, 65, 1.0, encoding).is_err());
         }
     }
 }

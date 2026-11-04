@@ -30237,3 +30237,25 @@ orientation torque; exercise exact isotropic reduction; measure actual pair
 linear/spin/orbital momentum including supports; replay the original native
 subflows; refine both source models; shift the reporting origin; and refuse
 inadmissible extents atomically.
+### Simultaneous coherent pressure channels and calibrated WAV output
+
+`pcm_wav::observation::harmonic::HarmonicPressureFrameRenderer` binds up to 64
+named receiver/readout channels to one original `PreparedHarmonicArrayRealization`
+and absolute integer/DD sample clock. Real and proper-complex factor draws stay
+shared across every channel and frequency. Directional readouts reuse the
+original pressure/velocity projection, signed weights and causal delays once.
+Preparation budgets cover the complete selected bank; original retained lines,
+including dark channels, must satisfy strict output Nyquist. Callback storage is
+bounded, sampling allocates nothing, and cancellation or physical refusal
+publishes no partial frame or counter advance.
+
+The original `Pcm16WavStream` and shared pressure frame loop retain complete
+interleaved frames, one authored Pa-to-PCM full scale, whole-request admission,
+callback-boundary cancellation and poisoned partial-I/O refusal. Frame counts
+are distinct from scalar channel samples. Mono/stereo bytes remain compatible;
+3–64 channels use WAVEFORMATEXTENSIBLE direct outputs with a zero speaker mask.
+The original PCM24/float32 batch writer supports the same ordered channels.
+Applications retain channel identity/geometry/calibration metadata beside WAV
+bytes. This is settled harmonic observation and offline file export; it adds
+no source process, propagation, transient onset, per-channel normalization,
+automatic speaker mapping or inference of ensemble statistics from one draw.

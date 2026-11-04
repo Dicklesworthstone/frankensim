@@ -162,6 +162,19 @@ impl<const D: usize> PreparedHarmonicEnsemble<D> {
         self.factors.len()
     }
 
+    /// Retained frequency lines across the deterministic mean and every
+    /// factor bank. Equal frequencies in different banks count separately;
+    /// this bounds coherent realization work before any fields are allocated.
+    #[must_use]
+    pub fn retained_line_count(&self) -> usize {
+        self.mean.frequency_count()
+            + self
+                .factors
+                .iter()
+                .map(|(_, field)| field.frequency_count())
+                .sum::<usize>()
+    }
+
     pub fn observe_window(
         &self,
         window: HarmonicWindow,

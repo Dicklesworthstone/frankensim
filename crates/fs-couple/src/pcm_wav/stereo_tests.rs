@@ -56,3 +56,27 @@ fn invalid_stereo_frames_and_channel_byte_rates_refuse_without_padding() {
         assert!(encode_pcm16_wav_interleaved(&[0.0;2],48_000,2,scale).is_err());
     }
 }
+
+#[test]
+fn direct_output_array_headers_preserve_quantizer_and_scalar_channel_order() {
+    let pressure = [0.0, 0.5, -0.5, 0.125, 2.0, -2.0, 0.25, -0.125];
+    let (wav, clips) = encode_pcm16_wav_interleaved(&pressure, 8_000, 4, 1.0).unwrap();
+    assert_eq!(u32_at(&wav, 16), 40);
+    assert_eq!(u16_at(&wav, 20), 0xfffe);
+    assert_eq!(u16_at(&wav, 22), 4);
+    assert_eq!(u32_at(&wav, 28), 64_000);
+    assert_eq!(u16_at(&wav, 32), 8);
+    assert_eq!(u16_at(&wav, 36), 22);
+    assert_eq!(u16_at(&wav, 38), 16);
+    assert_eq!(u32_at(&wav, 40), 0); // direct outputs, no speaker assignments
+    assert_eq!(u32_at(&wav, 44), 1); // PCM subtype
+    assert_eq!(&wav[60..64], b"data");
+    assert_eq!(u32_at(&wav, 64), 16);
+    assert_eq!(u32_at(&wav, 4) as usize + 8, wav.len());
+    let (mono, mono_clips) = encode_pcm16_wav(&pressure, 8_000, 1.0).unwrap();
+    assert_eq!(&wav[68..], &mono[44..]);
+    assert_eq!((clips, mono_clips), (2, 2));
+    assert!(encode_pcm16_wav_interleaved(&[0.0; 64], 8_000, 64, 1.0).is_ok());
+    assert!(encode_pcm16_wav_interleaved(&[0.0; 65], 8_000, 65, 1.0).is_err());
+    assert!(encode_pcm16_wav_interleaved(&[0.0; 4], u32::MAX / 8 + 1, 4, 1.0).is_err());
+}

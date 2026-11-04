@@ -24,6 +24,10 @@ impl core::fmt::Display for WavError {
 
 impl std::error::Error for WavError {}
 
+/// Bounded physical output channels in one WAV. Channels above stereo use
+/// WAVEFORMATEXTENSIBLE with a zero speaker mask (ordered direct outputs).
+pub const MAX_WAV_CHANNELS: u16 = 64;
+
 /// Encode mono PCM16 WAV bytes.
 ///
 /// `full_scale_pa` maps to `i16::MAX`. Values outside ±full-scale saturate
@@ -41,27 +45,31 @@ pub fn encode_pcm16_wav(
     encode_pcm16_wav_interleaved(pressure_pa, sample_rate_hz, 1, full_scale_pa)
 }
 
-/// Encode frame-interleaved mono or stereo pressure without changing channel gain.
+/// Encode frame-interleaved pressure without changing relative channel gain.
 ///
 /// Stereo input is `[left_0, right_0, left_1, right_1, ...]`; the sample rate
 /// is the frame rate of EACH channel, not the number of scalar values per second.
-/// Both channels use the same explicit pressure full-scale and the original
+/// All channels use the same explicit pressure full-scale and the original
 /// PCM quantizer. The returned clip count counts scalar channel samples.
 /// There is no downmix, panning, normalization, or implicit channel padding.
 ///
 /// # Errors
-/// Refuses channel counts other than 1 or 2, empty/incomplete frames, invalid
+/// Refuses channel counts outside 1..=64, empty/incomplete frames, invalid
 /// pressure/rate/full-scale, and RIFF or byte-rate overflow before allocation.
-/// More than two channels require a separately specified extensible WAV layout.
+/// Mono/stereo retain their original 44-byte headers and exact payloads.
+/// Larger arrays use WAVEFORMATEXTENSIBLE direct outputs, in the supplied
+/// channel order, without assigning physical microphones to speaker positions.
+/// Retain the application's channel identities alongside the file.
 pub fn encode_pcm16_wav_interleaved(
     pressure_pa: &[f64],
     sample_rate_hz: u32,
     channels: u16,
     full_scale_pa: f64,
 ) -> Result<(Vec<u8>, usize), WavError> {
-    if !matches!(channels, 1 | 2) || pressure_pa.len() % usize::from(channels) != 0 {
+    if !(1..=MAX_WAV_CHANNELS).contains(&channels)
+        || pressure_pa.len() % usize::from(channels) != 0 {
         return Err(WavError::InvalidInput {
-            what: "PCM16 requires complete mono or left/right stereo frames",
+            what: "PCM16 requires complete frames of 1..=64 channels",
         });
     }
     if pressure_pa.is_empty() {
@@ -86,13 +94,14 @@ pub fn encode_pcm16_wav_interleaved(
     let data_length = u32::try_from(data_bytes).map_err(|_| WavError::InvalidInput {
         what: "WAV payload exceeds u32",
     })?;
-    let riff_length = data_length.checked_add(36).ok_or(WavError::InvalidInput {
+    let header_len = pcm16_header_len(channels);
+    let riff_length = data_length.checked_add((header_len - 8) as u32).ok_or(WavError::InvalidInput {
         what: "WAV payload exceeds u32",
     })?;
     let block_align = channels * 2;
     let byte_rate = sample_rate_hz.checked_mul(u32::from(block_align))
         .ok_or(WavError::InvalidInput { what: "WAV byte rate overflows u32" })?;
-    let capacity = data_bytes.checked_add(44).ok_or(WavError::InvalidInput {
+    let capacity = data_bytes.checked_add(header_len).ok_or(WavError::InvalidInput {
         what: "WAV data length overflow",
     })?;
     if pressure_pa.iter().any(|p| !p.is_finite()) {
@@ -103,13 +112,16 @@ pub fn encode_pcm16_wav_interleaved(
     write_u32_le(&mut out, riff_length);
     out.extend_from_slice(b"WAVE");
     out.extend_from_slice(b"fmt ");
-    write_u32_le(&mut out, 16);
-    write_u16_le(&mut out, 1);
+    write_u32_le(&mut out, if channels <= 2 { 16 } else { 40 });
+    write_u16_le(&mut out, if channels <= 2 { 1 } else { 0xfffe });
     write_u16_le(&mut out, channels);
     write_u32_le(&mut out, sample_rate_hz);
     write_u32_le(&mut out, byte_rate);
     write_u16_le(&mut out, block_align);
     write_u16_le(&mut out, 16);
+    if channels > 2 {
+        write_extensible_fields(&mut out, channels, 16, 1);
+    }
     out.extend_from_slice(b"data");
     write_u32_le(&mut out, data_length);
     let mut clips = 0usize;
@@ -142,6 +154,21 @@ fn write_u32_le(out: &mut Vec<u8>, value: u32) {
 
 fn write_i16_le(out: &mut Vec<u8>, value: i16) {
     out.extend_from_slice(&value.to_le_bytes());
+}
+
+const fn pcm16_header_len(channels: u16) -> usize {
+    if channels <= 2 { 44 } else { 68 }
+}
+
+// Shared by PCM16, PCM24 and float32. A zero mask is the documented direct-out
+// layout: retain channel order without inventing a speaker configuration.
+// https://learn.microsoft.com/en-us/windows-hardware/drivers/audio/dsspeaker-directout-speaker-configuration
+fn write_extensible_fields(out: &mut Vec<u8>, channels: u16, bits: u16, subformat: u32) {
+    write_u16_le(out, 22);
+    write_u16_le(out, bits);
+    write_u32_le(out, match channels { 1 => 4, 2 => 3, _ => 0 });
+    write_u32_le(out, subformat);
+    out.extend_from_slice(&[0, 0, 0x10, 0, 0x80, 0, 0, 0xaa, 0, 0x38, 0x9b, 0x71]);
 }
 
 /// Incremental file export using the same PCM encoder and scheduled physics.

@@ -39,6 +39,36 @@ pub trait PressureRenderer {
     fn block(&mut self, output: &mut [f64]) -> Result<(), RenderError>;
 }
 
+/// Simultaneous pressure channels on ONE output frame clock, interleaved as
+/// `[frame_0_channel_0, frame_0_channel_1, ..., frame_1_channel_0, ...]`.
+/// Admission is read-only. Callbacks contain complete frames and preserve each
+/// channel's physical Pa calibration; the writer never normalizes their gains.
+pub trait PressureFrameRenderer {
+    fn channel_count(&self) -> usize;
+    fn frames_rendered(&self) -> u64;
+    fn max_frame_block_len(&self) -> usize;
+    fn validate_frame_rate(&self, sample_rate_hz: u32) -> Result<(), RenderError>;
+    fn validate_frame_count(&self, frames: u64) -> Result<(), RenderError>;
+    fn frame_block(&mut self, output: &mut [f64]) -> Result<(), RenderError>;
+}
+
+// Existing mechanics/filter producers share exactly the same frame loop as
+// physical arrays. Their mono source clock and callback semantics are intact.
+impl<T: PressureRenderer + ?Sized> PressureFrameRenderer for T {
+    fn channel_count(&self) -> usize { 1 }
+    fn frames_rendered(&self) -> u64 { self.samples_rendered() }
+    fn max_frame_block_len(&self) -> usize { self.max_block_len() }
+    fn validate_frame_rate(&self, rate: u32) -> Result<(), RenderError> {
+        self.validate_sample_rate(rate)
+    }
+    fn validate_frame_count(&self, frames: u64) -> Result<(), RenderError> {
+        self.validate_sample_count(frames)
+    }
+    fn frame_block(&mut self, output: &mut [f64]) -> Result<(), RenderError> {
+        self.block(output)
+    }
+}
+
 // Type erasure is optional and occurs at composition, never per sample. This
 // lets a nonlinear impact observer and a modal/reed renderer share an output
 // without forcing either to adopt the other's physical integration scheme.
