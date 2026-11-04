@@ -315,3 +315,129 @@ fn porous_g4_source_temperature_graph_and_cancellation_refuse_without_partial_st
     }
     assert_eq!(p,saved);
 }
+
+
+#[test]
+fn layered_dusty_gas_path_uses_the_same_transactional_species_owner() {
+    use crate::porous::permeability::{
+        DarcyGasBarrier, IntrinsicPermeability, PorousGasLayer, PorousGasSupport,
+    };
+    use crate::thermochemical_gas::energy::parcel::transfer::species::diffusion::dusty_gas::{
+        DustyGasFaceSolve, DustyGasPores, LayeredDustyGasMedium,
+    };
+    use super::dusty_gas::LayeredDustyGasNetworkLink;
+
+    let p = gases();
+    let bounds = endpoints(&p);
+    let d = card();
+    let context = point(400.0, 100000.0);
+    let pairs = pair(&d, &context);
+    let layers = vec![
+        PorousGasLayer::try_new(
+            IntrinsicPermeability::isotropic(2e-14).unwrap(),
+            0.004,
+            0.0,
+            "synthetic first porous layer",
+        ).unwrap(),
+        PorousGasLayer::try_new(
+            IntrinsicPermeability::isotropic(8e-15).unwrap(),
+            0.006,
+            0.0,
+            "synthetic second porous layer",
+        ).unwrap(),
+    ];
+    let barrier = DarcyGasBarrier::try_new(
+        layers,
+        [1.0, 0.0, 0.0],
+        PorousGasSupport {
+            temperature_k: (200.0, 1800.0),
+            pressure_pa: (1000.0, 1e7),
+            maximum_superficial_speed_m_s: 100.0,
+        },
+    ).unwrap();
+    let medium = LayeredDustyGasMedium::try_new(
+        barrier,
+        vec![
+            DustyGasPores::try_new(6e-8, 0.30, 1.8, "synthetic first pores").unwrap(),
+            DustyGasPores::try_new(2e-7, 0.52, 2.6, "synthetic second pores").unwrap(),
+        ],
+    ).unwrap();
+    let face_solve = DustyGasFaceSolve {
+        maximum_temperature_difference_k: 1e-5,
+        maximum_relative_pressure_difference: 0.25,
+        gradient_tolerance_per_m: 1e-8,
+    };
+    let link = LayeredDustyGasNetworkLink {
+        id: 91,
+        parcels: [0, 1],
+        medium: &medium,
+        area_m2: 1e-5,
+        pairs: &pairs,
+        gas_context: &context,
+        solve: face_solve,
+    };
+    let direct = p[&0].layered_dusty_gas_flux_to(
+        &p[&1], &medium, link.area_m2, &pairs, &context, face_solve, || false,
+    ).unwrap();
+    let dt = 0.001;
+    let candidate = step_candidate_with_paths(
+        &p,
+        GasTransportPaths {
+            layered_dusty_gas: &[link],
+            ..GasTransportPaths::default()
+        },
+        dt,
+        &bounds,
+        solve(),
+        || false,
+    ).unwrap();
+    assert_eq!(candidate.step().layered_dusty_gas.len(), 1);
+    assert_eq!(candidate.step().layered_dusty_gas[0].flux, direct);
+
+    let rows = direct.species.iter().filter_map(|flux| {
+        let mass = flux.mass_rate_left_to_right_kg_s * dt;
+        (mass != 0.0).then(|| SpeciesNetworkTransfer {
+            donor: if mass > 0.0 { 0 } else { 1 },
+            receiver: if mass > 0.0 { 1 } else { 0 },
+            species: flux.species.clone(),
+            mass_kg: mass.abs(),
+        })
+    }).collect::<Vec<_>>();
+    let expected = super::super::exchange_candidate(
+        &p, &rows, &bounds, solve().exchange, || false,
+    ).unwrap();
+    assert_eq!(candidate.parcels(), expected.parcels());
+    assert_eq!(candidate.step().exchange, *expected.step());
+    assert!(candidate.step().entropy_change_j_k >= -solve().entropy_tolerance_j_k);
+
+    let mut reverse = link;
+    reverse.parcels.reverse();
+    let reversed = step_candidate_with_paths(
+        &p,
+        GasTransportPaths {
+            layered_dusty_gas: &[reverse],
+            ..GasTransportPaths::default()
+        },
+        dt,
+        &bounds,
+        solve(),
+        || false,
+    ).unwrap();
+    assert_eq!(reversed.parcels(), candidate.parcels());
+    assert_eq!(reversed.step().exchange, candidate.step().exchange);
+
+    let mut closed = link;
+    closed.area_m2 = 0.0;
+    let idle = step_candidate_with_paths(
+        &p,
+        GasTransportPaths {
+            layered_dusty_gas: &[closed],
+            ..GasTransportPaths::default()
+        },
+        dt,
+        &bounds,
+        solve(),
+        || false,
+    ).unwrap();
+    assert_eq!(idle.parcels(), &p);
+}
