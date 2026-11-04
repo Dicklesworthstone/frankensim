@@ -1,8 +1,9 @@
 //! Physical body-force impulse on the same frozen face masses as pressure.
 
 use super::{
-    CancelGate, ChtError, DensityProjection, DensityProjectionControls, FlowFace, FlowField, Sum,
-    VoxelDomain, face_dual_mass, finite, finite_positive, nonnegative, poll, poll_every, refuse,
+    BoundaryPressure, CancelGate, ChtError, DensityProjection, DensityProjectionControls, FlowFace,
+    FlowField, PressureReadback, StaggeredBoundaryPressure, Sum, VoxelDomain, face_dual_mass,
+    finite, finite_positive, nonnegative, poll, poll_every, refuse,
 };
 
 /// Frozen material density and prescribed physical body force for one step.
@@ -102,7 +103,7 @@ pub struct ForcedDensityProjectionReport {
     pub force_pressure_split_work_j: f64,
     /// `delta_K + projection_loss + split_work - applied_endpoint_work
     /// - constraint_endpoint_work - pressure_source_work
-    /// + fixed_boundary_pressure_work`, J.
+    /// + fixed_boundary_pressure_work + open_boundary_pressure_work`, J.
     pub energy_defect_j: f64,
 }
 
@@ -207,6 +208,71 @@ impl FlowField {
         force_controls: DensityForceControls,
         gate: &CancelGate,
     ) -> Result<ForcedDensityProjection, ChtError> {
+        self.force_and_project_density_with_optional_pressure(
+            domain,
+            faces,
+            None,
+            input,
+            target_outflow_m3_s,
+            projection_controls,
+            force_controls,
+            gate,
+        )
+        .map(|(evolution, _)| evolution)
+    }
+
+    /// Apply body forcing and a spatial reservoir-pressure profile through the
+    /// same density-weighted projection. The profile supplies pressure on actual
+    /// open staggered faces; their impulses use the adjacent half-cell inertia.
+    /// A stratified hydrostatic head can balance gravity at an extended opening,
+    /// and unequal reservoir pressures can drive inflow or outflow.
+    ///
+    /// Pressure impulses and reservoir work are independently read from the
+    /// returned native field. Reservoir work retains the projection's component
+    /// gauge and is included in the combined mechanical energy balance. The
+    /// borrowed profile is neither copied nor retained. Reservoir material,
+    /// thermodynamic state and any subsequent mass transport remain caller-owned.
+    ///
+    /// # Errors
+    /// Any original force/projection refusal, invalid native pressure profile,
+    /// exceeded impulse/work budget or cancellation leaves the input unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn force_and_project_density_with_pressure_profile(
+        &self,
+        domain: &VoxelDomain,
+        faces: [FlowFace; 6],
+        profile: StaggeredBoundaryPressure<'_>,
+        input: DensityForceInput<'_>,
+        target_outflow_m3_s: &[f64],
+        projection_controls: DensityProjectionControls,
+        force_controls: DensityForceControls,
+        gate: &CancelGate,
+    ) -> Result<ForcedDensityProjection, ChtError> {
+        self.force_and_project_density_with_optional_pressure(
+            domain,
+            faces,
+            Some(profile),
+            input,
+            target_outflow_m3_s,
+            projection_controls,
+            force_controls,
+            gate,
+        )
+        .map(|(evolution, _)| evolution)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn force_and_project_density_with_optional_pressure(
+        &self,
+        domain: &VoxelDomain,
+        faces: [FlowFace; 6],
+        profile: Option<StaggeredBoundaryPressure<'_>>,
+        input: DensityForceInput<'_>,
+        target_outflow_m3_s: &[f64],
+        projection_controls: DensityProjectionControls,
+        force_controls: DensityForceControls,
+        gate: &CancelGate,
+    ) -> Result<(ForcedDensityProjection, Option<PressureReadback>), ChtError> {
         let predicted = self.predict_density_body_force(
             domain,
             faces,
@@ -215,31 +281,55 @@ impl FlowField {
             force_controls,
             gate,
         )?;
-        let projection = predicted.field.project_density_volume_source(
-            domain,
-            faces,
-            input.density_kg_m3,
-            target_outflow_m3_s,
-            projection_controls,
-            gate,
-        )?;
+        let (projection, pressure_readback) = match profile {
+            None => (
+                predicted.field.project_density_volume_source(
+                    domain,
+                    faces,
+                    input.density_kg_m3,
+                    target_outflow_m3_s,
+                    projection_controls,
+                    gate,
+                )?,
+                None,
+            ),
+            Some(profile) => {
+                let (projection, readback) = predicted
+                    .field
+                    .project_density_volume_source_with_pressure_readback(
+                        domain,
+                        faces,
+                        BoundaryPressure::Profile(profile),
+                        input.density_kg_m3,
+                        target_outflow_m3_s,
+                        projection_controls,
+                        gate,
+                    )?;
+                (projection, Some(readback))
+            }
+        };
         let report = audit_combined(
             self,
             &predicted,
             &projection,
             domain,
             faces,
+            profile,
+            pressure_readback.as_ref(),
             input,
             projection_controls.duration_s,
             force_controls,
             gate,
         )?;
         poll(gate)?;
-        Ok(ForcedDensityProjection {
-            projection,
-            forcing: predicted.report,
-            report,
-        })
+        Ok((
+            ForcedDensityProjection {
+                projection,
+                forcing: predicted.report,
+                report,
+            },
+            pressure_readback,
+        ))
     }
 }
 
@@ -452,6 +542,8 @@ fn audit_combined(
     projected: &DensityProjection,
     domain: &VoxelDomain,
     faces: [FlowFace; 6],
+    profile: Option<StaggeredBoundaryPressure<'_>>,
+    pressure_readback: Option<&PressureReadback>,
     input: DensityForceInput<'_>,
     duration_s: f64,
     controls: DensityForceControls,
@@ -483,10 +575,20 @@ fn audit_combined(
             let q_predicted = predicted.field.face(axis, slot);
             let q1 = projected.field.face(axis, slot);
             let expected = if corrected_face(domain, faces, c, f) {
-                sign * duration_s
-                    * area
-                    * (projected.pressure_correction_pa[c]
-                        - nb.map_or(0.0, |n| projected.pressure_correction_pa[n]))
+                let difference = pressure_readback.map_or_else(
+                    || {
+                        projected.pressure_correction_pa[c]
+                            - nb.map_or(0.0, |n| projected.pressure_correction_pa[n])
+                    },
+                    |readback| {
+                        readback.difference(
+                            c,
+                            nb,
+                            profile.and_then(|p| p.value(axis, slot)).unwrap_or(0.0),
+                        )
+                    },
+                );
+                sign * duration_s * area * difference
             } else {
                 0.0
             };
@@ -524,11 +626,14 @@ fn audit_combined(
     finite("flow.endpoint_body_work", endpoint_work.value)?;
     finite("flow.endpoint_constraint_work", constraint_work.value)?;
     finite("flow.force_pressure_split_work", split_work.value)?;
-    let energy_defect = change.value + projected.report.projection_loss_j + split_work.value
+    let mut energy_defect = change.value + projected.report.projection_loss_j + split_work.value
         - endpoint_work.value
         - constraint_work.value
         - projected.report.pressure_source_work_j
         + projected.report.fixed_boundary_pressure_work_j;
+    if projected.report.open_boundary_pressure_work_j != 0.0 {
+        energy_defect += projected.report.open_boundary_pressure_work_j;
+    }
     check_budget(
         "flow.combined_impulse_budget",
         impulse_defect.value,

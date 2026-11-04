@@ -3,8 +3,9 @@
 use super::{
     CancelGate, ChtError, DensityForceControls, DensityForceInput, DensityMomentumReconstruction,
     DensityMomentumReconstructionControls, DensityMomentumReconstructionReport,
-    DensityProjectionControls, FlowFace, FlowField, ForcedDensityProjection, Sum, VoxelDomain,
-    face_dual_mass, finite, finite_positive, nonnegative, poll, poll_every, refuse,
+    DensityProjectionControls, FlowFace, FlowField, ForcedDensityProjection, PressureReadback,
+    StaggeredBoundaryPressure, Sum, VoxelDomain, face_dual_mass, finite, finite_positive,
+    nonnegative, poll, poll_every, refuse,
 };
 
 /// Original extensive material state and authored sources for one fresh kick.
@@ -74,7 +75,8 @@ pub struct MaterialDensityMomentumReport {
     /// + pressure_projection_loss + force_pressure_split_work
     /// - reconstruction_reservoir_work - body_endpoint_work
     /// - force_constraint_endpoint_work - pressure_source_work
-    /// + fixed_boundary_pressure_work - mass_representation_work`, J.
+    /// + fixed_boundary_pressure_work + open_boundary_pressure_work
+    /// - mass_representation_work`, J.
     /// Initial reconstruction Jensen loss cancels; it is NOT debited again.
     pub composed_energy_defect_j: f64,
     pub absolute_energy_defect_j: f64,
@@ -138,6 +140,56 @@ impl FlowField {
         controls: MaterialDensityMomentumControls,
         gate: &CancelGate,
     ) -> Result<MaterialDensityMomentumStep, ChtError> {
+        self.force_project_material_momentum_with_optional_pressure(
+            domain, faces, None, input, controls, gate,
+        )
+    }
+
+    /// Return a fresh body-force and reservoir-pressure impulse to the original
+    /// material momentum. The borrowed profile has the same native face layout,
+    /// open-face admission and physical half-cell inertia as
+    /// [`Self::force_and_project_density_with_pressure_profile`].
+    ///
+    /// Every open-face impulse uses the actual cell-to-reservoir pressure
+    /// difference. Its half-cell share reaches material momentum once, including
+    /// hydrostatic support and either flow direction. The existing independent
+    /// angular/energy balances include the original reservoir work; numerical
+    /// scatter and projection losses remain separate. This method supplies no
+    /// reservoir mass, enthalpy, constitutive law or additional transport solve.
+    ///
+    /// # Errors
+    /// Invalid pressure data or any original reconstruction, forcing, projection,
+    /// feedback or cancellation refusal leaves all supplied state unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn force_project_material_momentum_with_pressure_profile(
+        &self,
+        domain: &VoxelDomain,
+        faces: [FlowFace; 6],
+        profile: StaggeredBoundaryPressure<'_>,
+        input: MaterialDensityMomentumInput<'_>,
+        controls: MaterialDensityMomentumControls,
+        gate: &CancelGate,
+    ) -> Result<MaterialDensityMomentumStep, ChtError> {
+        self.force_project_material_momentum_with_optional_pressure(
+            domain,
+            faces,
+            Some(profile),
+            input,
+            controls,
+            gate,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn force_project_material_momentum_with_optional_pressure(
+        &self,
+        domain: &VoxelDomain,
+        faces: [FlowFace; 6],
+        profile: Option<StaggeredBoundaryPressure<'_>>,
+        input: MaterialDensityMomentumInput<'_>,
+        controls: MaterialDensityMomentumControls,
+        gate: &CancelGate,
+    ) -> Result<MaterialDensityMomentumStep, ChtError> {
         poll(gate)?;
         for (name, maximum) in [
             (
@@ -163,23 +215,28 @@ impl FlowField {
             controls.reconstruction,
             gate,
         )?;
-        let evolution = reconstructed.field.force_and_project_density(
-            domain,
-            faces,
-            DensityForceInput {
-                density_kg_m3: &reconstructed.density_kg_m3,
-                acceleration_m_s2: input.acceleration_m_s2,
-                force_density_n_m3: input.force_density_n_m3,
-            },
-            input.target_outflow_m3_s,
-            controls.projection,
-            controls.forcing,
-            gate,
-        )?;
+        let (evolution, pressure_readback) = reconstructed
+            .field
+            .force_and_project_density_with_optional_pressure(
+                domain,
+                faces,
+                profile,
+                DensityForceInput {
+                    density_kg_m3: &reconstructed.density_kg_m3,
+                    acceleration_m_s2: input.acceleration_m_s2,
+                    force_density_n_m3: input.force_density_n_m3,
+                },
+                input.target_outflow_m3_s,
+                controls.projection,
+                controls.forcing,
+                gate,
+            )?;
         let exchange = Exchange {
             held: self,
             domain,
             faces,
+            profile,
+            pressure_readback: pressure_readback.as_ref(),
             input,
             controls,
             reconstructed: &reconstructed,
@@ -203,6 +260,8 @@ struct Exchange<'a> {
     held: &'a FlowField,
     domain: &'a VoxelDomain,
     faces: [FlowFace; 6],
+    profile: Option<StaggeredBoundaryPressure<'a>>,
+    pressure_readback: Option<&'a PressureReadback>,
     input: MaterialDensityMomentumInput<'a>,
     controls: MaterialDensityMomentumControls,
     reconstructed: &'a DensityMomentumReconstruction,
@@ -332,12 +391,13 @@ impl Exchange<'_> {
                     });
             let force =
                 dt * (native_mass * self.input.acceleration_m_s2[axis] + area * force_per_area);
-            let pressure = sign
-                * dt
-                * area
-                * (self.evolution.projection.pressure_correction_pa[c]
-                    - neighbor
-                        .map_or(0.0, |n| self.evolution.projection.pressure_correction_pa[n]));
+            let difference = self.pressure_readback.map_or_else(
+                || self.evolution.projection.pressure_correction_pa[c]
+                    - neighbor.map_or(0.0, |n| self.evolution.projection.pressure_correction_pa[n]),
+                |readback| readback.difference(c, neighbor,
+                    self.profile.and_then(|p| p.value(axis, slot)).unwrap_or(0.0)),
+            );
+            let pressure = sign * dt * area * difference;
             (force, pressure)
         };
         let impulse = constraint + (force + pressure);
@@ -479,7 +539,10 @@ impl Exchange<'_> {
                 self.controls.projection.maximum_volume_defect_m3_s,
             )?;
             let pressure_volume_defect = self.controls.projection.duration_s
-                * self.evolution.projection.pressure_correction_pa[c]
+                * self.pressure_readback.map_or(
+                    self.evolution.projection.pressure_correction_pa[c],
+                    |readback| readback.cell_pressure(c),
+                )
                 * volume_defect;
             composition_defect.add(pressure_volume_defect);
             energy_defect.add(pressure_volume_defect.abs());

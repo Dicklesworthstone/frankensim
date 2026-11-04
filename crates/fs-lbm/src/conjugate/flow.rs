@@ -69,6 +69,7 @@ pub enum FlowFace {
 // driving differences in the Krylov residual or the face subtraction.
 struct ProjectionPotential {
     cells: Vec<usize>,
+    row_of: Vec<usize>,
     values: Vec<f64>,
     component: Vec<usize>,
     reference_pressure_pa: Vec<f64>,
@@ -631,6 +632,7 @@ impl FlowField {
             report,
             ProjectionPotential {
                 cells: fluid,
+                row_of,
                 values: phi,
                 component,
                 reference_pressure_pa,

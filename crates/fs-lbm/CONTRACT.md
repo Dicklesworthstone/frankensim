@@ -3919,6 +3919,20 @@ electronics cooling (the wedge's second physics after steady conduction).
   impulse, held reactions, large velocity datums, zero-impulse preservation,
   independent representation-work refusal and repeated accepted material
   transport followed by fresh forcing, pressure and cell feedback.
+- `force_and_project_density_with_pressure_profile` and
+  `force_project_material_momentum_with_pressure_profile` carry the original
+  borrowed `StaggeredBoundaryPressure` through native forcing, projection and
+  cell feedback. Every exposed reservoir uses its actual half-cell inertia
+  and its own pressure difference. Reservoir work joins the existing combined
+  force/pressure identity, and physical pressure impulses reach original cell
+  momentum once. The native solve's relative pressure, component references
+  and existing cell-to-row map survive privately through readback; restoring
+  a large public pressure gauge cannot erase a small driving head. This adds
+  no pressure solve, profile copy, index-map allocation or component walk.
+  The original zero-pressure entrypoints retain their readback arithmetic.
+  Native regression sources specify unequal-density pressure acceleration,
+  spatial hydrostatic heads, large common pressure references, cell impulse
+  and energy feedback, zero-profile parity and invalid-profile refusal.
 - `FlowField::advance_coexistence_volume` supplies a bounded physical consumer
   of that conservative transport: one mobile, common-velocity material mixture
   on ONE adjacent isothermal solid/liquid coexistence interval of its original

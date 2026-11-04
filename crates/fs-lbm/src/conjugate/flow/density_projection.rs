@@ -157,6 +157,34 @@ pub struct DensityProjection {
     pub report: DensityProjectionReport,
 }
 
+// Fresh composed stages retain the native relative solution until their
+// impulse/work readback is complete. Reuse the solver's original row/component
+// maps and values; subtracting restored absolute pressures can lose a small
+// driving head under a large reservoir reference. No second pressure map or
+// solve is needed, and no private state is added to the public result.
+struct PressureReadback {
+    potential: ProjectionPotential,
+    uniform_pressure_scale: Option<f64>,
+}
+
+impl PressureReadback {
+    fn cell_pressure(&self, cell: usize) -> f64 {
+        let phi = self.potential.values[self.potential.row_of[cell]];
+        self.uniform_pressure_scale.map_or(phi, |scale| phi * scale)
+    }
+
+    fn difference(&self, cell: usize, neighbor: Option<usize>, boundary_pa: f64) -> f64 {
+        let other = neighbor.map_or_else(
+            || {
+                let row = self.potential.row_of[cell];
+                boundary_pa - self.potential.reference_pressure_pa[self.potential.component[row]]
+            },
+            |neighbor| self.cell_pressure(neighbor),
+        );
+        self.cell_pressure(cell) - other
+    }
+}
+
 pub(super) struct FrozenDensity<'a> {
     density_kg_m3: &'a [f64],
     pub(super) target_outflow_m3_s: &'a [f64],
@@ -380,6 +408,29 @@ impl FlowField {
         controls: DensityProjectionControls,
         gate: &CancelGate,
     ) -> Result<DensityProjection, ChtError> {
+        self.project_density_volume_source_with_pressure_readback(
+            domain,
+            faces,
+            boundary_pressure,
+            density_kg_m3,
+            target_outflow_m3_s,
+            controls,
+            gate,
+        )
+        .map(|(projection, _)| projection)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn project_density_volume_source_with_pressure_readback<'a>(
+        &self,
+        domain: &VoxelDomain,
+        faces: [FlowFace; 6],
+        boundary_pressure: BoundaryPressure<'a>,
+        density_kg_m3: &'a [f64],
+        target_outflow_m3_s: &'a [f64],
+        controls: DensityProjectionControls,
+        gate: &CancelGate,
+    ) -> Result<(DensityProjection, PressureReadback), ChtError> {
         let mut density = self.admit_density_projection(
             domain,
             faces,
@@ -419,11 +470,19 @@ impl FlowField {
             finite("flow.pressure_correction_pa", pressure[c])?;
         }
         poll(gate)?;
-        Ok(DensityProjection {
-            field,
-            pressure_correction_pa: pressure,
-            report,
-        })
+        Ok((
+            DensityProjection {
+                field,
+                pressure_correction_pa: pressure,
+                report,
+            },
+            PressureReadback {
+                potential,
+                uniform_pressure_scale: density
+                    .uniform_density
+                    .map(|rho| rho / controls.duration_s),
+            },
+        ))
     }
 
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]

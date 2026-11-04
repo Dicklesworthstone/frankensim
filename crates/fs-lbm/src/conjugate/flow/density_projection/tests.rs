@@ -484,6 +484,7 @@ fn independent_energy_readback_refuses_inconsistent_pressure() {
         &pressure,
         &ProjectionPotential {
             cells: vec![0, 1],
+            row_of: vec![0, 1],
             values: Vec::new(),
             component: vec![0, 0],
             reference_pressure_pa: vec![0.0],

@@ -40,6 +40,146 @@ fn input<'a>(
     }
 }
 
+fn profile(values: &[Vec<Option<f64>>; 3]) -> StaggeredBoundaryPressure<'_> {
+    StaggeredBoundaryPressure {
+        x_pa: &values[0],
+        y_pa: &values[1],
+        z_pa: &values[2],
+    }
+}
+
+#[test]
+fn reservoir_head_and_body_force_accelerate_actual_graded_inertia() {
+    let gate = CancelGate::new_clock_free();
+    for axis in 0..3 {
+        let mut widths = std::array::from_fn(|_| vec![1.0]);
+        widths[axis] = vec![1.0, 2.0];
+        widths[(axis + 1) % 3] = vec![2.0];
+        widths[(axis + 2) % 3] = vec![3.0];
+        let domain = VoxelDomain::graded(widths).unwrap();
+        let initial = FlowField::quiescent(&domain);
+        let mut faces = [FlowFace::Wall; 6];
+        faces[2 * axis] = FlowFace::Free;
+        faces[2 * axis + 1] = FlowFace::Free;
+        let mut acceleration = [0.0; 3];
+        acceleration[axis] = 0.75;
+        for difference in [-16.0, 16.0] {
+            let mut baseline: Option<ForcedDensityProjection> = None;
+            for datum in [0.0, 1e12] {
+                let mut pressure = initial.face_arrays().map(|q| vec![None; q.len()]);
+                pressure[axis][initial.slot(&domain, 0, 2 * axis).0] = Some(datum + difference);
+                pressure[axis][initial.slot(&domain, 1, 2 * axis + 1).0] = Some(datum);
+                let result = initial
+                    .force_and_project_density_with_pressure_profile(
+                        &domain,
+                        faces,
+                        profile(&pressure),
+                        input(&[2.0, 5.0], &[[0.0; 3]; 2], acceleration),
+                        &[0.0; 2],
+                        projection_controls(),
+                        force_controls(),
+                        &gate,
+                    )
+                    .unwrap();
+                // A=6; rho*h sums to 12 kg/m^2, so the entire column receives
+                // du=dt*(a+delta_p/12). The three dual masses sum to 72 kg.
+                let dt = projection_controls().duration_s;
+                let speed = dt * (0.75 + difference / 12.0);
+                for c in 0..2 {
+                    close(
+                        result.projection.field.outward(&domain, c, 2 * axis),
+                        -6.0 * speed,
+                    );
+                    close(
+                        result.projection.field.outward(&domain, c, 2 * axis + 1),
+                        6.0 * speed,
+                    );
+                }
+                close(result.report.momentum_change_kg_m_s[axis], 72.0 * speed);
+                close(
+                    result.report.pressure_impulse_kg_m_s[axis],
+                    dt * 6.0 * difference,
+                );
+                close(result.report.kinetic_energy_change_j, 36.0 * speed * speed);
+                close(
+                    result.projection.report.open_boundary_pressure_work_j,
+                    -dt * 6.0 * speed * difference,
+                );
+                close(result.report.energy_defect_j, 0.0);
+                if let Some(original) = &baseline {
+                    // The fractional cell head is not exactly representable
+                    // after adding 1e12 Pa. Fresh impulses must use the original
+                    // component-relative solution, without relaxed budgets.
+                    assert_eq!(result.projection.field, original.projection.field);
+                    assert_eq!(result.projection.report, original.projection.report);
+                    assert_eq!(result.report, original.report);
+                } else {
+                    baseline = Some(result);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn zero_pressure_profile_preserves_force_bits_and_invalid_profiles_refuse() {
+    let domain = VoxelDomain::new(2, 1, 1, 1.0).unwrap();
+    let initial = FlowField::quiescent(&domain);
+    let faces = [
+        FlowFace::Free,
+        FlowFace::Free,
+        FlowFace::Wall,
+        FlowFace::Wall,
+        FlowFace::Wall,
+        FlowFace::Wall,
+    ];
+    let gate = CancelGate::new_clock_free();
+    let mut pressure = initial.face_arrays().map(|q| vec![None; q.len()]);
+    let run = |pressure: StaggeredBoundaryPressure<'_>, gate: &CancelGate| {
+        initial.force_and_project_density_with_pressure_profile(
+            &domain,
+            faces,
+            pressure,
+            input(&[2.0, 5.0], &[[0.0; 3]; 2], [0.25, 0.0, 0.0]),
+            &[0.0; 2],
+            projection_controls(),
+            force_controls(),
+            gate,
+        )
+    };
+    let original = initial
+        .force_and_project_density(
+            &domain,
+            faces,
+            input(&[2.0, 5.0], &[[0.0; 3]; 2], [0.25, 0.0, 0.0]),
+            &[0.0; 2],
+            projection_controls(),
+            force_controls(),
+            &gate,
+        )
+        .unwrap();
+    assert_eq!(run(profile(&pressure), &gate).unwrap(), original);
+    pressure[0][1] = Some(0.0); // Interior faces cannot prescribe reservoir pressure.
+    assert!(run(profile(&pressure), &gate).is_err());
+    pressure[0][1] = None;
+    pressure[0][0] = Some(f64::NAN);
+    assert!(run(profile(&pressure), &gate).is_err());
+    pressure[0][0] = Some(1.0);
+    assert!(
+        run(
+            StaggeredBoundaryPressure {
+                x_pa: &[],
+                ..profile(&pressure)
+            },
+            &gate
+        )
+        .is_err()
+    );
+    gate.request();
+    assert_eq!(run(profile(&pressure), &gate), Err(ChtError::Cancelled));
+    assert_eq!(initial, FlowField::quiescent(&domain));
+}
+
 #[test]
 fn graded_sharp_stratification_balances_weight_and_endpoint_work_on_every_axis() {
     for axis in 0..3 {
@@ -466,6 +606,8 @@ fn refusal_cancellation_and_independent_readback_leave_the_original_unchanged() 
             &projected,
             &domain,
             faces,
+            None,
+            None,
             data,
             0.4,
             force_controls(),

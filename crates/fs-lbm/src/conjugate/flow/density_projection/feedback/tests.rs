@@ -49,6 +49,141 @@ fn along_x(minus: FlowFace, plus: FlowFace) -> [FlowFace; 6] {
     ]
 }
 
+fn profile(values: &[Vec<Option<f64>>; 3]) -> StaggeredBoundaryPressure<'_> {
+    StaggeredBoundaryPressure {
+        x_pa: &values[0],
+        y_pa: &values[1],
+        z_pa: &values[2],
+    }
+}
+
+#[test]
+fn reservoir_impulse_reaches_unequal_cell_masses_with_gauge_invariant_work() {
+    let domain = VoxelDomain::graded([vec![1.0, 2.0], vec![2.0], vec![3.0]]).unwrap();
+    let field = FlowField::quiescent(&domain);
+    let faces = along_x(FlowFace::Free, FlowFace::Free);
+    let gate = CancelGate::new_clock_free();
+    for scale in [1.0, 4.0] {
+        let mass = [12.0 * scale, 60.0 * scale];
+        for difference in [-16.0, 16.0] {
+            let mut baseline: Option<MaterialDensityMomentumStep> = None;
+            for datum in [0.0, 1e12] {
+                let mut pressure = field.face_arrays().map(|q| vec![None; q.len()]);
+                pressure[0][0] = Some(datum + difference);
+                pressure[0][2] = Some(datum);
+                let result = field
+                    .force_project_material_momentum_with_pressure_profile(
+                        &domain,
+                        faces,
+                        profile(&pressure),
+                        MaterialDensityMomentumInput {
+                            mass_kg: &mass,
+                            momentum_kg_m_s: &[[0.0; 3]; 2],
+                            acceleration_m_s2: [0.0; 3],
+                            force_density_n_m3: &[[0.0; 3]; 2],
+                            target_outflow_m3_s: &[0.0; 2],
+                        },
+                        controls(),
+                        &gate,
+                    )
+                    .unwrap();
+                // One common column velocity follows from series half-cell
+                // inertia. At fixed pressure its speed falls as density grows,
+                // while the actual total pressure impulse is independent of rho.
+                let dt = controls().projection.duration_s;
+                let speed = dt * difference / (12.0 * scale);
+                for c in 0..2 {
+                    close(result.momentum_kg_m_s[c][0], mass[c] * speed);
+                    close(result.momentum_kg_m_s[c][1], 0.0);
+                    close(result.momentum_kg_m_s[c][2], 0.0);
+                }
+                close(
+                    result.report.cell_momentum_change_kg_m_s[0],
+                    dt * 6.0 * difference,
+                );
+                close(
+                    result.report.kinetic_energy_change_j,
+                    36.0 * scale * speed * speed,
+                );
+                close(result.report.numerical_scatter_loss_j, 0.0);
+                close(result.report.composed_energy_defect_j, 0.0);
+                close(
+                    result
+                        .evolution
+                        .projection
+                        .report
+                        .open_boundary_pressure_work_j,
+                    -dt * 6.0 * speed * difference,
+                );
+                if let Some(original) = &baseline {
+                    assert_eq!(result.momentum_kg_m_s, original.momentum_kg_m_s);
+                    assert_eq!(result.report, original.report);
+                    assert_eq!(result.evolution.report, original.evolution.report);
+                } else {
+                    baseline = Some(result);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn stratified_reservoir_head_holds_a_vertical_opening_at_rest() {
+    let domain = VoxelDomain::graded([vec![2.0], vec![1.0, 2.0], vec![3.0]]).unwrap();
+    let field = FlowField::quiescent(&domain);
+    let mut pressure = field.face_arrays().map(|q| vec![None; q.len()]);
+    // rho=[5,2], vertical half-cell inertia per area=5/2+2=4.5.
+    // g_y=-3 therefore requires a 13.5 Pa drop between the cell centers.
+    // Both x-normal openings expose that same resolved hydrostatic head.
+    pressure[0] = vec![
+        Some(1e12 + 20.0),
+        Some(1e12 + 20.0),
+        Some(1e12 + 6.5),
+        Some(1e12 + 6.5),
+    ];
+    let result = field
+        .force_project_material_momentum_with_pressure_profile(
+            &domain,
+            along_x(FlowFace::Free, FlowFace::Free),
+            profile(&pressure),
+            MaterialDensityMomentumInput {
+                mass_kg: &[30.0, 24.0],
+                momentum_kg_m_s: &[[0.0; 3]; 2],
+                acceleration_m_s2: [0.0, -3.0, 0.0],
+                force_density_n_m3: &[[0.0; 3]; 2],
+                target_outflow_m3_s: &[0.0; 2],
+            },
+            controls(),
+            &CancelGate::new_clock_free(),
+        )
+        .unwrap();
+    for momentum in result.momentum_kg_m_s {
+        for component in momentum {
+            close(component, 0.0);
+        }
+    }
+    for flux in result
+        .evolution
+        .projection
+        .field
+        .face_arrays()
+        .into_iter()
+        .flatten()
+    {
+        close(*flux, 0.0);
+    }
+    close(
+        result
+            .evolution
+            .report
+            .pressure_and_constraint_impulse_kg_m_s[1],
+        81.0,
+    );
+    close(result.evolution.report.applied_endpoint_work_j, 0.0);
+    close(result.report.kinetic_energy_change_j, 0.0);
+    close(result.report.composed_energy_defect_j, 0.0);
+}
+
 #[test]
 fn zero_impulse_retains_original_unequal_subface_momenta_without_jensen_debit() {
     let domain = VoxelDomain::new(2, 1, 1, 1.0).unwrap();
@@ -524,6 +659,8 @@ fn independent_field_impulse_and_cell_readbacks_refuse_tampering_without_mutatio
         held: &field,
         domain: &domain,
         faces,
+        profile: None,
+        pressure_readback: None,
         input,
         controls: controls(),
         reconstructed: &reconstructed,
