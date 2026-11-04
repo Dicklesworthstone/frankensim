@@ -27,6 +27,8 @@ mod damping;
 mod elastic;
 mod solve;
 pub use damping::{JkrNormalDissipationSegment, JkrNormalMotionTrace};
+/// Original-source temperature changes preserving native motion and chronology.
+pub mod temperature;
 
 /// Fixed event storage; the caller may impose a smaller limit.
 pub const MAX_JKR_NORMAL_EVENTS: usize = 16;

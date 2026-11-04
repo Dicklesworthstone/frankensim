@@ -2257,6 +2257,28 @@ owner. Focused tests exercise damped oscillator convergence, passive loss,
 damping-driven capture and pull-off, force/refinement gates, trace work and
 unchanged zero-damping motion.
 
+### Prescribed-temperature continuation of normal inertia
+
+`JkrNormalMotion::continue_at_temperature` consumes the original immutable
+held-indentation `SourceJkrThermalRefresh` without restarting mechanical
+history. The successor borrows the refreshed original source and retains
+approach, velocity, elapsed time, accepted step count, relative mass, support
+stiffness and anchor, dashpot coefficient, and every numerical budget. Its
+sealed candidate carries the complete predecessor and successor. Foreign or
+stale source history, held-load control, a changed geometry, lost or marginal
+attached equilibrium, source/force limits, and cancellation refuse before any
+accepted owner changes.
+
+Only original contact potential changes in this instantaneous operation.
+The signed prescribed-driver supply is exactly the original refresh's
+`parameter_work_j`; kinetic and support storage are unchanged. The contact
+storage/work check is independent of large common mechanical energy datums.
+No impulse, branch release, viscous loss or caloric heat is created. Subsequent
+motion uses the refreshed original force, area, stiffness and branch limits.
+An unchanged original temperature query preserves the complete motion token.
+This is a prescribed-temperature parameter-work port, not an autonomous
+interface-temperature or entropy/internal-energy closure.
+
 ## Original normal work in mixed adhesive assemblies
 
 `NormalLawSource::mean_force_between` also supplies the original Hertz and
