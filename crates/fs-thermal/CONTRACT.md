@@ -1,5 +1,31 @@
 # fs-thermal contract
 
+## Finite-rate crystallization and latent thermal feedback
+
+`crystallization::CrystallizationLaw` retains an independent Nakamura exposure
+`z = integral K(T) dt` and absolute crystal mass fraction
+`X = Xmax * (1 - exp(-z^n))`. Its two original caloric branches share one datum:
+`h = (1-X) h_parent(T) + X h_crystal(T)`. Distinct heat capacities and the
+original temperature-dependent enthalpy gap enter this one account; latent heat
+is never added again as an independent source. Relative conversion and maximum
+absolute mass crystallinity are separate parameters.
+
+Isothermal stepping returns the required thermostat heat. Nonisothermal
+stepping integrates exposure with explicit midpoint while reconstructing both
+midpoint and endpoint temperatures on the same enthalpy account. Work and
+caloric tolerances are bounded, cancellation publishes no candidate, and
+out-of-domain or melting trajectories refuse. Immutable source owners may
+supply positive whole-domain heat-capacity lower bounds to accelerate caloric
+inversion; generic laws retain safeguarded bracket convergence. Eight focused
+native Rust tests pass, covering analytic JMAK, adiabatic recalescence with
+unequal heat capacities, second-order time refinement, accelerated affine and
+nonlinear inversion, datum shifts, endpoint behavior and cancellation.
+
+This is an irreversible isokinetic constitutive model with explicit caller
+parameters and applicability. It supplies no material calibration, stochastic
+nucleation, grain/dendrite morphology, segregation, remelting/reset or mechanical
+locking. Time integration error remains distinct from caloric closure.
+
 Layer L3. Shared conservative thermal transport and solid/vapor exchange.
 Runtime dependencies: std, fs-la, fs-math, fs-solver. Spatial discretizations and material
 constitutive data remain owned by their existing crates.

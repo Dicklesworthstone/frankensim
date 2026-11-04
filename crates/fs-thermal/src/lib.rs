@@ -18,6 +18,8 @@ pub mod phase_geometry;
 pub mod sublimation;
 /// Continuum gas-film evaporation, condensation and original-chart latent cooling.
 pub mod evaporation;
+/// Finite-rate crystal history with original-branch latent-energy feedback.
+pub mod crystallization;
 
 /// Compatibility path for the original conduction-owned timeline. This is a
 /// re-export, not a second implementation or a conversion between state types.
