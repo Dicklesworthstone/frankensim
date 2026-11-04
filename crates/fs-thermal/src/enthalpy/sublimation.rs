@@ -1,7 +1,7 @@
 //! Sublimation on the existing conservative thermal timeline.
 //!
-//! The cell must be a pure solid on its original caloric branch throughout the
-//! advance. Temperature alone cannot identify a mixed solid/liquid plateau;
+//! Whole-cell operators require a pure solid on its original caloric branch
+//! throughout the advance. Temperature alone cannot identify a mixed solid/liquid plateau;
 //! mixtures need an independently owned solid inventory and are not admitted by
 //! this whole-cell model.
 //!
@@ -17,6 +17,10 @@
 //! Refine `StepConfig::max_dt_s` for coupling accuracy. An isothermal finite
 //! vapor reservoir has a mass balance and an energy-transfer account, not a
 //! solved gas temperature or flow field.
+
+/// Separate substrate/coating storage with heat transport, births and regrowth.
+#[path = "sublimation/coating.rs"]
+pub mod coating;
 
 /// Multiple thermal cells sharing one finite vapor inventory.
 #[path = "sublimation/chamber.rs"]

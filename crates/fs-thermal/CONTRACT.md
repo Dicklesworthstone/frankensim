@@ -367,12 +367,57 @@ deposit and vapor energy changes close one common account.
 This is a thin, isothermal deposit approximation with frozen exchange area
 and the existing prescribed-temperature reservoir semantics. It supplies no
 nucleation barrier, porosity, resolved coating temperature gradient or
-contact-resistance model. A timeline/spatial consumer must explicitly apply
-the returned substrate/deposit transaction and own its geometry and contacts;
-the existing whole-cell sublimation timeline is not silently reinterpreted.
+contact-resistance model. The coating timeline below applies this transaction
+with the original heat-flow owner. Other spatial consumers must explicitly own
+their geometry and contacts; whole-cell sublimation remains a separate model.
 Six focused tests cover seed-free growth, finite-vapor inventory and energy,
 extinction/regrowth, inactive boundaries, independent caloric reference shifts,
 invalid charts/inventories, cancellation and bounded nonlinear work.
+
+### Supported coatings on the native thermal timeline
+
+`sublimation::coating::heat_supported_surface` applies signed heat at fixed
+substrate/deposit masses by solving
+`M_s*(h_s1-h_s0) + m_d*(h_d(T1)-h_d(T0)) = Q`.
+It reuses the bounded endpoint solver, including backtracking when the
+substrate-only outer trial leaves the domain but the combined-storage solution
+is admissible. Independent material datums remain intact. Unrepresentable heat
+is either explicitly bounded by the declared residual tolerance or refused.
+
+`enthalpy::sublimation::coating::CoatingSimulation` owns this storage together
+with the original thermal timeline and supported phase operator. Substrate
+cells retain their original material, mass, enthalpy, geometry and identity;
+deposited mass and its enthalpy remain separate, including exact zero inventory.
+The wrapper's mass/energy queries include BOTH condensed inventories. Each
+selected surface explicitly supplies its original pure-solid h(T), compatible
+phase law, kinetics and independent prescribed/thermostatted vapor reservoir.
+Future births may carry an authored coating; its mass and sensible energy enter
+the incoming account exactly once.
+
+Native heat links, ambient and reservoir exchange, source power, contacts,
+separation and boundary events retain their original owner. Heat storage
+includes the coating before the following phase update on every CFL substep.
+The substrate's existing CFL bound remains conservative for continuous
+nondecreasing deposit h(T). Endpoint coverage changes cannot retroactively
+alter deposition, and future cells have no pre-birth exposure. Deposit
+exhaustion preserves the substrate and its subsequent ability to collect vapor.
+
+The complete candidate includes event time, substrate enthalpy, deposit mass
+and vapor inventory. Refusal or cancellation publishes none of them. One
+full-advance thermal budget and bounded local nonlinear solves apply. Local
+energy differences and compensated sums preserve caloric reference handling;
+actual mass-rounding corrections are charged to the energy residual, and
+opposing local defects cannot cancel out of its absolute admission.
+
+This remains first-order heat/phase splitting with fixed reference area and
+conductances and a shared substrate/coating temperature. It does not resolve
+thick-layer resistance, porosity, melting, moving geometry, dynamic
+observer-based sources, or a shared gas chamber. Finite baths in different
+surface bindings are independent. Seven native integration tests cover combined
+storage/conduction/source work, zero-inventory growth and regrowth, finite vapor
+conservation, exact event exposure, coated births, cancellation/budgets,
+restart and independent caloric datums; seven heat tests additionally cover
+nonlinear storage, domain backtracking and unrepresentable heat.
 
 ## Numerical and physical limits
 
