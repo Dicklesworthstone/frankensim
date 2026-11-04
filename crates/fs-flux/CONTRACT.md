@@ -2450,8 +2450,80 @@ solutions; activated exothermic feedback from actual wall work; heat-driven
 retry replay; late cancellation and work refusal; final chemical-temperature
 refusal; and zero-drive/storage behavior. The Couette oracle is an exact
 one-cell semidiscrete time check, not continuum spatial or experimental
-validation. Normal wall motion, wall inertia and time-varying thermal boundary
-data retain their existing exclusions.
+validation. Normal wall motion and time-varying thermal boundary data retain their
+existing exclusions; finite tangential wall inertia uses the separate owner
+below.
+
+### Finite tangential wall inertia in native molecular and reacting flow
+
+`spatial::mixture::molecular::MolecularTransport3d::with_wall_inertia` binds
+positive finite complete carrier masses to up to six already configured
+reflecting no-slip sides. Each planar carrier has two uniform tangential
+velocity components. Its normal coordinate remains fixed; the guide receives
+normal molecular traction and the original Euler wall supplies pressure
+traction. There is no normal carrier work or moving-volume work. Initial
+velocity and the thermal condition come from the existing wall model; mass
+and model cannot be rebound after finite inertia is attached.
+
+Every original accepted SSP RK2 substep solves
+`2*M*(v_mid-v_start) = J_wall(v_mid)` using the existing
+`fs_solver::{NewtonKrylovState, NewtonKrylovConfig}` and fallible numerical
+Jacobian actions. Each residual replays the same native two-stage molecular
+trial with the finite wall held at its candidate midpoint. The original
+source computes full stress, species diffusion, Fourier heat and wall work;
+the candidate field retains its original positivity, parabolic and source
+domain checks, including configured SGS wall-gradient dependence. No second
+PDE, wall traction law or explicit viscous-heating source is introduced.
+
+Only the final accepted physical replay contributes native face quadrature
+and swaps the prepared candidate buffer. Rejected probes never advance the
+current fluid or private wall endpoint. The endpoint is `2*v_mid-v_start`;
+componentwise midpoint and represented-endpoint impulse gates and an
+independent kinetic/mechanical-work gate precede acceptance. Each substep
+therefore pairs received tangential impulse with actual carrier kinetic
+storage through midpoint work. The interval report independently checks
+aggregate momentum and kinetic work. Native outward boundary energy minus
+that mechanical work is the separately reported thermal-reservoir exchange;
+normal impulse is separately reported for the fixed guide. Thermal exchange
+is never silently added to carrier kinetic energy.
+
+Standalone `advance`, `MolecularEuler3d` and `ReactingEuler3d` all consume
+this same molecular owner. The first molecular half's unpublished wall
+endpoint seeds the second half. Advection/body-force work, isochoric
+chemistry, referenced and absolute chemical energy, and final temperature
+and source-domain checks retain their original owners. Whole-step shortening
+restarts the wall and fluid together from their accepted state. Only complete
+acceptance publishes the field, endpoint walls, face loads and reports.
+Prescribed acceleration may coexist on other walls; nonzero prescribed
+acceleration on a finite-inertia side refuses. A zero descriptor preserves
+the undriven path exactly.
+
+`WallInertiaControl3d` bounds the cumulative native spatial evaluations and
+attempted SSP substeps across every nonlinear probe, both molecular halves,
+and all outer retries of one public call. Nonlinear dimension is at most 12,
+Newton iterations at most 32, restart at most 12 and linear cycles at most 8.
+A conservative 64 KiB numerical-workspace reservation covers these bounded
+solver vectors and telemetry; callers add it to their original complete
+operator budget. Existing field buffers are reused without adding a full
+field copy. Allocator metadata and arbitrary constitutive-provider
+allocations retain their existing exclusions.
+
+Midpoint carrier storage is energy balanced but is not an L-stable relaxation
+method. In particular, a very light carrier can require a much smaller time
+step than the fluid-only parabolic cap; `maximum_step_s` controls the actual
+coupled substeps and must resolve that carrier relaxation. A coarse,
+energy-balanced oscillation is not evidence of resolved physical recoil.
+
+Validation uses the independent one-cell half-cell shear oracle
+`delta(t)=delta(0)*exp[-(2*mu*A/H)*(1/m_fluid+1/m_wall)*t]`,
+including heavy and light wall masses, distinct temporal refinement rungs,
+reciprocal momentum and heat release. Additional cases exercise two finite
+walls in the same solve, isothermal reservoir separation, body forcing,
+actual reacting species/exothermic feedback and absolute energy, shortening
+replay, last-checkpoint rollback and a budget exhausted during the second
+half. These are semidiscrete time and conservation checks; they do not
+establish continuum boundary-layer resolution, elastic wall modes, external
+carrier actuators, normal motion or time-varying thermal models.
 
 ## Two-fluid capillary displacement
 

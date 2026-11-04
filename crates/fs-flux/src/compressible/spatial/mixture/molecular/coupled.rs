@@ -302,6 +302,7 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
             .min(0.8 * controls.advection.cfl / rate);
         let mut last = DissipationError::Invalid("no coupled spatial mixture attempt");
         let mut last_dt = dt;
+        let wall_work = WallWork::default();
         for retry in 0..=controls.maximum_coupling_retries {
             poll(&mut cancelled)?;
             if !positive(0.5 * dt)
@@ -323,6 +324,8 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
                     controls.molecular,
                     self.maximum_workspace_bytes,
                     drive.as_ref().map(|d| (d, 0.0)),
+                    None,
+                    &wall_work,
                     &mut cancelled,
                 )?;
                 copy_values(
@@ -362,6 +365,8 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
                     // The molecular clock covers [0,h/2] then [h/2,h].
                     // Advection uses the same fixed geometry and no wall work.
                     drive.as_ref().map(|d| (d, 0.5 * dt)),
+                    first.wall_inertia.as_ref(),
+                    &wall_work,
                     &mut cancelled,
                 )?;
                 add_impulses(

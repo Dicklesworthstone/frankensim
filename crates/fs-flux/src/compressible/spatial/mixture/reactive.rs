@@ -12,6 +12,7 @@ use super::super::{BoundarySide, StepControl};
 use super::forcing::{self, ForcingWorkspace3d};
 use super::molecular::{
     DissipationControl, MolecularReport, MolecularTransport3d, TransportLaw, WallAcceleration3d,
+    WallWork,
 };
 use super::{BodyForce3d, ForceChange3d, ForceControl3d};
 use super::{
@@ -511,6 +512,7 @@ impl ReactingEuler3d {
         let mut dt = maximum_duration
             .value()
             .min(0.8 * controls.transport.cfl / rate);
+        let wall_work = WallWork::default();
         for retry in 0..=controls.maximum_coupling_retries {
             poll(&mut cancelled)?;
             if !positive(0.5 * dt)
@@ -535,6 +537,8 @@ impl ReactingEuler3d {
                             dissipation_controls,
                             maximum_workspace_bytes,
                             drive.as_ref().map(|d| (d, 0.0)),
+                            None,
+                            &wall_work,
                             &mut cancelled,
                         )?;
                         copy_field(
@@ -603,6 +607,10 @@ impl ReactingEuler3d {
                             // The molecular clock covers [0,h/2] then [h/2,h].
                             // Chemistry retains its original two half durations.
                             drive.as_ref().map(|d| (d, 0.5 * dt)),
+                            first
+                                .as_ref()
+                                .and_then(|report| report.wall_inertia.as_ref()),
+                            &wall_work,
                             &mut cancelled,
                         )?;
                         add_impulses(

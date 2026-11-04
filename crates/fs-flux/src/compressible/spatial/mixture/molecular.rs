@@ -22,9 +22,15 @@ use fs_qty::Time;
 
 mod coupled;
 mod driving;
+mod inertia;
 pub use coupled::{MolecularEuler3d, MolecularStepControl, MolecularStepReport3d};
 pub use driving::WallAcceleration3d;
 pub(super) use driving::WallDrive3d;
+use inertia::WallInertia;
+pub(super) use inertia::WallWork;
+pub use inertia::{
+    InertialWall3d, WallInertiaControl3d, WallInertiaExchange3d, WallInertiaReport3d,
+};
 
 #[cfg(feature = "experimental-sgs")]
 pub mod sgs;
@@ -60,6 +66,8 @@ pub struct MolecularReport {
     pub conservation_residual: Totals,
     /// Original reference transform of the conservative energy residual [J].
     pub absolute_energy_residual_j: f64,
+    /// Accepted finite tangential carrier storage and reciprocal wall exchange.
+    pub wall_inertia: Option<WallInertiaReport3d>,
 }
 
 struct Workspace {
@@ -88,6 +96,8 @@ pub struct MolecularTransport3d<L: TransportLaw> {
     grid: CartesianGrid,
     boundaries: Boundaries3d,
     walls: [MolecularWall3d; 6],
+    inertia: Option<WallInertia>,
+    bound_flow_workspace_bytes: usize,
     maximum_workspace_bytes: usize,
     boundary_impulses: Vec<f64>,
     last_step: Option<MolecularReport>,
@@ -177,6 +187,8 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
             grid,
             boundaries: flow.boundaries,
             walls: [MolecularWall3d::SlipAdiabatic; 6],
+            inertia: None,
+            bound_flow_workspace_bytes: flow.workspace_bytes(),
             maximum_workspace_bytes,
             boundary_impulses: allocated(boundary, 0.0)?,
             last_step: None,
@@ -212,6 +224,14 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
         side: BoundarySide,
         wall: MolecularWall3d,
     ) -> Result<Self, DissipationError> {
+        if self
+            .inertia
+            .is_some_and(|model| model.masses[side_index(side)] != 0.0)
+        {
+            return Err(DissipationError::Invalid(
+                "finite-wall model and accepted velocity cannot be reconfigured",
+            ));
+        }
         let Some(condition) = physical_condition(self.boundaries, side) else {
             return Err(DissipationError::Invalid(
                 "periodic molecular side has no physical wall",
@@ -262,7 +282,8 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
     pub fn law(&self) -> &L {
         self.source.law()
     }
-    /// Actual owned numerical capacities; external flow/provider data excluded.
+    /// Owned numerical capacities plus the bounded finite-wall solver reserve.
+    /// External flow, allocator metadata and arbitrary provider data are excluded.
     pub fn workspace_bytes(&self) -> usize {
         let bytes = self.source.workspace_bytes()
             + (self.boundary_impulses.capacity()
@@ -275,7 +296,10 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                 + self.work.boundary_correction.capacity())
                 * size_of::<f64>()
             + self.work.primitive.capacity() * size_of::<Primitive>()
-            + self.work.gradient.capacity() * size_of::<[[f64; 3]; 3]>();
+            + self.work.gradient.capacity() * size_of::<[[f64; 3]; 3]>()
+            + self
+                .inertia
+                .map_or(0, |_| WallInertiaControl3d::solver_workspace_bytes());
         #[cfg(feature = "experimental-sgs")]
         let bytes = bytes
             + self
@@ -344,6 +368,8 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
             controls,
             self.maximum_workspace_bytes,
             drive.as_ref().map(|d| (d, 0.0)),
+            None,
+            &WallWork::default(),
             &mut cancelled,
         )?;
         self.publish(report, endpoint);
@@ -355,6 +381,17 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
         accelerations: &[WallAcceleration3d],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Option<WallDrive3d>, DissipationError> {
+        if let Some(model) = self.inertia {
+            for acceleration in accelerations {
+                if model.masses[side_index(acceleration.side)] != 0.0
+                    && acceleration.acceleration.iter().any(|value| *value != 0.0)
+                {
+                    return Err(DissipationError::Invalid(
+                        "a finite wall cannot also have prescribed acceleration",
+                    ));
+                }
+            }
+        }
         WallDrive3d::new(self.walls, self.boundaries, accelerations, cancelled)
     }
 
@@ -368,6 +405,9 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
     ) {
         if let Some(walls) = endpoint_walls {
             self.walls = walls;
+        }
+        if let Some(inertia) = &report.wall_inertia {
+            inertia.apply(&mut self.walls);
         }
         std::mem::swap(&mut self.boundary_impulses, &mut self.work.boundary_trial);
         self.last_step = Some(report);
@@ -386,6 +426,8 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
             controls,
             maximum_workspace_bytes,
             None,
+            None,
+            &WallWork::default(),
             cancelled,
         )
     }
@@ -398,6 +440,8 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
         controls: DissipationControl,
         maximum_workspace_bytes: usize,
         drive: Option<(&WallDrive3d, f64)>,
+        previous: Option<&WallInertiaReport3d>,
+        wall_work: &WallWork,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<MolecularReport, DissipationError> {
         poll(cancelled)?;
@@ -433,22 +477,27 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                 tile.fill(0.0);
             }
         }
+        let mut current_walls = self.walls;
+        if let Some(previous) = previous {
+            previous.apply(&mut current_walls);
+        }
+        let initial_walls = current_walls;
+        let mut mechanical_work = [0.0; 6];
+        let mut work_correction = [0.0; 6];
         let interval = interval::advance(
             duration.value(),
             controls,
             cancelled,
             |action, elapsed, cancelled| {
-                let first_walls = drive
-                    .map(|(d, offset)| d.at(offset + elapsed))
-                    .transpose()?;
-                let walls = first_walls.as_ref().unwrap_or(&self.walls);
-                let first = match action {
+                let (stage, endpoint, exchange) = match action {
                     Action::First => {
+                        let walls = self.stage_walls(drive, elapsed, Some(&current_walls))?;
+                        wall_work.field(self.inertia)?;
                         return spatial(
                             &mut self.source,
                             &self.grid,
                             self.boundaries,
-                            walls,
+                            &walls,
                             &self.work.current,
                             &mut self.work.primitive,
                             &mut self.work.gradient,
@@ -459,93 +508,33 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                             cancelled,
                         );
                     }
-                    Action::Trial {
-                        first,
-                        cached: true,
-                        ..
-                    } => first,
-                    Action::Trial { .. } => spatial(
-                        &mut self.source,
-                        &self.grid,
-                        self.boundaries,
-                        walls,
-                        &self.work.current,
-                        &mut self.work.primitive,
-                        &mut self.work.gradient,
-                        &mut self.work.flux,
-                        #[cfg(feature = "experimental-sgs")]
-                        self.sgs.as_mut(),
-                        controls,
-                        cancelled,
-                    )?,
+                    Action::Trial { dt, first, cached } => {
+                        wall_work.trial(self.inertia)?;
+                        if self.inertia.is_some() {
+                            self.solve_wall_trial(
+                                dt,
+                                controls,
+                                drive,
+                                elapsed,
+                                &current_walls,
+                                wall_work,
+                                cancelled,
+                            )?
+                        } else {
+                            let stage = self.ssp_trial(
+                                dt,
+                                controls,
+                                drive,
+                                elapsed,
+                                None,
+                                cached.then_some(first),
+                                wall_work,
+                                cancelled,
+                            )?;
+                            (stage, current_walls, [0.0; 6])
+                        }
+                    }
                 };
-                let Action::Trial { dt, .. } = action else {
-                    unreachable!()
-                };
-                parabolic(first.rate * dt, controls.parabolic_cfl)?;
-                update(
-                    self.source.gas(),
-                    &self.grid,
-                    &self.work.current,
-                    &self.work.current,
-                    &self.work.flux,
-                    &mut self.work.stage,
-                    dt,
-                    false,
-                    None,
-                    cancelled,
-                )?;
-                capture(
-                    &self.grid,
-                    width,
-                    &self.work.flux,
-                    0.5 * dt,
-                    false,
-                    &mut self.work.boundary_step,
-                    cancelled,
-                )?;
-                // SSP RK2 evaluates stage two at the substep endpoint. The
-                // interval controller supplies the same start on every retry.
-                let second_walls = drive
-                    .map(|(d, offset)| d.at(offset + elapsed + dt))
-                    .transpose()?;
-                let walls = second_walls.as_ref().unwrap_or(&self.walls);
-                let second = spatial(
-                    &mut self.source,
-                    &self.grid,
-                    self.boundaries,
-                    walls,
-                    &self.work.stage,
-                    &mut self.work.primitive,
-                    &mut self.work.gradient,
-                    &mut self.work.flux,
-                    #[cfg(feature = "experimental-sgs")]
-                    self.sgs.as_mut(),
-                    controls,
-                    cancelled,
-                )?;
-                parabolic(second.rate * dt, controls.parabolic_cfl)?;
-                update(
-                    self.source.gas(),
-                    &self.grid,
-                    &self.work.current,
-                    &self.work.stage,
-                    &self.work.flux,
-                    &mut self.work.candidate,
-                    dt,
-                    true,
-                    None,
-                    cancelled,
-                )?;
-                capture(
-                    &self.grid,
-                    width,
-                    &self.work.flux,
-                    0.5 * dt,
-                    true,
-                    &mut self.work.boundary_step,
-                    cancelled,
-                )?;
                 for (index, ((total, correction), change)) in self
                     .work
                     .boundary_trial
@@ -562,8 +551,15 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                     *correction = (next - *total) - adjusted;
                     *total = next;
                 }
+                for index in 0..6 {
+                    let adjusted = exchange[index] - work_correction[index];
+                    let next = mechanical_work[index] + adjusted;
+                    work_correction[index] = (next - mechanical_work[index]) - adjusted;
+                    mechanical_work[index] = next;
+                }
+                current_walls = endpoint;
                 std::mem::swap(&mut self.work.current, &mut self.work.candidate);
-                Ok(first.merge(second))
+                Ok(stage)
             },
         )?;
         let after = checked_totals(&self.work.current, &self.grid, species, cancelled)?;
@@ -594,6 +590,12 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
             boundary_change,
             conservation_residual,
             absolute_energy_residual_j: conservation_residual.absolute_energy(self.gas())?,
+            wall_inertia: self.inertia_report(
+                &initial_walls,
+                &current_walls,
+                mechanical_work,
+                wall_work,
+            )?,
         };
         // No copied prefix can escape a late cancellation. Excess input
         // capacity follows the actual allocation across this O(1) exchange.
@@ -603,6 +605,126 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
         std::mem::swap(&mut flow.states, &mut self.work.current);
         flow.workspace_bytes = bytes;
         Ok(report)
+    }
+    /// Sample prescribed histories, then override only finite wall coordinates.
+    fn stage_walls(
+        &self,
+        drive: Option<(&WallDrive3d, f64)>,
+        elapsed: f64,
+        finite: Option<&[MolecularWall3d; 6]>,
+    ) -> Result<[MolecularWall3d; 6], DissipationError> {
+        let mut walls = drive
+            .map(|(d, offset)| d.at(offset + elapsed))
+            .transpose()?
+            .unwrap_or(self.walls);
+        if let (Some(model), Some(finite)) = (self.inertia, finite) {
+            for index in 0..6 {
+                if model.masses[index] != 0.0 {
+                    walls[index] = finite[index];
+                }
+            }
+        }
+        Ok(walls)
+    }
+
+    /// The single original SSP RK2 field trial. Probes only overwrite prepared
+    /// stage/candidate buffers; the caller owns accepted-state/load publication.
+    #[allow(clippy::too_many_arguments)]
+    fn ssp_trial(
+        &mut self,
+        dt: f64,
+        controls: DissipationControl,
+        drive: Option<(&WallDrive3d, f64)>,
+        elapsed: f64,
+        midpoint: Option<&[MolecularWall3d; 6]>,
+        cached: Option<Stage>,
+        wall_work: &WallWork,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Stage, DissipationError> {
+        let width = self.gas().species_count() + 4;
+        let walls = self.stage_walls(drive, elapsed, midpoint)?;
+        let first = if let Some(first) = cached {
+            first
+        } else {
+            wall_work.field(self.inertia)?;
+            spatial(
+                &mut self.source,
+                &self.grid,
+                self.boundaries,
+                &walls,
+                &self.work.current,
+                &mut self.work.primitive,
+                &mut self.work.gradient,
+                &mut self.work.flux,
+                #[cfg(feature = "experimental-sgs")]
+                self.sgs.as_mut(),
+                controls,
+                cancelled,
+            )?
+        };
+        parabolic(first.rate * dt, controls.parabolic_cfl)?;
+        update(
+            self.source.gas(),
+            &self.grid,
+            &self.work.current,
+            &self.work.current,
+            &self.work.flux,
+            &mut self.work.stage,
+            dt,
+            false,
+            None,
+            cancelled,
+        )?;
+        // Every probe starts a new SSP quadrature, never accumulating a
+        // perturbed candidate into the enclosing physical interval.
+        capture(
+            &self.grid,
+            width,
+            &self.work.flux,
+            0.5 * dt,
+            false,
+            &mut self.work.boundary_step,
+            cancelled,
+        )?;
+        let walls = self.stage_walls(drive, elapsed + dt, midpoint)?;
+        wall_work.field(self.inertia)?;
+        let second = spatial(
+            &mut self.source,
+            &self.grid,
+            self.boundaries,
+            &walls,
+            &self.work.stage,
+            &mut self.work.primitive,
+            &mut self.work.gradient,
+            &mut self.work.flux,
+            #[cfg(feature = "experimental-sgs")]
+            self.sgs.as_mut(),
+            controls,
+            cancelled,
+        )?;
+        parabolic(second.rate * dt, controls.parabolic_cfl)?;
+        update(
+            self.source.gas(),
+            &self.grid,
+            &self.work.current,
+            &self.work.stage,
+            &self.work.flux,
+            &mut self.work.candidate,
+            dt,
+            true,
+            None,
+            cancelled,
+        )?;
+        capture(
+            &self.grid,
+            width,
+            &self.work.flux,
+            0.5 * dt,
+            true,
+            &mut self.work.boundary_step,
+            cancelled,
+        )?;
+        Ok(first.merge(second))
     }
 }
 
