@@ -2,7 +2,7 @@
 //! Sampling remains in `TetLoadHistory3`; the sparse Newmark run owns time and
 //! displacement/velocity/acceleration. These adapters never call a static solve.
 use super::*;
-use super::supports::SupportMotion3;
+use super::supports::{SupportAcceleration3, SupportMotion3};
 use crate::loads3::transient::{TetTransientRun3, TransientConfig3, TransientError3, TransientStep3};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -90,6 +90,43 @@ impl TetLoadHistory3<'_> {
             prescribed_acceleration_m_s2, config, cx,
         )?)
     }
+
+    /// Initialize from authored support acceleration at the same physical time
+    /// as every force. Initial full displacement/velocity are independent SI
+    /// states; fixed acceleration comes from the history (zero when omitted),
+    /// while free acceleration is solved with the original consistent M_fc,
+    /// C_fc and K_fc coupling. No differentiation of displacement samples occurs.
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_transient_with_support_acceleration_history<'g, 'm, 'p, 's>(
+        &self,
+        geometry: &'g TetLoadGeometry3<'m>,
+        problem: &'p TetLinearElasticProblem<'s>,
+        thermal: Option<TetThermalStrainField<'_>>,
+        supports: &[SupportAcceleration3<'_>],
+        time_s: f64,
+        displacement_m: &[[f64; 3]],
+        velocity_m_s: &[[f64; 3]],
+        config: TransientConfig3,
+        cx: &Cx<'_>,
+    ) -> Result<TetTransientRun3<'g, 'm, 'p, 's>, TransientHistoryError3> {
+        let initial =
+            self.at_with_support_accelerations(geometry, problem, supports, time_s, cx)?;
+        let mut acceleration = vec![[0.0; 3]; problem.nodes_m.len()];
+        for &(d, a) in initial.prescribed_dofs_m_s2() {
+            cx.checkpoint().map_err(|_| LoadHistoryError3::Cancelled)?;
+            acceleration[d / 3][d % 3] = a;
+        }
+        Ok(initial.loads.case.begin_transient_with_supports(
+            problem,
+            thermal,
+            time_s,
+            displacement_m,
+            velocity_m_s,
+            &acceleration,
+            config,
+            cx,
+        )?)
+    }
 }
 impl TetTransientRun3<'_, '_, '_, '_> {
     /// Sample every force at the Newmark endpoint t+h, preserving the physical
@@ -150,6 +187,42 @@ impl TetTransientRun3<'_, '_, '_, '_> {
         )?;
         Ok(self.advance_with_supports(
             &endpoint.loads.case, endpoint.prescribed_dofs_m(), h_s, cx,
+        )?)
+    }
+
+    /// Sample load and acceleration histories at one physical endpoint and
+    /// integrate the original coupled solid/support motion. Omitted fixed
+    /// components have zero ENDPOINT acceleration and retain their accumulated
+    /// displacement/velocity. Refusal publishes no partial force or motion.
+    /// This single-step entry does not discover discontinuities: bind an
+    /// `EventLoadHistory3` acceleration schedule for exact left/right switches.
+    pub fn advance_history_with_support_accelerations(
+        &mut self,
+        history: &TetLoadHistory3<'_>,
+        supports: &[SupportAcceleration3<'_>],
+        h_s: f64,
+        cx: &Cx<'_>,
+    ) -> Result<TransientStep3, TransientHistoryError3> {
+        cx.checkpoint().map_err(|_| LoadHistoryError3::Cancelled)?;
+        let time = self.state().time_s + h_s;
+        if !h_s.is_finite() || h_s <= 0.0 || !time.is_finite() || time <= self.state().time_s {
+            return Err(TransientError3::Invalid(
+                "support acceleration history needs a finite later endpoint",
+            )
+            .into());
+        }
+        let endpoint = history.at_with_support_accelerations(
+            self.geometry,
+            self.problem,
+            supports,
+            time,
+            cx,
+        )?;
+        Ok(self.advance_with_support_accelerations(
+            &endpoint.loads.case,
+            endpoint.prescribed_dofs_m_s2(),
+            h_s,
+            cx,
         )?)
     }
 }

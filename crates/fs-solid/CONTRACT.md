@@ -2175,6 +2175,30 @@ Malformed bindings, sampling failures and cancellation leave the accepted
 trajectory intact. These adapters do not infer analytic derivatives, impulses
 or an event schedule from displacement tables.
 
+`SupportAcceleration3` supplies the parallel m/s² input convention through
+`at_with_support_accelerations`,
+`begin_transient_with_support_acceleration_history`, and
+`advance_history_with_support_accelerations`. The same bounded, unique fixed-DOF
+binding and typed world-vector sampler serves both conventions. Initial q/v
+remain independent physical states; initial constrained acceleration is sampled
+from the record and free acceleration is solved from the original full coupled
+equation. Omitted fixed components integrate zero acceleration, retaining their
+existing motion. Source values and all external forces share one physical clock.
+
+`EventLoadHistory3::new_with_support_accelerations` reuses the finite load/frame
+knot index and exact left/right samplers. Its acceleration initializer and
+`advance_to` integrate the left acceleration through each interval, then apply
+the right acceleration and external force together through
+`apply_support_acceleration_jump`. That zero-duration operation retains q/v,
+stored energy, clock and step count bit-for-bit; the original mass solve resets
+free acceleration with the consistent M_fc term and refreshes support reactions.
+There is no impulse, backward-smearing of a pulse edge, or event work. A late
+right-side refusal rolls back the entire private interval. Operators are shared,
+not reassembled, and the original adaptive comparison includes integrated fixed
+coordinates even for fully prescribed bodies. Smooth records still need temporal
+refinement; periodic records need the existing explicit finite unrolling. Source,
+frame and event-time parameter gradients are not supplied by this adapter.
+
 `EventLoadHistory3::new_with_supports` explicitly indexes those original
 support, load and frame knots together under one schedule budget. Its support
 initializer requires the same full initial kinematics. Event stepping uses
@@ -2207,6 +2231,10 @@ transactional malformed-input/cancellation handling.
 agreement with explicit core endpoints, physical frame time beyond a clamped
 table, a base-excited oscillator with both held-force pulse edges, full-support
 adaptive rejection, and transactional sampling, binding and cancellation refusals.
+`tests/transient_support_acceleration_history3.rs` adds G1/G3/G4 checks for
+finite acceleration switches with both Rayleigh terms, rigid pulse motion/work,
+independent coupled base/body-acceleration convergence, physical frame time and
+frame-tilt events, all-prescribed adaptive rejection, and late-event rollback.
 
 ### Prescribed-support motion adjoints
 

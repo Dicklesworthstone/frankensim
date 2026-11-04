@@ -137,7 +137,7 @@ fn discrepancy(base: &EventTransientRun3<'_, '_, '_, '_, '_, '_>,
     cx: &Cx<'_>) -> Result<f64, AdaptiveHistoryError3> {
     let (b, c, f) = (base.run.state(), coarse.run.state(), fine.run.state());
     let mut ratio = 0.0_f64;
-    let divisor = if base.schedule.supports.is_empty() { 3.0 } else { 1.0 };
+    let divisor = if base.schedule.supports.is_driven() { 1.0 } else { 3.0 };
     for (old, full, half, absolute) in [
         (&b.displacement, &c.displacement, &f.displacement, control.absolute_displacement_m),
         (&b.velocity, &c.velocity, &f.velocity, control.absolute_velocity_m_s),
@@ -154,7 +154,7 @@ fn discrepancy(base: &EventTransientRun3<'_, '_, '_, '_, '_, '_>,
             ratio = ratio.max(error);
         }
     }
-    if !base.schedule.supports.is_empty() {
+    if base.schedule.supports.is_driven() {
         let b = base.run.nodal_motion(cx).map_err(TransientHistoryError3::from)?;
         let c = coarse.run.nodal_motion(cx).map_err(TransientHistoryError3::from)?;
         let f = fine.run.nodal_motion(cx).map_err(TransientHistoryError3::from)?;

@@ -222,6 +222,52 @@ impl TetTransientRun3<'_, '_, '_, '_> {
                 "prescribed step must reach a distinct finite time with representable squared step",
             ));
         }
+        let mut candidate = self.support_candidate(prescribed_dofs, kind, cx)?;
+        for &d in self.problem.fixed_dofs {
+            check(cx)?;
+            if matches!(kind, SupportEndpoint::Displacement) {
+                // Subtract the absolute endpoints before the small predictor
+                // drift. Adding that drift to a nonzero displacement first
+                // can round it away and violate the prescribed endpoint.
+                let increment = number(candidate.motion[0][d] - previous.motion[0][d])?;
+                let correction = number((-h_s).mul_add(previous.motion[1][d], increment))?;
+                candidate.motion[2][d] =
+                    number((-b).mul_add(previous.motion[2][d], correction) / b)?;
+            }
+            candidate.motion[1][d] = number(
+                previous.motion[1][d]
+                    + h_s * (0.5 * previous.motion[2][d] + 0.5 * candidate.motion[2][d]),
+            )?;
+            if matches!(kind, SupportEndpoint::Acceleration) {
+                candidate.motion[0][d] = number(
+                    previous.motion[0][d]
+                        + h_s * (0.5 * previous.motion[1][d] + 0.5 * candidate.motion[1][d]),
+                )?;
+            }
+        }
+        self.advance_impl(load_next, Some(candidate), h_s, cx)
+    }
+
+    pub(super) fn support_acceleration_candidate(
+        &self,
+        prescribed_dofs_m_s2: &[(usize, f64)],
+        cx: &Cx<'_>,
+    ) -> Result<PrescribedMotion3, TransientError3> {
+        self.support_candidate(prescribed_dofs_m_s2, SupportEndpoint::Acceleration, cx)
+    }
+
+    // Ordinary steps and zero-duration acceleration switches share exactly
+    // the same fixed-component admission and omitted-component convention.
+    fn support_candidate(
+        &self,
+        prescribed_dofs: &[(usize, f64)],
+        kind: SupportEndpoint,
+        cx: &Cx<'_>,
+    ) -> Result<PrescribedMotion3, TransientError3> {
+        check(cx)?;
+        let previous = self.prescribed.as_ref().ok_or(TransientError3::Invalid(
+            "initialize prescribed-support motion before supplying endpoints",
+        ))?;
         if prescribed_dofs.len() > self.problem.fixed_dofs.len() {
             return Err(TransientError3::Invalid(
                 "too many prescribed support components",
@@ -254,29 +300,8 @@ impl TetTransientRun3<'_, '_, '_, '_> {
             check(cx)?;
             candidate.motion[field][d] = value;
         }
-        for &d in self.problem.fixed_dofs {
-            check(cx)?;
-            if matches!(kind, SupportEndpoint::Displacement) {
-                // Subtract the absolute endpoints before the small predictor
-                // drift. Adding that drift to a nonzero displacement first
-                // can round it away and violate the prescribed endpoint.
-                let increment = number(candidate.motion[0][d] - previous.motion[0][d])?;
-                let correction = number((-h_s).mul_add(previous.motion[1][d], increment))?;
-                candidate.motion[2][d] =
-                    number((-b).mul_add(previous.motion[2][d], correction) / b)?;
-            }
-            candidate.motion[1][d] = number(
-                previous.motion[1][d]
-                    + h_s * (0.5 * previous.motion[2][d] + 0.5 * candidate.motion[2][d]),
-            )?;
-            if matches!(kind, SupportEndpoint::Acceleration) {
-                candidate.motion[0][d] = number(
-                    previous.motion[0][d]
-                        + h_s * (0.5 * previous.motion[1][d] + 0.5 * candidate.motion[1][d]),
-                )?;
-            }
-        }
-        self.advance_impl(load_next, Some(candidate), h_s, cx)
+        check(cx)?;
+        Ok(candidate)
     }
 
     pub(super) fn subtract_support_force(
@@ -301,27 +326,27 @@ impl TetTransientRun3<'_, '_, '_, '_> {
         check(cx)
     }
 
-    /// A zero-duration force change retains support kinematics and energy but
-    /// changes reactions, including the consistent-mass free acceleration term.
+    /// Refresh reactions for a private force/acceleration switch without
+    /// another support-state copy. Displacement, velocity and energy stay fixed.
     pub(super) fn load_jump_supports(
         &self,
+        supports: Option<PrescribedMotion3>,
         acceleration: &[f64],
         full_force: &[(usize, f64)],
         cx: &Cx<'_>,
     ) -> Result<Option<PrescribedMotion3>, TransientError3> {
-        let Some(supports) = &self.prescribed else {
+        let Some(mut supports) = supports else {
             return Ok(None);
         };
         let endpoint = self.endpoint(
-            supports,
+            &supports,
             [&self.state.displacement, &self.state.velocity, acceleration],
             full_force,
             cx,
         )?;
-        let mut candidate = supports.clone();
-        candidate.reactions = endpoint.reactions;
+        supports.reactions = endpoint.reactions;
         check(cx)?;
-        Ok(Some(candidate))
+        Ok(Some(supports))
     }
 
     fn full_motion(

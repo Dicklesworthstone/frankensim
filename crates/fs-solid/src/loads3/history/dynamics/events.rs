@@ -9,7 +9,7 @@ use fs_scenario::frame::{Frame, FrameMotion};
 use fs_scenario::payload::{OutsideDomainPolicy, SampleSource, TableInterpolation};
 use fs_scenario::signal::Interp;
 use fs_qty::QtyAny;
-use super::super::supports::TetSupportSample3;
+use super::super::supports::{TetSupportAccelerationSample3, TetSupportSample3};
 
 fn invalid(what: &'static str) -> TransientHistoryError3 {
     TransientError3::Invalid(what).into()
@@ -23,9 +23,74 @@ fn checkpoint(cx: &Cx<'_>) -> Result<(), TransientHistoryError3> {
 /// Indexing does not certify resolution of a smooth signal between its knots.
 pub struct EventLoadHistory3<'a> {
     history: TetLoadHistory3<'a>,
-    supports: &'a [SupportMotion3<'a>],
+    supports: SupportSchedule3<'a>,
     knots: Vec<f64>,
 }
+
+#[derive(Clone, Copy)]
+enum SupportSchedule3<'a> {
+    Displacement(&'a [SupportMotion3<'a>]),
+    Acceleration(&'a [SupportAcceleration3<'a>]),
+}
+impl SupportSchedule3<'_> {
+    fn len(self) -> usize {
+        match self {
+            Self::Displacement(rows) => rows.len(),
+            Self::Acceleration(rows) => rows.len(),
+        }
+    }
+    fn is_driven(self) -> bool {
+        match self {
+            Self::Displacement(rows) => !rows.is_empty(),
+            Self::Acceleration(_) => true,
+        }
+    }
+    fn at<'g, 'm, 'p, 's>(
+        self,
+        history: &TetLoadHistory3<'_>,
+        geometry: &'g TetLoadGeometry3<'m>,
+        problem: &'p TetLinearElasticProblem<'s>,
+        time: f64,
+        maximum_displacement_m: f64,
+        cx: &Cx<'_>,
+    ) -> Result<ScheduledSupportSample3<'g, 'm, 'p, 's>, TransientHistoryError3> {
+        Ok(match self {
+            Self::Displacement(rows) => {
+                ScheduledSupportSample3::Displacement(history.at_with_supports(
+                    geometry,
+                    problem,
+                    rows,
+                    time,
+                    maximum_displacement_m,
+                    cx,
+                )?)
+            }
+            Self::Acceleration(rows) => ScheduledSupportSample3::Acceleration(
+                history.at_with_support_accelerations(geometry, problem, rows, time, cx)?,
+            ),
+        })
+    }
+}
+
+enum ScheduledSupportSample3<'g, 'm, 'p, 's> {
+    Displacement(TetSupportSample3<'g, 'm, 'p, 's>),
+    Acceleration(TetSupportAccelerationSample3<'g, 'm, 'p, 's>),
+}
+impl<'g, 'm, 'p, 's> ScheduledSupportSample3<'g, 'm, 'p, 's> {
+    fn loads(&self) -> &TetLoadSample3<'g, 'm, 'p, 's> {
+        match self {
+            Self::Displacement(v) => &v.loads,
+            Self::Acceleration(v) => &v.loads,
+        }
+    }
+    fn values(&self) -> &[(usize, f64)] {
+        match self {
+            Self::Displacement(v) => v.prescribed_dofs_m(),
+            Self::Acceleration(v) => v.prescribed_dofs_m_s2(),
+        }
+    }
+}
+
 impl<'a> EventLoadHistory3<'a> {
     /// Bound setup by an aggregate scalar-entry allowance (hard ceiling 2^20).
     /// Scalar tables are validated before binary search; validated vector
@@ -45,6 +110,40 @@ impl<'a> EventLoadHistory3<'a> {
     pub fn new_with_supports(history: TetLoadHistory3<'a>, supports: &'a [SupportMotion3<'a>],
         maximum_schedule_entries: usize, cx: &Cx<'_>)
         -> Result<Self, TransientHistoryError3> {
+        Self::with_support_schedule(
+            history,
+            SupportSchedule3::Displacement(supports),
+            maximum_schedule_entries,
+            cx,
+        )
+    }
+
+    /// Bind authored support accelerations to the original finite event index.
+    /// Held acceleration steps use their exact LEFT limit for the interval,
+    /// then switch to the RIGHT limit with q/v and energy continuous. The same
+    /// switch also applies any external-load jump through the original mass
+    /// equilibrium and support reactions. Frame-induced acceleration jumps are
+    /// finite loads as well; prescribed constraint axes remain world Cartesian.
+    pub fn new_with_support_accelerations(
+        history: TetLoadHistory3<'a>,
+        supports: &'a [SupportAcceleration3<'a>],
+        maximum_schedule_entries: usize,
+        cx: &Cx<'_>,
+    ) -> Result<Self, TransientHistoryError3> {
+        Self::with_support_schedule(
+            history,
+            SupportSchedule3::Acceleration(supports),
+            maximum_schedule_entries,
+            cx,
+        )
+    }
+
+    fn with_support_schedule(
+        history: TetLoadHistory3<'a>,
+        supports: SupportSchedule3<'a>,
+        maximum_schedule_entries: usize,
+        cx: &Cx<'_>,
+    ) -> Result<Self, TransientHistoryError3> {
         checkpoint(cx)?;
         if maximum_schedule_entries == 0 || maximum_schedule_entries > 1_048_576
             || history.surfaces.len() > 1024 || history.frames.frames.len() > 256
@@ -64,9 +163,19 @@ impl<'a> EventLoadHistory3<'a> {
             VolumeHistory3::Fixed(_) | VolumeHistory3::FixedAcceleration(_) => {}
             VolumeHistory3::ForceDensity(v) | VolumeHistory3::Acceleration(v) => index.vector(v)?,
         }
-        for support in supports {
-            checkpoint(cx)?;
-            index.vector(support.displacement)?;
+        match supports {
+            SupportSchedule3::Displacement(rows) => {
+                for support in rows {
+                    checkpoint(cx)?;
+                    index.vector(support.displacement)?;
+                }
+            }
+            SupportSchedule3::Acceleration(rows) => {
+                for support in rows {
+                    checkpoint(cx)?;
+                    index.vector(support.acceleration)?;
+                }
+            }
         }
         for frame in &history.frames.frames {
             checkpoint(cx)?;
@@ -89,7 +198,7 @@ impl<'a> EventLoadHistory3<'a> {
         time_s: f64, displacement_m: &[[f64; 3]], velocity_m_s: &[[f64; 3]],
         config: TransientConfig3, cx: &Cx<'_>)
         -> Result<EventTransientRun3<'h, 'a, 'g, 'm, 'p, 's>, TransientHistoryError3> {
-        if !self.supports.is_empty() {
+        if self.supports.is_driven() {
             return Err(invalid("support schedules require explicit initial support velocity and acceleration"));
         }
         let run = self.history.begin_transient(geometry, problem, thermal, time_s,
@@ -108,13 +217,58 @@ impl<'a> EventLoadHistory3<'a> {
         displacement_m: &[[f64; 3]], velocity_m_s: &[[f64; 3]],
         prescribed_acceleration_m_s2: &[[f64; 3]], config: TransientConfig3, cx: &Cx<'_>)
         -> Result<EventTransientRun3<'h, 'a, 'g, 'm, 'p, 's>, TransientHistoryError3> {
-        if self.supports.is_empty() {
+        let SupportSchedule3::Displacement(supports) = self.supports else {
+            return Err(invalid(
+                "acceleration schedules take their initial acceleration from the source",
+            ));
+        };
+        if supports.is_empty() {
             return Err(invalid("an explicit support schedule is required for prescribed initialization"));
         }
         let run = self.history.begin_transient_with_support_history(geometry, problem,
-            thermal, self.supports, time_s, displacement_m, velocity_m_s,
+            thermal, supports, time_s, displacement_m, velocity_m_s,
             prescribed_acceleration_m_s2, config, cx)?;
         Ok(EventTransientRun3 { schedule: self, run })
+    }
+
+    /// Initialize right-continuous prescribed acceleration from the bound
+    /// source, with independent full initial displacement and velocity. Free
+    /// acceleration is solved from the same coupled mass equilibrium. Even an
+    /// empty row set explicitly integrates zero-acceleration support motion.
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_transient_with_support_accelerations<'h, 'g, 'm, 'p, 's>(
+        &'h self,
+        geometry: &'g TetLoadGeometry3<'m>,
+        problem: &'p TetLinearElasticProblem<'s>,
+        thermal: Option<TetThermalStrainField<'_>>,
+        time_s: f64,
+        displacement_m: &[[f64; 3]],
+        velocity_m_s: &[[f64; 3]],
+        config: TransientConfig3,
+        cx: &Cx<'_>,
+    ) -> Result<EventTransientRun3<'h, 'a, 'g, 'm, 'p, 's>, TransientHistoryError3> {
+        let SupportSchedule3::Acceleration(supports) = self.supports else {
+            return Err(invalid(
+                "an acceleration schedule is required for acceleration initialization",
+            ));
+        };
+        let run = self
+            .history
+            .begin_transient_with_support_acceleration_history(
+                geometry,
+                problem,
+                thermal,
+                supports,
+                time_s,
+                displacement_m,
+                velocity_m_s,
+                config,
+                cx,
+            )?;
+        Ok(EventTransientRun3 {
+            schedule: self,
+            run,
+        })
     }
 
     fn endpoint(&self, start: f64, target: f64, maximum_step: f64) -> Result<f64, TransientHistoryError3> {
@@ -139,7 +293,7 @@ impl<'a> EventLoadHistory3<'a> {
     fn left_at<'g, 'm, 'p, 's>(&self, geometry: &'g TetLoadGeometry3<'m>,
         problem: &'p TetLinearElasticProblem<'s>, time: f64,
         maximum_displacement_m: f64, cx: &Cx<'_>)
-        -> Result<TetSupportSample3<'g, 'm, 'p, 's>, TransientHistoryError3> {
+        -> Result<ScheduledSupportSample3<'g, 'm, 'p, 's>, TransientHistoryError3> {
         let mut frames = FrameTree::new();
         for frame in &self.history.frames.frames {
             checkpoint(cx)?;
@@ -175,16 +329,54 @@ impl<'a> EventLoadHistory3<'a> {
         };
         let left = TetLoadHistory3 { surfaces: &surfaces, volume, frames: &frames,
             nodal_forces_n: self.history.nodal_forces_n };
-        let mut support_values = Vec::with_capacity(self.supports.len());
-        for support in self.supports {
-            checkpoint(cx)?;
-            support_values.push(vector_before(support.displacement, time)?);
+        match self.supports {
+            SupportSchedule3::Displacement(rows) => {
+                let mut values = Vec::with_capacity(rows.len());
+                for support in rows {
+                    checkpoint(cx)?;
+                    values.push(vector_before(support.displacement, time)?);
+                }
+                let supports: Vec<_> = rows
+                    .iter()
+                    .enumerate()
+                    .map(|(i, row)| SupportMotion3 {
+                        displacement: values[i].as_ref().unwrap_or(row.displacement),
+                        ..*row
+                    })
+                    .collect();
+                SupportSchedule3::Displacement(&supports).at(
+                    &left,
+                    geometry,
+                    problem,
+                    time,
+                    maximum_displacement_m,
+                    cx,
+                )
+            }
+            SupportSchedule3::Acceleration(rows) => {
+                let mut values = Vec::with_capacity(rows.len());
+                for support in rows {
+                    checkpoint(cx)?;
+                    values.push(vector_before(support.acceleration, time)?);
+                }
+                let supports: Vec<_> = rows
+                    .iter()
+                    .enumerate()
+                    .map(|(i, row)| SupportAcceleration3 {
+                        acceleration: values[i].as_ref().unwrap_or(row.acceleration),
+                        ..*row
+                    })
+                    .collect();
+                SupportSchedule3::Acceleration(&supports).at(
+                    &left,
+                    geometry,
+                    problem,
+                    time,
+                    maximum_displacement_m,
+                    cx,
+                )
+            }
         }
-        let supports: Vec<_> = self.supports.iter().enumerate().map(|(i, row)| {
-            SupportMotion3 { displacement: support_values[i].as_ref().unwrap_or(row.displacement), ..*row }
-        }).collect();
-        checkpoint(cx)?;
-        Ok(left.at_with_supports(geometry, problem, &supports, time, maximum_displacement_m, cx)?)
     }
 }
 
@@ -256,7 +448,8 @@ fn vector_before(vector: &VectorPayload, time: f64) -> Result<Option<VectorPaylo
     Ok(None)
 }
 
-/// Original accepted interval, plus an optional finite endpoint force jump.
+/// Original accepted interval, plus an optional finite endpoint force or
+/// prescribed-acceleration jump. The jump itself supplies no work or impulse.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScheduledStep3 {
     pub start_time_s: f64,
@@ -289,21 +482,48 @@ impl<'g, 'm, 'p, 's> EventTransientRun3<'_, '_, 'g, 'm, 'p, 's> {
         let geometry = self.run.geometry; let problem = self.run.problem;
         let left = self.schedule.left_at(geometry, problem, end_time_s,
             self.run.maximum_displacement_m(), cx)?;
-        let right = self.schedule.history.at_with_supports(geometry, problem,
-            self.schedule.supports, end_time_s, self.run.maximum_displacement_m(), cx)?;
-        if left.prescribed_dofs_m() != right.prescribed_dofs_m() {
+        let right = self.schedule.supports.at(
+            &self.schedule.history,
+            geometry,
+            problem,
+            end_time_s,
+            self.run.maximum_displacement_m(),
+            cx,
+        )?;
+        let changed = left.values() != right.values();
+        if changed && matches!(self.schedule.supports, SupportSchedule3::Displacement(_)) {
             return Err(invalid("discontinuous support displacement requires an explicit impulse or constraint transition"));
         }
         let mut candidate = self.run.clone();
-        let interval = if self.schedule.supports.is_empty() {
-            candidate.advance(&left.loads.case, end_time_s-start_time_s, cx)?
-        } else {
-            candidate.advance_with_supports(&left.loads.case, left.prescribed_dofs_m(),
-                end_time_s-start_time_s, cx)?
+        let interval = match self.schedule.supports {
+            SupportSchedule3::Displacement(rows) if rows.is_empty() => {
+                candidate.advance(&left.loads().case, end_time_s - start_time_s, cx)?
+            }
+            SupportSchedule3::Displacement(_) => candidate.advance_with_supports(
+                &left.loads().case,
+                left.values(),
+                end_time_s - start_time_s,
+                cx,
+            )?,
+            SupportSchedule3::Acceleration(_) => candidate.advance_with_support_accelerations(
+                &left.loads().case,
+                left.values(),
+                end_time_s - start_time_s,
+                cx,
+            )?,
         };
-        let jump = if left.nodal_forces_n() != right.nodal_forces_n() {
-            Some(candidate.apply_load_jump(&right.loads.case, cx)?)
-        } else { None };
+        let jump =
+            if changed || left.loads().nodal_forces_n() != right.loads().nodal_forces_n() {
+                Some(match self.schedule.supports {
+                    SupportSchedule3::Acceleration(_) => candidate
+                        .apply_support_acceleration_jump(&right.loads().case, right.values(), cx)?,
+                    SupportSchedule3::Displacement(_) => {
+                        candidate.apply_load_jump(&right.loads().case, cx)?
+                    }
+                })
+            } else {
+                None
+            };
         checkpoint(cx)?;
         self.run = candidate;
         Ok(ScheduledStep3 { start_time_s, end_time_s, interval, jump })

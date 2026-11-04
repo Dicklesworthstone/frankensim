@@ -141,7 +141,8 @@ impl<'g, 'm> TetTransientRun3<'g, 'm, '_, '_> {
     }
 }
 
-/// Diagnostics for changing a finite force at the current accepted time.
+/// Diagnostics for changing a finite force or prescribed acceleration at the
+/// current accepted time. Acceleration change is measured over FREE components.
 /// No time, step, displacement, velocity or energy is changed by this operation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoadJump3 {
@@ -177,6 +178,35 @@ impl TetTransientRun3<'_, '_, '_, '_> {
     pub fn apply_load_jump(&mut self, load_after: &TetLoadCase3<'_, '_>, cx: &Cx<'_>)
         -> Result<LoadJump3, TransientError3> {
         check(cx)?;
+        self.apply_load_jump_impl(load_after, self.prescribed.clone(), cx)
+    }
+
+    /// Switch finite prescribed acceleration and external loads at the current
+    /// accepted time. Fixed DOFs must be sorted/unique; omitted fixed components
+    /// acquire zero acceleration. The original mass solve re-equilibrates free
+    /// acceleration, including -M_fc*a_c, and refreshes full support reactions.
+    ///
+    /// Displacement, velocity, stored energy, clock and step count are retained
+    /// bit-for-bit: a finite acceleration discontinuity supplies no impulse or
+    /// work at zero duration. All new forces and accelerations publish together
+    /// after admission and cancellation checks. No global operator is rebuilt.
+    pub fn apply_support_acceleration_jump(
+        &mut self,
+        load_after: &TetLoadCase3<'_, '_>,
+        prescribed_dofs_m_s2: &[(usize, f64)],
+        cx: &Cx<'_>,
+    ) -> Result<LoadJump3, TransientError3> {
+        let supports = self.support_acceleration_candidate(prescribed_dofs_m_s2, cx)?;
+        self.apply_load_jump_impl(load_after, Some(supports), cx)
+    }
+
+    fn apply_load_jump_impl(
+        &mut self,
+        load_after: &TetLoadCase3<'_, '_>,
+        supports: Option<motion::PrescribedMotion3>,
+        cx: &Cx<'_>,
+    ) -> Result<LoadJump3, TransientError3> {
+        check(cx)?;
         let force = self.reduce_force(load_after, cx)?;
         let ku = self.apply(0.0, 1.0, &self.state.displacement, cx)?;
         let cv = self.apply(self.config.mass_damping_per_s, self.config.stiffness_damping_s,
@@ -186,7 +216,7 @@ impl TetTransientRun3<'_, '_, '_, '_> {
             if i % 256 == 0 { check(cx)?; }
             rhs.push(number(force[i] + self.thermal[i] - ku[i] - cv[i])?);
         }
-        if let Some(supports) = &self.prescribed {
+        if let Some(supports) = &supports {
             self.subtract_support_force(supports, &mut rhs, cx)?;
         }
         let (a, iterations, force_residual_n) = solve(&self.operator(1.0, 0.0, cx), &rhs, self.config)?;
@@ -197,7 +227,7 @@ impl TetTransientRun3<'_, '_, '_, '_> {
         }
         let mut full_force = Vec::with_capacity(load_after.nodal_forces_n().len());
         for &(d, f) in load_after.nodal_forces_n() { check(cx)?; full_force.push((d, f)); }
-        let supports = self.load_jump_supports(&a, &full_force, cx)?;
+        let supports = self.load_jump_supports(supports, &a, &full_force, cx)?;
         let report = LoadJump3 { time_s: self.state.time_s, iterations, force_residual_n,
             acceleration_change_l2_m_s2: change };
         check(cx)?;
