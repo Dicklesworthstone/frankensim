@@ -239,3 +239,130 @@ fn g0_g3_tone_force_fit_preserves_harmonic_results_and_original_clock_refusals()
         Err(AeroacError::HarmonicFit(HarmonicFitError::NonFinite { .. }))
     ));
 }
+
+#[test]
+fn g0_g1_recorded_force_cross_spectrum_preserves_medium_clock_and_field_statistics() {
+    use crate::curle2d::CoherenceBudget;
+    use fs_fft::welch::{
+        WelchBudget, WelchConfig, WelchCrossSpectrum, WelchDetrend, WelchError, WelchWindow,
+    };
+
+    let gas = GasState::try_new_moist_air(307.0, 83_000.0, 0.4).unwrap();
+    let acoustic = gas.acoustic_state().unwrap();
+    let dt = 1.0 / 6000.0;
+    // A manufactured accepted history at the observation seam, as in the
+    // refined-tone tests. This does not assert convergence of a jet simulation.
+    let run = MaterialJetLabiumRun {
+        material: &gas,
+        acoustic,
+        timestep_s: dt,
+        force_series_n_m: harmonic_record(265, dt, 282.6),
+        sampled_physical_mach_max: 0.0,
+        lattice_diagnostics: JetLabiumDiagnostics {
+            mach_max_lattice: 0.0,
+            flux_plate_plane: 0.0,
+            flux_fringe_plane: 0.0,
+            reynolds: 0.0,
+        },
+    };
+    let config = WelchConfig {
+        segment_samples: 64,
+        hop_samples: 32,
+        window: WelchWindow::PeriodicHann,
+        detrend: WelchDetrend::SegmentMean,
+    };
+    let work = WelchBudget {
+        maximum_channels: 2,
+        maximum_samples_per_channel: 265,
+        maximum_transforms: 14,
+        maximum_workspace_bytes: 1024 * 1024,
+    };
+    let prepared = run
+        .prepare_force_cross_spectrum(config, work, || false)
+        .unwrap();
+    assert_eq!(prepared.acoustic(), acoustic);
+    let spectrum = prepared.spectrum();
+    assert_eq!(spectrum.timestep_s(), dt);
+    assert_eq!(spectrum.config(), config);
+    assert_eq!(spectrum.channel_count(), 2);
+    assert_eq!(spectrum.segment_count(), 7);
+    assert_eq!(spectrum.bin_count(), 33);
+    assert_eq!(spectrum.used_sample_count(), 256);
+    assert_eq!(spectrum.discarded_tail_samples(), 9);
+    close(spectrum.bin_width_hz(), 6000.0 / 64.0, 0.0);
+
+    // Independently submit the same physical history as separate x/y channels.
+    // This catches channel/clock wiring mistakes in the interleaved adapter.
+    let x: Vec<_> = run.force_series_n_m().iter().map(|row| row[0]).collect();
+    let y: Vec<_> = run.force_series_n_m().iter().map(|row| row[1]).collect();
+    let reference = WelchCrossSpectrum::estimate(&[&x, &y], dt, config, work, || false).unwrap();
+    let receiver = [0.37, -0.24];
+    let source = [-0.03, 0.06];
+    let coherence = CoherenceBudget {
+        max_modes: 7,
+        max_source_mode_pairs: 7,
+    };
+    for bin in [3, 6, 9] {
+        let actual = prepared
+            .observe_bin(bin, receiver, source, coherence, || false)
+            .unwrap();
+        let observer = PreparedDipoleObserver::new(
+            acoustic,
+            reference.frequency_hz(bin).unwrap(),
+            receiver,
+            &[source],
+            1,
+        )
+        .unwrap();
+        let expected = observer
+            .evaluate_welch_bin(&reference, bin, coherence, || false)
+            .unwrap();
+        assert!(actual.mean_square_pressure_pa2 > 0.0);
+        assert_eq!(
+            actual.mean_square_pressure_pa2,
+            expected.mean_square_pressure_pa2
+        );
+        assert_eq!(
+            actual.velocity_covariance_m2_s2,
+            expected.velocity_covariance_m2_s2
+        );
+        assert_eq!(actual.active_intensity_w_m2, expected.active_intensity_w_m2);
+        assert_eq!(
+            actual.reactive_intensity_w_m2,
+            expected.reactive_intensity_w_m2
+        );
+        assert_eq!(actual.scope, SCOPE_STATEMENT);
+    }
+    for bin in [0, spectrum.bin_count() - 1, usize::MAX] {
+        assert!(matches!(
+            prepared.observe_bin(bin, receiver, source, coherence, || false),
+            Err(AeroacError::InvalidParameter { .. })
+        ));
+    }
+    for limited in [
+        CoherenceBudget {
+            max_modes: 6,
+            ..coherence
+        },
+        CoherenceBudget {
+            max_source_mode_pairs: 6,
+            ..coherence
+        },
+    ] {
+        assert!(matches!(
+            prepared.observe_bin(3, receiver, source, limited, || false),
+            Err(AeroacError::InvalidParameter { .. })
+        ));
+    }
+    assert!(matches!(
+        run.prepare_force_cross_spectrum(
+            config,
+            WelchBudget {
+                maximum_transforms: 13,
+                ..work
+            },
+            || false,
+        ),
+        Err(WelchError::BudgetExceeded(_))
+    ));
+}

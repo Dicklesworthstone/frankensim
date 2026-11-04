@@ -1092,3 +1092,46 @@ They pass a focused native exact-source leaf build using the production
 `fs-math` crate, plus the original Galilean pressure and moving-source owners,
 with nominal error carriers only. This is not a full-crate
 Cargo/DSR gate or experimental source validation.
+
+## Measured force coherence through the original line-dipole observer
+
+`curle2d::PreparedDipoleObserver::evaluate_welch_bin` propagates a joint
+recorded force cross spectrum through the original near-field pressure and
+particle-velocity transfers. Channels are ordered
+`[Fx_0,Fy_0,Fx_1,Fy_1,...]` in N/m, with one source frame and physical clock.
+The prepared frequency must exactly match the selected estimator bin.
+Each retained segment vector is summed coherently across force axes and
+source paths before its second moments enter the ensemble average. Measured
+cross-source and cross-axis phase, partial correlation and cancellation
+therefore survive; unknown phase is never replaced with a synthesized one.
+
+The shared one-sided /Hz factors are multiplied by `sqrt(2*df)` once, so
+the existing peak-phasor factor of one half produces this bin's pressure
+power, velocity covariance and signed active/reactive intensity. Results
+are integrated bin quantities, not densities per hertz or window-corrected
+tone amplitudes. In particular, a periodic-Hann resolved tone contributes
+two thirds of its energy to its central bin. DC and Nyquist are refused.
+Adding bins assumes a stationary resolved spectrum; finite-time
+cross-frequency beats and statistical confidence require their own evidence.
+
+`MaterialJetLabiumRun::prepare_force_cross_spectrum` observes the accepted
+run's actual Cartesian force history without copying or transposing it and
+retains its original timestep and `FluidAcousticState`. The resulting
+`JetForceCrossSpectrum::observe_bin` reuses that same medium and the original
+single-source observer. It cannot silently substitute nominal air, scalar
+force magnitude, a new clock or inferred absolute-SPL authority.
+
+Propagation is allocation-free O(sources * retained segments) after
+preparation. Explicit source-factor work limits and cancellation guard the
+observation. The source compactness, two-dimensional free-space model,
+homogeneous lossless medium and original absolute-level boundaries remain.
+
+Four focused native tests exercise the actual FFT/Curle/material snapshot
+algorithms: independently authored complex forces against all field moments;
+rectangular and Hann bin normalization; equal, opposite and partially
+correlated source histories; a pressure antinode with zero energy flux; and
+shape/frequency/work refusal, cancellation and deterministic replay. The
+manufactured accepted-run adapter regression additionally checks original
+medium/clock provenance and the public path, but requires the missing
+constellation dependencies to run. The native probe uses only a nominal
+outer error carrier and is not a full-crate integration gate.

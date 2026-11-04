@@ -320,6 +320,52 @@ pub struct JetForceSpectrum {
     spectrum: ForceSpectrum,
 }
 
+/// Joint Welch spectrum of the actual physical x/y force record. Retains the
+/// original acoustic material and measured force-component interference.
+pub struct JetForceCrossSpectrum {
+    acoustic: FluidAcousticState,
+    spectrum: fs_fft::welch::WelchCrossSpectrum,
+}
+
+impl JetForceCrossSpectrum {
+    /// Recorded window, sample clock, coverage and /Hz cross-spectrum factors.
+    pub fn spectrum(&self) -> &fs_fft::welch::WelchCrossSpectrum {
+        &self.spectrum
+    }
+
+    /// Same frozen fluid used to admit and execute the original flow.
+    pub const fn acoustic(&self) -> FluidAcousticState {
+        self.acoustic
+    }
+
+    /// Observe the power in one resolved interior bin, with its original
+    /// source-force units and shared material. This does not fit an isolated
+    /// tone or promote the 2D flow source into an absolute-SPL authority.
+    pub fn observe_bin(
+        &self,
+        bin: usize,
+        observer_m: [f64; 2],
+        source_m: [f64; 2],
+        budget: crate::curle2d::CoherenceBudget,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<crate::curle2d::DipoleFieldStatistics, AeroacError> {
+        if cancelled() {
+            return Err(AeroacError::Cancelled {
+                what: "recorded flow-source observation",
+            });
+        }
+        let frequency =
+            self.spectrum
+                .frequency_hz(bin)
+                .map_err(|_| AeroacError::InvalidParameter {
+                    what: "flow-source Welch bin",
+                })?;
+        let observer =
+            PreparedDipoleObserver::new(self.acoustic, frequency, observer_m, &[source_m], 1)?;
+        observer.evaluate_welch_bin(&self.spectrum, bin, budget, cancelled)
+    }
+}
+
 impl JetForceSpectrum {
     /// Original record length; interior positive bins are 1..sample_count/2.
     #[must_use]
@@ -519,6 +565,27 @@ impl<F: FluidTransport + FluidAcoustics + ?Sized> MaterialJetLabiumRun<'_, F> {
     #[must_use]
     pub const fn acoustic(&self) -> FluidAcousticState {
         self.acoustic
+    }
+
+    /// Estimate the joint force cross spectrum from the accepted physical
+    /// history, without copying/transposing it or inventing x/y independence.
+    /// The original material and sample clock follow every bin observation.
+    pub fn prepare_force_cross_spectrum(
+        &self,
+        config: fs_fft::welch::WelchConfig,
+        budget: fs_fft::welch::WelchBudget,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<JetForceCrossSpectrum, fs_fft::welch::WelchError> {
+        Ok(JetForceCrossSpectrum {
+            acoustic: self.acoustic,
+            spectrum: fs_fft::welch::WelchCrossSpectrum::estimate_interleaved(
+                &self.force_series_n_m,
+                self.timestep_s,
+                config,
+                budget,
+                cancelled,
+            )?,
+        })
     }
 
     /// Authority boundary retained from the existing two-dimensional rig.

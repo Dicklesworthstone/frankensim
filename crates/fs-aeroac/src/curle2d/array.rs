@@ -296,6 +296,83 @@ impl PreparedDipoleObserver {
         statistics.finish()
     }
 
+    /// Propagate the measured joint source spectrum over one resolved bin.
+    ///
+    /// Channels are `[Fx_0,Fy_0,Fx_1,Fy_1,...]` in N/m, with the same source
+    /// order, frame and physical clock as this observer. The prepared frequency
+    /// must equal `spectrum.frequency_hz(bin)`. Each segment's retained complex
+    /// channel vector is propagated coherently before powers are averaged.
+    /// Thus measured cross-source AND cross-axis phase survives propagation.
+    ///
+    /// The one-sided /Hz factors are scaled by `sqrt(2*df)` exactly once for
+    /// the existing peak-phasor intensity convention. Outputs are this bin's
+    /// pressure/velocity powers and signed intensity, NOT densities per Hz or
+    /// coherent-gain tone amplitudes. DC and Nyquist are refused. Adding bins
+    /// assumes a stationary resolved spectrum; finite-time cross-frequency
+    /// beats, independent segments and statistical confidence are not inferred.
+    /// The original 2D source-model/absolute-SPL boundary remains unchanged.
+    ///
+    /// Allocation-free O(sources * segments), with cancellation at source
+    /// boundaries. No dense covariance, synthetic phases or eigenfactorization.
+    pub fn evaluate_welch_bin(
+        &self,
+        spectrum: &fs_fft::welch::WelchCrossSpectrum,
+        bin: usize,
+        budget: CoherenceBudget,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<DipoleFieldStatistics, AeroacError> {
+        let poll = |cancelled: &mut dyn FnMut() -> bool| {
+            if cancelled() {
+                Err(AeroacError::Cancelled {
+                    what: "recorded dipole cross spectrum",
+                })
+            } else {
+                Ok(())
+            }
+        };
+        poll(&mut cancelled)?;
+        if bin == 0 || bin >= spectrum.bin_count() - 1 {
+            return Err(invalid("radiation requires an interior positive Welch bin"));
+        }
+        let frequency = spectrum
+            .frequency_hz(bin)
+            .map_err(|_| invalid("recorded dipole spectrum bin"))?;
+        if frequency.to_bits() != self.frequency_hz.to_bits()
+            || self.source_count().checked_mul(2) != Some(spectrum.channel_count())
+        {
+            return Err(invalid(
+                "Welch source channels/frequency must match the prepared observer",
+            ));
+        }
+        if spectrum.segment_count() > budget.max_modes
+            || self
+                .source_count()
+                .checked_mul(spectrum.segment_count())
+                .is_none_or(|work| work > budget.max_source_mode_pairs)
+        {
+            return Err(invalid("recorded dipole coherence exceeds the work budget"));
+        }
+        let peak_scale = core::f64::consts::SQRT_2 * det::sqrt(spectrum.bin_width_hz());
+        let mut statistics = StatisticsSum::default();
+        for factor in spectrum
+            .factors(bin)
+            .map_err(|_| invalid("recorded dipole spectrum bin"))?
+        {
+            poll(&mut cancelled)?;
+            let mut sums = [ComplexSum::default(); 3];
+            for (transfer, force) in self.transfers.iter().zip(factor.chunks_exact(2)) {
+                poll(&mut cancelled)?;
+                let forces = core::array::from_fn(|axis| {
+                    C64::new(force[axis].re, force[axis].im).scale(peak_scale)
+                });
+                transfer.accumulate(forces, &mut sums)?;
+            }
+            statistics.add(sums.map(ComplexSum::value))?;
+        }
+        poll(&mut cancelled)?;
+        statistics.finish()
+    }
+
     /// Propagate sources with mutually uncorrelated unit-power amplitudes.
     ///
     /// Each vector [N/m] fixes that source's peak amplitude, polarization and
