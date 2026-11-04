@@ -26,6 +26,9 @@ use fs_solver::LinearOp;
 /// Physical thermal stress constraints and exact adjoint curvature.
 pub mod stress;
 
+/// Initial-stress vibration and equilibrium-aware frequency sensitivities.
+pub mod modal;
+
 /// One independently equilibrated thermal and mechanical load case.
 #[derive(Debug, Clone, Copy)]
 pub struct ThermalLoadCase<'a> {

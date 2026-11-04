@@ -231,13 +231,13 @@ impl<'a> ThermalComplianceGoal<'a> {
         Ok(output)
     }
 
-    fn reference_stress(&self, index: usize, cell: usize) -> [f64; 6] {
+    pub(super) fn reference_stress(&self, index: usize, cell: usize) -> [f64; 6] {
         let c = material_at(self.material_field(), cell).stiffness_mandel_pa();
         let strain = &self.cases[index].response.elements[cell].elastic_strain_mandel;
         core::array::from_fn(|i| dot(&c[i], strain))
     }
 
-    fn local_design_load(&self, index: usize, cell: usize) -> [f64; 12] {
+    pub(super) fn local_design_load(&self, index: usize, cell: usize) -> [f64; 12] {
         let el = self.base.elasticity;
         let local = gather(el, &el.tets[cell], &self.base.displacements[index]);
         let ku = element_action(&el.ke[cell], &local);
@@ -254,7 +254,7 @@ impl<'a> ThermalComplianceGoal<'a> {
         })
     }
 
-    fn scatter_stress(
+    pub(super) fn scatter_stress(
         &self,
         cell: usize,
         derivative: &[f64; 6],

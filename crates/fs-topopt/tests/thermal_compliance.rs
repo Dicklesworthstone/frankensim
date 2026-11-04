@@ -6,6 +6,9 @@ mod simp;
 #[path = "thermal_compliance/stress.rs"]
 mod stress;
 
+#[path = "thermal_compliance/modal.rs"]
+mod modal;
+
 use std::ops::ControlFlow;
 
 use fs_blake3::ContentHash;
