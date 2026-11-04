@@ -47,6 +47,9 @@ use fs_lbm::d3q19::{
 use fs_lbm::sgs3::{SgsConfig, SgsReport, SgsWorkspace3};
 use fs_math::det;
 
+/// Spatially resolved splitter forces on the original flow trajectory.
+pub mod distributed;
+
 /// Absolute transverse-force RMS floor [lattice momentum/step] below
 /// which a rung's AMPLITUDE carries no claim (the vacuous-oscillation
 /// trap: mirror-symmetric rigs oscillate in amplified roundoff at
@@ -120,9 +123,9 @@ pub struct SlotJet3dDiagnostics {
 #[derive(Debug, Clone)]
 pub struct SlotJet3dRun {
     /// Per-step impulse on the splitter plate `(Fx, Fy)` [lattice
-    /// momentum/step], length `steps_record`. The plate spans the
-    /// full periodic z, so the net z impulse integrates to roundoff
-    /// and is not recorded.
+    /// momentum/step], length `steps_record`, integrated over one periodic
+    /// span. This legacy record retains x/y only; [`distributed`] preserves
+    /// all three components and their spatial phases without a symmetry claim.
     pub force_series: Vec<[f64; 2]>,
     /// Diagnostics.
     pub diagnostics: SlotJet3dDiagnostics,

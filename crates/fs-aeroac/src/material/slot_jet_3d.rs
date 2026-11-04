@@ -1,9 +1,10 @@
 //! One physical fluid state drives the original three-dimensional slot-jet rig.
 //!
 //! The central-moment viscosity, SI force and acoustic wavenumber share the
-//! same gas, liquid or real-gas source. Forces are integrated across one periodic span, in N; they are
-//! not the N/m line sources of the two-dimensional Curle observer. This module
-//! deliberately leaves spatial radiation to an appropriate acoustic boundary.
+//! same gas, liquid or real-gas source. The aggregate record integrates one
+//! periodic span in N; [`distributed`] retains spatial force patches for the
+//! existing three-dimensional acoustic observer. These are finite prescribed
+//! force distributions, without an isolated-radiator qualification.
 
 use super::{
     ForceSpectrum, JetPhysicalState, MAX_PHYSICAL_MACH, MaterialAeroacError, acoustic_from_scaling,
@@ -23,6 +24,9 @@ use fs_material::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
 use fs_material::fluid_transport::FluidTransport;
 use fs_material::gas::GasState;
 use fs_math::{c64::C64, det};
+
+/// Spatial plate forces and coherent 3-D observation in this material's units.
+pub mod distributed;
 
 /// Geometry in cells and numerical controls, with no independent viscosity.
 #[derive(Clone, Debug)]

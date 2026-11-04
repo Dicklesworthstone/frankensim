@@ -201,8 +201,13 @@ impl WelchCrossSpectrum {
         )
     }
 
+    /// Estimate a dynamically shaped record without transposing or copying it.
+    /// `sample(channel, time_index)` must return the same physical sample on
+    /// every call; it is read during admission and again during transforms.
+    /// Channel order and the declared clock remain fixed for the whole record.
+    /// The same original shape, work, allocation and cancellation bounds apply.
     #[allow(clippy::too_many_arguments)]
-    fn estimate_with(
+    pub fn estimate_with(
         channels: usize,
         samples: usize,
         sample: impl Fn(usize, usize) -> f64,

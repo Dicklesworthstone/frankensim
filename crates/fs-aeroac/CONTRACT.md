@@ -1343,3 +1343,48 @@ Shape/work/clock and all physical frequencies are admitted before output writes.
 The existing continuous relative-velocity Doppler bound now transforms each receiver image's velocity hull, together with a conservative bound on the stored reflection operator's norm. Direct paths preserve their existing arithmetic. Original source and microphone paths receive whole-span half-space admission; the source remains strictly inside and exactly represented tangential receiver motion can lie on an ideal wall. The original causal Bernstein pair bounds admit every image's clearance. Pair and node limits are aggregate across all images, root caps remain per path, finite source coverage is required at both receiver endpoints, and cancellation publishes no partial owner or pressure sum.
 
 The fixed-size image owner borrows histories without copying or recompiling them, and queries allocate nothing. Ten new physics/audio regressions cover independent accelerating image-source Green potentials, both moving clocks, reflected Doppler bandwidth, exact release-wall pressure cancellation, the fixed-microphone limit, coordinate covariance, complete histories, work limits and transactional rendering. Together with 30 existing controls they pass in the focused original-source build. This retains its narrow material/FFT/error-wiring facades and is not full-workspace or encoder integration validation. The model remains prescribed compact-source pressure in a homogeneous quiescent lossless fluid with stationary ideal walls; uniform-flow paths, moving walls, finite impedance, general wedges, enclosed rooms, absorption and source feedback are not added.
+
+## Distributed three-dimensional splitter forces and coherent observation
+
+`slot_jet_3d::distributed` adds an opt-in x/z partition of the existing splitter's
+actual halfway-reflection links. `run_slot_jet_3d_patches` retains all three force
+components ON THE FLUID, measured from the same ordinary or explicitly selected
+SGS collision that streams each recorded step, before fringe forcing. The
+original central-moment trajectory, seed, molecular viscosity and diagnostics
+remain authoritative. Each patch bounds both plate faces, edges and diagonal
+links; periodic-seam coordinates are represented around their selected solid
+cell. Patch count, force-record bytes and native probe bytes are explicitly
+admitted before the associated allocations.
+
+`MaterialSlotJet3d::run_patches` binds those forces to the original material and
+physical clock, using its existing `rho * dx^4 / dt^2` force scale and `dx` geometry
+scale. It retains Fx, Fy and Fz without span/area normalization. The returned
+record's `estimate_welch` feeds sample-major data directly to the original joint
+Welch owner as source-major `[0, Fx, Fy, Fz]` channels; no full-record transpose or
+monopole-zero history is allocated. Sample count derives from the private force
+buffer. The resulting spectrum retains its material, positions and radii.
+
+`observe_bin` applies the existing compact-source-array pressure/velocity Green
+transfer to each synchronized Welch factor before calculating second moments.
+It preserves measured cross-patch and cross-axis phase and coherence, including
+radiation from separated opposing forces whose aggregate vanishes. Every patch
+must satisfy caller-authored `k*radius` and radius/range limits at that observer
+and frequency. Output is bin-integrated rather than PSD/Hz. No acoustic relative-
+error bound follows from those geometric admissions, especially near destructive
+interference.
+
+This is resolved stationary-wall dipole radiation from an authored distribution
+within one periodic flow cell, in the same homogeneous stationary lossless
+material and free space. It does not qualify an isolated physical radiator,
+replicate a periodic array, model finite-body scattering/source feedback, resolve
+volume quadrupoles, or synthesize stochastic SGS sound. Existing aggregate
+records and checkpoint version 3 are unchanged. Refused/cancelled runs expose no
+partial force record; native patch exchanges publish only with accepted fluid.
+
+Five new aeroac unit groups cover canonical x/z partition and periodic geometry,
+record/probe budgets, native aggregate force sign, original material SI scaling,
+and propagation/coherence of opposing spatial forces including Fz. Together with
+three native LBM patch-load groups, these targets typecheck through full native
+fs-aeroac production and unit sources after concurrent boundary changes were
+merged. These runtime tests and turbulent acoustic benchmarks were not executed
+in this session; no measured-spectrum or SPL qualification is claimed.

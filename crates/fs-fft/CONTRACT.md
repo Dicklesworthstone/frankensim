@@ -859,3 +859,15 @@ the production FFT/SIMD/math owners. Coverage includes bitwise chunk-partition
 equivalence across hop/window/detrend/layout choices, late cancellation and
 changed-data retry, exact overlap/tail counts, extreme scaling, input/budget
 refusal and incomplete finalization. Full workspace gates remain unrun.
+
+## Direct channel access for joint Welch observations
+
+`WelchCrossSpectrum::estimate_with` publicly exposes the existing callback-based
+estimator used by channel-slice and Cartesian observations. A caller can present
+a fixed record in its native layout through `(channel, sample)` access without
+allocating a channel transpose or histories for identically zero channels. The
+callback must present consistent samples from that record. All existing finite-
+input, clock, Welch-configuration, work/memory budget, cancellation, window,
+detrending, tail and factor-normalization rules remain unchanged; the estimator's
+arithmetic is unchanged. The distributed three-axis jet consumer uses this seam
+with source-major `[0,Fx,Fy,Fz]` channels and the original physical sample clock.
