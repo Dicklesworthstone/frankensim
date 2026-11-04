@@ -25,8 +25,10 @@ use fs_fft::harmonic_window::{
 use fs_math::{c64::C64, dd::Dd, det};
 
 mod quadratic;
+mod sampled;
 pub use fs_fft::harmonic_window::HarmonicProductSpectrumLimits;
 pub use quadratic::{AcousticFieldComponent, AcousticProductSpectrum};
+pub use sampled::{HarmonicSampleBudget, HarmonicSampleClock};
 
 mod ensemble;
 pub use ensemble::{

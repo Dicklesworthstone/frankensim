@@ -51,6 +51,42 @@ fn g1_prepared_force_spectrum_matches_independent_hann_dft() {
     }
 }
 
+#[test]
+fn g1_physical_force_spectrum_retains_prime_and_odd_window_frequencies() {
+    for n in [65_usize, 96, 101] {
+        let dt = 1.0 / 8000.0;
+        let edge = (n - 1) / 2;
+        let record: Vec<_> = (0..n)
+            .map(|i| {
+                let phase = TAU * i as f64 / n as f64;
+                [
+                    0.7 + (7.0 * phase).cos(),
+                    -0.4 + (edge as f64 * phase).sin(),
+                ]
+            })
+            .collect();
+        let spectrum = ForceSpectrum::new(&record, dt, n).unwrap();
+        assert_eq!(spectrum.sample_count, n);
+        for bin in [1, 7, edge] {
+            let (actual, frequency) = spectrum.line(bin).unwrap();
+            assert_eq!(frequency, bin as f64 / (n as f64 * dt));
+            for axis in 0..2 {
+                let mean = record.iter().map(|f| f[axis]).sum::<f64>() / n as f64;
+                let mut expected = C64::ZERO;
+                for (i, row) in record.iter().enumerate() {
+                    let angle = TAU * bin as f64 * i as f64 / n as f64;
+                    let window = 0.5 - 0.5 * (TAU * i as f64 / (n - 1) as f64).cos();
+                    expected = expected
+                        + C64::new(angle.cos(), angle.sin())
+                            .scale((row[axis] - mean) * window * 4.0 / (n - 1) as f64);
+                }
+                assert!((actual[axis] - expected).abs() < 2e-12);
+            }
+        }
+        assert!(spectrum.line(n.div_ceil(2)).is_err());
+    }
+}
+
 fn harmonic_record(n: usize, dt: f64, fundamental: f64) -> Vec<[f64; 2]> {
     (0..n)
         .map(|i| {
@@ -111,7 +147,9 @@ fn g1_joint_force_fit_resolves_weak_off_bin_even_harmonics_and_radiation() {
 fn g0_force_spectrum_budget_bins_and_original_fit_clock_refuse() {
     let forces = harmonic_record(64, 0.001, 31.7);
     assert!(ForceSpectrum::new(&forces, 0.001, 63).is_err());
-    assert!(ForceSpectrum::new(&forces[..63], 0.001, 64).is_err());
+    let odd = ForceSpectrum::new(&forces[..63], 0.001, 64).unwrap();
+    assert!(odd.line(31).is_ok());
+    assert!(odd.line(32).is_err());
     assert!(ForceSpectrum::new(&forces, 0.0, 64).is_err());
     let spectrum = ForceSpectrum::new(&forces, 0.001, 64).unwrap();
     for bin in [0, 32, usize::MAX] {
@@ -192,6 +230,45 @@ fn g1_noncommensurate_force_tones_preserve_weak_lines_and_true_frequency_radiati
         residual_rms_n_m: summary.map(|s| s.residual_rms),
     };
     assert_eq!(fitted.frequencies_hz(), frequencies);
+    let field_budget = crate::observation::HarmonicObservationBudget {
+        max_lines: 3,
+        max_line_pairs: 9,
+    };
+    let field = fitted
+        .prepare_observer_field([0.4, 0.3], [0.0, 0.0], field_budget)
+        .unwrap();
+    let clock = crate::observation::HarmonicSampleClock::new(fs_math::dd::Dd::ZERO, 4000).unwrap();
+    let mut pressure = [0.0; 73];
+    field
+        .sample_pressure_into(
+            clock,
+            19,
+            &mut pressure,
+            crate::observation::HarmonicSampleBudget {
+                max_samples: 73,
+                max_tone_samples: 219,
+            },
+        )
+        .unwrap();
+    for (offset, actual) in pressure.iter().enumerate() {
+        let time = (19 + offset) as f64 / 4000.0;
+        let expected: f64 = frequencies
+            .iter()
+            .zip(amplitudes)
+            .map(|(&frequency, force)| {
+                let p = dipole_pressure(force, TAU * frequency / 340.0, [0.4, 0.3], [0.0, 0.0])
+                    .unwrap()
+                    .pressure;
+                let theta = TAU * frequency * time;
+                p.re * theta.cos() + p.im * theta.sin()
+            })
+            .sum();
+        assert!((actual - expected).abs() < 2e-10);
+    }
+    assert!(matches!(
+        fitted.prepare_observer_field_cancellable([0.4, 0.3], [0.0, 0.0], field_budget, || true),
+        Err(AeroacError::Cancelled { .. })
+    ));
     for index in 0..frequencies.len() {
         let observed = fitted.observe_tone(index, [0.4, 0.3], [0.0, 0.0]).unwrap();
         assert_eq!(observed.frequency_hz, frequencies[index]);

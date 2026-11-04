@@ -84,7 +84,7 @@ pub struct SlotJet3dConfig {
     pub seed_amplitude: f64,
     /// Settling steps before recording.
     pub steps_settle: usize,
-    /// Recorded steps (power of two, for the shared FFT pipeline).
+    /// Recorded steps (at least 64); the shared FFT retains this exact window.
     pub steps_record: usize,
 }
 
@@ -323,11 +323,12 @@ pub(crate) fn validate_config(cfg: &SlotJet3dConfig) -> Result<(), AeroacError> 
             what: "nozzle + plate + fringe do not fit in the domain",
         });
     }
-    if !cfg.steps_record.is_power_of_two() || cfg.steps_record < 64 {
+    if cfg.steps_record < 64 {
         return Err(AeroacError::InvalidParameter {
-            what: "steps_record must be a power of two >= 64",
+            what: "steps_record must be at least 64",
         });
     }
+    fs_fft::GeneralFft::required_workspace_bytes(cfg.steps_record).map_err(AeroacError::Fft)?;
     Ok(())
 }
 

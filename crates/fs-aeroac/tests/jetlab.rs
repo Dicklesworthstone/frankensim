@@ -6,7 +6,7 @@
 
 use fs_aeroac::jetlab::{
     JetLabiumConfig, RampConfig, RampDirection, dipole_spectrum_line, run_adiabatic_ramp,
-    run_jet_labium, transverse_force_peak,
+    run_jet_labium, transverse_force_peak, transverse_force_spectrum,
 };
 use fs_aeroac::{AeroacError, SCOPE_STATEMENT};
 use fs_lbm::core2::CollisionModel2;
@@ -142,7 +142,7 @@ fn jet_labium_edge_tone_oscillates_and_radiates() {
 #[test]
 fn jet_labium_refusals_are_typed() {
     let mut c = base_config();
-    c.steps_record = 1000; // not a power of two
+    c.steps_record = 63; // below the retained-record minimum
     assert!(matches!(
         run_jet_labium(&c),
         Err(AeroacError::InvalidParameter { .. })
@@ -198,7 +198,7 @@ fn tiny_ramp_config() -> RampConfig {
         rungs: 3,
         steps_ramp: 32,
         steps_rung_settle: 32,
-        steps_rung_record: 64,
+        steps_rung_record: 67,
         skip_bins: 2,
     }
 }
@@ -270,7 +270,7 @@ fn adiabatic_ramp_refusals_are_typed() {
         Err(AeroacError::InvalidParameter { .. })
     ));
     let mut c = tiny_ramp_config();
-    c.steps_rung_record = 100; // not a power of two
+    c.steps_rung_record = 63; // below the retained-record minimum
     assert!(matches!(
         run_adiabatic_ramp(&c),
         Err(AeroacError::InvalidParameter { .. })
@@ -295,7 +295,7 @@ fn adiabatic_ramp_refusals_are_typed() {
     ));
     // Peak-measurement refusals.
     assert!(matches!(
-        transverse_force_peak(&[[0.0, 0.0]; 100], 3.0, 0.08, 4),
+        transverse_force_peak(&[[0.0, 0.0]; 63], 3.0, 0.08, 4),
         Err(AeroacError::InvalidParameter { .. })
     ));
     assert!(matches!(
@@ -309,11 +309,49 @@ fn adiabatic_ramp_refusals_are_typed() {
 fn jet_labium_determinism_bitwise() {
     let mut c = base_config();
     c.steps_settle = 100;
-    c.steps_record = 64;
+    c.steps_record = 67;
     let a = run_jet_labium(&c).expect("a");
     let b = run_jet_labium(&c).expect("b");
+    assert_eq!(a.force_series.len(), 67);
+    assert_eq!(b.force_series.len(), 67);
     for (x, y) in a.force_series.iter().zip(&b.force_series) {
         assert_eq!(x[0].to_bits(), y[0].to_bits());
         assert_eq!(x[1].to_bits(), y[1].to_bits());
+    }
+}
+
+/// G1: preserve the exact physical window and the highest positive odd bin.
+#[test]
+fn transverse_spectrum_retains_nonbinary_windows_and_odd_positive_edge() {
+    for n in [65_usize, 96, 101] {
+        let bin = if n % 2 == 1 { n / 2 } else { 7 };
+        let force: Vec<[f64; 2]> = (0..n)
+            .map(|j| {
+                let phase = core::f64::consts::TAU * bin as f64 * j as f64 / n as f64;
+                [0.0, phase.sin()]
+            })
+            .collect();
+        let (power, peak) = transverse_force_spectrum(&force, 2.5, 0.1, 1).unwrap();
+        assert_eq!(power.len(), n.div_ceil(2));
+        assert_eq!(peak.bin, bin);
+        let expected_strouhal = (bin as f64 / n as f64) * 5.0 / 0.1;
+        assert!((peak.strouhal - expected_strouhal).abs() < 1e-12);
+        let mean = force.iter().map(|f| f[1]).sum::<f64>() / n as f64;
+        for (k, &actual) in power.iter().enumerate() {
+            let mut re = 0.0;
+            let mut im = 0.0;
+            for (j, f) in force.iter().enumerate() {
+                let window = 0.5 - 0.5 * (core::f64::consts::TAU * j as f64 / (n - 1) as f64).cos();
+                let phase = core::f64::consts::TAU * k as f64 * j as f64 / n as f64;
+                let value = (f[1] - mean) * window;
+                re += value * phase.cos();
+                im -= value * phase.sin();
+            }
+            let expected = re * re + im * im;
+            assert!(
+                (actual - expected).abs() <= 2e-11 * expected.max(1.0),
+                "N={n}, bin={k}: {actual:e} versus {expected:e}"
+            );
+        }
     }
 }

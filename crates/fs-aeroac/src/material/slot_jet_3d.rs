@@ -46,7 +46,7 @@ pub struct SlotJet3dSetup {
     pub seed_amplitude: f64,
     /// Settling steps before recording.
     pub steps_settle: usize,
-    /// Recorded steps; a power of two, at least 64.
+    /// Recorded physical steps, at least 64; arbitrary lengths are retained.
     pub steps_record: usize,
 }
 

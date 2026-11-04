@@ -92,6 +92,8 @@ pub enum AeroacError {
     /// The shared numerical harmonic fitter refused its input, budget or
     /// conditioning. Its diagnostics remain distinct from acoustic admission.
     HarmonicFit(fs_fft::harmonic::HarmonicFitError),
+    /// The original exact-length transform refused its storage, buffers or data.
+    Fft(fs_fft::GeneralFftError),
     /// Non-finite input.
     NonFinite {
         /// Where.
@@ -118,6 +120,7 @@ impl core::fmt::Display for AeroacError {
         match self {
             AeroacError::Cancelled { what } => write!(f, "cancelled: {what}"),
             AeroacError::HarmonicFit(error) => write!(f, "force harmonic fit: {error}"),
+            AeroacError::Fft(error) => write!(f, "force spectrum: {error}"),
             AeroacError::NonFinite { what } => write!(f, "non-finite input: {what}"),
             AeroacError::InvalidParameter { what } => write!(f, "invalid parameter: {what}"),
             AeroacError::NotConverged { what, residual } => {

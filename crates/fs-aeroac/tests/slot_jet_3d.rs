@@ -68,10 +68,10 @@ fn config_refusals() {
     );
 
     let mut cfg = smoke_config();
-    cfg.steps_record = 100;
+    cfg.steps_record = 63;
     assert!(
         run_slot_jet_3d(&cfg).is_err(),
-        "non-power-of-two record must be refused"
+        "record below the 64-sample minimum must be refused"
     );
 
     let mut cfg = smoke_config();
@@ -105,15 +105,16 @@ fn config_refusals() {
 
 #[test]
 fn smoke_run_classifies_and_discloses_bin() {
-    let cfg = smoke_config();
+    let mut cfg = smoke_config();
+    cfg.steps_record = 67;
     let run = run_slot_jet_3d(&cfg).expect("smoke run must execute");
-    assert_eq!(run.force_series.len(), 64);
+    assert_eq!(run.force_series.len(), 67);
     assert!(!run.scope.is_empty());
     #[allow(clippy::cast_precision_loss)]
-    let bin_width = (1.0f64 / 64.0) * 2.0 * cfg.slot_half / cfg.u_jet;
+    let bin_width = (1.0 / cfg.steps_record as f64) * 2.0 * cfg.slot_half / cfg.u_jet;
     assert!((run.diagnostics.strouhal_bin_width - bin_width).abs() < 1e-12);
     let rung = classify_rung(&run, &cfg).expect("classification must succeed");
-    // A 64-step smoke cannot carry physics claims either way; the
+    // A 67-step smoke cannot carry physics claims either way; the
     // receipt must still be fully populated.
     assert!(rung.flatness.is_finite());
     assert_eq!(

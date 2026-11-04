@@ -87,9 +87,12 @@ fn force_line<F: FluidTransport + FluidAcoustics + ?Sized>(
 fn g0_actual_lattice_force_and_frequency_have_correct_physical_units() {
     let gas = gas("300 100000 0");
     let physical = physical();
-    let model = MaterialJetLabium::try_new(&gas, &setup(), physical).unwrap();
+    let mut setup = setup();
+    setup.steps_record = 67;
+    let model = MaterialJetLabium::try_new(&gas, &setup, physical).unwrap();
     let lattice = run_jet_labium(model.lattice_config()).unwrap();
     let run = model.run().unwrap();
+    assert_eq!(run.force_series_n_m().len(), 67);
     let dx = physical.cell_size_m;
     let dt = physical.timestep_s;
     let force_unit = gas.density * dx.powi(3) / dt.powi(2);
@@ -268,7 +271,8 @@ fn g0_actual_lattice_force_and_frequency_have_correct_physical_units() {
 
 #[test]
 fn g3_data_only_pressure_temperature_and_composition_swaps_reach_flow_and_sound() {
-    let read = |text: &str| read_gas_record(&mut text.split_ascii_whitespace(), None, None).unwrap();
+    let read =
+        |text: &str| read_gas_record(&mut text.split_ascii_whitespace(), None, None).unwrap();
     let reference = read("mixture 300 100000 mole 2 N2 0.8 O2 0.2");
     let law = IsobaricGasLaw::try_from_record(reference.clone()).unwrap();
     // Carry the actual ingress/feedback owners through both the lattice and

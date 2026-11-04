@@ -65,7 +65,7 @@ pub struct JetLabiumConfig {
     pub fringe_sigma: f64,
     /// Settling steps before recording.
     pub steps_settle: usize,
-    /// Recorded steps (power of two, for the caller's FFT).
+    /// Recorded steps (at least 64); the exact physical window is retained.
     pub steps_record: usize,
     /// Transverse seed amplitude RELATIVE to `u_jet` (0 disables).
     /// THE VACUOUS-OSCILLATION TRAP (executed): the rig is mirror-
@@ -369,7 +369,7 @@ impl Rig {
                 }
             }
             #[allow(clippy::cast_precision_loss)]
-            let samples = (steps / 16) as f64;
+            let samples = steps.div_ceil(16) as f64;
             Ok(RecordedSegment {
                 force_series,
                 mach_max,
@@ -387,18 +387,19 @@ impl Rig {
 ///
 /// # Errors
 /// [`AeroacError::InvalidParameter`] on inconsistent geometry (plate
-/// reaching into the fringe, slot taller than the domain, non-power-
-/// of-two record length, degenerate sizes);
+/// reaching into the fringe, slot taller than the domain, fewer than
+/// 64 recording steps, degenerate sizes);
 /// [`AeroacError::NonFinite`] on bad reals, and (with a named
 /// destabilization message) when the lattice blows up during the
 /// run — the typed alternative to fs-lbm's non-finite-density panic.
 pub fn run_jet_labium(cfg: &JetLabiumConfig) -> Result<JetLabiumRun, AeroacError> {
     validate_config(cfg)?;
-    if !cfg.steps_record.is_power_of_two() || cfg.steps_record < 64 {
+    if cfg.steps_record < 64 {
         return Err(AeroacError::InvalidParameter {
-            what: "steps_record must be a power of two >= 64",
+            what: "steps_record must be at least 64",
         });
     }
+    fs_fft::GeneralFft::required_workspace_bytes(cfg.steps_record).map_err(AeroacError::Fft)?;
     let mut rig = Rig::build(cfg);
     // --- Settle, then record. ---
     rig.settle(cfg.steps_settle)?;
@@ -448,9 +449,10 @@ pub struct ForcePeak {
 ///
 /// # Errors
 /// [`AeroacError::InvalidParameter`] unless the record length is a
-/// power of two >= 64 and `1 <= skip_bins < n/4`;
+/// length >= 64 and `1 <= skip_bins < n/4`;
 /// [`AeroacError::NonFinite`]/[`AeroacError::InvalidParameter`] on
-/// bad `slot_half`/`u_jet`.
+/// bad `slot_half`/`u_jet`; [`AeroacError::Fft`] on unrepresentable
+/// transform sizes or nonfinite sampled transforms.
 pub fn transverse_force_spectrum(
     force_series: &[[f64; 2]],
     slot_half: f64,
@@ -458,9 +460,9 @@ pub fn transverse_force_spectrum(
     skip_bins: usize,
 ) -> Result<(Vec<f64>, ForcePeak), AeroacError> {
     let n = force_series.len();
-    if !n.is_power_of_two() || n < 64 {
+    if n < 64 {
         return Err(AeroacError::InvalidParameter {
-            what: "force record length must be a power of two >= 64",
+            what: "force record length must be at least 64",
         });
     }
     if skip_bins < 1 || skip_bins >= n / 4 {
@@ -488,7 +490,16 @@ pub fn transverse_force_spectrum(
             .sum::<f64>()
             / n_f,
     );
-    let fft = fs_fft::Fft::new(n);
+    let max_workspace_bytes =
+        fs_fft::GeneralFft::required_workspace_bytes(n).map_err(AeroacError::Fft)?;
+    let fft = fs_fft::GeneralFft::new(
+        n,
+        fs_fft::GeneralFftBudget {
+            max_samples: n,
+            max_workspace_bytes,
+        },
+    )
+    .map_err(AeroacError::Fft)?;
     let mut buf: Vec<fs_fft::C64> = force_series
         .iter()
         .enumerate()
@@ -498,9 +509,9 @@ pub fn transverse_force_spectrum(
             fs_fft::C64::new((f[1] - mean) * w, 0.0)
         })
         .collect();
-    let mut scratch = vec![fs_fft::C64::new(0.0, 0.0); n];
-    fft.forward(&mut buf, &mut scratch);
-    let power: Vec<f64> = buf[..n / 2].iter().map(|c| c.norm_sq()).collect();
+    let mut scratch = vec![fs_fft::C64::new(0.0, 0.0); fft.scratch_len()];
+    fft.forward(&mut buf, &mut scratch).map_err(AeroacError::Fft)?;
+    let power: Vec<f64> = buf[..n.div_ceil(2)].iter().map(|c| c.norm_sq()).collect();
     let (peak_bin, peak_pow) = power
         .iter()
         .enumerate()
@@ -576,7 +587,7 @@ pub struct RampConfig {
     pub steps_ramp: usize,
     /// Re-lock settle steps after each transition, before recording.
     pub steps_rung_settle: usize,
-    /// Per-rung force record length (power of two >= 64).
+    /// Per-rung force record length (at least 64, retained exactly).
     pub steps_rung_record: usize,
     /// Peak-search guard band for [`transverse_force_peak`].
     pub skip_bins: usize,
@@ -650,7 +661,7 @@ fn ramp_tau(rig: &mut Rig, from: f64, to: f64, steps: usize) -> Result<(), Aeroa
 /// # Errors
 /// [`AeroacError::InvalidParameter`] on the base-config violations
 /// of [`run_jet_labium`], fewer than two rungs, zero ramp/settle
-/// steps, a non-power-of-two record, a degenerate (< 1% relative)
+/// steps, a record shorter than 64, a degenerate (< 1% relative)
 /// Reynolds span, or a top-of-ramp relaxation time at or below the
 /// 0.5005 stability floor; [`AeroacError::NonFinite`] on bad reals.
 pub fn run_adiabatic_ramp(cfg: &RampConfig) -> Result<RampReport, AeroacError> {
@@ -665,11 +676,12 @@ pub fn run_adiabatic_ramp(cfg: &RampConfig) -> Result<RampReport, AeroacError> {
             what: "steps_ramp and steps_rung_settle must be positive",
         });
     }
-    if !cfg.steps_rung_record.is_power_of_two() || cfg.steps_rung_record < 64 {
+    if cfg.steps_rung_record < 64 {
         return Err(AeroacError::InvalidParameter {
-            what: "steps_rung_record must be a power of two >= 64",
+            what: "steps_rung_record must be at least 64",
         });
     }
+    fs_fft::GeneralFft::required_workspace_bytes(cfg.steps_rung_record).map_err(AeroacError::Fft)?;
     if !cfg.reynolds_end.is_finite() {
         return Err(AeroacError::NonFinite {
             what: "reynolds_end",

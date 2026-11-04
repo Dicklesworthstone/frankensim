@@ -47,6 +47,22 @@ impl core::fmt::Display for WindowError {
 
 impl std::error::Error for WindowError {}
 
+/// Instantaneous `exp(-i 2 pi f t)` on an explicitly retained source clock.
+///
+/// Signed Hz and DC are admitted. This uses the same Hz conversion and DD
+/// phase reduction as the finite-window moments, so sampled fields and their
+/// analytic observations share one convention. The returned real/imaginary
+/// parts retain small cancellation residuals until the final field reduction.
+pub fn phase_hz_from_clock_dd(frequency_hz: f64, time_s: Dd) -> Result<[Dd; 2], WindowError> {
+    if !time_s.hi.is_finite() || !time_s.lo.is_finite() {
+        return Err(WindowError::InvalidWindow);
+    }
+    let time = checked(Dd::from_pair(time_s.hi, time_s.lo))?;
+    let phase = checked(angular_frequency(frequency_hz)? * time)?;
+    let (real, imaginary) = proper_phase(phase);
+    Ok([checked(real)?, checked(imaginary)?])
+}
+
 /// Nonnegative, unit-integral temporal sensitivity of a detector.
 ///
 /// These profiles weight the instantaneous quantity being observed. They do
@@ -261,7 +277,7 @@ impl HarmonicWindow {
             return Err(WindowError::InvalidFrequency);
         }
         let difference = checked(Dd::from_f64(frequency_a_hz) - Dd::from_f64(frequency_b_hz))?;
-        self.proper_difference_kernel(checked(difference * Dd::from_f64(core::f64::consts::TAU))?)
+        self.proper_difference_kernel(checked(difference * TAU_DD)?)
     }
 
     #[allow(clippy::float_cmp)] // Exact zero is the normalized DD identity.
@@ -454,11 +470,19 @@ fn checked(x: Dd) -> Result<Dd, WindowError> {
     }
 }
 
+// Mathematical 2*pi to DD precision, using fs-math's existing pi-tail
+// convention. Lifting only f64::TAU leaves its ~2.45e-16 radian error in every
+// cycle; multiplying by an absolute source epoch then creates a spurious phase.
+const TAU_DD: Dd = Dd {
+    hi: core::f64::consts::TAU,
+    lo: 2.449_293_598_294_706_4e-16,
+};
+
 fn angular_frequency(frequency_hz: f64) -> Result<Dd, WindowError> {
     if !frequency_hz.is_finite() {
         return Err(WindowError::InvalidFrequency);
     }
-    checked(Dd::from_f64(frequency_hz) * Dd::from_f64(core::f64::consts::TAU))
+    checked(Dd::from_f64(frequency_hz) * TAU_DD)
 }
 
 fn check_amplitude(value: Dd) -> Result<(), WindowError> {
@@ -903,6 +927,9 @@ mod tests {
             .mean_real_product_dd(a, b)
             .unwrap();
         assert_eq!(large, small);
+        // This rad/s input is the rounded f64 approximation to 2*pi. The Hz
+        // owner retains the mathematical constant's low part, so the two
+        // independently authored frequencies agree numerically, not bitwise.
         close(
             large.to_f64(),
             window
@@ -910,7 +937,7 @@ mod tests {
                 .unwrap()
                 .mean_real_product(a, b)
                 .unwrap(),
-            0.0,
+            2e-15,
         );
         assert!(matches!(
             window.proper_product_kernel_hz(f64::INFINITY, 0.0),
@@ -962,21 +989,38 @@ mod tests {
         let start = 2.0_f64.powi(-20);
         let duration = 2.0_f64.powi(-30);
         let window = HarmonicWindow::new(start, duration).unwrap();
-        // Products by powers of two are exact; evaluate the large and small
-        // physical frequency contributions independently using platform trig.
+        // The base completes an EXACT integer number of cycles at both the
+        // start and half-width. Its phase is therefore one; only the fractional
+        // frequency rotates. Applying platform trig to TAU*large_integer would
+        // instead validate the growing phase error of a rounded 2*pi constant.
         let rotate = |x: f64| C64::new(x.cos(), -x.sin());
-        let base_start = TAU * (base * start);
-        let base_half = TAU * (base * (0.5 * duration));
+        assert_eq!(base * start, 2.0_f64.powi(28));
+        assert_eq!(base * (0.5 * duration), 2.0_f64.powi(17));
         let small_start = TAU * (fraction * start);
         let small_half = TAU * (fraction * (0.5 * duration));
-        let expected_rotation =
-            rotate(base_start) * rotate(small_start) * rotate(base_half) * rotate(small_half);
-        let half = Dd::from_f64(base_half) + Dd::from_f64(small_half);
-        let expected_sine = (rotate(base_half) * rotate(small_half)).im;
-        let expected = expected_rotation.scale(-expected_sine / half.to_f64());
+        let expected_rotation = rotate(small_start) * rotate(small_half);
+        let half = TAU * ((base + fraction) * (0.5 * duration));
+        let expected = expected_rotation.scale(small_half.sin() / half);
         let actual = window.mean_phase_hz(base + fraction).unwrap();
         close(actual.re, expected.re, 2e-20);
         close(actual.im, expected.im, 2e-20);
+    }
+
+    #[test]
+    fn g3_instantaneous_hz_phase_retains_integer_cycles_and_sub_ulp_quarter_turns() {
+        for epoch in [2.0_f64.powi(40), -2.0_f64.powi(40)] {
+            let time = Dd::from_f64(epoch);
+            let phase = phase_hz_from_clock_dd(4096.0, time).unwrap();
+            close(phase[0].to_f64(), 1.0, 2e-15);
+            close(phase[1].to_f64(), 0.0, 2e-15);
+            // A quarter period lies below one f64 ULP of the absolute epoch.
+            let quarter = time + Dd::from_f64(1.0 / 16384.0);
+            for (frequency, imaginary) in [(4096.0, -1.0), (-4096.0, 1.0)] {
+                let phase = phase_hz_from_clock_dd(frequency, quarter).unwrap();
+                close(phase[0].to_f64(), 0.0, 2e-15);
+                close(phase[1].to_f64(), imaginary, 2e-15);
+            }
+        }
     }
 
     #[test]

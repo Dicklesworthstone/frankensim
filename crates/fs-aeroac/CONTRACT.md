@@ -1,5 +1,43 @@
 # fs-aeroac — Contract
 
+## Exact physical records and sampled harmonic receivers
+
+Material-bound 2D and periodic 3D jets retain every admitted recording step,
+including odd and prime record lengths. Their prepared force spectra and the
+shared transverse periodogram use fs-fft's cached GeneralFft. The physical grid
+remains k/(N*dt); only the internal Bluestein convolution is padded. Even-N
+Nyquist is excluded and odd-N floor(N/2) is retained. Hann windowing, DC removal,
+peak-force normalization, original material and N/m or periodic-cell N units
+keep their existing owners. Sample-count admission bounds work before numeric
+allocation; the derived FFT payload is checked explicitly. The 2D diagnostic
+average counts every actual 16-step sample, including a partial final group.
+
+JetForceTones::prepare_observer_field and JetForceHarmonics::prepare_observer_field
+propagate each actual fitted frequency through the original near-field Curle
+pressure/velocity operator. This produces one coherent PreparedHarmonicField<2>
+for analytic windows or sampled pressure, with phase at original force sample
+zero. DC force and unexplained residuals are excluded from acoustic tones.
+The original frozen homogeneous lossless 2D source and shape/scaling limits
+remain; this adds no isolated 3D radiation or absolute-SPL authority.
+
+PreparedHarmonicField samples physical pascals through HarmonicSampleClock at
+epoch + integer_index/sample_rate. DD clock arithmetic retains long counters
+and sub-ULP sample intervals. Shared Hz phase conversion retains the low 2*pi
+part, preventing rounded-constant drift at large source epochs; authored rad/s
+semantics remain separate. Coalesced amplitudes and coherent reduction remain
+in DD through the final scalar. Every line must be strictly below output
+Nyquist, even at a cancellation null. Sample/line work is bounded before output,
+and sampling allocates nothing. Absolute integer indexing fixes the arithmetic
+independently of callback partitions and avoids accumulated oscillator drift.
+
+These are observations of settled prescribed harmonics. No attack, source
+evolution, missing phase/coherence, extrapolation of a nonstationary force
+record, or recovery of already aliased measurements is inferred. Direct DFT,
+physical source-to-pressure, independent real-waveform, analytic-window,
+large-epoch, cancellation and output-admission tests cover these paths.
+
+
+
 ## Purpose and layer
 
 Layer L3. Low-Mach aeroacoustic source models (bead

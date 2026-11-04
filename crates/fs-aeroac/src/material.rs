@@ -61,7 +61,7 @@ pub struct JetLabiumSetup {
     pub fringe_sigma: f64,
     /// Settling steps before the force record.
     pub steps_settle: usize,
-    /// Recorded steps; power of two, at least 64.
+    /// Recorded physical steps, at least 64; arbitrary lengths are retained.
     pub steps_record: usize,
     /// Transverse perturbation relative to jet speed.
     pub seed_amplitude: f64,
@@ -201,9 +201,11 @@ impl<'a, F: FluidTransport + FluidAcoustics + ?Sized> MaterialJetLabium<'a, F> {
             collision: setup.collision,
         };
         validate_config(&config)?;
-        if !config.steps_record.is_power_of_two() || config.steps_record < 64 {
-            return Err(invalid("steps_record must be a power of two >= 64"));
+        if config.steps_record < 64 {
+            return Err(invalid("steps_record must be at least 64"));
         }
+        fs_fft::GeneralFft::required_workspace_bytes(config.steps_record)
+            .map_err(AeroacError::Fft)?;
         let initial_speed = physical.jet_speed_m_s
             * fs_math::det::sqrt(1.0 + setup.seed_amplitude * setup.seed_amplitude);
         if initial_speed > physical.max_speed_m_s {
@@ -367,7 +369,8 @@ impl JetForceCrossSpectrum {
 }
 
 impl JetForceSpectrum {
-    /// Original record length; interior positive bins are 1..sample_count/2.
+    /// Original record length; all positive bins strictly below Nyquist exist,
+    /// including floor(N/2) when N is odd.
     #[must_use]
     pub const fn sample_count(&self) -> usize {
         self.spectrum.sample_count
@@ -415,6 +418,28 @@ pub struct JetForceHarmonics {
 }
 
 impl JetForceHarmonics {
+    /// Propagate every fitted harmonic into one coherent pressure/velocity
+    /// field for analytic windows or sampled output. Phase stays at force
+    /// record sample zero; fitted DC is not an acoustic radiation tone.
+    pub fn prepare_observer_field(
+        &self,
+        observer_m: [f64; 2],
+        source_m: [f64; 2],
+        budget: crate::observation::HarmonicObservationBudget,
+    ) -> Result<crate::observation::PreparedHarmonicField<2>, AeroacError> {
+        prepare_force_field(
+            self.acoustic,
+            self.harmonics
+                .iter()
+                .map(|&order| self.fundamental_hz * order as f64),
+            &self.force_n_m,
+            observer_m,
+            source_m,
+            budget,
+            &mut || false,
+        )
+    }
+
     /// Requested harmonic orders, in the shared plan's original order.
     #[must_use]
     pub fn harmonics(&self) -> &[usize] {
@@ -481,6 +506,39 @@ pub struct JetForceTones {
 }
 
 impl JetForceTones {
+    /// Propagate the actual independent frequencies, their phases and vector
+    /// forces into one same-medium pressure/velocity field. The existing
+    /// near-field Curle operator is evaluated once per tone. Its full field
+    /// supports finite-window interference and physical pressure rendering.
+    /// This remains a settled 2D line-source observation with the original
+    /// shape/scaling scope; DC force and unexplained residuals are not radiated.
+    pub fn prepare_observer_field(
+        &self,
+        observer_m: [f64; 2],
+        source_m: [f64; 2],
+        budget: crate::observation::HarmonicObservationBudget,
+    ) -> Result<crate::observation::PreparedHarmonicField<2>, AeroacError> {
+        self.prepare_observer_field_cancellable(observer_m, source_m, budget, || false)
+    }
+
+    pub fn prepare_observer_field_cancellable(
+        &self,
+        observer_m: [f64; 2],
+        source_m: [f64; 2],
+        budget: crate::observation::HarmonicObservationBudget,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<crate::observation::PreparedHarmonicField<2>, AeroacError> {
+        prepare_force_field(
+            self.acoustic,
+            self.frequencies_hz.iter().copied(),
+            &self.force_n_m,
+            observer_m,
+            source_m,
+            budget,
+            &mut cancelled,
+        )
+    }
+
     /// Positive fitted frequencies [Hz], in the admitted increasing order.
     #[must_use]
     pub fn frequencies_hz(&self) -> &[f64] {
@@ -524,6 +582,50 @@ impl JetForceTones {
             source_m,
         )
     }
+}
+
+fn prepare_force_field(
+    acoustic: FluidAcousticState,
+    frequencies_hz: impl ExactSizeIterator<Item = f64>,
+    forces_n_m: &[[C64; 2]],
+    observer_m: [f64; 2],
+    source_m: [f64; 2],
+    budget: crate::observation::HarmonicObservationBudget,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<crate::observation::PreparedHarmonicField<2>, AeroacError> {
+    if cancelled() {
+        return Err(AeroacError::Cancelled {
+            what: "physical force-field preparation",
+        });
+    }
+    let count = forces_n_m.len();
+    if count != frequencies_hz.len()
+        || count > budget.max_lines
+        || count
+            .checked_mul(count)
+            .is_none_or(|pairs| pairs > budget.max_line_pairs)
+    {
+        return Err(AeroacError::InvalidParameter {
+            what: "force observation exceeds its line/work budget",
+        });
+    }
+    let mut lines = Vec::new();
+    lines
+        .try_reserve_exact(count)
+        .map_err(|_| AeroacError::InvalidParameter {
+            what: "force observation line allocation failed",
+        })?;
+    for (frequency, force) in frequencies_hz.zip(forces_n_m) {
+        if cancelled() {
+            return Err(AeroacError::Cancelled {
+                what: "physical force-field preparation",
+            });
+        }
+        let observer =
+            PreparedDipoleObserver::new(acoustic, frequency, observer_m, &[source_m], 1)?;
+        lines.push(observer.evaluate_harmonic_line(&[*force])?);
+    }
+    crate::observation::PreparedHarmonicField::new_cancellable(&lines, budget, cancelled)
 }
 
 fn observe_force(
@@ -811,7 +913,7 @@ impl MaterialJetLabiumRun<'_, GasState> {
 }
 
 fn check_force_bin(n: usize, bin: usize) -> Result<(), AeroacError> {
-    if bin == 0 || bin >= n / 2 {
+    if bin == 0 || bin >= n.div_ceil(2) {
         return Err(AeroacError::InvalidParameter {
             what: "observed force bin must be strictly between DC and Nyquist",
         });
@@ -830,9 +932,9 @@ struct ForceSpectrum {
 impl ForceSpectrum {
     fn new(forces: &[[f64; 2]], timestep_s: f64, max_samples: usize) -> Result<Self, AeroacError> {
         let n = forces.len();
-        if n < 4 || !n.is_power_of_two() || n > max_samples {
+        if n < 4 || n > max_samples {
             return Err(AeroacError::InvalidParameter {
-                what: "force spectrum requires a power-of-two record within the sample budget",
+                what: "force spectrum requires at least four samples within the record budget",
             });
         }
         if !timestep_s.is_finite() || timestep_s <= 0.0 {
@@ -840,21 +942,30 @@ impl ForceSpectrum {
                 what: "force spectrum requires a positive finite sample interval",
             });
         }
+        let fft = fs_fft::GeneralFft::new(
+            n,
+            fs_fft::GeneralFftBudget {
+                max_samples,
+                max_workspace_bytes: fs_fft::GeneralFft::required_workspace_bytes(n)
+                    .map_err(AeroacError::Fft)?,
+            },
+        )
+        .map_err(AeroacError::Fft)?;
         let n_f = n as f64;
         let window: Vec<f64> = (0..n)
             .map(|i| 0.5 - 0.5 * fs_math::det::cos(core::f64::consts::TAU * i as f64 / (n_f - 1.0)))
             .collect();
         let normalization = 2.0 / window.iter().sum::<f64>();
-        let fft = fs_fft::Fft::new(n);
         let mut buffer = vec![fs_fft::C64::default(); n];
-        let mut scratch = vec![fs_fft::C64::default(); n];
-        let mut lines = vec![[C64::ZERO; 2]; n / 2];
+        let mut scratch = vec![fs_fft::C64::default(); fft.scratch_len()];
+        let mut lines = vec![[C64::ZERO; 2]; n.div_ceil(2)];
         for axis in 0..2 {
             let mean = forces.iter().map(|f| f[axis]).sum::<f64>() / n_f;
             for (i, value) in forces.iter().enumerate() {
                 buffer[i] = fs_fft::C64::new((value[axis] - mean) * window[i], 0.0);
             }
-            fft.forward(&mut buffer, &mut scratch);
+            fft.forward(&mut buffer, &mut scratch)
+                .map_err(AeroacError::Fft)?;
             for (bin, line) in lines.iter_mut().enumerate().skip(1) {
                 line[axis] = C64::new(buffer[bin].re, -buffer[bin].im).scale(normalization);
             }

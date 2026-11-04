@@ -12,6 +12,9 @@ use crate::render::{RenderError, schedule::ScheduledRenderer};
 /// Latency-aligned acoustic superposition of independently clocked mechanics.
 pub mod ensemble;
 
+/// Settled coherent acoustic fields on an explicit, alias-free output clock.
+pub mod harmonic;
+
 /// Retarded moving compact sources sampled from accepted physical histories.
 pub mod moving;
 

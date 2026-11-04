@@ -1,5 +1,26 @@
 # CONTRACT: fs-couple
 
+## Physical harmonic pressure reaches the existing WAV stream
+
+pcm_wav::observation::harmonic::HarmonicPressureRenderer borrows an original
+PreparedHarmonicField and its explicit source-clock epoch/output rate. It
+implements the existing PressureRenderer contract and uses the sole PCM/WAV
+writer, including authored pascal/full-scale conversion and clip reporting.
+No gain normalization, propagation delay, attack envelope or source time
+integration is introduced. Source and propagation validity remain the original
+field caller's responsibility, including the 2D force model's scaling limit.
+
+Construction checks every physical line against output Nyquist and reserves one
+bounded callback buffer. Sampling uses the native aeroac/FFT DD phase owner and
+absolute integer indices. Successful callbacks allocate nothing and are
+bit-identical under block partition changes. A refused callback leaves both
+the caller's output and completed sample counter unchanged. Existing streaming
+cancellation and renderer/writer clock agreement remain authoritative. Native
+regressions compare complete WAV bytes with the original encoder, verify
+partition invariance, and exercise rate, size, alias and overflow refusals.
+
+
+
 ## Coherent winding heat on the native enthalpy timeline
 
 The opt-in `harmonic-winding-heating` feature adds
