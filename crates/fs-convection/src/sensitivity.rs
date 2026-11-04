@@ -50,7 +50,13 @@ impl CorrelationInputs {
             let Some(&input) = evaluation.groups().get(axis) else {
                 continue;
             };
-            let derivative = if let Some(mixed_plate) = &mixed_plate
+            let derivative = if id == CorrelationId::HollandsHorizontalAirLayer {
+                if input_is_interior(&evaluation, axis) {
+                    super::enclosed::partial(evaluation.groups()["Ra"], axis)
+                } else {
+                    None
+                }
+            } else if let Some(mixed_plate) = &mixed_plate
                 && input_is_interior(&evaluation, axis)
             {
                 Some(mixed_plate.partial(axis))
@@ -233,6 +239,8 @@ fn input_elasticity(
             "mu_bulk_over_surface" => 0.25 * (nu - 2.0) / nu,
             _ => 0.0,
         },
+        // Its signed/zero-Rayleigh partials are evaluated directly above.
+        CorrelationId::HollandsHorizontalAirLayer => return Ok(None),
     };
     finite_derivative(value, "Nusselt input elasticity").map(Some)
 }

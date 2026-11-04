@@ -18,6 +18,7 @@ use std::collections::BTreeMap;
 
 mod mixed;
 mod natural;
+mod enclosed;
 mod sensitivity;
 
 /// Finite axial sections of the original developing circular-duct relation.
@@ -84,12 +85,14 @@ pub enum CorrelationId {
     ChurchillSphere,
     /// Isolated isothermal sphere in forced flow, Whitaker's bulk-property relation.
     WhitakerSphere,
+    /// Total gas conduction and natural convection between horizontal isothermal walls.
+    HollandsHorizontalAirLayer,
 }
 
 impl CorrelationId {
     /// Complete catalog order. This is stable audit order, not a selection
     /// preference.
-    pub const ALL: [CorrelationId; 19] = [
+    pub const ALL: [CorrelationId; 20] = [
         Self::CircularDuctLaminarCwt,
         Self::CircularDuctLaminarChf,
         Self::CircularDuctHausen,
@@ -109,6 +112,7 @@ impl CorrelationId {
         Self::ManningQureshiAidingVerticalPlate,
         Self::ChurchillSphere,
         Self::WhitakerSphere,
+        Self::HollandsHorizontalAirLayer,
     ];
 
     /// Stable model-card identifier.
@@ -140,6 +144,7 @@ impl CorrelationId {
             }
             Self::ChurchillSphere => "convection.churchill-sphere",
             Self::WhitakerSphere => "convection.whitaker-sphere",
+            Self::HollandsHorizontalAirLayer => "convection.hollands-horizontal-air-layer",
         }
     }
 
@@ -187,6 +192,9 @@ impl CorrelationId {
             }
             Self::WhitakerSphere => {
                 "Nu_D = 2 + (0.4 Re_D^(1/2) + 0.06 Re_D^(2/3)) Pr^0.4 (mu_bulk/mu_surface)^(1/4)"
+            }
+            Self::HollandsHorizontalAirLayer => {
+                "Nu_gap = 1 for signed Ra <= 1708; otherwise 1 + 1.44(1-1708/Ra) + max(0,(Ra/5830)^(1/3)-1); Ra = g beta (T_lower-T_upper) gap^3/(nu alpha)"
             }
         }
     }
@@ -297,6 +305,27 @@ impl CorrelationInputs {
         }
     }
 
+    /// Horizontal enclosed air layer, with properties at the mean of the two
+    /// actual wall temperatures. Rayleigh is SIGNED, positive when buoyancy
+    /// destabilizes the layer: `g beta (T_lower-T_upper) gap^3/(nu alpha)`.
+    /// Never replace it with an absolute value. Stable layers, zero gravity,
+    /// equilibrium and subcritical unstable layers retain total Nu=1.
+    ///
+    /// `gap_over_min_span` is the gap divided by the smaller WHOLE plate span,
+    /// not a mesh-cell width. Both spans must exceed ten gaps. The card admits
+    /// Pr in [0.70, 0.72] as an explicit implementation policy around air's
+    /// source value near 0.71; this is not a published validation interval.
+    /// Positive Ra must not exceed 1e5. The coefficient already includes the
+    /// gas's Fourier conduction; adding another gas conductance double counts it.
+    #[must_use]
+    pub const fn horizontal_air_layer(
+        signed_rayleigh: f64,
+        prandtl: f64,
+        gap_over_min_span: f64,
+    ) -> Self {
+        Self::natural(signed_rayleigh, prandtl).with_aspect_ratio(gap_over_min_span)
+    }
+
     /// Aiding mixed-convection point with nonnegative Reynolds and Rayleigh
     /// magnitudes and positive Prandtl number. Both flow drivers cannot vanish.
     ///
@@ -324,7 +353,9 @@ impl CorrelationInputs {
         self
     }
 
-    /// Declare the rectangular-duct minor/major side ratio in `(0, 1]`.
+    /// Declare the selected geometry's aspect ratio. Rectangular ducts use
+    /// minor/major side in `(0, 1]`; the enclosed horizontal air layer uses
+    /// gap/minimum whole-plate span in `(0, 0.1)`.
     #[must_use]
     pub const fn with_aspect_ratio(mut self, ratio: f64) -> Self {
         self.aspect_ratio = Some(ratio);
@@ -368,12 +399,23 @@ impl CorrelationInputs {
             insert_group(&mut groups, "aspect_ratio", value, false)?;
         }
         if let Some(value) = self.rayleigh {
-            insert_group(
-                &mut groups,
-                "Ra",
-                value,
-                mixed || id == CorrelationId::ChurchillSphere,
-            )?;
+            if id == CorrelationId::HollandsHorizontalAirLayer {
+                // The enclosure needs the actual stability sign. Other cards
+                // retain their original nonnegative/positive group admission.
+                if !value.is_finite() {
+                    return Err(CorrelationError::InvalidGroup {
+                        axis: "Ra", value_bits: value.to_bits(),
+                    });
+                }
+                groups.insert("Ra".to_string(), value);
+            } else {
+                insert_group(
+                    &mut groups,
+                    "Ra",
+                    value,
+                    mixed || id == CorrelationId::ChurchillSphere,
+                )?;
+            }
         }
         if let Some(value) = self.viscosity_ratio {
             insert_group(&mut groups, "mu_bulk_over_surface", value, false)?;
@@ -856,6 +898,7 @@ fn evaluate_formula(
                 * det::pow(group("Pr"), 0.4)
                 * det::pow(group("mu_bulk_over_surface"), 0.25)
         }
+        CorrelationId::HollandsHorizontalAirLayer => enclosed::nusselt(group("Ra")),
     }
 }
 
@@ -976,6 +1019,7 @@ fn card_for(id: CorrelationId) -> CorrelationCard {
             .with("Re", 1.0, 2_300.0)
     };
     let (source, validity, assumptions, failures, discrepancy_rel, discrepancy_basis) = match id {
+        CorrelationId::HollandsHorizontalAirLayer => return enclosed::card(),
         CorrelationId::CircularDuctLaminarCwt => (
             SHAH_LONDON,
             fully_developed(),

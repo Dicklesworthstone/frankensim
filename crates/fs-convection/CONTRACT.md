@@ -21,7 +21,7 @@ correlation.
 
 ## Public types and semantics
 
-- `CorrelationId` names nineteen implemented relations: circular-duct 3.66 and
+- `CorrelationId` names twenty implemented relations: circular-duct 3.66 and
   4.36 limits; a thermally developing circular-duct relation; rectangular-
   duct constant-temperature and constant-flux limits; one simultaneously
   developing constant-temperature rectangular-duct table slice at
@@ -35,7 +35,8 @@ correlation.
   plate, including its pure forced and natural boundary-layer limits; and
   Churchill isolated-sphere natural convection, including its conductive limit;
   and Whitaker forced convection over an isolated sphere with explicit
-  bulk/surface viscosity correction.
+  bulk/surface viscosity correction; and Hollands horizontal enclosed air-layer
+  transfer, including gas conduction and stable/subcritical limits.
 - `CorrelationCard` combines an `fs-evidence::ModelCard`, bibliographic
   provenance, and `DiscrepancyBasis`.
 - `CorrelationInputs` makes Re, Pr, L/Dh, aspect ratio, Ra, bulk/surface
@@ -45,6 +46,9 @@ correlation.
   `Re Pr/(L/Dh)` when all three inputs exist. `mixed(Re, Ra, Pr)` supplies both
   flow drivers; their magnitudes presume the caller has established aiding
   vertical alignment. The dimensional owner checks the actual signs.
+  `horizontal_air_layer(signed_Ra, Pr, gap_over_min_span)` retains the enclosure's
+  stability sign and its whole-plate aspect ratio instead of an external-flow
+  length or a mesh-cell width.
 - `evaluate` returns `NusseltEvaluation` only after every shared
   `ValidityDomain` axis is present and inside its inclusive bounds.
 - `NusseltEvaluation::heat_transfer_coefficient` returns
@@ -71,7 +75,9 @@ correlation.
    inputs refuse; there is no silent extrapolation. The aiding mixed card
    admits zero Re or Ra (and corresponding derived Pe/Gz); at least one flow
    driver must be positive. The isolated sphere admits Ra=0 as the physical
-   steady conduction limit Nu=2. All other supplied groups remain positive.
+   steady conduction limit Nu=2. The horizontal enclosed air layer retains
+   finite signed Ra, with stable and zero-driving total conduction Nu=1.
+   All other supplied groups remain positive.
 3. Every successful value carries exactly the selected model card, its
    validity domain, assumptions, discrepancy, and deterministic evaluation
    provenance.
@@ -96,6 +102,33 @@ correlation.
    conservative engineering allowances, explicitly labeled as such. They are
    not fabricated source-published confidence intervals and cannot earn a
    validation color.
+
+## Horizontal enclosed air layer
+
+`HollandsHorizontalAirLayer` implements the horizontal reduction of
+Hollands, Raithby and Unny, report COO-2597-2 (1976), §4 Eq. (4-1),
+[doi:10.2172/7125623](https://doi.org/10.2172/7125623), reproducing the original
+[1976 paper](https://doi.org/10.1115/1.3450517). For unstable layers it uses
+`Nu = 1 + 1.44 max(0, 1-1708/Ra) + max(0, (Ra/5830)^(1/3)-1)`.
+Stable horizontal stratification, zero driving and subcritical positive Ra
+retain total `Nu=1`; gas conduction must not be added again. Radiation is separate.
+
+The signed group uses `g beta (T_lower-T_upper) gap³/(nu alpha)`, with gas
+properties at the mean of the two actual isothermal wall temperatures.
+The unstable branch admits Ra through `1e5`; finite negative Ra describes the
+analytic stable conduction limit. Applying the report's thin-layer assumption
+to **both** spans requires `gap/minimum_span < 0.1`. The numerical Pr interval
+`[0.70, 0.72]` is a conservative implementation policy around the source's air
+value near `0.71`, **not a source-published validation interval**. Pr alone does
+not establish fluid identity. Density/property variation, quasi-steady gas
+storage neglect, and whole-plate geometry remain the dimensional owner's
+explicit physical admissions. Inclination, ventilation and wall shear are absent.
+
+Analytic signed-Ra partials are zero in the stable and subcritical branches,
+including Ra=0. The Ra derivative is unavailable at the source's kinks `1708`
+and `5830`, or at the unstable domain endpoint. Unrelated interior partials
+remain available. G0/G3 tests in `tests/enclosed_air_layer.rs` compare independent
+high-precision arithmetic, stability, source limits, continuity and typed scaling.
 
 ## Error model
 
