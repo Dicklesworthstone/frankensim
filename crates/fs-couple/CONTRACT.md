@@ -23405,6 +23405,24 @@ thermodynamic and original fixed-reference moisture limits remain explicit.
 Mechanical response is one way: elastic work does not feed solvent chemical
 potential, and the route does not claim closed chemo-mechanical energy balance.
 
+`FiniteMoistureSolution::with_solubility` explicitly retains a
+`FiniteSolubilitySolution` instead of assuming every component remains
+dissolved. Every scalar volume trial repartitions the same total stocks, then
+uses only dissolved particles for endpoint activity and the native sorption
+query. A surviving solid buffers its solute concentration; crossing saturation
+can create a solid, and dilution can exhaust it. Accepted candidates preserve
+the complete phase owner for continuation, with independent dissolved-plus-solid
+component balances before publication. The shared controller carries this
+behavior through single and multiple slabs, Cartesian fields and their existing
+mechanical consumers without inventing a second moisture integrator.
+
+Focused G1/G3/G4 cases check manufactured buffered uptake/desorption,
+precipitation and solid exhaustion during real native diffusion, retained
+crystals on continuation, the resulting native wet-plate mass difference and
+failed-solve immutability. This opt-in route has the original material law's
+independent neutral-solute, instantaneous-equilibrium scope; it does not claim
+electrolyte solubility, crystal-water transport or dissolution heat feedback.
+
 ### Simultaneous specimens sharing one finite solution
 
 `FiniteMoistureSolution::advance_shared` and `advance_shared_cartesian` couple

@@ -5,7 +5,10 @@ use fs_couple::moisture::solution::*;
 use fs_material::osmosis::{
     AqueousSolution, IdealDiluteSolution, OsmosisError,
     nonideal::{NonidealSolutionError, VirialSolutionModel},
+    solubility::FiniteSolubilitySolution,
 };
+use fs_qty::{Amount, AmountConcentration, Temperature, Volume};
+use fs_thermochem::{SpeciesId, solution::solubility::IdealSolubilityV1};
 use std::sync::Arc;
 
 #[path = "solution/shared.rs"]
@@ -28,6 +31,206 @@ pub(super) fn controls(volume: f64) -> SolutionMoistureSolve {
         maximum_iterations: 100,
         mass_tolerance_kg: 1e-13,
     }
+}
+
+fn soluble_reservoir(volume: f64, total_moles: f64, saturation: f64) -> FiniteMoistureSolution {
+    let law = IdealSolubilityV1::new(
+        SpeciesId::new("water").unwrap(),
+        SpeciesId::new("authored-neutral-solute").unwrap(),
+        Temperature::new(293.15),
+        AmountConcentration::new(saturation),
+        0.0,
+        [Temperature::new(293.15), Temperature::new(293.15)],
+    )
+    .unwrap();
+    FiniteMoistureSolution::with_solubility(
+        FiniteSolubilitySolution::new(
+            Temperature::new(293.15),
+            WATER_VOLUME,
+            Volume::new(volume),
+            vec![(law, Amount::new(total_moles))],
+        )
+        .unwrap(),
+        WATER_MOLAR_MASS,
+    )
+    .unwrap()
+}
+
+#[test]
+fn solubility_buffers_actual_moisture_activity_and_preserves_finite_crystals() {
+    with_cx(|cx| {
+        let final_volume = 5e-5;
+        let saturation = 100.0;
+        let activity = (-WATER_VOLUME * saturation).exp();
+        let slope = 0.2;
+        let diffusion = 0.01;
+        let dt = 2.0;
+        let alpha = 4.0 * dt * diffusion;
+        for initial_moisture in [0.198, 0.201] {
+            let initial = slab(card([diffusion; 2], 0.3), 1.0, vec![initial_moisture], cx);
+            let final_moisture = (initial_moisture + alpha * slope * activity) / (1.0 + alpha);
+            let water = initial.dry_mass_kg() * (final_moisture - initial_moisture);
+            let initial_volume = final_volume + water / WATER_DENSITY;
+            let total = 2.0 * saturation * initial_volume.max(final_volume);
+            let bath = soluble_reservoir(initial_volume, total, saturation);
+            let before = bath.solubility().unwrap().clone();
+            let faces = [
+                Some(atmosphere::sorption(slope)),
+                Some(atmosphere::sorption(slope)),
+            ];
+            let endpoint = bath
+                .advance(&initial, dt, &faces, config(), controls(initial_volume), cx)
+                .unwrap();
+            near(endpoint.moisture().moisture()[0], final_moisture, 2e-13);
+            near(
+                endpoint.reservoir().solution().solvent_volume_m3(),
+                final_volume,
+                2e-16,
+            );
+            for actual in endpoint.step().water_activity {
+                near(actual, activity, 2e-14);
+            }
+            let phase = endpoint
+                .reservoir()
+                .solubility()
+                .unwrap()
+                .phase_partitions()[0];
+            near(phase.dissolved.value(), saturation * final_volume, 2e-13);
+            near(
+                phase.solid.value(),
+                total - saturation * final_volume,
+                2e-13,
+            );
+            near(phase.dissolved.value() + phase.solid.value(), total, 1e-16);
+            near(
+                phase.solid.value() - before.phase_partitions()[0].solid.value(),
+                saturation * water / WATER_DENSITY,
+                2e-13,
+            );
+            near(endpoint.step().water_balance_residual_kg, 0.0, 1e-13);
+            for source in endpoint.step().transport.surface_sorption.iter().flatten() {
+                near(source.query().axes()["relative_humidity"], activity, 2e-14);
+            }
+            let continued = endpoint
+                .reservoir()
+                .advance(
+                    endpoint.moisture(),
+                    dt,
+                    &faces,
+                    config(),
+                    controls(final_volume),
+                    cx,
+                )
+                .unwrap();
+            let continued_phase = continued
+                .reservoir()
+                .solubility()
+                .unwrap()
+                .phase_partitions()[0];
+            near(
+                continued_phase.dissolved.value() + continued_phase.solid.value(),
+                total,
+                1e-16,
+            );
+            assert_eq!(bath.solubility(), Some(&before));
+            assert_eq!(initial.moisture(), &[initial_moisture]);
+        }
+    });
+}
+
+#[test]
+fn native_water_exchange_crosses_saturation_and_exhausts_or_creates_solid() {
+    with_cx(|cx| {
+        let final_volume = 5e-5;
+        let saturation = 1000.0;
+        let slope = 0.2;
+        let diffusion = 0.01;
+        let dt = 2.0;
+        let alpha = 4.0 * dt * diffusion;
+        for (initial_moisture, final_concentration) in [(0.1, saturation), (0.26, 980.0)] {
+            let activity = (-WATER_VOLUME * final_concentration).exp();
+            let initial = slab(card([diffusion; 2], 0.3), 1.0, vec![initial_moisture], cx);
+            let final_moisture = (initial_moisture + alpha * slope * activity) / (1.0 + alpha);
+            let water = initial.dry_mass_kg() * (final_moisture - initial_moisture);
+            let initial_volume = final_volume + water / WATER_DENSITY;
+            let total = if water > 0.0 {
+                saturation * 0.5 * (initial_volume + final_volume)
+            } else {
+                final_concentration * final_volume
+            };
+            let bath = soluble_reservoir(initial_volume, total, saturation);
+            let faces = [
+                Some(atmosphere::sorption(slope)),
+                Some(atmosphere::sorption(slope)),
+            ];
+            let endpoint = bath
+                .advance(&initial, dt, &faces, config(), controls(initial_volume), cx)
+                .unwrap();
+            near(
+                endpoint.reservoir().solution().solvent_volume_m3(),
+                final_volume,
+                2e-16,
+            );
+            near(endpoint.moisture().moisture()[0], final_moisture, 2e-13);
+            near(endpoint.step().water_activity[1], activity, 2e-13);
+            let start_solid = bath.solubility().unwrap().phase_partitions()[0]
+                .solid
+                .value();
+            let end = endpoint
+                .reservoir()
+                .solubility()
+                .unwrap()
+                .phase_partitions()[0];
+            if water > 0.0 {
+                assert_eq!(start_solid, 0.0);
+                assert!(end.solid.value() > 0.0);
+            } else {
+                assert!(start_solid > 0.0);
+                assert_eq!(end.solid.value(), 0.0);
+                assert_eq!(end.dissolved.value(), total);
+            }
+            near(end.dissolved.value() + end.solid.value(), total, 1e-15);
+            near(endpoint.step().water_balance_residual_kg, 0.0, 1e-13);
+        }
+    });
+}
+
+#[test]
+fn precipitated_solute_changes_native_wet_plate_and_failure_retains_both_stocks() {
+    with_cx(|cx| {
+        let volume = 1e-4;
+        let total = 0.2;
+        let bath = soluble_reservoir(volume, total, 1000.0);
+        let initial = slab(card([0.01; 2], 0.3), 0.1, vec![0.1; 4], cx);
+        let plate = plate(&initial, PlateMaterialModel::Isotropic, cx);
+        let faces = [
+            Some(atmosphere::sorption(0.2)),
+            Some(atmosphere::sorption(0.2)),
+        ];
+        let solve = controls(volume);
+        let endpoint = bath
+            .advance(&initial, 0.25, &faces, config(), solve, cx)
+            .unwrap();
+        let all_dissolved = reservoir(volume, vec![total])
+            .advance(&initial, 0.25, &faces, config(), solve, cx)
+            .unwrap();
+        assert!(endpoint.step().water_to_solid_kg > all_dissolved.step().water_to_solid_kg);
+        let wet = plate.resolve(endpoint.moisture(), cx).unwrap();
+        let overdissolved = plate.resolve(all_dissolved.moisture(), cx).unwrap();
+        assert!(wet.wet_mass_kg() > overdissolved.wet_mass_kg());
+        near(wet.wet_mass_kg(), endpoint.moisture().wet_mass_kg(), 1e-13);
+        let before = bath.solubility().unwrap().clone();
+        let too_small = SolutionMoistureSolve {
+            solvent_volume_bracket_m3: [0.999999999 * volume, 1.000000001 * volume],
+            ..solve
+        };
+        assert!(matches!(
+            bath.advance(&initial, 0.25, &faces, config(), too_small, cx),
+            Err(SolutionMoistureError::Unbracketed { .. }),
+        ));
+        assert_eq!(bath.solubility(), Some(&before));
+        assert_eq!(initial.moisture(), &[0.1; 4]);
+    });
 }
 
 #[test]

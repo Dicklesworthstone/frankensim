@@ -9,8 +9,11 @@
 //! surface-exchange resistance still control uptake and desorption.
 //!
 //! One bounded scalar solve closes endpoint solution solvent plus endpoint
-//! bound water against their original inventories. Solute amounts never change,
-//! so uptake concentrates the solution and desorption dilutes it. The accepted
+//! bound water against their original inventories. Total solute amounts never
+//! change. An optional finite solubility owner partitions those totals between
+//! dissolved and solid stocks at every trial; only dissolved particles affect
+//! water activity. Otherwise uptake concentrates the solution and desorption
+//! dilutes it with all solutes retained in solution. The accepted
 //! source queries, native slab or Cartesian fields and solution publish together. Incompressible
 //! solvent density is the explicit molar mass divided by partial molar volume.
 //!
@@ -43,7 +46,10 @@ use super::{
     reservoir::{ReservoirField, ReservoirParticipant},
 };
 use fs_exec::Cx;
-use fs_material::osmosis::{AqueousSolution, OsmosisError};
+use fs_material::osmosis::{
+    AqueousSolution, OsmosisError,
+    solubility::{FiniteSolubilityError, FiniteSolubilitySolution},
+};
 
 /// Original thermodynamic/source/diffusion refusal; no endpoint is published.
 #[derive(Debug)]
@@ -52,6 +58,8 @@ pub enum SolutionMoistureError {
     Moisture(MoistureError),
     /// Original aqueous thermodynamic or concentration-support owner refused.
     Solution(OsmosisError),
+    /// Original finite solid/solution partition or solubility law refused.
+    Solubility(FiniteSolubilityError),
     /// Malformed, unsupported or unrepresentable data.
     Invalid(&'static str),
     /// The supplied source-supported solvent-volume interval contains no sign change.
@@ -77,6 +85,11 @@ impl From<OsmosisError> for SolutionMoistureError {
         Self::Solution(value)
     }
 }
+impl From<FiniteSolubilityError> for SolutionMoistureError {
+    fn from(value: FiniteSolubilityError) -> Self {
+        Self::Solubility(value)
+    }
+}
 
 /// Explicit scalar work, source-domain and finite-inventory tolerances.
 #[derive(Clone, Copy, Debug)]
@@ -95,9 +108,15 @@ pub struct SolutionMoistureSolve {
 /// One original finite solution inventory and an explicit solvent mass scale.
 #[derive(Clone, Debug)]
 pub struct FiniteMoistureSolution {
-    solution: AqueousSolution,
+    inventory: SolutionInventory,
     solvent_molar_mass_kg_mol: f64,
     solvent_density_kg_m3: f64,
+}
+
+#[derive(Clone, Debug)]
+enum SolutionInventory {
+    Dissolved(AqueousSolution),
+    Solubility(FiniteSolubilitySolution),
 }
 
 /// Accepted native diffusion and finite-reservoir exchange over one interval.
@@ -170,15 +189,50 @@ impl FiniteMoistureSolution {
             ));
         }
         Ok(Self {
-            solution,
+            inventory: SolutionInventory::Dissolved(solution),
             solvent_molar_mass_kg_mol,
             solvent_density_kg_m3: density,
         })
     }
 
-    /// Shared thermodynamic owner and its original solute amounts.
+    /// Retain finite neutral solute totals and their original solid phases.
+    /// Every subsequent volume trial re-equilibrates the same component totals.
+    /// This uses the pair laws' independent dilute neutral-solute model; it does
+    /// not infer ionic dissociation, electrolyte common-ion effects, mixed
+    /// crystals, nucleation kinetics, dissolution heat or crystal-bound water.
+    pub fn with_solubility(
+        solution: FiniteSolubilitySolution,
+        solvent_molar_mass_kg_mol: f64,
+    ) -> Result<Self, SolutionMoistureError> {
+        let density = solvent_molar_mass_kg_mol / solution.solution().solvent_molar_volume_m3_mol();
+        let mass = solution.solution().solvent_volume_m3() * density;
+        if !positive(solvent_molar_mass_kg_mol) || !positive(density) || !positive(mass) {
+            return Err(SolutionMoistureError::Invalid(
+                "finite positive solvent molar mass, density and water inventory required",
+            ));
+        }
+        solution.solution().water_activity()?;
+        Ok(Self {
+            inventory: SolutionInventory::Solubility(solution),
+            solvent_molar_mass_kg_mol,
+            solvent_density_kg_m3: density,
+        })
+    }
+
+    /// Shared thermodynamics of the DISSOLVED amounts. With finite solubility,
+    /// use [`Self::solubility`] for conserved totals and original solid stocks.
     pub const fn solution(&self) -> &AqueousSolution {
-        &self.solution
+        match &self.inventory {
+            SolutionInventory::Dissolved(solution) => solution,
+            SolutionInventory::Solubility(solution) => solution.solution(),
+        }
+    }
+    /// Original finite solubility owner, if explicitly selected by the caller.
+    pub const fn solubility(&self) -> Option<&FiniteSolubilitySolution> {
+        match &self.inventory {
+            SolutionInventory::Dissolved(_) => None,
+            SolutionInventory::Solubility(solution) => Some(solution),
+        }
     }
     /// Explicit solvent molar mass [kg/mol].
     pub const fn solvent_molar_mass_kg_mol(&self) -> f64 {
@@ -186,7 +240,29 @@ impl FiniteMoistureSolution {
     }
     /// Actual solvent inventory [kg], excluding dissolved solutes.
     pub fn solvent_mass_kg(&self) -> f64 {
-        self.solution.solvent_volume_m3() * self.solvent_density_kg_m3
+        self.solution().solvent_volume_m3() * self.solvent_density_kg_m3
+    }
+
+    fn with_solvent_volume_m3(&self, volume: f64) -> Result<Self, SolutionMoistureError> {
+        let inventory = match &self.inventory {
+            SolutionInventory::Dissolved(solution) => {
+                SolutionInventory::Dissolved(solution.with_solvent_volume_m3(volume)?)
+            }
+            SolutionInventory::Solubility(solution) => {
+                SolutionInventory::Solubility(solution.with_solvent_volume_m3(volume)?)
+            }
+        };
+        let mass = volume * self.solvent_density_kg_m3;
+        if !positive(mass) {
+            return Err(SolutionMoistureError::Invalid(
+                "finite positive solvent inventory required at the candidate volume",
+            ));
+        }
+        Ok(Self {
+            inventory,
+            solvent_molar_mass_kg_mol: self.solvent_molar_mass_kg_mol,
+            solvent_density_kg_m3: self.solvent_density_kg_m3,
+        })
     }
 
     /// Advance native diffusion against this finite solution's endpoint activity.

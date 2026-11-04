@@ -4,8 +4,9 @@ use super::*;
 use crate::moisture::reservoir::water_sum;
 
 /// One common solution debit, with all signed specimen transfers retained in
-/// their original native reports. Solute amounts are unchanged, even when
-/// opposing adsorption/desorption leaves the net solvent inventory unchanged.
+/// their original native reports. Total solute amounts are unchanged, including
+/// finite solid stocks when selected, even when opposing adsorption/desorption
+/// leaves the net solvent inventory unchanged.
 #[derive(Clone, Debug)]
 pub struct SharedSolutionMoistureStep {
     pub interval_s: [f64; 2],
@@ -56,7 +57,7 @@ pub type SharedCartesianSolutionMoistureCandidate =
     SharedSolutionMoistureCandidate<MoistureCartesian, MoistureCartesianReport>;
 
 struct Trial<Field, Report> {
-    solution: AqueousSolution,
+    reservoir: FiniteMoistureSolution,
     solids: Vec<SharedMoistureSolid<Field, Report>>,
     water_to_solids_kg: f64,
     residual_kg: f64,
@@ -150,7 +151,7 @@ impl FiniteMoistureSolution {
             ));
         }
         let time_s = ordered[0].field.inventory().time_s;
-        let temperature = self.solution.temperature_k();
+        let temperature = self.solution().temperature_k();
         let mut cells = 0usize;
         for body in &ordered {
             poll(cx)?;
@@ -170,7 +171,7 @@ impl FiniteMoistureSolution {
                 ));
             }
         }
-        let initial_volume = self.solution.solvent_volume_m3();
+        let initial_volume = self.solution().solvent_volume_m3();
         let [mut lower, mut upper] = controls.solvent_volume_bracket_m3;
         if !positive(lower)
             || !positive(upper)
@@ -187,8 +188,8 @@ impl FiniteMoistureSolution {
         }
         let evaluate = |volume: f64| -> Result<Trial<F, F::Report>, SolutionMoistureError> {
             poll(cx)?;
-            let solution = self.solution.with_solvent_volume_m3(volume)?;
-            let activity = solution.water_activity()?;
+            let reservoir = self.with_solvent_volume_m3(volume)?;
+            let activity = reservoir.solution().water_activity()?;
             let mut solids = Vec::with_capacity(ordered.len());
             for body in &ordered {
                 poll(cx)?;
@@ -222,7 +223,7 @@ impl FiniteMoistureSolution {
                 ));
             }
             Ok(Trial {
-                solution,
+                reservoir,
                 solids,
                 water_to_solids_kg,
                 residual_kg,
@@ -242,7 +243,7 @@ impl FiniteMoistureSolution {
                 tolerance_kg: controls.mass_tolerance_kg,
             });
         } else if self
-            .solution
+            .solution()
             .solute_moles()
             .iter()
             .all(|&amount| amount == 0.0)
@@ -262,7 +263,7 @@ impl FiniteMoistureSolution {
                 });
             }
             Trial {
-                solution: self.solution.with_solvent_volume_m3(volume)?,
+                reservoir: self.with_solvent_volume_m3(volume)?,
                 residual_kg: (volume - initial_volume) * self.solvent_density_kg_m3
                     + start.water_to_solids_kg,
                 ..start
@@ -322,7 +323,37 @@ impl FiniteMoistureSolution {
             }
         };
 
-        let reservoir = Self::new(accepted.solution, self.solvent_molar_mass_kg_mol)?;
+        let reservoir = accepted.reservoir;
+        if let Some(initial) = self.solubility() {
+            let endpoint = reservoir
+                .solubility()
+                .ok_or(SolutionMoistureError::Invalid(
+                    "finite solid inventories were not retained by the moisture candidate",
+                ))?;
+            if initial.components().len() != endpoint.components().len() {
+                return Err(SolutionMoistureError::Invalid(
+                    "finite solubility component layout changed during moisture exchange",
+                ));
+            }
+            for ((original, component), partition) in initial
+                .components()
+                .iter()
+                .zip(endpoint.components())
+                .zip(endpoint.phase_partitions())
+            {
+                let total = original.total().value();
+                let residual =
+                    water_sum([partition.dissolved.value(), partition.solid.value(), -total]);
+                if component != original
+                    || !residual.is_finite()
+                    || residual.abs() > 8.0 * f64::EPSILON * total
+                {
+                    return Err(SolutionMoistureError::Invalid(
+                        "dissolved plus solid solute failed its original component balance",
+                    ));
+                }
+            }
+        }
         let solvent_mass_kg = [self.solvent_mass_kg(), reservoir.solvent_mass_kg()];
         let residual = solvent_mass_kg[1] - solvent_mass_kg[0] + accepted.water_to_solids_kg;
         let mut originals = Vec::with_capacity(ordered.len());
@@ -370,12 +401,12 @@ impl FiniteMoistureSolution {
         let step = SharedSolutionMoistureStep {
             interval_s: [time_s, time_s + dt_s],
             water_activity: [
-                self.solution.water_activity()?,
-                reservoir.solution.water_activity()?,
+                self.solution().water_activity()?,
+                reservoir.solution().water_activity()?,
             ],
             osmotic_pressure_pa: [
-                self.solution.osmotic_pressure_pa()?,
-                reservoir.solution.osmotic_pressure_pa()?,
+                self.solution().osmotic_pressure_pa()?,
+                reservoir.solution().osmotic_pressure_pa()?,
             ],
             solvent_mass_kg,
             solid_water_kg,

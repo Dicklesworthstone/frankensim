@@ -63,6 +63,87 @@ fn spatial<'a>(
 }
 
 #[test]
+fn shared_cartesian_saturation_keeps_opposing_water_fluxes_and_one_crystal_inventory() {
+    with_cx(|cx| {
+        let saturation = 100.0;
+        let activity = (-WATER_VOLUME * saturation).exp();
+        let final_volume = 5e-5;
+        let length = [0.04_f64, 0.03];
+        let diffusion = [1e-5, 2e-5];
+        let old = [0.19, 0.21];
+        let dt = 2.0;
+        // Six half-cell faces on each independently sized physical cube.
+        let expected: [f64; 2] = std::array::from_fn(|i| {
+            let alpha = 12.0 * dt * diffusion[i] / length[i].powi(2);
+            (old[i] + alpha * 0.2 * activity) / (1.0 + alpha)
+        });
+        let water: [f64; 2] =
+            std::array::from_fn(|i| 500.0 * length[i].powi(3) * (expected[i] - old[i]));
+        assert!(water[0] > 0.0 && water[1] < 0.0);
+        let initial_volume = final_volume + (water[0] + water[1]) / WATER_DENSITY;
+        let total = 2.0 * saturation * initial_volume.max(final_volume);
+        let bath = soluble_reservoir(initial_volume, total, saturation);
+        let a = grid(length[0], [1; 3], diffusion[0], vec![old[0]], cx);
+        let b = grid(length[1], [1; 3], diffusion[1], vec![old[1]], cx);
+        let faces = std::array::from_fn(|_| Some(atmosphere::sorption(0.2)));
+        let solve = controls(initial_volume);
+        let endpoint = bath
+            .advance_shared_cartesian(
+                &[spatial(20, &b, &faces), spatial(10, &a, &faces)],
+                dt,
+                2,
+                solve,
+                cx,
+            )
+            .unwrap();
+        near(
+            endpoint.reservoir().solution().solvent_volume_m3(),
+            final_volume,
+            2e-16,
+        );
+        for (i, body) in endpoint.solids().iter().enumerate() {
+            near(body.moisture.moisture()[0], expected[i], 2e-13);
+            near(
+                body.transport.boundary_water_kg.iter().sum(),
+                water[i],
+                2e-13,
+            );
+            for source in body.transport.surface_sorption.iter().flatten() {
+                near(source.query().axes()["relative_humidity"], activity, 2e-14);
+            }
+        }
+        let phase = endpoint
+            .reservoir()
+            .solubility()
+            .unwrap()
+            .phase_partitions()[0];
+        near(phase.dissolved.value(), saturation * final_volume, 2e-13);
+        near(phase.dissolved.value() + phase.solid.value(), total, 1e-16);
+        near(endpoint.step().water_balance_residual_kg, 0.0, 1e-13);
+        near(endpoint.step().direct_water_balance_residual_kg, 0.0, 1e-13);
+        let replay = bath
+            .advance_shared_cartesian(
+                &[spatial(10, &a, &faces), spatial(20, &b, &faces)],
+                dt,
+                2,
+                solve,
+                cx,
+            )
+            .unwrap();
+        assert_eq!(
+            replay.reservoir().solubility(),
+            endpoint.reservoir().solubility()
+        );
+        for (repeated, accepted) in replay.solids().iter().zip(endpoint.solids()) {
+            assert_eq!(repeated.id, accepted.id);
+            assert_eq!(repeated.moisture.moisture(), accepted.moisture.moisture());
+        }
+        assert_eq!(a.moisture(), &[old[0]]);
+        assert_eq!(b.moisture(), &[old[1]]);
+    });
+}
+
+#[test]
 fn shared_solution_has_one_manufactured_activity_and_keeps_opposing_local_transfers() {
     with_cx(|cx| {
         let final_volume = 5e-5;
