@@ -261,3 +261,39 @@ they do not certify continuum quadrature convergence or measured wind spectra.
 - No gust events, no thermals, no site heterogeneity (E3.3c territory).
 - `DEC17_AIR` is the ensemble MEAN of the pre-registered distributions;
   H-case members draw their own scenario per the frozen registry.
+
+## Exact native-step OU velocity observations
+
+`fixed_step::MannStepAverage` is an opt-in, prepared observation of one complete
+physical interval of the existing advected `FixedStepMannField`. The next endpoint
+and the interval-mean quadratures are sampled from their joint Gaussian law. The
+endpoint retains the original counter stream and multiply/add order; a disjoint
+`0x4d464156` stream supplies the independent integral bridge. Linear interpolation
+between endpoint samples is not substituted for that bridge.
+
+Preparation admits the original immutable spectrum, clock, phase origin and RNG
+identity, plus an explicit numerical workspace ceiling (104 additional bytes per
+mode, excluding shared source definitions and fixed metadata). Each joint advance
+uses eight normal draws per mode, reuses two amplitude banks, polls cancellation,
+and publishes endpoint and observation together only after all admission passes.
+Small decay/phase coefficients use analytic divided-difference and covariance
+series; scaled complex arithmetic admits large finite phases without squaring
+them. Nonrepresentable decay, phase, coefficient or bridge scale is refused.
+
+The observation supports the original point, oriented box, harmonic slip-plane,
+and complete wall/box kernels, with their analytic spatial gradients. Those static
+linear operators act on the same averaged quadratures; querying draws no noise and
+allocates no amplitude storage. Existing endpoint checkpoint format and replay
+remain unchanged, and determine all future means. The observation workspace is
+not a new accepted flow owner and need not be checkpointed to replay future steps.
+
+This is the exact linear time average of the represented finite-band OU velocity
+model, conditional on its authored correlation times. It does not average
+nonlinear momentum or energy fluxes, supply unresolved stress/kinetic energy,
+validate physical eddy turnover, or make OU forcing temporally band-limited.
+
+Verification: all 33 native `mann_field::` unit tests pass. The five new groups
+include an independent continuous stochastic-convolution quadrature oracle,
+small-decay and rotating/extreme-phase limits, 4096-realization joint moments,
+unchanged endpoint/restart bits, every publication cancellation boundary, and
+all four spatial observations with divergence and gradient checks.
