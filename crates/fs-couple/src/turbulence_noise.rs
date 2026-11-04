@@ -220,20 +220,106 @@ const GAUSS_LEGENDRE_16: [(f64, f64); 8] = [
 /// `s = (1 - z^-1) / (1 + z^-1)` (prewarped: `u = tan(pi f dt)`, `b = u_hi - u_lo`, `c = u_lo u_hi`), for a unit white
 /// input: `(1/pi) int_{w_lo}^{w_hi} |H(e^{jw})|^2 dw`. With `u = tan(w / 2)` and the low-pass prototype frequency
 /// `x = (u^2 - c) / (b u)` (`x = -1` at `u_lo`, `+1` at `u_hi`, `|H|^2 = 1 / (1 + x^2)`, `du / dx = b u / r`,
-/// `r = sqrt(b^2 x^2 + 4 c)`) it is `(2/pi) int_{-1}^{1} b u / (r (1 + x^2) (1 + u^2)) dx`, a smooth integrand, here by
-/// 16-point Gauss-Legendre (about 1e-12 relative for the flue band; a test checks it against brute force). Without
+/// `r = sqrt(b^2 x^2 + 4 c)`) it is `(2/pi) int_{-1}^{1} b u / (r (1 + x^2) (1 + u^2)) dx`. A single 16-point rule
+/// under-resolves wide bands near Nyquist; compare whole and split rules, refining within an explicit panel cap.
+/// Unresolved quadrature refuses the section instead of silently changing its calibrated gain. Without
 /// warping (`u << 1`) it is `b / 2`: an analog 2-pole Butterworth band-pass puts exactly half its power inside its edges.
-fn butterworth_in_band_variance(b: f64, c: f64) -> f64 {
-    let mut sum = 0.0;
-    for &(node, weight) in &GAUSS_LEGENDRE_16 {
-        for x in [-node, node] {
-            let r = det::sqrt(b * b * x * x + 4.0 * c);
-            // The positive root of u^2 - b x u - c = 0, in the form without cancellation on either side of x = 0.
-            let u = if x >= 0.0 { 0.5 * (b * x + r) } else { 2.0 * c / (r - b * x) };
-            sum += weight * (b * u / r) / ((1.0 + x * x) * (1.0 + u * u));
+fn butterworth_in_band_variance(b: f64, c: f64) -> Option<f64> {
+    let rule = |lo: f64, hi: f64| {
+        let (mid, half) = (0.5 * (lo + hi), 0.5 * (hi - lo));
+        let mut sum = 0.0;
+        for &(node, weight) in &GAUSS_LEGENDRE_16 {
+            for sign in [-1.0, 1.0] {
+                let x = mid + sign * half * node;
+                let r = det::sqrt(b * b * x * x + 4.0 * c);
+                // The positive root without cancellation on either side.
+                let u = if x >= 0.0 {
+                    0.5 * (b * x + r)
+                } else {
+                    2.0 * c / (r - b * x)
+                };
+                sum += weight * (b * u / r) / ((1.0 + x * x) * (1.0 + u * u));
+            }
         }
+        sum * half
+    };
+    fn refine(
+        rule: &impl Fn(f64, f64) -> f64,
+        lo: f64,
+        hi: f64,
+        coarse: f64,
+        panels: &mut usize,
+    ) -> Option<f64> {
+        if *panels < 2 {
+            return None;
+        }
+        *panels -= 2;
+        let mid = 0.5 * (lo + hi);
+        let (left, right) = (rule(lo, mid), rule(mid, hi));
+        let fine = left + right;
+        if !fine.is_finite() || fine <= 0.0 {
+            return None;
+        }
+        if (fine - coarse).abs() <= 2e-12 * fine {
+            return Some(fine);
+        }
+        Some(refine(rule, lo, mid, left, panels)? + refine(rule, mid, hi, right, panels)?)
     }
-    sum * core::f64::consts::FRAC_2_PI
+    let mut panels = 254;
+    refine(&rule, -1.0, 1.0, rule(-1.0, 1.0), &mut panels)
+        .map(|integral| integral * core::f64::consts::FRAC_2_PI)
+}
+
+/// Covariance-normalized realization of a Butterworth band (or its Nyquist
+/// high-pass limit). With `r²+s²=1`, `a=1-2b0`, `t²=1-a²`, its state obeys
+/// `v=a*z1-t*x; z'=(r*z0-s*v, s*z0+r*v)`. The zero-input map cannot increase
+/// `z0²+z1²`; also `F Fᵀ + G Gᵀ = I`, independently of the current band.
+/// This retains unit state covariance through any prescribed band changes.
+/// A zero-start state warms toward it, without instantaneous rescaling.
+///
+/// For a fixed band this is the AR(2) state transformed by its stationary
+/// covariance Cholesky factor. Its output is exactly
+/// `b0*(1-z^-2)/(1+a1*z^-1+a2*z^-2)` up to rounding. State choice matters
+/// under retuning: see Rabenstein & Czarnach (1985),
+/// <https://doi.org/10.1016/0165-1684(85)90090-8>.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct GaussianBandSection {
+    rotation: [f64; 2],
+    feedback: f64,
+    innovation: f64,
+    output: [f64; 2],
+    gain: f64,
+}
+
+impl GaussianBandSection {
+    fn new(rotation: [f64; 2], b0: f64, in_band_variance: f64, fraction: f64) -> Option<Self> {
+        let direct = det::sqrt(b0);
+        let memory = det::sqrt(1.0 - b0);
+        let gain = det::sqrt(fraction) * direct / det::sqrt(in_band_variance);
+        if !rotation.iter().all(|x| x.is_finite())
+            || !direct.is_finite()
+            || !memory.is_finite()
+            || !gain.is_finite()
+            || gain <= 0.0
+        {
+            return None;
+        }
+        Some(Self {
+            rotation,
+            feedback: 1.0 - 2.0 * b0,
+            innovation: 2.0 * direct * memory,
+            output: [direct, -memory],
+            gain,
+        })
+    }
+
+    fn step(self, state: &mut [f64; 2], white: f64) -> f64 {
+        let y = self.output[0] * white + self.output[1] * state[1];
+        let v = self.feedback * state[1] - self.innovation * white;
+        let [r, s] = self.rotation;
+        *state = [r * state[0] - s * v, s * state[0] + r * v];
+        y * self.gain
+    }
 }
 
 /// One 2-pole Butterworth band-pass section and the variance of its output inside its edges for a unit white input.
@@ -244,6 +330,7 @@ struct BandBiquad {
     a1: f64,
     a2: f64,
     in_band_variance: f64,
+    gaussian: GaussianBandSection,
 }
 
 impl BandBiquad {
@@ -260,12 +347,23 @@ impl BandBiquad {
         if !(b > 0.0 && c > 0.0 && b.is_finite() && c.is_finite()) {
             return None;
         }
-        let in_band_variance = butterworth_in_band_variance(b, c);
+        let in_band_variance = butterworth_in_band_variance(b, c)?;
         if !(in_band_variance > 0.0 && in_band_variance.is_finite()) {
             return None;
         }
         let a0 = 1.0 + b + c;
-        Some(Self { b0: b / a0, a1: 2.0 * (c - 1.0) / a0, a2: (1.0 - b + c) / a0, in_band_variance })
+        let b0 = b / a0;
+        // Direct prewarped expressions avoid subtracting nearly equal
+        // denominator coefficients when one edge approaches zero/Nyquist.
+        let rotation = [(1.0 - c) / (1.0 + c), 2.0 * det::sqrt(c) / (1.0 + c)];
+        let gaussian = GaussianBandSection::new(rotation, b0, in_band_variance, 1.0)?;
+        Some(Self {
+            b0,
+            a1: 2.0 * (c - 1.0) / a0,
+            a2: (1.0 - b + c) / a0,
+            in_band_variance,
+            gaussian,
+        })
     }
 }
 
@@ -281,9 +379,12 @@ impl BandBiquad {
 /// exactly half its power inside its edges, the bilinear one a little more (0.51-0.56 at the flue's settings), and the
 /// total rms is about 1.4 times the in-band rms. [`BandedGaussian`] (two first-order low-passes, normalised on the
 /// whole band) put only 0.26 of its power inside the same edges, 5.8 dB below the card's gain; it is kept unchanged,
-/// used by no row, as the tests' planted reference. The coefficients and the normalisation follow the edges every step
-/// (quasi-stationary, like [`BandedGaussian::step`]); the filter is direct form I, so a coefficient change acts on
-/// stored inputs and outputs, not on a hidden state.
+/// used by no row, as the tests' planted reference. The coefficients and in-band normalisation follow the edges every
+/// step. A covariance-normalized state prevents changing bands from amplifying stored history: stable frozen direct
+/// forms alone do not guarantee stability under retuning. At fixed edges the original Butterworth transfer and
+/// stationary in-band gain are retained up to rounding; previous sample bits are not promised. For a prescribed band
+/// schedule, unit state covariance is invariant. Feedback-driven random edges need not have stationary variance,
+/// and a rapidly changing band has no stationary spectrum or instantaneous in-band RMS claim.
 ///
 /// AT NYQUIST (the voice and lip rows). The edges follow the jet, and a fast jet through a
 /// narrow gap puts them above the step's Nyquist frequency `f_N = 1 / (2 dt)`. A band with `f_lo < f_N <= f_hi` keeps
@@ -291,15 +392,22 @@ impl BandBiquad {
 /// `(f_N - f_lo) / (f_hi - f_lo)` there). It is drawn through a first-order high-pass at `f_lo` (prewarped: -3 dB at
 /// exactly `f_lo`), the band-pass's own lower skirt (6 dB/oct). Nothing is renormalised into the narrower band:
 /// Verge gives no spectrum above his band, and moving its power below Nyquist would be a number made here. A band with
-/// `f_lo >= f_N` is silent. A band wholly below Nyquist is the band-pass above, bit for bit what it was before this
-/// rule. [`ButterworthBandGaussian::step_with_coverage`] says which of the three a step was.
+/// `f_lo >= f_N` is silent. A band wholly below Nyquist retains the band-pass above and its fixed-band response
+/// up to rounding. The high-pass uses the same normalized state as the band-pass's
+/// Nyquist limit, so crossing the boundary does not reinterpret old output history.
+/// [`ButterworthBandGaussian::step_with_coverage`] says which of the three a step was.
 #[derive(Clone, Debug)]
 pub struct ButterworthBandGaussian {
     white: Stream,
-    x1: f64,
-    x2: f64,
-    y1: f64,
-    y2: f64,
+    state: [f64; 2],
+    // Constant flow need not repeat the spectral normalization quadrature.
+    prepared: Option<PreparedGaussianBand>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PreparedGaussianBand {
+    inputs: [f64; 3],
+    section: Option<(GaussianBandSection, BandCoverage)>,
 }
 
 impl ButterworthBandGaussian {
@@ -313,7 +421,11 @@ impl ButterworthBandGaussian {
     /// constriction noise's third-octave bank) take one tile each, so no two of them draw the same numbers.
     #[must_use]
     pub fn new_on_tile(seed: u64, kernel: u32, tile: u32) -> Self {
-        Self { white: StreamKey { seed, kernel, tile }.stream(), x1: 0.0, x2: 0.0, y1: 0.0, y2: 0.0 }
+        Self {
+            white: StreamKey { seed, kernel, tile }.stream(),
+            state: [0.0; 2],
+            prepared: None,
+        }
     }
 
     /// One sample for -3 dB edges `f_lo_hz < f_hi_hz` and step `dt` seconds, of unit rms inside the edges. An upper edge at
@@ -325,37 +437,49 @@ impl ButterworthBandGaussian {
     }
 
     /// [`Self::step`], and how much of the band this step could represent.
-    pub fn step_with_coverage(&mut self, f_lo_hz: f64, f_hi_hz: f64, dt: f64) -> (f64, BandCoverage) {
-        if let Some(q) = BandBiquad::design(f_lo_hz, f_hi_hz, dt) {
-            let x = self.white.next_normal();
-            let y = q.b0 * (x - self.x2) - q.a1 * self.y1 - q.a2 * self.y2;
-            (self.x2, self.x1, self.y2, self.y1) = (self.x1, x, self.y1, y);
-            return (y / det::sqrt(q.in_band_variance), BandCoverage::Whole);
-        }
-        let Some(h) = TruncatedHighPass::design(f_lo_hz, f_hi_hz, dt) else {
-            return (self.skip(), BandCoverage::Silent);
+    pub fn step_with_coverage(
+        &mut self,
+        f_lo_hz: f64,
+        f_hi_hz: f64,
+        dt: f64,
+    ) -> (f64, BandCoverage) {
+        let inputs = [f_lo_hz, f_hi_hz, dt];
+        let prepared = match self.prepared {
+            Some(prepared) if prepared.inputs == inputs => prepared,
+            _ => {
+                let section = BandBiquad::design(f_lo_hz, f_hi_hz, dt)
+                    .map(|q| (q.gaussian, BandCoverage::Whole))
+                    .or_else(|| {
+                        TruncatedHighPass::design(f_lo_hz, f_hi_hz, dt)
+                            .map(|h| (h.gaussian, BandCoverage::Truncated))
+                    });
+                let prepared = PreparedGaussianBand { inputs, section };
+                self.prepared = Some(prepared);
+                prepared
+            }
         };
-        let x = self.white.next_normal();
-        let y = h.b0 * (x - self.x1) - h.a1 * self.y1;
-        (self.x2, self.x1, self.y2, self.y1) = (self.x1, x, self.y1, y);
-        (y * det::sqrt(h.fraction / h.in_band_variance), BandCoverage::Truncated)
+        match prepared.section {
+            Some((section, coverage)) => {
+                let white = self.white.next_normal();
+                (section.step(&mut self.state, white), coverage)
+            }
+            None => (self.skip(), BandCoverage::Silent),
+        }
     }
 
     /// One sample through an already designed whole-band section: the arithmetic of the whole-band branch of
     /// [`ButterworthBandGaussian::step_with_coverage`], for a source (the constriction noise's third-octave bank) that designs
     /// each section once. A band at or above the Nyquist frequency has no design and is [`ButterworthBandGaussian::skip`].
     fn step_designed(&mut self, q: &BandBiquad) -> f64 {
-        let x = self.white.next_normal();
-        let y = q.b0 * (x - self.x2) - q.a1 * self.y1 - q.a2 * self.y2;
-        (self.x2, self.x1, self.y2, self.y1) = (self.x1, x, self.y1, y);
-        y / det::sqrt(q.in_band_variance)
+        let white = self.white.next_normal();
+        q.gaussian.step(&mut self.state, white)
     }
 
     /// A step with the source closed: exactly one white sample is drawn (the stream index does not depend on how long
     /// the gate was shut), the section is cleared and the output is zero.
     pub fn skip(&mut self) -> f64 {
         let _ = self.white.next_normal();
-        (self.x1, self.x2, self.y1, self.y2) = (0.0, 0.0, 0.0, 0.0);
+        self.state = [0.0; 2];
         0.0
     }
 }
@@ -432,6 +556,7 @@ struct TruncatedHighPass {
     a1: f64,
     in_band_variance: f64,
     fraction: f64,
+    gaussian: GaussianBandSection,
 }
 
 impl TruncatedHighPass {
@@ -456,7 +581,17 @@ impl TruncatedHighPass {
             return None;
         }
         let a0 = 1.0 + u_lo;
-        Some(Self { b0: 1.0 / a0, a1: (u_lo - 1.0) / a0, in_band_variance, fraction })
+        let b0 = 1.0 / a0;
+        // The band-pass approaches r=-1, s=0 as its upper edge approaches
+        // Nyquist. The other state then alternates without entering output.
+        let gaussian = GaussianBandSection::new([-1.0, 0.0], b0, in_band_variance, fraction)?;
+        Some(Self {
+            b0,
+            a1: (u_lo - 1.0) / a0,
+            in_band_variance,
+            fraction,
+            gaussian,
+        })
     }
 }
 
@@ -1473,6 +1608,18 @@ mod tests {
         assert!((q.in_band_variance / (0.5 * b) - 1.0).abs() < 1.0e-5, "{} against b/2 = {}", q.in_band_variance, 0.5 * b);
     }
 
+    /// Wide bands used to lose power in the fixed prototype-coordinate rule,
+    /// causing an artificial gain jump when the upper edge crossed Nyquist.
+    #[test]
+    fn wide_band_normalization_matches_independent_frequency_quadrature() {
+        let dt = 1.0 / 48_000.0;
+        for (lo, hi) in [(1000.0, 23_990.0), (200.0, 23_000.0)] {
+            let q = BandBiquad::design(lo, hi, dt).unwrap();
+            let brute = biquad_variance_brute(&q, lo, hi, dt, 200_000);
+            assert!((q.in_band_variance / brute - 1.0).abs() < 2e-9);
+        }
+    }
+
     /// The planted negative: the in-band rms of a long stream is one for this filter, and the same estimator puts
     /// the old band (two one-pole low-passes, whole-band normalisation) 5.8 dB below it.
     #[test]
@@ -1508,14 +1655,14 @@ mod tests {
         }
         assert_eq!(open.white.index(), shut.white.index());
         assert!(open.white.index() > 0);
-        assert_eq!((shut.x1, shut.x2, shut.y1, shut.y2), (0.0, 0.0, 0.0, 0.0));
+        assert_eq!(shut.state, [0.0; 2]);
         let before = open.white.index();
         let per_step = before / 6;
         assert_eq!(per_step * 6, before, "six open steps must advance the stream evenly");
         assert_eq!(open.step(2500.0, 1000.0, dt), 0.0);
         assert_eq!(open.step(30_000.0, 40_000.0, dt), 0.0, "a lower edge above Nyquist is a closed band");
         assert_eq!(open.white.index(), before + 2 * per_step);
-        assert_eq!((open.x1, open.y1), (0.0, 0.0), "a closed band clears the section");
+        assert_eq!(open.state, [0.0; 2], "a closed band clears the section");
         let run = |seed, kernel| {
             let mut g = ButterworthBandGaussian::new(seed, kernel);
             (0..64).map(|_| g.step(f_lo, f_hi, dt).to_bits()).collect::<Vec<u64>>()
@@ -1597,25 +1744,151 @@ mod tests {
         assert_eq!(b.white.index(), 8 * per_step);
     }
 
-    /// The flue pages never reach Nyquist, so their bytes must not move: below Nyquist every sample is, bit for bit, the
-    /// section as it stood before the truncation rule (that arithmetic written out here), along a sweep of edges.
+    /// G0/G3: changing realization must preserve the original frozen transfer
+    /// and calibration. A direct-form reference independently filters the
+    /// same original keyed white sequence at each of three fixed bands.
     #[test]
-    fn butterworth_band_noise_below_nyquist_is_bit_for_bit_the_band_pass_alone() {
-        let dt = 1.0 / 288_000.0;
-        let mut g = ButterworthBandGaussian::new(13, FLUE_JET_NOISE_KERNEL);
-        let mut white = StreamKey { seed: 13, kernel: FLUE_JET_NOISE_KERNEL, tile: 0 }.stream();
-        let (mut x1, mut x2, mut y1, mut y2) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
-        for i in 0..20_000u32 {
-            let speed = 5.0 + 30.0 * f64::from(i % 1000) / 1000.0;
-            let per_hz = speed / 1.13e-3;
-            let (f_lo, f_hi) = (0.045 * per_hz, 0.115 * per_hz);
+    fn butterworth_band_noise_fixed_bands_preserve_the_original_transfer() {
+        for (f_lo, f_hi, dt) in [
+            (1000.0, 2500.0, 1.0 / 48_000.0),
+            (956.0, 2442.0, 1.0 / 288_000.0),
+            (9000.0, 22_000.0, 1.0 / 48_000.0),
+        ] {
+            let mut g = ButterworthBandGaussian::new(13, FLUE_JET_NOISE_KERNEL);
+            let mut white = StreamKey {
+                seed: 13,
+                kernel: FLUE_JET_NOISE_KERNEL,
+                tile: 0,
+            }
+            .stream();
+            let (mut x1, mut x2, mut y1, mut y2) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
             let q = BandBiquad::design(f_lo, f_hi, dt).unwrap();
-            let x = white.next_normal();
-            let y = q.b0 * (x - x2) - q.a1 * y1 - q.a2 * y2;
-            (x2, x1, y2, y1) = (x1, x, y1, y);
-            let (got, coverage) = g.step_with_coverage(f_lo, f_hi, dt);
-            assert_eq!(coverage, BandCoverage::Whole);
-            assert_eq!(got.to_bits(), (y / det::sqrt(q.in_band_variance)).to_bits(), "sample {i}");
+            for i in 0..20_000 {
+                let x = white.next_normal();
+                let y = q.b0 * (x - x2) - q.a1 * y1 - q.a2 * y2;
+                (x2, x1, y2, y1) = (x1, x, y1, y);
+                let (got, coverage) = g.step_with_coverage(f_lo, f_hi, dt);
+                assert_eq!(coverage, BandCoverage::Whole);
+                let expected = y / det::sqrt(q.in_band_variance);
+                assert!(
+                    (got - expected).abs() < 2e-11,
+                    "sample {i}: {got} vs {expected}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn changing_bands_contract_without_input_and_cross_nyquist_continuously() {
+        let dt = 1.0 / 48_000.0;
+        let sections = [
+            BandBiquad::design(1000.0, 2500.0, dt).unwrap().gaussian,
+            BandBiquad::design(10_000.0, 22_000.0, dt).unwrap().gaussian,
+            TruncatedHighPass::design(12_000.0, 36_000.0, dt)
+                .unwrap()
+                .gaussian,
+        ];
+        let mut state = [0.3, -1.7];
+        for i in 0..300 {
+            let before = state[0] * state[0] + state[1] * state[1];
+            let _ = sections[i % sections.len()].step(&mut state, 0.0);
+            let after = state[0] * state[0] + state[1] * state[1];
+            assert!(
+                after <= before * (1.0 + 1e-14),
+                "step {i}: {before} -> {after}"
+            );
+        }
+        let below = BandBiquad::design(1000.0, 24_000.0 * (1.0 - 1e-12), dt)
+            .unwrap()
+            .gaussian;
+        let above = TruncatedHighPass::design(1000.0, 24_000.0, dt)
+            .unwrap()
+            .gaussian;
+        let (mut left, mut right) = ([0.3, -1.7], [0.3, -1.7]);
+        let yl = below.step(&mut left, 0.8);
+        let yr = above.step(&mut right, 0.8);
+        assert!(
+            (yl - yr).abs() < 2e-10,
+            "Nyquist output {yl} vs {yr}; gains {} vs {}",
+            below.gain,
+            above.gain
+        );
+        for (a, b) in left.into_iter().zip(right) {
+            assert!((a - b).abs() < 2e-5, "Nyquist state {a} vs {b}");
+        }
+    }
+
+    /// Prescribed changes preserve the unit equilibrium state distribution;
+    /// they do not define a stationary spectrum during rapid retuning.
+    #[test]
+    fn changing_bands_preserve_gaussian_equilibrium_covariance() {
+        let dt = 1.0 / 48_000.0;
+        let bands = [(1000.0, 2500.0), (10_000.0, 22_000.0), (12_000.0, 36_000.0)];
+        let mut sums = [[0.0; 3]; 3];
+        let mut products = [[0.0; 4]; 3];
+        let samples = 16_384;
+        for seed in 0..samples {
+            let mut initial = StreamKey {
+                seed,
+                kernel: GLOTTAL_NOISE_KERNEL,
+                tile: 0,
+            }
+            .stream();
+            let mut noise = ButterworthBandGaussian::new(seed, FLUE_JET_NOISE_KERNEL);
+            noise.state = [initial.next_normal(), initial.next_normal()];
+            for (i, &(lo, hi)) in bands.iter().cycle().take(12).enumerate() {
+                let y = noise.step(lo, hi, dt);
+                if i >= 9 {
+                    let phase = i - 9;
+                    let gain = noise.prepared.unwrap().section.unwrap().0.gain;
+                    let values = [noise.state[0], noise.state[1], y / gain];
+                    for j in 0..3 {
+                        sums[phase][j] += values[j];
+                        products[phase][j] += values[j] * values[j];
+                    }
+                    products[phase][3] += values[0] * values[1];
+                }
+            }
+        }
+        for phase in 0..3 {
+            let means = sums[phase].map(|x| x / samples as f64);
+            for j in 0..3 {
+                let variance = products[phase][j] / samples as f64 - means[j] * means[j];
+                assert!(means[j].abs() < 0.04, "phase {phase}: mean {}", means[j]);
+                assert!(
+                    (variance - 1.0).abs() < 0.05,
+                    "phase {phase}: variance {variance}"
+                );
+            }
+            let covariance = products[phase][3] / samples as f64 - means[0] * means[1];
+            assert!(
+                covariance.abs() < 0.04,
+                "phase {phase}: covariance {covariance}"
+            );
+        }
+    }
+
+    /// G0 regression: stable frozen sections do not guarantee a stable changing
+    /// direct form. The original two-step homogeneous recurrence has an
+    /// eigenvalue -2.0805 for these wholly representable, positive bands.
+    #[test]
+    fn changing_jet_noise_bands_do_not_amplify_retained_history() {
+        let dt = 1.0 / 48_000.0;
+        let mut noise = ButterworthBandGaussian::new(71, FLUE_JET_NOISE_KERNEL);
+        let mut maximum = 0.0f64;
+        for i in 0..4096 {
+            let (lo, hi) = if i % 2 == 0 {
+                (1000.0, 2500.0)
+            } else {
+                (10_000.0, 22_000.0)
+            };
+            let sample = noise.step(lo, hi, dt);
+            assert!(sample.is_finite(), "nonfinite sample at step {i}");
+            maximum = maximum.max(sample.abs());
+            assert!(
+                maximum < 20.0,
+                "artificial noise amplification {maximum} at step {i}"
+            );
         }
     }
 
@@ -1624,6 +1897,35 @@ mod tests {
 
     fn jet_card() -> JetNoiseCard {
         JetNoiseCard { seed: 21, gain: 1.3e-3, strouhal_lo: 0.045, strouhal_hi: 0.115, reynolds_onset: 1700.0 }
+    }
+
+    #[test]
+    fn glottal_and_lip_jet_noise_remain_bounded_when_the_gap_changes_band() {
+        let card = JetNoiseCard {
+            reynolds_onset: 0.0,
+            ..jet_card()
+        };
+        let mut voice = GlottalJetNoise::new(card).unwrap();
+        let mut lip = LipJetNoise::new(card).unwrap();
+        let (width, speed, dt) = (0.014, 40.0, 1.0 / 48_000.0);
+        let scale = card.gain * 0.5 * RHO * speed * speed;
+        for i in 0..4096 {
+            let lower_hz = [1000.0, 9000.0, 12_000.0][i % 3];
+            let gap = card.strouhal_lo * speed / lower_hz;
+            voice.record(width * gap * speed, gap);
+            lip.record(width * gap * speed, gap);
+            for pressure in [
+                voice.pressure_pa(width, 100.0, RHO, MU, dt),
+                lip.pressure_pa(width, 100.0, RHO, MU, dt),
+            ] {
+                assert!(pressure.is_finite() && pressure.abs() < 20.0 * scale);
+            }
+        }
+        for coverage in [voice.coverage(), lip.coverage()] {
+            assert_eq!(coverage.open_gate(), 4096);
+            assert!(coverage.whole > 0 && coverage.truncated > 0);
+            assert_eq!(coverage.silent, 0);
+        }
     }
 
     /// Gauntlet G3. The series pressure's rms INSIDE the band `St_h` in `[st_lo, st_hi]` is `gain rho U_j^2 / 2` at the jet
