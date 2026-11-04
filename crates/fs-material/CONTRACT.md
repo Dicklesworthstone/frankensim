@@ -13111,3 +13111,30 @@ Explicit spectral tabulated indices admit ordinary real `n >= 1` with
 `n² <= f64::MAX/64` arithmetic headroom. Legacy visible source bounds remain.
 These source schemas provide neither missing transparency nor a measured
 material preset, and do not certify extrapolation beyond original support.
+
+## Finite elastic plate refraction and transmission
+
+`ElasticPlateLayers` prepares the original incident thermoviscous state,
+existing equivalent-fluid entrance layers, one explicitly isotropic lossless
+elastic state and a borrowed receiving fluid. Density and original Christoffel
+speeds are retained. `scattering(cosine)` returns coherent pressure R/T,
+plate-front pressure, outgoing P/S and receiving normal wavenumbers, and normal
+reflected/transmitted/porous-absorbed power fractions. Incidence queries allocate
+nothing; elastic plate work has fixed size, plus the original entrance stack.
+
+Both plate faces enforce continuous normal traction/velocity and zero shear
+traction. Even/odd P/S potentials retain finite-thickness mode conversion,
+interference, Lamb resonances and evanescent tunneling. Bounded sin/cos/sinc
+pairs and a factored logarithmic transmission determinant avoid growing
+evanescent transfer entries. Critical angles, exact zero thickness and the
+normal P-only limit remain finite; the latter reuses the original finite-fluid
+transfer owner. Receiving evanescence carries zero normal power, and elastic
+evanescence is never heat. Only original porous entrance loss is absorbed.
+
+The scope is one homogeneous, frozen, unstressed, lossless isotropic plate.
+Original state provenance, response regime and strain admission remain intact;
+no anisotropic projection, solid damping, lateral finite size or reconstructed
+interior elastic field is supplied. Nine new native controls and 19 existing
+controls pass, including an independent six-boundary-equation oracle, normal
+and zero-thickness limits, critical neighborhoods, reciprocity, porous loss,
+thick evanescence and a narrow air-loaded flexural tunneling resonance.

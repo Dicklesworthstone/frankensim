@@ -308,7 +308,11 @@ impl TransmittedState {
     }
 }
 
-fn positive_product_ratio(a: f64, b: f64, denominator: f64) -> Result<f64, MaterialError> {
+pub(super) fn positive_product_ratio(
+    a: f64,
+    b: f64,
+    denominator: f64,
+) -> Result<f64, MaterialError> {
     // Prefer removing the incidence cosine before multiplying a small density
     // contrast. A positive subnormal intermediate still loses relative accuracy.
     let ratio = b / denominator;

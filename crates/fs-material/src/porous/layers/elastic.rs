@@ -22,6 +22,9 @@
 //! <https://doi.org/10.1093/gji/ggab308>. Here amplitudes are particle velocity
 //! relative to incident particle velocity, and pressure is positive compression.
 
+pub mod plate;
+pub use plate::{ElasticPlateLayers, LayeredElasticPlateTransmission};
+
 use super::transmission::transmit_state;
 use super::{
     Layer, RigidBackedLayers, bad, divided, finite, magnitude_scale, normal_wavenumber_ratio,
