@@ -325,6 +325,9 @@ mod tests {
         // Stable weighted energy remains finite without forming m*u*u
         // in ordinary precision.
         near(kinetic_energy(reduced, [1.0e-154, 0.0, 0.0]), 0.25, 1e-15);
+        // The new mixing formula does not require the unrepresentable sum
+        // old + incoming. Endpoint state validation is a separate concern.
+        assert!(!(old + incoming).is_finite());
     }
 
     #[test]
