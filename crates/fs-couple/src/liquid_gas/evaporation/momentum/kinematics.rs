@@ -322,6 +322,8 @@ mod tests {
         let smaller = old.min(incoming);
         let reduced = smaller / (1.0 + smaller / larger);
         assert_eq!(reduced, expected);
+        // Stable weighted energy remains finite without forming m*u*u
+        // in ordinary precision.
         near(kinetic_energy(reduced, [1.0e-154, 0.0, 0.0]), 0.25, 1e-15);
     }
 
