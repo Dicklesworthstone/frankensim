@@ -8,7 +8,17 @@ export function createPianoEngine(Engine, sampleRate, options = {}, bytes = null
       || sampleRate < 8000 || sampleRate * substeps > 192000) {
     throw new RangeError('piano substeps must be 1, 2 or 4 with a mechanical rate at most 192000 Hz');
   }
-  const limits = [Number(options.courseModeBudget) || 0, Number(options.maxDynamicModes) || 0, Number(options.fullScalePa) || 0];
+  // Constructor budgets cross an unsigned WASM boundary; zero keeps the engine
+  // default, but negative/fractional/nonfinite values must not wrap or truncate.
+  const budget = (value, name) => {
+    const n = value === undefined ? 0 : Number(value);
+    if (!Number.isInteger(n) || n < 0 || n > 0xffffffff) {
+      throw new RangeError(`${name} must be a nonnegative 32-bit integer`);
+    }
+    return n;
+  };
+  const limits = [budget(options.courseModeBudget, 'courseModeBudget'),
+    budget(options.maxDynamicModes, 'maxDynamicModes'), Number(options.fullScalePa) || 0];
   const coords = Number(options.boardCoordinates) || 0;
   const specifications = [];
   if (options.stringStretching !== undefined) {

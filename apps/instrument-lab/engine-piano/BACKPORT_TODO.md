@@ -1,5 +1,15 @@
 # Piano CPU backports — 2026-10-27
 
+## Reconcile the live queue and quality fixes with current source — 2026-11-04 (`frankensim-qobyi`, `frankensim-fnhlq`)
+
+- [x] Confirm current source lost already-deployed queue/quality repairs during the external stash/pull. Reopen qobyi for source integration; production remains on verified runtime5c5a57901116. Do not apply the old stash wholesale.
+- [x] Restore bounded queue prediction and consumption accounting during refill; restore transactional quality/governor updates and constructor u32 validation. Preserve current atmosphere, gas-source, string-material, stretching, per-key damper and stats additions.
+- [x] Restore focused queue/governor tests and the startup budget test. Keep tests limited to the changed piano path; do not pull unrelated drum changes from the stash.
+- [ ] Run focused existing factory/preparation/client/sink checks plus restored tests; review the final diff for loss of peer functionality.
+- [ ] Exercise current JavaScript with the deployed real WASM in the browser: invalid-budget recovery, unchanged sound output, ordinary playback. Keep native current-HEAD compilation and full physical-model qualification distinct.
+- [ ] Reconcile other already-live startup fixes if absent, with focused coverage; do not let the next release silently undo accepted behavior.
+- [ ] Record exact results in Beads, keep residual 4,800-mode dropout work open, and release owned resources. No payment, sales, user preferences or existing comparison-tab changes.
+
 ## Avoid whole-chunk audio-thread view allocations — 2026-11-04 (`frankensim-fnhlq`)
 
 - [x] Find a separate sink-side lever: copying an entire128-frame source unnecessarily creates a typed-array view for each output channel. At48kHz stereo this creates750 views/second on the audio thread. Copy the original source directly only when offset0 and the copied length equals its length; keep partial/chopped source behavior unchanged. No ring, queue, timing, PCM, governor or engine change.

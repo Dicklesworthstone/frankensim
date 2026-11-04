@@ -78,7 +78,10 @@ const fail = (error, extra = {}) => post({ type: 'error', code: 'worker_error', 
 
 function estimateQueue(now) {
   const inFlight = sentTotal - level.receivedFrames;
-  const consumed = level.at > 0 ? ((now - level.at) * sampleRate) / 1000 : 0;
+  // The sink reports every two quanta. Predict only that far ahead: wall time
+  // is not evidence of consumption while the browser stalls its audio thread.
+  const consumed = level.at > 0
+    ? Math.min(2 * CHUNK, Math.max(0, ((now - level.at) * sampleRate) / 1000)) : 0;
   return Math.max(0, level.queuedFrames + inFlight - consumed);
 }
 
@@ -102,16 +105,22 @@ function renderChunk() {
 function govern(now) {
   if (!governor || now - lastGovernorAt < 400) return;
   lastGovernorAt = now;
-  const floorModes = 400;
+  const floorModes = Math.min(400, asked.maxDynamicModes);
+  let next;
   if (loadAverage > 0.8 && granted.maxDynamicModes > floorModes) {
-    granted.maxDynamicModes = Math.max(floorModes, Math.floor(granted.maxDynamicModes * 0.8));
-    granted.courseModeBudget = Math.max(60, Math.floor(granted.courseModeBudget * 0.85));
-    governorSteps += 1;
-    engine.setQuality(granted.courseModeBudget, granted.partialBandHz, granted.maxDynamicModes);
+    next = { ...granted,
+      maxDynamicModes: Math.max(floorModes, Math.floor(granted.maxDynamicModes * 0.8)),
+      courseModeBudget: Math.max(Math.min(60, asked.courseModeBudget), Math.floor(granted.courseModeBudget * 0.85)),
+    };
   } else if (loadAverage < 0.45 && (granted.maxDynamicModes < asked.maxDynamicModes || granted.courseModeBudget < asked.courseModeBudget)) {
-    granted.maxDynamicModes = Math.min(asked.maxDynamicModes, Math.ceil(granted.maxDynamicModes * 1.1));
-    granted.courseModeBudget = Math.min(asked.courseModeBudget, Math.ceil(granted.courseModeBudget * 1.08));
-    engine.setQuality(granted.courseModeBudget, granted.partialBandHz, granted.maxDynamicModes);
+    next = { ...granted,
+      maxDynamicModes: Math.min(asked.maxDynamicModes, Math.ceil(granted.maxDynamicModes * 1.1)),
+      courseModeBudget: Math.min(asked.courseModeBudget, Math.ceil(granted.courseModeBudget * 1.08)),
+    };
+  }
+  if (next && engine.setQuality(next.courseModeBudget, next.partialBandHz, next.maxDynamicModes)) {
+    granted = next;
+    if (loadAverage > 0.8) governorSteps += 1;
   }
 }
 
@@ -124,7 +133,9 @@ function pump() {
   let budget = Math.ceil(targetFrames / CHUNK) + 2;
   while (queue < targetFrames && budget-- > 0) {
     renderChunk();
-    queue += CHUNK;
+    // Rendering takes wall time while the audio thread keeps consuming.
+    // Retain the bounded two-quantum prediction, including within this turn.
+    queue = estimateQueue(performance.now());
   }
   now = performance.now();
   const error = engine.lastError();
@@ -240,14 +251,27 @@ function command(message) {
     case 'unaCorda': if (!engine.unaCorda(Boolean(args[0]))) fail('una corda refused', { id, command: name, code: 'refused' }); break;
     case 'allNotesOff': engine.allNotesOff(); break;
     case 'setQuality': {
-      const q = args[0] || {};
-      asked = {
-        courseModeBudget: Number(q.courseModeBudget) || asked.courseModeBudget,
-        partialBandHz: Number(q.partialBandHz) || asked.partialBandHz,
-        maxDynamicModes: Number(q.maxDynamicModes) || asked.maxDynamicModes,
+      const q = args[0] ?? {};
+      if (typeof q !== 'object' || Array.isArray(q)) {
+        fail('quality must be an object', { id, command: name, code: 'refused' });
+        return;
+      }
+      const next = {
+        courseModeBudget: q.courseModeBudget === undefined ? asked.courseModeBudget : Number(q.courseModeBudget),
+        partialBandHz: q.partialBandHz === undefined ? asked.partialBandHz : Number(q.partialBandHz),
+        maxDynamicModes: q.maxDynamicModes === undefined ? asked.maxDynamicModes : Number(q.maxDynamicModes),
       };
-      granted = { ...asked };
-      if (!engine.setQuality(asked.courseModeBudget, asked.partialBandHz, asked.maxDynamicModes)) fail('invalid quality limits', { id, command: name, code: 'refused' });
+      // Validate integer budgets before wasm-bindgen can truncate or wrap them
+      // to u32. A refusal must preserve both the engine and governor's state.
+      const validBudget = (value) => Number.isInteger(value) && value > 0 && value <= 0xffffffff;
+      if (!validBudget(next.courseModeBudget) || !validBudget(next.maxDynamicModes)
+          || !Number.isFinite(next.partialBandHz) || next.partialBandHz <= 0
+          || !engine.setQuality(next.courseModeBudget, next.partialBandHz, next.maxDynamicModes)) {
+        fail('invalid quality limits', { id, command: name, code: 'refused' });
+        return;
+      }
+      asked = next;
+      granted = { ...next };
       break;
     }
     case 'setTargetMs': {
