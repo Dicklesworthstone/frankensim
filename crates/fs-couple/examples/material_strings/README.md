@@ -1095,6 +1095,61 @@ In the library:
 - a layered thermoelastic string refuses a nonzero eta_F, because none of its
   layers owns that heat.
 
+### Measured torsion
+
+A `section measured` string has no layers, so its torsion cannot be derived
+from a shear modulus and a polar inertia. A string with twist modes and no row
+refuses, with the measured-string refusal unchanged. The optional per-string
+record selects the string's own measured torsion from one row of
+[`measured-torsion.tsv`](measured-torsion.tsv) by its id:
+
+```text
+torsion-measured mansour-2016-kaplan-cello-d3-open
+```
+
+Place it where the optional `torsion-memory` record would go; a measured string
+refuses `torsion-memory`, so the two never appear together. The string row's
+twist mode count sets how many twist modes there are, and it must be at least 1.
+
+Each row carries three numbers:
+- the torsional fundamental f1 of the speaking length;
+- the characteristic torsional impedance at the surface, Z = sqrt(K_R I_R) / r²;
+- one quality factor Q.
+
+The only row is Mansour, Woodhouse and Scavone's open cello D3: 758 Hz,
+1.8 kg/s, Q 34. Q 34 is Woodhouse and Loach's average over the first few
+torsional modes of steel-cored cello strings, which stayed almost constant over
+those modes. Mansour assigns it to every torsional mode.
+
+The engine builds the twist bank as follows:
+- The twist is a non-dispersive torsional line from the nut to the bridge
+  station, with its rotation fixed at both ends. The afterlength does not twist.
+- In surface coordinates (u = r theta), the line inertia is Z / c and the
+  stiffness is Z c, with c = 2 L_s f1. The bow sees exactly the measured Z, and
+  mode n lies at n f1. No radius, polar inertia or shear modulus is inferred.
+- Every twist mode has the measured Q, as zeta = 1 / (2 Q). The bank takes a
+  damping ratio per mode, so the material shear law (Q falling as 1/n) is not
+  used and no anchoring is needed.
+- No gas drag is added, because the measured Q is the string's own loss in air.
+
+A row is bound to one specimen. The string must come from the row's pack and
+select the row's line-density property, and its span times its bridge station
+must equal the row's speaking length. Otherwise it refuses. The row's
+fundamental is the open string's, so a `--stop-profile` refuses too. The
+specimen binding is a reading of the two papers, and the row's source text
+says so: Part 2 names neither the string's make nor its length, and the row
+binds it to Part 1's Kaplan Solutions D3 at 0.69 m.
+
+The receipt prints `measured_torsion_string=`. The line gives the row id, the
+twist mode count, f1, Z, Q (with its zeta, stated as the same on every mode),
+the twisting span, the derived c, the surface inertia and stiffness, and the
+source.
+
+In the library, `MaterialStringSource::with_measured_torsion` takes a
+`MeasuredStringTorsion` on a measured whole string only. Consumers that need
+layers, polar inertia or a radius refuse a measured torsion. These are material
+heat, shear memory, rotational bridges, angular ports and cylinder gas loading.
+
 ### Material shear memory on torsional strings
 
 Torsional modes can select their own source-backed relaxation spectrum for each
