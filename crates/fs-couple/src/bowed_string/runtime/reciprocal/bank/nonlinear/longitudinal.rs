@@ -3,9 +3,12 @@
 //! Reuses fs-nlmodal's positive finite-strain energy and the existing exact
 //! linear/friction/DG owners. Retained longitudinal sine modes carry the SOLID
 //! mass; transverse slope maps carry their already admitted gas-loaded mass.
-//! The fixed-end elastic axial extension is conservative. Original bending,
-//! torsion, body, bridge and fluid losses remain; no axial viscosity is inferred
-//! from a bending-loss property. Omitted axial channels equilibrate statically.
+//! The fixed-end elastic strain law is conservative. When causal cylinder gas
+//! loading is selected, every retained axial mode also drives the SAME fluid's
+//! axial shear continuum, with independent memory and no potential-flow added
+//! mass. Original bending, torsion, body and bridge losses remain; no axial
+//! material viscosity is inferred from a bending-loss property. Omitted axial
+//! channels equilibrate statically.
 use super::super::multiple::MultiBowStringBank;
 use super::super::{MaterialStringBankSource, MaterialStringSource, ReciprocalStringBank};
 use super::{ImpactError, invalid};
@@ -21,6 +24,7 @@ use fs_math::{c64::C64, det};
 use fs_nlmodal::{KcStringParams, longitudinal::LongitudinalString};
 use fs_phs::Storage;
 
+mod fluid;
 mod loss;
 pub use loss::LongitudinalMaterialLoss;
 pub mod bearings;
@@ -77,6 +81,7 @@ pub struct MaterialLongitudinalString {
     axial_rigidity_n: f64,
     prestress_n: f64,
     axial_component: usize,
+    axial_fluid_component: Option<usize>,
     elastic_frequency_band_rad_s: Option<(f64, f64)>,
     axial_material_loss: Option<ConcentricAxialViscosity>,
     finite_strain_viscosity: bool,
@@ -101,6 +106,12 @@ impl MaterialLongitudinalString {
     /// New axial component follows every original string, body and fluid state.
     pub const fn axial_component(&self) -> usize {
         self.axial_component
+    }
+    /// Independent axial gas-memory coordinates, present when the bank selected
+    /// causal cylinder loading. Order is axial mode, then original fluid branch.
+    /// These follow all original components and all new solid axial components.
+    pub const fn axial_fluid_component(&self) -> Option<usize> {
+        self.axial_fluid_component
     }
     /// Intersection of explicit elasticity/density frequency applicability.
     pub const fn elastic_frequency_band_rad_s(&self) -> Option<(f64, f64)> {
@@ -415,8 +426,10 @@ impl ReciprocalStringBank {
     /// compliant stops, schedules and PCM use the unchanged coupled owner.
     ///
     /// This replaces instantaneous geometric stretching, so the two selections
-    /// are mutually exclusive. The retained axial modes are elastic/lossless;
-    /// original transverse/torsion/bridge/body/fluid loss still dissipates energy.
+    /// are mutually exclusive. The retained axial material is elastic; selected
+    /// cylinder gas shear adds reciprocal axial memory and dissipation without
+    /// changing the solid inertia. Original transverse/torsion/bridge/body/fluid
+    /// loss still dissipates energy.
     /// No fitted axial damping, automatic retuning, winding slip or moving
     /// endpoints are supplied. Refine mode selection and clock for convergence;
     /// source bands, mode ceilings, strain limits and nonlinear iteration can
@@ -444,7 +457,8 @@ impl ReciprocalStringBank {
     /// `KelvinVoigt` selects the linear u_xt operator. The explicit
     /// `FiniteStrainKelvinVoigt` selection instead retains y_x*y_xt and z_x*z_xt
     /// in the same joint constitutive iteration and removes diagonal axial
-    /// damping, so the same viscosity is never counted twice. Its positive loss
+    /// material damping, so the same viscosity is never counted twice. Selected
+    /// exterior-fluid shear remains active. The material law's positive loss
     /// uses actual strain increments and reaches the original pressure observer.
     /// Creep, heat evolution and interlayer slip are not supplied. Source bands
     /// screen the small-signal coupled spectrum, not all nonlinear harmonics.
@@ -493,6 +507,13 @@ impl ReciprocalStringBank {
                 "longitudinal waves require one cold selection per original string before nonlinear binding",
             ));
         }
+        fluid::admit(
+            &self.source,
+            &resolutions,
+            self.system.mode_count(),
+            bearings.len(),
+            gate,
+        )?;
         let mut strings = Vec::with_capacity(resolutions.len());
         let mut components = Vec::with_capacity(resolutions.len());
         let mut bindings = Vec::with_capacity(resolutions.len());
@@ -553,6 +574,11 @@ impl ReciprocalStringBank {
                     } else {
                         damping_ratio
                     };
+                    // Material selection never removes the separately sourced
+                    // exterior-fluid tail. The remaining shear acts through
+                    // reciprocal, independently moving gas coordinates below.
+                    let damping_ratio = damping_ratio
+                        + fluid::tail_damping_ratio(&self.source, index, solid_mass, omega)?;
                     Ok(ModalAcousticMode {
                         angular_frequency_rad_s: omega,
                         damping_ratio,
@@ -586,6 +612,10 @@ impl ReciprocalStringBank {
                 axial_rigidity_n: ea,
                 prestress_n: card.tension_n,
                 axial_component: self.system.components().len() + index,
+                axial_fluid_component: self
+                    .source
+                    .cylinder_gas_loading()
+                    .map(|_| self.system.components().len() + self.source.strings.len() + index),
                 elastic_frequency_band_rad_s: band,
                 axial_material_loss,
                 finite_strain_viscosity: loss.finite_strain(),
@@ -617,11 +647,19 @@ impl ReciprocalStringBank {
             });
             strings.push(law);
         }
-        let (connections, anchors) = bearings::lower(
+        let (mut connections, anchors) = bearings::lower(
             &self.source,
             &strings,
             self.system.components(),
             &bearings,
+            gate,
+        )?;
+        fluid::append(
+            &self.source,
+            &strings,
+            self.system.components(),
+            &mut components,
+            &mut connections,
             gate,
         )?;
         self.system = self

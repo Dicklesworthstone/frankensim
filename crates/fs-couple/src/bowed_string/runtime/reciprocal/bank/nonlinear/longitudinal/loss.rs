@@ -6,7 +6,8 @@ use fs_material::section::axial::ConcentricAxialViscosity;
 /// Explicit constitutive selection, independent of the nonlinear strain energy.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LongitudinalMaterialLoss {
-    /// Original lossless longitudinal coordinates. No viscosity is inferred.
+    /// Elastic axial material. No material viscosity is inferred; independently
+    /// selected exterior-fluid loading remains active.
     Elastic,
     /// Linear axial strain-rate loss from each original solid state [Pa s].
     /// This does not include the finite-slope y_x*y_xt contribution to strain rate.
@@ -16,7 +17,7 @@ pub enum LongitudinalMaterialLoss {
     },
     /// The same source viscosity applied to the complete retained strain rate
     /// `u_xt + y_x*y_xt + z_x*z_xt`. The original joint nonlinear/contact solve
-    /// owns the resulting force and loss; linear modal axial damping is absent.
+    /// owns the resulting force and loss; linear modal material damping is absent.
     /// This remains the declared moderate-slope strain reduction, not a fully
     /// geometrically exact material law or a thermal evolution model.
     FiniteStrainKelvinVoigt {

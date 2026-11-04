@@ -7176,7 +7176,8 @@ clarinet is one filling of those objects.
   tail is collapsed to resistance with dynamic error bounded by
   `R_low*lambda_min/omega` at positive frequency; the fast tail is truncated.
   Refine all three axes and the actual coupled response. Every branch adds one
-  coordinate and one connection per transverse mode. The shared mechanical
+  coordinate and one connection per retained transverse/twist mode, and per
+  axial mode when longitudinal waves are selected. The shared mechanical
   connection ceiling is 4096, with caller mode/connection/setup budgets still
   enforced before allocation; that port capacity alone does not raise the
   ordinary exact connected-island limit. An explicit prepared linear budget
@@ -7189,8 +7190,8 @@ clarinet is one filling of those objects.
   pressure, both transverse planes, unchanged torsion, fluid kinetic energy,
   torque binding order and preload/release. Source review is not native test
   execution. This local long-cylinder, small-motion Newtonian incompressible
-  model supplies no finite-amplitude convection/wakes, axial/end/confinement
-  or neighbouring-string interaction, rotary drag, rarefaction, compressible
+  model supplies no finite-amplitude convection/wakes, axial-gradient/end/confinement
+  or neighbouring-string interaction, rarefaction, compressible
   radiation, evolving atmosphere or measured violin/cello/bass fidelity claim.
 
 - Reed path: quasistatic or massive Bernoulli valve. Reeds with explicit
@@ -10263,13 +10264,35 @@ therefore be signed. Contiguous original bindings keep borrowed coordinate
 slices. Body states, connections, complete tensor losses, interface source and
 pressure weights are preserved rather than rebuilding an independent voice.
 
+When the bank has selected causal cylinder gas loading, retained axial modes
+also drive that original fluid's axial Stokes shear. The local diffusion
+equation `rho*u_t=mu*(u_rr+u_r/r)`, no-slip surface and resting far field give
+`u(r,s)=U*K0(q*r)/K0(q*a)`, `q=sqrt(rho*s/mu)`. Integrating surface shear with
+[`K0'=-K1`](https://dlmf.nist.gov/10.29.E3) gives
+`Z_parallel=2*pi*mu*z*K1(z)/K0(z)`: half the transverse viscous spectrum, with
+no instantaneous potential-flow added mass. `CylinderFlow::axial_body` exposes
+the same passive operator in physical displacement/momentum coordinates.
+The bank projects each branch onto the actual solid-mass axial sine basis and
+appends independent fluid states after all solid axial components. Fluid
+kinetic storage, reciprocal reactions and heat enter the original exact
+linear/friction/strain work balance. The collapsed slow tail remains active
+under every axial material-loss selection. Original frequency, material history,
+body address, bearing columns and acoustic weights are preserved. The complete
+mode/connection/work budgets admit all axial memory or refuse the selection.
+This local long-cylinder approximation neglects axial fluid gradients and end
+loading; no finite-rod axial solution, convection, confinement or measured
+accuracy is claimed. Focused checks compare independent complex-Bessel
+impedance and physical pHS histories with the actual bank, viscosity-dependent
+axial ringdown, bow-driven axial fluid energy and complete work closure.
+
 `longitudinal-waves SLOPE STRAIN ITERATIONS MAX_FORCE ABS_TOL REL_TOL COUNT INDEX...`
 selects this path in the ordinary material-string file through scheduling and
 PCM. It replaces instantaneous geometric stretching. Requested indices, full
 mode budgets, material elasticity/density bands, clock, rotation-invariant slope
 bounds, strain, positive local tension and nonlinear closure remain explicit
-admission conditions. Axial modes are conservatively elastic; original bending,
-torsion, bridge, body and fluid losses remain active. Omitted axial channels are
+admission conditions. Axial material is elastic unless an explicit loss law is
+selected; selected axial gas shear and original bending, torsion, bridge, body
+and fluid losses remain active. Omitted axial channels are
 statically equilibrated. No axial viscosity is inferred, and no independent
 longitudinal end-force port, moving endpoint, helical slip or temperature evolution
 is added. The shared nonlinear force preload below also equilibrates retained

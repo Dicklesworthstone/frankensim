@@ -1,10 +1,19 @@
-//! Causal transverse loading from the unsteady Stokes cylinder continuum.
+//! Causal transverse and axial loading from the unsteady Stokes cylinder continuum.
 //!
 //! rho u_t = -grad p + mu laplacian u, div u = 0, no slip on a circular
 //! cylinder and rest at infinity give, per unit length,
 //! Z(s) = pi rho a² s + 4 pi mu z K1(z)/K0(z), z=a sqrt(rho s/mu).
 //! See Berg, Yao & Panzarella, NASA/CR-2007-215050, equation (7):
 //! <https://ntrs.nasa.gov/api/citations/20080006726/downloads/20080006726.pdf>.
+//!
+//! Axial translation solves rho u_t = mu (u_rr + u_r/r), with no axial
+//! pressure gradient. The decaying solution is u(r,s)=U K0(qr)/K0(qa),
+//! q=sqrt(rho s/mu). Integrating wall shear and using K0'=-K1 gives
+//! Z_parallel(s)=2 pi mu z K1(z)/K0(z). The modified Bessel equation and
+//! derivative identity are <https://dlmf.nist.gov/10.25.E1> and
+//! <https://dlmf.nist.gov/10.29.E3>. Thus axial motion has HALF the transverse
+//! viscous spectrum and NO instantaneous potential-flow added mass. It still
+//! stores energy in the diffusing fluid's independent memory coordinates.
 //!
 //! Across the negative real s axis the Bessel Wronskian gives a POSITIVE
 //! spectral density 8 mu/[pi (J0(x)²+Y0(x)²)] per d log(lambda), where
@@ -20,8 +29,11 @@
 //! declared frequency/time band while refining all three axes.
 //!
 //! This is linear, incompressible, unconfined two-dimensional flow around a long
-//! circular cylinder. It omits convection, end/axial interactions, nearby wires,
-//! rarefaction, rotary drag and compressible sound radiation. A string's material
+//! circular cylinder. Local axial motion neglects axial velocity gradients and
+//! finite-cylinder end effects; it is not a finite rod's axial-flow solution.
+//! Both translations omit convection, end/axial interactions, nearby wires,
+//! rarefaction and compressible sound radiation. Rotary motion has its own owner.
+//! A string's material
 //! loss is separate; the older sampled cylinder resistance must not be added.
 //! Gas and single-phase liquid sources use the SAME Newtonian continuum through
 //! fs-material's checked transport view. The original source is retained, not
@@ -82,6 +94,20 @@ pub struct CylinderFlowBranch {
     pub resistance_per_length_n_s_m2: f64,
     /// Actual branch inertia per cylinder length [kg/m], c/rate.
     pub mass_per_length_kg_m: f64,
+}
+
+/// Direction of uniform translation relative to the circular cylinder's axis.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CylinderTranslation {
+    /// Normal translation: potential-flow inertia plus the viscous continuum.
+    Transverse,
+    /// Axial surface shear: half the viscous continuum, no potential-flow inertia.
+    Axial,
+}
+impl CylinderTranslation {
+    const fn viscous_fraction(self) -> f64 {
+        match self { Self::Transverse => 1.0, Self::Axial => 0.5 }
+    }
 }
 
 /// Source-bound fluid loading before any mechanical normalization.
@@ -196,7 +222,8 @@ impl<F> CylinderFlow<F> {
     #[must_use] pub const fn radius_m(&self) -> f64 { self.radius_m }
     /// Original three resolution axes.
     #[must_use] pub const fn resolution(&self) -> CylinderFlowResolution { self.resolution }
-    /// Instantaneous potential-flow inertia [kg/m], excluding memory masses.
+    /// Transverse instantaneous potential-flow inertia [kg/m], excluding memory.
+    /// Axial translation has no instantaneous added mass.
     #[must_use] pub const fn added_mass_per_length_kg_m(&self) -> f64 { self.added_mass_per_length_kg_m }
     /// Collapsed slow spectral tail's exact resistance [N s/m²].
     #[must_use] pub const fn low_tail_resistance_per_length_n_s_m2(&self) -> f64 {
@@ -204,25 +231,58 @@ impl<F> CylinderFlow<F> {
     }
     /// Slow cutoff [1/s], for the explicit low-tail error estimate.
     #[must_use] pub const fn minimum_rate_per_s(&self) -> f64 { self.minimum_rate_per_s }
-    /// Positive mechanical branches in original quadrature order.
+    /// Transverse positive mechanical branches in original quadrature order.
     #[must_use] pub fn branches(&self) -> &[CylinderFlowBranch] { &self.branches }
+
+    /// Axial branches of the SAME diffusion continuum and numerical grid.
+    /// Both resistance and physical fluid inertia are halved; rates are unchanged.
+    pub fn axial_branches(&self) -> impl ExactSizeIterator<Item = CylinderFlowBranch> + '_ {
+        self.branches.iter().map(|branch| CylinderFlowBranch {
+            rate_per_s: branch.rate_per_s,
+            resistance_per_length_n_s_m2: 0.5 * branch.resistance_per_length_n_s_m2,
+            mass_per_length_kg_m: 0.5 * branch.mass_per_length_kg_m,
+        })
+    }
+
+    /// Axial collapsed slow-tail resistance [N s/m²], with the same cutoff bound.
+    #[must_use] pub fn axial_low_tail_resistance_per_length_n_s_m2(&self) -> f64 {
+        0.5 * self.low_tail_resistance_per_length_n_s_m2
+    }
 
     /// Discretized force/velocity impedance [N s/m²], convention exp(+i omega t).
     /// Evaluates the actual passive operator; this is not an error certificate.
     pub fn impedance_per_length(&self, omega_rad_s: f64) -> Result<C64, AcousticRealizeError> {
+        self.translation_impedance_per_length(omega_rad_s, CylinderTranslation::Transverse)
+    }
+
+    /// Axial force/velocity impedance [N s/m²], convention exp(+i omega t).
+    /// Evaluates the viscous spectrum directly, avoiding subtraction of the
+    /// transverse potential-flow inertia at large frequency or density.
+    pub fn axial_impedance_per_length(&self, omega_rad_s: f64) -> Result<C64, AcousticRealizeError> {
+        self.translation_impedance_per_length(omega_rad_s, CylinderTranslation::Axial)
+    }
+
+    fn translation_impedance_per_length(
+        &self, omega_rad_s: f64, translation: CylinderTranslation,
+    ) -> Result<C64, AcousticRealizeError> {
         if !omega_rad_s.is_finite() || omega_rad_s <= 0.0 {
             return Err(invalid("cylinder fluid impedance requires positive finite angular frequency"));
         }
-        let mut z = C64 { re: self.low_tail_resistance_per_length_n_s_m2,
-            im: self.added_mass_per_length_kg_m * omega_rad_s };
+        let fraction = translation.viscous_fraction();
+        let mut z = C64 { re: fraction * self.low_tail_resistance_per_length_n_s_m2,
+            im: match translation {
+                CylinderTranslation::Transverse => self.added_mass_per_length_kg_m * omega_rad_s,
+                CylinderTranslation::Axial => 0.0,
+            } };
         for branch in &self.branches {
             // Scale before squaring to avoid overflow in rate²+omega².
             let scale = omega_rad_s.max(branch.rate_per_s);
             let w = omega_rad_s / scale;
             let rate = branch.rate_per_s / scale;
             let denominator = w*w + rate*rate;
-            z.re += branch.resistance_per_length_n_s_m2 * w*w / denominator;
-            z.im += branch.resistance_per_length_n_s_m2 * w*rate / denominator;
+            let resistance = fraction * branch.resistance_per_length_n_s_m2;
+            z.re += resistance * w*w / denominator;
+            z.im += resistance * w*rate / denominator;
         }
         if !z.re.is_finite() || !z.im.is_finite() {
             return Err(invalid("cylinder fluid impedance is unrepresentable"));
@@ -235,6 +295,8 @@ impl<F> CylinderFlow<F> {
 mod tests;
 #[cfg(test)]
 mod transport_tests;
+#[cfg(test)]
+mod axial_tests;
 
 /// A translating cylindrical body and its original fluid-memory coordinates.
 ///
@@ -244,13 +306,14 @@ mod transport_tests;
 /// inertia [kg m/s], then each spectral fluid branch momentum [kg m/s].
 /// The single port is applied force [N] / body velocity [m/s].
 ///
-/// Uniform transverse translation along `length_m` uses the same long-cylinder
+/// Uniform translation along `length_m` uses the same long-cylinder
 /// local-flow approximation as the impedance. End effects, confinement,
 /// nonlinear drag, radiation, thermal feedback and intrinsic solid loss are not
 /// added. The spring is an explicit external linear support, not an inferred
 /// material law. Retain every fluid state when composing, stepping or resuming.
 pub struct CylinderBody<'a, F = GasState> {
     flow: &'a CylinderFlow<F>,
+    translation: CylinderTranslation,
     length_m: f64,
     dry_mass_kg: f64,
     moving_mass_kg: f64,
@@ -278,6 +341,36 @@ impl<F> CylinderFlow<F> {
         max_states: usize,
         gate: &CancelGate,
     ) -> Result<CylinderBody<'_, F>, AcousticRealizeError> {
+        self.translation_body(CylinderTranslation::Transverse, length_m, dry_mass_kg,
+            support_stiffness_n_m, max_states, gate)
+    }
+
+    /// Couple axial surface shear to physical body motion, using the same native
+    /// pHS owner and complete state budget as [`Self::transverse_body`]. The moving
+    /// body mass is exactly the supplied dry mass; all fluid inertia remains in
+    /// independently evolving memory states. This is the local infinite-cylinder
+    /// Stokes law, with no end loading or axial pressure-gradient approximation.
+    pub fn axial_body(
+        &self,
+        length_m: f64,
+        dry_mass_kg: f64,
+        support_stiffness_n_m: f64,
+        max_states: usize,
+        gate: &CancelGate,
+    ) -> Result<CylinderBody<'_, F>, AcousticRealizeError> {
+        self.translation_body(CylinderTranslation::Axial, length_m, dry_mass_kg,
+            support_stiffness_n_m, max_states, gate)
+    }
+
+    fn translation_body(
+        &self,
+        translation: CylinderTranslation,
+        length_m: f64,
+        dry_mass_kg: f64,
+        support_stiffness_n_m: f64,
+        max_states: usize,
+        gate: &CancelGate,
+    ) -> Result<CylinderBody<'_, F>, AcousticRealizeError> {
         if gate.is_requested() { return Err(AcousticRealizeError::Cancelled); }
         let n = self.branches.len().checked_add(2)
             .ok_or_else(|| invalid("cylinder body state count overflow"))?;
@@ -286,12 +379,16 @@ impl<F> CylinderFlow<F> {
         }
         let square = n.checked_mul(n)
             .ok_or_else(|| invalid("cylinder body matrix dimension overflow"))?;
-        let added_mass = length_m * self.added_mass_per_length_kg_m;
+        let fraction = translation.viscous_fraction();
+        let added_mass = match translation {
+            CylinderTranslation::Transverse => length_m * self.added_mass_per_length_kg_m,
+            CylinderTranslation::Axial => 0.0,
+        };
         let moving_mass = dry_mass_kg + added_mass;
-        let low_resistance = length_m * self.low_tail_resistance_per_length_n_s_m2;
-        if [length_m, dry_mass_kg, added_mass, moving_mass, 1.0 / moving_mass, low_resistance]
+        let low_resistance = length_m * (fraction * self.low_tail_resistance_per_length_n_s_m2);
+        if [length_m, dry_mass_kg, moving_mass, 1.0 / moving_mass, low_resistance]
             .iter().any(|v| !v.is_finite() || *v <= 0.0)
-            || moving_mass <= dry_mass_kg
+            || (translation == CylinderTranslation::Transverse && moving_mass <= dry_mass_kg)
             || !support_stiffness_n_m.is_finite() || support_stiffness_n_m < 0.0 {
             return Err(invalid("cylinder body requires representable positive geometry/inertia and nonnegative support stiffness"));
         }
@@ -309,8 +406,8 @@ impl<F> CylinderFlow<F> {
         for (branch_index, branch) in self.branches.iter().enumerate() {
             if gate.is_requested() { return Err(AcousticRealizeError::Cancelled); }
             let index = branch_index + 2;
-            let mass = length_m * branch.mass_per_length_kg_m;
-            let resistance = length_m * branch.resistance_per_length_n_s_m2;
+            let mass = length_m * (fraction * branch.mass_per_length_kg_m);
+            let resistance = length_m * (fraction * branch.resistance_per_length_n_s_m2);
             if [mass, 1.0 / mass, resistance].iter().any(|v| !v.is_finite() || *v <= 0.0) {
                 return Err(invalid("physical cylinder fluid mass or resistance is unrepresentable"));
             }
@@ -332,7 +429,7 @@ impl<F> CylinderFlow<F> {
         let system = fs_phs::PortHamiltonian::new(n, 1, j, r, g, Box::new(storage))
             .map_err(AcousticRealizeError::AlgebraicSolve)?;
         if gate.is_requested() { return Err(AcousticRealizeError::Cancelled); }
-        Ok(CylinderBody { flow: self, length_m, dry_mass_kg,
+        Ok(CylinderBody { flow: self, translation, length_m, dry_mass_kg,
             moving_mass_kg: moving_mass, memory_masses_kg: memory_masses, system })
     }
 }
@@ -340,6 +437,8 @@ impl<F> CylinderFlow<F> {
 impl<F> CylinderBody<'_, F> {
     /// Original typed source and unchanged quadrature/resolution.
     #[must_use] pub const fn flow(&self) -> &CylinderFlow<F> { self.flow }
+    /// Original direction relative to the physical cylinder axis.
+    #[must_use] pub const fn translation(&self) -> CylinderTranslation { self.translation }
     /// Uniformly immersed cylinder length [m].
     #[must_use] pub const fn length_m(&self) -> f64 { self.length_m }
     /// Original solid/body mass, excluding fluid [kg].

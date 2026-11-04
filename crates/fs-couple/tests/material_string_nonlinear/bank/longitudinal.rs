@@ -35,7 +35,10 @@ fn longitudinal_extension_preserves_original_components_and_excites_real_axial_i
         let mut bank = original
             .with_longitudinal_waves(vec![selection(&[1, 2]); 2], nonlinear_config(), gate)
             .unwrap();
-        assert_eq!(bank.system().mode_count(), old_count + 4);
+        assert_eq!(
+            bank.system().mode_count(),
+            old_count + 4 * (1 + resolution().intervals)
+        );
         assert_eq!(
             bank.source().longitudinal_waves().unwrap().strings().len(),
             2
@@ -56,8 +59,12 @@ fn longitudinal_extension_preserves_original_components_and_excites_real_axial_i
             assert_eq!(bank.system().components()[index].states(), state);
         }
         let axial = bank.source().longitudinal_waves().unwrap().strings()[0].axial_component();
+        let fluid = bank.source().longitudinal_waves().unwrap().strings()[0]
+            .axial_fluid_component()
+            .expect("selected gas must load retained axial motion");
         let zero = vec![0.0; bank.system().mode_count()];
         let mut driven_axial = 0.0_f64;
+        let mut axial_gas_energy = 0.0_f64;
         let mut sympathetic = 0.0_f64;
         for _ in 0..256 {
             let frame = *bank.step_under_gate(&zero, active(), gate).unwrap();
@@ -69,6 +76,13 @@ fn longitudinal_extension_preserves_original_components_and_excites_real_axial_i
                     .displacement_m_sqrt_kg
                     .abs(),
             );
+            axial_gas_energy = axial_gas_energy.max(
+                bank.system().components()[fluid]
+                    .states()
+                    .iter()
+                    .map(|s| 0.5 * s.velocity_m_sqrt_kg_per_s.powi(2))
+                    .sum(),
+            );
             sympathetic = sympathetic.max(
                 bank.system().components()[1].states()[0]
                     .displacement_m_sqrt_kg
@@ -78,6 +92,10 @@ fn longitudinal_extension_preserves_original_components_and_excites_real_axial_i
         assert!(
             driven_axial > 1e-18,
             "nonlinear transverse strain must drive the retained axial harmonic"
+        );
+        assert!(
+            axial_gas_energy > 0.0,
+            "bowed finite strain must also drive axial gas history"
         );
         assert!(
             sympathetic > 1e-15,
@@ -104,7 +122,7 @@ fn longitudinal_extension_preserves_original_components_and_excites_real_axial_i
 }
 
 #[test]
-fn elastic_material_scales_axial_frequencies_while_gas_changes_only_transverse_loading() {
+fn elastic_material_scales_axial_frequencies_while_gas_keeps_the_solid_axial_inertia() {
     with_cx(|cx, gate| {
         let build = |young, medium| {
             physical_bank(cx, gate, young, medium, 1)
@@ -135,10 +153,15 @@ fn elastic_material_scales_axial_frequencies_while_gas_changes_only_transverse_l
 #[test]
 fn axial_linear_limit_is_the_existing_exact_oscillator_without_double_stiffness() {
     with_cx(|cx, gate| {
-        let mut bank = physical_bank(cx, gate, 200e9, gas(), 1)
+        let mut bank = bank_without_causal_gas(cx, gate, 200e9, gas(), 1)
             .with_longitudinal_waves(vec![selection(&[1, 2])], nonlinear_config(), gate)
             .unwrap();
         let component = bank.source().longitudinal_waves().unwrap().strings()[0].axial_component();
+        assert!(
+            bank.source().longitudinal_waves().unwrap().strings()[0]
+                .axial_fluid_component()
+                .is_none()
+        );
         let mut exact = bank.system().components()[component].clone();
         let offset: usize = bank.system().components()[..component]
             .iter()
@@ -171,6 +194,164 @@ fn axial_linear_limit_is_the_existing_exact_oscillator_without_double_stiffness(
                     .all(|s| s.displacement_m_sqrt_kg == 0.0)
             );
         }
+    });
+}
+
+#[test]
+fn axial_bank_matches_independent_physical_force_and_momentum_coordinates() {
+    with_cx(|cx, gate| {
+        let mut bank = physical_bank(cx, gate, 200e9, gas(), 1)
+            .with_longitudinal_waves(vec![selection(&[1])], nonlinear_config(), gate)
+            .unwrap();
+        let law = &bank.source().longitudinal_waves().unwrap().strings()[0];
+        let component = law.axial_component();
+        let fluid_component = law.axial_fluid_component().unwrap();
+        let omega = law.model().axial_omegas()[0];
+        // Integral sin²(k*x) dx = L/2. Compare the actual bank with a native
+        // pHS in physical amplitude/momentum coordinates, with independently
+        // derived effective length, dry mass, spring and work-conjugate force.
+        let length = 0.5 * bank.cards()[0].length_m;
+        let mass = length * law.solid_linear_density_kg_m();
+        let root_mass = mass.sqrt();
+        let flow = bank.source().cylinder_gas_loading().unwrap().strings()[0]
+            .flow()
+            .clone();
+        let body = flow
+            .axial_body(
+                length,
+                mass,
+                mass * omega * omega,
+                resolution().intervals + 2,
+                gate,
+            )
+            .unwrap();
+        assert_eq!(body.moving_mass_kg(), mass);
+        let offset: usize = bank.system().components()[..component]
+            .iter()
+            .map(|c| c.modes().len())
+            .sum();
+        let mut forces = vec![0.0; bank.system().mode_count()];
+        let mut state = vec![0.0; resolution().intervals + 2];
+        for sample in 0..16 {
+            let load = if sample == 0 { 1.0 } else { 0.0 };
+            forces[offset] = load;
+            bank.step_under_gate(&forces, released(), gate).unwrap();
+            // The reference uses the distinct native pHS midpoint solver at
+            // 128 substeps; its O(dt²) phase error bounds this comparison.
+            for _ in 0..128 {
+                state = fs_phs::step(
+                    body.system(),
+                    &state,
+                    &[root_mass * load],
+                    1.0 / (48_000.0 * 128.0),
+                )
+                .unwrap()
+                .x;
+            }
+            let actual = bank.system().components()[component].states()[0];
+            let q = root_mass * state[0];
+            let v = state[1] / root_mass;
+            let scale = q.hypot(v / omega);
+            let error = (actual.displacement_m_sqrt_kg - q)
+                .hypot((actual.velocity_m_sqrt_kg_per_s - v) / omega);
+            assert!(
+                error < 4e-5 * scale,
+                "sample={sample}, physical axial error={error:e}/{scale:e}"
+            );
+            for (index, actual) in bank.system().components()[fluid_component]
+                .states()
+                .iter()
+                .enumerate()
+            {
+                let expected = state[index + 2] / body.memory_masses_kg()[index].sqrt();
+                assert!((actual.velocity_m_sqrt_kg_per_s - expected).abs() < 4e-5 * scale * omega);
+            }
+        }
+    });
+}
+
+#[test]
+fn axial_gas_viscosity_changes_retained_motion_and_closes_the_original_work_ledger() {
+    with_cx(|cx, gate| {
+        let mut specification = GasSpec::dry_air_ussa1976();
+        specification.sutherland_beta *= 4.0;
+        let viscous = GasState::try_new(&specification, 293.15, 101_325.0).unwrap();
+        assert_eq!(viscous.density, gas().density);
+        let build = |medium| {
+            physical_bank(cx, gate, 200e9, medium, 1)
+                .with_longitudinal_waves(vec![selection(&[1])], nonlinear_config(), gate)
+                .unwrap()
+        };
+        let (mut a, mut b) = (build(gas()), build(viscous));
+        let law = &a.source().longitudinal_waves().unwrap().strings()[0];
+        let component = law.axial_component();
+        let fluid_component = law.axial_fluid_component().unwrap();
+        assert_eq!(
+            law.model().axial_omegas(),
+            b.source().longitudinal_waves().unwrap().strings()[0]
+                .model()
+                .axial_omegas()
+        );
+        let offset: usize = a.system().components()[..component]
+            .iter()
+            .map(|c| c.modes().len())
+            .sum();
+        let mut forces = vec![0.0; a.system().mode_count()];
+        let (mut work, mut loss, mut memory_energy, mut difference) = (0.0, 0.0, 0.0_f64, 0.0_f64);
+        for sample in 0..192 {
+            forces[offset] = if sample == 0 { 1.0 } else { 0.0 };
+            let fa = *a.step_under_gate(&forces, released(), gate).unwrap();
+            let fb = *b.step_under_gate(&forces, released(), gate).unwrap();
+            work += fa.external_work_j;
+            loss += fa.network_dissipation_j;
+            assert_eq!(fa.drive_work_j, 0.0);
+            assert_eq!(fa.friction_dissipation_j, 0.0);
+            assert!(fa.energy_residual_j.abs() <= fa.energy_tolerance_j);
+            assert!(fb.energy_residual_j.abs() <= fb.energy_tolerance_j);
+            memory_energy = memory_energy.max(
+                a.system().components()[fluid_component]
+                    .states()
+                    .iter()
+                    .map(|s| 0.5 * s.velocity_m_sqrt_kg_per_s.powi(2))
+                    .sum(),
+            );
+            difference = difference.max(
+                (a.system().components()[component].states()[0].velocity_m_sqrt_kg_per_s
+                    - b.system().components()[component].states()[0].velocity_m_sqrt_kg_per_s)
+                    .abs(),
+            );
+        }
+        assert!(
+            memory_energy > 0.0,
+            "axial gas must receive real kinetic energy"
+        );
+        assert!(
+            difference > 1e-9,
+            "source viscosity must affect the actual axial ringdown"
+        );
+        assert!(loss > 0.0);
+        assert!((a.system().total_energy_j().unwrap() + loss - work).abs() < 2e-12);
+    });
+}
+
+#[test]
+fn complete_axial_memory_is_admitted_before_any_modes_can_be_silently_omitted() {
+    with_cx(|cx, gate| {
+        let admitted = physical_bank(cx, gate, 200e9, gas(), 2)
+            .with_longitudinal_waves(vec![selection(&[1, 2, 3]); 2], nonlinear_config(), gate)
+            .unwrap();
+        assert_eq!(admitted.system().mode_count(), 62);
+        // All four axial frequencies fit the clock, but the full gas history
+        // would need 72 coordinates, exceeding the caller's original cap 64.
+        assert!(
+            physical_bank(cx, gate, 200e9, gas(), 2)
+                .with_longitudinal_waves(
+                    vec![selection(&[1, 2, 3, 4]); 2],
+                    nonlinear_config(),
+                    gate
+                )
+                .is_err()
+        );
     });
 }
 

@@ -26,10 +26,10 @@ use fs_scenario::{
 };
 use fs_tribo::FrictionLaw;
 
-#[path = "bank/multiple.rs"]
-mod multiple;
 #[path = "bank/longitudinal.rs"]
 mod longitudinal;
+#[path = "bank/multiple.rs"]
+mod multiple;
 
 fn nonlinear_config() -> NonlinearModalConfig {
     NonlinearModalConfig {
@@ -47,6 +47,17 @@ fn resolution() -> CylinderFlowResolution {
     }
 }
 fn physical_bank(
+    cx: &Cx<'_>,
+    gate: &CancelGate,
+    young: f64,
+    medium: GasState,
+    strings: usize,
+) -> ReciprocalStringBank {
+    bank_without_causal_gas(cx, gate, young, medium, strings)
+        .with_cylinder_gas_loading(resolution(), gate)
+        .unwrap()
+}
+fn bank_without_causal_gas(
     cx: &Cx<'_>,
     gate: &CancelGate,
     young: f64,
@@ -153,8 +164,6 @@ fn physical_bank(
         gate,
     )
     .unwrap()
-    .with_cylinder_gas_loading(resolution(), gate)
-    .unwrap()
 }
 fn active() -> FrictionDrive {
     FrictionDrive {
@@ -226,7 +235,9 @@ fn joint_bow_stretching_and_fluid_memory_retain_all_coordinates_and_close_work()
                 .step_under_gate(&zero, if k < 192 { active() } else { released() }, gate)
                 .unwrap();
             work += frame.drive_work_j + frame.external_work_j;
-            loss += frame.network_dissipation_j + frame.friction_dissipation_j + frame.declared_slip_work_j;
+            loss += frame.network_dissipation_j
+                + frame.friction_dissipation_j
+                + frame.declared_slip_work_j;
             let nonlinear = bank.system().nonlinear_frame().unwrap();
             assert!(nonlinear.reaction_residual <= nonlinear.reaction_tolerance);
             assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
