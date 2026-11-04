@@ -4076,6 +4076,55 @@ ordinary solver. Existing low-Mach and lattice-stability limits remain;
 no unconditional stability or temporal-order guarantee for the complete
 partitioned buoyancy/source solver is added.
 
+### Thermal wall laws in the original thermal slabs
+
+`ThermalLbm::set_thermal_walls` and `ThermalLbm3::set_thermal_walls`
+select independent, spatially uniform laws at the existing stationary,
+impermeable halfway plates: prescribed temperature, insulation, prescribed
+inward heat flux, or a film to a prescribed ambient. With no override, the
+original public `t_bottom`/`t_top` temperatures retain their original
+anti-bounce-back arithmetic. Resetting the override restores that behavior.
+
+For each reflected normal pair, `q = g_in - g_out` is the actual scalar
+exchange and `T_wall = (g_in + g_out)/(2w)` is the surface trace. The film
+closure solves `q = H*(T_ambient - T_wall)` locally, with bounded arithmetic
+in both insulating and prescribed-temperature limits. Flux units are scalar
+increment per link per step; `H = h*dt/(rho*Cp*dx)`. Collision already owns
+diffusivity, so no second relaxation-time factor multiplies this exchange.
+The reports sum actual exchange with compensated reductions and retain the
+mean and local extrema of the surface trace. Ghost planes remain metadata,
+not extra fluid heat storage. Reports describe heat already transported;
+they are not sources to apply again.
+
+The checked source owner snapshots both the active laws and last accepted
+report. It admits active fluid temperatures, prescribed wall temperatures,
+and every resolved wall trace against the caller's scalar interval. A late
+refusal preserves the original populations, histories, wall laws and report.
+The channel dynamic SGS filter consumes active prescribed-temperature or
+zero-flux conditions; it refuses nonzero flux and film laws until its filter
+supports their local traces. Other ordinary/source thermal steps use the
+same wall streaming operator in both dimensions.
+
+`MaterialThermalWall` provides the same laws in SI through the retained
+material slab. It converts signed `q''` by `dt/(rho*Cp*dx*DeltaT)` and `h`
+by `dt/(rho*Cp*dx)`; reversing the original temperature coordinate does not
+reverse physical heating. The wall report converts actual link exchange to
+joules using the same captured material heat capacity and physical cell
+volume, with explicit extrusion depth in 2-D and `dx^3` in 3-D. Surface
+mean/minimum/maximum temperatures are reported in kelvin, including proper
+extrema ordering for negative `DeltaT`. The existing frozen-storage and
+Boussinesq assumptions remain. Films use authored coefficients and prescribed
+ambients; correlation selection and finite external storage remain with their
+existing owners.
+
+Focused kernel regressions cover the original temperature arithmetic, exact
+insulation, signed imposed flux, local film balance, and the analytic series
+resistance of a conductive slab between two films across several relaxation
+times. Source and channel-SGS regressions cover boundary publication and
+refusal. This closure is limited to the existing planar, uniform-cell,
+constant-capacity temperature slabs; it adds neither curved boundaries nor
+a finite ambient reservoir or a general unsteady accuracy guarantee.
+
 ### Full tensor diffusion in the original thermal slabs
 
 `thermal::tensor::DiffusivityTensor<D>` prepares the full symmetric positive

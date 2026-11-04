@@ -173,6 +173,7 @@ impl<const D: usize, const Q: usize> AxisLattice<D, Q> {
     /// Pull streaming, periodic in the in-plane coordinates. If walls are
     /// supplied, the first/last planes are fixed halfway-temperature walls;
     /// otherwise all axes wrap. The same pair operations serve both cases.
+    #[cfg(test)]
     pub(crate) fn stream(
         &self,
         populations: &mut [[f64; Q]],

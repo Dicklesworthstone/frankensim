@@ -19,7 +19,7 @@ mod forcing;
 mod buoyancy;
 pub use buoyancy::MaterialBuoyancyBoundary;
 pub mod free_surface;
-pub use forcing::{electrothermal, transport};
+pub use forcing::{MaterialThermalWall, MaterialWallExchange, electrothermal, transport};
 mod runtime_rebind;
 mod three_dimensional;
 pub use three_dimensional::{MaterialSlab3, MaterialThermalSlab3};
@@ -311,6 +311,9 @@ impl<F: FluidTransport + ?Sized> MaterialScaling<'_, F> {
 /// Defaults to the D2Q9/D2Q5 solver; [`MaterialSlab3`] uses D3Q19/D3Q7.
 /// Numerical fields remain public through `lattice`; manually changing its
 /// normalized wall values invalidates this frozen physical-unit mapping.
+/// Use [`MaterialThermalWall`] through the material slab's `set_thermal_walls`
+/// method to prescribe insulation, wall heat flux or an exterior film in SI
+/// while retaining the original temperature coordinates and buoyancy scale.
 pub struct MaterialSlab<L = ThermalLbm> {
     /// Actual solver; step it through `lattice.step()`.
     pub lattice: L,
