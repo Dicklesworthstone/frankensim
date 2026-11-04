@@ -1,16 +1,16 @@
 //! Quasisteady harmonic absorption refreshed by native cell temperatures.
 //!
 //! Each thermally lumped specimen cell is one homogeneous acoustic sublayer.
-//! Its actual caloric-law temperature reevaluates the ORIGINAL GasSpec/GasState
+//! Its actual caloric-law temperature reevaluates the ORIGINAL fluid source
 //! and PorousFluidLaw. Density, sound speed, viscosity, conductivity and pore
 //! resistivity change together; no independent temperature multiplier is fitted.
 //! Changed layers then participate in ONE coherent two-sided stack solve.
 //!
 //! Pressure and composition are prescribed isobaric background conditions, not
-//! a finite gas inventory. Thermal mass is never replaced by rho(T)*pore volume.
+//! a finite fluid inventory. Thermal mass is never replaced by rho(T)*pore volume.
 //! The original thermal law must represent the specimen's storage under this
-//! background, with a justified common gas/skeleton temperature. Reservoir mass
-//! transport, gas pressure evolution and constituent heat fractions are absent.
+//! background, with a justified common fluid/skeleton temperature. Reservoir mass
+//! transport, mean pressure evolution and constituent heat fractions are absent.
 //!
 //! Every heat rate uses the accepted START temperature of its native explicit
 //! step. A changed endpoint prepares the next start and admits the final state;
@@ -29,6 +29,10 @@ use fs_duct::porous::{
 use fs_material::gas::{GasSpec, GasState};
 use fs_material::porous::PorousFluidLaw;
 use fs_math::c64::C64;
+
+/// Original thermoviscous material laws for accepted-temperature feedback.
+pub mod fluid;
+pub use fluid::{IsobaricPorousLiquid, PorousLiquidState, PorousTemperatureFluid};
 
 /// Partially coherent two-sided stationary pressure spectra.
 pub mod covariance;
@@ -109,7 +113,7 @@ pub struct PorousTemperatureCell<'a> {
 }
 
 /// Fixed coherent exterior drive; heating does not silently change its power
-/// normalization when the INTERNAL pore-gas temperature and impedance change.
+/// normalization when the INTERNAL pore-fluid temperature and impedance change.
 #[derive(Clone, Copy, Debug)]
 pub struct PorousHarmonicDrive {
     /// Shared angular frequency [rad/s], in each skeleton's original support.
@@ -123,19 +127,19 @@ pub struct PorousHarmonicDrive {
 }
 
 /// Reusable accepted-state cache plus the original thermal/material bindings.
-/// Each changed temperature reevaluates only its own gas and porous sublayer.
+/// Each changed temperature reevaluates only its own fluid and porous sublayer.
 /// A shared stack solve runs once if any cell changed; unchanged/latent plateau
 /// temperatures reuse all coefficients and analytic sources. Geometry and
 /// material objects remain immutable, including during candidate cloning.
 #[derive(Clone)]
-pub struct TemperaturePorousHeating<'a> {
+pub struct TemperaturePorousHeating<'a, F: PorousTemperatureFluid = IsobaricPorousGas<'a>> {
     cells: Vec<PorousTemperatureCell<'a>>,
-    gas: IsobaricPorousGas<'a>,
+    gas: F,
     drive: PorousHarmonicDrive,
     tangential_wavenumber_rad_m: f64,
     termination: Option<PassivePorousTermination>,
     options: ComposeOptions,
-    states: Vec<GasState>,
+    states: Vec<F::State>,
     layers: Vec<PorousLayer<'a>>,
     heat: PreparedHeat,
     boundary: PorousLayerPower,
@@ -144,16 +148,44 @@ pub struct TemperaturePorousHeating<'a> {
 /// Additional evaluations in one advance, excluding initial construction.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PorousFeedbackWork {
-    /// Changed physical cell states evaluated through the original gas law.
+    /// Changed physical cell states evaluated through any original fluid law.
+    pub fluid_evaluations: usize,
+    /// Gas evaluations, retained separately for existing gas-only consumers.
     pub gas_evaluations: usize,
     /// Shared coherent stack solves, including admitted changed endpoints.
     pub stack_solves: usize,
 }
+impl PorousFeedbackWork {
+    fn record_fluid<F: PorousTemperatureFluid>(&mut self) -> Result<(), PorousHeatingError> {
+        self.fluid_evaluations = self
+            .fluid_evaluations
+            .checked_add(1)
+            .ok_or(DepositionError::Budget("porous fluid evaluations"))?;
+        if F::IS_GAS {
+            self.gas_evaluations = self
+                .gas_evaluations
+                .checked_add(1)
+                .ok_or(DepositionError::Budget("porous gas evaluations"))?;
+        }
+        Ok(())
+    }
+}
+
+impl<'a> TemperaturePorousHeating<'a> {
+    /// Original gas states, preserving the existing gas-only view.
+    pub fn gas_states(&self) -> &[GasState] {
+        self.fluid_states()
+    }
+    /// Prescribed isobaric gas law and its explicit admitted temperature range.
+    pub const fn gas(&self) -> IsobaricPorousGas<'a> {
+        self.gas
+    }
+}
 
 /// One jointly accepted cache and native thermal candidate.
-pub struct PorousTemperatureStep<'t, 'a> {
+pub struct PorousTemperatureStep<'t, 'a, F: PorousTemperatureFluid = IsobaricPorousGas<'a>> {
     /// Reusable cache evaluated at the returned thermal state's temperatures.
-    pub heating: TemperaturePorousHeating<'a>,
+    pub heating: TemperaturePorousHeating<'a, F>,
     /// Existing native thermal and acoustic energy accounts, without duplication.
     pub step: PorousHeatingStep<'t>,
     /// Actual changed-state/source work in this advance.
@@ -203,7 +235,7 @@ fn prepare_stack_drive<'s, 'l, 'm>(
     }
 }
 
-impl<'a> TemperaturePorousHeating<'a> {
+impl<'a, F: PorousTemperatureFluid> TemperaturePorousHeating<'a, F> {
     /// One-sided normal-incidence illumination with a passive rear load.
     /// The authored right pressure must be zero. The fixed load's counter-wave
     /// is recomputed with every changed-temperature stack; its dissipated work
@@ -211,7 +243,7 @@ impl<'a> TemperaturePorousHeating<'a> {
     pub fn try_new_terminated(
         thermal: &DepositionSimulation<'_>,
         cells: &[PorousTemperatureCell<'a>],
-        gas: IsobaricPorousGas<'a>,
+        gas: F,
         drive: PorousHarmonicDrive,
         termination: PassivePorousTermination,
         options: ComposeOptions,
@@ -236,7 +268,7 @@ impl<'a> TemperaturePorousHeating<'a> {
     pub fn try_new_oblique_terminated(
         thermal: &DepositionSimulation<'_>,
         cells: &[PorousTemperatureCell<'a>],
-        gas: IsobaricPorousGas<'a>,
+        gas: F,
         drive: PorousHarmonicDrive,
         tangential_wavenumber_rad_m: f64,
         termination: PassivePorousTermination,
@@ -265,7 +297,7 @@ impl<'a> TemperaturePorousHeating<'a> {
     pub fn try_new(
         thermal: &DepositionSimulation<'_>,
         cells: &[PorousTemperatureCell<'a>],
-        gas: IsobaricPorousGas<'a>,
+        gas: F,
         drive: PorousHarmonicDrive,
         options: ComposeOptions,
         checkpoint: impl FnMut() -> Result<(), DepositionError>,
@@ -281,7 +313,7 @@ impl<'a> TemperaturePorousHeating<'a> {
     pub fn try_new_oblique(
         thermal: &DepositionSimulation<'_>,
         cells: &[PorousTemperatureCell<'a>],
-        gas: IsobaricPorousGas<'a>,
+        gas: F,
         drive: PorousHarmonicDrive,
         tangential_wavenumber_rad_m: f64,
         options: ComposeOptions,
@@ -300,18 +332,18 @@ impl<'a> TemperaturePorousHeating<'a> {
         )
     }
 
-    // Spectral bins share gas evaluations while retaining the same original
+    // Spectral bins share fluid evaluations while retaining the same original
     // single-frequency preparation and complete physical thermal admission.
     #[allow(clippy::too_many_arguments)]
     fn prepare(
         thermal: &DepositionSimulation<'_>,
         cells: &[PorousTemperatureCell<'a>],
-        gas: IsobaricPorousGas<'a>,
+        gas: F,
         drive: PorousHarmonicDrive,
         tangential_wavenumber_rad_m: f64,
         termination: Option<PassivePorousTermination>,
         options: ComposeOptions,
-        shared_states: Option<&[GasState]>,
+        shared_states: Option<&[F::State]>,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, PorousHeatingError> {
         checkpoint()?;
@@ -345,9 +377,9 @@ impl<'a> TemperaturePorousHeating<'a> {
                 original.geometry.end_m[i] - original.geometry.start_m[i]
             })))?;
             let state = if let Some(states) = shared_states {
-                states[index]
+                states[index].clone()
             } else {
-                gas.evaluate(thermal.temperature_k(cell.cell)?)?
+                fluid::evaluate(&gas, thermal.temperature_k(cell.cell)?)?
             };
             layers.push(PorousLayer::try_new_oblique(
                 cell.material,
@@ -445,17 +477,17 @@ impl<'a> TemperaturePorousHeating<'a> {
     pub fn cells(&self) -> &[PorousCellHeating] {
         &self.heat.cells
     }
-    /// Original gas states evaluated at the current cached temperatures.
-    pub fn gas_states(&self) -> &[GasState] {
+    /// Original fluid states evaluated at the current cached temperatures.
+    pub fn fluid_states(&self) -> &[F::State] {
         &self.states
     }
     /// Original per-cell porous responses, retaining each skeleton's identity.
     pub fn acoustic_layers(&self) -> &[PorousLayer<'a>] {
         &self.layers
     }
-    /// Prescribed isobaric gas law and its explicit admitted temperature range.
-    pub const fn gas(&self) -> IsobaricPorousGas<'a> {
-        self.gas
+    /// Original fluid source and its prescribed background conditions.
+    pub const fn fluid(&self) -> &F {
+        &self.gas
     }
     /// Original coherent pressure drive and FIXED exterior normalization.
     pub const fn drive(&self) -> PorousHarmonicDrive {
@@ -502,15 +534,12 @@ impl<'a> TemperaturePorousHeating<'a> {
         for (i, cell) in self.cells.iter().enumerate() {
             checkpoint()?;
             let temperature = thermal.temperature_k(cell.cell)?;
-            if temperature.to_bits() == self.states[i].temperature.to_bits() {
+            if temperature.to_bits() == self.gas.temperature_k(&self.states[i]).to_bits() {
                 continue;
             }
-            let state = self.gas.evaluate(temperature)?;
+            let state = fluid::evaluate(&self.gas, temperature)?;
             changed.push((i, state));
-            work.gas_evaluations = work
-                .gas_evaluations
-                .checked_add(1)
-                .ok_or(DepositionError::Budget("porous gas evaluations"))?;
+            work.record_fluid::<F>()?;
         }
         self.refresh_changed(&changed, work, checkpoint)
     }
@@ -519,26 +548,26 @@ impl<'a> TemperaturePorousHeating<'a> {
     // caller or common spectral binding already admitted the thermal specimen.
     fn refresh_changed(
         &mut self,
-        changed: &[(usize, GasState)],
+        changed: &[(usize, F::State)],
         work: &mut PorousFeedbackWork,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), PorousHeatingError> {
         if changed.is_empty() {
             return Ok(());
         }
-        for &(i, state) in changed {
+        for (i, state) in changed {
             checkpoint()?;
             let layer = PorousLayer::try_new_oblique(
-                self.cells[i].material,
-                &state,
+                self.cells[*i].material,
+                state,
                 self.drive.angular_frequency_rad_s,
-                self.layers[i].thickness_m(),
+                self.layers[*i].thickness_m(),
                 self.drive.area_m2,
                 self.drive.reference_impedance_pa_s_m3,
                 self.tangential_wavenumber_rad_m,
             )?;
-            self.states[i] = state;
-            self.layers[i] = layer;
+            self.states[*i] = state.clone();
+            self.layers[*i] = layer;
         }
         let stack = acoustic(checkpoint, |cancelled| {
             PorousLayerStack::try_new(&self.layers, self.options, cancelled)
@@ -583,17 +612,17 @@ impl<'a> TemperaturePorousHeating<'a> {
 
     /// Advance source feedback and thermal state as ONE immutable candidate.
     /// Rates use accepted-start temperatures, then native duration/CFL/event
-    /// clipping applies. Endpoint refresh admits the returned gas state and
+    /// clipping applies. Endpoint refresh admits the returned fluid state and
     /// caches it for continuation. Conduction, authored heat, latent storage,
     /// original material/source domains and all rollback rules remain native.
-    /// Gas and acoustic refreshes add no separate heat credit or storage term.
+    /// Fluid and acoustic refreshes add no separate heat credit or storage term.
     pub fn advance_to<'t>(
         &self,
         initial: &DepositionSimulation<'t>,
         target_s: f64,
         config: StepConfig,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
-    ) -> Result<PorousTemperatureStep<'t, 'a>, PorousHeatingError> {
+    ) -> Result<PorousTemperatureStep<'t, 'a, F>, PorousHeatingError> {
         checkpoint()?;
         let mut observer = FeedbackObserver {
             source: self.clone(),
@@ -621,12 +650,12 @@ impl<'a> TemperaturePorousHeating<'a> {
 }
 
 #[derive(Clone)]
-struct FeedbackObserver<'a> {
-    source: TemperaturePorousHeating<'a>,
+struct FeedbackObserver<'a, F: PorousTemperatureFluid> {
+    source: TemperaturePorousHeating<'a, F>,
     account: HeatAccount,
     work: PorousFeedbackWork,
 }
-impl DepositionObserver for FeedbackObserver<'_> {
+impl<F: PorousTemperatureFluid> DepositionObserver for FeedbackObserver<'_, F> {
     type Error = PorousHeatingError;
     fn sources(
         &mut self,

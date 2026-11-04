@@ -119,30 +119,41 @@ pub struct PorousSpectrumPower {
 
 /// One native thermal specimen driven by a bounded stationary acoustic spectrum.
 /// Bins are stored in increasing frequency order for deterministic summation.
-/// Their material objects, cell geometry and gas specification are common;
+/// Their material objects, cell geometry and fluid source are common;
 /// pressure phases and fixed exterior references may differ across frequencies.
 /// All isobaric, caloric-storage and quasisteady assumptions of the original
 /// [`TemperaturePorousHeating`] also apply to this shared feedback trajectory.
 #[derive(Clone)]
-pub struct PorousSpectrumHeating<'a> {
-    bins: Vec<TemperaturePorousHeating<'a>>,
+pub struct PorousSpectrumHeating<'a, F: PorousTemperatureFluid = IsobaricPorousGas<'a>> {
+    bins: Vec<TemperaturePorousHeating<'a, F>>,
     heat: PreparedHeat,
 }
 
 /// Jointly accepted spectrum cache, native thermal state and physical accounts.
-pub struct PorousSpectrumStep<'t, 'a> {
+pub struct PorousSpectrumStep<'t, 'a, F: PorousTemperatureFluid = IsobaricPorousGas<'a>> {
     /// Reusable per-frequency caches at the returned native temperatures.
-    pub heating: PorousSpectrumHeating<'a>,
+    pub heating: PorousSpectrumHeating<'a, F>,
     /// Shared thermal advance and total acoustic heat, credited exactly once.
     pub step: PorousHeatingStep<'t>,
     /// Per-frequency acoustic energy [J], in increasing frequency order.
     /// These diagnose the total account; they are not additional heat sources.
     pub bin_energy: Vec<PorousHeatingEnergy>,
-    /// Gas evaluations are shared; stack solves count each affected frequency.
+    /// Fluid evaluations are shared; stack solves count each affected frequency.
     pub work: PorousFeedbackWork,
 }
 
 impl<'a> PorousSpectrumHeating<'a> {
+    /// Original gas states, preserving the existing gas-only view.
+    pub fn gas_states(&self) -> &[GasState] {
+        self.fluid_states()
+    }
+    /// Original fixed gas composition, pressure and admitted temperature range.
+    pub fn gas(&self) -> IsobaricPorousGas<'a> {
+        self.bins[0].gas()
+    }
+}
+
+impl<'a, F: PorousTemperatureFluid> PorousSpectrumHeating<'a, F> {
     /// Route every frequency's load work to one explicit native backing cell.
     /// Frequencies describe the same physical specimen/backing. Their load heat
     /// is summed before the shared thermal step and counted once. The distinct
@@ -177,7 +188,7 @@ impl<'a> PorousSpectrumHeating<'a> {
     pub fn try_new(
         thermal: &DepositionSimulation<'_>,
         cells: &[PorousTemperatureCell<'a>],
-        gas: IsobaricPorousGas<'a>,
+        gas: F,
         bins: &[PorousHarmonicDrive],
         options: PorousSpectrumOptions,
         checkpoint: impl FnMut() -> Result<(), DepositionError>,
@@ -192,7 +203,7 @@ impl<'a> PorousSpectrumHeating<'a> {
     pub fn try_new_oblique(
         thermal: &DepositionSimulation<'_>,
         cells: &[PorousTemperatureCell<'a>],
-        gas: IsobaricPorousGas<'a>,
+        gas: F,
         bins: &[PorousHarmonicDrive],
         tangential_wavenumbers_rad_m: &[f64],
         options: PorousSpectrumOptions,
@@ -215,7 +226,7 @@ impl<'a> PorousSpectrumHeating<'a> {
     pub fn try_new_terminated(
         thermal: &DepositionSimulation<'_>,
         cells: &[PorousTemperatureCell<'a>],
-        gas: IsobaricPorousGas<'a>,
+        gas: F,
         bins: &[PorousHarmonicDrive],
         terminations: &[PassivePorousTermination],
         options: PorousSpectrumOptions,
@@ -239,7 +250,7 @@ impl<'a> PorousSpectrumHeating<'a> {
     pub fn try_new_oblique_terminated(
         thermal: &DepositionSimulation<'_>,
         cells: &[PorousTemperatureCell<'a>],
-        gas: IsobaricPorousGas<'a>,
+        gas: F,
         bins: &[PorousHarmonicDrive],
         tangential_wavenumbers_rad_m: &[f64],
         terminations: &[PassivePorousTermination],
@@ -262,7 +273,7 @@ impl<'a> PorousSpectrumHeating<'a> {
     fn prepare(
         thermal: &DepositionSimulation<'_>,
         cells: &[PorousTemperatureCell<'a>],
-        gas: IsobaricPorousGas<'a>,
+        gas: F,
         bins: &[PorousHarmonicDrive],
         tangential: Option<&[f64]>,
         terminations: Option<&[PassivePorousTermination]>,
@@ -342,7 +353,7 @@ impl<'a> PorousSpectrumHeating<'a> {
         let mut states = Vec::with_capacity(cells.len());
         for cell in cells {
             checkpoint()?;
-            states.push(gas.evaluate(thermal.temperature_k(cell.cell)?)?);
+            states.push(fluid::evaluate(&gas, thermal.temperature_k(cell.cell)?)?);
         }
         let mut prepared = Vec::with_capacity(drives.len());
         for (drive, tangential, termination) in drives {
@@ -350,7 +361,7 @@ impl<'a> PorousSpectrumHeating<'a> {
             prepared.push(TemperaturePorousHeating::prepare(
                 thermal,
                 cells,
-                gas,
+                gas.clone(),
                 drive,
                 tangential,
                 termination,
@@ -369,20 +380,20 @@ impl<'a> PorousSpectrumHeating<'a> {
     }
 
     /// Native single-frequency diagnostics in canonical increasing order.
-    pub fn bins(&self) -> &[TemperaturePorousHeating<'a>] {
+    pub fn bins(&self) -> &[TemperaturePorousHeating<'a, F>] {
         &self.bins
     }
     /// Common physical cells with the sum of their positive per-bin heat rates.
     pub fn cells(&self) -> &[PorousCellHeating] {
         &self.heat.cells
     }
-    /// One native gas state per cell, evaluated once and shared across bins.
-    pub fn gas_states(&self) -> &[GasState] {
-        self.bins[0].gas_states()
+    /// One native fluid state per cell, evaluated once and shared across bins.
+    pub fn fluid_states(&self) -> &[F::State] {
+        self.bins[0].fluid_states()
     }
-    /// Original fixed gas composition, pressure and admitted temperature range.
-    pub fn gas(&self) -> IsobaricPorousGas<'a> {
-        self.bins[0].gas()
+    /// Original fluid source and its prescribed background conditions.
+    pub fn fluid(&self) -> &F {
+        self.bins[0].fluid()
     }
     /// Total mean exterior power and direct physical dissipation.
     pub fn power(&self) -> PorousSpectrumPower {
@@ -419,14 +430,16 @@ impl<'a> PorousSpectrumHeating<'a> {
         for (index, cell) in self.heat.cells.iter().enumerate() {
             checkpoint()?;
             let temperature = thermal.temperature_k(cell.cell)?;
-            if temperature.to_bits() == self.bins[0].states[index].temperature.to_bits() {
+            if temperature.to_bits()
+                == self
+                    .fluid()
+                    .temperature_k(&self.bins[0].states[index])
+                    .to_bits()
+            {
                 continue;
             }
-            changed.push((index, self.gas().evaluate(temperature)?));
-            work.gas_evaluations = work
-                .gas_evaluations
-                .checked_add(1)
-                .ok_or(DepositionError::Budget("porous spectral gas evaluations"))?;
+            changed.push((index, fluid::evaluate(self.fluid(), temperature)?));
+            work.record_fluid::<F>()?;
         }
         if changed.is_empty() {
             return Ok(());
@@ -450,7 +463,7 @@ impl<'a> PorousSpectrumHeating<'a> {
         target_s: f64,
         config: StepConfig,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
-    ) -> Result<PorousSpectrumStep<'t, 'a>, PorousHeatingError> {
+    ) -> Result<PorousSpectrumStep<'t, 'a, F>, PorousHeatingError> {
         checkpoint()?;
         let mut observer = SpectrumObserver {
             source: self.clone(),
@@ -565,13 +578,13 @@ pub(super) fn sum_heat_sources<'h>(
 }
 
 #[derive(Clone)]
-struct SpectrumObserver<'a> {
-    source: PorousSpectrumHeating<'a>,
+struct SpectrumObserver<'a, F: PorousTemperatureFluid> {
+    source: PorousSpectrumHeating<'a, F>,
     account: HeatAccount,
     bin_accounts: Vec<HeatAccount>,
     work: PorousFeedbackWork,
 }
-impl DepositionObserver for SpectrumObserver<'_> {
+impl<F: PorousTemperatureFluid> DepositionObserver for SpectrumObserver<'_, F> {
     type Error = PorousHeatingError;
     fn sources(
         &mut self,

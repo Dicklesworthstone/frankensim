@@ -13,6 +13,8 @@ use fs_thermal::enthalpy::*;
 mod refinement;
 #[path = "porous_heating_feedback/termination.rs"]
 mod termination;
+#[path = "porous_heating_feedback/liquid.rs"]
+mod liquid;
 
 const AREA: f64 = 0.004;
 const CP: f64 = 200.0;

@@ -1,7 +1,7 @@
 //! Partially coherent stationary spectra on the original thermal timeline.
 //! Each physical frequency owns one Hermitian PSD RMS pressure covariance.
 //! Its at-most-two positive components share ONE native composed porous stack.
-//! Gas state is evaluated once per changed cell across all frequencies; direct
+//! Fluid state is evaluated once per changed cell across all frequencies; direct
 //! viscous/thermal work sums before one accepted-start thermal advance.
 //!
 //! Ordinary frequency bins remain statistically independent; same-mode
@@ -9,7 +9,7 @@
 //! constructor also admits independent spatial modes at the SAME frequency.
 //! Coherent emitters instead combine phasors or include their cross correlation. This is a
 //! stationary ensemble/long-time mean, not finite-time beating, noise-driven
-//! thermal fluctuations or acoustic transients. All original isobaric gas,
+//! thermal fluctuations or acoustic transients. All original isobaric fluid,
 //! rigid-frame, parallel plane-wave and thermally lumped storage assumptions apply.
 
 use super::spectrum::{
@@ -72,26 +72,26 @@ struct BinResponse<'a> {
 /// A common native thermal specimen under a partially coherent spectrum.
 /// Native coefficients/geometry are prepared once per physical frequency,
 /// not once per covariance component. The source retains the original skeleton,
-/// caloric law, mass and explicit isobaric gas binding at every thermal cell.
+/// caloric law, mass and explicit isobaric fluid binding at every thermal cell.
 #[derive(Clone)]
-pub struct PorousCrossSpectrumHeating<'a> {
+pub struct PorousCrossSpectrumHeating<'a, F: PorousTemperatureFluid = IsobaricPorousGas<'a>> {
     bins: Vec<PorousCovarianceBin>,
     responses: Vec<BinResponse<'a>>,
-    states: Vec<GasState>,
-    gas: IsobaricPorousGas<'a>,
+    states: Vec<F::State>,
+    gas: F,
     options: ComposeOptions,
     heat: PreparedHeat,
 }
 
 /// One jointly accepted native state, spectrum cache and physical energy account.
-pub struct PorousCrossSpectrumStep<'t, 'a> {
+pub struct PorousCrossSpectrumStep<'t, 'a, F: PorousTemperatureFluid = IsobaricPorousGas<'a>> {
     /// Cache evaluated at the returned native thermal temperatures.
-    pub heating: PorousCrossSpectrumHeating<'a>,
+    pub heating: PorousCrossSpectrumHeating<'a, F>,
     /// Native thermal candidate and total acoustic heat, credited once.
     pub step: PorousHeatingStep<'t>,
     /// Diagnostic per-mode energy [J], in increasing (frequency, k_t) order.
     pub bin_energy: Vec<PorousHeatingEnergy>,
-    /// Gas counts are per changed cell; stack counts are per resolved mode.
+    /// Fluid counts are per changed cell; stack counts are per resolved mode.
     pub work: PorousFeedbackWork,
 }
 
@@ -176,6 +176,17 @@ fn prepare_components<'s, 'l, 'm>(
 }
 
 impl<'a> PorousCrossSpectrumHeating<'a> {
+    /// Original gas states, preserving the existing gas-only view.
+    pub fn gas_states(&self) -> &[GasState] {
+        self.fluid_states()
+    }
+    /// Prescribed native gas composition, pressure and explicit support.
+    pub const fn gas(&self) -> IsobaricPorousGas<'a> {
+        self.gas
+    }
+}
+
+impl<'a, F: PorousTemperatureFluid> PorousCrossSpectrumHeating<'a, F> {
     /// Route every frequency/angular mode's positive load work into the same
     /// explicit native backing cell. Modes still share one thermal advance;
     /// their per-bin accounts diagnose, and never duplicate, the summed heat.
@@ -207,7 +218,7 @@ impl<'a> PorousCrossSpectrumHeating<'a> {
     pub fn try_new_terminated(
         thermal: &DepositionSimulation<'_>,
         cells: &[PorousTemperatureCell<'a>],
-        gas: IsobaricPorousGas<'a>,
+        gas: F,
         bins: &[PorousCovarianceBin],
         terminations: &[PassivePorousTermination],
         options: PorousSpectrumOptions,
@@ -230,7 +241,7 @@ impl<'a> PorousCrossSpectrumHeating<'a> {
     pub fn try_new_oblique_terminated(
         thermal: &DepositionSimulation<'_>,
         cells: &[PorousTemperatureCell<'a>],
-        gas: IsobaricPorousGas<'a>,
+        gas: F,
         bins: &[PorousCovarianceBin],
         tangential_wavenumbers_rad_m: &[f64],
         terminations: &[PassivePorousTermination],
@@ -254,7 +265,7 @@ impl<'a> PorousCrossSpectrumHeating<'a> {
     pub fn try_new_independent_modes_terminated(
         thermal: &DepositionSimulation<'_>,
         cells: &[PorousTemperatureCell<'a>],
-        gas: IsobaricPorousGas<'a>,
+        gas: F,
         modes: &[PorousAngularMode],
         terminations: &[PassivePorousTermination],
         options: PorousSpectrumOptions,
@@ -279,7 +290,7 @@ impl<'a> PorousCrossSpectrumHeating<'a> {
     pub fn try_new(
         thermal: &DepositionSimulation<'_>,
         cells: &[PorousTemperatureCell<'a>],
-        gas: IsobaricPorousGas<'a>,
+        gas: F,
         bins: &[PorousCovarianceBin],
         options: PorousSpectrumOptions,
         checkpoint: impl FnMut() -> Result<(), DepositionError>,
@@ -302,7 +313,7 @@ impl<'a> PorousCrossSpectrumHeating<'a> {
     pub fn try_new_oblique(
         thermal: &DepositionSimulation<'_>,
         cells: &[PorousTemperatureCell<'a>],
-        gas: IsobaricPorousGas<'a>,
+        gas: F,
         bins: &[PorousCovarianceBin],
         tangential_wavenumbers_rad_m: &[f64],
         options: PorousSpectrumOptions,
@@ -334,7 +345,7 @@ impl<'a> PorousCrossSpectrumHeating<'a> {
     pub fn try_new_independent_modes(
         thermal: &DepositionSimulation<'_>,
         cells: &[PorousTemperatureCell<'a>],
-        gas: IsobaricPorousGas<'a>,
+        gas: F,
         modes: &[PorousAngularMode],
         options: PorousSpectrumOptions,
         checkpoint: impl FnMut() -> Result<(), DepositionError>,
@@ -353,7 +364,7 @@ impl<'a> PorousCrossSpectrumHeating<'a> {
     fn prepare(
         thermal: &DepositionSimulation<'_>,
         cells: &[PorousTemperatureCell<'a>],
-        gas: IsobaricPorousGas<'a>,
+        gas: F,
         inputs: Inputs<'_>,
         terminations: Option<&[PassivePorousTermination]>,
         options: PorousSpectrumOptions,
@@ -462,7 +473,7 @@ impl<'a> PorousCrossSpectrumHeating<'a> {
         let mut states = Vec::with_capacity(cells.len());
         for cell in cells {
             checkpoint()?;
-            states.push(gas.evaluate(thermal.temperature_k(cell.cell)?)?);
+            states.push(fluid::evaluate(&gas, thermal.temperature_k(cell.cell)?)?);
         }
         let mut responses = Vec::with_capacity(count);
         for &(bin, tangential, termination) in &ordered {
@@ -572,13 +583,13 @@ impl<'a> PorousCrossSpectrumHeating<'a> {
     pub fn cells(&self) -> &[PorousCellHeating] {
         &self.heat.cells
     }
-    /// One cached original gas state per native thermal cell.
-    pub fn gas_states(&self) -> &[GasState] {
+    /// One cached original fluid state per native thermal cell.
+    pub fn fluid_states(&self) -> &[F::State] {
         &self.states
     }
-    /// Prescribed native gas composition, pressure and explicit support.
-    pub const fn gas(&self) -> IsobaricPorousGas<'a> {
-        self.gas
+    /// Original fluid source and its prescribed background conditions.
+    pub const fn fluid(&self) -> &F {
+        &self.gas
     }
     /// Exterior mean powers and direct native cell dissipation across all bins.
     pub fn power(&self) -> PorousSpectrumPower {
@@ -606,15 +617,12 @@ impl<'a> PorousCrossSpectrumHeating<'a> {
         for (i, cell) in self.heat.cells.iter().enumerate() {
             checkpoint()?;
             let temperature = thermal.temperature_k(cell.cell)?;
-            if temperature.to_bits() == self.states[i].temperature.to_bits() {
+            if temperature.to_bits() == self.gas.temperature_k(&self.states[i]).to_bits() {
                 continue;
             }
-            self.states[i] = self.gas.evaluate(temperature)?;
+            self.states[i] = fluid::evaluate(&self.gas, temperature)?;
             changed.push(i);
-            work.gas_evaluations = work
-                .gas_evaluations
-                .checked_add(1)
-                .ok_or(DepositionError::Budget("cross-spectrum gas evaluations"))?;
+            work.record_fluid::<F>()?;
         }
         if changed.is_empty() {
             return Ok(());
@@ -663,7 +671,7 @@ impl<'a> PorousCrossSpectrumHeating<'a> {
         target_s: f64,
         config: StepConfig,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
-    ) -> Result<PorousCrossSpectrumStep<'t, 'a>, PorousHeatingError> {
+    ) -> Result<PorousCrossSpectrumStep<'t, 'a, F>, PorousHeatingError> {
         checkpoint()?;
         let mut observer = CrossSpectrumObserver {
             source: self.clone(),
@@ -702,13 +710,13 @@ impl<'a> PorousCrossSpectrumHeating<'a> {
 }
 
 #[derive(Clone)]
-struct CrossSpectrumObserver<'a> {
-    source: PorousCrossSpectrumHeating<'a>,
+struct CrossSpectrumObserver<'a, F: PorousTemperatureFluid> {
+    source: PorousCrossSpectrumHeating<'a, F>,
     account: HeatAccount,
     bin_accounts: Vec<HeatAccount>,
     work: PorousFeedbackWork,
 }
-impl DepositionObserver for CrossSpectrumObserver<'_> {
+impl<F: PorousTemperatureFluid> DepositionObserver for CrossSpectrumObserver<'_, F> {
     type Error = PorousHeatingError;
     fn sources(
         &mut self,

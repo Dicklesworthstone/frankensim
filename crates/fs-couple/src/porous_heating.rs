@@ -76,6 +76,14 @@ pub enum PorousHeatingError {
     Acoustic(DuctError),
     /// Original gas or porous constitutive/source-domain refusal.
     Material(fs_material::MaterialError),
+    /// Original liquid density/transport refusal with its complete immutable
+    /// source context and the attempted native thermal temperature.
+    LiquidSource {
+        card_identity: fs_blake3::ContentHash,
+        reference_query: fs_matdb::QueryPoint,
+        temperature_k: f64,
+        source: fs_material::liquid::density::LiquidDensityError,
+    },
     /// Unchanged native thermal, domain, budget or cancellation refusal.
     Thermal(DepositionError),
     /// Physical mapping or retained binding is inadmissible.

@@ -26839,6 +26839,48 @@ refinement against an independent two-cell direct-owner RK4 reference with
 conduction, authored heat and outgoing acoustic energy. The nine existing
 fixed-source porous thermal regressions remain unchanged and pass.
 
+### Original liquid-source feedback in the same porous heat owners
+
+The harmonic, spectrum and covariance heating owners accept a defaulted
+`PorousTemperatureFluid` source; existing `IsobaricPorousGas` constructors and
+gas-state views retain their original behavior. `IsobaricPorousLiquid` supplies
+one concrete liquid-saturated path through the existing
+`ResolvedLiquidDensityState`. Its original selected `rho(T,p)` surface and Cp
+derive the same state's thermal expansion, compressibility, Cv and adiabatic
+sound speed. Viscosity and conductivity refresh with them; an original kinematic
+viscosity is converted with the new density. No ideal-gas closure, fitted
+temperature multiplier or alternate porous response is introduced. The native
+local density response retains its own single-phase, derivative-support and
+thermodynamic consistency limits. The general-fluid use of Cp/Cv and adiabatic
+bulk modulus follows the [COMSOL poroacoustics general-fluid derivation](https://doc.comsol.com/6.3/doc/com.comsol.help.aco/aco_ug_pressure.05.182.html).
+
+The liquid binding retains the exact immutable card, typed temperature/pressure
+axes, selected claims and other original context, including composition. It
+admits explicit thermal-support endpoints and every later native temperature
+through the original continuation API; endpoint admission does not fill source
+holes or establish intermediate phase stability. `LiquidSource` refusals retain
+the native liquid error, original card identity, complete reference query and
+attempted temperature. Source and cancellation failures publish neither the
+candidate acoustic cache nor the candidate thermal state.
+
+This is isobaric constitutive continuation of a thermally lumped rigid specimen.
+The original thermal law must justify common liquid/skeleton temperature and
+storage under the prescribed background. Density changes do not move fluid,
+change pore inventory, add stored mass, or alter fixed specimen geometry and
+exterior wave references. Native authored masses and caloric identities remain
+unchanged. Actual positive per-layer viscous/thermal integrals still supply the
+accepted-start thermal watts; external power residuals never become heat.
+
+One original liquid evaluation serves each changed physical cell across all
+frequencies/angular modes. Immutable evidence-bearing states are shared across
+spectral caches and candidate clones. Unchanged temperatures and latent plateaus
+reuse them. `PorousFeedbackWork::fluid_evaluations` counts all changed fluid
+evaluations; its retained `gas_evaluations` field counts only gas sources.
+Focused regressions cover direct original-stack parity at oblique incidence,
+local density/Cp/Cv identities, native accepted-start energy and unchanged mass,
+zero thermal-expansion loss, shared spectral/covariance source work, and atomic
+source-context/cancellation refusal.
+
 <!-- porous-spectrum-feedback:start -->
 ### Stationary finite-band porous heating with native temperature feedback
 
