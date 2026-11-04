@@ -25,6 +25,9 @@
 //! their own owners. Heat transport is explicit and first order; the local
 //! exposure update uses the shared midpoint kernel. Timestep refinement remains
 //! necessary for accuracy. A domain exit or exhausted budget refuses atomically.
+//! Optional per-material adaptivity resolves the local phase history along each
+//! thermal step's linear enthalpy path. It controls local kinetic discrepancies;
+//! the outer heat-transfer discretization retains its own timestep requirement.
 
 use super::{
     Boundary, CellId, DepositedCell, DepositionError, DepositionSimulation, EnergyAudit, Event,
@@ -32,8 +35,8 @@ use super::{
     positive,
 };
 use crate::crystallization::{
-    CrystallizationError, CrystallizationLaw, CrystallizationSolve, CrystallizationState,
-    EquivalentAgeRemelting,
+    AdaptiveCrystallizationStep, CrystallizationAdaptivity, CrystallizationError,
+    CrystallizationLaw, CrystallizationSolve, CrystallizationState, EquivalentAgeRemelting,
 };
 use std::collections::BTreeMap;
 
@@ -109,6 +112,50 @@ pub struct CrystallizationAudit {
     pub maximum_cell_energy_residual_j: f64,
     /// Sum of absolute local represented-heat and caloric defects, J.
     pub absolute_energy_residual_j: f64,
+    /// Work and accepted local error estimates for explicitly adaptive materials.
+    /// Unselected materials do not contribute to these counters or maxima.
+    pub adaptive_phase: CrystallizationAdaptiveAudit,
+}
+
+/// Local phase-integration estimates, separate from thermal transport accuracy.
+/// These are full-step versus two-half-step discrepancies, not rigorous bounds
+/// on the complete trajectory or its phase-transition event times.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CrystallizationAdaptiveAudit {
+    pub accepted_substeps: usize,
+    pub rejected_trials: usize,
+    pub attempted_trials: usize,
+    pub maximum_temperature_discrepancy_k: f64,
+    pub maximum_crystalline_mass_fraction_discrepancy: f64,
+    pub maximum_exposure_discrepancy: f64,
+}
+
+impl CrystallizationAdaptiveAudit {
+    fn include(&mut self, step: &AdaptiveCrystallizationStep) -> Result<(), DepositionError> {
+        let overflow = || DepositionError::Budget("adaptive phase work counters");
+        self.accepted_substeps = self
+            .accepted_substeps
+            .checked_add(step.accepted_substeps)
+            .ok_or_else(overflow)?;
+        self.rejected_trials = self
+            .rejected_trials
+            .checked_add(step.rejected_trials)
+            .ok_or_else(overflow)?;
+        self.attempted_trials = self
+            .attempted_trials
+            .checked_add(step.attempted_trials)
+            .ok_or_else(overflow)?;
+        self.maximum_temperature_discrepancy_k = self
+            .maximum_temperature_discrepancy_k
+            .max(step.maximum_temperature_discrepancy_k);
+        self.maximum_crystalline_mass_fraction_discrepancy = self
+            .maximum_crystalline_mass_fraction_discrepancy
+            .max(step.maximum_crystalline_mass_fraction_discrepancy);
+        self.maximum_exposure_discrepancy = self
+            .maximum_exposure_discrepancy
+            .max(step.maximum_exposure_discrepancy);
+        Ok(())
+    }
 }
 
 /// Clone checkpoints the accepted enthalpy, time, exposure and original sources.
@@ -120,6 +167,7 @@ pub struct CrystallizationSimulation<'a> {
     materials: BTreeMap<MaterialId, CrystallizationMaterial<'a>>,
     states: BTreeMap<CellId, CrystallizationState>,
     remelting: BTreeMap<MaterialId, EquivalentAgeRemelting>,
+    adaptivity: BTreeMap<MaterialId, CrystallizationAdaptivity>,
 }
 
 impl<'a> CrystallizationSimulation<'a> {
@@ -177,6 +225,7 @@ impl<'a> CrystallizationSimulation<'a> {
             materials: map,
             states,
             remelting: BTreeMap::new(),
+            adaptivity: BTreeMap::new(),
         })
     }
 
@@ -217,6 +266,44 @@ impl<'a> CrystallizationSimulation<'a> {
     /// Explicit selected history rule, absent for the original irreversible path.
     pub fn remelting_model(&self, material_id: MaterialId) -> Option<EquivalentAgeRemelting> {
         self.remelting.get(&material_id).copied()
+    }
+
+    /// Resolve one material's kinetic history by bounded local step doubling.
+    ///
+    /// This selection applies to existing cells and subsequent births, including
+    /// selected equilibrium remelting. The source laws, accepted states, heat
+    /// links and event times stay with their original owners. The supplied
+    /// maximum dt must resolve the source's rate variations; error estimation
+    /// cannot detect an arbitrarily narrow unobserved rate peak.
+    ///
+    /// Controls limit each material-cell advance inside one outer thermal step.
+    /// The thermal cell/substep budgets separately bound the number of advances.
+    /// Heat rates remain frozen on that outer step, so local kinetic adaptivity
+    /// does not replace heat-transport timestep refinement or its CFL bound.
+    pub fn with_adaptive_phase_integration(
+        mut self,
+        material_id: MaterialId,
+        adaptivity: CrystallizationAdaptivity,
+    ) -> Result<Self, CrystallizationTimelineError> {
+        adaptivity.validate()?;
+        if !self.materials.contains_key(&material_id) {
+            return Err(DepositionError::InvalidInput(
+                "phase adaptivity requires an existing crystallization material",
+            )
+            .into());
+        }
+        if self.adaptivity.contains_key(&material_id) {
+            return Err(DepositionError::InvalidInput(
+                "phase adaptivity requires a unique material selection",
+            )
+            .into());
+        }
+        self.adaptivity.insert(material_id, adaptivity);
+        Ok(self)
+    }
+
+    pub fn phase_adaptivity(&self, material_id: MaterialId) -> Option<CrystallizationAdaptivity> {
+        self.adaptivity.get(&material_id).copied()
     }
 
     pub fn time_s(&self) -> f64 {
@@ -314,6 +401,7 @@ impl<'a> CrystallizationSimulation<'a> {
             crystallized_mass_kg: 0.0,
             maximum_cell_energy_residual_j: 0.0,
             absolute_energy_residual_j: 0.0,
+            adaptive_phase: CrystallizationAdaptiveAudit::default(),
         };
         let mut stored = Sum::default();
         let mut external = Sum::default();
@@ -396,20 +484,35 @@ impl<'a> CrystallizationSimulation<'a> {
                 let heat = finite(dt * rates.watts[&id])?;
                 applied_heat.add(heat)?;
                 let target_h = finite(cell.specific_h_j_kg + heat / cell.mass_kg)?;
-                let (next_h, caloric_defect) =
-                    if let Some(model) = next.materials.get(&cell.material_id) {
-                        let previous = next.states[&id];
-                        // Preserve the exact caller's cancellation/source refusal.
-                        // The local material callback accepts only a boolean.
-                        let mut refused = None;
-                        let mut cancelled = || match checkpoint() {
-                            Ok(()) => false,
-                            Err(error) => {
-                                refused = Some(error);
-                                true
-                            }
-                        };
-                        let result = match next.remelting.get(&cell.material_id) {
+                let (next_h, caloric_defect) = if let Some(model) =
+                    next.materials.get(&cell.material_id)
+                {
+                    let previous = next.states[&id];
+                    // Preserve the exact caller's cancellation/source refusal.
+                    // The local material callback accepts only a boolean.
+                    let mut refused = None;
+                    let mut cancelled = || match checkpoint() {
+                        Ok(()) => false,
+                        Err(error) => {
+                            refused = Some(error);
+                            true
+                        }
+                    };
+                    let result = if let Some(&adaptivity) = next.adaptivity.get(&cell.material_id) {
+                        model
+                            .law
+                            .advance_specific_enthalpy_adaptive(
+                                previous,
+                                target_h,
+                                dt,
+                                controls.caloric,
+                                adaptivity,
+                                next.remelting.get(&cell.material_id).copied(),
+                                &mut cancelled,
+                            )
+                            .map(|step| (step.state, step.caloric_residual_j_kg, Some(step)))
+                    } else {
+                        match next.remelting.get(&cell.material_id) {
                             Some(&remelting) => model.law.advance_specific_enthalpy_with_remelting(
                                 previous,
                                 target_h,
@@ -425,32 +528,37 @@ impl<'a> CrystallizationSimulation<'a> {
                                 controls.caloric,
                                 &mut cancelled,
                             ),
-                        };
-                        if let Some(error) = refused {
-                            return Err(error.into());
                         }
-                        let step = result?;
-                        crystals.add(finite(
-                            cell.mass_kg
-                                * (step.state.crystalline_mass_fraction()
-                                    - previous.crystalline_mass_fraction()),
-                        )?)?;
-                        next.states.insert(id, step.state);
-                        (
-                            step.state.specific_enthalpy_j_kg(),
-                            finite(cell.mass_kg * step.caloric_residual_j_kg.abs())?,
-                        )
-                    } else {
-                        // Ordinary finite bodies use the original immutable law
-                        // and admitted CFL bound. Heat-only links permit either
-                        // original enthalpy or fixed-volume internal-energy storage.
-                        let temperature =
-                            next.thermal.materials[&cell.material_id].temperature_k(target_h)?;
-                        if !positive(temperature) {
-                            return Err(DepositionError::MaterialDomain.into());
-                        }
-                        (target_h, 0.0)
+                        .map(|step| (step.state, step.caloric_residual_j_kg, None))
                     };
+                    if let Some(error) = refused {
+                        return Err(error.into());
+                    }
+                    let (state, caloric_residual, adaptive) = result?;
+                    if let Some(step) = adaptive {
+                        audit.adaptive_phase.include(&step)?;
+                    }
+                    crystals.add(finite(
+                        cell.mass_kg
+                            * (state.crystalline_mass_fraction()
+                                - previous.crystalline_mass_fraction()),
+                    )?)?;
+                    next.states.insert(id, state);
+                    (
+                        state.specific_enthalpy_j_kg(),
+                        finite(cell.mass_kg * caloric_residual.abs())?,
+                    )
+                } else {
+                    // Ordinary finite bodies use the original immutable law
+                    // and admitted CFL bound. Heat-only links permit either
+                    // original enthalpy or fixed-volume internal-energy storage.
+                    let temperature =
+                        next.thermal.materials[&cell.material_id].temperature_k(target_h)?;
+                    if !positive(temperature) {
+                        return Err(DepositionError::MaterialDomain.into());
+                    }
+                    (target_h, 0.0)
+                };
                 let represented = finite(cell.mass_kg * (next_h - cell.specific_h_j_kg))?;
                 let heat_defect = finite(represented - heat)?;
                 let defect = finite(heat_defect.abs() + caloric_defect)?;

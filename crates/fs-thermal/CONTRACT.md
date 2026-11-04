@@ -122,6 +122,42 @@ Five native core regressions cover partial/complete melt, superheat and renewed
 growth, conserved energy, source/domain/history refusal, large datums and
 saturated ages, false-arrest prevention, cancellation and stationary holds.
 
+### Adaptive phase history on a prescribed enthalpy path
+
+`advance_specific_enthalpy_adaptive` reuses the original irreversible or
+explicitly selected remelting kernel. One full step and two half steps follow
+the same linear enthalpy path; acceptance retains the two half steps without
+extrapolating temperature, crystal mass fraction, exposure or energy. Absolute
+temperature, fraction and exposure discrepancies each have an explicit local
+tolerance. Exposure remains part of the comparison when a small crystalline
+fraction would otherwise hide unresolved early history. The original final
+enthalpy is retained exactly, and latent heat remains in that one account.
+
+The controls bound trial count and timestep size; accepted and rejected trials
+both spend that budget. Local caloric/enthalpy-stage overshoots can request
+refinement, while source, state, temperature-domain and cancellation errors
+retain their refusal. A zero-growth coarse/refined pair with active endpoint
+kinetics requests refinement instead of accepting false arrest. Minimum-step,
+represented-time or work exhaustion returns no partial accepted interval.
+
+`CrystallizationSimulation::with_adaptive_phase_integration` selects those
+controls per original material, including existing cells and scheduled births.
+The existing heat-transfer owner still chooses the outer step and supplies its
+linear enthalpy path. Each material-cell advance has its own bounded local
+trial budget; the original cell and outer-step budgets bound their count.
+The timeline reports accepted/rejected work and maximum accepted local
+discrepancies separately from heat and caloric residuals. Clones preserve the
+selection, and any late refusal preserves the original complete timeline.
+
+Local discrepancy estimates do not bound global error, phase-event timing,
+spatial error or the outer first-order heat-transfer error. The maximum local
+timestep must resolve source-rate features: finite samples cannot detect every
+arbitrarily narrow kinetic peak. Thermal/CFL and timestep refinement remain
+independent requirements. Focused timeline cases cover analytic adiabatic
+recalescence inside one outer step, latent reheating and a stationary plateau,
+energy accounting, deterministic replay, budget exhaustion and cancellation;
+these integration cases require the complete native thermal dependency graph.
+
 Layer L3. Shared conservative thermal transport and solid/vapor exchange.
 Runtime dependencies: std, fs-la, fs-math, fs-solver. Spatial discretizations and material
 constitutive data remain owned by their existing crates.
@@ -1277,4 +1313,5 @@ datum invariance, an independent implicit cell balance above explicit CFL, sharp
 extrema, invalid ownership/topology and cancellation. These checks concern
 spatial face reconstruction and stated discrete equations, not a blanket TVD,
 global convergence or arbitrary-source maximum-principle claim.
+
 
