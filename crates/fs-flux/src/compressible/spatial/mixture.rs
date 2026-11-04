@@ -297,6 +297,9 @@ impl MixtureEuler3d {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, Error> {
         stepping::poll::<Error>(&mut cancelled)?;
+        for pair in [boundaries.x, boundaries.y, boundaries.z] {
+            pair.admit::<Error>()?;
+        }
         let bytes = Self::required_workspace_bytes_with_reservoirs(&gas, &grid, reservoirs.len())?
             .checked_add(
                 (states.capacity() - states.len())
@@ -430,6 +433,58 @@ impl MixtureEuler3d {
         self.step_impl(maximum_duration, controls, None, cancelled)
     }
 
+    /// Initial pressure-wave bound shared by Euler and complete split owners.
+    fn pressure_outlet_rate(&self, cancelled: &mut impl FnMut() -> bool) -> Result<f64, Error> {
+        let n = self.gas.species_count();
+        let width = n + 4;
+        let mut rate: f64 = 0.0;
+        let mut outlet_flux = [0.0; WIDTH_LIMIT];
+        for side in BoundarySide::ALL {
+            let axis = side.axis();
+            let sign = side.sign();
+            let super::AxisBoundaries::Ends { lower, upper } = self.boundaries.axis(axis) else {
+                continue;
+            };
+            let BoundaryCondition::PressureOutlet { pressure_pa } =
+                (if sign < 0.0 { lower } else { upper })
+            else {
+                continue;
+            };
+            let [a, b] = tangents(axis);
+            for face in 0..self.grid.face_count(side) {
+                stepping::poll::<Error>(cancelled)?;
+                let mut coordinate = [0; 3];
+                coordinate[axis] = if sign < 0.0 {
+                    0
+                } else {
+                    self.grid.shape[axis] - 1
+                };
+                coordinate[a] = face % self.grid.shape[a];
+                coordinate[b] = face / self.grid.shape[a];
+                let index = self.grid.index(coordinate);
+                let q = cell(&self.states[index * width..(index + 1) * width], n);
+                let flux = self.gas.pressure_outlet_spatial_flux(
+                    q.normal(axis),
+                    sign,
+                    pressure_pa,
+                    &mut outlet_flux[..width],
+                    &mut *cancelled,
+                )?;
+                let density = sum(q.partial_densities.iter().copied());
+                // The characteristic speed includes the sampled face sound
+                // speed; shear is carried unchanged through that wave.
+                rate = rate.max(
+                    flux.signal_speed / self.grid.spacing[axis]
+                        + ((q.momentum[a] / density).abs() + flux.signal_speed)
+                            / self.grid.spacing[a]
+                        + ((q.momentum[b] / density).abs() + flux.signal_speed)
+                            / self.grid.spacing[b],
+                );
+            }
+        }
+        Ok(rate)
+    }
+
     fn step_impl(
         &mut self,
         maximum_duration: Time,
@@ -456,6 +511,7 @@ impl MixtureEuler3d {
                     .sum(),
             );
         }
+        rate = rate.max(self.pressure_outlet_rate(&mut cancelled)?);
         let before = checked_totals(&self.states, &self.grid, n, &mut cancelled)?;
         let mut source_change = ForceChange3d::default();
         let accepted = stepping::advance(
@@ -763,6 +819,10 @@ fn spatial(
                         (true, BoundaryCondition::Transmissive) => {
                             gas.hllc_spatial_flux(q(k), q(k), &mut result[..width], &mut *cancelled)?
                         }
+                        (true, BoundaryCondition::PressureOutlet { pressure_pa }) => gas
+                            .pressure_outlet_spatial_flux(
+                                q(k), sign, pressure_pa, &mut result[..width], &mut *cancelled,
+                            )?,
                         (false, BoundaryCondition::Reflecting) => {
                             face_trace(k, 0.5 * sign, &mut left[..width]);
                             gas.stationary_wall_spatial_flux_from_primitive(
@@ -778,6 +838,16 @@ fn spatial(
                             gas.hllc_spatial_flux_from_primitive(
                                 p,
                                 p,
+                                &mut result[..width],
+                                &mut *cancelled,
+                            )?
+                        }
+                        (false, BoundaryCondition::PressureOutlet { pressure_pa }) => {
+                            face_trace(k, 0.5 * sign, &mut left[..width]);
+                            gas.pressure_outlet_spatial_flux_from_primitive(
+                                normal_primitive(&left[..width], n, axis),
+                                sign,
+                                pressure_pa,
                                 &mut result[..width],
                                 &mut *cancelled,
                             )?

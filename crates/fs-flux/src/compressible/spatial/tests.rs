@@ -706,6 +706,111 @@ fn g0_spatial_geometry_source_and_extensive_admission() {
 }
 
 #[test]
+fn g0_pressure_boundary_enum_reuses_existing_spatial_outlet_and_rejects_overrides() {
+    let grid = CartesianGrid::new(2, 3, 4, 0.1, 0.2, 0.3).unwrap();
+    for side in BoundarySide::ALL {
+        for reconstruction in [Reconstruction::FirstOrder, Reconstruction::Muscl] {
+            let source = gas(0.4);
+            let mut velocity = [0.2, -0.3, 0.1];
+            velocity[side.axis()] = 0.0;
+            let state = State::from_primitive(&source, 1.0, velocity, 1.0).unwrap();
+            let outlet = PressureOutletBoundary {
+                side,
+                pressure_pa: 0.8,
+            };
+            let topology = |condition| {
+                let pair = AxisBoundaries::Ends {
+                    lower: if side.sign() < 0.0 {
+                        condition
+                    } else {
+                        BoundaryCondition::Reflecting
+                    },
+                    upper: if side.sign() > 0.0 {
+                        condition
+                    } else {
+                        BoundaryCondition::Reflecting
+                    },
+                };
+                let mut axes = [AxisBoundaries::Periodic; 3];
+                axes[side.axis()] = pair;
+                Boundaries3d {
+                    x: axes[0],
+                    y: axes[1],
+                    z: axes[2],
+                }
+            };
+            let direct = topology(BoundaryCondition::PressureOutlet {
+                pressure_pa: outlet.pressure_pa,
+            });
+            let mut flow = Euler3d::new(
+                source.clone(),
+                grid,
+                vec![state; grid.len()],
+                direct,
+                || false,
+            )
+            .unwrap();
+            let mut reference = Euler3d::new_with_open_boundaries(
+                source.clone(),
+                grid,
+                vec![state; grid.len()],
+                topology(BoundaryCondition::Transmissive),
+                &[],
+                &[outlet],
+                || false,
+            )
+            .unwrap();
+            let controls = StepControl {
+                reconstruction,
+                ..StepControl::default()
+            };
+            let report = flow.step(Time::new(0.001), controls, || false).unwrap();
+            assert_eq!(
+                report,
+                reference
+                    .step(Time::new(0.001), controls, || false)
+                    .unwrap()
+            );
+            assert_eq!(flow.states(), reference.states());
+            assert_eq!(
+                flow.boundary_impulses(side),
+                reference.boundary_impulses(side)
+            );
+            assert_eq!(flow.pressure_outlet(side), Some(outlet));
+            assert!(
+                Euler3d::new_with_open_boundaries(
+                    source.clone(),
+                    grid,
+                    vec![state; grid.len()],
+                    direct,
+                    &[],
+                    &[outlet],
+                    || false,
+                )
+                .is_err()
+            );
+            let reservoir = ReservoirBoundary {
+                side,
+                density: 1.0,
+                velocity,
+                pressure_pa: 1.0,
+            };
+            assert!(
+                Euler3d::new_with_reservoirs(
+                    source,
+                    grid,
+                    vec![state; grid.len()],
+                    direct,
+                    &[reservoir],
+                    || false,
+                )
+                .is_err()
+            );
+        }
+    }
+}
+
+#[test]
 fn g0_pressure_outlet_preserves_uniform_advection_on_every_side() {
     let grid = CartesianGrid::new(2, 3, 4, 0.1, 0.2, 0.3).unwrap();
     for side in BoundarySide::ALL {

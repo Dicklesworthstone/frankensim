@@ -298,6 +298,8 @@ impl MixtureEuler2d {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, Error> {
         cartesian::poll::<Error>(&mut cancelled)?;
+        boundaries.x.admit::<Error>()?;
+        boundaries.y.admit::<Error>()?;
         let bytes = Self::required_workspace_bytes_with_reservoirs(&gas, &grid, reservoirs.len())?
             .checked_add(
                 (states.capacity() - states.len())
@@ -427,6 +429,32 @@ impl MixtureEuler2d {
         self.step_impl(maximum_duration, controls, None, cancelled)
     }
 
+    /// Initial pressure-wave bound shared by Euler and complete split owners.
+    fn pressure_outlet_rate(&self, cancelled: &mut impl FnMut() -> bool) -> Result<f64, Error> {
+        let n = self.gas.species_count();
+        let width = n + 3;
+        let mut outlet_flux = [0.0; WIDTH_LIMIT];
+        cartesian::pressure_outlet_rate(
+            &self.grid,
+            self.boundaries,
+            cancelled,
+            |index, axis, sign, pressure_pa, cancelled| {
+                let q = cell(&self.states[index * width..(index + 1) * width], n);
+                let flux = self.gas.pressure_outlet_normal_flux(
+                    q.normal(axis),
+                    sign,
+                    pressure_pa,
+                    &mut outlet_flux[..width],
+                    cancelled,
+                )?;
+                let density = sum(q.partial_densities.iter().copied());
+                Ok(flux.signal_speed / self.grid.spacing[axis]
+                    + ((q.momentum[1 - axis] / density).abs() + flux.signal_speed)
+                        / self.grid.spacing[1 - axis])
+            },
+        )
+    }
+
     fn step_impl(
         &mut self,
         maximum_duration: Time,
@@ -453,6 +481,7 @@ impl MixtureEuler2d {
             );
         }
         rate = rate.max(self.reservoirs.maximum_rate(&self.grid));
+        rate = rate.max(self.pressure_outlet_rate(&mut cancelled)?);
         let before = checked_totals(&self.states, &self.grid, n, &mut cancelled)?;
         let mut source_change = ForceChange2d::default();
         let accepted = cartesian::advance(
@@ -821,6 +850,10 @@ fn spatial(
                         (true, BoundaryCondition::Transmissive) => {
                             gas.hllc_normal_flux(q(k), q(k), &mut result[..width], &mut *cancelled)?
                         }
+                        (true, BoundaryCondition::PressureOutlet { pressure_pa }) => gas
+                            .pressure_outlet_normal_flux(
+                                q(k), sign, pressure_pa, &mut result[..width], &mut *cancelled,
+                            )?,
                         (false, BoundaryCondition::Reflecting) => {
                             face_trace(k, 0.5 * sign, &mut left[..width]);
                             gas.stationary_wall_normal_flux_from_primitive(
@@ -836,6 +869,16 @@ fn spatial(
                             gas.hllc_normal_flux_from_primitive(
                                 p,
                                 p,
+                                &mut result[..width],
+                                &mut *cancelled,
+                            )?
+                        }
+                        (false, BoundaryCondition::PressureOutlet { pressure_pa }) => {
+                            face_trace(k, 0.5 * sign, &mut left[..width]);
+                            gas.pressure_outlet_normal_flux_from_primitive(
+                                normal_primitive(&left[..width], n, axis),
+                                sign,
+                                pressure_pa,
                                 &mut result[..width],
                                 &mut *cancelled,
                             )?

@@ -324,6 +324,60 @@ fn g2_g4_coupled_wall_impulses_energy_and_late_cancellation_preserve_one_state()
 }
 
 #[test]
+fn g1_planar_pressure_outlet_bounds_complete_molecular_interval_and_preserves_zero_transport() {
+    let grid = CartesianGrid::new(2, 2, 0.1, 0.1, 0.4).unwrap();
+    let make = || {
+        field(
+            gas(0.0),
+            grid,
+            Boundaries2d {
+                x: AxisBoundaries::Ends {
+                    lower: BoundaryCondition::Reflecting,
+                    upper: BoundaryCondition::PressureOutlet { pressure_pa: 1e-12 },
+                },
+                ..PERIODIC
+            },
+            |_| [1.0, 0.0, 0.0, 1.0],
+        )
+    };
+    let controls = MolecularStepControl {
+        advection: StepControl {
+            cfl: 0.1,
+            maximum_halvings: 0,
+            reconstruction: Reconstruction::FirstOrder,
+        },
+        maximum_coupling_retries: 0,
+        ..MolecularStepControl::default()
+    };
+    for (shear, bulk, conductivity) in [(0.0, 0.0, 0.0), (0.01, 0.005, 0.01)] {
+        let flow = make();
+        let coefficients = law(&flow, shear, bulk, conductivity);
+        let mut coupled = MolecularEuler2d::new(flow, coefficients, || false).unwrap();
+        let report = coupled.step(Time::new(1.0), controls, || false).unwrap();
+        let sonic = 2.0 * 1.4_f64.sqrt() / 2.4;
+        let bound = controls.advection.cfl * 0.1 / (2.0 * 2.0 * sonic);
+        assert!(report.elapsed.value() <= bound * (1.0 + 2e-10));
+        assert_eq!(report.coupling_retries, 0);
+        assert_eq!(report.advection.halvings, 0);
+        assert_eq!(report.first.elapsed.value() * 2.0, report.elapsed.value());
+        assert_eq!(report.second.elapsed, report.first.elapsed);
+        assert_eq!(report.advection.elapsed, report.elapsed);
+        assert!(report.boundary_change.mass < 0.0);
+        for residual in report.conservation_residual.array() {
+            close(residual, 0.0, 3e-12);
+        }
+        if shear == 0.0 {
+            let mut reference = make();
+            let expected = reference
+                .step(Time::new(1.0), controls.advection, || false)
+                .unwrap();
+            assert_eq!(report.advection, expected);
+            assert_eq!(coupled.flow().states(), reference.states());
+        }
+    }
+}
+
+#[test]
 fn g0_zero_transport_recovers_original_euler_and_work_refusal_is_atomic() {
     let init = |x: [f64; 2]| [1.0, 0.1 * x[0], -0.1 * x[1], 2.0];
     let mut reference = planar(4, init);

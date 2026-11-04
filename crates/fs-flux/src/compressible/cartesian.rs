@@ -190,6 +190,41 @@ pub(super) fn neighbour(
     }
 }
 
+/// Visit only pressure-controlled exterior faces, without sweeping interior
+/// faces or allocating scratch. The source callback bounds the whole local
+/// unsplit interval, including transverse advection.
+pub(super) fn pressure_outlet_rate<E: Failure, C: FnMut() -> bool>(
+    grid: &CartesianGrid,
+    boundaries: Boundaries2d,
+    cancelled: &mut C,
+    mut face_rate: impl FnMut(usize, usize, f64, f64, &mut C) -> Result<f64, E>,
+) -> Result<f64, E> {
+    let mut rate: f64 = 0.0;
+    for side in SIDES {
+        let axis = side.axis();
+        let sign = side.sign();
+        let AxisBoundaries::Ends { lower, upper } = boundaries.axis(axis) else {
+            continue;
+        };
+        let BoundaryCondition::PressureOutlet { pressure_pa } =
+            (if sign < 0.0 { lower } else { upper })
+        else {
+            continue;
+        };
+        let position = if sign < 0.0 { 0 } else { grid.shape[axis] - 1 };
+        for line in 0..grid.face_count(side) {
+            poll::<E>(cancelled)?;
+            let cell = if axis == 0 {
+                line * grid.shape[0] + position
+            } else {
+                position * grid.shape[0] + line
+            };
+            rate = rate.max(face_rate(cell, axis, sign, pressure_pa, cancelled)?);
+        }
+    }
+    Ok(rate)
+}
+
 /// MC reconstruction with one source-admitted theta for every component/axis.
 /// A source may limit a coupled leading block before scalar velocity/pressure.
 #[allow(clippy::too_many_arguments)]

@@ -399,7 +399,7 @@ impl ReactingEuler2d {
             n,
             &mut cancelled,
         )?;
-        let mut rate: f64 = 0.0;
+        let mut rate = self.accepted.reservoirs.maximum_rate(&self.accepted.grid);
         for row in self.accepted.states.chunks_exact(n + 3) {
             let p = cell(row, n).primitive(&self.accepted.gas, &mut cancelled)?;
             if let Some((_, control, _)) = forcing.as_ref() {
@@ -410,8 +410,10 @@ impl ReactingEuler2d {
                     + (p.velocity[1].abs() + p.sound_speed) / self.accepted.grid.spacing[1],
             );
         }
-        // A modest pre-chemistry margin avoids paying for predictably rejected
-        // acoustic intervals. The actual post-reaction faces still own CFL.
+        rate = rate.max(self.accepted.pressure_outlet_rate(&mut cancelled)?);
+        // The same pressure-wave bound as the transport owner chooses the
+        // complete split interval before chemistry spends work on either half.
+        // Heat release can still increase the actual post-reaction face CFL.
         let mut dt = maximum_duration
             .value()
             .min(0.8 * controls.transport.cfl / rate);

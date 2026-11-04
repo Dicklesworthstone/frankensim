@@ -573,27 +573,35 @@ fn g0_spatial_molecular_budget_capacity_and_boundary_ownership_are_explicit() {
             .iter()
             .all(|(s, p, e)| *s == [0.0; 3] && *p == [0.0; 3] && *e == 0.0)
     );
-    flow.boundaries.z = OPEN;
-    assert!(matches!(
-        op.advance(
-            &mut flow,
-            Time::new(0.001),
-            DissipationControl::default(),
-            || false
-        ),
-        Err(DissipationError::Invalid(_))
-    ));
-    assert_eq!(flow.states(), before);
-    let source = SpatialTransport::new(
-        flow.gas().clone(),
-        law(flow.gas(), 0.01, 0.02, 0.0, 0.03),
-        || false,
-    )
-    .unwrap();
-    assert!(matches!(
-        MolecularTransport3d::new(&flow, source, MAX_MIXTURE_WORKSPACE_BYTES, || false),
-        Err(DissipationError::Invalid(_))
-    ));
+    for boundary in [
+        OPEN,
+        AxisBoundaries::Ends {
+            lower: BoundaryCondition::Reflecting,
+            upper: BoundaryCondition::PressureOutlet { pressure_pa: 0.8 },
+        },
+    ] {
+        flow.boundaries.z = boundary;
+        assert!(matches!(
+            op.advance(
+                &mut flow,
+                Time::new(0.001),
+                DissipationControl::default(),
+                || false
+            ),
+            Err(DissipationError::Invalid(_))
+        ));
+        assert_eq!(flow.states(), before);
+        let source = SpatialTransport::new(
+            flow.gas().clone(),
+            law(flow.gas(), 0.01, 0.02, 0.0, 0.03),
+            || false,
+        )
+        .unwrap();
+        assert!(matches!(
+            MolecularTransport3d::new(&flow, source, MAX_MIXTURE_WORKSPACE_BYTES, || false),
+            Err(DissipationError::Invalid(_))
+        ));
+    }
 }
 
 #[test]

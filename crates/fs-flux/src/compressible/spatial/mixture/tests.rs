@@ -7,6 +7,7 @@ use fs_qty::Length;
 use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
 
 mod molecular;
+mod pressure_outlet;
 mod reservoir;
 
 const PERIODIC: Boundaries3d = Boundaries3d {

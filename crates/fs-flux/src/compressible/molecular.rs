@@ -382,6 +382,7 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
                         dt,
                         false,
                         None,
+                        None,
                         &mut cancelled,
                     )?;
                     capture_boundaries(
@@ -418,6 +419,7 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
                         &mut self.work.candidate,
                         dt,
                         true,
+                        None,
                         None,
                         &mut cancelled,
                     )?;

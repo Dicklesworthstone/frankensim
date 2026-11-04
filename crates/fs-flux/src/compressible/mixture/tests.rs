@@ -4,6 +4,7 @@ mod molecular;
 mod molecular_coupled;
 mod reactive;
 mod reservoir;
+mod pressure_outlet;
 use crate::compressible::{AxisBoundaries, Euler2d, FrozenGas, SIDES, State};
 use fs_evidence::ValidityDomain;
 use fs_gas::multicomponent::{Boundaries, Boundary, CaloricDomain, MixtureEuler1d};

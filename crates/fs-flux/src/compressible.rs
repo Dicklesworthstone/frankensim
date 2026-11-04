@@ -156,16 +156,24 @@ const SIDES: [BoundarySide; 4] = [
 ];
 
 /// Physical treatment at a stationary exterior face.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum BoundaryCondition {
     /// Zero-gradient continuation, not a nonreflecting subsonic outlet.
     Transmissive,
     /// Impermeable, adiabatic slip wall with zero mass and energy flux.
     Reflecting,
+    /// Positive absolute backpressure [Pa] on an outgoing gas characteristic.
+    /// The original EOS supplies the shock/expansion and sonic face state;
+    /// the interior supplies composition, entropy and tangential velocity.
+    /// Reverse flow refuses because pressure alone does not define an inlet.
+    PressureOutlet {
+        /// Externally maintained absolute pressure [Pa].
+        pressure_pa: f64,
+    },
 }
 
 /// Periodic axes share exactly the same face flux at both ends.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum AxisBoundaries {
     /// Identify the two ends of this axis.
     Periodic,
@@ -177,9 +185,25 @@ pub enum AxisBoundaries {
         upper: BoundaryCondition,
     },
 }
+impl AxisBoundaries {
+    fn admit<E: cartesian::Failure>(self) -> Result<(), E> {
+        if let Self::Ends { lower, upper } = self {
+            for condition in [lower, upper] {
+                if let BoundaryCondition::PressureOutlet { pressure_pa } = condition
+                    && !positive(pressure_pa)
+                {
+                    return Err(E::invalid(
+                        "pressure outlet needs positive finite absolute pressure",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
 
 /// Independent x and y boundary pairs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Boundaries2d {
     /// Conditions normal to x.
     pub x: AxisBoundaries,
@@ -385,6 +409,8 @@ impl Euler2d {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, Error> {
         poll(&mut cancelled)?;
+        boundaries.x.admit::<Error>()?;
+        boundaries.y.admit::<Error>()?;
         if states.len() != grid.len() {
             return Err(Error::Invalid("Cartesian state count"));
         }
@@ -530,9 +556,17 @@ impl Euler2d {
                     + (p.velocity[1].abs() + p.sound_speed) / self.grid.spacing[1],
             );
         }
+        rate = rate.max(pressure_outlet_rate(
+            &self.gas,
+            &self.grid,
+            self.boundaries,
+            &self.states,
+            self.hydrostatic.as_ref(),
+            &mut cancelled,
+        )?);
         let before = checked_totals(&self.states, self.grid.cell_volume(), &mut cancelled)?;
         let mut source_change = ForceChange2d::default();
-        let accepted = cartesian::advance(
+        let accepted = cartesian::advance::<Error, _>(
             maximum_duration.value(),
             self.time,
             rate,
@@ -833,6 +867,10 @@ fn spatial(
                     let q = states[k].normal(axis);
                     gas.hllc_normal_flux(q, q, &mut *cancelled)?
                 }
+                (true, BoundaryCondition::PressureOutlet { pressure_pa }) => gas
+                    .pressure_outlet_normal_flux(
+                        states[k].normal(axis), sign, pressure_pa, &mut *cancelled,
+                    )?,
                 (false, BoundaryCondition::Reflecting) => gas
                     .stationary_wall_normal_flux_from_primitive(
                         reconstruct(k, 0.5 * sign),
@@ -843,6 +881,10 @@ fn spatial(
                     let p = reconstruct(k, 0.5 * sign);
                     gas.hllc_normal_flux_from_primitive(p, p, &mut *cancelled)?
                 }
+                (false, BoundaryCondition::PressureOutlet { pressure_pa }) => gas
+                    .pressure_outlet_normal_flux_from_primitive(
+                        reconstruct(k, 0.5 * sign), sign, pressure_pa, &mut *cancelled,
+                    )?,
             }
         };
         stats.fallback += usize::from(flux.used_hll_fallback);
@@ -865,6 +907,70 @@ fn spatial(
         cancelled,
     )?;
     Ok(stats)
+}
+
+fn pressure_outlet_rate(
+    gas: &FrozenGas,
+    grid: &CartesianGrid,
+    boundaries: Boundaries2d,
+    states: &[State],
+    hydrostatic: Option<&hydrostatic::HydrostaticBalance>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<f64, Error> {
+    cartesian::pressure_outlet_rate(
+        grid,
+        boundaries,
+        cancelled,
+        |cell, axis, sign, p, cancelled| {
+            let q = states[cell];
+            let (flux, shear) = if let Some(balance) = hydrostatic {
+                let primitive = balance.primitive(gas, grid, cell, q, cancelled)?;
+                let relative = balance.variables(grid, cell, primitive)?;
+                let reference = balance.trace(grid, cell, axis, sign);
+                let trace = [
+                    reference[0] * relative[0],
+                    relative[1],
+                    relative[2],
+                    reference[3] * relative[3],
+                ];
+                let temperature = (trace[3] / trace[0]) / gas.gas_constant();
+                // Match the native zero-slope physical face and its admission
+                // fallback. Using a stratified volume average here could mistake
+                // a resting high-pressure face for reversed flow.
+                let trace = if trace.into_iter().all(f64::is_finite)
+                    && positive(trace[0])
+                    && positive(trace[3])
+                    && (gas.domain().minimum_temperature..=gas.domain().maximum_temperature)
+                        .contains(&temperature)
+                {
+                    trace
+                } else {
+                    primitive.array()
+                };
+                (
+                    gas.pressure_outlet_normal_flux_from_primitive(
+                        NormalPrimitive {
+                            density: trace[0],
+                            normal_velocity: trace[axis + 1],
+                            transverse_velocity: trace[2 - axis],
+                            pressure: trace[3],
+                        },
+                        sign,
+                        p,
+                        cancelled,
+                    )?,
+                    trace[2 - axis],
+                )
+            } else {
+                (
+                    gas.pressure_outlet_normal_flux(q.normal(axis), sign, p, cancelled)?,
+                    q.momentum[1 - axis] / q.density,
+                )
+            };
+            Ok(flux.signal_speed / grid.spacing[axis]
+                + (shear.abs() + flux.signal_speed) / grid.spacing[1 - axis])
+        },
+    )
 }
 
 fn face_index(grid: &CartesianGrid, axis: usize, face: usize, line: usize) -> usize {
