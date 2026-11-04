@@ -121,6 +121,7 @@ pub use electric::motion::{ElectricMotionInput, MovingConductorSolution};
 pub use electric::{
     Conductor, ElectricSetup, ElectricSolution, ElectricalContact, Electrode, ElectrodeDrive,
     ElectrodeSolution, ElectrothermalReport, solve_electric, solve_electrothermal,
+    solve_electrothermal_with_contacts,
 };
 pub use energy::{
     AdvectiveEnthalpyField, AffineSpecificEnthalpy, CellSink, CompactComponent, ContactResistance,

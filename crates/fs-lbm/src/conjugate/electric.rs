@@ -22,6 +22,8 @@
 //! cell's temperature, the potential, the Joule heat as a source, the
 //! temperature, repeated to a fixed point (one pass when no conductor
 //! depends on temperature).
+//! [`solve_electrothermal_with_contacts`] includes explicit resistive-joint
+//! heating in the same temperature feedback loop.
 //!
 //! No-claims: DC only (no skin effect, inductance or capacitance); ohmic,
 //! isotropic bulk conductors and explicit zero-thickness resistive contacts;
@@ -246,10 +248,14 @@ pub struct ElectricSolution {
 /// Evidence of the electro-thermal fixed point.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ElectrothermalReport {
-    /// Potential/temperature passes.
+    /// Thermal solves performed. Temperature-dependent laws also require
+    /// one final electrical evaluation at the accepted temperature.
     pub passes: usize,
     /// Largest temperature change of the last pass, K.
     pub temperature_change_k: f64,
+    /// Largest per-cell difference between the Joule heat used by the thermal
+    /// solve and the electrical field re-evaluated at its returned temperature, W.
+    pub joule_source_change_w: f64,
 }
 
 /// Where a cell sits in the potential system.
@@ -792,9 +798,12 @@ fn poll_every(gate: &CancelGate, i: usize) -> Result<(), ChtError> {
 
 /// Couple the potential and the temperature: Joule heat from the potential
 /// at the current temperature joins `thermal`'s sources, `energy` solves
-/// the temperature, and the two repeat until the largest temperature
-/// change falls below `1e-9` of the temperature span (one pass when no
-/// conductor depends on temperature).
+/// the temperature, and the two repeat until both temperature and local Joule
+/// heat converge. The returned electrical field is evaluated at the returned
+/// temperature, including on the accepted pass. Temperature tolerance is
+/// `1e-9 * max(span, 1 K)`; each cell's source tolerance is `1e-12 W` plus
+/// `1e-9` of that cell's peak old/new heat. Temperature-independent conductors
+/// retain one electrical and one thermal solve.
 ///
 /// # Errors
 /// The refusals of [`solve_electric`] and of `energy`;
@@ -804,64 +813,131 @@ pub fn solve_electrothermal(
     domain: &VoxelDomain,
     electric: &ElectricSetup,
     thermal: &ThermalSetup,
+    energy: impl FnMut(&ThermalSetup) -> Result<EnergySolution, ChtError>,
+    gate: &CancelGate,
+) -> Result<(EnergySolution, ElectricSolution, ElectrothermalReport), ChtError> {
+    solve_electrothermal_with_contacts(domain, electric, thermal, &[], energy, gate)
+}
+
+/// Couple native bulk resistivity and explicitly declared resistive joints to
+/// the existing thermal owner. Contacts retain their authored area resistance
+/// and surface heat partition throughout the solve. Bulk and contact Joule
+/// heat enter `thermal`'s sources exactly once, including contact heat assigned
+/// to an electrode cell. Thermal contact resistance is independently declared
+/// in `thermal`; electrical resistance never substitutes for it.
+///
+/// The convergence and endpoint guarantees are those of [`solve_electrothermal`].
+/// For temperature-dependent contact laws use the source-resolved
+/// [`super::material_coupling::interfaces`] owner instead.
+///
+/// # Errors
+/// Invalid contacts, the refusals of [`solve_electrothermal`], malformed thermal
+/// fields or source powers, or cancellation. No partial solution is returned.
+#[allow(clippy::too_many_lines)] // coupled physical field and local source convergence
+pub fn solve_electrothermal_with_contacts(
+    domain: &VoxelDomain,
+    electric: &ElectricSetup,
+    thermal: &ThermalSetup,
+    contacts: &[ElectricalContact],
     mut energy: impl FnMut(&ThermalSetup) -> Result<EnergySolution, ChtError>,
     gate: &CancelGate,
 ) -> Result<(EnergySolution, ElectricSolution, ElectrothermalReport), ChtError> {
     const PASSES: usize = 200;
+    const RELATIVE: f64 = 1e-9;
+    poll(gate)?;
     let cells = domain.cell_count();
+    if !thermal.power_w.is_empty() && thermal.power_w.len() != cells {
+        return Err(ChtError::InvalidInput {
+            field: "electrothermal.power_w",
+            reason: "needs one source per cell or an empty field".into(),
+        });
+    }
+    for &power in &thermal.power_w {
+        finite("electrothermal.power_w", power)?;
+    }
     let coupled = electric.temperature_dependent();
     let mut heated = thermal.clone();
     let mut temperature: Option<Vec<f64>> = None;
-    let mut change = f64::INFINITY;
+    // Reuse the endpoint electrical solve as the next pass's input, so source
+    // convergence requires only one additional final solve when coupled.
+    let electrical = |temperature: Option<&[f64]>| {
+        solve_electric_impl(domain, electric, temperature,
+            |_, _, point, conductor| Ok(point.map_or(conductor.resistivity_ohm_m,
+                |t| conductor.resistivity(t))), contacts, gate)
+    };
+    let mut field = electrical(None)?;
+    let mut residual = f64::INFINITY;
     for pass in 1..=PASSES {
         poll(gate)?;
-        let field = solve_electric(domain, electric, temperature.as_deref(), gate)?;
-        heated.power_w = if thermal.power_w.is_empty() {
-            field.joule_w.clone()
-        } else {
-            thermal
-                .power_w
-                .iter()
-                .zip(&field.joule_w)
-                .map(|(p, q)| p + q)
-                .collect()
-        };
-        debug_assert_eq!(heated.power_w.len(), cells);
-        let solution = energy(&heated)?;
-        if let Some(previous) = &temperature {
-            change = previous
-                .iter()
-                .zip(&solution.temperature)
-                .fold(0.0f64, |m, (a, b)| m.max((a - b).abs()));
+        heated.power_w.clone_from(&field.joule_w);
+        for (power, authored) in heated.power_w.iter_mut().zip(&thermal.power_w) {
+            *power += authored;
+            finite("electrothermal.combined_power_w", *power)?;
         }
+        let solution = energy(&heated)?;
+        poll(gate)?;
+        if solution.temperature.len() != cells {
+            return Err(ChtError::InvalidInput {
+                field: "electrothermal.temperature",
+                reason: "needs one temperature per cell".into(),
+            });
+        }
+        for &t in &solution.temperature {
+            finite_positive("electrothermal.temperature", t)?;
+        }
+        if !coupled {
+            poll(gate)?;
+            return Ok((solution, field, ElectrothermalReport {
+                passes: pass, temperature_change_k: 0.0, joule_source_change_w: 0.0,
+            }));
+        }
+        let next = electrical(Some(&solution.temperature))?;
+        let change = temperature.as_ref().map_or(f64::INFINITY, |previous| {
+            previous.iter().zip(&solution.temperature)
+                .fold(0.0f64, |m, (a, b)| m.max((a - b).abs()))
+        });
+        // Check each cell in watts, independently of its storage or another
+        // cell's source magnitude. Small temperature changes in strongly
+        // cooled or high-capacity regions cannot mask inconsistent heating.
+        let (power_change, power_residual) = field.joule_w.iter().zip(&next.joule_w)
+            .fold((0.0f64, 0.0f64), |(change, residual), (old, new)| {
+                let difference = (old - new).abs();
+                let limit = 1e-12 + RELATIVE * old.abs().max(new.abs());
+                (change.max(difference), residual.max(difference / limit))
+            });
         let (lo, hi) = solution
             .temperature
             .iter()
             .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), t| {
                 (lo.min(*t), hi.max(*t))
             });
-        if !coupled || change <= 1e-9 * (hi - lo).max(1.0) {
+        residual = (change / (RELATIVE * (hi - lo).max(1.0))).max(power_residual);
+        if residual <= 1.0 {
+            poll(gate)?;
             return Ok((
                 solution,
-                field,
+                next,
                 ElectrothermalReport {
                     passes: pass,
-                    temperature_change_k: if coupled { change } else { 0.0 },
+                    temperature_change_k: change,
+                    joule_source_change_w: power_change,
                 },
             ));
         }
-        if !(hi.is_finite() && lo.is_finite()) {
-            break;
-        }
         temperature = Some(solution.temperature);
+        field = next;
     }
     Err(ChtError::SolverNotConverged {
         system: "electrothermal (thermal runaway?)",
         iterations: PASSES,
-        relative_residual: change,
-        tolerance: 1e-9,
+        relative_residual: residual,
+        tolerance: 1.0,
     })
 }
+
+#[cfg(test)]
+#[path = "electric/electrothermal_tests.rs"]
+mod electrothermal_tests;
 
 #[cfg(test)]
 mod material_tests {

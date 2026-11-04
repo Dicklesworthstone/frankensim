@@ -5167,13 +5167,32 @@ BiCGStab fallback); fluid, insulators and the domain boundary carry no
 current. Each face dissipates `G_f dphi^2`, split by half resistance, so
 the Joule heat equals the electrodes' `sum V I` (discrete Tellegen) to
 solver precision. `solve_electrothermal` adds the Joule heat to the
-sources and iterates potential and temperature (resistivity at the
-previous pass) until the largest change is 1e-9 of the span; 200 passes
-refuse as `SolverNotConverged { system: "electrothermal (thermal
-runaway?)" }`, the answer for a current-driven conductor past runaway.
+sources and iterates potential and temperature. Its accepted electrical
+field is re-evaluated at the returned thermal temperature, with that solve
+cached between passes. Acceptance requires both a temperature change below
+`1e-9 * max(span, 1 K)` and every cell's Joule-source mismatch below
+`1e-12 W + 1e-9 * max(old, new local power)`. Source differences retain
+watts per cell, independently of heat capacity or other cells' power;
+`ElectrothermalReport::joule_source_change_w` reports the largest mismatch.
+Temperature-independent conductors retain one electrical and one thermal
+solve. After 200 thermal passes the loop refuses as
+`SolverNotConverged { system: "electrothermal (thermal runaway?)" }`,
+the answer for a current-driven conductor past runaway.
 Refusals: no voltage electrode, overlapping or touching electrodes, a
 current electrode with no conducting path to a voltage electrode, a
 non-positive resistivity at the solved temperature.
+
+`solve_electrothermal_with_contacts` includes explicit `ElectricalContact`
+area resistances in series with bulk half-cell resistances. Contact Joule
+heat follows each declared surface partition, including heat assigned to
+electrode cells, and joins bulk heat and authored power exactly once.
+Electrical contacts do not infer or replace thermal contact resistances.
+The contact values stay fixed throughout this native-law solve; the existing
+source-resolved material coupling owns temperature-dependent contact laws.
+Focused G1 regressions in `electric/electrothermal_tests.rs` compare the
+three-cell thermal resistance network, an independent voltage-driven cubic,
+and a strongly cooled resistor whose small temperature update would otherwise
+hide a resolved Joule-source mismatch.
 
 | Fixture | Reference | Measured |
 |---|---|---|
@@ -5182,7 +5201,8 @@ non-positive resistivity at the solved temperature.
 | Same, 3.5 x the current (`m L / 2 = 1.75 > pi / 2`) | no steady state | refused (electrothermal) |
 
 No-claims: DC only (no skin effect, inductance or capacitance); ohmic,
-isotropic conductors; no electrical contact resistance; ideal electrodes.
+isotropic conductors; ideal electrodes; no inferred contact resistance,
+surface heat partition, or contact pressure/dynamics model.
 
 ### Two-resistor compact components (`CompactComponent`)
 
