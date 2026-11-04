@@ -28,7 +28,8 @@ impl<'m> LossLaw<'m> {
                 &[],
             ),
             DielectricResponse::Ohmic(conductor) => (
-                linear_electric_permittivity(conductor.material()).map_err(ReflectionError::from)?,
+                linear_electric_permittivity(conductor.material())
+                    .map_err(ReflectionError::from)?,
                 ohmic_conductivity(conductor)?,
                 &[],
             ),
@@ -37,20 +38,30 @@ impl<'m> LossLaw<'m> {
                 0.0,
                 dielectric.poles(),
             ),
-            DielectricResponse::DebyeWithOhmic { dielectric, conductor } => (
+            DielectricResponse::DebyeWithOhmic {
+                dielectric,
+                conductor,
+            } => (
                 dielectric.high_frequency_permittivity_f_m(),
                 shared_ohmic_conductivity(dielectric, conductor)?,
                 dielectric.poles(),
             ),
-            DielectricResponse::OpticalConductor(_) | DielectricResponse::OpticalMaterial(_) => {
+            DielectricResponse::OpticalConductor(_)
+            | DielectricResponse::OpticalMaterial(_)
+            | DielectricResponse::SpectralOptical(_) => {
                 return Err(bad(
                     "finite-window film heat needs an original causal material reservoir",
                 ));
             }
         };
-        let permeability = linear_magnetic_permeability(response.material())
-            .map_err(ReflectionError::from)?;
-        Ok(Self { epsilon_infinity, permeability, conductivity, poles })
+        let permeability =
+            linear_magnetic_permeability(response.material()).map_err(ReflectionError::from)?;
+        Ok(Self {
+            epsilon_infinity,
+            permeability,
+            conductivity,
+            poles,
+        })
     }
 }
 
@@ -66,8 +77,13 @@ impl PoleTransfer {
     pub fn new(pole: DebyePole, omega: f64) -> Result<Self, AngularSpectrumError> {
         let delta = pole.permittivity_increment_f_m;
         let tau = pole.relaxation_time_s;
-        if [delta, tau, omega].iter().any(|v| !v.is_finite() || *v <= 0.0) {
-            return Err(bad("settled Debye response needs positive source poles and frequency"));
+        if [delta, tau, omega]
+            .iter()
+            .any(|v| !v.is_finite() || *v <= 0.0)
+        {
+            return Err(bad(
+                "settled Debye response needs positive source poles and frequency",
+            ));
         }
         let root_delta = det::sqrt(delta);
         let root_tau = det::sqrt(tau);
@@ -111,7 +127,11 @@ fn multiply_three(a: f64, b: f64, c: f64) -> f64 {
 fn divide_product(value: f64, a: f64, b: f64) -> f64 {
     let (small, large) = (a.min(b), a.max(b));
     let first = value / small;
-    if first.is_finite() { first / large } else { (value / large) / small }
+    if first.is_finite() {
+        first / large
+    } else {
+        (value / large) / small
+    }
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-//! Homogeneous visible dispersion and intensity-attenuation conversions.
+//! Homogeneous spectral dispersion and intensity-attenuation conversions.
 //!
 //! Source/quantity admission stays with the material bridge. Wavelengths are
 //! vacuum wavelengths; alpha is power absorption per physical metre. Therefore
@@ -14,16 +14,30 @@ pub(super) const FREQUENCY_WAVELENGTH_NM: f64 = core::f64::consts::TAU * LIGHT_S
 pub(super) const VISIBLE_BAND_NM: [f64; 2] = [380.0, 780.0];
 
 pub(super) fn visible_wavelength_nm(omega: f64) -> Option<f64> {
-    let [low, high] = VISIBLE_BAND_NM;
-    if !omega.is_finite()
-        || omega < FREQUENCY_WAVELENGTH_NM / high
-        || omega > FREQUENCY_WAVELENGTH_NM / low
+    wavelength_from_frequency(omega, FREQUENCY_WAVELENGTH_NM, VISIBLE_BAND_NM)
+}
+
+// Wavelength units are those of both the constant and the original bounds.
+// Check frequency before any division-rounding correction at source endpoints.
+pub(super) fn wavelength_from_frequency(
+    omega: f64,
+    frequency_wavelength: f64,
+    [low, high]: [f64; 2],
+) -> Option<f64> {
+    let minimum = frequency_wavelength / high;
+    let maximum = frequency_wavelength / low;
+    if ![omega, frequency_wavelength, low, high, minimum, maximum]
+        .iter()
+        .all(|v| v.is_finite() && *v > 0.0)
+        || high <= low
+        || omega < minimum
+        || omega > maximum
     {
         return None;
     }
     // Admission precedes rounding correction, so one adjacent frequency
     // outside the supported band cannot be clamped into a usable source.
-    Some((FREQUENCY_WAVELENGTH_NM / omega).clamp(low, high))
+    Some((frequency_wavelength / omega).clamp(low, high))
 }
 
 pub(super) fn cauchy_index([a, b_m2, c_m4]: [f64; 3], wavelength_nm: f64) -> Option<f64> {
@@ -88,16 +102,21 @@ pub(super) fn admits_sellmeier_band(strengths: [f64; 3], resonances_m2: [f64; 3]
 }
 
 pub(super) fn attenuating_index(n: f64, alpha_per_m: f64, wavelength_nm: f64) -> Option<C64> {
+    attenuating_index_m(n, alpha_per_m, wavelength_nm * 1e-9)
+}
+
+/// SI source wavelengths do not round-trip through nanometres before loss.
+pub(super) fn attenuating_index_m(n: f64, alpha_per_m: f64, wavelength_m: f64) -> Option<C64> {
     if !n.is_finite()
         || n <= 0.0
         || !alpha_per_m.is_finite()
         || alpha_per_m < 0.0
-        || !wavelength_nm.is_finite()
-        || wavelength_nm <= 0.0
+        || !wavelength_m.is_finite()
+        || wavelength_m <= 0.0
     {
         return None;
     }
-    let k = alpha_per_m * (wavelength_nm * 1e-9 / (4.0 * core::f64::consts::PI));
+    let k = alpha_per_m * (wavelength_m / (4.0 * core::f64::consts::PI));
     if !k.is_finite() || (alpha_per_m > 0.0 && k == 0.0) {
         return None;
     }
@@ -161,6 +180,45 @@ mod tests {
         assert!(admits_sellmeier_band([0.0; 3], [hidden_pole, 0.0, 0.0]));
         assert!(attenuating_index(1.5, -1.0, 550.0).is_none());
         assert!(attenuating_index(1.5, f64::from_bits(1), 550.0).is_none());
+    }
+
+    #[test]
+    fn original_finite_bands_keep_si_power_loss_and_strict_frequency_edges() {
+        let constant = core::f64::consts::TAU * LIGHT_SPEED_M_S;
+        for band in [[8e-6, 14e-6], [2e-4, 3e-4], [0.01, 0.02]] {
+            let low_frequency = constant / band[1];
+            let high_frequency = constant / band[0];
+            assert_eq!(
+                wavelength_from_frequency(low_frequency, constant, band),
+                Some(band[1])
+            );
+            assert_eq!(
+                wavelength_from_frequency(high_frequency, constant, band),
+                Some(band[0])
+            );
+            for omega in [
+                low_frequency.next_down(),
+                high_frequency.next_up(),
+                0.0,
+                f64::NAN,
+            ] {
+                assert!(wavelength_from_frequency(omega, constant, band).is_none());
+            }
+            let wavelength = (band[0] + band[1]) * 0.5;
+            let alpha = 0.7 / wavelength;
+            let index = attenuating_index_m(1.7, alpha, wavelength).unwrap();
+            let normal_wavenumber = index.scale(core::f64::consts::TAU / wavelength);
+            assert!((-2.0 * normal_wavenumber.im / alpha - 1.0).abs() < 5e-15);
+            let field = det::exp(normal_wavenumber.im * wavelength);
+            assert!((field * field - det::exp(-0.7)).abs() < 4e-16);
+            let mu = 1.7e-6;
+            let epsilon = permittivity(index, 1.0 / (LIGHT_SPEED_M_S * det::sqrt(mu))).unwrap();
+            let dispersion = epsilon.scale(mu * (constant / wavelength).powi(2));
+            assert!(
+                (dispersion - normal_wavenumber * normal_wavenumber).abs()
+                    < 6e-15 * dispersion.abs()
+            );
+        }
     }
 
     #[test]

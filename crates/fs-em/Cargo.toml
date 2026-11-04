@@ -11,7 +11,7 @@ description = "Material-resolved planar magnetostatics on the shared FEEC and so
 layer = "L3"
 
 [features]
-plane-wave = ["dep:fs-fft"]
+plane-wave = ["dep:fs-fft", "dep:fs-matdb"]
 harmonic-exposure = ["dep:fs-fft"]
 
 [dependencies]
@@ -21,6 +21,7 @@ fs-fft = { path = "../fs-fft", optional = true }
 fs-ga = { path = "../fs-ga" }
 fs-la = { path = "../fs-la" }
 fs-material = { path = "../fs-material" }
+fs-matdb = { path = "../fs-matdb", optional = true }
 fs-phs = { path = "../fs-phs" }
 fs-qty = { path = "../fs-qty" }
 fs-rep-mesh = { path = "../fs-rep-mesh" }

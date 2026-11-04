@@ -309,6 +309,9 @@ impl<'a> PlanarDielectricLayers<'a> {
             (DielectricResponse::OpticalMaterial(a), DielectricResponse::OpticalMaterial(b)) => {
                 core::ptr::eq(a.source(), b.source())
             }
+            (DielectricResponse::SpectralOptical(a), DielectricResponse::SpectralOptical(b)) => {
+                a.same_source(b)
+            }
             _ => false,
         };
         same_response(self.incident_response, other.incident_response)

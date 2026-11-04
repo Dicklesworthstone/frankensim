@@ -40,7 +40,10 @@ pub mod angular_spectrum;
 
 /// Original spectral metal/dielectric optics with explicit same-state permeability.
 pub mod optical;
-pub use optical::{OpticalConductorResponse, OpticalMaterialResponse};
+pub use optical::{
+    OpticalConductorResponse, OpticalMaterialResponse, RefreshedSpectralOpticalSource,
+    SpectralOpticalResponse, SpectralOpticalSource,
+};
 
 // Shared power-to-momentum contractions. Source/geometry admission belongs
 // to the original film and beam owners, not to an arbitrary power input.
@@ -83,6 +86,10 @@ pub enum DielectricResponse<'a> {
     /// intensity absorption supplies k=alpha*lambda_vac/(4*pi); RGB-only input
     /// refuses. The same complete source supplies real scalar permeability.
     OpticalMaterial(OpticalMaterialResponse<'a>),
+    /// Original finite-band complex-index or phase-index/absorption source.
+    /// The authored interpolation-gap limit and same-state permeability remain
+    /// attached; no visible-band restriction or extrapolated tail is supplied.
+    SpectralOptical(SpectralOpticalResponse<'a>),
 }
 impl<'a> DielectricResponse<'a> {
     pub fn material(self) -> &'a ResolvedMaterialStatePoint {
@@ -93,6 +100,7 @@ impl<'a> DielectricResponse<'a> {
             Self::DebyeWithOhmic { dielectric, .. } => dielectric.material(),
             Self::OpticalConductor(response) => response.material(),
             Self::OpticalMaterial(response) => response.material(),
+            Self::SpectralOptical(response) => response.material(),
         }
     }
 
@@ -127,6 +135,7 @@ impl<'a> DielectricResponse<'a> {
             }
             Self::OpticalConductor(response) => response.permittivity_f_m(omega)?,
             Self::OpticalMaterial(response) => response.permittivity_f_m(omega)?,
+            Self::SpectralOptical(response) => response.permittivity_f_m(omega)?,
         };
         if !finite(epsilon) || epsilon == C64::ZERO || epsilon.im > 0.0 {
             return Err(ReflectionError::Invalid(
@@ -340,7 +349,8 @@ impl<'a> PlanarDielectricInterface<'a> {
                 }
                 DielectricResponse::Debye(_)
                 | DielectricResponse::OpticalConductor(_)
-                | DielectricResponse::OpticalMaterial(_) => {}
+                | DielectricResponse::OpticalMaterial(_)
+                | DielectricResponse::SpectralOptical(_) => {}
             }
         }
         Ok(Self {

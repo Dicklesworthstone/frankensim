@@ -3686,3 +3686,43 @@ or Maxwell reconstruction. Three additional original-source integration
 tests cover film/evanescent fields, multi-frequency coherence and mixed
 two-face ensembles, but remain unexecuted without the sibling constellation.
 No full Cargo, DSR, cross-platform or experimental-validation result is claimed.
+
+## Original finite-band material optics in Maxwell propagation
+
+`plane_wave::SpectralOpticalResponse` consumes the original
+`SpectralComplexIndexStatePoint`, the SI source-wavelength conductor wrapper,
+or the typed phase-index/intensity-absorption dielectric snapshot through
+`SpectralOpticalSource`. Arbitrary canonical complex-index knots remain on
+their original grid. The caller supplies a positive maximum knot span in
+vacuum metres, and scalar absolute magnetic permeability must belong to the
+same complete material snapshot. No nonmagnetic default, visible clamp,
+spectral extrapolation or extra Ohmic loss is supplied.
+
+`DielectricResponse::SpectralOptical` reaches the existing native interface,
+layer and angular-spectrum beam owners, including transparent dispersive
+incidence. Original n/k interpolation delegates to the shared material owner.
+For the dielectric family, original n and power-absorption alpha interpolate
+before k=alpha*lambda_vac/(4*pi); interpolating a converted k table would change
+the declared absorption law. The existing n-i*k convention and
+epsilon=(n-i*k)^2/(mu*c^2) drive phase, attenuation, impedance and Fresnel work.
+Frequency admission precedes any roundoff correction at source-band endpoints.
+Monochromatic evaluation allocates nothing.
+
+Source refresh returns an owned, fully readmitted snapshot while retaining the
+same interpolation-gap policy and original claims. Generic complex-index
+bindings retain their authored wavelengths; the SI conductor wrapper refreshes
+its source wavelength properties as well as coefficients. The same-state
+permeability refreshes with them. Failure leaves the original response intact.
+Coherent source compatibility retains the original source owner and gap policy.
+Finite-band monochromatic tables do not establish causal time-domain heat
+reservoirs or a two-sided group derivative at piecewise-linear knots; the
+existing reservoir preparation explicitly refuses them.
+
+Four native dispersion-module tests pass against real fs_math, including SI
+intensity attenuation, the complex Maxwell dispersion relation and strict
+finite-band frequency edges. Four source-owner integration regressions cover
+infrared complex Fresnel, same-state permeability refresh, transparent incident
+Snell refraction, coherent film/beam phase, source-owner compatibility, original
+alpha interpolation, evolving SI wavelength support and retained gap limits.
+Those complete material/FFT integration tests remain unexecuted without the
+constellation dependency checkouts.

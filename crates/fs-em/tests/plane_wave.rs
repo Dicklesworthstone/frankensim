@@ -53,6 +53,9 @@ mod two_sided_beam;
 #[path = "plane_wave/optical_dielectric.rs"]
 mod optical_dielectric;
 
+#[path = "plane_wave/spectral_optical.rs"]
+mod spectral_optical;
+
 fn source(
     properties: &[(&str, Dims, f64)],
     validity: ValidityDomain,
