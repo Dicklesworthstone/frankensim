@@ -3,8 +3,9 @@
 //! At each selected power port, let y be the original output, u the original
 //! input, and Z>0 an output/input reference. With peak exp(-i omega t) waves,
 //! u=(2a-y)/Z and b=y-a. Close ALL selected ports in the original descriptor
-//! pencil before factorization: A_closed=A-sum G_p G_p^T W/Z_p. This remains
-//! well defined at a bare component resonance; no isolated impedance is inverted.
+//! pencil before factorization: L_closed=L-sum G_p G_p^T W/Z_p, then
+//! A_closed=-i omega E-L_closed. This remains well defined at a bare component
+//! resonance; no isolated impedance is inverted.
 //!
 //! The original R and all material/constraint coordinates remain unchanged.
 //! The reference feedback is a boundary exchange, not internal material heat.
@@ -15,8 +16,12 @@ use super::{
     invalid, poll,
 };
 
+mod frequency;
 mod poles;
+mod resonance;
+pub use frequency::{ScatteringFrequencyResponse, ScatteringWaveDerivative};
 pub use poles::{DecayWavePort, ScatteringPole, ScatteringSpectrum};
+pub use resonance::ScatteringObservation;
 
 /// Additional resources for wave closure, beyond the consumed harmonic model's
 /// existing budget. Payload excludes that model, allocator overhead and RSS.
@@ -70,6 +75,7 @@ pub struct ScatteringModel {
     closed: HarmonicModel,
     ports: Vec<(usize, f64)>,
     selected: Vec<bool>,
+    budget: ScatteringBudget,
 }
 
 /// One shared LU of the fully closed physical problem, reusable across drives.
@@ -169,6 +175,7 @@ impl ScatteringModel {
             closed: model,
             ports: ports.to_vec(),
             selected,
+            budget,
         })
     }
 
@@ -262,7 +269,19 @@ impl ScatteringFactor<'_> {
         input: &[C64],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<ScatteringResponse, HarmonicError> {
-        poll(&mut cancelled)?;
+        let effective = self.effective_input(input, &mut cancelled)?;
+        let physical = self.factor.response(&effective, &mut cancelled)?;
+        self.observe_response(input, physical, &mut cancelled)
+    }
+
+    // The same source convention applies to amplitudes and their derivatives:
+    // incident waves on selected slots, ordinary physical inputs elsewhere.
+    fn effective_input(
+        &self,
+        input: &[C64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<C64>, HarmonicError> {
+        poll(cancelled)?;
         if input.len() != self.model.closed.m || input.iter().any(|&z| !finite(z)) {
             return Err(invalid(
                 "one finite wave or ordinary input per original port required",
@@ -272,11 +291,21 @@ impl ScatteringFactor<'_> {
         for &(p, z) in &self.model.ports {
             effective[p] = input[p].scale(2.0 / z);
         }
-        let mut physical = self.factor.response(&effective, &mut cancelled)?;
+        Ok(effective)
+    }
+
+    // Restore original boundary inputs and physical work for either an ordinary
+    // response or the base of its frequency tangent. No second solve is needed.
+    fn observe_response(
+        &self,
+        input: &[C64],
+        mut physical: HarmonicResponse,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ScatteringResponse, HarmonicError> {
         let mut physical_inputs = input.to_vec();
         let mut waves = Vec::with_capacity(self.model.ports.len());
         for &(p, z) in &self.model.ports {
-            poll(&mut cancelled)?;
+            poll(cancelled)?;
             let a = input[p];
             let b = physical.output[p] - a;
             let u = (a.scale(2.0) - physical.output[p]).scale(1.0 / z);
@@ -307,7 +336,7 @@ impl ScatteringFactor<'_> {
             });
         }
         for (p, &u) in physical_inputs.iter().enumerate() {
-            poll(&mut cancelled)?;
+            poll(cancelled)?;
             let power = HarmonicPortPower::from_peak(u, physical.output[p])?;
             physical.port_power_w[p] = power.active_w;
             physical.port_power_components[p] = power;
@@ -319,7 +348,7 @@ impl ScatteringFactor<'_> {
             .map(|wave| wave.incident_power_w - wave.outgoing_power_w)
             .sum();
         for (p, &power) in physical.port_power_w.iter().enumerate() {
-            poll(&mut cancelled)?;
+            poll(cancelled)?;
             if !self.model.selected[p] {
                 wave_supply += power;
             }
@@ -341,9 +370,9 @@ impl ScatteringFactor<'_> {
             &physical.state,
             &physical.effort,
             &physical_inputs,
-            &mut cancelled,
+            cancelled,
         )?);
-        poll(&mut cancelled)?;
+        poll(cancelled)?;
         Ok(ScatteringResponse {
             physical,
             physical_inputs,

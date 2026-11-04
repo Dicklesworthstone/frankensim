@@ -144,21 +144,9 @@ impl HarmonicModel {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<DrivenResonance, DrivenResonanceError> {
         poll(&mut cancelled)?;
-        let (low, high) = interval_rad_s;
-        if !low.is_finite()
-            || !high.is_finite()
-            || low <= 0.0
-            || high <= low
-            || !controls.absolute_frequency_tolerance_rad_s.is_finite()
-            || controls.absolute_frequency_tolerance_rad_s <= 0.0
-            || !controls.relative_frequency_tolerance.is_finite()
-            || !(0.0..1.0).contains(&controls.relative_frequency_tolerance)
-            || !(3..=4096).contains(&controls.maximum_evaluations)
-            || input.len() != self.m
-            || input.iter().any(|z| !finite(*z))
-        {
+        if input.len() != self.m || input.iter().any(|z| !finite(*z)) {
             return Err(DrivenResonanceError::Invalid(
-                "positive ordered interval, finite excitation and bounded resolution controls required",
+                "one finite excitation per original port required",
             ));
         }
         let (weights, dimension) = match observation {
@@ -173,110 +161,170 @@ impl HarmonicModel {
                 "finite nonzero observation on original coordinates required",
             ));
         }
-        let mut search = Search {
-            model: self,
-            input,
-            observation,
+        search_resonance(
+            interval_rad_s,
             controls,
             cancelled,
-            evaluations: 0,
-            residual: 0.0,
-        };
-        let outer_low = search.sample(low, true)?;
-        let outer_high = search.sample(high, true)?;
-        let mut left = outer_low;
-        let mut right = outer_high;
-        if left.slope <= 0.0 || right.slope >= 0.0 {
-            return Err(DrivenResonanceError::NotBracketed(
-                "a peak requires increasing then decreasing nonzero response",
-            ));
-        }
-        let mut stationary = None;
-        while !search.resolved(left.omega, right.omega) {
-            if let Some(middle) = stationary {
-                // Reuse the exactly stationary evaluated response while its
-                // two sign endpoints contract; do not refactor its frequency.
-                let a = search.sample(interior_midpoint(left.omega, middle)?, true)?;
-                let b = search.sample(interior_midpoint(middle, right.omega)?, true)?;
-                if a.slope <= 0.0 || b.slope >= 0.0 {
-                    return Err(DrivenResonanceError::NotBracketed(
-                        "stationary response does not retain a resolved maximum bracket",
-                    ));
-                }
-                left = a;
-                right = b;
-                continue;
-            }
-            let middle = search.sample(interior_midpoint(left.omega, right.omega)?, true)?;
-            if middle.slope > 0.0 {
-                left = middle;
-            } else if middle.slope < 0.0 {
-                right = middle;
-            } else {
-                // An exactly zero rounded slope is not a zero-width frequency
-                // certificate. Retain an actual smaller sign bracket around it.
-                stationary = Some(middle.omega);
-            }
-        }
-        let peak_sample = search.sample(f64::midpoint(left.omega, right.omega), true)?;
-        let peak = ResonanceFrequency {
-            angular_frequency_rad_s: peak_sample.omega,
-            bracket_rad_s: (left.omega, right.omega),
-        };
-        let half_power = if controls.measure_half_power_bandwidth {
-            let target = peak_sample.value.abs() * core::f64::consts::FRAC_1_SQRT_2;
-            if !target.is_finite() || target <= 0.0 {
-                return Err(DrivenResonanceError::Invalid(
-                    "half-height amplitude is not representable",
-                ));
-            }
-            if outer_low.value.abs() >= target || outer_high.value.abs() >= target {
-                return Err(DrivenResonanceError::NotBracketed(
-                    "both half-height crossings must lie inside the supplied interval",
-                ));
-            }
-            let lower = search.crossing(outer_low, peak_sample, target)?;
-            let upper = search.crossing(outer_high, peak_sample, target)?;
-            let bandwidth_rad_s = upper.angular_frequency_rad_s - lower.angular_frequency_rad_s;
-            let response_quality_factor = peak_sample.omega / bandwidth_rad_s;
-            if bandwidth_rad_s <= 0.0
-                || !response_quality_factor.is_finite()
-                || lower.bracket_rad_s.1 >= upper.bracket_rad_s.0
-            {
-                return Err(DrivenResonanceError::FrequencyResolution);
-            }
-            Some(HalfPowerBandwidth {
-                lower,
-                upper,
-                bandwidth_rad_s,
-                response_quality_factor,
-            })
-        } else {
-            None
-        };
-        poll(&mut search.cancelled)?;
-        Ok(DrivenResonance {
-            peak,
-            observation: peak_sample.value,
-            observation_derivative: peak_sample.derivative,
-            half_power,
-            evaluations: search.evaluations,
-            maximum_relative_residual: search.residual,
-        })
+            |omega, derivative, cancelled| {
+                let factor = self.factor(omega, &mut *cancelled)?;
+                let (response, slope, residual) = if derivative {
+                    let result =
+                        factor.response_with_frequency_derivative(input, None, &mut *cancelled)?;
+                    let data = match observation {
+                        HarmonicObservation::State(w) => (w, &result.state_derivative),
+                        HarmonicObservation::Effort(w) => (w, &result.effort_derivative),
+                        HarmonicObservation::Output(w) => (w, &result.output_derivative),
+                    };
+                    let slope = project(data.0, data.1.iter().copied(), cancelled)?;
+                    (result.response, slope, result.relative_derivative_residual)
+                } else {
+                    (factor.response(input, &mut *cancelled)?, C64::ZERO, 0.0)
+                };
+                let data = match observation {
+                    HarmonicObservation::State(w) => (w, &response.state),
+                    HarmonicObservation::Effort(w) => (w, &response.effort),
+                    HarmonicObservation::Output(w) => (w, &response.output),
+                };
+                let value = project(data.0, data.1.iter().copied(), cancelled)?;
+                Ok((value, slope, residual.max(response.relative_residual)))
+            },
+        )
     }
 }
 
-struct Search<'a, 'w, F> {
-    model: &'a HarmonicModel,
-    input: &'a [C64],
-    observation: HarmonicObservation<'w>,
+// Both ordinary and wave-closed physical systems use one bracket/refinement
+// owner. The evaluator returns the actual observed phasor, its optional exact
+// tangent, and the largest independently checked physical equation residual.
+// `derivative=false` avoids the second solve when refining half-height crossings.
+pub(super) fn search_resonance<C, E>(
+    interval_rad_s: (f64, f64),
     controls: ResonanceControls,
-    cancelled: F,
+    mut cancelled: C,
+    evaluate: E,
+) -> Result<DrivenResonance, DrivenResonanceError>
+where
+    C: FnMut() -> bool,
+    E: FnMut(f64, bool, &mut C) -> Result<(C64, C64, f64), DrivenResonanceError>,
+{
+    poll(&mut cancelled)?;
+    let (low, high) = interval_rad_s;
+    if !low.is_finite()
+        || !high.is_finite()
+        || low <= 0.0
+        || high <= low
+        || !controls.absolute_frequency_tolerance_rad_s.is_finite()
+        || controls.absolute_frequency_tolerance_rad_s <= 0.0
+        || !controls.relative_frequency_tolerance.is_finite()
+        || !(0.0..1.0).contains(&controls.relative_frequency_tolerance)
+        || !(3..=4096).contains(&controls.maximum_evaluations)
+    {
+        return Err(DrivenResonanceError::Invalid(
+            "positive ordered interval and bounded resolution controls required",
+        ));
+    }
+    let mut search = Search {
+        evaluate,
+        controls,
+        cancelled,
+        evaluations: 0,
+        residual: 0.0,
+    };
+    let outer_low = search.sample(low, true)?;
+    let outer_high = search.sample(high, true)?;
+    let mut left = outer_low;
+    let mut right = outer_high;
+    if left.slope <= 0.0 || right.slope >= 0.0 {
+        return Err(DrivenResonanceError::NotBracketed(
+            "a peak requires increasing then decreasing nonzero response",
+        ));
+    }
+    let mut stationary = None;
+    while !search.resolved(left.omega, right.omega) {
+        if let Some(middle) = stationary {
+            // Reuse the exactly stationary evaluated response while its
+            // two sign endpoints contract; do not refactor its frequency.
+            let a = search.sample(interior_midpoint(left.omega, middle)?, true)?;
+            let b = search.sample(interior_midpoint(middle, right.omega)?, true)?;
+            if a.slope <= 0.0 || b.slope >= 0.0 {
+                return Err(DrivenResonanceError::NotBracketed(
+                    "stationary response does not retain a resolved maximum bracket",
+                ));
+            }
+            left = a;
+            right = b;
+            continue;
+        }
+        let middle = search.sample(interior_midpoint(left.omega, right.omega)?, true)?;
+        if middle.slope > 0.0 {
+            left = middle;
+        } else if middle.slope < 0.0 {
+            right = middle;
+        } else {
+            // An exactly zero rounded slope is not a zero-width frequency
+            // certificate. Retain an actual smaller sign bracket around it.
+            stationary = Some(middle.omega);
+        }
+    }
+    let peak_sample = search.sample(f64::midpoint(left.omega, right.omega), true)?;
+    let peak = ResonanceFrequency {
+        angular_frequency_rad_s: peak_sample.omega,
+        bracket_rad_s: (left.omega, right.omega),
+    };
+    let half_power = if controls.measure_half_power_bandwidth {
+        let target = peak_sample.value.abs() * core::f64::consts::FRAC_1_SQRT_2;
+        if !target.is_finite() || target <= 0.0 {
+            return Err(DrivenResonanceError::Invalid(
+                "half-height amplitude is not representable",
+            ));
+        }
+        if outer_low.value.abs() >= target || outer_high.value.abs() >= target {
+            return Err(DrivenResonanceError::NotBracketed(
+                "both half-height crossings must lie inside the supplied interval",
+            ));
+        }
+        let lower = search.crossing(outer_low, peak_sample, target)?;
+        let upper = search.crossing(outer_high, peak_sample, target)?;
+        let bandwidth_rad_s = upper.angular_frequency_rad_s - lower.angular_frequency_rad_s;
+        let response_quality_factor = peak_sample.omega / bandwidth_rad_s;
+        if bandwidth_rad_s <= 0.0
+            || !response_quality_factor.is_finite()
+            || lower.bracket_rad_s.1 >= upper.bracket_rad_s.0
+        {
+            return Err(DrivenResonanceError::FrequencyResolution);
+        }
+        Some(HalfPowerBandwidth {
+            lower,
+            upper,
+            bandwidth_rad_s,
+            response_quality_factor,
+        })
+    } else {
+        None
+    };
+    poll(&mut search.cancelled)?;
+    Ok(DrivenResonance {
+        peak,
+        observation: peak_sample.value,
+        observation_derivative: peak_sample.derivative,
+        half_power,
+        evaluations: search.evaluations,
+        maximum_relative_residual: search.residual,
+    })
+}
+
+struct Search<C, E> {
+    evaluate: E,
+    controls: ResonanceControls,
+    cancelled: C,
     evaluations: usize,
     residual: f64,
 }
 
-impl<F: FnMut() -> bool> Search<'_, '_, F> {
+impl<C, E> Search<C, E>
+where
+    C: FnMut() -> bool,
+    E: FnMut(f64, bool, &mut C) -> Result<(C64, C64, f64), DrivenResonanceError>,
+{
     fn resolved(&self, low: f64, high: f64) -> bool {
         high - low
             <= self
@@ -293,28 +341,8 @@ impl<F: FnMut() -> bool> Search<'_, '_, F> {
             });
         }
         self.evaluations += 1;
-        let factor = self.model.factor(omega, &mut self.cancelled)?;
-        let (response, slope) = if derivative {
-            let result =
-                factor.response_with_frequency_derivative(self.input, None, &mut self.cancelled)?;
-            self.residual = self.residual.max(result.relative_derivative_residual);
-            let data = match self.observation {
-                HarmonicObservation::State(w) => (w, &result.state_derivative),
-                HarmonicObservation::Effort(w) => (w, &result.effort_derivative),
-                HarmonicObservation::Output(w) => (w, &result.output_derivative),
-            };
-            let slope = project(data.0, data.1, &mut self.cancelled)?;
-            (result.response, slope)
-        } else {
-            (factor.response(self.input, &mut self.cancelled)?, C64::ZERO)
-        };
-        self.residual = self.residual.max(response.relative_residual);
-        let data = match self.observation {
-            HarmonicObservation::State(w) => (w, &response.state),
-            HarmonicObservation::Effort(w) => (w, &response.effort),
-            HarmonicObservation::Output(w) => (w, &response.output),
-        };
-        let value = project(data.0, data.1, &mut self.cancelled)?;
+        let (value, slope, residual) = (self.evaluate)(omega, derivative, &mut self.cancelled)?;
+        self.residual = self.residual.max(residual);
         if derivative && value == C64::ZERO {
             return Err(DrivenResonanceError::NotBracketed(
                 "a silent observation or exact antiresonance is not a resonance peak",
@@ -368,19 +396,19 @@ fn interior_midpoint(low: f64, high: f64) -> Result<f64, DrivenResonanceError> {
     }
 }
 
-fn project(
+pub(super) fn project(
     weights: &[f64],
-    values: &[C64],
+    values: impl IntoIterator<Item = C64>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<C64, DrivenResonanceError> {
     let mut real = Dd::ZERO;
     let mut imaginary = Dd::ZERO;
-    for (w, x) in weights.chunks(64).zip(values.chunks(64)) {
-        poll(cancelled)?;
-        for (&weight, value) in w.iter().zip(x) {
-            real = real + Dd::from_f64(weight) * Dd::from_f64(value.re);
-            imaginary = imaginary + Dd::from_f64(weight) * Dd::from_f64(value.im);
+    for (i, (&weight, value)) in weights.iter().zip(values).enumerate() {
+        if i % 64 == 0 {
+            poll(cancelled)?;
         }
+        real = real + Dd::from_f64(weight) * Dd::from_f64(value.re);
+        imaginary = imaginary + Dd::from_f64(weight) * Dd::from_f64(value.im);
     }
     let value = C64::new(real.to_f64(), imaginary.to_f64());
     if finite(value) {

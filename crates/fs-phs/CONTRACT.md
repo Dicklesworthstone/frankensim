@@ -310,6 +310,21 @@ brackets are not interval-arithmetic certificates. The caller must isolate the
 desired peak; this query does not enumerate all peaks or prove uniqueness in a
 multimode interval, validate a continuum model, or establish nonlinear resonance.
 
+`ScatteringModel::driven_resonance` applies the same bounded search to the fully
+closed wave-boundary model. Its fixed real `ScatteringObservation` can select
+original state, effort, actual conjugate input, output, or outgoing waves.
+Inputs/outputs follow original source order; outgoing weights follow authored
+wave-port order. Actual inputs retain `(2a-y)/Z` and outgoing waves retain `y-a`,
+so incident-wave interference and load reactions can shift their peaks relative
+to the motion peak. Every query checks the original physical response/tangent
+equations with those actual boundary inputs. No effective-source work is passed
+off as physical supply, and a finite loaded bandwidth is not internal heating.
+The search adds no dense operator, derivative matrix or per-query projection
+allocation. Five analytic tests in `harmonic_scattering_resonance` cover lossless
+matched-boundary linewidth, coherent reflected-wave peak shifts, actual reaction
+force peaks, displacement/effort consistency, cancellation/replay and rejection
+of reflection dips. All ordinary-query limits above still apply.
+
 ### Finite resonance poles of the complete continuous model
 
 `HarmonicModel::resonance_pole` refines one caller-seeded finite free mode of
@@ -1986,8 +2001,9 @@ a held 1 F capacitor with 10^8 C charge, checking terminal KCL and physical work
 `harmonic::scattering::ScatteringModel` consumes an admitted original
 `HarmonicModel` and closes every selected power port before factorization.
 For original input u and output y, positive output/input reference Z, and peak
-exp(-i omega t) waves, `u=(2a-y)/Z` and `b=y-a`. Its full descriptor operator
-is `A_closed=A-sum G_p G_p^T W/Z_p`; all differential and algebraic
+exp(-i omega t) waves, `u=(2a-y)/Z` and `b=y-a`. Its complete generator
+is `L_closed=L-sum G_p G_p^T W/Z_p`, with dynamic pencil
+`A_closed=-i omega E-L_closed`; all differential and algebraic
 coordinates, mutual terms, physical storage and material memory remain.
 No bare component impedance or descriptor mass is inverted. An otherwise
 singular bare resonance can have a finite physically loaded wave response.
@@ -2027,6 +2043,32 @@ with and without physical damping, full mutually coupled two-body response and
 ordinary forcing against an independent 2x2 mechanical solve, unequal-reference
 reciprocity, original hereditary state/heat, constrained descriptor RLC response,
 factor reuse, resources and cancellation (G0/G1/G3/G4).
+
+### Loaded physical frequency derivatives
+
+`ScatteringFactor::response_with_frequency_derivative` reuses the same closed
+LU through the shared harmonic tangent owner. Original input slots retain
+incident-wave or ordinary-input meaning; optional derivatives preserve both
+source chain rules. State/effort/output derivatives retain all constraints,
+mutual terms and material memory. Actual inputs use `u'=(2a'-y')/Z`; outgoing
+waves use `b'=y'-a'`, including their incident-wave contribution. The original
+unclosed equations independently admit these actual input derivatives.
+
+Original storage and internal-dissipation derivatives remain separate from
+boundary exchange. Physical source-work derivatives are reconstructed from
+actual u/u', while independent incident/outgoing power derivatives close a
+second wave balance. Reference loading never becomes material heat, including
+at an exactly singular bare pole. References and physical coefficients remain
+fixed; frequency-dependent materials require retained source states.
+
+The call admits twice the original additional scattering payload/work bound
+against the retained `ScatteringBudget`, besides the shared harmonic derivative
+budget. Cancellation or refusal publishes no partial result and preserves the
+factor. G1/G3 tests compare loaded scalar and mutual mechanical response,
+descriptor RLC reactions, Maxwell history/heat, and power-conjugate unit
+changes; G4 checks cancellation, capacities and replay. These are numerical
+linear/local tangents, without a near-pole forward-error or broadband material
+authority claim.
 
 ## Original-state outgoing resonance and decay
 
