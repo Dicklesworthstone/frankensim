@@ -158,7 +158,8 @@ pub(super) fn admit_condition(
 /// RNEA. No dense joint Jacobian or independent kinematics owner is introduced.
 pub(super) fn project_constraint_impulses(
     model: &ArticulatedModel,
-    state: &FreeFloatingMotionState,
+    world_from_base: Se3,
+    joint_position: &[f64],
     body_impulses: &[Wrench],
     joint_impulses: &[f64],
     cancelled: &mut impl FnMut() -> bool,
@@ -180,15 +181,24 @@ pub(super) fn project_constraint_impulses(
     let zero = vec![0.0; model.dof_count()];
     let evaluated = inverse_dynamics(
         model,
-        BaseState::prescribed(state.base.world_from_base, Twist::zero(), Twist::zero()),
-        &state.joint_position,
+        BaseState::prescribed(world_from_base, Twist::zero(), Twist::zero()),
+        joint_position,
         &zero,
         &zero,
         Vec3::default(),
         &external,
     )?;
     poll(cancelled)?;
-    let base = evaluated.body_wrench[0].transform_by(&model.links()[0].parent_from_child_zero());
+    let root = &model.links()[0];
+    let base_from_root = if root.joint().dof_count() == 0 {
+        root.parent_from_child_zero()
+    } else {
+        // A prescribed support may have a mobile root. Its current transform,
+        // including root joint motion, maps the physical base covector.
+        root.parent_from_child_zero()
+            .compose(root.joint().motion(joint_position[0])?)?
+    };
+    let base = evaluated.body_wrench[0].transform_by(&base_from_root);
     let mut generalized = base.to_array().to_vec();
     for (index, (&body, &joint)) in evaluated
         .generalized_force
@@ -219,7 +229,7 @@ pub(super) fn constraint_work(
     joint_velocity_after: &[f64],
     boost: Vec3,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<f64, PayloadError> {
+) -> Result<Dd, PayloadError> {
     poll(cancelled)?;
     if body_impulses.len() != before.body_twist.len()
         || body_impulses.len() != after.body_twist.len()
@@ -264,5 +274,6 @@ pub(super) fn constraint_work(
         work = work + Dd::from_f64(impulse) * mean;
     }
     poll(cancelled)?;
-    finite(work.to_f64(), "payload common-frame mixed constraint work")
+    finite(work.to_f64(), "payload common-frame mixed constraint work")?;
+    Ok(work)
 }

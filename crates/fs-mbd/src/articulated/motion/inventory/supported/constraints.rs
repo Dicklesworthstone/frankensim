@@ -45,7 +45,9 @@ pub struct SupportedPayloadConstraintControls {
     /// Native normalized row-mobility reciprocal-condition floor in
     /// [4096*EPSILON, 1]. Dependent or unresolved rows are never regularized.
     pub minimum_reciprocal_condition: f64,
-    /// Nonnegative cap on absolute actual midpoint joint-reaction work, J.
+    /// Nonnegative cap on absolute actual midpoint reaction work, J.
+    /// The bilateral wrapper includes all body and joint constraint work in
+    /// the inventory's common energy frame; this joint-only owner uses A^T lambda.
     /// This is separate from capture projection loss or separation-source work.
     pub maximum_reaction_work_j: f64,
 }
@@ -79,7 +81,7 @@ pub struct SupportedPayloadConstraintReaction {
 }
 
 impl SupportedPayloadConstraintReaction {
-    fn empty() -> Self {
+    pub(super) fn empty() -> Self {
         Self {
             multipliers: Vec::new(),
             joint_impulse: Vec::new(),
@@ -138,8 +140,10 @@ pub fn capture_payload(
         payload,
         controls,
         Some((rows, constraint_controls)),
+        None,
         cancelled,
     )
+    .map(|(result, _)| result)
 }
 
 /// Original accepted release and the ideal joint impulse on the retained tree.
@@ -177,8 +181,10 @@ pub fn release_payload(
         controls,
         0.0,
         Some((rows, constraint_controls)),
+        None,
         cancelled,
     )
+    .map(|(result, _)| result)
 }
 
 /// Separate a finite payload while the retained tree keeps its ideal gear/lock rows.
@@ -220,8 +226,10 @@ pub fn release_payload_with_impulse(
         controls.balance,
         controls.maximum_separation_work_j,
         Some((rows, constraint_controls)),
+        None,
         cancelled,
     )
+    .map(|(result, _)| result)
 }
 
 pub(super) fn impulse_response(
@@ -360,7 +368,9 @@ pub(super) fn impulse_response(
     ))
 }
 
-fn admit_controls(controls: SupportedPayloadConstraintControls) -> Result<(), PayloadError> {
+pub(super) fn admit_controls(
+    controls: SupportedPayloadConstraintControls,
+) -> Result<(), PayloadError> {
     validate_condition_floor(controls.minimum_reciprocal_condition)?;
     if !controls.maximum_reaction_work_j.is_finite() || controls.maximum_reaction_work_j < 0.0 {
         return Err(ConstraintError::Invalid("supported payload reaction-work budget").into());

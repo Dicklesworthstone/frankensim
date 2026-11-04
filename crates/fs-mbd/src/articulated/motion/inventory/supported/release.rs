@@ -14,13 +14,17 @@ use super::super::{
     PayloadAttachment, PayloadError, PayloadState, account_boost, energy_in_frame, finite,
     payload_at_link, poll, replace_link_inertia, twist_in_frame,
 };
+use super::bilateral::{self, SupportedBilateralPayloadReaction};
 use super::constraints::{
-    ConstrainedSupportedPayloadRelease, SupportedPayloadConstraintControls, impulse_response,
-    passive_reaction,
+    ConstrainedSupportedPayloadRelease, SupportedPayloadConstraintControls,
+    SupportedPayloadConstraintReaction, impulse_response, passive_reaction,
 };
 use super::{SupportedPayloadBalance, SupportedPayloadControls, admit, audit_momentum, negate};
 use crate::articulated::motion::prescribed::PrescribedBaseMotionState;
 use crate::articulated::motion::reconfigure::constraints::JointConstraint;
+use crate::articulated::motion::spatial_loads::implicit::distance::{
+    BilateralImpulseConfig, BilateralLoop,
+};
 use crate::articulated::motion::{SpatialSum, kinetic_link_increment, sum_products};
 use crate::articulated::{
     ArticulatedModel, BaseState, forward_kinematics, inverse_dynamics, momentum_from_kinematics,
@@ -73,7 +77,7 @@ pub struct SupportedPayloadRelease {
     pub impulse_on_retained_link: Wrench,
     /// Actual complete-system momentum and common-frame work diagnostics.
     /// Energy residual subtracts support work and supplied_work_j, plus any
-    /// ideal joint-reaction midpoint work from the constrained wrapper.
+    /// full ideal-reaction midpoint work from a constrained wrapper.
     pub balance: SupportedPayloadBalance,
 }
 
@@ -102,9 +106,9 @@ pub fn release_payload(
     cancelled: impl FnMut() -> bool,
 ) -> Result<SupportedPayloadRelease, PayloadError> {
     release_evaluated(
-        model, state, attachment, None, controls, 0.0, None, cancelled,
+        model, state, attachment, None, controls, 0.0, None, None, cancelled,
     )
-    .map(|result| result.release)
+    .map(|(result, _)| result.release)
 }
 
 /// Detach and drive separation by one internal point impulse and free couple.
@@ -145,9 +149,10 @@ pub fn release_payload_with_impulse(
         controls.balance,
         controls.maximum_separation_work_j,
         None,
+        None,
         cancelled,
     )
-    .map(|result| result.release)
+    .map(|(result, _)| result.release)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -159,8 +164,15 @@ pub(super) fn release_evaluated(
     controls: SupportedPayloadReleaseControls<'_>,
     maximum_work_j: f64,
     constraints: Option<(&[JointConstraint], SupportedPayloadConstraintControls)>,
+    bilateral_rows: Option<(&[BilateralLoop], BilateralImpulseConfig)>,
     mut cancelled: impl FnMut() -> bool,
-) -> Result<ConstrainedSupportedPayloadRelease, PayloadError> {
+) -> Result<
+    (
+        ConstrainedSupportedPayloadRelease,
+        Option<SupportedBilateralPayloadReaction>,
+    ),
+    PayloadError,
+> {
     poll(&mut cancelled)?;
     admit_attachment(model, attachment)?;
     if !maximum_work_j.is_finite() || maximum_work_j < 0.0 {
@@ -202,7 +214,8 @@ pub(super) fn release_evaluated(
     let zero = vec![0.0; model.dof_count()];
     let mut state_after = state.clone();
     let mut payload_after = payload_before;
-    let (after_owned, support_impulse_body, reaction) = if no_impulse {
+    let mut bilateral_event = None;
+    let (after_owned, support_impulse_body, reaction) = if no_impulse && bilateral_rows.is_none() {
         // Admit retained-inertia rows without repairing their finite residuals.
         // Passive release retains the exact original state and its FK.
         let reaction = passive_reaction(&model_after, state, constraints, &mut cancelled)?;
@@ -210,37 +223,64 @@ pub(super) fn release_evaluated(
     } else {
         let mut body_impulses = vec![Wrench::default(); model.link_count()];
         body_impulses[target] = impulse_on_retained_link;
-        let (response, reaction) = impulse_response(
-            &model_after,
-            state,
-            &zero,
-            &body_impulses,
-            constraints,
-            &mut cancelled,
-        )?;
+        let (response, reaction) = if let Some((loops, config)) = bilateral_rows {
+            let (rows, constraint_controls) = constraints.ok_or(PayloadError::Invalid(
+                "missing supported mixed constraint controls",
+            ))?;
+            let event = bilateral::native_response(
+                &model_after,
+                state,
+                &body_impulses,
+                loops,
+                rows,
+                constraint_controls,
+                config,
+                &mut cancelled,
+            )?;
+            let response = event.impulse.clone();
+            bilateral_event = Some(event);
+            (response, SupportedPayloadConstraintReaction::empty())
+        } else {
+            impulse_response(
+                &model_after,
+                state,
+                &zero,
+                &body_impulses,
+                constraints,
+                &mut cancelled,
+            )?
+        };
         poll(&mut cancelled)?;
-        state_after.joint_velocity = response.joint_velocity_after;
-        let delta =
-            solve_floating_base_system(&payload_before.inertia.matrix()?, impulse_on_payload_body)?;
-        payload_after.twist_body = payload_before.twist_body.plus(delta);
-        validate_twist(
-            payload_after.twist_body,
-            "supported_payload_release.payload_velocity",
-        )?;
-        if payload_after.twist_body == payload_before.twist_body {
-            return Err(PayloadError::Invalid(
-                "supported payload velocity jump erased",
-            ));
+        if no_impulse {
+            // Full mixed mobility was admitted above, without projecting the
+            // finite tangent residual. Preserve the passive state's bits.
+            (None, Wrench::default(), reaction)
+        } else {
+            state_after.joint_velocity = response.joint_velocity_after;
+            let delta = solve_floating_base_system(
+                &payload_before.inertia.matrix()?,
+                impulse_on_payload_body,
+            )?;
+            payload_after.twist_body = payload_before.twist_body.plus(delta);
+            validate_twist(
+                payload_after.twist_body,
+                "supported_payload_release.payload_velocity",
+            )?;
+            if payload_after.twist_body == payload_before.twist_body {
+                return Err(PayloadError::Invalid(
+                    "supported payload velocity jump erased",
+                ));
+            }
+            poll(&mut cancelled)?;
+            let after = forward_kinematics(
+                &model_after,
+                state_after.base,
+                &state_after.joint_position,
+                &state_after.joint_velocity,
+            )?;
+            poll(&mut cancelled)?;
+            (Some(after), response.support_impulse_body, reaction)
         }
-        poll(&mut cancelled)?;
-        let after = forward_kinematics(
-            &model_after,
-            state_after.base,
-            &state_after.joint_position,
-            &state_after.joint_velocity,
-        )?;
-        poll(&mut cancelled)?;
-        (Some(after), response.support_impulse_body, reaction)
     };
     let after = after_owned.as_ref().unwrap_or(&kin);
     let mut momentum_after = momentum_from_kinematics(&model_after, after)?;
@@ -297,6 +337,25 @@ pub(super) fn release_evaluated(
     });
     let mut projected = vec![Wrench::default(); model.link_count()];
     let boost = account_boost(model, &kin)?;
+    let (bilateral_reaction, bilateral_work) = if let Some(event) = bilateral_event {
+        let (_, constraint_controls) = constraints.ok_or(PayloadError::Invalid(
+            "missing supported mixed constraint controls",
+        ))?;
+        let (reaction, work) = bilateral::finish_reaction(
+            &model_after,
+            state,
+            &kin,
+            after,
+            &state_after.joint_velocity,
+            boost,
+            event,
+            constraint_controls,
+            &mut cancelled,
+        )?;
+        (Some(reaction), Some(work))
+    } else {
+        (None, None)
+    };
     let centered_target = twist_in_frame(target_twist, target_pose, boost)?;
     let centered_payload = twist_in_frame(
         payload_before.twist_body,
@@ -401,9 +460,14 @@ pub(super) fn release_evaluated(
         &projected,
     )?
     .generalized_force;
+    let constraint_joint_impulse = bilateral_reaction
+        .as_ref()
+        .map_or(reaction.joint_impulse.as_slice(), |reaction| {
+            &reaction.generalized_constraint_impulse[6..]
+        });
     for (index, (residual, &applied)) in joint_momentum_residual
         .iter_mut()
-        .zip(&reaction.joint_impulse)
+        .zip(constraint_joint_impulse)
         .enumerate()
     {
         if index % 64 == 0 {
@@ -459,13 +523,15 @@ pub(super) fn release_evaluated(
     );
     // Retain the native reaction pairing before rounding its public receipt.
     // Small signed work must survive cancellation with support/source work.
-    let constraint_work = (sum_products(
-        reaction.joint_impulse.iter().copied(),
-        state.joint_velocity.iter().copied(),
-    ) + sum_products(
-        reaction.joint_impulse.iter().copied(),
-        state_after.joint_velocity.iter().copied(),
-    )) * Dd::from_f64(0.5);
+    let constraint_work = bilateral_work.unwrap_or_else(|| {
+        (sum_products(
+            reaction.joint_impulse.iter().copied(),
+            state.joint_velocity.iter().copied(),
+        ) + sum_products(
+            reaction.joint_impulse.iter().copied(),
+            state_after.joint_velocity.iter().copied(),
+        )) * Dd::from_f64(0.5)
+    });
     let energy_residual_j = finite(
         (centered_change - centered_support_work - supplied_work - constraint_work).to_f64(),
         "supported_payload_release.energy_residual",
@@ -517,17 +583,20 @@ pub(super) fn release_evaluated(
         energy_residual_j,
     };
     poll(&mut cancelled)?;
-    Ok(ConstrainedSupportedPayloadRelease {
-        release: SupportedPayloadRelease {
-            model_after,
-            state_after,
-            payload_after,
-            supplied_work_j,
-            applied_impulse: impulse,
-            impulse_on_payload_body,
-            impulse_on_retained_link,
-            balance,
+    Ok((
+        ConstrainedSupportedPayloadRelease {
+            release: SupportedPayloadRelease {
+                model_after,
+                state_after,
+                payload_after,
+                supplied_work_j,
+                applied_impulse: impulse,
+                impulse_on_payload_body,
+                impulse_on_retained_link,
+                balance,
+            },
+            reaction,
         },
-        reaction,
-    })
+        bilateral_reaction,
+    ))
 }

@@ -211,7 +211,8 @@ pub(in crate::articulated::motion::inventory) fn release_evaluated(
         }
         generalized_constraint_impulse = bilateral::project_constraint_impulses(
             &model_after,
-            state,
+            state.base.world_from_base,
+            &state.joint_position,
             &reaction.constraint_body_impulses,
             &reaction.constraint_joint_impulses,
             &mut cancelled,
@@ -363,6 +364,7 @@ pub(in crate::articulated::motion::inventory) fn release_evaluated(
             boost,
             &mut cancelled,
         )?
+        .to_f64()
     } else {
         let rates_before = apply_rows(constraints, &state.joint_velocity, &mut cancelled)?;
         let rates_after = apply_rows(constraints, &state_after.joint_velocity, &mut cancelled)?;

@@ -213,7 +213,8 @@ pub(super) fn capture_evaluated(
         };
         let impulse = bilateral::project_constraint_impulses(
             &model_after,
-            state,
+            state.base.world_from_base,
+            &state.joint_position,
             &reaction.constraint_body_impulses,
             &reaction.constraint_joint_impulses,
             &mut cancelled,
@@ -384,6 +385,7 @@ pub(super) fn capture_evaluated(
             boost,
             &mut cancelled,
         )?
+        .to_f64()
     } else {
         let initial_rows = apply_rows(constraints, &state.joint_velocity, &mut cancelled)?;
         let mut work = 0.0;

@@ -8,9 +8,14 @@
 //! never a raw decrease of lab-frame kinetic energy.
 //!
 //! This is a perfectly inelastic rigid attachment at the actual supplied pose.
-//! The constraints child composes existing ideal affine gear/lock rows with
-//! the same lifecycle. Contact discovery, nonlinear loops, finite grasp duration
-//! and a thermal destination for removed mechanical energy remain separate.
+//! The constraints and bilateral children compose existing affine gear/lock
+//! rows and material distance/spherical closures with the same lifecycle.
+//! Contact discovery, finite grasp duration and a thermal destination for
+//! removed mechanical energy remain separate.
+
+/// Material distance/spherical closures and affine rows in supported inventory events.
+#[path = "supported/bilateral.rs"]
+pub mod bilateral;
 
 /// Existing affine gear and lock reactions during supported payload inventory events.
 #[path = "supported/constraints.rs"]
@@ -20,8 +25,10 @@ pub mod constraints;
 #[path = "supported/release.rs"]
 pub mod release;
 
+use self::bilateral::SupportedBilateralPayloadReaction;
 use self::constraints::{
-    ConstrainedSupportedPayloadCapture, SupportedPayloadConstraintControls, impulse_response,
+    ConstrainedSupportedPayloadCapture, SupportedPayloadConstraintControls,
+    SupportedPayloadConstraintReaction, impulse_response,
 };
 use super::super::prescribed::PrescribedBaseMotionState;
 use super::super::reconfigure::{self, ReconfigurationControls, ReconfigurationError};
@@ -33,6 +40,9 @@ use super::{
     energy_in_frame, finite, payload_at_link, poll, replace_link_inertia, twist_in_frame,
 };
 use crate::articulated::motion::reconfigure::constraints::JointConstraint;
+use crate::articulated::motion::spatial_loads::implicit::distance::{
+    BilateralImpulseConfig, BilateralLoop,
+};
 use crate::articulated::{
     ArticulatedModel, ArticulatedMomentum, BaseState, forward_kinematics, inverse_dynamics,
     momentum_from_kinematics, validate_twist, validate_wrench,
@@ -79,7 +89,8 @@ pub struct SupportedPayloadBalance {
     /// Native RNEA projection of actual body increments or release decomposition.
     /// Unconstrained capture and equal/opposite separation have no external
     /// relative-joint impulse. Constrained inventory events subtract the
-    /// declared A^T lambda in their surrounding constraint-reaction receipt.
+    /// full body-plus-joint constraint projection in their surrounding reaction
+    /// receipt (A^T lambda for affine joint-only rows).
     pub joint_momentum_residual: Vec<f64>,
     /// Largest absolute residual divided by its declared allowance, at most one.
     pub maximum_normalized_momentum_residual: f64,
@@ -159,9 +170,10 @@ pub fn capture_payload(
         payload,
         controls,
         None,
+        None,
         cancelled,
     )
-    .map(|result| result.capture)
+    .map(|(result, _)| result.capture)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -172,8 +184,15 @@ fn capture_evaluated(
     payload: PayloadState,
     controls: SupportedPayloadControls<'_>,
     constraints: Option<(&[JointConstraint], SupportedPayloadConstraintControls)>,
+    bilateral_rows: Option<(&[BilateralLoop], BilateralImpulseConfig)>,
     mut cancelled: impl FnMut() -> bool,
-) -> Result<ConstrainedSupportedPayloadCapture, PayloadError> {
+) -> Result<
+    (
+        ConstrainedSupportedPayloadCapture,
+        Option<SupportedBilateralPayloadReaction>,
+    ),
+    PayloadError,
+> {
     poll(&mut cancelled)?;
     admit(model, state, target_link, controls)?;
     let before = forward_kinematics(
@@ -204,14 +223,36 @@ fn capture_evaluated(
     body_impulses[target_link] = mismatch;
     let zero = vec![0.0; model.dof_count()];
     poll(&mut cancelled)?;
-    let (response, reaction) = impulse_response(
-        &model_after,
-        state,
-        &zero,
-        &body_impulses,
-        constraints,
-        &mut cancelled,
-    )?;
+    let (response, reaction, bilateral_event) = if let Some((loops, config)) = bilateral_rows {
+        let (rows, constraint_controls) = constraints.ok_or(PayloadError::Invalid(
+            "missing supported mixed constraint controls",
+        ))?;
+        let event = bilateral::native_response(
+            &model_after,
+            state,
+            &body_impulses,
+            loops,
+            rows,
+            constraint_controls,
+            config,
+            &mut cancelled,
+        )?;
+        (
+            event.impulse.clone(),
+            SupportedPayloadConstraintReaction::empty(),
+            Some(event),
+        )
+    } else {
+        let (response, reaction) = impulse_response(
+            &model_after,
+            state,
+            &zero,
+            &body_impulses,
+            constraints,
+            &mut cancelled,
+        )?;
+        (response, reaction, None)
+    };
     poll(&mut cancelled)?;
     let state_after = PrescribedBaseMotionState {
         time_s: state.time_s,
@@ -228,6 +269,25 @@ fn capture_evaluated(
     poll(&mut cancelled)?;
     let payload_after = payload_at_link(&after, target_link, link_from_payload, payload.inertia)?;
     let boost = account_boost(model, &before)?;
+    let bilateral_reaction = if let Some(event) = bilateral_event {
+        let (_, constraint_controls) = constraints.ok_or(PayloadError::Invalid(
+            "missing supported mixed constraint controls",
+        ))?;
+        let (reaction, _) = bilateral::finish_reaction(
+            &model_after,
+            state,
+            &before,
+            &after,
+            &state_after.joint_velocity,
+            boost,
+            event,
+            constraint_controls,
+            &mut cancelled,
+        )?;
+        Some(reaction)
+    } else {
+        None
+    };
     let mut momentum_before = momentum_from_kinematics(model, &before)?;
     let incoming = payload
         .inertia
@@ -328,9 +388,14 @@ fn capture_evaluated(
         &projected,
     )?
     .generalized_force;
+    let constraint_joint_impulse = bilateral_reaction
+        .as_ref()
+        .map_or(reaction.joint_impulse.as_slice(), |reaction| {
+            &reaction.generalized_constraint_impulse[6..]
+        });
     for (index, (residual, &applied)) in joint_momentum_residual
         .iter_mut()
-        .zip(&reaction.joint_impulse)
+        .zip(constraint_joint_impulse)
         .enumerate()
     {
         if index % 64 == 0 {
@@ -377,7 +442,7 @@ fn capture_evaluated(
         });
     }
     // For constrained capture, this projection identity retains the finite
-    // final-rate pairing J_constraint dot qdot_after as an admitted defect.
+    // final-rate pairing J_constraint dot v_after as an admitted defect.
     // Its separately bounded midpoint work is not subtracted from this Q.
     let energy_residual_j = finite(
         (centered_change - support_work + removed).to_f64(),
@@ -421,23 +486,26 @@ fn capture_evaluated(
         energy_residual_j,
     };
     poll(&mut cancelled)?;
-    Ok(ConstrainedSupportedPayloadCapture {
-        capture: SupportedPayloadCapture {
-            model_after,
-            state_after,
-            attachment: PayloadAttachment {
-                target_link,
-                retained_link: model.links()[target_link].clone(),
-                loaded_inertia,
-                link_from_payload,
-                payload_inertia: payload.inertia,
+    Ok((
+        ConstrainedSupportedPayloadCapture {
+            capture: SupportedPayloadCapture {
+                model_after,
+                state_after,
+                attachment: PayloadAttachment {
+                    target_link,
+                    retained_link: model.links()[target_link].clone(),
+                    loaded_inertia,
+                    link_from_payload,
+                    payload_inertia: payload.inertia,
+                },
+                payload_after,
+                removed_relative_energy_j,
+                balance,
             },
-            payload_after,
-            removed_relative_energy_j,
-            balance,
+            reaction,
         },
-        reaction,
-    })
+        bilateral_reaction,
+    ))
 }
 
 fn admit(

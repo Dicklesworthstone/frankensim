@@ -6636,3 +6636,50 @@ repository-pinned toolchain. Native compilation and numerical Rust execution
 remain **UNRUN** here because nightly-2026-07-06, the complete dependency graph,
 DSR and RCH are unavailable. No benchmark, all-runtime or full-plan completion
 claim is made. The broader `frankensim-ext-mbd-core-vqqt` bead remains open.
+
+### Supported payload capture and release with material closures
+
+`motion::inventory::supported::bilateral` connects supported rigid payload
+capture, passive release and point-impulse/free-couple separation to the native
+prescribed mixed material/joint event. The existing inventory lifecycles remain
+the owners: capture combines the original full rotated payload inertia before
+the simultaneous mismatch/reaction response; release restores the exact retained
+inertia before the simultaneous recoil/reaction response. The new path admits
+distance/spherical closures and gear/lock rows together, including mobile root
+joints, and retains the authoritative native support impulse and signed work.
+The original unconstrained and affine-only public entry points retain their
+existing branches.
+
+Actual body and joint constraint impulses now share the original zero-rate RNEA
+projection and common-frame work helper. The base covector uses the current root
+joint transform; old fixed-root callers keep their original transform and f64
+work boundary. Supported inventory subtracts the full projected joint impulse,
+not only the affine A^T multiplier. The new reaction receipt exposes the full
+base/joint covector, common accounting boost, actual midpoint work and final-rate
+pairing, separately from the native auxiliary event's lab-frame work.
+
+Capture retains its nonnegative physical relative-motion quadratic Q and the
+identity delta_K - W_support + Q = J_constraint dot v_final, including the
+independently bounded finite tangency defect. Midpoint reaction work is capped
+separately and is not subtracted from Q. Release retains unrounded Dd constraint
+work until subtracting support, source and reaction work from actual kinetic
+change. The supported separation policy still refuses negative source work.
+Passive/zero-impulse release admits geometry, tangency and full mixed mobility
+on retained inertia while preserving the original state and applying no
+constraint correction. Existing representability checks still refuse nonzero solved velocity changes
+erased in actual endpoint body motion, including possible roundoff at a fully
+immobilized driven configuration. No hidden rate clipping is introduced.
+
+Five focused groups in `tests/articulated_supported_bilateral_payloads.rs`
+cover an independently derived capture/passive/ejection cycle, simultaneous
+endpoint limits, finite-slip work and caps, exact passive state, full-tensor
+payload response with spherical closure and a nonzero mobile-root coordinate,
+independent virtual-work projection, rotated/translated frames, driven support
+work, a large common boost, combined-rank/condition/budget/token refusals and
+cancellation. Root and independent review found no blocking source/API defect;
+exact rational scalar and finite-slip work checks passed. All changed consumer
+files and the new tests pass the available nightly-2026-08-31 rustfmt check.
+Native compilation and numerical Rust tests remain **UNRUN** under the previously
+recorded toolchain/dependency limitations. No throughput, full supported
+continuous-loop integration, supported batch-inventory or full-plan completion
+claim is made; `frankensim-ext-mbd-core-vqqt` remains open.
