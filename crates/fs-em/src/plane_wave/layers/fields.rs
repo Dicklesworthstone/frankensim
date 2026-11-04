@@ -54,8 +54,8 @@ impl<'m> PlanarDielectricLayers<'m> {
         if c > 1.0 {
             return Err(bad("incidence cosine must lie in (0,1]"));
         }
-        let epsilon_i = linear_electric_permittivity(self.incident)?;
-        let mu_i = linear_magnetic_permeability(self.incident)?;
+        let epsilon_i = self.incident_epsilon_f_m;
+        let mu_i = self.incident_mu_h_m;
         let normal_admittance = positive(det::sqrt(epsilon_i) / det::sqrt(mu_i))?;
         let admittance = positive(match polarization {
             Polarization::Te => normal_admittance * c,

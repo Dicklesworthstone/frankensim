@@ -26,22 +26,23 @@ pub(super) enum ExposureSide {
 
 impl ExposureSide {
     /// The observed half-space owns the constitutive coefficients. A lossless
-    /// left observation is valid even when a different or lossy medium is on
-    /// the right. Finite-window right observations require the original
+    /// observation is valid even when a different or lossy medium is on the
+    /// other side. Either observed half-space requires its original
     /// nondispersive law; a zero loss at one frequency is not that law.
     pub(super) fn momentum_material<'m>(
         self,
         source: &PlanarDielectricLayers<'m>,
     ) -> Result<&'m fs_material::state_point::ResolvedMaterialStatePoint, ReflectionError> {
         use AngularSpectrumIlluminationSide as I;
-        match self.illumination() {
-            I::IncomingLeft | I::OutgoingLeft | I::TotalLeft => Ok(source.incident_material()),
-            I::IncomingRight | I::OutgoingRight | I::TotalRight => match source.exit_response() {
-                DielectricResponse::Lossless(material) => Ok(material),
-                _ => Err(ReflectionError::Invalid(
-                    "finite-window momentum requires an original lossless nondispersive observation medium",
-                )),
-            },
+        let response = match self.illumination() {
+            I::IncomingLeft | I::OutgoingLeft | I::TotalLeft => source.incident_response(),
+            I::IncomingRight | I::OutgoingRight | I::TotalRight => source.exit_response(),
+        };
+        match response {
+            DielectricResponse::Lossless(material) => Ok(material),
+            _ => Err(ReflectionError::Invalid(
+                "finite-window momentum requires an original lossless nondispersive observation medium",
+            )),
         }
     }
 

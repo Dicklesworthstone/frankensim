@@ -218,10 +218,8 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
             }
         }
         let omega = source.angular_frequency_rad_s();
-        let epsilon = linear_electric_permittivity(source.incident_material())
-            .map_err(ReflectionError::from)?;
-        let mu = linear_magnetic_permeability(source.incident_material())
-            .map_err(ReflectionError::from)?;
+        let epsilon = source.incident_permittivity_f_m();
+        let mu = source.incident_permeability_h_m();
         let exit_mu =
             linear_magnetic_permeability(source.exit_material()).map_err(ReflectionError::from)?;
         let k = omega * det::sqrt(epsilon) * det::sqrt(mu);

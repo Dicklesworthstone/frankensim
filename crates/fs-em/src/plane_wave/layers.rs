@@ -27,8 +27,7 @@ use super::{
     positive,
 };
 use fs_material::{
-    field_storage::{linear_electric_permittivity, linear_magnetic_permeability},
-    state_point::ResolvedMaterialStatePoint,
+    field_storage::linear_magnetic_permeability, state_point::ResolvedMaterialStatePoint,
 };
 use fs_math::{c64::C64, det};
 
@@ -61,6 +60,9 @@ struct PreparedLayer<'a> {
 /// Frequency-resolved original material laws; angle queries allocate nothing.
 pub struct PlanarDielectricLayers<'a> {
     incident: &'a ResolvedMaterialStatePoint,
+    incident_response: DielectricResponse<'a>,
+    incident_epsilon_f_m: f64,
+    incident_mu_h_m: f64,
     exit: DielectricResponse<'a>,
     exit_wave: WaveMedium,
     omega: f64,
@@ -99,6 +101,25 @@ impl<'a> PlanarDielectricLayers<'a> {
         omega_rad_s: f64,
         layers: &[DielectricLayer<'a>],
     ) -> Result<Self, ReflectionError> {
+        Self::try_new_with_incident_response(
+            DielectricResponse::Lossless(incident),
+            exit,
+            omega_rad_s,
+            layers,
+        )
+    }
+
+    /// Admit an original spectral or other constitutive incident law at this
+    /// frequency. Its permittivity must be real and positive, preserving the
+    /// existing lossless power port. The original law and its resolved value
+    /// are retained together; optical incidence does not require a second
+    /// static epsilon source. Every downstream field uses this same cache.
+    pub fn try_new_with_incident_response(
+        incident: DielectricResponse<'a>,
+        exit: DielectricResponse<'a>,
+        omega_rad_s: f64,
+        layers: &[DielectricLayer<'a>],
+    ) -> Result<Self, ReflectionError> {
         if layers.len() > MAX_LAYERS
             || layers
                 .iter()
@@ -109,8 +130,8 @@ impl<'a> PlanarDielectricLayers<'a> {
             ));
         }
         let omega = positive(omega_rad_s)?;
-        let epsilon_i = linear_electric_permittivity(incident)?;
-        let mu_i = linear_magnetic_permeability(incident)?;
+        let epsilon_i = incident.lossless_permittivity(omega)?;
+        let mu_i = linear_magnetic_permeability(incident.material())?;
         let wave_number = positive(omega * det::sqrt(epsilon_i) * det::sqrt(mu_i))?;
         let prepare = |source: DielectricResponse<'a>| {
             WaveMedium::new(
@@ -129,7 +150,10 @@ impl<'a> PlanarDielectricLayers<'a> {
             });
         }
         Ok(Self {
-            incident,
+            incident: incident.material(),
+            incident_response: incident,
+            incident_epsilon_f_m: epsilon_i,
+            incident_mu_h_m: mu_i,
             exit,
             exit_wave,
             omega,
@@ -140,6 +164,18 @@ impl<'a> PlanarDielectricLayers<'a> {
 
     pub const fn incident_material(&self) -> &'a ResolvedMaterialStatePoint {
         self.incident
+    }
+    /// Original incident law, including its wavelength parameterization.
+    pub const fn incident_response(&self) -> DielectricResponse<'a> {
+        self.incident_response
+    }
+    /// Positive lossless permittivity from the original law at this frequency.
+    pub const fn incident_permittivity_f_m(&self) -> f64 {
+        self.incident_epsilon_f_m
+    }
+    /// Original same-state scalar permeability [H/m].
+    pub const fn incident_permeability_h_m(&self) -> f64 {
+        self.incident_mu_h_m
     }
     pub fn exit_material(&self) -> &'a ResolvedMaterialStatePoint {
         self.exit.material()
@@ -152,7 +188,9 @@ impl<'a> PlanarDielectricLayers<'a> {
     /// vector capacity. Borrowed material sources and allocator overhead are excluded.
     pub fn workspace_bytes(&self) -> usize {
         core::mem::size_of::<Self>().saturating_add(
-            self.layers.capacity().saturating_mul(core::mem::size_of::<PreparedLayer<'a>>()),
+            self.layers
+                .capacity()
+                .saturating_mul(core::mem::size_of::<PreparedLayer<'a>>()),
         )
     }
     pub const fn exit_permittivity_f_m(&self) -> C64 {
@@ -190,10 +228,7 @@ impl<'a> PlanarDielectricLayers<'a> {
         super::momentum::normal_difference(
             self.wave_number / self.omega,
             cosine,
-            C64::new(
-                exit_kz.re / self.wave_number,
-                exit_kz.im / self.wave_number,
-            ),
+            C64::new(exit_kz.re / self.wave_number, exit_kz.im / self.wave_number),
             self.exit_wave.epsilon_ratio.re,
             self.exit_wave.mu_ratio,
         )
@@ -221,8 +256,8 @@ impl<'a> PlanarDielectricLayers<'a> {
             return Err(bad("radiation-pressure source must be finite"));
         }
         let response = self.response(incidence_cosine, polarization)?;
-        let epsilon = linear_electric_permittivity(self.incident)?;
-        let mu = linear_magnetic_permeability(self.incident)?;
+        let epsilon = self.incident_epsilon_f_m;
+        let mu = self.incident_mu_h_m;
         let y = match polarization {
             Polarization::Te => response.incident_normal_wavenumber_rad_m / (self.omega * mu),
             Polarization::Tm => self.omega * epsilon / response.incident_normal_wavenumber_rad_m,
@@ -276,7 +311,7 @@ impl<'a> PlanarDielectricLayers<'a> {
             }
             _ => false,
         };
-        core::ptr::eq(self.incident, other.incident)
+        same_response(self.incident_response, other.incident_response)
             && same_response(self.exit, other.exit)
             && self.layers.len() == other.layers.len()
             && self.layers.iter().zip(&other.layers).all(|(a, b)| {

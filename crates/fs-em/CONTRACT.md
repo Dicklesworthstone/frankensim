@@ -2283,7 +2283,7 @@ qualification of an otherwise static material at an optical frequency.
 containing the original conductor, Cauchy, tabulated dielectric or Sellmeier
 family. `DielectricResponse::OpticalMaterial` feeds these sources through the
 same interface, coherent film, internal-field and vector-beam owners. The
-incident port retains its existing explicit lossless epsilon/mu admission. The
+incident port requires positive real permittivity and sourced permeability. The
 original family can be extended with explicit permeability using
 `VisibleOpticalStatePoint::with_additional_requirements`; original claims and
 receipts are retained, newly required properties come from the same immutable
@@ -2311,6 +2311,31 @@ compare all three dielectric families with independent Fresnel and film sums,
 preserve original receipts and same-state magnetic refresh, and check RGB,
 source-card, pole and adjacent-frequency refusals. The pure constitutive leaf
 has separate native tests for SI dispersion, attenuation and band admission.
+
+`PlanarDielectricInterface::try_new_with_incident_response` and
+`PlanarDielectricLayers::try_new_with_incident_response` retain an original
+frequency-dependent incident law as well. Each selected frequency must have
+strictly positive real permittivity and exactly zero loss; absorbing incidence
+remains refused so incoming/reflected normal powers keep their existing
+additive interpretation. Cauchy, tabulated and Sellmeier incident glass uses its
+original vacuum-wavelength parameterization, without a second static epsilon
+property. The incident phase wavelength is `lambda_vac/n`; its conserved
+transverse wave number controls Snell refraction, total internal reflection,
+film phase and the vector beam's light-cone admission.
+
+The prepared stack caches the actual incident epsilon/mu once per frequency.
+Interior fields, simultaneous illumination, cycle-mean forces and beam
+reconstruction use that same cache. Frequency/thermal rebuilds retain the
+original incident response rather than replacing its law with a material
+snapshot. Exposure source-identity checks include the incident law; finite-time
+stress/momentum observations still require an explicitly nondispersive law in
+the observed half-space, even if a spectral law happens to be lossless at all
+queried frequencies. Synthetic G1/G3 regressions cover the three dielectric
+families, independent Snell/Fresnel and Fourier-vector fields, homogeneous
+film phase and internal E/H, both illumination ports, wavelength-dependent
+light-cone admission, absorbing/out-of-band refusals and the original static
+constructor equivalence. These remain monochromatic-source numerical checks,
+not a causal pulse-propagation or measured-material claim.
 
 ### Coherent finite dielectric films
 

@@ -135,6 +135,20 @@ impl<'a> DielectricResponse<'a> {
         }
         Ok(epsilon)
     }
+
+    // Incoming/reflected normal powers have the original additive port
+    // interpretation only in a lossless incident medium. A dispersive source
+    // is still valid at a monochromatic frequency; zero loss is checked there,
+    // without replacing its spectral law by a separately authored constant.
+    fn lossless_permittivity(self, omega: f64) -> Result<f64, ReflectionError> {
+        let epsilon = self.permittivity(omega)?;
+        if epsilon.im != 0.0 || epsilon.re <= 0.0 {
+            return Err(ReflectionError::Invalid(
+                "incident wave response must be positive and lossless at the selected frequency",
+            ));
+        }
+        Ok(epsilon.re)
+    }
 }
 
 // Same static source admission as the native spatial Ohmic field owner. A
@@ -184,8 +198,8 @@ impl std::error::Error for ReflectionError {}
 /// an unambiguous additive decomposition. The transmitted side may absorb.
 pub struct PlanarDielectricInterface<'a> {
     incident: &'a ResolvedMaterialStatePoint,
+    incident_response: DielectricResponse<'a>,
     transmitted: DielectricResponse<'a>,
-    incident_epsilon_f_m: f64,
     incident_mu_h_m: f64,
     transmitted_mu_h_m: f64,
 }
@@ -295,31 +309,44 @@ impl<'a> PlanarDielectricInterface<'a> {
         incident: &'a ResolvedMaterialStatePoint,
         transmitted: DielectricResponse<'a>,
     ) -> Result<Self, ReflectionError> {
-        let incident_epsilon_f_m = linear_electric_permittivity(incident)?;
-        let incident_mu_h_m = linear_magnetic_permeability(incident)?;
+        Self::try_new_with_incident_response(DielectricResponse::Lossless(incident), transmitted)
+    }
+
+    /// Retain both original constitutive laws, including spectral incident
+    /// glass. Each response query reuses its actual incident permittivity at
+    /// that frequency and requires it to be positive and exactly lossless.
+    /// Absorbing incidence and out-of-band optical queries refuse; a static
+    /// electric-permittivity property is not required by an optical source.
+    pub fn try_new_with_incident_response(
+        incident: DielectricResponse<'a>,
+        transmitted: DielectricResponse<'a>,
+    ) -> Result<Self, ReflectionError> {
+        let incident_mu_h_m = linear_magnetic_permeability(incident.material())?;
         let transmitted_mu_h_m = linear_magnetic_permeability(transmitted.material())?;
-        match transmitted {
-            DielectricResponse::Lossless(material) => {
-                linear_electric_permittivity(material)?;
+        for source in [incident, transmitted] {
+            match source {
+                DielectricResponse::Lossless(material) => {
+                    linear_electric_permittivity(material)?;
+                }
+                DielectricResponse::Ohmic(conductor) => {
+                    linear_electric_permittivity(conductor.material())?;
+                    ohmic_conductivity(conductor)?;
+                }
+                DielectricResponse::DebyeWithOhmic {
+                    dielectric,
+                    conductor,
+                } => {
+                    shared_ohmic_conductivity(dielectric, conductor)?;
+                }
+                DielectricResponse::Debye(_)
+                | DielectricResponse::OpticalConductor(_)
+                | DielectricResponse::OpticalMaterial(_) => {}
             }
-            DielectricResponse::Ohmic(conductor) => {
-                linear_electric_permittivity(conductor.material())?;
-                ohmic_conductivity(conductor)?;
-            }
-            DielectricResponse::DebyeWithOhmic {
-                dielectric,
-                conductor,
-            } => {
-                shared_ohmic_conductivity(dielectric, conductor)?;
-            }
-            DielectricResponse::Debye(_)
-            | DielectricResponse::OpticalConductor(_)
-            | DielectricResponse::OpticalMaterial(_) => {}
         }
         Ok(Self {
-            incident,
+            incident: incident.material(),
+            incident_response: incident,
             transmitted,
-            incident_epsilon_f_m,
             incident_mu_h_m,
             transmitted_mu_h_m,
         })
@@ -327,6 +354,10 @@ impl<'a> PlanarDielectricInterface<'a> {
 
     pub const fn incident_material(&self) -> &'a ResolvedMaterialStatePoint {
         self.incident
+    }
+    /// Original incident law; its spectral parameterization is retained.
+    pub const fn incident_response(&self) -> DielectricResponse<'a> {
+        self.incident_response
     }
     pub fn transmitted_material(&self) -> &'a ResolvedMaterialStatePoint {
         self.transmitted.material()
@@ -348,16 +379,16 @@ impl<'a> PlanarDielectricInterface<'a> {
                 "incidence cosine must lie in (0,1]",
             ));
         }
+        let incident_epsilon_f_m = self.incident_response.lossless_permittivity(omega)?;
         let epsilon = self.transmitted.permittivity(omega)?;
         let medium = WaveMedium::new(
             epsilon,
             self.transmitted_mu_h_m,
-            self.incident_epsilon_f_m,
+            incident_epsilon_f_m,
             self.incident_mu_h_m,
         )?;
-        let wave_number = positive(
-            omega * det::sqrt(self.incident_epsilon_f_m) * det::sqrt(self.incident_mu_h_m),
-        )?;
+        let wave_number =
+            positive(omega * det::sqrt(incident_epsilon_f_m) * det::sqrt(self.incident_mu_h_m))?;
         interface_response(medium, wave_number, c, polarization)
     }
 }

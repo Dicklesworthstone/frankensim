@@ -110,11 +110,7 @@ impl<'m> PlanarDielectricLayers<'m> {
             })
         };
         let admittance_s = [
-            admittance(
-                linear_electric_permittivity(self.incident)?,
-                linear_magnetic_permeability(self.incident)?,
-                c,
-            )?,
+            admittance(self.incident_epsilon_f_m, self.incident_mu_h_m, c)?,
             admittance(
                 self.exit_wave.epsilon_f_m.re,
                 linear_magnetic_permeability(self.exit.material())?,
@@ -199,8 +195,7 @@ impl<'m> PlanarDielectricLayers<'m> {
         {
             return Err(bad("two-sided field or heat transfer is unrepresentable"));
         }
-        let inverse_speed = det::sqrt(linear_electric_permittivity(self.incident)?)
-            * det::sqrt(linear_magnetic_permeability(self.incident)?);
+        let inverse_speed = det::sqrt(self.incident_epsilon_f_m) * det::sqrt(self.incident_mu_h_m);
         let momentum_normal_over_omega = [inverse_speed * c, inverse_speed * q.re];
         let momentum_normal_difference = super::super::momentum::normal_difference(
             inverse_speed,
@@ -209,8 +204,7 @@ impl<'m> PlanarDielectricLayers<'m> {
             self.exit_wave.epsilon_ratio.re,
             self.exit_wave.mu_ratio,
         );
-        let momentum_parallel_over_omega =
-            inverse_speed * det::sqrt((1.0 - c) * (1.0 + c));
+        let momentum_parallel_over_omega = inverse_speed * det::sqrt((1.0 - c) * (1.0 + c));
         let prepared = PreparedLayerIllumination {
             stack: self,
             polarization,

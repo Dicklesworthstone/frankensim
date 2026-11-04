@@ -610,8 +610,8 @@ impl<'a, 'm> QuasiSteadyFilmHeating<'a, 'm> {
             let mut stacks = reserve(frequencies.len())?;
             for &omega in &frequencies {
                 poll(&mut cancelled)?;
-                stacks.push(PlanarDielectricLayers::try_new(
-                    self.original.incident_material(),
+                stacks.push(PlanarDielectricLayers::try_new_with_incident_response(
+                    self.original.incident_response(),
                     self.original.exit_response(),
                     omega,
                     &films,
