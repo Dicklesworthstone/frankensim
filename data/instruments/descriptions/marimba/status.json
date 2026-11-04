@@ -3,10 +3,11 @@
   "family": "marimba",
   "title": "Marimba",
   "reference_instrument": "Iowa MIS marimba (model NA; bar material not stated; yarn, cord and rubber mallets)",
-  "summary": "A struck rosewood bar, not yet a marimba: it has no resonator tube, its hard rubber mallet isn't the recording's, its undercut is solved in the engine and not measured, and it decays far too fast (A3's f1 at 226.0 dB/s against the recording's 31.1; the cause isn't known). The outline comes from J. La Favre's table of an unnamed commercial 5-octave marimba, and the wood from the rosewood row of Chaigne and Doutaut 1997. Iowa states no bar wood or outline, so this isn't the recording's bar. A3 is a bright knock with the pitch underneath. Eb6 is close to one decaying sine, set against a recording that is a roll. Gb2 has no render.",
+  "summary": "A struck rosewood bar, not yet a marimba: it has no resonator tube, its hard rubber mallet isn't the recording's, its undercut is solved in the engine and not measured, and it decays too fast (A3's f1 at 72.0 dB/s against the recording's 31.1), even on a loss law fit after that gap was seen. The outline comes from J. La Favre's table of an unnamed commercial 5-octave marimba, and the stiffness and density from the rosewood row of Chaigne and Doutaut 1997. Iowa states no bar wood or outline, so this isn't the recording's bar. A3 is a short bright knock and then f1. Eb6 is close to one decaying sine, set against a recording that is a roll. Gb2 has no render.",
   "physics_present": [
     "The bar outline from J. La Favre's table of an unnamed commercial 5-octave marimba with rosewood bars, on a 56 x 6 x 3 mesh",
-    "Rosewood from Chaigne and Doutaut 1997 (JASA 101, Table I): E 2.13e10, density 1015, eta 2.35e-7 s, gamma_B 51.58 1/s. The other elastic ratios are Honduras mahogany's, a stand-in (USDA Wood Handbook)",
+    "Rosewood stiffness and density from Chaigne and Doutaut 1997 (JASA 101, Table I): E 2.13e10, density 1015. The other elastic ratios are Honduras mahogany's, a stand-in (USDA Wood Handbook)",
+    "A loss law fit through three printed rosewood bars, gamma_B 14.526 1/s and eta 1.0759e-6 s: Bremaud and Sprossmann, both Dalbergia latifolia, and Brancheriau, an unidentified Dalbergia. It was tried after we saw f1 decaying too fast, and no recording number entered it. It spans 393 to 945 Hz, so A3's f1 and third mode, C5's second mode and Eb6's f1 are extrapolated. The scale's strikes are still on the first loss row",
     "A circular-arc undercut solved in the engine from the modes alone, for f1 at equal temperament and f2 = 4 f1, the tuning the builder states for its own padouk bars; the third mode isn't aimed at. On Eb6 the arch length is the one the builder prints on its padouk table and only f1 is solved, because the builder says that register is tuned to the fundamental only",
     "A Hertz contact mallet, Chaigne and Doutaut's hard rubber row at 1.0 m/s, with the strike point carried from the xylophone bar",
     "Burton-Miller boundary-element radiation up to the band each page states, with no box"
@@ -14,11 +15,12 @@
   "physics_missing": [
     "A resonator tube: a real marimba hangs a tuned tube under each bar. At equal modal velocity A3's f1 radiates 32 dB less than its third mode, and the A3 recording has lines at 3.00, 5.00 and 7.00 f1 that we read as the closed tube's odd modes, untested",
     "The recording's mallet: the A3 and C5 recordings use a cord mallet, and Eb6's is a roll with no mallet named. The recordings differ in mallet as well as tube, and these renders can't separate the two",
-    "The right decay: f1 falls at 226.0 dB/s against the recording's 31.1 on A3, and at 235.0 against 59.7 on C5. The loss row comes from Chaigne and Doutaut's xylophone bar, and at A3 nearly all of f1's rate is that row's constant term. The same authors write that marimba bars have lower internal damping and stronger tube coupling than xylophone bars, and that decay times with and without the tube clearly differ on marimbas in the low range. So the row and the missing tube may both matter; neither has been tested here. Eb6's recording is a roll, so it gives no decay to compare",
+    "The right decay: on the fit f1 falls at 72.0 dB/s against the recording's 31.1 on A3, and at 113.6 against 59.7 on C5. Chaigne and Doutaut write that marimba bars have lower internal damping and stronger tube coupling than xylophone bars, and that decay times with and without the tube clearly differ on marimbas in the low range, so the gap that's left may be the missing tube, untested. Eb6's recording is a roll, so it gives no decay to compare",
     "A printed undercut: the rosewood table prints no arch length and no tuning, so we don't know that a maker would cut what the engine solved",
     "The recording's bar: Iowa states no bar wood and no bar outline",
     "A printed marimba strike point",
-    "Any mode above the band each page states: nothing above it is in that file"
+    "Any mode above the band each page states: nothing above it is in that file",
+    "A receiver that holds during contact: each page's peak is a pulse from the contact force through the receiver law, not the note's level, as tested on F4 with a second receiver. The broadband receiver is being wired in"
   ],
   "blocked": "Gb2: the engine certified no mode between 20 and 120 Hz on this bar at its length limit, on any window plan tried, so no cut could be solved and there is no render.",
   "beads": [
