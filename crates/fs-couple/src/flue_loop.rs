@@ -106,7 +106,7 @@ use fs_aeroac::jetcard::{JetCard, JetCardClaim};
 use fs_duct::{FingeringTable, Termination};
 use fs_material::gas::GasState;
 use fs_rand::StreamKey;
-use crate::turbulence_noise::{BandedGaussian, FLUE_JET_NOISE_KERNEL};
+use crate::turbulence_noise::{ButterworthBandGaussian, FLUE_JET_NOISE_KERNEL};
 
 use crate::bernoulli_aperture::developing::{DevelopingSlit, DevelopingSlitState};
 use crate::wind_line::{WindBoundary, WindLineBank, WindLineError};
@@ -147,9 +147,14 @@ pub mod auvray_jet;
 pub const FLUE_SEED_KERNEL: u32 = 0x666c_7565; // "flue"
 
 /// The opt-in breath noise of a flue jet (card row `jet_noise SEED GAIN ST_LO ST_HI RE_ON`): a dipole pressure jump
-/// in series in the mouth, uncorrelated with the acoustic field, of rms `gain * rho U_j^2 / 2 = gain * P_f` over the band
+/// in series in the mouth, uncorrelated with the acoustic field, of rms `gain * rho U_j^2 / 2 = gain * P_f` INSIDE the band
 /// `St_h = f h / U_j` in `[strouhal_lo, strouhal_hi]`, `h` the flue height, and zero while `Re_h = U_j h / nu` is below
-/// `reynolds_onset`. `U_j = sqrt(2 P_f / rho)` is VERGE'S jet velocity (the maximum jet velocity of his eq. 2.12) from the
+/// `reynolds_onset`. The band's shape is Verge's own recipe, white noise through one 2-pole Butterworth band-pass
+/// (sec. 6.5, p. 196; never run by him, p. 198), here with its -3 dB edges at the two Strouhal ends, so it falls at
+/// 6 dB/oct outside them like the pedestal of his Fig. 5.15a (p. 160), and the rms of the whole stream is about 1.4 times
+/// the in-band rms ([`ButterworthBandGaussian`]; an upper edge at or above Nyquist draws silence). The band filter before it
+/// (MB 17116) put 0.26 of its power inside the band, so it delivered the card's gain 5.8 dB low there.
+/// `U_j = sqrt(2 P_f / rho)` is VERGE'S jet velocity (the maximum jet velocity of his eq. 2.12) from the
 /// driving (foot) pressure `P_f`, the instantaneous blowing pressure upstream of the windway; it is NOT the card speed of
 /// the loop (the windway's bulk or centre speed): the measurement defines its gain, its floor and its band on `U_j`, and a
 /// windway with a viscous drop leaves `P_f` and so the noise unchanged while it slows the jet the loop sees. This is the
@@ -194,21 +199,21 @@ impl JetNoiseSpec {
 // The attached source: the spec, its own banded stream and the last series pressure it drew (0 while shut).
 struct JetNoise {
     spec: JetNoiseSpec,
-    noise: BandedGaussian,
+    noise: ButterworthBandGaussian,
     last_pa: f64,
 }
 
 impl JetNoise {
     fn new(spec: JetNoiseSpec) -> Result<Self, FlueError> {
         spec.validate().map_err(|what| FlueError::Invalid { what })?;
-        Ok(Self { noise: BandedGaussian::new(spec.seed, FLUE_JET_NOISE_KERNEL), spec, last_pa: 0.0 })
+        Ok(Self { noise: ButterworthBandGaussian::new(spec.seed, FLUE_JET_NOISE_KERNEL), spec, last_pa: 0.0 })
     }
 
     // The series pressure [Pa] of one accepted sample, drawn ONCE before any nonlinear trial; None while the gate is
     // shut (so a shut source leaves the mouth solve and the ledger on their original arithmetic). Everything follows
     // Verge's jet velocity `U_j = sqrt(2 P_f / rho)` of THIS sample's foot pressure `P_f` (never the windway's speed):
-    // the amplitude is `gain * rho U_j^2 / 2 = gain * P_f`, the gate `Re_h = U_j h / nu >= reynolds_onset`, the band edges
-    // `f = St U_j / h`. The stream advances by exactly one normal whether the gate is open or shut.
+    // the in-band amplitude is `gain * rho U_j^2 / 2 = gain * P_f`, the gate `Re_h = U_j h / nu >= reynolds_onset`, the
+    // -3 dB band edges `f = St U_j / h`. The stream advances by exactly one normal whether the gate is open or shut.
     fn pressure_pa(&mut self, foot_pa: f64, flue_height_m: f64, rho: f64, nu: f64, dt: f64) -> Option<f64> {
         let speed_m_s = if foot_pa > 0.0 { (2.0 * foot_pa / rho).sqrt() } else { 0.0 };
         let reynolds = speed_m_s * flue_height_m / nu;
@@ -2976,21 +2981,36 @@ mod forced_jet_tests {
     }
 
     #[test]
-    fn g3_jet_noise_rms_is_gain_times_the_foot_pressure_and_so_scales_with_the_square_of_verges_jet_velocity() {
-        // U_j = sqrt(2 P_f / rho): 100 Pa -> 12.9 m/s, 400 Pa -> 25.8 m/s (U_j doubles); rms = gain * rho U_j^2 / 2 = gain * P_f.
-        let (h, rho, nu, dt, count) = (1.0e-3, 1.2, 1.5e-5, 1.0 / 48_000.0, 1usize << 16);
-        let rms = |foot_pa: f64| {
+    fn g3_jet_noise_in_band_rms_is_gain_times_the_foot_pressure_and_so_scales_with_the_square_of_verges_jet_velocity() {
+        // U_j = sqrt(2 P_f / rho): 100 Pa -> 12.9 m/s, 400 Pa -> 25.8 m/s (U_j doubles); the rms INSIDE St_h in [ST_LO, ST_HI]
+        // (581-1485 Hz, then 1162-2969 Hz) is gain * rho U_j^2 / 2 = gain * P_f, within 3 % (MB 17116). Planted negative: the
+        // band filter this path had before, at the same edges and scale, measures 5.8 dB low on the same estimator.
+        let (h, rho, nu, dt, count) = (1.0e-3, 1.2, 1.5e-5, 1.0 / 48_000.0, 1usize << 19);
+        let band = |foot_pa: f64| {
+            let per_hz = (2.0 * foot_pa / rho).sqrt() / h;
+            (0.045 * per_hz, 0.115 * per_hz)
+        };
+        let in_band_rms = |foot_pa: f64| {
             let mut n = JetNoise::new(noise_spec(0.0)).unwrap();
             for _ in 0..4096 {
                 n.pressure_pa(foot_pa, h, rho, nu, dt);
             }
-            let s2: f64 = (0..count).map(|_| n.pressure_pa(foot_pa, h, rho, nu, dt).unwrap().powi(2)).sum();
-            (s2 / count as f64).sqrt()
+            let xs: Vec<f64> = (0..count).map(|_| n.pressure_pa(foot_pa, h, rho, nu, dt).unwrap()).collect();
+            let (f_lo, f_hi) = band(foot_pa);
+            crate::turbulence_noise::in_band_mean_square(&xs, f_lo, f_hi, dt).sqrt()
         };
-        let (slow, fast) = (rms(100.0), rms(400.0));
+        let (slow, fast) = (in_band_rms(100.0), in_band_rms(400.0));
         let law = 1.3e-3 * 100.0;
-        assert!((slow - law).abs() < 0.05 * law, "rms {slow} against gain P_f = {law}");
+        assert!((slow - law).abs() < 0.03 * law, "in-band rms {slow} against gain P_f = {law}");
         assert!((fast / slow - 4.0).abs() < 0.2, "doubling U_j gave x{}", fast / slow);
+        let (f_lo, f_hi) = band(100.0);
+        let mut old = crate::turbulence_noise::BandedGaussian::new(11, FLUE_JET_NOISE_KERNEL);
+        for _ in 0..4096 {
+            old.step(f_lo, f_hi, dt);
+        }
+        let olds: Vec<f64> = (0..count).map(|_| 1.3e-3 * 100.0 * old.step(f_lo, f_hi, dt)).collect();
+        let old_db = 20.0 * (crate::turbulence_noise::in_band_mean_square(&olds, f_lo, f_hi, dt).sqrt() / law).log10();
+        assert!((old_db + 5.8).abs() < 0.5, "the old band's in-band level {old_db} dB re gain P_f");
     }
 
     #[test]

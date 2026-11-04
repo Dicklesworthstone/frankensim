@@ -51,6 +51,10 @@
 //! see [`JetNoiseCard`] for the law, what each part rests on, and the label a page must carry. It uses the band-limited
 //! core [`BandedGaussian`] under its own kernel id [`GLOTTAL_JET_NOISE_KERNEL`] and, like the flue's `jet_noise` row, five
 //! required fields and no default.
+//!
+//! THE FLUE JET NOISE FILTER ([`ButterworthBandGaussian`]): the flue's `jet_noise` row alone draws through one 2-pole
+//! Butterworth band-pass, Verge's prescribed shape, normalised so that the rms inside the card's band is the card's gain;
+//! see that type for the source and what it does not claim.
 
 use fs_math::det;
 use fs_rand::{Stream, StreamKey};
@@ -178,6 +182,149 @@ impl BandedGaussian {
         self.y_hi = 0.0;
         0.0
     }
+}
+
+/// The 16-point Gauss-Legendre rule on `[-1, 1]`, positive half `(node, weight)`; the rule is symmetric.
+const GAUSS_LEGENDRE_16: [(f64, f64); 8] = [
+    (0.095_012_509_837_637_44, 0.189_450_610_455_068_6),
+    (0.281_603_550_779_258_9, 0.182_603_415_044_923_6),
+    (0.458_016_777_657_227_4, 0.169_156_519_395_002_6),
+    (0.617_876_244_402_643_8, 0.149_595_988_816_576_65),
+    (0.755_404_408_355_003_1, 0.124_628_971_255_533_95),
+    (0.865_631_202_387_831_6, 0.095_158_511_682_493),
+    (0.944_575_023_073_232_6, 0.062_253_523_938_647_61),
+    (0.989_400_934_991_649_9, 0.027_152_459_411_754_055),
+];
+
+/// The variance INSIDE the -3 dB edges of the band-pass `b s / (s^2 + b s + c)` taken through the bilinear map
+/// `s = (1 - z^-1) / (1 + z^-1)` (prewarped: `u = tan(pi f dt)`, `b = u_hi - u_lo`, `c = u_lo u_hi`), for a unit white
+/// input: `(1/pi) int_{w_lo}^{w_hi} |H(e^{jw})|^2 dw`. With `u = tan(w / 2)` and the low-pass prototype frequency
+/// `x = (u^2 - c) / (b u)` (`x = -1` at `u_lo`, `+1` at `u_hi`, `|H|^2 = 1 / (1 + x^2)`, `du / dx = b u / r`,
+/// `r = sqrt(b^2 x^2 + 4 c)`) it is `(2/pi) int_{-1}^{1} b u / (r (1 + x^2) (1 + u^2)) dx`, a smooth integrand, here by
+/// 16-point Gauss-Legendre (about 1e-12 relative for the flue band; a test checks it against brute force). Without
+/// warping (`u << 1`) it is `b / 2`: an analog 2-pole Butterworth band-pass puts exactly half its power inside its edges.
+fn butterworth_in_band_variance(b: f64, c: f64) -> f64 {
+    let mut sum = 0.0;
+    for &(node, weight) in &GAUSS_LEGENDRE_16 {
+        for x in [-node, node] {
+            let r = det::sqrt(b * b * x * x + 4.0 * c);
+            // The positive root of u^2 - b x u - c = 0, in the form without cancellation on either side of x = 0.
+            let u = if x >= 0.0 { 0.5 * (b * x + r) } else { 2.0 * c / (r - b * x) };
+            sum += weight * (b * u / r) / ((1.0 + x * x) * (1.0 + u * u));
+        }
+    }
+    sum * core::f64::consts::FRAC_2_PI
+}
+
+/// One 2-pole Butterworth band-pass section and the variance of its output inside its edges for a unit white input.
+/// `y[n] = b0 (x[n] - x[n-2]) - a1 y[n-1] - a2 y[n-2]`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct BandBiquad {
+    b0: f64,
+    a1: f64,
+    a2: f64,
+    in_band_variance: f64,
+}
+
+impl BandBiquad {
+    /// The section with -3 dB at exactly `f_lo_hz` and `f_hi_hz` at step `dt` (prewarped bilinear map of
+    /// `b s / (s^2 + b s + c)`: `a0 = 1 + b + c`, `b0 = b / a0`, `a1 = 2 (c - 1) / a0`, `a2 = (1 - b + c) / a0`). None for edges
+    /// that are not ordered and positive, or an upper edge at or above the Nyquist frequency `1 / (2 dt)`.
+    fn design(f_lo_hz: f64, f_hi_hz: f64, dt: f64) -> Option<Self> {
+        if !(f_lo_hz > 0.0 && f_hi_hz > f_lo_hz && dt > 0.0 && dt.is_finite() && f_hi_hz * dt < 0.5) {
+            return None;
+        }
+        let pi = core::f64::consts::PI;
+        let (u_lo, u_hi) = (det::tan(pi * f_lo_hz * dt), det::tan(pi * f_hi_hz * dt));
+        let (b, c) = (u_hi - u_lo, u_lo * u_hi);
+        if !(b > 0.0 && c > 0.0 && b.is_finite() && c.is_finite()) {
+            return None;
+        }
+        let in_band_variance = butterworth_in_band_variance(b, c);
+        if !(in_band_variance > 0.0 && in_band_variance.is_finite()) {
+            return None;
+        }
+        let a0 = 1.0 + b + c;
+        Some(Self { b0: b / a0, a1: 2.0 * (c - 1.0) / a0, a2: (1.0 - b + c) / a0, in_band_variance })
+    }
+}
+
+/// Gaussian noise through ONE 2-pole Butterworth band-pass (a biquad), normalised so that its rms INSIDE the -3 dB edges
+/// is one: the flue `jet_noise` row's filter (MB 17116), and no other source's. It is Verge's own recipe for the flue
+/// source, white noise through "an order two Butterworth pass-band digital filter" (M. P. Verge, PhD thesis, TU Eindhoven
+/// 1995, sec. 6.5, p. 196). The recipe names no edges, and Verge never ran it: "In the results presented later, we,
+/// however, did not use a turbulence noise source" (p. 198). One biquad has 6 dB/oct skirts, the slope of the pedestal
+/// his measured source shows outside its peak (Fig. 5.15a, p. 160, read approximately: 8-10 x 1e-5 per analyser line over
+/// St_h 0.055-0.10 and 2.5-5 x 1e-5 on either side; nothing is printed above St_h 0.135). The edges are the card's
+/// Strouhal band (p. 196 prefers edges fixed in Hz; that is a separate step, not taken here), and the gain is defined
+/// over that band, so the normalisation is in-band: the analog section puts
+/// exactly half its power inside its edges, the bilinear one a little more (0.51-0.56 at the flue's settings), and the
+/// total rms is about 1.4 times the in-band rms. [`BandedGaussian`] (two first-order low-passes, normalised on the
+/// whole band) put only 0.26 of its power inside the same edges, 5.8 dB below the card's gain; it is kept unchanged for
+/// the voice's and the lip's jet rows. The coefficients and the normalisation follow the edges every step
+/// (quasi-stationary, like [`BandedGaussian::step`]); the filter is direct form I, so a coefficient change acts on
+/// stored inputs and outputs, not on a hidden state.
+#[derive(Clone, Debug)]
+pub struct ButterworthBandGaussian {
+    white: Stream,
+    x1: f64,
+    x2: f64,
+    y1: f64,
+    y2: f64,
+}
+
+impl ButterworthBandGaussian {
+    /// A stream at `seed` under `kernel` (tile 0), the section at rest.
+    #[must_use]
+    pub fn new(seed: u64, kernel: u32) -> Self {
+        Self { white: StreamKey { seed, kernel, tile: 0 }.stream(), x1: 0.0, x2: 0.0, y1: 0.0, y2: 0.0 }
+    }
+
+    /// One sample for -3 dB edges `f_lo_hz < f_hi_hz` and step `dt` seconds, of unit rms inside the edges. Edges that are
+    /// not ordered and positive, or an upper edge at or above the Nyquist frequency, count as closed and are
+    /// [`ButterworthBandGaussian::skip`].
+    pub fn step(&mut self, f_lo_hz: f64, f_hi_hz: f64, dt: f64) -> f64 {
+        let Some(q) = BandBiquad::design(f_lo_hz, f_hi_hz, dt) else {
+            return self.skip();
+        };
+        let x = self.white.next_normal();
+        let y = q.b0 * (x - self.x2) - q.a1 * self.y1 - q.a2 * self.y2;
+        (self.x2, self.x1, self.y2, self.y1) = (self.x1, x, self.y1, y);
+        y / det::sqrt(q.in_band_variance)
+    }
+
+    /// A step with the source closed: exactly one white sample is drawn (the stream index does not depend on how long
+    /// the gate was shut), the section is cleared and the output is zero.
+    pub fn skip(&mut self) -> f64 {
+        let _ = self.white.next_normal();
+        (self.x1, self.x2, self.y1, self.y2) = (0.0, 0.0, 0.0, 0.0);
+        0.0
+    }
+}
+
+/// Test estimator: the mean square of `xs` inside `[f_lo_hz, f_hi_hz]`, from Hann-windowed 4096-sample periodograms
+/// (Goertzel on each bin whose centre lies in the band, both signs of frequency, averaged over the whole segments).
+#[cfg(test)]
+pub(crate) fn in_band_mean_square(xs: &[f64], f_lo_hz: f64, f_hi_hz: f64, dt: f64) -> f64 {
+    const N: usize = 4096;
+    let tau = core::f64::consts::TAU;
+    let window: Vec<f64> = (0..N).map(|i| 0.5 - 0.5 * (tau * i as f64 / N as f64).cos()).collect();
+    let w2: f64 = window.iter().map(|w| w * w).sum();
+    let df = 1.0 / (N as f64 * dt);
+    let (k_lo, k_hi) = ((f_lo_hz / df).ceil() as usize, (f_hi_hz / df).floor() as usize);
+    let (mut total, mut segments) = (0.0, 0usize);
+    for segment in xs.chunks_exact(N) {
+        for k in k_lo..=k_hi {
+            let coeff = 2.0 * (tau * k as f64 / N as f64).cos();
+            let (mut s1, mut s2) = (0.0f64, 0.0f64);
+            for (x, w) in segment.iter().zip(&window) {
+                (s2, s1) = (s1, x * w + coeff * s1 - s2);
+            }
+            total += 2.0 * (s1 * s1 + s2 * s2 - coeff * s1 * s2) / (N as f64 * w2);
+        }
+        segments += 1;
+    }
+    total / segments as f64
 }
 
 /// The voice's opt-in aspiration card: `aspiration_noise <seed> <xi> [<re_crit>]`.
@@ -672,6 +819,121 @@ mod tests {
         assert_eq!(run(7, FLUE_JET_NOISE_KERNEL), run(7, FLUE_JET_NOISE_KERNEL));
         assert_ne!(run(7, FLUE_JET_NOISE_KERNEL), run(8, FLUE_JET_NOISE_KERNEL));
         assert_ne!(run(7, FLUE_JET_NOISE_KERNEL), run(7, GLOTTAL_NOISE_KERNEL), "the flue's kernel keeps its stream apart from the glottal one");
+    }
+
+    // |H(e^{jw})|^2 of a section, evaluated from its coefficients (independent of the closed forms in `design`).
+    fn biquad_power(q: &BandBiquad, f_hz: f64, dt: f64) -> f64 {
+        let w = core::f64::consts::TAU * f_hz * dt;
+        let (c1, s1, c2, s2) = (w.cos(), w.sin(), (2.0 * w).cos(), (2.0 * w).sin());
+        let (nr, ni) = (q.b0 * (1.0 - c2), q.b0 * s2);
+        let (dr, di) = (1.0 + q.a1 * c1 + q.a2 * c2, -(q.a1 * s1 + q.a2 * s2));
+        (nr * nr + ni * ni) / (dr * dr + di * di)
+    }
+
+    // (1/pi) int |H|^2 dw over [f_lo, f_hi], composite Simpson on `intervals` (even) intervals.
+    fn biquad_variance_brute(q: &BandBiquad, f_lo: f64, f_hi: f64, dt: f64, intervals: usize) -> f64 {
+        let h = (f_hi - f_lo) / intervals as f64;
+        let mut s = biquad_power(q, f_lo, dt) + biquad_power(q, f_hi, dt);
+        for i in 1..intervals {
+            s += if i % 2 == 1 { 4.0 } else { 2.0 } * biquad_power(q, f_lo + i as f64 * h, dt);
+        }
+        s * h / 3.0 * 2.0 * dt
+    }
+
+    #[test]
+    fn butterworth_band_is_minus_3_db_at_both_edges_unity_at_its_centre_and_6_db_per_octave_outside() {
+        let (f_lo, f_hi, dt) = (1000.0, 2500.0, 1.0 / 48_000.0);
+        let q = BandBiquad::design(f_lo, f_hi, dt).unwrap();
+        let pi = core::f64::consts::PI;
+        let (u_lo, u_hi) = ((pi * f_lo * dt).tan(), (pi * f_hi * dt).tan());
+        let at_u = |u: f64| biquad_power(&q, u.atan() / (pi * dt), dt);
+        assert!((biquad_power(&q, f_lo, dt) - 0.5).abs() < 1.0e-12, "lower edge {}", biquad_power(&q, f_lo, dt));
+        assert!((biquad_power(&q, f_hi, dt) - 0.5).abs() < 1.0e-12, "upper edge {}", biquad_power(&q, f_hi, dt));
+        assert!((at_u((u_lo * u_hi).sqrt()) - 1.0).abs() < 1.0e-12, "centre {}", at_u((u_lo * u_hi).sqrt()));
+        // One section: |H| goes as f below the band and as 1/f above it (in prewarped frequency), 6.02 dB per octave.
+        let lower = (at_u(u_lo / 8.0) / at_u(u_lo / 16.0)).sqrt();
+        let upper = (at_u(8.0 * u_hi) / at_u(16.0 * u_hi)).sqrt();
+        assert!((lower - 2.0).abs() < 0.02 && (upper - 2.0).abs() < 0.02, "skirts x{lower} and x{upper} per octave");
+        assert_eq!(biquad_power(&q, 0.0, dt), 0.0, "no DC");
+        // Edges out of order, non-positive, or at or above Nyquist: no section.
+        for (lo, hi) in [(2500.0, 1000.0), (0.0, 1000.0), (1000.0, 24_000.0), (1000.0, f64::INFINITY), (f64::NAN, 2500.0)] {
+            assert!(BandBiquad::design(lo, hi, dt).is_none(), "{lo}-{hi} Hz");
+        }
+    }
+
+    #[test]
+    fn butterworth_in_band_variance_matches_brute_force_and_the_unwarped_half_power_limit() {
+        for (f_lo, f_hi, dt) in [(1000.0, 2500.0, 1.0 / 48_000.0), (956.0, 2442.0, 1.0 / 288_000.0), (5000.0, 12_780.0, 1.0 / 48_000.0)] {
+            let q = BandBiquad::design(f_lo, f_hi, dt).unwrap();
+            let brute = biquad_variance_brute(&q, f_lo, f_hi, dt, 200_000);
+            assert!((q.in_band_variance - brute).abs() < 1.0e-9 * brute, "{f_lo}-{f_hi} Hz: {} against {brute}", q.in_band_variance);
+            // The whole band holds more: the in-band fraction is above the analog one half, the more so the nearer the band
+            // is to Nyquist (0.548, 0.508 and 0.722 here by an independent quadrature).
+            let total = biquad_variance_brute(&q, 1.0e-9, 0.5 / dt - 1.0e-9, dt, 2_000_000);
+            let fraction = q.in_band_variance / total;
+            assert!(fraction > 0.5 && fraction < 0.75, "{f_lo}-{f_hi} Hz: in-band fraction {fraction}");
+        }
+        // Far below Nyquist the warping vanishes and the analog result holds: b / 2 with b = u_hi - u_lo.
+        let dt = 1.0e-7;
+        let q = BandBiquad::design(1000.0, 2500.0, dt).unwrap();
+        let b = (core::f64::consts::PI * 2500.0 * dt).tan() - (core::f64::consts::PI * 1000.0 * dt).tan();
+        assert!((q.in_band_variance / (0.5 * b) - 1.0).abs() < 1.0e-5, "{} against b/2 = {}", q.in_band_variance, 0.5 * b);
+    }
+
+    /// MB 17116's planted negative: the in-band rms of a long stream is one for this filter, and the same estimator puts
+    /// the old band (two one-pole low-passes, whole-band normalisation) 5.8 dB below it.
+    #[test]
+    fn butterworth_band_noise_has_unit_rms_inside_its_edges_where_the_old_band_is_5_8_db_low() {
+        let (f_lo, f_hi, dt, n) = (1000.0, 2500.0, 1.0 / 48_000.0, 1usize << 19);
+        let mut g = ButterworthBandGaussian::new(41, FLUE_JET_NOISE_KERNEL);
+        let mut old = BandedGaussian::new(41, FLUE_JET_NOISE_KERNEL);
+        for _ in 0..4096 {
+            g.step(f_lo, f_hi, dt);
+            old.step(f_lo, f_hi, dt);
+        }
+        let xs: Vec<f64> = (0..n).map(|_| g.step(f_lo, f_hi, dt)).collect();
+        let olds: Vec<f64> = (0..n).map(|_| old.step(f_lo, f_hi, dt)).collect();
+        let in_band = in_band_mean_square(&xs, f_lo, f_hi, dt);
+        assert!((in_band - 1.0).abs() < 0.06, "in-band mean square {in_band} (rms within 3 %)");
+        let old_db = 10.0 * in_band_mean_square(&olds, f_lo, f_hi, dt).log10();
+        assert!((old_db + 5.8).abs() < 0.5, "the old band's in-band level {old_db} dB");
+        // The whole stream carries the out-of-band skirts too: mean square 1 / (in-band fraction).
+        let q = BandBiquad::design(f_lo, f_hi, dt).unwrap();
+        let expected = biquad_variance_brute(&q, 1.0e-9, 0.5 / dt - 1.0e-9, dt, 2_000_000) / q.in_band_variance;
+        let total = xs.iter().map(|x| x * x).sum::<f64>() / n as f64;
+        assert!((total / expected - 1.0).abs() < 0.05, "total mean square {total} against {expected}");
+    }
+
+    #[test]
+    fn butterworth_band_noise_draws_one_normal_per_step_open_shut_or_out_of_range_and_is_seeded() {
+        let (f_lo, f_hi, dt) = (1000.0, 2500.0, 1.0 / 48_000.0);
+        let mut open = ButterworthBandGaussian::new(7, FLUE_JET_NOISE_KERNEL);
+        let mut shut = ButterworthBandGaussian::new(7, FLUE_JET_NOISE_KERNEL);
+        for _ in 0..6 {
+            open.step(f_lo, f_hi, dt);
+            assert_eq!(shut.skip(), 0.0);
+        }
+        assert_eq!(open.white.index(), shut.white.index());
+        assert!(open.white.index() > 0);
+        assert_eq!((shut.x1, shut.x2, shut.y1, shut.y2), (0.0, 0.0, 0.0, 0.0));
+        let before = open.white.index();
+        let per_step = before / 6;
+        assert_eq!(per_step * 6, before, "six open steps must advance the stream evenly");
+        assert_eq!(open.step(2500.0, 1000.0, dt), 0.0);
+        assert_eq!(open.step(1000.0, 30_000.0, dt), 0.0, "an upper edge above Nyquist is a closed band");
+        assert_eq!(open.white.index(), before + 2 * per_step);
+        assert_eq!((open.x1, open.y1), (0.0, 0.0), "a closed band clears the section");
+        let run = |seed, kernel| {
+            let mut g = ButterworthBandGaussian::new(seed, kernel);
+            (0..64).map(|_| g.step(f_lo, f_hi, dt).to_bits()).collect::<Vec<u64>>()
+        };
+        assert_eq!(run(7, FLUE_JET_NOISE_KERNEL), run(7, FLUE_JET_NOISE_KERNEL));
+        assert_ne!(run(7, FLUE_JET_NOISE_KERNEL), run(8, FLUE_JET_NOISE_KERNEL));
+        let banded: Vec<u64> = {
+            let mut g = BandedGaussian::new(7, FLUE_JET_NOISE_KERNEL);
+            (0..64).map(|_| g.step(f_lo, f_hi, dt).to_bits()).collect()
+        };
+        assert_ne!(run(7, FLUE_JET_NOISE_KERNEL), banded, "same white stream, another filter");
     }
 
     const RHO: f64 = 1.15;

@@ -6168,12 +6168,18 @@ velocity `U = sqrt(2 P_foot / rho)` (Verge 1995, eq. 2.12 definition) of the
 instantaneous blowing pressure `P_foot` upstream of the windway, for all three uses
 below; it is not the windway's bulk or centre speed that the loop's jet has, so at a
 fixed `P_foot` a card with another windway loss draws the same noise (a test pins
-this). The amplitude is `GAIN * rho * U^2 / 2 = GAIN * P_foot` in rms, the gate is
-`Re_h = U h / nu >= RE_ON`, and the band is the Strouhal band
+this). The amplitude is `GAIN * rho * U^2 / 2 = GAIN * P_foot` in rms INSIDE the
+band, the gate is `Re_h = U h / nu >= RE_ON`, and the band is the Strouhal band
 `St_h = f h / U` between `ST_LO` and `ST_HI`, recomputed every sample from the live
-`U`, so the spectrum slides with the pressure and the rms follows `U^2`. The stream is a
-band-passed unit Gaussian (a difference of two one-pole low-passes, scaled by the
-exact variance of the pair) keyed by `SEED` and its own kernel id
+`U`, so the spectrum slides with the pressure and the rms follows `U^2`. The stream is
+a unit Gaussian through one 2-pole Butterworth band-pass (one biquad, Verge's own
+recipe, sec. 6.5 p. 196, which he never ran, p. 198) whose -3 dB edges are the band's
+ends, prewarped so they are exact at the mechanics clock, and scaled by the exact
+variance the section has inside the band (16-point Gauss-Legendre), so `GAIN` is the
+in-band rms; outside the band the skirts fall at 6 dB/octave, like the pedestal of
+Verge's Fig. 5.15a (p. 160), and the whole stream's rms is about 1.4 times the
+in-band rms. An upper edge at or above Nyquist draws silence. The stream is keyed by
+`SEED` and its own kernel id
 (`FLUE_JET_NOISE_KERNEL`), not the island's onset-seed stream: exactly one normal is
 drawn per sample whether the gate is open or shut, so a gate that never opens leaves
 the loop bit-identical to the card without the row. The gate returns zero (and
@@ -6184,8 +6190,11 @@ source-work ledger and the ledger still closes. Omission keeps every result bit-
 the five fields. No-claim: a single broadband source in series at the mouth; the
 gain and band belong to the cited measurement (Verge 1995 sec. 5.5 for a recorder-like
 pipe), are valid only near the Reynolds number and W/h where it was measured, and
-nothing here shapes the spectrum beyond the band edges or tunes a gain to a
-recording.
+nothing here shapes the spectrum beyond one section's skirts or tunes a gain to a
+recording. Until 2026-11-03 the band was a difference of two one-pole low-passes
+normalised on the whole band, which put 0.26 of its power inside the band and so
+delivered `GAIN` 5.8 dB low there; that filter (`BandedGaussian`) remains, unchanged,
+only for the voice's and the brass lip's jet rows.
 
 `bernoulli_aperture::slit_channel` resolves fixed, fully developed planar
 Newtonian momentum from the retained `GasState` density and viscosity. Its
