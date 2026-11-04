@@ -12,7 +12,8 @@
 //! frame. This is the finite ideal-plane image construction of Allen & Berkley,
 //! JASA 65 (1979), 943–950, doi:10.1121/1.382599, with the moving Green-function
 //! derivatives owned by the original compact source operator. Finite impedance,
-//! general wedges, moving walls/receivers, dispersion and feedback are absent.
+//! general wedges, moving walls, dispersion and feedback are absent. Moving
+//! microphones use the same image law through [`moving`].
 
 use super::{
     MAX_BOUND_DEPTH, PreparedSourceTrajectory, QuinticSegment, dot, enclose_dd, invalid, poll,
@@ -25,6 +26,11 @@ use crate::curle3d::moving::{
 };
 use fs_ivl::Interval;
 use fs_math::dd::Dd;
+
+/// Reflected observation on one original moving microphone trajectory.
+pub mod moving;
+
+pub use moving::{MovingReflectionObserver, PreparedReflectedMovingReceiverSource};
 
 #[derive(Clone, Copy, Debug)]
 struct ImagePath {
@@ -54,27 +60,12 @@ impl IdealReflectionObserver {
         planes: &[IdealAcousticPlane],
         maximum_source_paths: usize,
     ) -> Result<Self, AeroacError> {
-        if !(1..=3).contains(&planes.len()) {
-            return Err(invalid(
-                "transient reflection needs one to three ideal planes",
-            ));
-        }
-        let path_count = 1_usize << planes.len();
-        if path_count > maximum_source_paths {
-            return Err(invalid(
-                "transient reflection exceeds its complete path budget",
-            ));
-        }
-        for (index, plane) in planes.iter().enumerate() {
+        let path_count = admit_planes(planes, maximum_source_paths)?;
+        for plane in planes {
             if plane.distance(observer.observer_position_m())?.to_f64() < 0.0 {
                 return Err(invalid(
                     "transient microphone is outside the fluid half-space",
                 ));
-            }
-            for other in &planes[..index] {
-                if dot(plane.inward_normal(), other.inward_normal()).abs() > 64.0 * f64::EPSILON {
-                    return Err(invalid("transient reflection planes must be perpendicular"));
-                }
             }
         }
         let direct = ImagePath {
@@ -138,6 +129,31 @@ impl IdealReflectionObserver {
         }
         Ok(self.paths[index])
     }
+}
+
+fn admit_planes(
+    planes: &[IdealAcousticPlane],
+    maximum_source_paths: usize,
+) -> Result<usize, AeroacError> {
+    if !(1..=3).contains(&planes.len()) {
+        return Err(invalid(
+            "transient reflection needs one to three ideal planes",
+        ));
+    }
+    let path_count = 1_usize << planes.len();
+    if path_count > maximum_source_paths {
+        return Err(invalid(
+            "transient reflection exceeds its complete path budget",
+        ));
+    }
+    for (index, plane) in planes.iter().enumerate() {
+        for other in &planes[..index] {
+            if dot(plane.inward_normal(), other.inward_normal()).abs() > 64.0 * f64::EPSILON {
+                return Err(invalid("transient reflection planes must be perpendicular"));
+            }
+        }
+    }
+    Ok(path_count)
 }
 
 /// Additional whole-trajectory admission work. Source storage and root caps

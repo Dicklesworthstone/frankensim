@@ -32,7 +32,8 @@ pub use receiver::{
     PreparedMovingReceiverSource,
 };
 pub use reflection::{
-    IdealReflectionObserver, PreparedReflectedSourceTrajectory, ReflectedTrajectoryBudget,
+    IdealReflectionObserver, MovingReflectionObserver, PreparedReflectedMovingReceiverSource,
+    PreparedReflectedSourceTrajectory, ReflectedTrajectoryBudget,
 };
 
 const MAX_BOUND_DEPTH: usize = 32;

@@ -13,6 +13,7 @@ use super::{
     split_controls,
 };
 use crate::AeroacError;
+use crate::curle3d::IdealAcousticPlane;
 use crate::curle3d::moving::MovingCompactLimits;
 use fs_ivl::Interval;
 use fs_math::dd::Dd;
@@ -71,9 +72,120 @@ pub struct PreparedMovingReceiverSample {
 pub struct PreparedMovingReceiverSource<'a> {
     source: &'a PreparedKinematicTrajectory,
     receiver: &'a PreparedKinematicTrajectory,
+    image: Option<ReceiverImage<'a>>,
     config: MovingReceiverConfig,
     maximum_source_time_rate: f64,
     maximum_root_iterations: usize,
+}
+
+/// Preparation work shared by every image of one physical source.
+#[derive(Default)]
+pub(super) struct ReceiverPreparationWork {
+    pairs: usize,
+    nodes: usize,
+}
+
+/// A borrowed, stationary image of an ORIGINAL receiver trajectory. Geometry
+/// is admitted by the ideal-wall owner; this view changes no retained knots.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct ReceiverImage<'a> {
+    pub(super) planes: &'a [IdealAcousticPlane],
+    pub(super) mask: usize,
+}
+
+impl ReceiverImage<'_> {
+    fn kinematics(self, mut state: SourceKinematics) -> Result<SourceKinematics, AeroacError> {
+        for (index, plane) in self.planes.iter().enumerate().rev() {
+            if self.mask & (1 << index) == 0 {
+                continue;
+            }
+            let before = plane.distance(state.position_m)?.to_f64();
+            state.position_m = plane.reflected_position(state.position_m)?;
+            let after = plane.distance(state.position_m)?.to_f64();
+            if (before > 0.0 && after >= 0.0) || (before < 0.0 && after <= 0.0) {
+                return Err(invalid("moving virtual microphone is not representable"));
+            }
+            let reflect = |value: [f64; 3]| {
+                let normal = plane.inward_normal();
+                let projection = (0..3).fold(Dd::ZERO, |sum, axis| {
+                    sum + Dd::from_f64(value[axis]) * Dd::from_f64(normal[axis])
+                });
+                core::array::from_fn(|axis| {
+                    (Dd::from_f64(value[axis]) - projection * Dd::from_f64(2.0 * normal[axis]))
+                        .to_f64()
+                })
+            };
+            state.velocity_m_s = reflect(state.velocity_m_s);
+            state.acceleration_m_s2 = reflect(state.acceleration_m_s2);
+        }
+        if state
+            .velocity_m_s
+            .iter()
+            .chain(&state.acceleration_m_s2)
+            .any(|v| !v.is_finite())
+        {
+            return Err(invalid("image microphone derivatives are unrepresentable"));
+        }
+        Ok(state)
+    }
+
+    fn point_bounds(self, mut point: [Interval; 3]) -> [Interval; 3] {
+        for (index, plane) in self.planes.iter().enumerate().rev() {
+            if self.mask & (1 << index) == 0 {
+                continue;
+            }
+            let normal = plane.inward_normal();
+            let distance = (0..3).fold(Interval::point(0.0), |sum, axis| {
+                sum + (point[axis] - Interval::point(plane.point_m()[axis]))
+                    * Interval::point(normal[axis])
+            });
+            point = core::array::from_fn(|axis| {
+                point[axis] - distance * Interval::point(2.0 * normal[axis])
+            });
+        }
+        point
+    }
+
+    pub(super) fn vector_bounds(self, mut vector: [Interval; 3]) -> [Interval; 3] {
+        for (index, plane) in self.planes.iter().enumerate().rev() {
+            if self.mask & (1 << index) == 0 {
+                continue;
+            }
+            let normal = plane.inward_normal();
+            let projection = (0..3).fold(Interval::point(0.0), |sum, axis| {
+                sum + vector[axis] * Interval::point(normal[axis])
+            });
+            vector = core::array::from_fn(|axis| {
+                vector[axis] - projection * Interval::point(2.0 * normal[axis])
+            });
+        }
+        vector
+    }
+
+    // For the stored (rounded) unit normal, ||I-2nn^T||_2 is exactly
+    // max(1, |1-2 n.n|). Keep its outward product instead of assuming a
+    // numerically composed reflection preserves the speed bound bit-for-bit.
+    pub(super) fn maximum_mach(self, original: f64) -> f64 {
+        if original == 0.0 {
+            return 0.0;
+        }
+        let one = Interval::point(1.0);
+        let mut speed = Interval::point(original);
+        for (index, plane) in self.planes.iter().enumerate() {
+            if self.mask & (1 << index) == 0 {
+                continue;
+            }
+            let squared = plane
+                .inward_normal()
+                .into_iter()
+                .fold(Interval::point(0.0), |sum, value| {
+                    sum + Interval::point(value) * Interval::point(value)
+                });
+            let stretch = (one - Interval::point(2.0) * squared).abs().hi().max(1.0);
+            speed = speed * Interval::point(stretch);
+        }
+        speed.hi()
+    }
 }
 
 impl<'a> PreparedMovingReceiverSource<'a> {
@@ -84,6 +196,28 @@ impl<'a> PreparedMovingReceiverSource<'a> {
         receiver: &'a PreparedKinematicTrajectory,
         config: MovingReceiverConfig,
         budget: MovingReceiverBudget,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, AeroacError> {
+        Self::new_image(
+            source,
+            receiver,
+            None,
+            config,
+            budget,
+            &mut ReceiverPreparationWork::default(),
+            cancelled,
+        )
+    }
+
+    // Every image borrows the ORIGINAL microphone path. Image preparation
+    // shares the original pair solver and one aggregate work counter.
+    pub(super) fn new_image(
+        source: &'a PreparedKinematicTrajectory,
+        receiver: &'a PreparedKinematicTrajectory,
+        image: Option<ReceiverImage<'a>>,
+        config: MovingReceiverConfig,
+        budget: MovingReceiverBudget,
+        work: &mut ReceiverPreparationWork,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, AeroacError> {
         poll(cancelled)?;
@@ -109,13 +243,14 @@ impl<'a> PreparedMovingReceiverSource<'a> {
                 "moving receiver medium, finite window, clearance or work budget",
             ));
         }
-        let maximum_source_time_rate = doppler::maximum_rate(source, receiver);
+        let maximum_source_time_rate = doppler::maximum_rate(source, receiver, image);
         if !maximum_source_time_rate.is_finite() || maximum_source_time_rate <= 0.0 {
             return Err(invalid("moving receiver Doppler bound is unrepresentable"));
         }
         let owner = Self {
             source,
             receiver,
+            image,
             config,
             maximum_source_time_rate,
             maximum_root_iterations: budget
@@ -129,7 +264,7 @@ impl<'a> PreparedMovingReceiverSource<'a> {
         if last != first {
             owner.prepare_receiver(last, cancelled)?;
         }
-        admit_clearance(&owner, budget, cancelled)?;
+        admit_clearance(&owner, budget, work, cancelled)?;
         poll(cancelled)?;
         Ok(owner)
     }
@@ -176,7 +311,23 @@ impl<'a> PreparedMovingReceiverSource<'a> {
                 "query is outside the admitted moving receiver window",
             ));
         }
-        let receiver_state = self.receiver.kinematics_at(receiver_time)?;
+        let physical = self.receiver.kinematics_at(receiver_time)?;
+        let receiver_state = self
+            .image
+            .map_or(Ok(physical), |image| image.kinematics(physical))?;
+        let mut sample = self.prepare_receiver_at(receiver_time, receiver_state, cancelled)?;
+        // The public metadata always describes the physical microphone, even
+        // when an internal image view supplied the root and pressure field.
+        sample.receiver_kinematics = physical;
+        Ok(sample)
+    }
+
+    fn prepare_receiver_at(
+        &self,
+        receiver_time: f64,
+        receiver_state: SourceKinematics,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PreparedMovingReceiverSample, AeroacError> {
         let first_segment = &self.source.segments[0].polynomial;
         let last_segment = &self.source.segments[self.source.segments.len() - 1].polynomial;
         let first_time = first_segment.first.source_time_s;
@@ -297,6 +448,27 @@ impl<'a> PreparedMovingReceiverSource<'a> {
         })
     }
 
+    fn receiver_state_at(&self, time: f64) -> Result<SourceKinematics, AeroacError> {
+        let state = self.receiver.kinematics_at(time)?;
+        self.image
+            .map_or(Ok(state), |image| image.kinematics(state))
+    }
+
+    pub(super) fn observer_at(&self, time: f64) -> Result<MovingCompactObserver, AeroacError> {
+        let [first, last] = self.config.receiver_time_interval_s;
+        if !time.is_finite() || time < first || time > last {
+            return Err(invalid("image microphone time exceeds its admitted window"));
+        }
+        MovingCompactObserver::new(
+            self.source.medium(),
+            self.receiver_state_at(time)?.position_m,
+            MovingCompactLimits {
+                maximum_mach: self.source.declared_maximum_mach,
+                minimum_distance_m: self.config.minimum_distance_m,
+            },
+        )
+    }
+
     fn arrival_residual(
         &self,
         segment: &QuinticSegment,
@@ -402,6 +574,7 @@ struct PairNode {
 fn admit_clearance(
     owner: &PreparedMovingReceiverSource<'_>,
     budget: MovingReceiverBudget,
+    work: &mut ReceiverPreparationWork,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), AeroacError> {
     let [first, last] = owner.config.receiver_time_interval_s;
@@ -409,8 +582,6 @@ fn admit_clearance(
     let c = Interval::point(owner.source.medium().sound_speed_m_s());
     let tolerance = owner.config.maximum_time_residual_s;
     let residual_interval = Interval::new(-tolerance, tolerance);
-    let mut visited = 0_usize;
-    let mut pairs = 0_usize;
     let first_segment = owner
         .receiver
         .segments
@@ -423,20 +594,35 @@ fn admit_clearance(
         }
         for source in &owner.source.segments {
             poll(cancelled)?;
-            if pairs >= budget.maximum_segment_pairs {
+            if work.pairs >= budget.maximum_segment_pairs {
                 return Err(invalid(
                     "moving receiver clearance exceeds segment-pair budget",
                 ));
             }
-            pairs += 1;
+            work.pairs += 1;
             let s = &source.polynomial;
-            let origin_delta = core::array::from_fn(|i| {
-                Interval::point(r.first.kinematics.position_m[i])
-                    - Interval::point(s.first.kinematics.position_m[i])
-            });
+            let (origin_delta, receiver_position) = if let Some(image) = owner.image {
+                let origin = image.point_bounds(r.first.kinematics.position_m.map(Interval::point));
+                (
+                    core::array::from_fn(|i| {
+                        origin[i] - Interval::point(s.first.kinematics.position_m[i])
+                    }),
+                    receiver
+                        .position_bounds
+                        .map(|control| image.vector_bounds(control)),
+                )
+            } else {
+                (
+                    core::array::from_fn(|i| {
+                        Interval::point(r.first.kinematics.position_m[i])
+                            - Interval::point(s.first.kinematics.position_m[i])
+                    }),
+                    receiver.position_bounds,
+                )
+            };
             let initial = PairNode {
                 source_position: source.position_bounds,
-                receiver_position: receiver.position_bounds,
+                receiver_position,
                 source_first: Interval::point(s.first.source_time_s),
                 source_last: Interval::point(s.last.source_time_s),
                 receiver_first: Interval::point(r.first.source_time_s),
@@ -447,13 +633,13 @@ fn admit_clearance(
             let mut pending = 1;
             while pending > 0 {
                 poll(cancelled)?;
-                if visited >= budget.maximum_bound_nodes {
+                if work.nodes >= budget.maximum_bound_nodes {
                     return Err(AeroacError::NotConverged {
                         what: "moving receiver clearance bound-node budget",
                         residual: 1.0,
                     });
                 }
-                visited += 1;
+                work.nodes += 1;
                 pending -= 1;
                 let node = stack[pending];
                 let Some(receiver_time) =

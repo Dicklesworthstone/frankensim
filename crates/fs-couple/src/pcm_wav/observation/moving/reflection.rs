@@ -1,5 +1,7 @@
 //! Ideal reflected paths through the original accepted-history renderer.
 
+mod moving;
+
 use super::motion::{CompactMotion, sealed};
 use super::{
     CompactSourceHistory, MovingCompactRenderer, MovingPressureBudget, MovingPressureConfig,
