@@ -276,6 +276,15 @@ where claimed below.
   physical residual, Jacobian and preconditioner weights unchanged and avoids
   two temporary vectors per residual/Jacobian evaluation. Position remains an
   ordinary `f64`, so sub-ULP position accumulation is not claimed.
+  If the initial explicit predictor fails the model's stage admission, one
+  bounded retry seeds the original configuration by negating the Newmark
+  predictor drift. The resulting stage velocity is admitted independently;
+  initial-state checks, physical residuals, nonlinear budgets, timestep and
+  endpoint admission are unchanged. Cancellation is checked after both setup
+  attempts. This does not guarantee a feasible Newton seed for every envelope.
+  `tests/structural_admission.rs` checks a stiff spring whose exact implicit
+  endpoint is inside its geometric domain despite a refused predictor, the
+  acceleration pullback, velocity-envelope refusal and atomic cancellation.
 - `galpha::FirstOrderGeneralizedAlpha` + `first_order_galpha_step` are the
   prefactored small-system lane for `M udot + A u = f`.
   `OperatorFirstOrderGeneralizedAlpha` consumes `FirstOrderProblem` (or the

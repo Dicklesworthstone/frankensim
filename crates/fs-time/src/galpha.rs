@@ -637,8 +637,24 @@ impl OperatorGeneralizedAlpha {
         // displacement change is small relative to a prestressed equilibrium.
         // The effective Jacobian and its preconditioner weights are unchanged.
         let guess = vec![0.0; self.n];
-        let setup = NewtonKrylovState::new(&residual, guess, self.solve.newton);
+        let mut setup = NewtonKrylovState::new(&residual, guess, self.solve.newton);
         structural_poll(cancelled)?;
+        if setup.is_err() && residual.admission_error.borrow().is_some() {
+            // An explicit predictor can leave the physical envelope even
+            // when the implicit endpoint is admissible. Negate that drift
+            // to seed the same Newmark equation at the original position.
+            // The reconstructed stage velocity still needs model admission;
+            // this is one bounded retry, without clipping or changing h.
+            residual.admission_error.replace(None);
+            let guess = state
+                .v
+                .iter()
+                .zip(&state.a)
+                .map(|(&v, &a)| -structural_increment(self, v, a, 0.0).0)
+                .collect();
+            setup = NewtonKrylovState::new(&residual, guess, self.solve.newton);
+            structural_poll(cancelled)?;
+        }
         let mut newton = setup.map_err(|error| {
             residual
                 .take_admission_error()

@@ -234,3 +234,168 @@ fn valid_stage_cannot_publish_an_invalid_endpoint_or_partial_history() {
     assert_adjoint_refused(method(0.2), &model, &state, 0.0);
     assert_eq!(state, before);
 }
+
+// A one-kilogram spring with a finite geometric and velocity domain. The
+// continuous response to -10 N stays inside 2 mm, well below the 1 cm bound.
+struct BoundedSpring {
+    refused: Cell<usize>,
+    forces: Cell<usize>,
+}
+impl BoundedSpring {
+    fn new() -> Self {
+        Self {
+            refused: Cell::new(0),
+            forces: Cell::new(0),
+        }
+    }
+}
+impl SecondOrderProblem for BoundedSpring {
+    fn dimension(&self) -> usize {
+        1
+    }
+    fn validate_state(&self, q: &[f64], v: &[f64]) -> Result<(), String> {
+        if !q[0].is_finite() || q[0].abs() >= 0.01 || !v[0].is_finite() || v[0].abs() >= 1.0 {
+            self.refused.set(self.refused.get() + 1);
+            Err("spring geometry or velocity exceeds its domain".into())
+        } else {
+            Ok(())
+        }
+    }
+    fn mass_apply(&self, x: &[f64], out: &mut [f64]) {
+        out.copy_from_slice(x);
+    }
+    fn damping_apply(&self, x: &[f64], out: &mut [f64]) {
+        out[0] = 2.0 * x[0];
+    }
+    fn internal_force(&self, q: &[f64], out: &mut [f64]) {
+        out[0] = 10_000.0 * q[0];
+    }
+    fn tangent_apply(&self, _: &[f64], x: &[f64], out: &mut [f64]) {
+        out[0] = 10_000.0 * x[0];
+    }
+    fn resistance(&self, q: &[f64], v: &[f64], out: &mut [f64]) {
+        assert!(
+            self.validate_state(q, v).is_ok(),
+            "refused state reached the force law"
+        );
+        self.forces.set(self.forces.get() + 1);
+        out[0] = 10_000.0 * q[0] + 2.0 * v[0];
+    }
+}
+impl SecondOrderVjp for BoundedSpring {
+    fn parameter_count(&self) -> usize {
+        1
+    }
+    fn mass_transpose_apply(&self, x: &[f64], out: &mut [f64]) -> Result<(), String> {
+        self.mass_apply(x, out);
+        Ok(())
+    }
+    fn damping_transpose_apply(&self, x: &[f64], out: &mut [f64]) -> Result<(), String> {
+        self.damping_apply(x, out);
+        Ok(())
+    }
+    fn tangent_transpose_apply(&self, q: &[f64], x: &[f64], out: &mut [f64]) -> Result<(), String> {
+        self.tangent_apply(q, x, out);
+        Ok(())
+    }
+    fn residual_parameter_vjp(
+        &self,
+        q: &[f64],
+        _: &[f64],
+        _: &[f64],
+        seed: &[f64],
+        out: &mut [f64],
+    ) -> Result<(), String> {
+        out[0] = q[0] * seed[0]; // stiffness derivative, mass/damping fixed
+        Ok(())
+    }
+}
+
+#[test]
+fn implicit_acceleration_equilibrium_survives_a_refused_explicit_predictor() {
+    let h = 0.1;
+    for rho in [1.0, 0.8, 0.0, 0.3, 0.5] {
+        let model = BoundedSpring::new();
+        let initial = SecondOrderState::new(0.0, &[0.0], &[0.0], &[-10.0]);
+        let method = OperatorGeneralizedAlpha::new(1, h, rho, ImplicitSolveConfig::default());
+        // Independent scalar force equilibrium at the Chung--Hulbert stage.
+        let am = (2.0 * rho - 1.0) / (rho + 1.0);
+        let af = rho / (rho + 1.0);
+        let gamma = 0.5 - am + af;
+        let beta = 0.25 * (1.0 - am + af).powi(2);
+        let q_predict = h * h * (0.5 - beta) * initial.a[0];
+        let v_predict = h * (1.0 - gamma) * initial.a[0];
+        let effective =
+            1.0 - am + (1.0 - af) * gamma * h * 2.0 + (1.0 - af) * beta * h * h * 10_000.0;
+        let acceleration =
+            (-10.0 - am * initial.a[0] - (1.0 - af) * (2.0 * v_predict + 10_000.0 * q_predict))
+                / effective;
+        let q = q_predict + beta * h * h * acceleration;
+        let v = v_predict + gamma * h * acceleration;
+        assert!(q.abs() < 0.002);
+        let mut state = initial.clone();
+        method
+            .step(&mut state, &model, &[-10.0])
+            .expect("the implicit endpoint remains inside the spring domain");
+        assert!((state.q[0] - q).abs() < 1e-12, "rho={rho}");
+        assert!((state.v[0] - v).abs() < 1e-12, "rho={rho}");
+        assert!((state.a[0] - acceleration).abs() < 1e-10, "rho={rho}");
+        if [0.0, 0.8, 1.0].contains(&rho) {
+            assert!(
+                model.refused.get() > 0,
+                "must exercise the refused predictor"
+            );
+        }
+        // Acceleration sensitivities use the accepted implicit equation,
+        // independent of which admissible Newton seed made it reachable.
+        let gradient = method
+            .step_vjp(
+                &initial,
+                &model,
+                &[-10.0],
+                (&[0.0], &[0.0], &[1.0]),
+                &Identity,
+                SecondOrderAdjointConfig::default(),
+                10_000,
+                &mut || false,
+            )
+            .unwrap();
+        assert!((gradient.a[0] - acceleration).abs() < 1e-10);
+        assert!((gradient.forcing[0] - 1.0 / effective).abs() < 1e-12);
+        assert!((gradient.parameters[0] + (1.0 - af) * q / effective).abs() < 1e-12);
+    }
+}
+
+#[test]
+fn fallback_seed_still_admits_velocity_and_preserves_cancelled_state() {
+    let model = BoundedSpring::new();
+    // The old-position seed has stage speed -1.7 m/s. Correct geometry alone
+    // cannot authorize this state, whose velocity exceeds the source envelope.
+    let mut state = SecondOrderState::new(0.0, &[0.0], &[0.9], &[-50.0]);
+    let before = state.clone();
+    let method = OperatorGeneralizedAlpha::new(1, 0.1, 0.0, ImplicitSolveConfig::default());
+    assert!(matches!(
+        method.step(&mut state, &model, &[-10.0]),
+        Err(TimeSolveError::ModelRefused {
+            phase: "implicit stage",
+            ..
+        })
+    ));
+    assert_eq!(state, before);
+    assert_eq!(model.forces.get(), 0);
+    assert!(model.refused.get() >= 2);
+
+    let model = BoundedSpring::new();
+    let method = OperatorGeneralizedAlpha::new(1, 0.1, 1.0, ImplicitSolveConfig::default());
+    let mut state = SecondOrderState::new(0.0, &[0.0], &[0.0], &[-10.0]);
+    let before = state.clone();
+    assert_eq!(
+        method.step_controlled(&mut state, &model, &[-10.0], &mut || model.forces.get() > 0),
+        Err(TimeSolveError::Cancelled)
+    );
+    assert_eq!(state, before);
+    assert!(model.refused.get() > 0);
+    method.step(&mut state, &model, &[-10.0]).unwrap();
+    assert_eq!(state.steps, 1);
+    assert_eq!(state.history.len(), 1);
+}
