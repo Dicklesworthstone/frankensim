@@ -129,6 +129,19 @@ that calibration or supply missing geometry, moving masses or deformation.
 
 ## Section pressure drag through stall
 
+The parasite ledger's spatial `wrench_at` evaluates the material-point velocity
+relative to local air and returns force, its moment about the supplied origin,
+and dissipated relative power. Co-moving flow yields zero force without a
+direction singularity. Longitudinal loads sample incident air and pitch-point
+velocity at the declared parasite line, retaining the accepted wrench for
+distributed roll/yaw loads. The shared six-DOF propulsion owner samples world
+wind there and includes all rigid angular rates. Its success path
+does not allocate per-component reports or recompute a digest. G0/G3 tests check
+spatial work, reversal, co-moving air and isolated local gusts through both real
+aircraft load consumers. The constant scalar component coefficients remain an
+Estimated isotropic model; directional areas, local propeller wash and resolved
+interference are not inferred by this kinematic correction.
+
 Longitudinal flight, distributed roll/yaw moments, and the native six-DOF
 propulsion assembly consume the same effective strip incidence returned by
 `fs-wing`. Steady coupling, evolving axial wakes and first-harmonic wakes carry
@@ -2229,3 +2242,4 @@ replay/parity. The existing 13 annular consumer checks also pass. This is
 selected-source native evidence, not a workspace, cross-platform, real-time
 or new timestep-order gate. Continuation supplies an algebraic branch anchor,
 not dynamic wing stall, wake inertia or an additional fluid closure.
+

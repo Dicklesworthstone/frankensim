@@ -92,6 +92,24 @@ pub struct FlatPlateAggregate {
     pub power_w: f64,
 }
 
+/// Non-lifting drag at one material point, expressed in the caller's frame.
+///
+/// The declared scalar component coefficients remain an isotropic engineering
+/// estimate. This spatial load does not infer orientation-dependent component
+/// areas, resolved interference, or propeller wash.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct DragWrench {
+    /// Force opposite the local body-relative-to-air velocity [N].
+    pub force_n: [f64; 3],
+    /// Moment about the origin used to define the application arm [N m].
+    pub moment_nm: [f64; 3],
+    /// Magnitude of the drag force [N].
+    pub drag_n: f64,
+    /// Nonnegative energy transfer out of relative motion [W].
+    /// This is `-force dot relative_velocity`, not inertial body power in wind.
+    pub dissipated_power_w: f64,
+}
+
 /// The registered Wright v1 ledger. Areas and coefficients are Estimated
 /// reconstruction values (bluff-body handbook classes); the wide sigmas
 /// say so. Flat-plate-equivalent sum ≈ 1.45 m² + 10% interference.
@@ -154,6 +172,77 @@ pub fn wright_ledger_v1() -> DragLedger {
 }
 
 impl DragLedger {
+    /// Evaluate a spatial drag load without allocating a diagnostic report.
+    ///
+    /// Supply velocity at the force's application point, including rigid-point
+    /// motion and subtracting the local fluid velocity in the same frame. A
+    /// co-moving point has exactly zero drag. `arm_m` runs from the requested
+    /// moment origin to that point, so the returned moment is `arm cross force`.
+    ///
+    /// # Errors
+    /// Ledger admission refusals pass through. `air-state-invalid` rejects
+    /// nonfinite velocity, arm or nonpositive density; `drag-wrench-overflow`
+    /// rejects a nonrepresentable force, moment or dissipated power.
+    pub fn wrench_at(
+        &self,
+        rho_kg_m3: f64,
+        relative_velocity_mps: [f64; 3],
+        arm_m: [f64; 3],
+    ) -> Result<DragWrench, Refusal> {
+        self.admit()?;
+        if !rho_kg_m3.is_finite()
+            || rho_kg_m3 <= 0.0
+            || !relative_velocity_mps.iter().all(|v| v.is_finite())
+            || !arm_m.iter().all(|v| v.is_finite())
+        {
+            return Err(Refusal {
+                code: "air-state-invalid",
+                message: "drag requires positive finite density and finite local velocity/arm"
+                    .into(),
+                ranked_repairs: vec![
+                    "supply the material-point velocity relative to local air".into(),
+                ],
+            });
+        }
+        let [u, v, w] = relative_velocity_mps;
+        let speed = u.hypot(v).hypot(w);
+        if speed == 0.0 {
+            return Ok(DragWrench::default());
+        }
+        let q = 0.5 * rho_kg_m3 * speed * speed;
+        // Keep the diagnostic ledger's component order and arithmetic, but
+        // avoid its per-item Vec, identity hash and strings in the stage loop.
+        let mut sum = 0.0;
+        for component in &self.components {
+            sum += q * component.area_m2 * component.cd;
+        }
+        let drag_n = sum + sum * self.unresolved_interference_frac;
+        let force_n = relative_velocity_mps.map(|v| -drag_n * (v / speed));
+        let moment_nm = [
+            arm_m[1] * force_n[2] - arm_m[2] * force_n[1],
+            arm_m[2] * force_n[0] - arm_m[0] * force_n[2],
+            arm_m[0] * force_n[1] - arm_m[1] * force_n[0],
+        ];
+        let dissipated_power_w = drag_n * speed;
+        if !force_n.iter().all(|v| v.is_finite())
+            || !moment_nm.iter().all(|v| v.is_finite())
+            || !drag_n.is_finite()
+            || !dissipated_power_w.is_finite()
+        {
+            return Err(Refusal {
+                code: "drag-wrench-overflow",
+                message: "local drag force, moment or power is not representable".into(),
+                ranked_repairs: vec!["use a representable density, geometry and local flow".into()],
+            });
+        }
+        Ok(DragWrench {
+            force_n,
+            moment_nm,
+            drag_n,
+            dissipated_power_w,
+        })
+    }
+
     /// Admit the ledger.
     ///
     /// # Errors

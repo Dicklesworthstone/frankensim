@@ -13,6 +13,76 @@ fn jlog(case: &str, payload: &str) {
 const RHO: f64 = 1.294;
 
 #[test]
+fn g3_parasite_line_samples_local_gust_and_rigid_pitch_velocity() {
+    let mut design = wright_openloop_v1();
+    design.coupling = fs_flyer::propcoupling::CANDIDATE_B;
+    design.drag_z_m = design.cg_m[2] - 0.35;
+    let alpha = 0.06;
+    let speed = 13.86;
+    let pitch_rate = 0.12;
+    let velocity = [
+        speed * fs_math::det::cos(alpha),
+        0.0,
+        speed * fs_math::det::sin(alpha),
+    ];
+    let point = [design.cg_m[0], design.cg_m[1], design.drag_z_m];
+    let arm = design.drag_z_m - design.cg_m[2];
+    let gust = [2.0, -1.5, 0.8];
+    let run = |increment: [f64; 3]| {
+        design
+            .force_buildup_with_incident(speed, alpha, 0.03, 40.0, pitch_rate, RHO, None, &|p| {
+                Ok(std::array::from_fn(|i| {
+                    velocity[i] + if p == point { increment[i] } else { 0.0 }
+                }))
+            })
+            .unwrap()
+    };
+    let calm = run([0.0; 3]);
+    let local = run(gust);
+    assert_eq!(calm.coupled.gamma, local.coupled.gamma);
+    assert_eq!(calm.thrust_n, local.thrust_n);
+    let expected = |increment: [f64; 3]| {
+        let flow = [
+            velocity[0] + pitch_rate * arm + increment[0],
+            increment[1],
+            velocity[2] + increment[2],
+        ];
+        let norm = flow.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let magnitude = design.ledger.evaluate(RHO, norm).unwrap().total_parasite_n;
+        (flow.map(|v| -magnitude * v / norm), magnitude)
+    };
+    let (before, before_magnitude) = expected([0.0; 3]);
+    let (after, after_magnitude) = expected(gust);
+    for i in 0..3 {
+        assert!((local.force_n[i] - calm.force_n[i] - (after[i] - before[i])).abs() < 1e-9);
+    }
+    assert!((local.moment_y_nm - calm.moment_y_nm - arm * (after[0] - before[0])).abs() < 1e-9);
+    assert!((local.drag_n - calm.drag_n - (after_magnitude - before_magnitude)).abs() < 1e-9);
+    let before_lateral = design.distributed_lateral_loads(&calm, 0.03, RHO).unwrap();
+    let after_lateral = design.distributed_lateral_loads(&local, 0.03, RHO).unwrap();
+    assert_eq!(before_lateral.circulation, after_lateral.circulation);
+    assert_eq!(before_lateral.profile_drag, after_lateral.profile_drag);
+    assert_eq!(before_lateral.propellers, after_lateral.propellers);
+    let roll_delta = -arm * (after[1] - before[1]);
+    assert!(roll_delta.abs() > 1.0);
+    assert!((after_lateral.net().roll_nm - before_lateral.net().roll_nm - roll_delta).abs() < 1e-9);
+    assert_eq!(after_lateral.net().yaw_nm, before_lateral.net().yaw_nm);
+    let result =
+        design.force_buildup_with_incident(speed, alpha, 0.03, 40.0, pitch_rate, RHO, None, &|p| {
+            if p == point {
+                Err(fs_flyer::Refusal {
+                    code: "drag-sample-refused",
+                    message: "local test field unavailable".into(),
+                    ranked_repairs: vec![],
+                })
+            } else {
+                Ok(velocity)
+            }
+        });
+    assert_eq!(result.unwrap_err().code, "drag-sample-refused");
+}
+
+#[test]
 fn g0_separated_profile_and_induced_drag_reach_the_actual_aircraft_force_and_work() {
     let mut design = wright_openloop_v1();
     design.coupling = fs_flyer::propcoupling::CANDIDATE_B;

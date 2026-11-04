@@ -2,8 +2,9 @@
 //!
 //! Reuse the circulation and washed incident velocities from the actual
 //! propeller/wing solve. There is no second aerodynamic solve and no gust
-//! coefficient or random kick. The existing reference-flow induced/parasite
-//! drag acts on the centerline and supplies no differential yaw at this tier.
+//! coefficient or random kick. The accepted parasite wrench includes the roll
+//! moment of local sideflow at its physical height. Reference-flow induced drag
+//! remains on the CG line and supplies no differential yaw at this tier.
 
 use crate::Refusal;
 use crate::aircraft::{ForceBuildup, OpenLoopDesign};
@@ -42,6 +43,8 @@ pub struct DistributedLateralLoads {
     pub profile_drag: LateralMomentsNm,
     /// Separate axial propeller thrusts at their original disk centers.
     pub propellers: LateralMomentsNm,
+    /// Local parasite force at its declared application line.
+    pub parasite_drag: LateralMomentsNm,
 }
 
 impl DistributedLateralLoads {
@@ -49,9 +52,11 @@ impl DistributedLateralLoads {
     #[must_use]
     pub fn net(self) -> LateralMomentsNm {
         LateralMomentsNm {
-            roll_nm: (self.circulation.roll_nm + self.profile_drag.roll_nm)
-                + self.propellers.roll_nm,
-            yaw_nm: (self.circulation.yaw_nm + self.profile_drag.yaw_nm) + self.propellers.yaw_nm,
+            roll_nm: ((self.circulation.roll_nm + self.profile_drag.roll_nm)
+                + self.propellers.roll_nm)
+                + self.parasite_drag.roll_nm,
+            yaw_nm: ((self.circulation.yaw_nm + self.profile_drag.yaw_nm) + self.propellers.yaw_nm)
+                + self.parasite_drag.yaw_nm,
         }
     }
 }
@@ -63,8 +68,9 @@ impl OpenLoopDesign {
     /// `force_buildup_with_incident`. Accepted local velocities already contain
     /// prop wash and rigid pitch motion; neither is added again. Layout work
     /// is linear in the panel count, without another influence matrix or
-    /// nonlinear iteration. No section gust memory, differential induced-drag
-    /// model, rotor reaction torque or crossflow force is invented here.
+    /// nonlinear iteration. The accepted parasite moment is carried unchanged;
+    /// its local wind is not sampled a second time. No section gust memory,
+    /// differential induced-drag model or rotor reaction torque is invented here.
     ///
     /// # Errors
     /// `distributed-loads-invalid` on missing/inconsistent/nonfinite accepted
@@ -103,7 +109,13 @@ impl OpenLoopDesign {
                 "circulation or strip velocities do not match the aircraft layout",
             ));
         }
-        let mut result = DistributedLateralLoads::default();
+        let mut result = DistributedLateralLoads {
+            parasite_drag: LateralMomentsNm {
+                roll_nm: loads.parasite_wrench.moment_nm[0],
+                yaw_nm: loads.parasite_wrench.moment_nm[2],
+            },
+            ..DistributedLateralLoads::default()
+        };
         for (s, (strip, &velocity)) in strips.iter().zip(local).enumerate() {
             let speed2 = velocity[0] * velocity[0] + velocity[2] * velocity[2];
             if !velocity.iter().all(|v| v.is_finite())
@@ -159,6 +171,7 @@ impl OpenLoopDesign {
             result.circulation,
             result.profile_drag,
             result.propellers,
+            result.parasite_drag,
             result.net(),
         ]
         .iter()

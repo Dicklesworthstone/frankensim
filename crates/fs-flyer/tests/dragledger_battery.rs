@@ -18,6 +18,74 @@ const RHO: f64 = 1.294; // Dec-17 cold sea-level (air-state-v1)
 const V: f64 = 13.86; // airspeed_dec17_mps
 
 #[test]
+fn g0_local_drag_wrench_obeys_spatial_work_and_reverses_with_relative_flow() {
+    let ledger = wright_ledger_v1();
+    let flow = [3.0, 4.0, 12.0];
+    let arm = [0.2, -0.4, 0.6];
+    let wrench = ledger.wrench_at(RHO, flow, arm).unwrap();
+    let report = ledger.evaluate(RHO, 13.0).unwrap();
+    assert_eq!(wrench.drag_n, report.total_parasite_n);
+    assert_eq!(wrench.dissipated_power_w, report.power_w);
+    let dot = |a: [f64; 3], b: [f64; 3]| a.into_iter().zip(b).map(|(x, y)| x * y).sum::<f64>();
+    assert!((dot(wrench.force_n, flow) + report.power_w).abs() < 1e-9);
+    // V_point = V_origin + omega x arm, with the material wind subtracted.
+    let velocity = [10.0, -2.0, 3.0];
+    let omega = [0.7, -0.3, 0.4];
+    let point = [
+        velocity[0] + omega[1] * arm[2] - omega[2] * arm[1],
+        velocity[1] + omega[2] * arm[0] - omega[0] * arm[2],
+        velocity[2] + omega[0] * arm[1] - omega[1] * arm[0],
+    ];
+    let wind = std::array::from_fn(|i| point[i] - flow[i]);
+    let body_power = dot(wrench.force_n, velocity) + dot(wrench.moment_nm, omega);
+    let wind_power = dot(wrench.force_n, wind);
+    assert!((body_power - wind_power + wrench.dissipated_power_w).abs() < 1e-9);
+    let reversed = ledger.wrench_at(RHO, flow.map(|v| -v), arm).unwrap();
+    assert_eq!(reversed.force_n, wrench.force_n.map(|v| -v));
+    assert_eq!(reversed.moment_nm, wrench.moment_nm.map(|v| -v));
+    assert_eq!(reversed.dissipated_power_w, wrench.dissipated_power_w);
+    assert_eq!(
+        ledger.wrench_at(RHO, [0.0; 3], arm).unwrap(),
+        Default::default()
+    );
+}
+
+#[test]
+fn g0_local_drag_retains_representable_loads_at_extreme_velocity_scales() {
+    let ledger = wright_ledger_v1();
+    for (rho, speed) in [(1e300, 1e-200), (1e-300, 1e200)] {
+        let wrench = ledger.wrench_at(rho, [speed, 0.0, 0.0], [0.0; 3]).unwrap();
+        let report = ledger.evaluate(rho, speed).unwrap();
+        assert!(wrench.drag_n > 0.0);
+        assert_eq!(wrench.drag_n, report.total_parasite_n);
+        assert_eq!(wrench.force_n[0], -report.total_parasite_n);
+        assert_eq!(wrench.dissipated_power_w, report.power_w);
+    }
+}
+
+#[test]
+fn g0_local_drag_refuses_invalid_and_overflowing_loads() {
+    let ledger = wright_ledger_v1();
+    for (rho, flow, arm) in [
+        (0.0, [1.0; 3], [0.0; 3]),
+        (RHO, [f64::NAN, 0.0, 0.0], [0.0; 3]),
+        (RHO, [1.0; 3], [0.0, f64::INFINITY, 0.0]),
+    ] {
+        assert_eq!(
+            ledger.wrench_at(rho, flow, arm).unwrap_err().code,
+            "air-state-invalid"
+        );
+    }
+    assert_eq!(
+        ledger
+            .wrench_at(RHO, [1e200, 0.0, 0.0], [0.0; 3])
+            .unwrap_err()
+            .code,
+        "drag-wrench-overflow"
+    );
+}
+
+#[test]
 fn per_item_arithmetic_and_work_closure() {
     let rep = wright_ledger_v1().evaluate(RHO, V).unwrap();
     let q = 0.5 * RHO * V * V;

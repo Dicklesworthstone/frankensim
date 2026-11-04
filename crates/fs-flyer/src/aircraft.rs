@@ -27,7 +27,7 @@
 //! anyway); far wake = trailing legs at this tier.
 
 use crate::Refusal;
-use crate::dragledger::{DragLedger, wright_ledger_v1};
+use crate::dragledger::{DragLedger, DragWrench, wright_ledger_v1};
 use crate::propcoupling::{
     CANDIDATE_A, CoupledStep, IncidentInflow, PropCouplingSolverSpec, PropDisk,
     coupled_prop_airframe_step_with_incident,
@@ -189,6 +189,9 @@ pub struct ForceBuildup {
     pub thrust_n: [f64; 2],
     /// Induced-drag term [N] (declared classical formula).
     pub induced_drag_n: f64,
+    /// Accepted parasite force and moment at its physical drag line.
+    /// Retained so distributed lateral loads reuse the identical local sample.
+    pub parasite_wrench: DragWrench,
     /// The coupled prop step receipt.
     pub coupled: CoupledStep,
     /// Engine-vs-prop torque imbalance [N·m] (per prop, symmetric):
@@ -425,8 +428,9 @@ impl OpenLoopDesign {
     /// it does not also apply the legacy pitch-rate twist approximation.
     /// Every wing/canard strip and both propeller disk centers are sampled.
     /// Local accepted prop wash enters circulation, Kutta–Joukowsky forces,
-    /// profile drag, and section moments consistently. Parasite/induced-drag
-    /// estimates and the common straight wake retain the supplied CG reference.
+    /// profile drag, and section moments consistently. Parasite drag samples
+    /// incident air and rigid-point velocity at its declared application line;
+    /// induced drag and the common straight wake retain the CG reference.
     ///
     /// # Errors
     /// As [`Self::force_buildup_warm`], plus incident-field and local-flow
@@ -652,16 +656,18 @@ impl OpenLoopDesign {
         let diz = d_ind * vhat[2];
         force[0] -= dix;
         force[2] -= diz;
-        // Parasite ledger at its declared line.
-        let ledger_rep = self.ledger.evaluate(rho_kg_m3, v_mps)?;
-        let dp = ledger_rep.total_parasite_n;
-        let dpx = dp * vhat[0];
-        let dpz = dp * vhat[2];
-        force[0] -= dpx;
-        force[2] -= dpz;
-        let drag_arm = self.drag_z_m - self.cg_m[2];
-        let drag_moment = drag_arm * (-dpx);
-        m_y += drag_moment;
+        // Force and moment use the SAME local relative velocity. Sampling at
+        // the CG while applying drag off-CG loses rotational damping and lets
+        // a localized gust change the moment arm without changing its force.
+        let drag_point = [self.cg_m[0], self.cg_m[1], self.drag_z_m];
+        let drag_arm = [0.0, 0.0, self.drag_z_m - self.cg_m[2]];
+        let mut drag_velocity = incident(drag_point)?;
+        drag_velocity[0] += q_pitch_rad_s * drag_arm[2];
+        let parasite = self.ledger.wrench_at(rho_kg_m3, drag_velocity, drag_arm)?;
+        for (force, drag) in force.iter_mut().zip(parasite.force_n) {
+            *force += drag;
+        }
+        m_y += parasite.moment_nm[1];
         // Thrust along +x at the disk lines.
         for (k, d) in disks.iter().enumerate() {
             let t = coupled.thrust_n[k];
@@ -683,9 +689,10 @@ impl OpenLoopDesign {
             force_n: force,
             moment_y_nm: m_y,
             lift_n: lift,
-            drag_n: dp + d_prof + d_ind,
+            drag_n: parasite.drag_n + d_prof + d_ind,
             thrust_n: coupled.thrust_n,
             induced_drag_n: d_ind,
+            parasite_wrench: parasite,
             coupled,
             torque_imbalance_nm,
         })

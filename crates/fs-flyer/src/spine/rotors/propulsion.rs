@@ -677,11 +677,14 @@ impl PropulsionGeometry<'_> {
                 / (core::f64::consts::PI * aspect * design.oswald_e);
             force = force - air_direction.scale(induced_drag);
         }
-        let parasite_drag = design.ledger.evaluate(rho, airspeed)?.total_parasite_n;
-        let parasite_force = air_direction.scale(-parasite_drag);
-        force = force + parasite_force;
-        moment =
-            moment + Vec3::new(0.0, 0.0, design.drag_z_m - design.cg_m[2]).cross(parasite_force);
+        let drag_point = [design.cg_m[0], design.cg_m[1], design.drag_z_m];
+        let parasite = design.ledger.wrench_at(
+            rho,
+            air.sample(drag_point)?.relative_velocity_mps,
+            [0.0, 0.0, design.drag_z_m - design.cg_m[2]],
+        )?;
+        force = force + vec(parasite.force_n);
+        moment = moment + vec(parasite.moment_nm);
         let mut aerodynamic_nm = [0.0; N];
         for k in 0..2 {
             let mount = self.mounts[k];

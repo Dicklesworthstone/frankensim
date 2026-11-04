@@ -319,6 +319,69 @@ fn inputs() -> PropulsionInputs {
     }
 }
 
+#[test]
+fn g3_native_parasite_drag_uses_its_world_sample_and_all_angular_rates() {
+    let mut design = wright_openloop_v1();
+    design.coupling = CANDIDATE_B;
+    design.drag_z_m = design.cg_m[2] - 0.35;
+    let a = aero_assembly(design.gross_mass_kg);
+    let model = GearedPropulsion::new(&design, &a, mounts()).unwrap();
+    let mut state = flight_state(&a);
+    state.rigid.omega_body = [0.15, 0.20, -0.07];
+    let arm = Vec3::new(0.0, 0.0, design.drag_z_m - design.cg_m[2]);
+    let point_world = v(state.rigid.pos_m) + arm; // identity attitude fixture
+    let point = [point_world.x, point_world.y, point_world.z];
+    let wind = [4.0, -3.0, 1.0];
+    let calm = model
+        .evaluate(&state, inputs(), &|_| Ok(ZERO), None)
+        .unwrap();
+    let gust = model
+        .evaluate(
+            &state,
+            inputs(),
+            &|p| Ok(if p == point { wind } else { ZERO }),
+            None,
+        )
+        .unwrap();
+    assert_eq!(calm.coupled.gamma, gust.coupled.gamma);
+    assert_eq!(calm.coupled.thrust_n, gust.coupled.thrust_n);
+    let point_velocity = v(state.rigid.vel_mps) + v(state.rigid.omega_body).cross(arm);
+    let expected = |wind: [f64; 3]| {
+        let relative = point_velocity - v(wind);
+        let magnitude = design
+            .ledger
+            .evaluate(inputs().density_kg_m3, relative.norm())
+            .unwrap()
+            .total_parasite_n;
+        relative.scale(-magnitude / relative.norm())
+    };
+    let delta = expected(wind) - expected(ZERO);
+    assert!(
+        (v(gust.aerodynamic_force_body_n) - v(calm.aerodynamic_force_body_n) - delta).norm() < 1e-9
+    );
+    assert!(
+        (v(gust.loads.carrier.moment_nm) - v(calm.loads.carrier.moment_nm) - arm.cross(delta))
+            .norm()
+            < 1e-9
+    );
+    // A co-moving air parcel at the drag point removes this drag, while the
+    // wing and propeller still see the original nonzero forward flow.
+    let co_moving = [point_velocity.x, point_velocity.y, point_velocity.z];
+    let zero = model
+        .evaluate(
+            &state,
+            inputs(),
+            &|p| Ok(if p == point { co_moving } else { ZERO }),
+            None,
+        )
+        .unwrap();
+    assert!(
+        (v(zero.aerodynamic_force_body_n) - v(calm.aerodynamic_force_body_n) + expected(ZERO))
+            .norm()
+            < 1e-9
+    );
+}
+
 // Independent flat-panel Kutta--Joukowsky integration, projected using the
 // velocity components rather than the production angle/trigonometric helper.
 fn transverse_induced_drag(
