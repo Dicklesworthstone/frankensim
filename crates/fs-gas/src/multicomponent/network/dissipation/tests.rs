@@ -1,4 +1,5 @@
 //! Independent finite-volume molecular/thermal port balances and decay laws.
+mod adaptive;
 pub(in crate::multicomponent::network) mod reservoir;
 mod stabilized;
 use super::*;

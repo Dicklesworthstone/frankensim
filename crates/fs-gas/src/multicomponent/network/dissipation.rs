@@ -23,9 +23,11 @@ use crate::multicomponent::{
 use fs_qty::{Length, Time};
 use fs_thermochem::transport::maxwell_stefan::{MaxwellStefanV1, MaxwellStefanWorkspaceV1};
 
+mod adaptive;
 mod evolve;
 mod stabilized;
 
+pub use adaptive::{AdaptiveNetworkDissipationControl, AdaptiveNetworkDissipationReport};
 pub use stabilized::StabilizedNetworkDissipationReport;
 
 /// Complete molecular interval; the accepted network clock is unchanged.
@@ -33,7 +35,8 @@ pub use stabilized::StabilizedNetworkDissipationReport;
 pub struct NetworkDissipationReport {
     /// Complete requested molecular duration [s].
     pub elapsed: Time,
-    /// Accepted globally synchronized SSPRK2 substeps or RKL2 macrosteps.
+    /// Accepted globally synchronized SSPRK2 substeps, RKL2 macrosteps, or
+    /// accuracy-controlled intervals containing two RKL2 half-steps.
     pub accepted_steps: usize,
     /// Rejected and halved complete network substeps.
     pub rejected_steps: usize,
@@ -94,6 +97,8 @@ struct Workspace {
     stabilized_faces: Vec<f64>,
     stabilized_plenum_rhs: Vec<f64>,
     stabilized_endpoint_changes: Vec<f64>,
+    // Opt-in accuracy control retains its full/two-half probe storage.
+    adaptive: adaptive::Workspace,
     endpoint_changes: Vec<f64>,
     endpoint_corrections: Vec<f64>,
     branch_before: Vec<Totals>,
@@ -269,6 +274,7 @@ impl<L: TransportLaw> NetworkDissipationOperator<L> {
             stabilized_faces: Vec::new(),
             stabilized_plenum_rhs: Vec::new(),
             stabilized_endpoint_changes: Vec::new(),
+            adaptive: adaptive::Workspace::default(),
             endpoint_changes: allocated(branch_count * 2 * m, 0.0)?,
             endpoint_corrections: allocated(branch_count * 2 * m, 0.0)?,
             branch_before: allocated(branch_count, super::empty_totals(n))?,

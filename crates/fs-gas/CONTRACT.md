@@ -2376,6 +2376,57 @@ orientation and formation-gauge invariance, late cancellation, cumulative work
 refusal and reuse. The work comparison is a stability comparison, not a claim
 of equal temporal error. Test execution is not implied by this contract.
 
+### Accuracy-controlled molecular intervals with finite storage
+
+`NetworkDissipationOperator::advance_adaptive_for` and
+`advance_adaptive_with_reservoirs_for` add explicit physical local-accuracy
+controls to this same network RKL2 owner. `AdaptiveNetworkDissipationControl`
+retains the original source, stage, attempt and complete-window RHS limits and
+adds absolute species-density, temperature and axial-velocity accuracy plus a
+componentwise relative tolerance. Each trial compares one full step with two
+half-steps using the SAME selected stage count, hence the same second-order
+method coefficients. The difference divided by three estimates the local error
+of the two-half result. Selecting fewer stages for the halves would change the
+leading error coefficient and is deliberately not done.
+
+The maximum error norm checks every original species separately in every
+branch cell and finite plenum, together with temperature and velocity decoded
+by the original caloric owner. Large total mixture mass or arbitrary formation
+references cannot hide trace-species or thermal error. Every individual signed
+endpoint transfer is also checked. Its absolute species accuracy uses the
+smaller incident storage volume, thermal accuracy uses the smaller actual
+incident heat capacity, and support-impulse accuracy uses the branch-cell mass.
+Relative transfer accuracy scales the actual transferred quantity; cancellation
+between two ports or between branches does not erase a quadrature error.
+Canonical sensible energy is used for this port norm, retaining formation-gauge
+invariance. All actual physical energy receipts retain their original meaning.
+
+An accepted interval publishes the admitted two-half field and its matching
+conservative endpoint quadrature, without Richardson extrapolation, clipping or
+post-hoc balance repair. Failed accuracy probes shrink with a bounded
+second-order local-error controller; failed physical probes retain the original
+halving policy. Two field arrays and two endpoint arrays are reserved lazily
+and reused, with no per-probe numerical allocation. The initial RHS is shared
+by the full and first-half probes, and the admitted midpoint RHS starts the
+second half: an unrefused `s`-stage probe costs `3*s+1` spatial evaluations.
+All refused probes consume that same whole-window work budget.
+
+`AdaptiveNetworkDissipationReport` nests the original stabilized/balance report,
+the largest ACCEPTED component/port error ratio (at most one), and the number of
+accuracy refusals. Accepted steps count paired half-step intervals; rejected
+steps include physical and accuracy refusals. A composing owner can retain one
+RHS counter across molecular halves, geometry changes between those halves,
+and discarded complete coupled attempts. Final publication and all accepted
+report preservation use the original shared transaction.
+
+This is an estimated local-error lane, not a certified global, spatial or
+operator-splitting error bound, nor an unconditional positivity/entropy theorem.
+Focused regressions cover a stiff finite-plenum two-half Legendre mode,
+tolerance refinement against continuous species and unequal-capacity Fourier
+exponentials, affine three-storage bath evolution and port quadrature against a
+matrix-exponential reference, formation-gauge/orientation invariance, and late
+work/cancellation rollback with reuse. Test execution is reported separately.
+
 ### Exterior molecular baths through complete network transactions
 
 `NetworkDissipationOperator::advance_with_reservoirs_for` supplies one optional

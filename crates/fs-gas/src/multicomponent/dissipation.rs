@@ -130,6 +130,9 @@ pub enum DissipationError {
     Material(fs_material::MaterialError),
     /// An accepted-stage parabolic estimate exceeds its declared bound.
     ParabolicNumber { observed: f64, maximum: f64 },
+    /// A full/two-half molecular probe exceeded its declared local accuracy.
+    /// This is a measured estimate, not a bound on global or splitting error.
+    EstimatedTemporalError { observed: f64, maximum: f64 },
     /// Complete requested evolution exceeded its bounded attempt count.
     WorkLimit {
         elapsed_time_s: f64,

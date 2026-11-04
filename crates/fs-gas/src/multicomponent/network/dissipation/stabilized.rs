@@ -10,6 +10,7 @@ use super::{
     Time, TransportLaw, allocated, poll, positive,
 };
 use crate::multicomponent::dissipation::StabilizedDissipationControl;
+use crate::multicomponent::dissipation::evolve::Stage;
 use crate::multicomponent::dissipation::stabilized::{
     b, check_rate, extent, recurrence, reserve_evaluation,
 };
@@ -150,23 +151,13 @@ fn advance<L: TransportLaw>(
     let (before, active_reservoirs) =
         evolve::prepare(owner, network, duration, base, reservoirs, cancelled)?;
     let reservoirs = if active_reservoirs { reservoirs } else { None };
-    let m = owner.gas.species_count() + 2;
     let initial_evaluations = *evaluations;
     let mut elapsed = 0.0;
     let mut progress = Progress::default();
     let mut maximum_stages_used = 0;
     let mut maximum_scaled_parabolic = 0.0_f64;
     if duration.value() > 0.0 {
-        let work = &mut owner.work;
-        if work.stabilized_faces.len() != work.faces.len() {
-            work.stabilized_faces = allocated(work.faces.len(), 0.0)?;
-        }
-        if work.stabilized_plenum_rhs.len() != work.plenum_rhs.len() {
-            work.stabilized_plenum_rhs = allocated(work.plenum_rhs.len(), 0.0)?;
-        }
-        if work.stabilized_endpoint_changes.len() != work.endpoints_a.len() {
-            work.stabilized_endpoint_changes = allocated(work.endpoints_a.len(), 0.0)?;
-        }
+        prepare_work(owner)?;
     }
     while elapsed < duration.value() {
         poll(cancelled)?;
@@ -179,14 +170,7 @@ fn advance<L: TransportLaw>(
         }
         reserve_evaluation(evaluations, controls.maximum_operator_evaluations, elapsed)?;
         let a = spatial(owner, Input::Current, base, reservoirs, cancelled)?;
-        owner
-            .work
-            .stabilized_faces
-            .copy_from_slice(&owner.work.faces);
-        owner
-            .work
-            .stabilized_plenum_rhs
-            .copy_from_slice(&owner.work.plenum_rhs);
+        cache_anchor(owner);
         let remaining = duration.value() - elapsed;
         let mut step = remaining.min(base.maximum_step_s);
         if a.rate > 0.0 {
@@ -217,69 +201,21 @@ fn advance<L: TransportLaw>(
                 .find(|s| step * a.rate <= base.parabolic_cfl * extent(*s))
                 .unwrap_or(controls.maximum_stages);
             let extension = extent(stages);
-            let limit = base.parabolic_cfl * extension;
-            let w1 = 1.0 / extension;
-            let first_weight = b(1) * w1;
-            let mut peak = a;
-            let attempt = (|| {
-                check_rate(step, a.rate, limit)?;
-                // A refused trial overwrote the spatial scratch. Restore the
-                // cached anchor operator before restarting its first stage.
-                owner
-                    .work
-                    .faces
-                    .copy_from_slice(&owner.work.stabilized_faces);
-                owner
-                    .work
-                    .plenum_rhs
-                    .copy_from_slice(&owner.work.stabilized_plenum_rhs);
-                forward(owner, Input::Current, step * first_weight, cancelled)?;
-                owner.work.candidate.copy_from_slice(&owner.work.current);
-                owner.work.endpoints_a.fill(0.0); // older integrated transfer
-                for (index, shape) in owner.branches.iter().enumerate() {
-                    poll(cancelled)?;
-                    for end in 0..2 {
-                        let face =
-                            shape.face_start + if end == 0 { 0 } else { shape.mesh.cell_count() };
-                        let sign = if end == 0 { 1.0 } else { -1.0 };
-                        for k in 0..m {
-                            owner.work.stabilized_endpoint_changes[(2 * index + end) * m + k] = step
-                                * first_weight
-                                * shape.mesh.face_areas()[0]
-                                * sign
-                                * owner.work.stabilized_faces[face * m + k];
-                        }
-                    }
-                }
-                for j in 2..=stages + 1 {
-                    poll(cancelled)?;
-                    reserve_evaluation(
-                        evaluations,
-                        controls.maximum_operator_evaluations,
-                        elapsed,
-                    )?;
-                    let evaluated = spatial(owner, Input::Stage, base, reservoirs, cancelled)?;
-                    check_rate(step, evaluated.rate, limit)?;
-                    peak.rate = peak.rate.max(evaluated.rate);
-                    peak.gradient_residual =
-                        peak.gradient_residual.max(evaluated.gradient_residual);
-                    peak.mass_frame_residual =
-                        peak.mass_frame_residual.max(evaluated.mass_frame_residual);
-                    if j > stages {
-                        break; // endpoint passed the full original spatial admission
-                    }
-                    let jf = j as f64;
-                    let mu = ((2.0 * jf - 1.0) / jf) * b(j) / b(j - 1);
-                    let nu = -((jf - 1.0) / jf) * b(j) / b(j - 2);
-                    let mu_tilde = mu * w1;
-                    let gamma_tilde = -(1.0 - b(j - 1)) * mu_tilde;
-                    stage_recurrence(owner, step, [mu, nu, mu_tilde, gamma_tilde], cancelled)?;
-                    core::mem::swap(&mut owner.work.stage, &mut owner.work.candidate);
-                }
-                Ok::<_, DissipationError>(())
-            })();
+            let attempt = macrostep(
+                owner,
+                Step {
+                    step_s: step,
+                    stages,
+                    anchor: a,
+                    elapsed,
+                },
+                controls,
+                reservoirs,
+                evaluations,
+                cancelled,
+            );
             match attempt {
-                Ok(()) => {
+                Ok(peak) => {
                     for k in 0..owner.work.endpoint_changes.len() {
                         if k % 1024 == 0 {
                             poll(cancelled)?;
@@ -336,6 +272,114 @@ fn advance<L: TransportLaw>(
         maximum_stages_used,
         maximum_scaled_parabolic_number: maximum_scaled_parabolic,
     })
+}
+
+pub(super) fn prepare_work<L: TransportLaw>(
+    owner: &mut NetworkDissipationOperator<L>,
+) -> Result<(), DissipationError> {
+    let work = &mut owner.work;
+    if work.stabilized_faces.len() != work.faces.len() {
+        work.stabilized_faces = allocated(work.faces.len(), 0.0)?;
+    }
+    if work.stabilized_plenum_rhs.len() != work.plenum_rhs.len() {
+        work.stabilized_plenum_rhs = allocated(work.plenum_rhs.len(), 0.0)?;
+    }
+    if work.stabilized_endpoint_changes.len() != work.endpoints_a.len() {
+        work.stabilized_endpoint_changes = allocated(work.endpoints_a.len(), 0.0)?;
+    }
+    Ok(())
+}
+
+pub(super) fn cache_anchor<L: TransportLaw>(owner: &mut NetworkDissipationOperator<L>) {
+    owner
+        .work
+        .stabilized_faces
+        .copy_from_slice(&owner.work.faces);
+    owner
+        .work
+        .stabilized_plenum_rhs
+        .copy_from_slice(&owner.work.plenum_rhs);
+}
+
+pub(super) struct Step {
+    pub step_s: f64,
+    pub stages: usize,
+    pub anchor: Stage,
+    pub elapsed: f64,
+}
+
+// One original RKL2 recurrence. `current` and the cached anchor RHS are input;
+// `stage`, endpoint transfers and the fully admitted endpoint RHS are output.
+// Keeping this one kernel lets accuracy probes share the constitutive physics
+// and the exact same fixed-stage integration formula with the original path.
+pub(super) fn macrostep<L: TransportLaw>(
+    owner: &mut NetworkDissipationOperator<L>,
+    trial: Step,
+    controls: StabilizedDissipationControl,
+    reservoirs: Option<&[[Option<Cell<'_>>; 2]]>,
+    evaluations: &mut usize,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Stage, DissipationError> {
+    let Step {
+        step_s: step,
+        stages,
+        anchor,
+        elapsed,
+    } = trial;
+    let base = controls.transport;
+    let m = owner.gas.species_count() + 2;
+    let extension = extent(stages);
+    let limit = base.parabolic_cfl * extension;
+    let w1 = 1.0 / extension;
+    let first_weight = b(1) * w1;
+    let mut peak = anchor;
+    check_rate(step, anchor.rate, limit)?;
+    // A refused trial overwrote the spatial scratch. Restore its cached RHS.
+    owner
+        .work
+        .faces
+        .copy_from_slice(&owner.work.stabilized_faces);
+    owner
+        .work
+        .plenum_rhs
+        .copy_from_slice(&owner.work.stabilized_plenum_rhs);
+    forward(owner, Input::Current, step * first_weight, cancelled)?;
+    owner.work.candidate.copy_from_slice(&owner.work.current);
+    owner.work.endpoints_a.fill(0.0);
+    for (index, shape) in owner.branches.iter().enumerate() {
+        poll(cancelled)?;
+        for end in 0..2 {
+            let face = shape.face_start + if end == 0 { 0 } else { shape.mesh.cell_count() };
+            let sign = if end == 0 { 1.0 } else { -1.0 };
+            for k in 0..m {
+                owner.work.stabilized_endpoint_changes[(2 * index + end) * m + k] = step
+                    * first_weight
+                    * shape.mesh.face_areas()[0]
+                    * sign
+                    * owner.work.stabilized_faces[face * m + k];
+            }
+        }
+    }
+    for j in 2..=stages + 1 {
+        poll(cancelled)?;
+        reserve_evaluation(evaluations, controls.maximum_operator_evaluations, elapsed)?;
+        let evaluated = spatial(owner, Input::Stage, base, reservoirs, cancelled)?;
+        check_rate(step, evaluated.rate, limit)?;
+        peak.rate = peak.rate.max(evaluated.rate);
+        peak.gradient_residual = peak.gradient_residual.max(evaluated.gradient_residual);
+        peak.mass_frame_residual = peak.mass_frame_residual.max(evaluated.mass_frame_residual);
+        if j > stages {
+            break; // endpoint passed the full original spatial admission
+        }
+        let jf = j as f64;
+        let mu = ((2.0 * jf - 1.0) / jf) * b(j) / b(j - 1);
+        let nu = -((jf - 1.0) / jf) * b(j) / b(j - 2);
+        let mu_tilde = mu * w1;
+        let gamma_tilde = -(1.0 - b(j - 1)) * mu_tilde;
+        stage_recurrence(owner, step, [mu, nu, mu_tilde, gamma_tilde], cancelled)?;
+        core::mem::swap(&mut owner.work.stage, &mut owner.work.candidate);
+    }
+    Ok(peak)
 }
 
 fn stage_recurrence<L: TransportLaw>(
