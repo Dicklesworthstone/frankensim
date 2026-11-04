@@ -128,3 +128,51 @@ no-recycle limits, source admission, infeasible targets, iteration exhaustion,
 overflowed tolerance and unresolved floating-point intervals.
 Six Bond-adapter tests add changing-P80 power, purge, fresh-tonnage accounting,
 original work-index/source restrictions and preserved physical-owner refusals.
+
+## Startup, feed changes and finite mill inventory
+
+`ContinuousPopulationBalanceMill::advance_inventory` now advances one local
+mill's `transient::MillInventory` through a constant-feed interval. Starting
+empty, changing feed, and washing out an existing charge retain material held
+inside the mill. The caller carries the returned inventory into the next
+interval; every size class keeps its explicit elemental masses and water has
+its own extensive account. For dry or elemental class mass `H_i`:
+
+```text
+dH_i/dt = f_i - (S_i + 1/tau)*H_i + sum_j(b_ij*S_j*H_j)
+```
+
+The zero-accumulation limit is exactly the existing steady mill equation.
+Water follows `dH_water/dt = f_water - H_water/tau`. Constant source rates,
+daughters, feed and common residence are declared for each interval. Positive
+backward-Euler substeps solve from coarser to finer classes and accumulate
+discharge as `dt*H_new/tau`. The result returns final inventory, instantaneous
+outlet, integrated feed/discharge and actual dry, water and elemental closure
+residuals. Account values are never adjusted to force closure.
+
+The caller supplies maximum step, finite substep budget and mass-balance
+tolerances. Time integration is first order; balance admission is not a bound
+on trajectory error. Cancellation or an unsupported, unrepresentable or
+unbalanced operation returns no partial response and leaves the inputs intact.
+Actual feed flow, residence and defined feed solids fraction enter the original
+source query. Empty-feed washout requires source support at zero dry flow; if
+the source requires feed solids fraction, the undefined empty-feed ratio causes
+refusal. Inventory composition is never substituted for feed composition.
+
+```bash
+cargo run -p fs-material --example transient_grinding
+```
+
+This synthetic example starts empty, feeds 10 kg/s dry ore for 30 seconds,
+doubles feed for 30 seconds, then washes out for 30 seconds at a declared
+10-second common residence. It prints retained and discharged solids, water,
+copper and balance residuals. The G1 tests compare startup/washout and a driven
+two-size system to independent analytical solutions, demonstrate first-order
+refinement and retain the original steady solution as a fixed point. G0/G3/G4
+checks cover separate elemental/water balances, feed changes, replay, source
+restrictions, cancellation and bounded work.
+
+This is one local perfectly mixed inventory. Dynamic classifier recycle,
+size-dependent discharge, liberation, varying kinetic coefficients, equipment
+power draw and plant calibration remain separate physical inputs/models. The
+source-backed Bond test rows do not supply any of those missing calibrations.

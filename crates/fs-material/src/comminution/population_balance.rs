@@ -18,13 +18,18 @@
 //! existing redistribution owner; account arithmetic is not an exact certificate.
 //!
 //! Rates and daughters retain their common original test context and validity.
-//! They are held constant at the admitted operating point. No liberation,
-//! agglomeration, size-dependent discharge, transient response, media trajectory,
+//! They are held constant at the admitted operating point. The `transient`
+//! module advances an explicitly retained inventory under the same local law.
+//! No liberation, agglomeration, size-dependent discharge, media trajectory,
 //! power draw, wear, or transfer of laboratory rates to a plant is inferred.
 
 /// Continuous mill/classifier closure with explicit underflow recycle and purge.
 #[path = "population_balance/circuit.rs"]
 pub mod circuit;
+
+/// Finite inventory, feed changes and washout under the same declared local law.
+#[path = "population_balance/transient.rs"]
+pub mod transient;
 
 use super::breakage::{BreakageTestContext, BreakageTransfer, MAX_SIZE_CLASSES, SizeClass};
 pub use super::circuit::MILL_DRY_FLOW_AXIS;
@@ -269,15 +274,16 @@ impl ContinuousPopulationBalanceMill {
         &self.validity
     }
 
-    /// Solve with the source-admitted mean residence in seconds. Dry solids,
-    /// all measured elements and water are kept as separate extensive accounts.
-    /// Caller conditions cannot replace the three internally computed axes.
-    pub fn at_residence_time(
+    // Shared admission keeps transient and steady operation on the original
+    // source and actual feed coordinates. An entirely empty feed has no solids
+    // fraction; it cannot satisfy a source that requires that coordinate.
+    fn admitted_feed(
         &self,
         feed: &ParticleStream,
         residence: Time,
         conditions: &QueryPoint,
-    ) -> Result<ContinuousMillSolution> {
+        allow_empty: bool,
+    ) -> Result<QueryPoint> {
         require(
             residence.value().is_finite() && residence.value() > 0.0,
             "mean residence must be finite and positive",
@@ -293,7 +299,7 @@ impl ContinuousPopulationBalanceMill {
         )?;
         let dry_flow = feed.dry_solids()?.value();
         require(
-            dry_flow > 0.0,
+            allow_empty || dry_flow > 0.0,
             "continuous grinding requires positive dry feed",
         )?;
         for axis in [
@@ -306,7 +312,7 @@ impl ContinuousPopulationBalanceMill {
                 "caller conditions cannot replace actual residence, flow or solids fraction",
             )?;
         }
-        let actual = conditions
+        let mut actual = conditions
             .clone()
             .with_quantity(
                 MEAN_RESIDENCE_TIME_AXIS,
@@ -317,18 +323,33 @@ impl ContinuousPopulationBalanceMill {
                 MILL_DRY_FLOW_AXIS,
                 QuantitySpec::dimensional(MassFlowRate::DIMS),
                 dry_flow,
-            )?
-            .with_quantity(
+            )?;
+        if dry_flow > 0.0 || feed.water().value() > 0.0 {
+            actual = actual.with_quantity(
                 SOLIDS_FRACTION_AXIS,
                 QuantitySpec::dimensional(Dimensionless::DIMS),
                 feed.solids_mass_fraction()?.value(),
             )?;
+        }
         if !self
             .validity
             .contains_typed(actual.axes(), actual.axis_quantities())
         {
             return Err(PopulationBalanceError::OutsideValidity);
         }
+        Ok(actual)
+    }
+
+    /// Solve with the source-admitted mean residence in seconds. Dry solids,
+    /// all measured elements and water are kept as separate extensive accounts.
+    /// Caller conditions cannot replace the three internally computed axes.
+    pub fn at_residence_time(
+        &self,
+        feed: &ParticleStream,
+        residence: Time,
+        conditions: &QueryPoint,
+    ) -> Result<ContinuousMillSolution> {
+        let actual = self.admitted_feed(feed, residence, conditions, false)?;
         let elements: Vec<_> = feed.classes()[0].elements().keys().cloned().collect();
         let channels = elements.len() + 1;
         let mut incoming = vec![vec![Sum::default(); channels]; self.classes.len()];

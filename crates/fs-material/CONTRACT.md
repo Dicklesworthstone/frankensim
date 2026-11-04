@@ -12047,13 +12047,28 @@ residence. Original daughter fractions close within eight binary64 epsilons
 and are never renormalized; floating-point results are not interval certificates.
 Bad layouts, nonconservative/coarsening daughters, unsupported source points,
 nonpositive operating conditions and unrepresentable arithmetic refuse without
-mutating the feed. No ore-rate inference, liberation, transient response,
+mutating the feed. No ore-rate inference, liberation,
 size-dependent discharge, media dynamics, power or wear prediction is supplied.
 
 The six focused population-balance tests cover independent two-class and
 multiclass balances, every dry/element/water account, throughput/residence
 response, source admission and invalid kinetic declarations. The executable
 `continuous_ball_mill` example uses explicitly synthetic rates and distributions.
+
+`advance_inventory` extends the same source-bound local law to finite time.
+It retains class dry/element masses and carrier water in `transient::MillInventory`.
+Constant-feed intervals use bounded positive backward-Euler substeps; integrated
+discharge uses those same accepted substeps. Final inventory, instantaneous
+outlet, integrated input/output and actual dry/element/water closure residuals
+are returned together. The caller can carry that inventory through startup,
+feed changes and washout. Actual feed and residence retain the original source
+admission; an empty feed cannot provide a required solids-fraction coordinate.
+Cancellation, insufficient work budget or failed conservation publishes no
+partial state. This is a first-order numerical trajectory, with an explicit
+step limit; a small balance residual is not a trajectory-error bound.
+Dynamic classifier recycle, rate-power calibration and plant transfer remain
+outside this local model. The `transient_grinding` example and seven independent
+analytical/refinement/conservation regressions exercise the complete path.
 
 ## Simultaneous shared-reagent batch kinetics
 
