@@ -49,7 +49,10 @@ impl<'s> ProjectedViscoSolid<'s> {
     /// or internal-variable transfer is inferred. The coupling owner must bind
     /// the replacement laws to their original source and transfer live history.
     pub fn with_element_laws(
-        &self, laws: &[TensorProny], budget: SolidProjectionBudget, gate: &CancelGate,
+        &self,
+        laws: &[TensorProny],
+        budget: SolidProjectionBudget,
+        gate: &CancelGate,
     ) -> Result<ProjectedViscoSolid<'s>, ViscoElementError> {
         poll_map(gate)?;
         let n = self.coordinates();
@@ -69,14 +72,19 @@ impl<'s> ProjectedViscoSolid<'s> {
         let mut points = Vec::with_capacity(self.points.len());
         for (old, &element) in self.points.iter().zip(&self.point_elements) {
             poll_map(gate)?;
-            points.push(laws[element].project_strain(
+            let mut point = laws[element].project_strain(
                 old.strain_columns(), old.volume_m3(),
                 TensorProjectionBudget {
                     max_coordinates: budget.max_coordinates,
                     max_scalar_terms: material_work(n, &laws[element])?,
                 },
                 || gate.is_requested(),
-            ).and_then(|point| point.with_eigenstrain_mandel(*old.free_strain_mandel()))
+            ).map_err(ViscoElementError::Projection)?;
+            if let Some(columns) = old.compatible_strain_columns() {
+                point = point.with_compatible_strain_columns(columns)
+                    .map_err(ViscoElementError::Projection)?;
+            }
+            points.push(point.with_eigenstrain_mandel(*old.free_strain_mandel())
                 .map_err(ViscoElementError::Projection)?);
         }
         poll_map(gate)?;
@@ -177,17 +185,16 @@ impl ViscoElements {
     /// must admit positive-definite projected inertia; dependent columns are not repaired.
     /// Spatial/modal convergence and source frequency applicability remain
     /// explicit obligations, as with the original time-domain history owner.
-    /// B-bar basis projection is refused: standalone material projections do
-    /// not yet carry its independent compatible-strain admission map. Native
-    /// B-bar histories, dynamics and harmonic response remain available.
+    /// B-bar retains both its original work-conjugate assumed strain and its
+    /// independent compatible strain at each quadrature point. The latter
+    /// constrains material-domain admission without adding constitutive work.
     pub fn project_basis(
-        &self, columns: &[Vec<f64>], budget: SolidProjectionBudget, cx: &Cx<'_>,
+        &self,
+        columns: &[Vec<f64>],
+        budget: SolidProjectionBudget,
+        cx: &Cx<'_>,
     ) -> Result<ProjectedViscoSolid<'_>, ViscoElementError> {
         checkpoint(cx)?;
-        if self.elements.iter().any(|element| element.points.iter()
-            .any(|point| point.compatible_gradients.is_some())) {
-            return Err(invalid("B-bar basis projection requires independent compatible-strain admission; use native viscoelastic operators"));
-        }
         let n = columns.len();
         let free = self.equilibrium.free_dofs.len();
         if !(1..=256).contains(&budget.max_coordinates) || n == 0 || n > budget.max_coordinates
@@ -208,6 +215,9 @@ impl ViscoElements {
                     checked_mul(checked_mul(point.b.len(), 6)?, n)?,
                     material_work(n, &element.law)?,
                 )?)?;
+                if let Some(gradients) = &point.compatible_gradients {
+                    work = checked_add(work, checked_mul(checked_mul(gradients.len(), 3)?, n)?)?;
+                }
             }
         }
         if count > budget.max_material_points || work > budget.max_scalar_terms {
@@ -234,6 +244,8 @@ impl ViscoElements {
             for point in &element.points {
                 checkpoint(cx)?;
                 let mut strains = Vec::with_capacity(n);
+                let mut compatible = point.compatible_gradients.as_ref()
+                    .map(|_| Vec::with_capacity(n));
                 for column in columns {
                     let mandel: [f64; 6] = core::array::from_fn(|i|
                         point.b.iter().zip(&reduced).map(|(b, r)|
@@ -242,8 +254,14 @@ impl ViscoElements {
                     // tensor shear. This conversion retains stress:strain work.
                     strains.push(core::array::from_fn(|i| if i < 3 { mandel[i] }
                         else { mandel[i]*core::f64::consts::FRAC_1_SQRT_2 }));
+                    if let Some(columns) = &mut compatible {
+                        let raw = point.compatible_strain_from_local(mandel, |i|
+                            reduced[i].map_or(0.0, |r| column[r]));
+                        columns.push(core::array::from_fn(|i| if i < 3 { raw[i] }
+                            else { raw[i]*core::f64::consts::FRAC_1_SQRT_2 }));
+                    }
                 }
-                let projected = element.law.project_strain(
+                let mut projected = element.law.project_strain(
                     &strains, point.volume_m3,
                     TensorProjectionBudget {
                         max_coordinates: budget.max_coordinates,
@@ -251,6 +269,10 @@ impl ViscoElements {
                     },
                     || cx.checkpoint().is_err(),
                 ).map_err(ViscoElementError::Projection)?;
+                if let Some(columns) = compatible {
+                    projected = projected.with_compatible_strain_columns(&columns)
+                        .map_err(ViscoElementError::Projection)?;
+                }
                 points.push(projected);
                 point_elements.push(e);
             }

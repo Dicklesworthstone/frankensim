@@ -7764,6 +7764,13 @@ The focused regression checks shear-stress parity and identical refusal without
 mutation in both time-domain interfaces. This admits supplied endpoints only;
 it does not enclose strain extrema between time samples or quadrature points.
 
+An assumed-strain projection may retain an independent compatible strain map
+through `ProjectedTensorProny::with_compatible_strain_columns`. Both total and
+elastic compatible strains must satisfy the same material domain as the work
+map. Constitutive stiffness, Kelvin loss, Maxwell memory and conjugate forces
+continue to use the original work map. Eigenstrain updates retain the additional
+map, and material-memory continuation refuses a changed or dropped map.
+
 ## Volumetric storage on the shared thermal timeline
 
 `thermal::transport::volumetric::timeline::FixedVolumeThermalLaw` borrows the

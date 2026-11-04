@@ -83,6 +83,75 @@ fn projection_preserves_shear_work_and_volume_scaling() {
 }
 
 #[test]
+fn compatible_admission_keeps_assumed_strain_work_and_survives_thermal_changes() {
+    let law = model();
+    let work = [[0.1, 0.0, 0.0, 0.0, 0.0, 0.0]];
+    let compatible = [[1.0, 0.0, 0.0, 0.0, 0.0, 0.0]];
+    let original = law.project_strain(&work, 0.25, budget(), || false).unwrap();
+    let guarded = original
+        .with_compatible_strain_columns(&compatible)
+        .unwrap();
+    assert_eq!(
+        guarded.equilibrium_stiffness(),
+        original.equilibrium_stiffness()
+    );
+    assert_eq!(guarded.viscosity_matrix(), original.viscosity_matrix());
+    assert_eq!(guarded.branches(), original.branches());
+    assert_eq!(
+        guarded.strain(&[0.06]).unwrap(),
+        original.strain(&[0.06]).unwrap()
+    );
+    let stress = [3.0, -2.0, 1.0, 0.5, 0.0, 0.0];
+    assert_eq!(
+        guarded.conjugate_force(&stress).unwrap(),
+        original.conjugate_force(&stress).unwrap()
+    );
+    assert!(original.strain(&[0.11]).is_ok());
+    assert!(
+        guarded.strain(&[0.11]).is_err(),
+        "assumed strain cannot conceal geometric overstrain"
+    );
+
+    let heated = guarded
+        .with_eigenstrain_mandel([-0.05, 0.0, 0.0, 0.0, 0.0, 0.0])
+        .unwrap();
+    assert_eq!(
+        heated.compatible_strain_columns(),
+        Some(compatible.as_slice())
+    );
+    assert!(
+        heated.strain(&[0.06]).is_err(),
+        "compatible elastic strain must also be admitted"
+    );
+    assert!(
+        original
+            .with_eigenstrain_mandel([-0.05, 0.0, 0.0, 0.0, 0.0, 0.0])
+            .unwrap()
+            .strain(&[0.06])
+            .is_ok()
+    );
+
+    let memory = vec![0.0; 6 * law.branches().len()];
+    assert!(
+        guarded
+            .transfer_factor_memory(&original, &memory, 1e-10, || false)
+            .is_err()
+    );
+    assert_eq!(
+        guarded
+            .transfer_factor_memory(&guarded, &memory, 1e-10, || false)
+            .unwrap(),
+        memory
+    );
+    assert!(original.with_compatible_strain_columns(&[]).is_err());
+    assert!(
+        original
+            .with_compatible_strain_columns(&[[f64::NAN; 6]])
+            .is_err()
+    );
+}
+
+#[test]
 fn projection_refuses_domain_work_and_cancellation_without_mutating_the_law() {
     let m=model(); let saved=m.clone(); let c=columns();
     for v in [0.0,-1.0,f64::NAN,f64::INFINITY] {assert!(m.project_strain(&c,v,budget(),||false).is_err());}

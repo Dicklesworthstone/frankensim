@@ -606,11 +606,114 @@ fn hex8_admission_counts_every_memory_point_and_bounds_reduced_projection() {
             max_scalar_terms: 100_000,
         };
         let bbar = create(2, 96).unwrap();
-        assert!(matches!(
-            bbar.project_basis(&[vec![1.0; 24]], budget, cx),
-            Err(ViscoElementError::InvalidHistory { .. })
-        ));
+        let projected = bbar.project_basis(&[vec![1.0; 24]], budget, cx).unwrap();
+        assert!(projected.material_points().iter()
+            .all(|point| point.compatible_strain_columns().is_some()));
         let standard = system(&NODES, &m, Formulation::Standard, &[], 2, cx);
-        assert!(standard.project_basis(&[vec![1.0; 24]], budget, cx).is_ok());
+        let projected = standard.project_basis(&[vec![1.0; 24]], budget, cx).unwrap();
+        assert!(projected.material_points().iter()
+            .all(|point| point.compatible_strain_columns().is_none()));
+    });
+}
+
+#[test]
+fn hex8_bbar_projection_preserves_original_work_and_local_strain_admission() {
+    with_cx(|cx, gate| {
+        let m = coupled();
+        let solid = system(&NODES, &m, Formulation::BBar, &[], 2, cx);
+        let columns: Vec<Vec<f64>> = (0..2)
+            .map(|axis| {
+                NODES
+                    .iter()
+                    .flat_map(|p| {
+                        let mut u = [0.0; 3];
+                        u[axis] = (p[axis] - 0.5) * (p[axis + 1] - 0.5);
+                        u
+                    })
+                    .collect()
+            })
+            .collect();
+        let budget = SolidProjectionBudget {
+            max_coordinates: 2,
+            max_basis_scalars: 48,
+            max_material_points: 8,
+            max_scalar_terms: 100_000,
+        };
+        let projected = solid.project_basis(&columns, budget, cx).unwrap();
+        let native = solid.equilibrium();
+        let mut applied = vec![0.0; 24];
+        for j in 0..2 {
+            native.stiffness.spmv(&columns[j], &mut applied);
+            for i in 0..2 {
+                let expected: f64 = columns[i].iter().zip(&applied).map(|(a, b)| a * b).sum();
+                let actual: f64 = projected
+                    .material_points()
+                    .iter()
+                    .map(|point| point.equilibrium_stiffness()[2 * i + j])
+                    .sum();
+                near(actual, expected, 1e-12);
+            }
+            native.mass.spmv(&columns[j], &mut applied);
+            for i in 0..2 {
+                let expected: f64 = columns[i].iter().zip(&applied).map(|(a, b)| a * b).sum();
+                near(projected.mass_matrix_kg()[2 * i + j], expected, 1e-12);
+            }
+        }
+
+        let norm = |strain: &[f64; 6]| {
+            (strain[..3].iter().map(|x| x * x).sum::<f64>()
+                + 2.0 * strain[3..].iter().map(|x| x * x).sum::<f64>())
+            .sqrt()
+        };
+        let assumed = projected
+            .material_points()
+            .iter()
+            .map(|point| norm(&point.strain_columns()[0]))
+            .fold(0.0, f64::max);
+        let compatible = projected
+            .material_points()
+            .iter()
+            .map(|point| norm(&point.compatible_strain_columns().unwrap()[0]))
+            .fold(0.0, f64::max);
+        assert!(compatible > assumed);
+        let amplitude = m.law.maximum_strain_norm() / (assumed * compatible).sqrt();
+        for point in projected.material_points() {
+            let unguarded = m
+                .law
+                .project_strain(
+                    point.strain_columns(),
+                    point.volume_m3(),
+                    fs_material::visco_tensor::TensorProjectionBudget {
+                        max_coordinates: 2,
+                        max_scalar_terms: 100_000,
+                    },
+                    || false,
+                )
+                .unwrap();
+            assert!(unguarded.strain(&[amplitude, 0.0]).is_ok());
+        }
+        assert!(
+            projected
+                .material_points()
+                .iter()
+                .any(|point| point.strain(&[amplitude, 0.0]).is_err())
+        );
+        let rebuilt = projected
+            .with_element_laws(&[m.law.clone()], budget, gate)
+            .unwrap();
+        for (old, new) in projected
+            .material_points()
+            .iter()
+            .zip(rebuilt.material_points())
+        {
+            assert_eq!(
+                old.compatible_strain_columns(),
+                new.compatible_strain_columns()
+            );
+            assert_eq!(
+                old.strain(&[amplitude, 0.0]).is_ok(),
+                new.strain(&[amplitude, 0.0]).is_ok()
+            );
+        }
     });
 }

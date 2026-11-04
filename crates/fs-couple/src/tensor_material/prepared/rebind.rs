@@ -78,6 +78,7 @@ impl PreparedTensorHistory<'_> {
             poll(gate)?;
             if before.volume_m3().to_bits() != after.volume_m3().to_bits()
                 || before.strain_columns() != after.strain_columns()
+                || before.compatible_strain_columns() != after.compatible_strain_columns()
                 || before.branches().len() != after.branches().len()
                 || before.free_strain_mandel().iter().any(|v| *v != 0.0)
                 || after.free_strain_mandel().iter().any(|v| *v != 0.0)

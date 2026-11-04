@@ -59,6 +59,7 @@ impl ProjectedPronyBranch {
 pub struct ProjectedTensorProny {
     model: TensorProny,
     columns: Vec<Voigt>,
+    compatible_columns: Option<Vec<Voigt>>,
     volume_m3: f64,
     equilibrium: Vec<f64>,
     viscosity: Vec<f64>,
@@ -76,10 +77,13 @@ impl TensorProny {
     /// # Errors
     /// Invalid geometry/columns/budget, overflow, or cancellation. Partial
     /// factors are never published, and the material remains immutable.
-    pub fn project_strain(&self, columns: &[Voigt], volume_m3: f64,
-        budget: TensorProjectionBudget, mut cancelled: impl FnMut() -> bool)
-        -> Result<ProjectedTensorProny>
-    {
+    pub fn project_strain(
+        &self,
+        columns: &[Voigt],
+        volume_m3: f64,
+        budget: TensorProjectionBudget,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<ProjectedTensorProny> {
         poll(&mut cancelled)?;
         let n = columns.len();
         if !(1..=256).contains(&budget.max_coordinates) || n == 0 || n > budget.max_coordinates
@@ -133,7 +137,7 @@ impl TensorProny {
             }
         }
         poll(&mut cancelled)?;
-        Ok(ProjectedTensorProny { model:self.clone(), columns:columns.to_vec(), volume_m3,
+        Ok(ProjectedTensorProny { model:self.clone(), columns:columns.to_vec(), compatible_columns:None, volume_m3,
             equilibrium, viscosity, viscosity_rows: viscous_rows, branches, free_strain_mandel: [0.0; 6] })
     }
 }
@@ -146,6 +150,28 @@ impl ProjectedTensorProny {
     pub fn volume_m3(&self) -> f64 { self.volume_m3 }
     /// Original tensor-shear strain columns, in unchanged coordinate order.
     pub fn strain_columns(&self) -> &[Voigt] { &self.columns }
+    /// Independent compatible tensor-shear map, when the work map uses an
+    /// assumed strain such as B-bar. Both maps retain the same coordinates.
+    pub fn compatible_strain_columns(&self) -> Option<&[Voigt]> {
+        self.compatible_columns.as_deref()
+    }
+    /// Retain the original geometric strain for independent domain admission.
+    ///
+    /// The constitutive work, Kelvin matrix and Maxwell factors still use the
+    /// original work-conjugate columns. This additional map prevents an assumed
+    /// strain projection from hiding a locally excessive compatible strain.
+    /// It adds no stiffness, energy, loss or state. The element owner supplies
+    /// the map; it is never inferred from a material or fitted to a response.
+    pub fn with_compatible_strain_columns(&self, columns: &[Voigt]) -> Result<Self> {
+        if columns.len() != self.coordinates() || columns.iter().any(|v| !finite(v)) {
+            return Err(invalid(
+                "compatible strain must retain every finite displacement column",
+            ));
+        }
+        let mut next = self.clone();
+        next.compatible_columns = Some(columns.to_vec());
+        Ok(next)
+    }
     /// Full symmetric row-major equilibrium stiffness in the caller's coordinates.
     pub fn equilibrium_stiffness(&self) -> &[f64] { &self.equilibrium }
     /// Full symmetric Kelvin damping matrix [N s/m] in the same coordinates.
@@ -203,7 +229,9 @@ impl ProjectedTensorProny {
         Ok(ProjectedTensorTemperatureDerivative { equilibrium, branches })
     }
 
-    /// Reconstruct physical strain and enforce the original material domain.
+    /// Reconstruct work-conjugate strain and enforce the original material domain.
+    /// An independent compatible map, when present, must pass the same total
+    /// and elastic strain checks without replacing the constitutive work map.
     /// This checks a supplied state, not every point along a time interval.
     pub fn strain(&self, displacement: &[f64]) -> Result<Voigt> {
         if displacement.len() != self.coordinates() || displacement.iter().any(|v| !v.is_finite()) {
@@ -219,6 +247,24 @@ impl ProjectedTensorProny {
             let elastic = core::array::from_fn(|i| WEIGHTS[i]*out[i] - self.free_strain_mandel[i]);
             self.model.validate_mandel_strain(&elastic)
                 .map_err(|_| invalid("projected elastic strain exceeds original small-strain domain"))?;
+        }
+        if let Some(columns) = &self.compatible_columns {
+            let mut compatible = [0.0; 6];
+            for (column, &value) in columns.iter().zip(displacement) {
+                for i in 0..6 {
+                    compatible[i] += column[i] * value;
+                }
+            }
+            let compatible = mandel(&compatible);
+            self.model
+                .validate_mandel_strain(&compatible)
+                .map_err(|_| invalid("compatible strain exceeds original small-strain domain"))?;
+            if self.free_strain_mandel.iter().any(|x| *x != 0.0) {
+                let elastic = core::array::from_fn(|i| compatible[i] - self.free_strain_mandel[i]);
+                self.model.validate_mandel_strain(&elastic).map_err(|_| {
+                    invalid("compatible elastic strain exceeds original small-strain domain")
+                })?;
+            }
         }
         Ok(out)
     }

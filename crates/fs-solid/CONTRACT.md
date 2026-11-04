@@ -3699,7 +3699,7 @@ loss directions, source bands and explicit capacity refusals.
 ## Source tetrahedra projected into full-memory structural dynamics
 
 `linear3::visco::ViscoElements::project_basis` projects an explicit displacement
-basis using the original Tet4/Tet10 strain matrices, physical quadrature volumes,
+basis using the original Tet4/Tet10 and Standard/B-bar HEX8 strain matrices, physical quadrature volumes,
 material laws and constrained free-DOF map. The resulting
 `ProjectedViscoSolid` retains the complete consistent mass matrix
 `Phi^T M Phi`, each original quadrature-point tensor constitutive contribution,
@@ -3715,6 +3715,17 @@ coordinate count, stored basis entries, quadrature points and scalar projection
 work before constructing the result. Overflow, nonfinite maps, source refusal
 and cancellation return errors without a partial projection. The immutable
 projection borrows its original source assembly.
+
+B-bar projections also retain each original compatible quadrature strain map.
+The shared material owner checks it independently of the assumed work strain,
+including after thermal eigenstrain or source-law rebuilding. This permits the
+same `TensorSolidBody` and prepared material dynamics consumers without hiding
+local overstrain or substituting compatible stiffness for the B-bar operator.
+The extra geometric projection work is charged to the original scalar budget.
+Focused HEX8 tests compare projected stiffness and consistent mass to the native
+assembly, reject a strain hidden by B-bar averaging, and retain that refusal on
+material rebuilding. The coupled-body regression checks actual motion and
+element heat against an independent damped-oscillator solution.
 
 A dynamic consumer must independently admit positive-definite, representable
 projected inertia. Geometry, supports, basis and material state remain fixed.
