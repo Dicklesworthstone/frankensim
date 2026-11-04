@@ -221,7 +221,7 @@ impl<const N: usize> SurfacePowerResponse<N> {
         )
     }
 
-    /// Original visible-band diffuse emissivity law, with opaque Kirchhoff
+    /// Original source-band diffuse emissivity law, with opaque Kirchhoff
     /// absorption. This does not extend that source's spectral support or infer
     /// a bolometric cooling model.
     pub fn from_spectral_diffuse(

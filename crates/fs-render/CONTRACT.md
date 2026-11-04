@@ -1307,12 +1307,18 @@ differentiable lift). Pure Rust throughout.
   are numerical consistency checks, not experimental spectral validation.
 
 - `SpectralDiffuseThermalSurface` extends the same opaque diffuse transport
-  with an explicit visible-band Kirchhoff law. `SpectralEmissivity` admits
-  2–16 strictly increasing linear knots spanning exactly 380–780 nm with
-  emissivity in `[0,1]`; evaluation never extrapolates. Each wavelength emits
+  with an explicit source-band Kirchhoff law. `SpectralEmissivity` retains
+  2–16 strictly increasing positive vacuum-wavelength knots with emissivity in
+  `[0,1]`. Its existing `table` and `constant` constructors keep exact 380–780 nm
+  support; `table_in_band` and `constant_in_band` retain the actual finite band,
+  including infrared. `SpectralReflectance` shares this bounded numerical owner
+  and the same explicit-band constructors. Evaluation never extrapolates.
+  Visible-observer light proposals require full visible source coverage and
+  restrict their quadrature to that observer band even for wider source tables.
+  Each wavelength emits
   `epsilon(lambda) * B_lambda(T)` and reflects `1-epsilon(lambda)`. Source
   identity binds the actual numerical curve, temperature and declared source.
-  A visible table does not supply bolometric exitance, infrared continuation,
+  A finite-band table does not supply bolometric exitance, out-of-band continuation,
   a cooling debit or authenticated specimen measurements. The original gray
   model and its all-wavelength source arithmetic remain available unchanged.
   Camera paths, opaque BSDFs, stationary and moving thermal mesh proposals,
@@ -5943,12 +5949,15 @@ or phase-mixture data. Run with
 ### Native-state diffuse absorptivity
 
 `thermal_surface::heating::diffuse_feedback::SurfaceDiffuseLaw` binds the
-existing visible-band spectral emissivity/absorptivity law to either native
+original finite-band spectral emissivity/absorptivity law to either native
 temperature or the original specific-enthalpy coordinate. Enthalpy binding
 requires the exact caloric identity and enthalpy storage basis, so two states on
 one isothermal latent plateau may retain different absorptivity. Every state row
 shares one authored wavelength grid; interpolation occurs in the declared state
-coordinate before the existing wavelength interpolation. No RGB conversion,
+coordinate before the existing wavelength interpolation. State refresh retains
+the source band and uses fixed inline knot storage without a per-refresh heap
+allocation. Infrared heating and reciprocal emission use the same native
+temperature or enthalpy state and emissivity. No RGB conversion,
 solid/liquid mixture rule, infrared continuation or measured-data authority is
 invented.
 

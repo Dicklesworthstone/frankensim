@@ -22,6 +22,69 @@ fn si_blackbody(temperature: f64, wavelength_nm: f64) -> f64 {
 }
 
 #[test]
+fn g1_infrared_source_retains_si_planck_and_kirchhoff_equilibrium() {
+    let curve =
+        SpectralEmissivity::table_in_band(&[(8_000.0, 0.1), (10_000.0, 0.7), (14_000.0, 0.3)])
+            .unwrap();
+    assert_eq!(curve.wavelength_bounds_nm(), (8_000.0, 14_000.0));
+    for temperature in [250.0, 300.0, 800.0] {
+        let surface = source(temperature, curve);
+        for (wavelength, epsilon) in [
+            (8_000.0, 0.1),
+            (9_000.0, 0.4),
+            (10_000.0, 0.7),
+            (12_000.0, 0.5),
+            (14_000.0, 0.3),
+        ] {
+            let black = si_blackbody(temperature, wavelength);
+            let emitted = surface.radiance_w_m2_sr_nm(wavelength).unwrap();
+            assert!(emitted > 0.0);
+            assert!((emitted / black - epsilon).abs() < 5e-14);
+            let reflected = surface.reflectance(wavelength).unwrap() * black;
+            assert!(((emitted + reflected) / black - 1.0).abs() < 5e-14);
+        }
+        for wavelength in [8_000.0_f64.next_down(), 14_000.0_f64.next_up(), 550.0] {
+            assert_eq!(
+                surface.radiance_w_m2_sr_nm(wavelength),
+                Err(ThermalSurfaceError::Wavelength)
+            );
+            assert_eq!(
+                surface.reflectance(wavelength),
+                Err(ThermalSurfaceError::Wavelength)
+            );
+        }
+    }
+}
+
+#[test]
+fn g0_source_band_identity_and_numerical_envelope_do_not_assume_visible_support() {
+    let visible = SpectralEmissivity::constant(0.5).unwrap();
+    let explicit = SpectralEmissivity::constant_in_band(0.5, (380.0, 780.0)).unwrap();
+    assert_eq!(visible, explicit);
+    assert_eq!(visible.identity(), explicit.identity());
+    let infrared = SpectralEmissivity::constant_in_band(0.5, (8_000.0, 14_000.0)).unwrap();
+    assert_ne!(visible.identity(), infrared.identity());
+    // A source-band bound must not test the unprovided 380 nm wavelength:
+    // its RJ bound overflows here, while every point in this infrared band fits.
+    let temperature = f64::MAX / 4.0;
+    assert_eq!(
+        SpectralDiffuseThermalSurface::try_new(temperature, visible, ContentHash([47; 32])),
+        Err(ThermalSurfaceError::Unrepresentable)
+    );
+    let hot_ir = source(temperature, infrared);
+    assert!(hot_ir.radiance_w_m2_sr_nm(10_000.0).unwrap().is_finite());
+    let dark = source(
+        f64::MAX,
+        SpectralEmissivity::constant_in_band(0.0, (8_000.0, 14_000.0)).unwrap(),
+    );
+    assert_eq!(dark.radiance_w_m2_sr_nm(10_000.0), Ok(0.0));
+    assert_eq!(
+        dark.radiance_w_m2_sr_nm(550.0),
+        Err(ThermalSurfaceError::Wavelength)
+    );
+}
+
+#[test]
 fn g0_linear_knots_preserve_endpoints_support_and_exact_constant_laws() {
     let curve = selective();
     assert_eq!(

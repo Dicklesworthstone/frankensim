@@ -20,7 +20,7 @@ enum Coordinate {
 
 /// Immutable spectral emissivity versus native temperature or specific enthalpy.
 ///
-/// Every row must use the same visible wavelength knots. Linear interpolation in
+/// Every row must use the same source-band wavelength knots. Linear interpolation in
 /// state is an authored constitutive law. Wavelength interpolation remains owned
 /// by [`SpectralEmissivity`]. Enthalpy laws bind the exact caloric identity and
 /// datum, so equal-temperature states inside latent heat may have different
@@ -197,7 +197,7 @@ impl SurfaceDiffuseLaw {
     /// Resolve the reciprocal equilibrium-emission view from the SAME native
     /// state law used by incident absorption. The native caloric owner supplies
     /// temperature; no separate emissivity fit or phase-coordinate mapping is
-    /// introduced. This remains a visible-band source and makes no bolometric
+    /// introduced. This remains a finite-band source and makes no bolometric
     /// cooling claim.
     pub fn resolve_surface(
         &self,
@@ -310,19 +310,18 @@ impl SurfaceDiffuseLaw {
         let (a, left) = self.rows[upper - 1];
         let (b, right) = self.rows[upper];
         let fraction = (coordinate - a) / (b - a);
-        let mut knots = Vec::new();
-        knots
-            .try_reserve_exact(left.knots().len())
-            .map_err(|_| SurfaceHeatingError::Budget)?;
-        for (&(wavelength_nm, emissivity), &(_, rhs)) in
-            left.knots().iter().zip(right.knots())
+        // The spectral owner already limits every source row to 16 knots.
+        // Refresh stays on the stack, including at each accepted heat interval.
+        let mut knots = [(0.0, 0.0); 16];
+        for (slot, (&(wavelength_nm, emissivity), &(_, rhs))) in
+            knots.iter_mut().zip(left.knots().iter().zip(right.knots()))
         {
-            knots.push((
+            *slot = (
                 wavelength_nm,
                 interpolate_value(emissivity, rhs, fraction),
-            ));
+            );
         }
-        SpectralEmissivity::table(&knots).map_err(Into::into)
+        SpectralEmissivity::table_in_band(&knots[..left.knots().len()]).map_err(Into::into)
     }
 }
 

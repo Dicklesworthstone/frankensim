@@ -1,10 +1,10 @@
-//! Visible-band Kirchhoff emission and reflection from one accepted source law.
+//! Source-band Kirchhoff emission and reflection from one accepted source law.
 //!
 //! These opaque diffuse surfaces declare wavelength-dependent emissivity over
-//! the renderer's visible band. Their reciprocal reflectance is exactly
+//! their explicitly declared vacuum-wavelength band. Reciprocal reflectance is
 //! `1 - emissivity(lambda)`, and their equilibrium radiance is
 //! `emissivity(lambda) * Planck(lambda, temperature)`. The declared law does not
-//! establish measured-material authority, infrared behavior or total cooling.
+//! establish measured-material authority, out-of-band behavior or total cooling.
 
 use super::{
     BOLTZMANN_J_K, ContentHash, DomainHasher, GrayDiffuseThermalSurface, LIGHT_M_S,
@@ -12,17 +12,17 @@ use super::{
 };
 use crate::spectral::{
     LAMBDA_MAX, LAMBDA_MIN,
-    reflectance::{VisibleFractionTable, VisibleFractionTableError},
+    reflectance::{SpectralFractionTable, SpectralFractionTableError},
 };
 
-/// Bounded piecewise-linear emissivity, including both visible-band endpoints.
+/// Bounded piecewise-linear emissivity on an explicit finite source band.
 ///
-/// The accepted law covers exactly 380–780 nm with 2–16 strictly increasing
-/// wavelength knots and finite emissivity in `[0,1]`. It never extrapolates,
+/// The accepted law retains 2–16 strictly increasing positive vacuum-wavelength
+/// knots and finite emissivity in `[0,1]`. It never extrapolates,
 /// interpolates RGB values or implies a law outside the declared band.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SpectralEmissivity {
-    table: VisibleFractionTable,
+    table: SpectralFractionTable,
 }
 
 impl SpectralEmissivity {
@@ -37,8 +37,35 @@ impl SpectralEmissivity {
     /// into inline storage; no allocation or caller-owned table survives.
     pub fn table(knots: &[(f64, f64)]) -> Result<Self, ThermalSurfaceError> {
         Ok(Self {
-            table: VisibleFractionTable::table(knots).map_err(thermal_table_error)?,
+            table: SpectralFractionTable::table(knots).map_err(thermal_table_error)?,
         })
+    }
+
+    /// Retain the original finite emissivity band, including UV or infrared.
+    /// The first and last positive finite vacuum wavelengths define support.
+    /// The same bounded interpolation owner serves absorption and reflection.
+    pub fn table_in_band(knots: &[(f64, f64)]) -> Result<Self, ThermalSurfaceError> {
+        Ok(Self {
+            table: SpectralFractionTable::table_in_band(knots).map_err(thermal_table_error)?,
+        })
+    }
+
+    /// Constant emissivity only within the explicitly declared vacuum-nm band.
+    /// This is a finite-band law, with no implied gray continuation.
+    pub fn constant_in_band(
+        emissivity: f64,
+        wavelength_bounds_nm: (f64, f64),
+    ) -> Result<Self, ThermalSurfaceError> {
+        Self::table_in_band(&[
+            (wavelength_bounds_nm.0, emissivity),
+            (wavelength_bounds_nm.1, emissivity),
+        ])
+    }
+
+    /// Inclusive support in vacuum nanometres.
+    #[must_use]
+    pub const fn wavelength_bounds_nm(&self) -> (f64, f64) {
+        self.table.wavelength_bounds_nm()
     }
 
     /// Evaluate the accepted linear law at a wavelength in the closed band.
@@ -66,15 +93,15 @@ impl SpectralEmissivity {
     }
 }
 
-fn thermal_table_error(error: VisibleFractionTableError) -> ThermalSurfaceError {
+fn thermal_table_error(error: SpectralFractionTableError) -> ThermalSurfaceError {
     match error {
-        VisibleFractionTableError::Knots => ThermalSurfaceError::SpectralEmissivity,
-        VisibleFractionTableError::Fraction => ThermalSurfaceError::Emissivity,
-        VisibleFractionTableError::Wavelength => ThermalSurfaceError::Wavelength,
+        SpectralFractionTableError::Knots => ThermalSurfaceError::SpectralEmissivity,
+        SpectralFractionTableError::Fraction => ThermalSurfaceError::Emissivity,
+        SpectralFractionTableError::Wavelength => ThermalSurfaceError::Wavelength,
     }
 }
 
-/// Accepted visible-band opaque diffuse surface in local thermal equilibrium.
+/// Accepted source-band opaque diffuse surface in local thermal equilibrium.
 ///
 /// The source identity binds this declared optical law and temperature to the
 /// caller's accepted physical source; supplying a hash does not create measured
@@ -82,7 +109,7 @@ fn thermal_table_error(error: VisibleFractionTableError) -> ThermalSurfaceError 
 /// the spectral knots. This view emits into vacuum/the exterior-air model and
 /// keeps the existing two-sided, per-face convention of gray thermal surfaces.
 ///
-/// No bolometric exitance or cooling API is provided: an infrared continuation
+/// No bolometric exitance or cooling API is provided: the unmeasured remainder
 /// and its owning thermal model must be supplied before asserting total power.
 /// Observing this spectrum never advances or debits the thermal owner.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -93,9 +120,9 @@ pub struct SpectralDiffuseThermalSurface {
 }
 
 impl SpectralDiffuseThermalSurface {
-    /// Bind a finite positive temperature to the accepted visible source law.
+    /// Bind a finite positive temperature to the accepted finite source law.
     ///
-    /// An emitting surface requires a representable visible-band blackbody
+    /// An emitting surface requires a representable source-band blackbody
     /// envelope. This is a numerical restriction, without a broadband cooling
     /// assumption; an identically zero source needs no blackbody evaluation.
     pub fn try_new(
@@ -111,15 +138,27 @@ impl SpectralDiffuseThermalSurface {
         }
         if emissivity.table.has_positive_value() {
             // exp(x)-1 >= x gives the Rayleigh–Jeans upper bound B_lambda <=
-            // 2*c*k*T/lambda^4. Its largest value in this band occurs at 380 nm.
+            // 2*c*k*T/lambda^4. Its largest value is at the source band's lower
+            // endpoint, which need not be a visible wavelength.
             // This check avoids both a broadband T^4 restriction and a source
             // that overflows before the accepted emissivity can be applied.
-            let lambda2 = LAMBDA_MIN * LAMBDA_MIN;
+            let minimum_nm = emissivity.wavelength_bounds_nm().0;
+            let lambda2 = minimum_nm * minimum_nm;
             let upper_per_kelvin = 2.0 * LIGHT_M_S * BOLTZMANN_J_K * 1.0e27 / (lambda2 * lambda2);
-            if temperature_k > f64::MAX / upper_per_kelvin {
+            let unrepresentable = if upper_per_kelvin.is_finite() && upper_per_kelvin > 0.0 {
+                temperature_k > f64::MAX / upper_per_kelvin
+            } else {
+                // Retain the same bound when a declared wavelength makes an
+                // intermediate fourth power overflow or underflow.
+                fs_math::det::ln(2.0 * LIGHT_M_S * BOLTZMANN_J_K * 1.0e27)
+                    + fs_math::det::ln(temperature_k)
+                    - 4.0 * fs_math::det::ln(minimum_nm)
+                    > fs_math::det::ln(f64::MAX)
+            };
+            if unrepresentable {
                 return Err(ThermalSurfaceError::Unrepresentable);
             }
-            planck_radiance_w_m2_sr_nm(temperature_k, LAMBDA_MIN)?;
+            planck_radiance_w_m2_sr_nm(temperature_k, minimum_nm)?;
         }
         Ok(Self {
             temperature_k,
@@ -134,7 +173,7 @@ impl SpectralDiffuseThermalSurface {
         self.temperature_k
     }
 
-    /// Accepted visible-band spectral emissivity law.
+    /// Accepted source-band spectral emissivity law.
     #[must_use]
     pub const fn emissivity(&self) -> SpectralEmissivity {
         self.emissivity
@@ -145,7 +184,7 @@ impl SpectralDiffuseThermalSurface {
         Ok(1.0 - self.emissivity.at(wavelength_nm)?)
     }
 
-    /// Emitted spectral radiance in W/(m² sr nm), within 380–780 nm inclusive.
+    /// Emitted spectral radiance in W/(m² sr nm), inside the declared band.
     pub fn radiance_w_m2_sr_nm(&self, wavelength_nm: f64) -> Result<f64, ThermalSurfaceError> {
         let emissivity = self.emissivity.at(wavelength_nm)?;
         if emissivity == 0.0 {
@@ -159,7 +198,7 @@ impl SpectralDiffuseThermalSurface {
         }
     }
 
-    /// Whether the accepted emissivity has positive support in the visible band.
+    /// Whether the accepted emissivity has positive support in its source band.
     /// A sufficiently cold spectrum may still underflow numerically to zero.
     #[must_use]
     pub const fn is_emitting(&self) -> bool {
@@ -185,7 +224,7 @@ impl SpectralDiffuseThermalSurface {
 pub enum DiffuseThermalSurface<'a> {
     /// Existing gray source, with its original all-wavelength behavior.
     Gray(GrayDiffuseThermalSurface),
-    /// Accepted visible spectral source, borrowed from its material owner.
+    /// Accepted finite-band spectral source, borrowed from its material owner.
     Spectral(&'a SpectralDiffuseThermalSurface),
 }
 

@@ -7,7 +7,7 @@
 //! source sample and temperature used by the conduction radiation owner.
 //!
 //! Spectral radiance is W/(m² sr nm). No RGB lift, exposure or display mapping
-//! enters the physical spectrum. The tracer integrates its visible band only;
+//! enters the physical spectrum. The visible tracer integrates its own band;
 //! cooling retains the complete Stefan--Boltzmann spectrum in its own owner.
 //! The gray and spectral diffuse surfaces are two-sided: each face emits into
 //! its outward hemisphere. Exitance is per emitting side, so a sheet exposing
@@ -17,9 +17,9 @@
 //! approximation). A thermal hit within an active dielectric medium refuses;
 //! no refractive-index correction is invented for the original cooling model.
 //!
-//! [`SpectralDiffuseThermalSurface`] additionally accepts a declared visible-band
+//! [`SpectralDiffuseThermalSurface`] additionally accepts a declared finite-band
 //! emissivity curve and uses it for both reciprocal reflection and emission.
-//! That finite-band law makes no claim about bolometric cooling or infrared
+//! That finite-band law makes no claim about bolometric cooling or out-of-band
 //! continuation; its thermal owner remains responsible for total energy.
 //!
 //! [`CoatingThermalEmission`] resolves reciprocal directional emission from
@@ -218,8 +218,9 @@ pub enum ThermalSurfaceError {
     Temperature,
     /// Emissivity must be finite and in [0,1].
     Emissivity,
-    /// The visible emissivity table must contain 2–16 strictly increasing
-    /// finite wavelength knots, starting at 380 nm and ending at 780 nm exactly.
+    /// The emissivity table must contain 2–16 strictly increasing positive
+    /// finite wavelength knots. The legacy visible constructor requires exact
+    /// 380 and 780 nm endpoints.
     SpectralEmissivity,
     /// The physical-source identity must not be zero.
     SourceIdentity,
@@ -235,7 +236,7 @@ impl core::fmt::Display for ThermalSurfaceError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::SpectralEmissivity => {
-                f.write_str("invalid visible-band spectral emissivity table")
+                f.write_str("invalid source-band spectral emissivity table")
             }
             _ => write!(f, "invalid gray/diffuse thermal surface: {self:?}"),
         }

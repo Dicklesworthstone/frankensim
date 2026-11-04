@@ -282,19 +282,30 @@ fn spectral_visible_luminance(
     checkpoint: &mut impl FnMut() -> Result<(), LightingError>,
 ) -> Result<f64, LightingError> {
     let emissivity = surface.emissivity();
+    let (minimum_nm, maximum_nm) = emissivity.wavelength_bounds_nm();
+    // This is a visible-observer proposal. Unknown visible radiance is not
+    // zero, and an infrared source must not trigger unbounded visible-bin work.
+    if minimum_nm > LAMBDA_MIN || maximum_nm < LAMBDA_MAX {
+        return Err(LightingError::InvalidThermalTriangle { light_index: 0 });
+    }
     let dl = (LAMBDA_MAX - LAMBDA_MIN) / QUAD_BINS as f64;
     let mut luminance = 0.0;
     let mut normalization = 0.0;
     for interval in emissivity.knots().windows(2) {
         checkpoint()?;
-        let width = interval[1].0 - interval[0].0;
+        let lower = interval[0].0.max(LAMBDA_MIN);
+        let upper = interval[1].0.min(LAMBDA_MAX);
+        if lower >= upper {
+            continue;
+        }
+        let width = upper - lower;
         let bins = (width / dl).ceil().max(1.0) as usize;
         let step = width / bins as f64;
         for bin in 0..bins {
             if bin % 8 == 0 {
                 checkpoint()?;
             }
-            let lambda = interval[0].0 + (bin as f64 + 0.5) * step;
+            let lambda = lower + (bin as f64 + 0.5) * step;
             let observer_weight = cie_y(lambda) * step;
             let radiance = surface
                 .radiance_w_m2_sr_nm(lambda)

@@ -1,4 +1,4 @@
-//! Declared passive visible-band reflectance and the shared fractional table.
+//! Declared passive source-band reflectance and the shared fractional table.
 //!
 //! Bounds apply to the represented piecewise-linear law. They do not establish
 //! measurement provenance, interpolation accuracy or a scattering model.
@@ -12,14 +12,14 @@ const MAX_KNOTS: usize = 16;
 
 /// A declared passive reflectance spectrum with exact black and white support.
 ///
-/// The law covers 380--780 nm with 2--16 strictly increasing wavelength knots.
+/// The law retains 2--16 strictly increasing positive vacuum-wavelength knots.
 /// Values are finite fractions in [0,1], interpolated linearly in wavelength.
 /// No RGB fit, extrapolation, temperature or thermal emission is implied.
 /// Admission does not make a supplied table a calibrated measurement or bound
 /// its interpolation, wavelength-resolution or material-model error.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SpectralReflectance {
-    table: VisibleFractionTable,
+    table: SpectralFractionTable,
 }
 
 impl SpectralReflectance {
@@ -34,8 +34,35 @@ impl SpectralReflectance {
     /// into inline storage, so the immutable spectrum remains allocation-free.
     pub fn table(knots: &[(f64, f64)]) -> Result<Self, SpectralReflectanceError> {
         Ok(Self {
-            table: VisibleFractionTable::table(knots).map_err(SpectralReflectanceError::from)?,
+            table: SpectralFractionTable::table(knots).map_err(SpectralReflectanceError::from)?,
         })
+    }
+
+    /// Declare a passive law on its actual finite source band, in vacuum nm.
+    /// The first and last knots define support; no visible or infrared values
+    /// are supplied outside it. Storage and queries remain allocation-free.
+    pub fn table_in_band(knots: &[(f64, f64)]) -> Result<Self, SpectralReflectanceError> {
+        Ok(Self {
+            table: SpectralFractionTable::table_in_band(knots)
+                .map_err(SpectralReflectanceError::from)?,
+        })
+    }
+
+    /// Constant reflectance on an explicitly bounded source interval.
+    pub fn constant_in_band(
+        reflectance: f64,
+        wavelength_bounds_nm: (f64, f64),
+    ) -> Result<Self, SpectralReflectanceError> {
+        Self::table_in_band(&[
+            (wavelength_bounds_nm.0, reflectance),
+            (wavelength_bounds_nm.1, reflectance),
+        ])
+    }
+
+    /// Inclusive support in vacuum nanometres.
+    #[must_use]
+    pub const fn wavelength_bounds_nm(&self) -> (f64, f64) {
+        self.table.wavelength_bounds_nm()
     }
 
     /// Evaluate the declared reflectance at a wavelength in the closed band.
@@ -52,35 +79,36 @@ impl SpectralReflectance {
     }
 }
 
-/// Why a declared passive visible-band reflectance cannot be used.
+/// Why a declared passive source-band reflectance cannot be used.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpectralReflectanceError {
-    /// Require 2--16 strictly increasing finite knots from 380 to 780 nm.
+    /// Require 2--16 strictly increasing positive finite wavelength knots.
+    /// The legacy visible constructor additionally requires 380 and 780 nm.
     Knots,
     /// Every reflectance must be finite and in [0,1].
     Reflectance,
-    /// Evaluation requires a finite wavelength within 380--780 nm.
+    /// Evaluation requires a finite wavelength inside the declared band.
     Wavelength,
 }
 
 impl core::fmt::Display for SpectralReflectanceError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::Knots => f.write_str("invalid visible-band reflectance knots"),
+            Self::Knots => f.write_str("invalid source-band reflectance knots"),
             Self::Reflectance => f.write_str("reflectance must be finite and in [0,1]"),
-            Self::Wavelength => f.write_str("wavelength outside the visible reflectance band"),
+            Self::Wavelength => f.write_str("wavelength outside the declared reflectance band"),
         }
     }
 }
 
 impl core::error::Error for SpectralReflectanceError {}
 
-impl From<VisibleFractionTableError> for SpectralReflectanceError {
-    fn from(error: VisibleFractionTableError) -> Self {
+impl From<SpectralFractionTableError> for SpectralReflectanceError {
+    fn from(error: SpectralFractionTableError) -> Self {
         match error {
-            VisibleFractionTableError::Knots => Self::Knots,
-            VisibleFractionTableError::Fraction => Self::Reflectance,
-            VisibleFractionTableError::Wavelength => Self::Wavelength,
+            SpectralFractionTableError::Knots => Self::Knots,
+            SpectralFractionTableError::Fraction => Self::Reflectance,
+            SpectralFractionTableError::Wavelength => Self::Wavelength,
         }
     }
 }
@@ -88,26 +116,33 @@ impl From<VisibleFractionTableError> for SpectralReflectanceError {
 /// Numerical owner shared by semantically distinct reflectance/emissivity laws.
 /// Values are stored directly, never as a rounded complement of another law.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct VisibleFractionTable {
+pub(crate) struct SpectralFractionTable {
     knots: [(f64, f64); MAX_KNOTS],
     len: u8,
     positive: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum VisibleFractionTableError {
+pub(crate) enum SpectralFractionTableError {
     Knots,
     Fraction,
     Wavelength,
 }
 
-impl VisibleFractionTable {
-    pub(crate) fn table(knots: &[(f64, f64)]) -> Result<Self, VisibleFractionTableError> {
+impl SpectralFractionTable {
+    pub(crate) fn table(knots: &[(f64, f64)]) -> Result<Self, SpectralFractionTableError> {
         if !(2..=MAX_KNOTS).contains(&knots.len())
             || knots[0].0 != LAMBDA_MIN
             || knots[knots.len() - 1].0 != LAMBDA_MAX
         {
-            return Err(VisibleFractionTableError::Knots);
+            return Err(SpectralFractionTableError::Knots);
+        }
+        Self::table_in_band(knots)
+    }
+
+    pub(crate) fn table_in_band(knots: &[(f64, f64)]) -> Result<Self, SpectralFractionTableError> {
+        if !(2..=MAX_KNOTS).contains(&knots.len()) {
+            return Err(SpectralFractionTableError::Knots);
         }
         let mut accepted = Self {
             knots: [(0.0, 0.0); MAX_KNOTS],
@@ -116,13 +151,13 @@ impl VisibleFractionTable {
         };
         for (index, &(wavelength_nm, value)) in knots.iter().enumerate() {
             if !wavelength_nm.is_finite()
-                || !(LAMBDA_MIN..=LAMBDA_MAX).contains(&wavelength_nm)
+                || wavelength_nm <= 0.0
                 || (index > 0 && wavelength_nm <= knots[index - 1].0)
             {
-                return Err(VisibleFractionTableError::Knots);
+                return Err(SpectralFractionTableError::Knots);
             }
             if !value.is_finite() || !(0.0..=1.0).contains(&value) {
-                return Err(VisibleFractionTableError::Fraction);
+                return Err(SpectralFractionTableError::Fraction);
             }
             // One physical zero has one declaration identity.
             let value = if value == 0.0 { 0.0 } else { value };
@@ -132,9 +167,14 @@ impl VisibleFractionTable {
         Ok(accepted)
     }
 
-    pub(crate) fn at(&self, wavelength_nm: f64) -> Result<f64, VisibleFractionTableError> {
-        if !wavelength_nm.is_finite() || !(LAMBDA_MIN..=LAMBDA_MAX).contains(&wavelength_nm) {
-            return Err(VisibleFractionTableError::Wavelength);
+    pub(crate) const fn wavelength_bounds_nm(&self) -> (f64, f64) {
+        (self.knots[0].0, self.knots[self.len as usize - 1].0)
+    }
+
+    pub(crate) fn at(&self, wavelength_nm: f64) -> Result<f64, SpectralFractionTableError> {
+        let (minimum, maximum) = self.wavelength_bounds_nm();
+        if !wavelength_nm.is_finite() || !(minimum..=maximum).contains(&wavelength_nm) {
+            return Err(SpectralFractionTableError::Wavelength);
         }
         let knots = self.knots();
         let index = knots.partition_point(|&(wavelength, _)| wavelength <= wavelength_nm) - 1;
@@ -164,6 +204,49 @@ impl VisibleFractionTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn infrared_reflectance_retains_source_band_and_original_visible_bits() {
+        let knots = [(8_000.0, 0.125), (10_000.0, 0.875), (14_000.0, 0.375)];
+        let curve = SpectralReflectance::table_in_band(&knots).unwrap();
+        assert_eq!(curve.wavelength_bounds_nm(), (8_000.0, 14_000.0));
+        assert_eq!(curve.knots(), knots);
+        assert_eq!(curve.at(9_000.0), Ok(0.5));
+        assert_eq!(curve.at(12_000.0), Ok(0.625));
+        assert_eq!(
+            SpectralReflectance::table(&knots),
+            Err(SpectralReflectanceError::Knots)
+        );
+        for wavelength in [8_000.0_f64.next_down(), 14_000.0_f64.next_up(), 550.0] {
+            assert_eq!(
+                curve.at(wavelength),
+                Err(SpectralReflectanceError::Wavelength)
+            );
+        }
+        for rho in [0.0, 1e-300, 0.5, 1.0] {
+            let old = SpectralReflectance::constant(rho).unwrap();
+            let explicit = SpectralReflectance::constant_in_band(rho, (380.0, 780.0)).unwrap();
+            assert_eq!(old, explicit);
+            for wavelength in [380.0, 441.25, 550.0, 780.0] {
+                assert_eq!(
+                    old.at(wavelength).unwrap().to_bits(),
+                    explicit.at(wavelength).unwrap().to_bits()
+                );
+            }
+        }
+        for band in [
+            (0.0, 1.0),
+            (-1.0, 1.0),
+            (1.0, 1.0),
+            (2.0, 1.0),
+            (1.0, f64::INFINITY),
+        ] {
+            assert_eq!(
+                SpectralReflectance::constant_in_band(0.5, band),
+                Err(SpectralReflectanceError::Knots)
+            );
+        }
+    }
 
     #[test]
     fn exact_black_white_and_constant_reflectance() {

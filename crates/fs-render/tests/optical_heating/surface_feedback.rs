@@ -793,3 +793,49 @@ fn diffuse_state_law_uses_the_same_latent_emissivity_for_absorption_and_emission
     close(low_response.absorbed_fraction()[0], low_e);
     close(high_response.absorbed_fraction()[0], high_e);
 }
+
+#[test]
+fn infrared_diffuse_state_retains_its_band_through_native_latent_heat_feedback() {
+    let curve = |a, b| SpectralEmissivity::table_in_band(&[
+        (8_000.0, a), (14_000.0, b),
+    ]).unwrap();
+    let law = Arc::new(SurfaceDiffuseLaw::try_enthalpy(
+        ContentHash([218; 32]), ContentHash([202; 32]), (300.0, 500.0),
+        &[(0.0, curve(0.1, 0.2)), (10.0, curve(0.1, 0.2)),
+          (110.0, curve(0.7, 0.9)), (200.0, curve(0.7, 0.9))], 4,
+    ).unwrap());
+    let mut initial = cell(11, 1.0, 1.0, 0.0);
+    initial.specific_h_j_kg = 30.0;
+    let native = thermal(vec![initial], &IDENTIFIED_LATENT, vec![]);
+    let wavelengths = [9_000.0, 12_000.0];
+    let surface = law.resolve_surface(&native, CellId(11), MaterialId(7)).unwrap();
+    assert_eq!(surface.emissivity().wavelength_bounds_nm(), (8_000.0, 14_000.0));
+    let response = law.resolve_response(&native, CellId(11), MaterialId(7), wavelengths).unwrap();
+    let gray = fs_render::thermal_surface::GrayDiffuseThermalSurface::try_new(
+        310.0, 1.0, ContentHash([219; 32]),
+    ).unwrap();
+    for (lane, wavelength) in wavelengths.into_iter().enumerate() {
+        close(response.absorbed_fraction()[lane], surface.radiance_w_m2_sr_nm(wavelength).unwrap()
+            / gray.radiance_w_m2_sr_nm(wavelength).unwrap());
+        close(response.reflected_fraction()[lane] + response.absorbed_fraction()[lane], 1.0);
+    }
+    let input = SurfaceOpticalHeating::try_new_with_stateful_diffuse(
+        &[], &[StatefulDiffuseSurfaceIlluminationSource {
+            source_id: 1, thermal_cell: CellId(11), material_id: MaterialId(7),
+            temperature_bounds_k: (300.0, 500.0), wavelengths_nm: wavelengths,
+            optics: Arc::clone(&law),
+            power: SpectralPowerSchedule::try_new(&[segment(0.0, 1.0, [10.0, 20.0], [10.0, 20.0])], 1).unwrap(),
+        }], &native, budget(), tolerance(), || Ok(()),
+    ).unwrap();
+    let (hot, accepted, audit) = native.advance_observed(&input, 0.5, config(0.125), || Ok(())).unwrap();
+    let absorbed = accepted.energy().thermal_input_j;
+    assert!(absorbed > 0.0);
+    close(hot.cells()[&CellId(11)].specific_h_j_kg - 30.0, absorbed);
+    close(audit.external_heat_j, absorbed);
+    assert_eq!(hot.temperature_k(CellId(11)).unwrap(), 310.0);
+    assert_eq!(native.cells()[&CellId(11)].specific_h_j_kg, 30.0);
+    let after = law.resolve_surface(&hot, CellId(11), MaterialId(7)).unwrap();
+    assert!(after.emissivity().at(9_000.0).unwrap() > surface.emissivity().at(9_000.0).unwrap());
+    assert_eq!(after.emissivity().wavelength_bounds_nm(), (8_000.0, 14_000.0));
+    assert!(law.resolve_response(&hot, CellId(11), MaterialId(7), [550.0]).is_err());
+}
