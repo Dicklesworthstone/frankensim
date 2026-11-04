@@ -240,7 +240,10 @@ pub(super) fn extract(
             contact_requested, count(64))?;
         live_contact_rows = Some(result.contact_rows);
         natural_ambient = result.natural_ambient;
-        let mode = if has_natural { "nonlinear-contact-natural-convection-feedback" }
+        inlet_rows = result.air_rows;
+        let mode = if has_natural && !data.air_paths.is_empty() { "nonlinear-contact-natural-full-air-feedback" }
+            else if !data.air_paths.is_empty() { "nonlinear-contact-full-air-feedback" }
+            else if has_natural { "nonlinear-contact-natural-convection-feedback" }
             else { "nonlinear-contact-full-material-feedback" };
         (result.gradient.nodal_load, result.gradient.relative_residual, result.gradient.iterations,
             None, None, mode)

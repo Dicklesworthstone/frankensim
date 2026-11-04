@@ -298,7 +298,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// convection, retaining signed wall and ambient feedback at the physical field.
 /// Version 113 composes steady live contact with closed area-mean enclosure
 /// radiation, including fresh radiative nodal loads and reservoir reactions.
-pub const SOLVE_DRIVER_VERSION: u32 = 113;
+/// Version 114 carries live-contact adjoints through transported air and mixed
+/// natural/forced convection, including inlet and native fan-speed controls.
+pub const SOLVE_DRIVER_VERSION: u32 = 114;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -6892,6 +6894,10 @@ fn conduction_solve_receipt(
         // the balance audit describes.
         let temperature_contact_fragment = std::cell::RefCell::new(None);
         let temperature_contact_work = std::cell::RefCell::new(contact::Work::default());
+        // Complete contact adjoints re-query the original wall laws and march
+        // actual air references before enforcing the unchanged physical gate.
+        let strict_boundary_feedback = adaptive_requested
+            || (adjoint_requested && temperature_contact.is_some());
         let solve_once = |derived: &BTreeMap<String, (f64, f64)>| -> Result<
             radiation::SolidSolution,
             SolveRefusal,
@@ -7093,7 +7099,7 @@ fn conduction_solve_receipt(
             let pressure_pa = spec.envelope.as_ref().map_or(101_325.0, |e| e.pressure.value);
             let mixed = natural::solve_mixed_steady(
                 &cx, &natural_laws, pressure_pa, path,
-                adaptive_requested.then(|| spec.solver.as_ref().map_or(
+                strict_boundary_feedback.then(|| spec.solver.as_ref().map_or(
                     fs_conduction::LinearConfig::default().tolerance,
                     |solver| (solver.tolerance_rel * 1e-2).max(1e-13),
                 )),
@@ -7112,9 +7118,7 @@ fn conduction_solve_receipt(
             let mut htc = natural::initial_coefficients(&natural_laws, pressure_pa)?;
             // The goal owner checks the COMPLETE physical residual, not only
             // the last frozen Robin solve. Leave room below its stricter gate.
-            let natural_tolerance = if adaptive_requested
-                || (adjoint_requested && temperature_contact.is_some())
-            {
+            let natural_tolerance = if strict_boundary_feedback {
                 let goal_tolerance = spec.solver.as_ref().map_or(
                     fs_conduction::LinearConfig::default().tolerance,
                     |solver| (solver.tolerance_rel * 1e-2).max(1e-13),
@@ -7179,7 +7183,7 @@ fn conduction_solve_receipt(
         } else {
             let path = airflow_path.as_ref().expect("declared airflow was lowered");
             let exchange = conjugate::solve_steady_exchange(
-                &cx, path, adaptive_requested, solve_once,
+                &cx, path, strict_boundary_feedback, solve_once,
             )?;
             let fragment = conjugate::receipt_fragment(path, &exchange.outcome)?;
             (exchange.solid, Some(fragment), exchange.derived, path.air_paths())

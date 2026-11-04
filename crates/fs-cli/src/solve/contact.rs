@@ -16,7 +16,7 @@ use super::{SolveRefusal, conduction_error, json_string, parse_claim_id};
 use crate::cards::CardPackSet;
 
 const MAX_RESPONSES: usize = 64;
-pub(super) const NO_CLAIM: &str = "Source-backed matching P1 contact uses the arithmetic mean of the two independent face temperature means as the declared T coordinate. Each local response retains its original card, selected claim and manufactured joint state. The existing steady spatial solver retains heterogeneous k(T), prescribed boundaries and natural/transported-air consumers. Declared area-mean ambient or closed-enclosure radiation uses the original radiation iteration around complete contact Newton responses or the bounded source-surface contact fixed point; convection alone heats transported air. The returned field passes freshly queried physical watt residual and heat-balance gates, including radiative loads on prescribed reservoir reactions. The contact receipt declares the bounded coupled Newton or contact fixed-point algorithm; neither establishes arbitrary-law convergence or uniqueness. Explicit selected-node adjoints for steady prescribed or natural-convection boundaries use the complete smooth bulk/contact tangent, signed physical natural-convection feedback and the true transpose; air/radiation feedback and prescribed-temperature controls remain outside that contact derivative. Steady open-enclosure/pointwise radiation, adaptive-goal refinement and inverse/roundoff certificates for this nonlinear contact path are not supplied. Uniform spatial ladder differences retain their existing Estimated meaning. No evolving pressure, geometry or new material authority is inferred.";
+pub(super) const NO_CLAIM: &str = "Source-backed matching P1 contact uses the arithmetic mean of the two independent face temperature means as the declared T coordinate. Each local response retains its original card, selected claim and manufactured joint state. The existing steady spatial solver retains heterogeneous k(T), prescribed boundaries and natural/transported-air consumers. Declared area-mean ambient or closed-enclosure radiation uses the original radiation iteration around complete contact Newton responses or the bounded source-surface contact fixed point; convection alone heats transported air. The returned field passes freshly queried physical watt residual and heat-balance gates, including radiative loads on prescribed reservoir reactions. The contact receipt declares the bounded coupled Newton or contact fixed-point algorithm; neither establishes arbitrary-law convergence or uniqueness. Explicit selected-node adjoints for steady prescribed, natural or transported-air boundaries use the complete smooth bulk/contact tangent, signed natural-convection feedback, full marched-air reference feedback and the true transpose. Inlet and fan controls retain their original transport and hydraulic owners. Radiation feedback and prescribed-temperature controls remain outside that contact derivative. Steady open-enclosure/pointwise radiation, adaptive-goal refinement and inverse/roundoff certificates for this nonlinear contact path are not supplied. Uniform spatial ladder differences retain their existing Estimated meaning. No evolving pressure, geometry or new material authority is inferred.";
 
 struct Source {
     name: String,
@@ -401,10 +401,6 @@ pub(super) fn admit(
         transient.is_some()
             || setup.radiation.is_some()
             || setup.enclosure_radiation.is_some()
-            || setup.boundaries.iter().any(|row| matches!(
-                row.condition,
-                fs_project::ThermalBoundaryCondition::AirflowConvection { .. }
-            ))
             || spec.outputs.iter().flatten().any(|output| matches!(output.name.as_str(),
                 "temperature-max-boundary-adjoint"
                     | "temperature-max-contact-boundary-adjoint"
@@ -422,8 +418,8 @@ pub(super) fn admit(
     {
         return Err(conduction_error(
             "cli-solve-conduction-contact-composition",
-            "temperature-varying native contact admits steady base/uniform-ladder solves with prescribed, natural or airflow convection and optional area-mean ambient or closed-enclosure radiation, or capacity/total-enthalpy transient solves with prescribed, scheduled, natural or transported-air boundaries; capacity also admits area-mean ambient and closed-enclosure radiation, while total enthalpy admits pointwise ambient/enclosure radiation. Selected-node adjoints admit steady prescribed or natural-convection boundaries and optional whole-law contact controls; this requested composition needs additional complete contact feedback",
-            "use an admitted storage and boundary composition; contact adjoints require steady prescribed or natural-convection boundaries without airflow, radiation or prescribed-temperature controls; steady and capacity radiation use area-mean ambient or closed-enclosure exchange; pointwise emission and open-enclosure histories require total enthalpy; never replace the contact law by a frozen resistance",
+            "temperature-varying native contact admits steady base/uniform-ladder solves with prescribed, natural or airflow convection and optional area-mean ambient or closed-enclosure radiation, or capacity/total-enthalpy transient solves with prescribed, scheduled, natural or transported-air boundaries; capacity also admits area-mean ambient and closed-enclosure radiation, while total enthalpy admits pointwise ambient/enclosure radiation. Selected-node adjoints admit steady prescribed, natural or transported-air boundaries and optional whole-law contact controls; this requested composition needs additional complete contact feedback",
+            "use an admitted storage and boundary composition; contact adjoints require steady prescribed, natural or transported-air boundaries without radiation or prescribed-temperature controls; steady and capacity radiation use area-mean ambient or closed-enclosure exchange; pointwise emission and open-enclosure histories require total enthalpy; never replace the contact law by a frozen resistance",
         ));
     }
     Ok(())

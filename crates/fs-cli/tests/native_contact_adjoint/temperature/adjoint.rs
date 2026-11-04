@@ -5,6 +5,8 @@ use fs_qty::QtyAny;
 
 #[path = "adjoint/natural.rs"]
 mod natural;
+#[path = "adjoint/air.rs"]
+mod air;
 
 fn scaled_pack(scale: f64, surface: bool) -> (Vec<u8>, String, String) {
     if !surface {

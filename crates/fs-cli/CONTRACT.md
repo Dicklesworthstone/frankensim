@@ -3551,3 +3551,25 @@ and all nested contact, nonlinear and Krylov work. The final numerical history
 continues to describe its applied load; fresh endpoint evidence is reported
 separately, with no hidden replacement solve. Live steady contact with open or
 pointwise enclosure radiation and contact/radiation adjoints remain unsupported.
+
+### Live-contact adjoints through transported air and mixed convection — driver 114
+
+Selected-node contact adjoints now retain the complete stream-wise air feedback,
+including multiple ordered wall segments and mixed natural/forced cooling.
+The existing boundary owner physically marches each original air path at the
+unchanged accepted wall temperatures, binds its full wall-to-reference map and
+re-queries natural coefficients. The existing strict boundary iteration is used
+for these requests so the endpoint can satisfy its original physical watt gate.
+
+The same complete bulk/contact/convection transpose supplies source-power,
+whole-contact-law, natural-ambient and independent branch-inlet derivatives.
+Fan-speed derivatives contract that same total dual through the existing
+hydraulic operating-point, heat-transfer and air-capacity owners. Branch and
+segment identities remain checked, and natural reservoir heat stays outside the
+air march. The contact-extended output adds resistance contractions to the
+same accepted field and dual used by the plain selected-node adjoint.
+
+Focused native regressions cover two serial airflow segments and mixed natural
+convection with nonlinear conductivity and curve/surface contact sources.
+Radiation, transient history, prescribed-temperature controls and adaptive
+contact goals still require their own complete derivative compositions.
