@@ -81,6 +81,55 @@ nucleation kinetics or a spatial phase-field evolution. Its free-energy form
 is the molar equivalent of the INL MOOSE regular-solution implementation:
 <https://mooseframework.inl.gov/docs/doxygen/modules/classRegularSolutionFreeEnergy.html>.
 
+### Closed isobaric liquid calorics
+
+`solution::caloric` combines that SAME pair law with explicitly ordered
+pure-liquid molar Cp(T) curves. `PureLiquidHeatCapacityV1` admits at most 4096
+positive, strictly ordered source points and exactly integrates their
+piecewise-linear interpolation, including crossed knots. Cooling negates the
+same ascending integration. No gas standard-state substitution, total-mixture
+Cp average, Cp(T) times a finite temperature change, or fabricated property
+fit is used. The caller qualifies the pure-liquid sources and their common
+pressure; the numerical model preserves species order, common datum and the
+intersection of the source temperature domains.
+
+`BinaryLiquidCaloricModelV1` prepares finite equilibrated or explicitly
+homogeneous parcels, mixes two parcels at possibly different temperatures,
+and adds/removes prescribed heat. Each bounded temperature trial recomputes
+the original common-tangent phase equilibrium. Pure sensible enthalpy plus
+the pair's `R B x_A x_B` excess closes the isobaric energy balance, including
+the heat capacity contributed by changing coexistence compositions. A
+homogeneous unstable feed can demix adiabatically and change temperature;
+heating/cooling can remove/create the miscibility gap without changing either
+component inventory. Positive heat is INTO the liquid inventory. This is an
+enthalpy balance with constant-pressure boundary work, not a constant-volume
+internal-energy closure.
+
+The thermal residual integrates sensible increments directly from each
+original parcel and differences the mixing products before inventory scaling.
+It never subtracts large absolute reference enthalpies to recover a small
+heat input. Compensated sums retain cancellation between sensible and excess
+terms. Stored reference enthalpy is a rounded constitutive diagnostic; the
+reported incremental heat residual is the acceptance account. Both explicit
+temperature-width and absolute energy budgets must pass, unless a sampled
+endpoint is an exact numerical energy root. A supplied bracket stays inside
+all source domains; unsupported phase roots, out-of-bracket heat, exhausted
+work, unrepresentable inventories and cancellation return no completed state.
+Original parcels remain immutable and cannot be reused with another pair or
+caloric law. Evaluation is allocation-free after constructing bounded source
+curves, apart from shared-owner reference counting; no source querying occurs
+inside the root loop.
+
+G0/G1/G3 tests in `src/solution/caloric/tests.rs` check exact source integrals,
+ideal unequal-capacity temperature mixing, both heat-of-mixing signs, an
+independent high-precision two-phase thermal root, the additional equilibrium
+heat capacity, reversible heating/cooling across coexistence, adiabatic
+demixing, small heating against large reference energy, source mismatch,
+domain/work refusal, cancellation and the phase-weighted Gibbs identity.
+Fixtures validate numerical behavior, not measured properties of a named
+chemical pair. The model still excludes vapor/solid phases, variable pressure,
+spatial diffusion, nucleation rates, capillarity and hydrodynamic evolution.
+
 ## Finite calcium-sulfate phases and lime neutralization
 
 `MineralReaction` provides gypsum precipitation with both hydrate waters,

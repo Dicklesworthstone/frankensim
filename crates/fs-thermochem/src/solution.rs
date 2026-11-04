@@ -19,6 +19,9 @@ use crate::{SpeciesId, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R};
 use fs_math::det::{exp, expm1, ln, sqrt};
 use fs_qty::Temperature;
 
+/// Pure-component calorics and closed isobaric thermal equilibrium.
+pub mod caloric;
+
 /// Finite solid/liquid partition for an explicitly declared neutral solute.
 pub mod solubility;
 
@@ -582,6 +585,23 @@ impl BinaryPhaseEquilibriumV1 {
         self.phases()
             .iter()
             .map(|p| p.fraction_of_total_moles * p.state.mixing_gibbs_j_per_mol)
+            .sum()
+    }
+
+    /// Equilibrium mixing enthalpy [J/mol], including the actual phase split.
+    /// This is the excess contribution; pure-component enthalpies are separate.
+    pub fn mixing_enthalpy_j_per_mol(&self) -> f64 {
+        self.phases()
+            .iter()
+            .map(|p| p.fraction_of_total_moles * p.state.mixing_enthalpy_j_per_mol)
+            .sum()
+    }
+
+    /// Equilibrium mixing entropy [J/(mol K)] from the same phase amounts.
+    pub fn mixing_entropy_j_per_mol_k(&self) -> f64 {
+        self.phases()
+            .iter()
+            .map(|p| p.fraction_of_total_moles * p.state.mixing_entropy_j_per_mol_k)
             .sum()
     }
 }
