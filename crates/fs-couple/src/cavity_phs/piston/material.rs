@@ -40,6 +40,11 @@ use fs_material::thermochemical_gas::energy::parcel::transfer::nozzle::{GasNozzl
 use super::double_acting::{
     DoubleActingGasPiston, DoublePistonInput, DoublePistonSolve, DoublePistonStep,
 };
+use super::momentum::{
+    PistonImpulseControls, PistonImpulseError, PistonImpulseReceipt,
+    RigidPistonImpactContact, RigidPistonImpactControls, RigidPistonImpactError,
+    RigidPistonImpactReceipt,
+};
 
 /// A rigid material-bound moving wall and its coupled source-resolved gas.
 ///
@@ -91,6 +96,30 @@ impl<G: PistonGas> MaterialGasPiston<G> {
     /// Accepted common thermal/flow/acoustic gas state and source model.
     #[must_use]
     pub const fn gas(&self) -> &G { self.piston.gas() }
+
+    /// Apply a wall impulse using the original source-resolved specimen mass.
+    /// The body, gas, geometry and previous finite-time port record are retained.
+    pub fn apply_impulse(
+        &mut self,
+        impulse_n_s: f64,
+        controls: PistonImpulseControls,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<PistonImpulseReceipt, PistonImpulseError> {
+        self.piston.apply_impulse(impulse_n_s, controls, cancelled)
+    }
+
+    /// Resolve a reciprocal axial rigid-point impact without replacing the
+    /// material-bound wall or its conserved inertia and source provenance.
+    pub fn apply_rigid_normal_impact(
+        &mut self,
+        rigid: &mut fs_mbd::RigidBodyState,
+        properties: fs_mbd::MassProperties,
+        contact: RigidPistonImpactContact,
+        controls: RigidPistonImpactControls,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<RigidPistonImpactReceipt, RigidPistonImpactError> {
+        self.piston.apply_rigid_normal_impact(rigid, properties, contact, controls, cancelled)
+    }
 
     /// Advance the original coupled gas and momentum equations unchanged.
     /// Failed input, source support, numerical balance or cancellation leaves
@@ -533,6 +562,30 @@ impl<G: PistonGas> MaterialDoubleActingGasPiston<G> {
     /// One accepted shared dynamics owner; cannot independently step either gas.
     #[must_use]
     pub const fn piston(&self) -> &DoubleActingGasPiston<G> { &self.piston }
+
+    /// Transfer an instantaneous impulse through the original specimen mass
+    /// and shared wall, retaining both gas owners and their port history.
+    pub fn apply_impulse(
+        &mut self,
+        impulse_n_s: f64,
+        controls: PistonImpulseControls,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<PistonImpulseReceipt, PistonImpulseError> {
+        self.piston.apply_impulse(impulse_n_s, controls, cancelled)
+    }
+
+    /// Resolve one reciprocal rigid-point impact on the same material-bound
+    /// wall. No gas, specimen inertia or accepted source record is replaced.
+    pub fn apply_rigid_normal_impact(
+        &mut self,
+        rigid: &mut fs_mbd::RigidBodyState,
+        properties: fs_mbd::MassProperties,
+        contact: RigidPistonImpactContact,
+        controls: RigidPistonImpactControls,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<RigidPistonImpactReceipt, RigidPistonImpactError> {
+        self.piston.apply_rigid_normal_impact(rigid, properties, contact, controls, cancelled)
+    }
 
     // Preserve the complete accepted-candidate owner, including both port clocks
     // and cumulative histories. Reconstructing from gas/velocity snapshots would

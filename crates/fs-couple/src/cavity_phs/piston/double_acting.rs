@@ -18,6 +18,11 @@ use super::{
     ResolvedThermochemicalGasState,
     Trial, impulse, invalid, poll, positive,
 };
+use super::momentum::{
+    PistonImpulseControls, PistonImpulseError, PistonImpulseReceipt,
+    RigidPistonImpactContact, RigidPistonImpactControls, RigidPistonImpactError,
+    RigidPistonImpactReceipt,
+};
 
 /// Two opposed constant-area faces on the SAME rigid translating body.
 ///
@@ -183,6 +188,32 @@ impl<G: PistonGas> DoubleActingGasPiston<G> {
     /// Positive pressure-exposed area of the opposing face [m2].
     #[must_use]
     pub const fn opposing_area_m2(&self) -> f64 { self.opposing_area_m2 }
+
+    /// Transfer an instantaneous impulse to the ONE original wall momentum.
+    /// Both gas volumes, material states and finite-time port records remain
+    /// unchanged; no heat or pressure work is assigned to zero elapsed time.
+    pub fn apply_impulse(
+        &mut self,
+        impulse_n_s: f64,
+        controls: PistonImpulseControls,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<PistonImpulseReceipt, PistonImpulseError> {
+        self.primary.apply_impulse(impulse_n_s, controls, cancelled)
+    }
+
+    /// Resolve one axial frictionless impact with a native rigid material point.
+    /// The original wall and rigid body publish together; both gas stores and
+    /// the shared finite-time port history stay intact.
+    pub fn apply_rigid_normal_impact(
+        &mut self,
+        rigid: &mut fs_mbd::RigidBodyState,
+        properties: fs_mbd::MassProperties,
+        contact: RigidPistonImpactContact,
+        controls: RigidPistonImpactControls,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<RigidPistonImpactReceipt, RigidPistonImpactError> {
+        self.primary.apply_rigid_normal_impact(rigid, properties, contact, controls, cancelled)
+    }
 
     fn admit_linear_clock(
         &self, states: [&G::State; 2], volumes_m3: [f64; 2], duration_s: f64,

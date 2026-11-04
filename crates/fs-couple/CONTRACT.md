@@ -29824,3 +29824,33 @@ balance, successive accepted feedback steps, missing permeability, retained gap
 and frequency admission, and atomic endpoint-source refusal after the native
 thermal candidate is otherwise admissible. The existing fixed-geometry,
 quasi-steady split and timestep-convergence responsibility remain unchanged.
+
+### Instantaneous momentum on source-backed gas pistons
+
+`cavity_phs::piston::momentum` applies resolved wall impulses to the original
+`GasPiston` and `DoubleActingGasPiston`, including their material-bound wrappers.
+Only the one wall velocity changes. Both gas volumes, conserved masses,
+compositions, calorics, source records and preceding finite-time port accounts
+remain intact. No gas pressure work or heat is assigned to zero elapsed time.
+Free walls use their actual conserved mass; fixed supports return the opposite
+reaction impulse with zero support work. Endpoint ceilings, represented
+momentum and signed work are admitted before publication, using impulse-local
+scales and double-double polarized work rather than total-energy subtraction.
+Callers account the returned event receipt separately from finite-time windows.
+
+The axial rigid-impact path uses the original rigid point kinematics, full
+inertia mobility and unpublished native point-impulse candidate, together with
+`fs_contact::impact::solve_normal_impact`. A declared world axis and origin
+locate the actual piston face from its original volume/area coordinate; the
+rigid witness must lie on that axis. Equal and opposite normal impulses act on
+the two native mechanical owners, with actual momentum, restitution and
+combined kinetic-loss checks before the final shared cancellation/publication
+boundary. Off-centre striker rotation is retained. Impact loss is reported by
+the contact law without an invented gas or solid heat partition.
+
+This is one selected frictionless axial event, with frozen configuration and
+no gas/material query. It supplies no collision search, oblique guide dynamics,
+simultaneous-contact selection, shock closure or sustained-contact integrator.
+Focused kernel and source-gas regressions cover kicks, braking, fixed-support
+reaction, reciprocal recoil, unchanged gas/port histories, cancellation and
+continuation through the original finite-time equations.

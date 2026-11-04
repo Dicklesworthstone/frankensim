@@ -8,6 +8,8 @@
 /// Two source-resolved gases acting on one inertial wall and one momentum state.
 pub mod double_acting;
 mod impulse;
+/// Instantaneous wall impulses and reciprocal axial rigid-body impacts.
+pub mod momentum;
 mod support;
 pub use support::PistonSupport;
 mod constitutive;
@@ -33,7 +35,9 @@ use fs_material::thermochemical_gas::energy::parcel::midpoint::{
 /// `step` conserves chamber mass; `step_with_nozzle` admits conservative exchange
 /// with a finite reservoir before advancing the same gas and wall equations.
 /// Volume is the single position owner: the effective wall coordinate is V/A.
-/// Other rigid-body coordinates, contact stops and crank linkages are not modeled.
+/// Other rigid-body coordinates and crank linkages are not modeled. The
+/// [`momentum`] path handles selected axial impacts without contact discovery
+/// or a sustained-contact model.
 /// The default is the existing ideal thermochemical parcel. A source-backed
 /// `IsochoricRealGasParcel` uses the SAME mechanics and acceptance with its
 /// nonideal midpoint pressure, calorics and acoustic compressibility. Existing
