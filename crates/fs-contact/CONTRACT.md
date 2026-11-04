@@ -1751,6 +1751,21 @@ Six focused original-source tests recover the pure-normal finite-spring limit,
 check complete energy gradients/stiffness and independent normal-work
 quadrature, retain release across subdivision, and cover source/refusal/retry.
 
+`JkrPullOffFixture::refresh_at_held_stages` now continues its actual accepted
+mixed-mode state under independently prescribed original bulk and interface
+temperatures. Original pinned claims, geometry, apparatus stiffnesses, stage
+coordinates and bounds remain fixed; the successor recomputes contact area,
+tip motion, spring storage and static shear capacity consistently. Its signed
+parameter work is the complete contact-plus-spring potential change. Held
+external stages perform no mechanical work, and no caloric heat is inferred.
+Lost attachment or newly exceeded slip capacity refuses; detached history and
+cumulative release remain detached and unchanged. No-op queries retain the
+exact fixture and response. Four G1/G3/G4 regressions cover independent source
+temperatures and spring work, thermal-cycle recovery, detached release retention,
+and atomic source/domain/stability/cancellation refusals. This is endpoint
+continuation; an intervening thermal path, thermal expansion and snap dynamics
+remain outside the model.
+
 ## Dynamic wetting, contact-line pinning and mechanical adhesion
 
 `capillary_bridge::contact_line::SourceContactLineBridge` evolves the actual

@@ -1,6 +1,8 @@
 //! G1/G3/G4: original mixed-mode potential, apparatus work and irreversible release.
 #[path = "adhesive_dmt_coupled/common.rs"]
 mod common;
+#[path = "adhesive_pull_off/temperature.rs"]
+mod temperature;
 
 use core::f64::consts::PI;
 use fs_contact::normal_patch::adhesive::fixture::JkrSpringFixture;

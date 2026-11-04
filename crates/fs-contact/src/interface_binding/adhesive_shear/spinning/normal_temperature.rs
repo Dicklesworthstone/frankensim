@@ -84,9 +84,11 @@ impl SourceAdhesiveShear {
         self.rebind_thermal_normal(refreshed.source().normal_state())
     }
 
-    // Public entries first establish the immutable original-model successor;
-    // this shared leaf resolves only the original pinned junction claims.
-    fn rebind_thermal_normal(
+    // Callers must first establish the immutable original-model successor,
+    // including the accepted mixed-mode apparatus owner. This shared leaf
+    // resolves only the original pinned junction claims; it does not establish
+    // normal-model or accepted-history continuity on its own.
+    pub(crate) fn rebind_thermal_normal(
         &self,
         normal: &BoundNormalInterfaceState,
     ) -> Result<Self, AdhesiveShearError> {

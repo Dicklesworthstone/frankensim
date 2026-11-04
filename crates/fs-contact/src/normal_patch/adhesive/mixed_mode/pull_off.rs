@@ -20,6 +20,9 @@
 //! refuses. This is a quasistatic failure handoff, not an inertial snap history,
 //! post-slip JKR law, partial-slip model or empirical mixed-mode toughness fit.
 
+/// Original-source temperature changes at the actual held apparatus stages.
+pub mod temperature;
+
 use super::loading::JkrShearBoundaryKind;
 use super::{JkrMixedModeControl, JkrMixedModeError, JkrMixedModeResponse, SourceJkrMixedMode};
 use crate::interface_binding::adhesive_shear::{AdhesiveShearError, SourceAdhesiveShear};
@@ -338,6 +341,10 @@ impl JkrPullOffFixture {
 
     pub const fn contact(&self) -> &SourceJkrMixedMode {
         &self.contact
+    }
+    /// Identity of the original contact, shear source and complete apparatus.
+    pub const fn identity(&self) -> ContentHash {
+        self.identity
     }
     pub const fn shear_source(&self) -> &SourceAdhesiveShear {
         &self.shear
