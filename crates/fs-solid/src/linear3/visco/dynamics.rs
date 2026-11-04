@@ -3,8 +3,10 @@
 //! With w=(v1+v0)/2 and u1-u0=h*w, the original affine strain ramp gives
 //! f_mean=f_hold_mean+h*K_mean*w. The sparse solve is
 //! (M+h^2*K_mean/2)w=M*v0+h*(f_external_mean-f_hold_mean)/2.
-//! Therefore external work equals kinetic/storage change plus the original
-//! physical Maxwell/Kelvin heat, up to the independently checked solve error.
+//! External nodal work plus prescribed eigenstrain work equals kinetic/storage
+//! change plus the original physical Maxwell/Kelvin heat, up to the independently
+//! checked solve error. Frozen coefficients admit thermal forcing through the
+//! SAME mean tangent; thermal storage/capacity is not part of this work port.
 //! Endpoint stress is retained for observation, never substituted for f_mean.
 //! Supports remain stationary; the original reduced consistent mass is exact
 //! on that subspace. Moving supports need full mass coupling and are absent.
@@ -48,6 +50,7 @@ pub struct ViscoDynamicOperator<'a> {
     dt_s: f64,
     config: ViscoDynamicConfig,
     reduced: Vec<Option<usize>>,
+    mean_tangents: Vec<Mandel6>,
     operator: CsrOp,
     preconditioner: Jacobi,
 }
@@ -60,6 +63,7 @@ pub struct ViscoDynamicState<'p, 'a> {
     velocity_mps: Vec<f64>,
     kinetic_j: f64,
     external_work_j: f64,
+    eigenstrain_work_j: f64,
     time_s: f64,
     steps: usize,
 }
@@ -78,7 +82,8 @@ pub struct ViscoDynamicStep {
     pub external_work_j: f64,
     /// Exactly zero for this stationary-support owner [J].
     pub support_work_j: f64,
-    /// External work minus kinetic/storage changes and physical heat [J].
+    /// External nodal plus imposed-eigenstrain work minus kinetic/storage
+    /// changes and physical heat [J].
     pub balance_residual_j: f64,
     /// Endpoint and exact mean internal forces; original storage/work/heat.
     pub constitutive: ViscoForceStep,
@@ -182,6 +187,7 @@ impl ViscoElements {
             dt_s,
             config,
             reduced,
+            mean_tangents: tangents,
             operator: CsrOp::symmetric(effective),
             preconditioner,
         })
@@ -234,6 +240,7 @@ impl<'a> ViscoDynamicOperator<'a> {
             velocity_mps: velocity_mps.to_vec(),
             kinetic_j,
             external_work_j: 0.0,
+            eigenstrain_work_j: 0.0,
             time_s: 0.0,
             steps: 0,
         })
@@ -266,14 +273,45 @@ impl ViscoDynamicState<'_, '_> {
         self.external_work_j
     }
 
+    /// Cumulative signed imposed-eigenstrain work since starting this trajectory
+    /// [J]. This work is separate from applied-load work and physical heat.
+    pub const fn eigenstrain_work_j(&self) -> f64 {
+        self.eigenstrain_work_j
+    }
+
     /// Advance one interval using the actual interval-mean external nodal load.
     /// For an affine force history this is its endpoint average. No material
     /// endpoint-force trapezoid is used. All fixed supports stay stationary,
     /// so their reaction work is zero; full dynamic support reactions are not
-    /// reconstructed from the reduced mass. Failure preserves the entire state.
+    /// reconstructed from the reduced mass. Any accepted free strain is held.
+    /// Failure preserves the entire state.
     pub fn advance(
         &mut self,
         mean_force_n: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<ViscoDynamicStep, ViscoElementError> {
+        self.advance_impl(mean_force_n, None, cx)
+    }
+
+    /// Advance the original inertial trajectory while imposing source-integrated
+    /// elementwise thermal strain. The mean tangent, consistent reference mass,
+    /// source-domain checks and original quadrature memories are unchanged.
+    /// Free strain interpolates affinely over the interval and its exact signed
+    /// work enters the existing energy gate separately from nodal loading.
+    /// This does not transport constitutive coefficients or solve caloric heat.
+    pub fn advance_with_thermal_strain(
+        &mut self,
+        mean_force_n: &[f64],
+        thermal: super::super::TetThermalStrainField<'_>,
+        cx: &Cx<'_>,
+    ) -> Result<ViscoDynamicStep, ViscoElementError> {
+        self.advance_impl(mean_force_n, Some(thermal), cx)
+    }
+
+    fn advance_impl(
+        &mut self,
+        mean_force_n: &[f64],
+        thermal: Option<super::super::TetThermalStrainField<'_>>,
         cx: &Cx<'_>,
     ) -> Result<ViscoDynamicStep, ViscoElementError> {
         checkpoint(cx)?;
@@ -291,11 +329,16 @@ impl ViscoDynamicState<'_, '_> {
                 "dynamic step budget, representable time and complete finite mean load required",
             ));
         }
+        self.material.validate_thermal_field(thermal, cx)?;
         let free = &system.equilibrium.free_dofs;
-        let held = {
+        let mut held = {
             let mut trial = self.material.clone();
             trial.step_internal_force(self.material.displacement_m(), h, cx)?
         };
+        self.material.add_thermal_mean_force(
+            thermal, &prepared.mean_tangents, &prepared.reduced,
+            &mut held.reduced_mean_force_n, cx,
+        )?;
         let velocity: Vec<_> = free.iter().map(|&d| self.velocity_mps[d]).collect();
         let mut momentum = vec![0.0; free.len()];
         system.equilibrium.mass.spmv(&velocity, &mut momentum);
@@ -330,7 +373,7 @@ impl ViscoDynamicState<'_, '_> {
             next_velocity[d] = finite(2.0 * actual_mean - self.velocity_mps[d])?;
         }
         let mut candidate = self.material.clone();
-        let constitutive = candidate.step_internal_force(&displacement, h, cx)?;
+        let constitutive = candidate.step_internal_force_impl(&displacement, h, thermal, cx)?;
         let delta_velocity: Vec<_> = free
             .iter()
             .map(|&d| next_velocity[d] - self.velocity_mps[d])
@@ -352,7 +395,7 @@ impl ViscoDynamicState<'_, '_> {
                 .sum(),
         )?;
         let defect = finite(
-            work - (kinetic_j - self.kinetic_j)
+            work + constitutive.step_eigenstrain_work_j - (kinetic_j - self.kinetic_j)
                 - (constitutive.energy.stored_j - self.material.energy.stored_j)
                 - constitutive.step_dissipated_j,
         )?;
@@ -360,6 +403,7 @@ impl ViscoDynamicState<'_, '_> {
             prepared.config.absolute_energy_tolerance_j
                 + prepared.config.relative_energy_tolerance
                     * (work.abs()
+                        + constitutive.step_eigenstrain_work_j.abs()
                         + kinetic_j
                         + self.kinetic_j
                         + constitutive.energy.stored_j.abs()
@@ -373,11 +417,15 @@ impl ViscoDynamicState<'_, '_> {
             });
         }
         let external_work = finite(self.external_work_j + work)?;
+        let eigenstrain_work = finite(
+            self.eigenstrain_work_j + constitutive.step_eigenstrain_work_j,
+        )?;
         checkpoint(cx)?;
         self.material = candidate;
         self.velocity_mps = next_velocity;
         self.kinetic_j = kinetic_j;
         self.external_work_j = external_work;
+        self.eigenstrain_work_j = eigenstrain_work;
         self.time_s = time;
         self.steps += 1;
         Ok(ViscoDynamicStep {

@@ -113,11 +113,47 @@ impl<'a> ViscoElementState<'a> {
     /// between endpoints. Refine the interval to resolve creep/load evolution.
     /// No state is published until both sparse and original-force residuals
     /// pass, every source strain is admitted, and cancellation is checked.
+    /// Previously accepted free strain is held without resetting thermal history.
     pub fn step_quasistatic(
         &mut self,
         prepared: &ViscoQuasistaticOperator<'a>,
         applied_force_n: &[f64],
         support_displacement_m: &[f64],
+        config: TetStaticSolveConfig,
+        cx: &Cx<'_>,
+    ) -> Result<ViscoQuasistaticStep, ViscoElementError> {
+        self.step_quasistatic_impl(
+            prepared, applied_force_n, support_displacement_m, None, config, cx,
+        )
+    }
+
+    /// Solve the same endpoint equilibrium while imposing a new elementwise
+    /// free-strain field. The original fixed-coefficient tangent is reused;
+    /// thermal forcing, support motion and accepted branch memories share one
+    /// solve. Admission and the prescribed-eigenstrain work account are exactly
+    /// those of `step_internal_force_with_thermal_strain`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_quasistatic_with_thermal_strain(
+        &mut self,
+        prepared: &ViscoQuasistaticOperator<'a>,
+        applied_force_n: &[f64],
+        support_displacement_m: &[f64],
+        thermal: super::super::TetThermalStrainField<'_>,
+        config: TetStaticSolveConfig,
+        cx: &Cx<'_>,
+    ) -> Result<ViscoQuasistaticStep, ViscoElementError> {
+        self.step_quasistatic_impl(
+            prepared, applied_force_n, support_displacement_m, Some(thermal), config, cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_quasistatic_impl(
+        &mut self,
+        prepared: &ViscoQuasistaticOperator<'a>,
+        applied_force_n: &[f64],
+        support_displacement_m: &[f64],
+        thermal: Option<super::super::TetThermalStrainField<'_>>,
         config: TetStaticSolveConfig,
         cx: &Cx<'_>,
     ) -> Result<ViscoQuasistaticStep, ViscoElementError> {
@@ -150,27 +186,31 @@ impl<'a> ViscoElementState<'a> {
             }
             .into());
         }
+        self.validate_thermal_field(thermal, cx)?;
         let free = &self.system.equilibrium.free_dofs;
         let mut history_force = vec![0.0; free.len()];
-        for ((element, histories), tangent) in self
+        for (index, ((element, histories), tangent)) in self
             .system
             .elements
             .iter()
             .zip(&self.histories)
             .zip(&prepared.tangents)
+            .enumerate()
         {
+            let delta_free = self.thermal_increment(index, thermal);
             for (point, accepted) in element.points.iter().zip(histories) {
                 checkpoint(cx)?;
                 // Hold the admitted previous strain through the original
                 // constitutive owner. The tangent then supplies the exact
-                // affine offset for moving supports. Solve free displacement
+                // affine offset for moving supports and imposed expansion.
+                // Solve free displacement
                 // increments around the accepted configuration so the large
                 // relaxed elastic load need not be solved again at each step.
                 let mut hold = accepted.clone();
                 let mut stress = element
                     .law
                     .step(&mut hold, accepted.strain, prepared.dt_s)?;
-                let delta: [f64; 6] = core::array::from_fn(|i| {
+                let mut delta: [f64; 6] = core::array::from_fn(|i| {
                     point
                         .b
                         .iter()
@@ -179,6 +219,11 @@ impl<'a> ViscoElementState<'a> {
                         .map(|(b, &d)| b[i] * (support_displacement_m[d] - self.displacement_m[d]))
                         .sum::<f64>()
                 });
+                if thermal.is_some() {
+                    for i in 0..6 {
+                        delta[i] -= delta_free[i];
+                    }
+                }
                 for i in 0..6 {
                     stress[i] += (0..6).map(|j| tangent[i][j] * delta[j]).sum::<f64>();
                 }
@@ -219,7 +264,9 @@ impl<'a> ViscoElementState<'a> {
             displacement_m[dof] = self.displacement_m[dof] + value;
         }
         let mut candidate = self.clone();
-        let constitutive = candidate.step_internal_force(&displacement_m, prepared.dt_s, cx)?;
+        let constitutive = candidate.step_internal_force_impl(
+            &displacement_m, prepared.dt_s, thermal, cx,
+        )?;
         let reaction_force_n: Vec<_> = constitutive
             .full_force_n
             .iter()
