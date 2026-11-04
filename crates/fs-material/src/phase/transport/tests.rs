@@ -1,5 +1,6 @@
 //! Manufactured constitutive/source checks, not measured metal properties.
 mod joint_response;
+mod shear_volume;
 mod volume_change;
 
 use super::*;

@@ -10,7 +10,7 @@
 //! fraction coordinate from that same chart. The explicit shear entry also
 //! consumes the native physical rate; other context remains fixed.
 //! The original entries retain their constant equal-phase-density reduction.
-//! The explicit volume-change entry instead requires exact agreement with the
+//! The explicit volume-change entries instead require exact agreement with the
 //! chart's current density. Its consumer must conserve mass and account for
 //! occupied-volume change. No equilibrium or volume-flow solver is added here.
 
@@ -235,6 +235,39 @@ pub fn resolve_phase_transport_state_with_shear_rate(
         query,
         Some((shear_rate_axis, shear_rate_per_s)),
         PhaseDensityAdmission::Fixed(None),
+    )
+}
+
+/// Resolve physical shear and transport at the original chart's changing density.
+///
+/// This combines the volume-change admission with the original owned-shear
+/// query: the h chart supplies T, phase and current rho, while the momentum
+/// owner supplies `sqrt(2 D:D)` in 1/s on an existing typed rate coordinate.
+/// Source viscosity, conductivity and admitted additional responses use that
+/// same state and rate. A kinematic viscosity is converted with the actual
+/// chart-matching source density, including unequal phase densities and
+/// sensible expansion admitted by the original law.
+///
+/// Exact solids require zero rate and never request liquid Cp or viscosity.
+/// Density and Cp may not depend on shear, even at a matching sampled value:
+/// those would require a different thermodynamic storage owner. Fixed source
+/// coordinates, selected claims, original chart identity and support remain
+/// enforced. No density tolerance, reference projection or new rheology is
+/// introduced. The consumer still owns mass/enthalpy conservation, occupied
+/// volume M/rho, phase mobility and mechanical work.
+pub fn resolve_phase_transport_state_with_shear_for_volume_change(
+    law: &MushyPhaseLaw<'_>,
+    specific_enthalpy_j_kg: f64,
+    query: PhaseTransportSourceQuery<'_>,
+    shear_rate_axis: &str,
+    shear_rate_per_s: f64,
+) -> Result<ResolvedPhaseTransportState, MaterialError> {
+    resolve_phase_transport_state_inner(
+        law,
+        specific_enthalpy_j_kg,
+        query,
+        Some((shear_rate_axis, shear_rate_per_s)),
+        PhaseDensityAdmission::OriginalChart,
     )
 }
 

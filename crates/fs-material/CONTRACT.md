@@ -9234,6 +9234,18 @@ fluid tuple. Original chart, mobility, source-domain and identity refusals remai
 active. Agreement at one sampled state does not establish source/chart agreement
 throughout an interval.
 
+`resolve_phase_transport_state_with_shear_for_volume_change` additionally
+owns the native physical `sqrt(2 D:D)` rate in 1/s on an existing typed
+coordinate. Original h-derived temperature, fraction and current density share
+one source snapshot with rate-dependent viscosity, conductivity and admitted
+extra responses; pinned selections and fixed pressure/composition remain intact.
+Kinematic viscosity converts with that same actual density. Exact solids require
+zero rate and no liquid-only property claims. Shear-dependent density or heat
+capacity still refuses even at a matching sampled value, because the original
+caloric chart does not supply that storage law. The entry introduces no
+constitutive iteration, independent phase state or volume-flow solve; original
+fixed-density shear entries retain their admission.
+
 The consumer must conserve mass and extensive enthalpy and account for occupied
 volume `M/rho` in geometry or continuity. Pressure work and phase support remain
 with their physical owners; this resolver supplies no EOS pressure update or
