@@ -50,7 +50,8 @@ differentiable lift). Pure Rust throughout.
   `SellmeierIor::try_new_in_band` retains an explicit positive finite vacuum-
   wavelength interval for original oscillator coefficients and analytic group
   index. The closed interval excludes every active pole; monotone endpoint
-  checks retain the transparent `[1, 3]` phase-index domain. Nonrepresentable
+  checks retain ordinary phase indices `n >= 1` with squared-index arithmetic
+  headroom `n² <= f64::MAX/64`. Nonrepresentable
   squared-micrometre bounds and queries outside the source interval refuse.
   No table fit or extrapolation is introduced through native fields, interfaces,
   coherent films or thermal-source consumers. Effective glass support still
@@ -2005,6 +2006,28 @@ bounded layer cannot activate an unbounded uniform-field shortcut.
 Controls run original conduction solves through analytic infrared dispersion,
 thermal refraction and native bundle focusing, with independent path/footprint,
 phase/group, Beer attenuation, mixed-Hessian, contact and domain references.
+
+## High-index transparent dielectric transport
+
+Explicit finite-band Sellmeier and tabulated phase laws admit ordinary real
+indices above three, including high-index infrared windows and lenses. The
+native scalar/polarized Fresnel, smooth/GGX transmission, GRIN sample and
+transmitting-coating exterior checks share `n >= 1` and
+`n² <= f64::MAX/64`; this upper condition reserves arithmetic headroom and
+supplies no material or transparency claim. Original wavelength support,
+absorption laws, and each coherent-film owner's additional limits remain.
+The visible Cauchy, sample, table and legacy Sellmeier constructors retain
+their original `[1,3]` domain and existing accepted arithmetic/identities.
+
+Exact normal incidence retains the transmitted normal square directly,
+without cancellation against a much larger incident index. Evanescent Fresnel
+phase ratios scale only when their intermediate squares are unrepresentable,
+so total internal reflection remains a finite polarization transformation.
+No metal, anomalous-index or complex-Snell model is inferred from this range
+extension. Controls cover independent high-index Snell/Fresnel and Brewster
+values, reciprocal rough transmission, quarter-wave matching in both
+directions, native analytic GRIN paths/group distance/Beer attenuation, source
+bounds and normal/evanescent extreme-contrast arithmetic.
 
 ## Invariants
 

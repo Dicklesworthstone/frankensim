@@ -211,9 +211,7 @@ impl CoherentPeriodicCoating {
         // The bounded original films may absorb; their complex propagation
         // must remain in the transmitted field and must never be normalized
         // into a lossless R+T partition.
-        if !exit_eta.is_finite()
-            || !(1.0..=3.0).contains(&exit_eta)
-        {
+        if !crate::dielectric::admitted_dielectric_index(exit_eta) {
             return Err(ConductorError::InvalidSample);
         }
         let mut geometry = Geometry::new(
@@ -433,7 +431,7 @@ impl<'a> CoherentCoatingStack<'a> {
         exit_normal: [f64; 2],
     ) -> Result<CoherentTransmission, ConductorError> {
         self.validate_wavelength(wavelength_nm)?;
-        if !exit_eta.is_finite() || !(1.0..=3.0).contains(&exit_eta) {
+        if !crate::dielectric::admitted_dielectric_index(exit_eta) {
             return Err(ConductorError::InvalidSample);
         }
         let mut geometry = Geometry::new(
@@ -463,7 +461,7 @@ impl<'a> CoherentCoatingStack<'a> {
         exit_normal: [f64; 2],
     ) -> Result<CoherentLayerTransmission, ConductorError> {
         self.validate_wavelength(wavelength_nm)?;
-        if !exit_eta.is_finite() || !(1.0..=3.0).contains(&exit_eta) {
+        if !crate::dielectric::admitted_dielectric_index(exit_eta) {
             return Err(ConductorError::InvalidSample);
         }
         let mut geometry = Geometry::new(

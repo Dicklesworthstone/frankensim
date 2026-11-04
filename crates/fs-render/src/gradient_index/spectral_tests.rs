@@ -215,10 +215,10 @@ fn g0_refractive_fields_keep_the_common_source_band_and_interior_extrema() {
             expected
         );
     }
-    let interior_peak = table(|i| if i == 4 { 2.99 } else { 1.5 }, absorption);
+    let interior_minimum = table(|i| if i == 4 { 1.01 } else { 1.5 }, absorption);
     assert!(
         AffineIndexField::try_new(
-            &interior_peak,
+            &interior_minimum,
             ray().origin,
             Vec3::new(0.2, 0.0, 0.0),
             bounds(),
@@ -227,10 +227,10 @@ fn g0_refractive_fields_keep_the_common_source_band_and_interior_extrema() {
     );
     assert!(
         QuadraticIndexField::try_new(
-            &interior_peak,
+            &interior_minimum,
             ray().origin,
             Vec3::new(0.0, 0.0, 0.0),
-            IndexHessian::try_new([1.0, 1.0, 0.0], [0.0; 3]).unwrap(),
+            IndexHessian::try_new([-1.0, -1.0, 0.0], [0.0; 3]).unwrap(),
             bounds(),
         )
         .is_err()

@@ -95,11 +95,12 @@ fn g0_finite_band_sellmeier_refuses_hidden_poles_and_extrapolation() {
         );
     }
     // Pole-free does not imply an admitted index: the monotone endpoints
-    // must still keep the entire band's phase index within [1,3].
+    // must still keep the entire band's phase index in the native ordinary
+    // real-index domain with representable squared-index headroom.
     for (strengths, resonances) in [
-        ([9.0, 0.0, 0.0], [0.0; 3]),
+        ([f64::MAX / 32.0, 0.0, 0.0], [0.0; 3]),
         ([1.0, 0.0, 0.0], [100.0, 0.0, 0.0]),
-        ([1.0, 0.0, 0.0], [0.99, 0.0, 0.0]),
+        ([f64::MAX / 128.0, 0.0, 0.0], [0.99, 0.0, 0.0]),
     ] {
         assert_eq!(
             SellmeierIor::try_new_in_band(strengths, resonances, (1000.0, 2000.0)),

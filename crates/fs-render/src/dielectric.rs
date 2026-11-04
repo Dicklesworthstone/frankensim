@@ -23,12 +23,22 @@ pub use anisotropic::AnisotropicDielectricRoughness;
 mod absorption_band_tests;
 #[cfg(test)]
 mod sellmeier_band_tests;
+#[cfg(test)]
+mod high_index_tests;
 
 const PI: f64 = core::f64::consts::PI;
 const MIN_ROUGHNESS_ALPHA: f64 = 1.0e-4;
 const MAX_ROUGHNESS_ALPHA: f64 = 1.0;
 const MAX_GLASS_IOR: f64 = 3.0;
 const UNIT_TOLERANCE: f64 = 2.0e-10;
+
+/// Ordinary transparent real indices, including high-index infrared optics.
+/// The squared-index headroom is numerical, not a material fit or a claim of
+/// transparency: it keeps native normal-wave-number and Fresnel sums finite.
+/// Source support and the real-interface/Beer approximation remain explicit.
+pub(crate) fn admitted_dielectric_index(index: f64) -> bool {
+    index.is_finite() && index >= 1.0 && index * index <= f64::MAX / 64.0
+}
 
 /// Fixed number of knots in a dielectric phase-index table.
 pub const DIELECTRIC_SPECTRAL_SAMPLE_COUNT: usize = 9;
@@ -58,7 +68,8 @@ pub enum DielectricError {
     /// interface convention.
     InvalidDirection,
     /// A scalar interface parameter was non-finite or an absolute index was
-    /// outside the admitted `[1, 3]` dielectric domain.
+    /// outside the ordinary real-index domain `n >= 1`, or its square lacks
+    /// the numerical headroom required by native interface arithmetic.
     InvalidInterface,
     /// A transmitting dielectric coating was absorbing or otherwise outside
     /// the explicitly lossless coherent-stack domain.
@@ -182,9 +193,10 @@ impl CauchyIor {
 /// must convert/refit air-relative catalog data before claiming absolute accuracy;
 /// accepting coefficients does not authenticate a measurement. The transparent
 /// model admits nonnegative oscillator strengths and squared resonances, no
-/// active pole in the declared wavelength band, and phase indices in `[1, 3]`.
-/// The legacy constructor retains 380--780 nm; another source-supported band
-/// requires [`Self::try_new_in_band`], without fitting or extrapolation.
+/// active pole in the declared wavelength band, and ordinary phase indices
+/// `n >= 1` with `n² <= f64::MAX/64`. The legacy constructor retains 380--780 nm
+/// and `[1,3]`; explicitly supported high-index or nonvisible materials use
+/// [`Self::try_new_in_band`], without fitting or extrapolation.
 /// Absorption resonances and anomalous dispersion require a complex-index model.
 ///
 /// With `B_i, C_i >= 0`, every active term is nonincreasing between its poles.
@@ -202,7 +214,11 @@ impl SellmeierIor {
     /// Admit dimensionless strengths and squared resonance wavelengths in µm²
     /// over the original visible support, 380--780 vacuum nanometres.
     pub fn try_new(strengths: [f64; 3], resonances_um2: [f64; 3]) -> Result<Self, DielectricError> {
-        Self::try_new_in_band(strengths, resonances_um2, (LAMBDA_MIN, LAMBDA_MAX))
+        let candidate = Self::try_new_in_band(strengths, resonances_um2, (LAMBDA_MIN, LAMBDA_MAX))?;
+        if candidate.eval(LAMBDA_MIN)? > MAX_GLASS_IOR {
+            return Err(DielectricError::InvalidIor);
+        }
+        Ok(candidate)
     }
 
     /// Admit the original analytic coefficients over an explicitly declared
@@ -280,7 +296,7 @@ impl SellmeierIor {
             index_squared += self.strengths[i] * (square / (square - self.resonances_um2[i]));
         }
         if !index_squared.is_finite()
-            || !(1.0..=MAX_GLASS_IOR * MAX_GLASS_IOR).contains(&index_squared)
+            || !(1.0..=f64::MAX / 64.0).contains(&index_squared)
         {
             return Err(DielectricError::InvalidIor);
         }
@@ -347,16 +363,21 @@ impl DielectricIorSample {
     /// Construct a visible-band sample with an absolute index in `[1, 3]`.
     pub fn try_new(wavelength_nm: f64, index: f64) -> Result<Self, DielectricError> {
         validate_wavelength(wavelength_nm)?;
+        if index > MAX_GLASS_IOR {
+            return Err(DielectricError::InvalidIor);
+        }
         Self::try_new_in_band(wavelength_nm, index)
     }
 
     /// Positive finite vacuum-wavelength knot for an explicitly supported real
-    /// index table. The original absolute-index `[1,3]` domain is unchanged.
+    /// index table. High-index materials are admitted with `n >= 1` and
+    /// `n² <= f64::MAX/64`; the bound reserves arithmetic headroom, not a
+    /// different physical index law. The visible constructor keeps `[1,3]`.
     pub fn try_new_in_band(wavelength_nm: f64, index: f64) -> Result<Self, DielectricError> {
         if !wavelength_nm.is_finite() || wavelength_nm <= 0.0 {
             return Err(DielectricError::InvalidWavelength);
         }
-        if !index.is_finite() || !(1.0..=MAX_GLASS_IOR).contains(&index) {
+        if !admitted_dielectric_index(index) {
             return Err(DielectricError::InvalidIor);
         }
         Ok(Self {
@@ -396,6 +417,9 @@ impl TabulatedIor {
         samples: [DielectricIorSample; DIELECTRIC_SPECTRAL_SAMPLE_COUNT],
     ) -> Result<Self, DielectricError> {
         validate_table_wavelengths(samples.map(DielectricIorSample::wavelength_nm))?;
+        if samples.iter().any(|sample| sample.index > MAX_GLASS_IOR) {
+            return Err(DielectricError::InvalidIor);
+        }
         Ok(Self { samples, max_knot_span_nm: MAX_DIELECTRIC_KNOT_SPAN_NM })
     }
 
@@ -1225,7 +1249,8 @@ impl FresnelDielectric {
 }
 
 /// Evaluate exact unpolarized dielectric Fresnel for an incident cosine in
-/// `[0, 1]` and admitted absolute indices `eta_i`, `eta_t` in `[1, 3]`.
+/// `[0, 1]` and ordinary absolute indices `eta_i`, `eta_t` at least one, with
+/// squared indices no larger than `f64::MAX/64` for arithmetic headroom.
 pub fn fresnel_dielectric(
     incident_cosine: f64,
     eta_i: f64,
@@ -1243,7 +1268,14 @@ pub fn fresnel_dielectric(
             total_internal_reflection: false,
         });
     }
-    let normal_squared = dielectric_transmitted_normal_squared(incident_cosine, eta_i, eta_t);
+    // At exact normal incidence this is eta_t², independent of eta_i. Do not
+    // subtract two enormous incident terms: even a double-double difference
+    // cannot recover an arbitrarily smaller transmitted square.
+    let normal_squared = if incident_cosine == 1.0 {
+        eta_t * eta_t
+    } else {
+        dielectric_transmitted_normal_squared(incident_cosine, eta_i, eta_t)
+    };
     if normal_squared <= 0.0 {
         return Ok(FresnelDielectric {
             reflectance: 1.0,
@@ -1879,10 +1911,8 @@ fn validate_interface_scalar(
     eta_t: f64,
 ) -> Result<(), DielectricError> {
     if incident_cosine.is_finite()
-        && eta_i.is_finite()
-        && eta_t.is_finite()
-        && (1.0..=MAX_GLASS_IOR).contains(&eta_i)
-        && (1.0..=MAX_GLASS_IOR).contains(&eta_t)
+        && admitted_dielectric_index(eta_i)
+        && admitted_dielectric_index(eta_t)
     {
         Ok(())
     } else {
@@ -1953,6 +1983,11 @@ pub(crate) fn refract(
     eta_t: f64,
     transmitted_cosine: f64,
 ) -> Result<Vec3, DielectricError> {
+    if eta_i > MAX_GLASS_IOR && wo == normal {
+        // Normal incidence has no tangential wave vector. Preserve that
+        // geometry when eta-1 rounds to eta for a very large index contrast.
+        return Ok(normal.scale(-1.0));
+    }
     let incident_cosine = wo.dot(normal);
     let eta = eta_i / eta_t;
     let direction = add(
@@ -2554,7 +2589,7 @@ mod tests {
             DielectricSurface::try_rough(0.0),
             Err(DielectricError::InvalidRoughness)
         );
-        for invalid_eta in [0.0, -1.0, 0.99, 3.01, f64::MAX, f64::INFINITY] {
+        for invalid_eta in [0.0, -1.0, 0.99, 1.0e154, f64::MAX, f64::INFINITY] {
             assert_eq!(
                 sample_smooth_dielectric(
                     Vec3::new(0.0, 0.0, 1.0),

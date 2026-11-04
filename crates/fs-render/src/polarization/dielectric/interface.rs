@@ -48,10 +48,21 @@ pub(super) fn diagonal(s_power: f64, p_power: f64, cross_re: f64, cross_im: f64)
 /// (a-i b)/(a+i b), evaluated without complex allocation or atan/trig.
 fn tir_amplitude(a: f64, b: f64) -> (f64, f64) {
     let denominator = a * a + b * b;
+    if denominator.is_finite() && denominator > 0.0 {
+        return ((a * a - b * b) / denominator, -2.0 * a * b / denominator);
+    }
+    // A high-index evanescent admittance can be finite while its square
+    // overflows. Only this numerical branch changes the established ordinary
+    // arithmetic; scaling a phase ratio has no physical effect.
+    let scale = a.abs().max(b.abs());
+    let a = a / scale;
+    let b = b / scale;
+    let denominator = a * a + b * b;
     ((a * a - b * b) / denominator, -2.0 * a * b / denominator)
 }
 
-/// Exact s/p dielectric response for the existing `[1,3]` index domain.
+/// Exact s/p dielectric response for the native ordinary real-index domain,
+/// including explicitly supported high-index infrared materials.
 ///
 /// This deliberately calls the scalar admission and Snell calculation, so
 /// equal-index/grazing/critical-angle policy cannot diverge from the tracer.

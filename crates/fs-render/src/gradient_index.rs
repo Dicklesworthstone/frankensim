@@ -99,7 +99,8 @@ pub struct GradientIndexSample {
 }
 
 impl GradientIndexSample {
-    /// Admit an absolute phase index in `[1, 3]`, its finite gradient in inverse
+    /// Admit an ordinary absolute phase index `n >= 1` with
+    /// `n² <= f64::MAX/64`, its finite gradient in inverse
     /// metres, a nonnegative power-absorption coefficient in inverse metres,
     /// and an optional positive finite group index. The group index must come
     /// from spectral differentiation; it is never inferred from phase index.
@@ -109,8 +110,7 @@ impl GradientIndexSample {
         absorption_per_m: f64,
         group_index: Option<f64>,
     ) -> Result<Self, GradientIndexError> {
-        if !phase_index.is_finite()
-            || !(1.0..=3.0).contains(&phase_index)
+        if !crate::dielectric::admitted_dielectric_index(phase_index)
             || !finite_vec(phase_gradient_per_m)
             || !absorption_per_m.is_finite()
             || absorption_per_m < 0.0
@@ -223,7 +223,8 @@ pub struct AffineIndexField<'a> {
 }
 
 impl<'a> AffineIndexField<'a> {
-    /// Admit finite bounds and keep the phase-index law in `[1, 3]` throughout
+    /// Admit finite bounds and keep the phase-index law in the native ordinary
+    /// real-index domain throughout
     /// the box and the common phase/absorption wavelength band. Native analytic
     /// laws are monotone on their admitted domain; every tabulated phase knot
     /// inside the common band is checked separately. No source is extrapolated.

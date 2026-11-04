@@ -28,7 +28,7 @@ use super::{
 
 /// Coherent s/p reflection and power-normalized transmission through one
 /// original transparent coating. Wavelength is vacuum nm; indices retain the
-/// native [1,3] domain. The same film is used when incident/exit media reverse.
+/// native ordinary real-index domain. The same film is used when incident/exit media reverse.
 ///
 /// A zero-thickness or index-matched film preserves the entire bare Mueller
 /// response. Equal surrounding indices do not remove a contrasting film.
