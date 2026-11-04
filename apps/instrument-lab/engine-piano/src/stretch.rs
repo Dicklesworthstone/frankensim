@@ -1,4 +1,4 @@
-//! Geometric extension of the sounding strings (`Config::string_stretching`).
+//! Geometric extension of retained physical strings (`Config::string_stretching`).
 //!
 //! The same per-key file and physics as the reference's `--string-stretching`
 //! (`grand_piano/string_stretching.rs`, `longitudinal_string.rs`): fs-nlmodal's
@@ -69,7 +69,8 @@ pub fn plain_steel_waves_spec(courses: &[crate::refmods::geometry::Course], band
     text
 }
 
-/// The extension state of one sounding string segment.
+/// The extension state of one physical string segment. Active and sympathetic
+/// partials feed the same retained transverse prefix and the same axial history.
 #[derive(Clone)]
 pub(crate) struct Stretch {
     model: LongitudinalString,
@@ -184,6 +185,59 @@ impl Stretch {
     /// Retained axial coordinates.
     pub fn axial_modes(&self) -> usize {
         self.u.len()
+    }
+
+    /// Number of physical transverse partials driving this extension state.
+    pub fn transverse_modes(&self) -> usize {
+        self.scales.len()
+    }
+
+    /// Cold projection onto a changed transverse prefix of the SAME string.
+    /// The axial sine coordinates have not changed basis: retain their physical
+    /// displacement and velocity exactly. The new prefix's current strain is the
+    /// next FOH drive's starting value, and its extension potential is the split's
+    /// new energy baseline. The caller accounts separately for projection energy.
+    ///
+    /// When the retained union is unchanged, the kernel keeps the original owner
+    /// without calling this method, preserving its drive history bit for bit.
+    /// This is initialization of a replacement trial; an error never changes the
+    /// previous accepted owner.
+    pub fn reproject_from(&mut self, previous: Option<&Self>, q: &[f64], beta: &[f64],
+        b: f64, axial_bridge: f64) -> Result<(), String> {
+        if q.len() != self.scales.len() || beta.len() != q.len()
+            || !b.is_finite() || !axial_bridge.is_finite()
+            || q.iter().chain(beta).any(|x| !x.is_finite()) {
+            return Err("string extension projection needs its complete finite transverse prefix".into());
+        }
+        if let Some(old) = previous {
+            if self.length != old.length || self.ea != old.ea
+                || self.rest_tension != old.rest_tension || self.step_s != old.step_s
+                || self.axial_port != old.axial_port || self.omega2 != old.omega2
+                || self.betas != old.betas || self.model.axial_modes() != old.model.axial_modes() {
+                return Err("string extension projection cannot change its physical axial coordinates".into());
+            }
+            self.u.copy_from_slice(&old.u);
+            self.w.copy_from_slice(&old.w);
+        }
+        let axial_bridge = if self.axial_port { axial_bridge } else { 0.0 };
+        self.fill_slopes(q, beta, b);
+        let mean = self.model.geometric_strain(&self.slopes, &mut self.harmonics)
+            .map_err(|e| e.to_string())?;
+        self.fill_relative(axial_bridge);
+        let total = self.storage(mean, axial_bridge).0;
+        let axial_own: f64 = self.u.iter().zip(&self.omega2).map(|(u, w2)| 0.5 * w2 * u * u).sum();
+        let potential = total - axial_own;
+        let c = self.model.strain_energy_coefficient();
+        for j in 0..self.force.len() {
+            self.force[j] = self.omega2[j] * self.betas[j] * axial_bridge
+                - c * self.model.axial_slope_scales()[j] * self.harmonics[j];
+        }
+        if !total.is_finite() || !potential.is_finite()
+            || self.force.iter().chain(&self.u).chain(&self.w).any(|x| !x.is_finite()) {
+            return Err("string extension projection is not representable".into());
+        }
+        self.potential = potential;
+        Ok(())
     }
 
     fn fill_slopes(&mut self, q: &[f64], beta: &[f64], b: f64) {
@@ -424,5 +478,59 @@ mod axial_transition_tests {
         assert_eq!(model.force, reference.force);
         assert_eq!(got.loss.to_bits(), expected.loss.to_bits());
         assert_eq!(got.work.to_bits(), expected.work.to_bits());
+    }
+
+    /// G0/G3: a transverse reduction does not reset an axial resonator. Its
+    /// cross term can INCREASE extension energy, so projection is not heat.
+    #[test]
+    fn changing_the_transverse_prefix_retains_axial_motion_and_rebases_the_drive() {
+        let make = |n| Stretch::new(
+            Material { axial_rigidity_n: 96_000.0, maximum_slope: 0.2 },
+            Some(WaveMaterial { bandwidth_hz: 8_100.0, mode_cap: 4,
+                damping_ratio: 0.01, maximum_strain: 0.01 }),
+            1.0, 0.006, 500.0, n, 48_000,
+        ).unwrap();
+        let mut full = make(2);
+        assert_eq!(full.axial_modes(), 4);
+        let slope = 0.01_f64;
+        let geometric = 0.25 * slope * slope;
+        let d4 = full.model.axial_slope_scales()[3];
+        full.u[3] = -3.0 * geometric / d4;
+        full.w[0] = 0.02;
+        let q = [0.0, slope / full.scales[1]];
+        let before = full.stored(&q, &[0.0; 2], 0.0, 0.0);
+        let c = 0.5 * full.ea * full.length;
+        // The second transverse sine has a constant strain and a fourth
+        // cosine strain. Its latter term partly cancels the axial compression.
+        let expected_before = 3.0 * c * geometric * geometric + 0.5 * 0.02_f64.powi(2);
+        assert!((before - expected_before).abs() < 2e-14 * expected_before);
+
+        let mut reduced = make(1);
+        reduced.reproject_from(Some(&full), &[0.0], &[0.0], 0.0, 0.0).unwrap();
+        assert_eq!(reduced.u, full.u);
+        assert_eq!(reduced.w, full.w);
+        let after = reduced.stored(&[0.0], &[0.0], 0.0, 0.0);
+        let expected_after = 4.5 * c * geometric * geometric + 0.5 * 0.02_f64.powi(2);
+        assert!(after > before, "removing a cancelling strain component can add extension storage");
+        assert!((after - expected_after).abs() < 2e-14 * expected_after);
+        assert!(reduced.force.iter().all(|&f| f == 0.0));
+        assert!(reduced.potential.abs() < 2e-14 * after);
+
+        // All remaining axial motion is now a freely decaying oscillator.
+        // An obsolete pre-projection force or potential would introduce work.
+        let omega = reduced.model.axial_omegas()[3];
+        let (want_q, want_v) = free_motion(omega, 0.01, reduced.u[3], reduced.w[3], reduced.step_s);
+        let kick = reduced.step(&[0.0], &[0.0], 0.0, 0.0, reduced.step_s, &mut [0.0]).unwrap();
+        assert!((reduced.u[3] - want_q).abs() < 2e-12 * full.u[3].abs());
+        assert!((reduced.w[3] - want_v).abs() < 2e-12 * (omega * full.u[3]).abs());
+        assert!(kick.work.abs() < 2e-12 * after);
+        assert!(kick.loss > 0.0);
+
+        let mut expanded = make(5);
+        expanded.reproject_from(Some(&reduced), &[0.0; 5], &[0.0; 5], 0.0, 0.0).unwrap();
+        assert_eq!(expanded.u, reduced.u);
+        assert_eq!(expanded.w, reduced.w);
+        let kept = reduced.stored(&[0.0], &[0.0], 0.0, 0.0);
+        assert_eq!(expanded.stored(&[0.0; 5], &[0.0; 5], 0.0, 0.0).to_bits(), kept.to_bits());
     }
 }

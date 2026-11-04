@@ -144,7 +144,8 @@ pub struct Config {
     pub silent_bank_hz: f64,
     /// Geometric string extension: the reference's complete `--string-stretching` file
     /// (`linear`, `stretch` or `waves` per key of the scale; see `crate::stretch`). It acts
-    /// on sounding strings through one explicit kick per step, booked in `Ledger::coupling_j`.
+    /// on each physical string's retained active/bank union through one explicit kick
+    /// per step, booked in `Ledger::coupling_j`. Axial motion survives ownership changes.
     /// `None` keeps the linear strings bit for bit.
     pub string_stretching: Option<String>,
 }
@@ -1448,8 +1449,6 @@ struct ASeg {
     /// Held contact force of this step [N] (speaking strings only).
     force: f64,
     src: f64,
-    /// Geometric extension of this string (`Config::string_stretching`).
-    stretch: Option<Box<Stretch>>,
 }
 
 #[derive(Clone)]
@@ -1540,9 +1539,13 @@ pub struct Ledger {
     pub felt_loss_j: f64,
     pub shank_loss_j: f64,
     pub catch_loss_j: f64,
-    /// Relative string energy discarded when keys returned to the static image.
+    /// Physical string energy removed when a retained prefix is reduced,
+    /// including its change of nonlinear storage. Retained axial and sympathetic
+    /// motion stay in stored_j; a nonlinear projection's energy increase is
+    /// representation work in coupling_j, never retirement or physical heat.
     pub retired_j: f64,
     /// Signed numerical work of the explicit nonlinear string-extension split.
+    /// Also includes extension energy introduced by adding previously absent modes.
     /// Reciprocal linear string/bank/board exchange adds no source to this account.
     pub coupling_j: f64,
     pub residual_j: f64,
@@ -1669,6 +1672,13 @@ pub struct LivePiano {
     bank_gl: Vec<f64>,
     /// Per course, its `Config::string_stretching` material (and waves), if it stretches.
     stretch_spec: Vec<Option<(Material, Option<WaveMaterial>)>>,
+    /// One nonlinear owner per physical segment, independent of active/bank ownership.
+    stretches: Vec<Option<Box<Stretch>>>,
+    /// Courses with a retained nonlinear segment, and physical termination rows
+    /// projected once into the current loaded board basis. No per-sample projection.
+    stretch_courses: Vec<usize>,
+    stretch_gl: Vec<f64>,
+    stretch_al: Vec<f64>,
     stretching: bool,
 }
 
@@ -1756,6 +1766,10 @@ impl Clone for LivePiano {
             bank_courses: self.bank_courses.clone(),
             bank_gl: self.bank_gl.clone(),
             stretch_spec: self.stretch_spec.clone(),
+            stretches: self.stretches.clone(),
+            stretch_courses: self.stretch_courses.clone(),
+            stretch_gl: self.stretch_gl.clone(),
+            stretch_al: self.stretch_al.clone(),
             stretching: self.stretching,
         }
     }
@@ -2208,6 +2222,7 @@ impl LivePiano {
         let surface_xy = desc.surface.iter().flat_map(|p| [p.position_m[0] as f32, p.position_m[1] as f32]).collect();
         let surface_shapes: Vec<f32> = desc.surface.iter().flat_map(|p| p.mode_shape.iter().map(|x| *x as f32)).collect();
         let n_courses = courses.len();
+        let n_segments = segs.len();
         let mut piano = Self {
             acoustic_gas: gas,
             atmospheric_propagation,
@@ -2279,6 +2294,10 @@ impl LivePiano {
             bank_courses,
             stretching: stretch_spec.iter().any(Option::is_some),
             stretch_spec,
+            stretches: vec![None; n_segments],
+            stretch_courses: Vec::new(),
+            stretch_gl: vec![0.0; n_courses * r],
+            stretch_al: vec![0.0; n_courses * r],
             cfg,
         };
         piano.rebuild(&[], &[])?;
@@ -2446,18 +2465,12 @@ impl LivePiano {
             }
         }
         let (pad_pack, pad_gram) = pack_pads(&pad, n);
-        // Admitted at the full partial count in `new`, so it builds for any grant.
-        let seg = &self.segs[si];
-        let stretch = self.stretch_spec[seg.course].and_then(|(material, waves)| {
-            let density = self.courses[seg.course].linear_density_kg_m;
-            Stretch::new(material, waves, seg.length_m, density, seg.tension_n, n, self.cfg.sample_rate).ok().map(Box::new)
-        });
         ASeg {
             #[cfg(target_arch = "wasm32")]
             pair: self.segs[si].pair,
             seg: si, off, n, duplex: self.segs[si].duplex, member: self.segs[si].member, beta2, mek, w_schur, loss_w, sum_c4,
             endpoint_drag, hammer_lift, lift_total: hammer_lift + lift_bq, cdiag, pad, pad_pack, pad_gram, shared_bank_pad: false,
-            owed: false, owe: [0.0; 4], dn: [0.0; 4], force: 0.0, src: 0.0, stretch,
+            owed: false, owe: [0.0; 4], dn: [0.0; 4], force: 0.0, src: 0.0,
         }
     }
 
@@ -2480,6 +2493,8 @@ impl LivePiano {
             phi: Vec<f64>, k_phys: Vec<f64>, flow: Vec<f64>, bz: Vec<Zoh>, s_inv: Vec<f64>, sd_inv: Vec<f64>,
             wmk: Vec<f64>, wu: Vec<f64>, contact_gl_resp: Vec<f64>, ledger: Ledger, counters: Counters,
             bank: Vec<BankMode>, bank_courses: Vec<BankCourse>, bank_gl: Vec<f64>,
+            stretches: Vec<Option<Box<Stretch>>>, stretch_courses: Vec<usize>,
+            stretch_gl: Vec<f64>, stretch_al: Vec<f64>,
         }
         let saved = Saved {
             active: self.active.clone(), slots: self.keys.iter().map(|key| key.slot).collect(),
@@ -2488,16 +2503,22 @@ impl LivePiano {
             s_inv: self.s_inv.clone(), sd_inv: self.sd_inv.clone(), wmk: self.wmk.clone(), wu: self.wu.clone(),
             contact_gl_resp: self.contact_gl_resp.clone(), ledger: self.ledger, counters: self.counters,
             bank: self.bank.clone(), bank_courses: self.bank_courses.clone(), bank_gl: self.bank_gl.clone(),
+            stretches: self.stretches.clone(), stretch_courses: self.stretch_courses.clone(),
+            stretch_gl: self.stretch_gl.clone(), stretch_al: self.stretch_al.clone(),
         };
         let result = self.rebuild_in_place(activate, retire);
         if result.is_err() {
             let Saved {
                 active, slots, q, v, bq, bvel, phi, k_phys, flow, bz, s_inv, sd_inv, wmk, wu, contact_gl_resp, ledger, counters,
-                bank, bank_courses, bank_gl,
+                bank, bank_courses, bank_gl, stretches, stretch_courses, stretch_gl, stretch_al,
             } = saved;
             self.bank = bank;
             self.bank_courses = bank_courses;
             self.bank_gl = bank_gl;
+            self.stretches = stretches;
+            self.stretch_courses = stretch_courses;
+            self.stretch_gl = stretch_gl;
+            self.stretch_al = stretch_al;
             for (key, slot) in self.keys.iter_mut().zip(slots) {
                 key.slot = slot;
             }
@@ -2529,6 +2550,12 @@ impl LivePiano {
         let mut vs = vec![0.0; r];
         matvec(&self.phi, &self.bq, &mut qs);
         matvec(&self.phi, &self.bvel, &mut vs);
+        // Retiring a prefix may remove transverse coordinates before its nonlinear
+        // owner is projected. Save that owner's physical energy before clearing them.
+        // Unchanged unions do not rebuild or touch their axial/drive histories.
+        let mut projected_extension: Vec<Option<(f64, f64)>> = if self.stretching {
+            vec![None; self.segs.len()]
+        } else { Vec::new() };
         // Where each segment's partials sit in the silent-string bank, if anywhere.
         let mut bank_of: Vec<Option<(usize, usize)>> = vec![None; self.segs.len()];
         for (bi, course) in self.bank_courses.iter().enumerate() {
@@ -2566,12 +2593,16 @@ impl LivePiano {
                     let x = self.q[k] - self.m.beta[k] * b;
                     e += 0.5 * self.v[k] * self.v[k] + 0.5 * self.m.w2[k] * x * x;
                 }
-                // Its extension and axial motion leave with it (the bank strings are linear).
-                if let Some(st) = &s.stretch {
-                    e += st.stored(&self.q[range.clone()], &self.m.beta[range.clone()], b, axial_bridge);
-                }
                 // Its chord keeps following the bridge: that kinetic energy stays.
-                self.ledger.retired_j += e - 0.5 * (s.beta2 - handed_beta2) * bdot * bdot;
+                let linear_removed = e - 0.5 * (s.beta2 - handed_beta2) * bdot * bdot;
+                if let Some(st) = self.stretches[s.seg].as_deref()
+                    && self.segs[s.seg].bank_n != st.transverse_modes() {
+                    let retained = s.off..s.off + st.transverse_modes();
+                    projected_extension[s.seg] = Some((st.stored(&self.q[retained.clone()],
+                        &self.m.beta[retained], b, axial_bridge), linear_removed));
+                } else {
+                    self.ledger.retired_j += linear_removed;
+                }
                 self.q[s.off + handed..range.end].fill(0.0);
                 self.v[s.off + handed..range.end].fill(0.0);
                 self.counters.retirements += 1;
@@ -2634,6 +2665,69 @@ impl LivePiano {
                     });
                 }
             }
+        }
+        // Nonlinear motion belongs to the physical retained union. A smaller
+        // active grant can leave a bank tail, and retirement can leave axial
+        // resonance in an entirely sympathetic string.
+        if self.stretching {
+            let mut retained: Vec<usize> = self.segs.iter().map(|s| s.bank_n).collect();
+            for ac in &self.active {
+                for s in &ac.segs {
+                    retained[s.seg] = retained[s.seg].max(s.n);
+                }
+            }
+            for (si, n) in retained.into_iter().enumerate() {
+                let seg = &self.segs[si];
+                let Some((material, waves)) = self.stretch_spec[seg.course] else { continue; };
+                let old = self.stretches[si].as_deref();
+                let old_n = old.map_or(0, Stretch::transverse_modes);
+                if n == old_n && projected_extension[si].is_none() {
+                    continue;
+                }
+                let b = dot(&self.g_st[seg.course * r..(seg.course + 1) * r], &qs);
+                let axial = dot(&self.a_st[seg.course * r..(seg.course + 1) * r], &qs);
+                let before = projected_extension[si].map(|(energy, _)| energy).unwrap_or_else(|| old.map_or(0.0, |st| {
+                    let range = seg.off..seg.off + old_n;
+                    st.stored(&self.q[range.clone()], &self.m.beta[range], b, axial)
+                }));
+                let mut replacement = None;
+                let mut after = 0.0;
+                if n > 0 {
+                    let density = self.courses[seg.course].linear_density_kg_m;
+                    let mut st = Stretch::new(material, waves, seg.length_m, density,
+                        seg.tension_n, n, self.cfg.sample_rate)?;
+                    let range = seg.off..seg.off + n;
+                    st.reproject_from(old, &self.q[range.clone()], &self.m.beta[range.clone()], b, axial)?;
+                    after = st.stored(&self.q[range.clone()], &self.m.beta[range], b, axial);
+                    replacement = Some(Box::new(st));
+                }
+                if !before.is_finite() || !after.is_finite() {
+                    return Err(format!("key {}: string extension projection energy is unresolved", self.courses[seg.course].midi));
+                }
+                if projected_extension[si].is_some() || n < old_n {
+                    // Cross terms can make the extension energy increase when a
+                    // transverse component is removed. Classify the TOTAL physical
+                    // storage change, including the removed linear mode/chord part.
+                    let removed = projected_extension[si].map_or(0.0, |(_, linear)| linear)
+                        + before - after;
+                    if !removed.is_finite() {
+                        return Err("string projection energy change is not representable".into());
+                    }
+                    if removed >= 0.0 {
+                        self.ledger.retired_j += removed;
+                    } else {
+                        self.ledger.coupling_j -= removed;
+                    }
+                } else {
+                    // Adding zero-relative-motion transverse modes normally leaves
+                    // storage unchanged. Any newly introduced extension storage is
+                    // numerical reduction work, never physical damping or a strike.
+                    self.ledger.coupling_j += after - before;
+                }
+                self.stretches[si] = replacement;
+            }
+            self.stretch_courses = self.keys.iter().enumerate().filter_map(|(ci, key)|
+                key.segs.iter().any(|&si| self.stretches[si].is_some()).then_some(ci)).collect();
         }
         // Per-key bookkeeping (display shape table is populated lazily in snapshot()).
         for slot in 0..self.active.len() {
@@ -2725,6 +2819,14 @@ impl LivePiano {
             return Err("loaded soundboard mode unresolved or above output band".into());
         }
         self.phi = phi;
+        for &ci in &self.stretch_courses {
+            for j in 0..r {
+                self.stretch_gl[ci * r + j] = (0..r)
+                    .map(|i| self.g_st[ci * r + i] * self.phi[i * r + j]).sum();
+                self.stretch_al[ci * r + j] = (0..r)
+                    .map(|i| self.a_st[ci * r + i] * self.phi[i * r + j]).sum();
+            }
+        }
         for (bi, course) in self.bank_courses.iter_mut().enumerate() {
             let g = &self.g_st[course.ci * r..(course.ci + 1) * r];
             for j in 0..r {
@@ -2874,6 +2976,14 @@ impl LivePiano {
             let x = self.q[k] - self.m.beta[k] * b;
             let u = v - self.m.beta[k] * bdot;
             e += 0.5 * u * u + 0.5 * self.m.w2[k] * x * x;
+        }
+        // Without a sympathetic receiver, retirement would discard this axial
+        // resonance too; transverse quietness alone cannot make it disappear.
+        if self.segs[s.seg].bank_n == 0 && let Some(st) = self.stretches[s.seg].as_deref() {
+            let ci = self.segs[s.seg].course;
+            let axial = dot(&self.stretch_al[ci * self.r..(ci + 1) * self.r], &self.bq);
+            let range = s.off..s.off + st.transverse_modes();
+            e += st.stored(&self.q[range.clone()], &self.m.beta[range], b, axial);
         }
         e
     }
@@ -3904,34 +4014,38 @@ impl LivePiano {
         }
     }
 
-    /// Mechanical energy now stored in strings (the silent-string bank's too), board,
-    /// hammers and felt [J].
-    /// The extension kick of every stretching sounding string (`crate::stretch`), after the
-    /// step's linear motion; owed damper flows settle first. Returns the axial modal loss;
-    /// the split's numerical work and the board's kinetic change go to `Ledger::coupling_j`.
+    /// One extension kick per physical retained string, after its shared linear
+    /// active/bank motion. Owed damper flows settle before reading those velocities.
+    /// Returns physical axial loss; the split's numerical work and the reciprocal
+    /// board impulse remain explicitly in `Ledger::coupling_j`.
     fn step_stretch(&mut self) -> f64 {
+        if self.stretch_courses.is_empty() { return 0.0; }
         let dt = self.dt;
-        let mut work = -0.5 * self.bvel.iter().map(|x| x * x).sum::<f64>();
-        let mut loss = 0.0;
         for ac in &mut self.active {
-            let b = dot(&ac.gl, &self.bq);
-            let axial_bridge = dot(&ac.al, &self.bq);
-            let mut reaction = 0.0;
-            let mut axial_reaction = 0.0;
             for s in &mut ac.segs {
-                if s.stretch.is_none() {
-                    continue;
-                }
-                let range = s.off..s.off + s.n;
-                if s.owed {
-                    settle_owed(s, &mut self.v[range.clone()]);
+                if self.stretches[s.seg].is_some() && s.owed {
+                    settle_owed(s, &mut self.v[s.off..s.off + s.n]);
                     s.owed = false;
                 }
-                if let Some(st) = s.stretch.as_deref_mut() {
+            }
+        }
+        let mut work = -0.5 * self.bvel.iter().map(|x| x * x).sum::<f64>();
+        let mut loss = 0.0;
+        for &ci in &self.stretch_courses {
+            let gl = &self.stretch_gl[ci * self.r..(ci + 1) * self.r];
+            let al = &self.stretch_al[ci * self.r..(ci + 1) * self.r];
+            let b = dot(gl, &self.bq);
+            let axial_bridge = dot(al, &self.bq);
+            let mut reaction = 0.0;
+            let mut axial_reaction = 0.0;
+            for &si in &self.keys[ci].segs {
+                if let Some(st) = self.stretches[si].as_deref_mut() {
+                    let off = self.segs[si].off;
+                    let range = off..off + st.transverse_modes();
                     let kick = match st.step(&self.q[range.clone()], &self.m.beta[range.clone()], b, axial_bridge, dt, &mut self.v[range]) {
                         Ok(kick) => kick,
                         Err(error) => {
-                            self.last_error = Some(format!("key {}: {error}", self.keys[ac.ci].midi));
+                            self.last_error = Some(format!("key {}: {error}", self.keys[ci].midi));
                             continue;
                         }
                     };
@@ -3946,13 +4060,13 @@ impl LivePiano {
             }
             if reaction != 0.0 {
                 let push = -dt * reaction;
-                for (x, g) in self.bvel.iter_mut().zip(&ac.gl) {
+                for (x, g) in self.bvel.iter_mut().zip(gl) {
                     *x += push * g;
                 }
             }
             if axial_reaction != 0.0 {
                 let push = -dt * axial_reaction;
-                for (x, a) in self.bvel.iter_mut().zip(&ac.al) {
+                for (x, a) in self.bvel.iter_mut().zip(al) {
                     *x += push * a;
                 }
             }
@@ -3961,6 +4075,26 @@ impl LivePiano {
         loss
     }
 
+    /// Nonlinear extension storage and axial kinetic energy of one course [J],
+    /// including its currently sympathetic segments. Unknown keys return None.
+    pub fn string_extension_energy_j(&self, midi: u8) -> Option<f64> {
+        let ci = self.key_index(midi)?;
+        Some(self.extension_energy(ci))
+    }
+
+    fn extension_energy(&self, ci: usize) -> f64 {
+        let b = dot(&self.stretch_gl[ci * self.r..(ci + 1) * self.r], &self.bq);
+        let axial = dot(&self.stretch_al[ci * self.r..(ci + 1) * self.r], &self.bq);
+        self.keys[ci].segs.iter().filter_map(|&si| {
+            self.stretches[si].as_deref().map(|st| {
+                let off = self.segs[si].off;
+                let range = off..off + st.transverse_modes();
+                st.stored(&self.q[range.clone()], &self.m.beta[range], b, axial)
+            })
+        }).sum()
+    }
+
+    /// Mechanical energy now stored in all retained strings, board, hammers and felt [J].
     pub fn stored_energy_j(&self) -> f64 {
         let r = self.r;
         let mut e = 0.5 * self.bvel.iter().map(|x| x * x).sum::<f64>();
@@ -3978,18 +4112,16 @@ impl LivePiano {
         }
         for ac in &self.active {
             let b = dot(&ac.gl, &self.bq);
-            let axial_bridge = dot(&ac.al, &self.bq);
             for s in &ac.segs {
                 let vel = self.seg_velocity(s);
                 for (k, v) in (s.off..s.off + s.n).zip(vel.iter()) {
                     let x = self.q[k] - self.m.beta[k] * b;
                     e += 0.5 * v * v + 0.5 * self.m.w2[k] * x * x;
                 }
-                if let Some(st) = &s.stretch {
-                    let range = s.off..s.off + s.n;
-                    e += st.stored(&self.q[range.clone()], &self.m.beta[range], b, axial_bridge);
-                }
             }
+        }
+        for &ci in &self.stretch_courses {
+            e += self.extension_energy(ci);
         }
         for &ci in &self.busy {
             let key = &self.keys[ci];

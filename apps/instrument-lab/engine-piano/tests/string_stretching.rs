@@ -1,6 +1,8 @@
 //! Geometric string extension on the live kernel (`Config::string_stretching`,
 //! `src/stretch.rs`): the reference's own strain, storage and file, with one
-//! kick per step. The wider comparison is `examples/validate.rs --string-waves`.
+//! kick per physical retained string per step. Active and sympathetic partials
+//! share the same axial state. The wider comparison is
+//! `examples/validate.rs --string-waves`.
 use fs_live_piano::refmods::{engine, geometry, linear::string_stretching::{Specification, HEADER}, steinway_scale};
 use fs_live_piano::stretch::plain_steel_waves_spec;
 use fs_live_piano::{Config, Description, LivePiano};
@@ -272,5 +274,138 @@ fn geometric_axial_motion_reaches_sounding_strings_and_clone_rebuilds() {
         assert!(piano.take_error().is_none());
         let ledger = piano.close_ledger();
         assert!(ledger.residual_j.abs() < 1e-11 * ledger.input_j, "residual {:e} J", ledger.residual_j);
+    }
+}
+
+fn sympathetic_fixture(bank_band: f64) -> (Description, Config) {
+    let mut desc = Description::embedded().unwrap().truncated(4).unwrap();
+    desc.courses.retain(|c| [57, 69].contains(&c.midi));
+    for course in &mut desc.courses {
+        course.unison = 1;
+        course.detune_cents = 0.0;
+        course.duplex_length_m = 0.0;
+    }
+    // Explicit manufactured axial ports in the original board basis. No
+    // production geometry or fitted vertical-to-axial multiplier is inferred.
+    desc.bridge_axial_rows.insert(57, vec![0.03, -0.02, 0.01, -0.005]);
+    desc.bridge_axial_rows.insert(69, vec![-0.01, 0.025, 0.015, 0.008]);
+    let mut cfg = Config::live(RATE);
+    cfg.max_partials = 8;
+    cfg.course_mode_budget = 8;
+    cfg.max_dynamic_modes = 16;
+    cfg.max_courses = 2;
+    cfg.duplex = false;
+    cfg.partial_band_hz = 2400.0;
+    cfg.silent_bank_hz = bank_band;
+    cfg.retire_ringing_j = 0.0;
+    cfg.retire_damped_j = 0.0;
+    cfg.string_stretching = Some(plain_steel_waves_spec(&desc.courses, 10_000.0, 0.01, 0.05));
+    (desc, cfg)
+}
+
+fn compare_ringing(a: &mut LivePiano, b: &mut LivePiano, samples: usize) {
+    let (mut difference, mut signal) = (0.0, 0.0);
+    for _ in 0..samples {
+        let (x, y) = (a.step(), b.step());
+        difference += (x - y).powi(2);
+        signal += x * x;
+    }
+    assert!(signal > 0.0);
+    assert!(difference < 1e-12 * signal,
+        "ownership changed the retained nonlinear trajectory: {difference:e} / {signal:e}");
+    for piano in [a, b] {
+        assert!(piano.take_error().is_none());
+        let ledger = piano.close_ledger();
+        assert!(ledger.residual_j.abs() < 1e-9 * ledger.input_j, "{ledger:?}");
+    }
+}
+
+/// G3: a receiving string already rings nonlinearly before its key is held.
+/// Borrowing a prefix or the entire bank changes only ownership, including the
+/// remaining tail's geometric strain and both reciprocal termination forces.
+#[test]
+fn a_ringing_nonlinear_bank_and_its_active_prefix_have_the_same_trajectory() {
+    let (desc, cfg) = sympathetic_fixture(2400.0);
+    let mut bank = LivePiano::new(&desc, cfg).unwrap();
+    bank.set_sustain(1.0).unwrap();
+    bank.note_on(57, 0.8).unwrap();
+    for _ in 0..2048 { bank.step(); }
+    let initial_extension = bank.string_extension_energy_j(69).unwrap();
+    assert!(initial_extension > 0.0, "the unplayed receiver must retain nonlinear motion");
+    for grant in [1, 8] {
+        let mut reference = bank.clone();
+        let mut borrowed = bank.clone();
+        borrowed.set_quality(grant, 2400.0, 16).unwrap();
+        let union = borrowed.bank_modes() + borrowed.dynamic_modes();
+        let before = borrowed.stored_energy_j();
+        let work = borrowed.ledger.coupling_j;
+        borrowed.silent_key_down(69).unwrap();
+        borrowed.apply_pending_notes();
+        assert_eq!(borrowed.bank_modes() + borrowed.dynamic_modes(), union);
+        assert!((borrowed.stored_energy_j() - before).abs() < 1e-11 * before);
+        assert!((borrowed.string_extension_energy_j(69).unwrap() - initial_extension).abs()
+            < 1e-10 * initial_extension);
+        assert_eq!(borrowed.ledger.coupling_j.to_bits(), work.to_bits());
+        assert_eq!(borrowed.ledger.retired_j, 0.0);
+        compare_ringing(&mut reference, &mut borrowed, 4096);
+    }
+}
+
+/// G3: retiring the active prefix into an identical retained bank must keep
+/// longitudinal resonance alive, then reuse it on a later physical strike.
+#[test]
+fn longitudinal_motion_survives_bank_retirement_and_restrike() {
+    let (desc, cfg) = sympathetic_fixture(2400.0);
+    let mut retire_cfg = cfg.clone();
+    // Force a representation handoff as soon as the hammer is clear. The
+    // bank still retains every partial of this intentionally bounded fixture.
+    retire_cfg.retire_ringing_j = 1.0;
+    retire_cfg.retire_damped_j = 1.0;
+    let mut reference = LivePiano::new(&desc, cfg).unwrap();
+    let mut retiring = LivePiano::new(&desc, retire_cfg).unwrap();
+    for piano in [&mut reference, &mut retiring] {
+        piano.set_sustain(1.0).unwrap();
+        piano.note_on(69, 0.8).unwrap();
+    }
+    compare_ringing(&mut reference, &mut retiring, 12_288);
+    assert!(retiring.counters.retirements > 0);
+    assert_eq!(retiring.sounding_keys(), 0);
+    assert_eq!(reference.sounding_keys(), 1);
+    let kept = reference.string_extension_energy_j(69).unwrap();
+    assert!(kept > 0.0);
+    assert!((retiring.string_extension_energy_j(69).unwrap() - kept).abs() < 1e-8 * kept);
+    assert!(retiring.ledger.retired_j.abs() < 1e-12 * retiring.ledger.input_j,
+        "the retained bank must not discard axial storage: {:?}", retiring.ledger);
+    compare_ringing(&mut reference, &mut retiring, 2048);
+    for piano in [&mut reference, &mut retiring] {
+        piano.note_on(69, 0.6).unwrap();
+        piano.apply_pending_notes();
+    }
+    compare_ringing(&mut reference, &mut retiring, 2048);
+}
+
+/// G0/G4: a failed expansion must restore the old nonlinear prefix, its axial
+/// coordinates, FOH source, potential baseline, cached rows and energy ledger.
+#[test]
+fn a_refused_prefix_expansion_preserves_the_ringing_nonlinear_bank() {
+    let (desc, cfg) = sympathetic_fixture(800.0);
+    let mut piano = LivePiano::new(&desc, cfg).unwrap();
+    piano.set_sustain(1.0).unwrap();
+    piano.note_on(57, 0.8).unwrap();
+    for _ in 0..2048 { piano.step(); }
+    assert!(piano.string_extension_energy_j(69).unwrap() > 0.0);
+    let mut reference = piano.clone();
+    let before = piano.stored_energy_j();
+    let work = piano.ledger.coupling_j;
+    piano.fail_next_rebuild();
+    piano.silent_key_down(69).unwrap();
+    piano.apply_pending_notes();
+    assert!(piano.take_error().is_some());
+    assert_eq!(piano.stored_energy_j().to_bits(), before.to_bits());
+    assert_eq!(piano.ledger.coupling_j.to_bits(), work.to_bits());
+    assert_eq!(piano.string_extension_energy_j(69).unwrap().to_bits(),
+        reference.string_extension_energy_j(69).unwrap().to_bits());
+    for _ in 0..4096 {
+        assert_eq!(piano.step().to_bits(), reference.step().to_bits());
     }
 }

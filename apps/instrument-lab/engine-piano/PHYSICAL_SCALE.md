@@ -120,6 +120,32 @@ the axial update allocates nothing. A refused axial trial preserves that segment
 accepted coordinates and force history and is reported by `take_error()`.
 This segment-level refusal does not roll back the complete piano timestep.
 
+One extension/longitudinal state now belongs to each physical retained string,
+including an unplayed sympathetic string. Its geometric strain uses the union
+of its active prefix and remaining bank tail. Both the transverse and axial
+bridge reactions return to the same board, and axial viscous heat is counted
+once. The state continues while a key is released or its active voice retires.
+When ownership changes without changing that union, the exact same axial
+displacement, velocity, previous force and split-energy baseline are retained.
+
+A changed partial budget projects only the transverse prefix. The unchanged
+axial sine coordinates keep their physical displacement and velocity; the new
+current strain starts the next linearly interpolated force. The actual change
+of linear, chord and nonlinear storage is accounted at that boundary. A net
+removal goes to `retired_j`; a net increase goes to signed representation work
+in `coupling_j`. Nonlinear cross terms can increase extension energy when a
+partial is removed, so this projection is never called physical heat and no
+amplitude normalization is applied. Failed rebuilds restore the nonlinear
+state, drive history and ledger along with the existing linear state.
+
+`LivePiano::string_extension_energy_j(midi)` observes the course's extension
+storage and axial kinetic energy across both owners. Total stored energy
+includes that physical state once. The conservative nonlinear coupling still
+uses the declared explicit kick; its time-discretization work remains in
+`coupling_j`. Shared ownership does not turn it into an implicit or exactly
+energy-conserving nonlinear integrator. Mode-band and timestep convergence
+remain separate requirements.
+
 The optional final argument on the WASM preparation constructors carries the
 unchanged text. The factory checks `supportsStringStretching()` first, so older
 WASM cannot silently ignore the selection. Rebuild using
@@ -187,7 +213,7 @@ displacement and the accepted average bridge displacement determine reciprocal
 forces within the same step. This resolves coupled normal modes and sympathetic
 beating without a delayed bank reaction or a numerical energy source in
 `coupling_j`. That account still records the separate nonlinear stretching
-split when selected.
+split and any extension energy introduced by a changed reduction when selected.
 
 Active prefixes and bank tails share absolute modal displacement and velocity.
 Activation and retirement transfer ownership without copying or resetting the
@@ -195,7 +221,8 @@ retained motion. Each retained mode appears once in the conservative and
 intrinsic-loss solves, and each string's unresolved chord drag is counted once
 over the retained union. Existing physical board-basis transfer and failed
 rebuild rollback remain in force; finite pads use the same union of velocities.
-The existing bank-off arithmetic is unchanged.
+With string stretching selected, that union also drives the shared nonlinear
+state described above. With no stretching, the existing arithmetic is unchanged.
 
 Intrinsic loss uses the same reciprocal midpoint half-flow as sounding strings:
 material strain drag retains its bridge cross terms, while gas drag acts on
@@ -214,6 +241,15 @@ under either owner, ownership changes during ringing, retirement/restrike,
 and a strongly damped source-material receiver. Those full engine regressions
 and native/WASM cost measurements remain unexecuted in this change; no new
 throughput or measured audio-comparison result is claimed.
+
+Additional nonlinear regressions cover a ringing receiver represented entirely
+in the bank or with a borrowed active prefix, continued axial motion through
+retirement and restrike, and restoration after a refused prefix expansion.
+An analytic projection case retains nonzero axial displacement and velocity
+while removing a cancelling transverse strain component; it checks the resulting
+increase of extension storage and the subsequent free axial decay. These added
+tests have syntax validation here; full native integration execution remains
+outstanding.
 
 ## Native composition
 
