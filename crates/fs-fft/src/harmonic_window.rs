@@ -175,6 +175,32 @@ impl HarmonicWindow {
         self.product_kernel_extended(Dd::from_f64(omega_a), Dd::from_f64(omega_b))
     }
 
+    /// Deterministic product for two offsets on one common angular carrier.
+    ///
+    /// Each physical frequency is common_offset + omega_a/b. Add in
+    /// double-double precision before the clock rotation and centered Gram
+    /// contraction, so a small envelope offset is not rounded out of a large
+    /// carrier. Both sum and difference terms are retained. Signed offsets,
+    /// carriers and DC are admitted; all three inputs must be finite.
+    ///
+    /// This is the same analytic owner as product_kernel, not a carrier
+    /// average or an approximation that removes the sum-frequency term.
+    pub fn product_kernel_shifted(
+        self,
+        omega_a: f64,
+        omega_b: f64,
+        common_offset: f64,
+    ) -> Result<HarmonicProduct, WindowError> {
+        if !omega_a.is_finite() || !omega_b.is_finite() || !common_offset.is_finite() {
+            return Err(WindowError::InvalidFrequency);
+        }
+        let carrier = Dd::from_f64(common_offset);
+        self.product_kernel_extended(
+            checked(carrier + Dd::from_f64(omega_a))?,
+            checked(carrier + Dd::from_f64(omega_b))?,
+        )
+    }
+
     /// Deterministic real-product kernel for frequencies authored in Hz.
     ///
     /// Retains the Hz-to-radian conversion through both carrier rotations and
@@ -581,6 +607,68 @@ mod tests {
             total += weight * sensitivity * x * y;
         }
         total / (3 * n) as f64
+    }
+
+    #[test]
+    fn g1_shifted_kernel_retains_offsets_below_carrier_spacing() {
+        let carrier = 1e20;
+        let offsets = [-1.0, 1.0];
+        assert_eq!(carrier + offsets[0], carrier + offsets[1]);
+        for profile in [
+            HarmonicWindowProfile::Uniform,
+            HarmonicWindowProfile::Triangular,
+        ] {
+            let window = HarmonicWindow::with_profile(0.13, 0.7, profile).unwrap();
+            let kernel = window
+                .product_kernel_shifted(offsets[0], offsets[1], carrier)
+                .unwrap();
+            // cos(A)cos(B) + sin(A)sin(B) = cos(A-B), pointwise.
+            // Independent difference-frequency reference has no huge carrier.
+            let resolved = kernel.mean_real_product_dd(C64::ONE, C64::ONE).unwrap()
+                + kernel
+                    .mean_real_product_dd(C64::new(0.0, 1.0), C64::new(0.0, 1.0))
+                    .unwrap();
+            let reference = window.mean_phase(offsets[0] - offsets[1]).unwrap().re;
+            // DD retains the beat, with finite absolute phase precision at 1e20.
+            let tolerance = 4e-14 + 8.0 * carrier * f64::EPSILON * f64::EPSILON;
+            close(resolved.to_f64(), reference, tolerance);
+            assert!((resolved.to_f64() - 1.0).abs() > 0.1);
+        }
+    }
+
+    #[test]
+    fn g0_shifted_kernel_zero_offset_and_refusals() {
+        let window = HarmonicWindow::new(-0.3, 0.8).unwrap();
+        let a = C64::new(0.7, -0.4);
+        let b = C64::new(-0.2, 0.9);
+        assert_eq!(
+            window
+                .product_kernel_shifted(-2.0, 3.0, 0.0)
+                .unwrap()
+                .mean_real_product_dd(a, b)
+                .unwrap(),
+            window
+                .product_kernel(-2.0, 3.0)
+                .unwrap()
+                .mean_real_product_dd(a, b)
+                .unwrap(),
+        );
+        for (wa, wb, carrier) in [
+            (f64::NAN, 1.0, 0.0),
+            (1.0, f64::INFINITY, 0.0),
+            (1.0, 2.0, f64::NEG_INFINITY),
+        ] {
+            assert_eq!(
+                window.product_kernel_shifted(wa, wb, carrier).unwrap_err(),
+                WindowError::InvalidFrequency,
+            );
+        }
+        assert_eq!(
+            window
+                .product_kernel_shifted(f64::MAX, 1.0, f64::MAX)
+                .unwrap_err(),
+            WindowError::Unrepresentable,
+        );
     }
 
     #[test]
