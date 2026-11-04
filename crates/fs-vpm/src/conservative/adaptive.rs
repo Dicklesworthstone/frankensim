@@ -6,7 +6,9 @@
 //!
 //! The viscous [`simulate_viscous_with_cx`] path retains positive diffusion:
 //! One original D(h/2) A(h) D(h/2) step is compared with two half steps.
-//! Both positions and circulation must satisfy their own physical tolerance;
+//! Positive viscosity also checks an independent A(h/2) D(h) A(h/2) witness,
+//! exposing initial motion that fast diffusion can erase in both trial states.
+//! Positions and circulation must satisfy their own physical tolerance;
 //! accepting the fine state preserves the original positive diffusion maps.
 //! Areas remain attached to their particles. Each diffusion stage evaluates
 //! the current geometry, so no fixed-site neighbor graph is reused after motion.
@@ -50,17 +52,24 @@ pub struct ViscousAdaptiveOptions {
 /// Every trial compares the same original second-order viscous composition
 /// at full and half steps. The maximum of the circulation/vorticity estimate
 /// and ||x_fine-x_coarse||/(3*position_tolerance) must be at most one.
+/// Positive viscosity additionally compares the fine state with an independent
+/// A(h/2) D(h) A(h/2) witness, without the step-doubling division by three.
+/// This exposes initial transport that rapid diffusion can suppress in both
+/// ordinary candidates. All estimates must pass; they remain local estimators,
+/// not a certificate for arbitrary stiff transients or global trajectory error.
 /// Only the two-half-step state is accepted, with no Richardson projection,
 /// negative diffusion interval or post-step circulation/impulse correction.
 ///
-/// With P=N(N-1), an active viscous trial uses 9P pair visits, of which
-/// 6P evaluate diffusion kernels at the current substage positions. Zero
-/// viscosity uses 3P advection visits and no diffusion evaluations. Each trial
-/// charges 2N + pair_visits + 4 units (copies, estimates, three original step
-/// boundaries and one trial boundary); initial validation costs N. Three
-/// particle buffers are reserved once. Zero duration or fewer than two
-/// particles preserves the inventory exactly, using one N-particle buffer
-/// and N validation units. All areas and options are still checked.
+/// With P=N(N-1), an active viscous trial uses 12P pair visits, of which
+/// 7P evaluate diffusion kernels at the current substage positions. Its work
+/// is 4N + pair_visits + 5 units: initial trial copies/estimates, witness
+/// copies/estimates, four step boundaries and one trial boundary. Zero
+/// viscosity skips the witness, using 3P advection visits, no diffusion
+/// evaluations and 2N + pair_visits + 4 units. Initial validation costs N.
+/// Three particle buffers are reserved once; the witness reuses the coarse
+/// buffer. Runs with zero duration or fewer than two particles preserve the
+/// inventory exactly, using one N-particle buffer and N validation units.
+/// All areas and options are still checked.
 ///
 /// The original exact pair advection preserves vortex impulse. PSE conserves
 /// circulation and contracts sampled-vorticity range/enstrophy but does not
@@ -105,19 +114,19 @@ pub fn simulate_viscous_with_cx(
     let active = duration_s > 0.0 && n >= 2;
     let diffuse = active && law.kinematic_viscosity_m2_s() > 0.0;
     let pairs_per_trial = if active {
-        diffusion::pair_work(n, 3, if diffuse { 3 } else { 1 })?
+        diffusion::pair_work(n, 1, if diffuse { 12 } else { 3 })?
     } else {
         0
     };
     let fractions_per_trial = if diffuse {
-        diffusion::pair_work(n, 3, 2)?
+        diffusion::pair_work(n, 1, 7)?
     } else {
         0
     };
     let trial_work = n64
-        .checked_mul(2)
+        .checked_mul(if diffuse { 4 } else { 2 })
         .and_then(|value| value.checked_add(pairs_per_trial))
-        .and_then(|value| value.checked_add(4))
+        .and_then(|value| value.checked_add(if diffuse { 5 } else { 4 }))
         .ok_or(overflow("adaptive moving trial work"))?;
     admit_count("adaptive work", n64, budget.max_work_units)?;
     let peak_live_bytes = n
@@ -235,6 +244,52 @@ pub fn simulate_viscous_with_cx(
                 error_ratio = error_ratio.max(strength_error).max(position_error);
                 Ok(())
             })?;
+        }
+        if diffuse {
+            // Step doubling alone can agree spuriously when both candidates
+            // diffuse away the initial motion. Reverse the splitting order,
+            // using the now-spare coarse buffer and the same physical owners.
+            coarse.clear();
+            for &particle in &state {
+                meter.unit(&mut accountant, cx, "fs-vpm.viscous-witness-copy", || {
+                    coarse.push(particle);
+                    Ok(())
+                })?;
+            }
+            super::viscous::reverse_step(
+                &mut coarse,
+                areas_m2,
+                h,
+                core,
+                law,
+                &mut pair_evaluations,
+                &mut meter,
+                &mut accountant,
+                cx,
+            )?;
+            for i in 0..n {
+                meter.unit(&mut accountant, cx, "fs-vpm.viscous-witness-error", || {
+                    let strength_error = scaled_error(
+                        state[i].circulation,
+                        coarse[i].circulation,
+                        fine[i].circulation,
+                        areas_m2[i],
+                        time.absolute_vorticity_tolerance_s_inv,
+                        time.relative_tolerance,
+                    );
+                    let position_error = position_error(
+                        coarse[i].pos,
+                        fine[i].pos,
+                        options.absolute_position_tolerance_m,
+                    );
+                    // This is an independent splitting witness, not a
+                    // step-doubling estimate: undo the shared helpers' /3.
+                    error_ratio = error_ratio
+                        .max(3.0 * strength_error)
+                        .max(3.0 * position_error);
+                    Ok(())
+                })?;
+            }
         }
         meter.unit(&mut accountant, cx, "fs-vpm.viscous-adaptive-trial", || {
             Ok(())

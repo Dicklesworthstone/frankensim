@@ -533,6 +533,16 @@ Euclidean norm divided by three times an explicit absolute metre tolerance.
 Circulation uses the existing area-weighted absolute-vorticity/relative
 estimate. A small circulation error cannot hide inaccurate particle motion.
 
+For positive viscosity, each trial also compares its fine result with an
+independent `A(h/2) D(h) A(h/2)` composition. The witness reuses the coarse
+buffer after the ordinary comparison and calls the original positive pair
+owners. Position and circulation differences use the same physical tolerances
+without the step-doubling division by three. This detects initial transport
+that rapid diffusion can extinguish in both ordinary candidates. All estimates
+must pass, and only the original two-half-step state is accepted. These remain
+local estimators, not a certificate for arbitrary stiff transients or global
+trajectory error.
+
 The existing viscous owner now accepts an internal positive time fraction,
 so the full/half trials share the original pair maps, ordering, validation
 and checkpoints. Keeping the fraction separate from the physical time avoids
@@ -543,10 +553,11 @@ and complete-window result are shared with fixed-site adaptive diffusion.
 
 Each diffusion substage evaluates its actual moved geometry. Both Gaussian
 and compact laws are supported; no pinned neighbor graph is used after motion.
-With P=N(N-1), an active trial charges 9P pair visits and 6P diffusion-kernel
-evaluations for positive viscosity, or 3P advection visits for zero viscosity.
-Total logical work is N + attempts*(2N + pair_visits_per_trial + 4).
-Three particle buffers are reserved once; there is no per-trial allocation.
+With P=N(N-1), each positive-viscosity trial charges 12P pair visits, 7P
+diffusion-kernel evaluations and 4N+12P+5 logical work units. Zero viscosity
+skips the witness and retains 3P visits and 2N+3P+4 work units. Initial
+validation costs N. Three particle buffers are reserved once; the witness
+requires no additional storage or per-trial allocation.
 Zero duration and fewer than two particles preserve input bits using one
 particle buffer, while still validating all areas and physical controls.
 
@@ -560,7 +571,8 @@ This is temporal error estimation for the original direct 2-D particle model,
 not a global error certificate, spatial-remeshing controller, wall treatment,
 variable-viscosity stress law or three-dimensional viscous solver.
 `tests/adaptive_viscous.rs` checks the independent decaying-dipole
-translation/strength solution, geometry-changing clouds against the original
+translation/strength solution including rapid initial viscous decay,
+geometry-changing clouds against the original
 refined owner, identities, resource counts and transactional refusal.
 
 

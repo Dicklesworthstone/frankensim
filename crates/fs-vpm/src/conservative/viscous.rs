@@ -209,3 +209,57 @@ pub(super) fn weighted_step(
     meter.unit(accountant, cx, "fs-vpm.conservative-step", || Ok(()))?;
     meter.boundary(accountant, cx, "fs-vpm.conservative-step-complete")
 }
+
+// Reverse positive Strang composition A(dt/2) D(dt) A(dt/2), used only as
+// an independent adaptive witness. Reuse the original pair owners and keep
+// half intervals as fractions so a subnormal physical dt is not lost.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn reverse_step(
+    state: &mut [VortexParticle],
+    areas: &[f64],
+    dt: f64,
+    core: f64,
+    law: PseDiffusion,
+    completed_pairs: &mut u64,
+    meter: &mut WorkMeter,
+    accountant: &mut AdmittedBudget<'_>,
+    cx: &Cx<'_>,
+) -> Result<(), VpmError> {
+    if dt > 0.0 {
+        super::weighted_symmetric_sweep(
+            state,
+            dt,
+            core,
+            0.5,
+            completed_pairs,
+            meter,
+            accountant,
+            cx,
+        )?;
+        if law.kinematic_viscosity_m2_s() > 0.0 {
+            diffusion::symmetric_sweep(
+                state,
+                areas,
+                law,
+                dt,
+                0.5,
+                completed_pairs,
+                meter,
+                accountant,
+                cx,
+            )?;
+        }
+        super::weighted_symmetric_sweep(
+            state,
+            dt,
+            core,
+            0.5,
+            completed_pairs,
+            meter,
+            accountant,
+            cx,
+        )?;
+    }
+    meter.unit(accountant, cx, "fs-vpm.viscous-witness-step", || Ok(()))?;
+    meter.boundary(accountant, cx, "fs-vpm.viscous-witness-step-complete")
+}

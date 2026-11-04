@@ -134,9 +134,9 @@ fn g1_position_control_resolves_motion_when_dipole_strength_is_already_exact() {
                 assert_eq!(run.elapsed_s.to_bits(), time.to_bits());
                 assert_eq!(run.attempts, run.accepted_steps + run.rejected_steps);
                 assert!((0.0..=1.0).contains(&run.max_accepted_error_ratio));
-                assert_eq!(run.pair_evaluations, 18 * run.attempts as u64);
-                assert_eq!(run.fraction_evaluations, 12 * run.attempts as u64);
-                assert_eq!(run.work_units, 2 + 26 * run.attempts as u64);
+                assert_eq!(run.pair_evaluations, 24 * run.attempts as u64);
+                assert_eq!(run.fraction_evaluations, 14 * run.attempts as u64);
+                assert_eq!(run.work_units, 2 + 37 * run.attempts as u64);
                 assert_eq!(run.budget.cost_charged, run.work_units);
                 assert_eq!(run.peak_live_bytes, 6 * size_of::<VortexParticle>());
             }
@@ -155,6 +155,57 @@ fn g1_position_control_resolves_motion_when_dipole_strength_is_already_exact() {
             assert_eq!(tight.attempts, replay.attempts);
             assert_eq!(tight.work_units, replay.work_units);
         }
+    });
+}
+
+#[test]
+fn g1_stiff_diffusion_must_resolve_transport_before_extinguishing_the_dipole() {
+    let initial = dipole();
+    let nu = 1000.0;
+    let law = PseDiffusion::new(nu, 1.0).unwrap();
+    let rate = 8.0 * nu / (PI * std::f64::consts::E);
+    let exact_x = -(-rate).exp_m1() / (rate * 2.0 * PI * 1.01);
+    // With h=1, both ordinary Strang candidates diffuse to zero before
+    // appreciable advection; their difference misses the entire translation.
+    // The independent reversed splitting must force initial time refinement.
+    with_cx(&CancelGate::new_clock_free(), Budget::INFINITE, |cx| {
+        let results = [1e-5, 1e-8].map(|tolerance| {
+            let actual = simulate_viscous_with_cx(
+                cx,
+                &initial,
+                &[1.0; 2],
+                1.0,
+                0.1,
+                law,
+                options(tolerance),
+                budget(2),
+            )
+            .unwrap();
+            assert_eq!(actual.elapsed_s.to_bits(), 1.0_f64.to_bits());
+            assert!(actual.rejected_steps > 0);
+            assert!(actual.particles[0].pos[0] > 0.9 * exact_x);
+            for (p, original) in actual.particles.iter().zip(initial) {
+                assert_eq!(p.pos[1], original.pos[1]);
+                assert!(p.circulation.abs() < 1e-13);
+            }
+            assert!(total_circulation(&actual.particles).abs() < 1e-13);
+            assert_eq!(actual.pair_evaluations, 24 * actual.attempts as u64);
+            assert_eq!(actual.fraction_evaluations, 14 * actual.attempts as u64);
+            assert_eq!(actual.work_units, 2 + 37 * actual.attempts as u64);
+            assert_eq!(actual.budget.cost_charged, actual.work_units);
+            assert_eq!(actual.peak_live_bytes, 6 * size_of::<VortexParticle>());
+            (
+                (actual.particles[0].pos[0] - exact_x).abs(),
+                actual.accepted_steps,
+            )
+        });
+        let [(loose_error, loose_steps), (tight_error, tight_steps)] = results;
+        assert!(tight_error < 3e-8, "stiff translation error={tight_error}");
+        assert!(
+            loose_error > 50.0 * tight_error,
+            "{loose_error} -> {tight_error}"
+        );
+        assert!(tight_steps > loose_steps);
     });
 }
 
