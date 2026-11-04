@@ -374,6 +374,31 @@ fn loss_factors_add_the_printed_law_to_every_card_and_leave_the_computed_drag_al
 }
 
 #[test]
+fn the_receipt_names_the_tension_and_bending_loss_the_string_carries() {
+    let parse = |card: &str| input::Spec::parse(card.as_bytes()).unwrap();
+    scoped(|cx, gate| {
+        let bound = ready(cx, gate, parse(&with_loss(&text())), 1.0).unwrap();
+        let source = specimen(&bound.performance.bank().source().bank().strings()[0].source);
+        assert_eq!(source.string().tension_loss_factor, Some(2e-5));
+        assert_eq!(source.string().bending_loss_factor, Some(0.02));
+        let line = crate::measured::loss_receipt(&bound, 0).expect("a loss-factors string carries its own tension loss");
+        for part in [
+            format!("eta_F={} ", 2e-5),
+            format!("row {FRICTION},"),
+            format!("eta_B={} ", 0.02),
+            format!("(row {BENDING};"),
+            "manufactured measured-section frontend fixture".to_owned(),
+        ] {
+            assert!(line.contains(&part), "{part} is missing from: {line}");
+        }
+        assert!(!line.contains("entered as 0"), "{line}");
+        // Planted negative: without the selection the string has no tension loss and no such receipt.
+        let plain = ready(cx, gate, parse(&text()), 1.0).unwrap();
+        assert!(crate::measured::loss_receipt(&plain, 0).is_none());
+    });
+}
+
+#[test]
 fn a_loss_selection_refuses_every_row_it_cannot_own() {
     let original = text();
     for selection in [
@@ -505,3 +530,6 @@ fn measured_setup_and_explicit_elastic_scope_are_not_silently_replaced() {
         }
     });
 }
+
+#[path = "measured/torsion.rs"]
+mod torsion;

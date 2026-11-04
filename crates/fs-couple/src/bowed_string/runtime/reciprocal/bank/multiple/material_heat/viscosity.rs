@@ -65,7 +65,8 @@ impl MultiBowStringBank {
             }
         }
         if let Some(twist) = member.source.torsion_source() {
-            let section = twist.section();
+            let section = twist.section()
+                .ok_or_else(|| invalid("viscous heat requires material torsion; measured whole-string torsion has no layers"))?;
             let shear = *section
                 .layer_viscous_stiffness_n_m2_s()
                 .get(layer)

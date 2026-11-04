@@ -111,7 +111,7 @@ fn sourced_twist_has_physical_frequency_loss_and_surface_torque_normalization() 
     with_cx(|cx,gate| {
         let bank=raw(cx,gate,source(80e9,1000.0).with_torsion("G","eta_s",3).unwrap(),options()).unwrap();
         let MaterialStringSource::WithTorsion(t)=&bank.source().strings()[0].source else {panic!("lost torsional source")};
-        let rotary=t.section().rotary_inertia_kg_m(); let radius=t.section().shear().elastic().outer_radius_m();
+        let rotary=t.section().unwrap().rotary_inertia_kg_m(); let radius=t.section().unwrap().shear().elastic().outer_radius_m();
         assert_eq!(t.mode_count(),3); assert_eq!(bank.system().components()[0].modes().len(),7);
         let modes=bank.system().components()[0].modes(); let phi=&bank.system().port().left.shapes;
         for n in 1..=3 {
@@ -333,7 +333,7 @@ fn layered_twist_uses_all_original_annuli_and_the_same_selected_shear_data() {
             .with_torsion("G","eta_s",2).unwrap();
         let b=raw(cx,gate,s,options()).unwrap();
         let MaterialStringSource::WithTorsion(t)=&b.source().strings()[0].source else {panic!("missing source")};
-        assert_eq!(t.section().shear().elastic(),&original);
+        assert_eq!(t.section().unwrap().shear().elastic(),&original);
         let MaterialStringSource::Concentric{section,..}=t.bending() else {panic!("lost layered bending")};
         assert_eq!(section.elastic(),&original);
         assert_eq!(b.cards()[0].linear_density_kg_m,original.line_density_kg_m());
@@ -494,7 +494,7 @@ fn g2_reciprocal_torque_matches_independent_two_oscillator_solution() {
         bank = bank.with_rotational_body_connections(vec![link.clone()], gate).unwrap();
         let MaterialStringSource::WithTorsion(twist) = &bank.source().strings()[0].source else { panic!("missing source") };
         let angular = (core::f64::consts::PI * link.station_fraction).sin()
-            / (twist.section().rotary_inertia_kg_m() * bank.cards()[0].length_m * 0.5).sqrt();
+            / (twist.section().unwrap().rotary_inertia_kg_m() * bank.cards()[0].length_m * 0.5).sqrt();
         let w = bank.system().components()[0].modes()[4].angular_frequency_rad_s;
         // Independent physical angular spring: K += k*[phi_s,-phi_b]^T*[phi_s,-phi_b].
         // Its only driven subspace is the one twist and one receiving body mode.

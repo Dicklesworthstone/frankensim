@@ -91,7 +91,7 @@ fn bonded_layers_and_torsion_survive_in_one_joint_body_prefix_without_false_norm
         assert_eq!(image.mode_count(),5);assert_eq!(image.bodies().len(),2);
         assert_eq!(image.axial_rigidity_n(),expected.axial_stiffness_n());
         let MaterialStringSource::WithTorsion(t)=image.source() else {panic!("lost twist source")};
-        assert_eq!(t.section().shear().elastic(),&expected);
+        assert_eq!(t.section().unwrap().shear().elastic(),&expected);
         let normal=image.transverse_shape(0.27).unwrap();let surface=image.surface_shape(0.27).unwrap();
         assert_eq!(normal[..3],surface[..3]);assert_eq!(&normal[3..],&[0.0;2]);
         assert!(surface[3..].iter().all(|x|x.abs()>0.0));

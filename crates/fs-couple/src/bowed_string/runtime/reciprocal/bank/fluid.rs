@@ -74,8 +74,10 @@ impl StringBankFluidLoading {
         if modes.len() != start + twist.mode_count() {
             return Err(invalid("rotary fluid lost the original torsional basis"));
         }
+        let section = twist.section()
+            .ok_or_else(|| invalid("rotary fluid has no original torsional material"))?;
         let rate = (flow.steady_resistance_per_length_n_s()
-            + flow.low_tail_resistance_per_length_n_s()) / twist.section().rotary_inertia_kg_m();
+            + flow.low_tail_resistance_per_length_n_s()) / section.rotary_inertia_kg_m();
         for mode in &mut modes[start..] {
             let added = 0.5 * rate / mode.angular_frequency_rad_s;
             let loss = mode.damping_ratio + added;
@@ -138,9 +140,11 @@ impl StringBankFluidLoading {
             if let Some(flow) = &loading.rotary {
                 let twist = sources[index].source.torsion_source()
                     .ok_or_else(|| invalid("rotary fluid has no original torsion"))?;
+                let section = twist.section()
+                    .ok_or_else(|| invalid("rotary fluid has no original torsional material"))?;
                 let radius = flow.radius_m();
                 let solid_surface = radius * det::sqrt(2.0
-                    / twist.section().rotary_inertia_kg_m() / card.length_m);
+                    / section.rotary_inertia_kg_m() / card.length_m);
                 let offset = transverse_modes * loading.flow.branches().len();
                 for k in 0..twist.mode_count() {
                     for (branch_index, branch) in flow.branches().iter().enumerate() {
@@ -266,6 +270,10 @@ impl ReciprocalStringBank {
             || self.system.components()[..self.cards.len()].iter().flat_map(|c| c.states())
                 .any(|s| s.displacement_m_sqrt_kg != 0.0 || s.velocity_m_sqrt_kg_per_s != 0.0) {
             return Err(invalid("cylinder loading requires one cold binding before string motion or playback"));
+        }
+        // A measured whole-string torsion's Q is the string's own loss in air; rotary drag would count it twice.
+        if self.source.strings.iter().any(|member| member.source.torsion_source().is_some_and(|t| t.measured().is_some())) {
+            return Err(invalid("measured whole-string torsion already includes its air loss; cylinder loading refuses it"));
         }
         // Bound complete dimensions BEFORE allocating quadrature or port arrays.
         let moving_modes = self.source.strings.iter()

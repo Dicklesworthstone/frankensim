@@ -95,7 +95,10 @@ pub(super) fn string_band(
         MaterialStringSource::WithPolarizations(p) => string_band(p.source(), band)?,
         MaterialStringSource::WithTorsion(t) => {
             string_band(t.bending(), band)?;
-            intersect(band, t.section().omega_band_rad_s())?;
+            // A measured whole-string torsion states no material band of its own.
+            if let Some(section) = t.section() {
+                intersect(band, section.omega_band_rad_s())?;
+            }
             if let Some(law) = t.relaxation() {
                 intersect(band, law.omega_band_rad_s())?;
             }

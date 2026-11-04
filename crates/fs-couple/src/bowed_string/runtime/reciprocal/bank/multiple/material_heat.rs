@@ -161,7 +161,9 @@ impl MultiBowStringBank {
             // The torsion constructor retains this same section. Check the
             // full original bundle and volume rather than infer a heat split
             // from GJ/EI or from the relative vibration amplitudes.
-            let section = twist.section().shear().elastic();
+            let section = twist.section()
+                .ok_or_else(|| invalid("string material heat requires material torsion; measured whole-string torsion has no layers"))?
+                .shear().elastic();
             if section
                 .layers()
                 .get(layer)

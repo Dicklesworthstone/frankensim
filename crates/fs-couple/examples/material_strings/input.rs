@@ -59,6 +59,9 @@ pub struct Wire {
     pub polarizations: Option<TransverseDirections>,
     /// The `tension-loss` row this string selects. None is no tension loss term.
     pub tension_loss: Option<TensionLossRow>,
+    /// The `torsion-measured` row a `section measured` string selects. None is no torsion: a measured whole string
+    /// with twist modes and no row refuses.
+    pub measured_torsion: Option<MeasuredTorsionRow>,
 }
 impl Wire {
     pub(super) fn validate_elastic_sources(&self) -> Result<()> {
@@ -112,6 +115,42 @@ pub fn tension_loss_rows() -> Result<Vec<TensionLossRow>> {
             return Err("tension-loss.tsv rows need a unique id, a finite nonnegative eta_F and a source".into());
         }
         rows.push(TensionLossRow { id: id.into(), eta_f, source: source.into() });
+    }
+    Ok(rows)
+}
+/// One measured whole string's own torsion in `measured-torsion.tsv`: the specimen it was measured on (its pack id and
+/// its measured section's line-density property), the speaking length its fundamental belongs to, the torsional
+/// fundamental, the surface torsional impedance, and the Q of every twist mode.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MeasuredTorsionRow {
+    pub id: String, pub pack: String, pub linear_density: String, pub speaking_length_m: f64,
+    pub fundamental_hz: f64, pub impedance_kg_s: f64, pub quality_factor: f64, pub source: String,
+}
+/// The evidence table that `torsion-measured ID` selects from, compiled into the example.
+pub const MEASURED_TORSION_TABLE: &str = include_str!("measured-torsion.tsv");
+const MEASURED_TORSION_HEADER: &str = "id\tpack\tlinear_density\tspeaking_length_m\tfundamental_Hz\timpedance_kg_s\tQ\tsource";
+/// Every row of the table in file order. A malformed, duplicate or nonphysical row refuses.
+pub fn measured_torsion_rows() -> Result<Vec<MeasuredTorsionRow>> {
+    let mut lines = MEASURED_TORSION_TABLE.lines().filter(|line| !line.starts_with('#'));
+    if lines.next() != Some(MEASURED_TORSION_HEADER) {
+        return Err("measured-torsion.tsv needs the header id, pack, linear_density, speaking_length_m, fundamental_Hz, impedance_kg_s, Q, source".into());
+    }
+    let mut rows: Vec<MeasuredTorsionRow> = Vec::new();
+    for line in lines {
+        let fields: Vec<&str> = line.split('\t').collect();
+        let &[id, pack, linear_density, length, fundamental, impedance, q, source] = fields.as_slice() else {
+            return Err("measured-torsion.tsv rows need exactly id, pack, linear_density, speaking_length_m, fundamental_Hz, impedance_kg_s, Q and source".into());
+        };
+        let (speaking_length_m, fundamental_hz, impedance_kg_s, quality_factor): (f64, f64, f64, f64) =
+            (length.parse()?, fundamental.parse()?, impedance.parse()?, q.parse()?);
+        if [id, pack, linear_density].iter().any(|word| word.is_empty() || word.contains(char::is_whitespace))
+            || source.is_empty() || rows.iter().any(|row| row.id == id)
+            || [speaking_length_m, fundamental_hz, impedance_kg_s].iter().any(|x| !x.is_finite() || *x <= 0.0)
+            || !quality_factor.is_finite() || quality_factor <= 0.5 {
+            return Err("measured-torsion.tsv rows need a unique id, a pack and property name, a positive length, fundamental and impedance, a Q above 1/2 and a source".into());
+        }
+        rows.push(MeasuredTorsionRow { id: id.into(), pack: pack.into(), linear_density: linear_density.into(),
+            speaking_length_m, fundamental_hz, impedance_kg_s, quality_factor, source: source.into() });
     }
     Ok(rows)
 }
@@ -427,7 +466,7 @@ impl Spec {
             let mut wire = Wire { pack, length, radius, prestress, section: WireSection::Homogeneous,
                 elastic_sources: None,
                 bending_loss: BendingLoss::KelvinVoigt, torsion_memory: None,
-                thermal_reference_kelvin: None, tension_loss: None,
+                thermal_reference_kelvin: None, tension_loss: None, measured_torsion: None,
                 polarizations: None, bending_modes, twist_modes,
                 bridge: SharedPlateBridge { station_fraction, stiffness_n_m, damping_n_s_m, rest_extension_m: 0.0 } };
             row.end()?;
@@ -541,6 +580,16 @@ impl Spec {
                 }
                 wire.torsion_memory = Some(layers);
                 wire.torsion_memory_states()?;
+            }
+            if r.lines.clone().next().and_then(|line| line.split_ascii_whitespace().next()) == Some("torsion-measured") {
+                if !matches!(&wire.section, WireSection::Measured { .. }) {
+                    return Err("torsion-measured is a whole string's own measurement; only a section measured string takes it".into());
+                }
+                let mut row = r.row("torsion-measured")?;
+                let id = row.word()?;
+                row.end()?;
+                wire.measured_torsion = Some(measured_torsion_rows()?.into_iter().find(|row| row.id == id)
+                    .ok_or("torsion-measured names no row of measured-torsion.tsv")?);
             }
             if wire.bending_modes == 0 || !(0.0 < wire.bridge.station_fraction && wire.bridge.station_fraction < 1.0)
                 || wire.bridge.stiffness_n_m < 0.0 || wire.bridge.damping_n_s_m < 0.0

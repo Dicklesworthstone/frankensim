@@ -16,6 +16,10 @@
 //! material band screens the retained linear modes, not nonlinear harmonics.
 //! See Bavu, Smith & Wolfe, 'Torsional waves in a bowed string' (2005),
 //! arXiv:physics/0505059, for the importance of surface rather than centre speed.
+//!
+//! A measured whole string has no layers to derive torsion from. It can take
+//! its own measured torsion instead ([`MeasuredStringTorsion`]): fundamental,
+//! surface impedance and one Q, on the nut-to-bridge span. See that type.
 
 use super::*;
 use crate::shear_shell::constant_loss::ConstantLossSpectrum;
@@ -167,7 +171,10 @@ impl StringBodyRotationConnection {
         // The original owner uses metres/Newtons. This exact coordinate change
         // preserves energy and work: x=r*theta, k_x=k_theta/r², F_x=tau/r.
         // Use the actual material section radius, never an arbitrary modal gain.
-        let radius = twist.section.shear().elastic().outer_radius_m();
+        let Some(section) = twist.section() else {
+            return Err(invalid("a rotational bridge requires material-derived string torsion; measured whole-string torsion has no polar inertia or radius"));
+        };
+        let radius = section.shear().elastic().outer_radius_m();
         let stiffness = self.stiffness_n_m_per_rad / radius / radius;
         let damping = self.damping_n_m_s_per_rad / radius / radius;
         let rest = self.rest_angle_rad * radius;
@@ -270,12 +277,95 @@ impl ReciprocalStringBank {
     }
 }
 
-/// Frozen original bending specimen plus torsion from its SAME material states.
+/// Torsion measured on one whole string: its torsional fundamental on the
+/// speaking length, its characteristic torsional impedance at the surface,
+/// and one quality factor. It belongs to a measured whole string
+/// ([`MaterialStringSource::Measured`]); a material section derives its own.
+///
+/// The twist is a non-dispersive torsional line from the nut (station 0) to
+/// the support station (the bridge). Rotation is fixed at both ends, and the
+/// afterlength beyond the support carries no twist. In surface coordinates
+/// `u = r theta`, the line inertia is `Z / c` [kg/m] and the stiffness `Z c`
+/// [N], with `c = 2 L_s f_1`. The bow therefore sees exactly the measured
+/// `Z = sqrt(K_R I_R) / r^2`, and mode `n` lies at `n f_1`. The source does not
+/// state a radius, polar inertia or shear modulus, and none is inferred.
+///
+/// Every twist mode gets the measured Q, as `zeta = 1 / (2 Q)`. That follows a
+/// measured Q that stays almost constant over the modes it was measured on; no
+/// material law is used to vary it. No gas drag is added, because the measured
+/// Q is the string's own loss in air. Consumers that need layers, polar inertia
+/// or a radius (material heat, shear memory, rotational bridges, angular ports,
+/// cylinder gas loading) refuse a measured torsion.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MeasuredStringTorsion {
+    fundamental_hz: f64,
+    impedance_kg_s: f64,
+    quality_factor: f64,
+    support_fraction: f64,
+}
+
+impl MeasuredStringTorsion {
+    /// Admit the measured torsional fundamental [Hz] of the span from the nut to
+    /// `support_fraction` of the full string, the surface impedance [kg/s], and
+    /// the quality factor of every twist mode.
+    ///
+    /// # Errors
+    /// A nonpositive or nonfinite fundamental or impedance, a quality factor that
+    /// is not finite and above 1/2, or a support station outside (0, 1).
+    pub fn try_new(fundamental_hz: f64, impedance_kg_s: f64, quality_factor: f64, support_fraction: f64)
+        -> Result<Self, MaterialStatePointError>
+    {
+        if !fundamental_hz.is_finite() || fundamental_hz <= 0.0
+            || !impedance_kg_s.is_finite() || impedance_kg_s <= 0.0
+            || !quality_factor.is_finite() || quality_factor <= 0.5
+            || !support_fraction.is_finite() || support_fraction <= 0.0 || support_fraction >= 1.0 {
+            return Err(MaterialStatePointError::InvalidDerived {
+                quantity: "measured torsion needs a positive fundamental and impedance, a quality factor above 1/2 and an interior support station",
+            });
+        }
+        Ok(Self { fundamental_hz, impedance_kg_s, quality_factor, support_fraction })
+    }
+    /// Measured torsional fundamental of the twisting span [Hz].
+    #[must_use]
+    pub const fn fundamental_hz(&self) -> f64 { self.fundamental_hz }
+    /// Measured characteristic torsional impedance at the surface, `sqrt(K_R I_R) / r^2` [kg/s].
+    #[must_use]
+    pub const fn impedance_kg_s(&self) -> f64 { self.impedance_kg_s }
+    /// Measured quality factor, the same for every twist mode.
+    #[must_use]
+    pub const fn quality_factor(&self) -> f64 { self.quality_factor }
+    /// Station of the twist's far end (the bridge) as a fraction of the full span.
+    #[must_use]
+    pub const fn support_fraction(&self) -> f64 { self.support_fraction }
+    /// Twisting span [m], nut to support, on a string whose full span is `length_m`.
+    #[must_use]
+    pub fn span_m(&self, length_m: f64) -> f64 { length_m * self.support_fraction }
+    /// Torsional wave speed `c = 2 L_s f_1` [m/s].
+    #[must_use]
+    pub fn wave_speed_m_s(&self, length_m: f64) -> f64 { 2.0 * self.span_m(length_m) * self.fundamental_hz }
+    /// Line inertia in surface coordinates, `I_R / r^2 = Z / c` [kg/m].
+    #[must_use]
+    pub fn surface_inertia_kg_m(&self, length_m: f64) -> f64 {
+        self.impedance_kg_s / self.wave_speed_m_s(length_m)
+    }
+}
+
+/// Where a twist source's coefficients come from.
+#[derive(Clone, Debug)]
+enum TwistLaw {
+    /// The original material section's shear stiffness, polar inertia and shear loss.
+    Section(ConcentricTorsionalSection),
+    /// A measurement of the whole string's own torsion.
+    Measured(MeasuredStringTorsion),
+}
+
+/// Frozen original bending specimen plus torsion from its SAME material states,
+/// or from the same measured string's own torsion measurement.
 /// Private fields prevent attaching an unrelated section or nesting reductions.
 #[derive(Clone, Debug)]
 pub struct TorsionalStringSource {
     bending: MaterialStringSource,
-    section: ConcentricTorsionalSection,
+    law: TwistLaw,
     relaxation: Option<ConcentricPronyTorsionalSection>,
     mode_count: usize,
     total_modes: usize,
@@ -354,10 +444,40 @@ impl MaterialStringSource {
         let section = shear.with_torsional_viscosity(viscosity_property)?;
         Ok(Self::WithTorsion(Box::new(TorsionalStringSource {
             bending: self,
-            section,
+            law: TwistLaw::Section(section),
             relaxation: None,
             mode_count: modes,
             total_modes,
+        })))
+    }
+
+    /// Add a measured whole string's own measured torsion as `modes` twist modes
+    /// on its nut-to-support span ([`MeasuredStringTorsion`]).
+    ///
+    /// Only [`Self::Measured`] takes it, with or without its two transverse
+    /// planes, and either polarization order gives the same source. Bending
+    /// coordinates come first, then the twist modes `1..=modes` at `n f_1`.
+    ///
+    /// # Errors
+    /// A source that is not a measured whole string, already twisted, or a mode
+    /// selection outside 1..=4096. Clock admission occurs at assembly.
+    pub fn with_measured_torsion(self, torsion: MeasuredStringTorsion, modes: usize)
+        -> Result<Self, MaterialStatePointError>
+    {
+        if let Self::WithPolarizations(p) = self {
+            return p.add_measured_torsion(torsion, modes);
+        }
+        let invalid = |quantity| MaterialStatePointError::InvalidDerived { quantity };
+        if modes == 0 || modes > 4096 || matches!(&self, Self::WithTorsion(_)) {
+            return Err(invalid("torsional extension requires 1..=4096 modes and a non-nested source"));
+        }
+        if !matches!(&self, Self::Measured(_)) {
+            return Err(invalid("measured torsion belongs to a measured whole string; a material section derives its own"));
+        }
+        let total_modes = self.modes().checked_add(modes)
+            .ok_or_else(|| invalid("combined bending/torsion mode count overflow"))?;
+        Ok(Self::WithTorsion(Box::new(TorsionalStringSource {
+            bending: self, law: TwistLaw::Measured(torsion), relaxation: None, mode_count: modes, total_modes,
         })))
     }
 
@@ -385,7 +505,12 @@ impl MaterialStringSource {
                         quantity: "torsional relaxation requires one original source binding",
                     });
                 }
-                twist.relaxation = Some(twist.section.clone().with_prony_torsion(properties)?);
+                let TwistLaw::Section(section) = &twist.law else {
+                    return Err(MaterialStatePointError::InvalidDerived {
+                        quantity: "shear relaxation requires a material torsional section; measured torsion has no layers",
+                    });
+                };
+                twist.relaxation = Some(section.clone().with_prony_torsion(properties)?);
                 Ok(Self::WithTorsion(twist))
             }
             Self::Homogeneous(_) | Self::Measured(_) | Self::Wound(_) | Self::Concentric { .. }
@@ -401,13 +526,29 @@ impl MaterialStringSource {
     {
         let mut shapes = self.transverse_shape(card, station)?;
         if let Some(twist) = self.torsion_source() {
-            let inertia = twist.section.rotary_inertia_kg_m();
-            let radius = twist.section.shear().elastic().outer_radius_m();
             let offset = shapes.len() - twist.mode_count;
-            for k in 0..twist.mode_count {
-                let value = radius * unit_shape(k, station, card.length_m, inertia);
-                if !value.is_finite() { return Err(invalid("torsional surface shape is not representable")); }
-                shapes[offset + k] = value;
+            match &twist.law {
+                TwistLaw::Section(section) => {
+                    let inertia = section.rotary_inertia_kg_m();
+                    let radius = section.shear().elastic().outer_radius_m();
+                    for k in 0..twist.mode_count {
+                        let value = radius * unit_shape(k, station, card.length_m, inertia);
+                        if !value.is_finite() { return Err(invalid("torsional surface shape is not representable")); }
+                        shapes[offset + k] = value;
+                    }
+                }
+                TwistLaw::Measured(measured) => {
+                    // Surface displacement per modal coordinate on the nut-to-support span;
+                    // the afterlength does not twist.
+                    let support = measured.support_fraction();
+                    let span = measured.span_m(card.length_m);
+                    let inertia = measured.surface_inertia_kg_m(card.length_m);
+                    for k in 0..twist.mode_count {
+                        let value = if station < support { unit_shape(k, station / support, span, inertia) } else { 0.0 };
+                        if !value.is_finite() { return Err(invalid("torsional surface shape is not representable")); }
+                        shapes[offset + k] = value;
+                    }
+                }
             }
         }
         Ok(shapes)
@@ -418,8 +559,22 @@ impl TorsionalStringSource {
     #[must_use]
     pub const fn bending(&self) -> &MaterialStringSource { &self.bending }
     /// Original material section with independent shear loss and rotary inertia.
+    /// `None` for a measured whole string's measured torsion, which has no section.
     #[must_use]
-    pub const fn section(&self) -> &ConcentricTorsionalSection { &self.section }
+    pub const fn section(&self) -> Option<&ConcentricTorsionalSection> {
+        match &self.law {
+            TwistLaw::Section(section) => Some(section),
+            TwistLaw::Measured(_) => None,
+        }
+    }
+    /// The measured whole string's own torsion, when that is the source.
+    #[must_use]
+    pub const fn measured(&self) -> Option<&MeasuredStringTorsion> {
+        match &self.law {
+            TwistLaw::Section(_) => None,
+            TwistLaw::Measured(measured) => Some(measured),
+        }
+    }
     /// Optional independent shear spectra, retained on the original source.
     #[must_use]
     pub const fn relaxation(&self) -> Option<&ConcentricPronyTorsionalSection> {
@@ -433,7 +588,10 @@ impl TorsionalStringSource {
     pub(super) fn angular_shape(&self, card: &BowedStringCard, station: f64, transverse_modes: usize)
         -> Result<Vec<f64>, ReciprocalStringError>
     {
-        let inertia = self.section.rotary_inertia_kg_m();
+        let TwistLaw::Section(section) = &self.law else {
+            return Err(invalid("an angular map requires material torsion; measured whole-string torsion has no polar inertia"));
+        };
+        let inertia = section.rotary_inertia_kg_m();
         let mut row = vec![0.0; transverse_modes];
         for k in 0..self.mode_count {
             let value = unit_shape(k, station, card.length_m, inertia);
@@ -446,17 +604,21 @@ impl TorsionalStringSource {
     pub(super) fn append_modes(&self, card: &BowedStringCard, modes: &mut Vec<ModalAcousticMode>, gate: &CancelGate)
         -> Result<(), ReciprocalStringError>
     {
-        let inertia = self.section.rotary_inertia_kg_m();
-        let speed = (self.section.stiffness_n_m2() / inertia).sqrt();
+        let section = match &self.law {
+            TwistLaw::Section(section) => section,
+            TwistLaw::Measured(measured) => return self.append_measured_modes(measured, card, modes, gate),
+        };
+        let inertia = section.rotary_inertia_kg_m();
+        let speed = (section.stiffness_n_m2() / inertia).sqrt();
         let norm = (inertia * card.length_m * 0.5).sqrt();
-        let radius = self.section.shear().elastic().outer_radius_m();
+        let radius = section.shear().elastic().outer_radius_m();
         if !speed.is_finite() || speed <= 0.0 || !norm.is_finite() || norm <= 0.0
             || !(radius / norm).is_finite() || radius / norm == 0.0 {
             return Err(invalid("torsion frequency and angular normalization must be representable"));
         }
-        let constant_loss = self.constant_loss()?;
+        let constant_loss = Self::constant_loss(section)?;
         let (lo, hi) = match &constant_loss {
-            None => self.section.omega_band_rad_s(),
+            None => section.omega_band_rad_s(),
             Some(law) => law.band,
         };
         for n in 1..=self.mode_count {
@@ -464,14 +626,39 @@ impl TorsionalStringSource {
             let k = n as f64 * core::f64::consts::PI / card.length_m;
             let omega = k * speed;
             let viscous = match &constant_loss {
-                None => self.section.viscous_stiffness_n_m2_s(),
+                None => section.viscous_stiffness_n_m2_s(),
                 Some(law) => law.viscous_stiffness_at(omega),
             };
             let zeta = (viscous / inertia) * k * k / (2.0 * omega);
             if !omega.is_finite() || omega <= 0.0 || omega < lo || omega > hi
                 || !zeta.is_finite() || zeta < 0.0
-                || (self.section.viscous_stiffness_n_m2_s() > 0.0 && zeta == 0.0) {
+                || (section.viscous_stiffness_n_m2_s() > 0.0 && zeta == 0.0) {
                 return Err(invalid("actual torsional modes exceed material support or coefficient representability"));
+            }
+            modes.push(ModalAcousticMode { angular_frequency_rad_s: omega, damping_ratio: zeta,
+                pressure_per_modal_velocity: fs_math::c64::C64::ZERO });
+        }
+        Ok(())
+    }
+
+    /// Measured twist modes: `omega_n = 2 pi n f_1` and the measured `zeta = 1 / (2 Q)` on every mode.
+    fn append_measured_modes(&self, measured: &MeasuredStringTorsion, card: &BowedStringCard,
+        modes: &mut Vec<ModalAcousticMode>, gate: &CancelGate) -> Result<(), ReciprocalStringError>
+    {
+        let span = measured.span_m(card.length_m);
+        let inertia = measured.surface_inertia_kg_m(card.length_m);
+        let norm = (inertia * span * 0.5).sqrt();
+        let zeta = 0.5 / measured.quality_factor();
+        if !span.is_finite() || span <= 0.0 || !inertia.is_finite() || inertia <= 0.0
+            || !norm.is_finite() || norm <= 0.0 || !(1.0 / norm).is_finite()
+            || !zeta.is_finite() || zeta <= 0.0 {
+            return Err(invalid("measured torsion's span, surface inertia and loss must be representable"));
+        }
+        for n in 1..=self.mode_count {
+            poll(gate)?;
+            let omega = core::f64::consts::TAU * measured.fundamental_hz() * n as f64;
+            if !omega.is_finite() || omega <= 0.0 {
+                return Err(invalid("measured torsional mode frequency is not representable"));
             }
             modes.push(ModalAcousticMode { angular_frequency_rad_s: omega, damping_ratio: zeta,
                 pressure_per_modal_velocity: fs_math::c64::C64::ZERO });
@@ -481,17 +668,17 @@ impl TorsionalStringSource {
 
     /// The per-layer shear loss when any layer states [`SHEAR_VISCOSITY_REFERENCE_OMEGA`], else `None`. Its band is
     /// the section's material band within the spectrum's fit band and each stated anchor's own validity.
-    fn constant_loss(&self) -> Result<Option<TorsionalConstantLoss>, ReciprocalStringError> {
-        let elastic = self.section.shear().elastic();
+    fn constant_loss(section: &ConcentricTorsionalSection) -> Result<Option<TorsionalConstantLoss>, ReciprocalStringError> {
+        let elastic = section.shear().elastic();
         if elastic.layers().iter().all(|layer| layer.material.property(SHEAR_VISCOSITY_REFERENCE_OMEGA).is_none()) {
             return Ok(None);
         }
-        let (lo, hi) = self.section.omega_band_rad_s();
+        let (lo, hi) = section.omega_band_rad_s();
         let mut band = (lo.max(STRING_LOSS_SPECTRUM_BAND_RAD_S.0), hi.min(STRING_LOSS_SPECTRUM_BAND_RAD_S.1));
         let mut layers = Vec::with_capacity(elastic.layers().len());
         for (layer, geometry) in elastic.layers().iter().zip(elastic.layer_integrals()) {
             // The same per-layer term as the section's sum: eta_s times the polar moment J = 2 I.
-            let eta = layer.material.property(self.section.viscosity_property())
+            let eta = layer.material.property(section.viscosity_property())
                 .ok_or_else(|| invalid("constant-loss torsion lost a layer's shear viscosity"))?.value_si();
             let viscous = eta * (2.0 * geometry.second_moment_m4());
             let reference = match layer.material.property(SHEAR_VISCOSITY_REFERENCE_OMEGA) {

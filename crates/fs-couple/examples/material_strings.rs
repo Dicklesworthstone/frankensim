@@ -352,6 +352,9 @@ impl input::Spec {
         if self.one_way_observer.is_some() && profile.is_none() {
             return Err("one_way_observer requires a body profile that declares its closed acoustic skin".into());
         }
+        if stop_profile.is_some() && self.strings.iter().any(|wire| wire.measured_torsion.is_some()) {
+            return Err("a torsion-measured row is the open string's measurement; a stop profile changes the twisting span".into());
+        }
         if let Some(stops)=&stop_profile { stops.validate_performance(&self,gate)?; }
         if let Some(radiation) = self.body_radiation {
             radiation.validate(self.rate)?;
@@ -1078,10 +1081,15 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
         match &wire.tension_loss {
             Some(row)=>eprintln!("tension_loss_string={string}; row={}; eta_F={}; source={:?}; other_rows=[{}]",
                 row.id,row.eta_f,row.source,others(Some(&row.id))),
-            None=>eprintln!("tension_loss_string={string}; eta_F=stated unknown, entered as 0 (no tension loss: air and the pack's bending law only); rows=[{}]",
-                others(None)),
+            // A measured string's own loss-factors rows are its tension loss; only a string with neither has none.
+            None=>match measured::loss_receipt(&ready,string) {
+                Some(bound)=>eprintln!("tension_loss_string={string}; {bound}; tension_loss_table_rows=[{}]",others(None)),
+                None=>eprintln!("tension_loss_string={string}; eta_F=stated unknown, entered as 0 (no tension loss: air and the pack's bending law only); rows=[{}]",
+                    others(None)),
+            },
         }
     }
+    measured::describe_torsion(&ready);
     eprintln!("bow_friction={:?}",ready.spec.friction);
     if let Some(forces)=ready.performance.material_force_program() {
         eprintln!("physical_force_ports={:?}; initial_force_N={:?}; initialization={:?}; authored_events={}; preload_energy_J={:?}; shared mechanical clock and coupled solver",

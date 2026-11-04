@@ -257,7 +257,7 @@ fn data_only_elastic_pairs_reach_bending_torsion_and_coupled_pressure() {
             let MaterialStringSource::WithTorsion(twist) = source(&ready) else {
                 panic!("retained torsion")
             };
-            assert_eq!(twist.section().shear().shear_property(), None);
+            assert_eq!(twist.section().unwrap().shear().shear_property(), None);
             assert_eq!(
                 pressure(&mut ready, 1),
                 expected,
@@ -308,11 +308,11 @@ fn data_only_elastic_pairs_reach_bending_torsion_and_coupled_pressure() {
                 panic!("retained torsion")
             };
             close(
-                twist.section().rotary_inertia_kg_m(),
+                twist.section().unwrap().rotary_inertia_kg_m(),
                 2.0 * (7800.0 * core_i + density * sleeve_i),
             );
             close(
-                twist.section().stiffness_n_m2(),
+                twist.section().unwrap().stiffness_n_m2(),
                 2.0 * (80e9 * core_i + shear * sleeve_i),
             );
             assert_eq!(changed.performance.bank().cards()[0].tension_n, 20.0);
@@ -370,8 +370,8 @@ fn independent_sleeve_properties_reach_section_torsion_and_coupled_pressure() {
             assert_eq!(e.layers().len(), 2);
             assert_eq!(e.layers()[0].material, section(&original).elastic().layers()[0].material);
             let MaterialStringSource::WithTorsion(twist) = source(&changed) else { panic!("original torsion") };
-            close(twist.section().rotary_inertia_kg_m(), 2.0 * (7800.0 * core_i + (if key == "density" {value} else {7800.0}) * sleeve_i));
-            close(twist.section().stiffness_n_m2(), 2.0 * (80e9 * core_i + (if key == SHEAR {value} else {80e9}) * sleeve_i));
+            close(twist.section().unwrap().rotary_inertia_kg_m(), 2.0 * (7800.0 * core_i + (if key == "density" {value} else {7800.0}) * sleeve_i));
+            close(twist.section().unwrap().stiffness_n_m2(), 2.0 * (80e9 * core_i + (if key == SHEAR {value} else {80e9}) * sleeve_i));
             assert_eq!(changed.performance.bank().cards()[0].tension_n, 20.0);
             let actual = pressure(&mut changed, 1);
             assert!(actual.iter().zip(&expected).any(|(a,b)| (a-b).abs() > 1e-12), "{key} did not reach actual output");
