@@ -121,6 +121,8 @@ pub mod piano_vertical;
 pub mod pickup;
 /// Source-bound reciprocal longitudinal piezoelectric sensors and actuators.
 pub mod piezoelectric;
+/// Native field/finite-inertia feedback for invariant circular planar conductors.
+pub mod planar_induction;
 /// Finite-amplitude periodic regimes of complete nonlinear pHS ODEs via fs-orbit.
 pub mod phs_orbit;
 /// Material-driven biased magnetostrictive coil/core motion on the shared stepper.

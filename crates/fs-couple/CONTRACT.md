@@ -28349,3 +28349,67 @@ Scope remains constant-density generalized-Newtonian flow on one globally rigid
 two-dimensional domain with a principal-z body. Viscoelastic memory, density
 evolution, thermal deposition, independent obstacles, exact finite-step whole-
 fluid angular conservation and a full coupled passivity theorem are not added.
+
+## Finite-inertia planar induction rotor
+
+`planar_induction::PlanarInductionRotor` couples the original linear
+`fs-em::PlanarEddy` moving-conductor midpoint to the original
+`fs-mbd::articulated` prescribed-base inverse-inertia/impulse owner. The
+mechanical model is one original revolute-z root link on a stationary support,
+with its original centered axisymmetric spatial inertia. Field history,
+unwrapped angle and angular velocity form one immutable accepted state.
+The API returns both field and mechanical histories together only after
+coupling, field, work, impulse and cancellation admission.
+
+The admitted physical conductor is a homogeneous isotropic disk or annulus
+whose analytic occupancy is invariant under rotation. Binding checks all
+original conductor cells: one source-resolved material and isolated current
+region, positive triangle orientation, opposite interior edges, one connected
+component and complete outer/inner boundary cycles winding once about the
+native axis. Every boundary chord must fit the declared radial approximation
+budget. A finite square, offset rotor, sector, extra hole or varying conductor
+source cannot silently become an invariant rotor. The fixed polygonal mesh
+still approximates circles: this admission does not certify exact polygon
+no-penetration, geometry convergence or electromagnetic field accuracy.
+No interface, material source or mesh actually rotates.
+
+The complete field domain must have uniform scalar permeability. This avoids
+claiming full bearing-force closure from Lorentz volume forces while omitting
+permeability-interface traction. Every conducting cell belongs to this rotor;
+separate conducting stators require another composition. Impressed current
+inside the rotor refuses at binding and every endpoint, because the extracted
+loads represent the native conduction current. Fixed external impressed-current
+coils in insulating cells retain their original source-work owner.
+
+Each bounded scalar trial uses the original accepted magnetic history and
+rigid velocity `omega * [-dy, dx]`. The native nonsymmetric induction solve
+supplies the actual midpoint current, field, Joule heat and Lorentz work.
+The original exact P1 load integrator supplies the full force/torque wrench,
+which is transformed to the actual midpoint link frame. The native ABA
+impulse response then applies its integrated body load and any separately
+declared held shaft torque. Its original constrained mass, support reaction,
+representability and joint-limit checks remain active. The impulse API is
+used as an inverse-inertia map inside this finite-duration composition;
+the composition advances the rotor angle itself.
+
+The converged field speed must agree with the mean of the actual old/new
+mechanical speeds. Actual kinetic increment minus native field mechanical
+work and shaft work is independently bounded, as is the combined magnetic
+plus kinetic storage change plus Joule heat minus impressed-source and shaft
+work. Native support impulses, external impulses and their angular/linear
+residuals remain separately available. A stationary ideal support has zero
+work. Numerical field, mechanical and coupling defects are exposed; none is
+reclassified as heat, removed from torque or repaired by changing state.
+Nonconvergence has no prescribed-speed fallback and returns no partial state.
+
+The implementation reuses the prepared original magnetic operator, native
+Krylov/storage/Peclet controls, original P1 force transfer and original linear
+storage ABA owner. The immutable native model, conductor selection, unit rotational velocities
+and geometry receipt share one private reference-counted binding, so accepting
+a new history does not copy mesh-sized prepared arrays. Bounded field trials
+reuse their velocity buffer. No performance, nonlinear-material,
+moving-mesh, full-machine, thermal-feedback or cross-platform claim is made.
+Focused native tests exercise genuine free magnetic DOFs, signed braking,
+finite-inertia feedback versus frozen-speed forcing, continuation, driven
+annular rotation, source/geometry refusals and final-publication cancellation.
+
