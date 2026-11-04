@@ -97,6 +97,7 @@ impl ScatteringModel {
                 ))
             },
         )
+        .map_err(DrivenResonanceError::from)
     }
 }
 

@@ -36,8 +36,8 @@ pub struct ResonanceControls {
     pub absolute_frequency_tolerance_rad_s: f64,
     /// Additional relative bracket width, in [0,1). The larger tolerance wins.
     pub relative_frequency_tolerance: f64,
-    /// Maximum factor/response queries, including the peak and both crossings.
-    /// Each derivative query additionally reuses its factor for one tangent solve.
+    /// Maximum physical response queries, including the peak and both crossings.
+    /// Native harmonic derivative queries share each factor with the tangent solve.
     /// Must lie in 3..=4096; there is no unbounded search or implicit truncation.
     pub maximum_evaluations: usize,
     /// Also bracket the selected response's squared-amplitude half-height on
@@ -80,7 +80,8 @@ pub struct DrivenResonance {
     pub observation_derivative: C64,
     /// Both resolved half-height crossings, only when requested.
     pub half_power: Option<HalfPowerBandwidth>,
-    /// Actual number of factored physical response queries.
+    /// Actual number of physical response queries. Native harmonic wrappers
+    /// factor their original model once per query.
     pub evaluations: usize,
     /// Largest native response/tangent backward residual across all queries.
     /// Near resonance this is not a forward amplitude or frequency error bound.
@@ -114,6 +115,57 @@ impl std::error::Error for DrivenResonanceError {}
 impl From<HarmonicError> for DrivenResonanceError {
     fn from(error: HarmonicError) -> Self {
         Self::Harmonic(error)
+    }
+}
+
+/// Refusal of a source-supplied physical resonance query. The source error is
+/// retained unchanged and need not implement Clone, PartialEq, or Error.
+/// No partial peak or linewidth is returned on any refusal.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ResonanceSearchError<E> {
+    /// Invalid controls or nonfinite/unrepresentable source observations.
+    Invalid(&'static str),
+    /// The supplied interval does not bracket the selected peak or crossing.
+    NotBracketed(&'static str),
+    /// The total number of source evaluations reached the caller's cap.
+    EvaluationLimit {
+        /// Exhausted physical-query allowance.
+        maximum: usize,
+    },
+    /// Floating-point spacing cannot meet the requested frequency resolution.
+    FrequencyResolution,
+    /// The search's cancellation callback requested a stop.
+    Cancelled,
+    /// Original source admission, physical solve, residual or cancellation error.
+    Source(E),
+}
+
+impl<E: core::fmt::Debug> core::fmt::Display for ResonanceSearchError<E> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "driven resonance search refused: {self:?}")
+    }
+}
+
+impl<E: std::error::Error + 'static> std::error::Error for ResonanceSearchError<E> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Source(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+// Existing pHS and wave methods keep their original public error contract.
+impl From<ResonanceSearchError<DrivenResonanceError>> for DrivenResonanceError {
+    fn from(error: ResonanceSearchError<DrivenResonanceError>) -> Self {
+        match error {
+            ResonanceSearchError::Invalid(what) => Self::Invalid(what),
+            ResonanceSearchError::NotBracketed(what) => Self::NotBracketed(what),
+            ResonanceSearchError::EvaluationLimit { maximum } => Self::EvaluationLimit { maximum },
+            ResonanceSearchError::FrequencyResolution => Self::FrequencyResolution,
+            ResonanceSearchError::Cancelled => Self::Harmonic(HarmonicError::Cancelled),
+            ResonanceSearchError::Source(error) => error,
+        }
     }
 }
 
@@ -192,24 +244,46 @@ impl HarmonicModel {
                 Ok((value, slope, residual.max(response.relative_residual)))
             },
         )
+        .map_err(DrivenResonanceError::from)
     }
 }
 
-// Both ordinary and wave-closed physical systems use one bracket/refinement
-// owner. The evaluator returns the actual observed phasor, its optional exact
-// tangent, and the largest independently checked physical equation residual.
-// `derivative=false` avoids the second solve when refining half-height crossings.
-pub(super) fn search_resonance<C, E>(
+/// Resolve one observed peak and optional half-power linewidth from a complete
+/// physical response supplied by its source owner.
+///
+/// `evaluate(omega, need_derivative, cancelled)` returns the selected complex
+/// observation, its analytic derivative per rad/s, and the largest independently
+/// checked backward residual of that query. The observation must describe the
+/// SAME physical experiment throughout the interval. Any source, coefficient,
+/// or observation frequency dependence belongs in the supplied total derivative.
+/// The source retains its own coordinates, constraints, material memory,
+/// physical load, admission, work/memory limits and residual checks; this search
+/// neither reconstructs an operator nor fits or truncates a response.
+///
+/// `need_derivative=false` is used only for half-height crossings. The source
+/// may omit its tangent solve then; the returned derivative slot is ignored.
+/// This is the same single refinement owner used by ordinary pHS and loaded
+/// wave responses. It makes at most `controls.maximum_evaluations` source calls
+/// and polls cancellation before and after each successful call. A native source
+/// refusal remains [`ResonanceSearchError::Source`] with its original error.
+///
+/// The interval must have positive then negative logarithmic amplitude slope
+/// and must isolate the desired peak. Requested half-height crossings must lie
+/// inside that original interval. Silent peak samples, unresolved plateaus,
+/// missing brackets and insufficient frequency resolution refuse. This does not
+/// enumerate modes, prove uniqueness, certify a continuum, or equate observable
+/// half-power Q with a pole's decay rate or an internal material loss.
+pub fn search_resonance<E, C, F>(
     interval_rad_s: (f64, f64),
     controls: ResonanceControls,
     mut cancelled: C,
-    evaluate: E,
-) -> Result<DrivenResonance, DrivenResonanceError>
+    evaluate: F,
+) -> Result<DrivenResonance, ResonanceSearchError<E>>
 where
     C: FnMut() -> bool,
-    E: FnMut(f64, bool, &mut C) -> Result<(C64, C64, f64), DrivenResonanceError>,
+    F: FnMut(f64, bool, &mut C) -> Result<(C64, C64, f64), E>,
 {
-    poll(&mut cancelled)?;
+    search_poll(&mut cancelled)?;
     let (low, high) = interval_rad_s;
     if !low.is_finite()
         || !high.is_finite()
@@ -221,7 +295,7 @@ where
         || !(0.0..1.0).contains(&controls.relative_frequency_tolerance)
         || !(3..=4096).contains(&controls.maximum_evaluations)
     {
-        return Err(DrivenResonanceError::Invalid(
+        return Err(ResonanceSearchError::Invalid(
             "positive ordered interval and bounded resolution controls required",
         ));
     }
@@ -237,7 +311,7 @@ where
     let mut left = outer_low;
     let mut right = outer_high;
     if left.slope <= 0.0 || right.slope >= 0.0 {
-        return Err(DrivenResonanceError::NotBracketed(
+        return Err(ResonanceSearchError::NotBracketed(
             "a peak requires increasing then decreasing nonzero response",
         ));
     }
@@ -249,7 +323,7 @@ where
             let a = search.sample(interior_midpoint(left.omega, middle)?, true)?;
             let b = search.sample(interior_midpoint(middle, right.omega)?, true)?;
             if a.slope <= 0.0 || b.slope >= 0.0 {
-                return Err(DrivenResonanceError::NotBracketed(
+                return Err(ResonanceSearchError::NotBracketed(
                     "stationary response does not retain a resolved maximum bracket",
                 ));
             }
@@ -276,12 +350,12 @@ where
     let half_power = if controls.measure_half_power_bandwidth {
         let target = peak_sample.value.abs() * core::f64::consts::FRAC_1_SQRT_2;
         if !target.is_finite() || target <= 0.0 {
-            return Err(DrivenResonanceError::Invalid(
+            return Err(ResonanceSearchError::Invalid(
                 "half-height amplitude is not representable",
             ));
         }
         if outer_low.value.abs() >= target || outer_high.value.abs() >= target {
-            return Err(DrivenResonanceError::NotBracketed(
+            return Err(ResonanceSearchError::NotBracketed(
                 "both half-height crossings must lie inside the supplied interval",
             ));
         }
@@ -293,7 +367,7 @@ where
             || !response_quality_factor.is_finite()
             || lower.bracket_rad_s.1 >= upper.bracket_rad_s.0
         {
-            return Err(DrivenResonanceError::FrequencyResolution);
+            return Err(ResonanceSearchError::FrequencyResolution);
         }
         Some(HalfPowerBandwidth {
             lower,
@@ -304,7 +378,7 @@ where
     } else {
         None
     };
-    poll(&mut search.cancelled)?;
+    search_poll(&mut search.cancelled)?;
     Ok(DrivenResonance {
         peak,
         observation: peak_sample.value,
@@ -315,18 +389,18 @@ where
     })
 }
 
-struct Search<C, E> {
-    evaluate: E,
+struct Search<C, F> {
+    evaluate: F,
     controls: ResonanceControls,
     cancelled: C,
     evaluations: usize,
     residual: f64,
 }
 
-impl<C, E> Search<C, E>
+impl<C, F, E> Search<C, F>
 where
     C: FnMut() -> bool,
-    E: FnMut(f64, bool, &mut C) -> Result<(C64, C64, f64), DrivenResonanceError>,
+    F: FnMut(f64, bool, &mut C) -> Result<(C64, C64, f64), E>,
 {
     fn resolved(&self, low: f64, high: f64) -> bool {
         high - low
@@ -336,24 +410,35 @@ where
                 .max(self.controls.relative_frequency_tolerance * f64::midpoint(low, high))
     }
 
-    fn sample(&mut self, omega: f64, derivative: bool) -> Result<Sample, DrivenResonanceError> {
-        poll(&mut self.cancelled)?;
+    fn sample(&mut self, omega: f64, derivative: bool) -> Result<Sample, ResonanceSearchError<E>> {
+        search_poll(&mut self.cancelled)?;
         if self.evaluations == self.controls.maximum_evaluations {
-            return Err(DrivenResonanceError::EvaluationLimit {
+            return Err(ResonanceSearchError::EvaluationLimit {
                 maximum: self.evaluations,
             });
         }
         self.evaluations += 1;
-        let (value, slope, residual) = (self.evaluate)(omega, derivative, &mut self.cancelled)?;
+        let (value, slope, residual) = (self.evaluate)(omega, derivative, &mut self.cancelled)
+            .map_err(ResonanceSearchError::Source)?;
+        search_poll(&mut self.cancelled)?;
+        if !finite(value)
+            || (derivative && !finite(slope))
+            || !residual.is_finite()
+            || residual < 0.0
+        {
+            return Err(ResonanceSearchError::Invalid(
+                "finite physical observation/tangent and nonnegative backward residual required",
+            ));
+        }
         self.residual = self.residual.max(residual);
         if derivative && value == C64::ZERO {
-            return Err(DrivenResonanceError::NotBracketed(
+            return Err(ResonanceSearchError::NotBracketed(
                 "a silent observation or exact antiresonance is not a resonance peak",
             ));
         }
         let logarithmic_slope = if derivative { (slope / value).re } else { 0.0 };
         if !logarithmic_slope.is_finite() || !value.abs().is_finite() {
-            return Err(DrivenResonanceError::Invalid(
+            return Err(ResonanceSearchError::Invalid(
                 "observed amplitude or logarithmic slope is not representable",
             ));
         }
@@ -370,7 +455,7 @@ where
         mut outside: Sample,
         mut inside: Sample,
         target: f64,
-    ) -> Result<ResonanceFrequency, DrivenResonanceError> {
+    ) -> Result<ResonanceFrequency, ResonanceSearchError<E>> {
         loop {
             let low = outside.omega.min(inside.omega);
             let high = outside.omega.max(inside.omega);
@@ -390,10 +475,18 @@ where
     }
 }
 
-fn interior_midpoint(low: f64, high: f64) -> Result<f64, DrivenResonanceError> {
+fn search_poll<E>(cancelled: &mut impl FnMut() -> bool) -> Result<(), ResonanceSearchError<E>> {
+    if cancelled() {
+        Err(ResonanceSearchError::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+
+fn interior_midpoint<E>(low: f64, high: f64) -> Result<f64, ResonanceSearchError<E>> {
     let middle = f64::midpoint(low, high);
     if middle <= low || middle >= high {
-        Err(DrivenResonanceError::FrequencyResolution)
+        Err(ResonanceSearchError::FrequencyResolution)
     } else {
         Ok(middle)
     }
