@@ -13371,3 +13371,38 @@ Six independent regressions pass alongside all eighteen solid interface/slab con
 `water_refraction::IapwsWaterRefraction` evaluates IAPWS R9-97 equation (1) and its released coefficients from original ITS-90 temperature, mass density and vacuum wavelength. It admits only 261.15–773.15 K, 0–1060 kg/m³ and 200–1100 nm. Fixed-size wavelength preparation and allocation-free state queries retain absolute phase index, stable dilute refractivity, analytic group index, and first/second temperature and density partials, including the mixed derivative. `sample_if97_state` consumes the original homogeneous IF97 state's T/rho without replacing its EOS or claiming IAPWS-95 pressure precision.
 
 The caller retains ordinary-water purity, homogeneous phase validity and accepted state identity. The law supplies no absorption, scattering, ice/brine or two-phase mixture closure, and does not extend the published optical uncertainty. Four focused actual-source controls cover 24 published refractive-index values using independently printed IAPWS-95 density tables with rounding allowances, 20 derivative states, four original IF97 states including the complete isobaric chain rule, source-domain refusals, and vacuum/dilute limits.
+
+## Declared WLF and Arrhenius viscous temperature shifts
+
+`visco::temperature::TemperatureShift` retains caller-supplied WLF or molar
+Arrhenius coefficients, the reference temperature and an inclusive calibrated
+temperature interval. Its convention is `a_T = tau(T)/tau(T_ref)`: WLF uses
+`log10(a_T) = -C1 (T-T_ref)/(C2+T-T_ref)`; Arrhenius uses
+`ln(a_T) = (E/R) (1/T-1/T_ref)`. Temperatures are absolute kelvin and E is
+J/mol. The reference shift is exactly one. The complete WLF interval must lie
+strictly above its pole. Out-of-band temperatures and unrepresentable shifts or
+logarithmic derivatives refuse. No universal material coefficients are inferred.
+
+The existing tensor, scalar Maxwell, fractional Zener, modified Zener and lowered
+Prony owners consume the same shift. Maxwell times and complete Kelvin viscosity
+tensors scale by `a_T`; Kelvin factors scale by `sqrt(a_T)`. Elastic moduli,
+anisotropy, branch order, elastic factors and strain limits remain unchanged.
+No eigensolve, NNLS refit or second time integrator is introduced. Existing
+harmonic and history operators therefore evaluate
+`C_T*(omega)=C_ref*(a_T omega)` and reduced time `t/a_T`.
+A lowered model retains its original fit measurements on the correspondingly
+mapped frequency grid; it gains no experimental or inter-sample authority.
+Bounded source frequency support shifts by `1/a_T`, and nonzero coefficients
+may not silently vanish by underflow.
+
+The returned `ShiftedViscoelastic<M>` retains the actual temperature and complete
+shift declaration alongside the original constitutive implementation.
+`temperature_shift.rs` and `temperature_shift_scalar.rs` exercise the formulas,
+reference fixed point, refusals, harmonic response, plane stress, reduced-time
+histories, positive viscous heat and transformed source support.
+These are authored numerical fixtures, not measured material calibration.
+The caller must qualify the same material as thermorheologically simple.
+Moisture shifts, vertical modulus changes, thermal expansion, integration along
+a changing temperature history, and caloric/entropy coupling remain separate.
+This is a temperature-dependent constitutive slice of IRP M0.2-W4
+(`frankensim-irp-v5-instrument-realism-pexfp.24`), not closure of that whole bead.

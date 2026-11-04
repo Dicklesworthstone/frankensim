@@ -46,6 +46,8 @@ pub mod slab_ted;
 pub mod modified_zener;
 pub mod source;
 pub mod stress_control;
+/// Declared WLF/Arrhenius shifts of existing scalar and tensor viscous kinetics.
+pub mod temperature;
 /// Passive full-tensor Prony (generalized Maxwell) viscoelastic law in Mandel coordinates.
 pub mod tensor;
 pub use modified_zener::ModifiedFractionalZener;
