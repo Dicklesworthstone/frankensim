@@ -28,15 +28,14 @@
 //! Cross-gap pressure corrections are outside this model; see Gustafsson et al.
 //! (2015), <https://doi.org/10.1016/j.apm.2015.03.028>.
 
-use fs_math::det;
-
 mod layer_work;
 use layer_work::LayerWork;
 pub use layer_work::MAX_LAYER_REPORTS;
 /// Prescribed pressure supplies combined with the original sliding-wall film.
 pub mod pressure;
+pub use pressure::PressureDrivenShearedFilm;
 
-use super::pressure::{PressureDatum, PressureDrivenReport, ReservoirPressures};
+use super::pressure::{PressureDatum, PressureDrivenReport, ReservoirPressures, barus_mean_at_datum, pressure_drop_at_datum};
 use super::stratified::{GapViscosityProfile, StratifiedFilm, ViscosityLayer};
 use super::{
     FilmError, FilmReport, MAX_CELLS, MAX_CHANNELS, MAX_PORTS, ResistiveFilm, Solution, dot, fail,
@@ -409,12 +408,12 @@ impl ShearedFilm {
         self.film.project(&state.pressure.pressure, &mut candidate);
         let mut pressure_drops = [0.0; MAX_CHANNELS];
         let mut power = 0.0;
-        let mut supply = 0.0;
+        let mut supply = Sum::default();
         let mut supply_magnitude = 0.0;
         for (k, edge) in self.film.channels.iter().enumerate() {
             let local = state.channels[k];
             let coefficient = &self.coefficients[k];
-            let dp = self.pressure_difference(&state, k, reservoirs);
+            let dp = local.pressure_drop;
             let potential_drop = state.pressure.potential[edge.from]
                 - edge.to.map_or_else(
                     || reservoirs.map_or(0.0, |r| r.potential[k]),
@@ -445,7 +444,7 @@ impl ShearedFilm {
                 // Reservoir work uses TOTAL flow, including Couette pumping.
                 // Only Qp*delta_p and relative-wall drag are irreversible heat.
                 let incoming = -p * flow;
-                supply += incoming;
+                supply.add(incoming);
                 supply_magnitude += incoming.abs();
             }
             if REPORT_LAYERS {
@@ -461,6 +460,7 @@ impl ShearedFilm {
             }
         }
         let work = dot(velocity, &candidate[..self.film.ports]);
+        let supply = supply.value();
         let residual = work + supply - power;
         let magnitude = work.abs() + supply_magnitude + power.abs();
         if candidate[..self.film.ports].iter().any(|x| !x.is_finite())
@@ -610,7 +610,7 @@ impl ShearedFilm {
             }
             let local = state.channels[k];
             let dh = -dot(&edge.gap.closure, dq);
-            let dp = self.pressure_difference(&state, k, reservoirs);
+            let dp = local.pressure_drop;
             let boundary_change = if reservoirs.is_some() {
                 reservoir_directions_pa[k]
             } else {
@@ -648,25 +648,6 @@ impl ShearedFilm {
         }
         out.copy_from_slice(&candidate[..self.film.ports]);
         Ok(())
-    }
-
-    fn pressure_difference(
-        &self,
-        state: &State,
-        channel: usize,
-        reservoirs: Option<&ReservoirPressures>,
-    ) -> f64 {
-        let edge = &self.film.channels[channel];
-        let Some(boundary) = reservoirs else {
-            return state.pressure.pressure[edge.from]
-                - edge.to.map_or(0.0, |j| state.pressure.pressure[j]);
-        };
-        let alpha = self.film.pressure_viscosity_coefficient_per_pa();
-        let to = edge.to.map_or(boundary.potential[channel], |j| state.pressure.potential[j]);
-        let delta = state.pressure.potential[edge.from] - to;
-        let fluidity = boundary.datum.fluidity - alpha * to;
-        let scaled = alpha * delta / fluidity;
-        if scaled == 0.0 { delta / fluidity } else { -(-scaled).ln_1p() / alpha }
     }
 
     fn state_with_reservoirs(
@@ -718,6 +699,7 @@ impl ShearedFilm {
                 relative_speed,
                 drag,
                 entrainment: flow,
+                pressure_drop: 0.0,
             };
         }
         let pressure = if let Some(boundary) = reservoirs {
@@ -731,90 +713,50 @@ impl ShearedFilm {
             )?
         };
         let alpha = self.film.pressure_viscosity_coefficient_per_pa();
-        if alpha != 0.0 {
-            for (k, edge) in self.film.channels.iter().enumerate() {
+        for (k, edge) in self.film.channels.iter().enumerate() {
+            let to = edge.to.map_or_else(
+                || reservoirs.map_or(0.0, |r| r.potential[k]),
+                |j| pressure.potential[j],
+            );
+            let multiplier = if alpha != 0.0 && self.coefficients[k].moving {
+                barus_mean_at_datum(
+                    alpha,
+                    reservoirs.map_or(1.0, |r| r.datum.fluidity),
+                    pressure.potential[edge.from],
+                    to,
+                    0.0,
+                    0.0,
+                )?.0
+            } else {
+                1.0
+            };
+            channels[k].pressure_drop = if reservoirs.is_some() {
+                // Reuse the sorted-endpoint divided difference. A one-sided
+                // log1p ratio can round to its singular endpoint even when
+                // both admitted endpoint fluidities are finite and positive.
                 if self.coefficients[k].moving {
-                    let (multiplier, _) = barus_mean_at_datum(
+                    (pressure.potential[edge.from] - to) * multiplier
+                } else {
+                    pressure_drop_at_datum(
                         alpha,
                         reservoirs.map_or(1.0, |r| r.datum.fluidity),
                         pressure.potential[edge.from],
-                        edge.to.map_or_else(
-                            || reservoirs.map_or(0.0, |r| r.potential[k]),
-                            |j| pressure.potential[j],
-                        ),
-                        0.0,
-                        0.0,
-                    )?;
-                    channels[k].drag *= multiplier;
-                    if !channels[k].drag.is_finite() || channels[k].drag <= 0.0 {
-                        return fail("pressure-dependent sliding resistance is not representable");
-                    }
+                        to,
+                    )?
+                }
+            } else {
+                pressure.pressure[edge.from]
+                    - edge.to.map_or(0.0, |j| pressure.pressure[j])
+            };
+            if alpha != 0.0 && self.coefficients[k].moving {
+                channels[k].drag *= multiplier;
+                if !channels[k].drag.is_finite() || channels[k].drag <= 0.0 {
+                    return fail("pressure-dependent sliding resistance is not representable");
                 }
             }
         }
         Ok(State { pressure, channels })
     }
-}
-
-// Integrate exp(alpha*p(x)) along the passage, where psi(x) is affine.
-// The coincident-pressure divided difference and its derivative are evaluated
-// by a fixed convergent series; no pressure subtraction or quadrature is used.
-fn barus_mean_at_datum(
-    alpha: f64,
-    fluidity: f64,
-    from: f64,
-    to: f64,
-    from_change: f64,
-    to_change: f64,
-) -> Result<(f64, f64), FilmError> {
-    if alpha == 0.0 {
-        return Ok((1.0, 0.0));
-    }
-    let (high, low, high_change, low_change) = if from >= to {
-        (from, to, from_change, to_change)
-    } else {
-        (to, from, to_change, from_change)
-    };
-    let r = fluidity - alpha * high;
-    let delta = high - low;
-    let x = alpha * delta / r;
-    let (mean, change) = if x <= 0.125 {
-        let mut logarithmic = 1.0;
-        let mut high_weight = 0.5;
-        let mut low_weight = 0.5;
-        let mut power = 1.0;
-        for n in 1..=20 {
-            power *= -x;
-            logarithmic += power / f64::from(n + 1);
-            high_weight += power / f64::from(n + 2);
-            low_weight += power * f64::from(n + 1) / f64::from(n + 2);
-        }
-        let mean = logarithmic / r;
-        let change = if high_change == 0.0 && low_change == 0.0 {
-            0.0
-        } else {
-            (alpha / r) * ((high_weight * high_change + low_weight * low_change) / r)
-        };
-        (mean, change)
-    } else {
-        let r_low = fluidity - alpha * low;
-        let log_ratio = if x.is_finite() {
-            det::ln(1.0 + x)
-        } else {
-            det::ln(r_low) - det::ln(r)
-        };
-        let mean = (log_ratio / alpha) / delta;
-        let change = if high_change == 0.0 && low_change == 0.0 {
-            0.0
-        } else {
-            ((high_change / r - low_change / r_low) - mean * (high_change - low_change)) / delta
-        };
-        (mean, change)
-    };
-    if !mean.is_finite() || mean <= 0.0 || !change.is_finite() {
-        return fail("Barus sliding viscosity average or tangent is not representable");
-    }
-    Ok((mean, change))
 }
 
 #[derive(Clone, Copy, Default)]
@@ -824,6 +766,7 @@ struct ChannelState {
     relative_speed: f64,
     drag: f64,
     entrainment: f64,
+    pressure_drop: f64,
 }
 
 struct State {

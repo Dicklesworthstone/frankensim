@@ -24,6 +24,17 @@ tangent differentiates gaps, wall rates and all prescribed boundary pressures
 together. Viscosity continuation retains supplies, geometry and wall rows.
 Admission failures leave caller outputs untouched.
 
+The additive `evaluate_force_into` omits channel/layer publication for repeated
+mechanical trial queries; the original report-bearing API remains available.
+Count/range accessors preserve original channels and layers for thermal routes.
+Both supplied-film owners use the original passive arithmetic for explicit
+zero supplies, including tangents when supply directions are zero. Signed reservoir work uses compensated sums.
+Sorted-endpoint Barus recovery retains finite drops when a one-sided logarithmic
+ratio would round to its singular endpoint. Pressure-only and fixed-wall paths
+recover the physical drop without requiring a separately representable viscosity
+multiplier. Moving passages cache the drop and reuse their already required
+mean viscosity for traction, heat and geometry derivatives.
+
 The model adds no finite reservoir inventory, supply-line dynamics, thermal
 clock, fluid inertia, cavitation or general high-pressure EHL constitutive law.
 Regressions cover analytic supplied Couette/Poiseuille work, static Barus load

@@ -13,6 +13,8 @@
 //! <https://ntrs.nasa.gov/citations/19910021217>). It supplies no reservoir
 //! inventory, supply-line dynamics, cavitation, fluid inertia or thermal owner.
 
+use fs_math::det;
+
 use super::{
     FilmChannelReport, FilmError, FilmReport, MAX_CELLS, MAX_CHANNELS, MAX_PORTS, ResistiveFilm,
     dot, fail, solve_factored,
@@ -46,6 +48,7 @@ impl PressureDatum {
 pub struct PressureDrivenFilm {
     film: ResistiveFilm,
     reservoirs: ReservoirPressures,
+    ambient: bool,
 }
 
 /// One compiled pressure boundary shared by normal and sliding-wall films.
@@ -141,7 +144,8 @@ impl PressureDrivenFilm {
     /// endpoints. No omitted or duplicate reservoir can silently become ambient.
     pub fn new(film: ResistiveFilm, reservoirs_pa: &[Option<f64>]) -> Result<Self, FilmError> {
         let reservoirs = ReservoirPressures::new(&film, reservoirs_pa)?;
-        Ok(Self { film, reservoirs })
+        let ambient = reservoirs_pa.iter().flatten().all(|p| *p == 0.0);
+        Ok(Self { film, reservoirs, ambient })
     }
 
     /// Original channel-indexed boundary mapping, in gauge Pa.
@@ -191,6 +195,18 @@ impl PressureDrivenFilm {
         {
             return fail("invalid pressure-driven film output shape");
         }
+        if self.ambient {
+            // Preserve the original ambient pressure, channel work and force
+            // arithmetic exactly, including internal-channel cancellation.
+            let report = film.evaluate_with_channels_into(q, velocity, force, pressure, channels)?;
+            let work = dot(velocity, force);
+            return Ok(PressureDrivenReport {
+                film: report,
+                mechanical_power_w: work,
+                reservoir_power_w: 0.0,
+                power_residual_w: work - report.dissipated_power_w,
+            });
+        }
         let s = film.solve_with_boundaries::<false, true>(
             q,
             velocity,
@@ -211,13 +227,12 @@ impl PressureDrivenFilm {
             let flow = s.conductance[k] * delta;
             // Recover a pressure DIFFERENCE without subtracting two biased
             // physical pressures. This is also exact for the constant-mu law.
-            let fluidity = self.reservoirs.datum.fluidity - alpha * to;
-            let scaled = alpha * delta / fluidity;
-            let dp = if scaled == 0.0 {
-                delta / fluidity
-            } else {
-                -(-scaled).ln_1p() / alpha
-            };
+            let dp = pressure_drop_at_datum(
+                alpha,
+                self.reservoirs.datum.fluidity,
+                s.potential[edge.from],
+                to,
+            )?;
             let power = flow * dp;
             if !flow.is_finite() || !power.is_finite() || power < 0.0 {
                 return fail("nonfinite or negative pressure-driven film channel work");
@@ -290,6 +305,9 @@ impl PressureDrivenFilm {
         {
             return fail("invalid pressure-driven film tangent direction or shape");
         }
+        if self.ambient && reservoir_directions_pa.iter().all(|d| *d == 0.0) {
+            return film.tangent_into(q, velocity, dq, dv, out);
+        }
         let s = film.solve_with_boundaries::<false, true>(
             q,
             velocity,
@@ -333,6 +351,105 @@ impl PressureDrivenFilm {
         out.copy_from_slice(&candidate[..film.ports]);
         Ok(())
     }
+}
+
+/// Physical pressure difference without requiring its viscosity multiplier
+/// to be representable. Sorted fluidities avoid the false negative-log endpoint
+/// at large contrast; zero drop remains exact even at subnormal fluidity.
+pub(super) fn pressure_drop_at_datum(
+    alpha: f64,
+    fluidity: f64,
+    from: f64,
+    to: f64,
+) -> Result<f64, FilmError> {
+    let signed_delta = from - to;
+    if alpha == 0.0 || signed_delta == 0.0 {
+        return if signed_delta.is_finite() {
+            Ok(signed_delta)
+        } else {
+            fail("film pressure difference is not representable")
+        };
+    }
+    let (high, low, sign) = if from > to { (from, to, 1.0) } else { (to, from, -1.0) };
+    let r_high = fluidity - alpha * high;
+    let r_low = fluidity - alpha * low;
+    if !r_high.is_finite() || !r_low.is_finite() || r_high <= 0.0 || r_low <= 0.0 {
+        return fail("film pressure difference needs positive finite fluidities");
+    }
+    let delta = high - low;
+    let scaled = alpha * delta / r_high;
+    let magnitude = if scaled == 0.0 {
+        delta / r_high
+    } else if scaled.is_finite() {
+        scaled.ln_1p() / alpha
+    } else {
+        (det::ln(r_low) - det::ln(r_high)) / alpha
+    };
+    if !magnitude.is_finite() || magnitude < 0.0 {
+        return fail("film pressure difference is not representable");
+    }
+    Ok(sign * magnitude)
+}
+
+// Integrate exp(alpha*p(x)) along the passage, where psi(x) is affine.
+// The coincident-pressure divided difference and its derivative are evaluated
+// by a fixed convergent series; no pressure subtraction or quadrature is used.
+pub(super) fn barus_mean_at_datum(
+    alpha: f64,
+    fluidity: f64,
+    from: f64,
+    to: f64,
+    from_change: f64,
+    to_change: f64,
+) -> Result<(f64, f64), FilmError> {
+    if alpha == 0.0 {
+        return Ok((1.0, 0.0));
+    }
+    let (high, low, high_change, low_change) = if from >= to {
+        (from, to, from_change, to_change)
+    } else {
+        (to, from, to_change, from_change)
+    };
+    let r = fluidity - alpha * high;
+    let delta = high - low;
+    let x = alpha * delta / r;
+    let (mean, change) = if x <= 0.125 {
+        let mut logarithmic = 1.0;
+        let mut high_weight = 0.5;
+        let mut low_weight = 0.5;
+        let mut power = 1.0;
+        for n in 1..=20 {
+            power *= -x;
+            logarithmic += power / f64::from(n + 1);
+            high_weight += power / f64::from(n + 2);
+            low_weight += power * f64::from(n + 1) / f64::from(n + 2);
+        }
+        let mean = logarithmic / r;
+        let change = if high_change == 0.0 && low_change == 0.0 {
+            0.0
+        } else {
+            (alpha / r) * ((high_weight * high_change + low_weight * low_change) / r)
+        };
+        (mean, change)
+    } else {
+        let r_low = fluidity - alpha * low;
+        let log_ratio = if x.is_finite() {
+            det::ln(1.0 + x)
+        } else {
+            det::ln(r_low) - det::ln(r)
+        };
+        let mean = (log_ratio / alpha) / delta;
+        let change = if high_change == 0.0 && low_change == 0.0 {
+            0.0
+        } else {
+            ((high_change / r - low_change / r_low) - mean * (high_change - low_change)) / delta
+        };
+        (mean, change)
+    };
+    if !mean.is_finite() || mean <= 0.0 || !change.is_finite() {
+        return fail("Barus sliding viscosity average or tangent is not representable");
+    }
+    Ok((mean, change))
 }
 
 #[cfg(test)]

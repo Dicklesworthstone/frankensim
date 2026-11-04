@@ -24,6 +24,7 @@ use super::{
 pub struct PressureDrivenShearedFilm {
     film: ShearedFilm,
     reservoirs: ReservoirPressures,
+    ambient: bool,
 }
 
 impl PressureDrivenShearedFilm {
@@ -33,13 +34,48 @@ impl PressureDrivenShearedFilm {
         pressures_pa: &[Option<f64>],
     ) -> Result<Self, FilmError> {
         let reservoirs = ReservoirPressures::new(&film.film, pressures_pa)?;
-        Ok(Self { film, reservoirs })
+        let ambient = pressures_pa.iter().flatten().all(|p| *p == 0.0);
+        Ok(Self { film, reservoirs, ambient })
     }
 
     /// Original geometry, wall rows and retained viscosity profiles.
     #[must_use]
     pub const fn sheared_film(&self) -> &ShearedFilm {
         &self.film
+    }
+
+    /// Number of original generalized mechanical ports.
+    #[must_use]
+    pub fn port_count(&self) -> usize {
+        self.film.pressure_operator().port_count()
+    }
+
+    /// Number of original pressure cells.
+    #[must_use]
+    pub fn cell_count(&self) -> usize {
+        self.film.pressure_operator().cell_count()
+    }
+
+    /// Number of original passages, including closed fixed-wall passages.
+    #[must_use]
+    pub fn channel_count(&self) -> usize {
+        self.film.pressure_operator().channel_count()
+    }
+
+    /// Number of retained layers in original flat channel order.
+    #[must_use]
+    pub fn layer_count(&self) -> usize {
+        self.film.layer_count()
+    }
+
+    /// Original channel's lower-to-upper layer interval.
+    #[must_use]
+    pub fn channel_layer_range(&self, channel: usize) -> Option<core::ops::Range<usize>> {
+        self.film.channel_layer_range(channel)
+    }
+
+    fn evaluation_reservoirs(&self) -> Option<&ReservoirPressures> {
+        if self.ambient { None } else { Some(&self.reservoirs) }
     }
 
     /// Prescribed gauge pressures in original channel order.
@@ -70,6 +106,22 @@ impl PressureDrivenShearedFilm {
         )
     }
 
+    /// Evaluate force, physical pressure and complete power without requesting
+    /// channel or layer reports. Intended for repeated mechanical trial queries;
+    /// the same native solve and atomic admission remain the owners.
+    pub fn evaluate_force_into(
+        &self,
+        q: &[f64],
+        velocity: &[f64],
+        force: &mut [f64],
+        pressure: &mut [f64],
+    ) -> Result<PressureDrivenReport, FilmError> {
+        self.film.evaluate_with_reservoirs::<false, false>(
+            q, velocity, force, pressure, &mut [], &mut [],
+            self.evaluation_reservoirs(),
+        )
+    }
+
     /// Evaluate simultaneous force, cell pressures, total flows and work.
     ///
     /// Mechanical power and reservoir power may each have either sign. Their
@@ -89,7 +141,7 @@ impl PressureDrivenShearedFilm {
             pressure,
             channels,
             &mut [],
-            Some(&self.reservoirs),
+            self.evaluation_reservoirs(),
         )
     }
 
@@ -114,7 +166,7 @@ impl PressureDrivenShearedFilm {
             pressure,
             channels,
             layer_power_w,
-            Some(&self.reservoirs),
+            self.evaluation_reservoirs(),
         )
     }
 
@@ -133,6 +185,12 @@ impl PressureDrivenShearedFilm {
         reservoir_directions_pa: &[f64],
         out: &mut [f64],
     ) -> Result<(), FilmError> {
+        if reservoir_directions_pa.len() != self.channel_count() {
+            return super::fail("invalid pressure-driven sliding film supply direction count");
+        }
+        if self.ambient && reservoir_directions_pa.iter().all(|d| *d == 0.0) {
+            return self.film.tangent_into(q, velocity, dq, dv, out);
+        }
         self.film.tangent_with_reservoirs(
             q,
             velocity,
