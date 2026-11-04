@@ -5,15 +5,19 @@
 //! occupy separate counter domains. One prepared workspace is reused across
 //! the four wavelength lanes; a failed lane refuses the complete pixel.
 
-use super::{AreaLightPixelSample, AreaLightRasterError};
+use super::super::sensor::CurvedSensorPixelSample;
 use super::super::{
-    CAMERA_WAVELENGTHS, CameraRadianceError, CurvedCameraRaster, CurvedPixelSample, unit,
+    CAMERA_WAVELENGTHS, CameraRadianceError, CameraRadianceSample, CurvedCameraRaster,
+    CurvedPixelSample, CurvedRasterError, unit,
 };
+use super::{AreaLightPixelSample, AreaLightRasterError};
+use crate::charts::Ray;
 use crate::polarization::dielectric::scene::curved::camera::area_lights::camera::MAX_AREA_LIGHT_BINDINGS;
 use crate::polarization::dielectric::scene::curved::camera::area_lights::participating::{
     CurvedRayleighAreaLightCameraScene, RayleighAreaLightCameraSettings,
     RayleighAreaLightCameraWorkspace,
 };
+use crate::spectral::detector::QuantumEfficiencySensor;
 use fs_exec::Cx;
 use fs_rand::philox::philox4x32_10;
 
@@ -21,20 +25,20 @@ use fs_rand::philox::philox4x32_10;
 /// and molecular work. The contained area result includes both weighted
 /// next-event terms and complementary emitter hits in its total radiance.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct RayleighAreaLightPixelSample {
-    area: AreaLightPixelSample,
+pub struct RayleighAreaLightPixelSample<P = CurvedPixelSample> {
+    area: AreaLightPixelSample<P>,
     volume_events: [u32; CAMERA_WAVELENGTHS],
     free_flight_draws: [u32; CAMERA_WAVELENGTHS],
     source_free_flight_draws: [u32; CAMERA_WAVELENGTHS],
     source_candidates: [u32; CAMERA_WAVELENGTHS],
 }
 
-impl RayleighAreaLightPixelSample {
-    pub const fn pixel_sample(&self) -> &CurvedPixelSample {
+impl<P> RayleighAreaLightPixelSample<P> {
+    pub const fn pixel_sample(&self) -> &P {
         self.area.pixel_sample()
     }
 
-    pub const fn area_pixel_sample(&self) -> &AreaLightPixelSample {
+    pub const fn area_pixel_sample(&self) -> &AreaLightPixelSample<P> {
         &self.area
     }
 
@@ -74,6 +78,67 @@ impl CurvedCameraRaster<'_> {
         pixel: u32,
         sample: u32,
     ) -> Result<RayleighAreaLightPixelSample, AreaLightRasterError> {
+        self.sample_rayleigh_area_transport(
+            scene,
+            initial_medium,
+            settings,
+            workspace,
+            seed,
+            pixel,
+            sample,
+            |trace| self.sample_pixel_with_transport(cx, seed, pixel, sample, trace),
+        )
+    }
+
+    /// Integrate authored detector channels through native finite-area light
+    /// sampling, molecular collisions and source transmittance. Each wavelength
+    /// retains its own refractive paths, phase function and MIS; every channel
+    /// reuses the same four paths. A failed lane refuses the entire observation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sample_pixel_sensor_rayleigh_area_lights<const C: usize>(
+        &self,
+        cx: &Cx<'_>,
+        scene: &CurvedRayleighAreaLightCameraScene<'_, '_, '_, '_, '_, '_>,
+        sensor: &QuantumEfficiencySensor<C>,
+        initial_medium: usize,
+        settings: RayleighAreaLightCameraSettings,
+        workspace: &mut RayleighAreaLightCameraWorkspace,
+        seed: u64,
+        pixel: u32,
+        sample: u32,
+    ) -> Result<RayleighAreaLightPixelSample<CurvedSensorPixelSample<C>>, AreaLightRasterError>
+    {
+        self.sample_rayleigh_area_transport(
+            scene,
+            initial_medium,
+            settings,
+            workspace,
+            seed,
+            pixel,
+            sample,
+            |trace| self.sample_sensor_with_transport(cx, sensor, seed, pixel, sample, trace),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn sample_rayleigh_area_transport<P>(
+        &self,
+        scene: &CurvedRayleighAreaLightCameraScene<'_, '_, '_, '_, '_, '_>,
+        initial_medium: usize,
+        settings: RayleighAreaLightCameraSettings,
+        workspace: &mut RayleighAreaLightCameraWorkspace,
+        seed: u64,
+        pixel: u32,
+        sample: u32,
+        integrate: impl FnOnce(
+            &mut dyn FnMut(
+                &Cx<'_>,
+                Ray,
+                f64,
+                usize,
+            ) -> Result<CameraRadianceSample, CameraRadianceError>,
+        ) -> Result<P, CurvedRasterError>,
+    ) -> Result<RayleighAreaLightPixelSample<P>, AreaLightRasterError> {
         let key = [seed as u32, (seed >> 32) as u32];
         let mut area_radiance_w_m2_sr_nm = [0.0; CAMERA_WAVELENGTHS];
         let mut area_samples = [0; CAMERA_WAVELENGTHS];
@@ -86,61 +151,55 @@ impl CurvedCameraRaster<'_> {
         let mut source_free_flight_draws = [0; CAMERA_WAVELENGTHS];
         let mut source_candidates = [0; CAMERA_WAVELENGTHS];
         let mut source_failure = None;
-        let result = self.sample_pixel_with_transport(
-            cx, seed, pixel, sample,
-            |cx, ray, wavelength, lane| {
-                let traced = match scene.sample_ray_with_tracking_samples(
-                    cx, ray, wavelength, initial_medium, settings, workspace,
-                    |event| {
-                        let block = philox4x32_10(
-                            [pixel, sample, event, 0x6372_7340 + lane as u32], key,
-                        );
-                        core::array::from_fn(|i| unit(block[i]))
-                    },
-                    |flight| {
-                        philox4x32_10(
-                            [pixel, sample, flight, 0x6372_7350 + lane as u32], key,
-                        ).map(unit)
-                    },
-                    |event, binding| {
-                        let domain = 0x6372_6100
-                            + (lane * MAX_AREA_LIGHT_BINDINGS + binding) as u32;
-                        let block = philox4x32_10([pixel, sample, event, domain], key);
-                        [unit(block[0]), unit(block[1])]
-                    },
-                    |collision, binding| {
-                        let domain = 0x6372_6500
-                            + (lane * MAX_AREA_LIGHT_BINDINGS + binding) as u32;
-                        let block = philox4x32_10([pixel, sample, collision, domain], key);
-                        [unit(block[0]), unit(block[1])]
-                    },
-                    |area, image, flight| {
-                        let source_key = [
-                            key[0] ^ image,
-                            key[1] ^ (0x6372_6200 + lane as u32),
-                        ];
-                        unit(philox4x32_10([pixel, sample, area, flight], source_key)[0])
-                    },
-                ) {
-                    Ok(traced) => traced,
-                    Err(error) => {
-                        source_failure = Some((lane, error));
-                        return Err(CameraRadianceError::NumericalRange);
-                    }
-                };
-                area_radiance_w_m2_sr_nm[lane] = traced.area_radiance_w_m2_sr_nm();
-                area_samples[lane] = u64::from(traced.area_samples());
-                images[lane] = u64::from(traced.images());
-                trace_evaluations[lane] = u64::from(traced.trace_evaluations());
-                field_evaluations[lane] = traced.field_evaluations();
-                query_work[lane] = traced.query_work();
-                volume_events[lane] = traced.volume_events();
-                free_flight_draws[lane] = traced.free_flight_draws();
-                source_free_flight_draws[lane] = traced.source_free_flight_draws();
-                source_candidates[lane] = traced.source_candidates();
-                Ok(*traced.radiance_sample())
-            },
-        );
+        let result = integrate(&mut |cx, ray, wavelength, lane| {
+            let traced = match scene.sample_ray_with_tracking_samples(
+                cx,
+                ray,
+                wavelength,
+                initial_medium,
+                settings,
+                workspace,
+                |event| {
+                    let block =
+                        philox4x32_10([pixel, sample, event, 0x6372_7340 + lane as u32], key);
+                    core::array::from_fn(|i| unit(block[i]))
+                },
+                |flight| {
+                    philox4x32_10([pixel, sample, flight, 0x6372_7350 + lane as u32], key).map(unit)
+                },
+                |event, binding| {
+                    let domain = 0x6372_6100 + (lane * MAX_AREA_LIGHT_BINDINGS + binding) as u32;
+                    let block = philox4x32_10([pixel, sample, event, domain], key);
+                    [unit(block[0]), unit(block[1])]
+                },
+                |collision, binding| {
+                    let domain = 0x6372_6500 + (lane * MAX_AREA_LIGHT_BINDINGS + binding) as u32;
+                    let block = philox4x32_10([pixel, sample, collision, domain], key);
+                    [unit(block[0]), unit(block[1])]
+                },
+                |area, image, flight| {
+                    let source_key = [key[0] ^ image, key[1] ^ (0x6372_6200 + lane as u32)];
+                    unit(philox4x32_10([pixel, sample, area, flight], source_key)[0])
+                },
+            ) {
+                Ok(traced) => traced,
+                Err(error) => {
+                    source_failure = Some((lane, error));
+                    return Err(CameraRadianceError::NumericalRange);
+                }
+            };
+            area_radiance_w_m2_sr_nm[lane] = traced.area_radiance_w_m2_sr_nm();
+            area_samples[lane] = u64::from(traced.area_samples());
+            images[lane] = u64::from(traced.images());
+            trace_evaluations[lane] = u64::from(traced.trace_evaluations());
+            field_evaluations[lane] = traced.field_evaluations();
+            query_work[lane] = traced.query_work();
+            volume_events[lane] = traced.volume_events();
+            free_flight_draws[lane] = traced.free_flight_draws();
+            source_free_flight_draws[lane] = traced.source_free_flight_draws();
+            source_candidates[lane] = traced.source_candidates();
+            Ok(*traced.radiance_sample())
+        });
         if let Some((lane, error)) = source_failure {
             return Err(AreaLightRasterError::Transport { lane, error });
         }

@@ -175,7 +175,7 @@ impl CurvedCameraRaster<'_> {
         })
     }
 
-    fn sample_sensor_with_transport<const C: usize>(
+    pub(super) fn sample_sensor_with_transport<const C: usize>(
         &self,
         cx: &Cx<'_>,
         sensor: &QuantumEfficiencySensor<C>,

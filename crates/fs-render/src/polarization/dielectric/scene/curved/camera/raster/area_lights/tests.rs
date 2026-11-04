@@ -29,6 +29,8 @@ use fs_blake3::hash_domain;
 use fs_geom::{Point3, Vec3};
 use fs_rand::philox::philox4x32_10;
 
+mod sensor;
+
 fn material() -> DielectricGlass {
     DielectricGlass::new(
         CauchyIor::try_constant(1.3).unwrap(),
