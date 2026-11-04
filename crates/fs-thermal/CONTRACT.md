@@ -56,8 +56,36 @@ scheduled births, finite-mold contact/separation and continuation across events.
 This fixed-reference-geometry,
 uniform-cell reduction has first-order heat transport and explicit kinetic
 timestep limits. Conductivity evolution requires a declared supplied law;
-front morphology, moving geometry, mechanical unlocking and work feedback are
-outside this transport model.
+front morphology, moving geometry, mechanical unlocking and work feedback retain
+their separate physical owners.
+
+### Instantaneous heat transfers on accepted phase history
+
+`CrystallizationLaw::apply_specific_enthalpy` resolves a caloric transition at
+exactly zero elapsed time. Irreversible exposure is frozen during heating and
+cooling; explicitly selected equilibrium remelting can reduce surviving
+crystals and their equivalent age. An unchanged enthalpy preserves the accepted
+state bitwise after source, state and control validation. The original inverse
+and melting projection own sensible and latent energy together.
+
+`CrystallizationSimulation::apply_heat_impulses` applies one signed joule amount
+per original active cell in deterministic physical-ID order. Bound cells use
+that same phase closure; ordinary cells retain their original caloric law and
+storage basis. The atomic candidate preserves time, event cursor, mass,
+geometry, contacts and boundary sources. Due events must already be processed;
+conduction and kinetic growth resume only with actual elapsed-time advancement.
+No arbitrary impulse duration is introduced.
+
+Cell-relative storage differences and compensated sums separately bound lost
+heat increments and original caloric defects. Opposing local errors cannot
+cancel admission failures. Caloric iteration and original cell budgets bound
+work; a late source refusal, energy failure or caller checkpoint error returns
+no partial batch. The audit's `external_heat_j` is relative to the thermal
+subsystem: a coupled mechanical owner must cancel that internal transfer with
+its own storage debit and account for any nonthermal export. Three timeline
+regressions cover finite-mold calorimetry and later contact, latent remelting
+and recooling without kinetic aging, and atomic refusal/cancellation including
+unrepresentable heat increments. They require the full native thermal graph.
 
 ## Finite-rate crystallization and latent thermal feedback
 

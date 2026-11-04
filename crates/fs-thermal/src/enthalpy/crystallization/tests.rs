@@ -1,6 +1,8 @@
 //! G0/G1 manufactured calorimetry and G3/G4 timeline/cancellation checks.
 #[path = "tests/adaptive.rs"]
 mod adaptive;
+#[path = "tests/impulses.rs"]
+mod impulses;
 #[path = "tests/remelting.rs"]
 mod remelting;
 

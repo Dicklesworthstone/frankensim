@@ -40,6 +40,10 @@ use crate::crystallization::{
 };
 use std::collections::BTreeMap;
 
+#[path = "crystallization/impulses.rs"]
+mod impulses;
+pub use impulses::CrystallizationImpulseControls;
+
 /// The material closure and its original, all-amorphous thermal coordinate.
 #[derive(Clone, Copy)]
 pub struct CrystallizationMaterial<'a> {
@@ -325,6 +329,14 @@ impl<'a> CrystallizationSimulation<'a> {
     /// fabricated zero crystallinity or extra kinetic allocation.
     pub fn states(&self) -> &BTreeMap<CellId, CrystallizationState> {
         &self.states
+    }
+    /// Original immutable kinetic/caloric owner for a bound material. This
+    /// permits a cross-domain energy transfer to check both original sources
+    /// before proposing a thermal-state change; it grants no mutable access.
+    pub fn material_law(&self, material_id: MaterialId) -> Option<&'a CrystallizationLaw<'a>> {
+        self.materials
+            .get(&material_id)
+            .map(|material| material.law)
     }
     pub fn mass_kg(&self) -> f64 {
         self.thermal.mass_kg()
