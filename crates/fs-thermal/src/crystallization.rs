@@ -22,8 +22,10 @@
 //! This irreversible isokinetic model is an explicitly admitted approximation.
 //! It supplies no stochastic nucleation, crystal morphology, segregation,
 //! melting/reset, glass transition, stress locking or experimentally calibrated
-//! material constants. Growth at the melting temperature requires zero rate;
-//! any temperature above that boundary refuses instead of inventing a melt law.
+//! material constants. An explicitly admitted superheated source domain permits
+//! completely amorphous material to cool into crystallization. The supplied rate
+//! must be zero at and above melting; any nonzero crystal fraction above that
+//! boundary refuses instead of inventing a melt law or resetting phase history.
 //!
 //! Governing model: Nakamura, Katayama & Amano (1973),
 //! <https://doi.org/10.1002/app.1973.070170404>. The heat balance and integral
@@ -92,7 +94,8 @@ impl<F: Fn(f64) -> Result<f64, CrystallizationError>> CrystallizationCaloric for
 ///
 /// This is the nth root of the isothermal Avrami coefficient k(T), whose units
 /// are s^-n. The rate is immutable and continuous; the source owner admits its
-/// material/process applicability. It must vanish at the melting temperature.
+/// material/process applicability. It must vanish at and above the melting
+/// temperature; the solver never replaces an inadmissible supplied rate by zero.
 pub trait CrystallizationRate {
     fn rate_s_inv(&self, temperature_k: f64) -> Result<f64, CrystallizationError>;
 }
@@ -112,8 +115,11 @@ pub struct CrystallizationConfig {
     /// Absolute mass crystallinity at complete relative conversion, in (0,1].
     pub maximum_crystalline_mass_fraction: f64,
     /// Inclusive overlap of both original caloric branches and the kinetic law.
+    /// Above melting, only completely amorphous states are admitted. Both
+    /// original branches must still cover this full source domain.
     pub temperature_range_k: [f64; 2],
-    /// Thermodynamic growth boundary, K. Domain maximum may be lower.
+    /// Thermodynamic growth boundary, K. A source domain may extend above it
+    /// for amorphous feed, without admitting remelting of existing crystals.
     pub melting_temperature_k: f64,
 }
 
@@ -201,7 +207,6 @@ impl<'a> CrystallizationLaw<'a> {
             || !positive(upper)
             || lower >= upper
             || !positive(config.melting_temperature_k)
-            || upper > config.melting_temperature_k
         {
             return Err(CrystallizationError::Invalid(
                 "invalid crystallization parameters or domain",
@@ -239,6 +244,9 @@ impl<'a> CrystallizationLaw<'a> {
         }
         law.rate_s_inv(lower)?;
         law.rate_s_inv(upper)?;
+        if lower < config.melting_temperature_k && config.melting_temperature_k < upper {
+            law.rate_s_inv(config.melting_temperature_k)?;
+        }
         Ok(law)
     }
 
@@ -316,6 +324,7 @@ impl<'a> CrystallizationLaw<'a> {
                 "crystalline mass fraction outside model",
             ));
         }
+        self.check_phase_temperature(temperature_k, crystalline_mass_fraction)?;
         let (amorphous, crystalline) = self.branches(temperature_k)?;
         if crystalline_mass_fraction == 0.0 {
             return Ok(amorphous);
@@ -335,9 +344,9 @@ impl<'a> CrystallizationLaw<'a> {
                 "Nakamura rate must be finite and nonnegative",
             ));
         }
-        if temperature_k == self.config.melting_temperature_k && rate != 0.0 {
+        if temperature_k >= self.config.melting_temperature_k && rate != 0.0 {
             return Err(CrystallizationError::Invalid(
-                "crystallization rate must vanish at melting",
+                "crystallization rate must vanish at and above melting",
             ));
         }
         Ok(rate)
@@ -374,10 +383,10 @@ impl<'a> CrystallizationLaw<'a> {
                 "mixture heat-capacity bound is not representable",
             ));
         }
-        let [mut lower, mut upper] = self.config.temperature_range_k;
+        let [mut lower, mut upper] = self.phase_temperature_range_k(fraction)?;
         let mut h_lower = self.specific_enthalpy_j_kg(lower, fraction)?;
         let mut h_upper = self.specific_enthalpy_j_kg(upper, fraction)?;
-        if h_lower >= h_upper {
+        if h_lower > h_upper || (lower < upper && h_lower == h_upper) {
             return Err(CrystallizationError::Invalid(
                 "mixture caloric branch is not increasing",
             ));
@@ -559,7 +568,39 @@ impl<'a> CrystallizationLaw<'a> {
         if state.identity != self.config.identity {
             return Err(CrystallizationError::StateMismatch);
         }
-        self.check_temperature(state.temperature_k)
+        self.check_phase_temperature(state.temperature_k, state.crystalline_mass_fraction)
+    }
+
+    fn check_phase_temperature(
+        &self,
+        temperature_k: f64,
+        crystalline_mass_fraction: f64,
+    ) -> Result<(), CrystallizationError> {
+        let [minimum_k, maximum_k] = self.phase_temperature_range_k(crystalline_mass_fraction)?;
+        if !temperature_k.is_finite() || temperature_k < minimum_k || temperature_k > maximum_k {
+            return Err(CrystallizationError::TemperatureOutOfRange {
+                temperature_k,
+                minimum_k,
+                maximum_k,
+            });
+        }
+        Ok(())
+    }
+
+    fn phase_temperature_range_k(
+        &self,
+        crystalline_mass_fraction: f64,
+    ) -> Result<[f64; 2], CrystallizationError> {
+        let [lower, mut upper] = self.config.temperature_range_k;
+        if crystalline_mass_fraction > 0.0 {
+            upper = upper.min(self.config.melting_temperature_k);
+        }
+        if lower > upper {
+            return Err(CrystallizationError::Invalid(
+                "source domain admits no crystalline temperature at or below melting",
+            ));
+        }
+        Ok([lower, upper])
     }
 
     fn check_temperature(&self, temperature_k: f64) -> Result<(), CrystallizationError> {
@@ -756,6 +797,172 @@ mod tests {
         assert_eq!(step.specific_heat_j_kg, 0.0);
         assert!(step.caloric_residual_j_kg.abs() <= 1e-8);
         assert!(step.state.temperature_k() > initial.temperature_k());
+    }
+
+    #[test]
+    fn g1_superheated_amorphous_feed_cools_into_growth_on_one_enthalpy_account() {
+        let rate = |t: f64| Ok(0.001 * (500.0 - t).max(0.0));
+        let cfg = CrystallizationConfig {
+            temperature_range_k: [250.0, 650.0],
+            ..config()
+        };
+        let law = CrystallizationLaw::new(&amorphous, &crystalline, &rate, cfg).unwrap();
+        let initial = law.state_at_temperature(600.0, 0.0).unwrap();
+        let dwell = law.advance_isothermal(initial, 10.0).unwrap();
+        assert_eq!(dwell.state, initial);
+        assert_eq!(dwell.specific_heat_j_kg, 0.0);
+        assert_eq!(law.rate_s_inv(500.0).unwrap(), 0.0);
+        assert_eq!(law.rate_s_inv(600.0).unwrap(), 0.0);
+
+        let mut current = initial;
+        let mut heat = 0.0;
+        for temperature in [550.0, 500.0] {
+            let target_h = amorphous(temperature).unwrap();
+            let step = law
+                .advance_specific_enthalpy(
+                    current,
+                    target_h,
+                    1.0,
+                    CrystallizationSolve::default(),
+                    || false,
+                )
+                .unwrap();
+            assert_eq!(step.state.exposure(), 0.0);
+            assert_eq!(step.state.crystalline_mass_fraction(), 0.0);
+            assert_eq!(step.state.specific_enthalpy_j_kg(), target_h);
+            near(step.state.temperature_k(), temperature, 1e-9);
+            heat += step.specific_heat_j_kg;
+            current = step.state;
+        }
+
+        // h falls from 500 to 100 kJ/kg. The zero initial rate leaves the
+        // midpoint amorphous at 400 K, giving z=0.1 and this independent
+        // unequal-Cp mixture inversion. Latent release reduces the cooling;
+        // it is already in h, with no second thermal credit.
+        let step = law
+            .advance_specific_enthalpy(
+                current,
+                100_000.0,
+                1.0,
+                CrystallizationSolve::default(),
+                || false,
+            )
+            .unwrap();
+        let fraction = 0.6 * (1.0 - (-0.01_f64).exp());
+        let expected_t = 300.0 + 100_000.0 * fraction / (2000.0 - 1000.0 * fraction);
+        near(step.state.exposure(), 0.1, 1e-11);
+        near(step.state.crystalline_mass_fraction(), fraction, 1e-12);
+        near(step.state.temperature_k(), expected_t, 1e-9);
+        assert!(step.state.temperature_k() > 300.0);
+        assert_eq!(step.state.specific_enthalpy_j_kg(), 100_000.0);
+        assert!(step.caloric_residual_j_kg.abs() <= 1e-8);
+        heat += step.specific_heat_j_kg;
+        assert_eq!(heat, -600_000.0);
+        assert_eq!(initial.specific_enthalpy_j_kg() + heat, 100_000.0);
+    }
+
+    #[test]
+    fn g0_superheated_rates_and_source_domains_are_never_silently_extended() {
+        let cfg = CrystallizationConfig {
+            temperature_range_k: [250.0, 650.0],
+            ..config()
+        };
+        let positive_above_melt = |_: f64| Ok(0.1);
+        assert!(
+            CrystallizationLaw::new(&amorphous, &crystalline, &positive_above_melt, cfg,).is_err()
+        );
+        let nonzero_at_melt = |t: f64| Ok(0.001 * (650.0 - t));
+        assert!(CrystallizationLaw::new(&amorphous, &crystalline, &nonzero_at_melt, cfg,).is_err());
+
+        // Endpoints cannot certify an arbitrary source. The actual interior
+        // query must also refuse a positive superheated rate, not clamp it.
+        let bad_interior = |t: f64| {
+            Ok(if t <= 500.0 {
+                0.001 * (500.0 - t)
+            } else {
+                1e-6 * (t - 500.0) * (650.0 - t)
+            })
+        };
+        let law = CrystallizationLaw::new(&amorphous, &crystalline, &bad_interior, cfg).unwrap();
+        assert!(law.rate_s_inv(550.0).is_err());
+        let hot = law.state_at_temperature(550.0, 0.0).unwrap();
+        assert!(law.advance_isothermal(hot, 1.0).is_err());
+
+        let rate = |t: f64| Ok(0.001 * (500.0 - t).max(0.0));
+        let cold_amorphous = |t: f64| {
+            if t > 500.0 {
+                Err(CrystallizationError::Invalid("parent source limit"))
+            } else {
+                amorphous(t)
+            }
+        };
+        let cold_crystalline = |t: f64| {
+            if t > 500.0 {
+                Err(CrystallizationError::Invalid("crystal source limit"))
+            } else {
+                crystalline(t)
+            }
+        };
+        assert!(CrystallizationLaw::new(&cold_amorphous, &crystalline, &rate, cfg).is_err());
+        assert!(CrystallizationLaw::new(&amorphous, &cold_crystalline, &rate, cfg).is_err());
+        let cold_rate = |t: f64| {
+            if t > 500.0 {
+                Err(CrystallizationError::Invalid("kinetic source limit"))
+            } else {
+                rate(t)
+            }
+        };
+        assert!(CrystallizationLaw::new(&amorphous, &crystalline, &cold_rate, cfg).is_err());
+    }
+
+    #[test]
+    fn g0_existing_crystals_cannot_cross_melting_in_an_extended_source_domain() {
+        let rate = |t: f64| Ok(0.001 * (500.0 - t).max(0.0));
+        let cfg = CrystallizationConfig {
+            temperature_range_k: [250.0, 650.0],
+            ..config()
+        };
+        let law = CrystallizationLaw::new(&amorphous, &crystalline, &rate, cfg).unwrap();
+        let initial = law.state_at_temperature(450.0, 0.6).unwrap();
+        let fraction = initial.crystalline_mass_fraction();
+        let hot_h =
+            (1.0 - fraction) * amorphous(550.0).unwrap() + fraction * crystalline(550.0).unwrap();
+        assert!(law.specific_enthalpy_j_kg(550.0, fraction).is_err());
+        assert!(law.state_at_temperature(550.0, initial.exposure()).is_err());
+        assert!(matches!(
+            law.state_at_enthalpy(
+                hot_h,
+                initial.exposure(),
+                CrystallizationSolve::default(),
+                || false
+            ),
+            Err(CrystallizationError::EnthalpyOutOfRange { .. })
+        ));
+        assert!(
+            law.advance_specific_enthalpy(
+                initial,
+                hot_h,
+                0.01,
+                CrystallizationSolve::default(),
+                || false,
+            )
+            .is_err()
+        );
+
+        let melt_h = law.specific_enthalpy_j_kg(500.0, fraction).unwrap();
+        let at_melt = law
+            .state_at_enthalpy(
+                melt_h,
+                initial.exposure(),
+                CrystallizationSolve::default(),
+                || false,
+            )
+            .unwrap();
+        assert_eq!(at_melt.temperature_k(), 500.0);
+        assert_eq!(at_melt.crystalline_mass_fraction(), fraction);
+        assert_eq!(law.advance_isothermal(at_melt, 1.0).unwrap().state, at_melt);
+        assert_eq!(initial.temperature_k(), 450.0);
+        assert_eq!(initial.exposure(), 0.6);
     }
 
     #[test]

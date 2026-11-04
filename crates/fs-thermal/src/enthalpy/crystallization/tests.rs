@@ -869,3 +869,113 @@ fn schedule_cannot_renew_substep_budget_and_due_events_precede_manual_boundaries
         .unwrap();
     assert_eq!(born.cells()[&CellId(10)].boundary.htc_w_m2_k, 10.0);
 }
+
+#[test]
+fn superheated_scheduled_feed_cools_into_crystallization_against_a_finite_mold() {
+    // Identified manufactured affine calorics extend to 600 K on BOTH
+    // original branches. No lower-domain source is silently extrapolated.
+    struct HotBranch(f64);
+    impl HotBranch {
+        fn identity(&self) -> [u8; 32] {
+            let mut id = [0x61; 32];
+            id[..8].copy_from_slice(&self.0.to_bits().to_le_bytes());
+            id
+        }
+    }
+    impl ThermalLaw for HotBranch {
+        fn caloric_identity(&self) -> Option<[u8; 32]> {
+            Some(self.identity())
+        }
+        fn temperature_k(&self, h: f64) -> Result<f64, DepositionError> {
+            let t = 300.0 + (h - self.0) / 1000.0;
+            if (250.0..=600.0).contains(&t) {
+                Ok(t)
+            } else {
+                Err(DepositionError::MaterialDomain)
+            }
+        }
+        fn maximum_temperature_slope(&self) -> f64 {
+            0.001
+        }
+    }
+    impl CrystallizationCaloric for HotBranch {
+        fn caloric_identity(&self) -> Option<[u8; 32]> {
+            Some(self.identity())
+        }
+        fn specific_enthalpy_j_kg(&self, t: f64) -> Result<f64, CrystallizationError> {
+            if (250.0..=600.0).contains(&t) {
+                Ok(1000.0 * (t - 300.0) + self.0)
+            } else {
+                Err(CrystallizationError::Invalid("hot caloric source domain"))
+            }
+        }
+        fn minimum_heat_capacity_j_kg_k(&self) -> Option<f64> {
+            Some(1000.0)
+        }
+    }
+    let amorphous = HotBranch(0.0);
+    let crystalline = HotBranch(-100_000.0);
+    let law = CrystallizationLaw::new(
+        &amorphous,
+        &crystalline,
+        &RATE,
+        CrystallizationConfig {
+            identity: [91; 32],
+            temperature_range_k: [250.0, 600.0],
+            ..law().config()
+        },
+    )
+    .unwrap();
+    let template = finite_bath();
+    let mut feed = template.cells()[&CellId(10)].clone();
+    feed.specific_h_j_kg = 250_000.0; // Original amorphous chart at 550 K.
+    let original = DepositionSimulation::new(
+        vec![
+            TimedEvent {
+                time_s: 0.0,
+                event: Event::Birth(template.cells()[&CellId(11)].clone()),
+            },
+            TimedEvent {
+                time_s: 1.0,
+                event: Event::Birth(feed),
+            },
+            TimedEvent {
+                time_s: 1.0,
+                event: Event::Contact(template.links()[&1].clone()),
+            },
+        ],
+        &[(MaterialId(3), &amorphous), (MaterialId(4), &MOLD)],
+        DepositionBudget {
+            max_cells: 2,
+            max_links: 1,
+            max_events: 3,
+            max_substeps: 1000,
+        },
+    )
+    .unwrap();
+    let start = CrystallizationSimulation::new(
+        original,
+        &[CrystallizationMaterial {
+            material_id: MaterialId(3),
+            amorphous: &amorphous,
+            law: &law,
+            maximum_temperature_slope: 0.001,
+        }],
+        || Ok(()),
+    )
+    .unwrap();
+    let (hot, _) = start.advance_to(2.0, controls(0.125), || Ok(())).unwrap();
+    assert!(hot.temperature_k(CellId(10)).unwrap() > 500.0);
+    assert_eq!(hot.states()[&CellId(10)].exposure(), 0.0);
+    assert_eq!(hot.states()[&CellId(10)].crystalline_mass_fraction(), 0.0);
+    let (cooled, audit) = start.advance_to(20.0, controls(0.125), || Ok(())).unwrap();
+    assert!(cooled.temperature_k(CellId(10)).unwrap() < 500.0);
+    assert!(cooled.temperature_k(CellId(11)).unwrap() > 300.0);
+    assert!(cooled.states()[&CellId(10)].crystalline_mass_fraction() > 0.0);
+    assert_eq!(audit.thermal.incoming_energy_j, 2500.0);
+    assert_eq!(audit.thermal.external_heat_j, 0.0);
+    close(cooled.energy_j(), 2500.0, 1e-7);
+    close(cooled.mass_kg(), 0.06, 1e-17);
+    assert!(!cooled.states().contains_key(&CellId(11)));
+    assert!(start.cells().is_empty());
+}
