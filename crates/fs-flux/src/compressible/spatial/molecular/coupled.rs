@@ -303,7 +303,7 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
             self.accepted.grid.cell_volume(),
             &mut cancelled,
         )?;
-        let mut rate: f64 = 0.0;
+        let mut rate = self.accepted.reservoirs.maximum_rate(&self.accepted.grid);
         for q in &self.accepted.states {
             let p = q.primitive(&self.accepted.gas, &mut cancelled)?;
             if let Some((_, controls, _)) = &forcing {

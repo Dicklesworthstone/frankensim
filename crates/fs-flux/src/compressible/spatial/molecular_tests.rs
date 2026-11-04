@@ -340,6 +340,111 @@ fn g0_spatial_zero_law_preserves_euler_and_source_or_work_refusal_is_atomic() {
     }
 }
 
+#[test]
+fn g1_molecular_composition_retains_the_original_pressure_reservoir() {
+    use crate::compressible::spatial::ReservoirBoundary;
+    let source = gas(0.4);
+    let grid = CartesianGrid::new(3, 2, 2, 0.1, 0.1, 0.1).unwrap();
+    let boundaries = Boundaries3d {
+        x: AxisBoundaries::Ends {
+            lower: BoundaryCondition::Transmissive,
+            upper: BoundaryCondition::Reflecting,
+        },
+        y: AxisBoundaries::Periodic,
+        z: AxisBoundaries::Periodic,
+    };
+    let input = ReservoirBoundary {
+        side: BoundarySide::XMin,
+        density: 1.0,
+        velocity: [0.0; 3],
+        pressure_pa: 2.0,
+    };
+    let make = || {
+        Euler3d::new_with_reservoirs(
+            source.clone(),
+            grid,
+            vec![State::from_primitive(&source, 1.0, [0.0; 3], 1.0).unwrap(); 12],
+            boundaries,
+            &[input],
+            || false,
+        )
+        .unwrap()
+    };
+    let mut reference = make();
+    let mut coupled = MolecularEuler3d::new(make(), law(&source, 0.0, 0.0, 0.0), || false).unwrap();
+    for _ in 0..3 {
+        let expected = reference
+            .step(Time::new(0.001), StepControl::default(), || false)
+            .unwrap();
+        let actual = coupled
+            .step(Time::new(0.001), MolecularStepControl::default(), || false)
+            .unwrap();
+        assert!(actual.boundary_change.mass > 0.0);
+        assert_eq!(actual.advection, expected);
+        assert_eq!(coupled.flow().states(), reference.states());
+        assert_eq!(coupled.flow().reservoir(input.side), Some(input));
+        close(actual.conservation_residual.energy, 0.0, 2e-13);
+    }
+}
+
+#[test]
+fn g1_hot_reservoir_sets_the_complete_molecular_interval_without_a_retry() {
+    use crate::compressible::spatial::ReservoirBoundary;
+    let source = gas(0.0);
+    let grid = CartesianGrid::new(2, 2, 2, 0.1, 0.1, 0.1).unwrap();
+    let input = ReservoirBoundary {
+        side: BoundarySide::XMin,
+        density: 1.0,
+        velocity: [0.0; 3],
+        pressure_pa: 32.0,
+    };
+    let initial = Euler3d::new_with_reservoirs(
+        source.clone(),
+        grid,
+        vec![State::from_primitive(&source, 1.0, [0.0; 3], 0.01).unwrap(); 8],
+        Boundaries3d {
+            x: AxisBoundaries::Ends {
+                lower: BoundaryCondition::Transmissive,
+                upper: BoundaryCondition::Transmissive,
+            },
+            y: WALL,
+            z: WALL,
+        },
+        &[input],
+        || false,
+    )
+    .unwrap();
+    let mut coupled =
+        MolecularEuler3d::new(initial, law(&source, 0.01, 0.005, 0.01), || false).unwrap();
+    let controls = MolecularStepControl {
+        advection: StepControl {
+            cfl: 0.2,
+            maximum_halvings: 0,
+            reconstruction: planar::Reconstruction::FirstOrder,
+        },
+        maximum_coupling_retries: 0,
+        ..MolecularStepControl::default()
+    };
+    let report = coupled.step(Time::new(1.0), controls, || false).unwrap();
+    // The same exterior signal must bound both molecular half steps before
+    // either begins. A cell-only estimate lets Euler shorten the middle step
+    // and then refuses the complete split when no retries are available.
+    let bound = controls.advection.cfl * 0.1 / (3.0 * (1.4_f64 * 32.0).sqrt());
+    assert!(report.elapsed.value() <= bound * (1.0 + 2e-14));
+    assert_eq!(report.coupling_retries, 0);
+    assert_eq!(report.advection.halvings, 0);
+    assert_eq!(report.first.elapsed.value() * 2.0, report.elapsed.value());
+    assert_eq!(report.second.elapsed, report.first.elapsed);
+    assert_eq!(report.advection.elapsed, report.elapsed);
+    assert_eq!(coupled.flow().time(), report.elapsed);
+    assert_eq!(coupled.flow().reservoir(input.side), Some(input));
+    assert!(report.boundary_change.mass > 0.0);
+    assert!(report.boundary_change.energy > 0.0);
+    for residual in report.conservation_residual.array() {
+        close(residual, 0.0, 2e-13);
+    }
+}
+
 fn coupled_walls() -> MolecularEuler3d<ConstantTransport> {
     let flow = field(
         gas(0.4),
