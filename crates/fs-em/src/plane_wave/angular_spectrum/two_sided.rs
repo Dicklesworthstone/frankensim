@@ -81,7 +81,8 @@ pub struct PreparedAngularSpectrumIllumination<'b, 's, 'm> {
 impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
     /// Add a coherent beam incident from the right face. Its Ex/Ey samples use
     /// the SAME x/y axes, grid origin, frequency and exp(+i omega t) clock as
-    /// this left beam. Samples are peak V/m at the right physical face.
+    /// this left beam. Samples are peak V/m at the right physical face, with
+    /// the left beam's transverse carrier removed when that carrier is nonzero.
     ///
     /// A lossy, critical or evanescent exterior refuses even for a dark input
     /// bin: the complete declared two-port source space must be propagating.
@@ -252,7 +253,6 @@ impl<'b, 's, 'm> PreparedAngularSpectrumIllumination<'b, 's, 'm> {
     pub fn layer_absorbed_power_w(&self, layer: usize) -> Option<f64> {
         self.layer_power_w.get(layer).copied()
     }
-
     /// Exact cycle-mean heat in one film depth interval over the complete
     /// original periodic cell, in watts. Both face amplitudes interfere in
     /// the native positive loss modes before powers are formed.

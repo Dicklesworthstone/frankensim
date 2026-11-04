@@ -23,10 +23,10 @@ use sources::{ExposureLine, ExposureLines, ExposureSide};
 mod aperture;
 pub use aperture::{
     AngularSpectrumApertureControlLimits, AngularSpectrumApertureEnergyGradient,
-    PreparedAngularSpectrumApertureEnergyControl,
     AngularSpectrumExposureApertureLimits, AngularSpectrumExposureApertureMoments,
     AngularSpectrumExposureApertureProjection, AngularSpectrumExposureApertureProjectionReading,
     AngularSpectrumExposureApertureReading, AngularSpectrumExposureApertureStress,
+    PreparedAngularSpectrumApertureEnergyControl,
 };
 
 mod stress;
@@ -172,6 +172,15 @@ impl<'b, 's, 'm> AngularSpectrumExposure<'b, 's, 'm> {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, AngularSpectrumError> {
         poll(&mut cancelled)?;
+        // Real-field finite-window products contain sum-wavevector terms as
+        // well as differences. The current cell kernel uses the unshifted
+        // integer lattice; cycle-mean complex-field observations do not have
+        // this restriction. Refuse before its orthogonality could be misused.
+        if anchor.carrier_rad_m != [0.0; 2] {
+            return Err(bad(
+                "finite-window exposures require a zero transverse carrier",
+            ));
+        }
         if lines.len() > 4096 || lines.len() > limits.maximum_lines {
             return Err(bad("exposure line count exceeds its budget"));
         }
@@ -206,6 +215,7 @@ impl<'b, 's, 'm> AngularSpectrumExposure<'b, 's, 'm> {
             let original = lines.get(index);
             let line = original.beam();
             if line.grid() != anchor.grid()
+                || line.carrier_rad_m != [0.0; 2]
                 || !line.source().same_sources_and_geometry(anchor.source())
             {
                 return Err(bad(
@@ -548,7 +558,11 @@ impl<'b, 's, 'm> AngularSpectrumExposure<'b, 's, 'm> {
             if i % 64 == 0 {
                 poll(cancelled)?;
             }
-            if sum.iter().flatten().any(|v| !v.hi.is_finite() || !v.lo.is_finite()) {
+            if sum
+                .iter()
+                .flatten()
+                .any(|v| !v.hi.is_finite() || !v.lo.is_finite())
+            {
                 return Err(bad("coherent exposure field is unrepresentable"));
             }
         }

@@ -9,6 +9,9 @@ use fs_em::plane_wave::{
 };
 use fs_math::det;
 
+mod carrier;
+mod carrier_correlation;
+
 fn limits() -> AngularSpectrumLimits {
     AngularSpectrumLimits {
         maximum_grid_points: 4096,

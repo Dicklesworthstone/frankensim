@@ -143,7 +143,6 @@ impl<'b, 's, 'm> PreparedAngularSpectrumLayer<'b, 's, 'm> {
     pub fn absorbed_power_w(&self) -> f64 {
         self.absorbed_power_w
     }
-
     /// Cycle-mean watts absorbed between two depths in this original film,
     /// integrated continuously over the beam's complete periodic cell.
     ///
@@ -213,9 +212,12 @@ impl<'b, 's, 'm> PreparedAngularSpectrumLayer<'b, 's, 'm> {
             || (beam.source().angular_frequency_rad_s()
                 == self.beam.source().angular_frequency_rad_s()
                 && beam.source().same_sources_and_geometry(self.beam.source()));
-        if !same_source || beam.grid() != self.beam.grid() {
+        if !same_source
+            || beam.grid() != self.beam.grid()
+            || beam.carrier_rad_m != self.beam.carrier_rad_m
+        {
             return Err(bad(
-                "layer factors require the same original source and grid",
+                "layer factors require the same original source, grid and carrier",
             ));
         }
         Ok(())
@@ -302,8 +304,7 @@ impl<'b, 's, 'm> PreparedAngularSpectrumLayer<'b, 's, 'm> {
         depth_m: f64,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<AngularSpectrumLayerField, AngularSpectrumError> {
-        let (electric, magnetic) =
-            self.modal_field_for_beam(beam, depth_m, &mut cancelled)?;
+        let (electric, magnetic) = self.modal_field_for_beam(beam, depth_m, &mut cancelled)?;
         let field = beam.synthesize(electric, magnetic, &mut cancelled)?;
         AngularSpectrumLayerField::from_field(field, self.heat_coefficient, &mut cancelled)
     }

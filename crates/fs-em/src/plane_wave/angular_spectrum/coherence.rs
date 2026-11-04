@@ -134,9 +134,12 @@ impl<'b, 's, 'm> AngularSpectrumCoherence<'b, 's, 'm> {
         let mut sums = [Dd::ZERO; 4];
         for factor in factors {
             poll(&mut cancelled)?;
-            if !core::ptr::eq(factor.source(), first.source()) || factor.grid() != first.grid() {
+            if !core::ptr::eq(factor.source(), first.source())
+                || factor.grid() != first.grid()
+                || factor.carrier_rad_m != first.carrier_rad_m
+            {
                 return Err(bad(
-                    "coherence factors require the same original source and grid",
+                    "coherence factors require the same original source, grid and carrier",
                 ));
             }
             let p = factor.power();
@@ -282,8 +285,8 @@ impl<'b, 's, 'm> AngularSpectrumCoherence<'b, 's, 'm> {
             aperture,
             self.anchor.workspace_bytes(),
             limits,
-            |column| self.anchor.modes[column].kx,
-            |row| self.anchor.modes[row * grid.width].ky,
+            |column| self.anchor.envelope_wavenumber(0, column),
+            |row| self.anchor.envelope_wavenumber(1, row),
             &mut cancelled,
         )?;
         let mut flux = [Dd::ZERO; 3];

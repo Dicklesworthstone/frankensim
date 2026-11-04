@@ -1,8 +1,9 @@
 //! Coherent vector diffraction through the original source-backed planar films.
 //!
-//! Samples describe one PERIODIC, band-limited transverse cell, with x varying
+//! Samples describe one PERIODIC, band-limited transverse envelope, with x varying
 //! fastest and exp(+i omega t) peak phasors in V/m. The supplied Ex/Ey are the
-//! incident field at the first film face. Every Fourier mode keeps its complex
+//! incident field at the first film face, or its envelope when an explicit
+//! transverse carrier is supplied. Every Fourier mode keeps its complex
 //! phase and its own TE/TM stack response. Exact kz propagation, Ez and all H
 //! components follow Maxwell's equations; there is no paraxial approximation.
 //!
@@ -27,7 +28,7 @@
 use super::{Polarization, ReflectionError, layers::PlanarDielectricLayers};
 use fs_fft::{C64 as FftComplex, Fft};
 use fs_material::field_storage::{linear_electric_permittivity, linear_magnetic_permeability};
-use fs_math::{c64::C64, det};
+use fs_math::{c64::C64, dd::Dd, det};
 use modes::{
     basis, cartesian, fields, fields_from_tangential, finite, normal_flux, polarized, propagation,
 };
@@ -50,8 +51,9 @@ mod coherence;
 pub use coherence::{
     AngularSpectrumCoherence, AngularSpectrumCoherenceField, AngularSpectrumCoherenceLayerField,
     AngularSpectrumCoherenceLimits, AngularSpectrumCorrelationLimits,
-    AngularSpectrumInterferenceStatistics, AngularSpectrumMutualCoherence, AngularSpectrumObservation,
-    AngularSpectrumPointStatistics, PreparedAngularSpectrumCoherenceLayer,
+    AngularSpectrumInterferenceStatistics, AngularSpectrumMutualCoherence,
+    AngularSpectrumObservation, AngularSpectrumPointStatistics,
+    PreparedAngularSpectrumCoherenceLayer,
 };
 
 mod force;
@@ -65,11 +67,10 @@ pub use two_sided::{
 mod exposure;
 pub use exposure::{
     AngularSpectrumApertureControlLimits, AngularSpectrumApertureEnergyGradient,
-    PreparedAngularSpectrumApertureEnergyControl,
     AngularSpectrumExposure, AngularSpectrumExposureApertureLimits,
     AngularSpectrumExposureApertureMoments, AngularSpectrumExposureApertureProjection,
-    AngularSpectrumExposureApertureProjectionReading,
-    AngularSpectrumExposureApertureReading, AngularSpectrumExposureApertureStress, AngularSpectrumExposureEnsemble,
+    AngularSpectrumExposureApertureProjectionReading, AngularSpectrumExposureApertureReading,
+    AngularSpectrumExposureApertureStress, AngularSpectrumExposureEnsemble,
     AngularSpectrumExposureEnsembleLimits, AngularSpectrumExposureField,
     AngularSpectrumExposureHeatChannel, AngularSpectrumExposureHeatSpectrumLimits,
     AngularSpectrumExposureLayerDissipation, AngularSpectrumExposureLayerField,
@@ -82,7 +83,7 @@ pub use exposure::{
     AngularSpectrumExposureStressPoint, AngularSpectrumFactorStatistics,
     AngularSpectrumHeatAreaQuadrature, AngularSpectrumHeatDepthSample,
     AngularSpectrumHeatVolumeQuadrature, AngularSpectrumIntegratedHeatLimits,
-    PreparedAngularSpectrumExposureLayer,
+    PreparedAngularSpectrumApertureEnergyControl, PreparedAngularSpectrumExposureLayer,
 };
 
 /// Bounds the uninterruptible work of one existing FFT pencil.
@@ -206,6 +207,8 @@ struct Mode {
 pub struct PlanarAngularSpectrum<'s, 'm> {
     source: &'s PlanarDielectricLayers<'m>,
     grid: AngularSpectrumGrid,
+    carrier_rad_m: [f64; 2],
+    carrier_phase: Vec<C64>,
     x_fft: Fft,
     y_fft: Fft,
     modes: Vec<Mode>,
@@ -223,10 +226,52 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
         grid: AngularSpectrumGrid,
         incident_tangential_e_v_per_m: &[[C64; 2]],
         limits: AngularSpectrumLimits,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, AngularSpectrumError> {
+        Self::prepare_with_carrier(
+            source,
+            grid,
+            [0.0; 2],
+            incident_tangential_e_v_per_m,
+            limits,
+            cancelled,
+        )
+    }
+
+    /// Prepare a beam at an arbitrary transverse carrier wavevector [rad/m].
+    /// Samples are the periodic Ex/Ey ENVELOPE: the physical field is their
+    /// Fourier reconstruction times exp(-i*(carrier_x*x + carrier_y*y)).
+    /// All original mode wavevectors are shifted before applying Snell's law,
+    /// polarization, Maxwell reconstruction and propagation. No angular
+    /// rounding, paraxial approximation, resampling or spectral truncation is
+    /// involved. The whole shifted grid must remain inside the incident light
+    /// cone; its exit may propagate, reach critical incidence, or be evanescent.
+    ///
+    /// Carrier phases are prepared once and reused by all field queries,
+    /// including film interiors, partial coherence and two-sided illumination.
+    /// Right-face inputs to `prepare_illumination` use this same envelope
+    /// convention. Cycle-mean quantities are periodic; the complex field need
+    /// not be. Finite-window real-field exposures currently require zero carrier.
+    pub fn prepare_with_carrier(
+        source: &'s PlanarDielectricLayers<'m>,
+        grid: AngularSpectrumGrid,
+        carrier_rad_m: [f64; 2],
+        incident_tangential_e_v_per_m: &[[C64; 2]],
+        limits: AngularSpectrumLimits,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, AngularSpectrumError> {
         poll(&mut cancelled)?;
-        let (n, area, workspace_bytes, field_fft_work) = admit(grid, limits)?;
+        let (n, area, mut workspace_bytes, field_fft_work) = admit(grid, limits)?;
+        if !carrier_rad_m.iter().all(|value| value.is_finite()) {
+            return Err(bad("transverse carrier must be finite"));
+        }
+        if carrier_rad_m != [0.0; 2] {
+            workspace_bytes = n
+                .checked_mul(core::mem::size_of::<C64>())
+                .and_then(|bytes| workspace_bytes.checked_add(bytes))
+                .filter(|&bytes| bytes <= limits.maximum_workspace_bytes)
+                .ok_or_else(|| bad("carrier exceeds its workspace budget"))?;
+        }
         if incident_tangential_e_v_per_m.len() != n {
             return Err(bad("finite Ex/Ey samples must cover the declared grid"));
         }
@@ -256,16 +301,14 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
         }
         // Admit ALL bins before allocating FFT plans or evaluating the films.
         // Real transverse wave numbers are conserved across every interface.
-        let max_kx = if grid.width == 1 {
-            0.0
-        } else {
-            core::f64::consts::PI / grid.spacing_m[0]
+        let maximum_component = |count, spacing, carrier: f64| {
+            [count / 2, (count - 1) / 2]
+                .map(|bin| (carrier + transverse_number(bin, count, spacing)).abs())
+                .into_iter()
+                .fold(0.0, f64::max)
         };
-        let max_ky = if grid.height == 1 {
-            0.0
-        } else {
-            core::f64::consts::PI / grid.spacing_m[1]
-        };
+        let max_kx = maximum_component(grid.width, grid.spacing_m[0], carrier_rad_m[0]);
+        let max_ky = maximum_component(grid.height, grid.spacing_m[1], carrier_rad_m[1]);
         if det::hypot(max_kx / k, max_ky / k) >= 1.0 {
             return Err(AngularSpectrumError::IncidentLightCone {
                 column: grid.width / 2,
@@ -275,6 +318,30 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
         let x_fft = Fft::new(grid.width);
         poll(&mut cancelled)?;
         let y_fft = Fft::new(grid.height);
+        let mut carrier_phase = Vec::new();
+        if carrier_rad_m != [0.0; 2] {
+            carrier_phase
+                .try_reserve_exact(n)
+                .map_err(|_| bad("carrier phase allocation failed"))?;
+            for row in 0..grid.height {
+                for column in 0..grid.width {
+                    if (row * grid.width + column) % 256 == 0 {
+                        poll(&mut cancelled)?;
+                    }
+                    let phase = Dd::from_f64(carrier_rad_m[0])
+                        * Dd::from_f64(grid.spacing_m[0])
+                        * Dd::from_f64(column as f64)
+                        + Dd::from_f64(carrier_rad_m[1])
+                            * Dd::from_f64(grid.spacing_m[1])
+                            * Dd::from_f64(row as f64);
+                    if !phase.hi.is_finite() || !phase.lo.is_finite() {
+                        return Err(bad("carrier phase is unrepresentable"));
+                    }
+                    let (sine, cosine) = det::sin_cos_dd(phase);
+                    carrier_phase.push(C64::new(cosine.to_f64(), -sine.to_f64()));
+                }
+            }
+        }
         let mut ex = Vec::with_capacity(n);
         let mut ey = Vec::with_capacity(n);
         for (index, sample) in incident_tangential_e_v_per_m.iter().enumerate() {
@@ -321,8 +388,9 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
                 if index % 32 == 0 {
                     poll(&mut cancelled)?;
                 }
-                let kx = transverse_number(column, grid.width, grid.spacing_m[0]);
-                let ky = transverse_number(row, grid.height, grid.spacing_m[1]);
+                let kx =
+                    carrier_rad_m[0] + transverse_number(column, grid.width, grid.spacing_m[0]);
+                let ky = carrier_rad_m[1] + transverse_number(row, grid.height, grid.spacing_m[1]);
                 let sine = det::hypot(kx / k, ky / k);
                 let cosine = det::sqrt((1.0 - sine) * (1.0 + sine));
                 if !cosine.is_finite() || cosine <= 0.0 {
@@ -404,6 +472,8 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
         Ok(Self {
             source,
             grid,
+            carrier_rad_m,
+            carrier_phase,
             x_fft,
             y_fft,
             modes,
@@ -422,6 +492,23 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
     pub fn grid(&self) -> AngularSpectrumGrid {
         self.grid
     }
+    /// Physical carrier used by this beam's periodic input envelope [rad/m].
+    pub fn carrier_transverse_wavenumber_rad_m(&self) -> [f64; 2] {
+        self.carrier_rad_m
+    }
+
+    // A common carrier cancels analytically from cycle-mean interference.
+    // Recover each original envelope bin directly: subtracting the carrier
+    // from a rounded physical mode would lose small beat wavenumbers.
+    fn envelope_wavenumber(&self, axis: usize, bin: usize) -> f64 {
+        let count = if axis == 0 {
+            self.grid.width
+        } else {
+            self.grid.height
+        };
+        transverse_number(bin, count, self.grid.spacing_m[axis])
+    }
+
     pub fn power(&self) -> AngularSpectrumPower {
         self.power
     }
@@ -471,8 +558,8 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
             aperture,
             self.workspace_bytes,
             limits,
-            |column| self.modes[column].kx,
-            |row| self.modes[row * self.grid.width].ky,
+            |column| self.envelope_wavenumber(0, column),
+            |row| self.envelope_wavenumber(1, row),
             &mut cancelled,
         )?;
         let (electric, magnetic) = self.modal_field(side, distance_from_face_m, &mut cancelled)?;
@@ -601,7 +688,11 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
                     if index % 256 == 0 {
                         poll(&mut cancelled)?;
                     }
-                    dst[c] = complex(*src);
+                    dst[c] = if self.carrier_phase.is_empty() {
+                        complex(*src)
+                    } else {
+                        complex(*src) * self.carrier_phase[index]
+                    };
                 }
             }
         }

@@ -2604,6 +2604,36 @@ requires the workspace constellation dependencies. This feature does not add
 transients, incident near-field excitation, rough/finite film edges, arbitrary
 three-dimensional scattering, or empirical material-frequency qualification.
 
+### Arbitrary-angle carriers for refracting vector beams
+
+`PlanarAngularSpectrum::prepare_with_carrier` accepts an explicit transverse
+wavevector in rad/m and samples of a periodic tangential-electric envelope.
+The physical field is that envelope times `exp(-i*k_carrier·x)`. Every
+Fourier wavevector receives the carrier before its original TE/TM film solve,
+Snell refraction, vector Maxwell reconstruction and propagation. Incidence
+angles are therefore continuous rather than quantized to the envelope's FFT
+bins. The complete shifted grid must fit inside the incident light cone;
+critical and evanescent exit waves retain their existing physical treatment.
+The original `prepare` is exactly the zero-carrier case.
+
+Carrier phases retain double-double products during argument reduction and
+are cached once, adding one complex value per point to the admitted workspace.
+Field queries add O(points) complex multiplications without new trigonometric
+work, constitutive queries or film solves. Internal fields, cycle-mean
+absorption, finite apertures, momentum, partial coherence and simultaneous
+illumination use the same shifted modes; right-face inputs use the same
+envelope convention. Shared response caches require the same carrier.
+Cycle-mean aperture kernels cancel the common carrier analytically and retain
+the original envelope-bin differences, including separations below the
+carrier's floating-point spacing. Direct mutual-coherence observations retain
+the envelope phase separately and apply the carrier once per observation.
+Finite-window real-field exposures explicitly refuse nonzero carriers because
+their current full-cell sum-frequency kernel assumes an unshifted integer
+lattice. No paraxial approximation, discarded modes, near-field incident
+excitation or finite-edge diffraction is introduced. Focused controls cover
+arbitrary oblique Snell/Fresnel fields, Brewster cancellation, TIR decay,
+interior and two-sided fields, source-cache identity and resource refusals.
+
 ### Finite detector apertures preserve spatial interference
 
 `PlanarAngularSpectrum::measure_aperture` observes the original coherent vector

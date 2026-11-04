@@ -1,9 +1,10 @@
 //! Two-point electric coherence and ideal, explicitly authored field analyzers.
 //!
 //! Prepared Fourier coefficients already contain their inverse-FFT 1/N. Direct
-//! synthesis uses exp(-i (kx*x + ky*y)) with no further normalization. Coordinates
-//! observe the original periodic, band-limited cell and its continuation, not an
-//! isolated aperture. The existing Maxwell mode owner supplies all longitudinal,
+//! synthesis uses the envelope Fourier phases and the authored transverse carrier,
+//! with no further normalization. Coordinates observe the original periodic,
+//! band-limited envelope and its carrier, not an isolated aperture. The existing
+//! Maxwell mode owner supplies all longitudinal,
 //! reflected, transmitted and material-dependent phases.
 
 use super::*;
@@ -17,7 +18,7 @@ const ZERO_TENSOR: Tensor = [[ZERO_COMPLEX; 3]; 3];
 /// An exterior sample in the original beam's Cartesian coordinates, in metres.
 /// Incident/reflected/total samples lie at z=-distance_from_face_m; transmitted
 /// samples lie beyond the last face. Distance must be finite and nonnegative;
-/// x/y may be any finite coordinates in the periodic continuation.
+/// x/y may be any finite coordinates in the envelope's continuation and carrier.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AngularSpectrumObservation {
     pub side: AngularSpectrumSide,
@@ -107,7 +108,9 @@ impl AngularSpectrumMutualCoherence {
             let value = 2.0 * det::hypot(mutual_v2_m2.re / scale, mutual_v2_m2.im / scale)
                 / (ia / scale + ib / scale);
             if !value.is_finite() || value > 1.0 + 32.0 * f64::EPSILON {
-                return Err(bad("projected mutual coherence violates its intensity bound"));
+                return Err(bad(
+                    "projected mutual coherence violates its intensity bound",
+                ));
             }
             Some(value.min(1.0))
         };
@@ -210,7 +213,10 @@ impl AngularSpectrumCoherence<'_, '_, '_> {
         let mut sum = Dd::ZERO;
         for factor in self.factors {
             let [ea, eb] = synthesize_pair(factor, [a, b], &mut cancelled)?;
-            let combined = plus(analyze(ea, analyzers[0]), multiply(phase, analyze(eb, analyzers[1])));
+            let combined = plus(
+                analyze(ea, analyzers[0]),
+                multiply(phase, analyze(eb, analyzers[1])),
+            );
             sum = sum + multiply(half(combined), conjugate(combined))[0];
         }
         let value = nonnegative(sum)?;
@@ -231,13 +237,17 @@ impl AngularSpectrumCoherence<'_, '_, '_> {
                 || observation.distance_from_face_m < 0.0
                 || observation.position_m.iter().any(|v| !v.is_finite())
             {
-                return Err(bad("coherence observations need finite coordinates and nonnegative depth"));
+                return Err(bad(
+                    "coherence observations need finite coordinates and nonnegative depth",
+                ));
             }
         }
         if self.correlation_mode_evaluations()? > limits.maximum_mode_evaluations
             || self.correlation_workspace_bytes() > limits.maximum_workspace_bytes
         {
-            return Err(bad("two-point coherence exceeds its work or workspace budget"));
+            return Err(bad(
+                "two-point coherence exceeds its work or workspace budget",
+            ));
         }
         Ok(())
     }
@@ -254,22 +264,37 @@ fn synthesize_pair(
         if index % 32 == 0 {
             poll(cancelled)?;
         }
+        let kx = factor.envelope_wavenumber(0, index % factor.grid.width);
+        let ky = factor.envelope_wavenumber(1, index / factor.grid.width);
         for (sum, observation) in sums.iter_mut().zip(observations) {
-            let (electric, _) = factor.mode_field(
-                mode,
-                observation.side,
-                observation.distance_from_face_m,
-            )?;
-            // Use the actual admitted wave numbers, retaining both products
-            // and their sum before argument reduction, including distant points.
-            let phase = Dd::from_f64(mode.kx) * Dd::from_f64(observation.position_m[0])
-                + Dd::from_f64(mode.ky) * Dd::from_f64(observation.position_m[1]);
+            let (electric, _) =
+                factor.mode_field(mode, observation.side, observation.distance_from_face_m)?;
+            // Keep the original envelope offsets: adding a much larger carrier
+            // in binary64 can erase distinct bins before phase reconstruction.
+            let phase = Dd::from_f64(kx) * Dd::from_f64(observation.position_m[0])
+                + Dd::from_f64(ky) * Dd::from_f64(observation.position_m[1]);
             if !phase.hi.is_finite() || !phase.lo.is_finite() {
                 return Err(bad("two-point spatial phase is unrepresentable"));
             }
             let (sine, cosine) = det::sin_cos_dd(phase);
             for (value, amplitude) in sum.iter_mut().zip(electric) {
                 *value = plus(*value, multiply(lift(amplitude), [cosine, -sine]));
+            }
+        }
+    }
+    // The common carrier multiplies each completed envelope once. It cancels
+    // in local moments, but its relative phase survives between observations.
+    if factor.carrier_rad_m != [0.0; 2] {
+        for (field, observation) in sums.iter_mut().zip(observations) {
+            let phase = Dd::from_f64(factor.carrier_rad_m[0])
+                * Dd::from_f64(observation.position_m[0])
+                + Dd::from_f64(factor.carrier_rad_m[1]) * Dd::from_f64(observation.position_m[1]);
+            if !phase.hi.is_finite() || !phase.lo.is_finite() {
+                return Err(bad("two-point carrier phase is unrepresentable"));
+            }
+            let (sine, cosine) = det::sin_cos_dd(phase);
+            for value in field {
+                *value = multiply(*value, [cosine, -sine]);
             }
         }
     }
@@ -294,7 +319,10 @@ fn contract(tensor: &Tensor, a: [C64; 3], b: [C64; 3]) -> ComplexDd {
     let mut sum = ZERO_COMPLEX;
     for (row, ai) in tensor.iter().zip(a) {
         for (&entry, bj) in row.iter().zip(b) {
-            sum = plus(sum, multiply(multiply(conjugate(lift(ai)), entry), lift(bj)));
+            sum = plus(
+                sum,
+                multiply(multiply(conjugate(lift(ai)), entry), lift(bj)),
+            );
         }
     }
     sum
