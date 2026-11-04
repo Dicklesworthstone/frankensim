@@ -31,6 +31,12 @@ fn constant_layers_recover_series_bulk_and_contact_resistance_in_both_directions
             close(result.conductance_w_k, g, 1e-11);
             close(result.endpoint_derivative_w_k[0], g, 1e-12);
             close(result.endpoint_derivative_w_k[1], -g, 1e-12);
+            let resistance = 0.02 / 8.0 + 0.03 / 2.0 + r;
+            close(
+                result.contact_resistance_derivative_w2_m2_k,
+                -0.004 * (t[0] - t[1]) / resistance.powi(2),
+                1e-8,
+            );
             let j = result.power_a_to_b_w / 0.004;
             close(result.interface_temperature_k[0], t[0] - j * 0.02/8.0, 1e-9);
             close(result.interface_temperature_k[1], t[1] + j * 0.03/2.0, 1e-9);
@@ -87,6 +93,8 @@ fn unequal_nonlinear_layers_have_reciprocal_heat_and_complete_endpoint_derivativ
             let swapped = TwoLayerConduction::new([&b,&a], [0.035,0.02], 0.004,r).unwrap()
                 .evaluate([t[1],t[0]],config(),||Ok(())).unwrap();
             assert_eq!(result.power_a_to_b_w,-swapped.power_a_to_b_w);
+            assert_eq!(result.contact_resistance_derivative_w2_m2_k,
+                -swapped.contact_resistance_derivative_w2_m2_k);
             assert_eq!(result.interface_temperature_k, [swapped.interface_temperature_k[1],swapped.interface_temperature_k[0]]);
             for i in 0..2 {
                 let mut plus=t; let mut minus=t;
@@ -98,8 +106,55 @@ fn unequal_nonlinear_layers_have_reciprocal_heat_and_complete_endpoint_derivativ
             let scaled = TwoLayerConduction::new([&a,&b], [0.02,0.035], 0.008,r).unwrap()
                 .evaluate(t,config(),||Ok(())).unwrap();
             close(scaled.power_a_to_b_w,2.0*result.power_a_to_b_w,3e-9);
+            close(scaled.contact_resistance_derivative_w2_m2_k,
+                2.0 * result.contact_resistance_derivative_w2_m2_k, 1e-7);
         }
     }
+}
+
+#[test]
+fn contact_tangent_matches_nonlinear_flux_changes_and_the_perfect_contact_limit() {
+    let a = ConductivityCurve::new(vec![
+        [200.0, 2.0], [450.0, 8.0], [700.0, 5.0], [1000.0, 10.0],
+    ]).unwrap();
+    let b = ConductivityCurve::new(vec![
+        [200.0, 12.0], [500.0, 3.0], [1000.0, 7.0],
+    ]).unwrap();
+    for t in [[650.0, 310.0], [320.0, 680.0]] {
+        let at = |resistance| {
+            TwoLayerConduction::new([&a, &b], [0.02, 0.035], 0.004, resistance)
+                .unwrap()
+                .evaluate(t, config(), || Ok(()))
+                .unwrap()
+        };
+        let step = 1e-6;
+        let perfect = at(0.0);
+        // Only nonnegative resistance is physical. A second-order forward
+        // difference independently checks the admitted right derivative.
+        let right = (-3.0 * perfect.power_a_to_b_w + 4.0 * at(step).power_a_to_b_w
+            - at(2.0 * step).power_a_to_b_w) / (2.0 * step);
+        close(perfect.contact_resistance_derivative_w2_m2_k, right, 0.01);
+        let result = at(0.02);
+        let central_step = 1e-5;
+        let central = (at(0.02 + central_step).power_a_to_b_w
+            - at(0.02 - central_step).power_a_to_b_w) / (2.0 * central_step);
+        close(result.contact_resistance_derivative_w2_m2_k, central, 1e-3);
+        assert!(result.contact_resistance_derivative_w2_m2_k * result.power_a_to_b_w < 0.0);
+    }
+}
+
+#[test]
+fn contact_tangent_retains_finite_physical_scale_for_large_areas() {
+    let k = constant(1.0);
+    let area = 1e200;
+    let result = TwoLayerConduction::new([&k; 2], [0.5; 2], area, 1.0)
+        .unwrap()
+        .evaluate([600.0, 300.0], config(), || Ok(()))
+        .unwrap();
+    // R_total = 2 m² K/W, so q=150 W/m² and dq/dR''=-75.
+    // Q and its derivative are finite although the intermediate Q*G is not.
+    close(result.power_a_to_b_w / area, 150.0, 1e-11);
+    close(result.contact_resistance_derivative_w2_m2_k / area, -75.0, 1e-11);
 }
 
 #[test]

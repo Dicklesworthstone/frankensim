@@ -222,6 +222,10 @@ pub struct LayerConductionResponse {
     pub interface_temperature_k: [f64; 2],
     /// [d(power a->b)/dTa, d(power a->b)/dTb] with charts/geometry fixed.
     pub endpoint_derivative_w_k: [f64; 2],
+    /// d(power a->b)/dR'' with endpoint temperatures/charts/geometry fixed,
+    /// in W²/(m² K). This is the right derivative at perfect contact, R''=0.
+    /// A state-dependent contact law chains this with its own dR''/dh.
+    pub contact_resistance_derivative_w2_m2_k: f64,
     /// Hot-layer outgoing minus cold-layer incoming power, independent of a/b order.
     pub layer_heat_residual_w: f64,
     /// Diagnostic temperature-jump residual divided by resistance, W. This is
@@ -319,6 +323,7 @@ impl<'a> TwoLayerConduction<'a> {
                 conductance_w_k: g,
                 interface_temperature_k: [ta, tb],
                 endpoint_derivative_w_k: [g, -g],
+                contact_resistance_derivative_w2_m2_k: 0.0,
                 layer_heat_residual_w: 0.0,
                 contact_heat_residual_w: 0.0,
                 contact_temperature_residual_k: 0.0,
@@ -402,6 +407,11 @@ impl<'a> TwoLayerConduction<'a> {
                     positive(g_interface * (self.curves[0].conductivity_w_m_k(ta)? / ki[0]))?,
                     -positive(g_interface * (self.curves[1].conductivity_w_m_k(tb)? / ki[1]))?,
                 ];
+                // Differentiating the common-flux/contact equations gives
+                // dQ/dR'' = -Q/(d_a/k(Tia) + R'' + d_b/k(Tib)). Use the
+                // already accepted flux density to avoid overflowing Q*G
+                // before division by area, or forming a second interface solve.
+                let contact_derivative = -sign * positive(jh * g_interface)?;
                 // Require a representable nonzero flux even if a loose user
                 // tolerance would otherwise accept an endpoint of the bracket.
                 let g = positive(qh / (th - tc))?;
@@ -411,6 +421,7 @@ impl<'a> TwoLayerConduction<'a> {
                     conductance_w_k: g,
                     interface_temperature_k: interface,
                     endpoint_derivative_w_k: derivatives,
+                    contact_resistance_derivative_w2_m2_k: contact_derivative,
                     layer_heat_residual_w: residual,
                     contact_heat_residual_w: sign * contact_residual,
                     contact_temperature_residual_k: sign * jump_residual,

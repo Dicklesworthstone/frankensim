@@ -64,6 +64,22 @@ fn nonlinear_local_sources_keep_integrated_heat_and_physical_derivatives() {
     close(got.interface_temperature_k[1], 410.0, 1e-9);
     let differential_resistance = 0.08745 / 7.4 + 0.09295 / 7.9 + 0.013;
     close(
+        got.contact_resistance_derivative_w2_m2_k,
+        -40.0 / differential_resistance,
+        1e-8,
+    );
+    let contact_step = 1e-5;
+    let flux_at = |resistance| {
+        TwoLayerConduction::new([&hot, &cold], [0.08745, 0.09295], 0.004, resistance)
+            .unwrap()
+            .evaluate(temperatures, config(), || Ok(()))
+            .unwrap()
+            .power_a_to_b_w
+    };
+    let contact_difference = (flux_at(0.013 + contact_step) - flux_at(0.013 - contact_step))
+        / (2.0 * contact_step);
+    close(got.contact_resistance_derivative_w2_m2_k, contact_difference, 1e-3);
+    close(
         got.endpoint_derivative_w_k[0],
         0.004 / differential_resistance * 8.5 / 7.4,
         1e-12,
@@ -94,6 +110,10 @@ fn nonlinear_local_sources_keep_integrated_heat_and_physical_derivatives() {
         .evaluate([300.0, 650.0], config(), || Ok(()))
         .unwrap();
     assert_eq!(reversed.power_a_to_b_w, -got.power_a_to_b_w);
+    assert_eq!(
+        reversed.contact_resistance_derivative_w2_m2_k,
+        -got.contact_resistance_derivative_w2_m2_k,
+    );
     assert_eq!(
         reversed.interface_temperature_k,
         [
