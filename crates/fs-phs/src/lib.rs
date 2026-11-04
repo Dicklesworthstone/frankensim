@@ -4500,6 +4500,7 @@ pub fn acoustic_frustum_chain_outlet_wall(
         viscothermal,
         wall,
         None,
+        None,
     )
 }
 
@@ -4520,6 +4521,7 @@ fn acoustic_frustum_chain_outlet_wall_in_exterior(
     viscothermal: Option<&ViscothermalPin>,
     wall: Option<&WallPin>,
     section_media: Option<&[acoustic_outlet::AcousticSectionMedium]>,
+    cell_walls: Option<&[acoustic_outlet::AcousticCellWall]>,
 ) -> Result<PortHamiltonian, PhsError> {
     if !(exterior_density.is_finite()
         && exterior_density > 0.0
@@ -4562,19 +4564,9 @@ fn acoustic_frustum_chain_outlet_wall_in_exterior(
         ChainOutlet::Radiating(flange) => Some(flange),
         ChainOutlet::PressureRelease | ChainOutlet::Rigid => None,
     };
-    let mut n_cells = 0usize;
-    let mut last_radius = 0.0;
-    for s in sections {
-        if !(s.length > 0.0 && s.radius > 0.0 && s.outlet() > 0.0) || s.cells == 0 {
-            return Err(PhsError::Unadmitted {
-                what: "acoustic section parameters",
-            });
-        }
-        n_cells = n_cells.checked_add(s.cells).ok_or(PhsError::Unadmitted {
-            what: "acoustic cell count overflow",
-        })?;
-        last_radius = s.outlet();
-    }
+    let geometry = acoustic_outlet::acoustic_cell_geometry(sections)?;
+    let n_cells = geometry.len();
+    let last_radius = sections.last().expect("admitted geometry").outlet();
     if sections.is_empty()
         || n_cells < 2
         || !(density > 0.0 && sound_speed > 0.0)
@@ -4582,6 +4574,11 @@ fn acoustic_frustum_chain_outlet_wall_in_exterior(
     {
         return Err(PhsError::Unadmitted {
             what: "acoustic chain parameters",
+        });
+    }
+    if cell_walls.is_some_and(|walls| walls.len() != n_cells || wall.is_some() || !taps.is_empty()) {
+        return Err(PhsError::Unadmitted {
+            what: "cell walls require one complete wall per cell, no wall override and no side taps",
         });
     }
     let n_line = n_cells.checked_mul(2).ok_or(PhsError::Unadmitted {
@@ -4592,27 +4589,16 @@ fn acoustic_frustum_chain_outlet_wall_in_exterior(
     let mut radii = Vec::with_capacity(n_cells);
     let mut cell_x0 = Vec::with_capacity(n_cells);
     let mut cell_media = Vec::with_capacity(n_cells);
-    let mut x_acc = 0.0;
-    for (section, s) in sections.iter().enumerate() {
-        let medium = section_media.map_or(uniform, |media| media[section]);
-        let dx = s.length / s.cells as f64;
-        let r_in = s.radius;
-        let r_out = s.outlet();
-        let n_s = s.cells as f64;
-        for i in 0..s.cells {
-            let ra = r_in + (r_out - r_in) * (i as f64 / n_s);
-            let rb = r_in + (r_out - r_in) * ((i + 1) as f64 / n_s);
-            let a_inert = core::f64::consts::PI * ra * rb;
-            let a_comp = core::f64::consts::PI * (ra * ra + ra * rb + rb * rb) / 3.0;
-            cell_x0.push(x_acc);
-            inertances.push(medium.density * dx / a_inert);
-            compliances.push(a_comp * dx / (medium.density * medium.sound_speed * medium.sound_speed));
-            cell_media.push(medium);
-            radii.push(f64::midpoint(ra, rb));
-            x_acc += dx;
-        }
+    for cell in &geometry {
+        let medium = section_media.map_or(uniform, |media| media[cell.section]);
+        cell_x0.push(cell.x0);
+        inertances.push(medium.density * cell.axial_length / cell.inertance_area);
+        compliances.push(cell.compression_area * cell.axial_length / (medium.density * medium.sound_speed * medium.sound_speed));
+        cell_media.push(medium);
+        radii.push(cell.radius);
     }
-    let total_length = x_acc;
+    let last = geometry.last().expect("admitted geometry");
+    let total_length = last.x0 + last.axial_length;
     let omega_pin = match section_media {
         None => core::f64::consts::PI * sound_speed / (2.0 * total_length),
         Some(media) => {
@@ -4646,7 +4632,13 @@ fn acoustic_frustum_chain_outlet_wall_in_exterior(
     )?;
     let n_pad_foster = pad_foster_count(taps, viscothermal);
     let n_rad_foster = rad_foster_count(mouth, cell_media[n_cells - 1].viscothermal.as_ref());
-    let n_wall = wall_state_count(n_cells, wall)?;
+    let n_wall = match cell_walls {
+        Some(walls) => {
+            for wall in walls { wall_state_count(1, Some(&wall.wall))?; }
+            n_cells.checked_mul(2).ok_or(PhsError::Unadmitted { what: "wall cell count overflow" })?
+        }
+        None => wall_state_count(n_cells, wall)?,
+    };
     let n = n_line + n_tap_states + n_tap_foster + n_pad_foster + n_rad_foster + n_foster + n_wall;
     let mut foster_off = vec![0usize; n_cells];
     let mut next_foster = n_line + n_tap_states + n_tap_foster + n_pad_foster + n_rad_foster;
@@ -4843,16 +4835,17 @@ fn acoustic_frustum_chain_outlet_wall_in_exterior(
             tap_off,
         )?;
     }
-    if let Some(w) = wall {
-        let wall_base =
-            n_line + n_tap_states + n_tap_foster + n_pad_foster + n_rad_foster + n_foster;
+    let wall_base = n_line + n_tap_states + n_tap_foster + n_pad_foster + n_rad_foster + n_foster;
+    if wall.is_some() || cell_walls.is_some() {
         for cell in 0..n_cells {
             let dx = if cell + 1 < n_cells {
                 cell_x0[cell + 1] - cell_x0[cell]
             } else {
                 total_length - cell_x0[cell]
             };
-            let area = 2.0 * core::f64::consts::PI * radii[cell] * dx;
+            let strip = if cell_walls.is_some() { geometry[cell].wall_strip_length } else { dx };
+            let area = 2.0 * core::f64::consts::PI * radii[cell] * strip;
+            let w = cell_walls.map_or_else(|| wall.expect("admitted numerical wall"), |walls| &walls[cell].wall);
             apply_cell_wall(
                 &mut q,
                 &mut j,
@@ -4874,6 +4867,21 @@ fn acoustic_frustum_chain_outlet_wall_in_exterior(
     let (r,resistance_witness)=r.finish()?;
     let mut system=PortHamiltonian::new(n, inlets, j, r, g, Box::new(QuadraticStorage::new(q, n)?))?;
     system.resistance_witness=resistance_witness;
+    if let Some(walls) = cell_walls {
+        let mut branches = Vec::new();
+        for (cell, wall) in walls.iter().enumerate() {
+            let area = geometry[cell].wall_area_m2();
+            for arm in &wall.relaxation {
+                let mut projection = vec![0.0; n];
+                projection[wall_base + 2 * cell] = 1.0;
+                branches.push(RelaxationBranch {
+                    projection, stiffness: arm.stiffness_per_area / area,
+                    relaxation_time_s: arm.relaxation_time_s,
+                });
+            }
+        }
+        system = system.with_relaxation_branches(branches)?;
+    }
     Ok(system)
 }
 

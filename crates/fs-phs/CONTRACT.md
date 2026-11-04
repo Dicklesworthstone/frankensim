@@ -47,6 +47,30 @@ Identical media use the original uniform arithmetic. This numeric layer requires
 the caller to admit coherent frozen media at common static pressure and the
 spatial approximation; the regional entry has no side openings.
 
+`acoustic_cell_geometry` exposes the original frustum cell partition, authored
+section index and midpoint radius. Axial length remains separate from wetted
+strip length and area. The regional cell-wall constructor accepts one
+`AcousticCellWall` per returned cell. New cell walls use actual slanted strip
+area, matching the original material-wall TMM geometry; existing uniform
+numerical-wall arithmetic remains unchanged. Surface slant never multiplies
+gas volume or axial inertia.
+
+`acoustic_chain_with_regional_outlet_flow_and_cell_walls` stamps the original
+local mass/equilibrium/Kelvin wall law through the existing cell junction, then
+appends each positive original Maxwell arm through
+`PortHamiltonian::with_relaxation_branches`. Its outlet row is derived from the
+complete gas/wall/memory state, using the original declared exact quadratic
+storage representation. Wall motion and gas continuity exchange the same
+pressure/volume-flow work; observation adds no debit. Source identity, material
+applicability and excited-band admission remain caller responsibilities.
+No static pressure prestress, axial shell interaction, evolving geometry or
+external wall radiation is introduced.
+
+Authored cell-wall regressions check cylinder numerical-wall bits, independent
+conical surface area with unchanged gas storage, full harmonic Maxwell
+impedance, independent Kelvin/hereditary dissipation and joint gas/wall volume
+balance on odd/even chains. Their presence does not claim native execution.
+
 Authored G1/G3 regressions cover independent compression-volume conservation
 for odd/even cylinder, single-cone and joined-frustum chains; their low-frequency
 through-flow limit with and without viscothermal memory; physical radiation

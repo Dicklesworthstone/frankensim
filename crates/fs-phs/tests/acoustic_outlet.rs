@@ -1,12 +1,14 @@
 //! G1/G3: physical outlet flow, coordinate orientation and complete storage.
 use fs_math::c64::C64;
 use fs_phs::acoustic_outlet::{
-    AcousticSectionMedium, acoustic_chain_with_outlet_flow,
-    acoustic_chain_with_outlet_flow_in_exterior, acoustic_chain_with_regional_outlet_flow,
+    AcousticCellWall, AcousticSectionMedium, AcousticWallRelaxation, acoustic_cell_geometry,
+    acoustic_chain_with_outlet_flow, acoustic_chain_with_outlet_flow_in_exterior,
+    acoustic_chain_with_regional_outlet_flow,
+    acoustic_chain_with_regional_outlet_flow_and_cell_walls,
 };
 use fs_phs::harmonic::{HarmonicBudget, HarmonicModel};
 use fs_phs::{
-    AcousticSection, ChainOutlet, MouthFlange, ViscothermalPin, acoustic_chain_outlet_wall,
+    AcousticSection, ChainOutlet, MouthFlange, ViscothermalPin, WallPin, acoustic_chain_outlet_wall,
 };
 
 fn section(cells: usize, cone: bool) -> AcousticSection {
@@ -15,6 +17,201 @@ fn section(cells: usize, cone: bool) -> AcousticSection {
         radius: 0.01,
         outlet_radius: if cone { 0.02 } else { 0.01 },
         cells,
+    }
+}
+
+#[test]
+fn source_wall_geometry_uses_surface_slant_without_changing_axial_gas_storage() {
+    let pin = WallPin {
+        surface_density: 0.08,
+        stiffness_per_area: 2e6,
+        resistance: 12.0,
+    };
+    let medium = AcousticSectionMedium {
+        density: 1.2,
+        sound_speed: 340.0,
+        viscothermal: None,
+    };
+    for cone in [false, true] {
+        let sections = [AcousticSection {
+            length: 0.08,
+            radius: 0.01,
+            outlet_radius: if cone { 0.03 } else { 0.01 },
+            cells: 3,
+        }];
+        let geometry = acoustic_cell_geometry(&sections).unwrap();
+        let walls = vec![
+            AcousticCellWall {
+                wall: pin,
+                relaxation: vec![]
+            };
+            3
+        ];
+        let (system, flow) = acoustic_chain_with_regional_outlet_flow_and_cell_walls(
+            &sections,
+            &[medium],
+            1.2,
+            340.0,
+            ChainOutlet::PressureRelease,
+            1,
+            &walls,
+        )
+        .unwrap();
+        let (legacy, legacy_flow) = acoustic_chain_with_regional_outlet_flow(
+            &sections,
+            &[medium],
+            1.2,
+            340.0,
+            ChainOutlet::PressureRelease,
+            1,
+            Some(&pin),
+        )
+        .unwrap();
+        assert_eq!(system.state_dim(), 12);
+        let diagonal = system.effort(&[1.0; 12]);
+        let old = legacy.effort(&[1.0; 12]);
+        let dx = sections[0].length / 3.0;
+        let dr = (sections[0].outlet_radius - sections[0].radius) / 3.0;
+        for (cell, geometry) in geometry.iter().enumerate() {
+            let ra = sections[0].radius + cell as f64 * dr;
+            let rb = ra + dr;
+            let area = core::f64::consts::PI * (ra + rb) * dx.hypot(dr);
+            assert_eq!(geometry.section, 0);
+            assert_eq!(geometry.axial_length.to_bits(), dx.to_bits());
+            assert!((geometry.wall_area_m2() / area - 1.0).abs() < 1e-14);
+            assert!((diagonal[6 + 2 * cell] * area / pin.stiffness_per_area - 1.0).abs() < 1e-13);
+            assert!((diagonal[7 + 2 * cell] * pin.surface_density / area - 1.0).abs() < 1e-13);
+            // Surface slant cannot alter the gas volume or axial inertia.
+            assert_eq!(diagonal[2 * cell].to_bits(), old[2 * cell].to_bits());
+            assert_eq!(
+                diagonal[2 * cell + 1].to_bits(),
+                old[2 * cell + 1].to_bits()
+            );
+        }
+        if !cone {
+            let (j, r, g) = system.structure();
+            let (lj, lr, lg) = legacy.structure();
+            let bits = |values: &[f64]| values.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+            assert_eq!(bits(j), bits(lj));
+            assert_eq!(bits(r), bits(lr));
+            assert_eq!(bits(g), bits(lg));
+            assert_eq!(bits(&diagonal), bits(&old));
+            assert_eq!(bits(flow.coefficients()), bits(legacy_flow.coefficients()));
+        } else {
+            assert!(diagonal[6] < old[6]);
+        }
+    }
+}
+
+#[test]
+fn cell_wall_maxwell_pressure_work_and_flow_match_the_complete_native_state() {
+    for cells in [3, 4] {
+        let sections = [section(cells, true)];
+        let geometry = acoustic_cell_geometry(&sections).unwrap();
+        let medium = AcousticSectionMedium {
+            density: 1.2,
+            sound_speed: 340.0,
+            viscothermal: None,
+        };
+        let walls: Vec<_> = (0..cells)
+            .map(|cell| AcousticCellWall {
+                wall: WallPin {
+                    surface_density: 0.05,
+                    stiffness_per_area: 1e6,
+                    resistance: 10.0,
+                },
+                relaxation: vec![AcousticWallRelaxation {
+                    stiffness_per_area: (cell + 1) as f64 * 2e5,
+                    relaxation_time_s: 0.002,
+                }],
+            })
+            .collect();
+        let build = |walls: &[AcousticCellWall]| {
+            acoustic_chain_with_regional_outlet_flow_and_cell_walls(
+                &sections,
+                &[medium],
+                1.2,
+                340.0,
+                ChainOutlet::PressureRelease,
+                1,
+                walls,
+            )
+        };
+        let (system, flow) = build(&walls).unwrap();
+        assert_eq!(system.state_dim(), 5 * cells);
+        assert_eq!(flow.coefficients().len(), system.state_dim());
+        let model = HarmonicModel::from_ode(
+            &system,
+            HarmonicBudget {
+                max_dimension: 64,
+                max_dense_bytes: 2_000_000,
+                max_dense_work: 2_000_000,
+                relative_residual_tolerance: 1e-10,
+            },
+            || false,
+        )
+        .unwrap();
+        for omega in [200.0, 1500.0, 6000.0] {
+            let response = model
+                .factor(omega, || false)
+                .unwrap()
+                .response(&[C64::ONE], || false)
+                .unwrap();
+            let s = C64::new(0.0, omega);
+            for (cell, wall) in walls.iter().enumerate() {
+                let area = geometry[cell].wall_area_m2();
+                let arm = wall.relaxation[0];
+                // Independent local mechanical impedance in pressure/volume-flow
+                // units under exp(+i omega t); no fitted wall admittance.
+                let impedance = C64::new(
+                    wall.wall.resistance / area,
+                    omega * wall.wall.surface_density / area,
+                ) + C64::new(wall.wall.stiffness_per_area / area, 0.0) / s
+                    + C64::new(arm.stiffness_per_area / area, 0.0)
+                        / (s + C64::new(1.0 / arm.relaxation_time_s, 0.0));
+                let mut basis = vec![0.0; system.state_dim()];
+                basis[2 * cell] = 1.0;
+                let pressure = response.state[2 * cell].scale(system.effort(&basis)[2 * cell]);
+                let volume_flow = s * response.state[2 * cells + 2 * cell];
+                assert!((pressure - impedance * volume_flow).abs() < 1e-9 * pressure.abs());
+            }
+        }
+        let mut initial = vec![0.0; system.state_dim()];
+        for cell in 0..cells {
+            initial[2 * cell] = 1e-8 * (cell + 1) as f64;
+            initial[2 * cells + 2 * cell] = 1e-9;
+            initial[4 * cells + cell] = 1e-4;
+        }
+        let dt = 1e-6;
+        let step = fs_phs::step(&system, &initial, &[3e-4], dt).unwrap();
+        let midpoint: Vec<_> = initial
+            .iter()
+            .zip(&step.x)
+            .map(|(a, b)| f64::midpoint(*a, *b))
+            .collect();
+        let mut expected_loss = 0.0;
+        let mut volume_change = 0.0;
+        for (cell, wall) in walls.iter().enumerate() {
+            let area = geometry[cell].wall_area_m2();
+            let q_wall = 2 * cells + 2 * cell;
+            let velocity = midpoint[q_wall + 1] * area / wall.wall.surface_density;
+            let arm = wall.relaxation[0];
+            let elastic_memory = (arm.stiffness_per_area / area).sqrt() * midpoint[q_wall]
+                - midpoint[4 * cells + cell];
+            expected_loss += dt
+                * (wall.wall.resistance / area * velocity.powi(2)
+                    + elastic_memory.powi(2) / arm.relaxation_time_s);
+            let sign = if cell % 2 == 0 { 1.0 } else { -1.0 };
+            volume_change +=
+                sign * (step.x[2 * cell] - initial[2 * cell] + step.x[q_wall] - initial[q_wall]);
+        }
+        assert!((step.dissipated - expected_loss).abs() < 1e-10 * expected_loss);
+        let boundary = dt * (3e-4 - flow.volume_flow_m3_s(&midpoint).unwrap());
+        assert!((volume_change - boundary).abs() < 1e-10 * boundary.abs().max(1e-12));
+        let mut invalid = walls.clone();
+        invalid[0].relaxation[0].relaxation_time_s = 0.0;
+        assert!(build(&invalid).is_err());
+        assert!(build(&walls[..cells - 1]).is_err());
     }
 }
 
