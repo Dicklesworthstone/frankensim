@@ -9,13 +9,17 @@
 pub use super::mixture::molecular::MolecularWall3d;
 use super::*;
 use crate::compressible::molecular::parabolic;
-pub use crate::compressible::molecular::{MolecularControl, MolecularError, MolecularStepControl};
+pub use crate::compressible::molecular::{
+    MolecularControl, MolecularError, MolecularStabilization, MolecularStepControl,
+};
 use fs_gas::multicomponent::dissipation::TransportLaw;
 pub use fs_gas::multicomponent::dissipation::WallThermalCondition;
 use fs_qty::{Pressure, Temperature};
 
 mod coupled;
 pub use coupled::{MolecularEuler3d, MolecularStepReport3d};
+mod stabilized;
+pub use stabilized::StabilizedMolecularReport3d;
 
 /// Explicit local or periodic dynamic subgrid transport for low-Mach studies.
 #[cfg(feature = "experimental-sgs")]
@@ -26,7 +30,7 @@ pub mod sgs;
 pub struct MolecularReport3d {
     /// Complete represented duration [s].
     pub elapsed: Time,
-    /// Accepted SSP RK2 substeps.
+    /// Accepted SSP RK2 substeps or opt-in RKL2 macrosteps.
     pub accepted_steps: usize,
     /// Rejected internal attempts.
     pub rejected_steps: usize,
@@ -72,6 +76,7 @@ pub struct MolecularTransport3d<L> {
     law: L,
     boundary_impulses: Vec<BoundaryImpulse>,
     work: MolecularWorkspace,
+    stabilized: Option<stabilized::Workspace>,
     #[cfg(feature = "experimental-sgs")]
     sgs: Option<sgs::SubgridTransport>,
 }
@@ -101,6 +106,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
             boundaries: flow.boundaries,
             walls: [MolecularWall3d::SlipAdiabatic; 6],
             law,
+            stabilized: None,
             #[cfg(feature = "experimental-sgs")]
             sgs: None,
             boundary_impulses: allocated(faces, Totals::default())?,

@@ -15,6 +15,8 @@ use fs_qty::{Pressure, Temperature};
 
 mod coupled;
 pub use coupled::{MolecularEuler2d, MolecularStepControl, MolecularStepReport};
+pub(in crate::compressible) mod stabilized;
+pub use stabilized::{MolecularStabilization, StabilizedMolecularReport};
 mod wall;
 pub use wall::{MolecularWall, MolecularWall2d};
 
@@ -23,7 +25,7 @@ pub use wall::{MolecularWall, MolecularWall2d};
 pub struct MolecularControl {
     /// Maximum conservative parabolic estimate, in `(0, 0.45]`.
     pub parabolic_cfl: f64,
-    /// Largest internal SSP RK2 substep [s].
+    /// Largest SSP RK2 substep or opt-in RKL2 macrostep [s].
     pub maximum_step_s: f64,
     /// Minimum retry step [s]; an exact final remainder may be smaller.
     pub minimum_step_s: f64,
@@ -64,7 +66,7 @@ impl MolecularControl {
 pub struct MolecularReport {
     /// Complete represented duration.
     pub elapsed: Time,
-    /// Accepted SSP RK2 substeps.
+    /// Accepted SSP RK2 substeps or opt-in RKL2 macrosteps.
     pub accepted_steps: usize,
     /// Rejected internal attempts.
     pub rejected_steps: usize,
@@ -111,7 +113,7 @@ pub enum MolecularError {
         observed: f64,
         maximum: f64,
     },
-    /// An SSP stage exceeds the declared parabolic estimate.
+    /// A stage exceeds the selected integrator's parabolic estimate.
     ParabolicNumber { observed: f64, maximum: f64 },
     /// The complete duration exceeds the caller's attempt budget.
     WorkLimit {
@@ -119,6 +121,8 @@ pub enum MolecularError {
         accepted: usize,
         rejected: usize,
     },
+    /// The lazily retained RKL2 buffers exceed the caller's additional byte cap.
+    StabilizedWorkspace { required_bytes: usize, maximum_bytes: usize },
     /// No source-admissible internal step remains.
     StepFailure {
         elapsed_s: f64,
@@ -197,6 +201,7 @@ pub struct MolecularTransport2d<L> {
     law: L,
     boundary_impulses: Vec<BoundaryImpulse>,
     work: MolecularWorkspace,
+    stabilized: Option<stabilized::Workspace>,
 }
 impl<L: TransportLaw> MolecularTransport2d<L> {
     /// Bind the same original species models; labels alone never establish identity.
@@ -220,6 +225,7 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
             boundaries: flow.boundaries,
             walls: [MolecularWall2d::SlipAdiabatic; 4],
             law,
+            stabilized: None,
             boundary_impulses: allocated(2 * (nx + ny), Totals::default())?,
             work: MolecularWorkspace {
                 current: allocated(n, State::default())?,

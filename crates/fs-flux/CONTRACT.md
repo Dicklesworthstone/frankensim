@@ -1331,6 +1331,44 @@ so old exchange cannot be relabeled under a new wall condition. Identical
 reconfiguration preserves accepted history; cancellation and source refusal
 publish no partial field, time or per-face exchange.
 
+### Stabilized frozen-composition heat and momentum diffusion
+
+Both `compressible::molecular::MolecularTransport2d::advance_stabilized`
+and `compressible::spatial::molecular::MolecularTransport3d::advance_stabilized`
+apply the original gas-owned second-order RKL2 coefficients and the shared
+multidimensional interval controller to these frozen-composition operators.
+`MolecularControl` retains physical macrostep, CFL and retry limits;
+`MolecularStabilization` separately declares maximum stages, cumulative actual
+operator evaluations, and an explicit cap on EXTRA retained numerical storage.
+The existing flow, source-law, molecular and optional SGS allocations are outside
+this extra-storage cap. Required and actual retained extra bytes are queryable.
+
+The three original state arrays are reused. Additional anchor-face and
+boundary-stage arrays are allocated lazily once. Every stage and the final
+endpoint use the original local transport data, caloric inversion, full
+Newtonian stress/work and Fourier heat. Three-dimensional SGS, when explicitly
+selected, is reevaluated by its original owner. One conservative face flux
+serves neighboring cells; the SAME signed Legendre recurrence integrates
+per-face boundary heat and mechanical impulse/work.
+
+The controller selects the smallest sufficient stage count up to the declared
+limit and bounds the negative-real linear parabolic number by
+`CFL * (s*s+s-2)/4`. This is not a nonlinear positivity or entropy guarantee.
+Physical refusals halve private trials without clipping; the caller must choose
+an accuracy-appropriate maximum macrostep because no time-error estimate is
+provided. Work includes failed stage prefixes, recomputed retry anchors and
+endpoint admission. Source failures remain typed to the original owner.
+Cancellation, exhausted work and insufficient extra storage cannot publish a
+partial field or boundary load; successful pure molecular updates do not
+advance Euler time.
+
+Focused regressions compare planar and anisotropic volumetric thermal modes
+with independently derived discrete Laplacian eigenvalues, check time
+refinement and reduced operator work, recover viscous shear decay and conversion
+of kinetic energy to internal energy, close heated-wall transfer using the
+signed recurrence, and exercise byte/work/cancellation refusal and replay.
+These are manufactured source fixtures, not experimental calibration.
+
 Five focused G0/G1/G2/G3/G4 regressions exercise a 2-D Fourier mode, oblique
 longitudinal and transverse Newtonian modes, collision-diameter-only pressure
 and shear changes, wall impulse/energy closure, late cancellation/replay,

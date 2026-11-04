@@ -531,3 +531,5 @@ fn g0_forced_molecular_zero_source_and_zero_transport_recover_native_owners() {
     assert_eq!(molecular.flow().states(), euler.states());
     assert_eq!(molecular.flow().time(), euler.time());
 }
+
+mod stabilized;

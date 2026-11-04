@@ -634,3 +634,6 @@ fn g2_g4_all_six_walls_receive_complete_impulse_and_late_cancel_retains_history(
         assert_eq!(flow.flow().states(), probe.flow().states());
     }
 }
+
+#[path = "molecular/stabilized_tests.rs"]
+mod stabilized;

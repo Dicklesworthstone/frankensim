@@ -55,19 +55,41 @@ pub(in crate::compressible) fn reserve_evaluation(
     Ok(())
 }
 
-pub(in crate::compressible) fn advance<C: FnMut() -> bool>(
+/// Preserve the concrete field owner's source refusals through shared retries.
+pub(in crate::compressible) trait IntervalFailure: From<DissipationError> {
+    fn is_terminal(&self) -> bool;
+    fn step_failure(self, elapsed: f64, dt: f64) -> Self;
+}
+impl IntervalFailure for DissipationError {
+    fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            Self::Cancelled | Self::OperatorWorkLimit { .. } | Self::WorkLimit { .. }
+        )
+    }
+    fn step_failure(self, elapsed: f64, dt: f64) -> Self {
+        Self::StepFailure {
+            elapsed_time_s: elapsed,
+            step_s: dt,
+            last: Box::new(self),
+        }
+    }
+}
+
+pub(in crate::compressible) fn advance<C: FnMut() -> bool, E: IntervalFailure>(
     duration: f64,
     controls: StabilizedDissipationControl,
     evaluations: &mut usize,
     cancelled: &mut C,
-    mut evaluate: impl FnMut(Action, f64, &mut usize, &mut C) -> Result<Stage, DissipationError>,
-) -> Result<StabilizedInterval, DissipationError> {
+    mut evaluate: impl FnMut(Action, f64, &mut usize, &mut C) -> Result<Stage, E>,
+) -> Result<StabilizedInterval, E> {
     poll(cancelled)?;
     controls.validate()?;
     if !duration.is_finite() || duration < 0.0 {
         return Err(DissipationError::Invalid(
             "nonnegative finite stabilized molecular duration required",
-        ));
+        )
+        .into());
     }
     let initial_evaluations = *evaluations;
     let base = controls.transport;
@@ -90,7 +112,8 @@ pub(in crate::compressible) fn advance<C: FnMut() -> bool>(
         if !first.rate.is_finite() || first.rate < 0.0 {
             return Err(DissipationError::Invalid(
                 "stabilized molecular parabolic scale overflow",
-            ));
+            )
+            .into());
         }
         let remaining = duration - result.interval.elapsed;
         let mut dt = remaining.min(base.maximum_step_s);
@@ -107,7 +130,8 @@ pub(in crate::compressible) fn advance<C: FnMut() -> bool>(
             {
                 return Err(DissipationError::Invalid(
                     "unrepresentable stabilized molecular substep",
-                ));
+                )
+                .into());
             }
             let mut scheme = maximum_scheme;
             for stages in 2..=controls.maximum_stages {
@@ -157,19 +181,11 @@ pub(in crate::compressible) fn advance<C: FnMut() -> bool>(
                     result.interval.accepted_steps += 1;
                     break;
                 }
-                Err(
-                    error @ (DissipationError::Cancelled
-                    | DissipationError::OperatorWorkLimit { .. }
-                    | DissipationError::WorkLimit { .. }),
-                ) => return Err(error),
+                Err(error) if error.is_terminal() => return Err(error),
                 Err(error) => {
                     result.interval.rejected_steps += 1;
                     if halving == base.maximum_halvings || dt * 0.5 < base.minimum_step_s {
-                        return Err(DissipationError::StepFailure {
-                            elapsed_time_s: result.interval.elapsed,
-                            step_s: dt,
-                            last: Box::new(error),
-                        });
+                        return Err(error.step_failure(result.interval.elapsed, dt));
                     }
                     dt *= 0.5;
                 }

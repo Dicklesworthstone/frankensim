@@ -263,7 +263,7 @@ pub(super) fn neighbour(
     q
 }
 
-fn flux_array(f: SpatialFaceFlux, axis: usize) -> [f64; 5] {
+pub(super) fn flux_array(f: SpatialFaceFlux, axis: usize) -> [f64; 5] {
     let [a, b] = tangents(axis);
     let mut q = [0.0; 5];
     q[0] = f.mass;
