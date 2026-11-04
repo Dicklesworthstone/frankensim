@@ -248,6 +248,19 @@ differentiable lift). Pure Rust throughout.
   including rejections. Local estimates are not global error certificates.
   Native homogeneous spectral glass has a one-sample analytic fast path;
   a bounded affine field retains the same dispersion/absorption owner.
+  Vacuum wavelengths must be positive and finite; the immutable field owns
+  their spectral support independently of the visible color observer. Native
+  affine and quadratic preparation checks the common phase/absorption band,
+  its endpoints and every contained phase knot throughout the admitted spatial
+  bounds. Original infrared tables therefore reach scalar, differential-bundle,
+  boundary-event, LTE-emission and polarized curved-beam propagation without
+  extrapolation or resampling. The same local wavelength drives phase delay,
+  group delay and intensity extinction. Uniform propagation retains its
+  one-sample fast path and the adaptive integration adds no new allocation.
+  Synthetic infrared fixtures check independent homogeneous/affine path laws,
+  quadratic focusing, Planck emission through the same absorbing path, Stokes
+  attenuation and common-band refusal. This does not broaden visible-only
+  analytic materials, color observers, rough surfaces or compact coatings.
   Missing or nonpositive tabulated group derivatives suppress the delay claim
   while retaining supported phase propagation. `PolarizedBeam` consumes the
   propagator directly: all Stokes power components receive integrated

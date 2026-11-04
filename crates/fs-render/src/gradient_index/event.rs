@@ -380,7 +380,7 @@ pub(super) fn propagate_with_stepper<
     if !max_distance_m.is_finite() || max_distance_m < 0.0 {
         return Err(GradientIndexError::InvalidOptions.into());
     }
-    if !wavelength_nm.is_finite() || !(LAMBDA_MIN..=LAMBDA_MAX).contains(&wavelength_nm) {
+    if !wavelength_nm.is_finite() || wavelength_nm <= 0.0 {
         return Err(GradientIndexError::Dielectric(DielectricError::InvalidWavelength).into());
     }
     if !finite_point(ray.origin) {

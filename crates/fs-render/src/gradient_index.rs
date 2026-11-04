@@ -26,7 +26,6 @@ use fs_math::det;
 
 use crate::charts::Ray;
 use crate::dielectric::{DielectricError, DielectricGlass, DielectricIor};
-use crate::spectral::{LAMBDA_MAX, LAMBDA_MIN};
 
 pub mod bundle;
 pub mod event;
@@ -154,9 +153,11 @@ impl GradientIndexSample {
 
 /// A spatial optical law pinned to one immutable physical-state snapshot.
 ///
-/// Positions are metres and wavelengths are vacuum nanometres. The law must
-/// return consistent phase values and derivatives, remain smooth over each
-/// propagated segment and refuse queries outside its physical/source domain.
+/// Positions are metres and wavelengths are positive finite vacuum nanometres.
+/// The field owns spectral support: propagation is not limited to a color
+/// observer's visible window. The law must return consistent phase values and
+/// derivatives, remain smooth over each propagated segment and refuse queries
+/// outside its physical/source domain.
 /// State-dependent adapters borrow or own the accepted state; sampling must
 /// not silently refresh it while a path is being integrated.
 pub trait GradientIndexField {
@@ -222,9 +223,10 @@ pub struct AffineIndexField<'a> {
 }
 
 impl<'a> AffineIndexField<'a> {
-    /// Admit finite bounds and keep the complete visible phase-index law in
-    /// `[1, 3]` throughout the box. Native analytic laws are monotone on their
-    /// admitted visible domain; every tabulated knot is checked separately.
+    /// Admit finite bounds and keep the phase-index law in `[1, 3]` throughout
+    /// the box and the common phase/absorption wavelength band. Native analytic
+    /// laws are monotone on their admitted domain; every tabulated phase knot
+    /// inside the common band is checked separately. No source is extrapolated.
     pub fn try_new(
         glass: &'a DielectricGlass,
         reference_point: Point3,
@@ -247,15 +249,18 @@ impl<'a> AffineIndexField<'a> {
             gradient_per_m,
             bounds,
         };
+        let (minimum, maximum) = glass.wavelength_bounds_nm()?;
         for x in [bounds.min.x, bounds.max.x] {
             for y in [bounds.min.y, bounds.max.y] {
                 for z in [bounds.min.z, bounds.max.z] {
                     let p = Point3::new(x, y, z);
-                    candidate.sample(p, LAMBDA_MIN)?;
-                    candidate.sample(p, LAMBDA_MAX)?;
+                    candidate.sample(p, minimum)?;
+                    candidate.sample(p, maximum)?;
                     if let DielectricIor::Tabulated(table) = glass.ior() {
                         for knot in table.samples() {
-                            candidate.sample(p, knot.wavelength_nm())?;
+                            if (minimum..=maximum).contains(&knot.wavelength_nm()) {
+                                candidate.sample(p, knot.wavelength_nm())?;
+                            }
                         }
                     }
                 }
@@ -452,7 +457,7 @@ pub fn propagate_with_control<F: GradientIndexField + ?Sized>(
     if !distance_m.is_finite() || distance_m < 0.0 {
         return Err(GradientIndexError::InvalidOptions);
     }
-    if !wavelength_nm.is_finite() || !(LAMBDA_MIN..=LAMBDA_MAX).contains(&wavelength_nm) {
+    if !wavelength_nm.is_finite() || wavelength_nm <= 0.0 {
         return Err(DielectricError::InvalidWavelength.into());
     }
     if !finite_point(ray.origin) {
@@ -672,8 +677,16 @@ fn trial_step_guarded<F: GradientIndexField + ?Sized>(
     field_evaluations: &mut u32,
 ) -> Result<Trial, GradientIndexError> {
     trial_step_guarded_observed(
-        field, origin, wavelength_nm, state, first_derivative, step, track_group,
-        admits_stage, field_evaluations, |_, _, _| Ok(()),
+        field,
+        origin,
+        wavelength_nm,
+        state,
+        first_derivative,
+        step,
+        track_group,
+        admits_stage,
+        field_evaluations,
+        |_, _, _| Ok(()),
     )
 }
 

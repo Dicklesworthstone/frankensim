@@ -144,6 +144,8 @@ impl BeamMedium {
     /// Sample the incident or target medium for a beam launch or interface.
     /// This does not perform a physical boundary crossing: use the existing
     /// smooth/rough sampling operation to apply Snell/Fresnel at an interface.
+    /// The original field admits its own wavelength support; a positive finite
+    /// vacuum wavelength is not restricted to the camera's visible band here.
     pub fn try_gradient_at<F: GradientIndexField + ?Sized>(
         field: &F,
         position: Point3,
@@ -152,7 +154,7 @@ impl BeamMedium {
         if !finite_point(position) {
             return Err(BeamError::InvalidPosition);
         }
-        if !(crate::spectral::LAMBDA_MIN..=crate::spectral::LAMBDA_MAX).contains(&wavelength_nm) {
+        if !wavelength_nm.is_finite() || wavelength_nm <= 0.0 {
             return Err(DielectricError::InvalidWavelength.into());
         }
         let sample = field.sample(position, wavelength_nm)?;
@@ -1043,6 +1045,76 @@ mod tests {
                 .abs()
                 < 2e-10
         );
+    }
+
+    #[test]
+    fn g1_infrared_curved_beam_retains_source_band_phase_group_and_stokes_power() {
+        use crate::dielectric::{DielectricIorSample, TabulatedIor};
+        use crate::gradient_index::AffineIndexField;
+        use fs_geom::Aabb;
+
+        let ior = TabulatedIor::try_new_in_band(
+            std::array::from_fn(|i| {
+                let wavelength = 8000.0 + 750.0 * i as f64;
+                DielectricIorSample::try_new_in_band(
+                    wavelength, 1.71875 - wavelength / 64000.0,
+                ).unwrap()
+            }),
+            750.0,
+        ).unwrap();
+        let material = DielectricGlass::new(
+            ior,
+            BeerLambertAbsorption::try_from_spectral_extinction_in_band(&[
+                (9000.0, 0.2), (11000.0, 0.6), (13000.0, 1.0),
+            ]).unwrap(),
+            GlassProvenance::Custom,
+        );
+        let origin = Point3::new(0.0, 0.0, 0.0);
+        let gradient = 0.2;
+        let field = AffineIndexField::try_new(
+            &material, origin, Vec3::new(0.0, gradient, 0.0),
+            Aabb::new(Point3::new(-1.0, -0.5, -0.5), Point3::new(1.0, 0.5, 0.5)),
+        ).unwrap();
+        let wavelength = 11000.0;
+        let length = 0.4;
+        let initial = PolarizedBeam::try_new(
+            origin,
+            PolarizationFrame::try_new(Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0)).unwrap(),
+            wavelength,
+            BeamMedium::try_gradient_at(&field, origin, wavelength).unwrap(),
+            Stokes::try_new(2.0, 0.6, -0.8, 0.4).unwrap(),
+        ).unwrap();
+        let result = initial.advance_gradient(&field, length, GradientIndexOptions::default()).unwrap();
+        let n0 = 1.71875 - wavelength / 64000.0;
+        let n = (n0 * n0 + (gradient * length).powi(2)).sqrt();
+        let phase_path = 0.5 * (length * n
+            + n0 * n0 / gradient * (gradient * length / n0).asinh());
+        assert!((result.beam.ray().origin.y - (n - n0) / gradient).abs() < 2e-10);
+        assert!((result.beam.ray().dir.x - n0 / n).abs() < 2e-10);
+        assert!((result.beam.ray().dir.y - gradient * length / n).abs() < 2e-10);
+        assert!((result.propagation.optical_path_length_m - phase_path).abs() < 2e-10);
+        assert!((result.propagation.group_optical_path_length_m.unwrap()
+            - phase_path - wavelength / 64000.0 * length).abs() < 2e-10);
+        assert_eq!(result.beam.wavelength_nm(), wavelength);
+        assert_eq!(result.beam.frame().horizontal(), Vec3::new(0.0, 0.0, 1.0));
+        let factor = (-0.6_f64 * length).exp();
+        same(result.beam.power(), Stokes {
+            i: 2.0 * factor, q: 0.6 * factor, u: -0.8 * factor, v: 0.4 * factor,
+        });
+        near(result.beam.power().degree(), initial.power().degree());
+        for wavelength in [550.0, 8999.0, 13001.0] {
+            assert_eq!(BeamMedium::try_gradient_at(&field, origin, wavelength),
+                Err(BeamError::GradientIndex(GradientIndexError::Dielectric(DielectricError::InvalidWavelength))));
+        }
+        for wavelength in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(BeamMedium::try_gradient_at(&field, origin, wavelength),
+                Err(BeamError::Dielectric(DielectricError::InvalidWavelength)));
+        }
+        assert_eq!(initial.advance_gradient_with_control(
+            &field, length, GradientIndexOptions::default(), || false,
+        ), Err(BeamError::GradientIndex(GradientIndexError::Cancelled)));
+        assert_eq!(initial.ray().origin, origin);
+        assert_eq!(initial.power(), Stokes::try_new(2.0, 0.6, -0.8, 0.4).unwrap());
     }
 
     #[test]

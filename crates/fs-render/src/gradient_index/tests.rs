@@ -312,3 +312,238 @@ fn g0_zero_distance_and_unavailable_group_are_explicit() {
     .unwrap();
     close(thin.absorbed_power_fraction(), 1.0e-16, 1.0e-29);
 }
+
+fn infrared_glass() -> DielectricGlass {
+    use crate::dielectric::{DielectricIorSample, TabulatedIor};
+    // An exactly linear phase law: n = 1.71875 - lambda_nm / 64000,
+    // hence n_g = 1.71875. Absorption has a narrower, independent source band.
+    let phase = TabulatedIor::try_new_in_band(
+        std::array::from_fn(|i| {
+            let wavelength = 8000.0 + 750.0 * i as f64;
+            DielectricIorSample::try_new_in_band(wavelength, 1.71875 - wavelength / 64000.0)
+                .unwrap()
+        }),
+        750.0,
+    )
+    .unwrap();
+    DielectricGlass::new(
+        phase,
+        BeerLambertAbsorption::try_from_spectral_extinction_in_band(&[
+            (9000.0, 0.2),
+            (11000.0, 0.6),
+            (13000.0, 1.0),
+        ])
+        .unwrap(),
+        GlassProvenance::Custom,
+    )
+}
+
+struct Unbounded;
+impl event::BoundaryOracle for Unbounded {
+    fn query(&mut self, _: Point3) -> Result<event::BoundaryQuery, GradientIndexError> {
+        Ok(event::BoundaryQuery {
+            clearance_m: f64::INFINITY,
+            witness: None,
+        })
+    }
+}
+
+#[test]
+fn g1_infrared_scalar_bundle_and_event_paths_keep_phase_group_and_absorption() {
+    let glass = infrared_glass();
+    let field = HomogeneousIndexField::new(&glass);
+    let length = 0.4;
+    for wavelength in [9000.0, 11000.0, 13000.0] {
+        let n = 1.71875 - wavelength / 64000.0;
+        let alpha = 0.2 + (wavelength - 9000.0) / 5000.0;
+        let scalar = propagate(
+            &field,
+            ray(),
+            axis(),
+            wavelength,
+            length,
+            GradientIndexOptions::default(),
+        )
+        .unwrap();
+        let bundle = bundle::propagate_bundle(
+            &field,
+            ray(),
+            axis(),
+            wavelength,
+            length,
+            bundle::BundleOptions::default(),
+        )
+        .unwrap();
+        let event = event::propagate_to_boundary(
+            &field,
+            &mut Unbounded,
+            ray(),
+            axis(),
+            wavelength,
+            length,
+            None,
+            event::GradientEventOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(event.termination, event::BoundaryTermination::DistanceLimit);
+        for result in [&scalar, bundle.propagation(), &event.propagation] {
+            close(result.ray.origin.x, length, 2e-14);
+            assert_eq!(result.ray.dir, ray().dir);
+            close(result.optical_path_length_m, n * length, 2e-14);
+            close(
+                result.group_optical_path_length_m.unwrap(),
+                1.71875 * length,
+                2e-14,
+            );
+            close(result.optical_depth, alpha * length, 2e-14);
+            close(result.power_transmittance(), (-alpha * length).exp(), 2e-14);
+            assert_eq!(result.field_evaluations, 1);
+        }
+    }
+}
+
+#[test]
+fn g1_infrared_affine_and_quadratic_fields_use_the_common_source_band() {
+    let glass = infrared_glass();
+    assert_eq!(glass.wavelength_bounds_nm().unwrap(), (9000.0, 13000.0));
+    let field = AffineIndexField::try_new(&glass, ray().origin, Vec3::new(0.0, 0.2, 0.0), bounds())
+        .unwrap();
+    let length = 0.6;
+    let wavelength = 11000.0;
+    let n0 = 1.71875 - wavelength / 64000.0;
+    let scalar = propagate(
+        &field,
+        ray(),
+        axis(),
+        wavelength,
+        length,
+        GradientIndexOptions::default(),
+    )
+    .unwrap();
+    let n = (n0 * n0 + (0.2_f64 * length).powi(2)).sqrt();
+    close(scalar.ray.origin.y, (n - n0) / 0.2, 2e-10);
+    close(
+        scalar.final_sample.phase_index() * scalar.ray.dir.x,
+        n0,
+        2e-10,
+    );
+    close(
+        scalar.group_optical_path_length_m.unwrap() - scalar.optical_path_length_m,
+        wavelength / 64000.0 * length,
+        2e-10,
+    );
+    let lens = bundle::QuadraticIndexField::try_new(
+        &glass,
+        ray().origin,
+        Vec3::new(0.0, 0.0, 0.0),
+        bundle::IndexHessian::try_new([0.0, -n0, -n0], [0.0; 3]).unwrap(),
+        Aabb::new(Point3::new(-1.0, -0.1, -0.1), Point3::new(1.0, 0.1, 0.1)),
+    )
+    .unwrap();
+    let focused = bundle::propagate_bundle(
+        &lens,
+        ray(),
+        axis(),
+        wavelength,
+        length,
+        bundle::BundleOptions::default(),
+    )
+    .unwrap();
+    for (column, launch) in focused
+        .angular_derivatives()
+        .into_iter()
+        .zip(focused.launch_basis())
+    {
+        close(
+            norm(sub(column.position_m_per_rad, launch.scale(length.sin()))),
+            0.0,
+            2e-9,
+        );
+        close(
+            norm(sub(column.direction_per_rad, launch.scale(length.cos()))),
+            0.0,
+            2e-9,
+        );
+    }
+    for wavelength in [8999.0, 13001.0, 550.0, 0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(
+            propagate(
+                &field,
+                ray(),
+                axis(),
+                wavelength,
+                length,
+                GradientIndexOptions::default(),
+            )
+            .is_err()
+        );
+        assert!(
+            bundle::propagate_bundle(
+                &lens,
+                ray(),
+                axis(),
+                wavelength,
+                length,
+                bundle::BundleOptions::default(),
+            )
+            .is_err()
+        );
+        assert!(
+            event::propagate_to_boundary(
+                &field,
+                &mut Unbounded,
+                ray(),
+                axis(),
+                wavelength,
+                length,
+                None,
+                event::GradientEventOptions::default(),
+            )
+            .is_err()
+        );
+    }
+    assert_eq!(
+        propagate_with_control(
+            &field,
+            ray(),
+            axis(),
+            wavelength,
+            length,
+            GradientIndexOptions::default(),
+            || false,
+        ),
+        Err(GradientIndexError::Cancelled)
+    );
+}
+
+#[test]
+fn g1_infrared_lte_emission_uses_the_same_absorbing_path_and_si_planck_law() {
+    let glass = infrared_glass();
+    let field = HomogeneousIndexField::new(&glass);
+    let temperature = 420.0;
+    let wavelength = 11000.0;
+    let length = 0.4;
+    let (path, emission) = thermal::propagate_emission_to_boundary_with_control(
+        &field,
+        &|_: Point3| Ok(temperature),
+        1e-13,
+        &mut Unbounded,
+        ray(),
+        axis(),
+        wavelength,
+        length,
+        None,
+        event::GradientEventOptions::default(),
+        || true,
+    )
+    .unwrap();
+    let lambda_m: f64 = wavelength * 1e-9;
+    let h = 6.626_070_15e-34;
+    let c = 299_792_458.0_f64;
+    let k = 1.380_649e-23;
+    let blackbody = (2.0 * h * c * c / lambda_m.powi(5)) * 1e-9
+        / (h * c / (lambda_m * k * temperature)).exp_m1();
+    let expected = blackbody * -(-0.6_f64 * length).exp_m1();
+    close(emission, expected, 2e-11 * expected);
+    close(path.propagation.optical_depth, 0.6 * length, 2e-14);
+}

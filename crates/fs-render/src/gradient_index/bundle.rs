@@ -207,11 +207,16 @@ impl<'a> QuadraticIndexField<'a> {
             }
             Ok(())
         };
-        check(LAMBDA_MIN)?;
-        check(LAMBDA_MAX)?;
+        let (minimum, maximum) = glass
+            .wavelength_bounds_nm()
+            .map_err(GradientIndexError::from)?;
+        check(minimum)?;
+        check(maximum)?;
         if let DielectricIor::Tabulated(table) = glass.ior() {
             for sample in table.samples() {
-                check(sample.wavelength_nm())?;
+                if (minimum..=maximum).contains(&sample.wavelength_nm()) {
+                    check(sample.wavelength_nm())?;
+                }
             }
         }
         Ok(candidate)
@@ -599,7 +604,7 @@ pub fn propagate_bundle_with_control<F: SecondOrderIndexField + ?Sized>(
     if !distance_m.is_finite() || distance_m < 0.0 {
         return Err(BundleError::InvalidOptions);
     }
-    if !wavelength_nm.is_finite() || !(LAMBDA_MIN..=LAMBDA_MAX).contains(&wavelength_nm) {
+    if !wavelength_nm.is_finite() || wavelength_nm <= 0.0 {
         return Err(GradientIndexError::Dielectric(DielectricError::InvalidWavelength).into());
     }
     if !finite_point(ray.origin) {
