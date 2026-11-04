@@ -1,5 +1,30 @@
 # CONTRACT: fs-couple
 
+## Native duct outlet harmonics and coherent aperture radiation
+
+`acoustic_realize::duct_harmonic::observe_duct_harmonics` contracts the original
+bell and active tone-hole `AcousticOutletFlow` rows directly against every full
+`HbOrbit` coordinate. These internal output rows need not be external power
+ports. Loaded-terminal inertia, material memory, native outward signs, sparse
+tap IDs, stations and effective open radii remain owned by the original assembly.
+DD contraction preserves complex phase; DC flow stays separate and positive
+lines use peak `2 conj(c_h)` amplitudes. No inlet-flow substitution is made.
+
+Explicit outward normals and mouth-relative receiver geometry define local
+aperture frames. Existing circular quadrature and harmonic Rayleigh transfer
+produce each mouth's pressure and velocity; velocity rotates back to one common
+Cartesian frame before DD coherent summation. The returned existing
+`PreparedHarmonicField<3>` feeds the established harmonic pressure renderer.
+State, opening, harmonic, quadrature, storage and cancellation limits apply.
+
+The exterior is explicitly supplied, homogeneous and lossless; each prescribed
+uniform circular aperture has its own oriented infinite-baffle observation.
+This adds no radiation load, mutual aperture scattering or atmospheric model,
+and does not establish candidate-orbit convergence. Five physical regressions
+cover the actual loaded bell versus inlet, finite-aperture rendered pressure,
+sparse tap identity and phase cancellation, rigid bell/lateral-hole rotation,
+closed-mouth silence and atomic admission/cancellation refusals.
+
 ## Native continuous tangents in periodic and variational solves
 
 The original pHS orbit adapter discovers `Storage::continuous_tangent()`
