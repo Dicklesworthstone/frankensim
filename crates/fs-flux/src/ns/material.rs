@@ -139,6 +139,35 @@ pub struct MaterialFluxSolution {
     transport: FluidTransportState,
     pressure_pa: Vec<f64>,
     kinetic_energy_j_per_m: f64,
+    viscous_dissipation: MaterialViscousDissipation,
+}
+
+/// Resolved bulk viscous heating at one accepted material/velocity endpoint.
+///
+/// The physical rate is `2 mu D:D = mu gamma^2`, with the original dynamic
+/// viscosity and objective symmetric strain. BDM1 gradients and the bound
+/// material response are constant in each triangle, so these cell powers are
+/// exact for that discrete field. Rigid translation/rotation adds no heating.
+/// Wall-slip, Darcy, SIP, upwind and time-discretization losses are separate.
+/// This result does not evolve temperature or claim a complete discrete energy
+/// balance; multiplying by a timestep is an endpoint quadrature of the heat.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MaterialViscousDissipation {
+    cell_heating_w_m3: Vec<f64>,
+    total_power_w_per_m: f64,
+}
+
+impl MaterialViscousDissipation {
+    /// Nonnegative local heat production [W/m³], in original triangle order.
+    #[must_use]
+    pub fn cell_heating_w_m3(&self) -> &[f64] {
+        &self.cell_heating_w_m3
+    }
+    /// Area integral of the cell heating, per out-of-plane depth [W/m].
+    #[must_use]
+    pub const fn total_power_w_per_m(&self) -> f64 {
+        self.total_power_w_per_m
+    }
 }
 
 /// Physical coordinates for a cellwise generalized-Newtonian material query.
@@ -212,6 +241,12 @@ impl<F> MaterialFluxRheologyStep<F> {
     pub const fn kinetic_energy_j_per_m(&self) -> f64 {
         self.flow.kinetic_energy_j_per_m()
     }
+    /// Physical bulk heating from the exact accepted cell material responses.
+    /// No source is queried again and the initial reference viscosity is unused.
+    #[must_use]
+    pub const fn viscous_dissipation(&self) -> &MaterialViscousDissipation {
+        self.flow.viscous_dissipation()
+    }
     /// Endpoint material responses, indexed by triangle.
     #[must_use]
     pub fn samples(&self) -> &[MaterialFluxRheologySample<F>] {
@@ -240,6 +275,11 @@ impl MaterialFluxSolution {
     #[must_use]
     pub const fn kinetic_energy_j_per_m(&self) -> f64 {
         self.kinetic_energy_j_per_m
+    }
+    /// Physical bulk heating from the accepted velocity and material viscosity.
+    #[must_use]
+    pub const fn viscous_dissipation(&self) -> &MaterialViscousDissipation {
+        &self.viscous_dissipation
     }
     /// The exact material snapshot used for assembly and physical outputs.
     #[must_use]
@@ -465,8 +505,11 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> MaterialFluxSystem<'s, 'm, 'a, F> {
         );
         let (step, samples) =
             field.finish(result.and_then(|step| step.map_err(MaterialFluxError::Rheology)))?;
+        let flow = self.physical_solution_with_viscosity(step.solution, &|cell| {
+            samples[cell].transport.dynamic_viscosity_pa_s()
+        })?;
         Ok(MaterialFluxRheologyStep {
-            flow: self.physical_solution(step.solution)?,
+            flow,
             samples,
             iterations: step.iterations,
             relative_update: step.relative_update,
@@ -574,6 +617,16 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> MaterialFluxSystem<'s, 'm, 'a, F> {
         &self,
         discrete: FluxSolution,
     ) -> Result<MaterialFluxSolution, MaterialFluxError> {
+        self.physical_solution_with_viscosity(discrete, &|_| {
+            self.transport.dynamic_viscosity_pa_s()
+        })
+    }
+
+    fn physical_solution_with_viscosity(
+        &self,
+        discrete: FluxSolution,
+        viscosity_pa_s: &dyn Fn(usize) -> f64,
+    ) -> Result<MaterialFluxSolution, MaterialFluxError> {
         if !discrete.converged(self.params.tol) {
             return Err(MaterialFluxError::LinearConvergence {
                 residual: discrete.rel_residual.max(discrete.scaled_rel_residual),
@@ -593,6 +646,7 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> MaterialFluxSystem<'s, 'm, 'a, F> {
             .map(|value| density * value)
             .collect();
         let kinetic_energy_j_per_m = density * self.system.kinetic_energy(&discrete.x);
+        let viscous_dissipation = self.viscous_dissipation(&discrete.x, viscosity_pa_s)?;
         if !pressure_pa.iter().all(|value| value.is_finite()) || !kinetic_energy_j_per_m.is_finite()
         {
             return Err(MaterialFluxError::Invalid(
@@ -604,6 +658,45 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> MaterialFluxSystem<'s, 'm, 'a, F> {
             transport: self.transport,
             pressure_pa,
             kinetic_energy_j_per_m,
+            viscous_dissipation,
+        })
+    }
+
+    // One physical loss owner for homogeneous, constitutive and moving-chart
+    // endpoints. Read retained viscosity snapshots, never call source laws here.
+    fn viscous_dissipation(
+        &self,
+        velocity: &[f64],
+        viscosity_pa_s: &dyn Fn(usize) -> f64,
+    ) -> Result<MaterialViscousDissipation, MaterialFluxError> {
+        let mut cell_heating_w_m3 = self.system.shear_rates(velocity);
+        let mut total_power_w_per_m = 0.0;
+        let mut compensation = 0.0;
+        for (cell, heating) in cell_heating_w_m3.iter_mut().enumerate() {
+            let mu = viscosity_pa_s(cell);
+            // sqrt(mu)*gamma avoids overflowing gamma² or underflowing
+            // mu*gamma when the final, dimensioned heating is representable.
+            let scaled_rate = mu.sqrt() * *heating;
+            *heating = scaled_rate * scaled_rate;
+            let power = *heating * self.system.mesh.areas[cell];
+            if !positive(mu) || !heating.is_finite() || !power.is_finite() {
+                return Err(MaterialFluxError::Invalid(
+                    "physical viscous heating is not representable",
+                ));
+            }
+            let corrected = power - compensation;
+            let next = total_power_w_per_m + corrected;
+            compensation = (next - total_power_w_per_m) - corrected;
+            total_power_w_per_m = next;
+        }
+        if !total_power_w_per_m.is_finite() {
+            return Err(MaterialFluxError::Invalid(
+                "integrated viscous power is not representable",
+            ));
+        }
+        Ok(MaterialViscousDissipation {
+            cell_heating_w_m3,
+            total_power_w_per_m,
         })
     }
 }

@@ -185,7 +185,20 @@ fn g1_changing_rigid_motion_and_layered_rheology_recover_constant_physical_shear
                 3e-7,
             );
             near(first.borrow()[cell].unwrap(), old_slopes[layer], 1e-12);
+            near(
+                step.flow.solution.viscous_dissipation().cell_heating_w_m3()[cell],
+                tau * slopes[layer],
+                3e-7,
+            );
         }
+        near(
+            step.flow
+                .solution
+                .viscous_dissipation()
+                .total_power_w_per_m(),
+            0.5 * tau * (slopes[0] + slopes[1]),
+            3e-7,
+        );
     }
 }
 
@@ -243,6 +256,14 @@ fn g3_free_world_stream_has_zero_strain_with_moving_spatial_material_queries() {
             .unwrap();
         let local = inverse(step.orientation_cos_sin, u);
         let (error, div) = system.velocity_error(step.flow.solution.velocity_dofs(), &|_| local);
+        near(
+            step.flow
+                .solution
+                .viscous_dissipation()
+                .total_power_w_per_m(),
+            0.0,
+            2e-16,
+        );
         assert!(error < 4e-9 && div < 4e-9, "{error} {div}");
         vector(step.world_momentum_n_s_per_m, scale(u, 2.3), 4e-9);
         let count = queries.get();

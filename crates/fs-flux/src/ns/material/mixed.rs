@@ -2,7 +2,7 @@
 
 use super::{
     MaterialFluxError, MaterialFluxRheologyPoint, MaterialFluxRheologySample, MaterialFluxSystem,
-    rheology::RheologyField,
+    MaterialViscousDissipation, rheology::RheologyField,
 };
 use crate::ns::FluxSolution;
 use crate::ns::boundary::{
@@ -198,6 +198,7 @@ pub struct MaterialStokesSolution {
     transport: FluidTransportState,
     pressure_pa: Vec<f64>,
     kinetic_energy_j_per_m: f64,
+    viscous_dissipation: MaterialViscousDissipation,
 }
 
 impl MaterialStokesSolution {
@@ -325,6 +326,12 @@ impl MaterialStokesSolution {
     pub const fn kinetic_energy_j_per_m(&self) -> f64 {
         self.kinetic_energy_j_per_m
     }
+    /// Physical bulk heating at the accepted field. For nonlinear endpoints,
+    /// the exact final source viscosities are used, not transport()'s reference.
+    #[must_use]
+    pub const fn viscous_dissipation(&self) -> &MaterialViscousDissipation {
+        &self.viscous_dissipation
+    }
 }
 
 /// Accepted source-backed steady flow and its exact final material responses.
@@ -332,6 +339,7 @@ pub struct MaterialStokesRheologySolution<G> {
     flow: StokesRheologySolution,
     pressure_pa: Vec<f64>,
     kinetic_energy_j_per_m: f64,
+    viscous_dissipation: MaterialViscousDissipation,
     samples: Vec<MaterialFluxRheologySample<G>>,
 }
 
@@ -398,6 +406,11 @@ impl<G> MaterialStokesRheologySolution<G> {
     #[must_use]
     pub const fn kinetic_energy_j_per_m(&self) -> f64 {
         self.kinetic_energy_j_per_m
+    }
+    /// Physical bulk heating from the retained final material and velocity.
+    #[must_use]
+    pub const fn viscous_dissipation(&self) -> &MaterialViscousDissipation {
+        &self.viscous_dissipation
     }
     /// Exact final source owners, in triangle order, without a reporting requery.
     #[must_use]
@@ -511,9 +524,20 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
         &self,
         flow: StokesSolution,
     ) -> Result<MaterialStokesSolution, MaterialFluxError> {
+        self.material_stokes_solution_with_viscosity(flow, &|_| {
+            self.transport.dynamic_viscosity_pa_s()
+        })
+    }
+
+    pub(super) fn material_stokes_solution_with_viscosity(
+        &self,
+        flow: StokesSolution,
+        viscosity_pa_s: &dyn Fn(usize) -> f64,
+    ) -> Result<MaterialStokesSolution, MaterialFluxError> {
         let density = self.transport.density_kg_m3();
         let pressure_pa: Vec<_> = flow.pressure.iter().map(|p| density * p).collect();
         let kinetic_energy_j_per_m = density * self.system.kinetic_energy(&flow.field.x);
+        let viscous_dissipation = self.viscous_dissipation(&flow.field.x, viscosity_pa_s)?;
         if pressure_pa.iter().any(|value| !value.is_finite()) || !kinetic_energy_j_per_m.is_finite()
         {
             return Err(MaterialFluxError::Invalid(
@@ -525,6 +549,7 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
             transport: self.transport,
             pressure_pa,
             kinetic_energy_j_per_m,
+            viscous_dissipation,
         })
     }
 
@@ -621,6 +646,9 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
         let (flow, samples) = field.finish(result)?;
         let pressure_pa: Vec<_> = flow.solution.pressure.iter().map(|p| density * p).collect();
         let kinetic_energy_j_per_m = density * self.system.kinetic_energy(&flow.solution.field.x);
+        let viscous_dissipation = self.viscous_dissipation(&flow.solution.field.x, &|cell| {
+            samples[cell].transport.dynamic_viscosity_pa_s()
+        })?;
         if pressure_pa.iter().any(|value| !value.is_finite()) || !kinetic_energy_j_per_m.is_finite()
         {
             return Err(MaterialFluxError::Invalid(
@@ -631,6 +659,7 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
             flow,
             pressure_pa,
             kinetic_energy_j_per_m,
+            viscous_dissipation,
             samples,
         })
     }

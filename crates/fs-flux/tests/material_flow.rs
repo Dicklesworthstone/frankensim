@@ -36,6 +36,54 @@ fn near(actual: f64, expected: f64, tolerance: f64) {
 }
 
 #[test]
+fn viscous_heat_is_objective_and_matches_couette_and_extensional_work() {
+    // A = [[a, s-w], [w, -a]] has gamma²=4*a²+s². Translation and
+    // rigid spin w do not contribute, even when their kinetic energy is large.
+    // For Couette shear the independent wall-power check is tau*U*L=mu*s²*area.
+    for n in [2, 4] {
+        let mesh = TriMesh::from_mesh2(&Mesh2::triangles(2.0, 1.0, 2 * n, n));
+        let system = FluxSystem::new(&mesh);
+        for (a, shear, spin, boost) in [
+            (0.0, 0.0, 1.7, [2.0, -3.0]),
+            (0.0, 1.2, 0.0, [0.0, 0.0]),
+            (0.35, -0.8, 2.1, [-3.0, 4.0]),
+        ] {
+            for density in [2.0, 7.0] {
+                let mu = 0.3;
+                let material = transport(density, mu);
+                let flow =
+                    MaterialFluxSystem::new(&system, &material, MaterialFluxNumerics::default())
+                        .unwrap();
+                let velocity = |p: [f64; 2]| {
+                    [
+                        boost[0] + a * p[0] + (shear - spin) * p[1],
+                        boost[1] + spin * p[0] - a * p[1],
+                    ]
+                };
+                let solution = flow.solve_stokes(&zero_force, &velocity).unwrap();
+                let heating = mu * (4.0 * a * a + shear * shear);
+                let dissipation = solution.viscous_dissipation();
+                assert_eq!(dissipation.cell_heating_w_m3().len(), mesh.tris.len());
+                for &cell_heat in dissipation.cell_heating_w_m3() {
+                    assert!(cell_heat >= 0.0);
+                    near(cell_heat, heating, 2e-9);
+                }
+                near(dissipation.total_power_w_per_m(), 2.0 * heating, 2e-9);
+                // The same result comes from the resolved volume, with no
+                // dependence on the number or areas of the triangles.
+                let integral: f64 = dissipation
+                    .cell_heating_w_m3()
+                    .iter()
+                    .zip(&mesh.areas)
+                    .map(|(q, area)| q * area)
+                    .sum();
+                near(dissipation.total_power_w_per_m(), integral, 2e-14);
+            }
+        }
+    }
+}
+
+#[test]
 fn transient_pressure_impulse_uses_original_gas_density_and_reports_pascals() {
     let mesh = mesh();
     let system = FluxSystem::new(&mesh);
@@ -144,6 +192,15 @@ fn transient_mixed_material_shear_uses_dynamic_viscosity_and_inertia_together() 
         let expected_energy =
             0.5 * density * dt * dt * (1.1_f64.powi(2) + 1.1 * 0.6 + 0.6_f64.powi(2) / 3.0);
         near(solved.kinetic_energy_j_per_m(), expected_energy, 2e-11);
+        let heating = viscosity * (0.6 * dt).powi(2);
+        for &cell_heat in solved.viscous_dissipation().cell_heating_w_m3() {
+            near(cell_heat, heating, 3e-11);
+        }
+        near(
+            solved.viscous_dissipation().total_power_w_per_m(),
+            heating,
+            3e-11,
+        );
         let queries = Cell::new(0);
         let refused_force = |_: [f64; 2]| {
             queries.set(queries.get() + 1);
@@ -517,6 +574,17 @@ fn g1_material_rheology_closes_temperature_layers_and_physical_shear_traction() 
                 1.0,
                 2e-9,
             );
+            // The independent uniform shear traction is 1 Pa, so local heat
+            // is tau*gamma, despite different temperature/rheology on each side.
+            near(
+                step.viscous_dissipation().cell_heating_w_m3()[cell],
+                if point.position_m[1] < 0.5 {
+                    lower_rate
+                } else {
+                    upper_rate
+                },
+                3e-9,
+            );
             near(
                 sample.material().temperature_k,
                 if point.position_m[1] < 0.5 {
@@ -533,6 +601,16 @@ fn g1_material_rheology_closes_temperature_layers_and_physical_shear_traction() 
                 + lower_rate * upper_rate / 8.0
                 + upper_rate.powi(2) / 24.0);
         near(step.kinetic_energy_j_per_m(), expected_energy, 2e-10);
+        near(
+            step.viscous_dissipation().total_power_w_per_m(),
+            0.5 * (lower_rate + upper_rate),
+            3e-9,
+        );
+        assert_eq!(
+            reads.get(),
+            calls,
+            "heat reporting does not requery sources"
+        );
         assert!(step.pressure_pa().iter().all(|p| p.abs() < 2e-9));
         // A single reference viscosity cannot reproduce the sourced shear
         // traction balance, even though loads and boundary data are identical.

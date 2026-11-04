@@ -207,6 +207,20 @@ adjoints.
 
 ## Invariants
 
+Material-bound homogeneous and generalized-Newtonian Stokes/Navier–Stokes
+solutions also retain `MaterialViscousDissipation`: cell heat production
+`2 mu D:D = mu gamma²` in W/m³ and its area integral in W/m. The same accepted
+velocity gradients and retained dynamic material viscosity determine both;
+nonlinear and rigid-ALE endpoints use their final cell responses without
+source requery or reference-viscosity substitution. The fields are constant
+on each BDM1/material cell. Compensated summation accumulates power in mesh order.
+Rigid translation and rotation contribute no strain heat. Wall-slip, Darcy,
+SIP, upwind and BDF1 losses remain separate. These are endpoint power fields;
+time integration and thermal deposition need an explicit consumer, and the
+result alone is not a full discrete energy-balance or thermal-evolution claim.
+Analytic Couette/extensional, rigid-motion, mesh-refinement, temperature-layered
+rheology and moving-chart tests cover the physical values and source ownership.
+
 1. BDM1 basis reproduces its defining dofs (Kronecker to 3.7e-15),
    satisfies the divergence theorem per basis function (1.4e-15), and
    has single-valued normal traces across interior edges (3.6e-15)

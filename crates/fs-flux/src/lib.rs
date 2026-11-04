@@ -72,11 +72,12 @@ pub use gas_film::{
 };
 #[cfg(feature = "continuum")]
 pub use material::{
-    MaterialBoundaryLoad, MaterialBoundaryTransport, MaterialBoundaryWrench, MaterialBrinkmanSolution, MaterialFluxError,
-    MaterialFluxNumerics, MaterialFluxRheologyPoint, MaterialFluxRheologySample,
-    MaterialFluxRheologyStep, MaterialFluxSolution, MaterialFluxSystem,
+    MaterialBoundaryLoad, MaterialBoundaryTransport, MaterialBoundaryWrench,
+    MaterialBrinkmanSolution, MaterialFluxError, MaterialFluxNumerics, MaterialFluxRheologyPoint,
+    MaterialFluxRheologySample, MaterialFluxRheologyStep, MaterialFluxSolution, MaterialFluxSystem,
     MaterialNavierStokesBoundary, MaterialNavierStokesRheologyStep, MaterialNavierStokesStep,
     MaterialStokesBoundary, MaterialStokesRheologySolution, MaterialStokesSolution,
+    MaterialViscousDissipation,
 };
 #[cfg(feature = "continuum")]
 pub use ns::adjoint::{FluxAdjointError, FluxAdjointSolution};

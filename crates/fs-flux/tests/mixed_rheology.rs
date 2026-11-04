@@ -257,6 +257,15 @@ fn g1_material_open_thickening_flow_retains_sources_stress_and_pressure() {
             assert!(sample.material().query <= queries);
             stress_error = stress_error
                 .max((sample.transport().dynamic_viscosity_pa_s() * rates[cell] - 1.0).abs());
+            let expected_heat = if mesh.centroids[cell][1] < 0.5 {
+                3.0
+            } else {
+                1.0
+            };
+            assert!(
+                (solved.viscous_dissipation().cell_heating_w_m3()[cell] - expected_heat).abs()
+                    < 4e-7
+            );
         }
         let pressure_error = solved
             .pressure_pa()
@@ -274,6 +283,8 @@ fn g1_material_open_thickening_flow_retains_sources_stress_and_pressure() {
         );
         assert!(error < 1e-7 && div < 1e-9 && stress_error < 1e-7 && pressure_error < 1e-7);
         assert!((solved.kinetic_energy_j_per_m() / exact_energy - 1.0).abs() < 1e-7);
+        // tau=1 Pa over area one: half at gamma=3/s, half at gamma=1/s.
+        assert!((solved.viscous_dissipation().total_power_w_per_m() - 2.0).abs() < 4e-7);
         assert_eq!(
             solved.pressure_reference(),
             StokesPressureReference::TractionDatum

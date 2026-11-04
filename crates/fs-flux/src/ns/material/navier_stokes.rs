@@ -247,7 +247,10 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
         })
         .map_err(MaterialFluxError::Boundary);
         let (endpoint, samples) = field.finish(result)?;
-        Ok((self.material_navier_stokes_step(endpoint)?, samples))
+        let step = self.material_navier_stokes_step_with_viscosity(endpoint, &|cell| {
+            samples[cell].transport().dynamic_viscosity_pa_s()
+        })?;
+        Ok((step, samples))
     }
 
     /// Advance pressure-driven generalized-Newtonian BDF1 with the original
@@ -302,18 +305,29 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
         })
         .map_err(MaterialFluxError::Boundary);
         let (endpoint, samples) = field.finish(result)?;
-        Ok(MaterialNavierStokesRheologyStep {
-            step: self.material_navier_stokes_step(endpoint)?,
-            samples,
-        })
+        let step = self.material_navier_stokes_step_with_viscosity(endpoint, &|cell| {
+            samples[cell].transport().dynamic_viscosity_pa_s()
+        })?;
+        Ok(MaterialNavierStokesRheologyStep { step, samples })
     }
 
     fn material_navier_stokes_step(
         &self,
         endpoint: NavierStokesStep,
     ) -> Result<MaterialNavierStokesStep, MaterialFluxError> {
+        self.material_navier_stokes_step_with_viscosity(endpoint, &|_| {
+            self.transport.dynamic_viscosity_pa_s()
+        })
+    }
+
+    fn material_navier_stokes_step_with_viscosity(
+        &self,
+        endpoint: NavierStokesStep,
+        viscosity_pa_s: &dyn Fn(usize) -> f64,
+    ) -> Result<MaterialNavierStokesStep, MaterialFluxError> {
         Ok(MaterialNavierStokesStep {
-            solution: self.material_stokes_solution(endpoint.solution)?,
+            solution: self
+                .material_stokes_solution_with_viscosity(endpoint.solution, viscosity_pa_s)?,
             iterations: endpoint.iterations,
             relative_update: endpoint.relative_update,
             nonlinear_residual: endpoint.nonlinear_residual,

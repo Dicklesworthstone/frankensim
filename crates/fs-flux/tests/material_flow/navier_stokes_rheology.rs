@@ -112,6 +112,13 @@ fn mixed_material_rheology_retains_endpoint_sources_and_coherent_pressure_inerti
             near(*pressure, 7.0 + 2.0 * point[0] - 3.0 * point[1], 4e-8);
         }
         assert_eq!(step.solution.transport(), &reference);
+        // Include the normal strains as well as shear: gamma²=.25.
+        // The zero-shear reference viscosity would give the wrong heat.
+        let heating = step.solution.viscous_dissipation();
+        for &cell_heat in heating.cell_heating_w_m3() {
+            near(cell_heat, viscosity(0.5) * 0.25, 5e-8);
+        }
+        near(heating.total_power_w_per_m(), viscosity(0.5) * 0.25, 5e-8);
         assert_eq!(result.samples().len(), mesh.tris.len());
         assert_eq!(
             reads.get(),
