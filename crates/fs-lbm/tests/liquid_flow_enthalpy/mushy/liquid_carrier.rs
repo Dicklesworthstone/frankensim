@@ -3,6 +3,8 @@ use super::*;
 use fs_lbm::conjugate::ViscousHeatControls;
 use fs_lbm::conjugate::enthalpy::advection::feedback::implicit::ImplicitFlowControls;
 
+mod open;
+
 fn state<'a>(domain: &VoxelDomain, curve: &'a EquilibriumEnthalpyPhaseCurve) -> DepositionSimulation<'a> {
     let events = [20.0, 40.0, 60.0, 80.0].into_iter().enumerate().map(|(i, h)| {
         let [x, y, z] = domain.coords(i);

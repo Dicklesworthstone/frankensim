@@ -1,12 +1,14 @@
 //! Analytic phase data exercise the actual thermal timeline and mass transfers.
 
 use super::*;
-use crate::enthalpy::advection::{MassBoundary, MassFlow};
+use crate::enthalpy::advection::MassFlow;
 use crate::enthalpy::advection::reconstruction::{AxialCellStencil, LimitedEnthalpyReconstruction};
 use crate::enthalpy::backward_euler::BackwardEulerStep;
 use crate::enthalpy::{
     Boundary, CellGeometry, CellId, DepositionBudget, Event, StepConfig, TimedEvent,
 };
+
+mod open;
 
 const MAT: MaterialId = MaterialId(1);
 
@@ -183,12 +185,6 @@ fn phase_source_admission_and_incompatible_transport_modes_refuse() {
     assert!(original.clone().with_entropy_audit().with_liquid_carrier(carrier(&law)).is_err());
     assert!(selected.clone().with_entropy_audit().endpoint_transport(&initial, || Ok(())).is_err());
     assert!(selected.clone().with_stationary_species(vec!["liquid".into()], vec![], 3, 1).is_err());
-    let boundaries = vec![
-        MassBoundary::Inlet { id: 10, cell: CellId(0), kg_s: 0.5, material_id: MAT, specific_h_j_kg: 100.0 },
-        MassBoundary::Outlet { id: 11, cell: CellId(0), kg_s: 0.5 },
-    ];
-    assert!(selected.clone().with_boundaries(boundaries.clone(), 5).is_err());
-    assert!(original.with_boundaries(boundaries, 5).unwrap().with_liquid_carrier(carrier(&law)).is_err());
     let reconstruction = LimitedEnthalpyReconstruction::try_new(&initial,
         &[AxialCellStencil { previous: CellId(0), cell: CellId(1), next: CellId(2) }], 1, || Ok(())).unwrap();
     assert!(matches!(selected.endpoint_transport_with_reconstruction(&initial, &reconstruction, || Ok(())),

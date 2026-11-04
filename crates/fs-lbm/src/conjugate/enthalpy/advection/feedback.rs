@@ -401,7 +401,8 @@ where
     ///
     /// The default is the declared homogeneous single-velocity enthalpy/porosity
     /// approximation. `Self::with_liquid_carrier` optionally transports the
-    /// liquid's enthalpy through a stationary solid in a closed Stokes domain.
+    /// liquid's enthalpy through a stationary solid with the admitted Stokes
+    /// work account, including supported pressure-driven liquid streams.
     /// It retains the underlying callback's source receipts and context; it
     /// does not promote raw permeability/model data to measured authority.
     /// Below the model's minimum liquid volume fraction (including fully

@@ -54,7 +54,7 @@ where
         check_gate(self.gate, &mut || Ok(()))?;
         if self.liquid_carrier.is_some() {
             return Err(invalid(
-                "liquid-only carriage through stationary solid requires the closed creeping-flow owner, not homogeneous inertia",
+                "liquid-only carriage through stationary solid requires the creeping-flow work owner, not homogeneous inertia",
             ).into());
         }
         if self.unsteady.is_some() || self.applied.is_some() {

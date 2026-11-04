@@ -59,8 +59,9 @@ impl MassFlow {
 
 /// External mass connection. Rates are positive magnitudes [kg/s]. Inlet
 /// material identity and enthalpy datum must match the receiving cell's law.
-/// Outlets carry the CURRENT local enthalpy unless explicitly bound to a
-/// [`SelectiveOutlet`] on the stationary-species path.
+/// Outlets carry the CURRENT local enthalpy, or the moving liquid's enthalpy
+/// with an explicit [`liquid::LiquidEnthalpyCarrier`]. A [`SelectiveOutlet`]
+/// instead supplies the stream enthalpy on the stationary-species path.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MassBoundary {
     /// Supplied material entering an active control volume.
@@ -248,9 +249,6 @@ impl<O> Advected<O> {
     /// infer reservoir pressure, velocity, mixing or momentum.
     pub fn with_boundaries(mut self, mut boundaries: Vec<MassBoundary>, max_connections: usize)
         -> Result<Self, DepositionError> {
-        if self.liquid_carrier.is_some() && !boundaries.is_empty() {
-            return Err(invalid("liquid-carrier transport requires a closed mass-flow graph"));
-        }
         if self.flows.len().checked_add(boundaries.len()).is_none_or(|n| n > max_connections) {
             return Err(DepositionError::Budget("mass-flow connections"));
         }
@@ -263,6 +261,7 @@ impl<O> Advected<O> {
             if let MassBoundary::Inlet { specific_h_j_kg, .. } = boundary {
                 finite(*specific_h_j_kg)?;
             }
+            if let Some(carrier) = &self.liquid_carrier { carrier.admit_boundary(boundary)?; }
         }
         boundaries.sort_by_key(|boundary| boundary.identity().0);
         self.boundaries = boundaries;
@@ -368,10 +367,10 @@ impl<O: DepositionObserver> DepositionObserver for Advected<O> {
         -> Result<BTreeMap<CellId, f64>, Self::Error> {
         check()?;
         if let Some(carrier) = &self.liquid_carrier {
-            if !self.boundaries.is_empty() || self.stationary_species.is_some()
-                || !self.selective_outlets.is_empty() || self.entropy.is_some()
+            if self.stationary_species.is_some() || !self.selective_outlets.is_empty()
+                || self.entropy.is_some()
             {
-                return Err(invalid("liquid-carrier transport requires a closed graph without species or bulk-entropy mixing").into());
+                return Err(invalid("liquid-carrier transport excludes species and bulk-entropy mixing").into());
             }
             carrier.admit_law(thermal)?;
         }
@@ -396,6 +395,12 @@ impl<O: DepositionObserver> DepositionObserver for Advected<O> {
             if thermal.material_storage_basis(cell.material_id)? != ThermalStorageBasis::Enthalpy {
                 return Err(invalid("mass flow requires enthalpy storage, not fixed-volume internal energy").into());
             }
+            if let Some(carrier) = &self.liquid_carrier {
+                carrier.admit_boundary(boundary)?;
+                // Both liquid entry and discharge require liquid support and
+                // the same fixed-density inventory, even without interior edges.
+                carrier.carried_h(cell)?;
+            }
             let reference_h = self.reference_h(thermal, id)?;
             let (power_w, gross_power_w, side) = match *boundary {
                 MassBoundary::Inlet { material_id, specific_h_j_kg, .. } => {
@@ -416,8 +421,10 @@ impl<O: DepositionObserver> DepositionObserver for Advected<O> {
                         finite(kg_s * specific_h_j_kg)?, 0)
                 }
                 MassBoundary::Outlet { .. } => {
-                    let outgoing_h = self.selective_outlets.get(&boundary_id)
-                        .map_or(cell.specific_h_j_kg, |outlet| outlet.specific_h_j_kg);
+                    let outgoing_h = match self.selective_outlets.get(&boundary_id) {
+                        Some(outlet) => outlet.specific_h_j_kg,
+                        None => self.carried_h(cell)?,
+                    };
                     pending.outlet_kg_s = finite(pending.outlet_kg_s + kg_s)?;
                     (-finite(kg_s * finite(outgoing_h - reference_h)?)?,
                         -finite(kg_s * outgoing_h)?, 1)

@@ -12,8 +12,9 @@ where
     /// thermal cells retain the complete sensible/latent mixture energy.
     ///
     /// Requires the already bound original pure-substance phase chart, equal
-    /// constant phase density, and closed creeping flow with physical viscous
-    /// heating (`with_viscous_heating` or `with_body_force_heating`). The native
+    /// constant phase density, and creeping flow with physical viscous heating
+    /// (`with_viscous_heating`, `with_body_force_heating`, or the existing
+    /// `with_pressure_work_heating` reservoir-mouth model). The native
     /// velocity is interpreted as liquid volume flux per total cell-face area.
     /// The stationary solid carries no mass flux or reaction work. Every native
     /// liquid mass rate remains locally balanced, so changes in liquid inventory
@@ -25,21 +26,36 @@ where
     /// fractions. Superheat, conduction, Joule and viscous heat still melt the
     /// same original cells, and latent energy is never supplied twice.
     ///
-    /// Attach before the first advance. Transient homogeneous inertia, open
-    /// mass boundaries, non-isothermal alloy coexistence, unequal density and
-    /// moving skeletons are unsupported. No liquid-occupancy inertia or separate
+    /// Open flow uses the ordinary mobile mushy entry, explicit pure-liquid
+    /// inlet enthalpy on every actual inflow (including backflow), and the
+    /// original pressure-work heating owner. Outlet enthalpy is the current
+    /// liquid's h. Stored and incoming h must use the same fixed thermodynamic
+    /// reference pressure. Do not add hydrodynamic p/rho to inlet h: the native
+    /// mechanical pressure supply already enters once through physical heat.
+    /// Its pressure gauge remains independent of the caloric enthalpy datum.
+    ///
+    /// Attach before the first advance. Exact-solid topology remains closed;
+    /// open flow refuses below the source mobility's admitted liquid fraction.
+    /// Transient homogeneous inertia, non-isothermal alloy coexistence, unequal
+    /// density and moving skeletons are unsupported. No liquid-occupancy inertia or separate
     /// phase momentum is inferred. Explicit and implicit Stokes thermal paths
     /// use the same original `Advected` owner and source-bound descriptor.
     pub fn with_liquid_carrier(mut self) -> Result<Self, MaterialFlowError<O::Error>> {
         check_gate(self.gate, &mut || Ok(()))?;
-        if self.unsteady.is_some() || self.applied.is_some()
-            || self.viscous_heating.as_ref().is_none_or(|heat| heat.pressure_work)
-        {
+        if self.unsteady.is_some() || self.applied.is_some() || self.viscous_heating.is_none() {
             return Err(invalid(
-                "liquid carriage requires closed physical Stokes heating before the first advance",
+                "liquid carriage requires physical Stokes heating before the first advance",
             ).into());
         }
-        phase::admit_phase_config(self.config)?;
+        if self.viscous_heating.as_ref().is_some_and(|heat| heat.pressure_work) {
+            if self.exact_phase {
+                return Err(invalid("open liquid carriage has no exact-solid pressure-mouth closure").into());
+            }
+            // The existing pressure-work attachment already admits the native
+            // opposed normal-traction mouths and their physical power account.
+        } else {
+            phase::admit_phase_config(self.config)?;
+        }
         let phase = self.mushy.ok_or(invalid(
             "liquid carriage requires the original stationary phase-mobility source",
         ))?;

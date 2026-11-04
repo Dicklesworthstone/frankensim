@@ -6,7 +6,7 @@
 //! a stationary solid's latent-energy fraction. This supplies no momentum,
 //! phase-volume change, species segregation or second heat integrator.
 
-use super::{Advected, finite, invalid};
+use super::{Advected, MassBoundary, finite, invalid};
 use crate::enthalpy::{
     DepositedCell, DepositionError, DepositionSimulation, MaterialId, ThermalLaw,
     ThermalStorageBasis,
@@ -136,6 +136,21 @@ impl LiquidEnthalpyCarrier {
         Ok(())
     }
 
+    pub(super) fn admit_boundary(&self, boundary: &MassBoundary) -> Result<(), DepositionError> {
+        if let MassBoundary::Inlet { material_id, specific_h_j_kg: h, .. } = *boundary {
+            if material_id != self.material {
+                return Err(invalid("liquid-carrier inlet must use the original material and enthalpy datum"));
+            }
+            if !h.is_finite() || h < self.enthalpy_bounds_j_kg[0] || h > self.enthalpy_bounds_j_kg[1] {
+                return Err(DepositionError::MaterialDomain);
+            }
+            if h < self.plateau_enthalpy_bounds_j_kg[1] {
+                return Err(invalid("liquid-carrier inlet must be entirely liquid within its original phase chart"));
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn carried_h(&self, cell: &DepositedCell) -> Result<f64, DepositionError> {
         let expected_mass = finite(self.density_kg_m3 * cell.geometry.volume_m3)?;
         if cell.material_id != self.material || expected_mass <= 0.0
@@ -157,20 +172,30 @@ impl LiquidEnthalpyCarrier {
 
 impl<O> Advected<O> {
     /// Transport the moving liquid's h while retaining stationary-solid energy
-    /// in the original bulk cell. Only a closed, single-material mass graph is
-    /// supported. The resolved mass rate is liquid mass per second, not total
-    /// mixture motion or intrinsic liquid velocity; its owner supplies momentum.
+    /// in the original bulk cell. Every cell balances liquid mass, including
+    /// any explicit inlets/outlets. The resolved mass rate is liquid mass per
+    /// second, not total mixture motion or intrinsic liquid velocity; its owner
+    /// supplies momentum. The solid skeleton carries no mass through a boundary.
+    ///
+    /// An inlet must be pure liquid at or above the original liquidus enthalpy,
+    /// within that same material chart and enthalpy datum. An outlet carries the
+    /// current liquid enthalpy, including in a partially solid cell. Boundary
+    /// cells must contain liquid. The original external-enthalpy account owns
+    /// their signed heat input; no separate latent, pressure or kinetic source
+    /// is inferred. Source pressure/work conventions remain the flow owner's
+    /// responsibility, just as for ordinary single-phase stream enthalpy.
     ///
     /// Existing conservative transfers, component-reference subtraction and
     /// physical energy gates remain authoritative. The carried-h slope is in
     /// [0,1], so the original outgoing-mass CFL remains conservative. A bulk-h
     /// entropy audit, species mixing or nonempty bulk-h reconstruction refuses.
     pub fn with_liquid_carrier(mut self, carrier: LiquidEnthalpyCarrier) -> Result<Self, DepositionError> {
-        if !self.boundaries.is_empty() || self.stationary_species.is_some()
-            || !self.selective_outlets.is_empty() || self.entropy.is_some()
+        if self.stationary_species.is_some() || !self.selective_outlets.is_empty()
+            || self.entropy.is_some()
         {
-            return Err(invalid("liquid-carrier transport requires a closed graph without species or bulk-entropy mixing"));
+            return Err(invalid("liquid-carrier transport excludes species and bulk-entropy mixing"));
         }
+        for boundary in &self.boundaries { carrier.admit_boundary(boundary)?; }
         self.liquid_carrier = Some(carrier);
         self.pending = None;
         self.boundary_pending = None;
