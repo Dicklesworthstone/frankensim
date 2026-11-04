@@ -96,6 +96,32 @@ measurement side of the simulate-vs-measure calibration loop.
   damping ratios are expressed against one unchanged reference frequency.
   It does not undo the natural-frequency change of a fitted windowed pole.
 
+## Sampled ringdowns
+
+`identify_ringdown` reuses `fs-fft`'s joint, bounded damped-pole refinement
+across all supplied time-domain sensor channels, then produces the existing
+`Mode` tables for MAC and calibration comparison. A fitted damped frequency
+`f_d` and amplitude decay `alpha` define `p = -alpha + i*2*pi*f_d`; the table
+reports natural frequency `|p|/(2*pi)` and damping ratio `-Re(p)/|p|`.
+The positive-Laplace-pole observation residue is half the conjugate of the
+fit's peak engineering phasor. These residues depend on the initial excitation
+and are not force-normalized FRF residues or modal masses.
+
+An optional declared exponential response window uses the existing pole
+translation and passive clamp. Modes sort by corrected natural frequency,
+carrying their source-pole indices and original sensor order. The complete
+raw fit retains caller pole order, measured decay, amplitudes, residuals,
+conditioning and refinement evidence. Extra table, shape and sorting storage
+is reserved from the caller's byte budget before fitting. Refusals preserve
+the shared fit's typed errors. Invalid windows refuse before fitting.
+
+This path assumes supplied model order, local seeds and compatible calibrated
+sensor units. It does not run FRF stabilization or SNR gates, discover modes,
+or estimate uncertainty: both `Mode` interval fields are NaN.
+`tests/ringdown.rs` uses independently specified damped-oscillator motion to
+check physical parameters, opposite/nodal sensor shapes, existing MAC/table
+comparison, window-corrected ordering, source identity and typed refusals.
+
 ## Invariants
 
 1. Known-answer: 10 synthetic modes recovered across noise levels

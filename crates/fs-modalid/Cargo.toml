@@ -11,6 +11,7 @@ description = "Experimental modal identification from measured FRFs: Loewner + v
 layer = "L3"
 
 [dependencies]
+fs-fft = { path = "../fs-fft" }
 fs-la = { path = "../fs-la" }
 fs-math = { path = "../fs-math" }
 fs-vfit = { path = "../fs-vfit" }

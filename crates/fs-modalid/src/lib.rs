@@ -19,6 +19,11 @@
 //! confidence intervals, and an SNR gate that REFUSES to identify
 //! below the noise floor (named refusal, never a fabricated mode).
 //!
+//! [`identify_ringdown`] maps a joint, bounded multi-sensor time-domain pole
+//! fit into the same [`Mode`] tables for MAC and calibration comparisons.
+//! Its local pole estimates and observation residues retain the raw fit;
+//! this path does not run the FRF stabilization, SNR or uncertainty gates.
+//!
 //! Convention: measured FRF data enters in the engineering
 //! `e^{-i*omega*t}` convention typical of acoustics instrumentation;
 //! [`FrfData::new`] CONJUGATES it onto the Laplace axis fs-vfit uses
@@ -28,6 +33,10 @@
 use fs_math::c64::C64;
 use fs_vfit::vf::{FitOptions, residue_fit_at_poles, terms_from_poles};
 use fs_vfit::{RationalModel, vector_fit};
+
+/// Shared damped-pole fitting for sampled free-decay observations.
+pub mod ringdown;
+pub use ringdown::{RingdownError, RingdownIdentification, identify_ringdown};
 
 /// One channel of measured FRF samples (shared frequency grid).
 #[derive(Debug, Clone)]

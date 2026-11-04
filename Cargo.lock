@@ -2191,6 +2191,7 @@ dependencies = [
 name = "fs-modalid"
 version = "0.0.1"
 dependencies = [
+ "fs-fft",
  "fs-la",
  "fs-math",
  "fs-vfit",
