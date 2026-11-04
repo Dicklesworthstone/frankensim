@@ -8,6 +8,8 @@
 
 mod reservoir;
 pub(super) use reservoir::open_inventory_change;
+mod evacuated;
+pub(super) use evacuated::newly_filled_pair_change;
 
 use super::super::snapshot::MAX_SNAPSHOT_PARCELS;
 use super::{ClosedGasParcel, GasEnergyError, SpeciesId, source_error};

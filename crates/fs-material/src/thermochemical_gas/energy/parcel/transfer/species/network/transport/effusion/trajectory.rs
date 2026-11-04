@@ -48,6 +48,10 @@ pub const MAX_EFFUSION_ATTEMPTS: usize = 65_536;
 pub const MAX_EFFUSION_INTERVALS: usize = 4_096;
 pub const MAX_EFFUSION_RETAINED_ROWS: usize = 131_072;
 
+pub(super) fn retained_rows(step: &ReservoirEffusionStep) -> usize {
+    accounts::row_count(step)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EffusionAdvanceControls {
     pub initial_step_s: f64,
@@ -66,6 +70,36 @@ pub struct EffusionAdvanceControls {
     pub species_mass_tolerance_kg: f64,
     /// Boundary energy uses one common partial-enthalpy reference per trial.
     pub stream_energy_tolerance_j: f64,
+}
+
+impl EffusionAdvanceControls {
+    /// Validate shared physical accuracy and finite-work controls. These also
+    /// govern the first-fill transition from an exactly evacuated receiver.
+    pub fn validate(self) -> Result<(), EffusionAdvanceError> {
+        if ![
+            self.initial_step_s,
+            self.minimum_step_s,
+            self.maximum_step_s,
+            self.temperature_tolerance_k,
+            self.pressure_tolerance_pa,
+            self.species_mass_tolerance_kg,
+            self.stream_energy_tolerance_j,
+        ]
+        .into_iter()
+        .all(positive)
+            || self.minimum_step_s > self.initial_step_s
+            || self.initial_step_s > self.maximum_step_s
+            || !self.relative_tolerance.is_finite()
+            || !(0.0..=1.0).contains(&self.relative_tolerance)
+            || !(3..=MAX_EFFUSION_ATTEMPTS).contains(&self.maximum_attempts)
+            || !(1..=MAX_EFFUSION_INTERVALS).contains(&self.maximum_accepted_intervals)
+        {
+            return Err(EffusionAdvanceError::Invalid(
+                "positive dimensional tolerances and bounded adaptive effort required",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -149,31 +183,38 @@ fn physical(error: GasTransportError, elapsed_s: f64, duration_s: f64) -> Error 
     }
 }
 fn retryable(error: &Error) -> bool {
+    matches!(error, Error::Step { error, .. } if retryable_native(error))
+}
+
+pub(super) fn retryable_native(error: &GasTransportError) -> bool {
     // Source, geometry, model-domain and unrepresentable-arithmetic errors
     // remain hard refusals. No classification by diagnostic message text.
     matches!(
         error,
-        Error::Step {
-            error: GasTransportError::Exchange(
-                SpeciesNetworkError::Withdrawal { .. }
-                    | SpeciesNetworkError::Parcel {
-                        error: GasEnergyError::OutsideBracket { .. }
-                            | GasEnergyError::NotConverged { .. },
-                        ..
-                    }
-            ) | GasTransportError::Nozzle(SnapshotNozzleError::EquilibriumCrossed { .. })
-                | GasTransportError::Porous(PorousNetworkError::EquilibriumCrossed { .. })
-                | GasTransportError::Membrane(MembraneNetworkError::EquilibriumCrossed { .. })
-                | GasTransportError::Diffusion(DiffusionNetworkError::EntropyDecrease { .. }),
-            ..
-        }
+        GasTransportError::Exchange(
+            SpeciesNetworkError::Withdrawal { .. }
+                | SpeciesNetworkError::Parcel {
+                    error: GasEnergyError::OutsideBracket { .. }
+                        | GasEnergyError::NotConverged { .. },
+                    ..
+                }
+        ) | GasTransportError::Nozzle(SnapshotNozzleError::EquilibriumCrossed { .. })
+            | GasTransportError::Porous(PorousNetworkError::EquilibriumCrossed { .. })
+            | GasTransportError::Membrane(MembraneNetworkError::EquilibriumCrossed { .. })
+            | GasTransportError::Diffusion(DiffusionNetworkError::EntropyDecrease { .. })
     )
 }
 fn positive(value: f64) -> bool {
     value.is_finite() && value > 0.0
 }
 
-fn ratio(a: f64, b: f64, scale: f64, absolute: f64, relative: f64) -> Result<f64, Error> {
+pub(super) fn ratio(
+    a: f64,
+    b: f64,
+    scale: f64,
+    absolute: f64,
+    relative: f64,
+) -> Result<f64, Error> {
     let allowance = relative.mul_add(scale, absolute);
     let error = (a - b).abs() / allowance;
     if !positive(allowance) || !error.is_finite() {
@@ -190,7 +231,7 @@ fn inventory(gas: &ClosedGasParcel) -> Result<BTreeMap<SpeciesId, f64>, Error> {
         .map_err(|_| Error::Invalid("unrepresentable original species inventory"))
 }
 
-fn state_error(
+pub(super) fn state_error(
     before: &BTreeMap<u64, ClosedGasParcel>,
     coarse: &BTreeMap<u64, ClosedGasParcel>,
     fine: &BTreeMap<u64, ClosedGasParcel>,
@@ -198,19 +239,24 @@ fn state_error(
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<f64, Error> {
     let mut error = 0.0_f64;
-    for (&id, old) in before {
+    for (&id, b) in fine {
         poll(cancelled)?;
-        let (a, b) = (&coarse[&id], &fine[&id]);
-        let (s0, s1, s2) = (old.state().state(), a.state().state(), b.state().state());
+        let a = coarse
+            .get(&id)
+            .ok_or(Error::Invalid("adaptive endpoint identities disagree"))?;
+        let old = before.get(&id);
+        let (s1, s2) = (a.state().state(), b.state().state());
+        // An initially evacuated endpoint has no thermal coordinate. It adds
+        // nothing to the error scale; only its actual positive endpoints do.
         for (x, y, z, absolute) in [
             (
-                s0.temperature,
+                old.map_or(0.0, |gas| gas.state().state().temperature),
                 s1.temperature,
                 s2.temperature,
                 controls.temperature_tolerance_k,
             ),
             (
-                s0.pressure,
+                old.map_or(0.0, |gas| gas.state().state().pressure),
                 s1.pressure,
                 s2.pressure,
                 controls.pressure_tolerance_pa,
@@ -226,7 +272,11 @@ fn state_error(
         }
         // Query each original/native inventory once. Newly supplied species
         // enter the union immediately with exact zero in the original state.
-        let (old, a, b) = (inventory(old)?, inventory(a)?, inventory(b)?);
+        let (old, a, b) = (
+            old.map(inventory).transpose()?.unwrap_or_default(),
+            inventory(a)?,
+            inventory(b)?,
+        );
         for species in old.keys().chain(a.keys()).chain(b.keys()) {
             poll(cancelled)?;
             let x = old.get(species).copied().unwrap_or(0.0);
@@ -267,32 +317,48 @@ pub fn advance_candidate<C: FnMut() -> bool>(
     endpoints: &BTreeMap<u64, GasEnergySolve>,
     step_controls: GasTransportSolve,
     controls: EffusionAdvanceControls,
+    cancelled: C,
+) -> Result<EffusionAdvanceCandidate, Error> {
+    advance_candidate_with_row_limit(
+        parcels,
+        paths,
+        vacuum,
+        reservoirs,
+        drifting,
+        duration_s,
+        endpoints,
+        step_controls,
+        controls,
+        MAX_EFFUSION_RETAINED_ROWS,
+        cancelled,
+    )
+}
+
+// An enclosing physical owner can reserve rows already retained during its
+// initialization. Enforce the remaining allowance BEFORE appending history.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn advance_candidate_with_row_limit<C: FnMut() -> bool>(
+    parcels: &BTreeMap<u64, ClosedGasParcel>,
+    paths: GasTransportPaths<'_>,
+    vacuum: &[VacuumEffusionLink<'_>],
+    reservoirs: &[EffusionReservoirLink<'_>],
+    drifting: &[EffusionDriftingReservoirLink<'_>],
+    duration_s: f64,
+    endpoints: &BTreeMap<u64, GasEnergySolve>,
+    step_controls: GasTransportSolve,
+    controls: EffusionAdvanceControls,
+    maximum_retained_rows: usize,
     mut cancelled: C,
 ) -> Result<EffusionAdvanceCandidate, Error> {
     poll(&mut cancelled)?;
+    controls.validate()?;
     if !positive(duration_s)
         || parcels.is_empty()
         || parcels.len() > MAX_SNAPSHOT_PARCELS
-        || ![
-            controls.initial_step_s,
-            controls.minimum_step_s,
-            controls.maximum_step_s,
-            controls.temperature_tolerance_k,
-            controls.pressure_tolerance_pa,
-            controls.species_mass_tolerance_kg,
-            controls.stream_energy_tolerance_j,
-        ]
-        .into_iter()
-        .all(positive)
-        || controls.minimum_step_s > controls.initial_step_s
-        || controls.initial_step_s > controls.maximum_step_s
-        || !controls.relative_tolerance.is_finite()
-        || !(0.0..=1.0).contains(&controls.relative_tolerance)
-        || !(3..=MAX_EFFUSION_ATTEMPTS).contains(&controls.maximum_attempts)
-        || !(1..=MAX_EFFUSION_INTERVALS).contains(&controls.maximum_accepted_intervals)
+        || !(1..=MAX_EFFUSION_RETAINED_ROWS).contains(&maximum_retained_rows)
     {
         return Err(Error::Invalid(
-            "positive duration, dimensional tolerances and bounded adaptive effort required",
+            "positive duration and a bounded nonempty gas network required",
         ));
     }
     let mut current = parcels.clone();
@@ -405,7 +471,7 @@ pub fn advance_candidate<C: FnMut() -> bool>(
                 let rows = accounts::row_count(first.step())
                     .checked_add(accounts::row_count(fine.step()))
                     .and_then(|n| retained_rows.checked_add(n));
-                if rows.is_none_or(|n| n > MAX_EFFUSION_RETAINED_ROWS) {
+                if rows.is_none_or(|n| n > maximum_retained_rows) {
                     return Err(Error::WorkBudget {
                         elapsed_s: elapsed,
                         attempted_steps: attempted,
