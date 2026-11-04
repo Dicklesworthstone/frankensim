@@ -6,6 +6,25 @@ mod frame;
 pub use frame::RigidFrame3;
 mod impulse;
 
+// Own a sampled endpoint until the shared publication point. Existing scalar
+// histories retain their selected shape and original arithmetic.
+pub(super) enum EndpointForcing3 {
+    Scale(f64),
+    Field {
+        uniform: [f64; 3],
+        local: Vec<[f64; 3]>,
+    },
+}
+
+impl EndpointForcing3 {
+    pub(super) fn sampled_field(&self) -> Option<([f64; 3], &[[f64; 3]])> {
+        match self {
+            Self::Field { uniform, local } => Some((*uniform, local)),
+            Self::Scale(_) => None,
+        }
+    }
+}
+
 /// Refusal before a flow or force-frame proposal is published.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BoundaryForcingError3 {
@@ -54,6 +73,63 @@ impl BoundaryGrid3 {
         gate: &CancelGate,
     ) -> Result<(), BoundaryStepError3> {
         self.validate_endpoint_force_scale(next_scale, gate)?;
+        self.step_with_endpoint_forcing_inner(EndpointForcing3::Scale(next_scale), None, gate)
+            .map(|_| ())
+    }
+
+    /// Advance with a prescribed uniform and spatial force at the next time.
+    ///
+    /// Both inputs are lattice force densities, not accelerations. `local`
+    /// samples fluid cells in x-fastest order and is added to `uniform`. The
+    /// force may change direction and spatial shape independently at every
+    /// step. Static solid cells are skipped. Collision uses the accepted old
+    /// force; open faces reconstruct physical velocity, density and stress in
+    /// the NEW endpoint frame before populations and forces publish together.
+    /// Thus body forcing supplies `(F_n + F_(n+1))/2` per lattice tick, with
+    /// wall reaction and open-boundary transport accounted separately.
+    ///
+    /// The sampled field becomes the shape for later scalar histories. Use
+    /// `rebind_uniform_force` and `rebind_force_field_with_gate` for an
+    /// instantaneous change of a held load that supplies no elapsed impulse.
+    /// This prescribed-source step does not solve velocity-dependent forcing.
+    ///
+    /// One sampled force vector is allocated; native population scratch is
+    /// reused. Cancellation, invalid data or a late reconstruction refusal
+    /// publishes neither populations nor either force component.
+    pub fn step_with_endpoint_forcing(
+        &mut self,
+        uniform: [f64; 3],
+        local: impl FnMut([usize; 3]) -> [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<(), BoundaryStepError3> {
+        let endpoint = self.sample_endpoint_forcing(uniform, local, gate)?;
+        self.step_with_endpoint_forcing_inner(endpoint, None, gate)
+            .map(|_| ())
+    }
+
+    /// Endpoint-force step with the native impulse, torque and work on selected
+    /// walls. Selection and moving-mass conventions match
+    /// [`Self::step_with_wall_momentum`]; the loads come from the same collision
+    /// used by the accepted stream, without a second collision or grid clone.
+    pub fn step_with_endpoint_forcing_and_wall_momentum(
+        &mut self,
+        uniform: [f64; 3],
+        local: impl FnMut([usize; 3]) -> [f64; 3],
+        links: &[BoundaryLink3],
+        moment_origin: [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<WallMomentumExchange3, BoundaryStepError3> {
+        self.validate_wall_measurement(links, moment_origin)?;
+        let endpoint = self.sample_endpoint_forcing(uniform, local, gate)?;
+        self.step_with_endpoint_forcing_inner(endpoint, Some((links, moment_origin)), gate)
+    }
+
+    fn step_with_endpoint_forcing_inner(
+        &mut self,
+        endpoint: EndpointForcing3,
+        measurement: Option<(&[BoundaryLink3], [f64; 3])>,
+        gate: &CancelGate,
+    ) -> Result<WallMomentumExchange3, BoundaryStepError3> {
         let collide = collision_kernel3();
         for tile in 0..self.f[0].len() {
             endpoint_checkpoint(gate)?;
@@ -74,6 +150,10 @@ impl BoundaryGrid3 {
                 }
             }
         }
+        let exchange = match measurement {
+            Some((links, origin)) => self.wall_momentum(links, origin, Some(gate))?,
+            None => WallMomentumExchange3::default(),
+        };
         let mut next = self.next.take().unwrap_or_else(|| self.f.clone());
         let view = StreamView {
             post: &self.post,
@@ -84,6 +164,7 @@ impl BoundaryGrid3 {
             boundaries: self.boundaries,
             dims: [self.nx, self.ny, self.nz],
         };
+        let endpoint_field = endpoint.sampled_field();
         for tile in 0..self.f[0].len() {
             if let Err(error) = endpoint_checkpoint(gate) {
                 self.next = Some(next);
@@ -93,14 +174,21 @@ impl BoundaryGrid3 {
                 if self.solid[tile] & (1u64 << lane) != 0 {
                     continue;
                 }
-                for (field, value) in next.iter_mut().zip(view.pull_cell(tile, lane)) {
+                let values = view.pull_cell(tile, lane);
+                if !view.endpoint_is_physical(&values, tile, lane, endpoint_field) {
+                    self.next = Some(next);
+                    return Err(BoundaryStepError3::Unphysical {
+                        cell: self.coords(tile, lane),
+                    });
+                }
+                for (field, value) in next.iter_mut().zip(values) {
                     field[tile].0[lane] = value;
                 }
             }
         }
-        self.publish_next_with_force_scale(next, gate, true, Some(next_scale))?;
+        self.publish_next_with_forcing(next, gate, true, Some(endpoint))?;
         self.topology_locked = true;
-        Ok(())
+        Ok(exchange)
     }
 
     /// Pooled counterpart of [`Self::step_with_endpoint_force_scale`]. Both
@@ -122,9 +210,73 @@ impl BoundaryGrid3 {
             Some((&[], [0.0; 3])),
             None,
             None,
-            Some(next_scale),
+            Some(EndpointForcing3::Scale(next_scale)),
         )
         .map(|_| ())
+    }
+
+    /// Pooled counterpart of [`Self::step_with_endpoint_forcing`], with the
+    /// same sampled field, native cell kernels and atomic publication.
+    pub fn step_pooled_with_endpoint_forcing<P: KernelRunner>(
+        &mut self,
+        pool: &P,
+        gate: &CancelGate,
+        uniform: [f64; 3],
+        local: impl FnMut([usize; 3]) -> [f64; 3],
+    ) -> Result<(), BoundaryStepError3> {
+        let endpoint = self.sample_endpoint_forcing(uniform, local, gate)?;
+        self.step_pooled_coupling_inner(
+            pool,
+            gate,
+            Some((&[], [0.0; 3])),
+            None,
+            None,
+            Some(endpoint),
+        )
+        .map(|_| ())
+    }
+
+    /// Pooled endpoint-force step returning the same selected-link loads as
+    /// [`Self::step_with_endpoint_forcing_and_wall_momentum`].
+    pub fn step_pooled_with_endpoint_forcing_and_wall_momentum<P: KernelRunner>(
+        &mut self,
+        pool: &P,
+        gate: &CancelGate,
+        uniform: [f64; 3],
+        local: impl FnMut([usize; 3]) -> [f64; 3],
+        links: &[BoundaryLink3],
+        moment_origin: [f64; 3],
+    ) -> Result<WallMomentumExchange3, BoundaryStepError3> {
+        self.validate_wall_measurement(links, moment_origin)?;
+        let endpoint = self.sample_endpoint_forcing(uniform, local, gate)?;
+        self.step_pooled_coupling_inner(
+            pool,
+            gate,
+            Some((links, moment_origin)),
+            None,
+            None,
+            Some(endpoint),
+        )
+        .map(|(exchange, _)| exchange)
+    }
+
+    fn sample_endpoint_forcing(
+        &self,
+        uniform: [f64; 3],
+        local: impl FnMut([usize; 3]) -> [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<EndpointForcing3, BoundaryStepError3> {
+        self.sample_force_field_for_uniform(uniform, local, gate)
+            .map(|local| EndpointForcing3::Field { uniform, local })
+            .map_err(|error| match error {
+                BoundaryForcingError3::Cancelled => BoundaryStepError3::Cancelled,
+                BoundaryForcingError3::Invalid(reason) => {
+                    BoundaryStepError3::EndpointForce { reason }
+                }
+                BoundaryForcingError3::Unphysical { cell } => {
+                    BoundaryStepError3::Unphysical { cell }
+                }
+            })
     }
 
     pub(super) fn validate_endpoint_force_scale(
@@ -233,10 +385,24 @@ impl BoundaryGrid3 {
 
     pub(super) fn sample_force_field_with_gate(
         &self,
+        force: impl FnMut([usize; 3]) -> [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<Vec<[f64; 3]>, BoundaryForcingError3> {
+        self.sample_force_field_for_uniform(self.force, force, gate)
+    }
+
+    fn sample_force_field_for_uniform(
+        &self,
+        uniform: [f64; 3],
         mut force: impl FnMut([usize; 3]) -> [f64; 3],
         gate: &CancelGate,
     ) -> Result<Vec<[f64; 3]>, BoundaryForcingError3> {
         poll(gate)?;
+        if !uniform.iter().all(|value| value.is_finite()) {
+            return Err(BoundaryForcingError3::Invalid(
+                "uniform force must be finite",
+            ));
+        }
         if !self.collision_model.supports_body_force() {
             return Err(BoundaryForcingError3::Invalid(
                 "the selected collision model does not admit body forcing",
@@ -256,7 +422,7 @@ impl BoundaryGrid3 {
                     let value = force(cell);
                     if !value
                         .iter()
-                        .zip(self.force)
+                        .zip(uniform)
                         .all(|(local, uniform)| local.is_finite() && (local + uniform).is_finite())
                     {
                         return Err(BoundaryForcingError3::Unphysical { cell });

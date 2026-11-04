@@ -23,8 +23,11 @@ use crate::CS2;
 mod sgs;
 pub use sgs::{BoundarySgsError3, BoundarySgsReport3};
 mod profile;
-pub use profile::{BoundaryProfileError3, InletFlux3, PressureProfileReport3, VelocityProfileReport3};
+pub use profile::{
+    BoundaryProfileError3, InletFlux3, PressureProfileReport3, VelocityProfileReport3,
+};
 mod forcing;
+use forcing::EndpointForcing3;
 pub use forcing::{BoundaryForcingError3, RigidFrame3};
 mod curved;
 pub use curved::{CurvedWall3, CurvedWallLink3, CurvedWallStep3};
@@ -876,8 +879,13 @@ impl BoundaryGrid3 {
             }
             if !matches!(
                 (before, after),
-                (FaceBoundary3::Velocity { .. }, FaceBoundary3::Velocity { .. })
-                    | (FaceBoundary3::Pressure { .. }, FaceBoundary3::Pressure { .. })
+                (
+                    FaceBoundary3::Velocity { .. },
+                    FaceBoundary3::Velocity { .. }
+                ) | (
+                    FaceBoundary3::Pressure { .. },
+                    FaceBoundary3::Pressure { .. }
+                )
             ) {
                 return Err(BoundaryForcingError3::Invalid(
                     "live open targets must preserve face kinds and wall data",
@@ -1441,10 +1449,11 @@ impl BoundaryGrid3 {
         measurement: Option<(&[BoundaryLink3], [f64; 3])>,
         models: Option<&[CollisionModel3]>,
         finite_walls: Option<([Face3; 2], [FiniteMassWall3; 2], [f64; 3])>,
-        endpoint_force_scale: Option<f64>,
+        endpoint_forcing: Option<EndpointForcing3>,
     ) -> Result<(WallMomentumExchange3, Option<[FiniteMassWallReceipt3; 2]>), BoundaryStepError3>
     {
-        if finite_walls.is_none() {
+        let defer_topology_lock = matches!(&endpoint_forcing, Some(EndpointForcing3::Field { .. }));
+        if finite_walls.is_none() && !defer_topology_lock {
             self.topology_locked = true;
         }
         {
@@ -1492,20 +1501,35 @@ impl BoundaryGrid3 {
                     dims: [self.nx, self.ny, self.nz],
                 },
                 solid: &self.solid,
+                endpoint_field: endpoint_forcing
+                    .as_ref()
+                    .and_then(EndpointForcing3::sampled_field),
                 next: chunk_groups(&mut next),
             };
             run_pass(pool, gate, &kernel)
         };
-        if let Err(error) = outcome {
-            self.next = Some(next);
-            return Err(error);
+        match outcome {
+            Err(error) => {
+                self.next = Some(next);
+                return Err(error);
+            }
+            Ok(FirstUnphysical(Some(index))) => {
+                self.next = Some(next);
+                return Err(BoundaryStepError3::Unphysical {
+                    cell: self.coords(index / TILE_CELLS, index % TILE_CELLS),
+                });
+            }
+            Ok(FirstUnphysical(None)) => {}
         }
-        self.publish_next_with_force_scale(
+        self.publish_next_with_forcing(
             next,
             gate,
             measurement.is_some() || models.is_some() || proposal.is_some(),
-            endpoint_force_scale,
+            endpoint_forcing,
         )?;
+        if defer_topology_lock {
+            self.topology_locked = true;
+        }
         let receipts = proposal.map(|proposal| {
             self.boundaries = proposal.final_boundaries;
             self.topology_locked = true;
@@ -1527,10 +1551,25 @@ impl BoundaryGrid3 {
 
     fn publish_next_with_force_scale(
         &mut self,
-        mut next: [Vec<Tile>; Q3],
+        next: [Vec<Tile>; Q3],
         gate: &CancelGate,
         check_cancellation: bool,
         endpoint_force_scale: Option<f64>,
+    ) -> Result<(), BoundaryStepError3> {
+        self.publish_next_with_forcing(
+            next,
+            gate,
+            check_cancellation,
+            endpoint_force_scale.map(EndpointForcing3::Scale),
+        )
+    }
+
+    fn publish_next_with_forcing(
+        &mut self,
+        mut next: [Vec<Tile>; Q3],
+        gate: &CancelGate,
+        check_cancellation: bool,
+        endpoint_forcing: Option<EndpointForcing3>,
     ) -> Result<(), BoundaryStepError3> {
         if self.open_cells.is_none() {
             self.open_cells = Some(self.compile_open_cells());
@@ -1543,12 +1582,12 @@ impl BoundaryGrid3 {
                 if check_cancellation && index.is_multiple_of(TILE_CELLS) && gate.is_requested() {
                     return Err(BoundaryStepError3::Cancelled);
                 }
-                let values = self.open_boundary_populations(
+                let values = self.open_boundary_populations_with_forcing(
                     &next,
                     cell,
                     interior,
                     face,
-                    endpoint_force_scale,
+                    endpoint_forcing.as_ref(),
                 )?;
                 let (tile, lane) = self.addr(cell[0], cell[1], cell[2]);
                 for (field, value) in next.iter_mut().zip(values) {
@@ -1568,8 +1607,14 @@ impl BoundaryGrid3 {
         }
         core::mem::swap(&mut self.f, &mut next);
         self.next = Some(next);
-        if let Some(scale) = endpoint_force_scale {
-            self.publish_endpoint_force_scale(scale);
+        match endpoint_forcing {
+            Some(EndpointForcing3::Scale(scale)) => self.publish_endpoint_force_scale(scale),
+            Some(EndpointForcing3::Field { uniform, local }) => {
+                self.force = uniform;
+                self.force_field = Some(local);
+                self.force_field_shape = None;
+            }
+            None => {}
         }
         Ok(())
     }
@@ -2121,15 +2166,32 @@ impl BoundaryGrid3 {
     }
 
     fn open_force(&self, tile: usize, lane: usize, endpoint_scale: Option<f64>) -> [f64; 3] {
-        if let Some(scale) = endpoint_scale {
-            let shape = self
-                .force_field_shape
-                .as_deref()
-                .or(self.force_field.as_deref())
-                .expect("admitted endpoint force shape");
-            core::array::from_fn(|a| self.force[a] + scale * shape[tile * TILE_CELLS + lane][a])
-        } else {
-            cell_force(self.force, self.force_field.as_deref(), tile, lane)
+        self.open_force_with_forcing(
+            tile,
+            lane,
+            endpoint_scale.map(EndpointForcing3::Scale).as_ref(),
+        )
+    }
+
+    fn open_force_with_forcing(
+        &self,
+        tile: usize,
+        lane: usize,
+        endpoint: Option<&EndpointForcing3>,
+    ) -> [f64; 3] {
+        match endpoint {
+            Some(EndpointForcing3::Scale(scale)) => {
+                let shape = self
+                    .force_field_shape
+                    .as_deref()
+                    .or(self.force_field.as_deref())
+                    .expect("admitted endpoint force shape");
+                core::array::from_fn(|a| self.force[a] + scale * shape[tile * TILE_CELLS + lane][a])
+            }
+            Some(EndpointForcing3::Field { uniform, local }) => {
+                cell_force(*uniform, Some(local), tile, lane)
+            }
+            None => cell_force(self.force, self.force_field.as_deref(), tile, lane),
         }
     }
 
@@ -2141,8 +2203,25 @@ impl BoundaryGrid3 {
         face: Face3,
         endpoint_scale: Option<f64>,
     ) -> Result<[f64; Q3], BoundaryStepError3> {
+        self.open_boundary_populations_with_forcing(
+            fields,
+            cell,
+            interior,
+            face,
+            endpoint_scale.map(EndpointForcing3::Scale).as_ref(),
+        )
+    }
+
+    fn open_boundary_populations_with_forcing(
+        &self,
+        fields: &[Vec<Tile>; Q3],
+        cell: [usize; 3],
+        interior: [usize; 3],
+        face: Face3,
+        endpoint: Option<&EndpointForcing3>,
+    ) -> Result<[f64; Q3], BoundaryStepError3> {
         let (neighbor_rho, neighbor_velocity, stress) =
-            self.regularized_source(fields, interior, endpoint_scale)?;
+            self.regularized_source(fields, interior, endpoint)?;
         let (rho, velocity) = match self.boundaries.face(face) {
             FaceBoundary3::Velocity { velocity } => (
                 neighbor_rho,
@@ -2155,7 +2234,7 @@ impl BoundaryGrid3 {
             FaceBoundary3::Periodic | FaceBoundary3::Wall { .. } => unreachable!(),
         };
         let (tile, lane) = self.addr(cell[0], cell[1], cell[2]);
-        let force = self.open_force(tile, lane, endpoint_scale);
+        let force = self.open_force_with_forcing(tile, lane, endpoint);
         let mut reconstructed = regularized_populations(rho, velocity, stress);
         if force != [0.0; 3] {
             // Guo's stored populations are f_phys - S(u,F)/2. Project
@@ -2172,8 +2251,13 @@ impl BoundaryGrid3 {
                 }
             }
         }
-        let density = reconstructed.iter().sum::<f64>();
-        if !reconstructed.iter().all(|f| f.is_finite()) || !density.is_finite() || density <= 0.0 {
+        let physical = if matches!(endpoint, Some(EndpointForcing3::Field { .. })) {
+            finite_forced_populations(&reconstructed, force)
+        } else {
+            let density = reconstructed.iter().sum::<f64>();
+            reconstructed.iter().all(|f| f.is_finite()) && density.is_finite() && density > 0.0
+        };
+        if !physical {
             return Err(BoundaryStepError3::Unphysical { cell });
         }
         Ok(reconstructed)
@@ -2183,7 +2267,7 @@ impl BoundaryGrid3 {
         &self,
         fields: &[Vec<Tile>; Q3],
         [x, y, z]: [usize; 3],
-        endpoint_scale: Option<f64>,
+        endpoint: Option<&EndpointForcing3>,
     ) -> Result<(f64, [f64; 3], [[f64; 3]; 3]), BoundaryStepError3> {
         let (tile, lane) = self.addr(x, y, z);
         let mut rho = 0.0;
@@ -2195,7 +2279,7 @@ impl BoundaryGrid3 {
             momentum[1] += f64::from(velocity.1) * fq;
             momentum[2] += f64::from(velocity.2) * fq;
         }
-        let force = self.open_force(tile, lane, endpoint_scale);
+        let force = self.open_force_with_forcing(tile, lane, endpoint);
         let velocity = core::array::from_fn(|axis| (momentum[axis] + 0.5 * force[axis]) / rho);
         if !rho.is_finite() || rho <= 0.0 || !velocity.iter().all(|v| v.is_finite()) {
             return Err(BoundaryStepError3::Unphysical { cell: [x, y, z] });
@@ -2405,6 +2489,26 @@ fn cell_force(uniform: [f64; 3], field: Option<&[[f64; 3]]>, tile: usize, lane: 
     }
 }
 
+// Shared admission of actual pulled/reconstructed endpoint populations. Work
+// stays on the stack while streaming, instead of rereading every SoA field in
+// a serial full-grid pass after the parallel stream has completed.
+fn finite_forced_populations(populations: &[f64; Q3], force: [f64; 3]) -> bool {
+    let mut rho = 0.0;
+    let mut momentum = [0.0; 3];
+    for (&value, e) in populations.iter().zip(E3) {
+        if !value.is_finite() {
+            return false;
+        }
+        rho += value;
+        momentum[0] += f64::from(e.0) * value;
+        momentum[1] += f64::from(e.1) * value;
+        momentum[2] += f64::from(e.2) * value;
+    }
+    rho.is_finite()
+        && rho > 0.0
+        && (0..3).all(|a| ((momentum[a] + 0.5 * force[a]) / rho).is_finite())
+}
+
 fn tile_lane_coords(dims: [usize; 3], tile: usize, lane: usize) -> [usize; 3] {
     let (ntx, nty) = (dims[0] / TILE, dims[1] / TILE);
     let tx = tile % ntx;
@@ -2495,6 +2599,21 @@ fn wall_population(outgoing: f64, rho: f64, q: usize, velocity: [f64; 3]) -> f64
 }
 
 impl StreamView<'_> {
+    fn endpoint_is_physical(
+        &self,
+        populations: &[f64; Q3],
+        tile: usize,
+        lane: usize,
+        endpoint: Option<([f64; 3], &[[f64; 3]])>,
+    ) -> bool {
+        // Open-owned values are only provisional here; their final physical
+        // frame is admitted by the shared regularized reconstruction.
+        self.open_link_masks[tile].0[lane] != 0
+            || endpoint.is_none_or(|(uniform, local)| {
+                finite_forced_populations(populations, cell_force(uniform, Some(local), tile, lane))
+            })
+    }
+
     /// Post-stream populations of one fluid cell before open-face
     /// reconstruction.
     fn pull_cell(&self, tile: usize, lane: usize) -> [f64; Q3] {
@@ -2631,17 +2750,31 @@ impl TileKernel for CollidePass<'_> {
 struct StreamPass<'a> {
     view: StreamView<'a>,
     solid: &'a [u64],
+    endpoint_field: Option<([f64; 3], &'a [[f64; 3]])>,
     next: Vec<Mutex<[&'a mut [Tile]; Q3]>>,
 }
 
+// Canonical first failure, independent of worker execution order.
+struct FirstUnphysical(Option<usize>);
+
+impl Reduce for FirstUnphysical {
+    fn identity() -> Self {
+        Self(None)
+    }
+
+    fn merge(self, other: Self) -> Self {
+        if self.0.is_some() { self } else { other }
+    }
+}
+
 impl TileKernel for StreamPass<'_> {
-    type Out = ();
+    type Out = FirstUnphysical;
 
     fn tiles(&self) -> TilePlan {
         TilePlan::new("fs-lbm.boundary3.stream", self.next.len() as u64)
     }
 
-    fn run(&self, group: u64, cx: &Cx<'_>) -> ControlFlow<Cancelled, ()> {
+    fn run(&self, group: u64, cx: &Cx<'_>) -> ControlFlow<Cancelled, FirstUnphysical> {
         if let Err(cancelled) = cx.checkpoint() {
             return ControlFlow::Break(cancelled);
         }
@@ -2656,12 +2789,18 @@ impl TileKernel for StreamPass<'_> {
                     continue;
                 }
                 let values = self.view.pull_cell(tile, lane);
+                if !self
+                    .view
+                    .endpoint_is_physical(&values, tile, lane, self.endpoint_field)
+                {
+                    return ControlFlow::Continue(FirstUnphysical(Some(tile * TILE_CELLS + lane)));
+                }
                 for (field, value) in chunk.iter_mut().zip(values) {
                     field[local].0[lane] = value;
                 }
             }
         }
-        ControlFlow::Continue(())
+        ControlFlow::Continue(FirstUnphysical(None))
     }
 }
 

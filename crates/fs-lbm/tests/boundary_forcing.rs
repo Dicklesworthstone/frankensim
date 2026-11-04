@@ -483,7 +483,7 @@ fn forced_open_wall_seams_reconstruct_only_open_owned_links() {
     assert_ne!(wall, 0);
     assert_ne!(open, 0);
     assert_eq!(wall & open, 0);
-    let collision = |[x, y, z]| {
+    let collision = |[x, y, z]: [usize; 3]| {
         collide_cell3(
             grid.populations(x, y, z),
             model,
@@ -946,5 +946,373 @@ fn endpoint_force_scale_refusals_keep_populations_and_force_atomic() {
             Err(BoundaryStepError3::EndpointForce { .. })
         ));
         assert_eq!(snapshot(&overflow), before);
+    }
+}
+
+mod endpoint_fields {
+    use super::*;
+    use fs_exec::{CancelGate, TilePool};
+    use fs_lbm::BoundaryStepError3;
+
+    fn uniform(t: f64) -> [f64; 3] {
+        [
+            2e-5 * (1.0 + t),
+            -1e-5 * (1.0 - 2.0 * t),
+            3e-5 * (t * t - 0.3),
+        ]
+    }
+
+    // Independent components evolve with different spatial/time dependences;
+    // no scalar scaling of a single initial vector field can represent this.
+    fn local([x, y, z]: [usize; 3], t: f64) -> [f64; 3] {
+        let (x, y, z) = ((x + 1) as f64, (y + 1) as f64, (z + 1) as f64);
+        [
+            1e-6 * x * (1.0 - t) + 2e-6 * y * t,
+            -1.5e-6 * z * (1.0 + t * t) + 0.5e-6 * x * t,
+            1.2e-6 * y * z * t + 0.7e-6 * x,
+        ]
+    }
+
+    fn prepare(mut grid: BoundaryGrid3) -> BoundaryGrid3 {
+        for [x, y, z] in cells(&grid) {
+            grid.set_populations(
+                x,
+                y,
+                z,
+                &equilibrium3(0.8 + 0.01 * (x + 2 * y + z) as f64, [0.011, -0.007, 0.004]),
+            );
+        }
+        grid.rebind_uniform_force(uniform(0.0), &CancelGate::new_clock_free())
+            .unwrap();
+        grid.rebind_force_field(|cell| local(cell, 0.0));
+        grid
+    }
+
+    fn force_sum(grid: &BoundaryGrid3, t: f64) -> [f64; 3] {
+        cells(grid).into_iter().fold([0.0; 3], |sum, cell| {
+            let local = local(cell, t);
+            core::array::from_fn(|a| sum[a] + uniform(t)[a] + local[a])
+        })
+    }
+
+    #[test]
+    fn rotated_spatial_histories_close_impulse_and_match_pooled_bits() {
+        let gate = CancelGate::new_clock_free();
+        for model in [
+            CollisionModel3::Bgk { tau: 0.8 },
+            CollisionModel3::Trt {
+                tau: 0.9,
+                magic: 3.0 / 16.0,
+            },
+            CollisionModel3::CentralMoment {
+                second_order_rate: 1.3,
+                higher_order_rate: 0.9,
+            },
+            CollisionModel3::ReducedCumulant {
+                second_order_rate: 1.3,
+                third_order_rate: 0.9,
+                fourth_order_rate: 1.1,
+            },
+        ] {
+            for workers in [1, 3] {
+                let make = || {
+                    prepare(BoundaryGrid3::with_collision_model(
+                        12,
+                        8,
+                        8,
+                        model,
+                        [0.0; 3],
+                        BoundarySpec3::periodic(),
+                    ))
+                };
+                let (mut serial, mut pooled) = (make(), make());
+                let pool = TilePool::for_host(workers, 0xF02CE);
+                let mass = serial.total_mass();
+                let mut expected = fluid_momentum(&serial);
+                let mut previous = force_sum(&serial, 0.0);
+                for t in [-0.4, 0.8, -1.1, 0.2] {
+                    let supplied = force_sum(&serial, t);
+                    serial
+                        .step_with_endpoint_forcing(uniform(t), |cell| local(cell, t), &gate)
+                        .unwrap();
+                    pooled
+                        .step_pooled_with_endpoint_forcing(&pool, &gate, uniform(t), |cell| {
+                            local(cell, t)
+                        })
+                        .unwrap();
+                    expected =
+                        core::array::from_fn(|a| expected[a] + 0.5 * (previous[a] + supplied[a]));
+                    for (actual, expected) in fluid_momentum(&serial).into_iter().zip(expected) {
+                        close(actual, expected, 5e-12);
+                    }
+                    close(serial.total_mass(), mass, 5e-13);
+                    assert_eq!(serial.uniform_force_density(), uniform(t));
+                    assert_eq!(snapshot(&serial), snapshot(&pooled));
+                    previous = supplied;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn changing_fields_reconstruct_all_open_faces_in_the_endpoint_frame() {
+        let gate = CancelGate::new_clock_free();
+        let pool = TilePool::for_host(3, 0xF02CE);
+        for axis in 0..3 {
+            let mut faces = [FaceBoundary3::Periodic; 6];
+            faces[2 * axis] = FaceBoundary3::Velocity {
+                velocity: [0.02, -0.01, 0.007],
+            };
+            faces[2 * axis + 1] = FaceBoundary3::Pressure { density: 1.03 };
+            let make = || {
+                prepare(BoundaryGrid3::new(
+                    8,
+                    8,
+                    8,
+                    0.8,
+                    [0.0; 3],
+                    BoundarySpec3::new(faces),
+                ))
+            };
+            let (mut serial, mut pooled) = (make(), make());
+            for t in [-0.4, 0.8, -1.1] {
+                serial
+                    .step_with_endpoint_forcing(uniform(t), |cell| local(cell, t), &gate)
+                    .unwrap();
+                pooled
+                    .step_pooled_with_endpoint_forcing(&pool, &gate, uniform(t), |cell| {
+                        local(cell, t)
+                    })
+                    .unwrap();
+                assert_open_physical_moments(&serial, axis);
+                assert_eq!(snapshot(&serial), snapshot(&pooled));
+            }
+        }
+    }
+
+    fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+    }
+
+    fn angular(grid: &BoundaryGrid3, origin: [f64; 3], force_at: Option<f64>) -> [f64; 3] {
+        cells(grid).into_iter().fold([0.0; 3], |sum, cell| {
+            let r = core::array::from_fn(|a| cell[a] as f64 + 0.5 - origin[a]);
+            let value = force_at.map_or_else(
+                || moments(grid, cell).1,
+                |t| {
+                    let local = local(cell, t);
+                    core::array::from_fn(|a| uniform(t)[a] + local[a])
+                },
+            );
+            let torque = cross(r, value);
+            core::array::from_fn(|a| sum[a] + torque[a])
+        })
+    }
+
+    #[test]
+    fn changing_force_and_native_wall_loads_close_linear_and_angular_impulse() {
+        let gate = CancelGate::new_clock_free();
+        let pool = TilePool::for_host(3, 0xF02CE);
+        let origin = [-0.3, 0.7, 1.2];
+        let make = || {
+            let mut grid =
+                BoundaryGrid3::new(8, 8, 8, 0.9, [0.0; 3], BoundarySpec3::lid_cavity([0.0; 3]));
+            grid.voxelize_sdf(|p| {
+                (p[0] - 3.0)
+                    .abs()
+                    .max((p[1] - 4.0).abs())
+                    .max((p[2] - 3.0).abs())
+                    - 0.8
+            });
+            prepare(grid)
+        };
+        let (mut serial, mut pooled) = (make(), make());
+        let links = serial.boundary_links();
+        let mass = serial.total_mass();
+        let mut previous_t = 0.0;
+        for t in [-0.4, 0.8, -1.1] {
+            let before = fluid_momentum(&serial);
+            let angular_before = angular(&serial, origin, None);
+            let force_before = force_sum(&serial, previous_t);
+            let force_after = force_sum(&serial, t);
+            let torque_before = angular(&serial, origin, Some(previous_t));
+            let torque_after = angular(&serial, origin, Some(t));
+            let exchange = serial
+                .step_with_endpoint_forcing_and_wall_momentum(
+                    uniform(t),
+                    |cell| local(cell, t),
+                    &links,
+                    origin,
+                    &gate,
+                )
+                .unwrap();
+            let parallel = pooled
+                .step_pooled_with_endpoint_forcing_and_wall_momentum(
+                    &pool,
+                    &gate,
+                    uniform(t),
+                    |cell| local(cell, t),
+                    &links,
+                    origin,
+                )
+                .unwrap();
+            let after = fluid_momentum(&serial);
+            let angular_after = angular(&serial, origin, None);
+            assert!(exchange.measured_links > 0);
+            assert_eq!(exchange, parallel);
+            assert_eq!(snapshot(&serial), snapshot(&pooled));
+            close(serial.total_mass(), mass, 5e-13);
+            for a in 0..3 {
+                close(
+                    after[a] - before[a] + exchange.wall_impulse[a],
+                    0.5 * (force_before[a] + force_after[a]),
+                    8e-12,
+                );
+                close(
+                    angular_after[a] - angular_before[a] + exchange.wall_angular_impulse[a],
+                    0.5 * (torque_before[a] + torque_after[a]),
+                    2e-11,
+                );
+            }
+            previous_t = t;
+        }
+    }
+
+    #[test]
+    fn sampled_fields_reduce_to_native_held_and_scalar_history_bits() {
+        let gate = CancelGate::new_clock_free();
+        // Include open reconstruction: changing only the force metadata after
+        // an ordinary step would fail this equality at both faces.
+        let mut faces = [FaceBoundary3::Periodic; 6];
+        faces[0] = FaceBoundary3::Velocity {
+            velocity: [0.02, -0.01, 0.007],
+        };
+        faces[1] = FaceBoundary3::Pressure { density: 1.03 };
+        let make = || {
+            prepare(BoundaryGrid3::new(
+                8,
+                4,
+                4,
+                0.8,
+                [0.0; 3],
+                BoundarySpec3::new(faces),
+            ))
+        };
+        let (mut sampled, mut reference) = (make(), make());
+        for _ in 0..3 {
+            sampled
+                .step_with_endpoint_forcing(uniform(0.0), |cell| local(cell, 0.0), &gate)
+                .unwrap();
+            reference.step();
+            assert_eq!(snapshot(&sampled), snapshot(&reference));
+        }
+        for scale in [-0.4, 0.8, 0.0, 1.3] {
+            sampled
+                .step_with_endpoint_forcing(
+                    uniform(0.0),
+                    |cell| local(cell, 0.0).map(|f| scale * f),
+                    &gate,
+                )
+                .unwrap();
+            reference
+                .step_with_endpoint_force_scale(scale, &gate)
+                .unwrap();
+            assert_eq!(snapshot(&sampled), snapshot(&reference));
+        }
+        // A newly sampled field is the newly selected spatial shape, including
+        // after old scalar scales have cached their previous reference shape.
+        sampled
+            .step_with_endpoint_forcing(uniform(0.8), |cell| local(cell, 0.8), &gate)
+            .unwrap();
+        sampled.step_with_endpoint_force_scale(-0.5, &gate).unwrap();
+        for [x, y, z] in cells(&sampled) {
+            let expected = local([x, y, z], 0.8);
+            assert_eq!(
+                sampled.force_density(x, y, z),
+                core::array::from_fn(|a| uniform(0.8)[a] - 0.5 * expected[a])
+            );
+        }
+    }
+
+    #[test]
+    fn sampling_cancellation_and_late_reconstruction_refuse_atomically() {
+        let pool = TilePool::for_host(2, 0xF02CE);
+        let mut faces = [FaceBoundary3::Periodic; 6];
+        faces[0] = FaceBoundary3::Velocity {
+            velocity: [0.02, -0.01, 0.007],
+        };
+        faces[1] = FaceBoundary3::Pressure { density: 1.03 };
+        let make = || {
+            prepare(BoundaryGrid3::new(
+                8,
+                4,
+                4,
+                0.8,
+                [0.0; 3],
+                BoundarySpec3::new(faces),
+            ))
+        };
+        for pooled in [false, true] {
+            for case in 0..6 {
+                let (mut grid, mut control) = (make(), make());
+                let gate = CancelGate::new_clock_free();
+                let mut next_uniform = uniform(0.8);
+                if case == 0 {
+                    next_uniform[1] = f64::NAN;
+                }
+                if case == 1 {
+                    gate.request();
+                }
+                if case == 5 {
+                    grid.set_populations(7, 3, 3, &[0.0; Q3]);
+                }
+                let before = snapshot(&grid);
+                let sample = |cell: [usize; 3]| {
+                    if case == 2 && cell == [7, 3, 3] {
+                        return [f64::NAN; 3];
+                    }
+                    if case == 3 && cell == [7, 3, 3] {
+                        gate.request();
+                    }
+                    // Finite sampled data, but the second open face's physical
+                    // stress overflows after a successful collision and stream.
+                    if case == 4 && cell[0] >= 6 {
+                        return [1e303, 0.0, 0.0];
+                    }
+                    local(cell, 0.8)
+                };
+                let result = if pooled {
+                    grid.step_pooled_with_endpoint_forcing(&pool, &gate, next_uniform, sample)
+                } else {
+                    grid.step_with_endpoint_forcing(next_uniform, sample, &gate)
+                };
+                assert!(
+                    matches!(
+                        result,
+                        Err(BoundaryStepError3::Cancelled
+                            | BoundaryStepError3::EndpointForce { .. }
+                            | BoundaryStepError3::Unphysical { .. }
+                            | BoundaryStepError3::Collision { .. })
+                    ),
+                    "case {case}: {result:?}"
+                );
+                assert_eq!(snapshot(&grid), before);
+                assert_eq!(grid.uniform_force_density(), uniform(0.0));
+                if case == 5 {
+                    grid.set_populations(7, 3, 3, &control.populations(7, 3, 3));
+                }
+                let gate = CancelGate::new_clock_free();
+                grid.step_with_endpoint_forcing(uniform(0.8), |cell| local(cell, 0.8), &gate)
+                    .unwrap();
+                control
+                    .step_with_endpoint_forcing(uniform(0.8), |cell| local(cell, 0.8), &gate)
+                    .unwrap();
+                assert_eq!(snapshot(&grid), snapshot(&control));
+            }
+        }
     }
 }
