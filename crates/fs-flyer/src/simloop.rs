@@ -489,6 +489,8 @@ impl SimLoop {
     /// height, modal time scales, material choice and sampling mode.
     /// Restricted homogeneous Mann wind emits V8 with its finite-band target,
     /// applicability height and all four sequential OU quadratures.
+    /// Ground-plane-blocked Mann wind emits V9, retaining the same tensor
+    /// inputs and four paths with its distinct no-penetration observation.
     /// Legacy V2 reconstructs its OU state by
     /// replaying the canonical prehistory through the saved tick.
     ///
@@ -505,6 +507,14 @@ impl SimLoop {
         }
         let mut b = Vec::new();
         let version = match &self.spatial_wind {
+            Some(wind)
+                if matches!(
+                    wind.spec.spectrum,
+                    SpatialWindSpectrum::MannPlaneBlocked { .. }
+                ) =>
+            {
+                9u32
+            }
             Some(wind)
                 if matches!(
                     wind.spec.spectrum,
@@ -597,6 +607,7 @@ impl SimLoop {
             wind.encode(&self.run_intent_id, &mut b);
         }
         let domain = match version {
+            9 => "org.frankensim.wf.checkpoint-state.v9",
             8 => "org.frankensim.wf.checkpoint-state.v8",
             7 => "org.frankensim.wf.checkpoint-state.v7",
             6 => "org.frankensim.wf.checkpoint-state.v6",
@@ -646,6 +657,7 @@ impl SimLoop {
         let digest_v6 = hash_domain("org.frankensim.wf.checkpoint-state.v6", body);
         let digest_v7 = hash_domain("org.frankensim.wf.checkpoint-state.v7", body);
         let digest_v8 = hash_domain("org.frankensim.wf.checkpoint-state.v8", body);
+        let digest_v9 = hash_domain("org.frankensim.wf.checkpoint-state.v9", body);
         let matches_v1 = digest_v1.as_bytes() == tail;
         let matches_v2 = digest_v2.as_bytes() == tail;
         let matches_v3 = digest_v3.as_bytes() == tail;
@@ -654,6 +666,7 @@ impl SimLoop {
         let matches_v6 = digest_v6.as_bytes() == tail;
         let matches_v7 = digest_v7.as_bytes() == tail;
         let matches_v8 = digest_v8.as_bytes() == tail;
+        let matches_v9 = digest_v9.as_bytes() == tail;
         if !matches_v1
             && !matches_v2
             && !matches_v3
@@ -662,6 +675,7 @@ impl SimLoop {
             && !matches_v6
             && !matches_v7
             && !matches_v8
+            && !matches_v9
         {
             return Err(Refusal {
                 code: "checkpoint-tampered",
@@ -676,16 +690,17 @@ impl SimLoop {
             .ok_or_else(|| bad("missing version"))?;
         match (
             version, matches_v1, matches_v2, matches_v3, matches_v4, matches_v5, matches_v6,
-            matches_v7, matches_v8,
+            matches_v7, matches_v8, matches_v9,
         ) {
-            (2, _, true, _, _, _, _, _, _)
-            | (3, _, _, true, _, _, _, _, _)
-            | (4, _, _, _, true, _, _, _, _)
-            | (5, _, _, _, _, true, _, _, _)
-            | (6, _, _, _, _, _, true, _, _)
-            | (7, _, _, _, _, _, _, true, _)
-            | (8, _, _, _, _, _, _, _, true) => {}
-            (1, true, _, _, _, _, _, _, _) => {
+            (2, _, true, _, _, _, _, _, _, _)
+            | (3, _, _, true, _, _, _, _, _, _)
+            | (4, _, _, _, true, _, _, _, _, _)
+            | (5, _, _, _, _, true, _, _, _, _)
+            | (6, _, _, _, _, _, true, _, _, _)
+            | (7, _, _, _, _, _, _, true, _, _)
+            | (8, _, _, _, _, _, _, _, true, _)
+            | (9, _, _, _, _, _, _, _, _, true) => {}
+            (1, true, _, _, _, _, _, _, _, _) => {
                 return Err(Refusal {
                     code: "checkpoint-version-unsupported",
                     message: "CheckpointStateV1 lacks lateral state and cannot exact-resume v2"
@@ -750,7 +765,7 @@ impl SimLoop {
                     return Err(bad("unknown spatial wind sampling mode"));
                 }
                 let kind = match version {
-                    7 | 8 => take(&mut pos, 1)?[0],
+                    7 | 8 | 9 => take(&mut pos, 1)?[0],
                     6 => 2,
                     _ => 1,
                 };
@@ -888,6 +903,7 @@ impl SimLoop {
             matches!(
                 wind.spec.spectrum,
                 SpatialWindSpectrum::MannHomogeneousAbove { .. }
+                    | SpatialWindSpectrum::MannPlaneBlocked { .. }
             )
         }) {
             return self.step_with_wind_domain(input);

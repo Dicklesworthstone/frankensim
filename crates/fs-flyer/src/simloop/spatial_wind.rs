@@ -8,6 +8,7 @@ use crate::atmosphere::MaterialAirProfile;
 use fs_atmo::evolving::EvolvingTurbulenceField;
 use fs_atmo::fit::{FittedAmplitudes, build_fitted_field, fit_amplitudes};
 use fs_atmo::mann::MannParams;
+use fs_atmo::mann_field::wall::MannPlaneWall;
 use fs_atmo::mann_field::{HomogeneousMannField, MannQuadrature, MannSpectralModel};
 use fs_atmo::{FlatSiteLogLaw, FlowSample, MAX_MODES, TurbulenceField};
 use fs_blake3::hash_domain;
@@ -21,6 +22,7 @@ use field::WindField;
 mod rollback;
 
 const HOMOGENEOUS_MARKER: &[u8] = b"mann-homogeneous-above-v1\0";
+const PLANE_BLOCKED_MARKER: &[u8] = b"mann-plane-blocked-v1\0";
 pub(super) const APPLICABILITY_REFUSAL: &str = "spatial-wind-applicability";
 
 /// Explicit wall-compatible or restricted homogeneous solenoidal wind model.
@@ -58,6 +60,18 @@ pub enum SpatialWindSpectrum {
         /// Positive lower admitted height [m] for every CG/strip/disk query.
         minimum_height_m: f64,
     },
+    /// Full finite-band Mann field with the native harmonic no-penetration
+    /// correction at the aircraft's ground plane h = 0. The original complete
+    /// tensor and four OU paths are retained. This is an outer-flow slip-plane
+    /// model, without a viscous wall layer or ground-generated turbulence.
+    MannPlaneBlocked {
+        /// Spatial tensor target before the explicit plane correction.
+        parameters: MannParams,
+        /// Lowest resolved dimensionless wavenumber |k| L.
+        min_kl: f64,
+        /// Highest resolved dimensionless wavenumber |k| L.
+        max_kl: f64,
+    },
 }
 
 /// Explicit synthetic wind model for [`SimLoop::init_with_spatial_wind`].
@@ -89,7 +103,7 @@ pub(super) struct SpatialWindState {
     pub material_profile: Option<MaterialAirProfile>,
     /// Ground velocity in flight-line-forward / vertical-up coordinates.
     pub ground_mps: [f64; 2],
-    /// Allocated once for the homogeneous mode; reused for refused-step rollback.
+    /// Allocated once for full-tensor Mann modes; reused for refused-step rollback.
     rollback: Option<Box<rollback::Rollback>>,
 }
 
@@ -135,9 +149,18 @@ impl SpatialWindState {
                 parameters,
                 min_kl,
                 max_kl,
-                minimum_height_m,
+                ..
+            }
+            | SpatialWindSpectrum::MannPlaneBlocked {
+                parameters,
+                min_kl,
+                max_kl,
             } => {
-                if !minimum_height_m.is_finite() || minimum_height_m <= 0.0 {
+                if let SpatialWindSpectrum::MannHomogeneousAbove {
+                    minimum_height_m, ..
+                } = spec.spectrum
+                    && (!minimum_height_m.is_finite() || minimum_height_m <= 0.0)
+                {
                     return Err(invalid(
                         "homogeneous wind requires a positive finite applicability height",
                     ));
@@ -175,7 +198,18 @@ impl SpatialWindState {
     /// both velocity and derivative coordinates, including mean shear.
     pub fn sample(&self, [x, y, h]: [f64; 3]) -> Result<FlowSample, Refusal> {
         self.admit_height(h)?;
-        let mut sample = self.field.sample(-x, y, h).map_err(map_atmo)?;
+        let mut sample = if matches!(
+            self.spec.spectrum,
+            SpatialWindSpectrum::MannPlaneBlocked { .. }
+        ) {
+            let WindField::Homogeneous(field) = &self.field else {
+                return Err(invalid("plane blocking requires the full Mann field"));
+            };
+            field.sample_wall_blocked([-x, y, h], ground_plane())
+        } else {
+            self.field.sample(-x, y, h)
+        }
+        .map_err(map_atmo)?;
         sample.u[0] += self.spec.mean.speed(h);
         sample.grad[0][2] += self.spec.mean.dspeed_dh(h);
         let sign = [-1.0, 1.0, 1.0];
@@ -193,6 +227,7 @@ impl SpatialWindState {
             SpatialWindSpectrum::MannHomogeneousAbove {
                 minimum_height_m, ..
             } => Some(minimum_height_m),
+            SpatialWindSpectrum::MannPlaneBlocked { .. } => Some(0.0),
             _ => None,
         }
     }
@@ -203,8 +238,12 @@ impl SpatialWindState {
         {
             return Err(Refusal {
                 code: APPLICABILITY_REFUSAL,
-                message: format!("query height {height:?} m is outside homogeneous wind's admitted h >= {minimum} m"),
-                ranked_repairs: vec!["use a wall-compatible model or keep every load sample inside the authored homogeneous domain".into()],
+                message: format!(
+                    "query height {height:?} m is outside the selected wind model's admitted h >= {minimum} m"
+                ),
+                ranked_repairs: vec![
+                    "keep every load sample inside the selected wind model's domain".into(),
+                ],
             });
         }
         Ok(())
@@ -263,6 +302,22 @@ impl SpatialWindState {
                     bytes.extend_from_slice(&value.to_bits().to_le_bytes());
                 }
             }
+            SpatialWindSpectrum::MannPlaneBlocked {
+                parameters,
+                min_kl,
+                max_kl,
+            } => {
+                bytes.extend_from_slice(PLANE_BLOCKED_MARKER);
+                for value in [
+                    parameters.alpha_eps23,
+                    parameters.length_m,
+                    parameters.gamma,
+                    min_kl,
+                    max_kl,
+                ] {
+                    bytes.extend_from_slice(&value.to_bits().to_le_bytes());
+                }
+            }
         }
         bytes.extend_from_slice(&self.spec.advection_mps.to_bits().to_le_bytes());
         bytes.extend_from_slice(&(self.spec.correlation_times_s.len() as u32).to_le_bytes());
@@ -303,23 +358,38 @@ impl SpatialWindState {
         for value in &mut f {
             *value = f64::from_le_bytes(take(8)?.try_into().expect("8"));
         }
-        let spectrum = if version == 8 {
-            if take(HOMOGENEOUS_MARKER.len())? != HOMOGENEOUS_MARKER {
+        let spectrum = if matches!(version, 8 | 9) {
+            let marker = if version == 9 {
+                PLANE_BLOCKED_MARKER
+            } else {
+                HOMOGENEOUS_MARKER
+            };
+            if take(marker.len())? != marker {
                 return Err(bad());
             }
             let mut target = [0.0; 6];
-            for value in &mut target {
+            let count = if version == 9 { 5 } else { 6 };
+            for value in &mut target[..count] {
                 *value = f64::from_le_bytes(take(8)?.try_into().expect("8"));
             }
-            SpatialWindSpectrum::MannHomogeneousAbove {
-                parameters: MannParams {
-                    alpha_eps23: target[0],
-                    length_m: target[1],
-                    gamma: target[2],
-                },
-                min_kl: target[3],
-                max_kl: target[4],
-                minimum_height_m: target[5],
+            let parameters = MannParams {
+                alpha_eps23: target[0],
+                length_m: target[1],
+                gamma: target[2],
+            };
+            if version == 9 {
+                SpatialWindSpectrum::MannPlaneBlocked {
+                    parameters,
+                    min_kl: target[3],
+                    max_kl: target[4],
+                }
+            } else {
+                SpatialWindSpectrum::MannHomogeneousAbove {
+                    parameters,
+                    min_kl: target[3],
+                    max_kl: target[4],
+                    minimum_height_m: target[5],
+                }
             }
         } else if version == 7 {
             if take(15)? != b"mann-stress-v1\0" {
@@ -364,7 +434,7 @@ impl SpatialWindState {
         if !ground_mps.iter().all(|v| v.is_finite()) {
             return Err(bad());
         }
-        let mut amplitudes: Vec<Vec<f64>> = (0..if version == 8 { 4 } else { 2 })
+        let mut amplitudes: Vec<Vec<f64>> = (0..if matches!(version, 8 | 9) { 4 } else { 2 })
             .map(|_| Vec::with_capacity(count))
             .collect();
         for quadrature in &mut amplitudes {
@@ -403,6 +473,11 @@ impl SpatialWindState {
     }
 }
 
+fn ground_plane() -> MannPlaneWall {
+    // Wind height and every native aerodynamic ground image use h = 0.
+    MannPlaneWall::new(0.0).expect("the flight ground plane is finite")
+}
+
 impl SimLoop {
     /// Achieved one-point stress calibration for the current spatial model.
     /// Errors apply to the seed-specific finite-basis ensemble, not to each
@@ -424,20 +499,55 @@ impl SimLoop {
         second_m: [f64; 3],
         lag_s: f64,
     ) -> Result<[[f64; 3]; 3], Refusal> {
+        if !self.spatial_wind.as_ref().is_some_and(|wind| {
+            matches!(
+                wind.spec.spectrum,
+                SpatialWindSpectrum::MannHomogeneousAbove { .. }
+            )
+        }) {
+            return Err(invalid(
+                "covariance query requires the homogeneous Mann model",
+            ));
+        }
+        self.mann_wind_covariance(first_m, second_m, lag_s)
+    }
+
+    /// Complete represented Mann covariance in flight coordinates, with the
+    /// selected wall observation applied at both points. Mean wind is excluded.
+    /// The plane-blocked model is height-dependent, so both positions matter;
+    /// it retains the original modal advection and OU time correlations.
+    /// This is the finite-band synthetic model, not measured wind validation.
+    pub fn mann_wind_covariance(
+        &self,
+        first_m: [f64; 3],
+        second_m: [f64; 3],
+        lag_s: f64,
+    ) -> Result<[[f64; 3]; 3], Refusal> {
         let wind = self
             .spatial_wind
             .as_ref()
-            .ok_or_else(|| invalid("homogeneous spatial wind is disabled"))?;
+            .ok_or_else(|| invalid("full-tensor Mann spatial wind is disabled"))?;
         wind.admit_height(first_m[2])?;
         wind.admit_height(second_m[2])?;
         let WindField::Homogeneous(field) = &wind.field else {
             return Err(invalid(
-                "covariance query requires the homogeneous Mann model",
+                "covariance query requires a full-tensor Mann model",
             ));
         };
         let signs = [-1.0, 1.0, 1.0];
-        let separation = core::array::from_fn(|i| signs[i] * (second_m[i] - first_m[i]));
-        let mut covariance = field.covariance(separation, lag_s).map_err(map_atmo)?;
+        let mut covariance = match wind.spec.spectrum {
+            SpatialWindSpectrum::MannPlaneBlocked { .. } => field.covariance_wall_blocked(
+                core::array::from_fn(|i| signs[i] * first_m[i]),
+                core::array::from_fn(|i| signs[i] * second_m[i]),
+                lag_s,
+                ground_plane(),
+            ),
+            _ => {
+                let separation = core::array::from_fn(|i| signs[i] * (second_m[i] - first_m[i]));
+                field.covariance(separation, lag_s)
+            }
+        }
+        .map_err(map_atmo)?;
         for i in 0..3 {
             for j in 0..3 {
                 covariance[i][j] *= signs[i] * signs[j];
@@ -981,3 +1091,6 @@ mod mann_tests;
 
 #[cfg(test)]
 mod homogeneous_tests;
+
+#[cfg(test)]
+mod plane_blocked_tests;

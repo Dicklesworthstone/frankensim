@@ -1142,6 +1142,28 @@ spectral factors are not rebuilt or copied each tick. The homogeneous replay,
 load, covariance, model-substitution and atomic-refusal regressions are in
 `simloop/spatial_wind/homogeneous_tests.rs`.
 
+`MannPlaneBlocked { parameters, min_kl, max_kl }` applies fs-atmo's existing
+harmonic plane correction to the same full-tensor Mann field at the aircraft's
+ground h = 0. Every CG, wing/canard strip and propeller sample uses that corrected
+velocity and analytic gradient. Normal wind vanishes at the ground; the field
+stays solenoidal, retains all original modal cross-components, and approaches
+the homogeneous field aloft. The mean log law and material gas/profile continue
+to use their original owners. This is an explicitly selected outer-flow slip
+model, without a viscous sublayer, ground-generated turbulence, a near-ground
+spectral calibration or reconstructed historical gusts.
+
+`mann_wind_covariance(first, second, lag)` exposes the complete represented
+space-time tensor for either full-tensor model in flight coordinates. Plane
+blocking acts at both observation points, so equal separations at different
+heights can have different covariance. Sampling retains the same four sequential
+OU paths; neither sampling nor covariance draws noise or advances the wind clock.
+Plane-blocked runs use V9 checkpoints with a distinct model identity, target,
+cutoffs, four paths, sampling mode and material choice. V2–V8 keep their existing
+layout. Below-ground material-point refusals reuse the existing transactional
+flight/control/OU backup. Focused integration regressions in
+`simloop/spatial_wind/plane_blocked_tests.rs` cover wall parity, all field/tensor
+components, actual load and motion changes, replay and refusal rollback.
+
 Ordinary, CG spatial-wind and distributed-wind airborne paths share one coupled
 longitudinal/rotor midpoint step. The first native aerodynamic solve predicts
 midpoint velocity, pitch attitude/rate and rotor speed. A second solve evaluates
