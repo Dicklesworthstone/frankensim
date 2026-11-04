@@ -54,6 +54,9 @@ const TEMPERATURE_K: f64 = 293.15;
 const SHEAR_CORRECTION: f64 = 5.0 / 6.0;
 /// Default drilling penalty of the shell elements; `--drilling-alpha` changes it for a declared sensitivity (the junction stiffness of a fully tied T-junction depends on it).
 const DRILLING_ALPHA: f64 = 1e-3;
+/// Default allowance on the assembly's projection work; `--projection-work` declares a larger one (a table near the
+/// v4 node cap needs about 1.6e12 terms for 256 modes, as `material_strings` assembly options declare).
+const PROJECTION_WORK: usize = 100_000_000_000;
 const MIN_DIRECTOR_DOT: f64 = 0.9;
 
 struct Part {
@@ -511,7 +514,7 @@ fn jacobi(mut a: Vec<Vec<f64>>) -> (Vec<f64>, Vec<Vec<f64>>) {
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
-        return Err("usage: shell_body_modes ASSEMBLY.tsv PACK_DIR [--modes N] [--fmin HZ] [--fmax HZ] [--omega RAD_S] [--drilling-alpha A] [--shapes PATH] [--node-shapes PATH] [--fholes RASTER.tsv]".into());
+        return Err("usage: shell_body_modes ASSEMBLY.tsv PACK_DIR [--modes N] [--fmin HZ] [--fmax HZ] [--omega RAD_S] [--drilling-alpha A] [--projection-work TERMS] [--shapes PATH] [--node-shapes PATH] [--fholes RASTER.tsv]".into());
     }
     let (mut n_modes, mut fmin, mut fmax, mut omega) = (
         10usize,
@@ -523,6 +526,7 @@ fn main() -> Result<()> {
     let mut node_shapes: Option<String> = None;
     let mut fholes: Option<String> = None;
     let mut drilling_alpha = DRILLING_ALPHA;
+    let mut projection_work = PROJECTION_WORK;
     let mut it = args[3..].iter();
     while let Some(flag) = it.next() {
         let value = it.next().ok_or("flag without a value")?;
@@ -532,6 +536,7 @@ fn main() -> Result<()> {
             "--fmax" => fmax = value.parse()?,
             "--omega" => omega = value.parse()?,
             "--drilling-alpha" => drilling_alpha = value.parse()?,
+            "--projection-work" => projection_work = value.parse()?,
             "--shapes" => shapes = Some(value.clone()),
             "--node-shapes" => node_shapes = Some(value.clone()),
             "--fholes" => fholes = Some(value.clone()),
@@ -547,6 +552,9 @@ fn main() -> Result<()> {
         println!(
             "drilling_alpha = {drilling_alpha:e} (declared sensitivity; the default is {DRILLING_ALPHA:e})"
         );
+    }
+    if projection_work != PROJECTION_WORK {
+        println!("projection_work = {projection_work} (declared allowance; the default is {PROJECTION_WORK})");
     }
     let gate = CancelGate::new_clock_free();
     let requested = requirements()?;
@@ -669,7 +677,7 @@ fn main() -> Result<()> {
         n_modes,
         projection_budget: ShellProjectionBudget {
             max_modes: n_modes.max(8),
-            max_projection_terms: 100_000_000_000,
+            max_projection_terms: projection_work,
             reference_resistance_n_s_m: 1.0,
         },
         max_total_nodes: total_nodes,

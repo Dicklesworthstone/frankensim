@@ -66,6 +66,70 @@ pub struct LipIsland {
     pub provenance: String,
 }
 
+/// The second, INWARD-striking lip mode (opt-in; see [`BrassVoice::with_lip_mode2`]).
+///
+/// Lip-reed measurements publish the mechanical response of an embouchure as two resonances: an outward-striking one and
+/// an inward-striking one, the played note between them (Newton, Campbell and Gilbert, JASA 123(1) EL14-EL20, 2008, who
+/// conclude that "a model incorporating at least two degrees of freedom should be required to simulate computationally
+/// realistic oscillations"). Cullen (2000, PhD, University of Edinburgh, Appendix A Table A.2) prints both for twenty
+/// embouchures of an artificial lip pair on a trombone-size mouthpiece: `fL1 QL1 1/muL1` and `fL2 QL2 1/muL2`, the
+/// second `1/mu` NEGATIVE because that mode moves against the force. The aperture is the sum of the two modes' displacements,
+/// each a mass-spring-damper `m = A / |1/mu|`, `k = m (2 pi f)^2`, `c = m (2 pi f) / Q` driven by the same transmural
+/// force, the second with the sign of its printed `1/mu`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LipMode2 {
+    /// Effective mass magnitude [kg]: `A / |1/mu_2|`.
+    pub mass_kg: f64,
+    /// Stiffness [N/m] at unit tension: `m (2 pi f_2)^2`.
+    pub stiffness_n_m: f64,
+    /// Damping [N s/m] at unit tension: `m (2 pi f_2) / Q_2`.
+    pub damping_n_s_m: f64,
+    /// `-1.0` for an inward-striking mode (a negative printed `1/mu`: the mode moves against the force), `1.0` otherwise.
+    pub sign: f64,
+}
+
+impl LipMode2 {
+    /// The mode from its published quantities and the lip's pressure-collecting face area `A` [m^2].
+    ///
+    /// # Errors
+    /// The reason, when `f_hz`, `q` or `face_area_m2` is not positive finite, or `inverse_mu_m2_per_kg` is zero or not finite.
+    pub fn from_response(
+        f_hz: f64,
+        q: f64,
+        inverse_mu_m2_per_kg: f64,
+        face_area_m2: f64,
+    ) -> Result<LipMode2, &'static str> {
+        if !(f_hz.is_finite() && f_hz > 0.0) {
+            return Err("the second lip mode's resonance must be positive finite");
+        }
+        if !(q.is_finite() && q > 0.0) {
+            return Err("the second lip mode's quality factor must be positive finite");
+        }
+        if !(inverse_mu_m2_per_kg.is_finite() && inverse_mu_m2_per_kg != 0.0) {
+            return Err("the second lip mode's inverse mu must be finite and nonzero");
+        }
+        if !(face_area_m2.is_finite() && face_area_m2 > 0.0) {
+            return Err("the lip's face area must be positive finite");
+        }
+        let mass = face_area_m2 / inverse_mu_m2_per_kg.abs();
+        let omega = core::f64::consts::TAU * f_hz;
+        Ok(LipMode2 {
+            mass_kg: mass,
+            stiffness_n_m: mass * omega * omega,
+            damping_n_s_m: mass * omega / q,
+            sign: if inverse_mu_m2_per_kg < 0.0 { -1.0 } else { 1.0 },
+        })
+    }
+}
+
+/// The second lip mode's integrator: its own exact quadratic island and state beside the lip island's.
+struct LipSecondMode {
+    mode: LipMode2,
+    sys: PortHamiltonian,
+    linear: LinearSplit,
+    state: Vec<f64>,
+}
+
 /// Control-rate inputs (applied between blocks; D17).
 #[derive(Debug, Clone, Copy)]
 pub enum BrassControl {
@@ -128,6 +192,10 @@ pub struct BrassVoice {
     /// Opt-in constriction noise ([`ConstrictionNoise`]: Oldham and Ukpoho's printed duct-constriction law in third-octave
     /// bands, an extrapolation to the lip); `None` adds nothing.
     constriction_noise: Option<ConstrictionNoise>,
+    /// Opt-in second lip mode ([`LipMode2`]); `None` leaves the loop exactly the one-mode loop.
+    lip2: Option<LipSecondMode>,
+    /// The opt-in flow-area exponent `q` ([`BrassVoice::with_lip_area_exponent`]); exactly 1.0 is the plain `w h`.
+    area_exponent: f64,
 }
 
 impl BrassVoice {
@@ -188,6 +256,8 @@ impl BrassVoice {
             diags: Vec::new(),
             jet_noise: None,
             constriction_noise: None,
+            lip2: None,
+            area_exponent: 1.0,
         })
     }
 
@@ -209,6 +279,101 @@ impl BrassVoice {
     #[must_use]
     pub fn jet_noise_coverage(&self) -> Option<JetNoiseCoverage> {
         self.jet_noise.as_ref().map(LipJetNoise::coverage)
+    }
+
+    /// Add the opt-in second lip mode before any sample is rendered: a second mass-spring-damper (see [`LipMode2`] for what it
+    /// is and where its numbers come from) stepped under the SAME transmural force with the sign of its printed `1/mu`,
+    /// the aperture being `rest gap + q1 + q2` (clipped at zero). A voice without it is bit-identical to one built before
+    /// this existed. Its published numbers carry no pre-stress law, so it runs only at lip tension 1.0 and
+    /// [`BrassVoice::apply`] refuses any other `SetLipTension` by name.
+    ///
+    /// # Errors
+    /// [`MmLineError::Invalid`] when the voice's tension is not 1.0 or the mode is refused admission.
+    pub fn with_lip_mode2(mut self, mode: LipMode2) -> Result<BrassVoice, MmLineError> {
+        if self.tension != 1.0 {
+            return Err(MmLineError::Invalid {
+                what: "the second lip mode (lip_response_mode2) has no printed pre-stress law and runs only at lip tension 1.0",
+            });
+        }
+        let sys = mass_spring_damper(mode.mass_kg, mode.stiffness_n_m, mode.damping_n_s_m).map_err(|_| {
+            MmLineError::Invalid {
+                what: "the second lip mode refused admission",
+            }
+        })?;
+        let linear = prepare_lip(&sys)?;
+        self.lip2 = Some(LipSecondMode {
+            mode,
+            sys,
+            linear,
+            state: vec![0.0, 0.0],
+        });
+        Ok(self)
+    }
+
+    /// Add the opt-in flow-area exponent `q` before any sample is rendered: the aperture the Bernoulli flow sees becomes
+    /// `w h (h/H0)^(q-1)` for the lip gap `h`, the rest gap `H0` and the width `w` (an area that grows as `h^q`; `q = 1` is the plain
+    /// `w h` and is bit-identical to a voice without the row). The normalisation at `H0` is ours: it leaves the aperture at the
+    /// rest gap unchanged. Copley and Strong (1996, JASA 99(2) 1219) plot the lip area against its height and describe an
+    /// "almost linear relationship between area and height" as a first approximation without printing an exponent, so `q` is a
+    /// bracket parameter and not a measured value. Only the flow area changes; the lip's motion is untouched.
+    ///
+    /// # Errors
+    /// [`MmLineError::Invalid`] unless `1 <= q <= 4`.
+    pub fn with_lip_area_exponent(mut self, q: f64) -> Result<BrassVoice, MmLineError> {
+        if !(q.is_finite() && (1.0..=4.0).contains(&q)) {
+            return Err(MmLineError::Invalid {
+                what: "the lip area exponent (lip_area_exponent) must be finite and in [1, 4]",
+            });
+        }
+        self.area_exponent = q;
+        Ok(self)
+    }
+
+    /// The flow aperture `w h (h/H0)^(q-1)` [m^2] for the lip gap `h`; exactly `w h` when the exponent is 1 or the lip is closed.
+    fn flow_width_height(&self, gap: f64) -> f64 {
+        let plain = self.lip.width_m * gap;
+        if self.area_exponent == 1.0 || gap <= 0.0 {
+            plain
+        } else {
+            plain * (gap / self.lip.rest_gap_m).powf(self.area_exponent - 1.0)
+        }
+    }
+
+    /// One lip step under `force` [N]: the first mode always, the second when present (driven by `sign x force`). Returns the
+    /// summed displacement `q1 (+ q2)` [m] and the worst supply defect. Without the second mode this is exactly the original
+    /// single-mode step (the same operations in the same order).
+    fn step_lip(&mut self, force: f64, dt: f64) -> Result<(f64, f64), MmLineError> {
+        let record = step_split(
+            &self.lip_sys,
+            &self.lip_linear,
+            LinearPropagator::ExactZoh,
+            &self.lip_state,
+            &[force],
+            dt,
+        )
+        .map_err(|_| MmLineError::Invalid {
+            what: "lip island step refused",
+        })?;
+        let mut defect = record.supply_defect().abs();
+        self.lip_state = record.x;
+        let mut displacement = self.lip_state[0];
+        if let Some(second) = self.lip2.as_mut() {
+            let record2 = step_split(
+                &second.sys,
+                &second.linear,
+                LinearPropagator::ExactZoh,
+                &second.state,
+                &[second.mode.sign * force],
+                dt,
+            )
+            .map_err(|_| MmLineError::Invalid {
+                what: "second lip mode step refused",
+            })?;
+            defect = defect.max(record2.supply_defect().abs());
+            second.state = record2.x;
+            displacement += second.state[0];
+        }
+        Ok((displacement, defect))
     }
 
     /// Attach the opt-in constriction noise before any sample is rendered: a series pressure source added to the lip's
@@ -246,6 +411,11 @@ impl BrassVoice {
                         what: "lip tension must be finite positive",
                     });
                 }
+                if self.lip2.is_some() && t != 1.0 {
+                    return Err(MmLineError::Invalid {
+                        what: "the second lip mode (lip_response_mode2) has no printed pre-stress law and runs only at lip tension 1.0",
+                    });
+                }
                 // Stiffness ~ t^2, damping ~ t: rebuild the island with
                 // the SAME state (q, p persist through an embouchure
                 // move — the lip does not teleport).
@@ -280,6 +450,9 @@ impl BrassVoice {
     pub fn reset(&mut self) -> Result<(), MmLineError> {
         self.bank.reset()?;
         self.lip_state = vec![0.0, 0.0];
+        if let Some(second) = self.lip2.as_mut() {
+            second.state = vec![0.0, 0.0];
+        }
         self.cup = CupState::default();
         self.p_bore_prev = 0.0;
         if let Some(source) = self.jet_noise.as_mut() {
@@ -391,20 +564,9 @@ impl BrassVoice {
             }
             let dp_lip = drive - self.p_bore_prev;
             let force = dp_lip * self.lip.face_area_m2;
-            let record = step_split(
-                &self.lip_sys,
-                &self.lip_linear,
-                LinearPropagator::ExactZoh,
-                &self.lip_state,
-                &[force],
-                dt,
-            )
-            .map_err(|_| MmLineError::Invalid {
-                what: "lip island step refused",
-            })?;
-            worst_defect = worst_defect.max(record.supply_defect().abs());
-            self.lip_state = record.x;
-            let gap = (self.lip.rest_gap_m + self.lip_state[0]).max(0.0);
+            let (displacement, defect) = self.step_lip(force, dt)?;
+            worst_defect = worst_defect.max(defect);
+            let gap = (self.lip.rest_gap_m + displacement).max(0.0);
             gap_min = gap_min.min(gap);
             gap_max = gap_max.max(gap);
             gap_acc += gap;
@@ -422,7 +584,7 @@ impl BrassVoice {
             //    the flow and the reflection all hold at this sample.
             let boundary = self.bank.boundary_response()?;
             let (a, k_off) = cup_port(boundary, &self.cup, self.cup_compliance, zc0, dt);
-            let wh = self.lip.width_m * gap;
+            let wh = self.flow_width_height(gap);
             let flow = if wh <= 0.0 {
                 0.0
             } else {
@@ -1165,6 +1327,167 @@ pub(crate) mod brass_loop_tests {
                 );
             }
         }
+    }
+
+    /// The probe voice (authored lip with a 1e-4 m^2 face, tension 1) with the opt-in second lip mode, or without it.
+    fn second_mode_voice(second: Option<LipMode2>) -> BrassVoice {
+        let gas = air(293.15);
+        let load = MmLoad::Analytic(Termination::FlangedOpen);
+        let mut lip = authored_lip();
+        lip.face_area_m2 = 1.0e-4;
+        let voice = BrassVoice::new(&[brass_combo(0.0)], &["open"], &gas, &load, &config(), lip, 1.5e-6).expect("voice");
+        match second {
+            Some(mode) => voice.with_lip_mode2(mode).expect("second mode"),
+            None => voice,
+        }
+    }
+
+    /// Cullen (2000) Table A.2 embouchure 7's inward-striking mode: 244.5 Hz, Q 11.0, 1/mu -0.073 m^2/kg.
+    fn embouchure_7_mode2() -> LipMode2 {
+        LipMode2::from_response(244.5, 11.0, -0.073, 1.0e-4).expect("the printed numbers")
+    }
+
+    /// Displacement of a mass-spring-damper released from rest under a constant force, underdamped closed form.
+    fn damped_step_response(force: f64, m: f64, k: f64, c: f64, t: f64) -> f64 {
+        let alpha = c / (2.0 * m);
+        let wd = (k / m - alpha * alpha).sqrt();
+        force / k * (1.0 - (-alpha * t).exp() * ((wd * t).cos() + alpha / wd * (wd * t).sin()))
+    }
+
+    #[test]
+    fn second_lip_mode_follows_the_published_quantities_and_refuses_unusable_ones() {
+        let mode = embouchure_7_mode2();
+        let omega = core::f64::consts::TAU * 244.5;
+        assert!((mode.mass_kg - 1.0e-4 / 0.073).abs() <= 1e-15 * mode.mass_kg);
+        assert!((mode.stiffness_n_m - mode.mass_kg * omega * omega).abs() <= 1e-12 * mode.stiffness_n_m);
+        assert!((mode.damping_n_s_m - mode.mass_kg * omega / 11.0).abs() <= 1e-12 * mode.damping_n_s_m);
+        assert_eq!(mode.sign, -1.0, "a negative printed 1/mu is an inward-striking mode");
+        assert_eq!(LipMode2::from_response(244.5, 11.0, 0.073, 1.0e-4).expect("outward").sign, 1.0);
+        for (f, q, inverse_mu, area, needle) in [
+            (0.0, 11.0, -0.073, 1.0e-4, "resonance"),
+            (f64::NAN, 11.0, -0.073, 1.0e-4, "resonance"),
+            (244.5, 0.0, -0.073, 1.0e-4, "quality factor"),
+            (244.5, 11.0, 0.0, 1.0e-4, "nonzero"),
+            (244.5, 11.0, f64::INFINITY, 1.0e-4, "nonzero"),
+            (244.5, 11.0, -0.073, 0.0, "face area"),
+        ] {
+            let error = LipMode2::from_response(f, q, inverse_mu, area).expect_err(needle);
+            assert!(error.contains(needle), "{error}");
+        }
+    }
+
+    #[test]
+    fn second_lip_mode_static_response_is_the_signed_sum_of_two_compliances() {
+        let mode = embouchure_7_mode2();
+        let mut voice = second_mode_voice(Some(mode));
+        let (dt, force) = (1.0 / 24_000.0, 2.5e-2);
+        let mut displacement = 0.0f64;
+        for _ in 0..48_000 {
+            displacement = voice.step_lip(force, dt).expect("step").0;
+        }
+        let expected = force / voice.lip.stiffness_n_m + mode.sign * force / mode.stiffness_n_m;
+        assert!(
+            (displacement - expected).abs() <= 1e-9 * expected.abs(),
+            "static opening {displacement:.12e} against F (1/k1 - 1/k2) = {expected:.12e}"
+        );
+        assert!(displacement < force / voice.lip.stiffness_n_m, "the inward-striking mode moves against the force");
+    }
+
+    #[test]
+    fn second_lip_mode_step_response_matches_the_two_oscillator_closed_form() {
+        let mode = embouchure_7_mode2();
+        let mut voice = second_mode_voice(Some(mode));
+        let (dt, force) = (1.0 / 24_000.0, 2.5e-2);
+        let (m1, k1, c1) = (voice.lip.mass_kg, voice.lip.stiffness_n_m, voice.lip.damping_n_s_m);
+        let mut at = [0.0f64; 2];
+        for n in 1..=120usize {
+            let (displacement, _) = voice.step_lip(force, dt).expect("step");
+            if n == 7 {
+                at[0] = displacement;
+            }
+            if n == 120 {
+                at[1] = displacement;
+            }
+        }
+        for (n, got) in [(7usize, at[0]), (120usize, at[1])] {
+            let t = n as f64 * dt;
+            let expected = damped_step_response(force, m1, k1, c1, t)
+                + mode.sign * damped_step_response(force, mode.mass_kg, mode.stiffness_n_m, mode.damping_n_s_m, t);
+            assert!(
+                (got - expected).abs() <= 1e-9 * expected.abs().max(1e-12),
+                "step {n}: {got:.12e} against the closed form {expected:.12e}"
+            );
+        }
+    }
+
+    #[test]
+    fn second_lip_mode_runs_only_at_unit_tension_and_names_the_refusal() {
+        let mut voice = second_mode_voice(Some(embouchure_7_mode2()));
+        voice.apply(BrassControl::SetLipTension(1.0)).expect("tension 1 is the printed state");
+        let refusal = voice.apply(BrassControl::SetLipTension(1.2)).expect_err("another tension has no printed law");
+        assert!(format!("{refusal:?}").contains("lip_response_mode2"), "{refusal:?}");
+        let mut one_mode = second_mode_voice(None);
+        one_mode.apply(BrassControl::SetLipTension(1.2)).expect("the one-mode lip scales as before");
+        let mut tensioned = second_mode_voice(None);
+        tensioned.apply(BrassControl::SetLipTension(1.3)).expect("tension");
+        let refusal = tensioned.with_lip_mode2(embouchure_7_mode2()).err().expect("added after a tension change");
+        assert!(format!("{refusal:?}").contains("lip_response_mode2"), "{refusal:?}");
+    }
+
+    #[test]
+    fn a_voice_without_the_second_mode_steps_exactly_the_original_lip_island() {
+        let mut voice = second_mode_voice(None);
+        let dt = 1.0 / 24_000.0;
+        let reference = step_split(&voice.lip_sys, &voice.lip_linear, LinearPropagator::ExactZoh, &voice.lip_state, &[1.0e-2], dt)
+            .expect("reference step");
+        let (displacement, defect) = voice.step_lip(1.0e-2, dt).expect("step");
+        assert!(voice.lip2.is_none());
+        assert_eq!(voice.lip_state, reference.x);
+        assert_eq!(displacement.to_bits(), reference.x[0].to_bits());
+        assert_eq!(defect.to_bits(), reference.supply_defect().abs().to_bits());
+    }
+
+    #[test]
+    fn second_lip_mode_changes_the_rendered_sound_and_reset_clears_it() {
+        let one = jet_render(&mut second_mode_voice(None), 4000.0);
+        let mut voice = second_mode_voice(Some(embouchure_7_mode2()));
+        let two = jet_render(&mut voice, 4000.0);
+        assert!(two.iter().all(|x| x.is_finite()));
+        assert!(!same_bits(&one, &two), "a second mode must reach the mouthpiece pressure");
+        assert!(voice.lip2.as_ref().is_some_and(|second| second.state.iter().any(|x| *x != 0.0)));
+        voice.reset().expect("reset");
+        assert_eq!(voice.lip_state, vec![0.0, 0.0]);
+        assert_eq!(voice.lip2.as_ref().expect("second mode").state, vec![0.0, 0.0]);
+    }
+
+    #[test]
+    fn lip_area_exponent_one_is_bit_identical_and_q_scales_the_aperture_about_the_rest_gap() {
+        // q = 1 (the row set to exactly 1) steps exactly the original loop, bit for bit.
+        let plain = jet_render(&mut second_mode_voice(None), 4000.0);
+        let unit = jet_render(&mut second_mode_voice(None).with_lip_area_exponent(1.0).expect("q = 1"), 4000.0);
+        assert!(same_bits(&plain, &unit), "q = 1 must be the plain w h");
+        // The aperture: unchanged at the rest gap, multiplied by (h/H0)^(q-1) elsewhere, zero when closed.
+        let mut voice = second_mode_voice(None).with_lip_area_exponent(2.0).expect("q = 2");
+        let (w, h0) = (voice.lip.width_m, voice.lip.rest_gap_m);
+        assert_eq!(voice.flow_width_height(h0).to_bits(), (w * h0).to_bits());
+        let wide = 2.0 * h0;
+        assert!((voice.flow_width_height(wide) - w * wide * 2.0).abs() <= 1e-15 * w * wide * 2.0);
+        let narrow = 0.5 * h0;
+        assert!((voice.flow_width_height(narrow) - w * narrow * 0.5).abs() <= 1e-15 * w * narrow);
+        assert_eq!(voice.flow_width_height(0.0), 0.0);
+        // The exponent reaches the mouthpiece pressure.
+        let steeper = jet_render(&mut voice, 4000.0);
+        assert!(steeper.iter().all(|x| x.is_finite()));
+        assert!(!same_bits(&plain, &steeper), "q = 2 must reach the mouthpiece pressure");
+    }
+
+    #[test]
+    fn lip_area_exponent_outside_one_to_four_is_refused_by_name() {
+        for q in [0.0, 0.99, 4.01, -1.0, f64::NAN, f64::INFINITY] {
+            let refusal = second_mode_voice(None).with_lip_area_exponent(q).err().expect("outside [1, 4]");
+            assert!(format!("{refusal:?}").contains("lip_area_exponent"), "{q}: {refusal:?}");
+        }
+        assert!(second_mode_voice(None).with_lip_area_exponent(4.0).is_ok());
     }
 }
 

@@ -37,6 +37,10 @@ pub use incident::PreparedMolecularIncident;
 mod adaptive;
 pub use adaptive::{MolecularNearFieldOptions, PreparedMolecularNearField};
 
+#[path = "helmholtz_molecular/power.rs"]
+mod power;
+pub use power::{MolecularPowerDensity, MolecularPowerObservation};
+
 /// Material, geometric, work-envelope, solve or cancellation refusal.
 #[derive(Debug)]
 pub enum MolecularError {

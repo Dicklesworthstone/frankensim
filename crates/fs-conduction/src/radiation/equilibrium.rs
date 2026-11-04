@@ -147,11 +147,13 @@ where
     let (mut energy, robin_fluxes) = crate::solve::energy_balance(problem.mesh, &boundary,
         problem.source, &system, &dofs, temperature);
     let convective_out_w = energy.robin_out_w;
-    if original_convection.is_some() {
+    if let Some(surfaces) = original_convection {
         // The common outward boundary account includes radiation once, while
         // the retained Robin rows contain original convection alone for air.
         energy.dirichlet_in_w = dirichlet_reactions_w.iter().map(|&(_, r)| r).sum();
-        energy.robin_out_w += nonlinear.net_outward_heat_w.iter().sum::<f64>();
+        // Open exchange appends an algebraic black reservoir. Its opposite
+        // heat closes the radiation system, not the solid's external account.
+        energy.robin_out_w += nonlinear.net_outward_heat_w[..surfaces.len()].iter().sum::<f64>();
         energy.closure_w = energy.source_w + energy.dirichlet_in_w
             - energy.neumann_out_w - energy.robin_out_w;
         energy.scale_w = energy.source_w.abs().max(energy.dirichlet_in_w.abs())

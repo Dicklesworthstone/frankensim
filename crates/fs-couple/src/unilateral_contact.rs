@@ -6,6 +6,7 @@
 /// Existing card and finite-gap owners lowered to work-conjugate contact storage.
 pub mod binding;
 pub(crate) mod distributed;
+pub(crate) mod station;
 
 use fs_dcontact::{ContactStorage, DContactError, Obstacle, string_collocation};
 use fs_math::det;

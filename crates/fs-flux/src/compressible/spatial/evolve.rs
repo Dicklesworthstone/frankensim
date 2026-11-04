@@ -5,6 +5,7 @@ pub(super) fn attempt(
     gas: &FrozenGas,
     grid: &CartesianGrid,
     boundaries: Boundaries3d,
+    reservoirs: &reservoir::Reservoirs,
     states: &[State],
     work: &mut Workspace,
     dt: f64,
@@ -17,6 +18,7 @@ pub(super) fn attempt(
         gas,
         grid,
         boundaries,
+        reservoirs,
         states,
         &mut work.primitive,
         &mut work.slopes,
@@ -50,6 +52,7 @@ pub(super) fn attempt(
         gas,
         grid,
         boundaries,
+        reservoirs,
         &work.stage,
         &mut work.primitive,
         &mut work.slopes,
@@ -91,6 +94,7 @@ fn spatial(
     gas: &FrozenGas,
     grid: &CartesianGrid,
     boundaries: Boundaries3d,
+    reservoirs: &reservoir::Reservoirs,
     states: &[State],
     primitive: &mut [Primitive],
     slopes: &mut [[[f64; 5]; 3]],
@@ -168,25 +172,51 @@ fn spatial(
                 cell: k,
                 sign,
                 condition,
-            } => match (first_order, condition) {
-                (true, BoundaryCondition::Reflecting) => {
-                    gas.stationary_wall_spatial_flux(states[k].normal(axis), sign, &mut *cancelled)?
+            } => {
+                if let Some(exterior) = reservoirs.get(axis, sign) {
+                    if first_order {
+                        let inside = states[k].normal(axis);
+                        let outside = exterior.state.normal(axis);
+                        let (left, right) = if sign < 0.0 {
+                            (outside, inside)
+                        } else {
+                            (inside, outside)
+                        };
+                        gas.hllc_spatial_flux(left, right, &mut *cancelled)?
+                    } else {
+                        let inside = reconstruct(k, 0.5 * sign);
+                        let outside = exterior.normal(axis);
+                        let (left, right) = if sign < 0.0 {
+                            (outside, inside)
+                        } else {
+                            (inside, outside)
+                        };
+                        gas.hllc_spatial_flux_from_primitive(left, right, &mut *cancelled)?
+                    }
+                } else {
+                    match (first_order, condition) {
+                        (true, BoundaryCondition::Reflecting) => gas.stationary_wall_spatial_flux(
+                            states[k].normal(axis),
+                            sign,
+                            &mut *cancelled,
+                        )?,
+                        (true, BoundaryCondition::Transmissive) => {
+                            let q = states[k].normal(axis);
+                            gas.hllc_spatial_flux(q, q, &mut *cancelled)?
+                        }
+                        (false, BoundaryCondition::Reflecting) => gas
+                            .stationary_wall_spatial_flux_from_primitive(
+                                reconstruct(k, 0.5 * sign),
+                                sign,
+                                &mut *cancelled,
+                            )?,
+                        (false, BoundaryCondition::Transmissive) => {
+                            let p = reconstruct(k, 0.5 * sign);
+                            gas.hllc_spatial_flux_from_primitive(p, p, &mut *cancelled)?
+                        }
+                    }
                 }
-                (true, BoundaryCondition::Transmissive) => {
-                    let q = states[k].normal(axis);
-                    gas.hllc_spatial_flux(q, q, &mut *cancelled)?
-                }
-                (false, BoundaryCondition::Reflecting) => gas
-                    .stationary_wall_spatial_flux_from_primitive(
-                        reconstruct(k, 0.5 * sign),
-                        sign,
-                        &mut *cancelled,
-                    )?,
-                (false, BoundaryCondition::Transmissive) => {
-                    let p = reconstruct(k, 0.5 * sign);
-                    gas.hllc_spatial_flux_from_primitive(p, p, &mut *cancelled)?
-                }
-            },
+            }
             cartesian::FaceKind::PeriodicCopy { .. } => unreachable!(),
         };
         stats.fallback += usize::from(f.used_hll_fallback);

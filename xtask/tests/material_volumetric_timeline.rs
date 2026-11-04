@@ -181,6 +181,7 @@ fn g1_g3_fixed_volume_storage_survives_mass_basis_and_datum_changes() {
     for rho in [200.0, 1000.0] {
         for datum in [290.0, 300.0, 315.0, 340.0] {
             let law = FixedVolumeThermalLaw::try_new(&p, rho, datum).unwrap();
+            assert_eq!(law.caloric_identity(), Some(*law.identity().as_bytes()));
             assert_eq!(law.path(), &p);
             assert_eq!(law.reference_density_kg_m3(), rho);
             assert_eq!(law.datum_temperature_k(), datum);
@@ -224,6 +225,44 @@ fn g1_g3_fixed_volume_storage_survives_mass_basis_and_datum_changes() {
         assert!(FixedVolumeThermalLaw::try_new(&p, rho, 300.0).is_err());
     }
     assert!(FixedVolumeThermalLaw::try_new(&p, 200.0, 289.0).is_err());
+}
+
+#[test]
+fn g0_birth_enforces_native_volume_storage_basis_without_manual_preflight() {
+    let card = analytic_card(2e6, 20000.0, 0.2, 0.002);
+    let p = path(&card, &point(290.0), &point(340.0));
+    let law = FixedVolumeThermalLaw::try_new(&p, 200.0, 300.0).unwrap();
+    let valid = cell(&law, 1, 310.0, 0.002);
+    let mut wrong_mass = valid.clone();
+    wrong_mass.mass_kg *= 1.01;
+    let mut wrong_volume = valid.clone();
+    wrong_volume.geometry.volume_m3 *= 1.01;
+    for invalid in [wrong_mass, wrong_volume] {
+        let initial = DepositionSimulation::new(
+            vec![TimedEvent {
+                time_s: 0.0,
+                event: Event::Birth(invalid),
+            }],
+            &[(MaterialId(1), &law)],
+            DepositionBudget {
+                max_cells: 1,
+                max_links: 0,
+                max_events: 1,
+                max_substeps: 1,
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            initial.advance_to(0.0, CONFIG, || Ok(())),
+            Err(DepositionError::InvalidInput(
+                "cell mass and reference volume do not match its volumetric thermal law"
+            ))
+        ));
+        assert!(initial.cells().is_empty());
+    }
+    let admitted = timeline(vec![valid], &[(MaterialId(1), &law)], None);
+    close(admitted.mass_kg(), 0.4, 1e-16);
+    close(admitted.temperature_k(CellId(1)).unwrap(), 310.0, 1e-12);
 }
 
 #[test]

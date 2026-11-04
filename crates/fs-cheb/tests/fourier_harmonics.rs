@@ -144,6 +144,61 @@ fn exact_padding_does_not_inflate_repeated_products_and_constants_preserve_small
 }
 
 #[test]
+fn sparse_nonlinear_products_preserve_weak_generated_harmonics_and_exact_zeros() {
+    // A small retained partial is independent information, even when adding it
+    // to the fundamental on a sample grid would round it away. Product-to-sum:
+    // (cos(t) + e sin(5t)) cos(2t)
+    //   = (cos(t) + cos(3t) + e sin(3t) + e sin(7t))/2.
+    let epsilon = 1.0e-100;
+    let f = series(16, 0.0, &[(1, 1.0, 0.0), (5, 0.0, epsilon)]);
+    let g = series(16, 0.0, &[(2, 1.0, 0.0)]);
+    let product = f.mul(&g);
+    assert_eq!(product.coeffs[1], C64::from_re(0.25));
+    assert_eq!(product.coeffs[3], C64::new(0.25, -0.25 * epsilon));
+    assert_eq!(product.coeffs[7], C64::new(0.0, -0.25 * epsilon));
+    for (k, c) in product.coeffs.iter().enumerate() {
+        if ![1, 3, 7].contains(&k) {
+            assert_eq!(*c, C64::ZERO, "spurious harmonic {k}");
+        }
+    }
+    assert_eq!(product.coeffs, g.mul(&f).coeffs);
+}
+
+#[test]
+fn sparse_cubic_nonlinearity_does_not_create_forbidden_even_harmonics() {
+    // Odd polynomial nonlinearities driven by an odd-harmonic signal retain
+    // half-wave symmetry. No FFT roundoff floor should invent even partials.
+    let f = series(32, 0.0, &[(1, 1.0, 0.0), (5, 0.125, 0.0)]);
+    let cube = f.mul(&f).mul(&f);
+    for (k, c) in cube.coeffs.iter().enumerate() {
+        if k % 2 == 0 || k > 15 {
+            assert_eq!(*c, C64::ZERO, "forbidden harmonic {k}");
+        }
+    }
+    for j in 0..79 {
+        let t = std::f64::consts::TAU * (j as f64 + 0.17) / 79.0;
+        close(cube.eval(t), (t.cos() + 0.125 * (5.0 * t).cos()).powi(3));
+    }
+}
+
+#[test]
+fn dense_fourier_products_still_retain_all_sum_and_difference_modes() {
+    // 32 nonzero modes per input exceed the sparse K*L <= N work bound.
+    let modes: Vec<_> = (1..=32)
+        .map(|k| (k, 1.0 / (k as f64 + 1.0), 0.25 / k as f64))
+        .collect();
+    let f = series(64, 0.0, &modes);
+    let product = f.mul(&f);
+    for j in 0..263 {
+        let t = std::f64::consts::TAU * (j as f64 + 0.31) / 263.0;
+        close(product.eval(t), f.eval(t).powi(2));
+    }
+    let (_, a, b) = modes[31];
+    close(product.coeffs[64].re, 0.25 * (a * a - b * b));
+    close(product.coeffs[64].im, -0.5 * a * b);
+}
+
+#[test]
 fn unrepresentable_derivative_refuses_instead_of_publishing_infinity() {
     let f = series(8, 0.0, &[(4, f64::MAX, 0.0)]);
     assert!(std::panic::catch_unwind(|| f.differentiate()).is_err());

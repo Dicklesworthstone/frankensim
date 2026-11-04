@@ -307,3 +307,35 @@ fn n3_any_header_mismatch_refuses() {
     let parsed = ClosedBodyTable::parse(&table).unwrap();
     assert!(stepped.attach_closed_body(0, &parsed, batter, resonant).is_err());
 }
+
+/// The dipole's length from the committed tables, on z-floors and the kick's y-floor, against an independent axisymmetric
+/// boundary-integral solve of the closed cylinder in free field (its net-flow power reaches 0.9987 of the monopole law).
+/// The script's read of the table's own rows is the first number; the solve's power-equivalent length is the second.
+#[test]
+fn the_tables_give_the_independent_solves_dipole_length() {
+    let tables = [
+        ("snare-off", include_str!("../data/closed-body/snare-off.tsv"), 0.3694, 0.3705, 0.01),
+        ("tom-12", include_str!("../data/closed-body/tom-12.tsv"), 0.3675, 0.3666, 0.01),
+        ("tom-14", include_str!("../data/closed-body/tom-14.tsv"), 0.6017, 0.5764, 0.05),
+        ("kick", include_str!("../data/closed-body/kick.tsv"), 0.7882, 0.7436, 0.07),
+    ];
+    for (name, text, script, solve, limit) in tables {
+        let d = ClosedBodyTable::parse(text).unwrap().dipole_length().unwrap();
+        eprintln!("{name}: D {d:.4} m (script's read of the rows {script}, solve {solve})");
+        assert!((d - script).abs() < 1e-3, "{name}: {d} m, the rows read {script} m");
+        assert!((d / solve - 1.0).abs() < limit, "{name}: {d} m against the solve's {solve} m");
+    }
+    // Planted negative: the heads' sources swapped make a negative length, which is refused, not used.
+    let swapped: String = tables[0]
+        .1
+        .lines()
+        .map(|line| match line.starts_with("source\t") {
+            true if line.contains("\tbatter\t") => line.replace("\tbatter\t", "\tresonant\t"),
+            true => line.replace("\tresonant\t", "\tbatter\t"),
+            false => line.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let error = ClosedBodyTable::parse(&swapped).unwrap().dipole_length().unwrap_err();
+    assert!(error.contains("not a real positive length"), "{error}");
+}

@@ -1,9 +1,9 @@
-//! Live source contacts inside the original closed radiosity iteration.
+//! Live source contacts inside the original closed or open radiosity iteration.
 
 use fs_exec::Cx;
 use crate::{ConductionError, ConductionProblem, RobinFlux, SolveConfig, ThermalBoundary};
 use crate::radiation::{CoupledRadiationConfig, CoupledRadiationReport, GrayDiffuseEnclosure,
-    RadiosityReport, enclosure_exchange as exchange, equilibrium,
+    OpenDiffuseEnclosure, RadiationSurface, RadiosityReport, enclosure_exchange as exchange, equilibrium,
     require_enclosure_solid_residual, solve_radiating_surfaces_with};
 use super::super::{TemperatureContactEvaluation, finite, invalid, poll};
 use super::{ContactSteadyNewtonSolution, ContactSteadySolution, SteadyContactConfig,
@@ -74,6 +74,40 @@ impl TemperatureContacts<'_, '_> {
         radiation: CoupledRadiationConfig,
     ) -> Result<ContactSteadyEnclosureSolution<ContactSteadyNewtonSolution>, ConductionError> {
         poll(cx, 0)?;
+        let prepared = enclosure.prepare_radiosity(cx)?;
+        self.solve_steady_newton_with_enclosure(cx, problem, initial, solver,
+            enclosure.surfaces(), radiation, largest_area(enclosure.view_factors().areas_m2()),
+            &|t| prepared.solve(cx, t))
+    }
+
+    /// Compose the same complete contact Newton response with an open gray
+    /// cavity. Its explicit black reservoir has no solid degree of freedom;
+    /// only physical-surface radiation enters the solid heat/reaction account.
+    /// Original convection alone remains available to transported air.
+    /// Source support, original thermal anchoring and all closed-path physical
+    /// acceptance gates remain required. This supplies no coupled adjoint.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_steady_newton_with_open_gray_diffuse_enclosure(
+        &self, cx: &Cx<'_>, problem: ConductionProblem<'_>, initial: &[f64],
+        solver: SteadyContactNewtonConfig, enclosure: &OpenDiffuseEnclosure,
+        ambient_temperature_k: f64, radiation: CoupledRadiationConfig,
+    ) -> Result<ContactSteadyEnclosureSolution<ContactSteadyNewtonSolution>, ConductionError> {
+        poll(cx, 0)?;
+        require_ambient(ambient_temperature_k)?;
+        self.solve_steady_newton_with_enclosure(cx, problem, initial, solver,
+            enclosure.surfaces(), radiation, largest_area(enclosure.view_factors().areas_m2()),
+            &|t| enclosure.solve(cx, t, ambient_temperature_k).map(|r| r.exchange))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn solve_steady_newton_with_enclosure<R>(
+        &self, cx: &Cx<'_>, problem: ConductionProblem<'_>, initial: &[f64],
+        solver: SteadyContactNewtonConfig, surfaces: &[RadiationSurface],
+        radiation: CoupledRadiationConfig, largest_area: f64, evaluate: &R,
+    ) -> Result<ContactSteadyEnclosureSolution<ContactSteadyNewtonSolution>, ConductionError>
+    where R: Fn(&[f64]) -> Result<RadiosityReport, ConductionError>,
+    {
+        poll(cx, 0)?;
         self.check_mesh(problem.mesh)?;
         let responses = count(radiation.max_iterations, 1)?;
         for allowance in [solver.max_iterations, solver.max_residual_evaluations] {
@@ -84,13 +118,12 @@ impl TemperatureContacts<'_, '_> {
             .and_then(|n| n.checked_mul(solver.max_iterations))
             .ok_or_else(|| invalid("<steady-contact-enclosure>", "combined Newton/Krylov allowance overflows"))?;
         bound(krylov_allowance, responses)?;
-        let patches = exchange::bind_traces(cx, problem, enclosure)?;
-        let prepared = enclosure.prepare_radiosity(cx)?;
+        let patches = exchange::bind_surface_traces(cx, problem, surfaces)?;
         let boundary = |radiosity: &RadiosityReport| exchange::shifted_boundary(problem, &patches, radiosity);
         let mut work = ContactEnclosureWork::default();
         let mut convection = None;
         let (contact, radiation, applied_boundary) = solve_radiating_surfaces_with(cx, problem,
-            enclosure.surfaces(), radiation, &boundary, &|t| prepared.solve(cx, t),
+            surfaces, radiation, &boundary, evaluate,
             |combined, warm| {
                 let contact = self.solve_steady_newton(cx, combined, warm.unwrap_or(initial), solver)?;
                 let krylov = contact.newton.history.iter()
@@ -102,8 +135,8 @@ impl TemperatureContacts<'_, '_> {
             |contact| &contact.temperature,
             |contact, nonlinear, applied| {
                 let (physical, endpoint, accepted) = self.enclosure_endpoint(cx, problem,
-                    &contact.temperature, enclosure, nonlinear, applied, &boundary,
-                    solver.residual_tolerance_w, solver.energy_tolerance_w)?;
+                    &contact.temperature, surfaces, nonlinear, applied, &boundary,
+                    solver.residual_tolerance_w, solver.energy_tolerance_w, largest_area)?;
                 if accepted {
                     convection = Some((endpoint.robin_fluxes.clone(), endpoint.convective_out_w));
                     contact.physical_contacts = physical;
@@ -131,17 +164,50 @@ impl TemperatureContacts<'_, '_> {
         enclosure: &GrayDiffuseEnclosure, radiation: CoupledRadiationConfig,
     ) -> Result<ContactSteadyEnclosureSolution<ContactSteadySolution>, ConductionError> {
         poll(cx, 0)?;
+        let prepared = enclosure.prepare_radiosity(cx)?;
+        self.solve_steady_with_enclosure(cx, problem, initial, solver, coupling,
+            enclosure.surfaces(), radiation, largest_area(enclosure.view_factors().areas_m2()),
+            &|t| prepared.solve(cx, t))
+    }
+
+    /// Retain source-surface Picard contact responses inside the same open
+    /// cavity owner. The black reservoir is an external heat channel, never a
+    /// fictitious solid trace or a load to air. Every inner response is counted
+    /// and the unchanged final field passes fresh contact/radiation watt gates.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_steady_with_open_gray_diffuse_enclosure(
+        &self, cx: &Cx<'_>, problem: ConductionProblem<'_>, initial: &[f64],
+        solver: SolveConfig, coupling: SteadyContactConfig,
+        enclosure: &OpenDiffuseEnclosure, ambient_temperature_k: f64,
+        radiation: CoupledRadiationConfig,
+    ) -> Result<ContactSteadyEnclosureSolution<ContactSteadySolution>, ConductionError> {
+        poll(cx, 0)?;
+        require_ambient(ambient_temperature_k)?;
+        self.solve_steady_with_enclosure(cx, problem, initial, solver, coupling,
+            enclosure.surfaces(), radiation, largest_area(enclosure.view_factors().areas_m2()),
+            &|t| enclosure.solve(cx, t, ambient_temperature_k).map(|r| r.exchange))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn solve_steady_with_enclosure<R>(
+        &self, cx: &Cx<'_>, problem: ConductionProblem<'_>, initial: &[f64],
+        solver: SolveConfig, coupling: SteadyContactConfig,
+        surfaces: &[RadiationSurface], radiation: CoupledRadiationConfig,
+        largest_area: f64, evaluate: &R,
+    ) -> Result<ContactSteadyEnclosureSolution<ContactSteadySolution>, ConductionError>
+    where R: Fn(&[f64]) -> Result<RadiosityReport, ConductionError>,
+    {
+        poll(cx, 0)?;
         self.check_mesh(problem.mesh)?;
         let responses = count(radiation.max_iterations, 1)?;
         let (nonlinear, krylov) = coupling.admit(&solver)?;
         for allowance in [coupling.max_iterations, nonlinear, krylov] { bound(allowance, responses)?; }
-        let patches = exchange::bind_traces(cx, problem, enclosure)?;
-        let prepared = enclosure.prepare_radiosity(cx)?;
+        let patches = exchange::bind_surface_traces(cx, problem, surfaces)?;
         let boundary = |radiosity: &RadiosityReport| exchange::shifted_boundary(problem, &patches, radiosity);
         let mut work = ContactEnclosureWork::default();
         let mut convection = None;
         let (contact, radiation, applied_boundary) = solve_radiating_surfaces_with(cx, problem,
-            enclosure.surfaces(), radiation, &boundary, &|t| prepared.solve(cx, t),
+            surfaces, radiation, &boundary, evaluate,
             |combined, warm| {
                 let contact = self.solve_steady(cx, combined, warm.unwrap_or(initial), solver.clone(), coupling)?;
                 require_enclosure_solid_residual(cx, &contact.conduction)?;
@@ -151,8 +217,8 @@ impl TemperatureContacts<'_, '_> {
             |contact| &contact.conduction.temperature,
             |contact, nonlinear, applied| {
                 let (physical, endpoint, accepted) = self.enclosure_endpoint(cx, problem,
-                    &contact.conduction.temperature, enclosure, nonlinear, applied, &boundary,
-                    coupling.residual_tolerance_w, coupling.energy_tolerance_w)?;
+                    &contact.conduction.temperature, surfaces, nonlinear, applied, &boundary,
+                    coupling.residual_tolerance_w, coupling.energy_tolerance_w, largest_area)?;
                 if accepted {
                     convection = Some((endpoint.robin_fluxes.clone(), endpoint.convective_out_w));
                     contact.physical_contacts = physical;
@@ -171,19 +237,19 @@ impl TemperatureContacts<'_, '_> {
 
     #[allow(clippy::too_many_arguments)]
     fn enclosure_endpoint<F>(&self, cx: &Cx<'_>, problem: ConductionProblem<'_>,
-        temperature: &[f64], enclosure: &GrayDiffuseEnclosure, nonlinear: RadiosityReport,
+        temperature: &[f64], surfaces: &[RadiationSurface], nonlinear: RadiosityReport,
         applied: &RadiosityReport, boundary: &F, residual_tolerance_w: f64, energy_tolerance_w: f64,
+        largest_area: f64,
     ) -> Result<(TemperatureContactEvaluation, equilibrium::Endpoint, bool), ConductionError>
     where F: Fn(&RadiosityReport) -> Result<ThermalBoundary, ConductionError>,
     {
         let physical = self.evaluate(cx, problem.boundary, temperature)?;
         let endpoint = equilibrium::endpoint(cx, problem, Some(physical.frozen_interfaces()),
-            temperature, residual_tolerance_w, nonlinear, applied, boundary, Some(enclosure.surfaces()))?;
+            temperature, residual_tolerance_w, nonlinear, applied, boundary, Some(surfaces))?;
         let energy = &endpoint.energy;
         for value in [energy.source_w, energy.neumann_out_w, energy.robin_out_w,
             energy.dirichlet_in_w, energy.closure_w, energy.scale_w, endpoint.convective_out_w]
         { finite(value)?; }
-        let largest_area = enclosure.surfaces().iter().map(|s| s.area_m2()).fold(0.0, f64::max);
         let mut accepted = endpoint.report.residual_w <= residual_tolerance_w
             && energy.closure_w.abs() <= energy_tolerance_w
             && endpoint.report.max_patch_heat_mismatch_w <= energy_tolerance_w;
@@ -193,6 +259,17 @@ impl TemperatureContacts<'_, '_> {
         }
         Ok((physical, endpoint, accepted))
     }
+}
+
+fn largest_area(areas: &[f64]) -> f64 {
+    areas.iter().copied().fold(0.0, f64::max)
+}
+
+fn require_ambient(temperature_k: f64) -> Result<(), ConductionError> {
+    if !temperature_k.is_finite() || temperature_k <= 0.0 {
+        return Err(invalid("<steady-contact-enclosure>", "black reservoir temperature must be positive and finite"));
+    }
+    Ok(())
 }
 
 fn count(total: usize, increment: usize) -> Result<usize, ConductionError> {

@@ -1,6 +1,7 @@
 //! Original gas/liquid material response in the native multimodal duct.
 //!
-//! One immutable material snapshot supplies every station and the mouth.
+//! One immutable interior snapshot supplies every station. Same-fluid mouths
+//! reuse it; an explicitly supplied receiving fluid supplies its own radiation.
 //! Density and sound speed set each radial mode's axial wavelength and cutoff;
 //! optional transport/caloric data supply the existing wall-diffusion law.
 //! Radius-junction conversion, stable reflection recursion, exact-cutoff
@@ -247,6 +248,90 @@ impl PreparedModalDuct<'_> {
         Ok(outlet::wave_response(response)?.drive_sources(sources)?)
     }
 
+    /// Drive a material duct radiating into a separately declared exterior
+    /// fluid through its circular mouth in an infinite rigid baffle.
+    ///
+    /// Interior density and sound speed alone set the duct's transverse
+    /// cutoffs and axial propagation. The exterior's own rho and c set every
+    /// entry of the coupled radiation impedance, including evanescent-mode
+    /// coupling. Pressure and outward volume flow are continuous at the mouth;
+    /// no averaged sound speed or impedance is assigned to the interface.
+    /// Both original materials are evaluated once, before propagation.
+    ///
+    /// The stationary interface has no membrane, mean flow, mass transfer or
+    /// capillary dynamics. The caller owns equilibrium of the two background
+    /// states and the validity of their small-signal acoustic material laws.
+    /// The receiving half-space is homogeneous and nondispersive. Radiation
+    /// quadrature bounds apply to its ka, while duct cutoffs use the interior.
+    ///
+    /// # Errors
+    /// Either original material refusal, the original flanged-radiation
+    /// admission limits, and source/propagation failures. As with
+    /// [`Self::drive_sources_from_material`], an undriven impedance pole does
+    /// not prevent a finite physical source solution.
+    pub fn drive_sources_from_material_with_exterior<
+        M: FluidAcoustics + ?Sized,
+        E: FluidAcoustics + ?Sized,
+    >(
+        &self,
+        material: &M,
+        exterior: &E,
+        omega: f64,
+        sources: &[PortExcitation],
+    ) -> Result<MouthSourceResponse, FluidDuctError> {
+        admit_frequency(omega)?;
+        let state = material.acoustic_state()?;
+        let exterior = exterior.acoustic_state()?;
+        let response = evaluate_snapshot(
+            self,
+            &state,
+            &exterior,
+            omega,
+            MouthBoundary::Flanged,
+            true,
+            true,
+            |radius| wave_from_state(&state, radius, omega),
+        )?;
+        Ok(outlet::wave_response(response)?.drive_sources(sources)?)
+    }
+
+    /// The same independent receiving medium with the interior material's
+    /// original viscothermal wall diffusion. Only the interior must supply
+    /// viscosity, conductivity and Cp/Cv; those coefficients never leak into
+    /// the exterior radiation law. Loss ownership and higher-mode wall-loss
+    /// approximation remain those of
+    /// [`Self::drive_sources_from_material_with_loss`].
+    ///
+    /// # Errors
+    /// As [`Self::drive_sources_from_material_with_exterior`], plus the original
+    /// interior caloric, transport and wall-diffusion refusals.
+    pub fn drive_sources_from_material_with_exterior_and_loss<
+        M: ThermoviscousFluid + ?Sized,
+        E: FluidAcoustics + ?Sized,
+    >(
+        &self,
+        material: &M,
+        exterior: &E,
+        omega: f64,
+        loss: LossModel,
+        sources: &[PortExcitation],
+    ) -> Result<MouthSourceResponse, FluidDuctError> {
+        admit_frequency(omega)?;
+        let state = material.thermoviscous_state()?;
+        let exterior = exterior.acoustic_state()?;
+        let response = evaluate_snapshot(
+            self,
+            &state.acoustic(),
+            &exterior,
+            omega,
+            MouthBoundary::Flanged,
+            true,
+            true,
+            |radius| thermoviscous_wave_from_state(&state, radius, omega, loss),
+        )?;
+        Ok(outlet::wave_response(response)?.drive_sources(sources)?)
+    }
+
     fn evaluate_material<M: FluidAcoustics + ?Sized>(
         &self,
         material: &M,
@@ -259,6 +344,7 @@ impl PreparedModalDuct<'_> {
         let state = material.acoustic_state()?;
         evaluate_snapshot(
             self,
+            &state,
             &state,
             omega,
             boundary,
@@ -282,6 +368,7 @@ impl PreparedModalDuct<'_> {
         evaluate_snapshot(
             self,
             &state.acoustic(),
+            &state.acoustic(),
             omega,
             boundary,
             observe_mouth,
@@ -300,9 +387,11 @@ fn admit_frequency(omega: f64) -> Result<(), DuctError> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn evaluate_snapshot(
     geometry: &PreparedModalDuct<'_>,
     state: &FluidAcousticState,
+    exterior: &FluidAcousticState,
     omega: f64,
     boundary: MouthBoundary,
     observe_mouth: bool,
@@ -320,7 +409,7 @@ fn evaluate_snapshot(
             // The snapshot implements FluidAcoustics directly: the original
             // material is not re-evaluated for its exterior radiation.
             let matrix =
-                crate::flanged::flanged_modal_impedance_from_material(state, radius, omega, n)?;
+                crate::flanged::flanged_modal_impedance_from_material(exterior, radius, omega, n)?;
             reflection_from_impedance(&matrix, &mouth_wave.zc, n)?
         }
         MouthBoundary::Rigid | MouthBoundary::PressureRelease => {

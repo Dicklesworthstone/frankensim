@@ -129,6 +129,58 @@ fn displacement_and_velocity_peaks_and_widths_match_original_oscillator_equation
 }
 
 #[test]
+fn acceleration_peak_and_bandwidth_follow_original_inertial_motion() {
+    let gate = CancelGate::new_clock_free();
+    let system = oscillator(1);
+    let force = C64::new(0.7, -0.2);
+    let weight = [2.3];
+    let drag = 2.0 * ZETA * OMEGA;
+    let displacement_peak_sq = OMEGA * OMEGA - 0.5 * drag * drag;
+    let minimum_denominator = drag * drag * (OMEGA * OMEGA - 0.25 * drag * drag);
+    // Accelerance at omega has the same normalized magnitude as receptance
+    // at OMEGA²/omega. This gives independent closed-form peak and edge roots.
+    let peak = OMEGA * OMEGA / det::sqrt(displacement_peak_sq);
+    let edges = (
+        OMEGA * OMEGA / det::sqrt(displacement_peak_sq + det::sqrt(minimum_denominator)),
+        OMEGA * OMEGA / det::sqrt(displacement_peak_sq - det::sqrt(minimum_denominator)),
+    );
+    let result = system
+        .driven_resonance(
+            &[force],
+            ModalHarmonicObservation::Acceleration(&weight),
+            (600.0, 1400.0),
+            controls(),
+            100_000,
+            &gate,
+        )
+        .unwrap();
+    frequency(result.peak, peak);
+    let band = result.half_power.unwrap();
+    frequency(band.lower, edges.0);
+    frequency(band.upper, edges.1);
+    assert!((band.bandwidth_rad_s - (edges.1 - edges.0)).abs() < 2e-6);
+    let omega = result.peak.angular_frequency_rad_s;
+    let denominator = C64::new((OMEGA - omega) * (OMEGA + omega), -drag * omega);
+    let q = force.scale(weight[0]) / denominator;
+    let q_slope = -(C64::new(-2.0 * omega, -drag) * q) / denominator;
+    let acceleration = q.scale(-omega * omega);
+    let acceleration_slope = q_slope.scale(-omega * omega) - q.scale(2.0 * omega);
+    assert!((result.observation - acceleration).abs() < 1e-12 * acceleration.abs());
+    assert!((result.observation_derivative - acceleration_slope).abs() < 1e-12);
+    assert!(
+        (result.observation_derivative / result.observation)
+            .re
+            .abs()
+            < 1e-9
+    );
+    assert!(
+        peak - OMEGA > 6.0,
+        "acceleration must not reuse the velocity peak"
+    );
+    assert_eq!(system.samples_rendered(), 0);
+}
+
+#[test]
 fn quiet_signed_modal_interference_retains_the_observed_resonance() {
     let gate = CancelGate::new_clock_free();
     let system = oscillator(3);

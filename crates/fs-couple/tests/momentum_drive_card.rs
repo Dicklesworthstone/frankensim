@@ -129,3 +129,20 @@ fn the_row_changes_the_loop_not_the_card() {
             > a.renderer().voice().momentum_drive().unwrap().kappa()
     );
 }
+
+#[test]
+fn bickley_profile_selects_one_shared_station_profile_and_accepts_spreading() {
+    for spreading in ["", "jet_spreading bickley\n", "jet_spreading fletcher-1976\n"] {
+        let card = parse_with(&format!("{RESPONSE}momentum_drive bickley-profile\n{spreading}"))
+            .expect("profile momentum parses");
+        let voice = card.renderer().voice();
+        assert!(voice.forced_jet().is_some());
+        assert!(voice.jet_cut_width_station());
+        assert!(voice.momentum_drive().is_none());
+        assert_eq!(voice.bickley_momentum_drive().unwrap().bore_area_m2(),
+            card.geometry().bore_area_m2);
+    }
+    assert!(parse("momentum_drive bickley-profile extra").is_err());
+    assert!(parse("momentum_drive bickley-profile\nmomentum_drive 1").is_err());
+    assert!(parse_with("momentum_drive bickley-profile\n").is_err());
+}

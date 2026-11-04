@@ -2,10 +2,56 @@
 //! Returned inner solve data retain their applied boundary; fresh physical heat
 //! is explicit so outer convection owners never advance or relabel history.
 
-use fs_conduction::radiation::GrayDiffuseEnclosure;
+use fs_conduction::radiation::{GrayDiffuseEnclosure, OpenDiffuseEnclosure, RadiationSurface, RadiosityReport};
 use fs_conduction::interface::temperature::{ContactIterationConfig, TemperatureContacts};
 use fs_conduction::transient::backward_euler::EndpointEvaluation;
 use super::*;
+
+/// One geometric binding per spatial rung, shared by both time grids and all
+/// natural/air/contact trials. The black reservoir never becomes a solid patch.
+pub(super) enum Model {
+    Closed(GrayDiffuseEnclosure),
+    Open(OpenDiffuseEnclosure, f64),
+}
+
+impl Model {
+    pub(super) fn bind(cx: &Cx<'_>, problem: ConductionProblem<'_>, lowering: &radiation::LoweredRadiation)
+        -> Result<Option<Self>, ConductionError> {
+        if let Some(ambient) = lowering.open_ambient_temperature_k() {
+            lowering.bind_open_enclosure(cx, problem).map(|model| model.map(|model| Self::Open(model, ambient)))
+        } else {
+            lowering.bind_enclosure(cx, problem).map(|model| model.map(Self::Closed))
+        }
+    }
+
+    pub(super) fn surfaces(&self) -> &[RadiationSurface] {
+        match self { Self::Closed(model) => model.surfaces(), Self::Open(model, _) => model.surfaces() }
+    }
+
+    pub(super) fn is_open(&self) -> bool { matches!(self, Self::Open(..)) }
+
+    pub(super) fn closed(&self) -> Result<&GrayDiffuseEnclosure, SolveRefusal> {
+        match self {
+            Self::Closed(model) => Ok(model),
+            Self::Open(..) => Err(bad("open area-mean capacity radiation does not expose trajectory adjoints")),
+        }
+    }
+
+    pub(super) fn surface_heat_w(&self, report: &RadiosityReport) -> Result<f64, SolveRefusal> {
+        let heat = report.net_outward_heat_w.get(..self.surfaces().len())
+            .ok_or_else(|| bad("capacity enclosure lost its physical-surface heat rows"))?;
+        finite(heat.iter().sum())
+    }
+
+    pub(super) fn into_solution(self, conduction: ConductionSolution, endpoint: radiation::EnclosureEndpoint)
+        -> radiation::SolidSolution {
+        match self {
+            Self::Closed(model) => radiation::SolidSolution::from_enclosure_endpoint(conduction, model, endpoint),
+            Self::Open(model, ambient) => radiation::SolidSolution::from_open_enclosure_endpoint(
+                conduction, model, ambient, endpoint),
+        }
+    }
+}
 
 pub(super) struct Step {
     pub(super) conduction: StepSolution,
@@ -33,7 +79,7 @@ pub(super) fn advance(
     temperature_contacts: Option<&TemperatureContacts<'_, '_>>,
     contact_config: Option<contact::Config>, old: &[f64], dt_s: f64,
     config: StepConfig, nonlinear: Option<NonlinearStepConfig>,
-    model: &GrayDiffuseEnclosure, radiation_config: fs_conduction::AmbientRadiationConfig,
+    model: &Model, radiation_config: fs_conduction::AmbientRadiationConfig,
     deadline: Option<(Instant, f64)>,
 ) -> Result<Step, SolveRefusal> {
     poll(cx, deadline)?;
@@ -49,9 +95,12 @@ pub(super) fn advance(
             old, dt_s, config, nonlinear, model, radiation_config, deadline,
         );
     }
-    let solved = engine.advance_prescribed_with_enclosure_radiation(
-        cx, problem, interfaces, old, dt_s, config, nonlinear, model, radiation_config,
-    ).map_err(lower)?;
+    let solved = match model {
+        Model::Closed(model) => engine.advance_prescribed_with_enclosure_radiation(
+            cx, problem, interfaces, old, dt_s, config, nonlinear, model, radiation_config),
+        Model::Open(model, ambient) => engine.advance_prescribed_with_open_enclosure_radiation(
+            cx, problem, interfaces, old, dt_s, config, nonlinear, model, *ambient, radiation_config),
+    }.map_err(lower)?;
     poll(cx, deadline)?;
     let report = &solved.radiation;
     let fresh = &report.radiosity;
@@ -66,7 +115,7 @@ pub(super) fn advance(
     let net_input_w = finite(
         solved.conduction.source_w + solved.physical_dirichlet_in_w
             - solved.prescribed_neumann_out_w - solved.convective_out_w
-            - fresh.enclosure_energy_closure_w,
+            - model.surface_heat_w(fresh)?,
     )?;
     let solid_solves = report.iterations;
     let nonlinear_updates = if nonlinear.is_some() { report.solid_iterations } else { 0 };
@@ -106,23 +155,30 @@ fn advance_contact(
     cx: &Cx<'_>, engine: &BackwardEuler<'_>, problem: ConductionProblem<'_>,
     contacts: &TemperatureContacts<'_, '_>, controls: contact::Config,
     old: &[f64], dt_s: f64, config: StepConfig, nonlinear: Option<NonlinearStepConfig>,
-    model: &GrayDiffuseEnclosure, radiation_config: fs_conduction::AmbientRadiationConfig,
+    model: &Model, radiation_config: fs_conduction::AmbientRadiationConfig,
     deadline: Option<(Instant, f64)>,
 ) -> Result<Step, SolveRefusal> {
     let coupling = ContactIterationConfig {
         max_iterations: controls.max_responses(), relaxation: 0.5,
         residual_tolerance_j: controls.residual_tolerance_j,
     };
-    let solved = if controls.coupled_newton {
-        contacts.advance_capacity_newton_with_enclosure_radiation(
+    let solved = match (controls.coupled_newton, model) {
+        (true, Model::Closed(model)) => contacts.advance_capacity_newton_with_enclosure_radiation(
             cx, engine, problem, old, dt_s, config,
             nonlinear.ok_or_else(|| bad("enclosure contact Newton lost its nonlinear controls"))?,
             coupling, controls.max_face_pairs, model, radiation_config,
-        )
-    } else {
-        contacts.advance_capacity_with_enclosure_radiation(
+        ),
+        (false, Model::Closed(model)) => contacts.advance_capacity_with_enclosure_radiation(
             cx, engine, problem, old, dt_s, config, nonlinear, coupling, model, radiation_config,
-        )
+        ),
+        (true, Model::Open(model, ambient)) => contacts.advance_capacity_newton_with_open_enclosure_radiation(
+            cx, engine, problem, old, dt_s, config,
+            nonlinear.ok_or_else(|| bad("open enclosure contact Newton lost its nonlinear controls"))?,
+            coupling, controls.max_face_pairs, model, *ambient, radiation_config,
+        ),
+        (false, Model::Open(model, ambient)) => contacts.advance_capacity_with_open_enclosure_radiation(
+            cx, engine, problem, old, dt_s, config, nonlinear, coupling, model, *ambient, radiation_config,
+        ),
     }.map_err(lower)?;
     poll(cx, deadline)?;
     let physical = &solved.physical;
@@ -173,7 +229,7 @@ fn advance_contact(
 
 #[allow(clippy::too_many_arguments)]
 fn step_row(
-    cx: &Cx<'_>, model: &GrayDiffuseEnclosure, endpoint: &radiation::EnclosureEndpoint,
+    cx: &Cx<'_>, model: &Model, endpoint: &radiation::EnclosureEndpoint,
     solid_solves: usize, nonlinear_backtracks: usize,
     prescribed_neumann_out_w: f64, physical_dirichlet_in_w: f64,
     deadline: Option<(Instant, f64)>,
@@ -181,7 +237,8 @@ fn step_row(
     let report = &endpoint.report;
     let fresh = &report.radiosity;
     let count = model.surfaces().len();
-    if fresh.surface_temperatures_k.len() != count || fresh.net_outward_heat_w.len() != count
+    let rows = count + usize::from(model.is_open());
+    if fresh.surface_temperatures_k.len() != rows || fresh.net_outward_heat_w.len() != rows
         || report.applied_heat_w.len() != count
     {
         return Err(bad("capacity enclosure evidence lost its ordered physical patches"));
@@ -196,12 +253,18 @@ fn step_row(
             number(report.applied_heat_w[index])?, number(fresh.net_outward_heat_w[index])?,
         ));
     }
+    let (name, bath) = match model {
+        Model::Closed(_) => ("closed-gray-diffuse-enclosure", String::new()),
+        Model::Open(_, ambient) => ("open-gray-diffuse-enclosure", format!(
+            ",\"ambient_temperature_k\":{},\"ambient_absorbed_w\":{},\"enclosure_energy_closure_w\":{}",
+            number(*ambient)?, number(-fresh.net_outward_heat_w[count])?, number(fresh.enclosure_energy_closure_w)?)),
+    };
     Ok(format!(
-        "{{\"model\":\"closed-gray-diffuse-enclosure\",\"storage\":\"volumetric-heat-capacity\",\"solid_solves\":{},\"radiation_trials\":{},\"solid_iterations\":{},\"krylov_iterations\":{},\"nonlinear_backtracks\":{},\"max_heat_mismatch_w\":{},\"applied_radiation_out_w\":{},\"nonlinear_radiation_out_w\":{},\"convective_out_w\":{},\"prescribed_neumann_out_w\":{},\"physical_dirichlet_in_w\":{},\"radiosity_residual_w_m2\":{},\"physical_residual_j\":{},\"physical_residual_threshold_j\":{},\"physical_energy_residual_j\":{},\"decomposition_residual_w\":{},\"patches\":[{}]}}",
+        "{{\"model\":\"{name}\",\"storage\":\"volumetric-heat-capacity\",\"solid_solves\":{},\"radiation_trials\":{},\"solid_iterations\":{},\"krylov_iterations\":{},\"nonlinear_backtracks\":{},\"max_heat_mismatch_w\":{},\"applied_radiation_out_w\":{},\"nonlinear_radiation_out_w\":{},\"convective_out_w\":{},\"prescribed_neumann_out_w\":{},\"physical_dirichlet_in_w\":{},\"radiosity_residual_w_m2\":{},\"physical_residual_j\":{},\"physical_residual_threshold_j\":{},\"physical_energy_residual_j\":{},\"decomposition_residual_w\":{},\"patches\":[{}]{bath}}}",
         solid_solves, report.iterations, report.solid_iterations, report.krylov_iterations,
         nonlinear_backtracks, number(report.max_heat_mismatch_w)?,
         number(finite(report.applied_heat_w.iter().sum())?)?,
-        number(fresh.enclosure_energy_closure_w)?, number(endpoint.convective_out_w)?,
+        number(model.surface_heat_w(fresh)?)?, number(endpoint.convective_out_w)?,
         number(prescribed_neumann_out_w)?, number(physical_dirichlet_in_w)?,
         number(fresh.linear_residual_max_w_m2)?, number(endpoint.physical_residual_norm_j)?,
         number(endpoint.physical_residual_tolerance_j)?, number(endpoint.physical_energy_residual_j)?,
@@ -215,7 +278,7 @@ fn step_row(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn refresh(
     cx: &Cx<'_>, endpoint: &mut radiation::EnclosureEndpoint,
-    model: &GrayDiffuseEnclosure, physical: &EndpointEvaluation,
+    model: &Model, physical: &EndpointEvaluation,
     physical_residual_tolerance_j: f64, solid_solves: usize, nonlinear_backtracks: usize,
     deadline: Option<(Instant, f64)>,
 ) -> Result<String, SolveRefusal> {

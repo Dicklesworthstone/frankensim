@@ -13,18 +13,18 @@
 //! compressible. When the cup pressure exceeds the mouth's, gas leaves through
 //! the same channel. At every Runge-Kutta stage the face pressure solves mass
 //! continuity between the metered channel and the interior's own end wave
-//! (this source's shock or fan). A closed lip is a wall.
+//! (this source's shock or fan). The mixed-out face cools by its kinetic head:
+//! its static enthalpy plus `u^2 / 2` is the mouth's stagnation enthalpy, using
+//! the same source's temperature-dependent heat capacity. A closed lip is a wall.
 //!
 //! The lip steps once per gas step under the cup pressure of the previous
 //! step's first stage, and the gap is held through both stages. The radiated
 //! observer receives every mechanics sample's mean bell volume flow.
 //!
 //! Limits, stated rather than hidden: the mouth is a fixed reservoir at the
-//! room's temperature and composition (no breath heating or exhaled CO2); the
-//! mixed-out inflow enters at the mouth temperature (its kinetic heat,
-//! `u^2 / (2 c_p)` with `u` the cup-face speed, is not added); reverse flow
-//! discharges the cup's static state; one held bore without valves; the bell
-//! radiates as a rigid baffled piston.
+//! room's temperature and composition (no breath heating or exhaled CO2);
+//! reverse flow discharges the cup's static state; one held bore without valves;
+//! the bell radiates as a rigid baffled piston.
 
 use fs_duct::Duct;
 use fs_duct::nonlinear::bore::{BoreSpec, NonlinearBore, WallGas, WallMemory, WallReceipt};
@@ -452,16 +452,6 @@ fn metered(
     }
 }
 
-// Mass flux through the face if the interior's end wave reaches `p`: mouth gas
-// at the mouth temperature entering, the interior's star state leaving.
-fn face_mass_flux(gas: &FrozenGas, star: Primitive, mouth: Primitive, p: f64) -> f64 {
-    if star.velocity >= 0.0 {
-        p / (gas.gas_constant() * mouth.temperature) * star.velocity
-    } else {
-        star.density * star.velocity
-    }
-}
-
 fn lip_face(
     gas: &FrozenGas,
     interior: Primitive,
@@ -497,28 +487,60 @@ fn lip_face(
     let residual = |p: f64| -> Result<(f64, Primitive, f64), GasError> {
         let wave = gas.end_wave(interior, -1.0, p, || false)?;
         let mass = metered(gas, wave.primitive, mouth, opening, p)?;
-        let value = mass / inlet_area - face_mass_flux(gas, wave.primitive, mouth, p);
-        Ok((value, wave.primitive, wave.signal_speed))
+        let face = if wave.primitive.velocity >= 0.0 {
+            gas.stagnation_to_static_state(mouth.temperature, p, wave.primitive.velocity, || false)?
+        } else {
+            wave.primitive
+        };
+        let value = mass / inlet_area - face.density * face.velocity;
+        Ok((value, face, wave.signal_speed))
     };
     let mut pressure = wall;
     let (mut lo, mut hi) = (wall.min(mouth.pressure), wall.max(mouth.pressure));
     if opening > 0.0 && lo < hi {
         // Illinois false position on the bracket [lo, hi], G(lo) >= 0 >= G(hi).
-        let (mut g_lo, mut g_hi) = (residual(lo)?.0, residual(hi)?.0);
+        // At high mouth pressure the auxiliary upper face speed can exhaust
+        // the caloric path even though the metered solution is supported.
+        // Keep that pressure only as a bound and bisect until a supported
+        // nonpositive residual exists; never accept a temperature clamp.
+        let cold_trial = |error: &GasError| {
+            matches!(
+                error,
+                GasError::CaloricPath("reservoir acceleration leaves cold source domain")
+            )
+        };
+        let mut g_lo = residual(lo)?.0;
+        let mut g_hi = match residual(hi) {
+            Ok(value) => Some(value.0),
+            Err(error) if wall < mouth.pressure && cold_trial(&error) => None,
+            Err(error) => return Err(error),
+        };
         let mut side = 0i8;
         let mut converged = false;
         for _ in 0..200 {
-            let next = if g_lo > g_hi {
-                (lo * g_hi - hi * g_lo) / (g_hi - g_lo)
-            } else {
-                lo.midpoint(hi)
+            if g_hi.is_none() && hi - lo <= 1e-12 * hi {
+                return Err(GasError::CaloricPath(
+                    "lip face continuity requires an unsupported cold inflow",
+                ));
+            }
+            let next = match g_hi {
+                Some(g_hi) if g_lo > g_hi => (lo * g_hi - hi * g_lo) / (g_hi - g_lo),
+                _ => lo.midpoint(hi),
             };
             let next = if next > lo && next < hi {
                 next
             } else {
                 lo.midpoint(hi)
             };
-            let g = residual(next)?.0;
+            let g = match residual(next) {
+                Ok(value) => value.0,
+                Err(error) if g_hi.is_none() && cold_trial(&error) => {
+                    hi = next;
+                    side = 0;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             pressure = next;
             if g == 0.0 {
                 converged = true;
@@ -527,17 +549,17 @@ fn lip_face(
             if g > 0.0 {
                 (lo, g_lo) = (next, g);
                 if side == 1 {
-                    g_hi *= 0.5;
+                    g_hi = g_hi.map(|value| value * 0.5);
                 }
                 side = 1;
             } else {
-                (hi, g_hi) = (next, g);
+                (hi, g_hi) = (next, Some(g));
                 if side == -1 {
                     g_lo *= 0.5;
                 }
                 side = -1;
             }
-            if hi - lo <= 1e-12 * hi {
+            if g_hi.is_some() && hi - lo <= 1e-12 * hi {
                 converged = true;
                 break;
             }
@@ -546,13 +568,11 @@ fn lip_face(
             return Err(GasError::Invalid("lip face continuity did not converge"));
         }
     }
-    let (_, star, signal) = residual(pressure)?;
-    let flux = if star.velocity >= 0.0 {
-        let density = pressure / (gas.gas_constant() * mouth.temperature);
-        let face = gas.primitive(gas.conserved(density, star.velocity, pressure)?, || false)?;
+    let (_, face, signal) = residual(pressure)?;
+    let flux = if face.velocity >= 0.0 {
         gas.inflow_flux(face, mouth.temperature, signal)?
     } else {
-        gas.face_flux(star, signal)?
+        gas.face_flux(face, signal)?
     };
     Ok(LipFace {
         flux,

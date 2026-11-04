@@ -91,6 +91,79 @@ pub struct DrumSpec {
     /// Where the tensions, strike point, stick and (kick) beater, pillow and microphone come
     /// from. It joins the notes of every drum built from the spec.
     pub provenance: &'static str,
+    /// Opt-in: the heads' compact dipole radiation (`HeadDipole`). None leaves the render untouched.
+    pub head_dipole: Option<HeadDipole>,
+}
+
+/// What the build needs for the heads' compact dipole radiation (`crate::RadDipole`).
+#[derive(Clone, Copy, Debug)]
+pub struct HeadDipole {
+    /// The dipole's length [m], from the piece's closed-body table (`head_dipole_from_table`).
+    pub length_m: f64,
+    /// The air modes' `f_max` [Hz] when they are attached, so the law's frequency carries their mass.
+    pub air_modes_f_max: Option<f64>,
+}
+
+/// `HeadDipole` from the piece's closed-body table.
+pub fn head_dipole_from_table(text: &str, air_modes_f_max: Option<f64>) -> Result<HeadDipole, String> {
+    let length_m = crate::closed_body::ClosedBodyTable::parse(text)?.dipole_length()?;
+    Ok(HeadDipole { length_m, air_modes_f_max })
+}
+
+/// The lower hybrid [Hz] at small amplitude, the frequency the dipole's law is taken at: both heads' (0,1) shapes,
+/// each with its own tension, film mass and piston air mass, on the cavity's stiffness, and with `air_modes_f_max` the
+/// mass of the axisymmetric air modes below it. Each mode adds `rho c^2 g^2 / (N (w_m^2 - w^2))` to the two heads'
+/// mass matrix, with `g` its overlap with the shape, `N` its volume norm, and sign `(-1)^p` on the far head.
+/// This is the membrane's law: it leaves out bending, the wires and the hit, and a port (the build refuses one).
+pub fn lower_hybrid_hz(s: &DrumSpec, densities: (f64, f64), gas: &GasState, air_modes_f_max: Option<f64>) -> Result<f64, String> {
+    use crate::radiation::{ModeShape, bessel_j};
+    let j = ModeShape::new(0, 1).zero;
+    let (a, depth) = (s.radius, s.depth);
+    let (rho, c) = (gas.density, gas.sound_speed);
+    let area = PI * a * a;
+    let shape_volume = 2.0 * PI * a * a / j;
+    let air = 8.0 * rho * a.powi(3) / 3.0 * (shape_volume / area).powi(2);
+    let cavity = rho * c * c / (area * depth) * shape_volume * shape_volume;
+    let stiffness = |hd: Head| hd.tension * (j / a).powi(2) * area;
+    let k = [stiffness(s.batter) + cavity, cavity, stiffness(s.reso) + cavity];
+    let m = [densities.0 * s.batter.thickness * area + air, densities.1 * s.reso.thickness * area + air];
+    let modes: Vec<(f64, f64, f64)> = air_modes_f_max
+        .map_or_else(Vec::new, |f_max| cylinder_air_modes(a, depth, c, f_max))
+        .into_iter()
+        .filter(|md| md.m == 0)
+        .map(|md| {
+            let g = 2.0 * PI * a * a * j * bessel_j(0, md.alpha) / (j * j - md.alpha * md.alpha);
+            (md.omega, rho * c * c * g * g / (md.lambda * area * depth), if md.p % 2 == 1 { -1.0 } else { 1.0 })
+        })
+        .collect();
+    let lowest = |w: f64| {
+        let (mut m11, mut m12, mut m22) = (m[0], 0.0, m[1]);
+        for &(wm, weight, sign) in &modes {
+            let added = weight / (wm * wm - w * w);
+            m11 += added;
+            m12 += sign * added;
+            m22 += added;
+        }
+        // det(K - lambda M) = 0 for two coordinates; the smaller root, in the form that keeps its digits.
+        let det_m = m11 * m22 - m12 * m12;
+        let det_k = k[0] * k[2] - k[1] * k[1];
+        let b = m11 * k[2] + m22 * k[0] - 2.0 * m12 * k[1];
+        (2.0 * det_k / (b + (b * b - 4.0 * det_m * det_k).sqrt())).sqrt() - w
+    };
+    let first_mode = modes.iter().map(|md| md.0).fold(f64::INFINITY, f64::min);
+    let (mut lo, mut hi) = (2.0 * PI, (2.0 * PI * 5000.0_f64).min(first_mode * (1.0 - 1e-6)));
+    if !(lowest(lo) > 0.0 && lowest(hi) < 0.0) {
+        return Err(format!("head dipole: no lower hybrid of {} between {} and {} Hz", s.name, lo / (2.0 * PI), hi / (2.0 * PI)));
+    }
+    for _ in 0..100 {
+        let mid = 0.5 * (lo + hi);
+        if lowest(mid) > 0.0 {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    Ok(0.5 * (lo + hi) / (2.0 * PI))
 }
 
 /// The presets' provenance (ruling 7486). Their head tensions, strike points and stick loss, and
@@ -256,6 +329,19 @@ fn build_drum(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState, materials: Optio
     // outside air on each head's volume motion: a baffled piston's radiation mass, 8 rho a^3 / 3
     batter.air_mass = 8.0 * gas.density * s.radius.powi(3) / 3.0;
     reso.air_mass = batter.air_mass;
+    let head_dipole = match s.head_dipole {
+        None => None,
+        Some(_) if matches!(batter_loss, FilmLoss::FittedT60) => {
+            return Err(format!("head dipole: {}'s fitted T60 already lumps its radiation in; it needs the card route", s.name));
+        }
+        Some(_) if s.port.is_some() => {
+            return Err(format!("head dipole: {} has a port, which the law's lower hybrid does not carry", s.name));
+        }
+        Some(d) => {
+            let f_ref = lower_hybrid_hz(s, (primary.2, secondary.2), &gas, d.air_modes_f_max)?;
+            Some((d, f_ref, RadDipole::compact_resistance(d.length_m, f_ref, &gas)))
+        }
+    };
     // Without the fitted T60 (which lumped it in), the heads take their exterior
     // resistance, air mass and viscous layer from the baked table, in this gas,
     // whatever the film-loss source. The viscous layer is always attached, so
@@ -263,8 +349,10 @@ fn build_drum(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState, materials: Optio
     if !matches!(batter_loss, FilmLoss::FittedT60) {
         let table = crate::radiation::RadiationTable::shipped()?;
         // (0,1) stays on the compact monopole below; the volume shapes (0,n>=2)
-        // take the baffled load less the monopole's share (each receipt says so).
-        let compact = RadDamp::monopole(vec![], f01(s.radius, s.batter, primary.2), &gas).resistance;
+        // take the baffled load less the monopole's share (each receipt says so), and less the
+        // dipole's own-head share when it is attached, or the shape would pay that part twice.
+        let compact = RadDamp::monopole(vec![], f01(s.radius, s.batter, primary.2), &gas).resistance
+            + head_dipole.map_or(0.0, |(_, _, resistance)| RadDipole::OWN_HEAD_SHARE * resistance);
         let film = materials.filter(|m| m.has_film_loss_curve());
         for (index, head, label, hd, elastic) in [
             (0, &mut batter, "batter", s.batter, primary),
@@ -311,6 +399,14 @@ fn build_drum(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState, materials: Optio
     });
     ins.cavities.push(Cavity { heads: vec![bi, ri], volume: PI * s.radius * s.radius * s.depth, port });
     ins.rads.push(RadDamp::monopole(vec![bi, ri], f01(s.radius, s.batter, primary.2), &gas));
+    if let Some((d, f_ref, resistance)) = head_dipole {
+        ins.rad_dipole = Some(RadDipole { heads: (bi, ri), resistance, radiated_j: 0.0 });
+        notes.push(format!(
+            "head dipole (opt-in, an estimate): the heads' same-way motion radiates R_d Q^2, Q half the difference of their outward volume velocities, R_d = rho w^4 D^2 / (12 pi c^3) = {resistance:.4e} kg/(m^4 s). D {:.4} m from the closed-body table's low end; w at the membrane-law lower hybrid {f_ref:.2} Hz ({}), fixed, not the rendered line. Each head's own share R_d / 4 comes off the volume shapes' baffled load. Free-field law, no floor",
+            d.length_m,
+            d.air_modes_f_max.map_or_else(|| "no air-mode mass".to_string(), |f_max| format!("with the axisymmetric air modes below {f_max} Hz")),
+        ));
+    }
     let mut settle = 0.0;
     if let Some(wr) = s.wires {
         let (mass_per_m, tension, preload_per_m, len) = (wr.mass_per_m, wr.tension, wr.preload_per_m, wr.length);
@@ -432,6 +528,7 @@ pub fn snare() -> DrumSpec {
         mic: [0.35, 0.25, 0.9], // an overhead about 1 m away, 25 degrees off the drum's axis
         floor: Some(floor_z(-0.65)),
         provenance: FITTED_DRUM_RECEIPT,
+        head_dipole: None,
     }
 }
 
@@ -463,6 +560,7 @@ pub fn kick() -> DrumSpec {
         mic: [0.0, 0.221 + 1.0, 0.1],
         floor: Some(floor_y(-(0.221 + KICK_HOOP_RISE_M))),
         provenance: FITTED_DRUM_RECEIPT,
+        head_dipole: None,
     }
 }
 
@@ -498,6 +596,7 @@ pub fn tom(size_in: f64) -> DrumSpec {
         mic: [0.35, 0.25, 0.9],
         floor: Some(floor_z(if size_in <= 12.5 { -0.75 } else { -0.55 })),
         provenance: FITTED_DRUM_RECEIPT,
+        head_dipole: None,
     }
 }
 
@@ -524,22 +623,28 @@ struct CardDrum {
 // lowest mode at the pitch measured on the reference stroke. The pitch is the lowest spectral peak
 // within 20 dB of the strongest, 30-400 Hz (Hann, 2^19 points), in the small-amplitude tail of the
 // Salamander overhead strokes the kit is compared with, where two dynamics agree (mail 7506):
-// kick 40.6 Hz (kick_OH_F_1, _P_3, 0.3-0.6 s), snare 134.4 Hz (snare2OFF_OH_F_1, _P_2,
-// 0.6-1.0 s), rack tom 133.9 Hz (hiTom_OH_F_4, _P_3, 1.0-1.6 s), floor tom 60.4 Hz
-// (loTom_OH_FF_5, _MP_3, 1.0-1.6 s). The card drum's mode is read the same way from a 0.1 m/s
-// stroke (the Berger stretch negligible), 0.3-1.0 s after onset; both heads keep 88cccbb78's
+// kick 40.6 Hz (kick_OH_F_1, _P_3, 0.3-0.6 s), rack tom 133.9 Hz (hiTom_OH_F_4, _P_3, 1.0-1.6 s),
+// floor tom 60.4 Hz (loTom_OH_FF_5, _MP_3, 1.0-1.6 s). The snare is the exception: that read gives
+// 134.3 Hz at about 30 dB/s, the same with the wires on or off, which is the rack tom's own pitch
+// and rate (133.85-134.22 Hz, 29.8-30.1 dB/s). It is probably the rack tom ringing; that is
+// inferred, since no stroke exists with the tom muted. The target is the snare's own line, 150.4 Hz
+// at 78-109 dB/s (snare2OFF_OH_F_1, _P_2, 0.10-0.50 s). The card drum's mode is read as above from a
+// 0.1 m/s stroke (the Berger stretch negligible), 0.3-1.0 s after onset; both heads keep 88cccbb78's
 // ratio. Found by scaling both preset heads together (f proportional to the square root of the
-// tension) until that mode was within 0.3 Hz of the target, rounding the batter to four figures
-// and setting the resonant head at 88cccbb78's ratio to it; the snare, 0.37 Hz high at that ratio,
-// took one more step. These drums' own modes: snare 134.40, rack tom 133.85, floor tom 60.42
-// and kick 40.56 Hz (trj, 2026-10-26). The early pitch of a hard stroke is up to 15 Hz sharper
-// (the stretch); nothing grades balance or decay.
+// tension) until that mode was within 0.3 Hz of the target, rounding the batter to four figures and
+// setting the resonant head at 88cccbb78's ratio to it; the snare came from three rendered rungs,
+// 148.76, 150.60 and 152.42 Hz at 1608, 1651 and 1694 N/m. The rack tom came from two rendered rungs
+// and one secant step, with the air modes and the head dipole on: 121.84 and 135.04 Hz at 1264 and
+// 1554.7 N/m, then 133.97 Hz at 1530 N/m, against 133.95 Hz on its F and P strokes at 0.80-1.20 s.
+// These drums' own modes: snare 150.40 (rendered at 1646), rack tom 133.97 (rendered at 1530), floor
+// tom 60.42 and kick 40.56 Hz (trj, 2026-10-26). The early pitch of a hard stroke is up to 15 Hz
+// sharper (the stretch); nothing grades balance or decay.
 const CARD_DRUMS: [CardDrum; 4] = [
     CardDrum {
         name: "snare 14x6",
-        tensions: (1072.0, 1072.0 * 2080.0 / 1330.0),
+        tensions: (1646.0, 1646.0 * 2080.0 / 1330.0),
         strike_xy: (0.06, 0.02),
-        provenance: "drum (card route, ruling 7486): tensions tuned to the recording's pitch, lowest mode 134.4 Hz (Salamander snare2OFF_OH_F_1/_P_2, late tail); strike point (60, 20) mm, a declared playing-position estimate (88cccbb78); stick Hunt-Crossley loss 0.2 s/m and the wires' tension 2.0 N, preload 0.25 N/m and contact loss 2.0 s/m are declared estimates (88cccbb78); the wires' contact stiffness is computed from the cards (Hertz, elliptical, helix; ruling 7520)",
+        provenance: "drum (card route, ruling 7486): tensions tuned to the recording's pitch, lowest mode 150.4 Hz (Salamander snare2OFF_OH_F_1/_P_2, the snare's own line, 0.10-0.50 s; the late-tail 134.3 Hz line is probably the rack tom ringing, inferred, since no stroke exists with the tom muted); strike point (60, 20) mm, a declared playing-position estimate (88cccbb78); stick Hunt-Crossley loss 0.2 s/m and the wires' tension 2.0 N, preload 0.25 N/m and contact loss 2.0 s/m are declared estimates (88cccbb78); the wires' contact stiffness is computed from the cards (Hertz, elliptical, helix; ruling 7520)",
     },
     CardDrum {
         name: "kick 18x18",
@@ -549,9 +654,9 @@ const CARD_DRUMS: [CardDrum; 4] = [
     },
     CardDrum {
         name: "rack tom 12x7",
-        tensions: (1264.0, 1264.0 * 950.0 / 1270.0),
+        tensions: (1530.0, 1530.0 * 950.0 / 1270.0),
         strike_xy: (0.35 * 0.146, 0.0),
-        provenance: "drum (card route, ruling 7486): tensions tuned to the recording's pitch, lowest mode 133.9 Hz (Salamander hiTom_OH_F_4/_P_3, late tail); strike point 0.35 R, a declared playing-position estimate (88cccbb78); stick Hunt-Crossley loss 0.2 s/m, a declared estimate (88cccbb78)",
+        provenance: "drum (card route, ruling 7486): tensions tuned to the recording's pitch, lowest mode 133.95 Hz with the air modes and head dipole on (Salamander hiTom_OH F and P strokes, 0.80-1.20 s); strike point 0.35 R, a declared playing-position estimate (88cccbb78); stick Hunt-Crossley loss 0.2 s/m, a declared estimate (88cccbb78)",
     },
     CardDrum {
         name: "floor tom 14x14",
@@ -2527,5 +2632,217 @@ mod cavity_wall_loss_tests {
         assert!(AirLayers::new(k, &[1e7], &[wt2(10.0)], &[1.0], &[1.0]).is_err(), "a mode below the band was not refused");
         assert!(AirLayers::new(k, &[1e7], &[wt2(1000.0)], &[-1.0], &[1.0]).is_err(), "a negative share was not refused");
         assert!(AirLayers::new(k, &[1e7, 1e7], &[wt2(1000.0)], &[1.0], &[1.0]).is_err(), "mismatched lengths were not refused");
+    }
+}
+
+#[cfg(test)]
+mod head_dipole_tests {
+    use super::*;
+    use crate::radiation::{ModeShape, RadiationTable};
+
+    const RATE: f64 = 48_000.0;
+    const RADIUS: f64 = 0.06;
+    const DEPTH: f64 = 0.05;
+    const GRID: f64 = 0.006;
+
+    fn k() -> f64 {
+        1.0 / RATE
+    }
+
+    /// Two identical heads of the card's build (Berger stretch, no surface loss) on a small drum, so these run in seconds.
+    fn head(name: &str) -> Body {
+        head_body(name, RADIUS, GRID, tom(12.0).batter, None, MYLAR, FilmLoss::NoSurfaceLoss).unwrap()
+    }
+
+    /// Start a head at rest in the (0,1) shape, `outward` metres per unit of the shape, outward positive.
+    fn start(b: &mut Body, outward: f64) {
+        let shape = ModeShape::new(0, 1);
+        for i in 0..b.n {
+            let [x, y] = b.xy[i];
+            b.w[i] = outward * shape.value(x / RADIUS, y / RADIUS, false);
+            b.wp[i] = b.w[i];
+        }
+        b.sync();
+    }
+
+    fn volume(b: &Body, x: &[f64]) -> f64 {
+        x.iter().sum::<f64>() * b.h * b.h
+    }
+
+    /// A head's outward volume velocity at the half step.
+    fn rate(b: &Body) -> f64 {
+        (volume(b, &b.w) - volume(b, &b.wp)) / k()
+    }
+
+    fn pair(a_outward: f64, b_outward: f64) -> Instrument {
+        let mut ins = Instrument::with_gas(RATE, standard_gas()).unwrap();
+        for (name, outward) in [("a", a_outward), ("b", b_outward)] {
+            let mut b = head(name);
+            start(&mut b, outward);
+            ins.add(b);
+        }
+        ins
+    }
+
+    /// The test MB 1067 asks for: the rendered heads lose exactly the energy the term says it removes. Everything a card
+    /// head carries that stores or takes energy is on: the Berger stretch, piston air mass, cavity, baffled load, monopole.
+    #[test]
+    fn the_rendered_heads_lose_exactly_the_energy_the_dipole_reports() {
+        let gas = standard_gas();
+        let table = RadiationTable::shipped().unwrap();
+        let hd = tom(12.0).batter;
+        let spec = DrumSpec { radius: RADIUS, depth: DEPTH, batter: hd, reso: hd, ..tom(12.0) };
+        let f_ref = lower_hybrid_hz(&spec, (MYLAR.2, MYLAR.2), &gas, None).unwrap();
+        let r_d = RadDipole::compact_resistance(0.15, f_ref, &gas);
+        let r_m = RadDamp::monopole(vec![], f01(RADIUS, hd, MYLAR.2), &gas).resistance;
+        let coincidence_hz = gas.sound_speed.powi(2) / (2.0 * PI * hd.thickness)
+            * (12.0 * MYLAR.2 * (1.0 - MYLAR.1 * MYLAR.1) / MYLAR.0).sqrt();
+        let mut ins = pair(1.0e-4, -1.0e-4);
+        for b in ins.bodies.iter_mut() {
+            b.air_mass = 8.0 * gas.density * RADIUS.powi(3) / 3.0;
+            b.attach_head_radiation_with_viscous(&table, RADIUS, &gas, Some(r_m + RadDipole::OWN_HEAD_SHARE * r_d), coincidence_hz).unwrap();
+        }
+        let cavity_volume = PI * RADIUS * RADIUS * DEPTH;
+        ins.cavities.push(Cavity { heads: vec![0, 1], volume: cavity_volume, port: None });
+        ins.rads.push(RadDamp { bodies: vec![0, 1], resistance: r_m });
+        ins.rad_dipole = Some(RadDipole { heads: (0, 1), resistance: r_d, radiated_j: 0.0 });
+        assert!(ins.stability().0 < 0.5);
+        let net = |ins: &Instrument| rate(&ins.bodies[0]) + rate(&ins.bodies[1]);
+        let difference = |ins: &Instrument| 0.5 * (rate(&ins.bodies[0]) - rate(&ins.bodies[1]));
+        // Stored energy at the half step, less the backward-velocity correction of the two radiation terms.
+        let stored = |ins: &Instrument| -> f64 {
+            let heads: f64 = ins.bodies.iter().map(|b| b.discrete_energy(k()) + 0.5 * b.air_mass / (b.area * b.area) * rate(b).powi(2)).sum();
+            let (now, before): (f64, f64) = (ins.bodies.iter().map(|b| volume(b, &b.w)).sum(), ins.bodies.iter().map(|b| volume(b, &b.wp)).sum());
+            let air = 0.5 * gas.density * gas.sound_speed.powi(2) / cavity_volume * now * before;
+            heads + air - 0.25 * k() * (r_m * net(ins).powi(2) + r_d * difference(ins).powi(2))
+        };
+        let e0 = stored(&ins);
+        let (mut net_before, mut difference_before) = (net(&ins), difference(&ins));
+        let (mut monopole_lost, mut dipole_lost) = (0.0, 0.0);
+        for _ in 0..2000 {
+            ins.step(&mut []);
+            let (n, d) = (net(&ins), difference(&ins));
+            monopole_lost += k() * r_m * (0.5 * (n + net_before)).powi(2);
+            dipole_lost += k() * r_d * (0.5 * (d + difference_before)).powi(2);
+            (net_before, difference_before) = (n, d);
+        }
+        let fell = e0 - stored(&ins);
+        let load: f64 = ins.bodies.iter().map(Body::head_radiated_j).sum();
+        let reported = ins.rad_dipole.as_ref().unwrap().radiated_j;
+        assert!((reported / dipole_lost - 1.0).abs() < 1e-12, "the term reports {reported} J, its own definition gives {dipole_lost} J");
+        assert!(reported > 1e-4 * e0, "a vacuous run: the dipole took {reported} J of {e0} J");
+        let residual = fell - (monopole_lost + load + reported);
+        assert!(residual.abs() < 1e-9 * e0, "the heads lost {fell} J; monopole {monopole_lost}, load {load}, dipole {reported}");
+        // Planted negative: a term that took a quarter more than it reports would not close.
+        assert!((fell - (monopole_lost + load + 0.8 * reported)).abs() > 1e4 * residual.abs());
+        eprintln!("energy {e0:.4e} J, fell {fell:.4e} J: monopole {monopole_lost:.3e}, load {load:.3e}, dipole {reported:.3e}, residual {residual:.1e}");
+    }
+
+    /// Same-way motion under a dipole of `R_d = 4 R` is, for each head, breathing motion under a monopole of `R`: bit for bit.
+    /// Each kind of radiation pays nothing on the other's motion.
+    #[test]
+    fn the_dipole_pays_on_same_way_motion_and_the_monopole_on_breathing_motion() {
+        let r = 3.0e3;
+        let run = |a: f64, b: f64, monopole: Option<f64>, dipole: Option<f64>| {
+            let mut ins = pair(a, b);
+            if let Some(resistance) = monopole {
+                ins.rads.push(RadDamp { bodies: vec![0, 1], resistance });
+            }
+            ins.rad_dipole = dipole.map(|resistance| RadDipole { heads: (0, 1), resistance, radiated_j: 0.0 });
+            for _ in 0..1500 {
+                ins.step(&mut []);
+            }
+            ins
+        };
+        let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        let amp = 1.0e-4;
+        let bare_same = run(amp, -amp, None, None);
+        let bare_breathing = run(amp, amp, None, None);
+        let dipole_same = run(amp, -amp, None, Some(4.0 * r));
+        let monopole_breathing = run(amp, amp, Some(r), None);
+        assert_ne!(bits(&dipole_same.bodies[0].w), bits(&bare_same.bodies[0].w), "the dipole did nothing to same-way motion");
+        assert_eq!(bits(&dipole_same.bodies[0].w), bits(&monopole_breathing.bodies[0].w));
+        assert!(dipole_same.rad_dipole.as_ref().unwrap().radiated_j > 0.0);
+        let dipole_breathing = run(amp, amp, None, Some(4.0 * r));
+        assert_eq!(bits(&dipole_breathing.bodies[0].w), bits(&bare_breathing.bodies[0].w), "breathing motion paid the dipole");
+        assert_eq!(dipole_breathing.rad_dipole.as_ref().unwrap().radiated_j, 0.0);
+        let monopole_same = run(amp, -amp, Some(r), None);
+        assert_eq!(bits(&monopole_same.bodies[0].w), bits(&bare_same.bodies[0].w), "same-way motion paid the monopole");
+    }
+
+    /// The grid's own lowest mode: power iteration on `8 I - L`, L the plate's graph Laplacian, from the sampled Bessel shape.
+    /// The stepped circle's mode is what decays, and at this grid its `V^2 / M` is 4.4 % above the sampled shape's.
+    fn grid_mode(b: &Body) -> Vec<f64> {
+        let shape = ModeShape::new(0, 1);
+        let node = |x: f64| (x / b.h).round() as i64;
+        let index: std::collections::BTreeMap<(i64, i64), usize> = b.xy.iter().enumerate().map(|(n, &[x, y])| ((node(x), node(y)), n)).collect();
+        let mut phi: Vec<f64> = b.xy.iter().map(|&[x, y]| shape.value(x / RADIUS, y / RADIUS, false)).collect();
+        for _ in 0..4000 {
+            let mut next = vec![0.0; b.n];
+            for (&(i, j), &a) in &index {
+                next[a] = 4.0 * phi[a] + [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().filter_map(|&(di, dj)| index.get(&(i + di, j + dj))).map(|&c| phi[c]).sum::<f64>();
+            }
+            let norm = next.iter().map(|x| x * x).sum::<f64>().sqrt();
+            phi = next.iter().map(|x| x / norm).collect();
+        }
+        phi
+    }
+
+    /// Same-way motion's amplitude falls at `sigma = R_d V^2 / (4 M)`: `Q = V qdot` and each head takes half the force.
+    #[test]
+    fn same_way_motion_decays_at_the_laws_rate() {
+        let sample = head("sample");
+        let phi = grid_mode(&sample);
+        let shape_volume = volume(&sample, &phi);
+        let modal_mass: f64 = phi.iter().zip(&sample.mass).map(|(p, m)| m * p * p).sum();
+        let sigma = 25.0;
+        let mut ins = pair(0.0, 0.0);
+        let amplitude = 1.0e-6 / phi.iter().fold(0.0_f64, |top, p| top.max(p.abs()));
+        for (head, sign) in [(0, 1.0), (1, -1.0)] {
+            let b = &mut ins.bodies[head];
+            for i in 0..b.n {
+                b.w[i] = sign * amplitude * phi[i];
+                b.wp[i] = b.w[i];
+            }
+            b.sync();
+        }
+        ins.rad_dipole = Some(RadDipole { heads: (0, 1), resistance: 4.0 * modal_mass * sigma / (shape_volume * shape_volume), radiated_j: 0.0 });
+        let mut peaks = vec![];
+        let (mut before, mut now) = (f64::NAN, f64::NAN);
+        for step in 0..(0.12 * RATE) as usize {
+            ins.step(&mut []);
+            let next = volume(&ins.bodies[0], &ins.bodies[0].w).abs();
+            if before < now && now >= next {
+                peaks.push((step as f64 * k(), now.ln()));
+            }
+            (before, now) = (now, next);
+        }
+        let n = peaks.len() as f64;
+        let (mt, my) = (peaks.iter().map(|p| p.0).sum::<f64>() / n, peaks.iter().map(|p| p.1).sum::<f64>() / n);
+        let slope = peaks.iter().map(|p| (p.0 - mt) * (p.1 - my)).sum::<f64>() / peaks.iter().map(|p| (p.0 - mt).powi(2)).sum::<f64>();
+        eprintln!("same-way decay {} 1/s, the law's {sigma}", -slope);
+        assert!((-slope / sigma - 1.0).abs() < 0.01, "decay {} vs the law's {sigma}", -slope);
+    }
+
+    /// Against an independent script's two-coordinate solve (brentq, numpy eigenvalues), both with and without the air modes' mass.
+    #[test]
+    fn the_lower_hybrid_matches_its_independent_solve() {
+        let gas = standard_gas();
+        let card = card_drum(&snare_wires_off()).unwrap();
+        let film = (MYLAR.2, MYLAR.2);
+        let read = |s: &DrumSpec, f_max| lower_hybrid_hz(s, film, &gas, f_max).unwrap();
+        assert!((read(&card, None) - 166.2546).abs() < 2e-3, "{}", read(&card, None));
+        assert!((read(&card, Some(8000.0)) - 152.3994).abs() < 2e-3, "{}", read(&card, Some(8000.0)));
+        let tuned = retune(card, 1.5);
+        assert!((read(&tuned, Some(8000.0)) - 183.5781).abs() < 2e-3, "{}", read(&tuned, Some(8000.0)));
+    }
+
+    #[test]
+    fn a_fitted_preset_refuses_the_dipole() {
+        let mut spec = tom(12.0);
+        spec.grid *= 6.0;
+        spec.head_dipole = Some(HeadDipole { length_m: 0.37, air_modes_f_max: None });
+        let error = drum(&spec, &[]).err().expect("the preset's fitted T60 already lumps its radiation in");
+        assert!(error.contains("fitted T60"), "{error}");
     }
 }

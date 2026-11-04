@@ -20,6 +20,8 @@
 
 /// Event-resolved heat transfer for explicitly prescribed separation histories.
 pub mod prescribed;
+/// Source-preserving thermal weakening of the existing mechanical bonds.
+pub mod temperature;
 
 use std::collections::BTreeMap;
 use fs_exec::Cx;

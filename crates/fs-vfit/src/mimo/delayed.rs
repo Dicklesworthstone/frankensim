@@ -9,7 +9,7 @@
 //! this runtime does not turn a transcendental delay into a Hamiltonian proof.
 
 use super::{DelayedMimoModel, MimoPassivityReport, check_delayed_mimo_passivity,
-    hermitian_part, zoh_mean_phi};
+    hermitian_part, zoh_mean_phi, zoh_pole_denominator};
 use super::load::{MimoLoadError, MimoLoadLimits, validate_source};
 use crate::model::PoleTerm;
 use crate::passivity::CertificateClass;
@@ -311,14 +311,23 @@ impl PreparedDelayedMimoLoad {
         let z = C64::new(c, s);
         let mut response: Vec<C64> = self.new_direct.iter().zip(&self.old_direct)
             .map(|(new, old)| C64::from_re(*new) + z.conj().scale(*old)).collect();
-        for term in &self.terms {
+        for (term, source_pole) in self.terms.iter().zip(&self.source.model.poles) {
+            let pole = match source_pole {
+                PoleTerm::Real { pole, .. } => C64::from_re(*pole),
+                PoleTerm::Pair { pole, .. } => *pole,
+            };
+            let denominator = zoh_pole_denominator(pole, omega, self.time_step_s);
+            let conjugate_denominator = if term.pair {
+                zoh_pole_denominator(pole.conj(), omega, self.time_step_s)
+            } else { C64::ONE };
             for (j, entry) in response.iter_mut().enumerate() {
                 let first = term.mean_residues[j]
-                    * (term.new_gains[j] + z.conj() * term.old_gains[j]) / (z - term.decay);
+                    * (term.new_gains[j] + z.conj() * term.old_gains[j]) * z.conj()
+                    / denominator;
                 *entry = *entry + if term.pair {
                     first + term.mean_residues[j].conj()
                         * (term.new_gains[j].conj() + z.conj() * term.old_gains[j].conj())
-                        / (z - term.decay.conj())
+                        * z.conj() / conjugate_denominator
                 } else { first };
             }
         }

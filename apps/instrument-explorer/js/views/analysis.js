@@ -348,7 +348,8 @@ export async function render(main, r) {
     h('p.lede', null, real
       ? ['The simulation and a real recording, measured the same way and drawn on one time axis. Press play: every lane, the maps and the note panel follow the playhead.',
         h('span.kbdonly', null, ' Keys 1 and 2 switch what you hear without losing your place.')]
-      : 'The simulation measured every 10 ms. There is no real recording of this passage to set beside it.'));
+      : 'The simulation measured every 10 ms. There is no real recording of this passage to set beside it.'),
+    p.how ? h('p.anahow', null, h('b', null, 'How it was made. '), p.how) : null);
 
   const tileList = an ? tiles(p, an) : [];
   // two even rows on a wide screen (9 tiles: 5 + 4), rather than one full row and a stray pair

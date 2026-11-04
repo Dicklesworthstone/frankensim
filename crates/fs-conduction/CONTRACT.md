@@ -1,5 +1,92 @@
 # CONTRACT: fs-conduction
 
+## Heat-imbalance solves for linear transient conduction
+
+The theta march solves `(C + theta*dt*K) delta_T = dt*(b - K*T_old)` with zero
+increments on the already imposed Dirichlet vertices. This is the original
+theta discretization, including heterogeneous capacity, conductivity and Robin
+terms. Its relative Krylov tolerance is measured against the actual heat
+imbalance, so an absolute-temperature storage term cannot hide a weak heat pulse.
+The constant reduced operator and preconditioner are retained across steps.
+Both the primal and its unchanged discrete adjoint use the shared scaled,
+cancellable CG driver with a recomputed residual and at most two defect repairs
+inside the original iteration budget. The reported residual concerns the
+returned physical increment; it is not a spatial/time error bound or a bound
+on rounding when that increment is added to an absolute temperature.
+
+## Complete steady contact and reflected-radiation adjoints
+
+`ContactSteadyLinearization::pullback_with_robin_and_flux_feedback_and_resistance_controls`
+composes the existing complete bulk/contact tangent with the boundary owner's
+mean-Robin and independent mean-flux factors. The original mean-only entry
+delegates to the same implementation. No new primal, radiation solver, time
+factor or frozen-contact response is introduced.
+
+`EnclosureRadiationLinearization` supplies those factors for closed/open gray
+enclosures on original uniform Robin and prescribed-flux patches. Rebinding its
+fresh physical boundary to `linearize_steady_endpoint` rechecks the unchanged
+field against the original residual and heat tolerances. Both contact-temperature
+partials, bulk K'(T), reflected exchange and any original natural/air feedback
+participate in one true transposed solve. Whole resistance-law controls contract
+that same dual; the radiosity owner remaps original convection, emissivity and
+the shared open-bath temperature controls.
+
+The existing source-slope, cancellation, trace-element and feedback-memory gates
+remain in force. `tests/temperature_contact/radiation/enclosure/adjoint.rs`
+compares contact, source, emissivity and bath derivatives with independent
+physical re-solves on mixed Robin/flux surfaces with nonlinear conductivity.
+This is a local discrete steady derivative, with no pointwise/ambient contact
+radiation adjoint, trajectory derivative or continuum error certificate.
+
+## Capacity storage with open reflected radiation and live contacts
+
+The existing backward-Euler enclosure owner now accepts `OpenDiffuseEnclosure`
+alongside closed exchange. `advance_prescribed_with_open_enclosure_radiation`
+retains ordinary capacity responses; the matching
+`TemperatureContacts::advance_capacity_with_open_enclosure_radiation` and
+`advance_capacity_newton_with_open_enclosure_radiation` entries retain the
+original source-surface fixed point and complete bulk/contact Newton responses.
+Every trial uses the same old field and admitted step. Geometry and the prepared
+radiosity operator stay fixed; no additional time integrator or material law is
+introduced.
+
+Fresh contact and radiative loads enter the complete nodal joule residual,
+including prescribed-temperature storage reactions. Only physical-surface watts
+enter the solid's outward radiation account; the independently evaluated black
+reservoir closes the radiosity system without cancelling the solid's external
+heat. Authored Neumann heat and original convection remain distinct, so only
+convection can heat transported air. Applied patch loads contain only physical
+surfaces, while fresh radiosity retains the separate reservoir row.
+
+The original surface, residual, energy and work gates remain in force. All
+nested responses, Newton updates, backtracks and Krylov iterations are counted.
+Cancellation, source refusal or exhausted work publishes no accepted endpoint.
+Focused regressions in `tests/temperature_contact/radiation.rs` use independent
+two-surface gray exchange and original nodal assembly to check both heat signs,
+source-curve/surface agreement, prescribed reactions, work and rollback. Native
+execution remains pending; syntax checks establish no runtime pass. This adds
+no open-capacity radiation adjoint, pointwise model or temporal-error certificate.
+
+## Live source contacts with open radiative cavities
+
+`TemperatureContacts::solve_steady_newton_with_open_gray_diffuse_enclosure`
+and `solve_steady_with_open_gray_diffuse_enclosure` compose the original complete
+contact Newton or source-surface Picard response with `OpenDiffuseEnclosure`.
+Closed and open exchange share one contact/radiosity iteration and unchanged-field
+endpoint audit. The pinned source laws, heterogeneous conductivity, physical
+traces, original thermal anchor and bounded response counts remain authoritative.
+
+The black environment has no solid degree of freedom. Fresh physical-surface
+loads enter free residuals and prescribed-temperature reactions; only those
+surface heat rows enter the solid energy balance. The independently evaluated
+reservoir row closes the radiation system and never cancels the solid's external
+heat or enters transported air. Original convection stays separate. Acceptance
+requires the original contact residual, heat closure, patch mismatch and radiosity
+watt gates; cancellation and source-domain refusal publish no candidate. This
+steady patch-mean producer adds no pointwise model or continuum-error certificate.
+Capacity open-cavity storage and complete steady contact/radiosity derivatives
+are composed by the shared owners described above.
+
 ## Nonlinear generated-layer temperature derivatives
 
 `NonlinearGeneratedLayeredWallSolution::temperature_profile` borrows one
@@ -1144,6 +1231,25 @@ thermomechanical equilibrium. The prescribed event path retains its existing
 rate-independent admission. Every physical reversal requires its own supplied
 segment: an undamaged closed loop has no retained point-history signature, so
 neither its existence nor its viscous work can be recovered from endpoints.
+
+`FractureCooling::transfer_temperature` explicitly connects the actual caloric
+cell temperatures to source-defined common- or mixed-mode bond weakening. Each
+complete update retains the original ordered interface card, selected claims,
+nonthermal coordinates, area, jump and irreversible history. The successor's
+temperature must equal the explicitly weighted two-cell temperature returned by
+`interface_temperature_k`; a stale or substituted source refuses. The original
+cohesive temperature law supplies fixed-jump parameter work, storage change and
+new damage loss, integrated on original area with a declared joule gate.
+Thermal failure immediately opens the existing thermal contact or selects its
+separately declared closed-failed conductance. Cooling cannot heal or rebond it.
+Both mechanical and thermal clocks must already describe the same endpoint, so
+an unfinished timed mechanical segment cannot be replayed under changed laws.
+No heat is inferred from parameter work or damage release, and no dashpot work
+occurs during the zero-duration transfer. Four focused G1/G3/G4 test groups cover
+heating/cooling through common, mixed and viscous sources, partial mode history,
+actual postfailure heat exchange, source/temperature refusals and cancellation.
+This is staggered endpoint coupling, not within-step fracture localization,
+resolved interfacial temperature, a cure law or a complete thermodynamic closure.
 
 > Beads `frankensim-extreal-program-f85xj.5.1`, `.5.3`, `.5.4`, and `.5.6`. The
 > cooling vertical's steady heat-conduction solve, matching-P1 contact rung,

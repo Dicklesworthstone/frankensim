@@ -1588,6 +1588,8 @@ pub fn check_delayed_mimo_passivity(
 pub struct MimoZoh {
     ports: usize,
     time_step_s: f64,
+    /// Original Laplace poles retain decay below the rounded unit-circle radius.
+    poles: Vec<C64>,
     /// Per term: `exp(p T)`, `(exp(p T) - 1)/p`, residue matrix, pair flag.
     terms: Vec<(C64, C64, Vec<C64>, bool)>,
     /// phi1(p T) maps each original pole state to its exact step mean.
@@ -1620,6 +1622,22 @@ pub(crate) fn zoh_mean_phi(z: C64, exponential: C64) -> (C64, C64) {
     }
 }
 
+// 1 - exp((p - i*omega)*dt). Factor z - exp(p*dt) by z before
+// subtracting: expm1 retains small physical decay, and the half-angle identity
+// retains the real part near resonance. Subtract frequencies before scaling
+// so identical source/probe frequencies have exactly zero detuning.
+// Shared by scalar, multiport and retarded held-input resonance observations.
+pub(crate) fn zoh_pole_denominator(pole: C64, omega: f64, dt: f64) -> C64 {
+    let phase = (pole.im - omega) * dt;
+    let exponent = pole.re * dt;
+    let decay = det::exp(exponent);
+    let half_sine = det::sin(0.5 * phase);
+    C64::new(
+        -det::expm1(exponent) + 2.0 * decay * half_sine * half_sine,
+        -decay * det::sin(phase),
+    )
+}
+
 impl MimoModel {
     /// Exact ZOH stepping at `time_step_s`.
     ///
@@ -1631,6 +1649,7 @@ impl MimoModel {
             return Err(PassivityError::Unstable);
         }
         let mut terms = Vec::with_capacity(self.poles.len());
+        let mut poles = Vec::with_capacity(self.poles.len());
         let mut mean_state_gains = Vec::with_capacity(self.poles.len());
         let mut mean_d = self.d.clone();
         for (term, r) in self.poles.iter().zip(&self.residues) {
@@ -1638,6 +1657,7 @@ impl MimoModel {
                 PoleTerm::Real { pole, .. } => (C64::from_re(pole), false),
                 PoleTerm::Pair { pole, .. } => (pole, true),
             };
+            poles.push(pole);
             let x = pole.scale(time_step_s);
             let (s, c) = det::sin_cos(x.im);
             let decay = C64::new(c, s).scale(det::exp(x.re));
@@ -1659,6 +1679,7 @@ impl MimoModel {
             time_step_s,
             state: vec![C64::ZERO; terms.len() * n],
             candidate_state: vec![C64::ZERO; terms.len() * n],
+            poles,
             terms,
             mean_state_gains,
             mean_d,
@@ -1673,6 +1694,9 @@ impl MimoZoh {
     /// Actual sampled transfer matrix at angular frequency `omega` [rad/s].
     /// This includes the held-input state update and start-of-interval output;
     /// it is not the continuous rational response relabeled as a digital filter.
+    /// Original Laplace decay is retained in the analytical discrete transfer
+    /// even when a stored exponential radius rounds to one. This does not imply
+    /// that arbitrarily long time stepping escapes floating-point accumulation.
     #[must_use]
     pub fn eval_discrete_iw(&self, omega: f64) -> Vec<C64> {
         self.eval_output_discrete_iw(omega, false)
@@ -1696,14 +1720,19 @@ impl MimoZoh {
             .zip(&self.e)
             .map(|(&d, &e)| C64::from_re(d) + (C64::ONE - z.conj()).scale(e / self.time_step_s))
             .collect();
-        for (k, (decay, gain, r, pair)) in self.terms.iter().enumerate() {
+        for (k, (_, gain, r, pair)) in self.terms.iter().enumerate() {
             let weight = if mean {
                 self.mean_state_gains[k]
             } else {
                 C64::ONE
             };
-            let first = weight * *gain * (z - *decay).recip();
-            let second = weight.conj() * gain.conj() * (z - decay.conj()).recip();
+            let pole = self.poles[k];
+            let first = weight * *gain * z.conj()
+                / zoh_pole_denominator(pole, omega, self.time_step_s);
+            let second = if *pair {
+                weight.conj() * gain.conj() * z.conj()
+                    / zoh_pole_denominator(pole.conj(), omega, self.time_step_s)
+            } else { C64::ZERO };
             for (y, r) in y.iter_mut().zip(r) {
                 *y = *y
                     + if *pair {

@@ -292,6 +292,17 @@ differentiable lift). Pure Rust throughout.
   general certified minimum separation. Analytic regressions cover submicron
   absorption, distant camera origins, oblique Snell/Fresnel power, metre
   scaling and rigid placement.
+
+  The same reconstructed mesh witnesses and bounded normal offsets also
+  govern opaque reflection: diffuse, GGX, smooth and brushed conductor paths,
+  their direct-light visibility, bidirectional vertices, and finite thermal
+  or volume-source connections. Static, rigid and animated mesh placement
+  retain their original nearest-hit ray parameters. A numerical launch must
+  neither skip a nearby reflector/emitter nor jump over an occluder. Tracer
+  bit semantics v5 records this change; focused analytical controls cover
+  both sides of submicrometre mirror/diffuse gaps, instancing, translated
+  scenes and environment-light occlusion. Calibrated photometric probes
+  retain their authored geometric resolution limit.
 - `gradient_index` module (feature `tracer`): allocation-free adaptive
   Dormand--Prince 5(4) propagation of the geometric-optics ray equation
   `d(n t)/ds = grad(n)`. An immutable field supplies local phase index,
@@ -7243,3 +7254,9 @@ Inside each original planar face collar, a temporary fixed-plane-coordinate repr
 The prepared mesh and material must retain the original mesh/nodal-buffer snapshot identity and one continuous material phase law. Each stage requires the declared transverse approach bound. A roundoff-unresolved actual endpoint on a genuine temperature-gradient-jump plane refuses the derivative. Native exterior and duplicated contact-node faces still terminate. Compensated distance accumulation, whole-path step/face/query budgets and cancellation remain explicit. Local adaptive ODE/variation estimates are not a global accuracy certificate; this adds no discontinuous-index material interface, curved-face continuation, moving thermoelastic mesh or global geometry/point-location proof.
 
 Forty-two focused actual-source tests pass: seven new bundle controls, eleven retained thermal/transient controls and twenty-four original native bundle regressions. They cover many-cell footprints in both orientations, independent exact piecewise-affine ray references, equal-arc endpoints on both sides inside the collar, nonlinear material curvature and distinct group path, an accepted backward-Euler thermal state, contact handling, original source identity and global budgets. In the genuine-gradient-jump refinement control, the maximum position/direction column error against independent neighboring analytic rays falls from 2.1625e-5 to 5.0302e-9 to 9.0960e-11 over three step/tolerance settings.
+
+## Water refraction from joint pressure and temperature fields
+
+`material_state::water_refraction::pressure_temperature::PressureTemperatureWaterField` borrows one immutable joint reconstruction of absolute thermodynamic pressure and temperature. Each query evaluates the selected original IF97 Region 1/2 state, retaining compressibility, expansion and their mixed response. The spatial density Hessian contains both field Hessians, both pure gradient outer products and both mixed pressure/temperature outer products. Ordinary ray queries reuse the stored first EOS responses; only bundle queries request the full analytic density jet. Preparation and sampling allocate nothing.
+
+`bind_refraction` uses the existing IAPWS phase/group law, absorption law and native ray/bundle transport. Focused controls cover liquid/vapor scalar finite differences through the complete EOS-plus-optics chain, exact constant-pressure compatibility, pressure-driven bending with conserved tangential optical momentum, and analytic pressure-lens focusing with distinct phase/group path lengths. Snapshot/branch identity, bounded-field behavior, nonfinite range and native EOS/optical refusals remain explicit. A frozen compressive snapshot must supply its actual pressure and temperature; the adapter supplies no acoustic thermal closure, phase-mixture tangent, moving-fluid/Doppler effect, regional continuation or mesh transition.

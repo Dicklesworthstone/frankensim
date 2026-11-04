@@ -4,7 +4,8 @@
 //! `exp(+i omega t)` and `theta = T'/T0`, the equations are
 //! `i omega rho v = div(-p I + 2 mu dev(eps(v)) + zeta div(v) I)`,
 //! `div(v) + i omega (beta_T p - alpha_p T0 theta) = 0`, and
-//! `i omega (rho cp T0 theta - alpha_p T0 p) - kappa T0 laplacian(theta) = 0`.
+//! `i omega (rho cp T0 theta - alpha_p T0 p) - kappa T0 laplacian(theta) = q'`.
+//! [`heat_source`] supplies optional volumetric heating `q'` [W/m^3].
 //! The signed isobaric expansion `alpha_p` and isothermal compressibility
 //! `beta_T` are material coefficients. The original ideal-gas constructor uses
 //! `alpha_p=1/T0, beta_T=1/p0`; [`ThermoviscousFe::new_with_thermodynamics`]
@@ -50,6 +51,8 @@ use wall::PreparedWallTraces;
 /// Reciprocal full-vector moving solid boundaries in the original mixed solve.
 pub mod moving_wall;
 use moving_wall::{MovingWall, MovingWallField};
+/// Distributed heat-release excitation on the original resolved temperature basis.
+pub mod heat_source;
 /// Complete causal motion and thermal storage through the original pHS owner.
 pub mod time;
 
@@ -339,8 +342,11 @@ pub struct PreparedThermoviscousScattering<'a, 'c> {
 /// Cycle-averaged work [W]; no clipping of loss or residual is performed.
 #[derive(Debug, Clone, Copy)]
 pub struct ThermoviscousPower {
-    /// Work entering through prescribed total traction and structural forces.
+    /// Total work entering through traction, structural forces and heat sources.
     pub input_w: f64,
+    /// Acoustic thermal work `Re(integral(conj(T'/T0) q'))/2` [W].
+    /// Included in `input_w`; this is not the first-order heat-release phasor.
+    pub heat_source_work_w: f64,
     /// Deviatoric shear-viscous dissipation.
     pub viscous_w: f64,
     /// Independent dilatational-viscous dissipation.
@@ -386,13 +392,13 @@ pub struct ThermoviscousField {
     pub velocity_m_s: Vec<[C64; 3]>,
     /// P2 temperature coefficients [K], in the same hierarchical ordering.
     pub temperature_k: Vec<C64>,
-    /// Independently integrated resolved losses and boundary input work.
+    /// Independently integrated resolved losses and source input work.
     pub power: ThermoviscousPower,
     /// Coupled structural velocity and full fluid reaction, empty for rigid walls.
     pub moving_wall: MovingWallField,
 }
 impl ThermoviscousField {
-    /// Mean traction work entering the domain [W].
+    /// Total mean acoustic work entering the domain [W].
     #[must_use]
     pub const fn input_power_w(&self) -> f64 {
         self.power.input_w
@@ -402,6 +408,8 @@ impl ThermoviscousField {
 impl<'c> ThermoviscousFe<'c> {
     /// Assemble the full mixed system once. P2/P1/P2 is fixed; an unstable
     /// equal-order pair is not an option. Curved geometry is not inferred.
+    /// A sealed volume may have no traction ports; its original thermal fields
+    /// can be excited through [`heat_source`] or evolved from initial data.
     pub fn new(
         complex: &'c TetComplex,
         positions: &[[f64; 3]],
@@ -473,7 +481,6 @@ impl<'c> ThermoviscousFe<'c> {
             || limits.max_elements == 0
             || !limits.max_element_aspect_ratio.is_finite()
             || limits.max_element_aspect_ratio <= 0.0
-            || (boundary.ports.is_empty() && moving_faces.is_empty())
             || boundary.ports.len() > MAX_PORT_MODES
             || complex.tets.is_empty()
         {
@@ -1324,6 +1331,7 @@ impl PreparedThermoviscous<'_, '_> {
                 .zip(&inward_flow_m3_s)
                 .map(|(&p, &q)| 0.5 * (p.conj() * q).re)
                 .sum(),
+            heat_source_work_w: 0.0,
             viscous_w: 0.0,
             bulk_w: 0.0,
             conductive_w: 0.0,

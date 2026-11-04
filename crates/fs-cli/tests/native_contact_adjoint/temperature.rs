@@ -389,8 +389,8 @@ fn temperature_contact_never_substitutes_frozen_derivatives_or_adaptive_goals() 
         "--interfaces".into(),
         contact.display().to_string(),
     ]);
-    // Transported air has a complete contact dual; radiation still requires
-    // its own coupled contact/radiosity tangent and cannot freeze either law.
+    // Ambient radiation still needs its complete live-contact derivative;
+    // the admitted enclosure tangent cannot substitute for that boundary law.
     let f = Fixture::new(false, true);
     let (source, contact, ledger) = prepare(&f, 20, Some(OUTPUT));
     let result = solve_radiating(&f, &source, &contact, &ledger);

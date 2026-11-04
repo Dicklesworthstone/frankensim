@@ -1,5 +1,81 @@
 # CONTRACT: fs-cli
 
+## Live contact and enclosure sensitivities — driver 118
+
+Steady `temperature-max-adjoint` and `temperature-max-contact-adjoint` now
+compose live source-backed contacts with closed/open area-mean gray enclosures.
+The retained original contact law is re-queried on the unchanged physical
+endpoint, with both temperature partials and heterogeneous bulk K'(T). The
+existing radiosity binder adds its complete reflected tangent, including
+original prescribed-flux patches without artificial convection ports.
+
+Natural-convection and transported-air feedback participate in the same total
+dual. Source power, original convection, inlet, fan, conductivity, whole contact
+resistance-law, emissivity and shared open-bath controls use that dual and their
+original physical owners. Fresh physical residual, heat, source-slope and
+transpose gates remain mandatory. Requesting the derivative does not replace
+or perturb the accepted primal, and live contacts cannot also retain a frozen
+interface operator. Driver 118 invalidates earlier cached producer results.
+
+Focused native physical re-solves cover closed curve/Newton and open
+source-surface/Picard contact, source power, bath temperature and air inlet.
+Mixed Robin/flux numerical tests additionally check emissivity and stale-field
+refusal. Rust syntax and source review passed; runtime execution remains
+pending. Ambient/pointwise contact-radiation derivatives, prescribed-temperature
+controls and radiating contact trajectory adjoints remain unsupported. No
+continuum, unique-maximum-at-a-tie or gradient-error certificate is added.
+
+## Capacity storage in open radiative cavities — driver 117
+
+Declared regional heat-capacity trajectories now compose live source contacts
+with open area-mean gray-diffuse enclosures. The existing backward-Euler and
+reflected-radiosity owners retain the same accepted old field on every trial;
+the CLI adds no time integrator or radiation solver. Scalar/curve contacts use
+the complete bulk/contact Newton response, source surfaces use their bounded
+fixed point, and ordinary fixed interfaces share the same enclosure path.
+
+One exact surface/view-factor binding serves both time grids, every workload
+event and all prescribed, natural, transported-air and mixed cooling trials.
+Acceptance re-queries the unchanged contact endpoint with fresh reflected heat,
+actual convection coefficients and actual air references. The independent
+black-reservoir row has no solid trace or capacity. Only physical-surface heat
+enters the solid energy sum and prescribed-node storage reaction; the complete
+radiosity closure still includes the bath. Original convection alone heats air.
+
+Per-step and final receipts retain applied and fresh physical patch heat,
+independently evaluated bath power, original source identities and complete
+contact/radiation/Newton/backtrack/Krylov work. Cancellation, exhausted budgets
+and refused source queries publish no accepted partial history. Driver 117
+invalidates prior cached producer results. Pointwise capacity emission,
+area-mean open total-enthalpy histories and open-capacity radiation adjoints
+remain unsupported; existing admitted contact-only trajectory adjoints and
+pointwise total-enthalpy open radiation retain their own owners.
+
+Focused numerical and native regressions independently reconstruct reflected
+bath heat, storage, scheduled input, live contact queries and convection-only
+air gain. They cover both source algorithms, static-contact reuse, fixed-node
+storage reactions, domain/budget/cancellation refusal and deterministic retry.
+The resource-constrained implementation session checked Rust syntax and diffs;
+native runtime execution remains required.
+
+## Live source contacts in open radiative cavities — driver 116
+
+Steady base and uniform-ladder cooling solves now compose source-backed matching
+contact laws with explicit open gray-diffuse enclosure radiation. Source curves
+retain complete bulk/contact Newton responses; source surfaces retain the
+bounded contact fixed point. Both call the same reflected-radiosity owner as
+closed enclosures and compose with existing natural and transported-air cooling.
+
+The unchanged final field passes fresh contact/radiation residual, prescribed
+reaction, heat-closure and radiosity watt gates. Only physical-surface heat enters
+the solid's outward balance; the independent black-reservoir row closes the
+radiation system. Original convection alone reaches air transport. Receipts
+retain the actual field, source states, separate reservoir heat, and every nested
+contact, nonlinear and Krylov response. The new driver version invalidates
+earlier cached producer results. Driver 117 adds capacity-storage open-cavity
+histories; driver 118 adds complete steady contact/enclosure adjoints. Steady
+pointwise emission remains unsupported.
+
 ## Source-caloric cooling scenes
 
 `cooling-cht` accepts an explicit top-level `fluid_enthalpy` object on an
@@ -2837,7 +2913,9 @@ Native uncertainty studies bind that same `radiation-reservoir-temperature`
 coordinate through `enclosure-environment`, changing only the explicit open
 bath. Transient calibration consumes the matching pointwise enthalpy bath
 control over the selected prefix; absent, closed or ambiguous owners refuse.
-Patch-mean open transients and continuum bounds still refuse explicitly.
+Driver 117 adds patch-mean open trajectories with declared regional capacity,
+including live source contacts. Patch-mean open total-enthalpy histories,
+open-capacity radiation adjoints and continuum bounds still refuse explicitly.
 The existing native tests exercise independent reflected heat equations in
 both directions and real pointwise vacuum histories with original enthalpy
 storage. Native adjoint regressions compare fresh complete trajectories under
@@ -3518,8 +3596,10 @@ Accepted outer natural/air audits refresh the physical enclosure boundary,
 reservoir reactions and convection at the same unchanged field. Retained
 applied patch heat and all counted work remain attached to their actual solve.
 Enclosure callbacks, nested contact responses, Newton updates, backtracks and
-Krylov work keep their separate bounded counts. Capacity contact still refuses
-pointwise radiation, open-enclosure histories and trajectory derivatives.
+Krylov work keep their separate bounded counts. Later drivers add prescribed
+contact-only trajectory adjoints (115) and open-enclosure capacity histories
+(117). Pointwise capacity radiation and capacity contact/radiation derivatives
+remain unsupported.
 Focused native and imported-project regressions accompany the integration;
 syntax checks do not replace their required native execution.
 
@@ -3568,8 +3648,9 @@ transported air; contact and closed-enclosure exchange remain internal.
 Published counters include the initial solid response, every radiation trial
 and all nested contact, nonlinear and Krylov work. The final numerical history
 continues to describe its applied load; fresh endpoint evidence is reported
-separately, with no hidden replacement solve. Live steady contact with open or
-pointwise enclosure radiation and contact/radiation adjoints remain unsupported.
+separately, with no hidden replacement solve. Driver 116 extends this shared
+owner to open cavities; steady pointwise exchange and contact/radiation adjoints
+remain unsupported.
 
 ### Live-contact adjoints through transported air and mixed convection — driver 114
 
@@ -3592,3 +3673,31 @@ Focused native regressions cover two serial airflow segments and mixed natural
 convection with nonlinear conductivity and curve/surface contact sources.
 Radiation, transient history, prescribed-temperature controls and adaptive
 contact goals still require their own complete derivative compositions.
+
+### Live-contact capacity trajectory adjoints — driver 115
+
+`temperature-final-adjoint` and `temperature-sampled-peak-adjoint` now compose
+regional-capacity backward Euler with the original source-backed contact
+endpoint derivative. Every selected fine-grid endpoint retains its original
+absolute joule residual target. The native conduction owner re-queries its
+pinned laws at the unchanged independent traces, checks physical residual and
+energy closure, and supplies the complete capacity/bulk/contact transpose.
+There is no frozen-contact reconstruction or replacement forward solve.
+
+Source-power, original-temperature, capacity, prescribed-flux and Robin
+controls contract that same complete dual. Uniform prescribed-bath controls
+also include the full contact transpose at constrained vertices, including the
+direct objective term for a selected prescribed node. Thermal histories are
+sampled at the original interval starts and held fixed. An initial sampled
+peak requires no reverse solve; controls after an earlier selected peak have
+zero influence. Sparse contact assembly and bounded FGMRES workspace are
+charged before the forward history runs, with the same face cap retained by
+the numerical owner. The estimate is not a peak allocator/RSS guarantee.
+
+Imported-project regressions compare curve/surface source laws and nonlinear
+bulk transport against fresh full-history perturbations. They check exact
+forward-field and energy invariance, prescribed-bath and scheduled-reservoir
+controls, selected-prefix accounting and source-corner refusal. Source/material
+kinks still refuse classical derivatives. Contact with total enthalpy,
+radiation, natural convection or transported air and material/contact-scale
+trajectory controls remain outside this product composition.

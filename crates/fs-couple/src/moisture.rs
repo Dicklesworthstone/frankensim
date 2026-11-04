@@ -341,7 +341,9 @@ pub struct MoistureStepReport {
     /// Identity of the exact prepared source-line chart in Kirchhoff mode.
     /// None retains the harmonic endpoint/lagged coefficient scheme.
     pub kirchhoff_source: Option<ContentHash>,
-    /// Original true-residual solver report.
+    /// True residual of the conservative equations for moisture relative to
+    /// the initial first cell. Its normalization resolves gradients without
+    /// dilution by the uniform water inventory.
     pub linear: SolveReport,
     /// Endpoint nonlinear residual/work, or None for accepted-start lagging.
     /// `linear` describes the last frozen-coefficient solve; this report tests
@@ -661,9 +663,12 @@ impl MoistureSlab {
                 self.solve_implicit(dt_s, &faces, &start, config, controls, profile.as_ref(), cx)?
             } else {
                 let (operator, rhs, coupling) = self.transport_system(dt_s, &faces, &start, None, cx)?;
-                let solution = operator.solve_direct(&rhs, config.linear, cx)?;
+                let mut solution = operator.solve_direct(&rhs, config.linear, cx)?;
                 if !solution.report.converged_euclidean() {
                     return Err(MoistureError::NotConverged(solution.report));
+                }
+                for value in &mut solution.x {
+                    *value += self.moisture[0];
                 }
                 let endpoint = self.transport_states(&solution.x, cx)?;
                 (solution, endpoint, coupling, None)
@@ -761,6 +766,8 @@ impl MoistureSlab {
     }
 
     /// One common finite-volume operator for both coefficient time levels.
+    /// The unknown is moisture relative to the initial first cell, so a large
+    /// uniform inventory cannot hide small diffusion gradients in the residual.
     fn transport_system(
         &self,
         dt_s: f64,
@@ -789,6 +796,7 @@ impl MoistureSlab {
         }
         let mut operator = DiffusionStep {
             diagonal: vec![1.0; n],
+            storage_boundary: vec![1.0; n],
             off: Vec::with_capacity(n - 1),
         };
         for (i, pair) in d.windows(2).enumerate() {
@@ -827,11 +835,13 @@ impl MoistureSlab {
             };
         }
         let boundary = [coupling[0].0, coupling[1].0];
-        let mut rhs = self.moisture.clone();
+        let reference = self.moisture[0];
+        let mut rhs: Vec<_> = self.moisture.iter().map(|m| m - reference).collect();
         for (side, i) in [0, n - 1].into_iter().enumerate() {
             if let Some(m) = surface[side] {
                 operator.diagonal[i] += boundary[side];
-                rhs[i] += boundary[side] * m;
+                operator.storage_boundary[i] += boundary[side];
+                rhs[i] += boundary[side] * (m - reference);
             }
         }
         if operator.diagonal.iter().any(|v| !positive(*v))
@@ -871,6 +881,10 @@ impl MoistureSlab {
 
 struct DiffusionStep {
     diagonal: Vec<f64>,
+    // Retain storage and exterior coupling independently of interior face
+    // coefficients; subtracting them back out of the diagonal loses storage
+    // when the diffusion time scale is much shorter than the time step.
+    storage_boundary: Vec<f64>,
     off: Vec<f64>,
 }
 impl LinearOp for DiffusionStep {
@@ -878,12 +892,13 @@ impl LinearOp for DiffusionStep {
         self.diagonal.len()
     }
     fn apply(&self, x: &[f64], y: &mut [f64]) {
-        for ((y, &a), &x) in y.iter_mut().zip(&self.diagonal).zip(x) {
+        for ((y, &a), &x) in y.iter_mut().zip(&self.storage_boundary).zip(x) {
             *y = a * x;
         }
         for (i, &a) in self.off.iter().enumerate() {
-            y[i] -= a * x[i + 1];
-            y[i + 1] -= a * x[i];
+            let flux = a * (x[i] - x[i + 1]);
+            y[i] += flux;
+            y[i + 1] -= flux;
         }
     }
 }

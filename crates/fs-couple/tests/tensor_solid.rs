@@ -78,6 +78,102 @@ fn full_mass_drives_work_conjugate_force_and_inertia_without_lumping() {
 }
 
 #[test]
+fn bbar_brick_runs_through_original_material_dynamics_and_heat_ownership() {
+    with_cx(|cx, gate| {
+        let nodes = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 1.0],
+            [1.0, 1.0, 1.0],
+            [0.0, 1.0, 1.0],
+        ];
+        let cells = [[0, 1, 2, 3, 4, 5, 6, 7]];
+        let equilibrium = diagonal([120.0, 90.0, 120.0, 60.0, 50.0, 40.0]);
+        let viscosity_time = 0.01;
+        let material = TetViscoMaterial {
+            law: TensorProny::new_mandel(equilibrium, vec![], 0.02)
+                .unwrap()
+                .with_kelvin_viscosity_mandel(
+                    equilibrium.map(|row| row.map(|x| viscosity_time * x)),
+                )
+                .unwrap(),
+            density_kg_m3: 2.0,
+            material_state_identity: [84; 32],
+        };
+        let source = system(
+            SolidMeshRef::Hex8 {
+                nodes_m: &nodes,
+                elements: &cells,
+                formulation: fs_solid::linear::Formulation::BBar,
+                stiffness_points_per_dir: 2,
+            },
+            TetViscoField::Uniform(&material),
+            &[],
+            cx,
+        );
+        let shape: Vec<f64> = nodes
+            .iter()
+            .flat_map(|p| [(p[0] - 0.5) * (p[1] - 0.5), 0.0, 0.0])
+            .collect();
+        let projection = source
+            .project_basis(&[shape.clone()], projection_budget(), cx)
+            .unwrap();
+        let mut applied = vec![0.0; 24];
+        source.equilibrium().stiffness.spmv(&shape, &mut applied);
+        let stiffness = dot(&shape, &applied);
+        source.equilibrium().mass.spmv(&shape, &mut applied);
+        let mass = dot(&shape, &applied);
+        let damping_rate = viscosity_time * stiffness / (2.0 * mass);
+        let frequency = (stiffness / mass - damping_rate * damping_rate).sqrt();
+        let body = TensorSolidBody::new(projection, dynamics_budget(), gate).unwrap();
+        assert!(
+            body.history(&[0.1], &[0.0], InitialMemory::Relaxed, gate)
+                .is_err()
+        );
+        let initial_displacement = 0.001;
+        let mut history = body
+            .history(
+                &[initial_displacement],
+                &[0.0],
+                InitialMemory::Relaxed,
+                gate,
+            )
+            .unwrap();
+        let initial_energy = history.material_history().stored_energy_j();
+        let mut heat = 0.0;
+        for step in 1..=8 {
+            let record = history.advance(&[[0.0; 3]; 8], 0.01, 1e-12, gate).unwrap();
+            assert_eq!(record.element_heat_j.len(), 1);
+            assert!(record.element_heat_j[0] > 0.0);
+            heat += record.element_heat_j[0];
+            let time = step as f64 * 0.01;
+            // Independent one-coordinate oscillator from the ORIGINAL native
+            // K/M pencil, not from the reduced dynamics matrices.
+            let expected = initial_displacement
+                * (-damping_rate * time).exp()
+                * ((frequency * time).cos() + damping_rate / frequency * (frequency * time).sin());
+            close(
+                history.material_history().displacement_m()[0],
+                expected,
+                2e-13,
+            );
+            close(
+                history.material_history().stored_energy_j() + heat,
+                initial_energy,
+                2e-12,
+            );
+            let nodal = history.nodal_displacement_m(gate).unwrap();
+            for (value, basis) in nodal.iter().flatten().zip(&shape) {
+                close(*value, expected * basis, 2e-13);
+            }
+        }
+    });
+}
+
+#[test]
 fn original_tet4_and_tet10_quadrature_preserves_shear_mass_and_virtual_work() {
     with_cx(|cx,gate| {
         let material=material(0.01,0.25);

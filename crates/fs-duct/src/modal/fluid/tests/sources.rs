@@ -360,6 +360,194 @@ fn coherent_material_sources_match_global_fields_and_full_radiated_power() {
 }
 
 #[test]
+fn independent_receiving_fluids_match_global_cutoff_fields_and_radiated_power() {
+    let interior = liquid();
+    let radius = j1_roots(1).unwrap()[0] / 128.0;
+    let source = duct(&[radius, 0.045, 0.038], 0.009);
+    let geometry = PreparedModalDuct::new(&source, 3, 1).unwrap();
+    // An exact inlet cutoff belongs to the interior, regardless of the
+    // receiving fluid's different wavelength and modal radiation coupling.
+    let omega = 128.0 * interior.sound_speed_m_s();
+    let reference =
+        interior.characteristic_impedance_pa_s_m() / (core::f64::consts::PI * radius * radius);
+    let sources = [
+        pressure(C64::new(2.0, 0.3), C64::new(0.6, 0.2).scale(reference)),
+        PortExcitation::VolumeFlow(C64::new(0.25, -0.1).scale(1.0 / reference)),
+        pressure(C64::new(0.4, 0.8), C64::new(0.3, -0.2).scale(reference)),
+    ];
+    let transport =
+        FluidTransportState::try_new(interior.density_kg_m3(), 4200.0, 0.6, 0.001).unwrap();
+    let lossy_interior = ThermoviscousFluidState::try_new(interior, transport, 4100.0).unwrap();
+    let same_fluid = geometry
+        .drive_sources_from_material(&interior, omega, MouthBoundary::Flanged, &sources)
+        .unwrap();
+
+    // Numerical constitutive controls, not fitted or measured liquid data.
+    for exterior in [
+        FluidAcousticState::try_new(850.0, 1100.0).unwrap(),
+        FluidAcousticState::try_new(1250.0, 1800.0).unwrap(),
+    ] {
+        let radiation = crate::flanged::flanged_modal_impedance_from_material(
+            &exterior,
+            geometry.mouth_radius_m(),
+            omega,
+            3,
+        )
+        .unwrap();
+        let (z, map) = direct_pressure_flow(
+            &geometry,
+            &interior,
+            omega,
+            MouthBoundary::Flanged,
+            &radiation,
+        );
+        let (expected_pressure, expected_mouth, expected_flow) = source_oracle(&z, &map, &sources);
+        let actual = geometry
+            .drive_sources_from_material_with_exterior(&interior, &exterior, omega, &sources)
+            .unwrap();
+        for i in 0..3 {
+            near(actual.inlet.inlet_pressure[i], expected_pressure[i], 2.0);
+            near(
+                actual.inlet.inlet_flow[i],
+                expected_flow[i],
+                2.0 / reference,
+            );
+            near(actual.mouth_flow[i], expected_mouth[i], 2.0 / reference);
+        }
+        assert!(
+            (actual.inlet.inlet_pressure[0] - same_fluid.inlet.inlet_pressure[0]).abs() > 1e-3,
+            "a changed receiving fluid must change the physical source load"
+        );
+        let radiated = power(&apply(&radiation, &actual.mouth_flow), &actual.mouth_flow);
+        assert!(radiated > 0.0);
+        near(
+            C64::from_re(actual.inlet.inlet_power_w),
+            C64::from_re(radiated),
+            radiated,
+        );
+        balanced(&actual.inlet);
+
+        let lossy = geometry
+            .drive_sources_from_material_with_exterior_and_loss(
+                &lossy_interior,
+                &exterior,
+                omega,
+                LossModel::Bessel,
+                &sources,
+            )
+            .unwrap();
+        let radiated = power(&apply(&radiation, &lossy.mouth_flow), &lossy.mouth_flow);
+        assert!(radiated > 0.0);
+        assert!(lossy.inlet.inlet_power_w > radiated);
+        balanced(&lossy.inlet);
+    }
+}
+
+#[test]
+fn explicit_same_fluid_retains_original_source_bits_for_every_wall_loss_model() {
+    let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).unwrap();
+    let source = duct(&[0.014, 0.02, 0.017], 0.011);
+    let geometry = PreparedModalDuct::new(&source, 3, 1).unwrap();
+    let sources = [
+        pressure(C64::new(1.0, 0.3), C64::new(3e5, 1e5)),
+        PortExcitation::VolumeFlow(C64::new(1e-7, -2e-7)),
+        pressure(C64::new(-0.2, 0.7), C64::new(4e5, -1e5)),
+    ];
+    for omega in [5000.0, 60_000.0] {
+        for loss in [LossModel::Lossless, LossModel::WideTube, LossModel::Bessel] {
+            let expected = geometry
+                .drive_sources_from_material_with_loss(
+                    &gas,
+                    omega,
+                    loss,
+                    MouthBoundary::Flanged,
+                    &sources,
+                )
+                .unwrap();
+            let actual = geometry
+                .drive_sources_from_material_with_exterior_and_loss(
+                    &gas, &gas, omega, loss, &sources,
+                )
+                .unwrap();
+            assert_eq!(actual.inlet.inlet_pressure, expected.inlet.inlet_pressure);
+            assert_eq!(actual.inlet.inlet_flow, expected.inlet.inlet_flow);
+            assert_eq!(actual.mouth_flow, expected.mouth_flow);
+            if loss == LossModel::Lossless {
+                let acoustic = geometry
+                    .drive_sources_from_material_with_exterior(&gas, &gas, omega, &sources)
+                    .unwrap();
+                assert_eq!(acoustic.inlet.inlet_pressure, expected.inlet.inlet_pressure);
+                assert_eq!(acoustic.inlet.inlet_flow, expected.inlet.inlet_flow);
+                assert_eq!(acoustic.mouth_flow, expected.mouth_flow);
+            }
+        }
+    }
+}
+
+#[test]
+fn independent_materials_keep_snapshot_ownership_and_exterior_radiation_domain() {
+    let acoustic = liquid();
+    let transport =
+        FluidTransportState::try_new(acoustic.density_kg_m3(), 4200.0, 0.6, 0.001).unwrap();
+    let counted = || CountedFluid {
+        state: ThermoviscousFluidState::try_new(acoustic, transport, 4100.0).unwrap(),
+        acoustic_samples: Cell::new(0),
+        complete_samples: Cell::new(0),
+    };
+    let (interior, exterior) = (counted(), counted());
+    let source = duct(&[0.025, 0.038, 0.028], 0.009);
+    let geometry = PreparedModalDuct::new(&source, 3, 1).unwrap();
+    let omega = acoustic.sound_speed_m_s() * 110.0;
+    let sources = [
+        pressure(C64::ONE, C64::from_re(1e9)),
+        PortExcitation::VolumeFlow(C64::ZERO),
+        PortExcitation::VolumeFlow(C64::ZERO),
+    ];
+    geometry
+        .drive_sources_from_material_with_exterior(&interior, &exterior, omega, &sources)
+        .unwrap();
+    geometry
+        .drive_sources_from_material_with_exterior_and_loss(
+            &interior,
+            &exterior,
+            omega,
+            LossModel::Bessel,
+            &sources,
+        )
+        .unwrap();
+    assert_eq!(interior.acoustic_samples.get(), 1);
+    assert_eq!(interior.complete_samples.get(), 1);
+    assert_eq!(exterior.acoustic_samples.get(), 2);
+    assert_eq!(exterior.complete_samples.get(), 0);
+
+    let slow_exterior = FluidAcousticState::try_new(1.0, 100.0).unwrap();
+    assert!(matches!(
+        geometry.drive_sources_from_material_with_exterior(
+            &acoustic,
+            &slow_exterior,
+            omega,
+            &sources
+        ),
+        Err(FluidDuctError::Duct(DuctError::RadiationKaTooLarge { .. }))
+    ));
+    struct FailedExterior;
+    impl FluidAcoustics for FailedExterior {
+        fn acoustic_state(&self) -> Result<FluidAcousticState, MaterialError> {
+            Err(MaterialError::Parameters {
+                what: "exterior source refused its phase".into(),
+            })
+        }
+    }
+    assert!(matches!(
+        geometry.drive_sources_from_material_with_exterior(
+            &acoustic, &FailedExterior, omega, &sources
+        ),
+        Err(FluidDuctError::Material(MaterialError::Parameters { what }))
+            if what == "exterior source refused its phase"
+    ));
+}
+
+#[test]
 fn source_queries_keep_one_material_snapshot_and_original_refusals() {
     let state = liquid();
     let transport =

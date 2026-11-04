@@ -3,17 +3,20 @@
   "family": "oboe",
   "title": "Oboe",
   "reference_instrument": "Oboe",
-  "summary": "First renders are posted on Bb4 and Db4 (graded) and on G5 and Ab5 (no grade, an octave down); Eb6 has none because the printed ladder ends at D5. One complete oboe tone-hole table exists (Nederveen and de Bruijn 1967, a Munnich oboe). Its bore is published only as graphs, now read at stations with stated reading errors, and it carries no pad heights or fingering chart. Nothing open prints an oboe reed's blade mass, stiffness or damping.",
+  "summary": "Limits first: the reed is assembled from another reed's measurements and a clarinet's mass and damping, not measured; there is no tongue, breath noise or hole vortex loss; and every note is flat of its name, more the higher it goes (C4 -50 c to C5 -158 c on the scale). A C major scale and Ode to Joy are up, each note its own render at one fixed 7.4 kPa, on fingerings inferred from Table III of Nederveen and de Bruijn 1967, the one complete oboe tone-hole table we hold. Bb4 (7 of 15) and Db4 (6 of 14) are graded pages; G5 and Ab5 play an octave down and have no grade; Eb6 has no render because the printed ladder ends at D5. The bore is published only as graphs, read at stations with stated reading errors.",
   "physics_present": [
     "generic fs-duct conical and cylindrical segments, tone-hole side branches and a flanged bell load, the lumped single-reed owner and the physical baffled outlet receiver already run for the clarinet; a description gives them this bore and a reed with values partly borrowed from the clarinet, and the posted first renders come from it",
-    "Fuks and Sundberg 1996 blowing pressures for two professional oboe players are retained as player data"
+    "Fuks and Sundberg 1996 blowing pressures for two professional oboe players are retained as player data",
+    "Fingerings chained from Table III's closed and open tones for each hole: inferred, not printed, from C4 to C5 and on the page notes. Where the table prints two rows for a note, the scale takes one and says which; the octave aids, holes 1, 2 and 5, aren't printed and are closed"
   ],
   "physics_missing": [
     "a measured bore profile and bell flare: only reads from the paper's graphs exist",
     "pad and key heights, undercut geometry and a full fingering chart",
     "a double-reed valve driving this bore (paired reed or the material-modal valve)",
     "staple and reed channel geometry",
-    "a modern specimen: the only complete table is from 1967"
+    "a modern specimen: the only complete table is from 1967",
+    "A printed pressure for each note: Fuks and Sundberg print note pressures for D4, F4, Bb4, D5 and F5 only, so every note here uses the pages' fixed 7.4 kPa",
+    "The scale's tuning: a player's push doesn't fix it (3 mm at the reed end raises the first passive peak 3.0 to 17.1 c), and why it goes flatter with height is being read"
   ],
   "blocked": "The paper's bore graphs are read and its tables were transcribed from the page images, but no open source prints an oboe reed's blade mass, stiffness or damping. Needs those from the authors or a measured reed, and a newer measured oboe.",
   "beads": [

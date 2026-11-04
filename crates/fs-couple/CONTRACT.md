@@ -1815,9 +1815,22 @@ depth and timestep. Source-backed rheology supplies the accepted endpoint
 viscosities; a rigid frame translation or spin does not add strain heat.
 This is BDF1 endpoint quadrature, not an exact integral along the unobserved
 within-step trajectory. Physical wall-slip loss, mechanical dashpots, SIP,
-upwind and backward-Euler numerical losses remain separate. No thermal state
-is updated and this diagnostic does not establish a coupled energy theorem.
+upwind and backward-Euler numerical losses remain separate. Ordinary motion
+steps do not update thermal state; this diagnostic does not establish a coupled
+energy theorem.
 Nonfinite physical heat refuses before any body or fluid history is committed.
+
+`GuidedStokesMotion::step_with_heating` deposits that same native endpoint
+strain heat into original finite thermal cells over the identical interval.
+The explicit triangle-to-cell map must match the original x/y triangle prisms
+extruded along +z, including centrelines, depth, volume, surface and frozen-density
+mass. Native thermal subcycling preserves caloric laws, authored sources,
+contacts, reservoirs and scheduled events; generated heat never replaces a
+boundary source. Both clocks must agree, and motion plus thermal history publish
+only after the native flow/body and thermal gates and final cancellation pass.
+This first-order one-way split retains frozen fluid transport and fixed geometry;
+it adds no advection, thermoviscosity or global energy/passivity theorem. Caloric
+identity remains caller-authored because a transport snapshot cannot supply it.
 
 The existing motion regressions now independently check zero strain heat in
 an accelerating uniform translation, analytic Couette heating under rigid
@@ -5802,14 +5815,32 @@ cavity (composes with the BEM's outward panel velocities).
 
 - `VibroacousticModel::frf` / `frf_truncated` — dense complex coupled
   solve; every response carries the complete power breakdown with BOTH
-  audit residuals (`input = structural + interface + radiated`,
-  `interface = cavity`) — algebraically exact identities, measured at
-  1e-13.
+  audit residuals (`input = structural + cavity + radiated`,
+  `interface + acoustic_input = cavity`). The force-only paths retain zero
+  acoustic input and use the same original coupled operator.
+- `frf_with_sources` / `frf_truncated_with_sources` admit original-basis
+  volume-flow projections `Q_q = integral(psi_q s dV) + integral(psi_q v_in dA)`
+  with inward injection positive. The pressure row receives
+  `-i omega rho0 c0^2 Q_q/Lambda_q`; the same source supplies signed work
+  `Re(a_q conj(Q_q))/2`. Pressure backreaction, full modal structural viscosity,
+  molecular compressibility and exterior radiation remain in the same solve.
+  Source vectors retain full-basis ordering under truncation. A driven structural
+  wall must not also appear as a prescribed cavity source. This admits imposed
+  linear acoustic excitation; it does not infer jet physics or source impedance.
+  `project_cavity_boundary_flow` maps an explicit inward velocity through the
+  original cavity surface quadrature, retaining signed cancellations and the
+  equality between integrated surface work and modal source work.
+  The source tests compare sealed-cavity compliance with an independent closed
+  form, integrate pressure/flow work over a cycle, and check reciprocal mixed
+  transfers, coherent superposition, signed normalization and truncation.
 - `frf_with_convergence` — truncation error OBSERVED (full vs halved
   bases) and refused (`FS-COUPLE-VIBRO-TRUNCATION-NOT-CONVERGED`)
   above the caller tolerance; near-resonance rows are genuinely
   truncation-sensitive (measured 0.28 on the casebook fixture) and the
   casebook exposes rather than hides that.
+  `frf_with_sources_and_convergence` applies the same check to the total work
+  of the prescribed force and volume sources. This scalar comparison does not
+  certify pointwise pressure convergence or a quiet transfer-function notch.
 - `undamped_natural_frequencies` — exact `x = omega^2` linearization
   (unit-triangular `B`), pinned by the two-oscillator closed form at
   ~1e-16 across a five-decade coupling sweep, a first-order added-mass
@@ -7263,8 +7294,11 @@ clarinet is one filling of those objects.
   paths. Invalid authored ratios refuse instead of being clamped.
   G1/G3 tests check the resistance formula and
   pressure ring-down under changed gas pressure. A second
-  polarization at `1+detune` is a second member on the same clock
-  and shares every plate (it is not an independent unused body).
+  polarization at `1+detune` is a second fixed-end member on the same clock
+  and shares every plate (it is not an independent unused body). Moving-end
+  second polarization requires explicit transverse attachment geometry that
+  this assembly does not carry; it refuses before realization, with or without
+  Prony bending, instead of silently rendering only one plane.
 - String path, `EA > 0`: `fs-nlmodal::kirchhoff_carrier_string`
   (fixed-fixed) or `kirchhoff_carrier_moving_end` (Dirac join)
   + Gonzalez
@@ -8041,11 +8075,26 @@ clarinet is one filling of those objects.
   the duct FIR. The certified three-pHS Dirac interconnection is
   `common_flow_dirac(moving_end_waveguide, transformer(plate, load))`
   in `fs-phs` (free-end attachment port, area transformer, Kirchhoff
-  star). The load is a Helmholtz cavity or an `acoustic_chain`
-  duct — the same object. `PrestressedString.moving_end` selects
+  star). The complete plate image retains its Helmholtz cavity, material
+  memory and exterior histories before an optional `acoustic_chain` duct
+  joins its independent surface port. A cavity and duct can therefore load
+  the same body without downgrading the string to one-way bridge forcing.
+  Cavity construction uses the same `PlateBank::attach_cavity` owner on all
+  paths; a cavity without a structural attachment refuses instead of being
+  silently omitted. `PrestressedString.moving_end` selects
   that clock. Bow, obstacle stations, and blow/reed are leftover
   ports of `join_port` (Stribeck and Hunt–Crossley stay port
-  forces). Von Karman is the same plate pHS with quartic storage.
+  forces). Both moving-end ODE and descriptor clocks bind obstacle stations
+  through the shared contact admission and retain each physical line measure,
+  gap and law. `fs-dcontact` supplies the instantaneous normal reaction and
+  non-attractive Hunt–Crossley unloading at the actual conjugate port velocity;
+  `fs-tribo` supplies the existing declared scalar friction ramp using the same
+  elastic normal capacity as fixed-end contact. Stations are never relocated
+  and missing measures or gaps refuse. G1/G3 checks cover force-law parity,
+  nonzero loss, station-measure partition invariance and friction's effect on
+  observer pressure in both clocks, including retained Prony memory. The held-force clock
+  is unchanged; this wiring adds no finite-step contact-work closure claim.
+  Von Karman is the same plate pHS with quartic storage.
   `EA > 0` is `kirchhoff_carrier_moving_end` on the same
   free-fixed port. Fixed-fixed sines keep the one-way bridge
   force; with a plate the duct is still the ODE chain
@@ -8372,11 +8421,22 @@ None.
   bore's static end state into the mouth. The face pressure solves continuity
   between the metered lip flow and the bore's own end wave (a strictly
   monotone residual, bracketed between the closed-end pressure and the mouth
-  pressure, Illinois false position to 1e-12 of the bracket). Inflow energy is
-  mass flux times the mouth's stagnation enthalpy. The lip advances once per
-  gas step by its exact zero-order-hold split under the face pressure. The bell
-  flow is averaged per mechanics sample and observed by the multirate baffled
-  receiver.
+  pressure, Illinois false position to 1e-12 of the bracket). If an auxiliary
+  high-pressure trial exhausts the inflow's cold source path, bounded bisection
+  first finds a supported upper residual; it never clamps the temperature or
+  refuses a supported root merely because that auxiliary trial was too cold.
+  Inflow energy is mass flux times the mouth's stagnation enthalpy. The
+  mixed-out face's static temperature solves
+  `h(T_mouth)-h(T_face)=u_face^2/2` through the shared gas owner's original
+  variable-Cp caloric inversion. Continuity and final mass, momentum and energy
+  fluxes use that same source-admitted face state; the face's density and sound
+  speed reflect its kinetic cooling. Regressions check an independent
+  variable-Cp enthalpy integral at elevated pressure, nozzle continuity,
+  pressure-wave compatibility, the linear limit, reverse flow and supported
+  choked inflow behind an unsupported auxiliary pressure trial. The lip
+  advances once per gas step by its exact zero-order-hold split under the face
+  pressure. The bell flow is averaged per mechanics sample and observed by the
+  multirate baffled receiver.
   - **Lip file:** `bore nonlinear <max_cell_m> <mechanics_per_output<=16>
     <gas_steps_per_mechanics<=64> <wall_poles> <band_lo_hz> <band_hi_hz>
     <wall_error<1>`. It needs `ambient thermochemical ...` with its source packs
@@ -8390,9 +8450,9 @@ None.
     declared band: on 20-8000 Hz at 1 %, 24 poles resolve radii up to about
     6 mm and 64 (the fs-phs cap) up to about 35 mm; a 61 mm trumpet bell needs
     a declared error of 7e-2 at 64 poles.
-  - **Limits:** inflow mixes out at the mouth temperature; reverse flow
-    uses the static end state as donor; the cup is a lumped volume on the first
-    cell; valves refuse. The field keeps to the NASA-9 region that holds the
+  - **Limits:** reverse flow uses the static end state as donor; the cup is a
+    lumped volume on the first cell; valves refuse. The field keeps to the
+    NASA-9 region that holds the
     room for every species (the McBride air packs split at 1000 K and state no
     caloric continuity across it); a state that would leave it refuses. A test
     builds that air from the data/matdb/seed-v1 McBride tables: the old fixed
@@ -8473,10 +8533,31 @@ None.
   same-sample solve and in the `feedback < 1` guard (never loosened). KAPPA is
   required and only `1` (Eq. (1), as printed) or `2.6` (their Sec. II
   pulsating-jet fit, one rig, authors unsure of its meaning) is accepted;
-  anything else is refused. A card without the row is bit-identical. Transfer
+  other numerical weights are refused. A card without the row is bit-identical. Transfer
   caveats (turbulent jet, cut-up/slit 20-40, versus this laminar Bickley jet;
   their end correction 19-30 cm referred to the pipe versus ours of a few
   millimetres) are in the module doc and the provenance sidecar.
+
+  PROFILE MOMENTUM (`FlueVoice::with_bickley_momentum_drive`, card row
+  `momentum_drive bickley-profile`) integrates the original station's
+  `u=U sech²((y-eta)/b)` instead of multiplying its cut volume by one speed.
+  Both volume and momentum use that forced jet's actual station width,
+  centre speed and span, including its named spreading law; this selection
+  also enables the existing `jet_cut_width station` path. With
+  `s=tanh((eta-offset)/b)`, the cut is `Q=U b H (1+s)` and
+  `J=rho U² b H (2/3+s-s³/3)`. Full-jet momentum is `4 rho U² b H/3`.
+  The original series port takes `(J-J_rest)/S_p`, including its signed work;
+  the quiescent cut at the same instantaneous speed/offset supplies J_rest.
+  A factored cubic difference retains small cut changes. Its derivative
+  `dJ/dQ=rho U (1-s²)` preserves the existing same-sample solver's upper
+  feedback bound `rho U/S_p`. There is no fitted multiplier, time filter or
+  extra lag. The printed lumped and profile sources exclude one another.
+  This assumes deposition of selected streamwise momentum into the bore;
+  labium recoil, downstream jet dynamics and experimental sound accuracy
+  remain outside the claim. G0/G1/G3 kernel tests compare independent
+  velocity-squared quadrature, the analytic derivative, cut symmetry, zero
+  deviation and momentum-preserving spreading. Native voice/card tests cover
+  shared profile selection, same-sample feedback and source-work accounting.
 
   OPT-IN FORCED JET (`FlueVoice::with_forced_jet`, card row `jet_response
   forced-bickley SPACING WINDOW`; rulings 7376/7518): the forced Bickley
@@ -8601,9 +8682,13 @@ None.
   674860b2e the held-room G4 card without the row rendered wav 0820a975 and
   flows 866aa73f, the posted control's bytes). REFUSALS: the row with no
   `window embouchure` before it, a law other than `open-strip`, trailing
-  fields, a card without the forced jet, a late attachment, and an area that
-  is not finite and positive. NOT CLAIMED: a measured flute mouth flow, a
-  uniform velocity over the strip, and the terms left on `S_m`.
+  fields, a card without the forced jet, a late attachment, an area that is
+  not finite and positive, and, while rendering, a mouth flow whose speed over
+  the named area reaches the gas's speed of sound (MB 1833: PF-661 slide G4 and
+  C5 cards with the source term and `mouth_loss none` passed it and returned
+  rc 0). The check only reads and refuses, so a render that stays below it is
+  unchanged. NOT CLAIMED: a measured flute mouth flow, a uniform velocity over
+  the strip, and the terms left on `S_m`.
 
   OPT-IN JET SOURCE ON THE STRIP (term `source` on the same row,
   `jet_forcing_area open-strip source`; `FlueVoice::with_jet_source_area`; MB
@@ -8631,6 +8716,49 @@ None.
   REFUSALS: a term other than `source`, trailing fields after it, and the
   row's own refusals above. NOT CLAIMED: a measured source length for an
   embouchure, a uniform flow over the strip, and the terms left on `S_m`.
+
+  OPT-IN JET SWING LIMIT (card row `jet_swing_limit fletcher-1976`, after
+  `jet_spreading`; `FlueVoice::with_jet_swing_limit`, `jet_swing_limit`; MB
+  1784/1816): the forced jet's displacement is linear, and on the organ B4
+  card it swings 25 mm across a 7 mm cut-up. The row limits it by Fletcher's
+  envelope, his model choice (JASA 60, 1976, pp. 927, 933), carried to this
+  jet and not measured on it: exponential growth up to the spread width `W`
+  at the lip, then linear growth with an envelope of semiangle about 15 deg;
+  he says varying these "has very little effect". `E = W + (X - x_t) tan 15
+  deg`, `x_t = X acosh(W w/v) / acosh(y w/v)` from his eq. 9-12, 0 when `W w/v
+  <= 1`. `W` is the station's `b(X)`, `X` the cut-up; no coefficient. THE TIME
+  FORM IS OURS, NOT PRINTED: one gain `g = min(1, E/y)` on the whole linear
+  displacement, stepped at its sign changes, with `y` and `v` its peaks over
+  the last two half cycles and `w` from their length; `mu` from the kernel's
+  gain `y w/v` read through his cosh, though the kernel's response is not a
+  cosh. A saturation of the displacement leaves it crossing zero at the same
+  speed and doesn't change the cut's harmonics (open loop on the organ B4
+  render). The current-feedback guard still reads the linear slope, which
+  bounds the limited one. The render sidecar prints the law, what is printed
+  and what is ours (`flue_input.jet_response.swing_limit`). Measured anchors,
+  neither on this pipe: de la Cuadra and Fabre, ISMA 2004, amplitude at
+  transition about `h` at `Vac/Ub` about 1e-2 and under, and the B4 card's
+  `u/U_j` 0.287 is about 30 times outside that; Verge 1995 ch. 4, linear to
+  `h/2`. Without the row every result is bit-identical
+  (`g0_jet_swing_limit_under_the_spread_width_is_bit_identical` shows the row
+  itself changes nothing until the gain leaves 1). REFUSALS: no forced jet, no
+  named spreading law, a late attachment, a law other than `fletcher-1976`,
+  trailing fields, and a width, cut-up or step not finite and positive. NOT
+  CLAIMED: a measured limit on any pipe here, the vortex street Fletcher sets
+  aside, and any phase change past the transition.
+
+  OPT-IN JET CUT WIDTH (card row `jet_cut_width station`, after
+  `jet_swing_limit`; `FlueVoice::with_jet_cut_width_station`; MB 1784/1816):
+  the tanh cut's half-width is half the flue height times `beta(X)`, the width
+  at which `2 b H U` equals the exit's bulk flux `U h H`. The prints have one
+  `b`, the jet's own sech^2 width at the lip, in the profile, the tanh and the
+  swing (Fletcher and Douglas 1980 eq. 1-2, Verge 1995 eq. 4.25, Auvray et al.
+  2014), and the kernel already carries it as `b0`. The row gives the cut
+  `b0 beta(X)` and the swing `2 b H U` at the station's centre speed. The slope
+  at the crossing is the same, so only the saturation differs. `momentum_drive`
+  keeps the station's centre speed. Without the row every result is
+  bit-identical. REFUSALS: no forced jet, a late attachment, a law other than
+  `station`, trailing fields, and `jet_swing_limit` after it.
 
   JET SPEED EDGE (ruling 8132, bead pexfp.135.2): the declared minimum jet
   speed U_min (`jet_limits`, or 1 m/s on the legacy TMM image) sizes the
@@ -14832,7 +14960,7 @@ This is a fixed-reference, constant-coefficient, reversible small-strain
 model. The midpoint method is second order for smooth forcing and adds no
 model damping; an energy balance does not establish time or mesh convergence.
 General circuits, radiation, dielectric/structural loss, nonlinear switching,
-thermal updates and experimental validation remain outside this spatial path.
+ceramic thermal updates and experimental validation remain outside this spatial path.
 `piezoelectric_plate` exercises an actual finite-plate voltage ramp followed by
 charge-preserving electrode disconnection and computed open-circuit ringing.
 
@@ -14853,6 +14981,27 @@ charge and heat; that heat belongs to the load, not the ceramic. Temperature
 evolution and general RLC networks are not inferred. Synthetic RC exponential,
 current/voltage drive and mechanically excited harvesting tests exercise this
 same field solve, including orientation, gauge and transactional refusal checks.
+
+`transient::load::thermal::step_with_thermal_loads_candidate` connects those
+original electrode loads to `PreparedMaterialNetwork` and the existing
+cell-driver enthalpy residual. Each prepared resistor has exactly one electrode
+binding; its original material-network destination alone selects the finite
+heat receiver. Pinned electrical and conductive claims are evaluated at every
+proposed thermal endpoint. The original spatial midpoint solve supplies actual
+load current, Joule heat and motion; no separate RC or mechanical integrator is
+introduced. Native thermal links carry that heat into finite neighbouring cells.
+
+Both accepted clocks must agree. Every trial starts from the same accepted
+mechanical/electrical history, and one candidate contains both final histories
+only after the native thermal and combined work/storage checks pass. The
+complete source sample, per-load heat routes and spatial residuals are retained.
+The ceramic keeps its original fixed source tensors and small-strain geometry;
+only the external load and thermal network evolve temperature. Coupled accuracy
+is first order in general. Synthetic regressions in
+`tests/piezoelectric/spatial_transient_load/thermal.rs` compare finite two-cell
+heating and spatial motion against independently eliminated scalar equations,
+including source substitution, polarity, continuation and transactional refusal.
+They do not establish empirical ceramic or conductor qualification.
 
 The reduced rod/circuit path also accepts
 `TensorPiezoelectric::longitudinal(direction)` without a second scalar material
@@ -18710,8 +18859,9 @@ and never used to correct another body's momentum coordinate. Unequal masses
 therefore retain pairwise action/reaction. Attached composites require complete
 inner work and original contact paths; incomplete inner storage refuses instead
 of silently reverting to a global work correction. Native numerical coordinate
-probes use each retained contact's physical displacement scale. No analytic
-Newton action is claimed for the new path quadrature.
+probes use each retained contact's physical displacement scale. The original
+radius-coordinate path derivative also supplies the native Newton action,
+including the explicitly admitted continuous noncontact branch.
 
 Quadrature and original-source refusals produce nonfinite trial efforts in the
 infallible native interface; the source APIs retain typed errors. A failed work
@@ -18766,9 +18916,11 @@ endpoint derivative projects through its contact row's
 outer product. Valid near-fold motion therefore does not require central
 numerical probes outside the attached domain. The coincident fold retains its
 singular derivative and refuses; no finite tangent is invented. A native inner
-rule without a derivative is never replaced by its quadratic view. Assemblies
-containing Maugis retain their existing numerical derivative route until that
-owner supplies its actual path derivative. Focused checks compare the
+rule without a derivative is never replaced by its quadratic view. Maugis uses
+its original radius-coordinate analytic-slope quadrature and closed-form disk
+derivative, retaining the source work budget, zero-area crossing and terminal
+fold refusal. No endpoint-force subtraction or finite-difference contact
+probe is required. Focused checks compare the
 complete analytic action with directional work differences and advance a
 strictly attached near-fold state through both native and prepared execution.
 
@@ -18815,17 +18967,21 @@ material and admitted radiation states.
 
 The scalar solve consumes `NormalLawSource::mean_force_between` and its original
 analytic endpoint derivative, also used by `BoundNormalStorage`. Conservative
-Hertz, explicit attached JKR, finite-range DMT and retained finite-gap tables
-share this path without a fitted common law. Signed attraction and negative
+Hertz, explicit attached JKR, finite-zone Maugis, finite-range DMT and retained
+finite-gap tables share this path without a fitted common law. Maugis retains
+its original selected contact/noncontact domain and bounded work/derivative
+budgets. Signed attraction and negative
 adhesive potential remain physical. Unilateral laws retain the inactive
 negative-approach fraction through contact onset and release. Positive
-Hunt--Crossley dissipation and Maugis without an admitted analytic path
-derivative refuse; native network damping does not replace their contact loss.
+Hunt--Crossley dissipation refuses; native network damping does not replace
+its contact loss.
 
 Safeguarded analytic Newton refinement retains the positive-slope mechanical
 root connected to the accepted JKR state and respects explicit source-domain,
-iteration, force and coordinate bounds. A coarse ambiguous DMT step, source
-fold/domain escape or unresolved root refuses. Contact uses the straight
+iteration, force and coordinate bounds. Maugis requires the original positive
+load-line-slope bracket; the JKR stable-root search does not infer a Maugis
+post-fold branch. A coarse ambiguous DMT step, source fold/domain escape or
+unresolved root refuses. Contact uses the straight
 approach path between accepted native endpoints, with a held work-conjugate
 reaction; continuous within-sample turning points, attachment and snap release
 are not resolved by this lane.
@@ -18845,7 +19001,9 @@ Focused evidence uses the original ordinary complete-pencil propagator: four
 stiff modes and two Kelvin--Voigt links under tensile JKR; twenty steps of native
 Maxwell memory, storage and independently integrated loss; source-domain,
 receiving-state and cancellation rollback; and Hertz/table onset and release,
-DMT gap attraction and explicit lossy-contact refusal. The retained-table test
+DMT gap attraction and explicit lossy-contact refusal. Finite-zone Maugis cases
+at lambda 0.2 and 5 compare the complete native modal/Maxwell propagation,
+original source work, material loss and total energy closure. The retained-table test
 does not rerun its BEM producer. Prepared radiation/material-ingress paths and
 full typed-port/workspace audits are not newly claimed by the bounded
 verification projection.
@@ -21759,7 +21917,20 @@ The existing held-input, contact and observer conventions remain explicit.
 
 The original bank observer reads its complete physical prefix at the declared
 string offset, so compact and Vk modes cannot overlap or double count in the
-pressure calculation. Focused native tests cover independently written
+pressure calculation. The string contribution uses the same compact strip
+observer as fixed-end strings, with the signed area and midpoint first moment
+of its original half-integer cosine shapes. Both its monopole acceleration and
+dipole jerk therefore survive body/duct composition. Acceleration retains the
+original interval-mean momentum increment; jerk differences consecutive accepted
+interval means. The first interval primes its own history without inventing a
+release impulse or an endpoint reaction from the descriptor's mean multiplier.
+Body/duct observation and material histories keep their original owners. The
+existing positive-string-axis compact approximation and absence of string
+radiation back-reaction remain. G1 checks compare sine/cosine moments with
+independent spatial quadrature and actual bare/joined pressure with a damped
+oscillator derived by eliminating the common-velocity constraint.
+
+Focused native tests cover independently written
 mechanical/fluid DAE evolution with 20/40/80-step refinement, work/heat and
 constraint closure, nonlinear histories, malformed/incompatible joins, and
 128 exact steps of accepted warm radiation memory at 48 kHz. Actual renderer

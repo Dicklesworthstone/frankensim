@@ -7,7 +7,7 @@
 //! is supplied here. Source-bearing owners retain their original phase and
 //! query policy. A numerical snapshot alone carries no source authority.
 
-/// Weak-loss bulk absorption with explicitly supplied compressional viscosity.
+/// Bulk absorption and homogeneous dispersion with explicit compressional viscosity.
 pub mod absorption;
 
 use fs_blake3::{ContentHash, DomainHasher};

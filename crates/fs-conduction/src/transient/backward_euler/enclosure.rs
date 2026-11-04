@@ -1,6 +1,6 @@
 //! Capacity storage with implicit reflected radiation and immutable temperature history.
 //! The existing linear and full k(T) Newton owners remain the only solid solvers.
-//! Shared enclosure traces separate internal exchange from original external heat.
+//! Shared physical traces separate reflected exchange from original external heat.
 
 use fs_exec::Cx;
 use super::{
@@ -11,8 +11,8 @@ use crate::{
     AmbientRadiationConfig, ConductionError, ConductionProblem, RobinFlux, ScalarField,
     ThermalBc, ThermalBoundary, ThermalInterfaces,
     radiation::{
-        EnclosureExchangeReport, GrayDiffuseEnclosure, RadiosityReport,
-        enclosure_exchange::{self as exchange, Patch, PatchLaw},
+        EnclosureExchangeReport, GrayDiffuseEnclosure, OpenDiffuseEnclosure, RadiosityReport,
+        enclosure_exchange::{self as exchange, Patch, PatchLaw, PreparedEnclosure},
     },
 };
 
@@ -21,7 +21,8 @@ use crate::{
 #[derive(Debug, Clone)]
 pub struct EnclosureEndpointEvaluation {
     /// Complete physical residual, stored energy, original convection/Neumann
-    /// exchanges and prescribed reaction. Radiation is internal signed exchange.
+    /// exchanges and prescribed reaction. Only physical-surface radiation enters
+    /// the solid account; an open model's separate bath row closes exchange.
     pub physical: EndpointEvaluation,
     /// Fresh radiosity on the supplied candidate's exact patch means.
     pub radiosity: RadiosityReport,
@@ -100,11 +101,38 @@ impl BackwardEuler<'_> {
         dt_s: f64, config: StepConfig, enclosure: &GrayDiffuseEnclosure,
         radiation_config: AmbientRadiationConfig,
     ) -> Result<EnclosureEndpointEvaluation, ConductionError> {
+        let prepared = PreparedEnclosure::Closed(enclosure.prepare_radiosity(cx)?);
+        self.evaluate_enclosure_endpoint(cx, problem, interfaces, old, candidate,
+            dt_s, config, &prepared, radiation_config)
+    }
+
+    /// Audit the same capacity endpoint against an explicit black environment.
+    /// Its algebraic reservoir row has no solid capacity or prescribed reaction.
+    /// Fresh physical-surface loads enter the original full residual and bath
+    /// reactions; only original convection can heat a surrounding air stream.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_prescribed_open_enclosure_endpoint(
+        &self, cx: &Cx<'_>, problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>, old: &[f64], candidate: &[f64],
+        dt_s: f64, config: StepConfig, enclosure: &OpenDiffuseEnclosure,
+        ambient_temperature_k: f64, radiation_config: AmbientRadiationConfig,
+    ) -> Result<EnclosureEndpointEvaluation, ConductionError> {
+        self.evaluate_enclosure_endpoint(cx, problem, interfaces, old, candidate,
+            dt_s, config, &PreparedEnclosure::Open(enclosure, ambient_temperature_k), radiation_config)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_enclosure_endpoint(
+        &self, cx: &Cx<'_>, problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>, old: &[f64], candidate: &[f64],
+        dt_s: f64, config: StepConfig, enclosure: &PreparedEnclosure<'_>,
+        radiation_config: AmbientRadiationConfig,
+    ) -> Result<EnclosureEndpointEvaluation, ConductionError> {
         self.admit_endpoint_step(cx, problem, old, dt_s, config)?;
         radiation_config.validate()?;
-        let patches = exchange::bind(cx, problem, enclosure, candidate)?;
-        let means = exchange::means(cx, problem, enclosure, candidate)?;
-        let fresh = exchange::radiosity(cx, enclosure, &means, radiation_config)?;
+        let patches = exchange::bind_surface_traces(cx, problem, enclosure.surfaces())?;
+        let means = exchange::surface_means(cx, problem, enclosure.surfaces(), candidate)?;
+        let fresh = enclosure.solve(cx, &means, radiation_config)?;
         self.enclosure_endpoint_from_radiosity(
             cx, problem, interfaces, old, candidate, dt_s, config, &patches, fresh,
         )
@@ -148,6 +176,34 @@ impl BackwardEuler<'_> {
         interfaces: Option<&ThermalInterfaces>, old: &[f64], dt_s: f64,
         step_config: StepConfig, nonlinear: Option<NonlinearStepConfig>,
         enclosure: &GrayDiffuseEnclosure, radiation_config: AmbientRadiationConfig,
+    ) -> Result<EnclosureStepSolution, ConductionError> {
+        let prepared = PreparedEnclosure::Closed(enclosure.prepare_radiosity(cx)?);
+        self.advance_prescribed_enclosure(cx, problem, interfaces, old, dt_s,
+            step_config, nonlinear, &prepared, radiation_config)
+    }
+
+    /// Advance the same area-mean capacity model with an open black environment.
+    /// The existing reflected-radiation iteration and unchanged-old-field solid
+    /// solver remain the owners. The external bath contributes no fictitious
+    /// storage and cannot cancel the solid's outward radiative heat account.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_prescribed_with_open_enclosure_radiation(
+        &self, cx: &Cx<'_>, problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>, old: &[f64], dt_s: f64,
+        step_config: StepConfig, nonlinear: Option<NonlinearStepConfig>,
+        enclosure: &OpenDiffuseEnclosure, ambient_temperature_k: f64,
+        radiation_config: AmbientRadiationConfig,
+    ) -> Result<EnclosureStepSolution, ConductionError> {
+        self.advance_prescribed_enclosure(cx, problem, interfaces, old, dt_s,
+            step_config, nonlinear, &PreparedEnclosure::Open(enclosure, ambient_temperature_k), radiation_config)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_prescribed_enclosure(
+        &self, cx: &Cx<'_>, problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>, old: &[f64], dt_s: f64,
+        step_config: StepConfig, nonlinear: Option<NonlinearStepConfig>,
+        enclosure: &PreparedEnclosure<'_>, radiation_config: AmbientRadiationConfig,
     ) -> Result<EnclosureStepSolution, ConductionError> {
         let accepted = self.advance_enclosure_with_responses(
             cx, problem, old, dt_s, step_config, nonlinear, enclosure, radiation_config,
@@ -199,7 +255,7 @@ impl BackwardEuler<'_> {
     pub(crate) fn advance_enclosure_with_responses<S, A>(
         &self, cx: &Cx<'_>, problem: ConductionProblem<'_>, old: &[f64], dt_s: f64,
         step_config: StepConfig, nonlinear: Option<NonlinearStepConfig>,
-        enclosure: &GrayDiffuseEnclosure, radiation_config: AmbientRadiationConfig,
+        enclosure: &PreparedEnclosure<'_>, radiation_config: AmbientRadiationConfig,
         absolute_target_j: Option<f64>, responses_per_trial: usize,
         mut respond: impl FnMut(ConductionProblem<'_>, StepConfig, Option<NonlinearStepConfig>, f64)
             -> Result<EnclosureStepResponse<S>, ConductionError>,
@@ -230,11 +286,9 @@ impl BackwardEuler<'_> {
             if index % 512 == 0 { poll(cx, index)?; }
             predictor[vertex] = dofs.prescribed()[vertex];
         }
-        let patches = exchange::bind(cx, problem, enclosure, &predictor)?;
-        let prepared = enclosure.prepare_radiosity(cx)?;
-        let initial_means = exchange::means(cx, problem, enclosure, &predictor)?;
-        let initial_radiosity =
-            exchange::prepared_radiosity(cx, &prepared, &initial_means, radiation_config)?;
+        let patches = exchange::bind_surface_traces(cx, problem, enclosure.surfaces())?;
+        let initial_means = exchange::surface_means(cx, problem, enclosure.surfaces(), &predictor)?;
+        let initial_radiosity = enclosure.solve(cx, &initial_means, radiation_config)?;
         let (initial, _) = endpoint_from_radiosity(
             cx, problem, &predictor, dt_s, &patches, initial_radiosity, &mut evaluate,
         )?;
@@ -251,7 +305,7 @@ impl BackwardEuler<'_> {
         if absolute_target_j.is_some() && target * 0.125 <= 0.0 {
             return Err(invalid("enclosure contact inner residual allowance is not representable"));
         }
-        let mut driving = initial.radiosity.surface_temperatures_k;
+        let mut driving = initial.radiosity.surface_temperatures_k[..patches.len()].to_vec();
         let mut thermal_responses = 0usize;
         let mut solid_iterations = 0usize;
         let mut krylov_iterations = 0usize;
@@ -260,7 +314,7 @@ impl BackwardEuler<'_> {
         let mut last_mismatch = 0.0_f64;
         for iteration in 0..radiation_config.max_iterations {
             poll(cx, iteration)?;
-            let applied = exchange::prepared_radiosity(cx, &prepared, &driving, radiation_config)?;
+            let applied = enclosure.solve(cx, &driving, radiation_config)?;
             let boundary = exchange::shifted_boundary(problem, &patches, &applied)?;
             let combined = ConductionProblem { boundary: &boundary, ..problem };
             let (initial, _) = evaluate(combined, &predictor)?;
@@ -288,8 +342,8 @@ impl BackwardEuler<'_> {
             count(&mut nonlinear_backtracks, response.nonlinear_backtracks, max_backtracks)?;
             count(&mut krylov_iterations, response.krylov_iterations, max_krylov)?;
             let conduction = &response.conduction;
-            let actual = exchange::means(cx, problem, enclosure, &conduction.temperature)?;
-            let fresh = exchange::prepared_radiosity(cx, &prepared, &actual, radiation_config)?;
+            let actual = exchange::surface_means(cx, problem, enclosure.surfaces(), &conduction.temperature)?;
+            let fresh = enclosure.solve(cx, &actual, radiation_config)?;
             let (audited, physical_state) = endpoint_from_radiosity(
                 cx, problem, &conduction.temperature, dt_s, &patches, fresh, &mut evaluate,
             )?;
@@ -337,7 +391,7 @@ impl BackwardEuler<'_> {
                     response, physical, physical_state, nonlinear_backtracks,
                     combined_boundary: boundary,
                     radiation: EnclosureExchangeReport {
-                        radiosity: fresh, applied_heat_w: applied.net_outward_heat_w,
+                        radiosity: fresh, applied_heat_w: applied.net_outward_heat_w[..patches.len()].to_vec(),
                         max_heat_mismatch_w: last_mismatch, iterations: iteration + 1,
                         solid_iterations, krylov_iterations,
                     },
@@ -361,7 +415,8 @@ impl BackwardEuler<'_> {
 
 /// One physical heat decomposition for both fixed and freshly queried contacts.
 /// The callback assembles capacity on the fresh reflected boundary; only this
-/// owner removes internal radiation from authored convection and Neumann heat.
+/// owner removes radiation from authored convection and Neumann heat. An open
+/// bath closes the radiosity system, not the solid's physical heat account.
 #[allow(clippy::too_many_arguments)]
 fn endpoint_from_radiosity<A>(
     cx: &Cx<'_>, problem: ConductionProblem<'_>, candidate: &[f64], dt_s: f64,
@@ -378,7 +433,7 @@ fn endpoint_from_radiosity<A>(
     physical.convective_robin_fluxes = rows;
     physical.convective_out_w = convective_out_w;
     physical.neumann_out_w = exchange::prescribed_neumann_heat(cx, problem)?;
-    physical.radiation_out_w = fresh.enclosure_energy_closure_w;
+    physical.radiation_out_w = finite(fresh.net_outward_heat_w[..patches.len()].iter().sum())?;
     physical.energy_residual_j = finite(physical.stored_energy_change_j - dt_s * (
         physical.source_w + physical.dirichlet_in_w - physical.neumann_out_w
             - physical.convective_out_w - physical.radiation_out_w

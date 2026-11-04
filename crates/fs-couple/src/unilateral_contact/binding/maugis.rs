@@ -122,15 +122,9 @@ impl ConstitutiveDiscreteGradient for BoundNormalStorage {
         direction: &[f64],
         out: &mut [f64],
     ) -> bool {
-        // Maugis retains its numerical route until its original path owner
-        // supplies a derivative. Other source owners compose their own exact
-        // path derivatives, including unilateral and finite-range crossings.
-        if !self.component_rule
-            || self
-                .contacts
-                .iter()
-                .any(|contact| matches!(contact.source, NormalLawSource::MaugisAttached(_)))
-        {
+        // Every original source supplies its own path derivative, including
+        // finite-zone adhesion and its continuous zero-solid-area junction.
+        if !self.component_rule {
             return false;
         }
         if a.len() != b.len()

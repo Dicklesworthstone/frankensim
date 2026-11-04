@@ -3,28 +3,32 @@
  "family": "double-bass",
  "title": "Double bass",
  "reference_instrument": "Double bass (University of Iowa MIS)",
- "summary": "A reduced engine, not a double bass. Each string drives a single body mode (a 0.15 kg mass on a spring at 280 Hz, damping ratio 0.02) that radiates as a baffled piston of 0.003 m², in place of the double bass's bridge, arched plates, ribs, bass bar, soundpost and enclosed air. On the four graded open strings the hyperbolic-law renders leave 8 to 18 dB too much of each note's energy above 8 kHz, and too much in every band above 0.5 kHz, up to 23 dB at 2-3 kHz. No open, measured double bass geometry was found on 2026-10-30, so the physical body waits on a scanned or measured double bass. The open-string arco cards for the E, A, D and G (orchestra tuning) strings select the shared hyperbolic friction law with published assumed coefficients. The bow force each card carries was re-chosen on 2026-11-01 by a rule fixed beforehand: the geometric mean of the end points of the longest contiguous run of Helmholtz points (playable, slip fraction within 25 % of the ideal value) on a hyperbolic-law bow-force ladder (rigid bridge, 1 s at 0.15 m/s), re-run in full at commit 01c5841f4 (receipts: data/instruments/grades/double-bass/bowed-card-sweep-hyperbolic-01c5841f4.jsonl); the forces changed on E1 (14.23 to 11.47 N), A1 (8.963 to 18.16 N), D2 (6.151 to 7.417 N) and G2 (3.982 to 4.300 N). The ladder is a proxy for the render, which uses the one-port plate and the card's own bow schedule, and the stick-rule change of commit f8ae88277 does not reach these cards. The notes were graded again at the re-chosen forces (instrgrade at commit 01c5841f4, 2026-11-01); the re-choice is not claimed to sound better. Against the same strings at the forces they carried before (14 of the 15 measures per note have a spread of real recordings to fall inside or outside of, and only those are counted): A1 went from 5 measures inside to 8 (the spectrogram difference fell from 25.5 to 24.1 dB, the attack-time gap from 2.0 to 1.3 doublings of attack time, and the spectral-flux gap from 0.86 to 0.79 dB, each from outside to inside), E1 kept 4 inside but swapped a pair (the fundamental-frequency gap fell from 2.16 to 1.65 cents, outside to inside; the spectral-flux gap rose from 0.74 to 0.83 dB, inside to outside), and D2 and G2 did not change (8 and 4 inside). Over the four notes: 21 inside and 35 outside before, 24 inside and 32 outside after. The spectral-envelope gap is now 26.9 dB on E1 and 19.6 dB on G2 (it was 30.5 and 25.7 at the old forces); the cause of the earlier rise against the Gaussian law was not found, and this follows a change of bow force, not of the model. The A1 render peaks at 0.0936 Pa against the family's full scale of 0.1 Pa (94 %), with no clipped sample. E1's playable run is one grid point wide: the ladder at 11.4653 N is playable (1.375 flybacks per period, so E1 is not a single-flyback Helmholtz note even there) and at 11.47 N (+0.04 %, the force rounded to 4 figures) it is raucous. Published string properties, assumed interface properties and retained bow gestures each have source rows and run through the one-string point-bow reader.",
+ "summary": "Four open strings (E1, A1, D2, G2) and two stopped notes. D3 is a first render: sharp (+32.5 cents), and it doesn't reach steady Helmholtz motion. Eb2 is a partial the engine refused at 2.18 s, with no bow release. Db4 has no render. The body is a computed shell that keeps its lowest 256 modes, to 1623.5 Hz: above that it neither moves nor radiates, so the pages are much darker than the recordings from about 3 kHz up. It is spruce and maple shell with a 116 L air cavity through the f-holes, from Johannsson's printed bass dimensions on the cello shell route, not a scan; wood below 150 Hz is a declared extrapolation. The bow is a 10 mm ribbon with hair compliance on the measured rosin curve (Woodhouse and Galluzzo 2025, eq. 13). The after-length is a sixth of the speaking length or a sixth x 116/115, a ratio borrowed from the cello.",
  "physics_present": [
-  "fs-couple bowed_string: pinned Euler-Bernoulli string modes from vibrating length, tension and mass per length; tension is set from the table so the open-string pitch is a result of the card",
-  "fs-couple set-valued contact on the shared fs-tribo Hyperbolic law: static cap and mu(v) = 0.4 + 0.08/(abs(v) + 0.2), with the declared law solved at the string endpoint; no Gaussian conversion or numerical velocity ramp",
-  "a reduced body: one mode (0.15 kg, 280 Hz, damping ratio 0.02) radiating one way as a baffled piston of 0.003 m² to a 1 m observer; the same placeholder serves viola, cello and double bass. Modal damping from the fundamental's measured Q where one was retrieved",
-  "a point bow driven by a canonical gesture schedule (on the string at rest, constant acceleration to the bow speed, constant force, lift); forces are the 2026-11-01 re-choice (geometric mean of the longest Helmholtz run of a hyperbolic-law bow-force ladder, see sources.tsv) as authored gestures, with no recording involved",
-  "bowed_card_sweep and the native performer now read the same declared law; existing rigid-bridge sweeps in data/instruments/grades describe the prior Gaussian baseline and do not validate the hyperbolic cards' playable region"
+  "computed double-bass shell body: spruce top and bass bar, maple back, ribs and bridge, from Johannsson's printed bass dimensions on the cello shell route; the lowest 256 modes are kept, ending at 1623.5 Hz; first structural mode 106 Hz",
+  "air cavity of 116 L breathing through the f-holes (a physical neck); coupled air mode 61 Hz",
+  "wood from the measured spruce (from 100 Hz) and maple (from 150 Hz) packs, with the lower band edge moved to 90 Hz as a declared extrapolation, not a measurement",
+  "Thomastik Spirocore Orchestra 4/4 medium strings (maker's tension table, line mass and gauges) at a 1.100 m speaking length, bending modes in two polarisations, with a bending stiffness",
+  "bow of finite width: a 10 mm ribbon of 3 cells with hair compliance (Pitteroff and Woodhouse 1998)",
+  "friction law measured on real rosin (Woodhouse and Galluzzo 2025, eq. 13), a steady sliding curve",
+  "static compliance of the omitted body modes at the bridge and under the bow (exact static Green)",
+  "after-length (bridge to tailpiece): one sixth of the speaking length (E1) or one sixth x 116/115 (A1, D2, G2), the printed bowed-string rule with the cello's 116 mm ratio borrowed",
+  "room air at 20 °C",
+  "a bow gesture on a fixed schedule: a 0.15 s ramp to the note's force at 0.15 m/s, then a 20 ms lift; each page states its bow force",
+  "a finger stop on the stopped notes (D3, Eb2): a normal contact on the string at the equal-tempered station; its 100 N limit is the solver's limit, not a finger's force, and no print gives a finger force"
  ],
  "physics_missing": [
-  "the whole body (a reduced stand-in is rendered): bridge, arched top and back with graduated thickness, ribs, bass bar, soundpost, f-holes, enclosed air and radiation back-loading; the physical route is the material_strings shell body with published plate geometry and wood data, finite-width bow ribbon",
-  "measured string Q and body admittance for this instrument (placeholders are labelled UNKNOWN in sources.tsv)",
-  "string torsion and the second polarisation, and a ribbon bow with hair compliance",
-  "bending stiffness and mode-dependent loss of the real wound strings; the card carries zero stiffness and one damping ratio for every mode",
-  "the actual rosin's measured temperature-dependent law, transfer layer and contact history; the selected hyperbolic curve is a published velocity-only assumption",
-  "stopped notes and finger damping; only open strings are described",
-  "mode-count, friction-substep and time-step convergence ladders",
-  "the C extension and the bow type",
-  "player noise: the render is far too clean (harmonic-to-noise ratio and spectral flux of the violin and viola notes are far from the real recordings), because there is no hair ribbon, no rosin thermal third body and no bow speed or force fluctuation",
-  "hysteresis and onset classes: the sweeps start from rest at constant speed and force, so the up and down force ramps, the acceleration and force onset map and the pre-Helmholtz transient length are not measured",
-  "measured playable limits: the model's Helmholtz band has not been compared with the published measured limits on a card whose string matches the measured one; torsion, which lowers the upper limit, is absent"
+  "body modes above the 256th: the pages keep the binary's limit when they were rendered, so above 1623.5 Hz the body neither moves nor radiates and the pages are much darker than the recordings from about 3 kHz up",
+  "stopped notes: D3 is sharp (+32.5 cents) and not in steady Helmholtz motion; Eb2 stops at 2.18 s with no bow release; Db4 has a recording and no render",
+  "a measured bass: the body is mapped from a maker's published specification onto the il Cannone specimen tables, not scanned; the bass bar is moved 18.1 mm inward to clear the f-hole (no source prints that position); the bridge is a uniform 152.6 g shell; the 1.070 m of a 3/4 instrument is not modelled",
+  "measured wood properties below 150 Hz (maple) and 100 Hz (spruce)",
+  "string loss: none is printed for these strings, so the cards carry none and the notes ring on after the bow lifts",
+  "string torsion: the cards carry no twist modes",
+  "the rosin's temperature and contact history: the friction is a steady sliding curve with no thermal or third-body memory",
+  "a printed double-bass after-length: the 116/115 ratio is borrowed from the cello",
+  "player variation: bow speed and force follow a fixed schedule"
  ],
- "blocked": null,
+ "blocked": "Db4 (recording-only): the finger-stop render that completed did not sound a Db4, and no other has completed.",
  "beads": [
   "pexfp.310"
  ]

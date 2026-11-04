@@ -345,8 +345,21 @@ fn g4_kinetic_changes_have_zero_instantaneous_work_and_refusals_are_atomic() {
     let next_point = point(1.0, &[(10.0, 0.4)], 0.7);
     let changed_mass = body(next_point.clone(), 2.0, DT, &gate);
     let changed_map = body(project(next_point.material(), 2.0), 1.0, DT, &gate);
+    let changed_compatible_map = body(
+        next_point
+            .with_compatible_strain_columns(&[[2.0, 0.0, 0.0, 0.0, 0.0, 0.0]])
+            .unwrap(),
+        1.0,
+        DT,
+        &gate,
+    );
     let changed_clock = body(next_point, 1.0, DT / 2.0, &gate);
-    for next in [&changed_mass, &changed_map, &changed_clock] {
+    for next in [
+        &changed_mass,
+        &changed_map,
+        &changed_compatible_map,
+        &changed_clock,
+    ] {
         assert!(
             retained
                 .rebind_materials(next, allowance(1.0), &gate)
@@ -354,6 +367,14 @@ fn g4_kinetic_changes_have_zero_instantaneous_work_and_refusals_are_atomic() {
         );
         assert_eq!(snapshot(&retained), accepted);
     }
+    let guarded = changed_compatible_map
+        .history(&[0.01], &[0.0], InitialMemory::Relaxed, &gate)
+        .unwrap();
+    assert!(
+        guarded
+            .rebind_materials(&different_kelvin, allowance(1.0), &gate)
+            .is_err()
+    );
     let stiffer = body(point(2.0, &[(20.0, 0.4)], 0.7), 1.0, DT, &gate);
     assert!(
         retained

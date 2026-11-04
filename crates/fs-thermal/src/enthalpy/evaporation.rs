@@ -290,6 +290,10 @@ impl DepositionSimulation<'_> {
         if !super::positive(step.liquid.mass_kg) {
             return Err(ThermalEvaporationError::CellExhausted(id));
         }
+        let mut candidate = cell.clone();
+        candidate.mass_kg = step.liquid.mass_kg;
+        candidate.specific_h_j_kg = step.liquid.specific_enthalpy_j_kg;
+        caloric.validate_cell(&candidate)?;
         checkpoint()?;
         // All fallible evaluation precedes the single physical-state commit.
         let cell = self

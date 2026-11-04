@@ -40,6 +40,148 @@ fn close(a: f64, b: f64, tol: f64) {
         "{a:e} != {b:e}"
     );
 }
+
+fn potential(law: &SourceMaugisSphereContact) -> mechanical::MaugisAttachedPotential {
+    let (_, d0, f0) = scales(law);
+    mechanical::MaugisAttachedPotential::new(
+        law.clone(),
+        continuation::MaugisContinuationBudget {
+            work: MaugisWorkBudget {
+                absolute_tolerance_j: 1e-12 * f0 * d0,
+                relative_tolerance: 1e-11,
+                maximum_evaluations: 10000,
+            },
+            energy_absolute_tolerance_j: 1e-9 * f0 * d0,
+            energy_relative_tolerance: 1e-10,
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn original_path_derivative_matches_work_identity_both_directions_and_fold_endpoints() {
+    for lambda in [0.02, 0.2, 1.0, 5.0, 1000.0] {
+        let law = model(lambda);
+        let (_, d0, f0) = scales(&law);
+        let owner = potential(&law);
+        let fold = law.minimum_attached_indentation_m();
+        for (from, to) in [
+            (0.0, 3.0 * d0),
+            (3.0 * d0, 0.0),
+            (fold, 3.0 * d0),
+            (3.0 * d0, fold),
+        ] {
+            // Independent original-radius force integral; it does not use the
+            // new analytic-slope moments or physical-indentation path owner.
+            let work = law
+                .reversible_work_between(from, to, owner.budget().work)
+                .unwrap();
+            let mean = work.work_j / (to - from);
+            let expected = (law.evaluate_attached(to).unwrap().normal_force_n - mean) / (to - from);
+            let actual = owner.path_end_derivative(from, to).unwrap();
+            assert!(
+                (actual - expected).abs() < 3e-8 * (f0 / d0),
+                "lambda={lambda}: {actual:e} != {expected:e}"
+            );
+        }
+        let h = 1e-5 * d0;
+        let from = 0.4 * d0;
+        let to = 2.0 * d0;
+        let difference = (owner.path(from, to + h).unwrap().mean_force_n
+            - owner.path(from, to - h).unwrap().mean_force_n)
+            / (2.0 * h);
+        assert!((owner.path_end_derivative(from, to).unwrap() - difference).abs() < 3e-6 * f0 / d0);
+        if lambda >= 1.0 {
+            assert!(matches!(
+                owner.path_end_derivative(fold, fold),
+                Err(continuation::MaugisContinuationError::Contact(
+                    MaugisError::EndpointTangent
+                ))
+            ));
+        }
+    }
+}
+
+#[test]
+fn tiny_maugis_paths_keep_half_tangent_without_force_subtraction() {
+    for lambda in [0.02, 0.2, 1.0, 5.0, 1000.0] {
+        let law = model(lambda);
+        let (_, d0, f0) = scales(&law);
+        let owner = potential(&law);
+        let half = 0.5 * law.evaluate_attached(d0).unwrap().tangent_n_per_m.unwrap();
+        close(owner.path_end_derivative(d0, d0).unwrap(), half, 1e-14);
+        for end in [
+            d0.next_up(),
+            d0 * (1.0 + 2.0_f64.powi(-24)),
+            d0 * (1.0 + 2.0_f64.powi(-40)),
+        ] {
+            for (a, b) in [(d0, end), (end, d0)] {
+                let actual = owner.path_end_derivative(a, b).unwrap();
+                assert!((actual - half).abs() < 1e-7 * f0 / d0);
+                assert_eq!(actual, owner.path_end_derivative(a, b).unwrap());
+            }
+        }
+        let mut budget = owner.budget();
+        budget.work.maximum_evaluations = 5;
+        let short = mechanical::MaugisAttachedPotential::new(law, budget).unwrap();
+        assert!(matches!(
+            short.path_end_derivative(d0, 2.0 * d0),
+            Err(continuation::MaugisContinuationError::Contact(
+                MaugisError::WorkBudgetExceeded
+            ))
+        ));
+    }
+}
+
+#[test]
+fn connected_disk_derivative_preserves_negative_stiffness_and_zero_area_crossing() {
+    for lambda in [0.02, 0.2, 0.8] {
+        let law = model(lambda);
+        let (_, d0, f0) = scales(&law);
+        let owner = potential(&law).with_noncontact_continuation().unwrap();
+        let limits = owner.noncontact_continuation().unwrap();
+        let width = limits.first_contact_indentation_m - limits.minimum_indentation_m;
+        let a = limits.minimum_indentation_m + 0.3 * width;
+        let b = limits.minimum_indentation_m + 0.7 * width;
+        assert!(owner.path_end_derivative(a, b).unwrap() < 0.0);
+        for (from, to) in [(a, b), (b, a), (a, 0.5 * d0), (0.5 * d0, a)] {
+            let h = 1e-5 * width;
+            let difference = (owner.path(from, to + h).unwrap().mean_force_n
+                - owner.path(from, to - h).unwrap().mean_force_n)
+                / (2.0 * h);
+            let actual = owner.path_end_derivative(from, to).unwrap();
+            assert!((actual - difference).abs() < 3e-6 * (f0 / d0).max(actual.abs()));
+        }
+        let touch = limits.first_contact_indentation_m;
+        let contact_tangent = owner.path_end_derivative(touch, touch).unwrap();
+        let left = owner
+            .path_end_derivative(touch - 1e-8 * width, touch - 1e-8 * width)
+            .unwrap();
+        assert!((contact_tangent - left).abs() < 1e-6 * f0 / d0);
+        for (from, to) in [
+            (limits.minimum_indentation_m, b),
+            (b, limits.minimum_indentation_m),
+        ] {
+            let mean = owner.path(from, to).unwrap().mean_force_n;
+            let expected = (owner.evaluate(to).unwrap().normal_force_n() - mean) / (to - from);
+            close(
+                owner.path_end_derivative(from, to).unwrap(),
+                expected,
+                1e-10,
+            );
+        }
+        assert!(
+            owner
+                .path_end_derivative(limits.minimum_indentation_m, limits.minimum_indentation_m)
+                .is_err()
+        );
+        assert!(
+            owner
+                .path_end_derivative(limits.minimum_indentation_m.next_down(), b)
+                .is_err()
+        );
+    }
+}
 #[test]
 fn original_maugis_closure_load_and_indentation_equations() {
     for lambda in [0.02, 0.2, 1.0, 5.0, 20.0] {
@@ -65,9 +207,15 @@ fn original_maugis_closure_load_and_indentation_equations() {
             close(s.contact_area_m2, PI * s.contact_radius_m.powi(2), 2e-15);
             assert!(s.cohesive_radius_m > s.contact_radius_m);
             let update = fs_contact::interface_binding::adhesive_shear::SourceAdhesiveContactUpdate::from_maugis(&s).unwrap();
-            assert_eq!(update.normal_state_identity(), law.normal_state().identity());
+            assert_eq!(
+                update.normal_state_identity(),
+                law.normal_state().identity()
+            );
             assert_eq!(update.contact().area_m2(), s.contact_area_m2);
-            assert_eq!(update.contact().repulsive_normal_force_n(), s.repulsive_normal_force_n);
+            assert_eq!(
+                update.contact().repulsive_normal_force_n(),
+                s.repulsive_normal_force_n
+            );
             assert!(update.contact().area_m2() < PI * s.cohesive_radius_m.powi(2));
         }
     }

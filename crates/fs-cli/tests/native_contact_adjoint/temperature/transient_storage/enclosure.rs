@@ -1,4 +1,4 @@
-//! Closed, equal-area gray exchange redistributes heat without an external bath.
+//! Equal-area gray exchange shares the physical capacity/contact history.
 //! These reciprocal factors are a manufactured algebraic fixture, not a claim
 //! that the imported contact pair geometrically forms a closed enclosure.
 
@@ -9,6 +9,8 @@ use fs_project::{ConductionEnclosure, EnclosureRadiatingSurface, EnclosureViewFa
 const START_K: f64 = 300.0;
 const EPSILON: f64 = 0.85; // Existing immutable gray-surface fixture card.
 const SIGMA: f64 = 5.670_374_419e-8;
+const OPEN_BATH_K: f64 = 290.0;
+const MUTUAL_VIEW: f64 = 0.25;
 
 fn n(row: &J, key: &str) -> f64 {
     row.f64_field(key).unwrap_or_else(|| panic!("missing numeric {key}: {row:?}"))
@@ -45,6 +47,15 @@ fn enclosed_fixture(cooling: Cooling) -> Fixture {
     f
 }
 
+fn open_fixture(cooling: Cooling) -> Fixture {
+    let mut f = enclosed_fixture(cooling);
+    let declaration = f.project.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+        .enclosure_radiation.as_mut().unwrap();
+    declaration.ambient_temperature = Some(QtyAny::new(OPEN_BATH_K, dims::TEMPERATURE));
+    declaration.view_factors = vec![vec![0.0, MUTUAL_VIEW], vec![MUTUAL_VIEW, 0.0]];
+    f
+}
+
 fn mesh_masses() -> Vec<f64> {
     let mut f = fixture(true, false);
     time(&mut f).max_step.value = 1.0;
@@ -59,7 +70,8 @@ fn mesh_masses() -> Vec<f64> {
 
 fn exchange(row: &J) -> f64 {
     let radiation = row.get("radiation").unwrap();
-    assert_eq!(radiation.str_field("model"), Some("closed-gray-diffuse-enclosure"));
+    let open = radiation.str_field("model") == Some("open-gray-diffuse-enclosure");
+    if !open { assert_eq!(radiation.str_field("model"), Some("closed-gray-diffuse-enclosure")); }
     assert_eq!(radiation.str_field("storage"), Some("volumetric-heat-capacity"));
     let patches = radiation.get("patches").unwrap().as_array().unwrap();
     assert_eq!(patches.len(), 2);
@@ -68,27 +80,47 @@ fn exchange(row: &J) -> f64 {
     close(n(cold, "area_m2"), 5.0, 1e-12);
     close(n(hot, "area_m2"), 5.0, 1e-12);
     let (a, b) = (n(cold, "mean_temperature_k"), n(hot, "mean_temperature_k"));
-    // Solve the two-surface gray resistance network independently. Both
-    // emissivities are 0.85, F12=F21=1, and each exterior has area 5 m2.
-    let cold_out = SIGMA * 5.0 * (a - b) * (a + b) * (a * a + b * b)
-        / (2.0 / EPSILON - 1.0);
+    let (cold_out, hot_out) = if open {
+        // Independently solve the reflected 2x2 equations relative to the
+        // black bath, then recover each original solid patch's outward heat.
+        let emission = |t: f64| EPSILON * SIGMA * (t - OPEN_BATH_K) * (t + OPEN_BATH_K)
+            * (t * t + OPEN_BATH_K * OPEN_BATH_K);
+        let r = (1.0 - EPSILON) * MUTUAL_VIEW;
+        let ja = (emission(a) + r * emission(b)) / (1.0 - r * r);
+        let jb = (emission(b) + r * emission(a)) / (1.0 - r * r);
+        (5.0 * (ja - MUTUAL_VIEW * jb), 5.0 * (jb - MUTUAL_VIEW * ja))
+    } else {
+        // Independent closed two-surface gray resistance network.
+        let q = SIGMA * 5.0 * (a - b) * (a + b) * (a * a + b * b)
+            / (2.0 / EPSILON - 1.0);
+        (q, -q)
+    };
     assert!(cold_out.abs() > 1e-5, "the fixture must exchange internal radiation");
     close(n(cold, "nonlinear_heat_w"), cold_out, 2e-8);
-    close(n(hot, "nonlinear_heat_w"), -cold_out, 2e-8);
-    close(n(cold, "nonlinear_heat_w") + n(hot, "nonlinear_heat_w"), 0.0, 2e-8);
-    for key in ["applied_radiation_out_w", "nonlinear_radiation_out_w",
-        "prescribed_neumann_out_w", "physical_dirichlet_in_w"] {
+    close(n(hot, "nonlinear_heat_w"), hot_out, 2e-8);
+    for key in ["applied_radiation_out_w", "nonlinear_radiation_out_w"] {
+        close(n(radiation, key), cold_out + hot_out, 2e-8);
+    }
+    for key in ["prescribed_neumann_out_w", "physical_dirichlet_in_w"] {
         close(n(radiation, key), 0.0, 2e-8);
+    }
+    if open {
+        assert!(cold_out + hot_out > 0.1, "the black bath must remove real stored heat");
+        close(n(radiation, "ambient_temperature_k"), OPEN_BATH_K, 0.0);
+        close(n(radiation, "ambient_absorbed_w"), cold_out + hot_out, 2e-8);
+        close(n(radiation, "enclosure_energy_closure_w"), 0.0, 2e-8);
     }
     assert!(n(radiation, "physical_residual_j") <= n(radiation, "physical_residual_threshold_j"));
     assert!(n(radiation, "physical_energy_residual_j").abs() <= ENERGY_TOLERANCE_J);
-    let contact = row.get("temperature_contact").unwrap();
-    close(n(contact, "physical_residual_norm_j"), n(radiation, "physical_residual_j"), 0.0);
-    close(n(contact, "physical_energy_residual_j"), n(radiation, "physical_energy_residual_j"), 0.0);
+    if let Some(contact) = row.get("temperature_contact").filter(|value| value.get("method").is_some()) {
+        close(n(contact, "physical_residual_norm_j"), n(radiation, "physical_residual_j"), 0.0);
+        close(n(contact, "physical_energy_residual_j"), n(radiation, "physical_energy_residual_j"), 0.0);
+    }
     cold_out
 }
 
 fn external_heat(row: &J, cooling: Cooling, internal: f64) -> f64 {
+    let radiative = n(row.get("radiation").unwrap(), "nonlinear_radiation_out_w");
     let natural = match cooling {
         Cooling::Natural => reservoir_heat(row, "cold"),
         Cooling::Mixed => reservoir_heat(row, "hot"),
@@ -105,14 +137,14 @@ fn external_heat(row: &J, cooling: Cooling, internal: f64) -> f64 {
         close(n(actual, "air_total_w"), heat, 3e-6);
         close(n(coupled, "air_heat_gain_w"), heat, 3e-6);
         close(n(coupled, "off_path_convective_out_w"), natural, 3e-6);
-        close(n(coupled, "radiative_out_w"), 0.0, 2e-8);
+        close(n(coupled, "radiative_out_w"), radiative, 2e-8);
         assert!(n(coupled, "coupled_energy_residual_j").abs() <= ENERGY_TOLERANCE_J);
         heat
     } else { 0.0 };
     let outgoing = n(row.get("radiation").unwrap(), "convective_out_w");
     close(outgoing, air + natural, 3e-6);
     assert!((outgoing - (air + natural + internal)).abs() > 1e-5,
-        "internal reflected exchange must not be added to external or air-stream heat");
+        "reflected radiation must not be added to convective or air-stream heat");
     if cooling != Cooling::Prescribed {
         let owner = row.get(if cooling == Cooling::Air { "conjugate" } else { "natural" }).unwrap();
         let contact = row.get("temperature_contact").unwrap();
@@ -129,7 +161,10 @@ fn external_heat(row: &J, cooling: Cooling, internal: f64) -> f64 {
 
 fn audit(receipt: &J, field: &J, cooling: Cooling, card: &str, claim: &str, masses: &[f64], surface: bool) {
     let trajectory = receipt.get("transient").unwrap();
-    assert_eq!(trajectory.get("radiation").unwrap().str_field("method"), Some("implicit-closed-gray-diffuse-enclosure"));
+    let open = receipt.get("radiation").unwrap().str_field("model") == Some("open-gray-diffuse-enclosure");
+    assert_eq!(trajectory.get("radiation").unwrap().str_field("method"), Some(if open {
+        "implicit-open-gray-diffuse-enclosure"
+    } else { "implicit-closed-gray-diffuse-enclosure" }));
     let contact_work = trajectory.get("temperature_contact").unwrap();
     let method = if surface { "source-backed-contact-fixed-point" } else { "source-backed-contact-newton" };
     assert_eq!(contact_work.str_field("method"), Some(method));
@@ -158,7 +193,7 @@ fn audit(receipt: &J, field: &J, cooling: Cooling, card: &str, claim: &str, mass
                 close(n(contact, "thermal_responses"), n(radiation, "solid_solves"), 0.0);
             }
             let power = if start < 0.25 { 20.0 } else if start < 0.75 { 5.0 } else { 10.0 };
-            let net = power - external;
+            let net = power - external - n(radiation, "nonlinear_radiation_out_w");
             close(n(row, "source_w"), power, 1e-10);
             close(n(row, "net_input_w"), net, 2.0 * ENERGY_TOLERANCE_J / dt + 1e-8);
             close(n(row, "stored_energy_change_j"), dt * net, 2.0 * ENERGY_TOLERANCE_J + 1e-8);
@@ -166,7 +201,7 @@ fn audit(receipt: &J, field: &J, cooling: Cooling, card: &str, claim: &str, mass
             grid_responses += n(contact, "thermal_responses"); start = end;
         }
         close(supplied, 10.0, 0.0);
-        if cooling == Cooling::Prescribed { close(stored, 10.0, 2e-8); }
+        if cooling == Cooling::Prescribed && !open { close(stored, 10.0, 2e-8); }
         else { assert!(stored < 0.0, "external cooling must remove real stored heat"); }
         close(n(contact_work, &format!("{grid}_thermal_responses")), grid_responses, 0.0);
         responses += grid_responses;
@@ -202,6 +237,13 @@ fn audit(receipt: &J, field: &J, cooling: Cooling, card: &str, claim: &str, mass
         let patch = patches.iter().find(|patch| patch.str_field("region") == surface.str_field("target")).unwrap();
         close(n(surface, "mean_temperature_k"), n(patch, "mean_temperature_k"), 0.0);
         close(n(surface, "nonlinear_heat_w"), n(patch, "nonlinear_heat_w"), 0.0);
+    }
+    if open {
+        close(n(final_radiation, "ambient_temperature_k"), OPEN_BATH_K, 0.0);
+        close(n(final_radiation, "ambient_effective_area_m2"), 10.0 * (1.0 - MUTUAL_VIEW), 1e-12);
+        close(n(final_radiation, "ambient_absorbed_w"), n(last_radiation, "ambient_absorbed_w"), 0.0);
+        close(n(final_radiation, "nonlinear_radiative_out_w"), n(last_radiation, "nonlinear_radiation_out_w"), 0.0);
+        close(n(final_radiation, "enclosure_energy_closure_w"), 0.0, 2e-8);
     }
 }
 
@@ -244,5 +286,62 @@ fn native_capacity_contact_enclosure_keeps_natural_and_air_heat_in_their_own_res
                 for (a, b) in temperature.iter().zip(&curve_temperature) { close(*a, *b, 3e-6); }
             } else { curve_temperature = temperature; }
         }
+    }
+}
+
+#[test]
+fn native_capacity_contact_open_enclosure_preserves_bath_storage_and_all_cooling_paths() {
+    let masses = mesh_masses();
+    for (case, cooling) in [Cooling::Prescribed, Cooling::Natural, Cooling::Air, Cooling::Mixed].into_iter().enumerate() {
+        let f = open_fixture(cooling);
+        let mut curve_temperature = Vec::new();
+        for surface in [false, true] {
+            let pack = if surface { temperature_surface_pack() } else { temperature_pack() };
+            let (card, claim) = (pack.1.clone(), pack.2.clone());
+            let (receipt, field) = solve_radiating(&f, 210 + 2 * case + usize::from(surface), pack);
+            audit(&receipt, &field, cooling, &card, &claim, &masses, surface);
+            let temperature = values(&field, "temperature");
+            if surface {
+                for (a, b) in temperature.iter().zip(&curve_temperature) { close(*a, *b, 3e-6); }
+            } else { curve_temperature = temperature; }
+        }
+    }
+}
+
+#[test]
+fn native_capacity_open_enclosure_uses_the_same_owner_with_static_contact() {
+    let f = open_fixture(Cooling::Prescribed);
+    let masses = mesh_masses();
+    let (receipt, field, _) = f.solve(0.3, None, 218);
+    let trajectory = receipt.get("transient").unwrap();
+    let mut integrated = 0.0;
+    for row in trajectory.get("fine").unwrap().as_array().unwrap() {
+        exchange(row);
+        let radiation = row.get("radiation").unwrap();
+        close(n(radiation, "convective_out_w"), 0.0, 0.0);
+        let net = n(row, "source_w") - n(radiation, "nonlinear_radiation_out_w");
+        let dt = n(row, "dt_s");
+        close(n(row, "stored_energy_change_j"), dt * net, 2.0 * ENERGY_TOLERANCE_J);
+        integrated += dt * net;
+    }
+    let stored: f64 = values(&field, "temperature").iter().zip(&masses)
+        .map(|(t, mass)| mass * CP * (t - START_K)).sum();
+    close(stored, integrated, 8.0 * ENERGY_TOLERANCE_J);
+    assert!(stored < 0.0);
+    let final_radiation = receipt.get("radiation").unwrap();
+    assert_eq!(final_radiation.str_field("time_integration"), Some("backward-euler-capacity"));
+    close(n(final_radiation, "ambient_absorbed_w"), n(final_radiation, "nonlinear_radiative_out_w"), 2e-8);
+}
+
+#[test]
+fn native_capacity_open_enclosure_refuses_unimplemented_trajectory_adjoints() {
+    let f = open_fixture(Cooling::Prescribed);
+    for (ordinal, output) in [(219, "temperature-final-adjoint"), (220, "temperature-sampled-peak-adjoint")] {
+        let (source, contact, ledger) = prepare_with_pack(&f, ordinal, Some(output), temperature_pack());
+        let output = super::radiation::run_radiating(&f, &source, &contact, &ledger);
+        assert_ne!(output.exit_code, fs_cli::exit::SUCCESS);
+        let refusal = format!("{}{}", output.stdout, output.stderr);
+        assert!(refusal.contains("radiation") || refusal.contains("enclosure"), "{refusal}");
+        assert!(!refusal.contains("run_receipt"), "unsupported derivative published history: {refusal}");
     }
 }

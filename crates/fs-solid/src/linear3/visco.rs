@@ -290,14 +290,22 @@ impl IntegrationPoint {
         &self,
         dofs: &[usize],
         displacement: &[f64],
-        mut strain: [f64; 6],
+        strain: [f64; 6],
     ) -> [f64; 6] {
+        self.compatible_strain_from_local(strain, |i| displacement[dofs[i]])
+    }
+
+    fn compatible_strain_from_local(
+        &self,
+        mut strain: [f64; 6],
+        displacement: impl Fn(usize) -> f64,
+    ) -> [f64; 6]{
         if let Some(gradients) = &self.compatible_gradients {
             for i in 0..3 {
                 strain[i] = gradients
                     .iter()
-                    .zip(dofs.chunks_exact(3))
-                    .map(|(g, d)| g[i] * displacement[d[i]])
+                    .enumerate()
+                    .map(|(node, g)| g[i] * displacement(3 * node + i))
                     .sum();
             }
         }

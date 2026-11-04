@@ -21,7 +21,7 @@ correlation.
 
 ## Public types and semantics
 
-- `CorrelationId` names twenty-one implemented relations: circular-duct 3.66 and
+- `CorrelationId` names twenty-two implemented relations: circular-duct 3.66 and
   4.36 limits; a thermally developing circular-duct relation; rectangular-
   duct constant-temperature and constant-flux limits; one simultaneously
   developing constant-temperature rectangular-duct table slice at
@@ -37,7 +37,8 @@ correlation.
   and Whitaker forced convection over an isolated sphere with explicit
   bulk/surface viscosity correction; and Hollands horizontal enclosed air-layer
   transfer, including gas conduction and stable/subcritical limits; and Hollands
-  inclined air-gap transfer with the explicit source inclination correction.
+  inclined air-gap transfer with the explicit source inclination correction; and
+  Wright vertical air-cavity transfer with its finite-height correction.
 - `CorrelationCard` combines an `fs-evidence::ModelCard`, bibliographic
   provenance, and `DiscrepancyBasis`.
 - `CorrelationInputs` makes Re, Pr, L/Dh, aspect ratio, Ra, bulk/surface
@@ -52,6 +53,8 @@ correlation.
   length or a mesh-cell width. `inclined_air_layer(Ra, Pr, gap_over_min_span,
   inclination_degrees)` retains full-gravity Ra and the physical inclination
   separately; the source formula applies its own gravity projection.
+  `vertical_air_layer(Ra_magnitude, Pr, height_over_gap)` uses the normal gap
+  for Ra and Nu and the whole vertical height for its aspect ratio.
 - `evaluate` returns `NusseltEvaluation` only after every shared
   `ValidityDomain` axis is present and inside its inclusive bounds.
 - `NusseltEvaluation::heat_transfer_coefficient` returns
@@ -81,7 +84,9 @@ correlation.
    steady conduction limit Nu=2. The horizontal enclosed air layer retains
    finite signed Ra, with stable and zero-driving total conduction Nu=1.
    The inclined air layer admits nonnegative Ra and angles in [0, 60] degrees,
-   retaining Nu=1 below the projected onset. Other supplied groups remain positive.
+   retaining Nu=1 below the projected onset. The vertical air cavity admits
+   nonnegative Ra through 1e6, including total conduction Nu=1 at zero driving,
+   and whole vertical height/gap in [5, 110]. Other supplied groups remain positive.
 3. Every successful value carries exactly the selected model card, its
    validity domain, assumptions, discrepancy, and deterministic evaluation
    provenance.
@@ -154,7 +159,8 @@ and quasi-steady storage assumptions follow the horizontal card's policy. The
 coefficient includes total gas conduction plus convection; radiation remains
 separate. Heating from above at nonzero inclination refuses: taking an absolute
 Ra or swapping wall temperatures would falsely change the physical orientation.
-Vertical cavities, non-air fluids, ventilation and wall shear remain unsupported.
+This inclined card excludes vertical cavities, non-air fluids, ventilation
+and wall shear; the distinct vertical card below supplies its own authority.
 
 Zero inclination shares the original horizontal arithmetic bit for bit; the
 signed horizontal card retains its existing source identity and stable branch.
@@ -165,6 +171,42 @@ that crosses them. Unrelated admitted partials stay available. The numerical
 leaf and `tests/inclined_air_layer.rs` compare independent high-precision values
 and derivatives, source/domain refusals, horizontal compatibility and typed
 conductance scaling. These are implementation checks, not experimental validation.
+
+## Vertical enclosed air cavity
+
+`WrightVerticalAirLayer` implements [Wright (1996), ASHRAE Transactions 102(1),
+940–946, Eqs. (9a–c) and (7)](https://dspacemainprd01.lib.uwaterloo.ca/server/api/core/bitstreams/2c7962f1-23f2-45ce-855c-5ca72c711eda/content).
+With `A = whole vertical height / normal gap`, the source prescribes the maximum
+of its tall-cavity curve and `0.242 (Ra/A)^0.272`, retaining finite-height effects
+without adding a parallel heat path. The tall-cavity curve is
+`1 + 1.75967e-10 Ra^2.2984755` through `Ra=1e4`,
+`0.028154 Ra^0.4134` through `Ra=5e4`, and
+`0.0673838 Ra^(1/3)` above it. The printed coefficients and branch cuts are
+retained without an invented smoothing blend.
+
+The implemented domain is `Ra in [0, 1e6]`, `A in [5, 110]`, and
+`Pr in [0.70, 0.72]`. The Ra and height limits conservatively retain the
+source's measurement range; the narrow Pr interval is a declared implementation
+admission around air near 0.71, not a published validation interval or evidence
+of fluid identity. The dimensional owner must establish air, sealed vertical
+parallel isothermal walls, compatible transverse confinement and edge conditions,
+mean-wall-temperature properties, and quasi-steady Boussinesq behavior.
+This card does not interpolate the unsupported gap between 60 and 90 degrees.
+
+Ra uses the absolute wall-temperature difference because exchanging the hot
+and cold vertical walls preserves this transfer magnitude. The dimensional
+thermal owner retains the signed heat direction and both walls' finite energy
+storage. Nu includes gas conduction exactly once; radiation and solid thermal
+bridges are separate physical paths. At zero driving Nu is exactly one.
+The 20% model discrepancy is an engineering allowance.
+
+Analytic Ra and aspect-ratio partials follow the active maximum branch.
+The low-Ra derivative is evaluated directly, preserving sensitivity when Nu
+rounds to one. Crossing a source branch cut, equal competing Nu branches or
+a validity boundary omits the corresponding derivative. Independent arithmetic,
+finite-difference partials, domain refusal, total-conduction and typed-coefficient
+checks are in `tests/vertical_air_layer.rs`; they check implementation accuracy,
+not experimental validation.
 
 ## Error model
 

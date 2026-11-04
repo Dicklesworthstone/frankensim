@@ -223,6 +223,10 @@ impl DepositionSimulation<'_> {
         if step.solid.mass_kg <= 0.0 {
             return Err(ThermalSublimationError::CellExhausted(id));
         }
+        let mut candidate = cell.clone();
+        candidate.mass_kg = step.solid.mass_kg;
+        candidate.specific_h_j_kg = step.solid.specific_enthalpy_j_kg;
+        caloric.validate_cell(&candidate)?;
         checkpoint()?;
         // No fallible work follows: both owners commit the same accepted result.
         let cell = self

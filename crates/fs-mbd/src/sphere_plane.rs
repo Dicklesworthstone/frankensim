@@ -6,6 +6,9 @@
 //! admits driven rolling and collinear sliding with exact slip-arrest events.
 //! Changing-direction sliding uses explicitly bounded implicit Coulomb steps,
 //! with first-order continuum convergence and timestep-resolved slip arrest.
+//! Zero-slip resolution scales with relative translation and contact-point
+//! rotation. Shared world drift cannot widen the friction-mode tolerance;
+//! unresolvable native momentum roundoff still refuses rather than implying rest.
 //! Ballistic contact timing and both impulse laws remain in fs-contact.
 //! Centre trajectories and world momenta use analytic constant-force segments;
 //! their curved-sliding force is a time-discrete approximation of Coulomb flow.
@@ -29,7 +32,7 @@ use fs_contact::impact::{
     NormalImpactError, NormalImpactInput, NormalImpactResult, solve_normal_impact,
 };
 use fs_contact::tangential::impact::{
-    CoulombImpulseError, CoulombImpulseInput, CoulombImpulseResult, FrictionLaw,
+    CoulombImpulseError, CoulombImpulseInput, CoulombImpulseResult, FrictionLaw, FrictionRegime,
     solve_isotropic_coulomb_impulse,
 };
 
@@ -408,17 +411,20 @@ impl Engine {
     fn kinematics(&mut self, body: RigidBodyState) -> Result<(f64, [f64; 2]), SpherePlaneError> {
         let velocity = body.center_of_mass_velocity_world(self.scene.properties)?;
         let omega = world_spin(body).scale(self.inertia.recip());
-        let relative = velocity
-            .sub(self.scene.velocity_world)
-            .add(omega.cross(self.arm));
+        // Subtract the common drift before adding rotation, and use only
+        // contact-relative motion to resolve zero slip. Absolute body/plane
+        // speeds must not turn a representable sliding velocity into rolling.
+        // Spin about the normal contributes no velocity at this contact point.
+        let relative_translation = velocity.sub(self.scene.velocity_world);
+        let surface_rotation = omega.cross(self.arm);
+        let relative = relative_translation.add(surface_rotation);
         vector(relative)?;
         self.velocity_scale = self
             .velocity_scale
-            .max(norm(velocity)?)
-            .max(norm(self.scene.velocity_world)?)
-            .max(norm(omega)? * self.scene.radius);
+            .max(norm(relative_translation)?)
+            .max(norm(surface_rotation)?);
         Ok((
-            finite(velocity.sub(self.scene.velocity_world).dot(self.n))?,
+            finite(relative_translation.dot(self.n))?,
             [
                 finite(relative.dot(self.tangent[0]))?,
                 finite(relative.dot(self.tangent[1]))?,
@@ -667,9 +673,10 @@ impl Engine {
                 finite(normal_force * h)?,
                 self.support_kinetic_mu,
             )?;
-            let after = friction.relative_tangent_velocity_after;
-            let after_speed = finite(after[0].hypot(after[1]))?;
-            let arrested = after_speed <= 4096.0 * f64::EPSILON * self.velocity_scale;
+            // The constitutive branch owns arrest. Velocity tolerances audit
+            // its native realization below; they cannot capture sliding that
+            // the original Coulomb disk still resolves.
+            let arrested = friction.regime == FrictionRegime::Sticking;
             // Resolve a turning trajectory without allowing the discrete force
             // to do positive work on an initial part of its linear slip path.
             // A supercritical transverse drive cannot arrest at a finite time;

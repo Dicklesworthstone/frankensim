@@ -3134,6 +3134,7 @@ dependencies = [
  "fs-blake3",
  "fs-exec",
  "fs-la",
+ "fs-material",
  "fs-math",
  "fs-wakeref",
 ]

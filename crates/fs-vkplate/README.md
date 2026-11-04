@@ -57,9 +57,12 @@ Node count alone does not establish audio-band fidelity.
   nearest node. A finite striker face retains its equal-weight footprint.
 - **Air**: a lumped adiabatic cavity couples a drum's two heads; each head's volume motion
   carries the radiation mass of a baffled piston (`8 rho a^3 / 3`, implicit); a monopole
-  radiation resistance acts on the drum's NET volume flow (two heads moving the same way in
-  space radiate as a weak dipole, which is why a tom's fundamental rings). An optional port
-  models a vented front head.
+  radiation resistance acts on the drum's NET volume flow, so two heads moving the same way in
+  space pay almost none of it. They still radiate as a dipole, which by default no head pays for
+  (the microphone hears it). The opt-in `--head-dipole` charges it: `R_d = rho w^4 D^2 / (12 pi c^3)`
+  on half the difference of the heads' outward volume velocities, `D` from the piece's closed-body
+  table, each head's own share taken off the volume shapes' baffled load. It is an estimate: free-field
+  law, no floor, `w` the membrane-law lower hybrid. An optional port models a vented front head.
 - **Sound**: the Rayleigh integral of surface acceleration at each microphone, per-node delays.
   A microphone hears only surfaces facing it. Over a rigid floor (any plane, `floor_z`, `floor_y`)
   it also hears, by the floor's image, the surfaces facing that image.
@@ -735,9 +738,15 @@ offline examples' card route keeps none of them (ruling 7486):
 - **Tensions** are a drummer's tuning: both heads keep 88cccbb78's ratio and are scaled so the card
   drum's own lowest mode, read from a 0.1 m/s stroke 0.3-1.0 s after onset, sits at the late pitch
   of the Salamander strokes. That pitch is the lowest spectral peak within 20 dB of the strongest,
-  30-400 Hz, where two dynamics agree: kick 40.6 Hz, snare 134.4 Hz, rack tom 133.9 Hz, floor
-  tom 60.4 Hz. The batter tensions that put the card drums there are 375.5 (kick), 1072 (snare),
-  1264 (rack tom) and 478 N/m (floor tom). The early pitch of a hard stroke is up to 15 Hz sharper
+  30-400 Hz, where two dynamics agree: kick 40.6 Hz, rack tom 133.9 Hz, floor tom 60.4 Hz. The
+  snare is the exception. That read gives 134.3 Hz, at the rack tom's own pitch and rate with the
+  wires on or off, so it is probably the rack tom ringing (inferred: no stroke exists with the tom
+  muted). The snare's target is its own line, 150.4 Hz at 78-109 dB/s over 0.10-0.50 s. The batter
+  tensions that put the card drums there are 375.5 (kick), 1646 (snare), 1530 (rack tom) and
+  478 N/m (floor tom). The rack tom's value was rendered with the air modes and the head dipole on,
+  at 133.97 Hz against 133.95 Hz on its strokes at 0.80-1.20 s. Without the cavity's air modes the
+  snare's tuning would read about 166 Hz (the lumped two-head solve), so a render without them is
+  sharp. The early pitch of a hard stroke is up to 15 Hz sharper
   (the stretch); kitgrade's "fundamental", the strongest component in the first 250 ms, reads that.
 - **The wires' contact stiffness** is computed from the steel and film cards (ruling 7520, above).
 - **The hi-hat's rim friction**, 0.6, is measured: Cu-10 at.% Sn (17 wt% Sn; B20 is 20 wt%) sliding

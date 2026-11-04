@@ -18,6 +18,14 @@ mod dirac_body;
 mod reed_ode;
 
 #[cfg(test)]
+mod polarization_tests;
+#[cfg(test)]
+mod moving_contact_tests;
+#[cfg(test)]
+#[path = "acoustic_realize/string_observer_tests.rs"]
+mod moving_string_observer_tests;
+
+#[cfg(test)]
 use reed_ode::realize_reed_ode;
 
 use crate::modal_acoustic_time::{
@@ -34,7 +42,7 @@ use crate::thin_plate::{
 };
 use crate::unilateral_contact::{
     modal_contact_forces, modal_friction_forces, modal_hunt_crossley_forces, slit_contact_force,
-    slit_lay,
+    slit_lay, station::StationContact,
 };
 /// Legacy sections-per-metre budget for default non-reed ODE duct paths.
 const SECTION_BUDGET: f64 = 8.0;
@@ -58,7 +66,7 @@ use fs_phs::{
     modal_bank_ports, quasistatic_aperture_opening, step, step_descriptor, transformer,
 };
 use fs_scenario::{
-    AcousticAssembly, AmbientGas, BeatingReed, BowStroke, ContactTexture, HelmholtzCavity,
+    AcousticAssembly, AmbientGas, BeatingReed, BowStroke, ContactTexture,
     LocallyReactingWall, Pluck, PrestressedString, RadiatingPlate, RayleighParams, ThinPlate,
     UnilateralObstacle, ViscothermalDuct, VolumeVelocityPulse, WaveguideEnd,
 };
@@ -568,6 +576,14 @@ fn realize_assembly_inner(
             what: "sample rate and duration must be positive and finite",
         });
     }
+    if assembly.string.as_ref().is_some_and(|s| s.moving_end && s.polarization_detune > 0.0) {
+        // One scalar body port cannot specify both transverse attachment
+        // motions. Do not silently drop the second plane or constrain it to
+        // the first plane's velocity.
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "moving-end second polarization requires explicit transverse attachment geometry and is not supported by this assembly",
+        });
+    }
     if let Some(observer) = realize_options.baffled_duct {
         return duct_observer::realize(assembly, chart.is_some(), realize_options, observer);
     }
@@ -641,14 +657,14 @@ fn realize_assembly_inner(
     let dirac_string_only = dirac_base && assembly.duct.is_none();
     let dirac_string_duct = dirac_base
         && assembly.duct.is_some()
-        && assembly.cavity.is_none()
         && assembly
             .duct
             .as_ref()
             .is_some_and(|d| bore_spec(d).is_some());
-    if let Some(cavity) = assembly.cavity
-        && !dirac_string_only
-    {
+    // Every assembly path consumes the same complete body image. A cavity is
+    // an internal load of that body, so adding a duct must not replace the
+    // moving-end constraint with the fixed-fixed, one-way bridge path.
+    if let Some(cavity) = assembly.cavity {
         bodies.attach_cavity(cavity, &gas)?;
     }
     if dirac_string_duct {
@@ -665,7 +681,6 @@ fn realize_assembly_inner(
             &assembly.obstacles,
             assembly.contact_texture,
             &mut bodies,
-            None,
             assembly.duct.as_ref(),
             assembly.reed,
             assembly.blow,
@@ -701,7 +716,6 @@ fn realize_assembly_inner(
                 &assembly.obstacles,
                 assembly.contact_texture,
                 &mut bodies,
-                assembly.cavity,
                 None,
                 assembly.reed,
                 assembly.blow,
@@ -1578,7 +1592,10 @@ pub fn string_mode_omega(string: &PrestressedString, k: usize) -> f64 {
 /// scenario has no directional listener. This remains a compact strip model,
 /// not the radiation solution for a cylindrical wire. Common propagation
 /// delay is omitted. Jerk uses backward differences of accepted accelerations
-/// (first-order); instantaneous release impulses are not reconstructed.
+/// (first-order); instantaneous release impulses are not reconstructed. The
+/// joined moving-end path supplies interval-mean accelerations from its accepted
+/// momentum increments, retaining that clock instead of inferring endpoint
+/// reactions from a descriptor step's interval multiplier.
 #[derive(Clone)]
 struct StringObserver {
     weights: Vec<(f64, f64)>,
@@ -1592,6 +1609,18 @@ impl StringObserver {
         let factor = scale * gas.density * string.width_m / (4.0 * pi * range * mass_scale);
         let weights = (1..=string.n_modes)
             .map(|k| {
+                if string.moving_end {
+                    let kpi = (k as f64 - 0.5) * pi;
+                    let sign = if k % 2 == 1 { 1.0 } else { -1.0 };
+                    // The original half-integer cosine shape has both signed
+                    // area and first moment about the same string midpoint.
+                    return (
+                        factor * sign * string.length_m / kpi,
+                        factor * string.length_m.powi(2)
+                            * (0.5 * sign / kpi - 1.0 / kpi.powi(2))
+                            / gas.sound_speed,
+                    );
+                }
                 let kpi = k as f64 * pi;
                 if k % 2 == 1 {
                     (factor * 2.0 * string.length_m / kpi, 0.0)
@@ -2040,8 +2069,9 @@ fn secondary_string(string: &PrestressedString, tension_scale: f64) -> Prestress
     twin
 }
 
-/// Two-way Dirac realize: moving-end waveguide ⊕ plate ⊕ optional
-/// Helmholtz cavity or [`acoustic_chain`] duct. `EA > 0` uses
+/// Two-way Dirac realize: moving-end waveguide ⊕ complete plate/body image
+/// ⊕ optional [`acoustic_chain`] duct. The image retains its cavity, material
+/// and exterior histories together. `EA > 0` uses
 /// [`kirchhoff_carrier_moving_end`] on the same free-fixed port.
 /// Bow, obstacle stations, and blow/reed are leftover ports of
 /// [`join_port`]. Von Karman is the same plate pHS with a quartic
@@ -2056,7 +2086,6 @@ fn realize_dirac_join(
     obstacles: &[UnilateralObstacle],
     texture: Option<ContactTexture>,
     plates: &mut PlateBank,
-    cavity: Option<HelmholtzCavity>,
     duct: Option<&ViscothermalDuct>,
     reed: Option<BeatingReed>,
     blow: Option<VolumeVelocityPulse>,
@@ -2079,11 +2108,9 @@ fn realize_dirac_join(
             mode_zeta(string, omega, wave_number, gas)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let obs_stations: Vec<f64> = obstacles
-        .iter()
-        .flat_map(|o| o.stations.iter().copied())
-        .collect();
-    let waveguide = moving_end_string_phs(string, &zetas, bow, &obs_stations)?;
+    let contacts = StationContact::prepare(obstacles)
+        .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+    let waveguide = moving_end_string_phs(string, &zetas, bow, &contacts)?;
     let n_string = waveguide.state_dim();
     let mut string_state = vec![0.0; n_string];
     if let Some(pluck) = pluck {
@@ -2101,8 +2128,8 @@ fn realize_dirac_join(
         ode_start,
         body_observation,
         fluid_port,
-    ) = match (body, cavity, duct) {
-        (None, _, Some(line)) => {
+    ) = match (body, duct) {
+        (None, Some(line)) => {
             refuse_open_nyquist(line, gas, sample_rate_hz)?;
             let (sections, taps) =
                 bore_spec(line).ok_or(AcousticRealizeError::InvalidDescription {
@@ -2126,8 +2153,8 @@ fn realize_dirac_join(
             string_state.resize(system.state_dim(), 0.0);
             (Some(system), None, string_state, 0, None, fluid_port)
         }
-        (None, _, None) => (Some(waveguide), None, string_state, 1, None, None),
-        (Some(plate), None, None) => {
+        (None, None) => (Some(waveguide), None, string_state, 1, None, None),
+        (Some(plate), None) => {
             let joined = dirac_body::join_complete_body(waveguide, string_state, plate, None)?;
             (
                 None,
@@ -2138,26 +2165,7 @@ fn realize_dirac_join(
                 joined.fluid_port,
             )
         }
-        (Some(plate), Some(cav), None) => {
-            let flow = helmholtz_flow_cavity(cav, gas)
-                .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
-            let load = dirac_body::DiracBodyLoad {
-                state: vec![0.0; flow.state_dim()],
-                system: flow,
-                face: 0,
-                drive_port: None,
-            };
-            let joined = dirac_body::join_complete_body(waveguide, string_state, plate, Some(load))?;
-            (
-                None,
-                Some(joined.system),
-                joined.state,
-                0,
-                Some(joined.observation),
-                joined.fluid_port,
-            )
-        }
-        (Some(plate), None, Some(line)) => {
+        (Some(plate), Some(line)) => {
             refuse_open_nyquist(line, gas, sample_rate_hz)?;
             let (sections, taps) =
                 bore_spec(line).ok_or(AcousticRealizeError::InvalidDescription {
@@ -2188,11 +2196,6 @@ fn realize_dirac_join(
                 Some(joined.observation),
                 joined.fluid_port,
             )
-        }
-        (Some(_), Some(_), Some(_)) => {
-            return Err(AcousticRealizeError::InvalidDescription {
-                what: "Dirac join takes a cavity or a duct, not both",
-            });
         }
     };
     let dt = 1.0 / f64::from(sample_rate_hz);
@@ -2228,8 +2231,7 @@ fn realize_dirac_join(
     let mut out = Vec::with_capacity(n);
     let mut rec_x = vec![0.0; x.len()];
     let mut average_output = vec![0.0; descriptor_exact.as_ref().map_or(0, |s| s.port_dim())];
-    let phi0 = det::sqrt(2.0 / (string.lin_density_kg_m * string.length_m));
-    let pi = core::f64::consts::PI;
+    let mut string_observer = StringObserver::new(string, gas, listener_m, 1.0);
     for i in 0..n {
         let t = i as f64 * dt;
         if let Some(prepared) = descriptor_exact.as_mut() {
@@ -2239,7 +2241,7 @@ fn realize_dirac_join(
                 n_s,
                 string,
                 bow,
-                obstacles,
+                &contacts,
                 reed,
                 blow,
                 gas,
@@ -2257,7 +2259,7 @@ fn realize_dirac_join(
                 n_s,
                 string,
                 bow,
-                obstacles,
+                &contacts,
                 reed,
                 blow,
                 gas,
@@ -2277,7 +2279,7 @@ fn realize_dirac_join(
                 n_s,
                 string,
                 bow,
-                obstacles,
+                &contacts,
                 reed,
                 blow,
                 gas,
@@ -2297,13 +2299,15 @@ fn realize_dirac_join(
             )?
             .x;
         }
-        let mut p = 0.0;
-        for k in 0..n_s {
-            let acc = (rec_x[2 * k + 1] - x[2 * k + 1]) / dt;
-            let kappa = (k as f64 + 0.5) * pi / string.length_m;
-            let integral = phi0 * (if k % 2 == 0 { 1.0 } else { -1.0 }) / kappa;
-            p += gas.density * string.width_m * acc * integral / (4.0 * pi * listener_m);
-        }
+        let acceleration: Vec<f64> = (0..n_s)
+            .map(|k| (rec_x[2 * k + 1] - x[2 * k + 1]) / dt)
+            .collect();
+        // Keep the original accepted interval-mean source. Its first interval
+        // has no preceding mean: prime with itself, without a fabricated jerk
+        // or release impulse. All later means share the same observer history.
+        let initial = string_observer.previous_acceleration.is_none()
+            .then(|| acceleration.clone());
+        let mut p = string_observer.observe(acceleration, initial, dt)?;
         if let Some(observation) = &body_observation {
             p += observation.pressure_between(&x, &rec_x, dt, gas.density, listener_m)?;
         }
@@ -2328,11 +2332,11 @@ fn moving_end_string_phs(
     string: &PrestressedString,
     zetas: &[f64],
     bow: Option<BowStroke>,
-    obs_stations: &[f64],
+    contacts: &[StationContact],
 ) -> Result<fs_phs::PortHamiltonian, AcousticRealizeError> {
     let n = string.n_modes.max(1);
     let phi0 = det::sqrt(2.0 / (string.lin_density_kg_m * string.length_m));
-    let m = 1 + usize::from(bow.is_some()) + obs_stations.len();
+    let m = 1 + usize::from(bow.is_some()) + contacts.len();
     let mut g = vec![0.0; (2 * n) * m];
     for k in 0..n {
         let kappa = (k as f64 + 0.5) * core::f64::consts::PI / string.length_m;
@@ -2342,8 +2346,8 @@ fn moving_end_string_phs(
             g[(2 * k + 1) * m + col] = phi0 * det::cos(kappa * bow.station_frac * string.length_m);
             col += 1;
         }
-        for &s in obs_stations {
-            g[(2 * k + 1) * m + col] = phi0 * det::cos(kappa * s.clamp(0.0, 1.0) * string.length_m);
+        for contact in contacts {
+            g[(2 * k + 1) * m + col] = phi0 * det::cos(kappa * contact.station_frac() * string.length_m);
             col += 1;
         }
     }
@@ -2387,7 +2391,7 @@ fn leftover_u(
     n_s: usize,
     string: &PrestressedString,
     bow: Option<BowStroke>,
-    obstacles: &[UnilateralObstacle],
+    contacts: &[StationContact],
     reed: Option<BeatingReed>,
     blow: Option<VolumeVelocityPulse>,
     gas: &GasState,
@@ -2409,17 +2413,7 @@ fn leftover_u(
             .map_err(AcousticRealizeError::Nonlinear)?;
         col += 1;
     }
-    for spec in obstacles {
-        for (i, &s) in spec.stations.iter().enumerate() {
-            let opening = moving_end_opening(string, x, n_s, s);
-            let v = y.get(col).copied().unwrap_or(0.0);
-            let gap = spec.gaps_m.get(i).copied().unwrap_or(0.0);
-            let pen = (opening - gap).max(0.0);
-            let fel = -spec.stiffness * det::pow(pen, spec.alpha);
-            u[col] = fel - spec.internal_loss * spec.stiffness * det::pow(pen, spec.alpha) * v;
-            col += 1;
-        }
-    }
+    col = moving_end_contact_inputs(string, x, n_s, contacts, &y, &mut u, col)?;
     if let Some(port) = fluid_port {
         if port != col || port >= m {
             return Err(AcousticRealizeError::InvalidDescription {
@@ -2454,7 +2448,7 @@ fn leftover_u_ode(
     n_s: usize,
     string: &PrestressedString,
     bow: Option<BowStroke>,
-    obstacles: &[UnilateralObstacle],
+    contacts: &[StationContact],
     reed: Option<BeatingReed>,
     blow: Option<VolumeVelocityPulse>,
     gas: &GasState,
@@ -2477,20 +2471,7 @@ fn leftover_u_ode(
             .map_err(AcousticRealizeError::Nonlinear)?;
         col += 1;
     }
-    for spec in obstacles {
-        for (i, &s) in spec.stations.iter().enumerate() {
-            if col >= m {
-                break;
-            }
-            let opening = moving_end_opening(string, x, n_s, s);
-            let v = y.get(col).copied().unwrap_or(0.0);
-            let gap = spec.gaps_m.get(i).copied().unwrap_or(0.0);
-            let pen = (opening - gap).max(0.0);
-            let fel = -spec.stiffness * det::pow(pen, spec.alpha);
-            u[col] = fel - spec.internal_loss * spec.stiffness * det::pow(pen, spec.alpha) * v;
-            col += 1;
-        }
-    }
+    col = moving_end_contact_inputs(string, x, n_s, contacts, &y, &mut u, col)?;
     if let Some(port) = fluid_port {
         if port != col || port >= m {
             return Err(AcousticRealizeError::InvalidDescription {
@@ -2517,13 +2498,38 @@ fn leftover_u_ode(
     Ok(u)
 }
 
+// Both the free/duct ODE and common-velocity descriptor use these same physical
+// force ports, including original quadrature and the actual conjugate velocity.
+#[allow(clippy::too_many_arguments)]
+fn moving_end_contact_inputs(
+    string: &PrestressedString, x: &[f64], n_s: usize, contacts: &[StationContact],
+    velocities: &[f64], input: &mut [f64], start: usize,
+) -> Result<usize, AcousticRealizeError> {
+    let end = start.checked_add(contacts.len()).ok_or(AcousticRealizeError::InvalidDescription {
+        what: "moving-end contact port count overflows",
+    })?;
+    if n_s.checked_mul(2).is_none_or(|n| n > x.len())
+        || end > input.len() || velocities.len() != input.len()
+    {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "moving-end contact lost its original string state or force/velocity ports",
+        });
+    }
+    for (i, contact) in contacts.iter().enumerate() {
+        let opening = moving_end_opening(string, x, n_s, contact.station_frac());
+        input[start + i] = contact.force(opening, velocities[start + i])
+            .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+    }
+    Ok(end)
+}
+
 fn moving_end_opening(string: &PrestressedString, x: &[f64], n_s: usize, station: f64) -> f64 {
     let phi0 = det::sqrt(2.0 / (string.lin_density_kg_m * string.length_m));
     let mut y = 0.0;
     for k in 0..n_s {
         let kappa = (k as f64 + 0.5) * core::f64::consts::PI / string.length_m;
-        let phi = phi0 * det::cos(kappa * station.clamp(0.0, 1.0) * string.length_m);
-        y += x.get(2 * k).copied().unwrap_or(0.0) * phi;
+        let phi = phi0 * det::cos(kappa * station * string.length_m);
+        y += x[2 * k] * phi;
     }
     y
 }
@@ -2606,25 +2612,6 @@ fn free_fixed_pluck_modal(pluck: Pluck, string: &PrestressedString, k_zero: usiz
         acc += w * det::cos(kappa * x);
     }
     mu * phi0 * acc * (l / nq as f64)
-}
-
-fn helmholtz_flow_cavity(
-    cavity: HelmholtzCavity,
-    gas: &GasState,
-) -> Result<fs_phs::PortHamiltonian, AcousticRealizeError> {
-    // One owner (DEF-09): the declared ends set both end corrections and the
-    // outer radiation load; the Bessel neck loss joins it at the resonance.
-    let resistance = crate::cavity_modal::resonance_neck_resistance(&cavity, gas)?;
-    fs_phs::helmholtz_resonator_flow(
-        cavity.volume_m3,
-        cavity.neck_radius_m,
-        cavity.neck_length_m,
-        gas.density,
-        gas.sound_speed,
-        resistance,
-        crate::cavity_modal::neck_ends(&cavity),
-    )
-    .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))
 }
 
 #[allow(clippy::too_many_arguments)] // one coherent realization record
@@ -6146,7 +6133,6 @@ mod string_observer_tests {
                     &[],
                     None,
                     &mut plates,
-                    None,
                     None,
                     None,
                     None,

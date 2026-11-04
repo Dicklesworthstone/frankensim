@@ -560,9 +560,10 @@ impl<'a> AreaLighting<'a> {
             Receiver::Surface {
                 frame,
                 intersection,
-                boundary: Some(_),
+                boundary,
                 ..
-            } => intersection.spawn_boundary_ray(frame.geometric, direction),
+            } if boundary.is_some() || intersection.mesh_boundary_origin.is_some() =>
+                intersection.spawn_boundary_ray(frame.geometric, direction),
             Receiver::Surface {
                 frame: SurfaceFrame {
                     oriented: normal, ..

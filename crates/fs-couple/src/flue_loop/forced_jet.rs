@@ -244,6 +244,12 @@ impl JetExitLaw {
 /// 1.0 mm).
 pub const FLETCHER_1976_DIVERGENCE_DEG: f64 = 5.0;
 
+/// Where the card's `jet_cut_width station` comes from, as the voice provenance and the render
+/// sidecar print it.
+pub const JET_CUT_WIDTH_STATION_SOURCE: &str = "one b, the jet's own sech^2 width at the lip, in the profile, the tanh and the swing 2 b H U: \
+     Fletcher and Douglas 1980 eq. 1-2, Verge 1995 eq. 4.25, Auvray et al. 2014; the default half the flue height is a volume match, 2 b H U = U h H, \
+     in none of these prints. Same slope at the crossing, so only the saturation differs";
+
 /// Optional card row `jet_spreading LAW` after `jet_response forced-bickley ...`: the base jet's
 /// own streamwise development over the cut-up (module documentation).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

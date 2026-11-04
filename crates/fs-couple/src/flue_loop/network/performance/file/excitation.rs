@@ -8,6 +8,7 @@ use super::{FlueInputError, Rows, bad, poll};
 use crate::bernoulli_aperture::contraction::ContractionSpec;
 use crate::flue_loop::auvray_jet::AuvraySpec;
 use crate::flue_loop::forced_jet::{ForcedJetSpec, JetExitLaw, JetSpreadingLaw};
+use crate::flue_loop::jet_swing_limit;
 use crate::flue_loop::momentum_drive;
 use crate::flue_loop::nolle_jet::{ChannelClass, NolleSpec};
 use crate::flue_loop::{FlueError, FlueVoice};
@@ -130,12 +131,19 @@ enum JetTransferInput {
 }
 
 /// Optional source selections after `jet`, before `jet_limits`.
+enum MomentumDriveInput {
+    Lumped(f64),
+    BickleyProfile,
+}
+
 pub(crate) struct FlueJetInput {
     card_centreline: bool,
     transfer: Option<JetTransferInput>,
     response: Option<(ForcedJetSpec, JetExitLaw)>,
-    momentum: Option<f64>,
+    momentum: Option<MomentumDriveInput>,
     spreading: JetSpreadingLaw,
+    swing_limit: bool,
+    cut_width_station: bool,
 }
 
 impl FlueJetInput {
@@ -230,23 +238,29 @@ impl FlueJetInput {
         } else {
             None
         };
-        // Optional `momentum_drive KAPPA` right after `jet_response`: KAPPA is required and only the two printed weights
-        // (1, Thwaites and Fletcher 1983 Eq. (1); 2.6, their Sec. II fit) are accepted. It acts on the forced jet's cut flow.
+        // Preserve the two printed lumped weights; bickley-profile instead
+        // integrates the original station's squared velocity and selects its cut.
         let momentum = if rows.next_is("momentum_drive") {
             let mut row = rows.row("momentum_drive")?;
             let line = row.line;
             if row.fields.clone().next().is_none() {
                 return Err(bad(line, momentum_drive::KAPPA_REFUSED));
             }
-            let kappa = row.scalar().map_err(|_| bad(line, momentum_drive::KAPPA_REFUSED))?;
+            let drive = if row.fields.clone().next() == Some("bickley-profile") {
+                row.fields.next();
+                MomentumDriveInput::BickleyProfile
+            } else {
+                let kappa = row.scalar().map_err(|_| bad(line, momentum_drive::KAPPA_REFUSED))?;
+                if !momentum_drive::is_printed_weight(kappa) {
+                    return Err(bad(line, momentum_drive::KAPPA_REFUSED));
+                }
+                MomentumDriveInput::Lumped(kappa)
+            };
             row.end()?;
             if response.is_none() {
                 return Err(bad(line, "momentum_drive requires the jet_response row before it"));
             }
-            if !momentum_drive::is_printed_weight(kappa) {
-                return Err(bad(line, momentum_drive::KAPPA_REFUSED));
-            }
-            Some(kappa)
+            Some(drive)
         } else {
             None
         };
@@ -271,6 +285,37 @@ impl FlueJetInput {
         } else {
             JetSpreadingLaw::None
         };
+        // Optional `jet_swing_limit fletcher-1976` after `jet_spreading`: Fletcher's envelope on the
+        // forced jet's swing. It takes the spread width at the lip, so it needs the law row.
+        let swing_limit = rows.next_is("jet_swing_limit");
+        if swing_limit {
+            let mut row = rows.row("jet_swing_limit")?;
+            let line = row.line;
+            if row.fields.next() != Some(jet_swing_limit::NAME) {
+                return Err(bad(line, "jet_swing_limit requires fletcher-1976"));
+            }
+            row.end()?;
+            if spreading == JetSpreadingLaw::None {
+                return Err(bad(line, "jet_swing_limit requires the jet_spreading row before it"));
+            }
+        }
+        // Optional `jet_cut_width station`, last: the cut takes the forced jet's own width and the
+        // printed swing.
+        let cut_width_station = rows.next_is("jet_cut_width");
+        if cut_width_station {
+            let mut row = rows.row("jet_cut_width")?;
+            let line = row.line;
+            if row.fields.next() != Some("station") {
+                return Err(bad(line, "jet_cut_width requires station"));
+            }
+            row.end()?;
+            if response.is_none() {
+                return Err(bad(line, "jet_cut_width requires the jet_response row before it"));
+            }
+            if rows.next_is("jet_swing_limit") {
+                return Err(bad(line + 1, "jet_swing_limit goes before jet_cut_width"));
+            }
+        }
         if transfer.is_some() && response.is_some() {
             return Err(bad(
                 rows.line,
@@ -290,6 +335,8 @@ impl FlueJetInput {
             response,
             momentum,
             spreading,
+            swing_limit,
+            cut_width_station,
         })
     }
 
@@ -336,11 +383,24 @@ impl FlueJetInput {
             }
             None => voice,
         };
-        match self.momentum {
-            Some(kappa) => voice
+        let voice = match self.momentum {
+            Some(MomentumDriveInput::Lumped(kappa)) => voice
                 .with_momentum_drive(kappa)
-                .map_err(FlueInputError::Physics),
-            None => Ok(voice),
+                .map_err(FlueInputError::Physics)?,
+            Some(MomentumDriveInput::BickleyProfile) => voice
+                .with_bickley_momentum_drive()
+                .map_err(FlueInputError::Physics)?,
+            None => voice,
+        };
+        let voice = if self.swing_limit {
+            voice.with_jet_swing_limit().map_err(FlueInputError::Physics)?
+        } else {
+            voice
+        };
+        if self.cut_width_station {
+            voice.with_jet_cut_width_station().map_err(FlueInputError::Physics)
+        } else {
+            Ok(voice)
         }
     }
 }

@@ -92,7 +92,8 @@ pub trait ThermalLaw {
     /// `None` means that identity-bound energy-coordinate laws are unavailable.
     fn caloric_identity(&self) -> Option<[u8; 32]> { None }
     /// Admit law-specific mass, geometry and storage constraints before birth
-    /// changes any timeline inventory. Generic geometry admission runs first.
+    /// or a phase exchange changes timeline inventory. Generic geometry and
+    /// phase-domain admission run first; a refusal publishes no endpoint.
     fn validate_cell(&self, _cell: &DepositedCell) -> Result<(), DepositionError> { Ok(()) }
     /// Temperature in kelvin at the selected specific energy [J/kg]. The
     /// historical h-labelled argument is u for an explicit internal-energy law.

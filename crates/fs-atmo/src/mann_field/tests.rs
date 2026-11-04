@@ -19,6 +19,35 @@ fn model(gamma: f64, count: usize) -> MannSpectralModel {
     .unwrap()
 }
 
+#[test]
+fn energy_scale_band_builds_a_sampleable_solenoidal_field() {
+    // All modes in this band used to exhaust the inverse hypergeometric
+    // series near z=-1, rejecting a valid atmospheric turbulence field.
+    let model = MannSpectralModel::build(
+        41,
+        MANN_TARGET_V1,
+        MannQuadrature {
+            n_modes: 8,
+            min_kl: 0.998,
+            max_kl: 0.999,
+        },
+        [7.0, -0.5, 0.2],
+    )
+    .unwrap();
+    let covariance = model.covariance([0.0; 3]).unwrap();
+    assert!(covariance.iter().flatten().all(|value| value.is_finite()));
+    assert!((0..3).all(|i| covariance[i][i] > 0.0));
+    let field = HomogeneousMannField::at_anchor(model, 57, vec![0.8; 8]).unwrap();
+    for position in [[0.0; 3], [1.3, -0.7, 0.4]] {
+        let sample = field.sample(position).unwrap();
+        assert!(sample.u.iter().all(|value| value.is_finite()));
+        assert!(sample.grad.iter().flatten().all(|value| value.is_finite()));
+        let divergence: f64 = (0..3).map(|i| sample.grad[i][i]).sum();
+        let scale: f64 = sample.grad.iter().flatten().map(|value| value.abs()).sum();
+        assert!(scale > 0.0 && divergence.abs() < 1e-13 * scale);
+    }
+}
+
 // Independent covariance oracle: integrate the original tensor directly,
 // without using the polarization factors or production covariance evaluator.
 fn tensor_covariance(

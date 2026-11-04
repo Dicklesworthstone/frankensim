@@ -129,6 +129,63 @@ fn close(a: f64, b: f64, tolerance: f64) {
 }
 
 #[test]
+fn evaporation_and_condensation_respect_the_original_cell_inventory() {
+    struct FixedInventory;
+    impl ThermalLaw for FixedInventory {
+        fn validate_cell(&self, cell: &DepositedCell) -> Result<(), DepositionError> {
+            if cell.mass_kg != 0.02 {
+                return Err(DepositionError::InvalidInput(
+                    "fixed reference inventory changed",
+                ));
+            }
+            Ok(())
+        }
+        fn temperature_k(&self, h: f64) -> Result<f64, DepositionError> {
+            CALORIC.temperature_k(h)
+        }
+        fn maximum_temperature_slope(&self) -> f64 {
+            CALORIC.maximum_temperature_slope()
+        }
+    }
+    let law = FixedInventory;
+    let mut thermal = DepositionSimulation::new(
+        vec![birth(0.0, cell(1, 0.0, 0.0))],
+        &[(MaterialId(1), &law)],
+        DepositionBudget {
+            max_cells: 1,
+            max_links: 0,
+            max_events: 1,
+            max_substeps: 4,
+        },
+    )
+    .unwrap()
+    .advance_to(0.0, config(1.0), || Ok(()))
+    .unwrap()
+    .0;
+    let before = thermal.cells().clone();
+    for pressure in [0.0, 6000.0] {
+        let error = thermal
+            .evaporate_cell(CellId(1), &Liquid, film(pressure), 1.0, phase(), || Ok(()))
+            .unwrap_err();
+        assert_eq!(
+            error,
+            ThermalEvaporationError::Thermal(DepositionError::InvalidInput(
+                "fixed reference inventory changed",
+            ))
+        );
+        assert_eq!(thermal.cells(), &before);
+        assert_eq!(thermal.time_s(), 0.0);
+    }
+    // Equilibrium exchanges remain admissible: the hook does not forbid phase
+    // APIs categorically, only an endpoint incompatible with the original law.
+    let equilibrium = thermal
+        .evaporate_cell(CellId(1), &Liquid, film(3600.0), 1.0, phase(), || Ok(()))
+        .unwrap();
+    assert_eq!(equilibrium.transferred_mass_kg, 0.0);
+    assert_eq!(thermal.cells(), &before);
+}
+
+#[test]
 fn evaporation_cools_and_condensation_warms_actual_liquid_inventory() {
     for (pressure, direction) in [(0.0, 1.0), (6000.0, -1.0)] {
         let mut thermal = initial(0.0);

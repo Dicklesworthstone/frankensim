@@ -49,6 +49,7 @@ pub(super) enum Receiver<'a> {
     Surface {
         material: &'a Material,
         frame: SurfaceFrame,
+        mesh_boundary_origin: Option<MeshBoundaryOrigin>,
         outgoing: Vec3,
         brushed: Option<&'a crate::surface_detail::ShadingFrame>,
         incident_glass: Option<DielectricGlass>,
@@ -87,8 +88,12 @@ impl Receiver<'_> {
 
     fn shadow_origin(&self, point: Point3, direction: Vec3) -> Point3 {
         match self {
-            Self::Surface { frame, .. } => point.offset(frame.oriented.scale(RAY_EPS)),
-            Self::Dielectric {
+            Self::Surface {
+                frame,
+                mesh_boundary_origin,
+                ..
+            }
+            | Self::Dielectric {
                 frame,
                 mesh_boundary_origin,
                 ..
@@ -149,6 +154,7 @@ impl Receiver<'_> {
                 outgoing,
                 brushed,
                 incident_glass,
+                ..
             } => {
                 let cosine = frame.oriented.dot(direction).max(0.0);
                 if cosine == 0.0 {
@@ -586,6 +592,7 @@ mod tests {
                     geometric: normal,
                     entering: true,
                 },
+                mesh_boundary_origin: None,
                 outgoing: normal,
                 brushed: None,
                 incident_glass,

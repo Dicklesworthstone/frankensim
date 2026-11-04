@@ -7764,6 +7764,13 @@ The focused regression checks shear-stress parity and identical refusal without
 mutation in both time-domain interfaces. This admits supplied endpoints only;
 it does not enclose strain extrema between time samples or quadrature points.
 
+An assumed-strain projection may retain an independent compatible strain map
+through `ProjectedTensorProny::with_compatible_strain_columns`. Both total and
+elastic compatible strains must satisfy the same material domain as the work
+map. Constitutive stiffness, Kelvin loss, Maxwell memory and conjugate forces
+continue to use the original work map. Eigenstrain updates retain the additional
+map, and material-memory continuation refuses a changed or dropped map.
+
 ## Volumetric storage on the shared thermal timeline
 
 `thermal::transport::volumetric::timeline::FixedVolumeThermalLaw` borrows the
@@ -9095,6 +9102,22 @@ and the existing gas classical limit. This is a uniform Newtonian weak-loss
 model with constant bulk viscosity over the caller's supported band, not a
 dispersion, phase-change, wall-loss or experimental-validation claim. Adding
 resolved relaxation already included in the supplied bulk viscosity is invalid.
+
+The same prepared owner exposes `thermoviscous_wavenumber(omega)` for the
+acoustic branch of the full homogeneous linear Navier--Stokes--Fourier spatial
+dispersion relation. It retains the original real-fluid density, adiabatic sound
+speed, Cp/Cv, viscosity and conductivity. For `exp(i k r - i omega t)`, `Im(k)`
+is amplitude attenuation and `Re(k)` supplies the associated phase; the separate
+thermal diffusion mode is not returned. A rationalized quadratic root avoids
+cancellation at weak loss and Cp/Cv close to one, with allocation-free constant
+work per frequency. Zero frequency is exact; nonpassive, unrepresentable or
+unresolved acoustic/thermal branches refuse, including roundoff near the
+discriminant cut. The leading attenuation recovers Stokes--Kirchhoff, while
+finite-frequency corrections satisfy the original continuity, momentum and
+energy equations. This does not supply molecular spectra, boundary layers,
+nonlinear response or experimental validity outside the original coefficients'
+supported band. The parabolic transport equations do not establish a finite
+wavefront; an observer's `r/c` reference delay is a numerical convention.
 
 `fluid_acoustics::FluidAcoustics` admits one immutable acoustic snapshot with
 positive finite density, adiabatic sound speed, bulk modulus `K_s = rho c²`,
@@ -13364,3 +13387,38 @@ Six independent regressions pass alongside all eighteen solid interface/slab con
 `water_refraction::IapwsWaterRefraction` evaluates IAPWS R9-97 equation (1) and its released coefficients from original ITS-90 temperature, mass density and vacuum wavelength. It admits only 261.15–773.15 K, 0–1060 kg/m³ and 200–1100 nm. Fixed-size wavelength preparation and allocation-free state queries retain absolute phase index, stable dilute refractivity, analytic group index, and first/second temperature and density partials, including the mixed derivative. `sample_if97_state` consumes the original homogeneous IF97 state's T/rho without replacing its EOS or claiming IAPWS-95 pressure precision.
 
 The caller retains ordinary-water purity, homogeneous phase validity and accepted state identity. The law supplies no absorption, scattering, ice/brine or two-phase mixture closure, and does not extend the published optical uncertainty. Four focused actual-source controls cover 24 published refractive-index values using independently printed IAPWS-95 density tables with rounding allowances, 20 derivative states, four original IF97 states including the complete isobaric chain rule, source-domain refusals, and vacuum/dilute limits.
+
+## Declared WLF and Arrhenius viscous temperature shifts
+
+`visco::temperature::TemperatureShift` retains caller-supplied WLF or molar
+Arrhenius coefficients, the reference temperature and an inclusive calibrated
+temperature interval. Its convention is `a_T = tau(T)/tau(T_ref)`: WLF uses
+`log10(a_T) = -C1 (T-T_ref)/(C2+T-T_ref)`; Arrhenius uses
+`ln(a_T) = (E/R) (1/T-1/T_ref)`. Temperatures are absolute kelvin and E is
+J/mol. The reference shift is exactly one. The complete WLF interval must lie
+strictly above its pole. Out-of-band temperatures and unrepresentable shifts or
+logarithmic derivatives refuse. No universal material coefficients are inferred.
+
+The existing tensor, scalar Maxwell, fractional Zener, modified Zener and lowered
+Prony owners consume the same shift. Maxwell times and complete Kelvin viscosity
+tensors scale by `a_T`; Kelvin factors scale by `sqrt(a_T)`. Elastic moduli,
+anisotropy, branch order, elastic factors and strain limits remain unchanged.
+No eigensolve, NNLS refit or second time integrator is introduced. Existing
+harmonic and history operators therefore evaluate
+`C_T*(omega)=C_ref*(a_T omega)` and reduced time `t/a_T`.
+A lowered model retains its original fit measurements on the correspondingly
+mapped frequency grid; it gains no experimental or inter-sample authority.
+Bounded source frequency support shifts by `1/a_T`, and nonzero coefficients
+may not silently vanish by underflow.
+
+The returned `ShiftedViscoelastic<M>` retains the actual temperature and complete
+shift declaration alongside the original constitutive implementation.
+`temperature_shift.rs` and `temperature_shift_scalar.rs` exercise the formulas,
+reference fixed point, refusals, harmonic response, plane stress, reduced-time
+histories, positive viscous heat and transformed source support.
+These are authored numerical fixtures, not measured material calibration.
+The caller must qualify the same material as thermorheologically simple.
+Moisture shifts, vertical modulus changes, thermal expansion, integration along
+a changing temperature history, and caloric/entropy coupling remain separate.
+This is a temperature-dependent constitutive slice of IRP M0.2-W4
+(`frankensim-irp-v5-instrument-realism-pexfp.24`), not closure of that whole bead.

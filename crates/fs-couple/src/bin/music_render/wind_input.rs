@@ -1092,7 +1092,7 @@ pub(super) fn flue_provenance(p: &FlueFilePerformance) -> String {
         jet.spec().beta, jet.spec().gamma, json_string(&jet.spec().source), jet.cut_up_over_height(),
         jet.growth(), jet.half_width_m(), jet.source_length_m()));
     let jet_json = renderer.voice().forced_jet().map_or_else(auvray_json, |jet| format!(
-        ",\"jet_response\":{{\"kind\":\"forced-bickley\",\"spacing_b\":{:e},\"window_b_over_u0\":{:e},\"half_width_m\":{:e},\"centre_over_bulk\":{:e},\"reynolds\":{:e}{}{}}}",
+        ",\"jet_response\":{{\"kind\":\"forced-bickley\",\"spacing_b\":{:e},\"window_b_over_u0\":{:e},\"half_width_m\":{:e},\"centre_over_bulk\":{:e},\"reynolds\":{:e}{}{}{}{}}}",
         jet.spec().spacing, jet.spec().window, jet.half_width_m(), jet.centre_over_bulk(), jet.reynolds(),
         if jet.exit_law() == fs_couple::flue_loop::forced_jet::JetExitLaw::Measured { ",\"exit\":\"measured\"" } else { "" },
         // Named only when the card adds `jet_spreading LAW`.
@@ -1100,7 +1100,21 @@ pub(super) fn flue_provenance(p: &FlueFilePerformance) -> String {
             ",\"spreading\":{{\"law\":{},\"source\":{},\"station_width_over_exit\":{:e},\"station_centre_speed_over_exit\":{:e},\"virtual_origin_over_exit_half_width\":{:e},\"band_half_height_b\":{:e},\"cut_half_width_factor\":{:e},\"cut_swing_factor\":{:e},\"model\":\"quasi-parallel U = a sech^2(y/beta), a = beta^-1/2, base held past the station\"}}",
             json_string(jet.spreading().name()), json_string(jet.spreading().source()), beta, 1.0 / flux,
             jet.step_response().spreading().virtual_origin(jet.reynolds()).unwrap_or(f64::NAN),
-            jet.step_response().resolution().half_height, beta, flux))));
+            jet.step_response().resolution().half_height, beta, flux)),
+        // Named only when the card adds `jet_swing_limit`.
+        renderer.voice().jet_swing_limit().map_or_else(String::new, |limit| format!(
+            ",\"swing_limit\":{{\"law\":{},\"spread_width_m\":{:e},\"cut_up_m\":{:e},\"semiangle_deg\":{:e},\"envelope\":{},\"printed\":{},\"ours\":{}}}",
+            json_string(fs_couple::flue_loop::jet_swing_limit::NAME), limit.spread_width_m(), limit.cut_up_m(),
+            fs_couple::flue_loop::jet_swing_limit::FLETCHER_1976_ENVELOPE_SEMIANGLE_DEG,
+            json_string(fs_couple::flue_loop::jet_swing_limit::LAW),
+            json_string(fs_couple::flue_loop::jet_swing_limit::PRINTED),
+            json_string(fs_couple::flue_loop::jet_swing_limit::OURS))),
+        // Named only when the card adds `jet_cut_width`.
+        if renderer.voice().jet_cut_width_station() {
+            format!(",\"cut_width\":{{\"law\":\"station\",\"half_width_m\":{:e},\"source\":{}}}",
+                renderer.voice().cut_half_width_m(),
+                json_string(fs_couple::flue_loop::forced_jet::JET_CUT_WIDTH_STATION_SOURCE))
+        } else { String::new() }));
     // Named only when the opt-in momentum drive is attached; every field is the card's own or the printed weight's.
     let momentum_json = renderer.voice().momentum_drive().map_or_else(String::new, |drive| format!(
         ",\"momentum_drive\":{{\"kappa\":{},\"source\":{},\"law\":{},\"bore_area_m2\":{:e},\"cut_up_over_flue_height\":{:e},\"transfer_caveats\":{}}}",

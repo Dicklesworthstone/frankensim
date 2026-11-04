@@ -65,11 +65,13 @@ pub struct MoistureCartesianReport {
     pub transport_start: Vec<ResolvedMaterialStatePoint>,
     pub transport_end: Vec<ResolvedMaterialStatePoint>,
     /// Last frozen-coefficient solve, independently checked by its native owner.
+    /// The load and unknown use moisture relative to the initial first cell.
     pub linear: SolveReport,
     pub nonlinear_iterations: usize,
     /// Sum of native CG iterations across every Picard solve.
     pub linear_iterations: usize,
-    /// True relative Euclidean residual of the endpoint-dependent equations.
+    /// True relative Euclidean residual of the endpoint-dependent equations,
+    /// with the same shifted-load normalization as the linear solve.
     pub nonlinear_relative_residual: f64,
     /// Original prepared x/y/z source-chart identities for Kirchhoff transport.
     /// `None` denotes the ordinary harmonic-coefficient scheme.
@@ -423,13 +425,13 @@ impl MoistureCartesian {
             linear_iterations = linear_iterations.checked_add(solution.report.iters).ok_or(
                 MoistureError::Invalid("Cartesian solver work count overflow"),
             )?;
-            let endpoint = self.transport_states(&solution.x, cx)?;
+            let candidate: Vec<_> = solution.x.iter().map(|m| m + self.moisture[0]).collect();
+            let endpoint = self.transport_states(&candidate, cx)?;
             let endpoint_system =
                 self.system(dt_s, &boundaries, &endpoint, profiles.as_ref(), cx)?;
             let relative = endpoint_system.relative_residual(&solution.x, cx)?;
-            let transfer = self.transfers(&solution.x, &boundaries, &endpoint_system);
-            let water_after = solution
-                .x
+            let transfer = self.transfers(&candidate, &boundaries, &endpoint_system);
+            let water_after = candidate
                 .iter()
                 .map(|m| m * self.dry_mass_per_cell_kg)
                 .sum::<f64>();
@@ -451,7 +453,7 @@ impl MoistureCartesian {
                     .chain(reservoir.into_iter().flatten())
                     .fold(0.0, f64::max);
                 let roundoff = 128.0 * f64::EPSILON * upper.max(1.0);
-                for (cell, (&old, &new)) in self.moisture.iter().zip(&solution.x).enumerate() {
+                for (cell, (&old, &new)) in self.moisture.iter().zip(&candidate).enumerate() {
                     if !new.is_finite()
                         || new < 0.0
                         || new > self.geometry.maximum_moisture
@@ -485,7 +487,7 @@ impl MoistureCartesian {
                         equilibrium
                     } else {
                         face.fraction
-                            .mul_add(equilibrium - solution.x[face.cell], solution.x[face.cell])
+                            .mul_add(equilibrium - candidate[face.cell], candidate[face.cell])
                     };
                     self.transport_state_at(m)?;
                     surface_moisture[face.side].push((face.cell, m));
@@ -510,7 +512,7 @@ impl MoistureCartesian {
                         .map(|p| std::array::from_fn(|k| p[k].identity())),
                 };
                 let mut next = self.clone();
-                next.moisture = solution.x;
+                next.moisture = candidate;
                 next.time_s = end;
                 poll(cx)?;
                 return Ok((next, report));
@@ -524,10 +526,10 @@ impl MoistureCartesian {
                 });
             }
             if nonlinear.relaxation == 1.0 {
-                iterate = solution.x;
+                iterate = candidate;
                 system = endpoint_system;
             } else {
-                for (old, candidate) in iterate.iter_mut().zip(&solution.x) {
+                for (old, candidate) in iterate.iter_mut().zip(&candidate) {
                     *old = nonlinear.relaxation.mul_add(candidate - *old, *old);
                 }
                 let states = self.transport_states(&iterate, cx)?;
@@ -559,10 +561,13 @@ impl MoistureCartesian {
         let mut system = CartesianSystem {
             operator: CartesianOperator {
                 diagonal: vec![1.0; n],
+                storage_boundary: vec![1.0; n],
                 forward: vec![[0.0; 3]; n],
                 strides,
             },
-            rhs: self.moisture.clone(),
+            // Solve relative to one common reference, preserving the scale of
+            // small gradients independently of the uniform water inventory.
+            rhs: self.moisture.iter().map(|m| m - self.moisture[0]).collect(),
             faces: Vec::new(),
         };
         for i in 0..n {
@@ -629,7 +634,8 @@ impl MoistureCartesian {
                             ));
                         }
                         system.operator.diagonal[i] += coefficient;
-                        system.rhs[i] += coefficient * equilibrium;
+                        system.operator.storage_boundary[i] += coefficient;
+                        system.rhs[i] += coefficient * (equilibrium - self.moisture[0]);
                         system.faces.push(CartesianFace {
                             side,
                             cell: i,
@@ -708,6 +714,7 @@ impl CartesianSystem {
 }
 struct CartesianOperator {
     diagonal: Vec<f64>,
+    storage_boundary: Vec<f64>,
     forward: Vec<[f64; 3]>,
     strides: [usize; 3],
 }
@@ -716,15 +723,16 @@ impl LinearOp for CartesianOperator {
         self.diagonal.len()
     }
     fn apply(&self, x: &[f64], y: &mut [f64]) {
-        for ((y, &a), &x) in y.iter_mut().zip(&self.diagonal).zip(x) {
+        for ((y, &a), &x) in y.iter_mut().zip(&self.storage_boundary).zip(x) {
             *y = a * x;
         }
         for (i, coefficients) in self.forward.iter().enumerate() {
             for (k, &a) in coefficients.iter().enumerate() {
                 if a != 0.0 {
                     let j = i + self.strides[k];
-                    y[i] -= a * x[j];
-                    y[j] -= a * x[i];
+                    let flux = a * (x[i] - x[j]);
+                    y[i] += flux;
+                    y[j] -= flux;
                 }
             }
         }

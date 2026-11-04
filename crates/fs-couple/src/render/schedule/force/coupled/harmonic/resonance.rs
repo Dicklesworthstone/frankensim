@@ -19,6 +19,11 @@ pub enum ModalHarmonicObservation<'a> {
     Displacement(&'a [f64]),
     /// Weighted velocity; the same weights give a result in metres/second.
     Velocity(&'a [f64]),
+    /// Weighted physical acceleration; the same weights give metres/second².
+    /// This observes `-i omega v`, retaining the inertial acceleration of the
+    /// complete coupled response. Its driven peak generally differs from both
+    /// displacement and velocity peaks, even for one damped mode.
+    Acceleration(&'a [f64]),
 }
 
 /// Search refusals preserve the original coupled admission/solve error.
@@ -26,7 +31,8 @@ pub type ModalDrivenResonanceError = ResonanceSearchError<ModalCouplingError>;
 
 impl ModalHarmonicObservation<'_> {
     pub(super) fn validate(self, modes: usize) -> Result<(), ModalCouplingError> {
-        let (Self::Displacement(weights) | Self::Velocity(weights)) = self;
+        let (Self::Displacement(weights) | Self::Velocity(weights) | Self::Acceleration(weights)) =
+            self;
         if weights.len() != modes
             || weights.iter().any(|weight| !weight.is_finite())
             || !weights.iter().any(|weight| *weight != 0.0)
@@ -50,7 +56,7 @@ impl ModalHarmonicObservation<'_> {
                 &response.displacement_m_sqrt_kg,
                 tangent.map(|value| &value.displacement_derivative),
             ),
-            Self::Velocity(weights) => (
+            Self::Velocity(weights) | Self::Acceleration(weights) => (
                 weights,
                 &response.velocity_m_sqrt_kg_per_s,
                 tangent.map(|value| &value.velocity_derivative),
@@ -61,7 +67,26 @@ impl ModalHarmonicObservation<'_> {
             .map(|values| project(weights, values, gate))
             .transpose()?
             .unwrap_or(C64::ZERO);
-        Ok((value, derivative))
+        if matches!(self, Self::Acceleration(_)) {
+            // Differentiate a = -i omega v analytically. Multiplying velocity
+            // once avoids forming omega², and projection precedes that scale
+            // so signed modal cancellation remains in the physical observer.
+            let s = C64::new(0.0, -response.omega_rad_s);
+            let acceleration = s * value;
+            let slope = if tangent.is_some() {
+                s * derivative + C64::new(0.0, -1.0) * value
+            } else {
+                C64::ZERO
+            };
+            if !complex_finite(acceleration) || !complex_finite(slope) {
+                return Err(invalid(
+                    "physical acceleration observation is not representable",
+                ));
+            }
+            Ok((acceleration, slope))
+        } else {
+            Ok((value, derivative))
+        }
     }
 }
 
@@ -93,10 +118,10 @@ fn project(weights: &[f64], values: &[C64], gate: &CancelGate) -> Result<C64, Mo
 
 impl CoupledModalSystem {
     /// Resolve a local driven peak and optional half-power width of a FIXED
-    /// physical displacement or velocity observation under fixed force phasors.
+    /// physical displacement, velocity or acceleration observation under fixed force phasors.
     /// All original modes, connection directions, Maxwell arms and reciprocal
-    /// air poles remain in every solve. Displacement and velocity generally have
-    /// different peak frequencies; neither is replaced by a free-pole frequency.
+    /// air poles remain in every solve. Displacement, velocity and acceleration
+    /// generally have different peak frequencies; none is replaced by a free pole.
     ///
     /// The caller must isolate one peak with increasing amplitude at the lower
     /// endpoint and decreasing amplitude at the upper endpoint. Both endpoints

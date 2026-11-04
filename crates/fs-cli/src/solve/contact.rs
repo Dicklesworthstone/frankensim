@@ -16,7 +16,7 @@ use super::{SolveRefusal, conduction_error, json_string, parse_claim_id};
 use crate::cards::CardPackSet;
 
 const MAX_RESPONSES: usize = 64;
-pub(super) const NO_CLAIM: &str = "Source-backed matching P1 contact uses the arithmetic mean of the two independent face temperature means as the declared T coordinate. Each local response retains its original card, selected claim and manufactured joint state. The existing steady spatial solver retains heterogeneous k(T), prescribed boundaries and natural/transported-air consumers. Declared area-mean ambient or closed-enclosure radiation uses the original radiation iteration around complete contact Newton responses or the bounded source-surface contact fixed point; convection alone heats transported air. The returned field passes freshly queried physical watt residual and heat-balance gates, including radiative loads on prescribed reservoir reactions. The contact receipt declares the bounded coupled Newton or contact fixed-point algorithm; neither establishes arbitrary-law convergence or uniqueness. Explicit selected-node adjoints for steady prescribed, natural or transported-air boundaries use the complete smooth bulk/contact tangent, signed natural-convection feedback, full marched-air reference feedback and the true transpose. Inlet and fan controls retain their original transport and hydraulic owners. Radiation feedback and prescribed-temperature controls remain outside that contact derivative. Steady open-enclosure/pointwise radiation, adaptive-goal refinement and inverse/roundoff certificates for this nonlinear contact path are not supplied. Uniform spatial ladder differences retain their existing Estimated meaning. No evolving pressure, geometry or new material authority is inferred.";
+pub(super) const NO_CLAIM: &str = "Source-backed matching P1 contact uses the arithmetic mean of the two independent face temperature means as the declared T coordinate. Each local response retains its original card, selected claim and manufactured joint state. The existing steady spatial solver retains heterogeneous k(T), prescribed boundaries and natural/transported-air consumers. Declared area-mean ambient or closed/open enclosure radiation uses the original radiation iteration around complete contact Newton responses or the bounded source-surface contact fixed point; convection alone heats transported air. The explicit black reservoir in open exchange has no solid degree of freedom and stays outside the physical-surface outward heat sum. The returned field passes freshly queried physical watt residual and heat-balance gates, including radiative loads on prescribed reservoir reactions. The contact receipt declares the bounded coupled Newton or contact fixed-point algorithm; neither establishes arbitrary-law convergence or uniqueness. Explicit selected-node adjoints for steady prescribed, natural or transported-air boundaries use the complete smooth bulk/contact tangent, signed natural-convection feedback, full marched-air reference feedback and the true transpose. Closed/open area-mean enclosure derivatives add the complete reflected-radiosity feedback, including original prescribed-flux patches, to that same dual. Inlet, fan, contact-law, emissivity and open-bath controls retain their original physical owners. Ambient/pointwise radiation and prescribed-temperature controls remain outside that contact derivative. Steady pointwise radiation, adaptive-goal refinement and inverse/roundoff certificates for this nonlinear contact path are not supplied. Uniform spatial ladder differences retain their existing Estimated meaning. No evolving pressure, geometry or new material authority is inferred.";
 
 struct Source {
     name: String,
@@ -381,12 +381,40 @@ pub(super) fn admit(
     let transient = setup.transient.as_ref();
     let enthalpy_contact = transient.is_some_and(|time| time.enthalpy.is_some());
     let capacity_contact = transient.is_some() && !enthalpy_contact;
-    let unsupported_transient = transient.is_some_and(|_| {
-        spec.outputs.iter().flatten().any(|output| output.name.contains("adjoint"))
-    });
-    // Steady and capacity ambient radiation and steady closed enclosures reuse
+    // The capacity owner differentiates the unchanged accepted R(T) endpoint.
+    // Other storage and derived-boundary owners still need their complete
+    // contact feedback composed before they can expose trajectory derivatives.
+    let capacity_adjoint = capacity_contact
+        && setup.radiation.is_none()
+        && setup.enclosure_radiation.is_none()
+        && !setup.boundaries.iter().any(|row| {
+            matches!(
+                row.condition,
+                fs_project::ThermalBoundaryCondition::NaturalConvection { .. }
+                    | fs_project::ThermalBoundaryCondition::AirflowConvection { .. }
+            )
+        })
+        && spec
+            .outputs
+            .iter()
+            .flatten()
+            .filter(|output| output.name.contains("adjoint"))
+            .all(|output| {
+                matches!(
+                    output.name.as_str(),
+                    "temperature-final-adjoint" | "temperature-sampled-peak-adjoint"
+                )
+            });
+    let unsupported_transient = transient.is_some()
+        && !capacity_adjoint
+        && spec
+            .outputs
+            .iter()
+            .flatten()
+            .any(|output| output.name.contains("adjoint"));
+    // Steady and capacity ambient radiation and steady closed/open enclosures reuse
     // complete contact Newton responses or the bounded source-surface fixed point.
-    // Capacity also shares the closed patch-mean enclosure iteration.
+    // Capacity also shares the closed/open patch-mean enclosure iteration.
     // Total enthalpy has a distinct owner that differentiates local P1
     // emission and enclosure reflection inside the same contact/storage state.
     let unsupported_radiation = setup.radiation.as_ref().is_some_and(|declaration| {
@@ -395,12 +423,11 @@ pub(super) fn admit(
     }) || setup.enclosure_radiation.as_ref().is_some_and(|declaration| {
         let pointwise = declaration.spatial_model == Some(fs_project::RadiationSpatialModel::Pointwise);
         !((enthalpy_contact && pointwise)
-            || ((capacity_contact || transient.is_none()) && !pointwise && declaration.ambient_temperature.is_none()))
+            || (!pointwise && (transient.is_none() || capacity_contact)))
     });
     let unsupported_adjoint = adjoint && (
-        transient.is_some()
+        (transient.is_some() && !capacity_adjoint)
             || setup.radiation.is_some()
-            || setup.enclosure_radiation.is_some()
             || spec.outputs.iter().flatten().any(|output| matches!(output.name.as_str(),
                 "temperature-max-boundary-adjoint"
                     | "temperature-max-contact-boundary-adjoint"
@@ -418,8 +445,8 @@ pub(super) fn admit(
     {
         return Err(conduction_error(
             "cli-solve-conduction-contact-composition",
-            "temperature-varying native contact admits steady base/uniform-ladder solves with prescribed, natural or airflow convection and optional area-mean ambient or closed-enclosure radiation, or capacity/total-enthalpy transient solves with prescribed, scheduled, natural or transported-air boundaries; capacity also admits area-mean ambient and closed-enclosure radiation, while total enthalpy admits pointwise ambient/enclosure radiation. Selected-node adjoints admit steady prescribed, natural or transported-air boundaries and optional whole-law contact controls; this requested composition needs additional complete contact feedback",
-            "use an admitted storage and boundary composition; contact adjoints require steady prescribed, natural or transported-air boundaries without radiation or prescribed-temperature controls; steady and capacity radiation use area-mean ambient or closed-enclosure exchange; pointwise emission and open-enclosure histories require total enthalpy; never replace the contact law by a frozen resistance",
+            "temperature-varying native contact admits steady base/uniform-ladder solves with prescribed, natural or airflow convection and optional area-mean ambient or closed/open enclosure radiation, or capacity/total-enthalpy transient solves with prescribed, scheduled, natural or transported-air boundaries; capacity also admits area-mean ambient and closed/open enclosure radiation, while total enthalpy admits pointwise ambient/enclosure radiation. Selected-node adjoints admit steady prescribed, natural or transported-air boundaries with optional closed/open area-mean enclosures and whole-law contact controls. Capacity final/sampled-peak adjoints admit prescribed or scheduled thermal boundaries; this requested composition needs additional complete contact feedback",
+            "use an admitted storage and boundary composition; steady contact adjoints require prescribed, natural or transported-air boundaries with optional area-mean closed/open enclosures and no ambient/pointwise radiation or prescribed-temperature controls; capacity contact adjoints require temperature-final-adjoint or temperature-sampled-peak-adjoint with prescribed or scheduled boundaries and no derived convection or radiation; steady and capacity radiation admit area-mean ambient and closed/open enclosure exchange; pointwise emission requires total enthalpy; never replace the contact law by a frozen resistance",
         ));
     }
     Ok(())

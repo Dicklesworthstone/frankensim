@@ -20,6 +20,69 @@ fn supported(speed: f64) -> SpherePlaneState {
 }
 
 #[test]
+fn g1_large_shared_tangent_drift_preserves_sliding_after_impact() {
+    let scene = SpherePlane {
+        force_world: Vec3::new(0.0, -16.0, 0.0),
+        restitution: 0.0,
+        friction_coefficient: 0.125,
+        ..scene()
+    };
+    let duration = 0.125;
+    let config = SpherePlaneConfig::default();
+    let before = state(
+        Vec3::new(0.0, RADIUS, 0.0),
+        Vec3::new(1.0, -1.0, 0.0),
+        Vec3::ZERO,
+        UnitQuaternion::IDENTITY,
+    );
+    let reference = advance_sphere_plane(&scene, before, duration, config, || false).unwrap();
+    // The impact applies J_n=2 and J_t=-1/4; support then adds -1/4.
+    // With original inverse tangent mass 7/4, slip is 9/16 immediately
+    // after impact and 1/8 at the endpoint. It has not reached rolling.
+    assert_eq!(reference.state_after.mode(), SpherePlaneMode::Sliding);
+    close_vector(reference.contact_impulse_world, Vec3::new(-0.5, 4.0, 0.0));
+    close(reference.dissipated_energy, 1.28125);
+    for boost_x in [-1_099_511_627_776.0, 1_099_511_627_776.0] {
+        // Both momenta and every commanded increment are binary exact at
+        // +/-2^40 m/s. The 1/8 m/s final slip spans hundreds of input ULPs.
+        let boost = Vec3::new(boost_x, 0.0, 0.0);
+        let moving_scene = SpherePlane {
+            velocity_world: boost,
+            ..scene
+        };
+        let moving_before = state(
+            Vec3::new(0.0, RADIUS, 0.0),
+            Vec3::new(1.0, -1.0, 0.0).add(boost),
+            Vec3::ZERO,
+            UnitQuaternion::IDENTITY,
+        );
+        let moving =
+            advance_sphere_plane(&moving_scene, moving_before, duration, config, || false).unwrap();
+        assert_eq!(moving.state_after.mode(), SpherePlaneMode::Sliding);
+        assert_eq!(
+            moving
+                .events
+                .iter()
+                .map(|e| (e.kind, e.time_s))
+                .collect::<Vec<_>>(),
+            reference
+                .events
+                .iter()
+                .map(|e| (e.kind, e.time_s))
+                .collect::<Vec<_>>()
+        );
+        close_vector(moving.contact_impulse_world, reference.contact_impulse_world);
+        close(moving.dissipated_energy, reference.dissipated_energy);
+        let after = moving.state_after.body();
+        let relative_slip = velocity(after)
+            .sub(boost)
+            .add(spin(after).cross(Vec3::new(0.0, -RADIUS, 0.0)));
+        close_vector(relative_slip, Vec3::new(0.125, 0.0, 0.0));
+        close_vector(spin(after), spin(reference.state_after.body()));
+    }
+}
+
+#[test]
 fn g1_static_threshold_and_kinetic_hysteresis_use_original_sphere_inertia() {
     // A solid sphere requires |F_t|/3.5 of static traction, not |F_t|.
     // N=20, mu_s=.3 therefore permit rolling through |F_t|=21 N;

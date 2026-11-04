@@ -15,6 +15,8 @@
 //! description of the hardware means the cycle cannot disagree with the map
 //! about which components exist or what they dissipate at full load — there
 //! is one declaration of the power distribution and one of its time profile.
+//! Prescribed boundary temperatures, ambient Robin heat and Neumann fluxes
+//! retain their authored values throughout the power schedule.
 //!
 //! # Segments must TILE the window
 //!
@@ -45,8 +47,10 @@
 
 use crate::ConductionError;
 use crate::assemble::{
-    DofMap, assemble_operator, assemble_operator_with_element_materials, reduce_matrix_and_lift,
+    DofMap, assemble_operator, assemble_operator_with_element_materials, assemble_source_load,
+    reduce_matrix_and_lift,
 };
+use crate::field::ScalarField;
 use crate::material::ElementMaterials;
 use crate::transient::{TransientConfig, TransientProblem, assemble_capacitance};
 use fs_exec::Cx;
@@ -543,18 +547,26 @@ fn march_duty_cycle_inner(
 
     let dofs = DofMap::new(boundary, n)?;
     let capacitance = assemble_capacitance(cx, mesh, capacity)?;
+    let source_load = assemble_source_load(cx, mesh, source)?;
+    // Keep the authored boundary load separate from the scheduled volumetric
+    // power. In particular, zero duty must not switch a Robin bath to 0 K or
+    // remove a Neumann heat flux. Assemble each load directly so a weak source
+    // is not recovered by subtracting large environmental contributions.
+    let no_source = ScalarField::Uniform(0.0);
     let system = match element_materials {
         Some(assigned) => assemble_operator_with_element_materials(
-            cx, mesh, boundary, material, source, initial, assigned,
+            cx, mesh, boundary, material, &no_source, initial, assigned,
         )?,
-        None => assemble_operator(cx, mesh, boundary, material, source, initial)?,
+        None => assemble_operator(cx, mesh, boundary, material, &no_source, initial)?,
     };
 
-    let inverse_dt = 1.0 / dt;
     let theta = config.theta();
-    let lhs = scaled_sum(&capacitance, inverse_dt, &system.operator, theta);
-    let (a_ff, lift) = reduce_matrix_and_lift(&lhs, &dofs);
-    let precond = crate::solve::spd_preconditioner(&a_ff);
+    let op = {
+        let lhs = scaled_sum(&capacitance, 1.0, &system.operator, theta * dt);
+        let (a_ff, _) = reduce_matrix_and_lift(&lhs, &dofs);
+        CsrOp::symmetric(a_ff)
+    };
+    let precond = crate::solve::spd_preconditioner(op.matrix());
 
     let mut temperature = initial.to_vec();
     for &vertex in dofs.fixed() {
@@ -567,8 +579,8 @@ fn march_duty_cycle_inner(
     let mut steps_above = 0usize;
     let mut delivered_scale_seconds = 0.0f64;
 
-    let mut scratch_c = vec![0.0f64; n];
     let mut scratch_k = vec![0.0f64; n];
+    let mut rhs = vec![0.0f64; dofs.n()];
 
     for step in 0..steps {
         cx.checkpoint().map_err(|_| ConductionError::Cancelled {
@@ -587,24 +599,22 @@ fn march_duty_cycle_inner(
         let weight = theta.mul_add(scale_new, (1.0 - theta) * scale_old);
         delivered_scale_seconds += weight * dt;
 
-        capacitance.spmv(&temperature, &mut scratch_c);
+        // Solve for the heat-driven temperature increment, with zero change
+        // at the already lifted Dirichlet vertices. Relative convergence is
+        // measured against this heat pulse, not the absolute background.
         system.operator.spmv(&temperature, &mut scratch_k);
-        let mut rhs = Vec::with_capacity(dofs.n());
         for (slot, &vertex) in dofs.free().iter().enumerate() {
-            let value = scratch_c[vertex].mul_add(
-                inverse_dt,
-                (1.0 - theta).mul_add(-scratch_k[vertex], weight * system.load[vertex]),
-            ) + lift[slot];
+            let value =
+                dt * weight.mul_add(source_load[vertex], system.load[vertex] - scratch_k[vertex]);
             if !value.is_finite() {
                 return Err(ConductionError::NonFinite {
                     field: "duty-cycle right-hand side",
                     bits: value.to_bits(),
                 });
             }
-            rhs.push(value);
+            rhs[slot] = value;
         }
 
-        let op = CsrOp::symmetric(a_ff.clone());
         let mut cg = CgState::new(&op, &precond, &rhs);
         let report = cg.run(
             &op,
@@ -612,7 +622,7 @@ fn march_duty_cycle_inner(
             config.linear_tolerance(),
             config.linear_max_iterations(),
         );
-        let truth = relative_residual(&a_ff, &rhs, &cg.x);
+        let truth = relative_residual(op.matrix(), &rhs, &cg.x);
         if truth.is_nan() || truth >= config.linear_tolerance() {
             return Err(ConductionError::LinearSolveFailed {
                 iteration: step,
@@ -622,7 +632,9 @@ fn march_duty_cycle_inner(
             });
         }
         for (slot, &vertex) in dofs.free().iter().enumerate() {
-            temperature[vertex] = cg.x[slot];
+            let updated = temperature[vertex] + cg.x[slot];
+            crate::require_finite("duty-cycle temperature", updated)?;
+            temperature[vertex] = updated;
         }
 
         let step_peak = temperature.iter().fold(f64::NEG_INFINITY, |a, b| a.max(*b));

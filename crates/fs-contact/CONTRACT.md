@@ -2205,6 +2205,21 @@ free. A separate gate compares integrated work with the original analytic
 endpoint potentials before returning the mean. Work-error estimates remain
 numerical estimates, not interval certificates.
 
+The original `path_end_derivative` supplies the endpoint derivative of that same
+mean force. It integrates the analytic original radius-coordinate force and
+approach slopes as factored triangular moments. The coordinate interval cancels
+before division, preserving tiny motions and unequal paths ending at a fold
+without force subtraction or displaced source probes. Successive five-point
+Gaussian refinements use the original work budget: the absolute derivative
+tolerance is its absolute work tolerance divided by the squared indentation
+scale; relative tolerance and evaluation limit are retained. Each quadrature
+sample is one explicit original kernel evaluation, with no inverse solve or
+allocation. This remains bounded quadrature, not an interval certificate.
+The disk derivative is closed form, and crossing paths retain both original
+branches at the zero-area junction. A coincident terminal fold refuses a finite
+derivative. Focused tests compare independent original work identities, reversed
+paths, tiny motion, negative disk stiffness, and budget/domain refusals.
+
 This connects the original source to `fs-couple::BoundNormalStorage` and its
 native `fs-phs` stepping. Local elastic contact remains quasistatic while the
 caller-owned bodies carry inertia. Fold crossing, snap-induced elastic waves,
@@ -2311,8 +2326,8 @@ tail stiffness, splitting at both original corners. Finite-gap curves integrate
 their original segment slopes with compensated accumulation and retain their
 source support and public-node continuity checks. Coincident piecewise corners
 use an explicitly one-sided Newton representative; this does not grant a smooth
-DMT potential tangent at a corner. The JKR fold remains singular, and Maugis
-returns no analytic derivative until its own path owner supplies one.
+DMT potential tangent at a corner. Coincident JKR and Maugis terminal folds
+remain singular. Maugis uses the original path derivative described above.
 
 All these derivative paths allocate no memory. Frozen Hertz potential queries
 also reuse the conservative owner, avoiding cold pressure/identity receipt

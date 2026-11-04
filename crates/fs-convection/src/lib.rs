@@ -89,12 +89,14 @@ pub enum CorrelationId {
     HollandsHorizontalAirLayer,
     /// Total transfer in an inclined high-aspect-ratio air gap heated from below.
     HollandsInclinedAirLayer,
+    /// Total transfer across a sealed vertical air cavity, including finite height.
+    WrightVerticalAirLayer,
 }
 
 impl CorrelationId {
     /// Complete catalog order. This is stable audit order, not a selection
     /// preference.
-    pub const ALL: [CorrelationId; 21] = [
+    pub const ALL: [CorrelationId; 22] = [
         Self::CircularDuctLaminarCwt,
         Self::CircularDuctLaminarChf,
         Self::CircularDuctHausen,
@@ -116,6 +118,7 @@ impl CorrelationId {
         Self::WhitakerSphere,
         Self::HollandsHorizontalAirLayer,
         Self::HollandsInclinedAirLayer,
+        Self::WrightVerticalAirLayer,
     ];
 
     /// Stable model-card identifier.
@@ -149,6 +152,7 @@ impl CorrelationId {
             Self::WhitakerSphere => "convection.whitaker-sphere",
             Self::HollandsHorizontalAirLayer => "convection.hollands-horizontal-air-layer",
             Self::HollandsInclinedAirLayer => "convection.hollands-inclined-air-layer",
+            Self::WrightVerticalAirLayer => "convection.wright-vertical-air-layer",
         }
     }
 
@@ -202,6 +206,9 @@ impl CorrelationId {
             }
             Self::HollandsInclinedAirLayer => {
                 "Nu = 1 + 1.44 (1-1708 sin(1.8 theta)^1.6/(Ra cos(theta))) max(0,1-1708/(Ra cos(theta))) + max(0,(Ra cos(theta)/5830)^(1/3)-1); theta from horizontal"
+            }
+            Self::WrightVerticalAirLayer => {
+                "Nu = max(Nu_w, 0.242 (Ra/A)^0.272); A=height/gap; Nu_w=1+1.75967e-10 Ra^2.2984755 for Ra<=1e4, 0.028154 Ra^0.4134 for 1e4<Ra<=5e4, 0.0673838 Ra^(1/3) above"
             }
         }
     }
@@ -358,6 +365,24 @@ impl CorrelationInputs {
         inputs
     }
 
+    /// Sealed vertical air cavity with nonnegative gap-based Rayleigh magnitude.
+    ///
+    /// The characteristic length is the full normal gas gap. The aspect ratio
+    /// is the whole vertical height divided by that gap, not the smaller lateral
+    /// span. Either wall may be hotter; the dimensional owner retains the signed
+    /// temperature difference when applying heat to the two finite walls.
+    /// The card admits Ra in [0, 1e6], Pr in [0.70, 0.72], and height/gap in
+    /// [5, 110]. Air identity and transverse confinement remain explicit physical
+    /// admissions; these groups alone cannot establish them.
+    #[must_use]
+    pub const fn vertical_air_layer(
+        rayleigh: f64,
+        prandtl: f64,
+        height_over_gap: f64,
+    ) -> Self {
+        Self::natural(rayleigh, prandtl).with_aspect_ratio(height_over_gap)
+    }
+
     /// Aiding mixed-convection point with nonnegative Reynolds and Rayleigh
     /// magnitudes and positive Prandtl number. Both flow drivers cannot vanish.
     ///
@@ -387,8 +412,9 @@ impl CorrelationInputs {
     }
 
     /// Declare the selected geometry's aspect ratio. Rectangular ducts use
-    /// minor/major side in `(0, 1]`; the enclosed air-layer cards use
-    /// gap/minimum whole-plate span in `(0, 0.1)`.
+    /// minor/major side in `(0, 1]`; horizontal and inclined air layers use
+    /// gap/minimum whole-plate span in `(0, 0.1)`; the vertical air cavity
+    /// uses whole vertical height/gap in `[5, 110]`.
     #[must_use]
     pub const fn with_aspect_ratio(mut self, ratio: f64) -> Self {
         self.aspect_ratio = Some(ratio);
@@ -448,7 +474,9 @@ impl CorrelationInputs {
                     value,
                     mixed || matches!(
                         id,
-                        CorrelationId::ChurchillSphere | CorrelationId::HollandsInclinedAirLayer
+                        CorrelationId::ChurchillSphere
+                            | CorrelationId::HollandsInclinedAirLayer
+                            | CorrelationId::WrightVerticalAirLayer
                     ),
                 )?;
             }
@@ -941,6 +969,9 @@ fn evaluate_formula(
         CorrelationId::HollandsInclinedAirLayer => {
             enclosed::inclined_nusselt(group("Ra"), group("inclination_degrees"))
         }
+        CorrelationId::WrightVerticalAirLayer => {
+            enclosed::vertical::nusselt(group("Ra"), group("aspect_ratio"))
+        }
     }
 }
 
@@ -1063,6 +1094,7 @@ fn card_for(id: CorrelationId) -> CorrelationCard {
     let (source, validity, assumptions, failures, discrepancy_rel, discrepancy_basis) = match id {
         CorrelationId::HollandsHorizontalAirLayer => return enclosed::card(),
         CorrelationId::HollandsInclinedAirLayer => return enclosed::inclined_card(),
+        CorrelationId::WrightVerticalAirLayer => return enclosed::vertical::card(),
         CorrelationId::CircularDuctLaminarCwt => (
             SHAH_LONDON,
             fully_developed(),

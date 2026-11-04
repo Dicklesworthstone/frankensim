@@ -845,7 +845,10 @@ pub struct SampledPlateMode {
 
 /// Von Karman storage from *sampled* displacement modes.
 ///
-/// Second derivatives are central / one-sided finite differences.
+/// Second derivatives use central finite differences at every interior
+/// grid point. The Airy sine trace is zero at the physical boundary, so
+/// boundary Hessians are not needed. Prepared displacement Hessians are
+/// reused across all mode pairs and stress channels.
 /// Airy stress uses the same sine products as the SS constructor
 /// (in-plane movable), so clamped/orthotropic bending is FE while
 /// the membrane channel stays the analytic Airy basis. `E` in the
@@ -853,7 +856,8 @@ pub struct SampledPlateMode {
 /// orthotropic callers).
 ///
 /// # Errors
-/// [`NlModalError`] on bad grids, non-physical parameters, or an
+/// [`NlModalError`] on bad grids, non-physical parameters, Airy indices
+/// at or above the grid Nyquist limit, or an
 /// FD-stencil disagreement above `0.9` of the channel scale
 /// (FE Hessians are first-order; the sine reprint test is the
 /// accuracy pin).
@@ -876,12 +880,30 @@ pub fn von_karman_sampled_plate(
             what: "sampled grid must be at least 5×5",
         });
     }
+    let Some(points) = nx.checked_mul(ny) else {
+        return Err(NlModalError::Parameter {
+            what: "sampled grid size overflow",
+        });
+    };
     for mode in disp {
-        if mode.nx != nx || mode.ny != ny || mode.w.len() != nx * ny || !(mode.omega > 0.0) {
+        if mode.nx != nx
+            || mode.ny != ny
+            || mode.w.len() != points
+            || !(mode.omega > 0.0 && mode.omega.is_finite())
+            || mode.w.iter().any(|v| !v.is_finite())
+        {
             return Err(NlModalError::Parameter {
                 what: "sampled modes must share a finite positive grid",
             });
         }
+    }
+    if stress_modes
+        .iter()
+        .any(|mode| mode.m >= nx - 1 || mode.n >= ny - 1)
+    {
+        return Err(NlModalError::Parameter {
+            what: "sampled Airy mode must be below the grid Nyquist limit",
+        });
     }
     let VkPlateParams {
         lx,
@@ -894,21 +916,22 @@ pub fn von_karman_sampled_plate(
     let dx = lx / (nx - 1) as f64;
     let dy = ly / (ny - 1) as f64;
     let area_el = dx * dy;
-    let mut fields = Vec::with_capacity(disp.len());
+    let mut hessians = Vec::with_capacity(disp.len());
     let mut omegas = Vec::with_capacity(disp.len());
     for mode in disp {
         let energy: f64 = mode.w.iter().map(|v| v * v).sum::<f64>() * area_el * rho * h;
-        if !(energy > 0.0) {
+        if !(energy > 0.0 && energy.is_finite()) {
             return Err(NlModalError::Parameter {
-                what: "sampled mode has no L2 mass",
+                what: "sampled mode must have finite positive L2 mass",
             });
         }
         let scale = det::sqrt(1.0 / energy);
-        fields.push(mode.w.iter().map(|v| v * scale).collect::<Vec<_>>());
+        let field: Vec<_> = mode.w.iter().map(|v| v * scale).collect();
+        hessians.push(sampled_hessians(&field, nx, ny, dx, dy));
         omegas.push(mode.omega);
     }
     type RawChannel = (f64, Vec<(usize, usize, f64, f64)>, f64);
-    let nq = fields.len();
+    let nq = hessians.len();
     let pi = core::f64::consts::PI;
     let psi_norm = det::sqrt(4.0 / (lx * ly));
     let kmin2 = (pi / lx) * (pi / lx) + (pi / ly) * (pi / ly);
@@ -928,8 +951,7 @@ pub fn von_karman_sampled_plate(
         let mut scale = f64::MIN_POSITIVE;
         for p in 0..nq {
             for q in 0..=p {
-                let a2 = fd_coupling(&psi, &fields[p], &fields[q], nx, ny, dx, dy, 2);
-                let a4 = fd_coupling(&psi, &fields[p], &fields[q], nx, ny, dx, dy, 4);
+                let (a2, a4) = sampled_coupling(&psi, &hessians[p], &hessians[q], area_el);
                 scale = scale.max(a2.abs()).max(a4.abs());
                 pairs.push((p, q, a2, a4));
             }
@@ -960,8 +982,10 @@ pub fn von_karman_sampled_plate(
             residual: worst_rel,
         });
     }
+    let storage = SosModalStorage { omegas, channels };
+    storage.validate()?;
     Ok(VkModel {
-        storage: SosModalStorage { omegas, channels },
+        storage,
         disp_modes: dummy_disp_ids(nq),
         stress_modes: stress_modes.to_vec(),
         quadrature_residual: worst_rel,
@@ -1016,38 +1040,38 @@ fn fd_dxy(w: &[f64], nx: usize, i: usize, j: usize, dx: f64, dy: f64) -> f64 {
         / (4.0 * dx * dy)
 }
 
-#[allow(clippy::too_many_arguments)] // one coherent physics record/assembler
-fn fd_coupling(
-    psi: &[f64],
-    a: &[f64],
-    b: &[f64],
-    nx: usize,
-    ny: usize,
-    dx: f64,
-    dy: f64,
-    order: u8,
-) -> f64 {
-    let mut acc = 0.0;
-    // Skip the two-point halo so both orders use the same interior
-    // stencil. Index-clamped boundary differences of a Dirichlet
-    // sine are O(1/h) garbage and dominate the certificate.
-    let halo = 2usize;
-    if nx <= 2 * halo || ny <= 2 * halo {
-        return 0.0;
-    }
-    for j in halo..ny - halo {
-        for i in halo..nx - halo {
-            let a_xx = fd_d2(a, nx, i, j, 0, dx, order);
-            let a_yy = fd_d2(a, nx, i, j, 1, dy, order);
-            let a_xy = fd_dxy(a, nx, i, j, dx, dy);
-            let b_xx = fd_d2(b, nx, i, j, 0, dx, order);
-            let b_yy = fd_d2(b, nx, i, j, 1, dy, order);
-            let b_xy = fd_dxy(b, nx, i, j, dx, dy);
-            let l = a_xx * b_yy + a_yy * b_xx - 2.0 * a_xy * b_xy;
-            acc += psi[j * nx + i] * l;
+// [xx(second order), yy(second order), xy, xx(fourth order), yy(fourth order)].
+// The mixed derivative is shared by the production and diagnostic stencils.
+fn sampled_hessians(w: &[f64], nx: usize, ny: usize, dx: f64, dy: f64) -> Vec<[f64; 5]> {
+    let mut hessians = vec![[0.0; 5]; nx * ny];
+    // Every interior node has a valid second-order central stencil,
+    // including the first ring next to the boundary. Omitting that ring
+    // biases the harmonic overlaps, particularly the mixed-curvature term.
+    // Use second-order differences there for both orders; the Airy trace
+    // is zero on the boundary itself, where the Hessian is left zero.
+    for j in 1..ny - 1 {
+        for i in 1..nx - 1 {
+            hessians[j * nx + i] = [
+                fd_d2(w, nx, i, j, 0, dx, 2),
+                fd_d2(w, nx, i, j, 1, dy, 2),
+                fd_dxy(w, nx, i, j, dx, dy),
+                fd_d2(w, nx, i, j, 0, dx, 4),
+                fd_d2(w, nx, i, j, 1, dy, 4),
+            ];
         }
     }
-    acc * dx * dy
+    hessians
+}
+
+fn sampled_coupling(psi: &[f64], a: &[[f64; 5]], b: &[[f64; 5]], area_el: f64) -> (f64, f64) {
+    let mut a2 = 0.0;
+    let mut a4 = 0.0;
+    for ((&psi, a), b) in psi.iter().zip(a).zip(b) {
+        let mixed = 2.0 * a[2] * b[2];
+        a2 += psi * (a[0] * b[1] + a[1] * b[0] - mixed);
+        a4 += psi * (a[3] * b[4] + a[4] * b[3] - mixed);
+    }
+    (a2 * area_el, a4 * area_el)
 }
 
 // ---------------------------------------------------------------------
@@ -1276,7 +1300,10 @@ mod beam_dispersion_tests {
         for mode in [1, 2, 7, 32, 1024] {
             let kappa = mode as f64 * core::f64::consts::PI / length;
             let expected = ((tension * kappa * kappa + ei * kappa.powi(4)) / mass).sqrt();
-            close(prestressed_beam_omega(length, tension, mass, ei, mode), expected);
+            close(
+                prestressed_beam_omega(length, tension, mass, ei, mode),
+                expected,
+            );
         }
     }
 
@@ -1314,8 +1341,8 @@ mod beam_dispersion_tests {
             let omega = |k| prestressed_beam_omega_at_wavenumber(k, tension, mass, ei);
             let phase_speed = omega(kappa) / kappa;
             let group_speed = (omega(kappa + h) - omega(kappa - h)) / (2.0 * h);
-            let expected_ratio = (tension + 2.0 * ei * kappa * kappa)
-                / (tension + ei * kappa * kappa);
+            let expected_ratio =
+                (tension + 2.0 * ei * kappa * kappa) / (tension + ei * kappa * kappa);
             assert!((group_speed / phase_speed - expected_ratio).abs() < 2.0e-9);
         }
     }
@@ -1327,8 +1354,14 @@ mod beam_dispersion_tests {
             prestressed_beam_omega_at_wavenumber(1.0e50, 1.0e200, 1.0e-200, 1.0e200),
             1.0e300,
         );
-        assert_eq!(prestressed_beam_omega_at_wavenumber(3.0, 0.0, 1.0, 0.0), 0.0);
-        assert_eq!(prestressed_beam_omega_at_wavenumber(0.0, 1.0, 1.0, 1.0), 0.0);
+        assert_eq!(
+            prestressed_beam_omega_at_wavenumber(3.0, 0.0, 1.0, 0.0),
+            0.0
+        );
+        assert_eq!(
+            prestressed_beam_omega_at_wavenumber(0.0, 1.0, 1.0, 1.0),
+            0.0
+        );
     }
 
     #[test]

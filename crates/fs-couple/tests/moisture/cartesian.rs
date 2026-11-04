@@ -77,6 +77,59 @@ fn sealed() -> [MoistureFace; 6] {
 }
 
 #[test]
+fn stiff_uniform_cartesian_diffusion_preserves_exact_water_equilibrium() {
+    with_cx(|cx| {
+        let geometry = grid_geometry([1.0, 0.2, 0.1], [4, 3, 2]);
+        let initial = vec![0.15; 24];
+        let field = MoistureCartesian::new(
+            directional_card([0.01, 0.02, 0.03]),
+            point(0.1),
+            ["diffusion_x", "diffusion_y", "diffusion_z"],
+            MaterialPropertySelection::SingleClaimOnly,
+            geometry,
+            initial.clone(),
+            cx,
+        ).unwrap();
+        let mut step = config();
+        step.linear.max_iterations = 1;
+        step.linear.max_corrections = 0;
+        for boundaries in [sealed(), std::array::from_fn(|_| MoistureFace::PrescribedDryBasis(0.15))] {
+            let (next, report) = field.advance(1.0e8, &boundaries, step, nonlinear(), cx).unwrap();
+            assert_eq!(next.moisture(), initial);
+            assert_eq!(report.boundary_water_kg, [0.0; 6]);
+            assert_eq!(report.water_balance_residual_kg, 0.0);
+            assert_eq!(report.linear_iterations, 0);
+        }
+    });
+}
+
+#[test]
+fn weak_cartesian_cosine_diffusion_uses_gradient_scale_not_background_water() {
+    with_cx(|cx| {
+        let n = 8;
+        let geometry = grid_geometry([1.0; 3], [n, 1, 1]);
+        let amplitude = 1.0e-6;
+        let dt = 0.5;
+        let diffusion = 0.01;
+        let wave = |i: usize| (std::f64::consts::PI * (i as f64 + 0.5) / n as f64).cos();
+        let decay = 1.0 / (1.0 + 4.0 * dt * diffusion * (n * n) as f64
+            * (std::f64::consts::PI / (2.0 * n as f64)).sin().powi(2));
+        let mut step = config();
+        step.linear.tolerance = 1.0e-6;
+        let controls = MoistureNonlinearConfig { relative_tolerance: 1.0e-6, ..nonlinear() };
+        for background in [0.1, 0.2] {
+            let initial = (0..n).map(|i| background + amplitude * wave(i)).collect();
+            let field = grid(card([diffusion; 2], 0.3), geometry, initial, cx);
+            let (next, report) = field.advance(dt, &sealed(), step, controls, cx).unwrap();
+            for (i, &m) in next.moisture().iter().enumerate() {
+                near(m, background + amplitude * decay * wave(i), 2.0e-10);
+            }
+            near(report.water_balance_residual_kg, 0.0, 1.0e-12);
+        }
+    });
+}
+
+#[test]
 fn g1_impermeable_principal_directions_preserve_independent_slab_evolution() {
     with_cx(|cx| {
         let geometry = grid_geometry([1.0, 0.2, 0.1], [8, 3, 2]);

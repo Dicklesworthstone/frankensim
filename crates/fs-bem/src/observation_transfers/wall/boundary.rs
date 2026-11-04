@@ -1,9 +1,48 @@
 //! Local surface laws evaluated by their original mechanical/material owners.
 use super::*;
-use crate::helmholtz::bc::PorousRigidBoundary;
-use fs_material::fluid_acoustics::thermoviscous::ThermoviscousFluidState;
-use fs_material::porous::PorousFluidLaw;
+use crate::helmholtz::bc::{PorousLayersBoundary, PorousRigidBoundary};
+use fs_material::fluid_acoustics::{FluidAcousticState, thermoviscous::ThermoviscousFluidState};
+use fs_material::porous::{
+    PorousFluidLaw,
+    layers::{Layer, MAX_LAYERS, RigidBackedLayers},
+};
 use fs_phs::WallPin;
+
+/// An owned layer in a locally reacting, rigid-backed treatment, ordered from
+/// the exposed face toward its backing. The original material owner retains
+/// pressure/normal-velocity continuity and coherent propagation between layers.
+#[derive(Clone, Debug)]
+pub enum LocalWallLayer {
+    Porous {
+        law: PorousFluidLaw,
+        thickness_m: f64,
+    },
+    /// Lossless gap containing the wall's coherent saturating/exterior fluid.
+    FluidGap { thickness_m: f64 },
+    /// Lossless fluid with its own original density and bulk modulus.
+    FluidLayer {
+        fluid: FluidAcousticState,
+        thickness_m: f64,
+    },
+}
+
+impl LocalWallLayer {
+    fn source(&self) -> Layer<'_> {
+        match self {
+            Self::Porous { law, thickness_m } => Layer::Porous {
+                law,
+                thickness_m: *thickness_m,
+            },
+            Self::FluidGap { thickness_m } => Layer::FluidGap {
+                thickness_m: *thickness_m,
+            },
+            Self::FluidLayer { fluid, thickness_m } => Layer::FluidLayer {
+                fluid,
+                thickness_m: *thickness_m,
+            },
+        }
+    }
+}
 
 /// A passive locally reacting surface, in specific-impedance units [Pa s/m].
 /// These are boundary models, not a new shell or moving porous-frame solver.
@@ -18,6 +57,14 @@ pub enum LocalWall {
         law: PorousFluidLaw,
         fluid: ThermoviscousFluidState,
         thickness_m: f64,
+    },
+    /// Original coherent multilayer response, used at NORMAL incidence by
+    /// the existing local Robin adapter. No lateral propagation, curvature
+    /// correction or moving frame is inferred. At most MAX_LAYERS are admitted;
+    /// zero thickness is an identity, and an empty stack is rigid.
+    LayeredRigid {
+        fluid: ThermoviscousFluidState,
+        layers: Vec<LocalWallLayer>,
     },
 }
 
@@ -113,6 +160,38 @@ impl LocalBoundary {
                     if prepared.medium() != medium {
                         return Err(TransferError::Invalid(
                             "porous and exterior fluid coefficients differ",
+                        ));
+                    }
+                    supported_hz.0 = supported_hz.0.max(band.0);
+                    supported_hz.1 = supported_hz.1.min(band.1);
+                }
+                LocalWall::LayeredRigid { fluid, layers } => {
+                    let mut band = (0.0_f64, f64::INFINITY);
+                    for layer in layers {
+                        if let LocalWallLayer::Porous { law, .. } = layer {
+                            let source_band = law.reference_card().valid_hz;
+                            band.0 = band.0.max(source_band.0);
+                            band.1 = band.1.min(source_band.1);
+                        }
+                    }
+                    if band.0 >= band.1 {
+                        return Err(TransferError::Invalid(
+                            "local wall layers have no common frequency band",
+                        ));
+                    }
+                    // Validate thicknesses and original sources together at
+                    // one supported frequency, including zero-thickness laws.
+                    // Robin pressure-node refusals belong to the actual query,
+                    // not an arbitrary validation frequency for lossless gaps.
+                    let probe_hz = if band.0 > 0.0 { band.0 } else { 1.0 };
+                    let prepared =
+                        prepare_layers(fluid, layers, core::f64::consts::TAU * probe_hz)?;
+                    let acoustic = prepared.fluid().acoustic();
+                    if acoustic.density_kg_m3() != medium.density
+                        || acoustic.sound_speed_m_s() != medium.sound_speed
+                    {
+                        return Err(TransferError::Invalid(
+                            "layered wall and exterior fluid coefficients differ",
                         ));
                     }
                     supported_hz.0 = supported_hz.0.max(band.0);
@@ -252,6 +331,10 @@ impl LocalBoundary {
                     thickness_m,
                 } => PorousRigidBoundary::new(law, fluid, omega, *thickness_m)?
                     .normalized_admittance(),
+                LocalWall::LayeredRigid { fluid, layers } => {
+                    let prepared = prepare_layers(fluid, layers, omega)?;
+                    PorousLayersBoundary::new(&prepared)?.normalized_admittance()
+                }
             };
             if !finite(beta) || beta.re < 0.0 {
                 return Err(TransferError::Invalid(
@@ -324,12 +407,105 @@ impl LocalBoundary {
                         }
                     }
                 }
+                LocalWall::LayeredRigid { fluid, layers } => {
+                    hash.update(&[3]);
+                    hash_scalars(
+                        &mut hash,
+                        &[
+                            fluid.acoustic().density_kg_m3(),
+                            fluid.acoustic().sound_speed_m_s(),
+                            fluid.acoustic().adiabatic_bulk_modulus_pa(),
+                            fluid.transport().density_kg_m3(),
+                            fluid.transport().specific_heat_j_kg_k(),
+                            fluid.transport().thermal_conductivity_w_m_k(),
+                            fluid.transport().dynamic_viscosity_pa_s(),
+                            fluid.heat_capacity_ratio(),
+                            fluid.specific_heat_cv_j_kg_k(),
+                        ],
+                    );
+                    hash.update(&(layers.len() as u64).to_le_bytes());
+                    for layer in layers {
+                        match layer {
+                            LocalWallLayer::Porous { law, thickness_m } => {
+                                hash.update(&[0]);
+                                hash_scalars(&mut hash, &[*thickness_m]);
+                                hash_porous_source(&mut hash, law);
+                            }
+                            LocalWallLayer::FluidGap { thickness_m } => {
+                                hash.update(&[1]);
+                                hash_scalars(&mut hash, &[*thickness_m]);
+                            }
+                            LocalWallLayer::FluidLayer { fluid, thickness_m } => {
+                                hash.update(&[2]);
+                                hash_scalars(
+                                    &mut hash,
+                                    &[
+                                        *thickness_m,
+                                        fluid.density_kg_m3(),
+                                        fluid.sound_speed_m_s(),
+                                        fluid.adiabatic_bulk_modulus_pa(),
+                                    ],
+                                );
+                            }
+                        }
+                    }
+                }
             }
         }
         for &index in &self.panel_laws {
             hash.update(&(index as u64).to_le_bytes());
         }
         hash.finalize()
+    }
+}
+
+fn prepare_layers<'a>(
+    fluid: &'a ThermoviscousFluidState,
+    layers: &'a [LocalWallLayer],
+    omega: f64,
+) -> Result<RigidBackedLayers<'a>, TransferError> {
+    if layers.len() > MAX_LAYERS {
+        return Err(TransferError::Invalid(
+            "local wall exceeds the material layer ceiling",
+        ));
+    }
+    // Borrow original sources without a second heap allocation per frequency.
+    let mut sources = [Layer::FluidGap { thickness_m: 0.0 }; MAX_LAYERS];
+    for (source, layer) in sources.iter_mut().zip(layers) {
+        *source = layer.source();
+    }
+    Ok(RigidBackedLayers::new(
+        fluid,
+        omega,
+        &sources[..layers.len()],
+    )?)
+}
+
+fn hash_porous_source(hash: &mut DomainHasher, law: &PorousFluidLaw) {
+    let card = law.reference_card();
+    for text in [card.name, card.provenance] {
+        hash.update(&(text.len() as u64).to_le_bytes());
+        hash.update(text.as_bytes());
+    }
+    hash_scalars(
+        hash,
+        &[
+            card.porosity,
+            card.flow_resistivity,
+            card.tortuosity,
+            card.viscous_length_m,
+            card.thermal_length_m,
+            card.valid_hz.0,
+            card.valid_hz.1,
+            law.reference_dynamic_viscosity_pa_s(),
+        ],
+    );
+    match card.thermal_permeability_m2 {
+        None => hash.update(&[0]),
+        Some(value) => {
+            hash.update(&[1]);
+            hash_scalars(hash, &[value]);
+        }
     }
 }
 

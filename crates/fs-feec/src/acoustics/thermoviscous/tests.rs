@@ -2,6 +2,7 @@ use super::*;
 
 mod conductive;
 mod fluid;
+mod heat_source;
 mod moving_wall;
 mod time;
 

@@ -149,17 +149,24 @@ budgeted, cancellable entry points).
    the highest mode, so an imaginary highest coefficient is meaningful for
    off-grid evaluation and subsequent derivatives. This replaces the former
    odd-derivative collocation convention that discarded the highest mode.
-   `mul` computes the full nonlinear product with a shared real-FFT plan and
-   a power-of-two grid strictly above twice the sum of retained degrees.
+   `mul` computes the full nonlinear product with a power-of-two output grid
+   strictly above twice the sum of retained degrees. Sparse spectra use
+   coefficient convolution with compensated summation, preserving weak
+   generated partials that would disappear during sampling alongside much
+   stronger modes, and exact zeros outside the sum/difference support.
+   Dense spectra use a shared real-FFT plan.
    Input highest-mode coefficients are halved when embedded as interior
    modes. Strict padding preserves even the product's highest sine; all
    sum/difference harmonics are retained, with no plateau cutoff. Only exact
    zeros reduce the input degree, and coefficients above the known product
-   degree are set to zero. Work is O(N log N), storage O(N); constant factors
-   use direct coefficient scaling. Tests cover off-grid Nyquist derivatives
+   degree are set to zero. For K and L nonzero input coefficients, sparse
+   convolution is selected when KL <= N and costs O(N + KL); otherwise work
+   is O(N log N). Storage is O(N); constant factors use direct coefficient
+   scaling. Tests cover off-grid Nyquist derivatives
    and Laplacians, second-harmonic generation without a spurious mean,
    imaginary highest coefficients, unequal resolutions, the product rule,
-   and continuous Parseval energy. This is algebra of retained interpolants,
+   continuous Parseval energy, weak generated partials, exact cubic parity,
+   and dense-product fallback. This is algebra of retained interpolants,
    not a claim that input sampling resolved the original functions; the
    classic operations do not add a budget or cancellation certificate.
    Construction and nonlinear products condition amplitudes with exact powers

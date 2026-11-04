@@ -1253,7 +1253,7 @@ the enthalpy default. The inherited `specific_h_j_kg` field carries the selected
 coordinate; the timeline applies the same conservative heat exchange and
 `integral de/T` entropy account without converting one thermodynamic potential
 into another. Each law can admit its own mass/geometry relationship through
-`validate_cell`, called before a birth changes inventory.
+`validate_cell`, called before a birth or phase exchange changes inventory.
 
 `material_storage_basis` exposes the original registered law's declaration.
 Nonzero prescribed mass flow and inlet calorics require enthalpy storage. The
@@ -1261,6 +1261,15 @@ single-surface, joint-chamber and external-endpoint sublimation paths also requi
 enthalpy before constructing or publishing open-mass exchange. Batch admission
 finishes before any endpoint mutation. Zero-flow connections remain available
 for heat-only internal-energy storage.
+
+Direct liquid evaporation/condensation, direct and shared-chamber sublimation,
+and externally solved solid/condensed endpoints validate the complete candidate
+cell with its original caloric law before committing mass or enthalpy. This is
+the same admission used by external liquid exchange. A caloric law bound to a
+fixed component inventory or reference mass/volume cannot silently acquire a
+different heat capacity through mass loss. All cells and the shared vapor
+reservoir remain unchanged if any candidate is refused; zero-transfer endpoints
+remain admissible when they preserve the original binding.
 
 Focused regressions exercise two rigid bodies exchanging heat with conserved
 internal energy and increasing thermal entropy; invalid mass/volume births;

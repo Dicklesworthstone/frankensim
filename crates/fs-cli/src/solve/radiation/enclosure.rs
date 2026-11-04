@@ -91,11 +91,15 @@ pub(super) fn lower(
             "ambient-reservoir and closed-enclosure radiation cannot own the same native model",
         ));
     }
-    if declaration.ambient_temperature.is_some() {
-        if setup.transient.is_some()
-            && declaration.spatial_model != Some(fs_project::RadiationSpatialModel::Pointwise)
-        {
-            return Err(bad("open-enclosure histories require spatial-model pointwise and total-enthalpy storage so bath heat enters the actual nonlinear endpoint"));
+    if declaration.ambient_temperature.is_some()
+        && declaration.spatial_model != Some(fs_project::RadiationSpatialModel::Pointwise)
+        && let Some(time) = &setup.transient
+    {
+        if time.enthalpy.is_some() {
+            return Err(bad("open total-enthalpy histories require spatial-model pointwise; regional-capacity histories use the shared area-mean enclosure owner"));
+        }
+        if spec.outputs.iter().flatten().any(|output| output.name.contains("adjoint")) {
+            return Err(bad("open area-mean capacity radiation does not expose trajectory adjoints"));
         }
     }
     if spec
@@ -434,7 +438,7 @@ impl EnclosureResult {
     ) -> Result<String, SolveRefusal> {
         match self {
             Self::Closed(result) => result.receipt(lowering, convective_out_w, thermal_responses),
-            Self::Open(result) => result.receipt(lowering, convective_out_w),
+            Self::Open(result) => result.receipt(lowering, convective_out_w, thermal_responses),
         }
     }
 }

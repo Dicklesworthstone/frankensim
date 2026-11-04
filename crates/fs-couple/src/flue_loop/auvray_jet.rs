@@ -19,8 +19,9 @@
 //! that is always on in Auvray's model (2014 Eq. 2, `alpha_vc`) is the card's own `mouth_loss`
 //! row; this module does not add it.
 //!
-//! Citation for the card values: Auvray, Ernoult, Fabre and Lagrée, "Jet-drive/discrete-vortex
-//! models' simulation of a recorder", J. Acoust. Soc. Am. 136(1), 389-400 (2014). Its Table I
+//! Citation for the card values: Auvray, Ernoult, Fabre and Lagrée, "Time-domain simulation of
+//! flute-like instruments: Comparison of jet-drive and discrete-vortex models", J. Acoust. Soc.
+//! Am. 136(1), 389-400 (2014). Its Table I
 //! (row JD) gives `b = 0.3` and `c_jd = 0.4`, i.e. `beta 0.3` and `gamma 0.4` on this row; Sec. II B
 //! states them as the experimental values of de la Cuadra and of Blanc (`beta ~ 0.3`,
 //! `c_jd ~ 0.4`), which depend on the channel's velocity profile and hold over a few jet

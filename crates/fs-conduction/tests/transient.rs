@@ -122,6 +122,179 @@ fn uniform_adiabatic_heating_is_exact_for_every_scheme_and_step() {
 }
 
 #[test]
+fn millikelvin_heat_pulses_are_resolved_at_the_declared_solver_tolerance() {
+    // A relative tolerance must resolve the temperature RISE, rather than
+    // permit a spatially nonuniform error scaled by the 300 K background.
+    // The insulated body's exact response is uniform for every theta.
+    let mesh = unit_mesh(4);
+    let boundary = adiabatic(&mesh);
+    let source_density = 2.0; // W/m^3: a 6 mK rise over this trajectory.
+    let source = ScalarField::uniform("weak heat pulse", source_density).expect("source");
+    let linear = LinearConfig {
+        tolerance: 1e-7,
+        ..LinearConfig::default()
+    };
+    let dt_s = 2.0e3;
+    let steps = 3;
+    let expected_rise = source_density * dt_s * (steps as f64) / RHO_CP;
+    let initial = vec![T_COLD; mesh.vertex_count()];
+
+    for theta in [1.0, 0.75, 0.5] {
+        let config = TransientConfig::new(theta, dt_s, linear).expect("config");
+        let solution = with_cx(|cx| {
+            march(
+                cx,
+                TransientProblem {
+                    mesh: &mesh,
+                    boundary: &boundary,
+                    material: &material(),
+                    source: &source,
+                    capacity: capacity(),
+                },
+                &config,
+                &initial,
+                steps,
+            )
+            .expect("weak pulse march")
+        });
+
+        for (vertex, &temperature) in solution.temperature.iter().enumerate() {
+            let error = (temperature - T_COLD - expected_rise).abs();
+            assert!(
+                error < 20.0 * linear.tolerance * expected_rise,
+                "theta={theta}: vertex {vertex} weak-pulse error {error} K exceeds the tolerance on the {expected_rise} K rise"
+            );
+        }
+    }
+}
+
+#[test]
+fn weak_diffusion_is_independent_of_the_absolute_temperature_background() {
+    // Constant-property insulated diffusion is invariant under T -> T + c.
+    // Compare the same millikelvin-scale profile at two physical baselines;
+    // a solver tolerance scaled to absolute temperature breaks this symmetry.
+    let mesh = unit_mesh(4);
+    let boundary = adiabatic(&mesh);
+    let source = ScalarField::uniform("no heating", 0.0).expect("source");
+    let linear = LinearConfig {
+        tolerance: 1e-7,
+        ..LinearConfig::default()
+    };
+    let amplitude = 1.0e-3;
+    let perturbation: Vec<_> = mesh
+        .positions()
+        .iter()
+        .map(|p| amplitude * ((1.0 - p[0]).powi(2) + 0.5 * p[1] + 0.25 * p[2].powi(3)))
+        .collect();
+
+    for theta in [1.0, 0.75, 0.5] {
+        let config = TransientConfig::new(theta, 2.0e3, linear).expect("config");
+        let run = |background| {
+            let initial: Vec<_> = perturbation
+                .iter()
+                .map(|value| background + value)
+                .collect();
+            with_cx(|cx| {
+                march(
+                    cx,
+                    TransientProblem {
+                        mesh: &mesh,
+                        boundary: &boundary,
+                        material: &material(),
+                        source: &source,
+                        capacity: capacity(),
+                    },
+                    &config,
+                    &initial,
+                    3,
+                )
+                .expect("weak diffusion march")
+            })
+        };
+        let reference = run(1.0);
+        let shifted = run(T_COLD);
+
+        for vertex in 0..mesh.vertex_count() {
+            let reference_excess = reference.temperature[vertex] - 1.0;
+            let shifted_excess = shifted.temperature[vertex] - T_COLD;
+            let error = (reference_excess - shifted_excess).abs();
+            assert!(
+                error < 50.0 * linear.tolerance * amplitude,
+                "theta={theta}: vertex {vertex} background-dependent error {error} K in the {amplitude} K diffusion profile"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_small_heat_pulse_is_resolved_independently_of_absolute_temperature() {
+    // Linear insulated conduction is invariant under a uniform temperature
+    // shift. A tolerance applied to C*T/dt can hide this spatial heat signal
+    // in the 300 K background, even though the increment is representable.
+    let mesh = unit_mesh(3);
+    let boundary = adiabatic(&mesh);
+    let material = ConductivityModel::isotropic_declared(1.0).unwrap();
+    let capacity = VolumetricHeatCapacity::declared(1.0).unwrap();
+    let source = ScalarField::nodal(
+        "localized weak heat",
+        mesh.vertex_count(),
+        mesh.positions()
+            .iter()
+            .map(|p| if p[0] < 0.5 && p[1] < 0.5 { 1e-5 } else { 0.0 })
+            .collect(),
+    )
+    .unwrap();
+    for theta in [0.5, 0.75, 1.0] {
+        let config = TransientConfig::new(
+            theta,
+            0.1,
+            LinearConfig {
+                tolerance: 1e-8,
+                max_iterations: 1_000,
+                restart: 30,
+            },
+        )
+        .unwrap();
+        let problem = TransientProblem {
+            mesh: &mesh,
+            boundary: &boundary,
+            material: &material,
+            source: &source,
+            capacity,
+        };
+        let solve_at = |offset| {
+            with_cx(|cx| march(cx, problem, &config, &vec![offset; mesh.vertex_count()], 3))
+                .unwrap()
+        };
+        let reference = solve_at(0.0);
+        let physical = solve_at(T_COLD);
+        let worst = reference
+            .temperature
+            .iter()
+            .zip(&physical.temperature)
+            .map(|(&rise, &temperature)| (temperature - T_COLD - rise).abs())
+            .fold(0.0, f64::max);
+        assert!(
+            worst < 2e-11,
+            "theta={theta}: shift changed the heat pulse by {worst} K"
+        );
+
+        // With insulated faces, all source energy stays in the body. Check the
+        // published temperatures, independently of the Krylov residual.
+        let mut energy = 0.0;
+        let mut power = 0.0;
+        for (e, tet) in mesh.complex().tets.iter().enumerate() {
+            let weight = mesh.element_volume(e) / 4.0;
+            for &vertex in tet {
+                energy += weight * (physical.temperature[vertex as usize] - T_COLD);
+                power += weight * source.at(vertex as usize);
+            }
+        }
+        assert!((energy - physical.time_s * power).abs() < 2e-11);
+    }
+}
+
+#[test]
 fn the_capacitance_matrix_holds_the_exact_heat_content() {
     // Summing every entry of C gives rho c_p V: the discrete heat content of
     // a unit uniform temperature rise. This is the property that makes the
@@ -601,6 +774,46 @@ fn the_adjoint_agrees_with_finite_differences_under_crank_nicolson_too() {
         verdict.max_rel_err, verdict.pairs
     );
     assert_eq!(verdict.informative_directions, 1);
+}
+
+#[test]
+fn the_transient_adjoint_preserves_extreme_but_finite_goal_scales() {
+    let mesh = unit_mesh(2);
+    let boundary = adiabatic(&mesh);
+    let source = ScalarField::uniform("volumetric source", 3.0e5).unwrap();
+    let config = TransientConfig::crank_nicolson(1.0, linear_config()).unwrap();
+    let steps = 3;
+    let expected_unscaled = 3.0e5 * steps as f64 / RHO_CP;
+    // The scalar goal's units may make its weights tiny or large. Squaring
+    // those physical loads inside unscaled CG must not turn a nonzero
+    // derivative into zero, or make a finite derivative overflow.
+    for scale in [1e-200, 1.0, 1e200] {
+        let functional = FinalStateFunctional::new(vec![
+            scale / mesh.vertex_count() as f64;
+            mesh.vertex_count()
+        ])
+        .unwrap();
+        let gradient = with_cx(|cx| {
+            source_scale_gradient(
+                cx,
+                TransientProblem {
+                    mesh: &mesh,
+                    boundary: &boundary,
+                    material: &material(),
+                    source: &source,
+                    capacity: capacity(),
+                },
+                &config,
+                &functional,
+                steps,
+            )
+        })
+        .unwrap();
+        assert!(
+            (gradient / scale - expected_unscaled).abs() < 1e-12,
+            "goal scale {scale}: derivative {gradient} lost its physical scale"
+        );
+    }
 }
 
 #[test]

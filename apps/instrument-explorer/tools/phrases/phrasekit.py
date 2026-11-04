@@ -245,7 +245,7 @@ def render_planned(pid, p):
             m = pitch(x, t + min(0.3, d * 0.45), t + d - 0.06, note)
             notes.append(dict(at=round(t, 3), dur=d, note=note, target_hz=round(hz(note), 2), **(m or {})))
             t += d
-        how = ("One render: the player's mouth pressure and lip pre-stress change during it, so every note "
+        how = p.get("how") or ("One render: the player's mouth pressure and lip pre-stress change during it, so every note "
                "transition happens inside the simulation. " + ("Each note is tongued: the pressure drops to zero "
                "for 30 ms, then attacks at 14 kPa and settles to that note's sustain pressure."
                if kind != "slur" else "The pressure stays at 14 kPa; only the lip tightens and relaxes, "

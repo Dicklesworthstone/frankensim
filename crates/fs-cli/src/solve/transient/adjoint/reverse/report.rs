@@ -3,8 +3,12 @@ use super::{Cx, Derivatives, Instant, Objective, SolveRefusal, StepConfig, bad, 
 use super::super::super::{json_string, number};
 
 pub(super) fn render(
-    cx: &Cx<'_>, result: &Derivatives, ends: &[f64], objective: Objective,
-    config: StepConfig, deadline: Option<(Instant, f64)>,
+    cx: &Cx<'_>,
+    result: &Derivatives,
+    ends: &[f64],
+    objective: Objective,
+    config: StepConfig,
+    deadline: Option<(Instant, f64)>,
 ) -> Result<String, SolveRefusal> {
     let mut totals = vec![0.0; result.region_names.len()];
     let mut intervals = Vec::new();
@@ -46,7 +50,7 @@ pub(super) fn render(
         .and_then(|v| v.checked_mul(result.max_dual_solves_per_step))
         .ok_or_else(|| bad("reverse iteration allowance overflows"))?;
     let reconstruction_limit = if result.revalidated_steps > 0
-        || !result.radiation.is_empty() || !result.convection.is_empty() {
+        || !result.radiation.is_empty() || !result.convection.is_empty() || !result.contact.is_empty() {
         0
     } else {
         iteration_limit
@@ -58,6 +62,14 @@ pub(super) fn render(
         MATERIAL_SCOPE,
     ));
     let mut scope = material_scope.as_deref().unwrap_or(SCOPE).to_owned();
+    let contact = &result.contact;
+    if !contact.is_empty() {
+        scope = scope.replace(
+            "with fixed matching contact",
+            "with original source-backed matching contact",
+        );
+        scope.push_str(" Live contact re-queries each pinned resistance law at its independent endpoint traces and retains both temperature partials in the same complete capacity/bulk transpose. Every selected endpoint is revalidated at the unchanged accepted field and its original absolute residual and energy targets, without a replacement solve. Source/material corners and validity endpoints refuse classical derivatives even when the forward semismooth solve succeeds. Geometry, pressure, finish, source selection and whole-law resistance scales remain fixed. Prescribed-boundary lifts include the full contact transpose at constrained vertices.");
+    }
     if !result.prescribed_temperature.is_empty() {
         scope = scope.replace("geometry, prescribed temperatures and material laws", "geometry and material laws")
             .replace("Surface-power, prescribed-temperature, ", "Surface-power, ");
@@ -71,7 +83,7 @@ pub(super) fn render(
         scope.push_str(" Declared thermal histories are held fixed and sampled at the same interval starts as the forward trajectory, before every endpoint reconstruction and coupled tangent. A replaced static Robin reference has zero derivative and is marked reference_history_held_fixed; its coefficient remains a control. Scheduled static heat-flux controls are omitted and scheduled prescribed-temperature coordinates remain fixed. These are not derivatives of history values or switching times.");
     }
     poll(cx, deadline)?;
-    Ok(format!("{{\"schema\":\"fs-cli-native-transient-adjoint-v1\",\"output\":{},\"method\":\"discrete-backward-euler-reverse\",\"value_k\":{},\"time_s\":{},\"state_index\":{},\"active_vertex\":{},\"active_ties\":{},\"unique_sampled_maximum\":{},\"dtemperature_duniform_initial_k_per_k\":{},\"dtemperature_dinitial_temperatures\":[{}],\"dtemperature_dcapacity_multiplier_k\":{},\"regional_power\":[{}],\"robin\":[{}],\"intervals\":[{}],\"reconstructed_solid_endpoints\":{},\"revalidated_solid_endpoints\":{},\"reconstruction_krylov_iterations\":{},\"adjoint_krylov_iterations\":{},\"maximum_dual_relative_residual\":{},\"max_reverse_steps\":{},\"max_krylov_iterations_per_linear_solve\":{},\"max_reconstruction_krylov_iterations\":{},\"max_adjoint_krylov_iterations\":{},\"additional_storage_estimate_bytes\":{},\"authority\":\"Estimated\",\"scope\":{}{}{}{}{}{heat_flux}}}",
+    Ok(format!("{{\"schema\":\"fs-cli-native-transient-adjoint-v1\",\"output\":{},\"method\":\"discrete-backward-euler-reverse\",\"value_k\":{},\"time_s\":{},\"state_index\":{},\"active_vertex\":{},\"active_ties\":{},\"unique_sampled_maximum\":{},\"dtemperature_duniform_initial_k_per_k\":{},\"dtemperature_dinitial_temperatures\":[{}],\"dtemperature_dcapacity_multiplier_k\":{},\"regional_power\":[{}],\"robin\":[{}],\"intervals\":[{}],\"reconstructed_solid_endpoints\":{},\"revalidated_solid_endpoints\":{},\"reconstruction_krylov_iterations\":{},\"adjoint_krylov_iterations\":{},\"maximum_dual_relative_residual\":{},\"max_reverse_steps\":{},\"max_krylov_iterations_per_linear_solve\":{},\"max_reconstruction_krylov_iterations\":{},\"max_adjoint_krylov_iterations\":{},\"additional_storage_estimate_bytes\":{},\"authority\":\"Estimated\",\"scope\":{}{}{}{}{}{contact}{heat_flux}}}",
         json_string(objective.name()), number(selected.value)?, number(time)?, selected.state,
         selected.vertex, selected.ties, selected.ties == 1, number(initial_uniform)?, initial.join(","),
         number(result.capacity)?, regional.join(","), robin.join(","), intervals.join(","), result.reconstructed_steps, result.revalidated_steps,

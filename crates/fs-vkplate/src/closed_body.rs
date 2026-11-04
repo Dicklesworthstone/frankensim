@@ -43,6 +43,10 @@ pub const ROUTE: &str = "closed-body-triangle-cbie";
 pub const RECIPROCITY_LIMIT: f64 = 0.02;
 /// A reconstructed kernel's statistics must match fs-bem's within this.
 pub const KERNEL_MATCH: f64 = 1e-9;
+/// Where `ClosedBodyTable::dipole_length` reads the table [Hz].
+const DIPOLE_READ_HZ: [f64; 3] = [20.0, 30.0, 40.0];
+/// How far that read's imaginary part and its spread may go, as shares of its length.
+const DIPOLE_READ_LIMIT: f64 = 0.05;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HeadSide {
@@ -373,6 +377,71 @@ impl ClosedBodyTable {
             kernels,
             complement: complement.ok_or_else(|| refuse("no complement kernel"))?,
         })
+    }
+
+    /// The length of the compact dipole the two heads make, from this table's own (0,1) columns. Unit outward
+    /// volume rates on the batter and on the resonant shape are each half a monopole at mid-depth, plus and minus half
+    /// a dipole, so `(H_b - H_r) / (H_b + H_r) = (D / 2) g'(z) / g(z)`, with `g` the point kernel at the microphone plus
+    /// its floor image, on the axis at mid-depth.
+    ///
+    /// It reads the table near 20, 30 and 40 Hz and returns the median. One direction is not the power: at a drum's
+    /// fundamental the same read runs 10 % long at this microphone, which is 22 % in power. The low end stays within
+    /// 1 % of the power-equivalent length for the snare and the 12-inch tom, against an independent boundary-integral
+    /// solve of the closed cylinder; the deeper 14-inch tom and the kick read 4 % and 6 % long.
+    pub fn dipole_length(&self) -> Result<f64, String> {
+        let refuse = |what: String| format!("closed-body table {}: head dipole: {what}", self.piece);
+        let column = |head: HeadSide| {
+            self.sources
+                .iter()
+                .position(|s| s.head == head && s.shape.m == 0 && s.shape.n == 1 && !s.sine)
+                .ok_or_else(|| refuse(format!("no (0,1) column for the {head:?} head")))
+        };
+        let (batter, resonant) = (column(HeadSide::Batter)?, column(HeadSide::Resonant)?);
+        let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        let (point, normal) = self.floor;
+        let centre = [0.0, 0.0, -0.5 * self.depth];
+        let axis = [0.0, 0.0, 1.0];
+        let beyond = dot([centre[0] - point[0], centre[1] - point[1], centre[2] - point[2]], normal);
+        let turn = dot(axis, normal);
+        let mirrored = |x: [f64; 3], s: f64| [x[0] - 2.0 * s * normal[0], x[1] - 2.0 * s * normal[1], x[2] - 2.0 * s * normal[2]];
+        let paths = [(centre, axis), (mirrored(centre, beyond), mirrored(axis, turn))];
+        let div = |a: (f64, f64), b: (f64, f64)| {
+            let d = b.0 * b.0 + b.1 * b.1;
+            ((a.0 * b.0 + a.1 * b.1) / d, (a.1 * b.0 - a.0 * b.1) / d)
+        };
+        let mut reads = Vec::with_capacity(DIPOLE_READ_HZ.len());
+        for hz in DIPOLE_READ_HZ {
+            let bin = (hz * self.n_fft as f64 / self.rate).round().max(1.0);
+            let omega = TAU * bin / self.n_fft as f64;
+            let wavenumber = omega * self.rate / self.gas.1;
+            let (_, _, hb) = kernel_stats(&self.kernels[batter], omega);
+            let (_, _, hr) = kernel_stats(&self.kernels[resonant], omega);
+            let ratio = div((hb.0 - hr.0, hb.1 - hr.1), (hb.0 + hr.0, hb.1 + hr.1));
+            // The kernels' transfer is exp(+i w t), so a path of length r carries exp(-i k r).
+            let (mut g, mut dg) = ((0.0, 0.0), (0.0, 0.0));
+            for (source, direction) in paths {
+                let to_mic = [self.mic[0] - source[0], self.mic[1] - source[1], self.mic[2] - source[2]];
+                let r = dot(to_mic, to_mic).sqrt();
+                let (s, c) = det::sin_cos(wavenumber * r);
+                let path = (c / r, -s / r);
+                let along = -dot(to_mic, direction) / r;
+                let (x, y) = (-along / r, -along * wavenumber);
+                g = (g.0 + path.0, g.1 + path.1);
+                dg = (dg.0 + path.0 * x - path.1 * y, dg.1 + path.0 * y + path.1 * x);
+            }
+            let slope = div(dg, g);
+            let length = div((2.0 * ratio.0, 2.0 * ratio.1), slope);
+            if !(length.0 > 0.0 && length.1.abs() <= DIPOLE_READ_LIMIT * length.0) {
+                return Err(refuse(format!("the read near {hz} Hz is ({}, {}) m, not a real positive length", length.0, length.1)));
+            }
+            reads.push(length.0);
+        }
+        reads.sort_by(f64::total_cmp);
+        let median = reads[reads.len() / 2];
+        if reads[reads.len() - 1] - reads[0] > DIPOLE_READ_LIMIT * median {
+            return Err(refuse(format!("the reads {reads:?} m disagree")));
+        }
+        Ok(median)
     }
 
     /// The route receipt for the render's notes.

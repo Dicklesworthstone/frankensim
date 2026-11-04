@@ -373,7 +373,6 @@ fn render(
         None,
         None,
         None,
-        None,
         &gas(),
         1.0,
         rate,
@@ -422,7 +421,6 @@ fn actual_dirac_renderer_uses_mixed_and_vk_only_banks_with_signed_surface_maps()
             &[],
             None,
             &mut cold_bank(false),
-            None,
             None,
             None,
             Some(fs_scenario::VolumeVelocityPulse {
@@ -487,4 +485,164 @@ fn actual_dirac_renderer_retains_declared_radiation_at_the_audio_clock() {
             .state(),
         before,
     );
+}
+
+#[test]
+fn cavity_and_duct_assembly_keeps_the_complete_reciprocal_body_path() {
+    use crate::acoustic_realize::{
+        finish_observer, gas_state, plate_bank, realize_assembly, realize_dirac_join,
+    };
+    use fs_scenario::{
+        AcousticAssembly, AmbientGas, CylinderSegment, HelmholtzCavity, Listener, NeckEnd, Pluck,
+        ThinPlate, ViscothermalDuct, VolumeVelocityPulse, WaveguideEnd,
+    };
+
+    // A small manufactured nonlinear plate avoids replacing the actual
+    // body/cavity owner with a forced oscillator. Its soft elastic law and
+    // long duct keep the common nonlinear clock inside its admitted band.
+    let mut assembly = AcousticAssembly {
+        ambient: AmbientGas::sea_level(),
+        string: Some(string(4.0)),
+        duct: Some(ViscothermalDuct {
+            segments: vec![CylinderSegment {
+                radius_m: 0.01,
+                outlet_radius_m: 0.01,
+                length_m: 10.0,
+            }],
+            tone_holes: vec![],
+            termination: WaveguideEnd::Closed,
+            wall: None,
+        }),
+        pluck: Some(Pluck {
+            station_frac: 0.5,
+            height_m: 1e-5,
+        }),
+        bow: None,
+        blow: Some(VolumeVelocityPulse {
+            peak_m3_s: 1e-5,
+            duration_s: 0.001,
+        }),
+        reed: None,
+        soundboard: None,
+        body_modes: vec![],
+        plate: Some(ThinPlate {
+            length_m: 0.2,
+            width_m: 0.15,
+            thickness_m: 0.002,
+            density_kg_m3: 1000.0,
+            e1_pa: 1e6,
+            e2_pa: 1e6,
+            nu12: 0.3,
+            g12_pa: 1e6 / 2.6,
+            material_angle_rad: 0.0,
+            damping_ratio: 0.02,
+            thermoelastic: None,
+            kelvin_voigt_bending: None,
+            n_modes: 1,
+            geometric_nonlinearity: true,
+            pretension_n_m: 0.0,
+            clamped: false,
+        }),
+        cavity: Some(HelmholtzCavity {
+            volume_m3: 0.001,
+            neck_radius_m: 0.001,
+            neck_length_m: 0.1,
+            inner_end: NeckEnd::Flanged,
+            outer_end: NeckEnd::Flanged,
+        }),
+        obstacles: vec![],
+        contact_texture: None,
+        listener: Listener { distance_m: 1.0 },
+        sample_rate_hz: 48_000,
+        duration_s: 64.0 / 48_000.0,
+    };
+    let actual = realize_assembly(&assembly).unwrap();
+    let gas = gas_state(assembly.ambient).unwrap();
+    let mut bank = plate_bank(assembly.soundboard, &assembly.body_modes, assembly.plate).unwrap();
+    bank.declare_radiation_loads(&gas, assembly.sample_rate_hz)
+        .unwrap();
+    bank.attach_cavity(assembly.cavity.unwrap(), &gas).unwrap();
+    let source = bank
+        .physical_image(
+            &gas,
+            assembly.sample_rate_hz,
+            &fs_exec::CancelGate::default(),
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        source.state_dim(),
+        4,
+        "one plate pair and the original cavity pair"
+    );
+    let expected = realize_dirac_join(
+        assembly.string.as_ref().unwrap(),
+        assembly.pluck,
+        assembly.bow,
+        &assembly.obstacles,
+        assembly.contact_texture,
+        &mut bank,
+        assembly.duct.as_ref(),
+        assembly.reed,
+        assembly.blow,
+        &gas,
+        assembly.listener.distance_m,
+        assembly.sample_rate_hz,
+        actual.pressure_pa.len(),
+    )
+    .unwrap();
+    let expected = finish_observer(&assembly, &gas, expected, None.into()).unwrap();
+    assert_eq!(
+        actual, expected,
+        "a cavity must not redirect a moving attachment through one-way bridge forcing"
+    );
+    assert!(actual.pressure_pa.iter().all(|p| p.is_finite()));
+    assert!(actual.pressure_pa.iter().any(|p| *p != 0.0));
+
+    assembly.cavity = None;
+    assert_ne!(
+        realize_assembly(&assembly).unwrap().pressure_pa,
+        actual.pressure_pa,
+        "the original cavity must remain mechanically active beside the duct"
+    );
+}
+
+#[test]
+fn unattached_cavity_is_refused_instead_of_disappearing_from_a_moving_string() {
+    use crate::acoustic_realize::realize_assembly;
+    use fs_scenario::{AcousticAssembly, AmbientGas, HelmholtzCavity, Listener, NeckEnd, Pluck};
+
+    let assembly = AcousticAssembly {
+        ambient: AmbientGas::sea_level(),
+        string: Some(string(4.0)),
+        duct: None,
+        pluck: Some(Pluck {
+            station_frac: 0.5,
+            height_m: 1e-5,
+        }),
+        bow: None,
+        blow: None,
+        reed: None,
+        soundboard: None,
+        body_modes: vec![],
+        plate: None,
+        cavity: Some(HelmholtzCavity {
+            volume_m3: 0.001,
+            neck_radius_m: 0.001,
+            neck_length_m: 0.1,
+            inner_end: NeckEnd::Flanged,
+            outer_end: NeckEnd::Flanged,
+        }),
+        obstacles: vec![],
+        contact_texture: None,
+        listener: Listener { distance_m: 1.0 },
+        sample_rate_hz: 48_000,
+        duration_s: 1.0 / 48_000.0,
+    };
+    assert!(matches!(
+        realize_assembly(&assembly),
+        Err(AcousticRealizeError::InvalidDescription {
+            what: "cavity-only island has no mechanical plate image",
+        })
+    ));
 }

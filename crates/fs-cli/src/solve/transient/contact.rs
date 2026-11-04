@@ -10,7 +10,7 @@ use super::*;
 pub(super) mod enthalpy;
 
 pub(super) const MAX_RESPONSES: usize = 64;
-pub(super) const NO_CLAIM: &str = "Source-backed matching contact queries each pinned resistance law at the arithmetic mean of its two independent face-temperature means. Pressure, finish, medium, geometry and claim selection remain fixed. Every counted contact trial uses the same immutable old field; the accepted unchanged endpoint passes freshly queried complete nodal joule-residual and separate storage/heat gates. Published contact heat and reservoir reactions describe that physical endpoint, while inner Krylov residuals describe its counted numerical response. Contact heat is internal transfer and is not added to external input. Scalar and continuous linear source curves share the complete capacity/bulk/contact Newton solve, with generalized primal source tangents at curve knots and inward source endpoints; every physical trial still passes its pinned source query. Surface laws retain the bounded contact fixed point. Neither algorithm establishes arbitrary-law convergence or uniqueness. This capacity path does not supply total-enthalpy storage; declared total-enthalpy trajectories use the separate shared contact/enthalpy owner with complete Newton tangents for scalar/continuous-curve sources and a bounded physical fixed point for source surfaces. Natural-convection trials use these same live contact responses and the original old temperature. Acceptance re-queries contact and evaluates the complete unchanged endpoint under its updated physical convection coefficient, with all nested responses counted. Transported-air callbacks use these same contact-aware capacity responses. Natural convection can enclose complete air solves on distinct targets, followed by a fresh combined contact/natural/air audit. Area-mean ambient gray or closed-enclosure radiation encloses these same contact responses inside each prescribed or derived-boundary trial; predictor and accepted physical audits include the actual radiative law. Only forced convection heats air; ambient and off-path reservoir heat retain separate accounts. Contact and closed reflected exchange remain internal, while authored Neumann heat and prescribed-node storage reactions remain external. Radiation callbacks and all nested contact responses, Newton updates, backtracks and Krylov iterations are counted separately. Open-enclosure/pointwise radiation and trajectory derivatives are not supplied for temperature-varying contact by this capacity adapter.";
+pub(super) const NO_CLAIM: &str = "Source-backed matching contact queries each pinned resistance law at the arithmetic mean of its two independent face-temperature means. Pressure, finish, medium, geometry and claim selection remain fixed. Every counted contact trial uses the same immutable old field; the accepted unchanged endpoint passes freshly queried complete nodal joule-residual and separate storage/heat gates. Published contact heat and reservoir reactions describe that physical endpoint, while inner Krylov residuals describe its counted numerical response. Contact heat is internal transfer and is not added to external input. Scalar and continuous linear source curves share the complete capacity/bulk/contact Newton solve, with generalized primal source tangents at curve knots and inward source endpoints; every physical trial still passes its pinned source query. Surface laws retain the bounded contact fixed point. Neither algorithm establishes arbitrary-law convergence or uniqueness. This capacity path does not supply total-enthalpy storage; declared total-enthalpy trajectories use the separate shared contact/enthalpy owner with complete Newton tangents for scalar/continuous-curve sources and a bounded physical fixed point for source surfaces. Natural-convection trials use these same live contact responses and the original old temperature. Acceptance re-queries contact and evaluates the complete unchanged endpoint under its updated physical convection coefficient, with all nested responses counted. Transported-air callbacks use these same contact-aware capacity responses. Natural convection can enclose complete air solves on distinct targets, followed by a fresh combined contact/natural/air audit. Area-mean ambient gray or closed/open enclosure radiation encloses these same contact responses inside each prescribed or derived-boundary trial; predictor and accepted physical audits include the actual radiative law. Only forced convection heats air; ambient and off-path reservoir heat retain separate accounts. Contact and closed reflected exchange remain internal, while authored Neumann heat, prescribed-node storage reactions and open-enclosure bath exchange remain external. The black reservoir is outside the solid trace and capacity arrays; its independently evaluated radiation row never cancels the physical-surface outward heat sum. Radiation callbacks and all nested contact responses, Newton updates, backtracks and Krylov iterations are counted separately. Optional final/sampled-peak capacity adjoints retain the complete smooth source-contact tangent for prescribed or scheduled thermal boundaries, with no replacement forward solve. Pointwise radiation and contact-history derivatives with derived convection, radiation or material controls remain unsupported by this capacity adapter.";
 
 pub(super) const fn method(coupled_newton: bool) -> &'static str {
     if coupled_newton {
@@ -48,14 +48,16 @@ pub(super) struct Step {
 
 pub(super) fn admit_radiation(
     lowering: Option<&radiation::LoweredRadiation>,
-    model: Option<&fs_conduction::radiation::GrayDiffuseEnclosure>,
+    model: Option<&enclosure::Model>,
 ) -> Result<(), SolveRefusal> {
-    if lowering.is_some_and(|row| row.is_pointwise() || row.open_ambient_temperature_k().is_some())
-    {
-        return Err(bad("live capacity contact requires area-mean ambient or closed-enclosure radiation; pointwise and open-enclosure radiation are unsupported"));
+    if lowering.is_some_and(radiation::LoweredRadiation::is_pointwise) {
+        return Err(bad("live capacity contact requires area-mean ambient or closed/open enclosure radiation; pointwise radiation requires total enthalpy"));
     }
-    if lowering.is_some_and(radiation::LoweredRadiation::is_enclosure) != model.is_some() {
-        return Err(bad("live capacity contact lost its declared closed-enclosure radiation model"));
+    if lowering.is_some_and(radiation::LoweredRadiation::is_enclosure) != model.is_some()
+        || lowering.is_some_and(|row| row.open_ambient_temperature_k().is_some())
+            != model.is_some_and(enclosure::Model::is_open)
+    {
+        return Err(bad("live capacity contact lost its declared enclosure radiation model"));
     }
     Ok(())
 }
@@ -105,7 +107,7 @@ pub(super) fn evaluate(
     contacts: &TemperatureContacts<'_, '_>, old: &[f64], candidate: &[f64],
     dt_s: f64, config: StepConfig,
     lowering: Option<&radiation::LoweredRadiation>,
-    model: Option<&fs_conduction::radiation::GrayDiffuseEnclosure>,
+    model: Option<&enclosure::Model>,
     deadline: Option<(Instant, f64)>,
 ) -> Result<(EndpointEvaluation, TemperatureContactEvaluation), SolveRefusal> {
     poll(cx, deadline)?;

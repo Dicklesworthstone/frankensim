@@ -20,6 +20,8 @@
 //! ambient mixture <temperature_k> <pressure_pa> <mole|mass> <count> <species fraction>...
 //! ambient thermochemical <temperature_k> <pressure_pa> <mole|mass> <count> <id fraction>...
 //! lip_response <f_hz> <q> <inverse_mu_m2_per_kg> <width_m> <rest_gap_m> <face_area_m2>
+//! lip_response_mode2 <f_hz> <q> <inverse_mu_m2_per_kg>      optional; the lip's second, inward-striking mode (a negative 1/mu)
+//! lip_area_exponent <q>                                    optional; flow area w h (h/H0)^(q-1), 1 <= q <= 4 (q = 1 is the plain w h)
 //! lip <mass_kg> <stiffness_n_m> <damping_n_s_m> <width_m> <rest_gap_m> <face_area_m2>
 //! lip_source <free text to end of line>      required provenance sentence
 //! cup_volume_m3 <volume>
@@ -81,6 +83,21 @@
 //! `m = A / (1/mu)`, `k = m (2 pi f)^2`, `c = m (2 pi f) / Q`; the face area
 //! `A` cancels in every motion and only fixes the force normalization.
 //!
+//! `lip_response_mode2` is the opt-in second, inward-striking mode of the same lip ([`super::LipMode2`]). Cullen (2000, PhD,
+//! University of Edinburgh, Appendix A Table A.2) prints it beside the first for twenty embouchures of an artificial lip pair, with a
+//! NEGATIVE `1/mu` because it moves against the force, and Newton, Campbell and Gilbert (JASA 123(1) EL14-EL20, 2008) report the same
+//! outward/inward pair in human and artificial lips, the played note between them, and conclude that at least two degrees of
+//! freedom are needed to simulate the lip realistically. The aperture is the sum of the two modes' displacements under the same
+//! force. It needs `lip_response` (the face area is shared), not `lip`. Its published numbers carry no pre-stress law, so the
+//! linear loop refuses any lip tension but 1.0 by name and `bore nonlinear` refuses the record altogether. A file without the
+//! record is bit-identical to one written before it existed.
+//!
+//! `lip_area_exponent` is the opt-in exponent `q` of the flow aperture, `w h (h/H0)^(q-1)` with `H0` the lip record's rest gap
+//! ([`super::BrassVoice::with_lip_area_exponent`]). Copley and Strong (1996) describe the lip area against height as almost linear and
+//! print no exponent, so `q` is a stated bracket (`1 <= q <= 4`) and the normalisation at `H0`, which leaves the aperture at the rest
+//! gap unchanged, is ours. Only the flow area changes, not the lip's motion; `bore nonlinear` refuses the record. A file without
+//! the record, or with `q` exactly 1, is bit-identical to one written before it existed.
+//!
 //! A `bessel` record is a Bessel horn `r(s) = b (u - s)^(-flare)` through the
 //! stated end radii over the stated length, expanded into `pieces` cones whose
 //! end radii lie exactly on that curve (the piecewise-conic image every
@@ -113,7 +130,7 @@ use fs_math::det;
 use fs_scenario::gesture::{GestureSchedule, GestureTarget};
 use fs_vfit::discretize::DelayedFilter;
 
-use super::{BrassBlockDiag, BrassControl, BrassVoice, LipIsland};
+use super::{BrassBlockDiag, BrassControl, BrassVoice, LipIsland, LipMode2};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::brass_sequence::mouth::{MAX_MOUTH_FLOW_TAPS, MouthFlowConfig, modal_flow_lines, plane_flow_line};
 use crate::driving_point::LineLadder;
@@ -195,6 +212,8 @@ pub struct LipDescription {
     nonlinear: Option<(NonlinearBoreRecord, ThermochemicalGasModel)>,
     jet_noise: Option<JetNoiseCard>,
     constriction_noise: Option<ConstrictionNoiseCard>,
+    lip_mode2: Option<LipMode2>,
+    lip_area_exponent: Option<f64>,
 }
 
 struct Fields<'a> {
@@ -394,6 +413,9 @@ impl LipDescription {
         let mut full_scale: Option<f64> = None;
         let mut gas: Option<GasRecord> = None;
         let mut lip_core: Option<LipCore> = None;
+        let mut lip_from_response = false;
+        let mut lip_mode2_raw: Option<(f64, f64, f64)> = None;
+        let mut lip_area_exponent_raw: Option<f64> = None;
         let mut lip_source: Option<String> = None;
         let mut bore_source: Option<String> = None;
         let mut cup: Option<f64> = None;
@@ -465,6 +487,21 @@ impl LipDescription {
                         face_area_m2: area,
                     };
                     once(&mut lip_core, core, &f)?;
+                    lip_from_response = true;
+                    f.finish()?;
+                }
+                "lip_response_mode2" => {
+                    let (freq, q) = (f.positive()?, f.positive()?);
+                    let inverse_mu = f.number()?;
+                    if inverse_mu == 0.0 {
+                        return f.err("inverse mu must be nonzero (negative for an inward-striking mode)");
+                    }
+                    once(&mut lip_mode2_raw, (freq, q, inverse_mu), &f)?;
+                    f.finish()?;
+                }
+                "lip_area_exponent" => {
+                    let q = f.positive()?;
+                    once(&mut lip_area_exponent_raw, q, &f)?;
                     f.finish()?;
                 }
                 "lip" => {
@@ -689,6 +726,29 @@ impl LipDescription {
         {
             return Err("modal_baffle requires a linear bore and termination flanged; no foreign exterior load is substituted".into());
         }
+        let lip_mode2 = match lip_mode2_raw {
+            None => None,
+            Some(_) if !lip_from_response => {
+                return Err("lip_response_mode2 needs the lip_response record (its first mode and shared face area), not lip".into());
+            }
+            Some(_) if nonlinear.is_some() => {
+                return Err("lip_response_mode2 is not supported on bore nonlinear: the second lip mode runs on the linear bore only".into());
+            }
+            Some((freq, q, inverse_mu)) => Some(
+                LipMode2::from_response(freq, q, inverse_mu, core.face_area_m2)
+                    .map_err(|e| format!("lip_response_mode2 refused: {e}"))?,
+            ),
+        };
+        let lip_area_exponent = match lip_area_exponent_raw {
+            None => None,
+            Some(_) if nonlinear.is_some() => {
+                return Err("lip_area_exponent is not supported on bore nonlinear: the flow aperture exponent runs on the linear bore only".into());
+            }
+            Some(q) if !(1.0..=4.0).contains(&q) => {
+                return Err(format!("lip_area_exponent must be in [1, 4] (a stated bracket), got {q}"));
+            }
+            Some(q) => Some(q),
+        };
         let nonlinear = match nonlinear {
             None => None,
             Some(_) if !cfg!(feature = "nonlinear-brass") => return Err(NONLINEAR_FEATURE.into()),
@@ -763,6 +823,8 @@ impl LipDescription {
             nonlinear,
             jet_noise,
             constriction_noise,
+            lip_mode2,
+            lip_area_exponent,
         })
     }
 
@@ -770,6 +832,18 @@ impl LipDescription {
     #[must_use]
     pub const fn jet_noise(&self) -> Option<&JetNoiseCard> {
         self.jet_noise.as_ref()
+    }
+
+    /// The opt-in second lip mode, if the file declared one ([`LipMode2`]).
+    #[must_use]
+    pub const fn lip_mode2(&self) -> Option<&LipMode2> {
+        self.lip_mode2.as_ref()
+    }
+
+    /// The opt-in flow-area exponent `q`, if the file declared one ([`super::BrassVoice::with_lip_area_exponent`]).
+    #[must_use]
+    pub const fn lip_area_exponent(&self) -> Option<f64> {
+        self.lip_area_exponent
     }
 
     /// The opt-in lip constriction-noise record, if the file declared one ([`crate::turbulence_noise::ConstrictionNoise`]).
@@ -921,6 +995,18 @@ impl LipDescription {
             Some(card) => voice
                 .with_jet_noise(card)
                 .map_err(|e| format!("jet_noise refused: {e}"))?,
+            None => voice,
+        };
+        let voice = match self.lip_mode2 {
+            Some(mode) => voice
+                .with_lip_mode2(mode)
+                .map_err(|e| format!("lip_response_mode2 refused: {e}"))?,
+            None => voice,
+        };
+        let voice = match self.lip_area_exponent {
+            Some(q) => voice
+                .with_lip_area_exponent(q)
+                .map_err(|e| format!("lip_area_exponent refused: {e}"))?,
             None => voice,
         };
         let voice = match self.constriction_noise {
@@ -1085,6 +1171,8 @@ impl LipDescription {
             bore_length_m: self.duct.segments.iter().map(Segment::axial_length).sum(),
             mouth_radius_m,
             lip: self.lip.clone(),
+            lip_mode2: self.lip_mode2,
+            lip_area_exponent: self.lip_area_exponent,
             lip_source: self.lip_source.clone(),
             bore_source: self.bore_source.clone(),
             cup_volume_m3: self.cup_volume_m3,
@@ -1186,6 +1274,10 @@ pub struct LipInfo {
     pub mouth_radius_m: f64,
     /// The lip as the loop uses it, with its provenance sentence.
     pub lip: LipIsland,
+    /// The opt-in second lip mode, when the file declared one.
+    pub lip_mode2: Option<LipMode2>,
+    /// The opt-in flow-area exponent, when the file declared one.
+    pub lip_area_exponent: Option<f64>,
     /// Provenance sentence of the lip numbers.
     pub lip_source: String,
     /// Provenance sentence of the bore geometry.
@@ -1699,6 +1791,93 @@ mod tests {
             let error = parse(extra).expect_err(extra);
             assert!(error.contains(needle), "{extra:?} -> {error}");
         }
+    }
+
+    #[test]
+    fn lip_response_mode2_parses_and_is_refused_by_name() {
+        let parse = |extra: &str| LipDescription::from_bytes(fixture(extra).as_bytes());
+        let ok = parse("lip_response_mode2 244.5 11.0 -0.073\n").expect("parses");
+        let mode = ok.lip_mode2().expect("declared");
+        let omega = core::f64::consts::TAU * 244.5;
+        assert!((mode.mass_kg - 0.0001 / 0.073).abs() <= 1e-15 * mode.mass_kg);
+        assert!((mode.stiffness_n_m - mode.mass_kg * omega * omega).abs() <= 1e-12 * mode.stiffness_n_m);
+        assert!((mode.damping_n_s_m - mode.mass_kg * omega / 11.0).abs() <= 1e-12 * mode.damping_n_s_m);
+        assert_eq!(mode.sign, -1.0);
+        assert!(parse("").expect("parses").lip_mode2().is_none());
+        for (extra, needle) in [
+            ("lip_response_mode2\n", "missing field"),
+            ("lip_response_mode2 244.5 11.0\n", "missing field"),
+            ("lip_response_mode2 244.5 11.0 -0.073 1\n", "unexpected extra field"),
+            ("lip_response_mode2 x 11.0 -0.073\n", "malformed field"),
+            ("lip_response_mode2 244.5 0 -0.073\n", "expected a positive number"),
+            ("lip_response_mode2 244.5 11.0 0\n", "nonzero"),
+            ("lip_response_mode2 244.5 11.0 nan\n", "must be finite"),
+            ("lip_response_mode2 244.5 11.0 -0.073\nlip_response_mode2 250 11.0 -0.07\n", "may only appear once"),
+        ] {
+            let error = parse(extra).expect_err(extra);
+            assert!(error.contains(needle), "{extra:?} -> {error}");
+        }
+        // The second mode shares the first's face area, so it needs lip_response and not the lumped lip record.
+        let lumped = fixture("lip_response_mode2 244.5 11.0 -0.073\n").replace(
+            "lip_response 200 7 0.1 0.012 0.0005 0.0001\n",
+            "lip 1.0e-4 160 0.05 0.012 0.0005 0.0001\n",
+        );
+        let error = LipDescription::from_bytes(lumped.as_bytes()).expect_err("lumped lip");
+        assert!(error.contains("needs the lip_response record"), "{error}");
+    }
+
+    #[test]
+    fn lip_response_mode2_reaches_the_radiated_pressure_and_a_file_without_it_is_unchanged() {
+        let build = |extra: &str| pressure(&LipDescription::from_bytes(fixture(extra).as_bytes()).expect("parses"));
+        let plain = build("");
+        let again = build("");
+        assert!(
+            plain.iter().zip(&again).all(|(a, b)| a.to_bits() == b.to_bits()),
+            "the same file must render the same bits"
+        );
+        let two = build("lip_response_mode2 244.5 11.0 -0.073\n");
+        assert_ne!(plain, two, "a second lip mode must reach the radiated pressure");
+        assert!(two.iter().all(|x| x.is_finite()));
+        // The same bytes with the record are a different input (the hash covers the file); the first mode is untouched.
+        let (a, b) = (
+            LipDescription::from_bytes(fixture("").as_bytes()).expect("parses"),
+            LipDescription::from_bytes(fixture("lip_response_mode2 244.5 11.0 -0.073\n").as_bytes()).expect("parses"),
+        );
+        assert_ne!(a.input_hash, b.input_hash);
+        assert_eq!(a.lip.mass_kg.to_bits(), b.lip.mass_kg.to_bits());
+        assert_eq!(a.lip.stiffness_n_m.to_bits(), b.lip.stiffness_n_m.to_bits());
+    }
+
+    #[test]
+    fn lip_area_exponent_parses_is_refused_by_name_and_reaches_the_radiated_pressure() {
+        let parse = |extra: &str| LipDescription::from_bytes(fixture(extra).as_bytes());
+        assert_eq!(parse("lip_area_exponent 2\n").expect("parses").lip_area_exponent(), Some(2.0));
+        assert_eq!(parse("").expect("parses").lip_area_exponent(), None);
+        for (extra, needle) in [
+            ("lip_area_exponent\n", "missing field"),
+            ("lip_area_exponent 2 3\n", "unexpected extra field"),
+            ("lip_area_exponent x\n", "malformed field"),
+            ("lip_area_exponent 0\n", "expected a positive number"),
+            ("lip_area_exponent 0.5\n", "lip_area_exponent must be in [1, 4]"),
+            ("lip_area_exponent 5\n", "lip_area_exponent must be in [1, 4]"),
+            ("lip_area_exponent 2\nlip_area_exponent 3\n", "may only appear once"),
+        ] {
+            let error = parse(extra).expect_err(extra);
+            assert!(error.contains(needle), "{extra:?} -> {error}");
+        }
+        let build = |extra: &str| pressure(&LipDescription::from_bytes(fixture(extra).as_bytes()).expect("parses"));
+        let plain = build("");
+        let unit = build("lip_area_exponent 1\n");
+        assert!(plain.iter().zip(&unit).all(|(a, b)| a.to_bits() == b.to_bits()), "q = 1 must be bit-identical to no row");
+        let steeper = build("lip_area_exponent 2\n");
+        assert_ne!(plain, steeper, "q = 2 must reach the radiated pressure");
+        assert!(steeper.iter().all(|x| x.is_finite()));
+        let (a, b) = (
+            LipDescription::from_bytes(fixture("").as_bytes()).expect("parses"),
+            LipDescription::from_bytes(fixture("lip_area_exponent 2\n").as_bytes()).expect("parses"),
+        );
+        assert_ne!(a.input_hash, b.input_hash);
+        assert_eq!(a.lip.mass_kg.to_bits(), b.lip.mass_kg.to_bits(), "the lip's own motion is untouched");
     }
 
     /// Gauntlet G0 (a gate that never opens adds exactly zero), G3 (an open gate reaches the radiated sound, is seeded and

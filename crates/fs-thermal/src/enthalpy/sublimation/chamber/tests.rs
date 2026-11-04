@@ -149,6 +149,84 @@ fn close(a: f64, b: f64, tolerance: f64) {
 }
 
 #[test]
+fn original_inventory_refusal_preserves_single_and_shared_chamber_states() {
+    struct FixedInventory;
+    impl ThermalLaw for FixedInventory {
+        fn validate_cell(&self, cell: &DepositedCell) -> Result<(), DepositionError> {
+            if cell.mass_kg != 0.02 {
+                return Err(DepositionError::InvalidInput(
+                    "fixed reference inventory changed",
+                ));
+            }
+            Ok(())
+        }
+        fn temperature_k(&self, h: f64) -> Result<f64, DepositionError> {
+            CALORIC.temperature_k(h)
+        }
+        fn maximum_temperature_slope(&self) -> f64 {
+            CALORIC.maximum_temperature_slope()
+        }
+    }
+    let fixed = FixedInventory;
+    let mut second = cell(2, -20_000.0, 0.0);
+    second.material_id = MaterialId(2);
+    let mut thermal = DepositionSimulation::new(
+        vec![birth(0.0, cell(1, 0.0, 0.0)), birth(0.0, second)],
+        &[(MaterialId(1), &CALORIC), (MaterialId(2), &fixed)],
+        DepositionBudget {
+            max_cells: 2,
+            max_links: 0,
+            max_events: 2,
+            max_substeps: 4,
+        },
+    )
+    .unwrap()
+    .advance_to(0.0, thermal_config(1.0), || Ok(()))
+    .unwrap()
+    .0;
+    let before = thermal.cells().clone();
+    let mut reservoir = bath(0.0, 0.001);
+    let original_reservoir = reservoir;
+    let expected = ThermalSublimationError::Thermal(DepositionError::InvalidInput(
+        "fixed reference inventory changed",
+    ));
+    assert_eq!(
+        thermal
+            .sublimate_cell(
+                CellId(2),
+                &Ice,
+                selection()[1].kinetics,
+                &mut reservoir,
+                0.25,
+                phase_config().surface_solver,
+                || Ok(()),
+            )
+            .unwrap_err(),
+        expected
+    );
+    assert_eq!(thermal.cells(), &before);
+    assert_eq!(reservoir, original_reservoir);
+    // The first surface is admissible; a refusal at the second must still
+    // preserve both solids and their one shared finite vapor inventory.
+    assert_eq!(
+        thermal
+            .sublimate_chamber(
+                &selection(),
+                &Ice,
+                &mut reservoir,
+                0.25,
+                phase_config(),
+                || Ok(()),
+            )
+            .unwrap_err(),
+        expected
+    );
+    assert_eq!(thermal.cells(), &before);
+    assert_eq!(reservoir, original_reservoir);
+    assert_eq!(thermal.time_s(), 0.0);
+}
+
+#[test]
 fn internal_energy_surface_refuses_the_entire_chamber_exchange() {
     struct InternalEnergy;
     impl ThermalLaw for InternalEnergy {

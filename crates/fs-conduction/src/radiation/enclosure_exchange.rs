@@ -1,4 +1,4 @@
-//! Shared trace binding and physical heat accounts for closed enclosure steps.
+//! Shared trace binding and physical heat accounts for enclosure steps.
 //! Storage owners supply their own accepted fields; reflection, shifted loads
 //! and original external heat retain one implementation for every trajectory.
 
@@ -8,7 +8,35 @@ use crate::{
     ScalarField, ThermalBc, ThermalBoundary,
     assemble::ASSEMBLY_TILE,
 };
-use super::{GrayDiffuseEnclosure, PreparedRadiosity, RadiationSurface, RadiosityReport};
+use super::{GrayDiffuseEnclosure, OpenDiffuseEnclosure, PreparedRadiosity, RadiationSurface, RadiosityReport};
+
+/// Retain the original prepared exchange owner across all capacity trials.
+/// Open exchange adds one algebraic reservoir row, never another solid trace.
+pub(crate) enum PreparedEnclosure<'a> {
+    Closed(PreparedRadiosity<'a>),
+    Open(&'a OpenDiffuseEnclosure, f64),
+}
+
+impl PreparedEnclosure<'_> {
+    pub(crate) fn surfaces(&self) -> &[RadiationSurface] {
+        match self {
+            Self::Closed(prepared) => prepared.enclosure().surfaces(),
+            Self::Open(model, _) => model.surfaces(),
+        }
+    }
+
+    pub(crate) fn solve(&self, cx: &Cx<'_>, temperatures: &[f64], config: AmbientRadiationConfig)
+        -> Result<RadiosityReport, ConductionError> {
+        match self {
+            Self::Closed(prepared) => prepared_radiosity(cx, prepared, temperatures, config),
+            Self::Open(model, ambient) => {
+                let report = model.solve(cx, temperatures, *ambient)?.exchange;
+                let largest_area = model.view_factors().areas_m2().iter().copied().fold(0.0_f64, f64::max);
+                checked_radiosity(largest_area, report, config)
+            }
+        }
+    }
+}
 
 /// Accepted exchange and actual work over all enclosure trials.
 #[derive(Debug, Clone)]
@@ -67,7 +95,7 @@ pub(crate) fn bind_traces(
 
 // The black bath of an open enclosure has no solid trace. Both callers bind
 // exactly the physical surfaces through the same natural-boundary rules.
-pub(super) fn bind_surface_traces(
+pub(crate) fn bind_surface_traces(
     cx: &Cx<'_>,
     problem: ConductionProblem<'_>,
     surfaces: &[RadiationSurface],
@@ -128,8 +156,13 @@ pub(crate) fn means(
     enclosure: &GrayDiffuseEnclosure,
     temperature: &[f64],
 ) -> Result<Vec<f64>, ConductionError> {
-    enclosure
-        .surfaces()
+    surface_means(cx, problem, enclosure.surfaces(), temperature)
+}
+
+pub(crate) fn surface_means(
+    cx: &Cx<'_>, problem: ConductionProblem<'_>, surfaces: &[RadiationSurface], temperature: &[f64],
+) -> Result<Vec<f64>, ConductionError> {
+    surfaces
         .iter()
         .enumerate()
         .map(|(i, surface)| {
@@ -155,7 +188,7 @@ pub(crate) fn radiosity(
 ) -> Result<RadiosityReport, ConductionError> {
     poll(cx, 0)?;
     let report = enclosure.solve(cx, temperature)?;
-    checked_radiosity(enclosure, report, config)
+    checked_radiosity(largest_surface_area(enclosure), report, config)
 }
 
 pub(crate) fn prepared_radiosity(
@@ -166,11 +199,15 @@ pub(crate) fn prepared_radiosity(
 ) -> Result<RadiosityReport, ConductionError> {
     poll(cx, 0)?;
     let report = prepared.solve(cx, temperature)?;
-    checked_radiosity(prepared.enclosure(), report, config)
+    checked_radiosity(largest_surface_area(prepared.enclosure()), report, config)
+}
+
+fn largest_surface_area(enclosure: &GrayDiffuseEnclosure) -> f64 {
+    enclosure.surfaces().iter().map(|surface| surface.area_m2()).fold(0.0_f64, f64::max)
 }
 
 fn checked_radiosity(
-    enclosure: &GrayDiffuseEnclosure,
+    largest_area: f64,
     report: RadiosityReport,
     config: AmbientRadiationConfig,
 ) -> Result<RadiosityReport, ConductionError> {
@@ -186,13 +223,8 @@ fn checked_radiosity(
     {
         finite(value)?;
     }
-    let area = enclosure
-        .surfaces()
-        .iter()
-        .map(|surface| surface.area_m2())
-        .fold(0.0_f64, f64::max);
     let tolerance = heat_tolerance(config, report.enclosure_energy_scale_w, 0.0)?;
-    if finite(report.linear_residual_max_w_m2 * area)? > tolerance
+    if finite(report.linear_residual_max_w_m2 * largest_area)? > tolerance
         || finite(report.enclosure_energy_closure_w)?.abs() > tolerance
     {
         return Err(invalid("enclosure radiosity equations or closed energy sum exceed their allowance"));

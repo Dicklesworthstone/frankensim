@@ -241,12 +241,41 @@ fn bore_json(bore: &LipBoreInfo) -> String {
     }
 }
 
+/// The lip receipt's optional second-mode object, empty for a performance without the `lip_response_mode2` record (so
+/// every receipt written before the record existed is unchanged).
+fn lip_mode2_json(i: &LipInfo) -> String {
+    match &i.lip_mode2 {
+        None => String::new(),
+        Some(m) => format!(
+            "\"lip_mode2\":{{\"mass_kg\":{},\"stiffness_n_m\":{},\"damping_n_s_m\":{},\"sign\":{},\"model\":\"this lip has TWO modes: the lip record above is the outward-striking first mode and this is the inward-striking second (aperture = rest gap + q1 + q2, q2 driven by sign x the same force); the model_scope's 1-DOF wording describes the lip without this record\"}},",
+            number(m.mass_kg),
+            number(m.stiffness_n_m),
+            number(m.damping_n_s_m),
+            number(m.sign),
+        ),
+    }
+}
+
+/// The lip receipt's optional flow-area-exponent object, empty for a performance without the `lip_area_exponent` record (so
+/// every receipt written before the record existed is unchanged).
+fn lip_area_exponent_json(i: &LipInfo) -> String {
+    match i.lip_area_exponent {
+        None => String::new(),
+        Some(q) => format!(
+            "\"lip_area_exponent\":{{\"q\":{},\"model\":\"flow aperture = width x gap x (gap / rest gap)^(q-1), a stated bracket (Copley and Strong 1996 call lip area against height almost linear and print no exponent); the normalisation at the rest gap is ours; the lip's motion is unchanged\"}},",
+            number(q),
+        ),
+    }
+}
+
 fn input_json(i: &LipInfo) -> String {
     let lip = &i.lip;
     let mic = &i.microphone;
+    let second = lip_mode2_json(i);
+    let exponent = lip_area_exponent_json(i);
     format!(
         "\"lip_input\":{{\"schema\":\"{}\",\"blake3\":\"{}\",\"bore\":{{\"segments\":{},\"length_m\":{},\"mouth_radius_m\":{},\"gas_temperature_k\":{},\"sound_speed_m_s\":{},\"source\":{}}},\
-         \"lip\":{{\"mass_kg\":{},\"stiffness_n_m\":{},\"damping_n_s_m\":{},\"width_m\":{},\"rest_gap_m\":{},\"face_area_m2\":{},\"source\":{}}},\
+         \"lip\":{{\"mass_kg\":{},\"stiffness_n_m\":{},\"damping_n_s_m\":{},\"width_m\":{},\"rest_gap_m\":{},\"face_area_m2\":{},\"source\":{}}},{}{}\
          \"cup_volume_m3\":{},\"control_rate_hz\":{},\"lip_tension_track\":{},\
          \"microphone\":{{\"position_m\":[{},{},{}],\"radial_rings\":{},\"angular_points\":{},\"resolved_band_hz\":{}}},\
          {}}}",
@@ -265,6 +294,8 @@ fn input_json(i: &LipInfo) -> String {
         number(lip.rest_gap_m),
         number(lip.face_area_m2),
         json_string(&i.lip_source),
+        second,
+        exponent,
         number(i.cup_volume_m3),
         i.control_rate_hz,
         i.has_lip_tension_track,

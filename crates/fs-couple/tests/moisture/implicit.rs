@@ -10,6 +10,36 @@ fn nonlinear() -> MoistureNonlinearConfig {
 }
 
 #[test]
+fn stiff_uniform_moisture_is_exact_equilibrium_in_every_slab_scheme() {
+    with_cx(|cx| {
+        let initial = vec![0.15; 32];
+        let original = slab(card([0.01, 0.04], 0.3), 1.0, initial.clone(), cx);
+        let mut step = config();
+        step.linear.max_iterations = 1;
+        step.linear.max_corrections = 0;
+        for field in [
+            original.clone(),
+            original.clone().with_implicit_diffusivity(nonlinear()).unwrap(),
+            original.with_kirchhoff_diffusivity(nonlinear()).unwrap(),
+        ] {
+            for boundaries in [
+                [MoistureFace::Sealed, MoistureFace::Sealed],
+                faces(0.15),
+            ] {
+                // A zero concentration gradient must not become a large
+                // difference between rounded diagonal/off-diagonal products.
+                let (next, report) = field.advance(1.0e8, &boundaries, step, cx).unwrap();
+                assert_eq!(next.moisture(), initial);
+                assert_eq!(report.boundary_water_kg, [0.0; 2]);
+                assert_eq!(report.water_balance_residual_kg, 0.0);
+                assert_eq!(report.linear.iters, 0);
+                assert_eq!(next.time_s(), 1.0e8);
+            }
+        }
+    });
+}
+
+#[test]
 fn g1_nonlinear_one_cell_uses_endpoint_diffusivity_and_endpoint_water_flux() {
     with_cx(|cx| {
         let lagged = slab(card([0.01, 0.04], 0.3), 1.0, vec![0.1], cx);

@@ -7,6 +7,9 @@ use fs_project::{
 };
 use fs_qty::QtyAny;
 
+#[path = "transient/adjoint.rs"]
+mod adjoint;
+
 fn fixture(nonlinear: bool, max_step: f64) -> Fixture {
     let mut f = Fixture::new(nonlinear, false);
     let setup = f.project.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
@@ -225,11 +228,21 @@ fn native_transient_contact_refuses_late_source_exit_without_a_completed_field()
 }
 
 #[test]
-fn native_transient_contact_keeps_unimplemented_derivatives_explicit() {
+fn native_transient_contact_keeps_material_derivatives_explicit() {
     let f = fixture(false, 0.5);
-    let (source, contact, ledger) = prepare(&f, 80, Some("temperature-final-adjoint"));
-    let result = run(&f, &source, &contact, &ledger);
-    assert_ne!(result.exit_code, fs_cli::exit::SUCCESS);
-    assert!(format!("{}{}", result.stdout, result.stderr)
-        .contains("cli-solve-conduction-contact-composition"));
+    for (ordinal, output) in [
+        "temperature-final-material-adjoint",
+        "temperature-sampled-peak-material-adjoint",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (source, contact, ledger) = prepare(&f, 80 + ordinal, Some(output));
+        let result = run(&f, &source, &contact, &ledger);
+        assert_ne!(result.exit_code, fs_cli::exit::SUCCESS);
+        assert!(
+            format!("{}{}", result.stdout, result.stderr)
+                .contains("cli-solve-conduction-contact-composition")
+        );
+    }
 }

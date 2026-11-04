@@ -151,6 +151,7 @@ impl ProjectedTensorProny {
     ) -> Result<Vec<f64>> {
         poll(&mut cancelled)?;
         if self.columns != next.columns
+            || self.compatible_columns != next.compatible_columns
             || self.volume_m3.to_bits() != next.volume_m3.to_bits()
             || self.model.branches.len() != next.model.branches.len()
             || memory.len() != 6 * self.model.branches.len()

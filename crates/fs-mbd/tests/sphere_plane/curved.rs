@@ -38,6 +38,78 @@ fn slip(scene: &SpherePlane, body: RigidBodyState) -> Vec3 {
 }
 
 #[test]
+fn g1_large_shared_normal_drift_cannot_capture_curved_sliding() {
+    let scene = curved_scene();
+    let duration = 0.25;
+    let config = controls(0.125);
+    let reference = advance_sphere_plane(&scene, initial(), duration, config, || false).unwrap();
+    assert_eq!(reference.state_after.mode(), SpherePlaneMode::Sliding);
+    assert!(
+        !reference
+            .events
+            .iter()
+            .any(|e| e.kind == SpherePlaneEventKind::Rolling)
+    );
+
+    // A power-of-two normal boost leaves every tangent input and operation
+    // unchanged. The plane positions, radius and time boundaries are binary
+    // exact too, so this does not ask for motion below world-state resolution.
+    // An absolute-speed tolerance of 4096*EPSILON would nevertheless call the
+    // still-resolved O(1 m/s) slip arrested after the first curved substep.
+    let boost = Vec3::new(0.0, 1_099_511_627_776.0, 0.0); // 2^40 m/s
+    let moving_scene = SpherePlane {
+        velocity_world: boost,
+        ..scene
+    };
+    let before = state(
+        Vec3::new(0.0, RADIUS, 0.0),
+        Vec3::new(1.0, 0.0, 0.0).add(boost),
+        Vec3::ZERO,
+        UnitQuaternion::IDENTITY,
+    );
+    let moving = advance_sphere_plane(&moving_scene, before, duration, config, || false).unwrap();
+    assert_eq!(moving.state_after.mode(), reference.state_after.mode());
+    assert_eq!(moving.sliding_substeps, reference.sliding_substeps);
+    assert_eq!(
+        moving
+            .events
+            .iter()
+            .map(|e| (e.kind, e.time_s))
+            .collect::<Vec<_>>(),
+        reference
+            .events
+            .iter()
+            .map(|e| (e.kind, e.time_s))
+            .collect::<Vec<_>>()
+    );
+    close_vector(
+        slip(&moving_scene, moving.state_after.body()),
+        slip(&scene, reference.state_after.body()),
+    );
+    close_vector(moving.contact_impulse_world, reference.contact_impulse_world);
+    close(moving.dissipated_energy, reference.dissipated_energy);
+
+    // The saved contact-resolution scale must remain relative on continuation.
+    let first = advance_sphere_plane(&moving_scene, before, 0.125, config, || false).unwrap();
+    assert_eq!(first.state_after.mode(), SpherePlaneMode::Sliding);
+    let second =
+        advance_sphere_plane(&moving_scene, first.state_after, 0.125, config, || false).unwrap();
+    assert_eq!(second.state_after.mode(), SpherePlaneMode::Sliding);
+    close_vector(
+        slip(&moving_scene, second.state_after.body()),
+        slip(&scene, reference.state_after.body()),
+    );
+    close_vector(
+        first.contact_impulse_world.add(second.contact_impulse_world),
+        reference.contact_impulse_world,
+    );
+    close(
+        first.dissipated_energy + second.dissipated_energy,
+        reference.dissipated_energy,
+    );
+}
+
+#[test]
 fn g1_curved_sliding_converges_to_independent_exact_two_axis_flow() {
     let scene = curved_scene();
     let before = initial();

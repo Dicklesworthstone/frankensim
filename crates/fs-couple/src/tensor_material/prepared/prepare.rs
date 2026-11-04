@@ -151,7 +151,7 @@ impl PreparedTensorBody {
         times
             .try_reserve_exact(time_capacity)
             .map_err(|_| invalid("source-time allocation refused"))?;
-        let (mut branches, mut kelvin_points) = (0usize, 0usize);
+        let (mut branches, mut kelvin_points, mut compatible_points) = (0usize, 0usize, 0usize);
         for (point, &group) in points.iter().zip(&heat_groups) {
             poll(gate)?;
             if point.coordinates() != n || point.free_strain_mandel().iter().any(|x| *x != 0.0) {
@@ -159,6 +159,7 @@ impl PreparedTensorBody {
                     "complete matching source coordinates and zero eigenstrain required",
                 ));
             }
+            compatible_points += usize::from(point.compatible_strain_columns().is_some());
             seen[group] = true;
             if let Some(rows) = point.viscosity_gram_rows() {
                 kelvin_points += 1;
@@ -226,6 +227,7 @@ impl PreparedTensorBody {
             points.len(),
             branches,
             kelvin_points,
+            compatible_points,
             groups,
             rows,
             force_scale_n.is_some(),
@@ -548,22 +550,26 @@ fn admit_resources(
     p: usize,
     b: usize,
     kv: usize,
+    compatible: usize,
     g: usize,
     rows: usize,
     affine: bool,
     controls: PreparedTensorControls,
 ) -> Result<()> {
-    let (n, s, p, b, kv, g, rows) = (
+    let (n, s, p, b, kv, compatible, g, rows) = (
         n as u128,
         s as u128,
         p as u128,
         b as u128,
         kv as u128,
+        compatible as u128,
         g as u128,
         rows as u128,
     );
     let d = s + n + 1;
-    let source = 8 * (2 * p * n * n + 6 * (p + b + kv) * n + 256 * p + 72 * b) + 1024 * p + 512 * b;
+    let source = 8 * (2 * p * n * n + 6 * (p + b + kv + compatible) * n + 256 * p + 72 * b)
+        + 1024 * p
+        + 512 * b;
     let mut bytes = source
         + 8 * (36 * d * d
             + g * (132 * s * s + s * n)
@@ -576,7 +582,10 @@ fn admit_resources(
         + 128 * (2 * n) * (2 * n) * (2 * n) * (2 * n)
         + 16 * (rows + g * s) * s * s
         + 64 * (p + b + 1) * n * n;
-    let mut warm = 64 * s * s + g * (16 * s * s + s * n) + 64 * (p + b + 1) * n + 16 * n * n;
+    // Assumed-strain points also contract and admit their independent original
+    // compatible map. It adds storage and endpoint work, never material energy.
+    let mut warm =
+        64 * s * s + g * (16 * s * s + s * n) + 64 * (p + b + compatible + 1) * n + 16 * n * n;
     if affine {
         let observer = s + 2 * n;
         // Original force-work Gramian plus one native one-way integral
