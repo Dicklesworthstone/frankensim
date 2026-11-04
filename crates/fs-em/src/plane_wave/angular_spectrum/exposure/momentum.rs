@@ -246,6 +246,11 @@ where
     'm: 's,
 {
     poll(cancelled)?;
+    if anchor.carrier_rad_m != [0.0; 2] {
+        return Err(bad(
+            "finite-window cell momentum requires a zero transverse carrier",
+        ));
+    }
     if workspace > limits.maximum_workspace_bytes {
         return Err(bad("exposure momentum exceeds its workspace budget"));
     }

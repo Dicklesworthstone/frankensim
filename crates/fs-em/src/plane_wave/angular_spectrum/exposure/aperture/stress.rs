@@ -225,6 +225,71 @@ struct Stress {
     dyad: [Dd; 6],
     poynting: [Dd; 3],
 }
+
+// Reuse the exact carrier-aware rectangle contraction for the continuous-cell
+// stress owner. Its retained modal fields are consumed before their original
+// FFT synthesis, so this needs no additional film solve or field reconstruction.
+pub(in crate::plane_wave::angular_spectrum::exposure) fn real_cell_dyad(
+    anchor: &PlanarAngularSpectrum<'_, '_>,
+    frequencies: &[f64],
+    fields: &[Vec<[C64; 6]>],
+    window: HarmonicWindow,
+    epsilon: f64,
+    mu: f64,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<[Dd; 6], AngularSpectrumError> {
+    let mut sum = CellDyad {
+        epsilon: Dd::from_f64(epsilon),
+        mu: Dd::from_f64(mu),
+        values: [Dd::ZERO; 6],
+    };
+    real_cell_accumulate(anchor, frequencies, fields, window, &mut sum, cancelled)?;
+    let grid = anchor.grid();
+    sum.finish(AngularSpectrumAperture::try_new(
+        [0.0; 2],
+        [
+            grid.width as f64 * grid.spacing_m[0],
+            grid.height as f64 * grid.spacing_m[1],
+        ],
+    )?)
+}
+
+struct CellDyad {
+    epsilon: Dd,
+    mu: Dd,
+    values: [Dd; 6],
+}
+
+impl Accumulator for CellDyad {
+    type Output = [Dd; 6];
+
+    fn add<K: Kernel>(&mut self, kernel: K, a: &FieldParts, b: &FieldParts) {
+        for (c, (u, v)) in [(0, 0), (1, 1), (2, 2), (0, 1), (0, 2), (1, 2)]
+            .into_iter()
+            .enumerate()
+        {
+            self.values[c] = self.values[c]
+                + self.epsilon * kernel.product(a[u], b[v])
+                + self.mu * kernel.product(a[u + 3], b[v + 3]);
+        }
+    }
+
+    fn finish(
+        self,
+        aperture: AngularSpectrumAperture,
+    ) -> Result<Self::Output, AngularSpectrumError> {
+        let area = Dd::from_f64(aperture.area_m2());
+        let values = self.values.map(|value| value * area);
+        if values
+            .iter()
+            .any(|&value| !finite_dd(value) || !value.to_f64().is_finite())
+        {
+            return Err(bad("carrier cell stress dyad is unrepresentable"));
+        }
+        Ok(values)
+    }
+}
+
 impl Stress {
     fn new(epsilon: f64, mu: f64) -> Self {
         Self {

@@ -2670,12 +2670,50 @@ Cycle-mean aperture kernels cancel the common carrier analytically and retain
 the original envelope-bin differences, including separations below the
 carrier's floating-point spacing. Direct mutual-coherence observations retain
 the envelope phase separately and apply the carrier once per observation.
-Finite-window real-field exposures explicitly refuse nonzero carriers because
-their current full-cell sum-frequency kernel assumes an unshifted integer
-lattice. No paraxial approximation, discarded modes, near-field incident
+Finite-window exposures admit a shared carrier across their original lines
+and covariance banks, retaining both real-field spatial sum and difference
+terms. No paraxial approximation, discarded modes, near-field incident
 excitation or finite-edge diffraction is introduced. Focused controls cover
 arbitrary oblique Snell/Fresnel fields, Brewster cancellation, TIR decay,
 interior and two-sided fields, source-cache identity and resource refusals.
+
+### Finite-window observations of refracting carrier beams
+
+The original exposure owner now admits nonzero transverse carriers shared by
+all lines and covariance factors. The same grouped Maxwell fields, source
+clock, material responses and uniform/triangular shutter kernels feed exterior
+observations, simultaneous illumination, film interiors, finite apertures,
+polarization/control observations, energy flux and Maxwell stress. Real
+sources retain sum and difference terms; only an authored proper-complex
+factor removes the real-field sum term.
+
+Spatial kernels retain double-double shifted wavenumbers and the original
+envelope offsets. Continuous cell power and stress use the existing rectangle
+Gram owner for nonzero real carriers, including both spatial dimensions and
+the original temporal kernel. Their explicit source-bank budget charges
+N(N+1)F² modal/point work and the additional DD fields, temporal kernels and
+axis caches before allocation. Zero-carrier sources and proper-bank cell
+contractions retain the original O(NF²) spatial orthogonality path. No extra
+material query, film solve or synthesis FFT is introduced by the continuous
+cell contraction.
+
+Continuous film heat uses original envelope offsets for conjugate products
+and DD carrier-shifted arguments for real sum products; the common carrier
+center phase rotates completed sum coefficients. Nonzero real banks on
+`ContinuousPeriodicCell` use the exact rectangle over the declared cell,
+charging D(N²+1) times their frequency-pair count. Proper banks retain D*N
+work per frequency pair, independently within a mixed bank. Original sampled
+area and depth quadrature semantics remain; irreversible Debye/Joule heat is
+still separated from stored/reversible material energy.
+
+Individual stress planes and finite patches retain all six independent tensor
+components. The existing field-momentum volume-rate and joint stress/momentum
+observers still refuse nonzero carriers. The periodic two-plane
+boundary-resultant shortcut also refuses them because lateral stresses cannot
+be assumed to cancel for finite-window real fields. These observations do not
+infer a closed-surface mechanical force or thermal feedback.
+Focused controls compare independent spatial/time Fresnel quadrature, two-face
+standing waves, analytic tensor stresses and actual material-reservoir heat.
 
 ### Finite detector apertures preserve spatial interference
 

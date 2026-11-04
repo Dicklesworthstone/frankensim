@@ -422,6 +422,7 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
                         bank,
                         depth_m,
                         true,
+                        window,
                         |a, b| window.proper_product_kernel(a, b),
                         proper_product,
                         ProperHarmonicProduct::mean_real_product_parts_dd,
@@ -434,6 +435,7 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
                         bank,
                         depth_m,
                         false,
+                        window,
                         |a, b| window.product_kernel(a, b),
                         product,
                         HarmonicProduct::mean_real_product_parts_dd,
@@ -503,6 +505,7 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
         bank: &AngularSpectrumExposure<'b, 's, 'm>,
         depth: f64,
         proper: bool,
+        window: HarmonicWindow,
         make_kernel: impl Fn(f64, f64) -> Result<P, fs_fft::harmonic_window::WindowError>,
         product: impl Fn(P, C64, C64) -> Result<Dd, MomentError>,
         product_parts: impl Fn(P, [Dd; 2], [Dd; 2]) -> Result<Dd, fs_fft::harmonic_window::WindowError>,
@@ -560,13 +563,17 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
             mapping.push(index);
             filtered.push([C64::ZERO; 6]);
         }
-        let normal_power = integrate_cell_power(
-            self.anchor.grid(),
-            &fields,
-            &kernels,
-            |kernel, a, b| product_parts(kernel.product, a, b),
-            cancelled,
-        )?;
+        let normal_power = if !proper && self.anchor.carrier_rad_m != [0.0; 2] {
+            aperture::real_cell_power(self.anchor, &bank.frequencies, &fields, window, cancelled)?
+        } else {
+            integrate_cell_power(
+                self.anchor.grid(),
+                &fields,
+                &kernels,
+                |kernel, a, b| product_parts(kernel.product, a, b),
+                cancelled,
+            )?
+        };
         for (group, field) in fields.iter_mut().enumerate() {
             bank.synthesize_frequency_field(group, field, cancelled)?;
         }

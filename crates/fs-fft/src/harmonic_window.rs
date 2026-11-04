@@ -175,6 +175,45 @@ impl HarmonicWindow {
         self.product_kernel_extended(Dd::from_f64(omega_a), Dd::from_f64(omega_b))
     }
 
+    /// Real-product kernel for angular frequencies retained in double-double
+    /// precision. A common carrier and a much smaller resolved offset must
+    /// not be rounded to one binary64 value before the sum/difference Gram
+    /// weights are formed. Inputs are normalized without discarding either
+    /// finite component; the original clock, shutter and contraction apply.
+    pub fn product_kernel_dd(
+        self,
+        omega_a: Dd,
+        omega_b: Dd,
+    ) -> Result<HarmonicProduct, WindowError> {
+        let omega_a = admit_frequency_dd(omega_a)?;
+        let omega_b = admit_frequency_dd(omega_b)?;
+        if omega_a.lo == 0.0 && omega_b.lo == 0.0 {
+            return self.product_kernel_extended(omega_a, omega_b);
+        }
+        let a = self.half_width_extended(omega_a)?;
+        let b = self.half_width_extended(omega_b)?;
+        // Subtract BEFORE multiplying by the interval. The small beat can
+        // otherwise disappear into the multiplication error of the common
+        // carrier, even though both authored DD frequencies retain it.
+        let difference = self.half_width_extended(checked(omega_a - omega_b)?)?;
+        let sum = self.half_width_extended(checked(omega_a + omega_b)?)?;
+        let (cos_cos, sin_sin) = match self.profile {
+            HarmonicWindowProfile::Uniform => rectangular_gram_parts(a, b, difference, sum)?,
+            HarmonicWindowProfile::Triangular => {
+                let half = Dd::from_f64(0.5);
+                let (c, s) =
+                    rectangular_gram_parts(a * half, b * half, difference * half, sum * half)?;
+                (checked(c * c + s * s)?, checked(Dd::from_f64(2.0) * c * s)?)
+            }
+        };
+        Ok(HarmonicProduct {
+            rotation_a: self.rotation_parts(omega_a)?,
+            rotation_b: self.rotation_parts(omega_b)?,
+            cos_cos,
+            sin_sin,
+        })
+    }
+
     /// Deterministic product for two offsets on one common angular carrier.
     ///
     /// Each physical frequency is common_offset + omega_a/b. Add in
@@ -195,7 +234,7 @@ impl HarmonicWindow {
             return Err(WindowError::InvalidFrequency);
         }
         let carrier = Dd::from_f64(common_offset);
-        self.product_kernel_extended(
+        self.product_kernel_dd(
             checked(carrier + Dd::from_f64(omega_a))?,
             checked(carrier + Dd::from_f64(omega_b))?,
         )
@@ -287,6 +326,21 @@ impl HarmonicWindow {
         self.proper_difference_kernel(checked(Dd::from_f64(omega_a) - Dd::from_f64(omega_b))?)
     }
 
+    /// Proper second-moment kernel for double-double angular frequencies.
+    /// Subtract the retained frequencies before applying the physical clock,
+    /// preserving beats smaller than a binary64 step of their common carrier.
+    /// The result includes the same peak-amplitude factor 1/2 as
+    /// [`Self::proper_product_kernel`].
+    pub fn proper_product_kernel_dd(
+        self,
+        omega_a: Dd,
+        omega_b: Dd,
+    ) -> Result<ProperHarmonicProduct, WindowError> {
+        self.proper_difference_kernel(checked(
+            admit_frequency_dd(omega_a)? - admit_frequency_dd(omega_b)?,
+        )?)
+    }
+
     /// Proper second-moment kernel for frequencies authored in cycles/second.
     ///
     /// The difference is formed in double-double BEFORE conversion to rad/s.
@@ -363,12 +417,33 @@ impl HarmonicWindow {
         let (wr, wi) = proper_phase(half_width);
         Ok([checked(sr * wr - si * wi)?, checked(sr * wi + si * wr)?])
     }
+
+    fn rotation_parts(self, omega: Dd) -> Result<[Dd; 2], WindowError> {
+        let high = Dd::from_f64(omega.hi);
+        let a = self.rotation(high, self.half_width_extended(high)?)?;
+        if omega.lo == 0.0 {
+            return Ok(a);
+        }
+        // The high-frequency product already needs both DD components.
+        // Rotate the retained offset separately before combining phases;
+        // adding its small angle to that product can erase the offset.
+        let low = Dd::from_f64(omega.lo);
+        let b = self.rotation(low, self.half_width_extended(low)?)?;
+        Ok([
+            checked(a[0] * b[0] - a[1] * b[1])?,
+            checked(a[0] * b[1] + a[1] * b[0])?,
+        ])
+    }
 }
 
 // Centered cosine/cosine and sine/sine means under a uniform clock.
 fn rectangular_gram(a: Dd, b: Dd) -> Result<(Dd, Dd), WindowError> {
     let difference = checked(a - b)?;
     let sum = checked(a + b)?;
+    rectangular_gram_parts(a, b, difference, sum)
+}
+
+fn rectangular_gram_parts(a: Dd, b: Dd, difference: Dd, sum: Dd) -> Result<(Dd, Dd), WindowError> {
     let half = Dd::from_f64(0.5);
     // About the midpoint, cos*sin is odd and integrates to zero.
     // C = (sinc(a-b)+sinc(a+b))/2, S = (sinc(a-b)-sinc(a+b))/2.
@@ -497,6 +572,13 @@ impl ProperHarmonicProduct {
         let imaginary = checked(ai * br - ar * bi)?;
         checked(checked(real * self.real)? - checked(imaginary * self.imaginary)?)
     }
+}
+
+fn admit_frequency_dd(frequency: Dd) -> Result<Dd, WindowError> {
+    if !frequency.hi.is_finite() || !frequency.lo.is_finite() {
+        return Err(WindowError::InvalidFrequency);
+    }
+    checked(Dd::from_pair(frequency.hi, frequency.lo))
 }
 
 fn checked(x: Dd) -> Result<Dd, WindowError> {
@@ -980,6 +1062,156 @@ mod tests {
             .mean_real_product(rotate_clock(a, 13.0), rotate_clock(b, 17.0))
             .unwrap();
         close(shifted, expected, 2e-14);
+    }
+
+    #[test]
+    fn g1_dd_product_preserves_a_beat_below_the_carrier_spacing() {
+        let duration = 2.0_f64.powi(60);
+        let delta = 1.0 / duration;
+        assert_eq!(1.0 + delta, 1.0);
+        let window = HarmonicWindow::new(0.0, duration).unwrap();
+        let actual = window
+            .product_kernel_dd(Dd::from_pair(1.0, delta), Dd::ONE)
+            .unwrap()
+            .mean_real_product(C64::ONE, C64::ONE)
+            .unwrap();
+        // cos((1+delta)t)*cos(t) has a resolved beat delta*T=1.
+        // Its sum-frequency mean has magnitude <= 1/(2*(2+delta)*T),
+        // below 3e-19 here; no high-frequency quadrature is needed.
+        close(actual, 0.5 * 1.0_f64.sin(), 3e-15);
+        let rounded = window
+            .product_kernel(1.0 + delta, 1.0)
+            .unwrap()
+            .mean_real_product(C64::ONE, C64::ONE)
+            .unwrap();
+        assert!((rounded - actual).abs() > 0.07);
+    }
+
+    #[test]
+    fn g1_dd_real_beats_survive_the_carrier_multiplication_error() {
+        for power in [60, 80, 90, 100] {
+            let duration = 0.7 * 2.0_f64.powi(power);
+            let delta = 2.0_f64.powi(-power);
+            for profile in [
+                HarmonicWindowProfile::Uniform,
+                HarmonicWindowProfile::Triangular,
+            ] {
+                let window = HarmonicWindow::with_profile(0.0, duration, profile).unwrap();
+                let actual = window
+                    .product_kernel_dd(Dd::from_pair(0.3, delta), Dd::from_f64(0.3))
+                    .unwrap()
+                    .mean_real_product(C64::ONE, C64::ONE)
+                    .unwrap();
+                assert_eq!(
+                    actual,
+                    window
+                        .product_kernel_shifted(delta, 0.0, 0.3)
+                        .unwrap()
+                        .mean_real_product(C64::ONE, C64::ONE)
+                        .unwrap(),
+                );
+                // delta*T=0.7 exactly at the authored binary64 precision.
+                // The real cross product is half the mean cosine of that
+                // beat plus a fast sum term bounded below 2e-18 here.
+                let expected = match profile {
+                    HarmonicWindowProfile::Uniform => 0.5 * 0.7_f64.sin() / 0.7,
+                    HarmonicWindowProfile::Triangular => {
+                        0.5 * 0.35_f64.cos() * (0.175_f64.sin() / 0.175).powi(2)
+                    }
+                };
+                close(actual, expected, 3e-15);
+            }
+        }
+    }
+
+    #[test]
+    fn g3_dd_proper_beats_cancel_the_retained_common_carrier() {
+        let delta = 2.0_f64.powi(-60);
+        let window = HarmonicWindow::new(2.0_f64.powi(90), 2.0_f64.powi(59)).unwrap();
+        let a = C64::new(0.7, -1.2);
+        let b = C64::new(-0.2, 0.8);
+        let expected = window
+            .proper_product_kernel(delta, 0.0)
+            .unwrap()
+            .mean_real_product_dd(a, b)
+            .unwrap();
+        for carrier in [-1.0, 0.0, 1.0, 2.0_f64.powi(30)] {
+            let actual = window
+                .proper_product_kernel_dd(Dd::from_pair(carrier, delta), Dd::from_f64(carrier))
+                .unwrap()
+                .mean_real_product_dd(a, b)
+                .unwrap();
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn g0_dd_product_admission_and_binary64_compatibility() {
+        let a = C64::new(0.7, -0.3);
+        let b = C64::new(-0.4, 1.1);
+        for profile in [
+            HarmonicWindowProfile::Uniform,
+            HarmonicWindowProfile::Triangular,
+        ] {
+            let window = HarmonicWindow::with_profile(-0.17, 0.31, profile).unwrap();
+            for (wa, wb) in [(0.0, 0.0), (-1.7, 2.3), (1.0, 1.0), (1e12, 1e12 + 0.25)] {
+                assert_eq!(
+                    window
+                        .product_kernel_dd(Dd::from_f64(wa), Dd::from_f64(wb))
+                        .unwrap()
+                        .mean_real_product_dd(a, b)
+                        .unwrap(),
+                    window
+                        .product_kernel(wa, wb)
+                        .unwrap()
+                        .mean_real_product_dd(a, b)
+                        .unwrap(),
+                );
+                assert_eq!(
+                    window
+                        .proper_product_kernel_dd(Dd::from_f64(wa), Dd::from_f64(wb))
+                        .unwrap()
+                        .mean_real_product_dd(a, b)
+                        .unwrap(),
+                    window
+                        .proper_product_kernel(wa, wb)
+                        .unwrap()
+                        .mean_real_product_dd(a, b)
+                        .unwrap(),
+                );
+            }
+            assert_eq!(
+                window
+                    .product_kernel_dd(Dd { hi: 1.0, lo: 2.0 }, Dd::ONE)
+                    .unwrap()
+                    .mean_real_product_dd(a, b)
+                    .unwrap(),
+                window
+                    .product_kernel(3.0, 1.0)
+                    .unwrap()
+                    .mean_real_product_dd(a, b)
+                    .unwrap(),
+            );
+            for invalid in [
+                Dd {
+                    hi: f64::NAN,
+                    lo: 0.0,
+                },
+                Dd {
+                    hi: 0.0,
+                    lo: f64::INFINITY,
+                },
+            ] {
+                assert!(matches!(
+                    window.product_kernel_dd(invalid, Dd::ONE),
+                    Err(WindowError::InvalidFrequency)
+                ));
+                assert!(matches!(
+                    window.proper_product_kernel_dd(Dd::ONE, invalid),
+                    Err(WindowError::InvalidFrequency)
+                ));
+            }
+        }
     }
 
     #[test]

@@ -59,6 +59,19 @@ energy is evaluated with a `sinc-1` series rather than subtracting rounded
 numbers near one. Strict trigonometry and double-double phase/products retain
 small physical terms without changing any FFT transform bits.
 
+`product_kernel_dd` and `proper_product_kernel_dd` additionally accept retained
+double-double angular frequencies. They normalize finite high/low components
+before the original Gram/rotation implementation, so a resolved offset smaller
+than a binary64 step of its common carrier is not erased at the API boundary.
+The proper kernel subtracts the retained frequencies before applying the clock.
+The real DD kernel likewise forms its beat before interval multiplication and
+rotates the high and low frequency components separately; scaling a large
+carrier first can otherwise erase a representable slow beat.
+Spatial consumers can use the same algebra for wavenumbers and lengths. The
+original scalar APIs keep their arithmetic and normalization; focused controls
+check sub-ulp real beats, exact proper common-carrier cancellation, invalid
+components and bitwise compatibility when the low input components are zero.
+
 Carrier rotations and the sine/cosine inputs of centered Gram weights use
 `fs_math::det::sin_cos_dd` without an intermediate f64 rounding. Independently
 rounded sinc values can otherwise make the mean-square pressure of two nearly

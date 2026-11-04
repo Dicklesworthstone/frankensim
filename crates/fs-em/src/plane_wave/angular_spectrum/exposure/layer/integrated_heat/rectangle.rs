@@ -1,8 +1,9 @@
 //! Continuous rectangular support for the original irreversible reservoirs.
 //!
 //! Centered spatial Gram weights supply the normalized difference/sum Fourier
-//! integrals. Original grouped fields receive one joint x/y center rotation
-//! before products, retaining their source time origin. Exponent-scaled DD
+//! integrals. Original grouped envelopes receive one joint x/y center rotation
+//! before products; their common carrier acts only on the sum coefficients.
+//! This retains small Fourier offsets and the source time origin. Exponent-scaled DD
 //! contractions preserve the original heat owner's representable dynamic range.
 
 use super::*;
@@ -30,6 +31,7 @@ pub(super) struct PreparedRectangle {
     aperture: AngularSpectrumAperture,
     x: Axis,
     y: Axis,
+    sum_carrier_rotation: Option<[ScaledDd; 2]>,
 }
 
 impl PreparedRectangle {
@@ -62,6 +64,7 @@ impl PreparedRectangle {
     pub(super) fn prepare(
         grid: AngularSpectrumGrid,
         aperture: AngularSpectrumAperture,
+        carrier_rad_m: [f64; 2],
         kx: impl Fn(usize) -> f64,
         ky: impl Fn(usize) -> f64,
         cancelled: &mut impl FnMut() -> bool,
@@ -69,18 +72,21 @@ impl PreparedRectangle {
         poll(cancelled)?;
         Self::workspace_bytes(grid)?;
         let extent = aperture.extent_m();
+        let sum_carrier_rotation = if carrier_rad_m == [0.0; 2] {
+            None
+        } else {
+            let rotation = center_rotation(aperture, carrier_rad_m)?;
+            Some(multiply(rotation, rotation))
+        };
         Ok(Self {
             grid,
             aperture,
-            x: Axis::prepare(grid.width, extent[0], kx, cancelled)?,
-            y: Axis::prepare(grid.height, extent[1], ky, cancelled)?,
+            x: Axis::prepare(grid.width, extent[0], carrier_rad_m[0], kx, cancelled)?,
+            y: Axis::prepare(grid.height, extent[1], carrier_rad_m[1], ky, cancelled)?,
+            sum_carrier_rotation,
         })
     }
 
-    // Keep start and half-width phases separate, as in the original detector
-    // owner, so a tiny patch is not rounded into a distant spatial coordinate.
-    // Sum x/y phases before trig: translating a spatial dark fringe must not
-    // leave a false residual from independently rounded axis rotations.
     fn electric(
         &self,
         field: Vec<[[Dd; 2]; 6]>,
@@ -95,8 +101,6 @@ impl PreparedRectangle {
         result
             .try_reserve_exact(field.len())
             .map_err(|_| bad("rectangular heat field allocation failed"))?;
-        let origin = self.aperture.origin_m();
-        let extent = self.aperture.extent_m();
         let mut center = [[ScaledDd::ZERO; 2]; 3];
         for (i, field) in field.into_iter().enumerate() {
             if i % 32 == 0 {
@@ -106,26 +110,7 @@ impl PreparedRectangle {
                 self.x.wavenumbers[i % self.grid.width],
                 self.y.wavenumbers[i / self.grid.width],
             ];
-            let (mut start, mut half_width) = (Dd::ZERO, Dd::ZERO);
-            for axis in 0..2 {
-                let number = Dd::from_f64(k[axis]);
-                start = start + number * Dd::from_f64(origin[axis]);
-                half_width = half_width
-                    + if k[axis].abs() >= extent[axis] {
-                        (number * Dd::from_f64(0.5)) * Dd::from_f64(extent[axis])
-                    } else {
-                        number * Dd::from_f64(0.5 * extent[axis])
-                    };
-            }
-            if !finite_dd(start) || !finite_dd(half_width) {
-                return Err(bad("rectangular heat center phase is unrepresentable"));
-            }
-            let (s, c) = det::sin_cos_dd(start);
-            let (t, d) = det::sin_cos_dd(half_width);
-            let rotation = [
-                ScaledDd::from_dd(c * d - s * t),
-                ScaledDd::from_dd(-(s * d + c * t)),
-            ];
+            let rotation = center_rotation(self.aperture, k)?;
             let electric: Electric =
                 core::array::from_fn(|axis| multiply(field[axis].map(ScaledDd::from_dd), rotation));
             if electric.iter().any(|&v| !finite_parts(v)) {
@@ -225,6 +210,16 @@ impl PreparedRectangle {
                 }
             }
         }
+        if !proper {
+            if let Some(rotation) = self.sum_carrier_rotation {
+                // The carrier cancels exactly from conjugate products. Rotate
+                // the completed plain product, preserving envelope dark nulls.
+                for pair in &mut pairs {
+                    poll(cancelled)?;
+                    pair.spatial.sum = multiply(pair.spatial.sum, rotation);
+                }
+            }
+        }
         emit_pairs(frequencies, proper, pairs, terms, cancelled)
     }
 }
@@ -233,6 +228,7 @@ impl Axis {
     fn prepare(
         count: usize,
         extent: f64,
+        carrier: f64,
         number: impl Fn(usize) -> f64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, AngularSpectrumError> {
@@ -268,9 +264,19 @@ impl Axis {
                     .product_kernel(a, b)
                     .map_err(|_| bad("rectangular heat spatial phase is unrepresentable"))?
                     .centered_gram_dd();
+                let sum_decrement = if carrier == 0.0 {
+                    (c - Dd::ONE) - s
+                } else {
+                    let carrier = Dd::from_f64(carrier);
+                    let [c, s] = window
+                        .product_kernel_dd(carrier + Dd::from_f64(a), carrier + Dd::from_f64(b))
+                        .map_err(|_| bad("rectangular heat carrier phase is unrepresentable"))?
+                        .centered_gram_dd();
+                    (c - Dd::ONE) - s
+                };
                 weights.push(Weight {
                     difference_decrement: (c - Dd::ONE) + s,
-                    sum_decrement: (c - Dd::ONE) - s,
+                    sum_decrement,
                 });
             }
         }
@@ -279,6 +285,37 @@ impl Axis {
             weights,
         })
     }
+}
+
+// Keep start and half-width phases separate, so a tiny patch is not rounded
+// into a distant coordinate. Sum both axis phases before trigonometry: a
+// translated dark fringe must not acquire independent axis-rotation residuals.
+fn center_rotation(
+    aperture: AngularSpectrumAperture,
+    k: [f64; 2],
+) -> Result<[ScaledDd; 2], AngularSpectrumError> {
+    let origin = aperture.origin_m();
+    let extent = aperture.extent_m();
+    let (mut start, mut half_width) = (Dd::ZERO, Dd::ZERO);
+    for axis in 0..2 {
+        let number = Dd::from_f64(k[axis]);
+        start = start + number * Dd::from_f64(origin[axis]);
+        half_width = half_width
+            + if k[axis].abs() >= extent[axis] {
+                (number * Dd::from_f64(0.5)) * Dd::from_f64(extent[axis])
+            } else {
+                number * Dd::from_f64(0.5 * extent[axis])
+            };
+    }
+    if !finite_dd(start) || !finite_dd(half_width) {
+        return Err(bad("rectangular heat center phase is unrepresentable"));
+    }
+    let (s, c) = det::sin_cos_dd(start);
+    let (t, d) = det::sin_cos_dd(half_width);
+    Ok([
+        ScaledDd::from_dd(c * d - s * t),
+        ScaledDd::from_dd(-(s * d + c * t)),
+    ])
 }
 
 fn decrement(x: Dd, y: Dd) -> ScaledDd {

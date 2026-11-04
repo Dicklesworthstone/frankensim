@@ -284,7 +284,9 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
     /// including film interiors, partial coherence and two-sided illumination.
     /// Right-face inputs to `prepare_illumination` use this same envelope
     /// convention. Cycle-mean quantities are periodic; the complex field need
-    /// not be. Finite-window real-field exposures currently require zero carrier.
+    /// not be. Finite-window exposure lines and covariance banks share this
+    /// carrier; continuous cell and aperture products retain its real-field
+    /// sum terms through the original spatial/temporal Gram integration.
     pub fn prepare_with_carrier(
         source: &'s PlanarDielectricLayers<'m>,
         grid: AngularSpectrumGrid,

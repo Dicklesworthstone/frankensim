@@ -63,7 +63,9 @@ pub use layer::{
 };
 
 /// Whole-line-bank bounds for a query. Pair work counts N*F² for N spatial
-/// points and F distinct frequencies. Logical numerical storage includes one
+/// points and F distinct frequencies. A nonzero common carrier additionally
+/// admits N²*F² exact spatial pairs for the real field's continuous cell power.
+/// Logical numerical storage includes one
 /// original beam's complete workspace, all retained frequency fields, temporal
 /// kernels, a compensated accumulation plane and the output. Other borrowed
 /// beams, earlier outputs and allocator overhead are outside this bound.
@@ -87,7 +89,7 @@ pub struct AngularSpectrumExposurePoint {
     pub poynting_w_m2: [f64; 3],
 }
 
-/// Exposure-averaged observables on the original periodic transverse cell.
+/// Exposure-averaged observables on the original transverse envelope cell.
 #[derive(Debug)]
 pub struct AngularSpectrumExposureField {
     grid: AngularSpectrumGrid,
@@ -101,10 +103,10 @@ impl AngularSpectrumExposureField {
     pub fn points(&self) -> &[AngularSpectrumExposurePoint] {
         &self.points
     }
-    /// Mean signed normal power integrated over the continuous periodic cell,
-    /// in watts. Modal orthogonality integrates the represented band-limited
-    /// fields exactly in space, without aliasing their quadratic products on
-    /// the original grid. This can differ from summing the point samples.
+    /// Mean signed normal power integrated over the continuous envelope cell,
+    /// in watts. Exact spatial integration retains carrier sum terms as well
+    /// as mode differences, without aliasing their quadratic products on the
+    /// original grid. This can differ from summing the point samples.
     pub fn normal_power_w(&self) -> f64 {
         self.normal_power_w
     }
@@ -114,6 +116,8 @@ impl AngularSpectrumExposureField {
 /// in frequency, polarization and spatial profile, but must retain the same
 /// original incident/exit/film material owners, layer order and thicknesses.
 /// Equal-frequency lines are summed as fields before forming any products.
+/// All lines and the anchor share one transverse carrier. Different carriers
+/// require distinct source spaces and cannot share this modal-frequency cache.
 pub struct AngularSpectrumExposure<'b, 's, 'm> {
     anchor: &'b PlanarAngularSpectrum<'s, 'm>,
     lines: ExposureLines<'b, 's, 'm>,
@@ -172,15 +176,6 @@ impl<'b, 's, 'm> AngularSpectrumExposure<'b, 's, 'm> {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, AngularSpectrumError> {
         poll(&mut cancelled)?;
-        // Real-field finite-window products contain sum-wavevector terms as
-        // well as differences. The current cell kernel uses the unshifted
-        // integer lattice; cycle-mean complex-field observations do not have
-        // this restriction. Refuse before its orthogonality could be misused.
-        if anchor.carrier_rad_m != [0.0; 2] {
-            return Err(bad(
-                "finite-window exposures require a zero transverse carrier",
-            ));
-        }
         if lines.len() > 4096 || lines.len() > limits.maximum_lines {
             return Err(bad("exposure line count exceeds its budget"));
         }
@@ -215,11 +210,11 @@ impl<'b, 's, 'm> AngularSpectrumExposure<'b, 's, 'm> {
             let original = lines.get(index);
             let line = original.beam();
             if line.grid() != anchor.grid()
-                || line.carrier_rad_m != [0.0; 2]
+                || line.carrier_rad_m != anchor.carrier_rad_m
                 || !line.source().same_sources_and_geometry(anchor.source())
             {
                 return Err(bad(
-                    "exposure lines require the same original materials, layers and grid",
+                    "exposure lines require the same original materials, layers, grid and carrier",
                 ));
             }
             source_indices.push(index);
@@ -263,7 +258,19 @@ impl<'b, 's, 'm> AngularSpectrumExposure<'b, 's, 'm> {
             .ok_or_else(|| bad("exposure pair overflow"))?;
         let point_frequency_pairs = n
             .checked_mul(pairs)
+            .and_then(|work| {
+                if anchor.carrier_rad_m == [0.0; 2] {
+                    Some(work)
+                } else {
+                    work.checked_mul(n.checked_add(1)?)
+                }
+            })
             .ok_or_else(|| bad("exposure work overflow"))?;
+        let carrier_workspace = if anchor.carrier_rad_m == [0.0; 2] {
+            0
+        } else {
+            aperture::real_cell_workspace_bytes(anchor.grid(), f)?
+        };
         let workspace_bytes = n
             .checked_mul(core::mem::size_of::<[C64; 6]>())
             .and_then(|v| v.checked_mul(f))
@@ -279,6 +286,7 @@ impl<'b, 's, 'm> AngularSpectrumExposure<'b, 's, 'm> {
             })
             .and_then(|v| v.checked_add(retained_group_bytes))
             .and_then(|v| v.checked_add(original_workspace))
+            .and_then(|v| v.checked_add(carrier_workspace))
             .ok_or_else(|| bad("exposure workspace overflow"))?;
         if line_pairs > limits.maximum_point_line_pairs
             || point_frequency_pairs > limits.maximum_point_frequency_pairs
@@ -317,8 +325,10 @@ impl<'b, 's, 'm> AngularSpectrumExposure<'b, 's, 'm> {
 
     /// Reconstruct each original line once, cache O(F²) temporal kernels, and
     /// integrate all vector cross terms. O(L*N + F*N*log N + F²*N) work; trigonometry
-    /// for the temporal window is O(F²), independent of the grid size. There is
-    /// no time stepping, time aliasing or repeated constitutive solve.
+    /// for the temporal window is O(F²), independent of the grid size. A nonzero
+    /// carrier uses its separately admitted O(N²*F²) continuous spatial product
+    /// integral; point observations retain the FFT path. There is no time
+    /// stepping, time aliasing or repeated constitutive solve.
     pub fn field(
         &self,
         side: AngularSpectrumSide,
@@ -391,13 +401,23 @@ impl<'b, 's, 'm> AngularSpectrumExposure<'b, 's, 'm> {
                 &mut cancelled,
             )?);
         }
-        let normal_power_w = integrate_cell_power(
-            self.anchor.grid(),
-            &fields,
-            &kernels,
-            HarmonicProduct::mean_real_product_parts_dd,
-            &mut cancelled,
-        )?
+        let normal_power_w = if self.anchor.carrier_rad_m == [0.0; 2] {
+            integrate_cell_power(
+                self.anchor.grid(),
+                &fields,
+                &kernels,
+                HarmonicProduct::mean_real_product_parts_dd,
+                &mut cancelled,
+            )?
+        } else {
+            aperture::real_cell_power(
+                self.anchor,
+                &self.frequencies,
+                &fields,
+                window,
+                &mut cancelled,
+            )?
+        }
         .to_f64();
         for (group, field) in fields.iter_mut().enumerate() {
             self.synthesize_frequency_field(group, field, &mut cancelled)?;

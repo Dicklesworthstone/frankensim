@@ -11,18 +11,19 @@ use super::*;
 
 type FieldParts = [[Dd; 2]; 6];
 
+mod control;
 mod polarization;
 mod stress;
-mod control;
 pub use control::{
     AngularSpectrumApertureControlLimits, AngularSpectrumApertureEnergyGradient,
     PreparedAngularSpectrumApertureEnergyControl,
 };
-pub use stress::AngularSpectrumExposureApertureStress;
 pub use polarization::{
     AngularSpectrumExposureApertureMoments, AngularSpectrumExposureApertureProjection,
     AngularSpectrumExposureApertureProjectionReading,
 };
+pub use stress::AngularSpectrumExposureApertureStress;
+pub(super) use stress::real_cell_dyad;
 
 /// Additional bounds for a joint aperture/shutter observation.
 ///
@@ -310,7 +311,10 @@ fn admit<A: Accumulator>(
 
 trait Kernel: Copy {
     const CENTER_FIELDS: bool;
-    fn prepare(window: HarmonicWindow, a: f64, b: f64) -> Result<Self, AngularSpectrumError>;
+    fn prepare(window: HarmonicWindow, a: f64, b: f64) -> Result<Self, AngularSpectrumError> {
+        Self::prepare_dd(window, Dd::from_f64(a), Dd::from_f64(b))
+    }
+    fn prepare_dd(window: HarmonicWindow, a: Dd, b: Dd) -> Result<Self, AngularSpectrumError>;
     fn compose(self, other: Self) -> Self;
     fn product(self, a: [Dd; 2], b: [Dd; 2]) -> Dd;
 }
@@ -376,12 +380,12 @@ impl Accumulator for [Dd; 9] {
 struct RealKernel([Dd; 2]);
 impl Kernel for RealKernel {
     const CENTER_FIELDS: bool = true;
-    fn prepare(window: HarmonicWindow, a: f64, b: f64) -> Result<Self, AngularSpectrumError> {
+    fn prepare_dd(window: HarmonicWindow, a: Dd, b: Dd) -> Result<Self, AngularSpectrumError> {
         // Centered weights are translation-independent. Reuse the original
         // small-width/sinc implementation, including its subnormal handling.
         let kernel = HarmonicWindow::with_profile(0.0, window.duration_s(), window.profile())
             .map_err(|_| bad("aperture centered interval is unrepresentable"))?
-            .product_kernel(a, b)
+            .product_kernel_dd(a, b)
             .map_err(|_| bad("aperture real phase kernel is unrepresentable"))?;
         Ok(Self(kernel.centered_gram_dd()))
     }
@@ -404,9 +408,9 @@ impl Kernel for RealKernel {
 struct ProperKernel([Dd; 2]);
 impl Kernel for ProperKernel {
     const CENTER_FIELDS: bool = false;
-    fn prepare(window: HarmonicWindow, a: f64, b: f64) -> Result<Self, AngularSpectrumError> {
+    fn prepare_dd(window: HarmonicWindow, a: Dd, b: Dd) -> Result<Self, AngularSpectrumError> {
         let kernel = window
-            .proper_product_kernel(a, b)
+            .proper_product_kernel_dd(a, b)
             .map_err(|_| bad("aperture proper phase kernel is unrepresentable"))?;
         let real = kernel
             .mean_real_product_dd(C64::ONE, C64::ONE)
@@ -442,11 +446,11 @@ impl<K: Kernel> Spatial<K> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, AngularSpectrumError> {
         let grid = anchor.grid();
-        Self::from_axes(
+        Self::from_axes_dd(
             grid,
             aperture,
-            |i| anchor.modes[i].kx,
-            |i| anchor.modes[i * grid.width].ky,
+            |i| transverse_wavenumber_dd(anchor, 0, i),
+            |i| transverse_wavenumber_dd(anchor, 1, i),
             cancelled,
         )
     }
@@ -458,6 +462,22 @@ impl<K: Kernel> Spatial<K> {
         ky: impl Fn(usize) -> f64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, AngularSpectrumError> {
+        Self::from_axes_dd(
+            grid,
+            aperture,
+            |i| Dd::from_f64(kx(i)),
+            |i| Dd::from_f64(ky(i)),
+            cancelled,
+        )
+    }
+
+    fn from_axes_dd(
+        grid: AngularSpectrumGrid,
+        aperture: AngularSpectrumAperture,
+        kx: impl Fn(usize) -> Dd,
+        ky: impl Fn(usize) -> Dd,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, AngularSpectrumError> {
         let origin = aperture.origin_m();
         let extent = aperture.extent_m();
         let x_window = HarmonicWindow::new(origin[0], extent[0])
@@ -467,8 +487,8 @@ impl<K: Kernel> Spatial<K> {
         Ok(Self {
             grid,
             aperture,
-            x: pair_kernels(grid.width, x_window, kx, cancelled)?,
-            y: pair_kernels(grid.height, y_window, ky, cancelled)?,
+            x: pair_kernels_dd(grid.width, x_window, kx, cancelled)?,
+            y: pair_kernels_dd(grid.height, y_window, ky, cancelled)?,
         })
     }
 
@@ -484,6 +504,15 @@ fn pair_kernels<K: Kernel>(
     frequency: impl Fn(usize) -> f64,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Vec<K>, AngularSpectrumError> {
+    pair_kernels_dd(count, window, |i| Dd::from_f64(frequency(i)), cancelled)
+}
+
+fn pair_kernels_dd<K: Kernel>(
+    count: usize,
+    window: HarmonicWindow,
+    frequency: impl Fn(usize) -> Dd,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Vec<K>, AngularSpectrumError> {
     let pairs = count
         .checked_mul(count)
         .ok_or_else(|| bad("aperture kernel count overflow"))?;
@@ -496,7 +525,7 @@ fn pair_kernels<K: Kernel>(
             if j % 32 == 0 {
                 poll(cancelled)?;
             }
-            kernels.push(K::prepare(window, frequency(i), frequency(j))?);
+            kernels.push(K::prepare_dd(window, frequency(i), frequency(j))?);
         }
     }
     Ok(kernels)
@@ -523,11 +552,11 @@ fn accumulate_bank<K: Kernel, A: Accumulator>(
         let mut field = bank.frequency_modal_parts(group, side, distance, cancelled)?;
         sum.prepare_field(&mut field, cancelled)?;
         if K::CENTER_FIELDS {
-            center_fields(
+            center_fields_dd(
                 &mut field,
                 bank.frequencies[group],
-                |i| bank.anchor.modes[i].kx,
-                |i| bank.anchor.modes[i].ky,
+                |i| transverse_wavenumber_dd(bank.anchor, 0, i % bank.anchor.grid.width),
+                |i| transverse_wavenumber_dd(bank.anchor, 1, i / bank.anchor.grid.width),
                 spatial.aperture,
                 window,
                 cancelled,
@@ -579,6 +608,27 @@ fn center_fields(
     window: HarmonicWindow,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), AngularSpectrumError> {
+    center_fields_dd(
+        field,
+        omega,
+        |i| Dd::from_f64(kx(i)),
+        |i| Dd::from_f64(ky(i)),
+        aperture,
+        window,
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn center_fields_dd(
+    field: &mut [FieldParts],
+    omega: f64,
+    kx: impl Fn(usize) -> Dd,
+    ky: impl Fn(usize) -> Dd,
+    aperture: AngularSpectrumAperture,
+    window: HarmonicWindow,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), AngularSpectrumError> {
     let [x, y] = aperture.origin_m();
     let [width, height] = aperture.extent_m();
     for (i, components) in field.iter_mut().enumerate() {
@@ -589,17 +639,16 @@ fn center_fields(
         for (frequency, origin, extent) in [
             (kx(i), x, width),
             (ky(i), y, height),
-            (-omega, window.start_s(), window.duration_s()),
+            (Dd::from_f64(-omega), window.start_s(), window.duration_s()),
         ] {
-            let frequency_dd = Dd::from_f64(frequency);
-            start = start + frequency_dd * Dd::from_f64(origin);
+            start = start + frequency * Dd::from_f64(origin);
             // Halve the larger operand to retain representable products when
             // either the interval or frequency is subnormal.
             half_width = half_width
-                + if frequency.abs() >= extent {
-                    (frequency_dd * Dd::from_f64(0.5)) * Dd::from_f64(extent)
+                + if frequency.hi.abs() >= extent {
+                    (frequency * Dd::from_f64(0.5)) * Dd::from_f64(extent)
                 } else {
-                    frequency_dd * Dd::from_f64(0.5 * extent)
+                    frequency * Dd::from_f64(0.5 * extent)
                 };
         }
         if !finite_dd(start) || !finite_dd(half_width) {
@@ -620,6 +669,159 @@ fn center_fields(
         }
     }
     Ok(())
+}
+
+// Preserve the envelope offset before adding a potentially much larger
+// carrier. Real products need the sum; proper products cancel the common
+// carrier through the original DD difference kernel.
+fn transverse_wavenumber_dd(anchor: &PlanarAngularSpectrum<'_, '_>, axis: usize, bin: usize) -> Dd {
+    Dd::from_f64(anchor.carrier_rad_m[axis]) + Dd::from_f64(anchor.envelope_wavenumber(axis, bin))
+}
+
+/// Additional live storage beside the original C64 point-observation path.
+/// Work is admitted by the exposure owner before any of these caches exist.
+pub(super) fn real_cell_workspace_bytes(
+    grid: AngularSpectrumGrid,
+    frequencies: usize,
+) -> Result<usize, AngularSpectrumError> {
+    if frequencies == 0 {
+        return Ok(0);
+    }
+    let n = grid
+        .width
+        .checked_mul(grid.height)
+        .ok_or_else(|| bad("carrier cell extent overflow"))?;
+    let axis_pairs = grid
+        .width
+        .checked_mul(grid.width)
+        .and_then(|x| {
+            grid.height
+                .checked_mul(grid.height)
+                .and_then(|y| x.checked_add(y))
+        })
+        .ok_or_else(|| bad("carrier cell axis cache overflow"))?;
+    axis_pairs
+        .checked_add(
+            frequencies
+                .checked_mul(frequencies)
+                .ok_or_else(|| bad("carrier cell frequency cache overflow"))?,
+        )
+        .and_then(|pairs| pairs.checked_mul(core::mem::size_of::<RealKernel>()))
+        .and_then(|bytes| {
+            n.checked_mul(frequencies)
+                .and_then(|nf| nf.checked_mul(core::mem::size_of::<FieldParts>()))
+                .and_then(|fields| bytes.checked_add(fields))
+        })
+        .and_then(|bytes| {
+            frequencies
+                .checked_mul(core::mem::size_of::<Vec<FieldParts>>())
+                .and_then(|vectors| bytes.checked_add(vectors))
+        })
+        .and_then(|bytes| {
+            bytes.checked_add(
+                core::mem::size_of::<Spatial<RealKernel>>()
+                    + core::mem::size_of::<Vec<RealKernel>>()
+                    + core::mem::size_of::<Vec<Vec<FieldParts>>>()
+                    + core::mem::size_of::<CellPower>(),
+            )
+        })
+        .ok_or_else(|| bad("carrier cell workspace overflow"))
+}
+
+// Exact full-cell real-field contraction. Centering, small-window Gram
+// arithmetic and integration are the same owners as finite-aperture queries.
+fn real_cell_accumulate<A: Accumulator>(
+    anchor: &PlanarAngularSpectrum<'_, '_>,
+    frequencies: &[f64],
+    fields: &[Vec<[C64; 6]>],
+    window: HarmonicWindow,
+    sum: &mut A,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), AngularSpectrumError> {
+    poll(cancelled)?;
+    if fields.len() != frequencies.len() {
+        return Err(bad("carrier cell requires every original frequency field"));
+    }
+    if frequencies.is_empty() {
+        return Ok(());
+    }
+    let grid = anchor.grid();
+    let aperture = AngularSpectrumAperture::try_new(
+        [0.0; 2],
+        [
+            grid.width as f64 * grid.spacing_m[0],
+            grid.height as f64 * grid.spacing_m[1],
+        ],
+    )?;
+    let spatial = Spatial::<RealKernel>::prepare(anchor, aperture, cancelled)?;
+    let temporal = pair_kernels(frequencies.len(), window, |i| -frequencies[i], cancelled)?;
+    let mut parts = Vec::new();
+    parts
+        .try_reserve_exact(fields.len())
+        .map_err(|_| bad("carrier cell field allocation failed"))?;
+    for (group, field) in fields.iter().enumerate() {
+        poll(cancelled)?;
+        if field.len() != grid.width * grid.height {
+            return Err(bad("carrier cell field differs from its original grid"));
+        }
+        let mut values = Vec::new();
+        values
+            .try_reserve_exact(field.len())
+            .map_err(|_| bad("carrier cell field allocation failed"))?;
+        for (i, value) in field.iter().enumerate() {
+            if i % 64 == 0 {
+                poll(cancelled)?;
+            }
+            values.push(value.map(|z| [Dd::from_f64(z.re), Dd::from_f64(z.im)]));
+        }
+        sum.prepare_field(&mut values, cancelled)?;
+        center_fields_dd(
+            &mut values,
+            frequencies[group],
+            |i| transverse_wavenumber_dd(anchor, 0, i % grid.width),
+            |i| transverse_wavenumber_dd(anchor, 1, i / grid.width),
+            aperture,
+            window,
+            cancelled,
+        )?;
+        parts.push(values);
+    }
+    integrate(&spatial, &temporal, &parts, sum, cancelled)
+}
+
+struct CellPower(Dd);
+impl Accumulator for CellPower {
+    type Output = Dd;
+    fn add<K: Kernel>(&mut self, kernel: K, a: &FieldParts, b: &FieldParts) {
+        self.0 = self.0 + kernel.product(a[0], b[4]) - kernel.product(a[1], b[3]);
+    }
+    fn finish(self, aperture: AngularSpectrumAperture) -> Result<Dd, AngularSpectrumError> {
+        let power = self.0 * Dd::from_f64(aperture.area_m2());
+        if !finite_dd(power) {
+            return Err(bad("integrated carrier cell power is unrepresentable"));
+        }
+        Ok(power)
+    }
+}
+
+pub(super) fn real_cell_power(
+    anchor: &PlanarAngularSpectrum<'_, '_>,
+    frequencies: &[f64],
+    fields: &[Vec<[C64; 6]>],
+    window: HarmonicWindow,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Dd, AngularSpectrumError> {
+    let mut sum = CellPower(Dd::ZERO);
+    real_cell_accumulate(anchor, frequencies, fields, window, &mut sum, cancelled)?;
+    let grid = anchor.grid();
+    let aperture = AngularSpectrumAperture::try_new(
+        [0.0; 2],
+        [
+            grid.width as f64 * grid.spacing_m[0],
+            grid.height as f64 * grid.spacing_m[1],
+        ],
+    )?;
+    sum.finish(aperture)
 }
 
 fn finite_dd(value: Dd) -> bool {

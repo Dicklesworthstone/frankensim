@@ -182,6 +182,11 @@ where
     'm: 's,
 {
     poll(cancelled)?;
+    if anchor.carrier_rad_m != [0.0; 2] {
+        return Err(bad(
+            "joint finite-window cell stress/momentum requires a zero transverse carrier",
+        ));
+    }
     if workspace > limits.maximum_workspace_bytes {
         return Err(bad(
             "exposure stress and momentum exceed their workspace budget",
