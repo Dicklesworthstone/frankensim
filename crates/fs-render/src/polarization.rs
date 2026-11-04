@@ -169,7 +169,8 @@ pub mod photometry {
 
     use core::f64::consts::{PI, TAU};
 
-    use crate::dielectric::{DielectricEvent, DielectricIor};
+    use crate::conductor::{CoherentCoatingStack, ConductorOptics};
+    use crate::dielectric::{DielectricCoatingStack, DielectricEvent, DielectricIor};
     use crate::photometry::source::{PhotometricSource, SPECTRAL_BINS, SourceError, wavelength_nm};
     use crate::polarization::dielectric::spectral_fresnel_dielectric_polarized_borrowed;
     use crate::polarization::{Mueller, Stokes};
@@ -298,6 +299,86 @@ pub mod photometry {
             }
             Ok(Self { matrices })
         }
+
+        /// Reflected power from the original metal optics, including any authored
+        /// transparent, absorbing or periodic coating. The incident medium retains
+        /// its native spectral phase law; no constant-index fit is introduced.
+        ///
+        /// Incoming and reflected frames use +Q along s and right-handed p axes,
+        /// as in `ConductorOptics::fresnel_mueller`. The retained U/V coupling
+        /// includes reflection phase. The caller places the outgoing source.
+        pub fn conductor_reflection(
+            incident_cosine: f64,
+            incident: impl Into<DielectricIor>,
+            optics: &ConductorOptics,
+        ) -> Result<Self, SourceError> {
+            let incident = incident.into();
+            let mut matrices = [Mueller::IDENTITY; SPECTRAL_BINS];
+            for (bin, matrix) in matrices.iter_mut().enumerate() {
+                let wavelength = wavelength_nm(bin);
+                let eta = incident.eval(wavelength).map_err(|_| SourceError::InvalidFilter)?;
+                *matrix = optics.fresnel_mueller(wavelength, eta, incident_cosine)
+                    .map_err(|_| SourceError::InvalidFilter)?;
+            }
+            Ok(Self { matrices })
+        }
+
+        /// Reflected power from an original ordered spectral stack on a metal.
+        /// The borrowed layers are incident-side first and replace any coating
+        /// already attached to `substrate`, matching the native stack owner.
+        /// Full spectral data and s/p phase are evaluated only during construction;
+        /// the resulting optic owns fixed-size matrices and borrows no layer data.
+        /// Frames and outgoing placement follow `Self::conductor_reflection`.
+        pub fn conductor_stack_reflection(
+            incident_cosine: f64,
+            incident: impl Into<DielectricIor>,
+            substrate: &ConductorOptics,
+            stack: CoherentCoatingStack<'_>,
+        ) -> Result<Self, SourceError> {
+            let incident = incident.into();
+            let mut matrices = [Mueller::IDENTITY; SPECTRAL_BINS];
+            for (bin, matrix) in matrices.iter_mut().enumerate() {
+                let wavelength = wavelength_nm(bin);
+                let eta = incident.eval(wavelength).map_err(|_| SourceError::InvalidFilter)?;
+                *matrix = stack.fresnel_mueller(substrate, wavelength, eta, incident_cosine)
+                    .map_err(|_| SourceError::InvalidFilter)?;
+            }
+            Ok(Self { matrices })
+        }
+
+        /// One coherent multilayer reflection/transmission channel between the
+        /// actual adjacent spectral media. `reverse` traverses the authored layers
+        /// inside-to-outside; callers also supply the corresponding incident and
+        /// transmitted media and incidence cosine. Layers retain their own support.
+        ///
+        /// These are native ray-power Mueller matrices, including coating loss
+        /// and relative phase. No radiance eta-squared factor or stochastic branch
+        /// probability is applied. Outgoing placement follows `dielectric_channel`.
+        pub fn coated_dielectric_channel(
+            incident_cosine: f64,
+            incident: impl Into<DielectricIor>,
+            transmitted: impl Into<DielectricIor>,
+            stack: DielectricCoatingStack<'_>,
+            reverse: bool,
+            event: DielectricEvent,
+        ) -> Result<Self, SourceError> {
+            let incident = incident.into();
+            let transmitted = transmitted.into();
+            let mut matrices = [Mueller::IDENTITY; SPECTRAL_BINS];
+            for (bin, matrix) in matrices.iter_mut().enumerate() {
+                let wavelength = wavelength_nm(bin);
+                let eta_i = incident.eval(wavelength).map_err(|_| SourceError::InvalidFilter)?;
+                let eta_t = transmitted.eval(wavelength).map_err(|_| SourceError::InvalidFilter)?;
+                let response = stack.fresnel_polarized(
+                    wavelength, reverse, incident_cosine, eta_i, eta_t,
+                ).map_err(|_| SourceError::InvalidFilter)?;
+                *matrix = match event {
+                    DielectricEvent::Reflection => response.reflection,
+                    DielectricEvent::Transmission => response.transmission,
+                };
+            }
+            Ok(Self { matrices })
+        }
     }
 
     /// A calibrated source plus its retained wavelength-dependent polarization.
@@ -389,6 +470,10 @@ pub mod photometry {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use crate::conductor::{
+            CoatingIorSample, CoatingLayer, CoherentAbsorbingCoating, CoherentDielectricCoating,
+            ConductorDataStatus, ConductorIorSample, ConductorSource,
+        };
         use crate::dielectric::{CauchyIor, DielectricIorSample, SellmeierIor, TabulatedIor};
         use crate::instances::RigidTransform;
         use crate::photometry::source::{AngularDistribution, SourceSpectrum};
@@ -541,6 +626,206 @@ pub mod photometry {
             close(out.relative_stokes()[bin].v, -1.0);
             close(out.intensity_source().flux_lm(), 1000.0);
             assert!(out.relative_stokes()[0].u.abs() > 0.01);
+        }
+
+
+        fn metal() -> ConductorOptics {
+            let source = ConductorSource::try_new(
+                fs_blake3::hash_domain("org.frankensim.test.photometric-reflection", b"synthetic"),
+                ConductorDataStatus::Representative,
+            ).unwrap();
+            ConductorOptics::try_new(core::array::from_fn(|i| {
+                ConductorIorSample::try_new(380.0 + 50.0 * i as f64, 0.2, 3.0).unwrap()
+            }), source).unwrap()
+        }
+
+        fn mixed_films(source: ConductorSource) -> (CoherentDielectricCoating, CoherentAbsorbingCoating) {
+            let transparent = CoherentDielectricCoating::try_new(
+                SellmeierIor::try_new([1.56, 0.0, 0.0], [0.0; 3]).unwrap(), 81e-9, source,
+            ).unwrap();
+            let absorbing = CoherentAbsorbingCoating::try_new(core::array::from_fn(|i| {
+                CoatingIorSample::try_new(
+                    380.0 + 50.0 * i as f64, 1.9 - 0.025 * i as f64, 0.05 + 0.01 * i as f64,
+                ).unwrap()
+            }), 100e-9, source).unwrap();
+            (transparent, absorbing)
+        }
+
+        #[test]
+        fn metal_reflection_phase_changes_calibrated_analyzer_flux() {
+            let input = PolarizedSource::try_new(source(),
+                [Stokes::try_new(1.0, 0.0, 1.0, 0.0).unwrap(); SPECTRAL_BINS]).unwrap();
+            let mirror = SpectralOptics::conductor_reflection(
+                0.5, CauchyIor::try_constant(1.0).unwrap(), &metal(),
+            ).unwrap();
+            let reflected = input.through(&mirror).unwrap();
+            // Independent complex Fresnel answer for n=0.2+3i at cos(theta)=0.5.
+            let expected = [0.9184110846593692, 0.04400178561613738,
+                -0.5749762549092700, 0.7148042176556463];
+            for state in reflected.relative_stokes() {
+                for (actual, expected) in [state.i, state.q, state.u, state.v].into_iter().zip(expected) {
+                    close(actual, expected);
+                }
+            }
+            close(reflected.intensity_source().flux_lm(), 1000.0 * expected[0]);
+            let quarter = SpectralOptics::linear_retarder(0.0, [PI / 2.0; SPECTRAL_BINS]).unwrap();
+            let analyzed = reflected.through(&quarter).unwrap();
+            let plus = analyzed.through(&SpectralOptics::linear_polarizer(PI / 4.0).unwrap()).unwrap();
+            let minus = analyzed.through(&SpectralOptics::linear_polarizer(-PI / 4.0).unwrap()).unwrap();
+            close(plus.intensity_source().flux_lm(), 500.0 * (expected[0] + expected[3]));
+            close(minus.intensity_source().flux_lm(), 500.0 * (expected[0] - expected[3]));
+            close(input.intensity_source().flux_lm(), 1000.0);
+        }
+
+        #[test]
+        fn conductor_stack_retains_spectral_phase_and_source_normalization() {
+            let bare = metal();
+            let (transparent, absorbing) = mixed_films(bare.source());
+            let layers = [CoatingLayer::Dielectric(&transparent), CoatingLayer::Absorbing(&absorbing)];
+            let stack = CoherentCoatingStack::try_new(&layers).unwrap();
+            let incident = DielectricIor::from(TabulatedIor::try_new(core::array::from_fn(|i| {
+                DielectricIorSample::try_new(380.0 + 50.0 * i as f64, 1.2 + 0.04 * i as f64).unwrap()
+            })).unwrap());
+            let optic = SpectralOptics::conductor_stack_reflection(0.6, &incident, &bare, stack).unwrap();
+            assert_eq!(optic.matrices, SpectralOptics::conductor_stack_reflection(
+                0.6, &incident, &bare.with_coating(transparent), stack,
+            ).unwrap().matrices, "the explicit stack replaces the substrate's attached film");
+            let state = Stokes::try_new(1.0, 0.3, 0.4, 0.2).unwrap();
+            let original = source();
+            let output = PolarizedSource::try_new(original.clone(), [state; SPECTRAL_BINS])
+                .unwrap().through(&optic).unwrap();
+            let surviving = core::array::from_fn(|bin| {
+                let wavelength = wavelength_nm(bin);
+                let expected = stack.fresnel_mueller(
+                    &bare, wavelength, incident.eval(wavelength).unwrap(), 0.6,
+                ).unwrap().apply(state);
+                let actual = output.relative_stokes()[bin];
+                for (actual, expected) in [actual.i, actual.q, actual.u, actual.v].into_iter()
+                    .zip([expected.i, expected.q, expected.u, expected.v]) {
+                    close(actual, expected);
+                }
+                expected.i
+            });
+            let calibrated = original.filtered(surviving).unwrap();
+            close(output.intensity_source().flux_lm(), calibrated.flux_lm());
+            for bin in 0..SPECTRAL_BINS {
+                let wavelength = wavelength_nm(bin);
+                close(output.intensity_source().flux_lm()
+                    * output.intensity_source().spectrum().value_w_per_lumen_nm(wavelength),
+                    calibrated.flux_lm() * calibrated.spectrum().value_w_per_lumen_nm(wavelength));
+            }
+            assert!((output.relative_stokes()[0].v - output.relative_stokes()[SPECTRAL_BINS - 1].v).abs() > 1e-4);
+            let single = [CoatingLayer::Absorbing(&absorbing)];
+            let explicit = SpectralOptics::conductor_stack_reflection(
+                0.6, &incident, &bare, CoherentCoatingStack::try_new(&single).unwrap(),
+            ).unwrap();
+            let attached = SpectralOptics::conductor_reflection(
+                0.6, &incident, &bare.with_absorbing_coating(absorbing),
+            ).unwrap();
+            for (a, b) in explicit.matrices.iter().zip(&attached.matrices) {
+                for (a, b) in a.0.iter().flatten().zip(b.0.iter().flatten()) { close(*a, *b); }
+            }
+        }
+
+        #[test]
+        fn antireflection_stack_changes_flux_without_radiance_eta_scaling() {
+            let air = CauchyIor::try_constant(1.0).unwrap();
+            let glass = CauchyIor::try_constant(1.5).unwrap();
+            let design_bin = SPECTRAL_BINS / 2;
+            let film_index = 1.5_f64.sqrt();
+            let film = CoherentDielectricCoating::try_new(
+                CauchyIor::try_constant(film_index).unwrap(),
+                wavelength_nm(design_bin) * 1e-9 / (4.0 * film_index), metal().source(),
+            ).unwrap();
+            let films = [film];
+            let stack = DielectricCoatingStack::try_new(&films).unwrap();
+            let original = source().with_unpolarized_optics();
+            let reflected = original.through(&SpectralOptics::coated_dielectric_channel(
+                1.0, air, glass, stack, false, DielectricEvent::Reflection,
+            ).unwrap()).unwrap();
+            let transmitted = original.through(&SpectralOptics::coated_dielectric_channel(
+                1.0, air, glass, stack, false, DielectricEvent::Transmission,
+            ).unwrap()).unwrap();
+            let bare = original.through(&SpectralOptics::dielectric_channel(
+                1.0, air, glass, DielectricEvent::Reflection,
+            ).unwrap()).unwrap();
+            assert!(reflected.relative_stokes()[design_bin].i < 1e-20);
+            close(transmitted.relative_stokes()[design_bin].i, 1.0);
+            assert!(reflected.intensity_source().flux_lm() < bare.intensity_source().flux_lm());
+            close(reflected.intensity_source().flux_lm() + transmitted.intensity_source().flux_lm(), 1000.0);
+            for (r, t) in reflected.relative_stokes().iter().zip(transmitted.relative_stokes()) {
+                close(r.i + t.i, 1.0);
+            }
+        }
+
+        #[test]
+        fn absorbing_dielectric_stack_reverses_layers_without_restoring_lost_flux() {
+            let (transparent, absorbing) = mixed_films(metal().source());
+            let layers = [CoatingLayer::Dielectric(&transparent), CoatingLayer::Absorbing(&absorbing)];
+            let reversed = [layers[1], layers[0]];
+            let stack = DielectricCoatingStack::try_mixed(&layers).unwrap();
+            let explicit_reverse = DielectricCoatingStack::try_mixed(&reversed).unwrap();
+            let inside = CauchyIor::try_constant(1.5).unwrap();
+            let outside = CauchyIor::try_constant(1.0).unwrap();
+            let original = source().with_unpolarized_optics();
+            let mut surviving_lumens = 0.0;
+            for event in [DielectricEvent::Reflection, DielectricEvent::Transmission] {
+                let optic = SpectralOptics::coated_dielectric_channel(
+                    0.8, inside, outside, stack, true, event,
+                ).unwrap();
+                let manual = SpectralOptics::coated_dielectric_channel(
+                    0.8, inside, outside, explicit_reverse, false, event,
+                ).unwrap();
+                assert_eq!(optic.matrices, manual.matrices);
+                let output = original.through(&optic).unwrap();
+                surviving_lumens += output.intensity_source().flux_lm();
+                if event == DielectricEvent::Reflection {
+                    let wrong_order = original.through(&SpectralOptics::coated_dielectric_channel(
+                        0.8, inside, outside, stack, false, event,
+                    ).unwrap()).unwrap();
+                    assert!(output.relative_stokes().iter().zip(wrong_order.relative_stokes())
+                        .any(|(a, b)| (a.i - b.i).abs() > 1e-4));
+                }
+            }
+            assert!(surviving_lumens > 0.0 && surviving_lumens < 1000.0);
+            close(original.intensity_source().flux_lm(), 1000.0);
+        }
+
+        #[test]
+        fn reflection_channels_refuse_invalid_angles_and_missing_spectral_support() {
+            let air = CauchyIor::try_constant(1.0).unwrap();
+            let glass = CauchyIor::try_constant(1.5).unwrap();
+            let bare = metal();
+            let metal_stack = CoherentCoatingStack::try_new(&[]).unwrap();
+            let empty = DielectricCoatingStack::try_new(&[]).unwrap();
+            for cosine in [f64::NAN, f64::INFINITY, -0.1, 1.1] {
+                assert!(SpectralOptics::conductor_reflection(cosine, air, &bare).is_err());
+                assert!(SpectralOptics::conductor_stack_reflection(cosine, air, &bare, metal_stack).is_err());
+                assert!(SpectralOptics::coated_dielectric_channel(
+                    cosine, air, glass, empty, false, DielectricEvent::Reflection,
+                ).is_err());
+            }
+            let narrow = SellmeierIor::try_new_in_band([1.25, 0.0, 0.0], [0.0; 3], (500.0, 700.0)).unwrap();
+            assert!(SpectralOptics::conductor_reflection(0.5, narrow, &bare).is_err());
+            assert!(SpectralOptics::coated_dielectric_channel(
+                0.5, air, narrow, empty, false, DielectricEvent::Transmission,
+            ).is_err());
+            let narrow_substrate = ConductorOptics::try_new_in_band(core::array::from_fn(|i| {
+                ConductorIorSample::try_new_in_band(500.0 + 25.0 * i as f64, 0.2, 3.0).unwrap()
+            }), 25.0, bare.source()).unwrap();
+            assert!(SpectralOptics::conductor_reflection(0.5, air, &narrow_substrate).is_err());
+            assert!(SpectralOptics::conductor_stack_reflection(
+                0.5, air, &narrow_substrate, metal_stack,
+            ).is_err());
+            let zero_film = CoherentDielectricCoating::try_new(narrow, 0.0, bare.source()).unwrap();
+            let films = [CoatingLayer::Dielectric(&zero_film)];
+            assert!(SpectralOptics::conductor_stack_reflection(
+                0.5, air, &bare, CoherentCoatingStack::try_new(&films).unwrap(),
+            ).is_err(), "zero thickness must not extend an optical source's support");
+            assert!(SpectralOptics::coated_dielectric_channel(
+                0.5, air, glass, DielectricCoatingStack::try_new_in_band(&[], (500.0, 700.0)).unwrap(),
+                false, DielectricEvent::Reflection,
+            ).is_err(), "an empty stack still owns its declared support");
         }
 
         #[test]

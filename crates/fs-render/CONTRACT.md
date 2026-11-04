@@ -1120,6 +1120,24 @@ differentiable lift). Pure Rust throughout.
   inputs and native limits. No particle-polarization inference, volume emission,
   extra extinction weight, direct-light estimator or MIS is added.
 
+- `polarization::photometry::SpectralOptics` (feature `photometry`) connects
+  native metal and coherent multilayer reflection to calibrated source optics.
+  `conductor_reflection` retains the original conductor's attached coatings;
+  `conductor_stack_reflection` consumes an arbitrary borrowed ordered spectral
+  stack with the native replacement semantics. `coated_dielectric_channel`
+  selects original reflected or power-normalized transmitted Mueller response,
+  including absorption and explicitly reversed layer order with the actual
+  adjacent media. Each constructor evaluates the original phase-index and
+  complex-field owners at the existing photometric quadrature wavelengths.
+  Invalid angles or unsupported source wavelengths refuse construction.
+  The resulting fixed-size optic retains no layer borrow and adds no per-ray
+  solve. The existing `PolarizedSource::through` chain preserves Q/U/V and
+  absolute surviving power relative to the original source normalization, so
+  mirror phase and coating interference affect downstream analyzers, lumens,
+  candela and spectral source intensity. Caller-owned s/p frames and outgoing
+  placement remain explicit; no radiance eta factor, extra absorption or
+  stochastic event probability is applied. Native scalar rendering consumes
+  the final intensity source; it does not inherit the chain's Stokes history.
 - `conductor` module (feature `tracer`): fixed-capacity visible-band tables of
   absolute complex refractive index `eta(lambda) + i k(lambda)` in vacuum
   nanometres, strict inclusive 380--780 nm support, deterministic linear
