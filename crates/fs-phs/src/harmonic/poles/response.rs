@@ -5,7 +5,8 @@ use super::*;
 use fs_la::pole_response::{PoleResponseError, PoleResponseOptions, PreparedPole};
 
 mod derivatives;
-pub use derivatives::{HarmonicParameterDirection, HarmonicPoleDerivative};
+pub use crate::harmonic::parameter::HarmonicParameterDirection;
+pub use derivatives::HarmonicPoleDerivative;
 
 /// Numerical-owner limits plus physical mapping/output limits. Each limit
 /// applies to preparation and independently to each complete batch. The
@@ -39,6 +40,18 @@ impl From<PoleResponseError> for HarmonicPoleResponseError {
 }
 impl From<HarmonicPoleError> for HarmonicPoleResponseError {
     fn from(e: HarmonicPoleError) -> Self { Self::Physical(e) }
+}
+impl From<crate::harmonic::HarmonicError> for HarmonicPoleResponseError {
+    fn from(error: crate::harmonic::HarmonicError) -> Self {
+        use crate::harmonic::HarmonicError;
+        match error {
+            HarmonicError::Invalid { what } => Self::Invalid { what },
+            HarmonicError::Cancelled => Self::Cancelled,
+            HarmonicError::Residual { relative, tolerance } =>
+                Self::Physical(HarmonicPoleError::Residual { relative, tolerance }),
+            HarmonicError::Singular { index } => Self::Numerical(PoleResponseError::Singular { index }),
+        }
+    }
 }
 fn invalid(what: &'static str) -> HarmonicPoleResponseError {
     HarmonicPoleResponseError::Invalid { what }

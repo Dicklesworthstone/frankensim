@@ -2,28 +2,7 @@
 //! With S=J-R and e=W*v: dA*v=(dJ-dR)*e+S*(dQ*v)-dT*v. T is the optional
 //! total nonlinear resisting-flow derivative. No storage inverse is required.
 use super::*;
-
-/// Derivatives per unit of ONE caller-declared real parameter, evaluated at the
-/// prepared model. None means exactly zero. Matrices are row-major in original
-/// state/port order. The differential/algebraic split and state chart stay fixed.
-/// Storage and dissipation tangents are symmetric, interconnection is skew.
-/// Signed tangents need NOT be positive semidefinite: decreasing mass, stiffness
-/// or loss is a valid local direction. No finite parameter interval is admitted.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct HarmonicParameterDirection<'a> {
-    pub interconnection: Option<&'a [f64]>,
-    pub dissipation: Option<&'a [f64]>,
-    /// Full n*n dQ with exactly zero algebraic rows/columns.
-    pub storage: Option<&'a [f64]>,
-    /// n*ports dG, used in BOTH source and observation semantics. Free-mode
-    /// eigenvalues do not depend on G, but their observed output does.
-    pub ports: Option<&'a [f64]>,
-    /// Full n*n TOTAL derivative of T=D_x+D_e W, not an extra R matrix.
-    /// No symmetry/PSD assumption. Include every constitutive, Hessian and
-    /// operating-point chain-rule term; None holds T fixed independently of Q.
-    /// A changing bias is not solved or differentiated automatically here.
-    pub resisting_flow: Option<&'a [f64]>,
-}
+use crate::harmonic::parameter::{ParameterAction, generator_action};
 
 /// Derivatives per unit of the declared parameter, in v[pivot]=1 gauge.
 /// Energy/loss derivatives are gauge-dependent observations, not derivatives
@@ -44,45 +23,6 @@ pub struct HarmonicPoleDerivative {
     pub linear_residual: f64,
 }
 fn at(matrix: Option<&[f64]>, index: usize) -> f64 { matrix.map_or(0.0, |a| a[index]) }
-
-impl HarmonicParameterDirection<'_> {
-    fn validate(&self, model: &HarmonicModel, cancelled: &mut impl FnMut() -> bool)
-        -> Result<(), HarmonicPoleResponseError>
-    {
-        let n = model.n;
-        for matrix in [self.interconnection, self.dissipation, self.storage, self.resisting_flow].into_iter().flatten() {
-            check_cancel(cancelled)?;
-            if matrix.len() != n*n || matrix.iter().any(|v| !v.is_finite()) {
-                return Err(invalid("complete finite n*n parameter matrices required"));
-            }
-        }
-        if let Some(g) = self.ports {
-            if g.len() != n*model.m || g.iter().any(|v| !v.is_finite()) {
-                return Err(invalid("complete finite n*ports port derivative required"));
-            }
-        }
-        // Reuse the source owner's symmetry admission, never repair a tangent.
-        if let Some(j) = self.interconnection {
-            crate::require_skew(j,n,"interconnection derivative")
-                .map_err(|_| invalid("interconnection derivative must be skew"))?;
-        }
-        for matrix in [self.dissipation,self.storage].into_iter().flatten() {
-            crate::require_symmetric(matrix,n,"material derivative")
-                .map_err(|_| invalid("storage and dissipation derivatives must be symmetric"))?;
-        }
-        if let Some(q) = self.storage {
-            for i in 0..n {
-                check_cancel(cancelled)?;
-                for j in 0..n {
-                    if (i >= model.n_diff || j >= model.n_diff) && q[i*n+j] != 0.0 {
-                        return Err(invalid("algebraic efforts cannot acquire storage through a derivative"));
-                    }
-                }
-            }
-        }
-        check_cancel(cancelled)
-    }
-}
 
 impl PreparedHarmonicPole<'_> {
     /// Differentiate free poles, full eigenstates, efforts and port outputs.
@@ -106,39 +46,9 @@ impl PreparedHarmonicPole<'_> {
         let mut results = Vec::with_capacity(directions.len());
         for direction in directions {
             direction.validate(model,&mut cancelled)?;
-            let mut dqv = vec![C64::ZERO;n];
-            let mut dq_envelope = vec![0.0;n];
-            for i in 0..model.n_diff {
-                check_cancel(&mut cancelled)?;
-                let mut correction = C64::ZERO;
-                for j in 0..model.n_diff {
-                    let q = at(direction.storage,i*n+j);
-                    accumulate(&mut dqv[i],&mut correction,v[j].scale(q));
-                    dq_envelope[i] += q.abs()*v[j].abs();
-                }
-            }
-            let mut action = vec![C64::ZERO;n];
-            let mut envelope = vec![0.0;n];
-            for i in 0..n {
-                check_cancel(&mut cancelled)?;
-                let mut correction = C64::ZERO;
-                for j in 0..n {
-                    let dj = at(direction.interconnection,i*n+j);
-                    let dr = at(direction.dissipation,i*n+j);
-                    let a = self.effort[j].scale(dj-dr)+dqv[j].scale(model.structure[i*n+j]);
-                    accumulate(&mut action[i],&mut correction,-a);
-                    envelope[i] += (dj.abs()+dr.abs())*self.effort[j].abs()
-                        +model.structure[i*n+j].abs()*dq_envelope[j];
-                    if let Some(dt)=direction.resisting_flow {
-                        accumulate(&mut action[i],&mut correction,v[j].scale(dt[i*n+j]));
-                        envelope[i]+=dt[i*n+j].abs()*v[j].abs();
-                    }
-                }
-            }
-            if action.iter().chain(&dqv).any(|&z| !finite(z))
-                || envelope.iter().chain(&dq_envelope).any(|x| !x.is_finite()) {
-                return Err(invalid("physical parameter action is not representable"));
-            }
+            let ParameterAction {storage:dqv,generator:mut action,envelope} =
+                generator_action(model,direction,v,&self.effort,&mut cancelled)?;
+            for value in &mut action { *value = -*value; }
             let scaled: Vec<_> = action.iter().zip(&self.row_scales).map(|(&z,&r)|divide(z,r)).collect();
             let mut solved = self.numerical.parameter_derivatives(&[&scaled],&mut cancelled)?;
             let tangent = solved.pop().expect("one admitted parameter");

@@ -283,6 +283,34 @@ antiresonance, physical scaling, and cancellation/replay. These are continuous
 linear/local tangents; a backward residual is not a near-pole forward-error,
 physical uncertainty, peak uniqueness, or nonlinear response certificate.
 
+### Physical parameter derivatives of driven responses
+
+`HarmonicFactor::response_with_parameter_derivative` differentiates the full
+forced AC solution at fixed frequency, original state chart and descriptor
+split. It accepts the same `HarmonicParameterDirection` as prepared free poles:
+complete original `dJ`, `dR`, `dQ`, `dG` and optional total resisting-flow `dT`.
+The direction's existing `harmonic::response` path remains available; both
+forced and pole tangents share matrix admission and physical generator action.
+Signed local directions need not be positive semidefinite, but their original
+symmetry/skew structure is required and algebraic coordinates cannot gain storage.
+
+For `A=-i omega E-(J-R)W+T`, the existing scaled LU/refinement solves
+`A dx=dG u+G du+(dJ-dR)e+(J-R)dQ x-dT x`. Optional complex input derivatives
+retain source dependence. Efforts include `W dx+dQ x`; outputs include BOTH
+`G^T de` and `dG^T e`. Every original reaction and Maxwell history remains.
+Mean storage, each port's work and independent original `R/T` work are
+differentiated with all coefficient terms. Nonlinear local results retain
+signed incremental work; callers supply complete constitutive/operating-point
+chain rules, and no bias solve or total biased-source heat derivative is inferred.
+
+The method admits twice the ordinary response work score plus `8*(n*n+n*ports)`
+and the ordinary payload plus `192*n+64*ports` bytes before allocation. It uses
+no perturbed solve, finite difference, storage inverse or new factorization.
+Cancellation and refusal leave the factor reusable. Eight native regressions
+cover high-Q mass/stiffness/loss, descriptor RLC constraints, Maxwell strength
+and relaxation time, coupled mutual/gyroscopic/port changes, conjugate port
+scales `1e-120..1e120`, nonlinear total `dT`, exact antiresonance and admission.
+
 ### Driven resonance peaks and half-power bandwidth
 
 `HarmonicModel::driven_resonance` resolves a caller-bracketed local maximum of
