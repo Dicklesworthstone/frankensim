@@ -1,9 +1,9 @@
-//! Exact positive P1 reference-density row moments for native enthalpy storage.
+//! Exact positive P1 row moments shared by reference-density and heat storage.
 
 /// Integral rho0*N_a over one admitted affine tetrahedron. Normalize before
 /// summing densities, so representable mass does not require a representable
 /// unscaled density sum. The caller owns mesh indexing, budgets and cancellation.
-pub(super) fn p1_nodal_masses(volume: f64, density: [f64; 4]) -> Option<[f64; 4]> {
+pub(in crate::transient) fn p1_nodal_masses(volume: f64, density: [f64; 4]) -> Option<[f64; 4]> {
     if !volume.is_finite()
         || volume <= 0.0
         || density.iter().any(|rho| !rho.is_finite() || *rho <= 0.0)

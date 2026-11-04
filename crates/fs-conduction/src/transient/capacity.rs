@@ -406,13 +406,17 @@ fn invalid(what: &str) -> ConductionError {
     }
 }
 
-/// Explicit constant heat-capacity distribution, in J/(m^3 K).
+/// Explicit, time-independent heat-capacity distribution, in J/(m^3 K).
 #[derive(Debug, Clone, Copy)]
 pub enum HeatCapacity<'a> {
     /// One declared value for the whole mesh, retaining the original path.
     Uniform(VolumetricHeatCapacity),
     /// Exactly one declared value per tetrahedron, in the original mesh order.
     PerElement(&'a [VolumetricHeatCapacity]),
+    /// One declared value per vertex, interpolated as P1 on the fixed reference
+    /// mesh. Exact row moments retain graded density's contribution to storage.
+    /// See [`super::assemble_nodal_capacitance`] for reference-volume semantics.
+    Nodal(&'a [VolumetricHeatCapacity]),
     /// Exactly one value per material actually used by `element_materials`.
     /// Input ordering is irrelevant. No missing value inherits a fallback, and
     /// duplicate or unused IDs refuse instead of silently changing a model.
@@ -436,6 +440,7 @@ impl HeatCapacity<'_> {
         match self {
             Self::Uniform(value) => BackwardEuler::uniform(cx, mesh, value),
             Self::PerElement(values) => BackwardEuler::per_element(cx, mesh, values),
+            Self::Nodal(values) => BackwardEuler::nodal(cx, mesh, values),
             Self::MaterialUniform(source) => BackwardEuler::uniform_material(cx, mesh, source),
             Self::MaterialById(rows) => {
                 let materials = materials.ok_or_else(|| {

@@ -1489,12 +1489,27 @@ source retention, and transactional refusals.
 The original theta/Crank–Nicolson owner now uses the SAME prepared storage
 through `march_with_capacity`. `transient::HeatCapacity` is the shared
 declaration; `ThermalHistoryCapacity` remains a re-export of that exact type.
-Uniform, per-element, material-ID and card-derived assignments therefore use
+Uniform, per-element, nodal, material-ID and card-derived assignments therefore use
 one preparation and source-domain policy. The theta path validates every
 incident conductivity and capacity interval before and after prescribed
 boundary lifting and at every accepted endpoint. Borrowed material source
 objects retain the original receipts; a returned temperature field does not
 itself own a new material card.
+
+`HeatCapacity::Nodal`, `BackwardEuler::nodal` and
+`assemble_nodal_capacitance` admit a positive P1 volumetric heat-capacity field
+on the fixed reference mesh. They reuse the enthalpy owner's exact P1 row
+moments: each tet contributes `V (sum(c) + c_a) / 20` to vertex `a`.
+Consequently, stored heat integrates the correlation between a graded capacity
+and a P1 temperature, which cell-averaged capacity discards. The diagonal is
+assembled once, remains positive, and is reused by theta, backward-Euler and
+history owners, including their nonlinear and radiative endpoint operations.
+For constant specific heat this represents P1 reference density directly. If
+both density and specific heat vary, the declared field is their P1 volumetric
+capacity approximation; it does not exactly multiply two independent P1
+fields. Values refer to the same supplied reference volume throughout the run;
+current-state density cannot change closed-body mass. This explicit field
+carries no material-source receipt and introduces no expansion or phase change.
 
 `duty::march_duty_cycle_with_capacity` uses that same prepared storage for
 scheduled volumetric power. Uniform, per-element, material-ID and source-bound

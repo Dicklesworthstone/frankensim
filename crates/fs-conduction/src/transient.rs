@@ -22,7 +22,9 @@
 //! step. On the radiative contact pulse, a cold radiative sink raised the
 //! sampled peak by +0.0036 K as dt → 0; with lumping it lowers it, as the
 //! comparison principle requires. Lumping keeps the heat content of a uniform
-//! field exact (`rho c_p V T`, since the row sums are unchanged). Reusing the
+//! field exact (`rho c_p V T`, since the row sums are unchanged). Spatially
+//! graded capacity uses the exact P1 row moments through [`HeatCapacity::Nodal`],
+//! preserving the integral of capacity times any P1 temperature. Reusing the
 //! steady assembly
 //! is the point: a transient run cannot drift from the steady physics,
 //! because it IS the steady physics with one extra term.
@@ -153,6 +155,60 @@ pub fn assemble_capacitance(
     capacity: VolumetricHeatCapacity,
 ) -> Result<Csr, ConductionError> {
     assemble_capacitance_from(cx, mesh, |_| capacity.value_j_per_m3_k())
+}
+
+/// Assemble lumped storage for a frozen P1 volumetric heat-capacity field.
+///
+/// Each tetrahedron contributes `V * (sum(c) + c_a) / 20` to vertex `a`,
+/// exactly integrating `c(x) N_a(x)`. Thus `sum(C_aa T_a)` retains the exact
+/// heat content of a P1 temperature, including its spatial correlation with
+/// density. Replacing the nodal field by tetrahedron averages loses that term.
+///
+/// Values are per unit volume of the supplied, fixed reference mesh. With
+/// constant specific heat, this directly represents graded reference density.
+/// If both density and specific heat vary, callers declare the P1 volumetric
+/// capacity itself; independently interpolated P1 factors have a different,
+/// quadratic product. No density or geometry is updated during a step.
+///
+/// # Errors
+/// [`ConductionError::FieldLength`] unless there is one capacity per vertex,
+/// [`ConductionError::Config`] for unrepresentable positive storage, and
+/// [`ConductionError::Cancelled`] at an assembly tile boundary.
+pub fn assemble_nodal_capacitance(
+    cx: &Cx<'_>,
+    mesh: &ConductionMesh,
+    capacities: &[VolumetricHeatCapacity],
+) -> Result<Csr, ConductionError> {
+    if capacities.len() != mesh.vertex_count() {
+        return Err(ConductionError::FieldLength {
+            field: "nodal heat capacity",
+            expected: mesh.vertex_count(),
+            found: capacities.len(),
+        });
+    }
+    let n = mesh.vertex_count();
+    let mut coo = Coo::new(n, n);
+    for (element, tet) in mesh.complex().tets.iter().enumerate() {
+        if element % crate::assemble::ASSEMBLY_TILE == 0 {
+            cx.checkpoint().map_err(|_| ConductionError::Cancelled {
+                stage: "assemble-nodal-capacitance",
+                at: element,
+            })?;
+        }
+        let values = tet.map(|vertex| capacities[vertex as usize].value_j_per_m3_k());
+        let entries = enthalpy::reference_mass::p1_nodal_masses(
+            mesh.element_volume(element),
+            values,
+        )
+        .ok_or_else(|| ConductionError::Config {
+            parameter: "nodal heat capacity",
+            what: format!("positive capacity entries for tetrahedron {element} are not representable"),
+        })?;
+        for (&vertex, entry) in tet.iter().zip(entries) {
+            coo.push(vertex as usize, vertex as usize, entry);
+        }
+    }
+    Ok(coo.assemble())
 }
 
 // One P1 mass rule for uniform and explicitly heterogeneous heat capacities.

@@ -60,7 +60,7 @@ mod endpoint;
 pub use endpoint::EnthalpyEndpointEvaluation;
 mod contact;
 mod pointwise;
-mod reference_mass;
+pub(super) mod reference_mass;
 use pointwise::{PointwiseBoundary, PointwiseBoundaryAssembly};
 
 use std::{cell::RefCell, fmt};

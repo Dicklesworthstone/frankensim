@@ -34,7 +34,7 @@ use crate::assemble::{AssembledSystem, assemble_operator_scaled_with_interfaces,
 use crate::solve::{energy_balance, spd_preconditioner};
 use crate::{ConductionError, ConductionMesh, ConductionProblem, InterfaceFlux, LinearConfig,
     RobinFlux, ThermalInterfaces};
-use super::{assemble_capacitance, assemble_capacitance_from, axpy_csr, MaterialHeatCapacity,
+use super::{assemble_capacitance, assemble_capacitance_from, assemble_nodal_capacitance, axpy_csr, MaterialHeatCapacity,
     VolumetricHeatCapacity};
 use crate::material::TemperatureSpan;
 
@@ -118,6 +118,19 @@ impl<'m> BackwardEuler<'m> {
                 expected: mesh.element_count(), found: capacities.len() });
         }
         let capacity = assemble_capacitance_from(cx, mesh, |e| capacities[e].value_j_per_m3_k())?;
+        poll(cx, 0)?;
+        Ok(Self { mesh, capacity, material_capacities: Vec::new(), capacity_temperature_spans: None })
+    }
+
+    /// Prepare a frozen P1 volumetric heat-capacity field in vertex order.
+    /// Exact row moments preserve density-temperature correlation on the
+    /// supplied reference mesh; storage is assembled once and reused unchanged.
+    /// See [`super::assemble_nodal_capacitance`] for the physical assumptions.
+    pub fn nodal(cx: &Cx<'_>, mesh: &'m ConductionMesh, capacities: &[VolumetricHeatCapacity])
+        -> Result<Self, ConductionError>
+    {
+        poll(cx, 0)?;
+        let capacity = assemble_nodal_capacitance(cx, mesh, capacities)?;
         poll(cx, 0)?;
         Ok(Self { mesh, capacity, material_capacities: Vec::new(), capacity_temperature_spans: None })
     }
