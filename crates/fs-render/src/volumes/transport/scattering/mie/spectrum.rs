@@ -264,7 +264,7 @@ where
 // One preparation and diagnostic owner for visible and source-bounded spectra.
 // None preserves the legacy visible table identities and arithmetic.
 #[allow(clippy::too_many_arguments)]
-fn prepare_spectrum<S, E>(
+pub(crate) fn prepare_spectrum<S, E>(
     cx: &Cx<'_>,
     host_index_n: f64,
     wavelengths_nm: &[f64],

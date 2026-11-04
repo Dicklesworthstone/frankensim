@@ -15,7 +15,8 @@ use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
 use fs_matdb::PropertyKey;
 use fs_material::state_point::{
-    ResolvedMaterialStatePoint, VisibleDielectricAbsorption, VisibleOpticalStatePoint,
+    MaterialStatePointError, ResolvedMaterialStatePoint, SpectralComplexIndexStatePoint,
+    VisibleDielectricAbsorption, VisibleOpticalStatePoint,
 };
 use fs_math::c64::C64;
 use fs_qty::semantic::{QuantityKind, ValueForm};
@@ -25,7 +26,7 @@ use crate::volumes::VolumeGrid;
 use crate::volumes::transport::scattering::ScatteringGrid;
 use crate::volumes::transport::scattering::mie::{
     MieError, MieOpticalSpectrum, MiePopulation, MiePopulationBudget, MiePopulationSolution,
-    MieSphere, ParticleSizeDistribution, prepare_visible_spectrum,
+    MieSphere, ParticleSizeDistribution, prepare_spectrum, prepare_visible_spectrum,
 };
 use crate::volumes::transport::{AbsorbingGrid, AbsorbingGridBudget, VolumeTransportError};
 
@@ -41,10 +42,16 @@ pub struct MaterialParticleScattering {
     optical_state_identity: ContentHash,
     density_kg_m3: f64,
     temperature_k: Option<f64>,
-    optics: BulkOpticalLaw,
+    optics: ParticleOpticalLaw,
     sizes: ParticleSizeDistribution,
     host_index_n: f64,
     identity: ContentHash,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum ParticleOpticalLaw {
+    Visible(BulkOpticalLaw),
+    Spectral(SpectralComplexIndexStatePoint),
 }
 
 impl MaterialParticleScattering {
@@ -64,6 +71,64 @@ impl MaterialParticleScattering {
         host_index_n: f64,
     ) -> Result<Self, ParticleScatteringError> {
         MaterialOpticalBinding::validate_bulk_state(accepted, optical.resolved())?;
+        let absorption = match optical {
+            VisibleOpticalStatePoint::Dielectric(value) => Some(value.absorption()),
+            VisibleOpticalStatePoint::DielectricSellmeier(value) => Some(value.absorption()),
+            _ => None,
+        };
+        if matches!(
+            absorption,
+            Some(VisibleDielectricAbsorption::ReferenceRgb { .. })
+        ) {
+            return Err(ParticleScatteringError::SpectralAbsorptionRequired);
+        }
+        Self::bind(
+            accepted,
+            optical.resolved(),
+            optical.resolved().identity(),
+            ParticleOpticalLaw::Visible(BulkOpticalLaw::from_state(optical)?),
+            density_property,
+            sizes,
+            host_index_n,
+        )
+    }
+
+    /// Bind explicitly sourced UV, visible or infrared complex-index samples
+    /// at the SAME accepted material condition as the particle bulk density.
+    ///
+    /// The original wavelength/property-key map, complete optical bundle and
+    /// source support remain intact. A visible source cannot acquire infrared
+    /// support through this constructor. Exact zero extinction remains a
+    /// lossless particle; no opacity or absorption is inferred from its name.
+    /// Temperature changes require refreshing the original source and rebinding.
+    pub fn try_spectral(
+        accepted: &ResolvedMaterialStatePoint,
+        optical: &SpectralComplexIndexStatePoint,
+        density_property: &PropertyKey,
+        sizes: ParticleSizeDistribution,
+        host_index_n: f64,
+    ) -> Result<Self, ParticleScatteringError> {
+        Self::bind(
+            accepted,
+            optical.resolved(),
+            optical.identity(),
+            ParticleOpticalLaw::Spectral(optical.clone()),
+            density_property,
+            sizes,
+            host_index_n,
+        )
+    }
+
+    fn bind(
+        accepted: &ResolvedMaterialStatePoint,
+        optical: &ResolvedMaterialStatePoint,
+        optical_identity: ContentHash,
+        optics: ParticleOpticalLaw,
+        density_property: &PropertyKey,
+        sizes: ParticleSizeDistribution,
+        host_index_n: f64,
+    ) -> Result<Self, ParticleScatteringError> {
+        MaterialOpticalBinding::validate_bulk_state(accepted, optical)?;
         let property = accepted
             .property_by_key(density_property)
             .ok_or(ParticleScatteringError::Density)?;
@@ -79,25 +144,13 @@ impl MaterialParticleScattering {
         {
             return Err(ParticleScatteringError::Density);
         }
-        let absorption = match optical {
-            VisibleOpticalStatePoint::Dielectric(value) => Some(value.absorption()),
-            VisibleOpticalStatePoint::DielectricSellmeier(value) => Some(value.absorption()),
-            _ => None,
-        };
-        if matches!(
-            absorption,
-            Some(VisibleDielectricAbsorption::ReferenceRgb { .. })
-        ) {
-            return Err(ParticleScatteringError::SpectralAbsorptionRequired);
-        }
         if !host_index_n.is_finite() || host_index_n <= 0.0 {
             return Err(ParticleScatteringError::HostIndex);
         }
-        let optics = BulkOpticalLaw::from_state(optical)?;
         let temperature_k = unique_temperature(accepted);
         let mut hash = DomainHasher::new("org.frankensim.render.material-particles.v1");
         hash.update(accepted.identity().as_bytes());
-        hash.update(optical.resolved().identity().as_bytes());
+        hash.update(optical_identity.as_bytes());
         hash.update(property.answer().receipt.content_hash().as_bytes());
         hash.update(&density_kg_m3.to_bits().to_le_bytes());
         hash.update(&host_index_n.to_bits().to_le_bytes());
@@ -108,7 +161,7 @@ impl MaterialParticleScattering {
         }
         Ok(Self {
             accepted_state_identity: accepted.identity(),
-            optical_state_identity: optical.resolved().identity(),
+            optical_state_identity: optical.identity(),
             density_kg_m3,
             temperature_k,
             optics,
@@ -120,7 +173,13 @@ impl MaterialParticleScattering {
 
     /// Wavelength-resolved absolute `n + i*k`, under `exp(-i*omega*t)`.
     pub fn complex_index(&self, vacuum_nm: f64) -> Result<C64, ParticleScatteringError> {
-        Ok(self.optics.complex_index(vacuum_nm)?)
+        match &self.optics {
+            ParticleOpticalLaw::Visible(optics) => Ok(optics.complex_index(vacuum_nm)?),
+            ParticleOpticalLaw::Spectral(optics) => {
+                let value = optics.at_wavelength(vacuum_nm)?;
+                Ok(C64::new(value.eta, value.k))
+            }
+        }
     }
 
     /// Solve the declared population with the ORIGINAL material evaluated at
@@ -171,6 +230,40 @@ impl MaterialParticleScattering {
             cx,
             self.host_index_n,
             wavelengths_nm,
+            angular_tolerance,
+            max_phase_knots,
+            |wavelength| self.at_wavelength(cx, wavelength, budget),
+        )?;
+        Ok(MaterialParticleSpectrum {
+            binding_identity: self.identity,
+            density_kg_m3: self.density_kg_m3,
+            temperature_k: self.temperature_k,
+            spectrum,
+        })
+    }
+
+    /// Prepare native absorption, scattering and angular response on 2--16
+    /// explicitly selected vacuum-wavelength knots within the original source
+    /// support. All output laws retain this exact closed wavelength interval.
+    ///
+    /// The original material index is evaluated at each knot and fresh midpoint.
+    /// The shared Mie owner reports sampled interpolation discrepancies; these
+    /// do not certify an unsampled material or particle resonance. Preparation
+    /// retains this binding's original source, state, density and size identity.
+    /// No material query, radius loop or Mie solve runs at transport vertices.
+    pub fn source_spectrum(
+        &self,
+        cx: &Cx<'_>,
+        wavelengths_nm: &[f64],
+        budget: MiePopulationBudget,
+        angular_tolerance: f64,
+        max_phase_knots: usize,
+    ) -> Result<MaterialParticleSpectrum, ParticleScatteringError> {
+        let spectrum = prepare_spectrum(
+            cx,
+            self.host_index_n,
+            wavelengths_nm,
+            Some(self.identity),
             angular_tolerance,
             max_phase_knots,
             |wavelength| self.at_wavelength(cx, wavelength, budget),
@@ -380,6 +473,8 @@ fn unique_temperature(state: &ResolvedMaterialStatePoint) -> Option<f64> {
 pub enum ParticleScatteringError {
     /// Original source material, state, quantities or optical law do not agree.
     Material(MaterialOpticalError),
+    /// Original broadband source or its supported wavelength refused a query.
+    OpticalSource(MaterialStatePointError),
     /// Missing, nonpositive or incorrectly typed bulk density property.
     Density,
     /// A complex particle index requires spectral bulk absorption, not RGB.
@@ -409,6 +504,11 @@ impl core::error::Error for ParticleScatteringError {}
 impl From<MaterialOpticalError> for ParticleScatteringError {
     fn from(value: MaterialOpticalError) -> Self {
         Self::Material(value)
+    }
+}
+impl From<MaterialStatePointError> for ParticleScatteringError {
+    fn from(value: MaterialStatePointError) -> Self {
+        Self::OpticalSource(value)
     }
 }
 impl From<MieError> for ParticleScatteringError {

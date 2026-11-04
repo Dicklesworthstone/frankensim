@@ -3,6 +3,9 @@
 #[path = "indexed/tests.rs"]
 mod indexed_cells;
 
+#[path = "infrared/tests.rs"]
+mod infrared;
+
 use super::*;
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_evidence::ValidityDomain;
@@ -31,11 +34,15 @@ fn temperature_quantity() -> QuantitySpec {
     ))
 }
 
+fn pressure_quantity() -> QuantitySpec {
+    QuantitySpec::semantic(SemanticType::new(QuantityKind::Pressure, ValueForm::Static))
+}
+
 fn point(temperature: f64) -> QueryPoint {
     QueryPoint::new()
         .with_quantity("thermal", temperature_quantity(), temperature)
         .unwrap()
-        .with("pressure", 100_000.0)
+        .with_quantity("pressure", pressure_quantity(), 100_000.0)
         .unwrap()
 }
 
@@ -132,7 +139,7 @@ fn card(family: Family) -> MaterialCard {
                 },
                 validity: ValidityDomain::unconstrained()
                     .with_quantity("thermal", temperature_quantity(), 300.0, 400.0)
-                    .with("pressure", 100_000.0, 100_000.0),
+                    .with_quantity("pressure", pressure_quantity(), 100_000.0, 100_000.0),
                 uncertainty: UncertaintyModel::Unstated,
                 interpolation: InterpolationPolicy::LinearInside,
                 observations: Vec::new(),

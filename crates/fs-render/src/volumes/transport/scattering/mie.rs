@@ -32,7 +32,7 @@ pub use population::{
     MAX_MIE_POPULATION_BINS, MiePopulation, MiePopulationBudget, MiePopulationSolution,
 };
 pub use spectrum::MieOpticalSpectrum;
-pub(crate) use spectrum::prepare_visible_spectrum;
+pub(crate) use spectrum::{prepare_spectrum, prepare_visible_spectrum};
 
 /// Maximum admitted size parameter `2 pi n_host r / lambda_vacuum`.
 pub const MAX_MIE_SIZE_PARAMETER: f64 = 128.0;

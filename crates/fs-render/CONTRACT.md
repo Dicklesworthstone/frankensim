@@ -4262,6 +4262,28 @@ knot and independent midpoint uses the source's wavelength-dependent index.
 Temperature-dependent source values enter when the material is resolved and
 bound; a changed state or particle geometry requires rebinding.
 
+`MaterialParticleScattering::try_spectral` consumes the original
+`SpectralComplexIndexStatePoint` with explicit wavelength/full-property-key
+bindings. Arbitrary supported UV, visible and infrared bands enter without
+relabeling a visible source or fitting a replacement material. Optical and
+bulk-density bundles must share the exact card, complete physical condition and
+quantity conventions. The binding identity includes the original wavelength/key
+map as well as the accepted state, density, host and radius-number distribution.
+An exactly zero extinction index remains zero particle absorption.
+
+`source_spectrum` uses the SAME native Mie preparation owner for 2--16 caller
+knots inside that original support. It evaluates material n/k at every knot and
+fresh midpoint, then retains the exact output support in absorption, scattering
+and angular tables. Material-state refresh keeps original claim pins; rebinding
+after temperature changes updates optical response and particle bulk density
+together. Existing cell palettes, constituent mixtures, LTE emission and
+constituent heat deposition consume these spectra without new transport loops.
+Source-knot interpolation and prepared Mie interpolation remain separate
+approximations; midpoint diagnostics do not certify unsampled resonances.
+Synthetic G0/G1/G3 regressions cover infrared Rayleigh absorption, temperature
+refresh, source-map identity, two-temperature Kirchhoff transport, and exclusion
+of purely scattering constituents from heat, plus source/state/work refusals.
+
 `MaterialParticleSpectrum::bind_ambient_grid` supplies native absorption,
 scattering and optional LTE emission from the prepared spectrum and borrowed
 dispersed-particle density. It admits only an index-one ambient host, enforces a
