@@ -62,7 +62,8 @@ pub use wall::{
     IterativeBoundaryObservationBake, IterativeBoundaryPower, IterativeBoundaryResponse,
     IterativeCoherentDirectivity, IterativeDirectivityOptions, IterativeFarFieldSample,
     IterativeObservationError, IterativeObservationOptions, IterativeObservationSample,
-    IterativeSourceReport, LocalBoundary, LocalBoundaryObservation, LocalWall, LowerBandWindow,
+    IterativeSourceReport, LocalBoundary, LocalBoundaryObservation, LocalWall, LocalWallLayer,
+    LowerBandWindow,
 };
 
 /// Largest admitted DFT/CQ size. Work budgets may be stricter.

@@ -2,13 +2,16 @@
 //! responsibility of the original BEM and material qualification ladders.
 use super::*;
 use crate::helmholtz::bc::{
-    PorousRigidBoundary,
+    PorousLayersBoundary, PorousRigidBoundary,
     incident::{self, IncidentField, Monopole},
 };
 use core::f64::consts::TAU;
 use fs_material::fluid_acoustics::{FluidAcousticState, thermoviscous::ThermoviscousFluidState};
 use fs_material::fluid_transport::FluidTransportState;
-use fs_material::porous::{PorousCard, PorousFluidLaw};
+use fs_material::porous::{
+    PorousCard, PorousFluidLaw,
+    layers::{Layer, MAX_LAYERS, RigidBackedLayers},
+};
 use fs_phs::WallPin;
 
 fn medium() -> Medium {
@@ -70,6 +73,22 @@ fn porous() -> LocalWall {
         law: porous_law(),
         fluid: fluid(),
         thickness_m: 0.03,
+    }
+}
+fn layered() -> LocalWall {
+    LocalWall::LayeredRigid {
+        fluid: fluid(),
+        layers: vec![
+            LocalWallLayer::Porous {
+                law: porous_law(),
+                thickness_m: 0.03,
+            },
+            LocalWallLayer::FluidGap { thickness_m: 0.025 },
+            LocalWallLayer::FluidLayer {
+                fluid: FluidAcousticState::try_new(1.7, 280.0).unwrap(),
+                thickness_m: 0.01,
+            },
+        ],
     }
 }
 fn uniform(surface: &SpherePanels, law: LocalWall) -> LocalBoundary {
@@ -138,6 +157,202 @@ fn mechanical_and_porous_laws_keep_original_units_and_complex_phase() {
 }
 
 #[test]
+fn layered_walls_keep_native_reflection_phase_air_gaps_and_layer_order() {
+    let bind = |wall| LocalBoundary::try_new(medium(), vec![LocalWall::Rigid, wall], vec![1, 0, 1]);
+    let boundary = bind(layered()).unwrap();
+    let gas = fluid();
+    let law = porous_law();
+    let inner_fluid = FluidAcousticState::try_new(1.7, 280.0).unwrap();
+    for frequency in [200.0, 700.0, 1500.0] {
+        let omega = TAU * frequency;
+        let original = RigidBackedLayers::new(
+            &gas,
+            omega,
+            &[
+                Layer::Porous {
+                    law: &law,
+                    thickness_m: 0.03,
+                },
+                Layer::FluidGap { thickness_m: 0.025 },
+                Layer::FluidLayer {
+                    fluid: &inner_fluid,
+                    thickness_m: 0.01,
+                },
+            ],
+        )
+        .unwrap();
+        let beta = boundary.normalized_admittance(omega, || false).unwrap();
+        let native = PorousLayersBoundary::new(&original).unwrap();
+        assert_eq!(
+            beta,
+            vec![
+                native.normalized_admittance(),
+                C64::ZERO,
+                native.normalized_admittance()
+            ]
+        );
+        assert!(beta[0].re > 0.0);
+        let reflected = (C64::ONE - beta[0]) / (C64::ONE + beta[0]);
+        let physical = original.reflection(1.0).unwrap();
+        assert!((reflected - physical.pressure_reflection.conj()).abs() < 1e-14);
+        assert!((1.0 - reflected.norm_sq() - physical.absorbed_fraction).abs() < 1e-14);
+    }
+    let beta = boundary
+        .normalized_admittance(TAU * 700.0, || false)
+        .unwrap()[0];
+    for reverse in [false, true] {
+        let mut changed = layered();
+        let LocalWall::LayeredRigid { layers, .. } = &mut changed else {
+            unreachable!()
+        };
+        if reverse {
+            layers.reverse();
+        } else {
+            layers[1] = LocalWallLayer::FluidGap { thickness_m: 0.0 };
+        }
+        let changed = bind(changed).unwrap();
+        assert_ne!(boundary.content_hash(), changed.content_hash());
+        assert!(
+            (beta
+                - changed
+                    .normalized_admittance(TAU * 700.0, || false)
+                    .unwrap()[0])
+                .abs()
+                > 1e-3
+        );
+    }
+    let mut polls = 0;
+    assert!(matches!(
+        boundary.normalized_admittance(TAU * 700.0, || {
+            polls += 1;
+            polls == 3
+        }),
+        Err(TransferError::Cancelled)
+    ));
+}
+
+#[test]
+fn layered_wall_source_support_and_material_refusals_survive_binding() {
+    let bind = |wall| LocalBoundary::try_new(medium(), vec![wall], vec![0]);
+    let mut wall = layered();
+    let LocalWall::LayeredRigid { layers, .. } = &mut wall else {
+        unreachable!()
+    };
+    let mut card = PorousCard::basotect_foam02();
+    card.valid_hz = (300.0, 1200.0);
+    layers.push(LocalWallLayer::Porous {
+        law: PorousFluidLaw::try_new(card.clone(), 1.81e-5).unwrap(),
+        thickness_m: 0.0,
+    });
+    // Even an identity-thickness source retains its declared material support.
+    let boundary = bind(wall.clone()).unwrap();
+    assert_eq!(boundary.supported_band_hz(), (300.0, 1200.0));
+    assert!(matches!(
+        boundary.normalized_admittance(TAU * 200.0, || false),
+        Err(TransferError::Material(_))
+    ));
+    assert!(matches!(
+        boundary.admit_band(TAU * 1400.0, Some(window())),
+        Err(TransferError::Invalid(_))
+    ));
+    let LocalWall::LayeredRigid { layers, .. } = &mut wall else {
+        unreachable!()
+    };
+    card.valid_hz = (1700.0, 2200.0);
+    layers.push(LocalWallLayer::Porous {
+        law: PorousFluidLaw::try_new(card, 1.81e-5).unwrap(),
+        thickness_m: 0.01,
+    });
+    assert!(matches!(bind(wall), Err(TransferError::Invalid(_))));
+    let mut wrong_fluid = layered();
+    let LocalWall::LayeredRigid {
+        fluid: wrong_gas, ..
+    } = &mut wrong_fluid
+    else {
+        unreachable!()
+    };
+    *wrong_gas = fluid_from_acoustic(FluidAcousticState::try_new(1.1, 340.0).unwrap());
+    assert!(matches!(bind(wrong_fluid), Err(TransferError::Invalid(_))));
+    assert!(matches!(
+        bind(LocalWall::LayeredRigid {
+            fluid: fluid(),
+            layers: vec![LocalWallLayer::FluidGap { thickness_m: -0.01 }],
+        }),
+        Err(TransferError::Material(_))
+    ));
+    assert!(matches!(
+        bind(LocalWall::LayeredRigid {
+            fluid: fluid(),
+            layers: vec![LocalWallLayer::FluidGap { thickness_m: 0.01 }; MAX_LAYERS + 1],
+        }),
+        Err(TransferError::Invalid(_))
+    ));
+    let rigid = bind(LocalWall::LayeredRigid {
+        fluid: fluid(),
+        layers: vec![],
+    })
+    .unwrap();
+    assert_eq!(
+        rigid.normalized_admittance(TAU * 700.0, || false).unwrap(),
+        vec![C64::ZERO]
+    );
+}
+
+#[test]
+fn layered_treatment_reaches_dense_and_iterative_source_receiver_fields() {
+    let surface = SpherePanels::icosphere(0.025, 0).unwrap();
+    let boundary = uniform(&surface, layered());
+    let dense = LocalBoundaryObservation::for_scattering(
+        scattering(&surface),
+        boundary.clone(),
+        Some(window()),
+    )
+    .unwrap();
+    let omega = TAU * 700.0;
+    let reference = dense.physical_frequency_sample(omega, || false).unwrap();
+    let rigid = scattering(&surface)
+        .frequency_sample(omega, || false)
+        .unwrap();
+    assert!((reference[0] - rigid[0]).abs() > 1e-3 * rigid[0].abs());
+    assert_eq!(
+        dense
+            .band_limited_frequency_sample(TAU * 100.0, || false)
+            .unwrap(),
+        vec![C64::ZERO; 4]
+    );
+    let gate = fs_exec::CancelGate::new_clock_free();
+    let iterative = IterativeBoundaryObservation::for_scattering(
+        &surface,
+        medium(),
+        &[source()],
+        &[receiver()],
+        boundary,
+        IterativeObservationOptions {
+            highest_omega: TAU * 1600.0,
+            minimum_clearance_m: 1e-3,
+            receiver_quadrature: Options::default(),
+            lower_window: Some(window()),
+            solver: helmholtz::IterativeOptions {
+                tol: 1e-10,
+                restart: 60,
+                max_iters: 600,
+                fmm_order: 7,
+                leaf_capacity: 64,
+                ..helmholtz::IterativeOptions::default()
+            },
+        },
+        &gate,
+    )
+    .unwrap();
+    let sample = iterative.physical_frequency_sample(omega, &gate).unwrap();
+    assert!(sample.sources[0].solve.converged_euclidean());
+    assert!(sample.sources[0].absorbed_power_w > 0.0);
+    for (&actual, &expected) in sample.transfer.iter().zip(&reference) {
+        assert!((actual - expected).abs() < 1e-8 * expected.abs());
+    }
+}
+
+#[test]
 fn complete_fluid_state_and_physical_patch_assignment_are_hash_bound() {
     let surface = SpherePanels::icosphere(0.025, 0).unwrap();
     let mut assignments = vec![0; surface.areas().len()];
@@ -192,6 +407,24 @@ fn complete_fluid_state_and_physical_patch_assignment_are_hash_bound() {
         .unwrap()
     };
     assert_ne!(bind(pair.0).content_hash(), bind(pair.1).content_hash());
+    let bind_layered = |acoustic| {
+        LocalBoundary::try_new(
+            shared,
+            vec![LocalWall::LayeredRigid {
+                fluid: fluid_from_acoustic(acoustic),
+                layers: vec![LocalWallLayer::Porous {
+                    law: porous_law(),
+                    thickness_m: 0.03,
+                }],
+            }],
+            vec![0],
+        )
+        .unwrap()
+    };
+    assert_ne!(
+        bind_layered(pair.0).content_hash(),
+        bind_layered(pair.1).content_hash()
+    );
 }
 
 #[test]

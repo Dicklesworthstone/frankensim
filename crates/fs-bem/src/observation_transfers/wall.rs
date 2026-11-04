@@ -11,7 +11,7 @@ use crate::near_field::Options;
 use std::cell::RefCell;
 
 mod boundary;
-pub use boundary::{LocalBoundary, LocalWall};
+pub use boundary::{LocalBoundary, LocalWall, LocalWallLayer};
 mod iterative;
 pub use iterative::{
     BoundaryWorkExposureFactor, BoundaryWorkExposureLimits, BoundaryWorkExposureLine,

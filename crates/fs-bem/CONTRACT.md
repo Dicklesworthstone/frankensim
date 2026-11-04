@@ -1638,6 +1638,21 @@ the original dense panel ceiling. The complete constitutive state, including
 porous source support and the original fluid bulk modulus, binds its hash.
 Porous saturating-fluid density and sound speed must match the exterior medium.
 
+`LocalWall::LayeredRigid` carries ordered `LocalWallLayer` porous sources,
+shared-fluid gaps and explicitly sourced lossless fluid layers into both dense
+and iterative observations. `RigidBackedLayers` owns their coherent propagation;
+`PorousLayersBoundary` supplies its normal-incidence Robin coefficient and the
+single phasor conversion. Every constituent porous source, including one with
+zero thickness, constrains the common supported frequency band. The original
+64-layer ceiling, thickness admission and coherent fluid snapshots are retained.
+Layer order, all original material parameters and every fluid's bulk modulus
+bind boundary identity. An empty stack is rigid, but prescribed source panels
+still require the explicit `Rigid` variant. This is a local-reaction approximation:
+it does not resolve lateral propagation or curvature within a finite treatment.
+Queried pressure-node poles propagate the material owner's refusal; no finite
+admittance is substituted. The FIR convergence gates still apply to layered
+responses and do not certify unsampled material resonances.
+
 `LocalBoundaryObservation::for_scattering` extends the existing prescribed
 point-flow observer with these walls; `for_surface` consumes the original
 finite structural-velocity or unit-aperture-flow traces. The original prepared
@@ -1651,7 +1666,7 @@ than silently changing their discretization. It produces stationary observer
 transfers; it does not supply a new in-loop load or moving-frame constitutive law.
 
 `physical_frequency_sample` retains unwindowed material physics and propagates
-native material/mechanical errors. A declared band containing a lossless wall's
+native material/mechanical errors. A declared band containing a lossless mechanical wall's
 zero-impedance resonance refuses before sampling; no admittance is clipped.
 Source cards with a positive lower frequency require an explicit
 `LowerBandWindow`. Its C4 lower stop/pass transition is bound into the operator
