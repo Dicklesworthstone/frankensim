@@ -1624,8 +1624,17 @@ impl Spec {
             if self.geometric_stretching.is_some() {
                 return Err("longitudinal waves and geometric stretching cannot both supply strain energy".into());
             }
-            modes = resolution.axial_modes.len().checked_mul(self.strings.len())
-                .and_then(|axial| modes.checked_add(axial)).ok_or("complete longitudinal mode count overflow")?;
+            let axial = resolution.axial_modes.len().checked_mul(self.strings.len())
+                .ok_or("complete longitudinal mode count overflow")?;
+            modes = modes.checked_add(axial).ok_or("complete longitudinal mode count overflow")?;
+            // Beside the causal cylinder operator every axial mode has its own fluid branches, each one
+            // coordinate and one connection, which the longitudinal owner admits against this same budget.
+            if let Some(flow) = self.cylinder_gas_loading {
+                let memory = axial.checked_mul(flow.intervals)
+                    .ok_or("axial fluid memory dimension overflow")?;
+                modes = modes.checked_add(memory).ok_or("complete axial fluid mode count overflow")?;
+                links = links.checked_add(memory).ok_or("complete axial fluid connection count overflow")?;
+            }
         }
         if let Some(budget) = self.prepared_linear {
             budget.validate()?;

@@ -259,6 +259,57 @@ fn parser_counts_longitudinal_coordinates_and_refuses_conflicts_before_source_io
     );
 }
 #[test]
+fn axial_gas_memory_is_declared_so_both_rows_are_admitted_and_one_over_is_refused() {
+    let parse = |text: &str| input::Spec::parse(text.as_bytes());
+    let dims = |text: &str| parse(text).unwrap().network_dimensions(false).unwrap();
+    let original = text();
+    // 2 body + 1 cavity + (2 planes + 1 twist) x (1 + 4 flow branches) = 18 modes;
+    // 1 string + 2 neck + 12 flow = 15 connections.
+    let no_axial = original.replace(&format!("{RECORD}\n"), "");
+    assert_eq!(dims(&no_axial), (18, 15, 18 * 16 * 16));
+    // 2 axial modes with 4 branches each: 10 more coordinates, 8 more connections.
+    assert_eq!(dims(&original), (28, 23, 28 * 24 * 24));
+    // Only the gas row brings the branches, and its interval count is live.
+    let dry = original.replace("cylinder-gas-loading 0.001 30 4\n", "");
+    assert_eq!(dims(&dry), (8, 3, 8 * 4 * 4));
+    let finer = original.replace("0.001 30 4", "0.001 30 8");
+    assert_eq!(dims(&finer), (48, 43, 48 * 44 * 44));
+    // The declared count is what the owner builds and admits.
+    scoped(|cx, gate| {
+        let ready = compile(cx, gate, parse(&original).unwrap(), 7800.0);
+        let built: usize = ready
+            .performance
+            .bank()
+            .system()
+            .components()
+            .iter()
+            .map(|c| c.modes().len())
+            .sum();
+        assert_eq!(built, 28);
+    });
+    // One under the true count refuses before any source is read.
+    let budget = |n: usize| original.replace("prepared-linear 64", &format!("prepared-linear {n}"));
+    assert_eq!(dims(&budget(28)).0, 28);
+    let refused = parse(&budget(27))
+        .err()
+        .expect("one under the true count")
+        .to_string();
+    assert!(refused.contains("explicit prepared mode budget"), "{refused}");
+    // So does the shared ceiling: 18 + 10 N modes, which without the branches would be 1020 at N = 101.
+    let sized = |n: usize| {
+        original
+            .replace("tension 20 1 1 ", &format!("tension 20 {n} 1 "))
+            .replace("prepared-linear 64", "prepared-linear 1024")
+    };
+    assert_eq!(dims(&sized(100)).0, 1018);
+    let refused = parse(&sized(101))
+        .err()
+        .expect("over the ceiling on the true count")
+        .to_string();
+    assert!(refused.contains("explicit prepared mode budget"), "{refused}");
+}
+
+#[test]
 fn axial_elasticity_band_is_checked_instead_of_reusing_a_transverse_validity_check() {
     scoped(|cx, gate| {
         // Bending/torsion are admitted by this band, axial mode two is not.
