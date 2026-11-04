@@ -2,27 +2,25 @@
   "schema": "frankensim.instrument-status.v1",
   "family": "xylophone",
   "title": "Xylophone",
-  "reference_instrument": "Iowa MIS xylophone (model NA; bar material not stated; hard-rubber and rosewood mallets, the graded file uses the rosewood mallets)",
-  "summary": "Bar-S1 slice: one three-dimensional rosewood bar with a designed undercut (tuned from its own modes so the second mode is three times the first, scaled to the Db5 fundamental, never from a recording), struck by a Hertz silicone sphere and heard at a modal Burton-Miller receiver one metre away. The first render is lossless and only a diagnostic; a second render damps the five elastic modes with a rosewood decay law measured on another bar. That slice has no resonator, no cord suspension, and no marimba or vibraphone. A second route, the bar_strike example of fs-couple, strikes an uncut rosewood-stock blank described by a data card for the Orff soprano xylophone of Rucz et al. (2021), alone or over a Helmholtz box resonator, with many certified modes instead of five. The landed resonator card has rendered at its own settings (4 s, 32 substeps, 53 min with the held-input cache of 3c9af2bd5), and the page plays it beside the same blank alone. Over the resonator, the blank's lowest line (756.5 Hz) is 29 dB stronger in the first second, that line's decay is not shorter, and the spectral centroid falls from 2940 to 809 Hz. The blank's lowest mode and the resonator's own frequency (897 Hz) are 18.6 % apart, both from stand-in or lumped values, and no measurement of a bar over a resonator is compared.It is a route demonstration, not a note of any instrument: the blank is not tuned to a pitch, its stiffness is a declared Wood Handbook stand-in (the source prints none), and no specimen match is claimed. The undercut is not rendered because the check that would admit it failed.",
+  "reference_instrument": "Iowa MIS xylophone (model NA; bar material not stated). Ab4 and Eb5 are compared with its hard-rubber files, Db5 with its rosewood file",
+  "summary": "Three solid padouk bars, Ab4, Db5 and Eb5, with no resonator, no neighbouring bars and no room, so each note is cleaner and has less early first partial than a real one. Their undercuts are solved, not printed, and Iowa's bars aren't known to be padouk. Each is Bar No. 5 of Chaigne and Doutaut 1997, with the undercut solved in the engine so the first partial sits at equal temperament and f2 = 3 f1. Eb5's is a narrow groove that we don't know a maker would cut, and it isn't converged in mesh. Ab4 and Eb5 take the paper's hard rubber mallet and Db5 its boxwood, at printed speeds, struck at the mesh point nearest the printed spot. We read the wood's loss from the paper's Fig. 4, 4.22 times its Table I, and we can't say why they differ. B5 and G6 are recordings only.",
   "physics_present": [
-    "Quadratic tetrahedral elasticity of the bar with an orthotropic wood scenario, modal analysis of the free-free body and six rigid modes",
-    "Burton-Miller boundary-element radiation transfer of the five retained elastic modes to a receiver at one metre",
-    "Material Hertz mallet contact with a silicone head, time-stepped with a measured substep ladder",
-    "Mode damping from the decay law measured on a rosewood xylophone bar (Chaigne and Doutaut 1997), used as a declared scenario",
-    "bar_strike route: a bar card with the printed blank dimensions, density from the measured blank of Rucz et al. (2021) and stiffness from cited Wood Handbook packs; quadratic tetrahedral modes in the 10 kHz band by certified windows, a Burton-Miller receiver transfer per mode, a Hertz boxwood mallet contact from the Doutaut and Chaigne 1994 pack, and a modal render with cited rosewood loss",
-    "The same route over a Helmholtz box resonator (volume, opening area and neck from Rucz et al. Table III), wired as a lumped cavity with a compact flanged-monopole neck radiation"
+    "A three-dimensional bar with the outline of Bar No. 5 of Chaigne and Doutaut 1997 (JASA 101, Table I): padouk, 29.3 x 3.7 x 1.9 cm, with their modulus and density. The other elastic ratios are Honduras mahogany's, a stand-in (USDA Wood Handbook)",
+    "A circular-arc undercut solved in the engine for each note, so the first partial sits at equal temperament and f2 = 3 f1. The 1:3 target is xylophone tuning practice in print, not taken from the recording",
+    "A Hertz mallet from the same paper's Table I: hard rubber at 1.0 m/s on Ab4 and Eb5, boxwood at 0.474 m/s on Db5",
+    "The wood's loss: the card keeps Table I's gamma_B and takes eta 3.86e-7 s (read error +-0.03e-7), which we read from their Fig. 4, alpha = 6.11 + 7.62e-6 f^2. No constant was fitted to the recording",
+    "Burton-Miller boundary-element radiation to 10 kHz on a 56 x 6 x 3 bar mesh"
   ],
   "physics_missing": [
-    "Wood loss measured on this bar: the decay law belongs to another rosewood bar, and the first render has no loss at all",
-    "Transverse rosewood constants and density of the Bar-S1 slice are scenario values, not measurements of a rosewood bar",
-    "bar_strike: the undercut. The three-dimensional mode check (check B) against the printed modes of the real A5 bar failed at every printed mid-bar thickness, so only the uncut blank is rendered and no cut bar is claimed",
-    "bar_strike: the wood. Rucz et al. do not state the species or print a stiffness; the cards combine their measured density with Wood Handbook species means (Indian rosewood longitudinal modulus, Honduras mahogany ratios) as a declared choice, and the stand-in blank's vertical modes fall 27 to 32 percent below the modes Rucz et al. measured on their blanks. The gap is reported as measured: no modulus was fitted to a frequency and no card value was changed to close it",
-    "bar_strike resonator: where the bar covers the opening is an unknown that the card declares; the lumped element misses the six measured resonances by up to roughly a tenth, reported and not trimmed; box walls, neighbouring bars and bar supports are omitted",
-    "Mallet head loss, mallet shaft and the real mallet of the recording",
-    "The cord suspension and the bar supports",
-    "A tubular resonator below the bar, which a marimba needs and which also changes a xylophone",
-    "Only five elastic modes are retained, so partials above a few kHz are absent",
-    "Marimba: blocked. The only tabulated instrument found (a home-built padouk marimba by La Favre) gives each bar's arch length and centre thickness but not the arch curve, and a pre-registered check failed: a parabolic arch does not reproduce the 1:4 and 1:10 tuning that the builder states for three of four bars. The Iowa marimba's model and bar material are not stated on its page (model NA). The vibraphone has no recording to compare with"
+    "A resonator: no box is in any render. In our model a box takes Ab4's first partial from -56.7 dB/s to about -142 at half the patch and -460 to -516 at the card's own rule, where Part II of the same paper says a tube has no appreciable effect on a wooden bar. So it's left out, which costs the 22 to 28 dB of early first partial a resonator gives, measured on Ab4 with an earlier mallet. We think the reason is that in this model the bar is a wall of the cavity and feels its full pressure; that hasn't been tested on its own",
+    "Neighbouring bars and a room. Harmonics-to-noise reads 63.9, 71.4 and 74.7 dB on Ab4, Db5 and Eb5, against 47.4, 51.2 and 51.2 dB in the recordings",
+    "A printed undercut: the printed bar is tuned about 1:4 at 397 Hz, and no cut for these notes is printed. Eb5's solved groove is 32 mm wide and 6.1 mm deep, against 145 mm and 5.6 mm on Db5, and we don't know that a maker would cut it",
+    "Mesh convergence on Eb5: at 112 x 6 x 4 its first partial falls 5.9 c, so the posted cut isn't converged",
+    "Why Fig. 4 and Table I differ: Fig. 4's eta is 4.22 times Table I's 9.16e-8, and they may not be the same bar. We looked at the figure because the upper partials decayed too slowly against the recording, so it was found after the gap was seen. On Ab4 its cost is the first partial going from 2.0 under the recording to 6.7 over",
+    "The recorded instrument's wood and bars, and on Db5 its mallet: the recording names rosewood mallets, and the render uses boxwood",
+    "Lines not explained: Ab4's 2424.8 Hz line is 21 dB too strong and 6 % low against the recording's 2580 Hz. Db5's recording has a line at 3545 Hz with nothing to match it here",
+    "Db5's pitch and Eb5's cepstral envelope stay outside the ruler. Eb5's attack is 3.2 ms against 18.5 ms",
+    "Any note beyond these three"
   ],
   "blocked": null,
   "beads": [

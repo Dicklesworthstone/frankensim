@@ -3,28 +3,27 @@
   "family": "timpani",
   "title": "Timpani",
   "reference_instrument": "VCSL Timpani 2B one-shots, hits, velocity layers v2 to v5 (Versilian Community Sample Library, CC0); VCSL documents nothing about the drum, so the card is a measured drum of the same class, Fleischer's Kolberg Pauke Nr. 2 with kettle B, tuned to the recordings' principal",
-  "summary": "A 4 s strike of kettle B at 288 kHz. Its partial ratios match the model's own coupled modes within 0.3 %. The decay is measured, not graded. Its T60s are 1.93 s for (1,1), 2.07 for (2,1), 2.50 for (3,1), 2.43 for (4,1) and 1.6 to 1.84 for (5,1). The VCSL Timpani 2B recordings give 1.3 to 2.3 s for (1,1) and 8.2 to 9.1 for (2,1) on all six hits, and at layers v3 and v5 they give 10 to 11 for (3,1), about 10 for (4,1) and about 7 for (5,1). These T60s bound this model only, not the drum: with head loss at zero, the render's upper partials still decay about 4 times faster than the recording's. VCSL documents nothing about its drum and it is not this one, so the recording locates a defect and sets no target. Nothing is tuned to it, and a fix has to come from the fit or the formulation",
+  "summary": "One 4 s strike of one kettle, with no head loss, a sealed and rigid kettle, and no floor or room. Its upper partials are too weak and still die too fast against a recording of another drum, and that isn't explained, so its decays bound this model only and nothing is graded. A tensioned PET head sits on Fleischer's measured kettle B, tuned so the (1,1) mode sits at the recording's principal; every other frequency follows from the physics. The kettle's air modes and an exterior load fitted from a boundary-element model act inside the same time step, and the mallet is Rhaouti, Chaigne and Joly's measured timpani mallet. Partial ratios are checked against the model's own coupled modes, not against a recording. VCSL documents nothing about its drum, so the recording locates a defect and sets no target.",
   "physics_present": [
-    "Head: a tensioned 0.2 mm PET film (Remo Weather King thickness, DuPont Mylar constants) with bending and nonlinear stretching, on Fleischer's measured kettle B (bearing-edge radius 357 mm, 140 l); 17 modes up to the (5,1) pair",
-    "Interior air: the kettle's own pressure modes, every angular order, up to 1500 Hz (68 modes), coupled to the head by reciprocal pressure work, so the bulk compliance raises the (0,1) and the interior air's near-field mass lowers every mode",
-    "Exterior air: a closed-surface BEM of the head and the kettle's outer wall from 40 to 400 Hz, kept as its reciprocal part and fitted to a 272-pole passive multiport load whose radiation damping and added mass act inside the same time step",
-    "Mallet: Rhaouti, Chaigne and Joly's measured timpani mallet (0.028 kg effective mass, F = 1.6e8 x^2.54, 1.4 m/s, contact window from ink spots), struck 10 cm in from the rim",
-    "Tension: computed (2582 N/m) so the coupled (1,1) mode sits at the 2B recordings' principal (112.1 Hz); every other frequency follows from the physics",
-    "Receiver: the BEM's own pressure 1 m off the axis and 1 m above the head plane, in free field"
+    "Head: a tensioned PET film (Remo Weather King thickness, DuPont Mylar constants) with bending and nonlinear stretching, on Fleischer's measured kettle B",
+    "Interior air: the kettle's own pressure modes, every angular order, coupled to the head by reciprocal pressure work",
+    "Exterior air: a closed-surface boundary-element model of the head and the kettle's outer wall, kept as its reciprocal part and fitted to a passive multiport load whose radiation damping and added mass act inside the same time step",
+    "Mallet: Rhaouti, Chaigne and Joly's measured timpani mallet, struck in from the rim",
+    "Tension: computed so the coupled (1,1) mode sits at the 2B recordings' principal; every other frequency follows from the physics",
+    "Receiver: the boundary-element model's own pressure, in free field"
   ],
   "physics_missing": [
-    "Head loss: film internal loss and bearing-edge friction are zero (no measured drum-head loss exists for this film). Entering any would shorten every T60, so these decays bound this model only",
-    "Upper-partial decay: part of the gap to the recording is the exterior formulation. In a 0.5 s test on the same binary, with the band cut to 320 Hz and (5,1) dropped so that plain CBIE can run, plain CBIE against closed-surface Burton-Miller lengthens (2,1) 1.25x, (1,2) about 1.4x and (3,1) about 2x, leaves (1,1) within 6 %, and lengthens (4,1) at least 2x, though that fit is unstable. It isn't all of the gap: (2,1) is still near 2.9 s and (3,1) near 5.5 s. The next suspect is the pole fit: (2,1) was 3.78 s on a 327-pole load and is 2.07 s on this 272-pole load, which is a correlation and not a cause. The render's T60s track the fit: in a 0.5 s test on a 234-pole plain CBIE load, not the published render's 272-pole load, they sit within 6 % of the fit's T60s on five lines, with (1,2) the exception, the fit's modal resistance on (1,1), (2,1), (3,1) and (4,1) is 2.5, 9.6, 30 and 114x the BEM values it fits on that load and 1.9, 2.1, 1.3 and 1.0x on the published Burton-Miller load, the two loads' BEM values disagree on the weak modes, and no fit has yet passed a 15 % limit on these lines",
-    "Upper-partial levels, a separate finding from decay: at 0.25 s the render's (2,1) to (5,1) sit 14, 31, 42 and 50 dB below (1,1), against 6, 20, 19 and 17 dB on one v5 hit of the recording, so 8 to 33 dB weak. The cause is not named, and the recording is another drum and mallet",
-    "Head modes above 380 Hz in vacuo ((1,3), (3,2), (6,1), (0,4) and higher): absent. Above the (5,1) pair, about 2.94 times the principal, the only partials are the kettle's air modes heard through the head (near 360, 550, 565, 690 and 730 Hz). The exterior load and the receiver transfer are fitted only from 40 to 400 Hz, so above 400 Hz those lines' levels and radiation damping are extrapolations",
-    "Duration: 4 s of one strike took 19.5 h; the exterior load's poles make each step cost about 50x the mechanics (pexfp.376.2). The file is 16-bit at 20 Pa full scale, so the signal ends between 2 and 3 s, (5,1)'s fit sits near that floor, and the last second is digital silence. render.sh can't write float32 until the kettle render does, which it has to before the next full render",
+    "Head loss: film internal loss and bearing-edge friction are zero, because no measured loss exists for this film. Entering any would shorten every decay, so these decays bound this model only",
+    "Upper-partial decay: part of the gap to the recording is the exterior formulation, shown in a short test against plain CBIE. It isn't all of the gap. The pole fit is the next suspect, which is a correlation and not a cause",
+    "Upper-partial levels, a separate finding: weak against one hit of the recording. The cause isn't named, and the recording is another drum and mallet",
+    "Head modes above the (5,1) pair are absent, so above it the only partials are the kettle's air modes heard through the head. The exterior load and the receiver are fitted over a limited band, so those lines' levels and radiation damping are extrapolations",
+    "Length and depth: the posted file is 16-bit, so the signal ends before the 4 s does",
     "The vent: the kettle is sealed",
     "Kettle, stand and counterhoop are rigid and silent",
-    "Uniform tension: the degenerate pairs do not split, so there is no beating",
+    "Uniform tension: the degenerate pairs don't split, so there's no beating",
     "Felt hysteresis: the mallet law is the source's hysteresis-free fit",
     "Room: free field, no floor and no room decay",
-    "Converged interior air (illustrative numerical choice): the cavity cut at 1500 Hz leaves the coupled (2,1)..(5,1) ratios 0.5 to 1.1 % above a 2500 Hz basis (u-cavity-truncation; pexfp.376.1)",
-    "Converged head mesh (illustrative numerical choice): 6x48 puts the in-vacuo (2,1)..(5,1) ratios 0.3 to 1.6 % low (u-head-mesh)"
+    "Converged interior air and head mesh: both are illustrative numerical choices (u-cavity-truncation, u-head-mesh)"
   ],
   "blocked": null,
   "beads": [
