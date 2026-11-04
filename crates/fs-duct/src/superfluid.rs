@@ -19,7 +19,7 @@
 //! silently injected into this first-order thermal perturbation equation.
 //! Reported storage is wave availability, not absolute internal energy.
 //! The boundary thermal wave work is `T' q/T0`, distinct from transported heat.
-//! Nonlinear heating/phase feedback, vortices, critical velocities, normal
+//! Nonlinear heating/phase feedback, vortex geometry/evolution, critical velocities, normal
 //! viscous boundary layers, longitudinal viscosity, second viscosities,
 //! Kapitza resistance and arbitrary geometry are outside this linear model.
 
@@ -153,6 +153,14 @@ pub enum MutualFriction {
     },
     GorterMellink {
         a_m_s_kg: f64,
+    },
+    /// Frozen unpolarized isotropic vortex tangle. The force is the angular
+    /// average of Hall–Vinen drag: `gamma=(rho_n*rho_s/rho)*B*kappa*L/3`.
+    /// No line-density evolution or oriented transverse dynamics is implied.
+    IsotropicVortexTangle {
+        circulation_quantum_m2_s: f64,
+        line_density_per_m2: f64,
+        dissipative_b: f64,
     },
 }
 

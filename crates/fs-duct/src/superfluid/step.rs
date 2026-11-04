@@ -1,5 +1,5 @@
 use super::*;
-use fs_material::superfluid::TwoFluidVelocity;
+use fs_material::superfluid::{TwoFluidVelocity, VortexMutualFriction};
 
 impl TwoFluidChannel {
     pub(super) fn stage_step(
@@ -36,8 +36,8 @@ impl TwoFluidChannel {
                 "step must advance a finite clock and satisfy the declared wave Courant <= 1 policy",
             ));
         }
-        match friction {
-            MutualFriction::None => {}
+        let friction = match friction {
+            MutualFriction::None => friction,
             MutualFriction::Linear { gamma_kg_m3_s: k }
             | MutualFriction::GorterMellink { a_m_s_kg: k } => {
                 if !k.is_finite() || k < 0.0 {
@@ -45,8 +45,24 @@ impl TwoFluidChannel {
                         "mutual-friction coefficient must be nonnegative and finite",
                     ));
                 }
+                friction
             }
-        }
+            MutualFriction::IsotropicVortexTangle {
+                circulation_quantum_m2_s,
+                line_density_per_m2,
+                dissipative_b,
+            } => {
+                let vortices = VortexMutualFriction::try_new(
+                    circulation_quantum_m2_s,
+                    line_density_per_m2,
+                    dissipative_b,
+                    0.0,
+                )?;
+                MutualFriction::Linear {
+                    gamma_kg_m3_s: self.material.isotropic_vortex_drag_kg_m3_s(vortices)?,
+                }
+            }
+        };
         let endpoints = [boundary.left, boundary.right];
         let mut port_modes = [[0.0; 2]; 2];
         for (i, end) in endpoints.into_iter().enumerate() {
@@ -227,6 +243,9 @@ impl TwoFluidChannel {
             };
             let change = match friction {
                 MutualFriction::None => unreachable!(),
+                MutualFriction::IsotropicVortexTangle { .. } => {
+                    unreachable!("vortex tangle drag is resolved once before staging")
+                }
                 MutualFriction::Linear { gamma_kg_m3_s } => {
                     self.material
                         .relax_linear_friction(velocities, gamma_kg_m3_s, dt)?

@@ -72,6 +72,11 @@ fn reciprocal_two_end_response_predicts_actual_forced_pressure_and_momentum() {
             MutualFriction::None,
             MutualFriction::Linear { gamma_kg_m3_s: 3.0 },
             MutualFriction::GorterMellink { a_m_s_kg: 20.0 },
+            MutualFriction::IsotropicVortexTangle {
+                circulation_quantum_m2_s: 1e-7,
+                line_density_per_m2: 3e8,
+                dissipative_b: 1.2,
+            },
         ] {
             let mut duct = channel(n, false);
             let pressure: Vec<_> = (0..n)
@@ -348,6 +353,11 @@ fn reciprocal_thermal_response_predicts_forced_two_sound_endpoint_temperatures()
             MutualFriction::None,
             MutualFriction::Linear { gamma_kg_m3_s: 3.0 },
             MutualFriction::GorterMellink { a_m_s_kg: 20.0 },
+            MutualFriction::IsotropicVortexTangle {
+                circulation_quantum_m2_s: 1e-7,
+                line_density_per_m2: 3e8,
+                dissipative_b: 1.2,
+            },
         ] {
             let mut duct = channel(n, false);
             let pressure: Vec<_> = (0..n)

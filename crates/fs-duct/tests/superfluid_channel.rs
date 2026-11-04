@@ -199,12 +199,17 @@ fn thermal_port_conserves_mass_and_entropy_and_counts_wave_work_separately() {
 }
 
 #[test]
-fn both_friction_laws_export_only_lost_kinetic_energy_to_thermal_consumers() {
+fn friction_laws_export_only_lost_kinetic_energy_to_thermal_consumers() {
     for law in [
         MutualFriction::Linear {
             gamma_kg_m3_s: 15.0,
         },
         MutualFriction::GorterMellink { a_m_s_kg: 2e6 },
+        MutualFriction::IsotropicVortexTangle {
+            circulation_quantum_m2_s: 1e-7,
+            line_density_per_m2: 6e8,
+            dissipative_b: 1.0,
+        },
     ] {
         let mut duct = standing(64, material(-0.3), 0.001, 0.001);
         let initial = duct.wave_energy_j().unwrap();
@@ -226,6 +231,60 @@ fn both_friction_laws_export_only_lost_kinetic_energy_to_thermal_consumers() {
         assert!(exported > 0.1 * initial);
         assert!((duct.wave_energy_j().unwrap() + exported - initial).abs() < 1e-11 * initial);
         assert!((duct.cumulative_mutual_friction_heat_j() - exported).abs() < 1e-12 * initial);
+    }
+}
+
+#[test]
+fn isotropic_vortex_tangle_matches_scalar_projection_and_refuses_bad_inputs_atomically() {
+    let mut tangle = standing(24, material(-0.3), 0.001, 0.001);
+    let mut scalar = standing(24, material(-0.3), 0.001, 0.001);
+    let law = MutualFriction::IsotropicVortexTangle {
+        circulation_quantum_m2_s: 1e-7,
+        line_density_per_m2: 6e8,
+        dissipative_b: 1.0,
+    };
+    // Independently: gamma=(rho_n*rho_s/rho)*B*kappa*L/3=0.75*60/3.
+    for _ in 0..20 {
+        let dt = tangle.maximum_step_s() * 0.8;
+        let a = tangle
+            .step(dt, BoundaryVelocities::CLOSED, law, || false)
+            .unwrap();
+        let b = scalar
+            .step(
+                dt,
+                BoundaryVelocities::CLOSED,
+                MutualFriction::Linear {
+                    gamma_kg_m3_s: 15.0,
+                },
+                || false,
+            )
+            .unwrap();
+        assert_eq!(a, b);
+    }
+    assert_eq!(snapshot(&tangle), snapshot(&scalar));
+    for (quantum, density, b) in [
+        (0.0, 1.0, 1.0),
+        (1.0, -1.0, 1.0),
+        (1.0, 1.0, -1.0),
+        (1.0, 1.0, f64::NAN),
+        (f64::MAX, 2.0, 1.0),
+    ] {
+        let before = snapshot(&tangle);
+        assert!(
+            tangle
+                .step(
+                    tangle.maximum_step_s(),
+                    BoundaryVelocities::CLOSED,
+                    MutualFriction::IsotropicVortexTangle {
+                        circulation_quantum_m2_s: quantum,
+                        line_density_per_m2: density,
+                        dissipative_b: b,
+                    },
+                    || false
+                )
+                .is_err()
+        );
+        assert_eq!(snapshot(&tangle), before);
     }
 }
 

@@ -123,6 +123,23 @@ helium property fit is inferred. Focused G0/G1/G3 tests cover thermodynamic
 identities, both modes, fountain balance, currents, Galilean boosts, opposite
 friction impulses, analytic decay, semigroup/heat closure and admission limits.
 
+`VortexMutualFriction` retains caller-supplied circulation magnitude, vortex line
+density and Hall–Vinen B/B′ coefficients. `relax_hall_vinen` exactly integrates
+the frozen straight aligned population: parallel counterflow remains unchanged,
+transverse motion damps and rotates, impulses are opposite, and only transverse
+damping releases heat. The B/B′ convention is `alpha=rho_n*B/(2*rho)`; the
+reactive term is signed and does no work. Scaled direction normalization and
+`expm1`/small-angle increments retain weak responses without an explicit-step
+stiffness limit. The isotropic unpolarized force projection is
+`gamma=(rho_n*rho_s/rho)*B*kappa*L/3`; it is consumed by the full two-fluid
+channel and its existing heat account. This is not averaging independently
+evolved orientations. Vortex geometry, line density, coefficients and material
+state are frozen: no nucleation, reconnection, tension, critical velocity,
+frequency-dependent fit, or evolving tangle is inferred. Direct regressions
+cover analytic anisotropic decay/rotation, reactive zero heat, weak/strong
+limits, momentum/heat closure, semigroup and frame covariance, the angular
+force average, and source refusal.
+
 ## Continuous gold leaching with oxygen uptake and stripping
 
 `cyanide_leach::flow::aeration::AeratedCyanidationCstr` attaches the original

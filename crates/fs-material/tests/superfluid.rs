@@ -2,7 +2,9 @@
 //! The round-number states are manufactured numerical fixtures, not helium data.
 
 use fs_material::fluid_acoustics::FluidAcoustics;
-use fs_material::superfluid::{TwoFluidProperties, TwoFluidState, TwoFluidVelocity};
+use fs_material::superfluid::{
+    TwoFluidProperties, TwoFluidState, TwoFluidVelocity, VortexMutualFriction,
+};
 
 fn properties() -> TwoFluidProperties {
     TwoFluidProperties {
@@ -359,4 +361,312 @@ fn singular_phases_bad_states_and_negative_dissipation_are_refused() {
             .relax_gorter_mellink(initial, f64::MAX, 10.0)
             .is_err()
     );
+}
+
+#[test]
+fn hall_vinen_preserves_parallel_motion_and_closes_transverse_heat_and_impulse() {
+    let material = state();
+    let mean = [3.0, -2.0, 1.0];
+    let w = [2.0, -1.0, 3.0];
+    let initial = material.velocities_from_barycentric(mean, w).unwrap();
+    let law = VortexMutualFriction::try_new(2.0, 3.0, 0.5, -0.25).unwrap();
+    let result = material
+        .relax_hall_vinen(initial, law, [0.0, 0.0, 7.0], 0.4)
+        .unwrap();
+    // Independent closed form of w_x'=-1.5*w_x+0.75*w_y,
+    // w_y'=-1.5*w_y-0.75*w_x and w_z'=0.
+    let (s, c) = (-0.3_f64).sin_cos();
+    let decay = (-0.6_f64).exp();
+    let expected = [decay * (2.0 * c + s), decay * (2.0 * s - c), 3.0];
+    close_vector(
+        material.counterflow_velocity_m_s(result.velocity).unwrap(),
+        expected,
+        3.0,
+    );
+    close_vector(
+        material.barycentric_velocity_m_s(result.velocity).unwrap(),
+        mean,
+        3.0,
+    );
+    let expected_heat = 0.5 * 0.75 * 5.0 * (1.0 - (-1.2_f64).exp());
+    close(result.dissipated_energy_j_m3, expected_heat, 2.0);
+    let before = material.kinetic_energy_density(initial).unwrap().total_j_m3;
+    let after = material
+        .kinetic_energy_density(result.velocity)
+        .unwrap()
+        .total_j_m3;
+    close(after + result.dissipated_energy_j_m3, before, before);
+    for i in 0..3 {
+        close(
+            result.normal_impulse_kg_m2_s[i],
+            0.75 * (expected[i] - w[i]),
+            3.0,
+        );
+        close(
+            result.velocity.normal_m_s[i] - initial.normal_m_s[i],
+            result.normal_impulse_kg_m2_s[i] / material.normal_density_kg_m3(),
+            3.0,
+        );
+        close(
+            result.superfluid_impulse_kg_m2_s[i],
+            -result.normal_impulse_kg_m2_s[i],
+            3.0,
+        );
+    }
+    let parallel = material
+        .velocities_from_barycentric([0.0; 3], [0.0, 0.0, 4.0])
+        .unwrap();
+    let unchanged = material
+        .relax_hall_vinen(parallel, law, [0.0, 0.0, 1.0], 100.0)
+        .unwrap();
+    assert_eq!(unchanged.velocity, parallel);
+    assert_eq!(unchanged.dissipated_energy_j_m3, 0.0);
+    assert_eq!(unchanged.normal_impulse_kg_m2_s, [0.0; 3]);
+}
+
+#[test]
+fn hall_vinen_reactive_rotation_is_reversible_and_produces_no_heat() {
+    let material = state();
+    let initial = material
+        .velocities_from_barycentric([0.0; 3], [2.0, 0.0, 3.0])
+        .unwrap();
+    let law = VortexMutualFriction::try_new(2.0, 1.0, 0.0, 1.0).unwrap();
+    let time = std::f64::consts::FRAC_PI_2;
+    let result = material
+        .relax_hall_vinen(initial, law, [0.0, 0.0, 1.0], time)
+        .unwrap();
+    close_vector(
+        material.counterflow_velocity_m_s(result.velocity).unwrap(),
+        [0.0, 2.0, 3.0],
+        3.0,
+    );
+    assert_eq!(result.dissipated_energy_j_m3, 0.0);
+    close(
+        material
+            .kinetic_energy_density(result.velocity)
+            .unwrap()
+            .total_j_m3,
+        material.kinetic_energy_density(initial).unwrap().total_j_m3,
+        5.0,
+    );
+    let reversed = material
+        .relax_hall_vinen(result.velocity, law, [0.0, 0.0, -1.0], time)
+        .unwrap();
+    close_vector(reversed.velocity.normal_m_s, initial.normal_m_s, 3.0);
+    close_vector(
+        reversed.velocity.superfluid_m_s,
+        initial.superfluid_m_s,
+        3.0,
+    );
+    let signed = VortexMutualFriction::try_new(2.0, 1.0, 0.0, -1.0).unwrap();
+    let reversed_b = material
+        .relax_hall_vinen(result.velocity, signed, [0.0, 0.0, 1.0], time)
+        .unwrap();
+    assert_eq!(reversed, reversed_b);
+}
+
+#[test]
+fn hall_vinen_retains_tiny_drag_reaction_and_strongly_damped_tail() {
+    let material = state();
+    let initial = material
+        .velocities_from_barycentric([0.0; 3], [1.0, 0.0, 0.0])
+        .unwrap();
+    let weak = VortexMutualFriction::try_new(2.0, 1.0, 1e-30, 2e-24).unwrap();
+    let step = material
+        .relax_hall_vinen(initial, weak, [0.0, 0.0, 1.0], 1.0)
+        .unwrap();
+    assert!((step.normal_impulse_kg_m2_s[0] / -7.5e-31 - 1.0).abs() < 1e-13);
+    assert!((step.normal_impulse_kg_m2_s[1] / 1.5e-24 - 1.0).abs() < 1e-13);
+    assert!((step.dissipated_energy_j_m3 / 7.5e-31 - 1.0).abs() < 1e-13);
+    assert!(step.velocity.normal_m_s[1] > 0.0);
+    // A very large but finite phase uses the deterministic trig owner's full
+    // range reduction. It must not erase the independent sub-ulp heat account.
+    let many_turns = VortexMutualFriction::try_new(2.0, 1.0, 1e-130, 1e200).unwrap();
+    let rotated = material
+        .relax_hall_vinen(initial, many_turns, [0.0, 0.0, 1.0], 1e100)
+        .unwrap();
+    assert!((rotated.dissipated_energy_j_m3 / 7.5e-31 - 1.0).abs() < 1e-13);
+    close(
+        material
+            .kinetic_energy_density(rotated.velocity)
+            .unwrap()
+            .total_j_m3,
+        0.375,
+        0.375,
+    );
+    close_vector(
+        material.barycentric_velocity_m_s(rotated.velocity).unwrap(),
+        [0.0; 3],
+        1.0,
+    );
+    let strong = VortexMutualFriction::try_new(2.0, 1.0, 1.0, 0.0).unwrap();
+    let damped = material
+        .relax_hall_vinen(initial, strong, [0.0, 0.0, 1.0], 80.0)
+        .unwrap();
+    let tail = material.counterflow_velocity_m_s(damped.velocity).unwrap()[0];
+    assert!((tail / (-80.0_f64).exp() - 1.0).abs() < 1e-13);
+    assert_eq!(damped.dissipated_energy_j_m3, 0.375);
+    let zero_lines = VortexMutualFriction::try_new(2.0, 0.0, 1.0, 2.0).unwrap();
+    assert_eq!(
+        material
+            .relax_hall_vinen(initial, zero_lines, [1.0, 0.0, 0.0], 1.0)
+            .unwrap()
+            .velocity,
+        initial
+    );
+    assert_eq!(
+        material
+            .relax_hall_vinen(initial, strong, [1.0, 0.0, 0.0], 0.0)
+            .unwrap()
+            .velocity,
+        initial
+    );
+}
+
+#[test]
+fn hall_vinen_is_a_galilean_covariant_semigroup_with_rotational_covariance() {
+    let material = state();
+    let initial = material
+        .velocities_from_barycentric([3.0, -2.0, 1.0], [0.7, -1.2, 2.0])
+        .unwrap();
+    let law = VortexMutualFriction::try_new(2.0, 3.0, 0.5, -0.25).unwrap();
+    let direction = [1.0, 2.0, -2.0];
+    let first = material
+        .relax_hall_vinen(initial, law, direction, 0.15)
+        .unwrap();
+    let split = material
+        .relax_hall_vinen(first.velocity, law, direction, 0.2)
+        .unwrap();
+    let whole = material
+        .relax_hall_vinen(initial, law, direction, 0.35)
+        .unwrap();
+    close_vector(split.velocity.normal_m_s, whole.velocity.normal_m_s, 3.0);
+    close_vector(
+        split.velocity.superfluid_m_s,
+        whole.velocity.superfluid_m_s,
+        3.0,
+    );
+    close(
+        first.dissipated_energy_j_m3 + split.dissipated_energy_j_m3,
+        whole.dissipated_energy_j_m3,
+        3.0,
+    );
+    let boost = [30.0, -20.0, 1.0];
+    let shifted = TwoFluidVelocity {
+        normal_m_s: std::array::from_fn(|i| initial.normal_m_s[i] + boost[i]),
+        superfluid_m_s: std::array::from_fn(|i| initial.superfluid_m_s[i] + boost[i]),
+    };
+    let boosted = material
+        .relax_hall_vinen(shifted, law, direction, 0.35)
+        .unwrap();
+    close_vector(
+        boosted.velocity.normal_m_s,
+        std::array::from_fn(|i| whole.velocity.normal_m_s[i] + boost[i]),
+        30.0,
+    );
+    close(
+        boosted.dissipated_energy_j_m3,
+        whole.dissipated_energy_j_m3,
+        3.0,
+    );
+    let rotate = |v: [f64; 3]| [-v[1], v[0], v[2]];
+    let rotated = material
+        .relax_hall_vinen(
+            TwoFluidVelocity {
+                normal_m_s: rotate(initial.normal_m_s),
+                superfluid_m_s: rotate(initial.superfluid_m_s),
+            },
+            law,
+            rotate(direction),
+            0.35,
+        )
+        .unwrap();
+    close_vector(
+        rotated.velocity.normal_m_s,
+        rotate(whole.velocity.normal_m_s),
+        3.0,
+    );
+    close(
+        rotated.dissipated_energy_j_m3,
+        whole.dissipated_energy_j_m3,
+        3.0,
+    );
+}
+
+#[test]
+fn isotropic_vortex_drag_is_the_angular_force_average_with_correct_density_basis() {
+    let material = state();
+    let law = VortexMutualFriction::try_new(2.0, 3.0, 0.5, -0.25).unwrap();
+    let gamma = material.isotropic_vortex_drag_kg_m3_s(law).unwrap();
+    assert_eq!(gamma, 0.75);
+    let initial = material
+        .velocities_from_barycentric([0.0; 3], [1.0, 2.0, -3.0])
+        .unwrap();
+    let directions = [
+        [1.0, 0.0, 0.0],
+        [-1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, -1.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [0.0, 0.0, -1.0],
+    ];
+    let mut average_force = [0.0; 3];
+    let dt = 1e-8;
+    for direction in directions {
+        let result = material
+            .relax_hall_vinen(initial, law, direction, dt)
+            .unwrap();
+        for (force, impulse) in average_force.iter_mut().zip(result.normal_impulse_kg_m2_s) {
+            *force += impulse / (6.0 * dt);
+        }
+    }
+    for (actual, w) in average_force.into_iter().zip([1.0, 2.0, -3.0]) {
+        assert!((actual / (-gamma * w) - 1.0).abs() < 2e-8);
+    }
+    // Reactive drag averages to zero. L and B change the dissipation rate;
+    // the normal fraction is retained through reduced, not total, density.
+    let doubled = VortexMutualFriction::try_new(2.0, 6.0, 0.5, 100.0).unwrap();
+    assert_eq!(
+        material.isotropic_vortex_drag_kg_m3_s(doubled).unwrap(),
+        2.0 * gamma
+    );
+}
+
+#[test]
+fn vortex_friction_refuses_invalid_population_direction_and_duration() {
+    for invalid in [0.0, -1.0, f64::INFINITY, f64::NAN] {
+        assert!(VortexMutualFriction::try_new(invalid, 1.0, 1.0, 0.0).is_err());
+    }
+    for invalid in [-1.0, f64::INFINITY, f64::NAN] {
+        assert!(VortexMutualFriction::try_new(1.0, invalid, 1.0, 0.0).is_err());
+        assert!(VortexMutualFriction::try_new(1.0, 1.0, invalid, 0.0).is_err());
+    }
+    assert!(VortexMutualFriction::try_new(1.0, 1.0, 1.0, f64::NAN).is_err());
+    assert!(VortexMutualFriction::try_new(f64::MAX, 2.0, 1.0, 0.0).is_err());
+    let material = state();
+    let law = VortexMutualFriction::try_new(2.0, 3.0, 1.0, -1.0).unwrap();
+    let velocity = material
+        .velocities_from_barycentric([0.0; 3], [1.0, 0.0, 0.0])
+        .unwrap();
+    for direction in [[0.0; 3], [f64::NAN, 0.0, 0.0], [0.0, f64::INFINITY, 0.0]] {
+        assert!(
+            material
+                .relax_hall_vinen(velocity, law, direction, 0.0)
+                .is_err()
+        );
+    }
+    for time in [-1.0, f64::INFINITY, f64::NAN, f64::MAX] {
+        assert!(
+            material
+                .relax_hall_vinen(velocity, law, [0.0, 0.0, 1.0], time)
+                .is_err()
+        );
+    }
+    let huge = material
+        .relax_hall_vinen(velocity, law, [0.0, 0.0, f64::MAX], 0.1)
+        .unwrap();
+    let tiny = material
+        .relax_hall_vinen(velocity, law, [0.0, 0.0, f64::from_bits(1)], 0.1)
+        .unwrap();
+    assert_eq!(huge, tiny);
 }

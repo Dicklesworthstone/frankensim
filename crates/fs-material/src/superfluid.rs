@@ -128,6 +128,100 @@ pub struct MutualFrictionStep {
     pub dissipated_energy_j_m3: f64,
 }
 
+/// Frozen vortex-line population and Hall–Vinen coefficients in SI.
+///
+/// With oriented unit tangent `t`, `w=v_n-v_s`, and reduced density
+/// `mu=rho_n*rho_s/rho`, the force ON THE NORMAL COMPONENT is
+/// `F_n = mu*kappa*L/2 * [B*t×(t×w) + B_prime*t×w]`.
+/// Thus only transverse counterflow dissipates; positive `B_prime` rotates
+/// `w` toward `t×w`. The superfluid receives the exact opposite force.
+///
+/// Convention: Jou, Mongiovi and Sciacca, <https://arxiv.org/abs/0806.1889>,
+/// equations (2.5), (2.8), (2.9), with zero line curvature; their coefficients
+/// are `alpha=rho_n*B/(2*rho)`, `alpha_prime=rho_n*B_prime/(2*rho)` as in
+/// Donnelly–Barenghi, DOI: 10.1063/1.556028, section 11. All four inputs must
+/// be supplied; neither circulation nor frequency/velocity-dependent drag is
+/// inferred from a material name. This does not evolve, create or reconnect
+/// vortex lines, include tension, or establish turbulent onset/validity.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VortexMutualFriction {
+    circulation_quantum_m2_s: f64,
+    line_density_per_m2: f64,
+    dissipative_b: f64,
+    reactive_b_prime: f64,
+    transverse_decay_rate_s_inv: f64,
+    rotation_rate_rad_s: f64,
+}
+
+impl VortexMutualFriction {
+    /// Positive circulation MAGNITUDE [m²/s], nonnegative line length per
+    /// volume [1/m²], nonnegative dimensionless B and signed finite B′.
+    /// The separate tangent passed to the oriented update gives circulation's
+    /// direction. Derived rates must be representable, including at weak drag.
+    pub fn try_new(
+        circulation_quantum_m2_s: f64,
+        line_density_per_m2: f64,
+        dissipative_b: f64,
+        reactive_b_prime: f64,
+    ) -> Result<Self, MaterialError> {
+        if !positive(circulation_quantum_m2_s)
+            || !nonnegative(line_density_per_m2)
+            || !nonnegative(dissipative_b)
+            || !reactive_b_prime.is_finite()
+        {
+            return Err(invalid(
+                "vortex friction requires positive finite circulation magnitude, nonnegative finite line density and B, and finite signed B_prime",
+            ));
+        }
+        let vorticity = circulation_quantum_m2_s * line_density_per_m2;
+        let transverse_decay_rate_s_inv = 0.5 * dissipative_b * vorticity;
+        let rotation_rate_rad_s = 0.5 * reactive_b_prime * vorticity;
+        if !nonnegative(vorticity)
+            || !nonnegative(transverse_decay_rate_s_inv)
+            || !rotation_rate_rad_s.is_finite()
+            || (line_density_per_m2 > 0.0 && vorticity == 0.0)
+            || (vorticity > 0.0
+                && ((dissipative_b > 0.0 && transverse_decay_rate_s_inv == 0.0)
+                    || (reactive_b_prime != 0.0 && rotation_rate_rad_s == 0.0)))
+        {
+            return Err(invalid("vortex friction rate is unrepresentable"));
+        }
+        Ok(Self {
+            circulation_quantum_m2_s,
+            line_density_per_m2,
+            dissipative_b,
+            reactive_b_prime,
+            transverse_decay_rate_s_inv,
+            rotation_rate_rad_s,
+        })
+    }
+
+    /// Supplied circulation magnitude [m²/s].
+    pub const fn circulation_quantum_m2_s(&self) -> f64 {
+        self.circulation_quantum_m2_s
+    }
+    /// Supplied total vortex line length per volume [1/m²].
+    pub const fn line_density_per_m2(&self) -> f64 {
+        self.line_density_per_m2
+    }
+    /// Supplied dissipative Hall–Vinen coefficient B.
+    pub const fn dissipative_b(&self) -> f64 {
+        self.dissipative_b
+    }
+    /// Supplied signed reactive Hall–Vinen coefficient B′.
+    pub const fn reactive_b_prime(&self) -> f64 {
+        self.reactive_b_prime
+    }
+    /// Relative-velocity transverse decay rate `B*kappa*L/2` [1/s].
+    pub const fn transverse_decay_rate_s_inv(&self) -> f64 {
+        self.transverse_decay_rate_s_inv
+    }
+    /// Signed right-handed rotation rate `B_prime*kappa*L/2` [rad/s].
+    pub const fn rotation_rate_rad_s(&self) -> f64 {
+        self.rotation_rate_rad_s
+    }
+}
+
 impl TwoFluidState {
     /// Admit a finite-temperature local two-fluid state. The thermodynamic
     /// identities are `kappa_T = kappa_s + alpha² T/(rho cp)` and
@@ -461,6 +555,109 @@ impl TwoFluidState {
         self.friction_step(velocity, velocity_loss, energy_loss)
     }
 
+    /// Exact homogeneous Hall–Vinen source for frozen, straight, aligned vortex
+    /// lines. `direction` is any nonzero finite vector pointing along positive
+    /// circulation; its magnitude is ignored. Parallel relative motion is
+    /// unchanged. Transverse motion decays and rotates analytically, without a
+    /// stiffness-limited explicit time step or a fictitious reactive heat term.
+    pub fn relax_hall_vinen(
+        &self,
+        velocity: TwoFluidVelocity,
+        friction: VortexMutualFriction,
+        direction: [f64; 3],
+        dt_s: f64,
+    ) -> Result<MutualFrictionStep, MaterialError> {
+        validate_velocity(velocity)?;
+        friction_inputs(0.0, dt_s)?;
+        finite_vector(direction)?;
+        let scale = direction.into_iter().map(f64::abs).fold(0.0, f64::max);
+        if scale == 0.0 {
+            return Err(invalid("aligned vortices require a nonzero direction"));
+        }
+        // Normalize after scaling so a valid direction cannot overflow or
+        // underflow its norm merely because of its caller-selected magnitude.
+        let scaled = direction.map(|x| x / scale);
+        let norm = speed(scaled);
+        let tangent = scaled.map(|x| x / norm);
+        let decay = friction.transverse_decay_rate_s_inv * dt_s;
+        let angle = friction.rotation_rate_rad_s * dt_s;
+        if !nonnegative(decay) || !angle.is_finite() {
+            return Err(invalid(
+                "vortex friction duration product is unrepresentable",
+            ));
+        }
+        if decay == 0.0 && angle == 0.0 {
+            return Ok(unchanged(velocity));
+        }
+        let relative = self.counterflow_velocity_m_s(velocity)?;
+        self.kinetic_energy_density(velocity)?;
+        let transverse_rotated = finite_vector(cross(tangent, relative))?;
+        let transverse = cross(transverse_rotated, tangent);
+        let (sine, cosine) = det::sin_cos(angle);
+        let attenuation = det::exp(-decay);
+        // Preserve sub-ulp damping and small reactive increments. In particular
+        // exp(-decay)*cos(angle)-1 must not round to zero before applying w.
+        let cosine_minus_one = if cosine > 0.0 {
+            -sine * sine / (1.0 + cosine)
+        } else {
+            cosine - 1.0
+        };
+        let real_change = det::expm1(-decay) + attenuation * cosine_minus_one;
+        let imaginary_change = attenuation * sine;
+        let delta: [f64; 3] = std::array::from_fn(|i| {
+            real_change * transverse[i] + imaginary_change * transverse_rotated[i]
+        });
+        let next = if real_change.abs() + imaginary_change.abs() <= 0.5 {
+            TwoFluidVelocity {
+                normal_m_s: std::array::from_fn(|i| {
+                    velocity.normal_m_s[i] + self.superfluid_fraction() * delta[i]
+                }),
+                superfluid_m_s: std::array::from_fn(|i| {
+                    velocity.superfluid_m_s[i] - self.normal_fraction * delta[i]
+                }),
+            }
+        } else {
+            // Reconstruct after a large change to retain a small surviving
+            // transverse velocity instead of subtracting two nearly equal w's.
+            let parallel_speed = (0..3).map(|i| tangent[i] * relative[i]).sum::<f64>();
+            let endpoint = std::array::from_fn(|i| {
+                tangent[i] * parallel_speed
+                    + attenuation * (cosine * transverse[i] + sine * transverse_rotated[i])
+            });
+            self.velocities_from_barycentric(self.barycentric_velocity_m_s(velocity)?, endpoint)?
+        };
+        validate_velocity(next)?;
+        let transverse_speed = speed(transverse_rotated);
+        let transverse_energy = 0.5 * self.reduced_density * transverse_speed * transverse_speed;
+        let dissipated_energy_j_m3 = transverse_energy * -det::expm1(-2.0 * decay);
+        if !nonnegative(dissipated_energy_j_m3) {
+            return Err(invalid("vortex friction heat is unrepresentable"));
+        }
+        let impulse = finite_vector(delta.map(|x| self.reduced_density * x))?;
+        Ok(MutualFrictionStep {
+            velocity: next,
+            normal_impulse_kg_m2_s: impulse,
+            superfluid_impulse_kg_m2_s: impulse.map(|x| -x),
+            dissipated_energy_j_m3,
+        })
+    }
+
+    /// Frozen, unpolarized isotropic-tangle projection of the same vortex law.
+    /// Orientational averaging gives `<I-t*t^T>=2I/3` and `<t>=0`, hence
+    /// `F_n=-gamma*w` with `gamma=(rho_n*rho_s/rho)*B*kappa*L/3` [kg/(m³ s)].
+    /// This averages the FORCE before evolution; it is not an average of
+    /// independently evolved aligned populations, nor a Vinen line-density law.
+    pub fn isotropic_vortex_drag_kg_m3_s(
+        &self,
+        friction: VortexMutualFriction,
+    ) -> Result<f64, MaterialError> {
+        let gamma = (2.0 / 3.0) * friction.transverse_decay_rate_s_inv * self.reduced_density;
+        if !nonnegative(gamma) || (friction.transverse_decay_rate_s_inv > 0.0 && gamma == 0.0) {
+            return Err(invalid("isotropic vortex drag is unrepresentable"));
+        }
+        Ok(gamma)
+    }
+
     fn friction_step(
         &self,
         velocity: TwoFluidVelocity,
@@ -554,6 +751,13 @@ fn validate_velocity(v: TwoFluidVelocity) -> Result<(), MaterialError> {
 }
 fn speed(v: [f64; 3]) -> f64 {
     det::hypot(det::hypot(v[0], v[1]), v[2])
+}
+fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
 }
 fn friction_inputs(coefficient: f64, time: f64) -> Result<(), MaterialError> {
     if nonnegative(coefficient) && nonnegative(time) {
