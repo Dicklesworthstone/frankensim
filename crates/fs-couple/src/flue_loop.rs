@@ -71,6 +71,10 @@
 //!   receptivity, flat growth `exp(beta W/h)`, delay `W/(gamma U)`, Bickley
 //!   `b = 2h/5`, Verge's source length) are the other opt-ins; all three
 //!   exclude each other;
+//! - opt-in by name after the forced jet, the jet's momentum drive
+//!   ([`momentum_drive`]): `p_mom = kappa rho v0 (Q_j - Q_rest) / S_p` in series
+//!   with the volume drive below, Thwaites and Fletcher's (1983) Eq. (1) at one of
+//!   its two printed weights (1 or 2.6);
 //! - the jet is cut by the labium: the volume flow entering the pipe is
 //!   `Q_j = Q_max * (1 + tanh((eta - y0) / b)) / 2`, the card's
 //!   smoothed top-hat profile integrated, `b` its half-width scaled to
@@ -131,6 +135,9 @@ pub mod nolle_jet;
 
 /// Opt-in forced Bickley jet's causal response in place of the island's band chain.
 pub mod forced_jet;
+
+/// Opt-in momentum drive of the jet beside the volume drive (Thwaites and Fletcher 1983, Eq. (1)).
+pub mod momentum_drive;
 
 /// Opt-in jet drive of Auvray et al. (2012, 2014) in place of the island's band chain.
 pub mod auvray_jet;
@@ -741,6 +748,8 @@ pub struct FlueVoice {
     // Opt-in forced-jet kernel (see `forced_jet`): the labium displacement from the retained exit
     // velocities. None = the island's own chain.
     forced: Option<forced_jet::ForcedJetKernel>,
+    // Opt-in momentum drive beside the volume drive (see `momentum_drive`). None = the volume drive alone, bit-identical.
+    momentum: Option<momentum_drive::MomentumDrive>,
     // Opt-in Auvray jet drive (see `auvray_jet`): in-phase receptivity, flat growth, pure convection,
     // Bickley cut and Verge source length. None = the island's own chain.
     auvray: Option<auvray_jet::AuvrayJet>,
@@ -874,6 +883,7 @@ impl FlueVoice {
             nolle: None,
             forced: None,
             auvray: None,
+            momentum: None,
             jet_noise: None,
             minimum_jet_speed_m_s: minimum_jet_speed,
             max_jet_history_samples: max_history,
@@ -1600,7 +1610,7 @@ impl FlueVoice {
         let flow_m3_s = if c.q_max > 0.0 {
             0.5*c.q_max*(1.0+((eta_m-c.offset_m)/c.half_width_m).tanh())
         } else { 0.0 };
-        let source_pa = self.source_coeff*(flow_m3_s-self.flow_prev)/self.dt;
+        let source_pa = self.jet_source_pa(flow_m3_s, c);
         if ![velocity, band_state[0], band_state[1], hp_out, displacement_m,
             eta_m, flow_m3_s, source_pa].iter().all(|v| v.is_finite()) {
             return Err(FlueError::Invalid { what: "jet trial left the finite physical domain" });
@@ -1788,7 +1798,10 @@ impl FlueVoice {
             (None, None) => self.island.displacement_gain*dt*c.hp_alpha*c.band_alpha*c.band_alpha
                 *delayed.current_weight/area,
         };
-        let feedback = compliance*(self.source_coeff/dt)*(0.5*c.q_max)*eta_slope/c.half_width_m;
+        // The source's slope in Q_j: the volume drive's `source_coeff/dt` plus, with the opt-in momentum drive attached,
+        // its direct `kappa rho v0 / S_p` (exactly zero without it). The bound is never loosened.
+        let source_slope = self.source_coeff/dt + self.momentum_source_slope(c);
+        let feedback = compliance*source_slope*(0.5*c.q_max)*eta_slope/c.half_width_m;
         if direct.abs() > 1.0 || !compliance.is_finite() || compliance <= 0.0
             || !feedback.is_finite() || !(feedback < 1.0) {
             return Err(FlueError::Invalid { what: "current jet feedback is underresolved; refine the source time step" });
@@ -1796,7 +1809,7 @@ impl FlueVoice {
         // The cut jet lies between zero and Qmax. The lossless responses at
         // those extremes, extended to zero, bracket every passive-loss root.
         let linear = |flow| solve_mouth_port(boundary,
-            self.source_coeff*(flow-self.flow_prev)/dt-radiation_history, self.q_prev, l, r, zc, dt);
+            self.jet_source_pa(flow, c)-radiation_history, self.q_prev, l, r, zc, dt);
         let mut lo = linear(0.0)?.flow_m3_s.min(0.0);
         let mut hi = linear(c.q_max)?.flow_m3_s.max(0.0);
         if let Some(loss) = &self.mouth_contraction {

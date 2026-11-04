@@ -212,6 +212,11 @@ impl FlueFilePerformance {
     /// chain by the forced Bickley jet's causal response (`flue_loop::forced_jet`). It is integrated
     /// at grid SPACING [b] over WINDOW [b/U0] at the Reynolds number of the gesture's highest
     /// blowing pressure; register physics is graded on 0.1 90. The two rows exclude each other.
+    /// Optional `momentum_drive KAPPA` right after `jet_response` adds the jet's momentum drive
+    /// (`flue_loop::momentum_drive`), `kappa rho v0 (Q_j - Q_rest) / S_p` in series with the volume
+    /// drive, Thwaites and Fletcher (1983) Eq. (1). KAPPA is required and only `1` (Eq. (1), p. 401) or
+    /// `2.6` (their Sec. II fit, p. 402) is accepted; it requires the `jet_response` row. Omission keeps
+    /// every default result bit-identical.
     /// The `jet` row's DISPLACEMENT_GAIN is the default chain's authored gain. The cards' 90 is
     /// about 7-18x the forced jet's response at each note's speaking mode (mail 7491). It stands
     /// until the forced jet passes fg_003, fg_004, fj_001 and gas_direction_amount (ruling 7518,

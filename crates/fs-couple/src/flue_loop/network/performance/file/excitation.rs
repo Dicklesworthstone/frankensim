@@ -8,6 +8,7 @@ use super::{FlueInputError, Rows, bad, poll};
 use crate::bernoulli_aperture::contraction::ContractionSpec;
 use crate::flue_loop::auvray_jet::AuvraySpec;
 use crate::flue_loop::forced_jet::{ForcedJetSpec, JetExitLaw};
+use crate::flue_loop::momentum_drive;
 use crate::flue_loop::nolle_jet::{ChannelClass, NolleSpec};
 use crate::flue_loop::{FlueError, FlueVoice};
 use fs_exec::CancelGate;
@@ -133,6 +134,7 @@ pub(crate) struct FlueJetInput {
     card_centreline: bool,
     transfer: Option<JetTransferInput>,
     response: Option<(ForcedJetSpec, JetExitLaw)>,
+    momentum: Option<f64>,
 }
 
 impl FlueJetInput {
@@ -227,6 +229,26 @@ impl FlueJetInput {
         } else {
             None
         };
+        // Optional `momentum_drive KAPPA` right after `jet_response`: KAPPA is required and only the two printed weights
+        // (1, Thwaites and Fletcher 1983 Eq. (1); 2.6, their Sec. II fit) are accepted. It acts on the forced jet's cut flow.
+        let momentum = if rows.next_is("momentum_drive") {
+            let mut row = rows.row("momentum_drive")?;
+            let line = row.line;
+            if row.fields.clone().next().is_none() {
+                return Err(bad(line, momentum_drive::KAPPA_REFUSED));
+            }
+            let kappa = row.scalar().map_err(|_| bad(line, momentum_drive::KAPPA_REFUSED))?;
+            row.end()?;
+            if response.is_none() {
+                return Err(bad(line, "momentum_drive requires the jet_response row before it"));
+            }
+            if !momentum_drive::is_printed_weight(kappa) {
+                return Err(bad(line, momentum_drive::KAPPA_REFUSED));
+            }
+            Some(kappa)
+        } else {
+            None
+        };
         if transfer.is_some() && response.is_some() {
             return Err(bad(
                 rows.line,
@@ -244,6 +266,7 @@ impl FlueJetInput {
             card_centreline,
             transfer,
             response,
+            momentum,
         })
     }
 
@@ -279,15 +302,21 @@ impl FlueJetInput {
             }
             None => voice,
         };
-        match self.response {
+        let voice = match self.response {
             Some((spec, exit)) => {
                 poll(gate)?;
                 let voice = voice
                     .with_forced_jet_exit(spec, exit, held_pressure_pa)
                     .map_err(FlueInputError::Physics)?;
                 poll(gate)?;
-                Ok(voice)
+                voice
             }
+            None => voice,
+        };
+        match self.momentum {
+            Some(kappa) => voice
+                .with_momentum_drive(kappa)
+                .map_err(FlueInputError::Physics),
             None => Ok(voice),
         }
     }

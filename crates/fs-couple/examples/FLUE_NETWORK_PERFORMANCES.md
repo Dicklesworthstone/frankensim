@@ -639,6 +639,15 @@ integrated at grid SPACING [b] over WINDOW [b/U0] at the Reynolds number of the
 gesture's highest blowing pressure, and register physics is graded on 0.1 90. The
 gain is then unused. In both source formats it excludes `jet_transfer nolle-price-2015`.
 
+The optional `momentum_drive KAPPA` row, directly after `jet_response`, adds the jet's momentum
+drive beside the volume drive (Thwaites and Fletcher 1983, Eq. (1) p. 401): a series pressure
+`KAPPA rho v0 (Q_j - Q_rest) / S_p`, where `v0` is the bulk jet speed, `S_p` the bore area and
+`Q_rest` the cut flow of the quiescent jet. KAPPA is required; only `1` (Eq. (1) as printed) and
+`2.6` (their Sec. II fit) are accepted. It needs the `jet_response` row; omitting it keeps every
+result bit-identical. Their jet is turbulent with cut-up/slit 20 to 40; this one is the laminar
+Bickley kernel, and their end correction (19 to 30 cm, referred to a 10 cm pipe) is far larger
+than ours, so the printed weights are a transfer, not a calibration of these cards.
+
 During a pressure gesture the response uses the accumulated convective clock
 `tau = integral U0(t)/b dt`. Each accepted physical-time velocity interval keeps
 its own speed and age; changing the pressure no longer retimes the entire past

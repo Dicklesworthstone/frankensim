@@ -7630,6 +7630,21 @@ None.
   7491). It stands until the forced jet passes fg_003, fg_004, fj_001 and
   gas_direction_amount (ruling 7518, mail 7859, bead pexfp.135.1).
 
+  OPT-IN MOMENTUM DRIVE (`FlueVoice::with_momentum_drive`, card row
+  `momentum_drive KAPPA` right after `jet_response`): the forced jet's cut flow
+  also drives the pipe through the jet's momentum flux, Thwaites and Fletcher
+  (1983, JASA 74:400) Eq. (1) p. 401: a series pressure `kappa rho v0 (Q_j -
+  Q_rest) / S_p` beside the volume drive `source_coeff dQ_j/dt`. `v0` is the
+  bulk jet speed of `q_max = v0 h W`, `S_p` the bore area, `Q_rest` the cut
+  flow of the quiescent jet (no source from the steady jet); the term is in the
+  same-sample solve and in the `feedback < 1` guard (never loosened). KAPPA is
+  required and only `1` (Eq. (1), as printed) or `2.6` (their Sec. II
+  pulsating-jet fit, one rig, authors unsure of its meaning) is accepted;
+  anything else is refused. A card without the row is bit-identical. Transfer
+  caveats (turbulent jet, cut-up/slit 20-40, versus this laminar Bickley jet;
+  their end correction 19-30 cm referred to the pipe versus ours of a few
+  millimetres) are in the module doc and the provenance sidecar.
+
   OPT-IN FORCED JET (`FlueVoice::with_forced_jet`, card row `jet_response
   forced-bickley SPACING WINDOW`; rulings 7376/7518): the forced Bickley
   jet's complete causal response replaces the band chain and the authored
