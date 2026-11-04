@@ -14,6 +14,10 @@ mod entropy;
 #[path = "friction_heat/cohesive.rs"]
 mod cohesive;
 
+#[cfg(feature = "experimental-solid-contact-heat")]
+#[path = "friction_heat/solid.rs"]
+mod solid;
+
 struct Sensible;
 impl ThermalLaw for Sensible {
     fn temperature_k(&self, h: f64) -> Result<f64, DepositionError> {

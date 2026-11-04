@@ -190,6 +190,14 @@ fn g1_constant_source_recovers_original_unpinned_equilibrium_and_work() {
     assert_eq!(sourced.u, original.u);
     assert_eq!(sourced.friction_reactions, original.friction_reactions);
     assert_eq!(sourced.friction_work, original.friction_work);
+    assert_eq!(
+        sourced.friction_work_per_node,
+        original.friction_work_per_node
+    );
+    assert_eq!(
+        sourced.friction_work_per_node.iter().sum::<f64>(),
+        sourced.friction_work,
+    );
     assert_eq!(sourced.iterations, original.iterations);
     assert!(original.friction_sources.is_empty());
     assert_eq!(sourced.friction_sources.len(), mesh.nodes.len());
@@ -254,6 +262,7 @@ fn g1_local_temperature_pressure_and_speed_control_actual_interface_traction() {
         let mut total = 0.0;
         for (i, sample) in result.friction_sources.iter().enumerate() {
             let Some(sample) = sample else {
+                assert_eq!(result.friction_work_per_node[i], 0.0);
                 continue;
             };
             let normal = -problem.barrier.d1(mesh.nodes[i][1] + 0.02);
@@ -267,6 +276,10 @@ fn g1_local_temperature_pressure_and_speed_control_actual_interface_traction() {
             close(sample.relative_speed_m_s, 0.002);
             close(result.friction_reactions[i][0], coefficient * normal);
             close(result.friction_reactions[i][1], 0.0);
+            close(
+                result.friction_work_per_node[i],
+                coefficient * normal * 0.001,
+            );
             if axis == "P" {
                 close(sample.source.query().axes()["P"], normal / 0.5);
             }
@@ -276,6 +289,10 @@ fn g1_local_temperature_pressure_and_speed_control_actual_interface_traction() {
             total += coefficient * normal * 0.001;
         }
         close(result.friction_work, total);
+        assert_eq!(
+            result.friction_work_per_node.iter().sum::<f64>(),
+            result.friction_work
+        );
         close(result.friction_support_work, total);
         assert_eq!(result.u, reference);
     }
@@ -430,6 +447,13 @@ fn g3_running_in_history_drives_traction_counts_reversals_and_rolls_back() {
     )
     .unwrap();
     let mut expected_distance = 0.2;
+    for (node, position) in mesh.nodes.iter().enumerate() {
+        assert_eq!(
+            trajectory.is_contact_active(node).unwrap(),
+            position[1] == 0.0
+        );
+    }
+    assert!(trajectory.is_contact_active(mesh.nodes.len()).is_err());
     // Each interval resolves its reversal. Normal motion contributes no sliding,
     // and detached nodes do not acquire running-in history from surface travel.
     for surface in [[0.003, 0.0], [-0.001, 0.0], [0.0, 0.002]] {
@@ -441,6 +465,7 @@ fn g3_running_in_history_drives_traction_counts_reversals_and_rolls_back() {
             let Some(sample) = sample else {
                 close(trajectory.sliding_distance()[i], 0.2);
                 close(solution.sliding_distance_increment[i], 0.0);
+                assert_eq!(solution.friction_work_per_node[i], 0.0);
                 continue;
             };
             close(trajectory.sliding_distance()[i], expected_distance);
@@ -456,6 +481,10 @@ fn g3_running_in_history_drives_traction_counts_reversals_and_rolls_back() {
                 surface[0].signum()
             };
             close(solution.friction_reactions[i][0], direction * mu * normal);
+            close(
+                solution.friction_work_per_node[i],
+                mu * normal * surface[0].abs(),
+            );
         }
         close(solution.friction_work, solution.friction_support_work);
         assert_eq!(solution.u, reference);

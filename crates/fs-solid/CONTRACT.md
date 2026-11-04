@@ -36,6 +36,15 @@ unconverged lags publish no trajectory state or work. Constant sources preserve 
 coefficient path; focused G1/G3/G4 contact tests exercise native equilibria,
 local temperature/pressure/speed response, final-query closure and rollback.
 
+The same final Huber traction supplies `friction_work_per_node` in original
+nodal order; its ordered sum is the existing `friction_work`. Inactive nodes
+and disabled friction contribute zero. SI plane-strain work is J/m of physical
+depth, so conversion to heat requires an explicit depth and heat fraction.
+`ContactTrajectory` can be cloned for a private coupled trial while retaining
+the immutable original problem and all accepted distance, displacement and
+work. This permits joint mechanics/thermal acceptance without aging the
+accepted interface during thermal iterations.
+
 ## Graded reference density on native HEX8 solids
 
 `linear3::hex8::Hex8ElasticProblem::assemble_with_reference_density` accepts

@@ -75,6 +75,7 @@ fs-tribo = { path = "../fs-tribo" }
 fs-vfit = { path = "../fs-vfit" }
 
 [dev-dependencies]
+fs-cutfem = { path = "../fs-cutfem" }
 fs-modalid = { path = "../fs-modalid" }
 fs-ladder = { path = "../fs-ladder" }
 fs-io = { path = "../fs-io" }
@@ -89,6 +90,8 @@ fs-evidence = { path = "../fs-evidence" }
 workspace = true
 
 [features]
+# Native SDF barrier friction, accepted sliding history and finite-cell heat.
+experimental-solid-contact-heat = ["fs-solid/contact"]
 # Coherent winding heat and magnetic work on the native enthalpy timeline.
 harmonic-winding-heating = ["fs-em/harmonic-exposure"]
 # Closed-channel two-fluid friction heat on the original thermal timeline.

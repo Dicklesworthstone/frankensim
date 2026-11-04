@@ -18920,6 +18920,55 @@ The scope remains frozen poses, supplied positive normal patches, matching finit
 Four G0/G1/G5 tests in `rigid_friction_heat_network.rs` cover an independently eliminated three-body/two-interface reference with shared middle-body mobility and shared finite heat capacity, retained second-step input permutation, source/budget/cancellation/competing-owner rollback and exact retry, and zero-friction hot-to-cold conduction. The reference interface temperatures are 304.69405993744004 K and 303.18187043010846 K; physical heats are 0.17343547971344292 J and 0.088803662273099 J. Tests admit 2e-7 K and 1e-9 J respectively. Four existing single-interface regressions also pass in the bounded native source-selected lane; this is not full workspace/DSR verification.
 
 
+### Native SDF solid friction and temperature feedback
+
+The opt-in `experimental-solid-contact-heat` feature exposes
+`friction_heat::solid::propose_solid_contact_heat`. It solves the existing native
+`ContactTrajectory` and `FrictionHeatNetworkStep` at one common endpoint using
+the existing bounded Newton owner. Every thermal trial starts from a clone of
+the same accepted displacement, physical time, sliding history and work. Its
+solved common face temperature refreshes each original `SourceThermalCoulomb`
+primary temperature coordinate. Native contact still owns pressure, secant
+speed, accumulated distance, normal load and force equilibrium. Additional
+temperature coordinates, including semantic fixed-external temperatures and
+non-primary legacy `T`, refuse until their thermal body/side ownership exists.
+
+One bounded exact-temperature cache avoids repeating the finite-element solve
+when thermal-cell perturbations leave all interface temperatures unchanged.
+Accepted mechanics, load, motion and source bindings are immutable within the
+call. The cache holds one native result and trajectory, with no Hessian or
+thermal/source callback payload. Conductivity and other heat resolve on every
+residual; actual mechanical solves and thermal trials are reported separately.
+
+Each active node has one explicit original thermal route. Initial separation,
+loss of the mapped contact, duplicate/missing coverage and pressure-width times
+depth inconsistent with thermal face area refuse. Native nodal Huber work is
+converted from J/m to J using a positive supplied physical depth. A declared
+per-node heat fraction enters the massless thermal face; the remainder is
+reported as exported nonthermal work, without inventing a damage or wear store.
+Original material conductivities and finite caloric bodies determine the signed
+two-body heat partition, including ordinary hot-to-cold exchange. No side split,
+new heat capacity or second conduction model is introduced.
+
+The exact final nonlinear payload retains the mechanical solution, source
+queries and trajectory; trial callbacks never publish accepted history. Nodal
+work closure, original cell/interface/thermal gates and the independent port
+balance `W_body_friction + delta(H) + D_other - W_support - Q_external` all precede
+publication. This is a friction/thermal port balance, not an integrated bulk
+hyperelastic energy assertion. Source/domain, nonlinear-budget and cancellation
+refusals leave both original owners unchanged.
+
+This remains fixed-footprint, quasistatic plane strain with Huber creep and
+endpoint work/path quadrature. Contact transitions and tangent reversals require
+time refinement; no continuous-path contact certificate is added. Bulk thermal
+strain/softening, moving thermal coverage, finite interface resistance and flash
+temperature remain outside this entry. The native integration fixture in
+`tests/friction_heat/solid.rs` compares heated friction and two finite bodies to
+an independently eliminated scalar reference, checks final T/path queries and
+late rollback, and exercises explicit nonthermal loss and ownership refusals.
+The two original work-conversion kernel tests pass; the new integrated fixture
+has not run under the current executor resource limit.
+
 ### Deformable damaged adhesive joints and finite-body heat
 
 `friction_heat::cohesive::propose_deformable_cohesive_heat` advances the original
