@@ -38,6 +38,8 @@ use fs_render::volumes::VolumeGrid;
 use fs_render::volumes::transport::scattering::{MassScatteringSpectrum, ScatteringGrid};
 use fs_render::volumes::transport::{AbsorbingGrid, AbsorbingGridBudget, MassAbsorptionSpectrum};
 
+#[path = "photometric_fixtures/aperture_controls.rs"]
+mod aperture_controls;
 #[path = "photometric_fixtures/lens_controls.rs"]
 mod lens_controls;
 #[path = "photometric_fixtures/optical_components.rs"]

@@ -3983,6 +3983,12 @@ isolation. These masks represent planar opaque blade geometry sampled into
 the native gobo law; three-dimensional blade placement, diffraction,
 manufactured-iris calibration and total physical error remain unqualified.
 
+End-to-end fixture regressions exercise transformed camera/probe paths,
+closed apertures, cancellation/replay, and 300 fixtures with 24 finite emitters
+each. The large-rig case uses an independently specified one-eighth opening
+and 759.375 lm total after optical and emitter controls. These are regression
+references, not measured throughput or total physical-error bounds.
+
 #### Bounded direct-area references for fixture rigs
 
 `UnoccludedAreaReference::new_with_rig` and
