@@ -5,6 +5,7 @@
 use super::harmonic::{MAX_MODES, MAX_PRODUCTS, Sum};
 use super::*;
 use fs_exec::CancelGate;
+use fs_fft::welch::{WelchCrossSpectrum, WelchPeakBin};
 
 /// Explicit cold-preparation storage and work. The quadrature ladder uses the
 /// original Gauss–Legendre/uniform-longitude grids, growing latitude count by
@@ -364,6 +365,26 @@ impl PreparedRadiationObservation {
         )
     }
 
+    /// Requested-direction radiation from measured source coherence in one
+    /// interior Welch bin. Output is this bin's W/sr, not W/(sr Hz).
+    /// Channels retain the original source kinds, order, SI units and clock.
+    /// No kernel evaluation, boundary solve or full-sphere integration occurs.
+    #[allow(clippy::too_many_arguments)]
+    pub fn observe_welch_bin(
+        &self,
+        spectrum: &WelchCrossSpectrum,
+        bin: usize,
+        recorded_order: &[SourceId],
+        budget: HarmonicWorkBudget,
+        output_w_per_sr: &mut [f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(), TransferError> {
+        check_cancel(&mut cancelled)?;
+        let view =
+            harmonic::welch::source_bin(spectrum, bin, self.omega, &self.sources, recorded_order)?;
+        self.observe_power(Input::Welch(view), budget, output_w_per_sr, &mut cancelled)
+    }
+
     fn observe_power(
         &self,
         input: Input<'_>,
@@ -446,6 +467,36 @@ impl PreparedRadiationObservation {
         )
     }
 
+    /// Full outgoing power and angular moments of one measured spectral bin.
+    ///
+    /// Retained source fields are combined coherently for each measured factor
+    /// before positive angular power is formed. The ORIGINAL angular refinement
+    /// and two-successive-grid convergence gate run on this actual covariance;
+    /// converged source self-powers do not qualify a different interference
+    /// pattern. The cache is reused without solves, quadrature kernels or query
+    /// allocation. Work includes recorded-factor conversion and every cached
+    /// direction needed by the original convergence ladder.
+    ///
+    /// Returns bin watts and W/sr, with bandwidth and peak/time normalization
+    /// each applied once. DC/Nyquist, frequency and source-order mismatches
+    /// refuse. The record does not validate stationarity, unobserved bands,
+    /// independent segments, source physics or a continuum radiation error.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_welch_bin(
+        &self,
+        spectrum: &WelchCrossSpectrum,
+        bin: usize,
+        recorded_order: &[SourceId],
+        budget: HarmonicWorkBudget,
+        output_w_per_sr: &mut [f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<RadiatedPowerMoments, TransferError> {
+        check_cancel(&mut cancelled)?;
+        let view =
+            harmonic::welch::source_bin(spectrum, bin, self.omega, &self.sources, recorded_order)?;
+        self.evaluate_power(Input::Welch(view), budget, output_w_per_sr, &mut cancelled)
+    }
+
     fn evaluate_power(
         &self,
         input: Input<'_>,
@@ -499,6 +550,14 @@ impl PreparedRadiationObservation {
                 }
                 2 * sources
             }
+            Input::Welch(view) => {
+                cap(view.segment_count(), MAX_MODES)?;
+                if view.channel_count() != sources {
+                    return Err(TransferError::Invalid("radiation recorded source shape"));
+                }
+                // Include both scalar components of the checked peak conversion.
+                view.segment_count() * (3 * sources + 1)
+            }
         };
         let directions = self.directions.len()
             + if integrate_power {
@@ -521,9 +580,22 @@ impl PreparedRadiationObservation {
         direction: usize,
         drives: &[C64],
     ) -> Result<C64, TransferError> {
+        self.field_with(columns, directions, direction, drives.len(), |source| {
+            Ok(drives[source])
+        })
+    }
+
+    fn field_with(
+        &self,
+        columns: &[C64],
+        directions: usize,
+        direction: usize,
+        sources: usize,
+        mut drive: impl FnMut(usize) -> Result<C64, TransferError>,
+    ) -> Result<C64, TransferError> {
         let mut sum = Sum::default();
-        for (source, &drive) in drives.iter().enumerate() {
-            sum.add(columns[source * directions + direction] * drive);
+        for source in 0..sources {
+            sum.add(columns[source * directions + direction] * drive(source)?);
         }
         let value = sum.finish();
         if !finite(value) {
@@ -558,6 +630,20 @@ impl PreparedRadiationObservation {
                     }
                     let value = columns[source * directions + direction]
                         .scale(det::sqrt(power))
+                        .scale(self.power_scale);
+                    sum.add(C64::from_re(value.norm_sq()));
+                }
+            }
+            Input::Welch(view) => {
+                for factor in view.factors() {
+                    check_cancel(cancelled)?;
+                    let value = self
+                        .field_with(columns, directions, direction, factor.len(), |source| {
+                            if source % 256 == 0 {
+                                check_cancel(cancelled)?;
+                            }
+                            harmonic::welch::peak(view, factor[source])
+                        })?
                         .scale(self.power_scale);
                     sum.add(C64::from_re(value.norm_sq()));
                 }
@@ -661,6 +747,7 @@ impl PreparedRadiationObservation {
 enum Input<'a> {
     Modes { factors: &'a [C64], modes: usize },
     Independent(&'a [f64]),
+    Welch(WelchPeakBin<'a>),
 }
 
 fn admit_columns(values: &[C64], expected: usize) -> Result<(), TransferError> {
@@ -692,3 +779,7 @@ fn check_cancel(cancelled: &mut impl FnMut() -> bool) -> Result<(), TransferErro
 #[cfg(test)]
 #[path = "radiation/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "radiation/welch_tests.rs"]
+mod welch_tests;

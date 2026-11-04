@@ -2797,3 +2797,46 @@ quadrature; its residual converges quadratically rather than being declared
 zero by construction. Six further native fs-fft tests exercise the shared
 endpoint/increment implementation. No full BEM solve, workspace build,
 mechanical-force inference or experimental validation is claimed.
+
+## Recorded source coherence in retained fields, microphones and radiation
+
+`PreparedHarmonicObservation::evaluate_welch_bin` propagates the measured
+joint spectrum through the original retained pressure/velocity bank.
+`PreparedMicrophoneArray::evaluate_welch_bin` retains the full Hermitian
+cross-receiver matrix after each original directional p/u projection.
+`PreparedRadiationObservation::{observe_welch_bin,evaluate_welch_bin}` carries
+the same source coherence into angular power and integrated outgoing power
+with its signed first and symmetric second directional moments.
+
+Every call requires the explicit recorded `SourceId` order to match the
+original prepared bank, including source kinds. Channels keep their actual
+structural-rate, volume-flow or force units; pressure-only re-labeling and
+same-sized source-bank substitution are refused. The original fluid,
+surface/boundary solution, direct/scattered paths, molecular field response,
+receiver geometry, source normalization and producer uncertainty remain.
+
+The shared `WelchPeakBin` admits the exact original angular frequency and
+applies checked `sqrt(2 df)` conversion once. Each source factor is propagated
+coherently before field products are averaged. Results integrate one resolved
+bin: Pa², velocity covariance, signed W/m², W/sr and W as appropriate, never
+implicitly per-hertz densities. DC and Nyquist are refused. Cross-frequency
+covariance, statistical confidence, segment independence and record
+stationarity are not inferred. Original finite-record leakage remains.
+
+Queries allocate no memory and perform no new boundary solve or propagation
+kernel evaluation. Measured-factor work is included in the existing bounds;
+cancellation is polled during source/factor/receiver contractions. Microphone
+amplitudes are computed once per factor and receiver, not per receiver pair.
+Radiated power must pass the original two-successive-angular-grid convergence
+gate for the ACTUAL recorded covariance. Successful self-power or another
+drive's convergence cannot authorize a different interference pattern.
+
+Eight focused native tests pass against actual FFT/math, harmonic statistics,
+microphone projection, radiation contraction, Gauss-Legendre angular grids
+and convergence algorithms. Independent spherical source fields and sphere
+integrals check all p/u moments, complex beamformer power, Q/force directional
+cross moments, Hann normalization, exact/partial cancellation, covariance-
+dependent angular refusal, identity, work and cancellation/replay. The leaf
+uses explicit analytic source-column fixtures and nominal outer error types;
+it does not claim a boundary solve. A separate original-boundary-solution
+integration test is included but remains unrun without the constellation.

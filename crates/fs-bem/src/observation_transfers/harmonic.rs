@@ -486,6 +486,8 @@ impl PreparedMicrophoneArray<'_> {
 mod momentum;
 pub use momentum::{HarmonicMomentumFlux, PreparedHarmonicSurfaceMomentum};
 
+pub(super) mod welch;
+
 mod exposure;
 pub use exposure::{
     HarmonicMomentumLimits, HarmonicVolumeQuadrature, HarmonicWaveMomentumFlux,
