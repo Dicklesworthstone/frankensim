@@ -14910,7 +14910,7 @@ This is a fixed-reference, constant-coefficient, reversible small-strain
 model. The midpoint method is second order for smooth forcing and adds no
 model damping; an energy balance does not establish time or mesh convergence.
 General circuits, radiation, dielectric/structural loss, nonlinear switching,
-thermal updates and experimental validation remain outside this spatial path.
+ceramic thermal updates and experimental validation remain outside this spatial path.
 `piezoelectric_plate` exercises an actual finite-plate voltage ramp followed by
 charge-preserving electrode disconnection and computed open-circuit ringing.
 
@@ -14931,6 +14931,27 @@ charge and heat; that heat belongs to the load, not the ceramic. Temperature
 evolution and general RLC networks are not inferred. Synthetic RC exponential,
 current/voltage drive and mechanically excited harvesting tests exercise this
 same field solve, including orientation, gauge and transactional refusal checks.
+
+`transient::load::thermal::step_with_thermal_loads_candidate` connects those
+original electrode loads to `PreparedMaterialNetwork` and the existing
+cell-driver enthalpy residual. Each prepared resistor has exactly one electrode
+binding; its original material-network destination alone selects the finite
+heat receiver. Pinned electrical and conductive claims are evaluated at every
+proposed thermal endpoint. The original spatial midpoint solve supplies actual
+load current, Joule heat and motion; no separate RC or mechanical integrator is
+introduced. Native thermal links carry that heat into finite neighbouring cells.
+
+Both accepted clocks must agree. Every trial starts from the same accepted
+mechanical/electrical history, and one candidate contains both final histories
+only after the native thermal and combined work/storage checks pass. The
+complete source sample, per-load heat routes and spatial residuals are retained.
+The ceramic keeps its original fixed source tensors and small-strain geometry;
+only the external load and thermal network evolve temperature. Coupled accuracy
+is first order in general. Synthetic regressions in
+`tests/piezoelectric/spatial_transient_load/thermal.rs` compare finite two-cell
+heating and spatial motion against independently eliminated scalar equations,
+including source substitution, polarity, continuation and transactional refusal.
+They do not establish empirical ceramic or conductor qualification.
 
 The reduced rod/circuit path also accepts
 `TensorPiezoelectric::longitudinal(direction)` without a second scalar material

@@ -7,6 +7,9 @@
 use super::*;
 use fs_material::conductor::{OhmicDrive, ResolvedConductor};
 
+/// Finite load heating and material feedback through the original enthalpy solve.
+pub mod thermal;
+
 /// External electrode source with the existing voltage/charge topology fixed.
 #[derive(Clone, Copy, Debug)]
 pub enum ElectrodeDrive {
