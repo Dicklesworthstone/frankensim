@@ -37,8 +37,8 @@ pub struct DampedTonePole {
 /// produces the same design and fit bits as the corresponding `ToneFitPlan`.
 #[derive(Debug, Clone)]
 pub struct DampedToneFitPlan {
-    poles: Vec<DampedTonePole>,
-    design: FitDesign,
+    pub(super) poles: Vec<DampedTonePole>,
+    pub(super) design: FitDesign,
 }
 
 impl DampedToneFitPlan {

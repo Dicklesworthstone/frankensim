@@ -14,6 +14,8 @@
 //! preserving physical inharmonicity and the interaction of close tones.
 //! [`DampedToneFitPlan`] retains supplied exponential decay rates as well as
 //! frequencies, fitting ringdowns and double decay through the same QR owner.
+//! [`refine_damped_tone_poles`] jointly refines locally seeded frequencies and
+//! amplitude decay rates without treating a ringdown as stationary harmonics.
 //!
 //! The returned peak phasor is `a_h + i b_h` for `exp(-i w_h t)`, referenced
 //! to the first sample. For an undamped bin-centered real sinusoid, it is
@@ -26,6 +28,17 @@ use fs_math::det;
 #[path = "harmonic/damped.rs"]
 mod damped;
 pub use damped::{DampedToneFitPlan, DampedTonePole};
+
+#[path = "harmonic/poles.rs"]
+mod poles;
+pub use poles::{
+    DampedToneBounds, DampedToneCorrection, DampedTonePoleChannelsFit, DampedTonePoleFit,
+    DampedToneRefinementBudget, DampedToneRefinementError, refine_damped_tone_poles,
+    refine_damped_tone_poles_channels,
+};
+
+#[path = "harmonic/refinement.rs"]
+mod refinement;
 
 #[path = "harmonic/frequency.rs"]
 mod frequency;

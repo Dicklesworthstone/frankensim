@@ -297,6 +297,65 @@ tones, time-origin attenuation/phase covariance, stationary-limit bit parity,
 physical-unit scaling and preloads, direct residual reconstruction, and typed
 rank/domain/storage refusals.
 
+### Joint ringdown pole refinement
+
+`harmonic::refine_damped_tone_poles` and
+`refine_damped_tone_poles_channels` locally refine the supplied frequencies
+AND amplitude decay rates of `DampedToneFitPlan`. The original Householder
+amplitude/DC fit, bounded backtracking and streaming channel-QR owner are
+shared with stationary tone refinement. The damped path retains the complete
+variable-projection Jacobian: for `r = y - A*c`, the negative residual
+derivative is `P_perp*D*c + (A^+)^T*D^T*r`. With `A = Q1*R` it is evaluated
+in Q coordinates as `[R^-T D^T r; Q2^T D*c]`, without forming a projector,
+pseudoinverse or normal equations. The residual-dependent first block is
+retained even away from an exact fit. See
+[O'Leary and Rust, §2.3](https://www.cs.umd.edu/users/oleary/software/varpro.pdf).
+
+`DampedToneBounds` supplies a finite closed rectangle for each pole, with
+positive sub-Nyquist frequency and nonnegative decay intervals of nonzero
+width. Rectangles must be strictly disjoint in at least one coordinate;
+separated decay intervals admit same-frequency double decay. Seed, pole,
+phasor and correction order is preserved. Frequencies remain damped
+oscillation frequencies, not undamped natural frequencies; decay acts on
+amplitude, and all peak phasors refer to the first sample. Common-unit
+channel weights remain physical under orthogonal changes of vector
+components. Constant channels retain their DC without inventing pole data.
+
+`DampedToneRefinementBudget` bounds all candidate evaluations and conservative
+numeric storage before allocation. Every untruncated frequency AND decay
+correction must satisfy its own tolerance. Trials are limited to a quarter
+cycle and half an amplitude e-fold across the record, with monotone residual
+backtracking. Active bounds, stagnation and exhausted work refuse. Both the
+full Jacobian and its projected physical sensitivity are independently gated
+by the declared reciprocal-condition floor, using coordinates `f*duration`
+and `decay*duration` without independent column normalization. The reported
+condition is their minimum: residual curvature cannot make an unexcited
+declared pole identifiable. Projected sensitivity must also exceed a roundoff
+floor in globally normalized signal units: a uniformly roundoff-sized
+Jacobian can have a good condition number. This floor is invariant to common
+physical unit changes and retains physically weak resolved records.
+Stationary APIs retain their original Kaufman
+derivative path; fixed-pole zero-decay fits retain stationary design/fit bits.
+
+G1/G3 checks in `tests/damped_tone_poles.rs` use an independent damped
+oscillator initial-value solution, beating unisons with a weak inharmonic
+partial, equal-frequency double decay, physical-unit and first-sample clock
+changes, vector-channel rotations, omitted-motion residuals, absent poles,
+and work/storage/domain refusals. An in-module finite-difference check
+compares the complete profiled Jacobian with independently refitted records
+at nonzero residual; a separate omitted-tone case prevents residual-only
+curvature from passing the observability gate.
+
+This supplies a ringdown observation building block for
+`frankensim-irp-v5-instrument-realism-pexfp.279` (two-polarization decay) and
+`frankensim-irp-v5-instrument-realism-pexfp.280` (string loss and late decay).
+It does not complete either acceptance bead, certify material parameters,
+discover mode count, estimate uncertainty, fit growth/chirps, remove aliasing
+or guarantee global/noisy-record identifiability. Unmodeled motion stays in
+the residual and can bias the fitted poles. Work remains
+O(E C (N K² + K³)), storage O(N K + K² + C K); no new throughput or
+mid-factorization cancellation claim is made.
+
 ### Local fundamental-frequency refinement
 
 `harmonic::refine_harmonic_frequency` refines an independently supplied pitch
