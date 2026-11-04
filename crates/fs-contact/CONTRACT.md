@@ -1783,6 +1783,22 @@ rotation, an interior radius violation, first slip/fold and atomic refusals,
 and detached history. This owner refuses an inadmissible whole segment; it does
 not manufacture post-slip or post-fold motion.
 
+`advance_tangential_stage_until_event` now locates the first sourced gross-slip
+or apparatus-radius boundary on that same vector loading segment. Analytic
+normal-spring elimination and bounded scalar radius roots avoid rebuilding a
+fixture at every probe. A stable quadratic chooses the outward intersection
+after any initial unloading/reversal. The result retains the canonical last
+admitted response, a numerical critical-radius bracket, actual reversible
+actuator work and unused vector travel. A relative 128-epsilon stage guard
+keeps the response on the supported side of the numerical boundary; it does
+not regularize friction or claim exact radius accuracy at a fold. One original
+work budget covers all queries and the single successor. Physical event kinds
+remain distinct from source/applicability errors. Boundary storage and prior
+cumulative release stay owned; no post-slip motion, snap, new release or heat
+destination is inferred. Four focused tests compare against the independent
+normal-withdrawal boundary, check reaction-work quadrature, vector reversal and
+subdivision, initial/detached history, and atomic domain/budget/cancel refusal.
+
 ## Dynamic wetting, contact-line pinning and mechanical adhesion
 
 `capillary_bridge::contact_line::SourceContactLineBridge` evolves the actual

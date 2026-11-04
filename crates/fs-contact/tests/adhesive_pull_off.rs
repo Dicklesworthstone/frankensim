@@ -3,6 +3,8 @@
 mod common;
 #[path = "adhesive_pull_off/controls.rs"]
 mod controls;
+#[path = "adhesive_pull_off/events.rs"]
+mod events;
 #[path = "adhesive_pull_off/temperature.rs"]
 mod temperature;
 

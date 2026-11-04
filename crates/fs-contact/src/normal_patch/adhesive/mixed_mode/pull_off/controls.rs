@@ -7,6 +7,9 @@
 //! This is quasistatic mechanical loading, with no parameter change, heat,
 //! reattachment, or invented post-instability dynamics.
 
+/// First-event continuation with retained boundary storage and unused travel.
+pub mod events;
+
 use super::{
     JkrMixedModeError, JkrPullOffBranch, JkrPullOffError, JkrPullOffFixture, JkrPullOffResponse,
     JkrPullOffState, Parameters, Work, finite,
@@ -25,6 +28,9 @@ pub struct JkrShearStageTransition {
     response: JkrPullOffResponse,
     mechanical_work_j: f64,
     evaluations: usize,
+    event: Option<events::JkrShearStageEvent>,
+    requested_stage_m: [f64; 2],
+    untraversed_stage_m: [f64; 2],
 }
 impl JkrShearStageTransition {
     pub const fn original_fixture_identity(&self) -> ContentHash {
@@ -51,6 +57,17 @@ impl JkrShearStageTransition {
     /// share the original fixture's single maximum_evaluations budget.
     pub const fn evaluations(&self) -> usize {
         self.evaluations
+    }
+    /// First physical boundary located by the event-continuation entry point.
+    pub const fn event(&self) -> Option<events::JkrShearStageEvent> {
+        self.event
+    }
+    pub const fn requested_stage_m(&self) -> [f64; 2] {
+        self.requested_stage_m
+    }
+    /// Motion left for a separately selected slip/dynamic owner, in metres.
+    pub const fn untraversed_stage_m(&self) -> [f64; 2] {
+        self.untraversed_stage_m
     }
 }
 
@@ -91,14 +108,33 @@ impl JkrPullOffFixture {
             finite(value)?;
         }
         let mut budget = Work::new(self.limits.maximum_evaluations, gate);
+        let before = self.shear_stage_before(previous, &mut budget)?;
+        self.move_shear_from_before(before, requested_stage_m, &mut budget)
+    }
+
+    fn shear_stage_before(
+        &self,
+        previous: JkrPullOffState,
+        budget: &mut Work<'_>,
+    ) -> Result<JkrPullOffResponse, JkrPullOffError> {
         budget.poll()?;
         let mut before = match previous.branch {
-            JkrPullOffBranch::Attached => self.attached(previous.normal_stage_m, &mut budget)?,
+            JkrPullOffBranch::Attached => self.attached(previous.normal_stage_m, budget)?,
             JkrPullOffBranch::Detached => {
                 self.detached(previous.normal_stage_m, previous.released_energy_j)?
             }
         };
         before.state.released_energy_j = previous.released_energy_j;
+        Ok(before)
+    }
+
+    fn move_shear_from_before(
+        &self,
+        before: JkrPullOffResponse,
+        requested_stage_m: [f64; 2],
+        budget: &mut Work<'_>,
+    ) -> Result<JkrShearStageTransition, JkrPullOffError> {
+        let previous = before.state;
         let (source, mut response) = if requested_stage_m == self.tangential_stage {
             (self.clone(), before)
         } else {
@@ -111,7 +147,7 @@ impl JkrPullOffFixture {
                     ..self.parameters()
                 };
                 let maximum =
-                    parameters.kinematics(self.limits.maximum_contact_radius_m, &mut budget)?;
+                    parameters.kinematics(self.limits.maximum_contact_radius_m, budget)?;
                 if maximum.ratio <= 1.0 || previous.normal_stage_m > maximum.stage {
                     return Err(JkrPullOffError::OutsideStageEnvelope);
                 }
@@ -127,12 +163,10 @@ impl JkrPullOffFixture {
                 self.tangential_stiffness,
                 requested_stage_m,
                 self.limits,
-                &mut budget,
+                budget,
             )?;
             let response = match previous.branch {
-                JkrPullOffBranch::Attached => {
-                    source.attached(previous.normal_stage_m, &mut budget)?
-                }
+                JkrPullOffBranch::Attached => source.attached(previous.normal_stage_m, budget)?,
                 JkrPullOffBranch::Detached => {
                     source.detached(previous.normal_stage_m, previous.released_energy_j)?
                 }
@@ -150,6 +184,9 @@ impl JkrPullOffFixture {
             response,
             mechanical_work_j,
             evaluations: budget.evaluations,
+            event: None,
+            requested_stage_m,
+            untraversed_stage_m: [0.0; 2],
         })
     }
 }
