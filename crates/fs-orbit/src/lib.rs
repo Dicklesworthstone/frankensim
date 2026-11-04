@@ -38,7 +38,7 @@ pub mod autonomous;
 mod adaptive;
 pub use adaptive::{
     AdaptiveHbOrbit, HbRefinementBudget, HbRefinementCheck, solve_hb_adaptive,
-    solve_hb_adaptive_seeded,
+    solve_hb_adaptive_scaled_seeded, solve_hb_adaptive_seeded,
 };
 
 mod scaling;

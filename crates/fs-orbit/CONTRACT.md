@@ -50,6 +50,17 @@ API — never instrument-shaped.
   have the corresponding physical units; frequency-change tolerance is relative.
   `HbRefinementCheck` records each solved order, assessed band and sample
   count, total/retained/omitted/sampling ratios, and actual inter-order changes.
+  `solve_hb_adaptive_scaled_seeded` carries explicit `HbScales` through every
+  larger solve without altering the original physical refinement tolerances
+  or the independent omitted-band assessment. Warm starts retain all physical
+  coefficients and the unknown frequency in its newly extended slot.
+  `fs-couple::phs_orbit` exposes both scaled entries on the original complete
+  port-Hamiltonian ODE. Its full physical seed includes material memory;
+  missing authored forcing bandwidth refuses before source evaluation. The
+  original Hamiltonian, resistance, signed ports and source-refusal behavior
+  remain authoritative. A native G1 integration regression checks tiny second-
+  and third-harmonic displacement/momentum phasors and independent physical
+  dissipation/power balance through both fixed and adaptive wrappers.
 - `ShootBudget` / `solve_shooting` -> `ShootOrbit` (period, orbit
   point, Floquet multipliers from the forward-differenced monodromy
   through the fs-la complex eigensolver). Admission requires the explicit
@@ -297,6 +308,12 @@ cases verify backbone-frequency warm starts, retained-residual refusal under
 a deliberately loose Newton tolerance, admission before model callbacks, and
 refusal when separately sub-budget retained/omitted bands exceed the single
 combined physical RMS budget.
+
+The scaled adaptive cubic-cascade regression changes state and equation units
+independently, retains a large unrelated preload, and actually solves orders
+1, 3 and 7. A cap at order 2 still checks through order 5 and refuses the
+analytically known missing third harmonic. This exercises physical conditioning
+and spectral resolution together rather than normalizing a solved result.
 
 ## No-claim boundaries
 

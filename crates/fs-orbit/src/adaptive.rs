@@ -1,8 +1,8 @@
 //! Bounded, measured refinement of retained harmonic order.
 
 use super::{
-    AftWorkspace, HbAnchor, HbBudget, HbOrbit, OrbitError, OrbitProblem, Packing, TAU, solve_hb,
-    solve_hb_seeded,
+    AftWorkspace, HbAnchor, HbBudget, HbOrbit, HbScales, OrbitError, OrbitProblem, Packing, TAU,
+    solve_hb, solve_hb_scaled_seeded, solve_hb_seeded,
 };
 use fs_math::{c64::C64, det};
 
@@ -149,6 +149,7 @@ pub fn solve_hb_adaptive<P: OrbitProblem>(
         solve_hb(problem, anchor, guess_amplitude, hb)?,
         hb,
         budget,
+        None,
     )
 }
 
@@ -180,7 +181,33 @@ pub fn solve_hb_adaptive_seeded<P: OrbitProblem>(
         solve_hb_seeded(problem, anchor, seed, hb)?,
         hb,
         budget,
+        None,
     )
+}
+
+/// [solve_hb_adaptive_seeded] with explicit physical Newton conditioning at
+/// every solved order. Seeds, output coefficients and refinement tolerances
+/// retain their original units; [`HbScales`] controls only the fixed-order
+/// solver's numerical chart and absolute normalized balance/sampling gate.
+///
+/// Warm starts extend the same physical waveform, with no change of scaling
+/// when modes are added. The independent retained/omitted-band assessment and
+/// actual inter-order waveform comparison remain mandatory. A loose Newton
+/// gate still cannot bypass the caller's physical refinement tolerances.
+///
+/// # Errors
+/// The refusals of [solve_hb_adaptive_seeded] and [solve_hb_scaled_seeded].
+pub fn solve_hb_adaptive_scaled_seeded<P: OrbitProblem>(
+    problem: &P,
+    anchor: HbAnchor,
+    seed: Vec<f64>,
+    hb: &HbBudget,
+    budget: &HbRefinementBudget,
+    scales: &HbScales,
+) -> Result<AdaptiveHbOrbit, OrbitError> {
+    admit(problem.dim(), anchor, hb, budget)?;
+    let initial = solve_hb_scaled_seeded(problem, anchor, seed, hb, scales)?.orbit;
+    refine(problem, anchor, initial, hb, budget, Some(scales))
 }
 
 // Parseval RMS for a real Fourier series, normalized BEFORE squaring so tiny
@@ -363,6 +390,7 @@ fn refine<P: OrbitProblem>(
     mut orbit: HbOrbit,
     hb: &HbBudget,
     budget: &HbRefinementBudget,
+    scales: Option<&HbScales>,
 ) -> Result<AdaptiveHbOrbit, OrbitError> {
     let mut previous: Option<HbOrbit> = None;
     let mut trace = Vec::new();
@@ -414,15 +442,15 @@ fn refine<P: OrbitProblem>(
         if let Some(slot) = pack.omega_slot {
             seed[slot] = orbit.omega;
         }
-        let next_orbit = solve_hb_seeded(
-            problem,
-            anchor,
-            seed,
-            &HbBudget {
-                harmonics: next,
-                ..*hb
-            },
-        )?;
+        let next_budget = HbBudget {
+            harmonics: next,
+            ..*hb
+        };
+        let next_orbit = if let Some(scales) = scales {
+            solve_hb_scaled_seeded(problem, anchor, seed, &next_budget, scales)?.orbit
+        } else {
+            solve_hb_seeded(problem, anchor, seed, &next_budget)?
+        };
         previous = Some(orbit);
         orbit = next_orbit;
     }

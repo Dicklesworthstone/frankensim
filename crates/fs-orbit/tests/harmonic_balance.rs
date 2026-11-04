@@ -1194,3 +1194,89 @@ fn invalid_physical_hb_scales_refuse_before_source_callbacks() {
         ));
     }
 }
+
+#[test]
+fn adaptive_physical_hb_scales_resolve_generated_harmonics_and_refuse_a_low_cap() {
+    let problem = PhysicalUnits {
+        problem: CubicWithPreload(1.0e9),
+        states: vec![1.0e-12, 1.0e6, 1.0],
+        equations: vec![1.0e8, 1.0e-12, 1.0],
+        clock_rate: 1.0,
+    };
+    let hb = HbBudget {
+        harmonics: 1,
+        tolerance: 1.0e-12,
+        ..HbBudget::default()
+    };
+    let refinement = fs_orbit::HbRefinementBudget {
+        max_harmonics: 7,
+        residual_tolerances: problem.equations.iter().map(|unit| unit * 1.0e-9).collect(),
+        state_tolerances: problem.states.iter().map(|unit| unit * 1.0e-9).collect(),
+        frequency_tolerance: 1.0e-10,
+    };
+    let mut seed = vec![0.0; 9];
+    seed[2] = 1.0e9;
+    let seed = problem.seed(seed, false);
+    let anchor = HbAnchor::Forced { omega: 1.0 };
+    let result = fs_orbit::solve_hb_adaptive_scaled_seeded(
+        &problem,
+        anchor,
+        seed.clone(),
+        &hb,
+        &refinement,
+        &problem.scales(),
+    )
+    .expect("each larger order must retain the original independent physical scales");
+    assert_eq!(
+        result
+            .refinement_trace
+            .iter()
+            .map(|check| check.harmonics)
+            .collect::<Vec<_>>(),
+        [1, 3, 7]
+    );
+    assert_complex(
+        result.orbit.coeffs[0][1].scale(1.0e12),
+        C64::new(0.25, -0.25),
+        1.0e-9,
+    );
+    assert_complex(
+        result.orbit.coeffs[1][1].scale(1.0e-6),
+        C64::new(0.0, -3.0 / 32.0),
+        1.0e-9,
+    );
+    assert_complex(
+        result.orbit.coeffs[1][3].scale(1.0e-6),
+        C64::new(-1.0 / 80.0, 1.0 / 160.0),
+        1.0e-9,
+    );
+    assert_eq!(result.orbit.coeffs[2][0].re, 1.0e9);
+    let accepted = result.refinement_trace.last().unwrap();
+    assert!(accepted.total_residual_ratio < 1.0);
+    assert!(accepted.state_change_ratio.unwrap() < 1.0);
+    assert!(accepted.sampling_defect_ratio < 1.0);
+
+    let capped = fs_orbit::solve_hb_adaptive_scaled_seeded(
+        &problem,
+        anchor,
+        seed,
+        &hb,
+        &fs_orbit::HbRefinementBudget {
+            max_harmonics: 2,
+            ..refinement
+        },
+        &problem.scales(),
+    );
+    match capped {
+        Err(OrbitError::HarmonicsUnresolved { check }) => {
+            assert_eq!(check.harmonics, 2);
+            assert_eq!(check.checked_harmonics, 5);
+            assert!(check.retained_residual_ratio < 1.0);
+            // The omitted cubic's normalized third-harmonic RMS is exactly 1/16.
+            assert!((check.omitted_residual_ratio * 1.0e-9 - 1.0 / 16.0).abs() < 1.0e-9);
+        }
+        other => {
+            panic!("small equation units must not conceal the omitted third harmonic: {other:?}")
+        }
+    }
+}
