@@ -5,6 +5,7 @@ use fs_matdb::{
     MaterialCard, MaterialStateId, PropertyClaim, PropertyKey, PropertyValue, Provenance,
     QueryPoint, UncertaintyModel,
 };
+use fs_material::hyper::mixed::VolumetricTreatment;
 use fs_material::hyper::plane_stress::PlaneStressSettings;
 use fs_material::sheet::{
     AREAL_DENSITY, MEMBRANE_DIMS, MembraneLaw, ResolvedSheet, SheetCapabilities, SheetError,
@@ -150,6 +151,12 @@ fn reference(c: &MaterialCard) -> ResolvedSheet {
 fn bind(c: &MaterialCard) -> ResolvedSheet {
     reference(c)
         .with_hyperelastic_membrane(c, 0, controls())
+        .unwrap()
+}
+
+fn bind_incompressible(c: &MaterialCard) -> ResolvedSheet {
+    reference(c)
+        .with_incompressible_hyperelastic_membrane(c, 0, controls())
         .unwrap()
 }
 
@@ -563,4 +570,300 @@ fn reference_mechanical_conditioning_ambiguous_capabilities_and_bad_states_refus
             .with_hyperelastic_membrane(&c, 0, controls())
             .is_err()
     );
+}
+
+// Independent exactly incompressible NH potential in C, without the native
+// transverse solve, deformation representative or automatic differentiation:
+// W = mu/2 (C11+C22+1/det(C)-3), S = mu (I-C^-1/det(C)).
+fn incompressible_neo_hookean_oracle(e: [f64; 3], thickness: f64) -> (f64, [f64; 3], [f64; 9]) {
+    let c = [[1.0 + 2.0 * e[0], e[2]], [e[2], 1.0 + 2.0 * e[1]]];
+    let determinant = c[0][0] * c[1][1] - c[0][1] * c[1][0];
+    let inverse = [
+        [c[1][1] / determinant, -c[0][1] / determinant],
+        [-c[1][0] / determinant, c[0][0] / determinant],
+    ];
+    let energy = 0.5 * thickness * MU * (c[0][0] + c[1][1] + determinant.recip() - 3.0);
+    let slots = [(0, 0), (1, 1), (0, 1)];
+    let resultants = slots.map(|(i, j)| {
+        thickness * MU * ((if i == j { 1.0 } else { 0.0 }) - inverse[i][j] / determinant)
+    });
+    let mut tangent = [0.0; 9];
+    for col in 0..3 {
+        let dc = match col {
+            0 => [[2.0, 0.0], [0.0, 0.0]],
+            1 => [[0.0, 0.0], [0.0, 2.0]],
+            _ => [[0.0, 1.0], [1.0, 0.0]],
+        };
+        let trace = (0..2)
+            .flat_map(|i| (0..2).map(move |j| inverse[i][j] * dc[j][i]))
+            .sum::<f64>();
+        for (row, (i, j)) in slots.into_iter().enumerate() {
+            let mut inverse_product = 0.0;
+            for a in 0..2 {
+                for b in 0..2 {
+                    inverse_product += inverse[i][a] * dc[a][b] * inverse[b][j];
+                }
+            }
+            tangent[3 * row + col] =
+                thickness * MU / determinant * (trace * inverse[i][j] + inverse_product);
+        }
+    }
+    (energy, resultants, tangent)
+}
+
+#[test]
+fn exact_incompressible_membrane_matches_independent_nh_energy_and_tangent() {
+    let c = card("neo-hookean-log", 0.0013, 0.24);
+    let sheet = bind_incompressible(&c);
+    let law = sheet.membrane_law().unwrap();
+    for e in [
+        [0.0; 3],
+        [0.16, 0.07, 0.11],
+        [-0.12, 0.03, 0.06],
+        [1.1, 0.17, 0.35],
+    ] {
+        let r = law.response(e).unwrap();
+        let (energy, stress, tangent) = incompressible_neo_hookean_oracle(e, sheet.thickness_m());
+        close(r.energy_j_m2, energy, 2e-10, 2e-12);
+        for i in 0..3 {
+            close(r.resultants_n_m[i], stress[i], 2e-9, 2e-11);
+        }
+        for i in 0..9 {
+            close(r.tangent_n_m[i], tangent[i], 2e-8, 2e-11);
+        }
+        law.admit_linearization(e).unwrap();
+    }
+    let finite = bind(&c).membrane_law().unwrap().response([0.0; 3]).unwrap();
+    let exact = law.response([0.0; 3]).unwrap();
+    close(
+        exact.tangent_n_m[0],
+        4.0 * MU * sheet.thickness_m(),
+        1e-10,
+        1e-14,
+    );
+    assert!(exact.tangent_n_m[0] > 1.1 * finite.tangent_n_m[0]);
+}
+
+#[test]
+fn exact_membrane_models_retain_work_tangents_without_bulk_penalty_arithmetic() {
+    for kind in [
+        "neo-hookean-log",
+        "mooney-rivlin-decoupled",
+        "ogden-decoupled",
+        "hgo-dispersed",
+    ] {
+        let c = card(kind, 0.0013, 0.24);
+        let law = bind_incompressible(&c).membrane_law().unwrap();
+        let e = [0.16, 0.07, 0.11];
+        let r = law.response(e).unwrap();
+        let h = 2e-6;
+        for col in 0..3 {
+            let mut lo = e;
+            let mut hi = e;
+            lo[col] -= h;
+            hi[col] += h;
+            let a = law.response(lo).unwrap();
+            let b = law.response(hi).unwrap();
+            close(
+                (b.energy_j_m2 - a.energy_j_m2) / (2.0 * h),
+                r.resultants_n_m[col],
+                2e-6,
+                2e-7,
+            );
+            for row in 0..3 {
+                close(
+                    (b.resultants_n_m[row] - a.resultants_n_m[row]) / (2.0 * h),
+                    r.tangent_n_m[3 * row + col],
+                    2e-5,
+                    3e-7,
+                );
+                close(
+                    r.tangent_n_m[3 * row + col],
+                    r.tangent_n_m[3 * col + row],
+                    2e-10,
+                    2e-12,
+                );
+            }
+        }
+        // This is an explicitly selected constraint, independent of the finite
+        // bulk data still retained on each original immutable model card.
+        let bulk_key = if kind == "neo-hookean-log" {
+            "lambda"
+        } else {
+            "kappa"
+        };
+        for bulk in [1.0e-100, 1.0e300] {
+            let mut m = model(kind);
+            m.parameters.get_mut(bulk_key).unwrap().value = bulk;
+            let c = source(vec![m], 0.0013, 0.24, ValidityDomain::unconstrained(), &[]);
+            let selected = bind_incompressible(&c).membrane_law().unwrap();
+            let changed = selected.response(e).unwrap();
+            assert_eq!(changed.energy_j_m2.to_bits(), r.energy_j_m2.to_bits());
+            assert_eq!(
+                changed.resultants_n_m.map(f64::to_bits),
+                r.resultants_n_m.map(f64::to_bits)
+            );
+            assert_eq!(
+                changed.tangent_n_m.map(f64::to_bits),
+                r.tangent_n_m.map(f64::to_bits)
+            );
+            let MembraneLaw::Hyperelastic(bound) = selected else {
+                panic!("wrong law")
+            };
+            assert_eq!(bound.model().model_card().parameters[bulk_key].value, bulk);
+        }
+    }
+}
+
+#[test]
+fn exact_membrane_tilted_fibres_keep_volume_transverse_relaxation_and_activation() {
+    for invariant_kind in [0.0, 1.0] {
+        let mut m = model("hgo-dispersed");
+        m.parameters.get_mut("fibre_invariants").unwrap().value = invariant_kind;
+        let c = source(vec![m], 0.0013, 0.24, ValidityDomain::unconstrained(), &[]);
+        let law = bind_incompressible(&c).membrane_law().unwrap();
+        let MembraneLaw::Hyperelastic(bound) = &law else {
+            panic!("wrong law")
+        };
+        let e = [0.22, 0.0, 0.05];
+        let r = (1.0_f64 + 2.0 * e[0]).sqrt();
+        let s = e[2] / r;
+        let t = (1.0 + 2.0 * e[1] - s * s).sqrt();
+        let native = bound
+            .model()
+            .law()
+            .incompressible_plane_stress(&[r, s, 0.0, t], controls())
+            .unwrap();
+        let f = native.deformation_gradient;
+        close(f[0] * f[4] * f[8], 1.0, 2e-15, 0.0);
+        assert!(
+            f[2].abs() > 1e-3,
+            "tilted fibres require transverse shear relaxation"
+        );
+        for i in [2, 5, 8] {
+            close(native.full_piola[i], 0.0, 1e-6, 0.0);
+        }
+        let mut unrelaxed = f;
+        unrelaxed[2] = 0.0;
+        unrelaxed[5] = 0.0;
+        assert!(bound.model().law().isochoric_energy(&unrelaxed) > native.energy_density_pa + 1.0);
+        close(
+            law.response(e).unwrap().energy_j_m2,
+            0.0013 * native.energy_density_pa,
+            1e-11,
+            1e-12,
+        );
+        law.admit_linearization(e).unwrap();
+        assert!(law.admit_linearization([0.0; 3]).is_err());
+        assert!(law.response([0.0; 3]).is_ok());
+    }
+}
+
+#[test]
+fn exact_membrane_selection_retains_source_identity_reference_mass_and_refusals() {
+    let extra = ("specific_heat_capacity", 1400.0, Dims([2, 0, -2, -1, 0, 0]));
+    let c = source(
+        vec![model("neo-hookean-log"), model("mooney-rivlin-decoupled")],
+        0.0013,
+        0.24,
+        ValidityDomain::unconstrained(),
+        &[extra],
+    );
+    let requirements = [
+        (AREAL_DENSITY, Dims([-2, 1, 0, 0, 0, 0])),
+        (THICKNESS, Dims([1, 0, 0, 0, 0, 0])),
+        (extra.0, extra.2),
+    ]
+    .map(|(name, dims)| {
+        ScalarPropertyRequirement::try_new(name, dims, ScalarAdmissibility::StrictlyPositive)
+            .unwrap()
+    });
+    let original =
+        resolve_material_state_point(&c, &point(), &requirements, Pick::SingleClaimOnly).unwrap();
+    let reference = ResolvedSheet::try_from_material(original.clone()).unwrap();
+    let finite = reference
+        .clone()
+        .with_hyperelastic_membrane(&c, 1, controls())
+        .unwrap();
+    let exact = reference
+        .clone()
+        .with_incompressible_hyperelastic_membrane(&c, 1, controls())
+        .unwrap();
+    assert_ne!(
+        finite, exact,
+        "the imposed constraint is part of the selected membrane identity"
+    );
+    assert_eq!(finite.areal_density_kg_m2(), exact.areal_density_kg_m2());
+    assert_eq!(finite.thickness_m(), exact.thickness_m());
+    let law = exact.membrane_law().unwrap();
+    let MembraneLaw::Hyperelastic(bound) = &law else {
+        panic!("wrong law")
+    };
+    assert_eq!(
+        bound.volumetric_treatment(),
+        VolumetricTreatment::ExactIncompressible
+    );
+    assert_eq!(bound.material(), &original);
+    assert_eq!(bound.model().model_card(), &c.models()[1]);
+    assert_eq!(bound.model().context(), &point());
+    assert!(bound.material().property(extra.0).is_some());
+    let MembraneLaw::Hyperelastic(finite_bound) = finite.membrane_law().unwrap() else {
+        panic!("wrong law")
+    };
+    assert_eq!(
+        finite_bound.volumetric_treatment(),
+        VolumetricTreatment::OriginalMaterial
+    );
+    assert!(
+        exact
+            .clone()
+            .with_hyperelastic_membrane(&c, 1, controls())
+            .is_err()
+    );
+    assert!(
+        exact
+            .with_incompressible_hyperelastic_membrane(&c, 1, controls())
+            .is_err()
+    );
+    assert!(
+        reference
+            .clone()
+            .with_incompressible_hyperelastic_membrane(&c, 2, controls())
+            .is_err()
+    );
+    let different = card("neo-hookean-log", 0.002, 0.24);
+    assert!(
+        reference
+            .clone()
+            .with_incompressible_hyperelastic_membrane(&different, 0, controls())
+            .is_err()
+    );
+    let invalid = PlaneStressSettings {
+        relative_tolerance: 0.0,
+        ..controls()
+    };
+    assert!(
+        reference
+            .with_incompressible_hyperelastic_membrane(&c, 0, invalid)
+            .is_err()
+    );
+    for e in [
+        [f64::NAN, 0.0, 0.0],
+        [-0.5, 0.0, 0.0],
+        [0.0, 0.0, 1.1],
+        [20.0, 0.0, 0.0],
+    ] {
+        assert!(law.response(e).is_err());
+    }
+    // Each in-plane stretch is within [1/5,5], but incompressibility would
+    // require thickness stretch 1/16. Keep the original 3-D domain refusal.
+    assert!(law.response([7.5, 7.5, 0.0]).is_err());
+    let heavy = bind_incompressible(&card("mooney-rivlin-decoupled", 0.0013, 2.4));
+    let e = [0.16, 0.07, 0.11];
+    let a = law.response(e).unwrap();
+    let b = heavy.membrane_law().unwrap().response(e).unwrap();
+    assert_eq!(a.energy_j_m2, b.energy_j_m2);
+    assert_eq!(a.resultants_n_m, b.resultants_n_m);
+    assert_eq!(a.tangent_n_m, b.tangent_n_m);
+    assert_eq!(heavy.areal_density_kg_m2(), 2.4);
 }

@@ -285,6 +285,24 @@ were checked; native Rust execution remains unverified under the resource blocke
 
 ## Current-area pressure on finite-deformation membranes
 
+Source-bound hyperelastic sheets can explicitly select exact incompressibility
+with `ResolvedSheet::with_incompressible_hyperelastic_membrane`. The existing
+3-D `MembranePatch` consumes the native constrained material potential and
+tangent through the same material-axis Green strain as its finite-compliance
+path. Current normal thickness contracts inversely with area, transverse shears
+relax for tilted fibres, and reference areal mass remains unchanged. No large
+bulk penalty, extra stiffness or inferred bending model enters the solve.
+Dead-load equilibrium, current-area pressure and loaded small-vibration modes
+therefore share the same explicit material choice, supports and reference mass.
+
+The `hyperelastic_membrane` regressions differentiate the native assembled
+energy/force/tangent for both choices, including tilted fibres. An independent
+exact-incompressible Neo-Hookean pyramid potential supplies center displacement,
+energy, support reactions and the loaded modal eigenvalue under fixed-rim
+pressure. These are discrete manufactured controls; they do not establish
+continuum convergence, material calibration, wrinkling or finite-amplitude
+vibration. Full native test execution requires the complete workspace.
+
 `MembranePatch::solve_with_pressure` uses the original membrane material,
 kinematics and Newton--Krylov owner with a uniform held pressure jump. Pressure
 acts on current oriented triangle areas, including the exact matrix-free

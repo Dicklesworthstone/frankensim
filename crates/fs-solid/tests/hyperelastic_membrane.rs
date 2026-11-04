@@ -12,6 +12,7 @@ use fs_material::sheet::{
 };
 use fs_material::state_point::MaterialPropertySelection;
 use fs_qty::Dims;
+use fs_solid::membrane::vibration::VibrationSettings;
 use fs_solid::membrane::{
     MembraneBudget, MembraneDomain, MembraneError, MembranePatch, MembraneSolveSettings,
 };
@@ -24,6 +25,15 @@ const THICKNESS_M: f64 = 0.0013;
 const MASS_KG_M2: f64 = 0.24;
 
 fn source(fibres: bool, modulus_scale: f64, mass: f64) -> (MaterialCard, ResolvedSheet) {
+    source_with_constraint(fibres, modulus_scale, mass, false)
+}
+
+fn source_with_constraint(
+    fibres: bool,
+    modulus_scale: f64,
+    mass: f64,
+    incompressible: bool,
+) -> (MaterialCard, ResolvedSheet) {
     let provenance = Provenance {
         source: "synthetic hyperelastic membrane integration fixture; not measured data".into(),
         license: "test-only".into(),
@@ -108,15 +118,16 @@ fn source(fibres: bool, modulus_scale: f64, mass: f64) -> (MaterialCard, Resolve
         },
         MaterialPropertySelection::SingleClaimOnly,
     )
-    .unwrap()
-    .with_hyperelastic_membrane(
-        &card,
-        0,
-        PlaneStressSettings {
-            relative_tolerance: 2e-13,
-            ..PlaneStressSettings::default()
-        },
-    )
+    .unwrap();
+    let controls = PlaneStressSettings {
+        relative_tolerance: 2e-13,
+        ..PlaneStressSettings::default()
+    };
+    let sheet = if incompressible {
+        sheet.with_incompressible_hyperelastic_membrane(&card, 0, controls)
+    } else {
+        sheet.with_hyperelastic_membrane(&card, 0, controls)
+    }
     .unwrap();
     (card, sheet)
 }
@@ -179,8 +190,12 @@ fn deformation(p: &MembranePatch) -> Vec<[f64; 3]> {
 
 #[test]
 fn native_membrane_force_and_geometric_tangent_are_exact_at_finite_deformation() {
-    for fibres in [false, true] {
-        let p = patch(triangle(), source(fibres, 1.0, MASS_KG_M2).1, 0.34);
+    for (fibres, incompressible) in [(false, false), (true, false), (false, true), (true, true)] {
+        let p = patch(
+            triangle(),
+            source_with_constraint(fibres, 1.0, MASS_KG_M2, incompressible).1,
+            0.34,
+        );
         let u = deformation(&p);
         let base = p.evaluate(&u, || false).unwrap();
         let h = 1e-7;
@@ -415,6 +430,93 @@ fn finite_strain_dead_load_and_pressure_equilibria_match_independent_pyramid() {
     assert_eq!(stiffer.reference_mass_kg(), p.reference_mass_kg());
     assert!(matches!(
         p.solve(&loads, &fixed, &initial, settings(), || true),
+        Err(MembraneError::Cancelled)
+    ));
+}
+
+// Independent incompressible NH potential of the same four affine facets.
+// det(F)=1 sets the normal thickness stretch to 1 / deformed-area ratio;
+// differentiating this scalar energy gives the center force and stiffness.
+// No production material, membrane, AD or matrix routine enters this oracle.
+fn incompressible_pyramid_oracle(stretch: f64, height: f64) -> (f64, f64, f64) {
+    let side: f64 = 0.1;
+    let q2 = (height / side).powi(2);
+    let s2 = stretch * stretch;
+    let b = s2 + 2.0 * q2;
+    let z2 = 1.0 / (s2 * b);
+    let force = 4.0 * MU * THICKNESS_M * height * (1.0 - z2 / b);
+    let energy = side * side * THICKNESS_M * MU * (2.0 * s2 + 2.0 * q2 + z2 - 3.0);
+    let stiffness = 4.0 * MU * THICKNESS_M * (1.0 - z2 / b + 8.0 * q2 * z2 / (b * b));
+    (force, energy, stiffness)
+}
+
+#[test]
+fn incompressible_source_drives_native_pressure_equilibrium_and_loaded_vibration() {
+    let (card, sheet) = source_with_constraint(false, 1.0, MASS_KG_M2, true);
+    let p = patch(diamond(), sheet, 0.0);
+    let stretch = 1.08;
+    let height = 0.02;
+    let (force, energy, stiffness) = incompressible_pyramid_oracle(stretch, height);
+    let zero = vec![[0.0; 3]; 5];
+    let fixed = fixed_rim(stretch);
+    let pressure = -3.0 * force / (0.02 * stretch * stretch);
+    let spectrum = p
+        .solve_vibration_with_pressure(
+            &zero,
+            pressure,
+            &fixed,
+            &zero,
+            settings(),
+            VibrationSettings {
+                max_free_dofs: 1,
+                relative_residual_tolerance: 1e-10,
+            },
+            || false,
+        )
+        .unwrap();
+    let equilibrium = spectrum.equilibrium();
+    assert!(equilibrium.newton.converged);
+    close(equilibrium.displacement_m[0][2], -height, 2e-10, 2e-10);
+    close(equilibrium.strain_energy_j, energy, 2e-10, 2e-10);
+    close(equilibrium.pressure_work_j, force * height, 2e-10, 2e-10);
+    close(equilibrium.residual_n[0][2], 0.0, 2e-9, 0.0);
+    close(
+        equilibrium.residual_n.iter().skip(1).map(|r| r[2]).sum(),
+        3.0 * force,
+        2e-9,
+        2e-10,
+    );
+    for &(dof, value) in &fixed {
+        assert_eq!(equilibrium.displacement_m[dof / 3][dof % 3], value);
+    }
+    assert_eq!(spectrum.free_dofs(), &[2]);
+    assert_eq!(spectrum.modes().len(), 1);
+    // The center's vertical pressure force is independent of its height for
+    // this fixed planar rim. Its follower stiffness is exactly zero here.
+    let mass = 0.02 * MASS_KG_M2 / 3.0;
+    close(spectrum.modes()[0].lambda, stiffness / mass, 1e-6, 2e-8);
+    close(p.nodal_mass_kg()[0], mass, 1e-17, 2e-14);
+    close(p.reference_mass_kg(), 0.02 * MASS_KG_M2, 1e-17, 2e-14);
+    assert_eq!(
+        p.sheets()[0].material().card_identity(),
+        card.content_hash()
+    );
+
+    let mut dead_load = zero.clone();
+    dead_load[0][2] = -force;
+    let dead = p
+        .solve(&dead_load, &fixed, &zero, settings(), || false)
+        .unwrap();
+    close(dead.displacement_m[0][2], -height, 2e-10, 2e-10);
+    close(dead.strain_energy_j, energy, 2e-10, 2e-10);
+    close(
+        dead.residual_n.iter().skip(1).map(|r| r[2]).sum(),
+        force,
+        2e-9,
+        2e-10,
+    );
+    assert!(matches!(
+        p.solve_with_pressure(&zero, pressure, &fixed, &zero, settings(), || true),
         Err(MembraneError::Cancelled)
     ));
 }

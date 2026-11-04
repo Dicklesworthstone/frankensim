@@ -2,7 +2,8 @@
 //!
 //! Material coordinates are warp, weft and reference normal. A positive
 //! Cholesky representative of `C_in_plane = I + 2 E` removes rigid rotation;
-//! native plane stress relaxes the entire transverse column of F. Multiplying
+//! native plane stress either relaxes the entire transverse column of F or
+//! explicitly fixes `det(F)=1` while relaxing both transverse shears. Multiplying
 //! the reduced potential by the original thickness gives work per reference
 //! area. Its exact chain rule supplies second-Piola resultants and their
 //! Green-strain tangent, including the stress times second-kinematic-derivative
@@ -13,6 +14,7 @@ use super::{
     THICKNESS,
 };
 use crate::hyper::cards::ResolvedHyperelastic;
+use crate::hyper::mixed::VolumetricTreatment;
 use crate::hyper::plane_stress::{PlaneStressResponse, PlaneStressSettings};
 use crate::hyper::{FibreInvariants, HyperelasticModel};
 use crate::state_point::ResolvedMaterialStatePoint;
@@ -23,15 +25,18 @@ use fs_matdb::MaterialCard;
 ///
 /// Reference mass is independent of the bulk law and thickness. The original
 /// source bundle and exact model card survive extraction into `MembraneLaw`.
-/// This is the native locally stable plane-stress branch, with no wrinkling,
-/// bending, residual stress, thermal reference change or incompressibility
-/// inferred. Arbitrary fibre directions remain in the reference material frame.
+/// This is the native locally stable plane-stress branch, with the original
+/// finite compliance or an explicitly imposed exact volume constraint. The
+/// constraint is a modeling choice, not additional source evidence. No wrinkling,
+/// bending, residual stress or thermal reference change is inferred. Arbitrary
+/// fibre directions remain in the reference material frame.
 #[derive(Clone, Debug)]
 pub struct HyperelasticMembrane {
     material: ResolvedMaterialStatePoint,
     model: ResolvedHyperelastic,
     reference_thickness_m: f64,
     settings: PlaneStressSettings,
+    volumetric: VolumetricTreatment,
 }
 
 impl PartialEq for HyperelasticMembrane {
@@ -39,6 +44,7 @@ impl PartialEq for HyperelasticMembrane {
         self.material == other.material
             && self.model == other.model
             && self.reference_thickness_m == other.reference_thickness_m
+            && self.volumetric == other.volumetric
             && self.settings.relative_tolerance == other.settings.relative_tolerance
             && self.settings.max_iterations == other.settings.max_iterations
             && self.settings.max_backtracks == other.settings.max_backtracks
@@ -51,6 +57,7 @@ impl HyperelasticMembrane {
         card: &MaterialCard,
         model_index: usize,
         settings: PlaneStressSettings,
+        volumetric: VolumetricTreatment,
     ) -> Result<Self, SheetError> {
         if sheet.material.card_identity() != card.content_hash() {
             return Err(SheetError::Invalid(
@@ -91,6 +98,7 @@ impl HyperelasticMembrane {
             model,
             reference_thickness_m: sheet.thickness,
             settings,
+            volumetric,
         };
         // Validate local controls and the supplied model at its reference.
         // HGO may have a one-sided tangent here, so this is not a vibration
@@ -119,9 +127,34 @@ impl HyperelasticMembrane {
         self.settings
     }
 
+    /// Original finite-compliance law or explicitly imposed `det(F) = 1`.
+    /// Exact incompressibility retains the source model's native remainder;
+    /// it never evaluates or substitutes its finite bulk penalty.
+    pub const fn volumetric_treatment(&self) -> VolumetricTreatment {
+        self.volumetric
+    }
+
     fn reduced_response(&self, strain: [f64; 3]) -> Result<PlaneStressResponse, SheetError> {
         let f = admitted_representative(strain)?;
-        Ok(self.model.law().plane_stress(&f, self.settings)?)
+        match self.volumetric {
+            VolumetricTreatment::OriginalMaterial => {
+                Ok(self.model.law().plane_stress(&f, self.settings)?)
+            }
+            VolumetricTreatment::ExactIncompressible => {
+                let response = self
+                    .model
+                    .law()
+                    .incompressible_plane_stress(&f, self.settings)?;
+                Ok(PlaneStressResponse {
+                    deformation_gradient: response.deformation_gradient,
+                    energy_density_pa: response.energy_density_pa,
+                    piola: response.piola,
+                    tangent: response.tangent,
+                    relative_transverse_residual: response.relative_transverse_residual,
+                    iterations: response.iterations,
+                })
+            }
+        }
     }
 
     /// Require a two-sided material tangent for small-vibration extraction.

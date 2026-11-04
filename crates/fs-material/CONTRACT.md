@@ -84,11 +84,27 @@ and unresolved principal-stretch boundaries refuse two-sided vibration
 admission. Native local stable-branch limits remain; no wrinkling or global
 stability certificate is added.
 
+`with_incompressible_hyperelastic_membrane` explicitly selects `J=1` through
+the original `hyper::incompressible_plane_stress` owner. The reference thickness
+is unchanged; its current normal stretch is the reciprocal in-plane area ratio.
+Both transverse shears relax against the native energy remainder and the full
+constrained tangent flows through the same Green-strain chain rule. No bulk
+penalty is evaluated or replaced. The original model card, source bundle,
+reference mass and stretch bounds remain authoritative; exact incompressibility
+is an imposed modeling choice, not new experimental source evidence. The
+retained `volumetric_treatment` distinguishes this choice from the original
+finite-compliance selection, including in membrane equality. The existing
+`MembranePatch` equilibrium, pressure and vibration consumers use either choice
+through the same `MembraneLaw` without another spatial solver.
+
 `sheet_hyperelastic` checks independent compressible Neo-Hookean reduction,
 all native model tangents, tilted-fibre transverse relaxation and source/reference
-refusals. `hyperelastic_membrane` checks 3-D force/tangent objectivity,
-independent mass, and finite-deformation dead-load/pressure equilibrium against
-an independent pyramid oracle.
+refusals. Its exact-incompressibility controls add an independent analytic
+Neo-Hookean Green-strain potential, all four laws' work/tangent derivatives,
+bitwise independence of unused bulk parameters, tilted-fibre traction closure,
+and retained source/mass/domain controls. `hyperelastic_membrane` checks 3-D
+force/tangent objectivity, independent mass, and finite-deformation
+dead-load/pressure equilibrium against an independent pyramid oracle.
 
 ## Source calorics, kinetics and shrinkage for crystallization
 

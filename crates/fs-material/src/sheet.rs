@@ -144,12 +144,28 @@ impl ResolvedSheet {
     /// environment or bending law is inferred from the bulk model.
     pub fn with_hyperelastic_membrane(mut self, card: &MaterialCard, model_index: usize,
         settings: crate::hyper::plane_stress::PlaneStressSettings) -> Result<Self, SheetError> {
-        let law = hyperelastic::HyperelasticMembrane::from_material_source(&self, card, model_index, settings)?;
+        let law = hyperelastic::HyperelasticMembrane::from_material_source(&self, card, model_index, settings,
+            crate::hyper::mixed::VolumetricTreatment::OriginalMaterial)?;
+        self.hyperelastic = Some(Arc::new(law));
+        Ok(self)
+    }
+    /// Explicitly impose exact incompressibility on a source-bound hyperelastic
+    /// membrane. The original energy remainder and all transverse traction
+    /// conditions are retained; `det(F) = 1` fixes the relaxed thickness without
+    /// evaluating a bulk penalty. This is a declared modeling constraint, not
+    /// additional evidence that the source material is exactly incompressible.
+    /// Original source admission, reference thickness, independent areal mass,
+    /// principal-stretch bounds and local solve budgets remain unchanged.
+    pub fn with_incompressible_hyperelastic_membrane(mut self, card: &MaterialCard, model_index: usize,
+        settings: crate::hyper::plane_stress::PlaneStressSettings) -> Result<Self, SheetError> {
+        let law = hyperelastic::HyperelasticMembrane::from_material_source(&self, card, model_index, settings,
+            crate::hyper::mixed::VolumetricTreatment::ExactIncompressible)?;
         self.hyperelastic = Some(Arc::new(law));
         Ok(self)
     }
     /// Exact selected constitutive law, shared immutably across triangles.
-    /// Hyperelastic selection is explicit through `with_hyperelastic_membrane`.
+    /// Both finite-compliance and exactly incompressible hyperelastic selections
+    /// retain the same native law carrier and original source identity.
     pub fn membrane_law(&self) -> Result<MembraneLaw, SheetError> {
         if let Some(law) = &self.hyperelastic {
             return Ok(MembraneLaw::Hyperelastic(Arc::clone(law)));
