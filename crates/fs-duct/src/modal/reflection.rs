@@ -118,6 +118,9 @@ impl ModalReflectionResponse {
     /// scattering matrix, which instead matches the other incident ports.
     /// Solving those boundary equations directly retains finite plane
     /// reflection at a pressure antinode without forming `Z00` or the full Z.
+    /// Exactly disconnected higher-mode blocks have zero source-driven
+    /// amplitude, including at their free resonances. No nonzero coupling is
+    /// discarded, and a singular source-connected block still refuses.
     ///
     /// # Errors
     /// Invalid response/reference or a singular source-boundary solve.
@@ -134,17 +137,59 @@ impl ModalReflectionResponse {
             what: "modal reflection mode count exceeds MAX_MODES",
         })?;
         let (p, q) = self.pressure_and_scaled_flow(references)?;
-        let mut boundary: Vec<_> = self.reflection_matrix.iter().map(|r| -*r).collect();
-        for i in 0..n {
-            boundary[i * n + i] = boundary[i * n + i] + C64::ONE;
+        // A closed higher mode may have R=+1 while the driven plane response
+        // remains finite. Its homogeneous equation then reads 0=0, not a
+        // singular source response. Retain exactly the connected modal block
+        // and select zero free amplitude outside it. Test BOTH directions so
+        // nonreciprocal user-authored matrices cannot hide a coupling. Exact
+        // zeros alone separate blocks; arbitrarily weak coupling is retained.
+        let mut connected = [false; MAX_MODES];
+        connected[0] = true;
+        loop {
+            let mut changed = false;
+            for i in 0..n {
+                if connected[i] {
+                    for j in 0..n {
+                        if !connected[j]
+                            && (self.reflection_matrix[i * n + j] != C64::ZERO
+                                || self.reflection_matrix[j * n + i] != C64::ZERO)
+                        {
+                            connected[j] = true;
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            if !changed { break; }
         }
-        for j in 0..n {
-            boundary[j] = p[j] + q[j];
+        let mut modes = [0; MAX_MODES];
+        let mut count = 0;
+        for (i, &included) in connected[..n].iter().enumerate() {
+            if included {
+                modes[count] = i;
+                count += 1;
+            }
         }
-        let lu = lu_complex(&boundary, n).map_err(|_| DuctError::Singular)?;
+        let modes = &modes[..count];
+        let mut boundary = vec![C64::ZERO; count * count];
+        for (row, &i) in modes.iter().enumerate() {
+            for (column, &j) in modes.iter().enumerate() {
+                boundary[row * count + column] = if i == 0 {
+                    p[j] + q[j]
+                } else {
+                    let value = -self.reflection_matrix[i * n + j];
+                    if i == j { value + C64::ONE } else { value }
+                };
+            }
+        }
+        let lu = lu_complex(&boundary, count).map_err(|_| DuctError::Singular)?;
+        let mut source = [C64::ZERO; MAX_MODES];
+        source[0] = C64::from_re(2.0);
+        lu.solve(&mut source[..count]);
         let mut outgoing = vec![C64::ZERO; n];
-        outgoing[0] = C64::from_re(2.0);
-        lu.solve(&mut outgoing);
+        for (&mode, &amplitude) in modes.iter().zip(&source) {
+            outgoing[mode] = amplitude;
+        }
         let reflected = (0..n)
             .fold(C64::ZERO, |sum, j| sum + (p[j] - q[j]) * outgoing[j])
             .scale(0.5);

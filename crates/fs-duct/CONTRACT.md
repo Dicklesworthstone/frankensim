@@ -498,6 +498,12 @@ pipe `Z_in = +i Zc cot(kL)`.
   closure, rather than matching those incident ports. Both avoid an `I-R`
   inverse at inlet flow nodes. Existing impedance queries retain their true
   poles, and load, cutoff, staircase and loss-model admissions remain intact.
+  A plane source excites only its exactly connected native modal block;
+  disconnected free resonances have zero forced amplitude. Both directions
+  of every nonzero coupling remain in that solve, without tolerance pruning.
+  A singular source-connected block still refuses, and mouth observation
+  retains the complete original modal coordinates with those free amplitudes
+  zero.
   `PreparedModalDuct::mouth_waves{,_tabulated,_load,_flanged,_matrix}` also retains
   the native mouth map `U_mouth=H a_native` from that same recurrence.
   `MouthWaveResponse::excite` resolves arbitrary coherent incident modal

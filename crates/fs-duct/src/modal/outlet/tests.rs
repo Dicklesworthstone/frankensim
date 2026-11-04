@@ -432,6 +432,34 @@ fn native_quarter_wave_mouth_flow_survives_an_exact_input_impedance_pole() {
 }
 
 #[test]
+fn native_mouth_observation_excludes_unforced_disconnected_resonances() {
+    // The plane channel has an exact pressure-release quarter-wave node:
+    // R00=+1, H00=i. An independent higher channel also has an inlet flow
+    // node. Its homogeneous free amplitude is zero for plane-only forcing.
+    let waves = MouthWaveResponse {
+        input: ModalReflectionResponse { omega: 1.0, n_modes: 2,
+            reflection_matrix: vec![C64::ONE, C64::ZERO, C64::ZERO, C64::ONE],
+            characteristic_impedances: vec![C64::from_re(2.0), C64::from_re(3.0)],
+            min_shear_number: f64::INFINITY, mouth_ka: 0.1,
+            cutoffs_at_throat_hz: vec![0.1], steps_used: 1 },
+        inlet_radius_m: 0.01, mouth_radius_m: 0.01,
+        native_flow_map: vec![C64::new(0.0, 1.0), C64::ZERO,
+            C64::ZERO, C64::new(0.0, -2.0/3.0)],
+    };
+    for reference in [0.5, 2.0, 7.0] {
+        assert_eq!(waves.input.plane_reflection(reference).unwrap(), C64::ONE);
+        assert_eq!(waves.per_incident_plane_pressure(reference).unwrap(),
+            vec![C64::new(0.0, 1.0), C64::ZERO]);
+        let incident = C64::new(0.4, -0.7);
+        let matched = waves.excite(&[reference, 3.0], &[incident, C64::ZERO]).unwrap();
+        close(matched.reflected_pressure[0], incident, 1.0);
+        assert_eq!(matched.reflected_pressure[1], C64::ZERO);
+        close(matched.mouth_flow[0], C64::new(0.0, 1.0)*incident, 1.0);
+        assert_eq!(matched.mouth_flow[1], C64::ZERO);
+    }
+}
+
+#[test]
 fn native_mouth_source_closures_match_independent_global_wave_equations() {
     let gas = air();
     let n = 3;

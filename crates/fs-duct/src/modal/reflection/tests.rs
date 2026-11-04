@@ -65,6 +65,103 @@ fn plane_source_preserves_zero_higher_flow_instead_of_matching_it() {
     }
 }
 
+// G1: an unforced disconnected resonant block does not determine the
+// source response. Its zero-amplitude solution is the zero-initial-data
+// forced solution, even though the full homogeneous matrix is singular.
+#[test]
+fn plane_source_keeps_finite_response_at_disconnected_modal_resonances() {
+    let plane = C64::new(0.3, 0.4);
+    let response = ModalReflectionResponse {
+        omega: 1000.0,
+        n_modes: 3,
+        // The higher block has eigenvalues +1 and -1, so I-R is singular.
+        reflection_matrix: vec![
+            plane, C64::ZERO, C64::ZERO,
+            C64::ZERO, C64::ZERO, C64::ONE,
+            C64::ZERO, C64::ONE, C64::ZERO,
+        ],
+        characteristic_impedances: vec![C64::from_re(4.0), C64::ONE, C64::ONE],
+        min_shear_number: f64::INFINITY,
+        mouth_ka: 0.1,
+        cutoffs_at_throat_hz: vec![100.0, 200.0],
+        steps_used: 1,
+    };
+    for reference in [0.7, 4.0, 20.0] {
+        let (actual, native) = response.plane_excitation(reference).unwrap();
+        let pressure = C64::ONE + plane;
+        let scaled_flow = (C64::ONE - plane).scale(reference / 4.0);
+        let expected = (pressure - scaled_flow) / (pressure + scaled_flow);
+        assert!((actual - expected).abs() < 4e-15);
+        assert!((native[0] * (pressure + scaled_flow) - C64::from_re(2.0)).abs() < 4e-15);
+        assert_eq!(&native[1..], &[C64::ZERO; 2]);
+        let matched = response.at_references(&[reference, 1.0, 1.0]).unwrap();
+        assert!((matched[0] - actual).abs() < 4e-15);
+    }
+}
+
+#[test]
+fn plane_source_retains_nonadjacent_connected_modes_and_zero_flow_closure() {
+    // The original two-port transformer, with a separate closed mode between
+    // its two coordinates. The source-connected block must include mode 2.
+    let mut response = mixed_nodes();
+    response.n_modes = 3;
+    response.reflection_matrix = vec![
+        C64::ZERO, C64::ZERO, C64::from_re(2.0),
+        C64::ZERO, C64::ONE, C64::ZERO,
+        C64::from_re(0.5), C64::ZERO, C64::ZERO,
+    ];
+    response.characteristic_impedances = vec![C64::from_re(4.0), C64::ONE, C64::ONE];
+    response.cutoffs_at_throat_hz = vec![100.0, 200.0];
+    for reference in [0.5, 4.0, 20.0] {
+        let (actual, native) = response.plane_excitation(reference).unwrap();
+        let (original, original_native) = mixed_nodes().plane_excitation(reference).unwrap();
+        assert!((actual - C64::ONE).abs() < 2e-14);
+        assert_eq!(actual, original);
+        assert_eq!(native, vec![original_native[0], C64::ZERO, original_native[1]]);
+        let back = multiply(&response.reflection_matrix, &native);
+        assert!((native[2] - back[2]).abs() < 2e-14);
+        assert!(native[2].abs() > 0.1);
+    }
+}
+
+#[test]
+fn plane_source_retains_transitively_coupled_reflection_paths() {
+    // A reciprocal passive three-channel mixer plus an independent closed
+    // mode. Source 0 reaches mode 1 only through mode 2. Eliminating the
+    // zero-flow conditions gives a2=18 a0/77 and a1=4 a0/77 exactly.
+    let mut response = mixed_nodes();
+    response.n_modes = 4;
+    response.reflection_matrix = [
+        0.1, 0.0, 0.2, 0.0,
+        0.0, 0.1, 0.2, 0.0,
+        0.2, 0.2, 0.1, 0.0,
+        0.0, 0.0, 0.0, 1.0,
+    ].map(C64::from_re).to_vec();
+    response.characteristic_impedances = vec![C64::ONE; 4];
+    response.cutoffs_at_throat_hz = vec![100.0, 200.0, 300.0];
+    let (reflected, native) = response.plane_excitation(1.0).unwrap();
+    assert!((reflected - C64::from_re(113.0/770.0)).abs() < 4e-15);
+    for (actual, expected) in native.iter().zip([1.0, 4.0/77.0, 18.0/77.0, 0.0]) {
+        assert!((*actual - C64::from_re(expected)).abs() < 4e-15);
+    }
+    let back = multiply(&response.reflection_matrix, &native);
+    for mode in 1..4 { assert!((native[mode] - back[mode]).abs() < 4e-15); }
+}
+
+#[test]
+fn plane_source_does_not_prune_weak_or_one_way_coupling_to_resonance() {
+    for coupling in [1.0, 1e-100, f64::MIN_POSITIVE] {
+        for transpose in [false, true] {
+            let mut response = mixed_nodes();
+            response.reflection_matrix = vec![C64::ZERO, C64::ZERO, C64::ZERO, C64::ONE];
+            response.reflection_matrix[if transpose { 1 } else { 2 }] = C64::from_re(coupling);
+            // R11=1 makes the higher-flow constraint singular. No threshold
+            // may silently discard an arbitrarily weak nonzero connection.
+            assert!(matches!(response.plane_excitation(4.0), Err(DuctError::Singular)));
+        }
+    }
+}
+
 #[test]
 fn prepared_reflection_matches_impedance_away_from_poles_for_every_load() {
     let gas = air();
