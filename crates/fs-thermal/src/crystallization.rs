@@ -42,6 +42,10 @@ use core::fmt;
 mod adaptive;
 pub use adaptive::{AdaptiveCrystallizationStep, CrystallizationAdaptivity};
 
+/// Original-density volume and pressure-work accounts at declared constant pressure.
+#[path = "crystallization/pressure.rs"]
+pub mod pressure;
+
 #[path = "crystallization/remelting.rs"]
 mod remelting;
 pub use remelting::{CrystallizationCaloricTransition, EquivalentAgeRemelting};
@@ -80,7 +84,7 @@ impl std::error::Error for CrystallizationError {}
 pub trait CrystallizationCaloric {
     fn specific_enthalpy_j_kg(&self, temperature_k: f64) -> Result<f64, CrystallizationError>;
     /// Identity of this immutable ORIGINAL caloric chart, including its energy
-    /// datum, complete state domain and constitutive data. Thermal adapters use
+    /// datum, complete state domain, density law when supplied, and constitutive data. Thermal adapters use
     /// this same identity to bind their registered law to this actual branch;
     /// agreement at one temperature is not a source-identity check. A material
     /// name or the combined kinetic-law identity is not a substitute. Generic
@@ -94,6 +98,13 @@ pub trait CrystallizationCaloric {
     /// absence retains the bounded temperature-bracket fallback.
     fn minimum_heat_capacity_j_kg_k(&self) -> Option<f64> {
         None
+    }
+    /// Optional original phase density [kg/m3] at the SAME fixed pressure,
+    /// composition and temperature domain as this caloric branch. Its data must
+    /// be included in `caloric_identity`; no density or pressure EOS is inferred
+    /// from enthalpy. `None` makes moving-volume/pressure-work queries unavailable.
+    fn density_kg_m3(&self, _temperature_k: f64) -> Result<Option<f64>, CrystallizationError> {
+        Ok(None)
     }
 }
 impl<F: Fn(f64) -> Result<f64, CrystallizationError>> CrystallizationCaloric for F {

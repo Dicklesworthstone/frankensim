@@ -153,6 +153,18 @@ impl CrystallizationCaloric for CrystallizationCaloricBranch<'_> {
     fn caloric_identity(&self) -> Option<[u8; 32]> {
         Some(*self.identity().as_bytes())
     }
+    fn density_kg_m3(&self, temperature_k: f64) -> Result<Option<f64>, CrystallizationError> {
+        // The same original chart identity covers both calorics and density.
+        // Preserve its admitted density interpolation instead of fitting a
+        // separate expansion law for constant-pressure consumers.
+        self.density_at_temperature(temperature_k)
+            .map(Some)
+            .map_err(|_| {
+                CrystallizationError::Invalid(
+                    "density is outside the original material crystallization branch",
+                )
+            })
+    }
     fn minimum_heat_capacity_j_kg_k(&self) -> Option<f64> {
         Some(self.minimum_heat_capacity_j_kg_k)
     }
