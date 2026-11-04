@@ -1,14 +1,17 @@
 //! Local surface laws evaluated by their original mechanical/material owners.
 use super::*;
-use crate::helmholtz::bc::{PorousLayersBoundary, PorousRigidBoundary};
+use crate::helmholtz::bc::{PorousLayersBoundary, PorousRigidBoundary, PorousTransmittingBoundary};
 use fs_material::fluid_acoustics::{FluidAcousticState, thermoviscous::ThermoviscousFluidState};
 use fs_material::porous::{
     PorousFluidLaw,
-    layers::{Layer, MAX_LAYERS, RigidBackedLayers},
+    layers::{
+        Layer, MAX_LAYERS, RigidBackedLayers, TransmittingLayers,
+        absorption::{LayerAbsorptionBudget, LayerAbsorptionError},
+    },
 };
 use fs_phs::WallPin;
 
-/// An owned layer in a locally reacting, rigid-backed treatment, ordered from
+/// An owned layer in a locally reacting treatment, ordered from
 /// the exposed face toward its backing. The original material owner retains
 /// pressure/normal-velocity continuity and coherent propagation between layers.
 #[derive(Clone, Debug)]
@@ -66,6 +69,22 @@ pub enum LocalWall {
         fluid: ThermoviscousFluidState,
         layers: Vec<LocalWallLayer>,
     },
+    /// Ordered layers terminated by an original lossless receiving fluid.
+    /// The normal-incidence Robin law represents a local outgoing planar load,
+    /// not a second 3D receiving field. Accepted work includes transmission;
+    /// only the explicit power-partition query evaluates irreversible loss.
+    LayeredTransmitting {
+        fluid: ThermoviscousFluidState,
+        receiving_fluid: FluidAcousticState,
+        layers: Vec<LocalWallLayer>,
+    },
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct WallPowerCoefficients {
+    pub(super) admittance: C64,
+    pub(super) irreversible_conductance: f64,
+    pub(super) transmitted_conductance: f64,
 }
 
 /// An immutable material table and one table index per physical boundary panel.
@@ -165,7 +184,13 @@ impl LocalBoundary {
                     supported_hz.0 = supported_hz.0.max(band.0);
                     supported_hz.1 = supported_hz.1.min(band.1);
                 }
-                LocalWall::LayeredRigid { fluid, layers } => {
+                LocalWall::LayeredRigid { fluid, layers }
+                | LocalWall::LayeredTransmitting { fluid, layers, .. } => {
+                    if layers.len() > MAX_LAYERS {
+                        return Err(TransferError::Invalid(
+                            "local wall exceeds the material layer ceiling",
+                        ));
+                    }
                     let mut band = (0.0_f64, f64::INFINITY);
                     for layer in layers {
                         if let LocalWallLayer::Porous { law, .. } = layer {
@@ -184,9 +209,13 @@ impl LocalBoundary {
                     // Robin pressure-node refusals belong to the actual query,
                     // not an arbitrary validation frequency for lossless gaps.
                     let probe_hz = if band.0 > 0.0 { band.0 } else { 1.0 };
-                    let prepared =
-                        prepare_layers(fluid, layers, core::f64::consts::TAU * probe_hz)?;
-                    let acoustic = prepared.fluid().acoustic();
+                    let omega = core::f64::consts::TAU * probe_hz;
+                    let acoustic = if let LocalWall::LayeredTransmitting { receiving_fluid, .. } = law {
+                        prepare_transmitting(fluid, receiving_fluid, layers, omega)?
+                            .prepared_layers().fluid().acoustic()
+                    } else {
+                        prepare_layers(fluid, layers, omega)?.fluid().acoustic()
+                    };
                     if acoustic.density_kg_m3() != medium.density
                         || acoustic.sound_speed_m_s() != medium.sound_speed
                     {
@@ -327,33 +356,7 @@ impl LocalBoundary {
             if cancelled() {
                 return Err(TransferError::Cancelled);
             }
-            let beta = match law {
-                LocalWall::Rigid => C64::ZERO,
-                LocalWall::Mechanical(pin) => {
-                    let impedance = fs_phs::wall_specific_impedance(pin, omega)?;
-                    if !finite(impedance) || impedance == C64::ZERO {
-                        return Err(TransferError::Invalid(
-                            "wall impedance is singular or unrepresentable",
-                        ));
-                    }
-                    C64::from_re(rho_c) / impedance
-                }
-                LocalWall::PorousRigid {
-                    law,
-                    fluid,
-                    thickness_m,
-                } => PorousRigidBoundary::new(law, fluid, omega, *thickness_m)?
-                    .normalized_admittance(),
-                LocalWall::LayeredRigid { fluid, layers } => {
-                    let prepared = prepare_layers(fluid, layers, omega)?;
-                    PorousLayersBoundary::new(&prepared)?.normalized_admittance()
-                }
-            };
-            if !finite(beta) || beta.re < 0.0 {
-                return Err(TransferError::Invalid(
-                    "local wall admittance is nonfinite or active",
-                ));
-            }
+            let beta = law.admittance(rho_c, omega)?;
             coefficients.push(beta);
         }
         Ok(self
@@ -404,6 +407,10 @@ impl LocalBoundary {
                 LocalWall::LayeredRigid { fluid, layers } => {
                     prepare_layers(fluid, layers, omega)?.reflection(1.0)?.pressure_reflection.conj()
                 }
+                LocalWall::LayeredTransmitting { fluid, receiving_fluid, layers } => {
+                    prepare_transmitting(fluid, receiving_fluid, layers, omega)?
+                        .scattering(1.0)?.pressure_reflection.conj()
+                }
             };
             if !finite(reflection) || reflection.abs() > 1.0 + 64.0 * f64::EPSILON {
                 return Err(TransferError::Invalid("local wall reflection is nonfinite or active"));
@@ -418,6 +425,66 @@ impl LocalBoundary {
             panels.push(coefficients[index]);
         }
         Ok(panels)
+    }
+
+    /// Query expensive positive layer-loss integrals only for a requested
+    /// physical power partition. The allowance counts declared layers across
+    /// distinct transmitting wall laws, including zero-thickness identities.
+    /// Each native query admits that count before its propagation/integration
+    /// passes and polls cancellation per layer. No panel repeats a wall query.
+    pub(super) fn power_coefficients(
+        &self,
+        omega: f64,
+        maximum_absorption_layers: usize,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(Vec<WallPowerCoefficients>, usize), TransferError> {
+        if cancelled() {
+            return Err(TransferError::Cancelled);
+        }
+        if !omega.is_finite() || omega <= 0.0 {
+            return Err(TransferError::Invalid("local wall frequency must be positive and finite"));
+        }
+        let layer_count = self.laws.iter().try_fold(0_usize, |total, law| {
+            let count = match law {
+                LocalWall::LayeredTransmitting { layers, .. } => layers.len(),
+                _ => 0,
+            };
+            total.checked_add(count).ok_or(TransferError::Invalid("wall loss extent overflow"))
+        })?;
+        if layer_count > maximum_absorption_layers {
+            return Err(TransferError::Invalid("wall loss exceeds declared material-layer budget"));
+        }
+        let rho_c = self.medium.density * self.medium.sound_speed;
+        let mut coefficients = Vec::with_capacity(self.laws.len());
+        for law in &self.laws {
+            if cancelled() {
+                return Err(TransferError::Cancelled);
+            }
+            let coefficient = if let LocalWall::LayeredTransmitting { fluid, receiving_fluid, layers } = law {
+                let prepared = prepare_transmitting(fluid, receiving_fluid, layers, omega)?;
+                let power = prepared.normal_surface_power(
+                    LayerAbsorptionBudget { max_layers: layers.len() },
+                    &mut cancelled,
+                ).map_err(absorption_error)?;
+                WallPowerCoefficients {
+                    admittance: power.normalized_admittance.conj(),
+                    irreversible_conductance: power.absorbed_conductance,
+                    transmitted_conductance: power.transmitted_conductance,
+                }
+            } else {
+                let admittance = law.admittance(rho_c, omega)?;
+                WallPowerCoefficients {
+                    admittance,
+                    irreversible_conductance: admittance.re,
+                    transmitted_conductance: 0.0,
+                }
+            };
+            coefficients.push(coefficient);
+        }
+        if cancelled() {
+            return Err(TransferError::Cancelled);
+        }
+        Ok((self.panel_laws.iter().map(|&i| coefficients[i]).collect(), layer_count))
     }
 
     fn compute_hash(&self) -> ContentHash {
@@ -477,8 +544,18 @@ impl LocalBoundary {
                         }
                     }
                 }
-                LocalWall::LayeredRigid { fluid, layers } => {
-                    hash.update(&[3]);
+                LocalWall::LayeredRigid { fluid, layers }
+                | LocalWall::LayeredTransmitting { fluid, layers, .. } => {
+                    if let LocalWall::LayeredTransmitting { receiving_fluid, .. } = law {
+                        hash.update(&[4]);
+                        hash_scalars(&mut hash, &[
+                            receiving_fluid.density_kg_m3(),
+                            receiving_fluid.sound_speed_m_s(),
+                            receiving_fluid.adiabatic_bulk_modulus_pa(),
+                        ]);
+                    } else {
+                        hash.update(&[3]);
+                    }
                     hash_scalars(
                         &mut hash,
                         &[
@@ -534,6 +611,52 @@ fn prepare_layers<'a>(
     layers: &'a [LocalWallLayer],
     omega: f64,
 ) -> Result<RigidBackedLayers<'a>, TransferError> {
+    let sources = layer_sources(layers)?;
+    Ok(RigidBackedLayers::new(
+        fluid,
+        omega,
+        &sources[..layers.len()],
+    )?)
+}
+
+impl LocalWall {
+    fn admittance(&self, rho_c: f64, omega: f64) -> Result<C64, TransferError> {
+        let beta = match self {
+            LocalWall::Rigid => C64::ZERO,
+            LocalWall::Mechanical(pin) => {
+                let impedance = fs_phs::wall_specific_impedance(pin, omega)?;
+                if !finite(impedance) || impedance == C64::ZERO {
+                    return Err(TransferError::Invalid(
+                        "wall impedance is singular or unrepresentable",
+                    ));
+                }
+                C64::from_re(rho_c) / impedance
+            }
+            LocalWall::PorousRigid {
+                law,
+                fluid,
+                thickness_m,
+            } => PorousRigidBoundary::new(law, fluid, omega, *thickness_m)?
+                .normalized_admittance(),
+            LocalWall::LayeredRigid { fluid, layers } => {
+                let prepared = prepare_layers(fluid, layers, omega)?;
+                PorousLayersBoundary::new(&prepared)?.normalized_admittance()
+            }
+            LocalWall::LayeredTransmitting { fluid, receiving_fluid, layers } => {
+                let prepared = prepare_transmitting(fluid, receiving_fluid, layers, omega)?;
+                PorousTransmittingBoundary::new(&prepared)?.normalized_admittance()
+            }
+        };
+        if !finite(beta) || beta.re < 0.0 {
+            return Err(TransferError::Invalid(
+                "local wall admittance is nonfinite or active",
+            ));
+        }
+        Ok(beta)
+    }
+}
+
+fn layer_sources(layers: &[LocalWallLayer]) -> Result<[Layer<'_>; MAX_LAYERS], TransferError> {
     if layers.len() > MAX_LAYERS {
         return Err(TransferError::Invalid(
             "local wall exceeds the material layer ceiling",
@@ -544,11 +667,25 @@ fn prepare_layers<'a>(
     for (source, layer) in sources.iter_mut().zip(layers) {
         *source = layer.source();
     }
-    Ok(RigidBackedLayers::new(
-        fluid,
-        omega,
-        &sources[..layers.len()],
-    )?)
+    Ok(sources)
+}
+
+fn prepare_transmitting<'a>(
+    fluid: &'a ThermoviscousFluidState,
+    receiving_fluid: &'a FluidAcousticState,
+    layers: &'a [LocalWallLayer],
+    omega: f64,
+) -> Result<TransmittingLayers<'a>, TransferError> {
+    let sources = layer_sources(layers)?;
+    Ok(TransmittingLayers::new(fluid, receiving_fluid, omega, &sources[..layers.len()])?)
+}
+
+fn absorption_error(error: LayerAbsorptionError) -> TransferError {
+    match error {
+        LayerAbsorptionError::Material(error) => TransferError::Material(error),
+        LayerAbsorptionError::Invalid(message) => TransferError::Invalid(message),
+        LayerAbsorptionError::Cancelled => TransferError::Cancelled,
+    }
 }
 
 fn hash_porous_source(hash: &mut DomainHasher, law: &PorousFluidLaw) {

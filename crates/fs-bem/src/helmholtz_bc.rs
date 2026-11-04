@@ -461,6 +461,57 @@ impl<'stack, 'source> PorousLayersBoundary<'stack, 'source> {
     }
 }
 
+/// Normal-incidence local Robin view of an original transmitting layer stack.
+///
+/// The receiving fluid is an outgoing planar half-space behind each local
+/// patch. This exterior BEM does not reconstruct a second three-dimensional
+/// receiving field or lateral propagation within the treatment. Re(beta) is
+/// total power accepted by the wall: transmitted energy is not porous heat.
+/// Use the original stack's explicit normal_surface_power query to separate
+/// those accounts. Admittance preparation performs no loss integration.
+#[derive(Clone, Copy)]
+pub struct PorousTransmittingBoundary<'stack, 'source> {
+    layers: &'stack fs_material::porous::layers::TransmittingLayers<'source>,
+    medium: Medium,
+    k: f64,
+    beta: C64,
+}
+
+impl<'stack, 'source> PorousTransmittingBoundary<'stack, 'source> {
+    pub fn new(
+        layers: &'stack fs_material::porous::layers::TransmittingLayers<'source>,
+    ) -> Result<Self, fs_material::MaterialError> {
+        let beta = layers.normalized_surface_admittance(1.0)?.conj();
+        let prepared = layers.prepared_layers();
+        let acoustic = prepared.fluid().acoustic();
+        let medium = Medium {
+            density: acoustic.density_kg_m3(),
+            sound_speed: acoustic.sound_speed_m_s(),
+        };
+        let k = prepared.exterior_wavenumber_rad_m();
+        if !k.is_finite() || k <= 0.0 || !finite(beta) || beta.re < 0.0 {
+            return Err(fs_material::MaterialError::State {
+                what: "transmitting BEM boundary needs finite passive admittance and positive wavenumber".into(),
+            });
+        }
+        Ok(Self { layers, medium, k, beta })
+    }
+
+    pub const fn layers(&self) -> &'stack fs_material::porous::layers::TransmittingLayers<'source> {
+        self.layers
+    }
+    pub const fn medium(&self) -> Medium {
+        self.medium
+    }
+    pub const fn wavenumber_rad_m(&self) -> f64 {
+        self.k
+    }
+    /// beta=Z0*v_n/p in the BEM exp(-i omega t) convention, conjugated once.
+    pub const fn normalized_admittance(&self) -> C64 {
+        self.beta
+    }
+}
+
 /// Drive velocity [m/s] and the frequency/space-dependent boundary law.
 #[derive(Clone, Copy)]
 pub struct SurfaceBc<'a> {
@@ -468,9 +519,11 @@ pub struct SurfaceBc<'a> {
     pub admittance: Admittance<'a>,
 }
 
-/// Outgoing trace plus separate wall absorption and drive work, in watts.
+/// Outgoing trace plus separate accepted wall power and drive work, in watts.
 pub struct BoundarySolution {
     pub radiation: RadiationSolution,
+    /// Power accepted by the boundary. A transmitting wall's value includes
+    /// outgoing backing-fluid energy and must not all be assigned to heat.
     pub absorbed_power_w: f64,
     pub driving_power_w: f64,
     pub declared_active: bool,
@@ -537,6 +590,8 @@ pub struct ScatteringSolution {
     pub incident_pressure_pa: Vec<C64>,
     /// Incident particle velocity along the body's outward normals [m/s].
     pub incident_normal_velocity_m_s: Vec<C64>,
+    /// Power accepted by the boundary. A transmitting wall's value includes
+    /// outgoing backing-fluid energy and must not all be assigned to heat.
     pub absorbed_power_w: f64,
     pub declared_active: bool,
 }

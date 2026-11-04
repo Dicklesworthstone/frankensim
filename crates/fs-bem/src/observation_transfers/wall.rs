@@ -18,7 +18,7 @@ pub use iterative::{
     BoundaryWorkExposureFactor, BoundaryWorkExposureLimits, BoundaryWorkExposureLine,
     PreparedBoundaryWorkExposure, WindowedBoundaryWork,
     BoundaryPortImpedance, IterativeBoundaryObservation, IterativeBoundaryObservationBake,
-    IterativeBoundaryPower, IterativeBoundaryResponse, IterativeCoherentDirectivity,
+    IterativeBoundaryPower, IterativeBoundaryPowerPartition, IterativeBoundaryResponse, IterativeCoherentDirectivity,
     IterativeDirectivityOptions, IterativeFarFieldSample, IterativeObservationError,
     IterativeObservationOptions, IterativeObservationSample, IterativeSourceReport,
 };

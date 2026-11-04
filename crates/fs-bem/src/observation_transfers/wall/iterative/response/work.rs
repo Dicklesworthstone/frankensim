@@ -17,11 +17,13 @@ pub struct IterativeBoundaryPower {
     /// Signed outward pressure/actual-normal-velocity work [W].
     /// Negative values are preserved, including discretization defects.
     pub outward_power_w: f64,
-    /// Absorption by the original local passive wall laws [W].
+    /// Total work accepted by the original local passive wall laws [W].
+    /// The historical name includes outgoing backing-fluid transmission;
+    /// it is not an irreversible-heat account for a transmitting wall.
     pub absorbed_power_w: f64,
-    /// Input minus outward work minus wall absorption [W].
+    /// Input minus outward work minus total accepted wall work [W].
     pub balance_w: f64,
-    /// Integral of |p|(|v_drive|+|v_actual|)/2 plus wall absorption [W].
+    /// Integral of |p|(|v_drive|+|v_actual|)/2 plus accepted wall work [W].
     /// This remains meaningful when signed active powers nearly cancel.
     pub apparent_power_scale_w: f64,
     /// Absolute balance divided by the apparent scale; zero for a zero field.
@@ -30,11 +32,44 @@ pub struct IterativeBoundaryPower {
     pub source_panel_products: u64,
 }
 
+impl IterativeBoundaryPower {
+    /// Total power leaving the exterior through the passive wall laws [W].
+    pub const fn accepted_power_w(&self) -> f64 {
+        self.absorbed_power_w
+    }
+}
+
+/// Coherent wall work split without replacing either the original boundary
+/// flux or the material's independent positive-loss integrals.
+#[derive(Clone, Copy, Debug)]
+pub struct IterativeBoundaryPowerPartition {
+    pub boundary_work: IterativeBoundaryPower,
+    pub accepted_power_w: f64,
+    /// Irreversible resistance/porous loss [W], not a transient temperature solve.
+    pub irreversible_loss_power_w: f64,
+    /// Power leaving into the explicitly lossless planar receiving fluid [W].
+    /// This is not a second three-dimensional BEM radiation field.
+    pub transmitted_power_w: f64,
+    /// Accepted work minus independently evaluated loss and transmission [W].
+    pub partition_residual_w: f64,
+    /// Declared layers integrated across distinct transmitting wall laws.
+    pub absorption_layers: usize,
+}
+
+struct BoundaryWorkEvaluation {
+    work: IterativeBoundaryPower,
+    partition: Option<[f64; 2]>,
+    absorption_layers: usize,
+}
+
 impl IterativeBoundaryResponse<'_, '_> {
     /// Integrate coherent finite-source work in O(sources * panels), retaining
     /// the phase and cross terms that sums of per-source powers would discard.
     /// The original material owner supplies beta = rho*c/Z at this frequency;
-    /// absorption is integral Re(beta)*|p|²/(2*rho*c) dA. Actual normal velocity
+    /// accepted work is integral Re(beta)*|p|²/(2*rho*c) dA. This cheap query
+    /// does not integrate porous heat: use coherent_boundary_power_partition
+    /// to distinguish irreversible loss from receiving-fluid transmission.
+    /// Actual normal velocity
     /// is taken from the retained solve, so work closure is measured rather
     /// than imposed by reconstructing velocity from that wall law.
     ///
@@ -53,6 +88,55 @@ impl IterativeBoundaryResponse<'_, '_> {
         maximum_panel_products: u64,
         gate: &CancelGate,
     ) -> Result<IterativeBoundaryPower, IterativeObservationError> {
+        Ok(self.evaluate_boundary_work(rates, maximum_panel_products, None, gate)?.work)
+    }
+
+    /// Separate outgoing transmission from irreversible loss using the same
+    /// coherent TOTAL boundary pressure as the retained work calculation.
+    /// The native material owner integrates positive viscous/thermal loss only
+    /// on request. maximum_absorption_layers bounds declared layers summed over
+    /// distinct transmitting laws, including identities; zero admits an empty
+    /// matched-fluid backing. Source/panel and material budgets are checked
+    /// before constitutive work. No power residual is assigned to either channel.
+    pub fn coherent_boundary_power_partition(
+        &self,
+        rates: &[C64],
+        maximum_panel_products: u64,
+        maximum_absorption_layers: usize,
+        gate: &CancelGate,
+    ) -> Result<IterativeBoundaryPowerPartition, IterativeObservationError> {
+        let evaluation = self.evaluate_boundary_work(
+            rates, maximum_panel_products, Some(maximum_absorption_layers), gate,
+        )?;
+        let [irreversible_loss_power_w, transmitted_power_w] = evaluation.partition
+            .ok_or_else(|| invalid("missing requested wall power partition"))?;
+        let accepted_power_w = evaluation.work.accepted_power_w();
+        let mut residual = ComplexSum::default();
+        for value in [accepted_power_w, -irreversible_loss_power_w, -transmitted_power_w] {
+            residual.add(C64::from_re(value));
+        }
+        let partition_residual_w = residual.finish().re;
+        if !partition_residual_w.is_finite() {
+            return Err(invalid("nonfinite wall power partition"));
+        }
+        poll(gate)?;
+        Ok(IterativeBoundaryPowerPartition {
+            boundary_work: evaluation.work,
+            accepted_power_w,
+            irreversible_loss_power_w,
+            transmitted_power_w,
+            partition_residual_w,
+            absorption_layers: evaluation.absorption_layers,
+        })
+    }
+
+    fn evaluate_boundary_work(
+        &self,
+        rates: &[C64],
+        maximum_panel_products: u64,
+        maximum_absorption_layers: Option<usize>,
+        gate: &CancelGate,
+    ) -> Result<BoundaryWorkEvaluation, IterativeObservationError> {
         poll(gate)?;
         let Excitation::Surface { owner, .. } = &self.observer.observation.excitation else {
             return Err(invalid(
@@ -78,13 +162,22 @@ impl IterativeBoundaryResponse<'_, '_> {
             .copied()
             .map(ScaledField::new)
             .collect::<Result<_, _>>()?;
-        let beta = self
-            .observer
-            .observation
-            .boundary
-            .normalized_admittance(self.omega, || gate.is_requested())?;
+        let boundary = &self.observer.observation.boundary;
+        let (partition, absorption_layers) = if let Some(maximum) = maximum_absorption_layers {
+            let (coefficients, layers) = boundary.power_coefficients(
+                self.omega, maximum, || gate.is_requested(),
+            )?;
+            (Some(coefficients), layers)
+        } else {
+            (None, 0)
+        };
+        let beta = if let Some(coefficients) = &partition {
+            coefficients.iter().map(|value| value.admittance).collect()
+        } else {
+            boundary.normalized_admittance(self.omega, || gate.is_requested())?
+        };
         let rho_c = self.medium().density * self.medium().sound_speed;
-        let mut sums = [ComplexSum::default(); 4];
+        let mut sums = [ComplexSum::default(); 6];
         for (panel, &area) in self.surface().areas().iter().enumerate() {
             poll(gate)?;
             let mut exponents = [i32::MIN; 3];
@@ -155,12 +248,29 @@ impl IterativeBoundaryResponse<'_, '_> {
             sums[3].add(C64::from_re(work(pressure, drive, area, true)?));
             sums[3].add(C64::from_re(work(pressure, velocity, area, true)?));
             sums[3].add(C64::from_re(absorbed));
+            if let Some(coefficients) = &partition {
+                let coefficient = coefficients[panel];
+                for (index, conductance) in [
+                    coefficient.irreversible_conductance,
+                    coefficient.transmitted_conductance,
+                ].into_iter().enumerate() {
+                    let value = product(
+                        pressure.value.norm_sq(),
+                        2 * pressure.exponent,
+                        &[0.5, area, conductance],
+                        rho_c,
+                    )?;
+                    sums[4 + index].add(C64::from_re(value));
+                }
+            }
         }
         let [
             input_power_w,
             outward_power_w,
             absorbed_power_w,
             apparent_power_scale_w,
+            irreversible_loss_power_w,
+            transmitted_power_w,
         ] = sums.map(|sum| sum.finish().re);
         let mut balance = ComplexSum::default();
         for value in [input_power_w, -outward_power_w, -absorbed_power_w] {
@@ -179,6 +289,8 @@ impl IterativeBoundaryResponse<'_, '_> {
             apparent_power_scale_w,
             balance_w,
             relative_balance,
+            irreversible_loss_power_w,
+            transmitted_power_w,
         ]
         .iter()
         .any(|v| !v.is_finite())
@@ -186,7 +298,7 @@ impl IterativeBoundaryResponse<'_, '_> {
             return Err(invalid("nonfinite coherent boundary work"));
         }
         poll(gate)?;
-        Ok(IterativeBoundaryPower {
+        let work = IterativeBoundaryPower {
             omega_rad_s: self.omega,
             operator_hash: self.operator_hash(),
             input_power_w,
@@ -196,6 +308,11 @@ impl IterativeBoundaryResponse<'_, '_> {
             apparent_power_scale_w,
             relative_balance,
             source_panel_products: products,
+        };
+        Ok(BoundaryWorkEvaluation {
+            work,
+            partition: partition.map(|_| [irreversible_loss_power_w, transmitted_power_w]),
+            absorption_layers,
         })
     }
 }

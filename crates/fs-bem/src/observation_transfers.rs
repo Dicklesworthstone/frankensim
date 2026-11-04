@@ -60,7 +60,7 @@ pub use wall::{
     BoundaryWorkExposureFactor, BoundaryWorkExposureLimits, BoundaryWorkExposureLine,
     PreparedBoundaryWorkExposure, WindowedBoundaryWork,
     BoundaryObservationBake, BoundaryPortImpedance, IterativeBoundaryObservation,
-    IterativeBoundaryObservationBake, IterativeBoundaryPower, IterativeBoundaryResponse,
+    IterativeBoundaryObservationBake, IterativeBoundaryPower, IterativeBoundaryPowerPartition, IterativeBoundaryResponse,
     IterativeCoherentDirectivity, IterativeDirectivityOptions, IterativeFarFieldSample,
     IterativeObservationError, IterativeObservationOptions, IterativeObservationSample,
     IterativeSourceReport, LocalBoundary, LocalBoundaryObservation, LocalWall, LocalWallLayer,

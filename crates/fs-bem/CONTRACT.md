@@ -1654,6 +1654,17 @@ reflection response; finite-admittance iterative/molecular routes still
 propagate their named refusal. The FIR convergence gates still apply to layered
 responses and do not certify unsampled material resonances.
 
+`LocalWall::LayeredTransmitting` carries the same ordered sources into both
+observation owners with an explicit original lossless receiving-fluid state.
+`TransmittingLayers` owns the coherent pressure/velocity propagation and
+`PorousTransmittingBoundary` supplies its stable normal-incidence admittance,
+conjugated once into exp(-i omega t). Material support, layer limits and full
+receiver/exterior state identity remain bound. Empty matched-fluid backing
+accepts outgoing power with zero irreversible loss. This is a locally reacting
+planar outgoing load behind each patch; no second 3-D receiving field, lateral
+treatment propagation, curvature correction or elastic mode conversion is
+inferred. Ordinary receiver/FIR evaluation performs no layer-loss integration.
+
 `LocalBoundaryObservation::for_scattering` extends the existing prescribed
 point-flow observer with these walls; `for_surface` consumes the original
 finite structural-velocity or unit-aperture-flow traces. The original prepared
@@ -1851,8 +1862,8 @@ realization or an error bound for the continuum problem.
 finite-source fields directly, without another solve or a source-pair matrix.
 Original signed pressure, actual normal velocity and prescribed source velocity
 are superposed before the quadratic work. The result separates source input,
-signed outward boundary work and absorption by the original local wall laws,
-including all coherent cross terms. Absorption uses the original frequency-bound
+signed outward boundary work and accepted work of the original local wall laws,
+including all coherent cross terms. Accepted work uses the original frequency-bound
 `Re(beta)*|p|^2/(2*rho*c)`; actual velocity comes from the retained solve, making
 the returned balance a measured identity rather than an imposed closure.
 An apparent-work scale normalizes the balance even when signed active powers
@@ -1865,6 +1876,24 @@ output. Storage is linear in panels plus sources. Compact and hybrid source
 banks refuse this finite-work-port operation because their retained compact
 columns are scattered fields and do not define point-source self work. These
 discrete work diagnostics do not bound BEM/FMM or continuum error.
+
+The explicit `coherent_boundary_power_partition` additionally evaluates native
+positive layer-loss integrals once per distinct transmitting wall law, with a
+caller budget for the summed declared layers. The same coherently combined
+total panel pressures supply accepted work, irreversible loss and outgoing
+receiving-fluid flux. Separate compensated sums retain source cross terms and
+small losses; neither channel is inferred from a residual or normalized to force
+closure. Legacy report field `absorbed_power_w` remains total accepted work,
+also named by `accepted_power_w()`, and includes outgoing transmission.
+`IterativeBoundaryPowerPartition` exposes that total, its independent two-way
+partition and the raw discrepancy. Other passive local wall laws have no
+receiving channel. Native material cancellation and the original source/panel
+work limits remain explicit; the cheap legacy work query does no heat integral.
+This cycle-average account uses the existing finite-source work owner and does
+not turn compact-source scattered traces into a finite self-work port.
+Focused regressions connect native phase/loading to actual dense and iterative
+receiver solves and finite-source coherent power, including lossless zero heat,
+porous heat plus transmission, source interference and work/cancellation refusal.
 
 `far_field` returns total outgoing amplitudes under `p ~ F exp(ikr)/r` using
 the original integrated triangle phase owner and exact direct volume monopoles
@@ -2927,8 +2956,9 @@ beside large input and outward powers. The raw closure residual remains visible.
 
 The reported watts are normalized-window pressure work. Reactive walls may
 return stored energy during a finite interval; their signed work is not
-irreversible heat. Cycle/stationary averaging recovers wall absorption under
-the original passive-law assumptions. No volume-storage, far-field radiation,
+irreversible heat. Cycle/stationary averaging recovers total accepted wall work
+under the original passive-law assumptions; a transmitting backing includes
+outgoing energy in that total. No volume-storage, far-field radiation,
 point-source self-loading or transient constitutive initial state is inferred.
 
 Preparation bounds all supplied lines, factors, source/panel products,

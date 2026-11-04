@@ -14,7 +14,7 @@ pub use directivity::{
     IterativeCoherentDirectivity, IterativeDirectivityOptions, IterativeFarFieldSample,
 };
 mod work;
-pub use work::IterativeBoundaryPower;
+pub use work::{IterativeBoundaryPower, IterativeBoundaryPowerPartition};
 mod exposure;
 pub use exposure::{
     BoundaryWorkExposureFactor, BoundaryWorkExposureLimits, BoundaryWorkExposureLine,

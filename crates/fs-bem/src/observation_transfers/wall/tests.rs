@@ -2,7 +2,7 @@
 //! responsibility of the original BEM and material qualification ladders.
 use super::*;
 use crate::helmholtz::bc::{
-    PorousLayersBoundary, PorousRigidBoundary,
+    PorousLayersBoundary, PorousRigidBoundary, PorousTransmittingBoundary,
     incident::{self, IncidentField, Monopole},
 };
 use core::f64::consts::TAU;
@@ -10,7 +10,7 @@ use fs_material::fluid_acoustics::{FluidAcousticState, thermoviscous::Thermovisc
 use fs_material::fluid_transport::FluidTransportState;
 use fs_material::porous::{
     PorousCard, PorousFluidLaw,
-    layers::{Layer, MAX_LAYERS, RigidBackedLayers},
+    layers::{Layer, MAX_LAYERS, RigidBackedLayers, TransmittingLayers},
 };
 use fs_phs::WallPin;
 
@@ -768,4 +768,158 @@ fn porous_diffraction_bakes_to_explicit_band_limited_pressure_playback() {
         peak = peak.max(output[0].abs());
     }
     assert!(peak > 1e-4);
+}
+
+#[test]
+fn transmitting_wall_retains_native_phase_receiver_and_independent_power_channels() {
+    let gas = fluid();
+    let receiver = FluidAcousticState::try_new(1.7, 280.0).unwrap();
+    let law = porous_law();
+    let wall = LocalWall::LayeredTransmitting {
+        fluid: gas,
+        receiving_fluid: receiver,
+        layers: vec![
+            LocalWallLayer::Porous { law: law.clone(), thickness_m: 0.03 },
+            LocalWallLayer::FluidGap { thickness_m: 0.025 },
+        ],
+    };
+    let bind = |wall| LocalBoundary::try_new(
+        medium(), vec![LocalWall::Rigid, wall], vec![1, 0, 1],
+    );
+    let boundary = bind(wall.clone()).unwrap();
+    assert_eq!(boundary.supported_band_hz(), (150.0, 1600.0));
+    for frequency in [200.0, 700.0, 1500.0] {
+        let omega = TAU * frequency;
+        let native = TransmittingLayers::new(
+            &gas, &receiver, omega,
+            &[
+                Layer::Porous { law: &law, thickness_m: 0.03 },
+                Layer::FluidGap { thickness_m: 0.025 },
+            ],
+        ).unwrap();
+        let adapter = PorousTransmittingBoundary::new(&native).unwrap();
+        assert_eq!(adapter.medium(), medium());
+        assert_eq!(adapter.wavenumber_rad_m(), omega / medium().sound_speed);
+        let beta = boundary.normalized_admittance(omega, || false).unwrap();
+        assert_eq!(beta, vec![adapter.normalized_admittance(), C64::ZERO, adapter.normalized_admittance()]);
+        assert_eq!(beta[0], native.normalized_surface_admittance(1.0).unwrap().conj());
+        let reflection = boundary.pressure_reflection(omega, || false).unwrap();
+        let native_reflection = native.scattering(1.0).unwrap().pressure_reflection.conj();
+        assert_eq!(reflection, vec![native_reflection, C64::ONE, native_reflection]);
+        let reflected = (C64::ONE - beta[0]) / (C64::ONE + beta[0]);
+        assert!((reflected - native.scattering(1.0).unwrap().pressure_reflection.conj()).abs() < 2e-14);
+        let original = native.normal_surface_power(
+            fs_material::porous::layers::absorption::LayerAbsorptionBudget { max_layers: 2 },
+            || false,
+        ).unwrap();
+        let (power, layers) = boundary.power_coefficients(omega, 2, || false).unwrap();
+        assert_eq!(layers, 2); // Two layers per distinct law, not per panel.
+        assert_eq!(power[0].admittance, beta[0]);
+        assert_eq!(power[0].irreversible_conductance, original.absorbed_conductance);
+        assert_eq!(power[0].transmitted_conductance, original.transmitted_conductance);
+        assert!(power[0].irreversible_conductance > 0.0);
+        assert!(power[0].transmitted_conductance > 0.0);
+        assert_eq!(power[1].irreversible_conductance, 0.0);
+        assert_eq!(power[1].transmitted_conductance, 0.0);
+        assert_eq!(power[0].transmitted_conductance, power[2].transmitted_conductance);
+    }
+    let omega = TAU * 700.0;
+    assert!(matches!(boundary.power_coefficients(omega, 1, || false), Err(TransferError::Invalid(_))));
+    let mut polls = 0;
+    assert!(matches!(boundary.power_coefficients(omega, 2, || {
+        polls += 1;
+        polls == 5
+    }), Err(TransferError::Cancelled)));
+    assert!(matches!(boundary.normalized_admittance(TAU * 100.0, || false), Err(TransferError::Material(_))));
+    for reverse in [false, true] {
+        let mut changed = wall.clone();
+        let LocalWall::LayeredTransmitting { receiving_fluid, layers, .. } = &mut changed else {
+            unreachable!()
+        };
+        if reverse {
+            layers.reverse();
+        } else {
+            *receiving_fluid = FluidAcousticState::try_new(2.4, 280.0).unwrap();
+        }
+        let changed = bind(changed).unwrap();
+        assert_ne!(changed.content_hash(), boundary.content_hash());
+        assert!((changed.normalized_admittance(omega, || false).unwrap()[0]
+            - boundary.normalized_admittance(omega, || false).unwrap()[0]).abs() > 1e-4);
+    }
+    let matched = bind(LocalWall::LayeredTransmitting {
+        fluid: gas,
+        receiving_fluid: gas.acoustic(),
+        layers: vec![],
+    }).unwrap();
+    let (power, count) = matched.power_coefficients(omega, 0, || false).unwrap();
+    assert_eq!(count, 0);
+    assert_eq!(power[0].admittance, C64::ONE);
+    assert_eq!(power[0].irreversible_conductance, 0.0);
+    assert_eq!(power[0].transmitted_conductance, 1.0);
+    assert_eq!(matched.pressure_reflection(omega, || false).unwrap(),
+        vec![C64::ZERO, C64::ONE, C64::ZERO]);
+}
+
+#[test]
+fn transmitting_treatment_reaches_dense_and_iterative_receiver_fields() {
+    let surface = SpherePanels::icosphere(0.025, 0).unwrap();
+    // A high receiving admittance selects the concurrent dense reflection
+    // coordinates. Its lossless empty stack still transmits rather than heats.
+    let pressure_release_limit = uniform(&surface, LocalWall::LayeredTransmitting {
+        fluid: fluid(),
+        receiving_fluid: FluidAcousticState::try_new(1.2e-10, 340.0).unwrap(),
+        layers: vec![],
+    });
+    let omega = TAU * 700.0;
+    assert!(pressure_release_limit.normalized_admittance(omega, || false).unwrap()[0].abs()
+        > 1.0 / det::sqrt(f64::EPSILON));
+    let (power, count) = pressure_release_limit.power_coefficients(omega, 0, || false).unwrap();
+    assert_eq!(count, 0);
+    assert_eq!(power[0].irreversible_conductance, 0.0);
+    assert!(power[0].transmitted_conductance > 0.0);
+    let reflection_chart = LocalBoundaryObservation::for_scattering(
+        scattering(&surface), pressure_release_limit, None,
+    ).unwrap();
+    assert!(reflection_chart.physical_frequency_sample(omega, || false).unwrap()
+        .iter().all(|&value| finite(value)));
+    let boundary = uniform(&surface, LocalWall::LayeredTransmitting {
+        fluid: fluid(),
+        receiving_fluid: fluid().acoustic(),
+        layers: vec![
+            LocalWallLayer::Porous { law: porous_law(), thickness_m: 0.03 },
+            LocalWallLayer::FluidGap { thickness_m: 0.025 },
+        ],
+    });
+    let dense = LocalBoundaryObservation::for_scattering(
+        scattering(&surface), boundary.clone(), Some(window()),
+    ).unwrap();
+    let omega = TAU * 700.0;
+    let reference = dense.physical_frequency_sample(omega, || false).unwrap();
+    let rigid = scattering(&surface).frequency_sample(omega, || false).unwrap();
+    assert!((reference[0] - rigid[0]).abs() > 1e-3 * rigid[0].abs());
+    let gate = fs_exec::CancelGate::new_clock_free();
+    let iterative = IterativeBoundaryObservation::for_scattering(
+        &surface, medium(), &[source()], &[receiver()], boundary,
+        IterativeObservationOptions {
+            highest_omega: TAU * 1600.0,
+            minimum_clearance_m: 1e-3,
+            receiver_quadrature: Options::default(),
+            lower_window: Some(window()),
+            solver: helmholtz::IterativeOptions {
+                tol: 1e-10,
+                restart: 60,
+                max_iters: 600,
+                fmm_order: 7,
+                leaf_capacity: 64,
+                ..helmholtz::IterativeOptions::default()
+            },
+        },
+        &gate,
+    ).unwrap();
+    let sample = iterative.physical_frequency_sample(omega, &gate).unwrap();
+    assert!(sample.sources[0].solve.converged_euclidean());
+    assert!(sample.sources[0].accepted_power_w() > 0.0);
+    for (&actual, &expected) in sample.transfer.iter().zip(&reference) {
+        assert!((actual - expected).abs() < 1e-8 * expected.abs());
+    }
 }

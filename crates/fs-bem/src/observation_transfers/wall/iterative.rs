@@ -11,7 +11,7 @@ mod response;
 pub use response::{
     BoundaryWorkExposureFactor, BoundaryWorkExposureLimits, BoundaryWorkExposureLine,
     PreparedBoundaryWorkExposure, WindowedBoundaryWork,
-    BoundaryPortImpedance, IterativeBoundaryPower, IterativeBoundaryResponse,
+    BoundaryPortImpedance, IterativeBoundaryPower, IterativeBoundaryPowerPartition, IterativeBoundaryResponse,
     IterativeCoherentDirectivity, IterativeDirectivityOptions, IterativeFarFieldSample,
 };
 
@@ -66,7 +66,15 @@ pub struct IterativeSourceReport {
     /// though each source rebuilt a separate FMM/preconditioner.
     pub resources: ResourceReceipt,
     /// Total-wall passive work for this unit source coordinate [W].
+    /// Includes power transmitted into a receiving fluid; not a heat account.
     pub absorbed_power_w: f64,
+}
+
+impl IterativeSourceReport {
+    /// Total exterior power accepted by the wall, including transmission [W].
+    pub const fn accepted_power_w(&self) -> f64 {
+        self.absorbed_power_w
+    }
 }
 
 #[derive(Clone, Debug)]

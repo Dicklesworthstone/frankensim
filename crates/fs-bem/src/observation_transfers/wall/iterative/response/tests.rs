@@ -667,3 +667,123 @@ fn g1_boundary_work_exposure_uses_retained_material_traces_and_common_source_clo
             .is_err()
     );
 }
+
+#[test]
+fn coherent_transmitting_wall_work_separates_heat_from_outgoing_backing_flux() {
+    use crate::observation_transfers::LocalWallLayer;
+    use fs_material::fluid_acoustics::{FluidAcousticState, thermoviscous::ThermoviscousFluidState};
+    use fs_material::fluid_transport::FluidTransportState;
+    use fs_material::porous::{
+        PorousCard, PorousFluidLaw,
+        layers::{Layer, TransmittingLayers, absorption::LayerAbsorptionBudget},
+    };
+
+    let gas = ThermoviscousFluidState::from_heat_capacity_ratio(
+        FluidAcousticState::try_new(medium().density, medium().sound_speed).unwrap(),
+        FluidTransportState::try_new(medium().density, 1005.0, 0.0257, 1.81e-5).unwrap(),
+        1.4,
+    ).unwrap();
+    let receiver = gas.acoustic();
+    let law = PorousFluidLaw::try_new(PorousCard::basotect_foam02(), 1.81e-5).unwrap();
+    let omega = TAU * 700.0;
+    let rates = [C64::new(0.8e-6, 0.3e-6), C64::new(-0.2e-6, 0.7e-6)];
+    for lossy in [false, true] {
+        let (surface, sources, traces, _) = fixture(0, Some([0.06, 0.0, 0.02]));
+        let mut native_layers = vec![Layer::FluidGap { thickness_m: 0.025 }];
+        let mut owned_layers = vec![LocalWallLayer::FluidGap { thickness_m: 0.025 }];
+        if lossy {
+            native_layers.insert(0, Layer::Porous { law: &law, thickness_m: 0.03 });
+            owned_layers.insert(0, LocalWallLayer::Porous { law: law.clone(), thickness_m: 0.03 });
+        }
+        let allowance = owned_layers.len();
+        let native = TransmittingLayers::new(&gas, &receiver, omega, &native_layers).unwrap();
+        let material = native.normal_surface_power(
+            LayerAbsorptionBudget { max_layers: allowance }, || false,
+        ).unwrap();
+        let passive: Vec<_> = (0..surface.areas().len())
+            .map(|panel| traces.iter().all(|trace| trace[panel] == 0.0))
+            .collect();
+        let boundary = LocalBoundary::try_new_iterative(
+            medium(),
+            vec![
+                LocalWall::Rigid,
+                LocalWall::LayeredTransmitting {
+                    fluid: gas,
+                    receiving_fluid: receiver,
+                    layers: owned_layers,
+                },
+            ],
+            passive.iter().map(|&value| usize::from(value)).collect(),
+        ).unwrap();
+        let gate = CancelGate::new_clock_free();
+        let mut observation_options = options(128);
+        observation_options.lower_window = Some(LowerBandWindow::try_new(150.0, 400.0).unwrap());
+        let owner = IterativeBoundaryObservation::for_surface(
+            &surface, medium(), &sources, &traces, &receivers(),
+            boundary, observation_options, &gate,
+        ).unwrap();
+        let response = owner.solve_frequency(omega, 4 * surface.areas().len(), &gate).unwrap();
+        assert!(response.reports().iter().all(|report| report.solve.converged_euclidean()));
+        let work = 4 * surface.areas().len() as u64;
+        let partition = response.coherent_boundary_power_partition(
+            &rates, work, allowance, &gate,
+        ).unwrap();
+        let legacy = response.coherent_boundary_power(&rates, work, &gate).unwrap();
+        assert_eq!(partition.accepted_power_w, legacy.accepted_power_w());
+        assert_eq!(partition.boundary_work.input_power_w, legacy.input_power_w);
+        assert_eq!(partition.boundary_work.outward_power_w, legacy.outward_power_w);
+        assert_eq!(partition.absorption_layers, allowance);
+
+        // Independent contraction of retained TOTAL pressures with native
+        // surface conductances. Sum complex fields first, retaining interference.
+        let mut pressure_weight = 0.0;
+        let mut incoherent_weight = 0.0;
+        for (panel, &is_passive) in passive.iter().enumerate() {
+            if !is_passive {
+                continue;
+            }
+            let mut pressure = C64::ZERO;
+            for (source, &rate) in rates.iter().enumerate() {
+                let field = response.solutions()[source].pressure[panel] * rate;
+                pressure = pressure + field;
+                incoherent_weight += field.norm_sq() * surface.areas()[panel];
+            }
+            pressure_weight += pressure.norm_sq() * surface.areas()[panel];
+        }
+        let weight = pressure_weight / (2.0 * medium().density * medium().sound_speed);
+        let expected_heat = weight * material.absorbed_conductance;
+        let expected_transmission = weight * material.transmitted_conductance;
+        let scale = partition.accepted_power_w;
+        assert!(scale > 0.0);
+        assert!(partition.transmitted_power_w > 0.0);
+        assert!((partition.irreversible_loss_power_w - expected_heat).abs() < 3e-12 * scale);
+        assert!((partition.transmitted_power_w - expected_transmission).abs() < 3e-12 * scale);
+        assert!(partition.partition_residual_w.abs() < 3e-12 * scale);
+        assert!(partition.boundary_work.relative_balance < 3e-12);
+        assert!((pressure_weight - incoherent_weight).abs() > 1e-6 * pressure_weight);
+        if lossy {
+            assert!(partition.irreversible_loss_power_w > 0.0);
+        } else {
+            assert_eq!(partition.irreversible_loss_power_w, 0.0);
+            assert!((partition.transmitted_power_w / scale - 1.0).abs() < 3e-12);
+        }
+
+        assert!(response.coherent_boundary_power_partition(
+            &rates, work - 1, allowance, &gate,
+        ).is_err());
+        assert!(response.coherent_boundary_power_partition(
+            &rates, work, allowance - 1, &gate,
+        ).is_err());
+        let zero = response.coherent_boundary_power_partition(
+            &[C64::ZERO; 2], work, allowance, &gate,
+        ).unwrap();
+        assert_eq!(zero.accepted_power_w, 0.0);
+        assert_eq!(zero.irreversible_loss_power_w, 0.0);
+        assert_eq!(zero.transmitted_power_w, 0.0);
+        let cancelled = CancelGate::new_clock_free();
+        cancelled.request();
+        assert!(response.coherent_boundary_power_partition(
+            &rates, work, allowance, &cancelled,
+        ).is_err());
+    }
+}
