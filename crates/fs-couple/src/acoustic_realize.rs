@@ -4631,18 +4631,11 @@ fn realize_kc_string(
     Ok(out)
 }
 
-// Preserve the complete original storage in either numerical image. The exact
-// owner includes conservative contact and quadratic material histories; it does
-// not replace the model by a contact-free or memory-free SOS approximation.
-enum KcFlow {
-    Exact(Box<fs_phs::linear_exact::PreparedNonlinearZoh>),
-    ResolvedMidpoint(Box<ResolvedKcFlow>),
-}
-
-struct ResolvedKcFlow {
-    system: fs_phs::PortHamiltonian,
-    linear: fs_phs::linear_exact::LinearSplit,
-    dt: f64,
+// The prepared owner admits its actual flow/heat dimensions. Its capacity
+// includes every model the original public split could admit, so fixed-end KC
+// members share one complete original-energy evolution at their fixed clock.
+struct KcFlow {
+    exact: Box<fs_phs::linear_exact::PreparedNonlinearZoh>,
 }
 
 impl KcFlow {
@@ -4656,41 +4649,17 @@ impl KcFlow {
             max_modes: system.state_dim(),
             max_omega_dt: core::f64::consts::PI,
         };
-        // The nonlinear trajectory uses 2*n + m + 1 coordinates. Its shadow
-        // split also reserves the doubled block used by the exact heat owner.
-        // Match BOTH existing admissions; never try-and-catch a physical or
-        // numerical preparation failure as permission to change integrators.
-        let preparation_dimension = system.state_dim()
-            .checked_mul(2)
-            .and_then(|n| n.checked_add(system.port_dim()))
-            .and_then(|n| n.checked_add(1))
-            .and_then(|n| n.checked_mul(2))
-            .ok_or(AcousticRealizeError::InvalidDescription {
-                what: "complete KC propagation dimension overflow",
-            })?;
-        if preparation_dimension <= fs_phs::linear_exact::MAX_LINEAR_EXPONENTIAL_BLOCK_DIM {
-            fs_phs::linear_exact::PreparedNonlinearZoh::new_owned(system, dt, budget)
-                .map(|flow| Self::Exact(Box::new(flow)))
-                .map_err(render_phs_error)
-        } else {
-            let linear = fs_phs::linear_exact::split_quadratic(&system, budget)
-                .map_err(render_phs_error)?;
-            Ok(Self::ResolvedMidpoint(Box::new(ResolvedKcFlow { system, linear, dt })))
-        }
+        fs_phs::linear_exact::PreparedNonlinearZoh::new_owned(system, dt, budget)
+            .map(|exact| Self { exact: Box::new(exact) })
+            .map_err(render_phs_error)
     }
 
     fn system(&self) -> &fs_phs::PortHamiltonian {
-        match self {
-            Self::Exact(flow) => flow.system(),
-            Self::ResolvedMidpoint(flow) => &flow.system,
-        }
+        self.exact.system()
     }
 
     fn duration(&self) -> f64 {
-        match self {
-            Self::Exact(flow) => flow.duration(),
-            Self::ResolvedMidpoint(flow) => flow.dt,
-        }
+        self.exact.duration()
     }
 
     fn admit_clock(&self, dt: f64) -> Result<(), AcousticRealizeError> {
@@ -4718,29 +4687,8 @@ impl KcFlow {
                 what: "KC propagation needs complete state and port output buffers",
             });
         }
-        match self {
-            Self::Exact(flow) => flow.step_into(initial, input, next, average_output)
-                .map_err(render_phs_error),
-            Self::ResolvedMidpoint(flow) => {
-                // Larger complete models keep the original render path. Only its
-                // nonlinear midpoint branch uses <=1-cent admission; exact
-                // quadratic storage keeps that owner's exact propagation.
-                // No mode, contact or memory arm is removed.
-                let record = fs_phs::linear_exact::step_render(
-                    &flow.system, &flow.linear, initial, input, dt,
-                ).map_err(render_phs_error)?;
-                next.copy_from_slice(&record.x);
-                average_output.copy_from_slice(&record.y);
-                Ok(fs_phs::PreparedStepRecord {
-                    delta_h: record.delta_h,
-                    dissipated: record.dissipated,
-                    supplied: record.supplied,
-                    newton_iters: record.newton_iters,
-                    solver_residual: record.solver_residual,
-                    solver_certificate: record.solver_certificate,
-                })
-            }
-        }
+        self.exact.step_into(initial, input, next, average_output)
+            .map_err(render_phs_error)
     }
 }
 
@@ -6073,14 +6021,14 @@ mod string_observer_tests {
     }
 
     #[test]
-    fn kc_render_refuses_unresolved_linear_poles_without_advancing() {
+    fn kc_render_refuses_reference_capacity_overflow_without_truncating_modes() {
         let string = PrestressedString {
             length_m: 0.5,
             tension_n: 20.0,
             lin_density_kg_m: 0.006,
             axial_stiffness_n: 1000.0,
             width_m: 0.001,
-            n_modes: 26,
+            n_modes: 52,
             damping_ratio: 0.0,
             rayleigh: None,
             bending_stiffness_n_m2: 0.0,
@@ -6092,38 +6040,12 @@ mod string_observer_tests {
             bending_loss_factor: None,
         };
         let gas = gas_state(AmbientGas::sea_level()).unwrap();
-        let probe = kc_string_member(&string, None, None, &[], &gas, 1.0, 1.0, 1e-6).unwrap();
-        let KcFlow::ResolvedMidpoint(probe) = &probe.flow else {
-            panic!("the complete 26-mode shadow exceeds the existing exponential capacity");
-        };
-        assert_eq!(probe.system.state_dim(), 2 * string.n_modes);
-        let dt = fs_phs::linear_exact::MIDPOINT_ONE_CENT_ANGULAR_STEP
-            / probe.linear.pole_rate_bound_rad_s();
-        let resolved_dt = dt * (1.0 - 1e-12);
-        let mut member = kc_string_member(
-            &string, None, None, &[], &gas, 1.0, 1.0, resolved_dt,
-        ).unwrap();
-        let mut texture = TextureDrive::try_new(None).unwrap();
-        member.x[2 * (string.n_modes - 1)] = 1e-9;
-        step_kc_member(
-            &mut member, None, &mut texture, &[], &string, &gas, resolved_dt,
-        ).unwrap();
-        assert_eq!(member.x.len(), 2 * string.n_modes);
-        assert!(member.x[2 * (string.n_modes - 1)] != 0.0);
-
-        let unresolved_dt = dt * (1.0 + 1e-10);
-        let mut member = kc_string_member(
-            &string, None, None, &[], &gas, 1.0, 1.0, unresolved_dt,
-        ).unwrap();
-        let before = member.x.clone();
+        // Every bare frequency fits the audio band, but the complete held-force
+        // image needs 2*(2*52)+52+1 = 261 coordinates, beyond the existing 256.
         assert!(matches!(
-            step_kc_member(
-                &mut member, None, &mut texture, &[], &string, &gas, unresolved_dt,
-            ),
-            Err(AcousticRealizeError::TimeResolution(_))
+            kc_string_member(&string, None, None, &[], &gas, 1.0, 1.0, 1.0 / 48_000.0),
+            Err(AcousticRealizeError::Nonlinear(_))
         ));
-        assert_eq!(member.x, before);
-        assert!(member.observer.previous_acceleration.is_none());
     }
 
     #[test]

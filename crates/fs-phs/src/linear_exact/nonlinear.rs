@@ -16,7 +16,7 @@
 use super::{
     DenseExponentialBudget, LinearSplitBudget, MAX_LINEAR_EXPONENTIAL_BLOCK_DIM, finite,
     positive_heat::PositiveHeat, prepared::PreparedQuadraticFlow,
-    prepared_zoh::energetic_scale_into, refuse, split_quadratic,
+    prepared_zoh::energetic_scale_into, refuse, split_quadratic_with_block_dimension,
 };
 use crate::{
     PhsError, PortHamiltonian, PreparedStepError, PreparedStepRecord, QuadraticStorage, StepRecord,
@@ -141,7 +141,9 @@ struct Scratch {
 /// Warm calls allocate nothing in this owner; storage and feedback callbacks
 /// must themselves be read-only and allocation-free for that guarantee. No
 /// physical accepted history is stored here. The work cap bounds Newton updates,
-/// not nonlinear temporal error. Dense admission covers 2*n+m+1 coordinates.
+/// not nonlinear temporal error. Dense admission covers the actual 2*n+m+1
+/// propagation and 2*n positive-heat coordinates; no doubled propagation block
+/// or additional eigendecomposition is reserved for held nonlinear efforts.
 pub struct PreparedNonlinearZoh {
     model: Model,
     scratch: Scratch,
@@ -149,6 +151,29 @@ pub struct PreparedNonlinearZoh {
 }
 
 impl PreparedNonlinearZoh {
+    /// Whether complete state/port dimensions fit this owner's reference caps.
+    ///
+    /// This checks only nonzero state dimension and overflow-safe sizes of the
+    /// actual propagation (2*n+m+1) and positive-heat (2*n) matrices. It does not
+    /// admit storage, J/R/G, caller budgets, finite clocks, or nonlinear accuracy;
+    /// preparation and stepping retain all of their independent checks.
+    pub fn fits_reference_capacity(state_dim: usize, port_dim: usize) -> bool {
+        if state_dim == 0 {
+            return false;
+        }
+        let Some(heat_dimension) = state_dim.checked_mul(2) else {
+            return false;
+        };
+        let Some(dimension) = heat_dimension
+            .checked_add(port_dim)
+            .and_then(|d| d.checked_add(1))
+        else {
+            return false;
+        };
+        heat_dimension <= MAX_LINEAR_EXPONENTIAL_BLOCK_DIM
+            && dimension <= MAX_LINEAR_EXPONENTIAL_BLOCK_DIM
+    }
+
     /// Prepare a finite positive clock and the original explicitly declared Q.
     /// Missing decompositions, unchanged dense limits and nonfinite caches refuse.
     pub fn new_owned(
@@ -169,12 +194,12 @@ impl PreparedNonlinearZoh {
             .checked_add(held)
             .and_then(|d| d.checked_add(1))
             .ok_or_else(|| refuse("nonlinear complete dimension"))?;
-        if dimension > MAX_LINEAR_EXPONENTIAL_BLOCK_DIM {
+        if !Self::fits_reference_capacity(n, m) {
             return Err(refuse(
                 "nonlinear complete operator exceeds existing exponential capacity",
             ));
         }
-        let split = split_quadratic(&system, budget)?;
+        let split = split_quadratic_with_block_dimension(&system, budget, dimension)?;
         let q = split.quadratic_matrix().to_vec();
         let exact = split.is_exact_quadratic();
         // This is the declared quadratic block, not a replacement physical
@@ -198,7 +223,14 @@ impl PreparedNonlinearZoh {
             storage: Box::new(QuadraticStorage::admitted(q.clone(), n)),
             resistance_witness: system.resistance_witness.clone(),
         };
-        let shadow_split = split_quadratic(&shadow, budget)?;
+        // The shadow changes only held-input columns and declares Q exact.
+        // Its J/R/Q, coordinates and spectral data are identical to the
+        // admitted original. Rebind that split instead of recomputing its
+        // eigensystems or reserving an unused doubled propagation block.
+        let mut shadow_split = split.clone();
+        shadow_split.m = held;
+        shadow_split.g = shadow.g.clone();
+        shadow_split.quadratic.exact = true;
         let outputs: Vec<Vec<f64>> = (0..m)
             .map(|p| {
                 (0..n)

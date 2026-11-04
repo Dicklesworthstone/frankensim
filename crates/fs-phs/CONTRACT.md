@@ -1794,7 +1794,25 @@ Q, modal truncation, state projection, new exponential kernel or added damping.
 The original cancellation-stable constitutive numerator supplies the nonlinear
 remainder gradient. Newton uses an invertible complete energy coordinate map,
 retains null-Q directions, and reuses the existing LU workspace. Preparation
-admits the unchanged dense ceiling for 2*n+m+1 numerical coordinates. Warm
+admits the actual 2*n+m+1 propagation and 2*n positive-heat matrices against
+the unchanged 256-coordinate ceiling. The private prepared admission shares
+every original shape, finite-value, J/R/Q symmetry, PSD, spectral residual and
+caller-budget check. The public `split_quadratic` entry retains its legacy
+2*(n+m+1) reservation unchanged. Held nonlinear-effort inputs reuse the already
+admitted original Q/J/R eigensystems; only the shadow's input layout and exact-Q
+declaration change, and its full matching-structure check remains active.
+
+`PreparedNonlinearZoh::fits_reference_capacity(n,m)` is an allocation-free,
+overflow-safe dimension suitability check, including n>0. It does not certify
+physical data, clocks, work budgets or temporal accuracy. For a complete bank
+with two states and one port per mode, the actual bound is 5*m+1<=256, admitting
+51 modes. Material-memory coordinates consume the same complete-state budget;
+none are discarded. The existing quadratic-flow byte/work and positive-heat
+admissions remain active. Larger matrices and additional output forms still
+increase cold preparation work; removing a redundant eigendecomposition does
+not establish real-time throughput.
+
+Warm
 state/output/selected-input publication is transactional after endpoint, finite
 value, original storage and independent positive loss/work checks. Controlled
 calls poll cancellation between bounded numerical trials. The default Newton
@@ -1814,7 +1832,7 @@ asserted exact for the continuous nonlinear gradient `grad H(x(t))`; only the
 quadratic limit is exact. Nonlinear accuracy, contact switching, excitation
 bandwidth, root uniqueness and real-time throughput require separate evidence.
 
-Six focused tests cover full cross damping and stiff warm Maxwell memory,
+The original six focused tests cover full cross damping and stiff warm Maxwell memory,
 independent discrete-effort heat/output integration, exact quadratic reduction,
 same-window passive feedback, energy-datum invariance, and atomic refusal and
 cancellation. Smooth state errors for 8/16/32 steps are approximately
@@ -1822,6 +1840,15 @@ cancellation. Smooth state errors for 8/16/32 steps are approximately
 A 1,000-step full nonlinear warm probe observes zero owner allocations. The
 original eight physical-heat, four scattering and four prepared exact-flow tests
 also pass after the shared heat extension. These are bounded numerical checks.
+
+Additional capacity regressions exercise the actual 256-coordinate propagation
+boundary with 63 retained oscillators, one force port and a driven zero-Q
+coordinate, comparing every endpoint and integrated port work with independent
+analytic motion. They cover the 51/52-mode dimension boundary, overflow and
+preallocation refusal, unchanged public split reservation, caller/clock budgets,
+and malformed raw J/R/G/Q admission. The existing nonlinear, contact and memory
+physics checks remain necessary: a larger admitted matrix is not a larger
+certified nonlinear timestep. Native execution of these added cases remains pending.
 
 ## Source-square heat on an unchanged linear trajectory
 

@@ -73,7 +73,6 @@ fn kc_high_frequency_and_inharmonic_partials_retain_the_linear_phase() {
         let mut member = kc_string_member(
             &string, None, None, &[], &gas, 1.0, 1.0, dt,
         ).unwrap();
-        assert!(matches!(&member.flow, KcFlow::Exact(_)));
         let amplitudes: Vec<_> = (0..modes)
             .map(|mode| mass_scale(&string) * 1e-9 / (mode + 1) as f64).collect();
         for (mode, &amplitude) in amplitudes.iter().enumerate() {
@@ -201,7 +200,6 @@ fn kc_exact_contact_preserves_the_original_potential_and_held_force_work() {
     let mut member = kc_string_member(
         &string, None, None, std::slice::from_ref(&obstacle), &gas, 1.0, 1.0, dt,
     ).unwrap();
-    assert!(matches!(&member.flow, KcFlow::Exact(_)));
     member.x[0] = mass_scale(&string) * 20e-6;
     let physical_energy = |x: &[f64]| {
         let penetration = (x[0] / mass_scale(&string) - obstacle.gaps_m[0]).max(0.0);
@@ -258,7 +256,6 @@ fn kc_exact_flow_keeps_every_bending_memory_coordinate_and_its_energy() {
         &string, Some(Pluck { station_frac: 0.37, height_m: 1e-4 }),
         None, &[], &gas, 1.0, 1.0, dt,
     ).unwrap();
-    assert!(matches!(&member.flow, KcFlow::Exact(_)));
     assert_eq!(member.x.len(), 8);
     let initial_memory = member.x[4..].to_vec();
     assert!(initial_memory.iter().all(|z| *z != 0.0));
@@ -337,8 +334,7 @@ fn rejected_kc_trials_keep_mechanics_observer_and_texture_for_retry() {
     assert_eq!(member.x, before);
     assert_eq!(texture.inner.as_ref().unwrap().path_m, 0.0);
 
-    let KcFlow::Exact(flow) = &mut member.flow else { panic!("small KC model must use exact flow"); };
-    flow.set_max_iterations(0).unwrap();
+    member.flow.exact.set_max_iterations(0).unwrap();
     assert!(matches!(
         step_kc_member(&mut member, Some(bow), &mut texture, &[], &string, &gas, dt),
         Err(AcousticRealizeError::Nonlinear(_))
@@ -347,8 +343,7 @@ fn rejected_kc_trials_keep_mechanics_observer_and_texture_for_retry() {
     assert!(member.observer.previous_acceleration.is_none());
     assert_eq!(texture.inner.as_ref().unwrap().path_m, 0.0);
 
-    let KcFlow::Exact(flow) = &mut member.flow else { unreachable!() };
-    flow.set_max_iterations(50).unwrap();
+    member.flow.exact.set_max_iterations(50).unwrap();
     let weight = member.observer.weights[0];
     member.observer.weights[0].0 = f64::MAX;
     assert!(matches!(
@@ -376,4 +371,35 @@ fn rejected_kc_trials_keep_mechanics_observer_and_texture_for_retry() {
     assert_eq!(member.observer.previous_acceleration, fresh.observer.previous_acceleration);
     assert_eq!(texture.inner.as_ref().unwrap().path_m, fresh_texture.inner.as_ref().unwrap().path_m);
     assert!(texture.inner.as_ref().unwrap().path_m > 0.0);
+}
+
+#[test]
+fn kc_bank_beyond_the_legacy_split_capacity_retains_its_highest_partial() {
+    let gas = gas_state(AmbientGas::sea_level()).unwrap();
+    let string = string(100.0, 43);
+    let dt = 1.0 / 48_000.0;
+    let mut member = kc_string_member(
+        &string, None, None, &[], &gas, 1.0, 1.0, dt,
+    ).unwrap();
+    assert_eq!(member.x.len(), 86);
+    assert_eq!(member.input.len(), 43);
+    // The old split needed 2*(86+43+1)=260 slots; the complete prepared
+    // nonlinear trajectory needs only 2*86+43+1=216. No state is removed.
+    let last = string.n_modes - 1;
+    let amplitude = mass_scale(&string) * 1e-10;
+    member.x[2 * last] = amplitude;
+    let w = omega(&string, last + 1);
+    assert!(fs_phs::linear_exact::admit_midpoint_band(w, dt).is_err());
+    let mut texture = TextureDrive::try_new(None).unwrap();
+    for step in 1..=4 {
+        let (pressure, physical) = step_kc_member(
+            &mut member, None, &mut texture, &[], &string, &gas, dt,
+        ).unwrap();
+        let phase = w * f64::from(step) * dt;
+        close(member.x[2 * last], amplitude * phase.cos(), amplitude);
+        close(member.x[2 * last + 1], -w * amplitude * phase.sin(), w * amplitude);
+        close(physical[last], member.x[2 * last] / mass_scale(&string), 1e-10);
+        assert!(pressure.is_finite());
+        assert_eq!(member.x.len(), 86);
+    }
 }

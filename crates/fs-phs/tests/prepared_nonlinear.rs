@@ -2,7 +2,7 @@
 //! Heat uses the original resistance on the method's discrete effort; only the
 //! quadratic limit is an exact continuous physical trajectory.
 use fs_phs::linear_exact::{
-    LinearSplitBudget, PreparedExactZoh, PreparedNonlinearZoh, QuadraticPart,
+    LinearSplitBudget, PreparedExactZoh, PreparedNonlinearZoh, QuadraticPart, split_quadratic,
 };
 use fs_phs::{PortHamiltonian, QuadraticStorage, RelaxationBranch, Storage, duffing_oscillator};
 
@@ -363,4 +363,161 @@ fn unresolved_or_cancelled_candidates_publish_no_state_output_or_feedback() {
         .unwrap();
     assert!(next != [17.0, 19.0] && output != [23.0]);
     assert!(accepted.dissipated > 0.0);
+}
+
+
+#[test]
+fn complete_reference_boundary_retains_every_mode_port_and_zero_energy_coordinate() {
+    // The actual propagation matrix reaches 256 coordinates with one output.
+    // This avoids preparing 51 separate output integrals just to test the same
+    // matrix ceiling; the coupled KC regression covers its many-port layout.
+    let modes = 63;
+    let n = 2 * modes + 1;
+    let dt = 0.01;
+    let input = 0.2;
+    let mut j = vec![0.0; n * n];
+    let r = vec![0.0; n * n];
+    let mut g = vec![0.0; n];
+    let mut q = vec![0.0; n * n];
+    let mut initial = vec![0.0; n];
+    for mode in 0..modes {
+        let position = 2 * mode;
+        let momentum = position + 1;
+        let omega = 3.0 + 0.1 * mode as f64;
+        j[position * n + momentum] = 1.0;
+        j[momentum * n + position] = -1.0;
+        q[position * n + position] = omega * omega;
+        q[momentum * n + momentum] = 1.0;
+        g[momentum] = 0.1 + 0.01 * mode as f64;
+        initial[position] = if mode % 2 == 0 { 0.01 } else { -0.01 };
+        initial[momentum] = 0.003 * ((mode % 3) as f64 - 1.0);
+    }
+    // This original zero-Q coordinate still has a nonzero held drive. It
+    // carries no stored energy, but its state must not disappear in preparation.
+    initial[n - 1] = 0.19;
+    g[n - 1] = 0.2;
+    let system = PortHamiltonian::new(
+        n,
+        1,
+        j.clone(),
+        r.clone(),
+        g.clone(),
+        Box::new(QuadraticStorage::new(q, n).unwrap()),
+    )
+    .unwrap();
+    assert!(PreparedNonlinearZoh::fits_reference_capacity(n, 1));
+    // The ordinary split continues to reserve its legacy doubled ZOH block.
+    assert!(split_quadratic(&system, budget(n)).is_err());
+    let before = system.hamiltonian(&initial);
+    let mut runtime = PreparedNonlinearZoh::new_owned(system, dt, budget(n)).unwrap();
+    assert_eq!(runtime.system().state_dim(), n);
+    assert_eq!(runtime.system().port_dim(), 1);
+    assert_eq!(
+        runtime.system().structure(),
+        (j.as_slice(), r.as_slice(), g.as_slice())
+    );
+    let step = runtime.step(&initial, &[input]).unwrap();
+    let mut reference_work = 0.0;
+    for mode in 0..modes {
+        let position = 2 * mode;
+        let momentum = position + 1;
+        let omega = 3.0 + 0.1 * mode as f64;
+        let (sin, cos) = (omega * dt).sin_cos();
+        let equilibrium = g[momentum] * input / (omega * omega);
+        let relative = initial[position] - equilibrium;
+        let expected_q = equilibrium + relative * cos + initial[momentum] * sin / omega;
+        let expected_p = initial[momentum] * cos - omega * relative * sin;
+        close(step.x[position], expected_q, 0.1);
+        close(step.x[momentum], expected_p, 0.1);
+        reference_work += input * g[momentum] * (expected_q - initial[position]);
+    }
+    close(step.x[n - 1], initial[n - 1] + dt * g[n - 1] * input, 1.0);
+    close(step.y[0], reference_work / (input * dt), 1.0);
+    close(step.supplied, reference_work, before);
+    close(step.delta_h, runtime.system().hamiltonian(&step.x) - before, before);
+    close(step.delta_h, reference_work, before);
+    assert_eq!(step.dissipated, 0.0);
+    assert!((step.x[n - 3] - initial[n - 3]).abs() > 1e-6);
+}
+
+#[test]
+fn reference_capacity_is_overflow_safe_and_refuses_before_large_allocation() {
+    // Complete bare KC layouts use two states and one force port per mode.
+    for modes in [25, 26, 43, 51] {
+        assert!(PreparedNonlinearZoh::fits_reference_capacity(2 * modes, modes));
+    }
+    assert!(!PreparedNonlinearZoh::fits_reference_capacity(104, 52));
+    assert!(PreparedNonlinearZoh::fits_reference_capacity(127, 1));
+    for (n, m) in [(0, 0), (127, 2), (128, 0), (usize::MAX, 0), (1, usize::MAX)] {
+        assert!(!PreparedNonlinearZoh::fits_reference_capacity(n, m));
+        // Deliberately omit all large matrices: capacity must refuse before
+        // shape access, storage probing or any dimension-dependent allocation.
+        let system = PortHamiltonian::from_raw_parts(
+            n,
+            m,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Box::new(QuadraticStorage::new(vec![1.0], 1).unwrap()),
+        );
+        assert!(PreparedNonlinearZoh::new_owned(system, 0.01, budget(usize::MAX)).is_err());
+    }
+    let make = || duffing_oscillator(1.0, 4.0, 3.0, 0.2).unwrap();
+    assert!(PreparedNonlinearZoh::fits_reference_capacity(2, 1));
+    assert!(PreparedNonlinearZoh::new_owned(make(), 0.01, budget(1)).is_err());
+    assert!(PreparedNonlinearZoh::new_owned(make(), 0.0, budget(2)).is_err());
+    assert!(PreparedNonlinearZoh::new_owned(make(), f64::NAN, budget(2)).is_err());
+    assert!(
+        PreparedNonlinearZoh::new_owned(
+            make(),
+            0.01,
+            LinearSplitBudget { max_modes: 2, max_omega_dt: f64::NAN },
+        )
+        .is_err()
+    );
+}
+
+// Preparation must use the explicit decomposition, never a sampled guess for H.
+struct PreparationOnlyStorage(Option<Vec<f64>>);
+impl Storage for PreparationOnlyStorage {
+    fn hamiltonian(&self, _x: &[f64]) -> f64 {
+        panic!("preparation must not probe the storage value");
+    }
+    fn gradient(&self, _x: &[f64], _out: &mut [f64]) {
+        panic!("preparation must not probe the storage gradient");
+    }
+    fn quadratic_part(&self) -> Option<QuadraticPart> {
+        self.0.as_ref().map(|matrix| QuadraticPart { matrix: matrix.clone(), exact: true })
+    }
+}
+
+#[test]
+fn prepared_capacity_path_keeps_raw_structure_and_storage_admission() {
+    let j = vec![0.0, 1.0, -1.0, 0.0];
+    let r = vec![0.0; 4];
+    let g = vec![0.0, 1.0];
+    let q = Some(vec![4.0, 0.0, 0.0, 1.0]);
+    let invalid = [
+        ("J shape", vec![0.0; 3], r.clone(), g.clone(), q.clone()),
+        ("J finite", vec![0.0, f64::NAN, -1.0, 0.0], r.clone(), g.clone(), q.clone()),
+        ("J skew", vec![1.0, 1.0, -1.0, 0.0], r.clone(), g.clone(), q.clone()),
+        ("R symmetry", j.clone(), vec![0.0, 1.0, 0.0, 0.0], g.clone(), q.clone()),
+        ("R PSD", j.clone(), vec![-1.0, 0.0, 0.0, 0.0], g.clone(), q.clone()),
+        ("G shape", j.clone(), r.clone(), vec![0.0], q.clone()),
+        ("G finite", j.clone(), r.clone(), vec![0.0, f64::NAN], q.clone()),
+        ("Q absent", j.clone(), r.clone(), g.clone(), None),
+        ("Q shape", j.clone(), r.clone(), g.clone(), Some(vec![1.0; 3])),
+        ("Q finite", j.clone(), r.clone(), g.clone(), Some(vec![f64::NAN, 0.0, 0.0, 1.0])),
+        ("Q symmetry", j.clone(), r.clone(), g.clone(), Some(vec![4.0, 0.1, 0.0, 1.0])),
+        ("Q PSD", j, r, g, Some(vec![-1.0, 0.0, 0.0, 1.0])),
+    ];
+    for (label, j, r, g, q) in invalid {
+        let system = PortHamiltonian::from_raw_parts(
+            2, 1, j, r, g, Box::new(PreparationOnlyStorage(q)),
+        );
+        assert!(
+            PreparedNonlinearZoh::new_owned(system, 0.01, budget(2)).is_err(),
+            "{label} must retain its original admission",
+        );
+    }
 }

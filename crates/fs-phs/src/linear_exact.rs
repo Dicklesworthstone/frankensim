@@ -445,13 +445,25 @@ pub fn split_quadratic(
     sys: &PortHamiltonian,
     budget: LinearSplitBudget,
 ) -> Result<LinearSplit, PhsError> {
-    let (n, m) = (sys.n, sys.m);
-    let extent = n.checked_mul(n).ok_or_else(|| refuse("state extent"))?;
-    let block = n
-        .checked_add(m)
+    let block = sys
+        .n
+        .checked_add(sys.m)
         .and_then(|x| x.checked_add(1))
         .and_then(|x| x.checked_mul(2))
         .ok_or_else(|| refuse("ZOH block extent"))?;
+    split_quadratic_with_block_dimension(sys, budget, block)
+}
+
+// Share the complete physical/spectral admission with prepared owners whose
+// actual exponential blocks differ from the legacy doubled ZOH reservation.
+// This is private: callers must account for every matrix they will construct.
+fn split_quadratic_with_block_dimension(
+    sys: &PortHamiltonian,
+    budget: LinearSplitBudget,
+    block: usize,
+) -> Result<LinearSplit, PhsError> {
+    let (n, m) = (sys.n, sys.m);
+    let extent = n.checked_mul(n).ok_or_else(|| refuse("state extent"))?;
     if n == 0
         || n > budget.max_modes
         || block > MAX_LINEAR_EXPONENTIAL_BLOCK_DIM
