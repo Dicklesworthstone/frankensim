@@ -94,6 +94,8 @@ pub mod liquid_gas;
 pub mod liquid_transfer;
 /// Reciprocal molecular streams on original finite gas inventories and bulk momenta.
 pub mod molecular_exchange;
+/// Molecular acoustic volume absorption on original finite gas internal energy.
+pub mod molecular_heating;
 /// Finite gas and rigid-wall molecular shear with original caloric feedback.
 pub mod molecular_shear;
 pub mod material_assembly;

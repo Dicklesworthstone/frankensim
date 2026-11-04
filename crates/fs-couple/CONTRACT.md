@@ -1,5 +1,49 @@
 # CONTRACT: fs-couple
 
+## Molecular absorption on original finite gas storage
+
+`molecular_heating::MolecularGasHeating` binds an original prepared molecular BEM
+volume-absorption operator to the original `IsochoricGasParcel` and
+`RelaxationAbsorption`. The complete re-evaluated gas/reservoir snapshot must
+match, and positive quadrature must represent the parcel's actual volume to
+roundoff. The immutable parcel retains its full thermochemical model, source
+packs, composition and density; the acoustic snapshot alone does not certify
+historical pack identity, so the caller must supply the original caloric source.
+The lumped parcel has no independent shape; geometric coverage and cubature
+convergence remain the quadrature author's responsibility.
+
+`heat_load` retains original source order, frequency and receiver geometry while
+evaluating coherent, independent-source or coherence-factor molecular heat.
+It multiplies actual integrated watts by an explicit physical duration exactly
+once. No solid heat capacity, extra RMS factor, wall work, outgoing flux or
+second attenuation term is injected. Queries reuse the existing bounded BEM
+readout without a boundary re-solve or dense source covariance.
+
+The returned source-bound load can apply `heat_gas` through the original
+nonlinear NASA-9 internal-energy inversion on a clone. Fixed-volume storage
+uses Cv and preserves mass/density; the same source supplies EOS pressure and
+transport. The candidate's next molecular state is re-evaluated through the
+original relaxation law. Native caloric refusal, endpoint source-domain
+failure, a caller-admitted maximum temperature increment or cancellation
+publishes no candidate and never changes the accepted gas or acoustic bank.
+The native joule balance remains separately available.
+
+Alternatively, the load's original `gas()` and `absorbed_energy_j()` can supply
+the existing `FiniteGasThermalEnvironment` gas and prescribed gas heat, so its
+native reciprocal body/gas exchange solves the combined balance. That path must
+start from the original parcel, not a candidate already heated with the same
+load. Harmonic heat is frozen and cycle averaged over the interval; accepting a
+candidate requires a new acoustic solve before claiming temperature feedback.
+This is uniformly mixed finite gas storage, without spatial gas conduction,
+mean flow or transient acoustic onset.
+
+Four G1/G3 integration tests in `tests/molecular_heating.rs` cover independent
+positive-volume power, nonlinear Cv/u(T) energy and EOS closure, original source
+retention, coherent cancellation/partial coherence/lossless limits, stale
+source and volume refusal, caloric and relaxation endpoint domains, and
+cancellation after the candidate solve. These synthetic source fixtures are
+numerical conservation tests; native execution remains a separate gate.
+
 ## Shared affine dry-friction branch continuation
 
 `stribeck_friction::StribeckLoadLine` also admits the original Coulomb and
