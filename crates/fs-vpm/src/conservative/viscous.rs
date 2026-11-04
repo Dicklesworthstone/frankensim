@@ -1,6 +1,7 @@
 //! Original PSE diffusion composed with the original conservative advection.
 
 use super::*;
+use crate::diffusion::moving::MovingDiffusion;
 use crate::diffusion::{self, PseDiffusion};
 
 /// Evolve viscous planar vortices with `D(dt/2) A(dt) D(dt/2)`, using the
@@ -167,9 +168,38 @@ pub(super) fn weighted_step(
     accountant: &mut AdmittedBudget<'_>,
     cx: &Cx<'_>,
 ) -> Result<(), VpmError> {
+    weighted_step_with(
+        state,
+        areas,
+        dt,
+        fraction,
+        core,
+        law,
+        &mut MovingDiffusion::dense(),
+        completed_pairs,
+        meter,
+        accountant,
+        cx,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn weighted_step_with(
+    state: &mut [VortexParticle],
+    areas: &[f64],
+    dt: f64,
+    fraction: f64,
+    core: f64,
+    law: PseDiffusion,
+    backend: &mut MovingDiffusion,
+    completed_pairs: &mut u64,
+    meter: &mut WorkMeter,
+    accountant: &mut AdmittedBudget<'_>,
+    cx: &Cx<'_>,
+) -> Result<(), VpmError> {
     let diffuse = dt > 0.0 && law.kinematic_viscosity_m2_s() > 0.0;
     if diffuse {
-        diffusion::symmetric_sweep(
+        backend.sweep(
             state,
             areas,
             law,
@@ -182,6 +212,7 @@ pub(super) fn weighted_step(
         )?;
     }
     if dt > 0.0 {
+        backend.admit_advection(state.len(), *completed_pairs, meter, accountant)?;
         super::weighted_symmetric_sweep(
             state,
             dt,
@@ -192,9 +223,10 @@ pub(super) fn weighted_step(
             accountant,
             cx,
         )?;
+        backend.invalidate();
     }
     if diffuse {
-        diffusion::symmetric_sweep(
+        backend.sweep(
             state,
             areas,
             law,
@@ -206,6 +238,7 @@ pub(super) fn weighted_step(
             cx,
         )?;
     }
+    backend.admit_work(1, meter, accountant)?;
     meter.unit(accountant, cx, "fs-vpm.conservative-step", || Ok(()))?;
     meter.boundary(accountant, cx, "fs-vpm.conservative-step-complete")
 }
@@ -220,12 +253,14 @@ pub(super) fn reverse_step(
     dt: f64,
     core: f64,
     law: PseDiffusion,
+    backend: &mut MovingDiffusion,
     completed_pairs: &mut u64,
     meter: &mut WorkMeter,
     accountant: &mut AdmittedBudget<'_>,
     cx: &Cx<'_>,
 ) -> Result<(), VpmError> {
     if dt > 0.0 {
+        backend.admit_advection(state.len(), *completed_pairs, meter, accountant)?;
         super::weighted_symmetric_sweep(
             state,
             dt,
@@ -236,8 +271,9 @@ pub(super) fn reverse_step(
             accountant,
             cx,
         )?;
+        backend.invalidate();
         if law.kinematic_viscosity_m2_s() > 0.0 {
-            diffusion::symmetric_sweep(
+            backend.sweep(
                 state,
                 areas,
                 law,
@@ -249,6 +285,7 @@ pub(super) fn reverse_step(
                 cx,
             )?;
         }
+        backend.admit_advection(state.len(), *completed_pairs, meter, accountant)?;
         super::weighted_symmetric_sweep(
             state,
             dt,
@@ -259,7 +296,9 @@ pub(super) fn reverse_step(
             accountant,
             cx,
         )?;
+        backend.invalidate();
     }
+    backend.admit_work(1, meter, accountant)?;
     meter.unit(accountant, cx, "fs-vpm.viscous-witness-step", || Ok(()))?;
     meter.boundary(accountant, cx, "fs-vpm.viscous-witness-step-complete")
 }

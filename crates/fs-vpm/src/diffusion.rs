@@ -49,6 +49,7 @@ use fs_math::det;
 
 /// Positive-time adaptivity on an existing compact diffusion graph.
 pub mod adaptive;
+pub(crate) mod moving;
 /// Reusable spatial graphs for fixed-site compact-support diffusion.
 pub mod sparse;
 pub use sparse::{PreparationBudget, PreparationReport, PreparedPse};
@@ -78,7 +79,11 @@ impl PseDiffusion {
     /// # Errors
     /// Refuses non-finite, negative or zero-width input.
     pub fn new(kinematic_viscosity_m2_s: f64, kernel_width_m: f64) -> Result<Self, VpmError> {
-        Self::with_kernel(kinematic_viscosity_m2_s, kernel_width_m, PseKernel::Gaussian)
+        Self::with_kernel(
+            kinematic_viscosity_m2_s,
+            kernel_width_m,
+            PseKernel::Gaussian,
+        )
     }
 
     /// Select a positive compact-support diffusion kernel with the same
@@ -420,9 +425,7 @@ impl PairKernel {
             let log_area = det::ln(scale) + det::ln(areas[0] / scale + areas[1] / scale);
             let log_weight = match self.shape {
                 PseKernel::Gaussian => -r2,
-                PseKernel::CompactWendland => {
-                    4.0 * det::ln(edge) + det::ln(1.0 + 4.0 * radius)
-                }
+                PseKernel::CompactWendland => 4.0 * det::ln(edge) + det::ln(1.0 + 4.0 * radius),
             };
             exponent = det::exp(self.log_rate_time + log_area + log_weight);
         }

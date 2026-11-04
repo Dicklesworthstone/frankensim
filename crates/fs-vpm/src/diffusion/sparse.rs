@@ -23,8 +23,8 @@ use super::{
     validate_inputs,
 };
 use crate::{
-    VortexParticle, VpmBudget, VpmError, VpmRun, WorkMeter, admit_cap, invalid_scalar, reserved_vec,
-    validate_particle,
+    VortexParticle, VpmBudget, VpmError, VpmRun, WorkMeter, admit_cap, invalid_scalar,
+    reserved_vec, validate_particle,
 };
 use fs_exec::{AdmittedBudget, BudgetConsumption, Cx};
 
@@ -162,7 +162,7 @@ impl PreparedPse {
             })?;
         }
         work.boundary("fs-vpm.pse-prepare-input-complete")?;
-        heap_sort(&mut cells, &mut work)?;
+        heap_sort(&mut cells, &mut work.borrowed())?;
         work.boundary("fs-vpm.pse-prepare-cells-complete")?;
 
         let mut candidate_visits = 0;
@@ -173,7 +173,7 @@ impl PreparedPse {
             law.kernel_width_m(),
             &mut candidate_visits,
             budget.max_candidate_visits,
-            &mut work,
+            &mut work.borrowed(),
             |_| {
                 let next = edge_count.checked_add(1).ok_or(VpmError::PlanOverflow {
                     resource: "prepared edges",
@@ -200,7 +200,11 @@ impl PreparedPse {
                 .ok_or(VpmError::PlanOverflow {
                     resource: "preparation candidate visits",
                 })?;
-            admit_count("preparation candidate visits", visits, budget.max_candidate_visits)?;
+            admit_count(
+                "preparation candidate visits",
+                visits,
+                budget.max_candidate_visits,
+            )?;
         }
         let mut edges = reserved_vec("pse-prepared-edges", edge_count)?;
         if edge_count != 0 {
@@ -210,7 +214,7 @@ impl PreparedPse {
                 law.kernel_width_m(),
                 &mut candidate_visits,
                 budget.max_candidate_visits,
-                &mut work,
+                &mut work.borrowed(),
                 |edge| {
                     let next = edges.len().checked_add(1).ok_or(VpmError::PlanOverflow {
                         resource: "prepared edges",
@@ -228,7 +232,7 @@ impl PreparedPse {
                 actual: edges.len(),
             });
         }
-        heap_sort(&mut edges, &mut work)?;
+        heap_sort(&mut edges, &mut work.borrowed())?;
         work.boundary("fs-vpm.pse-prepare-publication")?;
         let consumption = work.accountant.consumption();
         if work.meter.completed != consumption.cost_charged {
@@ -318,13 +322,17 @@ impl PreparedPse {
         let fraction_count = if active { self.edges.len() } else { 0 };
         let e = count(fraction_count, "prepared run edges")?;
         let s = count(steps, "prepared run steps")?;
-        let pair_evaluations = e
-            .checked_mul(2)
-            .and_then(|v| v.checked_mul(s))
-            .ok_or(VpmError::PlanOverflow {
-                resource: "prepared pair evaluations",
-            })?;
-        admit_count("pair evaluations", pair_evaluations, budget.max_pair_evaluations)?;
+        let pair_evaluations =
+            e.checked_mul(2)
+                .and_then(|v| v.checked_mul(s))
+                .ok_or(VpmError::PlanOverflow {
+                    resource: "prepared pair evaluations",
+                })?;
+        admit_count(
+            "pair evaluations",
+            pair_evaluations,
+            budget.max_pair_evaluations,
+        )?;
         let work_units = count(n, "prepared run particles")?
             .checked_add(e)
             .and_then(|v| v.checked_add(pair_evaluations))
@@ -385,7 +393,11 @@ impl PreparedPse {
                     Ok(())
                 })?;
             }
-            meter.boundary(&mut accountant, cx, "fs-vpm.pse-prepared-fractions-complete")?;
+            meter.boundary(
+                &mut accountant,
+                cx,
+                "fs-vpm.pse-prepared-fractions-complete",
+            )?;
         }
         let mut completed_pairs = 0_u64;
         for _ in 0..steps {
@@ -395,9 +407,11 @@ impl PreparedPse {
                 for (&[i, j], &fraction) in forward.chain(reverse) {
                     meter.unit(&mut accountant, cx, "fs-vpm.pse-prepared-pair", || {
                         completed_pairs =
-                            completed_pairs.checked_add(1).ok_or(VpmError::PlanOverflow {
-                                resource: "executed prepared pairs",
-                            })?;
+                            completed_pairs
+                                .checked_add(1)
+                                .ok_or(VpmError::PlanOverflow {
+                                    resource: "executed prepared pairs",
+                                })?;
                         exchange_fraction(&mut state, &self.areas, fraction, i, j)
                     })?;
                 }
@@ -429,9 +443,9 @@ impl PreparedPse {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct CellEntry {
-    cell: [i64; 2],
-    particle: usize,
+pub(super) struct CellEntry {
+    pub(super) cell: [i64; 2],
+    pub(super) particle: usize,
 }
 
 // Quotient rounding is at most 1/8 cell at this bound. A supported pair's
@@ -439,7 +453,11 @@ struct CellEntry {
 // floored quotients differ by at most two. The halo also covers negative
 // boundaries and quotients that underflow to signed zero. We refuse a larger
 // coordinate/radius scale instead of silently dropping physical neighbors.
-fn cell_coordinate(position: f64, radius: f64, particle: usize) -> Result<i64, VpmError> {
+pub(super) fn cell_coordinate(
+    position: f64,
+    radius: f64,
+    particle: usize,
+) -> Result<i64, VpmError> {
     const LIMIT: f64 = 1_125_899_906_842_624.0;
     let scaled = position / radius;
     if !scaled.is_finite() || scaled.abs() > LIMIT {
@@ -499,20 +517,21 @@ impl<'cx, 'clock> PreparationWork<'cx, 'clock> {
         })
     }
 
+    fn borrowed(&mut self) -> SpatialWork<'_, 'clock, 'clock> {
+        SpatialWork {
+            cx: self.cx,
+            accountant: &mut self.accountant,
+            meter: &mut self.meter,
+            limit: self.limit,
+        }
+    }
+
     fn unit<T>(
         &mut self,
         phase: &'static str,
         operation: impl FnOnce() -> Result<T, VpmError>,
     ) -> Result<T, VpmError> {
-        if self.meter.completed >= self.limit {
-            self.meter.flush(&mut self.accountant, phase)?;
-            return Err(VpmError::CapExceeded {
-                resource: "preparation work",
-                required: u128::from(self.meter.completed) + 1,
-                maximum: self.limit.into(),
-            });
-        }
-        self.meter.unit(&mut self.accountant, self.cx, phase, operation)
+        self.borrowed().unit(phase, operation)
     }
 
     fn boundary(&mut self, phase: &'static str) -> Result<(), VpmError> {
@@ -520,10 +539,44 @@ impl<'cx, 'clock> PreparationWork<'cx, 'clock> {
     }
 }
 
+// Shared spatial operations borrow the caller's existing execution account.
+// Rebuilding a moving graph must not open another account or hide sort work.
+pub(super) struct SpatialWork<'a, 'clock, 'scope> {
+    pub(super) cx: &'a Cx<'scope>,
+    pub(super) accountant: &'a mut AdmittedBudget<'clock>,
+    pub(super) meter: &'a mut WorkMeter,
+    pub(super) limit: u64,
+}
+
+impl SpatialWork<'_, '_, '_> {
+    pub(super) fn unit<T>(
+        &mut self,
+        phase: &'static str,
+        operation: impl FnOnce() -> Result<T, VpmError>,
+    ) -> Result<T, VpmError> {
+        if self.meter.completed >= self.limit {
+            self.meter.flush(self.accountant, phase)?;
+            return Err(VpmError::CapExceeded {
+                resource: "preparation work",
+                required: u128::from(self.meter.completed) + 1,
+                maximum: self.limit.into(),
+            });
+        }
+        self.meter.unit(self.accountant, self.cx, phase, operation)
+    }
+
+    pub(super) fn boundary(&mut self, phase: &'static str) -> Result<(), VpmError> {
+        self.meter.boundary(self.accountant, self.cx, phase)
+    }
+}
+
 // Total keys (cell, original index) and unique pair indices make this
 // allocation-free heapsort deterministic without relying on sort internals.
 // One sift unit performs at most two comparisons and one swap.
-fn heap_sort<T: Ord>(values: &mut [T], work: &mut PreparationWork<'_, '_>) -> Result<(), VpmError> {
+pub(super) fn heap_sort<T: Ord>(
+    values: &mut [T],
+    work: &mut SpatialWork<'_, '_, '_>,
+) -> Result<(), VpmError> {
     let len = values.len();
     for root in (0..len / 2).rev() {
         sift_down(values, root, len, work)?;
@@ -542,7 +595,7 @@ fn sift_down<T: Ord>(
     values: &mut [T],
     mut root: usize,
     end: usize,
-    work: &mut PreparationWork<'_, '_>,
+    work: &mut SpatialWork<'_, '_, '_>,
 ) -> Result<(), VpmError> {
     while end > 1 && root <= (end - 2) / 2 {
         let next = work.unit("fs-vpm.pse-prepare-sort", || {
@@ -571,7 +624,7 @@ fn sift_down<T: Ord>(
 fn lower_bound(
     cells: &[CellEntry],
     target: CellEntry,
-    work: &mut PreparationWork<'_, '_>,
+    work: &mut SpatialWork<'_, '_, '_>,
 ) -> Result<usize, VpmError> {
     let mut low = 0;
     let mut high = cells.len();
@@ -587,13 +640,13 @@ fn lower_bound(
     Ok(low)
 }
 
-fn visit_candidates(
+pub(super) fn visit_candidates(
     particles: &[VortexParticle],
     cells: &[CellEntry],
     radius: f64,
     visits: &mut u64,
     max_visits: u64,
-    work: &mut PreparationWork<'_, '_>,
+    work: &mut SpatialWork<'_, '_, '_>,
     mut accept: impl FnMut([usize; 2]) -> Result<(), VpmError>,
 ) -> Result<(), VpmError> {
     for source in cells {

@@ -576,6 +576,40 @@ geometry-changing clouds against the original
 refined owner, identities, resource counts and transactional refusal.
 
 
+### Compact neighbors for adaptive moving diffusion
+
+`conservative::adaptive::simulate_viscous_compact_with_cx` uses the same
+adaptive full/half-step and reverse-splitting witness with a bounded compact
+neighbor workspace. The original cell coordinates, two-cell halo, exact
+compact-support predicate, and canonical pair order are shared with the
+fixed-site graph owner. Every advection or candidate reset invalidates the
+graph; only adjacent diffusion stages at unchanged positions reuse it.
+Each supported edge evaluates its original fraction once per sweep and
+reuses it for both forward/reverse conservative exchanges.
+
+`CompactNeighborBudget` bounds live edges at every geometry and candidate
+distance tests over the entire window. Three original particle buffers plus
+N cell keys and at most min(max_edges,N(N-1)/2) edges/fractions are reserved
+once. Graph probes, searches, sorts, candidates, fractions, exchanges and
+discarded trials consume the original aggregate work account. Edge, memory,
+pair, search and work limits are checked before exceeding their allowances;
+failure returns no partial trajectory. Zero-duration, small-inventory and
+zero-viscosity paths retain the original result and need no neighbor graph.
+
+The dense Gaussian/compact path and existing fixed-site preparation remain
+available. No Gaussian tail truncation, new diffusion coefficient, or change
+to the accepted adaptive composition is introduced. Diffusion visits depend
+on supported edges; direct advection still requires 5N(N-1) visits per active
+viscous trial, and graph construction has its own charged cost. Subquadratic
+whole-solver scaling and wall-clock speedups are not claimed.
+
+Four public-API regression groups cover bitwise dense-path parity on separated
+clouds, particles entering support during motion and rejected trials, exact
+aggregate caps and late refusal/replay, and identity/zero-viscosity behavior.
+Rustfmt parsing and source/algorithm review passed. Native compilation and
+execution of these new VPM tests remain unverified in this environment.
+
+
 ## Prescribed affine flow on conservative 2-D vortices
 
 `conservative::ambient::{simulate_with_cx, simulate_viscous_with_cx}` adds one

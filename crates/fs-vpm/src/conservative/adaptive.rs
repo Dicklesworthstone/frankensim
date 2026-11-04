@@ -21,6 +21,7 @@ use crate::diffusion::adaptive::{
     AdaptiveOptions as DiffusionAdaptiveOptions, admit_count, count, next_step, overflow,
     scaled_error, trial_time, validate_options,
 };
+use crate::diffusion::moving::{self, MovingDiffusion};
 use crate::diffusion::{self, PseDiffusion};
 use crate::{
     AdmittedBudget, Cx, VortexParticle, VpmError, WorkMeter, admit_cap, invalid_scalar,
@@ -29,6 +30,7 @@ use crate::{
 use fs_math::det;
 
 pub use crate::diffusion::adaptive::{AdaptiveBudget, AdaptiveError, AdaptiveRun};
+pub use crate::diffusion::moving::CompactNeighborBudget;
 
 mod inviscid;
 pub use inviscid::{
@@ -45,6 +47,17 @@ pub struct ViscousAdaptiveOptions {
     /// Strictly positive absolute Euclidean position tolerance [m].
     /// No tolerance is scaled by distance from an arbitrary coordinate origin.
     pub absolute_position_tolerance_m: f64,
+}
+
+/// Complete compact-neighbor evolution and the actual aggregate search work.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompactAdaptiveRun {
+    /// Original adaptive physical result, including all search and exchange work.
+    pub run: AdaptiveRun,
+    /// Completed geometry rebuilds, including rejected trials.
+    pub graph_rebuilds: usize,
+    /// Actual candidate distance tests across all geometry rebuilds.
+    pub candidate_visits: u64,
 }
 
 /// Evolve moving viscous particles for one complete nonnegative duration.
@@ -92,8 +105,82 @@ pub fn simulate_viscous_with_cx(
     options: ViscousAdaptiveOptions,
     budget: AdaptiveBudget,
 ) -> Result<AdaptiveRun, AdaptiveError> {
+    simulate_viscous_impl(
+        cx, particles, areas_m2, duration_s, core, law, options, budget, None,
+    )
+    .map(|result| result.run)
+}
+
+/// Use bounded moving neighbors for the same compact viscous adaptive driver.
+///
+/// The original compact support predicate, canonical pair ordering, exchanges,
+/// error estimators and accepted trajectory are retained. The graph is rebuilt
+/// after advection or a candidate reset, and only reused while positions are
+/// unchanged. One fraction per supported edge is shared by forward/reverse
+/// exchanges. Gaussian laws are refused; no tail truncation is introduced.
+///
+/// All cell/probe/search/candidate/sort work and rejected trials count against
+/// the original aggregate work budget. The complete workspace is reserved once:
+/// N cell keys and min(max_edges, N(N-1)/2) edges/fractions, in addition to three
+/// particle buffers. Candidate visits are capped over the entire window; the
+/// edge cap applies at every moved geometry. Scaled cell coordinates retain the
+/// original +/-2^50 bound. Identity and zero-viscosity runs need no workspace.
+///
+/// Advection still costs 5N(N-1) visits per positive-viscosity trial. This reduces
+/// unsupported diffusion work, without an end-to-end subquadratic scaling or
+/// measured speedup claim.
+///
+/// # Errors
+/// Original adaptive refusals, a noncompact law, unsupported cell coordinates,
+/// exhausted aggregate search/edge/storage/work caps or allocation failure.
+/// No partial trajectory or graph is published.
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_viscous_compact_with_cx(
+    cx: &Cx<'_>,
+    particles: &[VortexParticle],
+    areas_m2: &[f64],
+    duration_s: f64,
+    core: f64,
+    law: PseDiffusion,
+    options: ViscousAdaptiveOptions,
+    budget: AdaptiveBudget,
+    neighbors: CompactNeighborBudget,
+) -> Result<CompactAdaptiveRun, AdaptiveError> {
+    simulate_viscous_impl(
+        cx,
+        particles,
+        areas_m2,
+        duration_s,
+        core,
+        law,
+        options,
+        budget,
+        Some(neighbors),
+    )
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn simulate_viscous_impl(
+    cx: &Cx<'_>,
+    particles: &[VortexParticle],
+    areas_m2: &[f64],
+    duration_s: f64,
+    core: f64,
+    law: PseDiffusion,
+    options: ViscousAdaptiveOptions,
+    budget: AdaptiveBudget,
+    neighbors: Option<CompactNeighborBudget>,
+) -> Result<CompactAdaptiveRun, AdaptiveError> {
     let time = options.time;
     validate_options(duration_s, time)?;
+    if neighbors.is_some() && law.kernel() != diffusion::PseKernel::CompactWendland {
+        return Err(invalid_scalar(
+            "moving neighbors require compact diffusion",
+            law.kernel_width_m(),
+            None,
+        )
+        .into());
+    }
     if !options.absolute_position_tolerance_m.is_finite()
         || options.absolute_position_tolerance_m <= 0.0
     {
@@ -113,12 +200,24 @@ pub fn simulate_viscous_with_cx(
     let n64 = count(n, "adaptive moving particles")?;
     let active = duration_s > 0.0 && n >= 2;
     let diffuse = active && law.kinematic_viscosity_m2_s() > 0.0;
+    let compact_neighbors = neighbors.filter(|_| diffuse);
+    let compact = compact_neighbors.is_some();
     let pairs_per_trial = if active {
-        diffusion::pair_work(n, 1, if diffuse { 12 } else { 3 })?
+        diffusion::pair_work(
+            n,
+            1,
+            if compact {
+                5
+            } else if diffuse {
+                12
+            } else {
+                3
+            },
+        )?
     } else {
         0
     };
-    let fractions_per_trial = if diffuse {
+    let fractions_per_trial = if diffuse && !compact {
         diffusion::pair_work(n, 1, 7)?
     } else {
         0
@@ -129,9 +228,14 @@ pub fn simulate_viscous_with_cx(
         .and_then(|value| value.checked_add(if diffuse { 5 } else { 4 }))
         .ok_or(overflow("adaptive moving trial work"))?;
     admit_count("adaptive work", n64, budget.max_work_units)?;
+    let neighbor_bytes = match compact_neighbors {
+        Some(limits) => moving::workspace_bytes(n, limits)?,
+        None => 0,
+    };
     let peak_live_bytes = n
         .checked_mul(core::mem::size_of::<VortexParticle>())
         .and_then(|value| value.checked_mul(if active { 3 } else { 1 }))
+        .and_then(|value| value.checked_add(neighbor_bytes))
         .ok_or(overflow("adaptive moving live bytes"))?;
     admit_cap("logical live bytes", peak_live_bytes, budget.max_live_bytes)?;
     let planned = if active { budget.max_work_units } else { n64 };
@@ -141,6 +245,10 @@ pub fn simulate_viscous_with_cx(
     let mut state = reserved_vec("viscous-adaptive-state", n)?;
     let mut coarse = reserved_vec("viscous-adaptive-coarse", if active { n } else { 0 })?;
     let mut fine = reserved_vec("viscous-adaptive-fine", if active { n } else { 0 })?;
+    let mut backend = match compact_neighbors {
+        Some(limits) => MovingDiffusion::compact(n, limits, budget)?,
+        None => MovingDiffusion::dense(),
+    };
     for (index, particle) in particles.iter().copied().enumerate() {
         meter.unit(&mut accountant, cx, "fs-vpm.viscous-adaptive-input", || {
             validate_particle(particle, index)?;
@@ -165,19 +273,21 @@ pub fn simulate_viscous_with_cx(
     let mut expected_work = n64;
     let mut max_accepted_error_ratio = 0.0_f64;
     while elapsed < duration_s {
+        let before_stats = backend.stats();
         let next_attempt = attempts
             .checked_add(1)
             .ok_or(overflow("adaptive attempts"))?;
         admit_cap("adaptive attempts", next_attempt, budget.max_attempts)?;
-        let next_pairs = pair_evaluations
+        let mut next_pairs = pair_evaluations
             .checked_add(pairs_per_trial)
             .ok_or(overflow("adaptive moving pair work"))?;
         admit_count("pair evaluations", next_pairs, budget.max_pair_evaluations)?;
-        let next_work = expected_work
+        let mut next_work = expected_work
             .checked_add(trial_work)
             .ok_or(overflow("adaptive moving accumulated work"))?;
         admit_count("adaptive work", next_work, budget.max_work_units)?;
         let (h, endpoint) = trial_time(elapsed, dt, duration_s)?;
+        backend.admit_work(n64, &mut meter, &mut accountant)?;
         coarse.clear();
         fine.clear();
         for &particle in &state {
@@ -187,44 +297,50 @@ pub fn simulate_viscous_with_cx(
                 Ok(())
             })?;
         }
+        backend.invalidate();
         // Keep h separate from its fractions so a small physical interval
         // survives multiplication by a large, representable original rate.
-        super::viscous::weighted_step(
+        super::viscous::weighted_step_with(
             &mut coarse,
             areas_m2,
             h,
             1.0,
             core,
             law,
+            &mut backend,
             &mut pair_evaluations,
             &mut meter,
             &mut accountant,
             cx,
         )?;
-        super::viscous::weighted_step(
+        backend.invalidate();
+        super::viscous::weighted_step_with(
             &mut fine,
             areas_m2,
             h,
             0.5,
             core,
             law,
+            &mut backend,
             &mut pair_evaluations,
             &mut meter,
             &mut accountant,
             cx,
         )?;
-        super::viscous::weighted_step(
+        super::viscous::weighted_step_with(
             &mut fine,
             areas_m2,
             h,
             0.5,
             core,
             law,
+            &mut backend,
             &mut pair_evaluations,
             &mut meter,
             &mut accountant,
             cx,
         )?;
+        backend.admit_work(n64, &mut meter, &mut accountant)?;
         let mut error_ratio = 0.0_f64;
         for i in 0..n {
             meter.unit(&mut accountant, cx, "fs-vpm.viscous-adaptive-error", || {
@@ -249,6 +365,8 @@ pub fn simulate_viscous_with_cx(
             // Step doubling alone can agree spuriously when both candidates
             // diffuse away the initial motion. Reverse the splitting order,
             // using the now-spare coarse buffer and the same physical owners.
+            backend.admit_work(n64, &mut meter, &mut accountant)?;
+            backend.invalidate();
             coarse.clear();
             for &particle in &state {
                 meter.unit(&mut accountant, cx, "fs-vpm.viscous-witness-copy", || {
@@ -262,11 +380,13 @@ pub fn simulate_viscous_with_cx(
                 h,
                 core,
                 law,
+                &mut backend,
                 &mut pair_evaluations,
                 &mut meter,
                 &mut accountant,
                 cx,
             )?;
+            backend.admit_work(n64, &mut meter, &mut accountant)?;
             for i in 0..n {
                 meter.unit(&mut accountant, cx, "fs-vpm.viscous-witness-error", || {
                     let strength_error = scaled_error(
@@ -291,6 +411,7 @@ pub fn simulate_viscous_with_cx(
                 })?;
             }
         }
+        backend.admit_work(1, &mut meter, &mut accountant)?;
         meter.unit(&mut accountant, cx, "fs-vpm.viscous-adaptive-trial", || {
             Ok(())
         })?;
@@ -300,10 +421,29 @@ pub fn simulate_viscous_with_cx(
             "fs-vpm.viscous-adaptive-trial-complete",
         )?;
         attempts = next_attempt;
+        if compact {
+            let after = backend.stats();
+            let kernels = after.fraction_evaluations - before_stats.fraction_evaluations;
+            let graph_work = after.graph_work_units - before_stats.graph_work_units;
+            next_pairs = kernels
+                .checked_mul(2)
+                .and_then(|pairs| next_pairs.checked_add(pairs))
+                .ok_or(overflow("adaptive compact trial pairs"))?;
+            next_work = next_work
+                .checked_add(graph_work)
+                .and_then(|work| {
+                    kernels
+                        .checked_mul(3)
+                        .and_then(|pairs| work.checked_add(pairs))
+                })
+                .ok_or(overflow("adaptive compact trial work"))?;
+            fraction_evaluations = after.fraction_evaluations;
+        } else {
+            fraction_evaluations = fraction_evaluations
+                .checked_add(fractions_per_trial)
+                .ok_or(overflow("adaptive moving kernel evaluations"))?;
+        }
         expected_work = next_work;
-        fraction_evaluations = fraction_evaluations
-            .checked_add(fractions_per_trial)
-            .ok_or(overflow("adaptive moving kernel evaluations"))?;
         if pair_evaluations != next_pairs || meter.completed != expected_work {
             return Err(VpmError::AccountingMismatch {
                 planned: expected_work,
@@ -332,18 +472,23 @@ pub fn simulate_viscous_with_cx(
         .into());
     }
     accountant.checkpoint("fs-vpm.viscous-adaptive-publication", cx)?;
-    Ok(AdaptiveRun {
-        particles: state,
-        elapsed_s: duration_s,
-        accepted_steps,
-        rejected_steps,
-        attempts,
-        pair_evaluations,
-        fraction_evaluations,
-        work_units: expected_work,
-        peak_live_bytes,
-        max_accepted_error_ratio,
-        budget: accountant.consumption(),
+    let stats = backend.stats();
+    Ok(CompactAdaptiveRun {
+        run: AdaptiveRun {
+            particles: state,
+            elapsed_s: duration_s,
+            accepted_steps,
+            rejected_steps,
+            attempts,
+            pair_evaluations,
+            fraction_evaluations,
+            work_units: expected_work,
+            peak_live_bytes,
+            max_accepted_error_ratio,
+            budget: accountant.consumption(),
+        },
+        graph_rebuilds: stats.graph_rebuilds,
+        candidate_visits: stats.candidate_visits,
     })
 }
 
