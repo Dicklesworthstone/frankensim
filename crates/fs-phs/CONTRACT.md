@@ -1,5 +1,48 @@
 # fs-phs — Contract
 
+## Explicit synchronous converter gate cycles
+
+`circuit::converter::switching::PreparedSwitchCycle` advances the original
+converter flux and both bus charges through every supplied complementary gate
+interval. Binary connections use the SAME original J/R/G and constant L/C
+storage as `AveragedBuckBoost`. State is continuous at commanded edges; no
+projection, fictitious gate work or storage reset occurs. The independently
+integrated winding/four-channel conduction heat includes resolved current
+ripple and its correlation with each channel's actual conducting interval.
+It is not a square of cycle-mean current or an additional averaged-loss debit.
+
+The caller can hold currents over a complete cycle or supply one current pair
+per original interval. Each pair multiplies its own voltage-time integral.
+Complete-cycle state-energy change, accumulated native work/heat, channel heat
+and terminal work are independently reconciled under explicit absolute/relative
+energy allowances before either output buffer publishes. Cancellation at any
+interval or the final checkpoint leaves accepted state unchanged. Per-interval
+native energy gates remain authoritative, with no weakened solve admission.
+
+`centered_pwm` compiles the two positive-bus connection windows on a common
+carrier. Simultaneous edges are grouped; exact zero/one duty produces a static
+connection. Nonzero pulses with indistinguishable floating-point edges refuse.
+The actual compensated interval duration is the owner clock. Explicit work
+limits admit at most 64 intervals before cache allocation. Identical connection
+and duration pairs share a native exact propagator; successful repeated cycles
+add no allocation or exponentials. The electrical inputs and all authored
+interval slots remain distinct even when propagators share a cache.
+
+This resolves prescribed ideal complementary switching and its conduction
+loss, including negative current, with frozen source-admitted on-resistance.
+It adds no semiconductor transition law, dead time, diode/recovery loss, gate
+or output capacitance, transition heat, discontinuous-current clamp, controller,
+state-triggered commutation or safe-operating-area claim. Temperature/source
+validity stays with the owning material/coupling layer. Full switching-device
+and closed-loop drive qualification remain beyond this numerical gate owner.
+
+Focused G1/G2/G3 regressions use independent physical-current/voltage ODEs and
+five original heat channels. They cover arbitrary gate/source sequences,
+static native parity, cache reuse, exact gate limits, a nonzero ripple-heating
+case with zero averaged current, centered-PWM refinement over a fixed physical
+horizon, and transactional limits/refusals. They do not assert native execution
+or measured semiconductor validity merely from their presence.
+
 ## Averaged bidirectional power conversion
 
 `circuit::converter::AveragedBuckBoost` assembles the original flux and both bus

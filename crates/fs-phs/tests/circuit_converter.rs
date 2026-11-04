@@ -1,5 +1,8 @@
 //! G1/G2/G3: original electrical dynamics, reciprocal power and physical heat.
 use fs_phs::PreparedStepError;
+
+#[path = "circuit_converter/switching.rs"]
+mod switching;
 use fs_phs::circuit::converter::{AveragedBuckBoost, BridgeModulation, BuckBoostParameters};
 use fs_phs::linear_exact::{LinearSplitBudget, PreparedExactZoh};
 

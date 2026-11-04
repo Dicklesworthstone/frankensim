@@ -25,6 +25,9 @@
 use crate::linear_exact::{LinearSplitBudget, PreparedExactZoh};
 use crate::{PhsError, PortHamiltonian, PreparedStepError, PreparedStepRecord, QuadraticStorage};
 
+/// Explicit complementary gate intervals on these SAME storage coordinates.
+pub mod switching;
+
 /// Five distinct heat owners, in the same order as [`ConductionHeat::joules`].
 pub const CONDUCTION_CHANNELS: usize = 5;
 
@@ -56,8 +59,10 @@ pub struct BridgeModulation {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ConductionHeat {
     /// Winding, input high, input low, output high, output low [J]. All five
-    /// paths carry the same averaged current; their effective resistances
-    /// partition the original positive integral of `R*i(t)^2`.
+    /// paths carry the same inductor current in each conducting interval; their
+    /// effective resistances partition the original positive `R*i(t)^2`
+    /// integral. The averaged lane uses its averaged current; the explicit
+    /// switching lane retains the resolved ripple in every interval.
     pub joules: [f64; CONDUCTION_CHANNELS],
 }
 
