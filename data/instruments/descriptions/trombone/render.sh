@@ -19,8 +19,8 @@
 #    player's embouchure setting is the free player input; which setting yields which note is read from
 #    the render afterwards, never set from a pitch.
 #
-# Mouth pressure. The published mf mouth pressures are 1.4 kPa +-10 % for one trombonist on B-flat2 (Boutin
-# et al. 2015, JASA 137:1195) and 14-16 mbar for an artificial mouth on E3 (Bromage 2007 PhD Edinburgh
+# Mouth pressure. The published mouth pressures are 1.4 kPa +-10 % for one trombonist playing mp on B-flat2 (Boutin
+# et al. 2015, JASA 137:1195, Sec. II B 2: the subjects were asked to play the notes mp) and 14-16 mbar for an artificial mouth on E3 (Bromage 2007 PhD Edinburgh
 # Table 4.3); per-note and per-dynamic tables for trombone are UNKNOWN. The first native renders of THIS
 # lip (Cullen's artificial lips, Table A.2 embouchure 7) at 1.5 kPa, and a ramp to 4 kPa, never started:
 # the flow stayed steady and the differentiating receiver radiated exactly zero. This lip needs several
@@ -65,7 +65,7 @@ RAMP_PEAK=${RAMP_PEAK:-1.2e4}
 # 8460 Pa. A hold left under its threshold keeps the ratio of sustain to threshold it had: 6000 / 5664 x 6733 =
 # 7132 Pa, and 6000 / 8161 x 8460 = 6220 Pa. Every other hold is still above its threshold and stays at 6 kPa.
 # A threshold is the root of this model's linearized voice on its own bore response, not a recording and not a
-# published mf pressure (those belong to other lips; see the note above). Pre-stress 1.15 sat under its
+# published mouth pressure (those belong to other lips; see the note above). Pre-stress 1.15 sat under its
 # threshold before the move too, so the rule keeps a ratio below one and that note dies away.
 ATTACK_PRESSURE=${ATTACK_PRESSURE:-1.2e4}
 ATTACK_SECONDS=${ATTACK_SECONDS:-8e-1}
