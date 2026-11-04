@@ -17,11 +17,15 @@ use fs_math::c64::C64;
 pub struct HarmonicPortControls {
     /// Maximum supplied ports. No port is discarded to satisfy this cap.
     pub maximum_ports: usize,
-    /// Maximum `n*p*(n+p)` multiply-add terms in B*Z*B^T.
-    /// Pointwise PSD admission has the existing fs-la bounded Jacobi work cap.
+    /// Dense projection work score: `n*p*(n+p)`. Compact diagonal loading
+    /// admits `n*n*p + 2*n*p*p + 8*n*p + k*k*k`, including one streamed
+    /// componentwise audit; k is ports plus retained pivot modes.
+    /// Pointwise PSD and the compact core have fs-la bounded dense work caps.
     pub maximum_projection_terms: u64,
     /// Conservative additional numerical payload, including source copies,
-    /// projection and Hermitian-PSD scratch. Excludes allocator metadata.
+    /// projection and Hermitian-PSD scratch. Compact loading adds
+    /// `144*k*k + 256*k` and blocked-LU workspace to the usual
+    /// `64*n*p + 256*p*p + 128*p` admission. Excludes allocator metadata.
     pub maximum_payload_bytes: usize,
 }
 
@@ -44,6 +48,7 @@ pub(super) struct PreparedPortImpedance {
     pub(super) ports: usize,
     pub(super) force_map: Vec<f64>,
     pub(super) impedance: Vec<C64>,
+    pub(super) controls: HarmonicPortControls,
 }
 
 pub(super) struct PortScaling {
@@ -141,6 +146,7 @@ impl PreparedPortImpedance {
             ports,
             force_map: force_map.to_vec(),
             impedance: impedance.to_vec(),
+            controls,
         })
     }
 
@@ -187,16 +193,13 @@ impl PreparedPortImpedance {
         })
     }
 
-    #[allow(clippy::too_many_arguments)] // original pencil's binary scaling
-    pub(super) fn add_to_operator(
+    pub(super) fn scaled_factors(
         &self,
-        operator: &mut [C64],
         coordinates: &[i32],
         time_exponent: i32,
-        frequency: f64,
         scaling: &PortScaling,
         cx: &Cx<'_>,
-    ) -> Result<(), HarmonicResponseError> {
+    ) -> Result<(Vec<f64>, Vec<C64>), HarmonicResponseError> {
         let (n, p) = (self.coordinates, self.ports);
         let mut b = vec![0.0; n * p];
         let mut z = vec![C64::ZERO; p * p];
@@ -225,8 +228,7 @@ impl PreparedPortImpedance {
                 }
             }
         }
-        // O(n*p^2 + n^2*p), not O(n^2*p^2). No inverse of either the bare
-        // pencil or Z is needed, so bare poles and lossless load channels work.
+        // Build B_hat Z_hat once without inverting the impedance.
         let mut bz = vec![C64::ZERO; n * p];
         for i in 0..n {
             poll(cx)?;
@@ -236,6 +238,24 @@ impl PreparedPortImpedance {
                 }
             }
         }
+        if bz.iter().any(|&value| !finite(value)) {
+            return Err(invalid("scaled physical port factors are not representable"));
+        }
+        Ok((b, bz))
+    }
+
+    #[allow(clippy::too_many_arguments)] // original pencil's binary scaling
+    pub(super) fn add_to_operator(
+        &self,
+        operator: &mut [C64],
+        coordinates: &[i32],
+        time_exponent: i32,
+        frequency: f64,
+        scaling: &PortScaling,
+        cx: &Cx<'_>,
+    ) -> Result<(), HarmonicResponseError> {
+        let (n, p) = (self.coordinates, self.ports);
+        let (b, bz) = self.scaled_factors(coordinates, time_exponent, scaling, cx)?;
         for i in 0..n {
             poll(cx)?;
             for j in 0..n {

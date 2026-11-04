@@ -31,6 +31,8 @@ use crate::{ModalError, quadratic_fraction, quadratic_power_scale};
 
 mod impedance;
 use impedance::PreparedPortImpedance;
+mod compact;
+use compact::CompactPortFactor;
 pub use impedance::{HarmonicPortControls, HarmonicPortResponse};
 mod frequency;
 pub use frequency::{
@@ -92,9 +94,9 @@ pub enum HarmonicResponseError {
         /// Caller-authored ceiling.
         cap: usize,
     },
-    /// The explicitly bounded, same-factor frequency tangent exceeds its work cap.
+    /// A harmonic factorization or same-factor frequency tangent exceeds its work cap.
     WorkBudget {
-        /// Requested frequency-tangent work score.
+        /// Requested work score.
         requested: u64,
         /// Caller-authored maximum work score.
         cap: u64,
@@ -115,7 +117,7 @@ pub enum HarmonicResponseError {
     Singular {
         /// Physical driving frequency [rad/s].
         angular_frequency_rad_s: f64,
-        /// Failing elimination pivot.
+        /// Failing elimination pivot; compact loads may index their bordered core.
         pivot: usize,
     },
     /// A solve did not meet the caller's backward-error budget.
@@ -148,12 +150,13 @@ pub struct PreparedHarmonicResponse {
     scaled_damping: Vec<f64>,
     damping: Vec<f64>,
     factor: Option<LuComplex>,
+    compact_port_factor: Option<CompactPortFactor>,
     port_load: Option<PreparedPortImpedance>,
     maximum_relative_residual: f64,
 }
 
-// Only an exactly diagonal source without a port load may use this layout.
-// In particular, a small off-diagonal damping entry is never a sparsity test.
+// Structural coefficient storage. A compact physical port factor is separate.
+// A small off-diagonal velocity entry is never a structural sparsity test.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MatrixLayout {
     Dense,
@@ -394,7 +397,25 @@ impl PreparedHarmonicResponse {
                 }
             }
         }
-        if let (Some(load), Some(scaling)) = (&port_load, &port_scaling) {
+        let compact_port_factor = match (&port_load, &port_scaling, layout) {
+            (Some(load), Some(scaling), MatrixLayout::Diagonal) => {
+                Some(CompactPortFactor::new(
+                    &operator,
+                    load,
+                    &coordinate_exponents,
+                    time_exponent,
+                    mu,
+                    angular_frequency_rad_s,
+                    scaling,
+                    controls.maximum_relative_residual,
+                    cx,
+                )?)
+            }
+            _ => None,
+        };
+        if compact_port_factor.is_none()
+            && let (Some(load), Some(scaling)) = (&port_load, &port_scaling)
+        {
             load.add_to_operator(
                 &mut operator,
                 &coordinate_exponents,
@@ -406,7 +427,9 @@ impl PreparedHarmonicResponse {
         }
         let diagonal = layout == MatrixLayout::Diagonal
             || (0..n).all(|i| (0..n).all(|j| i == j || operator[i * n + j] == C64::ZERO));
-        let factor = if diagonal {
+        let factor = if compact_port_factor.is_some() {
+            None
+        } else if diagonal {
             for i in 0..n {
                 if operator[layout.index(i, i, n)] == C64::ZERO {
                     return Err(HarmonicResponseError::Singular {
@@ -435,6 +458,7 @@ impl PreparedHarmonicResponse {
             scaled_damping: c,
             damping: damping.to_vec(),
             factor,
+            compact_port_factor,
             port_load,
             maximum_relative_residual: controls.maximum_relative_residual,
         })
@@ -489,6 +513,50 @@ impl PreparedHarmonicResponse {
             controls,
             cx,
             None,
+            MatrixLayout::Diagonal,
+        )
+    }
+
+    /// Independent modal vectors with a complete mutual physical port load.
+    /// Damping entries are viscous coefficients [1/s], as in `try_diagonal_modal`.
+    /// The full complex impedance and power-conjugate force map retain the
+    /// same admission, physical units and slope requirements as the dense API.
+    ///
+    /// A small bordered LU retains exact and near bare poles before elimination;
+    /// neither a bare zero diagonal nor the impedance is inverted. All modes
+    /// and couplings remain. Load controls bound the retained core and streamed
+    /// audits. Storage is O(n*p + k*k), preparation O(n*p*p + k*k*k), and a
+    /// factor solve O(n*p + k*k), where k is ports plus retained pivot modes.
+    /// The unchanged componentwise residual streams O(n*n*p) original entries.
+    /// A difficult cluster refuses its budget or residual rather than dropping
+    /// a mode. At DC the finite load vanishes from the operator but remains in
+    /// the analytic frequency derivative.
+    #[allow(clippy::too_many_arguments)] // physical vectors, ports and distinct resource controls
+    pub fn try_diagonal_modal_with_port_impedance(
+        natural_frequencies_rad_s: &[f64],
+        damping_rates_per_s: &[f64],
+        force_map: &[f64],
+        ports: usize,
+        impedance: &[C64],
+        angular_frequency_rad_s: f64,
+        controls: HarmonicResponseControls,
+        port_controls: HarmonicPortControls,
+        cx: &Cx<'_>,
+    ) -> Result<Self, HarmonicResponseError> {
+        poll(cx)?;
+        let n = natural_frequencies_rad_s.len();
+        admit_layout(n, controls, MatrixLayout::Diagonal)?;
+        if damping_rates_per_s.len() != n {
+            return Err(invalid("one modal damping rate per natural frequency required"));
+        }
+        let load = PreparedPortImpedance::new(n, force_map, ports, impedance, port_controls, cx)?;
+        Self::prepare_modal_coefficients(
+            natural_frequencies_rad_s,
+            damping_rates_per_s,
+            angular_frequency_rad_s,
+            controls,
+            cx,
+            Some(load),
             MatrixLayout::Diagonal,
         )
     }
@@ -684,7 +752,9 @@ impl PreparedHarmonicResponse {
     ) -> Result<(Vec<C64>, f64), HarmonicResponseError> {
         poll(cx)?;
         let mut solution = rhs.to_vec();
-        if let Some(factor) = &self.factor {
+        if let Some(compact) = &self.compact_port_factor {
+            compact.solve(&self.operator, &mut solution, cx)?;
+        } else if let Some(factor) = &self.factor {
             factor
                 .solve_with_cancel(&mut solution, || cx.checkpoint().is_err())
                 .map_err(|e| lu_error(e, self.angular_frequency_rad_s))?;
@@ -697,8 +767,7 @@ impl PreparedHarmonicResponse {
         if solution.iter().any(|z| !finite(*z)) {
             return Err(invalid("harmonic solution is not representable"));
         }
-        let relative_residual =
-            backward_error(&self.operator, &solution, rhs, self.n, self.layout, cx)?;
+        let relative_residual = backward_error(self, &solution, rhs, cx)?;
         if relative_residual > self.maximum_relative_residual {
             return Err(HarmonicResponseError::Residual {
                 measured: relative_residual,
@@ -763,6 +832,22 @@ impl PreparedHarmonicResponse {
             port_load,
             power_balance_residual_w: balance,
         })
+    }
+
+    fn operator_columns(&self, row: usize) -> core::ops::Range<usize> {
+        if self.compact_port_factor.is_some() {
+            0..self.n
+        } else {
+            self.layout.columns(row, self.n)
+        }
+    }
+
+    fn operator_entry(&self, row: usize, column: usize) -> Result<C64, HarmonicResponseError> {
+        if let Some(compact) = &self.compact_port_factor {
+            compact.entry(&self.operator, row, column)
+        } else {
+            Ok(self.operator[self.layout.index(row, column, self.n)])
+        }
     }
 
     fn viscous_entry(&self, row: usize, column: usize) -> f64 {
@@ -923,11 +1008,9 @@ fn symmetric_entry(a: &[f64], n: usize, i: usize, j: usize) -> f64 {
     }
 }
 fn backward_error(
-    a: &[C64],
+    prepared: &PreparedHarmonicResponse,
     x: &[C64],
     b: &[C64],
-    n: usize,
-    layout: MatrixLayout,
     cx: &Cx<'_>,
 ) -> Result<f64, HarmonicResponseError> {
     let scale = x
@@ -939,13 +1022,13 @@ fn backward_error(
     }
     let normalized = |v: C64| C64::new(v.re / scale, v.im / scale);
     let mut maximum = 0.0_f64;
-    for i in 0..n {
+    for i in 0..prepared.n {
         poll(cx)?;
         let mut residual = -normalized(b[i]);
         let mut denominator = normalized(b[i]).abs();
-        for j in layout.columns(i, n) {
+        for j in prepared.operator_columns(i) {
             let value = normalized(x[j]);
-            let coefficient = a[layout.index(i, j, n)];
+            let coefficient = prepared.operator_entry(i, j)?;
             residual = residual + coefficient * value;
             denominator += coefficient.abs() * value.abs();
         }

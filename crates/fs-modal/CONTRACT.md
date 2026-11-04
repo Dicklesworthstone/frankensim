@@ -286,6 +286,53 @@ unit changes, rank-deficient and lossless loads, tiny physical damping, complex
 Hermitian refusal, physical work, budgets and cancellation. Existing unloaded
 harmonic regressions retain their original behavior and `port_load = None`.
 
+`try_diagonal_modal_with_port_impedance` combines vector-authored independent
+modes with the same complete physical load and Hermitian-PSD admission. It
+keeps the structural operator diagonal and stores scaled B and BZ factors.
+No mode or coupling is projected away; reactive, mutual, nonreciprocal,
+rank-deficient and lossless impedances remain. The bounded complex LU acts on
+ports plus retained pivot modes, not the entire modal bank.
+
+For `A = D + L R^T`, `R = B_hat` and `L = -i*mu*B_hat*Z_hat`, every exact
+zero diagonal of D is retained. Near-pole rows also enter the pivot block when
+`|D_i| <= min(64*epsilon/residual_limit, 0.25) * h_i`, where
+`h_i = mu * sum_a |(B_hat Z_hat)_ia| * sum_j |B_hat_ja|`.
+This is an algebraic pivot heuristic, not a damping floor, modal truncation or
+forward-error certificate. Eliminated modes N and retained modes P give the
+bordered matrix `[I+R_N^T D_N^-1 L_N, -R_P^T; L_P, D_P]`. Its solution and
+`q_N = D_N^-1(F_N-L_N*u)` retain all original equations. Neither Z nor a zero
+bare diagonal is inverted. More exact bare zeros than ports necessarily
+refuse as singular; oversized retained cores refuse their resource bounds.
+Independent binary row/column equilibration changes no physical coefficient.
+Each port RHS contraction receives its own exponent before the actual
+equilibrated core rows are normalized together, so an uncoupled huge modal
+response cannot suppress a tiny retained force.
+
+Storage is `O(n*p+k*k)`, preparation `O(n*p*p+k*k*k)`, and a factor solve
+`O(n*p+k*k)`, with `k = p + retained_pivot_modes`. Audits deliberately stream
+the actual loaded matrix entries in `O(n*n*p)` work: the componentwise
+denominator remains `|A||q|+|F|`, not a looser factorized envelope. The same
+streamed coefficients enter the independently reconstructed frequency-tangent
+audit. Existing original-coordinate flow, effort and physical work owners are
+reused. At DC finite velocity loading vanishes from the solve but remains in
+the frequency derivative.
+
+Compact load work admission is `n*n*p + 2*n*p*p + 8*n*p + k*k*k`.
+Additional load payload admission is
+`64*n*p + 256*p*p + 128*p + 144*k*k + 256*k + W_LU(k,1)`, where W is the
+native blocked-LU workspace query. The first terms cover physical/scaled port
+copies and modal index arrays; the core allowance covers assembly, compensated
+sums, equilibration, factor and solve scratch. Core dimension also passes the
+existing fs-la bounded dense-work admission. These caps precede core
+allocation/factorization. Arithmetic, cancellation and original-row residual
+refusals publish no partial response.
+
+`tests/harmonic_compact_ports.rs` covers a 1,025-mode loaded bare-pole closed
+form, the full DC load tangent, dense parity for repeated/near bare poles,
+mutual nonreciprocal, rank-deficient and lossless loads, physical power, and a
+mixed-scale force fixture with a huge uncoupled response. Genuine unsupported
+poles, core resource limits and cancellation refuse explicitly.
+
 `solve_with_frequency_derivative` reuses that same prepared factor for the exact
 continuous frequency tangent, including authored `dF/domega` and the complete
 physical `dZ/domega`. Loaded owners require an explicit finite impedance-slope
@@ -304,6 +351,11 @@ and dense work score `64*(n*n+n*p+p*p)+256*(n+p)` before allocation. An unloaded
 compact modal owner admits work score `320*n`, with the same `512*n` added
 payload bound. Its current tangent/audit arrays peak at `208*n` additional
 bytes. Both paths retain the admitted scaled mass/damping and reuse the factor.
+A nonzero-frequency compact loaded owner admits work score
+`64*(n*n*p+n*p+p*p+k*k)+256*(n+p+k)`, including the streamed audits and bordered
+solves. Its added payload remains `8*n*p + 512*n + 384*p`; the retained core
+belongs to the prepared owner's load budget. DC uses the diagonal structural
+work score plus the existing port-tangent terms.
 No additional factor, finite difference, material law or peak search is created.
 M/C/K, geometry and the port map remain fixed; load causality, constitutive
 support and the supplied slope are the physical owner's responsibility.

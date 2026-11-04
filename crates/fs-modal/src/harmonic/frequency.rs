@@ -22,6 +22,8 @@ pub struct HarmonicFrequencyControls {
     /// Work score 64*(n²+n*p+p²)+256*(n+p), including both solves, original
     /// physical observations and the independently reconstructed tangent audit.
     /// An exactly diagonal unloaded modal owner uses 320*n instead.
+    /// Compact loading uses 64*(n*n*p+n*p+p*p+k*k)+256*(n+p+k), including
+    /// streamed original-entry audits and the k-dimensional bordered solves.
     /// The factorization was admitted when preparing the owner.
     pub maximum_work: u64,
 }
@@ -117,7 +119,8 @@ impl PreparedHarmonicResponse {
                 ));
             }
         };
-        admit(self.n, ports, self.layout, controls)?;
+        let core = self.compact_port_factor.as_ref().map_or(0, |factor| factor.dimension());
+        admit(self.n, ports, self.layout, core, controls)?;
         let (solution, force_exponent, relative) = self.solve_force(force, cx)?;
         let response = self.observe(force, &solution, force_exponent, relative, cx)?;
         let state_exponent = vector_exponent(&solution);
@@ -491,9 +494,9 @@ impl PreparedHarmonicResponse {
             let mut correction = C64::ZERO;
             let mut envelope =
                 source.abs() + scale(action.envelope[i], action_exponent - exponent)?;
-            for j in self.layout.columns(i, self.n) {
+            for j in self.operator_columns(i) {
                 let dq = tangent[j];
-                let coefficient = self.operator[self.layout.index(i, j, self.n)];
+                let coefficient = self.operator_entry(i, j)?;
                 add(&mut residual, &mut correction, coefficient * dq);
                 envelope += coefficient.abs() * dq.abs();
             }
@@ -523,6 +526,7 @@ fn admit(
     n: usize,
     p: usize,
     layout: MatrixLayout,
+    core: usize,
     controls: HarmonicFrequencyControls,
 ) -> Result<(), HarmonicResponseError> {
     let (nn, pp) = (n as u128, p as u128);
@@ -535,12 +539,16 @@ fn admit(
             cap: controls.maximum_additional_payload_bytes,
         });
     }
-    let structural_entries = if layout == MatrixLayout::Diagonal {
+    let kk = core as u128;
+    let structural_entries = if core != 0 {
+        nn * nn * pp
+    } else if layout == MatrixLayout::Diagonal {
         nn
     } else {
         nn * nn
     };
-    let work = 64 * (structural_entries + nn * pp + pp * pp) + 256 * (nn + pp);
+    let work = 64 * (structural_entries + nn * pp + pp * pp + kk * kk)
+        + 256 * (nn + pp + kk);
     let requested = u64::try_from(work).map_err(|_| invalid("frequency work extent overflow"))?;
     if requested > controls.maximum_work {
         return Err(HarmonicResponseError::WorkBudget {
