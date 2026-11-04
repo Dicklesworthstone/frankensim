@@ -18,7 +18,10 @@ pub struct SpatialCapacitance<'a> {
     capacitance_f: f64,
 }
 
-fn voltage_boundary(faces: &[Vec<usize>; 2], voltages: [f64; 2]) -> SpatialElectrostaticBoundary {
+pub(super) fn voltage_boundary(
+    faces: &[Vec<usize>],
+    voltages: &[f64],
+) -> SpatialElectrostaticBoundary {
     SpatialElectrostaticBoundary {
         voltage: faces
             .iter()
@@ -26,7 +29,7 @@ fn voltage_boundary(faces: &[Vec<usize>; 2], voltages: [f64; 2]) -> SpatialElect
             .flat_map(|(faces, voltage)| {
                 faces.iter().map(move |&face| ElectrostaticVoltageFace {
                     face,
-                    voltage_v: [voltage; 3],
+                    voltage_v: [*voltage; 3],
                 })
             })
             .collect(),
@@ -34,7 +37,7 @@ fn voltage_boundary(faces: &[Vec<usize>; 2], voltages: [f64; 2]) -> SpatialElect
     }
 }
 
-fn terminal_charge(
+pub(super) fn terminal_charge(
     field: &SpatialElectricField<'_>,
     vertices: &[usize],
     cancelled: &mut impl FnMut() -> bool,
@@ -47,6 +50,53 @@ fn terminal_charge(
         add(&mut charge, &mut correction, value)?;
     }
     Ok(charge)
+}
+
+/// Common exact exterior-face admission for two- and multi-electrode stores.
+pub(super) fn electrode_faces(
+    problem: &SpatialElectrostatics,
+    terminals: &[&[usize]],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(Vec<Vec<usize>>, Vec<Vec<usize>>)> {
+    let mut used = BTreeSet::new();
+    let mut assigned = vec![None; problem.mesh().vertex_count];
+    let mut vertices = Vec::with_capacity(terminals.len());
+    let mut canonical_faces = Vec::with_capacity(terminals.len());
+    for (terminal, faces) in terminals.iter().enumerate() {
+        if faces.is_empty() || faces.len() > problem.geometry.faces.len() {
+            return Err(invalid(
+                "nonempty bounded exterior face electrodes required",
+            ));
+        }
+        let mut selected = BTreeSet::new();
+        let mut ordered_faces = BTreeSet::new();
+        for &face in *faces {
+            check(cancelled)?;
+            if problem
+                .geometry
+                .faces
+                .get(face)
+                .is_none_or(|f| f.cells.len() != 1)
+                || !used.insert(face)
+            {
+                return Err(invalid(
+                    "electrodes require distinct original exterior faces",
+                ));
+            }
+            ordered_faces.insert(face);
+            for &v in &problem.mesh().faces[face] {
+                let v = v as usize;
+                if assigned[v].is_some_and(|other| other != terminal) {
+                    return Err(invalid("different electrodes cannot share a vertex"));
+                }
+                assigned[v] = Some(terminal);
+                selected.insert(v);
+            }
+        }
+        vertices.push(selected.into_iter().collect());
+        canonical_faces.push(ordered_faces.into_iter().collect());
+    }
+    Ok((canonical_faces, vertices))
 }
 
 impl SpatialElectrostatics {
@@ -62,43 +112,12 @@ impl SpatialElectrostatics {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<SpatialCapacitance<'_>> {
         check(cancelled)?;
-        let terminals = [positive_faces, negative_faces];
-        let mut used = BTreeSet::new();
-        let mut assigned = vec![None; self.mesh().vertex_count];
-        let mut vertices = [Vec::new(), Vec::new()];
-        for (terminal, faces) in terminals.iter().enumerate() {
-            if faces.is_empty() || faces.len() > self.geometry.faces.len() {
-                return Err(invalid(
-                    "nonempty bounded exterior face electrodes required",
-                ));
-            }
-            let mut selected = BTreeSet::new();
-            for &face in *faces {
-                check(cancelled)?;
-                if self
-                    .geometry
-                    .faces
-                    .get(face)
-                    .is_none_or(|f| f.cells.len() != 1)
-                    || !used.insert(face)
-                {
-                    return Err(invalid(
-                        "electrodes require distinct original exterior faces",
-                    ));
-                }
-                for &v in &self.mesh().faces[face] {
-                    let v = v as usize;
-                    if assigned[v].is_some_and(|other| other != terminal) {
-                        return Err(invalid("different electrodes cannot share a vertex"));
-                    }
-                    assigned[v] = Some(terminal);
-                    selected.insert(v);
-                }
-            }
-            vertices[terminal] = selected.into_iter().collect();
-        }
+        let (_, vertices) = electrode_faces(self, &[positive_faces, negative_faces], cancelled)?;
         let faces = [positive_faces.to_vec(), negative_faces.to_vec()];
-        let boundary = voltage_boundary(&faces, [1.0, 0.0]);
+        let vertices: [Vec<usize>; 2] = vertices
+            .try_into()
+            .map_err(|_| invalid("two capacitance electrodes required"))?;
+        let boundary = voltage_boundary(&faces, &[1.0, 0.0]);
         let field = self.solve(
             &vec![0.0; self.materials.len()],
             &boundary,
@@ -168,7 +187,7 @@ impl<'a> SpatialCapacitance<'a> {
             finite(value)?;
         }
         let difference = finite(voltages_v[0] - voltages_v[1])?;
-        let boundary = voltage_boundary(&self.faces, voltages_v);
+        let boundary = voltage_boundary(&self.faces, &voltages_v);
         let problem = self.field.problem;
         let rho = vec![0.0; problem.materials.len()];
         let (sources, traces) = problem.prepare_boundary(&rho, &boundary, controls, cancelled)?;

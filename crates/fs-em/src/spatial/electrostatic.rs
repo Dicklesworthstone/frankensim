@@ -20,6 +20,8 @@
 
 mod force;
 mod terminals;
+pub mod network;
+pub use network::{SpatialCapacitanceControls, SpatialCapacitanceMatrix, SpatialCapacitanceResponse};
 pub use terminals::SpatialCapacitance;
 
 use super::{

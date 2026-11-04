@@ -6,6 +6,8 @@
 mod force;
 #[path = "spatial_electrostatic/sources.rs"]
 mod sources;
+#[path = "spatial_electrostatic/network.rs"]
+mod network;
 
 use fs_em::{
     electrostatic::ElectrostaticControls,
