@@ -271,11 +271,7 @@ pub(super) fn dense_solve(m: &[f64], b: &[f64], n: usize) -> Option<Vec<f64>> {
 /// jump forever, and the one consistent partition was refused.
 fn kinetic_traction(law: &FrictionLaw, normal: f64, sign: f64, slip: f64, dt: f64) -> Result<f64, ModalFrictionError> {
     let speed = (slip / dt).abs();
-    let mu = if speed == 0.0 {
-        law.zero_speed_kinetic_coefficient()?
-    } else {
-        law.kinetic_coefficient(speed)?
-    };
+    let mu = kinetic_mu(law, speed)?;
     Ok(sign * mu * normal)
 }
 
@@ -293,8 +289,9 @@ fn branch_sign(b: Branch) -> f64 {
 /// difference of a row of magnitude `f_i` carries an absolute error of about
 /// `eps * f_i / h`, which for a near-rank-deficient `a` (many rigid-ribbon cells
 /// on few string modes) reached 0.7 of the smallest eigenvalue of `a`, and Newton
-/// stalled above the 1e-12 m gate. Sliding rows keep the difference: their law
-/// derivative would otherwise be needed for every `FrictionLaw` variant.
+/// stalled above the 1e-12 m gate. Sliding rows use the shared constitutive
+/// derivative too. One value/slope evaluation per sliding row replaces the
+/// traction-sized differences, which can cross a friction knee or round to zero.
 fn solve_partition(
     a: &[f64],
     f: &[f64],
@@ -306,43 +303,38 @@ fn solve_partition(
 ) -> Option<Vec<f64>> {
     let p = f.len();
     let mut t = vec![0.0f64; p];
-    let residual = |t: &[f64]| -> Option<Vec<f64>> {
+    let evaluate = |t: &[f64]| -> Option<(Vec<f64>, Vec<f64>)> {
         let slip = slips(a, f, t);
         let mut r = vec![0.0f64; p];
+        let mut jac = vec![0.0f64; p * p];
         for i in 0..p {
-            r[i] = match cells[i] {
-                Branch::Stuck => slip[i],
+            match cells[i] {
+                Branch::Stuck => {
+                    r[i] = slip[i];
+                    for j in 0..p {
+                        jac[i * p + j] = -a[i * p + j];
+                    }
+                }
                 Branch::SlidePos | Branch::SlideNeg => {
                     let sign = branch_sign(cells[i]);
-                    let kt = kinetic_traction(law[i], normal[i], sign, slip[i], dt).ok()?;
-                    t[i] - kt
+                    let speed = (slip[i] / dt).abs();
+                    let (mu, slope) = law[i].kinetic_coefficient_and_slope(speed).ok()?;
+                    r[i] = t[i] - sign * mu * normal[i];
+                    let along = slip_direction(slip[i]) / dt;
+                    for j in 0..p {
+                        let identity = if i == j { 1.0 } else { 0.0 };
+                        jac[i * p + j] = identity
+                            + sign * slope * along * a[i * p + j] * normal[i];
+                    }
                 }
-            };
+            }
         }
-        Some(r)
+        Some((r, jac))
     };
     for _ in 0..max_newton {
-        let r = residual(&t)?;
+        let (r, jac) = evaluate(&t)?;
         if r.iter().all(|x| x.abs() <= 1e-18) {
             break;
-        }
-        // Numerical Jacobian (p x p), central-free forward difference.
-        let h = 1e-11;
-        let mut jac = vec![0.0f64; p * p];
-        for j in 0..p {
-            let mut tp = t.clone();
-            tp[j] += h;
-            let rp = residual(&tp)?;
-            for i in 0..p {
-                jac[i * p + j] = (rp[i] - r[i]) / h;
-            }
-        }
-        for i in 0..p {
-            if cells[i] == Branch::Stuck {
-                for j in 0..p {
-                    jac[i * p + j] = -a[i * p + j];
-                }
-            }
         }
         let neg: Vec<f64> = r.iter().map(|x| -x).collect();
         let delta = dense_solve(&jac, &neg, p)?;
@@ -353,7 +345,7 @@ fn solve_partition(
             }
         }
     }
-    let r = residual(&t)?;
+    let (r, _) = evaluate(&t)?;
     if r.iter().all(|x| x.abs() <= 1e-12) {
         Some(t)
     } else {
@@ -366,6 +358,12 @@ fn kinetic_mu(law: &FrictionLaw, speed: f64) -> Result<f64, ModalFrictionError> 
     Ok(if speed == 0.0 { law.zero_speed_kinetic_coefficient()? } else { law.kinetic_coefficient(speed)? })
 }
 
+/// A sliding iterate at the cusp uses the symmetric generalized derivative of
+/// `abs(slip)`. The partition still owns the traction sign and final mode check.
+fn slip_direction(slip: f64) -> f64 {
+    if slip > 0.0 { 1.0 } else if slip < 0.0 { -1.0 } else { 0.0 }
+}
+
 /// Joint-Newton the tractions of a FIXED partition on a condensed line. The rows
 /// are those of `solve_partition`: a stuck port pins `slip_i(t) = 0`, a sliding
 /// port pins `t_i = kinetic_traction(branch sign, N_i(t), |slip_i(t)|)`.
@@ -373,8 +371,8 @@ fn kinetic_mu(law: &FrictionLaw, speed: f64) -> Result<f64, ModalFrictionError> 
 /// No row is differenced through the stops. Their reactions are converged only
 /// to the stops' tolerance, so a difference over a small traction step would be
 /// mostly that tolerance. Every row instead takes the line's own derivative. A
-/// sliding row adds the law's slope in slip speed, by a forward difference of
-/// the law alone: `d/dt_j (sign mu N_i) = sign (mu' (sgn slip_i / dt) dslip_ij N_i + mu dN_ij)`.
+/// sliding row adds the original law's analytic slope in slip speed:
+/// `d/dt_j (sign mu N_i) = sign (mu' (sgn slip_i / dt) dslip_ij N_i + mu dN_ij)`.
 /// Returns the tractions, or why the partition did not resolve and by how much:
 /// a stops' refusal is sized by `refusal_size` (the residual of an unconverged
 /// root, the value of a broken budget), a Newton failure is unbounded.
@@ -397,20 +395,11 @@ fn solve_condensed(
                 continue;
             }
             let sign = branch_sign(cells[i]);
-            let kt = kinetic_traction(law[i], point.normal[i], sign, point.slip[i], dt).map_err(|_| DIVERGED)?;
-            r[i] = t[i] - kt;
             let speed = (point.slip[i] / dt).abs();
-            let mu = kinetic_mu(law[i], speed).map_err(|_| DIVERGED)?;
-            let h = 1e-7 * speed.max(1e-6);
-            let slope = (kinetic_mu(law[i], speed + h).map_err(|_| DIVERGED)? - mu) / h;
+            let (mu, slope) = law[i].kinetic_coefficient_and_slope(speed).map_err(|_| DIVERGED)?;
+            r[i] = t[i] - sign * mu * point.normal[i];
             // d|slip|/d slip; a port at exactly zero slip contributes no slope.
-            let along = if point.slip[i] > 0.0 {
-                1.0 / dt
-            } else if point.slip[i] < 0.0 {
-                -1.0 / dt
-            } else {
-                0.0
-            };
+            let along = slip_direction(point.slip[i]) / dt;
             for j in 0..p {
                 let d = slope * along * point.dslip[i * p + j] * point.normal[i] + mu * point.dnormal[i * p + j];
                 let identity = if i == j { 1.0 } else { 0.0 };
@@ -628,11 +617,6 @@ pub(super) fn nearest_consistent_partition(
     })
 }
 
-/// Lowest speed and number of doublings of the critical-speed scan: 1e-6 m/s to
-/// 1e-6 * 2^30, about 1.07e3 m/s.
-const CRITICAL_SCAN_MIN_M_S: f64 = 1e-6;
-const CRITICAL_SCAN_STEPS: usize = 31;
-
 /// The slip speed past which a sliding row's own residual is monotone. It comes
 /// from the law's own slope and the port's diagonal compliance `a_ii`, for any
 /// `FrictionLaw`.
@@ -648,11 +632,11 @@ const CRITICAL_SCAN_STEPS: usize = 31;
 /// `-mu' N a_ii / dt` is 1.72 at rest; the hyperbolic 0.8/0.4/0.2 control gives
 /// 0.078).
 ///
-/// The scan doubles the speed from [`CRITICAL_SCAN_MIN_M_S`] and returns the
-/// first grid speed past the last one where `-mu' N a_ii / dt >= 1`. It returns
-/// 0 when the law never falls that fast: flat, rising, Coulomb, and the
-/// hyperbolic and Stribeck rows of this module's captured tests. The slope is
-/// a forward difference of the law alone, as in `solve_condensed`.
+/// The existing single-port load-line owner locates the last stationary point
+/// using the law's actual speed scale. Twice that speed seeds the rising side,
+/// avoiding the zero Jacobian at the stationary point itself. A clamped linear
+/// weakening law uses its exact zero-coefficient knee; flat and rising laws use
+/// zero. There is no fixed speed grid that can miss a narrow weakening region.
 ///
 /// No claim. `a_ii` is the port's own compliance, not the line condensed onto
 /// the port by the partition's other rows. For a symmetric positive definite `a`,
@@ -665,18 +649,44 @@ const CRITICAL_SCAN_STEPS: usize = 31;
 /// three- and five-cell steps it finds the same consistent partitions as the
 /// walk's own solve.
 fn critical_speed(law: &FrictionLaw, normal: f64, a_ii: f64, dt: f64) -> Result<f64, ModalFrictionError> {
-    let gain = normal * a_ii / dt;
-    let mut speed = CRITICAL_SCAN_MIN_M_S;
-    let mut past = 0.0;
-    for _ in 0..CRITICAL_SCAN_STEPS {
-        let h = 1e-7 * speed;
-        let slope = (kinetic_mu(law, speed + h)? - kinetic_mu(law, speed)?) / h;
-        speed *= 2.0;
-        if -slope * gain >= 1.0 {
-            past = speed;
-        }
+    law.validate()?;
+    if !normal.is_finite() || normal < 0.0 || !a_ii.is_finite() || a_ii < 0.0
+        || !dt.is_finite() || dt <= 0.0 {
+        return Err(fs_tribo::TriboError::InvalidInput { field: "friction_load_line" }.into());
     }
-    Ok(past)
+    if normal == 0.0 || a_ii == 0.0 {
+        return Ok(0.0);
+    }
+    let mobility = a_ii / dt;
+    let gain = normal * mobility;
+    if !mobility.is_finite() || !gain.is_finite() {
+        return Err(fs_tribo::TriboError::InvalidInput { field: "friction_load_line_scale" }.into());
+    }
+    let turning = match *law {
+        FrictionLaw::Coulomb { .. } => 0.0,
+        FrictionLaw::VelocityDependent { mu_zero, slope_per_speed, .. } => {
+            if slope_per_speed < 0.0 && -slope_per_speed * gain >= 1.0 {
+                mu_zero / -slope_per_speed
+            } else {
+                0.0
+            }
+        }
+        FrictionLaw::Stribeck { .. } | FrictionLaw::Hyperbolic { .. }
+        | FrictionLaw::ShiftedPower { .. } => {
+            let line = crate::stribeck_friction::StribeckLoadLine::new(law, normal, mobility)
+                .map_err(|error| match error {
+                    crate::stribeck_friction::ImplicitFrictionError::Constitutive(error) => error,
+                    _ => fs_tribo::TriboError::InvalidInput { field: "friction_load_line_turning_speed" },
+                })?;
+            let (_, last) = line.critical_slips_m_s();
+            if last == f64::INFINITY { 0.0 } else { last }
+        }
+    };
+    let seed = 2.0 * turning;
+    if !seed.is_finite() || seed < 0.0 {
+        return Err(fs_tribo::TriboError::InvalidInput { field: "friction_load_line_turning_speed" }.into());
+    }
+    Ok(seed)
 }
 
 /// Joint-Newton a FIXED partition of a plain line, with every sliding row written
@@ -689,8 +699,8 @@ fn critical_speed(law: &FrictionLaw, normal: f64, a_ii: f64, dt: f64) -> Result<
 /// Starts: stuck tractions at 0, and each sliding speed at the larger of its
 /// free-slip speed `|f_i| / dt` and [`critical_speed`]. No step takes a speed
 /// below a tenth of its current value, so a row stays on its branch. The
-/// Jacobian is exact in the line (`-a_ij dt_j / dx_j`) and differences only the
-/// law.
+/// Jacobian uses the exact line (`-a_ij dt_j / dx_j`) and the original law's
+/// analytic slope, without differencing nearly equal friction coefficients.
 ///
 /// Iteration stops when no unknown moves, or after `max_newton` steps. The
 /// result then faces `solve_partition`'s own gate: the residual on the actual
@@ -719,10 +729,9 @@ fn solve_partition_by_speed(
         for i in 0..p {
             if sliding(i) {
                 let sign = branch_sign(cells[i]);
-                let h = 1e-7 * x[i].max(1e-6);
-                let mu = kinetic_mu(law[i], x[i]).ok()?;
+                let (mu, slope) = law[i].kinetic_coefficient_and_slope(x[i]).ok()?;
                 t[i] = sign * mu * normal[i];
-                dt_dx[i] = sign * (kinetic_mu(law[i], x[i] + h).ok()? - mu) / h * normal[i];
+                dt_dx[i] = sign * slope * normal[i];
             } else {
                 t[i] = x[i];
             }
@@ -916,6 +925,82 @@ mod tests {
             characteristic_speed: 0.05,
             viscous_per_speed: 0.0,
         }
+    }
+
+    /// G1: a fixed 1e-11 N finite difference vanishes next to these otherwise
+    /// ordinary finite tractions. The constant law has an exact unit Jacobian.
+    #[test]
+    fn large_contact_loads_keep_the_exact_coulomb_partition() {
+        let law = FrictionLaw::Coulomb { static_mu: 0.8, kinetic_mu: 0.4 };
+        let a = [1e-8, 2e-9, 2e-9, 1e-8];
+        let f = [0.02, -0.04];
+        let n = [1e6, 2e6];
+        let cells = [Branch::SlidePos, Branch::SlideNeg];
+        let t = solve_partition(&a, &f, &n, &[&law; 2], 0.01, &cells, 2)
+            .expect("finite Coulomb loads do not require resolvable traction perturbations");
+        assert_eq!(t, [400_000.0, -800_000.0]);
+        assert!(is_consistent(&a, &f, &n, &[&law; 2], 0.01, &cells, &t).unwrap());
+    }
+
+    /// G1: the derivative retains both actual slip response and changing load.
+    #[test]
+    fn rate_and_normal_load_jacobians_recover_independent_roots() {
+        let law = FrictionLaw::VelocityDependent {
+            static_mu: 0.8, mu_zero: 0.2, slope_per_speed: 0.4,
+        };
+        let cells = [Branch::SlidePos];
+        let plain = solve_partition(&[0.2], &[0.5], &[2.0], &[&law], 0.1, &cells, 4)
+            .expect("affine velocity-dependent friction");
+        assert!((plain[0] - 4.4 / 2.6).abs() < 1e-13);
+
+        struct ChangingLoad;
+        impl CondensedLine for ChangingLoad {
+            fn at(&self, t: &[f64]) -> Result<LinePoint, ModalFrictionError> {
+                Ok(LinePoint {
+                    slip: vec![0.5 - 0.2 * t[0]],
+                    normal: vec![1.0 + 0.2 * t[0]],
+                    dslip: vec![-0.2],
+                    dnormal: vec![0.2],
+                })
+            }
+        }
+        // F = (1 + 0.2 F) * (0.2 + 0.4 * (0.5 - 0.2 F) / 0.1).
+        // Thus 0.16 F² + 1.36 F - 2.2 = 0, independently of Newton.
+        // det-ok: test-only independent quadratic-root oracle.
+        let expected = 4.4 / (1.36 + (1.36_f64.powi(2) + 4.0 * 0.16 * 2.2).sqrt());
+        let condensed = solve_condensed(&ChangingLoad, &[&law], 0.1, &cells, 32)
+            .expect("joint normal-load and slip derivative");
+        assert!((condensed[0] - expected).abs() < 1e-13);
+    }
+
+    /// G1/G3: weakening folds follow the material speed scale, including speeds
+    /// far below the former 1e-6 m/s scan and above its fixed upper limit.
+    #[test]
+    fn sliding_seed_follows_the_actual_friction_speed_scale() {
+        for c in [1e-200, 1e-12, 1e-6, 1.0, 1e6, 1e200] {
+            let hyperbolic = FrictionLaw::Hyperbolic {
+                static_mu: 0.8, kinetic_mu: 0.4, characteristic_speed: c,
+            };
+            let seed = critical_speed(&hyperbolic, 1.0, 9.0 * c / 0.4, 1.0).unwrap();
+            assert!((seed / c - 4.0).abs() < 1e-13);
+
+            let stribeck = FrictionLaw::Stribeck {
+                static_mu: 0.8, kinetic_mu: 0.4, characteristic_speed: c,
+                viscous_per_speed: 0.0,
+            };
+            let gain = 10.0 * c / 0.4;
+            let seed = critical_speed(&stribeck, 1.0, gain, 1.0).unwrap();
+            let (_, at_fold) = stribeck.kinetic_coefficient_and_slope(seed / 2.0).unwrap();
+            let (_, after_fold) = stribeck.kinetic_coefficient_and_slope(seed).unwrap();
+            assert!((1.0 + gain * at_fold).abs() < 2e-14);
+            assert!(1.0 + gain * after_fold > 0.0);
+        }
+        let clamped = FrictionLaw::VelocityDependent {
+            static_mu: 0.8, mu_zero: 0.4, slope_per_speed: -2.0,
+        };
+        assert_eq!(critical_speed(&clamped, 1.0, 1.0, 1.0).unwrap(), 0.4);
+        assert_eq!(critical_speed(&clamped, 1.0, 0.1, 1.0).unwrap(), 0.0);
+        assert_eq!(critical_speed(&clamped, 0.0, 1.0, 1.0).unwrap(), 0.0);
     }
 
     fn operating_point() -> ([f64; 25], [f64; 5]) {

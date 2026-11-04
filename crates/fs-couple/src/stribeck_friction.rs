@@ -310,7 +310,7 @@ impl StribeckLoadLine {
     ///
     /// # Errors
     /// An unsupported or invalid law, a non-positive or non-finite load or
-    /// mobility, or an unrepresentable static capacity.
+    /// mobility, or an unrepresentable static capacity or load-line scale.
     pub fn new(
         law: &fs_tribo::FrictionLaw,
         normal_n: f64,
@@ -380,6 +380,9 @@ impl StribeckLoadLine {
         // left side rises to its peak at x = 1/sqrt(2), then decays.
         let a = mobility_m_per_n_s * normal_n * (static_mu - kinetic_mu);
         let b = 1.0 + mobility_m_per_n_s * normal_n * viscous_per_speed;
+        if !a.is_finite() || !b.is_finite() {
+            return Err(ImplicitFrictionError::InvalidInput("load_line_scale"));
+        }
         let shape = |x: f64| x * fs_math::det::exp(-(x * x));
         let peak = core::f64::consts::FRAC_1_SQRT_2;
         let (local_max_m_s, local_min_m_s) = if let Weakening::Power(exponent) = weakening {
@@ -393,12 +396,21 @@ impl StribeckLoadLine {
             if bottom > 0.0 { (0.0, bottom) } else { (f64::INFINITY, f64::INFINITY) }
         } else if matches!(weakening, Weakening::Hyperbolic) {
             // (v + v0)^2 = m N (mu_s - mu_k) v0 at the one minimum.
-            let bottom = fs_math::det::sqrt(a * characteristic_speed) - characteristic_speed;
-            if !bottom.is_finite() {
-                return Err(ImplicitFrictionError::InvalidInput("load_line_scale"));
+            if a > characteristic_speed {
+                // Rationalize sqrt(a v0) - v0 without forming a v0, whose
+                // square units can overflow/underflow for a finite root.
+                // Keeping a - v0 also preserves the small positive minimum
+                // immediately beyond the fold, where subtracting roots fails.
+                let ratio = fs_math::det::sqrt(characteristic_speed) / fs_math::det::sqrt(a);
+                let bottom = (a - characteristic_speed) * (ratio / (1.0 + ratio));
+                if !(bottom.is_finite() && bottom > 0.0) {
+                    return Err(ImplicitFrictionError::InvalidInput("load_line_scale"));
+                }
+                (0.0, bottom)
+            } else {
+                (f64::INFINITY, f64::INFINITY)
             }
-            if bottom > 0.0 { (0.0, bottom) } else { (f64::INFINITY, f64::INFINITY) }
-        } else if a > 0.0 && a.is_finite() && b.is_finite() {
+        } else if a > 0.0 {
             let target = b * characteristic_speed / (2.0 * a);
             if !(target > 0.0 && target.is_finite()) {
                 return Err(ImplicitFrictionError::InvalidInput("load_line_scale"));
@@ -887,6 +899,71 @@ mod set_valued_contact_tests {
         }
     }
 
+    /// G1: dimensional scaling preserves both the physical turning point and
+    /// the coexisting static/high-slip solutions, even when a v0 cannot fit.
+    #[test]
+    fn hyperbolic_turning_point_and_hysteresis_survive_extreme_speed_scales() {
+        for speed in [1.0e-200, 1.0, 1.0e200] {
+            let law = fs_tribo::FrictionLaw::Hyperbolic {
+                static_mu: 0.8,
+                kinetic_mu: 0.4,
+                characteristic_speed: speed,
+            };
+            let mobility = 22.5 * speed;
+            let line = StribeckLoadLine::new(&law, 1.0, mobility).unwrap();
+            let (top, bottom) = line.critical_slips_m_s();
+            assert_eq!(top, 0.0);
+            assert!((bottom / speed - 2.0).abs() < 2.0e-15, "{speed}: {bottom}");
+
+            // In x = v/v0, x + 9 + 9/(1+x) = 17 gives x^2 - 7x + 1 = 0.
+            // det-ok: independent test oracle for the analytic quadratic root.
+            let exact_slip = (7.0 + 45.0_f64.sqrt()) / 2.0;
+            let fresh = line.step(17.0 * speed, ContactBranch::Fresh).unwrap();
+            assert_eq!(fresh.branch, ContactBranch::Stuck);
+            assert_eq!(fresh.relative_velocity_m_s, 0.0);
+            assert!((fresh.traction_n - 17.0 / 22.5).abs() < 2.0e-15);
+            let sliding = line
+                .step(17.0 * speed, ContactBranch::SlidingHigh { positive: true })
+                .unwrap();
+            assert_eq!(
+                sliding.branch,
+                ContactBranch::SlidingHigh { positive: true }
+            );
+            assert_eq!((sliding.roots, sliding.selected), (3, 2));
+            let slip = sliding.relative_velocity_m_s / speed;
+            assert!((slip - exact_slip).abs() < 2.0e-13, "{speed}: {sliding:?}");
+            assert!((slip - 17.0 + 22.5 * sliding.traction_n).abs() < 2.0e-13);
+            assert!((sliding.traction_n - (0.4 + 0.4 / (1.0 + slip))).abs() < 2.0e-15);
+        }
+    }
+
+    /// G1: adjacent load scales on either side of the fold retain their branch
+    /// classification; subtraction of rounded square roots loses this minimum.
+    #[test]
+    fn hyperbolic_turning_point_retains_the_first_float_beyond_the_fold() {
+        for speed in [1.0e-200_f64, 1.0, 1.0e200] {
+            let law = fs_tribo::FrictionLaw::Hyperbolic {
+                static_mu: 1.0,
+                kinetic_mu: 0.0,
+                characteristic_speed: speed,
+            };
+            let above = f64::from_bits(speed.to_bits() + 1);
+            let line = StribeckLoadLine::new(&law, 1.0, above).unwrap();
+            let (top, bottom) = line.critical_slips_m_s();
+            assert_eq!(top, 0.0);
+            assert!(bottom > 0.0);
+            // sqrt(v0 (v0 + epsilon)) - v0 = epsilon/2 + O(epsilon^2/v0).
+            assert!((bottom / (above - speed) - 0.5).abs() <= 2.0 * f64::EPSILON);
+            for mobility in [f64::from_bits(speed.to_bits() - 1), speed] {
+                let monotone = StribeckLoadLine::new(&law, 1.0, mobility).unwrap();
+                assert_eq!(
+                    monotone.critical_slips_m_s(),
+                    (f64::INFINITY, f64::INFINITY)
+                );
+            }
+        }
+    }
+
     /// G0: refusals are typed; nothing is defaulted.
     #[test]
     fn set_valued_line_refuses_bad_inputs() {
@@ -898,6 +975,21 @@ mod set_valued_contact_tests {
         }
         assert!(matches!(StribeckLoadLine::new(&law(0.4, 0.8, 0.04, 0.0), 1.0, 0.1),
             Err(ImplicitFrictionError::Constitutive(_))));
+        for overflow in [law(4.0, 0.0, 1.0, 0.0), law(0.8, 0.4, 0.04, 4.0)] {
+            assert!(matches!(
+                StribeckLoadLine::new(&overflow, 1.0, f64::MAX),
+                Err(ImplicitFrictionError::InvalidInput("load_line_scale"))
+            ));
+        }
+        let subnormal = fs_tribo::FrictionLaw::Hyperbolic {
+            static_mu: 1.0,
+            kinetic_mu: 0.0,
+            characteristic_speed: f64::from_bits(1),
+        };
+        assert!(matches!(
+            StribeckLoadLine::new(&subnormal, 1.0, f64::from_bits(2)),
+            Err(ImplicitFrictionError::InvalidInput("load_line_scale"))
+        ));
         let line = StribeckLoadLine::new(&f, 1.0, 0.1).unwrap();
         assert!(matches!(line.step(f64::NAN, ContactBranch::Fresh), Err(ImplicitFrictionError::InvalidInput(_))));
         let next = f64::from_bits(0.1_f64.to_bits() + 1);
