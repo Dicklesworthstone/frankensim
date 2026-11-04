@@ -112,6 +112,7 @@ pub struct NonlinearBore {
     step_s: f64,
     cfl: f64,
     centers_m: Vec<f64>,
+    fallbacks: u64,
 }
 
 impl NonlinearBore {
@@ -177,6 +178,7 @@ impl NonlinearBore {
             step_s: spec.step_s,
             cfl: spec.cfl,
             centers_m: geometry.centers_m,
+            fallbacks: 0,
         })
     }
 
@@ -187,24 +189,59 @@ impl NonlinearBore {
     /// fixed step, which the radiating end refuses) leaves the field and both
     /// memories unchanged. A wall refusal after an accepted gas step leaves
     /// the bore mid-step and must end the run.
+    ///
+    /// A gas step whose second-order (MUSCL) update leaves the source domain
+    /// at either RK stage is redone once, from the unchanged field, at the same
+    /// fixed step with first-order reconstruction: the a posteriori fallback of
+    /// the MOOD scheme (Clain, Diot and Loubère, J. Comput. Phys. 230 (2011)
+    /// 4028-4050). The same `admissible_state` test decides the retried step, no
+    /// bound or domain moves, and a step the retry also fails is refused as
+    /// [`NonlinearDuctError::GasAfterFirstOrderRetry`]. Any other refusal (a
+    /// CFL bound shorter than the fixed step, a port or radiating-end
+    /// refusal) is not retried. [`Self::first_order_fallbacks`] counts the
+    /// steps taken this way.
     pub fn step(
         &mut self,
         mut inlet: impl FnMut(&PortStage) -> Result<Option<FaceFlux>, GasError>,
     ) -> Result<BoreStep, NonlinearDuctError> {
-        let radiation = &mut self.radiation;
         let gas = &self.gas;
-        let controls = StepControl {
-            cfl: self.cfl,
-            reconstruction: Reconstruction::Muscl,
-            maximum_halvings: 0,
+        let (step_s, cfl) = (self.step_s, self.cfl);
+        let mut attempt =
+            |solver: &mut Euler1d, radiation: &mut PistonRadiation, reconstruction: Reconstruction| {
+                solver.step_with_ports(
+                    Time::new(step_s),
+                    StepControl {
+                        cfl,
+                        reconstruction,
+                        maximum_halvings: 0,
+                    },
+                    |stage| Ok([inlet(stage)?, Some(radiation.flux(gas, stage)?)]),
+                    || false,
+                )
+            };
+        let guess = self.radiation.guess;
+        let report = match attempt(&mut self.solver, &mut self.radiation, Reconstruction::Muscl) {
+            Ok(report) => report,
+            Err(first) if source_domain_refusal(&first) => {
+                // The refused attempt left the field and the end memory unchanged; only the end's
+                // uncommitted predictor flow and its Newton starting pressure belong to the attempt.
+                self.radiation.pending = None;
+                self.radiation.guess = guess;
+                let mut report = attempt(
+                    &mut self.solver,
+                    &mut self.radiation,
+                    Reconstruction::FirstOrder,
+                )
+                .map_err(NonlinearDuctError::GasAfterFirstOrderRetry)?;
+                // The solver sets this flag only when it retried a MUSCL control itself; this retry
+                // passed first-order control, so the flag is set here with the same meaning.
+                report.first_order_retry = true;
+                self.fallbacks += 1;
+                report
+            }
+            Err(error) => return Err(error.into()),
         };
-        let report = self.solver.step_with_ports(
-            Time::new(self.step_s),
-            controls,
-            |stage| Ok([inlet(stage)?, Some(radiation.flux(gas, stage)?)]),
-            || false,
-        )?;
-        let outlet_pressure_pa = radiation.commit()?;
+        let outlet_pressure_pa = self.radiation.commit()?;
         if let Some(walls) = self.walls.as_mut() {
             walls.apply(&mut self.solver, &self.gas)?;
         }
@@ -215,6 +252,13 @@ impl NonlinearBore {
             outlet_volume_flow_m3_s: outlet_mass_flow_kg_s / self.room.density,
             outlet_pressure_pa,
         })
+    }
+
+    /// Gas steps accepted so far only after the first-order retry of
+    /// [`Self::step`] (the MUSCL step failed the source-domain admission).
+    #[must_use]
+    pub const fn first_order_fallbacks(&self) -> u64 {
+        self.fallbacks
     }
 
     /// The shared gas field, its mesh, source and time.
@@ -266,6 +310,21 @@ impl NonlinearBore {
     pub fn wall_receipt(&self) -> Option<WallReceipt> {
         self.walls.as_ref().map(|walls| walls.receipt)
     }
+}
+
+// The gas owner's two refusals of an RK stage that leaves the source domain (fs-gas dynamics/evolve.rs), as
+// it reports them once its retries are spent. A test provokes the real refusal, so a changed text fails there.
+fn source_domain_refusal(error: &GasError) -> bool {
+    matches!(
+        error,
+        GasError::StepRetries { last, .. }
+            if matches!(
+                **last,
+                GasError::Invalid(
+                    "first RK stage outside source domain" | "second RK stage outside source domain"
+                )
+            )
+    )
 }
 
 struct BoreMesh {

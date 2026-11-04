@@ -41,6 +41,9 @@ pub enum NonlinearDuctError {
     Geometry(DuctError),
     /// Gas state, solve budget, or cancellation refused.
     Gas(GasError),
+    /// A bore step left the source domain at second order and again after its
+    /// first-order retry (`bore::NonlinearBore::step`); the retry's refusal.
+    GasAfterFirstOrderRetry(GasError),
     /// Geometry or requested discretization is outside this image's domain.
     UnsupportedGeometry(&'static str),
 }
@@ -50,6 +53,9 @@ impl fmt::Display for NonlinearDuctError {
         match self {
             Self::Geometry(error) => write!(f, "FS-DUCT-NONLINEAR-GEOMETRY: {error}"),
             Self::Gas(error) => write!(f, "FS-DUCT-NONLINEAR-GAS: {error}"),
+            Self::GasAfterFirstOrderRetry(error) => {
+                write!(f, "FS-DUCT-NONLINEAR-GAS: {error} after first-order retry")
+            }
             Self::UnsupportedGeometry(reason) => {
                 write!(f, "FS-DUCT-NONLINEAR-UNSUPPORTED: {reason}")
             }

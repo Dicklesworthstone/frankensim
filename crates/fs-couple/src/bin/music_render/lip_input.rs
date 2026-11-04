@@ -377,6 +377,10 @@ pub(super) fn run_with_gas_sources(
         .join(",");
     let gas_sources =
         super::thermochemical::provenance(core::slice::from_ref(description.gas_record()));
+    // Nonlinear bore only: gas steps accepted after a first-order retry of the failed second-order update.
+    let fallbacks = performance.first_order_fallbacks().map_or_else(String::new, |n| {
+        format!(",\"nonlinear_first_order_fallback_steps\":{n}")
+    });
     let provenance = format!(
         "{{\"schema\":\"frankensim-music-render-provenance-v1\",\"fixture\":\"lip-input\",\
          \"sample_rate_hz\":{},\"samples\":{samples},\"block\":{block},\
@@ -386,7 +390,7 @@ pub(super) fn run_with_gas_sources(
          \"lip_windows_0p1s\":[{}],\
          \"observation\":{{\"mechanics_sample_rate_hz\":{mechanics_rate_hz},\"output_sample_rate_hz\":{},\"ratio\":{ratio},\
          \"filter\":\"none: the baffled receiver differentiates and delays the mouth flow of every mechanical sample\",\
-         \"resampled\":false,\"declared_band_hz\":{}}}{gas_sources}}}",
+         \"resampled\":false,\"declared_band_hz\":{}}}{fallbacks}{gas_sources}}}",
         info.sample_rate_hz,
         info.full_scale_pa,
         rendered.clipped,

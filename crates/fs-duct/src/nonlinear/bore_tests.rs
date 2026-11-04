@@ -731,3 +731,205 @@ fn g2_sinusoid_steepens_to_the_lossless_shock_distance() {
     );
     assert!((measured / theory - 1.0).abs() <= 0.05);
 }
+
+// ---- the first-order retry of a step that leaves the source domain (MOOD a posteriori fallback) ----
+
+fn retry_bore() -> NonlinearBore {
+    let state = air();
+    let duct = Duct {
+        segments: vec![Segment::Cylinder {
+            radius: 5.0e-3,
+            length: 0.2,
+        }],
+    };
+    NonlinearBore::new(
+        &duct,
+        air_source(&state),
+        293.15,
+        101_325.0,
+        None,
+        BoreSpec {
+            maximum_cell_m: 4.0e-3,
+            inlet_volume_m3: 0.0,
+            step_s: STEP_S,
+            cfl: 0.45,
+            wall: None,
+        },
+    )
+    .unwrap()
+}
+
+// The step as it was before the retry existed: one second-order attempt, nothing else.
+fn unretried_step(
+    bore: &mut NonlinearBore,
+    reconstruction: Reconstruction,
+    mut inlet: impl FnMut(&PortStage) -> Result<Option<FaceFlux>, GasError>,
+) -> Result<StepReport, GasError> {
+    let radiation = &mut bore.radiation;
+    let gas = &bore.gas;
+    let controls = StepControl {
+        cfl: bore.cfl,
+        reconstruction,
+        maximum_halvings: 0,
+    };
+    let report = bore.solver.step_with_ports(
+        Time::new(bore.step_s),
+        controls,
+        |stage| Ok([inlet(stage)?, Some(radiation.flux(gas, stage)?)]),
+        || false,
+    )?;
+    radiation.commit().unwrap();
+    Ok(report)
+}
+
+fn bits(bore: &NonlinearBore) -> Vec<[u64; 3]> {
+    bore.solver()
+        .states()
+        .iter()
+        .map(|q| [q.density.to_bits(), q.momentum.to_bits(), q.energy.to_bits()])
+        .collect()
+}
+
+// Where two fields first differ, and the largest relative difference of any component (0.0 when they are bit-identical).
+fn difference(a: &[[u64; 3]], b: &[[u64; 3]]) -> (Option<(usize, usize, f64, f64)>, f64) {
+    let (mut first, mut worst) = (None, 0.0_f64);
+    for (cell, (x, y)) in a.iter().zip(b).enumerate() {
+        for (k, (&p, &q)) in x.iter().zip(y).enumerate() {
+            let (u, v) = (f64::from_bits(p), f64::from_bits(q));
+            if p != q {
+                first.get_or_insert((cell, k, u, v));
+                worst = worst.max((u - v).abs() / u.abs().max(v.abs()));
+            }
+        }
+    }
+    (first, worst)
+}
+
+// A two-state field: the left half and the right half each at (temperature K, pressure over the room pressure, Mach number of its own sound speed).
+fn planted_two_state(left: (f64, f64, f64), right: (f64, f64, f64)) -> Option<NonlinearBore> {
+    let mut bore = retry_bore();
+    let room_p = bore.room().pressure;
+    let gas = bore.gas().clone();
+    let make = |(t, ratio, mach): (f64, f64, f64)| {
+        let p = room_p * ratio;
+        let rho = p / (gas.gas_constant() * t);
+        let rest = gas.conserved(rho, 0.0, p).ok()?;
+        let c = gas.primitive(rest, || false).ok()?.sound_speed;
+        gas.conserved(rho, mach * c, p).ok()
+    };
+    let (l, r) = (make(left)?, make(right)?);
+    let cells = bore.solver().states().len();
+    bore.solver
+        .apply_cell_sources(|i, q, _| Ok(if i < cells / 2 { l } else { r }), || false)
+        .ok()?;
+    Some(bore)
+}
+
+#[test]
+fn a_step_that_never_fails_admission_is_the_unretried_step_bit_for_bit() {
+    let (mut with_retry, mut without) = (retry_bore(), retry_bore());
+    let source = with_retry.gas().clone();
+    let inlet_area = with_retry.inlet_area_m2();
+    let width = 1.0e-4;
+    let flow = |t: f64| {
+        if t < width {
+            1.0e-8 * 0.5 * (1.0 - det::cos(core::f64::consts::TAU * t / width))
+        } else {
+            0.0
+        }
+    };
+    let (mut guess_a, mut guess_b) = (with_retry.room().pressure, without.room().pressure);
+    for _ in 0..800 {
+        with_retry
+            .step(|stage| {
+                let (flux, _) = velocity_port(&source, stage, flow(stage.time) / inlet_area, &mut guess_a)?;
+                Ok(Some(flux))
+            })
+            .unwrap();
+        unretried_step(&mut without, Reconstruction::Muscl, |stage| {
+            let (flux, _) = velocity_port(&source, stage, flow(stage.time) / inlet_area, &mut guess_b)?;
+            Ok(Some(flux))
+        })
+        .unwrap();
+    }
+    assert_eq!(with_retry.first_order_fallbacks(), 0);
+    assert_eq!(bits(&with_retry), bits(&without));
+    assert_eq!(
+        with_retry.solver().time().value().to_bits(),
+        without.solver().time().value().to_bits()
+    );
+}
+
+#[test]
+fn a_step_that_fails_at_second_order_is_redone_at_first_order_and_counted() {
+    // The left half 101 K gas at 100 x the room pressure, the right half the room: step 0 is admitted at second order, step 1 is not.
+    let planted = || planted_two_state((101.0, 100.0, 0.0), (293.15, 1.0, 0.0)).unwrap();
+    // `refused` takes the same two attempts by hand; `fresh` takes only the first-order attempt, with no refused attempt before it.
+    let (mut retried, mut refused, mut fresh) = (planted(), planted(), planted());
+    retried.step(|_| Ok(None)).unwrap();
+    unretried_step(&mut refused, Reconstruction::Muscl, |_| Ok(None)).unwrap();
+    unretried_step(&mut fresh, Reconstruction::Muscl, |_| Ok(None)).unwrap();
+    assert_eq!(retried.first_order_fallbacks(), 0);
+    assert_eq!(bits(&retried), bits(&refused));
+    assert_eq!(bits(&retried), bits(&fresh));
+    // The second-order step 1 leaves the source domain and leaves the field and the clock as they were ...
+    let (field, clock) = (bits(&refused), refused.solver().time().value().to_bits());
+    let guess = refused.radiation.guess;
+    let refusal = unretried_step(&mut refused, Reconstruction::Muscl, |_| Ok(None)).unwrap_err();
+    assert!(source_domain_refusal(&refusal), "{refusal:?}");
+    assert_eq!(bits(&refused), field);
+    assert_eq!(refused.solver().time().value().to_bits(), clock);
+    // ... and the first-order step from the same field passes the same admission. The retried bore takes the same two attempts as
+    // `refused` (the end's uncommitted flow and starting pressure put back between them), so its field and clock are bit-identical.
+    refused.radiation.pending = None;
+    refused.radiation.guess = guess;
+    unretried_step(&mut refused, Reconstruction::FirstOrder, |_| Ok(None)).unwrap();
+    unretried_step(&mut fresh, Reconstruction::FirstOrder, |_| Ok(None)).unwrap();
+    let step = retried.step(|_| Ok(None)).unwrap();
+    assert_eq!(retried.first_order_fallbacks(), 1);
+    assert!(step.report.first_order_retry);
+    let (first, worst) = difference(&bits(&retried), &bits(&refused));
+    assert!(first.is_none(), "retried vs refused-then-first-order: first difference (cell, component, retried, refused) {first:?}, worst relative {worst:e}");
+    assert_eq!(
+        retried.solver().time().value().to_bits(),
+        refused.solver().time().value().to_bits()
+    );
+    // Against a first-order step that had no refused attempt before it: the shared EOS temperature solve starts from the
+    // primitives the refused attempt left behind and stops inside its own energy tolerance, so only that spread is expected.
+    let (first, worst) = difference(&bits(&retried), &bits(&fresh));
+    eprintln!("MOOD-RETRY-SPREAD vs a first-order step with no refused attempt: first difference (cell, component, retried, fresh) {first:?}, worst relative {worst:e}");
+    assert_eq!(
+        retried.solver().time().value().to_bits(),
+        fresh.solver().time().value().to_bits()
+    );
+}
+
+#[test]
+fn a_step_that_fails_at_both_orders_is_refused_naming_the_retry_and_changes_nothing() {
+    // 101 K gas flowing apart at twice its sound speed leaves the source domain at the first RK stage, at either order.
+    let mut bore = planted_two_state((101.0, 1.0, -2.0), (101.0, 1.0, 2.0)).unwrap();
+    let (field, clock) = (bits(&bore), bore.solver().time().value().to_bits());
+    let error = bore.step(|_| Ok(None)).unwrap_err();
+    let text = error.to_string();
+    assert!(matches!(error, NonlinearDuctError::GasAfterFirstOrderRetry(_)), "{text}");
+    assert!(text.starts_with("FS-DUCT-NONLINEAR-GAS: "), "{text}");
+    assert!(text.contains("outside source domain"), "{text}");
+    assert!(text.ends_with(" after first-order retry"), "{text}");
+    assert_eq!(bore.first_order_fallbacks(), 0);
+    assert_eq!(bits(&bore), field);
+    assert_eq!(bore.solver().time().value().to_bits(), clock);
+}
+
+#[test]
+fn a_refusal_that_is_not_a_source_domain_failure_is_not_retried() {
+    // At Mach 4 the radiating end refuses the fixed step (the CFL bound is shorter than it): not a domain failure, so no retry and the plain text.
+    let mut bore = planted_two_state((101.0, 1.0, -4.0), (101.0, 1.0, 4.0)).unwrap();
+    let field = bits(&bore);
+    let error = bore.step(|_| Ok(None)).unwrap_err();
+    let text = error.to_string();
+    assert!(matches!(error, NonlinearDuctError::Gas(_)), "{text}");
+    assert!(text.contains("radiating end runs on its declared fixed step"), "{text}");
+    assert!(!text.contains("after first-order retry"), "{text}");
+    assert_eq!(bore.first_order_fallbacks(), 0);
+    assert_eq!(bits(&bore), field);
+}

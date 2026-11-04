@@ -1316,6 +1316,14 @@ impl Engine {
             Self::Nonlinear(lip) => lip.diagnostics(),
         }
     }
+
+    fn first_order_fallbacks(&self) -> Option<u64> {
+        match self {
+            Self::Linear { .. } => None,
+            #[cfg(feature = "nonlinear-brass")]
+            Self::Nonlinear(lip) => Some(lip.bore().first_order_fallbacks()),
+        }
+    }
 }
 
 /// A realized performance: the lip, the bore and the microphone, advanced
@@ -1362,6 +1370,13 @@ impl LipPerformance {
     #[must_use]
     pub fn diagnostics(&self) -> &[BrassBlockDiag] {
         self.engine.diagnostics()
+    }
+
+    /// Nonlinear bore only (`None` for the linear bore): the gas steps accepted after a
+    /// first-order retry of the failed second-order update, so far.
+    #[must_use]
+    pub fn first_order_fallbacks(&self) -> Option<u64> {
+        self.engine.first_order_fallbacks()
     }
 
     /// Start recording the pressure at the mouthpiece (the internal pressure the
