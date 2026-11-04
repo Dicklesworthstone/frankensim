@@ -64,6 +64,8 @@ pub mod description;
 /// Shared transactional inlet load on the original material DG propagator.
 pub mod dg_port;
 pub mod driving_point;
+/// Solved electrostatic free-volume-charge loads on the native solid mesh.
+pub mod electrostatic;
 /// Material-derived axial and transverse continuum of a tensioned fiber ribbon.
 pub mod fiber_ribbon;
 /// Finite source gas on the shared uniform-body thermal callback.

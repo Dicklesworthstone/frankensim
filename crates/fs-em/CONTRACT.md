@@ -71,9 +71,14 @@ absolute-SI scalar or explicitly oriented principal permittivities through
 prepared once for repeated boundary and charge excitations.
 
 Typed exterior faces carry P1 voltage or uniform outward displacement D.n.
-Unlisted faces have D.n=0. Constant cell volume charge and face loads use exact
-P1 source moments. The signed Neumann load is minus the outward displacement.
-Compatibility includes BOTH volume and boundary load on each disconnected
+Unlisted faces have D.n=0. `solve_with_sources` additionally accepts uniform
+free-charge sheets on original internal faces and fixed mesh-frame impressed
+polarization per cell. Constant volume charge and face loads use exact P1
+source moments: rho*volume/4 and sigma*area/3 respectively. The signed Neumann
+load is minus the outward displacement. Polarization contributes
+`b_P = integral grad(N).P` to `K V = q_volume + q_sheet + b_P - integral N D.n`.
+It must not duplicate induced polarization already contained in epsilon.
+Compatibility includes volume, sheet and boundary load on each disconnected
 component before admitting a numerical gauge. Physical prescribed potentials
 and numerical gauges remain distinct, so a gauge cannot hide an incompatible
 charge. Existing source-free spatial magnetic/current consumers keep the same
@@ -86,7 +91,12 @@ differences and compensated accumulation. Admission checks total and component
 charge balance, free-node/gauge residuals, and dielectric energy against both
 the weak-source pairing and Hodge quadratic. Scalar and tensor material jumps
 are retained cellwise; raw interior normal-D jumps are diagnostics, not a
-smoothed field, equilibrated flux or continuum error certificate.
+smoothed field, equilibrated flux or continuum error certificate. Corrected
+interface residuals account for the prescribed sheet's normal-D jump.
+Cell displacement is `D=epsilon E+P`; storage remains
+`integral E.epsilon.E/2` at fixed impressed P, with the full signed
+`integral E.P` reported separately. Reaction charges subtract all authored
+loads, including b_P, so bound polarization is never relabeled free charge.
 
 `SpatialCapacitance` admits two disjoint unions of original exterior faces,
 solves their zero-volume-charge unit excitation, and checks electrode charge
@@ -100,23 +110,43 @@ volume charge to a passive two-terminal capacitor.
 `SpatialElectricField::maxwell_wrench` uses the existing closed-surface
 Maxwell integral and SE(3) wrench convention with D and E. Every integration
 face is internal, and both neighboring tetrahedra must retain one identical
-complete isotropic source, zero prescribed volume charge, and no
-electrode/imposed-displacement vertices. The homogeneous exterior is assumed
+complete isotropic source, zero prescribed volume charge and impressed
+polarization, and no charged-sheet/electrode/imposed-displacement support.
+The homogeneous exterior is assumed
 nondeforming, without electrostriction or fluid-pressure forces. This is a
 fixed-geometry instantaneous load; advancing motion requires explicit
 electrical, stored and mechanical work accounting and field/surface refinement.
 
+`fs_couple::electrostatic::spatial_coulomb_volume_load` separately transfers
+the accepted field's free-volume-charge force density `rho_free E` into the
+original solid P1 volume-load integrator on exactly matching positions and
+ordered tetrahedra. It retains constrained-node forces for support reactions
+and returns the native displacement/stress load case. Explicit selected
+charges must transfer their momentum to the mechanical material. This term
+does not supply electrode/sheet/polarization/interface forces, charge transport,
+electrostriction or moving-field feedback; it must not overlap an enclosing
+Maxwell load on the same body. The four direct integration regressions in
+`fs-couple/tests/electrostatic_loads.rs` cover SI resultant/torque/virtual work,
+an actual supported solid solve, selection and geometry/cancellation refusals.
+They are included but remain unexecuted under the same build resource limit.
+
 The independent `electrostatic::tetrahedral::TetDielectricOperator` remains
 the explicit-tensor/polarization weak-form primitive for constitutive coupling.
-Both paths use the native FEEC kernels. This sourced boundary-value owner does
-not yet admit impressed polarization, internal sheet charge, nonlinear or
-dispersive 3D dielectrics, infinite exterior boundaries, or moving-field work.
+Both paths use the native FEEC kernels. The prescribed polarization does not
+infer measured material authority, intrinsic polarization energy, source work
+for evolving P, hysteresis or electrostriction. Nonlinear/dispersive 3D
+dielectrics, infinite exterior boundaries and moving-field work remain outside
+this boundary-value owner. Source preparation reuses the original operator;
+it adds no field solve or independent dielectric discretization.
 
 `tests/spatial_electrostatic.rs` and its force submodule cover analytic layered
 capacitance and D continuity, retained high-bias fields, a 3D Poisson refinement
 sequence, pure-Neumann/disconnected compatibility, rotated anisotropy, native
 RC charge/heat/storage, actual-voltage/charge recovery, Q E force refinement,
 wrench frames and the original source/cancellation/work-budget refusals.
+Its source submodule adds analytic sheet/polarization fields, shorted and
+open-circuit limits, reversed-cell rotated tensors, mixed/pure-Neumann charge
+compatibility, source ordering, gauge invariance and force-collar refusals.
 
 ## Gauge-stable dielectric charge and energy
 
@@ -129,6 +159,18 @@ inflate the Krylov load scale of another component. Charge and energy retain
 their original absolute acceptance gates; no tolerance is relaxed to hide
 gauge cancellation. Focused charged-domain and independent-capacitor tests
 exercise these physical invariances.
+
+The shared planar scalar solve uses an admitted Jacobi inverse in the existing
+checked-CG recurrence. Diagonal setup shares Dirichlet elimination's row pass
+and retains one scalar per free coordinate; matrix and RHS remain unscaled.
+Acceptance still uses the independently recomputed residual of the physical
+equation. Three native exact-source scalar tests pass for heterogeneous
+capacitor response, strict iteration reduction against identity preconditioning,
+unrepresentable diagonals, gauge invariance and cancellation/replay. This is a
+fixture iteration-count result, not a wall-clock throughput claim or a full
+crate/repository test pass. New planar/spatial source integration tests are
+present; their full Cargo execution remains unverified in the implementation
+environment because shared memory/disk pressure blocked dependency compilation.
 
 ## Source-bound load resistance on continuing three-dimensional windings
 
@@ -1060,11 +1102,22 @@ field, strain and stress-dependent or applicability-bounded laws require an
 appropriate constitutive model and refuse here.
 
 Exterior voltage traces cover complete mesh edges and anchor every connected
-component. Other exterior edges carry zero normal displacement. Recovery reports
-cell `E=-grad(V)`, `D=epsilon E` and `integral E.D/2`, without smoothing material
+component. `solve_with_sources` admits explicit uniform outward D.n on other
+exterior edges, uniform free charge on internal edges, and complete fixed
+impressed-polarization vectors in the original mesh frame. Unlisted exterior
+edges carry zero normal displacement. Surface moments use the actual extrusion
+area and distribute sigma*area/2 to each endpoint; outward D contributes with
+the opposite weak sign. Internal sheets and exterior displacement traces are
+distinct and cannot be interchanged or duplicated; displacement cannot occupy
+a voltage edge. Endpoint/source permutations preserve canonical integration.
+Recovery reports cell `E=-grad(V)`, `D=epsilon E+P` and
+`integral E.epsilon.E/2`, without smoothing material
 interfaces. Prescribed-node weak reactions `K*V-f` are electrode free charges;
-their sum must cancel the prescribed volume charge. Free-node residuals and
-`U - (V.volume_load + V.electrode_charge)/2` have independent caller-supplied
+their sum plus volume and sheet charge must equal imposed outward displacement.
+The RHS includes `integral grad(N).P`; its voltage pairing is
+`-integral E.P`, exposed as a separate full signed physical pairing. Fixed P
+is additional to the induced response already present in the material law.
+Free-node residuals and `U - V.(all_source_loads + electrode_charge)/2` have independent caller-supplied
 absolute charge/energy gates in addition to the checked linear residual.
 These finite-element balance checks do not certify spatial approximation error.
 
@@ -1077,13 +1130,21 @@ only dielectric data or a supported fixed temperature changes both the spatial
 field and native circuit storage/decay. Live coefficient changes still require
 parameter-work accounting, and are not implemented by overwriting a branch.
 
-The model is fixed-geometry planar, isotropic, linear, nondispersive and lossless.
+The model is fixed-geometry planar, linear, nondispersive and lossless, with
+scalar or explicitly oriented SPD dielectric laws.
 Fringing within the specified domain is solved; missing exterior/end geometry,
-leakage/conduction, dielectric loss, breakdown, electrostriction and evolving
-thermal work are not inferred. `tests/electrostatic.rs` covers analytic layered
+leakage/conduction, dielectric loss, breakdown, electrostriction, intrinsic
+polarization energy, changing-P source work and evolving thermal work are not
+inferred. Maxwell contours exclude source-bearing collars while allowing
+enclosed polarized/charged bodies. Source-free capacitance and retained-charge
+owners keep their original material law and storage semantics.
+`tests/electrostatic.rs` covers analytic layered
 dielectrics, volume-charge/electrode Gauss balance, voltage-offset and energy
 identities, native RC response, source-state refresh, and explicit refusals using
-synthetic claims rather than measured material qualification.
+synthetic claims rather than measured material qualification. Its source
+submodule covers internal charged interfaces, open/shorted polarization,
+combined Neumann/sheet/polarization fields, units, high reference voltage,
+invalid/duplicate sources and cancellation/retry.
 
 ## Multiple dielectric electrodes and native circuit storage
 

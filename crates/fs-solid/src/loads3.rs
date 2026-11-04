@@ -151,6 +151,10 @@ impl<'m> TetLoadGeometry3<'m> {
         poll(cx)?;
         Ok(Self { nodes, tets, faces, volumes })
     }
+    /// Original reference positions in the same SI frame as the load vectors.
+    pub fn nodes_m(&self) -> &[[f64; 3]] { self.nodes }
+    /// Original ordered element connectivity; cell loads follow this order.
+    pub fn tetrahedra(&self) -> &[[usize; 4]] { self.tets }
     pub fn faces(&self) -> &[LoadFace3] { &self.faces }
     pub fn element_volumes_m3(&self) -> &[f64] { &self.volumes }
 
