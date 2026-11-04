@@ -686,3 +686,48 @@ f64 continuation, zero/invalid/underflow cases, and cancellation/replay.
 The finite-volume acoustic observer consumes these endpoints and changes in
 its separate surface/volume conservation tests. Full workspace validation was
 not executed in the delivery environment.
+
+## Recorded multichannel coherence: joint Welch cross spectra
+
+`welch::WelchCrossSpectrum` estimates synchronized real channels using the
+original deterministic FFT. Every channel uses the same sample clock,
+segment boundaries, detrending and rectangular or periodic Hann window.
+Separate channel slices and existing interleaved Cartesian records share the
+same owner; the latter requires no copied or transposed input history.
+
+Each positive-frequency bin retains one complex channel vector per segment.
+Their outer-product sum is the one-sided cross-spectral density
+`S_ab=sum_r B_ar conj(B_br)` in input-unit squared per hertz. The factors use
+the physical `exp(-i omega t)` convention, preserve complex cross-channel
+phase, and include the actual window energy, segment average, sample interval
+and the interior-bin factor of two. DC and Nyquist are not doubled. This is
+Welch's averaged modified periodogram, not a coherent-gain tone fit:
+<https://doi.org/10.1109/TAU.1967.1161901>.
+
+Keeping factors avoids a dense cross-spectral matrix and any numerical
+eigenfactorization. Storage is O(bins * segments * channels); the caller must
+admit this retained rank explicitly. Channel/sample, FFT-count and storage
+budgets are checked before allocation; storage accounting includes retained
+factors, FFT data/scratch, window and recursive plan tables. Segment lengths
+are powers of two in 4..=65536. Cancellation polls input admission and bounded
+work between the existing FFT calls. Incomplete tails are reported and still
+checked for nonfinite values; no samples are padded or interpolated.
+
+Per-segment scaling and double-double reductions protect representable
+fluctuations, common offsets and spectral products. Nonfinite input, lost
+nonzero normalized components and unrepresentable factors refuse explicitly.
+These checks do not turn finite precision into an interval or arbitrary
+relative-error certificate near a cancellation null.
+
+One segment has rank one and cannot establish a source's physical coherence.
+Overlapping segments are algebraic factors, not a declaration of independent
+realizations. No degrees of freedom, confidence interval, stationarity,
+cross-frequency covariance or unresolved-band power is inferred. The caller
+retains responsibility for record duration, leakage and spectral resolution.
+
+Focused native regressions use the original FFT/SIMD/math implementation and
+compare all cross-spectral entries with an independent direct DFT. They cover
+complex phase, rectangular/Hann windows, detrending, Parseval with endpoint
+weights, coherent and partially correlated channels, layout equivalence,
+numerical range, resource refusal, cancellation and replay. This scoped
+execution is not the full workspace or distributed repository gate.

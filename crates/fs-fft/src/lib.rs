@@ -30,6 +30,9 @@ use fs_math::det;
 
 pub mod harmonic_window;
 
+/// Joint, phase-preserving Welch estimates of recorded channel cross spectra.
+pub mod welch;
+
 mod simd_view;
 
 /// Joint harmonic estimation at caller-supplied frequencies, including
