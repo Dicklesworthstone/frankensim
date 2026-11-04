@@ -113,9 +113,10 @@ impl SourceNormalModalSystem {
     /// Native modes, all bilateral connections, rest loads, initial material
     /// histories and admitted radiation stay in their existing owners.
     /// Initial vibration and contact storage are retained; no equilibrium is
-    /// imposed. Current support is conservative Hertz, DMT, attached JKR and
-    /// retained finite-gap curves. Hunt--Crossley loss and a Maugis derivative
-    /// require their own admitted paths and are not silently omitted.
+    /// imposed. Current support is conservative Hertz, DMT, attached JKR,
+    /// Maugis (including its selected continuous noncontact branch), and retained
+    /// finite-gap curves. The original Maugis work/derivative budgets apply.
+    /// Hunt--Crossley loss requires its original timed path and is not omitted.
     pub fn new(
         network: CoupledModalSystem,
         contact: BoundNormalContact,
@@ -156,12 +157,6 @@ impl SourceNormalModalSystem {
             .into());
         }
         match contact.source() {
-            NormalLawSource::MaugisAttached(_) => {
-                return Err(invalid(
-                    "native source-normal solve requires the original analytic path derivative",
-                )
-                .into());
-            }
             NormalLawSource::HertzPoint(source) if source.dissipation_s_per_m() != 0.0 => {
                 return Err(invalid(
                     "dissipative point contact requires its original timed loss path",

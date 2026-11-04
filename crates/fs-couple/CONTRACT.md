@@ -18859,8 +18859,9 @@ and never used to correct another body's momentum coordinate. Unequal masses
 therefore retain pairwise action/reaction. Attached composites require complete
 inner work and original contact paths; incomplete inner storage refuses instead
 of silently reverting to a global work correction. Native numerical coordinate
-probes use each retained contact's physical displacement scale. No analytic
-Newton action is claimed for the new path quadrature.
+probes use each retained contact's physical displacement scale. The original
+radius-coordinate path derivative also supplies the native Newton action,
+including the explicitly admitted continuous noncontact branch.
 
 Quadrature and original-source refusals produce nonfinite trial efforts in the
 infallible native interface; the source APIs retain typed errors. A failed work
@@ -18915,9 +18916,11 @@ endpoint derivative projects through its contact row's
 outer product. Valid near-fold motion therefore does not require central
 numerical probes outside the attached domain. The coincident fold retains its
 singular derivative and refuses; no finite tangent is invented. A native inner
-rule without a derivative is never replaced by its quadratic view. Assemblies
-containing Maugis retain their existing numerical derivative route until that
-owner supplies its actual path derivative. Focused checks compare the
+rule without a derivative is never replaced by its quadratic view. Maugis uses
+its original radius-coordinate analytic-slope quadrature and closed-form disk
+derivative, retaining the source work budget, zero-area crossing and terminal
+fold refusal. No endpoint-force subtraction or finite-difference contact
+probe is required. Focused checks compare the
 complete analytic action with directional work differences and advance a
 strictly attached near-fold state through both native and prepared execution.
 
@@ -18964,17 +18967,21 @@ material and admitted radiation states.
 
 The scalar solve consumes `NormalLawSource::mean_force_between` and its original
 analytic endpoint derivative, also used by `BoundNormalStorage`. Conservative
-Hertz, explicit attached JKR, finite-range DMT and retained finite-gap tables
-share this path without a fitted common law. Signed attraction and negative
+Hertz, explicit attached JKR, finite-zone Maugis, finite-range DMT and retained
+finite-gap tables share this path without a fitted common law. Maugis retains
+its original selected contact/noncontact domain and bounded work/derivative
+budgets. Signed attraction and negative
 adhesive potential remain physical. Unilateral laws retain the inactive
 negative-approach fraction through contact onset and release. Positive
-Hunt--Crossley dissipation and Maugis without an admitted analytic path
-derivative refuse; native network damping does not replace their contact loss.
+Hunt--Crossley dissipation refuses; native network damping does not replace
+its contact loss.
 
 Safeguarded analytic Newton refinement retains the positive-slope mechanical
 root connected to the accepted JKR state and respects explicit source-domain,
-iteration, force and coordinate bounds. A coarse ambiguous DMT step, source
-fold/domain escape or unresolved root refuses. Contact uses the straight
+iteration, force and coordinate bounds. Maugis requires the original positive
+load-line-slope bracket; the JKR stable-root search does not infer a Maugis
+post-fold branch. A coarse ambiguous DMT step, source fold/domain escape or
+unresolved root refuses. Contact uses the straight
 approach path between accepted native endpoints, with a held work-conjugate
 reaction; continuous within-sample turning points, attachment and snap release
 are not resolved by this lane.
@@ -18994,7 +19001,9 @@ Focused evidence uses the original ordinary complete-pencil propagator: four
 stiff modes and two Kelvin--Voigt links under tensile JKR; twenty steps of native
 Maxwell memory, storage and independently integrated loss; source-domain,
 receiving-state and cancellation rollback; and Hertz/table onset and release,
-DMT gap attraction and explicit lossy-contact refusal. The retained-table test
+DMT gap attraction and explicit lossy-contact refusal. Finite-zone Maugis cases
+at lambda 0.2 and 5 compare the complete native modal/Maxwell propagation,
+original source work, material loss and total energy closure. The retained-table test
 does not rerun its BEM producer. Prepared radiation/material-ingress paths and
 full typed-port/workspace audits are not newly claimed by the bounded
 verification projection.

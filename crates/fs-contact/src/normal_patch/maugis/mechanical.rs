@@ -13,6 +13,8 @@ use super::{MaugisError, MaugisWorkEstimate, SourceMaugisSphereContact};
 use core::f64::consts::PI;
 use fs_blake3::ContentHash;
 
+mod derivative;
+
 /// Explicit attached-branch choice with bounded original-force integration.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MaugisAttachedPotential {

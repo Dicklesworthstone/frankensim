@@ -193,6 +193,114 @@ fn close(actual: f64, expected: f64, scale: f64, tolerance: f64) {
 }
 
 #[test]
+fn finite_zone_adhesion_drives_the_complete_native_modal_and_material_memory_system() {
+    use fs_contact::normal_patch::maugis::{
+        MaugisEnvelope, MaugisWorkBudget, SourceMaugisSphereContact,
+        continuation::MaugisContinuationBudget, mechanical::MaugisAttachedPotential,
+    };
+    let normal = source();
+    let r = normal.effective_radius_m();
+    let w = normal.normal_state().adhesion_energy_j_per_m2();
+    let e = normal.normal_state().elastic().reduced_modulus_pa();
+    let a0 = (core::f64::consts::PI * w * r * r / (4.0 * e / 3.0)).cbrt();
+    let d0 = a0 * a0 / r;
+    let f0 = core::f64::consts::PI * w * r;
+    for lambda in [0.2, 5.0] {
+        let law = SourceMaugisSphereContact::new(
+            normal.normal_state().clone(),
+            r,
+            2.0 * d0 / (core::f64::consts::PI * lambda),
+            MaugisEnvelope {
+                maximum_indentation_m: normal.envelope().maximum_indentation_m,
+                half_space_depth_m: 0.1,
+                layer_thickness_m: 0.1,
+                maximum_interaction_radius_to_radius: 0.1,
+                maximum_interaction_radius_to_depth: 0.1,
+                maximum_interaction_radius_to_layer: 0.1,
+                maximum_nominal_strain: 0.1,
+                maximum_repulsive_pressure_to_yield: 0.5,
+                maximum_adhesive_stress_to_yield: 0.9,
+                maximum_interaction_range_to_radius: 0.01,
+            },
+        )
+        .unwrap();
+        let potential = MaugisAttachedPotential::new(
+            law.clone(),
+            MaugisContinuationBudget {
+                work: MaugisWorkBudget {
+                    absolute_tolerance_j: 1e-12 * f0 * d0,
+                    relative_tolerance: 1e-11,
+                    maximum_evaluations: 2049,
+                },
+                energy_absolute_tolerance_j: 1e-10 * f0 * d0,
+                energy_relative_tolerance: 1e-10,
+            },
+        )
+        .unwrap();
+        let mut config = controls(&normal);
+        config.minimum_approach_m = 0.0;
+        config.maximum_approach_m = 4.0 * d0;
+        let mut owner = SourceNormalModalSystem::new(
+            network(&normal, true, 0.0),
+            BoundNormalContact::new(potential.clone().into(), column(), 0.0).unwrap(),
+            config,
+            &CancelGate::new_clock_free(),
+        )
+        .unwrap();
+        let mut reference = network(&normal, true, 0.0);
+        let old_memory = owner.network().material_memory().to_vec();
+        let initial_energy = owner.total_energy_j().unwrap();
+        let frame = owner.step(&[0.0; 4]).unwrap().clone();
+        assert!(frame.normal_force_n < 0.0);
+        assert!(frame.approach_after_m > frame.approach_before_m);
+        close(
+            frame.normal_force_n,
+            potential
+                .path(frame.approach_before_m, frame.approach_after_m)
+                .unwrap()
+                .mean_force_n,
+            f0,
+            2e-9,
+        );
+        let held: Vec<_> = column()
+            .iter()
+            .map(|weight| -weight * frame.normal_force_n)
+            .collect();
+        let native = reference.step(&held).unwrap().clone();
+        for (actual, expected) in states(owner.network()).iter().zip(states(&reference)) {
+            close(
+                actual.displacement_m_sqrt_kg,
+                expected.displacement_m_sqrt_kg,
+                d0 * det::sqrt(MA),
+                2e-9,
+            );
+            close(
+                actual.velocity_m_sqrt_kg_per_s,
+                expected.velocity_m_sqrt_kg_per_s,
+                d0 * det::sqrt(MA) * RATE as f64,
+                2e-9,
+            );
+        }
+        assert_ne!(owner.network().material_memory(), old_memory);
+        assert!(native.material_dissipation_j > 0.0);
+        close(
+            frame.network_dissipation_j,
+            native.total_dissipation_j(),
+            f0 * d0,
+            2e-9,
+        );
+        close(
+            owner.total_energy_j().unwrap() + frame.network_dissipation_j,
+            initial_energy,
+            f0 * d0,
+            2e-9,
+        );
+        assert!(frame.contact_work_residual_j.abs() <= frame.contact_work_tolerance_j);
+        assert_eq!(owner.contact().source().identity(), law.identity());
+    }
+}
+
+#[test]
 fn tensile_source_drives_the_original_complete_modal_network_and_work_ports() {
     let source = source();
     let h = source.indentation_scale_m();

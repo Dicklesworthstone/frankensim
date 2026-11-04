@@ -13,8 +13,9 @@ impl NormalLawSource {
     /// tangent supplies a one-sided Newton representative (the final table
     /// node uses its admitted left segment). This is not a smooth tangent at
     /// the corner. Unequal paths integrate both sides of each crossed corner.
-    /// A coincident JKR fold remains singular. Maugis returns `None` until its
-    /// own complete path derivative is available; no fitted law is substituted.
+    /// Coincident JKR and Maugis folds remain singular. Maugis integrates its
+    /// original analytic branch derivatives within the source's work budget;
+    /// no finite-difference probe or fitted law is substituted.
     pub fn mean_force_end_derivative(
         &self,
         from_m: f64,
@@ -25,7 +26,10 @@ impl NormalLawSource {
                 .attached_path_end_derivative(from_m, to_m)
                 .map(Some)
                 .map_err(NormalLawSourceError::Jkr),
-            Self::MaugisAttached(_) => Ok(None),
+            Self::MaugisAttached(source) => source
+                .path_end_derivative(from_m, to_m)
+                .map(Some)
+                .map_err(NormalLawSourceError::Maugis),
             Self::HertzPoint(source) => {
                 let (a, b, fraction) = unilateral_path(from_m, to_m).ok_or(
                     NormalLawSourceError::Point(NormalPatchError::InvalidInput {

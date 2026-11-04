@@ -96,6 +96,92 @@ fn kinetic(x: &[f64]) -> f64 {
 }
 
 #[test]
+fn original_maugis_jacobian_preserves_reciprocal_native_rows_across_solid_contact() {
+    for (lambda, connected) in [(0.2, true), (5.0, false)] {
+        let law = model(lambda);
+        let (d0, f0) = scales(&law);
+        let mut owner = potential(&law);
+        let from = if connected {
+            owner = owner.with_noncontact_continuation().unwrap();
+            let limits = owner.noncontact_continuation().unwrap();
+            limits.minimum_indentation_m
+                + 0.6 * (limits.first_contact_indentation_m - limits.minimum_indentation_m)
+        } else {
+            0.5 * law.minimum_attached_indentation_m()
+        };
+        let p0 = (0.75 * d0 * f0).sqrt();
+        let bound = storage(owner);
+        let a = [from, 0.2 * p0, 0.0, -0.1 * p0];
+        let b = [0.8 * d0, -0.1 * p0, -0.2 * d0, 0.3 * p0];
+        let direction = [0.3 * d0, 0.2 * p0, -0.2 * d0, -0.4 * p0];
+        let mut action = [f64::NAN; 4];
+        assert!(bound.discrete_gradient_rule().unwrap().end_jacobian_action(
+            &a,
+            &b,
+            &direction,
+            &mut action
+        ));
+        assert_eq!(action[0], -action[2]);
+        close(action[1], 0.5 * direction[1], p0, 1e-14);
+        close(action[3], direction[3] / 6.0, p0, 1e-14);
+        let h = 1e-5;
+        let plus = core::array::from_fn::<_, 4, _>(|i| b[i] + h * direction[i]);
+        let minus = core::array::from_fn::<_, 4, _>(|i| b[i] - h * direction[i]);
+        let ep = fs_phs::discrete_gradient(&bound, &a, &plus);
+        let em = fs_phs::discrete_gradient(&bound, &a, &minus);
+        for i in 0..4 {
+            close(
+                action[i],
+                (ep[i] - em[i]) / (2.0 * h),
+                if i % 2 == 0 { f0 } else { p0 },
+                2e-7,
+            );
+        }
+    }
+}
+
+#[test]
+fn native_and_prepared_maugis_motion_start_inside_a_fold_without_invalid_probes() {
+    let law = model(5.0);
+    let (d0, f0) = scales(&law);
+    let approach = law.minimum_attached_indentation_m() + 1e-8 * d0;
+    let initial = [approach, 0.0, 0.0, 0.0];
+    let system = system(potential(&law));
+    let dt = 1e-3 * (0.75 * d0 / f0).sqrt();
+    let native = fs_phs::step(&system, &initial, &[], dt).unwrap();
+    assert!(native.x[0] - native.x[2] > approach);
+    close(
+        native.x[1] + native.x[3],
+        0.0,
+        (0.75 * d0 * f0).sqrt(),
+        2e-9,
+    );
+    close(
+        system.hamiltonian(&native.x),
+        system.hamiltonian(&initial),
+        f0 * d0,
+        3e-8,
+    );
+    let mut workspace = StepWorkspace::new(&system).unwrap();
+    let mut out = [f64::NAN; 4];
+    workspace
+        .step_into(&system, &initial, &[], dt, &mut out, &mut [])
+        .unwrap();
+    for i in 0..4 {
+        close(
+            out[i],
+            native.x[i],
+            if i % 2 == 0 {
+                d0
+            } else {
+                (0.75 * d0 * f0).sqrt()
+            },
+            2e-8,
+        );
+    }
+}
+
+#[test]
 fn original_branch_and_path_work_drive_reciprocal_native_efforts() {
     for lambda in [0.02, 0.2, 5.0, 1000.0] {
         let law = model(lambda);
