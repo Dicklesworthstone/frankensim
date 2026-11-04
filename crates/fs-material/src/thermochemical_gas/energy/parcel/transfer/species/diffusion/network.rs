@@ -8,7 +8,7 @@ use super::super::network::{
     self, SpeciesNetworkError, SpeciesNetworkSolve, SpeciesNetworkStep, SpeciesNetworkTransfer,
 };
 use super::{
-    BinaryDiffusionMaterial, ClosedGasParcel, GasDiffusionFlux, GasDiffusionGeometry,
+    BinaryDiffusionMaterial, ClosedGasParcel, GasDiffusionDriving, GasDiffusionFlux, GasDiffusionGeometry,
     GasDiffusionSolve, GasEnergyError, GasSpeciesExchangeSolve, positive,
 };
 use crate::thermochemical_gas::energy::GasEnergySolve;
@@ -123,6 +123,24 @@ pub fn step_candidate(
     duration_s: f64,
     endpoints: &BTreeMap<u64, GasEnergySolve>,
     controls: DiffusionNetworkSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<DiffusionNetworkCandidate, Error> {
+    step_candidate_with_driving(parcels, links, duration_s, endpoints, controls,
+        GasDiffusionDriving::IsobaricMolar, cancelled)
+}
+
+/// Sample every molecular face with the selected force and reference frame.
+/// Pressure diffusion is mass-averaged and retains the same simultaneous species,
+/// partial-enthalpy and actual whole-network entropy gates. The caller's local
+/// temperature/pressure limits still apply; bulk momentum is not evolved here.
+#[allow(clippy::too_many_arguments)]
+pub fn step_candidate_with_driving(
+    parcels: &BTreeMap<u64, ClosedGasParcel>,
+    links: &[DiffusionNetworkLink<'_>],
+    duration_s: f64,
+    endpoints: &BTreeMap<u64, GasEnergySolve>,
+    controls: DiffusionNetworkSolve,
+    driving: GasDiffusionDriving,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<DiffusionNetworkCandidate, Error> {
     let candidate = candidate_before_entropy_gate(
@@ -131,6 +149,7 @@ pub fn step_candidate(
         duration_s,
         endpoints,
         controls,
+        driving,
         &mut cancelled,
     )?;
     if candidate.step.entropy_change_j_k < -controls.entropy_tolerance_j_k {
@@ -151,14 +170,16 @@ fn candidate_before_entropy_gate(
     duration_s: f64,
     endpoints: &BTreeMap<u64, GasEnergySolve>,
     controls: DiffusionNetworkSolve,
+    driving: GasDiffusionDriving,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<DiffusionNetworkCandidate, Error> {
-    let (transfers, reports) = sample_transfers(
+    let (transfers, reports) = sample_transfers_with_driving(
         parcels,
         links,
         duration_s,
         endpoints,
         controls,
+        driving,
         &mut cancelled,
     )?;
     let candidate = network::exchange_candidate(
@@ -202,6 +223,19 @@ pub(crate) fn sample_transfers(
     duration_s: f64,
     endpoints: &BTreeMap<u64, GasEnergySolve>,
     controls: DiffusionNetworkSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<(Vec<SpeciesNetworkTransfer>, Vec<DiffusionNetworkLinkStep>), Error> {
+    sample_transfers_with_driving(parcels, links, duration_s, endpoints, controls,
+        GasDiffusionDriving::IsobaricMolar, cancelled)
+}
+
+fn sample_transfers_with_driving(
+    parcels: &BTreeMap<u64, ClosedGasParcel>,
+    links: &[DiffusionNetworkLink<'_>],
+    duration_s: f64,
+    endpoints: &BTreeMap<u64, GasEnergySolve>,
+    controls: DiffusionNetworkSolve,
+    driving: GasDiffusionDriving,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<(Vec<SpeciesNetworkTransfer>, Vec<DiffusionNetworkLinkStep>), Error> {
     check(&mut cancelled)?;
@@ -248,11 +282,12 @@ pub(crate) fn sample_transfers(
             },
         };
         let flux = parcels[&left]
-            .diffusion_flux_to(
+            .diffusion_flux_to_with_driving(
                 &parcels[&right],
                 link.geometry,
                 link.pairs,
                 solve,
+                driving,
                 &mut cancelled,
             )
             .map_err(|error| {

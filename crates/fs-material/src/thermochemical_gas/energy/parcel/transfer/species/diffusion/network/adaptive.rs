@@ -4,7 +4,7 @@
 //! path can be accepted. Each stage uses the original simultaneous face/source,
 //! species inventory, caloric reconstruction and entropy owners. This remains
 //! first order in time. The local estimate is not a global error certificate or
-//! a license to leave the original isothermal/isobaric constitutive domain.
+//! a license to leave the selected molecular closure's constitutive domain.
 
 use super::super::super::super::snapshot::{MAX_SNAPSHOT_PARCELS, MAX_SNAPSHOT_TRANSFERS};
 use super::super::super::network::transport::{
@@ -14,7 +14,7 @@ use super::super::super::{SpeciesId, Sum, inventory};
 use super::{
     ClosedGasParcel, DiffusionNetworkCandidate, DiffusionNetworkError, DiffusionNetworkLink,
     DiffusionNetworkSolve, DiffusionNetworkStep, GasEnergySolve, SpeciesNetworkError,
-    candidate_before_entropy_gate, check,
+    GasDiffusionDriving, candidate_before_entropy_gate, check,
 };
 use std::collections::BTreeMap;
 
@@ -153,6 +153,7 @@ fn trial(
     dt: f64,
     endpoints: &BTreeMap<u64, GasEnergySolve>,
     physical: DiffusionNetworkSolve,
+    driving: GasDiffusionDriving,
     evaluations: &mut usize,
     maximum_evaluations: usize,
     cancelled: &mut impl FnMut() -> bool,
@@ -163,7 +164,7 @@ fn trial(
     }
     *evaluations += 1;
     let candidate =
-        candidate_before_entropy_gate(parcels, links, dt, endpoints, physical, cancelled)
+        candidate_before_entropy_gate(parcels, links, dt, endpoints, physical, driving, cancelled)
             .map_err(TrialFailure::Physical)?;
     if candidate.step().entropy_change_j_k < -physical.entropy_tolerance_j_k {
         return Err(TrialFailure::Entropy(candidate.step().entropy_change_j_k));
@@ -292,6 +293,26 @@ pub fn advance_candidate(
     endpoints: &BTreeMap<u64, GasEnergySolve>,
     physical: DiffusionNetworkSolve,
     controls: DiffusionNetworkAdvanceControls,
+    cancelled: impl FnMut() -> bool,
+) -> Result<DiffusionNetworkAdvanceCandidate, Error> {
+    advance_candidate_with_driving(original, links, duration_s, endpoints, physical,
+        controls, GasDiffusionDriving::IsobaricMolar, cancelled)
+}
+
+/// Advance the selected molecular force/frame through the complete window.
+/// Each coarse and fine probe resamples pressure driving and qualifies actual
+/// source endpoints. Mass-frame pressure diffusion preserves every original
+/// species, energy and closed-network entropy gate, including the independent
+/// original-to-final audit. No bulk-flow or thermal-diffusion law is introduced.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_candidate_with_driving(
+    original: &BTreeMap<u64, ClosedGasParcel>,
+    links: &[DiffusionNetworkLink<'_>],
+    duration_s: f64,
+    endpoints: &BTreeMap<u64, GasEnergySolve>,
+    physical: DiffusionNetworkSolve,
+    controls: DiffusionNetworkAdvanceControls,
+    driving: GasDiffusionDriving,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<DiffusionNetworkAdvanceCandidate, Error> {
     poll(&mut cancelled)?;
@@ -355,6 +376,7 @@ pub fn advance_candidate(
                 dt,
                 endpoints,
                 physical,
+                driving,
                 &mut evaluations,
                 controls.maximum_evaluations,
                 &mut cancelled,
@@ -365,6 +387,7 @@ pub fn advance_candidate(
                 half,
                 endpoints,
                 physical,
+                driving,
                 &mut evaluations,
                 controls.maximum_evaluations,
                 &mut cancelled,
@@ -375,6 +398,7 @@ pub fn advance_candidate(
                 half,
                 endpoints,
                 physical,
+                driving,
                 &mut evaluations,
                 controls.maximum_evaluations,
                 &mut cancelled,

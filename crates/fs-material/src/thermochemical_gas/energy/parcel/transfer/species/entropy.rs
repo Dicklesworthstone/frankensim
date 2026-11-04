@@ -101,7 +101,7 @@ fn amount(parcel: &ClosedGasParcel, index: usize) -> Result<f64, Error> {
     }
 }
 // ln(a/b), including nearly equal positive values and overflowing raw ratios.
-fn log_ratio(a: f64, b: f64) -> f64 {
+pub(super) fn log_ratio(a: f64, b: f64) -> f64 {
     if a == b {
         return 0.0;
     }
