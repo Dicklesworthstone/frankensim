@@ -6708,6 +6708,50 @@ screening, bath events, continuation, fixed-optics reuse, enthalpy-driven optics
 on a latent plateau, coverage and atomic refusal.
 <!-- native-coating-radiative-stack:end -->
 
+<!-- material-temperature-conductor:start -->
+### Original material claims drive native infrared absorption and cooling
+
+With `material-state` and `optical-heating`,
+`SurfaceConductorLaw::try_material_temperature` binds an immutable material card
+and its complete `SpectralConductorStatePoint` to one explicitly selected static
+absolute-temperature coordinate. The original native caloric owner supplies T;
+all other coordinates and quantity conventions remain fixed. Each evaluation
+refreshes the original selected claims, including source wavelength properties,
+all n/k knots, density and auxiliary properties. It does not choose replacement
+claims, fit a new temperature table, infer phase mixing or widen wavelength
+support. The original material source remains available through `material_source`.
+
+The existing material optical binding admits the refreshed knots into the same
+native conductor used by surface illumination, coated substrate absorption,
+`NativeCoatingEmission` and native coating radiative exchange. Absorption uses
+the original normal electromagnetic power flux. Reciprocal thermal emission
+uses that absorption and the same cell temperature through the original Planck
+owner. Only absorbed incident power enters heat; signed finite-band radiative
+exchange is debited once from native storage. Explicit coatings continue to use
+their original film laws and independent receivers.
+
+This is an explicitly opaque, isothermal, semi-infinite substrate model. Its
+native admission requires n and k strictly positive at every source knot;
+exactly transparent knots refuse, including when transparency first occurs at a
+heated endpoint. Positive k alone does not justify treating a finite specimen
+as opaque; thickness-dependent transmission and deposition remain with the
+existing finite-film and volume owners. No roughness law, penetration depth,
+bolometric tail or thermal material/card association is inferred.
+
+All retained property queries count against the source-property limit and the
+existing shared optical-law preparation budget. Laws and immutable cards share
+storage across native candidates. Native endpoint validation rechecks complete
+source support and native optical admissibility even in darkness. Every retained
+bare/coated incident wavelength is checked against the freshly admitted source
+band without another source or Fresnel solve, so moving support, late auxiliary
+expiry or loss of opacity refuses the whole candidate. Caller T
+bounds are additional restrictions, not certification of an intervening path.
+The existing accepted-start feedback remains explicit and needs time refinement.
+Five focused regression groups cover source pin retention and nonaffine T laws,
+analytic Fresnel heating with matching Planck emission, native IR bath heating,
+cooling and equilibrium, strict transparent limits, budgets and dark rollback.
+<!-- material-temperature-conductor:end -->
+
 ## Source-bounded quantum-efficiency detector channels
 
 `spectral::detector::QuantumEfficiencySensor<C>` retains 1–16 external

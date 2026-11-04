@@ -213,7 +213,8 @@ impl Resolver {
 impl NativeCoatingEmission {
     /// Prepare independently emitting films and their opaque substrate from
     /// original native states. The explicit films replace any substrate coating.
-    /// Unique optical-law rows share one declared preparation budget; repeated
+    /// Unique optical-law rows or original material property queries share one
+    /// declared preparation budget; repeated
     /// receiver/law pairs resolve once. Fixed optical models need no row budget.
     #[allow(clippy::too_many_arguments)]
     pub fn try_opaque(
@@ -238,7 +239,7 @@ impl NativeCoatingEmission {
                 *optics
             }
             SubstrateOpticsModel::Law(law) => {
-                resolver.law(1, law.identity(), law.row_count())?;
+                resolver.law(1, law.identity(), law.budget_size())?;
                 law.resolve(
                     thermal,
                     substrate_receiver.thermal_cell,

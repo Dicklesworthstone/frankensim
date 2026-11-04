@@ -2,7 +2,7 @@
 //!
 //! Immutable laws and resolved packets are shared across candidate clones.
 //! A distinct receiver/law pair resolves once per source interval; only changed
-//! optical constants invalidate Fresnel packets, and darkness needs no solve.
+//! optical snapshots invalidate Fresnel packets, and darkness needs no Fresnel solve.
 
 use super::feedback::SurfaceConductorLaw;
 use super::*;
@@ -49,8 +49,9 @@ impl<const N: usize> SurfaceIncidence<N> {
 }
 
 /// An incident source whose substrate n/k follow an explicitly authored law.
-/// The original native caloric owner supplies T and h; no phase mixing or
-/// material-card coordinate mapping is inferred. The additional temperature
+/// The original native caloric owner supplies T and h; a material-card law maps
+/// only its explicitly selected typed temperature axis. No phase mixing is
+/// inferred. The additional temperature
 /// bounds intersect the law's own support, including while illumination is off.
 #[derive(Clone, Debug)]
 pub struct StatefulSurfaceIlluminationSource<const N: usize> {
@@ -99,8 +100,9 @@ impl<const N: usize> SurfaceOpticalHeating<N> {
     /// Admit fixed and state-dependent sources into the SAME surface heat owner.
     ///
     /// `max_total_optical_knots` bounds state-coordinate rows across distinct
-    /// law identities, counting each shared law once. Each row has the original
-    /// fixed nine wavelength knots. The existing source/segment/evaluation
+    /// law identities, counting each shared law once. An original material law
+    /// counts every retained property query instead of authored rows. Each row
+    /// has the original nine wavelength knots. The source/segment/evaluation
     /// budgets cover both source kinds and bound all per-interval optical work.
     ///
     /// Optical constants are evaluated at the accepted interval START; native
@@ -141,7 +143,7 @@ impl<const N: usize> SurfaceOpticalHeating<N> {
             checkpoint()?;
             if law_ids.insert(*source.optics.identity().as_bytes()) {
                 knots = knots
-                    .checked_add(source.optics.row_count())
+                    .checked_add(source.optics.budget_size())
                     .ok_or(SurfaceHeatingError::Budget)?;
                 if knots > max_total_optical_knots {
                     return Err(SurfaceHeatingError::Budget);
@@ -293,9 +295,20 @@ impl<const N: usize> SurfaceFeedbackState<N> {
     ) -> Result<(), SurfaceHeatingError> {
         for bound in &self.model.laws {
             checkpoint()?;
-            bound
+            if let Some(optics) = bound
                 .law
-                .coordinate_at(thermal, bound.cell, bound.material)?;
+                .validate_native(thermal, bound.cell, bound.material)?
+            {
+                for &source in &bound.source_indices {
+                    checkpoint()?;
+                    let incidence = self.model.sources[source]
+                        .expect("stateful source retains its optical binding")
+                        .incidence;
+                    for wavelength in incidence.wavelengths_nm {
+                        optics.complex_ior(wavelength)?;
+                    }
+                }
+            }
         }
         Ok(())
     }

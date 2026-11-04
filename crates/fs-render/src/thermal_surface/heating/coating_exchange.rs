@@ -88,7 +88,8 @@ pub struct CoatingExchangeSource {
 #[derive(Clone, Copy, Debug)]
 pub struct NativeCoatingExchangeBudget {
     pub max_sources: usize,
-    /// Distinct original film/substrate law rows across all patches.
+    /// Distinct film/substrate law rows or retained material property queries
+    /// across all patches. A shared law is counted once.
     pub max_total_optical_knots: usize,
     /// Rate evaluations across a complete advance, including endpoint checks.
     pub max_source_evaluations: usize,
@@ -762,7 +763,7 @@ fn admit_optical_law_rows<'a>(
     if let Some(SubstrateOpticsModel::Law(law)) = substrate {
         if laws.insert((1, *law.identity().as_bytes())) {
             *rows = rows
-                .checked_add(law.row_count())
+                .checked_add(law.budget_size())
                 .ok_or(NativeCoatingExchangeError::Budget)?;
         }
     }

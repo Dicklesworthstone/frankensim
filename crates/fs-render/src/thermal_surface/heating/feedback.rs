@@ -10,15 +10,28 @@ use fs_blake3::{ContentHash, DomainHasher};
 use fs_thermal::enthalpy::{CellId, DepositionSimulation, MaterialId, ThermalStorageBasis};
 use std::sync::Arc;
 
+#[cfg(feature = "material-state")]
+mod material;
+
 #[derive(Clone, Copy, Debug)]
 enum Coordinate {
     Temperature,
     SpecificEnthalpy(ContentHash),
 }
 
-/// Immutable constitutive n/k table versus temperature or specific enthalpy.
+#[derive(Clone, Debug)]
+enum Model {
+    Rows {
+        source: ConductorSource,
+        rows: Arc<[(f64, ConductorOptics)]>,
+    },
+    #[cfg(feature = "material-state")]
+    Material(Arc<material::MaterialTemperatureConductor>),
+}
+
+/// Immutable constitutive n/k law versus temperature or specific enthalpy.
 ///
-/// Each row retains the original nine-knot conductor spectrum and its source.
+/// An authored table retains each original nine-knot spectrum and its source.
 /// All rows share one spectral grid and exactly the same attached coating.
 /// Linear interpolation in the declared state coordinate is an authored law,
 /// not an inferred solid/liquid mixing rule or a claim of measured behavior.
@@ -26,13 +39,14 @@ enum Coordinate {
 /// its fixed coating keeps its own original source and optical parameters.
 /// Wavelength evaluation, coherent films and power balance remain owned by
 /// [`ConductorOptics`]. Neither state nor wavelength support is extrapolated.
+/// With `material-state`, an original material-card model instead refreshes its
+/// pinned claims at the native temperature, without fitting a new state table.
 #[derive(Clone, Debug)]
 pub struct SurfaceConductorLaw {
     identity: ContentHash,
-    source: ConductorSource,
     coordinate: Coordinate,
     temperature_bounds_k: (f64, f64),
-    rows: Arc<[(f64, ConductorOptics)]>,
+    model: Model,
 }
 
 impl SurfaceConductorLaw {
@@ -159,10 +173,12 @@ impl SurfaceConductorLaw {
         retained.extend_from_slice(rows);
         Ok(Self {
             identity: hash.finalize(),
-            source,
             coordinate,
             temperature_bounds_k,
-            rows: retained.into(),
+            model: Model::Rows {
+                source,
+                rows: retained.into(),
+            },
         })
     }
 
@@ -171,8 +187,22 @@ impl SurfaceConductorLaw {
         self.identity
     }
 
+    /// Authored state rows. Original material models have no fitted rows.
     pub fn row_count(&self) -> usize {
-        self.rows.len()
+        match &self.model {
+            Model::Rows { rows, .. } => rows.len(),
+            #[cfg(feature = "material-state")]
+            Model::Material(_) => 0,
+        }
+    }
+
+    /// Storage/query budget units: authored rows or all retained source properties.
+    pub(crate) fn budget_size(&self) -> usize {
+        match &self.model {
+            Model::Rows { rows, .. } => rows.len(),
+            #[cfg(feature = "material-state")]
+            Model::Material(source) => source.property_count(),
+        }
     }
 
     pub fn temperature_bounds_k(&self) -> (f64, f64) {
@@ -187,8 +217,7 @@ impl SurfaceConductorLaw {
     }
 
     pub fn specific_enthalpy_bounds_j_kg(&self) -> Option<(f64, f64)> {
-        self.caloric_identity()
-            .map(|_| (self.rows[0].0, self.rows[self.rows.len() - 1].0))
+        self.caloric_identity().map(|_| self.coordinate_bounds())
     }
 
     /// Evaluate at an active native cell, retaining its actual material and,
@@ -244,6 +273,27 @@ impl SurfaceConductorLaw {
         Ok(coordinate)
     }
 
+    /// Endpoint validation includes the original source queries, even in a
+    /// dark interval where no new Fresnel packet is needed. Row models need
+    /// only their already-admitted coordinate support checked. A material model
+    /// returns its freshly admitted optics so each bound incidence can validate
+    /// its wavelengths without querying the source or solving Fresnel again.
+    pub(crate) fn validate_native(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        cell: CellId,
+        material: MaterialId,
+    ) -> Result<Option<ConductorOptics>, SurfaceHeatingError> {
+        let coordinate = self.coordinate_at(thermal, cell, material)?;
+        #[cfg(feature = "material-state")]
+        if let Model::Material(source) = &self.model {
+            return source.optics_at_temperature(coordinate).map(Some);
+        }
+        #[cfg(not(feature = "material-state"))]
+        let _ = coordinate;
+        Ok(None)
+    }
+
     /// Evaluate a temperature-coordinate law directly. An h-coordinate law
     /// refuses because temperature does not identify a state within latent heat.
     /// Native heating callers should use [`Self::resolve`] for material binding.
@@ -286,9 +336,8 @@ impl SurfaceConductorLaw {
     }
 
     fn check_coordinate(&self, coordinate: f64) -> Result<(), SurfaceHeatingError> {
-        if !coordinate.is_finite()
-            || !(self.rows[0].0..=self.rows[self.rows.len() - 1].0).contains(&coordinate)
-        {
+        let (minimum, maximum) = self.coordinate_bounds();
+        if !coordinate.is_finite() || !(minimum..=maximum).contains(&coordinate) {
             return Err(invalid(
                 "surface optical state is outside its constitutive coordinate support",
             ));
@@ -296,17 +345,29 @@ impl SurfaceConductorLaw {
         Ok(())
     }
 
+    fn coordinate_bounds(&self) -> (f64, f64) {
+        match &self.model {
+            Model::Rows { rows, .. } => (rows[0].0, rows[rows.len() - 1].0),
+            #[cfg(feature = "material-state")]
+            Model::Material(_) => self.temperature_bounds_k,
+        }
+    }
+
     pub(crate) fn optics_at_coordinate(
         &self,
         coordinate: f64,
     ) -> Result<ConductorOptics, SurfaceHeatingError> {
         self.check_coordinate(coordinate)?;
-        let upper = self
-            .rows
+        let (source, rows) = match &self.model {
+            Model::Rows { source, rows } => (*source, rows),
+            #[cfg(feature = "material-state")]
+            Model::Material(source) => return source.optics_at_temperature(coordinate),
+        };
+        let upper = rows
             .partition_point(|(x, _)| *x < coordinate)
-            .clamp(1, self.rows.len() - 1);
-        let (a, left) = self.rows[upper - 1];
-        let (b, right) = self.rows[upper];
+            .clamp(1, rows.len() - 1);
+        let (a, left) = rows[upper - 1];
+        let (b, right) = rows[upper];
         let fraction = (coordinate - a) / (b - a);
         let mut samples = left.samples();
         for (sample, rhs) in samples.iter_mut().zip(right.samples()) {
@@ -317,7 +378,7 @@ impl SurfaceConductorLaw {
             )?;
         }
         let mut optics =
-            ConductorOptics::try_new_in_band(samples, left.max_knot_span_nm(), self.source)?;
+            ConductorOptics::try_new_in_band(samples, left.max_knot_span_nm(), source)?;
         if let Some(coating) = left.coating() {
             optics = optics.with_coating(coating);
         } else if let Some(coating) = left.absorbing_coating() {

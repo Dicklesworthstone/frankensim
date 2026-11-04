@@ -188,7 +188,7 @@ impl Law {
     fn rows(&self) -> usize {
         match self {
             Self::Film(law) => law.row_count(),
-            Self::Substrate(law) => law.row_count(),
+            Self::Substrate(law) => law.budget_size(),
         }
     }
     fn coordinate(
@@ -206,6 +206,17 @@ impl Law {
         match self {
             Self::Film(law) => Ok(Resolved::Film(law.coating_at_coordinate(coordinate)?)),
             Self::Substrate(law) => Ok(Resolved::Substrate(law.optics_at_coordinate(coordinate)?)),
+        }
+    }
+    fn validate(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        cell: CellId,
+        material: MaterialId,
+    ) -> Result<Option<ConductorOptics>, SurfaceHeatingError> {
+        match self {
+            Self::Film(law) => law.coordinate_at(thermal, cell, material).map(|_| None),
+            Self::Substrate(law) => law.validate_native(thermal, cell, material),
         }
     }
 }
@@ -749,11 +760,21 @@ impl<const N: usize> CoatingFeedbackState<N> {
     ) -> Result<(), SurfaceHeatingError> {
         for bound in &self.model.laws {
             checkpoint()?;
-            bound.law.coordinate(
+            if let Some(optics) = bound.law.validate(
                 thermal,
                 bound.receiver.thermal_cell,
                 bound.receiver.material_id,
-            )?;
+            )? {
+                // Film/row wavelength support is fixed and was admitted with
+                // each stack. Original material wavelengths may move with T;
+                // recheck every bound mode against this fresh substrate once.
+                for &group in &bound.groups {
+                    checkpoint()?;
+                    for wavelength in self.model.stacks[group].incidence.wavelengths_nm {
+                        optics.complex_ior(wavelength)?;
+                    }
+                }
+            }
         }
         Ok(())
     }

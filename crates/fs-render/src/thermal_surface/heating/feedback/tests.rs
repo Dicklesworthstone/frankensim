@@ -63,7 +63,13 @@ fn constitutive_midpoint_uses_complex_index_before_original_fresnel() {
         constant.at_temperature(300.0).unwrap(),
         constant.at_temperature(541.7).unwrap()
     );
-    assert!(Arc::ptr_eq(&law.rows, &law.clone().rows));
+    match (&law.model, &law.clone().model) {
+        (Model::Rows { rows, .. }, Model::Rows { rows: cloned, .. }) => {
+            assert!(Arc::ptr_eq(rows, cloned));
+        }
+        #[cfg(feature = "material-state")]
+        _ => panic!("authored row model"),
+    }
 }
 
 #[test]

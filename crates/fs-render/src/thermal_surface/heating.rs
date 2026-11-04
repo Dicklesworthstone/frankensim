@@ -107,6 +107,10 @@ pub enum SurfaceHeatingError {
     Dielectric(DielectricError),
     Surface(ThermalSurfaceError),
     Profile(OpticalFeedbackError),
+    #[cfg(feature = "material-state")]
+    MaterialSource(fs_material::state_point::MaterialStatePointError),
+    #[cfg(feature = "material-state")]
+    MaterialOptics(crate::material_state::MaterialOpticalError),
     Heating(OpticalHeatingError),
     Thermal(DepositionError),
     TemperatureDomain {
