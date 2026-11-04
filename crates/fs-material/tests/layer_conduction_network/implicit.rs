@@ -157,3 +157,355 @@ fn solid_source_endpoint_uses_its_admitted_left_caloric_derivative() {
     assert!(links[0].state_at_specific_enthalpies([40_000.0_f64.next_up(), 10_000.0], geometry,
         old.contact_patch(7).unwrap(), &mut || Ok(())).is_err());
 }
+#[derive(Clone, Copy)]
+struct AffineLayerContact<'a> {
+    caloric: [&'a EquilibriumEnthalpyPhaseCurve; 2],
+    bounds: [[f64; 2]; 2],
+    reference_h: [f64; 2],
+    resistance: f64,
+    derivatives: [f64; 2],
+}
+
+impl fs_thermal::enthalpy::conduction::implicit::contact::ImplicitContactLaw
+    for AffineLayerContact<'_>
+{
+    fn caloric_laws(&self) -> [&dyn ThermalLaw; 2] {
+        self.caloric.map(|law| law as &dyn ThermalLaw)
+    }
+
+    fn enthalpy_bounds_j_kg(&self) -> [[f64; 2]; 2] {
+        self.bounds
+    }
+
+    fn state_at_specific_enthalpies(
+        &self,
+        h: [f64; 2],
+    ) -> Result<
+        fs_thermal::enthalpy::conduction::implicit::contact::ImplicitContactState,
+        DepositionError,
+    > {
+        use fs_thermal::enthalpy::conduction::implicit::contact::ImplicitContactState;
+        Ok(ImplicitContactState {
+            resistance_m2_k_w: self.derivatives[0].mul_add(
+                h[0] - self.reference_h[0],
+                self.derivatives[1].mul_add(h[1] - self.reference_h[1], self.resistance),
+            ),
+            resistance_enthalpy_derivatives_m2_kg_k_w_j: self.derivatives,
+        })
+    }
+}
+
+#[test]
+fn integrated_bulk_and_contact_tangents_differentiate_the_actual_combined_heat() {
+    let card = source();
+    let caloric = curve(&card);
+    let context = QueryPoint::new().with("T", 300.0).unwrap();
+    let layer = layer(&card, &caloric, &context);
+    let old = initial(&caloric);
+    let prepared = PreparedLayerConduction::new(&old, vec![binding(&layer)], 1, || Ok(())).unwrap();
+    let contact = AffineLayerContact {
+        caloric: [&caloric; 2],
+        bounds: [[0.0, 80_000.0]; 2],
+        reference_h: [35_000.0, 15_000.0],
+        resistance: 0.02,
+        derivatives: [2e-7, -1e-7],
+    };
+    let link = prepared
+        .implicit_link_laws(config())
+        .next()
+        .unwrap()
+        .with_contact(&contact)
+        .unwrap();
+    let geometry = ConductiveLink {
+        link_id: 7,
+        half_distances_m: [0.02, 0.03],
+        contact_resistance_m2_k_w: 0.0,
+    };
+    let patch = old.contact_patch(7).unwrap();
+    let at = |h: [f64; 2]| {
+        let state = link
+            .state_at_specific_enthalpies(h, geometry, patch, &mut || Ok(()))
+            .unwrap();
+        let temperatures = h.map(|value| caloric.temperature_at_specific_enthalpy(value).unwrap());
+        let power = state.conductance_w_k * (temperatures[0] - temperatures[1]);
+        (state, power)
+    };
+    // These finite differences vary BOTH the source contact and integrated
+    // bulk conductivity, including opposite heat flow and thermal equilibrium.
+    for h in [[35_000.0, 15_000.0], [15_000.0, 35_000.0], [25_000.0; 2]] {
+        let (state, _) = at(h);
+        for side in 0..2 {
+            let mut plus = h;
+            let mut minus = h;
+            plus[side] += 0.25;
+            minus[side] -= 0.25;
+            let difference = (at(plus).1 - at(minus).1) / 0.5;
+            assert!(
+                (difference - state.power_enthalpy_derivatives_w_kg_j[side]).abs() < 1e-8,
+                "h={h:?}, side={side}: finite difference {difference}, tangent {:?}",
+                state.power_enthalpy_derivatives_w_kg_j,
+            );
+        }
+    }
+    assert_eq!(old.time_s(), 0.0);
+}
+
+#[test]
+fn integrated_contact_domains_and_ownership_preserve_transactional_heat_history() {
+    let card = source();
+    let caloric = curve(&card);
+    let foreign = caloric.clone();
+    let context = QueryPoint::new().with("T", 300.0).unwrap();
+    let layer = layer(&card, &caloric, &context);
+    let old = initial(&caloric);
+    let law = transport(&card, &caloric, &context);
+    let prepared = PreparedLayerConduction::new(&old, vec![binding(&layer)], 1, || Ok(())).unwrap();
+    let make = || prepared.implicit_link_laws(config()).next().unwrap();
+    let contact = AffineLayerContact {
+        caloric: [&caloric; 2],
+        bounds: [[0.0, 80_000.0]; 2],
+        reference_h: [40_000.0, 10_000.0],
+        resistance: 0.02,
+        derivatives: [2e-7, -1e-7],
+    };
+    let other = AffineLayerContact {
+        caloric: [&caloric, &foreign],
+        ..contact
+    };
+    assert!(make().with_contact(&other).is_err());
+    let invalid = AffineLayerContact {
+        bounds: [[f64::NAN, 80_000.0]; 2],
+        ..contact
+    };
+    assert!(make().with_contact(&invalid).is_err());
+    assert!(
+        make()
+            .with_contact(&contact)
+            .unwrap()
+            .with_contact(&contact)
+            .is_err()
+    );
+    let mut fixed_binding = binding(&layer);
+    fixed_binding.contact_area_resistance_m2_k_w = 0.01;
+    let fixed = PreparedLayerConduction::new(&old, vec![fixed_binding], 1, || Ok(())).unwrap();
+    assert!(
+        fixed
+            .implicit_link_laws(config())
+            .next()
+            .unwrap()
+            .with_contact(&contact)
+            .is_err()
+    );
+
+    let geometry = ConductiveLink {
+        link_id: 7,
+        half_distances_m: [0.02, 0.03],
+        contact_resistance_m2_k_w: 0.0,
+    };
+    let patch = old.contact_patch(7).unwrap();
+    let limited = AffineLayerContact {
+        bounds: [[0.0, 30_000.0]; 2],
+        ..contact
+    };
+    let limited_link = make().with_contact(&limited).unwrap();
+    assert!(matches!(
+        limited_link.state_at_specific_enthalpies(
+            [40_000.0, 10_000.0],
+            geometry,
+            patch,
+            &mut || Ok(()),
+        ),
+        Err(DepositionError::MaterialDomain),
+    ));
+    // Preserve the original contact admission, including the zero-resistance
+    // boundary: a contact cannot report a negative value or a nonzero tangent
+    // at a zero value. Neither is clipped into an admissible heat coefficient.
+    for resistance in [-1.0, 0.0] {
+        let invalid = AffineLayerContact {
+            resistance,
+            ..contact
+        };
+        let link = make().with_contact(&invalid).unwrap();
+        assert!(matches!(
+            link.state_at_specific_enthalpies(
+                [40_000.0, 10_000.0],
+                geometry,
+                patch,
+                &mut || Ok(()),
+            ),
+            Err(DepositionError::MaterialDomain),
+        ));
+    }
+
+    let link = make().with_contact(&contact).unwrap();
+    let observer = native_observer(&old, &law, &prepared);
+    let chain = ImplicitConductionChain::new(&old, &observer, &[(MaterialId(1), &law)], || Ok(()))
+        .unwrap()
+        .with_link_laws(&old, &[(7, &link)], || Ok(()))
+        .unwrap();
+    let mut workspace = ImplicitConductionWorkspace::new(2).unwrap();
+    let mut polls = 0;
+    let (expected, report) = chain
+        .advance_to(&old, 0.1, controls(0.1), &mut workspace, || {
+            polls += 1;
+            Ok(())
+        })
+        .unwrap();
+    assert!(expected.temperature_k(CellId(1)).unwrap() < 600.0);
+    assert_eq!(report.energy.external_heat_j, 0.0);
+    assert!(report.energy.residual_j.abs() < 1e-7);
+    let mut calls = 0;
+    assert!(matches!(
+        chain.advance_to(&old, 0.1, controls(0.1), &mut workspace, || {
+            calls += 1;
+            if calls == polls - 1 {
+                Err(DepositionError::Cancelled)
+            } else {
+                Ok(())
+            }
+        }),
+        Err(
+            fs_thermal::enthalpy::conduction::implicit::ImplicitConductionError::Thermal(
+                DepositionError::Cancelled,
+            )
+        ),
+    ));
+    let (retry, _) = chain
+        .advance_to(&old, 0.1, controls(0.1), &mut workspace, || Ok(()))
+        .unwrap();
+    assert_eq!(retry.cells(), expected.cells());
+    assert_eq!(old.time_s(), 0.0);
+    assert_eq!(old.temperature_k(CellId(1)).unwrap(), 600.0);
+}
+
+#[test]
+fn integrated_contacts_share_the_bulk_branch_and_its_admitted_endpoint_tangent() {
+    use fs_thermal::enthalpy::conduction::implicit::contact::{
+        ImplicitContactLaw, ImplicitContactState,
+    };
+    struct TemperatureContact<'a>(&'a EquilibriumEnthalpyPhaseCurve, f64);
+    impl ImplicitContactLaw for TemperatureContact<'_> {
+        fn caloric_laws(&self) -> [&dyn ThermalLaw; 2] {
+            [self.0; 2]
+        }
+        fn enthalpy_bounds_j_kg(&self) -> [[f64; 2]; 2] {
+            [[0.0, self.1]; 2]
+        }
+        fn state_at_specific_enthalpies(
+            &self,
+            h: [f64; 2],
+        ) -> Result<ImplicitContactState, DepositionError> {
+            let t = self
+                .0
+                .temperature_at_specific_enthalpy(h[0])
+                .map_err(|_| DepositionError::MaterialDomain)?;
+            // Same endpoint convention as the original prepared source owner.
+            let at = if h[0] == self.1 {
+                h[0].next_down()
+            } else {
+                h[0]
+            };
+            let dt = self
+                .0
+                .temperature_derivative_at_specific_enthalpy(at)
+                .map_err(|_| DepositionError::MaterialDomain)?;
+            Ok(ImplicitContactState {
+                resistance_m2_k_w: 0.01 + 0.0001 * (t - 200.0),
+                resistance_enthalpy_derivatives_m2_kg_k_w_j: [0.0001 * dt, 0.0],
+            })
+        }
+    }
+    for sensible_knot in [false, true] {
+        let card = source();
+        let knots = if sensible_knot {
+            vec![
+                (0.0, 200.0, 0.0),
+                (40_000.0, 600.0, 0.0),
+                (80_000.0, 800.0, 0.0),
+            ]
+        } else {
+            vec![
+                (0.0, 200.0, 0.0),
+                (40_000.0, 600.0, 0.0),
+                (60_000.0, 600.0, 1.0),
+                (100_000.0, 1000.0, 1.0),
+            ]
+        };
+        let knots = knots
+            .into_iter()
+            .map(|(h, t, f)| EnthalpyPhaseKnot {
+                specific_enthalpy_j_kg: h,
+                temperature_k: t,
+                liquid_mass_fraction: f,
+                bulk_density_kg_m3: 1000.0,
+            })
+            .collect();
+        let caloric = if sensible_knot {
+            EquilibriumEnthalpyPhaseCurve::try_single_phase(
+                card.content_hash(),
+                SolidLiquidPhase::Solid,
+                knots,
+            )
+        } else {
+            EquilibriumEnthalpyPhaseCurve::try_new(card.content_hash(), knots)
+        }
+        .unwrap();
+        let context = QueryPoint::new().with("T", 300.0).unwrap();
+        let layer = ResolvedConductionLayer::new(
+            &caloric,
+            ThermalMaterialPoint {
+                material: &card,
+                context: &context,
+                temperature_axis: "T",
+                liquid_fraction_axis: None,
+            },
+            &PropertyKey::new("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS),
+            ClaimSelection::Policy(SelectionPolicy::SingleClaimOnly),
+            SolidLiquidPhase::Solid,
+            [200.0, if sensible_knot { 800.0 } else { 600.0 }],
+            || Ok(()),
+        )
+        .unwrap();
+        let old = initial(&caloric);
+        let prepared =
+            PreparedLayerConduction::new(&old, vec![binding(&layer)], 1, || Ok(())).unwrap();
+        let make = || prepared.implicit_link_laws(config()).next().unwrap();
+        let wider = TemperatureContact(&caloric, if sensible_knot { 80_000.0 } else { 100_000.0 });
+        // A phase-changing contact domain cannot be attached to a pure-solid
+        // layer. The caller prepares the original contact on its shared branch.
+        assert_eq!(make().with_contact(&wider).is_ok(), sensible_knot);
+        let contact = TemperatureContact(&caloric, 40_000.0);
+        let link = make().with_contact(&contact).unwrap();
+        let geometry = ConductiveLink {
+            link_id: 7,
+            half_distances_m: [0.02, 0.03],
+            contact_resistance_m2_k_w: 0.0,
+        };
+        let at = |h| {
+            link.state_at_specific_enthalpies(
+                [h, 10_000.0],
+                geometry,
+                old.contact_patch(7).unwrap(),
+                &mut || Ok(()),
+            )
+            .unwrap()
+        };
+        let power = |h| {
+            at(h).conductance_w_k * (caloric.temperature_at_specific_enthalpy(h).unwrap() - 300.0)
+        };
+        // The contact may end at an interior caloric knot of a wider bulk
+        // chart. BOTH derivatives use the shared left branch there, whether
+        // the excluded right branch is latent or simply has another Cp.
+        let inward = (3.0 * power(40_000.0) - 4.0 * power(39_999.0) + power(39_998.0)) / 2.0;
+        assert!((at(40_000.0).power_enthalpy_derivatives_w_kg_j[0] - inward).abs() < 1e-8);
+        assert!(
+            link.state_at_specific_enthalpies(
+                [40_000.0_f64.next_up(), 10_000.0],
+                geometry,
+                old.contact_patch(7).unwrap(),
+                &mut || Ok(()),
+            )
+            .is_err()
+        );
+    }
+}

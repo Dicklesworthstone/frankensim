@@ -863,3 +863,245 @@ fn source_surface_holes_remain_active_inside_admitted_enthalpy_bounds() {
     assert_eq!(old.cells()[&C].specific_h_j_kg, 25.0);
     assert_eq!(contact.reference().phases[0].specific_enthalpy_j_kg(), 25.0);
 }
+#[test]
+fn source_contact_and_kirchhoff_layers_share_the_native_implicit_heat_solution() {
+    use fs_material::phase::SolidLiquidPhase;
+    use fs_material::thermal::conduction::{
+        LayerConductionConfig,
+        network::{LayerLinkBinding, PreparedLayerConduction},
+        source::ResolvedConductionLayer,
+    };
+    use fs_thermal::enthalpy::conduction::implicit::link::ImplicitLinkLaw;
+
+    // Separate original cards, each with the same manufactured k(T)=2+0.01*T.
+    let cards = ["kirchhoff-cold", "kirchhoff-hot"].map(|name| {
+        let mut claims = ClaimSet::new();
+        claims
+            .insert_claim(PropertyClaim {
+                key: PropertyKey::new(KP, KD),
+                value: PropertyValue::Curve {
+                    abscissa: "T".into(),
+                    abscissa_dims: Temperature::DIMS,
+                    knots: vec![(300.0, 5.0), (550.0, 7.5), (800.0, 10.0)],
+                    dims: KD,
+                },
+                validity: ValidityDomain::unconstrained()
+                    .with_quantity(
+                        "T",
+                        QuantitySpec::dimensional(Temperature::DIMS),
+                        300.0,
+                        800.0,
+                    )
+                    .with_quantity("f", QuantitySpec::dimensional(Dims::NONE), 0.0, 1.0),
+                interpolation: InterpolationPolicy::LinearInside,
+                uncertainty: UncertaintyModel::Unstated,
+                observations: vec![],
+                provenance: provenance(),
+            })
+            .unwrap();
+        MaterialCard::assemble(
+            MaterialStateId {
+                chemistry: name.into(),
+                phase: "solid".into(),
+                process: "numerical fixture".into(),
+                revision: 0,
+            },
+            claims,
+            vec![],
+        )
+        .unwrap()
+    });
+    let curves = cards.each_ref().map(|card| {
+        EquilibriumEnthalpyPhaseCurve::try_single_phase(
+            card.content_hash(),
+            SolidLiquidPhase::Solid,
+            [(-100.0, 300.0), (400.0, 800.0)]
+                .map(|(h, t)| EnthalpyPhaseKnot {
+                    specific_enthalpy_j_kg: h,
+                    temperature_k: t,
+                    liquid_mass_fraction: 0.0,
+                    bulk_density_kg_m3: 1.0,
+                })
+                .to_vec(),
+        )
+        .unwrap()
+    });
+    let point = context();
+    let old = initial(&curves, 1);
+    let laws = [0, 1].map(|side| {
+        PreparedPhaseConductivity::new(
+            &curves[side],
+            ThermalMaterialPoint {
+                material: &cards[side],
+                context: &point,
+                temperature_axis: "T",
+                liquid_fraction_axis: Some("f"),
+            },
+            &PropertyKey::new(KP, KD),
+            ClaimSelection::Policy(SelectionPolicy::SingleClaimOnly),
+            [-100.0, 400.0],
+            || Ok(()),
+        )
+        .unwrap()
+    });
+    let layers = [0, 1].map(|side| {
+        ResolvedConductionLayer::new(
+            &curves[side],
+            ThermalMaterialPoint {
+                material: &cards[side],
+                context: &point,
+                temperature_axis: "T",
+                liquid_fraction_axis: Some("f"),
+            },
+            &PropertyKey::new(KP, KD),
+            ClaimSelection::Policy(SelectionPolicy::SingleClaimOnly),
+            SolidLiquidPhase::Solid,
+            [300.0, 800.0],
+            || Ok(()),
+        )
+        .unwrap()
+    });
+
+    let resistance = 35.0 / 264.0;
+    let source = source(&cards, Some("TA"), resistance - 0.07, 0.0005, 300.0);
+    let contact = PreparedMaterialContact::new(
+        &old,
+        binding(&curves, &cards, &source, &point, 0),
+        [[-100.0, 400.0]; 2],
+        || Ok(()),
+    )
+    .unwrap();
+    let source_pin = contact.reference().interface.receipt().selected;
+    near(
+        contact
+            .state_at_specific_enthalpies([25.0, 200.0])
+            .unwrap()
+            .resistance_m2_k_w,
+        resistance - 0.0075,
+        1e-14,
+    );
+    let distances = [0.5, 7.0 / 12.0];
+    let prepared = PreparedLayerConduction::new(
+        &old,
+        vec![LayerLinkBinding {
+            link: 100,
+            layers: [&layers[0], &layers[1]],
+            distances_m: distances,
+            contact_area_resistance_m2_k_w: 0.0,
+        }],
+        1,
+        || Ok(()),
+    )
+    .unwrap();
+    let integrated = prepared
+        .implicit_link_laws(LayerConductionConfig {
+            max_iterations: 96,
+            absolute_heat_tolerance_w: 1e-10,
+            relative_heat_tolerance: 1e-12,
+        })
+        .next()
+        .unwrap()
+        .with_contact(&contact)
+        .unwrap();
+    let geometry = ConductiveLink {
+        link_id: 100,
+        half_distances_m: distances,
+        contact_resistance_m2_k_w: 0.0,
+    };
+    let observer = ConductionObserver::new(
+        &old,
+        &[(MaterialId(0), &laws[0]), (MaterialId(1), &laws[1])],
+        &[geometry],
+        &[],
+        || Ok(()),
+    )
+    .unwrap();
+    let materials = [
+        (MaterialId(0), &laws[0] as &dyn ImplicitConductionLaw),
+        (MaterialId(1), &laws[1] as &dyn ImplicitConductionLaw),
+    ];
+    let links = [(100, &integrated as &dyn ImplicitLinkLaw)];
+    let chain = ImplicitConductionChain::new(&old, &observer, &materials, || Ok(()))
+        .unwrap()
+        .with_link_laws(&old, &links, || Ok(()))
+        .unwrap();
+    let graph = ImplicitConductionGraph::new(
+        &old,
+        &observer,
+        &materials,
+        ImplicitConductionLinearControls::default(),
+        || Ok(()),
+    )
+    .unwrap()
+    .with_link_laws(&old, &links, || Ok(()))
+    .unwrap();
+
+    // Independent exact endpoint: Cp=1, masses 2/3, initial 425/600 K.
+    // Final 440/590 K stores +30/-30 J. Contact surfaces 480/550 K give
+    // integral_440^480 k dT / .5 = integral_550^590 k dT / (7/12) = 528 W/m².
+    // Their 70 K jump needs R''=35/264; dt=5/88 transfers exactly 30 J.
+    // Both bulk-centre freezing and retaining the initial R'' miss this endpoint.
+    let dt = 5.0 / 88.0;
+    let mut work = ImplicitConductionWorkspace::new(2).unwrap();
+    let results = [
+        chain
+            .advance_to(&old, dt, controls(dt), &mut work, || Ok(()))
+            .unwrap(),
+        graph
+            .advance_to(&old, dt, controls(dt), &mut work, || Ok(()))
+            .unwrap(),
+    ];
+    for (next, audit) in results {
+        near(next.temperature_k(C).unwrap(), 440.0, 2e-8);
+        near(next.temperature_k(HOT[0]).unwrap(), 590.0, 2e-8);
+        let h = [
+            next.cells()[&C].specific_h_j_kg,
+            next.cells()[&HOT[0]].specific_h_j_kg,
+        ];
+        near(2.0 * (h[0] - 25.0), 30.0, 2e-8);
+        near(3.0 * (h[1] - 200.0), -30.0, 2e-8);
+        near(
+            contact
+                .state_at_specific_enthalpies(h)
+                .unwrap()
+                .resistance_m2_k_w,
+            resistance,
+            1e-10,
+        );
+        let flux = integrated
+            .state_at_specific_enthalpies(
+                h,
+                geometry,
+                next.contact_patch(100).unwrap(),
+                &mut || Ok(()),
+            )
+            .unwrap();
+        near(
+            flux.conductance_w_k
+                * (next.temperature_k(C).unwrap() - next.temperature_k(HOT[0]).unwrap()),
+            -528.0,
+            1e-7,
+        );
+        near(next.energy_j(), old.energy_j(), 2e-8);
+        assert_eq!(audit.energy.substeps, 1);
+        assert_eq!(audit.energy.external_heat_j, 0.0);
+        assert!(audit.entropy.conduction_generation_j_k > 0.0);
+        assert_eq!(next.links(), old.links());
+    }
+    assert!(
+        contact
+            .source_line()
+            .unwrap()
+            .knots
+            .iter()
+            .all(|(_, sample)| { sample.receipt.selected == source_pin })
+    );
+    assert_eq!(contact.reference().phases[0].specific_enthalpy_j_kg(), 25.0);
+    assert_eq!(
+        contact.reference().phases[1].specific_enthalpy_j_kg(),
+        200.0
+    );
+    assert_eq!(old.time_s(), 0.0);
+    assert_eq!(old.cells()[&C].specific_h_j_kg, 25.0);
+    assert_eq!(old.cells()[&HOT[0]].specific_h_j_kg, 200.0);
+}

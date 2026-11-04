@@ -1,5 +1,34 @@
 # fs-material — CONTRACT
 
+## Integrated bulk conduction with an evolving source contact
+
+`ImplicitLayerLink::with_contact` composes the original
+`ImplicitContactLaw` with both source-integrated material half-cells. It
+requires zero authored contact resistance, one contact owner, finite source
+bounds wholly inside the supported pure-phase layer domains and the same
+ordered caloric objects. Every trial checks those bounds, evaluates the original
+contact once, and uses the same
+Kirchhoff solve for power and its full derivative:
+`dQ/dh = (dQ/dT)(dT/dh) + (dQ/dR'')(dR''/dh)`.
+The analytic areal-resistance derivative uses the accepted interface flux and
+differential conductance without a second solve. Unrepresentable nonzero
+tangents refuse. Contact-state admission is shared with native thermal links.
+
+The contact is prepared on the shared admissible branch; wider contact domains
+refuse instead of heuristically resampling source tangents. At a contact upper
+bound inside the bulk chart, the bulk tangent uses its exact left caloric
+segment, keeping both chain-rule contributions on the same admitted side.
+The original thermal chain/graph retains energy, entropy, bounded work and
+transactional publication. Source response coordinates and fixed external
+pressure/composition keep their original meaning; no interface-temperature law
+or evolving pressure is inferred. This optional composition does not alter the
+fixed-resistance `PreparedLayerConduction::resolve` adapter. Pure-phase,
+quasi-steady half-cell assumptions and independent time/spatial refinement
+remain. Regressions check complete-flux finite differences, domain/ownership
+refusals and rollback, and actual `PreparedMaterialContact` source selection
+through a manufactured 30 J exchange in both native implicit solvers.
+
+
 ## Source-backed ionic solubility and osmotic particles
 
 `osmosis::solubility::electrolyte::ElectrolyteSolubilitySolution` retains one

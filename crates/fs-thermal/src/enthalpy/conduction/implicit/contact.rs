@@ -19,7 +19,10 @@ pub struct ImplicitContactState {
     pub resistance_enthalpy_derivatives_m2_kg_k_w_j: [f64; 2],
 }
 impl ImplicitContactState {
-    pub(super) fn admit(self) -> Result<(), DepositionError> {
+    /// Check the passive resistance and its finite constitutive tangents.
+    /// Complete-flux adapters use this same admission as native series links;
+    /// zero resistance requires zero tangents at the admitted state.
+    pub fn admit(self) -> Result<(), DepositionError> {
         if !self.resistance_m2_k_w.is_finite()
             || self.resistance_m2_k_w < 0.0
             || self
