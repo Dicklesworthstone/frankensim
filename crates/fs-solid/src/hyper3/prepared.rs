@@ -216,26 +216,77 @@ impl<L: FiniteStrainPotential> PreparedHyperTetProblem<'_, L> {
         field: &super::gravity::GravityField3<'_>,
         cx: &Cx<'_>,
     ) -> Result<super::gravity::TetGravityLoad3, HyperTetError> {
+        let result =
+            self.gravity_evaluate_with_density(density, displacement_m, field, true, cx)?;
+        Ok(super::gravity::TetGravityLoad3 {
+            force_n: result.force_n,
+            force_tangent_n_m: result.tangent.expect("requested gravity tangent"),
+            potential_energy_j: result.potential_energy_j,
+        })
+    }
+
+    /// The identical native gravity force and potential without Newton-tangent
+    /// allocation or assembly. Intended for force/impulse splitting consumers.
+    /// Returns `(full_nodal_force_n, potential_energy_j)`.
+    pub fn gravity_force_and_potential(
+        &self,
+        reference_density_kg_m3: &[f64],
+        displacement_m: &[f64],
+        field: &super::gravity::GravityField3<'_>,
+        cx: &Cx<'_>,
+    ) -> Result<(Vec<f64>, f64), HyperTetError> {
+        let result = self.gravity_evaluate_with_density(
+            super::gravity::ReferenceGravityDensity::PerElement(reference_density_kg_m3),
+            displacement_m,
+            field,
+            false,
+            cx,
+        )?;
+        Ok((result.force_n, result.potential_energy_j))
+    }
+
+    /// Force/potential-only counterpart retaining the original positive nodal
+    /// density quadrature. No cell-average or lumped-mass substitution is made.
+    pub fn gravity_force_and_potential_with_nodal_density(
+        &self,
+        reference_nodal_density_kg_m3: &[f64],
+        displacement_m: &[f64],
+        field: &super::gravity::GravityField3<'_>,
+        cx: &Cx<'_>,
+    ) -> Result<(Vec<f64>, f64), HyperTetError> {
+        let result = self.gravity_evaluate_with_density(
+            super::gravity::ReferenceGravityDensity::Nodal(reference_nodal_density_kg_m3),
+            displacement_m,
+            field,
+            false,
+            cx,
+        )?;
+        Ok((result.force_n, result.potential_energy_j))
+    }
+
+    fn gravity_evaluate_with_density(
+        &self,
+        density: super::gravity::ReferenceGravityDensity<'_>,
+        displacement_m: &[f64],
+        field: &super::gravity::GravityField3<'_>,
+        tangent: bool,
+        cx: &Cx<'_>,
+    ) -> Result<super::gravity::GravityEvaluation, HyperTetError> {
         let weights = super::gravity::bind_reference_weights(
             &self.elements,
             self.problem.nodes_m.len(),
             density,
             cx,
         )?;
-        let result = super::gravity::evaluate(
+        super::gravity::evaluate(
             self.problem.nodes_m,
             &self.elements,
             &weights,
             displacement_m,
             field,
-            true,
+            tangent,
             cx,
-        )?;
-        Ok(super::gravity::TetGravityLoad3 {
-            force_n: result.force_n,
-            force_tangent_n_m: result.tangent.expect("requested gravity tangent"),
-            potential_energy_j: result.potential_energy_j,
-        })
+        )
     }
 
     /// Assemble new held dead loads using the admitted reference volumes.

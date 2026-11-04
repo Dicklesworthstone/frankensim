@@ -5,6 +5,9 @@
 //! derivative. Original generalized-alpha/Newton owns the motion; this module
 //! only binds that existing force/tangent/potential into its existing operator.
 
+/// Reciprocal tidal impulses on the original solid and a finite point source.
+pub mod reciprocal;
+
 use std::fmt;
 use std::sync::Arc;
 
@@ -133,6 +136,22 @@ impl<'a> BoundGravity<'a> {
             }
         }
     }
+
+    fn force_and_potential(
+        &self,
+        problem: &PreparedHyperTetProblem<'a, FiniteSolidMaterial>,
+        displacement: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<(Vec<f64>, f64), HyperTetError> {
+        let field = crate::solid_gravity::bind_field(self.source.field, self.source.frame);
+        match &self.density {
+            ReferenceDensity::PerElement(values) => {
+                problem.gravity_force_and_potential(values, displacement, &field, cx)
+            }
+            ReferenceDensity::Nodal(values) => problem
+                .gravity_force_and_potential_with_nodal_density(values, displacement, &field, cx),
+        }
+    }
 }
 
 impl<'a> FiniteSolidBody<'a> {
@@ -250,7 +269,9 @@ impl DynamicOperator<'_, '_, '_> {
             return Err(invalid("native gravity force stage was not evaluated"));
         };
         if at.as_slice() != displacement || load.force_n.len() != displacement.len() {
-            return Err(invalid("native gravity force does not match its evaluated stage"));
+            return Err(invalid(
+                "native gravity force does not match its evaluated stage",
+            ));
         }
         self.gravity_force_at
             .replace(Some((at.clone(), load.force_n.clone())));
@@ -320,7 +341,9 @@ impl DynamicOperator<'_, '_, '_> {
             || stage.len() != before.len()
             || force_n.len() != before.len()
         {
-            return Err(invalid("accepted native gravity stage shape is inconsistent"));
+            return Err(invalid(
+                "accepted native gravity stage shape is inconsistent",
+            ));
         }
         for (dof, ((&old, &new), &at)) in before.iter().zip(after).zip(stage).enumerate() {
             if dof % 4096 == 0 {
@@ -330,19 +353,22 @@ impl DynamicOperator<'_, '_, '_> {
             // accepted endpoint rounds q_before+dq. Check its relation to the
             // published endpoints without replacing it by a reconstructed point.
             let midpoint = 0.5 * old + 0.5 * new;
-            let scale = old.abs().max(new.abs()).max(at.abs()).max(f64::MIN_POSITIVE);
-            if !at.is_finite()
-                || (at - midpoint).abs() > 8.0 * f64::EPSILON * scale
-            {
-                return Err(invalid("gravity force stage does not match the accepted interval"));
+            let scale = old
+                .abs()
+                .max(new.abs())
+                .max(at.abs())
+                .max(f64::MIN_POSITIVE);
+            if !at.is_finite() || (at - midpoint).abs() > 8.0 * f64::EPSILON * scale {
+                return Err(invalid(
+                    "gravity force stage does not match the accepted interval",
+                ));
             }
         }
         let first = gravity.evaluate(self.problem, before, self.cx)?;
         let last = gravity.evaluate(self.problem, after, self.cx)?;
         let work = dd(first.potential_energy_j) - dd(last.potential_energy_j);
         let mut midpoint_work = dd(0.0);
-        for (dof, ((&old, &new), &force)) in before.iter().zip(after).zip(force_n).enumerate()
-        {
+        for (dof, ((&old, &new), &force)) in before.iter().zip(after).zip(force_n).enumerate() {
             if dof % 4096 == 0 {
                 checkpoint(self.cx)?;
             }

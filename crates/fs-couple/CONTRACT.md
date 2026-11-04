@@ -29612,3 +29612,28 @@ heat and harmonic force response, source-selective viscosity refresh, and
 held/ramp/harmonic broadband convolutions. These extend the existing finite
 modal approximation; they introduce no damping floor, inferred drag or new
 constitutive source.
+
+## Reciprocal finite-solid / point-source gravitational kicks
+
+`FiniteSolidBody::reciprocal_gravity_kick_candidate` applies actual Newtonian
+tidal impulses to the original deforming solid and equal/opposite recoil to a
+finite native rigid source. `CentralGravity` owns the field; hyper3 owns the
+current-position quadrature with the same original cellwise or nodal reference
+density as inertia. Its force/potential-only entry shares the full gravity
+evaluation and skips sparse Newton-tangent assembly. The original consistent
+mass and rigid momentum owners perform both velocity updates. The source is
+a monopole at its COM: its spin is unchanged, without an invented compensating
+couple for quadrature error.
+
+Native per-owner residuals and a complete pair check bound actual linear and
+orbital-plus-spin impulse and impulse work. Solid support reactions remain
+external exchanges, including when the source recoils against an anchored
+solid. The balance origin is explicit; no large background momentum enlarges
+the absolute tolerances. Failure or cancellation publishes neither candidate.
+The frozen pair potential is counted once. The kick preserves configuration,
+material history, acceleration and physical time: it is a force subflow for
+caller-owned splitting, not a complete moving-source trajectory or a claim of
+energy conservation during this isolated kinetic change. Source multipoles,
+solid self-gravity, near-source quadrature accuracy and timestep convergence
+require their respective physical models or refinement. The same interaction
+must not also be supplied through the stationary external-gravity binding.

@@ -1,5 +1,7 @@
 //! Native dynamic gravity: independent trajectory, mass moments and atomic refusal.
 //! These manufactured conservative fields are numerical oracles, not material data.
+#[path = "gravity/reciprocal.rs"]
+mod reciprocal;
 #[path = "gravity/split.rs"]
 mod split;
 
