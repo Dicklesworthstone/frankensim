@@ -43,8 +43,8 @@ pub use forcing::{LinearForceFrame, LinearForcePullback, LinearForceTransition};
 /// Prepared exact motion under a continuous sinusoidal generalized force.
 pub mod harmonic;
 pub use harmonic::{
-    HarmonicForceTransition, MAX_HARMONIC_TONES, ModalToneBudget, PreparedModalHarmonic,
-    PreparedModalTones,
+    HarmonicForceFrame, HarmonicForceTransition, MAX_HARMONIC_TONES, ModalToneBudget,
+    PreparedHarmonicForce, PreparedModalHarmonic, PreparedModalTones,
 };
 
 /// Maximum number of modes admitted by one runtime model.

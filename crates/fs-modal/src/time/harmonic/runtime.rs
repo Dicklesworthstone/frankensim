@@ -4,20 +4,14 @@ use super::super::{
     ExactZohKernel, ModalAcousticFrame, ModalAcousticTimeError, ModalAcousticTimeModel,
     ModalAcousticWorkspace, ModalStepData, stage_modal_frame,
 };
-use super::{HarmonicForceTransition, integrals::HarmonicIntegrals, invalid};
+use super::{PreparedHarmonicForce, invalid};
 use std::sync::Arc;
-
-#[derive(Clone, Debug)]
-struct PreparedMode {
-    motion: HarmonicForceTransition,
-    integrals: HarmonicIntegrals,
-}
 
 /// Prepared continuous harmonic load for every retained mode of one shared
 /// mechanical model. Each mode receives its own cosine/sine generalized force
 /// [N/sqrt(kg)] at the same nonnegative forcing frequency [rad/s]. Coefficients
 /// are interval-local, with the same `exp(-i Omega t)` convention as
-/// [`HarmonicForceTransition`]. Preparation allocates; stepping does not.
+/// [`super::HarmonicForceTransition`]. Preparation allocates; stepping does not.
 ///
 /// Mode count, frequencies and damping are bound to the source model's shared
 /// immutable kernel. Its clones/checkpoint restores may reuse preparation;
@@ -40,7 +34,7 @@ struct PreparedMode {
 #[derive(Clone, Debug)]
 pub struct PreparedModalHarmonic {
     owner: Arc<ExactZohKernel>,
-    modes: Box<[PreparedMode]>,
+    modes: Box<[PreparedHarmonicForce]>,
     duration_s: f64,
     forcing_angular_frequency_rad_s: f64,
 }
@@ -73,14 +67,12 @@ impl PreparedModalHarmonic {
         }
         let mut modes = Vec::with_capacity(model.modes.len());
         for mode in &model.modes {
-            let motion = HarmonicForceTransition::try_new(
+            modes.push(PreparedHarmonicForce::try_new(
                 mode.angular_frequency_rad_s,
                 mode.damping_ratio,
                 forcing_angular_frequency_rad_s,
                 duration_s,
-            )?;
-            let integrals = HarmonicIntegrals::try_new(&motion, forcing_angular_frequency_rad_s)?;
-            modes.push(PreparedMode { motion, integrals });
+            )?);
         }
         Ok(Self {
             owner: Arc::clone(&model.transition_kernel),
@@ -118,7 +110,7 @@ impl PreparedModalHarmonic {
         self.modes
             .get(mode_index)
             .ok_or_else(|| invalid("harmonic mode index must be admitted"))?
-            .motion
+            .motion()
             .advance(state, cosine_force, sine_force)
     }
 
@@ -134,7 +126,7 @@ impl PreparedModalHarmonic {
         sine_force: f64,
     ) -> Result<(f64, f64), ModalAcousticTimeError> {
         self.modes[0]
-            .motion
+            .motion()
             .advance_force_phase(cosine_force, sine_force)
     }
 }
@@ -189,15 +181,13 @@ impl ModalAcousticTimeModel {
                 let mode = &prepared.modes[index];
                 let fc = cosine_forces[index];
                 let fs = sine_forces[index];
-                let next = mode.motion.advance(state, fc, fs)?;
-                let (work, work_allowance, loss, loss_allowance) =
-                    mode.integrals.evaluate(state, fc, fs)?;
+                let frame = mode.advance_with_energy(state, fc, fs)?;
                 Ok(ModalStepData {
-                    next,
-                    work,
-                    work_allowance,
-                    loss,
-                    loss_allowance,
+                    next: frame.state,
+                    work: frame.input_work_j,
+                    work_allowance: frame.input_work_roundoff_tolerance_j,
+                    loss: frame.viscous_dissipation_j,
+                    loss_allowance: frame.dissipation_roundoff_tolerance_j,
                 })
             },
         )?;

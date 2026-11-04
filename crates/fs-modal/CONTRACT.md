@@ -267,6 +267,22 @@ radiation account, and exact endpoints do not resolve unsampled observations.
 Long oscillatory intervals and repeated cached phase rotations accumulate
 floating-point error; no amplitude normalization is applied.
 
+`time::PreparedHarmonicForce` adds the same independently integrated signed
+work and positive viscous heat to a standalone scalar tone transition. Its
+ratio and explicit-rate constructors share the existing motion owner and
+`HarmonicIntegrals`; a free viscous coordinate therefore retains physical heat
+and force work under DC or continuous harmonic forcing. It returns both
+work/heat roundoff allowances, preserves cosine/sine and transient/forced
+cross terms, and never derives heat from endpoint-energy subtraction. Warm
+advancement allocates nothing and evaluates no transcendentals. The smaller
+motion-only cache remains unchanged. `PreparedModalHarmonic` uses this same
+prepared scalar type internally, retaining its existing admission and
+transactional balance gates. Scalar preparation does not infer model budgets
+or broadband radiation, and separate-tone heat cannot be summed to substitute
+for the simultaneous-tone owner. Analytic free-drag power integrals, tiny
+positive heat, negative DC source work, subdivision and bitwise bank agreement
+are exercised in `tests/harmonic_energy.rs`.
+
 `time::PreparedModalHarmonic` connects that motion owner to the actual shared
 `ModalAcousticTimeModel::step_harmonic_into` runtime. Every retained mode has
 its own cosine/sine force at one prescribed frequency, including DC. The

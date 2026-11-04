@@ -8,10 +8,12 @@ use super::{DampedTransition, ModalAcousticState, ModalAcousticTimeError};
 use fs_math::det;
 
 mod affine;
+mod energy;
 mod integrals;
 mod modulation;
 mod runtime;
 mod tones;
+pub use energy::{HarmonicForceFrame, PreparedHarmonicForce};
 pub use modulation::ToneModulationStep;
 pub use runtime::PreparedModalHarmonic;
 pub use tones::{MAX_HARMONIC_TONES, ModalToneBudget, PreparedModalTones};
@@ -31,8 +33,9 @@ pub use tones::{MAX_HARMONIC_TONES, ModalToneBudget, PreparedModalTones};
 /// Multiple harmonics superpose through [`Self::forced_increment`]; advance
 /// the homogeneous state only once before summing their zero-state responses.
 ///
-/// This API supplies motion, not harmonic-balance convergence, force work,
-/// viscous heat, or a broadband acoustic observation. Exact refers to this
+/// This API supplies motion; [`PreparedHarmonicForce`] adds independently
+/// integrated work and viscous heat. Neither supplies harmonic-balance
+/// convergence or a broadband acoustic observation. Exact refers to this
 /// linear differential equation and continuous forcing law. Finite arithmetic,
 /// unresolved intermediate observations and nonlinear generated harmonics
 /// retain their own accuracy requirements. A sampled force record should use
