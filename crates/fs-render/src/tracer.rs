@@ -181,7 +181,9 @@ mod transport;
 /// Bump ONLY with a semantic justification per docs/GOLDEN_POLICY.md.
 /// Version 6 aims finite visibility rays at the physical emitter endpoint and
 /// compares reconstructed endpoint positions after the bounded origin shift.
-pub const TRACER_BIT_SEMANTICS_VERSION: u32 = 6;
+/// Version 7 shares the all-sphere orthonormal frame with diffuse reflection,
+/// retaining unit ray directions and the cosine proposal at both poles.
+pub const TRACER_BIT_SEMANTICS_VERSION: u32 = 7;
 
 /// Bit-affecting semantics of the optional motion-time path. This is versioned
 /// separately because the legacy static entry points do not draw a shutter
@@ -20442,6 +20444,142 @@ mod tests {
         );
     }
 
+    fn diffuse_reflection_normals() -> [Vec3; 12] {
+        [
+            Vec3::new(0.0, 0.0, 1.0),
+            Vec3::new(0.0, 0.0, -1.0),
+            Vec3::new(1.0e-8, 0.0, -1.0),
+            Vec3::new(2.0e-5, -3.0e-5, -1.0),
+            Vec3::new(3.162_277_7e-4, 0.0, -1.0),
+            Vec3::new(0.0, -3.162_277_7e-4, -1.0),
+            // Both sides of the old n.z = -0.9999999 frame cutoff.
+            Vec3::new(4.46e-4, 0.0, -1.0),
+            Vec3::new(4.48e-4, 0.0, -1.0),
+            Vec3::new(0.3, -0.4, -0.5),
+            Vec3::new(-0.7, 0.2, 0.0),
+            Vec3::new(0.3, 0.4, 0.5),
+            Vec3::new(-0.2, -0.5, -0.7),
+        ]
+        .map(|normal| normal.scale(1.0 / normal.norm()))
+    }
+
+    #[test]
+    fn diffuse_reflection_preserves_unit_rays_and_cosine_pdf_at_both_poles() {
+        for normal in diffuse_reflection_normals() {
+            for u1 in [0.0_f64, 0.25, 0.5, 0.95, 1.0 - 1.0e-8, 1.0 - f64::EPSILON] {
+                for u2 in [0.0, 0.137, 0.25, 0.5, 0.75] {
+                    let (wi, sampled_pdf) = cosine_sample(normal, u1, u2);
+                    assert_near(wi.norm(), 1.0, 2.0e-13, "diffuse ray length");
+                    assert!(normal.dot(wi) > 0.0, "diffuse ray crossed the horizon");
+                    assert_near(
+                        normal.dot(wi),
+                        (1.0 - u1).sqrt(),
+                        2.0e-14,
+                        "diffuse local-to-world cosine",
+                    );
+                    assert_near(
+                        normal.dot(wi) / PI,
+                        sampled_pdf,
+                        2.0e-14,
+                        "diffuse sampled/evaluated solid-angle density",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn diffuse_reflection_furnace_weight_is_independent_of_surface_orientation() {
+        use crate::thermal_surface::{
+            GrayDiffuseThermalSurface, SpectralDiffuseThermalSurface, SpectralEmissivity,
+        };
+        let lifted = lift_rgb([0.7; 3]);
+        let materials = [
+            (
+                Material::Lambertian {
+                    reflectance: lifted,
+                },
+                lifted.eval(550.0),
+            ),
+            (
+                Material::SpectralDiffuse {
+                    reflectance: crate::spectral::SpectralReflectance::constant(0.7).unwrap(),
+                },
+                0.7,
+            ),
+            (
+                Material::GrayDiffuseThermal {
+                    surface: GrayDiffuseThermalSurface::try_new(300.0, 0.3, ContentHash([81; 32]))
+                        .unwrap(),
+                },
+                0.7,
+            ),
+            (
+                Material::SpectralDiffuseThermal {
+                    surface: SpectralDiffuseThermalSurface::try_new(
+                        300.0,
+                        SpectralEmissivity::constant(0.3).unwrap(),
+                        ContentHash([82; 32]),
+                    )
+                    .unwrap(),
+                },
+                0.7,
+            ),
+        ];
+        for (material, reflectance) in materials {
+            for normal in diffuse_reflection_normals() {
+                for u1 in [0.0, 0.5, 0.9, 1.0 - 1.0e-6] {
+                    for u2 in [0.0, 0.137, 0.25, 0.5, 0.75] {
+                        let (wi, pdf) =
+                            bsdf_sample(&material, normal, normal, u1, u2, None).unwrap();
+                        assert_near(
+                            bsdf_pdf(&material, normal, normal, wi, None),
+                            pdf,
+                            2.0e-14,
+                            "native diffuse BSDF density",
+                        );
+                        let f = opaque_bsdf_eval(&material, normal, normal, wi, 550.0, None, None)
+                            .unwrap();
+                        assert_near(
+                            f * normal.dot(wi) / pdf,
+                            reflectance,
+                            5.0e-12,
+                            "diffuse furnace sample weight",
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn diffuse_reflection_matches_rotated_quadratic_illumination() {
+        // For cosine-weighted directions, E[wi wi^T] = (I + n n^T)/4.
+        // Thus L(wi)=1+(axis.wi)^2 has an independent exact reflected integral.
+        // Midpoint radial and azimuthal quadrature integrates this quadratic
+        // exactly; normalizing a faulty warp cannot restore its distribution.
+        const SIDE: u32 = 16;
+        for normal in diffuse_reflection_normals() {
+            for axis in [Vec3::new(0.6, 0.0, 0.8), Vec3::new(0.0, 0.8, -0.6)] {
+                let mut radiance = 0.0;
+                for y in 0..SIDE {
+                    for x in 0..SIDE {
+                        let u1 = (f64::from(y) + 0.5) / f64::from(SIDE);
+                        let u2 = (f64::from(x) + 0.5) / f64::from(SIDE);
+                        let (wi, pdf) = cosine_sample(normal, u1, u2);
+                        let directional = axis.dot(wi);
+                        let incident = 1.0 + directional * directional;
+                        radiance += incident * (0.7 / PI) * normal.dot(wi) / pdf;
+                    }
+                }
+                radiance /= f64::from(SIDE * SIDE);
+                let cosine = axis.dot(normal);
+                let expected = 0.7 * (1.25 + 0.25 * cosine * cosine);
+                assert_near(radiance, expected, 2.0e-12, "rotated diffuse illumination");
+            }
+        }
+    }
+
     #[test]
     fn ggx_visible_normal_sampling_matches_pdf_at_grazing_and_both_poles() {
         let materials = [
@@ -22302,38 +22440,17 @@ mod tests {
 
 // ---- BSDF machinery --------------------------------------------------
 
-/// Deterministic orthonormal basis from a unit normal (Frisvad's
-/// branch on the pole, fixed arithmetic).
-fn basis(n: Vec3) -> (Vec3, Vec3) {
-    if n.z < -0.999_999_9 {
-        return (Vec3::new(0.0, -1.0, 0.0), Vec3::new(-1.0, 0.0, 0.0));
-    }
-    let a = 1.0 / (1.0 + n.z);
-    let b = -n.x * n.y * a;
-    (
-        Vec3::new(1.0 - n.x * n.x * a, b, -n.x),
-        Vec3::new(b, 1.0 - n.y * n.y * a, -n.y),
-    )
-}
-
-fn to_world(n: Vec3, local: [f64; 3]) -> Vec3 {
-    let (t, b) = basis(n);
-    Vec3::new(
-        t.x * local[0] + b.x * local[1] + n.x * local[2],
-        t.y * local[0] + b.y * local[1] + n.y * local[2],
-        t.z * local[0] + b.z * local[1] + n.z * local[2],
-    )
-}
-
 /// Cosine-weighted hemisphere sample around `n` using `det` trig (this
 /// path feeds the frozen goldens; the crate-root helper uses platform
-/// trig and stays for the un-hashed v0 batteries).
+/// trig and stays for the un-hashed v0 batteries). The shared all-sphere
+/// frame preserves the cosine measure: snapping a nearly polar normal to
+/// fixed tangents changes both ray length and the directional density.
 fn cosine_sample(n: Vec3, u1: f64, u2: f64) -> (Vec3, f64) {
     let r = u1.sqrt();
     let phi = 2.0 * PI * u2;
     let (sp, cp) = (det::sin(phi), det::cos(phi));
     let z = (1.0 - u1).max(0.0).sqrt();
-    (to_world(n, [r * cp, r * sp, z]), z / PI)
+    (to_world_all_sphere(n, [r * cp, r * sp, z]), z / PI)
 }
 
 fn ggx_d(alpha: f64, cos_m: f64) -> f64 {
@@ -22643,9 +22760,10 @@ fn bsdf_sample(
     }
 }
 
-/// Duff et al.'s cancellation-free all-sphere basis. Unlike the legacy
-/// Lambertian basis, this remains well conditioned at both poles and is used
-/// by the view-dependent GGX sampler for every reflective microfacet material.
+/// Duff et al.'s cancellation-free all-sphere basis, shared by diffuse and
+/// reflective GGX sampling. The denominator has magnitude at least one for
+/// a unit normal, retaining the actual surface orientation at both poles.
+/// https://jcgt.org/published/0006/01/01/
 fn basis_all_sphere(normal: Vec3) -> (Vec3, Vec3) {
     let sign = if normal.z < 0.0 { -1.0 } else { 1.0 };
     let a = -1.0 / (sign + normal.z);

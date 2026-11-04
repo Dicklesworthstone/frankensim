@@ -3089,6 +3089,56 @@ mod tests {
     }
 
     #[test]
+    fn diffuse_reflection_bdpt_preserves_both_transport_weights_and_densities() {
+        let normal = Vec3::new(3.162_277_7e-4, -2.0e-5, -1.0);
+        let normal = normal.scale(1.0 / normal.norm());
+        let wo = Vec3::new(0.6, 0.0, -0.8);
+        let (mut scene, _, _) = direct_emitter_scene(true);
+        scene.primitives[0].material = Material::SpectralDiffuse {
+            reflectance: crate::spectral::SpectralReflectance::constant(0.65).unwrap(),
+        };
+        scene.primitives[0].emission = None;
+        scene.lights.clear();
+        let vertex = Vertex {
+            kind: VertexKind::Surface { primitive_index: 0 },
+            point: Point3::new(0.0, 0.0, 0.0),
+            geometric_normal: Some(normal),
+            mesh_boundary_origin: None,
+            brushed_frame: None,
+            wo: Some(wo),
+            beta: 1.0,
+            pdf_fwd: 1.0,
+            pdf_rev: 0.0,
+            delta: false,
+            positive_medium: None,
+            negative_medium: None,
+        };
+        for mode in [TransportMode::Radiance, TransportMode::Importance] {
+            for random in [
+                [0.5, 0.25, 0.23, 0.71],
+                [1.0 - 1.0e-6, 0.25, 0.23, 0.71],
+                [1.0 - 1.0e-6, 0.75, 0.23, 0.71],
+            ] {
+                let sample = sample_surface(&scene, &vertex, 550.0, mode, random)
+                    .unwrap()
+                    .unwrap();
+                assert!((sample.direction.norm() - 1.0).abs() < 2.0e-13);
+                assert!(normal.dot(sample.direction) > 0.0);
+                assert!((sample.weight - 0.65).abs() < 5.0e-12);
+                assert!(
+                    (sample.pdf_fwd_solid_angle - normal.dot(sample.direction) / PI).abs()
+                        < 2.0e-14
+                );
+                assert!((sample.pdf_rev_solid_angle - normal.dot(wo) / PI).abs() < 2.0e-14);
+                let reverse =
+                    surface_pdf_solid_angle(&scene, &vertex, sample.direction, wo, 550.0).unwrap();
+                assert_eq!(sample.pdf_rev_solid_angle, reverse);
+                assert!(!sample.delta);
+            }
+        }
+    }
+
+    #[test]
     fn smooth_conductor_bdpt_preserves_host_fresnel_and_discrete_measure() {
         use crate::conductor::{ConductorDataStatus, ConductorIorSample, ConductorSource};
         use crate::dielectric::GlassProvenance;

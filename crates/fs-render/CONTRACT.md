@@ -2429,8 +2429,22 @@ thermal and calibrated photometric source ownership remains unchanged.
 The five emitter-continuation regressions are authored but not yet executed:
 the native feature build was killed while compiling the pinned runtime under
 the available memory limit. The Cornell reference remains pinned to tracer
-v3 and must be reproduced in debug and release before a justified v4 re-freeze;
+v3 and must be reproduced in debug and release before a justified re-freeze;
 neither its digest nor its evidence pin has been replaced without that proof.
+
+Tracer bit-semantics v7 uses the same all-sphere orthonormal frame for diffuse
+and reflective GGX sampling. The diffuse cosine warp retains the actual unit
+surface normal near the negative Z pole; it neither substitutes fixed tangents
+nor repairs a distorted distribution by normalizing the result. Returned rays
+stay unit length to floating-point roundoff, and their sampled/evaluated
+solid-angle densities agree. This preserves the orientation-independent
+Lambertian furnace weight in ordinary and spectral diffuse materials, their
+thermal reflection counterparts, and native camera and BDPT consumers.
+The frame has constant work and no allocation or rejection loop. Focused
+regressions exercise both sides of the former pole cutoff, grazing directions,
+an independent rotated quadratic-illumination integral, and forward/reverse
+BDPT densities. The existing Cornell digest and its evidence pin are unchanged.
+
 Current scalar scene-integrator no-claims: no gradient-index propagation or arbitrary overlapping media,
 no Russian roulette, reflective GGX
 and conductor sampling is isotropic-only, conductor and rough-dielectric GGX
