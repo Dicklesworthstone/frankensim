@@ -248,6 +248,7 @@ fn analytic_nonlinear_tangent_matches_original_residual_and_time_refinement() {
             &step,
             &energy,
             &BTreeMap::new(),
+            &[],
             false,
             controls(1.0),
             &mut report,
@@ -270,6 +271,7 @@ fn analytic_nonlinear_tangent_matches_original_residual_and_time_refinement() {
                 &step,
                 &plus,
                 &BTreeMap::new(),
+                &[],
                 false,
                 controls(1.0),
                 &mut report,
@@ -281,6 +283,7 @@ fn analytic_nonlinear_tangent_matches_original_residual_and_time_refinement() {
                 &step,
                 &minus,
                 &BTreeMap::new(),
+                &[],
                 false,
                 controls(1.0),
                 &mut report,
@@ -408,16 +411,16 @@ fn integrated_link_tangent_matches_original_energy_residual_with_unequal_masses(
     let step = BackwardEulerStep::new(&thermal, 0.3, || Ok(())).unwrap();
     let energy = [-7.0, 4.0, 3.0];
     let mut report = empty_report();
-    let trial = chain.evaluate(&step, &energy, &BTreeMap::new(), false, controls(1.0),
+    let trial = chain.evaluate(&step, &energy, &BTreeMap::new(), &[], false, controls(1.0),
         &mut report, &mut || Ok(())).unwrap();
     let mut workspace = ImplicitConductionWorkspace::new(3).unwrap();
     chain.jacobian(&thermal, trial.payload(), 0.3, &mut workspace, &mut || Ok(())).unwrap();
     for column in 0..3 {
         let mut plus = energy; let mut minus = energy;
         plus[column] += 1e-3; minus[column] -= 1e-3;
-        let a = chain.evaluate(&step, &plus, &BTreeMap::new(), false, controls(1.0),
+        let a = chain.evaluate(&step, &plus, &BTreeMap::new(), &[], false, controls(1.0),
             &mut report, &mut || Ok(())).unwrap();
-        let b = chain.evaluate(&step, &minus, &BTreeMap::new(), false, controls(1.0),
+        let b = chain.evaluate(&step, &minus, &BTreeMap::new(), &[], false, controls(1.0),
             &mut report, &mut || Ok(())).unwrap();
         for row in 0..3 {
             let derivative = if row == column { workspace.diagonal[row] }
@@ -687,6 +690,7 @@ struct Forcing {
     maximum_dt_s: f64,
     maximum_evaluations: usize,
     evaluations: usize,
+    transfer_evaluations: usize,
     begins: usize,
     events: usize,
     energy_j: f64,
@@ -706,6 +710,7 @@ impl Default for Forcing {
             maximum_dt_s: f64::MAX,
             maximum_evaluations: usize::MAX,
             evaluations: 0,
+            transfer_evaluations: 0,
             begins: 0,
             events: 0,
             energy_j: 0.0,
@@ -721,6 +726,7 @@ impl DepositionObserver for Forcing {
     fn begin(&mut self) -> Result<(), Self::Error> {
         self.begins += 1;
         self.evaluations = 0;
+        self.transfer_evaluations = 0;
         self.pending = None;
         Ok(())
     }
@@ -769,20 +775,24 @@ impl DepositionObserver for Forcing {
             BTreeMap::new()
         })
     }
+    fn ambient_conductances(
+        &mut self,
+        _: &DepositionSimulation<'_>,
+        _: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
+        Ok(if self.unsupported == 3 {
+            BTreeMap::from([(CellId(0), 1.0)])
+        } else {
+            BTreeMap::new()
+        })
+    }
     fn heat_transfers(
         &mut self,
         _: &DepositionSimulation<'_>,
         _: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<Vec<HeatTransfer>, Self::Error> {
-        Ok(if self.unsupported == 3 {
-            vec![HeatTransfer {
-                a: CellId(0),
-                b: CellId(1),
-                power_w: 1.0,
-            }]
-        } else {
-            vec![]
-        })
+        self.transfer_evaluations += 1;
+        Ok(vec![])
     }
     fn limit_timestep_s(
         &mut self,
@@ -1144,7 +1154,7 @@ fn observed_refusals_preserve_native_state_and_source_history() {
             )),
             Err(ImplicitConductionObservedError::Implicit(
                 ImplicitConductionError::Invalid(
-                    "observed implicit conduction accepts source-only observers"
+                    "observed implicit conduction owns all conductive coefficients"
                 )
             ))
         ));
@@ -1181,4 +1191,7 @@ fn observed_refusals_preserve_native_state_and_source_history() {
 
 #[path = "tests/ambient.rs"]
 mod ambient;
+
+#[path = "tests/advection.rs"]
+mod advection;
 

@@ -141,8 +141,9 @@ impl<'a> ImplicitConductionGraph<'a> {
             .advance_to(thermal, target_s, controls, workspace, checkpoint)
     }
 
-    /// Source-only IMEX advance through the same graph Newton/Krylov owner.
-    /// Sources are prescribed or lagged at each accepted start; see the chain's
+    /// IMEX sources and conservative transfers through the same graph solve.
+    /// Sources and directed transfers are held at each accepted start; the
+    /// original flow timestep limit remains active. See the chain's
     /// [`ImplicitConductionChain::advance_observed_to`] for history, retry and
     /// unsupported-hook semantics. No explicit conduction CFL is imposed.
     pub fn advance_observed_to<'m, O: DepositionObserver>(

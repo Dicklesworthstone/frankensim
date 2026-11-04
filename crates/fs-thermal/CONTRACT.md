@@ -1439,7 +1439,7 @@ preserves existing stepping arithmetic, and the existing empty-grid skip is
 unchanged. Focused observer regressions check exact coupled boundaries, invalid
 time rejection with rollback, coincident native events and split continuation.
 
-## Observed absorption sources in implicit conduction
+## Observed sources and advection in implicit conduction
 
 `ImplicitConductionChain::advance_observed_to` and the corresponding graph
 entry point accept original `DepositionObserver` source owners on the same
@@ -1465,14 +1465,23 @@ physical history. The source's acceptance hook runs only after the original
 thermal endpoint passes its cell and total joule gates. The entire thermal and
 optical candidate remains transactional if a later source check refuses.
 
-This first entry point supports external sources only. Nonempty observer link
-conductances, reservoir conductances or conservative transfers refuse explicitly;
-their physical effects are never silently dropped or duplicated. Authored
-boundaries are restored before native solving and acceptance. Native external
-heat already contains observed absorption, so component optical accounts are
-parallel descriptions of the same energy, not additional thermal credits.
-Generated-source entropy retains its original unclassified status. The existing
-adaptive step-doubling path remains source-free.
+Conservative observer transfers use the original paired heat-rate owner inside
+that same residual. `Advected` therefore composes balanced mass-carried enthalpy
+with endpoint conductivity, contact and boundary cooling. Source, transfer and
+timestep hooks retain their original order; one prepared flow epoch survives
+nonlinear retries and is accounted only for the accepted duration. Advection is
+explicit and retains its original timestep, caloric-datum, storage-basis and
+fixed-mass admission. Internal transfers cancel from external heat, including
+on latent plateaus; inlet/outlet enthalpy retains its original external account.
+This introduces no moving geometry, momentum equation or pressure-work model.
+
+Nonempty observer link, ambient or reservoir conductances still refuse because
+the implicit solver owns those coefficients. Authored boundaries are restored
+before native solving and acceptance. Native external heat already contains
+observed sources, so component accounts are parallel descriptions of the same
+energy, not additional credits. Generated-source and transfer entropy retain
+their original unclassified status; an opted-in advection entropy account keeps
+its own flow/mixing semantics. The adaptive step-doubling path remains source-free.
 
 G1/G3/G4 checks cover independent stiff chain/graph forced solutions, implicit
 Robin cooling with authored/start/interval sources, nonlinear halving of ramp
@@ -1482,6 +1491,12 @@ rollback. Cross-crate tests additionally use actual conductor surface pulses,
 state-dependent n/k response and Beer-Lambert volume deposition. Those checks
 retain independent native and optical energy accounts; they do not certify
 spatial, constitutive or nonlinear-optical accuracy from a small energy residual.
+
+Focused advection regressions compare chain and graph endpoints with an
+independent stiff circulating-pair solution and a large caloric-datum shift,
+resolve an open latent channel with nonlinear conductivity/contact resistance,
+and retain one flow preparation per accepted start across nonlinear retries.
+Unbalanced flow and late source refusal preserve both original histories.
 
 ## Limited axial enthalpy reconstruction on native transport
 

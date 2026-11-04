@@ -1,4 +1,4 @@
-//! Prescribed/lagged external sources on the original implicit heat solver.
+//! Prescribed/lagged sources and transport on the original implicit heat solver.
 use super::*;
 
 /// Native implicit refusal or an unchanged source-owner refusal.
@@ -70,8 +70,9 @@ fn restore_sources(thermal: &mut DepositionSimulation<'_>, authored: Vec<(CellId
 
 impl ImplicitConductionChain<'_> {
     /// Advance native conduction/cooling implicitly with prescribed or lagged
-    /// external heat. The original source hooks see the accepted START state;
-    /// their watts are held fixed during each endpoint Newton solve. Fixed
+    /// external heat and conservative internal transfers. The original source
+    /// hooks see the accepted START state; their watts are held fixed during
+    /// each endpoint Newton solve. Fixed
     /// absorption responses therefore need no optical Jacobian. A state-dependent
     /// optical source is explicit in this IMEX discretization and still needs
     /// its own timestep restriction and independent temporal refinement.
@@ -85,10 +86,17 @@ impl ImplicitConductionChain<'_> {
     /// thermal or observer candidate. Clone must retain the original observer's
     /// transactional, non-shared mutable history contract.
     ///
-    /// This entry supports external source hooks only. Nonempty conductance,
-    /// reservoir-conductance or internal-transfer hooks refuse explicitly; all
-    /// conduction remains owned by this solver. Native audits already include
-    /// observed heat exactly once. This is not the adaptive step-doubling path.
+    /// Balanced mass-carried enthalpy uses the original `Advected` observer,
+    /// including its datum, storage-basis, flow and timestep admission. Flow is
+    /// prepared once per accepted start state and retained through nonlinear
+    /// retries. This is explicit advection with implicit conduction; the flow
+    /// restriction and independent temporal refinement still apply.
+    ///
+    /// Nonempty conductance, ambient-conductance or reservoir-conductance hooks
+    /// refuse explicitly; all conduction remains owned by this solver. Native
+    /// audits count external heat once and cancel internal transfers. Transfer
+    /// entropy remains unclassified unless its owner supplies its own account.
+    /// This is not the adaptive step-doubling path or a moving-mass model.
     pub fn advance_observed_to<'m, O: DepositionObserver>(
         &self,
         thermal: &DepositionSimulation<'m>,
@@ -171,16 +179,16 @@ impl ImplicitConductionChain<'_> {
                     .reservoir_conductances(&next, &mut checkpoint)
                     .map_err(Observer)?
                     .is_empty()
-                || !source
-                    .heat_transfers(&next, &mut checkpoint)
-                    .map_err(Observer)?
-                    .is_empty()
             {
                 return Err(ImplicitConductionError::Invalid(
-                    "observed implicit conduction accepts source-only observers",
+                    "observed implicit conduction owns all conductive coefficients",
                 )
                 .into());
             }
+            // Preserve the native source -> transfer -> timestep hook order.
+            // Advected consumes its source epoch here and retains the pending
+            // mass/enthalpy account until exactly one accepted step callback.
+            let transfers = source.heat_transfers(&next, &mut checkpoint).map_err(Observer)?;
             let authored = next.add_step_sources(&sources, &mut checkpoint)?;
             let limit = source.limit_timestep_s(&next, controls.maximum_dt_s, &mut checkpoint);
             restore_sources(&mut next, authored);
@@ -229,6 +237,7 @@ impl ImplicitConductionChain<'_> {
                     &next,
                     end,
                     &combined,
+                    &transfers,
                     controls,
                     workspace,
                     &mut report,

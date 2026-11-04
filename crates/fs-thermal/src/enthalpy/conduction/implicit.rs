@@ -21,7 +21,7 @@
 use super::*;
 use crate::enthalpy::backward_euler::{
     BackwardEulerStep, BackwardEulerTrial, BoundaryConductances, BoundaryStepCoefficients,
-    StepCoefficients, resolvable_increment_j,
+    StepCoefficients, TransportStepCoefficients, resolvable_increment_j,
 };
 use crate::enthalpy::entropy::EntropyAudit;
 use fs_la::tridiagonal::{TridiagonalError, TridiagonalWorkspace};
@@ -35,7 +35,7 @@ mod graph;
 use graph::LinearTopology;
 pub use graph::{ImplicitConductionGraph, ImplicitConductionLinearControls};
 
-/// Source-only IMEX coupling with transactional observer histories.
+/// IMEX sources and conservative transport with transactional observer histories.
 #[path = "implicit/observed.rs"]
 mod observed;
 pub use observed::ImplicitConductionObservedError;
@@ -619,6 +619,7 @@ impl<'a> ImplicitConductionChain<'a> {
         step: &BackwardEulerStep<'_, 'm>,
         energy: &[f64],
         sources_w: &BTreeMap<CellId, f64>,
+        transfers: &[HeatTransfer],
         entropy: bool,
         controls: ImplicitConductionControls,
         report: &mut ImplicitConductionReport,
@@ -634,21 +635,27 @@ impl<'a> ImplicitConductionChain<'a> {
         let resolve = |thermal: &DepositionSimulation<'m>| {
             let endpoint = self.endpoint(thermal, &mut || (checkpoint.borrow_mut())())?;
             let boundaries = endpoint.boundary_values.clone();
-            Ok::<_, ImplicitConductionError>(BoundaryStepCoefficients {
-                bulk: StepCoefficients {
-                    sources_w: sources_w.clone(),
-                    conductances_w_k: endpoint.link_values.clone(),
-                    payload: endpoint,
+            Ok::<_, ImplicitConductionError>(TransportStepCoefficients {
+                heat: BoundaryStepCoefficients {
+                    bulk: StepCoefficients {
+                        sources_w: sources_w.clone(),
+                        conductances_w_k: endpoint.link_values.clone(),
+                        payload: endpoint,
+                    },
+                    boundaries,
                 },
-                boundaries,
+                // Held at the accepted start state: these directed powers
+                // have no endpoint derivative. Their original paired debit
+                // and credit never enter the external-source energy account.
+                transfers: transfers.to_vec(),
             })
         };
         if entropy {
-            step.evaluate_with_boundary_conductances_and_entropy(energy, resolve, || {
+            step.evaluate_with_transport_and_entropy(energy, resolve, || {
                 (checkpoint.borrow_mut())()
             })
         } else {
-            step.evaluate_with_boundary_conductances(energy, resolve, || {
+            step.evaluate_with_transport(energy, resolve, || {
                 (checkpoint.borrow_mut())()
             })
         }
@@ -794,6 +801,7 @@ impl<'a> ImplicitConductionChain<'a> {
             thermal,
             target_s,
             &BTreeMap::new(),
+            &[],
             controls,
             workspace,
             report,
@@ -806,6 +814,7 @@ impl<'a> ImplicitConductionChain<'a> {
         thermal: &DepositionSimulation<'m>,
         target_s: f64,
         sources_w: &BTreeMap<CellId, f64>,
+        transfers: &[HeatTransfer],
         controls: ImplicitConductionControls,
         workspace: &mut ImplicitConductionWorkspace,
         report: &mut ImplicitConductionReport,
@@ -818,6 +827,7 @@ impl<'a> ImplicitConductionChain<'a> {
             &step,
             &workspace.energy,
             sources_w,
+            transfers,
             false,
             controls,
             report,
@@ -833,6 +843,7 @@ impl<'a> ImplicitConductionChain<'a> {
                     &step,
                     &workspace.energy,
                     sources_w,
+                    transfers,
                     true,
                     controls,
                     report,
@@ -921,6 +932,7 @@ impl<'a> ImplicitConductionChain<'a> {
                         &step,
                         &workspace.proposal,
                         sources_w,
+                        transfers,
                         false,
                         controls,
                         report,
