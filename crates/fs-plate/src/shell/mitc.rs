@@ -410,11 +410,20 @@ impl ShearShellSection {
     }
 }
 
-/// Congruence-scaled Cholesky admission of the physical six-component
+/// Scale-aware Cholesky admission of the physical six-component
 /// membrane/curvature work. In particular, B itself need not be positive:
 /// reversing layer order reverses B without changing section passivity.
 fn admit_coupled_block(a: &[f64; 9], b: &[f64; 9], d: &[f64; 9], semidefinite: bool)
     -> Result<(), PlateError>
+{
+    factor_coupled_block(a, b, d, semidefinite).map(|_| ())
+}
+
+// Shared admission and physical Gram factor for the work-conjugate A/B/D
+// block. The factor has the original dimensional row scales; strain-rate
+// contraction therefore gives material power as a sum of squares.
+fn factor_coupled_block(a: &[f64; 9], b: &[f64; 9], d: &[f64; 9], semidefinite: bool)
+    -> Result<[[f64; 6]; 6], PlateError>
 {
     let bad = || PlateError::BadSection {
         what: "coupled membrane/bending resultant is not finite, symmetric and passive",
@@ -441,20 +450,29 @@ fn admit_coupled_block(a: &[f64; 9], b: &[f64; 9], d: &[f64; 9], semidefinite: b
     let tolerance = if semidefinite { 64.0*f64::EPSILON } else { 0.0 };
     let mut l = [[0.0; 6]; 6];
     for i in 0..6 { for j in 0..=i {
-        let mut value = block[i][j] / scale[i] / scale[j];
-        for k in 0..j { value -= l[i][k]*l[j][k]; }
-        if !value.is_finite() { return Err(bad()); }
+        // Preserve a weak physical channel before normalizing its admission
+        // test. Subtracting separately rounded normalized entries can erase a
+        // representable small positive pivot. The existing compensated product
+        // owner retains that difference in the original resultant units.
+        let mut residual = (block[i][j], 0.0);
+        for k in 0..j {
+            let product = two_prod(l[i][k], l[j][k]);
+            residual = dd_add(residual, (-product.0, -product.1));
+        }
+        let value = residual.0 + residual.1;
+        let normalized = value / scale[i] / scale[j];
+        if !value.is_finite() || !normalized.is_finite() { return Err(bad()); }
         if i == j {
-            if value < -tolerance || (!semidefinite && value <= 0.0) { return Err(bad()); }
-            l[i][j] = if value <= tolerance { 0.0 } else { det::sqrt(value) };
+            if normalized < -tolerance || (!semidefinite && value <= 0.0) { return Err(bad()); }
+            l[i][j] = if value <= 0.0 { 0.0 } else { det::sqrt(value) };
         } else if l[j][j] == 0.0 {
-            if value.abs() > tolerance { return Err(bad()); }
+            if normalized.abs() > tolerance { return Err(bad()); }
         } else {
             l[i][j] = value/l[j][j];
             if !l[i][j].is_finite() { return Err(bad()); }
         }
     } }
-    Ok(())
+    Ok(l)
 }
 
 const IDENTITY: [[f64; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];

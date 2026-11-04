@@ -19,6 +19,24 @@ pub struct ShearShellViscosity {
     bending: [f64; 9],
     shear: [f64; 3],
 }
+
+/// Original constitutive Gram factors, prepared once for physical heat.
+#[derive(Clone, Debug)]
+pub(super) struct ShearDissipation {
+    coupled: [[f64; 6]; 6],
+    shear: [[f64; 6]; 3],
+}
+
+impl ShearDissipation {
+    pub(super) fn power(&self, membrane: [f64; 3], bending: [f64; 3], shear: [f64; 2]) -> f64 {
+        let strain = [membrane[0], membrane[1], membrane[2], bending[0], bending[1], bending[2]];
+        (0..6).map(|column| {
+            let coupled: f64 = (0..6).map(|row| self.coupled[row][column] * strain[row]).sum();
+            let transverse = self.shear[0][column] * shear[0] + self.shear[1][column] * shear[1];
+            coupled * coupled + transverse * transverse
+        }).sum()
+    }
+}
 fn bad(what: &'static str) -> PlateError { PlateError::BadSection { what } }
 fn admit_spd3(v: &[f64; 9]) -> Result<(), PlateError> {
     if v.iter().any(|x| !x.is_finite())
@@ -48,6 +66,16 @@ fn admit3(v: &[f64; 9]) -> Result<(), PlateError> {
         .map_err(|_| bad("shell viscosity must be symmetric positive semidefinite"))
 }
 impl ShearShellViscosity {
+    pub(super) fn dissipation(&self) -> Result<ShearDissipation, PlateError> {
+        let [a, b, c] = self.shear;
+        Ok(ShearDissipation {
+            coupled: super::factor_coupled_block(&self.membrane, &self.coupling, &self.bending, true)?,
+            shear: fs_material::plane_stress_viscosity::factor_passive_resultant(
+                &[a, b, 0.0, b, c, 0.0, 0.0, 0.0, 0.0],
+            ).map_err(|_| bad("shell shear viscosity factor is unrepresentable"))?,
+        })
+    }
+
     /// Matrices already expressed in the facet strain coordinates, with
     /// engineering in-plane shear in slot three. Shear is [13,13/23,23];
     /// any physical shear-correction factor is included by the section compiler.
@@ -180,6 +208,23 @@ pub fn project_viscosity(
 mod tests {
     use super::*;
     use crate::shell::mitc::{element, ShellMass};
+
+    #[test]
+    fn g0_resolved_weak_material_loss_is_not_clipped_by_admission_tolerance() {
+        let diagonal = 1.0 + 1e-14;
+        let law = ShearShellViscosity::new_coupled(
+            [1.0, 1.0, 0.0, 1.0, diagonal, 0.0, 0.0, 0.0, 1.0],
+            [0.0; 9], [0.0; 9], [0.0; 3],
+        ).unwrap();
+        // Direct original-source quadratic form on [-1,1,0] is diagonal-1.
+        // Its positive Schur pivot lies below the zero-eigenvalue allowance;
+        // that allowance may admit rounding, but must never erase real heat.
+        let expected = diagonal - 1.0;
+        let power = law.dissipation().unwrap().power([-1.0, 1.0, 0.0], [0.0; 3], [0.0; 2]);
+        assert!(power > 0.0);
+        assert!((power / expected - 1.0).abs() < 4e-15, "{power:e} vs {expected:e}");
+    }
+
     fn section() -> ShearShellSection {
         ShearShellSection::from_orthotropic_solid(
             2.0e8,1.1e8,0.25,4.0e7,3.0e7,1.0e7,0.012,800.0,0.31,5.0/6.0).unwrap()

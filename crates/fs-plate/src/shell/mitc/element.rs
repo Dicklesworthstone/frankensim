@@ -238,6 +238,43 @@ impl PreparedStrainField {
         self.in_complete_basis(&m)
     }
 
+    /// Physical viscosity in the SAME complete reference basis as inertia.
+    /// Internal director rates remain independent; neither elastic nor viscous
+    /// static condensation can erase their material dissipation.
+    pub(super) fn complete_viscosity(
+        &self,
+        law: &super::viscosity::ShearShellViscosity,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Matrix, PlateError> {
+        let c = strain_matrix(&self.kin, &self.g, law.coupled_matrices(), cancelled)?;
+        self.in_complete_basis(&c)
+    }
+
+    /// Independent constitutive heat rate on the original positive quadrature.
+    /// Numerical drilling stiffness and the mechanical energy residual never
+    /// enter this sum of squared physical strain-rate channels.
+    pub(super) fn viscous_power(
+        &self,
+        nodal_rate: &[f64; 18],
+        bubble_rate: [f64; 2],
+        law: &super::viscosity::ShearDissipation,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<f64, PlateError> {
+        let mut rate = self.expand(nodal_rate);
+        rate[18] += bubble_rate[0];
+        rate[19] += bubble_rate[1];
+        let mut power = 0.0;
+        for (lambda, weight) in stiffness_rule() {
+            if cancelled() { return Err(PlateError::Cancelled); }
+            let (membrane, bending, shear) = self.eval(&rate, lambda[1], lambda[2]);
+            power += self.g.area_m2 * weight * law.power(membrane, bending, shear);
+        }
+        if !power.is_finite() {
+            return Err(PlateError::BadSection { what: "enriched shell viscous power is unrepresentable" });
+        }
+        Ok(power)
+    }
+
     pub(super) const fn bubble_stiffness(&self) -> [[f64; 2]; 2] {
         self.bubble_stiffness
     }

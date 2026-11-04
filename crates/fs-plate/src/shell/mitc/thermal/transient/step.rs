@@ -1,7 +1,7 @@
 //! Endpoint material changes in one permanent mechanical coordinate basis.
 //!
 //! With h=dt/2, the endpoint-average momentum equation solves
-//! (M+h²K1) v_mid = M v0 + h [f_mid-(K0+K1)q0/2]. Both material
+//! (M+h C+h²K1) v_mid = M v0 + h [f_mid-(K0+K1)q0/2]. Both material
 //! operators act on the SAME physical coordinates, reference inertia and
 //! algebraic drilling constraint. No remap or temperature-rate lift enters.
 
@@ -39,6 +39,11 @@ impl PreparedMitcMidpoint {
         {
             return Err(invalid(
                 "endpoint dynamics requires one exact reference basis, physical inertia and gauge",
+            ));
+        }
+        if !before.same_viscosity(after) {
+            return Err(invalid(
+                "one frozen material viscosity must apply throughout the midpoint interval",
             ));
         }
         before.admit_state(initial)?;
@@ -134,9 +139,13 @@ impl PreparedMitcMidpoint {
             .collect();
         let mean_momentum = action(&after.mass, &mean_velocity, &mut cancelled)?;
         let kinetic_energy_change_j = product(&velocity_change, &mean_momentum)?;
-        // This is ΔKE+Δ(qKq/2)-W_parameter-W_load, evaluated without an
+        let (dissipated_energy_j, facet_dissipated_energy_j) =
+            after.material_dissipation(&midpoint_velocity, self.dt_s, &mut cancelled)?;
+        // This is ΔKE+Δ(qKq/2)+heat-W_parameter-W_load, evaluated without an
         // avoidable cancellation of the same parameter work twice.
-        let energy_residual_j = finite(kinetic_energy_change_j + stiffness_work - load_work_j)?;
+        let energy_residual_j = finite(
+            kinetic_energy_change_j + stiffness_work + dissipated_energy_j - load_work_j,
+        )?;
         check(&mut cancelled)?;
         Ok(MitcTransientStep {
             state,
@@ -145,8 +154,10 @@ impl PreparedMitcMidpoint {
                 load_work_j,
                 quadratic_energy_change_j,
                 stiffness_parameter_work_j,
+                dissipated_energy_j,
                 energy_residual_j,
             },
+            facet_dissipated_energy_j,
         })
     }
 }

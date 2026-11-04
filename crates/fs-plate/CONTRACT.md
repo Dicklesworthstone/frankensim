@@ -1154,7 +1154,7 @@ The current model must retain mesh, directors, constraints and reference mass
 moments. Rebinding is immutable and does not move the physical history.
 
 `PreparedMitcMidpoint::advance_from` uses BOTH endpoint operators in the
-momentum equation. With `h=dt/2`, its factor is `M+h²K1`, and its right-hand side
+momentum equation. With `h=dt/2`, its factor is `M+h C+h²K1`, and its right-hand side
 is `M v0+h[f_mean-(K0+K1)q0/2]`. The native first-law account separates
 `q0^T(K1-K0)q1/2` from load work and quadratic storage. This diagnostic parameter
 work is not itself a material heat source; the coupled thermodynamic owner must
@@ -1163,9 +1163,33 @@ the same stepping kernel and retains exact zero parameter work without an
 extra stiffness application. Numerical gauge forces come from the fixed
 reference nodal gauge, with exactly zero independent-director components.
 
+`with_viscosity` attaches one admitted `ShearShellViscosity` per original facet.
+The SAME material A/B/D/transverse-shear law, native strain field, positive
+quadrature and support-frame scatter assemble sparse C in the complete fixed
+`T0q+Br` coordinates. Independent director rates and all nodal/director and
+membrane/bending couplings are retained. There is no mass-proportional drag,
+modal fit, numerical drilling loss or second constitutive law. The existing
+viscosity assembly work bound is checked before allocation; the midpoint factor
+is reused over fixed-dt intervals. All-zero viscosity retains the original
+lossless path exactly.
+
+Physical heat is independently evaluated from the original constitutive Gram
+factors and midpoint strain rates on each facet's positive quadrature. The
+native first law is `delta(kinetic+quadratic storage)+heat-W_parameter-W_load`;
+its signed defect is never relabeled as heat. `facet_dissipated_energy_j` names
+the original thermal destinations but does not perform a thermal credit.
+These per-facet amounts sum to the report's material heat and must not be
+debited twice. Source validity and any external thermal deposition remain with
+the caller. The viscosity is frozen over one interval; elastic refresh retains
+its exact owner, and differing endpoint viscosity owners refuse. An explicit
+between-step rebind preserves accepted displacement, velocity and reference
+inertia without creating energy or resetting a history. Resolving a physical
+decay still requires timestep convergence; midpoint is not L-stable.
+
 The scope is temperature/parameter-dependent LINEAR elasticity in a fixed
-reference geometry with constant physical mass. No nonlinear prestress,
-material damping, remesh, adjoint or experimental accuracy follows.
+reference geometry with constant physical mass and optional frozen linear
+viscosity. No hereditary loss, nonlinear prestress, remesh, adjoint or
+experimental accuracy follows.
 `tests/thermal_shell_inertia.rs`
 checks analytic bubble/cross inertia, independent dynamic internal motion,
 static-limit recovery, repeated midpoint conservation and atomic refusals.
@@ -1173,6 +1197,10 @@ static-limit recovery, repeated midpoint conservation and atomic refusals.
 add fixed-basis physical observation and inertia, scalar softened-oscillator
 and two-director momentum references, operator-parameter work, compatibility
 and cancellation. Compiler checks do not establish numerical execution.
+`tests/thermal_shell_viscosity.rs` adds full-operator parity with the existing
+modal projection, independent damped-director convergence over three time
+steps, nonproportional heat/work closure, rigid-motion and gauge-loss exclusion,
+material refresh, exact zero-loss parity and transactional refusals.
 
 ## Equilibrium of tied shell assemblies before modal reduction
 

@@ -16,7 +16,9 @@
 //! stiffness may change in this ORIGINAL fixed coordinate basis. Physical
 //! reference mass is assembled directly from the original director velocity
 //! field; numerical drilling inertia in a regularized modal pencil is excluded.
-//! This lane does not claim finite rotation, prestressed tangents, damping,
+//! Optional physical Kelvin--Voigt resultants damp the complete original
+//! strain-rate field, including independent director motion. This lane does
+//! not claim finite rotation, prestressed tangents, hereditary material memory,
 //! moving geometry, or temperature-dependent reference inertia.
 //! Director-axis drilling has no physical inertia. Its algebraic constraint
 //! must hold for initial coordinates and rates; unsupported director-axis
@@ -34,6 +36,7 @@ use std::sync::Arc;
 
 mod material;
 mod step;
+mod viscosity;
 
 /// An immutable full enriched pencil sharing the original nodal shell model.
 #[derive(Clone, Debug)]
@@ -47,6 +50,7 @@ pub struct EnrichedMitcShell {
     stiffness: Arc<Csr>,
     mass: Arc<Csr>,
     gauges: Arc<Vec<AlgebraicGauge>>,
+    viscosity: Option<Arc<viscosity::EnrichedViscosity>>,
 }
 
 #[derive(Debug)]
@@ -148,8 +152,11 @@ pub struct MitcTransientReport {
     /// Polarized work from changing the physical stiffness at fixed reference
     /// coordinates: q0^T (K1-K0) q1 / 2 [J]. It is not a caloric heat source.
     pub stiffness_parameter_work_j: f64,
-    /// Kinetic plus quadratic storage change, minus stiffness-parameter work
-    /// and total load work [J].
+    /// Nonnegative material heat dt times the original midpoint strain-rate
+    /// power [J]. Numerical drilling work and integration defects are excluded.
+    pub dissipated_energy_j: f64,
+    /// Kinetic plus quadratic storage change plus material heat, minus
+    /// stiffness-parameter work and total load work [J].
     pub energy_residual_j: f64,
 }
 
@@ -159,6 +166,11 @@ pub struct MitcTransientStep {
     pub state: MitcTransientState,
     /// Mechanical midpoint balance on this interval.
     pub report: MitcTransientReport,
+    /// Physical material heat [J] in original facet order, for a caller's
+    /// explicit thermal transfer. Empty when no viscosity is attached. These
+    /// values are already included in report.dissipated_energy_j; do not debit
+    /// them again from mechanics or automatically add other loss channels.
+    pub facet_dissipated_energy_j: Vec<f64>,
 }
 
 impl EnrichedMitcShell {
@@ -237,6 +249,7 @@ impl EnrichedMitcShell {
             stiffness,
             mass,
             gauges,
+            viscosity: None,
         })
     }
 
@@ -420,7 +433,7 @@ impl EnrichedMitcShell {
         })
     }
 
-    /// Factor M + (dt/2)^2 K once, sharing the static owner's equilibrated
+    /// Factor M + (dt/2) C + (dt/2)^2 K once, sharing the static owner's equilibrated
     /// sparse LDLT, compensated refinement and true-residual gate. Factorization
     /// and individual sparse kernels remain indivisible cancellation regions.
     pub fn prepare_midpoint(
@@ -442,6 +455,12 @@ impl EnrichedMitcShell {
                 let (cols, vals) = matrix.row(row);
                 for (&col, &val) in cols.iter().zip(vals) {
                     coo.push(row, col, finite(scale * val)?);
+                }
+            }
+            if let Some(viscosity) = &self.viscosity {
+                let (cols, vals) = viscosity.matrix.row(row);
+                for (&col, &val) in cols.iter().zip(vals) {
+                    coo.push(row, col, finite(h * val)?);
                 }
             }
         }
