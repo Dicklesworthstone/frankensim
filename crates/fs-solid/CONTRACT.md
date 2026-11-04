@@ -3891,7 +3891,9 @@ oracles, retained inelastic prehistory and subsequent native motion.
 an already inertia-bound thermal tetrahedral solid; a quasistatic owner without
 original reference inertia refuses. `FiniteThermoplasticHexMotion` supplies
 the same event for both standard and mean-dilatation Hex8 formulations, using
-the original tensor-product quadrature mass and physical current positions.
+a separate 3x3x3 reference-mass rule, exact for warped trilinear bricks, and
+physical current positions. The eight material quadrature histories are
+unchanged by this mass rule.
 The thermal family bindings and reference temperatures, current temperature,
 all plastic/creep and quadrature history, physical/assumed deformation, stress,
 free energy and internal energy remain unchanged. The event advances no

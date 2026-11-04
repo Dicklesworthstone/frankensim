@@ -6,10 +6,10 @@
 //! identity. Every Newton trial uses the same accepted history and velocity;
 //! all proposed material, thermal and motion state is returned atomically.
 //!
-//! Mass integrates the original trilinear shapes over the original quadrature
-//! volumes. Neither current volume nor the assumed mean dilatation changes that
-//! inventory. Numerical kinetic loss remains separate from plastic/creep heat
-//! and from the signed material/projection endpoint integration defects.
+//! Mass integrates the original trilinear shapes with a separate 3×3×3 rule,
+//! exact on warped reference bricks. Neither current volume nor assumed mean
+//! dilatation changes that inventory. Numerical kinetic loss remains separate
+//! from plastic/creep heat and the signed material/projection endpoint defects.
 //!
 //! Density is explicitly supplied reference data; this binding does not create
 //! a calibration or material-card claim. Temperature is prescribed per cell.
@@ -19,6 +19,7 @@
 use std::sync::Arc;
 
 use fs_exec::Cx;
+use fs_feec::highorder::quad1d::gauss_legendre;
 use fs_material::plastic::finite::thermal::{AffineThermalFiniteJ2, FiniteThermalJ2Material};
 
 use super::{
@@ -26,6 +27,7 @@ use super::{
     checkpoint, energy_gate, invalid,
 };
 use crate::inertia::{BackwardEulerInertia, InertiaError, ReferenceMass};
+use crate::linear3::hex::hex8_point;
 use crate::plastic3::{IncrementRecord, IncrementSettings, SmallStrainTetError};
 
 /// The same independent material and kinetic-loss gates as the native tetrahedra.
@@ -79,8 +81,9 @@ impl<'a, L: FiniteThermalJ2Material> FiniteThermoplasticHexMotion<'a, L> {
     /// initial velocity. No constitutive history or source identity is rebuilt.
     ///
     /// Density has one positive finite value per original cell and velocity
-    /// one finite vector per original node. The original eight-point geometry
-    /// supplies the consistent trilinear mass, exact on affine reference bricks.
+    /// one finite vector per original node. A separate 27-point reference rule
+    /// supplies consistent mass, exact for warped trilinear bricks as well as
+    /// affine ones. The eight constitutive histories remain unchanged.
     /// The retained tangent-entry budget includes both material and mass entries
     /// before sparse duplicate assembly: at most 768 entries per original cell.
     pub fn try_new(
@@ -116,12 +119,39 @@ impl<'a, L: FiniteThermalJ2Material> FiniteThermoplasticHexMotion<'a, L> {
             ))
             .into());
         }
+        // On warped Q1 maps, det(J) is quadratic in each coordinate. Shape
+        // products raise the mass integrand to degree four, beyond the material
+        // rule's two-point exactness. Build the exact reference rule once per
+        // cell, then retain only the assembled immutable mass.
+        let (coordinate, weight) = gauss_legendre(3);
         let mass = ReferenceMass::from_hex8_quadrature(
-            solid.elements.iter().map(|element| {
-                (
-                    element.nodes,
-                    element.points.map(|point| (point.shapes, point.volume_m3)),
-                )
+            solid.elements.iter().enumerate().map(|(index, element)| {
+                let positions = element.nodes.map(|node| solid.nodes_m[node]);
+                let mut points = [([0.0; 8], 0.0); 27];
+                for i in 0..3 {
+                    for j in 0..3 {
+                        for k in 0..3 {
+                            let q = 9 * i + 3 * j + k;
+                            let point = hex8_point(
+                                positions,
+                                [coordinate[i], coordinate[j], coordinate[k]],
+                                solid.budget.minimum_scaled_jacobian,
+                                index,
+                                q,
+                            )
+                            .map_err(|error| {
+                                InertiaError::InvalidInput {
+                                    what: error.to_string(),
+                                }
+                            })?;
+                            points[q] = (
+                                point.shapes,
+                                point.determinant_m3 * weight[i] * weight[j] * weight[k],
+                            );
+                        }
+                    }
+                }
+                Ok((element.nodes, points))
             }),
             reference_density_kg_m3,
             solid.displacement_m.as_flattened().len(),

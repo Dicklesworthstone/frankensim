@@ -258,14 +258,16 @@ impl ReferenceMass {
         Self::from_matrix(matrix.assemble(), reference_mass_kg, ndofs, cx).map(|mass| (mass, means))
     }
 
-    /// Consistent Hex8 mass at the original full eight-point quadrature.
-    /// The admitted geometry supplies positive reference weights and the native
-    /// trilinear shapes; neither current volume nor assumed dilatation enters.
-    /// The matrix is exact for affine bricks and uses the original geometry's
-    /// quadrature for warped cells. The same nonnegative mass action supports
-    /// the existing momentum stopping gate and kinetic-work identity.
-    pub(crate) fn from_hex8_quadrature(
-        geometry: impl ExactSizeIterator<Item = ([usize; 8], [([f64; 8], f64); 8])>,
+    /// Consistent Hex8 mass from admitted original reference quadrature.
+    /// The geometry supplies positive reference weights and native trilinear
+    /// shapes; neither current volume nor assumed dilatation enters. Three
+    /// Gauss points per coordinate integrate warped Q1 mass exactly. Fallible
+    /// geometry is consumed one cell at a time, without retaining another mesh
+    /// of quadrature data beside the constitutive histories.
+    pub(crate) fn from_hex8_quadrature<const N: usize>(
+        geometry: impl ExactSizeIterator<
+            Item = Result<([usize; 8], [([f64; 8], f64); N]), InertiaError>,
+        >,
         densities: &[f64],
         ndofs: usize,
         cx: &Cx<'_>,
@@ -282,8 +284,9 @@ impl ReferenceMass {
         }
         let mut mass = Coo::new(ndofs, ndofs);
         let mut reference_mass_kg = 0.0;
-        for ((nodes, points), &density) in geometry.zip(densities) {
+        for (geometry, &density) in geometry.zip(densities) {
             checkpoint(cx)?;
+            let (nodes, points) = geometry?;
             if nodes.iter().any(|&node| node >= ndofs / 3)
                 || (0..8).any(|a| nodes[..a].contains(&nodes[a]))
             {
@@ -1279,7 +1282,7 @@ mod tet10_tests {
             let p1 = ReferenceMass::new([([0, 1, 2, 3], 1.0 / 6.0)].into_iter(), &[6.0], 12, cx)
                 .unwrap();
             let g = 1.0 / 3.0_f64.sqrt();
-            let points = core::array::from_fn(|q| {
+            let points: [([f64; 8], f64); 8] = core::array::from_fn(|q| {
                 let shapes = core::array::from_fn(|a| {
                     (0..3)
                         .map(|i| {
@@ -1291,7 +1294,7 @@ mod tet10_tests {
                 (shapes, 1.0)
             });
             let hex = ReferenceMass::from_hex8_quadrature(
-                [([0, 1, 2, 3, 4, 5, 6, 7], points)].into_iter(),
+                [Ok(([0, 1, 2, 3, 4, 5, 6, 7], points))].into_iter(),
                 &[6.0],
                 24,
                 cx,
