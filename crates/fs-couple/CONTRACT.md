@@ -8632,9 +8632,13 @@ None.
   674860b2e the held-room G4 card without the row rendered wav 0820a975 and
   flows 866aa73f, the posted control's bytes). REFUSALS: the row with no
   `window embouchure` before it, a law other than `open-strip`, trailing
-  fields, a card without the forced jet, a late attachment, and an area that
-  is not finite and positive. NOT CLAIMED: a measured flute mouth flow, a
-  uniform velocity over the strip, and the terms left on `S_m`.
+  fields, a card without the forced jet, a late attachment, an area that is
+  not finite and positive, and, while rendering, a mouth flow whose speed over
+  the named area reaches the gas's speed of sound (MB 1833: PF-661 slide G4 and
+  C5 cards with the source term and `mouth_loss none` passed it and returned
+  rc 0). The check only reads and refuses, so a render that stays below it is
+  unchanged. NOT CLAIMED: a measured flute mouth flow, a uniform velocity over
+  the strip, and the terms left on `S_m`.
 
   OPT-IN JET SOURCE ON THE STRIP (term `source` on the same row,
   `jet_forcing_area open-strip source`; `FlueVoice::with_jet_source_area`; MB

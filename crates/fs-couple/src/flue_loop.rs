@@ -358,6 +358,15 @@ fn precedes_motion(delay_samples: f64, moving: u64) -> bool {
     delay_samples >= 1.0 && (delay_samples-1.0).floor() >= moving as f64
 }
 
+// A mouth flow's speed over a card's own forcing area, refused at the gas's speed of sound. Only on
+// a card naming its own area. This reads and refuses; a slower flow is untouched.
+fn check_forcing_speed(q: f64, forcing_area: f64, s_m: f64, sound_speed: f64) -> Result<(), FlueError> {
+    if forcing_area != s_m && (q / forcing_area).abs() >= sound_speed {
+        return Err(FlueError::Invalid { what: "mouth flow over the jet forcing area reached the speed of sound" });
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
 struct JetStepCoefficients {
     q_max: f64,
@@ -2277,6 +2286,7 @@ impl FlueVoice {
             if ![eta, flow, p_source, q, p_plus, p_in].iter().all(|x| x.is_finite()) {
                 return Err(FlueError::Invalid { what: "flue trial left the finite physical domain" });
             }
+            check_forcing_speed(q, forcing_area, s_m, self.gas.sound_speed)?;
             let radiation_candidate = self.mouth_radiation.as_ref()
                 .map(|load| load.candidate(q)).transpose()?;
             let window_candidate = self.window_radiation.as_ref()
@@ -3598,6 +3608,22 @@ mod forced_jet_tests {
         late.step_block(&mut [0.0; 8]).unwrap();
         assert!(matches!(late.with_jet_forcing_area(1e-4),
             Err(FlueError::Invalid { what }) if what.contains("cold voice")));
+    }
+
+    #[test]
+    fn g6_jet_forcing_area_refuses_a_mouth_flow_at_the_speed_of_sound() {
+        // The refusal through the whole render is on the PF-661 G4 and C5 cards without a mouth loss,
+        // whose flows pass it at 1.6 s and 1.4 s; here is the rule itself.
+        let (s_m, area, c) = (1e-4, 6e-5, 346.49);
+        for q in [1.001 * c * area, -1.001 * c * area, 2.0 * c * area] {
+            assert!(matches!(check_forcing_speed(q, area, s_m, c),
+                Err(FlueError::Invalid { what }) if what.contains("speed of sound")));
+        }
+        for q in [0.0, 0.999 * c * area, -0.999 * c * area] {
+            assert!(check_forcing_speed(q, area, s_m, c).is_ok());
+        }
+        // A card that names no area of its own is never refused, whatever the flow.
+        assert!(check_forcing_speed(2.0 * c * s_m, s_m, s_m, c).is_ok());
     }
 
     // jet_source_area: the default source coefficient's law on another area, on the same run as above.
