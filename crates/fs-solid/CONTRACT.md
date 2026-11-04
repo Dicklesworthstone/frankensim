@@ -310,8 +310,9 @@ Source-bound hyperelastic sheets can explicitly select exact incompressibility
 with `ResolvedSheet::with_incompressible_hyperelastic_membrane`. The existing
 3-D `MembranePatch` consumes the native constrained material potential and
 tangent through the same material-axis Green strain as its finite-compliance
-path. Current normal thickness contracts inversely with area, transverse shears
-relax for tilted fibres, and reference areal mass remains unchanged. No large
+path. At unchanged natural reference, normal thickness contracts inversely
+with area. Transverse shears relax for tilted fibres and reference areal mass
+remains unchanged. No large
 bulk penalty, extra stiffness or inferred bending model enters the solve.
 Dead-load equilibrium, current-area pressure and loaded small-vibration modes
 therefore share the same explicit material choice, supports and reference mass.
@@ -323,6 +324,19 @@ energy, support reactions and the loaded modal eigenvalue under fixed-rim
 pressure. These are discrete manufactured controls; they do not establish
 continuum convergence, material calibration, wrinkling or finite-amplitude
 vibration. Full native test execution requires the complete workspace.
+
+A source-bound hyperelastic sheet may also carry an explicit finite natural
+reference, including three retained mean-thermal-expansion endpoints. The
+same native membrane mechanics then consumes its pulled-back constitutive
+energy, resultants and tangent. The installed mesh, reference thickness and
+areal mass remain original; only the elastic part Fe=F G^-1 sets constitutive
+stretch and fibre activation. Exact incompressibility acts on Fe and permits
+total det(F)=det(G). Source temperatures/axis roles and the endpoint material
+context stay in the shared immutable material carrier. Native consumer tests
+cover tilted-fibre frame/tangent behavior and an independently derived heated
+pressure-loaded pyramid equilibrium and modal stiffness with unchanged inertia.
+This is fixed-endpoint mechanical preparation; it supplies no heat integrator,
+evolving thermal work or added wrinkling/bending law.
 
 `MembranePatch::solve_with_pressure` uses the original membrane material,
 kinematics and Newton--Krylov owner with a uniform held pressure jump. Pressure

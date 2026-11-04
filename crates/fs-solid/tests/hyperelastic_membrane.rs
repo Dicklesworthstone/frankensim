@@ -10,8 +10,8 @@ use fs_material::hyper::plane_stress::PlaneStressSettings;
 use fs_material::sheet::{
     AREAL_DENSITY, ResolvedSheet, SheetCapabilities, THICKNESS, resolve_sheet,
 };
-use fs_material::state_point::MaterialPropertySelection;
-use fs_qty::Dims;
+use fs_material::state_point::{MaterialPropertySelection, resolve_mean_thermal_expansion_strain};
+use fs_qty::{Dims, QuantitySpec, Temperature};
 use fs_solid::membrane::vibration::VibrationSettings;
 use fs_solid::membrane::{
     MembraneBudget, MembraneDomain, MembraneError, MembranePatch, MembraneSolveSettings,
@@ -519,4 +519,189 @@ fn incompressible_source_drives_native_pressure_equilibrium_and_loaded_vibration
         p.solve_with_pressure(&zero, pressure, &fixed, &zero, settings(), || true),
         Err(MembraneError::Cancelled)
     ));
+}
+
+#[test]
+fn natural_reference_preserves_anisotropic_objectivity_and_assembled_tangent() {
+    let sheet = source_with_constraint(true, 1.0, MASS_KG_M2, true)
+        .1
+        .with_hyperelastic_reference_stretches([1.04, 0.98, 1.02])
+        .unwrap();
+    let p = patch(triangle(), sheet, 0.34);
+    let u = deformation(&p);
+    let direction = vec![[0.4, -0.1, 0.7], [-0.3, 0.5, -0.1], [0.2, 0.1, -0.4]];
+    let tangent = p.tangent_apply(&u, &direction, || false).unwrap();
+    let h = 1e-7;
+    let offset = |sign: f64| {
+        u.iter()
+            .zip(&direction)
+            .map(|(u, v)| core::array::from_fn(|i| u[i] + sign * h * v[i]))
+            .collect::<Vec<_>>()
+    };
+    let low = p.evaluate(&offset(-1.0), || false).unwrap();
+    let high = p.evaluate(&offset(1.0), || false).unwrap();
+    for i in 0..3 {
+        for j in 0..3 {
+            close(
+                (high.internal_gradient_n[i][j] - low.internal_gradient_n[i][j]) / (2.0 * h),
+                tangent[i][j],
+                3e-5,
+                3e-6,
+            );
+        }
+    }
+    let (s, c) = 0.73_f64.sin_cos();
+    let rotate = |v: [f64; 3]| [c * v[0] - s * v[2], v[1], s * v[0] + c * v[2]];
+    let moved = p
+        .mesh()
+        .nodes
+        .iter()
+        .zip(&u)
+        .map(|(x, u)| {
+            let y = rotate([x[0] + u[0], x[1] + u[1], u[2]]);
+            [y[0] - x[0] + 0.2, y[1] - x[1] - 0.1, y[2] + 0.07]
+        })
+        .collect::<Vec<_>>();
+    let base = p.evaluate(&u, || false).unwrap();
+    let changed = p.evaluate(&moved, || false).unwrap();
+    close(changed.strain_energy_j, base.strain_energy_j, 2e-12, 5e-13);
+    let rotated_direction = direction.iter().copied().map(rotate).collect::<Vec<_>>();
+    let rotated_tangent = p
+        .tangent_apply(&moved, &rotated_direction, || false)
+        .unwrap();
+    for i in 0..3 {
+        for (a, b) in rotate(base.internal_gradient_n[i])
+            .into_iter()
+            .zip(changed.internal_gradient_n[i])
+        {
+            close(a, b, 3e-11, 5e-12);
+        }
+        for (a, b) in rotate(tangent[i]).into_iter().zip(rotated_tangent[i]) {
+            close(a, b, 3e-9, 5e-12);
+        }
+    }
+}
+
+#[test]
+fn mean_thermal_reference_changes_native_pressure_equilibrium_and_modes_at_fixed_mass() {
+    let (base, _) = source_with_constraint(false, 1.0, MASS_KG_M2, true);
+    let mut claims = base.claims().clone();
+    let temperature = QuantitySpec::dimensional(Temperature::DIMS);
+    let mean_key = PropertyKey::new(
+        "mean_engineering_length_expansion",
+        Dims([0, 0, 0, -1, 0, 0]),
+    );
+    let alpha = 0.003;
+    claims
+        .insert_claim(PropertyClaim {
+            key: mean_key.clone(),
+            value: PropertyValue::Scalar {
+                value: alpha,
+                dims: mean_key.dims(),
+            },
+            interpolation: InterpolationPolicy::ConstantWithinValidity,
+            validity: ValidityDomain::unconstrained()
+                .with_quantity("T_ref", temperature, 300.0, 310.0)
+                .with_quantity("T_hot", temperature, 300.0, 310.0),
+            uncertainty: UncertaintyModel::Unstated,
+            observations: vec![],
+            provenance: base.models()[0].provenance.clone(),
+        })
+        .unwrap();
+    let card = MaterialCard::assemble(base.id().clone(), claims, base.models().to_vec()).unwrap();
+    let original = resolve_sheet(
+        &card,
+        &QueryPoint::new()
+            .with_quantity("T", temperature, 300.0)
+            .unwrap(),
+        SheetCapabilities {
+            membrane: false,
+            bending: false,
+        },
+        MaterialPropertySelection::SingleClaimOnly,
+    )
+    .unwrap()
+    .with_incompressible_hyperelastic_membrane(
+        &card,
+        0,
+        PlaneStressSettings {
+            relative_tolerance: 2e-13,
+            ..PlaneStressSettings::default()
+        },
+    )
+    .unwrap();
+    let mean = resolve_mean_thermal_expansion_strain(
+        &card,
+        &mean_key,
+        &QueryPoint::new()
+            .with_quantity("T_ref", temperature, 300.0)
+            .unwrap()
+            .with_quantity("T_hot", temperature, 310.0)
+            .unwrap(),
+        "T_ref",
+        "T_hot",
+        MaterialPropertySelection::SingleClaimOnly,
+    )
+    .unwrap();
+    let selected = original
+        .clone()
+        .with_hyperelastic_mean_thermal_expansion(
+            &card,
+            [mean.clone(), mean.clone(), mean.clone()],
+            "T_ref",
+            "T_hot",
+        )
+        .unwrap();
+    let p = patch(diamond(), selected.clone(), 0.0);
+    let cold = patch(diamond(), original, 0.0);
+    let g = 1.0 + alpha * 10.0;
+    let stretch = 1.08;
+    let height = 0.02;
+    // W_ref(h)=g^3 W_native(h/g). Differentiate with respect to physical
+    // center height; the original pressure geometry and reference mass stay.
+    let (f, w, k) = incompressible_pyramid_oracle(stretch / g, height / g);
+    let (force, energy, stiffness) = (g * g * f, g * g * g * w, g * k);
+    let pressure = -3.0 * force / (0.02 * stretch * stretch);
+    let zero = vec![[0.0; 3]; 5];
+    let fixed = fixed_rim(stretch);
+    let spectrum = p
+        .solve_vibration_with_pressure(
+            &zero,
+            pressure,
+            &fixed,
+            &zero,
+            settings(),
+            VibrationSettings {
+                max_free_dofs: 1,
+                relative_residual_tolerance: 1e-10,
+            },
+            || false,
+        )
+        .unwrap();
+    let equilibrium = spectrum.equilibrium();
+    close(equilibrium.displacement_m[0][2], -height, 2e-10, 2e-10);
+    close(equilibrium.strain_energy_j, energy, 3e-10, 3e-10);
+    close(equilibrium.pressure_work_j, force * height, 3e-10, 3e-10);
+    close(equilibrium.residual_n[0][2], 0.0, 2e-9, 0.0);
+    let mass = 0.02 * MASS_KG_M2 / 3.0;
+    close(spectrum.modes()[0].lambda, stiffness / mass, 1e-6, 2e-8);
+    assert_eq!(p.nodal_mass_kg(), cold.nodal_mass_kg());
+    assert_eq!(p.reference_mass_kg(), cold.reference_mass_kg());
+    assert_eq!(&p.sheets()[0], &selected);
+    let fs_material::sheet::MembraneLaw::Hyperelastic(bound) =
+        p.sheets()[0].membrane_law().unwrap()
+    else {
+        panic!("wrong law")
+    };
+    assert_eq!(bound.mean_thermal_expansion().unwrap()[0], mean);
+    assert_eq!(bound.material().card_identity(), card.content_hash());
+    assert_eq!(bound.model().context().axes()["T"], 310.0);
+    assert_eq!(bound.material().query().axes()["T"], 300.0);
+    let unchanged_reference = cold
+        .solve_with_pressure(&zero, pressure, &fixed, &zero, settings(), || false)
+        .unwrap();
+    assert!(
+        unchanged_reference.displacement_m[0][2].abs() < 0.95 * height,
+        "finite thermal expansion must change the actual prestressed equilibrium"
+    );
 }

@@ -98,8 +98,9 @@ reference areal mass and thickness, extra selected properties, receipts and
 model provenance survive the shared `MembraneLaw::Hyperelastic` carrier.
 Mechanical/frequency-conditioned reference properties, competing selected
 membrane capabilities, missing model/context and native domain failures refuse.
-The supplied thickness belongs to the model's original stress-free reference;
-bending and evolving thermal/reference changes are not inferred.
+The supplied thickness and areal mass belong to the original mesh reference.
+Without an explicit natural-reference selection that reference is stress-free;
+bending and evolving temperature/history are not inferred.
 
 For engineering Green strain `[E11,E22,2E12]`, an objective Cholesky
 representative supplies the original native plane-stress owner, including all
@@ -113,9 +114,10 @@ and unresolved principal-stretch boundaries refuse two-sided vibration
 admission. Native local stable-branch limits remain; no wrinkling or global
 stability certificate is added.
 
-`with_incompressible_hyperelastic_membrane` explicitly selects `J=1` through
-the original `hyper::incompressible_plane_stress` owner. The reference thickness
-is unchanged; its current normal stretch is the reciprocal in-plane area ratio.
+`with_incompressible_hyperelastic_membrane` explicitly selects elastic `Je=1`
+through the original `hyper::incompressible_plane_stress` owner. Reference
+thickness is unchanged. With the original natural reference, current normal
+stretch is the reciprocal in-plane area ratio.
 Both transverse shears relax against the native energy remainder and the full
 constrained tangent flows through the same Green-strain chain rule. No bulk
 penalty is evaluated or replaced. The original model card, source bundle,
@@ -126,6 +128,27 @@ finite-compliance selection, including in membrane equality. The existing
 `MembranePatch` equilibrium, pressure and vibration consumers use either choice
 through the same `MembraneLaw` without another spatial solver.
 
+`with_hyperelastic_reference_stretches` explicitly supplies positive natural
+length ratios in warp/weft/normal order. The fixed diagonal G maps the mesh
+reference to the native model's stress-free frame: Fe=F G^-1 and
+W_ref=det(G) W_native(Fe). Exact Piola and tangent pullbacks precede the same
+Green-strain chain rule; no second local Newton solve is introduced. The
+original thickness and areal mass remain fixed. Native stretch and fibre
+activation bounds apply to Fe. Exact incompressibility therefore constrains
+elastic volume while total det(F)=det(G), permitting a changed natural volume.
+The default reference and explicit identity G retain original response bits.
+
+`with_hyperelastic_mean_thermal_expansion` binds three finite mean-expansion
+endpoint sources and explicit reference/endpoint temperature-axis roles. Each
+length ratio is 1+the source's engineering strain. The exact card, typed fixed
+context and both temperatures must agree across sources; original mass,
+thickness and initial model belong to the reconstructed reference context.
+The same selected model is admitted at the endpoint context. All three source
+objects and axis roles survive in the material carrier. Small-strain alpha
+integrals are not reinterpreted as finite reference maps. Reference selection
+is explicit and occurs once; no temperature evolution, reciprocal heat or
+work balance for changing G is supplied by this fixed-endpoint preparation.
+
 `sheet_hyperelastic` checks independent compressible Neo-Hookean reduction,
 all native model tangents, tilted-fibre transverse relaxation and source/reference
 refusals. Its exact-incompressibility controls add an independent analytic
@@ -134,6 +157,12 @@ bitwise independence of unused bulk parameters, tilted-fibre traction closure,
 and retained source/mass/domain controls. `hyperelastic_membrane` checks 3-D
 force/tangent objectivity, independent mass, and finite-deformation
 dead-load/pressure equilibrium against an independent pyramid oracle.
+
+Natural-reference regressions add independent finite/exact Neo-Hookean
+energy/resultant/tangent formulas, all-model derivatives, elastic-domain and
+HGO-activation admission, typed thermal sources and unchanged mass. Bounded
+original-source numerical checks execute the pullback and constitutive chain;
+full typed-source and native consumer tests still require the complete workspace.
 
 ## Fixed-mass PCM storage in a sensible solid matrix
 

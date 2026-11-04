@@ -163,6 +163,52 @@ impl ResolvedSheet {
         self.hyperelastic = Some(Arc::new(law));
         Ok(self)
     }
+    /// Map the original mesh reference to an explicitly specified stress-free
+    /// material frame, with positive warp/weft/normal length ratios.
+    /// Native energy is per relaxed volume: W_ref=det(G) W(F G^-1).
+    /// Original reference thickness and areal mass remain unchanged. This is
+    /// a fixed modeling choice, not inferred thermal data. Select only once.
+    pub fn with_hyperelastic_reference_stretches(
+        mut self,
+        stretches: [f64; 3],
+    ) -> Result<Self, SheetError> {
+        let law = self
+            .hyperelastic
+            .as_deref()
+            .ok_or(SheetError::Invalid(
+                "select a hyperelastic membrane before its natural reference",
+            ))?
+            .clone()
+            .with_reference_stretches(stretches)?;
+        self.hyperelastic = Some(Arc::new(law));
+        Ok(self)
+    }
+
+    /// Bind three source-declared MEAN engineering expansion endpoints in
+    /// warp/weft/normal order. Their fixed principal axes are the sheet axes.
+    /// The supplied axis roles become canonical T in the reference/current
+    /// mechanical contexts. Original mass/thickness must be resolved at the
+    /// typed reference context; the same model is admitted at the endpoint.
+    /// Retains every source/temperature role. No small-strain alpha conversion,
+    /// temperature history, reciprocal heat or independent bending is inferred.
+    pub fn with_hyperelastic_mean_thermal_expansion(
+        mut self,
+        card: &MaterialCard,
+        expansion: [crate::state_point::MeanThermalExpansionStrain; 3],
+        reference_axis: &str,
+        endpoint_axis: &str,
+    ) -> Result<Self, SheetError> {
+        let law = self
+            .hyperelastic
+            .as_deref()
+            .ok_or(SheetError::Invalid(
+                "select a hyperelastic membrane before its thermal reference",
+            ))?
+            .clone()
+            .with_mean_thermal_expansion(card, expansion, reference_axis, endpoint_axis)?;
+        self.hyperelastic = Some(Arc::new(law));
+        Ok(self)
+    }
     /// Exact selected constitutive law, shared immutably across triangles.
     /// Both finite-compliance and exactly incompressible hyperelastic selections
     /// retain the same native law carrier and original source identity.
