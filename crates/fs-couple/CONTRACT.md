@@ -2962,6 +2962,36 @@ and five multi-pocket tests execute against the same shared implementation.
 The simultaneous-collapse fixture also preserves atomic refusal when the
 subsequent dispersive collision cavitates at an undeclared liquid station.
 
+### Prescribed flow driving the same liquid/pocket trajectory
+
+`CavitatingDuctPockets::new_with_driven_port` assigns one original endpoint
+port to a prescribed flow source, separately from one to eight pocket ports.
+`advance_with_port_flow` holds a signed into-duct flow for one interval;
+`advance_with_port_flow_and_gas_heat` adds the existing caloric heat callback
+on that same trajectory. Flow may change between accepted intervals without
+resetting waves, wall memory, gas inventory or the native clock. Existing
+advance methods retain zero prescribed drive.
+
+The original generator receives `b_drive Q_drive`. Active vapor/gas pressure
+constraints and initial/event contact resolution all include
+`B_A^T b_drive Q_drive`; the pure-vapor path caches its affine response.
+Two additional original RK coordinates integrate drive pressure impulse and
+acoustic work. Complete original-port receipts pass through
+`candidate_from_trajectory` before the combined balance subtracts that
+external work exactly once. `DuctDriveStep` exposes transported volume,
+endpoint absolute pressure, pressure-perturbation impulse and acoustic work.
+Reference-pressure transport `p_ref integral Q_drive dt` is reported
+separately; it is neither acoustic storage nor generated heat.
+
+Original material, liquid-strain, pocket-volume, interface-Mach and cancellation
+admissions remain active. The drive's declared flow also passes its endpoint
+Mach and represented volume/work bounds. Cavitation at the drive endpoint
+refuses; this boundary does not silently become another pocket. This remains
+the original fixed-geometry, small-strain liquid model, with no inferred pump
+curve, valve law, moving piston mesh or strong-collapse shock treatment.
+The focused driven-port regressions are authored; native execution is not
+claimed by this checkpoint.
+
 ### Trapped noncondensable gas on the same pocket trajectory
 
 `CavitatingDuctPockets::new_with_trapped_gas` attaches an original

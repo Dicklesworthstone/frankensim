@@ -2,6 +2,8 @@ use super::*;
 use fs_duct::dg::{DgMesh, DgSidePort};
 use fs_duct::{Duct, Segment};
 
+mod driven;
+
 const RADIUS: f64 = 0.01;
 const RHO: f64 = 1000.0;
 const REFERENCE: f64 = 100_000.0;

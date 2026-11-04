@@ -143,6 +143,7 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
         scale: f64,
         volumes: &[f64],
         thermal: Option<&CaloricStage>,
+        drive_inflow: f64,
         work: &mut GasFlowWorkspace,
     ) -> Result<[f64; MAX_DUCT_POCKETS], DuctCavityError> {
         let count = self.sites.len();
@@ -174,9 +175,12 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
             }
             work.matrix[i * count + i] +=
                 stiffness[i] / self.column_norms[i] / self.column_norms[i];
-            work.rhs[i] = (-scale * dot(&self.pressure_rates[i * x.len()..(i + 1) * x.len()], x)
-                + thermal.map_or(0.0, |stage| stage.forcing[i]))
-                / self.column_norms[i];
+            let mut rate = -scale * dot(&self.pressure_rates[i * x.len()..(i + 1) * x.len()], x)
+                + thermal.map_or(0.0, |stage| stage.forcing[i]);
+            if drive_inflow != 0.0 {
+                rate -= self.drive_pressure_rate(i, drive_inflow);
+            }
+            work.rhs[i] = rate / self.column_norms[i];
         }
         work.solver
             .solve_into(&work.matrix, &work.rhs, &mut work.solution)

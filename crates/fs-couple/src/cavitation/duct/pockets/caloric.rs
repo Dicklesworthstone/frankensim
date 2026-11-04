@@ -106,7 +106,7 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
         Heat: Fn(f64, &CaloricGasObservation) -> Result<f64, DuctCavityError>,
         Cancel: FnMut() -> bool,
     {
-        self.advance_kernel(end_time_s, numerics, heat, cancelled)
+        self.advance_kernel(end_time_s, numerics, heat, 0.0, cancelled)
     }
 
     pub(super) fn prepare_caloric(

@@ -9,7 +9,7 @@
 //! outside this negligible-vapor-mass model.
 //!
 //! All active pressures are constrained TOGETHER by the Gram system
-//! (B_A^T B_A + diag(K_g)) Q_A = -B_A^T L x + f_heat.
+//! (B_A^T B_A + diag(K_g)) Q_A = -B_A^T (L x + b_drive Q_drive) + f_heat.
 //! A polytrope has K_g=-dp_g/dV; a finite caloric gas uses its original
 //! gamma(T) p_g/V and f_heat=R/(Cv V) times supplied heat power.
 //! Pure vapor has K_g=0 and retains its cached constant solve. One native
@@ -35,6 +35,10 @@ use gas::{GasFlowWorkspace, TrappedGasPocket};
 /// Original finite gas calorics and heat on the same liquid/pocket trajectory.
 pub mod caloric;
 use caloric::{CaloricGasPocket, CaloricGasStep, CaloricStage, HeatLaw};
+
+/// One prescribed endpoint inflow on the SAME liquid/pocket trajectory.
+pub mod driven;
+use driven::{Drive, DuctDriveStep};
 
 /// Bounds the coupled Gram solve and the 2^k contact-branch search.
 pub const MAX_DUCT_POCKETS: usize = 8;
@@ -85,6 +89,8 @@ pub struct DuctPocketsStep {
     pub caloric_gas: Vec<CaloricGasStep>,
     /// Integrated external heat into the finite caloric gas inventories [J].
     pub supplied_heat_j: f64,
+    /// Prescribed endpoint flow and its native acoustic work, when declared.
+    pub drive: Option<DuctDriveStep>,
     /// Groups whose coupled solve changed more than one contact branch.
     pub simultaneous_groups: usize,
     pub accepted_substeps: usize,
@@ -102,6 +108,7 @@ impl ObservationRow {
 }
 struct Site {
     specification: DuctPocket,
+    port_index: usize,
     station_m: f64,
     pressure_node: usize,
     upstream_node: Option<usize>,
@@ -114,6 +121,7 @@ struct Site {
 struct ConstraintGain {
     active: u16,
     coefficients: Vec<f64>,
+    driven_flow: [f64; MAX_DUCT_POCKETS],
 }
 impl ConstraintGain {
     fn flow(&self, index: usize, x: &[f64]) -> f64 {
@@ -122,16 +130,26 @@ impl ConstraintGain {
             x,
         )
     }
+    fn forced_flow(&self, index: usize, x: &[f64], scale: f64, inflow: f64) -> f64 {
+        let flow = scale * self.flow(index, x);
+        if inflow == 0.0 {
+            flow
+        } else {
+            flow + self.driven_flow[index] * inflow
+        }
+    }
 }
 
 /// Same-material liquid columns with simultaneous endpoint/interior pockets.
-/// Every original declared port must have exactly one pocket; fixed native
-/// closed, matched and pressure-release boundaries are retained unchanged.
+/// Each original port has one pocket, except an explicitly declared endpoint
+/// flow drive. Fixed native closed, matched and pressure-release boundaries
+/// are retained unchanged.
 pub struct CavitatingDuctPockets<F: CavitationProperties + FluidAcoustics + Clone> {
     duct: DgDuct<DgFluidMaterial<F>>,
     material: CavitationState,
     pub(super) limits: DuctCavityLimits,
     sites: Vec<Site>,
+    drive: Option<Drive>,
     has_gas: bool,
     has_caloric: bool,
     gram: Vec<f64>,
@@ -208,6 +226,29 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
         caloric_pockets: &[CaloricGasPocket],
         limits: DuctCavityLimits,
     ) -> Result<Self, DuctCavityError> {
+        Self::bind(
+            duct,
+            initial,
+            time_s,
+            specifications,
+            gas_pockets,
+            caloric_pockets,
+            None,
+            limits,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn bind(
+        duct: DgDuct<DgFluidMaterial<F>>,
+        initial: DgState,
+        time_s: f64,
+        specifications: &[DuctPocket],
+        gas_pockets: &[TrappedGasPocket],
+        caloric_pockets: &[CaloricGasPocket],
+        driven_port: Option<PortId>,
+        limits: DuctCavityLimits,
+    ) -> Result<Self, DuctCavityError> {
         let material = duct.material().cavitation_state()?;
         if material.acoustic_state()? != duct.acoustic_material() {
             return Err(DuctCavityError::InvalidInput(
@@ -216,9 +257,14 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
         }
         let view = duct.continuous_operator();
         let x = view.energy_coordinates(&initial)?;
-        let count = view.ports().len();
+        let count = specifications.len();
         if !(1..=MAX_DUCT_POCKETS).contains(&count)
-            || specifications.len() != count
+            || view.ports().len() != count + usize::from(driven_port.is_some())
+            || driven_port.is_some_and(|id| {
+                specifications.iter().any(|s| s.port == id)
+                    || (duct.inlet() != DgBoundary::Port(id)
+                        && duct.outlet() != DgBoundary::Port(id))
+            })
             || view.dimension() > MAX_CAVITATING_DUCT_DOFS
             || !time_s.is_finite()
             || time_s < 0.0
@@ -248,7 +294,7 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
         }
         for (i, gas) in gas_pockets.iter().enumerate() {
             if !positive(gas.minimum_volume_m3)
-                || !view.ports().iter().any(|(id, _)| *id == gas.port)
+                || !specifications.iter().any(|s| s.port == gas.port)
                 || gas_pockets[..i].iter().any(|other| other.port == gas.port)
             {
                 return Err(DuctCavityError::InvalidInput(
@@ -264,7 +310,7 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
         for (i, pocket) in caloric_pockets.iter().enumerate() {
             pocket.solve.validate().map_err(caloric::error)?;
             if !positive(pocket.minimum_volume_m3)
-                || !view.ports().iter().any(|(id, _)| *id == pocket.port)
+                || !specifications.iter().any(|s| s.port == pocket.port)
                 || caloric_pockets[..i]
                     .iter()
                     .any(|other| other.port == pocket.port)
@@ -278,7 +324,10 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
         }
         let mut sites = Vec::with_capacity(count);
         let n_local = duct.mesh().order + 1;
-        for (id, _) in view.ports() {
+        for (port_index, (id, _)) in view.ports().iter().enumerate() {
+            if Some(*id) == driven_port {
+                continue;
+            }
             let mut matching = specifications.iter().filter(|s| s.port == *id);
             let specification = *matching.next().ok_or(DuctCavityError::InvalidInput(
                 "an original port has no vapor-pocket specification",
@@ -337,6 +386,7 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
                 };
             sites.push(Site {
                 specification,
+                port_index,
                 station_m,
                 pressure_node,
                 upstream_node,
@@ -383,9 +433,9 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
         let mut column_norms = vec![0.0; count];
         let mut pressure_rates = vec![0.0; count * n];
         for i in 0..count {
-            let column = &view.ports()[i].1;
+            let column = &view.ports()[sites[i].port_index].1;
             for j in 0..count {
-                gram[i * count + j] = dot(column, &view.ports()[j].1);
+                gram[i * count + j] = dot(column, &view.ports()[sites[j].port_index].1);
             }
             column_norms[i] = gram[i * count + i].sqrt();
             if !positive(column_norms[i]) {
@@ -439,11 +489,15 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
             || sites
                 .iter()
                 .any(|s| s.gas.is_some_and(TrappedGasPocket::has_inventory));
+        let drive = driven_port
+            .map(|id| Drive::new(&duct, id, &sites))
+            .transpose()?;
         let mut model = Self {
             duct,
             material,
             limits,
             sites,
+            drive,
             has_gas,
             has_caloric,
             gram,
@@ -483,6 +537,7 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
             0.0,
             roundoff,
             thermal.as_ref(),
+            0.0,
             &mut || false,
         )?;
         let flows = if model.has_gas {
@@ -492,6 +547,7 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
                 1.0,
                 &volumes,
                 thermal.as_ref(),
+                0.0,
                 &mut GasFlowWorkspace::new(count)?,
             )?
         } else {
@@ -560,12 +616,14 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
             return Ok(ConstraintGain {
                 active: active_mask,
                 coefficients: Vec::new(),
+                driven_flow: [0.0; MAX_DUCT_POCKETS],
             });
         }
         let n = self.duct.total_dofs();
         let count = self.sites.len();
         let (indices, factor) = self.factor(active_mask, &[0.0; MAX_DUCT_POCKETS])?;
         let mut coefficients = vec![0.0; count * n];
+        let mut driven_flow = [0.0; MAX_DUCT_POCKETS];
         if let Some(factor) = factor {
             let mut rhs = vec![0.0; indices.len()];
             for column in 0..n {
@@ -577,8 +635,21 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
                     coefficients[i * n + column] = rhs[j] / self.column_norms[i];
                 }
             }
+            if let Some(drive) = &self.drive {
+                for (j, &i) in indices.iter().enumerate() {
+                    rhs[j] = -drive.pressure_rates[i] / self.column_norms[i];
+                }
+                factor.solve(&mut rhs);
+                for (j, &i) in indices.iter().enumerate() {
+                    driven_flow[i] = rhs[j] / self.column_norms[i];
+                }
+            }
         }
-        if coefficients.iter().any(|x| !x.is_finite()) {
+        if coefficients
+            .iter()
+            .chain(&driven_flow)
+            .any(|x| !x.is_finite())
+        {
             return Err(DuctCavityError::ActiveConstraints(
                 "coupled constraint gain overflows",
             ));
@@ -586,6 +657,7 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
         Ok(ConstraintGain {
             active: active_mask,
             coefficients,
+            driven_flow,
         })
     }
 
@@ -600,6 +672,7 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
         volume_tolerance: f64,
         pressure_tolerance: f64,
         thermal: Option<&CaloricStage>,
+        drive_inflow: f64,
         cancelled: &mut dyn FnMut() -> bool,
     ) -> Result<ConstraintGain, DuctCavityError> {
         let count = self.sites.len();
@@ -617,7 +690,8 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
             }
         }
         for i in 0..count {
-            let gap = self.limits.reference_pressure_pa + dot(&view.ports()[i].1, x)
+            let gap = self.limits.reference_pressure_pa
+                + dot(&view.ports()[self.sites[i].port_index].1, x)
                 - self.material.saturation_pressure_pa()
                 - self.pocket_gas_pressure(i, volumes[i], thermal)?;
             if !volumes[i].is_finite()
@@ -640,6 +714,9 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
             }
             rates[i] = dot(&self.pressure_rates[i * n..(i + 1) * n], x)
                 - thermal.map_or(0.0, |stage| stage.forcing[i]);
+            if drive_inflow != 0.0 {
+                rates[i] += self.drive_pressure_rate(i, drive_inflow);
+            }
         }
         let mut chosen: Option<(u16, [f64; MAX_DUCT_POCKETS], f64)> = None;
         for subset in 0..(1usize << contacts.len()) {
@@ -771,7 +848,7 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
         numerics: &DuctCavityNumerics,
         cancelled: &mut Cancel,
     ) -> Result<DuctPocketsStep, DuctCavityError> {
-        self.advance_kernel(end_time_s, numerics, &|_, _| Ok(0.0), cancelled)
+        self.advance_kernel(end_time_s, numerics, &|_, _| Ok(0.0), 0.0, cancelled)
     }
 
     fn advance_kernel(
@@ -779,6 +856,7 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
         end_time_s: f64,
         numerics: &DuctCavityNumerics,
         heat: &HeatLaw<'_>,
+        drive_inflow: f64,
         cancelled: &mut dyn FnMut() -> bool,
     ) -> Result<DuctPocketsStep, DuctCavityError> {
         let cancellation = RefCell::new(cancelled);
@@ -793,6 +871,14 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
             return Err(DuctCavityError::InvalidInput(
                 "the physical endpoint must be finite and strictly later",
             ));
+        }
+        if let Some(drive) = &self.drive {
+            drive.admit(
+                drive_inflow,
+                dt,
+                self.material.liquid_sound_speed_m_s(),
+                self.limits,
+            )?;
         }
         let view = self.duct.continuous_operator();
         let original = view.energy_coordinates(&self.state.duct)?;
@@ -828,29 +914,32 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
         }
         let gas_energy_index = n + 3 * count + 1;
         let gas_heat_index = gas_energy_index + count;
-        y.resize(
-            gas_energy_index + if self.has_caloric { 2 * count } else { 0 },
-            0.0,
-        );
+        let drive_index = gas_energy_index + if self.has_caloric { 2 * count } else { 0 };
+        y.resize(drive_index + if self.drive.is_some() { 2 } else { 0 }, 0.0);
         let mut integration =
             AdaptiveState::new(self.state.time_s, &y, numerics.maximum_step_s.min(dt));
         let initial_mask = mask(&self.state.pockets);
-        let mut gain = if self.has_caloric {
+        let mut gain = if self.has_caloric || self.drive.is_some() {
             let volumes: Vec<_> = self.state.pockets.iter().map(|s| s.volume_m3).collect();
-            let thermal = self.caloric_stage(
-                &branches,
-                self.state.time_s,
-                &volumes,
-                &[0.0; MAX_DUCT_POCKETS],
-                heat,
-                cancelled,
-            )?;
+            let thermal = if self.has_caloric {
+                Some(self.caloric_stage(
+                    &branches,
+                    self.state.time_s,
+                    &volumes,
+                    &[0.0; MAX_DUCT_POCKETS],
+                    heat,
+                    cancelled,
+                )?)
+            } else {
+                None
+            };
             self.resolve_contacts(
                 original,
                 &volumes,
                 numerics.absolute_volume_tolerance_m3,
                 numerics.absolute_pressure_tolerance_pa,
-                Some(&thermal),
+                thermal.as_ref(),
+                drive_inflow,
                 cancelled,
             )?
         } else {
@@ -951,6 +1040,7 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
                         coordinate_scale,
                         &volumes[..count],
                         thermal.as_ref(),
+                        drive_inflow,
                         &mut workspace.borrow_mut(),
                     ) {
                         Ok(flows) => flows,
@@ -965,7 +1055,7 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
                 } else {
                     let mut flows = [0.0; MAX_DUCT_POCKETS];
                     for (i, flow) in flows[..count].iter_mut().enumerate() {
-                        *flow = coordinate_scale * gain.flow(i, &u[..n]);
+                        *flow = gain.forced_flow(i, &u[..n], coordinate_scale, drive_inflow);
                     }
                     flows
                 };
@@ -987,7 +1077,7 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
                                 ));
                             }
                             let pressure = self.limits.reference_pressure_pa
-                                + coordinate_scale * dot(&view.ports()[i].1, &u[..n]);
+                                + coordinate_scale * dot(&view.ports()[site.port_index].1, &u[..n]);
                             // Nonlinear RK stage points need not lie exactly
                             // on the gas manifold. Its residual is checked on
                             // accepted endpoints/events, never projected.
@@ -1016,13 +1106,23 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
                     return;
                 }
                 for i in 0..count {
-                    for (value, b) in out[..n].iter_mut().zip(&view.ports()[i].1) {
+                    let column = &view.ports()[self.sites[i].port_index].1;
+                    for (value, b) in out[..n].iter_mut().zip(column) {
                         *value += b * (flows[i] / coordinate_scale);
                     }
-                    let pressure = coordinate_scale * dot(&view.ports()[i].1, &u[..n]);
+                    let pressure = coordinate_scale * dot(column, &u[..n]);
                     out[n + i] = flows[i] / self.sites[i].specification.maximum_volume_m3;
                     out[n + count + i] = pressure / impulse_scale;
                     out[n + 2 * count + i] = pressure * flows[i] / energy_scale;
+                }
+                if let Some(drive) = &self.drive {
+                    let column = &view.ports()[drive.port_index].1;
+                    for (value, b) in out[..n].iter_mut().zip(column) {
+                        *value += b * (drive_inflow / coordinate_scale);
+                    }
+                    let pressure = coordinate_scale * dot(column, &u[..n]);
+                    out[drive_index] = pressure / impulse_scale;
+                    out[drive_index + 1] = pressure * drive_inflow / energy_scale;
                 }
                 if let Some(stage) = thermal {
                     for i in 0..count {
@@ -1043,7 +1143,8 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
                     u[n + i]
                 } else {
                     (self.limits.reference_pressure_pa
-                        + coordinate_scale * dot(&view.ports()[i].1, &u[..n])
+                        + coordinate_scale
+                            * dot(&view.ports()[self.sites[i].port_index].1, &u[..n])
                         - vapor)
                         / pressure_scale
                 }
@@ -1088,7 +1189,11 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
                                 / numerics.absolute_volume_tolerance_m3
                         } else {
                             (self.limits.reference_pressure_pa
-                                + coordinate_scale * dot(&view.ports()[i].1, &integration.u[..n])
+                                + coordinate_scale
+                                    * dot(
+                                        &view.ports()[self.sites[i].port_index].1,
+                                        &integration.u[..n],
+                                    )
                                 - vapor)
                                 / numerics.absolute_pressure_tolerance_pa
                         };
@@ -1130,6 +1235,7 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
                         numerics.absolute_volume_tolerance_m3,
                         numerics.absolute_pressure_tolerance_pa,
                         thermal.as_ref(),
+                        drive_inflow,
                         cancelled,
                     )?;
                     let changed = (gain.active ^ next.active).count_ones() as usize;
@@ -1193,23 +1299,25 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
                 1.0,
                 &end_volumes[..count],
                 thermal.as_ref(),
+                drive_inflow,
                 &mut workspace.borrow_mut(),
             )?
         } else {
             let mut flows = [0.0; MAX_DUCT_POCKETS];
             for (i, flow) in flows[..count].iter_mut().enumerate() {
-                *flow = gain.flow(i, &endpoint);
+                *flow = gain.forced_flow(i, &endpoint, 1.0, drive_inflow);
             }
             flows
         };
-        let mut receipts = Vec::with_capacity(count);
+        let mut receipts = Vec::with_capacity(view.ports().len());
         let mut pockets = Vec::with_capacity(count);
         let mut states = Vec::with_capacity(count);
         let mut potential = 0.0;
         let mut before = self.state.duct.stored_energy_j();
         for (i, site) in self.sites.iter().enumerate() {
             let volume = integration.u[n + i] * site.specification.maximum_volume_m3;
-            let pressure = self.limits.reference_pressure_pa + dot(&view.ports()[i].1, &endpoint);
+            let pressure = self.limits.reference_pressure_pa
+                + dot(&view.ports()[site.port_index].1, &endpoint);
             let target_pressure = vapor + self.pocket_gas_pressure(i, volume, thermal.as_ref())?;
             if volume < -numerics.absolute_volume_tolerance_m3
                 || volume > site.specification.maximum_volume_m3
@@ -1268,6 +1376,31 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
             .iter()
             .map(|p| p.gas.mass_kg() * p.gas.state().specific_internal_energy_j_kg())
             .sum();
+        let drive = if let Some(drive) = &self.drive {
+            self.check_field(
+                &endpoint,
+                1.0,
+                &end_flows[..count],
+                numerics.absolute_pressure_tolerance_pa,
+            )?;
+            let report = drive.report(
+                drive_inflow,
+                dt,
+                self.limits.reference_pressure_pa,
+                dot(&view.ports()[drive.port_index].1, &endpoint),
+                integration.u[drive_index] * impulse_scale,
+                integration.u[drive_index + 1] * energy_scale,
+            )?;
+            receipts.push(DgTrajectoryPort {
+                id: drive.port,
+                pressure_impulse_pa_s: report.acoustic_pressure_impulse_pa_s,
+                work_into_duct_j: report.acoustic_work_j,
+            });
+            Some(report)
+        } else {
+            None
+        };
+        let drive_work = drive.as_ref().map_or(0.0, |d| d.acoustic_work_j);
         let loss = integration.u[n + 3 * count] * energy_scale;
         let (candidate, duct_report) = view.candidate_from_trajectory(
             &self.state.duct,
@@ -1281,7 +1414,8 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
         let liquid_total = candidate.stored_energy_j() + potential;
         // Use original-law Delta U so large common formation references cannot
         // erase transferred heat or pressure work in the conservation gate.
-        let residual = liquid_total - before + loss + gas_energy_change - supplied_heat_j;
+        let residual =
+            liquid_total - before + loss + gas_energy_change - supplied_heat_j - drive_work;
         let total = liquid_total + gas_storage;
         let tolerance = numerics.absolute_energy_tolerance_j
             + numerics.relative_tolerance
@@ -1289,7 +1423,8 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
                     + before.abs()
                     + loss.abs()
                     + gas_energy_change.abs()
-                    + supplied_heat_j.abs());
+                    + supplied_heat_j.abs()
+                    + drive_work.abs());
         if !total.is_finite() || !residual.is_finite() || residual.abs() > tolerance {
             return Err(DuctCavityError::EnergyBalance);
         }
@@ -1301,6 +1436,7 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
             energy_balance_residual_j: residual,
             caloric_gas: caloric_endpoints.iter().map(|p| p.step).collect(),
             supplied_heat_j,
+            drive,
             simultaneous_groups,
             accepted_substeps: integration.accepted,
             rejected_substeps: integration.rejected,

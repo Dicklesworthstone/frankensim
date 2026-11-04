@@ -239,6 +239,91 @@ fn near(a: f64, b: f64, tolerance: f64) {
 }
 
 #[test]
+fn held_drive_and_original_caloric_heat_share_exact_isobaric_work() {
+    let gas = parcel(0.002, 0.0, 2000.0);
+    let mass = gas.mass_kg();
+    let duct = DgDuct::from_material(
+        &Duct {
+            segments: vec![Segment::Cylinder {
+                radius: RADIUS,
+                length: 1.0,
+            }],
+        },
+        &material(),
+        DgMesh {
+            elements: 1,
+            order: 2,
+        },
+        DgBoundary::Port(PortId(8)),
+        DgBoundary::Port(PortId(17)),
+    )
+    .unwrap();
+    let inflow = area() * 0.01;
+    let duration = 1e-3;
+    let perturbation = 10_000.0;
+    let mut domain = limits();
+    domain.reference_pressure_pa -= perturbation;
+    let initial = duct.project_initial_state(|_| perturbation, |_| -inflow);
+    let original = initial.clone();
+    let mut coupled = CavitatingDuctPockets::new_with_driven_port(
+        duct,
+        initial,
+        0.0,
+        &[specification(8, VOLUME)],
+        &[],
+        &[caloric(gas)],
+        PortId(17),
+        domain,
+    )
+    .unwrap();
+    assert!(coupled.drive.as_ref().unwrap().pressure_rates[0].abs() > 0.01 * coupled.gram[0]);
+    // Removing m Cp dT heat at fixed pressure admits V'=Q_g=-Q_drive.
+    // Cv comes from the original variable-Cv source at each actual stage.
+    let heat = |_: f64, gas: &CaloricGasObservation| {
+        Ok(-gas.gas_pressure_pa * (1.0 + gas.cv_j_kg_k / gas_constant()) * inflow)
+    };
+    let step = coupled
+        .advance_with_port_flow_and_gas_heat(duration, &numerics(), inflow, &heat, &mut || false)
+        .unwrap();
+    let expected_volume = VOLUME - inflow * duration;
+    let endpoint = coupled.caloric_gas(PortId(8)).unwrap();
+    assert_eq!(endpoint.mass_kg(), mass);
+    near(endpoint.volume_m3(), expected_volume, 1e-14);
+    near(endpoint.state().state().pressure, PG, 2e-3);
+    near(
+        endpoint.state().state().temperature,
+        INITIAL_T * expected_volume / VOLUME,
+        2e-6,
+    );
+    for (&a, &b) in coupled
+        .state()
+        .duct()
+        .pressure()
+        .iter()
+        .zip(original.pressure())
+    {
+        near(a, b, 2e-3);
+    }
+    near(
+        step.drive.unwrap().acoustic_work_j,
+        perturbation * inflow * duration,
+        1e-10,
+    );
+    near(
+        step.caloric_gas[0].work_by_gas_j,
+        -PG * inflow * duration,
+        1e-10,
+    );
+    assert!(step.supplied_heat_j < 0.0);
+    near(
+        step.caloric_gas[0].internal_energy_change_j + step.caloric_gas[0].work_by_gas_j,
+        step.supplied_heat_j,
+        1e-10,
+    );
+    near(step.energy_balance_residual_j, 0.0, 1e-10);
+}
+
+#[test]
 fn original_caloric_zero_heat_recovers_adiabatic_polytrope_and_source_inventory() {
     let gas = parcel(0.0, 0.0, 2000.0);
     let original = gas.clone();
