@@ -6893,10 +6893,25 @@ Both phase capillary bounds, source support, native transport and cancellation
 must pass before any liquid, finite gas or wall candidate publishes.
 
 The original reference-ratio table is reused exactly when ratio bits match.
-Changed moving ratios use one temporary table from the SAME bounded Gauss/
-Hermite owner; pinned or zero-speed samples do not construct it. There is no
-growing ratio cache. These constitutive evaluations remain bounded by the
-existing wall-cell and thermal-substep limits. This supplies a two-viscous-wedge
+Changed moving ratios first invert the SAME angular relation over only the
+actual angle increment, without allocating another table or retaining a ratio cache.
+A safeguarded scalar Newton solve uses a fixed stack and adaptive 4/8-point
+Gauss quadrature, bounded by 64 inverse iterations, 24 subdivision levels and
+32,768 angular-slope evaluations. Both sides are scaled by `max(1,M)` before
+integration, retaining representable response at extreme viscosity contrasts.
+Quadrature discrepancy and roundoff must fit the local angular tolerance.
+If the local inverse is unresolved, the original bounded table is constructed
+once for that sample, preserving its existing support for strongly receding
+motion near small angles. This fallback retains the original table's accuracy
+and physical-domain checks; the stricter local tolerance is not a global
+certificate. There is no persistent ratio cache. Cancellation applies to changed,
+unchanged and zero-speed sourced queries. Pinned/zero-speed samples retain their
+original stationary behavior. The focused varying-ratio matrix verifies fewer
+than one quarter of a rebuilt table's angular-slope evaluations per sample;
+this is an operation-count bound for those cases, not a general timing claim
+or a bound for fallback cases.
+These evaluations remain bounded by the existing wall-cell and thermal-substep
+limits. This supplies a two-viscous-wedge
 closure at the declared local phase conditions, with the existing geometric
 contact-speed and scale-separation assumptions; it adds no resolved gas motion,
 contact-line heat, surface-energy theorem or calibrated entrainment model.

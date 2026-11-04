@@ -14,7 +14,7 @@
 //! length. Newtonian creeping flow in both phases and separated scales remain
 //! assumptions. The original finite-ratio API keeps its declared coefficient.
 //! The material boundary can instead supply the actual sourced gas/liquid ratio
-//! and reuse this same quadrature at that ratio. Neither path supplies a
+//! and integrate this same angular function at that ratio. Neither path supplies a
 //! second-fluid momentum solver.
 //! This closure does not resolve wall slip, nucleation, film entrainment, or a
 //! conservative surface-energy transfer.
@@ -24,6 +24,8 @@ use std::sync::Arc;
 use fs_exec::CancelGate;
 
 use super::{Error, checkpoint};
+
+mod varying_ratio;
 
 /// Explicit physical scales and admitted model domain. No universal defaults.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -42,7 +44,8 @@ pub struct CoxVoinovControls {
 
 /// Declared hydrodynamic model and shared, fixed-order reference angular table.
 /// Clones and unchanged material ratios share that table. An evolving sourced
-/// ratio uses the same bounded quadrature for its moving contact-line sample.
+/// ratio first uses an allocation-free local integral and safeguarded inverse;
+/// unresolved inverses retain the original bounded table fallback.
 #[derive(Clone, Debug)]
 pub struct CoxVoinovLaw {
     controls: CoxVoinovControls,
@@ -163,9 +166,7 @@ impl CoxVoinovLaw {
     }
 
     pub(super) fn admit_capillary_number(&self, capillary_number: f64) -> Result<(), Error> {
-        self.admit_capillary_number_at_ratio(
-            capillary_number, self.outer_to_liquid_viscosity_ratio,
-        )
+        self.admit_capillary_number_at_ratio(capillary_number, self.outer_to_liquid_viscosity_ratio)
     }
 
     pub(super) fn admit_capillary_number_at_ratio(
@@ -177,8 +178,7 @@ impl CoxVoinovLaw {
             || !viscosity_ratio.is_finite()
             || viscosity_ratio < 0.0
             || capillary_number.abs() > self.controls.maximum_capillary_number
-            || (capillary_number * viscosity_ratio).abs()
-                > self.controls.maximum_capillary_number
+            || (capillary_number * viscosity_ratio).abs() > self.controls.maximum_capillary_number
         {
             return Err(Error::Invalid(
                 "Cox contact speed leaves a phase's low-capillary-number domain",
@@ -187,10 +187,12 @@ impl CoxVoinovLaw {
         Ok(())
     }
 
-    /// Reuse the original bounded two-wedge quadrature at an actual material
-    /// ratio. No accumulated ratio cache or independent contact-line model is
-    /// introduced. Unchanged ratios reuse the original table; pinned/zero-speed
-    /// samples do not build one. A changed moving ratio uses one temporary table.
+    /// Evaluate the original two-wedge relation at an actual material ratio.
+    /// Unchanged ratios reuse the original table. A changed moving ratio first
+    /// solves the local angular integral without allocating a table. If that
+    /// inverse cannot resolve its accuracy, the original bounded table retains
+    /// its existing supported domain. No growing ratio cache or different
+    /// contact-line physics is introduced.
     pub(super) fn apparent_angle_at_ratio(
         &self,
         microscopic_angle_radians: f64,
@@ -198,6 +200,7 @@ impl CoxVoinovLaw {
         viscosity_ratio: f64,
         gate: &CancelGate,
     ) -> Result<f64, Error> {
+        checkpoint(gate)?;
         self.admit_angle(microscopic_angle_radians)?;
         self.admit_capillary_number_at_ratio(signed_capillary_number, viscosity_ratio)?;
         if signed_capillary_number == 0.0 {
@@ -206,8 +209,25 @@ impl CoxVoinovLaw {
         if viscosity_ratio.to_bits() == self.outer_to_liquid_viscosity_ratio.to_bits() {
             return self.apparent_angle_radians(microscopic_angle_radians, signed_capillary_number);
         }
-        Self::try_new_with_viscosity_ratio(self.controls, viscosity_ratio, gate)?
-            .apparent_angle_radians(microscopic_angle_radians, signed_capillary_number)
+        match varying_ratio::apparent_angle(
+            &self.controls,
+            self.logarithmic_scale_ratio,
+            microscopic_angle_radians,
+            signed_capillary_number,
+            viscosity_ratio,
+            gate,
+        ) {
+            Ok(answer) => Ok(answer.angle),
+            Err(_) => {
+                // Near dewetting a small endpoint slope amplifies even the
+                // integrated roundoff estimate. A performance optimization
+                // must not narrow the original table's supported trajectories.
+                // Cancellation still returns immediately and never builds it.
+                checkpoint(gate)?;
+                Self::try_new_with_viscosity_ratio(self.controls, viscosity_ratio, gate)?
+                    .apparent_angle_radians(microscopic_angle_radians, signed_capillary_number)
+            }
+        }
     }
 
     /// Apparent angle from a microscopic endpoint and SIGNED capillary number.
@@ -360,6 +380,18 @@ impl AngularTable {
 }
 
 fn two_phase_angular_slope(angle: f64, ratio: f64) -> f64 {
+    let slope = scaled_angular_slope(angle, ratio);
+    if ratio > 1.0 {
+        slope * (1.0 / ratio)
+    } else {
+        slope
+    }
+}
+
+// max(1,M) g'(theta,M). The moving-ratio inverse scales BOTH sides of Cox's
+// relation so high viscosity contrast does not shrink the integral to zero.
+// The original fixed-ratio table retains its original arithmetic and values.
+fn scaled_angular_slope(angle: f64, ratio: f64) -> f64 {
     if ratio == 0.0 {
         return angular_slope(angle);
     }
@@ -394,7 +426,6 @@ fn two_phase_angular_slope(angle: f64, ratio: f64) -> f64 {
         let reciprocal = 1.0 / ratio;
         (f1 * outer_f2 + reciprocal * outer_f1 * f2)
             / (2.0 * sin * (f1 + 2.0 * reciprocal * f3 + reciprocal * reciprocal * outer_f1))
-            * reciprocal
     }
 }
 
@@ -590,6 +621,192 @@ mod tests {
         let cancelled = CancelGate::new_clock_free();
         cancelled.request();
         assert!(CoxVoinovLaw::try_new_with_viscosity_ratio(controls(), 1.0, &cancelled).is_err());
+    }
+
+    #[test]
+    fn g1_varying_ratio_inverse_matches_original_physics_without_rebuilding_tables() {
+        let gate = CancelGate::new_clock_free();
+        let reference =
+            CoxVoinovLaw::try_new_with_viscosity_ratio(controls(), 0.04, &gate).unwrap();
+        let mut maximum_evaluations = 0;
+        for ratio in [0.0_f64, 0.001, 0.5, 1.0, 10.0, 1000.0, 1e6] {
+            let table =
+                CoxVoinovLaw::try_new_with_viscosity_ratio(controls(), ratio, &gate).unwrap();
+            for microscopic in [0.02, 0.3, 1.2, 2.9] {
+                let magnitude = if microscopic < 0.1 { 1e-9 } else { 1e-5 };
+                for capillary in [-magnitude / ratio.max(1.0), magnitude / ratio.max(1.0)] {
+                    let answer = varying_ratio::apparent_angle(
+                        &reference.controls,
+                        reference.logarithmic_scale_ratio,
+                        microscopic,
+                        capillary,
+                        ratio,
+                        &gate,
+                    )
+                    .unwrap();
+                    maximum_evaluations = maximum_evaluations.max(answer.evaluations);
+                    let applied = reference
+                        .apparent_angle_at_ratio(microscopic, capillary, ratio, &gate)
+                        .unwrap();
+                    assert_eq!(applied, answer.angle);
+                    assert_eq!(applied > microscopic, capillary > 0.0);
+                    let actual = reference_two_phase_difference(microscopic, applied, ratio);
+                    let expected = capillary * 1e6_f64.ln();
+                    let scale = ratio.max(1.0);
+                    assert!(
+                        (actual - expected).abs() * scale < 2e-12,
+                        "M={ratio}, theta={microscopic}: {actual} != {expected}"
+                    );
+                    let rebuilt = table
+                        .apparent_angle_radians(microscopic, capillary)
+                        .unwrap();
+                    assert!((applied - rebuilt).abs() < 2e-9);
+                }
+            }
+        }
+        // The old changed-ratio path always evaluated 2048*5+1 slopes before
+        // its inverse. This bounds real constitutive work, not wall-clock speed.
+        assert!(
+            maximum_evaluations < (INTERVALS * 5 + 1) / 4,
+            "local inverse used {maximum_evaluations} slope evaluations"
+        );
+    }
+
+    #[test]
+    fn g1_varying_ratio_large_angle_changes_keep_final_accuracy() {
+        let gate = CancelGate::new_clock_free();
+        let law = CoxVoinovLaw::try_new_with_viscosity_ratio(controls(), 0.04, &gate).unwrap();
+        // Independent 60-digit quadrature of the original two-wedge formula
+        // fixes these capillary numbers. Early inverse trials can lie near
+        // an angular endpoint with a much smaller slope than the final root.
+        for (microscopic, capillary, ratio, expected) in [
+            (0.02, 0.000_822_001_412_905_281_6, 1.0, 0.5),
+            (0.02, 0.000_433_880_012_922_515_6, 10.0, 0.5),
+            (1.2, -0.007_688_310_292_975_026, 1.0, 0.3),
+            (0.0002, 7.752_989_749_067_505e-6, 1.0, 0.1),
+            (0.0002, 2.089_804_821_140_145_7e-6, 1000.0, 0.1),
+        ] {
+            let apparent = law
+                .apparent_angle_at_ratio(microscopic, capillary, ratio, &gate)
+                .unwrap();
+            assert!(
+                (apparent - expected).abs() < 6e-13,
+                "M={ratio}, theta={microscopic}: {apparent} != {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn g3_varying_ratio_inverse_preserves_phase_exchange_and_extreme_contrast() {
+        let gate = CancelGate::new_clock_free();
+        let law = CoxVoinovLaw::try_new(controls(), &gate).unwrap();
+        let pi = core::f64::consts::PI;
+        for ratio in [0.02_f64, 0.7, 10.0, 1000.0] {
+            for microscopic in [0.3, 1.2, 2.8] {
+                for sign in [-1.0, 1.0] {
+                    let capillary = sign * 1e-5 / ratio.max(1.0);
+                    let direct = law
+                        .apparent_angle_at_ratio(microscopic, capillary, ratio, &gate)
+                        .unwrap();
+                    let exchanged = law
+                        .apparent_angle_at_ratio(
+                            pi - microscopic,
+                            -ratio * capillary,
+                            1.0 / ratio,
+                            &gate,
+                        )
+                        .unwrap();
+                    assert!((direct + exchanged - pi).abs() < 2e-11);
+                }
+            }
+        }
+        // M*g'(theta,M) tends to the inviscid function at pi-theta.
+        // This oracle never forms M^2 or subtracts tiny unscaled primitives.
+        for ratio in [1e40, 1e150, 1e300] {
+            for sign in [-1.0, 1.0] {
+                let capillary = sign * 1e-5 / ratio;
+                let microscopic = 1.2;
+                let apparent = law
+                    .apparent_angle_at_ratio(microscopic, capillary, ratio, &gate)
+                    .unwrap();
+                let actual = reference_g(pi - microscopic) - reference_g(pi - apparent);
+                let expected = sign * 1e-5 * 1e6_f64.ln();
+                assert!((actual - expected).abs() < 2e-11);
+            }
+        }
+    }
+
+    #[test]
+    fn g1_varying_ratio_fallback_retains_original_strongly_receding_motion() {
+        let gate = CancelGate::new_clock_free();
+        let law = CoxVoinovLaw::try_new_with_viscosity_ratio(controls(), 0.04, &gate).unwrap();
+        // Independent 60-digit quadrature of the original two-wedge formula
+        // from 0.5 to 0.01, divided by ln(10^6), rounded once to f64.
+        for (ratio, capillary) in [
+            (0.0, -0.001_000_417_105_826_687_4),
+            (0.001, -0.001_000_178_423_525_492_7),
+            (1.0, -0.000_822_057_277_845_519_2),
+            (10.0, -0.000_433_932_362_992_794_8),
+        ] {
+            let original =
+                CoxVoinovLaw::try_new_with_viscosity_ratio(controls(), ratio, &gate).unwrap();
+            // An original table-admitted trajectory: near a small endpoint
+            // angle, the local integral's conservative roundoff estimate can
+            // exceed its stricter angular target despite ordinary finite Ca.
+            let expected = original.apparent_angle_radians(0.5, capillary).unwrap();
+            let actual = law
+                .apparent_angle_at_ratio(0.5, capillary, ratio, &gate)
+                .unwrap();
+            assert!((actual - 0.01).abs() < 1e-8);
+            assert!((actual - expected).abs() < 2e-12);
+        }
+    }
+
+    #[test]
+    fn g1_varying_ratio_resolves_small_angles_and_physical_domain_edges() {
+        let gate = CancelGate::new_clock_free();
+        let law = CoxVoinovLaw::try_new_with_viscosity_ratio(controls(), 0.04, &gate).unwrap();
+        for ratio in [0.0_f64, 1.0, 1000.0, 1e6] {
+            let microscopic = 2e-4;
+            for sign in [-1.0, 1.0] {
+                let capillary =
+                    sign * 0.1 * microscopic * two_phase_angular_slope(microscopic, ratio)
+                        / 1e6_f64.ln();
+                let apparent = law
+                    .apparent_angle_at_ratio(microscopic, capillary, ratio, &gate)
+                    .unwrap();
+                let actual = reference_two_phase_difference(microscopic, apparent, ratio);
+                let expected = capillary * 1e6_f64.ln();
+                assert!((actual / expected - 1.0).abs() < 2e-6);
+                assert!(apparent >= controls().minimum_angle_radians);
+            }
+        }
+        for (angle, capillary) in [(1e-4, -1e-6), (3.0, 1e-6), (0.1, -0.001)] {
+            assert!(
+                law.apparent_angle_at_ratio(angle, capillary, 0.001, &gate)
+                    .is_err()
+            );
+        }
+        let micro = 1.2;
+        let same = law
+            .apparent_angle_at_ratio(micro, 1e-5, 0.04, &gate)
+            .unwrap();
+        assert_eq!(
+            same.to_bits(),
+            law.apparent_angle_radians(micro, 1e-5).unwrap().to_bits()
+        );
+        assert_eq!(
+            law.apparent_angle_at_ratio(micro, 0.0, 3.0, &gate).unwrap(),
+            micro
+        );
+        let cancelled = CancelGate::new_clock_free();
+        cancelled.request();
+        for (ratio, capillary) in [(0.04, 0.0), (0.04, 1e-5), (3.0, 1e-5)] {
+            assert!(
+                law.apparent_angle_at_ratio(micro, capillary, ratio, &cancelled)
+                    .is_err()
+            );
+        }
     }
 
     #[test]
