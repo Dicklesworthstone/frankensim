@@ -8,7 +8,8 @@
 use super::spatial::DiskAxes;
 use super::{
     CoupledStep, IncidentInflow, InfluenceOperator, Panel, PropCouplingSolverSpec, PropDisk,
-    Refusal, Rotor, RotorLoads, SectionClosure, SectionFrame, StripSpec, coupled_step_with_rotors,
+    Refusal, Rotor, RotorLoads, SectionClosure, SectionFrame, StripSpec, WingBranch,
+    coupled_step_with_rotors,
 };
 use fs_airscrew::swirl::{self as rotor_swirl, Controls, Induction, Power, Solution};
 use fs_blake3::hash_domain;
@@ -85,7 +86,7 @@ pub fn coupled_step(
 ) -> Result<CoupledSwirlStep, Refusal> {
     coupled_impl(
         axes, op, panels, strips, closure, None, rotor, disks, freestream, rho, spec, controls,
-        warm, incident,
+        warm, incident, None,
     )
     .map(|(step, _, _)| step)
 }
@@ -132,6 +133,7 @@ pub fn coupled_step_with_section_frames(
         controls,
         warm,
         incident,
+        None,
     )
     .map(|(step, _, _)| step)
 }
@@ -152,6 +154,7 @@ fn coupled_impl(
     controls: Controls,
     warm: Option<&WarmStart>,
     incident: IncidentInflow<'_>,
+    branch: Option<&mut WingBranch<'_>>,
 ) -> Result<(CoupledSwirlStep, [f64; 2], [f64; 2]), Refusal> {
     if warm.is_some_and(|w| !w.w_slip.into_iter().all(f64::is_finite)) {
         return Err(Refusal {
@@ -177,6 +180,7 @@ fn coupled_impl(
         Some(incident),
         axes,
         frames,
+        branch,
         |k, axial, omega, evaluated_wash| {
             let solution = rotor_swirl::bemt_solve(
                 rotor,

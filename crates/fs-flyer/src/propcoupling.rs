@@ -24,6 +24,7 @@
 use crate::Refusal;
 use fs_airscrew::{BemtPower, Rotor, bemt_solve};
 use fs_blake3::hash_domain;
+use fs_wing::nonlinear::continuation::{self, ContinuationControls, WingContinuation};
 use fs_wing::nonlinear::{
     InfluenceOperator, SectionClosure, SectionFrame, StripSpec, solve_nonlinear,
     solve_nonlinear_with_incident, solve_nonlinear_with_section_frames,
@@ -332,6 +333,7 @@ fn coupled_step_impl(
         incident,
         spatial,
         section_frames,
+        None,
         |_, axial, omega, _applied_wash| {
             let sol = bemt_solve(rotor, rho, axial, omega).map_err(map_err_a)?;
             Ok(RotorLoads {
@@ -351,6 +353,14 @@ struct RotorLoads<P> {
 
 /// The same two-way iteration and acceptance for explicitly selected rotor
 /// laws. Only the actual rotor evaluation and its power payload vary.
+// One caller-owned branch remains fixed through every nonlinear trial. Only
+// the wing whose residual/loads are accepted may replace this local output.
+struct WingBranch<'a> {
+    domain: ContinuationControls,
+    previous: Option<&'a WingContinuation>,
+    accepted: Option<WingContinuation>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn coupled_step_with_rotors<P: Copy>(
     op: &InfluenceOperator,
@@ -366,6 +376,7 @@ fn coupled_step_with_rotors<P: Copy>(
     incident: Option<IncidentInflow<'_>>,
     spatial: Option<spatial::DiskAxes>,
     section_frames: Option<&[SectionFrame]>,
+    mut branch: Option<&mut WingBranch<'_>>,
     mut rotor_solve: impl FnMut(usize, f64, f64, [f64; 2]) -> Result<RotorLoads<P>, Refusal>,
 ) -> Result<CoupledStep<P>, Refusal> {
     let map_err = |e: fs_wing::Refusal| Refusal {
@@ -443,6 +454,7 @@ fn coupled_step_with_rotors<P: Copy>(
         [f64; 2],
         [P; 2],
         fs_wing::nonlinear::NonlinearReport,
+        Option<WingContinuation>,
     );
     let mut evaluate = |x: &[f64; 2], warm_gamma: Option<&[f64]>| -> Result<EvalOut<P>, Refusal> {
         let du: Vec<f64> = if spatial.is_none() {
@@ -452,62 +464,111 @@ fn coupled_step_with_rotors<P: Copy>(
         } else {
             Vec::new()
         };
-        let wing = if let Some(frames) = section_frames {
-            let flow = incident.expect("framed coupling requires incident samples");
-            let velocity: Vec<_> = flow
-                .strip_velocity_mps
+        let (wing, wing_anchor) = if let Some(branch) = branch.as_ref() {
+            let velocity: Vec<_> = wash
                 .iter()
-                .zip(&wash)
-                .map(|(&v, &factors)| {
-                    if let Some(axes) = spatial {
-                        axes.velocity(v, factors, *x)
-                    } else {
-                        [v[0] + strip_wash(factors, *x), v[1], v[2]]
+                .enumerate()
+                .map(|(s, &factors)| {
+                    let velocity = incident.map_or(freestream, |flow| flow.strip_velocity_mps[s]);
+                    match spatial {
+                        Some(axes) => axes.velocity(velocity, factors, *x),
+                        None => [
+                            velocity[0] + strip_wash(factors, *x),
+                            velocity[1],
+                            velocity[2],
+                        ],
                     }
                 })
                 .collect();
-            // Compose actual spatial prop wash before the section projection.
-            // The same accepted vectors are returned with gamma below.
-            solve_nonlinear_with_section_frames(
-                op, panels, strips, freestream, rho, closure, frames, &velocity, warm_gamma,
-            )
-        } else {
-            match (incident, spatial) {
-                (Some(flow), Some(axes)) => {
-                    let velocity: Vec<_> = flow
-                        .strip_velocity_mps
-                        .iter()
-                        .zip(&wash)
-                        .map(|(&v, &factors)| axes.velocity(v, factors, *x))
-                        .collect();
-                    solve_nonlinear_with_incident(
-                        op, panels, strips, freestream, rho, closure, &velocity, None, warm_gamma,
-                    )
-                }
-                (Some(flow), None) => solve_nonlinear_with_incident(
+            let solved = if let Some(frames) = section_frames {
+                continuation::solve_with_section_frames(
                     op,
                     panels,
                     strips,
                     freestream,
                     rho,
                     closure,
-                    flow.strip_velocity_mps,
-                    Some(&du),
-                    warm_gamma,
-                ),
-                (None, _) => solve_nonlinear(
+                    frames,
+                    &velocity,
+                    branch.previous,
+                    branch.domain,
+                )
+            } else {
+                continuation::solve_with_incident(
                     op,
                     panels,
                     strips,
                     freestream,
                     rho,
                     closure,
-                    Some(&du),
-                    warm_gamma,
-                ),
+                    &velocity,
+                    None,
+                    branch.previous,
+                    branch.domain,
+                )
             }
-        }
-        .map_err(map_err)?;
+            .map_err(map_err)?;
+            (solved.solution, Some(solved.continuation))
+        } else {
+            let wing = if let Some(frames) = section_frames {
+                let flow = incident.expect("framed coupling requires incident samples");
+                let velocity: Vec<_> = flow
+                    .strip_velocity_mps
+                    .iter()
+                    .zip(&wash)
+                    .map(|(&v, &factors)| {
+                        if let Some(axes) = spatial {
+                            axes.velocity(v, factors, *x)
+                        } else {
+                            [v[0] + strip_wash(factors, *x), v[1], v[2]]
+                        }
+                    })
+                    .collect();
+                // Compose actual spatial prop wash before the section projection.
+                // The same accepted vectors are returned with gamma below.
+                solve_nonlinear_with_section_frames(
+                    op, panels, strips, freestream, rho, closure, frames, &velocity, warm_gamma,
+                )
+            } else {
+                match (incident, spatial) {
+                    (Some(flow), Some(axes)) => {
+                        let velocity: Vec<_> = flow
+                            .strip_velocity_mps
+                            .iter()
+                            .zip(&wash)
+                            .map(|(&v, &factors)| axes.velocity(v, factors, *x))
+                            .collect();
+                        solve_nonlinear_with_incident(
+                            op, panels, strips, freestream, rho, closure, &velocity, None,
+                            warm_gamma,
+                        )
+                    }
+                    (Some(flow), None) => solve_nonlinear_with_incident(
+                        op,
+                        panels,
+                        strips,
+                        freestream,
+                        rho,
+                        closure,
+                        flow.strip_velocity_mps,
+                        Some(&du),
+                        warm_gamma,
+                    ),
+                    (None, _) => solve_nonlinear(
+                        op,
+                        panels,
+                        strips,
+                        freestream,
+                        rho,
+                        closure,
+                        Some(&du),
+                        warm_gamma,
+                    ),
+                }
+            }
+            .map_err(map_err)?;
+            (wing, None)
+        };
         let mut g = [0.0f64; 2];
         let mut thrust = [0.0f64; 2];
         let mut torque = [0.0f64; 2];
@@ -550,10 +611,12 @@ fn coupled_step_with_rotors<P: Copy>(
             torque,
             power.map(|p| p.expect("both rotors evaluated")),
             wing,
+            wing_anchor,
         ))
     };
     loop {
-        let (g, thrust, torque, power, wing) = evaluate(&x, accepted_gamma.as_deref())?;
+        let (g, thrust, torque, power, wing, wing_anchor) =
+            evaluate(&x, accepted_gamma.as_deref())?;
         let r = [g[0] - x[0], g[1] - x[1]];
         // det doctrine: sqrt is IEEE-exact; hypot is platform libm and
         // broke native-vs-wasm digest identity (E6.2 measurement).
@@ -567,6 +630,9 @@ fn coupled_step_with_rotors<P: Copy>(
             (r02 + r12).sqrt() / ((x02 + x12).sqrt() + 1e-6)
         };
         if res < spec.tol {
+            if let Some(branch) = branch.as_deref_mut() {
+                branch.accepted = wing_anchor;
+            }
             return Ok(CoupledStep {
                 w_slip: g,
                 thrust_n: thrust,

@@ -28,6 +28,7 @@
 //! radial velocity. It retains the upstream axial model. See streamtube for
 //! its explicit fixed hub, pressure/exterior-flow and source-field limits.
 
+use super::super::WingBranch;
 use super::{
     Controls, CoupledSwirlStep, DiskAxes, IncidentInflow, InfluenceOperator, Panel,
     PropCouplingSolverSpec, PropDisk, Refusal, Rotor, SectionClosure, SectionFrame, Solution,
@@ -36,6 +37,7 @@ use super::{
 use fs_blake3::hash_domain;
 use fs_ga::Vec3;
 use fs_math::det;
+use fs_wing::nonlinear::continuation::{ContinuationControls, WingContinuation};
 
 #[path = "wake/streamtube.rs"]
 mod streamtube;
@@ -430,6 +432,14 @@ pub struct CoupledWakeStep {
     pub field_residual_mps: f64,
 }
 
+/// One complete accepted annular-field solve and its exact native wing anchor.
+/// The anchor belongs to the circulation/force velocities in `solution`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ContinuedWakeStep {
+    pub solution: CoupledWakeStep,
+    pub wing_continuation: WingContinuation,
+}
+
 /// Explicit numerical continuation; no extra physical angular momentum state.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WakeWarmStart {
@@ -558,6 +568,118 @@ pub fn coupled_step_with_transport(
     warm: Option<&WakeWarmStart>,
     incident: IncidentInflow<'_>,
 ) -> Result<CoupledWakeStep, Refusal> {
+    coupled_step_impl(
+        transport, axes, spin_sign, op, panels, strips, closure, frames, rotor, disks, freestream,
+        rho, spec, native, controls, warm, incident, None,
+    )
+    .map(|(solution, _)| solution)
+}
+
+/// Continue the original nonlinear wing under the full native annular field.
+/// With `previous=None`, establish the first complete accepted branch. Every
+/// inner coupling and outer field trial uses the SAME caller anchor; numerical
+/// wash seeds never replace it. Only the accepted force solution supplies the
+/// returned anchor. No branch clipping or cold-start fallback is performed.
+///
+/// # Errors
+/// Original field/rotor refusals plus native wing layout, incidence, row,
+/// filament-clearance and Newton-budget admission.
+#[allow(clippy::too_many_arguments)]
+pub fn coupled_step_continued(
+    transport: WakeTransport,
+    axes: DiskAxes,
+    spin_sign: [f64; 2],
+    op: &InfluenceOperator,
+    panels: &[Panel],
+    strips: &[StripSpec],
+    closure: SectionClosure<'_>,
+    frames: Option<&[SectionFrame]>,
+    rotor: &Rotor,
+    disks: &[PropDisk; 2],
+    freestream: [f64; 3],
+    rho: f64,
+    spec: &PropCouplingSolverSpec,
+    native: Controls,
+    controls: WakeControls,
+    warm: Option<&WakeWarmStart>,
+    incident: IncidentInflow<'_>,
+    previous: Option<&WingContinuation>,
+    domain: ContinuationControls,
+) -> Result<ContinuedWakeStep, Refusal> {
+    let (mut solution, wing) = coupled_step_impl(
+        transport,
+        axes,
+        spin_sign,
+        op,
+        panels,
+        strips,
+        closure,
+        frames,
+        rotor,
+        disks,
+        freestream,
+        rho,
+        spec,
+        native,
+        controls,
+        warm,
+        incident,
+        Some((domain, previous)),
+    )?;
+    let mut identity = solution.solution.coupled.spec_digest.as_bytes().to_vec();
+    for value in [
+        domain.maximum_incidence_rad,
+        domain.maximum_incidence_change_rad,
+        domain.maximum_row_condition,
+        domain.minimum_trailing_clearance_chords,
+        domain.section_difference_rad,
+    ] {
+        identity.extend_from_slice(&value.to_bits().to_le_bytes());
+    }
+    for value in [
+        domain.maximum_newton_iterations,
+        domain.maximum_residual_evaluations,
+        domain.maximum_jacobian_products,
+    ] {
+        identity.extend_from_slice(&(value as u64).to_le_bytes());
+    }
+    solution.solution.coupled.spec_digest = hash_domain(
+        "org.frankensim.fs-flyer.continued-annular-wake.v1",
+        &identity,
+    )
+    .to_hex();
+    Ok(ContinuedWakeStep {
+        solution,
+        wing_continuation: wing.ok_or_else(|| {
+            reject(
+                "swirl-wake-continuation-invalid",
+                "accepted field omitted its wing anchor",
+            )
+        })?,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn coupled_step_impl(
+    transport: WakeTransport,
+    axes: DiskAxes,
+    spin_sign: [f64; 2],
+    op: &InfluenceOperator,
+    panels: &[Panel],
+    strips: &[StripSpec],
+    closure: SectionClosure<'_>,
+    frames: Option<&[SectionFrame]>,
+    rotor: &Rotor,
+    disks: &[PropDisk; 2],
+    freestream: [f64; 3],
+    rho: f64,
+    spec: &PropCouplingSolverSpec,
+    native: Controls,
+    controls: WakeControls,
+    warm: Option<&WakeWarmStart>,
+    incident: IncidentInflow<'_>,
+    continuation: Option<(ContinuationControls, Option<&WingContinuation>)>,
+) -> Result<(CoupledWakeStep, Option<WingContinuation>), Refusal> {
     controls.admit()?;
     if !spin_sign.into_iter().all(|v| v == -1.0 || v == 1.0)
         || incident.strip_velocity_mps.len() != strips.len()
@@ -624,6 +746,11 @@ pub fn coupled_step_with_transport(
             .zip(&used)
             .map(|(&v, &u)| array(vec(v) + vec(u)))
             .collect();
+        let mut branch = continuation.map(|(domain, previous)| WingBranch {
+            domain,
+            previous,
+            accepted: None,
+        });
         let (mut solution, axial, applied_wash) = coupled_impl(
             Some(axes),
             op,
@@ -642,6 +769,7 @@ pub fn coupled_step_with_transport(
                 strip_velocity_mps: &velocity,
                 disk_velocity_mps: incident.disk_velocity_mps,
             },
+            branch.as_mut(),
         )?;
         let directions = axes.directions();
         let make = |k: usize| {
@@ -729,13 +857,16 @@ pub fn coupled_step_with_transport(
                 &identity,
             )
             .to_hex();
-            return Ok(CoupledWakeStep {
-                solution,
-                wakes,
-                used_strip_swirl_velocity_mps: used,
-                field_evaluations: evaluation,
-                field_residual_mps: last_residual,
-            });
+            return Ok((
+                CoupledWakeStep {
+                    solution,
+                    wakes,
+                    used_strip_swirl_velocity_mps: used,
+                    field_evaluations: evaluation,
+                    field_residual_mps: last_residual,
+                },
+                branch.and_then(|branch| branch.accepted),
+            ));
         }
         for (current, next) in used.iter_mut().zip(predicted) {
             *current =

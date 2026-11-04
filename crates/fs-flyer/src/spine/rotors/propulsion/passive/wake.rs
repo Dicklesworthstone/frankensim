@@ -6,9 +6,10 @@ use super::{
     ShaftPropulsionStep,
 };
 use crate::propcoupling::swirl::wake::{
-    CoupledWakeStep, WakeControls, WakeTransport, WakeWarmStart,
+    ContinuedWakeStep, CoupledWakeStep, WakeControls, WakeTransport, WakeWarmStart,
 };
 use fs_airscrew::swirl::Controls;
+use fs_wing::nonlinear::continuation::{ContinuationControls, WingContinuation};
 
 /// Full downstream angular wash on independently driven, braked or free shafts.
 ///
@@ -18,8 +19,8 @@ use fs_airscrew::swirl::Controls;
 /// when explicitly selected. The retained `ShaftMotion` alone owns carrier
 /// recoil, shaft momentum, bearing losses, phase and motor work.
 ///
-/// This is a steady source-field selection with numerical warm starts, not
-/// physical wake storage or the harmonic model's wing-branch continuation.
+/// This is a steady source-field selection. Native wing-branch continuation
+/// and numerical field seeds are explicit; neither adds physical wake storage.
 /// Native finite-window, disjoint-source and power-budget limits apply.
 pub struct WakeShaftPropulsion<'p, 'a, const N: usize> {
     propulsion: &'p ShaftPropulsion<'a, N>,
@@ -109,5 +110,77 @@ impl<'p, 'a, const N: usize> WakeShaftPropulsion<'p, 'a, N> {
                 Ok(evaluation)
             },
         )
+    }
+    /// Continue the native wing branch under each actual independent p/J speed
+    /// and the complete annular field. `previous=None` establishes an initial
+    /// accepted branch without advancing mechanical state.
+    ///
+    /// # Errors
+    /// Original field and wing-continuation refusals leave caller inputs intact.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_continued(
+        &self,
+        state: &RotorState<N>,
+        inputs: ShaftInputs<N>,
+        wind_world: &dyn Fn([f64; 3]) -> Result<[f64; 3], Refusal>,
+        warm: Option<&WakeWarmStart>,
+        previous: Option<&WingContinuation>,
+        domain: ContinuationControls,
+    ) -> Result<ShaftEvaluation<N, ContinuedWakeStep>, Refusal> {
+        self.propulsion
+            .evaluate_with(state, inputs, wind_world, |stage| {
+                self.model.solve_continued(stage, warm, previous, domain)
+            })
+    }
+
+    /// Advance native mechanics and the accepted wing anchor transactionally.
+    /// Initial and midpoint field solves each hold their wing anchor fixed
+    /// through all nested trials. Only a complete accepted initial solution
+    /// becomes the local midpoint anchor. Caller state publishes once.
+    ///
+    /// # Errors
+    /// Any field, wing, source-budget or late native-mechanics refusal retains
+    /// both mechanical states, caller wing anchor and caller field seeds.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_continued<C, W>(
+        &self,
+        motion: &mut ShaftMotion<N>,
+        wing: &mut WingContinuation,
+        t_s: f64,
+        angular_origin_world: [f64; 3],
+        warm: Option<&WakeWarmStart>,
+        domain: ContinuationControls,
+        inputs: C,
+        wind_world: W,
+    ) -> Result<ShaftPropulsionStep<N, ContinuedWakeStep>, Refusal>
+    where
+        C: FnMut(f64, &RotorState<N>) -> Result<ShaftInputs<N>, Refusal>,
+        W: Fn(f64, [f64; 3]) -> Result<[f64; 3], Refusal>,
+    {
+        let mut stage_warm = warm.cloned();
+        let mut stage_wing = wing.clone();
+        let step = self.propulsion.step_with(
+            motion,
+            t_s,
+            angular_origin_world,
+            inputs,
+            wind_world,
+            |state, inputs, wind| {
+                let evaluation = self.evaluate_continued(
+                    state,
+                    inputs,
+                    wind,
+                    stage_warm.as_ref(),
+                    Some(&stage_wing),
+                    domain,
+                )?;
+                stage_warm = Some(evaluation.coupled.solution.warm_start());
+                stage_wing = evaluation.coupled.wing_continuation.clone();
+                Ok(evaluation)
+            },
+        )?;
+        // All fallible field/anchor work ran inside the native callbacks.
+        *wing = stage_wing;
+        Ok(step)
     }
 }

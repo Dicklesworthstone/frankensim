@@ -7,11 +7,19 @@ use super::{
 };
 use crate::propcoupling::spatial::DiskAxes;
 use crate::propcoupling::swirl::wake::{
-    self as coupling, CoupledWakeStep, WakeControls, WakeTransport, WakeWarmStart,
+    self as coupling, ContinuedWakeStep, CoupledWakeStep, WakeControls, WakeTransport,
+    WakeWarmStart,
 };
 use fs_ga::Vec3;
+use fs_wing::nonlinear::continuation::{ContinuationControls, WingContinuation};
 
 impl AerodynamicSolution for CoupledWakeStep {
+    fn load_fields(&self) -> AerodynamicFields<'_> {
+        self.solution.load_fields()
+    }
+}
+
+impl AerodynamicSolution for ContinuedWakeStep {
     fn load_fields(&self) -> AerodynamicFields<'_> {
         self.solution.load_fields()
     }
@@ -86,6 +94,35 @@ impl<'a> WakeModel<'a> {
             stage.incident,
         )
     }
+    pub(in super::super) fn solve_continued(
+        &self,
+        stage: AerodynamicStage<'_>,
+        warm: Option<&WakeWarmStart>,
+        previous: Option<&WingContinuation>,
+        domain: ContinuationControls,
+    ) -> Result<ContinuedWakeStep, Refusal> {
+        coupling::coupled_step_continued(
+            self.transport,
+            self.axes,
+            self.spin,
+            stage.op,
+            stage.panels,
+            stage.strips,
+            stage.closure,
+            stage.section_frames,
+            &self.geometry.design.rotor,
+            stage.disks,
+            stage.freestream,
+            stage.rho,
+            &self.geometry.design.coupling,
+            self.native,
+            self.wake,
+            warm,
+            stage.incident,
+            previous,
+            domain,
+        )
+    }
 }
 
 /// Opt-in downstream angular transport, with admitted energy discrepancy.
@@ -147,6 +184,35 @@ impl<'p, 'a, const N: usize> WakePropulsion<'p, 'a, N> {
         })
     }
 
+    /// Evaluate the native wing branch under the complete annular field.
+    /// `previous=None` establishes an initial complete accepted branch.
+    /// Numerical field seeds and the caller's fixed wing anchor are distinct.
+    ///
+    /// # Errors
+    /// Native field and wing-continuation refusals leave both inputs unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_continued(
+        &self,
+        state: &GearedState,
+        inputs: PropulsionInputs,
+        wind_world: &dyn Fn([f64; 3]) -> Result<[f64; 3], Refusal>,
+        warm: Option<&WakeWarmStart>,
+        previous: Option<&WingContinuation>,
+        domain: ContinuationControls,
+    ) -> Result<SwirlEvaluation<N, ContinuedWakeStep>, Refusal> {
+        let result = self
+            .propulsion
+            .evaluate_with(state, inputs, wind_world, |stage| {
+                self.model.solve_continued(stage, warm, previous, domain)
+            })?;
+        Ok(SwirlEvaluation {
+            loads: result.loads,
+            aerodynamic_force_body_n: result.aerodynamic_force_body_n,
+            propeller_absolute_speed_rad_s: result.propeller_absolute_speed_rad_s,
+            coupled: result.aerodynamics,
+        })
+    }
+
     /// Advance actual carrier/shaft momentum using two complete angular-field
     /// solves at the initial and midpoint states. Internal motor torque and
     /// external aerodynamic shaft torque retain their existing exclusive owner.
@@ -163,16 +229,99 @@ impl<'p, 'a, const N: usize> WakePropulsion<'p, 'a, N> {
         dt_s: f64,
         angular_origin_world: [f64; 3],
         warm: Option<&WakeWarmStart>,
-        mut inputs: C,
+        inputs: C,
         wind_world: W,
     ) -> Result<SwirlStep<N, CoupledWakeStep>, Refusal>
     where
         C: FnMut(f64, &GearedState) -> Result<PropulsionInputs, Refusal>,
         W: Fn(f64, [f64; 3]) -> Result<[f64; 3], Refusal>,
     {
+        let mut stage_warm = warm.cloned();
+        self.step_with(
+            state,
+            t_s,
+            dt_s,
+            angular_origin_world,
+            inputs,
+            wind_world,
+            |stage, inputs, wind| {
+                let evaluation = self.evaluate(stage, inputs, wind, stage_warm.as_ref())?;
+                stage_warm = Some(evaluation.coupled.warm_start());
+                Ok(evaluation)
+            },
+        )
+    }
+
+    /// Advance from accepted initial/midpoint wing branches. The complete
+    /// midpoint anchor is returned with its actual loads only after mechanics
+    /// succeeds; retain it with the returned geared state for the next step.
+    ///
+    /// # Errors
+    /// Any native field, wing or mechanical refusal publishes neither state.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_continued<C, W>(
+        &self,
+        state: &GearedState,
+        wing: &WingContinuation,
+        t_s: f64,
+        dt_s: f64,
+        angular_origin_world: [f64; 3],
+        warm: Option<&WakeWarmStart>,
+        domain: ContinuationControls,
+        inputs: C,
+        wind_world: W,
+    ) -> Result<SwirlStep<N, ContinuedWakeStep>, Refusal>
+    where
+        C: FnMut(f64, &GearedState) -> Result<PropulsionInputs, Refusal>,
+        W: Fn(f64, [f64; 3]) -> Result<[f64; 3], Refusal>,
+    {
+        let mut stage_warm = warm.cloned();
+        let mut stage_wing = wing.clone();
+        self.step_with(
+            state,
+            t_s,
+            dt_s,
+            angular_origin_world,
+            inputs,
+            wind_world,
+            |stage, inputs, wind| {
+                let evaluation = self.evaluate_continued(
+                    stage,
+                    inputs,
+                    wind,
+                    stage_warm.as_ref(),
+                    Some(&stage_wing),
+                    domain,
+                )?;
+                stage_warm = Some(evaluation.coupled.solution.warm_start());
+                stage_wing = evaluation.coupled.wing_continuation.clone();
+                Ok(evaluation)
+            },
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_with<S, C, W, E>(
+        &self,
+        state: &GearedState,
+        t_s: f64,
+        dt_s: f64,
+        angular_origin_world: [f64; 3],
+        mut inputs: C,
+        wind_world: W,
+        mut evaluate: E,
+    ) -> Result<SwirlStep<N, S>, Refusal>
+    where
+        C: FnMut(f64, &GearedState) -> Result<PropulsionInputs, Refusal>,
+        W: Fn(f64, [f64; 3]) -> Result<[f64; 3], Refusal>,
+        E: FnMut(
+            &GearedState,
+            PropulsionInputs,
+            &dyn Fn([f64; 3]) -> Result<[f64; 3], Refusal>,
+        ) -> Result<SwirlEvaluation<N, S>, Refusal>,
+    {
         let mut initial = None;
         let mut midpoint = None;
-        let mut stage_warm = warm.cloned();
         let motion = geared::step(
             self.propulsion.assembly,
             state,
@@ -180,13 +329,9 @@ impl<'p, 'a, const N: usize> WakePropulsion<'p, 'a, N> {
             dt_s,
             angular_origin_world,
             |time, stage| {
-                let evaluation = self.evaluate(
-                    stage,
-                    inputs(time, stage)?,
-                    &|point| wind_world(time, point),
-                    stage_warm.as_ref(),
-                )?;
-                stage_warm = Some(evaluation.coupled.warm_start());
+                let evaluation = evaluate(stage, inputs(time, stage)?, &|point| {
+                    wind_world(time, point)
+                })?;
                 let loads = evaluation.loads;
                 if initial.is_none() {
                     initial = Some(evaluation);

@@ -515,3 +515,6 @@ fn g0_field_budgets_midpoint_and_late_native_refusals_preserve_state_and_retry()
         assert_eq!(motion.native_state(), fresh.native_state());
     }
 }
+
+#[path = "wake/continuation.rs"]
+mod continuation;

@@ -2141,8 +2141,44 @@ signed windmilling plus budget, midpoint and late native refusal/retry. These ar
 selected-source native checks, not full-workspace, cross-platform or real-time
 gates. This integration makes no additional timestep-convergence claim.
 
-The annular source field remains steady and distinct from harmonic wake memory
-and physical wing-branch continuation. The native annular owner supplies no
-continued-wing entry point. Its finite observation window, disjoint source
-restrictions and explicit projection discrepancy remain in force; there is no
-new unsteady wake law or complete fluid/body energy or momentum closure.
+The annular source field remains steady and distinct from physical harmonic
+wake memory. Optional native wing-branch continuation is described below; it
+does not add physical air inertia. The finite observation window, disjoint
+source restrictions and explicit projection discrepancy remain in force;
+there is no new unsteady wake law or complete fluid/body conservation claim.
+
+## Wing continuation through annular source-field coupling
+
+`propcoupling::swirl::wake::coupled_step_continued` reuses the original
+`fs-wing` Newton/FGMRES/Armijo continuation owner inside the existing two-way
+rotor and outer annular-field iterations. Every inner and outer trial holds
+the caller's complete accepted wing anchor fixed. Numerical wash/rotor seeds
+remain separate; a rejected trial never advances the caller's branch.
+The private inner result carries its native continuation alongside the actual
+nonlinear report, and captures it only at the accepted coupling residual.
+Only a complete outer field acceptance returns `ContinuedWakeStep`, pairing
+the exact circulation/incidence anchor with its actual used force velocities.
+The existing `CoupledWakeStep` type and ordinary entry points remain intact.
+Continued coupling identity includes every declared wing-domain/solver limit.
+
+The shared prepared `WakeModel` exposes `evaluate_continued` and
+`step_continued` on both geared `WakePropulsion` and independent
+`WakeShaftPropulsion`. Evaluation with no previous anchor establishes the
+initial complete branch without advancing mechanics. During a step, the
+complete accepted initial aerodynamic solution supplies the local midpoint
+anchor. Both physical mechanical stages retain their original owners and
+signed torque/work semantics. Independent shafts publish the caller's wing
+anchor only after native mechanics succeeds; the geared result returns its
+midpoint anchor with the accepted state. Native source, field, wing-domain
+and late mechanical refusals publish no partial branch or mechanical state.
+
+Four focused regression groups exercise both field choices: changing-load
+80 ms nonlinear flight with unequal shafts and actual Newton work; exact
+stage circulation/incidence/force-anchor correspondence and independent
+accumulated momentum/work balances; fixed caller-branch limits and a case
+where continuation succeeds while original cold Newton refuses; atomic
+midpoint/late-native refusal and deterministic retry; and geared-stage
+replay/parity. The existing 13 annular consumer checks also pass. This is
+selected-source native evidence, not a workspace, cross-platform, real-time
+or new timestep-order gate. Continuation supplies an algebraic branch anchor,
+not dynamic wing stall, wake inertia or an additional fluid closure.
