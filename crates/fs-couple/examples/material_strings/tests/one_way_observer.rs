@@ -750,15 +750,25 @@ fn a_prepared_skin_load_charges_its_poles_to_the_prepared_budget_not_the_exact_s
             ),
             (wide.clone(), false),
         ] {
+            // The exact owner's material setup work is (2 modes + 2 poles)^2 plus cross terms against
+            // `input::MAX_WORK`, which follows the body mode ceiling. The 16384 poles alone sit within
+            // 0.3 % of that ceiling, so the card carries 96 string modes to put the exact owner clearly
+            // over it, as the 4-mode card was over the smaller ceiling before the body cap rose.
+            let bare = source(&owner);
+            let card = bare.replace(" 20 4 0 0.8 3000 0.1", " 20 96 0 0.8 3000 0.1");
+            assert_ne!(card, bare, "the string row to widen is not in the card");
             let mut reads = 0;
-            let result = input::Spec::parse(source(&owner).as_bytes())
+            let result = input::Spec::parse(card.as_bytes())
                 .unwrap()
                 .compile_with_body::<NormalizedPack>(cx, gate, Some(profile(&own_skin())), |_| {
                     reads += 1;
                     Err("the first material read ends this check".into())
                 });
-            assert!(result.is_err());
-            assert_eq!(reads > 0, reaches_io, "{owner}");
+            let refusal = result.err().expect("the check ends in a refusal").to_string();
+            assert_eq!(reads > 0, reaches_io, "{owner}: {refusal}");
+            if !reaches_io {
+                assert!(refusal.contains("setup-work ceiling"), "{refusal}");
+            }
         }
     });
 }
