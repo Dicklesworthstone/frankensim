@@ -138,8 +138,18 @@ pub(super) fn advance(
     {
         return None;
     }
-    let next_momentum =
-        core::array::from_fn(|d| momentum[d] + transferred_mass * donor_velocity[d]);
+    // Resolve the small physical impulse before adding it to a possibly much
+    // larger stored momentum. Otherwise an accepted transfer can silently
+    // disappear when the receiver is moving in a highly boosted frame.
+    let impulse = core::array::from_fn::<_, 3, _>(|d| {
+        (Dd::from_f64(transferred_mass) * Dd::from_f64(donor_velocity[d])).to_f64()
+    });
+    let next_momentum = core::array::from_fn(|d| {
+        (Dd::from_f64(momentum[d]) + Dd::from_f64(impulse[d])).to_f64()
+    });
+    if (0..3).any(|d| impulse[d] != 0.0 && next_momentum[d] == momentum[d]) {
+        return None;
+    }
     let next_velocity = velocity(new_mass, next_momentum)?;
     let mixing_heat_j = if transferred_mass > 0.0 {
         let mixed_mass = old_mass + transferred_mass;
@@ -155,15 +165,19 @@ pub(super) fn advance(
     } else {
         0.0
     };
-    let actual_dm = new_mass - old_mass;
-    let carried = actual_dm.signum() * kinetic_energy(actual_dm.abs(), old_velocity);
-    let drift = (0..3)
-        .map(|d| {
-            let du = next_velocity[d] - old_velocity[d];
-            (new_mass * du) * (old_velocity[d] + 0.5 * du)
-        })
-        .sum::<f64>();
-    let kinetic_change_j = carried + drift;
+    // Changing-mass identity on the represented endpoint momenta. The old
+    // carried-plus-drift expression lost small velocity changes when absolute
+    // velocities were large, and computed a rounded mass difference.
+    let dm = Dd::from_f64(new_mass) - Dd::from_f64(old_mass);
+    let mut kinetic = Dd::ZERO;
+    for d in 0..3 {
+        let before = Dd::from_f64(momentum[d]) / Dd::from_f64(old_mass);
+        let after = Dd::from_f64(next_momentum[d]) / Dd::from_f64(new_mass);
+        let dp = Dd::from_f64(next_momentum[d]) - Dd::from_f64(momentum[d]);
+        kinetic = kinetic + (before * Dd::from_f64(0.5) + after * Dd::from_f64(0.5)) * dp
+            - dm * Dd::from_f64(0.5) * before * after;
+    }
+    let kinetic_change_j = kinetic.to_f64();
     [
         kinetic_energy(old_mass, old_velocity),
         kinetic_energy(new_mass, next_velocity),
@@ -261,6 +275,9 @@ mod tests {
         assert!(velocity(1.0, [f64::INFINITY, 0.0, 0.0]).is_none());
         assert!(advance(1.0, 0.0, [1.0; 3], -1.0, [1.0; 3]).is_none());
         assert!(advance(1.0, 2.0, [0.0; 3], f64::NAN, [0.0; 3]).is_none());
+        // Small but physically nonzero impulse cannot vanish into a large
+        // existing momentum without a visible refusal.
+        assert!(advance(1e20, 1e20, [1e30, 0.0, 0.0], 1e-12, [1.0, 0.0, 0.0]).is_none());
     }
 
     fn stream(mass_kg: f64, velocity_m_s: [f64; 3]) -> GasStream {
