@@ -42,7 +42,21 @@
 //! fold_shape <sine|rigid> <uniform|tapered>          (optional, two_mass only; the gap varies along the fold)
 //! aspiration_noise <seed> <xi_pa_s3_per_m6> [<re_crit>]   (optional; turbulence noise at the glottis)
 //! jet_noise <seed> <gain> <st_lo> <st_hi> <re_on>         (optional; constriction noise of the glottal jet, Verge's fraction)
+//! constriction_noise <seed> <duct_radius_m>               (optional; Oldham and Ukpoho's printed constriction noise)
 //! ```
+//!
+//! `constriction_noise` is an opt-in glottal source on the printed duct-constriction law of Oldham and Ukpoho (J. Sound Vib.
+//! 140(2), 1990; Guedel, AIVC Contributed Report 02, eq. 3 and Fig. 10; [`crate::turbulence_noise::ConstrictionNoise`]): a
+//! series pressure source added to the step's drive, in each third octave below the duct cutoff `100 / r` whose Strouhal
+//! number `f d / U_c` lies on the printed line, of rms `K(St) P` with `K` the printed trend, `P` the subglottal gesture,
+//! `U_c = sqrt(2 P / rho)` and `d = pi r / 2`. Two fields and no gain, so it has nothing to tune: `r` is the duct the
+//! constriction opens into, and the card says which radius it took. The law was measured on dampers and orifice plates in a
+//! 300 mm duct at 10-25 m/s, so putting it on a glottis is an extrapolation in size and Mach number that any page showing a
+//! render must say: "constriction noise from a duct-constriction law (Oldham and Ukpoho 1990, via Guedel AIVC CR02: dampers
+//! and orifice plates in a 300 mm duct at 10-25 m/s), applied to the glottal jet as an extrapolation". It is silent while the
+//! glottal flow is not forward. It may stand on a card with `jet_noise`, but those are two laws for one jet, so a page
+//! carrying both must say so. Without the key nothing is added and a performance is bit-identical to one written before the
+//! key existed.
 //!
 //! `jet_noise` is a second opt-in glottal source, beside `aspiration_noise` and not a replacement for it, and the two may
 //! be on one card: a series pressure source of rms `gain * rho U_j^2 / 2` over `St_h = f h / U_j` in `[st_lo, st_hi]`,
@@ -106,7 +120,10 @@ use crate::pcm_wav::baffled::{BaffledPressure, CircularOutletReceiver, RayleighM
 use crate::pcm_wav::observation::PressureRenderer;
 use crate::render::RenderError;
 use crate::tract::{TractChart, TractSection};
-use crate::turbulence_noise::{AspirationCard, GlottalAspiration, GlottalJetNoise, JetNoiseCard, RE_CRIT_SONDHI_SCHROETER};
+use crate::turbulence_noise::{
+    AspirationCard, ConstrictionNoise, ConstrictionNoiseCard, GlottalAspiration, GlottalJetNoise, JetNoiseCard,
+    RE_CRIT_SONDHI_SCHROETER,
+};
 use fs_duct::Termination;
 use fs_material::gas::GasState;
 use fs_material::gas_species::input::{GasRecord, ThermochemicalSources, read_gas_record};
@@ -168,6 +185,9 @@ pub struct VoiceDescription {
     /// Opt-in glottal jet noise (Verge's fraction on the glottal jet, an extrapolation; [`crate::turbulence_noise::JetNoiseCard`]);
     /// `None` adds nothing.
     pub jet_noise: Option<JetNoiseCard>,
+    /// Opt-in glottal constriction noise (Oldham and Ukpoho's printed law on the glottal jet, an extrapolation;
+    /// [`crate::turbulence_noise::ConstrictionNoise`]); `None` adds nothing.
+    pub constriction_noise: Option<ConstrictionNoiseCard>,
 }
 
 fn field(rest: &[&str], i: usize, what: &str) -> Result<f64, String> {
@@ -253,6 +273,7 @@ impl VoiceDescription {
         let mut tension_flutter = None;
         let mut aspiration_noise = None;
         let mut jet_noise = None;
+        let mut constriction_noise = None;
         let mut fold_mapping = None;
         let mut fold_shape = None;
         let mut fold_damping_upper = None;
@@ -454,6 +475,16 @@ impl VoiceDescription {
                     card.validate().map_err(str::to_string)?;
                     once(&mut jet_noise, card, key)?;
                 }
+                "constriction_noise" => {
+                    // No gain and no gate: the law has no free number. The radius is the duct the constriction opens into, and
+                    // the card, not this code, says which it took.
+                    arity(&rest, 2, key)?;
+                    let seed = whole(&rest, 0, "constriction_noise seed")?;
+                    let duct_radius_m = field(&rest, 1, "constriction_noise duct radius")?;
+                    let card = ConstrictionNoiseCard { seed, duct_radius_m };
+                    card.validate().map_err(str::to_string)?;
+                    once(&mut constriction_noise, card, key)?;
+                }
                 "fold_mapping" => {
                     arity(&rest, 1, key)?;
                     if rest[0] != "bilateral" {
@@ -532,6 +563,7 @@ impl VoiceDescription {
             tension_flutter,
             aspiration_noise,
             jet_noise,
+            constriction_noise,
         })
     }
 
@@ -626,12 +658,17 @@ impl VoiceDescription {
             Some(card) => Some(GlottalJetNoise::new(card).map_err(str::to_string)?),
             None => None,
         };
+        let constriction_noise = match self.constriction_noise {
+            Some(card) => Some(ConstrictionNoise::new(card, 1.0 / f64::from(mechanics_rate)).map_err(str::to_string)?),
+            None => None,
+        };
         Ok(VoicePerformance {
             island,
             mouth,
             receiver,
             aspiration,
             jet_noise,
+            constriction_noise,
             gas_density: gas.density,
             gas_viscosity: gas.dynamic_viscosity,
             fold_length_m: self.fold.fold_length_m,
@@ -828,6 +865,8 @@ pub struct VoicePerformance {
     aspiration: Option<GlottalAspiration>,
     /// Opt-in glottal jet-noise source (Verge's fraction on the glottal jet, an extrapolation).
     jet_noise: Option<GlottalJetNoise>,
+    /// Opt-in glottal constriction noise (Oldham and Ukpoho's printed law, an extrapolation).
+    constriction_noise: Option<ConstrictionNoise>,
     gas_density: f64,
     gas_viscosity: f64,
     fold_length_m: f64,
@@ -904,7 +943,16 @@ impl VoicePerformance {
                     .set_tension(1.0 + flutter.next_relative())
                     .map_err(|e| format!("fold tension refused: {e:?}"))?;
             }
-            let mut drive = self.schedule.at(t);
+            let gesture = self.schedule.at(t);
+            let mut drive = gesture;
+            if let Some(source) = self.constriction_noise.as_mut() {
+                // K(St) times the gesture's own pressure, not the noisy drive: the law's blowing pressure is a held value. Series
+                // like the sources below; zero is not added, so a silent source leaves the drive bit for bit what it was.
+                let noise = source.pressure_pa(gesture, self.gas_density);
+                if noise != 0.0 {
+                    drive += noise;
+                }
+            }
             if let Some(source) = self.jet_noise.as_mut() {
                 // The jet cannot be faster than the Bernoulli speed of the whole driving pressure. A series source like the
                 // aspiration one (the loop sees p_sub + p_n); zero is not added, so a shut gate leaves the drive bit for bit
@@ -938,6 +986,9 @@ impl VoicePerformance {
             }
             if let Some(source) = self.jet_noise.as_mut() {
                 source.record(frame.flow_m3_s, frame.gap_m.max(0.0));
+            }
+            if let Some(source) = self.constriction_noise.as_mut() {
+                source.record(frame.flow_m3_s);
             }
             let flow = self
                 .mouth
@@ -1728,6 +1779,56 @@ mod tests {
         let jet = render(&fixture("jet_noise 7 1.3e-3 0.045 0.115 300\n"));
         assert_ne!(both, aspiration, "the jet row must add to a card that has aspiration");
         assert_ne!(both, jet, "the aspiration row must add to a card that has the jet row");
+    }
+
+    #[test]
+    fn constriction_noise_parses_and_is_refused_by_name() {
+        let parse = |extra: &str| VoiceDescription::from_bytes(fixture(extra).as_bytes());
+        let ok = parse("constriction_noise 7 5.3e-3\n").expect("parses");
+        assert_eq!(ok.constriction_noise, Some(ConstrictionNoiseCard { seed: 7, duct_radius_m: 5.3e-3 }));
+        assert_eq!(parse("").expect("parses").constriction_noise, None);
+        for (extra, needle) in [
+            ("constriction_noise\n", "takes 2 fields"),
+            ("constriction_noise 7\n", "takes 2 fields"),
+            ("constriction_noise 7 5.3e-3 9\n", "takes 2 fields"),
+            ("constriction_noise x 5.3e-3\n", "not a non-negative integer"),
+            ("constriction_noise 7 x\n", "not a number"),
+            ("constriction_noise 7 nan\n", "must be finite"),
+            ("constriction_noise 7 0\n", "duct radius must be finite and positive"),
+            ("constriction_noise 7 -5.3e-3\n", "duct radius must be finite and positive"),
+            ("constriction_noise 7 5.3e-3\nconstriction_noise 8 5.3e-3\n", "only appear once"),
+        ] {
+            let error = parse(extra).expect_err(extra);
+            assert!(error.contains(needle), "{extra:?} -> {error}");
+        }
+    }
+
+    /// Gauntlet G0 (a cutoff under every driven band leaves nothing to add: bit-identical to no row), G3 (the printed law
+    /// reaches the radiated sound, finite and seeded) and the planted negative that keeps the first from being vacuous (the
+    /// same row at a real radius speaks).
+    #[test]
+    fn constriction_noise_is_bit_identical_with_no_band_below_its_cutoff_and_otherwise_seeded_and_audible() {
+        let plain = render(&fixture(""));
+        // A 12 m "duct" has its cutoff `100 / r` at 8.3 Hz, under the bank's lowest band (10 Hz), so nothing is driven.
+        let cut_off = render(&fixture("constriction_noise 7 12\n"));
+        assert!(
+            plain.iter().zip(&cut_off).all(|(a, b)| a.to_bits() == b.to_bits()),
+            "a row that drives no band must leave the output bit-identical to no row"
+        );
+        let spoken = render(&fixture("constriction_noise 7 5.3e-3\n"));
+        assert!(spoken.iter().all(|v| v.is_finite()));
+        assert!(first_difference(&plain, &spoken).is_some(), "the row at a real radius must reach the output");
+        let again = render(&fixture("constriction_noise 7 5.3e-3\n"));
+        assert!(spoken.iter().zip(&again).all(|(a, b)| a.to_bits() == b.to_bits()), "the same seed must repeat bit for bit");
+        assert_ne!(spoken, render(&fixture("constriction_noise 8 5.3e-3\n")), "another seed must give another noise");
+    }
+
+    #[test]
+    fn constriction_noise_and_jet_noise_stand_on_one_card_with_streams_of_their_own() {
+        let both = render(&fixture("jet_noise 7 1.3e-3 0.045 0.115 300\nconstriction_noise 7 5.3e-3\n"));
+        assert!(both.iter().all(|v| v.is_finite()));
+        assert_ne!(both, render(&fixture("jet_noise 7 1.3e-3 0.045 0.115 300\n")), "the row must add to a card that has jet_noise");
+        assert_ne!(both, render(&fixture("constriction_noise 7 5.3e-3\n")), "jet_noise must add to a card that has the row");
     }
 
     /// The radiated f0's peak swing at the gesture rate with no key, at `a = 0.04` and at `a = 0.08`, and the largest
