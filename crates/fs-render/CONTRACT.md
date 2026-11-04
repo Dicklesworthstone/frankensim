@@ -292,6 +292,17 @@ differentiable lift). Pure Rust throughout.
   general certified minimum separation. Analytic regressions cover submicron
   absorption, distant camera origins, oblique Snell/Fresnel power, metre
   scaling and rigid placement.
+
+  The same reconstructed mesh witnesses and bounded normal offsets also
+  govern opaque reflection: diffuse, GGX, smooth and brushed conductor paths,
+  their direct-light visibility, bidirectional vertices, and finite thermal
+  or volume-source connections. Static, rigid and animated mesh placement
+  retain their original nearest-hit ray parameters. A numerical launch must
+  neither skip a nearby reflector/emitter nor jump over an occluder. Tracer
+  bit semantics v5 records this change; focused analytical controls cover
+  both sides of submicrometre mirror/diffuse gaps, instancing, translated
+  scenes and environment-light occlusion. Calibrated photometric probes
+  retain their authored geometric resolution limit.
 - `gradient_index` module (feature `tracer`): allocation-free adaptive
   Dormand--Prince 5(4) propagation of the geometric-optics ray equation
   `d(n t)/ds = grad(n)`. An immutable field supplies local phase index,

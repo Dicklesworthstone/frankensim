@@ -179,9 +179,9 @@ mod transport;
 /// Philox/Sobol stream keying, the BSDF forms, the CMF/adaptation
 /// constants it inherits from `spectral`, and the EXR channel layout.
 /// Bump ONLY with a semantic justification per docs/GOLDEN_POLICY.md.
-/// Version 4 retains the authored BSDF after accumulating ordinary surface
-/// emission, so emitting geometry can also reflect and transmit incident light.
-pub const TRACER_BIT_SEMANTICS_VERSION: u32 = 4;
+/// Version 5 uses reconstructed mesh hit points and error-bounded origins for
+/// opaque reflection and visibility, preserving resolvable submicrometre gaps.
+pub const TRACER_BIT_SEMANTICS_VERSION: u32 = 5;
 
 /// Bit-affecting semantics of the optional motion-time path. This is versioned
 /// separately because the legacy static entry points do not draw a shutter
@@ -193,8 +193,8 @@ pub const MOTION_TRACER_BIT_SEMANTICS_VERSION: u32 = 1;
 /// cannot silently change the legacy pinhole tracer's frozen stream.
 pub const CINEMATIC_CAMERA_TRACER_BIT_SEMANTICS_VERSION: u32 = 1;
 
-/// Bit-affecting semantics of the opt-in spectral dielectric path. Existing
-/// opaque materials retain tracer-v1 stream order and image bits.
+/// Bit-affecting semantics specific to the opt-in spectral dielectric path.
+/// Shared mesh-origin behavior is also versioned by the general tracer surface.
 // v17 shares stable bare Fresnel powers and critical-angle geometry with
 // polarized transport, retaining positive T when grazing R rounds to one.
 // v18 reconstructs dielectric mesh vertices from their triangle witness and
@@ -323,7 +323,7 @@ struct SceneIntersection {
     mesh_boundary_origin: Option<MeshBoundaryOrigin>,
 }
 
-/// Unoffset dielectric mesh vertex and its numerical uncertainty. Physical
+/// Unoffset mesh vertex and its numerical uncertainty. Physical
 /// transport uses `point`; only spawned rays receive the normal displacement.
 #[derive(Clone, Copy)]
 struct MeshBoundaryOrigin {
@@ -14535,6 +14535,7 @@ fn trace_path_with_regions<'scene>(
                     (_, None) if !smooth_conductor => Some(volume_emission::Receiver::Surface {
                         material: &prim.material,
                         frame,
+                        mesh_boundary_origin: intersection.mesh_boundary_origin,
                         outgoing: ray.dir.scale(-1.0),
                         brushed: brushed_frame.as_ref(),
                         incident_glass: source_region.host,
@@ -14806,9 +14807,8 @@ fn trace_path_with_regions<'scene>(
                 | Material::Ggx { .. }
                 | Material::Conductor { .. }
                 | Material::BrushedConductor { .. } => {
-                    // Preserve the opaque tracer-v1 arithmetic and draw order
-                    // expression-for-expression so the frozen Cornell path is
-                    // unaffected by enabling dielectric support.
+                    // The opaque estimator retains its draw order; mesh
+                    // visibility shares the bounded origin used by continuation.
                     let (u1, u2) = rng.path_pair(path_sobol, depth, 0);
                     let light_sample = lighting.sample(hit.point, u1, u2);
                     if let Some(LightSample::ThermalSurface(light)) = light_sample {
@@ -14850,7 +14850,7 @@ fn trace_path_with_regions<'scene>(
                         let cos_s = n.dot(wi);
                         if cos_s > 0.0 {
                             let shadow = Ray {
-                                origin: hit.point.offset(n.scale(RAY_EPS)),
+                                origin: intersection.spawn_boundary_ray(frame.geometric, wi),
                                 dir: wi,
                             };
                             let shadow_hit = intersect(scene, cx, &shadow, ray_time)?;
@@ -15685,7 +15685,7 @@ fn trace_path_with_regions<'scene>(
                 prev_origin = hit.point;
                 segment_origin = hit.point;
                 ray = Ray {
-                    origin: dielectric_spawn_origin(hit.point, frame.geometric, wi),
+                    origin: intersection.spawn_boundary_ray(frame.geometric, wi),
                     dir: wi,
                 };
             }
@@ -15731,7 +15731,7 @@ fn trace_path_with_regions<'scene>(
                 prev_origin = hit.point;
                 segment_origin = hit.point;
                 ray = Ray {
-                    origin: hit.point.offset(n.scale(RAY_EPS)),
+                    origin: intersection.spawn_boundary_ray(frame.geometric, wi),
                     dir: wi,
                 };
             }
@@ -16432,12 +16432,10 @@ fn intersect_primitive(
                 current_best_t.unwrap_or(distance_limit.unwrap_or(f64::INFINITY)),
             )?
             .map(|mut surface_hit| {
-                let mesh_boundary_origin = if matches!(prim.material, Material::Dielectric { .. }) {
-                    surface_hit.hit.normal.and_then(|normal| MeshBoundaryOrigin::from_triangle(
+                let mesh_boundary_origin = surface_hit.hit.normal.and_then(|normal| MeshBoundaryOrigin::from_triangle(
                         mesh, surface_hit.triangle_index, surface_hit.barycentric,
                         RigidTransform::identity(), normal,
-                    )).map(|(origin, _)| origin)
-                } else { None };
+                    )).map(|(origin, _)| origin);
                 if let Some(origin) = mesh_boundary_origin {
                     // Retain the kernel's t for nearest-hit ordering. Recover
                     // physical distances from the unoffset surface witness,
@@ -16488,9 +16486,8 @@ fn intersect_primitive(
             instance
                 .intersect(cx, ray, t_max, TRACE_EPS)?
                 .map(|mut instance_hit| {
-                    let mesh_boundary_origin = if matches!(prim.material, Material::Dielectric { .. }) {
-                        MeshBoundaryOrigin::reconstruct_instance_hit(instance, &mut instance_hit)
-                    } else { None };
+                    let mesh_boundary_origin =
+                        MeshBoundaryOrigin::reconstruct_instance_hit(instance, &mut instance_hit);
                     SceneIntersection {
                         primitive_index: i,
                         hit: instance_hit.hit,
@@ -16513,17 +16510,15 @@ fn intersect_primitive(
                 .find(|cached| cached.primitive_index == i)
             {
                 let mut hit = cached.instance.intersect(cx, ray, t_max, TRACE_EPS)?;
-                let origin = if matches!(prim.material, Material::Dielectric { .. }) {
-                    hit.as_mut().and_then(|hit| MeshBoundaryOrigin::reconstruct_instance_hit(&cached.instance, hit))
-                } else { None };
+                let origin = hit.as_mut().and_then(|hit|
+                    MeshBoundaryOrigin::reconstruct_instance_hit(&cached.instance, hit));
                 (hit, origin)
             } else {
                 let timed_ray = TimedRay::at_normalized(*ray, time.interval, time.normalized);
                 let placed = instance.instance_at(cx, timed_ray.absolute_time_s())?;
                 let mut hit = placed.intersect(cx, ray, t_max, TRACE_EPS)?;
-                let origin = if matches!(prim.material, Material::Dielectric { .. }) {
-                    hit.as_mut().and_then(|hit| MeshBoundaryOrigin::reconstruct_instance_hit(&placed, hit))
-                } else { None };
+                let origin = hit.as_mut().and_then(|hit|
+                    MeshBoundaryOrigin::reconstruct_instance_hit(&placed, hit));
                 (hit, origin)
             };
             instance_hit.map(|instance_hit| SceneIntersection {
@@ -19820,6 +19815,129 @@ mod tests {
                     }
                 }
             }
+        });
+    }
+
+    #[test]
+    fn opaque_reflection_preserves_resolvable_submicrometre_gaps() {
+        let white = lift_rgb([1.0; 3]);
+        let optics = ConductorOptics::representative_tungsten();
+        let diffuse = crate::spectral::SpectralReflectance::constant(0.4).unwrap();
+        let hero = 0.173;
+        let wavelengths = hero_wavelength_packet::<PACKET>(
+            LAMBDA_MIN + hero * (LAMBDA_MAX - LAMBDA_MIN), LAMBDA_MIN, LAMBDA_MAX,
+        );
+        with_test_cx(|cx| {
+            for instanced in [false, true] {
+                for base_z in [0.0, 17.0, 1.0e6] {
+                    for side in [-1.0, 1.0] {
+                        for gap in [0.5e-6, 5.0e-6] {
+                            for material in [
+                                Material::Conductor { optics, surface: ConductorSurface::SMOOTH },
+                                Material::SpectralDiffuse { reflectance: diffuse },
+                            ] {
+                                let mirror = horizontal_quad(base_z, 10.0);
+                                let emitter_z = base_z + side * gap;
+                                let scene = Scene {
+                                    primitives: vec![
+                                        Primitive {
+                                            shape: if instanced { instanced_test_mesh(mirror, 801) }
+                                                else { Shape::Mesh(mirror) },
+                                            material,
+                                            emission: None,
+                                        },
+                                        Primitive {
+                                            shape: Shape::Mesh(horizontal_quad(emitter_z, 10.0)),
+                                            material: Material::SpectralDiffuse {
+                                                reflectance: crate::spectral::SpectralReflectance::constant(0.0).unwrap(),
+                                            },
+                                            emission: Some((white, 3.0)),
+                                        },
+                                    ],
+                                    lights: vec![RectLight {
+                                        corner: Point3::new(-10.0, -10.0, emitter_z),
+                                        edge_u: Vec3::new(20.0, 0.0, 0.0),
+                                        edge_v: Vec3::new(0.0, 20.0, 0.0),
+                                        prim: 1,
+                                        emission: (white, 3.0),
+                                    }],
+                                    environment: None,
+                                    camera: Camera {
+                                        eye: Point3::new(0.0, 0.0, base_z + side * gap * 0.5),
+                                        forward: Vec3::new(0.0, 0.0, -side),
+                                        up: Vec3::new(0.0, 1.0, 0.0),
+                                        half_tan: 0.2,
+                                    },
+                                };
+                                let lighting = validate_scene(&scene, cx, None).unwrap();
+                                let expected = packet_radiance_to_xyz(wavelengths.map(|lambda| {
+                                    let reflectance = if matches!(material, Material::Conductor { .. }) {
+                                        optics.fresnel(lambda, 1.0, 1.0).unwrap()
+                                    } else { 0.4 };
+                                    3.0 * white.eval(lambda) * reflectance
+                                }), &wavelengths, 1.0);
+                                let strategies = if matches!(material, Material::Conductor { .. }) {
+                                    &[DirectStrategy::BsdfOnly, DirectStrategy::NeeOnly,
+                                        DirectStrategy::Mis, DirectStrategy::PowerMis][..]
+                                } else { &[DirectStrategy::BsdfOnly][..] };
+                                for &strategy in strategies {
+                                    let settings = Settings { width: 1, height: 1, spp: 1, max_depth: 2,
+                                        sampler: Sampler::Iid, strategy, seed: 73 };
+                                    let actual = trace_path(&scene, &lighting, cx, &settings, 1.0,
+                                        0, 0, 0.5, 0.5, hero, None, CameraPath::Legacy, false,
+                                        None, None).unwrap().xyz;
+                                    for (observed, expected) in actual.into_iter().zip(expected) {
+                                        assert_near(observed, expected, 2e-12 * expected,
+                                            "opaque reflected rays must not skip a nearby emitter");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn opaque_shadow_rays_cannot_jump_over_a_nearby_occluder() {
+        let white = lift_rgb([1.0; 3]);
+        let mut scene = Scene {
+            primitives: vec![Primitive {
+                shape: Shape::Mesh(horizontal_quad(0.0, 10.0)),
+                material: Material::Lambertian { reflectance: white },
+                emission: None,
+            }],
+            lights: Vec::new(),
+            environment: Some(crate::lighting::EnvironmentMap::try_from_linear_srgb(
+                1, 1, vec![[1.0; 3]], 0.0,
+            ).unwrap()),
+            camera: Camera {
+                eye: Point3::new(0.0, 0.0, 0.25e-6),
+                forward: Vec3::new(0.0, 0.0, -1.0),
+                up: Vec3::new(0.0, 1.0, 0.0),
+                half_tan: 0.2,
+            },
+        };
+        let settings = Settings { width: 1, height: 1, spp: 1, max_depth: 1,
+            sampler: Sampler::Iid, strategy: DirectStrategy::NeeOnly, seed: 73 };
+        with_test_cx(|cx| {
+            let sample_direct = |scene: &Scene| {
+                let lighting = validate_scene(scene, cx, None).unwrap();
+                (0..32).map(|sample| trace_path(scene, &lighting, cx, &settings, 1.0,
+                    0, sample, 0.5, 0.5, 0.173, None, CameraPath::Legacy, false,
+                    None, None).unwrap().xyz[1]).sum::<f64>()
+            };
+            assert!(sample_direct(&scene) > 0.0, "the sampled environment lights the receiver");
+            scene.primitives.push(Primitive {
+                shape: Shape::Mesh(horizontal_quad(0.5e-6, 10.0)),
+                material: Material::SpectralDiffuse {
+                    reflectance: crate::spectral::SpectralReflectance::constant(0.0).unwrap(),
+                },
+                emission: None,
+            });
+            assert_eq!(sample_direct(&scene), 0.0,
+                "a resolvable submicrometre occluder must block reflected environment light");
         });
     }
 
