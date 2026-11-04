@@ -81,8 +81,10 @@ pub struct CohesiveContactStep<'a> {
 ///
 /// The caller owns the complete mechanical map and its work audit. Compliance
 /// is neither diagonalized nor symmetrized; anisotropic and cross-axis body
-/// response is retained. Area is the original bonded reference area, not an
-/// invented fraction of normal-load contact. Damage remains with the material.
+/// response is retained. The material's path-mean derivative supplies Newton's
+/// matrix, including damage and surviving-bond viscosity. Only explicitly
+/// unsupported nonsmooth paths use the existing bounded numerical stencil.
+/// Area is the original bonded reference area; damage remains with the material.
 #[derive(Debug)]
 pub struct CohesiveLoadLine {
     area_m2: f64,
@@ -157,11 +159,12 @@ impl CohesiveLoadLine {
             },
         );
         let mut evaluations = 0;
-        let mut current = self.evaluate(
+        let (mut current, mut current_tangent) = self.evaluate(
             point,
             old,
             free_jump,
             dt_s,
+            true,
             &mut evaluations,
             &mut keep_going,
         )?;
@@ -185,60 +188,80 @@ impl CohesiveLoadLine {
             }
             let x = current.material.equilibrium.point.jump_m();
             let mut jacobian = [0.0; 9];
-            for j in 0..3 {
-                // Central differences on the analytic mean, scaled to actual
-                // material onset length. Endpoint tangents are different and
-                // cannot be reused as though they differentiated path work.
-                let h = (1.0 / 1_048_576.0)
-                    * scales[j]
-                        .max(old[j].abs())
-                        .max(x[j].abs())
-                        .max(self.config.jump_absolute_tolerance_m);
-                let mut xp = x;
-                xp[j] += h;
-                let mut xm = x;
-                xm[j] -= h;
-                let plus = self.evaluate(
-                    point,
-                    xp,
-                    free_jump,
-                    dt_s,
-                    &mut evaluations,
-                    &mut keep_going,
-                );
-                let minus = self.evaluate(
-                    point,
-                    xm,
-                    free_jump,
-                    dt_s,
-                    &mut evaluations,
-                    &mut keep_going,
-                );
-                let (p, m, width) = match (plus, minus) {
-                    (Ok(p), Ok(m)) => (
-                        p.compatibility_residual_m,
-                        m.compatibility_residual_m,
-                        xp[j] - xm[j],
-                    ),
-                    (Ok(p), Err(e)) if outside_trial_domain(&e) => (
-                        p.compatibility_residual_m,
-                        current.compatibility_residual_m,
-                        xp[j] - x[j],
-                    ),
-                    (Err(e), Ok(m)) if outside_trial_domain(&e) => (
-                        current.compatibility_residual_m,
-                        m.compatibility_residual_m,
-                        x[j] - xm[j],
-                    ),
-                    (Err(e), _) | (_, Err(e)) => return Err(e),
-                };
-                if !(width > 0.0 && width.is_finite()) {
-                    return Err(CohesiveContactError::Invalid(
-                        "unrepresentable local derivative displacement",
-                    ));
-                }
+            if let Some(tangent) = current_tangent {
+                // d(g - g_free + S A t_mean)/dg. Keep every original
+                // off-diagonal mechanical response and material derivative.
                 for i in 0..3 {
-                    jacobian[i * 3 + j] = checked((p[i] - m[i]) / width)?;
+                    for j in 0..3 {
+                        let mut value = if i == j { 1.0 } else { 0.0 };
+                        for k in 0..3 {
+                            value = checked(
+                                value + self.compliance_m_n[i][k] * self.area_m2 * tangent[k][j],
+                            )?;
+                        }
+                        jacobian[i * 3 + j] = value;
+                    }
+                }
+            } else {
+                for j in 0..3 {
+                    // Only an explicitly unsupported nonsmooth material path uses
+                    // the original bounded, source-domain-aware numerical stencil.
+                    let h = (1.0 / 1_048_576.0)
+                        * scales[j]
+                            .max(old[j].abs())
+                            .max(x[j].abs())
+                            .max(self.config.jump_absolute_tolerance_m);
+                    let mut xp = x;
+                    xp[j] += h;
+                    let mut xm = x;
+                    xm[j] -= h;
+                    let plus = self.evaluate(
+                        point,
+                        xp,
+                        free_jump,
+                        dt_s,
+                        false,
+                        &mut evaluations,
+                        &mut keep_going,
+                    );
+                    let minus = self.evaluate(
+                        point,
+                        xm,
+                        free_jump,
+                        dt_s,
+                        false,
+                        &mut evaluations,
+                        &mut keep_going,
+                    );
+                    let (p, m, width) = match (
+                        plus.map(|(step, _)| step),
+                        minus.map(|(step, _)| step),
+                    ) {
+                        (Ok(p), Ok(m)) => (
+                            p.compatibility_residual_m,
+                            m.compatibility_residual_m,
+                            xp[j] - xm[j],
+                        ),
+                        (Ok(p), Err(e)) if outside_trial_domain(&e) => (
+                            p.compatibility_residual_m,
+                            current.compatibility_residual_m,
+                            xp[j] - x[j],
+                        ),
+                        (Err(e), Ok(m)) if outside_trial_domain(&e) => (
+                            current.compatibility_residual_m,
+                            m.compatibility_residual_m,
+                            x[j] - xm[j],
+                        ),
+                        (Err(e), _) | (_, Err(e)) => return Err(e),
+                    };
+                    if !(width > 0.0 && width.is_finite()) {
+                        return Err(CohesiveContactError::Invalid(
+                            "unrepresentable local derivative displacement",
+                        ));
+                    }
+                    for i in 0..3 {
+                        jacobian[i * 3 + j] = checked((p[i] - m[i]) / width)?;
+                    }
                 }
             }
             let rhs = current.compatibility_residual_m.map(|r| -r);
@@ -253,15 +276,16 @@ impl CohesiveLoadLine {
                     candidate,
                     free_jump,
                     dt_s,
+                    true,
                     &mut evaluations,
                     &mut keep_going,
                 ) {
-                    Ok(next)
+                    Ok((next, tangent))
                         if norm_inf(next.compatibility_residual_m) < residual
                             || norm_inf(next.compatibility_residual_m)
                                 <= next.compatibility_tolerance_m =>
                     {
-                        accepted = Some(next);
+                        accepted = Some((next, tangent));
                         break;
                     }
                     Ok(_) => {}
@@ -270,7 +294,7 @@ impl CohesiveLoadLine {
                 }
                 scale *= 0.5;
             }
-            current = accepted.ok_or(CohesiveContactError::NotConverged {
+            (current, current_tangent) = accepted.ok_or(CohesiveContactError::NotConverged {
                 residual_m: residual,
                 tolerance_m: tolerance,
                 iterations: iteration + 1,
@@ -285,9 +309,10 @@ impl CohesiveLoadLine {
         jump: [f64; 3],
         free: [f64; 3],
         dt: f64,
+        with_tangent: bool,
         count: &mut usize,
         keep_going: &mut impl FnMut() -> bool,
-    ) -> Result<CohesiveContactStep<'a>, CohesiveContactError> {
+    ) -> Result<(CohesiveContactStep<'a>, Option<[[f64; 3]; 3]>), CohesiveContactError> {
         if !keep_going() {
             return Err(CohesiveContactError::Cancelled);
         }
@@ -304,11 +329,20 @@ impl CohesiveLoadLine {
                 "per-step cohesive jump increment",
             ));
         }
-        let (material, mean) = point.trial_over_time_with_mean_traction(
-            jump,
-            dt,
-            self.config.material_energy_tolerance_j_m2,
-        )?;
+        let (material, mean, tangent) = if with_tangent {
+            point.trial_over_time_with_mean_traction_tangent(
+                jump,
+                dt,
+                self.config.material_energy_tolerance_j_m2,
+            )?
+        } else {
+            let (material, mean) = point.trial_over_time_with_mean_traction(
+                jump,
+                dt,
+                self.config.material_energy_tolerance_j_m2,
+            )?;
+            (material, mean, None)
+        };
         let force = mean.map(|v| self.area_m2 * v);
         if force.iter().any(|v| !v.is_finite()) || norm_inf(force) > self.config.maximum_force_n {
             return Err(CohesiveContactError::Range("cohesive held force"));
@@ -328,14 +362,17 @@ impl CohesiveLoadLine {
         let tolerance = checked(
             self.config.jump_absolute_tolerance_m + self.config.jump_relative_tolerance * scale,
         )?;
-        Ok(CohesiveContactStep {
-            material,
-            mean_force_n: force,
-            compatibility_residual_m: residual,
-            compatibility_tolerance_m: tolerance,
-            iterations: 0,
-            material_evaluations: 0,
-        })
+        Ok((
+            CohesiveContactStep {
+                material,
+                mean_force_n: force,
+                compatibility_residual_m: residual,
+                compatibility_tolerance_m: tolerance,
+                iterations: 0,
+                material_evaluations: 0,
+            },
+            tangent,
+        ))
     }
 }
 

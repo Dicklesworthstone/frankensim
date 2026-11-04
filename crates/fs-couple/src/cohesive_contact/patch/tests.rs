@@ -41,67 +41,93 @@ fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
 }
 
 #[test]
-fn heterogeneous_full_cross_compliance_recovers_exact_elastic_solution_with_linear_material_work() {
-    let laws = [
-        mixed(),
-        BilinearCohesive::new(7e8, 3e5, 300.0, 1e9, 0.02).unwrap(),
-        mixed(),
-    ];
-    let old = [[5e-5, -4e-5, 3e-5], [4e-5, 3e-5, -2e-5], [3e-5, 2e-5, 1e-5]];
-    let points: Vec<_> = laws
-        .iter()
-        .zip(old)
-        .map(|(law, g)| law.bonded_point().trial(g, 1e-8).unwrap().point)
-        .collect();
-    let target = [
-        [1e-4, 8e-5, -6e-5],
-        [8e-5, -7e-5, 4e-5],
-        [7e-5, -5e-5, -3e-5],
-    ];
-    let areas = vec![2e-6, 3e-6, 5e-6];
-    let stiffness = [[1e9, 4e8, 4e8], [7e8; 3], [1e9, 4e8, 4e8]];
-    let expected: [[f64; 3]; 3] = core::array::from_fn(|p| {
-        core::array::from_fn(|i| 0.5 * areas[p] * stiffness[p][i] * (old[p][i] + target[p][i]))
-    });
-    // Strictly diagonally dominant finite compliance, with every inter-site
-    // and inter-axis term present. The second map must retain its asymmetry.
-    for asymmetric in [false, true] {
-        let compliance: Vec<_> = (0..9)
-            .flat_map(|i| {
-                (0..9).map(move |j| {
-                    if i == j {
-                        6e-4 + f64::from(i) * 1e-5
-                    } else {
-                        1e-5 * f64::from(1 + (i + j) % 3)
-                            * if asymmetric && i > j { 0.7 } else { 1.0 }
-                    }
-                })
-            })
-            .collect();
-        let free: Vec<_> = (0..3)
-            .map(|p| {
-                core::array::from_fn(|i| {
-                    target[p][i]
-                        + (0..9)
-                            .map(|j| compliance[(3 * p + i) * 9 + j] * expected[j / 3][j % 3])
-                            .sum::<f64>()
-                })
-            })
-            .collect();
-        let mut solver =
-            CohesivePatchLoadLine::new(areas.clone(), compliance.clone(), config()).unwrap();
-        let result = solver.trial(&points, &free, 0.01, || true).unwrap();
-        for p in 0..3 {
-            for i in 0..3 {
-                close(result.jump_m[p][i], target[p][i], 3e-14);
-                close(result.mean_force_n[p][i], expected[p][i], 3e-10);
+fn heterogeneous_full_cross_compliance_uses_exact_tangents_with_two_calls_per_site() {
+    for viscous in [false, true] {
+        let viscosity = [2e6, 7e5, 7e5];
+        let dt = 0.01;
+        let laws = [
+            mixed(),
+            BilinearCohesive::new(7e8, 3e5, 300.0, 1e9, 0.02).unwrap(),
+            mixed(),
+        ]
+        .map(|law| {
+            if viscous {
+                law.with_viscosity(
+                    CohesiveViscosity::new(viscosity[0], viscosity[1], 100.0).unwrap(),
+                )
+            } else {
+                law
             }
+        });
+        let old = [[5e-5, -4e-5, 3e-5], [4e-5, 3e-5, -2e-5], [3e-5, 2e-5, 1e-5]];
+        let points: Vec<_> = laws
+            .iter()
+            .zip(old)
+            .map(|(law, g)| law.bonded_point().trial(g, 1e-8).unwrap().point)
+            .collect();
+        let target = [
+            [1e-4, 8e-5, -6e-5],
+            [8e-5, -7e-5, 4e-5],
+            [7e-5, -5e-5, -3e-5],
+        ];
+        let areas = vec![2e-6, 3e-6, 5e-6];
+        let stiffness = [[1e9, 4e8, 4e8], [7e8; 3], [1e9, 4e8, 4e8]];
+        let expected: [[f64; 3]; 3] = core::array::from_fn(|p| {
+            core::array::from_fn(|i| {
+                areas[p]
+                    * (0.5 * stiffness[p][i] * (old[p][i] + target[p][i])
+                        + if viscous {
+                            viscosity[i] * (target[p][i] - old[p][i]) / dt
+                        } else {
+                            0.0
+                        })
+            })
+        });
+        // Strictly diagonally dominant finite compliance, with every inter-site
+        // and inter-axis term present. The second map must retain its asymmetry.
+        for asymmetric in [false, true] {
+            let compliance: Vec<_> = (0..9)
+                .flat_map(|i| {
+                    (0..9).map(move |j| {
+                        if i == j {
+                            6e-4 + f64::from(i) * 1e-5
+                        } else {
+                            1e-5 * f64::from(1 + (i + j) % 3)
+                                * if asymmetric && i > j { 0.7 } else { 1.0 }
+                        }
+                    })
+                })
+                .collect();
+            let free: Vec<_> = (0..3)
+                .map(|p| {
+                    core::array::from_fn(|i| {
+                        target[p][i]
+                            + (0..9)
+                                .map(|j| compliance[(3 * p + i) * 9 + j] * expected[j / 3][j % 3])
+                                .sum::<f64>()
+                    })
+                })
+                .collect();
+            // The exact elastic/viscous affine law needs only N initial trials
+            // and N endpoint trials. Even one original local FD Jacobian would
+            // require 6N additional material calls and exceed this hard budget.
+            let mut bounded = config();
+            bounded.contact.max_iterations = 1;
+            bounded.contact.max_material_evaluations = 2 * points.len();
+            let mut solver =
+                CohesivePatchLoadLine::new(areas.clone(), compliance.clone(), bounded).unwrap();
+            let result = solver.trial(&points, &free, dt, || true).unwrap();
+            for p in 0..3 {
+                for i in 0..3 {
+                    close(result.jump_m[p][i], target[p][i], 3e-14);
+                    close(result.mean_force_n[p][i], expected[p][i], 3e-10);
+                }
+            }
+            assert_eq!(result.iterations, 1);
+            assert_eq!(result.material_evaluations, 2 * points.len());
+            assert_eq!(solver.compliance_m_per_n(), compliance);
+            assert_eq!(solver.areas_m2(), areas);
         }
-        // At most two Newton corrections: N initial + 2*(6N Jacobian + N line).
-        // Perturbing/reintegrating the whole patch for every column exceeds it.
-        assert!(result.material_evaluations <= 15 * points.len());
-        assert_eq!(solver.compliance_m_per_n(), compliance);
-        assert_eq!(solver.areas_m2(), areas);
     }
 }
 

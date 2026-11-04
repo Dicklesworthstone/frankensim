@@ -6,11 +6,12 @@
 //! Finite lever arms therefore transmit moments and redistribute force as an
 //! edge debonds. No independent-site solve or averaged damage is substituted.
 //!
-//! Each Jacobian column reevaluates only its local material point, then applies
-//! every entry of the corresponding compliance columns. Material evaluations
-//! scale linearly with site count per Jacobian; dense algebra remains quadratic
-//! for assembly and cubic for the bounded prepared LU solve. All storage is
-//! allocated at construction. Accepted points remain the caller's immutable
+//! Original mean-traction tangents are retained with each material evaluation,
+//! then multiplied by the complete compliance. Paths without a supplied tangent
+//! retain local finite differences; no other site's history is reevaluated for
+//! a column. Dense algebra remains quadratic for assembly and cubic for the
+//! bounded prepared LU solve. All storage is allocated at construction.
+//! Accepted points remain the caller's immutable
 //! history until its actual mechanics/work transaction succeeds.
 
 use super::{CohesiveContactConfig, CohesiveContactError, norm_inf, positive, valid_config};
@@ -94,6 +95,7 @@ pub struct CohesivePatchTrial<'s> {
 struct Evaluation {
     jump: Vec<[f64; 3]>,
     force: Vec<[f64; 3]>,
+    mean_traction_tangent: Vec<Option<[[f64; 3]; 3]>>,
     residual: Vec<[f64; 3]>,
     tolerance: Vec<f64>,
 }
@@ -102,6 +104,7 @@ impl Evaluation {
         Ok(Self {
             jump: filled(points, [0.0; 3])?,
             force: filled(points, [0.0; 3])?,
+            mean_traction_tangent: filled(points, None)?,
             residual: filled(points, [0.0; 3])?,
             tolerance: filled(points, 0.0)?,
         })
@@ -279,54 +282,67 @@ impl CohesivePatchLoadLine {
                 return Err(worst.refusal(iteration));
             }
             for (point, old_point) in points.iter().enumerate() {
-                let old = old_point.jump_m();
-                let x = self.current.jump[point];
-                let scales = old_point.law().mixed_mode_parameters().map_or(
-                    [old_point.law().onset_separation_m(); 3],
-                    |p| {
-                        [
-                            p.normal_strength_pa / p.normal_stiffness_pa_m,
-                            p.tangential_strength_pa / p.tangential_stiffness_pa_m,
-                            p.tangential_strength_pa / p.tangential_stiffness_pa_m,
-                        ]
-                    },
-                );
-                for j in 0..3 {
-                    let h = (1.0 / 1_048_576.0)
-                        * scales[j]
-                            .max(old[j].abs())
-                            .max(x[j].abs())
-                            .max(context.config.jump_absolute_tolerance_m);
-                    let mut xp = x;
-                    xp[j] += h;
-                    let mut xm = x;
-                    xm[j] -= h;
-                    let plus = context.force(point, xp, &mut evaluations, &mut keep_going);
-                    let minus = context.force(point, xm, &mut evaluations, &mut keep_going);
-                    let (a, b, width) = match (plus, minus) {
-                        (Ok(a), Ok(b)) => (a, b, xp[j] - xm[j]),
-                        (Ok(a), Err(e)) if outside_trial_domain(&e) => {
-                            (a, self.current.force[point], xp[j] - x[j])
-                        }
-                        (Err(e), Ok(b)) if outside_trial_domain(&e) => {
-                            (self.current.force[point], b, x[j] - xm[j])
-                        }
-                        (Err(e), _) | (_, Err(e)) => return Err(e),
-                    };
-                    if !positive(width) {
-                        return Err(CohesivePatchError::Invalid(
-                            "unrepresentable local derivative displacement",
-                        ));
-                    }
-                    let mut derivative = [0.0; 3];
+                let mut derivative = [[0.0; 3]; 3];
+                if let Some(tangent) = self.current.mean_traction_tangent[point] {
                     for k in 0..3 {
-                        derivative[k] = checked((a[k] - b[k]) / width)?;
+                        for j in 0..3 {
+                            derivative[k][j] = checked(self.areas[point] * tangent[k][j])?;
+                        }
                     }
+                } else {
+                    // Only unavailable material tangents need probes.
+                    // Each probe retains the SAME accepted history and time.
+                    let old = old_point.jump_m();
+                    let x = self.current.jump[point];
+                    let scales = old_point.law().mixed_mode_parameters().map_or(
+                        [old_point.law().onset_separation_m(); 3],
+                        |p| {
+                            [
+                                p.normal_strength_pa / p.normal_stiffness_pa_m,
+                                p.tangential_strength_pa / p.tangential_stiffness_pa_m,
+                                p.tangential_strength_pa / p.tangential_stiffness_pa_m,
+                            ]
+                        },
+                    );
+                    for j in 0..3 {
+                        let h = (1.0 / 1_048_576.0)
+                            * scales[j]
+                                .max(old[j].abs())
+                                .max(x[j].abs())
+                                .max(context.config.jump_absolute_tolerance_m);
+                        let mut xp = x;
+                        xp[j] += h;
+                        let mut xm = x;
+                        xm[j] -= h;
+                        let plus = context.force(point, xp, &mut evaluations, &mut keep_going);
+                        let minus = context.force(point, xm, &mut evaluations, &mut keep_going);
+                        let (a, b, width) = match (plus, minus) {
+                            (Ok(a), Ok(b)) => (a, b, xp[j] - xm[j]),
+                            (Ok(a), Err(e)) if outside_trial_domain(&e) => {
+                                (a, self.current.force[point], xp[j] - x[j])
+                            }
+                            (Err(e), Ok(b)) if outside_trial_domain(&e) => {
+                                (self.current.force[point], b, x[j] - xm[j])
+                            }
+                            (Err(e), _) | (_, Err(e)) => return Err(e),
+                        };
+                        if !positive(width) {
+                            return Err(CohesivePatchError::Invalid(
+                                "unrepresentable local derivative displacement",
+                            ));
+                        }
+                        for k in 0..3 {
+                            derivative[k][j] = checked((a[k] - b[k]) / width)?;
+                        }
+                    }
+                }
+                for j in 0..3 {
                     let column = 3 * point + j;
                     for row in 0..dimension {
                         let response = (0..3)
                             .map(|k| {
-                                context.compliance[row * dimension + 3 * point + k] * derivative[k]
+                                context.compliance[row * dimension + 3 * point + k]
+                                    * derivative[k][j]
                             })
                             .sum::<f64>();
                         self.jacobian[row * dimension + column] =
@@ -391,6 +407,17 @@ impl Context<'_, '_> {
         evaluations: &mut usize,
         keep_going: &mut impl FnMut() -> bool,
     ) -> Result<[f64; 3], CohesivePatchError> {
+        self.force_with_tangent(point, jump, None, evaluations, keep_going)
+    }
+
+    fn force_with_tangent(
+        &self,
+        point: usize,
+        jump: [f64; 3],
+        tangent_out: Option<&mut Option<[[f64; 3]; 3]>>,
+        evaluations: &mut usize,
+        keep_going: &mut impl FnMut() -> bool,
+    ) -> Result<[f64; 3], CohesivePatchError> {
         poll(keep_going)?;
         let old = self.points[point].jump_m();
         let increment = core::array::from_fn(|i| jump[i] - old[i]);
@@ -406,13 +433,27 @@ impl Context<'_, '_> {
             return Err(CohesivePatchError::Budget("total point-law evaluations"));
         }
         *evaluations += 1;
-        let (_, mean) = self.points[point]
-            .trial_over_time_with_mean_traction(
-                jump,
-                self.dt,
-                self.config.material_energy_tolerance_j_m2,
-            )
-            .map_err(|source| point_error(point, CohesiveContactError::Material(source)))?;
+        let mean = if let Some(out) = tangent_out {
+            let (_, mean, tangent) = self.points[point]
+                .trial_over_time_with_mean_traction_tangent(
+                    jump,
+                    self.dt,
+                    self.config.material_energy_tolerance_j_m2,
+                )
+                .map_err(|source| point_error(point, CohesiveContactError::Material(source)))?;
+            *out = tangent;
+            mean
+        } else {
+            // A finite-difference probe needs only its original force.
+            let (_, mean) = self.points[point]
+                .trial_over_time_with_mean_traction(
+                    jump,
+                    self.dt,
+                    self.config.material_energy_tolerance_j_m2,
+                )
+                .map_err(|source| point_error(point, CohesiveContactError::Material(source)))?;
+            mean
+        };
         let force = mean.map(|value| self.areas[point] * value);
         if force.iter().any(|value| !value.is_finite())
             || norm_inf(force) > self.config.maximum_force_n
@@ -432,7 +473,13 @@ impl Context<'_, '_> {
         keep_going: &mut impl FnMut() -> bool,
     ) -> Result<(), CohesivePatchError> {
         for point in 0..self.points.len() {
-            out.force[point] = self.force(point, out.jump[point], evaluations, keep_going)?;
+            out.force[point] = self.force_with_tangent(
+                point,
+                out.jump[point],
+                Some(&mut out.mean_traction_tangent[point]),
+                evaluations,
+                keep_going,
+            )?;
         }
         let dimension = 3 * self.points.len();
         for point in 0..self.points.len() {

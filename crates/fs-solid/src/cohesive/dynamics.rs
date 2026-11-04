@@ -3,9 +3,10 @@
 //! The implicit midpoint momentum equation uses the material owner's analytic
 //! **path-mean** traction, including its surviving-bond viscosity. Its work is
 //! therefore conjugate to the actual straight jump path, including prescribed
-//! offsets. The endpoint traction tangent is not the derivative of this mean;
-//! the existing fallible directional-difference adapter supplies Newton/FGMRES
-//! actions at an explicit displacement scale instead.
+//! offsets. The material's path-mean tangent supplies native Newton/FGMRES
+//! actions, retaining damage and surviving-bond viscosity. Its local blocks are
+//! reused at each fixed iterate. Explicitly unsupported material switches and
+//! friction paths retain the existing fallible directional-difference adapter.
 //!
 //! The original reduced mass must be symmetric positive definite and the
 //! elastic operator symmetric positive semidefinite. Both must remain pure and
@@ -46,17 +47,21 @@ pub mod interval;
 /// Instantaneous momentum transfer retaining damage and contact history.
 pub mod impulse;
 
+mod tangent;
+use tangent::StepJacobian;
+
 /// Explicit numerical, trajectory and energy controls. These are not material
 /// coefficients or inferred small-strain validity limits.
 #[derive(Debug, Clone, Copy)]
 pub struct DynamicsConfig {
     /// Reuse the native Newton/Krylov, force, material-energy and displacement
-    /// controls. `max_operator_evaluations` counts complete attempted physical
-    /// residuals, including both evaluations of each numerical Jacobian action
-    /// and the independent final replay. Each residual applies M and K once;
-    /// the final energy audit additionally applies each operator twice.
+    /// controls. `max_operator_evaluations` bounds the sum of complete physical
+    /// residuals and analytic Jacobian actions/preparation attempts. Numerical
+    /// fallback actions count their two physical residuals. The independent
+    /// final replay is included; the final energy audit additionally applies
+    /// each operator twice.
     pub solve: Config,
-    /// Maximum-component displacement perturbation of the numerical Jacobian.
+    /// Maximum-component displacement perturbation for numerical fallback only.
     pub difference_step_m: f64,
     pub maximum_step_s: f64,
     /// Bound on each accepted or trial reduced velocity component.
@@ -116,6 +121,9 @@ pub struct DynamicsStep<'m, 'a> {
     pub nonlinear: NewtonReport,
     pub maximum_force_residual_n: f64,
     pub residual_evaluations: usize,
+    /// Analytic actions, including preparation attempts that require fallback.
+    /// Together with residual evaluations this obeys max_operator_evaluations.
+    pub analytic_jacobian_evaluations: usize,
     /// Original patch order and local axes; includes viscosity and any explicitly
     /// bound damaged-area friction.
     pub mean_traction_pa: Vec<[f64; 3]>,
@@ -453,6 +461,7 @@ impl<'m, 'a> CohesiveMotion<'m, 'a> {
             cancelled: RefCell::new(cancelled),
             cancellation_seen: Cell::new(false),
             evaluations: Cell::new(0),
+            jacobian_evaluations: Cell::new(0),
             coulomb_mu: RefCell::new(coulomb_mu),
         };
         for chunk in mean_force_n.chunks(256) {
@@ -492,15 +501,15 @@ impl<'m, 'a> CohesiveMotion<'m, 'a> {
         let mut attempts = 0;
         let mut history = Vec::new();
         let (solution, nonlinear) = loop {
-            let numerical = FallibleFiniteDifference::new(
+            let numerical = StepJacobian::new(
+                &problem,
                 predictor.len(),
                 self.config.difference_step_m,
                 |x: &[f64]| problem.evaluate(x, false).map(|e| e.residual),
-            )
-            .map_err(difference_error)?;
+            )?;
             let solver = NewtonKrylovState::new(&numerical, predictor, self.config.solve.newton);
             if let Some(error) = numerical.take_failure() {
-                return Err(difference_error(error).into());
+                return Err(error.into());
             }
             problem.poll()?;
             let mut solver = solver.map_err(|e| Error::Solver(e.to_string()))?;
@@ -510,7 +519,7 @@ impl<'m, 'a> CohesiveMotion<'m, 'a> {
                 &mut || numerical.has_failed() || problem.poll().is_err(),
             );
             if let Some(error) = numerical.take_failure() {
-                return Err(difference_error(error).into());
+                return Err(error.into());
             }
             problem.poll()?;
             if run.progress != SolverRunProgress::Complete {
@@ -651,6 +660,7 @@ impl<'m, 'a> CohesiveMotion<'m, 'a> {
             nonlinear,
             maximum_force_residual_n,
             residual_evaluations: problem.evaluations.get(),
+            analytic_jacobian_evaluations: problem.jacobian_evaluations.get(),
             mean_traction_pa: endpoint.means,
             kinetic_before_j,
             kinetic_after_j,
@@ -678,6 +688,7 @@ struct StepProblem<'p, 'm, 'a> {
     cancelled: RefCell<&'p mut dyn FnMut() -> bool>,
     cancellation_seen: Cell<bool>,
     evaluations: Cell<usize>,
+    jacobian_evaluations: Cell<usize>,
     coulomb_mu: RefCell<Vec<f64>>,
 }
 struct Evaluation<'a> {
@@ -753,12 +764,18 @@ impl<'p, 'm, 'a> StepProblem<'p, 'm, 'a> {
         }
         Ok(energy)
     }
-    fn evaluate(&self, x: &[f64], retain: bool) -> Result<Evaluation<'a>, Error> {
+    fn charge(&self, analytic: bool) -> Result<(), Error> {
         self.poll()?;
-        if self.evaluations.get() >= self.motion.config.solve.max_operator_evaluations {
-            return Err(Error::Budget("dynamic residual evaluations"));
+        let used = self.evaluations.get().saturating_add(self.jacobian_evaluations.get());
+        if used >= self.motion.config.solve.max_operator_evaluations {
+            return Err(Error::Budget("dynamic residual/Jacobian evaluations"));
         }
-        self.evaluations.set(self.evaluations.get() + 1);
+        let count = if analytic { &self.jacobian_evaluations } else { &self.evaluations };
+        count.set(count.get() + 1);
+        Ok(())
+    }
+    fn evaluate(&self, x: &[f64], retain: bool) -> Result<Evaluation<'a>, Error> {
+        self.charge(false)?;
         let state = &self.motion.state;
         let n = state.system.n;
         let dimension = self

@@ -19127,7 +19127,12 @@ fixed external conditions. Bond creation, changing texture frames, source
 refresh and rebonding after rupture are not inferred from geometry.
 
 `CohesiveLoadLine` solves the complete jump using the material owner's analytic
-three-component path mean. The native wrapper stages the original mechanics
+three-component path mean and its optional derivative at fixed accepted history
+and interval. The Newton matrix is the full `I + S A D(t_mean)`; damage and
+surviving-bond viscosity enter through the same original path. Current and
+candidate derivatives are retained with their material trial, so smooth paths
+need no displaced constitutive probes. Unsupported nonsmooth cases retain the
+existing bounded numerical fallback. The native wrapper stages the original mechanics
 under those held reciprocal forces, recomputes the actual three-component jump,
 and independently reevaluates the timed material path on that motion. Separate
 jump and componentwise absolute-plus-relative force gates precede the whole
@@ -20086,7 +20091,7 @@ error estimate or an exact continuous-flow event-time theorem.
 
 `cohesive_contact::patch::CohesivePatchLoadLine` solves all opening and two shear coordinates of up to 64 original bonded quadrature sites together. It consumes the full caller mechanical cross-compliance, heterogeneous original `CohesivePoint` histories and reference areas. The original analytic mean traction supplies physical work. Finite lever arms transmit moments; local failure redistributes force through the retained off-diagonal response. No average damage or independent-site solution replaces the patch.
 
-Prepared scratch and LU storage allocate only at construction. Each Jacobian perturbation evaluates only its local point law, giving linear constitutive-evaluation work per Jacobian while retaining the bounded dense solve. Explicit total point-law evaluation, iteration, backtracking, per-site force/jump and compatibility budgets apply. Refusal/cancellation mutates scratch only; callers must independently audit actual mechanical motion before publishing all histories. Softening continuation does not certify root uniqueness, spatial resolution, finite-rotation objectivity or timestep accuracy. Tests cover heterogeneous full cross-compliance, force redistribution after local failure, exact finite-body force/torque/work balance with progressive edge peeling, the one-site limit, and atomic refusal.
+Prepared scratch and LU storage allocate only at construction. Each current/candidate material evaluation also retains its optional original path-mean tangent. The complete cross-site matrix multiplies each local three-by-three derivative by that site's reference area and every original compliance row. Only a site without an available tangent retains local finite-difference columns; those probes execute the original mean-only path. Smooth heterogeneous elastic/viscous fixtures require two material calls per site for one Newton correction, including the initial and candidate trials. This is bounded evaluation-count coverage, not a measured wall-clock speedup. Explicit total point-law evaluation, iteration, backtracking, per-site force/jump and compatibility budgets apply. Refusal/cancellation mutates scratch only; callers must independently audit actual mechanical motion before publishing all histories. Softening continuation does not certify root uniqueness, spatial resolution, finite-rotation objectivity or timestep accuracy. Tests cover heterogeneous full cross-compliance, force redistribution after local failure, exact finite-body force/torque/work balance with progressive edge peeling, the one-site limit, and atomic refusal.
 
 ## Native finite cohesive patches
 

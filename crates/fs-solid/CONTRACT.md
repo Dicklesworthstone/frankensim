@@ -5355,11 +5355,18 @@ For a physical interval `h`, the existing Newton/FGMRES owner solves
 history. `t_mean` is the original analytic vector integral along the straight
 three-component jump path and includes surviving-bond viscosity. The endpoint
 traction tangent is not substituted for the derivative of this path mean.
-The existing fallible numerical-difference adapter supplies Jacobian actions
-with an explicit displacement stencil; all actual residual evaluations count
-against the declared solve budget. A source or stencil refusal refuses the
-whole increment, and the complete physical endpoint is independently replayed
-before acceptance.
+The original material path derivative supplies the action
+`(2 M/h^2 + K/2) v + sum A B^T D(t_mean) B v`. Fixed-size local material blocks
+are cached at each exact Newton iterate and reused throughout FGMRES; all
+original sparse jump columns and native mass/elastic couplings remain present.
+No global dense tangent or positive-definite softening approximation is used.
+Explicitly unsupported material switches and active damaged-area friction or
+Coulomb paths retain the existing fallible numerical-difference adapter.
+Residuals and analytic actions/preparation attempts share the original
+operator-evaluation allowance; numerical fallback counts its actual residual
+calls. The complete physical endpoint is independently replayed before
+acceptance. A source, stencil, cancellation or work-budget refusal preserves
+the original accepted motion and material history.
 
 The step reports original kinetic, bulk and cohesive endpoint energies,
 intrinsic fracture loss, physical bond-viscosity loss, optional damaged-area

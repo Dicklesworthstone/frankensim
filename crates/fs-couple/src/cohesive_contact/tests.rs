@@ -298,3 +298,52 @@ fn a_valid_inward_step_at_the_material_range_boundary_uses_one_sided_derivatives
     close_vector(step.material.equilibrium.point.jump_m(), inward, 2e-14);
     assert_eq!(step.mean_force_n, [0.0; 3]);
 }
+
+#[test]
+fn path_tangent_solves_full_elastic_viscous_compliance_in_two_material_evaluations() {
+    let area = 2e-5;
+    let dt = 0.01;
+    let old = [5e-5, -4e-5, 3e-5];
+    let expected = [1e-4, 8e-5, -6e-5];
+    let stiffness = [1e9, 4e8, 4e8];
+    let compliance = [
+        [2e-4, 7e-5, -3e-5],
+        [4e-5, 3e-4, 5e-5],
+        [-2e-5, 5e-5, 1.5e-4],
+    ];
+    for viscous in [false, true] {
+        let law = if viscous {
+            law().with_viscosity(CohesiveViscosity::new(2e6, 7e5, 2.0).unwrap())
+        } else {
+            law()
+        };
+        let eta = if viscous { [2e6, 7e5, 7e5] } else { [0.0; 3] };
+        let point = law.bonded_point().trial(old, 1e-8).unwrap().point;
+        // This path remains strictly before damage initiation. The exact
+        // constitutive derivative is K/2 + eta/dt, never the endpoint K.
+        let force = core::array::from_fn(|i| {
+            area * (0.5 * stiffness[i] * (old[i] + expected[i])
+                + eta[i] * (expected[i] - old[i]) / dt)
+        });
+        let response = mv(compliance, force);
+        let free = core::array::from_fn(|i| expected[i] + response[i]);
+        let mut limited = config();
+        limited.max_material_evaluations = 2;
+        let mut owner = CohesiveLoadLine::new(area, compliance, limited).unwrap();
+        let step = owner.trial(point, free, dt, || true).unwrap();
+        close_vector(step.material.equilibrium.point.jump_m(), expected, 2e-14);
+        close_vector(step.mean_force_n, force, 3e-10);
+        assert_eq!(step.material_evaluations, 2);
+        assert_eq!(step.iterations, 1);
+        assert_eq!(step.material.equilibrium.point.damage(), 0.0);
+        let expected_loss: f64 = (0..3)
+            .map(|i| area * eta[i] * (expected[i] - old[i]).powi(2) / dt)
+            .sum();
+        close(area * step.material.viscous_dissipated_j_m2, expected_loss, 2e-13);
+        close(
+            dot(step.mean_force_n, core::array::from_fn(|i| expected[i] - old[i])),
+            area * step.material.total_work_j_m2(),
+            2e-12,
+        );
+    }
+}

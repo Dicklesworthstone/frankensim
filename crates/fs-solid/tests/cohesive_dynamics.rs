@@ -587,3 +587,48 @@ fn late_cancellation_domain_and_work_budget_preserve_the_complete_motion() {
         );
     });
 }
+
+#[test]
+fn native_path_jacobian_retains_motion_and_work_without_displaced_source_probes() {
+    with_cx(|cx| {
+        let assembled = scalar_tet(cx);
+        let mass = CsrOp::symmetric(assembled.mass);
+        let elastic = CsrOp::symmetric(assembled.stiffness);
+        for viscosity in [0.0, 4.0] {
+            let law = if viscosity == 0.0 {
+                law()
+            } else {
+                law().with_viscosity(CohesiveViscosity::new(viscosity, 7.0, 2.0).unwrap())
+            };
+            let system = CohesiveSystem::new(&elastic, vec![patch(&law)], budget()).unwrap();
+            let mut controls = config();
+            // This numerical fallback would leave the material and motion
+            // domains. A smooth original path must not need such probes.
+            controls.difference_step_m = 1.0;
+            controls.solve.max_operator_evaluations = 8;
+            let motion = system.bonded_state()
+                .into_dynamics(&mass, vec![0.003], 0.0, controls).unwrap();
+            let (h, g, force, m, bulk, bond) = (0.01, 0.0002, 0.02, 0.1, 10.0, 10.0);
+            let dashpot = 0.01 * viscosity;
+            let u = (force + 2.0 * m * 0.003 / h - (0.5 * bond + dashpot / h) * g)
+                / (2.0 * m / (h * h) + 0.5 * (bulk + bond) + dashpot / h);
+            let v = 2.0 * u / h - 0.003;
+            let mean_force = 0.5 * bond * (u + g) + dashpot * (u + g) / h;
+            let step = motion.advance(&[force], &[[g, 0.0, 0.0]], h, cx).unwrap();
+            close(step.motion.state().displacements_m()[0], u, 1e-13);
+            close(step.motion.velocity_m_s()[0], v, 1e-11);
+            close(step.mean_traction_pa[0][0] * 0.01, mean_force, 1e-11);
+            close(step.external_work_j, force * u, 1e-14);
+            close(step.prescribed_jump_work_j, mean_force * g, 1e-14);
+            close(step.viscous_dissipated_j, dashpot * (u + g).powi(2) / h, 1e-14);
+            close(step.energy_residual_j, 0.0, 1e-13);
+            assert!(step.analytic_jacobian_evaluations > 0);
+            assert!(step.residual_evaluations + step.analytic_jacobian_evaluations
+                <= controls.solve.max_operator_evaluations);
+            assert_eq!(step.cohesive_energy_j.dissipated, 0.0);
+            assert_eq!(motion.state().displacements_m(), &[0.0]);
+            assert_eq!(motion.velocity_m_s(), &[0.003]);
+            assert_eq!(motion.time_s(), 0.0);
+        }
+    });
+}
