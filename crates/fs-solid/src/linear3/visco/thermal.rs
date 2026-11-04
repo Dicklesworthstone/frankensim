@@ -127,6 +127,45 @@ impl ThermalSnapshot {
         Ok(Arc::new(snapshot))
     }
 
+    // A coefficient refresh may replace only the elastic identity. Every
+    // physical source sample and its assumed strain must survive unchanged.
+    pub(super) fn rebound(
+        &self,
+        next: &ViscoElements,
+        field: QuadraticThermalStrainField<'_>,
+        cx: &Cx<'_>,
+    ) -> Result<Arc<Self>, ViscoElementError> {
+        checkpoint(cx)?;
+        let points = next.elements.first().map_or(0, |e| e.points.len());
+        self.field().validate(next.elements.len(), points)?;
+        let rebound = Self::prepare(next, field, Some(self), cx)?;
+        for (element, material) in next.elements.iter().enumerate() {
+            for point in 0..material.points.len() {
+                checkpoint(cx)?;
+                let old = self.at(element, point);
+                let new = rebound.at(element, point);
+                if old.free_strain_mandel().map(f64::to_bits)
+                    != new.free_strain_mandel().map(f64::to_bits)
+                    || old.temperature_k().to_bits() != new.temperature_k().to_bits()
+                    || old.reference_temperature_k().to_bits()
+                        != new.reference_temperature_k().to_bits()
+                    || old.thermal_law_identity() != new.thermal_law_identity()
+                    || old.maximum_absolute_mandel_strain().to_bits()
+                        != new.maximum_absolute_mandel_strain().to_bits()
+                    || self.free_strain(element, point).map(f64::to_bits)
+                        != rebound.free_strain(element, point).map(f64::to_bits)
+                {
+                    return Err(TetElasticError::InvalidThermalStrain {
+                        what: "coefficient refresh must retain each original thermal sample and projected free strain",
+                    }
+                    .into());
+                }
+            }
+        }
+        checkpoint(cx)?;
+        Ok(rebound)
+    }
+
     pub(super) fn field(&self) -> QuadraticThermalStrainField<'_> {
         match self.points_per_element {
             Some(points_per_element) => QuadraticThermalStrainField::AtQuadrature {

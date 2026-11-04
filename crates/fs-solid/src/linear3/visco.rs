@@ -22,9 +22,11 @@
 //! domain. Inertia keeps the elastic owner's consistent reference quadrature.
 //! This is small-strain, elementwise-material B-bar, not exact incompressibility
 //! or an evolving-temperature constitutive model.
-//! Prescribed thermal expansion at the original quadrature is a separate work input. It acts
-//! on these same histories with fixed constitutive coefficients and reference
-//! mass; neither a reciprocal caloric law nor coefficient transport is inferred.
+//! Prescribed thermal expansion at the original quadrature is a separate work
+//! input. It acts on these same histories with held constitutive coefficients
+//! and reference mass. The explicit [`source`] owner can then refresh pinned
+//! coefficients at fixed physical spring strains, recording parameter storage
+//! work separately. Neither operation infers a reciprocal caloric law.
 
 use super::hex::{
     HexConnectivity, HexElasticProblem, HexFamily, HexPoint, HexQuadrature, hex20_point,
@@ -45,6 +47,7 @@ use fs_sparse::{Coo, Csr};
 
 mod hex8;
 mod project;
+pub mod source;
 mod thermal;
 pub use project::{ProjectedViscoSolid, SolidProjectionBudget};
 mod quasistatic;
@@ -315,6 +318,7 @@ pub struct ViscoElements {
     // Free-body modal/history use remains admitted; load control requires the
     // existing geometric rigid-mode constraint admission on every component.
     static_constraint_error: Option<TetElasticError>,
+    sources: Option<source::SourceBinding>,
 }
 
 /// Storage/loss matrices in the equilibrium assembly's free-DOF order.
@@ -839,6 +843,7 @@ impl ViscoElements {
             full_dofs: nodes.len() * 3,
             internal_variables: needed,
             static_constraint_error,
+            sources: None,
         })
     }
 
@@ -847,8 +852,9 @@ impl ViscoElements {
         &self.equilibrium
     }
 
-    /// Original material, reference density and source identity for an element.
-    /// This is the material that assembled the retained reference mass matrix.
+    /// Current material law and source identity with the original reference density.
+    /// After explicit source continuation, the retained mass still comes from
+    /// `reference_material_sources`, while this law supplies current stiffness.
     pub fn reference_material(&self, element: usize) -> Option<TetViscoMaterial> {
         self.elements.get(element).map(|e| TetViscoMaterial {
             law: e.law.clone(),
@@ -999,6 +1005,7 @@ impl ViscoElements {
             displacement_m: vec![0.0; self.full_dofs],
             thermal_strains: None,
             eigenstrain_work_j: 0.0,
+            parameter_work_j: 0.0,
         })
     }
 }
@@ -1015,7 +1022,8 @@ pub struct ViscoEnergy {
     /// Current Helmholtz storage.
     pub stored_j: f64,
     /// Cumulative exact mechanical-strain work: nodal work plus imposed
-    /// eigenstrain work. It equals storage change plus constitutive heat.
+    /// eigenstrain work. Together with the history's separate parameter work,
+    /// it equals storage change plus constitutive heat.
     pub work_j: f64,
     /// Cumulative dashpot heat, integrated as sums of squares, without clamping.
     pub dissipated_j: f64,
@@ -1030,6 +1038,7 @@ pub struct ViscoElementState<'a> {
     displacement_m: Vec<f64>,
     thermal_strains: Option<std::sync::Arc<thermal::ThermalSnapshot>>,
     eigenstrain_work_j: f64,
+    parameter_work_j: f64,
 }
 
 /// Work-conjugate force observation for one admitted prescribed-history step.
