@@ -3510,3 +3510,32 @@ and stream-work closure; it does not add finite-speed static-pressure boundary
 conversion, turbulent junction mixing, a dissipation-to-heat credit, acoustic
 storage, variable-density or cavitating flow, swirl, nonuniform section
 profiles, or moving-pipe FSI. Those require their own physical owners.
+
+## Unsteady circular laminar flow with viscous memory
+
+`graph::inertial::laminar::LaminarPipe` binds the original `FluidTransport`
+owner and one frozen source snapshot to the existing circular resistance and
+positive `fs-phs::ZkDiffusiveBasis`. Its native PHS contains mean-flow inertia
+and all admitted viscous-memory states, with separate profile storage and
+irreversible wall loss. Steady initialization recovers Poiseuille resistance
+and the parabolic profile's 4/3 kinetic-energy factor. Memory pressure work is
+never automatically credited as heat.
+
+`PreparedLaminarPipe` uses the original exact held-input trajectory, integrated
+port flow and independent native heat integral. Preparation caches the bounded
+dense work; successful warm steps and mean-flow relations allocate no memory.
+Two pressure ports conserve volume. Native-system handoff supports original
+PHS composition and transfers source/history/regime admission to that assembly.
+A comparison envelope admits the entire standalone held interval's mean-flow
+Reynolds support. Source, history-owner, regime, arithmetic, native-solver and
+cancellation refusal leave accepted history unchanged.
+
+Geometry, density and viscosity are fixed. Assumptions are stationary rigid
+no-slip walls and axially developed incompressible Newtonian flow. The original
+viscous spectrum retains sampled frequency-band/error admission; arbitrary
+startup has no inherited time-domain error certificate. Entrance effects,
+turbulence onset, radial heat transport, cavitation, compressibility and
+changing material history require other owners. Gas use additionally needs
+caller-qualified low-Mach/frozen-density support. Native regressions exercise
+independent radial Stokes startup/reversal and kinetic energy, harmonic phase
+and power, finite-reservoir composition, and atomic history/regime admission.

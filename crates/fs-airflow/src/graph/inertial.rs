@@ -19,6 +19,8 @@ use super::{FixedPressure, GraphError, LossGraph, Sum, checkpoint};
 pub mod loads;
 /// Explicit total-pressure junctions, with static traction and kinetic streams.
 pub mod total_pressure;
+/// Unsteady circular laminar flow with physical viscous profile memory.
+pub mod laminar;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PressureChart {
