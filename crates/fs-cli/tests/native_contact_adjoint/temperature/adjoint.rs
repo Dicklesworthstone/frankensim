@@ -3,6 +3,9 @@ use super::*;
 use fs_project::{ThermalBoundaryCondition as B, spec::dims};
 use fs_qty::QtyAny;
 
+#[path = "adjoint/natural.rs"]
+mod natural;
+
 fn scaled_pack(scale: f64, surface: bool) -> (Vec<u8>, String, String) {
     if !surface {
         return temperature_pack_from_knots(vec![(200.0, 0.2 * scale), (450.0, 0.45 * scale)]);

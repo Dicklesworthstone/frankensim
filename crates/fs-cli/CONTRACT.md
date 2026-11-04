@@ -3503,3 +3503,28 @@ Krylov work keep their separate bounded counts. Capacity contact still refuses
 pointwise radiation, open-enclosure histories and trajectory derivatives.
 Focused native and imported-project regressions accompany the integration;
 syntax checks do not replace their required native execution.
+
+### Live-contact adjoints through natural convection — driver 112
+
+Steady `temperature-max-adjoint` and `temperature-max-contact-adjoint` now
+compose source-backed matching contact with the existing Churchill-Chu natural
+convection owner. The unchanged accepted temperature is rebound to the original
+natural laws and pinned contact sources before the complete physical watt
+residual and heat closure are checked. The primal natural iteration tightens
+its numerical convergence for these requests; the original physical acceptance
+tolerance is preserved.
+
+One true-transpose solve includes heterogeneous bulk K'(T), both independent
+contact-temperature partials and the signed natural-coefficient wall feedback.
+The original natural-law owner maps ambient controls, including film-temperature
+feedback for heated and cooled walls. Power, conductivity, flux, Robin and each
+named whole-contact-law multiplier use that same total dual. The reusable
+numerical owner also accepts bounded full mean-reference feedback without
+introducing a separate solver or changing the accepted temperature field.
+
+Focused regressions compare matching and nonmatching numerical contact
+derivatives against independent series physics, and native curve/surface
+contact derivatives against power, resistance and natural-ambient perturbations.
+Classical derivatives still require unique material and contact slopes. Airflow,
+radiation, transient history and prescribed-temperature control derivatives
+remain outside this native contact-adjoint composition.

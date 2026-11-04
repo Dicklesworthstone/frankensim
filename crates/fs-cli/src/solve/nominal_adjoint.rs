@@ -239,8 +239,11 @@ pub(super) fn extract(
         let result = temperature_contact::pullback(cx, spec, solved, &weights,
             contact_requested, count(64))?;
         live_contact_rows = Some(result.contact_rows);
+        natural_ambient = result.natural_ambient;
+        let mode = if has_natural { "nonlinear-contact-natural-convection-feedback" }
+            else { "nonlinear-contact-full-material-feedback" };
         (result.gradient.nodal_load, result.gradient.relative_residual, result.gradient.iterations,
-            None, None, "nonlinear-contact-full-material-feedback")
+            None, None, mode)
     } else if setup.enclosure_radiation.is_some() {
         let result = enclosure_feedback::pullback(cx, spec, solved, &weights)?;
         inlet_rows = result.air_rows;

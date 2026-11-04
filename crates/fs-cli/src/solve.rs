@@ -294,7 +294,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// through prescribed, natural and transported-air boundary paths.
 /// Version 111 connects live capacity contact to closed reflected-radiation
 /// exchange through the same prescribed, natural and transported-air owners.
-pub const SOLVE_DRIVER_VERSION: u32 = 111;
+/// Version 112 carries the complete live-contact adjoint through natural
+/// convection, retaining signed wall and ambient feedback at the physical field.
+pub const SOLVE_DRIVER_VERSION: u32 = 112;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -7108,7 +7110,9 @@ fn conduction_solve_receipt(
             let mut htc = natural::initial_coefficients(&natural_laws, pressure_pa)?;
             // The goal owner checks the COMPLETE physical residual, not only
             // the last frozen Robin solve. Leave room below its stricter gate.
-            let natural_tolerance = if adaptive_requested {
+            let natural_tolerance = if adaptive_requested
+                || (adjoint_requested && temperature_contact.is_some())
+            {
                 let goal_tolerance = spec.solver.as_ref().map_or(
                     fs_conduction::LinearConfig::default().tolerance,
                     |solver| (solver.tolerance_rel * 1e-2).max(1e-13),

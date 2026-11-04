@@ -667,9 +667,14 @@ pub fn finite_gas_shared_thermal_reacting_acoustic_transport_candidate_with_path
                 let acoustic = transport.acoustics.get(&id).ok_or(Error::Invalid(
                     "wall heat lost its original acoustic substage account",
                 ))?;
-                let [_, loss, _, molecular] =
+                let accounts =
                     FiniteGasAcousticNode::accounts::<SharedFiniteGasAcousticThermalSource>(acoustic);
-                let remaining = (loss - molecular) - heat;
+                // Both original gas heat channels have already been deposited
+                // into gas. Only the remaining native loss can heat this wall.
+                let gas_heat = accounts.heat.total_j().map_err(|error| {
+                    Error::Native(super::FiniteGasDgTransportError::Acoustic { parcel: id, error })
+                })?;
+                let remaining = (accounts.acoustic_dissipation_j - gas_heat) - heat;
                 let input = inputs.get(&id).ok_or(Error::Invalid(
                     "wall heat lost its original acoustic input",
                 ))?;

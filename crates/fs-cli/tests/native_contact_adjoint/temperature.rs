@@ -374,13 +374,8 @@ fn temperature_contact_is_rebound_on_each_native_uniform_rung() {
 
 #[test]
 fn temperature_contact_never_substitutes_frozen_derivatives_or_adaptive_goals() {
-    let mut f = Fixture::new(false, false);
-    f.project.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
-        .boundaries[0].condition = fs_project::ThermalBoundaryCondition::NaturalConvection {
-            characteristic_length: fs_qty::QtyAny::new(1.0, fs_project::spec::dims::LENGTH),
-            ambient_temperature: fs_qty::QtyAny::new(300.0, fs_project::spec::dims::TEMPERATURE),
-            correlation: "convection.churchill-chu-vertical-plate".into(),
-        };
+    let mut f = Fixture::new(false, true);
+    f.project.cooling.as_mut().unwrap().conduction.as_mut().unwrap().radiation = None;
     let (source, contact, ledger) = prepare(&f, 20, Some(OUTPUT));
     let result = run(&f, &source, &contact, &ledger);
     assert_ne!(result.exit_code, fs_cli::exit::SUCCESS);
