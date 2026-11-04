@@ -65,6 +65,8 @@ mod impulse;
 pub use impulse::FrameImpulse;
 mod normal_impact;
 pub use normal_impact::{FrameNormalContact, FrameNormalImpact, FrameNormalImpactError};
+mod frictional_impact;
+pub use frictional_impact::{FrameFrictionalContact, FrameFrictionalImpact, FrameFrictionalImpactError};
 mod modes;
 pub use modes::{FrameModalAnalysis, FrameMode, FrameModeStatus};
 mod viscosity;

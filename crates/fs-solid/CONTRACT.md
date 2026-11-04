@@ -3639,6 +3639,53 @@ endpoints, Hermite moments, support cross mass, moving-obstacle work, internal
 momentum and velocity-boost invariance, finite-force/Newmark continuation,
 redundant determinacy and atomic physical/numerical refusals.
 
+### Simultaneous planar Coulomb impacts on the native frame
+
+`Frame2d::apply_frictional_impacts` resolves declared planar contacts through
+the existing non-associated `fs-contact::frictional_multicontact` owner. Each
+`FrameFrictionalContact` supplies normal and tangent covectors at the same
+physical point, in an orthonormal contact frame, with prescribed obstacle
+velocities, friction coefficient, stable ID and the native normal endpoint law.
+The same rows map frame velocities to contact rates and impulses to nodal
+forces and moments. Geometry, physical unit directions and event discovery
+remain caller-owned; penetration is refused without repair.
+
+The full original-mass contact mobility couples every normal and tangent row.
+One free-mass factor serves two streamed physical columns per contact, the
+combined native impulse and finite right-limit acceleration. The shared owner's
+second tangent is an exact zero coordinate: zero mobility, velocity and accepted
+impulse, without artificial inertia or compliance. This embedding conservatively
+retains the native PSD velocity/work qualification; a chosen representative
+never grants unique local loads or individual source-work allocations. The
+shared count, nonlinear evaluation, iteration, rank, determinacy and passivity
+limits remain authoritative. Adapter scratch is `O(ndof + contacts^2)`, and
+contact-ID-ordered reductions preserve replay under input permutation.
+
+Normal complementarity and maximum-dissipation Coulomb sticking/sliding share
+one solve. Actual stored frame velocities must then reproduce both components,
+close the original-mass momentum and obstacle-work balances, and satisfy the
+same physical Coulomb residual gates before the existing private impulse trial
+publishes. The receipt separates obstacle work, kinetic change, actual relative
+work and total impact loss. Relative work uses extended products directly;
+large world-frame energies are not subtracted to infer a small loss. Loss is
+not assigned to frictional heat. Cancellation, budget exhaustion or any late
+endpoint, work, continuation or force-balance refusal preserves all accepted
+state, including a newly staged Rayleigh reference.
+
+The original stationary-support, positive-free-inertia, untimed-material and
+reference-inertia boundaries remain. No position, member force, constitutive
+history or material clock changes during the event. Finite post-event loads,
+source viscosity and Rayleigh damping determine the actual right-limit
+acceleration and subsequent Newmark continuation. Sustained contact, collision
+detection, finite-rotation world inertia and heat allocation remain separate
+owners.
+
+`tests/frame2d_frictional_impact.rs` checks independent sliding/sticking solutions,
+non-diagonal normal/tangent coupling, consistent-mass support moments, canonical
+ID replay, inactive endpoints, internal linear/reference angular momentum,
+moving-obstacle work and velocity boosts, finite-force/Newmark continuation,
+the zero-friction limit, redundant-contact qualifications and atomic refusals.
+
 ## Signed, mass-normalized frame modes and participation
 
 `Frame2d::modal_analysis` exposes the complete signed current-tangent spectrum,
