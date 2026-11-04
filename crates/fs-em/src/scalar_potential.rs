@@ -6,7 +6,7 @@
 
 use fs_rep_mesh::TriComplex2;
 use fs_solver::{CheckedCgConfig, CheckedCgError, CsrOp, SolveReport, checked_cg};
-use fs_sparse::{Csr, precond::IdentityPrecond};
+use fs_sparse::{Csr, precond::Precond};
 
 use crate::planar::{MagneticError, PlanarMagnetostatics};
 
@@ -14,6 +14,18 @@ pub(crate) enum PotentialError {
     Invalid(&'static str),
     Cancelled,
     Nonconvergence(SolveReport),
+}
+
+/// Native Jacobi application on the already admitted free-coordinate matrix.
+/// The original matrix/RHS stay unscaled; checked_cg still accepts only its
+/// independently recomputed Euclidean residual in the physical equation.
+struct Diagonal(Vec<f64>);
+impl Precond for Diagonal {
+    fn apply(&self, residual: &[f64], output: &mut [f64]) {
+        for ((out, &value), &inverse) in output.iter_mut().zip(residual).zip(&self.0) {
+            *out = value * inverse;
+        }
+    }
 }
 
 fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), PotentialError> {
@@ -108,7 +120,9 @@ pub(crate) fn component_references(
 }
 
 /// Eliminate the original prescribed coordinates and use the existing checked
-/// CG recurrence, including its independently recomputed Euclidean residual.
+/// Jacobi-CG recurrence, including its independently recomputed Euclidean
+/// residual on the unscaled physical equation. Diagonal preparation shares
+/// the original row traversal and retains one scalar per free coordinate.
 pub(crate) fn solve(
     stiffness: &Csr,
     rhs: &[f64],
@@ -165,6 +179,7 @@ pub(crate) fn solve_relative(
     let mut columns = Vec::new();
     let mut values = Vec::new();
     let mut reduced_rhs = Vec::with_capacity(free.len());
+    let mut inverse_diagonal = Vec::with_capacity(free.len());
     // Constant potentials lie in the full Hodge operator's nullspace. Solve
     // for differences before multiplying by that operator: a large common
     // voltage must not dominate either elimination or the CG residual scale.
@@ -173,8 +188,12 @@ pub(crate) fn solve_relative(
     for &v in &free {
         poll(cancelled)?;
         let mut load = rhs[v];
+        let mut diagonal = 0.0;
         let (cols, vals) = stiffness.row(v);
         for (&w, &value) in cols.iter().zip(vals) {
+            if w == v {
+                diagonal = value;
+            }
             if let Some(voltage) = prescribed[w] {
                 let difference = finite(voltage - references[v])?;
                 load = finite((-value).mul_add(difference, load))?;
@@ -183,6 +202,12 @@ pub(crate) fn solve_relative(
                 values.push(value);
             }
         }
+        if !diagonal.is_finite() || diagonal <= 0.0 || !diagonal.recip().is_finite() {
+            return Err(PotentialError::Invalid(
+                "scalar-potential Jacobi diagonal must be representably positive",
+            ));
+        }
+        inverse_diagonal.push(diagonal.recip());
         row_ptr.push(columns.len());
         reduced_rhs.push(load);
     }
@@ -200,7 +225,7 @@ pub(crate) fn solve_relative(
     } else {
         let result = checked_cg(
             &CsrOp::symmetric(matrix),
-            &IdentityPrecond,
+            &Diagonal(inverse_diagonal),
             &reduced_rhs,
             controls,
             |_| poll(cancelled),
@@ -327,4 +352,152 @@ pub(crate) fn terminal_components(
         parent[v] = root(&mut parent, v);
     }
     Ok(parent)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fs_sparse::precond::IdentityPrecond;
+    use std::convert::Infallible;
+
+    fn controls() -> CheckedCgConfig {
+        CheckedCgConfig {
+            tolerance: 1e-12,
+            max_iterations: 256,
+            max_corrections: 2,
+        }
+    }
+
+    /// Exact capacitor star: node zero is the common electrode and leaf i has
+    /// independent C_i. The full operator has its physical constant nullspace;
+    /// after grounding zero, Q_i=C_i V_i is an independent analytical solution.
+    fn capacitor_star(capacitances: &[f64]) -> Csr {
+        let n = capacitances.len() + 1;
+        let mut row_ptr = vec![0];
+        let mut columns = vec![0];
+        let mut values = vec![capacitances.iter().sum()];
+        for (leaf, &capacitance) in capacitances.iter().enumerate() {
+            columns.push(leaf + 1);
+            values.push(-capacitance);
+        }
+        row_ptr.push(columns.len());
+        for (leaf, &capacitance) in capacitances.iter().enumerate() {
+            columns.extend([0, leaf + 1]);
+            values.extend([-capacitance, capacitance]);
+            row_ptr.push(columns.len());
+        }
+        Csr::from_parts(n, n, row_ptr, columns, values)
+    }
+
+    #[test]
+    fn jacobi_resolves_heterogeneous_capacitances_with_fewer_native_cg_iterations() {
+        let capacitances: Vec<_> = (0..16).map(|i| 2_f64.powi(2 * i - 40)).collect();
+        let matrix = capacitor_star(&capacitances);
+        let mut rhs = vec![0.0];
+        rhs.extend_from_slice(&capacitances);
+        let mut prescribed = vec![None; rhs.len()];
+        prescribed[0] = Some(0.0);
+        let actual = solve_relative(&matrix, &rhs, &prescribed, controls(), &mut || false)
+            .unwrap_or_else(|_| panic!("physical capacitor-star solve refused"));
+        let report = actual.report.as_ref().unwrap();
+        assert!(report.converged_euclidean());
+        for &voltage in &actual.relative[1..] {
+            assert!((voltage - 1.0).abs() < 1e-12);
+        }
+        // Check the unscaled physical equation independently of the
+        // preconditioned recurrence or its recursive residual estimate.
+        let residual_squared: f64 = capacitances
+            .iter()
+            .zip(&actual.relative[1..])
+            .map(|(&c, &voltage)| (c - c * voltage).powi(2))
+            .sum();
+        let rhs_squared: f64 = capacitances.iter().map(|c| c * c).sum();
+        assert!((residual_squared / rhs_squared).sqrt() < controls().tolerance);
+
+        let count = capacitances.len();
+        let reduced = Csr::from_parts(
+            count,
+            count,
+            (0..=count).collect(),
+            (0..count).collect(),
+            capacitances,
+        );
+        let baseline = checked_cg(
+            &CsrOp::symmetric(reduced),
+            &IdentityPrecond,
+            &rhs[1..],
+            controls(),
+            |_| Ok::<_, Infallible>(()),
+        )
+        .unwrap();
+        assert!(baseline.report.converged_euclidean());
+        assert!(report.iters <= 2, "Jacobi iterations: {}", report.iters);
+        assert!(baseline.report.iters >= 8);
+        assert!(report.iters < baseline.report.iters);
+
+        // A common absolute bias must not alter either physical differences
+        // or the deterministic iteration count and measured residual.
+        prescribed[0] = Some(2_f64.powi(45));
+        let shifted = solve_relative(&matrix, &rhs, &prescribed, controls(), &mut || false)
+            .unwrap_or_else(|_| panic!("gauge-shifted capacitor-star solve refused"));
+        assert_eq!(actual.relative, shifted.relative);
+        assert_eq!(report.iters, shifted.report.as_ref().unwrap().iters);
+        assert_eq!(
+            report.rel_residual.to_bits(),
+            shifted.report.as_ref().unwrap().rel_residual.to_bits()
+        );
+    }
+
+    #[test]
+    fn nonpositive_or_unrepresentable_jacobi_diagonals_refuse_before_solving() {
+        for diagonal in [0.0, -1.0, f64::NAN, f64::INFINITY, 1e-320] {
+            // Keep a connection to the reference even for malformed input so
+            // this reaches diagonal admission rather than the gauge refusal.
+            let matrix = Csr::from_parts(
+                2,
+                2,
+                vec![0, 2, 4],
+                vec![0, 1, 0, 1],
+                vec![1.0, -1.0, -1.0, diagonal],
+            );
+            assert!(matches!(
+                solve_relative(
+                    &matrix,
+                    &[0.0, 1.0],
+                    &[Some(0.0), None],
+                    controls(),
+                    &mut || false,
+                ),
+                Err(PotentialError::Invalid(
+                    "scalar-potential Jacobi diagonal must be representably positive"
+                ))
+            ));
+        }
+    }
+
+    #[test]
+    fn jacobi_setup_and_checked_iterations_remain_cancellable() {
+        let matrix = capacitor_star(&[1e-12, 1e-9, 1e-6]);
+        let rhs = [0.0, 1e-12, 2e-9, -1e-6];
+        let prescribed = [Some(0.0), None, None, None];
+        let mut calls = 0;
+        let original = solve_relative(&matrix, &rhs, &prescribed, controls(), &mut || {
+            calls += 1;
+            false
+        })
+        .unwrap_or_else(|_| panic!("capacitor-star solve refused"));
+        for stop in [1, 3, calls - 1, calls] {
+            let mut count = 0;
+            assert!(matches!(
+                solve_relative(&matrix, &rhs, &prescribed, controls(), &mut || {
+                    count += 1;
+                    count == stop
+                }),
+                Err(PotentialError::Cancelled)
+            ));
+        }
+        let replay = solve_relative(&matrix, &rhs, &prescribed, controls(), &mut || false)
+            .unwrap_or_else(|_| panic!("capacitor-star replay refused"));
+        assert_eq!(original.relative, replay.relative);
+    }
 }
