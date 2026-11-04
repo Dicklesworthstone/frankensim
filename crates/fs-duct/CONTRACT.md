@@ -2715,6 +2715,22 @@ and stepped-bore responses with a global endpoint-equation solve, retain native
 gas results, close full radiated power for source-EOS water, and check one-source
 evaluation, material wall dissipation and original source/admission refusals.
 
+`PreparedModalDuct::drive_sources_from_material_with_exterior` and its
+`_and_loss` counterpart close physical pressure/volume-flow sources against an
+independently declared receiving `FluidAcoustics` material. One interior
+snapshot owns propagation, radial cutoffs and optional viscothermal wall loss;
+one exterior snapshot owns the full coupled flanged radiation matrix and its
+`ka` admission. The stationary interface preserves pressure and outward volume
+flow without averaging material properties. Source resistance, coherent modal
+cross terms, exact interior cutoffs and physical mouth flows all survive. The
+caller owns background equilibrium; membrane, mean-flow, mass-transfer and
+capillary dynamics are absent, and the exterior remains a homogeneous,
+nondispersive infinite half-space behind a rigid baffle. G1/G3 regressions in
+`modal/fluid/tests/sources.rs` compare distinct receiving liquids to the global
+pressure/flow equations at exact interior cutoff, close source/radiated power,
+separate interior wall dissipation, retain all same-fluid result bits, and
+preserve the two material owners' sampling and refusal semantics.
+
 G1/G3 regressions in `tests/fluid_acoustics/flanged.rs` check the independent
 low-frequency piston asymptote, gas bit equivalence, source-water impedance
 scaling, multimodal reciprocity and positive radiated power, an analytic loaded
