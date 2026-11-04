@@ -13,14 +13,26 @@ Inputs use SI and the native plane-strain unit-depth convention: nodal normal
 reaction is N/m, and an explicitly supplied tributary contact width gives Pa.
 Temperature coordinates remain prescribed; sliding speed is the actual relative
 tangential displacement over the physical interval, including surface motion.
-Missing active bindings, source-domain failures and unsupported history/pressure
-coordinates refuse. No fallback coefficient supplies unavailable material data.
+`solve_timed_from_with_source_history` admits explicit per-node accumulated
+sliding distance. Every lag queries distance at the same accepted history plus
+the candidate's absolute relative tangential increment. Final acceptance therefore
+closes distance-dependent running-in coefficients on the actual equilibrium slip;
+Newton and lag rounds never add physical distance. `ContactTrajectory` owns this
+history, starts at zero or an explicit `new_with_sliding_history` restart, and
+commits distance, displacement, time and work together. Accepted resolved reversals
+add path length; normal motion and inactive endpoints do not. The solution returns
+the per-node distance increment, and final source samples retain the queried
+distance. Missing active bindings, source-domain failures, unsupported pressure
+coordinates and history-dependent sources on the stateless entry refuse. No
+fallback coefficient supplies unavailable material data.
 
 This lane requires equal static and kinetic source values. Huber regularization
-permits creep and supplies no exact static hysteresis, accumulated arc history,
-thermal feedback or heat allocation. Its secant speed and endpoint work retain
-the original temporal-refinement requirement. Source failures and unconverged
-lags publish no trajectory state or work. Constant sources preserve the original
+permits creep and supplies no exact static hysteresis, thermal feedback or heat
+allocation. Sliding history includes regularized creep and uses endpoint tangent
+projection: it is not an exact arc-length integral and cannot reconstruct
+within-step contact activation, tangent rotation or slip reversals. Distance,
+secant speed and endpoint work require temporal refinement. Source failures and
+unconverged lags publish no trajectory state or work. Constant sources preserve the original
 coefficient path; focused G1/G3/G4 contact tests exercise native equilibria,
 local temperature/pressure/speed response, final-query closure and rollback.
 

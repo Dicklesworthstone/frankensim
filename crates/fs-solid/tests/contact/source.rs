@@ -352,6 +352,7 @@ fn g4_source_refusals_leave_native_time_displacement_and_work_unchanged() {
         .unwrap();
     let accepted = trajectory.displacement().to_vec();
     let work = trajectory.work();
+    let distance = trajectory.sliding_distance().to_vec();
     let original = bindings[missing].take().unwrap();
     assert!(
         trajectory
@@ -369,11 +370,19 @@ fn g4_source_refusals_leave_native_time_displacement_and_work_unchanged() {
     assert_eq!(trajectory.time_s(), 2.5);
     assert_eq!(trajectory.displacement(), accepted);
     assert_eq!(trajectory.work(), work);
+    assert_eq!(trajectory.sliding_distance(), distance);
     let history_source = source("path", [(0.0, 0.6), (1.0, 0.6)]);
     let history_binding = self::bindings(&history_source, mesh.nodes.len());
     assert!(
-        trajectory
-            .advance_with_sources(0.5, 1.0, &stationary, &history_binding)
+        problem
+            .solve_timed_from_with_sources(
+                1.0,
+                &accepted,
+                &stationary,
+                0.5,
+                0.001,
+                &history_binding,
+            )
             .is_err()
     );
     assert_eq!(trajectory.displacement(), accepted);
@@ -388,4 +397,173 @@ fn g4_source_refusals_leave_native_time_displacement_and_work_unchanged() {
     assert_eq!(trajectory.time_s(), 2.5);
     assert_eq!(trajectory.displacement(), accepted);
     assert_eq!(trajectory.work(), work);
+    assert_eq!(trajectory.sliding_distance(), distance);
+}
+
+#[test]
+fn g3_running_in_history_drives_traction_counts_reversals_and_rolls_back() {
+    let mesh = Mesh2::quads(1.0, 1.0, 2, 2);
+    let material = card();
+    let hyper = HyperProblem {
+        mesh: &mesh,
+        material: &material,
+        dirichlet: vec![],
+        traction: vec![],
+        settings: NewtonSettings::default(),
+    };
+    let floor = HalfPlane {
+        normal: [0.0, 1.0],
+        offset: -0.02,
+    };
+    let mut problem = timed_problem(&hyper, &floor);
+    problem.pins = (0..2 * mesh.nodes.len()).map(|i| (i, 0.0)).collect();
+    let reference = vec![0.0; 2 * mesh.nodes.len()];
+    let prior_distance = vec![0.2; mesh.nodes.len()];
+    let law = source("path", [(0.0, 0.8), (0.21, 0.38)]);
+    let bindings = bindings(&law, mesh.nodes.len());
+    let mut trajectory = ContactTrajectory::new_with_sliding_history(
+        &problem,
+        2.0,
+        &reference,
+        0.001,
+        &prior_distance,
+    )
+    .unwrap();
+    let mut expected_distance = 0.2;
+    // Each interval resolves its reversal. Normal motion contributes no sliding,
+    // and detached nodes do not acquire running-in history from surface travel.
+    for surface in [[0.003, 0.0], [-0.001, 0.0], [0.0, 0.002]] {
+        expected_distance += f64::abs(surface[0]);
+        let solution = trajectory
+            .advance_with_sources(0.5, 1.0, &vec![surface; mesh.nodes.len()], &bindings)
+            .unwrap();
+        for (i, sample) in solution.friction_sources.iter().enumerate() {
+            let Some(sample) = sample else {
+                close(trajectory.sliding_distance()[i], 0.2);
+                close(solution.sliding_distance_increment[i], 0.0);
+                continue;
+            };
+            close(trajectory.sliding_distance()[i], expected_distance);
+            close(solution.sliding_distance_increment[i], surface[0].abs());
+            close(sample.accumulated_distance_m.unwrap(), expected_distance);
+            close(sample.source.query().axes()["path"], expected_distance);
+            let mu = 0.8 - 2.0 * expected_distance;
+            close(sample.coefficient, mu);
+            let normal = -problem.barrier.d1(mesh.nodes[i][1] + 0.02);
+            let direction = if surface[0] == 0.0 {
+                0.0
+            } else {
+                surface[0].signum()
+            };
+            close(solution.friction_reactions[i][0], direction * mu * normal);
+        }
+        close(solution.friction_work, solution.friction_support_work);
+        assert_eq!(solution.u, reference);
+        close(trajectory.work().balance_residual(), 0.0);
+    }
+    // The source range ends at 0.21 m. Rejecting a physical advance must not age
+    // the interface, and a subsequent admissible advance starts at 0.204 m.
+    let accepted_distance = trajectory.sliding_distance().to_vec();
+    let accepted_work = trajectory.work();
+    assert!(
+        trajectory
+            .advance_with_sources(0.5, 1.0, &vec![[0.008, 0.0]; mesh.nodes.len()], &bindings)
+            .is_err()
+    );
+    assert_eq!(trajectory.time_s(), 3.5);
+    assert_eq!(trajectory.displacement(), reference);
+    assert_eq!(trajectory.sliding_distance(), accepted_distance);
+    assert_eq!(trajectory.work(), accepted_work);
+    trajectory
+        .advance_with_sources(0.5, 1.0, &vec![[0.001, 0.0]; mesh.nodes.len()], &bindings)
+        .unwrap();
+    for (i, node) in mesh.nodes.iter().enumerate() {
+        close(
+            trajectory.sliding_distance()[i],
+            if node[1] == 0.0 { 0.205 } else { 0.2 },
+        );
+        assert_eq!(bindings[i].as_ref().unwrap().conditions.axes()["path"], 0.0);
+    }
+    assert!(
+        ContactTrajectory::new_with_sliding_history(&problem, 0.0, &reference, 0.001, &[-1.0],)
+            .is_err()
+    );
+}
+
+#[test]
+fn g3_distance_source_uses_final_equilibrium_slip_once_per_physical_interval() {
+    let mesh = Mesh2::quads(1.0, 1.0, 2, 2);
+    let material = card();
+    let pull = |_: f64, _: f64| [0.02, -0.2];
+    let hyper = HyperProblem {
+        mesh: &mesh,
+        material: &material,
+        dirichlet: vec![],
+        traction: vec![(Patch::Top, &pull)],
+        settings: NewtonSettings::default(),
+    };
+    let floor = HalfPlane {
+        normal: [0.0, 1.0],
+        offset: -0.02,
+    };
+    let mut problem = timed_problem(&hyper, &floor);
+    problem.friction.as_mut().unwrap().rounds = 40;
+    let reference = vec![0.0; 2 * mesh.nodes.len()];
+    let surface = vec![[0.0; 2]; mesh.nodes.len()];
+    let accepted_distance = vec![0.001; mesh.nodes.len()];
+    let law = source("path", [(0.0, 0.8), (0.01, 0.2)]);
+    let bindings = bindings(&law, mesh.nodes.len());
+    let solution = problem
+        .solve_timed_from_with_source_history(
+            1.0,
+            &reference,
+            &surface,
+            0.5,
+            0.001,
+            &bindings,
+            &accepted_distance,
+        )
+        .unwrap();
+    assert!(solution.residual < problem.tol);
+    for (i, sample) in solution.friction_sources.iter().enumerate() {
+        if let Some(sample) = sample {
+            let distance = accepted_distance[i] + solution.u[2 * i].abs();
+            close(sample.source.query().axes()["path"], distance);
+            close(sample.accumulated_distance_m.unwrap(), distance);
+            close(sample.coefficient, 0.8 - 60.0 * distance);
+            close(
+                solution.sliding_distance_increment[i],
+                solution.u[2 * i].abs(),
+            );
+        }
+    }
+    assert!(
+        (solution
+            .friction_reactions
+            .iter()
+            .map(|f| f[0])
+            .sum::<f64>()
+            + 0.02)
+            .abs()
+            < 1e-8
+    );
+    problem.friction.as_mut().unwrap().rounds = 80;
+    let more = problem
+        .solve_timed_from_with_source_history(
+            1.0,
+            &reference,
+            &surface,
+            0.5,
+            0.001,
+            &bindings,
+            &accepted_distance,
+        )
+        .unwrap();
+    assert_eq!(solution.u, more.u);
+    assert_eq!(
+        solution.sliding_distance_increment,
+        more.sliding_distance_increment
+    );
+    assert_eq!(solution.friction_sources, more.friction_sources);
+    assert_eq!(accepted_distance, vec![0.001; mesh.nodes.len()]);
 }

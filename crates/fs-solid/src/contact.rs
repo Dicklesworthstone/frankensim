@@ -155,8 +155,9 @@ impl Friction {
 /// normal reaction is force per out-of-plane depth [N/m]. Temperatures and
 /// other external conditions are held over the interval. Declared sliding-speed
 /// coordinates are replaced by the actual relative tangential increment / dt.
-/// The Huber model has no exact static constraint or internal slip history;
-/// unequal static/kinetic coefficients and accumulated-distance sources refuse.
+/// Accumulated-distance coordinates require explicitly accepted sliding history,
+/// supplied by [`ContactTrajectory`] or the history-aware timed solve. The Huber
+/// model has no exact static constraint; unequal static/kinetic values refuse.
 #[derive(Clone, Debug)]
 pub struct ContactFrictionBinding<'a> {
     /// Immutable source selection; every lag retains these original claims.
@@ -179,11 +180,16 @@ pub struct ContactFrictionSample {
     pub normal_reaction_n_per_m: f64,
     /// Relative secant speed in the final tangent frame, not Newton-step speed.
     pub relative_speed_m_s: f64,
+    /// Accepted distance plus this interval's relative tangential increment [m].
+    /// Present when the caller supplies sliding history, even for a law without
+    /// a distance axis. This is endpoint quadrature, not exact curved arc length.
+    pub accumulated_distance_m: Option<f64>,
 }
 
 struct FrictionSources<'a, 's> {
     bindings: &'a [Option<ContactFrictionBinding<'s>>],
     dt_s: f64,
+    accepted_sliding_distance: Option<&'a [f64]>,
 }
 
 impl ContactFrictionBinding<'_> {
@@ -193,6 +199,7 @@ impl ContactFrictionBinding<'_> {
         normal_reaction: f64,
         slip: f64,
         dt_s: f64,
+        accepted_distance: Option<f64>,
     ) -> Result<ContactFrictionSample, SolidError> {
         let refused = |reason: &str| SolidError::InvalidInput {
             what: format!("contact friction source at node {node}: {reason}"),
@@ -201,6 +208,9 @@ impl ContactFrictionBinding<'_> {
         if !speed.is_finite() {
             return Err(refused("relative secant speed is not finite"));
         }
+        let accumulated_distance = accepted_distance
+            .map(|distance| accumulated_sliding_distance(distance, slip.abs()))
+            .transpose()?;
         let mut point = self.conditions.clone();
         match (
             &self.law.axes().nominal_pressure,
@@ -232,9 +242,12 @@ impl ContactFrictionBinding<'_> {
                     ));
                 }
                 FrictionQueryAxisKind::AccumulatedDistance => {
-                    return Err(refused(
-                        "quasistatic Huber increments do not supply accumulated arc length",
-                    ));
+                    let distance = accumulated_distance.ok_or_else(|| {
+                        refused("an accumulated-distance source requires accepted sliding history")
+                    })?;
+                    point = point
+                        .with(&axis.name, distance)
+                        .map_err(|error| refused(&error.to_string()))?;
                 }
             }
         }
@@ -259,8 +272,30 @@ impl ContactFrictionBinding<'_> {
             coefficient: mu,
             normal_reaction_n_per_m: normal_reaction,
             relative_speed_m_s: speed,
+            accumulated_distance_m: accumulated_distance,
         })
     }
+}
+
+fn validate_sliding_history(distance: &[f64], nodes: usize) -> Result<(), SolidError> {
+    if distance.len() != nodes || distance.iter().any(|d| !d.is_finite() || *d < 0.0) {
+        return Err(SolidError::InvalidInput {
+            what: "contact sliding history needs one finite non-negative distance per node"
+                .to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn accumulated_sliding_distance(distance: f64, increment: f64) -> Result<f64, SolidError> {
+    let total = distance + increment;
+    if !total.is_finite() || increment < 0.0 || (increment > 0.0 && total <= distance) {
+        return Err(SolidError::InvalidInput {
+            what: "contact accumulated sliding distance cannot represent the physical increment"
+                .to_string(),
+        });
+    }
+    Ok(total)
 }
 
 /// The contact-augmented static problem.
@@ -310,6 +345,11 @@ pub struct ContactSolution {
     /// The body's friction work plus `friction_work` equals this value.
     /// Zero for stationary obstacles; not trajectory-integrated actuator work.
     pub friction_support_work: f64,
+    /// Per-node absolute relative tangential displacement in the final frame.
+    /// Zero for inactive nodes or disabled friction. This endpoint quadrature
+    /// counts physical sliding once per interval, including regularized creep;
+    /// lag/Newton iterations never add distance. In the sourced lane units are m.
+    pub sliding_distance_increment: Vec<f64>,
     /// Final source queries in original nodal order for the sourced entry.
     /// Inactive nodes have None. Empty for the constant-coefficient entry.
     pub friction_sources: Vec<Option<ContactFrictionSample>>,
@@ -349,6 +389,7 @@ pub struct ContactTrajectory<'p, 'a> {
     regularization_speed: f64,
     time_s: f64,
     u: Vec<f64>,
+    sliding_distance: Vec<f64>,
     work: ContactWork,
 }
 
@@ -387,8 +428,32 @@ impl<'p, 'a> ContactTrajectory<'p, 'a> {
             regularization_speed,
             time_s,
             u: reference_u.to_vec(),
+            sliding_distance: vec![0.0; problem.node_count()],
             work: ContactWork::default(),
         })
+    }
+
+    /// Start with explicitly owned nonnegative accumulated sliding distance at
+    /// each node. Use this to resume a worn/running-in interface; [`Self::new`]
+    /// starts virgin history at zero. Distance is in the mesh's length unit (m
+    /// for sourced friction). It must refer to the same material correspondence
+    /// as the supplied obstacle displacements; no correspondence is inferred.
+    ///
+    /// # Errors
+    /// All constructor refusals, wrong history length or nonfinite/negative data.
+    pub fn new_with_sliding_history(
+        problem: &'p ContactProblem<'a>,
+        time_s: f64,
+        reference_u: &[f64],
+        regularization_speed: f64,
+        sliding_distance: &[f64],
+    ) -> Result<Self, SolidError> {
+        validate_sliding_history(sliding_distance, problem.node_count())?;
+        let mut trajectory = Self::new(problem, time_s, reference_u, regularization_speed)?;
+        trajectory
+            .sliding_distance
+            .clone_from_slice(sliding_distance);
+        Ok(trajectory)
     }
 
     /// Last accepted physical time [s].
@@ -401,6 +466,14 @@ impl<'p, 'a> ContactTrajectory<'p, 'a> {
     #[must_use]
     pub fn displacement(&self) -> &[f64] {
         &self.u
+    }
+
+    /// Accepted relative sliding distance per node, including regularized creep.
+    /// Only active endpoints with friction enabled accumulate. Temporal
+    /// refinement must resolve contact activation, curvature and reversals.
+    #[must_use]
+    pub fn sliding_distance(&self) -> &[f64] {
+        &self.sliding_distance
     }
 
     /// Sum of endpoint friction-force/displacement products since construction.
@@ -427,9 +500,9 @@ impl<'p, 'a> ContactTrajectory<'p, 'a> {
     }
 
     /// Advance with original per-node material/interface sources. Temperatures
-    /// are held explicit inputs; the accepted normal load and relative secant
-    /// speed drive every final source query. Source failure or unconverged lags
-    /// leave time, displacement and all accumulated work unchanged.
+    /// are held explicit inputs; the accepted normal load, relative secant speed
+    /// and accumulated sliding distance drive every final source query. Source
+    /// failure or unconverged lags leave all accepted state and work unchanged.
     ///
     /// The same source identities should be retained across physical intervals;
     /// changing a binding is an explicit model change, not history evolution.
@@ -460,13 +533,14 @@ impl<'p, 'a> ContactTrajectory<'p, 'a> {
             });
         }
         let solution = match bindings {
-            Some(bindings) => self.problem.solve_timed_from_with_sources(
+            Some(bindings) => self.problem.solve_timed_from_with_source_history(
                 load,
                 &self.u,
                 surface_displacement,
                 dt_s,
                 self.regularization_speed,
                 bindings,
+                &self.sliding_distance,
             )?,
             None => self.problem.solve_timed_from(
                 load,
@@ -503,8 +577,15 @@ impl<'p, 'a> ContactTrajectory<'p, 'a> {
                 what: "contact cumulative friction work is not finite".to_string(),
             });
         }
+        let sliding_distance = self
+            .sliding_distance
+            .iter()
+            .zip(&solution.sliding_distance_increment)
+            .map(|(&distance, &increment)| accumulated_sliding_distance(distance, increment))
+            .collect::<Result<Vec<_>, _>>()?;
         self.u.clone_from(&solution.u);
         self.time_s = time_s;
+        self.sliding_distance = sliding_distance;
         self.work = work;
         Ok(solution)
     }
@@ -910,6 +991,66 @@ impl ContactProblem<'_> {
         regularization_speed: f64,
         bindings: &[Option<ContactFrictionBinding<'_>>],
     ) -> Result<ContactSolution, SolidError> {
+        self.solve_timed_sourced_increment(
+            load,
+            reference_u,
+            surface_displacement,
+            dt_s,
+            regularization_speed,
+            bindings,
+            None,
+        )
+    }
+
+    /// Solve sourced contact with explicitly accepted per-node sliding history.
+    /// Each distance source is queried at `accepted_distance + abs(relative_slip)`
+    /// in the current final tangent frame, consistently with its secant speed.
+    /// Every lag starts from the same accepted distances, so numerical iterations
+    /// never age the interface. Inactive nodes retain their previous distance.
+    /// The borrowed history never mutates; advance it using the returned distance
+    /// increments only after accepting the entire physical step. Alternatively,
+    /// [`ContactTrajectory::advance_with_sources`] owns this transaction.
+    ///
+    /// This is backward-Euler sliding-distance quadrature. Time steps must resolve
+    /// contact onset, tangent rotation and slip reversals; the endpoint increment
+    /// cannot reconstruct unresolved within-step arc length or reversal history.
+    ///
+    /// # Errors
+    /// All sourced timed-solve refusals plus invalid/unrepresentable history.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_timed_from_with_source_history(
+        &self,
+        load: f64,
+        reference_u: &[f64],
+        surface_displacement: &[[f64; 2]],
+        dt_s: f64,
+        regularization_speed: f64,
+        bindings: &[Option<ContactFrictionBinding<'_>>],
+        accepted_sliding_distance: &[f64],
+    ) -> Result<ContactSolution, SolidError> {
+        validate_sliding_history(accepted_sliding_distance, self.node_count())?;
+        self.solve_timed_sourced_increment(
+            load,
+            reference_u,
+            surface_displacement,
+            dt_s,
+            regularization_speed,
+            bindings,
+            Some(accepted_sliding_distance),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn solve_timed_sourced_increment(
+        &self,
+        load: f64,
+        reference_u: &[f64],
+        surface_displacement: &[[f64; 2]],
+        dt_s: f64,
+        regularization_speed: f64,
+        bindings: &[Option<ContactFrictionBinding<'_>>],
+        accepted_sliding_distance: Option<&[f64]>,
+    ) -> Result<ContactSolution, SolidError> {
         let friction = self.timed_friction(dt_s, regularization_speed)?;
         if friction.is_none() || bindings.len() != self.node_count() {
             return Err(SolidError::InvalidInput {
@@ -922,7 +1063,11 @@ impl ContactProblem<'_> {
             reference_u,
             Some(surface_displacement),
             friction,
-            Some(&FrictionSources { bindings, dt_s }),
+            Some(&FrictionSources {
+                bindings,
+                dt_s,
+                accepted_sliding_distance,
+            }),
         )
     }
 
@@ -1243,6 +1388,17 @@ impl ContactProblem<'_> {
             .chunks_exact(2)
             .map(|r| [-r[0], -r[1]])
             .collect();
+        let sliding_distance_increment = (0..n)
+            .map(|i| {
+                lag.as_ref().map_or(0.0, |lag| {
+                    if lag.frames[i].0 == [0.0; 2] {
+                        0.0
+                    } else {
+                        lag.slip(&u, i).abs()
+                    }
+                })
+            })
+            .collect();
         Ok(ContactSolution {
             min_gap: self.min_gap(&u)?,
             min_gap_ever,
@@ -1251,6 +1407,7 @@ impl ContactProblem<'_> {
             friction_reactions,
             friction_work,
             friction_support_work,
+            sliding_distance_increment,
             friction_sources: lag.and_then(|lag| lag.sources).unwrap_or_default(),
             iterations,
             residual,
@@ -1423,12 +1580,17 @@ impl<'a> FrictionLag<'a> {
                         .ok_or_else(|| SolidError::InvalidInput {
                             what: format!("active contact node {i} has no friction source binding"),
                         })?;
-                samples.push(Some(binding.sample(
-                    i,
-                    normal,
-                    lag.slip(u, i),
-                    sources.dt_s,
-                )?));
+                samples.push(Some(
+                    binding.sample(
+                        i,
+                        normal,
+                        lag.slip(u, i),
+                        sources.dt_s,
+                        sources
+                            .accepted_sliding_distance
+                            .map(|distance| distance[i]),
+                    )?,
+                ));
             }
             lag.sources = Some(samples);
         }
