@@ -38,6 +38,11 @@ use fs_sparse::{Coo, Csr};
 /// Causal distributed mechanical walls on the original pressure trace.
 pub mod mechanical;
 
+/// Complete-state exponential propagation with held physical source profiles.
+/// This removes midpoint's temporal frequency warping within explicit dense
+/// preparation limits; no original spatial coordinate is truncated.
+pub mod exact;
+
 /// Instantaneous outward velocity law `v_out = Y p`, with `Y >= 0`.
 #[derive(Clone, Debug)]
 pub struct ResistiveBoundary {

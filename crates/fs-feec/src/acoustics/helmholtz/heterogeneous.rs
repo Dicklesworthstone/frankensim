@@ -61,6 +61,10 @@ pub enum HeterogeneousError {
     Factor(LuComplexError),
     /// The original passive mechanical wall owner refused its physical data.
     Wall(fs_phs::PhsError),
+    /// The original dense mass factor refused exact full-field preparation.
+    MassFactor(fs_la::factor::FactorError),
+    /// The original complete-state exponential/Gramian owner refused.
+    Propagation(fs_phs::PhsError),
     /// The caller cancelled; no partial field/factor is returned.
     Cancelled,
     /// A declared preparation limit would be exceeded.
@@ -144,7 +148,9 @@ fn medium_coefficients(medium: Medium) -> Result<(f64, f64), AcousticFeError> {
         || !compressibility.is_finite()
         || compressibility <= 0.0
     {
-        return Err(invalid("unrepresentable heterogeneous acoustic coefficients"));
+        return Err(invalid(
+            "unrepresentable heterogeneous acoustic coefficients",
+        ));
     }
     Ok((inverse_density, compressibility))
 }

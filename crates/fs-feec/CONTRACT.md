@@ -1652,6 +1652,44 @@ environment; pinned rustfmt parsing and source/API review do not replace native
 validation. Midpoint stability does not certify phase accuracy: time-step,
 geometry, h/p and material quadrature refinement remain separate obligations.
 
+### Exact complete-field heterogeneous acoustic evolution
+
+`heterogeneous::time::exact` prepares the same full `M_beta`, `K_rho` and
+real boundary-admittance forms for exponential held-input evolution. It
+retains every original pressure/potential coordinate, including the constant
+potential gauge. Canonical momentum is `pi = M_beta p`; diagonal coordinate
+scales condition the original mass inverse, storage and interconnection.
+The inverse is checked against every original mass entry. No eigenmode is
+truncated, frequency matched, retuned or pinned to remove the gauge.
+
+`ExactVelocityPort` binds a dimensionless piecewise-linear inward-velocity
+shape to the original boundary quadrature. Step amplitudes have units m/s.
+Different ports may overlap and interfere; a source may share a real-admittance
+face. Port work is the held amplitude times the actual integrated
+`integral(shape p dA)` pressure, with boundary area appearing exactly once.
+Absorption independently integrates `p^T C_Y p` along the same cached
+trajectory through the existing pHS Gramian owner. It is neither an endpoint
+quadrature nor an energy remainder. Returned pressure/potential states retain
+the original material/geometry identity and work with existing field probes.
+
+Preparation is a bounded dense small-domain path, using the existing full-state
+exponential owner. The current cap is `2*(2*pressure_dofs + ports + 1) <= 256`,
+in addition to the caller's original-DOF, dense-cache byte and multiply-work
+limits. With zero or one port this permits at most 63 pressure DOFs. Larger
+fields refuse without reducing the basis or changing propagators. Warm steps
+perform cached contractions and allocate result/scratch vectors; they perform
+no material query, factorization or matrix exponential. Cancellation is polled
+between preparation rows and around bounded original numerical operations,
+and before any candidate is returned. All refusals preserve the accepted state.
+
+Exact means the complete semidiscrete held-input solution up to numerical
+exponential error, without midpoint's temporal frequency transformation.
+Spatial h/p, geometry and material quadrature still require convergence;
+source holding, recording bandwidth and antialiasing remain separate axes.
+This path covers frozen isotropic fluids with no mean flow or bulk loss and
+real memoryless boundary admittance. It does not promote the sparse midpoint
+route, an under-resolved mesh, or a small-domain fixture to instrument acceptance.
+
 ### Causal distributed mechanical boundaries
 
 `heterogeneous::time::mechanical` composes the original `fs_phs::WallPin`
