@@ -39,6 +39,7 @@
 //! tension_modulation <rate_hz> <relative_amplitude>  (optional; vibrato)
 //! tension_flutter <seed> <centre_hz> <bandwidth_hz> <sd_rel>  (optional; slow pitch movement of a straight tone)
 //! fold_mapping bilateral                             (optional; the fold line is one fold of a pair)
+//! fold_shape <sine|rigid> <uniform|tapered>          (optional, two_mass only; the gap varies along the fold)
 //! aspiration_noise <seed> <xi_pa_s3_per_m6> [<re_crit>]   (optional; turbulence noise at the glottis)
 //! jet_noise <seed> <gain> <st_lo> <st_hi> <re_on>         (optional; constriction noise of the glottal jet, Verge's fraction)
 //! ```
@@ -83,6 +84,14 @@
 //! ([`FoldCard::bilateral`]); without it they enter the gap coordinate as written, and a performance is
 //! bit-identical to one written before the key existed.
 //!
+//! `fold_shape` lets the gap vary along a `two_mass` fold, so closure spreads along it (the law is in
+//! [`crate::glottis`]). `sine` holds the ends, `rigid` moves the whole mass; `tapered` narrows the rest gap to nothing
+//! at the anterior commissure, `uniform` keeps it. Held ends are printed for prescribed motion only (Birkholz 2019,
+//! after Titze); the self-oscillating form and its modal mass are ours, and any page showing a render must say so.
+//! `rigid tapered` is the printed self-oscillating fold of Birkholz, Kroger and Neuschaefer-Rube 2011. `rigid uniform`
+//! is the plain island reached through the strips. Without the key a performance is bit-identical to one written
+//! before the key existed.
+//!
 //! On a `two_mass` fold the fold line's damping ratio is the lower mass's open ratio and
 //! `fold_damping_upper` the upper mass's, and the law adds `1.0` to each while its own section is shut
 //! (Ishizaka and Flanagan 1972, eq 3 and 4; [`FoldCard::damping_ratio`]). The key has no default: a
@@ -92,7 +101,7 @@
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::driving_point::LineLadder;
 use crate::driving_point::outlet::mouth_flow_line;
-use crate::glottis::{FoldCard, FoldCardSource, GlottalIsland};
+use crate::glottis::{FoldCard, FoldCardSource, FoldMode, FoldRestGap, FoldShape, GlottalIsland};
 use crate::pcm_wav::baffled::{BaffledPressure, CircularOutletReceiver, RayleighMedium};
 use crate::pcm_wav::observation::PressureRenderer;
 use crate::render::RenderError;
@@ -132,6 +141,8 @@ pub struct VoiceDescription {
     pub two_mass: bool,
     /// Lumped fold parameters.
     pub fold: FoldCard,
+    /// Opt-in shape of a two-mass fold along its length; `None` is the printed island.
+    pub fold_shape: Option<FoldShape>,
     /// Optional single-pin yielding tract wall.
     pub wall: Option<WallPin>,
     /// Mouth radiation load.
@@ -243,6 +254,7 @@ impl VoiceDescription {
         let mut aspiration_noise = None;
         let mut jet_noise = None;
         let mut fold_mapping = None;
+        let mut fold_shape = None;
         let mut fold_damping_upper = None;
         for line in lines {
             let mut tokens = line.split_whitespace();
@@ -449,6 +461,20 @@ impl VoiceDescription {
                     }
                     once(&mut fold_mapping, (), key)?;
                 }
+                "fold_shape" => {
+                    arity(&rest, 2, key)?;
+                    let mode = match rest[0] {
+                        "sine" => FoldMode::Sine,
+                        "rigid" => FoldMode::Rigid,
+                        other => return Err(format!("fold_shape mode must be `sine` or `rigid`, got {other:?}")),
+                    };
+                    let rest_gap = match rest[1] {
+                        "uniform" => FoldRestGap::Uniform,
+                        "tapered" => FoldRestGap::Tapered,
+                        other => return Err(format!("fold_shape rest gap must be `uniform` or `tapered`, got {other:?}")),
+                    };
+                    once(&mut fold_shape, FoldShape { mode, rest: rest_gap }, key)?;
+                }
                 "fold_damping_upper" => {
                     arity(&rest, 1, key)?;
                     let ratio = field(&rest, 0, "upper damping ratio")?;
@@ -472,6 +498,9 @@ impl VoiceDescription {
             (false, Some(_)) => return Err("fold_damping_upper needs a two_mass fold".into()),
             (false, None) => {}
         }
+        if !two_mass && fold_shape.is_some() {
+            return Err("fold_shape needs a two_mass fold".into());
+        }
         if sections.is_empty() {
             return Err(missing("section"));
         }
@@ -491,6 +520,7 @@ impl VoiceDescription {
             gas: gas.ok_or_else(|| missing("ambient"))?,
             two_mass,
             fold,
+            fold_shape,
             wall,
             termination: termination.ok_or_else(|| missing("termination"))?,
             sections,
@@ -541,6 +571,10 @@ impl VoiceDescription {
             mechanics_rate,
             self.wall.as_ref(),
         )
+        .and_then(|island| match self.fold_shape {
+            Some(shape) => island.with_fold_shape(shape),
+            None => Ok(island),
+        })
         .map_err(|e| format!("glottal island refused: {e:?}"))?;
         let (mouth, receipt) = mouth_flow_line(
             &duct,
@@ -615,6 +649,7 @@ impl VoiceDescription {
             completed: 0,
             poisoned: false,
             peak_flow_m3_s: 0.0,
+            min_flow_m3_s: 0.0,
             closed_steps: 0,
         })
     }
@@ -663,7 +698,9 @@ pub struct VoiceInfo {
 pub struct VoiceStats {
     /// Largest glottal volume flow [m^3/s].
     pub peak_glottal_flow_m3_s: f64,
-    /// Fraction of physical substeps with the folds in contact.
+    /// Smallest glottal volume flow [m^3/s], negative when the flow reverses.
+    pub min_glottal_flow_m3_s: f64,
+    /// Fraction of physical substeps with the folds in contact: with a `fold_shape`, any strip of either section.
     pub closed_fraction: f64,
     /// Most passes of the two-mass fold step's Newton solve in any one physical substep
     /// ([`GlottalIsland::force_passes`]).
@@ -802,6 +839,7 @@ pub struct VoicePerformance {
     completed: u64,
     poisoned: bool,
     peak_flow_m3_s: f64,
+    min_flow_m3_s: f64,
     closed_steps: u64,
 }
 
@@ -836,6 +874,7 @@ impl VoicePerformance {
         let (max_force_passes, all_passes) = self.island.force_passes();
         VoiceStats {
             peak_glottal_flow_m3_s: self.peak_flow_m3_s,
+            min_glottal_flow_m3_s: self.min_flow_m3_s,
             closed_fraction: if self.steps == 0 {
                 0.0
             } else {
@@ -906,7 +945,8 @@ impl VoicePerformance {
                 .map_err(|e| format!("mouth-flow line refused: {e:?}"))?;
             self.trace[j] = flow;
             self.peak_flow_m3_s = self.peak_flow_m3_s.max(frame.flow_m3_s);
-            if frame.gap_m <= 0.0 {
+            self.min_flow_m3_s = self.min_flow_m3_s.min(frame.flow_m3_s);
+            if frame.shut {
                 self.closed_steps += 1;
             }
             self.steps += 1;
@@ -1400,6 +1440,65 @@ mod tests {
             let error = VoiceDescription::from_bytes(modulation_text(extra).as_bytes()).expect_err(extra);
             assert!(error.contains(needle), "{extra:?} -> {error}");
         }
+    }
+
+    #[test]
+    fn fold_shape_parses_and_is_refused_by_name() {
+        let parse = |extra: &str| VoiceDescription::from_bytes(modulation_text(extra).as_bytes());
+        let sine = parse("fold_shape sine uniform\n").expect("parses");
+        assert_eq!(sine.fold_shape, Some(FoldShape { mode: FoldMode::Sine, rest: FoldRestGap::Uniform }));
+        let rigid = parse("fold_shape rigid tapered\n").expect("parses");
+        assert_eq!(rigid.fold_shape, Some(FoldShape { mode: FoldMode::Rigid, rest: FoldRestGap::Tapered }));
+        assert_eq!(parse("").expect("parses").fold_shape, None);
+        for (extra, needle) in [
+            ("fold_shape sine\n", "takes 2 fields"),
+            ("fold_shape wobble uniform\n", "mode must be"),
+            ("fold_shape sine flat\n", "rest gap must be"),
+            ("fold_shape sine uniform\nfold_shape sine uniform\n", "only appear once"),
+        ] {
+            let error = parse(extra).expect_err(extra);
+            assert!(error.contains(needle), "{extra:?} -> {error}");
+        }
+        let one_dof = modulation_text("fold_shape sine uniform\n")
+            .replace("fold two_mass", "fold one_dof")
+            .replace("fold_damping_upper 0.6\n", "");
+        let error = VoiceDescription::from_bytes(one_dof.as_bytes()).expect_err("one_dof");
+        assert!(error.contains("fold_shape needs a two_mass fold"), "{error}");
+    }
+
+    /// The row reaches the radiated pressure and its contact count, the partition stays free, and the tension gesture
+    /// runs on a shaped fold. `min_glottal_flow_m3_s` is what a page's flow column reads.
+    #[test]
+    fn fold_shape_renders_and_reports_contact_and_flow() {
+        let text = modulation_text("fold_shape sine uniform\n");
+        let description = VoiceDescription::from_bytes(text.as_bytes()).expect("parses");
+        let mut whole = description.build().expect("builds");
+        let mut split = description.build().expect("builds");
+        let (mut a, mut b) = (vec![0.0_f64; 9600], vec![0.0_f64; 9600]);
+        whole.block(&mut a).expect("whole");
+        for chunk in b.chunks_mut(37) {
+            split.block(chunk).expect("split");
+        }
+        for (x, y) in a.iter().zip(&b) {
+            assert_eq!(x.to_bits(), y.to_bits());
+        }
+        let plain = render(&modulation_text(""));
+        let shaped = render(&text);
+        assert!(shaped.iter().all(|v| v.is_finite()));
+        assert!(plain.iter().zip(&shaped).any(|(x, y)| x != y), "the row must reach the pressure");
+        let mut performance = description.build().expect("builds");
+        let mut out = vec![0.0; description.samples as usize];
+        for block in out.chunks_mut(4096) {
+            performance.block(block).expect("renders");
+        }
+        let stats = performance.stats();
+        assert!(stats.peak_glottal_flow_m3_s > 0.0);
+        assert!(stats.min_glottal_flow_m3_s <= stats.peak_glottal_flow_m3_s);
+        assert!(stats.closed_fraction > 0.0 && stats.closed_fraction < 1.0, "contact {}", stats.closed_fraction);
+        let gesture = modulation_text("fold_shape sine uniform\ntension_flutter 7 4 1.3 0.02\n");
+        let flutter = render(&gesture);
+        assert!(flutter.iter().all(|v| v.is_finite()));
+        assert!(flutter.iter().zip(&shaped).any(|(x, y)| x != y), "the gesture must reach the shaped fold");
     }
 
     /// The five filters of Ternstrom and Friberg's Fig. 9, at a rate low enough for a long run. Standard deviation

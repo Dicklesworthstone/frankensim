@@ -97,6 +97,23 @@
 //!   energy, so it closes the same ledger.
 //! - One named departure: (1D) the 1-DOF island keeps its own law below.
 //!
+//! Fold shape, opt-in ([`FoldShape`], [`GlottalIsland::with_fold_shape`]; without it nothing here changes): the gap
+//! varies along the fold, `h_i(s) = h0(s) + q_i phi(s)`, so closure spreads along the fold instead of arriving all at
+//! once. **What is printed and what is ours.** Held ends, `phi ~ sin(pi s)`, are printed for PRESCRIBED motion, a model
+//! that specifies the glottal geometry as a function of time (Birkholz, Interspeech 2019, pp. 3765-3766, after Titze
+//! 1984 and 1989; Samlan, Story and Bunton, JSLHR 2013, eq 3). A tapered rest gap, zero at the anterior commissure, is
+//! printed in both. A self-oscillating two-mass fold with that taper is printed with the masses moving rigidly, so with
+//! no held ends (`w_i(z) = max{0, x_rest,i (1 - z/l) + x_i}`, Birkholz, Kroger and Neuschaefer-Rube 2011, "Articulatory
+//! synthesis of words in six voice qualities using a modified two-mass model of the vocal folds"). The self-oscillating
+//! form of the sine mode is OURS: the modal mass and stiffness `gamma = mean(phi^2)` on `m`, `k` and `k_c`, the mode's
+//! normalization `mean(phi) = 1` (so `q` is the mean gap's displacement) and the row's closure below. Eq 13 and 14, eq
+//! 1 and 2 and the damping step are applied strip by strip, each projected on `phi`. Flow: `A_gi = l mean(h_i+)` over
+//! the section's own open strips, so the flow's kinetic energy `p^2 / 2 L(A_g1(q_1), A_g2(q_2))` splits by mass and
+//! keeps its discrete gradient; `R_vi = 12 mu d_i / (l mean(h_i^3))` over strips open at both masses, which is a loss
+//! alone. Which strips count as flow area is not pinned by data: where the folds do not close, it moves the 4-8 kHz
+//! band by about 10 dB in scratch runs. The closed-section damping step becomes the weight `mean_shut(phi^2) / gamma`
+//! and enters the discrete gradient as `-c dq/dt`.
+//!
 //! Viscous loss: without it the flow falls only linearly with the gap at
 //! closure, so it has a corner there and its derivative a step: harmonics
 //! fall at 6 dB/octave. With it the flow falls like `h^3` at small gaps.
@@ -257,6 +274,264 @@ impl FoldCard {
     }
 }
 
+/// How the displacement of a two-mass fold varies along its length.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FoldMode {
+    /// Held at both ends: `phi(s) = (pi/2) sin(pi s)`, mean 1 (module doc: printed for prescribed motion only).
+    Sine,
+    /// The whole mass moves together: `phi = 1` (Birkholz, Kroger and Neuschaefer-Rube 2011).
+    Rigid,
+}
+
+/// How the rest gap of a two-mass fold varies along its length. Both keep the card's rest gap as the mean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FoldRestGap {
+    /// `h0(s) = h0`.
+    Uniform,
+    /// `h0(s) = 2 h0 (1 - s)`: largest at the vocal processes and zero at the anterior commissure, as printed.
+    Tapered,
+}
+
+/// The opt-in shape of a two-mass fold along its length (module doc). `Rigid` with `Uniform` is the island's own law
+/// reached through the strips.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FoldShape {
+    /// Displacement along the fold.
+    pub mode: FoldMode,
+    /// Rest gap along the fold.
+    pub rest: FoldRestGap,
+}
+
+/// Strips along the fold. 24 and 96 agree with 48 within 0.3 dB in every band in scratch runs of the sine mode.
+const FOLD_STRIPS: usize = 48;
+
+/// The strip table of a [`FoldShape`]: the gap of strip `j` is `rest[j] + mode[j] q`, each strip a `1 / FOLD_STRIPS` of
+/// the fold's length at its midpoint.
+struct FoldStrips {
+    mode: [f64; FOLD_STRIPS],
+    rest: [f64; FOLD_STRIPS],
+    /// `mean(phi^2)`: the modal mass and stiffness against the mean-gap coordinate `q`.
+    gamma: f64,
+    /// `mean(phi^4)`, of eq 1's quartic energy.
+    quartic: f64,
+}
+
+impl FoldStrips {
+    fn new(shape: FoldShape, rest_gap: f64) -> Self {
+        let n = FOLD_STRIPS as f64;
+        let (mut mode, mut rest) = ([1.0_f64; FOLD_STRIPS], [rest_gap; FOLD_STRIPS]);
+        let (mut gamma, mut quartic) = (0.0_f64, 0.0_f64);
+        for j in 0..FOLD_STRIPS {
+            let s = (j as f64 + 0.5) / n;
+            if shape.mode == FoldMode::Sine {
+                mode[j] = core::f64::consts::FRAC_PI_2 * det::sin(core::f64::consts::PI * s);
+            }
+            if shape.rest == FoldRestGap::Tapered {
+                rest[j] = 2.0 * rest_gap * (1.0 - s);
+            }
+            gamma += mode[j] * mode[j] / n;
+            quartic += mode[j] * mode[j] * mode[j] * mode[j] / n;
+        }
+        Self { mode, rest, gamma, quartic }
+    }
+
+    /// The gap of strip `j` at the displacement `q` [m].
+    fn gap(&self, j: usize, q: f64) -> f64 {
+        self.rest[j] + self.mode[j] * q
+    }
+
+    /// The section's mean open gap `mean(h+)` at `q` [m]: its area over the fold length.
+    fn open_gap(&self, q: f64) -> f64 {
+        let mut sum = 0.0_f64;
+        for j in 0..FOLD_STRIPS {
+            sum += self.gap(j, q).max(0.0);
+        }
+        sum / FOLD_STRIPS as f64
+    }
+
+    /// Some strip of this displacement's section is shut.
+    fn any_shut(&self, q: f64) -> bool {
+        (0..FOLD_STRIPS).any(|j| self.gap(j, q) <= 0.0)
+    }
+
+    /// The two-mass channel at the displacements `q` (module doc): the [`If72Channel`] with its areas and elements
+    /// taken over the strips. With the sections' open strips nested, as they are at equal rest gaps, two open
+    /// sections always share an open strip.
+    fn channel(
+        &self,
+        rho: f64,
+        viscosity: f64,
+        length: f64,
+        thickness: [f64; 2],
+        q: [f64; 2],
+        tract_inlet_area: f64,
+    ) -> If72Channel {
+        let n = FOLD_STRIPS as f64;
+        let (mut open, mut cube) = ([0.0_f64; 2], [0.0_f64; 2]);
+        for j in 0..FOLD_STRIPS {
+            let (h1, h2) = (self.gap(j, q[0]), self.gap(j, q[1]));
+            open[0] += h1.max(0.0);
+            open[1] += h2.max(0.0);
+            if h1 > 0.0 && h2 > 0.0 {
+                cube[0] += h1 * h1 * h1;
+                cube[1] += h2 * h2 * h2;
+            }
+        }
+        let area = [length * open[0] / n, length * open[1] / n];
+        let resistance = |d: f64, c: f64| {
+            if c > 0.0 {
+                12.0 * viscosity * d * n / (length * c)
+            } else {
+                f64::INFINITY
+            }
+        };
+        If72Channel {
+            rho,
+            length,
+            thickness,
+            area,
+            resistance: [resistance(thickness[0], cube[0]), resistance(thickness[1], cube[1])],
+            inertance: [rho * thickness[0] / area[0], rho * thickness[1] / area[1]],
+            exit_ratio: area[1] / tract_inlet_area,
+        }
+    }
+
+    /// Eq 13 and 14 strip by strip at the displacements `q`, projected on the mode: `mean(phi P_i)` for each mass, with
+    /// `through` on strips open at both masses and eq 14's table on the rest, and each mass's closed-section damping
+    /// weight `mean_shut(phi^2) / gamma`.
+    fn loads(&self, q: [f64; 2], through: [f64; 2], p_sub: f64) -> ([f64; 2], [f64; 2]) {
+        let n = FOLD_STRIPS as f64;
+        let (mut load, mut shut) = ([0.0_f64; 2], [0.0_f64; 2]);
+        for j in 0..FOLD_STRIPS {
+            let phi = self.mode[j];
+            let (h1, h2) = (self.gap(j, q[0]), self.gap(j, q[1]));
+            let (p1, p2) = match (h1 > 0.0, h2 > 0.0) {
+                (true, true) => (through[0], through[1]),
+                (true, false) => (p_sub, p_sub),
+                (false, _) => (p_sub, 0.0),
+            };
+            load[0] += phi * p1;
+            load[1] += phi * p2;
+            if h1 <= 0.0 {
+                shut[0] += phi * phi;
+            }
+            if h2 <= 0.0 {
+                shut[1] += phi * phi;
+            }
+        }
+        (
+            [load[0] / n, load[1] / n],
+            [shut[0] / (n * self.gamma), shut[1] / (n * self.gamma)],
+        )
+    }
+
+    /// The divided difference of [`FoldStrips::open_gap`] from `from` to `to`, strip by strip so nothing cancels, its
+    /// derivative in `to`, and the slope of `open_gap` at `to`.
+    fn open_gap_quotient(&self, from: f64, to: f64) -> (f64, f64, f64) {
+        let n = FOLD_STRIPS as f64;
+        let span = to - from;
+        let (mut quotient, mut derivative, mut slope) = (0.0_f64, 0.0_f64, 0.0_f64);
+        for j in 0..FOLD_STRIPS {
+            let phi = self.mode[j];
+            let (a, b) = (self.gap(j, from), self.gap(j, to));
+            match (a > 0.0, b > 0.0) {
+                (true, true) => {
+                    quotient += phi;
+                    slope += phi;
+                }
+                (false, true) => {
+                    quotient += b / span;
+                    derivative += (phi - b / span) / span;
+                    slope += phi;
+                }
+                (true, false) => {
+                    let part = -a / span;
+                    quotient += part;
+                    derivative -= part / span;
+                }
+                (false, false) => {}
+            }
+        }
+        (quotient / n, derivative / n, slope / n)
+    }
+
+    /// Forces [N] on the lower and upper masses from the flow's kinetic energy `p^2 / 2 L(A_g1(q_1), A_g2(q_2))` as the
+    /// displacements move from `q` to `end` at fixed momentum, and their derivatives in `end`: the discrete gradient of
+    /// [`kinetic_energy_gradient`] (lower, then upper) with `q_i -> open_gap(q_i)` carried by the divided difference, so
+    /// `f1 dq1 + f2 dq2 = -(H(end) - H(q))`.
+    fn kinetic_gradient(
+        &self,
+        rho: f64,
+        length: f64,
+        thickness: [f64; 2],
+        momentum: f64,
+        q: [f64; 2],
+        end: [f64; 2],
+    ) -> ([f64; 2], [[f64; 2]; 2]) {
+        let half_p2 = 0.5 * momentum * momentum;
+        let c = length / rho;
+        let [d1, d2] = thickness;
+        let (h1, h1_end) = (self.open_gap(q[0]), self.open_gap(end[0]));
+        let (h2, h2_end) = (self.open_gap(q[1]), self.open_gap(end[1]));
+        let (g1, dg1_dend, _) = gamma_quotient(c, d1, d2, h1, h1_end, h2);
+        let (g2, dg2_dend, dg2_dlower) = gamma_quotient(c, d2, d1, h2, h2_end, h1_end);
+        let (s1, ds1, slope1) = self.open_gap_quotient(q[0], end[0]);
+        let (s2, ds2, slope2) = self.open_gap_quotient(q[1], end[1]);
+        (
+            [-half_p2 * g1 * s1, -half_p2 * g2 * s2],
+            [
+                [-half_p2 * (dg1_dend * slope1 * s1 + g1 * ds1), 0.0],
+                [
+                    -half_p2 * dg2_dlower * slope1 * s2,
+                    -half_p2 * (dg2_dend * slope2 * s2 + g2 * ds2),
+                ],
+            ],
+        )
+    }
+
+    /// One strip's spring law at the modal stiffness `stiffness`: the mass's stiffness per unit mean(phi^2).
+    fn strip_spring(&self, stiffness: f64) -> FoldSpring {
+        FoldSpring {
+            stiffness: stiffness / self.gamma,
+            rest_gap: 0.0,
+        }
+    }
+
+    /// Eq 1 and 2's energy of one mass of modal stiffness `stiffness` at `q` [J]: the quartic over the mode and the
+    /// collision of each shut strip. The linear spring is the pHS's.
+    fn spring_energy(&self, stiffness: f64, q: f64) -> f64 {
+        let spring = self.strip_spring(stiffness);
+        let mut contact = 0.0_f64;
+        for j in 0..FOLD_STRIPS {
+            contact += spring.contact_energy(self.gap(j, q));
+        }
+        0.0625 * spring.stiffness * ETA_K_PER_M2 * self.quartic * q * q * q * q
+            + contact / FOLD_STRIPS as f64
+    }
+
+    /// The force `-(V(to) - V(from)) / (to - from)` [N] of [`FoldStrips::spring_energy`] and its derivative in `to`,
+    /// divided out strip by strip as [`FoldSpring::gradient`] does.
+    fn spring_gradient(&self, stiffness: f64, from: f64, to: f64) -> (f64, f64) {
+        let spring = self.strip_spring(stiffness);
+        let cubic = 0.0625 * spring.stiffness * ETA_K_PER_M2 * self.quartic;
+        let mut quotient = cubic * (from + to) * (from * from + to * to);
+        let mut slope = cubic * (from * from + 2.0 * from * to + 3.0 * to * to);
+        let n = FOLD_STRIPS as f64;
+        for j in 0..FOLD_STRIPS {
+            let phi = self.mode[j];
+            let (part, part_slope) = spring.contact_quotient(self.gap(j, from), self.gap(j, to));
+            quotient += phi * part / n;
+            slope += phi * phi * part_slope / n;
+        }
+        (-quotient, -slope)
+    }
+
+    /// [`FoldStrips::spring_energy`] on both masses at the state `[q1, p1, q2, p2]` [J].
+    fn fold_spring_energy(&self, springs: &[FoldSpring; 2], x: &[f64]) -> f64 {
+        self.spring_energy(springs[0].stiffness, x[0]) + self.spring_energy(springs[1].stiffness, x[2])
+    }
+}
+
 /// Typed refusals.
 #[derive(Debug)]
 pub enum GlottisError {
@@ -306,6 +581,9 @@ pub struct GlottalFrame {
     /// Work done on the fold by [`GlottalIsland::set_tension`] calls since the previous step [J]. The stored
     /// energy changed by this plus `fold_energy_j` (the step's own `H(x1) - H(x0)`).
     pub tension_work_j: f64,
+    /// Some part of the fold is shut at the end of the step: `gap_m <= 0`, or with a [`FoldShape`], which may never
+    /// shut the whole length, any strip of either section.
+    pub shut: bool,
 }
 
 enum Valve {
@@ -352,6 +630,8 @@ pub struct GlottalIsland {
     tension: f64,
     /// Work done by tension changes since the last step [J], reported by the next frame.
     tension_work_j: f64,
+    /// The opt-in fold shape's strips; `None` is the printed island, by its own path.
+    strips: Option<Box<FoldStrips>>,
 }
 
 /// `eta_k`, the nonlinear coefficient of eq 1 (p. 1237), printed as 100 for both masses (p. 1250) [m^-2]. The print
@@ -408,28 +688,34 @@ impl FoldSpring {
         let cubic = 0.0625 * self.stiffness * ETA_K_PER_M2;
         let mut quotient = cubic * (a + b) * (a * a + b * b);
         let mut slope = cubic * (a * a + 2.0 * a * b + 3.0 * b * b);
+        let (contact, contact_slope) = self.contact_quotient(from, to);
+        quotient += contact;
+        slope += contact_slope;
+        (-quotient, -slope)
+    }
+
+    /// The divided difference `(V_h(to) - V_h(from)) / (to - from)` of the collision part of `V` over a move of the gap,
+    /// and its derivative in `to`.
+    fn contact_quotient(&self, from: f64, to: f64) -> (f64, f64) {
         let h = CONTACT_STIFFNESS_RATIO * self.stiffness;
         let eta = 0.0625 * ETA_H_PER_M2;
         let span = to - from;
         match (from <= 0.0, to <= 0.0) {
-            (true, true) => {
-                quotient += h * (0.5 * (from + to) + eta * (from + to) * (from * from + to * to));
-                slope += h * (0.5 + eta * (from * from + 2.0 * from * to + 3.0 * to * to));
-            }
+            (true, true) => (
+                h * (0.5 * (from + to) + eta * (from + to) * (from * from + to * to)),
+                h * (0.5 + eta * (from * from + 2.0 * from * to + 3.0 * to * to)),
+            ),
             // One end open: `V_h` is zero there, so only the shut end's remains.
             (true, false) => {
                 let part = -self.contact_energy(from) / span;
-                quotient += part;
-                slope -= part / span;
+                (part, -(part / span))
             }
             (false, true) => {
                 let part = self.contact_energy(to) / span;
-                quotient += part;
-                slope += (h * to * (1.0 + 4.0 * eta * to * to) - part) / span;
+                (part, (h * to * (1.0 + 4.0 * eta * to * to) - part) / span)
             }
-            (false, false) => {}
+            (false, false) => (0.0, 0.0),
         }
-        (-quotient, -slope)
     }
 }
 
@@ -968,7 +1254,49 @@ impl GlottalIsland {
             ]),
             tension: 1.0,
             tension_work_j: 0.0,
+            strips: None,
         })
+    }
+
+    /// Give a new two-mass island a [`FoldShape`] (module doc). The card's masses and stiffnesses become the modal ones,
+    /// `gamma` times each; the damping ratios stay, so the damping follows. Without this call the island is untouched.
+    ///
+    /// # Errors
+    /// A 1-DOF island or one that has already stepped, by name; pHS or split admission of the rebuilt fold.
+    pub fn with_fold_shape(mut self, shape: FoldShape) -> Result<Self, GlottisError> {
+        if !matches!(self.valve, Valve::TwoMass { .. }) {
+            return Err(GlottisError::Invalid {
+                what: "a fold shape needs a two-mass fold",
+            });
+        }
+        if self.force_passes.1 != 0 || self.tension != 1.0 {
+            return Err(GlottisError::Invalid {
+                what: "a fold shape is set before the island's first step",
+            });
+        }
+        let strips = FoldStrips::new(shape, self.card.rest_gap_m);
+        self.card.mass_lower_kg *= strips.gamma;
+        self.card.mass_upper_kg *= strips.gamma;
+        self.card.stiffness_lower_n_m *= strips.gamma;
+        self.card.stiffness_upper_n_m *= strips.gamma;
+        self.card.coupling_n_m *= strips.gamma;
+        let TensionedFold {
+            phs,
+            linear,
+            obstacle,
+            damped,
+            springs,
+        } = tensioned_fold(&self.card, true, 1.0)?;
+        if let Valve::TwoMass { phs: slot, .. } = &mut self.valve {
+            *slot = phs;
+        }
+        self.linear = linear;
+        self.obstacle = obstacle;
+        self.damped = damped;
+        self.springs = springs;
+        self.gap_response = [None; 4];
+        self.strips = Some(Box::new(strips));
+        Ok(self)
     }
 
     /// The present fold tension (1.0 = the card as written).
@@ -1008,7 +1336,10 @@ impl GlottalIsland {
         let (Valve::OneDof { phs: slot, x } | Valve::TwoMass { phs: slot, x }) = &mut self.valve;
         // The closed-section operators share this H (damping changes R only).
         let mut work = phs.hamiltonian(&x[..]) - slot.hamiltonian(&x[..]);
-        if two_mass {
+        if let Some(strips) = &self.strips {
+            work += strips.fold_spring_energy(&springs, &x[..])
+                - strips.fold_spring_energy(&self.springs, &x[..]);
+        } else if two_mass {
             work +=
                 fold_spring_energy(&springs, &x[..]) - fold_spring_energy(&self.springs, &x[..]);
         }
@@ -1039,14 +1370,25 @@ impl GlottalIsland {
         self.zc_flow
     }
 
-    /// The effective aperture gap [m].
+    /// The effective aperture gap [m]. With a [`FoldShape`], `min(A_g1, A_g2) / l`: the mean open gap, never negative.
     #[must_use]
     pub fn gap_m(&self) -> f64 {
         match &self.valve {
             Valve::OneDof { x, .. } => self.card.rest_gap_m + x[0],
-            Valve::TwoMass { x, .. } => {
-                (self.card.rest_gap_m + x[0]).min(self.card.rest_gap_m + x[2])
+            Valve::TwoMass { x, .. } => match &self.strips {
+                Some(strips) => strips.open_gap(x[0]).min(strips.open_gap(x[2])),
+                None => (self.card.rest_gap_m + x[0]).min(self.card.rest_gap_m + x[2]),
+            },
+        }
+    }
+
+    /// [`GlottalFrame::shut`] at the present state.
+    fn shut(&self, gap: f64) -> bool {
+        match (&self.valve, &self.strips) {
+            (Valve::TwoMass { x, .. }, Some(strips)) => {
+                strips.any_shut(x[0]) || strips.any_shut(x[2])
             }
+            _ => gap <= 0.0,
         }
     }
 
@@ -1073,16 +1415,26 @@ impl GlottalIsland {
     fn if72_channel(&self) -> Option<If72Channel> {
         match &self.valve {
             Valve::OneDof { .. } => None,
-            Valve::TwoMass { x, .. } => Some(If72Channel::new(
-                self.rho,
-                self.viscosity_pa_s,
-                self.card.fold_length_m,
-                [
-                    (self.card.thickness_m, self.card.rest_gap_m + x[0]),
-                    (self.card.thickness_upper_m, self.card.rest_gap_m + x[2]),
-                ],
-                self.tract_inlet_area_m2,
-            )),
+            Valve::TwoMass { x, .. } => Some(match &self.strips {
+                Some(strips) => strips.channel(
+                    self.rho,
+                    self.viscosity_pa_s,
+                    self.card.fold_length_m,
+                    [self.card.thickness_m, self.card.thickness_upper_m],
+                    [x[0], x[2]],
+                    self.tract_inlet_area_m2,
+                ),
+                None => If72Channel::new(
+                    self.rho,
+                    self.viscosity_pa_s,
+                    self.card.fold_length_m,
+                    [
+                        (self.card.thickness_m, self.card.rest_gap_m + x[0]),
+                        (self.card.thickness_upper_m, self.card.rest_gap_m + x[2]),
+                    ],
+                    self.tract_inlet_area_m2,
+                ),
+            }),
         }
     }
 
@@ -1217,13 +1569,15 @@ impl GlottalIsland {
         })?;
         self.p_plus_prev = p_plus;
         let fold_energy_j = record.delta_h; // per-step ledger delta
+        let gap_m = self.gap_m();
         Ok(GlottalFrame {
             flow_m3_s: flow,
             p_supra_pa: p_supra,
-            gap_m: self.gap_m(),
+            gap_m,
             dissipated_j: record.dissipated,
             fold_energy_j,
             tension_work_j: core::mem::take(&mut self.tension_work_j),
+            shut: self.shut(gap_m),
         })
     }
 
@@ -1246,6 +1600,9 @@ impl GlottalIsland {
         let ch = channel.ok_or(GlottisError::Invalid {
             what: "two-mass channel",
         })?;
+        if self.strips.is_some() {
+            return self.strip_fold_step(ch, p_sub, flow, momentum, dp_dt);
+        }
         let Valve::TwoMass { x, .. } = &self.valve else {
             return Err(GlottisError::Invalid {
                 what: "two-mass channel",
@@ -1299,6 +1656,70 @@ impl GlottalIsland {
         let mut record = step(&*self, &[base[0] + f[0], base[1] + f[1]])?;
         record.delta_h +=
             fold_spring_energy(&springs, &record.x) - fold_spring_energy(&springs, &x0);
+        if let Valve::TwoMass { x, .. } = &mut self.valve {
+            x.clone_from(&record.x);
+        }
+        Ok((record, passes))
+    }
+
+    /// [`GlottalIsland::two_mass_fold_step`] with a [`FoldShape`] (module doc). The same solve on the mean-gap
+    /// coordinates `q`, always with the open-section operator: a shut strip's added damping is a share of the fold,
+    /// not a state of it, so it joins the discrete gradient as the force `-c (end - q) / dt` with `c` from the weight at
+    /// the step's start, and its work over the step is added to the record's dissipation.
+    fn strip_fold_step(
+        &mut self,
+        ch: If72Channel,
+        p_sub: f64,
+        flow: f64,
+        momentum: f64,
+        dp_dt: f64,
+    ) -> Result<(fs_phs::StepRecord, u32), GlottisError> {
+        let response = self.gap_response(0)?;
+        let (Valve::TwoMass { phs, x }, Some(strips)) = (&self.valve, &self.strips) else {
+            return Err(GlottisError::Invalid {
+                what: "two-mass channel",
+            });
+        };
+        let x0 = x.clone();
+        let q0 = [x0[0], x0[2]];
+        let (rho, length, thickness) = (ch.rho, ch.length, ch.thickness);
+        let (pm1, pm2) = section_pressures(&ch, p_sub, flow, dp_dt);
+        // Eq 13 less its suction `(rho/2)(U/A_gi)^2`, which the discrete gradient carries.
+        let suction = |i: usize| {
+            if ch.open() {
+                0.5 * rho * (flow / ch.area[i]) * (flow / ch.area[i])
+            } else {
+                0.0
+            }
+        };
+        let (load, shut) = strips.loads(q0, [pm1 + suction(0), pm2 + suction(1)], p_sub);
+        let base = [length * thickness[0] * load[0], length * thickness[1] * load[1]];
+        let springs = self.springs;
+        let dt = self.dt;
+        let closed = [
+            2.0 * shut[0] * det::sqrt(springs[0].stiffness * self.card.mass_lower_kg),
+            2.0 * shut[1] * det::sqrt(springs[1].stiffness * self.card.mass_upper_kg),
+        ];
+        let gradient = |end: [f64; 2]| {
+            let (mut f, mut df) = strips.kinetic_gradient(rho, length, thickness, momentum, q0, end);
+            for i in 0..2 {
+                let (spring, slope) = strips.spring_gradient(springs[i].stiffness, q0[i], end[i]);
+                f[i] += spring - closed[i] * (end[i] - q0[i]) / dt;
+                df[i][i] += slope - closed[i] / dt;
+            }
+            (f, df)
+        };
+        let step = |forces: &[f64; 2]| {
+            fs_phs::linear_exact::step_render(phs, &self.linear, &x0, forces, dt)
+        };
+        let first = step(&base)?;
+        let stop = 1.0e-13 * self.card.rest_gap_m;
+        let (end, f, passes) = solve_kinetic_force(gradient, [first.x[0], first.x[2]], response, stop)?;
+        let mut record = step(&[base[0] + f[0], base[1] + f[1]])?;
+        record.delta_h +=
+            strips.fold_spring_energy(&springs, &record.x) - strips.fold_spring_energy(&springs, &x0);
+        record.dissipated += closed[0] * (end[0] - q0[0]) * (record.x[0] - q0[0]) / dt
+            + closed[1] * (end[1] - q0[1]) * (record.x[2] - q0[1]) / dt;
         if let Valve::TwoMass { x, .. } = &mut self.valve {
             x.clone_from(&record.x);
         }
@@ -3171,5 +3592,416 @@ mod glottis_tests {
             (0.5..=0.7).contains(&duty),
             "duty {duty:.3} against the text's 0.6 +- 0.1"
         );
+    }
+
+    const FOLD_SHAPES: [FoldShape; 4] = [
+        FoldShape { mode: FoldMode::Sine, rest: FoldRestGap::Uniform },
+        FoldShape { mode: FoldMode::Sine, rest: FoldRestGap::Tapered },
+        FoldShape { mode: FoldMode::Rigid, rest: FoldRestGap::Tapered },
+        FoldShape { mode: FoldMode::Rigid, rest: FoldRestGap::Uniform },
+    ];
+
+    /// `(phi, rest)` of each strip, written from the module doc and not from [`FoldStrips`].
+    fn strips_by_hand(shape: FoldShape, h0: f64) -> Vec<(f64, f64)> {
+        (0..48)
+            .map(|j| {
+                let s = (f64::from(j) + 0.5) / 48.0;
+                let phi = match shape.mode {
+                    FoldMode::Sine => core::f64::consts::FRAC_PI_2 * (core::f64::consts::PI * s).sin(),
+                    FoldMode::Rigid => 1.0,
+                };
+                let rest = match shape.rest {
+                    FoldRestGap::Uniform => h0,
+                    FoldRestGap::Tapered => 2.0 * h0 * (1.0 - s),
+                };
+                (phi, rest)
+            })
+            .collect()
+    }
+
+    /// The strip integrals against their closed forms, and the discrete gradients against the energies they divide
+    /// out and the finite differences of their own Jacobians, for moves on either side of closure and across it.
+    #[test]
+    fn gl_022_fold_strips_are_the_integrals_and_gradients_they_stand_for() {
+        let h0 = 3.57e-4;
+        let pi = core::f64::consts::PI;
+        let sine = FoldStrips::new(FOLD_SHAPES[0], h0);
+        assert!((sine.gamma - pi * pi / 8.0).abs() < 1.0e-13, "gamma {}", sine.gamma);
+        assert!((sine.quartic - 0.375 * (0.5 * pi).powi(4)).abs() < 1.0e-12, "quartic {}", sine.quartic);
+        // Open everywhere, the mean gap is `h0 + q`, up to the midpoint rule on `sin`.
+        assert!((sine.open_gap(0.3 * h0) - 1.3 * h0).abs() < 1.0e-3 * h0);
+        // Shut over the middle: `(2/pi) (h0 t - |q| (pi/2) (1 - cos t))`, `sin t = h0 / (|q| pi/2)`.
+        let t = (2.0 / pi / 2.0_f64).asin();
+        let closed_form = (2.0 / pi) * h0 * (t - pi * (1.0 - t.cos()));
+        assert!(
+            (sine.open_gap(-2.0 * h0) - closed_form).abs() < 2.0e-3 * h0,
+            "{} against {closed_form}",
+            sine.open_gap(-2.0 * h0)
+        );
+        // Elements at one state, all open: eq 8 with `mean(h^3)` for the cube.
+        let (rho, mu, l, d) = (1.2, 1.8e-5, 1.4e-2, [2.5e-3, 5.0e-4]);
+        let ch = sine.channel(rho, mu, l, d, [0.2 * h0, -0.1 * h0], 3.14e-4);
+        let cube = |q: f64| {
+            sine.mode
+                .iter()
+                .map(|phi| (h0 + phi * q).powi(3))
+                .sum::<f64>()
+                / 48.0
+        };
+        assert!((ch.resistance[0] - 12.0 * mu * d[0] / (l * cube(0.2 * h0))).abs() <= 1.0e-12 * ch.resistance[0]);
+        assert!((ch.resistance[1] - 12.0 * mu * d[1] / (l * cube(-0.1 * h0))).abs() <= 1.0e-12 * ch.resistance[1]);
+        assert!((ch.inertance[0] - rho * d[0] / ch.area[0]).abs() <= 1.0e-12 * ch.inertance[0]);
+        assert!(ch.open());
+        // The discrete gradients, each shape, moves open, across closure and shut.
+        let momentum = 0.5; // about the peak of a sung note: `L U`, 860 Pa s^2/m^3 at 6e-4 m^3/s
+        for shape in FOLD_SHAPES {
+            let strips = FoldStrips::new(shape, h0);
+            let g = |q: [f64; 2]| {
+                let (a, b) = (strips.open_gap(q[0]), strips.open_gap(q[1]));
+                if a > 0.0 && b > 0.0 {
+                    l * a * b / (rho * (d[0] * b + d[1] * a))
+                } else {
+                    0.0
+                }
+            };
+            for (q, end) in [
+                ([0.31 * h0, 0.11 * h0], [0.29 * h0, 0.13 * h0]),
+                ([-0.61 * h0, -0.43 * h0], [-0.67 * h0, -0.47 * h0]),
+                ([-1.01 * h0, -0.73 * h0], [-1.37 * h0, -1.19 * h0]),
+                ([-1.37 * h0, -1.19 * h0], [-1.01 * h0, -0.73 * h0]),
+            ] {
+                let kinetic = 0.5 * momentum * momentum;
+                let (f, df) = strips.kinetic_gradient(rho, l, d, momentum, q, end);
+                let work = f[0] * (end[0] - q[0]) + f[1] * (end[1] - q[1]);
+                let change = kinetic * (g(end) - g(q));
+                assert!(
+                    (work + change).abs() <= 1.0e-12 * (kinetic * g(q)).abs().max(1.0e-30),
+                    "{shape:?}: work {work:e}, energy change {change:e}"
+                );
+                let eps = 1.0e-9 * h0;
+                let at = |i: usize, sign: f64| {
+                    let mut e = end;
+                    e[i] += sign * eps;
+                    strips.kinetic_gradient(rho, l, d, momentum, q, e).0
+                };
+                for i in 0..2 {
+                    let (up, down) = (at(i, 1.0), at(i, -1.0));
+                    for row in 0..2 {
+                        let numeric = (up[row] - down[row]) / (2.0 * eps);
+                        assert!(
+                            (df[row][i] - numeric).abs() <= 1.0e-4 * df[row][i].abs().max(1.0e-9) + 1.0e-3,
+                            "{shape:?}: df[{row}][{i}] {} against {numeric}",
+                            df[row][i]
+                        );
+                    }
+                }
+                let k = 80.0 * strips.gamma;
+                let (spring, slope) = strips.spring_gradient(k, q[0], end[0]);
+                let spring_change = strips.spring_energy(k, end[0]) - strips.spring_energy(k, q[0]);
+                let spring_work = spring * (end[0] - q[0]);
+                assert!(
+                    (spring_work + spring_change).abs() <= 1.0e-12 * spring_change.abs().max(1.0e-18),
+                    "{shape:?}: spring work {spring_work:e}, energy change {spring_change:e}"
+                );
+                let numeric = (strips.spring_gradient(k, q[0], end[0] + eps).0
+                    - strips.spring_gradient(k, q[0], end[0] - eps).0)
+                    / (2.0 * eps);
+                assert!(
+                    (slope - numeric).abs() <= 1.0e-4 * slope.abs().max(1.0),
+                    "{shape:?}: spring slope {slope} against {numeric}"
+                );
+            }
+        }
+    }
+
+    /// [`gl_015`'s ledger](gl_015_fold_and_flow_energy_close_on_the_ideal_open_tube) on every fold shape, each force
+    /// and energy written again here from the strips by hand: eq 13 and 14 strip by strip projected on the mode, the
+    /// flow's energy on the sections' own open areas, eq 1 and 2 strip by strip.
+    #[test]
+    fn gl_023_every_fold_shape_closes_the_fold_and_flow_ledger() {
+        let gas = air();
+        let (rho, mu) = (gas.density, gas.dynamic_viscosity);
+        let a_tract = core::f64::consts::PI * 0.010 * 0.010;
+        for shape in FOLD_SHAPES {
+            let mut isl = island(true, 1.0).with_fold_shape(shape).expect("shape");
+            let plain = FoldCard::two_mass_standard();
+            let (l, d1, d2, h0) = (
+                plain.fold_length_m,
+                plain.thickness_m,
+                plain.thickness_upper_m,
+                plain.rest_gap_m,
+            );
+            let (k1, k2) = (plain.stiffness_lower_n_m, plain.stiffness_upper_n_m);
+            let strips = strips_by_hand(shape, h0);
+            let mean = |f: &dyn Fn(f64, f64) -> f64| {
+                strips.iter().map(|&(phi, rest)| f(phi, rest)).sum::<f64>() / 48.0
+            };
+            let gamma = mean(&|phi, _| phi * phi);
+            let quartic = mean(&|phi, _| phi.powi(4));
+            assert!((isl.card.mass_lower_kg - gamma * plain.mass_lower_kg).abs() <= 1.0e-12 * plain.mass_lower_kg);
+            assert!((isl.card.stiffness_upper_n_m - gamma * k2).abs() <= 1.0e-12 * k2);
+            assert!((isl.card.coupling_n_m - gamma * plain.coupling_n_m).abs() <= 1.0e-12 * plain.coupling_n_m);
+            let open = |q: f64| mean(&|phi, rest| (rest + phi * q).max(0.0));
+            let inverse_l = |q1: f64, q2: f64| {
+                let (h1, h2) = (open(q1), open(q2));
+                if h1 > 0.0 && h2 > 0.0 {
+                    l * h1 * h2 / (rho * (d1 * h2 + d2 * h1))
+                } else {
+                    0.0
+                }
+            };
+            let spring_energy = |k: f64, q: f64| {
+                k * (1.0e6 / 16.0) * quartic * q.powi(4)
+                    + mean(&|phi, rest| {
+                        let g = rest + phi * q;
+                        if g < 0.0 {
+                            3.0 * k * (0.5 * g * g + (5.0e6 / 16.0) * g.powi(4))
+                        } else {
+                            0.0
+                        }
+                    })
+            };
+            let state = |isl: &GlottalIsland| match &isl.valve {
+                Valve::TwoMass { x, .. } => x.clone(),
+                Valve::OneDof { .. } => unreachable!("two-mass island"),
+            };
+            let hamiltonian = |isl: &GlottalIsland| match &isl.valve {
+                Valve::OneDof { phs, x } | Valve::TwoMass { phs, x } => phs.hamiltonian(x),
+            };
+            if let Valve::TwoMass { x, .. } = &mut isl.valve {
+                x.copy_from_slice(&[-1.2 * h0, 0.0, -0.9 * h0, 0.0]);
+            }
+            let dt = isl.dt;
+            let n = RATE as usize / 2;
+            let (mut worst, mut miss_sum, mut scale_sum) = (0.0_f64, 0.0_f64, 0.0_f64);
+            let (mut any_shut, mut damped_loss) = (0_usize, 0.0_f64);
+            for k in 0..n {
+                let p_sub = 1400.0 * (k as f64 / (0.03 * f64::from(RATE))).min(1.0);
+                let x0 = state(&isl);
+                let (q1, q2) = (x0[0], x0[2]);
+                let p_prev = isl.momentum_pa_s;
+                let s0 = hamiltonian(&isl) + 0.5 * p_prev * p_prev * inverse_l(q1, q2);
+                let f = isl.step(p_sub).expect("step");
+                let x1 = state(&isl);
+                let (u, p) = (f.flow_m3_s, isl.momentum_pa_s);
+                let s1 = hamiltonian(&isl) + 0.5 * p * p * inverse_l(x1[0], x1[2]);
+                let (a1, a2) = (l * open(q1), l * open(q2));
+                let (through, losses) = if a1 > 0.0 && a2 > 0.0 {
+                    let cube = |which: usize| {
+                        mean(&|phi, rest| {
+                            let (h1, h2) = (rest + phi * q1, rest + phi * q2);
+                            if h1 > 0.0 && h2 > 0.0 {
+                                [h1, h2][which].powi(3)
+                            } else {
+                                0.0
+                            }
+                        })
+                    };
+                    let n_exit = a2 / a_tract;
+                    let kin = 0.37 / (a1 * a1) + (1.0 - 2.0 * n_exit * (1.0 - n_exit)) / (a2 * a2);
+                    let (r1, r2) = (12.0 * mu * d1 / (l * cube(0)), 12.0 * mu * d2 / (l * cube(1)));
+                    let (l1, l2) = (rho * d1 / a1, rho * d2 / a2);
+                    let dp_dt = (p - p_prev) / dt;
+                    let p11 = p_sub - 1.37 * 0.5 * rho * (u / a1).powi(2);
+                    let p12 = p11 - r1 * u - dp_dt * l1 / (l1 + l2);
+                    let p21 = p12 - 0.5 * rho * u * u * (1.0 / (a2 * a2) - 1.0 / (a1 * a1));
+                    let p22 = p21 - r2 * u - dp_dt * l2 / (l1 + l2);
+                    (
+                        [
+                            0.5 * (p11 + p12) + 0.5 * rho * (u / a1).powi(2),
+                            0.5 * (p21 + p22) + 0.5 * rho * (u / a2).powi(2),
+                        ],
+                        [
+                            0.5 * rho * kin * u.abs().powi(3) * dt,
+                            (r1 + r2) * u * u * dt,
+                            0.5 * (p - p_prev) * (p - p_prev) / (l1 + l2),
+                        ],
+                    )
+                } else {
+                    assert_eq!((u, p), (0.0, 0.0), "a shut section passes no flow");
+                    ([0.0; 2], [0.0; 3])
+                };
+                let load = |which: usize| {
+                    mean(&|phi, rest| {
+                        let pressures = match (rest + phi * q1 > 0.0, rest + phi * q2 > 0.0) {
+                            (true, true) => through,
+                            (true, false) => [p_sub, p_sub],
+                            (false, _) => [p_sub, 0.0],
+                        };
+                        phi * pressures[which]
+                    })
+                };
+                let eq13 = l * d1 * load(0) * (x1[0] - q1) + l * d2 * load(1) * (x1[2] - q2);
+                let contact = spring_energy(k1, q1) - spring_energy(k1, x1[0]) + spring_energy(k2, q2)
+                    - spring_energy(k2, x1[2]);
+                let source = (p_sub - f.p_supra_pa) * u * dt;
+                assert!(f.dissipated_j >= -1.0e-15, "fold damping {}", f.dissipated_j);
+                assert!(losses.iter().all(|&q| q >= 0.0), "losses {losses:?}");
+                let input = source + eq13 + contact + f.tension_work_j;
+                let loss = f.dissipated_j + losses.iter().sum::<f64>();
+                let miss = (s1 - s0) - (input - loss);
+                let scale = s0.abs() + s1.abs() + source.abs() + eq13.abs() + contact.abs() + loss;
+                worst = worst.max(miss.abs() / scale.max(1.0e-300));
+                miss_sum += miss;
+                scale_sum += scale;
+                damped_loss += f.dissipated_j;
+                if f.shut {
+                    any_shut += 1;
+                }
+                assert!(
+                    miss.abs() <= 1.0e-9 * scale && miss_sum.abs() <= 1.0e-9 * scale_sum,
+                    "{shape:?}: ledger open at step {k}: miss {miss:e} J of {scale:e} J, cumulative {miss_sum:e} J of {scale_sum:e} J"
+                );
+            }
+            println!(
+                "{{\"suite\":\"fs-couple\",\"case\":\"gl-023-fold-shape-ledger\",\"shape\":\"{shape:?}\",\"steps\":{n},\"any_shut_steps\":{any_shut},\"worst_step_rel_miss\":{worst:e},\"cumulative_miss_j\":{miss_sum:e},\"fold_damping_j\":{damped_loss:e},\"max_passes\":{},\"mean_passes\":{:.3}}}",
+                isl.force_passes().0,
+                isl.force_passes().1 as f64 / n as f64
+            );
+            assert!(any_shut > 0, "{shape:?}: the fold starts shut and must have contact");
+        }
+    }
+
+    /// `rigid uniform` is the plain island reached through the strips. Until the first closure only the summation order
+    /// differs. The closed-section damping then reaches them differently (the plain island's exact damped operator, the
+    /// strips' `-c dq/dt` in the discrete gradient), so past it the pitch and the peak are held and not the samples.
+    #[test]
+    fn gl_024_rigid_uniform_strips_are_the_plain_island() {
+        let shape = FoldShape { mode: FoldMode::Rigid, rest: FoldRestGap::Uniform };
+        let mut plain = island(true, 1.0);
+        let mut strips = island(true, 1.0).with_fold_shape(shape).expect("shape");
+        let rest = plain.card.rest_gap_m;
+        let rate = f64::from(RATE);
+        let n = (0.8 * rate) as usize;
+        let (mut a_flows, mut b_flows) = (Vec::with_capacity(n), Vec::with_capacity(n));
+        let mut first_shut = None;
+        for k in 0..n {
+            let p = 1400.0 * (k as f64 / (0.03 * rate)).min(1.0);
+            let a = plain.step(p).expect("plain");
+            let b = strips.step(p).expect("strips");
+            if first_shut.is_none() {
+                if a.shut {
+                    first_shut = Some(k);
+                } else {
+                    assert!(
+                        (a.flow_m3_s - b.flow_m3_s).abs() <= 1.0e-9 * a.flow_m3_s.abs().max(1.0e-6),
+                        "step {k}: flow {:e} against {:e}",
+                        a.flow_m3_s,
+                        b.flow_m3_s
+                    );
+                    assert!((a.gap_m - b.gap_m).abs() <= 1.0e-9 * rest, "step {k}: gap");
+                    assert_eq!(a.shut, b.shut, "step {k}");
+                }
+            }
+            a_flows.push(a.flow_m3_s);
+            b_flows.push(b.flow_m3_s);
+        }
+        let first_shut = first_shut.expect("the plain island closes");
+        let mean_f0 = |flows: &[f64]| {
+            let points = cycle_f0(&flows[n / 2..], rate);
+            points.iter().map(|p| p.1).sum::<f64>() / points.len() as f64
+        };
+        let peak = |flows: &[f64]| flows[n / 2..].iter().copied().fold(0.0_f64, f64::max);
+        let cents = 1200.0 * (mean_f0(&b_flows) / mean_f0(&a_flows)).log2();
+        let peak_ratio = peak(&b_flows) / peak(&a_flows);
+        println!(
+            "{{\"suite\":\"fs-couple\",\"case\":\"gl-024-rigid-uniform\",\"first_shut_step\":{first_shut},\"f0_hz\":{:.3},\"cents\":{cents:.3},\"peak_ratio\":{peak_ratio:.5}}}",
+            mean_f0(&a_flows)
+        );
+        assert!(cents.abs() < 5.0, "strips against island: {cents:.2} c");
+        assert!((peak_ratio - 1.0).abs() < 0.05, "peak ratio {peak_ratio:.4}");
+    }
+
+    /// What the row is for: closure spreading along the fold takes the top off `dU/dt`. Fraction of it in 4-8 kHz of
+    /// 80-8000 Hz, last 0.1 s at the same card and pressure, no retrim. A scratch run of this tube predicts 12 dB.
+    #[test]
+    fn gl_025_sine_mode_lowers_the_top_of_the_glottal_flow_derivative() {
+        fn high_band_db(flows: &[f64], rate: f64) -> f64 {
+            let tail = &flows[flows.len() - (0.1 * rate) as usize..];
+            let d: Vec<f64> = tail.windows(2).map(|w| w[1] - w[0]).collect();
+            let n = d.len();
+            let mean = d.iter().sum::<f64>() / n as f64;
+            let tau = core::f64::consts::TAU;
+            let df = rate / n as f64;
+            let (mut high, mut total) = (0.0_f64, 0.0_f64);
+            for bin in (80.0 / df).ceil() as usize..(8000.0 / df) as usize {
+                let (mut re, mut im) = (0.0_f64, 0.0_f64);
+                for (i, v) in d.iter().enumerate() {
+                    let hann = 0.5 - 0.5 * (tau * i as f64 / n as f64).cos();
+                    let angle = tau * (bin * i) as f64 / n as f64;
+                    re += hann * (v - mean) * angle.cos();
+                    im += hann * (v - mean) * angle.sin();
+                }
+                let power = re * re + im * im;
+                total += power;
+                if bin as f64 * df >= 4000.0 {
+                    high += power;
+                }
+            }
+            10.0 * (high / total).log10()
+        }
+        let rate = f64::from(RATE);
+        let mut plain = island(true, 1.0);
+        let (plain_speaks, plain_flows, _) = speaks(&mut plain, 1400.0, 0.6);
+        let mut sine = island(true, 1.0).with_fold_shape(FOLD_SHAPES[0]).expect("shape");
+        let (sine_speaks, sine_flows, sine_gaps) = speaks(&mut sine, 1400.0, 0.6);
+        assert!(plain_speaks && sine_speaks, "{plain_speaks} {sine_speaks}");
+        assert!(sine_gaps.iter().all(|&g| g >= 0.0), "the mean open gap is never negative");
+        let (flat_db, sine_db) = (high_band_db(&plain_flows, rate), high_band_db(&sine_flows, rate));
+        println!(
+            "{{\"suite\":\"fs-couple\",\"case\":\"gl-025-sine-top\",\"plain_db\":{flat_db:.2},\"sine_db\":{sine_db:.2}}}"
+        );
+        assert!(flat_db - sine_db > 5.0, "{flat_db:.2} dB against {sine_db:.2} dB");
+    }
+
+    /// Refusals by name, and tension's exact work on a shaped fold: the linear spring on the modal stiffnesses, eq 1's
+    /// quartic over the mode and eq 2 on each shut strip, written here from the strips by hand.
+    #[test]
+    fn gl_026_fold_shape_refusals_and_the_work_of_tension() {
+        let sine = FOLD_SHAPES[0];
+        let Err(GlottisError::Invalid { what }) = island(false, 1.0).with_fold_shape(sine) else {
+            panic!("a 1-DOF island takes no fold shape");
+        };
+        assert!(what.contains("two-mass"), "{what}");
+        let mut stepped = island(true, 1.0);
+        stepped.step(0.0).expect("step");
+        let Err(GlottisError::Invalid { what }) = stepped.with_fold_shape(sine) else {
+            panic!("a stepped island takes no fold shape");
+        };
+        assert!(what.contains("first step"), "{what}");
+
+        let plain = FoldCard::two_mass_standard();
+        let h0 = plain.rest_gap_m;
+        let by_hand = strips_by_hand(sine, h0);
+        let mean = |f: &dyn Fn(f64, f64) -> f64| by_hand.iter().map(|&(phi, rest)| f(phi, rest)).sum::<f64>() / 48.0;
+        let gamma = mean(&|phi, _| phi * phi);
+        let quartic = mean(&|phi, _| phi.powi(4));
+        let (k1, k2, kc) = (plain.stiffness_lower_n_m, plain.stiffness_upper_n_m, plain.coupling_n_m);
+        let (q1, q2) = (-1.2 * h0, 0.4 * h0);
+        let nonlinear = |k: f64, q: f64| {
+            k * (1.0e6 / 16.0) * quartic * q.powi(4)
+                + mean(&|phi, rest| {
+                    let g = rest + phi * q;
+                    if g < 0.0 {
+                        3.0 * k * (0.5 * g * g + (5.0e6 / 16.0) * g.powi(4))
+                    } else {
+                        0.0
+                    }
+                })
+        };
+        let expected = 0.2
+            * (0.5 * gamma * (k1 * q1 * q1 + k2 * q2 * q2 + kc * (q1 - q2) * (q1 - q2))
+                + nonlinear(k1, q1)
+                + nonlinear(k2, q2));
+        let mut isl = island(true, 1.0).with_fold_shape(sine).expect("shape");
+        if let Valve::TwoMass { x, .. } = &mut isl.valve {
+            x[0] = q1;
+            x[1] = 3.0e-5;
+            x[2] = q2;
+            x[3] = -1.0e-6;
+        }
+        let work = isl.set_tension(1.2).expect("tension");
+        assert!((work - expected).abs() <= 1.0e-10 * expected, "work {work:e} against {expected:e}");
+        assert_eq!(isl.step(0.0).expect("step").tension_work_j, work);
     }
 }
