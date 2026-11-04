@@ -227,7 +227,16 @@ impl PreparedImpactSystem {
             if batched {inner.hessian_vector_cached(x,d,out,&mut cache.borrow_mut())}
             else {inner.hessian_vector(x,d,out)}
         };
-        let ledger = if inner.has_nonlinear_dissipation() {
+        let ledger = if !inner.driven_sliding_films.is_empty() {
+            let tangent=|x:&[f64],e:&[f64],dx:&[f64],de:&[f64],out:&mut[f64]|
+                inner.supplied_film_tangent_into(x,e,dx,de,out);
+            self.workspace.step_into_supplied_controlled(
+                &inner.system,&inner.x,external,inner.config.dt_s,&mut self.candidate,&mut self.output,
+                &|x,e,out|inner.supplied_film_flow_into(x,e,out),
+                if self.analytic_newton {Some(&action)}else{None},
+                if self.analytic_newton {Some(&tangent)}else{None},||gate.is_requested(),
+            )
+        } else if inner.has_nonlinear_dissipation() {
             let tangent=|x:&[f64],e:&[f64],dx:&[f64],de:&[f64],out:&mut[f64]|
                 inner.dissipative_flow_tangent_into(x,e,dx,de,out);
             self.workspace.step_into_dissipative_controlled(

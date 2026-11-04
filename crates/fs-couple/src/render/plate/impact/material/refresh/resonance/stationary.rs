@@ -19,6 +19,11 @@ impl ImpactSystem {
             || input.iter().any(|f|f.abs()>self.config.maximum_generalized_force) {
             return Err(invalid("resonance point requires complete finite coordinates and admitted force"));
         }
+        // The harmonic owner admits passive nonlinear loss, not independent
+        // pressure supplies. Never analyze a source with those forces omitted.
+        if !self.driven_sliding_films.is_empty() {
+            return Err(invalid("pressure-fed films require supplied-power equilibrium analysis"));
+        }
         if !self.pads.is_empty() {
             return Err(invalid("irreversible felt histories need a smooth explicit-state linearization"));
         }

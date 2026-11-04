@@ -14,10 +14,11 @@ use super::{ImpactError, ImpactSystem, MAX_IMPACT_MODES, invalid};
 use fs_tribo::resistive_film::MAX_CELLS;
 
 impl ImpactSystem {
-    // All resistance-only fluid families share the same bounded island work.
+    // Passive and pressure-supplied fluid families share bounded island work.
     // Public insertion indices remain separate for each constitutive owner.
     pub(super) fn incompressible_film_count(&self) -> usize {
-        self.squeeze_films.len()+self.sliding_films.len()+self.power_law_films.len()
+        self.squeeze_films.len()+self.sliding_films.len()+self.driven_sliding_films.len()
+            +self.power_law_films.len()
     }
 
     /// Number of attached, immutable pressure islands. Their insertion indices
@@ -75,6 +76,11 @@ impl ImpactSystem {
         for film in &self.sliding_films {
             film.evaluate_into(&q[..self.modes], &zero[..self.modes],
                 &mut force[..self.modes], &mut p[..film.pressure_operator().cell_count()])
+                .map_err(|e| invalid(e.0))?;
+        }
+        for film in &self.driven_sliding_films {
+            film.evaluate_force_into(&q[..self.modes], &zero[..self.modes],
+                &mut force[..self.modes], &mut p[..film.cell_count()])
                 .map_err(|e| invalid(e.0))?;
         }
         for film in &self.power_law_films {

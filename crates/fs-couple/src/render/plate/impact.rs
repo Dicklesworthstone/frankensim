@@ -239,6 +239,7 @@ pub struct ImpactSystem {
     radiation:Option<radiation::Memory>,
     squeeze_films:Vec<squeeze::ResistiveFilm>,
     sliding_films:Vec<squeeze::sliding::ShearedFilm>,
+    driven_sliding_films:Vec<squeeze::sliding::driven::PressureDrivenShearedFilm>,
     power_law_films:Vec<squeeze::power_law::PowerLawFilm>,
     gas_film:Option<Rc<gas_film::Memory>>,
     // Immutable shared laws plus body/start addresses; no duplicate mesh data.
@@ -369,7 +370,7 @@ impl ImpactSystem {
             .map_err(|e|ImpactError::Owner(e.to_string()))?;
         let energy=system.hamiltonian(&x);
         if !energy.is_finite() || energy<0.0 || energy>config.maximum_energy_j {return Err(invalid("initial impact energy exceeds admission"));}
-        Self{system,x,pads:retained,histories,modes,config,sample:0,membranes,strings,supports,mechanical,contact,contact_loss,material_contacts:Vec::new(),radiation:None,relaxation:None,squeeze_films:Vec::new(),sliding_films:Vec::new(),power_law_films:Vec::new(),gas_film:None}.with_body_relaxation(stiffness_bound.sqrt())
+        Self{system,x,pads:retained,histories,modes,config,sample:0,membranes,strings,supports,mechanical,contact,contact_loss,material_contacts:Vec::new(),radiation:None,relaxation:None,squeeze_films:Vec::new(),sliding_films:Vec::new(),driven_sliding_films:Vec::new(),power_law_films:Vec::new(),gas_film:None}.with_body_relaxation(stiffness_bound.sqrt())
     }
     /// Accepted mass-normalized q,p; Kelvin coordinates follow the 2*modes prefix.
     #[must_use]
@@ -457,9 +458,15 @@ impl ImpactSystem {
             // Both use the SAME equation, port law, and physical acceptance gate.
             let mut workspace=fs_phs::StepWorkspace::new(&self.system).map_err(ImpactError::PreparedSolve)?;
             let mut candidate=vec![0.0;self.x.len()];let mut output=vec![0.0;self.modes];
-            let ledger=workspace.step_into_dissipative_controlled(&self.system,&self.x,external,
-                self.config.dt_s,&mut candidate,&mut output,
-                &|x,e,out|self.dissipative_flow_into(x,e,out),None,None,||gate.is_requested())
+            let ledger=if self.driven_sliding_films.is_empty() {
+                workspace.step_into_dissipative_controlled(&self.system,&self.x,external,
+                    self.config.dt_s,&mut candidate,&mut output,
+                    &|x,e,out|self.dissipative_flow_into(x,e,out),None,None,||gate.is_requested())
+            } else {
+                workspace.step_into_supplied_controlled(&self.system,&self.x,external,
+                    self.config.dt_s,&mut candidate,&mut output,
+                    &|x,e,out|self.supplied_film_flow_into(x,e,out),None,None,||gate.is_requested())
+            }
                 .map_err(|e|match e {fs_phs::PreparedStepError::Cancelled=>ImpactError::Cancelled,
                     fs_phs::PreparedStepError::Solver(e)=>ImpactError::PreparedSolve(e)})?;
             let mut histories=self.histories.borrow().clone();

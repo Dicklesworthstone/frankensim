@@ -6,6 +6,9 @@
 //! advances the system once and accounts for this resistance once.
 //! Wall velocity rows and layer profiles are immutable during a solve.
 
+/// Externally pressurized sliding films and their explicit reservoir work.
+pub mod driven;
+
 pub use fs_tribo::resistive_film::shear::{
     ShearChannelReport, ShearedFilm, WallVelocityPorts,
 };
