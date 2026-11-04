@@ -13594,3 +13594,33 @@ source boundaries, exact events, cancellation and deterministic retry. These
 are numerical implementation checks. The half-cell reconstruction is
 quasi-steady and pure-phase; it does not resolve internal face storage, fluid
 boundary layers, multidimensional spreading or a moving phase interface.
+
+## Calibrated thermal shear-thinning viscosity
+
+`fluid_transport::rheology` owns a checked SI Carreau-Yasuda master curve
+(`0 < n <= 1`, `a > 0`) with finite declared reference-rate support. It retains
+the existing WLF/Arrhenius `TemperatureShift` and explicitly distinguishes
+`mu(T,g) = a_T * mu_ref(g)` from `mu(T,g) = a_T * mu_ref(a_T*g)`; the latter
+checks support at the reduced reference rate. Stable log evaluation preserves
+representable extreme responses, analytic shear/temperature tangents and
+positive differential stress. Singular or unrepresentable scalar shear
+derivatives are explicit `None`; stress remains regular at rest.
+
+Binding queries the supplied `FluidTransport` once, retains the exact original
+source/snapshot, and replaces dynamic viscosity once while preserving current
+density, heat capacity and conductivity. Since this trait has no temperature
+coordinate, supplying a source at the evaluated temperature remains the caller's
+obligation. Source refusals propagate unchanged. No calibration authority,
+elastic memory, yield surface, phase law, extensional-flow fit or extrapolation
+is inferred. Ordinary constitutive queries allocate nothing and parameter logs
+are prepared once.
+
+Existing LBM callbacks consume the bound state through their native nonlinear
+collision and viscous-heating path; the broader legacy lattice Carreau domain,
+units and prepared relaxation-time policy remain intact. Constitutive regressions
+cover independent formula/finite-difference tangents, limits, both thermal
+conventions, support and extreme products. `material_thermal_rheology`
+independently prescribes shear stress, checks actual relaxation/rate and
+`mu*g^2` heating, source replacement invariance, temperature/shear changes to
+momentum/thermal populations, common `a=2` SI/lattice parity, and transactional
+calibration refusal.

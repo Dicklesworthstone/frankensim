@@ -13,6 +13,8 @@ use crate::liquid::ResolvedLiquidState;
 use crate::moist_air::ResolvedMoistAirState;
 
 mod mixed;
+/// Calibrated SI shear thinning with explicit WLF/Arrhenius temperature shifts.
+pub mod rheology;
 mod thermal;
 mod water;
 pub use mixed::{AidingVerticalPlateFrame, AidingVerticalPlateGroups, AidingVerticalPlateSettings};
