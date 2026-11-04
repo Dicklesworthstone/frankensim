@@ -7,6 +7,7 @@ use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 use fs_material::gas::{GasSpec, GasState};
 use fs_material::porous::layers::{
     AngularPowerBudget, AngularPowerError, DiffuseIncidence, IncidentPower, Layer,
+    LayerAbsorptionBudget, LayerAbsorptionError,
     MAX_ANGULAR_POWER_SAMPLES, MAX_LAYERS, RigidBackedLayers, TransmittingLayers,
 };
 use fs_material::porous::{PorousCard, PorousFluidLaw};
@@ -1489,6 +1490,467 @@ fn angular_queries_retain_sources_and_refuse_invalid_weights_budgets_and_cancell
             )
             .is_err()
     );
+    assert_eq!(incident.samples.get(), 1);
+    assert_eq!(receiver.samples.get(), 1);
+}
+
+// Conventional, unscaled transfer of pressure and Z_ref*v_n. This oracle is
+// deliberately limited to well-conditioned layers; the production report uses
+// neither these growing functions nor spatial quadrature.
+fn layer_state_oracle(kn: C64, inertia: C64, d: f64, right: [C64; 2]) -> [C64; 2] {
+    if kn == C64::ZERO {
+        return [right[0] + C64::new(0.0, d) * inertia * right[1], right[1]];
+    }
+    let (cos, sin) = cos_sin(kn.scale(d));
+    let i_sin = C64::new(0.0, 1.0) * sin;
+    let ratio = inertia / kn;
+    [
+        cos * right[0] + ratio * i_sin * right[1],
+        i_sin / ratio * right[0] + cos * right[1],
+    ]
+}
+
+fn layer_loss_oracle(
+    stack: &RigidBackedLayers<'_>,
+    cosine: f64,
+    load: C64,
+) -> (Vec<f64>, Vec<[f64; 2]>) {
+    let omega = stack.angular_frequency_rad_s();
+    let zref = stack.fluid().acoustic().characteristic_impedance_pa_s_m() / cosine;
+    let kt = stack.exterior_wavenumber_rad_m() * (1.0 - cosine * cosine).sqrt();
+    let parameters: Vec<_> = (0..stack.layer_count())
+        .map(|i| {
+            let (k, density, d) = match stack.layer(i).unwrap() {
+                Layer::Porous { thickness_m, .. } => {
+                    let response = stack.material_response(i).unwrap();
+                    (
+                        response.characteristic().1,
+                        response.dynamic_density_kg_m3(),
+                        thickness_m,
+                    )
+                }
+                Layer::FluidGap { thickness_m } => (
+                    C64::from_re(stack.exterior_wavenumber_rad_m()),
+                    C64::from_re(stack.fluid().acoustic().density_kg_m3()),
+                    thickness_m,
+                ),
+                Layer::FluidLayer { thickness_m, .. } => {
+                    let fluid = stack.fluid_response(i).unwrap();
+                    (
+                        C64::from_re(omega / fluid.sound_speed_m_s()),
+                        C64::from_re(fluid.density_kg_m3()),
+                        thickness_m,
+                    )
+                }
+            };
+            let squared = k * k - C64::from_re(kt * kt);
+            let mut kn = squared.sqrt();
+            if kn.im > 0.0 {
+                kn = -kn;
+            }
+            (kn, density.scale(omega / zref), d)
+        })
+        .collect();
+    let mut states = vec![[C64::ZERO; 2]; stack.layer_count() + 1];
+    states[stack.layer_count()] = [C64::ONE, load];
+    for i in (0..stack.layer_count()).rev() {
+        let (kn, inertia, d) = parameters[i];
+        states[i] = layer_state_oracle(kn, inertia, d, states[i + 1]);
+    }
+    let amplitude = C64::from_re(2.0) / (states[0][0] + states[0][1]);
+    let fluxes: Vec<_> = states
+        .iter()
+        .map(|s| {
+            let p = amplitude * s[0];
+            let q = amplitude * s[1];
+            (p * q.conj()).re
+        })
+        .collect();
+    let losses = fluxes.windows(2).map(|f| f[0] - f[1]).collect();
+    let integrals = (0..stack.layer_count())
+        .map(|i| {
+            let Some(response) = stack.material_response(i) else {
+                return [0.0; 2];
+            };
+            let density = response.dynamic_density_kg_m3();
+            let compliance = response.dynamic_bulk_modulus_pa().recip();
+            let (kn, inertia, d) = parameters[i];
+            let panels = 1024;
+            let mut values = [0.0; 2];
+            for j in 0..=panels {
+                let remaining = d * (1.0 - j as f64 / panels as f64);
+                let state = layer_state_oracle(kn, inertia, remaining, states[i + 1]);
+                let p = amplitude * state[0];
+                let normal_velocity = (amplitude * state[1]).scale(1.0 / zref);
+                let tangential_velocity = if kt == 0.0 {
+                    C64::ZERO
+                } else {
+                    p / density.scale(omega / kt)
+                };
+                let viscous = omega
+                    * -density.im
+                    * zref
+                    * (normal_velocity.norm_sq() + tangential_velocity.norm_sq());
+                let thermal = omega * -compliance.im * zref * p.norm_sq();
+                let weight = if j == 0 || j == panels {
+                    1.0
+                } else if j % 2 == 0 {
+                    2.0
+                } else {
+                    4.0
+                };
+                values[0] += weight * viscous;
+                values[1] += weight * thermal;
+            }
+            values.map(|v| v * d / (3.0 * panels as f64))
+        })
+        .collect();
+    (losses, integrals)
+}
+
+#[test]
+fn g1_layer_absorption_matches_interface_work_and_independent_spatial_integrals() {
+    let fluid = fluid();
+    let first = foam();
+    let second = PorousFluidLaw::try_new(PorousCard::pinta_fleece_foam02(), 1.81e-5).unwrap();
+    let middle = FluidAcousticState::try_new(0.9, 425.0).unwrap();
+    let layers = [
+        Layer::Porous {
+            law: &first,
+            thickness_m: 0.015,
+        },
+        Layer::FluidGap { thickness_m: 0.01 },
+        Layer::FluidLayer {
+            fluid: &middle,
+            thickness_m: 0.02,
+        },
+        Layer::Porous {
+            law: &second,
+            thickness_m: 0.025,
+        },
+    ];
+    let budget = LayerAbsorptionBudget {
+        max_layers: layers.len(),
+    };
+    for frequency in [400.0, 1100.0] {
+        let stack =
+            TransmittingLayers::new(&fluid, &fluid, core::f64::consts::TAU * frequency, &layers)
+                .unwrap();
+        for cosine in [1.0, 0.7, 0.2] {
+            for rigid in [false, true] {
+                let report = if rigid {
+                    stack
+                        .prepared_layers()
+                        .layer_absorption(cosine, 7.0, budget, || false)
+                        .unwrap()
+                } else {
+                    stack
+                        .layer_absorption(cosine, 7.0, budget, || false)
+                        .unwrap()
+                };
+                let (work, integrated) = layer_loss_oracle(
+                    stack.prepared_layers(),
+                    cosine,
+                    if rigid { C64::ZERO } else { C64::ONE },
+                );
+                for (i, row) in report.layers().iter().enumerate() {
+                    assert!((row.absorbed_fraction() - work[i]).abs() < 8e-13);
+                    assert!((row.viscous_absorbed_fraction - integrated[i][0]).abs() < 2e-11);
+                    assert!((row.thermal_absorbed_fraction - integrated[i][1]).abs() < 2e-11);
+                    assert_eq!(row.absorbed_power_w, 7.0 * row.absorbed_fraction());
+                    assert!(row.viscous_absorbed_fraction >= 0.0);
+                    assert!(row.thermal_absorbed_fraction >= 0.0);
+                }
+                assert_eq!(report.layers()[1].absorbed_fraction(), 0.0);
+                assert_eq!(report.layers()[2].absorbed_fraction(), 0.0);
+                assert!(report.balance_residual_w.abs() < 7e-12);
+                if rigid {
+                    let response = stack.prepared_layers().reflection(cosine).unwrap();
+                    assert_eq!(
+                        report.reflected_fraction,
+                        response.pressure_reflection.norm_sq()
+                    );
+                    assert_eq!(report.transmitted_fraction, 0.0);
+                    assert!((report.absorbed_fraction - response.absorbed_fraction).abs() < 8e-13);
+                } else {
+                    let response = stack.scattering(cosine).unwrap();
+                    assert_eq!(report.reflected_fraction, response.reflected_fraction);
+                    assert_eq!(report.transmitted_fraction, response.transmitted_fraction);
+                    assert!((report.absorbed_fraction - response.absorbed_fraction).abs() < 8e-13);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn g3_layer_absorption_subdivision_preserves_mechanisms_and_declared_zero_layers() {
+    let fluid = fluid();
+    let law = foam();
+    let omega = core::f64::consts::TAU * 800.0;
+    let whole = TransmittingLayers::new(
+        &fluid,
+        &fluid,
+        omega,
+        &[Layer::Porous {
+            law: &law,
+            thickness_m: 0.06,
+        }],
+    )
+    .unwrap();
+    let split = TransmittingLayers::new(
+        &fluid,
+        &fluid,
+        omega,
+        &[
+            Layer::Porous {
+                law: &law,
+                thickness_m: 0.01,
+            },
+            Layer::FluidGap { thickness_m: 0.0 },
+            Layer::Porous {
+                law: &law,
+                thickness_m: 0.02,
+            },
+            Layer::Porous {
+                law: &law,
+                thickness_m: 0.0,
+            },
+            Layer::Porous {
+                law: &law,
+                thickness_m: 0.03,
+            },
+        ],
+    )
+    .unwrap();
+    let budget = LayerAbsorptionBudget { max_layers: 5 };
+    for cosine in [1.0, 0.5, 0.01] {
+        let a = whole
+            .layer_absorption(cosine, 3.0, budget, || false)
+            .unwrap();
+        let b = split
+            .layer_absorption(cosine, 3.0, budget, || false)
+            .unwrap();
+        let viscous: f64 = b.layers().iter().map(|l| l.viscous_absorbed_fraction).sum();
+        let thermal: f64 = b.layers().iter().map(|l| l.thermal_absorbed_fraction).sum();
+        assert!((a.layers()[0].viscous_absorbed_fraction - viscous).abs() < 2e-13);
+        assert!((a.layers()[0].thermal_absorbed_fraction - thermal).abs() < 2e-13);
+        assert_eq!(b.layers().len(), 5);
+        assert_eq!(b.layers()[1].absorbed_power_w, 0.0);
+        assert_eq!(b.layers()[3].absorbed_power_w, 0.0);
+        assert!((a.absorbed_power_w - b.absorbed_power_w).abs() < 1e-12);
+    }
+}
+
+#[test]
+fn g1_local_loss_retains_sub_roundoff_transmission_and_thin_rigid_velocity_nodes() {
+    let base = fluid();
+    let fluid =
+        ThermoviscousFluidState::from_heat_capacity_ratio(base.acoustic(), base.transport(), 1.0)
+            .unwrap();
+    let law = foam();
+    let omega = core::f64::consts::TAU * 1000.0;
+    let response = law.effective_fluid(&fluid, omega).unwrap();
+    let density = response.dynamic_density_kg_m3();
+    let bulk = response.dynamic_bulk_modulus_pa();
+    assert_eq!(bulk.im, 0.0);
+    let z0 = fluid.acoustic().characteristic_impedance_pa_s_m();
+    let budget = LayerAbsorptionBudget { max_layers: 1 };
+    let d = 1e-20;
+    let transmitted = TransmittingLayers::new(
+        &fluid,
+        &fluid,
+        omega,
+        &[Layer::Porous {
+            law: &law,
+            thickness_m: d,
+        }],
+    )
+    .unwrap();
+    for cosine in [1.0, 0.4] {
+        let report = transmitted
+            .layer_absorption(cosine, 2.0, budget, || false)
+            .unwrap();
+        let zref = z0 / cosine;
+        let kt = (omega / fluid.acoustic().sound_speed_m_s()) * (1.0 - cosine * cosine).sqrt();
+        // Direct zero-thickness field limit: p=1, v_n=1/Z_ref and v_t=k_t/(omega*rho).
+        let expected = omega
+            * -density.im
+            * zref
+            * d
+            * (1.0 / (zref * zref) + kt * kt / (omega * omega * density.norm_sq()));
+        assert!(expected > 0.0 && expected < f64::EPSILON);
+        assert!((report.absorbed_fraction / expected - 1.0).abs() < 2e-12);
+        assert_eq!(report.layers()[0].thermal_absorbed_fraction, 0.0);
+    }
+    for d in [1e-8, 1e-12, 1e-20] {
+        let rigid = RigidBackedLayers::new(
+            &fluid,
+            omega,
+            &[Layer::Porous {
+                law: &law,
+                thickness_m: d,
+            }],
+        )
+        .unwrap();
+        let report = rigid.layer_absorption(1.0, 2.0, budget, || false).unwrap();
+        // Rigid back: p≈2 and v_n≈2 i omega (d-z)/K, giving a true d³ loss.
+        let expected = 4.0 * omega.powi(3) * -density.im * z0 * d.powi(3) / (3.0 * bulk.norm_sq());
+        assert!(report.absorbed_fraction > 0.0);
+        assert!((report.absorbed_fraction / expected - 1.0).abs() < 2e-11);
+        assert_eq!(report.layers()[0].thermal_absorbed_fraction, 0.0);
+    }
+}
+
+#[test]
+fn g0_layer_absorption_keeps_evanescent_lossless_and_opaque_limits_distinct() {
+    let fluid = fluid();
+    let receiver = FluidAcousticState::try_new(1.1, 425.0).unwrap();
+    let omega = core::f64::consts::TAU * 500.0;
+    let budget = LayerAbsorptionBudget { max_layers: 2 };
+    let lossless = TransmittingLayers::new(
+        &fluid,
+        &fluid,
+        omega,
+        &[
+            Layer::FluidLayer {
+                fluid: &receiver,
+                thickness_m: 0.07,
+            },
+            Layer::FluidGap { thickness_m: 0.02 },
+        ],
+    )
+    .unwrap();
+    for cosine in [1.0, 0.8, 0.6, 0.2] {
+        let report = lossless
+            .layer_absorption(cosine, 4.0, budget, || false)
+            .unwrap();
+        assert_eq!(report.absorbed_power_w, 0.0);
+        assert!(report.layers().iter().all(|p| p.absorbed_fraction() == 0.0));
+        assert!(report.transmitted_power_w > 0.0);
+    }
+    let law = foam();
+    let opaque = TransmittingLayers::new(
+        &fluid,
+        &receiver,
+        omega,
+        &[
+            Layer::Porous {
+                law: &law,
+                thickness_m: 1e5,
+            },
+            Layer::Porous {
+                law: &law,
+                thickness_m: 0.02,
+            },
+        ],
+    )
+    .unwrap();
+    let report = opaque.layer_absorption(0.2, 4.0, budget, || false).unwrap();
+    assert_eq!(report.transmitted_power_w, 0.0);
+    assert!(report.layers()[0].absorbed_power_w > 0.0);
+    assert_eq!(report.layers()[1].absorbed_power_w, 0.0);
+    assert!(
+        (report.absorbed_fraction - opaque.scattering(0.2).unwrap().absorbed_fraction).abs()
+            < 2e-13
+    );
+    let zero = opaque.layer_absorption(0.2, 0.0, budget, || false).unwrap();
+    assert_eq!(zero.absorbed_fraction, report.absorbed_fraction);
+    assert_eq!(zero.absorbed_power_w, 0.0);
+    assert!(zero.layers().iter().all(|l| l.absorbed_power_w == 0.0));
+    let grazing = opaque
+        .layer_absorption(1e-80, 4.0, budget, || false)
+        .unwrap();
+    let extreme = opaque
+        .layer_absorption(1e-200, 4.0, budget, || false)
+        .unwrap();
+    for (a, b) in [
+        (
+            grazing.layers()[0].viscous_absorbed_fraction,
+            extreme.layers()[0].viscous_absorbed_fraction,
+        ),
+        (
+            grazing.layers()[0].thermal_absorbed_fraction,
+            extreme.layers()[0].thermal_absorbed_fraction,
+        ),
+    ] {
+        assert!(b > 0.0);
+        assert!(((a / 1e-80) / (b / 1e-200) - 1.0).abs() < 3e-11);
+    }
+    let empty = RigidBackedLayers::new(&fluid, omega, &[]).unwrap();
+    let empty = empty
+        .layer_absorption(1.0, 3.0, LayerAbsorptionBudget { max_layers: 0 }, || false)
+        .unwrap();
+    assert!(empty.layers().is_empty());
+    assert_eq!(empty.reflected_power_w, 3.0);
+    assert_eq!(empty.absorbed_power_w, 0.0);
+}
+
+#[test]
+fn g4_layer_absorption_retains_sources_and_refuses_work_and_cancellation_atomically() {
+    let incident = CountedFluid {
+        state: fluid(),
+        samples: Cell::new(0),
+    };
+    let receiver = CountedReceiver {
+        state: incident.state.acoustic(),
+        samples: Cell::new(0),
+    };
+    let law = foam();
+    let stack = TransmittingLayers::new(
+        &incident,
+        &receiver,
+        core::f64::consts::TAU * 500.0,
+        &[
+            Layer::Porous {
+                law: &law,
+                thickness_m: 0.01,
+            },
+            Layer::FluidGap { thickness_m: 0.02 },
+            Layer::Porous {
+                law: &law,
+                thickness_m: 0.03,
+            },
+        ],
+    )
+    .unwrap();
+    let budget = LayerAbsorptionBudget { max_layers: 3 };
+    let baseline = stack.layer_absorption(0.7, 5.0, budget, || false).unwrap();
+    for stop in [1, 3, 6, 8] {
+        let mut polls = 0;
+        assert_eq!(
+            stack.layer_absorption(0.7, 5.0, budget, || {
+                polls += 1;
+                polls == stop
+            }),
+            Err(LayerAbsorptionError::Cancelled)
+        );
+        assert_eq!(
+            stack.layer_absorption(0.7, 5.0, budget, || false).unwrap(),
+            baseline
+        );
+    }
+    for max_layers in [0, 2, MAX_LAYERS + 1] {
+        assert!(
+            stack
+                .layer_absorption(0.7, 5.0, LayerAbsorptionBudget { max_layers }, || false)
+                .is_err()
+        );
+    }
+    for cosine in [0.0, -1.0, 1.01, f64::NAN, f64::INFINITY] {
+        assert!(
+            stack
+                .layer_absorption(cosine, 5.0, budget, || false)
+                .is_err()
+        );
+    }
+    for power in [-1.0, f64::NAN, f64::INFINITY] {
+        assert!(
+            stack
+                .layer_absorption(0.7, power, budget, || false)
+                .is_err()
+        );
+    }
     assert_eq!(incident.samples.get(), 1);
     assert_eq!(receiver.samples.get(), 1);
 }

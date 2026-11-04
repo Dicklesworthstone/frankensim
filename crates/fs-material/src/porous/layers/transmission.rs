@@ -15,8 +15,8 @@
 //! The rigid-frame, infinite-planar and shared-fluid limits of the parent remain.
 
 use super::{
-    Layer, RigidBackedLayers, bad, divided, finite, magnitude_scale, normal_wavenumber_ratio,
-    reflected_state, retained_fluid_snapshot,
+    Layer, LayerTransfer, RigidBackedLayers, bad, divided, finite, magnitude_scale,
+    normal_wavenumber_ratio, reflected_state, retained_fluid_snapshot,
 };
 use crate::MaterialError;
 use crate::fluid_acoustics::thermoviscous::ThermoviscousFluid;
@@ -112,8 +112,16 @@ impl<'a> TransmittingLayers<'a> {
     /// Exact planar reflection/refraction/transmission within the admitted
     /// material model. Critical incidence (receiving k_n=0) remains finite.
     pub fn scattering(&self, cosine: f64) -> Result<LayeredTransmission, MaterialError> {
+        self.scattering_with_layers(cosine, |_, _| Ok(()))
+    }
+
+    pub(super) fn scattering_with_layers<E: From<MaterialError>>(
+        &self,
+        cosine: f64,
+        observe: impl FnMut(usize, LayerTransfer) -> Result<(), E>,
+    ) -> Result<LayeredTransmission, E> {
         if !cosine.is_finite() || cosine <= 0.0 || cosine > 1.0 {
-            return Err(bad("layer transmission needs incidence cosine in (0,1]"));
+            return Err(bad("layer transmission needs incidence cosine in (0,1]").into());
         }
         let q = normal_wavenumber_ratio(
             self.speed_ratio,
@@ -123,7 +131,7 @@ impl<'a> TransmittingLayers<'a> {
         );
         let receiving_kn = q.scale(self.prepared.k0);
         if !finite(receiving_kn) || (q != C64::ZERO && receiving_kn == C64::ZERO) {
-            return Err(bad("receiving normal wavenumber is unrepresentable"));
+            return Err(bad("receiving normal wavenumber is unrepresentable").into());
         }
         // Y_receiver/Y_incident = (rho_incident/rho_receiver)*q/cos(theta).
         // Never divide by receiving k_n: it may be exactly zero at criticality.
@@ -137,7 +145,7 @@ impl<'a> TransmittingLayers<'a> {
                 C64::new(0.0, -value)
             }
         };
-        let state = transmit_state(&self.prepared, cosine, C64::ONE, load)?;
+        let state = transmit_state_with_layers(&self.prepared, cosine, C64::ONE, load, observe)?;
         let reflection = state.reflection;
         let transmission = state.coefficient(C64::ONE)?;
         // Compute weighted power before underflowing |T|^2. A small pressure
@@ -161,9 +169,7 @@ impl<'a> TransmittingLayers<'a> {
             || absorbed < -tolerance
             || (reflected + transmitted + absorbed - 1.0).abs() > tolerance
         {
-            return Err(bad(
-                "layer transmission failed passive normal-power balance",
-            ));
+            return Err(bad("layer transmission failed passive normal-power balance").into());
         }
         Ok(LayeredTransmission {
             pressure_reflection: reflection,
@@ -185,20 +191,39 @@ pub(super) fn transmit_state(
     exit_pressure: C64,
     exit_velocity: C64,
 ) -> Result<TransmittedState, MaterialError> {
+    transmit_state_with_layers(
+        prepared,
+        cosine,
+        exit_pressure,
+        exit_velocity,
+        |_, _| Ok(()),
+    )
+}
+
+fn transmit_state_with_layers<E: From<MaterialError>>(
+    prepared: &RigidBackedLayers<'_>,
+    cosine: f64,
+    exit_pressure: C64,
+    exit_velocity: C64,
+    mut observe: impl FnMut(usize, LayerTransfer) -> Result<(), E>,
+) -> Result<TransmittedState, E> {
     let initial_scale = magnitude_scale(exit_pressure).max(magnitude_scale(exit_velocity));
     if !finite(exit_pressure) || !finite(exit_velocity) || initial_scale == 0.0 {
-        return Err(bad("receiving pressure/velocity pair is unrepresentable"));
+        return Err(bad("receiving pressure/velocity pair is unrepresentable").into());
     }
     let mut pressure = divided(exit_pressure, initial_scale);
     let mut velocity = divided(exit_velocity, initial_scale);
     // [P,Q] = S*[physical pressure, Z_ref*physical velocity] for a unit
     // receiver modal amplitude. Retain the scalar canceled by reflection.
     let mut amplitude = LogAmplitude::new(-det::ln(initial_scale));
-    for layer in prepared.layers.iter().rev() {
+    for (index, layer) in prepared.layers.iter().enumerate().rev() {
         let d = layer.source.thickness_m();
         if d == 0.0 {
+            observe(index, LayerTransfer::identity(pressure, velocity))?;
             continue;
         }
+        let back_pressure = pressure;
+        let back_velocity = velocity;
         let kn;
         let normalization;
         (pressure, velocity, normalization, kn) =
@@ -209,6 +234,17 @@ pub(super) fn transmit_state(
             amplitude.add(kn.im * d - log_scaled(8.0, normalization));
             amplitude.rotate(-kn.re * d);
         }
+        observe(
+            index,
+            LayerTransfer {
+                front_pressure: pressure,
+                front_velocity: velocity,
+                back_pressure,
+                back_velocity,
+                normalization,
+                normal_wavenumber: kn,
+            },
+        )?;
     }
     let (reflection, entering) = reflected_state(pressure, velocity)?;
     let denominator = pressure + velocity;
@@ -294,7 +330,7 @@ fn positive_product_ratio(a: f64, b: f64, denominator: f64) -> Result<f64, Mater
     Ok(value)
 }
 
-fn log_scaled(factor: f64, value: f64) -> f64 {
+pub(super) fn log_scaled(factor: f64, value: f64) -> f64 {
     if value <= f64::MAX / factor {
         det::ln(factor * value)
     } else {
@@ -304,14 +340,14 @@ fn log_scaled(factor: f64, value: f64) -> f64 {
 
 // Compensated logarithmic magnitude prevents intermediate attenuation underflow;
 // the separately normalized phase keeps the common complex factor explicit.
-struct LogAmplitude {
-    log: f64,
+pub(super) struct LogAmplitude {
+    pub(super) log: f64,
     correction: f64,
     phase: C64,
     phase_valid: bool,
 }
 impl LogAmplitude {
-    fn new(log: f64) -> Self {
+    pub(super) fn new(log: f64) -> Self {
         Self {
             log,
             correction: 0.0,
@@ -319,7 +355,7 @@ impl LogAmplitude {
             phase_valid: true,
         }
     }
-    fn add(&mut self, value: f64) {
+    pub(super) fn add(&mut self, value: f64) {
         if self.log == f64::NEG_INFINITY || value == f64::NEG_INFINITY {
             self.log = f64::NEG_INFINITY;
             self.correction = 0.0;

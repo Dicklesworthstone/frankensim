@@ -10723,6 +10723,36 @@ power bounds, original-source retention and cancellation/budget refusal. Infinit
 planar stationary rigid-frame assumptions remain; this does not predict finite
 specimen diffraction or certify a reverberant room's diffuse field.
 
+### Layer-resolved viscous and thermal acoustic absorption
+
+Both prepared layer owners expose `layer_absorption` for explicit incident
+normal watts at one angle. Each original layer retains separate viscous and
+thermal absorbed fractions and their combined watts. The original R/T API
+is unchanged. Its SAME bounded propagation supplies the layer-face states;
+no additional material query, fitted attenuation or second field solver enters.
+
+Work follows `omega/2*(-Im(rho)*|v|^2 - Im(1/K)*|p|^2)` integrated through
+each retained equivalent fluid. Oblique viscous loss includes tangential
+velocity. Positive analytic wave integrals avoid subtracting nearly equal
+incident/outgoing powers. Thin-layer midpoint parity retains the `d^3` normal
+viscous loss near a rigid velocity node. Bounded inward-decaying waves and the
+existing compensated log-amplitude owner handle thicker layers. Lossless fluid,
+critical/evanescent fields and zero-thickness identities have exactly zero heat.
+
+Reflection, transmission and local heat remain independent accounts with an
+explicit floating-point balance residual; no residual is redistributed or
+coefficient clipped. Queries use fixed storage, linear layer work, an explicit
+caller allowance up to 64 layers and cancellation in both passes. Zero incident
+watts retain coefficients and zero work. Existing `porous_layers` G0/G1/G3/G4
+regressions compare interface fluxes and independent spatial quadrature, weak
+transmitting loss, thin standing waves, subdivision, opaque/refraction limits,
+source retention and atomic work/cancellation refusal.
+
+The mechanism split does not assign mean heat separately to the pore fluid and
+solid frame or evolve their temperatures. Original linear, rigid-frame,
+infinite-planar and frequency/source restrictions remain; no additional
+experimental validity or error certificate is supplied by the local account.
+
 ### Finite reservoirs in transient dense membrane transport
 
 `membrane::transient::slab::finite` adds two explicit whole-reservoir molar

@@ -42,6 +42,11 @@ pub use angular::{
     AngularPower, AngularPowerBudget, AngularPowerError, DiffuseIncidence, IncidentPower,
     MAX_ANGULAR_POWER_SAMPLES,
 };
+/// Layer-resolved viscous and thermal loss from the same coherent fields.
+pub mod absorption;
+pub use absorption::{
+    LayerAbsorbedPower, LayerAbsorption, LayerAbsorptionBudget, LayerAbsorptionError,
+};
 
 /// Bounded preparation storage and per-angle work.
 pub const MAX_LAYERS: usize = 64;
@@ -97,6 +102,31 @@ struct PreparedLayer<'a> {
     source: Layer<'a>,
     porous: Option<PorousFluidResponse>,
     fluid: Option<FluidAcousticState>,
+}
+
+// The optional observer sees the SAME bounded propagation used for R/T. The
+// normalizing scalar relates adjacent states without reconstructing growing
+// waves or changing the original reflection/transmission arithmetic.
+#[derive(Clone, Copy, Default)]
+struct LayerTransfer {
+    front_pressure: C64,
+    front_velocity: C64,
+    back_pressure: C64,
+    back_velocity: C64,
+    normalization: f64,
+    normal_wavenumber: C64,
+}
+impl LayerTransfer {
+    fn identity(pressure: C64, velocity: C64) -> Self {
+        Self {
+            front_pressure: pressure,
+            front_velocity: velocity,
+            back_pressure: pressure,
+            back_velocity: velocity,
+            normalization: 1.0,
+            normal_wavenumber: C64::ZERO,
+        }
+    }
 }
 
 /// Prepared material responses at ONE frequency. The incident/pore fluid has
@@ -266,18 +296,43 @@ impl<'a> RigidBackedLayers<'a> {
     /// model. Positive incidence cosine is measured from the interface normal.
     /// Empty layers give the rigid wall. Source laws are never re-evaluated here.
     pub fn reflection(&self, cosine: f64) -> Result<LayeredReflection, MaterialError> {
+        self.reflection_with_layers(cosine, |_, _| Ok(()))
+    }
+
+    fn reflection_with_layers<E: From<MaterialError>>(
+        &self,
+        cosine: f64,
+        mut observe: impl FnMut(usize, LayerTransfer) -> Result<(), E>,
+    ) -> Result<LayeredReflection, E> {
         if !cosine.is_finite() || cosine <= 0.0 || cosine > 1.0 {
-            return Err(bad("layered reflection needs incidence cosine in (0,1]"));
+            return Err(bad("layered reflection needs incidence cosine in (0,1]").into());
         }
         // Reference is Z0/cos(theta), the incident normal wave impedance.
         // Represent its ratio algebraically; forming Z0/cos could overflow.
         let (mut pressure, mut velocity) = (C64::ONE, C64::ZERO);
-        for layer in self.layers.iter().rev() {
+        for (index, layer) in self.layers.iter().enumerate().rev() {
             let d = layer.source.thickness_m();
             if d == 0.0 {
+                observe(index, LayerTransfer::identity(pressure, velocity))?;
                 continue;
             }
-            (pressure, velocity, _, _) = self.propagate_layer(layer, cosine, pressure, velocity)?;
+            let back_pressure = pressure;
+            let back_velocity = velocity;
+            let normalization;
+            let normal_wavenumber;
+            (pressure, velocity, normalization, normal_wavenumber) =
+                self.propagate_layer(layer, cosine, pressure, velocity)?;
+            observe(
+                index,
+                LayerTransfer {
+                    front_pressure: pressure,
+                    front_velocity: velocity,
+                    back_pressure,
+                    back_velocity,
+                    normalization,
+                    normal_wavenumber,
+                },
+            )?;
         }
         let (reflection, absorbed) = reflected_state(pressure, velocity)?;
         Ok(LayeredReflection {
