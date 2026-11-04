@@ -5,8 +5,8 @@ use fs_mbd::articulated::{
     apply_free_floating_impulses, apply_prescribed_base_impulses, free_floating_momentum,
 };
 use fs_mbd::{
-    MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3,
-    apply_equal_and_opposite_impulse_at_body_points,
+    Gravity, MassProperties, Pose, RigidBodyIntegrator, RigidBodyState, UnitQuaternion, Vec3,
+    Wrench, apply_equal_and_opposite_impulse_at_body_points,
 };
 
 const LARGE: f64 = (1u64 << 55) as f64;
@@ -26,6 +26,81 @@ fn state(position: Vec3, momentum: Vec3) -> RigidBodyState {
 
 fn inertia() -> SpatialInertia {
     SpatialInertia::new(1.0, GaVec::default(), Mat3::identity()).unwrap()
+}
+
+#[test]
+fn cross_products_preserve_centrality_and_antisymmetry() {
+    // Binary scaling keeps the supplied vectors exactly parallel. A single
+    // FMA against an already rounded second product leaves a false torque.
+    for scale in [2.0_f64.powi(-100), 1.0, 2.0_f64.powi(100)] {
+        let arm = Vec3::new(0.1, -0.3, 0.7).scale(scale);
+        assert_eq!(arm.cross(arm), Vec3::ZERO);
+        assert_eq!(arm.cross(arm.scale(32.0)), Vec3::ZERO);
+        let other = Vec3::new(-0.2, 0.4, 0.9).scale(scale);
+        assert_eq!(arm.cross(other), other.cross(arm).scale(-1.0));
+    }
+}
+
+#[test]
+fn native_central_impulses_and_axial_motion_do_not_invent_spin() {
+    let arm = Vec3::new(0.1, -0.3, 0.7);
+    let impulse = arm.scale(32.0);
+    let before = state(arm, Vec3::ZERO);
+    let receipt = before
+        .apply_impulse_at_body_point(properties(), arm, impulse)
+        .unwrap();
+    assert_eq!(receipt.angular_impulse_body, Vec3::ZERO);
+    assert_eq!(receipt.state_after.angular_momentum_body(), Vec3::ZERO);
+    assert_eq!(receipt.state_after.linear_momentum_world(), impulse);
+    let integrator = RigidBodyIntegrator::new(Gravity::ZERO);
+    assert_eq!(
+        integrator
+            .diagnostics(receipt.state_after, properties())
+            .unwrap()
+            .angular_momentum_world,
+        Vec3::ZERO
+    );
+
+    // Spherical inertia has no gyroscopic acceleration, and a material point
+    // on its rotation axis has neither rotational velocity nor centripetal
+    // acceleration. Exercise the actual native derivative/kinematics owners.
+    let spinning = RigidBodyState::new(Pose::identity(), Vec3::ZERO, arm).unwrap();
+    let point = integrator
+        .prepare_point_motion(spinning, properties(), Wrench::ZERO)
+        .unwrap()
+        .point_motion(arm.scale(64.0))
+        .unwrap();
+    assert_eq!(point.angular_acceleration_body, Vec3::ZERO);
+    assert_eq!(point.kinematics.point_velocity_world, Vec3::ZERO);
+    assert_eq!(point.point_acceleration_world, Vec3::ZERO);
+}
+
+#[test]
+fn nearly_central_impulses_retain_small_exact_angular_momentum() {
+    // For integer n = 2^27, n*n - (n+1)*(n-1) = 1 exactly. Both
+    // independently rounded products are 2^54, so an uncompensated second
+    // product loses the complete physical torque. i128 is an independent
+    // exact oracle, including sign and all three axis permutations.
+    let n = 1_i128 << 27;
+    let arms = [[n, n + 1, 0], [0, n, n + 1], [n + 1, 0, n]];
+    let impulses = [[n - 1, n, 0], [0, n - 1, n], [n, 0, n - 1]];
+    for (r, j) in arms.into_iter().zip(impulses) {
+        let exact = [
+            r[1] * j[2] - r[2] * j[1],
+            r[2] * j[0] - r[0] * j[2],
+            r[0] * j[1] - r[1] * j[0],
+        ];
+        let arm = Vec3::new(r[0] as f64, r[1] as f64, r[2] as f64);
+        let impulse = Vec3::new(j[0] as f64, j[1] as f64, j[2] as f64);
+        for sign in [-1.0, 1.0] {
+            let expected = Vec3::new(exact[0] as f64, exact[1] as f64, exact[2] as f64).scale(sign);
+            let receipt = state(Vec3::ZERO, Vec3::ZERO)
+                .apply_impulse_at_body_point(properties(), arm, impulse.scale(sign))
+                .unwrap();
+            assert_eq!(receipt.angular_impulse_body, expected);
+            assert_eq!(receipt.state_after.angular_momentum_body(), expected);
+        }
+    }
 }
 
 #[test]

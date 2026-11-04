@@ -1,5 +1,17 @@
 # CONTRACT: fs-mbd
 
+## Physical torque products
+
+The native `Vec3::cross` compensates both floating-point product tails before
+forming each moment. For finite product differences this preserves antisymmetry
+and exact cancellation of parallel binary-scaled inputs, without a tolerance
+clamp. Near-central impulses retain small resolved angular momentum instead of
+losing it in two large products. The operation is allocation-free and fixed
+work; nonfinite differences retain the previous fused-operation range behavior.
+The G0/G1 cases in `tests/momentum_reductions.rs` cover native central impulses,
+axial rigid-point motion, and all three nearly central torque components against
+an independent exact integer oracle.
+
 ## Shared native free rotation
 
 The explicit kick-drift, symplectic and staged Verlet rigid-body paths use

@@ -99,12 +99,32 @@ impl Vec3 {
     }
 
     /// Cross product, preserving the operand order.
+    ///
+    /// Both product roundoffs are retained. A one-sided FMA would turn
+    /// `v cross v` into its product's rounding error and can erase a small
+    /// moment between nearly parallel vectors. No collinearity tolerance or
+    /// torque clamp is applied.
     #[must_use]
     pub fn cross(self, other: Self) -> Self {
+        #[inline]
+        fn difference_of_products(a: f64, b: f64, c: f64, d: f64) -> f64 {
+            let ab = a * b;
+            let cd = c * d;
+            let difference = ab - cd;
+            if !difference.is_finite() {
+                // Preserve the original fused operation's range when its
+                // first product alone overflows but its difference does not.
+                return a.mul_add(b, -cd);
+            }
+            // Symmetric TwoProd tails preserve antisymmetry as well as exact
+            // cancellation. Near parallelism, ab-cd is exact by Sterbenz's
+            // lemma; the tails recover the otherwise lost physical moment.
+            difference + (a.mul_add(b, -ab) - c.mul_add(d, -cd))
+        }
         Self::new(
-            self.y.mul_add(other.z, -(self.z * other.y)),
-            self.z.mul_add(other.x, -(self.x * other.z)),
-            self.x.mul_add(other.y, -(self.y * other.x)),
+            difference_of_products(self.y, other.z, self.z, other.y),
+            difference_of_products(self.z, other.x, self.x, other.z),
+            difference_of_products(self.x, other.y, self.y, other.x),
         )
     }
 
