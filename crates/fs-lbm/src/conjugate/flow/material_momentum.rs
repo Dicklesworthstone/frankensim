@@ -11,6 +11,8 @@ use super::{
     poll_every,
 };
 
+mod resistance;
+pub use resistance::ResistiveMaterialMomentumAdvance;
 mod viscous;
 pub(in crate::conjugate::flow) use viscous::PreparedMaterialViscosity;
 pub use viscous::{

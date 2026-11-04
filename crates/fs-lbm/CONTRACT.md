@@ -1,5 +1,29 @@
 # CONTRACT: fs-lbm
 
+## Material transport with physical resistance heating
+
+`advance_material_momentum_with_resistance` and its reservoir-pressure form
+consume current M, h and P, perform one fresh resistance-aware mechanical
+step, and reuse that accepted native field for all original material and
+momentum routes. Accepted drag impulses enter original cell P once. Only the
+native cell partition of physical `dt B u_final²` heat is inserted into h
+before those same mass routes transport M, M h and kicked momentum. Incoming
+source and reservoir material/velocity remain explicit, including backflow.
+
+Actual `sum M (h_heated - h_original)` and absolute local insertion defects
+are checked, so unrepresentable heat cannot silently disappear under a large
+enthalpy datum. Heat insertion shares the existing mechanical energy and
+material enthalpy budgets with their native stages. Failed reconstruction,
+mechanics, caloric insertion, material or momentum transport, or cancellation
+returns no candidate and does not mutate caller state.
+
+Focused G0/G2/G3 tests cover graded density/resistance, source and boundary
+flow, accepted heat and momentum routes, zero-resistance reduction, held
+controller work and atomic refusal/retry. This is fixed-geometry transport
+with frozen isotropic resistance. It does not update an EOS or phase law,
+solve heat-dependent resistance or thermal-expansion feedback, or convert
+numerical damping or pressure work into additional enthalpy.
+
 ## Density-aware implicit stationary resistance
 
 The staggered `FlowField` resistance entries solve

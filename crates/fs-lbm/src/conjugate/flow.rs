@@ -39,7 +39,7 @@ mod material_momentum;
 pub use material_momentum::{
     MaterialMomentumAdvance, MaterialMomentumAdvanceControls, MaterialMomentumAdvanceInput,
     MaterialMomentumViscosityInput, MaterialViscosityControls, MaterialViscosityReport,
-    ViscousMaterialMomentumAdvance,
+    ResistiveMaterialMomentumAdvance, ViscousMaterialMomentumAdvance,
 };
 mod phase_volume;
 pub use phase_volume::{
