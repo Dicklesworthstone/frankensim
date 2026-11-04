@@ -1,4 +1,4 @@
-//! Backward-Euler conduction on the existing thermal network.
+//! Implicit enthalpy conduction on the existing thermal network.
 //!
 //! The unknown is each cell's energy increment in joules. Residuals, reservoir
 //! heat, source heat, entropy and final acceptance remain owned by the original
@@ -17,11 +17,13 @@
 //! unselected ambient channels retain authored htc. Bath events occur at their exact times.
 //! `ImplicitConductionGraph` admits branched, cyclic and disconnected networks
 //! through the same nonlinear/time owner with a bounded sparse Krylov solve.
+//! The opt-in `advance_sdirk2_to` path shares this residual and Newton owner,
+//! with second-order L-stable quadrature for fixed, source-free networks.
 
 use super::*;
 use crate::enthalpy::backward_euler::{
     BackwardEulerStep, BackwardEulerTrial, BoundaryConductances, BoundaryStepCoefficients,
-    StepCoefficients, TransportStepCoefficients, resolvable_increment_j,
+    StageQuadrature, StepCoefficients, TransportStepCoefficients, resolvable_increment_j,
 };
 use crate::enthalpy::entropy::EntropyAudit;
 use fs_la::tridiagonal::{TridiagonalError, TridiagonalWorkspace};
@@ -29,6 +31,10 @@ use fs_la::tridiagonal::{TridiagonalError, TridiagonalWorkspace};
 /// Accuracy-controlled comparisons of the same original implicit intervals.
 #[path = "implicit/adaptive.rs"]
 pub mod adaptive;
+
+/// Second-order native stage quadrature for fixed, source-free networks.
+#[path = "implicit/sdirk.rs"]
+mod sdirk;
 
 #[path = "implicit/graph.rs"]
 mod graph;
@@ -621,6 +627,7 @@ impl<'a> ImplicitConductionChain<'a> {
         })
     }
 
+    #[cfg(test)]
     fn evaluate<'m>(
         &self,
         step: &BackwardEulerStep<'_, 'm>,
@@ -628,6 +635,23 @@ impl<'a> ImplicitConductionChain<'a> {
         sources_w: &BTreeMap<CellId, f64>,
         transfers: &[HeatTransfer],
         entropy: bool,
+        controls: ImplicitConductionControls,
+        report: &mut ImplicitConductionReport,
+        checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BackwardEulerTrial<'m, Endpoint>, ImplicitConductionError> {
+        self.evaluate_stage(
+            step, energy, sources_w, transfers, entropy, None, controls, report, checkpoint,
+        )
+    }
+
+    fn evaluate_stage<'m>(
+        &self,
+        step: &BackwardEulerStep<'_, 'm>,
+        energy: &[f64],
+        sources_w: &BTreeMap<CellId, f64>,
+        transfers: &[HeatTransfer],
+        entropy: bool,
+        quadrature: Option<StageQuadrature<'_>>,
         controls: ImplicitConductionControls,
         report: &mut ImplicitConductionReport,
         checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
@@ -669,7 +693,11 @@ impl<'a> ImplicitConductionChain<'a> {
                 transfers,
             })
         };
-        if entropy {
+        if let Some(stage) = quadrature {
+            step.evaluate_stage(energy, resolve, stage, entropy, || {
+                (checkpoint.borrow_mut())()
+            })
+        } else if entropy {
             step.evaluate_with_transport_and_entropy(energy, resolve, || {
                 (checkpoint.borrow_mut())()
             })
@@ -848,14 +876,37 @@ impl<'a> ImplicitConductionChain<'a> {
         checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<(DepositionSimulation<'m>, EnergyAudit, EntropyAudit, f64), ImplicitConductionError>
     {
+        let trial = self.solve_stage(
+            thermal, target_s, sources_w, transfers, None, controls, workspace, report, checkpoint,
+        )?;
+        accept_trial(trial, controls, checkpoint)
+    }
+
+    // Shared nonlinear owner. The optional stage weight changes only the
+    // native residual's rate quadrature and its analytic Jacobian; all trial
+    // enthalpies remain relative to this actual physical initial state.
+    fn solve_stage<'m>(
+        &self,
+        thermal: &DepositionSimulation<'m>,
+        target_s: f64,
+        sources_w: &BTreeMap<CellId, f64>,
+        transfers: &[HeatTransfer],
+        quadrature: Option<StageQuadrature<'_>>,
+        controls: ImplicitConductionControls,
+        workspace: &mut ImplicitConductionWorkspace,
+        report: &mut ImplicitConductionReport,
+        checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BackwardEulerTrial<'m, Endpoint>, ImplicitConductionError> {
         let step = BackwardEulerStep::new(thermal, target_s, &mut *checkpoint)?;
+        let implicit_dt_s = quadrature.map_or(step.duration_s(), |stage| stage.implicit_dt_s);
         workspace.energy.fill(0.0);
-        let mut trial = self.evaluate(
+        let mut trial = self.evaluate_stage(
             &step,
             &workspace.energy,
             sources_w,
             transfers,
             false,
+            quadrature,
             controls,
             report,
             checkpoint,
@@ -866,29 +917,17 @@ impl<'a> ImplicitConductionChain<'a> {
             if maximum <= controls.cell_tolerance_j
                 && trial.audit().residual_j.abs() <= controls.total_tolerance_j
             {
-                let final_trial = self.evaluate(
+                return self.evaluate_stage(
                     &step,
                     &workspace.energy,
                     sources_w,
                     transfers,
                     true,
+                    quadrature,
                     controls,
                     report,
                     checkpoint,
-                )?;
-                let maximum = final_trial.maximum_cell_residual_j();
-                let entropy =
-                    *final_trial
-                        .entropy_audit()
-                        .ok_or(ImplicitConductionError::Invalid(
-                            "missing final entropy account",
-                        ))?;
-                let (next, _, audit) = final_trial.accept(
-                    controls.cell_tolerance_j,
-                    controls.total_tolerance_j,
-                    &mut *checkpoint,
-                )?;
-                return Ok((next, audit, entropy, maximum));
+                );
             }
             if iteration == controls.maximum_newton_iterations {
                 return Err(ImplicitConductionError::NotConverged {
@@ -898,7 +937,7 @@ impl<'a> ImplicitConductionChain<'a> {
             self.jacobian(
                 thermal,
                 trial.payload(),
-                step.duration_s(),
+                implicit_dt_s,
                 workspace,
                 checkpoint,
             )?;
@@ -955,12 +994,13 @@ impl<'a> ImplicitConductionChain<'a> {
                     workspace.proposal[i] = value;
                 }
                 if admitted && representable {
-                    match self.evaluate(
+                    match self.evaluate_stage(
                         &step,
                         &workspace.proposal,
                         sources_w,
                         transfers,
                         false,
+                        quadrature,
                         controls,
                         report,
                         checkpoint,
@@ -1014,6 +1054,23 @@ impl<'a> ImplicitConductionChain<'a> {
             })?;
         Ok((next, report))
     }
+}
+
+fn accept_trial<'m>(
+    trial: BackwardEulerTrial<'m, Endpoint>,
+    controls: ImplicitConductionControls,
+    checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
+) -> Result<(DepositionSimulation<'m>, EnergyAudit, EntropyAudit, f64), ImplicitConductionError> {
+    let maximum = trial.maximum_cell_residual_j();
+    let entropy = *trial
+        .entropy_audit()
+        .ok_or(ImplicitConductionError::Invalid("missing final entropy account"))?;
+    let (next, _, audit) = trial.accept(
+        controls.cell_tolerance_j,
+        controls.total_tolerance_j,
+        checkpoint,
+    )?;
+    Ok((next, audit, entropy, maximum))
 }
 
 fn validate_advance(

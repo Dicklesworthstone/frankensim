@@ -24,6 +24,12 @@ pub use boundaries::{BoundaryConductances, BoundaryStepCoefficients};
 mod transport;
 pub use transport::TransportStepCoefficients;
 
+// Native Runge--Kutta stages retain the original storage/rate owner. Earlier
+// stage heat is distinct from authored sources and from physical old enthalpy.
+#[path = "backward_euler/stages.rs"]
+mod stages;
+pub(super) use stages::{StageHeat, StageQuadrature};
+
 impl DepositionSimulation<'_> {
     /// Evaluate the ORIGINAL thermal rate owner's external power at this state.
     /// Trial sources add to authored sources; link replacements keep their
@@ -353,6 +359,7 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
             |state| resolve(state).map(|transport| (transport, None)),
             false,
             with_entropy,
+            None,
             checkpoint,
         )
     }
@@ -383,6 +390,7 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
             },
             true,
             false,
+            None,
             checkpoint,
         )
     }
@@ -401,6 +409,7 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
         >,
         stateful_calorics: bool,
         with_entropy: bool,
+        quadrature: Option<StageQuadrature<'_>>,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<BackwardEulerTrial<'m, T>, E> {
         checkpoint()?;
@@ -410,6 +419,12 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
             )
             .into());
         }
+        let rate_duration_s = if let Some(stage) = quadrature {
+            stage.validate(&self.ids)?;
+            stage.implicit_dt_s
+        } else {
+            self.duration_s
+        };
         let mut next = self.initial.clone();
         next.time_s = self.target_s;
         let mut storage = Vec::with_capacity(self.ids.len());
@@ -488,7 +503,7 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
         if !transfers.is_empty() {
             next.add_step_transfers(&mut rates, &transfers, &mut checkpoint)?;
         }
-        let entropy = if let Some(initial_h) = initial_h {
+        let mut entropy = if let Some(initial_h) = initial_h {
             // The same signed at-cell convention as the explicit entropy
             // observer. These are NOT heat sources for the energy residual:
             // the native transfer kernel above already applied them once.
@@ -514,14 +529,14 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
                 next.entropy_step_audit(
                     &initial_h,
                     &rates.temperatures,
-                    self.duration_s,
+                    rate_duration_s,
                     &mut checkpoint,
                 )?
             } else {
                 next.entropy_step_audit_with_boundary_coefficients(
                     &initial_h,
                     &rates.temperatures,
-                    self.duration_s,
+                    rate_duration_s,
                     &transfer_sources,
                     &BTreeMap::new(),
                     &boundaries.ambient_w_k,
@@ -534,6 +549,9 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
         } else {
             None
         };
+        if let (Some(stage), Some(audit)) = (quadrature, entropy.as_mut()) {
+            stage.add_earlier_entropy(audit)?;
+        }
         // The endpoint carries authored topology/boundaries, never trial inputs.
         for (id, value) in links {
             next.links
@@ -549,15 +567,32 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
                 .source_w = value;
         }
         let mut residual = Vec::with_capacity(self.ids.len());
+        // Only the final, entropy-audited first stage retains rates. Ordinary
+        // backward Euler and intermediate Newton trials allocate no extra row.
+        let mut retained_heat = (with_entropy && quadrature.is_some_and(|s| s.retain_heat))
+            .then(|| Vec::with_capacity(self.ids.len()));
+        let earlier = quadrature.and_then(|stage| stage.earlier);
         for (i, (&id, &joules)) in self.ids.iter().zip(&storage).enumerate() {
             if i % 256 == 0 {
                 checkpoint()?;
             }
-            residual.push(finite(
-                joules - finite(self.duration_s * rates.watts[&id])?,
-            )?);
+            let endpoint_heat = finite(rate_duration_s * rates.watts[&id])?;
+            let heat = if let Some(earlier) = earlier {
+                finite(endpoint_heat + earlier.heat_j[i])?
+            } else {
+                endpoint_heat
+            };
+            residual.push(finite(joules - heat)?);
+            if let Some(heat) = &mut retained_heat {
+                heat.push(endpoint_heat);
+            }
         }
-        let external_heat_j = finite(self.duration_s * rates.external_w)?;
+        let endpoint_external_heat_j = finite(rate_duration_s * rates.external_w)?;
+        let external_heat_j = if let Some(earlier) = earlier {
+            finite(endpoint_external_heat_j + earlier.external_heat_j)?
+        } else {
+            endpoint_external_heat_j
+        };
         let audit = EnergyAudit {
             incoming_mass_kg: 0.0,
             incoming_energy_j: 0.0,
@@ -567,6 +602,14 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
             substeps: 1,
             events: 0,
         };
+        let stage_heat = retained_heat.map(|heat| {
+            StageHeat::capture(
+                self.ids.clone(),
+                heat,
+                endpoint_external_heat_j,
+                entropy.expect("retained stage heat requires the native entropy audit"),
+            )
+        });
         checkpoint()?;
         Ok(BackwardEulerTrial {
             next,
@@ -574,6 +617,7 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
             residual,
             audit,
             entropy,
+            stage_heat,
         })
     }
 }
@@ -586,6 +630,7 @@ pub struct BackwardEulerTrial<'m, T> {
     residual: Vec<f64>,
     audit: EnergyAudit,
     entropy: Option<super::entropy::EntropyAudit>,
+    stage_heat: Option<StageHeat>,
 }
 impl<'m, T> BackwardEulerTrial<'m, T> {
     /// Per-cell energy-balance residual [J] in the step's CellId order.
@@ -625,6 +670,16 @@ impl<'m, T> BackwardEulerTrial<'m, T> {
         total_tolerance_j: f64,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<(DepositionSimulation<'m>, T, EnergyAudit), DepositionError> {
+        self.check_acceptance(cell_tolerance_j, total_tolerance_j, &mut checkpoint)?;
+        Ok((self.next, self.payload, self.audit))
+    }
+
+    fn check_acceptance(
+        &self,
+        cell_tolerance_j: f64,
+        total_tolerance_j: f64,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), DepositionError> {
         checkpoint()?;
         if !nonnegative(cell_tolerance_j) || !nonnegative(total_tolerance_j) {
             return Err(DepositionError::InvalidInput(
@@ -643,7 +698,7 @@ impl<'m, T> BackwardEulerTrial<'m, T> {
             return Err(DepositionError::EnergyBalance(self.audit.residual_j));
         }
         checkpoint()?;
-        Ok((self.next, self.payload, self.audit))
+        Ok(())
     }
 }
 

@@ -158,6 +158,22 @@ impl<'a> ImplicitConductionGraph<'a> {
             .advance_to(thermal, target_s, controls, workspace, checkpoint)
     }
 
+    /// Second-order L-stable conduction on the original branched/cyclic graph.
+    /// The chain entry point documents the fixed-cell, source-free, constant-bath
+    /// scope and the original domain/entropy/residual gates. Both stages and
+    /// rejected intervals share this graph's bounded sparse linear owner.
+    pub fn advance_sdirk2_to<'m>(
+        &self,
+        thermal: &DepositionSimulation<'m>,
+        target_s: f64,
+        controls: ImplicitConductionControls,
+        workspace: &mut ImplicitConductionWorkspace,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(DepositionSimulation<'m>, ImplicitConductionReport), ImplicitConductionError> {
+        self.inner
+            .advance_sdirk2_to(thermal, target_s, controls, workspace, checkpoint)
+    }
+
     /// IMEX sources and conservative transfers through the same graph solve.
     /// Sources and directed transfers are held at each accepted start; the
     /// original flow timestep limit remains active. See the chain's

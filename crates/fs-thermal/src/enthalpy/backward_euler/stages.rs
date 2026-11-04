@@ -1,0 +1,145 @@
+//! Internal stage quadrature on the original joule residual and caloric chart.
+use super::*;
+use crate::enthalpy::entropy::EntropyAudit;
+
+/// The physical endpoint clock and the implicit quadrature weight are distinct.
+/// A retained earlier stage is native heat, never an external source or a
+/// replacement for the actual initial enthalpy. This ingress is crate-internal.
+#[derive(Clone, Copy)]
+pub(in crate::enthalpy) struct StageQuadrature<'a> {
+    pub(in crate::enthalpy) implicit_dt_s: f64,
+    pub(in crate::enthalpy) earlier: Option<&'a StageHeat>,
+    pub(in crate::enthalpy) retain_heat: bool,
+}
+
+/// Integrated native rates at one physical stage, captured only after an
+/// entropy query. Private fields prevent callers substituting external heat
+/// for internal conduction or relabeling storage as a rate integral.
+pub(in crate::enthalpy) struct StageHeat {
+    ids: Vec<CellId>,
+    pub(super) heat_j: Vec<f64>,
+    pub(super) external_heat_j: f64,
+    reservoir_entropy_j_k: f64,
+    conduction_generation_j_k: f64,
+    source_entropy_j_k: f64,
+    has_unclassified_sources: bool,
+}
+
+impl StageQuadrature<'_> {
+    pub(super) fn validate(&self, ids: &[CellId]) -> Result<(), DepositionError> {
+        if !positive(self.implicit_dt_s)
+            || (self.retain_heat && self.earlier.is_some())
+            || self.earlier.is_some_and(|earlier| earlier.ids != ids)
+        {
+            return Err(DepositionError::InvalidInput(
+                "implicit stage needs positive quadrature and the original cell ordering",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn add_earlier_entropy(
+        &self,
+        audit: &mut EntropyAudit,
+    ) -> Result<(), DepositionError> {
+        if let Some(earlier) = self.earlier {
+            audit.reservoir_entropy_input_j_k =
+                finite(audit.reservoir_entropy_input_j_k + earlier.reservoir_entropy_j_k)?;
+            audit.conduction_generation_j_k =
+                finite(audit.conduction_generation_j_k + earlier.conduction_generation_j_k)?;
+            audit.unclassified_source_at_cell_j_k =
+                finite(audit.unclassified_source_at_cell_j_k + earlier.source_entropy_j_k)?;
+            audit.has_unclassified_sources |= earlier.has_unclassified_sources;
+            // Storage is still the exact caloric integral from the ORIGINAL
+            // physical initial state. The first stage is not an extra step.
+            audit.temporal_defect_j_k = finite(
+                audit.thermal_storage_change_j_k
+                    - audit.reservoir_entropy_input_j_k
+                    - audit.conduction_generation_j_k
+                    - audit.unclassified_source_at_cell_j_k,
+            )?;
+        }
+        Ok(())
+    }
+}
+
+impl StageHeat {
+    pub(super) fn capture(
+        ids: Vec<CellId>,
+        heat_j: Vec<f64>,
+        external_heat_j: f64,
+        entropy: EntropyAudit,
+    ) -> Self {
+        Self {
+            ids,
+            heat_j,
+            external_heat_j,
+            reservoir_entropy_j_k: entropy.reservoir_entropy_input_j_k,
+            conduction_generation_j_k: entropy.conduction_generation_j_k,
+            source_entropy_j_k: entropy.unclassified_source_at_cell_j_k,
+            has_unclassified_sources: entropy.has_unclassified_sources,
+        }
+    }
+
+    /// Reweight the same native stage rates; do not derive them from a rounded
+    /// storage increment or transfer its algebraic defect into later forcing.
+    pub(in crate::enthalpy) fn scaled(
+        mut self,
+        factor: f64,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, DepositionError> {
+        checkpoint()?;
+        if !positive(factor) {
+            return Err(DepositionError::InvalidInput(
+                "implicit stage heat needs a positive finite weight",
+            ));
+        }
+        for (i, heat) in self.heat_j.iter_mut().enumerate() {
+            if i % 256 == 0 {
+                checkpoint()?;
+            }
+            *heat = finite(*heat * factor)?;
+        }
+        self.external_heat_j = finite(self.external_heat_j * factor)?;
+        self.reservoir_entropy_j_k = finite(self.reservoir_entropy_j_k * factor)?;
+        self.conduction_generation_j_k = finite(self.conduction_generation_j_k * factor)?;
+        self.source_entropy_j_k = finite(self.source_entropy_j_k * factor)?;
+        checkpoint()?;
+        Ok(self)
+    }
+}
+
+impl<'s, 'm> BackwardEulerStep<'s, 'm> {
+    pub(in crate::enthalpy) fn evaluate_stage<T, E: From<DepositionError>>(
+        &self,
+        energy_increments_j: &[f64],
+        resolve: impl FnOnce(&DepositionSimulation<'m>) -> Result<TransportStepCoefficients<T>, E>,
+        quadrature: StageQuadrature<'_>,
+        with_entropy: bool,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BackwardEulerTrial<'m, T>, E> {
+        self.evaluate_endpoint_option(
+            energy_increments_j,
+            |state| resolve(state).map(|transport| (transport, None)),
+            false,
+            with_entropy,
+            Some(quadrature),
+            checkpoint,
+        )
+    }
+}
+
+impl<'m, T> BackwardEulerTrial<'m, T> {
+    pub(in crate::enthalpy) fn accept_with_stage_heat(
+        self,
+        cell_tolerance_j: f64,
+        total_tolerance_j: f64,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(DepositionSimulation<'m>, T, EnergyAudit, StageHeat), DepositionError> {
+        self.check_acceptance(cell_tolerance_j, total_tolerance_j, checkpoint)?;
+        let heat = self.stage_heat.ok_or(DepositionError::InvalidInput(
+            "implicit stage did not retain its native heat rates",
+        ))?;
+        Ok((self.next, self.payload, self.audit, heat))
+    }
+}

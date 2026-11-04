@@ -1216,6 +1216,45 @@ regressions check original heat and actual-bath entropy plus refusal/rollback.
 The full pinned-main native thermal source passes 191 tests, with one existing
 ignored test; required workspace/DSR gates remain a separate unavailable check.
 
+### Second-order implicit network diffusion
+
+`ImplicitConductionChain::advance_sdirk2_to` and the graph equivalent add
+two-stage L-stable SDIRK2 with `gamma = 1 - 1/sqrt(2)`. Both stages solve the
+original cell-joule residual using the original caloric laws, conductivity and
+interface tangents, domain-respecting Newton search and direct/sparse linear
+owner. The second stage retains the actual physical initial enthalpies; its
+known first-stage contribution is the native integrated heat-rate vector,
+not a synthetic initial temperature, an inferred storage difference, or an
+external heat source. The accepted endpoint is the second stage.
+
+First-stage heat is retained only for its final entropy-audited candidate,
+with O(cells) extra storage and no extra per-Newton rate-vector allocation.
+The ordinary backward-Euler entry points keep their original quadrature and
+arithmetic. Both stages and every rejected interval share the existing work
+budgets. Each fully accepted physical interval counts once; a rejected second
+stage publishes neither stage. Independent local, interval-total and whole-call
+joule gates remain active. Bath heat/entropy and conductive generation use the
+two positive stage weights; exact caloric entropy storage is measured from the
+original initial state and the temporal entropy defect remains explicit.
+
+This entry point admits fixed-mass source-free chains/graphs, including their
+existing nonlinear bulk, contact and integrated interface laws, with constant
+ambient/reservoir temperatures. Attached implicit advection, nonzero authored
+sources and pending events at or before the requested target refuse explicitly;
+no observer or mass-advection hook is exposed. Nonlinear failure may halve a
+complete two-stage interval, but this is not an error-controlled adaptive method. Second-order time accuracy
+requires a smooth admitted solution and independent timestep refinement;
+constitutive/phase corners may lower it. L-stability is not unconditional
+positivity, monotonicity or a maximum-principle guarantee: every stage retains
+the original material-domain checks, without temperature/heat clipping.
+
+Focused regressions compare unequal-capacity equilibration and bath cooling
+against independent analytic stage solutions, including physical weighted
+entropy. Periodic graph Fourier decay and nonlinear `k(T)` cooling demonstrate
+second-order temporal refinement. Stiff modal damping, latent-plateau storage,
+second-stage domain/work rollback and unsupported source/event refusal exercise
+the stated admission boundary.
+
 ## Additional material conductances on the native explicit timeline
 
 `DepositionSimulation::limit_timestep_for_additional_conductances` composes
