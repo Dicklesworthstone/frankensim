@@ -38,6 +38,7 @@ pub mod fixed_step;
 /// Harmonic no-penetration correction above a plane in the Mann frame.
 pub mod wall;
 use wall::MannPlaneWall;
+use wall::filter::MannWallBoxFilter;
 
 /// Independent Philox namespace for homogeneous Mann quadrature geometry.
 pub const MANN_FIELD_KERNEL: u32 = 0x4d41_4e4e;
@@ -276,6 +277,17 @@ impl MannSpectralModel {
         wall::covariance_modes(self, None, first_m, second_m, 0.0, wall)
     }
 
+    /// Equal-time covariance after exact finite-footprint wall observations
+    /// at both centers. The complete footprints must lie above the plane.
+    pub fn covariance_wall_blocked_filtered(
+        &self,
+        first_m: [f64; 3],
+        second_m: [f64; 3],
+        filter: &MannWallBoxFilter,
+    ) -> Result<[[f64; 3]; 3], Refusal> {
+        wall::filter::covariance_modes(self, None, first_m, second_m, 0.0, filter)
+    }
+
     /// Exact represented equal-time covariance `E[u_i(x) u_j(x+r)]`.
     /// At zero separation this gives the retained Reynolds-stress tensor;
     /// at nonzero separation it reports the actual finite-mode coherence.
@@ -456,7 +468,8 @@ impl HomogeneousMannField {
     /// Velocity and analytic gradient above an explicit slip plane. The
     /// harmonic correction enforces no penetration and preserves divergence;
     /// it uses the current quadratures without allocating or drawing noise.
-    /// Points below the plane refuse. Spatial filters are not combined here.
+    /// Points below the plane refuse. Use `sample_wall_blocked_filtered` for
+    /// exact finite-footprint observations of the same field.
     pub fn sample_wall_blocked(
         &self,
         point_m: [f64; 3],
@@ -468,6 +481,22 @@ impl HomogeneousMannField {
             core::array::from_fn(|i| self.paths[i].amplitudes()),
             point_m,
             wall,
+        )
+    }
+
+    /// Exact box, face or line average of wall-blocked velocity and all nine
+    /// gradients. Reads the original quadratures; crossing the plane refuses.
+    pub fn sample_wall_blocked_filtered(
+        &self,
+        point_m: [f64; 3],
+        filter: &MannWallBoxFilter,
+    ) -> Result<FlowSample, Refusal> {
+        wall::filter::sample_modes(
+            &self.model,
+            self.tick() as f64 / TICK_HZ,
+            core::array::from_fn(|i| self.paths[i].amplitudes()),
+            point_m,
+            filter,
         )
     }
 
@@ -522,6 +551,25 @@ impl HomogeneousMannField {
             second_m,
             lag_s,
             wall,
+        )
+    }
+
+    /// Full stationary tensor between two finite-footprint observations of
+    /// the same wall-blocked realization, including OU decay and advection.
+    pub fn covariance_wall_blocked_filtered(
+        &self,
+        first_m: [f64; 3],
+        second_m: [f64; 3],
+        lag_s: f64,
+        filter: &MannWallBoxFilter,
+    ) -> Result<[[f64; 3]; 3], Refusal> {
+        wall::filter::covariance_modes(
+            &self.model,
+            Some(&self.correlation_times_s),
+            first_m,
+            second_m,
+            lag_s,
+            filter,
         )
     }
 

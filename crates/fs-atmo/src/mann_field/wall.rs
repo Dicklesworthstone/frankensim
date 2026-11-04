@@ -14,10 +14,13 @@
 //! wall-generated turbulence or a calibration of the near-ground spectrum.
 //! Wall blocking and homogeneous shear are distinct effects in Mann (1994),
 //! JFM 273, <https://doi.org/10.1017/S0022112094001886>.
-//! Only point observations are exposed: homogeneous sinc gains do not
-//! describe averages of the evanescent wall correction.
+//! [`filter`] integrates the same field over finite boxes, faces and lines;
+//! the evanescent correction has its own analytic observation gain.
 
 use super::*;
+
+/// Exact finite-footprint observations of the wall-blocked field.
+pub mod filter;
 
 /// Plane `z = height_m` in the authored Mann coordinate frame.
 /// Only points in its exact upper half-space are admitted.
@@ -158,10 +161,8 @@ impl ModePoint {
     fn values(&self, a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
         let wall_derivative = -a[2] * self.wall_phase[1] + b[2] * self.wall_phase[0];
         [
-            a[0] * self.phase[0] + b[0] * self.phase[1]
-                + self.horizontal[0] * wall_derivative,
-            a[1] * self.phase[0] + b[1] * self.phase[1]
-                + self.horizontal[1] * wall_derivative,
+            a[0] * self.phase[0] + b[0] * self.phase[1] + self.horizontal[0] * wall_derivative,
+            a[1] * self.phase[0] + b[1] * self.phase[1] + self.horizontal[1] * wall_derivative,
             a[2] * self.difference[0] + b[2] * self.difference[1],
         ]
     }
@@ -178,8 +179,7 @@ impl ModePoint {
         }
         for i in 0..2 {
             for j in 0..2 {
-                sample.grad[i][j] +=
-                    (derivative[i] - self.horizontal[i] * wall_value) * self.k[j];
+                sample.grad[i][j] += (derivative[i] - self.horizontal[i] * wall_value) * self.k[j];
             }
             sample.grad[i][2] +=
                 derivative[i] * self.k[2] - self.horizontal[i] * wall_derivative * self.q;
@@ -250,7 +250,14 @@ pub(super) fn covariance_modes(
     };
     let mut covariance = [[0.0; 3]; 3];
     for (index, mode) in model.modes.iter().enumerate() {
-        let a = ModePoint::new(mode, model.advection_mps, 0.0, first, origin_wall, first_height)?;
+        let a = ModePoint::new(
+            mode,
+            model.advection_mps,
+            0.0,
+            first,
+            origin_wall,
+            first_height,
+        )?;
         let b = ModePoint::new(
             mode,
             model.advection_mps,

@@ -303,6 +303,22 @@ impl FixedStepMannField {
         )
     }
 
+    /// Exact finite-footprint wall-blocked observation of this accepted
+    /// fixed-clock state. No temporal advance or random draw is performed.
+    pub fn sample_wall_blocked_filtered(
+        &self,
+        point_m: [f64; 3],
+        filter: &MannWallBoxFilter,
+    ) -> Result<FlowSample, Refusal> {
+        wall::filter::sample_modes(
+            self.model(),
+            self.time_s(),
+            core::array::from_fn(|i| self.amplitudes[i].as_slice()),
+            point_m,
+            filter,
+        )
+    }
+
     pub fn sample_filtered(
         &self,
         point_m: [f64; 3],
@@ -350,6 +366,25 @@ impl FixedStepMannField {
             second_m,
             lag_s,
             wall,
+        )
+    }
+
+    /// Full covariance of two averaged wall-blocked observations, retaining
+    /// this owner's authored OU times and physical phase advection.
+    pub fn covariance_wall_blocked_filtered(
+        &self,
+        first_m: [f64; 3],
+        second_m: [f64; 3],
+        lag_s: f64,
+        filter: &MannWallBoxFilter,
+    ) -> Result<[[f64; 3]; 3], Refusal> {
+        wall::filter::covariance_modes(
+            self.model(),
+            Some(self.correlation_times_s()),
+            first_m,
+            second_m,
+            lag_s,
+            filter,
         )
     }
 

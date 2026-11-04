@@ -115,11 +115,37 @@ Only finite points in the exact upper half-space are admitted. The same
 retained modal arrays are read without new allocations, draws or clock
 changes. This is an outer-flow slip-plane construction, without a viscous
 no-slip layer, ground-generated turbulence or a calibrated near-ground
-spectrum. Point observations are supported; homogeneous sinc filters do not
-supply the evanescent correction's spatial average. Six focused Rust
-regressions accompany this implementation. After execution was restored,
+spectrum. Homogeneous sinc filters alone do not supply the evanescent
+correction's spatial average. Six focused Rust regressions accompany the
+point observation. After execution was restored,
 all six passed in the native debug build, including independent tensor
 covariance, all nine gradients and extreme far-field recovery.
+
+`mann_field::wall::filter::MannWallBoxFilter` supplies exact uniform averages
+over boxes, parallelepipeds and collapsed faces/lines/points. Both temporal
+owners expose `sample_wall_blocked_filtered` and
+`covariance_wall_blocked_filtered`; the spectral model exposes the equal-time
+covariance. The original homogeneous gain is combined with the analytic
+evanescent gain `product(sinh(z_j)/z_j)`, where
+`z_j = -q*a_j.z + i*(kx*a_j.x + ky*a_j.y)`. Both observations of the full
+tensor receive their own height-dependent response; energy is not rescaled.
+The whole footprint must remain above the plane, without clipping.
+
+Prepared correction gains are normalized at the footprint's lowest height,
+preserving deep wall-touching averages even when the center correction has
+underflowed. Compensated increments preserve tiny near-wall differences.
+Numerical gain storage is zero for points, 8 bytes/mode for tangential
+footprints and 32 bytes/mode with vertical extent; actual capacity is admitted.
+The source-bound observation allocates nothing and draws no randomness when
+sampled. Zero extent retains the original point arithmetic. Original physical
+clocks, spectra and OU paths are unchanged. This averages velocity and its
+analytic gradient, not nonlinear momentum/energy fluxes or unresolved physics.
+
+Six native filter regression groups passed against independent spatial and
+two-observer covariance quadrature, gradient differences, solenoidality,
+wall parity, both clocks/replay, deep/tiny footprints and admission. The
+complete affected Mann module suite passed 28 tests. These establish the
+represented finite-field identities, not a DNS or empirical calibration.
 
 ## Invariants
 
