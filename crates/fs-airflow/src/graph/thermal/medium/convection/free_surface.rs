@@ -12,6 +12,10 @@ use fs_lbm::material::free_surface::enthalpy::conduction::surface::convection::{
 };
 use fs_material::fluid_transport::{AidingVerticalPlateFrame, ThermalFluidTransportState};
 
+/// Spatially resolved external plate transfer on fixed original surface patches.
+pub mod sections;
+pub use sections::{PlanarFreeSurfaceSection, PlanarFreeSurfaceSections};
+
 /// Explicitly selected average flat-plate forced-convection correlation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlanarForcedConvectionRegime {
@@ -168,35 +172,49 @@ fn tangent(normal: [f64; 3], direction: [f64; 3]) -> bool {
         <= DIRECTION_ROUNDOFF
 }
 
+// Shared geometric/source admission for both whole-plate means and authored
+// streamwise strips. The physical surface temperature is supplied by fs-lbm's
+// original interface solve; it cannot be replaced with a liquid cell average.
+fn admit_plate_query(
+    query: &FreeSurfaceConvectionQuery<'_>,
+    outward_normal: [f64; 3],
+    characteristic_length: Length,
+) -> Result<[f64; 3], FreeSurfaceEnthalpyError> {
+    let normal = unit_normal(outward_normal)?;
+    let actual_normal = unit_normal(query.outward_normal)?;
+    if !aligned(normal, actual_normal) {
+        return Err(invalid(
+            "the declared plate normal must match its actual liquid/gas surface",
+        ));
+    }
+    if !characteristic_length.value().is_finite() || characteristic_length.value() <= 0.0 {
+        return Err(invalid(
+            "plate convection requires a positive physical characteristic length",
+        ));
+    }
+    let wall = query.surface_temperature_k;
+    let bulk = query.bulk.state().temperature;
+    if [wall, bulk].into_iter().any(|x| !x.is_finite() || x <= 0.0)
+        || query.film.state().temperature != 0.5 * wall + 0.5 * bulk
+    {
+        return Err(invalid(
+            "plate convection requires original bulk and actual mean-film temperatures",
+        ));
+    }
+    Ok(actual_normal)
+}
+
 impl FreeSurfaceGasConvection for PlanarFreeSurfaceConvection {
     fn coefficient(
         &self,
         query: FreeSurfaceConvectionQuery<'_>,
     ) -> Result<Option<Evidence<FreeSurfaceHeatTransferCoefficient>>, FreeSurfaceEnthalpyError>
     {
-        let normal = unit_normal(self.outward_normal)?;
-        let actual_normal = unit_normal(query.outward_normal)?;
-        if !aligned(normal, actual_normal) {
-            return Err(invalid(
-                "the declared plate normal must match its actual liquid/gas surface",
-            ));
-        }
-        if !self.characteristic_length.value().is_finite()
-            || self.characteristic_length.value() <= 0.0
-        {
-            return Err(invalid(
-                "plate convection requires a positive physical characteristic length",
-            ));
-        }
+        let actual_normal = admit_plate_query(
+            &query, self.outward_normal, self.characteristic_length,
+        )?;
         let wall = query.surface_temperature_k;
         let bulk = query.bulk.state().temperature;
-        if [wall, bulk].into_iter().any(|x| !x.is_finite() || x <= 0.0)
-            || query.film.state().temperature != 0.5 * wall + 0.5 * bulk
-        {
-            return Err(invalid(
-                "plate convection requires original bulk and actual mean-film temperatures",
-            ));
-        }
         let evaluated = match self.law {
             PlanarFreeSurfaceHeatLaw::Forced {
                 regime,

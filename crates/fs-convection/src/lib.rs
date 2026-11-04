@@ -21,7 +21,7 @@ mod natural;
 mod enclosed;
 mod sensitivity;
 
-/// Finite axial sections of the original developing circular-duct relation.
+/// Finite sections of the original mean flat-plate and circular-duct relations.
 pub mod developing;
 
 pub use natural::{HorizontalPlateFacing, NaturalConvectionGeometry};
@@ -857,10 +857,10 @@ fn evaluate_formula(
             numerator / denominator
         }
         CorrelationId::FlatPlateLaminarAverage => {
-            0.664 * det::sqrt(group("Re")) * det::pow(group("Pr"), 1.0 / 3.0)
+            developing::flat_plate_laminar_mean(group("Re"), group("Pr"))
         }
         CorrelationId::FlatPlateTurbulentAverage => {
-            (0.037 * det::pow(group("Re"), 0.8) - 871.0) * det::pow(group("Pr"), 1.0 / 3.0)
+            developing::flat_plate_turbulent_mean(group("Re"), group("Pr"))
         }
         CorrelationId::ChurchillBernsteinCylinder => {
             let re = group("Re");

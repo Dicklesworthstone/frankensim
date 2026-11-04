@@ -1,4 +1,4 @@
-//! Finite axial sections of the original mean Hausen relation.
+//! Finite sections of the original mean duct and flat-plate relations.
 //!
 //! A section uses the difference of cumulative mean transfer, not a fresh
 //! thermal entrance at each mesh cell. This is a derived held-property model;
@@ -6,9 +6,180 @@
 //! domain. Their discrepancy allowance is not a validated local error bound.
 
 use super::{
-    CorrelationError, CorrelationId, CorrelationInputs, HeatTransferCoefficient,
-    Length, NusseltEvaluation, ThermalConductivity, det, evaluate,
+    CorrelationError, CorrelationId, CorrelationInputs, CorrelationRobinBoundary,
+    HeatTransferCoefficient, Length, NusseltEvaluation, Temperature,
+    ThermalConductivity, det, evaluate,
 };
+use fs_evidence::{Evidence, NumericalCertificate, ProvenanceHash, SensitivitySummary};
+
+mod flat_plate;
+pub(super) use flat_plate::{flat_plate_laminar_mean, flat_plate_turbulent_mean};
+
+/// A strip must select one of the original flat-plate mean correlations.
+#[derive(Debug)]
+pub enum FlatPlateSectionError {
+    /// A duct, cylinder or natural-convection relation cannot describe this strip.
+    UnsupportedCorrelation(CorrelationId),
+    /// Preserve the original group, source-domain or arithmetic refusal.
+    Correlation(CorrelationError),
+}
+
+impl core::fmt::Display for FlatPlateSectionError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::UnsupportedCorrelation(id) => write!(f,
+                "flat-plate sections require a laminar or turbulent flat-plate mean, not {}", id.name()),
+            Self::Correlation(error) => write!(f, "{error}"),
+        }
+    }
+}
+impl std::error::Error for FlatPlateSectionError {}
+impl From<CorrelationError> for FlatPlateSectionError {
+    fn from(error: CorrelationError) -> Self { Self::Correlation(error) }
+}
+
+/// Mean heat transfer over the physical interval `[a,b]` of an isothermal plate.
+/// Both positions use the SAME leading edge, fluid state and relative velocity.
+/// The Nusselt number is based on the downstream distance `b`, not strip width.
+#[derive(Debug)]
+pub struct FlatPlateSection {
+    start_fraction: f64,
+    upstream: Option<NusseltEvaluation>,
+    downstream: NusseltEvaluation,
+    nusselt: f64,
+}
+
+impl FlatPlateSection {
+    /// Physical upstream/downstream distance ratio `a/b` in `[0,1)`.
+    pub const fn start_fraction(&self) -> f64 { self.start_fraction }
+    /// Original mean at `a`; absent only at the exact physical leading edge.
+    pub const fn upstream(&self) -> Option<&NusseltEvaluation> { self.upstream.as_ref() }
+    /// Original mean at the downstream position `b`.
+    pub const fn downstream(&self) -> &NusseltEvaluation { &self.downstream }
+    /// Strip-average `h b/k`, retaining `b` as its characteristic length.
+    pub const fn nusselt(&self) -> f64 { self.nusselt }
+
+    /// Convert with the SAME fluid conductivity and physical downstream distance.
+    ///
+    /// A leading-edge strip delegates exactly to the original mean conversion.
+    /// For positive starts, original source cards remain attached but their
+    /// mean discrepancy cannot bound a difference of cumulative predictions:
+    /// the derived strip therefore reports an explicit unbounded model band.
+    /// Formula arithmetic remains an estimate, with no local sensitivity claim.
+    pub fn heat_transfer_coefficient(
+        &self,
+        conductivity: ThermalConductivity,
+        downstream_distance: Length,
+    ) -> Result<Evidence<HeatTransferCoefficient>, CorrelationError> {
+        let mut evidence = self.downstream
+            .heat_transfer_coefficient(conductivity, downstream_distance)?;
+        let Some(upstream) = &self.upstream else { return Ok(evidence); };
+        let value = self.nusselt * conductivity.value() / downstream_distance.value();
+        if !value.is_finite() || value <= 0.0 {
+            return Err(CorrelationError::NonFiniteResult {
+                stage: "flat-plate section Nu-to-h conversion", value_bits: value.to_bits(),
+            });
+        }
+        evidence.value = HeatTransferCoefficient::new(value);
+        evidence.qoi = value;
+        evidence.numerical = NumericalCertificate::estimate(value, value);
+        evidence.model.discrepancy_rel = f64::INFINITY;
+        evidence.model.assumptions.push(
+            "section difference of cumulative flat-plate means at one held fluid and isothermal wall state".into());
+        evidence.model.assumptions.push(
+            "original mean-card discrepancy does not bound local or section model discrepancy".into());
+        evidence.model.assumptions.sort_unstable();
+        evidence.model.assumptions.dedup();
+        evidence.sensitivity = SensitivitySummary::default();
+        let mut values = [0_u8; 24];
+        for (bytes, input) in values.chunks_exact_mut(8).zip([
+            self.start_fraction, conductivity.value(), downstream_distance.value(),
+        ]) {
+            bytes.copy_from_slice(&input.to_bits().to_le_bytes());
+        }
+        evidence.provenance = ProvenanceHash::chain("convection-flat-plate-section-nu-to-h-v1", &[
+            upstream.evidence().provenance, self.downstream.evidence().provenance,
+            ProvenanceHash::of_bytes(&values),
+        ]);
+        Ok(evidence)
+    }
+
+    /// Lower exactly this strip coefficient into the existing conduction owner,
+    /// retaining the source-bearing coefficient beside the private Robin row.
+    pub fn robin_boundary(
+        &self,
+        conductivity: ThermalConductivity,
+        downstream_distance: Length,
+        reference_temperature: Temperature,
+    ) -> Result<CorrelationRobinBoundary, CorrelationError> {
+        let temperature = reference_temperature.value();
+        if !temperature.is_finite() {
+            return Err(CorrelationError::InvalidDimensionalInput {
+                field: "Robin reference temperature", value_bits: temperature.to_bits(),
+                requirement: "supply a finite coherent-SI absolute temperature",
+            });
+        }
+        let coefficient = self.heat_transfer_coefficient(conductivity, downstream_distance)?;
+        let boundary = fs_conduction::ThermalBc::robin(coefficient.value.value(), temperature)
+            .map_err(|_| CorrelationError::NonFiniteResult {
+                stage: "conduction Robin boundary admission", value_bits: coefficient.value.value().to_bits(),
+            })?;
+        Ok(CorrelationRobinBoundary { coefficient, reference_temperature, boundary })
+    }
+}
+
+/// Integrate one ORIGINAL flat-plate mean relation between physical positions
+/// `a` and `b`, using `start_fraction=a/b` and Reynolds number at `b`.
+///
+/// For positive starts, both `Re_b` and `Re_a=Re_b*a/b` must satisfy the SAME
+/// selected card. The strip transfer is `h b/k = (Nu_b-Nu_a)/(1-a/b)`.
+/// A laminar strip rationalizes the square-root difference. A turbulent strip
+/// cancels the shared 871 leading-edge correction analytically and uses an
+/// accurate exponential difference for very short strips. At `a=0` the exact
+/// original whole-plate mean is retained, including its leading-edge physics.
+///
+/// No positive unsupported upstream point is replaced by the exact entrance.
+/// In particular, no laminar/turbulent card switch or smoothing hides their
+/// rounded transition mismatch. The turbulent first interval already includes
+/// its original laminar leading-edge correction; a later strip must lie fully
+/// within that card's turbulent range.
+///
+/// Heat additivity assumes uniform relative velocity, fluid properties and
+/// isothermal wall temperature. Spatially varying wall/film properties are a
+/// separate held-property approximation, not a resolved boundary-layer solve.
+pub fn evaluate_flat_plate_section(
+    correlation: CorrelationId,
+    reynolds_at_end: f64,
+    prandtl: f64,
+    start_fraction: f64,
+) -> Result<FlatPlateSection, FlatPlateSectionError> {
+    if !matches!(correlation,
+        CorrelationId::FlatPlateLaminarAverage | CorrelationId::FlatPlateTurbulentAverage)
+    {
+        return Err(FlatPlateSectionError::UnsupportedCorrelation(correlation));
+    }
+    if !start_fraction.is_finite() || !(0.0..1.0).contains(&start_fraction) {
+        return Err(CorrelationError::InvalidGroup {
+            axis: "section_start_fraction", value_bits: start_fraction.to_bits(),
+        }.into());
+    }
+    let original = |reynolds| evaluate(correlation, CorrelationInputs::forced(reynolds, prandtl));
+    let downstream = original(reynolds_at_end)?;
+    let upstream = if start_fraction == 0.0 { None }
+        else { Some(original(reynolds_at_end * start_fraction)?) };
+    let mean = downstream.evidence().value;
+    let nusselt = match correlation {
+        CorrelationId::FlatPlateLaminarAverage => flat_plate::laminar_section(mean, start_fraction),
+        CorrelationId::FlatPlateTurbulentAverage => flat_plate::turbulent_section(mean, prandtl, start_fraction),
+        _ => return Err(FlatPlateSectionError::UnsupportedCorrelation(correlation)),
+    };
+    if !nusselt.is_finite() || nusselt <= 0.0 {
+        return Err(CorrelationError::NonFiniteResult {
+            stage: "flat-plate section cumulative-transfer difference", value_bits: nusselt.to_bits(),
+        }.into());
+    }
+    Ok(FlatPlateSection { start_fraction, upstream, downstream, nusselt })
+}
 
 const DEVELOPED: f64 = 3.66;
 const ENTRANCE: f64 = 0.0668;

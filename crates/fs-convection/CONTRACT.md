@@ -433,3 +433,43 @@ the analytic differential limit for adjacent floating-point lengths, and
 original domain/dimensional refusal. Source/API and scalar algebra review were
 completed; Rust parsing, compilation and native numerical execution were
 unavailable in the delivery environment. These tests are not reported executed.
+
+## Finite external flat-plate strips
+
+`developing::evaluate_flat_plate_section` evaluates the heat-transfer coefficient
+over physical leading-edge positions `[a,b]`, given `Re_b`, `Pr` and `a/b`.
+It retains the same original mean card at both endpoints and uses
+`Nu_strip = h b/k = (Nu_mean(b)-Nu_mean(a))/(1-a/b)`. The characteristic length
+for dimensional conversion remains **b**, not the strip width. Thus splitting
+a physical plate preserves total heat without starting a new boundary layer
+at every surface cell. The original mean and section paths share one arithmetic
+owner; existing mean-card arithmetic is unchanged.
+
+Laminar strips use `Nu_mean(b)/(1+sqrt(a/b))`. Turbulent strips cancel the common
+871 entrance term analytically and evaluate the power difference with `expm1`
+and the deterministic logarithm, preserving the local limit even for adjacent
+representable positions. A strip beginning at the exact leading edge retains
+the original whole-plate result, coefficient evidence and Robin row exactly.
+Every positive upstream point must satisfy the SAME original card as the
+downstream point. The turbulent whole-plate mean already includes its original
+laminar entrance; a later strip must lie entirely in the supported turbulent
+range. No cross-card transition blend, upstream clamp or zero-distance floor is
+introduced, and the rounded cards' transition mismatch is not hidden.
+
+Positive-strip coefficients retain both original source evaluations, the held
+fluid and isothermal-wall assumptions, and a provenance binding to the physical
+fraction, conductivity and downstream distance. Their model discrepancy is
+explicitly unbounded: the mean-card engineering allowance is not a validated
+local or section allowance. Numerical evidence remains an estimate, with no
+new enclosure, derivative or physical validation claim. The source-bearing
+coefficient lowers directly into the existing private `CorrelationRobinBoundary`
+pair. Heat additivity assumes the same properties, speed and wall state across
+compared intervals; varying local film or wall temperatures remains a separate
+held-property approximation, not a resolved boundary-layer solution.
+
+Four native scalar tests cover independent analytic means and local limits,
+unequal physical subdivisions, streamwise decay and cancellation in thin strips.
+`tests/flat_plate_sections.rs` covers original endpoint/domain refusal,
+dimensional heat additivity, exact first-strip compatibility, source/evidence
+retention and Robin lowering. Full crate integration execution still requires
+the repository's constellation dependencies.

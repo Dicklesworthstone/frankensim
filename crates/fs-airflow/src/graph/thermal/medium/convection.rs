@@ -29,10 +29,18 @@ pub use mixed::{
 pub mod sphere;
 pub use sphere::{MaterialSphereConvection, evaluate_sphere_from_material};
 
+/// Streamwise sections retain the physical external plate's leading edge.
+pub mod plate;
+pub use plate::{
+    MaterialFlatPlateSection, MaterialFlatPlateSectionError,
+    evaluate_flat_plate_section_from_material,
+};
+
 /// Planar gas convection on the original moving-liquid interface heat solve.
 pub mod free_surface;
 pub use free_surface::{
     PlanarForcedConvectionRegime, PlanarFreeSurfaceConvection, PlanarFreeSurfaceHeatLaw,
+    PlanarFreeSurfaceSection, PlanarFreeSurfaceSections,
 };
 
 /// Geometry and heat-flow direction required by the selected forced correlation.

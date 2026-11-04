@@ -3391,6 +3391,42 @@ source. Newly exposed native patches must pass every material and actual-normal
 check against the same declared plate; the capability does not admit curvature,
 a different local flow or an unsupported natural-convection inclination.
 
+### Streamwise external-plate sections
+
+`evaluate_flat_plate_section_from_material` now supplies a section-average
+coefficient from the original fluid state and the two physical distances from
+one leading edge. It retains that source, its single transport snapshot, both
+original cumulative correlation evaluations and the section coefficient.
+The same coefficient lowers through the existing evidence-paired Robin
+boundary into solid conduction. Laminar and leading-edge-corrected turbulent
+cards keep their own domains at both positive endpoints; no transition blend
+or new entrance at a cell boundary is introduced. A section starting at zero
+retains the original whole-length mean exactly.
+
+`PlanarFreeSurfaceSections` applies those coefficients to the original
+liquid/gas heat solve by O(1) lookup in authored surface-contact order.
+Every patch retains its liquid/gas identities, area, normal distances and
+world-frame normal. Explicit downstream directions must agree with the
+actual relative flow; reversed flow needs distances from the opposite leading
+edge. Missing or stale patch geometry and unsupported upstream regimes refuse.
+Film properties are re-evaluated by the original material owner at the actual
+trial interface/bulk mean, and the native liquid resistance, radiation,
+finite-gas capacity, reciprocal energy transfer and rollback remain active.
+This spatially varying provider deliberately does not admit uniform boundary
+evolution: newly exposed patches require their own physical section binding.
+
+For a common isothermal wall, held fluid state and relative velocity, the
+area-weighted strip coefficients recover the original whole-plate heat while
+resolving its downstream variation. Locally re-querying film properties is an
+explicit approximation to that constant-property boundary layer. Arbitrary
+non-isothermal boundary-layer history, transverse variation, curvature and
+gas momentum remain outside the relation. The source mean-card discrepancy
+is not a local error estimate: positive-start section evidence carries an
+explicit unbounded model discrepancy. Numerical checks cover unequal
+subdivision, source/dimensional consistency, Robin lowering, local heat
+variation, rotation, geometry changes and flow reversal; they do not confer
+experimental validation.
+
 ## Reversible total-pressure hydraulic nodes and physical static tractions
 
 `graph::inertial::total_pressure::TotalPressureGraph` is an explicitly selected,
