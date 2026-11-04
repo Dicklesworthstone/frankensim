@@ -39,7 +39,7 @@ impl StepWorkspace {
             self.backtracking_work.0 = self.backtracking_work.0.saturating_add(1);
             let trial_norm = residual_into(sys, x0, &self.trial, &self.forcing, dt,
                 &self.flow, &mut self.midpoint, &mut self.effort, &mut self.plus,
-                dissipation, &mut self.nonlinear_loss)?;
+                dissipation, &mut self.nonlinear_loss, &mut self.nonlinear_power)?;
             // Infinity-norm Armijo decrease; same norm/units as Newton admission.
             // Already converged finite candidates need not prove more decrease.
             if trial_norm <= (1.0 - 1.0e-4*alpha)*current_norm || trial_norm <= tolerance {

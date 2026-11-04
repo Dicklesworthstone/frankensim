@@ -92,7 +92,7 @@ fn split_jacobian_keeps_every_energy_and_nonlinear_dissipation_derivative() {
         let mut x0=vec![0.0;n];x0[0]=0.3;x0[1]=-0.6;x0[2]=-0.1;
         let mut x1=x0.clone();if !zero_increment {for i in 0..n {x1[i]+=0.005*(i as f64-2.0);}}
         dense.x.copy_from_slice(&x1);sparse.x.copy_from_slice(&x1);
-        let diss=if loss {Some(Dissipation{force:&resist,tangent:Some(&tangent)})}else{None};
+        let diss=if loss {Some(Dissipation{force:crate::prepared::dissipation::Flow::Passive(&resist),tangent:Some(&tangent)})}else{None};
         dense.analytic_jacobian_into(&sys,&x0,0.01,&action,diss,&mut ||Ok(())).unwrap();
         sparse.analytic_jacobian_into(&sys,&x0,0.01,&action,diss,&mut ||Ok(())).unwrap();
         let c=sparse.condensation.as_ref().unwrap();let restored=full(&sparse.jacobian,&c.left,&c.right);
@@ -291,7 +291,7 @@ fn acoustic_jacobian_uses_nonzero_column_support_not_all_edges_per_state() {
     for i in 0..n {dense.x[i]=x0[i]+0.0005*(i+1) as f64;}
     sparse.x.copy_from_slice(&dense.x);
     let action=|x:&[f64],d:&[f64],o:&mut[f64]|Potential(n).hessian(x,d,o);
-    let diss=Some(Dissipation{force:&resist,tangent:Some(&tangent)});
+    let diss=Some(Dissipation{force:crate::prepared::dissipation::Flow::Passive(&resist),tangent:Some(&tangent)});
     dense.analytic_jacobian_into(&sys,&x0,0.003,&action,diss,&mut ||Ok(())).unwrap();
     sparse.analytic_jacobian_into(&sys,&x0,0.003,&action,diss,&mut ||Ok(())).unwrap();
     let edges=(0..n).map(|r|sparse.flow.row(r).len()).sum::<usize>();

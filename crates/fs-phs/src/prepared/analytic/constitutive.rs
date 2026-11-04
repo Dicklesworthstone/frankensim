@@ -185,7 +185,7 @@ mod tests {
         condensed.set_condensed_pairs(&[[2, 3]]).unwrap();
         for use_dissipation in [false, true] {
             let dissipation = use_dissipation.then_some(Dissipation {
-                force: &resist,
+                force: crate::prepared::dissipation::Flow::Passive(&resist),
                 tangent: Some(&tangent),
             });
             for work in [&mut dense, &mut condensed] {

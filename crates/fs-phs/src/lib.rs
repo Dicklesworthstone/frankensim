@@ -63,7 +63,7 @@ pub mod port_exchange;
 pub use port_exchange::{PortExchangeBudget, PortExchangeRecord, PreparedPortExchange};
 
 mod prepared;
-pub use prepared::{PreparedStepError, PreparedStepRecord, StepWorkspace};
+pub use prepared::{NonlinearPortPower, PreparedStepError, PreparedStepRecord, StepWorkspace};
 mod newton;
 use fs_math::c64::C64;
 use fs_math::det;

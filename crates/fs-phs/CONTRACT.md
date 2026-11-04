@@ -2256,3 +2256,36 @@ The focused `harmonic_antiresonance` regression uses a real damped hereditary ho
 `PortHamiltonian::with_parallel_descriptor_load_columns` composes an original constrained load through the existing work-conjugate interconnection owner. The state order remains host coordinates, load differential coordinates, then load multipliers, with `E=diag(I_host,I_load_diff,0)`. The same signed physical columns define host reaction and load flow; no constraint inversion, state removal, storage linearization or time integration occurs during composition. Original immutable storage callbacks, analytic constitutive actions, coordinate scales and resistance witnesses survive. Multipliers remain zero-storage efforts. The public descriptor `output` now includes these original reaction efforts in `G^T e`.
 
 G1 analytic tests cover constrained inertia forcing and finite poles, pure algebraic mutual resistance, original reaction output and independent energy/heat. G3 tests check exact ordinary-ODE harmonic parity and nonlinear quartic trajectories/work against an independent equivalent physical mass, with malformed columns refused. Full native `fs-phs` compilation and all five new focused tests passed using actual source and cached production numerical dependencies. This is not a full workspace gate, descriptor-index classification or guarantee of unique dynamics; callers retain complete resource and initial-consistency responsibilities.
+
+## Nonlinear pressure supplies in the original implicit step
+
+`StepWorkspace::step_into_supplied_controlled` advances externally supplied
+nonlinear flows in the same source-owned/Gonzalez equation, using the existing
+analytic or finite-difference Newton, condensation, backtracking and cancellation
+paths. The callback fills resisting flow `D` and returns `NonlinearPortPower`
+with signed external supply and nonnegative physical dissipation in watts.
+Every trial admits `dg dot D + supplied = dissipated` within summation roundoff.
+The original passive callback retains its original arithmetic and refusal path.
+
+Returning both physical powers preserves small positive heat beside much larger
+opposing storage/supply powers; the solver does not reconstruct that heat by
+subtracting them. The accepted residual refreshes flow and powers together,
+overwriting finite-difference/backtracking probe values. Its exact discrete
+effort and those powers supply the existing receipt, without another callback
+evaluation or per-step solver allocation. Linear port work remains separate.
+Ordinary calls reset the nonlinear account; failures publish neither output.
+Supplies and constitutive parameters are held during the step, and callbacks
+remain read-only. This is accounting for an explicit physical source, not a
+certificate that a caller's supplied constitutive law represents that source.
+
+Fifty-five native prepared-solver regressions pass, including four new groups
+for independent midpoint solutions in both power directions, state-dependent
+sources, analytic/finite-difference agreement, exact passive parity, preserved
+small loss, undeclared work/negative-loss refusal and final-cancel retry.
+`fs-couple/tests/pressure_driven_gas.rs` additionally runs the original
+`PressureDrivenGasFilm` mass transport and storage inside this same mechanical
+step: 100 joint steps close supplied work, gas mass and mechanical/free-energy
+storage, with analytic/finite-difference agreement and atomic cancellation.
+This gas case retains prescribed same-species/temperature reservoirs and the
+isothermal free-energy convention; it adds no isolated thermal balance, finite
+reservoir inventory or automatic time-accuracy guarantee.

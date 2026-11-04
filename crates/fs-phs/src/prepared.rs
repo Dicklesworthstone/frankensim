@@ -16,6 +16,7 @@ mod dissipation;
 mod relaxation;
 mod backtrack;
 use dissipation::Dissipation;
+pub use dissipation::NonlinearPortPower;
 use structure::FlowPattern;
 
 /// Scalar ledger from a prepared step; state and port output use caller buffers.
@@ -23,10 +24,11 @@ use structure::FlowPattern;
 pub struct PreparedStepRecord {
     /// Actual change in Hamiltonian [J].
     pub delta_h: f64,
-    /// `dt * (dg^T R dg + dg^T D(midpoint,dg))` [J].
-    /// The additional nonlinear port is zero on the original stepping APIs.
+    /// `dt * (dg^T R dg + dg^T D + nonlinear_supplied_power)` [J].
+    /// Nonlinear loss/supply are zero on the original ordinary stepping APIs;
+    /// passive nonlinear calls retain `nonlinear_supplied_power = 0`.
     pub dissipated: f64,
-    /// `dt * u^T G^T dg` [J].
+    /// Linear port work plus any declared nonlinear supplied work [J].
     pub supplied: f64,
     /// Number of Newton updates performed.
     pub newton_iters: usize,
@@ -105,6 +107,7 @@ pub struct StepWorkspace {
     effort: Vec<f64>,
     effort_valid: bool,
     nonlinear_loss: Vec<f64>,
+    nonlinear_power: NonlinearPortPower,
     nonlinear_effort: Vec<f64>,
     residual: Vec<f64>,
     plus: Vec<f64>,
@@ -141,12 +144,15 @@ fn zeroed(len: usize) -> Result<Vec<f64>, PhsError> {
 #[allow(clippy::too_many_arguments)]// one residual with explicitly borrowed scratch
 fn residual_into(sys: &PortHamiltonian, x0: &[f64], x: &[f64], gu: &[f64],
     dt: f64, pattern: &FlowPattern, midpoint: &mut [f64], effort: &mut [f64], out: &mut [f64],
-    dissipation: Option<Dissipation<'_>>, nonlinear_loss: &mut [f64]) -> Result<f64, PhsError>
+    dissipation: Option<Dissipation<'_>>, nonlinear_loss: &mut [f64], nonlinear_power: &mut NonlinearPortPower)
+    -> Result<f64, PhsError>
 {
     norm(x)?;
     discrete_gradient_into_unchecked(sys.storage.as_ref(), x0, x, midpoint, effort);
     norm(effort)?;
-    if let Some(port) = dissipation { port.evaluate(midpoint, effort, nonlinear_loss)?; }
+    *nonlinear_power = if let Some(port) = dissipation {
+        port.evaluate(midpoint, effort, nonlinear_loss)?
+    } else { NonlinearPortPower::default() };
     for (row, value) in out.iter_mut().enumerate() {
         let mut flow = 0.0;
         for &col in pattern.row(row) {
@@ -177,7 +183,7 @@ impl StepWorkspace {
             backtracking_halvings: 0, backtracking_work: (0, 0),
             x: zeroed(n)?, best: zeroed(n)?, trial: zeroed(n)?,
             midpoint: zeroed(n)?, effort: zeroed(n)?, effort_valid: false, residual: zeroed(n)?,
-            nonlinear_loss: zeroed(n)?, nonlinear_effort: zeroed(n)?,
+            nonlinear_loss: zeroed(n)?, nonlinear_power: NonlinearPortPower::default(), nonlinear_effort: zeroed(n)?,
             plus: zeroed(n)?, minus: zeroed(n)?, forcing: zeroed(n)?,
             delta: zeroed(n)?, jacobian: zeroed(square)?, output: zeroed(m)?,
             lu: LuWorkspace::new(n).map_err(|_| dimensions("prepared LU capacity"))?,
@@ -506,7 +512,7 @@ impl StepWorkspace {
             poll()?;
             let rnorm = residual_into(sys, x0, &self.x, &self.forcing, dt, &self.flow,
                 &mut self.midpoint, &mut self.effort, &mut self.residual,
-                dissipation, &mut self.nonlinear_loss)?;
+                dissipation, &mut self.nonlinear_loss, &mut self.nonlinear_power)?;
             let rows =
                 self.constitutive_rows(sys, x0, dt, iterations, stagnant, dissipation.is_some())?;
             let quality = rows.as_ref().map_or(rnorm, |rows| {
@@ -538,7 +544,7 @@ impl StepWorkspace {
                 self.x.copy_from_slice(&self.best);
                 let residual = residual_into(sys, x0, &self.x, &self.forcing, dt, &self.flow,
                     &mut self.midpoint, &mut self.effort, &mut self.residual,
-                    dissipation, &mut self.nonlinear_loss)?;
+                    dissipation, &mut self.nonlinear_loss, &mut self.nonlinear_power)?;
                 self.certify(sys, x0, dt, residual, scale, iterations, stagnant, dissipation.is_some())?;
                 break;
             }
@@ -579,11 +585,11 @@ impl StepWorkspace {
                     self.trial[col] += h;
                     residual_into(sys, x0, &self.trial, &self.forcing, dt, &self.flow,
                         &mut self.midpoint, &mut self.effort, &mut self.plus,
-                        dissipation, &mut self.nonlinear_loss)?;
+                        dissipation, &mut self.nonlinear_loss, &mut self.nonlinear_power)?;
                     self.trial[col] = self.x[col] - h;
                     residual_into(sys, x0, &self.trial, &self.forcing, dt, &self.flow,
                         &mut self.midpoint, &mut self.effort, &mut self.minus,
-                        dissipation, &mut self.nonlinear_loss)?;
+                        dissipation, &mut self.nonlinear_loss, &mut self.nonlinear_power)?;
                     for row in 0..n {
                         self.jacobian[row * n + col] = (self.plus[row] - self.minus[row]) / (2.0 * h);
                     }
@@ -624,7 +630,7 @@ impl StepWorkspace {
         // restoration must never leave a stale effort in the energy ledger.
         let solver_residual = residual_into(sys, x0, &self.x, &self.forcing, dt, &self.flow,
             &mut self.midpoint, &mut self.effort, &mut self.residual,
-                dissipation, &mut self.nonlinear_loss)?;
+                dissipation, &mut self.nonlinear_loss, &mut self.nonlinear_power)?;
         let solver_certificate = self.certify(
             sys,
             x0,
@@ -642,14 +648,17 @@ impl StepWorkspace {
             dissipated += self.effort[row] * value;
         }
         if dissipation.is_some() {
-            dissipated += dissipation::power(&self.effort, &self.nonlinear_loss)?;
+            dissipated += self.nonlinear_power.dissipated_power_w;
         }
         dissipated *= dt;
         self.output.fill(0.0);
         for port in 0..self.m {
             for row in 0..n { self.output[port] += sys.g[row * self.m + port] * self.effort[row]; }
         }
-        let supplied = dt * u.iter().zip(&self.output).map(|(a, b)| a * b).sum::<f64>();
+        let mut supplied = dt * u.iter().zip(&self.output).map(|(a, b)| a * b).sum::<f64>();
+        if self.nonlinear_power.supplied_power_w != 0.0 {
+            supplied += dt * self.nonlinear_power.supplied_power_w;
+        }
         // The storage-difference owner may overwrite its gradient scratch with
         // grad H(midpoint). Keep the accepted Gonzalez effort intact for actual
         // constitutive work attribution; FD probe scratch is no longer needed.

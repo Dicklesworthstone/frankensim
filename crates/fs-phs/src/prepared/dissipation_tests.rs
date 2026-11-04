@@ -48,7 +48,7 @@ fn analytic_dissipative_jacobian_includes_state_and_complete_effort_derivatives(
     let mut work=StepWorkspace::new(&sys).unwrap();work.flow.refresh(&sys).unwrap();
     work.x.copy_from_slice(&b);
     work.analytic_jacobian_into(&sys,&a,dt,&hessian,
-        Some(Dissipation {force:&loss,tangent:Some(&tangent)}),&mut ||Ok(())).unwrap();
+        Some(Dissipation {force:Flow::Passive(&loss),tangent:Some(&tangent)}),&mut ||Ok(())).unwrap();
     let residual=|x:&[f64]| {
         let e=discrete_gradient(sys.storage.as_ref(),&a,x);
         let mid=[f64::midpoint(a[0],x[0]),f64::midpoint(a[1],x[1])];
