@@ -2310,6 +2310,15 @@ Reused frequency factors return full component perturbations and external
 reaction forces. Independently reconstructed physical input, glue loss and
 external load work must balance.
 
+`solve_with_frequency_derivative` consumes the rational owner's analytic
+`dZ/ds` with the exact `-i` chain rule at `s=-i*omega`. Every original real and
+conjugate pole, mutual entry and physical source slope enters the same-factor
+loaded tangent. The source derivative matrix and evaluation work are admitted
+before allocation and deducted from the shared frequency controls. Original
+physical motion, port reactions and work slopes support actual receiver
+resonance refinement. Source band, history and both admission reports retain
+their original meaning; frequency slopes add no broadband certificate.
+
 The original source clock, accepted pole history, port ordering and both
 passivity report classes remain unchanged. No fitting, sampled-transfer
 substitution, acoustic surface, external storage/heat or broadband certificate

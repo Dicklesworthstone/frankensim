@@ -30,10 +30,10 @@ use fs_la::eigen_complex::{EigFailure, eig, lu_complex};
 use fs_la::factor::{Qr, lu, qr};
 use fs_math::{c64::C64, det};
 
-/// Shared bounded admission and original exact ZOH runtime for causal loads.
-pub mod load;
 /// Exact held-input realization of entrywise propagation delays.
 pub mod delayed;
+/// Shared bounded admission and original exact ZOH runtime for causal loads.
+pub mod load;
 
 mod relocation;
 pub use relocation::shared_pole_relocation_scratch_bytes;
@@ -128,6 +128,39 @@ impl MimoModel {
             }
         }
         z
+    }
+
+    /// Row-major analytic complex derivative `dZ/ds` of the original model.
+    /// Real poles and stored conjugate pairs retain the same grouping as
+    /// [`Self::eval`], including all mutual entries and the improper term E.
+    /// Two robust complex divisions avoid explicitly squaring a very large
+    /// or small pole distance. A true pole is not shifted or regularized.
+    ///
+    /// This is a Laplace derivative: multiply by +i for dZ(i*w)/dw, or by -i
+    /// for the acoustic/structural dZ(-i*w)/dw convention. It creates no fit,
+    /// realization, runtime history, or new passivity claim.
+    #[must_use]
+    pub fn eval_derivative(&self, s: C64) -> Vec<C64> {
+        let mut derivative: Vec<_> = (0..self.ports * self.ports)
+            .map(|i| C64::from_re(self.e[i]))
+            .collect();
+        for (term, residues) in self.poles.iter().zip(&self.residues) {
+            match *term {
+                PoleTerm::Real { pole, .. } => {
+                    let distance = s - C64::from_re(pole);
+                    for (value, residue) in derivative.iter_mut().zip(residues) {
+                        *value = *value - (C64::from_re(residue.re) / distance) / distance;
+                    }
+                }
+                PoleTerm::Pair { pole, .. } => {
+                    let (a, b) = (s - pole, s - pole.conj());
+                    for (value, &residue) in derivative.iter_mut().zip(residues) {
+                        *value = *value - (residue / a) / a - (residue.conj() / b) / b;
+                    }
+                }
+            }
+        }
+        derivative
     }
 
     /// `Z(i omega)`.
@@ -1727,12 +1760,14 @@ impl MimoZoh {
                 C64::ONE
             };
             let pole = self.poles[k];
-            let first = weight * *gain * z.conj()
-                / zoh_pole_denominator(pole, omega, self.time_step_s);
+            let first =
+                weight * *gain * z.conj() / zoh_pole_denominator(pole, omega, self.time_step_s);
             let second = if *pair {
                 weight.conj() * gain.conj() * z.conj()
                     / zoh_pole_denominator(pole.conj(), omega, self.time_step_s)
-            } else { C64::ZERO };
+            } else {
+                C64::ZERO
+            };
             for (y, r) in y.iter_mut().zip(r) {
                 *y = *y
                     + if *pair {
