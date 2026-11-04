@@ -382,6 +382,7 @@ impl Slab<3, 7> for ThermalLbm3 {
         let weights = s.gpop[0];
         s.grid.f.clone_from(&g.f); s.grid.tau.clone_from(&g.tau); s.grid.fext.clone_from(&g.fext);
         s.grid.trt_magic = g.trt_magic();
+        s.grid.copy_plate_state_from(g);
         s.gpop.clone_from(&self.gpop);
         s.advection_history.clone_from(&self.advection_history);
         s.t_bottom = self.t_bottom; s.t_top = self.t_top; s.t_ref = self.t_ref;

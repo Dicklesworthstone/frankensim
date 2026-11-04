@@ -12443,3 +12443,36 @@ partition refusal, and late cancellation. Full native fs-lbm production/unit
 sources with `turbulent-inflow`, plus `material_boundary_sgs` and `boundary_sgs`
 integration targets, typecheck after merging concurrent boundary changes.
 These runtime tests were not executed in this session.
+
+## Prescribed thermal plates with source-owned viscous self-heating
+
+`PlatesGrid3::set_plate_motion` retains uniform tangential velocities on both
+fixed halfway z-plates and an explicit torque origin. The original BGK/TRT
+collision and pull stream use `f_in = f_out + 2 w rho (e.u_wall)/cs²` with
+post-collision density. Complete tangential planes introduce no modeled mass
+source. A boundary-only preflight uses that same reflection, admits finite
+positive-density/Mach-bounded endpoint populations, and accumulates compensated
+per-plane momentum, angular impulse and work before publication. It adds no
+population buffer or wall map. Zero drives preserve stationary population bits;
+invalid drives and rejected native steps retain accepted state and receipts.
+
+The original thermal/source candidate snapshot carries this drive and its last
+accepted receipt. `MaterialSlab3::set_plate_motion_si` uses the retained dx/dt;
+`last_plate_exchange_si` converts the actual native exchange with the retained
+rho0, cell volume and time unit. Negative wall work is energy supplied by the
+prescribed actuator. The existing `step_with_material_rheology_and_viscous_heating`
+resolves the same actual-temperature, force-corrected shear material for momentum
+and `mu*gamma_dot²` heat. Wall work is not added again as thermal power. Both
+source epochs, thermal wall exchange, populations and mechanical plate receipt
+publish together through the existing checked material transaction, including
+late native failure, endpoint-source refusal and cancellation. Low-level thermal
+steps retain their original nontransactional status; native failures now return
+through `ThermalForcingError::Flow3` to the checked owner instead of panicking.
+
+Focused regression definitions cover the analytic Couette velocity and viscous
+heating temperature profile under refinement, independent physical wall work and
+heat conversion, retained thermal Carreau-Yasuda feedback, stationary bit parity,
+and native/late-cancellation refusal followed by exact retry. They use declared
+synthetic material calibrations, not experimental validation. This fixed-geometry,
+low-Mach, generalized-Newtonian path adds no swept-cell transport, finite actuator
+reservoir, elastic memory, numerical-loss heating or transient total-energy proof.

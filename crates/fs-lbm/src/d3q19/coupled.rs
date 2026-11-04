@@ -35,6 +35,8 @@ use crate::rheology::{
 use crate::thermal::{ThermalForcingError, advection, forcing::validate_external_forces};
 use crate::thermal::boundary::{ThermalWall, ThermalWallError, ThermalWallExchange};
 
+mod moving_walls;
+
 /// Flow-lattice sound speed squared (D3Q19).
 const CS2_F: f64 = 1.0 / 3.0;
 
@@ -69,6 +71,8 @@ pub struct PlatesGrid3 {
     // even/odd product belongs to this selector; no reference viscosity is copied.
     pub(crate) trt_magic: Option<f64>,
     post: Vec<[f64; Q3]>,
+    plate_motion: Option<moving_walls::PlateMotion3>,
+    plate_exchange: Option<[super::WallMomentumExchange3; 2]>,
 }
 
 /// A collision selection or plate-grid step was refused without publishing.
@@ -76,6 +80,13 @@ pub struct PlatesGrid3 {
 pub enum PlateStepError3 {
     /// Dimensions and original population, relaxation, force or scratch storage disagree.
     Layout,
+    /// Invalid prescribed plate motion or an unrepresentable wall receipt.
+    WallMotion(&'static str),
+    /// A moving-wall boundary candidate is outside the native flow envelope.
+    WallState {
+        /// Original x-fastest fluid-cell index adjacent to a plate.
+        cell: usize,
+    },
     /// The native D3Q19 collision rejected a cell or its relaxation parameters.
     Collision {
         /// Original x-fastest cell index, including both wall layers.
@@ -88,6 +99,8 @@ impl core::fmt::Display for PlateStepError3 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Layout => write!(f, "D3Q19 plate-grid dimensions and storage disagree"),
+            Self::WallMotion(reason) => write!(f, "D3Q19 plate motion: {reason}"),
+            Self::WallState { cell } => write!(f, "D3Q19 moving plate produces an invalid state at cell {cell}"),
             Self::Collision { cell, source } => write!(f, "D3Q19 plate-grid cell {cell}: {source}"),
         }
     }
@@ -141,6 +154,8 @@ impl PlatesGrid3 {
             fext: vec![[0.0; 3]; cells],
             trt_magic: None,
             post: vec![f0; cells],
+            plate_motion: None,
+            plate_exchange: None,
         }
     }
 
@@ -344,7 +359,8 @@ impl PlatesGrid3 {
 
     /// One collide-force-stream step: selected BGK/TRT + Guo collision per
     /// fluid cell (per-cell τ and force), then pull streaming with
-    /// halfway bounce-back at the z-plates and periodic x/y wrap.
+    /// halfway bounce-back at the z-plates and periodic x/y wrap. An explicitly
+    /// retained plate drive uses those same links and records their momentum/work.
     /// Traversal is x-fastest, then y, then z — pinned and
     /// single-threaded.
     /// # Panics
@@ -356,7 +372,8 @@ impl PlatesGrid3 {
     /// Checked collision and streaming using the existing reusable scratch.
     ///
     /// All collisions complete before streaming publishes any population.
-    /// Invalid layout, parameters, incoming state or collision output therefore
+    /// Invalid layout, parameters, incoming state, collision output or prescribed
+    /// moving-wall boundary candidate therefore
     /// leaves populations, forces, relaxation times and the selector untouched.
     /// Scratch may change on refusal; retry overwrites every active entry.
     /// This adds no population allocation or extra collision pass.
@@ -377,10 +394,18 @@ impl PlatesGrid3 {
                 }
             }
         }
+        // Check moving boundary populations and their complete work/impulse
+        // account before the original stream can publish any population.
+        let plate_exchange = self.prepare_plate_exchange()?;
         for z in 1..nz - 1 {
             for y in 0..ny {
                 for x in 0..nx {
                     let i = self.idx(x, y, z);
+                    let wall_rho = if self.plate_motion.is_some() && (z == 1 || z == nz - 2) {
+                        self.post[i].iter().sum()
+                    } else {
+                        0.0
+                    };
                     for q in 0..Q3 {
                         let (ex, ey, ez) = E3[q];
                         let sx = (x as i64 - i64::from(ex)).rem_euclid(nx as i64) as usize;
@@ -388,8 +413,7 @@ impl PlatesGrid3 {
                         let sz = z as i64 - i64::from(ez);
                         let sz = sz as usize; // 1..=nz-2 ± 1 stays in 0..nz
                         self.f[i][q] = if self.is_wall_layer(sz) {
-                            // Halfway bounce-back off a resting plate.
-                            self.post[i][OPP3[q]]
+                            self.reflect_plate(self.post[i][OPP3[q]], wall_rho, q, usize::from(sz != 0))
                         } else {
                             self.post[self.idx(sx, sy, sz)][q]
                         };
@@ -397,6 +421,7 @@ impl PlatesGrid3 {
                 }
             }
         }
+        self.plate_exchange = plate_exchange;
         Ok(())
     }
 }
@@ -784,14 +809,16 @@ impl ThermalLbm3 {
     /// physical velocity, then advance flow under the frozen force.
     /// Temperature uses the selected halfway wall laws and periodic x/y streaming.
     pub fn step(&mut self) {
-        self.step_with_forces_inner(None, None, None);
+        self.step_with_forces_inner(None, None, None)
+            .expect("thermal plate state must admit native collision and wall transport");
     }
 
     /// Advance with external lattice force densities added to thermal buoyancy.
     /// The borrowed field has one vector per cell including the two wall
     /// planes, whose loads are ignored. It contains EXTERNAL forces only, not
-    /// the previous step's total `fext`. Admission failures leave state intact;
-    /// ordinary solver-state and stability requirements still apply.
+    /// the previous step's total `fext`. Force admission precedes mutation.
+    /// Complete thermal/flow rollback on a later native refusal is supplied by
+    /// the checked source/material APIs; this low-level method is not transactional.
     /// Total forces are held over this interval. Source-frame changes preserve
     /// physical velocity and force-corrected stress before the actual step, so
     /// changing a magnetic load cannot add a second half-force impulse.
@@ -805,8 +832,7 @@ impl ThermalLbm3 {
             .checked_mul(self.grid.ny)
             .ok_or(ThermalForcingError::Layout)?;
         validate_external_forces(forces, &self.gpop, plane, self.gbeta, self.t_ref)?;
-        self.step_with_forces_inner(Some(forces), None, None);
-        Ok(())
+        self.step_with_forces_inner(Some(forces), None, None)
     }
 
     // The shared transactional source owner admits the complete rate field.
@@ -821,8 +847,7 @@ impl ThermalLbm3 {
             .checked_mul(self.grid.ny)
             .ok_or(ThermalForcingError::Layout)?;
         validate_external_forces(forces, &self.gpop, plane, self.gbeta, self.t_ref)?;
-        self.step_with_forces_inner(Some(forces), Some(thermal_tau), None);
-        Ok(())
+        self.step_with_forces_inner(Some(forces), Some(thermal_tau), None)
     }
 
     pub(crate) fn step_with_tensor_diffusion(
@@ -832,8 +857,7 @@ impl ThermalLbm3 {
     ) -> Result<(), ThermalForcingError> {
         let plane = self.grid.nx.checked_mul(self.grid.ny).ok_or(ThermalForcingError::Layout)?;
         validate_external_forces(forces, &self.gpop, plane, self.gbeta, self.t_ref)?;
-        self.step_with_forces_inner(Some(forces), None, Some(diffusion));
-        Ok(())
+        self.step_with_forces_inner(Some(forces), None, Some(diffusion))
     }
 
     fn step_with_forces_inner(
@@ -841,7 +865,7 @@ impl ThermalLbm3 {
         external: Option<&[[f64; 3]]>,
         thermal_tau: Option<&[f64]>,
         diffusion: Option<crate::thermal::tensor::DiffusivityField<'_, 3>>,
-    ) {
+    ) -> Result<(), ThermalForcingError> {
         let (nx, ny, nz) = (self.grid.nx, self.grid.ny, self.grid.nz);
         for z in 1..nz - 1 {
             for y in 0..ny {
@@ -899,7 +923,7 @@ impl ThermalLbm3 {
             Some(walls),
         ));
         self.grid.post = post;
-        self.grid.step();
+        self.grid.try_step().map_err(ThermalForcingError::Flow3)
     }
 
     /// Total kinetic energy of the fluid.

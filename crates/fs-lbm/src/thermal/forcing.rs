@@ -47,8 +47,8 @@ pub(crate) fn reframe3(
     });
 }
 
-/// A force field that cannot be applied to the existing thermal solver.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Thermal force admission or native 3-D flow-step refusal.
+#[derive(Debug, Clone, PartialEq)]
 pub enum ThermalForcingError {
     /// The field must contain one vector per cell, including wall cells.
     Length {
@@ -66,6 +66,8 @@ pub enum ThermalForcingError {
     },
     /// The declared wall plane cannot describe the temperature storage.
     Layout,
+    /// Native D3Q19 collision or prescribed plate transport refused a candidate.
+    Flow3(crate::d3q19::PlateStepError3),
 }
 impl core::fmt::Display for ThermalForcingError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -73,6 +75,7 @@ impl core::fmt::Display for ThermalForcingError {
             Self::Length { expected, actual } => write!(f, "thermal force field has {actual} cells, expected {expected}"),
             Self::NonFinite { cell, component } => write!(f, "nonfinite thermal force at cell {cell}, component {component}"),
             Self::Layout => write!(f, "invalid thermal force/temperature layout"),
+            Self::Flow3(source) => write!(f, "thermal flow step: {source}"),
         }
     }
 }
