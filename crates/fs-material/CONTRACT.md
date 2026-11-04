@@ -6089,13 +6089,26 @@ species partial-pressure order and pass the existing extensive entropy gate.
 The original two-mechanism API delegates with empty porous/membrane slices.
 
 Material parcel and gas-field Maxwell–Stefan transport share the original
-`fs-thermochem::transport::maxwell_stefan` algebra. Parcel diffusion explicitly
-selects molar-averaged controls and results, retains its original pair material
-samples and absolute residual budgets, and preserves the isothermal/isobaric
-domain and selective partial-enthalpy/entropy checks. The shared owner polls
-during scaled assembly/elimination and keeps molar flux primary, independently
-of mass-flux underflow. This does not add Soret/Dufour transport or change the
-parcel frame to barycentric.
+`fs-thermochem::transport::maxwell_stefan` algebra. The default parcel entry
+points retain isothermal/isobaric molar-averaged controls, original pair material
+samples, absolute residual budgets and selective partial-enthalpy/entropy checks.
+The shared owner polls during scaled assembly/elimination and retains its
+original unscaled equations and reference-frame checks.
+
+The explicit `GasDiffusionDriving::CompositionAndPressureMass` mode evaluates
+`grad(x_i) + (x_i-Y_i) grad(ln p)` in the MASS-average frame with an independently
+supplied kg/(m² s) flux-sum tolerance. Both endpoints and the mean face must lie
+within the same selected binary-diffusivity claim. The original deterministic
+log-ratio helper preserves small pressure differences. Reports identify the
+mode, both actual flux sums, pressure gradient and pair-friction entropy rate;
+only the selected frame sum is constrained. With zero net mass flux the force
+contraction is the full ideal-gas chemical/pressure entropy driving, so this
+mode retains the actual closed-pair/network entropy gate without an omitted
+mechanical entropy term. Partial species enthalpy still crosses exactly once.
+`diffusion_flux_to_with_driving`, `diffuse_with_driving`, and the fixed/adaptive
+network `*_candidate_with_driving` entry points share these original owners.
+All existing default APIs remain molar-averaged. Neither mode evolves bulk
+momentum or supplies Soret/Dufour coupling; declared local T/p limits still apply.
 
 `species::diffusion::network::adaptive::advance_candidate` completes a requested
 positive molecular-diffusion duration on branching, cyclic or disconnected

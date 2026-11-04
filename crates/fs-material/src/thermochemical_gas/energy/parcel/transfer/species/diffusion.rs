@@ -1,16 +1,18 @@
-//! Source-backed isothermal/isobaric ideal-gas Maxwell-Stefan counterdiffusion.
+//! Source-backed ideal-gas Maxwell-Stefan composition and pressure diffusion.
 //!
-//! At the central face, solve sum_j (x_j J_i - x_i J_j)/D_ij = -c grad(x_i)
-//! with sum_i J_i=0 (MOLAR-average frame, NOT zero mass flux). Use the existing
+//! At the central face, solve sum_j (x_j J_i - x_i J_j)/D_ij = -c d_i.
+//! The default is isobaric MOLAR-average counterdiffusion. Explicit pressure
+//! diffusion uses d_i = grad(x_i) + (x_i-Y_i) grad(ln p) in the MASS-average
+//! frame, sum_i M_i J_i=0. The selected frame is retained in every report. Use the existing
 //! `fs-thermochem` friction owner, then check EVERY original equation and the
 //! molar-frame constraint. The gas-field and parcel paths share this algebra.
 //! A finite-volume step delegates species/partial-enthalpy transport and full
 //! endpoint reconstruction to exchange_species_with. Diffusivity is explicit
 //! pair material DATA; viscosity, species labels and air defaults never infer it.
 //!
-//! This local closure neglects thermal/pressure diffusion and external species
-//! forces. Caller-declared T/p difference limits admit that approximation; they
-//! are not an error estimate. No bulk flow, Knudsen law or membrane selectivity.
+//! Both modes neglect thermal diffusion and external species forces. Explicit
+//! T/p difference limits bound the local face approximation; they are not an
+//! error estimate. No bulk flow, momentum law, Knudsen law or membrane selectivity.
 //! Primary formulation: COMSOL, Multicomponent Gas Diffusion: Maxwell-Stefan
 //! Description (equations 3-75--3-78); Cantera, MultiTransport reference.
 
@@ -26,7 +28,7 @@ use crate::state_point::{MaterialPropertySelection, ResolvedMaterialStatePoint,
 use fs_matdb::{MaterialCard, QueryPoint};
 use fs_qty::{Dims, Pressure, Temperature};
 use fs_thermochem::transport::maxwell_stefan::{
-    MaxwellStefanErrorV1, MaxwellStefanMolarSolveV1, MaxwellStefanV1,
+    MaxwellStefanErrorV1, MaxwellStefanMolarSolveV1, MaxwellStefanSolveV1, MaxwellStefanV1,
 };
 use std::collections::BTreeMap;
 
@@ -51,6 +53,20 @@ pub struct GasDiffusionGeometry {
     pub area_m2: f64,
     pub distance_m: f64,
 }
+/// Explicit force and reference-frame choice for the molecular substep.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum GasDiffusionDriving {
+    /// Legacy locally isobaric approximation: sum_i J_i = 0 [mol/(m² s)].
+    #[default]
+    IsobaricMolar,
+    /// Include ideal-gas pressure diffusion in the mass-averaged frame.
+    /// The zero mass sum removes the mechanical pressure contribution from
+    /// the diffusion entropy balance; molar fluxes need not sum to zero.
+    CompositionAndPressureMass {
+        /// Maximum absolute sum_i M_i J_i [kg/(m² s)].
+        mass_flux_tolerance_kg_m2_s: f64,
+    },
+}
 /// Physical approximation and numerical residual admission, all explicit.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GasDiffusionSolve {
@@ -58,7 +74,7 @@ pub struct GasDiffusionSolve {
     pub maximum_pressure_difference_pa: f64,
     /// Maximum absolute residual of each original Maxwell-Stefan row [1/m].
     pub gradient_tolerance_per_m: f64,
-    /// Maximum absolute sum of molar fluxes [mol/(m2 s)].
+    /// Maximum absolute sum of molar fluxes in IsobaricMolar mode [mol/(m2 s)].
     pub molar_flux_tolerance_mol_m2_s: f64,
     /// Maximum tolerated rounding decrease in actual pair entropy [J/K].
     pub entropy_tolerance_j_k: f64,
@@ -91,12 +107,23 @@ pub struct SpeciesDiffusionFlux {
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct GasDiffusionFlux {
+    pub driving: GasDiffusionDriving,
     pub species: Vec<SpeciesDiffusionFlux>,
     pub pairs: Vec<BinaryDiffusionSample>,
     pub face_temperature_k: f64,
     pub face_pressure_pa: f64,
+    /// Signed endpoint log-pressure difference / distance [1/m], zero in the
+    /// isobaric approximation and on closed faces.
+    pub log_pressure_gradient_per_m: f64,
     pub maximum_gradient_residual_per_m: f64,
+    /// Signed molar-flux sum; constrained only in IsobaricMolar mode.
     pub molar_frame_residual_mol_m2_s: f64,
+    /// Signed mass-flux sum; constrained only in CompositionAndPressureMass mode.
+    pub mass_frame_residual_kg_m2_s: f64,
+    /// Nonnegative local pair-friction dissipation from the shared kernel.
+    /// None denotes an unrepresentable or exact-zero-composition diagnostic.
+    /// This rate [W/(m³ K)] does not replace the finite-step entropy check.
+    pub drag_entropy_production_w_m3_k: Option<f64>,
 }
 /// Original flux plus a checked, complete two-volume material proposal.
 #[derive(Clone, Debug, PartialEq)]
@@ -130,9 +157,27 @@ impl ClosedGasParcel {
     pub fn diffusion_flux_to(
         &self, right: &Self, geometry: GasDiffusionGeometry,
         pairs: &[BinaryDiffusionMaterial<'_>], controls: GasDiffusionSolve,
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<GasDiffusionFlux, GasEnergyError> {
+        self.diffusion_flux_to_with_driving(right, geometry, pairs, controls,
+            GasDiffusionDriving::IsobaricMolar, cancelled)
+    }
+
+    /// Resolve composition diffusion with an explicitly selected pressure law
+    /// and flux frame. Pressure mode qualifies both endpoints against the SAME
+    /// selected pair-material claim as the face. Caller T/p bounds still apply.
+    /// This returns molecular fluxes, not a bulk velocity or momentum update.
+    #[allow(clippy::too_many_arguments)]
+    pub fn diffusion_flux_to_with_driving(
+        &self, right: &Self, geometry: GasDiffusionGeometry,
+        pairs: &[BinaryDiffusionMaterial<'_>], controls: GasDiffusionSolve,
+        driving: GasDiffusionDriving, mut cancelled: impl FnMut() -> bool,
     ) -> Result<GasDiffusionFlux, GasEnergyError> {
         controls.validate()?; poll(&mut cancelled)?;
+        if let GasDiffusionDriving::CompositionAndPressureMass { mass_flux_tolerance_kg_m2_s } = driving
+            && !positive(mass_flux_tolerance_kg_m2_s) {
+            return Err(invalid("positive finite mass-frame diffusion tolerance required"));
+        }
         if !geometry.area_m2.is_finite() || geometry.area_m2 < 0.0 || !positive(geometry.distance_m)
             || pairs.len() > MAX_DIFFUSION_SPECIES*(MAX_DIFFUSION_SPECIES-1)/2 {
             return Err(invalid("bounded pair list, nonnegative diffusion area and positive distance required"));
@@ -140,13 +185,23 @@ impl ClosedGasParcel {
         let (a, b) = (self.state().state(), right.state().state());
         let temperature = 0.5*a.temperature + 0.5*b.temperature;
         let pressure = 0.5*a.pressure + 0.5*b.pressure;
-        let mut report = GasDiffusionFlux { species: Vec::new(), pairs: Vec::new(),
+        let mut report = GasDiffusionFlux { driving, species: Vec::new(), pairs: Vec::new(),
             face_temperature_k: temperature, face_pressure_pa: pressure,
-            maximum_gradient_residual_per_m: 0.0, molar_frame_residual_mol_m2_s: 0.0 };
+            log_pressure_gradient_per_m: 0.0, maximum_gradient_residual_per_m: 0.0,
+            molar_frame_residual_mol_m2_s: 0.0, mass_frame_residual_kg_m2_s: 0.0,
+            drag_entropy_production_w_m3_k: Some(0.0) };
         if geometry.area_m2 == 0.0 { poll(&mut cancelled)?; return Ok(report); }
         if (a.temperature-b.temperature).abs() > controls.maximum_temperature_difference_k
             || (a.pressure-b.pressure).abs() > controls.maximum_pressure_difference_pa {
-            return Err(invalid("gas states exceed declared isothermal/isobaric diffusion support"));
+            return Err(invalid("gas states exceed declared local temperature/pressure diffusion support"));
+        }
+        if matches!(driving, GasDiffusionDriving::CompositionAndPressureMass { .. }) {
+            let jump = super::entropy::log_ratio(b.pressure, a.pressure);
+            let gradient = jump / geometry.distance_m;
+            if !gradient.is_finite() || (jump != 0.0 && gradient == 0.0) {
+                return Err(invalid("diffusion log-pressure gradient is unrepresentable"));
+            }
+            report.log_pressure_gradient_per_m = gradient;
         }
         let catalog = catalog(self, right)?;
         let components = catalog.thermodynamics().components();
@@ -180,6 +235,14 @@ impl ClosedGasParcel {
             let point = super::super::updated_point(binding.context, temperature, pressure)?;
             let material = resolve_material_state_point(binding.material, &point,
                 std::slice::from_ref(&requirement), binding.selection.clone()).map_err(source_error)?;
+            if matches!(driving, GasDiffusionDriving::CompositionAndPressureMass { .. }) {
+                for state in [a, b] {
+                    poll(&mut cancelled)?;
+                    let boundary = super::super::updated_point(binding.context,
+                        state.temperature, state.pressure)?;
+                    material.at_query_point(binding.material, &boundary).map_err(source_error)?;
+                }
+            }
             let d = material.property(BINARY_DIFFUSIVITY_PROPERTY)
                 .ok_or(invalid("resolved binary diffusivity missing"))?.value_si();
             diffusion[i*n+j] = d; diffusion[j*n+i] = d;
@@ -190,31 +253,57 @@ impl ClosedGasParcel {
             .map(|species| (species.species().clone(), species.molar_mass())).collect())
             .map_err(diffusion_error)?;
         let mut workspace = owner.workspace().map_err(diffusion_error)?;
-        let evaluated = owner.evaluate_molar(&x, &gradient, Temperature::new(temperature),
-            Pressure::new(pressure), 0.0, &diffusion, MaxwellStefanMolarSolveV1 {
-                relative_tolerance: f64::EPSILON,
-                absolute_gradient_tolerance_per_m: controls.gradient_tolerance_per_m,
-                absolute_molar_flux_tolerance_mol_m2_s: controls.molar_flux_tolerance_mol_m2_s,
-            }, &mut workspace, &mut cancelled).map_err(diffusion_error)?;
-        // Preserve this public material adapter's absolute-only acceptance.
-        // Its declared small T/p differences still omit pressure/thermal drive;
-        // selecting the common owner does not silently extend that model.
-        report.maximum_gradient_residual_per_m = evaluated.maximum_gradient_residual_per_m();
-        let flux = evaluated.molar_fluxes();
-        let mut net = Sum::default();
-        for (species, &j) in components.iter().zip(flux) {
-            net.add(j)?;
-            let rate = (j*species.molar_mass().value())*geometry.area_m2;
-            if !rate.is_finite() || (j != 0.0 && rate == 0.0) {
-                return Err(invalid("diffusion species mass rate is unrepresentable"));
+        let pressure_gradient = report.log_pressure_gradient_per_m;
+        let mut record = |molar: &[f64], mass: &[f64], residual: f64, entropy: Option<f64>| {
+            report.maximum_gradient_residual_per_m = residual;
+            report.drag_entropy_production_w_m3_k = entropy;
+            let (mut net_molar, mut net_mass) = (Sum::default(), Sum::default());
+            for ((species, &j), &m) in components.iter().zip(molar).zip(mass) {
+                net_molar.add(j)?; net_mass.add(m)?;
+                let rate = m*geometry.area_m2;
+                if !rate.is_finite() || (j != 0.0 && rate == 0.0) {
+                    return Err(invalid("diffusion species mass rate is unrepresentable"));
+                }
+                report.species.push(SpeciesDiffusionFlux { species: species.species().clone(),
+                    molar_flux_mol_m2_s: j, mass_rate_left_to_right_kg_s: rate });
             }
-            report.species.push(SpeciesDiffusionFlux { species: species.species().clone(),
-                molar_flux_mol_m2_s: j, mass_rate_left_to_right_kg_s: rate });
+            report.molar_frame_residual_mol_m2_s = net_molar.value;
+            report.mass_frame_residual_kg_m2_s = net_mass.value;
+            Ok(())
+        };
+        match driving {
+            GasDiffusionDriving::IsobaricMolar => {
+                let evaluated = owner.evaluate_molar(&x, &gradient, Temperature::new(temperature),
+                    Pressure::new(pressure), 0.0, &diffusion, MaxwellStefanMolarSolveV1 {
+                        relative_tolerance: f64::EPSILON,
+                        absolute_gradient_tolerance_per_m: controls.gradient_tolerance_per_m,
+                        absolute_molar_flux_tolerance_mol_m2_s: controls.molar_flux_tolerance_mol_m2_s,
+                    }, &mut workspace, &mut cancelled).map_err(diffusion_error)?;
+                record(evaluated.molar_fluxes(), evaluated.mass_fluxes(),
+                    evaluated.maximum_gradient_residual_per_m(), evaluated.drag_entropy_production_w_m3_k())?;
+            }
+            GasDiffusionDriving::CompositionAndPressureMass { mass_flux_tolerance_kg_m2_s } => {
+                let evaluated = owner.evaluate(&x, &gradient, Temperature::new(temperature),
+                    Pressure::new(pressure), pressure_gradient, &diffusion, MaxwellStefanSolveV1 {
+                        relative_tolerance: f64::EPSILON,
+                        absolute_gradient_tolerance_per_m: controls.gradient_tolerance_per_m,
+                        absolute_mass_flux_tolerance_kg_m2_s: mass_flux_tolerance_kg_m2_s,
+                    }, &mut workspace, &mut cancelled).map_err(diffusion_error)?;
+                record(evaluated.molar_fluxes(), evaluated.mass_fluxes(),
+                    evaluated.maximum_gradient_residual_per_m(), evaluated.drag_entropy_production_w_m3_k())?;
+            }
         }
-        report.molar_frame_residual_mol_m2_s = net.value;
+        // Keep absolute-only acceptance and check the declared frame, never
+        // mistake a mass-averaged molar sum for a conservation residual.
+        let frame_missed = match driving {
+            GasDiffusionDriving::IsobaricMolar =>
+                report.molar_frame_residual_mol_m2_s.abs() > controls.molar_flux_tolerance_mol_m2_s,
+            GasDiffusionDriving::CompositionAndPressureMass { mass_flux_tolerance_kg_m2_s } =>
+                report.mass_frame_residual_kg_m2_s.abs() > mass_flux_tolerance_kg_m2_s,
+        };
         if report.maximum_gradient_residual_per_m > controls.gradient_tolerance_per_m
-            || net.value.abs() > controls.molar_flux_tolerance_mol_m2_s {
-            return Err(invalid("diffusion original equations or molar-frame constraint did not close"));
+            || frame_missed {
+            return Err(invalid("diffusion original equations or declared flux-frame constraint did not close"));
         }
         poll(&mut cancelled)?;
         Ok(report)
@@ -230,10 +319,24 @@ impl ClosedGasParcel {
     pub fn diffuse_with(
         &self, right: &Self, geometry: GasDiffusionGeometry, duration_s: f64,
         pairs: &[BinaryDiffusionMaterial<'_>], controls: GasDiffusionSolve,
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<GasDiffusionCandidate, GasEnergyError> {
+        self.diffuse_with_driving(right, geometry, duration_s, pairs, controls,
+            GasDiffusionDriving::IsobaricMolar, cancelled)
+    }
+
+    /// Conservative molecular substep in the explicitly selected frame.
+    /// Pressure diffusion uses the mass frame so pair friction includes the
+    /// full ideal-gas chemical/pressure driving. Both modes retain the actual
+    /// closed-pair entropy gate; neither evolves bulk momentum or Soret heat.
+    #[allow(clippy::too_many_arguments)]
+    pub fn diffuse_with_driving(
+        &self, right: &Self, geometry: GasDiffusionGeometry, duration_s: f64,
+        pairs: &[BinaryDiffusionMaterial<'_>], controls: GasDiffusionSolve,
+        driving: GasDiffusionDriving, mut cancelled: impl FnMut() -> bool,
     ) -> Result<GasDiffusionCandidate, GasEnergyError> {
         if !positive(duration_s) { return Err(invalid("positive finite diffusion duration required")); }
-        let flux = self.diffusion_flux_to(right, geometry, pairs, controls, &mut cancelled)?;
+        let flux = self.diffusion_flux_to_with_driving(right, geometry, pairs, controls, driving, &mut cancelled)?;
         let mut rows = Vec::with_capacity(flux.species.len());
         for species in &flux.species {
             let mass = species.mass_rate_left_to_right_kg_s*duration_s;
