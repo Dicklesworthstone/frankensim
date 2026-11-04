@@ -50,6 +50,7 @@ pub mod angular_spectrum;
 pub use angular_spectrum::{
     AcousticLayerSample, AcousticSpectrumError, AcousticSpectrumSample, AngularSpectrumBudget,
     IncidentPlaneWave, MAX_ANGULAR_SPECTRUM_COMPONENTS, PreparedAcousticSpectrum,
+    PreparedElasticAcousticSpectrum, PreparedElasticLayerAcousticSpectrum,
     PreparedLayerAcousticSpectrum,
 };
 /// Layer-resolved viscous and thermal loss from the same coherent fields.

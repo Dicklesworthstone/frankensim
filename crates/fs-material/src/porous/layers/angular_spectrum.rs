@@ -14,11 +14,15 @@
 //! compact-aperture approximation belong to the caller. No lateral edge
 //! scattering, mean flow, exterior bulk loss, or angular error bound is added.
 
-use super::{TransmittingLayers, finite};
+use super::{LayeredTransmission, RigidBackedLayers, TransmittingLayers, finite};
 use crate::MaterialError;
 use fs_math::{c64::C64, dd::Dd, det};
 
 mod interior;
+pub use super::elastic::stack::{
+    PreparedElasticAcousticSpectrum, PreparedElasticLayerAcousticSpectrum,
+};
+pub(in crate::porous::layers) use interior::PreparedLayerFields;
 pub use interior::{AcousticLayerSample, PreparedLayerAcousticSpectrum};
 
 /// Hard ceiling on cached coherent plane-wave components.
@@ -91,14 +95,19 @@ impl PlaneField {
     }
 }
 
-struct PreparedPlaneWave {
-    cosine: f64,
+pub(in crate::porous::layers) struct PreparedPlaneWave {
+    pub(in crate::porous::layers) cosine: f64,
     tangential_wavenumber: [f64; 2],
     incident_normal_wavenumber: f64,
     receiving_normal_wavenumber: C64,
     incident: PlaneField,
     reflected: PlaneField,
     transmitted: PlaneField,
+}
+impl PreparedPlaneWave {
+    pub(in crate::porous::layers) fn incident_pressure(&self) -> C64 {
+        self.incident.pressure
+    }
 }
 
 /// Reusable coherent field on both exterior sides of ONE original layer stack.
@@ -114,7 +123,9 @@ pub struct PreparedAcousticSpectrum<'p, 'a> {
     components: Vec<PreparedPlaneWave>,
 }
 
-fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), AcousticSpectrumError> {
+pub(in crate::porous::layers) fn poll(
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), AcousticSpectrumError> {
     if cancelled() {
         Err(AcousticSpectrumError::Cancelled)
     } else {
@@ -132,82 +143,100 @@ impl<'a> TransmittingLayers<'a> {
         budget: AngularSpectrumBudget,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PreparedAcousticSpectrum<'p, 'a>, AcousticSpectrumError> {
-        poll(cancelled)?;
-        if budget.max_components == 0
-            || budget.max_components > MAX_ANGULAR_SPECTRUM_COMPONENTS
-            || incident.is_empty()
-            || incident.len() > budget.max_components
-        {
-            return Err(AcousticSpectrumError::Invalid(
-                "acoustic spectrum needs nonempty components within explicit and hard budgets",
-            ));
-        }
-        let prepared = self.prepared_layers();
-        let k0 = prepared.exterior_wavenumber_rad_m();
-        let omega = prepared.angular_frequency_rad_s();
-        let impedance = prepared
-            .fluid()
-            .acoustic()
-            .characteristic_impedance_pa_s_m();
-        let receiving_density = self.receiving_state().density_kg_m3();
-        let mut components = Vec::with_capacity(incident.len());
-        for wave in incident {
-            poll(cancelled)?;
-            let direction = wave.direction;
-            let norm_squared = direction.iter().map(|d| d * d).sum::<f64>();
-            if direction.iter().any(|d| !d.is_finite())
-                || direction[2] <= 0.0
-                || direction[2] > 1.0
-                || (norm_squared - 1.0).abs() > 64.0 * f64::EPSILON
-                || !finite(wave.pressure_pa)
-            {
-                return Err(AcousticSpectrumError::Invalid(
-                    "incident wave needs a unit direction with positive normal component and finite pressure",
-                ));
-            }
-            let response = self
-                .scattering_with_layers::<AcousticSpectrumError>(direction[2], |_, _| {
-                    poll(cancelled)
-                })?;
-            let tangential_wavenumber = [k0 * direction[0], k0 * direction[1]];
-            let incident_normal_wavenumber = k0 * direction[2];
-            let receiving_normal_wavenumber = response.receiving_normal_wavenumber_rad_m;
-            let incident_velocity = direction.map(|d| C64::from_re(d / impedance));
-            let reflected_velocity = [
-                incident_velocity[0],
-                incident_velocity[1],
-                -incident_velocity[2],
-            ];
-            let receiving_velocity = [
-                C64::from_re((tangential_wavenumber[0] / omega) / receiving_density),
-                C64::from_re((tangential_wavenumber[1] / omega) / receiving_density),
-                C64::new(
-                    (receiving_normal_wavenumber.re / omega) / receiving_density,
-                    (receiving_normal_wavenumber.im / omega) / receiving_density,
-                ),
-            ];
-            components.push(PreparedPlaneWave {
-                cosine: direction[2],
-                tangential_wavenumber,
-                incident_normal_wavenumber,
-                receiving_normal_wavenumber,
-                incident: PlaneField::new(wave.pressure_pa, incident_velocity)?,
-                reflected: PlaneField::new(
-                    wave.pressure_pa * response.pressure_reflection,
-                    reflected_velocity,
-                )?,
-                transmitted: PlaneField::new(
-                    wave.pressure_pa * response.pressure_transmission,
-                    receiving_velocity,
-                )?,
-            });
-        }
-        poll(cancelled)?;
+        let components = prepare_components(
+            self.prepared_layers(),
+            self.receiving_state().density_kg_m3(),
+            incident,
+            budget,
+            cancelled,
+            |cosine, cancelled| {
+                self.scattering_with_layers::<AcousticSpectrumError>(cosine, |_, _| poll(cancelled))
+            },
+        )?;
         Ok(PreparedAcousticSpectrum {
             stack: self,
             components,
         })
     }
+}
+
+// Fluid and elastic stacks retain their own boundary solves while sharing the
+// exact exterior momentum, phase convention, admission and coherent summation.
+pub(in crate::porous::layers) fn prepare_components<C: FnMut() -> bool>(
+    prepared: &RigidBackedLayers<'_>,
+    receiving_density: f64,
+    incident: &[IncidentPlaneWave],
+    budget: AngularSpectrumBudget,
+    cancelled: &mut C,
+    mut scattering: impl FnMut(f64, &mut C) -> Result<LayeredTransmission, AcousticSpectrumError>,
+) -> Result<Vec<PreparedPlaneWave>, AcousticSpectrumError> {
+    poll(cancelled)?;
+    if budget.max_components == 0
+        || budget.max_components > MAX_ANGULAR_SPECTRUM_COMPONENTS
+        || incident.is_empty()
+        || incident.len() > budget.max_components
+    {
+        return Err(AcousticSpectrumError::Invalid(
+            "acoustic spectrum needs nonempty components within explicit and hard budgets",
+        ));
+    }
+    let k0 = prepared.exterior_wavenumber_rad_m();
+    let omega = prepared.angular_frequency_rad_s();
+    let impedance = prepared
+        .fluid()
+        .acoustic()
+        .characteristic_impedance_pa_s_m();
+    let mut components = Vec::with_capacity(incident.len());
+    for wave in incident {
+        poll(cancelled)?;
+        let direction = wave.direction;
+        let norm_squared = direction.iter().map(|d| d * d).sum::<f64>();
+        if direction.iter().any(|d| !d.is_finite())
+            || direction[2] <= 0.0
+            || direction[2] > 1.0
+            || (norm_squared - 1.0).abs() > 64.0 * f64::EPSILON
+            || !finite(wave.pressure_pa)
+        {
+            return Err(AcousticSpectrumError::Invalid(
+                "incident wave needs a unit direction with positive normal component and finite pressure",
+            ));
+        }
+        let response = scattering(direction[2], cancelled)?;
+        let tangential_wavenumber = [k0 * direction[0], k0 * direction[1]];
+        let incident_normal_wavenumber = k0 * direction[2];
+        let receiving_normal_wavenumber = response.receiving_normal_wavenumber_rad_m;
+        let incident_velocity = direction.map(|d| C64::from_re(d / impedance));
+        let reflected_velocity = [
+            incident_velocity[0],
+            incident_velocity[1],
+            -incident_velocity[2],
+        ];
+        let receiving_velocity = [
+            C64::from_re((tangential_wavenumber[0] / omega) / receiving_density),
+            C64::from_re((tangential_wavenumber[1] / omega) / receiving_density),
+            C64::new(
+                (receiving_normal_wavenumber.re / omega) / receiving_density,
+                (receiving_normal_wavenumber.im / omega) / receiving_density,
+            ),
+        ];
+        components.push(PreparedPlaneWave {
+            cosine: direction[2],
+            tangential_wavenumber,
+            incident_normal_wavenumber,
+            receiving_normal_wavenumber,
+            incident: PlaneField::new(wave.pressure_pa, incident_velocity)?,
+            reflected: PlaneField::new(
+                wave.pressure_pa * response.pressure_reflection,
+                reflected_velocity,
+            )?,
+            transmitted: PlaneField::new(
+                wave.pressure_pa * response.pressure_transmission,
+                receiving_velocity,
+            )?,
+        });
+    }
+    poll(cancelled)?;
+    Ok(components)
 }
 
 impl<'p, 'a> PreparedAcousticSpectrum<'p, 'a> {
@@ -228,7 +257,7 @@ impl<'p, 'a> PreparedAcousticSpectrum<'p, 'a> {
         position_m: [f64; 3],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<AcousticSpectrumSample, AcousticSpectrumError> {
-        self.sample(position_m, false, cancelled)
+        sample_components(&self.components, position_m, false, cancelled)
     }
 
     /// Transmitted field at `[x,y,z]` metres, with `z>=0` measured from the
@@ -240,55 +269,55 @@ impl<'p, 'a> PreparedAcousticSpectrum<'p, 'a> {
         position_m: [f64; 3],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<AcousticSpectrumSample, AcousticSpectrumError> {
-        self.sample(position_m, true, cancelled)
+        sample_components(&self.components, position_m, true, cancelled)
     }
+}
 
-    fn sample(
-        &self,
-        position: [f64; 3],
-        transmitted: bool,
-        cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<AcousticSpectrumSample, AcousticSpectrumError> {
-        poll(cancelled)?;
-        if position.iter().any(|x| !x.is_finite())
-            || (transmitted && position[2] < 0.0)
-            || (!transmitted && position[2] > 0.0)
-        {
-            return Err(AcousticSpectrumError::Invalid(
-                "observation needs finite coordinates on the selected exterior side",
-            ));
-        }
-        let mut sum = FieldSum([Dd::ZERO; 8]);
-        for wave in &self.components {
-            poll(cancelled)?;
-            if transmitted {
-                sum.add(
-                    wave.transmitted,
-                    propagation(wave, position, wave.receiving_normal_wavenumber)?,
-                )?;
-            } else {
-                sum.add(
-                    wave.incident,
-                    propagation(
-                        wave,
-                        position,
-                        C64::from_re(wave.incident_normal_wavenumber),
-                    )?,
-                )?;
-                sum.add(
-                    wave.reflected,
-                    propagation(
-                        wave,
-                        position,
-                        C64::from_re(-wave.incident_normal_wavenumber),
-                    )?,
-                )?;
-            }
-        }
-        let sample = sum.finish()?;
-        poll(cancelled)?;
-        Ok(sample)
+pub(in crate::porous::layers) fn sample_components(
+    components: &[PreparedPlaneWave],
+    position: [f64; 3],
+    transmitted: bool,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<AcousticSpectrumSample, AcousticSpectrumError> {
+    poll(cancelled)?;
+    if position.iter().any(|x| !x.is_finite())
+        || (transmitted && position[2] < 0.0)
+        || (!transmitted && position[2] > 0.0)
+    {
+        return Err(AcousticSpectrumError::Invalid(
+            "observation needs finite coordinates on the selected exterior side",
+        ));
     }
+    let mut sum = FieldSum([Dd::ZERO; 8]);
+    for wave in components {
+        poll(cancelled)?;
+        if transmitted {
+            sum.add(
+                wave.transmitted,
+                propagation(wave, position, wave.receiving_normal_wavenumber)?,
+            )?;
+        } else {
+            sum.add(
+                wave.incident,
+                propagation(
+                    wave,
+                    position,
+                    C64::from_re(wave.incident_normal_wavenumber),
+                )?,
+            )?;
+            sum.add(
+                wave.reflected,
+                propagation(
+                    wave,
+                    position,
+                    C64::from_re(-wave.incident_normal_wavenumber),
+                )?,
+            )?;
+        }
+    }
+    let sample = sum.finish()?;
+    poll(cancelled)?;
+    Ok(sample)
 }
 
 fn propagation(

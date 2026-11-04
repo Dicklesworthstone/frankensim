@@ -11463,6 +11463,31 @@ longitudinal limits before/between/after plates, retain heat below reflection
 roundoff, shield downstream layers behind opaque plates, and exercise budgets,
 identities, zero watts and atomic cancellation.
 
+`ElasticPlateStack::prepare_angular_spectrum` also accepts the shared
+`IncidentPlaneWave` and `AngularSpectrumBudget` interface for coherent
+reflection/transmission. `PreparedElasticAcousticSpectrum::prepare_layer_field`
+selects an original fluid/porous section before, between or after plates, with
+indices counting every section. Original P/S propagation retains each plate's
+signed transmission, bounded face states and logarithmic scale, preserving
+phase for downstream interference. Fluid-only and elastic stacks share the
+exterior field, local fluid propagation, coherent sum and positive heat owners.
+
+Selected-layer queries return pressure, all three fluid velocities,
+active/reactive intensity and separate local viscous/thermal heat after coherent
+summation. Opposite-phase sources can cancel both losses; pressure nodes can
+retain transverse viscous heat. Lossless fluid sections have zero heat and
+opaque plates shield downstream pores. Plate indices refuse fluid-interior
+queries. Zero-thickness fluid identities admit interface fields but no heat
+density. Preparation uses the existing component/section caps and retains
+O(components) storage per selected section. Queries allocate nothing, perform
+O(components) work, re-query no source and poll cancellation. Original linear,
+stationary, planar, rigid-frame and lossless-solid limits remain; no solid
+interior field, intrinsic solid damping or temperature evolution is inferred.
+Independent twelve-boundary-equation complex fields across both mode cutoffs,
+spatially integrated versus analytic heat, normal-fluid equivalence and mixed
+three-dimensional interference exercise this extension, together with nodes,
+opaque shielding, identities and atomic cancellation.
+
 The mechanism split does not assign mean heat separately to the pore fluid and
 solid frame or evolve their temperatures. Original linear, rigid-frame,
 infinite-planar and frequency/source restrictions remain; no additional
