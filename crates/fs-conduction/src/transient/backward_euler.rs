@@ -15,6 +15,9 @@
 //! the transient operator, and boundary-node storage enters the reaction heat.
 //! The original `advance` entry point still requires constant prescribed data.
 
+mod surface_capacity;
+pub use surface_capacity::{ArealHeatCapacity, SurfaceHeatCapacity};
+
 mod nonlinear;
 pub use nonlinear::{NonlinearStepConfig, NonlinearStepSolution};
 mod adjoint;
@@ -211,7 +214,8 @@ impl<'m> BackwardEuler<'m> {
     // Theta and duty-cycle owners share this prepared P1 storage and source admission.
     pub(crate) fn capacitance(&self) -> &Csr { &self.capacity }
 
-    /// Retained density/Cp source bundles. Empty for explicitly declared storage.
+    /// Retained volume and surface density/Cp source bundles.
+    /// Empty when all storage is explicitly declared.
     #[must_use]
     pub fn material_capacities(&self) -> &[MaterialHeatCapacity] { &self.material_capacities }
 

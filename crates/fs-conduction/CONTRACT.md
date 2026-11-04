@@ -1453,6 +1453,30 @@ checked arithmetic. This is an entry allowance, not a peak allocator/RSS proof.
 A latent plateau still has zero direct temperature seed while energetic
 enthalpy history and its boundary parameter sensitivities can remain nonzero.
 
+`BackwardEuler::with_surface_heat_capacity` adds thermally thin, perfectly
+bonded coating storage on original boundary-face slots. `ArealHeatCapacity`
+declares finite nonnegative J/(m²·K), and `SurfaceHeatCapacity` supplies uniform
+or P1 face coefficients in the original vertex order. The exact row-sum moment
+is `A (2 C_i + C_j + C_k) / 12`, preserving the correlation of a P1 capacity
+(or thickness) with the temperature trace. It is added to the existing volume
+capacitance; linear/nonlinear endpoints, contacts, radiation, prescribed-node
+reactions and discrete adjoints therefore share one combined storage operator.
+The prescribed reaction includes the surface energy change divided by the
+step duration. Empty and zero additions preserve the original operator exactly.
+
+The surface shares the solid boundary temperature: perfect thermal bonding
+and negligible through-thickness gradients are explicit model assumptions.
+This is frozen linear storage, with no separate film temperature, added
+contact resistance, tangential film conduction, moving geometry or latent
+heat. Storage in a separately meshed coating must not be added again.
+`SurfaceHeatCapacity::from_material` binds three declared nonnegative reference
+thicknesses to an already admitted constant `MaterialHeatCapacity`; it retains
+the original density/Cp source and intersects temperature support at every face
+vertex with a nonzero storage moment. It never samples a varying caloric law
+and freezes it. Duplicate faces within one addition, disjoint active source
+domains, non-finite/unrepresentable moments and cancellation refuse preparation.
+Successive additions intentionally accumulate further layer storage.
+
 `transient::MaterialHeatCapacity` resolves constant density and specific heat
 from one immutable material card at an explicit reference state, then pins both
 selected sources at the endpoints of a declared positive temperature interval.
