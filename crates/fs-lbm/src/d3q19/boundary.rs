@@ -1951,6 +1951,32 @@ impl BoundaryGrid3 {
         &mut self,
         gate: Option<&CancelGate>,
     ) -> Result<(), BoundaryStepError3> {
+        self.try_collide_with_relaxation(gate, None)
+    }
+
+    // Step-local material rates share the native collision/force arithmetic.
+    // The constructor model remains the owner of all non-shear controls.
+    fn try_collide_with_relaxation(
+        &mut self,
+        gate: Option<&CancelGate>,
+        relaxation: Option<&[f64]>,
+    ) -> Result<(), BoundaryStepError3> {
+        use crate::lattice3::{D3q19, ViscousLattice3};
+
+        if relaxation.is_some_and(|field| field.len() != self.f[0].len() * TILE_CELLS) {
+            return Err(BoundaryStepError3::WallMomentum {
+                reason: "curved-wall relaxation requires one x-fastest value per grid cell",
+            });
+        }
+        let reference_tau = match self.collision_model {
+            CollisionModel3::Bgk { tau } | CollisionModel3::Trt { tau, .. } => tau,
+            CollisionModel3::CentralMoment {
+                second_order_rate, ..
+            }
+            | CollisionModel3::ReducedCumulant {
+                second_order_rate, ..
+            } => 1.0 / second_order_rate,
+        };
         let collide = collision_kernel3();
         for tile in 0..self.f[0].len() {
             if gate.is_some_and(CancelGate::is_requested) {
@@ -1962,7 +1988,21 @@ impl BoundaryGrid3 {
                 }
                 let populations = core::array::from_fn(|direction| self.f[direction][tile].0[lane]);
                 let force = cell_force(self.force, self.force_field.as_deref(), tile, lane);
-                let post = collide(populations, self.collision_model, force).map_err(|source| {
+                let model = if let Some(field) = relaxation {
+                    let cell = self.coords(tile, lane);
+                    let tau = field[(cell[2] * self.ny + cell[1]) * self.nx + cell[0]];
+                    // Preserve exact original moment rates when unchanged; a
+                    // reciprocal round trip must not move constant-source bits.
+                    if tau == reference_tau && tau.is_finite() {
+                        self.collision_model
+                    } else {
+                        D3q19::with_shear_relaxation(self.collision_model, tau)
+                            .map_err(|source| BoundaryStepError3::Collision { cell, source })?
+                    }
+                } else {
+                    self.collision_model
+                };
+                let post = collide(populations, model, force).map_err(|source| {
                     BoundaryStepError3::Collision {
                         cell: self.coords(tile, lane),
                         source,

@@ -285,15 +285,52 @@ impl BoundaryGrid3 {
     pub fn step_with_curved_walls(
         &mut self,
         wall: &CurvedWall3,
+        velocity: impl FnMut(CurvedWallLink3) -> [f64; 3],
+        moment_origin: [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<CurvedWallStep3> {
+        self.step_curved_inner(wall, velocity, moment_origin, None, gate)
+    }
+
+    /// Advance the SAME curved-wall operator with local molecular relaxation.
+    ///
+    /// Supply one tau in x-fastest order for every grid cell; solid entries
+    /// are ignored. Every fluid tau must be finite and greater than one half.
+    /// The original collision family, TRT magic product and higher-order
+    /// moment rates are retained. D3Q19's existing second-order bulk/shear tie
+    /// remains. The held Guo force and interpolated populations drive the SAME
+    /// native wall impulse, torque and work account.
+    ///
+    /// This field applies only to this step. A later ordinary curved step uses
+    /// the constructor's uniform rate. State/temperature evaluation and units
+    /// remain caller-owned; this method neither estimates shear rate nor adds
+    /// an energy equation, diffusion of material or an eddy-viscosity model.
+    /// The unchanged field recovers the original step bits. Invalid rates,
+    /// geometry, endpoint populations, loads or cancellation publish nothing.
+    pub fn step_with_curved_walls_and_relaxation(
+        &mut self,
+        wall: &CurvedWall3,
+        velocity: impl FnMut(CurvedWallLink3) -> [f64; 3],
+        moment_origin: [f64; 3],
+        relaxation: &[f64],
+        gate: &CancelGate,
+    ) -> Result<CurvedWallStep3> {
+        self.step_curved_inner(wall, velocity, moment_origin, Some(relaxation), gate)
+    }
+
+    fn step_curved_inner(
+        &mut self,
+        wall: &CurvedWall3,
         mut velocity: impl FnMut(CurvedWallLink3) -> [f64; 3],
         moment_origin: [f64; 3],
+        relaxation: Option<&[f64]>,
         gate: &CancelGate,
     ) -> Result<CurvedWallStep3> {
         wall.validate(self, gate)?;
         if !moment_origin.into_iter().all(f64::is_finite) {
             return Err(invalid("curved wall moment origin must be finite"));
         }
-        self.try_collide_with_gate(Some(gate))?;
+        self.try_collide_with_relaxation(Some(gate), relaxation)?;
         let periodic = self.periodic_momentum_transport(gate).map_err(|_| {
             if gate.is_requested() {
                 BoundaryStepError3::Cancelled

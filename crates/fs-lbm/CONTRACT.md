@@ -10163,6 +10163,45 @@ helper. These are direct original numerical-owner checks with only unused
 runtime/pool and unrelated module wrappers omitted; full workspace Cargo,
 DSR, cross-ISA and performance gates were not executed.
 
+### Local material viscosity on the original curved-wall step
+
+`BoundaryGrid3::step_with_curved_walls_and_relaxation` accepts a step-local
+x-fastest shear-relaxation field. It uses the SAME native collision, held Guo
+force, interpolated pull populations and wall/periodic momentum accounts as
+the uniform curved-wall entry. BGK/TRT/central-moment/reduced-cumulant families
+retain their original non-shear controls, including TRT's magic product and
+D3Q19's existing bulk/shear tie. Unchanged rates retain original bits; a later
+ordinary step still uses its constructor model. Solid padding is ignored.
+Invalid field dimensions/rates or native endpoint/load/cancellation refusal
+leave accepted populations and topology unchanged.
+
+`material::MaterialScaling::step_curved_walls_with_material` samples
+each original `FluidTransport` response once, retaining that concrete value
+and its exact applied tau. Borrowed source values permit deliberately frozen
+fields without repeating property interpolation. The existing momentum
+scaling owner converts nu=mu/rho0 using the reference dx/dt. Every local source
+must retain the same physical reference density; mass, inertia and fluid
+inventories are not remapped. Cp/k remain source-admitted but impose no
+thermal-lattice restriction on this momentum-only operation. The explicit
+cell budget precedes sampling/allocation. All source and conversion checks
+precede native stepping, with no fallible publication after native acceptance.
+
+Temperature/composition evaluation, source epochs and any thermal evolution
+remain with the caller. The method does not reconstruct source pressure,
+solve implicit shear rheology, deposit viscous heat or substitute actuator
+work for heat. Geometry, wall velocity, moment origin, held force and returned
+momentum/work accounts retain the native lattice-unit convention. The caller
+must use the pinned density/dx/dt mapping and maintain its scenario speed
+bound. Curved-wall interpolation mass drift and fixed-occupancy restrictions
+are unchanged.
+
+Focused regressions exercise constant-source population/report identity for
+all four collision families, independent local collision/pull reconstruction,
+two-temperature piecewise Couette fluidity and actual wall work, original
+source retention and single evaluation, and budget/source/density/rate/late
+wall/cancellation rollback. These new regressions await native execution;
+no new measured convergence or performance claim is made here.
+
 ## Source-backed gas convection on planar moving-liquid interfaces
 
 `MaterialFreeSurfaceEnthalpy3::step_with_surface_convection` and

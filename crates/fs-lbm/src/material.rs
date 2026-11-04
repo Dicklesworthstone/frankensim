@@ -6,6 +6,8 @@
 //! EOS, phase transition, or conservative replacement of an evolving material.
 //! A successful plan checks necessary numerical bounds, not solver stability.
 
+/// Local material viscosity on the original curved-wall D3Q19 owner.
+pub mod boundary;
 pub mod conjugate;
 
 use fs_material::MaterialError;

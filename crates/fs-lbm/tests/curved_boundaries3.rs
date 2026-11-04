@@ -4,6 +4,9 @@ use fs_lbm::d3q19::{
     OPP3, Q3, W3, collide_cell3, equilibrium3,
 };
 
+#[path = "curved_boundaries3/material.rs"]
+mod material;
+
 fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     [
         a[1] * b[2] - a[2] * b[1],
