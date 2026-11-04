@@ -1316,3 +1316,482 @@ mod endpoint_fields {
         }
     }
 }
+
+mod linear_resistance {
+    use super::*;
+    use fs_exec::{CancelGate, TilePool};
+    use fs_lbm::BoundaryStepError3;
+    use fs_lbm::d3q19::LinearResistance3;
+
+    const AXES: [[f64; 3]; 3] = [
+        [2.0 / 3.0, -2.0 / 3.0, 1.0 / 3.0],
+        [1.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0],
+        [-2.0 / 3.0, -1.0 / 3.0, 2.0 / 3.0],
+    ];
+
+    fn models() -> [CollisionModel3; 4] {
+        [
+            CollisionModel3::Bgk { tau: 0.8 },
+            CollisionModel3::Trt {
+                tau: 0.9,
+                magic: 3.0 / 16.0,
+            },
+            CollisionModel3::CentralMoment {
+                second_order_rate: 1.3,
+                higher_order_rate: 0.9,
+            },
+            CollisionModel3::ReducedCumulant {
+                second_order_rate: 1.3,
+                third_order_rate: 0.9,
+                fourth_order_rate: 1.1,
+            },
+        ]
+    }
+
+    fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
+        a.into_iter().zip(b).map(|(a, b)| a * b).sum()
+    }
+
+    fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+    }
+
+    // Independent constitutive oracle, including arbitrary rotation and zero axes.
+    fn force(law: LinearResistance3, velocity: [f64; 3]) -> [f64; 3] {
+        let relative = core::array::from_fn(|a| law.skeleton_velocity[a] - velocity[a]);
+        core::array::from_fn(|a| {
+            law.body_force[a]
+                + (0..3)
+                    .map(|k| law.axes[k][a] * law.principal[k] * dot(law.axes[k], relative))
+                    .sum::<f64>()
+        })
+    }
+
+    fn angular(grid: &BoundaryGrid3, origin: [f64; 3]) -> [f64; 3] {
+        cells(grid).into_iter().fold([0.0; 3], |sum, cell| {
+            let r = core::array::from_fn(|a| cell[a] as f64 + 0.5 - origin[a]);
+            let torque = cross(r, moments(grid, cell).1);
+            core::array::from_fn(|a| sum[a] + torque[a])
+        })
+    }
+
+    #[test]
+    fn rotated_uniform_drag_matches_midpoint_momentum_and_work_for_all_collisions() {
+        let gate = CancelGate::new_clock_free();
+        let rho = 1.4;
+        let law = LinearResistance3 {
+            principal: [0.04, 0.2, 0.7],
+            axes: AXES,
+            skeleton_velocity: [0.002, -0.001, 0.0005],
+            body_force: [2e-4, -3e-4, 1e-4],
+        };
+        for model in models() {
+            let mut grid = uniform_grid(model);
+            let mut expected = [0.011, -0.009, 0.006];
+            for _ in 0..5 {
+                let previous = expected;
+                let relative = core::array::from_fn(|a| previous[a] - law.skeleton_velocity[a]);
+                let principal: [f64; 3] = core::array::from_fn(|k| {
+                    ((rho - 0.5 * law.principal[k]) * dot(AXES[k], relative)
+                        + dot(AXES[k], law.body_force))
+                        / (rho + 0.5 * law.principal[k])
+                });
+                expected = core::array::from_fn(|a| {
+                    law.skeleton_velocity[a]
+                        + (0..3).map(|k| AXES[k][a] * principal[k]).sum::<f64>()
+                });
+                let receipt = grid.step_with_linear_resistance(|_| law, &gate).unwrap();
+                let actual = grid.velocity(0, 0, 0);
+                for a in 0..3 {
+                    close(actual[a], expected[a], 2e-14);
+                    close(receipt.external_impulse[a], 64.0 * law.body_force[a], 2e-14);
+                    close(
+                        64.0 * rho * (actual[a] - previous[a]),
+                        receipt.external_impulse[a] - receipt.skeleton_impulse[a],
+                        2e-13,
+                    );
+                }
+                let kinetic_change = 32.0 * rho * (dot(actual, actual) - dot(previous, previous));
+                close(
+                    kinetic_change,
+                    receipt.external_work + receipt.fluid_drag_work,
+                    2e-14,
+                );
+                close(
+                    receipt.fluid_drag_work + receipt.skeleton_work,
+                    -receipt.relative_dissipation,
+                    2e-14,
+                );
+                assert!(receipt.relative_dissipation >= 0.0);
+                for (actual, expected) in grid
+                    .force_density(0, 0, 0)
+                    .into_iter()
+                    .zip(force(law, actual))
+                {
+                    close(actual, expected, 2e-14);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn strong_resistance_bounds_relative_energy_and_preserves_free_directions() {
+        let gate = CancelGate::new_clock_free();
+        let rho = 1.4;
+        let law = LinearResistance3 {
+            principal: [0.0, 4.0 * rho, 100.0 * rho],
+            axes: AXES,
+            skeleton_velocity: [0.001, -0.002, 0.0005],
+            body_force: [0.0; 3],
+        };
+        let initial_principal = [1e-4, -7e-5, 4e-5];
+        let initial = core::array::from_fn(|a| {
+            law.skeleton_velocity[a]
+                + (0..3)
+                    .map(|k| AXES[k][a] * initial_principal[k])
+                    .sum::<f64>()
+        });
+        for model in models() {
+            let mut grid = uniform_grid(model);
+            grid.initialize_uniform_equilibrium(rho, initial, &gate)
+                .unwrap();
+            let mut old_energy = 32.0 * rho * dot(initial_principal, initial_principal);
+            for step in 1..=12 {
+                let receipt = grid.step_with_linear_resistance(|_| law, &gate).unwrap();
+                let relative =
+                    core::array::from_fn(|a| grid.velocity(0, 0, 0)[a] - law.skeleton_velocity[a]);
+                for k in 0..3 {
+                    let factor = (rho - 0.5 * law.principal[k]) / (rho + 0.5 * law.principal[k]);
+                    close(
+                        dot(AXES[k], relative),
+                        initial_principal[k] * factor.powi(step),
+                        2e-13,
+                    );
+                }
+                let energy = 32.0 * rho * dot(relative, relative);
+                assert!(energy <= old_energy + 2e-15);
+                close(old_energy - energy, receipt.relative_dissipation, 2e-14);
+                if step == 1 {
+                    assert!(
+                        dot(AXES[1], relative) > 0.0,
+                        "stiff midpoint drag may reverse velocity"
+                    );
+                    assert!(dot(AXES[2], relative) < 0.0);
+                }
+                old_energy = energy;
+            }
+        }
+    }
+
+    #[test]
+    fn resolved_drag_relaxation_converges_at_second_order() {
+        let gate = CancelGate::new_clock_free();
+        let initial = [0.011, -0.009, 0.006];
+        let mut errors = Vec::new();
+        for steps in [8, 16, 32] {
+            let mut grid = uniform_grid(CollisionModel3::Bgk { tau: 0.8 });
+            let law = LinearResistance3 {
+                principal: [1.4 * 0.9 / f64::from(steps); 3],
+                ..LinearResistance3::default()
+            };
+            for _ in 0..steps {
+                let _ = grid.step_with_linear_resistance(|_| law, &gate).unwrap();
+            }
+            errors.push((grid.velocity(0, 0, 0)[0] - initial[0] * (-0.9_f64).exp()).abs());
+        }
+        for pair in errors.windows(2) {
+            assert!((3.9..4.1).contains(&(pair[0] / pair[1])), "{errors:?}");
+        }
+    }
+
+    #[test]
+    fn transported_endpoint_forces_close_wall_and_skeleton_impulse_and_torque() {
+        let gate = CancelGate::new_clock_free();
+        let origin = [-0.3, 0.7, 1.2];
+        let make = || {
+            let mut grid = BoundaryGrid3::new(
+                12,
+                8,
+                8,
+                0.9,
+                [0.0; 3],
+                BoundarySpec3::lid_cavity([0.003, 0.0, 0.0]),
+            );
+            grid.voxelize_sdf(|p| {
+                (p[0] - 3.0)
+                    .abs()
+                    .max((p[1] - 4.0).abs())
+                    .max((p[2] - 3.0).abs())
+                    - 0.8
+            });
+            for [x, y, z] in cells(&grid) {
+                grid.set_populations(
+                    x,
+                    y,
+                    z,
+                    &equilibrium3(
+                        0.8 + 0.01 * (x + 2 * y + z) as f64,
+                        [0.004 + 0.0001 * y as f64, -0.003, 0.001],
+                    ),
+                );
+            }
+            grid.rebind_uniform_force([1e-5, -2e-5, 3e-5], &gate)
+                .unwrap();
+            grid
+        };
+        let law = |[x, y, z]: [usize; 3], step: usize| LinearResistance3 {
+            principal: [
+                0.01 + 0.002 * x as f64,
+                0.04 + 0.001 * y as f64,
+                0.09 + 0.002 * z as f64,
+            ],
+            axes: AXES,
+            skeleton_velocity: [0.0001 * x as f64, -0.001, 0.0002 * z as f64],
+            body_force: [
+                1e-5 * (y + step + 1) as f64,
+                -2e-6 * (z + 1) as f64,
+                3e-6 * (x + step) as f64,
+            ],
+        };
+        for workers in [1, 3] {
+            let pool = TilePool::for_host(workers, 0xDA2C7);
+            let (mut serial, mut pooled) = (make(), make());
+            let links = serial.boundary_links();
+            for step in 0..4 {
+                let before = fluid_momentum(&serial);
+                let angular_before = angular(&serial, origin);
+                let mass = serial.total_mass();
+                let receipt = serial
+                    .step_with_linear_resistance_and_wall_momentum(
+                        |cell| law(cell, step),
+                        &links,
+                        origin,
+                        &gate,
+                    )
+                    .unwrap();
+                let parallel = pooled
+                    .step_pooled_with_linear_resistance_and_wall_momentum(
+                        &pool,
+                        &gate,
+                        |cell| law(cell, step),
+                        &links,
+                        origin,
+                    )
+                    .unwrap();
+                assert_eq!(snapshot(&serial), snapshot(&pooled));
+                assert_eq!(receipt, parallel);
+                let after = fluid_momentum(&serial);
+                let angular_after = angular(&serial, origin);
+                for a in 0..3 {
+                    close(
+                        after[a] - before[a],
+                        receipt.external_impulse[a] - receipt.skeleton_impulse[a]
+                            + receipt.walls.fluid_population_impulse[a],
+                        2e-11,
+                    );
+                    close(
+                        angular_after[a] - angular_before[a],
+                        receipt.external_angular_impulse[a] - receipt.skeleton_angular_impulse[a]
+                            + receipt.walls.fluid_population_angular_impulse[a],
+                        3e-11,
+                    );
+                }
+                close(
+                    serial.total_mass(),
+                    mass + receipt.walls.fluid_mass_change,
+                    2e-14,
+                );
+                close(
+                    receipt.fluid_drag_work + receipt.skeleton_work,
+                    -receipt.relative_dissipation,
+                    2e-13,
+                );
+                for cell @ [x, y, z] in cells(&serial) {
+                    let expected = force(law(cell, step), serial.velocity(x, y, z));
+                    for (actual, expected) in
+                        serial.force_density(x, y, z).into_iter().zip(expected)
+                    {
+                        close(actual, expected, 2e-14);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn zero_resistance_preserves_native_held_force_population_bits() {
+        let gate = CancelGate::new_clock_free();
+        let pool = TilePool::for_host(3, 0xDA2C7);
+        let body = |[x, y, z]: [usize; 3]| {
+            [
+                1e-5 * (x + 1) as f64,
+                -2e-5 * (y + 1) as f64,
+                3e-5 * (z + 1) as f64,
+            ]
+        };
+        for model in models() {
+            let make = || {
+                let mut grid = uniform_grid(model);
+                grid.rebind_force_field(body);
+                grid
+            };
+            let (mut reference, mut serial, mut pooled) = (make(), make(), make());
+            for _ in 0..4 {
+                reference.step();
+                let law = |cell| LinearResistance3 {
+                    body_force: body(cell),
+                    axes: AXES,
+                    ..LinearResistance3::default()
+                };
+                let receipt = serial.step_with_linear_resistance(law, &gate).unwrap();
+                let parallel = pooled
+                    .step_pooled_with_linear_resistance(&pool, &gate, law)
+                    .unwrap();
+                assert_eq!(snapshot(&reference), snapshot(&serial));
+                assert_eq!(snapshot(&reference), snapshot(&pooled));
+                assert_eq!(receipt, parallel);
+                assert_eq!(receipt.skeleton_impulse, [0.0; 3]);
+                assert_eq!(receipt.relative_dissipation, 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn tiny_drag_reaction_survives_a_much_larger_independent_body_force() {
+        let gate = CancelGate::new_clock_free();
+        let mut grid = uniform_grid(models()[0]);
+        let initial = grid.velocity(0, 0, 0);
+        let momentum_before = fluid_momentum(&grid);
+        let law = LinearResistance3 {
+            principal: [1e-22, 3e-22, 2e-22],
+            axes: AXES,
+            skeleton_velocity: [0.001, -0.002, 0.003],
+            body_force: [1e-4, -2e-4, 3e-4],
+        };
+        let receipt = grid.step_with_linear_resistance(|_| law, &gate).unwrap();
+        let final_velocity = grid.velocity(0, 0, 0);
+        let momentum_after = fluid_momentum(&grid);
+        // The constitutive drag is below the total-force ULP in this fixture.
+        // Its separate receipt must not conceal a resolved momentum imbalance.
+        assert_eq!(grid.force_density(0, 0, 0), law.body_force);
+        for a in 0..3 {
+            let expected = receipt.external_impulse[a] - receipt.skeleton_impulse[a];
+            let scale = momentum_before[a].abs()
+                + momentum_after[a].abs()
+                + receipt.external_impulse[a].abs()
+                + receipt.skeleton_impulse[a].abs();
+            assert!(
+                (momentum_after[a] - momentum_before[a] - expected).abs()
+                    <= 256.0 * f64::EPSILON * scale
+            );
+        }
+        let midpoint = core::array::from_fn(|a| 0.5 * initial[a] + 0.5 * final_velocity[a]);
+        let drag_only = LinearResistance3 {
+            body_force: [0.0; 3],
+            ..law
+        };
+        for (actual, drag) in receipt
+            .skeleton_impulse
+            .into_iter()
+            .zip(force(drag_only, midpoint))
+        {
+            let expected = -64.0 * drag;
+            assert!(
+                (actual - expected).abs() <= 2e-12 * expected.abs(),
+                "{actual:e} != {expected:e}"
+            );
+            assert_ne!(actual, 0.0);
+        }
+        assert!(receipt.relative_dissipation > 0.0);
+        assert!(
+            (receipt.fluid_drag_work + receipt.skeleton_work + receipt.relative_dissipation).abs()
+                <= 2e-12 * receipt.relative_dissipation
+        );
+    }
+
+    #[test]
+    fn invalid_laws_cancellation_and_late_work_overflow_are_atomic() {
+        let pool = TilePool::for_host(3, 0xDA2C7);
+        let valid = LinearResistance3 {
+            principal: [0.01, 0.02, 0.03],
+            axes: AXES,
+            ..LinearResistance3::default()
+        };
+        for pooled in [false, true] {
+            for case in 0..7 {
+                let (mut grid, mut control) =
+                    (uniform_grid(models()[0]), uniform_grid(models()[0]));
+                let before = snapshot(&grid);
+                let gate = CancelGate::new_clock_free();
+                if case == 0 {
+                    gate.request();
+                }
+                let sample = |cell: [usize; 3]| {
+                    let mut law = valid;
+                    if cell == [3, 3, 3] {
+                        match case {
+                            1 => law.principal[1] = -0.1,
+                            2 => law.axes[2] = law.axes[0],
+                            3 => law.skeleton_velocity[2] = f64::NAN,
+                            4 => gate.request(),
+                            5 => law.body_force = [1e300; 3],
+                            _ => {}
+                        }
+                    }
+                    if case == 6 {
+                        law.body_force = [0.1, -0.1, 0.1];
+                    }
+                    law
+                };
+                let origin = if case == 6 { [1e308; 3] } else { [0.0; 3] };
+                let result = if pooled {
+                    grid.step_pooled_with_linear_resistance_and_wall_momentum(
+                        &pool,
+                        &gate,
+                        sample,
+                        &[],
+                        origin,
+                    )
+                } else {
+                    grid.step_with_linear_resistance_and_wall_momentum(sample, &[], origin, &gate)
+                };
+                assert!(
+                    matches!(
+                        result,
+                        Err(BoundaryStepError3::Cancelled
+                            | BoundaryStepError3::EndpointForce { .. }
+                            | BoundaryStepError3::Unphysical { .. }
+                            | BoundaryStepError3::Collision { .. })
+                    ),
+                    "case {case}: {result:?}"
+                );
+                assert_eq!(snapshot(&grid), before);
+                let gate = CancelGate::new_clock_free();
+                let _ = grid.step_with_linear_resistance(|_| valid, &gate).unwrap();
+                let _ = control
+                    .step_with_linear_resistance(|_| valid, &gate)
+                    .unwrap();
+                assert_eq!(snapshot(&grid), snapshot(&control));
+            }
+        }
+        let mut faces = [FaceBoundary3::Periodic; 6];
+        faces[0] = FaceBoundary3::Velocity {
+            velocity: [0.01, 0.0, 0.0],
+        };
+        faces[1] = FaceBoundary3::Pressure { density: 1.0 };
+        let mut grid = BoundaryGrid3::new(8, 4, 4, 0.9, [0.0; 3], BoundarySpec3::new(faces));
+        let before = snapshot(&grid);
+        assert!(matches!(
+            grid.step_with_linear_resistance(
+                |_| panic!("must reject open faces before sampling"),
+                &CancelGate::new_clock_free()
+            ),
+            Err(BoundaryStepError3::EndpointForce { .. })
+        ));
+        assert_eq!(snapshot(&grid), before);
+    }
+}

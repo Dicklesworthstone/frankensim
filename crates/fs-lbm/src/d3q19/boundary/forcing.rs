@@ -5,6 +5,9 @@ use super::*;
 mod frame;
 pub use frame::RigidFrame3;
 mod impulse;
+mod resistance;
+pub use resistance::{LinearResistance3, ResistanceMomentumExchange3};
+pub(super) use resistance::{PreparedResistance3, ResistanceStream3};
 
 // Own a sampled endpoint until the shared publication point. Existing scalar
 // histories retain their selected shape and original arithmetic.

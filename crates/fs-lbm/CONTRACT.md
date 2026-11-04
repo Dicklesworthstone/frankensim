@@ -86,6 +86,36 @@ incompressible projection, compressible shock model or thermal source.
 G0/G3 regressions in `tests/momentum_impulse.rs` cover independent moments and
 stress, signed work, subsequent native collision, SI scaling and atomic refusal.
 
+## Implicit anisotropic resistance on native D3Q19 momentum
+
+`BoundaryGrid3::step_with_linear_resistance` and its pooled/selected-wall
+counterparts admit the local law `F = b + D(v_s-u)` with a prescribed skeleton.
+`LinearResistance3` owns finite nonnegative principal force-density/velocity
+coefficients and orthonormal material axes; zero coefficients admit free
+directions. Coefficients, skeleton velocity and independent body force are
+held at their supplied midpoint values for one lattice tick. They replace
+both old force components after preserving the initial physical velocity and
+full corrected stress through the original Guo reframe.
+
+Native collision uses the initial law. Native pull streaming solves
+`(rho I + D/2)u = m_raw + (b + D v_s)/2` with three principal-axis divisions,
+then publishes populations and endpoint forces together. The same grouped
+kernels serve serial and pooled paths; no second collision or post-stream
+population scan is introduced. Invalid data, cancellation and late refusal
+publish neither state nor force. Closed/periodic domains are admitted;
+open-face/source joint solves, nonlinear drag, evolved skeleton inertia and
+heat deposition are outside this lane.
+
+The receipt separates independent forcing, constitutive skeleton reaction,
+their angular impulses/work, nonnegative midpoint relative dissipation and
+selected native wall exchange. Complete momentum balances require every wall
+link and close to floating-point precision; periodic angular flux remains
+separate. Tiny constitutive drag is retained in the receipt even if it rounds
+out of the total force, without a promise to accumulate sub-ULP fluid impulses.
+The local drag/work identity is not a transported kinetic-energy equality.
+Uniform resolved relaxation is second order and has bounded relative source
+energy; stiff trapezoidal updates can reverse velocity and are not L-stable.
+
 ## D3Q27 TRT for wall-bounded laminar flow
 
 `CollisionModel27::Trt { tau, magic, equilibrium }` extends the original

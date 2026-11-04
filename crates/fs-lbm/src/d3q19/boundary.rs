@@ -27,8 +27,10 @@ pub use profile::{
     BoundaryProfileError3, InletFlux3, PressureProfileReport3, VelocityProfileReport3,
 };
 mod forcing;
-use forcing::EndpointForcing3;
-pub use forcing::{BoundaryForcingError3, RigidFrame3};
+pub use forcing::{
+    BoundaryForcingError3, LinearResistance3, ResistanceMomentumExchange3, RigidFrame3,
+};
+use forcing::{EndpointForcing3, PreparedResistance3, ResistanceStream3};
 mod curved;
 pub use curved::{CurvedWall3, CurvedWallLink3, CurvedWallStep3};
 mod rotor;
@@ -1465,6 +1467,7 @@ impl BoundaryGrid3 {
                 models,
                 force: self.force,
                 force_field: self.force_field.as_deref(),
+                resistance: None,
             };
             match run_pass(pool, gate, &kernel)? {
                 FirstCollision(None) => {}
@@ -1504,6 +1507,7 @@ impl BoundaryGrid3 {
                 endpoint_field: endpoint_forcing
                     .as_ref()
                     .and_then(EndpointForcing3::sampled_field),
+                resistance: None,
                 next: chunk_groups(&mut next),
             };
             run_pass(pool, gate, &kernel)
@@ -2699,6 +2703,7 @@ struct CollidePass<'a> {
     models: Option<&'a [CollisionModel3]>,
     force: [f64; 3],
     force_field: Option<&'a [[f64; 3]]>,
+    resistance: Option<&'a [PreparedResistance3]>,
 }
 
 impl TileKernel for CollidePass<'_> {
@@ -2712,7 +2717,13 @@ impl TileKernel for CollidePass<'_> {
         if let Err(cancelled) = cx.checkpoint() {
             return ControlFlow::Break(cancelled);
         }
-        let group = group as usize;
+        ControlFlow::Continue(self.run_group(group as usize))
+    }
+}
+
+impl CollidePass<'_> {
+    // Serial resistance steps use the exact same grouped cell kernel.
+    fn run_group(&self, group: usize) -> FirstCollision {
         let collide = collision_kernel3();
         let mut chunk = self.post[group]
             .lock()
@@ -2723,8 +2734,11 @@ impl TileKernel for CollidePass<'_> {
                 if self.solid[tile] & (1u64 << lane) != 0 {
                     continue;
                 }
-                let populations = core::array::from_fn(|q| self.f[q][tile].0[lane]);
-                let force = cell_force(self.force, self.force_field, tile, lane);
+                let mut populations = core::array::from_fn(|q| self.f[q][tile].0[lane]);
+                let mut force = cell_force(self.force, self.force_field, tile, lane);
+                if let Some(field) = self.resistance {
+                    force = field[tile * TILE_CELLS + lane].prepare(&mut populations, force);
+                }
                 let model = self
                     .models
                     .map_or(self.model, |field| field[tile * TILE_CELLS + lane]);
@@ -2735,15 +2749,12 @@ impl TileKernel for CollidePass<'_> {
                         }
                     }
                     Err(source) => {
-                        return ControlFlow::Continue(FirstCollision(Some((
-                            tile * TILE_CELLS + lane,
-                            source,
-                        ))));
+                        return FirstCollision(Some((tile * TILE_CELLS + lane, source)));
                     }
                 }
             }
         }
-        ControlFlow::Continue(FirstCollision(None))
+        FirstCollision(None)
     }
 }
 
@@ -2751,6 +2762,7 @@ struct StreamPass<'a> {
     view: StreamView<'a>,
     solid: &'a [u64],
     endpoint_field: Option<([f64; 3], &'a [[f64; 3]])>,
+    resistance: Option<&'a ResistanceStream3<'a>>,
     next: Vec<Mutex<[&'a mut [Tile]; Q3]>>,
 }
 
@@ -2778,10 +2790,20 @@ impl TileKernel for StreamPass<'_> {
         if let Err(cancelled) = cx.checkpoint() {
             return ControlFlow::Break(cancelled);
         }
-        let group = group as usize;
+        ControlFlow::Continue(self.run_group(group as usize))
+    }
+}
+
+impl StreamPass<'_> {
+    fn run_group(&self, group: usize) -> FirstUnphysical {
         let mut chunk = self.next[group]
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut resistance = self.resistance.map(|field| {
+            field.groups[group]
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        });
         for local in 0..chunk[0].len() {
             let tile = group * POOLED_GROUP_TILES + local;
             for lane in 0..TILE_CELLS {
@@ -2793,14 +2815,20 @@ impl TileKernel for StreamPass<'_> {
                     .view
                     .endpoint_is_physical(&values, tile, lane, self.endpoint_field)
                 {
-                    return ControlFlow::Continue(FirstUnphysical(Some(tile * TILE_CELLS + lane)));
+                    return FirstUnphysical(Some(tile * TILE_CELLS + lane));
+                }
+                if let (Some(field), Some(output)) = (self.resistance, resistance.as_mut()) {
+                    let cell = tile_lane_coords(self.view.dims, tile, lane);
+                    if !field.finish_cell(&values, tile, lane, local, cell, output) {
+                        return FirstUnphysical(Some(tile * TILE_CELLS + lane));
+                    }
                 }
                 for (field, value) in chunk.iter_mut().zip(values) {
                     field[local].0[lane] = value;
                 }
             }
         }
-        ControlFlow::Continue(FirstUnphysical(None))
+        FirstUnphysical(None)
     }
 }
 
