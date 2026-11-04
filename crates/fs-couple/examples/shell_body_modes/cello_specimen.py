@@ -4,13 +4,34 @@ written with its source or labelled ASSUMPTION in PROVENANCE.tsv beside the tabl
 recording or mode frequency. cello_bridge_19g.py then sets the bridge to its published mass; the two together write
 data/instruments/geometry/cello-castelbarco-1697-shell (check_cello_shell.py reproduces it byte for byte).
 
-usage: python3 -I cello_specimen.py CANNONE_DIR OUT_DIR [fholes=RASTER_RUNS.tsv]   (OUT_DIR must not exist)
+usage: python3 -I cello_specimen.py CANNONE_DIR OUT_DIR [instrument=viola] [fholes=RASTER_RUNS.tsv]   (OUT_DIR must not exist)
 
 fholes=RASTER_RUNS.tsv (optional): the two hole rasters traced from the LOCM drawing itself (frankensim.specimen-raster-runs.v1,
 already in this specimen's plan mm), used in place of the scaled Cannone holes; the top's island follows them, and the
 f_hole_* rows of PROVENANCE.tsv then state the trace and its scored checks (TRACE_* below) instead of the placement.
 The trace of image 0021 is data/instruments/geometry/cello-castelbarco-1697-shell/fholes-trace-image0021.tsv (kept as data;
 the tools that traced it are not in the tree). No table of that directory is made with it.
+
+With instrument=viola (off by default; without it every output byte is the cello's) the same mapping makes a VIOLA
+specimen from the viola's printed values instead, with the same three kinds of source:
+  LOC   = Library of Congress catalog record 2022560103, Stradivari viola "Cassavetti" 1727, via the same repo table:
+          length of back 410.6, bouts 183 / 123 / 237.
+  JOH   = Hans Johannsson, viola specification table, hansjohannsson.com/resources/mesviola.html, Medium column
+          (copy md5 1276ed9e3df166102f6d63c558b1ebef; the column whose body length range 405-415 holds LOC 410.6):
+          rib height average 38, rib thickness 1.2, arching back 16 / front 17; back thickness: centre at sound post 4.5,
+          flanks 2.7, fluting 2.3, centre of bouts 2.6, edge 4; front thickness: centre at sound post 3.2, flanks 2.6,
+          fluting 2.4, centre of bouts 2.6, edge 4; overhang 2.3; purfling distance from edge 4; lining width 8;
+          soundhole length 78, between top holes 48; stoplength 225; bass bar thickness approx. 6, height middle approx. 14
+          (its length cell is blank in this column); soundpost thickness 6.5; bridge feet width 46, thickness 5,
+          height approx. 39; string spacing at bridge 36.
+  LOCM  = the measured f-hole drawing of the same "Cassavetti" viola in that record's images (resource
+          music.musihas-200154830, image 0015: "Viola the Cassevetti Antonius Stradivarius 1727", John Montgomery,
+          February 2006, "all measurements in millimeters"; copy md5 805760becef25579715be299729849b1): f-hole lengths
+          79.0 (bass) / 78.3 (treble); upper eyes 49.2 apart (inner edges), diameters 8.0 / 8.0; lower eyes 123.5 apart
+          (inner edges) and 142.0 (outer edges), diameters 9.7 / 9.25; lower eye to the outside of the instrument
+          17.7 / 15.7; stop to the notches 223.0 / 219.0 ("Treble ff hole higher than bass ff"); notches 85.7 apart.
+The viola has no printed bridge mass and no printed bass bar length: the bridge keeps the Cannone-ratio volume from the
+JOH sizes, and the bar keeps the Cannone's length through the plan length scale; both are ASSUMPTION rows.
 
 Sources (values in mm unless stated):
   LOC   = Library of Congress catalog record 2022560102, Stradivari cello "Castelbarco" 1697, via the repo table
@@ -41,12 +62,17 @@ import numpy as np
 
 SRC = sys.argv[1].rstrip("/") + "/"
 OUT = sys.argv[2].rstrip("/") + "/"
-TRACE = None
+TRACE, VIOLA = None, False
 for arg in sys.argv[3:]:
     key, eq, value = arg.partition("=")
-    if key != "fholes" or not eq or not value or TRACE is not None:
-        raise SystemExit("refusing: %r; the only option is one fholes=RASTER_RUNS.tsv" % arg)
-    TRACE = value
+    if key == "fholes" and eq and value and TRACE is None:
+        TRACE = value
+    elif arg == "instrument=viola" and not VIOLA:
+        VIOLA = True
+    else:
+        raise SystemExit("refusing: %r; the options are one fholes=RASTER_RUNS.tsv and instrument=viola" % arg)
+if TRACE and VIOLA:
+    raise SystemExit("refusing: the fholes trace is the Castelbarco cello's (image 0021); the viola places its holes from image 0015")
 if os.path.exists(OUT):
     raise SystemExit("refusing: %s exists" % OUT)
 os.makedirs(OUT)
@@ -81,6 +107,18 @@ BAR_L, BAR_W, BAR_H = 580.0, 11.0, 24.0  # JOH
 POST_D = 11.0  # JOH
 BR_FEET, BR_T_FOOT, BR_H = 90.0, 11.0, 92.0  # JOH
 STR_SPAN = 47.0  # JOH
+if VIOLA:  # the viola's printed values (docstring); the f-holes again come from LOCM, not from JOH 78 / 48 / 13-15
+    L_BACK, B_UP, B_C, B_LO = 410.6, 183.0, 123.0, 237.0  # LOC
+    RIB_H, RIB_T = 38.0, 1.2  # JOH Medium
+    ARCH_TOP, ARCH_BACK = 17.0, 16.0  # JOH
+    T_TOP = dict(post=3.2, flank=2.6, flute=2.4, bout=2.6, edge=4.0)  # JOH front
+    T_BACK = dict(post=4.5, flank=2.7, flute=2.3, bout=2.6, edge=4.0)  # JOH back
+    PURF, LINING_W = 4.0, 8.0  # JOH purfling distance from edge 4, lining width 8
+    BAR_L, BAR_W, BAR_H = None, 6.0, 14.0  # JOH thickness and height; no printed length (None: the Cannone bar through the plan length scale)
+    POST_D = 6.5  # JOH
+    BR_FEET, BR_T_FOOT, BR_H = 46.0, 5.0, 39.0  # JOH
+    STR_SPAN = 36.0  # JOH
+NAME = "viola" if VIOLA else "cello"
 
 # ------------------------------------------------------------------ the Cannone references
 _, _, top_ol = nt("top-plate-outline.tsv")
@@ -96,9 +134,10 @@ kC = int(np.argmin(np.where(sel, wb, 1e9)))
 SZ = L_BACK / L_CAN
 ST_Z = np.array([zb[kL], zb[kC], zb[kU]])
 ST_S = np.array([B_LO / wb[kL], B_C / wb[kC], B_UP / wb[kU]])
-prov("plan_length_scale", "%.6f" % SZ, "LOC / CAN", "z' = %.4f z: LOC length of back 749 mm over the Cannone body length %.1f mm (top outline rows at least 10 mm wide, i.e. without the back's button)" % (SZ, L_CAN))
+LOC_TXT = dict(length="%g" % L_BACK, bouts="%g, %g, %g" % (B_LO, B_C, B_UP))  # as printed: 749 and 440, 234, 346 for the cello
+prov("plan_length_scale", "%.6f" % SZ, "LOC / CAN", "z' = %.4f z: LOC length of back %s mm over the Cannone body length %.1f mm (top outline rows at least 10 mm wide, i.e. without the back's button)" % (SZ, LOC_TXT["length"], L_CAN))
 prov("plan_width_scale", "lower %.4f at z %.2f, C %.4f at z %.2f, upper %.4f at z %.2f (Cannone z)" % (ST_S[0], ST_Z[0], ST_S[1], ST_Z[1], ST_S[2], ST_Z[2]), "LOC / CAN",
-     "x' = s(z) x, s piecewise linear in the Cannone z through the three bout stations of the Cannone back (widths %.1f, %.1f, %.1f mm -> LOC 440, 234, 346), constant beyond; ASSUMPTION: the cello outline is the Cannone outline so stretched (no cello outline curve is published in reach)" % (wb[kL], wb[kC], wb[kU]))
+     "x' = s(z) x, s piecewise linear in the Cannone z through the three bout stations of the Cannone back (widths %.1f, %.1f, %.1f mm -> LOC %s), constant beyond; ASSUMPTION: the %s outline is the Cannone outline so stretched (no %s outline curve is published in reach)" % (wb[kL], wb[kC], wb[kU], LOC_TXT["bouts"], NAME, NAME))
 
 
 def sx(zc):  # Cannone z -> width scale
@@ -213,8 +252,9 @@ for name, rows in (("top", top_rows), ("back", back_rows)):
 cpoly_t = np.vstack([np.c_[top_rows[:, 2], top_rows[:, 0]], np.c_[top_rows[::-1, 1], top_rows[::-1, 0]]])
 cpoly_b = np.vstack([np.c_[back_rows[:, 2], back_rows[:, 0]], np.c_[back_rows[::-1, 1], back_rows[::-1, 0]]])
 wcb = back_rows[:, 2] - back_rows[:, 1]
-prov("outline_check", "back length %.1f, bouts lower %.1f / C %.1f / upper %.1f mm" % (back_rows[:, 0].max() - back_rows[:, 0].min() + SZ, wcb[back_rows[:, 0] < -183].max(),
-     wcb[(back_rows[:, 0] > ST_Z[0] * SZ) & (back_rows[:, 0] < ST_Z[2] * SZ)].min(), wcb[back_rows[:, 0] > -183].max()), "check", "the mapped back outline against LOC 749 / 440 / 234 / 346 (length includes the button rows that are at least 10 mm wide in Cannone units)")
+Z_SPLIT = -87.0 * SZ if VIOLA else -183  # lower / upper bout split: the Cannone's z -87 mapped (the cello's -183 is that, rounded)
+prov("outline_check", "back length %.1f, bouts lower %.1f / C %.1f / upper %.1f mm" % (back_rows[:, 0].max() - back_rows[:, 0].min() + SZ, wcb[back_rows[:, 0] < Z_SPLIT].max(),
+     wcb[(back_rows[:, 0] > ST_Z[0] * SZ) & (back_rows[:, 0] < ST_Z[2] * SZ)].min(), wcb[back_rows[:, 0] > Z_SPLIT].max()), "check", "the mapped back outline against LOC %s / %g / %g / %g (length includes the button rows that are at least 10 mm wide in Cannone units)" % (LOC_TXT["length"], B_LO, B_C, B_UP))
 
 
 def dist_to_poly(poly, pts):
@@ -243,6 +283,19 @@ LO_DIA = {1: 19.7, 2: 19.2}  # LOCM lower eye diameters (check only)
 STOP_P = {1: 419.0, 2: 420.0}  # LOCM stop: top edge to the f-hole notches, bass / treble
 NOTCH_GAP_P = 162.0  # LOCM between the notches (check only)
 LO_EDGE_P = {1: 32.8, 2: 34.0}  # LOCM lower eye to the outside of the instrument, bass / treble (check only)
+LOCM_REF = "LOC item ihas.200154818 image 0021 (Montgomery 2005, Castelbarco cello, caliper mm)"
+LOCM_TXT = dict(tape=" (103.0 by tape)", stop="'bass ff hole higher than treble'", lo_dia="%.1f / %.1f")
+if VIOLA:  # the Cassavetti sheet draws the length from the upper wing's tip to the lower wing's tip, the whole hole as here
+    FH_LEN_P = {1: 79.0, 2: 78.3}
+    UP_INNER = 49.2
+    UP_DIA = {1: 8.0, 2: 8.0}
+    LO_INNER, LO_OUTER = 123.5, 142.0
+    LO_DIA = {1: 9.7, 2: 9.25}
+    STOP_P = {1: 223.0, 2: 219.0}
+    NOTCH_GAP_P = 85.7
+    LO_EDGE_P = {1: 17.7, 2: 15.7}
+    LOCM_REF = "LOC resource music.musihas-200154830 image 0015 (Montgomery 2006, Cassavetti viola, mm)"
+    LOCM_TXT = dict(tape="", stop="'Treble ff hole higher than bass ff'", lo_dia="%.1f / %.2f")
 _, _, fh = nt("top-plate-fholes.tsv")
 _, _, bsec_c = nt("bridge-sections.tsv")
 Z_NOTCH_C = float(np.average(bsec_c[:, 3], weights=bsec_c[:, 1]))  # ASSUMPTION: the Cannone's notch line is its bridge plane
@@ -352,11 +405,10 @@ for h in (1, 2):
     holes[h]["len_new"] = float(np.hypot(*(fw_(holes[h]["tips"][0]) - fw_(holes[h]["tips"][1]))))
     holes[h]["lo_edge"] = float(dist_to_poly(cpoly_t, holes[h]["b2"][None, :])[0]) - holes[h]["s"] * holes[h]["r_lo"]
 H1, H2 = holes[1], holes[2]
-LOCM_REF = "LOC item ihas.200154818 image 0021 (Montgomery 2005, Castelbarco cello, caliper mm)"
 prov("f_hole_length", "%.1f / %.1f mm (bass / treble), end to end" % (FH_LEN_P[1], FH_LEN_P[2]), "LOCM",
      "%s; USED: each Cannone hole shape is scaled uniformly by printed / Cannone end-to-end length (%.2f / %.2f mm), scale %.4f / %.4f; placed length %.2f / %.2f mm" % (
          LOCM_REF, H1["len_c"], H2["len_c"], H1["s"], H2["s"], H1["len_new"], H2["len_new"]))
-prov("f_hole_upper_eye_spacing", "%.1f mm between the upper eyes' inner edges (103.0 by tape)" % UP_INNER, "LOCM",
+prov("f_hole_upper_eye_spacing", "%.1f mm between the upper eyes' inner edges%s" % (UP_INNER, LOCM_TXT["tape"]), "LOCM",
      "%s; USED: upper eye centre x = -/+(spacing + diameter)/2 = %.2f / %.2f mm; ASSUMPTION: symmetric about the centre line" % (LOCM_REF, H1["eye2"][0], H2["eye2"][0]))
 prov("f_hole_upper_eye_diameter", "%.1f / %.1f mm (bass / treble)" % (UP_DIA[1], UP_DIA[2]), "LOCM",
      "%s; USED only to place the upper eye centre (inner edge + radius); the eyes are not resized: the scaled Cannone upper eyes are %.2f / %.2f mm" % (
@@ -367,9 +419,9 @@ prov("f_hole_lower_eye_spacing_inner", "%.1f mm between the lower eyes' inner ed
 prov("f_hole_lower_eye_spacing_outer", "%.1f mm between the lower eyes' outer edges" % LO_OUTER, "LOCM",
      "%s; USED: see f_hole_lower_eye_spacing_inner (placed lower eye centres x %.2f / %.2f mm)" % (LOCM_REF, H1["b2"][0], H2["b2"][0]))
 prov("f_hole_stop", "%.0f / %.0f mm from the top edge to the notches (bass / treble)" % (STOP_P[1], STOP_P[2]), "LOCM",
-     "%s ('bass ff hole higher than treble'); USED: each hole is moved along z until the stem's inner edge on the Cannone notch row lies this far below the top edge (z %.2f): notches at z %.2f / %.2f mm; ASSUMPTION: the Cannone notch line = its bridge plane (Cannone z %.2f)" % (
-         LOCM_REF, Z_TOP, H1["n2"][1], H2["n2"][1], Z_NOTCH_C))
-prov("f_hole_lower_eye_diameter", "%.1f / %.1f mm (bass / treble)" % (LO_DIA[1], LO_DIA[2]), "LOCM",
+     "%s (%s); USED: each hole is moved along z until the stem's inner edge on the Cannone notch row lies this far below the top edge (z %.2f): notches at z %.2f / %.2f mm; ASSUMPTION: the Cannone notch line = its bridge plane (Cannone z %.2f)" % (
+         LOCM_REF, LOCM_TXT["stop"], Z_TOP, H1["n2"][1], H2["n2"][1], Z_NOTCH_C))
+prov("f_hole_lower_eye_diameter", (LOCM_TXT["lo_dia"] + " mm (bass / treble)") % (LO_DIA[1], LO_DIA[2]), "LOCM",
      "%s; CHECK only, not used: the scaled Cannone lower eyes are %.2f / %.2f mm" % (LOCM_REF, 2 * H1["s"] * H1["r_lo"], 2 * H2["s"] * H2["r_lo"]))
 prov("f_hole_notch_gap", "%.1f mm between the notches" % NOTCH_GAP_P, "LOCM",
      "%s; CHECK only, not used: the placed notch inner edges are %.2f mm apart" % (LOCM_REF, H2["n2"][0] - H1["n2"][0]))
@@ -381,10 +433,12 @@ prov("f_hole_shape", "the il Cannone hole rasters (top-plate-fholes.tsv of the C
 prov("f_holes","scale %.4f / %.4f; rotation %.2f / %.2f deg about the upper eye; length %.2f / %.2f mm; z extents %.1f / %.1f mm, areas %.0f / %.0f mm2; upper eyes (%.2f, %.2f) / (%.2f, %.2f), lower eyes (%.2f, %.2f) / (%.2f, %.2f), notches (%.2f, %.2f) / (%.2f, %.2f)" % (
     H1["s"], H2["s"], math.degrees(H1["phi"]), math.degrees(H2["phi"]), H1["len_new"], H2["len_new"], H1["len2"], H2["len2"], H1["area2"], H2["area2"],
     *H1["eye2"], *H2["eye2"], *H1["b2"], *H2["b2"], *H1["n2"], *H2["n2"]),
-     "LOCM / CAN", "LOCM (printed on this cello): lengths 130.5 / 128.5 end to end; upper eyes 102.3 apart at their inner edges, diameters 13.5 / 13.0; lower eyes 220.0 apart at their inner edges and 258.2 at their outer edges; stop to the notches 419 / 420 from the top edge. Each Cannone hole shape is scaled uniformly to its printed length (Cannone end-to-end %.2f / %.2f mm), its upper eye centre put at x = -/+(102.3 + d_upper)/2, then rotated about that eye until the lower eye centre is at x = -/+(220.0 + 258.2)/4 = -/+119.55 below it, and moved along z until the stem's inner edge on the Cannone notch row lies at the printed stop below the top edge (z %.2f). ASSUMPTIONS: the Cannone hole shape; eye centres = the largest inscribed circles of the Cannone raster in the top and bottom 30 %% of each hole (Cannone radii %.2f, %.2f / %.2f, %.2f mm); hole ends = the centres of the first and last raster rows; the Cannone notch line = its bridge plane (Cannone z %.2f; the treble hole's inner nick is visible on the raster at z -106.75, the bass hole's is not resolved at 0.5 mm); the top's edge on the centre line half a 1 mm row beyond the last outline row; each spacing split symmetrically about the centre line" % (
-    H1["len_c"], H2["len_c"], Z_TOP, H1["r_up"], H1["r_lo"], H2["r_up"], H2["r_lo"], Z_NOTCH_C))
-prov("f_hole_check", "eye diameters upper %.2f / %.2f (LOCM 13.5 / 13.0), lower %.2f / %.2f (LOCM 19.7 / 19.2) mm; notch inner edges %.2f apart (LOCM 162.0); lower eye edge to the top outline %.2f / %.2f mm (LOCM 32.8 / 34.0 to the outside of the instrument); bridge plane z %.2f = %.2f mm below the top edge, %.2f / %.2f mm above the printed notch line (the bridge is not moved)" % (
-    2 * H1["s"] * H1["r_up"], 2 * H2["s"] * H2["r_up"], 2 * H1["s"] * H1["r_lo"], 2 * H2["s"] * H2["r_lo"], H2["n2"][0] - H1["n2"][0], H1["lo_edge"], H2["lo_edge"],
+     "LOCM / CAN", "LOCM (printed on this %s): lengths %.1f / %.1f end to end; upper eyes %.1f apart at their inner edges, diameters %.1f / %.1f; lower eyes %.1f apart at their inner edges and %.1f at their outer edges; stop to the notches %.0f / %.0f from the top edge. Each Cannone hole shape is scaled uniformly to its printed length (Cannone end-to-end %.2f / %.2f mm), its upper eye centre put at x = -/+(%.1f + d_upper)/2, then rotated about that eye until the lower eye centre is at x = -/+(%.1f + %.1f)/4 = -/+%.2f below it, and moved along z until the stem's inner edge on the Cannone notch row lies at the printed stop below the top edge (z %.2f). ASSUMPTIONS: the Cannone hole shape; eye centres = the largest inscribed circles of the Cannone raster in the top and bottom 30 %% of each hole (Cannone radii %.2f, %.2f / %.2f, %.2f mm); hole ends = the centres of the first and last raster rows; the Cannone notch line = its bridge plane (Cannone z %.2f; the treble hole's inner nick is visible on the raster at z -106.75, the bass hole's is not resolved at 0.5 mm); the top's edge on the centre line half a 1 mm row beyond the last outline row; each spacing split symmetrically about the centre line" % (
+    NAME, FH_LEN_P[1], FH_LEN_P[2], UP_INNER, UP_DIA[1], UP_DIA[2], LO_INNER, LO_OUTER, STOP_P[1], STOP_P[2],
+    H1["len_c"], H2["len_c"], UP_INNER, LO_INNER, LO_OUTER, 0.25 * (LO_INNER + LO_OUTER), Z_TOP, H1["r_up"], H1["r_lo"], H2["r_up"], H2["r_lo"], Z_NOTCH_C))
+prov("f_hole_check", ("eye diameters upper %.2f / %.2f (LOCM %.1f / %.1f), lower %.2f / %.2f (LOCM " + LOCM_TXT["lo_dia"] + ") mm; notch inner edges %.2f apart (LOCM %.1f); lower eye edge to the top outline %.2f / %.2f mm (LOCM %.1f / %.1f to the outside of the instrument); bridge plane z %.2f = %.2f mm below the top edge, %.2f / %.2f mm above the printed notch line (the bridge is not moved)") % (
+    2 * H1["s"] * H1["r_up"], 2 * H2["s"] * H2["r_up"], UP_DIA[1], UP_DIA[2], 2 * H1["s"] * H1["r_lo"], 2 * H2["s"] * H2["r_lo"], LO_DIA[1], LO_DIA[2],
+    H2["n2"][0] - H1["n2"][0], NOTCH_GAP_P, H1["lo_edge"], H2["lo_edge"], LO_EDGE_P[1], LO_EDGE_P[2],
     SZ * Z_NOTCH_C, Z_TOP - SZ * Z_NOTCH_C, STOP_P[1] - (Z_TOP - SZ * Z_NOTCH_C), STOP_P[2] - (Z_TOP - SZ * Z_NOTCH_C)), "check", "computed from the placed holes; not fitted")
 if TRACE:
     # The f_hole_* rows state the trace instead (image 0021 trace, run8: classify.py, measure.py v2, not in the tree; the checks were
@@ -471,10 +525,17 @@ def t_back(xp, zp, d):
     return we * T_BACK["edge"] + (1 - we) * t_int
 
 
+THICK_NOTES = (  # the JOH values each note reads, and what is not drawn
+    "edge 5.5, flanks = fluting 3.9, centre at sound post 4.7; centre of bouts 4.0 is within 0.1 mm of the flank and below the generator's 0.2 mm top zone step, so not drawn",
+    "edge 5, flanks = fluting 3.5, centre at sound post 7; centre of bouts 3.6 within 0.1 mm of the flank (below the 0.4 mm back zone step)")
+if VIOLA:
+    THICK_NOTES = (
+        "edge 4, flanks 2.6, fluting 2.4, centre at sound post 3.2, centre of bouts 2.6 (= the flank); fluting 2.4 is 0.2 mm below the flank, one 0.2 mm top zone step, and is NOT drawn: JOH prints no fluting width, so the edge ramp runs straight to the flank (ASSUMPTION)",
+        "edge 4, flanks 2.7, fluting 2.3, centre at sound post 4.5; centre of bouts 2.6 within 0.1 mm of the flank (below the 0.4 mm back zone step); fluting 2.3 is 0.4 mm below the flank, one back zone step, and is NOT drawn: JOH prints no fluting width, so the edge ramp runs straight to the flank (ASSUMPTION)")
 prov("thickness_top", "edge %.1f to %.0f mm from the outline, linear to the interior by %.0f mm; interior flank %.1f; island between the f-holes %.1f, blended to the flank over 20 mm" % (T_TOP["edge"], PURF, LINING_W, T_TOP["flank"], T_TOP["post"]),
-     "JOH front", "edge 5.5, flanks = fluting 3.9, centre at sound post 4.7; centre of bouts 4.0 is within 0.1 mm of the flank and below the generator's 0.2 mm top zone step, so not drawn; ASSUMPTION: the 4.7 region is the island between the holes (bounded by the holes' inner edges over the z span where both holes are open) because the Cannone top shows no thickening at its post (3.08 mm within 6 mm of the post vs interior median 3.16); edge band width = purfling distance 6 and ramp end = lining width 16 (JOH) are ASSUMPTIONS of where the edge value applies")
+     "JOH front", "%s; ASSUMPTION: the %g region is the island between the holes (bounded by the holes' inner edges over the z span where both holes are open) because the Cannone top shows no thickening at its post (3.08 mm within 6 mm of the post vs interior median 3.16); edge band width = purfling distance %g and ramp end = lining width %g (JOH) are ASSUMPTIONS of where the edge value applies" % (THICK_NOTES[0], T_TOP["post"], PURF, LINING_W))
 prov("thickness_back", "edge %.1f to %.0f mm, linear by %.0f mm; interior = %.1f + %.1f x clip((t_Cannone - %.2f) / (%.2f - %.2f)) at the mapped Cannone point" % (T_BACK["edge"], PURF, LINING_W, T_BACK["flank"], T_BACK["post"] - T_BACK["flank"], TB_FLANK, TB_POST, TB_FLANK),
-     "JOH back / CAN", "edge 5, flanks = fluting 3.5, centre at sound post 7; centre of bouts 3.6 within 0.1 mm of the flank (below the 0.4 mm back zone step); the Cannone back's measured thickening (5.9 mm at its post, %.2f mm = its interior 10th percentile at the flanks) sets WHERE the cello back is thick; ASSUMPTION: the cello back's thickness pattern is the Cannone's, rescaled to JOH's levels (Sacconi's 7 -> 6 -> 5 -> 4 centre contours in Hargrave 1987 p. 37 have the same central-strip form)" % TB_FLANK)
+     "JOH back / CAN", "%s; the Cannone back's measured thickening (5.9 mm at its post, %.2f mm = its interior 10th percentile at the flanks) sets WHERE the %s back is thick; ASSUMPTION: the %s back's thickness pattern is the Cannone's, rescaled to JOH's levels (Sacconi's 7 -> 6 -> 5 -> 4 centre contours in Hargrave 1987 p. 37 have the same central-strip form)" % (THICK_NOTES[1], TB_FLANK, NAME, NAME))
 
 # ------------------------------------------------------------------ arching and rib height: solve the vertical scales
 cring = np.column_stack(fwd(RING_C[:, 0], RING_C[:, 1]))
@@ -542,8 +603,8 @@ mid_b = E_BP + K_B * arch_b
 inner_b_ring = E_BP + K_B * arch_b_c - 0.5 * t_ring_b
 rib_h = inner_b_ring - inner_t_ring
 prov("arching", "top midsurface = -%.4f x (Cannone ring level %.2f - Cannone midsurface), back = %.2f + %.4f x (Cannone midsurface - its ring level %.2f)" % (K_T, E_T, E_BP, K_B, E_B),
-     "JOH / CAN", "scales solved so that the outer surface's highest point lies JOH 29 (front) / 28 (back) mm above the plate's glue plane (mean inner skin at the rib ring); ASSUMPTION: the Cannone's arch shape, and JOH 'arching height' read as that height")
-prov("rib_height", "mean %.2f mm (min %.2f, max %.2f) between the inner skins at the ring" % (rib_h.mean(), rib_h.min(), rib_h.max()), "JOH", "rib height average 120 (the variation along the ring is the Cannone's edge undulation x the arch scales)")
+     "JOH / CAN", "scales solved so that the outer surface's highest point lies JOH %g (front) / %g (back) mm above the plate's glue plane (mean inner skin at the rib ring); ASSUMPTION: the Cannone's arch shape, and JOH 'arching height' read as that height" % (ARCH_TOP, ARCH_BACK))
+prov("rib_height", "mean %.2f mm (min %.2f, max %.2f) between the inner skins at the ring" % (rib_h.mean(), rib_h.min(), rib_h.max()), "JOH", "rib height average %g (the variation along the ring is the Cannone's edge undulation x the arch scales)" % RIB_H)
 for name, Gp, mid, t, d, outward in (("top", Gt, mid_t, tt, dt, -1), ("back", Gb, mid_b, tb, db, +1)):
     outer = mid + outward * 0.5 * t
     inner = mid - outward * 0.5 * t
@@ -646,11 +707,13 @@ moved = r_mid2 - r_mid_in
 half = 0.5 * (rmax2 - rmin2)
 rmin2, rmax2 = r_mid_in - half, r_mid_in + half
 prov("rib_ring_overhang", "stretched Cannone ring: overhang to the nearer outline mean %.2f, min %.2f mm; after pulling in: min %.2f mm; %d of %d angles moved, by up to %.2f mm" % (oh0.mean(), oh0.min(), oh1.min(), int((moved > 1e-9).sum()), len(moved), moved.max()),
-     "generator / CAN", "points closer than 2.0 mm to either outline (the generator's own 1.6 mm minimum + 0.4) moved along the nearer outline's inward normal, then re-read at the table's angles; elsewhere the stretched Cannone overhang is kept (JOH's plate overhang 3 mm + half rib 0.85 mm = 3.85 is NOT imposed: the stretched Cannone mean is larger)")
+     "generator / CAN", "points closer than 2.0 mm to either outline (the generator's own 1.6 mm minimum + 0.4) moved along the nearer outline's inward normal, then re-read at the table's angles; elsewhere the stretched Cannone overhang is kept (%s)" % (
+         "JOH's plate overhang 2.3 mm + half rib 0.6 mm = 2.9 is NOT imposed: the stretched Cannone mean is %s" % ("larger" if oh0.mean() > 2.9 else "smaller") if VIOLA else
+         "JOH's plate overhang 3 mm + half rib 0.85 mm = 3.85 is NOT imposed: the stretched Cannone mean is larger"))
 rows = [(rs[i, 0], CX2, CZ2, RIB_T * RIB_H, rmin2[i], rmax2[i], float(inner_t_ring.mean()), float(inner_b_ring.mean()), RIB_T) for i in range(len(rs))]
 write("ribs-sections.tsv", "frankensim.specimen-ring-sections.v1", ["theta_deg", "centre_x_mm", "centre_z_mm", "area_mm2", "r_min_mm", "r_max_mm", "y_min_mm", "y_max_mm", "mean_width_mm"], rows,
       ["%.0f", "%.3f", "%.3f", "%.2f", "%.3f", "%.3f", "%.2f", "%.2f", "%.2f"])
-prov("ribs", "ring = the Cannone ring mapped through the plan scales, radii re-measured about the mapped centre (%.2f, %.2f) at the table's 2 degree angles; wall %.1f mm" % (CX2, CZ2, RIB_T), "JOH / CAN", "rib thickness 1.7 (JOH; written as every section's mean width, so the generator's 10th percentile is 1.7); y columns and area are not read by the generator")
+prov("ribs", "ring = the Cannone ring mapped through the plan scales, radii re-measured about the mapped centre (%.2f, %.2f) at the table's 2 degree angles; wall %.1f mm" % (CX2, CZ2, RIB_T), "JOH / CAN", "rib thickness %g (JOH; written as every section's mean width, so the generator's 10th percentile is %g); y columns and area are not read by the generator" % (RIB_T, RIB_T))
 
 # ------------------------------------------------------------------ bass bar
 _, _, bs = nt("bass-bar-sections.tsv")
@@ -658,7 +721,7 @@ hb_c = bs[:, 7] - bs[:, 6]
 kh = BAR_H / hb_c.max()
 xb2, zb2 = fwd(bs[:, 2], bs[:, 0])
 zmid = 0.5 * (zb2.min() + zb2.max())
-klen = BAR_L / (zb2.max() - zb2.min())
+klen = 1.0 if BAR_L is None else BAR_L / (zb2.max() - zb2.min())  # None: no printed length, the plan length scale alone
 zb3 = zmid + (zb2 - zmid) * klen
 xb3 = sx(zb3 / SZ) * (bs[:, 2])  # centre line follows the plan map at the stretched z
 # keep the bar under the bass foot where the Cannone has it: at the bridge plane, the bar's x relative to the feet is the
@@ -679,7 +742,10 @@ rows = [(z, BAR_W * h, x, 0.0, x - 0.5 * BAR_W, x + 0.5 * BAR_W, 0.0, h) for z, 
 write("bass-bar-sections.tsv", "frankensim.specimen-sections.v1", ["z_mm", "area_mm2", "centroid_x_mm", "centroid_y_mm", "x_min_mm", "x_max_mm", "y_min_mm", "y_max_mm"], rows, ["%.3f"] * 8)
 keep = h3 > 2.0
 prov("bass_bar", "length %.1f mm of sections (z %.1f to %.1f), %.1f mm above 2 mm height; max height %.1f; wall %.1f mm; centre line x %.1f to %.1f" % (zb3.max() - zb3.min(), zb3.min(), zb3.max(), zb3[keep].max() - zb3[keep].min(), h3.max(), BAR_W, xb3.min(), xb3.max()),
-     "JOH / CAN", "JOH bar length approx. 580 (the Cannone's whole section range stretched to it about its mapped middle), height middle approx. 24 (the Cannone height profile x %.3f), thickness approx. 11; ASSUMPTION: Cannone bar profile and line (centre line x = the plan width scale at each z, then shifted %.1f mm in x so that at the bridge plane it sits under the bass foot at the Cannone's position across the foot, x %.1f mm)" % (kh, BAR_SHIFT, bar_x_target))
+     "JOH / CAN", "%s, height middle approx. %g (the Cannone height profile x %.3f), thickness approx. %g; ASSUMPTION: Cannone bar profile and line (centre line x = the plan width scale at each z, then shifted %.1f mm in x so that at the bridge plane it sits under the bass foot at the Cannone's position across the foot, x %.1f mm)" % (
+         "JOH bar length approx. %g (the Cannone's whole section range stretched to it about its mapped middle)" % BAR_L if BAR_L is not None else
+         "JOH prints no bar length in this column (blank; the Small and Large cells read '5 to 4' and '4 to 3'), so ASSUMPTION: the Cannone's whole section range through the plan length scale %.4f alone" % SZ,
+         BAR_H, kh, BAR_W, BAR_SHIFT, bar_x_target))
 
 # ------------------------------------------------------------------ soundpost
 P2x, P2z = [float(v) for v in fwd(PX, PZ)]
@@ -688,7 +754,7 @@ y_back_post = float(E_BP + K_B * (FB.bil(FB.ymid, PX, PZ) - E_B))
 ys = np.linspace(y_top_post + 6, y_back_post - 6, 28)
 rows = [(y, math.pi * (0.5 * POST_D) ** 2, P2x, P2z, P2x - 0.5 * POST_D, P2x + 0.5 * POST_D, P2z - 0.5 * POST_D, P2z + 0.5 * POST_D) for y in ys]
 write("soundpost-sections.tsv", "frankensim.specimen-sections.v1", ["y_mm", "area_mm2", "centroid_x_mm", "centroid_z_mm", "x_min_mm", "x_max_mm", "z_min_mm", "z_max_mm"], rows, ["%.3f"] * 8)
-prov("soundpost", "diameter %.1f mm, vertical axis at (%.2f, %.2f)" % (POST_D, P2x, P2z), "JOH / CAN", "JOH soundpost thickness 11; ASSUMPTION: position = the Cannone post centroid (16.6, -114.3) through the plan map, axis vertical (the Cannone's tilt 0.034 / 0.008 not carried)")
+prov("soundpost", "diameter %.1f mm, vertical axis at (%.2f, %.2f)" % (POST_D, P2x, P2z), "JOH / CAN", "JOH soundpost thickness %g; ASSUMPTION:" % POST_D + " position = the Cannone post centroid (16.6, -114.3) through the plan map, axis vertical (the Cannone's tilt 0.034 / 0.008 not carried)")
 
 # ------------------------------------------------------------------ bridge
 _, _, sil = nt("bridge-silhouette.tsv")
@@ -774,8 +840,11 @@ write("bridge-sections.tsv", "frankensim.specimen-sections.v1", ["y_mm", "area_m
       [(YBOT2 - 0.5 * BR_H, 100.0, 0.0, ZC2, -0.5 * BR_FEET, 0.5 * BR_FEET, ZC2 - 0.5 * T_BR, ZC2 + 0.5 * T_BR)], ["%.3f"] * 8)
 write("part-volumes.tsv", "frankensim.specimen-part-volumes.v1", ["part", "volume_mm3", "triangles", "x_min_mm", "x_max_mm", "y_min_mm", "y_max_mm", "z_min_mm", "z_max_mm"],
       [("bridge", T_BR * area2, 0, rb[:, 1].min(), rb[:, 2].max(), rb[:, 0].min(), rb[:, 0].max(), ZC2 - 0.5 * T_BR, ZC2 + 0.5 * T_BR)], ["%s", "%.1f", "%d", "%.2f", "%.2f", "%.2f", "%.2f", "%.2f", "%.2f"])
-prov("bridge", "silhouette x %.4f (feet %.1f -> 90 mm), y %.4f (height %.2f -> 92 mm), plane z %.2f, feet bottoms on the outer skin at y %.2f (bass) / %.2f (treble), Cannone feet bottoms %.2f / %.2f; uniform shell thickness %.2f mm; area %.0f mm2; volume %.0f mm3" % (kx_b, feet_c, ky_b, ybot - ytop + 0.25, ZC2, skl, skr, fyl, fyr, T_BR, area2, T_BR * area2),
-     "JOH / CAN", "JOH bridge feet width 90, height approx. 92, thickness 11; thickness = the Cannone's uniform shell value (volume 3170 mm3 / silhouette %.0f mm2 = %.2f mm) x 11 / the Cannone's foot thickness %.2f mm (z extent of its sections 1-3 mm above the feet); ASSUMPTIONS: the Cannone silhouette's shape, JOH 'thickness 11' read as the foot thickness, the Cannone's mean-to-foot thickness ratio; position = the Cannone bridge plane through the length scale (stop %.1f mm from the top's neck-end edge vs JOH stoplength 405)" % (area_c, t_unif_c, t_foot_c, top_rows[:, 0].max() - ZC2))
+STOP_JOH = 225 if VIOLA else 405
+prov("bridge", "silhouette x %.4f (feet %.1f -> %g mm), y %.4f (height %.2f -> %g mm), plane z %.2f, feet bottoms on the outer skin at y %.2f (bass) / %.2f (treble), Cannone feet bottoms %.2f / %.2f; uniform shell thickness %.2f mm; area %.0f mm2; volume %.0f mm3" % (kx_b, feet_c, BR_FEET, ky_b, ybot - ytop + 0.25, BR_H, ZC2, skl, skr, fyl, fyr, T_BR, area2, T_BR * area2),
+     "JOH / CAN", "JOH bridge feet width %g, height approx. %g, thickness %g; thickness = the Cannone's uniform shell value (volume 3170 mm3 / silhouette %.0f mm2 = %.2f mm) x %g / the Cannone's foot thickness %.2f mm (z extent of its sections 1-3 mm above the feet); ASSUMPTIONS: the Cannone silhouette's shape, JOH 'thickness %g' read as the foot thickness, the Cannone's mean-to-foot thickness ratio; position = the Cannone bridge plane through the length scale (stop %.1f mm from the top's neck-end edge vs JOH stoplength %d)" % (
+         BR_FEET, BR_H, BR_T_FOOT, area_c, t_unif_c, BR_T_FOOT, t_foot_c, BR_T_FOOT, top_rows[:, 0].max() - ZC2, STOP_JOH)
+     + ("; MASS: no printed viola bridge mass was found, so the bridge keeps this volume: %.2f g at the maple pack's 626 kg/m3 (Sonderegger 2013), an ESTIMATE from the sizes above, not a measured or typical mass" % (T_BR * area2 * 626.0e-6) if VIOLA else ""))
 
 # ------------------------------------------------------------------ strings at the bridge
 xs_str = np.array([-1.5, -0.5, 0.5, 1.5]) * STR_SPAN / 3.0
@@ -786,11 +855,13 @@ for name, x in zip("cgda", xs_str):
     rows_s.append((name, "bridge", ZC2, x, y_top, 0.0, 0.0))
 write("string-contacts.tsv", "frankensim.specimen-string-contacts.v1", ["string", "contact", "z_mm", "x_mm", "y_mm", "slope_dy_dz_before", "slope_dy_dz_after"], rows_s,
       ["%s", "%s", "%.2f", "%.3f", "%.3f", "%.1f", "%.1f"])
-prov("strings_at_bridge", " ".join("%s (%.2f, %.2f)" % (r[0], r[3], r[4]) for r in rows_s), "JOH / CAN", "JOH string spacing at bridge 47 (equal gaps, C on the bass-bar side, -x); y = the top of the scaled silhouette at that x (notch depth not modelled); slopes not used by the generator")
+prov("strings_at_bridge", " ".join("%s (%.2f, %.2f)" % (r[0], r[3], r[4]) for r in rows_s), "JOH / CAN", "JOH string spacing at bridge %g (equal gaps, C on the bass-bar side, -x); y = the top of the scaled silhouette at that x (notch depth not modelled); slopes not used by the generator" % STR_SPAN)
 
 # ------------------------------------------------------------------ dimensions the generator reads
+POST_ROW = (("johannsson-viola-medium", "soundpost thickness 6.5 mm (hansjohannsson.com/resources/mesviola.html, Medium column)") if VIOLA else
+            ("johannsson-cello-1-1", "soundpost thickness 11 mm (hansjohannsson.com/resources/mescello.html, 1/1 column)"))
 write("dimensions.tsv", "frankensim.specimen-dimensions.v1", ["part", "feature", "quantity", "value_si", "unit", "sigma_si", "route", "source_id", "note"],
-      [("soundpost", "section", "equivalent-diameter-mean", "%.6f" % (POST_D / 1000), "m", "unstated", "published-maker-table", "johannsson-cello-1-1", "soundpost thickness 11 mm (hansjohannsson.com/resources/mescello.html, 1/1 column)")],
+      [("soundpost", "section", "equivalent-diameter-mean", "%.6f" % (POST_D / 1000), "m", "unstated", "published-maker-table") + POST_ROW],
       ["%s"] * 9)
 with open(OUT + "PROVENANCE.tsv", "x", encoding="utf-8") as f:
     f.write("item\tvalue\tsource\tnote\n")

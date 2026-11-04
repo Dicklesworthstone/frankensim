@@ -9,6 +9,7 @@ Plate thickness comes from the normal-thickness maps in uniform-thickness zones 
 tied to its neighbour along the shared edge chain); the attachment bands of the ribs, bar, post and bridge are zones of their own so that every tie chain lies inside one component.
 With instrument=cello and the cello mesh options below it builds the cello body of data/instruments/geometry/cello-castelbarco-1697-shell from that
 directory's specimen tables, which are laid out like il Cannone's; every option is off by default, so a violin table is unchanged.
+instrument=viola builds a viola body the same way from a specimen made by cello_specimen.py instrument=viola.
 """
 import math
 import sys
@@ -55,11 +56,15 @@ ZSTEP = dict(top=float(opts.get("zone_step_top_mm", "0.2")), back=float(opts.get
 # order (the first cell of a row, on the hole's edge, which can fall outside the traced ring); the default row-major keeps the violin and cello meshes unchanged.
 # instrument=bass is the cello's route for a double bass specimen (data/instruments/geometry/double-bass-johannsson-shell): the cello's drive letters, centre-drive height
 # and endpin text, with a `specimen` row and drive labels of its own.
+# instrument=viola is the cello's string and centre-drive rule (C and A outer strings, centre drive 2 mm below the mean string
+# contact height) for a specimen made by cello_specimen.py instrument=viola; it keeps the chinrest in `omitted` and adds a viola
+# `specimen` row.
 INSTRUMENT = opts.get("instrument", "violin")
-if INSTRUMENT not in ("violin", "cello", "bass"):
-    raise SystemExit("instrument must be violin, cello or bass")
+if INSTRUMENT not in ("violin", "cello", "bass", "viola"):
+    raise SystemExit("instrument must be violin, cello, bass or viola")
 CELLO = INSTRUMENT == "cello"
 BASS = INSTRUMENT == "bass"
+VIOLA = INSTRUMENT == "viola"
 LOW = CELLO or BASS  # the cello's drive letters (c, a), centre-drive height and endpin text
 FOOT_BAND = float(opts.get("foot_band_mm", "3.0"))
 FOOT_BAND_TEXT = "%.1f" % FOOT_BAND if "foot_band_mm" in opts else "3"  # the violin tables print the default as "3"
@@ -1322,6 +1327,8 @@ def main():
         meta("specimen", "DOUBLE BASS from Johannsson's published maker table (and Brown's total f-hole area) mapped onto the il Cannone tables (YellowDog, MB 16036/16912, after MaroonOak's cello route): a violin-form outline scaled to the bass table, no measured bass outline; every mapped value, its source and every ASSUMPTION in PROVENANCE.tsv of the specimen directory; not a scanned instrument")
     if CELLO:
         meta("specimen", "CELLO from published maker values mapped onto the il Cannone tables (MaroonOak, MB 15931): every mapped value, its source and every ASSUMPTION in PROVENANCE.tsv of the specimen directory; not a scanned instrument")
+    if VIOLA:
+        meta("specimen", "VIOLA from published maker values mapped onto the il Cannone tables: every mapped value, its source and every ASSUMPTION in PROVENANCE.tsv of the specimen directory; not a scanned instrument")
     meta("omitted", "neck and upper block, tail block, tailpiece, strings, %s, linings and corner blocks, purfling, varnish, glue compliance, the button and tail-end notch features of the plates (end rows narrower than 10 mm)" % ("endpin" if LOW else "chinrest"))
     write(vol_inner, r_eq, neck_len)
 
@@ -1354,7 +1361,7 @@ def write(vol_inner_mm3, r_eq_mm, neck_len_mm):
             f.write("drive\tdiagnostic centre, along the director\t%s\t0.0\t%.6f\t-0.1\t0\t1\t0\n" % (first.name, first.nodes[0][1]))
         if BRIDGE_ON:
             contact = {(r[0], r[1]): r for r in table("string-contacts.tsv")[1]}  # string, contact, z, x, y, slopes
-            ends = (("C", "c"), ("A", "a")) if CELLO else (("E", "c"), ("G", "a")) if BASS else (("G", "g"), ("E", "e"))  # the outer strings
+            ends = (("C", "c"), ("A", "a")) if CELLO or VIOLA else (("E", "c"), ("G", "a")) if BASS else (("G", "g"), ("E", "e"))  # the outer strings
             names = (("low string (E, specimen letter c) at the bridge, along x", "high string (G, specimen letter a) at the bridge, along x") if BASS
                      else ("bass string (%s) at the bridge, along x" % ends[0][0], "treble string (%s) at the bridge, along x" % ends[1][0]))
             for label, key in ((names[0], (ends[0][1], "bridge")), (names[1], (ends[1][1], "bridge"))):
@@ -1362,8 +1369,8 @@ def write(vol_inner_mm3, r_eq_mm, neck_len_mm):
                 p = to_plan(np.array([[float(r[3]), float(r[2])]]))[0]
                 f.write("drive\t%s\tbridge\t%.6f\t%.6f\t%.6f\t1\t0\t0\n" % (label, p[0] / 1000.0, float(r[4]) / 1000.0, p[1] / 1000.0))
             gz = to_plan(np.array([[0.0, float(contact[(ends[0][1], "bridge")][2])]]))[0]
-            # the centre drive: the violin's fixed height; the cello's 2 mm below the mean string contact height
-            y_centre = np.mean([float(contact[(s, "bridge")][4]) for s in "cgda"]) + 2.0 if LOW else -52.0
+            # the centre drive: the violin's fixed height; the cello's (and the bass's and viola's) 2 mm below the mean string contact height
+            y_centre = np.mean([float(contact[(s, "bridge")][4]) for s in "cgda"]) + 2.0 if LOW or VIOLA else -52.0
             f.write("drive\tbridge centre, along y (into the top)\tbridge\t%.6f\t%.6f\t%.6f\t0\t1\t0\n" % (0.0, y_centre / 1000.0, gz[1] / 1000.0))
     for k, v in META:
         print(k, "=", v)
