@@ -1,0 +1,69 @@
+frankensim.matdb-source.v1
+observation	thomastik-spirocore-orchestra-4-4-medium-wayback-20191213	Thomastik-Infeld Spirocore Orchestra double bass strings, 4/4 size, medium gauge, vibrating string length 110.0 cm, chrome-wound spiral core: S39 (E1), S38 (A1), S37 (D2), S36 (G2)	Catalogue tension from the manufacturer's product page (Wayback capture of 2019-12-13, thomastik-infeld.com/en/products/orchestral-strings/double-bass/spirocore-orchestra, MEDIUM row of the 110.0 cm table): E 34.0, A 34.0, D 32.0, G 30.0 kg; converted with 9.80665 m/s^2, reading kg as kilogram-force	The page prints kg and lb and does not name the unit or the pitch the tension belongs to; A4 = 440 Hz equal temperament is assumed. Values are for the 4/4 size only
+observation	mersenne-linear-density-derived	The same four strings	Line mass derived from published inputs, not weighed: mu = T / (2 L f)^2 (Mersenne) with T from the tension observation, L = 1.100 m and f the equal-tempered open-string frequency (E1 41.2034, A1 55.0000, D2 73.4162, G2 97.9989 Hz at A4 = 440 Hz)	Cross-check on A1 against Zupet 2024 (University of Ljubljana MSc, p. 24, as quoted by the lead in mail 15933; thesis not opened by PlumCanyon): Spirocore Medium 4/4 A, L 1100 mm, f0 55.0 Hz, mu 22.8 g/m, T 333.5 N
+observation	bass-spa-spirocore-mittel-gauges	Player-compiled gauge table (Bass Spa, sites.google.com/site/thebassspa/double-bass-strings), row Thomastik-Infeld Spirocore Mittel, columns G D A E: .052 .070 .085 .111	No unit is printed. Read as inches: it is the only unit for which mu / (pi d^2 / 4) stays below steel's 7850 kg/m^3 for all four strings; read as millimetres it would exceed it by about six orders of magnitude	The row is Spirocore Mittel of unstated size, not the 4/4 Orchestra set that gives the tension. On this route the diameter enters only through the computed air drag
+observation	core-bending-stiffness-bounds	The Spirocore spiral rope core (the page says only 'Spiral core'); bending stiffness is unpublished	Bounds, not measurements. Upper: the load-bearing core as a solid steel rod, EI = E pi d_c^4 / 64 with E = 200 GPa; A string d_c = 0.75 mm (Zupet 2024 via the lead, mail 15933); the E, D and G cores scaled as d_c = 0.75 mm x sqrt(T / T_A) (equal core stress, an assumption). Lower: the same core as a close-packed 1 x 7 bundle of free wires of diameter d_c / 3 with no friction between wires, EI = 7/81 of the upper	The wire count 7 and the core scaling are assumptions of this card; the winding adds no stiffness in either bound. The effect of the unknown is measured by rendering both
+observation	thomastik-vibrating-length	Thomastik-Infeld Spirocore Orchestra double bass 4/4 size	Vibrating string length 110.0 cm | 43.3 in, from the same page	Used as the speaking length (nut to bridge)
+scalar	linear-density-e1	mersenne-linear-density-derived	linear_density_bass_e1	0.04057767708278565	kg/m	constant
+uncertainty	linear-density-e1	unstated	-	-	-	-
+validity	linear-density-e1	temperature_known	0	0	1
+scalar	tension-e1	thomastik-spirocore-orchestra-4-4-medium-wayback-20191213	tension_bass_e1	333.42609999999996	N	constant
+uncertainty	tension-e1	unstated	-	-	-	-
+validity	tension-e1	temperature_known	0	0	1
+scalar	diameter-e1	bass-spa-spirocore-mittel-gauges	diameter_bass_e1	0.0028194	m	constant
+uncertainty	diameter-e1	unstated	-	-	-	-
+validity	diameter-e1	temperature_known	0	0	1
+scalar	bending-stiffness-e1-lo	core-bending-stiffness-bounds	bending_stiffness_bass_e1_lo	0.0002684466378799872	N*m^2	constant
+uncertainty	bending-stiffness-e1-lo	unstated	-	-	-	-
+validity	bending-stiffness-e1-lo	temperature_known	0	0	1
+scalar	bending-stiffness-e1-hi	core-bending-stiffness-bounds	bending_stiffness_bass_e1_hi	0.0031063110954684236	N*m^2	constant
+uncertainty	bending-stiffness-e1-hi	unstated	-	-	-	-
+validity	bending-stiffness-e1-hi	temperature_known	0	0	1
+scalar	linear-density-a1	mersenne-linear-density-derived	linear_density_bass_a1	0.02277345126698995	kg/m	constant
+uncertainty	linear-density-a1	unstated	-	-	-	-
+validity	linear-density-a1	temperature_known	0	0	1
+scalar	tension-a1	thomastik-spirocore-orchestra-4-4-medium-wayback-20191213	tension_bass_a1	333.42609999999996	N	constant
+uncertainty	tension-a1	unstated	-	-	-	-
+validity	tension-a1	temperature_known	0	0	1
+scalar	diameter-a1	bass-spa-spirocore-mittel-gauges	diameter_bass_a1	0.002159	m	constant
+uncertainty	diameter-a1	unstated	-	-	-	-
+validity	diameter-a1	temperature_known	0	0	1
+scalar	bending-stiffness-a1-lo	core-bending-stiffness-bounds	bending_stiffness_bass_a1_lo	0.0002684466378799872	N*m^2	constant
+uncertainty	bending-stiffness-a1-lo	unstated	-	-	-	-
+validity	bending-stiffness-a1-lo	temperature_known	0	0	1
+scalar	bending-stiffness-a1-hi	core-bending-stiffness-bounds	bending_stiffness_bass_a1_hi	0.0031063110954684236	N*m^2	constant
+uncertainty	bending-stiffness-a1-hi	unstated	-	-	-	-
+validity	bending-stiffness-a1-hi	temperature_known	0	0	1
+scalar	linear-density-d2	mersenne-linear-density-derived	linear_density_bass_d2	0.012029334002926701	kg/m	constant
+uncertainty	linear-density-d2	unstated	-	-	-	-
+validity	linear-density-d2	temperature_known	0	0	1
+scalar	tension-d2	thomastik-spirocore-orchestra-4-4-medium-wayback-20191213	tension_bass_d2	313.8128	N	constant
+uncertainty	tension-d2	unstated	-	-	-	-
+validity	tension-d2	temperature_known	0	0	1
+scalar	diameter-d2	bass-spa-spirocore-mittel-gauges	diameter_bass_d2	0.001778	m	constant
+uncertainty	diameter-d2	unstated	-	-	-	-
+validity	diameter-d2	temperature_known	0	0	1
+scalar	bending-stiffness-d2-lo	core-bending-stiffness-bounds	bending_stiffness_bass_d2_lo	0.00023779356158227258	N*m^2	constant
+uncertainty	bending-stiffness-d2-lo	unstated	-	-	-	-
+validity	bending-stiffness-d2-lo	temperature_known	0	0	1
+scalar	bending-stiffness-d2-hi	core-bending-stiffness-bounds	bending_stiffness_bass_d2_hi	0.0027516112125948685	N*m^2	constant
+uncertainty	bending-stiffness-d2-hi	unstated	-	-	-	-
+validity	bending-stiffness-d2-hi	temperature_known	0	0	1
+scalar	linear-density-g2	mersenne-linear-density-derived	linear_density_bass_g2	0.00632928322721376	kg/m	constant
+uncertainty	linear-density-g2	unstated	-	-	-	-
+validity	linear-density-g2	temperature_known	0	0	1
+scalar	tension-g2	thomastik-spirocore-orchestra-4-4-medium-wayback-20191213	tension_bass_g2	294.1995	N	constant
+uncertainty	tension-g2	unstated	-	-	-	-
+validity	tension-g2	temperature_known	0	0	1
+scalar	diameter-g2	bass-spa-spirocore-mittel-gauges	diameter_bass_g2	0.0013207999999999998	m	constant
+uncertainty	diameter-g2	unstated	-	-	-	-
+validity	diameter-g2	temperature_known	0	0	1
+scalar	bending-stiffness-g2-lo	core-bending-stiffness-bounds	bending_stiffness_bass_g2_lo	0.00020899824748441911	N*m^2	constant
+uncertainty	bending-stiffness-g2-lo	unstated	-	-	-	-
+validity	bending-stiffness-g2-lo	temperature_known	0	0	1
+scalar	bending-stiffness-g2-hi	core-bending-stiffness-bounds	bending_stiffness_bass_g2_hi	0.002418408292319707	N*m^2	constant
+uncertainty	bending-stiffness-g2-hi	unstated	-	-	-	-
+validity	bending-stiffness-g2-hi	temperature_known	0	0	1
+scalar	playing-length	thomastik-vibrating-length	playing_length	1.1	m	constant
+uncertainty	playing-length	unstated	-	-	-	-
+validity	playing-length	temperature_known	0	0	1

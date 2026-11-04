@@ -198,6 +198,41 @@ fn kaplan_ks510_rows_are_the_mansour_table_and_satisfy_its_identities() {
     assert!(percival.contains("NOT the Kaplan strings"), "{percival}");
 }
 
+/// The Thomastik Spirocore Orchestra 4/4 medium double-bass strings behind the posted bass notes E1, A1, D2 and G2: the catalogue tensions at the 110.0 cm vibrating length
+/// (E 34.0, A 34.0, D 32.0, G 30.0 kg, read as kilogram-force), the line masses derived from them by Mersenne's law at the equal-tempered open-string frequencies (A4 = 440 Hz),
+/// the gauges of a player-compiled table (read as inches) and the two bounds on the unpublished core bending stiffness: a solid steel rod of core diameter 0.75 mm x sqrt(T / T_A)
+/// and 7/81 of it for a close-packed bundle of seven free wires. Each row is checked against its derivation, and the derived mass against the gauge: the string's mean density
+/// stays below solid steel's.
+#[test]
+fn spirocore_bass_rows_are_their_catalogue_derivations() {
+    let s = load_pack("bass-strings-thomastik-spirocore-orchestra-catalogue-2019", PERMITTED_FACTS);
+    let l = s["playing_length"];
+    assert_eq!(l, 1.1, "the catalogue's 110.0 cm vibrating length");
+    let near = |a: f64, b: f64| ((a - b) / b).abs() < 1e-12;
+    let t_a = 34.0 * 9.80665;
+    // note, catalogue tension [kg], semitones below A4, gauge [in]
+    for (n, kg, semitones, inch) in [
+        ("e1", 34.0, -41.0, 0.111),
+        ("a1", 34.0, -36.0, 0.085),
+        ("d2", 32.0, -31.0, 0.070),
+        ("g2", 30.0, -26.0, 0.052),
+    ] {
+        let t = kg * 9.80665;
+        let f = 440.0 * 2f64.powf(semitones / 12.0);
+        let ms = t / (2.0 * l * f).powi(2);
+        let d = inch * 0.0254;
+        assert!(near(s[&format!("tension_bass_{n}")], t), "tension {n}");
+        assert!(near(s[&format!("linear_density_bass_{n}")], ms), "Mersenne mass {n}");
+        assert!(near(s[&format!("diameter_bass_{n}")], d), "gauge {n}");
+        let core = 0.75e-3 * (t / t_a).sqrt();
+        let hi = 200e9 * std::f64::consts::PI * core.powi(4) / 64.0;
+        assert!(near(s[&format!("bending_stiffness_bass_{n}_hi")], hi), "upper bound {n}");
+        assert!(near(s[&format!("bending_stiffness_bass_{n}_lo")], hi * 7.0 / 81.0), "lower bound {n}");
+        let rho = ms / (std::f64::consts::PI * d * d / 4.0);
+        assert!(rho < 7850.0, "{n}: the mean density {rho} kg/m3 must stay below steel's");
+    }
+}
+
 #[test]
 fn multifilament_core_patents_satisfy_their_identities() {
     let s = load_pack(
