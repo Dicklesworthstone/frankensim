@@ -153,12 +153,13 @@ pub(super) fn advance(
     }
     let next_velocity = velocity(new_mass, next_momentum)?;
     let mixing_heat_j = if transferred_mass > 0.0 {
-        let mixed_mass = old_mass + transferred_mass;
-        if !mixed_mass.is_finite() || mixed_mass <= 0.0 {
-            return None;
-        }
-        let reduced_mass =
-            old_mass.min(transferred_mass) * (old_mass.max(transferred_mass) / mixed_mass);
+        // The receiver and incoming masses may have a representable
+        // reduced mass even when their raw sum overflows. Use normalized
+        // weights, retaining the existing physical mixing law.
+        let larger = old_mass.max(transferred_mass);
+        let smaller = old_mass.min(transferred_mass);
+        let ratio = smaller / larger;
+        let reduced_mass = smaller / (1.0 + ratio);
         kinetic_energy(
             reduced_mass,
             core::array::from_fn(|d| donor_velocity[d] - old_velocity[d]),
@@ -308,6 +309,20 @@ mod tests {
                 near(single.kinetic_change_j, batch.kinetic_change_j, 1e-9);
             }
         }
+    }
+
+    #[test]
+    fn mixing_reduced_mass_remains_representable_for_large_inventory() {
+        // A mixture's reduced mass can fit even when adding both masses
+        // directly would overflow. No artificial clamping of velocity.
+        let old = 1.0e308;
+        let incoming = 1.0e308;
+        let expected = 0.5e308;
+        let larger = old.max(incoming);
+        let smaller = old.min(incoming);
+        let reduced = smaller / (1.0 + smaller / larger);
+        assert_eq!(reduced, expected);
+        near(kinetic_energy(reduced, [1.0e-154, 0.0, 0.0]), 0.25, 1e-15);
     }
 
     #[test]
