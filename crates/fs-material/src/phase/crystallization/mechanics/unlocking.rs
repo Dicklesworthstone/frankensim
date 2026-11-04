@@ -26,6 +26,9 @@ use crate::{MaterialAdmissibility, SmallStrainLaw, Tangent6, Voigt};
 use fs_blake3::ContentHash;
 use fs_evidence::{Ambition, ModelCard, ValidityDomain};
 
+/// Atomic transfer to the original constant-pressure material parcel.
+pub mod isobaric;
+
 /// Atomic transfer of a released network's heat to its original thermal cell.
 pub mod thermal;
 
@@ -80,6 +83,10 @@ pub struct UnlockedCrystallization {
     previous_lock: CrystallizationLock,
     release_volume: CrystallizationVolumeState,
     release_total_strain: Voigt,
+    // Original infinitesimal elastic volume strain, before removing the network.
+    release_elastic_volumetric_strain: f64,
+    // Arithmetic-only bound for summing its three normal components.
+    release_elastic_trace_roundoff: f64,
     elastic_state_identity: ContentHash,
     reference_specific_volume_m3_kg: f64,
     limits: CrystallizationStrainLimits,
@@ -142,6 +149,10 @@ impl FrozenCrystallizationElastic<'_, ElasticAcousticState> {
                 previous_lock: self.lock,
                 release_volume: self.volume,
                 release_total_strain: total_strain,
+                release_elastic_volumetric_strain: (strain[0] + strain[1]) + strain[2],
+                release_elastic_trace_roundoff: 8.0
+                    * f64::EPSILON
+                    * ((strain[0].abs() + strain[1].abs()) + strain[2].abs()),
                 elastic_state_identity: response.material_state_identity,
                 reference_specific_volume_m3_kg,
                 limits: self.limits,
