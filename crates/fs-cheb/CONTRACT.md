@@ -162,6 +162,14 @@ budgeted, cancellable entry points).
    and continuous Parseval energy. This is algebra of retained interpolants,
    not a claim that input sampling resolved the original functions; the
    classic operations do not add a budget or cancellation certificate.
+   Construction and nonlinear products condition amplitudes with exact powers
+   of two before FFT arithmetic, then restore physical units together with
+   normalization. Representable coefficients survive oversized unnormalized
+   transforms and reciprocal operand scaling; unrepresentable output
+   coefficients refuse. Construction explicitly makes DC and Nyquist real,
+   so endpoint twiddle roundoff cannot invent an off-grid Nyquist sine.
+   The budgeted constructor shares this numerical path and its finite-result
+   checks, with normalization work included in its admission.
 
 ## Error model
 Structured panics for programmer/modeling errors: non-finite or
@@ -335,8 +343,10 @@ and capacity refusals, and cancellation before publication.
   integration.
 - `fourier::FourierSeries` — trigonometric interpolants on [0, 2π)
   via fs-fft's real transform (power-of-two samples): eval,
-  ik-multiply differentiation (Nyquist zeroed, the real-signal
-  convention), integral off c₀, tail-magnitude spectral-decay probe.
+  continuous ik-multiply differentiation retaining the highest sine,
+  dealiased multiplication, integral off c₀, and a tail-magnitude
+  spectral-decay probe. Construction and multiplication condition amplitudes
+  before transforms to avoid unrepresentable temporary spectra.
 
 `tests/variants.rs`: cheb-101 colleague vs subdivision vs analytic;
 cheb-102 even-multiplicity recovery; cheb-103 1e-3 clustered roots;

@@ -27,28 +27,23 @@ impl FourierSeries {
     /// Interpolate `f` from `n` uniform samples (n even, ≥ 2).
     ///
     /// # Panics
-    /// If `n` is not a power of two ≥ 2 (caller contract — the current
-    /// real transform backend is radix-2).
+    /// If `n` is not a power of two ≥ 2, a sample is non-finite, or a
+    /// retained coefficient is not representable as finite f64.
     #[must_use]
     pub fn build<F: Fn(f64) -> f64>(f: &F, n: usize) -> FourierSeries {
         assert!(
             n >= 2 && n.is_power_of_two(),
             "power-of-two sample count >= 2 required"
         );
-        let samples: Vec<f64> = (0..n)
+        let mut samples: Vec<f64> = (0..n)
             .map(|k| {
                 let y = f(std::f64::consts::TAU * k as f64 / n as f64);
                 assert!(y.is_finite(), "Fourier samples must be finite");
                 y
             })
             .collect();
-        let fft = RealFft::new(n);
-        let spec = fft.forward(&samples);
-        let scale = 1.0 / n as f64;
-        let coeffs: Vec<C64> = spec
-            .into_iter()
-            .map(|c| C64::new(c.re * scale, c.im * scale))
-            .collect();
+        let coeffs = coefficients_from_samples(&mut samples)
+            .expect("Fourier coefficient is not representable as finite f64");
         FourierSeries { coeffs, n }
     }
 
@@ -132,9 +127,14 @@ impl FourierSeries {
     /// This is algebra of the retained interpolants; it cannot recover
     /// frequencies already aliased when the inputs were constructed.
     ///
+    /// The inputs are independently scaled by exact powers of two during
+    /// the transforms and sample multiplication. This keeps the result
+    /// invariant under reciprocal changes in the inputs' physical units,
+    /// even when their unscaled FFT buffers would overflow or underflow.
+    ///
     /// # Panics
-    /// If the required grid size overflows, or coefficients, transform
-    /// intermediates, or sample products are not representable as finite f64.
+    /// If the required grid size overflows or a retained output coefficient
+    /// is not representable as finite f64.
     #[must_use]
     pub fn mul(&self, other: &FourierSeries) -> FourierSeries {
         self.assert_valid();
@@ -156,13 +156,15 @@ impl FourierSeries {
             .and_then(usize::checked_next_power_of_two)
             .expect("Fourier product grid size overflows usize");
         let fft = RealFft::new(n);
-        let mut products = self.padded_samples(&fft, n, left_degree);
-        let right = other.padded_samples(&fft, n, right_degree);
+        let left_exponent = self.amplitude_exponent();
+        let right_exponent = other.amplitude_exponent();
+        let mut products = self.padded_samples(&fft, n, left_degree, left_exponent);
+        let right = other.padded_samples(&fft, n, right_degree, right_exponent);
         for (left, right) in products.iter_mut().zip(right) {
             *left *= right;
             assert!(left.is_finite(), "Fourier sample product is not finite");
         }
-        let scale = 1.0 / n as f64;
+        let exponent = left_exponent + right_exponent - n.ilog2() as i32;
         let coeffs = fft
             .forward(&products)
             .into_iter()
@@ -175,7 +177,19 @@ impl FourierSeries {
                 if k > degree {
                     C64::ZERO
                 } else {
-                    C64::new(c.re * scale, if k == 0 { 0.0 } else { c.im * scale })
+                    let coefficient = C64::new(
+                        scale_pow2(c.re, exponent),
+                        if k == 0 {
+                            0.0
+                        } else {
+                            scale_pow2(c.im, exponent)
+                        },
+                    );
+                    assert!(
+                        coefficient.re.is_finite() && coefficient.im.is_finite(),
+                        "Fourier product coefficient is not representable as finite f64"
+                    );
+                    coefficient
                 }
             })
             .collect();
@@ -207,15 +221,30 @@ impl FourierSeries {
         FourierSeries { coeffs, n: self.n }
     }
 
-    fn padded_samples(&self, fft: &RealFft, n: usize, degree: usize) -> Vec<f64> {
+    fn amplitude_exponent(&self) -> i32 {
+        binary_exponent(self.coeffs.iter().fold(0.0_f64, |largest, c| {
+            largest.max(c.re.abs()).max(c.im.abs())
+        }))
+    }
+
+    fn padded_samples(
+        &self,
+        fft: &RealFft,
+        n: usize,
+        degree: usize,
+        amplitude_exponent: i32,
+    ) -> Vec<f64> {
         let mut spectrum = vec![FftComplex::default(); n / 2 + 1];
         for (k, c) in self.coeffs.iter().take(degree + 1).enumerate() {
-            let scale = if k == self.n / 2 {
-                0.5 * n as f64
-            } else {
-                n as f64
-            };
-            spectrum[k] = FftComplex::new(c.re * scale, if k == 0 { 0.0 } else { c.im * scale });
+            let exponent = n.ilog2() as i32 - amplitude_exponent - i32::from(k == self.n / 2);
+            spectrum[k] = FftComplex::new(
+                scale_pow2(c.re, exponent),
+                if k == 0 {
+                    0.0
+                } else {
+                    scale_pow2(c.im, exponent)
+                },
+            );
             assert!(
                 spectrum[k].re.is_finite() && spectrum[k].im.is_finite(),
                 "Fourier padded coefficient is not representable as finite f64"
@@ -245,4 +274,66 @@ impl FourierSeries {
             .skip(from)
             .fold(0.0f64, |m, c| m.max(c.abs()))
     }
+}
+
+// Shared with the budgeted constructor: scale in the existing sample buffer,
+// not in an extra allocation. All FFT arithmetic then operates on magnitudes
+// of order one; restore the physical amplitude together with the 1/n factor.
+// Power-of-two scaling preserves the rounding of ordinary normal-range values.
+pub(crate) fn coefficients_from_samples(samples: &mut [f64]) -> Option<Vec<C64>> {
+    let n = samples.len();
+    let exponent = binary_exponent(samples.iter().fold(0.0_f64, |m, x| m.max(x.abs())));
+    if exponent != 0 {
+        for sample in samples.iter_mut() {
+            *sample = scale_pow2(*sample, -exponent);
+        }
+    }
+    let fft = RealFft::new(n);
+    let exponent = exponent - n.ilog2() as i32;
+    fft.forward(samples)
+        .into_iter()
+        .enumerate()
+        .map(|(k, c)| {
+            // Real samples constrain both endpoints to be real. In particular,
+            // roundoff in sin(pi) must not invent a continuous Nyquist sine:
+            // only subsequent calculus or an explicit coefficient supplies it.
+            let im = if k == 0 || k == n / 2 {
+                0.0
+            } else {
+                scale_pow2(c.im, exponent)
+            };
+            let c = C64::new(scale_pow2(c.re, exponent), im);
+            (c.re.is_finite() && c.im.is_finite()).then_some(c)
+        })
+        .collect()
+}
+
+// floor(log2(x)) without a logarithm or reciprocal, including subnormals.
+// Callers supply a nonnegative finite magnitude; zero needs no scaling.
+fn binary_exponent(x: f64) -> i32 {
+    let bits = x.to_bits();
+    let encoded = (bits >> 52) as i32;
+    if encoded != 0 {
+        encoded - 1023
+    } else if bits != 0 {
+        63 - bits.leading_zeros() as i32 - 1074
+    } else {
+        0
+    }
+}
+
+// Multiply by 2^exponent without first materializing an infinite/zero factor.
+// On a downscale, leave the largest negative step until last so a nonzero
+// subnormal result is rounded only once, at the final multiplication.
+fn scale_pow2(mut value: f64, mut exponent: i32) -> f64 {
+    while exponent > 1023 {
+        value *= f64::from_bits(2046_u64 << 52);
+        exponent -= 1023;
+    }
+    while exponent < -1022 {
+        let step = (exponent + 1022).max(-1022);
+        value *= f64::from_bits(((1023 + step) as u64) << 52);
+        exponent -= step;
+    }
+    value * f64::from_bits(((1023 + exponent) as u64) << 52)
 }

@@ -724,6 +724,15 @@ fn cb_009_budgeted_builder_twins() {
             assert_eq!(lhs.re.to_bits(), rhs.re.to_bits(), "spectrum bit parity");
             assert_eq!(lhs.im.to_bits(), rhs.im.to_bits(), "spectrum bit parity");
         }
+        // The unnormalized FFT sum overflows on this finite waveform.
+        // Both constructors must still retain its representable mean.
+        let large = |_| f64::MAX;
+        let classic_large = fs_cheb::fourier::FourierSeries::build(&large, 64);
+        let budgeted_large =
+            fs_cheb::fourier_build_budgeted(&large, 64, &ChebBudget::default(), cx)
+                .expect("finite coefficients survive transform scaling");
+        assert_eq!(budgeted_large.coeffs[0].re, f64::MAX);
+        assert_eq!(budgeted_large.coeffs, classic_large.coeffs);
         // Typed refusals where the classic API panics.
         assert!(matches!(
             fs_cheb::fourier_build_budgeted(&wave, 100, &ChebBudget::default(), cx),

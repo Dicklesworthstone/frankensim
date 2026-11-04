@@ -1364,7 +1364,7 @@ pub fn admit_cheb2_build(
 /// Worst-case preflight for [`crate::fourier::FourierSeries::build`]:
 /// `n` samples (power of two, ≥ 2 — a typed refusal where the classic
 /// API panics), one radix-2 real transform, and the retained complex
-/// spectrum.
+/// spectrum, including in-place amplitude conditioning.
 ///
 /// # Errors
 /// [`ChebError`] — shape or cap refusals.
@@ -1387,7 +1387,7 @@ pub fn admit_fourier_build(n: usize, budget: &ChebBudget) -> Result<ChebAdmissio
         temp_bytes,
         u128::from(budget.max_temp_bytes),
     )?;
-    let ops = samples * u128::from(n.ilog2().max(1)) * 5;
+    let ops = samples * (u128::from(n.ilog2().max(1)) * 5 + 8);
     cap_check(
         "Fourier transform work",
         ops,
@@ -1510,7 +1510,7 @@ pub fn colleague_roots_budgeted(
 ///
 /// # Errors
 /// [`ChebError`] — shape/cap refusals before any sampling,
-/// [`ChebError::NonFinite`] on an unrepresentable sample,
+/// [`ChebError::NonFinite`] on an unrepresentable sample or coefficient,
 /// [`ChebError::Cancelled`] at a drain boundary.
 pub fn fourier_build_budgeted<F: Fn(f64) -> f64>(
     f: &F,
@@ -1537,13 +1537,10 @@ pub fn fourier_build_budgeted<F: Fn(f64) -> f64>(
     if cx.checkpoint().is_err() {
         return Err(ChebError::Cancelled);
     }
-    let fft = fs_fft::RealFft::new(n);
-    let spec = fft.forward(&samples);
-    let scale = 1.0 / n as f64;
-    let coeffs: Vec<fs_math::c64::C64> = spec
-        .into_iter()
-        .map(|c| fs_math::c64::C64::new(c.re * scale, c.im * scale))
-        .collect();
+    let coeffs =
+        crate::fourier::coefficients_from_samples(&mut samples).ok_or(ChebError::NonFinite {
+            what: "Fourier coefficient",
+        })?;
     Ok(crate::fourier::FourierSeries { coeffs, n })
 }
 

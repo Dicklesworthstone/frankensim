@@ -148,3 +148,80 @@ fn unrepresentable_derivative_refuses_instead_of_publishing_infinity() {
     let f = series(8, 0.0, &[(4, f64::MAX, 0.0)]);
     assert!(std::panic::catch_unwind(|| f.differentiate()).is_err());
 }
+
+#[test]
+fn construction_preserves_constants_across_the_finite_amplitude_range() {
+    for amplitude in [f64::MAX, -f64::MAX, f64::MIN_POSITIVE, f64::from_bits(1)] {
+        for n in [2, 8, 64] {
+            let f = FourierSeries::build(&|_| amplitude, n);
+            assert_eq!(f.coeffs[0].re, amplitude, "mean, n={n}");
+            assert!(
+                f.coeffs
+                    .iter()
+                    .all(|c| c.re.is_finite() && c.im.is_finite())
+            );
+            for c in &f.coeffs[1..] {
+                assert_eq!(c.re, 0.0);
+                assert_eq!(c.im, 0.0);
+            }
+        }
+    }
+}
+
+#[test]
+fn construction_retains_phase_when_the_unnormalized_spectrum_would_overflow() {
+    let amplitude = f64::from_bits(2043_u64 << 52); // 2^1020
+    let f = FourierSeries::build(
+        &|t| amplitude * (0.5 + 0.75 * (3.0 * t).cos() - 0.25 * (5.0 * t).sin()),
+        128,
+    );
+    close(f.coeffs[0].re / amplitude, 0.5);
+    close(f.coeffs[3].re / amplitude, 0.375);
+    close(f.coeffs[5].im / amplitude, 0.125);
+    for j in 0..79 {
+        let t = std::f64::consts::TAU * (j as f64 + 0.17) / 79.0;
+        close(
+            f.eval(t) / amplitude,
+            0.5 + 0.75 * (3.0 * t).cos() - 0.25 * (5.0 * t).sin(),
+        );
+    }
+}
+
+#[test]
+fn nonlinear_products_are_invariant_under_reciprocal_amplitude_units() {
+    for exponent in [1000, -1000] {
+        let large = f64::from_bits(((1023 + exponent) as u64) << 52);
+        let small = f64::from_bits(((1023 - exponent) as u64) << 52);
+        let f = series(8, 0.0, &[(4, large, -0.5 * large)]);
+        let g = series(16, 0.25 * small, &[(3, 0.75 * small, small)]);
+        let product = f.mul(&g);
+        for j in 0..97 {
+            let t = std::f64::consts::TAU * (j as f64 + 0.43) / 97.0;
+            close(
+                product.eval(t),
+                ((4.0 * t).cos() - 0.5 * (4.0 * t).sin())
+                    * (0.25 + 0.75 * (3.0 * t).cos() + (3.0 * t).sin()),
+            );
+        }
+        close(product.coeffs[7].re, 0.3125);
+        close(product.coeffs[7].im, -0.15625);
+    }
+}
+
+#[test]
+fn nonlinear_product_rescales_small_coefficients_without_losing_subnormals() {
+    // (2^-536 cos(4t))² = 2^-1073 (1 + cos(8t)). The mean is
+    // two minimum subnormals; the one-sided 8th coefficient is one.
+    let amplitude = f64::from_bits((1023 - 536) << 52);
+    let f = series(8, 0.0, &[(4, amplitude, 0.0)]);
+    let product = f.mul(&f);
+    assert_eq!(product.coeffs[0].re, f64::from_bits(2));
+    assert_eq!(product.coeffs[8].re, f64::from_bits(1));
+}
+
+#[test]
+fn unrepresentable_product_coefficient_refuses_after_rescaling() {
+    let f = series(8, f64::MAX, &[(4, f64::MAX, 0.0)]);
+    let g = series(8, 2.0, &[(4, 1.0, 0.0)]);
+    assert!(std::panic::catch_unwind(|| f.mul(&g)).is_err());
+}
