@@ -1,5 +1,40 @@
 # CONTRACT: fs-thermochem
 
+## Finite neutral-solute saturation
+
+`solution::solubility::IdealSolubilityV1` binds explicit solvent and neutral
+solute identities, reference concentration in mol/m³ of incompressible solvent,
+reference temperature, constant dissolution-enthalpy slope and an inclusive
+temperature domain. The ideal-dilute van't Hoff law increases saturation with
+temperature for an endothermic dissolution. Logarithmic evaluation preserves
+representable results even when a separately formed exponential would overflow;
+reference-temperature and zero-enthalpy values remain exact.
+
+`equilibrate` retains a finite total component stock and returns separate
+dissolved and pure-solid amounts. Dissolved amount is `min(total, c_sat*V)`;
+the absent-solid branch may be undersaturated and the present-solid branch
+has exactly the supplied saturation capacity. A positive dissolved trace is
+retained independently of a much larger solid stock. The compensated component
+balance reports floating-point residuals without claiming a certified enclosure.
+`partition_at_saturation` is allocation-free and noniterative, allowing an
+isothermal material consumer to cache the original pair-law evaluation while
+repartitioning at each solvent-volume trial. G0/G3 tests cover finite phase
+complementarity, drying/redissolution, temperature direction and slope,
+extensive scaling, trace inventories and domain/range refusal.
+
+This is an explicitly declared, independent neutral-solute approximation, not
+an electrolyte solubility-product, pH, complexation or common-ion model. It
+does not infer measured material parameters, solid-phase selection, solvent
+density corrections, nucleation barriers, finite dissolution rates, solid
+volume or heat evolution. Concentration is on the stated solvent-volume basis;
+molality or total-solution-volume data require an explicit compatible conversion.
+The reversible finite-phase inequality follows USGS PHREEQC:
+<https://water.usgs.gov/water-resources/software/PHREEQC/documentation/phreeqc3-html/phreeqc3-13.htm>;
+its constant-enthalpy temperature treatment is documented in
+<https://water.usgs.gov/water-resources/software/PHREEQC/documentation/phreeqc3-html/phreeqc3-36.htm>.
+For ionic solids, IUPAC defines the solubility product in terms of ion
+activities: <https://goldbook.iupac.org/terms/view/S05742>.
+
 ## Binary liquid miscibility and source-owned thermodynamic forces
 
 `solution::BinaryRegularSolutionV1` retains two explicit ordered species and a

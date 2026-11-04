@@ -19,6 +19,9 @@ use crate::{SpeciesId, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R};
 use fs_math::det::{exp, expm1, ln, sqrt};
 use fs_qty::Temperature;
 
+/// Finite solid/liquid partition for an explicitly declared neutral solute.
+pub mod solubility;
+
 /// Maximum absolute sum error admitted for an independently represented pair.
 /// Inputs within this floating-point roundoff budget are normalized together.
 pub const BINARY_COMPOSITION_SUM_TOLERANCE_V1: f64 = 8.0 * f64::EPSILON;
