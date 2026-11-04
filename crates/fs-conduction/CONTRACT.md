@@ -1511,6 +1511,26 @@ fields. Values refer to the same supplied reference volume throughout the run;
 current-state density cannot change closed-body mass. This explicit field
 carries no material-source receipt and introduces no expansion or phase change.
 
+`HeatCapacity::MaterialVolumeFractions` and
+`BackwardEuler::material_volume_fractions` bind fixed P1 constituent volume
+fractions to original `MaterialHeatCapacity` sources. This explicitly declares
+a stationary, nonreacting composite at local thermal equilibrium with additive
+reference volumes and no heat of mixing. Its capacity is
+`C_vol = sum(phi_i rho_i Cp_i)`, consistent with constituent masses; separately
+averaging density and Cp and multiplying them is not this physical model.
+Fractions lie in `[0,1]` and sum to one at each vertex within `64*f64::EPSILON`,
+without clipping or normalization. The resulting P1 capacity uses the same
+exact nodal row moments, assembled once and reused by theta, backward-Euler,
+history and duty-cycle owners. All constituent source bundles survive; their
+temperature domains constrain every vertex of a tet where that constituent's
+P1 fraction is nonzero. Entirely absent constituents add no domain restriction.
+This conservative support check covers mixed interiors even when one corner's
+fraction is zero. Conductivity remains independently declared, and no evolving
+composition, expansion, reaction or latent heat is inferred. Regressions in
+`tests/material_volume_fraction_capacity.rs` check mass-correct composite
+heating, independent constituent-energy conservation, immutable preparation,
+source retention and active-support admission.
+
 `duty::march_duty_cycle_with_capacity` uses that same prepared storage for
 scheduled volumetric power. Uniform, per-element, material-ID and source-bound
 density/Cp capacities retain their distinct thermal inertia throughout the

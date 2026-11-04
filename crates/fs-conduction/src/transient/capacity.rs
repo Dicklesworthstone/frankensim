@@ -4,6 +4,9 @@
 //! validity-wide scalar laws. Temperature-varying data belong to the existing
 //! reference-mass enthalpy owner; they are never silently frozen here.
 
+pub(super) mod mixture;
+pub use mixture::MaterialHeatCapacityVolumeFraction;
+
 use fs_matdb::{EvaluationDecision, MaterialCard, PropertyKey, QueryPoint, SelectionPolicy};
 use fs_material::state_point::{
     DENSITY_PROPERTY, MaterialPropertySelection, ResolvedMaterialStatePoint,
@@ -427,6 +430,10 @@ pub enum HeatCapacity<'a> {
     /// Source-derived rho*c_p using the SAME material IDs as conductivity.
     /// Each source remains distinct; no representative material is averaged in.
     MaterialById(&'a [(MaterialId, MaterialHeatCapacity)]),
+    /// Fixed P1 constituent volume fractions with source-bound density and Cp.
+    /// Declares local thermal equilibrium and additive reference volumes;
+    /// conductivity remains an independently supplied constitutive model.
+    MaterialVolumeFractions(&'a [MaterialHeatCapacityVolumeFraction<'a>]),
 }
 
 impl HeatCapacity<'_> {
@@ -442,6 +449,9 @@ impl HeatCapacity<'_> {
             Self::PerElement(values) => BackwardEuler::per_element(cx, mesh, values),
             Self::Nodal(values) => BackwardEuler::nodal(cx, mesh, values),
             Self::MaterialUniform(source) => BackwardEuler::uniform_material(cx, mesh, source),
+            Self::MaterialVolumeFractions(constituents) => {
+                BackwardEuler::material_volume_fractions(cx, mesh, constituents)
+            }
             Self::MaterialById(rows) => {
                 let materials = materials.ok_or_else(|| {
                     invalid_assignment(
