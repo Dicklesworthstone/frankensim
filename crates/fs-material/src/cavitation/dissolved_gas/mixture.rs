@@ -50,6 +50,11 @@ fn total(values: impl Iterator<Item = f64>) -> Result<f64> {
 /// exact same liquid volume and accepted time, and every law must retain the
 /// same original gas catalog and temperature. Each species appears once.
 /// Different diffusivities and physical films are allowed, including zero area.
+/// Optional gas-side coefficients use the SAME scalar two-film resistance.
+/// Each conducting interface must fit in one common constant-total-pressure
+/// gas mixture throughout the interval; a conservative envelope may require a
+/// shorter step for opposing transfers. Zero-coefficient sealed paths supply
+/// no realized gas interface.
 ///
 /// `maximum_concentration_mol_m3` bounds the SUM of exchanging solutes across
 /// the liquid bulk, liquid-side interface and admitted quasi-steady films.
@@ -124,6 +129,37 @@ pub fn advance_mixture(
     // Summing separate extrema is conservative for unlike relaxation rates.
     let initial_pressure = gas.state().state().pressure;
     let final_pressure = candidate.gas().state().state().pressure;
+    if films.iter().any(|film| film.gas_side_transfer.is_some()) {
+        let active = order.iter().zip(&exchanges).filter(|(index, _)| {
+            films[**index].area_m2 > 0.0
+                && laws[**index].diffusivity_m2_s > 0.0
+                && films[**index]
+                    .gas_side_transfer
+                    .is_none_or(|k| k.value_si() > 0.0)
+        });
+        let bulk = total(
+            active
+                .clone()
+                .map(|(_, exchange)| exchange.sources[0].partial_pressure_pa),
+        )?;
+        let interface_excess = total(active.map(|(_, exchange)| {
+            exchange
+                .sources
+                .iter()
+                .map(|sample| sample.interface_partial_pressure_pa - sample.partial_pressure_pa)
+                .fold(f64::NEG_INFINITY, f64::max)
+        }))?;
+        // p_interface - p_bulk is a fixed signed multiple of each species'
+        // exponentially decaying Henry drive. Its endpoint extrema therefore
+        // bound the whole interval. Unchanged carrier pressure fills the rest;
+        // using differences preserves the exact one-film/zero-resistance limit.
+        let carrier = finite(initial_pressure - bulk)?;
+        if interface_excess > carrier + 64.0 * f64::EPSILON * initial_pressure {
+            return Err(invalid(
+                "mixture gas-film interfaces exceed the common total pressure",
+            ));
+        }
+    }
     let changes = || {
         exchanges.iter().map(|exchange| {
             exchange.sources[1].partial_pressure_pa - exchange.sources[0].partial_pressure_pa
@@ -162,7 +198,7 @@ pub fn advance_mixture(
             for sample in &exchange.sources {
                 for concentration in [
                     sample.concentration_mol_m3,
-                    sample.equilibrium_concentration_mol_m3,
+                    sample.interface_concentration_mol_m3,
                 ] {
                     let point = law
                         .source
@@ -192,7 +228,7 @@ pub fn advance_mixture(
         exchange.sources.iter().fold(0.0_f64, |maximum, sample| {
             maximum
                 .max(sample.concentration_mol_m3)
-                .max(sample.equilibrium_concentration_mol_m3)
+                .max(sample.interface_concentration_mol_m3)
         })
     }))?;
     if concentration > controls.maximum_concentration_mol_m3 {

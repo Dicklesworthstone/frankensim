@@ -11334,11 +11334,32 @@ liquid state/clock publish together only after source, mass, energy and final
 cancellation checks. Both bulk and interfacial concentrations must fit the
 original material support and authored dilute limit.
 
+`DissolutionFilm::gas_side_transfer` adds an explicitly fixed, pressure-based
+gas coefficient in mol/(m² s Pa), using the existing `MolarPermeance` quantity.
+The original scalar and simultaneous owners use the series law
+`1/K_l = delta_l/D_l + H/k_g`. The finite equilibrium, gas reconstruction and
+thermal accounts are unchanged; only the physical rate and interface traces
+change. `None` retains the original one-film arithmetic and `Some(0)` seals
+the gas path. Two simultaneously sealed films refuse an undetermined massless
+interface. Coefficient values carry no inferred material or experimental
+authority, and must apply over the complete pressure/composition interval.
+
+Bulk liquid and the ACTUAL liquid-side interface are queried against the
+original material support and dilution bound. With gas resistance, `H*p_bulk`
+is only a driving potential. A conducting interface cannot exceed the gas total
+pressure, and the mixture path bounds the combined interfacial partial pressures
+throughout the interval. Opposing transfers can require a shorter step to satisfy
+that conservative envelope. The liquid timescale check uses the reduced actual
+relaxation rate `lambda*delta_l²/D_l`. It does not certify the separate gas film.
+The two-film derivation follows the interfacial equilibrium and flux continuity
+in [ETH Zurich's film model](https://www.hyper-tvt.ethz.ch/fundamentals-masstransfer-filmodel.html).
+
 This is a fixed-temperature, fixed-volume dilute-solution model with negligible
-solute partial volume and gas-side resistance and an already quasi-steady liquid
-film. The authored film-relaxation bound is an applicability check, not a
+solute partial volume and already quasi-steady films. The authored
+film-relaxation bound is an applicability check, not a
 transient diffusion-layer solution or accuracy theorem. Nucleation, bubble
-radius motion, evaporation and adiabatic thermal evolution require separate
+radius motion, evaporation, Stefan flow, composition-dependent gas transport and
+adiabatic thermal evolution require separate
 physical owners; no generic entropy-production claim is made. Four native
 tests cover independent finite equilibrium/relaxation and thermostat energy,
 carrier-preserving exsolution, small-step/partition identities, and atomic
@@ -11365,6 +11386,11 @@ layout refusal, final cancellation/retry, and an unsupported interior pressure
 excursion with supported endpoints. These are synthetic equation checks;
 cross-solute interactions, reaction, moving bubbles and adiabatic temperature
 feedback remain outside this fixed-temperature dilute model.
+
+Additional scalar and mixture regressions check two-film finite-inventory
+oracles, both interface fluxes, unchanged equilibrium and heat, actual source
+support, sealed-film limits, reduced liquid relaxation rate, time subdivision,
+shared-interface refusal, canonical ordering and transactional cancellation.
 
 
 ## Thermal Voce with physical overstress kinetics

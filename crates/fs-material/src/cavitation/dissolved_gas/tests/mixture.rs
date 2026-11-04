@@ -81,10 +81,12 @@ fn unequal_opposing_films_refuse_an_interior_mixture_concentration_peak_atomical
         DissolutionFilm {
             area_m2: 0.01,
             thickness_m: 1e-3,
+            gas_side_transfer: None,
         },
         DissolutionFilm {
             area_m2: 0.01,
             thickness_m: 1e-5,
+            gas_side_transfer: None,
         },
     ];
     let mut limits = controls();
@@ -503,4 +505,131 @@ fn nonmonotone_total_pressure_cannot_hide_an_unsupported_interior_state() {
     ));
     assert_eq!(gas, before_gas);
     assert_eq!(liquid, before_liquid);
+}
+
+#[test]
+fn two_film_mixture_retains_opposing_species_and_one_original_gas_update() {
+    let catalog = model(vec![0.6, 0.4], 0.0);
+    let laws = laws(&catalog);
+    let films = [
+        DissolutionFilm {
+            gas_side_transfer: Some(MolarPermeance::try_new(H * D / film().thickness_m).unwrap()),
+            ..film()
+        },
+        DissolutionFilm {
+            gas_side_transfer: Some(
+                MolarPermeance::try_new(9.0 * (0.5 * H) * (3.0 * D) / film().thickness_m).unwrap(),
+            ),
+            ..film()
+        },
+    ];
+    let initial_gas = gas(&catalog);
+    let mut gas = initial_gas.clone();
+    let initial = inventories();
+    let mut liquid = initial;
+    let step = advance_mixture(
+        &laws,
+        &mut gas,
+        &mut liquid,
+        &films,
+        200.0,
+        controls(),
+        || false,
+    )
+    .unwrap();
+    assert!(step.exchanges[0].dissolved_moles_change > 0.0);
+    assert!(step.exchanges[1].dissolved_moles_change < 0.0);
+    for i in 0..2 {
+        let law = &laws[i];
+        let mw = law.molar_mass_kg_mol;
+        let total =
+            initial_gas.species_mass_kg(law.species()).unwrap() / mw + initial[i].dissolved_moles();
+        let h = law.henry_mol_m3_pa();
+        let kl = law.diffusivity_m2_s() / films[i].thickness_m;
+        let kg = films[i].gas_side_transfer.unwrap().value_si();
+        let overall = 1.0 / (1.0 / kl + h / kg);
+        let lambda = films[i].area_m2 * overall * (1.0 / VL + h * R * T / VG);
+        let equilibrium = total * (h * R * T * VL) / (VG + h * R * T * VL);
+        let expected =
+            equilibrium + (initial[i].dissolved_moles() - equilibrium) * (-lambda * 200.0).exp();
+        near(liquid[i].dissolved_moles(), expected, 3e-15);
+        near(
+            gas.species_mass_kg(law.species()).unwrap() / mw + liquid[i].dissolved_moles(),
+            total,
+            1e-14,
+        );
+        near(step.exchanges[i].relaxation_rate_per_s, lambda, 2e-18);
+    }
+    near(step.energy_residual_j, 0.0, 1e-8);
+    for endpoint in 0..2 {
+        let interface_total: f64 = step
+            .exchanges
+            .iter()
+            .map(|e| e.sources[endpoint].interface_partial_pressure_pa)
+            .sum();
+        let bulk_total = if endpoint == 0 {
+            initial_gas.state().state().pressure
+        } else {
+            gas.state().state().pressure
+        };
+        assert!(interface_total <= bulk_total);
+    }
+    let mut reversed_gas = initial_gas;
+    let mut reversed_liquid = [initial[1], initial[0]];
+    let reversed = advance_mixture(
+        &[laws[1].clone(), laws[0].clone()],
+        &mut reversed_gas,
+        &mut reversed_liquid,
+        &[films[1], films[0]],
+        200.0,
+        controls(),
+        || false,
+    )
+    .unwrap();
+    assert_eq!(step, reversed);
+    assert_eq!(gas, reversed_gas);
+    assert_eq!(liquid, [reversed_liquid[1], reversed_liquid[0]]);
+}
+
+#[test]
+fn two_film_mixture_refuses_incompatible_shared_interface_atomically() {
+    let catalog = model(vec![0.6, 0.4], 0.0);
+    let laws = laws(&catalog);
+    let films = [
+        DissolutionFilm {
+            gas_side_transfer: Some(MolarPermeance::try_new(H * D / film().thickness_m).unwrap()),
+            ..film()
+        },
+        DissolutionFilm {
+            // p_B,interface is below the total gas pressure by itself, but
+            // together with A it would require a negative carrier fraction.
+            gas_side_transfer: Some(
+                MolarPermeance::try_new(4.0 * (0.5 * H) * (3.0 * D) / film().thickness_m).unwrap(),
+            ),
+            ..film()
+        },
+    ];
+    let mut gas = gas(&catalog);
+    let original_gas = gas.clone();
+    let mut liquid = inventories();
+    let original_liquid = liquid;
+    let a = 0.5 * 60_000.0;
+    let b = 0.8 * 40_000.0 + 0.2 * (3.0 / (0.5 * H));
+    assert!(b < 100_000.0 && a + b > 100_000.0);
+    assert!(matches!(
+        advance_mixture(
+            &laws,
+            &mut gas,
+            &mut liquid,
+            &films,
+            1.0,
+            controls(),
+            || false
+        ),
+        Err(DissolvedGasError::Invalid(
+            "mixture gas-film interfaces exceed the common total pressure"
+        ))
+    ));
+    assert_eq!(gas, original_gas);
+    assert_eq!(liquid, original_liquid);
 }

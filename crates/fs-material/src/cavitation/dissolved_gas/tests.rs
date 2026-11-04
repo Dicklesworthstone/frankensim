@@ -175,6 +175,7 @@ fn film() -> DissolutionFilm {
     DissolutionFilm {
         area_m2: 0.01,
         thickness_m: 1e-5,
+        gas_side_transfer: None,
     }
 }
 fn near(a: f64, b: f64, tolerance: f64) {
@@ -360,6 +361,7 @@ fn late_cancellation_source_limits_and_infinite_dilution_guard_are_atomic() {
     let thick = DissolutionFilm {
         area_m2: 0.01,
         thickness_m: 0.01,
+        gas_side_transfer: None,
     };
     assert!(matches!(
         law.advance(&mut gas, &mut liquid, thick, 200.0, controls(), || false),
@@ -390,4 +392,275 @@ fn late_cancellation_source_limits_and_infinite_dilution_guard_are_atomic() {
     ));
     assert_eq!(gas, initial_gas);
     assert_eq!(liquid, before);
+}
+
+#[test]
+fn two_films_slow_kinetics_without_changing_finite_equilibrium_or_heat() {
+    let catalog = model(vec![0.6, 0.4], 0.0);
+    let law = law(&catalog);
+    let liquid_coefficient = D / film().thickness_m;
+    let kg = H * liquid_coefficient;
+    let two_films = DissolutionFilm {
+        gas_side_transfer: Some(MolarPermeance::try_new(kg).unwrap()),
+        ..film()
+    };
+    // Equal liquid- and gas-film resistances halve the rate. Both absorption
+    // and exsolution must reach the SAME original finite-inventory equilibrium.
+    for initial_dissolved in [0.0, 0.004] {
+        let mut gas = gas(&catalog);
+        let mut liquid = DissolvedGasInventory::new(VL, initial_dissolved, 0.0).unwrap();
+        let ng0 = gas.species_mass_kg(&id("A")).unwrap() / MW;
+        let total = ng0 + initial_dissolved;
+        let equilibrium = total * (H * R * T * VL) / (VG + H * R * T * VL);
+        let lambda =
+            two_films.area_m2 / (1.0 / liquid_coefficient + H / kg) * (1.0 / VL + H * R * T / VG);
+        let duration = 200.0;
+        let expected = equilibrium + (initial_dissolved - equilibrium) * (-lambda * duration).exp();
+        let step = law
+            .advance(
+                &mut gas,
+                &mut liquid,
+                two_films,
+                duration,
+                controls(),
+                || false,
+            )
+            .unwrap();
+        near(liquid.dissolved_moles(), expected, 2e-15);
+        near(step.relaxation_rate_per_s, lambda, 2e-18);
+        near(
+            step.film_relaxation_ratio,
+            lambda * two_films.thickness_m.powi(2) / D,
+            2e-18,
+        );
+        for at in &step.sources {
+            let liquid_flux =
+                liquid_coefficient * (at.interface_concentration_mol_m3 - at.concentration_mol_m3);
+            let gas_flux = kg * (at.partial_pressure_pa - at.interface_partial_pressure_pa);
+            near(liquid_flux, gas_flux, 2e-19);
+            near(
+                at.interface_concentration_mol_m3,
+                H * at.interface_partial_pressure_pa,
+                2e-15,
+            );
+            near(
+                at.interface_concentration_mol_m3,
+                0.5 * (at.concentration_mol_m3 + H * at.partial_pressure_pa),
+                2e-15,
+            );
+        }
+        near(
+            step.thermostat_heat_into_system_j,
+            step.dissolved_moles_change * (R * T - SOLUTION_HEAT),
+            1e-11,
+        );
+        near(step.energy_residual_j, 0.0, 1e-8);
+        near(step.mass_residual_kg, 0.0, 1e-14);
+        law.advance(&mut gas, &mut liquid, two_films, 1e6, controls(), || false)
+            .unwrap();
+        near(liquid.dissolved_moles(), equilibrium, 2e-14);
+        near(
+            gas.species_mass_kg(&id("A")).unwrap() / MW + liquid.dissolved_moles(),
+            total,
+            1e-14,
+        );
+    }
+}
+
+#[test]
+fn two_films_admit_the_actual_liquid_interface_and_refuse_late_source_failure() {
+    let catalog = model(vec![0.6, 0.4], 0.0);
+    let claims = [
+        (HENRY_SOLUBILITY_PROPERTY, HENRY_SOLUBILITY_DIMS, H),
+        (DISSOLVED_DIFFUSIVITY_PROPERTY, DIFFUSIVITY_DIMS, D),
+    ]
+    .map(|(name, dims, value)| {
+        let mut claim = claim(name, dims, value, [1000.0, 1e7]);
+        claim.validity = claim.validity.with_quantity(
+            "dissolved_concentration",
+            typed(QuantityKind::AmountConcentration),
+            0.0,
+            0.2,
+        );
+        claim
+    });
+    let law = HenryDissolution::new(
+        &catalog,
+        id("A"),
+        HenrySource {
+            material: card("bounded dilute two-film liquid source", claims.into()),
+            point: context(T),
+            selection: MaterialPropertySelection::SingleClaimOnly,
+        },
+        calorics(&catalog),
+    )
+    .unwrap();
+    let two_films = DissolutionFilm {
+        gas_side_transfer: Some(MolarPermeance::try_new(H * D / film().thickness_m / 9.0).unwrap()),
+        ..film()
+    };
+    let mut gas = gas(&catalog);
+    let mut liquid = DissolvedGasInventory::new(VL, 0.0, 0.0).unwrap();
+    let mut limits = controls();
+    limits.maximum_concentration_mol_m3 = 0.2;
+    let step = law
+        .advance(&mut gas, &mut liquid, two_films, 1.0, limits, || false)
+        .unwrap();
+    assert!(step.sources[0].equilibrium_concentration_mol_m3 > 0.2);
+    near(step.sources[0].interface_concentration_mol_m3, 0.12, 1e-15);
+    for at in &step.sources {
+        assert!(at.interface_concentration_mol_m3 < 0.2);
+        assert_eq!(
+            at.material[1].query().axes()["dissolved_concentration"],
+            at.interface_concentration_mol_m3
+        );
+    }
+    let initial_gas = gas.clone();
+    let initial_liquid = liquid;
+    // The actual bulk eventually leaves the original source domain. The
+    // initial supported interface cannot authorize that final state.
+    limits.maximum_concentration_mol_m3 = 20.0;
+    assert!(matches!(
+        law.advance(&mut gas, &mut liquid, two_films, 10_000.0, limits, || false),
+        Err(DissolvedGasError::Material(_))
+    ));
+    assert_eq!(gas, initial_gas);
+    assert_eq!(liquid, initial_liquid);
+}
+
+#[test]
+fn gas_film_seal_liquid_seal_and_quasisteady_time_use_actual_resistances() {
+    let catalog = model(vec![0.6, 0.4], 0.0);
+    let law = law(&catalog);
+    let mut gas = gas(&catalog);
+    let original_gas = gas.clone();
+    let mut liquid = DissolvedGasInventory::new(VL, 0.001, 0.0).unwrap();
+    let sealed = DissolutionFilm {
+        gas_side_transfer: Some(MolarPermeance::try_new(0.0).unwrap()),
+        ..film()
+    };
+    let step = law
+        .advance(&mut gas, &mut liquid, sealed, 200.0, controls(), || false)
+        .unwrap();
+    assert_eq!(step.dissolved_moles_change, 0.0);
+    assert_eq!(step.relaxation_rate_per_s, 0.0);
+    assert_eq!(step.film_relaxation_ratio, 0.0);
+    assert_eq!(liquid.dissolved_moles(), 0.001);
+    assert_eq!(liquid.time_s(), 200.0);
+    assert_eq!(gas, original_gas);
+    for at in &step.sources {
+        assert_eq!(at.interface_concentration_mol_m3, at.concentration_mol_m3);
+    }
+    let immobile = HenryDissolution::new(
+        &catalog,
+        id("A"),
+        source(0.0, [1000.0, 1e7]),
+        calorics(&catalog),
+    )
+    .unwrap();
+    let gas_film = DissolutionFilm {
+        gas_side_transfer: Some(MolarPermeance::try_new(1e-9).unwrap()),
+        ..film()
+    };
+    let step = immobile
+        .advance(&mut gas, &mut liquid, gas_film, 400.0, controls(), || false)
+        .unwrap();
+    assert_eq!(step.dissolved_moles_change, 0.0);
+    assert_eq!(
+        step.sources[0].interface_concentration_mol_m3,
+        step.sources[0].equilibrium_concentration_mol_m3
+    );
+    let before = liquid;
+    assert!(matches!(
+        immobile.advance(&mut gas, &mut liquid, sealed, 600.0, controls(), || false),
+        Err(DissolvedGasError::Invalid(_))
+    ));
+    assert_eq!(liquid, before);
+    // Extra gas resistance makes the bulk relax slowly even for this thicker
+    // liquid film. Apply lambda*delta²/D, not the old liquid-only rate.
+    let thickness = 0.01;
+    let slow = DissolutionFilm {
+        area_m2: film().area_m2,
+        thickness_m: thickness,
+        gas_side_transfer: Some(MolarPermeance::try_new(H * D / thickness / 99.0).unwrap()),
+    };
+    let step = law
+        .advance(&mut gas, &mut liquid, slow, 600.0, controls(), || false)
+        .unwrap();
+    assert!(step.film_relaxation_ratio < controls().maximum_film_relaxation_ratio);
+    near(
+        step.film_relaxation_ratio,
+        step.relaxation_rate_per_s * thickness.powi(2) / D,
+        1e-16,
+    );
+}
+
+#[test]
+fn two_film_time_partition_and_final_cancellation_keep_both_original_owners() {
+    let catalog = model(vec![0.6, 0.4], 0.0);
+    let law = law(&catalog);
+    let two_films = DissolutionFilm {
+        gas_side_transfer: Some(MolarPermeance::try_new(H * D / film().thickness_m / 4.0).unwrap()),
+        ..film()
+    };
+    let initial_gas = gas(&catalog);
+    let initial_liquid = DissolvedGasInventory::new(VL, 0.0, 0.0).unwrap();
+    let mut full_gas = initial_gas.clone();
+    let mut full_liquid = initial_liquid;
+    let mut polls = 0;
+    let full = law
+        .advance(
+            &mut full_gas,
+            &mut full_liquid,
+            two_films,
+            400.0,
+            controls(),
+            || {
+                polls += 1;
+                false
+            },
+        )
+        .unwrap();
+    let mut gas = initial_gas.clone();
+    let mut liquid = initial_liquid;
+    let mut stopped = 0;
+    assert_eq!(
+        law.advance(&mut gas, &mut liquid, two_films, 400.0, controls(), || {
+            stopped += 1;
+            stopped == polls
+        }),
+        Err(DissolvedGasError::Cancelled)
+    );
+    assert_eq!(gas, initial_gas);
+    assert_eq!(liquid, initial_liquid);
+    assert_eq!(
+        law.advance(&mut gas, &mut liquid, two_films, 400.0, controls(), || {
+            false
+        })
+        .unwrap(),
+        full
+    );
+    let mut split_gas = initial_gas;
+    let mut split_liquid = initial_liquid;
+    for time in [100.0, 200.0, 400.0] {
+        law.advance(
+            &mut split_gas,
+            &mut split_liquid,
+            two_films,
+            time,
+            controls(),
+            || false,
+        )
+        .unwrap();
+    }
+    near(
+        full_liquid.dissolved_moles(),
+        split_liquid.dissolved_moles(),
+        1e-15,
+    );
+    near(
+        full_gas.state().state().pressure,
+        split_gas.state().state().pressure,
+        1e-8,
+    );
 }
