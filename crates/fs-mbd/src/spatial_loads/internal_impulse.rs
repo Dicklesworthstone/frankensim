@@ -14,6 +14,10 @@
 use crate::{DynamicsError, MassProperties, MomentumImpulseReceipt, RigidBodyState, Vec3};
 use fs_math::dd::Dd;
 
+/// Simultaneous internal connectors sharing arbitrary finite native bodies.
+#[path = "internal_impulse/network.rs"]
+pub mod network;
+
 /// Force/couple impulse applied to the second attachment by an internal connector.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct InternalWrenchImpulse {
@@ -122,46 +126,9 @@ pub fn apply_internal_wrench_impulse(
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<InternalWrenchImpulseReceipt, InternalWrenchImpulseError> {
     poll(&mut cancelled)?;
-    if !controls.angular_origin_world_m.is_finite()
-        || [
-            controls.linear_tolerance_ns,
-            controls.angular_tolerance_nms,
-            controls.work_tolerance_j,
-        ]
-        .iter()
-        .any(|v| !v.is_finite() || *v < 0.0)
-    {
-        return Err(InternalWrenchImpulseError::InvalidControls);
-    }
-    for vector in [
-        impulse.impulse_on_second_world_ns,
-        impulse.couple_on_second_world_nms,
-    ] {
-        finite_vector(vector)?;
-    }
-    // Admission and arm rotation stay with the original rigid-point owner.
-    let points = [
-        states[0].point_kinematics(properties[0], impulse.arms_body_m[0])?,
-        states[1].point_kinematics(properties[1], impulse.arms_body_m[1])?,
-    ];
-    let separation = add(
-        subtract(
-            dd(states[1].pose().position_world()),
-            dd(states[0].pose().position_world()),
-        ),
-        subtract(dd(points[1].arm_world), dd(points[0].arm_world)),
-    );
-    let force = dd(impulse.impulse_on_second_world_ns);
-    let couple_b = dd(impulse.couple_on_second_world_nms);
-    let couple_a = subtract([Dd::ZERO; 3], add(couple_b, cross(separation, force)));
-    let attachment_couples_world_nms = [rounded(couple_a)?, rounded(couple_b)?];
-    // Retain the original geometric wrench through work and per-body audit.
-    // Rounding is only for the native momentum update: a small supplied couple
-    // must not vanish behind a large r cross J before its acceptance check.
-    let central = [
-        subtract(couple_a, cross(dd(points[0].arm_world), force)),
-        add(couple_b, cross(dd(points[1].arm_world), force)),
-    ];
+    validate_controls(controls)?;
+    let prepared = prepare(states, properties, impulse)?;
+    let central = prepared.central;
     poll(&mut cancelled)?;
     let first = states[0].apply_momentum_impulse(
         properties[0],
@@ -189,58 +156,19 @@ pub fn apply_internal_wrench_impulse(
     let mut angular_error = 0.0_f64;
     for i in 0..2 {
         poll(&mut cancelled)?;
-        let event = bodies[i];
-        let after = event.state_after;
-        let velocity_mid = midpoint(
-            states[i].center_of_mass_velocity_world(properties[i])?,
-            after.center_of_mass_velocity_world(properties[i])?,
-        );
-        let omega_mid = midpoint(
-            properties[i].angular_velocity_body_checked(states[i].angular_momentum_body())?,
-            properties[i].angular_velocity_body_checked(after.angular_momentum_body())?,
-        );
-        let axes = [
-            Vec3::new(1.0, 0.0, 0.0),
-            Vec3::new(0.0, 1.0, 0.0),
-            Vec3::new(0.0, 0.0, 1.0),
-        ]
-        .map(|axis| states[i].pose().orientation().rotate_body_to_world(axis));
-        let omega_world = rotate_wide(axes, omega_mid);
-        // Subtract original endpoint bits in wide precision too. A large kick
-        // may swallow the OLD momentum; rounding after-before first would hide
-        // that loss just as readily as two swallowed small commanded kicks.
-        let actual_linear = subtract(
-            dd(after.linear_momentum_world()),
-            dd(states[i].linear_momentum_world()),
-        );
-        let actual_angular = subtract(
-            dd(after.angular_momentum_body()),
-            dd(states[i].angular_momentum_body()),
-        );
-        let actual_world_angular = rotate_wide(axes, actual_angular);
-        linear_change = add(linear_change, actual_linear);
-        let arm = subtract(
-            dd(states[i].pose().position_world()),
-            dd(controls.angular_origin_world_m),
-        );
-        angular_change = add(
-            angular_change,
-            add(cross(arm, actual_linear), actual_world_angular),
-        );
-        kinetic_change =
-            kinetic_change + dot(velocity_mid, actual_linear) + dot(omega_mid, actual_angular);
-        connector_work = connector_work
-            + dot(velocity_mid, dd(event.linear_impulse_world))
-            + dot(omega_world, central[i]);
-        linear_error = linear_error
-            .max(norm(event.linear_residual_world))
-            .max(norm(rounded(subtract(
-                actual_linear,
-                dd(event.linear_impulse_world),
-            ))?));
-        angular_error = angular_error
-            .max(norm(event.angular_residual_body))
-            .max(norm(rounded(subtract(actual_world_angular, central[i]))?));
+        let audit = inspect_body(
+            properties[i],
+            bodies[i],
+            dd(bodies[i].linear_impulse_world),
+            central[i],
+            controls.angular_origin_world_m,
+        )?;
+        linear_change = add(linear_change, audit.linear);
+        angular_change = add(angular_change, audit.angular);
+        kinetic_change = kinetic_change + audit.energy[0] + audit.energy[1];
+        connector_work = connector_work + audit.work[0] + audit.work[1];
+        linear_error = linear_error.max(audit.linear_error);
+        angular_error = angular_error.max(audit.angular_error);
     }
     let linear_momentum_change_world_ns = rounded(linear_change)?;
     let angular_momentum_change_world_nms = rounded(angular_change)?;
@@ -261,8 +189,8 @@ pub fn apply_internal_wrench_impulse(
     }
     let receipt = InternalWrenchImpulseReceipt {
         bodies,
-        attachment_separation_world_m: rounded(separation)?,
-        attachment_couples_world_nms,
+        attachment_separation_world_m: rounded(prepared.separation)?,
+        attachment_couples_world_nms: prepared.couples,
         linear_momentum_change_world_ns,
         angular_momentum_change_world_nms,
         kinetic_energy_change_j: finite(kinetic_change.to_f64())?,
@@ -271,6 +199,130 @@ pub fn apply_internal_wrench_impulse(
     };
     poll(&mut cancelled)?;
     Ok(receipt)
+}
+
+// Pair and network paths retain one geometric wrench-transport owner. Each
+// network connector is evaluated at the same original poses, before any body
+// is updated; its unrounded central couples survive reduction and work pairing.
+struct PreparedImpulse {
+    separation: WideVec,
+    couples: [Vec3; 2],
+    central: [WideVec; 2],
+}
+fn prepare(
+    states: [RigidBodyState; 2],
+    properties: [MassProperties; 2],
+    impulse: InternalWrenchImpulse,
+) -> Result<PreparedImpulse, InternalWrenchImpulseError> {
+    finite_vector(impulse.impulse_on_second_world_ns)?;
+    finite_vector(impulse.couple_on_second_world_nms)?;
+    let points = [
+        states[0].point_kinematics(properties[0], impulse.arms_body_m[0])?,
+        states[1].point_kinematics(properties[1], impulse.arms_body_m[1])?,
+    ];
+    let separation = add(
+        subtract(
+            dd(states[1].pose().position_world()),
+            dd(states[0].pose().position_world()),
+        ),
+        subtract(dd(points[1].arm_world), dd(points[0].arm_world)),
+    );
+    let force = dd(impulse.impulse_on_second_world_ns);
+    let couple_b = dd(impulse.couple_on_second_world_nms);
+    let couple_a = subtract([Dd::ZERO; 3], add(couple_b, cross(separation, force)));
+    let couples = [rounded(couple_a)?, rounded(couple_b)?];
+    let central = [
+        subtract(couple_a, cross(dd(points[0].arm_world), force)),
+        add(couple_b, cross(dd(points[1].arm_world), force)),
+    ];
+    Ok(PreparedImpulse {
+        separation,
+        couples,
+        central,
+    })
+}
+
+fn validate_controls(
+    controls: InternalWrenchImpulseControls,
+) -> Result<(), InternalWrenchImpulseError> {
+    if !controls.angular_origin_world_m.is_finite()
+        || [
+            controls.linear_tolerance_ns,
+            controls.angular_tolerance_nms,
+            controls.work_tolerance_j,
+        ]
+        .iter()
+        .any(|v| !v.is_finite() || *v < 0.0)
+    {
+        return Err(InternalWrenchImpulseError::InvalidControls);
+    }
+    Ok(())
+}
+
+struct BodyAudit {
+    linear: WideVec,
+    angular: WideVec,
+    energy: [Dd; 2],
+    work: [Dd; 2],
+    velocity_mid: WideVec,
+    omega_world_mid: WideVec,
+    linear_error: f64,
+    angular_error: f64,
+}
+
+// Inspect the original native update against the unrounded intended resultant.
+// Keeping endpoint subtraction and frame products wide catches swallowed old
+// momenta as well as swallowed small kicks; opposite losses cannot hide in a
+// network's net balance. The pair's original summation order remains intact.
+fn inspect_body(
+    properties: MassProperties,
+    event: MomentumImpulseReceipt,
+    expected_linear: WideVec,
+    expected_central: WideVec,
+    origin: Vec3,
+) -> Result<BodyAudit, InternalWrenchImpulseError> {
+    let before = event.state_before;
+    let after = event.state_after;
+    let velocity_mid = midpoint(
+        before.center_of_mass_velocity_world(properties)?,
+        after.center_of_mass_velocity_world(properties)?,
+    );
+    let omega_mid = midpoint(
+        properties.angular_velocity_body_checked(before.angular_momentum_body())?,
+        properties.angular_velocity_body_checked(after.angular_momentum_body())?,
+    );
+    let axes = [
+        Vec3::new(1., 0., 0.),
+        Vec3::new(0., 1., 0.),
+        Vec3::new(0., 0., 1.),
+    ]
+    .map(|axis| before.pose().orientation().rotate_body_to_world(axis));
+    let omega_world_mid = rotate_wide(axes, omega_mid);
+    let linear = subtract(
+        dd(after.linear_momentum_world()),
+        dd(before.linear_momentum_world()),
+    );
+    let spin = subtract(
+        dd(after.angular_momentum_body()),
+        dd(before.angular_momentum_body()),
+    );
+    let spin_world = rotate_wide(axes, spin);
+    let arm = subtract(dd(before.pose().position_world()), dd(origin));
+    Ok(BodyAudit {
+        linear,
+        angular: add(cross(arm, linear), spin_world),
+        energy: [dot(velocity_mid, linear), dot(omega_mid, spin)],
+        work: [
+            dot(velocity_mid, expected_linear),
+            dot(omega_world_mid, expected_central),
+        ],
+        velocity_mid,
+        omega_world_mid,
+        linear_error: norm(event.linear_residual_world)
+            .max(norm(rounded(subtract(linear, expected_linear))?)),
+        angular_error: norm(event.angular_residual_body)
+            .max(norm(rounded(subtract(spin_world, expected_central))?)),
+    })
 }
 
 type WideVec = [Dd; 3];

@@ -21,6 +21,10 @@ use crate::{
 };
 use fs_math::dd::Dd;
 
+/// Finite trajectories with simultaneous internal actuators on shared bodies.
+#[path = "internal_motion/network.rs"]
+pub mod network;
+
 /// A constant world wrench prescribed on attachment B over one finite step.
 ///
 /// Attachment A receives the transported opposite force/couple at each stage.

@@ -18,6 +18,46 @@ all three explicit paths, with spatial momentum and kinetic-energy checks.
 Native group admission and representability limits apply to the shared drift.
 
 
+## Simultaneous internal-wrench networks and finite motion
+
+`spatial_loads::internal_impulse::network::apply_internal_wrench_network`
+extends the original internal connector to cycles and shared finite bodies.
+Each connector uses the original attachment wrench transport, then all linear
+and central angular impulses accumulate in a compensated bank before each
+original native body updates once. The original per-body representability
+audit and whole-network linear, spin-plus-orbital and work gates remain active.
+Opposite undelivered body resultants cannot hide behind zero net momentum.
+
+Every connector's signed work uses the complete simultaneous before/after
+midpoint velocities. This retains kinetic cross terms when multiple sources
+act on one body, with no arbitrary sequential source attribution. A second
+linear connector pass reuses original geometry; the body bank becomes midpoint
+kinematics. Work and owned payload are O(bodies + connectors), with body,
+connector and complete peak-byte limits admitted before fallible allocation.
+
+`spatial_loads::internal_motion::network::step_internal_wrench_network` wraps
+one original zero-load free step per body between two complete network stages.
+The transported couples follow actual endpoint attachment geometry, and all
+connectors and isolated bodies share one clock. Each free body's actual drift
+is admitted separately before whole-step momentum and source-work admission.
+Peak storage includes both receipts and the active native workspace. Any
+refusal or observed cancellation publishes no partial bodies or work.
+
+These are prescribed world-held internal sources with explicit supplied or
+recovered mechanical work. They do not infer joint/contact laws, elastic
+storage, motor efficiency or heat. The symmetric finite trajectory and source
+work require step refinement for general rotating attachments.
+
+Five G1/G3/G4 groups in `tests/internal_wrench_network.rs` independently check
+shared-body kinetic cross terms, full-tensor cyclic wrench algebra, body
+relabeling and frame/common-boost covariance, exact unequal-mass force/couple
+chains, and quadratic convergence to a simultaneous three-body Newton/Euler
+ODE with individual source-work quadratures. They also cover reversal,
+single-pair and zero-source native parity, complete payload/count bounds,
+swallowed resultants, late refusal and every observed cancellation point.
+All five groups and eleven original pair impulse/motion groups pass in the
+bounded actual-source native lane; full Cargo/DSR is not claimed.
+
 ## Finite prescribed internal-wrench motion
 
 `spatial_loads::internal_motion::step_internal_wrench` advances two original
