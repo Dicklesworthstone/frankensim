@@ -14,6 +14,8 @@ use std::rc::Rc;
 
 #[path = "material_flow/navier_stokes.rs"]
 mod navier_stokes;
+#[path = "material_flow/newton.rs"]
+mod newton;
 
 fn mesh() -> TriMesh {
     TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 3, 3))

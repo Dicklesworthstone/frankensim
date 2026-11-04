@@ -149,6 +149,33 @@ impl FluxSystem<'_> {
         timestep_s: f64,
         controls: FluxNewtonControls,
     ) -> Result<FluxNewtonStep, FluxNewtonError> {
+        self.bdf1_rheology_newton_step_checked(
+            params,
+            law,
+            force,
+            boundary,
+            previous_velocity,
+            timestep_s,
+            controls,
+            &|| true,
+        )
+    }
+
+    // A material source keeps its original error outside the scalar callback.
+    // Finish only the assembly already in progress, then stop before solving,
+    // accepting a trial, or publishing an endpoint using fallback coefficients.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub(crate) fn bdf1_rheology_newton_step_checked(
+        &self,
+        params: FluxParams,
+        law: &dyn Fn(usize, [f64; 2], f64) -> FluxViscosityTangent,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundary: &dyn Fn([f64; 2]) -> [f64; 2],
+        previous_velocity: &[f64],
+        timestep_s: f64,
+        controls: FluxNewtonControls,
+        source_is_valid: &dyn Fn() -> bool,
+    ) -> Result<FluxNewtonStep, FluxNewtonError> {
         if self.mesh.tris.is_empty()
             || previous_velocity.len() != self.n_u
             || previous_velocity.iter().any(|v| !v.is_finite())
@@ -189,18 +216,20 @@ impl FluxSystem<'_> {
         let mut last_update = 0.0;
         let mut last_linear_iterations = 0;
         for iteration in 0..=controls.maximum_iterations {
-            let linearization = self
-                .linearize_rheology(
-                    params,
-                    law,
-                    force,
-                    boundary,
-                    &state,
-                    true,
-                    inverse_timestep,
-                    Some(previous_velocity),
-                )
-                .map_err(FluxNewtonError::Linearization)?;
+            let linearization = self.linearize_rheology(
+                params,
+                law,
+                force,
+                boundary,
+                &state,
+                true,
+                inverse_timestep,
+                Some(previous_velocity),
+            );
+            if !source_is_valid() {
+                return Err(FluxNewtonError::Invalid("constitutive source refused"));
+            }
+            let linearization = linearization.map_err(FluxNewtonError::Linearization)?;
             let defect = linearization
                 .relative_residual
                 .max(linearization.scaled_relative_residual);
@@ -266,7 +295,7 @@ impl FluxSystem<'_> {
                     .zip(&correction.x)
                     .map(|(x, step)| x + alpha * step)
                     .collect();
-                if let Ok(trial) = self.newton_trial(
+                let trial = self.newton_trial(
                     params,
                     law,
                     force,
@@ -274,7 +303,11 @@ impl FluxSystem<'_> {
                     &candidate,
                     inverse_timestep,
                     previous_velocity,
-                ) {
+                );
+                if !source_is_valid() {
+                    return Err(FluxNewtonError::Invalid("constitutive source refused"));
+                }
+                if let Ok(trial) = trial {
                     let trial_defect = trial.original.max(trial.scaled);
                     let trial_merit = weighted_norm(&trial.residual, &scales);
                     if trial_merit <= (1.0 - 1e-4 * alpha) * merit

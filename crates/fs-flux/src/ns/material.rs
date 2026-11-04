@@ -31,17 +31,20 @@ use crate::ns::{FluxParams, FluxRheologyError, FluxSolution, FluxSystem};
 pub mod mixed;
 #[path = "material/navier_stokes.rs"]
 mod navier_stokes;
+#[path = "material/newton.rs"]
+mod newton;
 #[path = "material/porous.rs"]
 mod porous;
 #[path = "material/rheology.rs"]
 mod rheology;
 pub use mixed::{
-    MaterialBoundaryLoad, MaterialBoundaryTransport, MaterialBoundaryWrench, MaterialStokesBoundary,
-    MaterialStokesRheologySolution, MaterialStokesSolution,
+    MaterialBoundaryLoad, MaterialBoundaryTransport, MaterialBoundaryWrench,
+    MaterialStokesBoundary, MaterialStokesRheologySolution, MaterialStokesSolution,
 };
 pub use navier_stokes::{
     MaterialNavierStokesBoundary, MaterialNavierStokesRheologyStep, MaterialNavierStokesStep,
 };
+pub use newton::{MaterialFluxNewtonStep, MaterialFluxViscosityTangent};
 pub use porous::MaterialBrinkmanSolution;
 
 /// Numerical choices, separate from the material's physical viscosity.
@@ -89,6 +92,8 @@ pub enum MaterialFluxError {
     },
     /// The fully implicit constitutive/momentum step refused its candidate.
     Rheology(FluxRheologyError),
+    /// The consistent constitutive Newton solve refused its candidate.
+    Newton(crate::ns::newton::FluxNewtonError),
     /// Boundary admission or a checked constitutive flow solve refused.
     Boundary(crate::ns::boundary::StokesBoundaryError),
 }
@@ -110,6 +115,7 @@ impl core::fmt::Display for MaterialFluxError {
                 "material flow: Picard did not converge in {iterations} iterations (update {update})"
             ),
             Self::Rheology(error) => write!(f, "material flow: {error}"),
+            Self::Newton(error) => write!(f, "material flow: {error}"),
             Self::Boundary(error) => write!(f, "material flow: {error}"),
         }
     }

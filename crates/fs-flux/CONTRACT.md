@@ -4470,6 +4470,36 @@ boundary work, zero-transport molecular parity and positive-transport sonic
 interval agreement. G4 covers topology/duplicate/pressure admission, backflow
 and cancellation without partial publication.
 
+## Source-owned damped Newton rheology
+
+`MaterialFluxSystem::bdf1_rheology_newton_step` carries original material
+transport and analytic `dmu/dgamma` [Pa s²] into the existing sparse constitutive
+Jacobian and bounded Armijo Newton solver. Viscosity and its derivative use the
+same reference density as inertia, pressure and force. Original cell/rate
+responses are cached across volume and one-sided face quadrature, and the
+accepted endpoint retains those owners, derivatives and molecular heat
+`mu*gamma²`. No numerical differentiation or frozen-reference heat is used.
+
+The native checked entry stops after an already-started assembly if a source
+refuses, before another linear solve or candidate acceptance. A source refusal
+during line search remains terminal and keeps the original material error;
+it is not permission to extrapolate a source's domain. Invalid numerical trial
+states retain the native backtracking behavior. Failed calls leave caller
+history untouched. The native raw-coefficient API keeps its original behavior.
+
+G1/G3 regressions use the existing stiff shear-thickening case that exhausts
+Picard at the same budget, compare two source densities against the native
+Newton result, and check pressure, kinetic energy, constitutive tangents and
+local/integrated heat. The canonical thermally shifted Carreau-Yasuda source
+is also exercised and compared with converged Picard. G4 covers actual trial
+source refusal, changed density, invalid tangents and invalid timesteps.
+
+This is constant-density incompressible BDF1 with velocity boundaries and
+external endpoint temperature/composition held fixed. It supplies no evolving
+thermal field, viscoelastic history, mixed pressure-boundary Newton solver or
+unconditional convergence guarantee. The native smooth radial-law admission
+requires zero scalar viscosity derivative at zero strain.
+
 ## Pressure-fed evolving species in three-dimensional flow
 
 `spatial::mixture::MixtureEuler3d::new_with_reservoirs` binds immutable complete

@@ -26,9 +26,6 @@ pub mod cavitation;
 /// Source-owned, conservative two-dimensional shock propagation and reflection.
 #[cfg(feature = "experimental-compressible")]
 pub mod compressible;
-/// Conservative isothermal diffuse-interface dynamics from the original liquid law.
-#[cfg(feature = "experimental-miscibility")]
-pub mod miscibility;
 #[cfg(feature = "continuum")]
 pub mod gas_film;
 #[cfg(feature = "quarter-wave")]
@@ -37,6 +34,9 @@ pub mod lc;
 #[cfg(feature = "continuum")]
 #[path = "ns/material.rs"]
 pub mod material;
+/// Conservative isothermal diffuse-interface dynamics from the original liquid law.
+#[cfg(feature = "experimental-miscibility")]
+pub mod miscibility;
 #[cfg(feature = "continuum")]
 pub mod ns;
 /// Conservative isothermal solution transport through selective membranes.
@@ -76,8 +76,9 @@ pub use gas_film::{
 #[cfg(feature = "continuum")]
 pub use material::{
     MaterialBoundaryLoad, MaterialBoundaryTransport, MaterialBoundaryWrench,
-    MaterialBrinkmanSolution, MaterialFluxError, MaterialFluxNumerics, MaterialFluxRheologyPoint,
-    MaterialFluxRheologySample, MaterialFluxRheologyStep, MaterialFluxSolution, MaterialFluxSystem,
+    MaterialBrinkmanSolution, MaterialFluxError, MaterialFluxNewtonStep, MaterialFluxNumerics,
+    MaterialFluxRheologyPoint, MaterialFluxRheologySample, MaterialFluxRheologyStep,
+    MaterialFluxSolution, MaterialFluxSystem, MaterialFluxViscosityTangent,
     MaterialNavierStokesBoundary, MaterialNavierStokesRheologyStep, MaterialNavierStokesStep,
     MaterialStokesBoundary, MaterialStokesRheologySolution, MaterialStokesSolution,
     MaterialViscousDissipation,
@@ -122,4 +123,3 @@ mod tests {
         assert!(!super::VERSION.is_empty());
     }
 }
-
