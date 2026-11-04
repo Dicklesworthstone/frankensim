@@ -791,8 +791,44 @@ mechanical and modal momentum/work, signed transport decomposition and late
 refusal/retry are checked in
 `tests/passive_propulsion/dynamic/first_harmonic.rs`. Smooth coupled trajectories
 still require timestep refinement; no whole-fluid momentum/passivity theorem,
-dynamic swirl, transported wake geometry, unsteady wing memory or independent-
-shaft wing-continuation API is claimed.
+dynamic swirl, transported wake geometry or unsteady wing memory is claimed.
+
+### Continued wing branches through independent shafts
+
+`HarmonicShaftPropulsion::initialize_continuation`, `evaluate_continued` and
+`step_continued` reuse the original `fs_wing::nonlinear::continuation` owner
+with the same normal/skew modal wakes and retained `ShaftMotion`. The caller
+keeps the native `WingContinuation` alongside the physical modes; it stores an
+accepted algebraic circulation/incidence branch, not added fluid inertia or a
+lagged aerodynamic force. Plain and continued paths share one stage evaluator
+and one joint mechanical/wake stepping implementation.
+
+The initial force solve uses the caller's accepted anchor, and the midpoint
+solve uses the newly solved initial anchor. Both stages recompute the actual
+wing/blade loads at current pose, independent signed spins and all fixed-frame
+induction modes. The accepted midpoint anchor becomes the next initial solve's
+guess. Native geometry identity, incidence continuity, row conditioning,
+filament clearance, residual and bounded solver-work gates remain unchanged.
+
+All proposed anchors are local until the full step succeeds. Each stage's
+returned anchor is validated before its load callback returns; the full modal/
+skew wake and coupling-work checks also finish before canonical mechanics can
+publish. Any branch, material-air, wake, accounting or native mechanical refusal
+preserves canonical and published motion, all six modes and the accepted wing
+anchor. Success moves the already admitted modes/anchor into place without a
+new fallible operation; callback side effects remain caller-owned.
+
+The focused cases in
+`tests/passive_propulsion/dynamic/first_harmonic/continuation.rs` exercise
+48 ms normal and skew trajectories after shaft impulses, exact stage/anchor
+replay, independently reconstructed physical impulse and work, modal storage
+accounts and joint timestep refinement at 6/12/24/48 steps. Body, independent
+shaft and modal endpoint differences, together with coupling-work defects,
+show second-order refinement within that declared fixture. Late branch,
+material-air and final native-mechanical refusals preserve every accepted state
+and replay exactly. This extends algebraic branch continuation; it adds no
+unsteady-wing constitutive law, free-wake geometry or whole-fluid passivity
+claim.
 
 ### Ideal gears and real propeller/airframe motion
 

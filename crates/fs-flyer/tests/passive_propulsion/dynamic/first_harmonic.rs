@@ -378,3 +378,6 @@ fn g0_harmonic_and_skew_late_refusals_preserve_every_mode_and_canonical_state() 
         }
     }
 }
+
+#[path = "first_harmonic/continuation.rs"]
+mod continuation;

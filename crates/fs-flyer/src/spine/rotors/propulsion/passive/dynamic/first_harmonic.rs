@@ -15,6 +15,7 @@ use fs_airscrew::dynamic_inflow::first_harmonic::{
     FirstHarmonicInflow, HarmonicInduction, HarmonicInflowStep,
 };
 use fs_airscrew::oblique::DiskFrame;
+use fs_wing::nonlinear::continuation::{ContinuationControls, WingContinuation};
 
 /// Actual carrier/independent-shaft stage and all six physical wake modes.
 /// Modes use the fixed body disk frames returned by `disk_frames`; they never
@@ -128,11 +129,62 @@ impl<'p, 'a, const N: usize> HarmonicShaftPropulsion<'p, 'a, N> {
         inputs: ShaftInputs<N>,
         wind_world: &dyn Fn([f64; 3]) -> Result<[f64; 3], Refusal>,
     ) -> Result<ShaftEvaluation<N, HarmonicAerodynamics>, Refusal> {
+        self.evaluate_with_continuation(state, inputs, wind_world, None)
+    }
+
+    /// Establish an accepted native wing branch without advancing mechanics or
+    /// wake memory. The returned anchor owns circulation/incidence history for
+    /// the algebraic wing solve; it is not aerodynamic inertia or a lagged force.
+    ///
+    /// # Errors
+    /// All native force and continuation-domain refusals. No input state changes.
+    pub fn initialize_continuation(
+        &self,
+        state: &HarmonicShaftState<N>,
+        inputs: ShaftInputs<N>,
+        wind_world: &dyn Fn([f64; 3]) -> Result<[f64; 3], Refusal>,
+        domain: ContinuationControls,
+    ) -> Result<WingContinuation, Refusal> {
+        self.evaluate_with_continuation(state, inputs, wind_world, Some((domain, None)))?
+            .coupled
+            .wing_continuation
+            .ok_or_else(|| {
+                reject(
+                    "harmonic-continuation-invalid",
+                    "missing initial wing anchor",
+                )
+            })
+    }
+
+    /// Re-solve the original wing/blade equations from an accepted native anchor
+    /// at the actual carrier pose, independent spins and fixed-frame wake modes.
+    /// The anchor's native geometry, incidence and row-conditioning checks apply.
+    ///
+    /// # Errors
+    /// Native force/continuation refusals leave the borrowed anchor and state intact.
+    pub fn evaluate_continued(
+        &self,
+        state: &HarmonicShaftState<N>,
+        wing: &WingContinuation,
+        inputs: ShaftInputs<N>,
+        wind_world: &dyn Fn([f64; 3]) -> Result<[f64; 3], Refusal>,
+        domain: ContinuationControls,
+    ) -> Result<ShaftEvaluation<N, HarmonicAerodynamics>, Refusal> {
+        self.evaluate_with_continuation(state, inputs, wind_world, Some((domain, Some(wing))))
+    }
+
+    fn evaluate_with_continuation(
+        &self,
+        state: &HarmonicShaftState<N>,
+        inputs: ShaftInputs<N>,
+        wind_world: &dyn Fn([f64; 3]) -> Result<[f64; 3], Refusal>,
+        continuation: Option<(ContinuationControls, Option<&WingContinuation>)>,
+    ) -> Result<ShaftEvaluation<N, HarmonicAerodynamics>, Refusal> {
         self.wake
             .admit_state(inputs.density_kg_m3, state.induction)?;
         self.propulsion
             .evaluate_with(&state.motion, inputs, wind_world, |stage| {
-                self.wake.solve(stage, state.induction, None)
+                self.wake.solve(stage, state.induction, continuation)
             })
     }
 
@@ -157,8 +209,75 @@ impl<'p, 'a, const N: usize> HarmonicShaftPropulsion<'p, 'a, N> {
         induction: &mut [HarmonicInduction; 2],
         t_s: f64,
         angular_origin_world: [f64; 3],
+        inputs: C,
+        wind_world: W,
+    ) -> Result<HarmonicShaftStep<N>, Refusal>
+    where
+        C: FnMut(f64, &HarmonicShaftState<N>) -> Result<ShaftInputs<N>, Refusal>,
+        W: Fn(f64, [f64; 3]) -> Result<[f64; 3], Refusal>,
+    {
+        self.step_impl(
+            motion,
+            induction,
+            t_s,
+            angular_origin_world,
+            inputs,
+            wind_world,
+            None,
+        )
+    }
+
+    /// Continue the same algebraic wing branch through both real load stages
+    /// while advancing canonical mechanics and all six physical wake modes.
+    /// The start solve uses the caller's accepted anchor; the midpoint uses the
+    /// newly solved start anchor. Each stage recomputes the actual forces.
+    ///
+    /// The accepted anchor is the full step's load midpoint, used as a guess for
+    /// the next initial solve. Its validity is checked before mechanical
+    /// publication, together with native wake and coupling-work proposals.
+    ///
+    /// # Errors
+    /// Any branch/domain, force, wake or late mechanical refusal preserves both
+    /// mechanical states, every mode and the caller's accepted wing anchor.
+    /// Success moves the admitted midpoint anchor and modes into place without
+    /// further fallible operations. Callback side effects remain caller-owned.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_continued<C, W>(
+        &self,
+        motion: &mut ShaftMotion<N>,
+        induction: &mut [HarmonicInduction; 2],
+        wing: &mut WingContinuation,
+        domain: ContinuationControls,
+        t_s: f64,
+        angular_origin_world: [f64; 3],
+        inputs: C,
+        wind_world: W,
+    ) -> Result<HarmonicShaftStep<N>, Refusal>
+    where
+        C: FnMut(f64, &HarmonicShaftState<N>) -> Result<ShaftInputs<N>, Refusal>,
+        W: Fn(f64, [f64; 3]) -> Result<[f64; 3], Refusal>,
+    {
+        self.step_impl(
+            motion,
+            induction,
+            t_s,
+            angular_origin_world,
+            inputs,
+            wind_world,
+            Some((domain, wing)),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_impl<C, W>(
+        &self,
+        motion: &mut ShaftMotion<N>,
+        induction: &mut [HarmonicInduction; 2],
+        t_s: f64,
+        angular_origin_world: [f64; 3],
         mut inputs: C,
         wind_world: W,
+        continuation: Option<(ContinuationControls, &mut WingContinuation)>,
     ) -> Result<HarmonicShaftStep<N>, Refusal>
     where
         C: FnMut(f64, &HarmonicShaftState<N>) -> Result<ShaftInputs<N>, Refusal>,
@@ -173,6 +292,8 @@ impl<'p, 'a, const N: usize> HarmonicShaftPropulsion<'p, 'a, N> {
         let before = *induction;
         let dt_s = motion.duration_s();
         let mut stage_induction = before;
+        let domain = continuation.as_ref().map(|(domain, _)| *domain);
+        let mut stage_wing = None;
         let mut initial = None;
         let mut midpoint = None;
         let mut full_wake = None;
@@ -181,9 +302,32 @@ impl<'p, 'a, const N: usize> HarmonicShaftPropulsion<'p, 'a, N> {
                 motion: *mechanical,
                 induction: stage_induction,
             };
-            let evaluation = self.evaluate(&stage, inputs(time, &stage)?, &|point| {
-                wind_world(time, point)
-            })?;
+            let previous = stage_wing
+                .as_ref()
+                .or_else(|| continuation.as_ref().map(|(_, anchor)| &**anchor));
+            let evaluation = self.evaluate_with_continuation(
+                &stage,
+                inputs(time, &stage)?,
+                &|point| wind_world(time, point),
+                domain.map(|domain| (domain, previous)),
+            )?;
+            if domain.is_some() {
+                // Validate and prepare the next anchor before any mechanical
+                // publication. Clones stay local until the full step is accepted.
+                stage_wing = Some(
+                    evaluation
+                        .coupled
+                        .wing_continuation
+                        .as_ref()
+                        .ok_or_else(|| {
+                            reject(
+                                "harmonic-continuation-invalid",
+                                "missing accepted stage wing anchor",
+                            )
+                        })?
+                        .clone(),
+                );
+            }
             let loads = (evaluation.carrier, evaluation.torques);
             if initial.is_none() {
                 stage_induction = self
@@ -207,6 +351,9 @@ impl<'p, 'a, const N: usize> HarmonicShaftPropulsion<'p, 'a, N> {
         let (inflow, skew_inflow, coupling_work_residual_j) =
             full_wake.expect("successful native midpoint modal wake proposal");
         *induction = inflow.map(|wake| wake.induction);
+        if let Some((_, anchor)) = continuation {
+            *anchor = stage_wing.expect("successful native continued midpoint anchor");
+        }
         Ok(HarmonicShaftStep {
             state: HarmonicShaftState {
                 motion: accepted.state,
