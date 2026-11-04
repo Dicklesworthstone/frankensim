@@ -366,6 +366,37 @@ cancellation and exact retry. Native execution of these added cases remains
 pending the authoring environment's unchanged dependency/tooling blocker;
 syntax validation does not establish numerical execution.
 
+`TemperatureContacts::advance_capacity_with_enclosure_radiation` and
+`advance_capacity_newton_with_enclosure_radiation` extend the same live
+capacity/contact responses to the existing closed area-mean gray enclosure.
+They supply complete response and fresh-contact audit callbacks to the original
+capacity enclosure iterator. The reflected radiosity solve, exact trace binding,
+shifted boundary loads and physical heat decomposition retain one shared owner.
+Source surfaces use bounded contact fixed points; continuous curves use the
+complete contact/bulk Newton tangent. All trials receive the unchanged original
+old temperatures, including prescribed nodes.
+
+The original patch-temperature and applied-versus-fresh heat gates remain
+active. Acceptance additionally requires the freshly re-queried contact and
+reflected-radiation endpoint to meet the original absolute joule contact gate
+and independent storage/heat gate. Inner contact and numerical tolerances only
+tighten. Authored Neumann input and original convection remain separate from
+signed internal enclosure exchange; prescribed bath reactions charge fixed-node
+storage exactly once. `ContactCapacityEnclosureStep` retains the last applied
+numerical response separately from the fresh physical endpoint and contact
+states. Enclosure callbacks and all thermal responses are counted separately;
+Newton updates, backtracks and Krylov work cover every response under checked
+combined caps. The ordinary enclosure entry point still preserves its original
+predictor-based target, including the all-prescribed zero free-residual target.
+
+Focused G1/G4 closed-contact cases in `tests/temperature_contact/radiation.rs`
+compare curve Newton and source-surface fixed points, reconstruct nodal storage
+and residuals, check independent two-gray-patch heat and external balances,
+exercise both bath-jump directions, and preserve history through refusal and
+retry. These new cases have syntax validation only under the same native-build
+blocker. Pointwise/open exchange and contact/radiation sensitivities remain
+outside these capacity entry points.
+
 ## Material-state spatial ambient radiation
 
 `MaterialPointwiseAmbientRadiation` resolves original surface emissivity at each

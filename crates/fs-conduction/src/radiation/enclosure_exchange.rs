@@ -19,7 +19,8 @@ pub struct EnclosureExchangeReport {
     pub applied_heat_w: Vec<f64>,
     /// Maximum applied-versus-fresh patch heat difference, W.
     pub max_heat_mismatch_w: f64,
-    /// Number of inner solid solves; none advances history independently.
+    /// Number of enclosure callbacks; each may contain multiple live-contact
+    /// thermal responses, none of which advances history independently.
     pub iterations: usize,
     /// Sum of actual Newton attempts across all inner solves.
     pub solid_iterations: usize,

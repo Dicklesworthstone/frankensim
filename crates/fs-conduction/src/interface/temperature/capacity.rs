@@ -9,6 +9,8 @@ use super::{ContactIterationConfig, TemperatureContactEvaluation, TemperatureCon
 
 mod radiation;
 pub use radiation::ContactCapacityRadiationStep;
+mod enclosure;
+pub use enclosure::ContactCapacityEnclosureStep;
 
 /// One counted field, its applied contact operator, and a fresh physical audit.
 #[derive(Debug)]
