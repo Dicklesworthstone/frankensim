@@ -541,3 +541,137 @@ fn native_temperature_energy_ceiling_rejects_then_admits_a_smaller_update() {
     assert_eq!(system.samples_rendered(), sample);
     assert!(core::ptr::eq(system.source().unwrap(), &mild));
 }
+
+
+fn mixed_temperature_card() -> InterfaceSystemCard {
+    let stiffness = interface_stiffness_per_area_dims();
+    let mut claims = ClaimSet::new();
+    for (name, dims, cold, hot) in [
+        (COHESIVE_NORMAL_STIFFNESS_PROPERTY, stiffness, 1e9, 5e8),
+        (COHESIVE_TANGENTIAL_STIFFNESS_PROPERTY, stiffness, 4e8, 2e8),
+        (COHESIVE_NORMAL_STRENGTH_PROPERTY, Pressure::DIMS, 2e5, 8e4),
+        (COHESIVE_TANGENTIAL_STRENGTH_PROPERTY, Pressure::DIMS, 1.6e5, 6e4),
+        (
+            COHESIVE_MODE_I_FRACTURE_ENERGY_PROPERTY,
+            FRACTURE_ENERGY_PER_AREA_DIMS,
+            100.0,
+            50.0,
+        ),
+        (
+            COHESIVE_MODE_II_FRACTURE_ENERGY_PROPERTY,
+            FRACTURE_ENERGY_PER_AREA_DIMS,
+            400.0,
+            120.0,
+        ),
+        (COHESIVE_BK_EXPONENT_PROPERTY, Dims::NONE, 2.0, 1.5),
+        (COHESIVE_COMPRESSION_STIFFNESS_PROPERTY, stiffness, 2e9, 3e9),
+    ] {
+        claims
+            .insert_claim(PropertyClaim {
+                key: PropertyKey::new(name, dims),
+                value: PropertyValue::Curve {
+                    abscissa: "T".into(),
+                    abscissa_dims: Temperature::DIMS,
+                    knots: vec![(280.0, cold), (320.0, hot)],
+                    dims,
+                },
+                validity: ValidityDomain::unconstrained().with("T", 280.0, 320.0),
+                uncertainty: UncertaintyModel::Unstated,
+                interpolation: InterpolationPolicy::LinearInside,
+                observations: vec![],
+                provenance: Provenance {
+                    source: "manufactured mixed-mode thermal fixture, not measured data".into(),
+                    license: "CC0-1.0".into(),
+                    artifact: None,
+                },
+            })
+            .unwrap();
+    }
+    let surface = |name: &str| SurfaceSpec {
+        material: MaterialStateId {
+            chemistry: format!("mixed-{name}"),
+            phase: "solid".into(),
+            process: "mixed-mode thermal integration fixture".into(),
+            revision: 1,
+        },
+        texture_frame: name.into(),
+    };
+    InterfaceSystemCard::assemble(
+        surface("A"),
+        surface("B"),
+        SystemContext {
+            medium: "explicit mixed-mode interface".into(),
+            third_body: None,
+            environment: "temperature query".into(),
+            history: "original frozen-onset BK bond".into(),
+        },
+        claims,
+        vec![],
+    )
+    .unwrap()
+}
+
+#[test]
+fn mixed_mode_temperature_initiation_survives_native_transaction_and_drives_next_step() {
+    let card = mixed_temperature_card();
+    let query = QueryPoint::new().with("T", 280.0).unwrap();
+    let cold = resolve_mixed_mode_bilinear_cohesive(
+        &card,
+        &query,
+        MaterialPropertySelection::SingleClaimOnly,
+        0.02,
+    )
+    .unwrap();
+    let hot = cold.at_temperature(&card, "T", 320.0).unwrap();
+    assert!(cold.law().mixed_mode_parameters().is_some());
+    assert!(hot.law().mixed_mode_parameters().is_some());
+
+    let mut system = bound(&cold, [0.01, -0.005, 0.003], 1.0);
+    let held = [1.4e-4, 1.8e-4, -6e-5];
+    drive_to(&mut system, held);
+    let before = system.point();
+    assert!(before.mixed_mode_history().is_none());
+    assert_eq!(before.damage(), 0.0);
+    let native = states(&system);
+    let sample = system.samples_rendered();
+    let last = system.last_frame().copied();
+    let compliance = system.compliance_m_per_n();
+
+    let report = system
+        .apply_temperature_successor(&hot, "T", &CancelGate::new())
+        .unwrap();
+    let heated = system.point();
+    let history = heated
+        .mixed_mode_history()
+        .expect("hot strength surface must initiate the held mixed-mode gap");
+    assert!(heated.damage() > before.damage());
+    assert!(report.damage_dissipation_j > 0.0);
+    assert!(report.parameter_work_j < 0.0);
+    assert!(report.energy_residual_j.abs() <= report.energy_tolerance_j);
+    assert_eq!(report.jump_m, held);
+    assert_eq!(heated.jump_m(), held);
+    assert_eq!(states(&system), native);
+    assert_eq!(system.samples_rendered(), sample);
+    assert_eq!(system.last_frame().copied(), last);
+    assert_eq!(system.compliance_m_per_n(), compliance);
+    assert!(core::ptr::eq(system.source().unwrap(), &hot));
+    assert!(core::ptr::eq(system.law(), hot.law()));
+
+    // Unload without advancing the accepted damage maximum. The next native
+    // mechanical transaction must use the hot anisotropic stiffness and the
+    // temperature-selected frozen physical mode, not stale cold coefficients.
+    let target = [1.0e-4, 1.1e-4, -4e-5];
+    let (_, mean) = heated
+        .trial_over_time_with_mean_traction(target, system.sample_period_s(), 1e-8)
+        .unwrap();
+    let expected_force = mean.map(|traction| AREA * traction);
+    let frame = drive_with_force(&mut system, target, expected_force);
+    for i in 0..3 {
+        close(frame.jump_m[i], target[i], 3e-12);
+        close(frame.mean_force_n[i], expected_force[i], 3e-9);
+    }
+    close(system.point().damage(), heated.damage(), 2e-12);
+    assert_eq!(system.point().mixed_mode_history(), Some(history));
+    assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+    assert!(core::ptr::eq(system.source().unwrap(), &hot));
+}
