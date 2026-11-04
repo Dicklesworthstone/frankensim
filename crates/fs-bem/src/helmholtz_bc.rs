@@ -18,6 +18,10 @@ pub use incident::{
 mod prepared_iterative;
 pub use prepared_iterative::PreparedIterativeBoundary;
 
+#[path = "helmholtz_bc_reflection.rs"]
+mod reflection;
+pub use reflection::PreparedReflectionBoundary;
+
 /// Hook for a qualified nonlocal BL operator, e.g. a tangential surface
 /// Laplacian. It maps pressure [Pa] to rho*c*v_absorbed [Pa]. Its weighted
 /// quadratic form must be passive unless explicitly declared active. The

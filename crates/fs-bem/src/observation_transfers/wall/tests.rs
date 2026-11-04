@@ -601,7 +601,7 @@ fn finite_apertures_keep_prescribed_flow_while_other_patches_absorb() {
 }
 
 #[test]
-fn unsupported_material_bands_and_lossless_poles_refuse_before_solving() {
+fn material_support_remains_required_while_dense_lossless_resonances_are_finite() {
     let surface = SpherePanels::icosphere(0.025, 0).unwrap();
     assert!(matches!(
         LocalBoundaryObservation::for_scattering(
@@ -648,10 +648,20 @@ fn unsupported_material_bands_and_lossless_poles_refuse_before_solving() {
         lossless.normalized_admittance(1000.0, || false),
         Err(TransferError::Invalid(_))
     ));
-    assert!(matches!(
-        LocalBoundaryObservation::for_scattering(scattering(&surface), lossless.clone(), None,),
-        Err(TransferError::Invalid(_))
-    ));
+    let resonant = LocalBoundaryObservation::for_scattering(
+        scattering(&surface), lossless.clone(), None,
+    ).unwrap();
+    assert_eq!(lossless.pressure_reflection(1000.0, || false).unwrap(),
+        vec![-C64::ONE; surface.areas().len()]);
+    let exact = resonant.physical_frequency_sample(1000.0, || false).unwrap();
+    assert!(exact.iter().all(|&v| finite(v)));
+    assert!(exact.iter().any(|&v| v != C64::ZERO));
+    for offset in [-1e-10, 1e-10] {
+        let nearby = resonant.physical_frequency_sample(1000.0 * (1.0 + offset), || false).unwrap();
+        for (&actual, &reference) in nearby.iter().zip(&exact) {
+            assert!((actual - reference).abs() < 1e-6 * reference.abs().max(1.0));
+        }
+    }
     assert!(
         LocalBoundaryObservation::for_scattering(
             scattering(&surface),

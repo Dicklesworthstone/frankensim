@@ -5,7 +5,8 @@
 //! FIR convergence owner each retain their original physical/numerical roles.
 use super::*;
 use crate::helmholtz::bc::{
-    Admittance, IncidentField, IncidentSource, IncidentTraces, PreparedBoundary,
+    Admittance, BoundarySolution, IncidentField, IncidentSource, IncidentTraces, PreparedBoundary,
+    PreparedReflectionBoundary, ScatteringSolution,
 };
 use crate::near_field::Options;
 use std::cell::RefCell;
@@ -99,6 +100,25 @@ enum Excitation<'a> {
         compact: ScatteringObservation<'a>,
         sources: Vec<SourceId>,
     },
+}
+
+enum PreparedLocalBoundary<'a> {
+    Admittance(PreparedBoundary<'a>),
+    Reflection(PreparedReflectionBoundary<'a>),
+}
+impl PreparedLocalBoundary<'_> {
+    fn solve(&self, drive: &[C64]) -> Result<BoundarySolution, HelmholtzError> {
+        match self {
+            Self::Admittance(owner) => owner.solve(drive),
+            Self::Reflection(owner) => owner.solve(drive),
+        }
+    }
+    fn scatter(&self, incident: &IncidentTraces) -> Result<ScatteringSolution, HelmholtzError> {
+        match self {
+            Self::Admittance(owner) => owner.scatter(incident),
+            Self::Reflection(owner) => owner.scatter(incident),
+        }
+    }
 }
 
 /// A prescribed finite boundary radiator or point source observed in the same
@@ -377,7 +397,7 @@ impl<'a> LocalBoundaryObservation<'a> {
     }
 
     pub fn operator_hash(&self) -> ContentHash {
-        let mut hash = DomainHasher::new("fs-bem:local-boundary-observation:v1");
+        let mut hash = DomainHasher::new("fs-bem:local-boundary-observation:v2-reflection");
         hash.update(self.boundary.content_hash().as_bytes());
         hash.update(&self.highest_omega.to_bits().to_le_bytes());
         match &self.excitation {
@@ -437,85 +457,68 @@ impl<'a> LocalBoundaryObservation<'a> {
             }
             return Ok(vec![C64::ZERO; self.channel_count()]);
         }
-        let beta = self.boundary.normalized_admittance(omega, &mut cancelled)?;
-        let law = Admittance::Local {
-            beta: &beta,
-            declared_active: false,
+        // Preserve the original arithmetic in its well-scaled chart. Near a
+        // pressure node, beta magnifies roundoff; change coordinates before
+        // that magnification exceeds 1/sqrt(epsilon). This threshold changes
+        // no physical coefficient, loss or boundary equation.
+        let beta = match self.boundary.normalized_admittance(omega, &mut cancelled) {
+            Ok(beta) if beta.iter().all(|b| b.abs() < 1.0 / det::sqrt(f64::EPSILON)) => Some(beta),
+            Err(TransferError::Cancelled) => return Err(TransferError::Cancelled),
+            _ => None,
         };
-        let result = match &self.excitation {
-            Excitation::Point(owner) => owner
-                .frequency_sample_with_admittance(omega, law, &mut cancelled)
-                .map_err(|error| match error {
-                    HelmholtzError::Cancelled => TransferError::Cancelled,
-                    other => TransferError::Helmholtz(other),
-                })?,
-            Excitation::Surface { .. } | Excitation::Combined { .. } => {
-                let (surface, medium, geometry, quadrature) = self.field_geometry();
-                let k = omega / medium.sound_speed;
-                let boundary = PreparedBoundary::new(
-                    surface,
-                    k,
-                    medium,
-                    law,
-                    helmholtz::Formulation::BurtonMiller,
-                )?;
-                if cancelled() {
-                    return Err(TransferError::Cancelled);
-                }
-                let rows = geometry.prepare_velocity(k, medium, quadrature)?;
-                let momentum = C64::new(0.0, omega * medium.density);
-                let mut output = Vec::with_capacity(self.channel_count());
-                // Reuse factorization and receiver quadrature for every source;
-                // no matrix or integrated Green row is rebuilt inside this loop.
-                for index in 0..self.sources().len() {
-                    if cancelled() {
-                        return Err(TransferError::Cancelled);
-                    }
-                    let incident = self.source_incident(index).map(|source| [source]);
-                    let radiation = if let Some(sources) = &incident {
-                        let traces = IncidentTraces::from_admitted_field(
-                            surface,
-                            k,
-                            medium,
-                            IncidentField::Sources(sources),
-                            None,
-                        )?;
-                        boundary.scatter(&traces)?.scattered
-                    } else {
-                        boundary
-                            .solve(
-                                self.source_velocity(index)
-                                    .ok_or(TransferError::Invalid("missing finite source trace"))?,
-                            )?
-                            .radiation
-                    };
-                    let received = rows.evaluate_velocity(&radiation)?;
-                    for ((&pressure, velocity), receiver) in received
-                        .scalar
-                        .pressure
-                        .iter()
-                        .zip(&received.particle_velocity_m_s)
-                        .zip(self.receivers())
-                    {
-                        if let Some(sources) = &incident {
-                            let direct = IncidentField::Sources(sources).pressure_velocity_at(
-                                k,
-                                medium,
-                                receiver.position_m,
-                            )?;
-                            output.push(pressure + direct.pressure_pa);
-                            output.extend(
-                                (0..3).map(|i| momentum * (velocity[i] + direct.velocity_m_s[i])),
-                            );
-                        } else {
-                            output.push(pressure);
-                            output.extend(velocity.iter().map(|&v| momentum * v));
-                        }
-                    }
-                }
-                output
+        let (surface, medium, geometry, quadrature) = self.field_geometry();
+        let k = omega / medium.sound_speed;
+        let boundary = if let Some(beta) = &beta {
+            PreparedLocalBoundary::Admittance(PreparedBoundary::new(
+                surface, k, medium, Admittance::Local { beta, declared_active: false },
+                helmholtz::Formulation::BurtonMiller,
+            )?)
+        } else {
+            let reflection = self.boundary.pressure_reflection(omega, &mut cancelled)?;
+            PreparedLocalBoundary::Reflection(PreparedReflectionBoundary::new(
+                surface, k, medium, &reflection, false, helmholtz::Formulation::BurtonMiller,
+            )?)
+        };
+        if cancelled() {
+            return Err(TransferError::Cancelled);
+        }
+        let rows = geometry.prepare_velocity(k, medium, quadrature)?;
+        let momentum = C64::new(0.0, omega * medium.density);
+        let mut result = Vec::with_capacity(self.channel_count());
+        // Every source shares this factorization and the same receiver rows.
+        // Reflection coordinates retain pressure-release nodes in BOTH traces.
+        for index in 0..self.sources().len() {
+            if cancelled() {
+                return Err(TransferError::Cancelled);
             }
-        };
+            let incident = self.source_incident(index).map(|source| [source]);
+            let radiation = if let Some(sources) = &incident {
+                let traces = IncidentTraces::from_admitted_field(
+                    surface, k, medium, IncidentField::Sources(sources), None,
+                )?;
+                boundary.scatter(&traces)?.scattered
+            } else {
+                boundary.solve(
+                    self.source_velocity(index)
+                        .ok_or(TransferError::Invalid("missing finite source trace"))?,
+                )?.radiation
+            };
+            let received = rows.evaluate_velocity(&radiation)?;
+            for ((&pressure, velocity), receiver) in received.scalar.pressure.iter()
+                .zip(&received.particle_velocity_m_s).zip(self.receivers())
+            {
+                if let Some(sources) = &incident {
+                    let direct = IncidentField::Sources(sources).pressure_velocity_at(
+                        k, medium, receiver.position_m,
+                    )?;
+                    result.push(pressure + direct.pressure_pa);
+                    result.extend((0..3).map(|i| momentum * (velocity[i] + direct.velocity_m_s[i])));
+                } else {
+                    result.push(pressure);
+                    result.extend(velocity.iter().map(|&v| momentum * v));
+                }
+            }
+        }
         if cancelled() {
             return Err(TransferError::Cancelled);
         }
@@ -668,10 +671,11 @@ fn admit_binding_for_route(
             "local wall is bound to another medium or panel shape",
         ));
     }
-    boundary.admit_band(highest_omega, lower)?;
     if iterative {
+        boundary.admit_admittance_band(highest_omega, lower)?;
         helmholtz::admit_iterative_resolution(surface, highest_omega / medium.sound_speed)?;
     } else {
+        boundary.admit_band(highest_omega, lower)?;
         helmholtz::admit_resolution(surface, highest_omega / medium.sound_speed)?;
     }
     Ok(())

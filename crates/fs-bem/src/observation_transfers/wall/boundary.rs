@@ -249,7 +249,20 @@ impl LocalBoundary {
                 "observation band exceeds local-wall source support",
             ));
         }
-        self.admit_resonances(tau * lowest, highest_omega, false)
+        Ok(())
+    }
+
+    pub(super) fn admit_admittance_band(
+        &self,
+        highest_omega: f64,
+        lower: Option<LowerBandWindow>,
+    ) -> Result<(), TransferError> {
+        self.admit_band(highest_omega, lower)?;
+        self.admit_resonances(
+            core::f64::consts::TAU * lower.map_or(0.0, |window| window.stop_hz),
+            highest_omega,
+            false,
+        )
     }
 
     pub(in crate::observation_transfers) fn admit_physical_band_hz(
@@ -348,6 +361,63 @@ impl LocalBoundary {
             .iter()
             .map(|&index| coefficients[index])
             .collect())
+    }
+
+    /// Normal-incidence pressure reflection in exp(-i omega t), in original
+    /// panel order. The bounded coefficients retain zero-impedance mechanical
+    /// resonances and layered pressure nodes without an admittance division.
+    /// Every original source frequency domain and constitutive refusal remains.
+    pub fn pressure_reflection(
+        &self,
+        omega: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Vec<C64>, TransferError> {
+        if cancelled() {
+            return Err(TransferError::Cancelled);
+        }
+        if !omega.is_finite() || omega <= 0.0 {
+            return Err(TransferError::Invalid("local wall frequency must be positive and finite"));
+        }
+        let rho_c = self.medium.density * self.medium.sound_speed;
+        let mut coefficients = Vec::with_capacity(self.laws.len());
+        for law in &self.laws {
+            if cancelled() {
+                return Err(TransferError::Cancelled);
+            }
+            let reflection = match law {
+                LocalWall::Rigid => C64::ONE,
+                LocalWall::Mechanical(pin) => {
+                    let z = fs_phs::wall_specific_impedance(pin, omega)?;
+                    if !finite(z) {
+                        return Err(TransferError::Invalid("wall impedance is unrepresentable"));
+                    }
+                    let scale = z.re.abs().max(z.im.abs()).max(rho_c);
+                    let z = C64::new(z.re / scale, z.im / scale);
+                    let ambient = C64::from_re(rho_c / scale);
+                    (z - ambient) / (z + ambient)
+                }
+                LocalWall::PorousRigid { law, fluid, thickness_m } => {
+                    RigidBackedLayers::new(
+                        fluid, omega, &[Layer::Porous { law, thickness_m: *thickness_m }],
+                    )?.reflection(1.0)?.pressure_reflection.conj()
+                }
+                LocalWall::LayeredRigid { fluid, layers } => {
+                    prepare_layers(fluid, layers, omega)?.reflection(1.0)?.pressure_reflection.conj()
+                }
+            };
+            if !finite(reflection) || reflection.abs() > 1.0 + 64.0 * f64::EPSILON {
+                return Err(TransferError::Invalid("local wall reflection is nonfinite or active"));
+            }
+            coefficients.push(reflection);
+        }
+        let mut panels = Vec::with_capacity(self.panel_laws.len());
+        for (panel, &index) in self.panel_laws.iter().enumerate() {
+            if panel % 256 == 0 && cancelled() {
+                return Err(TransferError::Cancelled);
+            }
+            panels.push(coefficients[index]);
+        }
+        Ok(panels)
     }
 
     fn compute_hash(&self) -> ContentHash {

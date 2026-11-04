@@ -1649,8 +1649,9 @@ Layer order, all original material parameters and every fluid's bulk modulus
 bind boundary identity. An empty stack is rigid, but prescribed source panels
 still require the explicit `Rigid` variant. This is a local-reaction approximation:
 it does not resolve lateral propagation or curvature within a finite treatment.
-Queried pressure-node poles propagate the material owner's refusal; no finite
-admittance is substituted. The FIR convergence gates still apply to layered
+The dense observer retains pressure-node limits through the original finite
+reflection response; finite-admittance iterative/molecular routes still
+propagate their named refusal. The FIR convergence gates still apply to layered
 responses and do not certify unsampled material resonances.
 
 `LocalBoundaryObservation::for_scattering` extends the existing prescribed
@@ -1666,8 +1667,32 @@ than silently changing their discretization. It produces stationary observer
 transfers; it does not supply a new in-loop load or moving-frame constitutive law.
 
 `physical_frequency_sample` retains unwindowed material physics and propagates
-native material/mechanical errors. A declared band containing a lossless mechanical wall's
-zero-impedance resonance refuses before sampling; no admittance is clipped.
+native material/mechanical errors. The dense observer admits a lossless mechanical
+wall's zero-impedance resonance through `PreparedReflectionBoundary`. The original
+finite-admittance arithmetic remains in use while its normalized coefficients
+are below `1/sqrt(f64::EPSILON)`; a singular or poorly scaled chart switches to
+the same CBIE/Burton-Miller equations in bounded reflection coordinates. This
+threshold changes coordinates only, never damping or material parameters.
+
+With `r=(Z-rho*c)/(Z+rho*c)`, `a=(1+r)/2`, `b=(1-r)/2`, and `w=rho*c*v`,
+the wall law is `b*p+a*w=0`. The two original dense matrices are transformed
+in place; one factorization and the existing receiver rows serve all sources.
+At `r=-1` the total pressure is exactly zero while normal velocity remains
+unknown; at `r=+1` the original rigid fast path is retained. Mixed rigid,
+reactive, absorbing and pressure-release panels retain their original indices.
+Wall absorption uses coherent pressure/flow coordinates on the passive branch,
+avoiding a subtraction of incident/scattered velocities that would invent tiny
+losses on rigid patches. No reflection or admittance coefficient is clipped.
+
+The new dense route inherits the original panel/work limits and dense-LU
+cancellation granularity. It does not extend the iterative, nonlocal or
+molecular-gas solver's boundary support; those routes still refuse a band that
+contains a lossless mechanical admittance pole. Focused G0/G1/G3 tests cover
+finite-Robin equivalence, rigid arithmetic, the pressure-release sphere,
+mechanical resonance continuity and constitutive admission. These native
+regressions require execution; parser checks alone do not establish numerical
+or experimental validation.
+
 Source cards with a positive lower frequency require an explicit
 `LowerBandWindow`. Its C4 lower stop/pass transition is bound into the operator
 hash and retained by `BoundaryObservationBake`, alongside the original upper
