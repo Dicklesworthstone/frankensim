@@ -31,6 +31,8 @@ use fs_aeroac::curle3d::moving::{
 use fs_math::{dd::Dd, det};
 
 mod flow;
+/// Simultaneous independently moving microphones on the original pressure clocks.
+pub mod frames;
 mod motion;
 mod receiver;
 mod reflection;
@@ -400,18 +402,32 @@ impl<'a, M: CompactMotion> MovingCompactRenderer<'a, M> {
         output: &mut [f64],
         cancelled: &mut Cancel,
     ) -> Result<(), RenderError> {
-        if output.is_empty() {
+        let count = self.preview_block(output.len(), cancelled)?;
+        output.copy_from_slice(&self.scratch[..output.len()]);
+        self.completed += count;
+        Ok(())
+    }
+
+    // The sole pressure evaluator stages into existing scratch without consuming
+    // a sample. Mono and multi-microphone publication share this exact path.
+    // A late refusal can change scratch, never the accepted output clock.
+    fn preview_block<Cancel: FnMut() -> bool>(
+        &mut self,
+        count: usize,
+        cancelled: &mut Cancel,
+    ) -> Result<u64, RenderError> {
+        if count == 0 {
             return Err(RenderError::EmptyBlock);
         }
-        if output.len() > self.config.max_block {
+        if count > self.config.max_block {
             return Err(sizing(
                 "moving pressure block exceeds its preallocated capacity",
             ));
         }
-        let count =
-            u64::try_from(output.len()).map_err(|_| sizing("pressure block exceeds u64"))?;
-        self.validate_sample_count(count)?;
-        for i in 0..output.len() {
+        let completed =
+            u64::try_from(count).map_err(|_| sizing("pressure block exceeds u64"))?;
+        self.validate_sample_count(completed)?;
+        for i in 0..count {
             check_cancel(cancelled)?;
             let time = clock_time(self.config, self.completed + i as u64)?;
             let mut pressure = Dd::ZERO;
@@ -442,9 +458,7 @@ impl<'a, M: CompactMotion> MovingCompactRenderer<'a, M> {
             self.scratch[i] = value;
         }
         check_cancel(cancelled)?;
-        output.copy_from_slice(&self.scratch[..output.len()]);
-        self.completed += count;
-        Ok(())
+        Ok(completed)
     }
 }
 
