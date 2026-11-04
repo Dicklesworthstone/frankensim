@@ -10,6 +10,7 @@ use fs_orbit::{
     solve_hb_scaled_seeded,
 };
 use fs_phs::PortHamiltonian;
+use std::borrow::Cow;
 
 /// Complete continuous Hessian action of the original Hamiltonian.
 ///
@@ -25,7 +26,7 @@ pub type PhsStorageHessianAction<'a> = dyn Fn(&[f64], &[f64], &mut [f64]) -> boo
 pub(super) enum StorageTangent<'a> {
     Unavailable,
     Quadratic {
-        matrix: &'a [f64],
+        matrix: Cow<'a, [f64]>,
         prepared: RefCell<Option<Vec<f64>>>,
     },
     Hessian {
@@ -36,13 +37,20 @@ pub(super) enum StorageTangent<'a> {
 
 impl<'a> StorageTangent<'a> {
     pub(super) fn from_storage(system: &'a PortHamiltonian) -> Self {
-        system
-            .storage()
-            .exact_quadratic_matrix()
-            .map_or(Self::Unavailable, |matrix| Self::Quadratic {
-                matrix,
-                prepared: RefCell::new(None),
-            })
+        let matrix = if let Some(matrix) = system.storage().exact_quadratic_matrix() {
+            Cow::Borrowed(matrix)
+        } else if let Some(part) = system.storage().quadratic_part().filter(|part| part.exact) {
+            // Composed and relaxation storage expose their complete original
+            // quadratic form through owned metadata, including memory rows.
+            // A merely quadratic PART of a nonlinear law is never sufficient.
+            Cow::Owned(part.matrix)
+        } else {
+            return Self::Unavailable;
+        };
+        Self::Quadratic {
+            matrix,
+            prepared: RefCell::new(None),
+        }
     }
 
     fn hessian(n: usize, action: &'a PhsStorageHessianAction<'a>) -> Self {

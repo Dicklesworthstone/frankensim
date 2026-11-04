@@ -28,7 +28,10 @@ pub use tangent::{
 };
 
 mod continuation;
-pub use continuation::{PhsFrequencyResponsePoint, continue_forced_frequency_response};
+pub use continuation::{
+    PhsFrequencyResponsePoint, PhsScaledFrequencyResponsePoint,
+    continue_forced_frequency_response, continue_forced_frequency_response_scaled_seeded,
+};
 mod stability;
 pub use stability::{
     PhsFloquetControls, PhsFloquetLevel, PhsForcedStability, PhsNumericalStability,

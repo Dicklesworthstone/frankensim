@@ -81,6 +81,42 @@ API — never instrument-shaped.
   It returns `AutonomousBranch`, with exactly two corrected seeds plus the
   declared number of accepted additional points, not a parameter endpoint.
 
+## Forced continuation in physical units
+
+`ContinuationScales` / `continue_branch_scaled_seeded` accept the full original
+Fourier seed and separate state, equation and physical parameter magnitudes.
+The starting point is solved again. Both this additive entry and the original
+`continue_branch` use the same bordered corrector; the original entry retains
+its amplitude seed and coefficient-relative acceptance. The scaled predictor,
+secant, arclength row, Newton columns and finer-grid check use one normalized
+Parseval chart. Its step budgets are dimensionless arclength, and neither DC
+preload nor another coordinate's units relax absolute normalized acceptance.
+The physical HB trace and sampling defect remain separate from normalized
+HB/AFT/arclength diagnostics, including physical `SamplingUnresolved` fields.
+
+Declared island tangents reuse the shared `tangent::Workspace` for coefficient
+columns. The parameter column still probes the complete original residual,
+including parameter-dependent ports and physical frequency. Without a declared
+tangent, finite differences use each physical coordinate magnitude. Source
+parameter mutations remain owned by the supplied family; this entry does not
+add a separate model or claim to restore family state after refusal.
+
+`fs-couple::phs_orbit::continue_forced_frequency_response_scaled_seeded` uses
+the original full pHS state and independently audits signed supply, storage and
+resistance loss at every accepted frequency. Quadratic composition and linear
+relaxation storage supply cached complete-state tangents through explicitly
+exact `quadratic_part` metadata (borrowing exact Q when available); a partial
+quadratic with a nonlinear remainder never becomes a complete tangent.
+
+Native regressions traverse both Duffing folds under independent coordinate,
+equation and parameter unit changes, restart a selected higher-harmonic
+waveform, verify tiny-equation AFT alias refusal/refinement, and compare exact
+tangent versus residual-probe source calls. Original pHS tests retain tiny
+complex forcing harmonics, Maxwell memory phasors and independently computed
+cycle dissipation. These remain fixed-order numerical branches: harmonic
+truncation, physical frequency validity, branch identity, precise bifurcation
+location and stability need their own convergence/validation checks.
+
 ## Exact state tangents in harmonic balance
 
 The fixed-order Newton owner and its adaptive-order callers consume the exact
@@ -109,8 +145,8 @@ The `fs-couple::phs_orbit` consumer supplies the exact `(J-R)Q` tangent for
 explicitly exact quadratic storage. Its explicit nonlinear path uses the
 source owner's supplied Hamiltonian Hessian action. Original physical memory,
 storage, resistance and forcing remain in the model; feedback derivatives are
-not inferred. Shooting and the separate continuation correctors retain their
-existing differentiation paths.
+not inferred. Forced continuation reuses the same tangent workspace; shooting
+retains its existing differentiation path.
 
 ## Autonomous cycle continuation
 

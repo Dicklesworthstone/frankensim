@@ -83,7 +83,7 @@ pub(super) fn length(values: impl Iterator<Item = f64>) -> f64 {
 }
 
 impl AdmittedScales {
-    fn new(
+    pub(super) fn new(
         d: usize,
         anchor: HbAnchor,
         seed: &[f64],

@@ -2,7 +2,7 @@ use super::*;
 use crate::phs_orbit::{audit_forced_orbit, solve_forced_harmonic_balance_scaled_seeded};
 use core::cell::Cell;
 use fs_math::{c64::C64, det};
-use fs_orbit::OrbitError;
+use fs_orbit::{OrbitError, OrbitProblem};
 use fs_phs::{QuadraticStorage, Storage};
 use std::rc::Rc;
 
@@ -106,6 +106,12 @@ struct CubicStorage {
     mass: f64,
 }
 impl Storage for CubicStorage {
+    fn quadratic_part(&self) -> Option<fs_phs::linear_exact::QuadraticPart> {
+        Some(fs_phs::linear_exact::QuadraticPart {
+            matrix: vec![self.stiffness, 0.0, 0.0, 1.0 / self.mass],
+            exact: self.cubic == 0.0,
+        })
+    }
     fn hamiltonian(&self, x: &[f64]) -> f64 {
         0.5 * self.stiffness * x[0] * x[0]
             + 0.25 * self.cubic * x[0].powi(4)
@@ -145,6 +151,13 @@ fn original_nonlinear_hessian_recovers_manufactured_multiharmonic_force_and_work
         );
     let f3 = (q1 * q1 * q1).scale(cubic);
     let input = PeriodicPortInput::new(omega, vec![vec![C64::ZERO, f1, C64::ZERO, f3]]).unwrap();
+    assert!(
+        forced_problem(&system, &input)
+            .unwrap()
+            .island_state_jacobian()
+            .is_none(),
+        "the quadratic part cannot stand in for the nonlinear Hessian"
+    );
     let calls = Cell::new(0);
     let hessian = |x: &[f64], v: &[f64], out: &mut [f64]| {
         calls.set(calls.get() + 1);
@@ -210,6 +223,44 @@ fn original_nonlinear_hessian_recovers_manufactured_multiharmonic_force_and_work
         let audit = audit_forced_orbit(&system, &input, orbit, 256).unwrap();
         assert!((audit.mean_resistance_loss_w / exact_loss - 1.0).abs() < 1e-8);
         assert!(audit.relative_power_residual < 1e-8);
+    }
+}
+
+#[test]
+fn original_relaxation_coordinates_supply_the_complete_analytic_tangent() {
+    let (mass, stiffness, damping, arm_stiffness, tau) = (2.0, 4.0, 0.3, 3.0, 0.4);
+    let system = fs_phs::mass_spring_damper(mass, stiffness, damping)
+        .unwrap()
+        .with_relaxation_branches(vec![fs_phs::RelaxationBranch {
+            projection: vec![1.0, 0.0],
+            stiffness: arm_stiffness,
+            relaxation_time_s: tau,
+        }])
+        .unwrap();
+    let input = PeriodicPortInput::new(1.3, vec![vec![C64::ZERO, C64::from_re(0.5)]]).unwrap();
+    let problem = forced_problem(&system, &input).unwrap();
+    let callback = problem
+        .island_state_jacobian()
+        .expect("complete original quadratic memory law");
+    let mut actual = vec![f64::NAN; 9];
+    assert!(callback(&problem, 0.0, &[0.2, -0.1, 0.05], &mut actual));
+    // The original memory variable stores H_arm=(sqrt(k_arm)*q-z)^2/2.
+    // q'=p/m, p'=-(k+k_arm)q-d*p/m+sqrt(k_arm)z,
+    // z'=(sqrt(k_arm)q-z)/tau; all three coordinates stay in the tangent.
+    let coupling = arm_stiffness.sqrt();
+    let expected = [
+        0.0,
+        1.0 / mass,
+        0.0,
+        -(stiffness + arm_stiffness),
+        -damping / mass,
+        coupling,
+        coupling / tau,
+        0.0,
+        -1.0 / tau,
+    ];
+    for (actual, expected) in actual.iter().zip(expected) {
+        assert!((actual - expected).abs() < 1e-13);
     }
 }
 

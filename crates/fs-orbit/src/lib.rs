@@ -44,6 +44,9 @@ pub use adaptive::{
 mod scaling;
 pub use scaling::{HbScales, ScaledHbOrbit, solve_hb_scaled_seeded};
 
+mod forced;
+pub use forced::{ContinuationScales, ScaledContinuationPoint, continue_branch_scaled_seeded};
+
 mod tangent;
 
 const TAU: f64 = core::f64::consts::TAU;
@@ -1402,150 +1405,7 @@ pub fn continue_branch<P: ContinuableProblem>(
     guess_amplitude: f64,
     budget: &ContinuationBudget,
 ) -> Result<Vec<ContinuationPoint>, OrbitError> {
-    if !(budget.initial_step > 0.0 && budget.initial_step.is_finite()) {
-        return Err(OrbitError::BadParameter {
-            what: "initial step must be positive and finite",
-        });
-    }
-    let d = problem.dim();
-    let pack = Packing {
-        d,
-        n_harm: budget.hb.harmonics,
-        omega_slot: None,
-    };
-    let nc = pack.coeff_len();
-    let nz = nc + 1; // coefficients + lambda
-    // First point: plain HB at lambda0.
-    problem.set_parameter(lambda0);
-    let first = solve_hb(
-        problem,
-        HbAnchor::Forced {
-            omega: omega_of(lambda0),
-        },
-        guess_amplitude,
-        &budget.hb,
-    )?;
-    let mut z = pack_orbit(&first, &HbAnchor::Forced { omega: 1.0 });
-    z.push(lambda0);
-    let mut points = vec![ContinuationPoint {
-        lambda: lambda0,
-        orbit: first,
-        step: 0.0,
-    }];
-    let dir = (lambda1 - lambda0).signum();
-    // Initial tangent: pure-parameter march.
-    let mut tangent = vec![0.0f64; nz];
-    tangent[nc] = dir;
-    let mut step = budget.initial_step;
-    let mut residual = vec![0.0f64; nc];
-    let mut aft = AftWorkspace::new(&pack)?;
-    let eval = |problem: &mut P, z: &[f64], aft: &mut AftWorkspace, out: &mut [f64]| {
-        problem.set_parameter(z[nc]);
-        hb_residual(problem, &pack, &z[..nc], omega_of(z[nc]), aft, out);
-    };
-    for _ in 0..budget.max_steps {
-        // Reached the far end of the parameter window?
-        let lam = z[nc];
-        if (dir > 0.0 && lam >= lambda1) || (dir < 0.0 && lam <= lambda1) {
-            return Ok(points);
-        }
-        // Predictor.
-        let mut zp: Vec<f64> = z.iter().zip(&tangent).map(|(a, t)| a + step * t).collect();
-        // Corrector: bordered Newton.
-        let mut converged = None;
-        let mut residual_trace = Vec::new();
-        for _ in 0..budget.hb.max_newton {
-            eval(problem, &zp, &mut aft, &mut residual);
-            let mut r = residual.clone();
-            let arc: f64 = zp
-                .iter()
-                .zip(z.iter())
-                .zip(&tangent)
-                .map(|((a, b), t)| (a - b) * t)
-                .sum::<f64>()
-                - step;
-            r.push(arc);
-            let rn = norm(&r);
-            residual_trace.push(rn);
-            let scale = norm(&zp[..nc]).max(1.0);
-            if rn < budget.hb.tolerance * scale {
-                let (finer, checked, defect) =
-                    check_sampling(problem, &pack, &zp[..nc], omega_of(zp[nc]), &aft, &residual)?;
-                let checked_norm =
-                    det::sqrt(checked.iter().map(|v| v * v).sum::<f64>() + arc * arc);
-                if checked_norm < budget.hb.tolerance * scale
-                    && defect < budget.hb.tolerance * scale
-                {
-                    *residual_trace.last_mut().expect("current corrector") = checked_norm;
-                    converged = Some((checked_norm, finer.samples, defect));
-                    break;
-                }
-                if finer.refinement >= MAX_AFT_REFINEMENTS {
-                    return Err(OrbitError::SamplingUnresolved {
-                        samples: finer.samples,
-                        residual: checked_norm,
-                        defect,
-                    });
-                }
-                aft = finer;
-                continue;
-            }
-            let mut jac = vec![0.0f64; nz * nz];
-            let mut r2 = vec![0.0f64; nc];
-            for col in 0..nz {
-                let h = 1.0e-7 * zp[col].abs().max(1.0);
-                let saved = zp[col];
-                zp[col] = saved + h;
-                eval(problem, &zp, &mut aft, &mut r2);
-                zp[col] = saved;
-                for row in 0..nc {
-                    jac[row * nz + col] = (r2[row] - residual[row]) / h;
-                }
-                jac[nc * nz + col] = tangent[col];
-            }
-            eval(problem, &zp, &mut aft, &mut residual);
-            let Ok(factorized) = lu(&jac, nz) else {
-                return Err(OrbitError::SingularJacobian);
-            };
-            let mut delta = r;
-            factorized.solve(&mut delta);
-            for col in 0..nz {
-                zp[col] -= delta[col];
-            }
-        }
-        if let Some((final_residual, aft_samples, sampling_defect)) = converged {
-            let new_tangent: Vec<f64> = {
-                let diff: Vec<f64> = zp.iter().zip(z.iter()).map(|(a, b)| a - b).collect();
-                let nrm = norm(&diff).max(1.0e-300);
-                diff.iter().map(|v| v / nrm).collect()
-            };
-            tangent = new_tangent;
-            z = zp;
-            let (coeffs, _) = pack.unpack(&z[..nc]);
-            points.push(ContinuationPoint {
-                lambda: z[nc],
-                orbit: HbOrbit {
-                    omega: omega_of(z[nc]),
-                    coeffs,
-                    residual_trace,
-                    residual: final_residual,
-                    aft_samples,
-                    sampling_defect,
-                },
-                step,
-            });
-            step = (step * 1.3).min(budget.initial_step * 4.0);
-        } else if step > budget.min_step {
-            step *= 0.5;
-        } else {
-            return Err(OrbitError::ContinuationExhausted {
-                steps: points.len(),
-            });
-        }
-    }
-    Err(OrbitError::ContinuationExhausted {
-        steps: points.len(),
-    })
+    forced::legacy(problem, omega_of, lambda0, lambda1, guess_amplitude, budget)
 }
 
 impl HbOrbit {

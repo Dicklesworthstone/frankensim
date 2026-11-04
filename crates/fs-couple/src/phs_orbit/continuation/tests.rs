@@ -1,6 +1,6 @@
 use super::*;
 use fs_math::{c64::C64, det};
-use fs_orbit::HbBudget;
+use fs_orbit::{HbAnchor, HbBudget, HbScales};
 use fs_phs::{RelaxationBranch, Storage};
 
 fn budget(harmonics: usize) -> ContinuationBudget {
@@ -127,6 +127,122 @@ fn maxwell_branch_keeps_the_memory_coordinate_and_frequency_dependent_loss() {
         let viscous_only = 2.0 * damping * omega * omega * q.abs().powi(2);
         assert!(response.audit.mean_resistance_loss_w > viscous_only);
         assert!(response.audit.relative_power_residual < 1e-8);
+    }
+}
+
+#[test]
+fn scaled_frequency_branch_resolves_tiny_multiharmonic_forcing_and_work() {
+    let (mass, stiffness, damping) = (2.0, 1000.0, 4.0);
+    let system = fs_phs::mass_spring_damper(mass, stiffness, damping).unwrap();
+    let force = vec![
+        C64::ZERO,
+        C64::ZERO,
+        C64::new(1.5e-12, -0.75e-12),
+        C64::new(-0.4e-12, 0.3e-12),
+    ];
+    let input = PeriodicPortInput::new(5.0, vec![force.clone()]).unwrap();
+    let scales = HbScales {
+        states: vec![1e-14, 1e-12],
+        equations: vec![1e-12, 1e-10],
+        angular_frequency: 10.0,
+    };
+    let mut settings = budget(3);
+    settings.hb.tolerance = 1e-11;
+    let first = crate::phs_orbit::solve_forced_harmonic_balance_scaled_seeded(
+        &system,
+        &input,
+        vec![0.0; 14],
+        &settings.hb,
+        &scales,
+    )
+    .unwrap();
+    let seed = first.orbit.packed_seed(&HbAnchor::Forced {
+        omega: input.omega_rad_s(),
+    });
+    let response = continue_forced_frequency_response_scaled_seeded(
+        &system, &input, 20.0, seed, &settings, &scales, 256,
+    )
+    .unwrap();
+    assert!(response.len() > 10);
+    assert!(response.last().unwrap().point.point.lambda >= 20.0);
+    for point in response {
+        let orbit = &point.point.point.orbit;
+        assert!(point.point.scaled_residual < settings.hb.tolerance);
+        assert!(point.point.scaled_sampling_defect < settings.hb.tolerance);
+        let mut expected_loss = 0.0;
+        for (n, force) in force.iter().enumerate() {
+            let omega = n as f64 * orbit.omega;
+            let q = *force / C64::new(stiffness - mass * omega * omega, damping * omega);
+            let p = q * C64::new(0.0, mass * omega);
+            assert!((orbit.coeffs[0][n] - q).abs() < 1e-21);
+            assert!((orbit.coeffs[1][n] - p).abs() < 1e-19);
+            expected_loss += 2.0 * damping * omega * omega * q.abs().powi(2);
+        }
+        assert!((point.audit.mean_resistance_loss_w / expected_loss - 1.0).abs() < 2e-7);
+        assert!(point.audit.relative_power_residual < 2e-7);
+    }
+    assert_eq!(input.omega_rad_s(), 5.0);
+    assert_eq!(input.coefficients[0], force);
+}
+
+#[test]
+fn scaled_frequency_branch_keeps_physical_maxwell_memory_and_loss() {
+    let (mass, stiffness, arm, tau, damping) = (0.001, 4.0, 3.0, 0.02, 0.002);
+    let system = fs_phs::mass_spring_damper(mass, stiffness, damping)
+        .unwrap()
+        .with_relaxation_branches(vec![RelaxationBranch {
+            projection: vec![1.0, 0.0],
+            stiffness: arm,
+            relaxation_time_s: tau,
+        }])
+        .unwrap();
+    let force = C64::new(1e-6, -4e-7);
+    let input = PeriodicPortInput::new(20.0, vec![vec![C64::ZERO, force]]).unwrap();
+    let scales = HbScales {
+        states: vec![1e-6, 1e-7, 2e-6],
+        equations: vec![1e-4, 1e-5, 2e-4],
+        angular_frequency: 80.0,
+    };
+    let settings = budget(1);
+    let first = crate::phs_orbit::solve_forced_harmonic_balance_scaled_seeded(
+        &system,
+        &input,
+        vec![0.0; 9],
+        &settings.hb,
+        &scales,
+    )
+    .unwrap();
+    let anchor = HbAnchor::Forced {
+        omega: input.omega_rad_s(),
+    };
+    let seed = first.orbit.packed_seed(&anchor);
+    let response = continue_forced_frequency_response_scaled_seeded(
+        &system,
+        &input,
+        110.0,
+        seed.clone(),
+        &settings,
+        &scales,
+        256,
+    )
+    .unwrap();
+    assert_eq!(response[0].point.point.orbit.packed_seed(&anchor), seed);
+    assert!(response.last().unwrap().point.point.lambda >= 110.0);
+    for point in response {
+        let orbit = &point.point.point.orbit;
+        let omega = orbit.omega;
+        let iw_tau = C64::new(0.0, omega * tau);
+        let modulus = (iw_tau / (C64::ONE + iw_tau)).scale(arm);
+        let q = force / (C64::new(stiffness - mass * omega * omega, damping * omega) + modulus);
+        let memory = q.scale(arm.sqrt()) / (C64::ONE + iw_tau);
+        assert_eq!(orbit.coeffs.len(), 3);
+        assert!((orbit.coeffs[0][1] - q).abs() < 3e-7 * q.abs());
+        assert!((orbit.coeffs[1][1] - q * C64::new(0.0, mass * omega)).abs() < 3e-14);
+        assert!((orbit.coeffs[2][1] - memory).abs() < 3e-7 * memory.abs());
+        let expected_loss = 2.0 * damping * omega * omega * q.abs().powi(2)
+            + 2.0 * (q.scale(arm.sqrt()) - memory).abs().powi(2) / tau;
+        assert!((point.audit.mean_resistance_loss_w / expected_loss - 1.0).abs() < 2e-7);
+        assert!(point.audit.relative_power_residual < 2e-7);
     }
 }
 
