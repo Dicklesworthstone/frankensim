@@ -92,6 +92,21 @@ load work. A Maxwell-port oscillator test checks frequency-dependent stiffness,
 phase and power around the original loaded resonance; a tied-body test retains
 mutual loading and tests the error from dropping those entries.
 
+The loaded port factor also supplies `solve_with_frequency_derivative`: the
+original component source slopes and complete constitutive `dZ/domega` enter
+the shared same-factor tangent. An explicit zero matrix declares a locally
+constant load; missing/nonfinite entries refuse. Both original physical flow
+and reaction derivatives are reconstructed, including supported/slave DOFs,
+and physical source/glue/load work slopes are independently balanced. Output
+and observation limits precede physical allocation. Fixed component receivers
+use the shared compensated transfer projection; physical port flow and effort
+also expose amplitude/slope pairs for local resonance/antiresonance refinement.
+The receiver, geometry, accepted branch and retained basis stay fixed. These
+local response extrema do not certify complete spectra or modal-tail error.
+Focused tests compare an analytic dispersive Maxwell-loaded shell at DC and
+around resonance, distinguish its displacement and flow peaks, and compare a
+phased nonmatching-tie/mutual-port tangent against frequency differences.
+
 The port owner consumes the caller's attachment vectors without copying them,
 with separate cold projection/payload limits and common per-frequency factor
 limits. Pointwise Hermitian PSD admission is a numerical check only. Port order,

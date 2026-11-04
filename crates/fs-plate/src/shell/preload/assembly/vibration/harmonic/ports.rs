@@ -13,6 +13,9 @@ use fs_modal::harmonic::{
     HarmonicPortControls, HarmonicResponseControls, PreparedHarmonicResponse,
 };
 
+mod frequency;
+pub use frequency::{AssemblyPortFrequencyBudget, AssemblyPortHarmonicFrequencyResponse};
+
 /// One immutable physical attachment, in original component/DOF order.
 #[derive(Clone, Debug)]
 pub struct AssemblyHarmonicPort {
@@ -223,15 +226,56 @@ impl PreparedAssemblyPortHarmonicResponse<'_, '_, '_, '_> {
             .port_load
             .as_ref()
             .ok_or("assembled harmonic port response omitted its load")?;
+        let physical_port_flows = self.physical_flows(&assembly.velocities, &load.flow, cx)?;
+        let (mut power, mut power_correction, mut scale, mut input_scale) = (0.0, 0.0, 0.0, 0.0);
+        let reaction_forces =
+            self.physical_reactions(&load.effort, cx, |component, j, value, force_scale| {
+                let velocity = assembly.velocities[component][j];
+                add_real(
+                    &mut power,
+                    &mut power_correction,
+                    -0.5 * (value.conj() * velocity).re,
+                );
+                scale += 0.5 * force_scale * velocity.abs();
+                input_scale += 0.5 * component_loads[component][j].abs() * velocity.abs();
+            })?;
+        let balance =
+            assembly.average_component_power_w - assembly.modal.average_viscous_power_w - power;
+        let balance_scale = input_scale + assembly.modal.average_viscous_power_w.abs() + scale;
+        self.check_work(
+            power,
+            load.average_absorbed_power_w,
+            scale,
+            balance,
+            balance_scale,
+        )?;
+        checkpoint(cx)?;
+        Ok(AssemblyPortHarmonicResponse {
+            assembly,
+            physical_port_flows,
+            reaction_forces,
+            average_physical_load_power_w: power,
+            physical_power_balance_residual_w: balance,
+        })
+    }
+
+    // Both the primal and frequency tangent use the original physical map;
+    // neither may infer port flow from a diagonal modal approximation.
+    fn physical_flows(
+        &self,
+        velocities: &[Vec<C64>],
+        expected: &[C64],
+        cx: &Cx<'_>,
+    ) -> Result<Vec<C64>, String> {
         let p = self.ports.port_count();
-        if load.flow.len() != p || load.effort.len() != p {
+        if expected.len() != p {
             return Err("assembled harmonic port response dimensions disagree".into());
         }
         let mut physical_port_flows = Vec::with_capacity(p);
-        for (port, &expected) in self.ports.ports.iter().zip(&load.flow) {
+        for (port, &expected) in self.ports.ports.iter().zip(expected) {
             checkpoint(cx)?;
             let (mut flow, mut correction, mut scale) = (C64::ZERO, C64::ZERO, 0.0);
-            for (row, velocity) in port.component_force_shapes.iter().zip(&assembly.velocities) {
+            for (row, velocity) in port.component_force_shapes.iter().zip(velocities) {
                 for (j, (&weight, &v)) in row.iter().zip(velocity).enumerate() {
                     if j % 1024 == 0 {
                         checkpoint(cx)?;
@@ -251,18 +295,30 @@ impl PreparedAssemblyPortHarmonicResponse<'_, '_, '_, '_> {
             }
             physical_port_flows.push(flow);
         }
-        let mut reaction_forces: Vec<Vec<_>> = assembly
-            .velocities
+        Ok(physical_port_flows)
+    }
+
+    // The callback receives the uncancelled effort envelope at each physical
+    // DOF, keeping work checks meaningful when multiple attachments cancel.
+    fn physical_reactions(
+        &self,
+        efforts: &[C64],
+        cx: &Cx<'_>,
+        mut observe: impl FnMut(usize, usize, C64, f64),
+    ) -> Result<Vec<Vec<C64>>, String> {
+        if efforts.len() != self.ports.port_count() {
+            return Err("assembled harmonic port response dimensions disagree".into());
+        }
+        let mut reaction_forces: Vec<Vec<_>> = self
+            .ports
+            .model
+            .vibration
+            .equilibrium
+            .displacements
             .iter()
             .map(|v| vec![C64::ZERO; v.len()])
             .collect();
-        let (mut power, mut power_correction, mut scale, mut input_scale) = (0.0, 0.0, 0.0, 0.0);
-        for (component, ((reaction, velocity), force)) in reaction_forces
-            .iter_mut()
-            .zip(&assembly.velocities)
-            .zip(component_loads)
-            .enumerate()
-        {
+        for (component, reaction) in reaction_forces.iter_mut().enumerate() {
             checkpoint(cx)?;
             for (j, value) in reaction.iter_mut().enumerate() {
                 if j % 1024 == 0 {
@@ -270,7 +326,7 @@ impl PreparedAssemblyPortHarmonicResponse<'_, '_, '_, '_> {
                 }
                 let mut force_correction = C64::ZERO;
                 let mut force_scale = 0.0;
-                for (port, &effort) in self.ports.ports.iter().zip(&load.effort) {
+                for (port, &effort) in self.ports.ports.iter().zip(efforts) {
                     let weight = port.component_force_shapes[component][j];
                     if weight == 0.0 {
                         continue;
@@ -278,39 +334,33 @@ impl PreparedAssemblyPortHarmonicResponse<'_, '_, '_, '_> {
                     add_complex(value, &mut force_correction, effort.scale(-weight));
                     force_scale += effort.abs() * weight.abs();
                 }
-                if !finite(*value) {
+                if !finite(*value) || !force_scale.is_finite() {
                     return Err("assembled harmonic physical reaction overflow".into());
                 }
-                let work = -0.5 * (value.conj() * velocity[j]).re;
-                let adjusted = work - power_correction;
-                let next = power + adjusted;
-                power_correction = (next - power) - adjusted;
-                power = next;
-                scale += 0.5 * force_scale * velocity[j].abs();
-                input_scale += 0.5 * force[j].abs() * velocity[j].abs();
+                observe(component, j, *value, force_scale);
             }
         }
-        let balance =
-            assembly.average_component_power_w - assembly.modal.average_viscous_power_w - power;
-        let balance_scale = input_scale + assembly.modal.average_viscous_power_w.abs() + scale;
+        Ok(reaction_forces)
+    }
+
+    fn check_work(
+        &self,
+        power: f64,
+        expected: f64,
+        scale: f64,
+        balance: f64,
+        balance_scale: f64,
+    ) -> Result<(), String> {
         if !power.is_finite()
             || !scale.is_finite()
             || !balance.is_finite()
             || !balance_scale.is_finite()
-            || (power - load.average_absorbed_power_w).abs()
-                > self.relative_tolerance * scale.max(f64::MIN_POSITIVE)
+            || (power - expected).abs() > self.relative_tolerance * scale.max(f64::MIN_POSITIVE)
             || balance.abs() > self.relative_tolerance * balance_scale.max(f64::MIN_POSITIVE)
         {
             return Err("assembled harmonic physical port work or power balance disagrees".into());
         }
-        checkpoint(cx)?;
-        Ok(AssemblyPortHarmonicResponse {
-            assembly,
-            physical_port_flows,
-            reaction_forces,
-            average_physical_load_power_w: power,
-            physical_power_balance_residual_w: balance,
-        })
+        Ok(())
     }
 }
 
@@ -319,6 +369,13 @@ fn finite(z: C64) -> bool {
 }
 
 fn add_complex(sum: &mut C64, correction: &mut C64, value: C64) {
+    let adjusted = value - *correction;
+    let next = *sum + adjusted;
+    *correction = (next - *sum) - adjusted;
+    *sum = next;
+}
+
+fn add_real(sum: &mut f64, correction: &mut f64, value: f64) {
     let adjusted = value - *correction;
     let next = *sum + adjusted;
     *correction = (next - *sum) - adjusted;
