@@ -74,7 +74,7 @@ struct ReactionCase {
     equation: &'static str,
 }
 
-const REACTIONS: [&str; 49] = [
+const REACTIONS: [&str; 50] = [
     "lime-hydration",
     "hydrated-lime-neutralization",
     "lime-hydration-nbs1989",
@@ -105,6 +105,7 @@ const REACTIONS: [&str; 49] = [
     "water-dissociation",
     "sodium-hydroxide-dissolution",
     "sodium-cyanide-dissolution",
+    "arsenous-acid-peroxide-oxidation",
     "carbonic-component-dissociation",
     "bicarbonate-dissociation",
     "pyrite-roasting",
@@ -348,6 +349,24 @@ fn case(name: &str) -> Result<ReactionCase, Box<dyn Error>> {
                 "source-phase-aqueous",
             ],
             equation: "NaCN(s, cubic cr I) -> Na[+](aq) + CN[-](aq), declared dissolved pure-reagent amount on the NBS reference",
+        },
+        "arsenous-acid-peroxide-oxidation" => ReactionCase {
+            reaction: MineralReaction::ArsenousAcidPeroxideOxidation,
+            reference: NBS_REFERENCE,
+            packs: &[
+                "arsenous-acid-aqueous-nbs1989",
+                "hydrogen-peroxide-aqueous-nbs1989",
+                "arsenic-acid-aqueous-nbs1989",
+                "water-liquid-nbs1989-thermochemistry",
+            ],
+            species: &["H3AsO3(aq)", "H2O2(aq)", "H3AsO4(aq)", "H2O(l)"],
+            phase_axes: &[
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+                "source-phase-liquid",
+            ],
+            equation: "H3AsO3(aq) + H2O2(aq) -> H3AsO4(aq) + H2O(l), declared As(III)-to-As(V) oxidation; no rate, removal or fixation prediction",
         },
         "gold-cyanidation" => ReactionCase {
             reaction: MineralReaction::GoldCyanidation,
@@ -1127,7 +1146,11 @@ fn reference_point(
         ]
     } else if matches!(
         pack_id,
-        "hydrogen-cyanide-aqueous-nbs1989" | "oxygen-aqueous-nbs1989-thermochemistry"
+        "hydrogen-cyanide-aqueous-nbs1989"
+            | "oxygen-aqueous-nbs1989-thermochemistry"
+            | "hydrogen-peroxide-aqueous-nbs1989"
+            | "arsenic-acid-aqueous-nbs1989"
+            | "arsenous-acid-aqueous-nbs1989"
     ) {
         &["source-aqueous-unit-activity-infinite-dilution"]
     } else if phase_axis == "source-phase-aqueous" {
@@ -1141,6 +1164,21 @@ fn reference_point(
     };
     for axis in state_axes {
         point = point.with_quantity(*axis, QuantitySpec::dimensional(Dims::NONE), 1.0)?;
+    }
+    if pack_id == "arsenic-acid-aqueous-nbs1989" {
+        point = point.with_quantity(
+            "source-arsenic-oxidation-state-v",
+            QuantitySpec::dimensional(Dims::NONE),
+            1.0,
+        )?;
+    }
+    if pack_id == "arsenous-acid-aqueous-nbs1989" {
+        for axis in [
+            "source-arsenic-oxidation-state-iii",
+            "source-arsenite-component-plus-water",
+        ] {
+            point = point.with_quantity(axis, QuantitySpec::dimensional(Dims::NONE), 1.0)?;
+        }
     }
     if pack_id == "malachite-solid-usgs-b2131-thermochemistry" {
         point = point.with_quantity(

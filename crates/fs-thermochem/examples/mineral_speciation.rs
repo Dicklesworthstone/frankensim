@@ -1,6 +1,6 @@
-//! Coupled ideal acid/base and water speciation from five matched NBS source packs.
+//! Coupled ideal acid/base and water speciation from matched NBS source packs.
 //!
-//! Run `mineral_speciation --materials PACK_DIR [--family cyanide|sulfate]`;
+//! Run `mineral_speciation --materials PACK_DIR [--family cyanide|sulfate|arsenate]`;
 //! cyanide is the default. Each named profile must be
 //! compiled there as PACK_ID.fsmatpk. `--help` lists the required profiles.
 //! The example uses a fixed 10 kg solvent basis, n_ref=10 mol at unit molal
@@ -10,6 +10,8 @@
 //! The analytical pool is HCN+CN- only, excluding gold/copper complexes and WAD-CN.
 //! The sulfate mode instead uses HSO4- + SO4(2-), excluding molecular H2SO4
 //! and metal-sulfate complexes. It does not model concentrated sulfuric acid.
+//! The arsenate mode retains all four uncomplexed As(V) protonation states.
+//! As(III), mineral dissolution, redox, adsorption and fixation are separate.
 #![deny(unsafe_code)]
 
 use std::{error::Error, path::Path};
@@ -58,9 +60,58 @@ const SULFATE_SPECIES: [&str; 5] = [
     "H2O(l)",
 ];
 const SULFATE_FAMILY: &str = "uncomplexed-sulfate";
-const USAGE: &str = "usage: mineral_speciation --materials PACK_DIR [--family cyanide|sulfate]";
+const ARSENATE_PACKS: [&str; 7] = [
+    "arsenic-acid-aqueous-nbs1989",
+    "hydrogen-ion-aqueous-nbs1989",
+    "dihydrogen-arsenate-ion-aqueous-nbs1989",
+    "hydroxide-ion-aqueous-nbs1989",
+    "water-liquid-nbs1989-thermochemistry",
+    "hydrogen-arsenate-ion-aqueous-nbs1989",
+    "arsenate-ion-aqueous-nbs1989",
+];
+const ARSENATE_SPECIES: [&str; 7] = [
+    "H3AsO4(aq)",
+    "H+(aq)",
+    "H2AsO4[-](aq)",
+    "OH[-](aq)",
+    "H2O(l)",
+    "HAsO4[2-](aq)",
+    "AsO4[3-](aq)",
+];
+const USAGE: &str =
+    "usage: mineral_speciation --materials PACK_DIR [--family cyanide|sulfate|arsenate]";
 
-fn point(index: usize, sulfate: bool) -> Result<QueryPoint, Box<dyn Error>> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Family {
+    Cyanide,
+    Sulfate,
+    Arsenate,
+}
+impl Family {
+    fn packs(self) -> &'static [&'static str] {
+        match self {
+            Self::Cyanide => &PACKS,
+            Self::Sulfate => &SULFATE_PACKS,
+            Self::Arsenate => &ARSENATE_PACKS,
+        }
+    }
+    fn species(self) -> &'static [&'static str] {
+        match self {
+            Self::Cyanide => &SPECIES,
+            Self::Sulfate => &SULFATE_SPECIES,
+            Self::Arsenate => &ARSENATE_SPECIES,
+        }
+    }
+    fn id(self) -> &'static str {
+        match self {
+            Self::Cyanide => FAMILY,
+            Self::Sulfate => SULFATE_FAMILY,
+            Self::Arsenate => "uncomplexed-arsenate",
+        }
+    }
+}
+
+fn point(index: usize, family: Family) -> Result<QueryPoint, Box<dyn Error>> {
     let mut at = QueryPoint::new()
         .with_quantity(
             "temperature",
@@ -88,12 +139,15 @@ fn point(index: usize, sulfate: bool) -> Result<QueryPoint, Box<dyn Error>> {
             ("source-phase-aqueous", 1.0),
             ("source-aqueous-unit-activity-infinite-dilution", 1.0),
         ]);
-        if index != 0 || sulfate {
+        if index != 0 || family == Family::Sulfate {
             flags.extend([
                 ("source-individual-ion", 1.0),
                 ("source-ionic-reference-hydrogen-zero", 1.0),
             ]);
         }
+    }
+    if family == Family::Arsenate && [0, 2, 5, 6].contains(&index) {
+        flags.push(("source-arsenic-oxidation-state-v", 1.0));
     }
     for (axis, value) in flags {
         at = at.with_quantity(axis, QuantitySpec::dimensional(Dims::NONE), value)?;
@@ -118,9 +172,9 @@ fn formation_sources<'a>(
         .collect()
 }
 
-fn load_system(directory: &Path, sulfate: bool) -> Result<IdealAcidBaseSystem, Box<dyn Error>> {
-    let pack_names = if sulfate { SULFATE_PACKS } else { PACKS };
-    let species_names = if sulfate { SULFATE_SPECIES } else { SPECIES };
+fn load_system(directory: &Path, family: Family) -> Result<IdealAcidBaseSystem, Box<dyn Error>> {
+    let pack_names = family.packs();
+    let species_names = family.species();
     let packs = pack_names
         .iter()
         .map(|name| {
@@ -137,8 +191,8 @@ fn load_system(directory: &Path, sulfate: bool) -> Result<IdealAcidBaseSystem, B
             Ok(pack)
         })
         .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
-    let points = (0..5)
-        .map(|i| point(i, sulfate))
+    let points = (0..pack_names.len())
+        .map(|i| point(i, family))
         .collect::<Result<Vec<_>, _>>()?;
     let ids = species_names
         .iter()
@@ -151,24 +205,36 @@ fn load_system(directory: &Path, sulfate: bool) -> Result<IdealAcidBaseSystem, B
         ids[3].clone(),
         &formation_sources(&[4, 1, 3], &ids, &packs, &points),
     )?;
-    let dissociation = AcidDissociation::from_sources(
-        if sulfate {
-            MineralReaction::HydrogenSulfateDissociation
-        } else {
-            MineralReaction::HydrogenCyanideDissociation
-        }
-        .build()?,
-        ids[0].clone(),
-        ids[2].clone(),
-        ids[1].clone(),
-        &formation_sources(&[0, 1, 2], &ids, &packs, &points),
-    )?;
+    let mut steps = vec![(
+        match family {
+            Family::Cyanide => MineralReaction::HydrogenCyanideDissociation,
+            Family::Sulfate => MineralReaction::HydrogenSulfateDissociation,
+            Family::Arsenate => MineralReaction::ArsenicAcidDissociation,
+        },
+        0,
+        2,
+    )];
+    if family == Family::Arsenate {
+        steps.extend([
+            (MineralReaction::DihydrogenArsenateDissociation, 2, 5),
+            (MineralReaction::HydrogenArsenateDissociation, 5, 6),
+        ]);
+    }
+    let dissociations = steps
+        .into_iter()
+        .map(|(reaction, acid, base)| {
+            AcidDissociation::from_sources(
+                reaction.build()?,
+                ids[acid].clone(),
+                ids[base].clone(),
+                ids[1].clone(),
+                &formation_sources(&[acid, 1, base], &ids, &packs, &points),
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(IdealAcidBaseSystem::new(
         water,
-        vec![AcidFamily::new(
-            if sulfate { SULFATE_FAMILY } else { FAMILY },
-            vec![dissociation],
-        )?],
+        vec![AcidFamily::new(family.id(), dissociations)?],
     )?)
 }
 
@@ -184,6 +250,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         for pack in SULFATE_PACKS {
             println!("  {pack}");
         }
+        println!("Arsenate source profiles for --family arsenate:");
+        for pack in ARSENATE_PACKS {
+            println!("  {pack}");
+        }
         println!(
             "Compile each with: cargo run -p xtask -- matdb-pack --manifest data/matdb/seed-v1/PACK_ID/manifest.tsv --out PACK_DIR/PACK_ID.fsmatpk"
         );
@@ -195,6 +265,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         println!(
             "The sulfate pool is HSO4- + SO4(2-); molecular H2SO4 and concentrated acid are excluded."
         );
+        println!("The arsenate pool contains all four As(V) forms, excluding As(III) and solids.");
         println!(
             "Water has unit activity; no finite water balance, redox, metal complexes or kinetics."
         );
@@ -203,17 +274,22 @@ fn main() -> Result<(), Box<dyn Error>> {
     if !(args.len() == 2 || args.len() == 4) || args[0] != "--materials" {
         return Err(USAGE.into());
     }
-    let sulfate = if args.len() == 4 {
-        if args[2] != "--family" || !["cyanide", "sulfate"].contains(&args[3].as_str()) {
+    let family_mode = if args.len() == 4 {
+        if args[2] != "--family" {
             return Err(USAGE.into());
         }
-        args[3] == "sulfate"
+        match args[3].as_str() {
+            "cyanide" => Family::Cyanide,
+            "sulfate" => Family::Sulfate,
+            "arsenate" => Family::Arsenate,
+            _ => return Err(USAGE.into()),
+        }
     } else {
-        false
+        Family::Cyanide
     };
-    let system = load_system(Path::new(&args[1]), sulfate)?;
-    let names = if sulfate { SULFATE_SPECIES } else { SPECIES };
-    let family_id = if sulfate { SULFATE_FAMILY } else { FAMILY };
+    let system = load_system(Path::new(&args[1]), family_mode)?;
+    let names = family_mode.species();
+    let family_id = family_mode.id();
     let options = SpeciationOptions::default();
     let basis = Amount::new(10.0);
     println!("Ideal coupled aqueous speciation at 298.15 K and 100000 Pa.");
@@ -236,7 +312,23 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!(
         "Spectator amounts are fixed caller declarations, not salt dissolution or dosing predictions."
     );
-    let scenarios = if sulfate {
+    for step in system.families()[0].steps().iter().skip(1) {
+        println!(
+            "Source-derived pKa({})={:.12}.",
+            step.acid().as_str(),
+            -step.standard().log_equilibrium_constant().value() / core::f64::consts::LN_10,
+        );
+    }
+    let scenarios = if family_mode == Family::Arsenate {
+        vec![
+            ("pure water; empty uncomplexed As(V) pool", 0.0, 0.0, 0.0),
+            ("arsenic acid; no fixed counterions", 0.1, 0.0, 0.0),
+            ("one positive counterion per As(V)", 0.1, 0.1, 0.0),
+            ("two positive counterions per As(V)", 0.1, 0.2, 0.0),
+            ("three positive counterions per As(V)", 0.1, 0.3, 0.0),
+            ("two-counterion pool plus acid equivalents", 0.1, 0.2, 0.05),
+        ]
+    } else if family_mode == Family::Sulfate {
         vec![
             ("pure water; empty uncomplexed sulfate pool", 0.0, 0.0, 0.0),
             (
@@ -325,6 +417,18 @@ fn main() -> Result<(), Box<dyn Error>> {
                 "{} fraction of the uncomplexed pool: {:.10}",
                 names[2],
                 base.fraction.value()
+            );
+        }
+        for form in family
+            .forms
+            .iter()
+            .filter(|form| form.species.as_str() != names[0] && form.species.as_str() != names[2])
+        {
+            println!(
+                "{}: {:.12e} mol; fraction of the uncomplexed pool: {:.10}.",
+                form.species.as_str(),
+                form.amount.value(),
+                form.fraction.value()
             );
         }
         println!(

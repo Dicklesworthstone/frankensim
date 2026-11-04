@@ -67,6 +67,17 @@
 //! individual-ion rows in NBS Table 14:S. It is the second acid dissociation,
 //! not a declaration that molecular sulfuric acid is completely dissociated
 //! at arbitrary concentration or that metal-sulfate complexes are absent.
+//! Arsenic-acid protonation retains the four distinct aqueous As(V) species
+//! H3AsO4, H2AsO4-, HAsO4(2-) and AsO4(3-), as in Goldberg, Kishore and
+//! Lennen (2002), Table 7.9: <https://srd.nist.gov/jpcrdreprint/1.1416902.pdf>.
+//! The equations do not choose a thermodynamic evaluation, oxidize As(III),
+//! dissolve arsenopyrite or establish arsenic fixation in a solid residue.
+//! The NBS As(III) component definitions retain H3AsO3 = HAsO2 + H2O and
+//! H2AsO3- = AsO2- + H2O. Their first dissociation is separate from As(V).
+//! The declared net peroxide oxidation H3AsO3 + H2O2 -> H3AsO4 + H2O follows
+//! the endpoint in *The influence of speciation in the removal of arsenic
+//! from mine waters* (2003), equation 1. It is not an elementary mechanism;
+//! the source reference data alone supply no rate, completion or removal claim.
 //! Free-cyanide peroxide oxidation and the separate cyanate-hydrolysis endpoint
 //! follow EPA 530-R-94-037, section 3.6, printed page 10:
 //! <https://archive.epa.gov/epawaste/nonhaz/industrial/special/web/pdf/cyanide.pdf>.
@@ -240,6 +251,18 @@ pub enum MineralReaction {
     HydrogenCyanideDissociation,
     /// HSO4-(aq) -> H+(aq) + SO4(2-)(aq), the hydrogen-sulfate acid step.
     HydrogenSulfateDissociation,
+    /// H3AsO4(aq) -> H+(aq) + H2AsO4-(aq), the first As(V) proton step.
+    ArsenicAcidDissociation,
+    /// H2AsO4-(aq) -> H+(aq) + HAsO4(2-)(aq), the second As(V) proton step.
+    DihydrogenArsenateDissociation,
+    /// HAsO4(2-)(aq) -> H+(aq) + AsO4(3-)(aq), the third As(V) proton step.
+    HydrogenArsenateDissociation,
+    /// H3AsO3(aq) -> H+(aq) + H2AsO3-(aq), only the first As(III) proton step.
+    /// Both NBS component definitions retain their explicit water formula unit.
+    ArsenousAcidDissociation,
+    /// H3AsO3(aq) + H2O2(aq) -> H3AsO4(aq) + H2O(l).
+    /// Net As(III)-to-As(V) endpoint; reaction progress must be supplied explicitly.
+    ArsenousAcidPeroxideOxidation,
     /// H2O(l) -> H+(aq) + OH[-](aq).
     /// Standard water dissociation; activity laws and equilibrium remain explicit.
     WaterDissociation,
@@ -668,6 +691,52 @@ impl MineralReaction {
                     ("HSO4[-](aq)", &[1, 1, 4], -1, -1),
                     ("H+(aq)", &[1, 0, 0], 1, 1),
                     ("SO4[2-](aq)", &[0, 1, 4], -2, 1),
+                ],
+            ),
+            Self::ArsenicAcidDissociation => (
+                "arsenic-acid-dissociation",
+                &["H", "As", "O"],
+                &[
+                    ("H3AsO4(aq)", &[3, 1, 4], 0, -1),
+                    ("H+(aq)", &[1, 0, 0], 1, 1),
+                    ("H2AsO4[-](aq)", &[2, 1, 4], -1, 1),
+                ],
+            ),
+            Self::DihydrogenArsenateDissociation => (
+                "dihydrogen-arsenate-dissociation",
+                &["H", "As", "O"],
+                &[
+                    ("H2AsO4[-](aq)", &[2, 1, 4], -1, -1),
+                    ("H+(aq)", &[1, 0, 0], 1, 1),
+                    ("HAsO4[2-](aq)", &[1, 1, 4], -2, 1),
+                ],
+            ),
+            Self::HydrogenArsenateDissociation => (
+                "hydrogen-arsenate-dissociation",
+                &["H", "As", "O"],
+                &[
+                    ("HAsO4[2-](aq)", &[1, 1, 4], -2, -1),
+                    ("H+(aq)", &[1, 0, 0], 1, 1),
+                    ("AsO4[3-](aq)", &[0, 1, 4], -3, 1),
+                ],
+            ),
+            Self::ArsenousAcidDissociation => (
+                "arsenous-acid-dissociation",
+                &["H", "As", "O"],
+                &[
+                    ("H3AsO3(aq)", &[3, 1, 3], 0, -1),
+                    ("H+(aq)", &[1, 0, 0], 1, 1),
+                    ("H2AsO3[-](aq)", &[2, 1, 3], -1, 1),
+                ],
+            ),
+            Self::ArsenousAcidPeroxideOxidation => (
+                "arsenous-acid-peroxide-oxidation",
+                &["H", "As", "O"],
+                &[
+                    ("H3AsO3(aq)", &[3, 1, 3], 0, -1),
+                    ("H2O2(aq)", &[2, 0, 2], 0, -1),
+                    ("H3AsO4(aq)", &[3, 1, 4], 0, 1),
+                    ("H2O(l)", &[2, 0, 1], 0, 1),
                 ],
             ),
             Self::PyriteOxidationFerrous => (

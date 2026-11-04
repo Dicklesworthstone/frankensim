@@ -6,6 +6,12 @@ the compiler must reproduce them from the pinned manifest and source record.
 
 ## Mineral processing
 
+The [arsenic reference guide](MINING_ARSENIC_REFERENCE.md) adds six compatible
+NBS aqueous profiles and 24 claims. Exact protonation reactions connect all
+four As(V) forms to the shared-pH solver; As(III) source components also support
+the first dissociation and a finite-reagent peroxide oxidation endpoint.
+The existing chemistry examples run the new sources without another solver.
+
 The [grinding-media guide](MINING_GRINDING_MEDIA.md) adds discrete
 manufacturer ball specifications and a separately identified apparent charge
 packing reference. The [MIBC guide](MINING_FLOTATION_REAGENTS.md) adds a sourced

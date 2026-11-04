@@ -71,6 +71,11 @@ fn all_reference_reactions_conserve_and_rebuild_identically() {
         HydrogenPeroxideDecompositionDissolvedOxygen,
         HydrogenCyanideDissociation,
         HydrogenSulfateDissociation,
+        ArsenicAcidDissociation,
+        DihydrogenArsenateDissociation,
+        HydrogenArsenateDissociation,
+        ArsenousAcidDissociation,
+        ArsenousAcidPeroxideOxidation,
         WaterDissociation,
         CarbonicComponentDissociation,
         BicarbonateDissociation,
@@ -123,6 +128,44 @@ fn all_reference_reactions_conserve_and_rebuild_identically() {
                 .all(|a| a.amount.value() == 0.0)
         );
     }
+}
+
+#[test]
+fn arsenate_proton_steps_retain_each_intermediate_and_three_proton_equivalents() {
+    use MineralReaction::*;
+    let mut net = std::collections::BTreeMap::new();
+    for (recipe, acid, base) in [
+        (ArsenicAcidDissociation, "H3AsO4(aq)", "H2AsO4[-](aq)"),
+        (
+            DihydrogenArsenateDissociation,
+            "H2AsO4[-](aq)",
+            "HAsO4[2-](aq)",
+        ),
+        (
+            HydrogenArsenateDissociation,
+            "HAsO4[2-](aq)",
+            "AsO4[3-](aq)",
+        ),
+    ] {
+        let reaction = recipe.build().unwrap();
+        assert_eq!(reaction.terms().len(), 3);
+        close(amount(&reaction, 0.25, acid), 0.25);
+        close(amount(&reaction, 0.25, base), 0.25);
+        close(amount(&reaction, 0.25, "H+(aq)"), 0.25);
+        for term in reaction.terms() {
+            *net.entry(term.species.as_str().to_owned())
+                .or_insert(0_i128) += term.coefficient;
+        }
+    }
+    net.retain(|_, coefficient| *coefficient != 0);
+    assert_eq!(
+        net,
+        std::collections::BTreeMap::from([
+            ("H3AsO4(aq)".to_owned(), -1),
+            ("AsO4[3-](aq)".to_owned(), 1),
+            ("H+(aq)".to_owned(), 3),
+        ])
+    );
 }
 
 #[test]

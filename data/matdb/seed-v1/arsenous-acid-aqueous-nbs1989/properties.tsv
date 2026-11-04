@@ -1,0 +1,52 @@
+frankensim.matdb-source.v1
+observation	identity	Aqueous arsenous acid H3AsO3, As(III), NBS component convention	NBS Table 20:As (prepared 1964), H3AsO3 state ao	The source molar mass is 125.9438 g/mol. The source explicitly labels this row equivalent to HAsO2(ao) + H2O(l). The tabulated H3AsO3 identity and its complete formula are retained, with source-arsenite-component-plus-water required. This is not a license to substitute the unhydrated HAsO2 component without adjusting water stoichiometry. The neighboring H3AsO3 aq row has only enthalpy and is not selected. This is an As(III) reference, not H3AsO4 or total arsenic.
+observation	standard	Literal NBS 298.15 K thermodynamic row	https://data.nist.gov/od/ds/mds2-2124/NBS_Tables_with_ErratumValues.csv	The row gives standard molar formation enthalpy -742.2 kJ/mol, independently tabulated standard molar formation Gibbs energy -639.80 kJ/mol, and standard molar entropy 195.0 J/(mol K). The ao standard is a hypothetical ideal solution at unit molality with activity coefficients referenced to infinite dilution. The neutral entropy is standard molar entropy, not conventional individual-ion entropy. This is not a measured finite-concentration solution or a new structural claim about hydration. Heat capacity is unavailable. The source supplies no per-row confidence distribution or cross-species covariance; uncertainty remains Unstated.
+observation	scope	One source reference state with retained As(III) component convention	https://srd.nist.gov/JPCRD/jpcrdS2Vol11.pdf, sections 5.5 to 5.8; https://doi.org/10.6028/jres.125.007	All four claims require 298.15 K, 100000 Pa, source-elemental-reference-nbs1989, source-arsenic-oxidation-state-iii and source-arsenite-component-plus-water. The convention identifies the NBS tables with 1989 errata; the arsenic table was prepared in 1964. Direct formation G and formation H with entropy remain separate claims. The matched H2AsO3- row supports the first proton step only; further As(III) deprotonation is unavailable here. Explicitly balanced oxidation may use the H3AsO3 formula and matched NBS water/peroxide rows. These data supply no temperature extrapolation, activity coefficients, kinetics, oxidation efficiency, fixation or removal prediction.
+scalar	molar-mass	identity,scope	mass	125.9438	g/mol	tabulated
+scalar	formation-enthalpy	identity,standard,scope	hf	-742.2	kJ/mol	tabulated
+scalar	formation-gibbs-energy	identity,standard,scope	gf	-639.80	kJ/mol	tabulated
+scalar	standard-entropy	identity,standard,scope	s0	195.0	J/mol/K	tabulated
+uncertainty	molar-mass	unstated	-	-	-	-
+uncertainty	formation-enthalpy	unstated	-	-	-	-
+uncertainty	formation-gibbs-energy	unstated	-	-	-	-
+uncertainty	standard-entropy	unstated	-	-	-	-
+validity	molar-mass	temperature	298.15	298.15	K
+validity	formation-enthalpy	temperature	298.15	298.15	K
+validity	formation-gibbs-energy	temperature	298.15	298.15	K
+validity	standard-entropy	temperature	298.15	298.15	K
+validity	molar-mass	pressure	100000	100000	Pa
+validity	formation-enthalpy	pressure	100000	100000	Pa
+validity	formation-gibbs-energy	pressure	100000	100000	Pa
+validity	standard-entropy	pressure	100000	100000	Pa
+validity	molar-mass	standard	1	1	1
+validity	formation-enthalpy	standard	1	1	1
+validity	formation-gibbs-energy	standard	1	1	1
+validity	standard-entropy	standard	1	1	1
+validity	molar-mass	convention	1	1	1
+validity	formation-enthalpy	convention	1	1	1
+validity	formation-gibbs-energy	convention	1	1	1
+validity	standard-entropy	convention	1	1	1
+validity	molar-mass	phase	1	1	1
+validity	formation-enthalpy	phase	1	1	1
+validity	formation-gibbs-energy	phase	1	1	1
+validity	standard-entropy	phase	1	1	1
+validity	molar-mass	aqueous	1	1	1
+validity	formation-enthalpy	aqueous	1	1	1
+validity	formation-gibbs-energy	aqueous	1	1	1
+validity	standard-entropy	aqueous	1	1	1
+validity	molar-mass	oxidation	1	1	1
+validity	formation-enthalpy	oxidation	1	1	1
+validity	formation-gibbs-energy	oxidation	1	1	1
+validity	standard-entropy	oxidation	1	1	1
+validity	molar-mass	component	1	1	1
+validity	formation-enthalpy	component	1	1	1
+validity	formation-gibbs-energy	component	1	1	1
+validity	standard-entropy	component	1	1	1
+validity	molar-mass	reference	1	1	1
+validity	formation-enthalpy	reference	1	1	1
+validity	formation-gibbs-energy	reference	1	1	1
+validity	standard-entropy	reference	1	1	1
+validity	molar-mass	specimen	0	0	1
+validity	formation-enthalpy	specimen	0	0	1
+validity	formation-gibbs-energy	specimen	0	0	1
+validity	standard-entropy	specimen	0	0	1

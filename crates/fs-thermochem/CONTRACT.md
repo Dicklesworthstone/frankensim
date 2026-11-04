@@ -378,6 +378,35 @@ check coupled chemistry independently, including the water contribution to
 HCN/cyanide-salt roots. The Cargo-built `mineral_speciation --materials
 PACK_DIR` example runs five declared-stock scenarios and prints all residuals.
 
+## Source-backed arsenic protonation and peroxide oxidation
+
+Five `MineralReaction` endpoints retain exact H/As/O and charge conservation:
+the three successive As(V) proton losses, the first As(III) proton loss, and
+`H3AsO3(aq) + H2O2(aq) -> H3AsO4(aq) + H2O(l)`. Six compatible NBS aqueous
+profiles supply literal molar masses and formation H/G/S at 298.15 K and
+100000 Pa. All claims require the source oxidation-state flag; the As(III)
+claims additionally require their original component-plus-water convention.
+Unstated uncertainty and unavailable heat capacities remain explicit.
+
+`mineral_speciation --family arsenate --materials PACK_DIR` constructs one
+three-stage family in the existing shared-charge owner, retaining all four
+As(V) forms, water autoprotolysis and explicit spectator inventories. Original
+Gibbs rows determine each Ka. No later evaluation is substituted to tune the
+source values. `mineral_processing --reaction
+arsenous-acid-peroxide-oxidation` exposes source-backed amounts and H/G/S
+diagnostics; the conserved-inventory API bounds an explicit extent by the
+actual peroxide stock. A favorable standard Gibbs value does not set an
+extent, rate or peroxide selectivity.
+
+`mining_arsenic_sources` compiles all ten participating source packs through
+the ordinary compiler. It checks the 24 new claims and receipts, four direct
+reaction H/G/pKa values, independently evaluated triprotic fractions over
+pH 2-12 and extensive scaling, peroxide-limited inventory advancement, and
+missing-context, extrapolation, missing-property and cancellation refusals.
+The As(III) family contains only its first proton step. These sources supply
+neither strongly alkaline As(III) speciation nor mineral dissolution,
+nonideal electrolyte behavior, sorption or arsenic fixation.
+
 ## Source-backed aqueous cyanide, protons and dissolved oxygen
 
 Three matched NBS/1989-errata packs add twelve literal molar-mass and H/G/S
