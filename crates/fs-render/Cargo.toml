@@ -89,6 +89,10 @@ required-features = ["photometry"]
 name = "photometric_path"
 required-features = ["photometry"]
 
+[[test]]
+name = "photometric_fixtures"
+required-features = ["photometry"]
+
 [[example]]
 name = "photometric_stage"
 required-features = ["photometry"]
