@@ -11,6 +11,8 @@ use super::transport::{TransportMode, refractive_transport_factor};
 use super::*;
 
 mod brushed;
+#[cfg(test)]
+mod anisotropic_tests;
 
 /// Bit-affecting semantics of the opt-in bidirectional path integrator.
 /// Version 2 corrected the global sample multiplicity and estimator
@@ -558,6 +560,7 @@ fn surface_scattering(
             Err(TracerError::ThermalSurfaceUnsupported)
         }
         Material::Dielectric { surface, .. } => {
+            let surface = dielectric_surface_in_frame(*surface, vertex.brushed_frame.as_ref())?;
             let Some(alpha) = surface.roughness_alpha() else {
                 return Ok(0.0);
             };
@@ -626,6 +629,7 @@ fn surface_pdf_solid_angle(
             Err(TracerError::ThermalSurfaceUnsupported)
         }
         Material::Dielectric { surface, .. } => {
+            let surface = dielectric_surface_in_frame(*surface, vertex.brushed_frame.as_ref())?;
             let Some(alpha) = surface.roughness_alpha() else {
                 return Ok(0.0);
             };
@@ -717,6 +721,7 @@ fn sample_surface(
             )
         }
         Material::Dielectric { surface, .. } => {
+            let surface = dielectric_surface_in_frame(*surface, vertex.brushed_frame.as_ref())?;
             let incident = vertex.medium_toward(wo).map(|entry| *entry.glass);
             let transmitted = vertex
                 .medium_toward(wo.scale(-1.0))

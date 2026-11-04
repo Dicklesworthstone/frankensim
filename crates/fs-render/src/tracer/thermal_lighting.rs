@@ -147,6 +147,7 @@ pub(super) fn direct_contribution(
     for (lane, &wavelength) in wavelengths.iter().enumerate() {
         let (value, competing_pdf) = match *material {
             Material::Dielectric { surface, .. } => {
+                let surface = dielectric_surface_in_frame(surface, brushed)?;
                 let Some(alpha) = surface.roughness_alpha() else {
                     continue;
                 };

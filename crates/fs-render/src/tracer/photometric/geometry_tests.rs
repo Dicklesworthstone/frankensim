@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::instances::{GeometryInstance, RigidTransform, SharedGeometry};
-use crate::photometry::area::{EmissionSidedness, PhotometricAreaEmitter};
+use crate::photometry::area::{EmissionSidedness, PhotometricAreaEmitter, PhotometricEmitters};
 use crate::photometry::path::{IlluminanceSampling, PathIlluminanceJob, PathLuminanceJob};
 use crate::photometry::source::{AngularDistribution, SourceSpectrum};
 use fs_exec::{CancelGate, RunId, StreamKey};

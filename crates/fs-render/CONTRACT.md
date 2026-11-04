@@ -68,7 +68,8 @@ differentiable lift). Pure Rust throughout.
   Homogeneous Beer-Lambert absorption remains in inverse metres, with
   provenance-bearing representative glass presets, exact unpolarized Fresnel,
   Snell refraction and total internal reflection, plus smooth-delta and
-  single-scattering isotropic-GGX reflection/transmission. Radiance transport
+  single-scattering GGX reflection/transmission with isotropic or explicitly
+  authored anisotropic slopes. Radiance transport
   uses the documented `(eta_i/eta_t)^2` transmission convention.
   Bare reflection rationalizes the original index contrast and obtains
   transmission from normal Poynting flux, so a rounded unit reflectance does
@@ -107,6 +108,42 @@ differentiable lift). Pure Rust throughout.
   the same native Fresnel and radiance arithmetic at every admitted wavelength.
   Compact Cauchy coatings remain visible-only, including zero-thickness films;
   borrowed original stacks continue to enforce their own source support.
+- **Anisotropic rough glass:** `DielectricSurface::try_anisotropic_rough`
+  admits two GGX slope scales in `[1e-4, 1]` and a finite nonzero authored
+  tangent axis. `AnisotropicDielectricRoughness` retains both scales and the
+  normalized axis; its projection at a contact defines alpha-x, and the
+  perpendicular tangent defines alpha-y. A parallel axis explicitly refuses.
+  Native scalar scenes interpret the axis in geometry-local coordinates and
+  reuse the existing rigid instance/animated placement at the physical path
+  time. No tangent is inferred from the camera, material name or measured Ra.
+  Equal scales canonicalize to the original isotropic law and material identity.
+  Distinct scales and their authored axis enter the new material identity tag.
+
+  The original Walter reflection/transmission owner retains Fresnel, coherent
+  coating order, TIR, null-interface measures, radiance eta-squared factors
+  and refractive Jacobians. The anisotropic distribution and directional Smith
+  masking use the same geometric frame as the original Heitz visible-normal
+  warp, generalized to its two-axis stretch. Sampling, forward/reverse PDFs,
+  scalar camera packets and dispersive continuations, both BDPT transport
+  directions, and thermal/photometric/volume direct-source receivers consume
+  the same contact-bound law. Rejected facets retain their original probability
+  mass without resampling. Preparation/evaluation has bounded constant work
+  and no allocation; no performance benchmark or exact microgeometry claim
+  is made. Isotropic paths preserve their original arithmetic and identities.
+
+  Eight G0/G1/G3 native optical tests compare independent anisotropic Walter
+  equations, reflection/transmission reciprocity, radiance versus power,
+  independent hemispherical PDF/power quadrature, rotated/swapped axes,
+  absorbing-film survival, extreme slopes, TIR and exact null measures.
+  Together with 130 existing optical/spectral controls they pass in a focused
+  original-source build using the original vector operations and optical
+  kernels. Three additional native scene/BDPT/packet/refusal regressions are
+  authored and pass a real-dependency Cargo metadata check with tracer,
+  volumes and photometry enabled; scene-test execution remains unverified
+  in the implementation environment. Polarized scene sampling and direct connections explicitly
+  refuse this new finish until they carry its body-frame binding. This remains
+  single-scattering GGX: no inter-facet multiple scattering, finite coherence
+  averaging, diffuse substrate, inferred roughness spectrum or thermal law.
 - **Coherent coatings on transmitting dielectrics:** `DielectricSurface` owns
   an optional source-bound `DielectricCoating`, separate from homogeneous glass
   and bulk Beer-Lambert absorption. It admits the existing one-to-four-law

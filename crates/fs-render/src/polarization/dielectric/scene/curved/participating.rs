@@ -607,14 +607,17 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
                 [path_id as u32, (path_id >> 32) as u32, ordinal, domain],
                 [seed as u32, (seed >> 32) as u32],
             );
-            core::array::from_fn(|i| (f64::from(block[i]) + 0.5) / 4_294_967_296.0)
+            block.map(|lane| (f64::from(lane) + 0.5) / 4_294_967_296.0)
         };
         self.trace_with_tracking_samples_events_impl(
             cx,
             beam,
             initial_medium,
             settings,
-            |event| draws(event, 0x706f_6c32),
+            |event| {
+                let sample = draws(event, 0x706f_6c32);
+                [sample[0], sample[1], sample[2]]
+            },
             |flight| draws(flight, 0x706f_6c34),
             true,
             thermal_sources,

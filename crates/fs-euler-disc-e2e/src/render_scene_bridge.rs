@@ -3513,6 +3513,14 @@ fn hash_material(hasher: &mut DomainHasher, style: EulerMaterialStyle) {
                     hasher.update(&alpha.to_bits().to_le_bytes());
                 }
             }
+            if surface.anisotropy().is_some() {
+                // Retain both authored slopes and the body-locked tangent;
+                // the legacy isotropic scene byte stream remains unchanged.
+                hasher.update(b"anisotropic-dielectric-ggx.v1");
+                hasher.update(
+                    Material::Dielectric { glass, surface }.content_identity().as_bytes(),
+                );
+            }
         }
         EulerMaterialStyle::Conductor { optics, surface } => {
             // Tags 0--2 remain frozen for existing Euler configurations.

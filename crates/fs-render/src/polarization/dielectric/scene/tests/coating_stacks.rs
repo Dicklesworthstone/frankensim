@@ -182,8 +182,8 @@ fn g1_original_stack_sampling_retains_both_media_beer_and_reverse_bundle_density
                             input.ray(),
                             frame.horizontal(),
                             wavelength,
-                            initial,
                             input.power(),
+                            initial,
                         )
                         .unwrap();
                     let branch = curved

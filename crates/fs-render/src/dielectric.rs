@@ -16,6 +16,8 @@ mod coating;
 pub use coating::{
     DielectricCoating, DielectricCoatingStack, DielectricInterface, DielectricLayerPowerBalance,
 };
+mod anisotropic;
+pub use anisotropic::AnisotropicDielectricRoughness;
 
 #[cfg(test)]
 mod absorption_band_tests;
@@ -65,6 +67,9 @@ pub enum DielectricError {
     /// continuous rough reflection with delta transmission. This separate
     /// mixed-measure microfacet model is not admitted by the native sampler.
     CoatedNullRoughInterface,
+    /// This consumer has no authored tangent-frame binding for anisotropic
+    /// dielectric transport; treating the surface as isotropic is forbidden.
+    UnsupportedAnisotropicTransport,
 }
 
 impl core::fmt::Display for DielectricError {
@@ -81,6 +86,9 @@ impl core::fmt::Display for DielectricError {
             Self::InvalidCoating => "invalid passive dielectric coating",
             Self::CoatedNullRoughInterface => {
                 "rough coated equal-index boundaries require a mixed delta/rough model"
+            }
+            Self::UnsupportedAnisotropicTransport => {
+                "anisotropic dielectric transport requires an explicit tangent-frame binding"
             }
         })
     }
@@ -1043,10 +1051,13 @@ impl DielectricGlass {
     }
 }
 
-/// Smooth or isotropic-GGX dielectric boundary treatment.
+/// Smooth or GGX dielectric boundary treatment, with optional authored
+/// anisotropy. The scalar scene tracer interprets its tangent axis in the
+/// geometry's body frame and carries it through rigid instance motion.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DielectricSurface {
     roughness_alpha: Option<f64>,
+    anisotropy: Option<AnisotropicDielectricRoughness>,
     coating: Option<DielectricCoating>,
 }
 
@@ -1054,6 +1065,7 @@ impl DielectricSurface {
     /// Ideal smooth (delta) dielectric interface.
     pub const SMOOTH: Self = Self {
         roughness_alpha: None,
+        anisotropy: None,
         coating: None,
     };
 
@@ -1061,6 +1073,7 @@ impl DielectricSurface {
     /// look-development convenience, not a measured surface claim.
     pub const POLISHED: Self = Self {
         roughness_alpha: Some(0.06),
+        anisotropy: None,
         coating: None,
     };
 
@@ -1069,14 +1082,57 @@ impl DielectricSurface {
         validate_roughness(roughness_alpha)?;
         Ok(Self {
             roughness_alpha: Some(roughness_alpha),
+            anisotropy: None,
             coating: None,
         })
     }
 
-    /// `None` for a smooth delta interface, otherwise the GGX alpha.
+    /// Construct an anisotropic GGX boundary from two dimensionless slope
+    /// scales and an authored axis. Both scales retain the original GGX
+    /// interval `[1e-4, 1]`; no measured-height-to-slope conversion is inferred.
+    /// The projected axis defines alpha-x and its perpendicular alpha-y.
+    /// A contact where the axis is parallel to the normal explicitly refuses.
+    /// Equal scales canonicalize to the original isotropic surface.
+    pub fn try_anisotropic_rough(
+        alpha_x: f64,
+        alpha_y: f64,
+        tangent_axis: Vec3,
+    ) -> Result<Self, DielectricError> {
+        let law = AnisotropicDielectricRoughness::try_new(alpha_x, alpha_y, tangent_axis)?;
+        let mut surface = Self::try_rough(alpha_x)?;
+        if alpha_x != alpha_y {
+            surface.anisotropy = Some(law);
+        }
+        Ok(surface)
+    }
+
+    /// `None` for a smooth delta interface, otherwise the GGX alpha-x.
+    /// Isotropic surfaces use this value on both tangent axes. Anisotropic
+    /// callers must retain [`Self::anisotropy`] or use [`Self::interface`],
+    /// which binds the complete law rather than discarding alpha-y.
     #[must_use]
     pub const fn roughness_alpha(self) -> Option<f64> {
         self.roughness_alpha
+    }
+
+    /// Authored anisotropy and axis; `None` preserves the original smooth or
+    /// isotropic law. This is a slope distribution, not a geometry deformation.
+    #[must_use]
+    pub const fn anisotropy(self) -> Option<AnisotropicDielectricRoughness> {
+        self.anisotropy
+    }
+
+    /// Bind the same anisotropic law to an explicitly transformed axis.
+    /// Native scene consumers use the admitted rigid placement at the actual
+    /// path time; standalone interface callers supply a common coordinate frame.
+    pub fn with_tangent_axis(mut self, tangent_axis: Vec3) -> Result<Self, DielectricError> {
+        if let Some(law) = self.anisotropy {
+            let [alpha_x, alpha_y] = law.alphas();
+            self.anisotropy = Some(AnisotropicDielectricRoughness::try_new(
+                alpha_x, alpha_y, tangent_axis,
+            )?);
+        }
+        Ok(self)
     }
 
     /// Whether the interface is a smooth delta distribution.
@@ -1121,7 +1177,7 @@ impl DielectricSurface {
             self.coating.as_ref(),
             wavelength_nm,
             reverse,
-        ))
+        ).with_anisotropy(self.anisotropy))
     }
 }
 
@@ -1447,6 +1503,10 @@ fn evaluate_rough_with_fresnel(
     let normal = normalize_admitted(normal);
     let wo = normalize_admitted(wo);
     let wi = normalize_admitted(wi);
+    let anisotropy = interface
+        .and_then(DielectricInterface::anisotropy)
+        .map(|law| law.prepare(normal, roughness_alpha))
+        .transpose()?;
     let cos_o = normal.dot(wo).clamp(0.0, 1.0);
     let cos_i = normal.dot(wi).clamp(-1.0, 1.0);
     if cos_i == 0.0 {
@@ -1500,8 +1560,18 @@ fn evaluate_rough_with_fresnel(
     }
     let fresnel = evaluate_fresnel(wo_dot_m.clamp(0.0, 1.0))?;
     let probabilities = interface_event_probabilities(interface, fresnel);
-    let distribution = ggx_d(roughness_alpha, n_dot_m);
-    let geometry = smith_g1(roughness_alpha, cos_o) * smith_g1(roughness_alpha, cos_i.abs());
+    let distribution = anisotropy.map_or_else(
+        || ggx_d(roughness_alpha, n_dot_m),
+        |frame| frame.distribution(micro_normal),
+    );
+    let masking_o = anisotropy.map_or_else(
+        || smith_g1(roughness_alpha, cos_o),
+        |frame| frame.masking(wo),
+    );
+    let geometry = masking_o * anisotropy.map_or_else(
+        || smith_g1(roughness_alpha, cos_i.abs()),
+        |frame| frame.masking(wi),
+    );
 
     if reflection {
         if wi_dot_m <= 0.0 {
@@ -1512,7 +1582,7 @@ fn evaluate_rough_with_fresnel(
             });
         }
         let value = distribution * geometry * fresnel.reflectance / (4.0 * cos_o * cos_i);
-        let visible_normal_pdf = distribution * smith_g1(roughness_alpha, cos_o) * wo_dot_m / cos_o;
+        let visible_normal_pdf = distribution * masking_o * wo_dot_m / cos_o;
         let pdf = visible_normal_pdf * probabilities[0] / (4.0 * wo_dot_m);
         return finite_evaluation(value, pdf, event);
     }
@@ -1544,7 +1614,7 @@ fn evaluate_rough_with_fresnel(
     let value = fresnel.transmittance * distribution * geometry * (wi_dot_m * wo_dot_m).abs()
         / (cos_o * cos_i.abs() * denominator2);
     let jacobian = eta * eta * wi_dot_m.abs() / denominator2;
-    let visible_normal_pdf = distribution * smith_g1(roughness_alpha, cos_o) * wo_dot_m / cos_o;
+    let visible_normal_pdf = distribution * masking_o * wo_dot_m / cos_o;
     let pdf = visible_normal_pdf * probabilities[1] * jacobian;
     finite_evaluation(value, pdf, event)
 }
@@ -1623,6 +1693,10 @@ fn sample_rough_with_interface(
     }
     let normal = normalize_admitted(normal);
     let wo = normalize_admitted(wo);
+    let anisotropy = interface
+        .and_then(DielectricInterface::anisotropy)
+        .map(|law| law.prepare(normal, roughness_alpha))
+        .transpose()?;
     if indices_exactly_equal(eta_i, eta_t) {
         return Ok(Some(RoughDielectricSample {
             direction: wo.scale(-1.0),
@@ -1634,8 +1708,10 @@ fn sample_rough_with_interface(
         }));
     }
 
-    let micro_normal =
-        sample_ggx_visible_normal(normal, wo, roughness_alpha, microfacet_u, microfacet_v)?;
+    let micro_normal = match anisotropy {
+        Some(frame) => frame.sample(wo, microfacet_u, microfacet_v)?,
+        None => sample_ggx_visible_normal(normal, wo, roughness_alpha, microfacet_u, microfacet_v)?,
+    };
     let wo_dot_m = wo.dot(micro_normal);
     if wo_dot_m <= 0.0 {
         return Ok(None);
@@ -1946,15 +2022,6 @@ fn basis(normal: Vec3) -> (Vec3, Vec3) {
     )
 }
 
-fn to_world(normal: Vec3, local: [f64; 3]) -> Vec3 {
-    let (tangent, bitangent) = basis(normal);
-    Vec3::new(
-        tangent.x * local[0] + bitangent.x * local[1] + normal.x * local[2],
-        tangent.y * local[0] + bitangent.y * local[1] + normal.y * local[2],
-        tangent.z * local[0] + bitangent.z * local[1] + normal.z * local[2],
-    )
-}
-
 /// Heitz's isotropic GGX visible-normal warp (JCGT 2018). Conditioning the
 /// microfacet proposal on `wo` avoids spending most grazing-incidence draws on
 /// facets hidden from the incident direction. The returned density is
@@ -1967,8 +2034,26 @@ fn sample_ggx_visible_normal(
     u2: f64,
 ) -> Result<Vec3, DielectricError> {
     let (tangent, bitangent) = basis(normal);
+    sample_ggx_visible_normal_in_frame(
+        normal, tangent, bitangent, wo, alpha, alpha, u1, u2,
+    )
+}
+
+// The same Heitz disk warp serves isotropic and anisotropic surfaces. Keeping
+// the two original isotropic alpha values preserves its arithmetic sequence.
+#[allow(clippy::too_many_arguments)]
+fn sample_ggx_visible_normal_in_frame(
+    normal: Vec3,
+    tangent: Vec3,
+    bitangent: Vec3,
+    wo: Vec3,
+    alpha_x: f64,
+    alpha_y: f64,
+    u1: f64,
+    u2: f64,
+) -> Result<Vec3, DielectricError> {
     let local_wo = [tangent.dot(wo), bitangent.dot(wo), normal.dot(wo)];
-    let stretched = [alpha * local_wo[0], alpha * local_wo[1], local_wo[2]];
+    let stretched = [alpha_x * local_wo[0], alpha_y * local_wo[1], local_wo[2]];
     let stretched_norm =
         (stretched[0] * stretched[0] + stretched[1] * stretched[1] + stretched[2] * stretched[2])
             .sqrt();
@@ -2004,8 +2089,8 @@ fn sample_ggx_visible_normal(
     ];
 
     let unstretched = [
-        alpha * stretched_normal[0],
-        alpha * stretched_normal[1],
+        alpha_x * stretched_normal[0],
+        alpha_y * stretched_normal[1],
         stretched_normal[2].max(0.0),
     ];
     let normal_length = (unstretched[0] * unstretched[0]
@@ -2016,7 +2101,11 @@ fn sample_ggx_visible_normal(
         return Err(DielectricError::InvalidInterface);
     }
     let local_normal = unstretched.map(|component| component / normal_length);
-    let micro_normal = to_world(normal, local_normal);
+    let micro_normal = Vec3::new(
+        tangent.x * local_normal[0] + bitangent.x * local_normal[1] + normal.x * local_normal[2],
+        tangent.y * local_normal[0] + bitangent.y * local_normal[1] + normal.y * local_normal[2],
+        tangent.z * local_normal[0] + bitangent.z * local_normal[1] + normal.z * local_normal[2],
+    );
     if !micro_normal.x.is_finite()
         || !micro_normal.y.is_finite()
         || !micro_normal.z.is_finite()

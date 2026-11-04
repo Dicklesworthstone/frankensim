@@ -90,13 +90,7 @@ impl Default for CurvedBundleSettings {
     fn default() -> Self {
         let bundle = BundleOptions::default();
         Self {
-            trace: CurvedTraceSettings {
-                max_surface_events: 64,
-                max_distance_m: 100.0,
-                max_total_steps: 65_536,
-                max_query_work: 1_000_000,
-                event: GradientEventOptions::default(),
-            },
+            trace: CurvedTraceSettings::default(),
             position_derivative_tolerance_m: bundle.position_derivative_tolerance_m,
             direction_derivative_tolerance: bundle.direction_derivative_tolerance,
             interface: InterfaceOptions::default(),

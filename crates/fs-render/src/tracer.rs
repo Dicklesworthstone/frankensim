@@ -975,7 +975,8 @@ pub enum Material {
     Dielectric {
         /// Validated interior glass definition.
         glass: DielectricGlass,
-        /// Smooth-delta or isotropic-GGX boundary treatment.
+        /// Smooth-delta or GGX boundary treatment. An anisotropic surface's
+        /// authored tangent axis is geometry-local and follows rigid placement.
         surface: DielectricSurface,
     },
 }
@@ -1094,6 +1095,14 @@ impl Material {
                         hasher.update(&[1]);
                         update_material_scalar(&mut hasher, alpha);
                     }
+                }
+                if let Some(law) = surface.anisotropy() {
+                    hasher.update(b"anisotropic-dielectric-ggx.v1");
+                    for alpha in law.alphas() {
+                        update_material_scalar(&mut hasher, alpha);
+                    }
+                    let axis = law.tangent_axis();
+                    update_material_scalars(&mut hasher, [axis.x, axis.y, axis.z]);
                 }
                 if let Some(coating) = surface.coating() {
                     hasher.update(b"lossless-dielectric-coating.v1");
@@ -11310,8 +11319,9 @@ fn placed_instanced_geometry(
     }
 }
 
-/// Derive the brushed tangent frame for the current bounce, if the hit
-/// primitive is a [`Material::BrushedConductor`].
+/// Derive the material tangent frame for brushed conductors and anisotropic
+/// dielectrics. Both use their authored geometry-local axes and actual rigid
+/// placement; no camera-space or world-fixed direction is substituted.
 ///
 /// Brushing is BODY-LOCKED: the frame is derived in the geometry's local
 /// coordinates (where the radial-mark chart lives) and rotated to world
@@ -11319,7 +11329,7 @@ fn placed_instanced_geometry(
 /// grooves with it. Non-instanced shapes are authored in world coordinates,
 /// so body frame == world frame there.
 ///
-/// `Ok(None)` for non-brushed materials AND for the pole refusal
+/// `Ok(None)` for isotropic materials AND for the brushed-conductor pole refusal
 /// ([`SurfaceDetailError::PoleTangentUndefined`]): on the spin axis brushing
 /// has no direction, and callers fall back to the isotropic base alpha.
 fn brushed_shading_frame(
@@ -11330,9 +11340,12 @@ fn brushed_shading_frame(
     oriented_normal: Vec3,
     ray_time: Option<&PathTime>,
 ) -> Result<Option<crate::surface_detail::ShadingFrame>, TracerError> {
-    let Material::BrushedConductor { detail, .. } = &scene.primitives[primitive_index].material
-    else {
-        return Ok(None);
+    let (detail, dielectric_roughness) = match &scene.primitives[primitive_index].material {
+        Material::BrushedConductor { detail, .. } => (Some(detail), None),
+        Material::Dielectric { surface, .. } if surface.anisotropy().is_some() => {
+            (None, surface.anisotropy())
+        }
+        _ => return Ok(None),
     };
     let placement = match instance_hit {
         Some(_) => Some(
@@ -11352,7 +11365,22 @@ fn brushed_shading_frame(
         ),
         _ => (hit.point, oriented_normal),
     };
-    match crate::surface_detail::shading_frame(detail, local_point, local_normal) {
+    let local_frame = if let Some(law) = dielectric_roughness {
+        let (tangent, bitangent) = law.tangent_frame(local_normal)?;
+        let normal = local_normal.scale(1.0 / local_normal.norm());
+        Ok(crate::surface_detail::ShadingFrame {
+            geometric_normal: normal,
+            shading_normal: normal,
+            tangent,
+            bitangent,
+            mark_covered: false,
+        })
+    } else {
+        crate::surface_detail::shading_frame(
+            detail.ok_or(TracerError::InvalidInput)?, local_point, local_normal,
+        )
+    };
+    match local_frame {
         Ok(local_frame) => Ok(Some(match &placement {
             Some(transform) => crate::surface_detail::ShadingFrame {
                 geometric_normal: transform.transform_vector(local_frame.geometric_normal),
@@ -11366,6 +11394,20 @@ fn brushed_shading_frame(
         Err(crate::surface_detail::SurfaceDetailError::PoleTangentUndefined) => Ok(None),
         Err(_) => Err(TracerError::InvalidInput),
     }
+}
+
+/// Bind a body-authored dielectric to the one world tangent retained at its
+/// physical contact. The same copy is used by sampling, reciprocal densities,
+/// packet weights and every direct-source receiver at this vertex.
+fn dielectric_surface_in_frame(
+    surface: DielectricSurface,
+    frame: Option<&crate::surface_detail::ShadingFrame>,
+) -> Result<DielectricSurface, TracerError> {
+    if surface.anisotropy().is_none() {
+        return Ok(surface);
+    }
+    let frame = frame.ok_or(DielectricError::UnsupportedAnisotropicTransport)?;
+    Ok(surface.with_tangent_axis(frame.tangent)?)
 }
 
 fn mesh_is_convex_with_outward_faces(mesh: &TriMesh) -> bool {
@@ -14442,9 +14484,9 @@ fn trace_path_with_regions<'scene>(
             };
             if source_region.has_source_proposal(s.strategy) {
                 let receiver = match (&prim.material, dielectric_boundary) {
-                    (Material::Dielectric { surface, .. }, Some(boundary)) => surface
-                        .roughness_alpha()
-                        .map(|alpha| volume_emission::Receiver::Dielectric {
+                    (Material::Dielectric { surface, .. }, Some(boundary)) => {
+                        let surface = dielectric_surface_in_frame(*surface, brushed_frame.as_ref())?;
+                        surface.roughness_alpha().map(|alpha| volume_emission::Receiver::Dielectric {
                             frame,
                             mesh_boundary_origin: intersection.mesh_boundary_origin,
                             outgoing: ray.dir.scale(-1.0),
@@ -14452,7 +14494,8 @@ fn trace_path_with_regions<'scene>(
                             alpha,
                             surface,
                             source_side,
-                        }),
+                        })
+                    }
                     (_, None) if !smooth_conductor => Some(volume_emission::Receiver::Surface {
                         material: &prim.material,
                         frame,
@@ -14532,6 +14575,7 @@ fn trace_path_with_regions<'scene>(
             }
             match prim.material {
                 Material::Dielectric { surface, .. } => {
+                    let surface = dielectric_surface_in_frame(surface, brushed_frame.as_ref())?;
                     if let Some(alpha) = surface.roughness_alpha() {
                         let boundary = dielectric_boundary.ok_or(TracerError::InvalidInput)?;
                         let (u1, u2) = rng.path_pair(path_sobol, depth, 0);
@@ -15181,6 +15225,7 @@ fn trace_path_with_regions<'scene>(
             .flatten();
         match prim.material {
             Material::Dielectric { glass, surface } => {
+                let surface = dielectric_surface_in_frame(surface, brushed_frame.as_ref())?;
                 let boundary = dielectric_boundary.ok_or(TracerError::InvalidInput)?;
                 let proposal_lane = active_lane.unwrap_or(0);
                 let event_sample = if surface.is_delta() {

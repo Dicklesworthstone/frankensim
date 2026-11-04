@@ -1,4 +1,4 @@
-use super::super::super::SceneMedium;
+use super::super::super::{CurvedSceneError, SceneMedium};
 use super::super::tests::{
     ball_reference, close, close_vec, glass, grin_reference, plane, reference_columns, settings,
     sphere, unit, with_cx,

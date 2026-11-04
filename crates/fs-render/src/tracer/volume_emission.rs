@@ -59,7 +59,7 @@ pub(super) enum Receiver<'a> {
         outgoing: Vec3,
         boundary: BoundaryMedia<'a>,
         alpha: f64,
-        surface: &'a DielectricSurface,
+        surface: DielectricSurface,
         source_side: SourceSide,
     },
     Phase {
@@ -391,7 +391,7 @@ mod tests {
     ) -> Receiver<'static> {
         let normal = Vec3::new(0.0, 0.0, 1.0);
         Receiver::Dielectric {
-            surface: &DielectricSurface::POLISHED,
+            surface: DielectricSurface::POLISHED,
             mesh_boundary_origin: None,
             frame: SurfaceFrame {
                 oriented: normal,

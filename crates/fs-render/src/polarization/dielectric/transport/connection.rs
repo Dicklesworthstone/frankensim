@@ -71,6 +71,9 @@ impl PolarizedBeam {
         source_frame: PolarizationFrame,
         normalized_source: Stokes,
     ) -> Result<SurfaceConnectionResponse, BeamError> {
+        if surface.anisotropy().is_some() {
+            return Err(DielectricError::UnsupportedAnisotropicTransport.into());
+        }
         let reverse = normal.dot(self.frame.direction) > 0.0;
         self.evaluate_interface_connection(normal, opposite_medium.into(), surface.roughness_alpha(),
             surface.interface(self.wavelength_nm, reverse)?, source_frame, normalized_source)
@@ -90,6 +93,9 @@ impl PolarizedBeam {
         source_frame: PolarizationFrame,
         normalized_source: Stokes,
     ) -> Result<SurfaceConnectionResponse, BeamError> {
+        if surface.anisotropy().is_some() {
+            return Err(DielectricError::UnsupportedAnisotropicTransport.into());
+        }
         if surface.coating().is_some() {
             return Err(DielectricError::InvalidCoating.into());
         }

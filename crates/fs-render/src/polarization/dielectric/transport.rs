@@ -528,6 +528,9 @@ impl PolarizedBeam {
         surface: DielectricSurface,
         samples: [f64; 3],
     ) -> Result<Option<BeamSample>, BeamError> {
+        if surface.anisotropy().is_some() {
+            return Err(DielectricError::UnsupportedAnisotropicTransport.into());
+        }
         if samples.iter().any(|u| !u.is_finite() || !(0.0..1.0).contains(u)) {
             return Err(DielectricError::InvalidInterface.into());
         }
@@ -554,6 +557,9 @@ impl PolarizedBeam {
         stack: DielectricCoatingStack<'_>,
         samples: [f64; 3],
     ) -> Result<Option<BeamSample>, BeamError> {
+        if surface.anisotropy().is_some() {
+            return Err(DielectricError::UnsupportedAnisotropicTransport.into());
+        }
         if surface.coating().is_some() {
             return Err(DielectricError::InvalidCoating.into());
         }

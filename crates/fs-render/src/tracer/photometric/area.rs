@@ -890,6 +890,7 @@ impl Receiver<'_> {
                 ..
             } => {
                 if let Material::Dielectric { surface, .. } = material {
+                    let surface = dielectric_surface_in_frame(*surface, brushed)?;
                     let Some(alpha) = surface.roughness_alpha() else {
                         return Ok((0.0, 0.0));
                     };

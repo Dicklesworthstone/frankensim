@@ -180,6 +180,7 @@ impl<'a> DielectricCoatingStack<'a> {
             coating: Some(InterfaceCoating::Stack(self)),
             wavelength_nm,
             reverse,
+            anisotropy: None,
         })
     }
 
@@ -356,6 +357,7 @@ pub struct DielectricInterface<'a> {
     coating: Option<InterfaceCoating<'a>>,
     wavelength_nm: f64,
     reverse: bool,
+    anisotropy: Option<super::AnisotropicDielectricRoughness>,
 }
 
 #[derive(Clone, Copy)]
@@ -377,7 +379,20 @@ impl<'a> DielectricInterface<'a> {
             },
             wavelength_nm,
             reverse,
+            anisotropy: None,
         }
+    }
+
+    pub(super) const fn with_anisotropy(
+        mut self,
+        anisotropy: Option<super::AnisotropicDielectricRoughness>,
+    ) -> Self {
+        self.anisotropy = anisotropy;
+        self
+    }
+
+    pub(super) const fn anisotropy(self) -> Option<super::AnisotropicDielectricRoughness> {
+        self.anisotropy
     }
 
     pub(super) fn is_active(self) -> bool {

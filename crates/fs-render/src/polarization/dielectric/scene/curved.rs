@@ -101,6 +101,18 @@ pub struct CurvedTraceSettings {
     pub event: GradientEventOptions,
 }
 
+impl Default for CurvedTraceSettings {
+    fn default() -> Self {
+        Self {
+            max_surface_events: 64,
+            max_distance_m: 100.0,
+            max_total_steps: 65_536,
+            max_query_work: 1_000_000,
+            event: GradientEventOptions::default(),
+        }
+    }
+}
+
 /// Explicit numerical contact, retaining the original instance and patch.
 /// At this encounter the beam remains on its integrated path within the
 /// declared contact resolution. `surface_point` is not a replacement endpoint.
