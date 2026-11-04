@@ -33,6 +33,8 @@ pub mod polarization;
 
 /// Shared finite aqueous inventories with their selected thermodynamics.
 pub mod aqueous;
+/// Finite neutral solute inventories that partition between solution and solids.
+pub mod solubility;
 /// Thermodynamically consistent finite-domain solution interactions.
 pub mod nonideal;
 /// Chemical-potential-driven Maxwell–Stefan transport relative to fixed solvent.

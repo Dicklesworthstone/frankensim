@@ -9353,6 +9353,34 @@ claim. Raw coefficients carry no material-card authority; source-backed users
 must retain the original coefficients' full solution and operating support.
 
 
+### Finite saturation and retained solid solute
+
+`osmosis::solubility::FiniteSolubilitySolution` composes the original L1
+`IdealSolubilityV1` pair laws with the shared dissolved-particle thermodynamics.
+It retains 1–64 explicit neutral components sharing one solvent, each with a
+fixed total and separate dissolved/solid amounts. Only dissolved particles
+contribute to osmotic pressure and water activity. Pure-solvent removal can
+precipitate excess solute; dilution redissolves the same finite solid stock,
+including complete solid exhaustion. The dissolved-only `AqueousSolution` API
+keeps its existing meaning and is a view, not a substitute for the phase owner.
+
+Fixed-temperature pair evaluations are cached in shared immutable components.
+Each solvent-volume trial performs direct finite partitions without repeated
+temperature exponentials or chemical root solves. Explicit retemperature
+re-evaluates every original law within its domain. Original laws, identities,
+totals, capacities and floating-point phase balances remain inspectable.
+G0/G3 cases check two-component precipitation/redissolution, original ideal
+unsaturated and zero-stock limits, prescribed heating/cooling, phase balances,
+species-layout/domain refusal and immutable failed trials.
+
+The model assumes independent nonreacting neutral solutes, instantaneous
+equilibrium, negligible solute/solid volume and an incompressible solvent.
+It does not supply electrolyte dissociation, common-ion or pH chemistry,
+nonideal activities, mixed crystals, hydrate water, nucleation/rate laws or
+heat feedback. Caller-declared pair parameters retain their original numerical
+authority; the constructor does not authenticate measured solubility data.
+
+
 ## Shared cavitation coefficients and frozen mixture acoustics
 
 `cavitation` owns a checked immutable liquid state at one explicit absolute
