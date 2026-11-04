@@ -9618,6 +9618,18 @@ G0/G3 cases check two-component precipitation/redissolution, original ideal
 unsaturated and zero-stock limits, prescribed heating/cooling, phase balances,
 species-layout/domain refusal and immutable failed trials.
 
+Transport consumers can prepare an `independent_clone` once and then atomically
+replace solvent volume and TOTAL component inventories in the same species
+layout. The bounded replacement reuses all prepared buffers and cached pair
+coefficients, admits every candidate phase and dissolved thermodynamic state
+before mutation, and refuses shared stocks instead of allocating a hidden copy.
+A borrowed `partition_at_inventory` evaluates transport trial stocks without
+altering the accepted solution. Subsequent dilution or retemperature retains
+the updated totals. Heap accounting includes phase storage, original pair
+identifiers and their retained allocation capacity. Focused regressions cover
+phase crossing, continuation with transported stock, stable buffer addresses,
+and unchanged state after invalid, shared-storage or water-activity refusal.
+
 The model assumes independent nonreacting neutral solutes, instantaneous
 equilibrium, negligible solute/solid volume and an incompressible solvent.
 It does not supply electrolyte dissociation, common-ion or pH chemistry,

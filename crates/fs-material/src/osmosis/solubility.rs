@@ -53,7 +53,7 @@ impl From<OsmosisError> for FiniteSolubilityError {
 }
 type Result<T> = core::result::Result<T, FiniteSolubilityError>;
 
-/// One immutable pair law, total inventory and fixed-temperature saturation.
+/// One immutable pair law, current total inventory and fixed-temperature saturation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SolubilityComponent {
     law: IdealSolubilityV1,
@@ -65,7 +65,7 @@ impl SolubilityComponent {
     pub const fn law(&self) -> &IdealSolubilityV1 {
         &self.law
     }
-    /// Conserved total of dissolved solute plus its solid phase [mol].
+    /// Current total of dissolved solute plus its solid phase [mol].
     pub const fn total(&self) -> Amount {
         self.total
     }
@@ -178,13 +178,117 @@ impl FiniteSolubilitySolution {
     pub const fn solution(&self) -> &AqueousSolution {
         &self.solution
     }
-    /// Original laws and conserved component totals in caller-declared order.
+    /// Original laws and current component totals in caller-declared order.
     pub fn components(&self) -> &[SolubilityComponent] {
         &self.components
     }
     /// Dissolved and solid stocks, capacity and direct balances in that same order.
     pub fn phase_partitions(&self) -> &[SolubilityPartitionV1] {
         &self.partitions
+    }
+
+    /// Allocation-free partition of one proposed component inventory using
+    /// its original cached saturation. The accepted total and phase state are
+    /// borrowed only; transport trials may propose a different total stock.
+    pub fn partition_at_inventory(
+        &self,
+        component: usize,
+        solvent_volume_m3: f64,
+        total_moles: f64,
+    ) -> Result<SolubilityPartitionV1> {
+        let original = self
+            .components
+            .get(component)
+            .ok_or(FiniteSolubilityError::Invalid(
+                "trial component is outside the original species layout",
+            ))?;
+        Ok(partition_at_saturation(
+            original.saturation,
+            Volume::new(solvent_volume_m3),
+            Amount::new(total_moles),
+        )?)
+    }
+
+    /// Prepare independent component and phase storage for repeated transport
+    /// updates. Ordinary cloning shares immutable component stocks; this copy
+    /// instead pays all allocation costs before an evolution window begins.
+    pub fn independent_clone(&self) -> Self {
+        Self {
+            solution: self.solution.clone(),
+            components: Arc::from(self.components.as_ref()),
+            partitions: self.partitions.clone(),
+        }
+    }
+
+    /// Owned/shared heap storage, excluding `size_of::<Self>()`. Shared
+    /// component storage is counted in full for each prepared solution, with
+    /// Arc control words and an alignment allowance. Species buffer capacities
+    /// are included even when their original allocation exceeds their text.
+    pub fn heap_bytes(&self) -> usize {
+        self.solution.heap_bytes()
+            + core::mem::size_of_val(self.components.as_ref())
+            + core::mem::size_of_val(self.partitions.as_ref())
+            + 2 * core::mem::size_of::<usize>()
+            + core::mem::align_of::<SolubilityComponent>()
+            + self
+                .components
+                .iter()
+                .map(|component| component.law.heap_bytes())
+                .sum::<usize>()
+    }
+
+    /// Atomically replace solvent volume and TOTAL component stocks after
+    /// transport. The original pair identities, temperature and cached
+    /// saturation remain fixed; each new total includes dissolved plus solid.
+    ///
+    /// This operation allocates nothing. A shared component allocation refuses
+    /// instead of making a hidden copy: use `independent_clone` once when
+    /// preparing mutable integration buffers. All candidate partitions and
+    /// dissolved thermodynamics are admitted before any accepted field changes.
+    pub fn replace_inventories(
+        &mut self,
+        solvent_volume_m3: f64,
+        total_solute_moles: &[f64],
+    ) -> Result<()> {
+        let count = self.components.len();
+        if total_solute_moles.len() != count {
+            return Err(FiniteSolubilityError::Invalid(
+                "replacement totals must retain the original species layout",
+            ));
+        }
+        let mut partitions = [None; MAX_OSMOTIC_SOLUTES];
+        let mut dissolved = [0.0; MAX_OSMOTIC_SOLUTES];
+        for (index, (component, &total)) in
+            self.components.iter().zip(total_solute_moles).enumerate()
+        {
+            let phase = partition_at_saturation(
+                component.saturation,
+                Volume::new(solvent_volume_m3),
+                Amount::new(total),
+            )?;
+            dissolved[index] = phase.dissolved.value();
+            partitions[index] = Some(phase);
+        }
+        let pressure = self
+            .solution
+            .osmotic_pressure_at(solvent_volume_m3, &dissolved[..count])?;
+        super::water_activity_from_osmotic_pressure(
+            self.solution.temperature_k(),
+            pressure,
+            self.solution.solvent_molar_volume_m3_mol(),
+        )?;
+        let components =
+            Arc::get_mut(&mut self.components).ok_or(FiniteSolubilityError::Invalid(
+                "replacement needs independently prepared component storage",
+            ))?;
+        self.solution
+            .replace_inventories(solvent_volume_m3, &dissolved[..count])?;
+        for (index, component) in components.iter_mut().enumerate() {
+            let phase = partitions[index].expect("every original component was partitioned");
+            component.total = phase.total_solute;
+            self.partitions[index] = phase;
+        }
+        Ok(())
     }
 
     /// Re-equilibrate after pure-solvent exchange, retaining each TOTAL amount.

@@ -111,6 +111,13 @@ impl SpeciesId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Retained identifier buffer capacity, excluding the inline `String`.
+    /// Prepared physics owners can include this allocation in their byte budget.
+    #[must_use]
+    pub fn heap_bytes(&self) -> usize {
+        self.0.capacity()
+    }
 }
 
 impl fmt::Display for SpeciesId {

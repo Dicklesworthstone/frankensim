@@ -174,3 +174,103 @@ fn species_layout_and_failed_volume_trials_do_not_lose_original_inventories() {
         assert_eq!(state, before);
     }
 }
+
+#[test]
+fn transported_totals_repartition_in_prepared_storage_and_continue_with_updated_stocks() {
+    let original = FiniteSolubilitySolution::new(
+        Temperature::new(298.15),
+        18e-6,
+        Volume::new(1e-3),
+        vec![
+            (law("neutral-a", 100.0, 0.0), Amount::new(0.2)),
+            (law("neutral-b", 30.0, 0.0), Amount::new(0.02)),
+        ],
+    )
+    .unwrap();
+    let mut evolved = original.independent_clone();
+    let trial = original.partition_at_inventory(1, 5e-4, 0.08).unwrap();
+    assert_eq!(trial.total_solute.value(), 0.08);
+    assert_eq!(trial.dissolved.value(), 0.015);
+    assert!(original.partition_at_inventory(2, 5e-4, 0.08).is_err());
+    let component_storage = evolved.components().as_ptr();
+    let phase_storage = evolved.phase_partitions().as_ptr();
+    let dissolved_storage = evolved.solution().solute_moles().as_ptr();
+    evolved.replace_inventories(5e-4, &[0.04, 0.08]).unwrap();
+    assert_eq!(evolved.solution().solute_moles(), &[0.04, 0.015]);
+    assert_eq!(evolved.phase_partitions()[0].solid.value(), 0.0);
+    near(evolved.phase_partitions()[1].solid.value(), 0.065, 1e-16);
+    near(
+        evolved.solution().osmotic_pressure_pa().unwrap(),
+        R * 298.15 * 110.0,
+        1e-9,
+    );
+    assert_eq!(evolved.components()[0].total().value(), 0.04);
+    assert_eq!(evolved.components()[1].total().value(), 0.08);
+
+    evolved.replace_inventories(2e-3, &[0.3, 0.01]).unwrap();
+    assert_eq!(evolved.solution().solute_moles(), &[0.2, 0.01]);
+    near(evolved.phase_partitions()[0].solid.value(), 0.1, 1e-16);
+    assert_eq!(evolved.phase_partitions()[1].solid.value(), 0.0);
+    assert_eq!(evolved.components().as_ptr(), component_storage);
+    assert_eq!(evolved.phase_partitions().as_ptr(), phase_storage);
+    assert_eq!(
+        evolved.solution().solute_moles().as_ptr(),
+        dissolved_storage
+    );
+    let diluted = evolved.with_solvent_volume_m3(1e-2).unwrap();
+    assert_eq!(diluted.solution().solute_moles(), &[0.3, 0.01]);
+    assert_eq!(diluted.components()[0].total().value(), 0.3);
+    assert_eq!(original.components()[0].total().value(), 0.2);
+    assert_eq!(original.solution().solute_moles(), &[0.1, 0.02]);
+    assert!(
+        evolved.heap_bytes()
+            >= evolved.solution().heap_bytes()
+                + core::mem::size_of_val(evolved.components())
+                + core::mem::size_of_val(evolved.phase_partitions())
+    );
+}
+
+#[test]
+fn failed_or_shared_inventory_replacement_leaves_every_phase_and_view_unchanged() {
+    let mut state = FiniteSolubilitySolution::new(
+        Temperature::new(298.15),
+        18e-6,
+        Volume::new(1e-3),
+        vec![
+            (law("neutral-a", 100.0, 0.0), Amount::new(0.2)),
+            (law("neutral-b", 30.0, 0.0), Amount::new(0.02)),
+        ],
+    )
+    .unwrap();
+    let before = state.independent_clone();
+    for (volume, totals) in [
+        (0.0, [0.04, 0.08]),
+        (1e-3, [0.04, -0.01]),
+        (1e-3, [0.04, f64::NAN]),
+        (1e-3, [0.04, f64::INFINITY]),
+    ] {
+        assert!(state.replace_inventories(volume, &totals).is_err());
+        assert_eq!(state, before);
+    }
+    assert!(state.replace_inventories(1e-3, &[0.04]).is_err());
+    assert_eq!(state, before);
+    let shared = state.clone();
+    assert!(state.replace_inventories(5e-4, &[0.04, 0.08]).is_err());
+    assert_eq!(state, shared);
+    let mut independent = shared.independent_clone();
+    independent
+        .replace_inventories(5e-4, &[0.04, 0.08])
+        .unwrap();
+    assert_eq!(shared, before);
+
+    let mut huge_saturation = FiniteSolubilitySolution::new(
+        Temperature::new(298.15),
+        18e-6,
+        Volume::new(1e-3),
+        vec![(law("neutral-c", 1e9, 0.0), Amount::new(0.0))],
+    )
+    .unwrap();
+    let zero = huge_saturation.independent_clone();
+    assert!(huge_saturation.replace_inventories(1e-3, &[1e6]).is_err());
+    assert_eq!(huge_saturation, zero);
+}

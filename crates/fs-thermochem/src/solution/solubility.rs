@@ -121,6 +121,11 @@ impl IdealSolubilityV1 {
         self.dissolution_enthalpy_j_mol
     }
 
+    /// Retained pair-identity buffers, excluding the inline law fields.
+    pub fn heap_bytes(&self) -> usize {
+        self.solvent.heap_bytes() + self.solute.heap_bytes()
+    }
+
     /// Saturation at the actual temperature, with no unqualified extrapolation.
     ///
     /// This scalar evaluation allocates nothing. Logarithmic evaluation avoids
