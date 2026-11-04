@@ -1162,6 +1162,27 @@ medium/clock provenance and the public path, but requires the missing
 constellation dependencies to run. The native probe uses only a nominal
 outer error carrier and is not a full-crate integration gate.
 
+## Ideal acoustic reflection in uniform tangential flow
+
+`PreparedConvectedMonopoleObserver::with_orthogonal_planes` admits one to
+three perpendicular infinite ideal rigid or pressure-release planes only when
+the original physical mean flow is tangent to every wall. Tangency is checked
+within 64 machine epsilons in normalized directions; no flow is projected.
+The complete 2^m direct/image paths retain the original material, flow,
+frequency and clearance limits. Preparation bounds every path and folds four
+pressure/velocity coefficients per physical source, preserving O(N) runtime
+and source-factor work counts of N. Each physical source remains coherent
+with all its images, including under independent-source statistics.
+
+The same uniform-flow perturbation energy flux `<p u> + U <E>` is formed from
+the folded field. Both ideal boundary conditions give zero wall-normal flux
+for tangential flow. Shear flow, finite impedance, general wedges, enclosed
+rooms and source feedback remain outside this owner. The five reflection
+test families check an independent convected Green-function derivative oracle
+for corners, rotated walls and edge flux, zero-flow parity with the original
+compact owner, source coherence and clock, and domain/budget/cancellation
+refusals.
+
 ## Measured three-dimensional compact-source interference
 
 `PreparedCompactSourceObserver`, `PreparedHalfSpaceObserver`, and

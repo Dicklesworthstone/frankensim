@@ -21,7 +21,8 @@
 //! d_t E + div(U E + p u)=0, E=p²/(2 rho c²)+rho |u|²/2. We report this
 //! positive quadratic perturbation energy and its transport separately from
 //! the pressure-work intensity p u. These are not mean-flow energy change,
-//! a turbulence model, boundary scattering, or a source-validation claim.
+//! a turbulence model or a source-validation claim. The ideal-plane adapter
+//! adds exact image reflections when this SAME flow is tangent to every wall.
 
 use super::super::statistics::{ComplexSum, StatisticsSum, finite, invalid, nonfinite};
 use super::{CoherenceBudget, CoherentCompactField, CompactFieldStatistics};
@@ -32,6 +33,8 @@ use crate::curle3d::{
 };
 use fs_material::fluid_acoustics::FluidAcousticState;
 use fs_math::{c64::C64, dd::Dd, det};
+
+mod reflection;
 
 /// Applicability shared by deterministic and statistical observations.
 pub const CONVECTED_MONOPOLE_SCOPE: &str = "Prescribed compact volume injection at the uniform mean velocity; \
@@ -89,6 +92,9 @@ pub struct PreparedConvectedMonopoleObserver {
     observer_m: [f64; 3],
     frequency_hz: f64,
     paths: Vec<Path>,
+    limits: ConvectedMonopoleLimits,
+    // Images are folded into each original source, not statistical sources.
+    reflection_planes: Vec<super::IdealAcousticPlane>,
 }
 
 impl PreparedConvectedMonopoleObserver {
@@ -222,6 +228,8 @@ impl PreparedConvectedMonopoleObserver {
             observer_m,
             frequency_hz,
             paths,
+            limits,
+            reflection_planes: Vec::new(),
         })
     }
 
@@ -245,10 +253,24 @@ impl PreparedConvectedMonopoleObserver {
     pub fn source_position_m(&self, index: usize) -> Option<[f64; 3]> {
         self.paths.get(index).map(|path| path.source_m)
     }
-    /// Physical travel time d/c, including direction-dependent convection.
+    /// Physical DIRECT-path travel time d/c, including directional convection.
     /// This phase is already included in the prepared coefficients.
     pub fn source_delay_s(&self, index: usize) -> Option<f64> {
         self.paths.get(index).map(|path| path.delay_s)
+    }
+
+    /// Original admitted boundaries; empty for free-space propagation.
+    pub fn reflection_planes(&self) -> &[super::IdealAcousticPlane] {
+        &self.reflection_planes
+    }
+
+    /// Physical propagation model retained by every field/statistical query.
+    pub const fn scope(&self) -> &'static str {
+        if self.reflection_planes.is_empty() {
+            CONVECTED_MONOPOLE_SCOPE
+        } else {
+            reflection::CONVECTED_IDEAL_BOUNDARY_SCOPE
+        }
     }
 
     /// Coherently propagate peak volume flows [m³/s] on one source clock.
@@ -273,7 +295,7 @@ impl PreparedConvectedMonopoleObserver {
                 particle_velocity_m_s: [values[1], values[2], values[3]],
                 active_intensity_w_m2: moments.field.active_intensity_w_m2,
                 reactive_intensity_w_m2: moments.field.reactive_intensity_w_m2,
-                scope: CONVECTED_MONOPOLE_SCOPE,
+                scope: self.scope(),
             },
             mean_perturbation_energy_density_j_m3: moments.mean_perturbation_energy_density_j_m3,
             mean_perturbation_energy_flux_w_m2: moments.mean_perturbation_energy_flux_w_m2,
@@ -392,7 +414,7 @@ impl PreparedConvectedMonopoleObserver {
     }
 
     fn finish(&self, sum: StatisticsSum) -> Result<ConvectedMonopoleStatistics, AeroacError> {
-        let field = sum.finish(CONVECTED_MONOPOLE_SCOPE)?;
+        let field = sum.finish(self.scope())?;
         let mut energy = Dd::from_f64(
             (0.5 * field.mean_square_pressure_pa2) / self.acoustic.adiabatic_bulk_modulus_pa(),
         );
