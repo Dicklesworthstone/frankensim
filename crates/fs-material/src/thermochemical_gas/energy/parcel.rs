@@ -9,6 +9,8 @@
 //! The [`isobaric`] path heats against a quasistatic constant-pressure load,
 //! with enthalpy and the actual pressure-volume work checked independently.
 
+/// Conservative first filling of an exactly evacuated finite volume.
+pub mod evacuated;
 /// Conservative composition/model replacement at fixed mass, volume and total internal energy.
 pub mod composition;
 /// Constant-pressure heating with independent enthalpy and boundary-work balances.

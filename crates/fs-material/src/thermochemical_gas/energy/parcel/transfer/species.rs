@@ -109,7 +109,7 @@ fn catalog(left: &ClosedGasParcel, right: &ClosedGasParcel) -> Result<Thermochem
     mixed_model_from_portions(&[(left.model(), left.mass_kg()), (right.model(), right.mass_kg())],
         left.mass_kg() + right.mass_kg())
 }
-fn model_for_inventory(
+pub(in crate::thermochemical_gas) fn model_for_inventory(
     catalog: &ThermochemicalGasModel, target: &BTreeMap<SpeciesId, f64>,
 ) -> Result<ThermochemicalGasModel, GasEnergyError> {
     let mut amounts = Vec::with_capacity(catalog.thermodynamics().components().len());
