@@ -19,9 +19,11 @@ use fs_math::c64::C64;
 
 /// Small-signal analysis at an admitted equilibrium of the original nonlinear storage.
 pub mod equilibrium;
+mod frequency;
 mod poles;
 /// Continuous wave feedback, closed before factorization with physical power accounts.
 pub mod scattering;
+pub use frequency::HarmonicFrequencyResponse;
 /// Prepared physical port participation of complete descriptor modes.
 pub use poles::response;
 pub use poles::{BeynOptions, HarmonicSpectrum, HarmonicSpectrumError, ResonanceRegion};
@@ -100,6 +102,31 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), HarmonicError> {
 }
 fn finite(z: C64) -> bool {
     z.re.is_finite() && z.im.is_finite()
+}
+
+fn resource_bounds(n: usize, m: usize) -> Result<(usize, u64), HarmonicError> {
+    let square = n
+        .checked_mul(n)
+        .ok_or_else(|| invalid("dimension overflow"))?;
+    let ports = n
+        .checked_mul(m)
+        .ok_or_else(|| invalid("port dimension overflow"))?;
+    let bytes = square
+        .checked_mul(88)
+        .and_then(|v| ports.checked_mul(16).and_then(|p| v.checked_add(p)))
+        .and_then(|v| n.checked_mul(256).and_then(|p| v.checked_add(p)))
+        .and_then(|v| m.checked_mul(96).and_then(|p| v.checked_add(p)))
+        .ok_or_else(|| invalid("payload bound overflow"))?;
+    let work = (square as u64)
+        .checked_mul(
+            (n as u64)
+                .max(4 * MAX_RESPONSE_REFINEMENTS as u64)
+                .checked_add(m as u64)
+                .and_then(|v| v.checked_add(8))
+                .ok_or_else(|| invalid("work bound overflow"))?,
+        )
+        .ok_or_else(|| invalid("work bound overflow"))?;
+    Ok((bytes, work))
 }
 
 /// Immutable complete linear image; assembly is performed once per system.
@@ -280,21 +307,7 @@ impl HarmonicModel {
         let ports = n
             .checked_mul(m)
             .ok_or_else(|| invalid("port dimension overflow"))?;
-        let bytes = square
-            .checked_mul(88)
-            .and_then(|v| ports.checked_mul(16).and_then(|p| v.checked_add(p)))
-            .and_then(|v| n.checked_mul(256).and_then(|p| v.checked_add(p)))
-            .and_then(|v| m.checked_mul(96).and_then(|p| v.checked_add(p)))
-            .ok_or_else(|| invalid("payload bound overflow"))?;
-        let work = (square as u64)
-            .checked_mul(
-                (n as u64)
-                    .max(4 * MAX_RESPONSE_REFINEMENTS as u64)
-                    .checked_add(m as u64)
-                    .and_then(|v| v.checked_add(8))
-                    .ok_or_else(|| invalid("work bound overflow"))?,
-            )
-            .ok_or_else(|| invalid("work bound overflow"))?;
+        let (bytes, work) = resource_bounds(n, m)?;
         if n == 0
             || n_diff > n
             || n > MAX_HARMONIC_DIMENSION
@@ -458,87 +471,7 @@ impl HarmonicFactor<'_> {
                 rhs[i] = rhs[i] + input[p].scale(model.g[i * m + p]);
             }
         }
-        let mut state: Vec<_> = rhs
-            .iter()
-            .zip(&self.row_scales)
-            .map(|(z, s)| C64::new(z.re / s, z.im / s))
-            .collect();
-        if state.iter().any(|&v| !finite(v)) {
-            return Err(invalid("scaled port forcing overflow"));
-        }
-        self.lu.solve_with_cancel(&mut state, &mut cancelled)?;
-        for (z, s) in state.iter_mut().zip(&self.column_scales) {
-            *z = C64::new(z.re / s, z.im / s);
-        }
-        if state.iter().any(|&v| !finite(v)) {
-            return Err(invalid("response is not representable"));
-        }
-        // Componentwise backward error preserves small algebraic constraints
-        // alongside much larger dimensional differential rows. At an exact
-        // antiresonance some states vanish while coupled states remain finite;
-        // one LU solve can leave roundoff large relative to these small rows.
-        // Correct the ORIGINAL residual using the existing factor, preserving
-        // the requested gate, physical coordinates and genuine singularities.
-        let mut correction = vec![C64::ZERO; n];
-        let mut relative: f64 = 0.0;
-        for pass in 0..=MAX_RESPONSE_REFINEMENTS {
-            relative = 0.0;
-            for i in 0..n {
-                poll(&mut cancelled)?;
-                let mut residual = -rhs[i];
-                let mut denominator = rhs[i].abs();
-                for k in 0..n {
-                    let a = C64::new(
-                        -model.generator[i * n + k],
-                        if i == k && i < model.n_diff {
-                            -self.omega
-                        } else {
-                            0.0
-                        },
-                    );
-                    residual = residual + a * state[k];
-                    denominator += a.abs() * state[k].abs();
-                }
-                if !finite(residual) || !denominator.is_finite() {
-                    return Err(invalid("original-equation residual overflow"));
-                }
-                let row_error = if denominator == 0.0 {
-                    0.0
-                } else {
-                    residual.abs() / denominator
-                };
-                relative = relative.max(row_error);
-                correction[i] = C64::new(
-                    -residual.re / self.row_scales[i],
-                    -residual.im / self.row_scales[i],
-                );
-            }
-            if relative <= model.budget.relative_residual_tolerance
-                || pass == MAX_RESPONSE_REFINEMENTS
-            {
-                break;
-            }
-            if correction.iter().any(|&v| !finite(v)) {
-                return Err(invalid("scaled residual correction overflow"));
-            }
-            self.lu.solve_with_cancel(&mut correction, &mut cancelled)?;
-            for i in 0..n {
-                state[i] = state[i]
-                    + C64::new(
-                        correction[i].re / self.column_scales[i],
-                        correction[i].im / self.column_scales[i],
-                    );
-            }
-            if state.iter().any(|&v| !finite(v)) {
-                return Err(invalid("refined response is not representable"));
-            }
-        }
-        if relative > model.budget.relative_residual_tolerance {
-            return Err(HarmonicError::Residual {
-                relative,
-                tolerance: model.budget.relative_residual_tolerance,
-            });
-        }
+        let (state, relative) = self.solve_rhs(&rhs, &mut cancelled)?;
         let mut effort = state.clone();
         let mut energy = 0.0;
         for i in 0..model.n_diff {
@@ -597,5 +530,99 @@ impl HarmonicFactor<'_> {
             power_residual_w: balance,
             relative_residual: relative,
         })
+    }
+
+    // Original-coordinate solve shared by the drive and its frequency tangent.
+    // The factor, equilibration and original-equation refinement are identical.
+    fn solve_rhs(
+        &self,
+        rhs: &[C64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(Vec<C64>, f64), HarmonicError> {
+        let model = self.model;
+        let n = model.n;
+        let mut state: Vec<_> = rhs
+            .iter()
+            .zip(&self.row_scales)
+            .map(|(z, s)| C64::new(z.re / s, z.im / s))
+            .collect();
+        if state.iter().any(|&v| !finite(v)) {
+            return Err(invalid("scaled port forcing overflow"));
+        }
+        self.lu.solve_with_cancel(&mut state, &mut *cancelled)?;
+        for (z, s) in state.iter_mut().zip(&self.column_scales) {
+            *z = C64::new(z.re / s, z.im / s);
+        }
+        if state.iter().any(|&v| !finite(v)) {
+            return Err(invalid("response is not representable"));
+        }
+        // Componentwise backward error preserves small algebraic constraints
+        // alongside much larger dimensional differential rows. At an exact
+        // antiresonance some states vanish while coupled states remain finite;
+        // one LU solve can leave roundoff large relative to these small rows.
+        // Correct the ORIGINAL residual using the existing factor, preserving
+        // the requested gate, physical coordinates and genuine singularities.
+        let mut correction = vec![C64::ZERO; n];
+        let mut relative: f64 = 0.0;
+        for pass in 0..=MAX_RESPONSE_REFINEMENTS {
+            relative = 0.0;
+            for i in 0..n {
+                poll(cancelled)?;
+                let mut residual = -rhs[i];
+                let mut denominator = rhs[i].abs();
+                for k in 0..n {
+                    let a = C64::new(
+                        -model.generator[i * n + k],
+                        if i == k && i < model.n_diff {
+                            -self.omega
+                        } else {
+                            0.0
+                        },
+                    );
+                    residual = residual + a * state[k];
+                    denominator += a.abs() * state[k].abs();
+                }
+                if !finite(residual) || !denominator.is_finite() {
+                    return Err(invalid("original-equation residual overflow"));
+                }
+                let row_error = if denominator == 0.0 {
+                    0.0
+                } else {
+                    residual.abs() / denominator
+                };
+                relative = relative.max(row_error);
+                correction[i] = C64::new(
+                    -residual.re / self.row_scales[i],
+                    -residual.im / self.row_scales[i],
+                );
+            }
+            if relative <= model.budget.relative_residual_tolerance
+                || pass == MAX_RESPONSE_REFINEMENTS
+            {
+                break;
+            }
+            if correction.iter().any(|&v| !finite(v)) {
+                return Err(invalid("scaled residual correction overflow"));
+            }
+            self.lu
+                .solve_with_cancel(&mut correction, &mut *cancelled)?;
+            for i in 0..n {
+                state[i] = state[i]
+                    + C64::new(
+                        correction[i].re / self.column_scales[i],
+                        correction[i].im / self.column_scales[i],
+                    );
+            }
+            if state.iter().any(|&v| !finite(v)) {
+                return Err(invalid("refined response is not representable"));
+            }
+        }
+        if relative > model.budget.relative_residual_tolerance {
+            return Err(HarmonicError::Residual {
+                relative,
+                tolerance: model.budget.relative_residual_tolerance,
+            });
+        }
+        Ok((state, relative))
     }
 }

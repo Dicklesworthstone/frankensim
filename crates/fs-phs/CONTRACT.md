@@ -215,6 +215,33 @@ mutual-winding resonance splitting in both polarities; pure algebraic
 transformer power; and coordinate scales `1e-120..1e120`. True lossless poles,
 capacity limits, unsupported storage and cancelled reusable solves are tested.
 
+### Continuous driven-response frequency derivatives
+
+`HarmonicFactor::response_with_frequency_derivative` returns the original AC
+response and its derivative with respect to angular frequency, at fixed physical
+coefficients/equilibrium. Optional original-port input derivatives retain the
+source chain rule. The same scaled LU and original-equation refinement solve
+`A x' = G u' + i E x`; only differential coordinates enter `E x`. Every algebraic
+reaction, coupled storage coefficient and material memory remains, without mass
+inversion, finite frequency differences or a second factorization.
+
+Original effort/output, mean storage, input work and independent dissipation
+derivatives accompany the state tangent. Nonlinear equilibrium images retain
+their signed incremental `T` work; they do not relabel it as total source heat.
+`output_logarithmic_derivative` returns `y'/y`: real log-amplitude slope and
+imaginary phase slope. Under `exp(-i omega t)`, positive phase slope represents
+a delay when the input phasors are fixed. Exact zero output has no defined
+phase/log amplitude and returns `None`; no amplitude floor repairs it.
+
+The complete operation admits twice the ordinary response work score and
+additional retained response/tangent payload before allocation. Native
+cancellation/refusal leaves the factor reusable and publishes no partial result.
+G1/G3 regressions cover high-Q oscillator phase/energy, RLC source and Kirchhoff
+derivatives, Maxwell dispersion/history/heat, purely algebraic transformers,
+antiresonance, physical scaling, and cancellation/replay. These are continuous
+linear/local tangents; a backward residual is not a near-pole forward-error,
+physical uncertainty, peak uniqueness, or nonlinear response certificate.
+
 ### Finite resonance poles of the complete continuous model
 
 `HarmonicModel::resonance_pole` refines one caller-seeded finite free mode of
