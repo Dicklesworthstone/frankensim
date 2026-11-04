@@ -2492,6 +2492,22 @@ homogenization, the P2 milestone.
   at the same query point. It retains the original kinematic receipt and
   refuses unrepresentable conversion; neither API silently substitutes the
   other viscosity basis or certifies consistency of independent source tables.
+- `liquid::density::ResolvedLiquidDensityState` binds that liquid's exact
+  selected `rho(T,p)` Surface2D claim to its same-state Cp through the shared
+  `fs-thermochem::eos::density` identities. It supplies expansion, isothermal
+  and adiabatic compressibility, Cv and sound speed through the existing
+  `FluidAcoustics`, `FluidTransport`, `ThermalFluidTransport` and
+  `ThermoviscousFluid` traits, retaining one original density everywhere.
+  Original LinearInside cells supply analytic two-sided derivatives; exposed
+  edges, holes, unequal incident gradients and declared T/p validity endpoints
+  refuse. Typed coordinate meanings, card/claim identity and every non-T/p
+  coordinate remain fixed. Refresh updates all original transport properties;
+  immutable prepared source cells are shared across states. Pre-bound expansion
+  or independent beta refuses, and no derived property is inserted as a source
+  claim. Positive compressibility and Cv are mandatory; signed or zero expansion
+  is retained. The source caps bound work. This local single-phase equilibrium
+  closure supplies no derivative-uncertainty, phase-stability or finite-path
+  thermodynamic-integrability certificate.
 - `resolve_isotropic_elastic_state_point` requests only density, Young's
   modulus, and Poisson ratio for linear vibration/elasticity. The distinct
   `resolve_isotropic_solid_state_point` additionally requires yield stress for

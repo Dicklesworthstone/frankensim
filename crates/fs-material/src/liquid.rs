@@ -8,6 +8,8 @@
 //! chemistry-name default, corrosion model, or experimental-accuracy claim.
 
 pub mod surface;
+/// Source density derivatives shared by liquid heat, flow and sound response.
+pub mod density;
 /// Liquid miscibility, conservative phase inventories and composition-resolved transport.
 pub mod solution;
 mod thermal;
