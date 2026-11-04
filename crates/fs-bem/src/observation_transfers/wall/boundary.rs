@@ -294,7 +294,9 @@ impl LocalBoundary {
         )
     }
 
-    pub(in crate::observation_transfers) fn admit_physical_band_hz(
+    /// Constitutive support for owners that retain finite reflection coordinates
+    /// through a pressure-release node. This does not relax source bandwidth.
+    pub(in crate::observation_transfers) fn admit_physical_reflection_band_hz(
         &self,
         band: [f64; 2],
     ) -> Result<(), TransferError> {
@@ -307,6 +309,14 @@ impl LocalBoundary {
                 "physical load band exceeds local-wall source support",
             ));
         }
+        Ok(())
+    }
+
+    pub(in crate::observation_transfers) fn admit_physical_band_hz(
+        &self,
+        band: [f64; 2],
+    ) -> Result<(), TransferError> {
+        self.admit_physical_reflection_band_hz(band)?;
         let tau = core::f64::consts::TAU;
         self.admit_resonances(tau * band[0], tau * band[1], true)
     }

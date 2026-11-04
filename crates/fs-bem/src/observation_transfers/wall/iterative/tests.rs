@@ -99,6 +99,45 @@ fn relative_field(actual: &[C64], reference: &[C64]) -> f64 {
 }
 
 #[test]
+fn mechanical_resonance_keeps_matrix_free_fields_and_native_residuals() {
+    let surface = SpherePanels::icosphere(0.025, 0).unwrap();
+    let gate = CancelGate::new_clock_free();
+    let boundary = uniform(&surface, LocalWall::Mechanical(WallPin {
+        surface_density: 1.0,
+        stiffness_per_area: 4e6,
+        resistance: 0.0,
+    }));
+    let mut config = options();
+    config.solver.leaf_capacity = 128;
+    config.solver.near_field_cache_bytes = 0;
+    let dense = LocalBoundaryObservation::for_scattering(
+        ScatteringObservation::new(
+            &surface, medium(), &sources(), &receivers(), config.highest_omega,
+            config.minimum_clearance_m, config.receiver_quadrature, || false,
+        ).unwrap(),
+        boundary.clone(), None,
+    ).unwrap();
+    let owner = IterativeBoundaryObservation::for_scattering(
+        &surface, medium(), &sources(), &receivers(), boundary, config, &gate,
+    ).unwrap();
+    owner.admit_loading_band_hz([150.0, 500.0]).unwrap();
+    for omega in [2000.0 * (1.0 - 1e-4), 2000.0, 2000.0 * (1.0 + 1e-4)] {
+        let reference = dense.physical_frequency_sample(omega, || false).unwrap();
+        let sample = owner.physical_frequency_sample(omega, &gate).unwrap();
+        assert_eq!(sample.sources.len(), sources().len());
+        assert!(relative_field(&sample.transfer, &reference) < 2e-8, "omega={omega}");
+        for report in &sample.sources {
+            assert!(report.solve.converged_euclidean());
+            assert!(report.solve.rel_residual <= options().solver.tol);
+            assert!(report.resources.matvecs > 0);
+            if omega == 2000.0 {
+                assert_eq!(report.absorbed_power_w, 0.0);
+            }
+        }
+    }
+}
+
+#[test]
 fn harmonic_statistics_reuse_matrix_free_total_fields_and_retain_solve_reports() {
     let surface = SpherePanels::icosphere(0.025, 0).unwrap();
     let gate = CancelGate::new_clock_free();

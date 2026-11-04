@@ -1649,9 +1649,9 @@ Layer order, all original material parameters and every fluid's bulk modulus
 bind boundary identity. An empty stack is rigid, but prescribed source panels
 still require the explicit `Rigid` variant. This is a local-reaction approximation:
 it does not resolve lateral propagation or curvature within a finite treatment.
-The dense observer retains pressure-node limits through the original finite
-reflection response; finite-admittance iterative/molecular routes still
-propagate their named refusal. The FIR convergence gates still apply to layered
+Dense and iterative observers retain pressure-node limits through the original
+finite reflection response; finite-admittance molecular routes still propagate
+their named refusal. The FIR convergence gates still apply to layered
 responses and do not certify unsampled material resonances.
 
 `LocalWall::LayeredTransmitting` carries the same ordered sources into both
@@ -1695,9 +1695,10 @@ Wall absorption uses coherent pressure/flow coordinates on the passive branch,
 avoiding a subtraction of incident/scattered velocities that would invent tiny
 losses on rigid patches. No reflection or admittance coefficient is clipped.
 
-The new dense route inherits the original panel/work limits and dense-LU
-cancellation granularity. It does not extend the iterative, nonlocal or
-molecular-gas solver's boundary support; those routes still refuse a band that
+The dense route inherits the original panel/work limits and dense-LU
+cancellation granularity. Its iterative counterpart retains the original FMM
+and GMRES owner as described below. Nonlocal and molecular-gas boundary support
+is unchanged; finite-admittance molecular routes still refuse a band that
 contains a lossless mechanical admittance pole. Focused G0/G1/G3 tests cover
 finite-Robin equivalence, rigid arithmetic, the pressure-release sphere,
 mechanical resonance continuity and constitutive admission. These native
@@ -1966,9 +1967,9 @@ maximum angular frequency for downstream physical load admission.
 `aperture_support_areas_m2` sums original panel areas on each nonzero finite
 unit-flow trace without replacing its velocity profile or renormalizing flow.
 `admit_loading_band_hz` checks the complete positive unwindowed interval against
-native material support and the original resolution declaration, including an
-unsampled lossless zero-impedance resonance. It shares the existing material
-resonance check; the observation window still has no authority to extend a
+native material support and the original resolution declaration. A lossless
+zero-impedance wall retains its finite pressure-release limit in the iterative
+reflection owner. The observation window still has no authority to extend a
 physical loading domain.
 
 ## Reciprocal complete source loads and matched receiver transfers
@@ -3153,3 +3154,34 @@ the original caloric/time-average identity, source interference, coherence
 rotation, volume partition, work/storage admission and cancellation/reuse.
 The new integrated Rust regressions remain unrun because the execution
 environment is unavailable.
+
+
+### Matrix-free mixed reflection and pressure-release boundaries
+
+`helmholtz::bc::PreparedIterativeReflectionBoundary` applies the same bounded
+wall coordinates as the dense owner through the original prepared FMM layers.
+Its operator is A*diag(a)+i*k*B*diag(b), with a=(1+r)/2 and b=(1-r)/2.
+The existing B*q owner accepts q=i*k*w directly, avoiding conversion through
+physical velocity inside the mixed-coordinate matvec. All-rigid boundaries
+reuse the original prepared owner and arithmetic; zero coordinate arms skip
+their FMM work. No dense global matrix or artificial resistance is introduced.
+
+Near-field right-preconditioner blocks are constructed from this transformed
+operator, including the pure i*k*B pressure-release endpoint. The existing
+Centroid, TriangleNear and Triangle operators retain their original near/self
+closures and panel order. FMM leaf groups, block-size limits, near-entry caps,
+GMRES restart/iteration limits, cancellation and resource receipts are shared
+with the original iterative owner. Recomputed Krylov residuals measure the
+original boundary equation after the particular trace is restored; FMM and
+spatial errors remain separate. Nonconvergence reports physical pressure,
+never the internal mixed coordinate.
+
+`IterativeLocalBoundaryObservation` changes from finite admittance to bounded
+reflection at the same scaling threshold as the dense observer. Original
+material bands, source/receiver ordering, window semantics and shared source
+banks are preserved. Loading-band admission accepts a supported lossless wall
+resonance; finite-admittance molecular consumers retain their own restriction.
+Coherent wall-work reconstruction gives zero absorption at rigid and
+pressure-release endpoints. Focused regressions cover dense equivalence,
+independent original-equation residuals, all three panel rules, transformed
+preconditioning, mechanical-resonance continuity and actual refusal/cancellation.

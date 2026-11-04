@@ -17,6 +17,7 @@ pub use incident::{
 #[path = "helmholtz_bc_prepared_iterative.rs"]
 mod prepared_iterative;
 pub use prepared_iterative::PreparedIterativeBoundary;
+pub use super::iterative::reflection::PreparedIterativeReflectionBoundary;
 
 #[path = "helmholtz_bc_reflection.rs"]
 mod reflection;
