@@ -11323,6 +11323,32 @@ are explicit; the original three-argument angle/power table remains available.
 The fourth argument `interior` instead resolves the same beam inside that warm
 layer, including its two boundary faces and evanescent/standing fields.
 
+### Local coherent acoustic heating
+
+`PreparedLayerAcousticSpectrum::field_with_heat` observes the same original
+interior pressure/velocity field and separately reports viscous and thermal
+heat density in W/m3. The original dynamic density and bulk modulus supply
+`-omega Im(rho) |v|^2 / 2` and `-omega Im(1/K) |p|^2 / 2`, respectively.
+Fields are summed coherently before evaluating these terms; transverse
+velocity can therefore dissipate at a pressure node, while identical
+opposite-phase sources cancel both heat mechanisms. Lossless layers have
+exactly zero heat. Reactive intensity and evanescent decay are not assigned heat.
+
+Two cached constitutive weights add constant work after the original field
+observation, with no allocation, new solve or material query. Storage inherits
+the original spectrum component budget. The existing `prepare_layer_field`
+and `field` APIs, layer ordering, zero-thickness interface observation and
+critical/opaque propagation remain unchanged. A zero-thickness identity has
+no material volume and refuses the heat-density query. Cancellation publishes
+no partial result and leaves the prepared field reusable.
+
+These are equivalent-fluid dissipation mechanisms, not a fluid/frame thermal
+partition, temperature evolution or experimental calibration. Focused G0/G1/G3
+regression source compares independently derived complex boundary equations,
+integrates sampled heat against the original analytic layer-absorption owner,
+preserves coherent nodes/cancellation, and checks lossless/source/cancellation
+semantics.
+
 ### Diffuse and authored angular incident power
 
 `RigidBackedLayers::diffuse_power` and `TransmittingLayers::diffuse_power`

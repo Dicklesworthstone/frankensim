@@ -20,6 +20,18 @@ struct LayerWave {
     tangential_velocity_per_pa: [C64; 2],
 }
 
+/// Coherent fields and separate local heat mechanisms in an original layer.
+/// Heat is evaluated after summing the fields, not by adding component powers.
+/// These equivalent-fluid mechanisms are not a fluid/frame temperature split.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AcousticLayerSample {
+    pub field: AcousticSpectrumSample,
+    /// `-omega Im(rho) |v|^2 / 2` [W/m³], including tangential velocity.
+    pub viscous_heating_w_m3: f64,
+    /// `-omega Im(1/K) |p|^2 / 2` [W/m³].
+    pub thermal_heating_w_m3: f64,
+}
+
 /// Coherent pressure, velocity and intensity inside one original finite layer.
 ///
 /// Optional preparation retains O(components) storage for this selected layer.
@@ -32,6 +44,7 @@ pub struct PreparedLayerAcousticSpectrum<'s, 'p, 'a> {
     spectrum: &'s PreparedAcousticSpectrum<'p, 'a>,
     layer_index: usize,
     waves: Vec<LayerWave>,
+    heat_scales: [f64; 2],
 }
 
 impl<'p, 'a> PreparedAcousticSpectrum<'p, 'a> {
@@ -63,6 +76,21 @@ impl<'p, 'a> PreparedAcousticSpectrum<'p, 'a> {
                     .density_kg_m3(),
             )
         };
+        let compliance = layer
+            .porous
+            .map_or(C64::ZERO, |response| response.dynamic_bulk_modulus_pa().recip());
+        // Square roots retain a weak field times a strong loss coefficient
+        // without first squaring an unweighted field. Preparation reuses the
+        // same original material snapshot; observations need no extra query.
+        let heat_scales = [-density.im, -compliance.im].map(|loss| {
+            if loss == 0.0 {
+                0.0
+            } else {
+                det::exp(
+                    0.5 * (det::ln(prepared.omega) + det::ln(loss) - core::f64::consts::LN_2),
+                )
+            }
+        });
         let mut waves = Vec::with_capacity(self.components.len());
         for wave in &self.components {
             poll(cancelled)?;
@@ -117,6 +145,7 @@ impl<'p, 'a> PreparedAcousticSpectrum<'p, 'a> {
             spectrum: self,
             layer_index,
             waves,
+            heat_scales,
         })
     }
 }
@@ -130,6 +159,52 @@ impl<'s, 'p, 'a> PreparedLayerAcousticSpectrum<'s, 'p, 'a> {
     /// Selected layer in the original exposed-to-rear ordering.
     pub const fn layer_index(&self) -> usize {
         self.layer_index
+    }
+
+    /// Observe the same original coherent field and its local physical heat.
+    /// Pressure nodes may still have viscous heat through transverse velocity.
+    /// Lossless layers have exactly zero heat; evanescent decay and reactive
+    /// intensity are never assigned heat. This does not evolve temperature.
+    /// A zero-thickness identity has no material volume and refuses heat, while
+    /// [`Self::field`] still admits its original interface observation.
+    /// Additional heat work is constant and allocation-free after the field sum.
+    pub fn field_with_heat(
+        &self,
+        position_m: [f64; 3],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<AcousticLayerSample, AcousticSpectrumError> {
+        poll(cancelled)?;
+        let layer = &self.spectrum.stack.prepared_layers().layers[self.layer_index];
+        if layer.source.thickness_m() == 0.0 {
+            return Err(AcousticSpectrumError::Invalid(
+                "a zero-thickness layer has no interior heat density",
+            ));
+        }
+        if self.heat_scales.iter().any(|s| !s.is_finite() || *s < 0.0) {
+            return Err(AcousticSpectrumError::Invalid(
+                "interior passive constitutive heat is unrepresentable",
+            ));
+        }
+        let field = self.field(position_m, cancelled)?;
+        let viscous = field
+            .particle_velocity_m_s
+            .into_iter()
+            .fold(Dd::ZERO, |sum, v| {
+                sum + Dd::from_f64(v.scale(self.heat_scales[0]).norm_sq())
+            })
+            .to_f64();
+        let thermal = field.pressure_pa.scale(self.heat_scales[1]).norm_sq();
+        if !viscous.is_finite() || !thermal.is_finite() {
+            return Err(AcousticSpectrumError::Invalid(
+                "interior acoustic heat density is unrepresentable",
+            ));
+        }
+        poll(cancelled)?;
+        Ok(AcousticLayerSample {
+            field,
+            viscous_heating_w_m3: viscous,
+            thermal_heating_w_m3: thermal,
+        })
     }
 
     /// Pressure and all velocity components at `[x,y,z]` in metres, where

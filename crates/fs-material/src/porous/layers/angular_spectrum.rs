@@ -19,7 +19,7 @@ use crate::MaterialError;
 use fs_math::{c64::C64, dd::Dd, det};
 
 mod interior;
-pub use interior::PreparedLayerAcousticSpectrum;
+pub use interior::{AcousticLayerSample, PreparedLayerAcousticSpectrum};
 
 /// Hard ceiling on cached coherent plane-wave components.
 pub const MAX_ANGULAR_SPECTRUM_COMPONENTS: usize = 4096;

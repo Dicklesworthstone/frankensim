@@ -806,3 +806,334 @@ fn explicit_budgets_domains_and_cancellation_refuse_without_partial_fields() {
             .is_err()
     );
 }
+
+
+// Independent conventional transfer from the receiving face. Growing cos/sin
+// are used only for this well-conditioned reference, not for production fields.
+fn porous_heat_reference(
+    fluid: &ThermoviscousFluidState,
+    law: &PorousFluidLaw,
+    direction: [f64; 3],
+    amplitude: C64,
+    thickness: f64,
+    depth: f64,
+) -> ([C64; 4], [f64; 2]) {
+    let response = law.effective_fluid(fluid, OMEGA).unwrap();
+    let rho = response.dynamic_density_kg_m3();
+    let compliance = response.dynamic_bulk_modulus_pa().recip();
+    let kt = [direction[0] * OMEGA / 340.0, direction[1] * OMEGA / 340.0];
+    let mut kn = (rho * compliance.scale(OMEGA * OMEGA)
+        - C64::from_re(kt[0] * kt[0] + kt[1] * kt[1]))
+    .sqrt();
+    if kn.im > 0.0 {
+        kn = -kn;
+    }
+    let zn = rho.scale(OMEGA) / kn;
+    let y0 = direction[2] / (1.2 * 340.0);
+    let from_back = |distance: f64| {
+        let z = kn.scale(distance);
+        let cos = C64::new(z.re.cos() * z.im.cosh(), -z.re.sin() * z.im.sinh());
+        let i_sin = C64::new(-z.re.cos() * z.im.sinh(), z.re.sin() * z.im.cosh());
+        [cos + (zn * i_sin).scale(y0), i_sin / zn + cos.scale(y0)]
+    };
+    let front = from_back(thickness);
+    let transmission = amplitude.scale(2.0) / (front[0] + front[1].scale(y0.recip()));
+    let at = from_back(thickness - depth);
+    let p = transmission * at[0];
+    let v = [
+        p * C64::from_re(kt[0] / OMEGA) / rho,
+        p * C64::from_re(kt[1] / OMEGA) / rho,
+        transmission * at[1],
+    ];
+    let heat = [
+        -0.5 * OMEGA * rho.im * v.iter().map(|v| v.norm_sq()).sum::<f64>(),
+        -0.5 * OMEGA * compliance.im * p.norm_sq(),
+    ];
+    ([p, v[0], v[1], v[2]], heat)
+}
+
+#[test]
+fn g1_coherent_heat_matches_independent_original_boundary_equations() {
+    let fluid = fluid();
+    let law = PorousFluidLaw::try_new(PorousCard::basotect_foam02(), 1.81e-5).unwrap();
+    let direction = [0.36, 0.48, 0.8];
+    for thickness in [1e-12, 1e-5, 0.06] {
+        let stack = TransmittingLayers::new(
+            &fluid,
+            &fluid,
+            OMEGA,
+            &[Layer::Porous {
+                law: &law,
+                thickness_m: thickness,
+            }],
+        )
+        .unwrap();
+        // Numerical homogeneity of the linear model, not finite-amplitude physics.
+        for scale in [1e-40, 1.0, 1e40] {
+            let amplitude = C64::new(0.7, -0.3).scale(scale);
+            let beam = stack
+                .prepare_angular_spectrum(
+                    &[IncidentPlaneWave {
+                        direction,
+                        pressure_pa: amplitude,
+                    }],
+                    budget(1),
+                    &mut || false,
+                )
+                .unwrap();
+            let inside = beam.prepare_layer_field(0, &mut || false).unwrap();
+            for fraction in [0.0, 0.2, 0.7, 1.0] {
+                let depth = fraction * thickness;
+                let sample = inside
+                    .field_with_heat([0.0, 0.0, depth], &mut || false)
+                    .unwrap();
+                let (reference, heat) =
+                    porous_heat_reference(&fluid, &law, direction, amplitude, thickness, depth);
+                near(sample.field.pressure_pa, reference[0], 8e-13 * scale);
+                for (actual, expected) in sample
+                    .field
+                    .particle_velocity_m_s
+                    .into_iter()
+                    .zip(&reference[1..])
+                {
+                    near(actual, *expected, 5e-15 * scale);
+                }
+                near_real(sample.viscous_heating_w_m3, heat[0], 3e-12 * heat[0]);
+                near_real(sample.thermal_heating_w_m3, heat[1], 3e-12 * heat[1]);
+            }
+        }
+    }
+}
+
+#[test]
+fn g3_coherent_local_heat_integrates_to_original_layer_absorption() {
+    use fs_material::porous::layers::LayerAbsorptionBudget;
+    let fluid = fluid();
+    let law = PorousFluidLaw::try_new(PorousCard::basotect_foam02(), 1.81e-5).unwrap();
+    let other = FluidAcousticState::try_new(2.1, 410.0).unwrap();
+    let thicknesses = [0.04, 0.017, 0.03, 0.025];
+    let stack = TransmittingLayers::new(
+        &fluid,
+        &fluid,
+        OMEGA,
+        &[
+            Layer::Porous {
+                law: &law,
+                thickness_m: thicknesses[0],
+            },
+            Layer::FluidGap {
+                thickness_m: thicknesses[1],
+            },
+            Layer::Porous {
+                law: &law,
+                thickness_m: thicknesses[2],
+            },
+            Layer::FluidLayer {
+                fluid: &other,
+                thickness_m: thicknesses[3],
+            },
+        ],
+    )
+    .unwrap();
+    let wave = IncidentPlaneWave {
+        direction: [0.6, 0.0, 0.8],
+        pressure_pa: C64::new(0.7, 0.2),
+    };
+    let beam = stack
+        .prepare_angular_spectrum(&[wave], budget(1), &mut || false)
+        .unwrap();
+    // Unit physical face area: incident watts equal normal W/m² numerically.
+    let incident = 0.5 * wave.pressure_pa.norm_sq() * 0.8 / (1.2 * 340.0);
+    let work = stack
+        .layer_absorption(
+            0.8,
+            incident,
+            LayerAbsorptionBudget { max_layers: 4 },
+            || false,
+        )
+        .unwrap();
+    for (i, d) in thicknesses.into_iter().enumerate() {
+        let inside = beam.prepare_layer_field(i, &mut || false).unwrap();
+        let mut integrated = [0.0; 2];
+        // Independent composite Simpson integration, not the analytic loss owner.
+        const N: usize = 128;
+        for j in 0..=N {
+            let sample = inside
+                .field_with_heat([0.0, 0.0, d * (j as f64 / N as f64)], &mut || false)
+                .unwrap();
+            let weight = if j == 0 || j == N {
+                1.0
+            } else if j % 2 == 0 {
+                2.0
+            } else {
+                4.0
+            };
+            integrated[0] += weight * sample.viscous_heating_w_m3;
+            integrated[1] += weight * sample.thermal_heating_w_m3;
+        }
+        let expected = work.layers()[i];
+        for (value, fraction) in integrated.into_iter().zip([
+            expected.viscous_absorbed_fraction,
+            expected.thermal_absorbed_fraction,
+        ]) {
+            near_real(
+                value * d / (3.0 * N as f64),
+                incident * fraction,
+                2e-9 * incident,
+            );
+        }
+    }
+}
+
+#[test]
+fn g1_coherent_heat_retains_velocity_nodes_and_exact_source_cancellation() {
+    let fluid = fluid();
+    let law = PorousFluidLaw::try_new(PorousCard::basotect_foam02(), 1.81e-5).unwrap();
+    let stack = TransmittingLayers::new(
+        &fluid,
+        &fluid,
+        OMEGA,
+        &[Layer::Porous {
+            law: &law,
+            thickness_m: 0.06,
+        }],
+    )
+    .unwrap();
+    let wave = IncidentPlaneWave {
+        direction: [0.6, 0.0, 0.8],
+        pressure_pa: C64::new(0.7, -0.3),
+    };
+    let single = stack
+        .prepare_angular_spectrum(&[wave], budget(1), &mut || false)
+        .unwrap();
+    let crossing = stack
+        .prepare_angular_spectrum(
+            &[
+                wave,
+                IncidentPlaneWave {
+                    direction: [-0.6, 0.0, 0.8],
+                    ..wave
+                },
+            ],
+            budget(2),
+            &mut || false,
+        )
+        .unwrap();
+    let single_layer = single.prepare_layer_field(0, &mut || false).unwrap();
+    let crossing_layer = crossing.prepare_layer_field(0, &mut || false).unwrap();
+    let depth = 0.021;
+    let one = single_layer
+        .field_with_heat([0.0, 0.0, depth], &mut || false)
+        .unwrap();
+    let antinode = crossing_layer
+        .field_with_heat([0.0, 0.0, depth], &mut || false)
+        .unwrap();
+    near(
+        antinode.field.pressure_pa,
+        one.field.pressure_pa.scale(2.0),
+        1e-14,
+    );
+    assert_eq!(antinode.field.particle_velocity_m_s[0], C64::ZERO);
+    near_real(
+        antinode.thermal_heating_w_m3,
+        4.0 * one.thermal_heating_w_m3,
+        1e-14,
+    );
+    let x = core::f64::consts::FRAC_PI_2 / (0.6 * OMEGA / 340.0);
+    let node = crossing_layer
+        .field_with_heat([x, 0.0, depth], &mut || false)
+        .unwrap();
+    near(node.field.pressure_pa, C64::ZERO, 2e-15);
+    near(
+        node.field.particle_velocity_m_s[0],
+        C64::new(0.0, -2.0) * one.field.particle_velocity_m_s[0],
+        2e-17,
+    );
+    assert!(node.thermal_heating_w_m3 < 1e-28 * one.thermal_heating_w_m3);
+    let rho = stack
+        .prepared_layers()
+        .material_response(0)
+        .unwrap()
+        .dynamic_density_kg_m3();
+    let expected_viscous =
+        -2.0 * OMEGA * rho.im * one.field.particle_velocity_m_s[0].norm_sq();
+    near_real(
+        node.viscous_heating_w_m3,
+        expected_viscous,
+        2e-13 * expected_viscous,
+    );
+    assert!(node.viscous_heating_w_m3 > 0.0);
+    let cancelled = stack
+        .prepare_angular_spectrum(
+            &[
+                wave,
+                IncidentPlaneWave {
+                    pressure_pa: -wave.pressure_pa,
+                    ..wave
+                },
+            ],
+            budget(2),
+            &mut || false,
+        )
+        .unwrap();
+    let cancelled_layer = cancelled.prepare_layer_field(0, &mut || false).unwrap();
+    let zero = cancelled_layer
+        .field_with_heat([0.03, 0.0, depth], &mut || false)
+        .unwrap();
+    assert_eq!(zero.field.pressure_pa, C64::ZERO);
+    assert_eq!(zero.field.particle_velocity_m_s, [C64::ZERO; 3]);
+    assert_eq!(zero.viscous_heating_w_m3, 0.0);
+    assert_eq!(zero.thermal_heating_w_m3, 0.0);
+}
+
+#[test]
+fn g0_coherent_heat_is_a_pure_observation_and_keeps_lossless_identity_semantics() {
+    let incident = CountedFluid {
+        state: fluid(),
+        samples: Cell::new(0),
+    };
+    let stack = TransmittingLayers::new(
+        &incident,
+        &incident,
+        OMEGA,
+        &[
+            Layer::FluidGap { thickness_m: 0.1 },
+            Layer::FluidGap { thickness_m: 0.0 },
+        ],
+    )
+    .unwrap();
+    let waves = [IncidentPlaneWave {
+        direction: [0.6, 0.0, 0.8],
+        pressure_pa: C64::ONE,
+    }; 2];
+    let beam = stack
+        .prepare_angular_spectrum(&waves, budget(2), &mut || false)
+        .unwrap();
+    let inside = beam.prepare_layer_field(0, &mut || false).unwrap();
+    let point = [0.02, 0.03, 0.04];
+    let expected = inside.field_with_heat(point, &mut || false).unwrap();
+    assert_eq!(expected.field, inside.field(point, &mut || false).unwrap());
+    assert_eq!(expected.viscous_heating_w_m3, 0.0);
+    assert_eq!(expected.thermal_heating_w_m3, 0.0);
+    assert_eq!(incident.samples.get(), 1);
+    let identity = beam.prepare_layer_field(1, &mut || false).unwrap();
+    assert!(identity.field([0.0; 3], &mut || false).is_ok());
+    assert!(identity.field_with_heat([0.0; 3], &mut || false).is_err());
+    for bad in [
+        [0.0, 0.0, -1e-9],
+        [0.0, 0.0, 0.11],
+        [f64::NAN, 0.0, 0.05],
+    ] {
+        assert!(inside.field_with_heat(bad, &mut || false).is_err());
+    }
+    let mut polls = 0;
+    assert!(matches!(
+        inside.field_with_heat(point, &mut || {
+            polls += 1;
+            polls == 3
+        }),
+        Err(AcousticSpectrumError::Cancelled)
+    ));
+    assert_eq!(inside.field_with_heat(point, &mut || false).unwrap(), expected);
+    assert_eq!(incident.samples.get(), 1);
+}
