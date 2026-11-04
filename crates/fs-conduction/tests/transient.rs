@@ -122,6 +122,111 @@ fn uniform_adiabatic_heating_is_exact_for_every_scheme_and_step() {
 }
 
 #[test]
+fn millikelvin_heat_pulses_are_resolved_at_the_declared_solver_tolerance() {
+    // A relative tolerance must resolve the temperature RISE, rather than
+    // permit a spatially nonuniform error scaled by the 300 K background.
+    // The insulated body's exact response is uniform for every theta.
+    let mesh = unit_mesh(4);
+    let boundary = adiabatic(&mesh);
+    let source_density = 2.0; // W/m^3: a 6 mK rise over this trajectory.
+    let source = ScalarField::uniform("weak heat pulse", source_density).expect("source");
+    let linear = LinearConfig {
+        tolerance: 1e-7,
+        ..LinearConfig::default()
+    };
+    let dt_s = 2.0e3;
+    let steps = 3;
+    let expected_rise = source_density * dt_s * (steps as f64) / RHO_CP;
+    let initial = vec![T_COLD; mesh.vertex_count()];
+
+    for theta in [1.0, 0.75, 0.5] {
+        let config = TransientConfig::new(theta, dt_s, linear).expect("config");
+        let solution = with_cx(|cx| {
+            march(
+                cx,
+                TransientProblem {
+                    mesh: &mesh,
+                    boundary: &boundary,
+                    material: &material(),
+                    source: &source,
+                    capacity: capacity(),
+                },
+                &config,
+                &initial,
+                steps,
+            )
+            .expect("weak pulse march")
+        });
+
+        for (vertex, &temperature) in solution.temperature.iter().enumerate() {
+            let error = (temperature - T_COLD - expected_rise).abs();
+            assert!(
+                error < 20.0 * linear.tolerance * expected_rise,
+                "theta={theta}: vertex {vertex} weak-pulse error {error} K exceeds the tolerance on the {expected_rise} K rise"
+            );
+        }
+    }
+}
+
+#[test]
+fn weak_diffusion_is_independent_of_the_absolute_temperature_background() {
+    // Constant-property insulated diffusion is invariant under T -> T + c.
+    // Compare the same millikelvin-scale profile at two physical baselines;
+    // a solver tolerance scaled to absolute temperature breaks this symmetry.
+    let mesh = unit_mesh(4);
+    let boundary = adiabatic(&mesh);
+    let source = ScalarField::uniform("no heating", 0.0).expect("source");
+    let linear = LinearConfig {
+        tolerance: 1e-7,
+        ..LinearConfig::default()
+    };
+    let amplitude = 1.0e-3;
+    let perturbation: Vec<_> = mesh
+        .positions()
+        .iter()
+        .map(|p| amplitude * ((1.0 - p[0]).powi(2) + 0.5 * p[1] + 0.25 * p[2].powi(3)))
+        .collect();
+
+    for theta in [1.0, 0.75, 0.5] {
+        let config = TransientConfig::new(theta, 2.0e3, linear).expect("config");
+        let run = |background| {
+            let initial: Vec<_> = perturbation
+                .iter()
+                .map(|value| background + value)
+                .collect();
+            with_cx(|cx| {
+                march(
+                    cx,
+                    TransientProblem {
+                        mesh: &mesh,
+                        boundary: &boundary,
+                        material: &material(),
+                        source: &source,
+                        capacity: capacity(),
+                    },
+                    &config,
+                    &initial,
+                    3,
+                )
+                .expect("weak diffusion march")
+            })
+        };
+        let reference = run(1.0);
+        let shifted = run(T_COLD);
+
+        for vertex in 0..mesh.vertex_count() {
+            let reference_excess = reference.temperature[vertex] - 1.0;
+            let shifted_excess = shifted.temperature[vertex] - T_COLD;
+            let error = (reference_excess - shifted_excess).abs();
+            assert!(
+                error < 50.0 * linear.tolerance * amplitude,
+                "theta={theta}: vertex {vertex} background-dependent error {error} K in the {amplitude} K diffusion profile"
+            );
+        }
+    }
+}
+
+#[test]
 fn the_capacitance_matrix_holds_the_exact_heat_content() {
     // Summing every entry of C gives rho c_p V: the discrete heat content of
     // a unit uniform temperature rise. This is the property that makes the

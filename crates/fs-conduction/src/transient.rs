@@ -33,6 +33,16 @@
 //!   (C/dt + θK) T^{n+1} = (C/dt − (1−θ)K) T^n + b
 //! ```
 //!
+//! The solve uses the equivalent temperature-increment equation
+//!
+//! ```text
+//!   (C + θ dt K) ΔT = dt (b − K T^n),    T^{n+1} = T^n + ΔT
+//! ```
+//!
+//! so the linear tolerance resolves heat-driven temperature changes, including
+//! small pulses on a large absolute-temperature background. The constant
+//! Dirichlet values have zero increments after the initial boundary lift.
+//!
 //! # Only unconditionally stable schemes are admitted
 //!
 //! `theta` is restricted to `[0.5, 1]`. Below one half the scheme is only
@@ -289,8 +299,9 @@ impl TransientStep {
         self.krylov_iterations
     }
 
-    /// The crate's own recomputed Euclidean relative residual, not the
-    /// method's recursive estimate.
+    /// The recomputed Euclidean relative residual of the temperature-increment
+    /// system, normalized by its heat-transfer right-hand side rather than the
+    /// absolute temperature. This is not the method's recursive estimate.
     #[must_use]
     pub const fn true_relative_residual(&self) -> f64 {
         self.true_relative_residual
@@ -510,24 +521,27 @@ fn march_inner(
     let stiffness = &system.operator;
     let load = &system.load;
 
-    let inverse_dt = 1.0 / config.dt_s;
     let theta = config.theta;
 
-    // A = C/dt + theta*K, assembled once.
-    let lhs = axpy_csr(capacitance, inverse_dt, stiffness, theta);
-    let (a_ff, lift) = reduce_matrix_and_lift(&lhs, &dofs);
-    let precond = spd_preconditioner(&a_ff);
+    // Solve (C + theta*dt*K) delta_T = dt*(b - K*T_old). Keeping the
+    // absolute-temperature background out of the solve makes its relative
+    // tolerance meaningful for weak diffusion and small heat pulses.
+    let op = {
+        let lhs = axpy_csr(capacitance, 1.0, stiffness, theta * config.dt_s);
+        let (a_ff, _) = reduce_matrix_and_lift(&lhs, &dofs);
+        CsrOp::symmetric(a_ff)
+    };
+    let precond = spd_preconditioner(op.matrix());
 
     let mut temperature = initial.to_vec();
-    for (index, &vertex) in dofs.fixed().iter().enumerate() {
-        let _ = index;
+    for &vertex in dofs.fixed() {
         temperature[vertex] = dofs.prescribed()[vertex];
     }
     validate_material_temperature(cx, problem, storage, &temperature)?;
 
     let mut recorded = Vec::with_capacity(steps);
-    let mut scratch_c = vec![0.0f64; n];
     let mut scratch_k = vec![0.0f64; n];
+    let mut rhs = vec![0.0f64; dofs.n()];
 
     for step in 0..steps {
         cx.checkpoint().map_err(|_| ConductionError::Cancelled {
@@ -535,25 +549,21 @@ fn march_inner(
             at: step,
         })?;
 
-        // r = C/dt T^n − (1−θ) K T^n + b, over all vertices.
-        capacitance.spmv(&temperature, &mut scratch_c);
+        // The full old field already contains the prescribed temperatures,
+        // so K*T includes their contribution. Their increments are zero:
+        // adding an absolute-temperature Dirichlet lift here would double it.
         stiffness.spmv(&temperature, &mut scratch_k);
-        let mut rhs = Vec::with_capacity(dofs.n());
         for (slot, &vertex) in dofs.free().iter().enumerate() {
-            let value = scratch_c[vertex].mul_add(
-                inverse_dt,
-                (1.0 - theta).mul_add(-scratch_k[vertex], load[vertex]),
-            ) + lift[slot];
+            let value = config.dt_s * (load[vertex] - scratch_k[vertex]);
             if !value.is_finite() {
                 return Err(ConductionError::NonFinite {
                     field: "transient right-hand side",
                     bits: value.to_bits(),
                 });
             }
-            rhs.push(value);
+            rhs[slot] = value;
         }
 
-        let op = CsrOp::symmetric(a_ff.clone());
         let mut cg = CgState::new(&op, &precond, &rhs);
         let report = cg.run(
             &op,
@@ -561,7 +571,7 @@ fn march_inner(
             config.linear.tolerance,
             config.linear.max_iterations,
         );
-        let truth = true_relative_residual(&a_ff, &rhs, &cg.x);
+        let truth = true_relative_residual(op.matrix(), &rhs, &cg.x);
         if truth.is_nan() || truth >= config.linear.tolerance {
             return Err(ConductionError::LinearSolveFailed {
                 iteration: step,
@@ -572,7 +582,9 @@ fn march_inner(
         }
 
         for (slot, &vertex) in dofs.free().iter().enumerate() {
-            temperature[vertex] = cg.x[slot];
+            let updated = temperature[vertex] + cg.x[slot];
+            crate::require_finite("transient temperature", updated)?;
+            temperature[vertex] = updated;
         }
         validate_material_temperature(cx, problem, storage, &temperature)?;
         recorded.push(TransientStep {
