@@ -462,4 +462,153 @@ mod adiabatic_solid_cavity_bridge {
             assert_eq!(gas,before);
         });
     }
+
+    /// Uniform 1-to-8 tetrahedral refinement with globally shared edge midpoints.
+    /// Inner-boundary ancestry is retained independently of generated face order.
+    fn refined_shell(levels: usize) -> (Vec<[f64; 3]>, Vec<[usize; 4]>, Vec<bool>) {
+        let (mut nodes, mut tets) = shell();
+        let mut inner: Vec<_> = (0..nodes.len()).map(|i| i >= 4).collect();
+        for _ in 0..levels {
+            let mut edges = std::collections::BTreeMap::new();
+            let mut refined = Vec::with_capacity(8 * tets.len());
+            for &[a, b, c, d] in &tets {
+                let mut middle = |left: usize, right: usize| {
+                    let key = (left.min(right), left.max(right));
+                    *edges.entry(key).or_insert_with(|| {
+                        let point = std::array::from_fn(|axis|
+                            0.5 * nodes[left][axis] + 0.5 * nodes[right][axis]);
+                        let index = nodes.len();
+                        let is_inner = inner[left] && inner[right];
+                        nodes.push(point);
+                        inner.push(is_inner);
+                        index
+                    })
+                };
+                let ab = middle(a, b);
+                let ac = middle(a, c);
+                let ad = middle(a, d);
+                let bc = middle(b, c);
+                let bd = middle(b, d);
+                let cd = middle(c, d);
+                refined.extend_from_slice(&[
+                    [a, ab, ac, ad], [b, ab, bc, bd],
+                    [c, ac, bc, cd], [d, ad, bd, cd],
+                    [ab, cd, ac, ad], [ab, cd, ad, bd],
+                    [ab, cd, bd, bc], [ab, cd, bc, ac],
+                ]);
+            }
+            tets = refined;
+        }
+        (nodes, tets, inner)
+    }
+
+    #[test]
+    fn g1_refined_cavity_retains_global_acoustic_stiffness_without_dense_assembly() {
+        with_cx(|_, cx| {
+            let (nodes, tets, inner_nodes) = refined_shell(3);
+            let surface = Arc::new(ClosedTetPressureSurface::new(
+                &nodes, &tets, TetAssemblyBudget::standard(), 4 * tets.len(), cx,
+            ).unwrap());
+            let faces: Vec<_> = surface.faces().iter().enumerate()
+                .filter_map(|(i, face)| face.iter().all(|&node| inner_nodes[node]).then_some(i))
+                .collect();
+            let cavity = ClosedTetCavity::new(surface, &faces, cx).unwrap();
+            assert_eq!(faces.len(), 256);
+            assert!(3 * cavity.nodes().len() > 256);
+            let seed = gas(0.75, 0.001);
+            let original = ClosedGasParcel::new(
+                seed.model().clone(), seed.point().clone(), cavity.reference_volume_m3(),
+            ).unwrap();
+            let u: Vec<_> = nodes.iter().flat_map(|x| x.map(|value| -0.02 * value)).collect();
+            let direction: Vec<_> = nodes.iter().flat_map(|x| x.map(|value| 0.01 * value)).collect();
+            let load = cavity.adiabatic_gas_load(&u, &original, 30_000.0, entropy(), cx).unwrap();
+            let jacobian = &load.force_tangent;
+            assert_eq!(jacobian.nrows(), u.len());
+            assert_eq!(jacobian.ncols(), u.len());
+            assert_eq!(jacobian.acoustic_rank_one_vector().len(), u.len());
+            assert!(jacobian.geometric_part().nnz() <= 81 * cavity.surface().faces().len());
+            let action = jacobian.apply(&direction, cx).unwrap();
+            let mut output = vec![7.0; u.len()];
+            let mut scratch = vec![0.0; u.len()];
+            jacobian.apply_into(&direction, &mut output, &mut scratch, cx).unwrap();
+            assert_eq!(action, output);
+
+            // Dilation gives an independent closed-form geometry derivative:
+            // dV = 3 V ds/s and d(grad V) = 2 grad(V) ds/s.
+            let geometry = cavity.evaluate(&u, cx).unwrap();
+            let response = load.gas.pressure_response().unwrap();
+            let coefficient = 0.01 / 0.98 * (
+                2.0 * load.net_pressure_pa
+                    + 3.0 * load.volume_m3 * response.pressure_volume_derivative_pa_m3
+            );
+            for (local, &node) in cavity.nodes().iter().enumerate() {
+                for axis in 0..3 {
+                    close(action[3 * node + axis],
+                        coefficient * geometry.gradient_m2()[3 * local + axis], 3e-10);
+                }
+            }
+
+            // Distant boundary coordinates still couple through one conserved
+            // gas inventory, even when their geometric sparse entry is zero.
+            let weights = jacobian.acoustic_rank_one_vector();
+            let populated: Vec<_> = weights.iter().enumerate()
+                .filter_map(|(i, w)| (*w != 0.0).then_some(i)).collect();
+            let mut nonlocal = false;
+            'pairs: for &row in &populated {
+                for &column in &populated {
+                    if jacobian.geometric_part().get(row, column) == 0.0
+                        && weights[row] * weights[column] != 0.0
+                    {
+                        close(jacobian.get(row, column), -weights[row] * weights[column], 1e-14);
+                        nonlocal = true;
+                        break 'pairs;
+                    }
+                }
+            }
+            assert!(nonlocal);
+
+            let epsilon = 1e-4;
+            let plus: Vec<_> = u.iter().zip(&direction).map(|(x, d)| x + epsilon * d).collect();
+            let minus: Vec<_> = u.iter().zip(&direction).map(|(x, d)| x - epsilon * d).collect();
+            let positive = cavity.adiabatic_gas_load(&plus, &original, 30_000.0, entropy(), cx).unwrap();
+            let negative = cavity.adiabatic_gas_load(&minus, &original, 30_000.0, entropy(), cx).unwrap();
+            for i in 0..u.len() {
+                close(action[i], (positive.force_n[i] - negative.force_n[i]) / (2.0 * epsilon), 3e-6);
+            }
+            let mechanical_power: f64 = load.force_n.iter().zip(&direction).map(|(f, d)| f * d).sum();
+            close(mechanical_power,
+                -(positive.potential_change_j - negative.potential_change_j) / (2.0 * epsilon), 3e-6);
+            assert_eq!(original.volume_m3(), cavity.reference_volume_m3());
+        });
+    }
+
+    #[test]
+    fn g4_cavity_tangent_output_is_atomic_on_bad_directions_and_cancellation() {
+        with_cx(|gate, cx| {
+            let (nodes, tets) = shell();
+            let cavity = cavity(&nodes, &tets, cx);
+            let seed = gas(0.75, 0.001);
+            let original = ClosedGasParcel::new(
+                seed.model().clone(), seed.point().clone(), cavity.reference_volume_m3(),
+            ).unwrap();
+            let load = cavity.adiabatic_gas_load(&[0.0; 24], &original, 100_000.0, entropy(), cx).unwrap();
+            // Zero net force does not remove acoustic restoring stiffness.
+            assert_eq!(load.force_n, vec![0.0; 24]);
+            assert!(load.force_tangent.acoustic_rank_one_vector().iter().any(|&x| x != 0.0));
+            let mut output = vec![71.0; 24];
+            let mut scratch = vec![0.0; 24];
+            assert!(load.force_tangent.apply_into(&[0.0; 23], &mut output, &mut scratch, cx).is_err());
+            assert_eq!(output, vec![71.0; 24]);
+            let mut bad = [0.0; 24];
+            bad[23] = f64::NAN;
+            assert!(load.force_tangent.apply_into(&bad, &mut output, &mut scratch, cx).is_err());
+            assert_eq!(output, vec![71.0; 24]);
+            gate.request();
+            assert!(matches!(
+                load.force_tangent.apply_into(&[0.0; 24], &mut output, &mut scratch, cx),
+                Err(fs_solid::hyper3::HyperTetError::Cancelled)
+            ));
+            assert_eq!(output, vec![71.0; 24]);
+        });
+    }
 }

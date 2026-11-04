@@ -109,3 +109,29 @@ fn g3_integrated_generalized_force_matches_compression_and_exterior_work() {
     );
     assert!(errors[2] < 0.001, "{errors:?}");
 }
+
+#[test]
+fn g1_spatial_dense_gas_response_keeps_original_acoustic_stiffness_and_cancellation() {
+    use crate::thermochemical_gas::energy::entropy::GasEntropyError;
+    let gas = parcel_at(5.0e6);
+    let gradient = vec![1e-5; 513];
+    let direction = vec![0.02; gradient.len()];
+    let hessian = vec![0.0; gradient.len()];
+    assert!(gas.mechanical_load(gas.volume_m3(), &gradient, 200_000.0).is_err());
+    let load = gas.mechanical_load_with_limit(
+        gas.volume_m3(), &gradient, 200_000.0, gradient.len(), || false,
+    ).unwrap();
+    let force = load.generalized_forces_cancellable(|| false).unwrap();
+    let response = gas.pressure_response().unwrap();
+    let action = load.tangent_action_cancellable(&direction, &hessian, || false).unwrap();
+    let volume_direction = gradient.len() as f64 * 1e-5 * 0.02;
+    let expected = response.pressure_volume_derivative_pa_m3 * volume_direction * 1e-5;
+    for (&f, &actual) in force.iter().zip(&action) {
+        assert_eq!(f, (gas.state().pressure_pa() - 200_000.0) * 1e-5);
+        assert!((actual - expected).abs() <= 2e-13 * expected.abs().max(1.0));
+    }
+    assert!(matches!(
+        load.tangent_action_cancellable(&direction, &hessian, || true),
+        Err(GasEntropyError::Cancelled)
+    ));
+}

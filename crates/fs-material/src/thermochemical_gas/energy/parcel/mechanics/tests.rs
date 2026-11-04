@@ -133,3 +133,78 @@ fn stale_geometry_invalid_actions_and_unrepresentable_loads_refuse() {
     let g = vec![0.0; MAX_VOLUME_COORDINATES];
     assert_eq!(gas.mechanical_load(0.001, &g, 0.0).unwrap().generalized_forces().unwrap(), g);
 }
+
+#[test]
+fn g1_spatial_pressure_pullback_exceeds_the_local_limit_and_matches_material_differences() {
+    let gas = parcel(0.75, 0.001);
+    let count = 3 * MAX_VOLUME_COORDINATES + 17;
+    let gradient: Vec<_> = (0..count).map(|i| 1e-6 * (1.0 + (i % 7) as f64)).collect();
+    let direction: Vec<_> = (0..count).map(|i| 0.01 * ((i % 11) as f64 - 5.0)).collect();
+    let curvature: Vec<_> = (0..count).map(|i| 2e-5 * (1.0 + (i % 3) as f64)).collect();
+    let hessian: Vec<_> = curvature.iter().zip(&direction).map(|(k, d)| k * d).collect();
+    let exterior = 30_000.0;
+    assert!(gas.mechanical_load(gas.volume_m3(), &gradient, exterior).is_err());
+    let load = gas
+        .mechanical_load_with_limit(gas.volume_m3(), &gradient, exterior, count, || false)
+        .unwrap();
+    assert!(std::ptr::eq(load.state(), gas.state()));
+    let force = load.generalized_forces_cancellable(|| false).unwrap();
+    let action = load.tangent_action_cancellable(&direction, &hessian, || false).unwrap();
+    let power = load.mechanical_power_w_cancellable(&direction, || false).unwrap();
+    near(power, force.iter().zip(&direction).map(|(f, d)| f * d).sum(), 2e-12);
+    let epsilon = 1e-5;
+    let evaluate = |sign: f64| {
+        let delta = sign * epsilon;
+        let linear: f64 = gradient.iter().zip(&direction).map(|(g, d)| g * d).sum();
+        let quadratic: f64 = curvature.iter().zip(&direction).map(|(k, d)| k * d * d).sum();
+        let volume = gas.volume_m3() + delta * linear + 0.5 * delta * delta * quadratic;
+        let changed_gradient: Vec<_> = gradient.iter().zip(&hessian)
+            .map(|(g, h)| g + delta * h).collect();
+        let mut candidate = gas.clone();
+        candidate.set_volume_isentropic(volume, controls(), || false).unwrap();
+        candidate.mechanical_load_with_limit(volume, &changed_gradient, exterior, count, || false)
+            .unwrap().generalized_forces_cancellable(|| false).unwrap()
+    };
+    let plus = evaluate(1.0);
+    let minus = evaluate(-1.0);
+    for i in 0..count {
+        near(action[i], (plus[i] - minus[i]) / (2.0 * epsilon), 2e-7);
+    }
+}
+
+#[test]
+fn g4_spatial_pressure_limits_and_late_cancellation_leave_the_source_unchanged() {
+    let gas = parcel(0.75, 0.001);
+    let before = gas.clone();
+    let count = 4 * MAX_VOLUME_COORDINATES + 1;
+    let gradient = vec![1e-5; count];
+    assert!(gas.mechanical_load_with_limit(gas.volume_m3(), &gradient, 0.0, count - 1, || false).is_err());
+    let mut polls = 0;
+    assert!(matches!(
+        gas.mechanical_load_with_limit(gas.volume_m3(), &gradient, 0.0, count, || {
+            polls += 1;
+            polls == 4
+        }),
+        Err(GasEntropyError::Cancelled)
+    ));
+    let load = gas.mechanical_load_with_limit(gas.volume_m3(), &gradient, 0.0, count, || false).unwrap();
+    polls = 0;
+    assert!(matches!(load.generalized_forces_cancellable(|| {
+        polls += 1;
+        polls == 4
+    }), Err(GasEntropyError::Cancelled)));
+    let direction = vec![0.01; count];
+    let hessian = vec![0.0; count];
+    let mut total = 0;
+    load.tangent_action_cancellable(&direction, &hessian, || { total += 1; false }).unwrap();
+    polls = 0;
+    assert!(matches!(load.tangent_action_cancellable(&direction, &hessian, || {
+        polls += 1;
+        polls == total
+    }), Err(GasEntropyError::Cancelled)));
+    assert!(load.tangent_action_cancellable(&direction[..count-1], &hessian, || false).is_err());
+    let mut bad = hessian;
+    bad[count-1] = f64::NAN;
+    assert!(load.tangent_action_cancellable(&direction, &bad, || false).is_err());
+    assert_eq!(gas, before);
+}

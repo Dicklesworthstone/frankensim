@@ -131,6 +131,31 @@ impl ClosedRealGasParcel {
         )
     }
 
+    /// Source-owned real-gas pressure on a caller-budgeted spatial chart.
+    ///
+    /// The geometry owner supplies its admitted coordinate limit. The same
+    /// borrowed constitutive epoch and cancellable matrix-free actions are
+    /// shared with ideal gas; dense-fluid stiffness remains rho*c^2/V.
+    pub fn mechanical_load_with_limit<'a>(
+        &'a self,
+        volume_m3: f64,
+        gradient: &'a [f64],
+        exterior_pressure_pa: f64,
+        maximum_coordinates: usize,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<GasMechanicalLoad<'a, ResolvedThermochemicalRealGasState>, GasEntropyError> {
+        GasMechanicalLoad::new_with_limit(
+            self.state(),
+            self.volume_m3(),
+            volume_m3,
+            gradient,
+            exterior_pressure_pa,
+            self.pressure_response()?,
+            maximum_coordinates,
+            cancelled,
+        )
+    }
+
     /// Propose an endpoint from volume and total internal-energy change [J].
     ///
     /// Internal energy depends on BOTH density and temperature for this fluid.

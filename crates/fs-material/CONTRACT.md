@@ -10036,6 +10036,14 @@ state's acoustic law, not the ideal-gas substitution (Cp/Cv)*p.
 For caller-supplied V(q), gradient and Hessian actions, F=(p-pe)*grad(V) and
 DF[dq]=(p-pe)*Hess(V)[dq]-(rho*c^2/V)*grad(V)*(grad(V).dq).
 Exterior pressure is explicitly constant during the local linearization.
+The default small-chart entry retains its 256-coordinate limit. Both closed
+ideal and real-gas parcels also expose `mechanical_load_with_limit`, borrowing
+a spatial chart under the geometry owner's explicit coordinate budget.
+Cancellable force, power and tangent actions reuse the same pressure and
+acoustic response, poll in blocks of at most 256 coordinates, and publish no
+partial result on refusal. The geometry limit is not a constitutive restriction;
+the pullback introduces neither mesh ownership nor another volume law.
+
 Borrowing the parcel preserves the state epoch across force and tangent use.
 The adapter owns no geometry, piston integrator or phase-equilibrium closure;
 the existing homogeneous-branch restrictions continue to apply.

@@ -10,9 +10,11 @@
 //! dV/du, and an analytic Hessian-vector action. These can be consumed by
 //! fs-material's GasMechanicalLoad without a fixed-area or fixed-gamma closure.
 //! The material owner supplies p and dp/dV; this module supplies geometry only.
-//! Geometry and Hessian actions support the admitted mesh boundary size. The
-//! existing GasMechanicalLoad accepts at most 256 compact coordinates; this
-//! geometry does not lift that separate material-pullback limit.
+//! Geometry, force and tangent actions support the admitted mesh boundary size.
+//! The gas tangent retains sparse surface geometry and one acoustic rank-one
+//! factor; it neither imposes the small local-coordinate limit nor materializes
+//! the dense compressibility coupling. Its reusable-buffer action allocates no
+//! heap memory and polls cancellation in bounded coordinate/nonzero tiles.
 //!
 //! Every evaluation checks the complete solid mesh for local tetrahedron
 //! inversion/collapse and requires positive enclosed cavity volume. Closure,
@@ -25,9 +27,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use fs_exec::Cx;
-use fs_material::thermochemical_gas::energy::entropy::GasEntropySolve;
+use fs_material::thermochemical_gas::energy::entropy::{GasEntropyError, GasEntropySolve};
 use fs_material::thermochemical_gas::energy::parcel::ClosedGasParcel;
-use fs_sparse::{Coo, Csr};
+
+mod tangent;
+pub use tangent::TetCavityGasTangent;
 
 use super::{
     ClosedTetPressureSurface, HyperTetError, area_vector, checkpoint, cross, difference, dot,
@@ -77,8 +81,9 @@ pub struct TetCavityGasLoad {
     pub net_pressure_pa: f64,
     /// Full node-major force on the surrounding solid [N].
     pub force_n: Vec<f64>,
-    /// Derivative of `force_n` with respect to full solid displacement.
-    pub force_tangent: Csr,
+    /// Full force derivative: sparse geometry plus acoustic rank-one coupling.
+    /// Use apply_into with reusable buffers for large admitted cavity meshes.
+    pub force_tangent: TetCavityGasTangent,
     /// Delta U_gas + p_exterior Delta V [J] from the reference cavity state.
     pub potential_change_j: f64,
 }
@@ -302,41 +307,41 @@ impl ClosedTetCavity {
             Err(_) if was_cancelled => return Err(HyperTetError::Cancelled),
             Err(error) => return Err(invalid(&format!("adiabatic cavity gas refused state: {error}"))),
         };
+        let map_error = |error: GasEntropyError| match error {
+            GasEntropyError::Cancelled => HyperTetError::Cancelled,
+            other => invalid(&format!("cavity gas mechanical load refused: {other}")),
+        };
         let load = endpoint
-            .mechanical_load(
+            .mechanical_load_with_limit(
                 geometry.volume_m3,
                 geometry.gradient_m2(),
                 exterior_pressure_pa,
+                geometry.gradient_m2().len(),
+                || cx.checkpoint().is_err(),
             )
-            .map_err(|error| invalid(&format!("cavity gas mechanical load refused: {error}")))?;
+            .map_err(map_error)?;
         let compact_force = load
-            .generalized_forces()
-            .map_err(|error| invalid(&format!("cavity gas force refused: {error}")))?;
+            .generalized_forces_cancellable(|| cx.checkpoint().is_err())
+            .map_err(map_error)?;
         let mut force_n = vec![0.0; displacement_m.len()];
+        let mut volume_gradient = vec![0.0; displacement_m.len()];
         for (local, &value) in compact_force.iter().enumerate() {
+            if local % 256 == 0 { checkpoint(cx)?; }
             let node = self.nodes[local / 3];
-            force_n[3 * node + local % 3] = value;
+            let global = 3 * node + local % 3;
+            force_n[global] = value;
+            volume_gradient[global] = geometry.gradient_m2()[local];
         }
-        let compact = geometry.gradient_m2().len();
-        let mut tangent = Coo::new(displacement_m.len(), displacement_m.len());
-        let mut direction = vec![0.0; compact];
-        for column in 0..compact {
-            checkpoint(cx)?;
-            direction[column] = 1.0;
-            let volume_hessian = geometry.hessian_action(&direction, cx)?;
-            let action = load
-                .tangent_action(&direction, &volume_hessian)
-                .map_err(|error| invalid(&format!("cavity gas tangent refused: {error}")))?;
-            direction[column] = 0.0;
-            let column_node = self.nodes[column / 3];
-            let column_dof = 3 * column_node + column % 3;
-            for (row, value) in action.into_iter().enumerate() {
-                if value != 0.0 {
-                    let row_node = self.nodes[row / 3];
-                    tangent.push(3 * row_node + row % 3, column_dof, value);
-                }
-            }
-        }
+        let face_pressure = self.face_pressures_pa(load.net_pressure_pa(), cx)?;
+        let geometric = self.surface.force_tangent(
+            displacement_m, super::TetPressure::PerFace(&face_pressure), cx,
+        )?;
+        let tangent = TetCavityGasTangent::new(
+            geometric,
+            volume_gradient,
+            load.pressure_response().pressure_volume_derivative_pa_m3,
+            cx,
+        )?;
         let potential_change_j = finite(
             volume_step.stored_energy_change_j
                 + exterior_pressure_pa * finite(geometry.volume_m3 - self.reference_volume_m3)?,
@@ -348,7 +353,7 @@ impl ClosedTetCavity {
             volume_m3: geometry.volume_m3,
             net_pressure_pa,
             force_n,
-            force_tangent: tangent.assemble(),
+            force_tangent: tangent,
             potential_change_j,
         })
     }

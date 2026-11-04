@@ -4976,11 +4976,16 @@ The cavity also exposes `adiabatic_gas_load`, binding an original
 `ClosedGasParcel` at the undeformed cavity volume to the exact current cavity
 geometry. Every evaluation follows the source-owned isentrope to the trial
 volume and pulls the same pressure and acoustic bulk modulus through
-`GasMechanicalLoad`. The returned full-solid force Jacobian combines the
-matrix-free geometry Hessian with dp/dV; its conservative contribution is
+`GasMechanicalLoad`. Its conservative contribution is
 `Delta U_gas + p_ext Delta V`. This bridge uses no fixed gamma, does not freeze
 pressure or mutate the caller parcel, and adds neither heat nor time integration.
-The existing 256 compact-coordinate material pullback bound still applies.
+The force Jacobian is a `TetCavityGasTangent`: sparse current-surface geometry
+plus one retained acoustic rank-one term, `J = J_geometry - w w^T`, where
+`w = sqrt(rho*c^2/V) grad(V)`. It retains all nonlocal gas coupling with
+O(surface nonzeros + solid coordinates) storage and application work. Entry
+access and `apply` include both terms; `apply_into` uses caller-owned output
+and scratch without heap allocation, and leaves output unchanged on refusal.
+The sparse `geometric_part` alone is not the complete gas stiffness.
 
 
 Preparation rejects duplicate, out-of-range, open, disconnected and outer-shell
@@ -4988,9 +4993,16 @@ selections. Each evaluation admits every material tetrahedron and requires
 positive current cavity volume. Relative reference and displacement coordinates
 preserve a large common translation. These local checks do not certify
 self-intersection, global injectivity or contact. Geometry supports the admitted
-boundary size; `GasMechanicalLoad` retains its separate 256-coordinate chart
-bound. Gas evolution, heat exchange, mixed incompressibility and time integration
-remain with their respective owners.
+boundary size. The cavity supplies that admitted size to the shared material
+pullback and uses its cancellable force path, avoiding the default small-chart
+256-coordinate limit. Spatial admission and Jacobian actions poll cancellation
+in bounded tiles. Gas evolution, heat exchange, mixed incompressibility and
+time integration remain with their respective owners.
+
+Additional G1/G4 regressions refine the hollow specimen to 6,144 tetrahedra
+and 390 cavity coordinates, compare matrix-free forces/stiffness/work against
+source-resolved finite differences and analytic dilation, retain off-graph
+acoustic coupling, and check output atomicity under refusal and cancellation.
 
 Five focused regression groups cover independent volume/cofactor derivatives,
 work and pressure signs, matrix-free tangent action and symmetry, objectivity,

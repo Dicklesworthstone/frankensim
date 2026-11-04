@@ -10,7 +10,8 @@
 
 use super::{ClosedGasParcel, GasEntropyError, ResolvedThermochemicalGasState, positive};
 
-/// Hard work/allocation bound per local mechanical response, not a mesh limit.
+/// Default work/allocation bound for a small local mechanical response.
+/// Mesh consumers may supply their own admitted coordinate limit and cancellation.
 pub const MAX_VOLUME_COORDINATES: usize = 256;
 
 /// Local adiabatic pressure response from the original acoustic material state.
@@ -36,19 +37,33 @@ pub struct GasMechanicalLoad<'a, S = ResolvedThermochemicalGasState> {
 }
 
 fn invalid(message: &'static str) -> GasEntropyError { GasEntropyError::Invalid(message) }
-fn finite_vector(values: &[f64], length: usize) -> Result<(), GasEntropyError> {
-    if values.len() != length || values.iter().any(|v| !v.is_finite()) {
+fn checkpoint(cancelled: &mut impl FnMut() -> bool) -> Result<(), GasEntropyError> {
+    if cancelled() { Err(GasEntropyError::Cancelled) } else { Ok(()) }
+}
+fn finite_vector(
+    values: &[f64], length: usize, cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), GasEntropyError> {
+    if values.len() != length {
         return Err(invalid("volume response vector has wrong length or nonfinite entries"));
+    }
+    for block in values.chunks(MAX_VOLUME_COORDINATES) {
+        checkpoint(cancelled)?;
+        if block.iter().any(|v| !v.is_finite()) {
+            return Err(invalid("volume response vector has wrong length or nonfinite entries"));
+        }
     }
     Ok(())
 }
 fn finite(value: f64) -> Result<f64, GasEntropyError> {
     if value.is_finite() { Ok(value) } else { Err(invalid("mechanical pressure response overflow")) }
 }
-fn dot(a: &[f64], b: &[f64]) -> Result<f64, GasEntropyError> {
+fn dot(
+    a: &[f64], b: &[f64], cancelled: &mut impl FnMut() -> bool,
+) -> Result<f64, GasEntropyError> {
     // Fixed-order compensated accumulation, independent of worker scheduling.
     let (mut sum, mut correction) = (0.0, 0.0);
-    for (&x, &y) in a.iter().zip(b) {
+    for (i, (&x, &y)) in a.iter().zip(b).enumerate() {
+        if i % MAX_VOLUME_COORDINATES == 0 { checkpoint(cancelled)?; }
         let adjusted = finite(x * y)? - correction;
         let next = finite(sum + adjusted)?;
         correction = (next - sum) - adjusted;
@@ -94,6 +109,32 @@ impl ClosedGasParcel {
             self.pressure_response()?,
         )
     }
+
+    /// Borrow the same pressure response for a caller-budgeted spatial chart.
+    ///
+    /// The admitted mesh owns maximum_coordinates; it is not a new constitutive
+    /// limit. This view borrows all derivatives without allocating. Admission
+    /// and cancellable actions poll at most every 256 coordinates. Use the
+    /// cancellable actions when applying the load to a large chart.
+    pub fn mechanical_load_with_limit<'a>(
+        &'a self,
+        volume_m3: f64,
+        gradient: &'a [f64],
+        exterior_pressure_pa: f64,
+        maximum_coordinates: usize,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<GasMechanicalLoad<'a>, GasEntropyError> {
+        GasMechanicalLoad::new_with_limit(
+            self.state(),
+            self.volume_m3(),
+            volume_m3,
+            gradient,
+            exterior_pressure_pa,
+            self.pressure_response()?,
+            maximum_coordinates,
+            cancelled,
+        )
+    }
 }
 
 impl<'a, S> GasMechanicalLoad<'a, S> {
@@ -107,14 +148,33 @@ impl<'a, S> GasMechanicalLoad<'a, S> {
         exterior_pressure_pa: f64,
         response: GasPressureResponse,
     ) -> Result<Self, GasEntropyError> {
+        Self::new_with_limit(
+            state, current_volume_m3, volume_m3, gradient, exterior_pressure_pa,
+            response, MAX_VOLUME_COORDINATES, || false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::thermochemical_gas) fn new_with_limit(
+        state: &'a S,
+        current_volume_m3: f64,
+        volume_m3: f64,
+        gradient: &'a [f64],
+        exterior_pressure_pa: f64,
+        response: GasPressureResponse,
+        maximum_coordinates: usize,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, GasEntropyError> {
+        checkpoint(&mut cancelled)?;
         if volume_m3 != current_volume_m3 || !exterior_pressure_pa.is_finite()
             || exterior_pressure_pa < 0.0 || gradient.is_empty()
-            || gradient.len() > MAX_VOLUME_COORDINATES
+            || maximum_coordinates == 0 || gradient.len() > maximum_coordinates
         {
-            return Err(invalid("mechanical load needs current volume, nonnegative exterior pressure and 1..=256 coordinates"));
+            return Err(invalid("mechanical load needs current volume, nonnegative exterior pressure and coordinates within the declared limit"));
         }
-        finite_vector(gradient, gradient.len())?;
+        finite_vector(gradient, gradient.len(), &mut cancelled)?;
         let net_pressure_pa = finite(response.pressure_pa - exterior_pressure_pa)?;
+        checkpoint(&mut cancelled)?;
         Ok(Self {
             state,
             gradient,
@@ -137,7 +197,21 @@ impl<'a, S> GasMechanicalLoad<'a, S> {
 
     /// Work-conjugate generalized force, (p-pe)*grad(V), in the caller's chart.
     pub fn generalized_forces(&self) -> Result<Vec<f64>, GasEntropyError> {
-        self.gradient.iter().map(|g| finite(self.net_pressure_pa * g)).collect()
+        self.generalized_forces_cancellable(|| false)
+    }
+
+    /// The same force with bounded cancellation latency and atomic publication.
+    pub fn generalized_forces_cancellable(
+        &self, mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Vec<f64>, GasEntropyError> {
+        checkpoint(&mut cancelled)?;
+        let mut force = Vec::with_capacity(self.gradient.len());
+        for (i, &g) in self.gradient.iter().enumerate() {
+            if i % MAX_VOLUME_COORDINATES == 0 { checkpoint(&mut cancelled)?; }
+            force.push(finite(self.net_pressure_pa * g)?);
+        }
+        checkpoint(&mut cancelled)?;
+        Ok(force)
     }
 
     /// Actual force Jacobian action at fixed mass/entropy. `volume_hessian_action`
@@ -148,19 +222,47 @@ impl<'a, S> GasMechanicalLoad<'a, S> {
     pub fn tangent_action(
         &self, direction: &[f64], volume_hessian_action: &[f64],
     ) -> Result<Vec<f64>, GasEntropyError> {
-        finite_vector(direction, self.gradient.len())?;
-        finite_vector(volume_hessian_action, self.gradient.len())?;
-        let dp = finite(self.response.pressure_volume_derivative_pa_m3 * dot(self.gradient, direction)?)?;
-        self.gradient.iter().zip(volume_hessian_action).map(|(&g, &h)| {
-            finite(finite(self.net_pressure_pa * h)? + finite(dp * g)?)
-        }).collect()
+        self.tangent_action_cancellable(direction, volume_hessian_action, || false)
+    }
+
+    /// Matrix-free Jacobian action on a caller-budgeted chart, with the same
+    /// source acoustic compressibility and geometric pressure terms.
+    pub fn tangent_action_cancellable(
+        &self,
+        direction: &[f64],
+        volume_hessian_action: &[f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Vec<f64>, GasEntropyError> {
+        checkpoint(&mut cancelled)?;
+        finite_vector(direction, self.gradient.len(), &mut cancelled)?;
+        finite_vector(volume_hessian_action, self.gradient.len(), &mut cancelled)?;
+        let dp = finite(self.response.pressure_volume_derivative_pa_m3
+            * dot(self.gradient, direction, &mut cancelled)?)?;
+        let mut action = Vec::with_capacity(self.gradient.len());
+        for (i, (&g, &h)) in self.gradient.iter().zip(volume_hessian_action).enumerate() {
+            if i % MAX_VOLUME_COORDINATES == 0 { checkpoint(&mut cancelled)?; }
+            action.push(finite(finite(self.net_pressure_pa * h)? + finite(dp * g)?)?);
+        }
+        checkpoint(&mut cancelled)?;
+        Ok(action)
     }
 
     /// Net mechanical power OUT of gas plus the fixed-pressure exterior [W].
     /// F.q_dot equals (p-pe)*V_dot; energy integration remains with the caller.
     pub fn mechanical_power_w(&self, coordinate_rates: &[f64]) -> Result<f64, GasEntropyError> {
-        finite_vector(coordinate_rates, self.gradient.len())?;
-        finite(self.net_pressure_pa * dot(self.gradient, coordinate_rates)?)
+        self.mechanical_power_w_cancellable(coordinate_rates, || false)
+    }
+
+    /// Work-conjugate power on a spatial chart with bounded cancellation checks.
+    pub fn mechanical_power_w_cancellable(
+        &self, coordinate_rates: &[f64], mut cancelled: impl FnMut() -> bool,
+    ) -> Result<f64, GasEntropyError> {
+        checkpoint(&mut cancelled)?;
+        finite_vector(coordinate_rates, self.gradient.len(), &mut cancelled)?;
+        let power = finite(self.net_pressure_pa
+            * dot(self.gradient, coordinate_rates, &mut cancelled)?)?;
+        checkpoint(&mut cancelled)?;
+        Ok(power)
     }
 }
 
