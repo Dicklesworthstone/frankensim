@@ -93,7 +93,7 @@ impl From<FiniteViscoForceKick<'_>> for ViscoSustainedSolidKick {
 
 /// One accepted native split; durations and original scene keys permit replay.
 #[derive(Clone, Debug)]
-pub struct ViscoSustainedSphereTrajectoryStep {
+pub struct SustainedSphereTrajectoryStep<P> {
     pub elapsed_s: f64,
     pub duration_s: f64,
     pub maximum_contact_gap_m: f64,
@@ -104,15 +104,15 @@ pub struct ViscoSustainedSphereTrajectoryStep {
     pub solid_drift: FiniteViscoContactDrift,
     pub rigid: Vec<FiniteSolidSustainedRigidStep>,
     pub impact: Option<InelasticMixedContactReport>,
-    pub path: FiniteSolidSpherePathReport,
+    pub path: P,
 }
 
 /// Original physical storage/loss and separate signed/noncancelling numerical errors.
-#[derive(Clone, Debug, Default)]
-pub struct ViscoSustainedSphereTrajectoryReport {
+#[derive(Clone, Debug)]
+pub struct SustainedSphereTrajectoryReport<P> {
     pub duration_s: f64,
     pub rejected_steps: usize,
-    pub steps: Vec<ViscoSustainedSphereTrajectoryStep>,
+    pub steps: Vec<SustainedSphereTrajectoryStep<P>>,
     pub kinetic_change_j: f64,
     pub stored_change_j: f64,
     pub source_work_j: f64,
@@ -139,6 +139,66 @@ pub struct ViscoSustainedSphereTrajectoryReport {
     pub accumulated_linear_residual_kg_m_s: f64,
     pub accumulated_angular_residual_kg_m2_s: f64,
     pub accumulated_energy_residual_j: f64,
+}
+
+/// Original Tet4 receipt names retain their concrete geometric path type.
+pub type ViscoSustainedSphereTrajectoryStep =
+    SustainedSphereTrajectoryStep<FiniteSolidSpherePathReport>;
+pub type ViscoSustainedSphereTrajectoryReport =
+    SustainedSphereTrajectoryReport<FiniteSolidSpherePathReport>;
+
+impl<P> Default for SustainedSphereTrajectoryReport<P> {
+    fn default() -> Self {
+        Self {
+            duration_s: 0.0,
+            rejected_steps: 0,
+            steps: Vec::new(),
+            kinetic_change_j: 0.0,
+            stored_change_j: 0.0,
+            source_work_j: 0.0,
+            support_work_j: 0.0,
+            relaxation_loss_j: 0.0,
+            unallocated_contact_loss_j: 0.0,
+            solid_source_splitting_work_j: 0.0,
+            solid_force_splitting_work_j: 0.0,
+            material_endpoint_defect_j: 0.0,
+            rigid_force_splitting_work_j: 0.0,
+            rigid_drift_energy_defect_j: 0.0,
+            integration_defect_j: 0.0,
+            absolute_integration_defect_j: 0.0,
+            work_energy_residual_j: 0.0,
+            linear_momentum_change_kg_m_s: Vec3::ZERO,
+            angular_momentum_change_kg_m2_s: Vec3::ZERO,
+            external_impulse_kg_m_s: Vec3::ZERO,
+            external_angular_impulse_kg_m2_s: Vec3::ZERO,
+            support_impulse_kg_m_s: Vec3::ZERO,
+            support_angular_impulse_kg_m2_s: Vec3::ZERO,
+            linear_momentum_residual_kg_m_s: Vec3::ZERO,
+            angular_momentum_residual_kg_m2_s: Vec3::ZERO,
+            accumulated_linear_residual_kg_m_s: 0.0,
+            accumulated_angular_residual_kg_m2_s: 0.0,
+            accumulated_energy_residual_j: 0.0,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct SustainedTrajectoryAuditControls {
+    pub(super) linear_tolerance_kg_m_s: f64,
+    pub(super) angular_tolerance_kg_m2_s: f64,
+    pub(super) energy_tolerance_j: f64,
+    pub(super) integration_tolerance_j: f64,
+}
+
+impl From<ViscoSustainedSphereTrajectoryControls> for SustainedTrajectoryAuditControls {
+    fn from(c: ViscoSustainedSphereTrajectoryControls) -> Self {
+        Self {
+            linear_tolerance_kg_m_s: c.linear_tolerance_kg_m_s,
+            angular_tolerance_kg_m2_s: c.angular_tolerance_kg_m2_s,
+            energy_tolerance_j: c.energy_tolerance_j,
+            integration_tolerance_j: c.integration_tolerance_j,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -347,7 +407,7 @@ pub fn visco_sustained_sphere_trajectory_candidate<'a>(
         accumulate(&mut report, &step, vector(origin_m));
         report.steps.push(step);
         finish(&mut report);
-        if !admitted(&report, controls) {
+        if !admitted(&report, controls.into()) {
             return Err(Error::Audit(Box::new(report)));
         }
         current = Some(next);
@@ -595,9 +655,9 @@ fn incoming_laws(
     Ok((mapped, incoming, targets))
 }
 
-fn accumulate(
-    r: &mut ViscoSustainedSphereTrajectoryReport,
-    s: &ViscoSustainedSphereTrajectoryStep,
+pub(super) fn accumulate<P>(
+    r: &mut SustainedSphereTrajectoryReport<P>,
+    s: &SustainedSphereTrajectoryStep<P>,
     origin: Vec3,
 ) {
     let k = &s.solid_kick;
@@ -715,7 +775,7 @@ fn accumulate(
     }
 }
 
-fn finish(r: &mut ViscoSustainedSphereTrajectoryReport) {
+pub(super) fn finish<P>(r: &mut SustainedSphereTrajectoryReport<P>) {
     r.work_energy_residual_j =
         r.kinetic_change_j + r.stored_change_j + r.relaxation_loss_j + r.unallocated_contact_loss_j
             - r.source_work_j
@@ -730,9 +790,9 @@ fn finish(r: &mut ViscoSustainedSphereTrajectoryReport) {
         .sub(r.external_angular_impulse_kg_m2_s)
         .sub(r.support_angular_impulse_kg_m2_s);
 }
-fn admitted(
-    r: &ViscoSustainedSphereTrajectoryReport,
-    c: ViscoSustainedSphereTrajectoryControls,
+pub(super) fn admitted<P>(
+    r: &SustainedSphereTrajectoryReport<P>,
+    c: SustainedTrajectoryAuditControls,
 ) -> bool {
     [
         r.kinetic_change_j,

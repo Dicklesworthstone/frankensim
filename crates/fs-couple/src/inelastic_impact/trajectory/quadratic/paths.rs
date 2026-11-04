@@ -1,16 +1,71 @@
 //! Remaining rigid-pair paths share the authored boundary work allowance.
 
 use super::{
-    FiniteSolidSphere, FiniteSolidSphereTrajectoryError, MixedViscoSpherePathReport,
-    MixedViscoSphereTrajectoryError, QuadraticSolidPathControls, QuadraticSolidPathReport,
-    QuadraticSolidVolumePathReport, poll,
+    FiniteSolidSphere, FiniteSolidSphereTrajectoryError, MixedViscoSpherePathRefusal,
+    MixedViscoSpherePathReport, MixedViscoSphereTrajectoryError, QuadraticSolidContactSurface,
+    QuadraticSolidPathControls, QuadraticSolidPathReport, QuadraticSolidPathVerdict,
+    QuadraticSolidVolumePathReport, QuadraticSphereScenePathVerdict, TrajectoryScene, poll,
 };
 use fs_exec::Cx;
 use fs_mbd::{RigidBodyState, Vec3};
 use fs_query::triangle::sweep::{LinearSweepVerdict, linear_spheres};
 
+/// Both entry points share the same native motion and physical accounts. A
+/// prepared scene additionally authorizes its explicitly declared pair laws.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn admit_pairs(
+pub(super) fn admit_path(
+    scene: TrajectoryScene<'_>,
+    surface: &QuadraticSolidContactSurface,
+    volume: QuadraticSolidVolumePathReport,
+    start: &[[f64; 3]],
+    end: &[[f64; 3]],
+    before: &[RigidBodyState],
+    after: &[RigidBodyState],
+    spheres: &[FiniteSolidSphere],
+    controls: QuadraticSolidPathControls,
+    cx: &Cx<'_>,
+) -> Result<
+    Result<MixedViscoSpherePathReport, MixedViscoSpherePathRefusal>,
+    MixedViscoSphereTrajectoryError,
+> {
+    use MixedViscoSphereTrajectoryError as E;
+    if let TrajectoryScene::Complete(scene) = scene {
+        let path = scene
+            .affine_quadratic_sphere_paths_at_positions(
+                surface, start, end, before, after, controls, cx,
+            )
+            .map_err(E::Scene)?;
+        if matches!(
+            path.verdict,
+            QuadraticSphereScenePathVerdict::PossibleContact { .. }
+        ) {
+            return Ok(Err(MixedViscoSpherePathRefusal::ScenePath(path)));
+        }
+        return Ok(Ok(MixedViscoSpherePathReport {
+            contact_keys: Vec::new(),
+            volume,
+            boundary: path.boundary,
+            sphere_pair_comparisons: path.sphere_pair_comparisons,
+            sphere_pair_candidates: path.sphere_pair_candidates,
+            sphere_pairs_checked: path.sphere_pairs_checked,
+            sphere_pair_windows: path.sphere_pair_windows,
+            minimum_pair_clearance_m: path.minimum_pair_clearance_m,
+        }));
+    }
+    let boundary = surface
+        .affine_sphere_paths_at_positions(start, end, before, after, spheres, controls, cx)
+        .map_err(E::Surface)?;
+    if matches!(
+        boundary.verdict,
+        QuadraticSolidPathVerdict::PossibleContact { .. }
+    ) {
+        return Ok(Err(MixedViscoSpherePathRefusal::Boundary(boundary)));
+    }
+    admit_pairs(volume, boundary, before, after, spheres, controls, cx).map(Ok)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn admit_pairs(
     volume: QuadraticSolidVolumePathReport,
     boundary: QuadraticSolidPathReport,
     before: &[RigidBodyState],
@@ -21,8 +76,11 @@ pub(super) fn admit_pairs(
 ) -> Result<MixedViscoSpherePathReport, MixedViscoSphereTrajectoryError> {
     use MixedViscoSphereTrajectoryError as E;
     let mut report = MixedViscoSpherePathReport {
+        contact_keys: Vec::new(),
         volume,
         boundary,
+        sphere_pair_comparisons: 0,
+        sphere_pair_candidates: 0,
         sphere_pairs_checked: 0,
         sphere_pair_windows: 0,
         minimum_pair_clearance_m: None,
@@ -55,6 +113,8 @@ pub(super) fn admit_pairs(
                 cx,
             )
             .map_err(|e| E::Path(FiniteSolidSphereTrajectoryError::Query(e)))?;
+            report.sphere_pair_comparisons += 1;
+            report.sphere_pair_candidates += 1;
             report.sphere_pairs_checked += 1;
             report.sphere_pair_windows += pair.examined_windows;
             match pair.verdict {

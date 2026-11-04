@@ -57,6 +57,9 @@ mod quadratic_trajectory;
 #[path = "inelastic_impact/sustained.rs"]
 mod sustained;
 
+#[path = "inelastic_impact/quadratic_sustained.rs"]
+mod quadratic_sustained;
+
 const NODES: [[f64; 3]; 4] = [
     [0.0, 0.0, 0.0],
     [1.0, 0.0, 0.0],

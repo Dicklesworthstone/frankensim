@@ -5,6 +5,9 @@
 //! collision path interpolates all ten nodal coordinates and sphere centres;
 //! it is not an enclosure of the unknown continuous material trajectory.
 
+/// Loaded contact through original quadratic force, contact and material substeps.
+pub mod sustained;
+
 use super::{
     SphereTrajectoryReport, SphereTrajectoryStep, TrajectoryAuditControls, accumulate, admitted,
     check_clock, finish, vector,
@@ -25,11 +28,16 @@ use crate::inelastic_impact::{
             path::{
                 QuadraticSolidPathControls, QuadraticSolidPathReport, QuadraticSolidPathVerdict,
             },
+            scene::{
+                QuadraticSphereSceneError, QuadraticSphereScenePathReport,
+                QuadraticSphereScenePathVerdict,
+            },
             volume::{
                 QuadraticSolidVolumeError, QuadraticSolidVolumePathReport,
                 QuadraticSolidVolumePathVerdict,
             },
         },
+        scene::{FiniteSolidSphereScene, FiniteSolidSphereSceneKey},
     },
 };
 use fs_exec::Cx;
@@ -44,7 +52,9 @@ use fs_solid::hyper3::{
     visco::dynamics::FiniteViscoMotionControls,
 };
 
+mod geometry;
 mod paths;
+use geometry::TrajectoryScene;
 
 /// Explicit native solver, geometric work and complete-call physical allowances.
 #[derive(Clone, Copy, Debug)]
@@ -70,11 +80,15 @@ pub struct MixedViscoSphereTrajectoryControls {
     pub angular_integration_tolerance_kg_m2_s: f64,
 }
 
-/// Independent complete-volume, curved-boundary and undeclared-pair checks.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// Complete-volume, curved-boundary and rigid-pair path checks.
+#[derive(Clone, Debug, PartialEq)]
 pub struct MixedViscoSpherePathReport {
+    /// Original active features in the same order as this interval's impulses.
+    pub contact_keys: Vec<FiniteSolidSphereSceneKey>,
     pub volume: QuadraticSolidVolumePathReport,
     pub boundary: QuadraticSolidPathReport,
+    pub sphere_pair_comparisons: usize,
+    pub sphere_pair_candidates: usize,
     pub sphere_pairs_checked: usize,
     pub sphere_pair_windows: usize,
     /// No pair lower bound exists when there are fewer than two spheres.
@@ -103,6 +117,7 @@ pub struct MixedViscoSphereTrajectoryCandidate<'a> {
 pub enum MixedViscoSpherePathRefusal {
     Volume(QuadraticSolidVolumePathReport),
     Boundary(QuadraticSolidPathReport),
+    ScenePath(QuadraticSphereScenePathReport),
     Endpoint(QuadraticSolidSurfaceError),
 }
 
@@ -115,6 +130,7 @@ pub enum MixedViscoSphereTrajectoryError {
     ExactIncompressibleChordVelocity,
     Solid(MixedViscoTetError),
     Surface(QuadraticSolidSurfaceError),
+    Scene(QuadraticSphereSceneError),
     Volume(QuadraticSolidVolumeError),
     InitialVolumeUnresolved {
         report: QuadraticSolidVolumePathReport,
@@ -180,8 +196,92 @@ pub fn mixed_visco_sphere_trajectory_candidate<'a>(
     controls: MixedViscoSphereTrajectoryControls,
     cx: &Cx<'_>,
 ) -> Result<MixedViscoSphereTrajectoryCandidate<'a>, MixedViscoSphereTrajectoryError> {
+    advance_scene(
+        solid,
+        surface,
+        bodies,
+        properties,
+        TrajectoryScene::Surface(spheres),
+        held_velocity_dofs,
+        nodal_forces_n,
+        body_force_n_m3,
+        pressure_gauge,
+        wrenches,
+        gravity,
+        duration_s,
+        origin_m,
+        controls,
+        cx,
+    )
+}
+
+/// Advance a complete prepared sphere scene through one simultaneous native
+/// impact system, including rigid pairs and curved quadratic solid contacts.
+///
+/// Every rigid pair keeps its explicitly declared law and canonical scene key.
+/// Original native mass, pressure, histories, rigid inertia and all physical
+/// and numerical gates are identical to the surface-only entry. Possible pair
+/// encounters shorten the native interval before an active row can be resolved;
+/// no pair is ignored or assigned a sphere's different solid-interface law.
+/// This is a transient-impact driver; loaded dwell uses [`sustained`].
+#[allow(clippy::too_many_arguments)]
+pub fn mixed_visco_sphere_scene_trajectory_candidate<'a>(
+    solid: &MixedViscoTetMotion<'a>,
+    surface: &QuadraticSolidContactSurface,
+    scene: &FiniteSolidSphereScene,
+    bodies: &[RigidBodyState],
+    properties: &[MassProperties],
+    held_velocity_dofs: &[usize],
+    nodal_forces_n: &[(usize, f64)],
+    body_force_n_m3: [f64; 3],
+    pressure_gauge: Option<(usize, f64)>,
+    wrenches: &[Wrench],
+    gravity: Gravity,
+    duration_s: f64,
+    origin_m: [f64; 3],
+    controls: MixedViscoSphereTrajectoryControls,
+    cx: &Cx<'_>,
+) -> Result<MixedViscoSphereTrajectoryCandidate<'a>, MixedViscoSphereTrajectoryError> {
+    advance_scene(
+        solid,
+        surface,
+        bodies,
+        properties,
+        TrajectoryScene::Complete(scene),
+        held_velocity_dofs,
+        nodal_forces_n,
+        body_force_n_m3,
+        pressure_gauge,
+        wrenches,
+        gravity,
+        duration_s,
+        origin_m,
+        controls,
+        cx,
+    )
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn advance_scene<'a>(
+    solid: &MixedViscoTetMotion<'a>,
+    surface: &QuadraticSolidContactSurface,
+    bodies: &[RigidBodyState],
+    properties: &[MassProperties],
+    scene: TrajectoryScene<'_>,
+    held_velocity_dofs: &[usize],
+    nodal_forces_n: &[(usize, f64)],
+    body_force_n_m3: [f64; 3],
+    pressure_gauge: Option<(usize, f64)>,
+    wrenches: &[Wrench],
+    gravity: Gravity,
+    duration_s: f64,
+    origin_m: [f64; 3],
+    controls: MixedViscoSphereTrajectoryControls,
+    cx: &Cx<'_>,
+) -> Result<MixedViscoSphereTrajectoryCandidate<'a>, MixedViscoSphereTrajectoryError> {
     use MixedViscoSphereTrajectoryError as E;
     poll(cx)?;
+    let spheres = scene.spheres();
     validate(
         bodies, properties, spheres, wrenches, duration_s, origin_m, controls,
     )?;
@@ -240,10 +340,7 @@ pub fn mixed_visco_sphere_trajectory_candidate<'a>(
     };
     let mut elapsed = 0.0;
     let clock_tolerance = 8.0 * f64::EPSILON * start_time.abs().max(end_time.abs()).max(duration_s);
-    let mut geometry = surface
-        .sphere_separations_at_positions(&coordinates, &rigid, &spheres, controls.path.initial, cx)
-        .map_err(E::Surface)?;
-    let mut contacts = geometry.admitted_contacts().map_err(E::Surface)?;
+    let mut geometry = scene.contacts(surface, &coordinates, &rigid, controls.path.initial, cx)?;
     while elapsed < duration_s {
         poll(cx)?;
         if report.steps.len() == controls.maximum_steps {
@@ -252,12 +349,8 @@ pub fn mixed_visco_sphere_trajectory_candidate<'a>(
             }));
         }
         let accepted = current.as_ref().unwrap_or(solid);
-        let maximum_gap = geometry
-            .contacts
-            .iter()
-            .map(|w| w.gap_m)
-            .fold(0.0, f64::max);
-        let event = if contacts.is_empty() {
+        let maximum_gap = geometry.maximum_contact_gap_m;
+        let event = if geometry.contacts.is_empty() {
             None
         } else {
             Some(
@@ -266,7 +359,7 @@ pub fn mixed_visco_sphere_trajectory_candidate<'a>(
                     &held,
                     &rigid,
                     properties,
-                    &contacts,
+                    &geometry.contacts,
                     origin_m,
                     controls.impact,
                     cx,
@@ -282,7 +375,7 @@ pub fn mixed_visco_sphere_trajectory_candidate<'a>(
         // and endpoint geometry instead of rebuilding their material traces.
         let start = &coordinates;
         let mut dt = controls.maximum_step_s.min(duration_s - elapsed);
-        let (step, momentum, flights, rigid_next, path, end, geometry_next, contacts_next) = loop {
+        let (step, momentum, flights, rigid_next, mut path, end, geometry_next) = loop {
             poll(cx)?;
             if !dt.is_finite()
                 || dt <= 0.0
@@ -339,61 +432,37 @@ pub fn mixed_visco_sphere_trajectory_candidate<'a>(
                 .collect::<Result<_, _>>()
                 .map_err(E::Rigid)?;
             let next: Vec<_> = flights.iter().map(|f| f.receipt.state_after).collect();
-            let boundary = surface
-                .affine_sphere_paths_at_positions(
-                    start,
-                    &end,
-                    post_rigid,
-                    &next,
-                    &spheres,
-                    controls.path,
-                    cx,
-                )
-                .map_err(E::Surface)?;
-            if matches!(
-                boundary.verdict,
-                QuadraticSolidPathVerdict::PossibleContact { .. }
-            ) {
-                dt = shortened(
-                    dt,
-                    elapsed,
-                    &mut report,
-                    controls,
-                    MixedViscoSpherePathRefusal::Boundary(boundary),
-                )?;
-                continue;
-            }
-            let path = paths::admit_pairs(
+            let path = match paths::admit_path(
+                scene,
+                surface,
                 volume,
-                boundary,
+                start,
+                &end,
                 post_rigid,
                 &next,
                 &spheres,
                 controls.path,
                 cx,
-            )?;
-            let geometry = surface
-                .sphere_separations_at_positions(&end, &next, &spheres, controls.path.initial, cx)
-                .map_err(E::Surface)?;
-            let contacts = match geometry.admitted_contacts() {
-                Ok(contacts) => contacts,
-                Err(
-                    error @ (QuadraticSolidSurfaceError::UnresolvedGap { .. }
-                    | QuadraticSolidSurfaceError::UnresolvedActivation { .. }),
-                ) => {
-                    dt = shortened(
-                        dt,
-                        elapsed,
-                        &mut report,
-                        controls,
-                        MixedViscoSpherePathRefusal::Endpoint(error),
-                    )?;
+            )? {
+                Ok(path) => path,
+                Err(refusal) => {
+                    dt = shortened(dt, elapsed, &mut report, controls, refusal)?;
                     continue;
                 }
-                Err(error) => return Err(E::Surface(error)),
             };
-            break (step, momentum, flights, next, path, end, geometry, contacts);
+            let geometry = match scene.contacts(surface, &end, &next, controls.path.initial, cx) {
+                Ok(geometry) => geometry,
+                Err(error) => match geometry::refinable_endpoint(error) {
+                    Ok(refusal) => {
+                        dt = shortened(dt, elapsed, &mut report, controls, refusal)?;
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                },
+            };
+            break (step, momentum, flights, next, path, end, geometry);
         };
+        path.contact_keys = core::mem::take(&mut geometry.keys);
         let impact = event.map(|e| e.report);
         accumulate(
             &mut report,
@@ -430,7 +499,6 @@ pub fn mixed_visco_sphere_trajectory_candidate<'a>(
         coordinates = end;
         rigid = rigid_next;
         geometry = geometry_next;
-        contacts = contacts_next;
         finish(&mut report);
         if !admitted(&report, controls.into()) {
             return Err(E::Audit(Box::new(report)));
@@ -474,6 +542,10 @@ fn shortened(
         })
         | MixedViscoSpherePathRefusal::Boundary(QuadraticSolidPathReport {
             verdict: QuadraticSolidPathVerdict::PossibleContact { fraction_start, .. },
+            ..
+        })
+        | MixedViscoSpherePathRefusal::ScenePath(QuadraticSphereScenePathReport {
+            verdict: QuadraticSphereScenePathVerdict::PossibleContact { fraction_start, .. },
             ..
         }) => fraction_start,
         _ => 0.0,

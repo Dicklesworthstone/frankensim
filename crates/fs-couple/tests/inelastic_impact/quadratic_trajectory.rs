@@ -1,5 +1,8 @@
 //! G1/G3 native curved bounce, retained Maxwell evolution and loaded momentum.
 
+#[path = "quadratic_trajectory/scene.rs"]
+mod scene;
+
 use super::*;
 use fs_couple::finite_solid::contact::step::FiniteSolidSphereTrajectoryError;
 use fs_couple::inelastic_impact::{

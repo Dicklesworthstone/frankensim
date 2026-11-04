@@ -1,5 +1,57 @@
 # CONTRACT: fs-couple
 
+## Loaded quadratic Maxwell scenes through native force, contact and drift
+
+`trajectory::quadratic::sustained::mixed_visco_sustained_sphere_trajectory_candidate`
+advances original curved P2/P1 Maxwell motion with a complete prepared sphere
+scene through native force kick, simultaneous contact and material drift. Every
+active solid and declared rigid-pair row uses its original law, witness, solid
+trace and full rigid inertia. Restitution targets are computed from accepted
+pre-force velocities and fixed across retries, so a resting loaded contact does
+not turn each gravity kick into a new restitution bounce.
+
+The original finite-compliance mixed owner determines pressure at the actual
+post-contact drift coordinates and advances each retained quadrature history.
+Physical storage includes `U(J(p))`; reactions from that pressure solve's fixed
+coordinates never become physical support work. Authored stationary supports,
+signed nodal/reference-volume loads, wrenches, gravity and actual support torque
+retain separate momentum accounts. The original Tet4 and new TET10 sustained
+drivers share one accounting implementation through generic path receipts;
+existing Tet4 public receipt names remain concrete aliases.
+
+Positive reference and current whole-material maps are required before the first
+force phase. Every accepted interval then admits the complete TET10 volume path,
+curved boundary paths and declared sphere-pair paths. Each rejected interval
+recomputes the entire force/contact/drift sequence from the same accepted state.
+No rejected pressure solve, contact trial or material endpoint publishes time,
+stress or history. Accepted coordinates and geometry are reused. The absolute
+splitting allowance is distributed in proportion to trial duration; signed and
+noncancelling momentum/work checks also apply to the complete requested call.
+
+Relaxation, contact-map loss, source/force splitting and rigid drift defects
+remain separate. Loaded support contact can contain refinable numerical impact
+loss; it is not declared friction heat. Scope is first-order finite-compliance
+motion, stationary held velocities and one COM-centred sphere per rigid body.
+Exact incompressibility explicitly refuses the unconstrained kinetic subflow.
+Geometric admission covers the declared affine numerical path and local material
+orientation, not continuum-flow CCD or global solid self-intersection.
+
+`trajectory::quadratic::mixed_visco_sphere_scene_trajectory_candidate` also adds
+the same complete scene to the existing native transient-impact driver. Declared
+pair encounters localize before entering the simultaneous solve and retain their
+own restitution/friction law. Accepted interval keys align with the original
+contact impulses. The surface-only entry retains its undeclared-pair refusal;
+both entries share the same native motion and physical accounting worker.
+
+Five focused native regressions specify loaded curved two-sphere dwell with
+pre-force restitution, complete history replay and timestep-refined support loss;
+adaptive/late/cancelled rollback; sliding with original off-diagonal inertia and
+actual activation-gap angular residual; unequal-mass pair impact with independent
+impulse/loss/trajectory values; and single-sphere parity between transient entries.
+Pinned parser/format checks, bounded owner-integration review and independent
+mechanics arithmetic passed. Native Cargo compilation and Rust test execution
+remain unverified under the workspace resource blocker.
+
 ## Complete curved solid and rigid-pair scenes
 
 `inelastic_impact::surface::quadratic::scene` joins original curved TET10
