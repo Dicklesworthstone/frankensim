@@ -52,6 +52,138 @@ pub struct DrivenResonanceParameterResponse {
     pub maximum_relative_residual: f64,
 }
 
+/// One original observation and its local partial derivatives. Second/mixed
+/// entries are requested only at the peak; edge queries need first derivatives.
+/// The source evaluator releases its factor before returning this scalar record.
+pub(in crate::harmonic) struct ParameterObservationJet {
+    pub value: C64,
+    pub frequency: C64,
+    pub parameter: C64,
+    pub second_frequency: C64,
+    pub mixed: C64,
+    pub relative_residual: f64,
+}
+
+pub(in crate::harmonic) fn parameter_search_controls(
+    mut controls: ResonanceControls,
+) -> Result<ResonanceControls, DrivenResonanceError> {
+    let additional = if controls.measure_half_power_bandwidth {
+        3
+    } else {
+        1
+    };
+    if !(3 + additional..=4096).contains(&controls.maximum_evaluations) {
+        return Err(DrivenResonanceError::Invalid(
+            "evaluation capacity must include the peak search and parameter queries",
+        ));
+    }
+    controls.maximum_evaluations -= additional;
+    Ok(controls)
+}
+
+pub(in crate::harmonic) fn admit_parameter_response(
+    model: &HarmonicModel,
+) -> Result<(), DrivenResonanceError> {
+    let (base_bytes, base_work) = resource_bounds(model.n, model.m)?;
+    let bytes = base_bytes as u128 + 512 * model.n as u128 + 256 * model.m as u128;
+    let work = 6 * base_work as u128;
+    if bytes > model.budget.max_dense_bytes as u128 || work > model.budget.max_dense_work as u128 {
+        return Err(DrivenResonanceError::Invalid(
+            "insufficient simultaneous resonance parameter payload or work budget",
+        ));
+    }
+    Ok(())
+}
+
+/// One implicit differentiation owner for ordinary and physically loaded peaks.
+/// Each evaluation owns at most one factor and drops it before the next call.
+pub(in crate::harmonic) fn resolve_parameter_response<C, F>(
+    resonance: DrivenResonance,
+    mut evaluate: F,
+    cancelled: &mut C,
+) -> Result<DrivenResonanceParameterResponse, DrivenResonanceError>
+where
+    C: FnMut() -> bool,
+    F: FnMut(f64, bool, &mut C) -> Result<ParameterObservationJet, DrivenResonanceError>,
+{
+    poll(cancelled)?;
+    let omega = resonance.peak.angular_frequency_rad_s;
+    let peak = evaluate(omega, true, cancelled)?;
+    let value = resonance.observation;
+    let frequency_slope = resonance.observation_derivative;
+    let r = ratio(frequency_slope, value)?;
+    let t = ratio(peak.parameter, value)?;
+    let curvature = (ratio(peak.second_frequency, value)? - r * r).re;
+    let mixed_log_slope = (ratio(peak.mixed, value)? - r * t).re;
+    if !curvature.is_finite() || curvature >= 0.0 || !mixed_log_slope.is_finite() {
+        return Err(DrivenResonanceError::Invalid(
+            "a finite strictly negative local peak curvature is required",
+        ));
+    }
+    let peak_derivative = -mixed_log_slope / curvature;
+    let observation_derivative = peak.parameter + frequency_slope.scale(peak_derivative);
+    let total_log = t + r.scale(peak_derivative);
+    if !peak_derivative.is_finite() || !finite(observation_derivative) || !finite(total_log) {
+        return Err(DrivenResonanceError::Invalid(
+            "local peak parameter derivative is not representable",
+        ));
+    }
+    let mut residual = resonance
+        .maximum_relative_residual
+        .max(peak.relative_residual);
+    let half_power_derivative = if let Some(band) = resonance.half_power {
+        let mut crossing = |frequency: f64, lower: bool| {
+            let sample = evaluate(frequency, false, &mut *cancelled)?;
+            let slope = ratio(sample.frequency, sample.value)?.re;
+            if (lower && slope <= 0.0) || (!lower && slope >= 0.0) {
+                return Err(DrivenResonanceError::NotBracketed(
+                    "half-height crossing must have a nonzero slope toward the selected peak",
+                ));
+            }
+            let result = (total_log.re - ratio(sample.parameter, sample.value)?.re) / slope;
+            if !result.is_finite() {
+                return Err(DrivenResonanceError::Invalid(
+                    "crossing parameter derivative is not representable",
+                ));
+            }
+            residual = residual.max(sample.relative_residual);
+            Ok(result)
+        };
+        let lower = crossing(band.lower.angular_frequency_rad_s, true)?;
+        let upper = crossing(band.upper.angular_frequency_rad_s, false)?;
+        let width = upper - lower;
+        let quality =
+            band.response_quality_factor * (peak_derivative / omega - width / band.bandwidth_rad_s);
+        if !width.is_finite() || !quality.is_finite() {
+            return Err(DrivenResonanceError::Invalid(
+                "bandwidth parameter derivative is not representable",
+            ));
+        }
+        Some(HalfPowerBandwidthDerivative {
+            lower_frequency_derivative_rad_s: lower,
+            upper_frequency_derivative_rad_s: upper,
+            bandwidth_derivative_rad_s: width,
+            response_quality_factor_derivative: quality,
+        })
+    } else {
+        None
+    };
+    let evaluations = resonance.evaluations + if resonance.half_power.is_some() { 3 } else { 1 };
+    poll(cancelled)?;
+    Ok(DrivenResonanceParameterResponse {
+        resonance,
+        peak_frequency_derivative_rad_s: peak_derivative,
+        observation_derivative,
+        log_amplitude_derivative: total_log.re,
+        phase_derivative: total_log.im,
+        log_amplitude_curvature: curvature,
+        stationarity_residual: r.re,
+        half_power_derivative,
+        evaluations,
+        maximum_relative_residual: residual,
+    })
+}
+
 impl HarmonicModel {
     /// Resolve an observed resonance and differentiate its frequency, complex
     /// amplitude, phase, and optional -3 dB bandwidth/Q with respect to a real
@@ -84,7 +216,7 @@ impl HarmonicModel {
         direction: HarmonicParameterDirection<'_>,
         input_derivative: Option<&[C64]>,
         interval_rad_s: (f64, f64),
-        mut controls: ResonanceControls,
+        controls: ResonanceControls,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<DrivenResonanceParameterResponse, DrivenResonanceError> {
         poll(&mut cancelled)?;
@@ -94,176 +226,105 @@ impl HarmonicModel {
                 "one finite parameter input derivative per original port required",
             ));
         }
-        let additional = if controls.measure_half_power_bandwidth {
-            3
-        } else {
-            1
-        };
-        if !(3 + additional..=4096).contains(&controls.maximum_evaluations) {
-            return Err(DrivenResonanceError::Invalid(
-                "evaluation capacity must include the peak search and parameter queries",
-            ));
-        }
-        let (base_bytes, base_work) = resource_bounds(self.n, self.m)?;
-        let bytes = base_bytes as u128 + 512 * self.n as u128 + 256 * self.m as u128;
-        let work = 6 * base_work as u128;
-        if bytes > self.budget.max_dense_bytes as u128 || work > self.budget.max_dense_work as u128
-        {
-            return Err(DrivenResonanceError::Invalid(
-                "insufficient simultaneous resonance parameter payload or work budget",
-            ));
-        }
-        controls.maximum_evaluations -= additional;
+        let controls = parameter_search_controls(controls)?;
+        admit_parameter_response(self)?;
         let resonance =
             self.driven_resonance(input, observation, interval_rad_s, controls, &mut cancelled)?;
-        let omega = resonance.peak.angular_frequency_rad_s;
-        let factor = self.factor(omega, &mut cancelled)?;
-        let frequency = factor.response_with_frequency_derivative(input, None, &mut cancelled)?;
-        let parameter = factor.response_with_parameter_derivative(
-            input,
-            direction,
-            input_derivative,
-            &mut cancelled,
-        )?;
-        let value = resonance.observation;
-        let frequency_slope = resonance.observation_derivative;
-        let parameter_slope = selected(
-            observation,
-            &parameter.state_derivative,
-            &parameter.effort_derivative,
-            &parameter.output_derivative,
-            &mut cancelled,
-        )?;
-        let mut rhs = vec![C64::ZERO; self.n];
-        for (target, &dx) in rhs[..self.n_diff]
-            .iter_mut()
-            .zip(&frequency.state_derivative)
-        {
-            *target = C64::new(-2.0 * dx.im, 2.0 * dx.re);
-        }
-        let (second, second_residual) = factor.solve_rhs(&rhs, &mut cancelled)?;
-        let second_observation = self.observe_parameter_tangent(
-            observation,
-            &second,
-            None,
-            None,
-            &frequency.effort_derivative,
-            &mut cancelled,
-        )?;
-        let action = parameter::generator_action(
-            self,
-            &direction,
-            &frequency.state_derivative,
-            &frequency.effort_derivative,
-            &mut cancelled,
-        )?;
-        rhs = action.generator;
-        for (target, &dx) in rhs[..self.n_diff]
-            .iter_mut()
-            .zip(&parameter.state_derivative)
-        {
-            *target = *target + C64::new(-dx.im, dx.re);
-        }
-        let (mixed, mixed_residual) = factor.solve_rhs(&rhs, &mut cancelled)?;
-        let mixed_observation = self.observe_parameter_tangent(
-            observation,
-            &mixed,
-            Some(&action.storage),
-            direction.ports,
-            &frequency.effort_derivative,
-            &mut cancelled,
-        )?;
-        let r = ratio(frequency_slope, value)?;
-        let t = ratio(parameter_slope, value)?;
-        let curvature = (ratio(second_observation, value)? - r * r).re;
-        let mixed_log_slope = (ratio(mixed_observation, value)? - r * t).re;
-        if !curvature.is_finite() || curvature >= 0.0 || !mixed_log_slope.is_finite() {
-            return Err(DrivenResonanceError::Invalid(
-                "a finite strictly negative local peak curvature is required",
-            ));
-        }
-        let peak_derivative = -mixed_log_slope / curvature;
-        let observation_derivative = parameter_slope + frequency_slope.scale(peak_derivative);
-        let total_log = t + r.scale(peak_derivative);
-        if !peak_derivative.is_finite() || !finite(observation_derivative) || !finite(total_log) {
-            return Err(DrivenResonanceError::Invalid(
-                "local peak parameter derivative is not representable",
-            ));
-        }
-        let mut residual = resonance
-            .maximum_relative_residual
-            .max(frequency.response.relative_residual)
-            .max(frequency.relative_derivative_residual)
-            .max(parameter.response.relative_residual)
-            .max(parameter.relative_derivative_residual)
-            .max(second_residual)
-            .max(mixed_residual);
-        // The payload admission permits one dense factor. Release the peak's
-        // factor and tangent arrays before preparing either half-height edge.
-        drop((
-            factor,
-            frequency,
-            parameter,
-            rhs,
-            second,
-            mixed,
-            action.storage,
-            action.envelope,
-        ));
-        let half_power_derivative = if let Some(band) = resonance.half_power {
-            let lower = self.crossing_parameter_derivative(
-                input,
-                observation,
-                direction,
-                input_derivative,
-                band.lower.angular_frequency_rad_s,
-                total_log.re,
-                true,
-                &mut residual,
-                &mut cancelled,
-            )?;
-            let upper = self.crossing_parameter_derivative(
-                input,
-                observation,
-                direction,
-                input_derivative,
-                band.upper.angular_frequency_rad_s,
-                total_log.re,
-                false,
-                &mut residual,
-                &mut cancelled,
-            )?;
-            let width = upper - lower;
-            let quality = band.response_quality_factor
-                * (peak_derivative / omega - width / band.bandwidth_rad_s);
-            if !width.is_finite() || !quality.is_finite() {
-                return Err(DrivenResonanceError::Invalid(
-                    "bandwidth parameter derivative is not representable",
-                ));
-            }
-            Some(HalfPowerBandwidthDerivative {
-                lower_frequency_derivative_rad_s: lower,
-                upper_frequency_derivative_rad_s: upper,
-                bandwidth_derivative_rad_s: width,
-                response_quality_factor_derivative: quality,
-            })
-        } else {
-            None
-        };
-        let evaluations = resonance.evaluations + additional;
-        poll(&mut cancelled)?;
-        Ok(DrivenResonanceParameterResponse {
+        resolve_parameter_response(
             resonance,
-            peak_frequency_derivative_rad_s: peak_derivative,
-            observation_derivative,
-            log_amplitude_derivative: total_log.re,
-            phase_derivative: total_log.im,
-            log_amplitude_curvature: curvature,
-            stationarity_residual: r.re,
-            half_power_derivative,
-            evaluations,
-            maximum_relative_residual: residual,
-        })
+            |omega, second_order, cancelled| {
+                let factor = self.factor(omega, &mut *cancelled)?;
+                let frequency =
+                    factor.response_with_frequency_derivative(input, None, &mut *cancelled)?;
+                let parameter = factor.response_with_parameter_derivative(
+                    input,
+                    direction,
+                    input_derivative,
+                    &mut *cancelled,
+                )?;
+                let mut jet = ParameterObservationJet {
+                    value: selected(
+                        observation,
+                        &frequency.response.state,
+                        &frequency.response.effort,
+                        &frequency.response.output,
+                        cancelled,
+                    )?,
+                    frequency: selected(
+                        observation,
+                        &frequency.state_derivative,
+                        &frequency.effort_derivative,
+                        &frequency.output_derivative,
+                        cancelled,
+                    )?,
+                    parameter: selected(
+                        observation,
+                        &parameter.state_derivative,
+                        &parameter.effort_derivative,
+                        &parameter.output_derivative,
+                        cancelled,
+                    )?,
+                    second_frequency: C64::ZERO,
+                    mixed: C64::ZERO,
+                    relative_residual: frequency
+                        .response
+                        .relative_residual
+                        .max(frequency.relative_derivative_residual)
+                        .max(parameter.response.relative_residual)
+                        .max(parameter.relative_derivative_residual),
+                };
+                if !second_order {
+                    return Ok(jet);
+                }
+                let mut rhs = vec![C64::ZERO; self.n];
+                for (target, &dx) in rhs[..self.n_diff]
+                    .iter_mut()
+                    .zip(&frequency.state_derivative)
+                {
+                    *target = C64::new(-2.0 * dx.im, 2.0 * dx.re);
+                }
+                let (second, second_residual) = factor.solve_rhs(&rhs, &mut *cancelled)?;
+                let second_observation = self.observe_parameter_tangent(
+                    observation,
+                    &second,
+                    None,
+                    None,
+                    &frequency.effort_derivative,
+                    cancelled,
+                )?;
+                let action = parameter::generator_action(
+                    self,
+                    &direction,
+                    &frequency.state_derivative,
+                    &frequency.effort_derivative,
+                    cancelled,
+                )?;
+                rhs = action.generator;
+                for (target, &dx) in rhs[..self.n_diff]
+                    .iter_mut()
+                    .zip(&parameter.state_derivative)
+                {
+                    *target = *target + C64::new(-dx.im, dx.re);
+                }
+                let (mixed, mixed_residual) = factor.solve_rhs(&rhs, &mut *cancelled)?;
+                let mixed_observation = self.observe_parameter_tangent(
+                    observation,
+                    &mixed,
+                    Some(&action.storage),
+                    direction.ports,
+                    &frequency.effort_derivative,
+                    cancelled,
+                )?;
+                jet.second_frequency = second_observation;
+                jet.mixed = mixed_observation;
+                jet.relative_residual = jet
+                    .relative_residual
+                    .max(second_residual)
+                    .max(mixed_residual);
+                Ok(jet)
+            },
+            &mut cancelled,
+        )
     }
 
     // Observe W dx + dQ x and G^T de + dG^T e in original coordinates.
@@ -281,98 +342,58 @@ impl HarmonicModel {
         if let HarmonicObservation::State(weights) = observation {
             return project(weights, state.iter().copied(), cancelled);
         }
-        let mut effort = state.to_vec();
-        for i in 0..self.n_diff {
-            poll(cancelled)?;
-            effort[i] = project(
-                &self.q[i * self.n..i * self.n + self.n_diff],
-                state[..self.n_diff].iter().copied(),
-                cancelled,
-            )?;
-            if let Some(extra) = additive_effort {
-                effort[i] = effort[i] + extra[i];
-            }
-        }
+        let effort = tangent_effort(self, state, additive_effort, cancelled)?;
         match observation {
             HarmonicObservation::Effort(weights) => project(weights, effort, cancelled),
             HarmonicObservation::Output(weights) => {
-                let mut output = vec![C64::ZERO; self.m];
-                for i in 0..self.n {
-                    poll(cancelled)?;
-                    for p in 0..self.m {
-                        output[p] = output[p] + effort[i].scale(self.g[i * self.m + p]);
-                        if let Some(dg) = port_direction {
-                            output[p] = output[p] + original_effort[i].scale(dg[i * self.m + p]);
-                        }
-                    }
-                }
+                let output =
+                    tangent_output(self, &effort, port_direction, original_effort, cancelled)?;
                 project(weights, output, cancelled)
             }
             HarmonicObservation::State(_) => unreachable!(),
         }
     }
+}
 
-    #[allow(clippy::too_many_arguments)]
-    fn crossing_parameter_derivative(
-        &self,
-        input: &[C64],
-        observation: HarmonicObservation<'_>,
-        direction: HarmonicParameterDirection<'_>,
-        input_derivative: Option<&[C64]>,
-        omega: f64,
-        peak_log_amplitude_derivative: f64,
-        lower: bool,
-        maximum_residual: &mut f64,
-        cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<f64, DrivenResonanceError> {
-        let factor = self.factor(omega, &mut *cancelled)?;
-        let frequency = factor.response_with_frequency_derivative(input, None, &mut *cancelled)?;
-        let parameter = factor.response_with_parameter_derivative(
-            input,
-            direction,
-            input_derivative,
-            &mut *cancelled,
-        )?;
-        let value = selected(
-            observation,
-            &frequency.response.state,
-            &frequency.response.effort,
-            &frequency.response.output,
+pub(in crate::harmonic) fn tangent_effort(
+    model: &HarmonicModel,
+    state: &[C64],
+    additive_effort: Option<&[C64]>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Vec<C64>, DrivenResonanceError> {
+    let mut effort = state.to_vec();
+    for i in 0..model.n_diff {
+        poll(cancelled)?;
+        effort[i] = project(
+            &model.q[i * model.n..i * model.n + model.n_diff],
+            state[..model.n_diff].iter().copied(),
             cancelled,
         )?;
-        let dw = selected(
-            observation,
-            &frequency.state_derivative,
-            &frequency.effort_derivative,
-            &frequency.output_derivative,
-            cancelled,
-        )?;
-        let dt = selected(
-            observation,
-            &parameter.state_derivative,
-            &parameter.effort_derivative,
-            &parameter.output_derivative,
-            cancelled,
-        )?;
-        let slope = ratio(dw, value)?.re;
-        if (lower && slope <= 0.0) || (!lower && slope >= 0.0) {
-            return Err(DrivenResonanceError::NotBracketed(
-                "half-height crossing must have a nonzero slope toward the selected peak",
-            ));
+        if let Some(extra) = additive_effort {
+            effort[i] = effort[i] + extra[i];
         }
-        let result = (peak_log_amplitude_derivative - ratio(dt, value)?.re) / slope;
-        if !result.is_finite() {
-            return Err(DrivenResonanceError::Invalid(
-                "crossing parameter derivative is not representable",
-            ));
-        }
-        *maximum_residual = maximum_residual
-            .max(frequency.response.relative_residual)
-            .max(frequency.relative_derivative_residual)
-            .max(parameter.response.relative_residual)
-            .max(parameter.relative_derivative_residual);
-        Ok(result)
     }
+    Ok(effort)
+}
+
+pub(in crate::harmonic) fn tangent_output(
+    model: &HarmonicModel,
+    effort: &[C64],
+    port_direction: Option<&[f64]>,
+    original_effort: &[C64],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Vec<C64>, DrivenResonanceError> {
+    let mut output = vec![C64::ZERO; model.m];
+    for i in 0..model.n {
+        poll(cancelled)?;
+        for p in 0..model.m {
+            output[p] = output[p] + effort[i].scale(model.g[i * model.m + p]);
+            if let Some(dg) = port_direction {
+                output[p] = output[p] + original_effort[i].scale(dg[i * model.m + p]);
+            }
+        }
+    }
+    Ok(output)
 }
 
 fn selected(

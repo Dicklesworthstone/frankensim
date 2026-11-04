@@ -7,6 +7,8 @@ use crate::harmonic::resonance::{
 };
 use fs_math::c64::C64;
 
+mod sensitivity;
+
 /// Fixed real observation weights in the original physical units. Coherent
 /// complex amplitudes are combined before taking a magnitude; mutual phase,
 /// direct incident-wave interference and ordinary-source contributions survive.

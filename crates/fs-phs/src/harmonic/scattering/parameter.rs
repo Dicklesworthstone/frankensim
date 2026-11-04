@@ -7,8 +7,8 @@
 //! of the physical observation map remain; boundary loading is not R/heat.
 
 use super::{
-    C64, HarmonicError, HarmonicPortPower, ScatteringFactor, ScatteringResponse, finite, invalid,
-    poll,
+    C64, HarmonicError, HarmonicPortPower, ScatteringFactor, ScatteringModel, ScatteringResponse,
+    finite, invalid, poll,
 };
 use crate::harmonic::{HarmonicParameterDirection, parameter};
 use parameter::{ParameterStateDerivative, accumulate, at};
@@ -116,45 +116,18 @@ impl ScatteringFactor<'_> {
             &response.physical.effort,
             &mut cancelled,
         )?;
-        // This is the explicit changing output map, excluding Y*dx which the
-        // original closed operator already puts on the left side.
-        let mut direct_output = vec![C64::ZERO; m];
-        for p in 0..m {
-            poll(&mut cancelled)?;
-            let mut correction = C64::ZERO;
-            for i in 0..n {
-                accumulate(
-                    &mut direct_output[p],
-                    &mut correction,
-                    response.physical.effort[i].scale(at(direction.ports, i * m + p))
-                        + action.storage[i].scale(model.g[i * m + p]),
-                );
-            }
-        }
-        let mut source = input_derivative.map_or_else(|| vec![C64::ZERO; m], <[C64]>::to_vec);
-        for (index, &(p, z)) in self.model.ports.iter().enumerate() {
-            let dz = reference_derivative.map_or(0.0, |v| v[index]);
-            source[p] = (source[p].scale(2.0) - direct_output[p]).scale(1.0 / z)
-                - response.physical_inputs[p].scale(dz / z);
-        }
-        if direct_output.iter().chain(&source).any(|&z| !finite(z)) {
-            return Err(invalid(
-                "loaded parameter source action is not representable",
-            ));
-        }
         let mut rhs = action.generator;
-        for i in 0..n {
-            poll(&mut cancelled)?;
-            let mut correction = C64::ZERO;
-            for p in 0..m {
-                accumulate(
-                    &mut rhs[i],
-                    &mut correction,
-                    response.physical_inputs[p].scale(at(direction.ports, i * m + p))
-                        + source[p].scale(model.g[i * m + p]),
-                );
-            }
-        }
+        add_parameter_source(
+            self.model,
+            direction,
+            &response.physical.effort,
+            &response.physical_inputs,
+            &action.storage,
+            input_derivative,
+            reference_derivative,
+            &mut rhs,
+            &mut cancelled,
+        )?;
         let (state, relative) = self.factor.solve_rhs(&rhs, &mut cancelled)?;
         let mut observed = parameter::observe_state(
             model,
@@ -343,6 +316,63 @@ impl ScatteringFactor<'_> {
         }
         Ok(relative)
     }
+}
+
+// Add dG*u+G*du_explicit to an admitted full-state physical action. The explicit
+// changing output map excludes Y*dx, already closed on the left. Reusing this
+// same action on frequency tangents supplies the mixed frequency/parameter RHS.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn add_parameter_source(
+    owner: &ScatteringModel,
+    direction: HarmonicParameterDirection<'_>,
+    effort: &[C64],
+    physical_input: &[C64],
+    storage_action: &[C64],
+    input_derivative: Option<&[C64]>,
+    reference_derivative: Option<&[f64]>,
+    rhs: &mut [C64],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), HarmonicError> {
+    let model = &owner.closed;
+    let (n, m) = (model.n, model.m);
+    let mut direct_output = vec![C64::ZERO; m];
+    for p in 0..m {
+        poll(cancelled)?;
+        let mut correction = C64::ZERO;
+        for i in 0..n {
+            accumulate(
+                &mut direct_output[p],
+                &mut correction,
+                effort[i].scale(at(direction.ports, i * m + p))
+                    + storage_action[i].scale(model.g[i * m + p]),
+            );
+        }
+    }
+    let mut source = input_derivative.map_or_else(|| vec![C64::ZERO; m], <[C64]>::to_vec);
+    for (index, &(p, z)) in owner.ports.iter().enumerate() {
+        poll(cancelled)?;
+        let dz = reference_derivative.map_or(0.0, |v| v[index]);
+        source[p] = (source[p].scale(2.0) - direct_output[p]).scale(1.0 / z)
+            - physical_input[p].scale(dz / z);
+    }
+    if direct_output.iter().chain(&source).any(|&z| !finite(z)) {
+        return Err(invalid(
+            "loaded parameter source action is not representable",
+        ));
+    }
+    for i in 0..n {
+        poll(cancelled)?;
+        let mut correction = C64::ZERO;
+        for p in 0..m {
+            accumulate(
+                &mut rhs[i],
+                &mut correction,
+                physical_input[p].scale(at(direction.ports, i * m + p))
+                    + source[p].scale(model.g[i * m + p]),
+            );
+        }
+    }
+    Ok(())
 }
 
 fn half_pair(left: C64, right: C64) -> Result<f64, HarmonicError> {
