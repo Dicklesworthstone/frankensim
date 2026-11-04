@@ -4,6 +4,8 @@ use fs_em::spatial::conduction::motion::SpatialConductionMotion;
 
 #[path = "motion/mechanical.rs"]
 mod mechanical;
+#[path = "motion/contacts.rs"]
+mod stationary_contacts;
 
 fn scalar_problem(xs: &[f64], sigma: f64) -> SpatialConduction {
     let source = ResolvedConductorState::try_from_material(material(

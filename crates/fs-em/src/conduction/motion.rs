@@ -17,8 +17,9 @@
 //! motion. Remesh/re-resolve changed geometry or material through its owner.
 
 use super::{
-    ConductionBoundaryResponse, ConductionCellResponse, ConductionControls, ConductionCurrentTrace,
-    ConductionError, PlanarConduction, finite, gradients, poll, scalar_potential,
+    ConductionBoundaryResponse, ConductionCellResponse, ConductionContactResponse,
+    ConductionControls, ConductionCurrentTrace, ConductionError, PlanarConduction, finite,
+    gradients, poll, scalar_potential,
 };
 use fs_material::conductor::ResolvedConductorState;
 use fs_material::conductor::planar::PlanarConductorMaterial;
@@ -41,6 +42,11 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
     /// [`Self::solve_with_current_traces`]. An unconnected conductor needs only
     /// its voltage reference trace: the free potential screens a conservative
     /// motional field without an invented closed-circuit braking current.
+    ///
+    /// Finite contacts retain their stationary surface law only when both
+    /// adjacent original cells have zero prescribed velocity. Moving bulk away
+    /// from those surfaces is admitted; moving/sliding interfaces still refuse.
+    /// Contact heat is separate from bulk heat and has no mechanical work.
     pub fn solve_with_motion(
         &self,
         boundary_voltage_v: &[(usize, f64)],
@@ -50,11 +56,6 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<MovingConductionField<'_, C>, ConductionError> {
         poll(cancelled)?;
-        if !self.contacts().is_empty() {
-            return Err(ConductionError::Invalid(
-                "moving electrical contacts require an owned surface work and heat law",
-            ));
-        }
         self.validate_controls(boundary_voltage_v.len(), controls)?;
         let cells = self.mesh.faces().len();
         if motion.velocity_m_s.len() != cells || motion.normal_flux_density_t.len() != cells {
@@ -62,8 +63,22 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
                 "one prescribed velocity and normal magnetic field per original triangle required",
             ));
         }
-        let prescribed =
-            scalar_potential::prescribed_boundary(&self.mesh, boundary_voltage_v, cancelled)?;
+        if !self.contacts().is_empty() {
+            let trace = self.mesh.boundary_trace().map_err(|_| {
+                ConductionError::Invalid("electrical contacts require original exterior traces")
+            })?;
+            for edge in &trace.edges {
+                poll(cancelled)?;
+                if self.is_contact_edge(edge.oriented_vertices.map(|v| v as usize))
+                    && motion.velocity_m_s[edge.source_face] != [0.0; 2]
+                {
+                    return Err(ConductionError::Invalid(
+                        "moving electrical contacts require an owned surface work and heat law",
+                    ));
+                }
+            }
+        }
+        let prescribed = self.prescribed_boundary(boundary_voltage_v, cancelled)?;
         let applied = self.current_loads(current_traces, &prescribed, cancelled)?;
         let mut motional_field = Vec::with_capacity(cells);
         let mut motional_load = vec![0.0; self.mesh.vertices().len()];
@@ -118,6 +133,13 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
             cancelled,
         )?;
         let response = self.cell_response_with_motion(&solved.relative, motion_field, cancelled)?;
+        let contact_response = self.contact_response(&solved.relative, cancelled)?;
+        let mut contact_power_w = 0.0;
+        for contact in &contact_response {
+            poll(cancelled)?;
+            contact_power_w = finite(contact_power_w + contact.power_w)?;
+        }
+        let joule_power_w = finite(response.power_w + contact_power_w)?;
         let mut conductor_field_v_m = Vec::with_capacity(cells);
         let mut lorentz_force_density_n_m3 = Vec::with_capacity(cells);
         let mut cell_mechanical_power_w = Vec::with_capacity(cells);
@@ -151,13 +173,13 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
             &prescribed,
             &applied,
             motion_load,
-            electrical_power_w,
+            finite(electrical_power_w + contact_power_w)?,
             controls.current_tolerance_a,
             controls.power_tolerance_w,
             cancelled,
         )?;
         let power_balance_residual_w =
-            finite(finite(response.power_w + mechanical_power_w)? - boundary.terminal_power_w)?;
+            finite(finite(joule_power_w + mechanical_power_w)? - boundary.terminal_power_w)?;
         if work_pairing_residual_w > controls.power_tolerance_w
             || power_balance_residual_w.abs() > controls.power_tolerance_w
         {
@@ -188,6 +210,9 @@ impl<C: PlanarConductorMaterial> PlanarConduction<C> {
             velocity_m_s: motion.velocity_m_s.to_vec(),
             normal_flux_density_t: motion.normal_flux_density_t.to_vec(),
             response,
+            contact_response,
+            contact_power_w,
+            joule_power_w,
             conductor_field_v_m,
             lorentz_force_density_n_m3,
             cell_mechanical_power_w,
@@ -214,6 +239,9 @@ pub struct MovingConductionField<'a, C = ResolvedConductorState> {
     velocity_m_s: Vec<[f64; 2]>,
     normal_flux_density_t: Vec<f64>,
     response: ConductionCellResponse,
+    contact_response: Vec<ConductionContactResponse>,
+    contact_power_w: f64,
+    joule_power_w: f64,
     conductor_field_v_m: Vec<[f64; 2]>,
     lorentz_force_density_n_m3: Vec<[f64; 2]>,
     cell_mechanical_power_w: Vec<f64>,
@@ -263,8 +291,17 @@ impl<C: PlanarConductorMaterial> MovingConductionField<'_, C> {
     pub fn cell_joule_power_w(&self) -> &[f64] {
         &self.response.cell_power_w
     }
+    /// Total irreversible heat, including stationary contact loss once [W].
     pub fn joule_power_w(&self) -> f64 {
-        self.response.power_w
+        self.joule_power_w
+    }
+    /// Original P1 contact jumps, currents and surface heat in contact order.
+    pub fn contact_response(&self) -> &[ConductionContactResponse] {
+        &self.contact_response
+    }
+    /// Stationary surface electrical work, entirely irreversible heat [W].
+    pub fn contact_power_w(&self) -> f64 {
+        self.contact_power_w
     }
     /// Original cell `J x B` [N/m3], without interfacial smoothing.
     pub fn lorentz_force_density_n_m3(&self) -> &[[f64; 2]] {
@@ -277,6 +314,7 @@ impl<C: PlanarConductorMaterial> MovingConductionField<'_, C> {
         self.mechanical_power_w
     }
     /// Signed volume integral of the LABORATORY `E.J` [W].
+    /// Stationary contact electrical work is separate in `contact_power_w`.
     pub fn electrical_power_w(&self) -> f64 {
         self.electrical_power_w
     }

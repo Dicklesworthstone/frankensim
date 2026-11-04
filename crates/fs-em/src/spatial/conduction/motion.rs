@@ -47,10 +47,12 @@ impl<C: SpatialConductorMaterial> SpatialConduction<C> {
     /// same solve and source ownership.
     ///
     /// Independent charge, local work, Hodge and boundary-power gates precede
-    /// publication. Finite-resistance contacts refuse until their own moving
-    /// surface work/heat law is supplied; shared-vertex ideal continuity remains
-    /// part of the original volume field. The caller owns magnetic consistency,
-    /// motion and thermal evolution outside this quasistatic snapshot.
+    /// publication. Finite contacts retain their stationary surface law only
+    /// when both adjacent original cells have zero prescribed velocity. Moving
+    /// bulk elsewhere is admitted; moving/sliding interfaces still refuse.
+    /// Surface electrical work is heat, with zero surface mechanical work.
+    /// The caller owns magnetic consistency, motion and thermal evolution
+    /// outside this quasistatic snapshot.
     pub fn solve_with_motion(
         &self,
         boundary: &SpatialConductionBoundary,
@@ -59,16 +61,22 @@ impl<C: SpatialConductorMaterial> SpatialConduction<C> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<SpatialMovingConductionField<'_, C>> {
         check(cancelled)?;
-        if !self.contacts.is_empty() {
-            return Err(SpatialConductionError::Invalid(
-                "moving electrical contacts require an owned surface work and heat law",
-            ));
-        }
         let cells = self.conductors.len();
         if motion.velocity_m_s.len() != cells || motion.flux_density_t.len() != cells {
             return Err(SpatialConductionError::Invalid(
                 "one prescribed velocity and magnetic field per original tetrahedron required",
             ));
+        }
+        for cells in self.contact_cells() {
+            check(cancelled)?;
+            if cells
+                .iter()
+                .any(|&cell| motion.velocity_m_s[cell] != [0.0; 3])
+            {
+                return Err(SpatialConductionError::Invalid(
+                    "moving electrical contacts require an owned surface work and heat law",
+                ));
+            }
         }
         let traces = self.prepare_boundary(boundary, controls, cancelled)?;
         let g = &self.geometry;
@@ -153,6 +161,7 @@ pub(super) struct MotionPower {
     cell_mechanical_power_w: Vec<f64>,
     pub(super) mechanical_power_w: f64,
     pub(super) electrical_power_w: f64,
+    pub(super) contact_power_w: f64,
     pub(super) work_pairing_residual_w: f64,
 }
 
@@ -164,6 +173,7 @@ impl MotionPower {
             cell_mechanical_power_w: Vec::with_capacity(cells),
             mechanical_power_w: 0.0,
             electrical_power_w: 0.0,
+            contact_power_w: 0.0,
             work_pairing_residual_w: 0.0,
         }
     }
@@ -248,8 +258,17 @@ impl<C: SpatialConductorMaterial> SpatialMovingConductionField<'_, C> {
     pub fn cell_joule_power_w(&self) -> &[f64] {
         &self.field.cell_power_w
     }
+    /// Total irreversible heat, including stationary contact loss once [W].
     pub fn joule_power_w(&self) -> f64 {
         self.field.power_w
+    }
+    /// Original P1 contact jumps, currents and surface heat in contact order.
+    pub fn contact_response(&self) -> &[SpatialConductionContactResponse] {
+        &self.field.contacts
+    }
+    /// Stationary surface electrical work, entirely irreversible heat [W].
+    pub fn contact_power_w(&self) -> f64 {
+        self.power.contact_power_w
     }
     pub fn lorentz_force_density_n_m3(&self) -> &[[f64; 3]] {
         &self.power.lorentz_force_density_n_m3
@@ -261,6 +280,7 @@ impl<C: SpatialConductorMaterial> SpatialMovingConductionField<'_, C> {
         self.power.mechanical_power_w
     }
     /// Signed volume integral of laboratory `E.J` [W].
+    /// Stationary contact electrical work is separate in `contact_power_w`.
     pub fn electrical_power_w(&self) -> f64 {
         self.power.electrical_power_w
     }
@@ -287,7 +307,7 @@ impl<C: SpatialConductorMaterial> SpatialMovingConductionField<'_, C> {
     pub fn power_balance_residual_w(&self) -> f64 {
         self.field.power_residual_w
     }
-    /// Laboratory field power minus original weak nodal-current work [W].
+    /// Bulk plus stationary-contact electrical work minus weak nodal work [W].
     pub fn hodge_power_residual_w(&self) -> f64 {
         self.field.hodge_power_residual_w
     }
@@ -338,8 +358,17 @@ impl SpatialMovingConductionSnapshot {
     pub fn cell_joule_power_w(&self) -> &[f64] {
         &self.field.cell_power_w
     }
+    /// Total irreversible heat, including stationary contact loss once [W].
     pub fn joule_power_w(&self) -> f64 {
         self.field.power_w
+    }
+    /// Original P1 contact jumps, currents and surface heat in contact order.
+    pub fn contact_response(&self) -> &[SpatialConductionContactResponse] {
+        &self.field.contacts
+    }
+    /// Stationary surface electrical work, entirely irreversible heat [W].
+    pub fn contact_power_w(&self) -> f64 {
+        self.power.contact_power_w
     }
     pub fn lorentz_force_density_n_m3(&self) -> &[[f64; 3]] {
         &self.power.lorentz_force_density_n_m3

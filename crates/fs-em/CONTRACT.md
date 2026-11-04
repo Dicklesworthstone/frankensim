@@ -24,6 +24,31 @@ open motional screening, and the signed electrical/mechanical/Joule split under
 common biases larger than the physical drops. This changes numerical gauge
 handling, not the admitted fixed-geometry Ohmic/material/motion models.
 
+## Stationary resistive interfaces beside moving conductors
+
+Planar and spatial `solve_with_motion` now admit original finite-resistance
+contacts when BOTH adjacent original cells have exactly zero prescribed velocity.
+Moving bulk elsewhere retains `J = Sigma(E + u cross B)`; a moving or sliding
+contact still refuses even when its magnetic field is zero. The admitted
+zero-thickness stationary interface retains its original source, paired traces,
+exact P1 current and `integral([V]^2/R'')` heat. Its mechanical work is zero.
+
+Both moving-field owners expose `contact_response` and `contact_power_w`.
+Cell Joule arrays contain only bulk heat; total `joule_power_w` includes bulk
+and surface heat once. `electrical_power_w` remains the signed BULK integral
+of laboratory `E.J`. Boundary and Hodge work compare that integral PLUS
+surface work with the terminal supply, and the complete balance remains
+`terminal = bulk heat + contact heat + mechanical output`.
+The spatial owned snapshot retains these original surface results for explicit
+thermal partition by the coupling owner.
+
+Independent planar and tetrahedral series references exercise stationary parity,
+shorted braking, loaded generation, motoring, exact contact jumps/heat and
+refusal of motion on either contact side. A current-driven planar case also
+crosses the contact with one component reference under a common voltage larger
+than its physical drops. These are synthetic quasistatic model checks, with
+no sliding-contact, frictional heating, moving occupancy or induction claim.
+
 ## Resolved electrostatic forces, motion and floating electrodes
 
 The native planar and spatial electric fields now expose `virtual_work` for a
@@ -110,7 +135,8 @@ vertices; the native sparse solve and its iteration limits remain authoritative.
 This is a nonrelativistic fixed-domain DC snapshot with prescribed piecewise
 constant B and velocity. It does not evolve induction, magnetic sources,
 mechanics, finite moving interfaces or thermal advection. Finite-resistance
-contacts refuse pending an owned moving-surface work/heat law. G0/G1/G3/G4
+contacts require stationary adjacent cells as described above; motion at either
+surface still needs an owned moving-surface work/heat law. G0/G1/G3/G4
 fixtures in `tests/spatial_conduction/motion.rs` cover open-circuit screening,
 shorted braking, loaded generation, motoring, layered current drive, anisotropic
 scene rotation/volume scaling, stationary parity and transactional refusals.
