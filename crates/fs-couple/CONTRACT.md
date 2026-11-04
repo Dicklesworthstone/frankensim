@@ -1,5 +1,23 @@
 # CONTRACT: fs-couple
 
+## Shared affine dry-friction branch continuation
+
+`stribeck_friction::StribeckLoadLine` also admits the original Coulomb and
+clipped-linear `VelocityDependent` laws. Static capacity and the one-sided
+kinetic intercept remain distinct. An occupied sliding branch continues inside
+the larger static cone until its own zero-speed limit or finite-slip fold;
+fresh contact and reversal retain the existing static-first initialization.
+Exact affine roots consume no bisections and are checked against the unchanged
+constitutive law. Strong weakening counts its unstable root without selecting
+it. The zero-traction root at the clamp remains present at the fold itself.
+A coincident flat sliding interval refuses as nonisolated, rather than claiming
+a finite root count. Actual adhesive junction forces remain independent of
+repulsive load, including zero repulsion. Arrest is checked on the actual
+velocity line, so a rounded force quotient cannot invent a zero-speed slide.
+Seven native G0/G1/G3 regression groups
+cover these limits, both slope signs, reversal and adhesive offsets. This adds
+no state-ageing law, thermal evolution or continuous-time passivity claim.
+
 ## Source-backed ionic phases during finite moisture exchange
 
 `FiniteMoistureSolution::with_electrolyte_solubility` retains the original
