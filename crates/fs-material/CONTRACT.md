@@ -9025,6 +9025,16 @@ stores, with no external heat or duplicate storage. Source/domain/event and
 cancellation refusal discard the full proposed advance. Source selection and
 geometric metrics are prepared once; flux evaluation performs no database query.
 
+Explicit accepted endpoints and events are admitted by the same physical
+two-layer interface solve. Each source covers only its own bulk-to-face path;
+a finite contact jump may bridge disjoint temperature intervals. The endpoint
+check retains the starting-state heat samples and introduces no extra heat,
+receipt allocation or source query. A supported bulk temperature does not hide
+an unsupported contact face on the final step. Focused G1/G3 regressions cover
+disjoint hot/cold sources, reversed interface orientation, exact single-step
+heat and entropy; a G0 regression refuses a final cold-face source exit while
+both bulk temperatures remain supported.
+
 The six `radial_conduction` regressions cover independent cylindrical/spherical
 resistance, nonlinear conductivity integrals/tangents, thin shells and the
 exterior limit, data-only rho/Cp/k changes between finite solid/liquid cells,

@@ -50,14 +50,17 @@ impl<'p, 'a, 'm> LayerConductionObserver<'p, 'a, 'm> {
         for link in &self.model.links {
             checkpoint()?;
             let temperatures = link.validate(thermal)?;
-            // The physical interface solve requires both charts across the
-            // complete interval. Reject a last-step source exit immediately,
-            // even when no later substep would query that accepted endpoint.
-            for layer in link.binding.layers {
-                for temperature in temperatures {
-                    layer.conductivity_curve().conductivity_w_m_k(temperature)?;
-                }
-            }
+            // Each chart covers only its own bulk-to-face temperature path.
+            // A finite contact jump may bridge disjoint source intervals. The
+            // original flux solve checks both actual faces without querying a
+            // material at its neighbor's bulk temperature. Checking only the
+            // bulk endpoints would miss a final-step exit at a contact face.
+            link.flux_geometry
+                .conduction(
+                    link.binding.layers.map(|layer| layer.conductivity_curve()),
+                    link.binding.contact_area_resistance_m2_k_w,
+                )?
+                .evaluate(temperatures, self.config, &mut *checkpoint)?;
         }
         checkpoint()?;
         Ok(())
