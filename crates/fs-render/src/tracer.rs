@@ -179,9 +179,9 @@ mod transport;
 /// Philox/Sobol stream keying, the BSDF forms, the CMF/adaptation
 /// constants it inherits from `spectral`, and the EXR channel layout.
 /// Bump ONLY with a semantic justification per docs/GOLDEN_POLICY.md.
-/// Version 5 uses reconstructed mesh hit points and error-bounded origins for
-/// opaque reflection and visibility, preserving resolvable submicrometre gaps.
-pub const TRACER_BIT_SEMANTICS_VERSION: u32 = 5;
+/// Version 6 aims finite visibility rays at the physical emitter endpoint and
+/// compares reconstructed endpoint positions after the bounded origin shift.
+pub const TRACER_BIT_SEMANTICS_VERSION: u32 = 6;
 
 /// Bit-affecting semantics of the optional motion-time path. This is versioned
 /// separately because the legacy static entry points do not draw a shutter
@@ -687,6 +687,47 @@ struct PreparedDirectLight {
     emission: (LiftedSpectrum, f64),
     pdf_solid_angle: f64,
     target: DirectLightTarget,
+}
+
+impl PreparedDirectLight {
+    /// Numerical visibility follows the shifted origin to the actual endpoint.
+    /// The original direction and distance still own BSDFs, PDFs and attenuation.
+    fn shadow_ray(self, origin: Point3) -> Result<Ray, TracerError> {
+        let direction = match self.target {
+            DirectLightTarget::Rectangle { point, .. } => {
+                let displacement = point.delta_from(origin);
+                let distance = displacement.norm();
+                if !distance.is_finite() || distance <= 0.0 {
+                    return Err(TracerError::InvalidInput);
+                }
+                displacement.scale(1.0 / distance)
+            }
+            DirectLightTarget::Environment => self.direction,
+        };
+        Ok(Ray { origin, dir: direction })
+    }
+
+    fn is_visible(self, source: Point3, hit: Option<SceneIntersection>) -> bool {
+        match (self.target, hit) {
+            (
+                DirectLightTarget::Rectangle { primitive_index, point, distance_m, .. },
+                Some(hit),
+            ) => {
+                let scale = [source.x, source.y, source.z, point.x, point.y, point.z]
+                    .into_iter()
+                    .map(f64::abs)
+                    .fold(distance_m, f64::max);
+                // Match the photometric area endpoint's coordinate-error bound;
+                // a shifted ray parameter is not the unshifted physical distance.
+                let tolerance = 128.0 * f64::EPSILON * scale;
+                hit.primitive_index == primitive_index
+                    && hit.hit.point.delta_from(point).norm() <= tolerance
+            }
+            (DirectLightTarget::Environment, None) => true,
+            (DirectLightTarget::Rectangle { .. }, None)
+            | (DirectLightTarget::Environment, Some(_)) => false,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -14656,27 +14697,11 @@ fn trace_path_with_regions<'scene>(
                             let cos_s = n.dot(wi).abs();
                             let wo = ray.dir.scale(-1.0);
                             if cos_s > 0.0 {
-                                let shadow = Ray {
-                                    origin: intersection.spawn_boundary_ray(frame.geometric, wi),
-                                    dir: wi,
-                                };
+                                let shadow = direct.shadow_ray(
+                                    intersection.spawn_boundary_ray(frame.geometric, wi),
+                                )?;
                                 let shadow_hit = intersect(scene, cx, &shadow, ray_time)?;
-                                let visible = match (direct.target, shadow_hit) {
-                                    (
-                                        DirectLightTarget::Rectangle {
-                                            primitive_index,
-                                            distance_m,
-                                            ..
-                                        },
-                                        Some(shadow_hit),
-                                    ) => {
-                                        shadow_hit.primitive_index == primitive_index
-                                            && shadow_hit.hit.t > distance_m - 1.0e-4
-                                    }
-                                    (DirectLightTarget::Environment, None) => true,
-                                    (DirectLightTarget::Rectangle { .. }, None)
-                                    | (DirectLightTarget::Environment, Some(_)) => false,
-                                };
+                                let visible = direct.is_visible(hit.point, shadow_hit);
                                 if visible {
                                     let pdf_nee = direct.pdf_solid_angle;
                                     let shadow_medium = if n.dot(wi) > 0.0 {
@@ -14849,27 +14874,11 @@ fn trace_path_with_regions<'scene>(
                         let wi = direct.direction;
                         let cos_s = n.dot(wi);
                         if cos_s > 0.0 {
-                            let shadow = Ray {
-                                origin: intersection.spawn_boundary_ray(frame.geometric, wi),
-                                dir: wi,
-                            };
+                            let shadow = direct.shadow_ray(
+                                intersection.spawn_boundary_ray(frame.geometric, wi),
+                            )?;
                             let shadow_hit = intersect(scene, cx, &shadow, ray_time)?;
-                            let visible = match (direct.target, shadow_hit) {
-                                (
-                                    DirectLightTarget::Rectangle {
-                                        primitive_index,
-                                        distance_m,
-                                        ..
-                                    },
-                                    Some(shadow_hit),
-                                ) => {
-                                    shadow_hit.primitive_index == primitive_index
-                                        && shadow_hit.hit.t > distance_m - 1.0e-4
-                                }
-                                (DirectLightTarget::Environment, None) => true,
-                                (DirectLightTarget::Rectangle { .. }, None)
-                                | (DirectLightTarget::Environment, Some(_)) => false,
-                            };
+                            let visible = direct.is_visible(hit.point, shadow_hit);
                             // A one-reflection path can return to the same side of
                             // a dielectric without the straight source-light chord
                             // touching it. Enumerate this bounded technique
@@ -19812,6 +19821,72 @@ mod tests {
                     for (observed, expected) in actual.into_iter().zip(expected) {
                         assert_near(observed, expected, 2e-12 * expected,
                             "emitting mirror: Le + Fresnel * second source, counted once");
+                    }
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn rectangle_visibility_preserves_metre_gaps_at_large_world_translation() {
+        let white = lift_rgb([1.0; 3]);
+        let glass = DielectricGlass::new(
+            CauchyIor::try_constant(1.5).unwrap(),
+            BeerLambertAbsorption::CLEAR,
+            GlassProvenance::Custom,
+        );
+        let settings = Settings { width: 1, height: 1, spp: 1, max_depth: 1,
+            sampler: Sampler::Iid, strategy: DirectStrategy::NeeOnly, seed: 73 };
+        with_test_cx(|cx| {
+            for material in [
+                Material::Lambertian { reflectance: white },
+                Material::Dielectric { glass, surface: DielectricSurface::try_rough(0.2).unwrap() },
+            ] {
+                let mut reference = [[0.0; 3]; 8];
+                for (placement, base_z) in [0.0, 1.0e12].into_iter().enumerate() {
+                    let emitter_z = base_z + 1.0;
+                    let scene = Scene {
+                        primitives: vec![
+                            Primitive {
+                                shape: Shape::Mesh(closed_test_slab(base_z - 1.0, base_z)),
+                                material,
+                                emission: None,
+                            },
+                            Primitive {
+                                shape: Shape::Mesh(horizontal_quad(emitter_z, 0.5)),
+                                material: Material::Lambertian { reflectance: lift_rgb([0.0; 3]) },
+                                emission: Some((white, 3.0)),
+                            },
+                        ],
+                        lights: vec![RectLight {
+                            corner: Point3::new(-0.5, -0.5, emitter_z),
+                            edge_u: Vec3::new(1.0, 0.0, 0.0),
+                            edge_v: Vec3::new(0.0, 1.0, 0.0),
+                            prim: 1,
+                            emission: (white, 3.0),
+                        }],
+                        environment: None,
+                        camera: Camera {
+                            eye: Point3::new(0.0, 0.0, base_z + 0.5),
+                            forward: Vec3::new(0.0, 0.0, -1.0),
+                            up: Vec3::new(0.0, 1.0, 0.0),
+                            half_tan: 0.2,
+                        },
+                    };
+                    let lighting = validate_scene(&scene, cx, None).unwrap();
+                    for (sample, expected) in reference.iter_mut().enumerate() {
+                        let actual = trace_path(&scene, &lighting, cx, &settings, 1.0,
+                            0, sample as u32, 0.5, 0.5, 0.173, None, CameraPath::Legacy,
+                            false, None, None).unwrap().xyz;
+                        if placement == 0 {
+                            assert!(actual[1] > 0.0, "the rectangle directly lights the receiver");
+                            *expected = actual;
+                        } else {
+                            for (observed, expected) in actual.into_iter().zip(*expected) {
+                                assert_near(observed, expected, 2e-12 * expected,
+                                    "bounded ray origins must preserve translated finite-light visibility");
+                            }
+                        }
                     }
                 }
             }
