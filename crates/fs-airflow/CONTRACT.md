@@ -849,6 +849,41 @@ against the analytic constant-property solution across three timestep sizes.
 They also check native CFL budget enforcement, zero external heat, distinct
 applied/endpoint sources, late support failure and cancellation.
 
+### Enclosed horizontal air layers between finite walls
+
+`source::enclosure::evaluate_source_enclosed_gas_layers` supplies total gas-gap
+conductance to an original reciprocal thermal link. Both endpoints are finite
+isothermal walls; the gas has negligible storage in this quasi-steady model.
+The declared lower wall determines signed buoyancy independently of endpoint
+ordering. Actual caloric wall temperatures determine the full contrast and the
+mean temperature used to query one original gas material, retained with its
+thermal snapshot and original correlation evidence on every trial.
+
+The shared `HollandsHorizontalAirLayer` card owns the onset and gas conduction
+limit. Stable heating from above, subcritical heating from below, zero gravity
+and exact equilibrium retain `Nu=1`; an unstable admitted layer adds buoyant
+transfer. This is TOTAL gas heat: no second Fourier gas path or generated pair
+of source rates is added. The native link alone debits and credits the same
+heat and includes its conductance in the original timestep bound.
+
+Bindings declare the normal gap, both complete rectangular plate spans,
+gravity and an explicit maximum `|beta delta_T|` in `[0,1)`. The native link
+must cover that full rectangle on both walls within floating-point roundoff and have zero
+authored conductance. Thin-layer geometry, air-only source support and all
+Rayleigh/Prandtl limits remain with the original card. A matching Pr is not
+evidence that a non-air fluid is supported. Wall temperatures must represent
+uniform isothermal faces; this adapter does not replace resolved wall gradients,
+gas thermal storage, inclined cavities, sidewall bridges or radiation.
+
+`source::enclosure::observer::SourceEnclosedGasLayerObserver` reevaluates the
+gas at every actual explicit substep and accepted endpoint, retaining applied
+and endpoint samples separately. The same evaluator can supply a native
+backward-Euler or coupled heat trial's conductance map. Competing link ownership,
+geometry/source-domain refusal and cancellation leave no partial map or state;
+the original observer clone contract governs rollback of callback history.
+Pressure and composition remain with the original gas resolver, and numerical
+and physical refinement are still required for the declared approximation.
+
 ### Shared thermochemical medium in hydraulic and heat paths
 
 `FrozenFlowMedium::bind_fan_bank` connects the same original reference/inlet

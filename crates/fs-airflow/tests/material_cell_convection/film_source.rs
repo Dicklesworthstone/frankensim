@@ -9,6 +9,8 @@ mod links;
 mod heat_network;
 #[path = "film_source/sphere.rs"]
 mod sphere;
+#[path = "film_source/enclosure.rs"]
+mod enclosure;
 use fs_airflow::graph::thermal::medium::convection::deposition::source::*;
 use fs_evidence::ValidityDomain;
 use fs_matdb::{

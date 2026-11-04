@@ -11,6 +11,8 @@ pub mod heat;
 pub mod observer;
 /// Reciprocal convection on the original finite-cell thermal links.
 pub mod links;
+/// Quasi-steady enclosed gas layers between two finite isothermal walls.
+pub mod enclosure;
 
 use super::*;
 use fs_material::fluid_transport::{ThermalFluidTransport, ThermalFluidTransportState};
