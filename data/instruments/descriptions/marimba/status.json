@@ -3,15 +3,24 @@
   "family": "marimba",
   "title": "Marimba",
   "reference_instrument": "Iowa MIS marimba (model NA; bar material not stated; yarn, cord and rubber mallets)",
-  "summary": "No marimba is rendered. The xylophone bar slice exists (see the xylophone card), but a marimba needs a bar with a known undercut and a tubular resonator, and neither is available from a source we can cite.",
-  "physics_present": [],
-  "physics_missing": [
-    "The undercut curve of any real marimba bar: the only tabulated instrument found (a home-built padouk marimba by La Favre) gives each bar's arch length and centre thickness but not the curve",
-    "A tubular resonator coupled to the bar: the generic modal network has a lumped Helmholtz cavity and a duct solver, but no open-closed tube driven by a bar's volume velocity",
-    "Glued end blocks: that builder's lowest bars (C2 to D#3) carry extra wood under their ends, which a bar-only model does not include",
-    "The Iowa marimba's model and bar material are not stated (model NA), and the only instrument found with a full table of bar dimensions is a home-built padouk marimba, so a rendered padouk marimba could not be claimed to be the Iowa marimba"
+  "summary": "A struck rosewood bar, not yet a marimba: it has no resonator tube, its hard rubber mallet isn't the recording's, its undercut is solved in the engine and not measured, and it decays far too fast (A3's f1 at 226.0 dB/s against the recording's 31.1; the cause isn't known). The outline comes from J. La Favre's table of an unnamed commercial 5-octave marimba, and the wood from the rosewood row of Chaigne and Doutaut 1997. Iowa states no bar wood or outline, so this isn't the recording's bar. A3 is a bright knock with the pitch underneath. Eb6 is close to one decaying sine, set against a recording that is a roll. Gb2 has no render.",
+  "physics_present": [
+    "The bar outline from J. La Favre's table of an unnamed commercial 5-octave marimba with rosewood bars, on a 56 x 6 x 3 mesh",
+    "Rosewood from Chaigne and Doutaut 1997 (JASA 101, Table I): E 2.13e10, density 1015, eta 2.35e-7 s, gamma_B 51.58 1/s. The other elastic ratios are Honduras mahogany's, a stand-in (USDA Wood Handbook)",
+    "A circular-arc undercut solved in the engine from the modes alone, for f1 at equal temperament and f2 = 4 f1, the tuning the builder states for its own padouk bars; the third mode isn't aimed at. On Eb6 the arch length is the one the builder prints on its padouk table and only f1 is solved, because the builder says that register is tuned to the fundamental only",
+    "A Hertz contact mallet, Chaigne and Doutaut's hard rubber row at 1.0 m/s, with the strike point carried from the xylophone bar",
+    "Burton-Miller boundary-element radiation up to the band each page states, with no box"
   ],
-  "blocked": "A pre-registered check failed: a 1-D Timoshenko model of the builder's bars with a parabolic arch gives f2/f1 = 5.28, 4.60 and 4.33 for C2, C3 and C4 where the builder states 4, so the assumed curve is wrong. A second check on a different bar failed the same way: the Orff soprano xylophone bar of Rucz et al. (2021) prints a grindstone-cut radius and a thickness range, yet a three-dimensional mode check against its printed modes failed at every printed thickness, so a printed cut radius alone has not closed the curve. Three things would unblock it: (1) a source for the arch curve of one real marimba bar; (2) a measured f1:f2:f3 of one real bar, to check a candidate curve; (3) a published bar with its undercut curve and its resonator dimensions.",
+  "physics_missing": [
+    "A resonator tube: a real marimba hangs a tuned tube under each bar. At equal modal velocity A3's f1 radiates 32 dB less than its third mode, and the A3 recording has lines at 3.00, 5.00 and 7.00 f1 that we read as the closed tube's odd modes, untested",
+    "The recording's mallet: the A3 and C5 recordings use a cord mallet, and Eb6's is a roll with no mallet named. The recordings differ in mallet as well as tube, and these renders can't separate the two",
+    "The right decay: f1 falls at 226.0 dB/s against the recording's 31.1 on A3, and at 235.0 against 59.7 on C5. A tube gives the bar one more way to lose energy, so the missing tube shouldn't explain that; that is reasoning, not a test. Eb6's recording is a roll, so it gives no decay to compare",
+    "A printed undercut: the rosewood table prints no arch length and no tuning, so we don't know that a maker would cut what the engine solved",
+    "The recording's bar: Iowa states no bar wood and no bar outline",
+    "A printed marimba strike point",
+    "Any mode above the band each page states: nothing above it is in that file"
+  ],
+  "blocked": "Gb2: the engine certified no mode between 20 and 120 Hz on this bar at its length limit, on any window plan tried, so no cut could be solved and there is no render.",
   "beads": [
     "pexfp.270"
   ]
