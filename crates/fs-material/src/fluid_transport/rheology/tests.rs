@@ -281,6 +281,133 @@ fn g0_binding_preserves_current_thermal_source_and_replaces_viscosity_once() {
     );
 }
 
+#[derive(Debug)]
+struct CountedThermalFluid {
+    thermal: ThermalFluidTransportState,
+    transport: FluidTransportState,
+    transport_calls: Cell<usize>,
+    thermal_calls: Cell<usize>,
+}
+
+impl CountedThermalFluid {
+    fn new(temperature: f64, expansion: Option<f64>) -> Self {
+        let transport = FluidTransportState::try_new(1000.0, 4000.0, 0.6, 0.001).unwrap();
+        Self {
+            thermal: ThermalFluidTransportState::try_new(transport, temperature, expansion)
+                .unwrap(),
+            transport,
+            transport_calls: Cell::new(0),
+            thermal_calls: Cell::new(0),
+        }
+    }
+}
+
+impl FluidTransport for CountedThermalFluid {
+    fn transport_state(&self) -> Result<FluidTransportState, MaterialError> {
+        self.transport_calls.set(self.transport_calls.get() + 1);
+        Ok(self.transport)
+    }
+}
+
+impl ThermalFluidTransport for CountedThermalFluid {
+    fn thermal_transport_state(&self) -> Result<ThermalFluidTransportState, MaterialError> {
+        self.thermal_calls.set(self.thermal_calls.get() + 1);
+        Ok(self.thermal)
+    }
+}
+
+#[test]
+fn g3_thermal_binding_preserves_source_buoyancy_with_one_viscosity_replacement() {
+    let law = model(0.45, 2.0, ViscosityShiftMode::VerticalAndRate);
+    for expansion in [None, Some(0.0), Some(-0.0002), Some(0.0002)] {
+        let source = CountedThermalFluid::new(320.0, expansion);
+        let response = law.evaluate(320.0, 2.0).unwrap();
+        let bound = response.bind_thermal(&source).unwrap();
+        assert!(std::ptr::eq(*bound.source(), &source));
+        assert_eq!(bound.original_thermal_transport(), &source.thermal);
+        assert_eq!(
+            bound.rheological_transport().original_transport(),
+            &source.transport
+        );
+        assert_eq!(bound.rheology(), &response);
+        for _ in 0..3 {
+            let thermal = bound.thermal_transport_state().unwrap();
+            let transport = bound.transport_state().unwrap();
+            assert_eq!(thermal.transport(), transport);
+            assert_eq!(thermal.temperature_k(), 320.0);
+            assert_eq!(thermal.volumetric_expansion_per_k(), expansion);
+            assert_eq!(transport.density_kg_m3(), 1000.0);
+            assert_eq!(transport.specific_heat_j_kg_k(), 4000.0);
+            assert_eq!(transport.thermal_conductivity_w_m_k(), 0.6);
+            assert_eq!(
+                transport.dynamic_viscosity_pa_s(),
+                response.dynamic_viscosity_pa_s()
+            );
+            assert_eq!(
+                transport.thermal_diffusivity_m2_s(),
+                source.transport.thermal_diffusivity_m2_s()
+            );
+            let viscosity_ratio =
+                response.dynamic_viscosity_pa_s() / source.transport.dynamic_viscosity_pa_s();
+            close(
+                transport.prandtl(),
+                source.transport.prandtl() * viscosity_ratio,
+                5e-15,
+            );
+            if let Some(beta) = expansion {
+                let before = source.transport.rayleigh(9.81, beta, 10.0, 0.1).unwrap();
+                let after = transport.rayleigh(9.81, beta, 10.0, 0.1).unwrap();
+                close(after, before / viscosity_ratio, 5e-15);
+            }
+        }
+        // Repeated native momentum/heat consumers share a frozen snapshot;
+        // none of these reads re-queries or reselects the material source.
+        assert_eq!(source.transport_calls.get(), 1);
+        assert_eq!(source.thermal_calls.get(), 1);
+    }
+}
+
+#[test]
+fn g0_thermal_binding_refuses_mixed_temperatures_and_incoherent_source_views() {
+    let response = model(0.45, 2.0, ViscosityShiftMode::VerticalAndRate)
+        .evaluate(320.0, 2.0)
+        .unwrap();
+    for temperature in [300.0, 320.0_f64.next_up()] {
+        let source = CountedThermalFluid::new(temperature, Some(0.0002));
+        assert!(response.bind_thermal(&source).is_err());
+        // Temperature is admitted before requesting an unrelated transport.
+        assert_eq!(source.transport_calls.get(), 0);
+        assert_eq!(source.thermal_calls.get(), 1);
+    }
+    let mut source = CountedThermalFluid::new(320.0, Some(0.0002));
+    source.transport = FluidTransportState::try_new(1000.0, 4001.0, 0.6, 0.001).unwrap();
+    assert!(response.bind_thermal(&source).is_err());
+    assert_eq!(source.transport_calls.get(), 1);
+    assert_eq!(source.thermal_calls.get(), 1);
+    assert_eq!(source.thermal.transport().specific_heat_j_kg_k(), 4000.0);
+
+    #[derive(Debug)]
+    struct RefusingThermal;
+    impl FluidTransport for RefusingThermal {
+        fn transport_state(&self) -> Result<FluidTransportState, MaterialError> {
+            panic!("a refused thermal state must not request momentum transport")
+        }
+    }
+    impl ThermalFluidTransport for RefusingThermal {
+        fn thermal_transport_state(&self) -> Result<ThermalFluidTransportState, MaterialError> {
+            Err(MaterialError::State {
+                what: "source temperature outside support".into(),
+            })
+        }
+    }
+    assert_eq!(
+        response.bind_thermal(RefusingThermal).unwrap_err(),
+        MaterialError::State {
+            what: "source temperature outside support".into()
+        }
+    );
+}
+
 #[test]
 fn g0_invalid_calibration_parameters_refuse() {
     for (zero, infinity, time, n, a, band) in [

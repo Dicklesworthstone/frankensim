@@ -3,10 +3,14 @@
 
 use fs_lbm::material::{MaterialBuoyancyBoundary, plan_scaling_from_material};
 use fs_material::MaterialError;
+use fs_material::fluid_transport::rheology::{
+    CarreauYasuda, ThermalCarreauYasuda, ViscosityShiftMode,
+};
 use fs_material::fluid_transport::{
     FluidTransport, FluidTransportState, ThermalFluidTransport, ThermalFluidTransportState,
 };
 use fs_material::gas::{ConductivityModel, GasSpec, GasState};
+use fs_material::visco::temperature::{TemperatureShift, TemperatureShiftModel};
 use fs_qty::semantic::{Composition, CompositionBasis};
 
 fn boundary() -> MaterialBuoyancyBoundary {
@@ -32,6 +36,99 @@ fn close(actual: f64, expected: f64) {
         (actual - expected).abs() <= 3e-12 * expected.abs().max(1e-20),
         "{actual} != {expected}"
     );
+}
+
+#[test]
+fn g3_thermal_rheology_reaches_buoyancy_and_continues_both_native_solvers() {
+    // The source keeps rho/Cp fixed in this Boussinesq fixture. The declared
+    // Carreau law is sampled at a prescribed physical rate; this test does
+    // not claim that a frozen slab solves a spatially varying rheology field.
+    let law = ThermalCarreauYasuda::new(
+        CarreauYasuda::new(0.002, 0.0002, 0.6, 0.45, 2.0, [0.0, 1e6]).unwrap(),
+        TemperatureShift::new(
+            TemperatureShiftModel::Arrhenius {
+                activation_energy_j_mol: 12_000.0,
+            },
+            300.0,
+            [280.0, 360.0],
+        )
+        .unwrap(),
+        ViscosityShiftMode::VerticalAndRate,
+    );
+    let original = liquid(Some(0.001), 0.6, 0.001);
+    let cold_response = law.evaluate(300.0, 0.5).unwrap();
+    let cold = cold_response.bind_thermal(original).unwrap();
+    let previous = plan_scaling_from_material(&cold, 0.0001, 0.001, 0.001).unwrap();
+    let mut two = previous
+        .thermal_slab_from_material([4, 8], boundary(), 40)
+        .unwrap();
+    let mut three = previous
+        .thermal_slab3_from_material([4, 2, 8], boundary(), 80)
+        .unwrap();
+
+    let mu = cold_response.dynamic_viscosity_pa_s();
+    let nu = mu / 1000.0;
+    let alpha = 0.6 / (1000.0 * 4000.0);
+    close(
+        two.lattice.rayleigh(),
+        9.81 * 0.001 * 4.0 * 0.0008_f64.powi(3) / (nu * alpha),
+    );
+    close(
+        two.lattice.grid.tau[8],
+        0.5 + 3.0 * nu * 0.001 / 0.0001_f64.powi(2),
+    );
+    close(three.lattice.grid.tau[8], two.lattice.grid.tau[8]);
+
+    // An independently authored Newtonian snapshot at this same sampled mu
+    // must drive the existing flow/heat kernels identically, in both dimensions.
+    let direct_source = liquid(Some(0.001), 0.6, mu);
+    let direct = plan_scaling_from_material(&direct_source, 0.0001, 0.001, 0.001).unwrap();
+    let mut direct_two = direct
+        .thermal_slab_from_material([4, 8], boundary(), 40)
+        .unwrap();
+    let mut direct_three = direct
+        .thermal_slab3_from_material([4, 2, 8], boundary(), 80)
+        .unwrap();
+    for _ in 0..8 {
+        two.lattice.step();
+        three.lattice.step();
+        direct_two.lattice.step();
+        direct_three.lattice.step();
+    }
+    assert_eq!(two.lattice.grid.f, direct_two.lattice.grid.f);
+    assert_eq!(three.lattice.grid.f, direct_three.lattice.grid.f);
+    assert_eq!(two.lattice.gpop, direct_two.lattice.gpop);
+    assert_eq!(three.lattice.gpop, direct_three.lattice.gpop);
+
+    let hot_source =
+        ThermalFluidTransportState::try_new(original.transport(), 301.0, Some(0.001)).unwrap();
+    let hot_response = law.evaluate(301.0, 20.0).unwrap();
+    let hot = hot_response.bind_thermal(hot_source).unwrap();
+    let next = plan_scaling_from_material(&hot, 0.0001, 0.001, 0.001).unwrap();
+    assert!(hot_response.dynamic_viscosity_pa_s() < mu);
+    next.rebind_thermal_slab_from_material(&mut two, &previous, 9.81, 0.02)
+        .unwrap();
+    next.rebind_thermal_slab3_from_material(&mut three, &previous, 9.81, 0.02)
+        .unwrap();
+    // A material update changes coefficients, never accepted momentum/heat.
+    assert_eq!(two.lattice.grid.f, direct_two.lattice.grid.f);
+    assert_eq!(three.lattice.grid.f, direct_three.lattice.grid.f);
+    assert_eq!(two.lattice.gpop, direct_two.lattice.gpop);
+    assert_eq!(three.lattice.gpop, direct_three.lattice.gpop);
+    close(two.lattice.grid.tau[8], next.flow().tau);
+    close(three.lattice.grid.tau[8], next.flow().tau);
+    close(two.lattice.tau_g, direct_two.lattice.tau_g);
+    close(three.lattice.tau_g, direct_three.lattice.tau_g);
+    assert_eq!(two.lattice.t_ref, 0.75);
+    assert_eq!(three.lattice.t_ref, 0.75);
+    two.lattice.step();
+    three.lattice.step();
+    direct_two.lattice.step();
+    direct_three.lattice.step();
+    assert!(two.lattice.grid.f.iter().flatten().all(|v| v.is_finite()));
+    assert!(three.lattice.grid.f.iter().flatten().all(|v| v.is_finite()));
+    assert_ne!(two.lattice.grid.f, direct_two.lattice.grid.f);
+    assert_ne!(three.lattice.grid.f, direct_three.lattice.grid.f);
 }
 
 #[test]

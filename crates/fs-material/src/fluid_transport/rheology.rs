@@ -16,7 +16,9 @@
 //! stress differences, a yield surface, freezing, or an extensional-flow fit.
 //! No calibration data, pressure dependence or experimental authority is added.
 
-use super::{FluidTransport, FluidTransportState};
+use super::{
+    FluidTransport, FluidTransportState, ThermalFluidTransport, ThermalFluidTransportState,
+};
 use crate::MaterialError;
 use crate::visco::temperature::{TemperatureShift, TemperatureShiftState};
 use fs_math::det;
@@ -444,6 +446,49 @@ impl ThermalRheologyState {
             transport,
         })
     }
+
+    /// Bind the SAME current-temperature source to momentum, heat and buoyancy.
+    ///
+    /// Both original source views are read once and must agree exactly. The
+    /// source's absolute temperature must equal this constitutive query; its
+    /// signed or unknown expansion is retained, never inferred from viscosity.
+    /// The resulting frozen views perform no further source queries.
+    ///
+    /// This supplies local transport at the retained physical shear rate.
+    /// Evolution still requires the flow owner to re-evaluate that rate and
+    /// temperature; it does not qualify a Newtonian heat-transfer correlation
+    /// for a non-Newtonian fluid or introduce a new caloric law.
+    ///
+    /// # Errors
+    /// Preserves either source refusal and rejects mismatched temperature or
+    /// transport views before returning a combined material response.
+    pub fn bind_thermal<F: ThermalFluidTransport>(
+        &self,
+        source: F,
+    ) -> Result<ThermalRheologicalTransport<F>, MaterialError> {
+        let original_thermal = source.thermal_transport_state()?;
+        if original_thermal.temperature_k() != self.temperature.temperature_k() {
+            return Err(state_error(
+                "rheology and thermal source must share the exact physical temperature",
+            ));
+        }
+        let rheological = self.bind(source)?;
+        if original_thermal.transport() != rheological.original {
+            return Err(state_error(
+                "rheology source thermal and momentum transport views disagree",
+            ));
+        }
+        let thermal = ThermalFluidTransportState::try_new(
+            rheological.transport,
+            original_thermal.temperature_k(),
+            original_thermal.volumetric_expansion_per_k(),
+        )?;
+        Ok(ThermalRheologicalTransport {
+            rheological,
+            original_thermal,
+            thermal,
+        })
+    }
 }
 
 /// Exact source response plus the explicitly selected constitutive replacement.
@@ -471,5 +516,49 @@ impl<F> RheologicalTransport<F> {
 impl<F> FluidTransport for RheologicalTransport<F> {
     fn transport_state(&self) -> Result<FluidTransportState, MaterialError> {
         Ok(self.transport)
+    }
+}
+
+/// Calibrated viscosity with the original, same-temperature thermal source.
+/// Every numerical view is frozen together at binding. Source identity and
+/// support remain on the original owner; unknown expansion remains unknown.
+#[derive(Debug)]
+pub struct ThermalRheologicalTransport<F> {
+    rheological: RheologicalTransport<F>,
+    original_thermal: ThermalFluidTransportState,
+    thermal: ThermalFluidTransportState,
+}
+
+impl<F> ThermalRheologicalTransport<F> {
+    /// Original material owner, including its source receipts and conditions.
+    pub const fn source(&self) -> &F {
+        self.rheological.source()
+    }
+
+    /// Original thermal response, before replacing its viscosity.
+    pub const fn original_thermal_transport(&self) -> &ThermalFluidTransportState {
+        &self.original_thermal
+    }
+
+    /// Original transport and the SAME selected viscosity law and response.
+    pub const fn rheological_transport(&self) -> &RheologicalTransport<F> {
+        &self.rheological
+    }
+
+    /// Constitutive temperature, physical shear rate and viscosity tangents.
+    pub const fn rheology(&self) -> &ThermalRheologyState {
+        self.rheological.rheology()
+    }
+}
+
+impl<F> FluidTransport for ThermalRheologicalTransport<F> {
+    fn transport_state(&self) -> Result<FluidTransportState, MaterialError> {
+        self.rheological.transport_state()
+    }
+}
+
+impl<F> ThermalFluidTransport for ThermalRheologicalTransport<F> {
+    fn thermal_transport_state(&self) -> Result<ThermalFluidTransportState, MaterialError> {
+        Ok(self.thermal)
     }
 }

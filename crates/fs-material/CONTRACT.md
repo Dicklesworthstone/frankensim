@@ -13727,6 +13727,19 @@ elastic memory, yield surface, phase law, extensional-flow fit or extrapolation
 is inferred. Ordinary constitutive queries allocate nothing and parameter logs
 are prepared once.
 
+`ThermalRheologyState::bind_thermal` additionally admits the source's original
+`ThermalFluidTransport` snapshot. Exact source temperature and agreement of its
+thermal/momentum tuples are checked before returning `ThermalRheologicalTransport`.
+Both public views then share the same frozen, viscosity-replaced coefficients
+without repeated source queries. Signed, zero and unknown source expansion
+remain distinct; temperature is not reconstructed from the viscosity law.
+This enables source-owned thermal buoyancy and conservative material rebinding
+without losing the calibrated rheology. Flow evolution must still resolve its
+actual shear/temperature; the adapter does not qualify Newtonian empirical
+correlations for non-Newtonian fluids. G0/G3 controls check mixed-temperature
+and incoherent-source refusals, retained owners, one-time queries, and the
+coherent change of Prandtl/Rayleigh groups under viscosity replacement.
+
 Existing LBM callbacks consume the bound state through their native nonlinear
 collision and viscous-heating path; the broader legacy lattice Carreau domain,
 units and prepared relaxation-time policy remain intact. Constitutive regressions
