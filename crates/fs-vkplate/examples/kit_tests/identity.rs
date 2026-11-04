@@ -15,8 +15,10 @@ const PIN: [(&str, &str); 7] = [
     ("splash", "004ec059777e0a68f81c0434fb028f9197fba2e52a7771bdf71c7e493356f130"),
     ("crash", "4183cdf76c08dc38b95ea5f426ba35cd335b791a00c5c773cd1a790c44c9cabb"),
     ("ride", "8a25b23d3bca7e148929b7b194f2610ff175e1827900edc111b7f9f5b7380870"),
-    ("tom-12 (no table)", "a40b9136a55d3075de9a7e211c4001f7efe0eeff217a42f3aae6e26ee941744a"),
-    ("snare (no table)", "9a8104fae7ac0684e30ea7763a6e054316a11ba62d369fae0ecc92efa2664792"),
+    // These two moved once on purpose, by card tension alone: the rack tom to 1530 N/m and the snare to
+    // its own 150.4 Hz line at 1646 N/m. Every other piece stayed.
+    ("tom-12 (no table)", "b346dced5b6960318b64d186aaaf0a5df8e819bec496592d3a92d8e0c21c1bd0"),
+    ("snare (no table)", "4607f2b2e664c435c0c9cce86d43f77168965ff53087fdd02c5774df41c3d79a"),
 ];
 
 fn piece(name: &str) -> Result<Piece, String> {

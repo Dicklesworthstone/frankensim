@@ -7,6 +7,9 @@
 //! baked for that drum by fs-bem's `examples/drum_observer.rs` (crates/fs-vkplate/data/closed-body);
 //! it is refused for any other piece, and for a table baked for another drum, clock or gas.
 //!
+//! `--head-dipole`, with `--observer`, adds the heads' compact dipole radiation (`RadDipole`), its
+//! length read from that table. It is an estimate; it is refused for a ported drum and on `--preset-heads`.
+//!
 //! The drums' heads and stick come from sourced material cards, and no piece keeps a value fitted
 //! to a recording (see `drum_cards`); `--preset-heads` renders the recording-fitted presets
 //! instead, and says so. `crash-shaft` is the crash struck at its edge with the hickory card's
@@ -25,6 +28,8 @@ const CAVITY_MODES_FLAG: &str = "--cavity-modes";
 const WIRE_CONTACT_FLAG: &str = "--wire-contact";
 /// ALL-IN (MB 15788), opt-in with --cavity-modes: the air modes' viscothermal wall loss (Pierce Eq. (10-4.16)).
 const CAVITY_WALL_LOSS_FLAG: &str = "--cavity-wall-loss";
+/// ALL-IN, opt-in with --observer: the heads' compact dipole radiation, its length from that table.
+const HEAD_DIPOLE_FLAG: &str = "--head-dipole";
 
 fn main() {
     let preset_heads = std::env::args().any(|a| a == drum_cards::PRESET_HEADS_FLAG);
@@ -53,12 +58,25 @@ fn main() {
         eprintln!("refused: {CAVITY_WALL_LOSS_FLAG} is the loss of the air modes; give {CAVITY_MODES_FLAG} F_MAX_HZ too");
         std::process::exit(1)
     }
+    let head_dipole = all.iter().any(|a| a == HEAD_DIPOLE_FLAG).then(|| {
+        let Some(path) = &observer else {
+            eprintln!("refused: {HEAD_DIPOLE_FLAG} takes its length from the piece's closed-body table; give {OBSERVER_FLAG} TABLE.tsv too");
+            std::process::exit(1)
+        };
+        std::fs::read_to_string(path)
+            .map_err(|e| format!("cannot read {path}: {e}"))
+            .and_then(|text| kit::head_dipole_from_table(&text, cavity_modes))
+            .unwrap_or_else(|e| {
+                eprintln!("refused: {e}");
+                std::process::exit(1)
+            })
+    });
     let valued = |i: usize| i > 0 && (all[i - 1] == OBSERVER_FLAG || all[i - 1] == CAVITY_MODES_FLAG || all[i - 1] == WIRE_CONTACT_FLAG);
     let a: Vec<String> = all
         .iter()
         .enumerate()
         .filter(|(i, a)| {
-            *a != drum_cards::PRESET_HEADS_FLAG && *a != OBSERVER_FLAG && *a != CAVITY_MODES_FLAG && *a != WIRE_CONTACT_FLAG && *a != CAVITY_WALL_LOSS_FLAG && !valued(*i)
+            *a != drum_cards::PRESET_HEADS_FLAG && *a != OBSERVER_FLAG && *a != CAVITY_MODES_FLAG && *a != WIRE_CONTACT_FLAG && *a != CAVITY_WALL_LOSS_FLAG && *a != HEAD_DIPOLE_FLAG && !valued(*i)
         })
         .map(|(_, a)| a.clone())
         .collect();
@@ -71,7 +89,7 @@ fn main() {
     let v = |d: f64| speed.unwrap_or(d);
     // FS_KIT_TUNE scales a drum's head tensions (tuning experiments)
     let tune: f64 = std::env::var("FS_KIT_TUNE").ok().and_then(|s| s.parse().ok()).unwrap_or(1.0);
-    let drum = |s: kit::DrumSpec, kick: bool, v: f64| drum_cards::drum(&s, tune, &[(0.005, v)], kick, preset_heads);
+    let drum = |s: kit::DrumSpec, kick: bool, v: f64| drum_cards::drum(&kit::DrumSpec { head_dipole, ..s }, tune, &[(0.005, v)], kick, preset_heads);
     // FS_KIT_GRID scales a cymbal's grid spacing (refinement studies; 1 is the kit's own grid)
     let grid: f64 = std::env::var("FS_KIT_GRID").ok().and_then(|s| s.parse().ok()).unwrap_or(1.0);
     let cy = |s: kit::CymbalSpec| kit::CymbalSpec { grid: s.grid * grid, ..s };
@@ -188,6 +206,9 @@ fn main() {
         if let Some(o) = m.closed_body() {
             eprintln!("{}", o.report());
         }
+    }
+    if let Some(dipole) = &p.instrument.rad_dipole {
+        eprintln!("head dipole radiated {:.4e} J", dipole.radiated_j);
     }
     eprintln!("{dur} s rendered in {wall:.1} s ({:.1}x real time); peak {peak:.3} Pa", wall / dur);
     assert!(peak.is_finite(), "non-finite output");

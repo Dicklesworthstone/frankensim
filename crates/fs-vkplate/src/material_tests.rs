@@ -1728,3 +1728,58 @@ fn g1_the_crash_shaft_is_the_hickory_card_across_its_grain_on_bronze() {
     assert!(crush.deepest > 2.0 * crush.onset(k), "crushed to {:e} m, onset {:e} m", crush.deepest, crush.onset(k));
     assert!(crush.set(k) > 0.0);
 }
+
+/// The dipole's own-head share comes off every volume shape's baffled load, so a shape's own resistance plus that share
+/// is what it was without the dipole; the shapes, their air mass and the monopole do not move. A ported drum refuses it.
+#[test]
+fn the_head_dipole_takes_its_own_head_share_off_the_baffled_load() {
+    let film = pack("declared film", 1390.0, 4e9, Some(0.38));
+    let stick = pack("declared striker", 800.0, 12e9, Some(0.3));
+    let declared = binding(&film, &film, &stick);
+    let mut spec = kit::tom(12.0);
+    spec.grid *= 6.0;
+    let off = kit::drum_with_materials(&spec, &[], standard_gas(), &declared).unwrap();
+    assert!(off.instrument.rad_dipole.is_none());
+    spec.head_dipole = Some(kit::HeadDipole { length_m: 0.3675, air_modes_f_max: None });
+    let on = kit::drum_with_materials(&spec, &[], standard_gas(), &declared).unwrap();
+    let dipole = on.instrument.rad_dipole.as_ref().expect("the spec asked for the dipole");
+    assert!(on.notes.iter().any(|n| n.starts_with("head dipole (opt-in, an estimate)")), "{:?}", on.notes);
+    assert!(off.notes.iter().all(|n| !n.starts_with("head dipole")));
+    let f_ref = kit::lower_hybrid_hz(&spec, (1390.0, 1390.0), &standard_gas(), None).unwrap();
+    assert_eq!(dipole.resistance.to_bits(), RadDipole::compact_resistance(0.3675, f_ref, &standard_gas()).to_bits());
+    assert_eq!(on.instrument.rads[0].resistance.to_bits(), off.instrument.rads[0].resistance.to_bits());
+    let share = RadDipole::OWN_HEAD_SHARE * dipole.resistance;
+    for head in [dipole.heads.0, dipole.heads.1] {
+        let (a, b) = (&off.instrument.bodies[head], &on.instrument.bodies[head]);
+        let (la, lb) = (a.head_radiation.as_deref().unwrap(), b.head_radiation.as_deref().unwrap());
+        assert_eq!(la.cols.len(), lb.cols.len(), "the share dropped a shape from the load");
+        assert_eq!(la.mass.iter().map(|m| m.to_bits()).collect::<Vec<_>>(), lb.mass.iter().map(|m| m.to_bits()).collect::<Vec<_>>());
+        let h2 = a.h * a.h;
+        // A shape's own resistance from the load: the modal rate of that shape alone, projected, through B.
+        let own = |load: &crate::radiation::ModalAirLoad, j: usize| -> f64 {
+            let v: Vec<f64> = load.cols[j].iter().map(|c| c / h2).collect();
+            let p: Vec<f64> = load.cols.iter().map(|c| dot(c, &v)).collect();
+            let n = p.len();
+            (0..n).map(|s| (0..n).map(|t| p[s] * load.damping[s * n + t] * p[t]).sum::<f64>()).sum()
+        };
+        let mut volume_shapes = 0;
+        for j in 0..la.cols.len() {
+            let volume: f64 = la.cols[j].iter().sum();
+            let (before, after) = (own(la, j), own(lb, j));
+            assert!(
+                (after + share * volume * volume - before).abs() <= 1e-9 * before.abs().max(1e-30),
+                "shape {j}: {before} without the dipole, {after} with it and share {}", share * volume * volume
+            );
+            if share * volume * volume > 1e-6 * before {
+                volume_shapes += 1;
+            }
+        }
+        assert!(volume_shapes > 0, "no shape carried a share: the test is vacuous");
+    }
+    let mut ported = kit::kick();
+    ported.grid *= 6.0;
+    ported.port = Some(0.05);
+    ported.head_dipole = spec.head_dipole;
+    let error = kit::drum_with_materials(&ported, &[], standard_gas(), &declared).err().expect("a port is not in the law's hybrid");
+    assert!(error.contains("port"), "{error}");
+}

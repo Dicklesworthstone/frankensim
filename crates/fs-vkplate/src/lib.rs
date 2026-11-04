@@ -2282,6 +2282,32 @@ impl RadDamp {
     }
 }
 
+/// Compact dipole radiation on two heads' same-way motion, the part `RadDamp` leaves out. With `U_a`, `U_b` their
+/// outward volume velocities, the pair is the monopole on `U_a + U_b` plus `Q = (U_a - U_b) / 2` at opposite signs a
+/// length `D` apart, and that part radiates `P = R_d Q^2`, with
+/// `R_d = (rho w^2 / (4 pi c)) (k D)^2 / 3 = rho w^4 D^2 / (12 pi c^3)`.
+/// The force has `RadDamp`'s backward-velocity form, so `E - (k / 4) R_d Q^2`, with `Q` from the half-step velocity,
+/// falls in each step by exactly what `radiated_j` adds, `k R_d Qc^2`, with `Qc` from the centred velocity.
+/// Opt-in: an instrument without one takes none of these branches.
+#[derive(Clone)]
+pub struct RadDipole {
+    pub heads: (usize, usize),
+    pub resistance: f64,
+    /// The energy this term has removed so far [J].
+    pub radiated_j: f64,
+}
+
+impl RadDipole {
+    /// What each head's own volume pays of `R_d`: `Q^2` holds `U_a^2 / 4`.
+    pub const OWN_HEAD_SHARE: f64 = 0.25;
+
+    /// `R_d` for a dipole of length `length_m` [m] at `f_ref` [Hz].
+    pub fn compact_resistance(length_m: f64, f_ref: f64, gas: &GasState) -> f64 {
+        let omega = 2.0 * PI * f_ref;
+        gas.density * omega.powi(4) * length_m * length_m / (12.0 * PI * gas.sound_speed.powi(3))
+    }
+}
+
 /// Linear spring/dashpot between two nodes (or one node and ground).
 #[derive(Clone)]
 pub struct Link {
@@ -3154,6 +3180,8 @@ pub struct Instrument {
     /// Enclosed-air modes beyond each cavity's lumped term (opt-in; none by default).
     pub air_modes: Vec<AirModes>,
     pub rads: Vec<RadDamp>,
+    /// Two heads' compact dipole radiation (opt-in; none by default).
+    pub rad_dipole: Option<RadDipole>,
     pub links: Vec<Link>,
     pub contacts: Vec<Contact>,
     /// Dry friction on the faces some contacts press together, solved after the contacts.
@@ -3193,7 +3221,7 @@ impl Instrument {
         if !rate.is_finite() || rate <= 0.0 {
             return Err("instrument sample rate must be positive and finite".into());
         }
-        Ok(Instrument { bodies: vec![], cavities: vec![], air_modes: vec![], rads: vec![], links: vec![], contacts: vec![], frictions: vec![], strikes: vec![], drives: vec![], mics: vec![], rate, step_index: 0, gas, materials: None, prepared: false, cq: ContactQueue::default(), load_on: None })
+        Ok(Instrument { bodies: vec![], cavities: vec![], air_modes: vec![], rads: vec![], rad_dipole: None, links: vec![], contacts: vec![], frictions: vec![], strikes: vec![], drives: vec![], mics: vec![], rate, step_index: 0, gas, materials: None, prepared: false, cq: ContactQueue::default(), load_on: None })
     }
     /// Bring every body's bias on from zero as a raised cosine over `seconds`, not all at once, so
     /// the piece ends that time at rest under its load. A step rings every mode it reaches. This
@@ -3469,6 +3497,11 @@ impl Instrument {
             gas_rate2 += 2.0 * rate * radiation.resistance
                 * inverse_volume_mass(&radiation.bodies);
         }
+        // The dipole is rank one on the two heads, with weights +-1/2 on their volumes.
+        if let Some(dipole) = &self.rad_dipole {
+            gas_rate2 += 2.0 * rate * RadDipole::OWN_HEAD_SHARE * dipole.resistance
+                * inverse_volume_mass(&[dipole.heads.0, dipole.heads.1]);
+        }
         // Air modes: the whole set is a sum of rank-one terms v_k v_k^T with v_k = (sqrt(kappa_k) M^-1/2 g_k,
         // -omega~_k e_k), so its largest mass-normalized eigenvalue is that of their Gram matrix
         // G_kl = v_k . v_l = sqrt(kappa_k kappa_l) g_k^T M^-1 g_l + delta_kl omega~_k^2. Two upper bounds, the
@@ -3721,6 +3754,17 @@ impl Instrument {
                 }
             }
         }
+        if let Some(dipole) = &self.rad_dipole {
+            let volume = |b: &Body| b.w.iter().zip(&b.wp).map(|(a, c)| a - c).sum::<f64>() / k * b.h * b.h;
+            let q = 0.5 * (volume(&self.bodies[dipole.heads.0]) - volume(&self.bodies[dipole.heads.1]));
+            for (bi, share) in [(dipole.heads.0, 0.5), (dipole.heads.1, -0.5)] {
+                let b = &mut self.bodies[bi];
+                let fa = -dipole.resistance * q * share * b.h * b.h;
+                for f in b.f.iter_mut() {
+                    *f += fa;
+                }
+            }
+        }
         for d in &self.drives {
             let v = d.at(t);
             self.bodies[d.body].f[d.node] += v;
@@ -3762,6 +3806,11 @@ impl Instrument {
         }
         for b in self.bodies.iter_mut() {
             b.finish(k);
+        }
+        if let Some(dipole) = &mut self.rad_dipole {
+            let volume = |b: &Body| b.wn.iter().zip(&b.wp).map(|(a, c)| a - c).sum::<f64>() / (2.0 * k) * b.h * b.h;
+            let q = 0.5 * (volume(&self.bodies[dipole.heads.0]) - volume(&self.bodies[dipole.heads.1]));
+            dipole.radiated_j += k * dipole.resistance * q * q;
         }
         // microphones: centred acceleration at this step
         for (mi, m) in self.mics.iter_mut().enumerate() {
@@ -3807,7 +3856,8 @@ impl Instrument {
     /// `step` stays the reference that stepper is checked against. It prepares the microphones' taps as the
     /// first step would, so place microphones and bodies before exporting (a later move would no longer
     /// re-prepare them). A microphone's closed-body observer (pexfp.378) is not in it either, so
-    /// render-gpu's plan refuses a microphone that has one.
+    /// render-gpu's plan refuses a microphone that has one. Nor is a `RadDipole`: the kit attaches one only to
+    /// heads carrying a radiation load, which that plan refuses.
     pub fn image(&mut self) -> InstrumentImage {
         if !self.prepared {
             self.prepare();
