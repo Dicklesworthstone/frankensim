@@ -11,6 +11,8 @@ use fs_qty::{Amount, AmountConcentration, Temperature, Volume};
 use fs_thermochem::{SpeciesId, solution::solubility::IdealSolubilityV1};
 use std::sync::Arc;
 
+#[path = "solution/electrolyte.rs"]
+mod electrolyte;
 #[path = "solution/shared.rs"]
 mod shared;
 

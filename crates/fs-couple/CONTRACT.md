@@ -1,5 +1,36 @@
 # CONTRACT: fs-couple
 
+## Source-backed ionic phases during finite moisture exchange
+
+`FiniteMoistureSolution::with_electrolyte_solubility` retains the original
+`ElectrolyteSolubilitySolution` while the existing finite solution and native
+slab or Cartesian specimens exchange solvent. Every candidate volume updates
+the declared source-activity basis, solves pH and acid-family partitioning with
+the selected finite salt, and obtains osmotic pressure/water activity from
+the actual dissolved particles. Analytical cation/family totals, fixed
+spectators, species identities and original source selection remain bound.
+Concentration can create a solid; dilution can exhaust its finite stock.
+
+The existing shared scalar water closure and native material/sorption
+queries remain the sole moisture integrator. This path serves single and
+multiple specimens, their adaptive continuations and existing one-way solid
+mechanics consumers. Cancellation checkpoints also enter the nested chemistry
+solve; refused candidates leave the original solution and specimens unchanged.
+The accepted ionic owner and native fields publish together, with exact
+analytical-stock/layout checks and the original free-water conservation check.
+
+Only anhydrous selected salt reactions without a solvent term are admitted.
+Hydrate precipitation or hydrolysis with chemical water transfer requires an
+additional reaction-water account and refuses at construction. The original
+fixed-solvent dilute acid/base approximation remains explicit, including the
+small pure-water autoionization particle baseline retained by its actual H+/OH-
+inventories; the solvent activity is not exactly pure-water-normalized. This is not a
+concentrated-electrolyte activity model or an ion-permeating boundary. No
+volatile solute transfer, nucleation kinetics or dissolution heat is inferred.
+Focused native tests manufacture both precipitation on uptake and exhaustion
+on desorption using the original source-qualified 1:2 salt, then check the
+same endpoint pH, component totals, source RH and finite water balance.
+
 ## Native converter conduction and finite material temperatures
 
 `circuit_enthalpy::converter::ConverterThermalNetwork` joins the native

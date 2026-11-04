@@ -188,7 +188,7 @@ impl FiniteMoistureSolution {
         }
         let evaluate = |volume: f64| -> Result<Trial<F, F::Report>, SolutionMoistureError> {
             poll(cx)?;
-            let reservoir = self.with_solvent_volume_m3(volume)?;
+            let reservoir = self.with_solvent_volume_m3(volume, || cx.checkpoint().is_err())?;
             let activity = reservoir.solution().water_activity()?;
             let mut solids = Vec::with_capacity(ordered.len());
             for body in &ordered {
@@ -263,7 +263,7 @@ impl FiniteMoistureSolution {
                 });
             }
             Trial {
-                reservoir: self.with_solvent_volume_m3(volume)?,
+                reservoir: self.with_solvent_volume_m3(volume, || cx.checkpoint().is_err())?,
                 residual_kg: (volume - initial_volume) * self.solvent_density_kg_m3
                     + start.water_to_solids_kg,
                 ..start
@@ -352,6 +352,24 @@ impl FiniteMoistureSolution {
                         "dissolved plus solid solute failed its original component balance",
                     ));
                 }
+            }
+        }
+        if let Some(initial) = self.electrolyte_solubility() {
+            let endpoint =
+                reservoir
+                    .electrolyte_solubility()
+                    .ok_or(SolutionMoistureError::Invalid(
+                        "source-bound ionic phases were not retained by the moisture candidate",
+                    ))?;
+            if initial.component_total() != endpoint.component_total()
+                || initial.family_totals() != endpoint.family_totals()
+                || initial.spectators() != endpoint.spectators()
+                || initial.species() != endpoint.species()
+                || initial.solvent() != endpoint.solvent()
+            {
+                return Err(SolutionMoistureError::Invalid(
+                    "ionic analytical inventories or species layout changed during solvent exchange",
+                ));
             }
         }
         let solvent_mass_kg = [self.solvent_mass_kg(), reservoir.solvent_mass_kg()];

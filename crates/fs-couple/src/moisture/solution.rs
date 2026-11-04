@@ -12,10 +12,16 @@
 //! bound water against their original inventories. Total solute amounts never
 //! change. An optional finite solubility owner partitions those totals between
 //! dissolved and solid stocks at every trial; only dissolved particles affect
-//! water activity. Otherwise uptake concentrates the solution and desorption
+//! water activity. Source-backed ionic salt equilibrium can additionally solve
+//! pH and acid-family partitioning at every candidate solvent volume. Otherwise
+//! uptake concentrates the solution and desorption
 //! dilutes it with all solutes retained in solution. The accepted
 //! source queries, native slab or Cartesian fields and solution publish together. Incompressible
 //! solvent density is the explicit molar mass divided by partial molar volume.
+//! The ionic dilute view retains the small pure-water autoionization particle
+//! baseline, 2*sqrt(Kw) times the declared activity-reference amount density;
+//! it does not supply an exactly normalized pure-water or concentrated-ion
+//! solvent chemical potential.
 //!
 //! This is the equal-pressure, negligible-vapor-storage sorption limit. It does
 //! not turn a vapor surface coefficient into a liquid-immersion permeability,
@@ -48,7 +54,10 @@ use super::{
 use fs_exec::Cx;
 use fs_material::osmosis::{
     AqueousSolution, OsmosisError,
-    solubility::{FiniteSolubilityError, FiniteSolubilitySolution},
+    solubility::{
+        FiniteSolubilityError, FiniteSolubilitySolution,
+        electrolyte::{ElectrolyteSolubilityError, ElectrolyteSolubilitySolution},
+    },
 };
 
 /// Original thermodynamic/source/diffusion refusal; no endpoint is published.
@@ -60,6 +69,8 @@ pub enum SolutionMoistureError {
     Solution(OsmosisError),
     /// Original finite solid/solution partition or solubility law refused.
     Solubility(FiniteSolubilityError),
+    /// Original source-bound aqueous chemistry or finite ionic solid refused.
+    Electrolyte(ElectrolyteSolubilityError),
     /// Malformed, unsupported or unrepresentable data.
     Invalid(&'static str),
     /// The supplied source-supported solvent-volume interval contains no sign change.
@@ -90,6 +101,11 @@ impl From<FiniteSolubilityError> for SolutionMoistureError {
         Self::Solubility(value)
     }
 }
+impl From<ElectrolyteSolubilityError> for SolutionMoistureError {
+    fn from(value: ElectrolyteSolubilityError) -> Self {
+        Self::Electrolyte(value)
+    }
+}
 
 /// Explicit scalar work, source-domain and finite-inventory tolerances.
 #[derive(Clone, Copy, Debug)]
@@ -117,6 +133,7 @@ pub struct FiniteMoistureSolution {
 enum SolutionInventory {
     Dissolved(AqueousSolution),
     Solubility(FiniteSolubilitySolution),
+    Electrolyte(ElectrolyteSolubilitySolution),
 }
 
 /// Accepted native diffusion and finite-reservoir exchange over one interval.
@@ -219,19 +236,69 @@ impl FiniteMoistureSolution {
         })
     }
 
-    /// Shared thermodynamics of the DISSOLVED amounts. With finite solubility,
-    /// use [`Self::solubility`] for conserved totals and original solid stocks.
+    /// Retain source-backed pH, acid/base families, common ions and a finite
+    /// anhydrous salt while the existing specimens exchange only solvent.
+    /// Every candidate volume reuses the same chemical sources, analytical
+    /// totals, spectator stocks and declared amount-at-unit-activity basis.
+    /// Only actual dissolved species contribute to the shared ideal osmotic view.
+    ///
+    /// A reaction consuming or releasing water is refused: hydration and metal
+    /// hydrolysis require an additional chemical-water account before this
+    /// owner can claim conservation of free solvent plus specimen-bound water.
+    /// The original fixed-solvent dilute acid/base approximation still applies;
+    /// no volatile species, solute transport or reaction heat is introduced.
+    pub fn with_electrolyte_solubility(
+        solution: ElectrolyteSolubilitySolution,
+        solvent_molar_mass_kg_mol: f64,
+    ) -> Result<Self, SolutionMoistureError> {
+        if solution
+            .equilibrium()
+            .reaction()
+            .terms()
+            .iter()
+            .any(|term| &term.species == solution.solvent())
+        {
+            return Err(SolutionMoistureError::Invalid(
+                "finite moisture exchange requires an anhydrous salt reaction without chemical solvent transfer",
+            ));
+        }
+        let density = solvent_molar_mass_kg_mol / solution.solution().solvent_molar_volume_m3_mol();
+        let mass = solution.solution().solvent_volume_m3() * density;
+        if !positive(solvent_molar_mass_kg_mol) || !positive(density) || !positive(mass) {
+            return Err(SolutionMoistureError::Invalid(
+                "finite positive solvent molar mass, density and water inventory required",
+            ));
+        }
+        solution.solution().water_activity()?;
+        Ok(Self {
+            inventory: SolutionInventory::Electrolyte(solution),
+            solvent_molar_mass_kg_mol,
+            solvent_density_kg_m3: density,
+        })
+    }
+
+    /// Shared thermodynamics of the DISSOLVED amounts. With finite phases,
+    /// use [`Self::solubility`] or [`Self::electrolyte_solubility`] for conserved
+    /// analytical totals and original solid stocks.
     pub const fn solution(&self) -> &AqueousSolution {
         match &self.inventory {
             SolutionInventory::Dissolved(solution) => solution,
             SolutionInventory::Solubility(solution) => solution.solution(),
+            SolutionInventory::Electrolyte(solution) => solution.solution(),
         }
     }
     /// Original finite solubility owner, if explicitly selected by the caller.
     pub const fn solubility(&self) -> Option<&FiniteSolubilitySolution> {
         match &self.inventory {
-            SolutionInventory::Dissolved(_) => None,
+            SolutionInventory::Dissolved(_) | SolutionInventory::Electrolyte(_) => None,
             SolutionInventory::Solubility(solution) => Some(solution),
+        }
+    }
+    /// Complete original ionic chemistry, analytical stocks and phase result.
+    pub const fn electrolyte_solubility(&self) -> Option<&ElectrolyteSolubilitySolution> {
+        match &self.inventory {
+            SolutionInventory::Electrolyte(solution) => Some(solution),
+            SolutionInventory::Dissolved(_) | SolutionInventory::Solubility(_) => None,
         }
     }
     /// Explicit solvent molar mass [kg/mol].
@@ -243,7 +310,11 @@ impl FiniteMoistureSolution {
         self.solution().solvent_volume_m3() * self.solvent_density_kg_m3
     }
 
-    fn with_solvent_volume_m3(&self, volume: f64) -> Result<Self, SolutionMoistureError> {
+    fn with_solvent_volume_m3(
+        &self,
+        volume: f64,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, SolutionMoistureError> {
         let inventory = match &self.inventory {
             SolutionInventory::Dissolved(solution) => {
                 SolutionInventory::Dissolved(solution.with_solvent_volume_m3(volume)?)
@@ -251,6 +322,9 @@ impl FiniteMoistureSolution {
             SolutionInventory::Solubility(solution) => {
                 SolutionInventory::Solubility(solution.with_solvent_volume_m3(volume)?)
             }
+            SolutionInventory::Electrolyte(solution) => SolutionInventory::Electrolyte(
+                solution.with_solvent_volume_m3_cancelled(volume, cancelled)?,
+            ),
         };
         let mass = volume * self.solvent_density_kg_m3;
         if !positive(mass) {
