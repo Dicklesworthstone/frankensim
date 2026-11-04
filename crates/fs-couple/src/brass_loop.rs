@@ -36,7 +36,7 @@ use fs_phs::{PortHamiltonian, mass_spring_damper};
 use crate::mm_line::{
     CupState, MmBankLoad, MmLineBank, MmLineConfig, MmLineError, cup_junction_boundary, cup_port,
 };
-use crate::turbulence_noise::{JetNoiseCard, JetNoiseCoverage, LipJetNoise};
+use crate::turbulence_noise::{ConstrictionNoise, ConstrictionNoiseCard, JetNoiseCard, JetNoiseCoverage, LipJetNoise};
 use fs_duct::Duct;
 
 /// File-driven lip-valve performances observed at a baffled microphone.
@@ -125,6 +125,9 @@ pub struct BrassVoice {
     diags: Vec<BrassBlockDiag>,
     /// Opt-in lip jet noise ([`LipJetNoise`]: Stevens' form with Verge's constant, an extrapolation); `None` adds nothing.
     jet_noise: Option<LipJetNoise>,
+    /// Opt-in constriction noise ([`ConstrictionNoise`]: Oldham and Ukpoho's printed duct-constriction law in third-octave
+    /// bands, an extrapolation to the lip); `None` adds nothing.
+    constriction_noise: Option<ConstrictionNoise>,
 }
 
 impl BrassVoice {
@@ -184,6 +187,7 @@ impl BrassVoice {
             block_index: 0,
             diags: Vec::new(),
             jet_noise: None,
+            constriction_noise: None,
         })
     }
 
@@ -205,6 +209,20 @@ impl BrassVoice {
     #[must_use]
     pub fn jet_noise_coverage(&self) -> Option<JetNoiseCoverage> {
         self.jet_noise.as_ref().map(LipJetNoise::coverage)
+    }
+
+    /// Attach the opt-in constriction noise before any sample is rendered: a series pressure source added to the lip's
+    /// driving pressure beside (not instead of) the jet noise, of rms `K(St) P_blow` in each third octave below the duct
+    /// cutoff, `K` the printed trend of Oldham and Ukpoho and `P_blow` the gesture's blowing pressure (see
+    /// [`ConstrictionNoise`] for the law, what it rests on and the label). It is silent while the jet flow is not forward. A
+    /// voice without it is bit-identical to one built before this existed.
+    ///
+    /// # Errors
+    /// [`MmLineError::Invalid`] with the reason [`ConstrictionNoiseCard::validate`] gives.
+    pub fn with_constriction_noise(mut self, card: ConstrictionNoiseCard) -> Result<BrassVoice, MmLineError> {
+        self.constriction_noise =
+            Some(ConstrictionNoise::new(card, self.dt).map_err(|what| MmLineError::Invalid { what })?);
+        Ok(self)
     }
 
     /// Apply a control-rate delta (BETWEEN blocks; D17 lift for valve
@@ -266,6 +284,9 @@ impl BrassVoice {
         self.p_bore_prev = 0.0;
         if let Some(source) = self.jet_noise.as_mut() {
             source.record(0.0, 0.0);
+        }
+        if let Some(source) = self.constriction_noise.as_mut() {
+            source.record(0.0);
         }
         Ok(())
     }
@@ -359,6 +380,15 @@ impl BrassVoice {
                     drive += noise;
                 }
             }
+            // The opt-in constriction noise joins the same series drive: it reads the previous sample's jet flow (forward
+            // flow only), its amplitude follows the held blowing pressure, and zero is not added, so a voice without it keeps
+            // `drive` bit for bit.
+            if let Some(source) = self.constriction_noise.as_mut() {
+                let noise = source.pressure_pa(self.blow_pa, self.rho);
+                if noise != 0.0 {
+                    drive += noise;
+                }
+            }
             let dp_lip = drive - self.p_bore_prev;
             let force = dp_lip * self.lip.face_area_m2;
             let record = step_split(
@@ -409,6 +439,9 @@ impl BrassVoice {
             blow_work += drive * flow * dt;
             if let Some(source) = self.jet_noise.as_mut() {
                 source.record(flow, gap);
+            }
+            if let Some(source) = self.constriction_noise.as_mut() {
+                source.record(flow);
             }
             let (p_plus, p_minus, p_now) = cup_junction_boundary(
                 flow,
@@ -594,6 +627,52 @@ pub(crate) mod brass_loop_tests {
         let still = jet_render(&mut jet_voice(None), 0.0);
         let none = jet_render(&mut jet_voice(Some(jet_card(0.0, 7))), 0.0);
         assert!(same_bits(&still, &none), "no mouth pressure, no forward flow: no source even with no gate");
+    }
+
+    /// The probe voice of [`jet_voice`] with the opt-in constriction noise (cup radius from the card), or without it.
+    fn constriction_voice(card: Option<ConstrictionNoiseCard>) -> BrassVoice {
+        let gas = air(293.15);
+        let load = MmLoad::Analytic(Termination::FlangedOpen);
+        let mut lip = authored_lip();
+        lip.face_area_m2 = 1.0e-4;
+        let voice = BrassVoice::new(&[brass_combo(0.0)], &["open"], &gas, &load, &config(), lip, 1.5e-6).expect("voice");
+        let mut voice = match card {
+            Some(card) => voice.with_constriction_noise(card).expect("a usable card"),
+            None => voice,
+        };
+        voice.apply(BrassControl::SetLipTension(1.6)).expect("tension");
+        voice
+    }
+
+    fn constriction_card(seed: u64) -> ConstrictionNoiseCard {
+        ConstrictionNoiseCard { seed, duct_radius_m: 8.4e-3 }
+    }
+
+    /// Gauntlet G0 and G3. A voice without the constriction noise is the voice built before it existed; with no mouth
+    /// pressure there is no forward flow and no source, so the row adds exactly zero; with a blowing pressure the printed law
+    /// drives bands (a negative control inside the test: the planted 12 m radius puts the cutoff `100 / r` under the bank's
+    /// lowest band, and then the row is bit-identical to none even though the pressure is the same),
+    /// the pressure changes, stays finite, repeats bit for bit under a declared seed, and another seed gives another noise.
+    #[test]
+    fn constriction_noise_is_absent_silent_without_a_jet_and_speaks_seeded_on_the_printed_law() {
+        let plain = jet_render(&mut constriction_voice(None), 3000.0);
+        assert!(plain.iter().any(|p| p.abs() > 1.0), "the probe cup must carry pressure for the comparison to mean anything");
+        let still = jet_render(&mut constriction_voice(None), 0.0);
+        let none = jet_render(&mut constriction_voice(Some(constriction_card(7))), 0.0);
+        assert!(same_bits(&still, &none), "no mouth pressure, no forward flow: no source");
+        // Planted negative: a 12 m radius puts f_c = 8.3 Hz under the bank's lowest band (10 Hz), so nothing is driven at any
+        // pressure. (A smaller "duct" does not do it: the Strouhal length grows with the radius, so a 3 m radius, f_c = 33 Hz,
+        // still drives the 10-31.5 Hz bands, and the first run of this test said so.)
+        let cut_off = jet_render(
+            &mut constriction_voice(Some(ConstrictionNoiseCard { seed: 7, duct_radius_m: 12.0 })),
+            3000.0,
+        );
+        assert!(same_bits(&plain, &cut_off), "no band below the duct cutoff, so the law supplies nothing");
+        let open = jet_render(&mut constriction_voice(Some(constriction_card(7))), 3000.0);
+        assert!(open.iter().all(|p| p.is_finite()));
+        assert!(!same_bits(&plain, &open), "the printed law drives bands at this pressure, so it must reach the pressure");
+        assert!(same_bits(&open, &jet_render(&mut constriction_voice(Some(constriction_card(7))), 3000.0)), "a declared seed repeats bit for bit");
+        assert!(!same_bits(&open, &jet_render(&mut constriction_voice(Some(constriction_card(8))), 3000.0)), "another seed gives another noise");
     }
 
     /// G0/G3: distinct referenced mouth loads participate in the live lip/cup

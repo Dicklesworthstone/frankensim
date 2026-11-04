@@ -289,7 +289,14 @@ impl ButterworthBandGaussian {
     /// A stream at `seed` under `kernel` (tile 0), the section at rest.
     #[must_use]
     pub fn new(seed: u64, kernel: u32) -> Self {
-        Self { white: StreamKey { seed, kernel, tile: 0 }.stream(), x1: 0.0, x2: 0.0, y1: 0.0, y2: 0.0 }
+        Self::new_on_tile(seed, kernel, 0)
+    }
+
+    /// A stream at `seed` under `kernel` on `tile`, the section at rest: independent sections of one source (the
+    /// constriction noise's third-octave bank) take one tile each, so no two of them draw the same numbers.
+    #[must_use]
+    pub fn new_on_tile(seed: u64, kernel: u32, tile: u32) -> Self {
+        Self { white: StreamKey { seed, kernel, tile }.stream(), x1: 0.0, x2: 0.0, y1: 0.0, y2: 0.0 }
     }
 
     /// One sample for -3 dB edges `f_lo_hz < f_hi_hz` and step `dt` seconds, of unit rms inside the edges. An upper edge at
@@ -315,6 +322,16 @@ impl ButterworthBandGaussian {
         let y = h.b0 * (x - self.x1) - h.a1 * self.y1;
         (self.x2, self.x1, self.y2, self.y1) = (self.x1, x, self.y1, y);
         (y * det::sqrt(h.fraction / h.in_band_variance), BandCoverage::Truncated)
+    }
+
+    /// One sample through an already designed whole-band section: the arithmetic of the whole-band branch of
+    /// [`ButterworthBandGaussian::step_with_coverage`], for a source (the constriction noise's third-octave bank) that designs
+    /// each section once. A band at or above the Nyquist frequency has no design and is [`ButterworthBandGaussian::skip`].
+    fn step_designed(&mut self, q: &BandBiquad) -> f64 {
+        let x = self.white.next_normal();
+        let y = q.b0 * (x - self.x2) - q.a1 * self.y1 - q.a2 * self.y2;
+        (self.x2, self.x1, self.y2, self.y1) = (self.x1, x, self.y1, y);
+        y / det::sqrt(q.in_band_variance)
     }
 
     /// A step with the source closed: exactly one white sample is drawn (the stream index does not depend on how long
@@ -777,6 +794,313 @@ impl LipJetNoise {
     pub fn record(&mut self, flow_m3_s: f64, gap_m: f64) {
         self.last_flow_m3_s = flow_m3_s;
         self.last_gap_m = gap_m;
+    }
+}
+
+/// Kernel id of the lip's constriction-noise streams in `fs_rand`'s `(seed, kernel, tile)` key: "cons"; each third-octave
+/// band of the bank takes its own tile.
+pub const CONSTRICTION_NOISE_KERNEL: u32 = 0x636f_6e73;
+
+/// The trend line of Oldham and Ukpoho's Fig. 9 (K^2 against Strouhal number for dampers and orifice plates; reprinted as
+/// Fig. 10 in Guedel, AIVC Contributed Report 02, 2005): `(St, 20 log10 K + 120)`, i.e. K^2 in dB re 1e-12. The four
+/// vertices are READ FROM THE PRINTED FIGURE (about +-1.5 dB; the measured points scatter about +-6 dB around the line):
+/// flat at 62 dB from the line's start at St 0.1 to its peak 62.5 at St 0.4, 57.5 at St 3, then a straight line (on the
+/// log-log axes) to 14 dB where the printed line ends, at St 73.
+const OLDHAM_UKPOHO_TREND: [(f64, f64); 4] = [(0.1, 62.0), (0.4, 62.5), (3.0, 57.5), (73.0, 14.0)];
+
+/// `K(St)` [-] of Oldham and Ukpoho's trend line: the ratio of the rms fluctuating force to the mean force the flow exerts on
+/// the obstruction, from [`OLDHAM_UKPOHO_TREND`] interpolated linearly in `(ln St, dB)`. `None` outside the printed line
+/// (`St < 0.1` or `St > 73`): there is no data there, and nothing is supplied.
+#[must_use]
+pub fn constriction_k(strouhal: f64) -> Option<f64> {
+    let (first, last) = (OLDHAM_UKPOHO_TREND[0], OLDHAM_UKPOHO_TREND[OLDHAM_UKPOHO_TREND.len() - 1]);
+    if !(strouhal >= first.0 && strouhal <= last.0) {
+        return None;
+    }
+    let x = det::ln(strouhal);
+    for pair in OLDHAM_UKPOHO_TREND.windows(2) {
+        if strouhal <= pair[1].0 {
+            let (x0, x1) = (det::ln(pair[0].0), det::ln(pair[1].0));
+            let db = pair[0].1 + (pair[1].1 - pair[0].1) * (x - x0) / (x1 - x0);
+            return Some(det::exp((db - 120.0) * (core::f64::consts::LN_10 / 20.0)));
+        }
+    }
+    None
+}
+
+/// The lip's opt-in constriction-noise card: `constriction_noise <seed> <duct_radius_m>`. Two fields, no gain and no gate: the
+/// law below has no free number, so the card has nowhere to tune one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ConstrictionNoiseCard {
+    /// Declared seed of the noise streams.
+    pub seed: u64,
+    /// Radius `r` [m] of the duct the constriction opens into: the mouthpiece cup's rim radius.
+    pub duct_radius_m: f64,
+}
+
+impl ConstrictionNoiseCard {
+    /// Refuse a card whose radius cannot be used.
+    ///
+    /// # Errors
+    /// A named reason: the duct radius must be finite and positive.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if !(self.duct_radius_m.is_finite() && self.duct_radius_m > 0.0) {
+            return Err("constriction_noise duct radius must be finite and positive");
+        }
+        Ok(())
+    }
+}
+
+/// Third-octave bands of the bank: the base-ten centres of IEC 61260-1, `1 kHz * 10^(n/10)` for `n = -20 ..= 13` (10 Hz to
+/// 20 kHz; the nominal "standard centres" 10, 12.5, ..., 20000 Hz are these rounded), edges at `10^(+-1/20)` times the centre.
+const CONSTRICTION_BANDS: usize = 34;
+
+fn constriction_band_centre_hz(index: usize) -> f64 {
+    1000.0 * det::pow(10.0, (index as f64 - 20.0) / 10.0)
+}
+
+/// `(1/pi) int_{w_a}^{w_b} |H(e^{jw})|^2 dw` of one designed section for a unit white input, by 16-point Gauss-Legendre on the
+/// one interval (the integrand is smooth over a third octave: the section's quality factor is about 4.3).
+fn biquad_power_between(q: &BandBiquad, w_a: f64, w_b: f64) -> f64 {
+    let (half, mid) = (0.5 * (w_b - w_a), 0.5 * (w_b + w_a));
+    let mut sum = 0.0;
+    for &(node, weight) in &GAUSS_LEGENDRE_16 {
+        for x in [-node, node] {
+            let w = mid + half * x;
+            let (s1, c1) = det::sin_cos(w);
+            let (s2, c2) = det::sin_cos(2.0 * w);
+            let (re, im) = (1.0 + q.a1 * c1 + q.a2 * c2, q.a1 * s1 + q.a2 * s2);
+            sum += weight * 4.0 * q.b0 * q.b0 * s1 * s1 / (re * re + im * im);
+        }
+    }
+    sum * half / core::f64::consts::PI
+}
+
+/// Solve the dense system `a x = b` (`a` row-major `n x n`) by Gaussian elimination with partial pivoting; `None` if singular.
+fn solve_dense(mut a: Vec<f64>, mut b: Vec<f64>) -> Option<Vec<f64>> {
+    let n = b.len();
+    for col in 0..n {
+        let pivot = (col..n).max_by(|&r1, &r2| a[r1 * n + col].abs().total_cmp(&a[r2 * n + col].abs()))?;
+        if !(a[pivot * n + col].abs() > 1.0e-12) {
+            return None;
+        }
+        if pivot != col {
+            for k in 0..n {
+                a.swap(pivot * n + k, col * n + k);
+            }
+            b.swap(pivot, col);
+        }
+        for row in col + 1..n {
+            let factor = a[row * n + col] / a[col * n + col];
+            for k in col..n {
+                a[row * n + k] -= factor * a[col * n + k];
+            }
+            b[row] -= factor * b[col];
+        }
+    }
+    for row in (0..n).rev() {
+        let tail: f64 = (row + 1..n).map(|k| a[row * n + k] * b[k]).sum();
+        b[row] = (b[row] - tail) / a[row * n + row];
+    }
+    Some(b)
+}
+
+/// One third-octave band of the constriction-noise bank.
+#[derive(Clone, Debug)]
+struct ConstrictionBand {
+    centre_hz: f64,
+    filter: ButterworthBandGaussian,
+    /// The section, `None` while the band's upper edge is at or above the Nyquist frequency (never driven).
+    design: Option<BandBiquad>,
+}
+
+/// The brass lip's opt-in CONSTRICTION NOISE (MB 1186): the printed duct-constriction noise law of Oldham and Ukpoho, applied
+/// to the lip channel, in series with the lip's driving pressure, in third-octave bands.
+///
+/// THE LAW. Oldham and Ukpoho (J. Sound Vib. 140(2), 1990), as reprinted in Guedel (AIVC Contributed Report 02, 2005, eq. 3
+/// and Fig. 10), give the plane-wave sound power per third octave that an obstruction in a circular duct radiates below the
+/// duct's cutoff `f_c = 100 / r`: `L_W = 20 log K(St) + 10 log[rho A sigma^4 C_L^2 U_c^4 / 16 c] + 120`, `C_L = dp / (rho U^2 /
+/// 2)`, `U_c = U / sigma`, `St = f d / U_c`, `d = pi r (1 - sigma) / 2`, with `K` the ratio of the rms fluctuating force to
+/// the mean force on the obstruction (Nelson and Morfey's definition, which the text gives). With `sigma U_c = U` this is
+/// `W = K^2 A dp^2 / (4 rho c)`: the power one direction of a plane wave carries from a pressure jump of rms `K dp` across the
+/// obstruction (a series source `p_s` in a duct of impedance `rho c / A` on both sides puts `p_s / 2` on each, `W = p_s^2 A / 4
+/// rho c`). So each third octave is a SERIES PRESSURE SOURCE of rms `K(St) dp`, the form [`LipJetNoise`] uses, with `K` from
+/// [`constriction_k`] (the printed trend line) and no constant of this code.
+///
+/// WHAT THE LIP SUPPLIES. `dp` is the gesture's blowing pressure `P_blow` (the mean drop across the lip, the cup's mean
+/// pressure being negligible against it); the speed through the constriction is the Bernoulli speed `U_c = sqrt(2 P_blow /
+/// rho)`; the open-area ratio `sigma` (lip aperture over cup cross-section, at most a few percent) is taken as zero, so
+/// `d = pi r / 2` with `r` the card's duct radius (the cup rim radius), which moves `St` by under 5 % (under 0.2 dB on the
+/// printed line, inside the figure's reading error). A band is driven when its centre lies below `f_c` AND its `St = f d / U_c`
+/// lies on the printed line (`0.1 <= St <= 73`); every other band is silent. The amplitude follows the HELD pressure, not a
+/// cycle gate (MB 1186: the real floor depends less and less on phase as the pitch rises); the only gate is the lip's own
+/// jet, which the loop records one sample late: no forward flow (`Q <= 0`, which includes a closed lip) and there is no
+/// jet and no source, as for [`LipJetNoise`]. Every band's stream advances by one white sample per call whether the source
+/// speaks or not, so the noise at a given sample never depends on how long it was silent.
+///
+/// THE BANK. One 2-pole Butterworth band-pass per third octave ([`ButterworthBandGaussian`], P1's section, each on its own
+/// tile), unit rms inside its own -3 dB edges. Adjacent sections overlap (each puts about half its power outside its edges), so
+/// a bank weighted literally by `K P` delivers 1.2 to 3.3 dB MORE than `K P` in a third octave (measured on the printed trend).
+/// The weights are therefore the exact solution of `sum_j M_ij p_j = (K_i P)^2` over the driven bands, `M_ij` the fraction of
+/// section `j`'s unit in-band power that falls inside band `i`'s edges (a Gauss-Legendre integral of the section's own
+/// response, `M_jj = 1`); no number is chosen. Each driven third octave then carries `K P` (measured to within 0.24 dB over
+/// 12 bands at 5 kPa, 32 kHz, a 8.4 mm cup), and the bands below the lowest driven one carry only the lowest section's skirt
+/// (6.5, 13 and 17 dB under it in the next three third octaves in that run), not zero. A section's skirt falls about 2 dB per
+/// third octave, so on the printed line's steep section (`St > 3`, 3.1 dB per band) the exact weight of a band is negative:
+/// that band is dropped, the rest re-solved, and the dropped band carries its louder neighbour's skirt, above its own target
+/// (by up to 13 dB in the worst case tested, a 30 Pa blow, where every amplitude is tiny). A held lip never reaches that
+/// section: a trumpet at 11.4 kPa drives St 0.12-1.1.
+///
+/// WHAT IT DOES NOT CLAIM. The law was measured on dampers and orifice plates in a 300 mm duct at 10-25 m/s; the lip channel
+/// is an extrapolation in size, Mach number and shape, and any page that shows a render says so. The scatter of the measured
+/// points about the line is about +-6 dB. How much of the source reaches the cup against the lip's own resistance and the cup's
+/// compliance is the loop's answer, not this law's. Above `f_c` and outside `0.1 <= St <= 73` the law gives no source and none is
+/// invented. With no `constriction_noise` key a performance is bit-identical to one written before the key existed.
+#[derive(Clone, Debug)]
+pub struct ConstrictionNoise {
+    card: ConstrictionNoiseCard,
+    bands: Vec<ConstrictionBand>,
+    /// Row-major `CONSTRICTION_BANDS^2`: `M_ij`, the share of section `j`'s unit in-band power inside band `i`'s edges.
+    overlap: Vec<f64>,
+    /// `(blow_pa, rho)` the cached amplitudes belong to, and the amplitudes `sqrt(p_j)` [Pa] per band.
+    cached_for: Option<(u64, u64)>,
+    amplitude_pa: Vec<f64>,
+    last_flow_m3_s: f64,
+}
+
+impl ConstrictionNoise {
+    /// The source for `card` at step `dt` seconds (the clock the loop's lip pressure is drawn on).
+    ///
+    /// # Errors
+    /// The reason [`ConstrictionNoiseCard::validate`] gives, or an unusable step.
+    pub fn new(card: ConstrictionNoiseCard, dt: f64) -> Result<Self, &'static str> {
+        card.validate()?;
+        if !(dt > 0.0 && dt.is_finite()) {
+            return Err("constriction_noise needs a positive finite step");
+        }
+        let edge = det::pow(10.0, 0.05);
+        let bands: Vec<ConstrictionBand> = (0..CONSTRICTION_BANDS)
+            .map(|index| {
+                let centre_hz = constriction_band_centre_hz(index);
+                ConstrictionBand {
+                    centre_hz,
+                    filter: ButterworthBandGaussian::new_on_tile(card.seed, CONSTRICTION_NOISE_KERNEL, index as u32),
+                    design: BandBiquad::design(centre_hz / edge, centre_hz * edge, dt),
+                }
+            })
+            .collect();
+        let tau_dt = core::f64::consts::TAU * dt;
+        let mut overlap = vec![0.0; CONSTRICTION_BANDS * CONSTRICTION_BANDS];
+        for (j, band_j) in bands.iter().enumerate() {
+            let Some(q) = band_j.design else { continue };
+            for (i, band_i) in bands.iter().enumerate() {
+                if band_i.design.is_some() {
+                    let (w_a, w_b) = (tau_dt * band_i.centre_hz / edge, tau_dt * band_i.centre_hz * edge);
+                    overlap[i * CONSTRICTION_BANDS + j] = biquad_power_between(&q, w_a, w_b) / q.in_band_variance;
+                }
+            }
+        }
+        Ok(Self { card, bands, overlap, cached_for: None, amplitude_pa: vec![0.0; CONSTRICTION_BANDS], last_flow_m3_s: 0.0 })
+    }
+
+    /// The card.
+    #[must_use]
+    pub const fn card(&self) -> &ConstrictionNoiseCard {
+        &self.card
+    }
+
+    /// The bands the law drives at blowing pressure `blow_pa` in gas of density `rho`, as `(band index, centre_hz, K, target
+    /// rms Pa)`: centre below `f_c = 100 / r` and `St = f d / U_c` on the printed line, `target = K * blow_pa`.
+    #[must_use]
+    pub fn driven_bands(&self, blow_pa: f64, rho: f64) -> Vec<(usize, f64, f64, f64)> {
+        let mut driven = Vec::new();
+        if !(blow_pa > 0.0 && blow_pa.is_finite() && rho > 0.0 && rho.is_finite()) {
+            return driven;
+        }
+        let u_c = det::sqrt(2.0 * blow_pa / rho);
+        let d = core::f64::consts::FRAC_PI_2 * self.card.duct_radius_m;
+        let f_c = 100.0 / self.card.duct_radius_m;
+        for (index, band) in self.bands.iter().enumerate() {
+            if band.design.is_none() || !(band.centre_hz < f_c) {
+                continue;
+            }
+            if let Some(k) = constriction_k(band.centre_hz * d / u_c) {
+                driven.push((index, band.centre_hz, k, k * blow_pa));
+            }
+        }
+        driven
+    }
+
+    /// Re-derive the per-band amplitudes for this blowing pressure and density (cached: they change only with the gesture).
+    fn refresh(&mut self, blow_pa: f64, rho: f64) {
+        let key = (blow_pa.to_bits(), rho.to_bits());
+        if self.cached_for == Some(key) {
+            return;
+        }
+        self.cached_for = Some(key);
+        self.amplitude_pa.iter_mut().for_each(|a| *a = 0.0);
+        let driven = self.driven_bands(blow_pa, rho);
+        let n = driven.len();
+        if n == 0 {
+            return;
+        }
+        // Solve `sum_j M_ij p_j = (K_i P)^2` for the powers `p_j` of the kept bands. A section's skirt falls about 2 dB per
+        // third octave (6 dB per octave in power), so on the printed line's steep section (St > 3, 31 dB per decade, 3.1 dB
+        // per band) the louder band below puts MORE than the target into the band above and the exact weight there is
+        // negative: that band is dropped (the most negative first) and the rest re-solved, so every kept band is exact and a
+        // dropped band carries its neighbours' skirt, which is above its target. The flat section, where a held lip works,
+        // never needs this.
+        let mut keep: Vec<usize> = (0..n).collect();
+        let power = loop {
+            let m = keep.len();
+            let mut a = vec![0.0; m * m];
+            for (r, &kr) in keep.iter().enumerate() {
+                for (c, &kc) in keep.iter().enumerate() {
+                    a[r * m + c] = self.overlap[driven[kr].0 * CONSTRICTION_BANDS + driven[kc].0];
+                }
+            }
+            let target: Vec<f64> = keep.iter().map(|&k| driven[k].3 * driven[k].3).collect();
+            // The system is the identity plus the sections' skirts and is not singular; if it ever were, the uncorrected
+            // weights `(K P)^2` (the literal recipe) are used instead.
+            let Some(p) = solve_dense(a, target.clone()) else { break target };
+            match p.iter().copied().enumerate().filter(|&(_, x)| x < 0.0).min_by(|x, y| x.1.total_cmp(&y.1)) {
+                Some((worst, _)) => {
+                    keep.remove(worst);
+                }
+                None => break p,
+            }
+        };
+        for (&k, p) in keep.iter().zip(power) {
+            self.amplitude_pa[driven[k].0] = det::sqrt(p);
+        }
+    }
+
+    /// The series pressure [Pa] of this sample, from the last sample's jet flow. `blow_pa` is the gesture's blowing
+    /// pressure, `rho` the gas density. Every band's stream advances by exactly one white sample per call, source speaking or
+    /// not.
+    pub fn pressure_pa(&mut self, blow_pa: f64, rho: f64) -> f64 {
+        if !(self.last_flow_m3_s > 0.0 && blow_pa > 0.0 && blow_pa.is_finite() && rho > 0.0 && rho.is_finite()) {
+            for band in &mut self.bands {
+                let _ = band.filter.skip();
+            }
+            return 0.0;
+        }
+        self.refresh(blow_pa, rho);
+        let mut sum = 0.0;
+        for (band, &amplitude) in self.bands.iter_mut().zip(&self.amplitude_pa) {
+            match band.design {
+                Some(q) if amplitude > 0.0 => sum += amplitude * band.filter.step_designed(&q),
+                _ => {
+                    let _ = band.filter.skip();
+                }
+            }
+        }
+        sum
+    }
+
+    /// Remember this sample's jet flow [m^3/s] (signed: negative is reverse flow); the lip gap is not needed.
+    pub fn record(&mut self, flow_m3_s: f64) {
+        self.last_flow_m3_s = flow_m3_s;
     }
 }
 
@@ -1408,6 +1732,214 @@ mod tests {
         assert_ne!(run(7), run(8));
         for other in [GLOTTAL_NOISE_KERNEL, GLOTTAL_JET_NOISE_KERNEL, FLUE_JET_NOISE_KERNEL] {
             assert_ne!(LIP_JET_NOISE_KERNEL, other, "the lip's stream is its own");
+        }
+    }
+
+    const CUP_RADIUS: f64 = 8.4e-3;
+    const CONSTRICTION_DT: f64 = 1.0 / 32_000.0;
+
+    fn constriction(seed: u64) -> ConstrictionNoise {
+        ConstrictionNoise::new(ConstrictionNoiseCard { seed, duct_radius_m: CUP_RADIUS }, CONSTRICTION_DT).unwrap()
+    }
+
+    fn k2_db(k: f64) -> f64 {
+        20.0 * k.log10() + 120.0
+    }
+
+    /// Gauntlet G0. The trend is the printed line: its four vertices exactly, the straight log-log segment between them, and
+    /// no value outside the printed line (`St < 0.1` and `St > 73` have no data, and nothing is supplied there).
+    #[test]
+    fn constriction_trend_is_the_printed_line_and_absent_outside_it() {
+        for (st, db) in [(0.1, 62.0), (0.4, 62.5), (3.0, 57.5), (73.0, 14.0)] {
+            let k = constriction_k(st).expect("a vertex of the printed line");
+            assert!((k2_db(k) - db).abs() < 1.0e-9, "St {st}: {} dB against the printed {db}", k2_db(k));
+        }
+        // K at the low end is the 1.26e-3 the flue-jet row's constant (1.3e-3) is the same size as.
+        assert!((constriction_k(0.1).unwrap() - 1.2589e-3).abs() < 1.0e-6);
+        // Between 0.4 and 3 the line is straight in (ln St, dB): at St 1 it is 62.5 - 5 ln(2.5) / ln(7.5).
+        let at_one = 62.5 - 5.0 * (1.0f64 / 0.4).ln() / (3.0f64 / 0.4).ln();
+        assert!((k2_db(constriction_k(1.0).unwrap()) - at_one).abs() < 1.0e-9);
+        // Above St 3 it falls: 14 dB at 73 from 57.5 at 3 is about 31.4 dB per decade, and every step down is a drop.
+        let mut last = f64::INFINITY;
+        for st in [3.0, 5.0, 10.0, 20.0, 40.0, 73.0] {
+            let k = constriction_k(st).unwrap();
+            assert!(k < last, "St {st}");
+            last = k;
+        }
+        assert!((k2_db(constriction_k(10.0).unwrap()) - (57.5 + (14.0 - 57.5) * (10.0f64 / 3.0).ln() / (73.0f64 / 3.0).ln())).abs() < 1.0e-9);
+        for outside in [0.0999, 0.0, -1.0, 73.001, 1.0e3, f64::NAN, f64::INFINITY] {
+            assert_eq!(constriction_k(outside), None, "St {outside}");
+        }
+    }
+
+    /// Gauntlet G0. The bank's bands are the third octaves of IEC 61260-1, the card is refused when its radius is unusable, and
+    /// the driven set follows the printed rules: centre under `f_c = 100 / r` AND `St = f d / U_c` on the printed line.
+    #[test]
+    fn constriction_bands_are_the_standard_third_octaves_and_the_driven_set_follows_the_printed_rules() {
+        assert!((constriction_band_centre_hz(20) - 1000.0).abs() < 1.0e-9);
+        assert!((constriction_band_centre_hz(0) - 10.0).abs() < 1.0e-9);
+        assert!((constriction_band_centre_hz(33) - 19_952.623).abs() < 1.0e-2);
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(ConstrictionNoise::new(ConstrictionNoiseCard { seed: 1, duct_radius_m: bad }, CONSTRICTION_DT).is_err(), "radius {bad}");
+        }
+        assert!(ConstrictionNoise::new(ConstrictionNoiseCard { seed: 1, duct_radius_m: CUP_RADIUS }, 0.0).is_err());
+        let source = constriction(1);
+        let (blow, rho) = (5000.0, 1.2);
+        let driven = source.driven_bands(blow, rho);
+        assert!(!driven.is_empty());
+        let f_c = 100.0 / CUP_RADIUS;
+        let (u_c, d) = ((2.0f64 * blow / rho).sqrt(), core::f64::consts::FRAC_PI_2 * CUP_RADIUS);
+        for &(_, centre, k, rms) in &driven {
+            let st = centre * d / u_c;
+            assert!(centre < f_c, "{centre} Hz is at or above the duct cutoff {f_c} Hz");
+            assert!((0.1..=73.0).contains(&st), "St {st}");
+            assert!((rms - k * blow).abs() < 1.0e-12 * rms, "the target is K P_blow");
+        }
+        // The driven set is the contiguous run of centres in [0.1 U_c / d, f_c): nothing below it, nothing at or above f_c.
+        let lowest = 0.1 * u_c / d;
+        let expected: Vec<usize> = (0..CONSTRICTION_BANDS)
+            .filter(|&i| {
+                let c = constriction_band_centre_hz(i);
+                c >= lowest && c < f_c && c * 10f64.powf(0.05) < 16_000.0
+            })
+            .collect();
+        assert_eq!(driven.iter().map(|&(i, ..)| i).collect::<Vec<_>>(), expected);
+        // A pressure that is not a pressure drives nothing.
+        for bad in [0.0, -5.0, f64::NAN] {
+            assert!(source.driven_bands(bad, rho).is_empty(), "blow {bad}");
+        }
+        assert!(source.driven_bands(blow, 0.0).is_empty());
+        // The cutoff is not a switch a duct can use. The Strouhal length grows with the radius, so St 0.1 sits at
+        // `0.1 U_c / d = 0.2 U_c / (pi r)`, a fixed fraction (about U_c / 1571) of `f_c = 100 / r`, and some third octave of the
+        // bank lies between them for every radius from a bore to a ballroom: a 3 m duct (f_c = 33 Hz) still drives 10-31.5 Hz.
+        // Only a radius above 10 m has its cutoff under the lowest band (10 Hz) and drives nothing, at any blowing pressure.
+        for radius in [1.0e-3, CUP_RADIUS, 0.15, 3.0] {
+            let duct = ConstrictionNoise::new(ConstrictionNoiseCard { seed: 1, duct_radius_m: radius }, CONSTRICTION_DT).unwrap();
+            assert!(!duct.driven_bands(blow, rho).is_empty(), "radius {radius} m must still have a driven band");
+        }
+        let hall = ConstrictionNoise::new(ConstrictionNoiseCard { seed: 1, duct_radius_m: 12.0 }, CONSTRICTION_DT).unwrap();
+        for blow in [30.0, 3000.0, 14_000.0, 25_000.0] {
+            assert!(hall.driven_bands(blow, rho).is_empty(), "a 12 m radius has f_c = 8.3 Hz, under every band, at {blow} Pa");
+        }
+    }
+
+    /// Gauntlet G1. The overlap matrix has the unit diagonal by construction (an independent check of its Gauss-Legendre
+    /// integral against the section's own in-band variance), and on the printed trend the literal recipe (each section scaled by
+    /// `K P`) would deliver 1 dB or more over the printed level in the interior; the corrected bank's weights are all positive
+    /// (the correction never needs its clamp) over the range of pressures and duct radii a lip or a damper can show.
+    #[test]
+    fn constriction_overlap_is_unit_on_the_diagonal_and_the_literal_recipe_would_overdeliver() {
+        let source = constriction(1);
+        for (j, band) in source.bands.iter().enumerate() {
+            if band.design.is_some() {
+                let m = source.overlap[j * CONSTRICTION_BANDS + j];
+                assert!((m - 1.0).abs() < 1.0e-6, "band {j}: M_jj = {m}");
+            }
+        }
+        assert!(source.overlap.iter().all(|&m| m >= 0.0 && m.is_finite()));
+        let driven = source.driven_bands(5000.0, 1.2);
+        let interior = driven[driven.len() / 2].0;
+        let literal: f64 = driven.iter().map(|&(j, _, _, rms)| source.overlap[interior * CONSTRICTION_BANDS + j] * rms * rms).sum();
+        let target = driven[driven.len() / 2].3.powi(2);
+        let over_db = 10.0 * (literal / target).log10();
+        assert!(over_db > 1.0 && over_db < 4.0, "the literal recipe delivers {over_db} dB over K P in the interior");
+        // Over the range of pressures and duct radii a lip or a damper can show: every kept band is exact (to the solve), a band
+        // is dropped only on the printed line's steep section (St > 3), and a dropped band carries MORE than its target.
+        let mut worst_over_db: f64 = 0.0;
+        for radius in [CUP_RADIUS, 0.05, 0.15] {
+            for blow in [30.0, 300.0, 3000.0, 14_000.0, 25_000.0] {
+                let mut s = ConstrictionNoise::new(ConstrictionNoiseCard { seed: 1, duct_radius_m: radius }, CONSTRICTION_DT).unwrap();
+                s.refresh(blow, 1.2);
+                let (u_c, d) = ((2.0f64 * blow / 1.2).sqrt(), core::f64::consts::FRAC_PI_2 * radius);
+                let driven = s.driven_bands(blow, 1.2);
+                for &(i, centre, _, rms) in &driven {
+                    let delivered: f64 = driven.iter().map(|&(j, ..)| s.overlap[i * CONSTRICTION_BANDS + j] * s.amplitude_pa[j].powi(2)).sum();
+                    let db = 10.0 * (delivered / (rms * rms)).log10();
+                    if s.amplitude_pa[i] > 0.0 {
+                        assert!(db.abs() < 1.0e-6, "radius {radius} blow {blow}: kept band {i} delivers {db:+.3e} dB");
+                    } else {
+                        assert!(centre * d / u_c > 3.0, "radius {radius} blow {blow}: band {i} at St {} was dropped on the flat section", centre * d / u_c);
+                        assert!(db > 0.0, "radius {radius} blow {blow}: dropped band {i} must carry its neighbours' skirt, {db} dB");
+                        worst_over_db = worst_over_db.max(db);
+                    }
+                }
+            }
+        }
+        // Measured 12.6 dB at the worst of these cases (a 30 Pa blow); the module doc quotes it.
+        assert!(worst_over_db < 15.0, "a dropped band carries its neighbours' skirt, {worst_over_db} dB over its target");
+    }
+
+    /// Gauntlet G1 and G2. Each driven third octave of the SUMMED output carries `K P` of the printed law to within 1 dB
+    /// (measured with a Hann periodogram over the band's own edges, 2^19 samples), the third octaves below the lowest driven
+    /// band carry only that section's skirt and fall away, and the bands the law does not drive stay at their skirt too.
+    #[test]
+    fn constriction_bank_delivers_k_p_in_each_driven_third_octave_and_nothing_below_the_first() {
+        let (blow, rho) = (5000.0, 1.2);
+        let mut source = constriction(3);
+        let driven = source.driven_bands(blow, rho);
+        source.record(1.0e-3);
+        let n = 1usize << 19;
+        let xs: Vec<f64> = (0..n).map(|_| source.pressure_pa(blow, rho)).collect();
+        let edge = 10f64.powf(0.05);
+        let level_db = |centre: f64| 10.0 * (in_band_mean_square(&xs, centre / edge, centre * edge, CONSTRICTION_DT)).log10();
+        let mut worst: f64 = 0.0;
+        for &(_, centre, _, rms) in &driven {
+            let delivered = level_db(centre) - 10.0 * (rms * rms).log10();
+            assert!(delivered.abs() < 1.0, "{centre:.0} Hz delivers {delivered:+.2} dB against K P");
+            worst = worst.max(delivered.abs());
+        }
+        let first = driven[0].0;
+        let first_db = level_db(constriction_band_centre_hz(first));
+        let below: Vec<f64> = (1..=3).map(|k| first_db - level_db(constriction_band_centre_hz(first - k))).collect();
+        // Measured here: worst 0.236 dB over 12 bands, and 6.5, 13.3 and 16.9 dB under the lowest driven band (module doc).
+        assert!(worst < 0.5, "worst deviation {worst} dB over {} bands", driven.len());
+        assert!(below[0] > 3.0 && below[1] > below[0] + 3.0 && below[2] > below[1] + 2.0, "below the lowest driven band: {below:?} dB under it");
+        let skirt = level_db(constriction_band_centre_hz(first - 1));
+        assert!(skirt > first_db - 12.0, "the next band below carries the skirt, not silence: {skirt} against {first_db}");
+    }
+
+    /// Gauntlet G0/G3. No forward jet flow, no source (a planted flow makes the same source speak: the negatives are not
+    /// vacuous), no source for a pressure that is not a drive, and every band's stream advances one white sample per call
+    /// whether the source speaks or not; the bands' streams are different streams, the seed and kernel matter.
+    #[test]
+    fn constriction_noise_is_silent_without_a_forward_jet_and_keeps_one_white_sample_per_band_per_call() {
+        let (blow, rho) = (5000.0, 1.2);
+        let speaks = |flow: f64, blow: f64| {
+            let mut s = constriction(5);
+            s.record(flow);
+            (0..4096).any(|_| s.pressure_pa(blow, rho) != 0.0)
+        };
+        assert!(speaks(1.0e-3, blow), "forward flow speaks");
+        assert!(!speaks(-1.0e-3, blow), "reverse flow has no jet and no source");
+        assert!(!speaks(0.0, blow), "no flow (a closed lip) has no jet");
+        assert!(!speaks(1.0e-3, 0.0), "no blowing pressure, no drop to make noise from");
+        let (mut open, mut shut) = (constriction(5), constriction(5));
+        open.record(1.0e-3);
+        shut.record(0.0);
+        for _ in 0..50 {
+            open.pressure_pa(blow, rho);
+            shut.pressure_pa(blow, rho);
+        }
+        for (a, b) in open.bands.iter().zip(&shut.bands) {
+            assert_eq!(a.filter.white.index(), b.filter.white.index(), "one white sample per call, source speaking or not");
+            assert!(a.filter.white.index() > 0);
+        }
+        let run = |seed| {
+            let mut s = constriction(seed);
+            s.record(1.0e-3);
+            (0..256).map(|_| s.pressure_pa(blow, rho).to_bits()).collect::<Vec<u64>>()
+        };
+        assert_eq!(run(7), run(7));
+        assert_ne!(run(7), run(8));
+        let tile = |t| {
+            let mut g = ButterworthBandGaussian::new_on_tile(1, CONSTRICTION_NOISE_KERNEL, t);
+            (0..16).map(|_| g.step(900.0, 1100.0, CONSTRICTION_DT).to_bits()).collect::<Vec<u64>>()
+        };
+        assert_ne!(tile(0), tile(1), "each band draws its own stream");
+        let flue = |g: &mut ButterworthBandGaussian| (0..16).map(|_| g.step(900.0, 1100.0, CONSTRICTION_DT).to_bits()).collect::<Vec<u64>>();
+        assert_eq!(flue(&mut ButterworthBandGaussian::new(9, FLUE_JET_NOISE_KERNEL)), flue(&mut ButterworthBandGaussian::new_on_tile(9, FLUE_JET_NOISE_KERNEL, 0)), "tile 0 is the flue's own stream");
+        for other in [GLOTTAL_NOISE_KERNEL, GLOTTAL_JET_NOISE_KERNEL, FLUE_JET_NOISE_KERNEL, LIP_JET_NOISE_KERNEL] {
+            assert_ne!(CONSTRICTION_NOISE_KERNEL, other, "the constriction noise stream is its own");
         }
     }
 }

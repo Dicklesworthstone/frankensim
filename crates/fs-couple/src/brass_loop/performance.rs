@@ -29,6 +29,7 @@
 //! mouth_flow_max_taps <taps>                 optional; power of two in 512..=262144; default 65536 (the ladder's own ceiling)
 //! modal_baffle <relative_kernel_tol> <maximum_kernel_terms>  optional; full modal load and observation
 //! jet_noise <seed> <gain> <st_lo> <st_hi> <re_on>            optional; constriction noise of the lip jet, Verge's fraction
+//! constriction_noise <seed> <duct_radius_m>                  optional; Oldham and Ukpoho's printed constriction noise (linear bore)
 //! cylinder <radius_m> <length_m>             bore records, mouthpiece to bell
 //! cone <inlet_radius_m> <outlet_radius_m> <length_m>
 //! bessel <inlet_radius_m> <outlet_radius_m> <length_m> <flare> <pieces>
@@ -59,6 +60,17 @@
 //! pressure each sample, the nonlinear bore each gas step ([`super::nonlinear::NonlinearLip::with_jet_noise`]; there
 //! `Re_h = mdot / (w mu)` with the wall binding's own viscosity). A file without the record is bit-identical to one written
 //! before it existed, and so is one whose gate never opens.
+//!
+//! `constriction_noise` is the second opt-in source on the lip channel, the printed duct-constriction law of Oldham and
+//! Ukpoho (J. Sound Vib. 140(2), 1990; Guedel, AIVC Contributed Report 02, eq. 3 and Fig. 10) in place of Verge's flue-jet
+//! fraction ([`crate::turbulence_noise::ConstrictionNoise`]): a series pressure source added to the lip's driving pressure, in
+//! each third octave below the duct cutoff `100 / r` whose Strouhal number `f d / U_c` lies on the printed line, of rms
+//! `K(St) P_blow` with `K` the printed trend, `U_c = sqrt(2 P_blow / rho)` and `d = pi r / 2`. Two fields and no gain, so it
+//! has nothing to tune: `r` is the duct the constriction opens into, the cup rim radius the bore record's first station
+//! gives (the card says which). The law was measured on dampers and orifice plates in a 300 mm duct at 10-25 m/s, so putting
+//! it on a lip is an extrapolation in size and Mach number that any page showing a render says. It is silent while the jet
+//! flow is not forward, and a file without the record is bit-identical to one written before it existed. It is wired to the
+//! linear bore only: with `bore nonlinear` the file is refused by name rather than the source being dropped.
 //!
 //! Exactly one of `lip_response` and `lip` is given. `lip_response` carries
 //! the quantities lip-reed measurements publish: the outward-striking
@@ -108,7 +120,7 @@ use crate::pcm_wav::baffled::{BaffledPressure, CircularOutletReceiver, RayleighM
 use crate::pcm_wav::baffled::modal::{MAX_MODAL_KERNEL_TERMS, ModalOutletOptions, ModalOutletReport};
 use crate::pcm_wav::observation::PressureRenderer;
 use crate::render::RenderError;
-use crate::turbulence_noise::JetNoiseCard;
+use crate::turbulence_noise::{ConstrictionNoiseCard, JetNoiseCard};
 
 /// First line of every lip performance file.
 pub const LIP_PERFORMANCE_SCHEMA: &str = "frankensim-lip-performance-v1";
@@ -180,6 +192,7 @@ pub struct LipDescription {
     tension_track: Option<String>,
     nonlinear: Option<(NonlinearBoreRecord, ThermochemicalGasModel)>,
     jet_noise: Option<JetNoiseCard>,
+    constriction_noise: Option<ConstrictionNoiseCard>,
 }
 
 struct Fields<'a> {
@@ -390,6 +403,7 @@ impl LipDescription {
         let mut modal_baffle: Option<ModalOutletOptions> = None;
         let mut nonlinear: Option<NonlinearBoreRecord> = None;
         let mut jet_noise: Option<JetNoiseCard> = None;
+        let mut constriction_noise: Option<ConstrictionNoiseCard> = None;
         let mut ambient_words = None;
         let mut segments: Vec<Segment> = Vec::new();
         for (index, raw) in lines {
@@ -596,6 +610,17 @@ impl LipDescription {
                     once(&mut jet_noise, card, &f)?;
                     f.finish()?;
                 }
+                "constriction_noise" => {
+                    // Two fields and no gain: the law is Oldham and Ukpoho's printed trend, with no free number to declare.
+                    // The radius is the cup rim radius the bore record's first station gives; the card, not this code, says it.
+                    let seed: u64 = f.parse()?;
+                    let card = ConstrictionNoiseCard { seed, duct_radius_m: f.positive()? };
+                    if let Err(why) = card.validate() {
+                        return f.err(why);
+                    }
+                    once(&mut constriction_noise, card, &f)?;
+                    f.finish()?;
+                }
                 "microphone" => {
                     let position = [f.number()?, f.number()?, f.number()?];
                     let rings = f.count(128)? as usize;
@@ -735,6 +760,7 @@ impl LipDescription {
             tension_track,
             nonlinear,
             jet_noise,
+            constriction_noise,
         })
     }
 
@@ -742,6 +768,12 @@ impl LipDescription {
     #[must_use]
     pub const fn jet_noise(&self) -> Option<&JetNoiseCard> {
         self.jet_noise.as_ref()
+    }
+
+    /// The opt-in lip constriction-noise record, if the file declared one ([`crate::turbulence_noise::ConstrictionNoise`]).
+    #[must_use]
+    pub const fn constriction_noise(&self) -> Option<&ConstrictionNoiseCard> {
+        self.constriction_noise.as_ref()
     }
 
     /// The `bore nonlinear` record and the ambient source model it evolves,
@@ -889,6 +921,12 @@ impl LipDescription {
                 .map_err(|e| format!("jet_noise refused: {e}"))?,
             None => voice,
         };
+        let voice = match self.constriction_noise {
+            Some(card) => voice
+                .with_constriction_noise(card)
+                .map_err(|e| format!("constriction_noise refused: {e}"))?,
+            None => voice,
+        };
         let line = voice
             .receipts()
             .first()
@@ -950,6 +988,12 @@ impl LipDescription {
     ) -> Result<LipPerformance, String> {
         use super::nonlinear::{NonlinearClock, NonlinearLip};
         use fs_duct::nonlinear::bore::{WallGas, WallMemory};
+        if self.constriction_noise.is_some() {
+            return Err(
+                "constriction_noise is wired to the linear bore only: the nonlinear bore's lip loop does not carry it, and no source is silently dropped"
+                    .into(),
+            );
+        }
         use fs_duct::nonlinear::{CaloricDomain, FrozenGas};
         use fs_qty::Temperature;
         let gas = self.ambient_gas();
@@ -1677,6 +1721,49 @@ mod tests {
         let ungated = build("jet_noise 7 1.3e-3 0.045 0.115 0\n");
         let (at_gate, at_flow) = (first(&open).expect("gated source speaks"), first(&ungated).expect("ungated source speaks"));
         assert!(at_flow + 20 < at_gate, "the gated source must wait for the gate: ungated at {at_flow}, gated at {at_gate}");
+    }
+
+    #[test]
+    fn constriction_noise_parses_and_is_refused_by_name() {
+        let parse = |extra: &str| LipDescription::from_bytes(fixture(extra).as_bytes());
+        let ok = parse("constriction_noise 7 8.4e-3\n").expect("parses");
+        assert_eq!(ok.constriction_noise(), Some(&ConstrictionNoiseCard { seed: 7, duct_radius_m: 8.4e-3 }));
+        assert_eq!(parse("").expect("parses").constriction_noise(), None);
+        for (extra, needle) in [
+            ("constriction_noise\n", "missing field"),
+            ("constriction_noise 7\n", "missing field"),
+            ("constriction_noise 7 8.4e-3 9\n", "unexpected extra field"),
+            ("constriction_noise x 8.4e-3\n", "malformed field"),
+            ("constriction_noise 7 nan\n", "must be finite"),
+            ("constriction_noise 7 0\n", "expected a positive number"),
+            ("constriction_noise 7 -8.4e-3\n", "expected a positive number"),
+            ("constriction_noise 7 8.4e-3\nconstriction_noise 8 8.4e-3\n", "may only appear once"),
+        ] {
+            let error = parse(extra).expect_err(extra);
+            assert!(error.contains(needle), "{extra:?} -> {error}");
+        }
+    }
+
+    /// Gauntlet G0 (a cutoff under every driven band leaves nothing to add: bit-identical to no row), G3 (the printed law
+    /// reaches the radiated sound, is seeded and finite) and the planted negative that keeps the first from being vacuous (the
+    /// same row with the cup radius of a real cup speaks).
+    #[test]
+    fn constriction_noise_is_bit_identical_with_no_band_below_the_cutoff_and_otherwise_seeded_and_audible() {
+        let build = |extra: &str| pressure(&LipDescription::from_bytes(fixture(extra).as_bytes()).expect("parses"));
+        let plain = build("");
+        // A 12 m "duct" has its cutoff `100 / r` at 8.3 Hz, under the bank's lowest band (10 Hz), so nothing is driven at any
+        // pressure. (A 3 m radius does not do it: the Strouhal length grows with the radius and the 10-31.5 Hz bands are driven.)
+        let cut_off = build("constriction_noise 7 12\n");
+        assert!(
+            plain.iter().zip(&cut_off).all(|(a, b)| a.to_bits() == b.to_bits()),
+            "a row whose cutoff leaves no driven band must leave the radiated pressure bit-identical to no row"
+        );
+        let open = build("constriction_noise 7 8.4e-3\n");
+        assert!(open.iter().all(|p| p.is_finite()));
+        assert_ne!(plain, open, "the printed law drives bands on a real cup, so it must reach the radiated pressure");
+        let again = build("constriction_noise 7 8.4e-3\n");
+        assert!(open.iter().zip(&again).all(|(a, b)| a.to_bits() == b.to_bits()), "a declared seed repeats bit for bit");
+        assert_ne!(open, build("constriction_noise 8 8.4e-3\n"), "another seed gives another noise");
     }
 
     fn with_gas(record: &str) -> String {
