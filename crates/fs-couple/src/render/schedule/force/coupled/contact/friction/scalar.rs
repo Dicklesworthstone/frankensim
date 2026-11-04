@@ -1,6 +1,7 @@
 //! Shared admission, scalar branch/root and actual-state friction checks.
 //! Both the one-port and simultaneous-port owners use these exact operations.
 use super::*;
+use fs_tribo::{TangentialLaw, TangentialSolveConfig, TangentialStepInput};
 
 pub(super) fn admit_port(network: &CoupledModalSystem, port: &ModalFrictionPort,
     config: ModalFrictionConfig) -> Result<Vec<f64>, ModalFrictionError>
@@ -51,55 +52,42 @@ pub(super) fn solve(law: &FrictionLaw, config: ModalFrictionConfig, compliance: 
     dt: f64, free_slip: f64, normal: f64, gate: Option<&CancelGate>)
     -> Result<(f64, ModalFrictionRegime, usize), ModalFrictionError>
 {
+    poll(gate)?;
     if normal == 0.0 { return Ok((0.0, ModalFrictionRegime::Released, 0)); }
-    let static_mu = law.static_coefficient()?;
-    let cap = finite(static_mu*normal)?;
-    let required = finite(free_slip/compliance)?;
-    if required.abs() <= cap {
-        limit("friction traction", required.abs(), config.maximum_force_n)?;
-        return Ok((required, ModalFrictionRegime::Sticking, 0));
-    }
-    let sign = free_slip.signum();
-    let evaluate = |magnitude: f64| -> Result<(f64, f64), ModalFrictionError> {
-        poll(gate)?;
-        let slip = finite(free_slip.abs()-compliance*magnitude)?.max(0.0);
-        // Use the one-sided kinetic limit at the sticking endpoint; never
-        // feed zero into the owner's strictly-positive kinetic query.
-        let mu = if slip == 0.0 {
-            law.zero_speed_kinetic_coefficient()?
-        } else { law.kinetic_coefficient(finite(slip/dt)?)? };
-        let expected = finite(mu*normal)?;
-        Ok((finite(magnitude-expected)?, force_tolerance(config, magnitude, expected)?))
-    };
-    if let Some(force) = law.direct_sliding_traction_n(normal, free_slip.abs(), compliance, dt)? {
-        limit("friction traction", force, config.maximum_force_n)?;
-        if force < required.abs() {
-            let (residual, tolerance) = evaluate(force)?;
-            if residual.abs() <= tolerance {
-                let traction = if force == 0.0 { 0.0 } else { sign * force };
-                return Ok((traction, ModalFrictionRegime::Sliding, 0));
-            }
+    // Delegate only the held load-line solve. Actual modal displacement work
+    // and endpoint admission remain with check_within below. The shared owner
+    // isolates folded Gaussian branches before applying the force ceiling.
+    // Its work is bounded by max_iterations; cancellation brackets that leaf.
+    let candidate = law.advance(&law.initial_state(), &TangentialStepInput {
+        normal_n: normal,
+        slip_increment_m: [free_slip, 0.0],
+        dt_s: dt,
+        contact_temperature_k: None,
+        nominal_pressure_pa: None,
+        compliance_m_per_n: compliance,
+        solve: TangentialSolveConfig {
+            max_iterations: config.max_iterations,
+            maximum_force_n: config.maximum_force_n,
+            force_absolute_tolerance_n: config.force_absolute_tolerance_n,
+            force_relative_tolerance: config.force_relative_tolerance,
+        },
+    });
+    poll(gate)?;
+    let step = match candidate {
+        Err(TriboError::TangentialSolve { residual_n, tolerance_n, iterations }) => {
+            return Err(ModalCouplingError::ContactSolve { residual_n, tolerance_n, iterations }.into());
         }
-    }
-    let (zero, _) = evaluate(0.0)?;
-    if zero == 0.0 { return Ok((0.0, ModalFrictionRegime::Sliding, 0)); }
-    let mut lo = 0.0;
-    let mut hi = required.abs().min(config.maximum_force_n);
-    let (mut residual, mut tolerance) = evaluate(hi)?;
-    if residual.abs() <= tolerance { return Ok((sign*hi, ModalFrictionRegime::Sliding, 0)); }
-    if residual < 0.0 {
-        return Err(invalid("friction root is not bracketed within the declared force ceiling").into());
-    }
-    let mut used = 0;
-    for iteration in 1..=config.max_iterations {
-        used = iteration;
-        let mid = f64::midpoint(lo, hi);
-        (residual, tolerance) = evaluate(mid)?;
-        if residual.abs() <= tolerance { return Ok((sign*mid, ModalFrictionRegime::Sliding, iteration)); }
-        if mid == lo || mid == hi { break; }
-        if residual < 0.0 { lo = mid; } else { hi = mid; }
-    }
-    Err(ModalCouplingError::ContactSolve { residual_n: residual, tolerance_n: tolerance, iterations: used }.into())
+        Err(error @ TriboError::OutsideApplicability { field: "maximum_force_n", value, .. }) => {
+            limit("friction traction", value, config.maximum_force_n)?;
+            return Err(error.into());
+        }
+        result => result?,
+    };
+    let regime = match step.regime {
+        fs_tribo::FrictionRegime::Sticking => ModalFrictionRegime::Sticking,
+        fs_tribo::FrictionRegime::Sliding => ModalFrictionRegime::Sliding,
+    };
+    Ok((step.traction_n[0], regime, step.iterations))
 }
 
 /// The actual endpoint slip of an accepted candidate, as a distance:
@@ -177,7 +165,6 @@ pub(super) fn check_within(law: &FrictionLaw, config: ModalFrictionConfig, dt: f
 #[cfg(test)]
 mod trait_tests {
     use super::*;
-    use fs_tribo::{TangentialLaw, TangentialSolveConfig, TangentialStepInput};
 
     /// G1/G5: compare against the actual pre-existing modal branch/root owner,
     /// including its endpoint convention and bisection stopping iteration.
@@ -260,6 +247,38 @@ mod trait_tests {
                     }
                 }
             }
+        }
+    }
+
+    /// A folded Gaussian line has three roots here. The old scalar copy
+    /// rejected every feasible branch when the force ceiling lay between its
+    /// second and third force roots. The constitutive owner isolates first.
+    #[test]
+    fn g1_modal_gaussian_branch_survives_a_negative_cap_residual() {
+        let law = FrictionLaw::Stribeck {
+            static_mu: 1.0,
+            kinetic_mu: 0.1,
+            characteristic_speed: 1.0,
+            viscous_per_speed: 0.0,
+        };
+        let config = ModalFrictionConfig {
+            max_iterations: 80,
+            maximum_force_n: 0.95,
+            maximum_slip_speed_m_s: 10.0,
+            force_absolute_tolerance_n: 1e-14,
+            force_relative_tolerance: 1e-14,
+            sticking_tolerance_m: 1e-12,
+        };
+        for sign in [-1.0, 1.0] {
+            let (force, regime, used) = solve(&law, config, 3.0, 1.0, sign * 3.05, 1.0, None).unwrap();
+            let slip = sign * 3.05 - 3.0 * force;
+            // det-ok: independent direct constitutive expression.
+            let expected = sign * (0.1 + 0.9 * (-slip * slip).exp());
+            assert_eq!(regime, ModalFrictionRegime::Sliding);
+            assert!(force.abs() < 0.11);
+            assert!(slip.abs() > 2.7);
+            assert!((force - expected).abs() < 3e-14);
+            assert!(used <= config.max_iterations);
         }
     }
 }
