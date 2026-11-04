@@ -97,6 +97,141 @@ fn volume_cell(model: &Arc<VirialSolutionModel>, volume: f64, c: f64) -> Osmotic
 }
 
 #[test]
+fn multicomponent_implicit_candidates_refresh_all_original_binary_sources() {
+    let model = source(1.0, vec![0.0; 4], vec![200.0; 2]);
+    let key = PropertyKey::new("shared manufactured mixture mobility", DIMS);
+    let mut claims = ClaimSet::new();
+    claims
+        .insert_claim(PropertyClaim {
+            key: key.clone(),
+            value: PropertyValue::Curve {
+                abscissa: "c_A".into(),
+                abscissa_dims: typed(QuantityKind::AmountConcentration).dims(),
+                knots: vec![(0.0, 1e-9), (200.0, 3e-9)],
+                dims: DIMS,
+            },
+            validity: ValidityDomain::unconstrained().with_quantity(
+                "c_A",
+                typed(QuantityKind::AmountConcentration),
+                0.0,
+                200.0,
+            ),
+            uncertainty: UncertaintyModel::Unstated,
+            interpolation: InterpolationPolicy::LinearInside,
+            observations: vec![],
+            provenance: Provenance {
+                source: "manufactured mixture diffusion".into(),
+                license: "CC0-1.0".into(),
+                artifact: None,
+            },
+        })
+        .unwrap();
+    let card = Arc::new(
+        MaterialCard::assemble(
+            MaterialStateId {
+                chemistry: "assigned liquid pairs".into(),
+                phase: "liquid".into(),
+                process: "analytic fixture".into(),
+                revision: 0,
+            },
+            claims,
+            vec![],
+        )
+        .unwrap(),
+    );
+    let water = SpeciesId::new("water").unwrap();
+    let a = SpeciesId::new("solute-0").unwrap();
+    let b = SpeciesId::new("solute-1").unwrap();
+    let pairs = [
+        [water.clone(), a.clone()],
+        [water.clone(), b.clone()],
+        [a.clone(), b.clone()],
+    ];
+    let material = MaterialSolutionMaxwellStefan::new(
+        model.clone(),
+        (water.clone(), MolarMass::new(0.018)),
+        vec![
+            (a.clone(), MolarMass::new(0.04)),
+            (b.clone(), MolarMass::new(0.06)),
+        ],
+        pairs
+            .into_iter()
+            .map(|species| BinarySolutionDiffusionSource {
+                species,
+                material: card.clone(),
+                property: key.clone(),
+                selection: MaterialPropertySelection::SingleClaimOnly,
+            })
+            .collect(),
+        SolutionDiffusionSourceAxes {
+            temperature: "T".into(),
+            concentrations: vec![
+                (water, "c_water".into()),
+                (a, "c_A".into()),
+                (b, "c_B".into()),
+            ],
+        },
+        cell(&model, &[60.0, 60.0]).solution(),
+        || false,
+    )
+    .unwrap();
+    let mut system = OsmoticNetwork::with_solution_diffusion(
+        vec!["solute-0".into(), "solute-1".into()],
+        vec![cell(&model, &[100.0, 20.0]), cell(&model, &[20.0, 100.0])],
+        vec![SolutionDiffusionLink::from_material_sources(0, 1, 0.01, 0.001, material).unwrap()],
+        physical(),
+        1 << 22,
+    )
+    .unwrap()
+    .with_implicit_multicomponent_diffusion(
+        ImplicitMulticomponentDiffusionControls::default(),
+        1 << 22,
+    )
+    .unwrap();
+    let saved = bits(&system);
+    let mut implicit = system.implicit_multicomponent.take().unwrap();
+    let mut transfers = [f64::NAN; 2];
+    let mut evaluations = 0;
+    implicit
+        .transfers_into(
+            &system.cells[0].solution,
+            &system.cells[1].solution,
+            &mut system.diffusion[0],
+            100.0,
+            physical().constitutive,
+            &mut evaluations,
+            &mut transfers,
+            &mut || false,
+        )
+        .unwrap();
+    let left = [100.0 * VOLUME - transfers[0], 20.0 * VOLUME - transfers[1]];
+    let right = [20.0 * VOLUME + transfers[0], 100.0 * VOLUME + transfers[1]];
+    let (cl, cr) = (left[0] / VOLUME, right[0] / VOLUME);
+    let mean = (cl - cr) / (cl / cr).ln();
+    let coefficient = 1e-9 * (1.0 + mean / 100.0);
+    let expected = 100.0 * 0.01 * coefficient * (cl - cr) / 0.001;
+    assert!((transfers[0] - expected).abs() < 5e-14);
+    assert!((transfers[0] + transfers[1]).abs() < 2e-14);
+    assert!((coefficient - 1e-9 * (1.0 + (80.0 / 5.0_f64.ln()) / 100.0)).abs() > 5e-11);
+    let original = system.diffusion[0].material_sources().unwrap();
+    let endpoint = original
+        .resolve_inventories([VOLUME, VOLUME], [&left, &right], || false)
+        .unwrap();
+    for pair in endpoint.pairs() {
+        assert!((pair.face.properties()[0].value_si() - coefficient).abs() < 1e-23);
+        assert!(
+            original
+                .sources()
+                .iter()
+                .any(|source| source.selected_claim()
+                    == pair.face.properties()[0].answer().receipt.selected)
+        );
+    }
+    assert!(evaluations > 4);
+    assert_eq!(bits(&system), saved);
+}
+
+#[test]
 fn implicit_binary_root_refreshes_original_source_at_its_actual_endpoint() {
     let model = source(1.0, vec![0.0], vec![200.0]);
     let mut system = OsmoticNetwork::with_solution_diffusion(

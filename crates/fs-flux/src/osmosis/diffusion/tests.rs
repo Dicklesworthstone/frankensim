@@ -9,6 +9,7 @@ use fs_thermochem::{SpeciesId, transport::maxwell_stefan::MaxwellStefanMolarSolv
 use std::sync::Arc;
 
 mod implicit;
+mod multicomponent;
 mod source;
 
 const T: f64 = 298.15;

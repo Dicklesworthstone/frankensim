@@ -7,8 +7,11 @@
 //! free-energy decrease does not omit mechanical pressure/volume work.
 
 mod implicit;
+mod multicomponent;
 pub(crate) use implicit::ImplicitBinaryDiffusion;
 pub use implicit::ImplicitBinaryDiffusionControls;
+pub(crate) use multicomponent::ImplicitMulticomponentDiffusion;
+pub use multicomponent::ImplicitMulticomponentDiffusionControls;
 
 use super::{
     MAX_COMPARTMENTS, MAX_MEMBRANES, MAX_OSMOTIC_SPECIES, OsmoticCompartment, OsmoticNetwork,
@@ -383,10 +386,12 @@ fn finite(value: f64) -> Result<f64, OsmoticNetworkError> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn sweep(
     cells: &mut [OsmoticCompartment],
     links: &mut [SolutionDiffusionLink],
     mut implicit: Option<&mut ImplicitBinaryDiffusion>,
+    mut multicomponent: Option<&mut ImplicitMulticomponentDiffusion>,
     dt: f64,
     controls: SolutionDiffusionControls,
     evaluations: &mut usize,
@@ -402,8 +407,9 @@ pub(super) fn sweep(
         let n = left.solute_moles().len();
         let mut flux = [0.0; MAX_OSMOTIC_SPECIES];
         let mut area_time = 0.0;
+        let mut transfers = [0.0; MAX_OSMOTIC_SPECIES];
         let implicit_transfer = if let Some(implicit) = implicit.as_deref_mut() {
-            Some(implicit.transfer(
+            transfers[0] = implicit.transfer(
                 left,
                 right,
                 link,
@@ -411,7 +417,20 @@ pub(super) fn sweep(
                 controls.constitutive,
                 evaluations,
                 cancelled,
-            )?)
+            )?;
+            true
+        } else if let Some(implicit) = multicomponent.as_deref_mut() {
+            implicit.transfers_into(
+                left,
+                right,
+                link,
+                dt,
+                controls.constitutive,
+                evaluations,
+                &mut transfers[..n],
+                cancelled,
+            )?;
+            true
         } else {
             link.flux_into(
                 left,
@@ -425,22 +444,21 @@ pub(super) fn sweep(
             if !positive(area_time) {
                 return Err(OsmoticNetworkError::StepUnderflow);
             }
-            None
+            false
         };
         let mut next_left = [0.0; MAX_OSMOTIC_SPECIES];
         let mut next_right = [0.0; MAX_OSMOTIC_SPECIES];
         for i in 0..n {
             // Preserve the explicit owner's original per-species arithmetic
             // and refusal order, including recoverable withdrawal checks.
-            let transfer = match implicit_transfer {
-                Some(transfer) => transfer,
-                None => {
-                    let transfer = finite(area_time * flux[i])?;
-                    if flux[i] != 0.0 && transfer == 0.0 {
-                        return Err(OsmoticNetworkError::StepUnderflow);
-                    }
-                    transfer
+            let transfer = if implicit_transfer {
+                transfers[i]
+            } else {
+                let transfer = finite(area_time * flux[i])?;
+                if flux[i] != 0.0 && transfer == 0.0 {
+                    return Err(OsmoticNetworkError::StepUnderflow);
                 }
+                transfer
             };
             let (a, b) = (left.solute_moles()[i], right.solute_moles()[i]);
             let donor = if transfer >= 0.0 { a } else { b };

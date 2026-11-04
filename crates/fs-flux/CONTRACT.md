@@ -3015,8 +3015,10 @@ cancelled analytically; inventory rounding is checked separately. Only this
 fixed-volume mode reports `diffusion_free_energy_change_j: Some(...)`; it does
 not claim a caloric, electrochemical or mechanically open free-energy balance.
 Constant-data numerical/source workspaces are admitted at preparation;
-successful constant-data advances allocate nothing. Late failure publishes no
-partial inventory/time.
+the explicit and specialized binary paths allocate nothing during successful
+constant-data advances. The native multicomponent option below accounts for
+its allocating nonlinear work separately. Late failure publishes no partial
+inventory/time.
 
 `SolutionDiffusionLink::from_material_sources` uses the same timeline with
 `fs_material::osmosis::diffusion::source::MaterialSolutionMaxwellStefan`.
@@ -3107,6 +3109,53 @@ stiff window within a small step budget, nonlinear ODE refinement, original
 source refresh, coupled water rollback/potential, exact zeros, late cancellation,
 whole-window work, physical withdrawal and extreme-exposure refusal.
 
+### Implicit multisolute Maxwell--Stefan exchange
+
+`with_implicit_multicomponent_diffusion(ImplicitMulticomponentDiffusionControls,
+byte_budget)` selects coupled backward-Euler species equations for two or more
+declared solutes. It uses the existing `fs-solver` `NewtonKrylovState` and
+`FallibleFiniteDifference` owners for iteration, FGMRES and globalization. Every
+residual, numerical Jacobian probe and line-search candidate evaluates the
+original solvent-frame Maxwell--Stefan owner with all binary friction and
+nonideal cross forces; material coefficients refresh at the actual candidate.
+Neither independent Fick equations nor frozen source coefficients replace them.
+
+Unknowns are individual conserved transfers. Bounded logit coordinates span
+their nonnegative, thermodynamic-concentration-supported inventory intervals.
+The initial interior equal-concentration trial permits invasion from an exact
+zero endpoint without modifying the original physical state or adding trace
+mass. A species absent at both endpoints keeps exact zero amount and transfer.
+The original selected material source must admit every probe; unsupported
+endpoint/face states or joint interpolation gaps remain hard refusals.
+
+Native residuals use FIXED absolute molar scaling. After each native Newton
+checkpoint, a fresh physical replay checks BOTH actual rounded endpoint amount
+equations in moles against absolute accuracy plus relative accuracy times the
+actual transfer magnitude. Thus neither a large background inventory nor a
+transformed convergence flag can hide physical error. Finite integration,
+original withdrawal/balance/free-energy gates, whole-window atomic publication
+and the existing full/two-half temporal controller remain unchanged. The same
+option uses actual post-water volumes in the coupled network. Exhausted/stalled
+native nonlinear work is a named hard refusal, not a successful equilibrium.
+
+Every original flux evaluation, including initial states, derivative probes,
+discarded trials and checkpoint replays, consumes one complete-window budget.
+Source qualification queries retain their additional existing cost. Native
+dimension/restart, linear-cycle and outer-attempt caps admit a conservative
+512 KiB numerical payload allowance, plus two retained original solution
+buffers. This estimate includes bounded staged clones/telemetry and is NOT an
+allocated arena, allocator-overhead allowance or peak-process-memory guarantee.
+This optional native solve allocates transient vectors even for constant data;
+the explicit and specialized binary paths retain their original allocation
+behavior. It does not assert arbitrary-source root uniqueness, universal
+nonlinear convergence or a certified global temporal error bound.
+
+Focused regressions cover exact finite-concentration multisolute counterdiffusion
+at large stiffness, one-sided-zero invasion with an absent spectator, an adaptive
+stiff window, nonideal uphill transport against independent 2x2 solvent-frame
+equations and ODE refinement, all-pair source refresh, coupled water/potential,
+whole-window work, cancellation/retry and extreme-exposure rollback.
+
 ## Coupled nonideal water and molecular solution transport
 
 `OsmoticNetwork::with_coupled_solution_transport` composes the existing fully
@@ -3130,7 +3179,7 @@ all source links are requalified after water and after the complete molecular
 sweep. Pinned-source and physical-domain failures stay hard refusals. Only typed
 water root/bracket failures and finite-step withdrawal/passivity failures may
 shrink the step.
-The optional binary backward-Euler choice above changes only the molecular
+The optional binary or multisolute backward-Euler choice above changes only the molecular
 stage on this same timeline; its source samples use the actual post-water
 volumes, and its nonlinear work/refusal limits retain whole-window rollback.
 
@@ -3155,9 +3204,10 @@ to the fixed-volume mode. This is an isothermal potential/work account, not a
 caloric-energy, thermal-reservoir, inertia or cavitation model.
 
 All existing publication, bounded-work, source-payload and allocation rules
-remain: a failed/cancelled window publishes no volume, amount or clock; constant
-data advance without allocation, while material queries allocate their declared
-transient receipts. Focused tests use an independent two-state nonideal
+remain: a failed/cancelled window publishes no volume, amount or clock. The
+original explicit/binary constant-data paths advance without allocation; the
+optional native multisolute solve has its declared numerical payload allowance,
+and material queries allocate their original transient receipts. Focused tests use an independent two-state nonideal
 water/species ODE with state-dependent mobility, temporal refinement,
 pressure-driven separation, concentration/pressure datum and link-orientation
 invariance, water-induced source-boundary failure, cancellation, work and

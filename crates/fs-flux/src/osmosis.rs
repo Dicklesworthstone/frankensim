@@ -84,9 +84,14 @@ pub enum OsmoticNetworkError {
     Unbracketed,
     /// Scalar solve exhausted its iteration bound.
     NonlinearConvergence,
-    /// The binary implicit molecular solve could not resolve BOTH original
+    /// An implicit molecular solve could not resolve BOTH original
     /// inventory equations within the declared amount budget.
     ImplicitDiffusionConvergence { residual_mol: f64, maximum_mol: f64 },
+    /// The native multicomponent Newton--Krylov solve exhausted or stalled.
+    ImplicitMulticomponentConvergence {
+        scaled_residual: f64,
+        diagnosis: Option<fs_solver::NewtonStallDiagnosis>,
+    },
     /// Time integration exhausted its accepted-step or rejection budget.
     WorkBudget,
     /// Further halving cannot advance floating-point time.
@@ -392,6 +397,7 @@ pub struct OsmoticNetwork {
     diffusion: Vec<diffusion::SolutionDiffusionLink>,
     diffusion_controls: Option<diffusion::SolutionDiffusionControls>,
     implicit_diffusion: Option<diffusion::ImplicitBinaryDiffusion>,
+    implicit_multicomponent: Option<diffusion::ImplicitMulticomponentDiffusion>,
     coupled_controls: Option<coupled::CoupledSolutionControls>,
     work: Vec<OsmoticCompartment>,
     coarse: Vec<OsmoticCompartment>,
@@ -501,6 +507,7 @@ impl OsmoticNetwork {
             diffusion: Vec::new(),
             diffusion_controls: None,
             implicit_diffusion: None,
+            implicit_multicomponent: None,
             coupled_controls: None,
             workspace_bytes: required,
             time_s: 0.0,
@@ -526,7 +533,7 @@ impl OsmoticNetwork {
     /// Advance exactly the requested interval with conservative, positive
     /// exchange and bounded adaptive substeps. Membrane stages are implicit;
     /// molecular stages use paired fluxes at their current volumes, with an
-    /// optional deliberately selected binary backward-Euler solve. Pass
+    /// optional deliberately selected backward-Euler solve. Pass
     /// `|| cx.checkpoint().is_err()` to use the shared execution scope.
     /// Cancellation is polled per scalar iteration, membrane and publication.
     pub fn advance(
@@ -543,6 +550,9 @@ impl OsmoticNetwork {
         poll(&mut cancelled)?;
         copy_state(&self.cells, &mut self.work)?;
         if let Some(implicit) = &mut self.implicit_diffusion {
+            implicit.begin_window();
+        }
+        if let Some(implicit) = &mut self.implicit_multicomponent {
             implicit.begin_window();
         }
         let (water_before, amounts_before) = totals(&self.cells, self.species.len());
@@ -578,6 +588,7 @@ impl OsmoticNetwork {
                     &self.membranes,
                     &mut self.diffusion,
                     self.implicit_diffusion.as_mut(),
+                    self.implicit_multicomponent.as_mut(),
                     self.diffusion_controls,
                     self.coupled_controls,
                     step,
@@ -590,6 +601,7 @@ impl OsmoticNetwork {
                     &self.membranes,
                     &mut self.diffusion,
                     self.implicit_diffusion.as_mut(),
+                    self.implicit_multicomponent.as_mut(),
                     self.diffusion_controls,
                     self.coupled_controls,
                     0.5 * step,
@@ -602,6 +614,7 @@ impl OsmoticNetwork {
                     &self.membranes,
                     &mut self.diffusion,
                     self.implicit_diffusion.as_mut(),
+                    self.implicit_multicomponent.as_mut(),
                     self.diffusion_controls,
                     self.coupled_controls,
                     0.5 * step,
@@ -824,6 +837,7 @@ fn sweep_all(
     membranes: &[OsmoticMembrane],
     links: &mut [diffusion::SolutionDiffusionLink],
     implicit: Option<&mut diffusion::ImplicitBinaryDiffusion>,
+    multicomponent: Option<&mut diffusion::ImplicitMulticomponentDiffusion>,
     physical: Option<diffusion::SolutionDiffusionControls>,
     coupled: Option<coupled::CoupledSolutionControls>,
     dt: f64,
@@ -837,6 +851,7 @@ fn sweep_all(
             membranes,
             links,
             implicit,
+            multicomponent,
             coupled,
             dt,
             controls,
@@ -845,9 +860,16 @@ fn sweep_all(
         );
     }
     match physical {
-        Some(physical) => {
-            diffusion::sweep(cells, links, implicit, dt, physical, evaluations, cancelled)
-        }
+        Some(physical) => diffusion::sweep(
+            cells,
+            links,
+            implicit,
+            multicomponent,
+            dt,
+            physical,
+            evaluations,
+            cancelled,
+        ),
         None => sweep(cells, membranes, dt, controls, evaluations, cancelled),
     }
 }

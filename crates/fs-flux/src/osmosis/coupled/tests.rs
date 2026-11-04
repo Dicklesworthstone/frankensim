@@ -222,6 +222,111 @@ fn near(actual: f64, expected: f64, tolerance: f64) {
 }
 
 #[test]
+fn implicit_mixture_exchange_keeps_the_coupled_water_and_potential_owner() {
+    use crate::osmosis::diffusion::ImplicitMulticomponentDiffusionControls;
+    let model = Arc::new(
+        VirialSolutionModel::new(
+            T,
+            VBAR,
+            1.0,
+            vec![200.0; 2],
+            vec![0.005, 0.001, 0.001, 0.005],
+        )
+        .unwrap(),
+    );
+    let compartment = |volume, concentrations: [f64; 2]| {
+        OsmoticCompartment::new(
+            AqueousSolution::nonideal(
+                model.clone(),
+                volume,
+                concentrations.map(|c| c * volume).to_vec(),
+            )
+            .unwrap(),
+            OsmoticPressureVolume::new(volume, 1e5, K).unwrap(),
+            0.1 * volume,
+        )
+        .unwrap()
+    };
+    let material = SolutionMaxwellStefan::new(
+        model.clone(),
+        (id("water"), MolarMass::new(0.018)),
+        vec![
+            (id("A"), MolarMass::new(0.04)),
+            (id("B"), MolarMass::new(0.06)),
+        ],
+        vec![0.0, 1e-9, 3e-9, 1e-9, 0.0, 5e-10, 3e-9, 5e-10, 0.0],
+    )
+    .unwrap();
+    let water = OsmoticMembrane::new(
+        0,
+        1,
+        AREA,
+        MembraneTransport::new(
+            HydraulicPermeance::new(LP).unwrap(),
+            vec![
+                (
+                    ReflectionCoefficient::new(1.0).unwrap(),
+                    SolutePermeance::new(0.0).unwrap()
+                );
+                2
+            ],
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let mut system = OsmoticNetwork::with_coupled_solution_transport(
+        vec!["A".into(), "B".into()],
+        vec![
+            compartment(VL, [100.0, 10.0]),
+            compartment(VR, [20.0, 30.0]),
+        ],
+        vec![water],
+        vec![SolutionDiffusionLink::new(0, 1, AREA, LENGTH, material).unwrap()],
+        physical(),
+        1 << 22,
+    )
+    .unwrap()
+    .with_implicit_multicomponent_diffusion(
+        ImplicitMulticomponentDiffusionControls {
+            maximum_evaluations: 1,
+            ..ImplicitMulticomponentDiffusionControls::default()
+        },
+        1 << 22,
+    )
+    .unwrap();
+    let saved = bits(&system);
+    assert!(matches!(
+        system.advance(1.0, temporal(1e-3), || false),
+        Err(OsmoticNetworkError::WorkBudget)
+    ));
+    assert_eq!(bits(&system), saved);
+    system = system
+        .with_implicit_multicomponent_diffusion(
+            ImplicitMulticomponentDiffusionControls::default(),
+            1 << 22,
+        )
+        .unwrap();
+    let report = system.advance(1.0, temporal(1e-3), || false).unwrap();
+    assert_ne!(system.cells[0].solution.solvent_volume_m3(), VL);
+    assert!(system.cells[0].solution.solute_moles()[0] < 100.0 * VL);
+    assert!(system.cells[0].solution.solute_moles()[1] > 10.0 * VL);
+    assert!(report.water_balance_residual_m3.abs() <= 1e-18);
+    assert!(
+        report.solute_balance_residual_mol[..2]
+            .iter()
+            .all(|r| r.abs() <= 1e-16)
+    );
+    assert!(
+        report
+            .coupled_potential_change
+            .unwrap()
+            .total_potential_change_j
+            < 0.0
+    );
+    assert_eq!(report.diffusion_free_energy_change_j, None);
+}
+
+#[test]
 fn optional_binary_implicit_molecular_stages_share_water_rollback_and_potential() {
     use crate::osmosis::diffusion::ImplicitBinaryDiffusionControls;
     let mut system = network(1.0, 100000.0, true, false)

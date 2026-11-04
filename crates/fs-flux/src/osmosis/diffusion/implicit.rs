@@ -81,7 +81,10 @@ impl OsmoticNetwork {
         maximum_workspace_bytes: usize,
     ) -> Result<Self, OsmoticNetworkError> {
         controls.admit()?;
-        if self.species.len() != 1 || self.diffusion_controls.is_none() {
+        if self.species.len() != 1
+            || self.diffusion_controls.is_none()
+            || self.implicit_multicomponent.is_some()
+        {
             return Err(OsmoticNetworkError::Invalid(
                 "implicit binary diffusion requires one solute and prepared molecular links",
             ));
@@ -295,7 +298,7 @@ impl ImplicitBinaryDiffusion {
 // first. A finite representable integral is not lost to dt*A overflow or an
 // A*N underflow. A genuinely overflowing prediction may bracket a root but is
 // NEVER accepted as a residual. Exact zero flux has exact zero integral.
-fn integrated_flux(dt: f64, area: f64, flux: f64) -> f64 {
+pub(super) fn integrated_flux(dt: f64, area: f64, flux: f64) -> f64 {
     if flux == 0.0 {
         return 0.0;
     }
