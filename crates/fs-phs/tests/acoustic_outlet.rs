@@ -8,7 +8,8 @@ use fs_phs::acoustic_outlet::{
 };
 use fs_phs::harmonic::{HarmonicBudget, HarmonicModel};
 use fs_phs::{
-    AcousticSection, ChainOutlet, MouthFlange, ViscothermalPin, WallPin, acoustic_chain_outlet_wall,
+    AcousticSection, AcousticTap, ChainOutlet, MouthFlange, ViscothermalPin, WallPin,
+    acoustic_chain_outlet_wall,
 };
 
 fn section(cells: usize, cone: bool) -> AcousticSection {
@@ -17,6 +18,186 @@ fn section(cells: usize, cone: bool) -> AcousticSection {
         radius: 0.01,
         outlet_radius: if cone { 0.02 } else { 0.01 },
         cells,
+    }
+}
+
+#[test]
+fn long_open_chimney_has_an_open_low_frequency_limit_and_conserves_total_volume() {
+    let density = 1.2;
+    let speed = 343.0;
+    let radius = 0.004;
+    for cells in [3, 4] {
+        let sections = [AcousticSection {
+            length: 0.34,
+            radius: 0.012,
+            outlet_radius: 0.012,
+            cells,
+        }];
+        let tap = AcousticTap {
+            station: 0.6,
+            neck_length: 0.05,
+            neck_radius: radius,
+            open_fraction: 1.0,
+        };
+        let (system, bell) = acoustic_chain_with_outlet_flow(
+            &sections,
+            density,
+            speed,
+            ChainOutlet::Rigid,
+            1,
+            &[tap],
+            None,
+            None,
+        )
+        .unwrap();
+        let base = 2 * cells;
+        let outlet_flux = base + 4;
+        let tap_cell = (tap.station * cells as f64).floor() as usize;
+        let sign = if tap_cell % 2 == 0 { 1.0 } else { -1.0 };
+        assert_eq!(system.state_dim(), base + 5);
+        let model = HarmonicModel::from_ode(
+            &system,
+            HarmonicBudget {
+                max_dimension: 64,
+                max_dense_bytes: 2_000_000,
+                max_dense_work: 2_000_000,
+                relative_residual_tolerance: 1e-10,
+            },
+            || false,
+        )
+        .unwrap();
+        let omega_pin = core::f64::consts::PI * speed / (2.0 * sections[0].length);
+        // The original compact radiation owner retains its fixed pin. Its
+        // finite R is the only real load in this otherwise lossless fixture.
+        let resistance = density * omega_pin * omega_pin / (2.0 * core::f64::consts::PI * speed);
+        let low = model
+            .factor(0.001, || false)
+            .unwrap()
+            .response(&[C64::ONE], || false)
+            .unwrap();
+        let outward = low.effort[outlet_flux].scale(sign);
+        assert!((outward - C64::ONE).abs() < 1e-6);
+        assert!((low.output[0].re / resistance - 1.0).abs() < 1e-6);
+        assert!(
+            low.output[0].im.abs() < 0.01 * resistance,
+            "an open chimney cannot retain a divergent sealed-cap compliance"
+        );
+
+        let omega = 700.0;
+        let wave = model
+            .factor(omega, || false)
+            .unwrap()
+            .response(&[C64::ONE], || false)
+            .unwrap();
+        let neck = wave.effort[base + 1].scale(sign);
+        let outward = wave.effort[outlet_flux].scale(sign);
+        let compression = (wave.state[base] + wave.state[base + 2]).scale(sign);
+        assert!(
+            (neck - outward - C64::new(0.0, -omega) * compression).abs()
+                < 1e-9 * (neck.abs() + outward.abs())
+        );
+        assert!(
+            (neck - outward).abs() > 1e-5 * neck.abs(),
+            "distributed chimney compression makes inlet flow different from mouth flow"
+        );
+
+        let mut initial = vec![0.0; system.state_dim()];
+        for cell in 0..cells {
+            let orientation = if cell % 2 == 0 { 1.0 } else { -1.0 };
+            initial[2 * cell] = orientation * (cell + 1) as f64 * 1e-8;
+        }
+        initial[base] = sign * 2e-10;
+        initial[base + 2] = sign * 3e-10;
+        initial[outlet_flux] = sign * 1e-4;
+        let dt = 1e-6;
+        let input = 3e-4;
+        let step = fs_phs::step(&system, &initial, &[input], dt).unwrap();
+        let midpoint: Vec<_> = initial
+            .iter()
+            .zip(&step.x)
+            .map(|(a, b)| f64::midpoint(*a, *b))
+            .collect();
+        let outward = sign * system.effort(&midpoint)[outlet_flux];
+        let mut compression_change =
+            sign * (step.x[base] - initial[base] + step.x[base + 2] - initial[base + 2]);
+        for cell in 0..cells {
+            let orientation = if cell % 2 == 0 { 1.0 } else { -1.0 };
+            compression_change += orientation * (step.x[2 * cell] - initial[2 * cell]);
+        }
+        assert_eq!(bell.volume_flow_m3_s(&midpoint).unwrap(), 0.0);
+        let boundary = dt * (input - outward);
+        assert!((compression_change - boundary).abs() < 1e-10 * boundary.abs().max(1e-12));
+        let radiation_work = dt * resistance * outward * outward;
+        assert!((step.dissipated - radiation_work).abs() < 1e-10 * radiation_work.max(1e-20));
+    }
+}
+
+#[test]
+fn mixed_chimney_order_preserves_response_with_all_original_memory_and_wall_tails() {
+    let short = AcousticTap {
+        station: 0.3,
+        neck_length: 0.003,
+        neck_radius: 0.003,
+        open_fraction: 0.5,
+    };
+    let long = AcousticTap {
+        station: 0.7,
+        neck_length: 0.05,
+        neck_radius: 0.004,
+        open_fraction: 1.0,
+    };
+    let pin = ViscothermalPin {
+        dynamic_viscosity: 1.8e-5,
+        gamma: 1.4,
+        prandtl: 0.71,
+        foster_branches: 2,
+    };
+    let wall = WallPin {
+        surface_density: 0.1,
+        stiffness_per_area: 1e7,
+        resistance: 10.0,
+    };
+    for cone in [false, true] {
+        // The single cone exercises the original spherical caller as well as
+        // the cylindrical frustum caller; both share the corrected chimney.
+        let sections = [section(4, cone)];
+        let response = |taps: &[AcousticTap]| {
+            let system = acoustic_chain_outlet_wall(
+                &sections,
+                1.2,
+                343.0,
+                ChainOutlet::Radiating(MouthFlange::Flanged),
+                1,
+                taps,
+                Some(&pin),
+                Some(&wall),
+            )
+            .unwrap();
+            let model = HarmonicModel::from_ode(
+                &system,
+                HarmonicBudget {
+                    max_dimension: 128,
+                    max_dense_bytes: 8_000_000,
+                    max_dense_work: 20_000_000,
+                    relative_residual_tolerance: 1e-10,
+                },
+                || false,
+            )
+            .unwrap();
+            model
+                .factor(900.0, || false)
+                .unwrap()
+                .response(&[C64::ONE], || false)
+                .unwrap()
+        };
+        let forward = response(&[short, long]);
+        let reversed = response(&[long, short]);
+        assert!((forward.output[0] - reversed.output[0]).abs() < 1e-9 * forward.output[0].abs());
+        assert!(forward.dissipated_power_w > 0.0);
+        assert!(
+            (forward.dissipated_power_w - reversed.dissipated_power_w).abs()
+                < 1e-9 * forward.dissipated_power_w
+        );
     }
 }
 
@@ -157,15 +338,15 @@ fn cell_wall_maxwell_pressure_work_and_flow_match_the_complete_native_state() {
                 .unwrap()
                 .response(&[C64::ONE], || false)
                 .unwrap();
-            let s = C64::new(0.0, omega);
+            let s = C64::new(0.0, -omega);
             for (cell, wall) in walls.iter().enumerate() {
                 let area = geometry[cell].wall_area_m2();
                 let arm = wall.relaxation[0];
                 // Independent local mechanical impedance in pressure/volume-flow
-                // units under exp(+i omega t); no fitted wall admittance.
+                // units under exp(-i omega t); no fitted wall admittance.
                 let impedance = C64::new(
                     wall.wall.resistance / area,
-                    omega * wall.wall.surface_density / area,
+                    -omega * wall.wall.surface_density / area,
                 ) + C64::new(wall.wall.stiffness_per_area / area, 0.0) / s
                     + C64::new(arm.stiffness_per_area / area, 0.0)
                         / (s + C64::new(1.0 / arm.relaxation_time_s, 0.0));

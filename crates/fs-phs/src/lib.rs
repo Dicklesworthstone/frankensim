@@ -4179,10 +4179,10 @@ fn spherical_cone_wall(
         let ell_line = tap.neck_length.max(0.0) + side_hole_inner_length(b_eff, radii[cell]);
         if tap_open_is_line(tap, radii[cell], omega_pin, sound_speed) {
             let base = n_line + n_nf + open_state;
-            open_state += TAP_LINE_CELLS * 2;
+            open_state += TAP_LINE_STATES;
             let tap_off = (n_tap_foster > 0).then_some(n_line + n_nf + n_tap_states + open_foster);
             if n_tap_foster > 0 {
-                open_foster += TAP_LINE_CELLS * n_br * 2;
+                open_foster += TAP_LINE_STATES * n_br;
             }
             apply_tap_line(
                 &mut q,
@@ -4779,10 +4779,10 @@ fn acoustic_frustum_chain_outlet_wall_in_exterior(
         let ell_line = tap.neck_length.max(0.0) + side_hole_inner_length(b_eff, radii[cell]);
         if tap_open_is_line(tap, radii[cell], omega_pin, sound_speed) {
             let base = n_line + open_state;
-            open_state += TAP_LINE_CELLS * 2;
+            open_state += TAP_LINE_STATES;
             let tap_off = (n_tap_foster > 0).then_some(n_line + n_tap_states + open_foster);
             if n_tap_foster > 0 {
-                open_foster += TAP_LINE_CELLS * n_br * 2;
+                open_foster += TAP_LINE_STATES * n_br;
             }
             apply_tap_line(
                 &mut q,
@@ -5078,6 +5078,9 @@ fn apply_foster_series_on_flux(
 /// Chimney cells on a long open tap. Two is the coarsest LC
 /// line that can quarter-wave; short necks stay one inductor.
 const TAP_LINE_CELLS: usize = 2;
+// Two pressure cells and three fluxes: half-length end legs enclose the
+// original full compression volume and preserve its total axial inertance.
+const TAP_LINE_STATES: usize = 2 * TAP_LINE_CELLS + 1;
 
 /// Open-hole line length: chimney plus Dalmont inner. The
 /// wall-flanged `0.8216 b` sits on the last flux, same as TMM.
@@ -5117,9 +5120,9 @@ fn tap_open_budget(
         }
         let cell = tap_cell(tap.station, length, cell_x0);
         if tap_open_is_line(tap, radii[cell], omega, sound_speed) {
-            n_tap_states += TAP_LINE_CELLS * 2;
+            n_tap_states += TAP_LINE_STATES;
             if foster_on {
-                n_tap_foster += TAP_LINE_CELLS * n_br * 2;
+                n_tap_foster += TAP_LINE_STATES * n_br;
             }
         } else {
             n_tap_states += 1;
@@ -5129,10 +5132,10 @@ fn tap_open_budget(
     Ok((n_tap_states, n_tap_foster))
 }
 
-/// 2-cell Cauer-I line plus flanged mouth. The station pressure
-/// drives the first inductor (same hook as a lumped neck); each
-/// later `L` sits between the previous `C` and its own `C`. Last
-/// flux carries the same flanged `(R, X)` as the TMM chimney.
+/// Two compression cells between half-length inlet/outlet inductors and
+/// one full-length interior inductor. The added terminal flux leaves the
+/// final compression cell and alone carries the existing flanged mouth load.
+/// Thus total axial L/C are unchanged and d(sum q)/dt = U_in - U_out.
 #[allow(clippy::too_many_arguments)]// one coherent physics record/assembler
 fn apply_tap_line(
     q: &mut [f64],
@@ -5163,7 +5166,8 @@ fn apply_tap_line(
         let qi = base + 2 * cell;
         let pi = qi + 1;
         q[qi * n + qi] = 1.0 / c_cell;
-        q[pi * n + pi] = 1.0 / l_cell;
+        let inertance = if cell == 0 { 0.5 * l_cell } else { l_cell };
+        q[pi * n + pi] = 1.0 / inertance;
         j[qi * n + pi] = 1.0;
         j[pi * n + qi] = -1.0;
     }
@@ -5181,18 +5185,26 @@ fn apply_tap_line(
         j[pi * n + qi_prev] = 1.0;
         j[qi_prev * n + pi] = -1.0;
     }
+    let outlet_flux = base + 2 * TAP_LINE_CELLS;
+    let last_charge = base + 2 * (TAP_LINE_CELLS - 1);
+    q[outlet_flux * n + outlet_flux] = 1.0 / (0.5 * l_cell);
+    j[last_charge * n + outlet_flux] = -1.0;
+    j[outlet_flux * n + last_charge] = 1.0;
     if let Some(p) = pin {
         let n_br = p.foster_branches;
-        for cell in 0..TAP_LINE_CELLS {
+        for cell in 0..=TAP_LINE_CELLS {
+            let terminal = cell == TAP_LINE_CELLS;
             let qi = base + 2 * cell;
-            let pi = qi + 1;
+            let pi = if terminal { outlet_flux } else { qi + 1 };
+            let inertance = if cell == 0 || terminal { 0.5 * l_cell } else { l_cell };
+            let compliance = if terminal { 0.0 } else { c_cell };
             if n_br > 0 && p.dynamic_viscosity > 0.0 {
                 if let Some(off0) = foster_off {
                     let off = off0 + cell * n_br * 2;
-                    let r0 = 8.0 * p.dynamic_viscosity / (density * radius * radius) * l_cell;
+                    let r0 = 8.0 * p.dynamic_viscosity / (density * radius * radius) * inertance;
                     r.ground(pi, r0.max(0.0));
                     let terms_r = foster_bessel_series(
-                        l_cell,
+                        inertance,
                         radius,
                         density,
                         p.dynamic_viscosity,
@@ -5200,24 +5212,22 @@ fn apply_tap_line(
                         omega * 8.0,
                         n_br,
                     )?;
-                    let terms_g = foster_bessel_shunt(
-                        c_cell,
-                        radius,
-                        density,
-                        p,
-                        omega / 8.0,
-                        omega * 8.0,
-                        n_br,
-                    )?;
                     apply_foster_series_on_flux(q, r, n, pi, &terms_r, off);
-                    apply_foster_series_on_flux(q, r, n, qi, &terms_g, off + n_br);
+                    if !terminal {
+                        let terms_g = foster_bessel_shunt(
+                            c_cell, radius, density, p, omega / 8.0, omega * 8.0, n_br,
+                        )?;
+                        apply_foster_series_on_flux(q, r, n, qi, &terms_g, off + n_br);
+                    }
                 }
             } else {
                 let (r_series, g_shunt, l_scale, c_scale) =
-                    bessel_series_and_shunt(l_cell, c_cell, radius, density, omega, p)?;
-                q[qi * n + qi] /= c_scale;
-                q[pi * n + pi] = 1.0 / (l_cell * l_scale);
-                r.ground(qi, g_shunt);
+                    bessel_series_and_shunt(inertance, compliance, radius, density, omega, p)?;
+                if !terminal {
+                    q[qi * n + qi] /= c_scale;
+                    r.ground(qi, g_shunt);
+                }
+                q[pi * n + pi] = 1.0 / (inertance * l_scale);
                 r.ground(pi, r_series);
             }
         }
@@ -5226,7 +5236,7 @@ fn apply_tap_line(
         q,
         r,
         n,
-        base + 2 * TAP_LINE_CELLS - 1,
+        outlet_flux,
         density,
         sound_speed,
         radius,

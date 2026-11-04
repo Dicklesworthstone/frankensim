@@ -1538,7 +1538,7 @@ fn long_ode_chimney_is_not_a_lumped_inductor() {
     let lump = acoustic_chain(&sections, rho, c, false, 1, &short, None).expect("lumped");
     assert_eq!(
         line.state_dim(),
-        plain.state_dim() + 4,
+        plain.state_dim() + 5,
         "a long neck is a 2-cell LC shunt, not one inductor"
     );
     assert_eq!(
@@ -1563,18 +1563,27 @@ fn long_ode_chimney_is_not_a_lumped_inductor() {
         "first chimney C must be the cell compliance"
     );
     assert!(
-        (elem(&line, base + 1) - l_cell).abs() < 1.0e-9 * l_cell,
-        "first chimney L must be the cell inertance"
+        (elem(&line, base + 1) - 0.5 * l_cell).abs() < 1.0e-9 * l_cell,
+        "first chimney L must be the half-cell inlet inertance"
     );
     assert!(
         (elem(&line, base + 2) - c_cell).abs() < 1.0e-9 * c_cell,
         "second chimney C must be the cell compliance"
     );
     assert!(
-        (elem(&line, base + 3) - (l_cell + l_rad)).abs() < 1.0e-9 * (l_cell + l_rad),
-        "last chimney flux must carry the flanged mass ({})",
-        elem(&line, base + 3)
+        (elem(&line, base + 3) - l_cell).abs() < 1.0e-9 * l_cell,
+        "interior chimney L must retain the full-cell inertance"
     );
+    assert!(
+        (elem(&line, base + 4) - (0.5 * l_cell + l_rad)).abs() < 1.0e-9 * (l_cell + l_rad),
+        "last chimney flux must carry the flanged mass ({})",
+        elem(&line, base + 4)
+    );
+    let total_inertance = elem(&line, base + 1) + elem(&line, base + 3)
+        + elem(&line, base + 4) - l_rad;
+    assert!((total_inertance - rho * ell / area).abs() < 1e-12 * total_inertance);
+    let total_compliance = elem(&line, base) + elem(&line, base + 2);
+    assert!((total_compliance - area * ell / (rho * c * c)).abs() < 1e-12 * total_compliance);
     let foster = ViscothermalPin {
         dynamic_viscosity: 1.8e-5,
         gamma: 1.4,
@@ -1586,8 +1595,8 @@ fn long_ode_chimney_is_not_a_lumped_inductor() {
         acoustic_chain(&sections, rho, c, false, 1, &short, Some(&foster)).expect("lump F");
     assert_eq!(
         line_f.state_dim(),
-        line.state_dim() + 6 * 3 * 2 + 2 * 3 * 2,
-        "a line chimney mints series+thermal Foster on both cells"
+        line.state_dim() + 6 * 3 * 2 + 5 * 3,
+        "a line chimney mints three series and two thermal Foster networks"
     );
     assert_eq!(
         lump_f.state_dim(),
@@ -1616,7 +1625,7 @@ fn long_ode_chimney_on_a_cone_is_not_a_lumped_inductor() {
     let lump = spherical_cone(0.006, 0.018, 0.34, 1.2, c, 4, None, 1, &short, None).expect("lump");
     assert_eq!(
         line.state_dim(),
-        plain.state_dim() + 4,
+        plain.state_dim() + 5,
         "a long neck on a ψ-cone is the same 2-cell physical line"
     );
     assert_eq!(
@@ -1642,7 +1651,7 @@ fn long_ode_chimney_on_a_cone_is_not_a_lumped_inductor() {
     let web_line = acoustic_chain(&halves, 1.2, c, false, 1, &long, None).expect("web line");
     assert_eq!(
         web_line.state_dim(),
-        web_plain.state_dim() + 4,
+        web_plain.state_dim() + 5,
         "a long neck on a broken-line horn is still the 2-cell shunt"
     );
 }

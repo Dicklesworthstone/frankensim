@@ -526,14 +526,19 @@ inventoried and measured in fs-couple `tests/integrator_warping_audit.rs`.
   `acoustic_waveguide` / `AcousticTap` (`open_fraction` σ:
   compact open neck inertance, or a long neck
   (`kℓ > 0.2` or `ℓ > 4b`, `ℓ` = chimney + Dalmont inner)
-  as the same 2-cell LC line plus flanged mouth the TMM
-  chimney is; closed cavity `C`, or the mix
+  as a two-pressure-cell LC line with three series fluxes.
+  Half-cell inlet and outlet legs preserve total axial inertance;
+  the terminal flux alone owns the flanged mouth load, and the
+  two compression rates sum to neck inflow minus mouth outflow.
+  The chimney length includes the Dalmont inner correction;
+  the outer radiation correction occurs exactly once at the mouth.
+  Closed cavity `C`, or the mix
   `Y = σ Y_open + (1−σ) Y_closed`; a `ViscothermalPin`
   puts series `R` on a lumped neck and thermal `G` on
   remaining `C`, or the bore's per-cell wall law on a
   line; `foster_branches > 0` adds the bore's Foster
-  series on each lumped neck, series plus thermal Foster
-  on each chimney cell of a line, and the thermal Foster
+  series on each lumped neck, three correctly length-scaled series
+  and two thermal Foster families on each long chimney, and the thermal Foster
   shunt on each remaining pad `C`),
   `acoustic_chain` / `AcousticSection` (concatenated LC runs
   with an area jump at each interface — a muffler, a
