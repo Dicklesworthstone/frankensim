@@ -1,5 +1,45 @@
 # fs-material — CONTRACT
 
+## Source calorics, kinetics and shrinkage for crystallization
+
+`phase::crystallization::CrystallizationCaloricPair` borrows two original pure
+material charts over a declared common temperature interval. It rejects
+coexistence plateaus, uncovered metastable temperatures, mismatched material
+identities and nonpositive crystallization enthalpy gaps. The union of both
+charts' knots establishes positivity of the represented phase enthalpy gap;
+each original heat-capacity/density interpolation and source receipt survives.
+Source-backed and explicitly authored inputs retain their respective authority.
+The caller must supply compatible pressure/composition conditions and one
+physical enthalpy reference. Temperature-dependent latent heat is the original
+branch difference, not a new heater or duplicated apparent heat capacity.
+
+`kinetics::PreparedCrystallizationRate` prepares the canonical typed material
+source line for Nakamura K(T), in inverse seconds. It preserves every source
+breakpoint and original receipt, rejects invalid units/rates and unsupported
+conditions, and performs allocation-free binary-search interpolation during
+stepping. Source Cp lower bounds accelerate the shared caloric inversion without
+replacing the original charts. All parameters and caloric/kinetic source
+identities enter the resulting immutable state identity.
+
+Actual kinetic MASS crystallinity supplies additive constituent specific
+volumes, bulk density and a separately reported crystalline VOLUME fraction.
+`mechanics::CrystallizationLock` stores an explicitly selected stress-free
+temperature, fraction and total strain. Its frozen `SmallStrainLaw` view uses
+the same density-derived free-volume change and caller-supplied original
+elasticity in native continuum solvers. Separate total, elastic and free-strain
+bounds apply; prestress, mismatched sources and unsupported melting/unlocking
+refuse. No universal solid-support threshold or stiffness/fraction law is
+inferred. The mechanical response is one-way: elastic/parameter work is not
+silently charged to the thermal crystallization account. Locking and shrinkage
+carry no calibrated model-discrepancy bound.
+
+Focused regressions exercise original source receipts/rates, distinct Cp and
+latent feedback, absolute datum shifts, mass/volume conversion, cooling through
+the shared thermal timeline and native free/constrained shrinkage. The runnable
+`crystallization_cooling` example exchanges heat with a finite mold and prints
+temperature, both crystal fractions, free volume and the energy balance. Its
+inputs are explicitly manufactured; it is not a measured material prediction.
+
 ## Original mixed pressure dual without unused remainder tangents
 
 `MixedFiniteStrainPotential::mixed_pressure_potential` exposes the original
