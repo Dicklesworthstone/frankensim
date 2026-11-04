@@ -2798,6 +2798,53 @@ mod material_plate_tests {
         assert_eq!(input, original);
     }
 
+    // Independent reference for the plate's first-mode thermal participation.
+    // Use the physical rank-one bending tensor and the original DKT stiffness
+    // owner, not the adapter's sum-of-squares projection or a beam loss angle.
+    fn thermal_participation(plate: ThinPlate) -> f64 {
+        use fs_plate::{AssemblyOptions, EdgeSupport, PlateMesh, PlateSection, assemble, modes};
+        let mesh = PlateMesh::rectangle(plate.length_m, plate.width_m, 5, 4);
+        let section = PlateSection::isotropic(
+            plate.e1_pa, plate.nu12, plate.thickness_m, plate.density_kg_m3,
+        ).unwrap();
+        let model = assemble(&mesh, &section, &PlateMesh::rectangle_boundary(5, 4), &[],
+            &AssemblyOptions { pretension: plate.pretension_n_m, support: if plate.clamped {
+                EdgeSupport::Clamped
+            } else { EdgeSupport::SimplySupported } },
+        ).unwrap();
+        let k2 = core::f64::consts::PI.powi(2)
+            * (plate.length_m.recip().powi(2) + plate.width_m.recip().powi(2));
+        let omega11 = k2 * (section.d[0] / (plate.density_kg_m3 * plate.thickness_m)).sqrt();
+        let report = modes(&model, ((0.25*omega11).powi(2), (12.0*omega11).powi(2)),
+            &fs_modal::SliceOptions::default()).unwrap();
+        let phi = &report.modes[0].phi;
+        let mut kp = vec![0.0; phi.len()];
+        model.k.spmv(phi, &mut kp);
+        let total: f64 = phi.iter().zip(kp).map(|(p,k)| p*k).sum();
+        let d = plate.e1_pa * plate.thickness_m.powi(3) / (12.0*(1.0-plate.nu12).powi(2));
+        let tensor = [d, d, 0.0, d, d, 0.0, 0.0, 0.0, 0.0];
+        let mut thermal = 0.0;
+        for (element, tri) in mesh.tris.iter().enumerate() {
+            let (ke, _) = fs_plate::dkt_stiffness(&tri.map(|i| mesh.nodes[i].0),
+                &tri.map(|i| mesh.nodes[i].1), &tensor, element).unwrap();
+            let q: [f64; 9] = std::array::from_fn(|j| {
+                model.dof_map[3*tri[j/3]+j%3].map_or(0.0, |i| phi[i])
+            });
+            for i in 0..9 {
+                for j in 0..9 { thermal += q[i]*ke[9*i+j]*q[j]; }
+            }
+        }
+        thermal/total
+    }
+
+    fn slab_diffusion_shape(wt: f64) -> f64 {
+        (0..4096).map(|n| {
+            let odd = (2*n+1) as f64;
+            let x = wt / (odd*odd);
+            96.0 / (core::f64::consts::PI.powi(4)*odd.powi(4)) * x / (1.0+x*x)
+        }).sum()
+    }
+
     #[test]
     fn g1_cavity_material_modes_preserve_thermal_loss_and_change_pressure() {
         use fs_couple::cavity_phs::{PlateCavitySpec, realize_plate_cavity};
@@ -2861,14 +2908,15 @@ mod material_plate_tests {
                     cavity.bind_plate(specimen.plate()).unwrap();
                     assert_eq!(cavity.omegas.len(), 1);
                     let omega = cavity.omegas[0];
-                    // Independent Zener + proportional Kelvin-Voigt arithmetic,
+                    // Independent thermal diffusion + Kelvin-Voigt arithmetic,
                     // with zero geometric prestress: no material-name selection
                     // and no second thermal debit in the cavity owner.
                     let delta = 12e9 * 1e-8 * temperature / (rho * cp);
                     let tau = 0.002_f64.powi(2) * rho * cp
                         / (core::f64::consts::PI.powi(2) * conductivity);
                     let wt = omega * tau;
-                    let expected = 0.5 * delta * wt / (1.0 + wt * wt)
+                    let expected = 0.5 * delta * slab_diffusion_shape(wt)
+                        * thermal_participation(specimen.plate())
                         + 0.5 * viscosity.unwrap_or(0.0) / 12e9 * omega;
                     assert!((cavity.zetas[0] / expected - 1.0).abs() < 1e-10);
                     let mode = &certified_radiators(specimen.plate()).unwrap()[0];
@@ -3087,14 +3135,15 @@ mod material_plate_tests {
                 plate.thermoelastic.unwrap().state_identity,
                 plate.kelvin_voigt_bending.unwrap().material_state_identity
             );
-            // Independent nominal Zener + Kelvin-Voigt expressions, at zero
+            // Independent thermal diffusion + Kelvin-Voigt expressions, at zero
             // pretension, using the actual fixed-mass thickness and modal omega.
             let body = &certified_radiators(plate).unwrap()[0];
             let tau = thickness * thickness * rho * 600.0 / (core::f64::consts::PI.powi(2) * 60.0);
             let delta = 12e9 * (1e-4_f64).powi(2) * 375.0 / (rho * 600.0);
             let wt = body.omega * tau;
-            let expected = 0.5 * (delta * wt / (1.0 + wt * wt) + eta / 12e9 * body.omega);
-            assert!((body.zeta / expected - 1.0).abs() < 1e-12);
+            let expected = 0.5 * (delta * slab_diffusion_shape(wt) * thermal_participation(plate)
+                + eta / 12e9 * body.omega);
+            assert!((body.zeta / expected - 1.0).abs() < 1e-10);
             assert_eq!(specimen.material().card_identity(), card.content_hash());
             input = compiled.assembly().clone();
         }

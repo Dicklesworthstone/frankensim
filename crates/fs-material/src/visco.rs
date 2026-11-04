@@ -40,6 +40,8 @@ use fs_math::det;
 
 /// Zener thermoelastic damping of solid circular sections (exact thermal-mode series).
 pub mod circular_ted;
+/// Through-thickness thermoelastic diffusion and its plane-stress bending tensor.
+pub mod slab_ted;
 /// Bounded two-exponent fractional law, including measured violin-varnish spectra.
 pub mod modified_zener;
 pub mod source;

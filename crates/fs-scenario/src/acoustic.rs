@@ -328,7 +328,7 @@ pub struct ContactTexture {
     pub tangent_stiffness_n_m: f64,
 }
 
-/// Explicit thermal inputs for the isotropic Zener thin-plate approximation.
+/// Explicit thermal inputs for weak-coupling isotropic thin-plate damping.
 /// Elasticity and density come from the same [`ThinPlate`]. Values are at the
 /// stated specimen temperature, which need not equal the ambient gas temperature.
 #[derive(Debug, Clone, Copy, PartialEq)]

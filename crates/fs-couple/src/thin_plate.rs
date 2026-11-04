@@ -33,6 +33,9 @@ use fs_scenario::{
 use fs_vfit::FitOptions;
 use fs_vfit::discretize::{DigitalFilter, DigitalFilterState, realize_tabulated_impedance};
 
+mod thermoelastic_loss;
+use thermoelastic_loss::ThermoelasticBendingProjection;
+
 /// Full DKT coordinates from the SAME solve as a material image's ports.
 /// Internal consumers use rotations for constitutive projection; a transverse
 /// nodal trace alone cannot reconstruct curvature or material memory.
@@ -566,7 +569,21 @@ impl VkBody {
                 let k2 = (md.m as f64 * core::f64::consts::PI / plate.length_m).powi(2)
                     + (md.n as f64 * core::f64::consts::PI / plate.width_m).powi(2);
                 let fraction = bending_energy_fraction(d * k2, d * k2 + plate.pretension_n_m)?;
-                *z += fraction * loss.zeta(omega)?;
+                // For a sine mode, the integrals of squared mean curvature
+                // and the elastic curvature quadratic form coincide. Plane
+                // stress still increases thermal coupling by (1+nu)/(1-nu).
+                let thermal = match loss.thermal {
+                    Some(law) => thermoelastic_zeta(law, omega, plate.thickness_m)?
+                        * (1.0 + plate.nu12) / (1.0 - plate.nu12),
+                    None => 0.0,
+                };
+                let zeta = *z + fraction * (thermal + loss.viscous_zeta(omega)?);
+                if !(zeta.is_finite() && zeta >= 0.0) {
+                    return Err(AcousticRealizeError::InvalidDescription {
+                        what: "combined plate bending loss is unrepresentable",
+                    });
+                }
+                *z = zeta;
             }
         }
         let (drive, areas) = ss_sine_ports(
@@ -1058,11 +1075,24 @@ impl PlateBendingLaw {
         self.thermal.is_some() || self.viscous.is_some()
     }
 
+    // Reference uniaxial loss; regional viscosity consumers have no thermal
+    // law. Actual plate thermal loss needs its separate curvature participation.
     pub(crate) fn zeta(&self, omega: f64) -> Result<f64, AcousticRealizeError> {
-        let mut zeta = match self.thermal {
+        let thermal = match self.thermal {
             Some(law) => thermoelastic_zeta(law, omega, self.thickness)?,
             None => 0.0,
         };
+        let zeta = thermal + self.viscous_zeta(omega)?;
+        if !zeta.is_finite() {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "plate bending loss is unrepresentable",
+            });
+        }
+        Ok(zeta)
+    }
+
+    fn viscous_zeta(&self, omega: f64) -> Result<f64, AcousticRealizeError> {
+        let mut zeta = 0.0;
         if let Some(viscous) = self.viscous {
             let (lo, hi) = viscous.omega_band_rad_s;
             if !omega.is_finite() || omega < lo || omega > hi {
@@ -1087,6 +1117,7 @@ impl PlateBendingLaw {
 struct PlateBendingLoss {
     law: PlateBendingLaw,
     bending: Option<PlateModel>,
+    thermal: Option<ThermoelasticBendingProjection>,
 }
 
 impl PlateBendingLoss {
@@ -1100,7 +1131,10 @@ impl PlateBendingLoss {
         if !law.is_active() {
             return Ok(None);
         }
-        let bending = if plate.pretension_n_m == 0.0 {
+        let thermal = law.thermal.map(|thermal| ThermoelasticBendingProjection::new(
+            mesh, thermal, plate.thickness_m, plate.nu12,
+        )).transpose()?;
+        let bending = if plate.pretension_n_m == 0.0 || law.viscous.is_none() {
             None
         } else {
             Some(
@@ -1121,7 +1155,7 @@ impl PlateBendingLoss {
                 .map_err(map_plate)?,
             )
         };
-        Ok(Some(Self { law, bending }))
+        Ok(Some(Self { law, bending, thermal }))
     }
 }
 
@@ -1142,17 +1176,30 @@ impl ModalBendingLoss for PlateBendingLoss {
         phi: &[f64],
         omega: f64,
     ) -> Result<f64, AcousticRealizeError> {
+        let needs_energy = self.bending.is_some() || self.thermal.is_some();
+        let mut k_phi = if needs_energy { vec![0.0; phi.len()] } else { Vec::new() };
+        let total_energy = if needs_energy {
+            total.k.spmv(phi, &mut k_phi);
+            phi.iter().zip(&k_phi).map(|(p, k)| p * k).sum()
+        } else { 1.0 };
         let fraction = if let Some(bending) = &self.bending {
-            let mut k_phi = vec![0.0; phi.len()];
             bending.k.spmv(phi, &mut k_phi);
             let bending_energy = phi.iter().zip(&k_phi).map(|(p, k)| p * k).sum();
-            total.k.spmv(phi, &mut k_phi);
-            let total_energy = phi.iter().zip(&k_phi).map(|(p, k)| p * k).sum();
             bending_energy_fraction(bending_energy, total_energy)?
         } else {
             1.0
         };
-        Ok(fraction * self.law.zeta(omega)?)
+        let thermal = match &self.thermal {
+            Some(projection) => projection.modal_zeta(total, phi, omega, total_energy)?,
+            None => 0.0,
+        };
+        let zeta = thermal + fraction * self.law.viscous_zeta(omega)?;
+        if !(zeta.is_finite() && zeta >= 0.0) {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "combined plate bending loss is unrepresentable",
+            });
+        }
+        Ok(zeta)
     }
 }
 
@@ -2065,6 +2112,10 @@ fn admitted_thermoelastic(
             what: "thermoelastic relaxation strength or time is unrepresentable",
         });
     }
+    law.plate_bending_relaxation_matrix(plate.thickness_m, plate.nu12)
+        .map_err(|_| AcousticRealizeError::InvalidDescription {
+            what: "plate thermoelastic bending tensor is unrepresentable",
+        })?;
     Ok(Some(law))
 }
 
@@ -2073,7 +2124,7 @@ fn thermoelastic_zeta(
     omega: f64,
     thickness: f64,
 ) -> Result<f64, AcousticRealizeError> {
-    let eta = law.loss_factor(omega, thickness);
+    let eta = law.slab_loss_factor(omega, thickness);
     if !(eta >= 0.0 && eta.is_finite()) {
         return Err(AcousticRealizeError::InvalidDescription {
             what: "thermoelastic modal loss is unrepresentable",
@@ -2703,14 +2754,23 @@ mod tests {
         }
     }
 
-    fn independent_zener_zeta(plate: ThinPlate, omega: f64) -> f64 {
+    fn independent_slab_beam_zeta(plate: ThinPlate, omega: f64) -> f64 {
         let t = plate.thermoelastic.expect("explicit thermal inputs");
         let heat_per_volume = plate.density_kg_m3 * t.specific_heat_j_kg_k;
         let tau = plate.thickness_m.powi(2) * heat_per_volume
             / (core::f64::consts::PI.powi(2) * t.conductivity_w_m_k);
         let delta =
             plate.e1_pa * t.linear_expansion_per_k.powi(2) * t.temperature_k / heat_per_volume;
-        0.5 * delta * omega * tau / (1.0 + (omega * tau).powi(2))
+        // Independent thermal eigenfunction expansion; production evaluates
+        // the complete series in closed form. This scalar is uniaxial bending,
+        // before the plate's mean-curvature participation and total energy.
+        let shape: f64 = (0..4096).map(|n| {
+            let odd = (2 * n + 1) as f64;
+            let x = omega * tau / (odd * odd);
+            let weight = 96.0 / (core::f64::consts::PI.powi(4) * odd.powi(4));
+            weight * x / (1.0 + x*x)
+        }).sum();
+        0.5 * delta * shape
     }
 
     #[test]
@@ -2729,8 +2789,9 @@ mod tests {
         let mut losses = Vec::new();
         for plate in [base, expansion_twin, density_twin, hot] {
             let body = certified_radiators(plate).expect("linear plate").remove(0);
-            let expected = independent_zener_zeta(plate, body.omega);
-            assert!((body.zeta / expected - 1.0).abs() < 1e-12);
+            // Absolute FE loss is checked below against the original mode's
+            // independent tensor-energy integral; here check source sensitivity.
+            assert!(body.zeta > 0.0);
             let vk = VkBody::from_plate(plate).expect("nonlinear plate");
             // Read the assembled pHS, not the helper that manufactured its zeta.
             // The infinitesimal tangent removes the von Karman quartic term.
@@ -2738,7 +2799,8 @@ mod tests {
             let omega = (vk.sys.effort(&[q, 0.0])[0] / q).sqrt();
             let (_, r, _) = vk.sys.structure();
             let nonlinear_zeta = r[3] / (2.0 * omega);
-            let expected = independent_zener_zeta(plate, omega);
+            let expected = independent_slab_beam_zeta(plate, omega)
+                * (1.0 + plate.nu12) / (1.0 - plate.nu12);
             assert!((nonlinear_zeta / expected - 1.0).abs() < 1e-10);
             let x = [0.0, 1e-4];
             let step = fs_phs::step(&vk.sys, &x, &[0.0], 1e-5).expect("damped step");
@@ -2807,7 +2869,8 @@ mod tests {
         let omega = ((d * k2.powi(2) + plate.pretension_n_m * k2)
             / (plate.density_kg_m3 * plate.thickness_m))
             .sqrt();
-        let zeta = fraction * independent_zener_zeta(plate, omega);
+        let zeta = fraction * independent_slab_beam_zeta(plate, omega)
+            * (1.0 + plate.nu12) / (1.0 - plate.nu12);
         assert!(fraction < 0.5, "fixture must distinguish undiluted loss");
         let body = VkBody::from_plate(plate).unwrap();
         let (_, r, _) = body.sys.structure();
@@ -3012,19 +3075,38 @@ mod tests {
                 model.k.spmv(&phi, &mut kp);
                 let total: f64 = phi.iter().zip(kp).map(|(p, k)| p * k).sum();
                 let mut geometric = 0.0;
-                for tri in &mesh.tris {
+                let mut thermal_driving_energy = 0.0;
+                // Direct DKT stiffness projection of the physical rank-one
+                // thermoelastic tensor, independently of the production
+                // sum-of-squares curvature projection. Delta is applied below.
+                let thermal_scale = plate.e1_pa * plate.thickness_m.powi(3)
+                    / (12.0 * (1.0 - plate.nu12).powi(2));
+                let thermal_d = [thermal_scale, thermal_scale, 0.0,
+                    thermal_scale, thermal_scale, 0.0, 0.0, 0.0, 0.0];
+                for (element, tri) in mesh.tris.iter().enumerate() {
                     let [a, b, c] = tri.map(|i| mesh.nodes[i]);
                     let twice_area = (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0);
                     let [wa, wb, wc] = tri.map(|i| model.dof_map[3 * i].map_or(0.0, |r| phi[r]));
                     let gx = (wa * (b.1 - c.1) + wb * (c.1 - a.1) + wc * (a.1 - b.1)) / twice_area;
                     let gy = (wa * (c.0 - b.0) + wb * (a.0 - c.0) + wc * (b.0 - a.0)) / twice_area;
                     geometric += plate.pretension_n_m * 0.5 * twice_area * (gx * gx + gy * gy);
+                    let (ke, _) = fs_plate::dkt_stiffness(
+                        &[a.0, b.0, c.0], &[a.1, b.1, c.1], &thermal_d, element,
+                    ).unwrap();
+                    let local: [f64; 9] = std::array::from_fn(|j| {
+                        model.dof_map[3 * tri[j / 3] + j % 3].map_or(0.0, |r| phi[r])
+                    });
+                    for i in 0..9 {
+                        for j in 0..9 {
+                            thermal_driving_energy += local[i] * ke[9*i+j] * local[j];
+                        }
+                    }
                 }
                 assert!(geometric / total > 0.1);
                 for (thermal, viscous) in [(true, false), (false, true), (true, true)] {
                     let mut input = plate;
-                    let mut undiluted = if thermal {
-                        independent_zener_zeta(plate, omega)
+                    let mut expected = if thermal {
+                        independent_slab_beam_zeta(plate, omega) * thermal_driving_energy / total
                     } else {
                         0.0
                     };
@@ -3038,9 +3120,8 @@ mod tests {
                             omega_band_rad_s: (0.0, 1e6),
                             material_state_identity: None,
                         });
-                        undiluted += 0.5 * 2e6 / plate.e1_pa * omega;
+                        expected += (1.0 - geometric / total) * 0.5 * 2e6 / plate.e1_pa * omega;
                     }
-                    let expected = (1.0 - geometric / total) * undiluted;
                     let actual = if sampled_vk {
                         let body = VkBody::from_plate(input).unwrap();
                         let (_, r, _) = body.sys.structure();

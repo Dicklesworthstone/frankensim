@@ -7130,8 +7130,8 @@ clarinet is one filling of those objects.
   check changed pressure in linear, sine von Karman and sampled-FE plate paths,
   with and without separately selected viscosity. A fixed-mass card swap checks
   rebuilt thickness and both damping addends against independent slab diffusion,
-  mean-curvature participation and
-  Kelvin–Voigt arithmetic; conflicting heat-capacity claims require the selected
+  mean-curvature participation and Kelvin–Voigt arithmetic; conflicting
+  heat-capacity claims require the selected
   pin to survive compilation. These fixtures validate implementation, not an
   experiment or a transient heating simulation.
   String thermal compiler tests independently calculate integrated strain,
@@ -7317,8 +7317,9 @@ clarinet is one filling of those objects.
   Sine modes use the plane-stress factor `(1+nu)/(1-nu)` and prestress
   dilution `D k^2 / (D k^2 + T)`. Conservative prestress enters only the
   total energy denominator; viscosity retains its own bending/total ratio.
-  Authored loss is
-  unchanged. The same projection reaches the sampled-FE von Karman bank.
+  Authored loss is unchanged. The same projection reaches the sampled-FE
+  von Karman bank. Curvature coupling and the diffusion spectrum follow
+  [Norris and Photiadis, eqs. (33)–(45)](https://arxiv.org/abs/cond-mat/0405323).
   This is weak-loss, diagonal modal bending damping about the prestressed
   equilibrium; it does not model finite-amplitude membrane thermal loss or
   off-diagonal thermal coupling. The energy separation follows

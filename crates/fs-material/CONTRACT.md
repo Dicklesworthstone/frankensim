@@ -3291,7 +3291,7 @@ ledger; `matching_loss` builds one branch that hits an authored
 emitting a `LoweredModel` whose certificate is the MEASURED supremum
 relative modulus error over a dense in-band grid and whose evaluation
 REFUSES outside the certified band, `FS-MAT-VISCO-OUT-OF-BAND`);
-`ThermoelasticZener` (closed-form beam/plate thermoelastic loss,
+`ThermoelasticZener` (single-relaxation uniaxial thermoelastic loss,
   plus handbook `aluminum` / `structural_steel` constructors);
 `fit_fractional_zener` (deterministic Levenberg–Marquardt over an
 admissibility-preserving reparameterization, exact AD Jacobian, and a
@@ -3309,6 +3309,17 @@ tails are not erased by complex-product cancellation or squared-frequency overfl
 The fractional value and AD tangents share that arithmetic. These numerical
 improvements do not extend any source applicability band or replace the light-loss
 assumption behind modal `eta/2`.
+
+`visco::slab_ted` evaluates the complete insulated-slab thermal diffusion
+spectrum in constant work, using a positive low-frequency series and scaled
+closed form. `slab_loss_factor` is the uniaxial bending loss;
+`plate_bending_relaxation_matrix` supplies the plane-stress rank-one tensor
+`T (E alpha/(1-nu))^2 h^3/(12 rho c_p) [1,1,0]^T [1,1,0]`.
+Thermal loss therefore acts on mean curvature and vanishes for pure twist and
+trace-free saddle bending. This is first-order weak thermoelastic coupling in
+a homogeneous isotropic slab with insulated faces, without lateral diffusion
+or a transient heat solver. Focused tests compare the closed form with an
+independent thermal-mode sum and recover uniaxial anticlastic bending.
 
 `fit_fractional_zener_components` fits storage and loss with separate relative
 residuals and AD Jacobian rows. Every measured component must meet its own
