@@ -8,6 +8,7 @@ use fs_bem::observation_transfers::{
     PreparedHarmonicObservation, PreparedMicrophoneArray, PreparedRadiationObservation,
     PreparedRadiationOptions, ReceiverSpec, SourceId,
 };
+use fs_duct::network::molecular::MolecularNetwork;
 use fs_duct::network::{
     CoupledSourceBank, MAX_NETWORK_PORTS, NetworkCoherenceBudget, NetworkSourceCoordinate,
     NetworkSourceResponse, NetworkSourceStatistics, PortSource, PreparedNetworkSources,
@@ -19,6 +20,13 @@ const FACTOR_ENTRIES: usize = MAX_NETWORK_PORTS * MAX_NETWORK_PORTS;
 mod angular;
 pub use angular::PreparedRadiatingFarField;
 
+/// The complete interior propagation owner, never a substituted scalar loss.
+#[derive(Clone, Copy)]
+pub(super) enum Propagation<'a> {
+    Duct(LossModel),
+    Molecular(&'a MolecularNetwork),
+}
+
 /// One immutable source/network/exterior binding at a common positive frequency.
 /// Both the original source laws and the exterior geometry remain borrowed.
 /// Preparation shares one BEM factorization across openings and one loaded duct
@@ -29,7 +37,7 @@ pub struct PreparedRadiatingNetwork<'a> {
     sources: &'a [PortSource],
     bank: Option<&'a CoupledSourceBank>,
     scalar_loads: &'a [PortTermination],
-    loss: LossModel,
+    propagation: Propagation<'a>,
     boundary: CoupledTermination,
     network: PreparedNetworkSources,
     opening_indices: Vec<usize>,
@@ -60,7 +68,15 @@ impl RadiatingNetwork {
         scalar_loads: &'a [PortTermination],
         gate: &CancelGate,
     ) -> Result<PreparedRadiatingNetwork<'a>, ExteriorNetworkError> {
-        self.prepare_sources_inner(omega, loss, sources, bank, scalar_loads, None, gate)
+        self.prepare_sources_inner(
+            omega,
+            Propagation::Duct(loss),
+            sources,
+            bank,
+            scalar_loads,
+            None,
+            gate,
+        )
     }
 
     /// Additionally prepare far-field amplitudes and full-sphere radiated power
@@ -83,7 +99,7 @@ impl RadiatingNetwork {
     ) -> Result<PreparedRadiatingNetwork<'a>, ExteriorNetworkError> {
         self.prepare_sources_inner(
             omega,
-            loss,
+            Propagation::Duct(loss),
             sources,
             bank,
             scalar_loads,
@@ -93,10 +109,10 @@ impl RadiatingNetwork {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn prepare_sources_inner<'a>(
+    pub(super) fn prepare_sources_inner<'a>(
         &'a self,
         omega: f64,
-        loss: LossModel,
+        propagation: Propagation<'a>,
         sources: &'a [PortSource],
         bank: Option<&'a CoupledSourceBank>,
         scalar_loads: &'a [PortTermination],
@@ -139,8 +155,16 @@ impl RadiatingNetwork {
             ));
         }
         let (boundary, solutions) = self.exterior_basis(omega, gate)?;
-        let network = match &self.media {
-            Some(media) => network_prepare_sources_regional(
+        let network = match (propagation, &self.media) {
+            (Propagation::Molecular(molecular), _) => molecular.prepare_sources_controlled(
+                omega,
+                sources,
+                bank,
+                scalar_loads,
+                Some(&boundary),
+                &mut || gate.is_requested(),
+            )?,
+            (Propagation::Duct(loss), Some(media)) => network_prepare_sources_regional(
                 self.driving.network(),
                 media,
                 omega,
@@ -150,7 +174,7 @@ impl RadiatingNetwork {
                 scalar_loads,
                 Some(&boundary),
             )?,
-            None => network_prepare_sources(
+            (Propagation::Duct(loss), None) => network_prepare_sources(
                 self.driving.network(),
                 &self.gas,
                 omega,
@@ -217,7 +241,7 @@ impl RadiatingNetwork {
             sources,
             bank,
             scalar_loads,
-            loss,
+            propagation,
             boundary,
             network,
             opening_indices,
@@ -251,9 +275,20 @@ impl<'a> PreparedRadiatingNetwork<'a> {
     pub fn omega(&self) -> f64 {
         self.network.omega()
     }
-    /// Original interior propagation/loss law.
-    pub fn loss_model(&self) -> LossModel {
-        self.loss
+    /// Original conventional interior law, or `None` for a molecular binding.
+    /// A molecular reservoir is never reported as a frozen-gas `LossModel`.
+    pub fn loss_model(&self) -> Option<LossModel> {
+        match self.propagation {
+            Propagation::Duct(loss) => Some(loss),
+            Propagation::Molecular(_) => None,
+        }
+    }
+    /// Exact original molecular graph and cached edge spectra, when selected.
+    pub fn molecular_network(&self) -> Option<&'a MolecularNetwork> {
+        match self.propagation {
+            Propagation::Duct(_) => None,
+            Propagation::Molecular(molecular) => Some(molecular),
+        }
     }
     /// Original scalar source laws and their default phasors.
     pub fn sources(&self) -> &'a [PortSource] {

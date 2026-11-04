@@ -1,5 +1,36 @@
 # CONTRACT: fs-couple
 
+## Molecular graph propagation reaches loaded exterior sound
+
+`driving_point::network::radiation::RadiatingNetwork::bind_molecular` binds original
+molecular reservoirs and optional joint thermal/shear diffusion to every edge of
+an existing regional radiation owner. The graph and complete gas records come
+from that same immutable owner; each relaxation state must match its original
+edge gas. Explicit NetworkMedia records are required even for uniform gas.
+Independent exterior gas, common static pressure, block limits and wall
+resolution survive, and wall spectra are prepared once.
+
+`MolecularRadiatingNetwork::prepare_sources` and `prepare_sources_with_radiation`
+evaluate those laws at the physical angular frequency and reuse the fully loaded
+source solve with the complete mutual BEM radiation matrix. The same opening
+solutions and solved outward flows supply coherent pressure/velocity, source
+statistics, directional microphone cross spectra and optional far-field
+powers/moments. Source-bank coupling, signed work, retained-wave pole handling,
+cancellation and allocation-free amplitude application keep their original
+owners. Frequency sweeps reuse molecular spectra; amplitude/statistics sweeps
+require no additional field solve. The result retains `molecular_network()` and
+reports `loss_model() == None`; conventional results return `Some(original_loss)`.
+
+The exterior remains homogeneous and nondispersive. This is frozen, stationary,
+linear harmonic propagation, without mean flow, exterior molecular absorption,
+transient onset or causal time realization. Original plane-wave, mesh/port-basis,
+diffusion-band and material limits apply; embedded compact tone holes refuse.
+G1/G3/G4 cases in `radiation/tests/prepared/molecular.rs` cover empty-reservoir
+parity, analytic dark-mode absorption/work, collision-rate intervention,
+independently assembled receiver fields, coherence through directional/angular
+observers and original-record/budget/band/cancellation refusals. These numerical
+fixtures do not qualify an empirical material or instrument.
+
 ## Declared isotropic sources in bonded string input
 
 The layered `material_strings` frontend accepts an optional `elastic-sources`

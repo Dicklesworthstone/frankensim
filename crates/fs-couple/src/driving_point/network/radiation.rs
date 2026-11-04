@@ -22,6 +22,8 @@ use fs_exec::CancelGate;
 use fs_duct::network::NetworkMedia;
 
 mod prepared;
+mod molecular;
+pub use molecular::MolecularRadiatingNetwork;
 pub use prepared::{
     PreparedRadiatingFarField, PreparedRadiatingMicrophones, PreparedRadiatingNetwork,
     RadiatingSourceResponse, RadiatingSourceStatistics,
@@ -56,6 +58,8 @@ pub enum ExteriorNetworkError {
     Invalid(&'static str),
     /// Original duct propagation, boundary or Schur-solve refusal.
     Duct(DuctError),
+    /// Original molecular storage, relaxation, diffusion or binding refusal.
+    Molecular(fs_duct::molecular::MolecularDuctError),
     /// Original surface geometry, radiation or receiver refusal.
     Bem(HelmholtzError),
     /// Original harmonic field or microphone-observation refusal.
@@ -64,6 +68,9 @@ pub enum ExteriorNetworkError {
     Cancelled,
 }
 impl From<DuctError> for ExteriorNetworkError { fn from(e:DuctError)->Self { Self::Duct(e) } }
+impl From<fs_duct::molecular::MolecularDuctError> for ExteriorNetworkError {
+    fn from(e:fs_duct::molecular::MolecularDuctError)->Self { Self::Molecular(e) }
+}
 impl From<HelmholtzError> for ExteriorNetworkError { fn from(e:HelmholtzError)->Self { Self::Bem(e) } }
 impl From<fs_bem::observation_transfers::TransferError> for ExteriorNetworkError {
     fn from(e:fs_bem::observation_transfers::TransferError)->Self {

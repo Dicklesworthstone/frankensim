@@ -7,6 +7,7 @@ use fs_duct::network::{
 };
 
 mod angular;
+mod molecular;
 
 const FIELD_BUDGET: HarmonicWorkBudget = HarmonicWorkBudget {
     maximum_products: 100_000,
