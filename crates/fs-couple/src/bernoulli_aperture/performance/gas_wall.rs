@@ -13,6 +13,7 @@ use crate::bernoulli_aperture::dg::thermal_wall::gas::{
 use crate::bernoulli_aperture::dg::{ApertureDg, DgApertureFrame};
 use crate::bernoulli_aperture::tube::TubeDrive;
 use crate::cavity_phs::piston::thermal::layers::MaterialConductionLayers;
+use crate::dg_port::finite_gas::{FiniteGasDgError, FiniteGasDgHeatBudget};
 use crate::render::RenderError;
 use fs_exec::CancelGate;
 use fs_matdb::{MaterialCard, PropertyKey, QueryPoint};
@@ -101,6 +102,7 @@ pub(super) struct FiniteGasWallPlayback {
     surface_area_m2: f64,
     duration_s: f64,
     program: FiniteGasWallHeatProgram,
+    gas_heat_budgets: Option<FiniteGasDgHeatBudget>,
     gate: Arc<CancelGate>,
     next: usize,
     held_power_w: [f64; 2],
@@ -154,8 +156,20 @@ impl FiniteGasWallPlayback {
         let layers = self
             .conduction
             .layers(&self.material, &self.temperature_axis);
-        let report = system
-            .step_with_finite_gas_wall_heat_controlled(
+        let report = match self.gas_heat_budgets {
+            Some(budgets) => system.step_with_finite_gas_wall_viscous_molecular_heat_controlled(
+                &mut self.gas,
+                &mut self.state,
+                body,
+                &layers,
+                drive,
+                force_n,
+                powers[0] * self.duration_s,
+                self.program.coupling,
+                budgets,
+                &mut || self.gate.is_requested(),
+            ),
+            None => system.step_with_finite_gas_wall_heat_controlled(
                 &mut self.gas,
                 &mut self.state,
                 body,
@@ -165,8 +179,9 @@ impl FiniteGasWallPlayback {
                 powers[0] * self.duration_s,
                 self.program.coupling,
                 &mut || self.gate.is_requested(),
-            )
-            .map_err(RenderError::Voice)?;
+            ),
+        }
+        .map_err(RenderError::Voice)?;
         let frame = report.coupled.clone();
         self.last = Some(report);
         Ok(frame)
@@ -302,12 +317,69 @@ impl AperturePerformance {
             surface_area_m2: body.surface_area_m2,
             duration_s: body.duration_s,
             program,
+            gas_heat_budgets: None,
             gate,
             next: 0,
             held_power_w: [0.0; 2],
             last: None,
         });
         Ok(self)
+    }
+
+    /// Return original gas viscosity and molecular relaxation heat during the
+    /// attached joint gas/wall performance. Call after with_finite_gas_wall_heat
+    /// and before the first physical sample; omission preserves exported loss.
+    ///
+    /// The existing native observer is admitted once on a disposable zero-flow
+    /// load proposal. Invalid source support or preparation budgets refuse
+    /// before playback, without advancing accepted inventories, mechanics,
+    /// acoustic histories, control cursors or clocks. Each later physical step
+    /// measures its actual solved flows and returns gas and solid dissipation
+    /// to their separate finite inventories through the joint transaction.
+    /// The existing source limits, reciprocal conduction, power schedule and
+    /// cancellation gate remain in force; no new heat controls are consumed.
+    pub fn with_finite_gas_wall_viscous_molecular_heat(
+        mut self,
+        budgets: FiniteGasDgHeatBudget,
+    ) -> Result<Self, GestureCompileError> {
+        if self.poisoned || self.system.aperture().accepted_steps() != 0 {
+            return Err(invalid(
+                "joint gas dissipation heat must be selected before playback",
+            ));
+        }
+        let joint = self.finite_gas_wall.as_mut().ok_or_else(|| {
+            invalid("gas dissipation heat requires the original joint gas/wall program")
+        })?;
+        if joint.gas_heat_budgets.is_some() {
+            return Err(invalid("joint gas dissipation heat must be selected once"));
+        }
+        let CoupledAperture::Dg(system) = &self.system else {
+            return Err(invalid("joint gas dissipation heat requires the original DG owner"));
+        };
+        system.load().prepare_finite_gas_source_heat::<core::convert::Infallible, _>(
+            &joint.gas,
+            0.0,
+            joint.program.coupling.gas,
+            budgets,
+            &mut || joint.gate.is_requested(),
+        ).map_err(|error| {
+            let error = match error {
+                FiniteGasDgError::Cancelled => AcousticRealizeError::Cancelled,
+                FiniteGasDgError::Acoustic(error) => error,
+                error => AcousticRealizeError::Nonlinear(format!(
+                    "joint gas dissipation heat admission: {error:?}",
+                )),
+            };
+            GestureCompileError::Render(RenderError::Voice(error))
+        })?;
+        joint.gas_heat_budgets = Some(budgets);
+        Ok(self)
+    }
+
+    /// Separate original-gas source preparation budgets, when opted in.
+    #[must_use]
+    pub fn finite_gas_wall_viscous_molecular_heat_budget(&self) -> Option<FiniteGasDgHeatBudget> {
+        self.finite_gas_wall.as_ref().and_then(|joint| joint.gas_heat_budgets)
     }
 
     /// Actual accepted gas inventory and its original thermochemical source.

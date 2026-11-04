@@ -8,6 +8,8 @@ use fs_material::relaxation::{
 };
 use fs_thermochem::SpeciesId;
 
+mod playback;
+
 fn budgets() -> FiniteGasDgHeatBudget {
     FiniteGasDgHeatBudget {
         molecular: heat_budget(),

@@ -22541,6 +22541,25 @@ and finite reservoir transport programs cannot own the same evolving inventory
 simultaneously. The joint route inherits its fixed-inventory, fixed-geometry,
 all-solid scope and the original first-order acoustic partition.
 
+The explicit `with_finite_gas_wall_viscous_molecular_heat` opt-in reuses the
+same paired program, physical clock, cancellation gate and original DG owner.
+Before any sample, a disposable zero-flow trial admits the original source
+and explicit molecular/viscous heat budgets without advancing accepted state.
+Every rendered frame then uses the joint source-heat transaction at its
+actual solved bore and terminal flows. Bore molecular and viscous heat,
+terminal passage viscous heat and optional solid-wall dissipation enter
+their declared inventories once, with the original midpoint conduction and
+parameter-work accounts. No extra heat-control events or compilation slots
+are consumed. The default paired program retains its previous behavior.
+The selected budget remains inspectable, and existing observed-sample cursor
+publication and poisoned-callback semantics are unchanged.
+
+The focused playback regressions compare direct native joint steps, gas and
+wall caloric states, accepted acoustic histories and output across block
+sizes, and check early budget refusal and cancellation without cursor drift.
+Their sources passed Rust parsing and scoped whitespace checks; native
+compilation and execution remain pending.
+
 Focused G0/G1/G3/G4 regression cases in
 tests/dg_gas_rebind/finite_performance/wall/gas.rs check independent gas/body
 caloric changes, signed midpoint conduction, native parameter work, complete
