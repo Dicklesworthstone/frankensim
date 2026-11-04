@@ -38,9 +38,10 @@ pub struct ImpulseBudget {
     /// Maximum authored scalar modal inputs, before same-time aggregation.
     pub max_events: usize,
     /// Sum of mode counts over distinct (sample, voice) groups. An independent
-    /// mode reserves a delta, a candidate state and a cloned model's mode/state
-    /// records; exact-ZOH coefficients remain shared. A coupled group reserves
-    /// its complete delta; candidate scratch belongs to the original network.
+    /// mode reserves a delta and a cloned model's mode/state records; candidate
+    /// scratch stays with the original voice and exact-ZOH coefficients remain
+    /// shared. A coupled group reserves its complete delta; candidate scratch
+    /// belongs to the original network.
     pub max_staged_modes: usize,
 }
 
@@ -57,7 +58,7 @@ pub struct ImpulseReceipt {
 }
 
 enum ImpulseTarget {
-    Independent { states: Vec<ModalAcousticState>, model: ModalAcousticTimeModel },
+    Independent { model: ModalAcousticTimeModel },
     Coupled,
 }
 
@@ -74,8 +75,9 @@ struct StagedImpulse {
 /// Construction reserves all staging and receipts. Applying an impulse does
 /// not allocate, reset ringing, change held forces or advance the sample clock.
 /// The underlying voices retain their own disclosed allocation boundaries.
-/// State/energy budgets are checked transactionally at each impulse; pressure
-/// and ordinary time-step budgets remain checked by the existing voice step.
+/// State, energy and pressure budgets are checked transactionally at each
+/// impulse by the original modal owner, before the next time step can hide a
+/// pressure violation through decay or phase rotation.
 /// A nonzero impulse rounded entirely out of an independent velocity refuses;
 /// compensated signed work preserves cancelling modes' smaller contributions.
 /// Gated rendering retains the scheduler's whole-callback cancellation points;
@@ -151,7 +153,7 @@ impl ScheduledRenderer {
             }
             let target = match &self.context.voices[first.voice] {
                 RenderVoice::ModalString(voice) => ImpulseTarget::Independent {
-                    states: voice.model.states().to_vec(), model: voice.model.clone(),
+                    model: voice.model.clone(),
                 },
                 RenderVoice::CoupledModal(_) => ImpulseTarget::Coupled,
                 _ => unreachable!("impulse voice kind was admitted under exclusive ownership"),
@@ -275,16 +277,14 @@ impl ImpulseRenderer {
         // at compilation. Nothing is published until every voice passes.
         for event in &mut self.events[begin..end] {
             match (&mut self.renderer.context.voices[event.voice], &mut event.target) {
-                (RenderVoice::ModalString(voice), ImpulseTarget::Independent { states, model }) => {
-                    states.clone_from_slice(voice.model.states());
+                (RenderVoice::ModalString(voice), ImpulseTarget::Independent { model }) => {
                     let mut work = Dd::ZERO;
-                    for ((candidate, old), &impulse) in states.iter_mut().zip(voice.model.states()).zip(&event.delta) {
+                    for (old, &impulse) in voice.model.states().iter().zip(&event.delta) {
                         let before = old.velocity_m_sqrt_kg_per_s;
                         let after = before + impulse;
                         if impulse != 0.0 && after == before {
                             return Err(control("modal impulse is below representable velocity resolution"));
                         }
-                        candidate.velocity_m_sqrt_kg_per_s = after;
                         // Retain the endpoint mean and product tails before
                         // opposite modal works cancel across the complete event.
                         let mean = Dd::from_f64(0.5 * before) + Dd::from_f64(0.5 * after);
@@ -294,7 +294,13 @@ impl ImpulseRenderer {
                     if !event.work_j.is_finite() || !work.lo.is_finite() {
                         return Err(control("modal impulse work left the finite set"));
                     }
-                    model.restore_states(states).map_err(RenderError::Modal)?;
+                    // Synchronize with continuing motion before applying the
+                    // original owner's impulse admission, including pressure.
+                    // Keep represented kinetic work above as the receipt;
+                    // the shared frame separately accounts requested input work.
+                    model.restore_states(voice.model.states()).map_err(RenderError::Modal)?;
+                    model.apply_impulse_into(&event.delta, &mut voice.workspace)
+                        .map_err(RenderError::Modal)?;
                 }
                 (RenderVoice::CoupledModal(voice), ImpulseTarget::Coupled) => {
                     event.work_j = voice.stage_impulse(&event.delta)?.kinetic_energy_change_j;
@@ -307,7 +313,7 @@ impl ImpulseRenderer {
         // clock, limits and shared transition kernel.
         for event in &mut self.events[begin..end] {
             match (&mut self.renderer.context.voices[event.voice], &mut event.target) {
-                (RenderVoice::ModalString(voice), ImpulseTarget::Independent { model, .. }) => {
+                (RenderVoice::ModalString(voice), ImpulseTarget::Independent { model }) => {
                     core::mem::swap(&mut voice.model, model);
                 }
                 (RenderVoice::CoupledModal(voice), ImpulseTarget::Coupled) => voice.publish_impulse(),
@@ -327,7 +333,7 @@ impl ImpulseRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::modal_acoustic_time::{ModalAcousticMode, ModalAcousticTimeBudget};
+    use crate::modal_acoustic_time::{ModalAcousticMode, ModalAcousticTimeBudget, ModalAcousticTimeError};
     use crate::render::{ControlDelta, ModalStringVoice, RenderContext};
     use crate::render::schedule::ScheduledControl;
     use fs_math::c64::C64;
@@ -429,6 +435,41 @@ mod tests {
         assert!(performance.receipts().is_empty());
         assert_eq!(out, [123.0]);
         assert!(matches!(performance.block(&mut out), Err(RenderError::Poisoned)));
+    }
+
+    #[test]
+    fn instantaneous_pressure_refusal_precedes_decay_and_same_time_publication() {
+        let limits = ModalAcousticTimeBudget {
+            maximum_abs_pressure_pa: 0.5,
+            ..ModalAcousticTimeBudget::audible_reference()
+        };
+        let bounded = ModalAcousticTimeModel::try_new(2000, vec![ModalAcousticMode {
+            angular_frequency_rad_s: 700.0,
+            damping_ratio: 1.0,
+            pressure_per_modal_velocity: C64::new(1.0, 0.0),
+        }], limits).unwrap();
+        // A unit jump gives 1 Pa immediately, but only 0.458 Pa after one
+        // critically damped sample. Endpoint-only admission misses the jump.
+        let mut endpoint_only = bounded.clone();
+        endpoint_only.restore_states(&[ModalAcousticState {
+            displacement_m_sqrt_kg: 0.0,
+            velocity_m_sqrt_kg_per_s: 1.0,
+        }]).unwrap();
+        assert!(endpoint_only.step(&[0.0]).unwrap().observer_pressure_pa.abs() < 0.5);
+
+        let initial = bounded.states().to_vec();
+        let mut performance = renderer(vec![bounded.clone(), bounded], Vec::new())
+            .with_modal_impulses(vec![impulse(0, 0, 0.25), impulse(0, 1, 1.0)], budget()).unwrap();
+        let mut output = [123.0];
+        assert!(matches!(performance.block(&mut output),
+            Err(RenderError::Modal(ModalAcousticTimeError::BudgetExceeded {
+                what: "absolute observer pressure", ..
+            }))));
+        assert_eq!(performance.modal_states(0).unwrap(), initial.as_slice());
+        assert_eq!(performance.modal_states(1).unwrap(), initial.as_slice());
+        assert_eq!(performance.samples_rendered(), 0);
+        assert!(performance.receipts().is_empty());
+        assert_eq!(output, [123.0]);
     }
 
     #[test]

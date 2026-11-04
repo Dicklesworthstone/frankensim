@@ -1253,19 +1253,47 @@ impl ModalAcousticTimeModel {
     }
 }
 
-struct ModalStepData {
+struct ModalStepData<Work = f64> {
     next: ModalAcousticState,
-    work: f64,
+    work: Work,
     work_allowance: f64,
     loss: f64,
     loss_allowance: f64,
+}
+
+// Ordinary forcing retains its existing f64 operation tree. Impulses retain
+// endpoint-mean and product tails until the complete signed work is reduced.
+// Both paths are statically specialized and use the same admission loop.
+trait ModalWork: Copy + Default + core::ops::Add<Output = Self> {
+    fn value(self) -> f64;
+    fn finite(self) -> bool;
+}
+
+impl ModalWork for f64 {
+    fn value(self) -> f64 {
+        self
+    }
+
+    fn finite(self) -> bool {
+        self.is_finite()
+    }
+}
+
+impl ModalWork for fs_math::dd::Dd {
+    fn value(self) -> f64 {
+        self.to_f64()
+    }
+
+    fn finite(self) -> bool {
+        self.hi.is_finite() && self.lo.is_finite()
+    }
 }
 
 // Shared state admission and independent work/heat balance for held forces,
 // ramps, harmonic loads and impulses. A forcing owner proposes motion and integrals;
 // it cannot bypass the physical budgets or commit only part of a mode bank.
 #[allow(clippy::too_many_lines)] // one shared, transactional physics loop
-fn stage_modal_frame(
+fn stage_modal_frame<Work: ModalWork>(
     modes: &[ModalAcousticMode],
     states: &[ModalAcousticState],
     budget: ModalAcousticTimeBudget,
@@ -1276,7 +1304,7 @@ fn stage_modal_frame(
         usize,
         ModalAcousticMode,
         ModalAcousticState,
-    ) -> Result<ModalStepData, ModalAcousticTimeError>,
+    ) -> Result<ModalStepData<Work>, ModalAcousticTimeError>,
 ) -> Result<(), ModalAcousticTimeError> {
     if workspace.mode_count() != modes.len() {
         return Err(ModalAcousticTimeError::InvalidInput {
@@ -1284,7 +1312,7 @@ fn stage_modal_frame(
         });
     }
     let mut pressure_pa = 0.0;
-    let mut input_work_j = 0.0;
+    let mut input_work = Work::default();
     let mut work_roundoff_tolerance_j = 0.0;
     let mut energy_before_j = 0.0;
     let mut energy_after_j = 0.0;
@@ -1312,7 +1340,8 @@ fn stage_modal_frame(
         let after = modal_energy(mode, next);
         energy_before_j += before;
         energy_after_j += after;
-        input_work_j += work;
+        input_work = input_work + work;
+        let work = work.value();
         work_roundoff_tolerance_j += work_allowance;
         let balance_loss = work - (after - before);
         let balance_allowance =
@@ -1361,15 +1390,17 @@ fn stage_modal_frame(
         pressure_pa.abs(),
         budget.maximum_abs_pressure_pa,
     )?;
-    if ![
-        pressure_pa,
-        energy_before_j,
-        energy_after_j,
-        input_work_j,
-        work_roundoff_tolerance_j,
-    ]
-    .into_iter()
-    .all(f64::is_finite)
+    let input_work_j = input_work.value();
+    if !input_work.finite()
+        || ![
+            pressure_pa,
+            energy_before_j,
+            energy_after_j,
+            input_work_j,
+            work_roundoff_tolerance_j,
+        ]
+        .into_iter()
+        .all(f64::is_finite)
     {
         return Err(ModalAcousticTimeError::InvalidInput {
             what: "sample transition produced a non-finite result",

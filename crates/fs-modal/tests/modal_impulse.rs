@@ -265,3 +265,149 @@ fn g1_small_signed_work_is_not_erased_by_large_stored_elastic_energy() {
     assert_eq!(frame.total_modal_energy_j - 500_000.5, 0.0);
     assert_eq!(frame.viscous_dissipation_j, 0.0);
 }
+
+fn wide_free_model(velocities: &[f64]) -> ModalAcousticTimeModel {
+    let mut model = ModalAcousticTimeModel::try_new_with_free_coordinates(
+        48_000,
+        vec![mode(0.0, 0.0, 0.0); velocities.len()],
+        ModalAcousticTimeBudget {
+            maximum_abs_displacement_m_sqrt_kg: 1.0e20,
+            maximum_abs_velocity_m_sqrt_kg_per_s: 1.0e20,
+            maximum_total_energy_j: 1.0e40,
+            ..ModalAcousticTimeBudget::audible_reference()
+        },
+    )
+    .unwrap();
+    model
+        .restore_states(
+            &velocities
+                .iter()
+                .map(|&v| state(0.0, v))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    model
+}
+
+#[test]
+fn g1_signed_work_retains_endpoint_mean_and_product_tails_before_cancellation() {
+    // The first mean is halfway between f64 values in the first case; the
+    // means are exact but each product loses two joules in the second case.
+    for (large, kick, expected_work) in [
+        ((1_u64 << 55) as f64, 8.0, 64.5),
+        ((1_u64 << 52) as f64, 6.0, 36.5),
+    ] {
+        for physical_port in [false, true] {
+            let mut model = wide_free_model(&[large, 0.0, large]);
+            let initial = model.states().to_vec();
+            let impulses = [kick, 1.0, -kick];
+            let mut workspace = ModalAcousticWorkspace::new(&model);
+            let frame = if physical_port {
+                model.apply_port_impulse_into(&impulses, 1.0, &mut workspace)
+            } else {
+                model.apply_impulse_into(&impulses, &mut workspace)
+            }
+            .unwrap();
+            // v dot J cancels, leaving |J|^2 / 2 with unit modal masses.
+            assert_eq!(frame.input_work_j, expected_work);
+            assert_eq!(frame.viscous_dissipation_j, 0.0);
+            let reverse = model
+                .apply_impulse_into(&impulses.map(|j| -j), &mut workspace)
+                .unwrap();
+            assert_eq!(reverse.input_work_j, -expected_work);
+            assert_eq!(model.states(), initial);
+        }
+    }
+}
+
+#[test]
+fn g1_small_signed_work_survives_opposite_large_modal_contributions() {
+    let large = (1_u64 << 28) as f64;
+    for (small_before, small_impulse, expected_work) in [(0.0, 1.0, 0.5), (1.0, -1.0, -0.5)] {
+        let mut model = wide_free_model(&[0.0, small_before, large]);
+        let frame = model
+            .apply_impulse(&[large, small_impulse, -large])
+            .unwrap();
+        // The exact works in basis order are +2^55, +/-0.5, -2^55 joules.
+        assert_eq!(frame.input_work_j, expected_work);
+        assert_eq!(frame.viscous_dissipation_j, 0.0);
+        assert_eq!(
+            model.states(),
+            &[
+                state(0.0, large),
+                state(0.0, small_before + small_impulse),
+                state(0.0, 0.0)
+            ]
+        );
+    }
+}
+
+#[test]
+fn g0_swallowed_momentum_refuses_before_any_mode_is_published() {
+    let mut model = wide_free_model(&[0.0, 1.0e16]);
+    let initial = model.states().to_vec();
+    let mut workspace = ModalAcousticWorkspace::new(&model);
+    for kick in [1.0, -1.0] {
+        for physical_port in [false, true] {
+            let result = if physical_port {
+                model.apply_port_impulse_into(&[0.25, kick], 1.0, &mut workspace)
+            } else {
+                model.apply_impulse_into(&[0.25, kick], &mut workspace)
+            };
+            assert!(matches!(
+                result,
+                Err(ModalAcousticTimeError::InvalidInput {
+                    what: "modal impulse is below representable velocity resolution",
+                })
+            ));
+            assert_eq!(model.states(), initial);
+        }
+    }
+}
+
+#[test]
+fn g0_nonzero_port_projection_cannot_silently_underflow() {
+    let mut model = wide_free_model(&[0.0, 0.0]);
+    let initial = model.states().to_vec();
+    assert!(matches!(
+        model.apply_port_impulse(&[1.0, 1.0e-200], 1.0e-200),
+        Err(ModalAcousticTimeError::InvalidInput {
+            what: "modal impulse projection loses nonzero momentum",
+        })
+    ));
+    assert_eq!(model.states(), initial);
+    // A physically zero mode shape remains a legitimate uncoupled coordinate.
+    model.apply_port_impulse(&[1.0, 0.0], 1.0e-200).unwrap();
+    assert_eq!(model.states(), &[state(0.0, 1.0e-200), state(0.0, 0.0)]);
+}
+
+#[test]
+fn g0_pressure_limit_applies_before_damping_can_hide_the_jump() {
+    let mut model = ModalAcousticTimeModel::try_new(
+        2_000,
+        vec![mode(700.0, 1.0, 1.0)],
+        ModalAcousticTimeBudget {
+            maximum_abs_pressure_pa: 0.5,
+            ..ModalAcousticTimeBudget::audible_reference()
+        },
+    )
+    .unwrap();
+    let mut endpoint_only = model.clone();
+    endpoint_only.restore_states(&[state(0.0, 1.0)]).unwrap();
+    assert!(
+        endpoint_only
+            .step(&[0.0])
+            .unwrap()
+            .observer_pressure_pa
+            .abs()
+            < 0.5
+    );
+    assert!(matches!(
+        model.apply_impulse(&[1.0]),
+        Err(ModalAcousticTimeError::BudgetExceeded {
+            what: "absolute observer pressure",
+            ..
+        })
+    ));
+    assert_eq!(model.states(), &[state(0.0, 0.0)]);
+}

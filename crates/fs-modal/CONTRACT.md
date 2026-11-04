@@ -182,8 +182,12 @@ generalized impulses in `N s / sqrt(kg)` at fixed modal displacement:
 damping. `apply_port_impulse[_into]` projects a physical `N s` impulse with
 the same reciprocal mode-shape weights that reconstruct the port velocity.
 Signed work is the impulse dotted with mean pre/post velocity; it is computed
-without subtracting stored mechanical energies. No time elapses and all viscous
-heat entries are exactly zero. Free coordinates use the same mass normalization.
+without subtracting stored mechanical energies. Endpoint means, products and
+the signed reduction retain double-double tails so cancelling modal work does
+not erase small energy transfers. A nonzero impulse swallowed by velocity
+rounding or a nonzero physical projection underflowing to zero refuses the
+whole jump. No time elapses and all viscous heat entries are exactly zero.
+Free coordinates use the same mass normalization.
 The `_into` methods reuse the existing workspace and perform one bounded scalar
 pass without allocation or transcendental functions. All existing state,
 energy, pressure and work-balance admission gates remain transactional. These
@@ -192,7 +196,8 @@ duration, support reactions, omitted modes or broadband impact radiation.
 Finite-duration excitation remains a force-trajectory problem. G1/G3 regressions
 in `tests/modal_impulse.rs` check clock/damping independence, physical mass and
 reciprocal port work, braking, subdivision/reversal, retained small work and
-whole-bank refusal.
+whole-bank refusal, including cancellation tails and instantaneous pressure
+limits that finite-time decay could otherwise hide.
 
 The damped transition prepares its held-force convolution with a scaled entire
 series and transition doubling, then reuses scalar gains in the sample loop.
