@@ -44,6 +44,8 @@ use transition::{MeshBoundary, Transition};
 pub mod bundle;
 /// Original IF97/IAPWS water transport on the same thermal mesh.
 pub mod water;
+/// Exact planar Fresnel transport between original isothermal thermal elements.
+pub mod contact;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ElementFace {

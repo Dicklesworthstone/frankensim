@@ -719,7 +719,7 @@ fn cross(a: Vec3, b: Vec3) -> Vec3 {
 
 fn finite_point(p: Point3) -> bool { [p.x, p.y, p.z].iter().all(|v| v.is_finite()) }
 
-fn physical_roundoff(mut s: Stokes, reference: f64) -> Result<Stokes, BeamError> {
+pub(crate) fn physical_roundoff(mut s: Stokes, reference: f64) -> Result<Stokes, BeamError> {
     if ![s.i, s.q, s.u, s.v].iter().all(|x| x.is_finite()) {
         return Err(BeamError::NumericalRange);
     }

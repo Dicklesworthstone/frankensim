@@ -7285,3 +7285,51 @@ With `material-state`, `P1ConductionMesh::propagate_water` and `propagate_water_
 Both glass and water now call the same private prepared-field traversal owners. Water's complete nonlinear density/optical Hessian feeds the existing variational integrator even though the in-element temperature Hessian is zero. Native gradient-jump crossing-time corrections, transition collars, phase/group path lengths, Beer loss, receiving-plane projection, cancellation and whole-path work limits remain in force. Wavelength preparation is reused; propagation adds no workspace allocation. Contacts and exterior faces still stop, and EOS/optical domain crossings refuse.
 
 Four focused controls cover original smooth-field equivalence through a twelve-tetrahedron column in both orientations and both liquid/vapor branches, gradient-jump bundles against neighboring primal rays, accepted backward-Euler cooling, and contact/phase/snapshot/work refusals. This route uses a frozen pure-water thermal state at fixed pressure; it adds no fluid closure, mixture interpolation, varying-pressure mesh reconstruction, moving-fluid optics, global locator or free-surface interface law.
+
+## Polarized refraction at original thermal-contact faces
+
+`material_state::thermo_optic::transient::mesh::contact::P1ContactInterface`
+explicitly pairs two coincident original triangular faces in the same accepted
+P1 conduction snapshot. Each side retains its own reference glass and Schott
+thermo-optic law. The four original nodal values must prove each element
+isothermal; distinct temperatures and material indices across the contact are
+retained. Faces may share vertex IDs or use duplicated thermal-contact nodes.
+Exact geometric pairing and opposite interiors are checked without smoothing
+the jump, inventing an air gap or replacing a gradient by an element average.
+
+`split` traces an initially unpolarized interior ray to the actual first face
+and returns both nonzero Fresnel branches. `split_polarized` accepts a physical
+Stokes state with unit input intensity and the declared transverse reference.
+The existing dielectric owner supplies Snell directions, power-normalized
+Mueller matrices and the relative reflection phase under total internal
+reflection. Each contact rotates the actual incident frame into its local s/p
+basis. The complete Stokes state survives subsequent contacts; unpolarized
+scalar Fresnel averages remain diagnostic coefficients, not cumulative power
+weights. Returned Stokes components and `power_fraction()` are relative to the
+original unit launch and may be scaled by the caller's incident spectral power.
+
+Each branch propagates within its original receiving element to the next
+native face or the explicit outgoing-distance limit. Phase optical length,
+group optical length, geometric length and Beer optical depth accumulate from
+the original wavelength-dependent laws; each interface and bulk attenuation
+factor is applied once. Native watertight triangle hits retain the actual
+endpoint, without an unintegrated position offset or a GRIN arrival collar.
+`split_arrival` composes a caller-selected retained branch with the next
+explicitly paired contact, checking its private original-owner/face witness.
+The API supplies no implicit branching tree or unbounded reflection loop.
+
+Preparation stores eight native one-triangle charts. A split uses bounded
+constant work, at most twelve triangle-intersection queries, no query allocation
+and the original cancellation checkpoints. Edges, ambiguous faces, foreign
+snapshots/materials, unsupported wavelengths, invalid launches and nonuniform
+elements refuse. The model is smooth-interface polarized geometrical power
+transport: it adds no coherent interference between paths, coatings, roughness,
+discontinuous-index GRIN continuation, angular-bundle derivatives or global
+mesh locator. Thermal contact resistance is not assigned optical absorption;
+bulk absorption remains with each original glass.
+
+Six focused controls cover independent Snell/Fresnel and distinct phase/group
+paths, Beer loss, temperature-jump refraction and reverse incidence, TIR and
+equal-index limits, composition through three original elements with nonparallel
+incidence planes, analytic TIR polarization phase, frame covariance and
+source/domain/cancellation refusals.
