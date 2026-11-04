@@ -27,8 +27,8 @@ use fs_scenario::{AcousticAssembly, WaveguideEnd};
 /// local wall law and flanged termination. Strings, separate body/plate/cavity
 /// members, other excitation and tone holes refuse; none is silently dropped.
 /// The explicit lumped ladder uses the original compression-volume/volume-flow
-/// frustum owner, including for a single widening cone, with uniform interior
-/// gas, an independent pressure-matched exterior and its original numerical
+/// frustum owner, including for a single widening cone, with regional interior
+/// gases, an independent pressure-matched exterior and its original numerical
 /// wall. The exact same prepared chain supplies passive-pitch admission, reed
 /// feedback and terminal flow. The legacy spherical psi-line is not used by
 /// this physical image.
@@ -36,11 +36,14 @@ use fs_scenario::{AcousticAssembly, WaveguideEnd};
 /// spatial propagation remains in the LC state, without a separate TMM transfer.
 /// The original compact/Foster mouth-load approximation remains; this receiver
 /// neither replaces it nor certifies its continuum radiation match.
-/// Interior cell storage/losses and the reed use the interior gas; only the
+/// Interior cell storage/losses use each local gas and the reed uses the inlet; only the
 /// terminal radiation load, receiver and atmosphere use the exterior. The
 /// passive-pitch reference uses the same assignment through the original TMM.
-/// Nonuniform interior media and source-bound walls still require the
-/// characteristic line. Side-hole and general body microphones
+/// Nonuniform interiors keep at least two cells per authored region within the
+/// exact requested total, refining the greatest local cell travel time first.
+/// Their spatial screening estimate does not certify material-interface mode
+/// error: the measured regional TMM pitch gate remains decisive. Source-bound
+/// walls still require the characteristic line. Side-hole and general body microphones
 /// retain their existing dedicated owners and are not inferred from this input.
 ///
 /// Frozen gas regions share one static pressure. This is not advective mixing,
@@ -183,9 +186,9 @@ pub(super) fn realize(
     };
     let exterior = *regional.exterior_gas();
     let interior = *regional.inlet_gas();
-    if is_lumped && (gases.iter().any(|gas| *gas != interior) || binding.material_wall.is_some()) {
+    if is_lumped && binding.material_wall.is_some() {
         return Err(invalid(
-            "physical lumped outlet observation requires uniform interior gas and the original numerical wall; nonuniform interior media and source-bound walls need their own spatial owner",
+            "physical lumped outlet observation requires the original numerical wall; source-bound walls need their own spatial owner",
         ));
     }
     let [x, y, z] = binding.receiver.position_m;
@@ -262,7 +265,7 @@ pub(super) fn realize(
             assembly.sample_rate_hz,
             count,
             options.bore,
-            Some((&mut microphone, exterior)),
+            Some((&mut microphone, regional)),
         )?;
         for pressure in &mut pressure_pa {
             *pressure = observer.process(*pressure);

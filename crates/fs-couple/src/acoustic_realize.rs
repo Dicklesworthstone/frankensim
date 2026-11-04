@@ -132,10 +132,10 @@ pub enum AcousticRealizeError {
     LumpedLadderBand {
         /// Requested total cell count.
         cells: usize,
-        /// Smallest cell count whose spatial dispersion alone meets the
-        /// tolerance. This is a necessary condition, not an admission.
+        /// Smallest cell count whose spatial screening estimate meets the
+        /// tolerance. This does not admit material-interface eigenmode error.
         min_admissible_cells: usize,
-        /// Refusing pitch error at `cells` [cents]: the dispersion bound below
+        /// Refusing pitch error at `cells` [cents]: the spatial estimate below
         /// `min_admissible_cells`, otherwise the measured passive error
         /// (infinite when the ladder has no resonance within ±386 cents of
         /// the line's).
@@ -283,10 +283,12 @@ pub enum BoreRealizationReceipt {
     LumpedLadder {
         /// Total lumped LC cells assembled across the bore.
         cells: usize,
-        /// Smallest cell count whose spatial dispersion alone meets the
-        /// tolerance. This is a necessary condition, not an admission.
+        /// Smallest cell count whose spatial screening estimate meets the
+        /// tolerance. This does not admit material-interface eigenmode error.
         min_admissible_cells: usize,
-        /// Spatial dispersion model-form pitch error at `cells` [cents].
+        /// Spatial screening estimate at `cells` [cents]. Nonuniform interiors
+        /// use the largest cell travel time relative to total regional travel
+        /// time; their measured TMM pitch error remains the admission.
         dispersion_error_cents: f64,
         /// Measured, signed model-form pitch error against the characteristic
         /// line [cents]. It is taken from the lowest passive input-impedance
@@ -4985,8 +4987,15 @@ fn realize_reed_on_duct_with_receiver(
     sample_rate_hz: u32,
     n: usize,
     bore: BoreRealization,
-    receiver: Option<(&mut crate::pcm_wav::baffled::BaffledPressure, GasState)>,
+    receiver: Option<(
+        &mut crate::pcm_wav::baffled::BaffledPressure,
+        crate::driving_point::regional::RegionalDuct,
+    )>,
 ) -> Result<(Vec<f64>, BoreRealizationReceipt), AcousticRealizeError> {
+    // The resolved inlet is the source medium even when downstream cells and
+    // the exterior differ. No averaged bore gas enters Bernoulli or reed work.
+    let inlet = receiver.as_ref().map(|(_, regional)| *regional.inlet_gas());
+    let gas = inlet.as_ref().unwrap_or(gas);
     let physics = physics_duct(duct)?;
     let termination = match duct.termination {
         WaveguideEnd::Closed => Termination::Closed,
@@ -5034,30 +5043,26 @@ fn realize_reed_on_duct_with_receiver(
                     what: "lumped ladder ODE reed requires a linear plate bank",
                 });
             }
-            let (sections, taps) = bore_spec_with_cells(duct, cells).ok_or(
+            let (mut sections, taps) = bore_spec_with_cells(duct, cells).ok_or(
                 AcousticRealizeError::InvalidDescription {
                     what: "duct cannot be sliced into a lumped ladder",
                 },
             )?;
-            // Select the physical frustum image before either model-form gate.
-            // The passive scan below borrows this exact chain; the source then
-            // takes it unchanged, so a cone is never qualified as a psi-line
-            // and rendered with a different finite-volume approximation.
-            let receiver = receiver
-                .map(|(receiver, exterior_gas)| {
-                    reed_ode::PreparedReedOutlet::new(
-                        &sections,
-                        duct_outlet(duct.termination),
-                        &taps,
-                        gas,
-                        &exterior_gas,
-                        duct.wall,
-                        receiver,
-                    )
-                })
-                .transpose()?;
-            let dispersion_error_cents = lumped_ladder_dispersion_cents(cells);
-            let min_admissible_cells = min_admissible_lumped_cells(max_pitch_error_cents);
+            let regional = receiver.as_ref().map(|(_, regional)| regional)
+                .filter(|regional| nonuniform_interior(regional));
+            let (dispersion_error_cents, min_admissible_cells) = if let Some(regional) = regional {
+                let (counts, estimate, minimum) = regional_lumped_cells(
+                    &physics, regional, cells, max_pitch_error_cents,
+                )?;
+                for (section, count) in sections.iter_mut().zip(counts) {
+                    section.cells = count;
+                }
+                (estimate, minimum)
+            } else {
+                // Retain the original allocation and arithmetic for uniform gas.
+                (lumped_ladder_dispersion_cents(cells),
+                 min_admissible_lumped_cells(max_pitch_error_cents))
+            };
             if dispersion_error_cents > max_pitch_error_cents {
                 return Err(AcousticRealizeError::LumpedLadderBand {
                     cells,
@@ -5066,8 +5071,19 @@ fn realize_reed_on_duct_with_receiver(
                     max_pitch_error_cents,
                 });
             }
-            // Dispersion alone is a necessary condition. The admission is the
-            // ladder's MEASURED passive pitch against the line's own TMM.
+            // Select the physical frustum once. The passive scan borrows this
+            // exact regional chain; the source then consumes it unchanged.
+            let receiver = receiver
+                .map(|(receiver, regional)| {
+                    reed_ode::PreparedReedOutlet::new(
+                        &sections, duct_outlet(duct.termination), &taps,
+                        regional, duct.wall, receiver,
+                    )
+                })
+                .transpose()?;
+            // Worst-cell travel time is only a spatial screening estimate.
+            // Actual admission compares this ladder's passive pitch with the
+            // same regional TMM, including material-interface reflections.
             let pitch_error_cents = lumped_ladder_pitch_error_cents(
                 &physics,
                 &sections,
@@ -5136,6 +5152,67 @@ pub fn min_admissible_lumped_cells(max_pitch_error_cents: f64) -> usize {
         cells += 1;
     }
     cells
+}
+
+fn nonuniform_interior(regional: &crate::driving_point::regional::RegionalDuct) -> bool {
+    regional.segment_gases().iter().any(|gas| gas != regional.inlet_gas())
+}
+
+// Regional interfaces remain on original section boundaries. Spend exactly
+// the requested cell budget, splitting the largest local transit-time cell
+// first (ties retain authored order). No gas or interface inertia is averaged.
+fn regional_lumped_cells(
+    physics: &Duct,
+    regional: &crate::driving_point::regional::RegionalDuct,
+    requested: usize,
+    tolerance: f64,
+) -> Result<(Vec<usize>, f64, usize), AcousticRealizeError> {
+    let count = physics.segments.len();
+    if count != regional.segment_gases().len() || requested / 2 < count {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "regional lumped ladder needs at least two cells per authored gas region",
+        });
+    }
+    let times: Vec<_> = physics.segments.iter().zip(regional.segment_gases())
+        .map(|(segment, gas)| segment.axial_length() / gas.sound_speed)
+        .collect();
+    let total_time = regional.one_way_time_s();
+    let estimate = |time: f64, cells: usize| {
+        let theta = core::f64::consts::PI * (time / cells as f64) / (2.0 * total_time);
+        if theta == 0.0 { return 0.0; }
+        (1200.0 * det::ln(det::sin(theta) / theta) / core::f64::consts::LN_2).abs()
+    };
+    // Every region must meet the same maximum-cell criterion. Find its exact
+    // integer requirement by monotone search, then sum; no trial chains or
+    // potentially unbounded one-cell-at-a-time minimum search are necessary.
+    let mut minimum = 0usize;
+    for &time in &times {
+        let (mut low, mut high) = (1usize, 2usize);
+        while estimate(time, high) > tolerance {
+            low = high;
+            high = high.saturating_mul(2);
+        }
+        while high - low > 1 {
+            let middle = low + (high - low) / 2;
+            if estimate(time, middle) > tolerance { low = middle; }
+            else { high = middle; }
+        }
+        minimum = minimum.saturating_add(high);
+    }
+    let mut counts = vec![2; count];
+    for _ in count * 2..requested {
+        let mut slowest = 0;
+        for index in 1..count {
+            if times[index] / counts[index] as f64 > times[slowest] / counts[slowest] as f64 {
+                slowest = index;
+            }
+        }
+        counts[slowest] += 1;
+    }
+    let screening = times.iter().zip(&counts)
+        .map(|(&time, &cells)| estimate(time, cells))
+        .fold(0.0_f64, f64::max);
+    Ok((counts, screening, minimum))
 }
 
 /// Passive input impedance of a linear single-port bore chain,
@@ -5291,16 +5368,17 @@ fn lumped_ladder_resonances(
     prepared: Option<&reed_ode::PreparedReedOutlet<'_>>,
 ) -> Result<(Option<f64>, f64), AcousticRealizeError> {
     let length: f64 = physics.segments.iter().map(Segment::axial_length).sum();
-    let quarter = core::f64::consts::TAU * gas.sound_speed / (4.0 * length);
+    let quarter = match prepared {
+        Some(prepared) if nonuniform_interior(&prepared.reference) =>
+            core::f64::consts::TAU / (4.0 * prepared.reference.one_way_time_s()),
+        _ => core::f64::consts::TAU * gas.sound_speed / (4.0 * length),
+    };
     let wall = wall_pin(duct.wall);
     let line = first_impedance_peak(0.25 * quarter, 6.0 * quarter, 920, |omega| {
         // The continuum reference must use the same interior and exterior
         // assignment as the exact prepared chain consumed by the source.
         let response = match prepared {
-            Some(prepared) => fs_duct::exterior::input_impedance(
-                physics,
-                gas,
-                &prepared.exterior_gas,
+            Some(prepared) => prepared.reference.response_with_wall(
                 omega,
                 fs_duct::LossModel::Bessel,
                 termination,
@@ -6195,8 +6273,9 @@ mod lumped_ladder_resonance_tests {
             RayleighMedium { density: exterior.density, sound_speed: exterior.sound_speed },
         ).unwrap();
         let prepared = reed_ode::PreparedReedOutlet::new(
-            &sections, duct_outlet(duct.termination), &taps, &interior, &exterior,
-            None, &mut microphone,
+            &sections, duct_outlet(duct.termination), &taps,
+            crate::driving_point::regional::RegionalDuct::new(&physics, &[interior])
+                .unwrap().with_exterior_gas(exterior).unwrap(), None, &mut microphone,
         ).unwrap();
         let (_, admitted_reference) = lumped_ladder_resonances(
             &physics, &sections, &taps, &duct, Termination::FlangedOpen, &interior,
@@ -6213,6 +6292,97 @@ mod lumped_ladder_resonance_tests {
         let exterior_reference = reference(&exterior);
         assert_eq!(admitted_reference.to_bits(), exterior_reference.to_bits());
         assert!((exterior_reference / reference(&interior) - 1.0).abs() > 1e-6);
+    }
+
+    #[test]
+    fn regional_cells_use_local_travel_time_with_exact_work_and_minimum_counts() {
+        use crate::driving_point::regional::RegionalDuct;
+        let spec = fs_material::gas::GasSpec::dry_air_ussa1976();
+        let gases = [GasState::try_new(&spec, 400.0, 101_325.0).unwrap(),
+                     GasState::try_new(&spec, 225.0, 101_325.0).unwrap()];
+        let physics = Duct { segments: vec![
+            Segment::Cylinder { radius: 0.004, length: 0.12 },
+            Segment::Cylinder { radius: 0.004, length: 0.18 },
+        ] };
+        let regional = RegionalDuct::new(&physics, &gases).unwrap();
+        let (counts, screening, minimum) = regional_lumped_cells(&physics, &regional, 9, 1.0).unwrap();
+        // The colder second region takes twice as long, not merely 1.5 times
+        // as long as a length-only allocation using the inlet speed assumes.
+        assert_eq!(counts, vec![3, 6]);
+        assert_eq!(counts.iter().sum::<usize>(), 9);
+        let times = [0.12 / gases[0].sound_speed, 0.18 / gases[1].sound_speed];
+        let theta = core::f64::consts::PI * (times[0] / 3.0).max(times[1] / 6.0)
+            / (2.0 * (times[0] + times[1]));
+        let expected = (1200.0 * det::ln(det::sin(theta) / theta) / core::f64::consts::LN_2).abs();
+        assert!((screening - expected).abs() < 1e-12);
+        let first_passing = (4..100).find(|&cells| {
+            let (counts, estimate, reported) = regional_lumped_cells(&physics, &regional, cells, 1.0).unwrap();
+            assert_eq!(counts.iter().sum::<usize>(), cells);
+            assert!(counts.iter().all(|&count| count >= 2));
+            assert_eq!(reported, minimum);
+            estimate <= 1.0
+        }).unwrap();
+        assert_eq!(minimum, first_passing);
+        assert!(regional_lumped_cells(&physics, &regional, 3, 1.0).is_err());
+        let tied = Duct { segments: vec![physics.segments[0].clone(); 2] };
+        let tied_media = RegionalDuct::new(&tied, &[gases[0]; 2]).unwrap();
+        assert_eq!(regional_lumped_cells(&tied, &tied_media, 5, 1.0).unwrap().0, vec![3, 2]);
+    }
+
+    #[test]
+    fn physical_pitch_gate_uses_regional_travel_time_and_original_interface_loading() {
+        use crate::driving_point::regional::RegionalDuct;
+        use crate::pcm_wav::baffled::{BaffledPressure, CircularOutletReceiver, RayleighMedium};
+        let spec = fs_material::gas::GasSpec::dry_air_ussa1976();
+        let gases = [GasState::try_new(&spec, 400.0, 101_325.0).unwrap(),
+                     GasState::try_new(&spec, 225.0, 101_325.0).unwrap()];
+        let exterior = GasState::try_new(&spec, 293.15, gases[0].pressure).unwrap();
+        let duct = ViscothermalDuct {
+            segments: vec![CylinderSegment::cylinder(0.004, 0.12), CylinderSegment::cylinder(0.004, 0.18)],
+            tone_holes: vec![], termination: WaveguideEnd::FlangedOpen, wall: None,
+        };
+        let physics = physics_duct(&duct).unwrap();
+        let regional = RegionalDuct::new(&physics, &gases).unwrap().with_exterior_gas(exterior).unwrap();
+        let (mut sections, taps) = bore_spec_with_cells(&duct, 6).unwrap();
+        let (counts, _, _) = regional_lumped_cells(&physics, &regional, 6, 500.0).unwrap();
+        for (section, count) in sections.iter_mut().zip(counts) { section.cells = count; }
+        let mut microphone = BaffledPressure::circular_outlet(
+            0.004, 16_000,
+            CircularOutletReceiver {
+                position_m: [0.0, 0.0, 1.0], radial_rings: 1, angular_points: 8,
+                maximum_frequency_hz: 500.0,
+            },
+            RayleighMedium { density: exterior.density, sound_speed: exterior.sound_speed },
+        ).unwrap();
+        let prepared = reed_ode::PreparedReedOutlet::new(
+            &sections, duct_outlet(duct.termination), &taps, regional, None, &mut microphone,
+        ).unwrap();
+        let (_, admitted) = lumped_ladder_resonances(
+            &physics, &sections, &taps, &duct, Termination::FlangedOpen, &gases[0], Some(&prepared),
+        ).unwrap();
+        // Independent composition of the two original uniform TMM owners.
+        // The interface carries pressure and volume flow without a density ratio.
+        let upstream = Duct { segments: vec![physics.segments[0].clone()] };
+        let downstream = Duct { segments: vec![physics.segments[1].clone()] };
+        let quarter = core::f64::consts::TAU / (4.0 * (0.12 / gases[0].sound_speed + 0.18 / gases[1].sound_speed));
+        let expected = first_impedance_peak(0.25 * quarter, 6.0 * quarter, 920, |omega| {
+            let load = fs_duct::exterior::input_impedance(
+                &downstream, &gases[1], &exterior, omega, fs_duct::LossModel::Bessel,
+                Termination::FlangedOpen, fs_duct::WallModel::Rigid,
+            ).map_err(AcousticRealizeError::Duct)?;
+            fs_duct::exterior::input_impedance_load(
+                &upstream, &gases[0], &exterior, omega, fs_duct::LossModel::Bessel,
+                load.impedance, fs_duct::WallModel::Rigid,
+            ).map(|response| response.impedance.abs()).map_err(AcousticRealizeError::Duct)
+        }).unwrap().unwrap();
+        assert_eq!(admitted.to_bits(), expected.to_bits());
+        let inlet_only = first_impedance_peak(0.25 * quarter, 6.0 * quarter, 920, |omega| {
+            fs_duct::exterior::input_impedance(
+                &physics, &gases[0], &exterior, omega, fs_duct::LossModel::Bessel,
+                Termination::FlangedOpen, fs_duct::WallModel::Rigid,
+            ).map(|response| response.impedance.abs()).map_err(AcousticRealizeError::Duct)
+        }).unwrap().unwrap();
+        assert!((admitted / inlet_only - 1.0).abs() > 1e-3);
     }
 
     #[test]

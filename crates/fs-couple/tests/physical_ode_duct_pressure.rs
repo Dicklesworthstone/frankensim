@@ -266,6 +266,105 @@ fn explicit_same_exterior_preserves_the_complete_physical_output_bits() {
 }
 
 #[test]
+fn regional_cylinders_and_frusta_emit_their_loaded_flow_into_the_same_room() {
+    let exterior = gas(95_000.0);
+    let spec = GasSpec::dry_air_ussa1976();
+    let regions = [
+        GasState::try_new(&spec, 310.0, exterior.pressure).unwrap(),
+        GasState::try_new(&spec, 275.0, exterior.pressure).unwrap(),
+    ];
+    for (mass, radius) in [(0.0, 0.004), (1e-4, 0.005)] {
+        let mut input = input(mass);
+        input.duct.as_mut().unwrap().segments = vec![
+            CylinderSegment::cylinder(0.004, 0.12),
+            CylinderSegment::taper(0.004, radius, 0.18),
+        ];
+        let mut uniform = options(regions[0], 16);
+        uniform.bore = BoreRealization::lumped_ladder_with_tolerance(6, 500.0);
+        let binding = uniform.baffled_duct.as_mut().unwrap();
+        binding.exterior_gas = Some(exterior);
+        binding.receiver = receiver(exterior, 16, radius);
+        let regional = RealizeOptions {
+            gas: None,
+            baffled_duct: Some(BaffledDuctObserver {
+                segment_gases: Some(&regions),
+                ..uniform.baffled_duct.unwrap()
+            }),
+            ..uniform
+        };
+        let local = realize_assembly_with_options(&input, &regional).unwrap();
+        let uniform = realize_assembly_with_options(&input, &uniform).unwrap();
+        let observed = local.duct_observer.as_ref().unwrap();
+        assert_eq!(observed.segment_gases, regions.to_vec());
+        assert_eq!(observed.exterior_gas, exterior);
+        assert_eq!(observed.axial_delay_samples, 0);
+        assert_eq!(local.gas, exterior);
+        assert!(
+            local.pressure_pa[..15]
+                .iter()
+                .all(|pressure| *pressure == 0.0)
+        );
+        let amplitude = local
+            .pressure_pa
+            .iter()
+            .map(|pressure| pressure.abs())
+            .fold(0.0_f64, f64::max);
+        assert!(amplitude.is_finite() && amplitude > 0.0);
+        let difference = local
+            .pressure_pa
+            .iter()
+            .zip(&uniform.pressure_pa)
+            .map(|(local, uniform)| (local - uniform).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(difference > 1e-8 * amplitude);
+        match local.bore_receipt.unwrap() {
+            BoreRealizationReceipt::LumpedLadder {
+                cells,
+                pitch_error_cents,
+                ..
+            } => {
+                assert_eq!(cells, 6);
+                assert!(pitch_error_cents.is_finite() && pitch_error_cents.abs() <= 500.0);
+            }
+            other => panic!("unexpected regional receipt: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn identical_regional_profile_preserves_uniform_output_and_receipt_bits() {
+    let gas = gas(101_325.0);
+    let mut input = input(0.0);
+    input.duct.as_mut().unwrap().segments = vec![CylinderSegment::cylinder(0.004, 0.15); 2];
+    let regions = [gas; 2];
+    let uniform = options(gas, 16);
+    let regional = RealizeOptions {
+        gas: None,
+        baffled_duct: Some(BaffledDuctObserver {
+            segment_gases: Some(&regions),
+            ..uniform.baffled_duct.unwrap()
+        }),
+        ..uniform
+    };
+    let uniform = realize_assembly_with_options(&input, &uniform).unwrap();
+    let regional = realize_assembly_with_options(&input, &regional).unwrap();
+    assert_eq!(
+        uniform
+            .pressure_pa
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        regional
+            .pressure_pa
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(uniform.bore_receipt, regional.bore_receipt);
+    assert_eq!(uniform.duct_observer, regional.duct_observer);
+}
+
+#[test]
 fn unsupported_boundary_and_region_physics_are_not_silently_omitted() {
     let gas = gas(101_325.0);
     let mut input = input(0.0);
@@ -281,7 +380,7 @@ fn unsupported_boundary_and_region_physics_are_not_silently_omitted() {
     duct.segments = vec![CylinderSegment::cylinder(0.004, 0.15); 2];
     let regions = [
         gas,
-        GasState::try_new(&GasSpec::dry_air_ussa1976(), 310.0, gas.pressure).unwrap(),
+        GasState::try_new(&GasSpec::dry_air_ussa1976(), 310.0, 1.01 * gas.pressure).unwrap(),
     ];
     let regional_options = RealizeOptions {
         gas: None,
@@ -292,4 +391,20 @@ fn unsupported_boundary_and_region_physics_are_not_silently_omitted() {
         ..options
     };
     assert!(realize_assembly_with_options(&input, &regional_options).is_err());
+    let matched = [
+        gas,
+        GasState::try_new(&GasSpec::dry_air_ussa1976(), 310.0, gas.pressure).unwrap(),
+    ];
+    let underresolved = RealizeOptions {
+        bore: BoreRealization::lumped_ladder_with_tolerance(3, 500.0),
+        baffled_duct: Some(BaffledDuctObserver {
+            segment_gases: Some(&matched),
+            ..regional_options.baffled_duct.unwrap()
+        }),
+        ..regional_options
+    };
+    match realize_assembly_with_options(&input, &underresolved).unwrap_err() {
+        AcousticRealizeError::InvalidDescription { what } => assert!(what.contains("two cells")),
+        other => panic!("unexpected regional cell-budget refusal: {other:?}"),
+    }
 }

@@ -48,7 +48,7 @@ struct ReedOutletObserver<'a> {
 // No second assembly or legacy spherical image can enter between those steps.
 pub(super) struct PreparedReedOutlet<'a> {
     pub(super) line: fs_phs::PortHamiltonian,
-    pub(super) exterior_gas: GasState,
+    pub(super) reference: crate::driving_point::regional::RegionalDuct,
     observer: ReedOutletObserver<'a>,
 }
 
@@ -57,8 +57,7 @@ impl<'a> PreparedReedOutlet<'a> {
         sections: &[AcousticSection],
         outlet: ChainOutlet,
         taps: &[AcousticTap],
-        gas: &GasState,
-        exterior_gas: &GasState,
+        reference: crate::driving_point::regional::RegionalDuct,
         wall: Option<LocallyReactingWall>,
         receiver: &'a mut crate::pcm_wav::baffled::BaffledPressure,
     ) -> Result<Self, AcousticRealizeError> {
@@ -67,22 +66,29 @@ impl<'a> PreparedReedOutlet<'a> {
                 what: "physical ODE outlet observation requires separate receivers for side openings",
             });
         }
-        let (line, flow) = fs_phs::acoustic_outlet::acoustic_chain_with_outlet_flow_in_exterior(
+        let media: Vec<_> = reference
+            .segment_gases()
+            .iter()
+            .map(|gas| fs_phs::acoustic_outlet::AcousticSectionMedium {
+                density: gas.density,
+                sound_speed: gas.sound_speed,
+                viscothermal: Some(viscothermal_pin(gas)),
+            })
+            .collect();
+        let exterior = reference.exterior_gas();
+        let (line, flow) = fs_phs::acoustic_outlet::acoustic_chain_with_regional_outlet_flow(
             sections,
-            gas.density,
-            gas.sound_speed,
-            exterior_gas.density,
-            exterior_gas.sound_speed,
+            &media,
+            exterior.density,
+            exterior.sound_speed,
             outlet,
             1,
-            taps,
-            Some(&viscothermal_pin(gas)),
             wall_pin(wall).as_ref(),
         )
         .map_err(render_phs_error)?;
         Ok(Self {
             line,
-            exterior_gas: *exterior_gas,
+            reference,
             observer: ReedOutletObserver { flow, receiver },
         })
     }
