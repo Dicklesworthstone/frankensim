@@ -177,8 +177,13 @@ knots. The physical tensor is the sum of the three integrated principal values
 times their axis dyads; all four nodal derivative tensors use the same rotation.
 The spatial tangent includes both `K grad(N_j) dT_j/dh_j` and
 `(dK/dh_j) grad(T)`. The second term remains active during a latent plateau;
-it is not multiplied by `dT/dh` a second time. Residual-only evaluation stores
-only tensor values, and Newton reuses its combined constitutive moment pass.
+it is not multiplied by `dT/dh` a second time. A uniform isotropic source or an
+entirely isotropic material table retains compact scalar buffers: one value
+per element for residual evaluation, plus four nodal derivatives for Newton.
+Mixed or orthotropic fields retain complete tensor values and derivatives.
+Newton reuses its combined constitutive moment pass in both cases. Physical
+flux recovery streams each element's tensor without retaining a whole-mesh
+conductivity buffer.
 Exact source endpoints and interpolation from the nearer endpoint
 preserve positive conductivity across large source contrasts.
 
@@ -190,8 +195,8 @@ stepping and heat-source/history adjoints remain authoritative. Physical
 element-average heat flux is exposed through the adapter and uses the same
 original conductivity moments; it is not a face-conservative recovery.
 
-The source requires strictly positive conductivity throughout its prepared
-support. Unsupported initial and direct endpoint enthalpies, replacement
+The source requires strictly positive conductivity throughout its admitted
+common support. Unsupported initial and direct endpoint enthalpies, replacement
 numerical bases, element material overrides and additional phase multipliers
 are refused. A finite Newton trial leaving the source enthalpy interval is a
 dedicated recoverable domain refusal in the existing line search; nonfinite

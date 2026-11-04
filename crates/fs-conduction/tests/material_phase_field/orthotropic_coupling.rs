@@ -443,3 +443,145 @@ fn phase_history_admits_all_directional_bounds_with_a_nodal_reference_inventory(
         }
     });
 }
+
+#[test]
+fn assigned_scalar_and_mixed_dispatch_preserve_endpoints_and_adjoints() {
+    #[derive(Clone, Copy)]
+    enum Interpretation {
+        Isotropic,
+        EqualPrincipal,
+        Directional,
+    }
+    use Interpretation::{Directional, EqualPrincipal, Isotropic};
+
+    let positions = [-1.0, 1.0]
+        .into_iter()
+        .flat_map(|z| {
+            [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, z],
+            ]
+        })
+        .collect();
+    let mesh = ConductionMesh::new(
+        TetComplex::from_tets(8, vec![[0, 1, 2, 3], [4, 5, 6, 7]]),
+        positions,
+    )
+    .unwrap();
+    let cards = [orthotropic_card(K_A), orthotropic_card(K_B)];
+    let curves = cards.each_ref().map(caloric);
+    let sources: [[PreparedPhaseConductivity<'_>; 3]; 2] =
+        std::array::from_fn(|material| {
+            KEYS.map(|key| {
+                prepare_direction(
+                    &cards[material],
+                    &curves[material],
+                    key,
+                    [-100.0, 500.0],
+                    150_000.0,
+                )
+            })
+        });
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .adiabatic_remainder()
+        .finish()
+        .unwrap();
+    let contact = contact(&mesh, &boundary);
+    let zero = ScalarField::Uniform(0.0);
+    let old = [-20.0, 80.0, 20.0, 140.0, -10.0, 30.0, 90.0, 180.0];
+    let direction = [0.4, -0.7, 0.2, 0.6, -0.5, 0.3, 0.8, -0.1];
+    let weights = [0.7, -0.4, 0.2, 1.1, -0.3, 0.6, -0.2, 0.8];
+
+    with_cx(|cx| {
+        let evaluate = |interpretations: [Interpretation; 2]| {
+            let materials: [MaterialPhaseTransport<'_>; 2] =
+                std::array::from_fn(|material| {
+                    let density = 2.0 + material as f64;
+                    let axes = [AXES_A, AXES_B][material];
+                    match interpretations[material] {
+                        Isotropic => MaterialPhaseTransport::try_new_isotropic(
+                            cx,
+                            &sources[material][0],
+                            density,
+                        ),
+                        EqualPrincipal => MaterialPhaseTransport::try_new_orthotropic(
+                            cx,
+                            [&sources[material][0]; 3],
+                            axes,
+                            density,
+                        ),
+                        Directional => MaterialPhaseTransport::try_new_orthotropic(
+                            cx,
+                            sources[material].each_ref(),
+                            axes,
+                            density,
+                        ),
+                    }
+                    .unwrap()
+                });
+            let engine = HeterogeneousEnthalpyBackwardEuler::from_phase_materials(
+                cx,
+                &mesh,
+                &materials,
+                &[0, 1],
+                EnthalpyBudget {
+                    max_vertices: 8,
+                    max_elements: 2,
+                },
+            )
+            .unwrap();
+            let problem = engine.phase_transport_problem(&boundary, &zero).unwrap();
+            let mut policy = config();
+            policy.newton.linear_restart = 8;
+            let response = engine
+                .linearize_step(cx, problem, Some(&contact), &old, DT, policy)
+                .unwrap();
+            let thermal = response.transport();
+            let action = thermal.apply_jacobian(cx, &direction).unwrap();
+            let seed = thermal.temperature_pullback(cx, &weights).unwrap();
+            let dual = thermal
+                .pullback(
+                    cx,
+                    &seed,
+                    LinearConfig {
+                        tolerance: 1e-12,
+                        max_iterations: 64,
+                        restart: 8,
+                    },
+                )
+                .unwrap();
+            let scales = thermal
+                .conductivity_scale_pullback(cx, &dual.adjoint, 2)
+                .unwrap();
+            [
+                response.primal().specific_enthalpy_j_kg.clone(),
+                action,
+                dual.previous_specific_enthalpy,
+                scales,
+            ]
+        };
+
+        // Equal principal sources must recover the declared scalar physics.
+        let scalar = evaluate([Isotropic, Isotropic]);
+        let equal = evaluate([EqualPrincipal, EqualPrincipal]);
+        let mixed = evaluate([Isotropic, Directional]);
+        let directional = evaluate([EqualPrincipal, Directional]);
+        for (actual, expected) in [(&scalar, &equal), (&mixed, &directional)] {
+            for (actual, expected) in actual.iter().zip(expected.iter()) {
+                assert_eq!(actual.len(), expected.len());
+                for (&actual, &expected) in actual.iter().zip(expected.iter()) {
+                    near(actual, expected, 3e-9);
+                }
+            }
+        }
+        assert!(
+            scalar[0]
+                .iter()
+                .zip(&mixed[0])
+                .any(|(&scalar, &mixed)| (scalar - mixed).abs() > 1e-3),
+            "the directional second material must change the physical endpoint"
+        );
+    });
+}

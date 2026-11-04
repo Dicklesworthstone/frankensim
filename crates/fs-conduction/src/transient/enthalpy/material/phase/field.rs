@@ -26,6 +26,17 @@ pub(in crate::transient::enthalpy) enum PhaseFieldTransport<'c> {
 }
 
 impl<'c> PhaseFieldTransport<'c> {
+    /// The scalar fast path requires explicit isotropy throughout the material
+    /// table, including unused entries and the first entry owning the basis.
+    pub(in crate::transient::enthalpy) fn is_isotropic(&self) -> bool {
+        match self {
+            Self::Uniform(material) => material.principal_axes.is_none(),
+            Self::Assigned { materials, .. } => materials
+                .iter()
+                .all(|material| material.principal_axes.is_none()),
+        }
+    }
+
     pub(in crate::transient::enthalpy) fn material(
         &self,
         id: usize,
@@ -113,6 +124,43 @@ impl<'c> PhaseFieldTransport<'c> {
         Ok(())
     }
 
+    /// Preserve compact scalar buffers for explicitly isotropic materials.
+    /// Integrate one original source path per element without staging full
+    /// tensors or allocating an unused derivative array.
+    pub(in crate::transient::enthalpy) fn assemble_isotropic(
+        &self,
+        cx: &Cx<'_>,
+        mesh: &ConductionMesh,
+        h: &[f64],
+        with_derivatives: bool,
+    ) -> Result<(Vec<f64>, Option<Vec<[f64; 4]>>), EnthalpyError> {
+        self.admit_field(cx, mesh, h)?;
+        if !self.is_isotropic() {
+            return Err(EnthalpyError::InvalidInput(
+                "scalar phase assembly requires every material table entry to be explicitly isotropic",
+            ));
+        }
+        let mut values = Vec::with_capacity(mesh.element_count());
+        let mut derivatives = with_derivatives.then(|| Vec::with_capacity(mesh.element_count()));
+        for (element, vertices) in mesh.complex().tets.iter().enumerate() {
+            if element % ASSEMBLY_TILE == 0 {
+                poll(cx, element)?;
+            }
+            let (average, tangent) = integrate_scalar_path(
+                Some(cx),
+                &self.for_element(element).knots[0],
+                vertices.map(|v| h[v as usize]),
+                with_derivatives,
+            )?;
+            values.push(average);
+            if let Some(derivatives) = &mut derivatives {
+                derivatives.push(tangent);
+            }
+        }
+        poll(cx, mesh.element_count())?;
+        Ok((values, derivatives))
+    }
+
     /// Integrate original K(h_h) and its consistent enthalpy derivatives.
     /// No material table is copied into per-element objects. Residual-only
     /// consumers use [`Self::assemble_tensors`] to avoid derivative storage.
@@ -136,14 +184,12 @@ impl<'c> PhaseFieldTransport<'c> {
         self.map_elements(cx, mesh, h, false, |moments| moments.tensor)
     }
 
-    fn map_elements<T>(
+    fn admit_field(
         &self,
         cx: &Cx<'_>,
         mesh: &ConductionMesh,
         h: &[f64],
-        with_derivatives: bool,
-        mut output: impl FnMut(ElementConductivity) -> T,
-    ) -> Result<Vec<T>, EnthalpyError> {
+    ) -> Result<(), EnthalpyError> {
         poll(cx, 0)?;
         if h.len() != mesh.vertex_count() {
             return Err(EnthalpyError::InvalidInput(
@@ -161,7 +207,18 @@ impl<'c> PhaseFieldTransport<'c> {
                 ));
             }
         }
-        self.admit_enthalpies(cx, h)?;
+        self.admit_enthalpies(cx, h)
+    }
+
+    fn map_elements<T>(
+        &self,
+        cx: &Cx<'_>,
+        mesh: &ConductionMesh,
+        h: &[f64],
+        with_derivatives: bool,
+        mut output: impl FnMut(ElementConductivity) -> T,
+    ) -> Result<Vec<T>, EnthalpyError> {
+        self.admit_field(cx, mesh, h)?;
         let mut values = Vec::with_capacity(mesh.element_count());
         for (element, vertices) in mesh.complex().tets.iter().enumerate() {
             if element % ASSEMBLY_TILE == 0 {
@@ -183,7 +240,7 @@ impl<'c> PhaseFieldTransport<'c> {
         mesh: &ConductionMesh,
         h: &[f64],
     ) -> Result<Vec<[f64; 3]>, EnthalpyError> {
-        let conductivity = self.assemble_tensors(cx, mesh, h)?;
+        self.admit_field(cx, mesh, h)?;
         let mut temperature = Vec::with_capacity(h.len());
         for (vertex, &value) in h.iter().enumerate() {
             if vertex % ASSEMBLY_TILE == 0 {
@@ -199,10 +256,14 @@ impl<'c> PhaseFieldTransport<'c> {
             );
         }
         let mut flux = Vec::with_capacity(mesh.element_count());
-        for (element, (vertices, k)) in mesh.complex().tets.iter().zip(&conductivity).enumerate() {
+        for (element, vertices) in mesh.complex().tets.iter().enumerate() {
             if element % ASSEMBLY_TILE == 0 {
                 poll(cx, element)?;
             }
+            let k = self
+                .for_element(element)
+                .element_moments(cx, vertices.map(|v| h[v as usize]), false)?
+                .tensor;
             let mut gradient = [0.0; 3];
             for (&vertex, shape_gradient) in vertices.iter().zip(&mesh.geometry().grads[element]) {
                 for (value, &shape) in gradient.iter_mut().zip(shape_gradient) {

@@ -1028,6 +1028,10 @@ impl StepContext<'_, '_, '_, '_> {
 
     fn phase_scales(&self, h: &[f64]) -> Result<Option<EnthalpyConductivity>, EnthalpyError> {
         if let Some(source) = self.storage.sourced_phase.as_ref() {
+            if source.is_isotropic() {
+                return source.assemble_isotropic(self.cx, self.storage.mesh, h, false)
+                    .map(|(values, _)| Some(EnthalpyConductivity::Scales(values)));
+            }
             return source.assemble_tensors(self.cx, self.storage.mesh, h)
                 .map(|values| Some(EnthalpyConductivity::Tensors(values)));
         }
@@ -1190,8 +1194,14 @@ impl StepContext<'_, '_, '_, '_> {
         // The exact source moment pass returns values and derivatives together;
         // do not walk crossed source knots twice during a Newton linearization.
         let (phase_scales, phase_derivatives) = if let Some(source) = self.storage.sourced_phase.as_ref() {
-            let values = source.assemble(self.cx, self.storage.mesh, h, true)?;
-            (Some(EnthalpyConductivity::Moments(values)), None)
+            if source.is_isotropic() {
+                let (values, derivatives) =
+                    source.assemble_isotropic(self.cx, self.storage.mesh, h, true)?;
+                (Some(EnthalpyConductivity::Scales(values)), derivatives)
+            } else {
+                let values = source.assemble(self.cx, self.storage.mesh, h, true)?;
+                (Some(EnthalpyConductivity::Moments(values)), None)
+            }
         } else {
             (self.phase_scales(h)?, self.phase_scale_derivatives(h)?)
         };
