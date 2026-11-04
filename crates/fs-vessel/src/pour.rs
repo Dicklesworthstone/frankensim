@@ -6,14 +6,14 @@
 //! outer-lip cells after the pour) — computed under BOTH contact
 //! models so the bracketing band is a first-class output, per the
 //! plan's honest handling of contact-line fidelity. The render binds
-//! fs-render's Woodcock tracker to the simulation's OWN mass buffer:
+//! fs-render's exact slab absorption to the simulation's OWN mass buffer:
 //! the marketing shot and the physics are the same bytes.
 
 use fs_lbm::core2::frame::{FrameForcingError2, RigidFrame2};
 use fs_lbm::freesurface::{ContactModel, FreeSurface};
 use fs_lbm::rheology::{Rheology, update_tau};
 use fs_lbm::{Cell, Grid};
-use fs_render::volumes::{MajorantGrid, VolumeGrid, render_transmittance};
+use fs_render::volumes::{AbsorptionImageSettings, VolumeGrid, render_absorption_transmittance};
 
 /// The pour fixture: a tank with an interior weir (the lip) the fluid
 /// crosses as gravity tilts.
@@ -283,6 +283,23 @@ mod capillary_tests {
     use super::*;
 
     #[test]
+    fn pour_image_retains_thin_absorption_without_collision_noise() {
+        let outcome = PourOutcome {
+            mass_drift: 0.0,
+            fragments: 1,
+            poured_mass: 0.0,
+            dribble_cells: 0,
+            mass_field: vec![0.0, 1e-9, 0.5, 1.0],
+        };
+        let image = render_pour(&outcome, 2, 2, 2);
+        for (actual, mass) in image.iter().zip(&outcome.mass_field) {
+            assert!((actual - (-mass * 2.0).exp()).abs() < 2e-15);
+        }
+        assert!(image[1] < 1.0);
+        assert_eq!(image, render_pour(&outcome, 2, 2, 2));
+    }
+
+    #[test]
     fn shared_pour_preparation_preserves_momentum_then_delivers_native_impulse() {
         let rig = PourRig {
             g0: 0.0,
@@ -416,9 +433,14 @@ mod capillary_tests {
     }
 }
 
-/// The deliverable: render the pour's mass field with the Woodcock
-/// tracker, bound ZERO-COPY to the outcome's own buffer. Returns the
-/// image (res × res transmittance).
+/// Render exact slab transmittance, borrowing the outcome's mass field.
+///
+/// The fixture maps lattice mass to absorption per lattice length and uses
+/// `ny` as the displayed slab thickness. This is an absorption visualization,
+/// not a calibrated liquid optical material or refracting 3-D free surface.
+///
+/// # Panics
+/// Invalid dimensions, field values or an unrepresentable image allocation.
 #[must_use]
 pub fn render_pour(outcome: &PourOutcome, nx: usize, ny: usize, res: usize) -> Vec<f64> {
     let grid = VolumeGrid::new(
@@ -427,6 +449,15 @@ pub fn render_pour(outcome: &PourOutcome, nx: usize, ny: usize, res: usize) -> V
         [0.0, 0.0, 0.0],
         [1.0, 1.0, f64::from(u32::try_from(ny).expect("small"))],
     );
-    let majorant = MajorantGrid::build(&grid, 8);
-    render_transmittance(&grid, &majorant, res, 24, 0x7E55E1)
+    let pixels = res.checked_mul(res).expect("render resolution fits usize");
+    render_absorption_transmittance(
+        &grid,
+        AbsorptionImageSettings {
+            resolution: [res; 2],
+            max_pixels: pixels,
+            max_grid_cells: outcome.mass_field.len(),
+            max_cell_visits: u64::try_from(pixels).expect("render work fits u64"),
+        },
+    )
+    .expect("valid finite pour absorption image")
 }

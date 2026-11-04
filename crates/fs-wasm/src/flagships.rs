@@ -7,7 +7,7 @@
 //!   conformal surrogate) → EXPLORE (NSGA-II Pareto + knee polish).
 //! - [`run_vessel`] — the never-dribbling carafe: PARAMETERIZE → STABILITY
 //!   (Orr–Sommerfeld min-max) → VALIDATE (free-surface pour) → ROBUSTIFY (CVaR
-//!   over a fluid band) → RENDER (Woodcock volume transmittance).
+//!   over a fluid band) → RENDER (exact slab absorption transmittance).
 //! - [`run_frame`] — the e-stopped seismic frame: LAYOUT (fnx-free truss LP) →
 //!   SIZE (yield + Euler-buckling, catalog snap) → TIME HISTORY (nonlinear
 //!   fiber hinge) → FRAGILITY (anytime CS + MLMC) → CVaR mass minimization.
@@ -40,7 +40,7 @@ use fs_ornith::screen::{PANELS, lift_to_drag};
 use fs_qty::{Dims, QtyAny};
 use fs_race::{LossSpan, RaceSettings, race_field};
 use fs_rand::StreamKey;
-use fs_render::volumes::{MajorantGrid, VolumeGrid, render_transmittance};
+use fs_render::volumes::{AbsorptionImageSettings, VolumeGrid, render_absorption_transmittance};
 use fs_scenario::ensemble::{SpectrumModel, StochasticEnsemble};
 use fs_solid::fiber::{Section, rc_section};
 use fs_sos::lyapunov_certifies_stability;
@@ -941,15 +941,26 @@ fn pour_inline(nx: usize, ny: usize, capture: usize, contact: ContactModel) -> O
     })
 }
 
-/// Woodcock volume transmittance of a thin z-slab whose extinction field is the
-/// final pour mass map (`fs_render::volumes`).
+/// Exact absorption of a four-lattice-length slab of the final mass map.
+/// This display mapping does not infer a calibrated liquid optical material.
 fn render_thin_slab(mass: &[f64], nx: usize, ny: usize, res: usize) -> Vec<f64> {
-    if mass.len() != nx * ny {
-        return vec![f64::NAN; res * res];
+    let Some(pixels) = res.checked_mul(res) else {
+        return Vec::new();
+    };
+    if nx.checked_mul(ny) != Some(mass.len()) {
+        return vec![f64::NAN; pixels];
     }
     let grid = VolumeGrid::new([nx, ny, 1], mass, [0.0, 0.0, 0.0], [1.0, 1.0, 4.0]);
-    let majorant = MajorantGrid::build(&grid, 8);
-    render_transmittance(&grid, &majorant, res, 16, 0x7E55_E1D0)
+    render_absorption_transmittance(
+        &grid,
+        AbsorptionImageSettings {
+            resolution: [res; 2],
+            max_pixels: pixels,
+            max_grid_cells: mass.len(),
+            max_cell_visits: u64::try_from(pixels).unwrap_or(u64::MAX),
+        },
+    )
+    .unwrap_or_else(|_| vec![f64::NAN; pixels])
 }
 
 /* ======================================================================= */
@@ -1759,6 +1770,18 @@ mod wasm {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pour_slab_uses_exact_absorption_and_refuses_nonphysical_coefficients() {
+        let mass = [0.0, 1e-9, 0.5, 1.0];
+        let image = render_thin_slab(&mass, 2, 2, 2);
+        for (actual, coefficient) in image.iter().zip(mass) {
+            assert!((actual - (-coefficient * 4.0).exp()).abs() < 2e-15);
+        }
+        assert!(image[1] < 1.0);
+        assert!(render_thin_slab(&[-0.1], 1, 1, 1)[0].is_nan());
+        assert!(render_thin_slab(&[f64::NAN], 1, 1, 1)[0].is_nan());
+    }
 
     #[test]
     fn standalone_qty_dependency_round_trips_nonzero_mole_axis() {

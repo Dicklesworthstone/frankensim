@@ -1819,6 +1819,21 @@ differentiable lift). Pure Rust throughout.
   budgets before rendering. Its bit contract is
   `TRANSFER_RENDER_SEMANTICS_VERSION = 1`.
 
+  `render_absorption_transmittance` is the exact orthographic specialization
+  for nonnegative, piecewise-constant intensity absorption in inverse world
+  lengths. It sums the original column's optical depths with compensated
+  arithmetic, using each z cell's nominal thickness, then evaluates the shared
+  deterministic Beer--Lambert exponential once per pixel. There is no
+  collision noise or optical-depth-dependent work. Explicit pixel, field-scan
+  and pixel/cell-visit budgets admit the complete operation before allocation.
+  All cells are validated, including cells outside sampled image columns.
+  Pixel centres use exact integer cell ownership, independent of grid origin;
+  lateral subpixel averaging, scattering and refraction are not supplied.
+  Focused G0/G1/G3 tests cover heterogeneous layered columns, thin/vacuum/opaque
+  limits, length-unit rescaling, layer refinement, translation, cell-face
+  ownership and invalid-field/budget refusal. The original Monte Carlo APIs
+  retain their sampling semantics and remain available.
+
 - `volumes::transport` (features `volumes,tracer`) connects borrowed simulation
   density and temperature snapshots to physical scene transport. `AbsorbingGrid`
   requires kg/m³ density, metre geometry and an explicit source-domain mass

@@ -102,6 +102,11 @@ pub enum DvrError {
         /// Linear x-major field index.
         index: usize,
     },
+    /// Direct absorption requires nonnegative field coefficients.
+    NegativeGridAbsorption {
+        /// Linear x-major field index.
+        index: usize,
+    },
     /// Ray coordinates or parameter bounds are invalid.
     InvalidRay,
     /// The Woodcock majorant is negative or non-finite.
@@ -135,6 +140,15 @@ pub enum DvrError {
     },
     /// Pixel-count to primary-sample-count arithmetic overflowed.
     SampleCountOverflow,
+    /// Pixel-count times depth-cell-count overflowed the work counter.
+    CellVisitCountOverflow,
+    /// Exact absorption integration exceeds its explicit cell-visit budget.
+    CellVisitBudgetExceeded {
+        /// Requested pixel/cell intersections.
+        requested: u64,
+        /// Admitted pixel/cell intersections.
+        limit: u64,
+    },
     /// A pixel identity cannot be represented by the keyed stream.
     PixelIdentityOverflow,
     /// The image buffer could not be reserved in full.
@@ -260,6 +274,20 @@ pub struct DvrSettings {
     pub max_samples: u64,
     /// Hard null-collision steps per primary sample.
     pub max_tracking_steps_per_sample: u32,
+}
+
+/// Hard admission limits for exact orthographic absorption integration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AbsorptionImageSettings {
+    /// `[width, height]` in pixels, sampled at pixel centres.
+    pub resolution: [usize; 2],
+    /// Maximum allocated output pixels.
+    pub max_pixels: usize,
+    /// Maximum borrowed grid cells validated before integration.
+    pub max_grid_cells: usize,
+    /// Maximum pixel/cell intersections, `width * height * grid.dims[2]`.
+    /// The full work is admitted even when opaque columns can exit early.
+    pub max_cell_visits: u64,
 }
 
 /// A borrowed piecewise-constant scalar field on a regular grid — ZERO-COPY
@@ -477,6 +505,282 @@ impl Ray {
 #[must_use]
 pub fn beer_lambert(sigma: f64, length: f64) -> f64 {
     fs_math::det::exp(-sigma * length)
+}
+
+/// Exact Beer–Lambert transmittance of a piecewise-constant absorption grid.
+///
+/// Orthographic rays travel along `-z` through the full slab. The borrowed
+/// field supplies nonnegative intensity-absorption coefficients in inverse
+/// world-length units; `grid.cell[2]` supplies each layer's physical thickness.
+/// No density-to-absorption calibration, scattering or surface refraction is
+/// inferred. Unlike a collision estimate, every pixel retains the attenuation
+/// of optically thin cells without a sample-count or random-seed dependence.
+///
+/// This axis-aligned specialization needs no general ray traversal: it sums
+/// the intersected layers with compensated arithmetic and evaluates one
+/// deterministic exponential per pixel. Work is bounded by the admitted cell
+/// visits and independent of optical depth. Pixel centres are located in
+/// integer grid coordinates, so translating the grid cannot change which
+/// column a pixel samples. A centre exactly on a cell face owns the upper cell.
+/// There is no pixel-area filtering; unresolved lateral structure still needs
+/// more image resolution. Invalid input returns no partial image.
+pub fn render_absorption_transmittance(
+    grid: &VolumeGrid<'_>,
+    settings: AbsorptionImageSettings,
+) -> Result<Vec<f64>, DvrError> {
+    let [width, height] = settings.resolution;
+    let pixels = width
+        .checked_mul(height)
+        .filter(|_| width > 0 && height > 0)
+        .ok_or(DvrError::InvalidImageSize)?;
+    if pixels > settings.max_pixels {
+        return Err(DvrError::PixelBudgetExceeded {
+            requested: pixels,
+            limit: settings.max_pixels,
+        });
+    }
+    if grid.data.len() > settings.max_grid_cells {
+        return Err(DvrError::GridCellBudgetExceeded {
+            requested: grid.data.len(),
+            limit: settings.max_grid_cells,
+        });
+    }
+    let visits = u64::try_from(pixels)
+        .ok()
+        .zip(u64::try_from(grid.dims[2]).ok())
+        .and_then(|(pixels, depth)| pixels.checked_mul(depth))
+        .ok_or(DvrError::CellVisitCountOverflow)?;
+    if visits > settings.max_cell_visits {
+        return Err(DvrError::CellVisitBudgetExceeded {
+            requested: visits,
+            limit: settings.max_cell_visits,
+        });
+    }
+    validate_transfer_grid(grid)?;
+    if let Some(index) = grid.data.iter().position(|value| *value < 0.0) {
+        return Err(DvrError::NegativeGridAbsorption { index });
+    }
+    let mut image = Vec::new();
+    image
+        .try_reserve_exact(pixels)
+        .map_err(|_| DvrError::ImageAllocationRefused { pixels })?;
+    let [nx, ny, nz] = grid.dims;
+    let plane = nx * ny; // the full product was validated above
+    for py in 0..height {
+        let iy = pixel_centre_cell(py, height, ny);
+        for px in 0..width {
+            let ix = pixel_centre_cell(px, width, nx);
+            let column = ix + nx * iy;
+            let (mut depth, mut correction) = (0.0, 0.0);
+            for iz in (0..nz).rev() {
+                let increment = grid.data[column + plane * iz] * grid.cell[2];
+                let corrected = increment - correction;
+                let next = depth + corrected;
+                if !next.is_finite() {
+                    // A sum of nonnegative optical depths can only overflow
+                    // toward complete extinction, never finite gain or NaN.
+                    depth = f64::INFINITY;
+                    break;
+                }
+                correction = (next - depth) - corrected;
+                depth = next;
+            }
+            image.push(beer_lambert(depth, 1.0));
+        }
+    }
+    Ok(image)
+}
+
+fn pixel_centre_cell(pixel: usize, pixels: usize, cells: usize) -> usize {
+    // floor((pixel + 1/2) * cells / pixels), without floating-point face
+    // ambiguity or overflowing a doubled usize/u128 product.
+    let numerator = (pixel as u128) * (cells as u128);
+    let denominator = pixels as u128;
+    (numerator / denominator + (2 * (numerator % denominator) + cells as u128) / (2 * denominator))
+        as usize
+}
+
+#[cfg(test)]
+mod exact_absorption_tests {
+    use super::*;
+
+    fn settings(resolution: [usize; 2], cells: usize, depth: usize) -> AbsorptionImageSettings {
+        let pixels = resolution[0] * resolution[1];
+        AbsorptionImageSettings {
+            resolution,
+            max_pixels: pixels,
+            max_grid_cells: cells,
+            max_cell_visits: (pixels * depth) as u64,
+        }
+    }
+
+    fn close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() <= 8e-15 * expected.abs().max(f64::MIN_POSITIVE),
+            "actual={actual:.17e}, expected={expected:.17e}"
+        );
+    }
+
+    /// G1: independent analytic optical depths for distinct columns/layers.
+    /// Unequal dimensions, anisotropic cells and a translated origin must not
+    /// change the SI absorption length or the x-major field interpretation.
+    #[test]
+    fn layered_absorption_uses_each_original_column_and_depth_length() {
+        let values = [
+            0.0, 0.2, 0.4, 0.6, 0.8, 1.0, // lower z layer
+            0.3, 0.5, 0.7, 0.9, 1.1, 1.3, // upper z layer
+        ];
+        let grid = VolumeGrid::new([3, 2, 2], &values, [-7.0, 2.0, 9.0], [0.25, 3.0, 0.4]);
+        let image = render_absorption_transmittance(&grid, settings([6, 4], 12, 2)).unwrap();
+        for py in 0..4 {
+            for px in 0..6 {
+                let column = px / 2 + 3 * (py / 2);
+                let expected = (-(values[column] + values[column + 6]) * 0.4).exp();
+                close(image[px + 6 * py], expected);
+            }
+        }
+    }
+
+    /// G0/G1: no random collisions are needed to see weak absorption, and
+    /// finite positive coefficients whose optical depth overflows are opaque.
+    #[test]
+    fn vacuum_thin_and_opaque_absorption_have_their_analytic_limits() {
+        let grid = VolumeGrid::new(
+            [4, 1, 1],
+            &[0.0, 1e-9, 1.0, f64::MAX],
+            [0.0; 3],
+            [1.0, 1.0, 2.0],
+        );
+        let image = render_absorption_transmittance(&grid, settings([4, 1], 4, 1)).unwrap();
+        assert_eq!(image[0], 1.0);
+        assert!(
+            image[1] < 1.0,
+            "thin absorption must not disappear between collisions"
+        );
+        close(image[1], (-2e-9_f64).exp());
+        close(image[2], (-2.0_f64).exp());
+        assert_eq!(image[3], 0.0);
+    }
+
+    /// G3: changing world-length units, splitting identical layers or moving
+    /// the entire grid does not alter the represented absorption.
+    #[test]
+    fn absorption_preserves_units_refinement_and_translation() {
+        let coarse = VolumeGrid::new([2, 1, 1], &[0.25, 1.5], [0.0; 3], [0.5, 2.0, 4.0]);
+        let fine = VolumeGrid::new(
+            [2, 1, 4],
+            &[0.25, 1.5, 0.25, 1.5, 0.25, 1.5, 0.25, 1.5],
+            [0.0; 3],
+            [0.5, 2.0, 1.0],
+        );
+        let millimetres = VolumeGrid::new(
+            [2, 1, 1],
+            &[0.25e-3, 1.5e-3],
+            [0.0; 3],
+            [500.0, 2000.0, 4000.0],
+        );
+        let translated =
+            VolumeGrid::new(coarse.dims, coarse.data, [1e12, -1e12, 1e12], coarse.cell);
+        let reference = render_absorption_transmittance(&coarse, settings([5, 3], 2, 1)).unwrap();
+        for grid in [&fine, &millimetres, &translated] {
+            let image = render_absorption_transmittance(
+                grid,
+                settings([5, 3], grid.data.len(), grid.dims[2]),
+            )
+            .unwrap();
+            assert_eq!(image, reference);
+        }
+    }
+
+    /// G0: half-open cell ownership is exact even for a pixel on an internal
+    /// face. The last image pixel never addresses the grid's outside endpoint.
+    #[test]
+    fn pixel_centres_have_exact_face_ownership_and_last_pixel_support() {
+        assert_eq!(pixel_centre_cell(0, 1, 2), 1);
+        assert_eq!(pixel_centre_cell(0, 2, 3), 0);
+        assert_eq!(pixel_centre_cell(1, 2, 3), 2);
+        assert_eq!(
+            pixel_centre_cell(usize::MAX - 1, usize::MAX, usize::MAX),
+            usize::MAX - 1
+        );
+        let grid = VolumeGrid::new([2, 1, 1], &[0.0, 2.0], [0.0; 3], [0.1, 1.0, 1.0]);
+        let image = render_absorption_transmittance(&grid, settings([3, 1], 2, 1)).unwrap();
+        assert_eq!(image[0], 1.0);
+        close(image[1], (-2.0_f64).exp());
+        assert_eq!(image[1], image[2]);
+    }
+
+    /// G0: complete-grid validation and work admission happen even when a
+    /// defective cell would be skipped by the requested image resolution.
+    #[test]
+    fn exact_absorption_refuses_invalid_fields_and_exhausted_budgets() {
+        let grid = VolumeGrid::new([2, 1, 2], &[0.0, 1.0, 0.5, 0.2], [0.0; 3], [1.0; 3]);
+        let admitted = settings([2, 1], 4, 2);
+        assert_eq!(
+            render_absorption_transmittance(
+                &grid,
+                AbsorptionImageSettings {
+                    max_cell_visits: 3,
+                    ..admitted
+                },
+            ),
+            Err(DvrError::CellVisitBudgetExceeded {
+                requested: 4,
+                limit: 3
+            }),
+        );
+        assert_eq!(
+            render_absorption_transmittance(
+                &grid,
+                AbsorptionImageSettings {
+                    max_grid_cells: 3,
+                    ..admitted
+                },
+            ),
+            Err(DvrError::GridCellBudgetExceeded {
+                requested: 4,
+                limit: 3
+            }),
+        );
+        assert_eq!(
+            render_absorption_transmittance(
+                &grid,
+                AbsorptionImageSettings {
+                    max_pixels: 1,
+                    ..admitted
+                },
+            ),
+            Err(DvrError::PixelBudgetExceeded {
+                requested: 2,
+                limit: 1
+            }),
+        );
+        assert_eq!(
+            render_absorption_transmittance(&grid, settings([0, 1], 4, 2)),
+            Err(DvrError::InvalidImageSize),
+        );
+        for value in [-0.1, f64::NAN, f64::INFINITY] {
+            let data = [value, 0.0];
+            let invalid = VolumeGrid::new([2, 1, 1], &data, [0.0; 3], [1.0; 3]);
+            let result = render_absorption_transmittance(&invalid, settings([1, 1], 2, 1));
+            assert_eq!(
+                result,
+                Err(if value < 0.0 {
+                    DvrError::NegativeGridAbsorption { index: 0 }
+                } else {
+                    DvrError::NonFiniteGridValue { index: 0 }
+                }),
+            );
+        }
+        let invalid = VolumeGrid {
+            cell: [1.0, 1.0, 0.0],
+            ..grid
+        };
+        assert_eq!(
+            render_absorption_transmittance(&invalid, admitted),
+            Err(DvrError::InvalidGrid),
+        );
+    }
 }
 
 /// One Woodcock (delta-tracking) transmittance sample along

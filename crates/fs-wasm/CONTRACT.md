@@ -195,6 +195,10 @@ capillarity. A refused force preparation returns an empty campaign payload.
 Frames and the final render follow that same native liquid trajectory; fragment
 counts refer to connected 2-D liquid components. No 3-D breakup, finite-inertia
 vessel dynamics or browser-native parity certificate is implied.
+The final mass-map image uses the original exact Beer--Lambert slab integrator,
+with bounded work and no 16-sample collision noise. The browser retains its
+declared four-lattice-length display slab; this is absorption visualization,
+not a calibrated liquid optical material or a refracting 3-D free surface.
 
 No structured error type in v0. Browser-facing functions use bounded
 fallback outputs for invalid or failed kernel calls. Native helper

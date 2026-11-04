@@ -56,7 +56,7 @@ unavailable in this session; numerical equation checks are distinct evidence.
 Layer **L6 (HELM)**. Composes battle-tested lower crates end-to-end:
 fs-cheb (profile + Orr–Sommerfeld), fs-lbm (free-surface pour,
 rheology), fs-race/fs-exec (e-raced screening), fs-robust (canonical
-empirical CVaR), and fs-render `volumes` (Woodcock transmittance
+empirical CVaR), and fs-render `volumes` (exact slab transmittance
 deliverable). No new numerics live here; the crate's claim is the
 COMPOSITION with certificates at every joint.
 
@@ -101,8 +101,11 @@ COMPOSITION with certificates at every joint.
   gravity-only smoke model. It omits frame inertia and is not a physically
   rotating vessel. The existing cross-ISA smoke golden selects this legacy
   model explicitly; default and MID pours select the rigid-frame model.
-- `pour::render_pour(outcome, nx, ny, res)` — fs-render Woodcock
-  transmittance bound ZERO-COPY to `outcome.mass_field`.
+- `pour::render_pour(outcome, nx, ny, res)` — fs-render exact Beer--Lambert
+  slab transmittance bound ZERO-COPY to `outcome.mass_field`, with explicit
+  image/field/work admission. Lattice mass is displayed as absorption per
+  lattice length through an `ny`-thick slab. This is an absorption
+  visualization, not sourced liquid optics or refracting 3-D geometry.
 - `robust::robustify(beta) -> RobustReport` — nominal (band-center)
   vs CVaR_β lip optimization over the fluid band (rates ×
   viscosities), both evaluated on the OFF-NOMINAL corners.
@@ -180,8 +183,10 @@ invariants and converts their failure to a loud stop.
 
 Fully deterministic. The tilt schedule is closed-form, fs-lbm
 free-surface stepping is deterministic, the race jitter is a hashed
-counter (no RNG state), the render uses fixed Philox streams keyed by
-a constant seed. Bitwise replay is gated (vsl-006).
+counter (no RNG state), and the exact absorption render uses the original
+deterministic Beer--Lambert owner without random sampling. Bitwise replay is
+gated (vsl-006); image values intentionally change from the previous 24-sample
+collision estimates to their analytic values.
 
 ## Cancellation behavior
 
