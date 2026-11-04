@@ -2652,3 +2652,23 @@ pressure range. Small, zero and repeated algebraic roots exercise deflation's
 distinct conditioning cases. These tests establish numerical evaluation of the
 declared EOS, not the physical persistence of metastable liquid in a vacuum.
 
+### Pressure-consistent real-gas departures
+
+Operation version 4 preserves the original cubic root inventory and evaluates
+fugacity, internal energy, enthalpy, entropy and Cv from common immutable
+residual geometry. Deterministic log1p arithmetic forms the covolume offsets
+before rounding volume ratios to one. Near Z=1, the original cubic identity
+`Z-1 = B-A*(Z-B)/(Z²+2BZ-B²)` retains the pressure-work departure even when
+the published compressibility factor rounds to one. Dense roots retain their
+original positive Z inside the logarithm. The shared attraction integral and
+volume logarithms are evaluated once per root, so caloric queries introduce
+no additional transcendental evaluations or allocation.
+
+The same original PR parameters and source-temperature derivatives continue
+to determine all departures. Phase selection, stability and flash tolerances
+are unchanged. Focused regressions check the independent second-virial limits
+of pure and partial-mixture fugacity and all caloric departures down to
+1e-12 Pa, the Gibbs identity, and independently differentiated dilute-gas
+energy/entropy Cv identities. These numerical limits do not extend the
+physical validity of the source EOS or establish a continuum-flow regime.
+

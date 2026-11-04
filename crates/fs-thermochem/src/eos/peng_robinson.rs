@@ -26,7 +26,7 @@ pub mod saturation;
 /// Maximum number of components in one bounded mixture.
 pub const MAX_PENG_ROBINSON_COMPONENTS_V1: usize = 64;
 /// Fixed operation-tree version.
-pub const PENG_ROBINSON_EVALUATOR_VERSION_V1: u32 = 3;
+pub const PENG_ROBINSON_EVALUATOR_VERSION_V1: u32 = 4;
 
 const ROOT_TOL: f64 = 128.0 * f64::EPSILON;
 const COMPOSITION_TOL: f64 = 256.0 * f64::EPSILON;
@@ -430,12 +430,18 @@ impl MixedParameters {
     fn phase_root(&self, fractions: &[f64], t: f64, z: f64, volume: f64,
         density: f64, dimensionless_a: f64, dimensionless_b: f64)
         -> Result<PengRobinsonPhaseRootV1, PengRobinsonErrorV1> {
-        let log_phi = fugacity_logs(z, dimensionless_a, dimensionless_b,
+        if !volume.is_finite() || volume <= self.b_mix
+            || !density.is_finite() || density <= 0.0 {
+            return Err(PengRobinsonErrorV1::Unrepresentable { what: "phase-root observables" });
+        }
+        let residual_geometry = ResidualGeometry::new(
+            z, dimensionless_a, dimensionless_b, volume, self.b_mix,
+        )?;
+        let log_phi = fugacity_logs(residual_geometry, t,
             self.a_mix, self.b_mix, fractions, &self.aij, &self.bi)?;
         let residual_gibbs_over_rt = fractions.iter().zip(&log_phi)
             .map(|(x, value)| x * value).sum::<f64>();
-        if !residual_gibbs_over_rt.is_finite() || !volume.is_finite()
-            || volume <= self.b_mix || !density.is_finite() || density <= 0.0 {
+        if !residual_gibbs_over_rt.is_finite() {
             return Err(PengRobinsonErrorV1::Unrepresentable { what: "phase-root observables" });
         }
         Ok(PengRobinsonPhaseRootV1 {
@@ -449,6 +455,7 @@ impl MixedParameters {
             attraction_second_temperature_derivative: self.d2a_mix_dt2,
             covolume_m3_per_mol: self.b_mix,
             temperature_k: t,
+            residual_geometry,
         })
     }
 }
@@ -599,35 +606,79 @@ fn signed_cuberoot(value: f64) -> f64 {
     }
 }
 
+/// Shared original-EOS geometry for fugacity and all caloric departures.
+/// Retain offsets before adding them to one; a rounded Z=1 is not zero
+/// residual energy or fugacity. Immutable roots reuse the logarithms and integral.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ResidualGeometry {
+    z_minus_one: f64,
+    log_z: f64,
+    log_free_volume: f64,
+    attraction_integral: f64,
+}
+
+impl ResidualGeometry {
+    fn new(z: f64, a: f64, b: f64, volume: f64, covolume: f64)
+        -> Result<Self, PengRobinsonErrorV1> {
+        let mut z_minus_one = z - 1.0;
+        if z_minus_one.abs() < 0.5 {
+            // The original cubic gives Z-1 = B-A*(Z-B)/(Z²+2BZ-B²).
+            // Unlike subtraction from rounded Z, this retains its dilute limit.
+            let denominator = z * z + 2.0 * b * z - b * b;
+            z_minus_one = b - a * ((z - b) / denominator);
+        }
+        let log_z = if z_minus_one.abs() < 0.5 {
+            log_one_plus(z_minus_one)
+        } else {
+            // Dense low-pressure roots can have Z so small that Z-1 rounds
+            // to -1. Their logarithm must retain the original positive root.
+            det::ln(z)
+        };
+        let eta = covolume / volume;
+        let sqrt_2 = det::sqrt(2.0);
+        let log_free_volume = log_one_plus(-eta);
+        let attraction_integral = log_one_plus(
+            2.0 * sqrt_2 * eta / (1.0 + (1.0 - sqrt_2) * eta),
+        ) / (2.0 * sqrt_2 * covolume);
+        if [z_minus_one, log_z, log_free_volume, attraction_integral]
+            .iter().any(|value| !value.is_finite()) {
+            return Err(PengRobinsonErrorV1::Unrepresentable { what: "residual EOS geometry" });
+        }
+        Ok(Self { z_minus_one, log_z, log_free_volume, attraction_integral })
+    }
+}
+
+/// Kahan's log1p identity using the same deterministic logarithm as the EOS.
+fn log_one_plus(offset: f64) -> f64 {
+    let rounded = 1.0 + offset;
+    if rounded == 1.0 {
+        offset
+    } else {
+        det::ln(rounded) * (offset / (rounded - 1.0))
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn fugacity_logs(
-    z: f64,
-    a: f64,
-    b: f64,
+    geometry: ResidualGeometry,
+    temperature: f64,
     a_mix: f64,
     b_mix: f64,
     x: &[f64],
     aij: &[f64],
     bi: &[f64],
 ) -> Result<Vec<f64>, PengRobinsonErrorV1> {
-    let sqrt_2 = det::sqrt(2.0);
-    let z_minus_b = z - b;
-    let numerator = z + (1.0 + sqrt_2) * b;
-    let denominator = z + (1.0 - sqrt_2) * b;
-    if z_minus_b <= 0.0 || numerator <= 0.0 || denominator <= 0.0 {
-        return Err(PengRobinsonErrorV1::NoMechanicalRoot);
-    }
-    let log_ratio = det::ln(numerator / denominator);
-    let attraction_scale = a / (2.0 * sqrt_2 * b);
+    let attraction_scale = a_mix / (UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * temperature)
+        * geometry.attraction_integral;
     let n = x.len();
     let mut result = vec![0.0; n];
     for i in 0..n {
         let sum_aij = (0..n).map(|j| x[j] * aij[i * n + j]).sum::<f64>();
         let bi_over_b = bi[i] / b_mix;
         let bracket = 2.0 * sum_aij / a_mix - bi_over_b;
-        let value = bi_over_b * (z - 1.0)
-            - det::ln(z_minus_b)
-            - attraction_scale * bracket * log_ratio;
+        let value = bi_over_b * geometry.z_minus_one
+            - geometry.log_z - geometry.log_free_volume
+            - attraction_scale * bracket;
         if !value.is_finite() {
             return Err(PengRobinsonErrorV1::Unrepresentable {
                 what: "fugacity coefficient",
@@ -651,6 +702,7 @@ pub struct PengRobinsonPhaseRootV1 {
     attraction_second_temperature_derivative: f64,
     covolume_m3_per_mol: f64,
     temperature_k: f64,
+    residual_geometry: ResidualGeometry,
 }
 
 impl PengRobinsonPhaseRootV1 {
@@ -679,15 +731,9 @@ impl PengRobinsonPhaseRootV1 {
     /// reference at the same T and composition.
     #[must_use]
     pub fn residual_internal_energy_j_mol(&self) -> f64 {
-        let b = self.covolume_m3_per_mol;
-        let v = self.molar_volume_m3_per_mol;
-        let sqrt_2 = det::sqrt(2.0);
-        let log_volume = det::ln(
-            (v + (1.0 + sqrt_2) * b) / (v + (1.0 - sqrt_2) * b)
-        );
         (self.temperature_k * self.attraction_temperature_derivative
             - self.attraction_parameter)
-            * log_volume / (2.0 * sqrt_2 * b)
+            * self.residual_geometry.attraction_integral
     }
 
     /// Residual enthalpy H^R [J/mol].
@@ -695,7 +741,7 @@ impl PengRobinsonPhaseRootV1 {
     pub fn residual_enthalpy_j_mol(&self) -> f64 {
         UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K
             * self.temperature_k
-            * (self.compressibility_factor - 1.0)
+            * self.residual_geometry.z_minus_one
             + self.residual_internal_energy_j_mol()
     }
 
@@ -706,14 +752,8 @@ impl PengRobinsonPhaseRootV1 {
     /// it differs from the conventional same-pressure departure by `R ln Z`.
     #[must_use]
     pub fn residual_entropy_at_density_j_mol_k(&self) -> f64 {
-        let b = self.covolume_m3_per_mol;
-        let v = self.molar_volume_m3_per_mol;
-        let sqrt_2 = det::sqrt(2.0);
-        let log_volume = crate::entropy::log_ratio(
-            v + (1.0 + sqrt_2) * b, v + (1.0 - sqrt_2) * b,
-        );
-        UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * crate::entropy::log_ratio(v - b, v)
-            + self.attraction_temperature_derivative * log_volume / (2.0 * sqrt_2 * b)
+        UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * self.residual_geometry.log_free_volume
+            + self.attraction_temperature_derivative * self.residual_geometry.attraction_integral
     }
 
     /// Entropy departure S^R [J/(mol K)] from the ideal gas at the SAME T,
@@ -724,20 +764,14 @@ impl PengRobinsonPhaseRootV1 {
     pub fn residual_entropy_j_mol_k(&self) -> f64 {
         self.residual_entropy_at_density_j_mol_k()
             + UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K
-                * crate::entropy::log_ratio(self.compressibility_factor, 1.0)
+                * self.residual_geometry.log_z
     }
 
     /// Residual constant-volume heat capacity C_v^R [J/(mol K)].
     #[must_use]
     pub fn residual_cv_j_mol_k(&self) -> f64 {
-        let b = self.covolume_m3_per_mol;
-        let v = self.molar_volume_m3_per_mol;
-        let sqrt_2 = det::sqrt(2.0);
-        let log_volume = det::ln(
-            (v + (1.0 + sqrt_2) * b) / (v + (1.0 - sqrt_2) * b)
-        );
         self.temperature_k * self.attraction_second_temperature_derivative
-            * log_volume / (2.0 * sqrt_2 * b)
+            * self.residual_geometry.attraction_integral
     }
 
     /// (dp/dT)_v [Pa/K] and (dp/dv)_T [Pa mol/m^3] from the original PR law.
@@ -899,7 +933,7 @@ mod tests {
             .evaluate_pt(Temperature::new(217.152_272_470_045_6),
                 Pressure::new(2_500_001.521_079_547_7)).unwrap();
         assert_eq!(state.phase_roots().len(), 1);
-        assert_eq!(state.evaluator_version(), 3);
+        assert_eq!(state.evaluator_version(), 4);
         let z = state.phase_roots()[0].compressibility_factor();
         // Independent polynomial root, not a cubic-formula round trip.
         assert!((z - 0.076_224_432_883_693_82).abs() < 2e-14);
@@ -1235,6 +1269,77 @@ mod tests {
             - evaluate(t, m / (v - dv)).root().residual_entropy_at_density_j_mol_k()) / (2.0 * dv)
             + r / v;
         assert!((ds_dv / root.pressure_derivatives().0 - 1.0).abs() < 2.0e-8);
+    }
+
+    #[test]
+    fn g1_dilute_departures_retain_original_second_virial_response() {
+        let model = pure(methane());
+        let t = 300.0;
+        let r = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K;
+        for pressure in [1.0e-6, 1.0e-9, 1.0e-12] {
+            let state = model.evaluate_pt(Temperature::new(t), Pressure::new(pressure)).unwrap();
+            let root = state.select(PengRobinsonPhaseV1::Vapor);
+            let v = root.molar_volume_m3_per_mol();
+            let a = root.attraction_parameter;
+            let da = root.attraction_temperature_derivative;
+            let d2a = root.attraction_second_temperature_derivative;
+            let b = root.covolume_m3_per_mol;
+            // Independently expand the original Helmholtz law to order 1/v.
+            // These departures remain representable after rounded Z becomes 1.
+            for (name, actual, virial) in [
+                ("u", root.residual_internal_energy_j_mol(), (t * da - a) / v),
+                ("h", root.residual_enthalpy_j_mol(), (t * da - 2.0 * a + r * t * b) / v),
+                ("cv", root.residual_cv_j_mol_k(), t * d2a / v),
+                ("s(rho)", root.residual_entropy_at_density_j_mol_k(), (da - r * b) / v),
+                ("s(p)", root.residual_entropy_j_mol_k(), (da - a / t) / v),
+                ("ln(phi)", root.log_fugacity_coefficients()[0], (b - a / (r * t)) / v),
+            ] {
+                assert!((actual / virial - 1.0).abs() < 2.0e-10,
+                    "p={pressure}, {name}: actual={actual:e}, virial={virial:e}");
+            }
+            let from_gibbs = root.residual_enthalpy_j_mol() / t
+                - r * root.residual_gibbs_over_rt();
+            assert!((root.residual_entropy_j_mol_k() / from_gibbs - 1.0).abs() < 1.0e-13);
+        }
+    }
+
+    #[test]
+    fn g1_dilute_binary_fugacity_respects_each_partial_virial() {
+        let model = methane_ethane(0.3);
+        let t = 300.0;
+        let rt = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * t;
+        let mixed = model.mixing(t).unwrap();
+        let state = model.evaluate_pt(Temperature::new(t), Pressure::new(1.0e-10)).unwrap();
+        let root = state.select(PengRobinsonPhaseV1::Vapor);
+        let v = root.molar_volume_m3_per_mol();
+        for i in 0..2 {
+            let partial_a = (0..2).map(|j| model.mole_fractions[j] * mixed.aij[2 * i + j])
+                .sum::<f64>();
+            let virial = (mixed.bi[i] + (mixed.a_mix - 2.0 * partial_a) / rt) / v;
+            assert!((root.log_fugacity_coefficients()[i] / virial - 1.0).abs() < 1.0e-12);
+        }
+    }
+
+    #[test]
+    fn g1_dilute_caloric_and_entropy_tangents_preserve_cv() {
+        let model = pure(methane());
+        let t = 300.0;
+        let density = Density::new(1.0e-15);
+        let evaluate = |temperature| model.evaluate_density_temperature(
+            Temperature::new(temperature), density,
+        ).unwrap();
+        let center = evaluate(t);
+        let dt = 1.0e-3;
+        let plus = evaluate(t + dt);
+        let minus = evaluate(t - dt);
+        let du_dt = (plus.root().residual_internal_energy_j_mol()
+            - minus.root().residual_internal_energy_j_mol()) / (2.0 * dt);
+        let ds_dt = (plus.root().residual_entropy_at_density_j_mol_k()
+            - minus.root().residual_entropy_at_density_j_mol_k()) / (2.0 * dt);
+        let cv = center.root().residual_cv_j_mol_k();
+        assert!(cv > 0.0);
+        assert!((du_dt / cv - 1.0).abs() < 1.0e-7);
+        assert!((t * ds_dt / cv - 1.0).abs() < 1.0e-7);
     }
 
     #[test]
