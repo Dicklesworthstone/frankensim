@@ -11,6 +11,7 @@ authors.workspace = true
 layer = "L3"
 
 [dependencies]
+fs-exec = { path = "../fs-exec" }
 fs-fft = { path = "../fs-fft" }
 fs-ivl = { path = "../fs-ivl" }
 fs-lbm = { path = "../fs-lbm" }

@@ -1297,3 +1297,25 @@ coordinates, resource admission and cancellation. They compile the production
 observation modules, shared harmonic/math algorithms and original fluid-state
 constructor/methods; only root error carriers are nominal. The numerical leaf
 also compiles with warnings denied. Full workspace integration remains unrun.
+
+## Same-step plate momentum with explicit jet SGS
+
+The 3D slot-jet records the native splitter-plate momentum exchange from the
+actual post-collision populations before fringe forcing. Canonical plate-link
+selection excludes the nozzle. Ordinary and chunked recording share this step;
+checkpoint version 3 refuses histories containing the old post-stream force
+proxy, rather than combining two force definitions in a resumed spectrum.
+
+`run_slot_jet_3d_with_sgs` and `MaterialSlotJet3d::run_with_sgs` explicitly
+consume the existing Smagorinsky, WALE or Vreman boundary closure during
+settling and recording, using one reusable workspace and same-step wall loads.
+Model coefficients, filter width and viscosity-ratio limits remain authored.
+Zero coefficient preserves the corrected ordinary trajectory. Recorded shear
+dissipation means and eddy-viscosity maxima retain their native lattice units.
+Material density, molecular viscosity and periodic-cell force conversion
+retain their original owners. This adds no random forcing, unresolved acoustic
+source, broadband-regime validation or absolute-SPL authority.
+
+`slot_jet_3d/tests.rs` covers independently assembled post-collision impulse,
+fluid-plus-wall momentum balance, zero-closure bits, nonzero closure loads,
+chunk partition equivalence, source/closure refusals and material SI scaling.

@@ -9,11 +9,16 @@ use super::{
     ForceSpectrum, JetPhysicalState, MAX_PHYSICAL_MACH, MaterialAeroacError, acoustic_from_scaling,
     check_force_bin, fit_force_harmonics, fit_force_tones, invalid,
 };
-use crate::slot_jet_3d::{SlotJet3dConfig, SlotJet3dDiagnostics, run_slot_jet_3d, validate_config};
+use crate::slot_jet_3d::{
+    SlotJet3dConfig, SlotJet3dDiagnostics, SlotJet3dRun, SlotJet3dSgsDiagnostics,
+    SlotJet3dSgsError, run_slot_jet_3d, run_slot_jet_3d_with_sgs, validate_config,
+};
 use crate::{AeroacError, SCOPE_STATEMENT};
+use fs_exec::CancelGate;
 use fs_fft::harmonic::{HarmonicFitPlan, ToneFitPlan};
 use fs_lbm::d3q19::CollisionModel3;
 use fs_lbm::material::{MaterialScaling, plan_scaling_from_material};
+use fs_lbm::sgs3::SgsConfig;
 use fs_material::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
 use fs_material::fluid_transport::FluidTransport;
 use fs_material::gas::GasState;
@@ -59,6 +64,23 @@ pub struct MaterialSlotJet3d<'a, F: FluidTransport + FluidAcoustics + ?Sized = G
     force_unit_n: f64,
     span_m: f64,
 }
+
+/// Native SGS/source failures and the physical material binding stay distinct.
+#[derive(Clone, Debug)]
+pub enum MaterialSlotJet3dSgsError {
+    Source(SlotJet3dSgsError),
+    Material(MaterialAeroacError),
+}
+
+impl core::fmt::Display for MaterialSlotJet3dSgsError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Source(error) => write!(f, "{error}"),
+            Self::Material(error) => write!(f, "{error}"),
+        }
+    }
+}
+impl std::error::Error for MaterialSlotJet3dSgsError {}
 
 impl<'a, F: FluidTransport + FluidAcoustics + ?Sized> MaterialSlotJet3d<'a, F> {
     /// Compile an original gas, liquid or real-gas source into the original rig.
@@ -177,7 +199,35 @@ impl<'a, F: FluidTransport + FluidAcoustics + ?Sized> MaterialSlotJet3d<'a, F> {
     /// Original rig instability, observed envelope violations and nonfinite
     /// physical force refuse without returning a partial physical result.
     pub fn run(&self) -> Result<MaterialSlotJet3dRun<'_, F>, MaterialAeroacError> {
-        let mut run = run_slot_jet_3d(&self.config)?;
+        self.physical_run(run_slot_jet_3d(&self.config)?)
+    }
+
+    /// Execute the same material-bound source with an explicitly authored SGS
+    /// closure. The filter width is in cells; molecular viscosity, density and
+    /// force conversion remain those of this original material. Returned SGS
+    /// diagnostics retain their lattice units and exploration-only scope.
+    ///
+    /// # Errors
+    /// Refuses native closure/step/cancellation failures and the same physical
+    /// speed-envelope or force-conversion failures as [`Self::run`].
+    pub fn run_with_sgs(
+        &self,
+        closure: SgsConfig,
+        gate: &CancelGate,
+    ) -> Result<(MaterialSlotJet3dRun<'_, F>, SlotJet3dSgsDiagnostics), MaterialSlotJet3dSgsError>
+    {
+        let (run, diagnostics) = run_slot_jet_3d_with_sgs(&self.config, closure, gate)
+            .map_err(MaterialSlotJet3dSgsError::Source)?;
+        let physical = self
+            .physical_run(run)
+            .map_err(MaterialSlotJet3dSgsError::Material)?;
+        Ok((physical, diagnostics))
+    }
+
+    fn physical_run(
+        &self,
+        mut run: SlotJet3dRun,
+    ) -> Result<MaterialSlotJet3dRun<'_, F>, MaterialAeroacError> {
         let speed = self.scaling.velocity_si(run.diagnostics.mach_max_lattice)?;
         if speed > self.max_speed_m_s {
             return Err(invalid(

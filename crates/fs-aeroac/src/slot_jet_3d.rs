@@ -39,7 +39,12 @@ use crate::AeroacError;
 use crate::SCOPE_STATEMENT;
 use crate::jetlab::transverse_force_spectrum;
 use crate::regime::{SpectrumClass, classify_spectrum, measure_spectral_flatness};
-use fs_lbm::d3q19::{BoundaryGrid3, BoundarySpec3, CollisionModel3, E3, Q3, equilibrium3};
+use fs_exec::CancelGate;
+use fs_lbm::d3q19::{
+    BoundaryGrid3, BoundaryLink3, BoundarySgsError3, BoundarySgsReport3, BoundarySpec3,
+    CollisionModel3, E3, Q3, equilibrium3,
+};
+use fs_lbm::sgs3::{SgsConfig, SgsReport, SgsWorkspace3};
 use fs_math::det;
 
 /// Absolute transverse-force RMS floor [lattice momentum/step] below
@@ -123,6 +128,44 @@ pub struct SlotJet3dRun {
     pub diagnostics: SlotJet3dDiagnostics,
     /// The honest-scope statement (embedded in every output).
     pub scope: &'static str,
+}
+
+/// Explicit closure and its resolved-flow diagnostics over the recorded window.
+/// These are lattice-unit shear diagnostics, not heat or acoustic source terms.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SlotJet3dSgsDiagnostics {
+    /// Authored model, coefficient, filter width and refusal limit.
+    pub config: SgsConfig,
+    /// Number of fluid cells. Dissipations are means over recorded pre-step
+    /// states; viscosity and viscosity-ratio fields are maxima over that window.
+    pub recorded: SgsReport,
+}
+
+/// Source admission and native SGS failures retain their original owners.
+#[derive(Clone, Debug)]
+pub enum SlotJet3dSgsError {
+    Source(AeroacError),
+    Flow(BoundarySgsError3),
+}
+
+impl core::fmt::Display for SlotJet3dSgsError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Source(error) => write!(f, "{error}"),
+            Self::Flow(error) => write!(f, "{error}"),
+        }
+    }
+}
+impl std::error::Error for SlotJet3dSgsError {}
+impl From<AeroacError> for SlotJet3dSgsError {
+    fn from(error: AeroacError) -> Self {
+        Self::Source(error)
+    }
+}
+impl From<BoundarySgsError3> for SlotJet3dSgsError {
+    fn from(error: BoundarySgsError3) -> Self {
+        Self::Flow(error)
+    }
 }
 
 /// One classified rung of the Re ladder.
@@ -337,8 +380,8 @@ pub(crate) fn validate_config(cfg: &SlotJet3dConfig) -> Result<(), AeroacError> 
 struct Rig3 {
     grid: BoundaryGrid3,
     fringe: Fringe3,
-    /// Plate solid cells (for the momentum-exchange force).
-    plate_cells: Vec<(usize, usize, usize)>,
+    /// Actual plate wall links, retaining the native owner's canonical order.
+    plate_links: Vec<BoundaryLink3>,
     x_plate_plane: usize,
     x_fringe_plane: usize,
 }
@@ -427,23 +470,28 @@ impl Rig3 {
             })
             .collect();
         let fringe = Fringe3::with_profile(cfg.fringe_width, cfg.fringe_sigma, &profile);
-        // Plate solid cells (momentum-exchange surface).
-        let mut plate_cells = Vec::new();
-        for x in plate_x0..plate_x0 + cfg.plate_length {
-            for y in [cfg.ny / 2 - 1, cfg.ny / 2] {
-                for z in 0..cfg.nz {
-                    if grid.is_solid(x, y, z) {
-                        plate_cells.push((x, y, z));
-                    }
-                }
-            }
-        }
+        // A boundary link names an incoming pull direction: the solid lies at
+        // cell - e_q. Select the plate rather than the upstream nozzle, without
+        // changing the wall owner's deterministic reduction order.
+        let plate_links = grid
+            .boundary_links()
+            .into_iter()
+            .filter(|link| {
+                let direction = E3[link.direction];
+                let x = (link.cell[0] as isize - direction.0 as isize).rem_euclid(cfg.nx as isize)
+                    as usize;
+                let y = (link.cell[1] as isize - direction.1 as isize).rem_euclid(cfg.ny as isize)
+                    as usize;
+                (plate_x0..plate_x0 + cfg.plate_length).contains(&x)
+                    && (y == cfg.ny / 2 - 1 || y == cfg.ny / 2)
+            })
+            .collect();
         let x_plate_plane = plate_x0.saturating_sub(6).max(cfg.nozzle_thickness + 1);
         let x_fringe_plane = cfg.nx - cfg.fringe_width - 4;
         Rig3 {
             grid,
             fringe,
-            plate_cells,
+            plate_links,
             x_plate_plane,
             x_fringe_plane,
         }
@@ -494,29 +542,29 @@ impl Rig3 {
         Ok(())
     }
 
-    /// Momentum-exchange impulse on the plate: every population at a
-    /// fluid cell directed into a plate solid cell transfers
-    /// `2 f_i e_i` through the halfway bounce-back.
-    fn plate_impulse(&self) -> [f64; 2] {
-        let [nx, ny, nz] = self.grid.dimensions();
-        let mut impulse = [0.0f64; 2];
-        for &(x, y, z) in &self.plate_cells {
-            for (i, e) in E3.iter().enumerate().skip(1) {
-                // Fluid cell whose e_i neighbor is this plate cell.
-                // rem_euclid keeps the periodic wrap exact for
-                // negative lattice directions.
-                let qx = (x as isize - e.0 as isize).rem_euclid(nx as isize) as usize;
-                let qy = (y as isize - e.1 as isize).rem_euclid(ny as isize) as usize;
-                let qz = (z as isize - e.2 as isize).rem_euclid(nz as isize) as usize;
-                if self.grid.is_solid(qx, qy, qz) {
-                    continue;
-                }
-                let fi = self.grid.populations(qx, qy, qz)[i];
-                impulse[0] += 2.0 * fi * f64::from(e.0);
-                impulse[1] += 2.0 * fi * f64::from(e.1);
-            }
-        }
-        impulse
+    /// Record the impulse of this collision/reflection step before the fringe.
+    /// Already-streamed populations are not the outgoing wall populations.
+    fn step_plate_impulse(&mut self) -> [f64; 2] {
+        let exchange = self
+            .grid
+            .step_with_wall_momentum(&self.plate_links, [0.0; 3]);
+        self.fringe.apply(&mut self.grid);
+        [exchange.wall_impulse[0], exchange.wall_impulse[1]]
+    }
+
+    fn step_sgs(
+        &mut self,
+        gate: &CancelGate,
+        config: SgsConfig,
+        workspace: &mut SgsWorkspace3<CollisionModel3>,
+        record: bool,
+    ) -> Result<BoundarySgsReport3, BoundarySgsError3> {
+        let measurement = record.then_some((self.plate_links.as_slice(), [0.0; 3]));
+        let report = self
+            .grid
+            .step_with_sgs(gate, config, workspace, measurement)?;
+        self.fringe.apply(&mut self.grid);
+        Ok(report)
     }
 
     fn record(&mut self, steps: usize) -> Result<Vec<[f64; 2]>, AeroacError> {
@@ -525,9 +573,7 @@ impl Rig3 {
         std::panic::catch_unwind(core::panic::AssertUnwindSafe(move || {
             let mut force_series = Vec::with_capacity(steps);
             for _ in 0..steps {
-                this.grid.step();
-                this.fringe.apply(&mut this.grid);
-                let impulse = this.plate_impulse();
+                let impulse = this.step_plate_impulse();
                 if !impulse[0].is_finite() || !impulse[1].is_finite() {
                     return Err(AeroacError::NonFinite {
                         what: "3-D lattice destabilized (non-finite plate force)",
@@ -612,30 +658,101 @@ pub fn run_slot_jet_3d(cfg: &SlotJet3dConfig) -> Result<SlotJet3dRun, AeroacErro
     rig.settle(cfg.steps_settle)?;
     let force_series = rig.record(cfg.steps_record)?;
     let (mach_max, flux_plate, flux_fringe) = rig.plane_diagnostics();
-    let CollisionModel3::CentralMoment {
-        second_order_rate, ..
-    } = cfg.collision
-    else {
-        unreachable!("validate_config pins the central-moment operator");
-    };
-    let nu = (1.0 / second_order_rate - 0.5) / 3.0;
-    #[allow(clippy::cast_precision_loss)]
-    let reynolds = cfg.u_jet * 2.0 * cfg.slot_half / nu;
-    #[allow(clippy::cast_precision_loss)]
-    let strouhal_bin_width = (1.0 / cfg.steps_record as f64) * 2.0 * cfg.slot_half / cfg.u_jet;
-    Ok(SlotJet3dRun {
+    Ok(finish_run(
+        cfg,
         force_series,
-        diagnostics: SlotJet3dDiagnostics {
-            mach_max_lattice: mach_max,
-            flux_plate_plane: flux_plate,
-            flux_fringe_plane: flux_fringe,
-            reynolds,
-            record_len: cfg.steps_record,
-            strouhal_bin_width,
-        },
-        scope: SCOPE_STATEMENT,
+        mach_max,
+        flux_plate,
+        flux_fringe,
+    ))
+}
+
+/// Run the actual jet and plate-force source with an explicitly authored SGS
+/// viscosity. The same native closure advances both settling and recording;
+/// plate loads use that step's SGS-augmented post-collision populations.
+///
+/// The constructor collision remains the molecular law. Filter width is in
+/// cells, coefficients have no default, and the original closure's exploration
+/// restriction and viscosity-ratio refusal apply. The workspace is allocated
+/// once; this adds no random forcing or unresolved acoustic source. Zero model
+/// coefficient recovers the ordinary population and plate-force trajectory.
+///
+/// # Errors
+/// Original source and SGS admission, cancellation, allocation or native step
+/// failures refuse the whole result. No partial force history is returned.
+pub fn run_slot_jet_3d_with_sgs(
+    cfg: &SlotJet3dConfig,
+    closure: SgsConfig,
+    gate: &CancelGate,
+) -> Result<(SlotJet3dRun, SlotJet3dSgsDiagnostics), SlotJet3dSgsError> {
+    validate_config(cfg)?;
+    closure.validate().map_err(BoundarySgsError3::from)?;
+    if gate.is_requested() {
+        return Err(AeroacError::Cancelled {
+            what: "3-D SGS slot jet",
+        }
+        .into());
+    }
+    let mut rig = Rig3::build(cfg);
+    let mut workspace = rig.grid.sgs_workspace()?;
+    let mut force_series = Vec::new();
+    force_series
+        .try_reserve_exact(cfg.steps_record)
+        .map_err(|_| AeroacError::InvalidParameter {
+            what: "3-D SGS plate-force record allocation refused",
+        })?;
+    std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| {
+        for _ in 0..cfg.steps_settle {
+            rig.step_sgs(gate, closure, &mut workspace, false)?;
+        }
+        rig.check_stable()?;
+        let mut recorded = SgsReport::default();
+        #[allow(clippy::cast_precision_loss)]
+        let samples = cfg.steps_record as f64;
+        for _ in 0..cfg.steps_record {
+            let report = rig.step_sgs(gate, closure, &mut workspace, true)?;
+            let exchange = report
+                .wall_momentum
+                .expect("recording requests native plate wall impulse");
+            force_series.push([exchange.wall_impulse[0], exchange.wall_impulse[1]]);
+            recorded.fluid_cells = report.sgs.fluid_cells;
+            // Average each nonnegative contribution before summing: the
+            // unnormalised total need not be representable for a long record.
+            recorded.resolved_dissipation_lu += report.sgs.resolved_dissipation_lu / samples;
+            recorded.sgs_dissipation_lu += report.sgs.sgs_dissipation_lu / samples;
+            recorded.maximum_eddy_viscosity_lu = recorded
+                .maximum_eddy_viscosity_lu
+                .max(report.sgs.maximum_eddy_viscosity_lu);
+            recorded.maximum_eddy_to_molecular = recorded
+                .maximum_eddy_to_molecular
+                .max(report.sgs.maximum_eddy_to_molecular);
+        }
+        if !recorded.resolved_dissipation_lu.is_finite() || !recorded.sgs_dissipation_lu.is_finite()
+        {
+            return Err(AeroacError::NonFinite {
+                what: "3-D SGS mean shear dissipation",
+            }
+            .into());
+        }
+        let (speed, plate_flux, fringe_flux) = rig.plane_diagnostics();
+        Ok((
+            finish_run(cfg, force_series, speed, plate_flux, fringe_flux),
+            SlotJet3dSgsDiagnostics {
+                config: closure,
+                recorded,
+            },
+        ))
+    }))
+    .unwrap_or_else(|_| {
+        Err(AeroacError::NonFinite {
+            what: "3-D SGS lattice destabilized during settle or record",
+        }
+        .into())
     })
 }
+
+#[cfg(test)]
+mod tests;
 
 #[cfg(test)]
 mod material_diagnostics_tests {
@@ -667,7 +784,7 @@ mod material_diagnostics_tests {
         let rig = Rig3 {
             grid,
             fringe: Fringe3::with_profile(1, 0.1, &[(1.0, [0.0; 3]); 4]),
-            plate_cells: Vec::new(),
+            plate_links: Vec::new(),
             x_plate_plane: 1,
             x_fringe_plane: 2,
         };
@@ -1209,7 +1326,9 @@ struct ChunkState {
 }
 
 const CHECKPOINT_MAGIC: &[u8; 8] = b"FSJSCKPT";
-const CHECKPOINT_VERSION: u32 = 2;
+// Version 2 recorded a post-stream population proxy. Never append the actual
+// collision/reflection impulse to one of those histories on resume.
+const CHECKPOINT_VERSION: u32 = 3;
 const CHECKPOINT_HEADER_LEN: usize = 44;
 
 fn write_checkpoint(
@@ -1607,9 +1726,7 @@ fn step_chunk_loop(
             state.settle_done += 1;
         } else if state.record_done < total_record {
             let stepped = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| {
-                rig.grid.step();
-                rig.fringe.apply(&mut rig.grid);
-                rig.plate_impulse()
+                rig.step_plate_impulse()
             }));
             let impulse = match stepped {
                 Ok(impulse) => impulse,
