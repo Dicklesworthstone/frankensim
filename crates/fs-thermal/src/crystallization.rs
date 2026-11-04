@@ -26,6 +26,10 @@
 //! completely amorphous material to cool into crystallization. The supplied rate
 //! must be zero at and above melting; any nonzero crystal fraction above that
 //! boundary refuses instead of inventing a melt law or resetting phase history.
+//! [`EquivalentAgeRemelting`] is a separate opt-in approximation: instantaneous
+//! equilibrium melting at the original melting temperature, with the surviving
+//! fraction defining an equivalent Avrami age. The default growth APIs remain
+//! irreversible; no universal polymer melt-memory kinetics are inferred.
 //!
 //! Governing model: Nakamura, Katayama & Amano (1973),
 //! <https://doi.org/10.1002/app.1973.070170404>. The heat balance and integral
@@ -33,6 +37,10 @@
 //! <https://www.columbia.edu/~yly1/PDFs3/NAMRC36-.pdf>.
 
 use core::fmt;
+
+#[path = "crystallization/remelting.rs"]
+mod remelting;
+pub use remelting::EquivalentAgeRemelting;
 
 /// A refusal publishes no physical state or history increment.
 #[derive(Clone, Copy, Debug, PartialEq)]
