@@ -16,10 +16,10 @@
 //!   - Ambient components are analytic (fs-atmo exact gradients); the
 //!     bound-circulation and ground-image components use fs-vpm's
 //!     finite-core segment kernel and exact spatial derivatives. The
-//!     physical-wake (fs-vpm hybrid) and propeller-induced branches
-//!     are follow-up wiring — they are DECLARED unsupported by this
-//!     state version, so their omission is named but does not forbid
-//!     the total-flow claim.
+//!     [`PreparedWakeField`] binds the actual near/far connected wake,
+//!     including its closing bound line and optional ground images, to the
+//!     same sampling/invariant path. The legacy ring payload still carries
+//!     only its prescribed horseshoe; it does not synthesize a wake history.
 
 use crate::{Refusal, refuse};
 use fs_atmo::{Atmosphere, DEC17_AIR, FlatSiteLogLaw, TurbulenceField};
@@ -29,6 +29,9 @@ use fs_vpm::filament3d::{
     SegmentKinematics, segment_kinematics_with_core, segment_velocity_with_core,
 };
 
+mod wake;
+pub use wake::PreparedWakeField;
+
 /// Component bit: mean atmosphere (log law).
 pub const C_MEAN_ATMO: u32 = 1 << 0;
 /// Component bit: turbulent atmosphere.
@@ -37,9 +40,10 @@ pub const C_TURB_ATMO: u32 = 1 << 1;
 pub const C_GUST_EVENT: u32 = 1 << 2;
 /// Component bit: bound circulation (horseshoe).
 pub const C_BOUND_CIRCULATION: u32 = 1 << 3;
-/// Component bit: physical wake (fs-vpm hybrid; unsupported in v1).
+/// Component bit: complete connected physical wake, including its closing
+/// bound line. Supplied by [`PreparedWakeField`], absent from the v1 payload.
 pub const C_PHYSICAL_WAKE: u32 = 1 << 4;
-/// Component bit: ground images of the bound system.
+/// Component bit: ground images of the active bound or connected-wake source.
 pub const C_GROUND_IMAGES: u32 = 1 << 5;
 /// Component bit: propeller induced field (unsupported in v1).
 pub const C_PROP_INDUCED: u32 = 1 << 6;
@@ -94,7 +98,7 @@ impl GridSpec {
     /// Total points.
     #[must_use]
     pub fn n_points(&self) -> usize {
-        self.nx * self.ny * self.nz
+        self.nx.saturating_mul(self.ny).saturating_mul(self.nz)
     }
 
     /// Admit the grid.
@@ -468,6 +472,17 @@ pub fn sample_field(
     grid: &GridSpec,
     component_mask: u32,
 ) -> Result<FieldSampleSet, Refusal> {
+    sample_field_impl(state, grid, component_mask, None, &mut || false)
+}
+
+fn sample_field_impl(
+    state: &FieldSourceStateV1,
+    grid: &GridSpec,
+    component_mask: u32,
+    wake: Option<&PreparedWakeField>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<FieldSampleSet, Refusal> {
+    wake::checkpoint(cancelled)?;
     grid.admit()?;
     if component_mask == 0 {
         return Err(refuse(
@@ -483,7 +498,10 @@ pub fn sample_field(
             "use the C_* component constants",
         ));
     }
-    let supported = state.supported_components();
+    let supported = wake.map_or_else(
+        || state.supported_components(),
+        |wake| C_MEAN_ATMO | C_TURB_ATMO | wake.supported_components(),
+    );
     if component_mask & !supported != 0 {
         let missing: Vec<&str> = (0..8)
             .filter(|b| component_mask & !supported & (1 << b) != 0)
@@ -491,15 +509,19 @@ pub fn sample_field(
             .collect();
         return Err(refuse(
             "component-unsupported",
-            format!("state v1 cannot produce: {missing:?}"),
-            "drop the unsupported bits; their omission is named in meta",
+            format!("active field source cannot produce: {missing:?}"),
+            "select supported components; a connected wake already includes its bound closing line",
         ));
     }
     let n = grid.n_points();
     let tick = state.tick;
-    let has_singular =
-        component_mask & (C_BOUND_CIRCULATION | C_GROUND_IMAGES) != 0 && state.bound.is_some();
-    let core = state.bound.as_ref().map_or(0.0, |b| b.core_m);
+    let has_singular = wake.is_none()
+        && component_mask & (C_BOUND_CIRCULATION | C_GROUND_IMAGES) != 0
+        && state.bound.is_some();
+    let core = wake.map_or_else(
+        || state.bound.as_ref().map_or(0.0, |b| b.core_m),
+        |wake| wake.selected_core_radius(component_mask),
+    );
     if let Some(b) = state.bound.as_ref().filter(|_| has_singular) {
         if !b.gamma_m2ps.is_finite()
             || !b
@@ -539,22 +561,35 @@ pub fn sample_field(
             .map(|b| COMPONENT_NAMES[b as usize])
             .collect(),
         meta: FieldMeta {
-            field_source_snapshot_id: state.field_source_snapshot_id(),
+            field_source_snapshot_id: wake.map_or_else(
+                || state.field_source_snapshot_id(),
+                |wake| wake.snapshot_id(state),
+            ),
             source_tick: tick,
             source_state_digest: state.source_state_digest.clone(),
             source_modes: supported,
-            force_coupled_components: FORCE_COUPLED,
+            force_coupled_components: FORCE_COUPLED
+                | if wake.is_some() {
+                    supported & C_GROUND_IMAGES
+                } else {
+                    0
+                },
             visualization_only_components: C_VIS_ONLY,
             omitted_components: (0..8)
                 .filter(|b| component_mask & (1 << b) == 0)
                 .map(|b| COMPONENT_NAMES[b as usize])
                 .collect(),
-            core_radius_m: if has_singular { core } else { 0.0 },
+            core_radius_m: if has_singular || wake.is_some() {
+                core
+            } else {
+                0.0
+            },
             export_precision_bits: 64,
         },
     };
     let singular_mask_bits = component_mask & (C_BOUND_CIRCULATION | C_GROUND_IMAGES);
     for i in 0..n {
+        wake::checkpoint(cancelled)?;
         let p = grid.point(i);
         let solid = p[2] < 0.0;
         let mut u = u_at(state, component_mask & !singular_mask_bits, p, tick);
@@ -562,7 +597,18 @@ pub fn sample_field(
         // singular zero-core point is explicitly invalid, never zero-valid.
         let mut g = analytic_grad(state, component_mask, p, tick);
         let mut source_regular = true;
-        if let Some(b) = &state.bound {
+        if let Some(wake) = wake {
+            if let Some(value) = wake.kinematics(p, component_mask, cancelled)? {
+                for a in 0..3 {
+                    u[a] += value.velocity[a];
+                    for b in 0..3 {
+                        g[a][b] += value.gradient[a][b];
+                    }
+                }
+            } else {
+                source_regular = false;
+            }
+        } else if let Some(b) = &state.bound {
             for (bit, mirror) in [(C_BOUND_CIRCULATION, false), (C_GROUND_IMAGES, true)] {
                 if singular_mask_bits & bit == 0 {
                     continue;
@@ -586,9 +632,28 @@ pub fn sample_field(
             let mut pm = p;
             pp[j] += FD_H;
             pm[j] -= FD_H;
-            div_fd += (u_at(state, component_mask, pp, tick)[j]
-                - u_at(state, component_mask, pm, tick)[j])
-                / (2.0 * FD_H);
+            let ambient_mask = if wake.is_some() {
+                component_mask & !(C_PHYSICAL_WAKE | C_GROUND_IMAGES)
+            } else {
+                component_mask
+            };
+            let mut up = u_at(state, ambient_mask, pp, tick);
+            let mut um = u_at(state, ambient_mask, pm, tick);
+            if let Some(wake) = wake {
+                match (
+                    wake.velocity(pp, component_mask, cancelled)?,
+                    wake.velocity(pm, component_mask, cancelled)?,
+                ) {
+                    (Some(vp), Some(vm)) => {
+                        for a in 0..3 {
+                            up[a] += vp[a];
+                            um[a] += vm[a];
+                        }
+                    }
+                    _ => source_regular = false,
+                }
+            }
+            div_fd += (up[j] - um[j]) / (2.0 * FD_H);
         }
         let div_an = g[0][0] + g[1][1] + g[2][2];
         // Tensor invariants.
@@ -625,7 +690,7 @@ pub fn sample_field(
         } else {
             [0.0; 3]
         };
-        let in_core = has_singular
+        let mut in_core = has_singular
             && state.bound.as_ref().is_some_and(|b| {
                 [(C_BOUND_CIRCULATION, false), (C_GROUND_IMAGES, true)]
                     .into_iter()
@@ -636,15 +701,24 @@ pub fn sample_field(
                                 .any(|(a, c)| dist_to_segment(p, a, c) < 4.0 * b.core_m)
                     })
             });
-        let finite_ok =
-            u.iter().all(|v| v.is_finite()) && g.iter().flatten().all(|v| v.is_finite());
+        if let Some(wake) = wake {
+            in_core |= wake.in_core(p, component_mask, cancelled)?;
+        }
+        let omega = [g[2][1] - g[1][2], g[0][2] - g[2][0], g[1][0] - g[0][1]];
+        let strain = det::sqrt(s2);
+        let finite_ok = u
+            .iter()
+            .chain(g.iter().flatten())
+            .chain(omega.iter())
+            .chain(ksg.iter())
+            .chain([div_an, div_fd, strain, q, l2v].iter())
+            .all(|v| v.is_finite());
         out.u.push(u);
         out.grad_u.push(g);
-        out.omega
-            .push([g[2][1] - g[1][2], g[0][2] - g[2][0], g[1][0] - g[0][1]]);
+        out.omega.push(omega);
         out.div_analytic.push(div_an);
         out.div_finite_difference.push(div_fd);
-        out.strain_magnitude.push(det::sqrt(s2));
+        out.strain_magnitude.push(strain);
         out.q_criterion.push(q);
         out.lambda2.push(l2v);
         out.kinetic_speed_gradient.push(ksg);
@@ -653,6 +727,7 @@ pub fn sample_field(
         out.singularity_core_mask.push(in_core);
         out.solid_exclusion_mask.push(solid);
     }
+    wake::checkpoint(cancelled)?;
     Ok(out)
 }
 
@@ -700,7 +775,7 @@ impl FieldSampleSet {
 /// # Errors
 /// `forbidden-claim-total-flow` (names the absent components).
 pub fn claim_total_flow(sample: &FieldSampleSet) -> Result<(), Refusal> {
-    let owed = sample.meta.source_modes & FORCE_COUPLED;
+    let owed = sample.meta.source_modes & sample.meta.force_coupled_components;
     let missing = owed & !sample.component_mask;
     if missing == 0 {
         Ok(())

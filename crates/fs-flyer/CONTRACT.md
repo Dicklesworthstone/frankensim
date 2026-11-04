@@ -29,8 +29,33 @@ support of vorticity. Invalid core lengths and non-finite bound inputs refuse.
 The field digest domain is v2 for this intentional physical kernel change.
 `tests/fieldsvc_battery.rs` checks scaling, independent velocity differences,
 axis/endpoint behavior, image cancellation and selected-source masks (G0/G1).
-The field service still does not claim a resolved physical wake, propeller
-field or pressure; those components retain their existing explicit refusal.
+`fieldsvc::PreparedWakeField` additionally binds the actual connected near/far
+`fs-vpm` sources to this same return set. Preparation stores physical segments
+once, using each source's core and elapsed diffusion; subsequent queries reuse
+that buffer. Images across the field service's z=0 plane use polar velocity and
+axial vorticity reflection without copying sources or entering physical ledgers.
+All retained physical sources must stay above the plane when images are active.
+The connected sheet includes its bound closing line, so the legacy payload's
+prescribed horseshoe cannot be selected alongside it. The source snapshot hash
+binds both the original field state and the prepared near/far/image identity.
+
+Sampling uses exact retained-source derivatives and independent velocity-only
+finite differences of that same field. Its cost is O(points * retained edges),
+with no multipole-derivative error claim or recovery of pruned edges. Explicit
+source-count and source-visit caps precede allocation; the sample's eight-visit
+bound includes center derivatives, six velocity probes and core masking for
+each selected physical/image system. Queries poll cancellation every 256 source
+visits and at point boundaries, and publish no partial field. Core masks use
+each segment's actual radius. Active wake images are required for a total-flow
+claim, along with the physical wake itself.
+
+`tests/fieldsvc_wake.rs` exercises actual near/far partition invariance, full
+Jacobian velocity differences, plane/reflection identities, bound-line
+ownership, finite-core axis curl, singular masks, budgets, cancellation/replay
+and immutable source snapshots. The old ring payload still has no physical
+wake history; callers must supply it explicitly. Neither source path claims a
+propeller field, volume pressure, resolved vortex-tube dynamics, or completeness
+beyond its declared source components.
 
 - `FlyerDesign { wing, canard, rudder, lateral, warp, masses… }` — frd-body-v1
   coordinates, +x forward from the wing leading edge, SI units, radians.
