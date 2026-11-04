@@ -1110,6 +1110,24 @@ Cantera's ideal-gas implementation is a development cross-reference for the
 mixing and pressure terms, not a runtime dependency:
 <https://www.cantera.org/3.0/doxygen/html/d7/dd4/IdealGasPhase_8cpp_source.html>.
 
+## Local response from density derivatives
+
+`eos::density::DensityThermodynamicResponseV1` derives signed isobaric
+expansion, isothermal/adiabatic compressibility, Cv and sound speed from one
+homogeneous fixed-composition phase's original `rho`, `rho_T|p`, `rho_p|T`,
+absolute temperature and isobaric Cp. It uses the local Gibbs identities,
+including `Cp-Cv = T beta²/rho_p`, without an ideal-gas or incompressible
+assumption. All original scalars and the directly evaluated Cp-Cv correction
+remain available. Fixed-size evaluation allocates nothing. Nonpositive
+mechanical/caloric response, a caloric residual within 16 rounding units of Cp,
+and unrepresentable arithmetic refuse. Zero and negative expansion are valid.
+
+G0/G1/G3 regressions compare ideal gases, an independently differentiated Gibbs
+potential, original IF97 liquid/steam response, density scaling, a density
+maximum and small slopes. This local algebra grants no source authenticity,
+phase selection, uncertainty bound or global integrability of independently
+supplied density and Cp functions. Source ownership remains with its consumer.
+
 ## Mechanical ideal-gas EOS operation tree
 
 For positive finite molar mass `M`, absolute temperature `T`, and pressure `p`,
