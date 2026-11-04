@@ -156,6 +156,27 @@ impl Expansion {
                 .all(|v| v.is_finite())
     }
 
+
+    /// Relative arithmetic allowances require normal unsigned scales for every
+    /// retained moment order. Otherwise even nonzero geometry can have a zero
+    /// cached weight/quadrupole after underflow while its exact field is finite.
+    /// Such caches remain valid source containers but cannot be approximated.
+    fn resolved_moment_scales(&self) -> bool {
+        let w = self.w_abs_sum;
+        if !(w > 0.0 && w.is_normal()) {
+            return false;
+        }
+        if self.radius_m > 0.0 {
+            let dipole_scale = w * self.radius_m;
+            let quadrupole_scale = dipole_scale * self.radius_m;
+            if !dipole_scale.is_normal() || !quadrupole_scale.is_normal() {
+                return false;
+            }
+        }
+        self.max_abs_core_delta_m2 == 0.0
+            || (w * self.max_abs_core_delta_m2).is_normal()
+    }
+
     /// Pure quadrupole plus leading core-variation polynomial. The caller
     /// admits its domain/error before use; this never scans exact sources.
     pub(crate) fn velocity(&self, p: [f64; 3]) -> [f64; 3] {
@@ -208,6 +229,67 @@ impl Expansion {
         [k * v[0], k * v[1], k * v[2]]
     }
 
+
+    /// Analytic derivative of exactly the velocity polynomial above. Acceptance
+    /// must satisfy both the velocity and gradient remainder bounds.
+    pub(crate) fn kinematics(&self, p: [f64; 3]) -> crate::filament3d::WakeKinematics {
+        let r: [f64; 3] = core::array::from_fn(|i| p[i] - self.centroid[i]);
+        let rho2 = r[0] * r[0] + r[1] * r[1] + r[2] * r[2] + self.core2_m2;
+        let rho3 = rho2 * rho2.sqrt();
+        let rho5 = rho3 * rho2;
+        let rho7 = rho5 * rho2;
+        let rho9 = rho7 * rho2;
+        let kd = |i: usize, j: usize| -> f64 { if i == j { 1.0 } else { 0.0 } };
+        let jmat = |i: usize, j: usize| kd(i, j) / rho3 - 3.0 * r[i] * r[j] / rho5;
+        let hmat = |i: usize, j: usize, k: usize| {
+            -3.0 * (kd(i, j) * r[k] + kd(i, k) * r[j] + kd(j, k) * r[i]) / rho5
+                + 15.0 * r[i] * r[j] * r[k] / rho7
+        };
+        let tmat = |i: usize, j: usize, k: usize, l: usize| {
+            -3.0 * (kd(i, j) * kd(k, l) + kd(i, k) * kd(j, l) + kd(i, l) * kd(j, k))
+                / rho5
+                + 15.0
+                    * (kd(i, j) * r[k] * r[l]
+                        + kd(i, k) * r[j] * r[l]
+                        + kd(i, l) * r[j] * r[k]
+                        + kd(j, k) * r[i] * r[l]
+                        + kd(j, l) * r[i] * r[k]
+                        + kd(k, l) * r[i] * r[j])
+                    / rho7
+                - 105.0 * r[i] * r[j] * r[k] * r[l] / rho9
+        };
+        let scale = 1.0 / (4.0 * core::f64::consts::PI);
+        let core_cross_r = cross(self.core_moment, r);
+        let mut gradient = [[0.0; 3]; 3];
+        for n in 0..3 {
+            let mut column = cross(self.w_sum, core::array::from_fn(|i| jmat(i, n)));
+            for i in 0..3 {
+                let (j1, k1, j2, k2) = eps_pairs(i);
+                for l in 0..3 {
+                    column[i] -=
+                        self.dip[j1][l] * hmat(k1, l, n) - self.dip[j2][l] * hmat(k2, l, n);
+                    for m in 0..3 {
+                        column[i] += 0.5
+                            * (self.quad[j1][l][m] * tmat(k1, l, m, n)
+                                - self.quad[j2][l][m] * tmat(k2, l, m, n));
+                    }
+                }
+            }
+            let mut direction = [0.0; 3];
+            direction[n] = 1.0;
+            let core_cross_direction = cross(self.core_moment, direction);
+            for i in 0..3 {
+                gradient[i][n] = scale
+                    * (column[i] - 1.5 * core_cross_direction[i] / rho5
+                        + 7.5 * core_cross_r[i] * r[n] / rho7);
+            }
+        }
+        crate::filament3d::WakeKinematics {
+            velocity: self.velocity(p),
+            gradient,
+        }
+    }
+
     /// Absolute Euclidean velocity-error bound [m/s] for the retained Taylor
     /// polynomial. Infinity requires opening the node or evaluating sources.
     ///
@@ -224,7 +306,7 @@ impl Expansion {
 
     /// Same bound after the caller has admitted this immutable cache once.
     pub(crate) fn admitted_error_bound(&self, p: [f64; 3]) -> f64 {
-        if p.iter().any(|v| !v.is_finite()) {
+        if !self.resolved_moment_scales() || p.iter().any(|v| !v.is_finite()) {
             return f64::INFINITY;
         }
         let r = [
@@ -248,9 +330,6 @@ impl Expansion {
         let rho7 = rho5 * rho2;
         if !rho3.is_normal() || !rho5.is_normal() || !rho7.is_normal() {
             return f64::INFINITY;
-        }
-        if self.w_abs_sum == 0.0 {
-            return 0.0;
         }
         let distance = r[0].hypot(r[1]).hypot(r[2]);
         let d = distance - self.radius_m;
@@ -309,4 +388,109 @@ impl Expansion {
             f64::INFINITY
         }
     }
+    /// Absolute Frobenius Jacobian-error bound [1/s], after cache admission.
+    ///
+    /// Differentiate the retained Taylor polynomial before bounding its
+    /// remainder. With J = DxF, unit direction e, z = x/sqrt(q), t = z.e,
+    /// u = t^2 and s = |z|^2, 0 <= u <= s <= 1:
+    ///
+    /// q^3 D_e^3 J = (45t-105t^3)I + 90t ee^T
+    ///              + (45-315t^2)(ze^T+ez^T) + (-315t+945t^3)zz^T.
+    ///
+    /// Its squared Frobenius norm is convex in s. At s=1 it is
+    /// 4050+8100u-28350u^2+37800u^3, whose difference from 21600 is
+    /// (1-u)(17550+9450u+37800u^2). At s=u the difference is
+    /// 225(1-u)[(63u^2-77u/2)^2 + 2219u^2/4 -147u+96] >= 0.
+    /// Thus the spatial remainder coefficient is 60*sqrt(6)/6.
+    ///
+    /// D_e DcJ = (15/2)q^-3 [tI+ez^T+ze^T-7tzz^T].
+    /// The normalized squared norm is likewise convex in s; its endpoints
+    /// are 2+16u and 11u-42u^2+49u^3, both at most 18.
+    /// Finally DccJ=(15/4)q^-7/2(I-7zz^T) has Frobenius norm at most
+    /// (15/4)*sqrt(38)/q^(7/2). Core Taylor remainder contributes half.
+    ///
+    /// The resulting coefficients are 10*sqrt(6), (45/2)*sqrt(2), and
+    /// (15/8)*sqrt(38). Unsigned line measure bounds all source integrals.
+    /// A separate arithmetic allowance is conservative, not directed rounding.
+    pub(crate) fn admitted_gradient_error_bound(&self, p: [f64; 3]) -> f64 {
+        if !self.resolved_moment_scales() || p.iter().any(|v| !v.is_finite()) {
+            return f64::INFINITY;
+        }
+        let r: [f64; 3] = core::array::from_fn(|i| p[i] - self.centroid[i]);
+        let distance2 = r[0] * r[0] + r[1] * r[1] + r[2] * r[2];
+        let rho2 = distance2 + self.core2_m2;
+        if distance2 <= self.radius_m * self.radius_m
+            || self.max_abs_core_delta_m2 > rho2 / 16.0
+            || !rho2.is_finite()
+        {
+            return f64::INFINITY;
+        }
+        let rho = rho2.sqrt();
+        let rho3 = rho2 * rho;
+        let rho5 = rho3 * rho2;
+        let rho7 = rho5 * rho2;
+        let rho9 = rho7 * rho2;
+        if [rho3, rho5, rho7, rho9].iter().any(|v| !v.is_normal()) {
+            return f64::INFINITY;
+        }
+        let d = r[0].hypot(r[1]).hypot(r[2]) - self.radius_m;
+        let theta = self.radius_m / rho;
+        if d <= 0.0 || !(0.0 <= theta && theta < 1.0) {
+            return f64::INFINITY;
+        }
+        let core_delta = self.max_abs_core_delta_m2;
+        let spatial_q = d * d + self.core2_m2;
+        let core_q = d * d + (self.core2_m2 - core_delta).max(0.0);
+        if !spatial_q.is_normal() || !core_q.is_normal() {
+            return f64::INFINITY;
+        }
+        // Form dimensionless ratios: q^3 can overflow even when a finite
+        // physical remainder is representable. Such overflow must not look
+        // like a zero error bound.
+        let a_over_s = self.radius_m / spatial_q.sqrt();
+        let rho_over_s3 = (rho / spatial_q.sqrt()).powi(3);
+        let spatial = 10.0 * 6.0_f64.sqrt() * a_over_s.powi(3) * rho_over_s3;
+        let (mixed, core) = if core_delta == 0.0 {
+            (0.0, 0.0)
+        } else {
+            (
+                22.5 * 2.0_f64.sqrt() * a_over_s * (core_delta / spatial_q) * rho_over_s3,
+                1.875
+                    * 38.0_f64.sqrt()
+                    * (core_delta / core_q).powi(2)
+                    * (rho / core_q.sqrt()).powi(3),
+            )
+        };
+        let scale = ((self.w_abs_sum / rho2) / rho) / (4.0 * core::f64::consts::PI);
+        if !scale.is_normal() {
+            return f64::INFINITY;
+        }
+        let eps = f64::EPSILON;
+        let roundoff = 256.0 * eps * (self.source_count as f64 + 16.0);
+        if roundoff >= 0.125 {
+            return f64::INFINITY;
+        }
+        let coordinate_scale = p.iter().map(|v| v.abs()).fold(0.0_f64, f64::max)
+            + self
+                .centroid
+                .iter()
+                .map(|v| v.abs())
+                .fold(0.0_f64, f64::max)
+            + self.radius_m;
+        let conditioned = 256.0 * eps * (coordinate_scale / rho);
+        let delta = core_delta / rho2;
+        // Operator bounds for the four retained terms and their next spatial
+        // derivatives; sqrt(3) converts this arithmetic allowance to Frobenius.
+        let arithmetic = 3.0_f64.sqrt()
+            * (roundoff / (1.0 - roundoff)
+                * (2.0 + 24.0 * theta + 102.0 * theta * theta + 6.0 * delta)
+                + conditioned * (24.0 + 204.0 * theta + 1110.0 * theta * theta + 75.0 * delta));
+        let bound = scale * (spatial + mixed + core + arithmetic) * (1.0 + 256.0 * eps);
+        if bound.is_finite() && bound > 0.0 {
+            bound
+        } else {
+            f64::INFINITY
+        }
+    }
+
 }

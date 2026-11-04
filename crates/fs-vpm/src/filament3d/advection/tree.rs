@@ -7,6 +7,9 @@ use super::{
 use crate::farfield3d::expansion::Expansion;
 use crate::filament3d::WakeSegment;
 
+#[path = "field.rs"]
+pub(super) mod field;
+
 struct Node {
     start: usize,
     end: usize,
@@ -34,19 +37,33 @@ impl SourceTree {
         work: &mut WorkMeter,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), Refusal> {
+        self.rebuild_sources(sources, spec, false, work, cancelled)
+    }
+
+    fn rebuild_sources(
+        &mut self,
+        sources: &[PreparedSource],
+        spec: WakeTreeSpec,
+        retain_degenerate: bool,
+        work: &mut WorkMeter,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), Refusal> {
         checkpoint(cancelled)?;
         work.charge(sources.len() as u64)?;
         self.order.clear();
         self.nodes.clear();
         self.stack.clear();
         self.order
-            .try_reserve(sources.len())
+            .try_reserve_exact(sources.len())
             .map_err(|_| allocation())?;
         self.order.extend(
             sources
                 .iter()
                 .enumerate()
-                .filter_map(|(i, s)| (s.geometry.length > 0.0).then_some(i)),
+                .filter_map(|(i, s)| {
+                    (s.circulation != 0.0 && (retain_degenerate || s.geometry.length > 0.0))
+                        .then_some(i)
+                }),
         );
         if self.order.is_empty() {
             return Ok(());
@@ -61,9 +78,9 @@ impl SourceTree {
             .checked_mul(2)
             .and_then(|v| v.checked_sub(1))
             .ok_or_else(allocation)?;
-        self.nodes.try_reserve(nodes).map_err(|_| allocation())?;
+        self.nodes.try_reserve_exact(nodes).map_err(|_| allocation())?;
         self.stack
-            .try_reserve(usize::BITS as usize + 1)
+            .try_reserve_exact(usize::BITS as usize + 1)
             .map_err(|_| allocation())?;
         self.build_node(
             0,

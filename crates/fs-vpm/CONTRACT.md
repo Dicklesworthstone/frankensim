@@ -1431,3 +1431,96 @@ included through the evolved mean core and unchanged core deviations.
 `tests/expansion_bound3d.rs` checks heterogeneous cores, continued diffusion,
 signed cancellation, an independent analytic long-line oracle, scale and
 far-distance behavior, and mandatory exact-fallback domains.
+
+### Prepared source-tree kinematics and core queries
+
+`filament3d::PreparedWakeTree` prepares a reusable field snapshot from admitted
+`WakeSegment` values. It owns the actual oriented segments and individual
+physical core widths. Preparation builds the same deterministic `SourceTree`
+used by material advection, with the same continuous-line quadrupoles and
+leading core-variation moments. There is no second tree representation,
+particle substitution, source merging, or change to circulation. Source data
+and moments remain fixed; queries mutate only preallocated traversal scratch.
+A caller must prepare a new snapshot after changing physical geometry or cores.
+
+`prepare(sources, leaf_capacity, maximum_bytes, max_work, cancelled)` admits
+leaf sizes in 1..=256 and checks an explicit storage cap before allocation.
+`required_bytes(max_sources)` conservatively includes owned source geometry,
+worst-case nodes at leaf capacity one, source indices, traversal scratch and
+the owner. It excludes allocator bookkeeping/excess allocator-supplied capacity.
+Overflow refuses. Successful velocity, kinematics and core queries allocate no
+source/tree/index/traversal buffers. `source_count` includes every admitted
+input record, including zero-strength and degenerate sources.
+
+`velocity` accepts an absolute Euclidean error budget in m/s.
+`kinematics` accepts `WakeTreeAccuracy`, adding an independent absolute
+Frobenius Jacobian-error budget in s^-1. It analytically differentiates exactly
+the accepted velocity polynomial. An internal node is accepted only when both
+applicable full remainder bounds fit their unsigned-line-measure shares of
+half the requested budgets; otherwise it opens to exact segment leaves.
+Zero velocity tolerance, or zero gradient tolerance for a kinematics query,
+selects compensated summation in original source order. Exact mode reports
+zero expansion remainder, not zero floating-point error.
+
+For the gradient remainder, let node radius be a, unsigned circulation-length
+measure W, common core squared c, maximum core-squared deviation Delta, and
+geometric standoff d = |p-centroid|-a > 0. Define
+q_s = d^2+c and q_c = d^2+max(c-Delta,0). The complete real-arithmetic
+Frobenius truncation bound is
+
+    W/(4*pi) * [
+        10*sqrt(6) * a^3/q_s^3
+      + (45/2)*sqrt(2) * a*Delta/q_s^3
+      + (15/8)*sqrt(38) * Delta^2/q_c^(7/2)
+    ].
+
+These are the differentiated spatial, mixed space/core, and core-squared
+Taylor remainders. Their radial tensor bounds and endpoint polynomial proofs
+are documented in `farfield3d/expansion.rs`. Dimensionless ratios avoid
+overflow in the bound itself. A separate unsigned accumulation/coordinate
+allowance covers ordinary arithmetic conditioning; this remains distinct
+from a directed-rounding certificate or a time-integration error bound.
+
+Unresolved unsigned moment scales, nonnormal derivative denominators,
+nonfinite bounds, or an unrepresentable polynomial require exact fallback.
+In particular, a rounded-zero circulation-length measure does not establish
+zero flow: a short, weak source can still induce a representable field.
+Both whole-tree and internal-cell underflow paths retain exact sources.
+Diagnostic admission allows zero cores. Probes singular on an active
+unregularized segment return `None`; regular exterior-axis probes remain
+available. Nonfinite output tensors/curl/divergence are not published as
+valid kinematics.
+
+`in_core(p, multiplier, ...)` preserves the direct mask criterion:
+distance to a nonzero-strength segment is strictly less than the multiplier
+times that segment's own core radius. Expanded node balls conservatively
+exclude impossible matches, then exact leaf distances decide membership.
+Zero-strength records cannot mask a point; degenerate nonzero-strength
+records retain the native point-distance mask semantics. This query avoids
+a final full-source scan after accelerated field evaluation.
+
+`WakeTreeQueryReport` returns weighted logical work, node/accepted-cell/direct
+interaction counters, and summed velocity/gradient bounds. Preparation meters
+source admission and the shared tree construction. Each query charges one,
+each node eight, each accepted velocity expansion sixteen, each accepted
+kinematic expansion 128, each exact velocity/core-distance interaction one,
+and each exact kinematic interaction four. These are bounded logical work
+units, not FLOP counts. Cancellation is checked during traversals and again
+before every successful public return. Failure never changes the source
+snapshot; traversal scratch remains reusable.
+
+For gradient bound E_G, induced curl error is at most sqrt(2)*E_G and
+divergence error at most sqrt(3)*E_G. Orthogonal image reflection preserves
+velocity and Frobenius norms, so one prepared tree supports physical and
+reflected queries; budgets/bounds for their sum must be combined explicitly.
+For a centered velocity difference with step h, one derivative column's
+approximation bound is (E_plus+E_minus)/(2h). This does not account for the
+finite-difference truncation error or certify nonlinear derived invariants.
+
+The eight `tests/prepared_tree.rs` checks cover original-order exact parity,
+mixed cores and physical scaling, analytic gradients versus independent
+velocity differences, exact core-mask/culling behavior, zero-core singular
+semantics, weight/moment underflow, extreme derivative scales, byte/work caps,
+and final-boundary cancellation with snapshot reuse. These new Rust tests were
+authored and reviewed but native compilation and execution were unavailable
+for this extension; independent mathematical cross-checks are separate evidence.

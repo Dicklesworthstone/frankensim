@@ -8,6 +8,7 @@ mod tree;
 use crate::filament3d::SegmentGeometry;
 use crate::images3d::ImagePlane;
 use tree::SourceTree;
+pub use tree::field::{PreparedWakeTree, WakeTreeAccuracy, WakeTreeQueryReport};
 
 struct PreparedSource {
     geometry: SegmentGeometry,
@@ -340,6 +341,12 @@ fn velocity_at(
 impl PreparedSource {
     #[inline]
     fn unit_velocity(&self, p: [f64; 3]) -> Result<[f64; 3], Refusal> {
+        self.admit_separation(p)?;
+        Ok(self.geometry.velocity(p, self.core2_m2))
+    }
+
+    #[inline]
+    fn admit_separation(&self, p: [f64; 3]) -> Result<(), Refusal> {
         // Bound squared lengths and endpoint products before evaluating the
         // kernel: an overflowing denominator must not become apparent zero.
         let extent = self
@@ -357,7 +364,7 @@ impl PreparedSource {
                 "source-target separation exceeds the numerical domain",
             ));
         }
-        Ok(self.geometry.velocity(p, self.core2_m2))
+        Ok(())
     }
 }
 
