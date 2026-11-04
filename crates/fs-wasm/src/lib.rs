@@ -49,6 +49,7 @@ pub mod deep;
 pub mod dynamics;
 pub mod flagships;
 pub mod geom;
+pub mod laminar_vessel;
 pub mod pde;
 pub mod philox_normals;
 
@@ -73,6 +74,7 @@ pub use deep::{
 pub use dynamics::{ga_motor_orbit, lorenz_points, symplectic_vs_euler};
 pub use flagships::{run_frame, run_ornithoid, run_vessel};
 pub use geom::{marching_cubes, sdf_volume};
+pub use laminar_vessel::{LaminarVesselError, run_laminar_vessel};
 pub use pde::{fluid_frames, gray_scott_frames, topopt_frames, wave2d_frames};
 pub use philox_normals::{
     admit_philox_normals, philox_normals, philox_normals_admitted, philox_normals_envelope_json,

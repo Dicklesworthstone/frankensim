@@ -319,3 +319,29 @@ surface itself remains a build/smoke lane rather than a browser-E2E test suite.
   browser runner or WASM golden exists.
 - No browser performance claim without wasm32 benchmark artifacts.
 - No guarantee that every native crate feature is available in WASM.
+
+## Physical SI laminar vessel studies
+
+`laminar_vessel::run_laminar_vessel`, also exported at the crate root and through
+wasm-bindgen, accepts explicit section width/acceleration triples, width
+candidates, physical flow/density/viscosity/tension quartets and a wavenumber
+interval with kh/Re*kh budgets and CVaR level. The first fluid is nominal;
+subsequent rows are the equally weighted band. No dimensionless smoke control
+is silently converted to SI, and no synthetic source identity is generated.
+
+The native continuous-band evaluator and canonical CVaR produce all candidate
+rows in one sweep. The version-1 packet carries both selected candidates and
+actual section thickness, velocity, Reynolds, shear and worst-wavenumber
+profiles at the robust width and nominal fluid. The exact packed input/output
+layout is documented on the public function. This is a numerical binding, not
+a calibrated transient-pour animation or global stability certificate.
+
+Admission checks row shapes and explicit caps (64 sections, 128 candidates,
+64 band points and 65,536 section evaluations) before copying inputs or
+performing the study. Unsupported physics returns `LaminarVesselError` natively
+and a JavaScript error at the wasm boundary; inputs are never clamped and no
+NaN/empty/partial result impersonates success. The calculation is deterministic
+and contains no jitter or dense eigensolve. Native boundary regressions cover
+SI output and selection, repeatability, unsupported bands, invalid fluids/risk,
+row shapes and work admission. The historical `run_vessel` smoke export keeps
+its separately documented proxy and animation semantics.
