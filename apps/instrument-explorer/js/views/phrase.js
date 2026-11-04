@@ -2,7 +2,7 @@
 // for drawn on it, the measured pitch of every note, and how it was made. Shared by the home gallery and family pages.
 import { h, fmt, link, DATA } from '../app.js';
 import { Player, controls, playButton } from '../audio.js';
-import { mapFrame, pitchClass, unpitched } from '../spectro.js';
+import { mapFrame, pitchClass, silentCounts, silentShort, unpitched } from '../spectro.js';
 
 export const KIND_LABEL = {
   scale: 'scale', arpeggio: 'arpeggio', slur: 'lip slur', chords: 'chords', melody: 'melody', groove: 'groove',
@@ -46,7 +46,7 @@ export function pitchTally(p) {
 }
 
 function centsText(n) {
-  if (n.refused) return 'refused';
+  if (n.refused) return silentShort(n);
   if (unpitched(n)) return 'no steady pitch';
   if (n.cents === null || n.cents === undefined) return n.f0_hz ? `${fmt.num(n.f0_hz, 0)} Hz` : '–';
   const c = Math.round(n.cents);
@@ -62,7 +62,7 @@ function untimedText(p) {
   const n = (p.notes || []).length;
   if (p.native || !n) return 'one continuous render';
   const refused = p.notes.filter(x => x.refused).length;
-  return fmt.plural(n, p.kind === 'chords' ? 'chord' : 'part') + (refused ? `, ${refused} refused by the solver` : '');
+  return fmt.plural(n, p.kind === 'chords' ? 'chord' : 'part') + (refused ? `, ${silentCounts(p.notes).join(', ')}` : '');
 }
 
 /** A gallery card: the phrase's map as a thumbnail you can play in place, and a link to its page. */
@@ -82,7 +82,7 @@ export function phraseCard(p, familyTitle) {
       h('h3', null, h('a', { href: page }, p.title)),
       total
         ? h('div.pitchline', null, h('span.pitchdots', { 'aria-hidden': 'true' }, (p.notes || []).filter(n => pitchClass(n) !== 'none').slice(0, 24).map(n => h(`i.${pitchClass(n)}`))),
-          h('span', null, t.in === total ? `all ${total} notes in tune` : `${t.in} of ${total} in tune${t.out - t.refused ? `, ${t.out - t.refused} wrong` : ''}${t.refused ? `, ${t.refused} refused` : ''}`))
+          h('span', null, t.in === total ? `all ${total} notes in tune` : `${t.in} of ${total} in tune${t.out - t.refused ? `, ${t.out - t.refused} wrong` : ''}${t.refused ? `, ${silentCounts(p.notes).join(', ')}` : ''}`))
         : h('div.pitchline', null, h('span', null, untimedText(p))),
       h('a.open', { href: page, 'aria-label': `Full analysis of ${p.title}` },
         h('span', null, p.real || p.ref ? 'Compare with the real one' : 'Full analysis'), h('span.arrow', { 'aria-hidden': 'true' }, '→'))));
@@ -140,13 +140,13 @@ export function phraseStage(p, familyTitle) {
       h('span', null, h('i.c-near'), 'within 50¢'),
       h('span', null, h('i.c-out'), 'further off'),
       notes.some(n => pitchClass(n) === 'out') ? h('span', null, h('i.solid.c-out'), 'where it actually sounds') : null,
-      notes.some(n => n.refused) ? h('span', null, h('i.c-refused'), 'refused by the solver: silent') : null,
+      notes.some(n => n.refused) ? h('span', null, h('i.c-refused'), 'silent: not played') : null,
     ] : null,
     p.real ? [h('span', null, h('span.sw.sim'), 'simulation'), h('span', null, h('span.sw.real'), 'recording')] : null);
   const summary = total ? h('p.pitchsum', null,
     h('b', null, t.in === total ? `Every note in tune (within 10 cents)` : `${t.in} of ${total} notes within 10 cents`),
     t.near ? h('span', null, `${t.near} within 50`) : null, t.out - t.refused ? h('span', null, `${t.out - t.refused} further off`) : null,
-    t.refused ? h('span', null, `${t.refused} refused by the solver`) : null,
+    t.refused ? h('span', null, silentCounts(notes).join(', ')) : null,
     h('a', { href: '#/method' }, 'how pitch is measured')) : null;
   const how = h('div.howbox', null,
     h('div', null, h('h4', null, 'How it was made'), h('p', null, p.how || '')),
@@ -162,7 +162,7 @@ function noteTitle(n) {
   const parts = [n.note];
   if (n.string) parts.push(`on the ${n.string} string${n.semitones ? `, stopped ${n.semitones} semitone${n.semitones > 1 ? 's' : ''} up` : ' (open)'}`);
   if (n.target_hz) parts.push(`asked for ${fmt.num(n.target_hz, 1)} Hz`);
-  if (n.refused) parts.push(`not played: the solver refused it (${n.refused})`);
+  if (n.refused) parts.push(`not played: ${n.refused}`);
   else if (unpitched(n)) parts.push('no steady pitch: the waveform never settles into one period');
   else if (n.f0_hz) parts.push(`sounds ${fmt.num(n.f0_hz, 1)} Hz`);
   if (n.octave_check) parts.push(`(${n.octave_check})`);

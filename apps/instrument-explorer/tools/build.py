@@ -476,6 +476,7 @@ def build_pair(fid: str, note_id: str, note_dir: Path, media: Media, origin: str
                                             "licence": src.get("licence"), "url": src.get("url")},
         "no_reference": (pj.get("no_reference") or {}).get("reason"),
         "refused": pj.get("refused"),
+        "no_render": pj.get("no_render"),  # why a recording-only page has no render
         "f0_hz": f0 if isinstance(f0, dict) else None,
         "metrics": views,
         "tally": tally(views) if views else None,

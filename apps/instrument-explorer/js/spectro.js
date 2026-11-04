@@ -17,6 +17,25 @@ export function unpitched(n) {
   return Boolean(n && n.target_hz && n.periodicity !== undefined && n.periodicity !== null && n.periodicity < 0.5);
 }
 
+// Why a silent slot is silent, from the text delivered with it: still rendering, no bar exists, or a solver refusal.
+export function silentWhy(n) {
+  const s = String((n && n.refused) || '');
+  if (/^not rendered yet/i.test(s)) return 'not rendered yet';
+  if (/^there is no bar/i.test(s)) return 'no bar for this note';
+  return 'refused by the solver';
+}
+
+export function silentShort(n) {
+  return { 'not rendered yet': 'not yet', 'no bar for this note': 'no bar', 'refused by the solver': 'refused' }[silentWhy(n)];
+}
+
+/** One phrase's silent slots by cause, for a sentence: "4 not rendered yet", "2 refused by the solver". */
+export function silentCounts(notes) {
+  const c = new Map();
+  for (const n of notes || []) if (n.refused) c.set(silentWhy(n), (c.get(silentWhy(n)) || 0) + 1);
+  return [...c].map(([why, k]) => `${k} ${why}`);
+}
+
 export function pitchClass(n) {
   if (n && n.refused) return 'refused';  // the solver refused this note: its slot is silent, its message kept
   if (unpitched(n)) return 'out';
@@ -79,9 +98,9 @@ export function mapFrame(mapEl, { fLo, fHi, duration, player, label, notes, side
   const labels = labelled
     ? h('div.notelabels', null, notes.map(n => h('span', { style: { left: `${(100 * n.at) / duration}%` } }, n.note.replace(/^lip /, ''))))
     : null;
-  // a note the solver refused leaves its slot silent: say so on the simulation's map (never on the recording's)
+  // a note with no sound leaves its slot silent: say why on the simulation's map (never on the recording's)
   const refused = side !== 'real' && notes ? notes.filter(n => n.refused).map(n => h('div.refusedslot',
-    { style: { left: `${(100 * n.at) / duration}%`, width: `${(100 * n.dur) / duration}%` } }, h('span', null, 'refused'))) : [];
+    { style: { left: `${(100 * n.at) / duration}%`, width: `${(100 * n.dur) / duration}%` } }, h('span', null, silentShort(n)))) : [];
   const tag = label ? h(`span.maplabel${side ? `.${side}` : ''}`, null, label) : null;
   const frame = h(`div.mapframe${tall ? '.tall' : ''}`, null, mapEl, overlay, refused, labels, ticks, head, tag);
   if (typeof ResizeObserver === 'function') {

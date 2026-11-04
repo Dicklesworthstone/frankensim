@@ -3,7 +3,7 @@
 // long-term spectrum, and how both sounds were made and measured. Everything moves with the player.
 import { h, s, fmt, link, getJSON, DATA, empty } from '../app.js';
 import { controls } from '../audio.js';
-import { mapFrame, pitchClass, unpitched } from '../spectro.js';
+import { mapFrame, pitchClass, silentCounts, silentWhy, unpitched } from '../spectro.js';
 import { phrasePlayer, KIND_LABEL, pitchTally } from './phrase.js';
 
 let titleText = 'Phrase';
@@ -68,7 +68,7 @@ function tiles(p, an) {
     out.push({ cls: t.in === total ? 'in' : t.out ? 'out' : 'near', big: `${t.in}/${total}`, label: 'notes in tune',
       sub: t.in === total ? 'every note within 10 cents'
         : [t.near ? `${t.near} within 50 cents` : null, t.out - t.refused ? `${t.out - t.refused} more than 50 cents off` : null,
-          t.refused ? `${t.refused} refused by the solver` : null].filter(Boolean).join(', ') });
+          t.refused ? silentCounts(p.notes).join(', ') : null].filter(Boolean).join(', ') });
   }
   const sm = an.summary || {};
   if (sm.timbre_distance_db !== undefined) {
@@ -295,9 +295,9 @@ function noteTable(p, an, player) {
   const span = 1 + NOTE_COLS.length * (hasRef ? 2 : 1) + (hasRef ? 1 : 0);
   const rows = an.notes.map(row => {
     const n = notes[row.i];
-    if (n.refused) {  // a silent slot: the solver's message stands in for the measurements
+    if (n.refused) {  // a silent slot: its delivered reason stands in for the measurements
       return h('tr.n-refused', { 'data-i': String(row.i) }, h('td.note', null, n.note),
-        h('td.refused', { colspan: span }, h('b', null, 'refused by the solver'), ` (not played): ${n.refused}`));
+        h('td.refused', { colspan: span }, h('b', null, silentWhy(n)), ` (not played): ${n.refused}`));
     }
     const play = h('button.mini', { type: 'button', 'aria-label': `Play ${n.note}` }, '▶');
     play.addEventListener('click', () => player.load().then(() => { player.seek(n.at); player.play(); }, () => {}));
@@ -449,7 +449,8 @@ export async function render(main, r) {
     if (n.refused) {
       nowNote.replaceChildren(h('b', null, n.note), h('span', null, [n.string ? `${n.string} string` : null,
         n.target_hz ? `asked ${fmt.num(n.target_hz, 1)} Hz` : null, 'silent'].filter(Boolean).join(' · ')));
-      nowBody.replaceChildren(h('p.small', null, 'The solver refused this note part way through its render, rather than return a wrong answer: ', h('code', null, n.refused), '.'));
+      nowBody.replaceChildren(h('p.small', null, silentWhy(n) === 'refused by the solver'
+        ? ['The solver refused this note, rather than return a wrong answer: ', h('code', null, n.refused), '.'] : n.refused));
       holdHeight();
       return;
     }
