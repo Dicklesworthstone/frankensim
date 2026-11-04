@@ -64,8 +64,57 @@ impl MixtureEuler1d {
         gas_controls: StepControl,
         external_force_n: f64,
         controls: PistonControl,
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<PistonStep<SharedPistonGasReport>, PistonError> {
+        self.step_with_shared_piston_suspension(
+            right, piston, maximum_duration, gas_controls, external_force_n,
+            None, controls, cancelled,
+        ).map(|step| step.piston)
+    }
+
+    /// Couple both resolved pressures to one shared spring-and-damper piston.
+    ///
+    /// The stationary [`PistonSuspension`] enters every original joint velocity
+    /// trial. Both gas energies, piston kinetic energy, spring storage and
+    /// independently integrated viscous loss must balance the authored external
+    /// force work before either chamber publishes. Suspension impulse acts on
+    /// the piston; the anchor receives its opposite. Neither gas receives the
+    /// mechanical damper heat. The geometry, source and timestep limitations of
+    /// [`Self::step_with_shared_piston`] remain in force.
+    ///
+    /// # Errors
+    /// Suspension or native pressure/work refusal and cancellation preserve
+    /// both accepted fields, meshes, clocks and the piston.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_shared_suspended_piston(
+        &mut self,
+        right: &mut MixtureEuler1d,
+        piston: &mut Piston,
+        maximum_duration: Time,
+        gas_controls: StepControl,
+        external_force_n: f64,
+        suspension: PistonSuspension,
+        controls: PistonControl,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<SuspendedPistonStep<SharedPistonGasReport>, PistonError> {
+        self.step_with_shared_piston_suspension(
+            right, piston, maximum_duration, gas_controls, external_force_n,
+            Some(suspension), controls, cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::multicomponent) fn step_with_shared_piston_suspension(
+        &mut self,
+        right: &mut MixtureEuler1d,
+        piston: &mut Piston,
+        maximum_duration: Time,
+        gas_controls: StepControl,
+        external_force_n: f64,
+        suspension: Option<PistonSuspension>,
+        controls: PistonControl,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<SuspendedPistonStep<SharedPistonGasReport>, PistonError> {
         poll(&mut cancelled)?;
         let load = PistonLoad {
             exterior_pressure_pa: 0.0,
@@ -90,6 +139,7 @@ impl MixtureEuler1d {
                 "shared piston requires closed chambers with equal areas, interface coordinates and clocks",
             ));
         }
+        let suspension = suspension.map(|law| law.bind(interface)).transpose()?;
         let original_piston = *piston;
         let [lo, hi] = controls.midpoint_velocity_bracket_m_s;
         let (left_before, left_rate) = prepare(self, [lo, hi], &mut cancelled)?;
@@ -174,6 +224,11 @@ impl MixtureEuler1d {
                         right_report.left_boundary_change.energy,
                     ]),
                 };
+                let displacement = next_interface - interface;
+                let trial_load = match suspension {
+                    Some(law) => law.load(load, speed, displacement)?,
+                    None => load,
+                };
                 mechanical_report(
                     SharedPistonGasReport {
                         left,
@@ -181,14 +236,15 @@ impl MixtureEuler1d {
                     },
                     exchange,
                     original_piston,
-                    load,
+                    trial_load,
                     speed,
-                    next_interface - interface,
+                    displacement,
                     area,
                 )
-            });
+            }).and_then(|report| suspension::finish(suspension, report, load, dt, controls));
             match result {
-                Ok(mut report) => {
+                Ok(mut step) => {
+                    let report = &mut step.piston;
                     for side in [&mut report.gas.left, &mut report.gas.right] {
                         side.halvings = halvings;
                         side.first_order_retry = first_order_retry
@@ -202,8 +258,8 @@ impl MixtureEuler1d {
                         core::mem::swap(&mut flow.mesh, &mut moving.mesh);
                         flow.time += dt;
                     }
-                    piston.accept(&report);
-                    return Ok(report);
+                    piston.accept(report);
+                    return Ok(step);
                 }
                 Err(PistonError::Cancelled) => return Err(PistonError::Cancelled),
                 Err(PistonError::MixtureGas(Error::Allocation)) => {

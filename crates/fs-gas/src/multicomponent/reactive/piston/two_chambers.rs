@@ -5,7 +5,8 @@ use super::super::{
     coupled_report, poll, positive, react_cells, sum,
 };
 use crate::dynamics::piston::{
-    Piston, PistonControl, PistonError, PistonLoad, PistonStep, validate,
+    Piston, PistonControl, PistonError, PistonLoad, PistonStep, PistonSuspension,
+    SuspendedPistonStep, validate,
 };
 use crate::multicomponent::{Boundaries, Boundary, MixtureEuler1d, SharedPistonGasReport};
 use fs_qty::Time;
@@ -15,21 +16,21 @@ pub use molecular::ReactiveSharedPistonGasReport;
 
 /// One accepted pair of reacting chambers and their common mechanical response.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ReactiveSharedPistonStep {
+pub struct ReactiveSharedPistonStep<P = PistonStep<SharedPistonGasReport>> {
     /// Complete left-chamber chemistry and transport, in its original species order.
     pub left: ReactiveStepReport,
     /// Complete right-chamber chemistry and transport, in its original species order.
     pub right: ReactiveStepReport,
     /// Original simultaneous two-field pressure/piston solve between chemistry halves.
-    pub piston: PistonStep<SharedPistonGasReport>,
+    pub piston: P,
     /// Actual physical chemical-energy changes [J], ordered [left, right].
     /// These include each source bank's species-reference changes.
     pub gas_energy_change_j: [f64; 2],
     /// Whole-step gas/piston momentum change plus outer support impulses,
-    /// minus the independently applied piston impulse [N s].
+    /// minus the independently applied piston and suspension impulses [N s].
     pub combined_momentum_residual_n_s: f64,
-    /// Both physical gas-energy changes plus piston kinetic change,
-    /// minus the applied force's actual displacement work [J].
+    /// Both physical gas-energy changes plus piston kinetic change, spring
+    /// storage and damper loss when present, minus authored drive work [J].
     pub total_energy_residual_j: f64,
 }
 
@@ -72,8 +73,68 @@ impl ReactingEuler1d {
         controls: ReactiveStepControl,
         external_force_n: f64,
         piston_controls: PistonControl,
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<ReactiveSharedPistonStep, ReactiveError> {
+        self.step_with_shared_piston_suspension(
+            right, piston, maximum_duration, controls, external_force_n,
+            None, piston_controls, cancelled,
+        ).map(|step| ReactiveSharedPistonStep {
+            left: step.left,
+            right: step.right,
+            piston: step.piston.piston,
+            gas_energy_change_j: step.gas_energy_change_j,
+            combined_momentum_residual_n_s: step.combined_momentum_residual_n_s,
+            total_energy_residual_j: step.total_energy_residual_j,
+        })
+    }
+
+    /// Advance both reacting chambers with a shared spring-and-damper piston.
+    ///
+    /// The original C/P/C composition retains each mechanism and chemical
+    /// energy datum. Its pressure stage solves both resolved fields together
+    /// with the stationary [`PistonSuspension`]. Whole-step admission includes
+    /// both physical chemical energies, kinetic and spring storage, damper loss,
+    /// authored drive work, and both fixed-support and suspension impulses.
+    /// The nested suspended report covers the pressure stage; the outer balances
+    /// additionally include both chemistry halves at their actual cell volumes.
+    ///
+    /// The suspension is held during the complete step. Changing its anchor or
+    /// stiffness between calls requires caller accounting of that work. Damper
+    /// loss leaves the mechanical system and is not added as gas heat.
+    ///
+    /// # Errors
+    /// The same source, geometry, budget and cancellation refusals as
+    /// [`Self::step_with_shared_piston`] preserve both fields and the piston.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_shared_suspended_piston(
+        &mut self,
+        right: &mut ReactingEuler1d,
+        piston: &mut Piston,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        external_force_n: f64,
+        suspension: PistonSuspension,
+        piston_controls: PistonControl,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ReactiveSharedPistonStep<SuspendedPistonStep<SharedPistonGasReport>>, ReactiveError> {
+        self.step_with_shared_piston_suspension(
+            right, piston, maximum_duration, controls, external_force_n,
+            Some(suspension), piston_controls, cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_with_shared_piston_suspension(
+        &mut self,
+        right: &mut ReactingEuler1d,
+        piston: &mut Piston,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        external_force_n: f64,
+        suspension: Option<PistonSuspension>,
+        piston_controls: PistonControl,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<ReactiveSharedPistonStep<SuspendedPistonStep<SharedPistonGasReport>>, ReactiveError> {
         poll(&mut cancelled)?;
         validate(
             *piston,
@@ -136,15 +197,17 @@ impl ReactingEuler1d {
                     &mut chemistry[1],
                     &mut cancelled,
                 )?;
-                let mechanical = self.trial.step_with_shared_piston(
+                let suspended = self.trial.step_with_shared_piston_suspension(
                     &mut right.trial,
                     &mut trial_piston,
                     Time::new(duration),
                     controls.transport,
                     external_force_n,
+                    suspension,
                     piston_controls,
                     &mut cancelled,
                 )?;
+                let mechanical = &suspended.piston;
                 let elapsed = mechanical.gas.left.elapsed;
                 if elapsed != mechanical.gas.right.elapsed {
                     return Err(ReactiveError::Invalid(
@@ -197,13 +260,13 @@ impl ReactingEuler1d {
                         flow.transport.boundary_change.energy,
                     ])
                 });
-                let total_energy_residual_j = sum([
+                let mut total_energy_residual_j = sum([
                     gas_energy_change_j[0],
                     gas_energy_change_j[1],
                     mechanical.kinetic_energy_change_j,
                     -mechanical.external_force_work_j,
                 ]);
-                let combined_momentum_residual_n_s = sum([
+                let mut combined_momentum_residual_n_s = sum([
                     left.after.momentum - left.before.momentum,
                     right_report.after.momentum - right_report.before.momentum,
                     original_piston.mass_kg()
@@ -211,6 +274,17 @@ impl ReactingEuler1d {
                     mechanical.fixed_wall_impulse_n_s,
                     -duration * external_force_n,
                 ]);
+                if suspension.is_some() {
+                    total_energy_residual_j = sum([
+                        gas_energy_change_j[0],
+                        gas_energy_change_j[1],
+                        mechanical.kinetic_energy_change_j,
+                        suspended.spring_energy_change_j,
+                        suspended.damping_energy_j,
+                        -suspended.applied_force_work_j,
+                    ]);
+                    combined_momentum_residual_n_s -= suspended.suspension_impulse_n_s;
+                }
                 if !gas_energy_change_j
                     .into_iter()
                     .chain([total_energy_residual_j, combined_momentum_residual_n_s])
@@ -233,7 +307,7 @@ impl ReactingEuler1d {
                     Some(ReactiveSharedPistonStep {
                         left,
                         right: right_report,
-                        piston: mechanical,
+                        piston: suspended,
                         gas_energy_change_j,
                         combined_momentum_residual_n_s,
                         total_energy_residual_j,

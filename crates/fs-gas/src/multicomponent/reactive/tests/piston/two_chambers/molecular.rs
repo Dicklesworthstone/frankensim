@@ -6,6 +6,8 @@ use crate::multicomponent::dissipation::{
 };
 use crate::multicomponent::reactive::ReactiveSharedPistonGasReport;
 
+mod suspension;
+
 fn molecular_step(
     left: &mut ReactingEuler1d,
     right: &mut ReactingEuler1d,

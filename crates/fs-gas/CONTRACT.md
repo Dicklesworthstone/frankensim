@@ -4247,12 +4247,53 @@ cancellation checkpoint precedes joint gas, mesh, clock and velocity commit.
 The held-force entrypoints retain their original arithmetic; zero stiffness
 and damping reproduce them exactly. Evolving-mixture sources retain each
 species and its original formation-energy reference, including exact absences.
-This supplies a linear stationary suspension, not Coulomb friction, contact
-stops, moving anchors, heat return, reacting-piston composition or an automatic
-mechanical accuracy guarantee. The requested duration must resolve the
-physical spring/damping and gas timescales.
+These one-sided entrypoints supply a linear stationary suspension, not Coulomb
+friction, contact stops, moving anchors, heat return, reacting-piston composition
+or an automatic mechanical accuracy guarantee. The requested duration must
+resolve the physical spring/damping and gas timescales.
 
 Focused regressions exercise independent midpoint-force solutions, repeated
 pressure-driven trajectories with full gas/kinetic/spring/loss and momentum
 balance, preloaded equilibrium, exact free-piston reduction, variable-Cp
 species and energy-gauge invariance, and early/final cancellation rollback.
+
+## Shared suspended pistons with chemistry and molecular transport
+
+`MixtureEuler1d::step_with_shared_suspended_piston` applies the same original
+`PistonSuspension` to both resolved pressure fields around one inertial wall.
+Every joint speed proposal retains both moving-volume RK2 fields and their
+original independent species axes, caloric sources and energy references.
+Both actual face-pressure impulses supply piston motion and conjugate gas work;
+there is no imposed exterior-pressure work for an already represented chamber.
+Spring force uses the actual shared displacement midpoint, and viscous damping
+uses the same solved velocity. Existing retained workspaces own every attempt.
+
+`ReactingEuler1d::step_with_shared_suspended_piston` carries this mechanical
+solve through both original C/P/C source compositions. Its
+`ReactiveSharedPistonStep<P>` retains the complete chemistry reports; the
+suspended mechanics type describes the pressure stage, while the outer
+energy/momentum residuals cover the complete chemical step. The default
+mechanics type and held-force entrypoint keep their existing report semantics.
+`step_with_shared_suspended_piston_and_dissipation` includes both original
+D/C/A/C/D chambers inside every speed proposal, with actual pressure and
+longitudinal molecular-stress impulse/work from both sides. First source halves
+use accepted volumes and second halves use the actual moved volumes.
+
+Complete admission requires both physical chemical-energy changes plus piston
+kinetic change, quadratic spring-storage change and independent `c*w²*dt` loss
+to equal authored drive displacement work. Each source's formation reference
+enters exactly once. Molecular viscous heating stays in the original gas energy;
+mechanical damper loss leaves this system. Momentum includes both fixed outer
+supports and the suspension anchor's opposite impulse. A shortened duration
+restarts both complete chamber compositions. No gas, mesh, clock, piston or
+molecular geometry binding publishes before all balances and final cancellation.
+
+These are sealed constant-area axial chambers with one negligible-thickness
+piston, a stationary suspension anchor and fixed outer ends. They add no leakage,
+piston heat transfer, contact stop, moving anchor or general FSI accuracy claim. The held
+coefficient/anchor and caller-owned between-step work conventions remain those
+of `PistonSuspension`; the caller resolves the mechanical and gas timescales.
+Six focused regressions cover independent preload and midpoint-motion oracles,
+full storage/loss/momentum trajectories, distinct source gauges and species,
+chemical energy, an independent viscous-gas-heating oracle, exact zero-law
+reduction and final cancellation with both molecular bindings reusable.

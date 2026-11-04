@@ -2,8 +2,8 @@
 
 use super::initial_duration;
 use crate::dynamics::piston::{
-    MechanicalExchange, Piston, PistonControl, PistonLoad, PistonStep, mechanical_report, solve,
-    validate,
+    MechanicalExchange, Piston, PistonControl, PistonLoad, PistonStep, PistonSuspension,
+    SuspendedPistonStep, mechanical_report, solve, suspension, validate,
 };
 use crate::multicomponent::dissipation::{DissipationControl, DissipationOperator, TransportLaw};
 use crate::multicomponent::reactive::piston::molecular::MovingMolecularTrial;
@@ -71,8 +71,67 @@ impl ReactingEuler1d {
         dissipation_controls: [DissipationControl; 2],
         external_force_n: f64,
         piston_controls: PistonControl,
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<PistonStep<ReactiveSharedPistonGasReport>, ReactiveError> {
+        self.step_with_shared_piston_dissipation_suspension(
+            right, left_operator, right_operator, piston, maximum_duration, controls,
+            dissipation_controls, external_force_n, None, piston_controls, cancelled,
+        ).map(|step| step.piston)
+    }
+
+    /// Couple both original reacting molecular fields to a suspended piston.
+    ///
+    /// Each original D/C/A/C/D proposal includes the shared spring and damper
+    /// in its midpoint-speed equation. Both actual pressure and molecular-stress
+    /// impulses retain their conjugate wall work. The accepted balance includes
+    /// both physical chemical energies, kinetic and spring storage, and the
+    /// independent mechanical damper loss. Original gas viscous heating remains
+    /// in the molecular owner; suspension damping is a distinct exported loss.
+    ///
+    /// The stationary suspension is held over the complete reported step;
+    /// caller changes to stiffness or anchor between calls own their work.
+    /// Source, geometry, thermal-boundary and work-budget limits remain those of
+    /// [`Self::step_with_shared_piston_and_dissipation`].
+    ///
+    /// # Errors
+    /// Any source, pressure/work or suspension refusal, or cancellation, leaves
+    /// both accepted fields, clocks, piston and molecular bindings unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_shared_suspended_piston_and_dissipation<L: TransportLaw, R: TransportLaw>(
+        &mut self,
+        right: &mut ReactingEuler1d,
+        left_operator: &mut DissipationOperator<L>,
+        right_operator: &mut DissipationOperator<R>,
+        piston: &mut Piston,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        dissipation_controls: [DissipationControl; 2],
+        external_force_n: f64,
+        suspension: PistonSuspension,
+        piston_controls: PistonControl,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<SuspendedPistonStep<ReactiveSharedPistonGasReport>, ReactiveError> {
+        self.step_with_shared_piston_dissipation_suspension(
+            right, left_operator, right_operator, piston, maximum_duration, controls,
+            dissipation_controls, external_force_n, Some(suspension), piston_controls, cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_with_shared_piston_dissipation_suspension<L: TransportLaw, R: TransportLaw>(
+        &mut self,
+        right: &mut ReactingEuler1d,
+        left_operator: &mut DissipationOperator<L>,
+        right_operator: &mut DissipationOperator<R>,
+        piston: &mut Piston,
+        maximum_duration: Time,
+        controls: ReactiveStepControl,
+        dissipation_controls: [DissipationControl; 2],
+        external_force_n: f64,
+        suspension: Option<PistonSuspension>,
+        piston_controls: PistonControl,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<SuspendedPistonStep<ReactiveSharedPistonGasReport>, ReactiveError> {
         poll(&mut cancelled)?;
         let load = PistonLoad {
             exterior_pressure_pa: 0.0,
@@ -107,6 +166,9 @@ impl ReactingEuler1d {
         let original_piston = *piston;
         let area = self.accepted.mesh.face_areas()[0];
         let interface = self.accepted.cell_count();
+        let suspension = suspension
+            .map(|law| law.bind(self.accepted.mesh.positions()[interface]))
+            .transpose()?;
         let mut gas_trials = 0;
         let mut last =
             ReactiveError::Invalid("no admissible shared molecular reacting piston increment");
@@ -194,6 +256,10 @@ impl ReactingEuler1d {
                 };
                 let displacement = self.trial.mesh.positions()[interface]
                     - self.accepted.mesh.positions()[interface];
+                let trial_load = match suspension {
+                    Some(law) => law.load(load, speed, displacement)?,
+                    None => load,
+                };
                 mechanical_report(
                     ReactiveSharedPistonGasReport {
                         left: left.flow,
@@ -205,23 +271,27 @@ impl ReactingEuler1d {
                     },
                     exchange,
                     original_piston,
-                    load,
+                    trial_load,
                     speed,
                     displacement,
                     area,
                 )
                 .map_err(ReactiveError::from)
+            }).and_then(|report| {
+                suspension::finish(suspension, report, load, duration, piston_controls)
+                    .map_err(ReactiveError::from)
             });
             match attempt {
-                Ok(mut report) => {
+                Ok(mut step) => {
+                    let report = &mut step.piston;
                     report.gas_trials = gas_trials;
                     poll(&mut cancelled)?;
                     core::mem::swap(&mut self.accepted, &mut self.trial);
                     core::mem::swap(&mut right.accepted, &mut right.trial);
                     left_operator.publish_motion();
                     right_operator.publish_motion();
-                    piston.accept(&report);
-                    return Ok(report);
+                    piston.accept(report);
+                    return Ok(step);
                 }
                 Err(ReactiveError::Cancelled) => return Err(ReactiveError::Cancelled),
                 Err(error) => {
