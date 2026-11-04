@@ -147,7 +147,7 @@ pub(super) fn advance(
     let next_momentum = core::array::from_fn(|d| {
         (Dd::from_f64(momentum[d]) + impulse[d]).to_f64()
     });
-    if (0..3).any(|d| impulse[d].to_f64() != 0.0 && next_momentum[d] == momentum[d]) {
+    if (0..3).any(|d| impulse[d] != Dd::ZERO && next_momentum[d] == momentum[d]) {
         return None;
     }
     let next_velocity = velocity(new_mass, next_momentum)?;
