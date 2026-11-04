@@ -7922,11 +7922,22 @@ clarinet is one filling of those objects.
   reusing the existing response design, FIR stepping and linear convolution.
   The sample clock remains exactly `1/dt`. Numerical tail-energy tolerance is
   explicit and is not derived from terrestrial-air uncertainty. Admission
-  requires `omega*tau <= 0.01` through Nyquist; this weak-loss applicability
-  threshold is not an error bound. The retained material, actual FIR DC delay,
-  remaining `r/c - delay`, numerical padding and tail energy are reported.
-  Nonfinite input/output refuses atomically. The finite-band minimum-phase
-  response does not claim physical dispersion or source uncertainty.
+  requires `omega*tau <= 0.01` through Nyquist; this supported-regime threshold
+  is not an error bound. The retained material, selected model, actual FIR DC
+  delay, remaining `r/c0 - delay`, numerical padding and tail energy are
+  reported. Nonfinite input/output refuses atomically. Existing constructors
+  retain the classical finite-band minimum-phase approximation.
+
+  `FluidPropagationModel::ThermoviscousDispersion` is explicitly selected by
+  `FluidObserverFilter::with_model` or
+  `air_path::fluid::propagate_pressure_history_with_model`. Its complex
+  acoustic root supplies exp(-Im(k) r) exp(-i (Re(k)-omega/c0) r) for the FFT
+  synthesis convention. The original response owner retains this phase through
+  Nyquist alignment, precursor padding and truncation; minimum phase is not
+  reconstructed from its magnitude. `r/c0` is a reference delay, not a finite
+  wavefront of the parabolic Navier–Stokes–Fourier equations. Branch refusals
+  propagate; no molecular spectrum, boundary thermal mode or temperature
+  evolution is added. The same conservative Nyquist guard remains explicit.
 
   `pcm_wav::baffled::BaffledPressure::new_multirate_fluid_differentiating`
   composes that same fluid filter on each original surface path. Gas and
@@ -7936,7 +7947,14 @@ clarinet is one filling of those objects.
   original infinite-baffle and prescribed-motion assumptions. G1/G3 tests
   compare signed complex path sums, delay closure and actual pressure changes
   against independently calculated bulk-viscosity attenuation; all original
-  gas path semantics remain in the same owner.
+  gas path semantics remain in the same owner. Explicit `_with_model`
+  variants on this surface constructor and the circular-opening constructor
+  preserve the selected acoustic dispersion on every original path. Rayleigh
+  source normalization and boundary assumptions remain unchanged. Six added
+  regressions cover independent viscous complex phase, signed surface paths,
+  batch/stream timing, exact-clock admission, path composition and legacy
+  constructors. These integrated regressions remain unrun because the execution
+  environment became unavailable; they are not a new full-NSF boundary solve.
 
   `circular_openings_multirate_fluid_differentiating` exposes the same liquid
   and real-gas propagation to native volume-flow apertures. Circular quadrature,

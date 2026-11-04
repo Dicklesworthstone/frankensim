@@ -493,3 +493,99 @@ fn g0_fluid_opening_and_latency_refusals_preserve_the_original_clock_and_history
     assert_eq!(directional.kernels, before);
     assert_eq!(directional_report.additional_latency_samples, padding);
 }
+
+#[test]
+fn g1_thermoviscous_surface_paths_match_independent_complex_viscous_waves() {
+    let state = ThermoviscousFluidState::try_new(
+        FluidAcousticState::try_new(1000.0, 1200.0).unwrap(),
+        FluidTransportState::try_new(1000.0, 4000.0, 0.6, 5.0).unwrap(),
+        4000.0,
+    )
+    .unwrap();
+    let selection = FluidPropagation {
+        absorption: ClassicalBulkAbsorption::from_material(&state, 50.0).unwrap(),
+        ..propagation(50.0)
+    };
+    let surface = surface();
+    let rate = 48_000;
+    let (receiver, report) = BaffledPressure::new_multirate_fluid_differentiating_with_model(
+        &surface, 2, rate, rate, [0.0, 0.0, 20.0], &selection,
+        FluidPropagationModel::ThermoviscousDispersion, &mut || false,
+    )
+    .unwrap();
+    assert_eq!(report.surface_filter_indices, [0, 0, 1]);
+    assert!(report.filters.iter().all(|r| {
+        r.model == FluidPropagationModel::ThermoviscousDispersion
+            && r.absorption == selection.absorption
+    }));
+    for frequency in [1500.0, 6000.0, 12_000.0] {
+        let omega = TAU * frequency;
+        // Independent real-arithmetic solution for Cp=Cv and longitudinal
+        // viscosity. No call to either the material root or the FIR designer.
+        let x = omega * (4.0 * 5.0 / 3.0 + 50.0) / (1000.0 * 1200.0_f64.powi(2));
+        let norm = 1.0_f64.hypot(x);
+        let re = ((norm + 1.0) / (2.0 * norm * norm)).sqrt();
+        let wave_re = omega / 1200.0 * re;
+        let wave_im = omega / 1200.0 * x / (2.0 * norm * norm * re);
+        for input in 0..2 {
+            let (mut expected_re, mut expected_im, mut scale) = (0.0, 0.0, 0.0);
+            for (sample, &index) in surface.iter().zip(&report.surface_filter_indices) {
+                let receipt = report.filters[index];
+                let gain = 1000.0 * sample.area_m2 * sample.mode_shape[input]
+                    / (TAU * receipt.range_m);
+                let magnitude = (-wave_im * receipt.range_m).exp();
+                // The original receiver uses the actual retained FIR DC
+                // moment. Keep its finite-truncation correction explicit.
+                let phase = -wave_re * receipt.range_m
+                    - omega * (report.additional_latency_samples as f64 + path::HALF as f64)
+                        / f64::from(rate)
+                    + omega * (receipt.low_frequency_delay_s - receipt.latency_s);
+                expected_re += gain * magnitude * phase.cos();
+                expected_im += gain * magnitude * phase.sin();
+                scale += gain.abs() * magnitude;
+            }
+            let [actual_re, actual_im] = kernel(&receiver, input, frequency);
+            assert!(
+                (actual_re - expected_re).hypot(actual_im - expected_im) < 1e-3 * scale,
+                "frequency={frequency}, input={input}"
+            );
+        }
+    }
+    assert!(BaffledPressure::new_multirate_fluid_differentiating_with_model(
+        &surface, 2, rate, rate, [0.0, 0.0, 20.0], &selection,
+        FluidPropagationModel::ThermoviscousDispersion, &mut || true,
+    ).is_err());
+}
+
+#[test]
+fn g3_circular_fluid_paths_select_dispersion_and_preserve_legacy_constructor() {
+    use super::super::{CircularOutletReceiver, openings::CircularOpening};
+    let openings = [CircularOpening { center_m: [0.0; 2], radius_m: 0.001 }];
+    let receiver = CircularOutletReceiver {
+        position_m: [0.0, 0.0, 2.0],
+        radial_rings: 1,
+        angular_points: 8,
+        maximum_frequency_hz: 18_000.0,
+    };
+    let selection = propagation(10.0);
+    let (_, exact_report) = BaffledPressure::circular_openings_multirate_fluid_differentiating_with_model(
+        &openings, 48_000, 48_000, receiver, &selection,
+        FluidPropagationModel::ThermoviscousDispersion, &mut || false,
+    )
+    .unwrap();
+    assert!(!exact_report.filters.is_empty());
+    assert!(exact_report.filters.iter()
+        .all(|r| r.model == FluidPropagationModel::ThermoviscousDispersion));
+    let (legacy, legacy_report) = BaffledPressure::circular_openings_multirate_fluid_differentiating(
+        &openings, 48_000, 48_000, receiver, &selection, &mut || false,
+    )
+    .unwrap();
+    let (explicit, explicit_report) = BaffledPressure::circular_openings_multirate_fluid_differentiating_with_model(
+        &openings, 48_000, 48_000, receiver, &selection,
+        FluidPropagationModel::ClassicalMinimumPhase, &mut || false,
+    )
+    .unwrap();
+    assert_eq!(legacy.kernels, explicit.kernels);
+    assert_eq!(legacy_report.filters, explicit_report.filters);
+    assert_eq!(legacy_report.additional_latency_samples, explicit_report.additional_latency_samples);
+}
