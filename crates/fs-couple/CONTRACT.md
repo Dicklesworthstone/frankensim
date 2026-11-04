@@ -1,5 +1,32 @@
 # CONTRACT: fs-couple
 
+## Physical harmonics of original nonlinear port outputs
+
+`phs_orbit::spectrum::observe_port_spectrum` evaluates `G^T grad H(x)` from
+every original HB state coordinate, including explicit material memory. Output
+order is independent of state order: nonlinear storage can create DC, even
+harmonics and higher harmonics absent from the state coefficients. The shared
+FFT owner synthesizes the full state and projects the physical output, with
+one original-gradient evaluation per sample and O((states + ports) N log N)
+transform work. No small-signal linearization, added harmonic envelope or
+constitutive replacement is used.
+
+Three or more successively doubled, shifted sample grids preserve the original
+phase origin. Two successive comparisons must fit each port's absolute RMS
+budget, shared between retained-coefficient change and observed omitted-band
+RMS. Explicit source-evaluation, sample and numeric-storage bounds apply;
+cancellation or refusal publishes no partial spectrum. DC remains a separate
+real physical load. Positive output lines use peak `exp(-i n omega t)` phasors,
+`2 conj(c_n)`, compatible with existing mechanical and acoustic consumers.
+
+G1/G3/G4 cases in `tests/port_spectrum.rs` check analytic biased cubic output,
+phase and amplitude conversion, weak physical scales, unresolved output order,
+DC, budgets and cancellation. An integration case propagates the actual force
+harmonics through the existing compact acoustic observer and pressure renderer
+against an independent retarded-time force/force-rate oracle. Finite-grid
+agreement is not an infinite-tail bound, equation-solve or stability certificate,
+continuum validation, reciprocal acoustic load, or measured-instrument claim.
+
 ## Molecular absorption on original finite gas storage
 
 `molecular_heating::MolecularGasHeating` binds an original prepared molecular BEM

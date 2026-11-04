@@ -27,6 +27,9 @@ pub use tangent::{
     solve_forced_harmonic_balance_analytic_scaled_seeded,
 };
 
+/// Physical port harmonics evaluated through the original nonlinear storage.
+pub mod spectrum;
+
 mod continuation;
 pub use continuation::{
     PhsFrequencyResponsePoint, PhsScaledFrequencyResponsePoint,
