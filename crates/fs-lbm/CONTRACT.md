@@ -5293,6 +5293,22 @@ Newton-linearized about the previous iterate
 (`ThermalSetup::cell_sinks`, reported in `EnergyBalance::sink_outflow_w`),
 starting from the linearization about the surroundings temperature.
 
+For prescribed-flow steady convection, the same accepted endpoint must satisfy
+both the relative temperature-change criterion and each cell's nonlinear
+physical radiation power versus its solved tangent at `RadiationConfig::tolerance`.
+The original radiation owner supplies the heat scale and floating-point
+allowance; a large global temperature span cannot waive local physical heat
+closure. The existing `max_iterations` bounds the shared loop, and accepted
+flow/temperature fields are returned without another solve. `RadiationReport`
+retains the maximum cell defect, relative power defect, net physical outflow
+correction and corrected energy residual in watts. Fixed-temperature cells'
+corrections also change their thermostat heat, so they cancel from that net
+correction. The native energy report continues to describe its solved tangent.
+The focused `tests/radiative_convection_closure.rs` target exercises escape-only
+and surface exchange on prescribed advective flow, budget refusal despite a
+passing temperature gate, independent Stefan–Boltzmann heat, and physical
+fixed-temperature reservoir accounting in a sealed exchange enclosure.
+
 | Fixture | Reference | Measured |
 |---|---|---|
 | Slab filling a box floor, five faces surroundings at 300 K, non-conducting air, 5 W | `F = 1` exactly; `T = (P / (eps sigma A) + T_amb^4)^(1/4)` | every escape factor 1.0; 433.501645484 K vs 433.501645484 K; 5.000000000 W radiated; 6 Newton iterations |

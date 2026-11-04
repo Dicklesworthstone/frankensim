@@ -21,7 +21,8 @@
 //! to the effective surroundings temperature `T_amb = <T_surroundings^4>^(1/4)`
 //! over its escaping rays, preserving the sum of incident radiant powers.
 //! The energy equation carries `q` as a cell sink Newton-linearized about the
-//! previous iterate (`G = 4 eps sigma F A T^3`), iterated to convergence.
+//! previous iterate (`G = 4 eps sigma F A T^3`), iterated until the
+//! temperature and the physical cell powers agree with the solved tangent.
 //!
 //! # Surface-to-surface exchange
 //!
@@ -88,9 +89,9 @@ pub struct RadiationConfig {
     /// Nonlinear iteration budget for steady radiation and each transient step.
     pub max_iterations: usize,
     /// Largest temperature change between Picard iterates at convergence,
-    /// relative to the temperature span. Transient steps also require each
-    /// cell's physical radiation power to agree with its solved tangent at
-    /// this relative tolerance (with a floating-point roundoff allowance).
+    /// relative to the temperature span. Steady and transient solves also
+    /// require each cell's physical radiation power to agree with its solved
+    /// tangent at this relative tolerance (with a floating-point allowance).
     pub tolerance: f64,
     /// Exchange between the emitting surfaces (see the module docs); when
     /// false, only the escape to the surroundings is modelled.
@@ -150,6 +151,17 @@ pub struct RadiationReport {
     pub radiated_w: f64,
     /// Largest temperature change of the last Picard iterate over the span.
     pub temperature_change: f64,
+    /// Largest physical-minus-tangent radiation power magnitude in any cell, W.
+    pub maximum_cell_power_defect_w: f64,
+    /// Largest cellwise power defect normalized by the original radiation
+    /// owner's heat scale and roundoff allowance, bounded by the tolerance.
+    pub relative_power_defect: f64,
+    /// Physical-minus-tangent radiation outflow in cells without a fixed
+    /// temperature, W. A fixed cell's correction also changes its thermostat's
+    /// heat supply and cancels from the net energy residual.
+    pub net_outflow_correction_w: f64,
+    /// Solved energy residual minus the net radiation correction, W.
+    pub physical_energy_residual_w: f64,
     /// Exchange patches (0 without `surface_exchange`).
     pub patches: usize,
 }
@@ -1161,14 +1173,15 @@ impl Radiators {
     }
 }
 
-/// Steady conjugate energy with surface radiation to the surroundings on a
-/// given flow, by Picard iteration of the linearized radiative sinks.
+/// Steady conjugate energy with surface radiation on a prescribed flow, by
+/// Picard iteration of the linearized radiative sinks. The accepted endpoint
+/// must satisfy both the relative temperature and physical cell-power gates.
 ///
 /// # Errors
 /// Input and solver refusals, [`ChtError::SolverNotConverged`] (system
 /// `"radiation"`) when the Picard budget ends first, or
 /// [`ChtError::Cancelled`].
-#[allow(clippy::too_many_arguments)] // physics inputs + both configurations
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // one bounded coupled loop
 pub fn solve_energy_radiating(
     domain: &VoxelDomain,
     fluid: &FluidProperties,
@@ -1186,48 +1199,89 @@ pub fn solve_energy_radiating(
         });
     }
     let radiators = Radiators::build(domain, solids, radiation, gate)?;
+    let cells = domain.cell_count();
     // Start from the sinks linearized about a reference temperature (the
     // surroundings, else a declared face or fixed temperature): without
     // radiation the first iterate can lack the dominant heat path.
     let reference = radiators.reference(reference_temperature(setup, radiation));
-    let mut first = setup.clone();
-    first.cell_sinks.extend(
-        radiators.endpoint(domain, &vec![reference; domain.cell_count()], gate)?.sinks,
+    let mut step = setup.clone();
+    let base_sinks = step.cell_sinks.len();
+    step.cell_sinks.extend(
+        radiators.endpoint(domain, &vec![reference; cells], gate)?.sinks,
     );
-    let mut solution = solve_energy(domain, fluid, solids, flow, &first, energy, gate)?;
+    let mut solution = solve_energy(domain, fluid, solids, flow, &step, energy, gate)?;
     let mut endpoint = radiators.endpoint(domain, &solution.temperature, gate)?;
+    // Reuse the original setup and radiation buffers for every candidate.
+    // The seed solve has admitted these fixed-cell indices. Their physical
+    // radiation corrections also change thermostat heat and cancel globally.
+    let mut tangent_power = vec![0.0; cells];
+    let mut tangent_scale = vec![0.0; cells];
+    let mut fixed = vec![false; cells];
+    for (index, &(cell, _)) in setup.fixed_temperature.iter().enumerate() {
+        if index.is_multiple_of(1024) {
+            poll(gate)?;
+        }
+        fixed[cell] = true;
+    }
     let mut change = f64::INFINITY;
+    let mut maximum_cell_power_defect_w = 0.0_f64;
+    let mut relative_power_defect = f64::INFINITY;
+    let mut net_outflow_correction_w = 0.0;
+    let mut physical_energy_residual_w = f64::INFINITY;
     let mut iterations = 0usize;
     while iterations < radiation.max_iterations {
         poll(gate)?;
         iterations += 1;
-        let mut step = setup.clone();
+        step.cell_sinks.truncate(base_sinks);
         step.cell_sinks.extend_from_slice(&endpoint.sinks);
         let next = solve_energy(domain, fluid, solids, flow, &step, energy, gate)?;
         let next_endpoint = radiators.endpoint(domain, &next.temperature, gate)?;
-        let (lo, hi) = next
-            .temperature
-            .iter()
-            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), t| {
-                (lo.min(*t), hi.max(*t))
-            });
-        let largest = next
-            .temperature
-            .iter()
-            .zip(&solution.temperature)
-            .fold(0.0f64, |m, (a, b)| m.max((a - b).abs()));
+        endpoint.write_tangent_power(
+            &next.temperature, &mut tangent_power, &mut tangent_scale, gate,
+        )?;
+        let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+        let mut largest = 0.0_f64;
+        maximum_cell_power_defect_w = 0.0;
+        relative_power_defect = 0.0;
+        net_outflow_correction_w = 0.0;
+        for cell in 0..cells {
+            if cell.is_multiple_of(1024) {
+                poll(gate)?;
+            }
+            let t = next.temperature[cell];
+            lo = lo.min(t);
+            hi = hi.max(t);
+            largest = largest.max((t - solution.temperature[cell]).abs());
+            let defect = next_endpoint.power_defect(
+                cell,
+                tangent_power[cell],
+                tangent_scale[cell],
+                setup.power_w.get(cell).copied().unwrap_or(0.0).abs(),
+            )?;
+            maximum_cell_power_defect_w =
+                maximum_cell_power_defect_w.max(defect.difference_w.abs());
+            relative_power_defect = relative_power_defect.max(defect.relative);
+            if !fixed[cell] {
+                net_outflow_correction_w += defect.difference_w;
+            }
+        }
         change = largest / (hi - lo).max(f64::MIN_POSITIVE);
+        physical_energy_residual_w =
+            next.report.balance.residual_w - net_outflow_correction_w;
+        finite("radiation.outflow_correction_w", net_outflow_correction_w)?;
+        finite("radiation.physical_energy_residual_w", physical_energy_residual_w)?;
         solution = next;
         endpoint = next_endpoint;
-        if change <= radiation.tolerance {
+        if change <= radiation.tolerance && relative_power_defect <= radiation.tolerance {
             break;
         }
     }
-    if change > radiation.tolerance {
+    let residual = change.max(relative_power_defect);
+    if residual > radiation.tolerance {
         return Err(ChtError::SolverNotConverged {
             system: "radiation",
             iterations,
-            relative_residual: change,
+            relative_residual: residual,
             tolerance: radiation.tolerance,
         });
     }
@@ -1238,6 +1292,10 @@ pub fn solve_energy_radiating(
         iterations,
         radiated_w: endpoint.radiated_w,
         temperature_change: change,
+        maximum_cell_power_defect_w,
+        relative_power_defect,
+        net_outflow_correction_w,
+        physical_energy_residual_w,
         patches,
     };
     Ok((solution, report))
