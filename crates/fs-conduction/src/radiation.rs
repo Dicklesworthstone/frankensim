@@ -51,7 +51,7 @@ mod prepared;
 pub mod open;
 pub use open::{OpenDiffuseEnclosure, OpenEnclosureSolution, OpenRadiationBoundary,
     OpenRadiosityReport, solve_with_open_gray_diffuse_enclosure};
-mod equilibrium;
+pub(crate) mod equilibrium;
 /// Spatially resolved nonlinear T^4 exchange and its exact local tangent.
 pub mod pointwise;
 /// Local P1 emission coupled to reflected, patch-uniform irradiation.
@@ -1421,14 +1421,60 @@ where
     F: Fn(&RadiosityReport) -> Result<crate::ThermalBoundary, ConductionError>,
     R: Fn(&[f64]) -> Result<RadiosityReport, ConductionError>,
 {
+    let (conduction, radiation, boundary) = solve_radiating_surfaces_with(
+        cx, problem, surfaces, coupling_config, apply_boundary, evaluate,
+        |problem, warm| {
+            let mut config = conduction_config.clone();
+            if let Some(temperature) = warm {
+                let dofs = DofMap::new(problem.boundary, problem.mesh.vertex_count())?;
+                config.initial = InitialGuess::Free(dofs.gather(temperature));
+            }
+            let solution = run_conduction(cx, problem, interfaces, config)?;
+            require_enclosure_solid_residual(cx, &solution)?;
+            Ok(solution)
+        },
+        |solution| &solution.temperature,
+        |candidate, nonlinear, applied| {
+            let equilibrium = equilibrium::check(cx, problem, interfaces,
+                candidate, nonlinear, applied, apply_boundary, convection.then_some(surfaces))?;
+            let accepted = equilibrium.residual_w <= equilibrium.residual_threshold_w;
+            Ok((equilibrium, accepted))
+        },
+    )?;
+    Ok((CoupledRadiationSolution { conduction, radiation }, boundary))
+}
+
+/// One original radiosity iteration for static or source-backed solid owners.
+/// Every response callback must retain its own inner physical acceptance gate;
+/// the final callback audits the unchanged field under fresh constitutive laws.
+/// The default closed/open entry points above keep their original callbacks.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn solve_radiating_surfaces_with<T, F, R, S, V, A>(
+    cx: &Cx<'_>,
+    problem: ConductionProblem<'_>,
+    surfaces: &[RadiationSurface],
+    coupling_config: CoupledRadiationConfig,
+    apply_boundary: &F,
+    evaluate: &R,
+    mut solve_solid: S,
+    temperature: V,
+    mut audit: A,
+) -> Result<(T, CoupledRadiationReport, crate::ThermalBoundary), ConductionError>
+where
+    F: Fn(&RadiosityReport) -> Result<crate::ThermalBoundary, ConductionError>,
+    R: Fn(&[f64]) -> Result<RadiosityReport, ConductionError>,
+    S: FnMut(ConductionProblem<'_>, Option<&[f64]>) -> Result<T, ConductionError>,
+    V: Fn(&T) -> &[f64],
+    A: FnMut(&mut T, RadiosityReport, &RadiosityReport)
+        -> Result<(EnclosureEquilibriumReport, bool), ConductionError>,
+{
     coupling_config.validate()?;
     let surface_temperatures = |temperature: &[f64]| {
         surfaces.iter().map(|surface| surface.mean_temperature(problem.mesh, temperature))
             .collect::<Result<Vec<_>, ConductionError>>()
     };
-    let mut conduction = run_conduction(cx, problem, interfaces, conduction_config.clone())?;
-    require_enclosure_solid_residual(cx, &conduction)?;
-    let mut driving_temperatures = surface_temperatures(&conduction.temperature)?;
+    let mut conduction = solve_solid(problem, None)?;
+    let mut driving_temperatures = surface_temperatures(temperature(&conduction))?;
     let mut update_history = Vec::new();
     let mut equilibrium_checks = 0usize;
     let mut last_equilibrium_residual = None;
@@ -1440,18 +1486,14 @@ where
         })?;
         let radiosity = evaluate(&driving_temperatures)?;
         let overlaid = apply_boundary(&radiosity)?;
-        let dofs = DofMap::new(&overlaid, problem.mesh.vertex_count())?;
-        let mut next_config = conduction_config.clone();
-        next_config.initial = InitialGuess::Free(dofs.gather(&conduction.temperature));
         // Radiation changes boundary loads, not the solid's material laws.
         // Retain heterogeneous assignments (including k(T)) on EVERY iterate.
         let next_problem = ConductionProblem {
             boundary: &overlaid,
             ..problem
         };
-        let next = run_conduction(cx, next_problem, interfaces, next_config)?;
-        require_enclosure_solid_residual(cx, &next)?;
-        let actual_temperatures = surface_temperatures(&next.temperature)?;
+        let next = solve_solid(next_problem, Some(temperature(&conduction)))?;
+        let actual_temperatures = surface_temperatures(temperature(&next))?;
         for (surface, &temperature_k) in surfaces.iter().zip(&actual_temperatures) {
             surface.emissivity.validate_temperature(
                 surface.name(),
@@ -1476,23 +1518,18 @@ where
         conduction = next;
         if update <= threshold {
             let nonlinear = evaluate(&actual_temperatures)?;
-            let equilibrium = equilibrium::check(cx, problem, interfaces,
-                &conduction, nonlinear, &radiosity, apply_boundary,
-                convection.then_some(surfaces))?;
+            let (equilibrium, accepted) = audit(&mut conduction, nonlinear, &radiosity)?;
             equilibrium_checks += 1;
             last_equilibrium_residual = Some(equilibrium.residual_w);
-            if equilibrium.residual_w <= equilibrium.residual_threshold_w {
-                return Ok((CoupledRadiationSolution {
-                    conduction,
-                    radiation: CoupledRadiationReport {
+            if accepted && equilibrium.residual_w <= equilibrium.residual_threshold_w {
+                return Ok((conduction, CoupledRadiationReport {
                         iterations: iteration + 1,
                         surface_update_history_k: update_history,
                         final_threshold_k: threshold,
                         radiosity,
                         equilibrium,
                         equilibrium_checks,
-                    },
-                }, overlaid));
+                    }, overlaid));
             }
         }
         for (driving, actual) in driving_temperatures.iter_mut().zip(actual_temperatures) {
@@ -1515,7 +1552,7 @@ where
 // General conduction may stop on a caller-declared small step. That is not
 // sufficient for an enclosure equilibrium: neither the initial field nor a
 // radiation-loaded iterate may bypass the original solid residual gate.
-fn require_enclosure_solid_residual(
+pub(crate) fn require_enclosure_solid_residual(
     cx: &Cx<'_>,
     solution: &ConductionSolution,
 ) -> Result<(), ConductionError> {

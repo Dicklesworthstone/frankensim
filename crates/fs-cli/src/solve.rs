@@ -296,7 +296,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// exchange through the same prescribed, natural and transported-air owners.
 /// Version 112 carries the complete live-contact adjoint through natural
 /// convection, retaining signed wall and ambient feedback at the physical field.
-pub const SOLVE_DRIVER_VERSION: u32 = 112;
+/// Version 113 composes steady live contact with closed area-mean enclosure
+/// radiation, including fresh radiative nodal loads and reservoir reactions.
+pub const SOLVE_DRIVER_VERSION: u32 = 113;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";

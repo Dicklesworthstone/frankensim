@@ -8,6 +8,8 @@ pub mod newton;
 pub use newton::{ContactSteadyNewtonSolution, SteadyContactNewtonConfig};
 /// Complete contact/bulk Newton responses inside ambient patch radiation.
 pub mod radiation;
+/// Closed reflected enclosure exchange through the same steady contact owners.
+pub mod enclosure;
 
 use fs_exec::Cx;
 use fs_solver::norm2;

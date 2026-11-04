@@ -7,7 +7,8 @@ use super::{
     RadiationSurface, RadiosityReport, ThermalInterfaces,
     radiation_error,
 };
-use crate::assemble::{assemble_operator_scaled_with_interfaces, residual};
+use crate::assemble::{assemble_operator_scaled_with_interfaces, full_residual};
+use crate::{EnergyBalance, RobinFlux};
 
 /// Final-state evidence for the actual nonlinear enclosure equations.
 ///
@@ -52,6 +53,32 @@ pub(super) fn check<F>(
 where
     F: Fn(&RadiosityReport) -> Result<crate::ThermalBoundary, ConductionError>,
 {
+    Ok(endpoint(cx, problem, interfaces, &candidate.temperature,
+        candidate.report.residual_threshold, nonlinear, applied,
+        apply_boundary, original_convection)?.report)
+}
+
+/// Physical rows at one unchanged field. Convection retains its original
+/// boundary law; explicit radiative nodal loads also enter prescribed reactions.
+pub(crate) struct Endpoint {
+    pub(crate) report: EnclosureEquilibriumReport,
+    pub(crate) free_residual_w: Vec<(usize, f64)>,
+    pub(crate) dirichlet_reactions_w: Vec<(usize, f64)>,
+    pub(crate) energy: EnergyBalance,
+    pub(crate) robin_fluxes: Vec<RobinFlux>,
+    pub(crate) convective_out_w: f64,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn endpoint<F>(
+    cx: &Cx<'_>, problem: ConductionProblem<'_>, interfaces: Option<&ThermalInterfaces>,
+    temperature: &[f64], threshold: f64, nonlinear: RadiosityReport,
+    applied: &RadiosityReport, apply_boundary: &F,
+    original_convection: Option<&[RadiationSurface]>,
+) -> Result<Endpoint, ConductionError>
+where
+    F: Fn(&RadiosityReport) -> Result<crate::ThermalBoundary, ConductionError>,
+{
     poll(cx)?;
     let mut max_patch_heat_mismatch_w = 0.0f64;
     for (&new, &old) in nonlinear.net_outward_heat_w.iter().zip(&applied.net_outward_heat_w) {
@@ -80,10 +107,10 @@ where
     // Crucially retain the original heterogeneous k(T), contact and source.
     // The matrix is assembled at T, not at the preceding radiation driver.
     let system = assemble_operator_scaled_with_interfaces(cx, problem.mesh, &boundary,
-        problem.material, problem.source, &candidate.temperature, None, interfaces,
+        problem.material, problem.source, temperature, None, interfaces,
         problem.element_materials)?;
     poll(cx)?;
-    let mut values = residual(&system, &dofs, &candidate.temperature);
+    let mut full = full_residual(&system, temperature);
     if let Some(surfaces) = original_convection {
         // Reassemble the ORIGINAL convection and add actual radiative loads
         // directly. Reconstructing a shifted Robin reference here could hide
@@ -99,26 +126,42 @@ where
                         "use supported finite heat flux and surface geometry"));
                 }
                 for &vertex in &face.vertices {
-                    if let Some(index) = dofs.slot_of(vertex as usize) {
-                        values[index] += nodal_heat;
-                    }
+                    full[vertex as usize] += nodal_heat;
                 }
             }
         }
     }
-    if values.iter().any(|v| !v.is_finite()) {
+    if full.iter().any(|v| !v.is_finite()) {
         return Err(radiation_error("enclosure-equilibrium", "nonfinite reassembled residual",
             "inspect the original physical model and numerical range"));
     }
+    let free_residual_w: Vec<_> = dofs.free().iter().map(|&v| (v, full[v])).collect();
+    let values: Vec<_> = free_residual_w.iter().map(|&(_, r)| r).collect();
     let residual_w = fs_solver::norm2(&values);
-    let threshold = candidate.report.residual_threshold;
     if !residual_w.is_finite() || !threshold.is_finite() || threshold < 0.0 {
         return Err(radiation_error("enclosure-equilibrium", "invalid nonlinear residual or threshold",
             "retain the original finite nonnegative solid residual policy"));
     }
     poll(cx)?;
-    Ok(EnclosureEquilibriumReport {
+    let dirichlet_reactions_w: Vec<_> = dofs.fixed().iter().map(|&v| (v, full[v])).collect();
+    let (mut energy, robin_fluxes) = crate::solve::energy_balance(problem.mesh, &boundary,
+        problem.source, &system, &dofs, temperature);
+    let convective_out_w = energy.robin_out_w;
+    if original_convection.is_some() {
+        // The common outward boundary account includes radiation once, while
+        // the retained Robin rows contain original convection alone for air.
+        energy.dirichlet_in_w = dirichlet_reactions_w.iter().map(|&(_, r)| r).sum();
+        energy.robin_out_w += nonlinear.net_outward_heat_w.iter().sum::<f64>();
+        energy.closure_w = energy.source_w + energy.dirichlet_in_w
+            - energy.neumann_out_w - energy.robin_out_w;
+        energy.scale_w = energy.source_w.abs().max(energy.dirichlet_in_w.abs())
+            .max(energy.neumann_out_w.abs()).max(energy.robin_out_w.abs())
+            .max(f64::MIN_POSITIVE);
+    }
+    let report = EnclosureEquilibriumReport {
         nonlinear_radiosity: nonlinear, residual_w, residual_threshold_w: threshold,
         max_patch_heat_mismatch_w,
-    })
+    };
+    Ok(Endpoint { report, free_residual_w, dirichlet_reactions_w, energy,
+        robin_fluxes, convective_out_w })
 }

@@ -1,6 +1,8 @@
 //! Fresh contact and exact radiative heat must balance on the returned field.
 
 use super::*;
+#[path = "radiation/enclosure.rs"]
+mod enclosure;
 use fs_conduction::interface::temperature::steady::{SteadyContactConfig, SteadyContactNewtonConfig};
 use fs_conduction::{
     AmbientRadiationConfig, AmbientRadiationPatch, ConductionSolver, EMISSIVITY_DIMS, InitialGuess,

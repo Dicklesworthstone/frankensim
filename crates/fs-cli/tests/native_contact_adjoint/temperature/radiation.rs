@@ -1,6 +1,8 @@
 //! Real imported bodies retain contact and radiation in the same steady solve.
 
 use super::*;
+#[path = "radiation/enclosure.rs"]
+mod enclosure;
 
 fn receipt(f: &Fixture, ordinal: usize) -> J {
     receipt_with_pack(f, ordinal, temperature_pack())
@@ -187,7 +189,8 @@ fn source_surface_contact_reuses_ambient_radiation_and_preserves_the_air_heat_sp
         assert_eq!(contact.str_field("algorithm"), Some("bounded-contact-picard"));
         assert_eq!(composition.str_field("method"), Some("area-mean-secant-with-bounded-contact-picard"));
         assert_eq!(composition.get("physical_endpoint_reassembled"), Some(&J::Bool(true)));
-        assert_eq!(number(composition, "radiation_responses"), number(radiation, "solid_solves"));
+        assert_eq!(number(composition, "thermal_responses"), number(radiation, "solid_solves"));
+        assert_eq!(number(composition, "radiation_responses"), number(radiation, "radiation_trials"));
         assert!(number(composition, "thermal_responses") > number(composition, "radiation_responses"));
         assert!(number(contact, "total_thermal_responses") >= number(composition, "thermal_responses"));
         assert!(number(contact, "total_nonlinear_iterations") >= number(radiation, "solid_iterations"));

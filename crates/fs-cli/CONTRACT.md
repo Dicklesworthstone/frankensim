@@ -3528,3 +3528,26 @@ contact derivatives against power, resistance and natural-ambient perturbations.
 Classical derivatives still require unique material and contact slopes. Airflow,
 radiation, transient history and prescribed-temperature control derivatives
 remain outside this native contact-adjoint composition.
+
+### Closed-enclosure radiation with live contact — driver 113
+
+Steady source-backed contact now composes with closed area-mean gray-diffuse
+enclosure radiation. The existing radiosity iteration calls the complete contact
+Newton response for scalar/curve sources or the original bounded contact fixed
+point for source surfaces. It retains the original heterogeneous conductivity,
+independent contact traces, emissivity sources, view factors and boundary laws.
+The static-contact and open-enclosure entry points continue to use the same
+radiosity loop with their existing solid response.
+
+At the unchanged final temperature, the shared endpoint audit re-queries contact
+and radiosity and adds radiative nodal loads directly to the original physical
+equations. Those loads enter prescribed-temperature reactions as well as free
+rows. Free-node residual, heat closure, per-patch heat mismatch and radiosity
+residual all pass the original watt budgets. Only original convection enters
+transported air; contact and closed-enclosure exchange remain internal.
+
+Published counters include the initial solid response, every radiation trial
+and all nested contact, nonlinear and Krylov work. The final numerical history
+continues to describe its applied load; fresh endpoint evidence is reported
+separately, with no hidden replacement solve. Live steady contact with open or
+pointwise enclosure radiation and contact/radiation adjoints remain unsupported.

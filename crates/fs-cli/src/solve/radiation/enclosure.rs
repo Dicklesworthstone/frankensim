@@ -9,7 +9,9 @@ use fs_conduction::radiation::{
     ViewFactorEvidence, ViewFactorMatrix, ViewFactorTolerance,
     solve_with_convective_gray_diffuse_enclosure,
 };
-use fs_conduction::{ConductionError, ConductionProblem, SolveConfig, ThermalInterfaces};
+use fs_conduction::{ConductionError, ConductionProblem, ConductionSolution, RobinFlux,
+    SolveConfig, ThermalBoundary, ThermalInterfaces};
+use fs_conduction::interface::temperature::steady::enclosure::ContactEnclosureWork;
 use fs_exec::Cx;
 use fs_conduction::transient::enthalpy::enclosure::EnthalpyEnclosureReport;
 use fs_project::spec::{ConductionSetup, ThermalBoundaryCondition};
@@ -36,6 +38,7 @@ pub(super) struct ClosedEnclosureResult {
     model: GrayDiffuseEnclosure,
     report: EnclosureReport,
     decomposition_residual_w: f64,
+    contact_work: Option<ContactEnclosureWork>,
 }
 
 enum EnclosureReport {
@@ -300,39 +303,11 @@ pub(super) fn solve(
     poll(cx, solved.radiation.iterations)?;
     let tolerance = declaration.heat_tolerance.value;
     let applied = &solved.radiation.radiosity;
-    let actual = &solved.radiation.equilibrium.nonlinear_radiosity;
-    let largest_area = model
-        .surfaces()
-        .iter()
-        .map(RadiationSurface::area_m2)
-        .fold(0.0_f64, f64::max);
     let decomposition = solved.conduction.report.energy.robin_out_w
         + solved.conduction.report.energy.neumann_out_w
         - solved.convective_out_w - solved.prescribed_neumann_out_w
         - applied.enclosure_energy_closure_w;
-    // The owner already gates the full nonlinear free residual. Additionally
-    // enforce the project's explicit patch-watt and closed-energy allowances.
-    if !tolerance.is_finite()
-        || tolerance <= 0.0
-        || !decomposition.is_finite()
-        || decomposition.abs() > tolerance
-        || !solved
-            .radiation
-            .equilibrium
-            .max_patch_heat_mismatch_w
-            .is_finite()
-        || solved.radiation.equilibrium.max_patch_heat_mismatch_w > tolerance
-        || [applied, actual].iter().any(|report| {
-            !report.enclosure_energy_closure_w.is_finite()
-                || report.enclosure_energy_closure_w.abs() > tolerance
-                || !report.linear_residual_max_w_m2.is_finite()
-                || report.linear_residual_max_w_m2 * largest_area > tolerance
-        })
-    {
-        return Err(physical(
-            "the converged enclosure failed its declared patch heat, radiosity, closed-energy or convection decomposition gate",
-        ));
-    }
+    check_steady(&model, &solved.radiation, tolerance, decomposition)?;
     // Native common energy always exposes authored Neumann heat separately.
     // Its existing combined convection/radiation channel includes the signed
     // internal enclosure closure; applied per-trace evidence remains retained.
@@ -355,8 +330,66 @@ pub(super) fn solve(
             model,
             report: EnclosureReport::Steady(solved.radiation),
             decomposition_residual_w: decomposition,
+            contact_work: None,
         })),
     })
+}
+
+/// Identical project-level heat gates for static and source-backed contacts.
+fn check_steady(model: &GrayDiffuseEnclosure, radiation: &CoupledRadiationReport,
+    tolerance: f64, decomposition: f64) -> Result<(), ConductionError>
+{
+    let applied = &radiation.radiosity;
+    let actual = &radiation.equilibrium.nonlinear_radiosity;
+    let largest_area = model.surfaces().iter().map(RadiationSurface::area_m2)
+        .fold(0.0_f64, f64::max);
+    if !tolerance.is_finite()
+        || tolerance <= 0.0
+        || !decomposition.is_finite()
+        || decomposition.abs() > tolerance
+        || !radiation
+            .equilibrium
+            .max_patch_heat_mismatch_w
+            .is_finite()
+        || radiation.equilibrium.max_patch_heat_mismatch_w > tolerance
+        || [applied, actual].iter().any(|report| {
+            !report.enclosure_energy_closure_w.is_finite()
+                || report.enclosure_energy_closure_w.abs() > tolerance
+                || !report.linear_residual_max_w_m2.is_finite()
+                || report.linear_residual_max_w_m2 * largest_area > tolerance
+        })
+    {
+        return Err(physical(
+            "the converged enclosure failed its declared patch heat, radiosity, closed-energy or convection decomposition gate",
+        ));
+    }
+    Ok(())
+}
+
+impl SolidSolution {
+    /// The source-contact owner already retained the physical endpoint energy
+    /// and reactions. Keep those rows, checking the same native enclosure heat
+    /// policy while retaining the counted numerical boundary independently.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::solve) fn from_contact_enclosure(
+        conduction: ConductionSolution, model: GrayDiffuseEnclosure,
+        radiation: CoupledRadiationReport, applied_boundary: ThermalBoundary,
+        convective_fluxes: Vec<RobinFlux>, convective_out_w: f64,
+        work: ContactEnclosureWork, heat_tolerance_w: f64,
+    ) -> Result<Self, ConductionError> {
+        let decomposition = conduction.report.energy.robin_out_w - convective_out_w
+            - radiation.equilibrium.nonlinear_radiosity.enclosure_energy_closure_w;
+        check_steady(&model, &radiation, heat_tolerance_w, decomposition)?;
+        Ok(Self { conduction, convective_fluxes: Some(convective_fluxes),
+            convective_out: Some(convective_out_w), radiation: None, pointwise: None,
+            radiation_thermal_responses: Some(work.thermal_responses),
+            combined_boundary: Some(applied_boundary),
+            enclosure: Some(EnclosureResult::Closed(ClosedEnclosureResult {
+                model, report: EnclosureReport::Steady(radiation),
+                decomposition_residual_w: decomposition, contact_work: Some(work),
+            })),
+        })
+    }
 }
 
 impl EnclosureResult {
@@ -389,6 +422,7 @@ impl EnclosureResult {
                 energy_residual_j: endpoint.physical_energy_residual_j,
             },
             decomposition_residual_w: endpoint.decomposition_residual_w,
+            contact_work: None,
         })
     }
 
@@ -422,7 +456,8 @@ impl ClosedEnclosureResult {
                 report.radiosity.enclosure_energy_closure_w,
                 format!(
                     "\"solid_solves\":{},\"surface_iterations\":{},\"equilibrium_checks\":{},\"max_temperature_change_k\":{},\"max_heat_mismatch_w\":{},\"nonlinear_residual_w\":{},\"nonlinear_residual_threshold_w\":{}",
-                    report.iterations + 1, report.iterations, report.equilibrium_checks,
+                    thermal_responses.unwrap_or(report.iterations + 1),
+                    report.iterations, report.equilibrium_checks,
                     num(report.surface_update_history_k.last().copied().unwrap_or(0.0))?,
                     num(report.equilibrium.max_patch_heat_mismatch_w)?,
                     num(report.equilibrium.residual_w)?,
@@ -446,6 +481,15 @@ impl ClosedEnclosureResult {
                 ),
             ),
         };
+        let detail = if let Some(work) = self.contact_work {
+            let responses = match &self.report {
+                EnclosureReport::Steady(report) => report.iterations + 1,
+                EnclosureReport::Transient { .. } => unreachable!("contact enclosure work is steady"),
+            };
+            format!("{detail},\"radiation_responses\":{responses},\"solid_iterations\":{},\"krylov_iterations\":{},\"residual_evaluations\":{},\"jacobian_assemblies\":{}",
+                work.nonlinear_iterations, work.krylov_iterations,
+                work.residual_evaluations, work.jacobian_assemblies)
+        } else { detail };
         let mut rows = Vec::with_capacity(self.model.surfaces().len());
         for (i, (surface, source)) in self
             .model
