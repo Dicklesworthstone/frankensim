@@ -34,6 +34,7 @@ fn invalid(what: &str) -> MaterialError {
 pub struct ElasticAcousticState {
     stiffness_mandel_pa: Tangent6,
     density_kg_m3: f64,
+    explicitly_isotropic: bool,
     material_state_identity: ContentHash,
     maximum_absolute_mandel_strain: f64,
     hydrostatic_compliance_pa_inv: [f64; 6],
@@ -139,12 +140,14 @@ impl ElasticAcousticState {
                 "isotropic bulk and shear moduli must be finite and positive",
             ));
         }
-        Self::try_new_mandel(
+        let mut state = Self::try_new_mandel(
             super::bulk_shear_stiffness(bulk_modulus_pa, shear_modulus_pa),
             density_kg_m3,
             material_state_identity,
             maximum_absolute_mandel_strain,
-        )
+        )?;
+        state.explicitly_isotropic = true;
+        Ok(state)
     }
 
     /// Use an existing isotropic law and its declared strain ceiling.
@@ -153,12 +156,14 @@ impl ElasticAcousticState {
         density_kg_m3: f64,
         material_state_identity: ContentHash,
     ) -> Result<Self, MaterialError> {
-        Self::try_new_mandel(
+        let mut state = Self::try_new_mandel(
             law.stiffness(),
             density_kg_m3,
             material_state_identity,
             law.strain_limit,
-        )
+        )?;
+        state.explicitly_isotropic = true;
+        Ok(state)
     }
 
     /// Use an existing orthotropic law in its principal frame.
@@ -258,6 +263,7 @@ impl ElasticAcousticState {
         Ok(Self {
             stiffness_mandel_pa,
             density_kg_m3,
+            explicitly_isotropic: false,
             material_state_identity,
             maximum_absolute_mandel_strain,
             hydrostatic_compliance_pa_inv,
@@ -276,6 +282,14 @@ impl ElasticAcousticState {
     #[must_use]
     pub const fn density_kg_m3(&self) -> f64 {
         self.density_kg_m3
+    }
+
+    /// Whether the original constructor explicitly selected an isotropic law.
+    /// Generic Mandel, cubic and orthotropic admission never infer isotropy
+    /// from approximately equal tensor coefficients or discard anisotropy.
+    #[must_use]
+    pub const fn is_explicitly_isotropic(&self) -> bool {
+        self.explicitly_isotropic
     }
 
     /// Original material-state identity, unchanged by derived queries.

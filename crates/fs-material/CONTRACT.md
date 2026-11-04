@@ -10641,6 +10641,18 @@ with exact power-of-two speed scaling. A rounded speed ratio cannot decide
 whether a channel carries outgoing power. Equal-medium and normal-incidence
 fast paths remain exact; no angular band is clipped to artificial criticality.
 
+`porous::layers::ElasticTransmittingLayers` terminates the original finite
+porous/fluid stack in an explicitly isotropic, homogeneous, unstressed, lossless
+`ElasticAcousticState` half-space. Shared tangential slowness, continuous normal
+traction/velocity and zero shear traction determine outgoing P/S fields and
+separate normal powers. A normalized boundary pressure/velocity pair retains
+critical and evanescent modes and Rayleigh surface-pressure zeros without
+impedance division. Original density, tensor, identity and response regime are
+retained; Christoffel speeds are prepared once and angle evaluation allocates
+nothing. Existing bounded layer attenuation supplies only finite-layer loss.
+This infinitesimal-wave model does not project anisotropy, supply finite solid
+slabs, move a porous frame or infer damping from static source moduli.
+
 Normal-wave matching retains finite transmission through evanescent layers
 (frustrated total internal reflection). Such decay is not heat. At critical
 incidence, the transfer uses the finite pressure/normal-velocity limit instead

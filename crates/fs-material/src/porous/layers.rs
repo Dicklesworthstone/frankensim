@@ -32,6 +32,10 @@ use fs_math::{c64::C64, det};
 /// Coherent pressure and power transmission into a sourced receiving fluid.
 pub mod transmission;
 pub use transmission::{LayeredTransmission, TransmittingLayers};
+
+/// Coherent refraction and P/S conversion into an original isotropic solid.
+pub mod elastic;
+pub use elastic::{ElasticTransmittingLayers, LayeredElasticTransmission};
 /// Incoherent incident-power weighting of the original angular responses.
 pub mod angular;
 pub use angular::{

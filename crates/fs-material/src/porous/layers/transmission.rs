@@ -137,59 +137,21 @@ impl<'a> TransmittingLayers<'a> {
                 C64::new(0.0, -value)
             }
         };
-        let initial_scale = magnitude_scale(load).max(1.0);
-        let mut pressure = C64::from_re(1.0 / initial_scale);
-        let mut velocity = divided(load, initial_scale);
-        // [P,Q] = S*[physical pressure, Z_ref*physical velocity] for exit p=1.
-        // S cancels from reflection; transmission MUST retain it.
-        let mut amplitude = LogAmplitude::new(-det::ln(initial_scale));
-        for layer in self.prepared.layers.iter().rev() {
-            let d = layer.source.thickness_m();
-            if d == 0.0 {
-                continue;
-            }
-            let kn;
-            let normalization;
-            (pressure, velocity, normalization, kn) = self
-                .prepared
-                .propagate_layer(layer, cosine, pressure, velocity)?;
-            if kn.im == 0.0 {
-                // Lossless parent pair is the unscaled cos/i*sin matrix.
-                amplitude.add(-log_scaled(16.0, normalization));
-            } else {
-                // Bounded pair is 2*exp(-i*k_n*d) times the physical matrix.
-                amplitude.add(kn.im * d - log_scaled(8.0, normalization));
-                amplitude.rotate(-kn.re * d);
-            }
-        }
-        let (reflection, entering) = reflected_state(pressure, velocity)?;
-        let denominator = pressure + velocity;
-        let denominator_abs = denominator.abs();
-        let log_transmission = core::f64::consts::LN_2 + amplitude.log - det::ln(denominator_abs);
-        let transmission_abs = det::exp(log_transmission);
-        if !transmission_abs.is_finite() {
-            return Err(bad("layer pressure transmission is unrepresentable"));
-        }
-        let transmission = if transmission_abs == 0.0 {
-            C64::ZERO
-        } else {
-            if !amplitude.phase_valid {
-                return Err(bad("layer transmission phase is unrepresentable"));
-            }
-            (amplitude.phase * divided(denominator.conj(), denominator_abs)).scale(transmission_abs)
-        };
+        let state = transmit_state(&self.prepared, cosine, C64::ONE, load)?;
+        let reflection = state.reflection;
+        let transmission = state.coefficient(C64::ONE)?;
         // Compute weighted power before underflowing |T|^2. A small pressure
         // amplitude can still carry representable power into a high admittance.
         let transmitted = if load.re == 0.0 {
             0.0
         } else {
-            det::exp(det::ln(load.re) + 2.0 * log_transmission)
+            state.power(C64::ONE, det::ln(load.re))
         };
         let reflected = reflection.norm_sq();
         let absorbed = if self.lossless {
             0.0
         } else {
-            entering - transmitted
+            state.entering - transmitted
         };
         let tolerance = 512.0 * f64::EPSILON;
         if !finite(transmission)
@@ -211,6 +173,102 @@ impl<'a> TransmittingLayers<'a> {
             transmitted_fraction: transmitted,
             absorbed_fraction: absorbed,
         })
+    }
+}
+
+/// Propagate a homogeneous receiver boundary pair without dividing pressure by
+/// velocity. Elastic mode conversion can have zero pressure or zero normal
+/// velocity, so an admittance-only representation would introduce false poles.
+pub(super) fn transmit_state(
+    prepared: &RigidBackedLayers<'_>,
+    cosine: f64,
+    exit_pressure: C64,
+    exit_velocity: C64,
+) -> Result<TransmittedState, MaterialError> {
+    let initial_scale = magnitude_scale(exit_pressure).max(magnitude_scale(exit_velocity));
+    if !finite(exit_pressure) || !finite(exit_velocity) || initial_scale == 0.0 {
+        return Err(bad("receiving pressure/velocity pair is unrepresentable"));
+    }
+    let mut pressure = divided(exit_pressure, initial_scale);
+    let mut velocity = divided(exit_velocity, initial_scale);
+    // [P,Q] = S*[physical pressure, Z_ref*physical velocity] for a unit
+    // receiver modal amplitude. Retain the scalar canceled by reflection.
+    let mut amplitude = LogAmplitude::new(-det::ln(initial_scale));
+    for layer in prepared.layers.iter().rev() {
+        let d = layer.source.thickness_m();
+        if d == 0.0 {
+            continue;
+        }
+        let kn;
+        let normalization;
+        (pressure, velocity, normalization, kn) =
+            prepared.propagate_layer(layer, cosine, pressure, velocity)?;
+        if kn.im == 0.0 {
+            amplitude.add(-log_scaled(16.0, normalization));
+        } else {
+            amplitude.add(kn.im * d - log_scaled(8.0, normalization));
+            amplitude.rotate(-kn.re * d);
+        }
+    }
+    let (reflection, entering) = reflected_state(pressure, velocity)?;
+    let denominator = pressure + velocity;
+    let denominator_abs = denominator.abs();
+    amplitude.add(core::f64::consts::LN_2 - det::ln(denominator_abs));
+    amplitude.phase = amplitude.phase * divided(denominator.conj(), denominator_abs);
+    Ok(TransmittedState {
+        reflection,
+        entering,
+        amplitude,
+    })
+}
+
+pub(super) struct TransmittedState {
+    pub reflection: C64,
+    pub entering: f64,
+    amplitude: LogAmplitude,
+}
+impl TransmittedState {
+    /// Receiver coefficient times its common transmitted amplitude. Multiply
+    /// in log magnitude before rounding a deeply attenuated wave to zero.
+    pub fn coefficient(&self, coefficient: C64) -> Result<C64, MaterialError> {
+        self.scaled_coefficient(coefficient, 0.0)
+    }
+
+    pub fn scaled_coefficient(
+        &self,
+        coefficient: C64,
+        log_scale: f64,
+    ) -> Result<C64, MaterialError> {
+        if coefficient == C64::ZERO {
+            return Ok(C64::ZERO);
+        }
+        let scale = magnitude_scale(coefficient);
+        if !finite(coefficient) || !scale.is_finite() {
+            return Err(bad("layer transmission coefficient is unrepresentable"));
+        }
+        let direction = divided(coefficient, scale);
+        let norm = direction.abs();
+        let magnitude = det::exp(self.amplitude.log + log_scale + det::ln(scale) + det::ln(norm));
+        if !magnitude.is_finite() {
+            return Err(bad("layer transmission amplitude is unrepresentable"));
+        }
+        if magnitude == 0.0 {
+            return Ok(C64::ZERO);
+        }
+        if !self.amplitude.phase_valid {
+            return Err(bad("layer transmission phase is unrepresentable"));
+        }
+        Ok((self.amplitude.phase * divided(direction, norm)).scale(magnitude))
+    }
+
+    /// Normal mode power before squaring an underflowed field coefficient.
+    pub fn power(&self, coefficient: C64, log_weight: f64) -> f64 {
+        if coefficient == C64::ZERO || log_weight == f64::NEG_INFINITY {
+            return 0.0;
+        }
+        let scale = magnitude_scale(coefficient);
+        let log_coefficient = det::ln(scale) + det::ln(divided(coefficient, scale).abs());
+        det::exp(log_weight + 2.0 * (self.amplitude.log + log_coefficient))
     }
 }
 
