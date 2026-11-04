@@ -11,7 +11,8 @@
 //! exposure, a photometric luminance conversion or a display transform. The
 //! original SI spectral radiances and full native paths are retained alongside
 //! it. The ideal lens estimates an aperture average, as in the scalar tracer.
-//! Diffraction requires a source-depth model and is not admitted here.
+//! Diffraction requires the prepared homogeneous source-plane proof in
+//! [`wave::CurvedWaveCameraRaster`]; the generic geometric raster rejects it.
 //! An explicit geometric dispersive lens retains its native pupil and phase
 //! index laws, generating a separate camera ray for every sampled wavelength.
 
@@ -38,6 +39,10 @@ pub mod area_lights;
 /// Source-bounded multichannel detector signals, including infrared bands.
 pub mod sensor;
 
+/// Native wave imaging through a proven clear homogeneous source scene.
+pub mod wave;
+pub use wave::CurvedWaveCameraRaster;
+
 /// Each pixel sample independently traces this many wavelengths.
 pub const CAMERA_WAVELENGTHS: usize = 4;
 
@@ -46,6 +51,7 @@ pub enum CurvedRasterError {
     Camera(CameraError),
     Transport(CameraRadianceError),
     Sensor(crate::spectral::detector::SpectralSensorError),
+    WaveScene(wave::WaveSceneError),
     /// Zero/overflowing dimensions or an out-of-range row-major pixel.
     InvalidRaster,
     NumericalRange,
@@ -66,6 +72,11 @@ impl From<crate::spectral::detector::SpectralSensorError> for CurvedRasterError 
         Self::Sensor(error)
     }
 }
+impl From<wave::WaveSceneError> for CurvedRasterError {
+    fn from(error: wave::WaveSceneError) -> Self {
+        Self::WaveScene(error)
+    }
+}
 impl core::fmt::Display for CurvedRasterError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "curved camera raster: {self:?}")
@@ -80,6 +91,7 @@ pub struct CurvedPixelSample {
     rays: [Ray; CAMERA_WAVELENGTHS],
     wavelengths_nm: [f64; CAMERA_WAVELENGTHS],
     spectral: [CameraRadianceSample; CAMERA_WAVELENGTHS],
+    diffraction_weights: [f64; CAMERA_WAVELENGTHS],
 }
 
 impl CurvedPixelSample {
@@ -95,6 +107,7 @@ impl CurvedPixelSample {
     }
     /// Camera rays in wavelength order. They coincide for an achromatic
     /// camera; a geometric dispersive lens gives each lane its own ray.
+    /// Wave imaging shares a proposal ray, retaining each native spectral path.
     pub const fn camera_rays(&self) -> &[Ray; CAMERA_WAVELENGTHS] {
         &self.rays
     }
@@ -103,6 +116,12 @@ impl CurvedPixelSample {
     }
     pub const fn spectral_samples(&self) -> &[CameraRadianceSample; CAMERA_WAVELENGTHS] {
         &self.spectral
+    }
+    /// Optical pupil/proposal weights already applied to [`Self::xyz`].
+    /// The retained spectral samples are original transport radiances before
+    /// these weights. Geometric cameras retain exact unit weights.
+    pub const fn diffraction_weights(&self) -> &[f64; CAMERA_WAVELENGTHS] {
+        &self.diffraction_weights
     }
 }
 
@@ -125,13 +144,23 @@ impl<'a> CurvedCameraRaster<'a> {
         width: u32,
         height: u32,
     ) -> Result<Self, CurvedRasterError> {
+        if camera.has_diffraction() {
+            return Err(CameraError::InvalidDiffraction.into());
+        }
+        Self::prepare(camera, width, height)
+    }
+
+    // Only the geometric constructor and the separately proven wave wrapper
+    // can prepare this owner. The wrapper never exposes its internal raster.
+    fn prepare(
+        camera: &'a PhysicalCamera,
+        width: u32,
+        height: u32,
+    ) -> Result<Self, CurvedRasterError> {
         let pixels = width
             .checked_mul(height)
             .filter(|&count| count > 0)
             .ok_or(CurvedRasterError::InvalidRaster)?;
-        if camera.has_diffraction() {
-            return Err(CameraError::InvalidDiffraction.into());
-        }
         let half_tan = camera.raster_vertical_half_tan();
         let aspect = f64::from(width) / f64::from(height);
         if !(half_tan > 0.0 && (half_tan * aspect).is_finite()) {
@@ -193,23 +222,29 @@ impl<'a> CurvedCameraRaster<'a> {
         sample: u32,
         trace: impl FnMut(&Cx<'_>, Ray, f64, usize) -> Result<CameraRadianceSample, CameraRadianceError>,
     ) -> Result<CurvedPixelSample, CurvedRasterError> {
-        let (rays, wavelengths_nm, spectral) = self.sample_packet_with_transport(
-            cx,
-            seed,
-            pixel,
-            sample,
-            |u| {
-                Ok(hero_wavelength_packet::<CAMERA_WAVELENGTHS>(
-                    LAMBDA_MIN + u * (LAMBDA_MAX - LAMBDA_MIN),
-                    LAMBDA_MIN,
-                    LAMBDA_MAX,
-                ))
-            },
-            trace,
-        )?;
+        let (rays, wavelengths_nm, spectral, diffraction_weights) = self
+            .sample_packet_with_transport(
+                cx,
+                seed,
+                pixel,
+                sample,
+                |u| {
+                    Ok(hero_wavelength_packet::<CAMERA_WAVELENGTHS>(
+                        LAMBDA_MIN + u * (LAMBDA_MAX - LAMBDA_MIN),
+                        LAMBDA_MIN,
+                        LAMBDA_MAX,
+                    ))
+                },
+                trace,
+            )?;
         let mut xyz = [0.0; 3];
-        for (lane, &wavelength) in spectral.iter().zip(&wavelengths_nm) {
-            let weight = lane.radiance_w_m2_sr_nm() * self.xyz_scale;
+        for ((lane, &wavelength), &optical_weight) in spectral
+            .iter()
+            .zip(&wavelengths_nm)
+            .zip(&diffraction_weights)
+        {
+            let weight =
+                weighted_radiance(lane.radiance_w_m2_sr_nm(), optical_weight)? * self.xyz_scale;
             for (sum, observer) in
                 xyz.iter_mut()
                     .zip([cie_x(wavelength), cie_y(wavelength), cie_z(wavelength)])
@@ -226,6 +261,7 @@ impl<'a> CurvedCameraRaster<'a> {
             rays,
             wavelengths_nm,
             spectral,
+            diffraction_weights,
         })
     }
 
@@ -249,6 +285,7 @@ impl<'a> CurvedCameraRaster<'a> {
             [Ray; CAMERA_WAVELENGTHS],
             [f64; CAMERA_WAVELENGTHS],
             [CameraRadianceSample; CAMERA_WAVELENGTHS],
+            [f64; CAMERA_WAVELENGTHS],
         ),
         CurvedRasterError,
     > {
@@ -268,15 +305,49 @@ impl<'a> CurvedCameraRaster<'a> {
             - 2.0 * (f64::from(pixel / self.width) + unit(raster[1])) / f64::from(self.height))
             * self.half_tan;
         let wavelengths_nm = wavelengths(unit(raster[2]))?;
-        let rays = self
-            .camera
-            .generate_geometric_spectral_rays_from_tangent_offsets(
+        let lens_sample = LensSample::try_new(unit(lens[0]), unit(lens[1]))?;
+        let diffraction_sample = if self.camera.has_diffraction() {
+            let block = philox4x32_10([pixel, sample, 0, 0x6372_7333], key);
+            LensSample::try_new(unit(block[0]), unit(block[1]))?
+        } else {
+            LensSample::CENTER
+        };
+        let layered = if self.camera.layered_diffraction().is_some() {
+            Some(self.camera.sample_layered_diffraction_ray(
                 &render_cx,
                 x_tan,
                 y_tan,
-                LensSample::try_new(unit(lens[0]), unit(lens[1]))?,
+                diffraction_sample,
+                &wavelengths_nm,
+            )?)
+        } else {
+            None
+        };
+        let (rays, mut diffraction_weights) = if let Some(token) = &layered {
+            ([token.ray(); CAMERA_WAVELENGTHS], [0.0; CAMERA_WAVELENGTHS])
+        } else if self.camera.has_diffraction() {
+            let optical = self.camera.generate_spectral_ray_from_tangent_offsets(
+                &render_cx,
+                x_tan,
+                y_tan,
+                lens_sample,
+                diffraction_sample,
                 &wavelengths_nm,
             )?;
+            ([optical.ray; CAMERA_WAVELENGTHS], optical.weights)
+        } else {
+            (
+                self.camera
+                    .generate_geometric_spectral_rays_from_tangent_offsets(
+                        &render_cx,
+                        x_tan,
+                        y_tan,
+                        lens_sample,
+                        &wavelengths_nm,
+                    )?,
+                [1.0; CAMERA_WAVELENGTHS],
+            )
+        };
         let mut trace_lane = |lane: usize| -> Result<CameraRadianceSample, CurvedRasterError> {
             let result = trace(&render_cx, rays[lane], wavelengths_nm[lane], lane)?;
             if let Some(lens) = self.camera.dispersive_lens() {
@@ -291,12 +362,44 @@ impl<'a> CurvedCameraRaster<'a> {
             trace_lane(2)?,
             trace_lane(3)?,
         ];
-        Ok((rays, wavelengths_nm, spectral))
+        if self.camera.has_diffraction() {
+            let points = [
+                wave::source_point(&spectral[0])?,
+                wave::source_point(&spectral[1])?,
+                wave::source_point(&spectral[2])?,
+                wave::source_point(&spectral[3])?,
+            ];
+            if let Some(token) = layered {
+                diffraction_weights = token.resolve_spectral_sources(&render_cx, points)?.weights;
+            } else {
+                for ((point, &wavelength), weight) in points
+                    .into_iter()
+                    .zip(&wavelengths_nm)
+                    .zip(&mut diffraction_weights)
+                {
+                    if let Some(point) = point {
+                        self.camera
+                            .admit_diffraction_depth(Some(point), &[wavelength])?;
+                    } else {
+                        *weight = 0.0;
+                    }
+                }
+            }
+        }
+        Ok((rays, wavelengths_nm, spectral, diffraction_weights))
     }
 }
 
 fn unit(word: u32) -> f64 {
     (f64::from(word) + 0.5) / 4_294_967_296.0
+}
+
+fn weighted_radiance(radiance: f64, weight: f64) -> Result<f64, CurvedRasterError> {
+    let value = radiance * weight;
+    if !value.is_finite() || value < 0.0 || (radiance > 0.0 && weight > 0.0 && value == 0.0) {
+        return Err(CurvedRasterError::NumericalRange);
+    }
+    Ok(value)
 }
 
 #[cfg(test)]

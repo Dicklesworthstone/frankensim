@@ -127,22 +127,60 @@ impl<const N: usize> LayeredCameraRay<'_, N> {
         let mut weights = [0.0; N];
         for (weight, &wavelength) in weights.iter_mut().zip(&self.wavelengths_nm) {
             cx.checkpoint()?;
-            let ratio = self.reference_pupil_nm / self.camera.pupil_wavelength_nm(wavelength)?;
-            let phase = self.camera.pupil_defocus_phase(1.0 / depth, wavelength)?;
-            *weight = ratio
-                * ratio
-                * self
-                    .camera
-                    .layered_pupil_density(self.q.map(|value| ratio * value), phase)?
-                / self.proposal;
-            if !weight.is_finite() || *weight < 0.0 {
-                return Err(CameraError::InvalidDiffraction);
+            *weight = self.weight_at_depth(depth, wavelength)?;
+        }
+        Ok(SpectralCameraRay {
+            ray: self.ray,
+            weights,
+        })
+    }
+
+    /// Resolve separately retained native first hits in wavelength order.
+    /// All lanes use this token's original ray and proposal. Each finite
+    /// source supplies its own geometric axial depth and each black miss has
+    /// zero weight; a hero wavelength never lends another lane its endpoint.
+    ///
+    /// As with [`Self::resolve_source`], the caller must separately prove
+    /// full-pupil visibility and the declared homogeneous source-plane model.
+    /// A later emitter reached through arbitrary curved or reflected transport
+    /// does not supply this model's object distance.
+    pub fn resolve_spectral_sources(
+        self,
+        cx: &Cx<'_>,
+        points: [Option<Point3>; N],
+    ) -> Result<SpectralCameraRay<N>, CameraError> {
+        cx.checkpoint()?;
+        let mut weights = [0.0; N];
+        for ((weight, &wavelength), point) in
+            weights.iter_mut().zip(&self.wavelengths_nm).zip(points)
+        {
+            cx.checkpoint()?;
+            if let Some(point) = point {
+                self.camera
+                    .admit_diffraction_depth(Some(point), &[wavelength])?;
+                let depth = point.delta_from(self.camera.eye).dot(self.camera.forward);
+                *weight = self.weight_at_depth(depth, wavelength)?;
             }
         }
         Ok(SpectralCameraRay {
             ray: self.ray,
             weights,
         })
+    }
+
+    fn weight_at_depth(&self, depth: f64, wavelength: f64) -> Result<f64, CameraError> {
+        let ratio = self.reference_pupil_nm / self.camera.pupil_wavelength_nm(wavelength)?;
+        let phase = self.camera.pupil_defocus_phase(1.0 / depth, wavelength)?;
+        let weight = ratio
+            * ratio
+            * self
+                .camera
+                .layered_pupil_density(self.q.map(|value| ratio * value), phase)?
+            / self.proposal;
+        if !weight.is_finite() || weight < 0.0 {
+            return Err(CameraError::InvalidDiffraction);
+        }
+        Ok(weight)
     }
 }
 

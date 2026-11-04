@@ -26,6 +26,7 @@ pub struct CurvedSensorPixelSample<const CHANNELS: usize> {
     rays: [Ray; CAMERA_WAVELENGTHS],
     wavelengths: [DetectorWavelength<CHANNELS>; CAMERA_WAVELENGTHS],
     spectral: [CameraRadianceSample; CAMERA_WAVELENGTHS],
+    diffraction_weights: [f64; CAMERA_WAVELENGTHS],
 }
 
 impl<const C: usize> CurvedSensorPixelSample<C> {
@@ -52,6 +53,11 @@ impl<const C: usize> CurvedSensorPixelSample<C> {
     }
     pub const fn spectral_samples(&self) -> &[CameraRadianceSample; CAMERA_WAVELENGTHS] {
         &self.spectral
+    }
+    /// Pupil/proposal weights already applied to both detector integrals.
+    /// The retained native spectral radiances precede these optical weights.
+    pub const fn diffraction_weights(&self) -> &[f64; CAMERA_WAVELENGTHS] {
+        &self.diffraction_weights
     }
 }
 
@@ -185,7 +191,7 @@ impl CurvedCameraRaster<'_> {
         trace: impl FnMut(&Cx<'_>, Ray, f64, usize) -> Result<CameraRadianceSample, CameraRadianceError>,
     ) -> Result<CurvedSensorPixelSample<C>, CurvedRasterError> {
         let mut draws = None;
-        let (rays, _, spectral) = self.sample_packet_with_transport(
+        let (rays, _, spectral, diffraction_weights) = self.sample_packet_with_transport(
             cx,
             seed,
             pixel,
@@ -206,8 +212,10 @@ impl CurvedCameraRaster<'_> {
         let wavelengths = draws.ok_or(CurvedRasterError::NumericalRange)?;
         let mut power = [Dd::ZERO; C];
         let mut electrons = [Dd::ZERO; C];
-        for (lane, draw) in spectral.iter().zip(&wavelengths) {
-            let radiance = lane.radiance_w_m2_sr_nm();
+        for ((lane, draw), &optical_weight) in
+            spectral.iter().zip(&wavelengths).zip(&diffraction_weights)
+        {
+            let radiance = weighted_radiance(lane.radiance_w_m2_sr_nm(), optical_weight)?;
             for channel in 0..C {
                 power[channel] =
                     power[channel] + weighted_lane(radiance, draw.radiance_weights_nm()[channel]);
@@ -231,6 +239,7 @@ impl CurvedCameraRaster<'_> {
             rays,
             wavelengths,
             spectral,
+            diffraction_weights,
         })
     }
 }
