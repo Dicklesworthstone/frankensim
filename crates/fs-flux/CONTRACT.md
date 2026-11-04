@@ -3089,7 +3089,7 @@ may be charged repeatedly. The charge excludes allocator-specific overhead and
 transient queries/receipts; it is not an RSS or peak-memory guarantee. The
 constant-data allocation-free numerical route remains unchanged.
 
-Focused zero-inventory regressions cover uptake into pure solvent against the
+Focused neutral zero-inventory regressions cover uptake into pure solvent against the
 independent dilute two-volume exponential and temporal refinement, multi-edge
 propagation with a permanently absent species, exact empty equilibrium, late
 cancellation/work rollback and retry, and source-qualified zero concentrations.
@@ -3195,6 +3195,41 @@ at large stiffness, one-sided-zero invasion with an absent spectator, an adaptiv
 stiff window, nonideal uphill transport against independent 2x2 solvent-frame
 equations and ODE refinement, all-pair source refresh, coupled water/potential,
 whole-window work, cancellation/retry and extreme-exposure rollback.
+
+### Finite-rate zero-current ionic solution networks
+
+`with_zero_current_diffusion(ZeroCurrentDiffusion, byte_budget)` binds one common
+explicit valence/charge-budget assignment to every prepared molecular link
+before first advancement. `with_zero_current_solution_transport` prepares the
+same network with optional fully retaining water paths and the ionic face from
+its FIRST network source query; original joint material support need not admit
+the off-neutral componentwise-logarithmic face of the neutral transport mode.
+All compartments must be initially neutral within the absolute molar budget.
+
+Positive-area molecular paths must form a forest. Their independently floating
+zero-current voltages then admit a potential on each connected component.
+Cyclic ionic paths, independent ionic membrane leaks and both existing
+independent-transfer implicit choices refuse. No global circulating-current or
+electrode model is silently inferred. Closed zero-area links constrain neither
+current nor potential. A single shared ionic assignment is charged to prepared
+storage, with a bounded fallibly allocated forest check at preparation.
+
+The original explicit conserved-transfer sweep, full/two-half adaptive error
+controller and all withdrawal/source/free-energy/balance/rollback gates remain.
+Each face evaluates the original material's charge-neutral convex composition,
+chemical forces, full binary friction and zero-current electrical reaction.
+Both actually rounded updated inventories must retain neutrality before either
+is published. Source queries retain their original allocation costs; constant
+data allocate nothing during advance. A reported physical face evaluation uses
+at most three bounded native friction solves. Coupled retained-water paths use
+actual changed volumes and the original total mixing/mechanical potential.
+There is no concentration seed, ionic activity or caloric model invention.
+
+Focused regressions cover analytical ambipolar salt flux and diffusion voltage,
+divalent nonideal uphill salt transport, independent Na/K/Cl salts on a neutral
+intermediate face, original source-coefficient refresh, salt-ODE refinement,
+coupled water/ion dynamics, exact empty states, singular ionic fronts,
+late cancellation/retry, complete-window work and topology/implicit refusals.
 
 ## Coupled nonideal water and molecular solution transport
 

@@ -17,9 +17,11 @@
 //! <https://doi.org/10.1093/imanum/drad032>. This constitutive face does not
 //! establish the positivity or convergence theorem of their time discretization.
 //!
-//! This is neutral, isothermal, fixed-solvent transport on the original convex
-//! concentration domain. It is not unrestricted liquid flow or an ionic current
-//! law. Nonnegative endpoint concentrations are admitted; no log floor or seeded
+//! The default is neutral, isothermal, fixed-solvent transport on the original
+//! convex concentration domain. [`electrical`] adds explicitly qualified ions
+//! under a floating zero-current constraint, with its own neutral face and
+//! charge budgets. Neither route supplies unrestricted liquid flow. Nonnegative
+//! neutral endpoint concentrations are admitted; no log floor or seeded
 //! trace supplies an absent species. All binary Maxwell–Stefan coefficients,
 //! including solute/solute pairs, are explicit fixed numerical data in m²/s.
 //! Their measurement, temperature/composition applicability and material source
@@ -37,6 +39,8 @@ use fs_thermochem::transport::maxwell_stefan::{
 use fs_thermochem::{SpeciesId, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R};
 use std::sync::Arc;
 
+/// Floating diffusion potentials and charge-conserving ionic exchange.
+pub mod electrical;
 pub mod source;
 
 /// The original shared friction workspace, exposed through its material owner.
@@ -55,6 +59,18 @@ pub enum SolutionDiffusionError {
     Entropy {
         chemical_w_m3_k: f64,
         friction_w_m3_k: f64,
+    },
+    /// A finite floating electric potential cannot enforce zero ionic current.
+    SingularDiffusionPotential,
+    /// Actual elementary-charge equivalents in a finite compartment [mol].
+    InventoryCharge {
+        residual_mol: f64,
+        maximum_mol: f64,
+    },
+    /// Actual published ionic charge flux exceeds its absolute allowance.
+    ElectricCurrent {
+        residual_mol_m2_s: f64,
+        maximum_mol_m2_s: f64,
     },
     Cancelled,
 }
@@ -368,8 +384,38 @@ impl SolutionMaxwellStefan {
         binary_diffusivities_m2_s: &[f64],
         workspace: &mut MaxwellStefanWorkspaceV1,
         output: &mut [f64],
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<SolutionDiffusionReport> {
+        self.flux_with_binary_and_current_into(
+            left,
+            right,
+            distance_m,
+            controls,
+            binary_diffusivities_m2_s,
+            None,
+            workspace,
+            output,
+            cancelled,
+        )
+        .map(|(report, _)| report)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn flux_with_binary_and_current_into(
+        &self,
+        left: &AqueousSolution,
+        right: &AqueousSolution,
+        distance_m: f64,
+        controls: SolutionDiffusionSolve,
+        binary_diffusivities_m2_s: &[f64],
+        electrical: Option<&electrical::ZeroCurrentDiffusion>,
+        workspace: &mut MaxwellStefanWorkspaceV1,
+        output: &mut [f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(
+        SolutionDiffusionReport,
+        Option<electrical::ZeroCurrentDiffusionReport>,
+    )> {
         poll(&mut cancelled)?;
         let count = self.species.len();
         let n = count + 1;
@@ -383,6 +429,10 @@ impl SolutionMaxwellStefan {
         }
         self.admit_solution(left)?;
         self.admit_solution(right)?;
+        if let Some(policy) = electrical {
+            policy.admit_inventories(left.solute_moles())?;
+            policy.admit_inventories(right.solute_moles())?;
+        }
         let mut a = [0.0; MAX_OSMOTIC_SOLUTES];
         let mut b = [0.0; MAX_OSMOTIC_SOLUTES];
         let mut face = [0.0; MAX_OSMOTIC_SOLUTES];
@@ -419,8 +469,15 @@ impl SolutionMaxwellStefan {
         x[solvent] = c0;
         let mut total = Sum::default();
         total.add(c0);
+        if let Some(policy) = electrical {
+            policy.face_concentrations(&a[..count], &b[..count], &mut face[..count])?;
+        }
         for i in 0..count {
-            let c = logarithmic_mean_concentration(a[i], b[i])?;
+            let c = if electrical.is_some() {
+                face[i]
+            } else {
+                logarithmic_mean_concentration(a[i], b[i])?
+            };
             face[i] = c;
             x[self.original_to_canonical[i + 1]] = c;
             total.add(c);
@@ -440,11 +497,22 @@ impl SolutionMaxwellStefan {
             }
             let excess = excess.finish()?;
             let slot = self.original_to_canonical[i + 1];
-            // Form c_log * Delta(mu/RT) directly. The ideal part is exactly
-            // Delta(c), including an absent endpoint; the finite excess part
-            // still comes from the original symmetric virial interaction law.
+            // Neutral species keep the exact logarithmic-mean chain rule.
+            // Charged species use their shared charge-neutral face times the
+            // actual chemical-potential jump; per-ion logarithmic faces would
+            // leave the neutral composition manifold for independent salts.
             let mut force = Sum::default();
-            force.add(b[i] - a[i]);
+            force.add(
+                if electrical.is_some_and(|policy| policy.valences()[i] != 0) {
+                    if a[i] == 0.0 && b[i] == 0.0 {
+                        0.0
+                    } else {
+                        finite(face[i] * log_ratio(b[i], a[i]))?
+                    }
+                } else {
+                    b[i] - a[i]
+                },
+            );
             force.add(finite(face[i] * excess)?);
             drive[slot] = finite((force.finish()? / concentration) / distance_m)?;
             balance.add(drive[slot]);
@@ -455,6 +523,20 @@ impl SolutionMaxwellStefan {
             }
         }
         drive[solvent] = -balance.finish()?;
+        let potential_gradient = if let Some(policy) = electrical {
+            policy.add_electric_force(
+                self,
+                &x[..n],
+                &mut drive[..n],
+                concentration,
+                binary_diffusivities_m2_s,
+                controls,
+                workspace,
+                &mut cancelled,
+            )?
+        } else {
+            None
+        };
         let evaluated = self.owner.evaluate_molar_driving_forces(
             &x[..n],
             &drive[..n],
@@ -532,16 +614,28 @@ impl SolutionMaxwellStefan {
                 });
             }
         }
-        poll(&mut cancelled)?;
-        for (i, value) in output.iter_mut().enumerate() {
-            *value = converted[self.original_to_canonical[i + 1]];
-        }
-        Ok(SolutionDiffusionReport {
+        let molecular = SolutionDiffusionReport {
             maximum_gradient_residual_per_m: maximum,
             molar_frame_residual_mol_m2_s: evaluated.molar_frame_residual_mol_m2_s(),
             solvent_molar_flux_mol_m2_s: 0.0,
             chemical_entropy_production_w_m3_k: chemical_entropy,
             friction_entropy_production_w_m3_k: friction_entropy,
-        })
+        };
+        let electrical = electrical
+            .map(|policy| {
+                policy.report(
+                    self,
+                    molecular,
+                    potential_gradient,
+                    distance_m,
+                    &converted[..n],
+                )
+            })
+            .transpose()?;
+        poll(&mut cancelled)?;
+        for (i, value) in output.iter_mut().enumerate() {
+            *value = converted[self.original_to_canonical[i + 1]];
+        }
+        Ok((molecular, electrical))
     }
 }

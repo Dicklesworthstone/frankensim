@@ -84,9 +84,10 @@ impl OsmoticNetwork {
         if self.species.len() != 1
             || self.diffusion_controls.is_none()
             || self.implicit_multicomponent.is_some()
+            || self.zero_current_diffusion().is_some()
         {
             return Err(OsmoticNetworkError::Invalid(
-                "implicit binary diffusion requires one solute and prepared molecular links",
+                "implicit binary diffusion requires one neutral solute and prepared molecular links",
             ));
         }
         if let Some(prepared) = &mut self.implicit_diffusion {

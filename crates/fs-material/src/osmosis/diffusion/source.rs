@@ -111,6 +111,13 @@ pub struct MaterialSolutionDiffusionReport {
     pub sources: ResolvedSolutionDiffusivities,
 }
 
+/// Original pair-source receipts and the actual floating ionic diffusion field.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MaterialZeroCurrentDiffusionReport {
+    pub constitutive: super::electrical::ZeroCurrentDiffusionReport,
+    pub sources: ResolvedSolutionDiffusivities,
+}
+
 /// Original nonideal solution law with complete material-sourced binary pairs.
 /// Original thermodynamic species order and the shared MS canonical order are
 /// mapped explicitly. No kinetic datum is inferred from virial free energy.
@@ -337,6 +344,35 @@ impl MaterialSolutionMaxwellStefan {
         &self,
         volumes_m3: [f64; 2],
         amounts_mol: [&[f64]; 2],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ResolvedSolutionDiffusivities> {
+        self.resolve_inventories_with_electrical(volumes_m3, amounts_mol, None, cancelled)
+    }
+
+    /// Qualify the SAME charge-neutral convex face used by ionic friction.
+    /// Componentwise logarithmic means are not a neutral state for mixed salts.
+    pub fn resolve_zero_current_inventories(
+        &self,
+        volumes_m3: [f64; 2],
+        amounts_mol: [&[f64]; 2],
+        electrical: &super::electrical::ZeroCurrentDiffusion,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ResolvedSolutionDiffusivities> {
+        electrical.admit_inventories(amounts_mol[0])?;
+        electrical.admit_inventories(amounts_mol[1])?;
+        self.resolve_inventories_with_electrical(
+            volumes_m3,
+            amounts_mol,
+            Some(electrical),
+            cancelled,
+        )
+    }
+
+    fn resolve_inventories_with_electrical(
+        &self,
+        volumes_m3: [f64; 2],
+        amounts_mol: [&[f64]; 2],
+        electrical: Option<&super::electrical::ZeroCurrentDiffusion>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<ResolvedSolutionDiffusivities> {
         poll(&mut cancelled)?;
@@ -345,8 +381,12 @@ impl MaterialSolutionMaxwellStefan {
         let a = concentrations(model, volumes_m3[0], amounts_mol[0])?;
         let b = concentrations(model, volumes_m3[1], amounts_mol[1])?;
         let mut face = [0.0; MAX_OSMOTIC_SOLUTES];
-        for i in 0..n - 1 {
-            face[i] = logarithmic_mean_concentration(a[i], b[i])?;
+        if let Some(electrical) = electrical {
+            electrical.face_concentrations(&a[..n - 1], &b[..n - 1], &mut face[..n - 1])?;
+        } else {
+            for i in 0..n - 1 {
+                face[i] = logarithmic_mean_concentration(a[i], b[i])?;
+            }
         }
         model.evaluate(&face[..n - 1]).map_err(OsmosisError::from)?;
         let queries = [&a, &face, &b].map(|c| {
@@ -439,6 +479,49 @@ impl MaterialSolutionMaxwellStefan {
             cancelled,
         )?;
         Ok(MaterialSolutionDiffusionReport {
+            constitutive,
+            sources,
+        })
+    }
+
+    /// Refresh every original pair at actual left/face/right states, then
+    /// eliminate the zero-current electric field using that SAME matrix.
+    /// The response solves do not query an unrelated or frozen material law.
+    #[allow(clippy::too_many_arguments)]
+    pub fn flux_zero_current_into(
+        &self,
+        left: &AqueousSolution,
+        right: &AqueousSolution,
+        distance_m: f64,
+        controls: SolutionDiffusionSolve,
+        electrical: &super::electrical::ZeroCurrentDiffusion,
+        workspace: &mut SolutionDiffusionWorkspace,
+        output: &mut [f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<MaterialZeroCurrentDiffusionReport> {
+        poll(&mut cancelled)?;
+        self.reference_law.admit_solution(left)?;
+        self.reference_law.admit_solution(right)?;
+        electrical.admit_inventories(left.solute_moles())?;
+        electrical.admit_inventories(right.solute_moles())?;
+        let sources = self.resolve_zero_current_inventories(
+            [left.solvent_volume_m3(), right.solvent_volume_m3()],
+            [left.solute_moles(), right.solute_moles()],
+            electrical,
+            &mut cancelled,
+        )?;
+        let constitutive = self.reference_law.flux_zero_current_with_binary_into(
+            left,
+            right,
+            distance_m,
+            controls,
+            electrical,
+            &sources.binary_diffusivities_m2_s,
+            workspace,
+            output,
+            cancelled,
+        )?;
+        Ok(MaterialZeroCurrentDiffusionReport {
             constitutive,
             sources,
         })

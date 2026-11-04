@@ -11251,7 +11251,7 @@ the regular entropy checks. These optional diagnostics do not waive the
 evolution owner's finite-step free-energy and species-conservation checks.
 Solute fluxes retain the caller's original order even when the shared solver
 canonicalizes species differently.
-This is neutral fixed-solvent diffusion, not unrestricted liquid mechanics,
+This default is neutral fixed-solvent diffusion, not unrestricted liquid mechanics,
 electrochemical migration, Soret/Dufour transport or an absolute caloric balance.
 
 Successful face evaluations reuse the prepared original workspace and allocate
@@ -11269,6 +11269,47 @@ is not exact integration of a finite-concentration steady profile. The
 logarithmic-mean chain rule follows the finite-volume construction of Cancès,
 Ehrlacher and Monasse (https://doi.org/10.1093/imanum/drad032); no theorem for
 their full time discretization is claimed for this constitutive face.
+
+### Floating-potential ionic Maxwell--Stefan diffusion
+
+`osmosis::diffusion::electrical::ZeroCurrentDiffusion` assigns explicit original
+solute valences and absolute inventory-charge/current tolerances. Both the
+constant and material-source owners expose `flux_zero_current_into`. Every
+finite endpoint must already satisfy its charge budget; no ion, dissociation,
+activity model, concentration floor or compensating inventory is invented.
+The original virial free energy and pair data must be qualified for those ions.
+
+Charged face concentrations use ONE convex interpolation of the neutral
+endpoints, weighted by reciprocal total ionic concentration along their straight
+path. This retains neutrality and the logarithmic mean for proportional salt
+profiles. Componentwise logarithmic ionic means would generally violate
+neutrality for independent salts. Neutral co-solutes keep the original
+logarithmic mean; both source resolution and friction call the SAME face helper.
+Ionic force uses the actual face concentration times the original chemical
+potential jump. A one-sided-zero charged species refuses its singular finite
+face potential; exact species absent at both endpoints remain absent.
+
+The native MS owner evaluates chemical and electric responses in the original
+stationary-solvent frame. Eliminating the scalar electric gradient enforces
+`sum z_i N_i=0`; a final combined-force solve rechecks all original rows, actual
+charge flux and conjugate chemical/friction entropy. Electrical power vanishes
+under this same current constraint, so it is not added as spurious heat. At most
+three original friction solves use the retained workspace per face evaluation.
+Reports return the right-minus-left floating voltage, actual current residual
+and native solve count. No absolute voltage datum enters. A carrier-free equal
+state has an undetermined voltage, explicitly `None`. Publication is atomic.
+
+This is an isothermal, local electroneutral open-circuit limit; it supplies no
+Poisson/Debye-layer dynamics, electrode/current drive, ion association or caloric
+closure. Consumers must admit globally compatible potentials; independent
+zero-current constraints on arbitrary cyclic graphs are not justified. The
+force/friction and current/entropy structure follows Van-Brunt, Farrell and
+Monroe (https://arxiv.org/abs/2211.13505), equations 1.1--1.2, 6.5 and 16.13;
+the dilute ambipolar limit and its scale assumptions follow Ghosal and Chen
+(https://doi.org/10.1098/rspa.2010.0028). Public network-module regressions compare
+1:1 salt flux/voltage, divalent nonideal salt with a neutral co-solute, and
+independent Na/K/Cl salt fluxes against separate reduced equations and a
+quadrature-constructed neutral face.
 
 ### Finite gas–adsorbent sensible heat on the original pore timeline
 

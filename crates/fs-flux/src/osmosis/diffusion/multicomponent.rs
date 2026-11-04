@@ -124,9 +124,10 @@ impl OsmoticNetwork {
         if self.species.len() < 2
             || self.diffusion_controls.is_none()
             || self.implicit_diffusion.is_some()
+            || self.zero_current_diffusion().is_some()
         {
             return Err(OsmoticNetworkError::Invalid(
-                "multicomponent implicit diffusion needs at least two original solutes and prepared molecular links",
+                "multicomponent implicit diffusion needs at least two original neutral solutes and prepared molecular links",
             ));
         }
         if let Some(prepared) = &mut self.implicit_multicomponent {

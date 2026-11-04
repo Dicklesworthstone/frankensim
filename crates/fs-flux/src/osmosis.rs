@@ -33,6 +33,10 @@
 //! cancelled or exhausted advances publish neither state nor time.
 //! [`coupled`] combines retained-water and independent molecular pathways using
 //! the original pressure-law primitive and mixing free energy in one account.
+//! Explicit molecular paths can select a floating zero-current ionic closure
+//! on a forest, retaining neutral inventories and original source-qualified
+//! forces. This excludes independent-transfer implicit ionic trials and general
+//! circulating-current, double-layer or electrochemical reaction models.
 
 /// Nonideal Maxwell–Stefan diffusion at fixed solvent volume on this timeline.
 pub mod diffusion;

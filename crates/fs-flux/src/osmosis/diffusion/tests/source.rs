@@ -96,9 +96,7 @@ fn volume_cell(model: &Arc<VirialSolutionModel>, volume: f64, c: f64) -> Osmotic
     .unwrap()
 }
 
-#[test]
-fn multicomponent_implicit_candidates_refresh_all_original_binary_sources() {
-    let model = source(1.0, vec![0.0; 4], vec![200.0; 2]);
+fn multicomponent_material(model: &Arc<VirialSolutionModel>) -> MaterialSolutionMaxwellStefan {
     let key = PropertyKey::new("shared manufactured mixture mobility", DIMS);
     let mut claims = ClaimSet::new();
     claims
@@ -147,7 +145,7 @@ fn multicomponent_implicit_candidates_refresh_all_original_binary_sources() {
         [water.clone(), b.clone()],
         [a.clone(), b.clone()],
     ];
-    let material = MaterialSolutionMaxwellStefan::new(
+    MaterialSolutionMaxwellStefan::new(
         model.clone(),
         (water.clone(), MolarMass::new(0.018)),
         vec![
@@ -171,10 +169,91 @@ fn multicomponent_implicit_candidates_refresh_all_original_binary_sources() {
                 (b, "c_B".into()),
             ],
         },
-        cell(&model, &[60.0, 60.0]).solution(),
+        cell(model, &[60.0, 60.0]).solution(),
         || false,
     )
+    .unwrap()
+}
+
+#[test]
+fn ionic_source_coefficients_refresh_at_the_same_neutral_face_used_for_transport() {
+    use crate::osmosis::coupled::CoupledSolutionControls;
+    let model = source(1.0, vec![0.0; 4], vec![200.0; 2]);
+    let material = multicomponent_material(&model);
+    let policy = ZeroCurrentDiffusion::new(vec![1, -1], 1e-15, 1e-16).unwrap();
+    let (left, right) = (cell(&model, &[100.0, 100.0]), cell(&model, &[20.0, 20.0]));
+    let mut flux = [0.0; 2];
+    let report = material
+        .flux_zero_current_into(
+            left.solution(),
+            right.solution(),
+            0.001,
+            physical().constitutive,
+            &policy,
+            &mut material.workspace().unwrap(),
+            &mut flux,
+            || false,
+        )
+        .unwrap();
+    let mean = 80.0 / 5.0_f64.ln();
+    let coefficient = 1e-9 * (1.0 + mean / 100.0);
+    let expected = coefficient * 80.0 * (1.0 + 2.0 * VBAR * mean) / 0.001;
+    for value in flux {
+        assert!((value - expected).abs() < 2e-14);
+    }
+    for pair in report.sources.pairs() {
+        assert!((pair.face.properties()[0].value_si() - coefficient).abs() < 1e-23);
+    }
+    assert!(
+        report
+            .constitutive
+            .dimensionless_potential_right_minus_left
+            .unwrap()
+            .abs()
+            < 1e-12
+    );
+    let mut system = OsmoticNetwork::with_zero_current_solution_transport(
+        vec!["solute-0".into(), "solute-1".into()],
+        vec![left, right],
+        Vec::new(),
+        vec![SolutionDiffusionLink::from_material_sources(0, 1, 0.01, 0.001, material).unwrap()],
+        CoupledSolutionControls {
+            diffusion: physical(),
+            water_balance_tolerance_m3: 1e-18,
+        },
+        policy,
+        1 << 22,
+    )
     .unwrap();
+    system.advance(10.0, numerical(1e-4), || false).unwrap();
+    let left = system.compartments()[0].solution();
+    let right = system.compartments()[1].solution();
+    let (a, b) = (
+        left.solute_moles()[0] / VOLUME,
+        right.solute_moles()[0] / VOLUME,
+    );
+    let expected = 1e-9 * (1.0 + ((a - b) / (a / b).ln()) / 100.0);
+    let link = &system.solution_diffusion_links()[0];
+    let resolved = link
+        .material_sources()
+        .unwrap()
+        .resolve_zero_current_inventories(
+            [VOLUME, VOLUME],
+            [left.solute_moles(), right.solute_moles()],
+            link.zero_current_diffusion().unwrap(),
+            || false,
+        )
+        .unwrap();
+    assert!((expected - coefficient).abs() > 1e-12);
+    for pair in resolved.pairs() {
+        assert!((pair.face.properties()[0].value_si() - expected).abs() < 1e-22);
+    }
+}
+
+#[test]
+fn multicomponent_implicit_candidates_refresh_all_original_binary_sources() {
+    let model = source(1.0, vec![0.0; 4], vec![200.0; 2]);
+    let material = multicomponent_material(&model);
     let mut system = OsmoticNetwork::with_solution_diffusion(
         vec!["solute-0".into(), "solute-1".into()],
         vec![cell(&model, &[100.0, 20.0]), cell(&model, &[20.0, 100.0])],

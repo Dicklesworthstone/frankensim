@@ -8,6 +8,7 @@ use fs_qty::MolarMass;
 use fs_thermochem::{SpeciesId, transport::maxwell_stefan::MaxwellStefanMolarSolveV1};
 use std::sync::Arc;
 
+mod electrical;
 mod implicit;
 mod multicomponent;
 mod source;

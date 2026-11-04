@@ -5,9 +5,14 @@
 //! the enclosing full/two-half comparison controls their first-order temporal
 //! error. This mode admits no water/membrane connections, so a closed mixing
 //! free-energy decrease does not omit mechanical pressure/volume work.
+//! An explicit zero-current option evolves neutral ionic inventories on a
+//! forest using the original electrochemical force and source-qualified face.
+//! Ionic stages retain the same adaptive timeline and every physical gate.
 
+mod electrical;
 mod implicit;
 mod multicomponent;
+pub use fs_material::osmosis::diffusion::electrical::ZeroCurrentDiffusion;
 pub(crate) use implicit::ImplicitBinaryDiffusion;
 pub use implicit::ImplicitBinaryDiffusionControls;
 pub(crate) use multicomponent::ImplicitMulticomponentDiffusion;
@@ -24,6 +29,7 @@ use fs_material::osmosis::{
         SolutionMaxwellStefan, source::MaterialSolutionMaxwellStefan,
     },
 };
+use std::sync::Arc;
 
 /// Physical conservation/passivity and withdrawal admission, independent of
 /// the enclosing adaptive timeline's temporal error tolerances.
@@ -63,6 +69,7 @@ pub struct SolutionDiffusionLink {
     distance_m: f64,
     material: DiffusionMaterial,
     workspace: SolutionDiffusionWorkspace,
+    electrical: Option<Arc<ZeroCurrentDiffusion>>,
 }
 #[derive(Clone, Debug)]
 enum DiffusionMaterial {
@@ -129,6 +136,7 @@ impl SolutionDiffusionLink {
             distance_m,
             material,
             workspace,
+            electrical: None,
         })
     }
     pub const fn endpoints(&self) -> [usize; 2] {
@@ -150,6 +158,10 @@ impl SolutionDiffusionLink {
             DiffusionMaterial::Source(law) => Some(law),
         }
     }
+    /// Common ionic assignment selected by the enclosing network, if any.
+    pub fn zero_current_diffusion(&self) -> Option<&ZeroCurrentDiffusion> {
+        self.electrical.as_deref()
+    }
     fn heap_bytes(&self) -> usize {
         let material = match &self.material {
             DiffusionMaterial::Constant(law) => law.heap_bytes(),
@@ -166,10 +178,20 @@ impl SolutionDiffusionLink {
         amounts: [&[f64]; 2],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), OsmoticNetworkError> {
+        if let Some(electrical) = &self.electrical {
+            for inventory in amounts {
+                electrical
+                    .admit_inventories(inventory)
+                    .map_err(diffusion_source)?;
+            }
+        }
         if let Some(source) = self.material_sources() {
-            source
-                .resolve_inventories(volumes, amounts, cancelled)
-                .map_err(diffusion_source)?;
+            if let Some(electrical) = &self.electrical {
+                source.resolve_zero_current_inventories(volumes, amounts, electrical, cancelled)
+            } else {
+                source.resolve_inventories(volumes, amounts, cancelled)
+            }
+            .map_err(diffusion_source)?;
         }
         Ok(())
     }
@@ -188,6 +210,35 @@ impl SolutionDiffusionLink {
         *evaluations = evaluations
             .checked_add(1)
             .ok_or(OsmoticNetworkError::WorkBudget)?;
+        if let Some(electrical) = &self.electrical {
+            return match &self.material {
+                DiffusionMaterial::Constant(material) => material
+                    .flux_zero_current_into(
+                        left,
+                        right,
+                        self.distance_m,
+                        controls,
+                        electrical,
+                        &mut self.workspace,
+                        output,
+                        cancelled,
+                    )
+                    .map(|_| ()),
+                DiffusionMaterial::Source(material) => material
+                    .flux_zero_current_into(
+                        left,
+                        right,
+                        self.distance_m,
+                        controls,
+                        electrical,
+                        &mut self.workspace,
+                        output,
+                        cancelled,
+                    )
+                    .map(|_| ()),
+            }
+            .map_err(diffusion_source);
+        }
         match &self.material {
             DiffusionMaterial::Constant(material) => material
                 .flux_into(
@@ -556,7 +607,7 @@ pub(super) fn qualify_sources(
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), OsmoticNetworkError> {
     for link in links.iter() {
-        if link.material_sources().is_none() {
+        if link.material_sources().is_none() && link.electrical.is_none() {
             continue;
         }
         poll(cancelled)?;
