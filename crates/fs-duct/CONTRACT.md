@@ -560,11 +560,16 @@ pipe `Z_in = +i Zc cot(kL)`.
     acoustic work through the same pressure/flow solution. A genuine inlet
     impedance pole still refuses.
     The staircase admits an exact transverse cutoff inside a finite section
+    or at either endpoint for physical impedance and mouth-flow observations,
     through a private finite reference and the exact pressure/constant-flow
     transfer `P_left = P_right - i k_0 Zc_0 L U_right`,
     `U_left = U_right`. Its junction equations and retained mouth-flow map
     use that same response. Ordinary propagation is unchanged; native inlet
-    and mouth characteristic coordinates still refuse at cutoff. G1/G3 tests
+    and mouth characteristic coordinates still refuse at cutoff. A scalar
+    mouth load retains the zero-admittance limit of its matched higher modes;
+    a pressure-release mouth or full physical matrix retains its own boundary
+    equation. The conserved cutoff flow is formed directly, so a truly closed
+    channel retains its exact input-impedance pole. G1/G3 tests
     compare full input-impedance and mouth-flow matrices with independent
     simultaneous pressure/flow equations, approach cutoff from both frequency
     sides, and verify invariance under subdivision of the cutoff section.

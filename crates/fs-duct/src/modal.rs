@@ -34,10 +34,11 @@
 //! limit, ZK-corrected through the plane mode otherwise; the per-mode
 //! validity boundary of the wide-tube model is a CONTRACT disclosure,
 //! not a hidden assumption.
-//! Exact transverse cutoffs inside finite sections use pressure/constant-flow
-//! transfer in a finite local reference, including the same mouth observation.
-//! Native inlet/mouth characteristic coordinates remain singular at cutoff and
-//! still refuse; no finite local reference is returned as their physical impedance.
+//! Exact transverse cutoffs use pressure/constant-flow transfer in a finite
+//! local reference, including at either endpoint for physical input impedance
+//! and mouth-flow queries. Native inlet/mouth characteristic coordinates remain
+//! singular at cutoff and still refuse; no finite local reference is returned
+//! as their physical characteristic impedance.
 //!
 //! Bessel functions: `J0` uses a double-double series and `J1` uses the
 //! shared `fs_math::special` owner — no coefficient
@@ -334,15 +335,15 @@ fn modal_wave(
     loss: LossModel,
     gammas: &[f64],
 ) -> Result<ModalWave, DuctError> {
-    modal_wave_with_internal_cutoff(state, radius, omega, loss, gammas, false)
+    modal_wave_with_cutoff_reference(state, radius, omega, loss, gammas, false)
 }
 
-// A finite interior section has regular pressure/flow transfer at cutoff.
-// Only its private coordinates may use Zc_0 instead of the infinite Zc_n;
-// the public inlet/mouth native-wave semantics remain unchanged.
-fn modal_wave_with_internal_cutoff(
+// A finite section has regular pressure/flow transfer at cutoff. Private
+// coordinates may use Zc_0 instead of the infinite Zc_n; this also admits
+// physical endpoint observations, but never public native-wave coordinates.
+fn modal_wave_with_cutoff_reference(
     state: &GasState, radius: f64, omega: f64, loss: LossModel,
-    gammas: &[f64], admit_internal_cutoff: bool,
+    gammas: &[f64], admit_cutoff: bool,
 ) -> Result<ModalWave, DuctError> {
     let wave: SegmentWave = segment_wave(state, radius, omega, loss)?;
     let k0 = wave.wavenumber;
@@ -361,7 +362,7 @@ fn modal_wave_with_internal_cutoff(
             kn = -kn;
         }
         if kn.abs() < 1e-300 {
-            if admit_internal_cutoff && kn == C64::ZERO {
+            if admit_cutoff && kn == C64::ZERO {
                 k.push(kn);
                 zc.push(zc0);
                 continue;
@@ -751,7 +752,7 @@ fn mm_evaluate_prepared(
     load: MmLoad<'_>,
     observe_mouth: bool,
 ) -> Result<outlet::MouthResponse, DuctError> {
-    let response = mm_reflection_prepared(geometry, state, omega, loss, load, observe_mouth)?;
+    let response = mm_wave_response_prepared(geometry, state, omega, loss, load, observe_mouth, true)?;
     let input = response.input;
     let z_in = impedance_from_reflection(
         &input.reflection_matrix, &input.characteristic_impedances, input.n_modes,
@@ -794,6 +795,21 @@ fn mm_reflection_prepared(
     load: MmLoad<'_>,
     observe_mouth: bool,
 ) -> Result<ModalWaveResponse, DuctError> {
+    mm_wave_response_prepared(geometry, state, omega, loss, load, observe_mouth, false)
+}
+
+// Only physical pressure/flow outputs may use a finite reference at a boundary
+// cutoff. The public native-reflection route above never exposes that reference
+// as the divergent physical characteristic impedance.
+fn mm_wave_response_prepared(
+    geometry: &PreparedModalDuct<'_>,
+    state: &GasState,
+    omega: f64,
+    loss: LossModel,
+    load: MmLoad<'_>,
+    observe_mouth: bool,
+    admit_boundary_cutoff: bool,
+) -> Result<ModalWaveResponse, DuctError> {
     if !(omega.is_finite() && omega > 0.0) {
         return Err(DuctError::BadParameter {
             what: "omega must be finite and positive",
@@ -819,7 +835,9 @@ fn mm_reflection_prepared(
             (None, omega * mouth / matrix.exterior().sound_speed)
         }
     };
-    let mouth_wave = modal_wave(state, mouth, omega, loss, gammas)?;
+    let mouth_wave = modal_wave_with_cutoff_reference(
+        state, mouth, omega, loss, gammas, admit_boundary_cutoff,
+    )?;
     let mut min_shear = mouth_wave.shear_number;
     // Ideal boundary conditions apply pointwise over the entire mouth:
     // U = Zc^-1 (a-b) = 0 gives R = +I, and P = a+b = 0 gives R = -I.
@@ -851,6 +869,16 @@ fn mm_reflection_prepared(
             for mode in 1..n {
                 r[mode * n + mode] = ideal_reflection;
             }
+        } else {
+            // A scalar load matches each higher mode to its semi-infinite
+            // continuation. At cutoff its axial admittance vanishes: U_n=0,
+            // hence R_n=+1 in the finite local reference. Matching that
+            // artificial reference instead would invent a finite outlet flow.
+            for mode in 1..n {
+                if mouth_wave.k[mode] == C64::ZERO {
+                    r[mode * n + mode] = C64::ONE;
+                }
+            }
         }
         // Only scalar radiation/table loads leave higher modes matched.
         r
@@ -861,7 +889,7 @@ fn mm_reflection_prepared(
     // last station -> (junction -> propagate) for every earlier station.
     let propagate = |r: &mut Vec<C64>, flow: &mut Option<Vec<C64>>, wave: &ModalWave, length: f64| -> Result<(), DuctError> {
         if wave.k.contains(&C64::ZERO) {
-            return outlet::propagate_internal_cutoff(flow, r, wave, length);
+            return outlet::propagate_cutoff(flow, r, wave, length);
         }
         let e: Vec<C64> = wave
             .k
@@ -877,8 +905,8 @@ fn mm_reflection_prepared(
     propagate(&mut r, &mut mouth_flow, &wave_here, stations[last].length)?;
     for idx in (0..last).rev() {
         let st = &stations[idx];
-        let wave_up = modal_wave_with_internal_cutoff(
-            state, st.radius, omega, loss, gammas, idx != 0,
+        let wave_up = modal_wave_with_cutoff_reference(
+            state, st.radius, omega, loss, gammas, idx != 0 || admit_boundary_cutoff,
         )?;
         min_shear = min_shear.min(wave_up.shear_number);
         if let Some(junction) = &geometry.junctions[idx] {

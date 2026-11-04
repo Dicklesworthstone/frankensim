@@ -197,11 +197,12 @@ pub(super) fn propagate(map: &mut Option<Vec<C64>>, e: &[C64], n: usize) {
     }
 }
 
-/// Exact finite-section transfer at an INTERNAL transverse cutoff. Its local
+/// Exact finite-section transfer at a transverse cutoff. Its local
 /// reference is Zc_0, so P_left=P_right-i k_0 Zc_0 L U_right and U_left=U_right
 /// give r=b/(2+b), t=2/(2+b), b=-i k_0 L. Other modes retain their native
-/// decaying propagation. This does not reinterpret an inlet or mouth wave.
-pub(super) fn propagate_internal_cutoff(
+/// decaying propagation. The finite reference stays private; endpoint
+/// observations recover physical pressure/flow, never native cutoff waves.
+pub(super) fn propagate_cutoff(
     map: &mut Option<Vec<C64>>, reflection: &mut Vec<C64>, wave: &ModalWave, length: f64,
 ) -> Result<(), DuctError> {
     let n = wave.k.len();
@@ -231,8 +232,24 @@ pub(super) fn propagate_internal_cutoff(
     }
     let mut upstream = mat_mul(reflection, &j, n);
     for row in 0..n {
-        for col in 0..n { upstream[row*n+col] = t[row] * upstream[row*n+col]; }
-        upstream[row*n+row] = upstream[row*n+row] + r[row];
+        if wave.k[row] == C64::ZERO {
+            // U_left=U_right, hence I-R_left=(I-R_right)J on this row.
+            // Form the conserved flow directly: an exactly closed cutoff
+            // channel stays exactly closed, including its genuine impedance
+            // pole, without cancellation between r and t R J.
+            for col in 0..n {
+                let mut flow = C64::ZERO;
+                for mode in 0..n {
+                    let y = if mode == row { C64::ONE - reflection[row*n+mode] }
+                        else { -reflection[row*n+mode] };
+                    flow = flow + y * j[mode*n+col];
+                }
+                upstream[row*n+col] = if col == row { C64::ONE - flow } else { -flow };
+            }
+        } else {
+            for col in 0..n { upstream[row*n+col] = t[row] * upstream[row*n+col]; }
+            upstream[row*n+row] = upstream[row*n+row] + r[row];
+        }
     }
     if upstream.iter().any(|&z| !finite(z)) { return Err(DuctError::Singular); }
     if let Some(map) = map {

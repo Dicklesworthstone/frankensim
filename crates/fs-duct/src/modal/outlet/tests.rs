@@ -77,6 +77,15 @@ fn direct_source(duct: &Duct, gas: &GasState, omega: f64, loss: LossModel, n: us
     ideal: Option<Termination>, source: Option<(&[f64], bool)>)
     -> (Vec<C64>,Vec<C64>)
 {
+    direct_boundary(duct, gas, omega, loss, n, ideal, source, None)
+}
+
+// A full physical terminal matrix keeps its original signed pressure/flow
+// coordinates even when an endpoint mode has zero axial wavenumber.
+fn direct_boundary(duct: &Duct, gas: &GasState, omega: f64, loss: LossModel, n: usize,
+    ideal: Option<Termination>, source: Option<(&[f64], bool)>, matrix: Option<&[C64]>)
+    -> (Vec<C64>,Vec<C64>)
+{
     let stations = stations_of(duct,1).unwrap();
     let gammas = j1_roots(n-1).unwrap();
     let waves: Vec<_> = stations.iter().map(|s| {
@@ -164,12 +173,19 @@ fn direct_source(duct: &Duct, gas: &GasState, omega: f64, loss: LossModel, n: us
     zload[0] = C64::from_re(0.7*gas.density*gas.sound_speed/(core::f64::consts::PI*radius*radius));
     for mode in 0..n {
         for col in 0..dimension {
-            a[(row+mode)*dimension+col] = match ideal {
+            a[(row+mode)*dimension+col] = if let Some(matrix) = matrix {
+                (0..n).fold(pout[mode*dimension+col], |value, other|
+                    value-matrix[mode*n+other]*uout[other*dimension+col])
+            } else { match ideal {
                 Some(Termination::Closed) => uout[mode*dimension+col],
                 Some(Termination::IdealOpen) => pout[mode*dimension+col],
+                // A matched continuation has exactly zero axial admittance
+                // at cutoff. Its finite private basis scale is not a load.
+                None if mode > 0 && waves.last().unwrap().k[mode] == C64::ZERO =>
+                    uout[mode*dimension+col],
                 None => pout[mode*dimension+col]-zload[mode]*uout[mode*dimension+col],
                 _ => unreachable!("only ideal boundaries are used by this oracle"),
-            };
+            }};
         }
     }
     let scales: Vec<_> = a.chunks(dimension).map(|r|
@@ -235,9 +251,127 @@ fn internal_modal_cutoff_preserves_exact_finite_section_and_mouth_flow() {
     // Public native characteristic coordinates still refuse a cutoff at the
     // inlet or mouth; no finite reference is presented as physical Zc_n.
     assert!(modal_characteristic_impedances(&gas, radius, omega, LossModel::Lossless, 2).is_err());
+}
+
+#[test]
+fn pressure_release_endpoint_cutoff_retains_finite_impedance_and_constant_flow() {
+    // G1: the higher mode's axial wavelength diverges at BOTH endpoints.
+    // Its exact finite-section equations are U(x)=U_in and
+    // P_in=-i omega rho L U_in/A for the pressure-release mouth.
+    let gas = air();
+    let radius = j1_roots(1).unwrap()[0] / 128.0;
+    let omega = gas.sound_speed * 128.0;
+    let length = 0.03;
+    let duct = cylinders(&[radius]);
+    let z0 = gas.density*gas.sound_speed/(core::f64::consts::PI*radius*radius);
+    let phase = omega*length/gas.sound_speed;
+    let actual = mouth_response(&duct, &gas, omega, LossModel::Lossless,
+        Termination::IdealOpen, 2, 1).unwrap();
+    close(actual.input.impedance_matrix[3], C64::new(0.0, -phase*z0), z0);
+    close(actual.flow_map[3], C64::ONE, 1.0);
+    close(actual.input.impedance_matrix[0], C64::new(0.0, -z0*phase.sin()/phase.cos()), z0);
+    close(actual.flow_map[0], C64::from_re(phase.cos().recip()), 1.0);
+    for index in [1, 2] {
+        assert_eq!(actual.input.impedance_matrix[index], C64::ZERO);
+        assert_eq!(actual.flow_map[index], C64::ZERO);
+    }
+    let geometry = PreparedModalDuct::new(&duct, 2, 1).unwrap();
+    assert_eq!(geometry.input_impedance(&gas, omega, LossModel::Lossless,
+        Termination::IdealOpen).unwrap().impedance_matrix, actual.input.impedance_matrix);
+
+    // No artificial finite reference escapes through a native-wave API.
+    assert!(geometry.input_reflection(&gas, omega, LossModel::Lossless, Termination::IdealOpen).is_err());
+    assert!(geometry.mouth_waves(&gas, omega, LossModel::Lossless, Termination::IdealOpen).is_err());
+    assert!(modal_characteristic_impedances(&gas, radius, omega, LossModel::Lossless, 2).is_err());
+
+    // Closed and matched higher-mode cutoffs really do have an input pole.
+    // The finite-coordinate continuation must not turn it into a large number.
+    assert!(matches!(mouth_response(&duct, &gas, omega, LossModel::Lossless,
+        Termination::Closed, 2, 1), Err(DuctError::Singular)));
+    assert!(matches!(mouth_response_load(&duct, &gas, omega, LossModel::Lossless,
+        C64::from_re(0.7*z0), 2, 1), Err(DuctError::Singular)));
+}
+
+#[test]
+fn endpoint_cutoffs_match_original_pressure_flow_junction_equations() {
+    // G1/G3: admit either endpoint, retaining the physical boundary condition
+    // on every mode. A scalar load's higher modes stay matched, not loaded by
+    // the finite reference used to propagate the cutoff section.
+    let gas = air();
+    let radius = j1_roots(1).unwrap()[0] / 128.0;
+    let omega = gas.sound_speed * 128.0;
     for radii in [[radius, 0.042], [0.045, radius]] {
-        assert!(mouth_response_load(&cylinders(&radii), &gas, omega,
-            LossModel::Lossless, load, 2, 1).is_err());
+        let duct = cylinders(&radii);
+        let z0 = gas.density*gas.sound_speed/(core::f64::consts::PI*radii[1]*radii[1]);
+        for ideal in [None, Some(Termination::IdealOpen), Some(Termination::Closed)] {
+            let response = match ideal {
+                Some(termination) => mouth_response(&duct, &gas, omega, LossModel::Lossless,
+                    termination, 2, 1),
+                None => mouth_response_load(&duct, &gas, omega, LossModel::Lossless,
+                    C64::from_re(0.7*z0), 2, 1),
+            }.unwrap();
+            let (impedance, flow) = direct(&duct, &gas, omega, LossModel::Lossless, 2, ideal);
+            for (&actual, &expected) in response.input.impedance_matrix.iter().zip(&impedance) {
+                close(actual, expected, z0);
+            }
+            for (&actual, &expected) in response.flow_map.iter().zip(&flow) {
+                close(actual, expected, 1.0);
+            }
+            if ideal.is_none() && radii[1] == radius {
+                assert_eq!(&response.flow_map[2..], &[C64::ZERO, C64::ZERO]);
+            }
+        }
+    }
+}
+
+#[test]
+fn coupled_matrix_boundary_remains_finite_at_endpoint_cutoff() {
+    // G1/G3: a passive full terminal matrix mixes plane and cutoff modes.
+    // The independent global solve retains every pressure and volume flow;
+    // neither a native modal impedance nor a matched closure replaces it.
+    let gas = air();
+    let radius = j1_roots(1).unwrap()[0] / 128.0;
+    let omega = gas.sound_speed * 128.0;
+    for radii in [vec![radius], vec![radius, 0.042], vec![0.045, radius]] {
+        let duct = cylinders(&radii);
+        let mouth = *radii.last().unwrap();
+        let z0 = gas.density*gas.sound_speed/(core::f64::consts::PI*mouth*mouth);
+        let values = vec![C64::new(0.7, -0.2), C64::new(0.12, 0.08),
+            C64::new(0.12, 0.08), C64::new(1.1, -0.4)].iter().map(|z| z.scale(z0)).collect::<Vec<_>>();
+        let load = ModalMouthImpedance::new(omega, mouth, gas, ModeCount(2), values.clone()).unwrap();
+        let at = mouth_response_matrix(&duct, &gas, omega, LossModel::Lossless, &load, 2, 1).unwrap();
+        let (impedance, flow) = direct_boundary(&duct, &gas, omega, LossModel::Lossless,
+            2, None, None, Some(&values));
+        for (&actual, &expected) in at.input.impedance_matrix.iter().zip(&impedance) {
+            close(actual, expected, z0);
+        }
+        for (&actual, &expected) in at.flow_map.iter().zip(&flow) { close(actual, expected, 1.0); }
+
+        // Refine frequency from both sides: propagating and evanescent waves
+        // approach the same finite physical endpoint response.
+        for direction in [-1.0, 1.0] {
+            let mut previous = f64::INFINITY;
+            for offset in [1e-4, 1e-6, 1e-8] {
+                let query = omega*(1.0+direction*offset);
+                let load = ModalMouthImpedance::new(query, mouth, gas, ModeCount(2), values.clone()).unwrap();
+                let near = mouth_response_matrix(&duct, &gas, query, LossModel::Lossless, &load, 2, 1).unwrap();
+                let error = near.input.impedance_matrix.iter().zip(&at.input.impedance_matrix)
+                    .map(|(&a,&b)| (a-b).abs()/z0)
+                    .chain(near.flow_map.iter().zip(&at.flow_map).map(|(&a,&b)| (a-b).abs()))
+                    .fold(0.0, f64::max);
+                assert!(error < 0.1*previous, "radii={radii:?}, side={direction}, offset={offset}, error={error}");
+                previous = error;
+            }
+            assert!(previous < 5e-6);
+        }
+
+        let split = Duct { segments: radii.iter().flat_map(|&radius|
+            (0..2).map(move |_| Segment::Cylinder { radius, length: 0.015 })).collect() };
+        let split = mouth_response_matrix(&split, &gas, omega, LossModel::Lossless, &load, 2, 1).unwrap();
+        for (&actual, &expected) in split.input.impedance_matrix.iter().zip(&at.input.impedance_matrix) {
+            close(actual, expected, z0);
+        }
+        for (&actual, &expected) in split.flow_map.iter().zip(&at.flow_map) { close(actual, expected, 1.0); }
     }
 }
 
