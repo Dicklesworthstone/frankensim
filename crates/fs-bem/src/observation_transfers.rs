@@ -35,6 +35,9 @@ mod scattering;
 pub use scattering::{CompactSourceSpec, ForceDipoleSpec, PointSourceSpec, ScatteringObservation};
 mod harmonic;
 pub use harmonic::{
+    HarmonicPressureCorrelation, HarmonicPressureCorrelationLimits, HarmonicPressureCorrelationPair,
+    MAX_PRESSURE_CORRELATION_PAIRS, PreparedHarmonicPressureCorrelations,
+    WindowedHarmonicPressureCorrelations,
     HarmonicSourceMapLimits,
     HarmonicControlLimits, HarmonicEnergyGradient, HarmonicFieldCovector,
     PreparedHarmonicEnergyControl,

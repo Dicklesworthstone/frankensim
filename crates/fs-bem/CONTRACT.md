@@ -3185,3 +3185,33 @@ Coherent wall-work reconstruction gives zero absorption at rigid and
 pressure-release endpoints. Focused regressions cover dense equivalence,
 independent original-equation residuals, all three panel rules, transformed
 preconditioning, mechanical-resonance continuity and actual refusal/cancellation.
+
+## Signed-lag finite-window pressure-channel correlations
+
+`PreparedHarmonicPressureCorrelations` observes selected ordered channels of an
+existing `PreparedHarmonicPressureArray`. Each authored request retains a finite
+signed lag in seconds:
+`R_ab(tau) = E[<y_a(t) y_b(t + tau)>_window]`.
+Positive lag advances the second signal, giving `exp(-i omega tau)` under the
+original `exp(-i omega t)` convention. Directional p/u pickup, physical source
+phases, channel weights and steering delays are already in the borrowed array.
+
+Preparation retains lagged channel phasors once. Repeated Uniform/Triangular
+window queries share each analytic product kernel across all requested pairs,
+including both off-diagonal frequency contractions, real-factor sum-frequency
+terms and proper-factor difference-frequency terms. They perform no propagation solve,
+lag trigonometry, time sampling or dense source-covariance construction. Work
+is bounded by requested pairs times the sum of squared line counts; caller
+bounds also account for lag preparation, retained payload, query accumulators
+and one output. Cancellation or refusal leaves the original array and accepted observer reusable.
+
+Results distinguish the full uncentered correlation, the window average of
+instantaneous ensemble covariance, and the covariance of the two averaged
+readouts. The latter two are contracted from fluctuation factors directly,
+without subtracting a large deterministic second moment. Cross correlations
+retain either sign. Deterministic temporal variation is not mislabeled as
+source noise. No stationarity, Gaussian statistics or electronic noise is
+inferred. For nonstationary fields, reversing a pair and negating its lag also
+requires shifting the observation window by that lag. The harmonic continuation,
+original receiver/source identities, clock and unresolved physical uncertainty
+remain explicit; this is not a finite pulse or sampling-bandwidth model.

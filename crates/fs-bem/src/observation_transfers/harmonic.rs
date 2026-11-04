@@ -526,6 +526,9 @@ pub(super) mod welch;
 
 mod exposure;
 pub use exposure::{
+    HarmonicPressureCorrelation, HarmonicPressureCorrelationLimits, HarmonicPressureCorrelationPair,
+    MAX_PRESSURE_CORRELATION_PAIRS, PreparedHarmonicPressureCorrelations,
+    WindowedHarmonicPressureCorrelations,
     HarmonicMomentumLimits, HarmonicVolumeQuadrature, HarmonicWaveMomentumFlux,
     HarmonicWaveMomentumStorage, HarmonicWaveMomentumTransfer,
     PreparedHarmonicSurfaceWaveMomentum, PreparedHarmonicVolumeWaveMomentum,
