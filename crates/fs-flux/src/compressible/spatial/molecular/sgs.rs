@@ -1,8 +1,12 @@
 //! Local equilibrium subgrid stress and heat transport on the conservative gas.
 //!
 //! The resolved velocity is momentum/density (the Favre velocity). Each SSP
-//! stage recomputes the shared LBM Smagorinsky/WALE/Vreman closure from its full
-//! physical velocity gradient. Face stress adds `mu_t = rho nu_t` only to the
+//! stage recomputes the shared LBM Smagorinsky/WALE/Vreman closure from the full
+//! physical velocity gradient at each conservative face. The normal derivative
+//! uses the adjacent velocities, exactly as the stress does; transverse
+//! derivatives use the two cell traces. Cell-centered central differences alone
+//! miss alternating-cell shear and must not select the local face viscosity.
+//! Face stress adds `mu_t = rho nu_t` only to the
 //! deviatoric viscosity; bulk viscosity remains the original molecular law.
 //! Gradient-diffusion heat adds `k_t = mu_t cp(T)/Pr_t`, using the original
 //! caloric source at the face. Stress work and heat use the existing shared
@@ -33,6 +37,27 @@ mod channel;
 pub use channel::ChannelDynamicThermalSubgridConfig;
 pub(in crate::compressible::spatial) use channel::{channel_axis, channel_wall_values};
 pub use fs_lbm::sgs3::dynamic::channel::{ChannelDynamicScalarConfig, ChannelDynamicSgsConfig};
+
+/// Match the local constitutive tensor to the conservative stress stencil.
+/// The input and output tensors are component-first: `g[i][j] = du_i/dx_j`.
+pub(in crate::compressible::spatial) fn face_gradient(
+    left_velocity: [f64; 3],
+    right_velocity: [f64; 3],
+    left_gradient: [[f64; 3]; 3],
+    right_gradient: [[f64; 3]; 3],
+    normal_axis: usize,
+    distance: f64,
+) -> [[f64; 3]; 3] {
+    std::array::from_fn(|i| {
+        std::array::from_fn(|j| {
+            if j == normal_axis {
+                (right_velocity[i] - left_velocity[i]) / distance
+            } else {
+                0.5 * left_gradient[i][j] + 0.5 * right_gradient[i][j]
+            }
+        })
+    })
+}
 
 /// Explicit subgrid controls; enabling the Cargo feature alone changes no flow.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -138,51 +163,21 @@ impl SubgridTransport {
     pub(super) fn prepare(
         &mut self,
         primitive: &[Primitive],
-        gradient: &[[[f64; 3]; 3]],
         walls: &[MolecularWall3d; 6],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), MolecularError> {
-        let (config, widths, filter_width) = match &mut self.closure {
-            SubgridClosure::Local {
-                config,
-                widths,
-                filter_width,
-            } => (*config, *widths, *filter_width),
+        match &mut self.closure {
+            SubgridClosure::Local { .. } => Ok(()),
             SubgridClosure::Dynamic(dynamic) => {
-                return dynamic.prepare(primitive, &mut self.dynamic_viscosity, cancelled);
+                dynamic.prepare(primitive, &mut self.dynamic_viscosity, cancelled)
             }
             SubgridClosure::DynamicThermal(dynamic) => {
-                return dynamic.prepare(primitive, &mut self.dynamic_viscosity, cancelled);
+                dynamic.prepare(primitive, &mut self.dynamic_viscosity, cancelled)
             }
             SubgridClosure::ChannelDynamicThermal(dynamic) => {
-                return dynamic.prepare(primitive, walls, &mut self.dynamic_viscosity, cancelled);
-            }
-        };
-        if config.model.coefficient() == 0.0 {
-            return Ok(());
-        }
-        for (cell, ((p, g), mu)) in primitive
-            .iter()
-            .zip(gradient)
-            .zip(&mut self.dynamic_viscosity)
-            .enumerate()
-        {
-            if cell % 64 == 0 {
-                poll(cancelled)?;
-            }
-            let nu = match config.model {
-                SgsModel::Vreman { cv } => vreman_eddy_viscosity(cv, widths, *g),
-                model => eddy_viscosity(model, filter_width, *g),
-            }
-            .map_err(MolecularError::Subgrid)?;
-            *mu = p.density * nu;
-            if !mu.is_finite() {
-                return Err(MolecularError::Invalid(
-                    "unrepresentable subgrid dynamic viscosity",
-                ));
+                dynamic.prepare(primitive, walls, &mut self.dynamic_viscosity, cancelled)
             }
         }
-        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -193,12 +188,40 @@ impl SubgridTransport {
         right: usize,
         axis: usize,
         face: usize,
+        distance: f64,
+        primitive: &[Primitive],
+        gradient: &[[[f64; 3]; 3]],
         temperature: f64,
         pressure: f64,
         molecular_mu: f64,
         molecular_conductivity: f64,
     ) -> Result<(f64, f64), MolecularError> {
-        let mu_t = 0.5 * self.dynamic_viscosity[left] + 0.5 * self.dynamic_viscosity[right];
+        let mu_t = if let SubgridClosure::Local {
+            config,
+            widths,
+            filter_width,
+        } = &self.closure
+        {
+            if config.model.coefficient() == 0.0 {
+                return Ok((molecular_mu, molecular_conductivity));
+            }
+            let g = face_gradient(
+                primitive[left].velocity,
+                primitive[right].velocity,
+                gradient[left],
+                gradient[right],
+                axis,
+                distance,
+            );
+            let nu = match config.model {
+                SgsModel::Vreman { cv } => vreman_eddy_viscosity(cv, *widths, g),
+                model => eddy_viscosity(model, *filter_width, g),
+            }
+            .map_err(MolecularError::Subgrid)?;
+            (0.5 * primitive[left].density + 0.5 * primitive[right].density) * nu
+        } else {
+            0.5 * self.dynamic_viscosity[left] + 0.5 * self.dynamic_viscosity[right]
+        };
         let (prandtl, maximum_ratio) = match &self.closure {
             SubgridClosure::Local { config, .. } => {
                 (config.turbulent_prandtl, config.maximum_eddy_to_molecular)

@@ -1680,14 +1680,18 @@ normal resolution and appropriate source coefficients.
 
 With `experimental-sgs`, `MolecularTransport3d::with_sgs` and
 `MolecularEuler3d::with_sgs` consume the same explicitly authored Smagorinsky,
-WALE or Vreman closure as `fs-lbm`. Each SSP stage computes the full physical
-velocity gradient once; a preallocated per-cell dynamic-viscosity field is
-reused by faces. Smagorinsky/WALE use the declared multiplier times the cube
-root of cell volume; Vreman retains all three directional widths. The
-zero-coefficient control preserves molecular-only arithmetic and source calls.
+WALE or Vreman closure as `fs-lbm`. Each SSP stage caches cell gradients for
+transverse face traces. Local closures use the full physical face tensor:
+normal derivatives are adjacent-cell differences over the face distance,
+and transverse derivatives average the two cached cell traces. This matches
+the conservative stress stencil and resolves alternating-cell shear invisible
+to centered cell derivatives. Smagorinsky/WALE use the declared multiplier
+times the cube root of cell volume; Vreman retains all three directional
+widths. No additional numerical scratch is allocated. The zero-coefficient
+control preserves molecular-only arithmetic and source calls.
 
-Faces add `mu_t = mean(rho*nu_t)` to deviatoric viscosity, retaining the original
-molecular bulk viscosity. Heat adds `mu_t*cp(T)/Pr_t`, using the original
+Faces add `mu_t = mean(rho)*nu_t(face)` to deviatoric viscosity, retaining the
+original molecular bulk viscosity. Heat adds `mu_t*cp(T)/Pr_t`, using the original
 caloric source at the face temperature and the caller's positive turbulent
 Prandtl number. The existing shared momentum and total-energy flux carries
 both SGS stress work and heat, so internal heating is not added a second time.
@@ -2182,10 +2186,14 @@ is no SGS reaction-rate, wall, shock-interaction or DNS-accuracy qualification.
 With `experimental-sgs`, the existing spatial mixture molecular owner admits
 `sgs::MixtureSubgridConfig { transport: SubgridConfig, turbulent_schmidt }`
 through `MolecularTransport3d::with_sgs`. Every SSP stage/retry evaluates shared
-Smagorinsky, WALE or Vreman from the complete Favre-velocity gradient. The
-derivative-first cache is transposed to the shared component-first convention;
-Vreman retains directional filter widths. Both Prandtl and Schmidt numbers
-are explicitly authored positive finite values.
+Smagorinsky, WALE or Vreman from the complete Favre-velocity face gradient.
+Normal derivatives use adjacent cells; transverse derivatives average the
+cached cell traces, transposed from derivative-first to the shared
+component-first convention. The local face coefficient is
+`mu_t = mean(rho)*nu_t(face)`, so modeled stress, heat and species mixing see
+the same resolved face shear, including alternating-cell modes. Vreman
+retains directional filter widths. Both Prandtl and Schmidt numbers are
+explicitly authored positive finite values.
 
 Original Maxwell--Stefan transport, including its Soret/Dufour terms, remains
 unchanged. Each interior face adds deviatoric stress/work, `mu_t*cp(T)/Pr_t`

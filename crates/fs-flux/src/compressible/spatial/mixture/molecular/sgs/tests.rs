@@ -7,8 +7,8 @@ use fs_gas::multicomponent::dissipation::{
 use fs_qty::DynViscosity;
 use fs_thermochem::transport::kinetic::ThermalConductivityQuantityV1;
 
-mod dynamic;
 mod channel;
+mod dynamic;
 
 const PERIODIC: Boundaries3d = Boundaries3d {
     x: AxisBoundaries::Periodic,
@@ -183,11 +183,6 @@ fn sgs_mixture_faces_match_full_deviatoric_stress_heat_species_and_enthalpy() {
     .sqrt();
     let mu = (0.18 * flow.grid.cell_volume().cbrt()).powi(2) * strain;
     let left = flow.grid.index([1, 1, 1]);
-    close(
-        modeled.sgs.as_ref().unwrap().dynamic_viscosity[left],
-        mu,
-        2e-15,
-    );
     for axis in 0..3 {
         let mut c = [1, 1, 1];
         c[axis] += 1;
@@ -240,18 +235,26 @@ fn sgs_mixture_preserves_directional_vreman_metric_and_all_shared_models() {
         SgsModel::Vreman { cv: 0.07 },
     ] {
         let mut op = operator(&flow, Some(config(model)));
+        let mut molecular = operator(&flow, None);
         faces(&mut op, &flow);
+        faces(&mut molecular, &flow);
         let expected = match model {
             SgsModel::Vreman { cv } => vreman_eddy_viscosity(cv, flow.grid.spacing, A),
             model => eddy_viscosity(model, flow.grid.cell_volume().cbrt(), A),
         }
         .unwrap();
         assert!(expected > 0.0);
-        close(
-            op.sgs.as_ref().unwrap().dynamic_viscosity[flow.grid.index([1, 1, 1])],
-            expected,
-            2e-15,
-        );
+        for axis in 0..3 {
+            let face = flow.grid.cell_face(axis, [1, 1, 1]);
+            let tangent = (axis + 1) % 3;
+            let actual = op.work.flux[axis][7 * face + 3 + tangent]
+                - molecular.work.flux[axis][7 * face + 3 + tangent];
+            close(
+                actual,
+                -expected * (A[tangent][axis] + A[axis][tangent]),
+                2e-15,
+            );
+        }
     }
     let transpose = std::array::from_fn(|i| std::array::from_fn(|j| A[j][i]));
     let right = vreman_eddy_viscosity(0.07, flow.grid.spacing, A).unwrap();
@@ -260,6 +263,61 @@ fn sgs_mixture_preserves_directional_vreman_metric_and_all_shared_models() {
         (right - wrong).abs() > 1e-5,
         "anisotropic fixture must expose transposition"
     );
+}
+
+#[test]
+fn sgs_mixture_faces_resolve_checkerboard_shear_and_its_species_mixing() {
+    let spacing = [0.2, 0.3, 0.4];
+    for axis in 0..3 {
+        let tangent = (axis + 1) % 3;
+        let h = spacing[axis];
+        let flow = field(
+            material(0.0),
+            CartesianGrid::new(4, 4, 4, spacing[0], spacing[1], spacing[2]).unwrap(),
+            PERIODIC,
+            |x| {
+                let sign = if ((x[axis] / h) as usize) % 2 == 0 {
+                    1.0
+                } else {
+                    -1.0
+                };
+                let first = 0.5 + 0.1 * sign;
+                let mut velocity = [0.0; 3];
+                velocity[tangent] = 0.1 * sign;
+                ([first, 1.0 - first, 0.0], velocity, 1.0)
+            },
+        );
+        let cfg = config(SgsModel::Smagorinsky { cs: 0.18 });
+        let mut op = operator(&flow, Some(cfg));
+        let mut molecular = operator(&flow, None);
+        let active = faces(&mut op, &flow);
+        let base = faces(&mut molecular, &flow);
+        assert!(active.rate > base.rate);
+        assert!(
+            op.work
+                .gradient
+                .iter()
+                .flatten()
+                .flatten()
+                .all(|&g| g == 0.0)
+        );
+        let face = flow.grid.cell_face(axis, [1, 1, 1]);
+        let delta: [f64; 7] = std::array::from_fn(|i| {
+            op.work.flux[axis][7 * face + i] - molecular.work.flux[axis][7 * face + i]
+        });
+        let gradient: f64 = -0.2 / h;
+        let mu = (0.18 * flow.grid.cell_volume().cbrt()).powi(2) * gradient.abs();
+        let j = -mu / cfg.turbulent_schmidt * gradient;
+        close(delta[0], j, 2e-15);
+        close(delta[1], -j, 2e-15);
+        assert_eq!(delta[2], 0.0);
+        close(delta[3 + tangent], -mu * gradient, 2e-15);
+        // The source's stress scale dominates here. Molecular and modeled
+        // scales must add, with every physical inverse cell width retained.
+        let expected_increase =
+            4.0 * (20.0 / 3.0) * mu * spacing.iter().map(|h| h.recip().powi(2)).sum::<f64>();
+        close(active.rate - base.rate, expected_increase, 3e-14);
+    }
 }
 
 #[test]

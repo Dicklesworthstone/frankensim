@@ -160,12 +160,114 @@ fn g1_subgrid_heat_flux_uses_cp_prandtl_and_the_physical_filter_width() {
     );
     let z_flux = op.work.flux[2][op.grid.cell_face(2, c)];
     let l = op.work.primitive[op.grid.index([1, 1, 0])];
+    // At a z face the constitutive tensor uses the same adjacent-cell shear
+    // as the stress. Its centered-at-the-face derivative is second order too,
+    // but differs from the cell-centered symbol used on tangential x faces.
+    let face_strain = 0.2 * (std::f64::consts::PI * h).sin() / h;
+    let face_mu_t = (0.17 * h).powi(2) * face_strain;
     close(
         z_flux.transverse_momentum[0],
-        -(0.002 + mu_t) * (r.velocity[0] - l.velocity[0]) / h,
+        -(0.002 + face_mu_t) * (r.velocity[0] - l.velocity[0]) / h,
         2e-15,
     );
     assert!(rate > 0.0);
+}
+
+#[test]
+fn g0_face_sgs_damps_alternating_shear_missed_by_cell_central_gradients() {
+    // A collocated checkerboard has identically zero centered cell derivative,
+    // but finite stress at every face. Smagorinsky must see that actual shear.
+    // WALE/Vreman intentionally vanish on rank-one simple shear, so this
+    // regression must not impose an incorrect positive-eddy requirement on them.
+    for axis in 0..3 {
+        let tangent = (axis + 1) % 3;
+        let initial = |x: [f64; 3]| {
+            let sign = if ((4.0 * x[axis]) as usize) % 2 == 0 {
+                1.0
+            } else {
+                -1.0
+            };
+            let mut p = [1.0, 0.0, 0.0, 0.0, 2.0];
+            p[1 + tangent] = 0.1 * sign;
+            p
+        };
+        let mut flow = cube(4, initial);
+        let mut base = cube(4, initial);
+        let settings = config(SgsModel::Smagorinsky { cs: 0.17 });
+        let mut op = MolecularTransport3d::with_sgs(
+            &flow,
+            law(flow.gas(), 0.002, 0.0, 0.0),
+            settings,
+            || false,
+        )
+        .unwrap();
+        let mut molecular =
+            MolecularTransport3d::new(&base, law(base.gas(), 0.002, 0.0, 0.0), || false).unwrap();
+        let rate = spatial(
+            &op.gas,
+            &op.grid,
+            op.boundaries,
+            &op.walls,
+            &flow.states,
+            &mut op.law,
+            &mut op.work.primitive,
+            &mut op.work.gradient,
+            &mut op.work.flux,
+            &mut op.work.binary,
+            op.sgs.as_mut(),
+            &mut || false,
+        )
+        .unwrap();
+        assert!(
+            op.work
+                .gradient
+                .iter()
+                .flatten()
+                .flatten()
+                .all(|&g| g == 0.0)
+        );
+        let c = [1, 1, 1];
+        let f = op.work.flux[axis][op.grid.cell_face(axis, c)];
+        let h = 0.25;
+        let derivative: f64 = -0.2 / h;
+        let mu_t = (0.17_f64 * h).powi(2) * derivative.abs();
+        let index = tangents(axis).iter().position(|&i| i == tangent).unwrap();
+        close(
+            f.transverse_momentum[index],
+            -(0.002 + mu_t) * derivative,
+            2e-15,
+        );
+        // Stress dominates heat for this source. The admitted diffusion scale
+        // must include the face viscosity despite its zero cell-gradient cache.
+        let expected_rate = 4.0 * (20.0 / 3.0) * (0.002 + mu_t) * 3.0 / (h * h);
+        close(rate, expected_rate, 3e-14);
+        let energy = flow.totals().energy;
+        let before = partition(&flow);
+        let report = op
+            .advance(
+                &mut flow,
+                Time::new(0.001),
+                MolecularControl::default(),
+                || false,
+            )
+            .unwrap();
+        molecular
+            .advance(
+                &mut base,
+                Time::new(0.001),
+                MolecularControl::default(),
+                || false,
+            )
+            .unwrap();
+        let after = partition(&flow);
+        assert!(after.0 < partition(&base).0);
+        close(after.1 - before.1, before.0 - after.0, 2e-13);
+        close(flow.totals().energy, energy, 2e-13);
+        assert!(report.maximum_parabolic_number <= 0.40000000000001);
+        for r in report.conservation_residual.array() {
+            close(r, 0.0, 2e-13);
+        }
+    }
 }
 
 #[test]

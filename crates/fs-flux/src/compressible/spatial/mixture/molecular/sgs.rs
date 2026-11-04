@@ -25,6 +25,7 @@
 
 use super::super::sum;
 use super::*;
+use crate::compressible::spatial::molecular::sgs::face_gradient;
 pub use crate::compressible::spatial::molecular::sgs::{
     ChannelDynamicThermalSubgridConfig, DynamicAveraging, DynamicScalarConfig, DynamicSgsConfig,
     DynamicSubgridConfig, DynamicThermalSubgridConfig, SgsModel, SgsUse, SubgridConfig,
@@ -195,7 +196,7 @@ impl SubgridTransport {
         gas: &MixtureGas,
         states: &[f64],
         primitive: &[Primitive],
-        gradient: &[[[f64; 3]; 3]],
+        _gradient: &[[[f64; 3]; 3]],
         walls: &[MolecularWall3d; 6],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), DissipationError> {
@@ -254,34 +255,12 @@ impl SubgridTransport {
             }
         }
         let n = gas.species_count();
-        for (i, ((p, g), state)) in primitive
-            .iter()
-            .zip(gradient)
-            .zip(states.chunks_exact(n + 4))
-            .enumerate()
-        {
+        for (i, (p, state)) in primitive.iter().zip(states.chunks_exact(n + 4)).enumerate() {
             poll(cancelled)?;
             let nu = match &self.closure {
-                ViscosityClosure::Local {
-                    config,
-                    widths,
-                    filter_width,
-                } => {
-                    // The field is derivative-first; the shared local tensor
-                    // is component-first. Vreman retains its directional metric.
-                    let velocity_gradient = std::array::from_fn(|component| {
-                        std::array::from_fn(|axis| g[axis][component])
-                    });
-                    match config.transport.model {
-                        SgsModel::Vreman { cv } => {
-                            vreman_eddy_viscosity(cv, *widths, velocity_gradient)
-                        }
-                        model => eddy_viscosity(model, *filter_width, velocity_gradient),
-                    }
-                    .map_err(|_| {
-                        DissipationError::Invalid("mixture subgrid velocity gradient or viscosity")
-                    })?
-                }
+                // Local closures are evaluated at the conservative face, where
+                // adjacent velocity differences resolve alternating-cell shear.
+                ViscosityClosure::Local { .. } => 0.0,
                 ViscosityClosure::Dynamic(dynamic) => dynamic.viscosities()[i],
                 ViscosityClosure::DynamicThermal(dynamic) => dynamic.viscosities()[i],
                 ViscosityClosure::DynamicChannelThermal(dynamic) => dynamic.viscosities()[i],
@@ -333,7 +312,36 @@ impl SubgridTransport {
         out: &mut [f64],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<TransportFaceReport, DissipationError> {
-        let mu = 0.5 * self.dynamic_viscosity[left] + 0.5 * self.dynamic_viscosity[right];
+        let mu = if let ViscosityClosure::Local {
+            config,
+            widths,
+            filter_width,
+        } = &self.closure
+        {
+            if config.transport.model.coefficient() == 0.0 {
+                return Ok(receipt);
+            }
+            // This owner's cell tensor is derivative-first. Transpose before
+            // constructing the same component-first face tensor as frozen gas.
+            let transpose =
+                |g: [[f64; 3]; 3]| std::array::from_fn(|i| std::array::from_fn(|j| g[j][i]));
+            let g = face_gradient(
+                primitive[left].velocity,
+                primitive[right].velocity,
+                transpose(gradient[left]),
+                transpose(gradient[right]),
+                axis,
+                distance,
+            );
+            let nu = match config.transport.model {
+                SgsModel::Vreman { cv } => vreman_eddy_viscosity(cv, *widths, g),
+                model => eddy_viscosity(model, *filter_width, g),
+            }
+            .map_err(|_| DissipationError::Invalid("mixture subgrid face gradient or viscosity"))?;
+            (0.5 * primitive[left].density + 0.5 * primitive[right].density) * nu
+        } else {
+            0.5 * self.dynamic_viscosity[left] + 0.5 * self.dynamic_viscosity[right]
+        };
         let dynamic_heat = match &self.closure {
             ViscosityClosure::DynamicThermal(dynamic) => Some(dynamic.face_heat(left, right)),
             ViscosityClosure::DynamicChannelThermal(dynamic) => {

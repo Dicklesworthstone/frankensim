@@ -495,7 +495,7 @@ fn spatial<L: TransportLaw>(
     }
     #[cfg(feature = "experimental-sgs")]
     if let Some(sgs) = subgrid.as_mut() {
-        sgs.prepare(primitive, gradient, walls, cancelled)?;
+        sgs.prepare(primitive, walls, cancelled)?;
     }
     let mut maximum_diffusivity: f64 = 0.0;
     for axis in 0..3 {
@@ -574,6 +574,9 @@ fn spatial<L: TransportLaw>(
                     right,
                     axis,
                     index,
+                    grid.spacing[axis],
+                    primitive,
+                    gradient,
                     temperature,
                     pressure,
                     mu,
