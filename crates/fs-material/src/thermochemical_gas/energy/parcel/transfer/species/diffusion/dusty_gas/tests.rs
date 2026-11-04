@@ -38,29 +38,29 @@ use fs_thermochem::{
 };
 use std::collections::BTreeMap;
 
-const T: f64 = 400.0;
-const P: f64 = 100_000.0;
-const LENGTH: f64 = 0.01;
-const AREA: f64 = 0.01;
-const RADIUS: f64 = 1e-7;
-const POROSITY: f64 = 0.4;
-const TORTUOSITY: f64 = 2.0;
+pub(super) const T: f64 = 400.0;
+pub(super) const P: f64 = 100_000.0;
+pub(super) const LENGTH: f64 = 0.01;
+pub(super) const AREA: f64 = 0.01;
+pub(super) const RADIUS: f64 = 1e-7;
+pub(super) const POROSITY: f64 = 0.4;
+pub(super) const TORTUOSITY: f64 = 2.0;
 
-fn controls() -> DustyGasFaceSolve {
+pub(super) fn controls() -> DustyGasFaceSolve {
     DustyGasFaceSolve {
         maximum_temperature_difference_k: 1e-8,
         maximum_relative_pressure_difference: 0.25,
         gradient_tolerance_per_m: 1e-8,
     }
 }
-fn support() -> PorousGasSupport {
+pub(super) fn support() -> PorousGasSupport {
     PorousGasSupport {
         temperature_k: (200.0, 1800.0),
         pressure_pa: (1000.0, 1e7),
         maximum_superficial_speed_m_s: 100.0,
     }
 }
-fn medium(k: f64, length: f64) -> DustyGasMedium {
+pub(super) fn medium(k: f64, length: f64) -> DustyGasMedium {
     let layer = PorousGasLayer::try_new(
         IntrinsicPermeability::isotropic(k).unwrap(),
         length,
@@ -73,10 +73,10 @@ fn medium(k: f64, length: f64) -> DustyGasMedium {
         DustyGasPores::try_new(RADIUS, POROSITY, TORTUOSITY, "synthetic open pore geometry").unwrap(),
     ).unwrap()
 }
-fn binary(x: f64, pressure: f64) -> ClosedGasParcel {
+pub(super) fn binary(x: f64, pressure: f64) -> ClosedGasParcel {
     ClosedGasParcel::new(model(vec![x, 1.0-x], 0.0), point(T, pressure), 0.001).unwrap()
 }
-fn pure(name: &str, pressure: f64) -> ClosedGasParcel {
+pub(super) fn pure(name: &str, pressure: f64) -> ClosedGasParcel {
     let (mass, cp, mu, conductivity) = match name {
         "A" => (0.028, 3.5, 1.7e-5, 0.025),
         "B" => (0.004, 2.5, 2e-5, 0.15),
@@ -133,7 +133,7 @@ fn source(value: PropertyValue, dims: Dims, policy: InterpolationPolicy, pressur
         claims, vec![],
     ).unwrap()
 }
-fn card(value: f64) -> MaterialCard {
+pub(super) fn card(value: f64) -> MaterialCard {
     source(
         PropertyValue::Scalar { value, dims: BINARY_DIFFUSIVITY_DIMS },
         BINARY_DIFFUSIVITY_DIMS, InterpolationPolicy::ConstantWithinValidity, [1000.0, 1e7],
@@ -147,11 +147,11 @@ fn pair<'a>(a: &str, b: &str, card: &'a MaterialCard, context: &'a QueryPoint)
         material: card, context, selection: MaterialPropertySelection::SingleClaimOnly,
     }
 }
-fn near(actual: f64, expected: f64) {
+pub(super) fn near(actual: f64, expected: f64) {
     assert!((actual-expected).abs() <= 3e-11*expected.abs().max(1e-12),
         "{actual:.17e} != {expected:.17e}");
 }
-fn knudsen(molar_mass: f64) -> f64 {
+pub(super) fn knudsen(molar_mass: f64) -> f64 {
     POROSITY/TORTUOSITY * (2.0*RADIUS/3.0)
         * (8.0*UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K*T/(core::f64::consts::PI*molar_mass)).sqrt()
 }

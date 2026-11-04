@@ -1,4 +1,4 @@
-//! Isothermal ideal-gas dusty-gas transport in a homogeneous porous slab.
+//! Isothermal ideal-gas dusty-gas transport through porous slabs and ordered laminates.
 //!
 //! Fluxes are relative to the STATIONARY SOLID and per bulk cross-sectional
 //! area. Molecular collisions, Knudsen wall collisions and viscous Darcy flow
@@ -17,7 +17,7 @@
 //! The face uses concentration-weighted composition at one declared mean T;
 //! the admitted small temperature difference is ignored in the driving force.
 //! No thermal transpiration, Soret effect, adsorption, surface diffusion,
-//! pore storage, pore-size distribution or Forchheimer
+//! pore storage, unresolved pore-size distribution or Forchheimer
 //! inertia is inferred. Central face sampling requires spatial/time refinement;
 //! it is not a resolved steady nonlinear composition profile through the slab.
 
@@ -34,6 +34,10 @@ use fs_matdb::QueryPoint;
 use fs_math::det;
 use fs_thermochem::{Composition, CompositionBasis, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R};
 use std::{collections::BTreeMap, sync::Arc};
+
+/// Ordered heterogeneous porous layers using integrated Dusty-Gas resistance.
+pub mod layered;
+pub use layered::{LayeredDustyGasFlux, LayeredDustyGasMedium, LayeredDustyGasSpeciesFlux};
 
 /// Authored pore geometry. These inputs do not acquire measured authority from
 /// a citation; pore-size/tortuosity applicability must fit the physical solid.
