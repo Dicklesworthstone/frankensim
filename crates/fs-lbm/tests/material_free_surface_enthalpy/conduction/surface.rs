@@ -9,6 +9,10 @@ use fs_material::thermochemical_gas::energy::{GasEnergySolve, IsochoricGasParcel
 #[path = "surface/convection.rs"]
 mod convection;
 
+#[cfg(feature = "implicit-enthalpy-coupling")]
+#[path = "surface/implicit_finite.rs"]
+mod implicit_finite;
+
 fn face(surroundings_k: f64) -> FreeSurfaceInterfaceFace {
     FreeSurfaceInterfaceFace {
         face: FreeSurfaceGasFace {

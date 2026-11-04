@@ -25,8 +25,12 @@ pub struct FreeSurfaceFiniteGasExchange {
     /// Combined actual liquid/wall/gas storage minus authored, molecular,
     /// electrical and radiant heat, according to their original accounts.
     pub combined_thermal_balance_defect_j: f64,
-    /// Accumulated absolute allowance from the original gas energy inversion.
+    /// Accumulated allowance from the original gas energy inversion plus the
+    /// explicitly declared implicit gas-row allowance below, when selected.
     pub gas_energy_tolerance_j: f64,
+    /// Sum of the declared per-interval implicit gas energy-balance bounds.
+    /// Zero for the original explicit path. This does not change GasEnergySolve.
+    pub implicit_energy_tolerance_j: f64,
     pub substeps: usize,
     /// Present when this same finite atmosphere supplies the native gas load.
     /// The post-thermal EOS pressure is held during the following flow stage.
@@ -55,6 +59,7 @@ pub(super) struct FiniteAtmosphere {
     initial_pressure_pa: f64,
     pub(super) maximum_density_excursion: Option<f64>,
     substeps: usize,
+    implicit_energy_tolerance_j: f64,
 }
 
 impl FiniteAtmosphere {
@@ -81,6 +86,7 @@ impl FiniteAtmosphere {
             initial_pressure_pa: parcel.state().state().pressure,
             maximum_density_excursion: None,
             substeps: 0,
+            implicit_energy_tolerance_j: 0.0,
         })
     }
 
@@ -115,6 +121,17 @@ impl FiniteAtmosphere {
         heat_j: f64,
         check: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), Error> {
+        self.apply_heat_candidate(heat_j, check)?;
+        self.count_step()
+    }
+
+    // Original parcel inversion on a private candidate. Nonlinear trials use
+    // this WITHOUT advancing the accepted interval count or heat accounts.
+    fn apply_heat_candidate(
+        &mut self,
+        heat_j: f64,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<fs_material::thermochemical_gas::energy::GasHeatStep, Error> {
         let old = self.parcel.state().clone();
         let mut checkpoint_error = None;
         let result = self.parcel.add_heat(heat_j, self.controls, || {
@@ -128,17 +145,75 @@ impl FiniteAtmosphere {
         if let Some(error) = checkpoint_error {
             return Err(error.into());
         }
-        result?;
+        let result = result?;
         if !environment::same_sources(&old, self.parcel.state()) {
             return Err(Error::Invalid(
                 "finite atmosphere left its original transport source claims",
             ));
         }
+        Ok(result)
+    }
+
+    fn count_step(&mut self) -> Result<(), Error> {
         self.substeps = self
             .substeps
             .checked_add(1)
             .ok_or(Error::Invalid("finite atmosphere substep count overflow"))?;
         Ok(())
+    }
+
+    #[cfg(feature = "implicit-enthalpy-coupling")]
+    pub(super) fn trial_energy_increment(
+        &mut self,
+        change_j_kg: f64,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<f64, Error> {
+        let heat_j = environment::finite(self.parcel.mass_kg() * change_j_kg)?;
+        if change_j_kg != 0.0 && heat_j == 0.0 {
+            return Err(Error::Invalid("implicit gas energy increment underflows actual gas storage"));
+        }
+        Ok(self.apply_heat_candidate(heat_j, check)?.stored_energy_change_j)
+    }
+
+    /// Accept an ALREADY solved coupled endpoint, without applying its heat twice.
+    /// The actual original-law storage is checked independently of Newton's
+    /// requested coordinate. Its explicit joule allowance remains separate from
+    /// the original parcel inversion controls and is reported in the final audit.
+    pub(super) fn accept_prepared_heat(
+        &mut self,
+        initial: &IsochoricGasParcel,
+        heat_j: f64,
+        row_tolerance_j: f64,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), Error> {
+        check()?;
+        if !row_tolerance_j.is_finite() || row_tolerance_j < 0.0
+            || initial.mass_kg() != self.parcel.mass_kg()
+            || initial.volume_m3() != self.parcel.volume_m3()
+            || !environment::same_sources(initial.state(), self.parcel.state())
+        {
+            return Err(Error::Invalid("implicit gas endpoint changed its original owner or energy bounds"));
+        }
+        let stored = self.stored_since(initial.state().state().temperature)?;
+        let residual = environment::finite(stored - heat_j)?;
+        if residual.abs() > row_tolerance_j {
+            return Err(DepositionError::EnergyBalance(residual).into());
+        }
+        check()?;
+        self.implicit_energy_tolerance_j = environment::finite(
+            self.implicit_energy_tolerance_j + row_tolerance_j,
+        )?;
+        self.count_step()
+    }
+
+    fn stored_since(&self, temperature_k: f64) -> Result<f64, Error> {
+        let change = self.parcel.model().thermodynamics().specific_internal_energy_change(
+            Temperature::new(temperature_k),
+            Temperature::new(self.parcel.state().state().temperature),
+        ).map_err(|error| GasEnergyError::Material(fs_material::MaterialError::Parameters {
+            what: format!("finite atmosphere caloric increment: {error}"),
+        }))?.value();
+        environment::finite(self.parcel.mass_kg() * change)
     }
 
     pub(super) fn balance(
@@ -152,17 +227,12 @@ impl FiniteAtmosphere {
         // reject valid coupled heat steps merely because their common formation
         // reference is large. This is still an independent endpoint calculation,
         // not the sum of the supplied heat or of per-substep solver receipts.
-        let change = self.parcel.model().thermodynamics().specific_internal_energy_change(
-            Temperature::new(self.initial_temperature_k),
-            Temperature::new(self.parcel.state().state().temperature),
-        ).map_err(|error| GasEnergyError::Material(fs_material::MaterialError::Parameters {
-            what: format!("finite atmosphere caloric increment: {error}"),
-        }))?.value();
-        let stored = environment::finite(self.parcel.mass_kg() * change)?;
+        let stored = self.stored_since(self.initial_temperature_k)?;
         let defect = environment::finite(stored + heat_to_condensed_j)?;
         let allowance = environment::finite(
             self.substeps as f64 * self.parcel.mass_kg() * self.controls.energy_tolerance_j_kg,
         )?;
+        let allowance = environment::finite(allowance + self.implicit_energy_tolerance_j)?;
         if defect.abs() > allowance {
             return Err(Error::Invalid(
                 "finite atmosphere exceeded its original gas energy budget",
@@ -183,6 +253,7 @@ impl FiniteAtmosphere {
             gas_balance_defect_j: defect,
             combined_thermal_balance_defect_j: combined,
             gas_energy_tolerance_j: allowance,
+            implicit_energy_tolerance_j: self.implicit_energy_tolerance_j,
             substeps: self.substeps,
             pressure: self.maximum_density_excursion.map(|maximum_density_excursion| {
                 FreeSurfaceFiniteGasPressureLoad {

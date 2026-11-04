@@ -486,6 +486,22 @@ impl DepositionObserver for Conduction<'_, '_> {
         thermal: &DepositionSimulation<'_>,
         check: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), Error> {
+        self.accept_thermal_step(start_s, duration_s, thermal, None, check)
+    }
+}
+
+impl Conduction<'_, '_> {
+    // Shared endpoint accounting. A prepared coupled gas has already been
+    // reconstructed by the original parcel owner inside the nonlinear residual;
+    // validate its reciprocal heat instead of applying that heat a second time.
+    fn accept_thermal_step(
+        &mut self,
+        start_s: f64,
+        duration_s: f64,
+        thermal: &DepositionSimulation<'_>,
+        implicit_gas: Option<(&fs_material::thermochemical_gas::energy::IsochoricGasParcel, f64)>,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), Error> {
         let mut gas_heat = 0.0;
         for sample in &self.environment_last {
             check()?;
@@ -518,7 +534,11 @@ impl DepositionObserver for Conduction<'_, '_> {
             )?;
         }
         if let Some(gas) = &mut self.finite_atmosphere {
-            gas.accept_heat(-gas_heat, check)?;
+            if let Some((initial, tolerance)) = implicit_gas {
+                gas.accept_prepared_heat(initial, -gas_heat, tolerance, check)?;
+            } else {
+                gas.accept_heat(-gas_heat, check)?;
+            }
         }
         // Admit local liquid and contact-line material response against BOTH
         // accepted thermal endpoints. The finite gas keeps its own T/p/mixture,

@@ -14,10 +14,13 @@ use fs_solver::{
 };
 use std::cell::Cell;
 
-/// Numerical work and physical acceptance controls for prescribed reservoirs.
+mod finite;
+
+/// Numerical work and physical acceptance controls for surface reservoirs.
 /// This does not change interface geometry, mass, heat capacity or source law.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FreeSurfaceImplicitSolve {
+    /// Liquid energy coordinates plus one when a finite atmosphere is attached.
     pub maximum_unknowns: usize,
     pub maximum_krylov_restart: usize,
     pub maximum_newton_iterations: usize,
@@ -25,7 +28,9 @@ pub struct FreeSurfaceImplicitSolve {
     pub maximum_residual_evaluations: usize,
     /// Maximum-component numerical Jacobian perturbation in J/kg, not joules.
     pub difference_step_j_kg: f64,
-    /// Independent maximum actual cell energy-balance defect in joules.
+    /// Independent maximum actual liquid-cell AND finite-gas energy-balance
+    /// defect in joules, per accepted implicit interval. GasEnergySolve keeps
+    /// its separate original caloric inversion tolerance.
     /// The total gate remains `FreeSurfaceConductionControls::energy_tolerance_j`.
     pub cell_energy_tolerance_j: f64,
     /// Residual coordinates are J/kg after frozen positive row normalization.
@@ -60,6 +65,9 @@ pub struct FreeSurfaceImplicitReport {
     pub residual_evaluations: usize,
     pub newton_iterations: usize,
     pub maximum_cell_residual_j: f64,
+    /// Largest absolute original-law gas storage minus reciprocal surface heat.
+    /// Zero for prescribed reservoirs, which have no finite gas equation.
+    pub maximum_gas_residual_j: f64,
     pub last_nonlinear: Option<NewtonReport>,
 }
 
@@ -118,6 +126,34 @@ fn validate(solve: FreeSurfaceImplicitSolve, count: usize) -> Result<(), Error> 
         ));
     }
     Ok(())
+}
+
+// Both prescribed and finite-gas residuals use this one original numerical
+// driver. No physical history is advanced by a Newton or difference evaluation.
+fn solve_nonlinear(
+    dimension: usize,
+    solve: FreeSurfaceImplicitSolve,
+    residual: impl Fn(&[f64]) -> Result<Vec<f64>, Error>,
+    cancelled: impl Fn() -> bool,
+) -> Result<(Vec<f64>, NewtonReport), Error> {
+    let problem = FallibleFiniteDifference::new(dimension, solve.difference_step_j_kg, residual)
+        .map_err(numerical)?;
+    let construction = NewtonKrylovState::new(&problem, vec![0.0; dimension], solve.newton);
+    if let Some(error) = problem.take_failure() { return Err(numerical(error)); }
+    let mut solver = construction
+        .map_err(|e| Error::ImplicitSurface(FreeSurfaceImplicitFailure::Newton(e)))?;
+    let outcome = solver.run_controlled(&problem, solve.maximum_newton_iterations, &mut || {
+        cancelled() || problem.has_failed()
+    });
+    if let Some(error) = problem.take_failure() { return Err(numerical(error)); }
+    if cancelled() { return Err(DepositionError::Cancelled.into()); }
+    if outcome.progress != SolverRunProgress::Complete {
+        return Err(Error::ImplicitSurface(FreeSurfaceImplicitFailure::Interrupted(outcome.progress)));
+    }
+    if !outcome.report.converged {
+        return Err(Error::ImplicitSurface(FreeSurfaceImplicitFailure::NotConverged(outcome.report)));
+    }
+    Ok((solver.x, outcome.report))
 }
 
 // This adapter changes only nonlinear coordinates and conditioning. Every
@@ -179,9 +215,9 @@ fn solve_interval<'t, T>(
             .collect::<Result<Vec<_>, Error>>()?;
         step.evaluate(&energy, &resolve, check)
     };
-    let problem = FallibleFiniteDifference::new(
+    let (increments, nonlinear) = solve_nonlinear(
         step.cell_ids().len(),
-        solve.difference_step_j_kg,
+        solve,
         |x: &[f64]| {
             evaluate(x).map(|trial| {
                 trial
@@ -192,37 +228,14 @@ fn solve_interval<'t, T>(
                     .collect()
             })
         },
-    )
-    .map_err(numerical)?;
-    let construction =
-        NewtonKrylovState::new(&problem, vec![0.0; step.cell_ids().len()], solve.newton);
-    if let Some(error) = problem.take_failure() {
-        return Err(numerical(error));
-    }
-    let mut solver =
-        construction.map_err(|e| Error::ImplicitSurface(FreeSurfaceImplicitFailure::Newton(e)))?;
-    let outcome = solver.run_controlled(&problem, solve.maximum_newton_iterations, &mut || {
-        cancelled() || problem.has_failed()
-    });
-    if let Some(error) = problem.take_failure() {
-        return Err(numerical(error));
-    }
+        &cancelled,
+    )?;
     check()?;
-    if outcome.progress != SolverRunProgress::Complete {
-        return Err(Error::ImplicitSurface(
-            FreeSurfaceImplicitFailure::Interrupted(outcome.progress),
-        ));
-    }
-    if !outcome.report.converged {
-        return Err(Error::ImplicitSurface(
-            FreeSurfaceImplicitFailure::NotConverged(outcome.report),
-        ));
-    }
-    let trial = evaluate(&solver.x)?;
+    let trial = evaluate(&increments)?;
     let maximum = trial.maximum_cell_residual_j();
     let (next, payload, audit) =
         trial.accept(solve.cell_energy_tolerance_j, total_tolerance_j, check)?;
-    Ok((next, payload, audit, outcome.report, maximum))
+    Ok((next, payload, audit, nonlinear, maximum))
 }
 
 // Compensated sums preserve small exchange increments over many intervals.
@@ -252,7 +265,8 @@ impl Sum {
 
 /// Original timeline and observer, advanced at implicit endpoint quadrature.
 /// Callers have already processed the initial birth/contact events. Other
-/// histories require a separate coupled residual and therefore refuse here.
+/// One finite isochoric atmosphere adds its original energy equation to the
+/// same nonlinear solve. Other histories still require a coupled residual.
 pub(in super::super) fn advance<'t, 'a, 'm>(
     mut thermal: DepositionSimulation<'t>,
     mut observer: Conduction<'a, 'm>,
@@ -260,9 +274,8 @@ pub(in super::super) fn advance<'t, 'a, 'm>(
     controls: FreeSurfaceConductionControls,
     solve: FreeSurfaceImplicitSolve,
 ) -> Result<(DepositionSimulation<'t>, Conduction<'a, 'm>, EnergyAudit), Error> {
-    validate(solve, thermal.cells().len())?;
+    validate(solve, thermal.cells().len().saturating_add(usize::from(observer.finite_atmosphere.is_some())))?;
     if observer.surfaces.is_empty()
-        || observer.finite_atmosphere.is_some()
         || observer.electrical.is_some()
         || !observer.bodies.is_empty()
         || !observer.contacts.is_empty()
@@ -271,7 +284,7 @@ pub(in super::super) fn advance<'t, 'a, 'm>(
         || !observer.radiation.is_empty()
     {
         return Err(Error::Invalid(
-            "implicit surface exchange requires prescribed surface reservoirs without finite gas, bodies, current or separate environment/radiation sources",
+            "implicit surface exchange requires solved surfaces without finite bodies, current or separate environment/radiation sources",
         ));
     }
     if !target_s.is_finite()
@@ -347,26 +360,29 @@ pub(in super::super) fn advance<'t, 'a, 'm>(
                 payload,
             })
         };
-        let (next, mut accepted, audit, nonlinear, maximum) = solve_interval(
-            &thermal,
-            end,
-            &scales,
-            solve,
-            controls.energy_tolerance_j,
-            &evaluations,
-            resolve,
-            || gate.is_requested(),
-        )?;
+        let (next, mut accepted, audit, nonlinear, maximum, gas_maximum) =
+            if observer.finite_atmosphere.is_some() {
+                finite::solve_interval(&thermal, &observer, end, &scales, solve,
+                    controls.energy_tolerance_j, &evaluations)?
+            } else {
+                let (next, accepted, audit, nonlinear, maximum) = solve_interval(
+                    &thermal, end, &scales, solve, controls.energy_tolerance_j,
+                    &evaluations, resolve, || gate.is_requested(),
+                )?;
+                (next, accepted, audit, nonlinear, maximum, 0.0)
+            };
         // Only the accepted payload carries rates at this BE endpoint. The
         // original observer now integrates those rates ONCE and checks sources;
         // no nonlinear trial calls step or advances any accepted history.
-        accepted.step(start, end - start, &BTreeMap::new(), &next, &mut || {
-            checkpoint(gate)
-        })?;
+        let initial_gas = observer.finite_atmosphere.as_ref()
+            .map(|gas| (&gas.parcel, solve.cell_energy_tolerance_j));
+        accepted.accept_thermal_step(start, end - start, &next, initial_gas,
+            &mut || checkpoint(gate))?;
         external.add(audit.external_heat_j)?;
         report.intervals += 1;
         report.newton_iterations += nonlinear.iterations;
         report.maximum_cell_residual_j = report.maximum_cell_residual_j.max(maximum);
+        report.maximum_gas_residual_j = report.maximum_gas_residual_j.max(gas_maximum);
         report.last_nonlinear = Some(nonlinear);
         thermal = next;
         observer = accepted;

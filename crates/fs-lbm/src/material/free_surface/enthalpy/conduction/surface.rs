@@ -103,8 +103,8 @@ pub struct FreeSurfaceInterfaceSolve {
     pub relative_heat_tolerance: f64,
     /// Explicit continuation of detached-interface boundary data after flow.
     pub local_boundary_evolution: LocalSurfaceBoundaryEvolution,
-    /// Opt into endpoint-evaluated backward Euler for stiff prescribed-bath
-    /// exchange. None retains the original explicit thermal subcycling.
+    /// Opt into endpoint-evaluated backward Euler for prescribed reservoirs or
+    /// one finite isochoric atmosphere. None retains explicit thermal subcycling.
     #[cfg(feature = "implicit-enthalpy-coupling")]
     pub implicit: Option<FreeSurfaceImplicitSolve>,
 }
@@ -440,6 +440,10 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
     /// NASA-9 internal energy, T and EOS pressure feed the next surface solve.
     /// Radiation may heat gas through the surface even when gas and liquid bulk
     /// temperatures coincide. Its contribution to gas decay bounds the step.
+    /// With `solve.implicit`, the same gas internal energy is an additional
+    /// coupled endpoint unknown. This removes the explicit gas-capacity step
+    /// restriction while retaining the declared time/work and joule gates;
+    /// finite bodies, current and separate environmental paths still refuse.
     ///
     /// No gas momentum, pressure work, evaporation, participating-media radiation
     /// or moving-solid/phase-density handoff is added. Liquid, wall and gas

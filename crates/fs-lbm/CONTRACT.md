@@ -7815,13 +7815,14 @@ add surfactant transport, surface entropy, contact-line laws or capillary heat.
 With `implicit-enthalpy-coupling`, `FreeSurfaceInterfaceSolve::implicit` selects
 the original thermal owner's backward-Euler residual. The default remains the
 existing explicit trajectory. The optional path supports prescribed solved
-surface reservoirs and declared liquid-liquid conduction links, with the same
-material, caloric, gas-film and radiation laws. Finite gas, finite bodies,
-electrical coupling and the separate gas/radiation APIs require additional
-coupled residuals and refuse this initial implicit entry.
+surface reservoirs or one finite isochoric atmosphere, together with declared
+liquid-liquid conduction links and the same material, caloric, gas-film,
+convection and radiation laws. Finite bodies, electrical coupling and separate
+gas/radiation APIs still require additional coupled residuals and refuse.
 
-Unknowns are specific-enthalpy increments in J/kg, mapped to actual cell energy
-increments with the original masses. A small cut cell therefore does not receive
+Liquid coordinates are specific-enthalpy increments in J/kg, mapped to actual
+cell energy increments with the original masses. A finite atmosphere appends
+one original specific-internal-energy increment to this same nonlinear system. A small cut cell therefore does not receive
 the same finite-difference joule probe as a large cell. Frozen positive row
 scales combine cell mass and the interval's conductance/caloric slope bound.
 The existing bounded Newton-Krylov and fallible directional-difference owners
@@ -10224,9 +10225,10 @@ capacity-based interval bound. The finite atmosphere stores exactly the
 opposite gas heat on each original thermal substep; its new temperature, EOS
 pressure and source properties feed subsequent trials. Optional pressure loading
 uses this same parcel through the existing native pressure owner. Accepted
-liquid, wall and gas states still publish together. The existing opt-in implicit
-prescribed-reservoir residual also calls the provider at its trial endpoint;
-its original finite-body/gas and other coupling exclusions remain in force.
+liquid, wall and gas states still publish together. The opt-in implicit residual
+calls the provider at each trial endpoint for prescribed or single finite-gas
+surfaces. Finite bodies, electrical and separate environmental paths retain
+their original implicit exclusions.
 
 This bounded entry admits explicit Cartesian planar faces. Height-graph and
 local reconstructed surfaces refuse. A higher owner must declare the physical
@@ -10322,3 +10324,43 @@ parity. This supplies missing-film physics, not resolved moving walls,
 finite face extents, contact or a thermal destination. The inherited
 implicit midpoint method is not L-stable; physical stiff-film relaxation
 still needs time resolution.
+
+## Coupled implicit internal energy of one finite atmosphere
+
+Selecting `FreeSurfaceInterfaceSolve::implicit` on the existing finite-gas
+surface or surface-convection entry couples one gas energy coordinate to the
+original liquid backward-Euler residual and bounded Newton-Krylov driver.
+Every trial reconstructs a private parcel through its original isochoric caloric
+inversion. Its actual temperature, EOS pressure, composition and selected source
+claims feed the same interface root as the trial liquid endpoint. No physical
+history advances in a residual or directional-difference evaluation.
+
+The added gas row is original-law `m_g Delta u_g + dt sum(Q_from_gas) = 0`.
+It uses actual represented storage, with formation references canceled by the
+original temperature-anchored caloric law. The liquid rows retain the original
+`BackwardEulerStep` heat-rate and local/total energy gates. A separate union
+gate compares actual liquid-plus-gas storage with independently accumulated
+authored/molecular and radiant heat. Gas exchange is internal to that union.
+The accepted observer validates the already prepared gas endpoint and accounts
+for its surface heat once; it never applies that heat to the parcel a second
+time. Native flow, source, pressure and final endpoint failures still discard
+all candidates before publication.
+
+`maximum_unknowns` includes the gas coordinate. Existing residual, Newton,
+Krylov, interval, source-inversion and interface-root budgets remain operative.
+`cell_energy_tolerance_j` bounds each liquid row and the gas row per accepted
+interval. `GasEnergySolve` retains its separate original caloric-inversion
+controls. `FreeSurfaceImplicitReport::maximum_gas_residual_j` exposes the actual
+accepted gas defect; `FreeSurfaceFiniteGasExchange::implicit_energy_tolerance_j`
+identifies the accumulated declared gas-row allowance within the reported
+combined gas budget. Conditioning scales do not replace any raw joule gate.
+
+This removes the explicit gas-capacity CFL restriction; it does not establish
+timestep accuracy or unconditional nonlinear convergence. The original
+first-order thermal/native-flow split and fixed gas mass, composition and volume
+remain. Finite bodies, current, and separate environment/radiation paths remain
+excluded from this implicit rung. Focused public-API regressions compare the
+stiff coupled endpoint with an independent caloric/series-resistance equation,
+check large formation-reference invariance and evolving gas/film source states,
+close the radiating liquid-plus-gas union, and verify late-domain, cancellation
+and work-budget refusal with an identical accepted retry.
