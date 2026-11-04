@@ -126,6 +126,24 @@ material scaling and domain/representability refusals.
   antialiasing belong to the consumer. This is prescribed compact 3D pressure
   in a quiescent lossless medium, without finite-size validation, scattering,
   absorption, feedback, transient force particle velocity or SPL qualification.
+- `curle3d::moving::flow::UniformFlowCompactObserver` observes fixed laboratory
+  sources and microphones in an explicitly supplied uniform subsonic fluid
+  velocity. It reuses the original moving-source pressure coefficients after a
+  Galilean transformation, retaining convective volume-source pressure, force
+  direction and induction. The original fluid density and sound speed are
+  unchanged. Direction-dependent travel time solves `|x-y-U T| = c T`; its
+  downstream root remains finite near Mach one. Transient and harmonic queries
+  use the same coefficients and original source clock, with the delay applied
+  once. Both endpoints are stationary in the laboratory, so no spurious Doppler
+  frequency shift or receiver amplitude multiplier is introduced. Preparation
+  and observation allocate nothing and perform bounded constant work. Explicit
+  Mach, geometric clearance and represented-time residual limits refuse invalid
+  observations. `tests/uniform_flow.rs` checks the independent convected Green
+  function, stationary-owner parity, axial/crosswind delay, steady injection,
+  transient/harmonic agreement, rotation, material scaling and refusals. This
+  is pressure in a homogeneous, lossless, uniform flow, without shear-layer
+  refraction, boundaries, dispersion, particle velocity, energy-flux inference,
+  source feedback, finite-source validation or measured-SPL qualification.
 - `curle3d::moving::trajectory::PreparedSourceTrajectory` binds a finite C2
   quintic position history to the original microphone and fluid. Its position,
   velocity and acceleration come from the same accepted-knot interpolant.

@@ -20,6 +20,8 @@ use crate::AeroacError;
 use fs_material::fluid_acoustics::FluidAcousticState;
 use fs_math::{dd::Dd, det};
 
+/// Stationary sources and microphones in an explicitly moving uniform fluid.
+pub mod flow;
 /// Finite C2 source trajectories with whole-interval motion/clearance admission.
 pub mod trajectory;
 
