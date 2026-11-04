@@ -237,6 +237,7 @@ impl<'a> PreparedReflectedMovingReceiverSource<'a> {
 
     /// Coherent pressure from one physical Q/F history, queried on its own
     /// clock at each path's retarded time. A failed history/path aborts the sum.
+    /// Unrounded path pressures are retained until the final coherent sum.
     pub fn pressure_at(
         &self,
         receiver_time: f64,
@@ -246,12 +247,9 @@ impl<'a> PreparedReflectedMovingReceiverSource<'a> {
         let mut pressure = Dd::ZERO;
         for path in 0..self.path_count() {
             let sample = self.prepare_path(path, receiver_time, cancelled)?.pressure;
-            pressure = pressure
-                + Dd::from_f64(
-                    sample
-                        .evaluate(source_at(sample.source_time_s())?)?
-                        .pressure_pa,
-                );
+            let strength = source_at(sample.source_time_s())?;
+            let (_, path_pressure) = sample.evaluate_with_pressure_dd(strength)?;
+            pressure = pressure + path_pressure;
         }
         poll(cancelled)?;
         let value = pressure.to_f64();

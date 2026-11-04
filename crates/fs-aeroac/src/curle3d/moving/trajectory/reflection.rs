@@ -368,6 +368,7 @@ impl<'a> PreparedReflectedSourceTrajectory<'a> {
     /// each path's retarded time. A history error aborts the complete result;
     /// no unsupported image is silently dropped. The callback must return the
     /// original fixed-frame strengths and derivatives at the requested time.
+    /// Unrounded path pressures are retained until the final coherent sum.
     pub fn pressure_at(
         &self,
         receiver_time: f64,
@@ -384,7 +385,8 @@ impl<'a> PreparedReflectedSourceTrajectory<'a> {
             let prepared =
                 self.prepare_path(path, receiver_time, maximum_time_residual_s, cancelled)?;
             let strength = source_at(prepared.source_time_s())?;
-            pressure = pressure + Dd::from_f64(prepared.evaluate(strength)?.pressure_pa);
+            let (_, path_pressure) = prepared.evaluate_with_pressure_dd(strength)?;
+            pressure = pressure + path_pressure;
         }
         poll(cancelled)?;
         let pressure = pressure.to_f64();
