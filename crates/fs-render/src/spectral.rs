@@ -24,6 +24,9 @@
 
 use fs_math::det;
 
+/// Source-bounded quantum-efficiency channels and wavelength importance sampling.
+pub mod detector;
+
 pub(crate) mod reflectance;
 pub use reflectance::{LAMBDA_MAX, LAMBDA_MIN, SpectralReflectance, SpectralReflectanceError};
 
