@@ -15,6 +15,11 @@ pub use directivity::{
 };
 mod work;
 pub use work::IterativeBoundaryPower;
+mod exposure;
+pub use exposure::{
+    BoundaryWorkExposureFactor, BoundaryWorkExposureLimits, BoundaryWorkExposureLine,
+    PreparedBoundaryWorkExposure, WindowedBoundaryWork,
+};
 
 /// Immutable exp(-i omega t) fields at one positive physical frequency.
 /// Point-source solutions are scattered fields; finite-source solutions are

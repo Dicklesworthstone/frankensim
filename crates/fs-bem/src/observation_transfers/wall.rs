@@ -14,6 +14,8 @@ mod boundary;
 pub use boundary::{LocalBoundary, LocalWall};
 mod iterative;
 pub use iterative::{
+    BoundaryWorkExposureFactor, BoundaryWorkExposureLimits, BoundaryWorkExposureLine,
+    PreparedBoundaryWorkExposure, WindowedBoundaryWork,
     BoundaryPortImpedance, IterativeBoundaryObservation, IterativeBoundaryObservationBake,
     IterativeBoundaryPower, IterativeBoundaryResponse, IterativeCoherentDirectivity,
     IterativeDirectivityOptions, IterativeFarFieldSample, IterativeObservationError,

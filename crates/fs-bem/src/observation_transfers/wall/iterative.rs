@@ -9,6 +9,8 @@ use fs_solver::krylov::SolveReport;
 
 mod response;
 pub use response::{
+    BoundaryWorkExposureFactor, BoundaryWorkExposureLimits, BoundaryWorkExposureLine,
+    PreparedBoundaryWorkExposure, WindowedBoundaryWork,
     BoundaryPortImpedance, IterativeBoundaryPower, IterativeBoundaryResponse,
     IterativeCoherentDirectivity, IterativeDirectivityOptions, IterativeFarFieldSample,
 };

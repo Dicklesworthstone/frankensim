@@ -78,7 +78,7 @@ pub enum HarmonicExposureFactorStatistics {
 }
 
 impl HarmonicExposureFactorStatistics {
-    fn kernel(self, window: HarmonicWindow, a: f64, b: f64) -> Result<Kernel, TransferError> {
+    pub(crate) fn kernel(self, window: HarmonicWindow, a: f64, b: f64) -> Result<Kernel, TransferError> {
         match self {
             Self::Real => window.product_kernel(a, b).map(Kernel::Deterministic),
             Self::ProperComplex => window.proper_product_kernel(a, b).map(Kernel::Proper),
@@ -595,13 +595,13 @@ fn prepare_bank(
 }
 
 #[derive(Clone, Copy)]
-enum Kernel {
+pub(crate) enum Kernel {
     Deterministic(HarmonicProduct),
     Proper(ProperHarmonicProduct),
 }
 
 impl Kernel {
-    fn product(self, a: [Dd; 2], b: [Dd; 2]) -> Result<Dd, TransferError> {
+    pub(crate) fn product(self, a: [Dd; 2], b: [Dd; 2]) -> Result<Dd, TransferError> {
         match self {
             Self::Deterministic(kernel) => kernel.mean_real_product_parts_dd(a, b),
             Self::Proper(kernel) => kernel.mean_real_product_parts_dd(a, b),

@@ -559,4 +559,111 @@ fn point_response_retains_total_observation_but_has_no_finite_self_port() {
             .velocity_port_impedance(1, u64::MAX, &gate)
             .is_err()
     );
+    assert!(
+        PreparedBoundaryWorkExposure::new(
+            &response,
+            "point-clock",
+            &[],
+            &[],
+            exposure_limits(surface.areas().len()),
+            &gate,
+        )
+        .is_err()
+    );
+}
+
+fn exposure_limits(panels: usize) -> BoundaryWorkExposureLimits {
+    BoundaryWorkExposureLimits {
+        maximum_lines: 2,
+        maximum_factors: 1,
+        maximum_source_panel_products: 12 * panels,
+        maximum_panel_frequency_pairs: 4 * panels,
+        maximum_workspace_bytes: 1 << 20,
+    }
+}
+
+#[test]
+fn g1_boundary_work_exposure_uses_retained_material_traces_and_common_source_clock() {
+    use fs_fft::harmonic_window::HarmonicWindow;
+    let (surface, sources, traces, boundary) = fixture(0, Some([0.06, 0.0, 0.02]));
+    let gate = CancelGate::new_clock_free();
+    let owner = IterativeBoundaryObservation::for_surface(
+        &surface,
+        medium(),
+        &sources,
+        &traces,
+        &receivers(),
+        boundary,
+        options(128),
+        &gate,
+    )
+    .unwrap();
+    let panels = surface.areas().len();
+    let a = owner
+        .solve_frequency(TAU * 700.0, 4 * panels, &gate)
+        .unwrap();
+    let b = owner
+        .solve_frequency(TAU * 900.0, 4 * panels, &gate)
+        .unwrap();
+    let rates_a = [C64::new(3e-6, -2e-6), C64::new(-1e-6, 4e-6)];
+    let rates_b = [C64::new(2e-6, 1e-6), C64::new(-3e-6, -2e-6)];
+    let lines = [
+        BoundaryWorkExposureLine {
+            response: &a,
+            rates: &rates_a,
+        },
+        BoundaryWorkExposureLine {
+            response: &b,
+            rates: &rates_b,
+        },
+    ];
+    let limits = exposure_limits(panels);
+    let prepared =
+        PreparedBoundaryWorkExposure::new(&a, "drive-clock", &lines, &[], limits, &gate).unwrap();
+    assert_eq!(prepared.sources(), owner.sources());
+    assert_eq!(prepared.operator_hash(), owner.operator_hash());
+    assert_eq!(prepared.source_clock(), "drive-clock");
+    assert_eq!(prepared.panel_frequency_pairs(), 4 * panels);
+    assert!(prepared.workspace_bytes() <= limits.maximum_workspace_bytes);
+    let pa = a
+        .coherent_boundary_power(&rates_a, u64::MAX, &gate)
+        .unwrap();
+    let pb = b
+        .coherent_boundary_power(&rates_b, u64::MAX, &gate)
+        .unwrap();
+    // A full common period eliminates carrier and beat terms for 700/900 Hz.
+    let cycle = prepared
+        .observe_window(HarmonicWindow::new(0.00013, 0.01).unwrap(), &gate)
+        .unwrap();
+    let expected = [
+        pa.input_power_w + pb.input_power_w,
+        pa.outward_power_w + pb.outward_power_w,
+        pa.absorbed_power_w + pb.absorbed_power_w,
+    ];
+    let actual = [
+        cycle.input_power_w,
+        cycle.outward_power_w,
+        cycle.wall_power_w,
+    ];
+    for (got, want) in actual.into_iter().zip(expected) {
+        assert!((got - want).abs() <= 2e-12 * expected[0].abs().max(1e-30));
+    }
+    let short = prepared
+        .observe_window(HarmonicWindow::new(0.00013, 0.00017).unwrap(), &gate)
+        .unwrap();
+    assert!((short.input_power_w - cycle.input_power_w).abs() > 1e-4 * cycle.input_power_w.abs());
+    assert!(PreparedBoundaryWorkExposure::new(&a, "", &lines, &[], limits, &gate).is_err());
+    let tight = BoundaryWorkExposureLimits {
+        maximum_source_panel_products: 12 * panels - 1,
+        ..limits
+    };
+    assert!(
+        PreparedBoundaryWorkExposure::new(&a, "drive-clock", &lines, &[], tight, &gate).is_err()
+    );
+    let cancelled = CancelGate::new_clock_free();
+    cancelled.request();
+    assert!(
+        PreparedBoundaryWorkExposure::new(&a, "drive-clock", &lines, &[], limits, &cancelled)
+            .is_err()
+    );
 }

@@ -2873,3 +2873,32 @@ compile the exact quadratic and shared observation algorithms; the molecular
 carrier omits unused material/boundary storage and supplies no material
 behavior. An additional original-material, passive-wall BEM integration
 regression is authored but unrun without the constellation dependencies.
+
+### Finite-window work of retained acoustic boundary fields
+
+`PreparedBoundaryWorkExposure` binds one immutable iterative finite-source
+boundary owner and an explicit common source clock. It groups equal-frequency
+source fields before products and retains deterministic, real-coordinate and
+proper-complex cross-frequency interference through the existing shared
+harmonic-window kernels. The original pressure, actual outward velocity and
+prescribed source traces supply input/outward work. Original local material
+admittances supply inward wall velocity directly, preserving weak wall work
+beside large input and outward powers. The raw closure residual remains visible.
+
+The reported watts are normalized-window pressure work. Reactive walls may
+return stored energy during a finite interval; their signed work is not
+irreversible heat. Cycle/stationary averaging recovers wall absorption under
+the original passive-law assumptions. No volume-storage, far-field radiation,
+point-source self-loading or transient constitutive initial state is inferred.
+
+Preparation bounds all supplied lines, factors, source/panel products,
+panel/frequency pairs and logical workspace before allocation. It contracts
+retained solutions once and evaluates original material laws at grouped
+frequencies. Subsequent queries allocate nothing, reuse a temporal kernel
+across panels, poll cancellation, and repeat no boundary solve/material query.
+Five native production-kernel tests pass: independent time/phase quadrature
+for mixed statistics and both shutter profiles, reactive storage release,
+partition/common-clock invariance, direct weak wall work and cancellation.
+Their BEM/material declarations are unlinked and supply no substitute physics.
+One additional original passive-wall/retained-solve integration test and the
+point-source refusal extension remain unrun without the sibling constellation.

@@ -52,6 +52,8 @@ mod radiation;
 pub use radiation::{PreparedRadiationObservation, PreparedRadiationOptions, RadiatedPowerMoments};
 mod wall;
 pub use wall::{
+    BoundaryWorkExposureFactor, BoundaryWorkExposureLimits, BoundaryWorkExposureLine,
+    PreparedBoundaryWorkExposure, WindowedBoundaryWork,
     BoundaryObservationBake, BoundaryPortImpedance, IterativeBoundaryObservation,
     IterativeBoundaryObservationBake, IterativeBoundaryPower, IterativeBoundaryResponse,
     IterativeCoherentDirectivity, IterativeDirectivityOptions, IterativeFarFieldSample,
