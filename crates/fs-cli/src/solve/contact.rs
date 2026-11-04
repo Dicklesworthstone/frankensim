@@ -3,7 +3,7 @@
 mod newton;
 mod radiation;
 
-use fs_conduction::interface::temperature::steady::SteadyContactConfig;
+use fs_conduction::interface::temperature::steady::{ContactSteadySolution, SteadyContactConfig};
 use fs_conduction::interface::temperature::{TemperatureContact, TemperatureContacts};
 use fs_conduction::{
     ConductionMesh, ConductionProblem, ConductionSolver, SolveConfig, ThermalBoundary,
@@ -16,7 +16,7 @@ use super::{SolveRefusal, conduction_error, json_string, parse_claim_id};
 use crate::cards::CardPackSet;
 
 const MAX_RESPONSES: usize = 64;
-pub(super) const NO_CLAIM: &str = "Source-backed matching P1 contact uses the arithmetic mean of the two independent face temperature means as the declared T coordinate. Each local response retains its original card, selected claim and manufactured joint state. The existing steady spatial solver retains heterogeneous k(T), prescribed boundaries and natural/transported-air consumers. Declared area-mean ambient radiation uses the original radiation iteration around complete contact Newton responses; convection alone heats transported air. The returned field passes freshly queried physical watt residual and heat-balance gates. The contact receipt declares the bounded coupled Newton or contact fixed-point algorithm; neither establishes arbitrary-law convergence or uniqueness. Explicit selected-node adjoints for steady prescribed boundaries use the complete smooth bulk/contact tangent and its true transpose; natural/air/radiation feedback and prescribed-temperature controls remain outside that contact derivative. Steady enclosure/pointwise radiation, adaptive-goal refinement and inverse/roundoff certificates for this nonlinear contact path are not supplied. Uniform spatial ladder differences retain their existing Estimated meaning. No evolving pressure, geometry or new material authority is inferred.";
+pub(super) const NO_CLAIM: &str = "Source-backed matching P1 contact uses the arithmetic mean of the two independent face temperature means as the declared T coordinate. Each local response retains its original card, selected claim and manufactured joint state. The existing steady spatial solver retains heterogeneous k(T), prescribed boundaries and natural/transported-air consumers. Declared area-mean ambient radiation uses the original radiation iteration around complete contact Newton responses or the bounded source-surface contact fixed point; convection alone heats transported air. The returned field passes freshly queried physical watt residual and heat-balance gates. The contact receipt declares the bounded coupled Newton or contact fixed-point algorithm; neither establishes arbitrary-law convergence or uniqueness. Explicit selected-node adjoints for steady prescribed boundaries use the complete smooth bulk/contact tangent and its true transpose; natural/air/radiation feedback and prescribed-temperature controls remain outside that contact derivative. Steady enclosure/pointwise radiation, adaptive-goal refinement and inverse/roundoff certificates for this nonlinear contact path are not supplied. Uniform spatial ladder differences retain their existing Estimated meaning. No evolving pressure, geometry or new material authority is inferred.";
 
 struct Source {
     name: String,
@@ -418,7 +418,7 @@ pub(super) fn admit(
     {
         return Err(conduction_error(
             "cli-solve-conduction-contact-composition",
-            "temperature-varying native contact admits steady base/uniform-ladder solves with prescribed, natural or airflow convection and optional area-mean ambient radiation, or capacity/total-enthalpy transient solves with prescribed, scheduled, natural-convection or transported-air boundaries; total enthalpy also admits pointwise ambient/enclosure radiation. Selected-node adjoints admit steady prescribed boundaries and optional whole-law contact controls; this requested composition needs additional complete contact feedback",
+            "temperature-varying native contact admits steady base/uniform-ladder solves with prescribed, natural or airflow convection and optional area-mean ambient radiation, or capacity/total-enthalpy transient solves with prescribed, scheduled, natural or transported-air boundaries; total enthalpy also admits pointwise ambient/enclosure radiation. Selected-node adjoints admit steady prescribed boundaries and optional whole-law contact controls; this requested composition needs additional complete contact feedback",
             "use an admitted storage and boundary composition; contact adjoints require steady prescribed boundaries without radiation or prescribed-temperature controls; transient radiation requires total enthalpy and pointwise emission; never replace the contact law by a frozen resistance",
         ));
     }
@@ -506,7 +506,7 @@ impl Prepared {
         cx: &Cx<'_>,
         problem: ConductionProblem<'_>,
         resolution: &fs_project::ConductionInterfaceResolution,
-        mut config: SolveConfig,
+        config: SolveConfig,
         max_pairs: usize,
         radiation: Option<&super::radiation::LoweredRadiation>,
         work: &mut Work,
@@ -542,18 +542,7 @@ impl Prepared {
                 cx, problem, &contacts, &initial, &config, tolerance, max_pairs, work,
             );
         }
-        // Inner step-size convergence must not replace the original physical
-        // contact residual gate. The source-backed owner checks it independently.
-        config.stop.step_atol = 0.0;
-        config.stop.residual_rtol = config.stop.residual_rtol.min(1e-13);
-        config.stop.residual_atol = tolerance * 0.01;
-        config.linear.tolerance = config.linear.tolerance.min(1e-13);
-        let coupling = SteadyContactConfig {
-            max_iterations: MAX_RESPONSES,
-            relaxation: 0.5,
-            residual_tolerance_w: tolerance,
-            energy_tolerance_w: tolerance,
-        };
+        let (config, coupling) = picard_controls(config, tolerance);
         let accepted = contacts
             // The next natural/airflow callback starts from its last accepted
             // thermal field. The owner restores current prescribed values and
@@ -566,64 +555,94 @@ impl Prepared {
                 coupling,
             )
             .map_err(lower)?;
-        work.record(
-            accepted.iterations,
-            accepted.nonlinear_iterations,
-            accepted.krylov_iterations,
-        )?;
-        let mut states = Vec::with_capacity(accepted.physical_contacts.states().len());
-        for (index, state) in accepted.physical_contacts.states().iter().enumerate() {
-            if index % 256 == 0 {
-                poll(cx)?;
-            }
-            states.push(format!(concat!("{{\"interface\":{},\"side_a_face\":{},\"side_b_face\":{},",
-                "\"side_a_temperature_k\":{},\"side_b_temperature_k\":{},\"query_temperature_k\":{},",
-                "\"resistance_m2_k_w\":{},\"selected_claim\":{},\"usage_receipt\":{}}}"),
-                json_string(&state.interface), state.pair.side_a, state.pair.side_b,
-                number(state.side_a_temperature_k)?, number(state.side_b_temperature_k)?,
-                number(state.interface_temperature_k)?, number(state.resistance.value_m2_k_per_w())?,
-                json_string(&state.resistance.receipt().selected.0.to_hex()),
-                json_string(&state.resistance.receipt().content_hash().to_hex())));
-        }
-        let receipt = format!(
-            concat!(
-                "{{\"model\":\"source-backed-face-mean-temperature\",\"algorithm\":\"bounded-contact-picard\",",
-                "\"thermal_responses\":{},\"nonlinear_iterations\":{},\"krylov_iterations\":{},",
-                "\"total_thermal_responses\":{},\"total_nonlinear_iterations\":{},\"total_krylov_iterations\":{},",
-                "\"residual_norm_w\":{},\"residual_tolerance_w\":{},\"energy_closure_w\":{},",
-                "\"energy_tolerance_w\":{},\"face_states\":[{}],\"scope\":{}}}"
-            ),
-            accepted.iterations,
-            accepted.nonlinear_iterations,
-            accepted.krylov_iterations,
-            work.responses,
-            work.nonlinear,
-            work.krylov,
-            number(accepted.residual_norm_w)?,
-            number(tolerance)?,
-            number(accepted.energy.closure_w)?,
-            number(tolerance)?,
-            states.join(","),
-            json_string(NO_CLAIM)
-        );
-        let mut conduction = accepted.conduction;
-        // The published physical rows describe this unchanged field with fresh
-        // contacts. Inner numerical history remains the counted last response;
-        // all outer work is retained separately in the contact receipt above.
-        conduction.report.final_residual = accepted.residual_norm_w;
-        conduction.report.residual_threshold = tolerance;
-        conduction.report.energy = accepted.energy;
-        conduction.report.robin_fluxes = accepted.robin_fluxes;
-        conduction.report.interface_fluxes = accepted
-            .physical_contacts
-            .frozen_interfaces()
-            .fluxes(&conduction.temperature)
-            .map_err(lower)?;
-        poll(cx)?;
-        work.last_temperature = Some(conduction.temperature.clone());
-        Ok((
-            super::radiation::SolidSolution::from_conduction(conduction),
-            receipt,
-        ))
+        finish_picard(cx, accepted, tolerance, work, NO_CLAIM, "")
     }
+}
+
+/// The same original inner tolerances apply with and without radiation.
+fn picard_controls(mut config: SolveConfig, tolerance: f64) -> (SolveConfig, SteadyContactConfig) {
+    // Inner step-size convergence must not replace the original physical
+    // contact residual gate. The source-backed owner checks it independently.
+    config.stop.step_atol = 0.0;
+    config.stop.residual_rtol = config.stop.residual_rtol.min(1e-13);
+    config.stop.residual_atol = tolerance * 0.01;
+    config.linear.tolerance = config.linear.tolerance.min(1e-13);
+    (config, SteadyContactConfig {
+        max_iterations: MAX_RESPONSES,
+        relaxation: 0.5,
+        residual_tolerance_w: tolerance,
+        energy_tolerance_w: tolerance,
+    })
+}
+
+/// Publish the original bounded contact response after the physical owner has
+/// accepted it. A composed owner can add its counted outer work and audit rows.
+fn finish_picard(
+    cx: &Cx<'_>,
+    accepted: ContactSteadySolution,
+    tolerance: f64,
+    work: &mut Work,
+    scope: &str,
+    composition: &str,
+) -> Result<(super::radiation::SolidSolution, String), SolveRefusal> {
+    work.record(
+        accepted.iterations,
+        accepted.nonlinear_iterations,
+        accepted.krylov_iterations,
+    )?;
+    let mut states = Vec::with_capacity(accepted.physical_contacts.states().len());
+    for (index, state) in accepted.physical_contacts.states().iter().enumerate() {
+        if index % 256 == 0 {
+            poll(cx)?;
+        }
+        states.push(format!(concat!("{{\"interface\":{},\"side_a_face\":{},\"side_b_face\":{},",
+            "\"side_a_temperature_k\":{},\"side_b_temperature_k\":{},\"query_temperature_k\":{},",
+            "\"resistance_m2_k_w\":{},\"selected_claim\":{},\"usage_receipt\":{}}}"),
+            json_string(&state.interface), state.pair.side_a, state.pair.side_b,
+            number(state.side_a_temperature_k)?, number(state.side_b_temperature_k)?,
+            number(state.interface_temperature_k)?, number(state.resistance.value_m2_k_per_w())?,
+            json_string(&state.resistance.receipt().selected.0.to_hex()),
+            json_string(&state.resistance.receipt().content_hash().to_hex())));
+    }
+    let receipt = format!(
+        concat!(
+            "{{\"model\":\"source-backed-face-mean-temperature\",\"algorithm\":\"bounded-contact-picard\",",
+            "\"thermal_responses\":{},\"nonlinear_iterations\":{},\"krylov_iterations\":{},",
+            "\"total_thermal_responses\":{},\"total_nonlinear_iterations\":{},\"total_krylov_iterations\":{},",
+            "\"residual_norm_w\":{},\"residual_tolerance_w\":{},\"energy_closure_w\":{},",
+            "\"energy_tolerance_w\":{},\"face_states\":[{}],\"scope\":{}{}}}"
+        ),
+        accepted.iterations,
+        accepted.nonlinear_iterations,
+        accepted.krylov_iterations,
+        work.responses,
+        work.nonlinear,
+        work.krylov,
+        number(accepted.residual_norm_w)?,
+        number(tolerance)?,
+        number(accepted.energy.closure_w)?,
+        number(tolerance)?,
+        states.join(","),
+        json_string(scope),
+        composition,
+    );
+    let mut conduction = accepted.conduction;
+    // The published physical rows describe this unchanged field with fresh
+    // contacts. Inner numerical history remains the counted last response;
+    // all outer work is retained separately in the contact receipt above.
+    conduction.report.final_residual = accepted.residual_norm_w;
+    conduction.report.residual_threshold = tolerance;
+    conduction.report.energy = accepted.energy;
+    conduction.report.robin_fluxes = accepted.robin_fluxes;
+    conduction.report.interface_fluxes = accepted
+        .physical_contacts
+        .frozen_interfaces()
+        .fluxes(&conduction.temperature)
+        .map_err(lower)?;
+    poll(cx)?;
+    work.last_temperature = Some(conduction.temperature.clone());
+    Ok((
+        super::radiation::SolidSolution::from_conduction(conduction),
+        receipt,
+    ))
 }

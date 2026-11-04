@@ -3433,3 +3433,21 @@ independent air heat and capacity storage, and equivalent sensible-enthalpy
 trajectories. Live capacity contact with radiation and trajectory derivatives
 remains explicitly unsupported. These authored tests require native execution;
 formatter parsing alone does not establish runtime correctness.
+
+### Source-surface steady contact with ambient radiation — driver 109
+
+Source-backed resistance surfaces now retain the original bounded steady
+contact fixed point inside the existing area-mean ambient-radiation loop.
+Scalar/continuous-curve sources keep their complete contact Newton response.
+Both compositions share one fresh physical endpoint audit: pinned contact
+queries, actual radiative boundary, full nodal watt residual, heat closure and
+independent convection/radiation accounting. No artificial convection bath is
+added to radiation-only surfaces, and only original convection heats transported
+air when that consumer surrounds the shared thermal response.
+
+Every radiation callback and its nested contact, nonlinear and Krylov work is
+counted. The reported last numerical solve remains distinct from the fresh
+physical audit; no hidden final solve replaces the accepted field. This extends
+the admitted physical composition without inventing a unique derivative for
+source-surface corners. Steady contact with enclosure/pointwise radiation and
+contact/radiation adjoints remain explicitly unsupported.
