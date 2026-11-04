@@ -1543,7 +1543,6 @@ impl Scene {
             solver.and_then(|s| s.get("sgs")),
             turbulence,
             transient.as_ref(),
-            evolving,
         )?;
         if solver.is_some_and(|s| s.get("turbulent_prandtl").is_some())
             && turbulence == Turbulence::Laminar
@@ -1812,13 +1811,13 @@ fn execute_unsteady(
     unsteady.inner_tolerance = options.inner_tolerance;
     let started = Instant::now();
     let initial_temperature = vec![initial; domain.cell_count()];
-    let (run, material_feedback) = if scene.temperature_dependent() {
-        let (run, feedback) = material::march(
+    let (run, material_feedback, material_sgs) = if scene.temperature_dependent() {
+        let (run, feedback, fields) = material::march(
             scene, domain, flow_config, setup, &initial_temperature, &unsteady,
             |t| interpolate(&options.inlet_schedule, t), |t| transient.scale(t),
             radiation, gate,
         )?;
-        (run, Some(feedback))
+        (run, Some(feedback), fields)
     } else {
         let run = match scene.sgs {
         Some(sgs) => march_conjugate_with_sgs(
@@ -1854,7 +1853,7 @@ fn execute_unsteady(
         ),
     }
         .map_err(|e| solver_failure(&e))?;
-        (run, None)
+        (run, None, None)
     };
     let wall_s = started.elapsed().as_secs_f64();
     let records = &run.energy_records;
@@ -1869,10 +1868,13 @@ fn execute_unsteady(
     let max_step_sweeps = steps.iter().map(|r| r.inner_iterations).max().unwrap_or(0);
     let last = steps.last().copied();
     let report = &run.flow.flow.report;
-    let sgs = sgs::Summary::new(scene, domain, &run.flow.flow);
+    let sgs = sgs::Summary::new(scene, domain, &run.flow.flow, material_sgs.as_ref());
     let probes = read_probes(scene, domain, &run.temperature, &run.flow.flow.velocity_m_s);
     if let Some(path) = &scene.vtk {
-        let conductivity = run.flow.flow.eddy_conductivity(&scene.fluid);
+        let conductivity = material_sgs.as_ref().map_or_else(
+            || run.flow.flow.eddy_conductivity(&scene.fluid),
+            |fields| fields.conductivity.clone(),
+        );
         let turbulent = scene.sgs.map(|_| {
             (
                 run.flow.flow.eddy_viscosity_m2_s.as_slice(),
@@ -1921,7 +1923,9 @@ fn execute_unsteady(
             )
         })
         .collect();
-    let solver_name = if material_feedback.is_some() {
+    let solver_name = if material_feedback.is_some() && scene.sgs.is_some() {
+        "fv-simplec-unsteady-material-sgs"
+    } else if material_feedback.is_some() {
         "fv-simplec-unsteady-material"
     } else if scene.sgs.is_some() && buoyancy.is_some() {
         "fv-simplec-unsteady-sgs-boussinesq"
@@ -2069,7 +2073,7 @@ fn execute_unsteady(
     }
 }
 
-#[allow(clippy::too_many_lines)] // build, solve, and one linear report
+#[allow(clippy::too_many_lines)]// build, solve, and one linear report
 fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> {
     let tie = 1e-6 * scene.dx;
     let domain = scene

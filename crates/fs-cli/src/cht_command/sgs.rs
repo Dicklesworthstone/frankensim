@@ -8,13 +8,12 @@ use super::{
 };
 use std::fmt::Write as _;
 
-pub(super) const HELP: &str = "\nExploratory transient SGS: solver.sgs requires model (\"smagorinsky\",\n\"wale\" or \"vreman\"), coefficient, filter_width_factor,\nmaximum_eddy_to_molecular and usage: \"exploration\". It requires\ntransient.flow: \"unsteady\" and marched energy. Smagorinsky/WALE use\nfactor * cell_volume^(1/3); Vreman uses factor * EACH directional cell\nwidth and its coefficient is linear (not squared). The ratio cap refuses\nrather than clips. Do not combine with solver.turbulence: \"lvel\",\nsteady-on-mean-flow energy or evolving fluid material properties. The same\neddy viscosity drives momentum and heat. For either LVEL or SGS, positive\nsolver.turbulent_prandtl sets k_t = rho cp nu_t / Pr_t (default 0.9).\nIt changes heat diffusion independently of the momentum coefficient;\nchoose it for the modeled flow, not as a molecular material property.\nResults report its actual value, the model, filter range and final\neddy-viscosity/conductivity diagnostics; no turbulent DNS or\nacceptance-render qualification is implied. Example:\n  frankensim --json cooling-cht examples/cooling-cht/sgs-heated-obstacle.json\n";
+pub(super) const HELP: &str = "\nExploratory transient SGS: solver.sgs requires model (\"smagorinsky\",\n\"wale\" or \"vreman\"), coefficient, filter_width_factor,\nmaximum_eddy_to_molecular and usage: \"exploration\". It requires\ntransient.flow: \"unsteady\" and marched energy. Smagorinsky/WALE use\nfactor * cell_volume^(1/3); Vreman uses factor * EACH directional cell\nwidth and its coefficient is linear (not squared). The ratio cap refuses\nrather than clips. Do not combine with solver.turbulence: \"lvel\" or\nsteady-on-mean-flow energy. Temperature-dependent fluids and solids retain\ntheir original source laws: local molecular mu(T) and the resolved eddy\nviscosity drive momentum separately. The same eddy viscosity drives heat.\nFor either LVEL or SGS, positive solver.turbulent_prandtl sets\nk_t = rho0 Cp nu_t / Pr_t (default 0.9). Source fluid_enthalpy uses the\nlocal endpoint Cp from its original h(T); otherwise Cp is the reference\nvalue. Eddy transport never changes material claims or solid conductivity.\nPr_t changes heat diffusion independently of the momentum coefficient;\nchoose it for the modeled flow, not as a molecular material property.\nResults report its actual value, the model, filter range and final\neddy-viscosity/conductivity diagnostics; no turbulent DNS or\nacceptance-render qualification is implied. Example:\n  frankensim --json cooling-cht examples/cooling-cht/sgs-heated-obstacle.json\n";
 
 pub(super) fn parse(
     value: Option<&J>,
     turbulence: Turbulence,
     transient: Option<&Transient>,
-    evolving_materials: bool,
 ) -> Result<Option<FvSgsConfig>> {
     let Some(value) = value else {
         return Ok(None);
@@ -65,11 +64,6 @@ pub(super) fn parse(
             "solver.sgs cannot be combined with solver.turbulence: lvel",
         ));
     }
-    if evolving_materials {
-        return Err(bad(
-            "solver.sgs requires constant fluid properties; the evolving-material route is not an SGS owner",
-        ));
-    }
     let options = transient.and_then(|t| t.unsteady.as_ref()).ok_or_else(|| {
         bad("solver.sgs requires transient.flow: \"unsteady\"; steady and frozen-flow paths do not advance SGS")
     })?;
@@ -89,6 +83,13 @@ fn model(config: FvSgsConfig) -> (&'static str, f64) {
     }
 }
 
+/// Observations of the retained source states used by the native material run.
+pub(super) struct MaterialFields {
+    pub ratios: Vec<f64>,
+    pub conductivity: Vec<f64>,
+    pub source_caloric: bool,
+}
+
 /// Final projected-field diagnostics, not time averages or resolved spectra.
 pub(super) struct Summary {
     config: FvSgsConfig,
@@ -101,16 +102,23 @@ pub(super) struct Summary {
     mean_ratio: f64,
     max_conductivity: f64,
     turbulent_prandtl: f64,
+    material_heat: Option<bool>,
 }
 
 impl Summary {
-    pub(super) fn new(scene: &Scene, domain: &VoxelDomain, flow: &FvFlow) -> Option<Self> {
+    pub(super) fn new(
+        scene: &Scene,
+        domain: &VoxelDomain,
+        flow: &FvFlow,
+        material: Option<&MaterialFields>,
+    ) -> Option<Self> {
         let config = scene.sgs?;
         let (mut volume, mut weighted_eddy, mut max_eddy, mut max_heat_eddy) =
             (0.0, 0.0, 0.0_f64, 0.0_f64);
         let (mut min_filter_m, mut max_filter_m) = (f64::INFINITY, 0.0_f64);
         let mut min_filter_by_axis_m = [f64::INFINITY; 3];
         let mut max_filter_by_axis_m = [0.0_f64; 3];
+        let (mut max_ratio, mut weighted_ratio, mut max_conductivity) = (0.0_f64, 0.0, 0.0_f64);
         for c in 0..domain.cell_count() {
             if !domain.is_fluid(c) {
                 continue;
@@ -120,6 +128,11 @@ impl Summary {
             weighted_eddy += cell_volume * flow.eddy_viscosity_m2_s[c];
             max_eddy = max_eddy.max(flow.eddy_viscosity_m2_s[c]);
             max_heat_eddy = max_heat_eddy.max(flow.heat_eddy_viscosity_m2_s[c]);
+            if let Some(fields) = material {
+                max_ratio = max_ratio.max(fields.ratios[c]);
+                weighted_ratio += cell_volume * fields.ratios[c];
+                max_conductivity = max_conductivity.max(fields.conductivity[c]);
+            }
             if matches!(config.model, SgsModel::Vreman { .. }) {
                 for (axis, width) in domain.widths(c).into_iter().enumerate() {
                     let width = config.filter_width_factor * width;
@@ -142,11 +155,14 @@ impl Summary {
             min_filter_by_axis_m,
             max_filter_by_axis_m,
             max_eddy,
-            max_ratio: max_eddy / nu,
-            mean_ratio: weighted_eddy / volume / nu,
-            max_conductivity: scene.fluid.volumetric_heat_capacity() * max_heat_eddy
-                / flow.turbulent_prandtl,
+            max_ratio: material.map_or(max_eddy / nu, |_| max_ratio),
+            mean_ratio: material.map_or(weighted_eddy / volume / nu, |_| weighted_ratio / volume),
+            max_conductivity: material.map_or_else(
+                || scene.fluid.volumetric_heat_capacity() * max_heat_eddy / flow.turbulent_prandtl,
+                |_| max_conductivity,
+            ),
             turbulent_prandtl: flow.turbulent_prandtl,
+            material_heat: material.map(|fields| fields.source_caloric),
         })
     }
 
@@ -177,6 +193,17 @@ impl Summary {
                 ",\"filter_width_definition\":\"directional-cell-widths\",\"min_filter_width_by_axis_m\":[{},{},{}],\"max_filter_width_by_axis_m\":[{},{},{}]",
                 num(lo[0])?, num(lo[1])?, num(lo[2])?, num(hi[0])?, num(hi[1])?, num(hi[2])?);
         }
+        if let Some(source_caloric) = self.material_heat {
+            let _ = write!(
+                out,
+                ",\"viscosity_ratio_basis\":\"applied-local-molecular-viscosity\",\"thermal_capacity_basis\":{}",
+                quote(if source_caloric {
+                    "endpoint-source-cp"
+                } else {
+                    "reference-cp"
+                })
+            );
+        }
         out.push('}');
         Ok(())
     }
@@ -200,6 +227,17 @@ impl Summary {
             let _ = writeln!(out,
                 "sgs_filter_width_definition=directional-cell-widths\nsgs_min_filter_width_by_axis_m={:?}\nsgs_max_filter_width_by_axis_m={:?}",
                 self.min_filter_by_axis_m, self.max_filter_by_axis_m);
+        }
+        if let Some(source_caloric) = self.material_heat {
+            let _ = writeln!(
+                out,
+                "sgs_viscosity_ratio_basis=applied-local-molecular-viscosity\nsgs_thermal_capacity_basis={}",
+                if source_caloric {
+                    "endpoint-source-cp"
+                } else {
+                    "reference-cp"
+                }
+            );
         }
     }
 }

@@ -365,7 +365,8 @@ impl Bound<'_> {
             "\"maximum_passes_in_step\":{},\"maximum_passes_per_step\":{},\"maximum_energy_solves\":{},",
             "\"temperature_tolerance_k\":{},\"storage_tolerance_w\":{},\"energy_closure_tolerance_j\":{},",
             "\"temperature_relaxation\":{},\"maximum_temperature_defect_k\":{},\"maximum_storage_defect_w\":{},",
-            "\"maximum_step_face_flux_defect_w\":{},\"maximum_step_cell_flux_defect_w\":{}}}"),
+            "\"maximum_step_face_flux_defect_w\":{},\"maximum_step_cell_flux_defect_w\":{},",
+            "\"maximum_sgs_heat_flux_defect_w\":{}}}"),
             records.iter().map(|r| r.energy_solves).sum::<usize>(),
             records.iter().map(|r| r.passes).max().unwrap_or(0),
             controls.maximum_passes_per_step, controls.maximum_energy_solves,
@@ -374,6 +375,7 @@ impl Bound<'_> {
             number(worst(|r| r.temperature_defect_k))?, number(worst(|r| r.maximum_storage_defect_w))?,
             number(worst(|r| r.advection.maximum_face_flux_defect_w))?,
             number(worst(|r| r.advection.maximum_cell_flux_defect_w))?,
+            number(worst(|r| r.maximum_sgs_heat_flux_defect_w))?,
         ));
         Ok(report)
     }

@@ -150,16 +150,27 @@ existing thermal reservoirs, and malformed pressure refusal.
 ## Exploratory SGS cooling scenes
 
 The file-driven `cooling-cht` command accepts an explicit `solver.sgs` object:
-required model (`smagorinsky` or `wale`), coefficient, filter-width factor,
+required model (`smagorinsky`, `wale` or `vreman`), coefficient, filter-width factor,
 maximum eddy/molecular viscosity ratio and `usage: "exploration"`. Unknown
 SGS fields, invalid controls and acceptance use refuse. Admission requires
 the full unsteady coupled march: steady and frozen flow, steady energy on
-mean flow, simultaneous LVEL and evolving material transport refuse. The
+mean flow and simultaneous LVEL refuse. The
 existing ordinary scene paths never enable SGS by default.
 
-Dispatch uses `fs_lbm::conjugate::march_conjugate_with_sgs`; there is no CLI
-closure implementation. The same per-step modeled viscosity enters complete
-symmetric momentum stress and thermal conductivity at `Pr_t=0.9`. Results
+Dispatch uses the existing native conjugate and material SGS marches; there
+is no CLI closure implementation. Temperature-dependent fluids can combine
+SGS with original source calorics, evolving solid storage, or both. Momentum
+ratios use the retained applied local molecular viscosity and the fixed
+Boussinesq reference density. Heat uses reference Cp unless `fluid_enthalpy`
+selects the endpoint derivative of the original source h(T). The source
+material laws and claims remain unchanged; eddy conductivity is separate
+from molecular conductivity and is never assigned to solids. The source-caloric
+report exposes the native maximum SGS heat-flux defect between the applied
+thermal tangent and the physical endpoint.
+
+The same per-step modeled viscosity enters complete symmetric momentum stress
+and thermal conductivity using the authored `solver.turbulent_prandtl`
+(default `Pr_t=0.9`). Results
 retain all declared SGS controls, the physical filter range, and final
 maximum/volume-mean viscosity and conductivity diagnostics. Unsteady probes
 and requested VTK exports use the final flow and temperature; SGS exports

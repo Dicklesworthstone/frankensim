@@ -839,7 +839,11 @@ pub(super) fn march(
     power_schedule: impl Fn(f64) -> f64,
     radiation: Option<&fs_lbm::conjugate::RadiationConfig>,
     gate: &fs_exec::CancelGate,
-) -> Result<(fs_lbm::conjugate::ConjugateMarch, String)> {
+) -> Result<(
+    fs_lbm::conjugate::ConjugateMarch,
+    String,
+    Option<super::sgs::MaterialFields>,
+)> {
     use fs_lbm::material::conjugate::buoyant::MaterialBuoyancyError;
     use fs_lbm::material::transport::boussinesq::BoussinesqConfig;
 
@@ -863,7 +867,7 @@ pub(super) fn march(
         },
         _ => bad(error.to_string()),
     };
-    let (run, caloric_report, solid_feedback) = if let Some(input) = scene.fluid_enthalpy.as_ref() {
+    let (run, caloric_report, solid_feedback, caloric_endpoint) = if let Some(input) = scene.fluid_enthalpy.as_ref() {
         let caloric = input.bind(source)?;
         let reference_temperature = source.evolving_reference_temperature()
             .expect("evolving fluid admitted");
@@ -876,12 +880,20 @@ pub(super) fn march(
                 .collect::<Result<Vec<_>>>()?;
             let solid_controls = scene.transient.as_ref().and_then(|t| t.solid_storage)
                 .unwrap_or_default();
-            let result = bound.march_natural_convection_with_enthalpy_and_material_solids(
+            let result = match scene.sgs {
+                Some(sgs) => bound.march_natural_convection_with_enthalpy_and_material_solids_and_sgs(
+                    domain, &solids, flow, thermal, &energy, initial_temperature,
+                    bounds, &caloric, input.transient_controls(reference_temperature)?,
+                    solid_controls, unsteady, sgs, inlet_schedule, power_schedule, radiation, gate,
+                    |_, temperature, _| fluid.at_temperature(temperature),
+                ),
+                None => bound.march_natural_convection_with_enthalpy_and_material_solids(
                 domain, &solids, flow, thermal, &energy, initial_temperature,
                 bounds, &caloric, input.transient_controls(reference_temperature)?,
                 solid_controls, unsteady, inlet_schedule, power_schedule, radiation, gate,
                 |_, temperature, _| fluid.at_temperature(temperature),
-            ).map_err(failure)?;
+                ),
+            }.map_err(failure)?;
             let report = caloric.transient_report(
                 reference_temperature, &result.fluid.enthalpy, &result.fluid.records,
             )?;
@@ -929,30 +941,46 @@ pub(super) fn march(
                     super::num(record.solid_stored_energy_change_j)?));
             }
             storage.push_str("]}");
-            (result.fluid.convection, report, storage)
+            (result.fluid.convection, report, storage, Some(result.fluid.enthalpy.endpoint))
         } else {
-            let run = bound.march_natural_convection_with_enthalpy(
+            let run = match scene.sgs {
+                Some(sgs) => bound.march_natural_convection_with_enthalpy_and_sgs(
+                    domain, &scene.materials, flow, thermal, &energy, initial_temperature,
+                    bounds, &caloric, input.transient_controls(reference_temperature)?,
+                    unsteady, sgs, inlet_schedule, power_schedule, radiation, gate,
+                    |_, temperature, _| fluid.at_temperature(temperature),
+                ),
+                None => bound.march_natural_convection_with_enthalpy(
                 domain, &scene.materials, flow, thermal, &energy, initial_temperature,
                 bounds, &caloric, input.transient_controls(reference_temperature)?,
                 unsteady, inlet_schedule, power_schedule, radiation, gate,
                 |_, temperature, _| fluid.at_temperature(temperature),
-            ).map_err(failure)?;
+                ),
+            }.map_err(failure)?;
             let report = caloric.transient_report(
                 reference_temperature, &run.enthalpy, &run.records,
             )?;
-            (run.convection, report, String::new())
+            (run.convection, report, String::new(), Some(run.enthalpy.endpoint))
         }
     } else if scene.solid_sources.iter().any(SolidSource::temperature_dependent) {
         let solids = scene.solid_sources.iter().map(SolidSource::thermal_law)
             .collect::<Result<Vec<_>>>()?;
         let controls = scene.transient.as_ref().and_then(|t| t.solid_storage)
             .unwrap_or_default();
-        let result = bound.march_natural_convection_with_material_solids(
+        let result = match scene.sgs {
+            Some(sgs) => bound.march_natural_convection_with_material_solids_and_sgs(
+                domain, &solids, flow, thermal,
+                &fs_lbm::conjugate::EnergyConfig::default(), initial_temperature,
+                bounds, unsteady, controls, sgs, inlet_schedule, power_schedule, radiation, gate,
+                |_, temperature, _| fluid.at_temperature(temperature),
+            ),
+            None => bound.march_natural_convection_with_material_solids(
             domain, &solids, flow, thermal,
             &fs_lbm::conjugate::EnergyConfig::default(), initial_temperature,
             bounds, unsteady, controls, inlet_schedule, power_schedule, radiation, gate,
             |_, temperature, _| fluid.at_temperature(temperature),
-        ).map_err(failure)?;
+            ),
+        }.map_err(failure)?;
         let endpoint = endpoint_json(result.solid_endpoint.iter().map(|sample| (
             sample.cell, sample.temperature_k, sample.conductivity_w_m_k[0], &sample.material,
         )), gate)?;
@@ -994,15 +1022,23 @@ pub(super) fn march(
                 super::num(record.solid_stored_energy_change_j)?));
         }
         storage.push_str("]}");
-        (result.fluid, "null".into(), storage)
+        (result.fluid, "null".into(), storage, None)
     } else {
-        let run = bound.march_natural_convection(
+        let run = match scene.sgs {
+            Some(sgs) => bound.march_natural_convection_with_sgs(
+                domain, &scene.materials, flow, thermal,
+                &fs_lbm::conjugate::EnergyConfig::default(), initial_temperature,
+                bounds, unsteady, sgs, inlet_schedule, power_schedule, radiation, gate,
+                |_, temperature, _| fluid.at_temperature(temperature),
+            ),
+            None => bound.march_natural_convection(
             domain, &scene.materials, flow, thermal,
             &fs_lbm::conjugate::EnergyConfig::default(), initial_temperature,
             bounds, unsteady, inlet_schedule, power_schedule, radiation, gate,
             |_, temperature, _| fluid.at_temperature(temperature),
-        ).map_err(failure)?;
-        (run, "null".into(), String::new())
+            ),
+        }.map_err(failure)?;
+        (run, "null".into(), String::new(), None)
     };
     let applied = fluid_endpoint_json(&run.applied, gate)?;
     let endpoint = fluid_endpoint_json(&run.endpoint, gate)?;
@@ -1013,11 +1049,50 @@ pub(super) fn march(
         "\"fluid_applied\":{},\"fluid_endpoint\":{},\"fluid_enthalpy\":{}{}}}"),
         super::num(run.applied_time_s)?, super::num(run.endpoint_time_s)?,
         applied, endpoint, caloric_report, solid_feedback);
-    Ok((run.march, feedback))
+    // These are observations of the actual accepted solve, not fresh source
+    // queries. Momentum used the retained applied mu(T) at reference density;
+    // source-caloric heat uses the retained endpoint Cp from the same h(T).
+    let sgs_fields = if scene.sgs.is_some() {
+        let mut ratios = vec![0.0; domain.cell_count()];
+        let mut conductivity = vec![0.0; domain.cell_count()];
+        let projected = &run.march.flow.flow;
+        let rho = run.reference.density_kg_m3();
+        for sample in &run.applied {
+            if gate.is_requested() {
+                return Err(super::solver_failure(
+                    &fs_lbm::conjugate::ChtError::Cancelled,
+                ));
+            }
+            let cell = sample.cell;
+            let mu = sample
+                .material
+                .resolved_transport()
+                .dynamic_viscosity_pa_s();
+            ratios[cell] = projected.eddy_viscosity_m2_s[cell] / (mu / rho);
+            let cp = caloric_endpoint.as_ref().map_or_else(
+                || run.reference.specific_heat_j_kg_k(),
+                |field| {
+                    field[cell]
+                        .expect("native calorics retain every fluid cell")
+                        .heat_capacity_j_kg_k
+                },
+            );
+            conductivity[cell] =
+                rho * cp * projected.heat_eddy_viscosity_m2_s[cell] / projected.turbulent_prandtl;
+        }
+        Some(super::sgs::MaterialFields {
+            ratios,
+            conductivity,
+            source_caloric: caloric_endpoint.is_some(),
+        })
+    } else {
+        None
+    };
+    Ok((run.march, feedback, sgs_fields))
 }
 
 /// Source-caloric storage shares the same fixed-density physical approximation.
-pub(super) const UNSTEADY_NO_CLAIM: &str = "unsteady laminar fixed-geometry Boussinesq flow and conservative conjugate heat storage; original fluid density, viscosity and conductivity reevaluated at each accepted temperature with fixed pressure, composition and selected source claims; reference fluid density retained in inertia and continuity; storage and advection use reference Cp unless fluid_enthalpy selects original source h(T), backward-Euler source storage and conservative first-order upwind; source density and Cp departures remain at most 5 percent; explicit first-order fluid-material coupling even with BDF2 momentum; solids use authored/frozen storage or implicit endpoint conductivity and source-integrated heat capacity on a declared single-phase span at fixed reference mass; source-caloric fluid and source-integral solid storage may close in one joint implicit thermal endpoint; compact components store heat once through their authored constant heat_capacity_j_k or exact integral of bounded heat_capacity_table_j_k, with no source-material or volumetric storage assigned to occupied cells; original optional surface-radiation model; no compressibility, latent phase change, deformation, turbulence closure or time/grid convergence claim; Estimated numerical evidence, not experimental validation";
+pub(super) const UNSTEADY_NO_CLAIM: &str = "unsteady fixed-geometry Boussinesq flow and conservative conjugate heat storage; laminar unless solver.sgs explicitly selects exploratory algebraic eddy transport; original fluid density, viscosity and conductivity reevaluated at each accepted temperature with fixed pressure, composition and selected source claims; reference fluid density retained in inertia and continuity; storage and advection use reference Cp unless fluid_enthalpy selects original source h(T), backward-Euler source storage and conservative first-order upwind; SGS heat uses reference Cp or the selected h(T) endpoint derivative and the authored turbulent Prandtl number, separately from molecular conductivity; source density and Cp departures remain at most 5 percent; explicit first-order fluid-material coupling even with BDF2 momentum; solids use authored/frozen storage or implicit endpoint conductivity and source-integrated heat capacity on a declared single-phase span at fixed reference mass; source-caloric fluid and source-integral solid storage may close in one joint implicit thermal endpoint; compact components store heat once through their authored constant heat_capacity_j_k or exact integral of bounded heat_capacity_table_j_k, with no source-material or volumetric storage assigned to occupied cells; original optional surface-radiation model; no compressibility, latent phase change, deformation, SGS dissipation heating, turbulent DNS, thermal wall-layer or time/grid convergence claim; Estimated numerical evidence, not experimental validation";
 
 fn fluid_endpoint_json(
     samples: &[fs_lbm::material::conjugate::buoyant::MaterialBuoyancySample<FluidState>],

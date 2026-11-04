@@ -1,10 +1,128 @@
 //! The real CLI selects the shared transient SGS owner and publishes its
 //! modeled momentum/thermal fields. These are workflow, not turbulence-DNS tests.
 
-use super::{DUCT, J, f, run, scratch};
+use super::{DUCT, J, f, run, scratch, unsteady_material_atmosphere};
 
 const EXAMPLE: &str = include_str!("../../../../examples/cooling-cht/sgs-heated-obstacle.json");
 const VREMAN: &str = include_str!("../../../../examples/cooling-cht/vreman-graded-obstacle.json");
+
+#[test]
+fn evolving_gas_sgs_uses_actual_molecular_transport_and_original_calorics() {
+    let base = unsteady_material_atmosphere("mixture 300 100000 mole 2 He 0.4 N2 0.6", -9.81);
+    for (index, model, caloric) in [
+        (0, "smagorinsky", false),
+        (1, "wale", true),
+        (2, "vreman", false),
+    ] {
+        let mut scene = base.replace(
+            "\"solver\":{",
+            &format!(
+                r#""solver":{{"sgs":{{
+          "model":"{model}","coefficient":0.17,"filter_width_factor":1,
+          "maximum_eddy_to_molecular":50,"usage":"exploration"}},"turbulent_prandtl":0.7,"#
+            ),
+        );
+        if caloric {
+            scene = scene.replacen(
+                '{',
+                r#"{"fluid_enthalpy":{
+              "minimum_temperature_k":300,"maximum_temperature_k":310,"maximum_flux_defect_w":1e-9,
+              "transient_controls":{"maximum_passes_per_step":80,"maximum_energy_solves":400,
+                "temperature_tolerance_k":1e-9,"maximum_storage_defect_w":1e-9,
+                "maximum_energy_closure_j":1e-8,"temperature_relaxation":1}},"#,
+                1,
+            );
+        }
+        let (code, result, error) =
+            run(&scratch(&format!("material-gas-sgs-{index}.json"), &scene));
+        assert_eq!(code, 0, "{error}");
+        assert_eq!(
+            result.str_field("solver"),
+            Some("fv-simplec-unsteady-material-sgs")
+        );
+        let closure = result.path(&["flow", "sgs"]).unwrap();
+        assert_eq!(
+            closure.str_field("viscosity_ratio_basis"),
+            Some("applied-local-molecular-viscosity")
+        );
+        assert_eq!(
+            closure.str_field("thermal_capacity_basis"),
+            Some(if caloric {
+                "endpoint-source-cp"
+            } else {
+                "reference-cp"
+            })
+        );
+        assert_eq!(f(closure, &["thermal_prandtl"]), 0.7);
+        let eddy = f(closure, &["final_max_eddy_viscosity_m2_s"]);
+        assert!(eddy > 0.0);
+        let rho = f(&result, &["material_inputs", "fluid", "density_kg_m3"]);
+        let mu_min = f(
+            &result,
+            &[
+                "material_feedback",
+                "fluid_applied",
+                "minimum_dynamic_viscosity_pa_s",
+            ],
+        );
+        let mu_max = f(
+            &result,
+            &[
+                "material_feedback",
+                "fluid_applied",
+                "maximum_dynamic_viscosity_pa_s",
+            ],
+        );
+        assert!(
+            mu_max > mu_min,
+            "the actual solve must exercise evolving viscosity"
+        );
+        let ratio = f(&result, &["flow", "max_eddy_viscosity_ratio"]);
+        assert!(ratio >= eddy / (mu_max / rho) * (1.0 - 1e-12));
+        assert!(ratio <= eddy / (mu_min / rho) * (1.0 + 1e-12));
+        if caloric {
+            let h = result
+                .path(&["material_feedback", "fluid_enthalpy"])
+                .unwrap();
+            assert!(f(h, &["maximum_sgs_heat_flux_defect_w"]) <= f(h, &["flux_tolerance_w"]));
+        }
+        assert!(f(&result, &["transient", "worst_step_closure_j"]) < 1e-7);
+    }
+}
+
+#[test]
+fn evolving_material_zero_sgs_preserves_native_history_and_local_cap_refuses() {
+    let base = unsteady_material_atmosphere("300 100000 0", -9.81);
+    let (code, laminar, error) = run(&scratch("material-sgs-zero-base.json", &base));
+    assert_eq!(code, 0, "{error}");
+    let disabled = base.replace(
+        "\"solver\":{",
+        r#""solver":{"sgs":{
+      "model":"smagorinsky","coefficient":0,"filter_width_factor":1,
+      "maximum_eddy_to_molecular":0,"usage":"exploration"},"#,
+    );
+    let (code, zero, error) = run(&scratch("material-sgs-zero.json", &disabled));
+    assert_eq!(code, 0, "{error}");
+    assert_eq!(zero.get("transient"), laminar.get("transient"));
+    assert_eq!(
+        zero.get("material_feedback"),
+        laminar.get("material_feedback")
+    );
+    for key in [
+        "final_kinetic_energy_j",
+        "final_mass_residual",
+        "final_momentum_residual",
+    ] {
+        assert_eq!(zero.path(&["flow", key]), laminar.path(&["flow", key]));
+    }
+    assert_eq!(f(&zero, &["flow", "max_eddy_viscosity_ratio"]), 0.0);
+    let capped = disabled.replace("\"coefficient\":0,", "\"coefficient\":0.17,");
+    let (code, refused, error) = run(&scratch("material-sgs-local-cap.json", &capped));
+    assert_ne!(code, 0);
+    assert!(error.contains("eddy/molecular ratio"), "{error}");
+    assert!(refused.get("material_feedback").is_none());
+    assert!(refused.get("flow").is_none());
+}
 
 fn short_scene(name: &str, model: &str, coefficient: f64) -> String {
     EXAMPLE

@@ -1236,6 +1236,101 @@ mod evolving_materials {
     }
 
     #[test]
+    fn evolving_solid_and_fluid_sgs_preserve_source_storage_and_export_local_cp_heat() {
+        for caloric in [false, true] {
+            let name = format!("material-solid-sgs-{caloric}");
+            let (path, scene) = prepare(&name, 0.01, 350.0);
+            // Source Cp is exactly 2 + 0.002 (T - 300) above the reference.
+            // It must affect modeled heat diffusion only on the source-h(T) path.
+            std::fs::write(
+                path.with_file_name(format!("{name}-liquid.fsmcdpk")),
+                pack_with_cp_slope(true, 0.0, 350.0, 0.002),
+            )
+            .unwrap();
+            let mut input = scene.replace(
+                "\"source\":{\"mode\":\"temperature-dependent\",",
+                "\"source\":{\"mode\":\"temperature-dependent\",\"storage_temperature_range_k\":[290,350],",
+            ).replace("\"solver\":{", r#""solver":{"turbulent_prandtl":0.7,"sgs":{
+                "model":"smagorinsky","coefficient":0.17,"filter_width_factor":1,
+                "maximum_eddy_to_molecular":50,"usage":"exploration"},"#)
+             .replacen('{', &format!(r#"{{"vtk":"{name}.vtr",
+                "transient":{{"flow":"unsteady","time_step_s":0.02,"steps":4,
+                "initial_temperature_k":300,"inner_iterations":2000,"inner_tolerance":1e-9}},"#), 1);
+            if caloric {
+                let policy = CALORIC_POLICY.replacen(
+                    '{',
+                    r#"{"transient_controls":{
+                  "maximum_passes_per_step":80,"maximum_energy_solves":400,
+                  "temperature_tolerance_k":1e-9,"maximum_storage_defect_w":1e-9,
+                  "maximum_energy_closure_j":1e-8,"temperature_relaxation":1},"#,
+                    1,
+                );
+                input = input.replacen('{', &format!(r#"{{"fluid_enthalpy":{policy},"#), 1);
+            }
+            std::fs::write(&path, &input).unwrap();
+            let (code, result, error) = run(&path);
+            assert_eq!(code, 0, "{error}");
+            assert_eq!(
+                result.str_field("solver"),
+                Some("fv-simplec-unsteady-material-sgs")
+            );
+            let feedback = result.get("material_feedback").unwrap();
+            assert_eq!(
+                feedback
+                    .path(&["solid_storage", "records"])
+                    .and_then(J::as_array)
+                    .unwrap()
+                    .len(),
+                4
+            );
+            assert!(f(&result, &["flow", "sgs", "final_max_eddy_viscosity_m2_s"]) > 0.0);
+            assert!(f(&result, &["transient", "worst_step_closure_j"]) < 1e-7);
+            let vtk = std::fs::read_to_string(result.str_field("vtk").unwrap()).unwrap();
+            let field = |name: &str| -> Vec<f64> {
+                vtk.split(&format!("Name=\"{name}\""))
+                    .nth(1)
+                    .unwrap()
+                    .split('>')
+                    .nth(1)
+                    .unwrap()
+                    .split('<')
+                    .next()
+                    .unwrap()
+                    .split_whitespace()
+                    .map(|x| x.parse().unwrap())
+                    .collect()
+            };
+            let temperature = field("temperature_k");
+            let eddy = field("eddy_viscosity_m2_s");
+            let conductivity = field("turbulent_conductivity_w_m_k");
+            let mut nonzero = 0;
+            for ((t, nu), k) in temperature.iter().zip(&eddy).zip(&conductivity) {
+                let cp = if caloric {
+                    2.0 + 0.002 * (t - 300.0)
+                } else {
+                    2.0
+                };
+                assert!((k - cp * nu / 0.7).abs() <= 1e-10 * (1.0 + k.abs()));
+                if *k > 0.0 {
+                    nonzero += 1;
+                }
+            }
+            assert!(nonzero > 0);
+            let maximum = conductivity.into_iter().fold(0.0_f64, f64::max);
+            assert!(
+                (maximum
+                    - f(
+                        &result,
+                        &["flow", "sgs", "final_max_turbulent_conductivity_w_m_k"]
+                    ))
+                .abs()
+                    < 1e-10
+            );
+            assert_eq!(std::fs::read_to_string(path).unwrap(), input);
+        }
+    }
+
+    #[test]
     fn unsteady_solid_storage_integrates_original_capacity_instead_of_freezing_cp() {
         // One nearly insulated unit-volume solid, rho_ref=2 kg/m3, heated by
         // 1 W for 2 s. Its sourced Cp is 2 + slope*(T-300), so the independent

@@ -31791,3 +31791,31 @@ or experimental acoustic validity.
 Focused G0/G1/G3 regressions cover a causal resonator's independent impulse
 response and peak, even-bin reuse, actual tail measurements, dispersive
 high-Q refusal, original Bessel isothermal storage and lossless ring-down.
+
+
+## Changing-band turbulent jet-noise colour
+
+The shared `ButterworthBandGaussian` uses a covariance-normalized two-state
+realization for the flue, voice, lip and constriction noise sources. Each
+zero-input step contracts the state norm even when the band changes. The
+identity `F Fᵀ + G Gᵀ = I` preserves unit equilibrium state covariance for
+prescribed band schedules; a zero-start or cleared source retains its warmup.
+The high-pass truncation shares the band-pass's Nyquist-limit state. This fixes
+the direct form's parametric instability: a native regression against the
+previous core reached amplitude 41.52 after seven unit-scale noise samples.
+
+At fixed edges the original Butterworth transfer and in-band calibration are
+preserved up to rounding. Wide-band normalization uses whole/split 16-point
+quadrature with at most 255 panels and refuses unresolved normalization. This
+removes the former roughly 13.4% gain jump at the 1–24 kHz Nyquist limit on a
+48 kHz clock. Repeated identical edges/step reuse a prepared section, removing
+repeated spectral quadrature and coefficient square roots from steady-flow
+sampling. Sampling allocates nothing and consumes exactly one original keyed
+Philox normal per call, including silent calls.
+
+Source placement, Reynolds gates, authored gains, Strouhal bands and retained
+below-Nyquist power fractions remain unchanged. Changed realizations change
+sample bits. Rapidly varying bands have no stationary spectrum or instantaneous
+in-band RMS guarantee, and feedback-driven random edges need not preserve
+unconditional covariance. This is a stable stochastic colour model, not a
+resolved turbulence model or additional experimental noise calibration.
