@@ -315,7 +315,7 @@ mod tests {
     fn mixing_reduced_mass_remains_representable_for_large_inventory() {
         // A mixture's reduced mass can fit even when adding both masses
         // directly would overflow. No artificial clamping of velocity.
-        let old = 1.0e308;
+        let old: f64 = 1.0e308;
         let incoming = 1.0e308;
         let expected = 0.5e308;
         let larger = old.max(incoming);

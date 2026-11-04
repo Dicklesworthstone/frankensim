@@ -130,7 +130,7 @@ mod tests {
                     (2.0_f64/(transverse*length)).sqrt()*n as f64*core::f64::consts::PI/length).collect(),
                 solid_linear_density_kg_m:solid,transverse_linear_density_kg_m:transverse,
                 axial_rigidity_n:ea,prestress_n:tension,axial_component:1,elastic_frequency_band_rad_s:None,
-                axial_material_loss:None,finite_strain_viscosity:false,
+                axial_material_loss:None,finite_strain_viscosity:false,axial_fluid_component:None,
             }}
     }
     fn spatial(law:&StrainHistory,q:&[f64],s:f64)->(f64,Vec<f64>) {
