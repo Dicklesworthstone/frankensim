@@ -288,6 +288,37 @@ mod tests {
     }
 
     #[test]
+    fn single_phase_matches_distributed_under_boost_and_inventory_rounding() {
+        // Both public paths must use the same represented-momentum account,
+        // including a nontrivial incoming relative velocity and a rounded
+        // endpoint inventory. The thermal loss is frame-independent.
+        for boost in [[0.0; 3], [1024.0, -4096.0, 256.0]] {
+            let old: [f64; 3] =
+                core::array::from_fn(|d| [3.0, -1.0, 2.0][d] + boost[d]);
+            let donor: [f64; 3] =
+                core::array::from_fn(|d| [-2.0, 4.0, 1.0][d] + boost[d]);
+            let p = old.map(|u| 2.0 * u);
+            for new_mass in [2.5, 2.500001] {
+                let single = advance(2.0, new_mass, p, 0.5, donor).unwrap();
+                let batch = advance_many(2.0, new_mass, p, &[stream(0.5, donor)]).unwrap();
+                assert_eq!(single.momentum, batch.momentum);
+                assert_eq!(single.velocity, batch.velocity);
+                near(single.mixing_heat_j, batch.mixing_heat_j, 1e-12);
+                near(single.kinetic_change_j, batch.kinetic_change_j, 1e-9);
+            }
+        }
+    }
+
+    #[test]
+    fn single_phase_rejects_a_lost_nonzero_impulse() {
+        let mass = 1e20;
+        let momentum = [1e30, 0.0, 0.0];
+        let transfer = 1e-12;
+        assert!(advance(mass, mass, momentum, transfer, [1.0, 0.0, 0.0]).is_none());
+        assert!(advance_many(mass, mass, momentum, &[stream(transfer, [1.0, 0.0, 0.0])]).is_none());
+    }
+
+    #[test]
     fn distributed_opposing_phase_closes_independent_rational_inventory() {
         let streams = [
             stream(-0.5, [3.0, -1.0, 2.0]),
