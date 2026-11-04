@@ -280,6 +280,9 @@ pub struct ReedBoreVoice {
     lay: Option<Obstacle>,
     inlet_gas: GasState,
     viscous_slit: Option<crate::bernoulli_aperture::viscous::ViscousSlit>,
+    /// Opt-in duct-constriction noise on the reed channel (`set_constriction_noise`): a series pressure source on the
+    /// mouth side, the brass lip's law carried to the reed slit. `None` is the original voice, bit for bit.
+    constriction_noise: Option<crate::turbulence_noise::ConstrictionNoise>,
     rho: f64,
     jet_observer: CompactForceObserver,
     zc: f64,
@@ -700,6 +703,7 @@ impl ReedBoreVoice {
             lay,
             inlet_gas: *gas,
             viscous_slit: None,
+            constriction_noise: None,
             rho: gas.density,
             jet_observer,
             zc,
@@ -773,6 +777,28 @@ impl ReedBoreVoice {
         }
         let slit = crate::bernoulli_aperture::viscous::ViscousSlit::from_gas(&self.inlet_gas, length_m)?;
         self.viscous_slit = Some(slit);
+        Ok(())
+    }
+
+    /// Add the opt-in duct-constriction noise ([`crate::turbulence_noise::ConstrictionNoise`]) to the reed channel: Oldham
+    /// and Ukpoho's printed law as a third-octave series source of rms K(St) times the blowing pressure, `St = f d / U_c`
+    /// with `U_c = sqrt(2 P / rho)` the Bernoulli speed of the total drop and `d = pi r / 2` of the card's duct radius, the
+    /// brass lip's reading carried unchanged to the reed slit. An extrapolation of the same size as the brass row's: the
+    /// law was measured on dampers and plates in a 300 mm duct at 10 to 25 m/s, and the reed channel's own jet is slower
+    /// and thinner. Admission is allowed only before the first rendered sample.
+    ///
+    /// # Errors
+    /// An advanced voice, or the reason [`crate::turbulence_noise::ConstrictionNoiseCard::validate`] gives.
+    pub fn set_constriction_noise(&mut self, card: crate::turbulence_noise::ConstrictionNoiseCard) -> Result<(), AcousticRealizeError> {
+        if self.sample_index != 0 {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "constriction noise requires an unadvanced voice",
+            });
+        }
+        self.constriction_noise = Some(
+            crate::turbulence_noise::ConstrictionNoise::new(card, self.dt)
+                .map_err(|what| AcousticRealizeError::InvalidDescription { what })?,
+        );
         Ok(())
     }
 
@@ -918,7 +944,15 @@ impl ReedBoreVoice {
     pub fn step_block(&mut self, out: &mut [f64]) -> Result<(), AcousticRealizeError> {
         for slot in out.iter_mut() {
             let t = self.sample_index as f64 * self.dt;
-            let p_m = blowing_envelope(self.reed, t);
+            let p_blow = blowing_envelope(self.reed, t);
+            // The opt-in constriction noise is a series source on the mouth side, of rms K(St) x the held blowing pressure per
+            // third octave (Oldham and Ukpoho's printed law, the brass row's), silent while the last sample's mouthpiece flow
+            // was not forward; without it `p_m` is the blowing pressure itself.
+            let p_series = match self.constriction_noise.as_mut() {
+                Some(source) => source.pressure_pa(p_blow, self.rho),
+                None => 0.0,
+            };
+            let p_m = p_blow + p_series;
             let mut boundary = self.line.boundary_response().map_err(|_|
                 AcousticRealizeError::Reed { what: "characteristic boundary left the finite set" })?;
             let shunt_incoming = self
@@ -993,6 +1027,9 @@ impl ReedBoreVoice {
                     what: "characteristic line left the finite set",
                 })?
                 + shunt_incoming;
+            if let Some(source) = self.constriction_noise.as_mut() {
+                source.record((p_plus - p_minus_now) / self.zc);
+            }
             if let Some(shunt) = &mut self.register_shunt {
                 shunt.step(p_plus).map_err(|_| AcousticRealizeError::Reed {
                     what: "register-hole orifice shunt left the finite set",

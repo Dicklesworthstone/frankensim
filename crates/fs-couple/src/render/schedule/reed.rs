@@ -25,6 +25,12 @@
 //! Optional `tonehole_lengths lefebvre-scavone-2012` after it, on the same binding, gives every
 //! tone hole the printed thick-wall lengths of Lefebvre and Scavone (J. Acoust. Soc. Am. 131(4),
 //! 2012) instead of the engine's inner length: `fs_duct`'s `hole_lengths` lists each equation.
+//! Optional `constriction_noise SEED DUCT_RADIUS_M` after those rows, before `compile_limits`, adds the brass lip
+//! row's duct-constriction noise (Oldham and Ukpoho's printed K(St) law, as a seeded third-octave series pressure
+//! source on the mouth side, rms K times the held blowing pressure, silent while the mouthpiece flow is not forward;
+//! see `ReedBoreVoice::set_constriction_noise`). It is an extrapolation in size, speed and shape, from dampers and
+//! plates in a 300 mm duct to a reed slit; the printed law fixes neither the jet speed nor the pressure drop to use
+//! for a viscous slit (they span 40 dB here), and the row takes the Bernoulli speed of the total drop as the brass row does.
 //! Legacy `listener_m` selects bore pressure plus the compact-jet proxy.
 //! `baffled_outlet` selects Rayleigh observation of the admitted openings.
 //! Neither is measured calibration; the underlying reed mechanics are shared.
@@ -906,6 +912,19 @@ impl ReedPerformance {
             }
             true
         } else { false };
+        // `constriction_noise SEED DUCT_RADIUS_M`: the brass lip row's duct-constriction noise (Oldham and Ukpoho's printed law)
+        // on the reed channel; both fields required, no default, once only, after the hole rows.
+        let constriction_noise = if r.lines.clone().next()
+            .and_then(|line| line.split_ascii_whitespace().next()) == Some("constriction_noise") {
+            let mut row = r.row("constriction_noise")?;
+            let line = row.line;
+            let seed: u64 = row.parse()?;
+            let duct_radius_m = row.positive()?;
+            row.finish()?;
+            let card = crate::turbulence_noise::ConstrictionNoiseCard { seed, duct_radius_m };
+            card.validate().map_err(|what| bad(line, what))?;
+            Some(card)
+        } else { None };
         let mut row = r.row("compile_limits")?;
         let max_work: u64 = row.parse()?;
         let max_controls = row.count(MAX_CONTROLS)?;
@@ -1112,6 +1131,9 @@ impl ReedPerformance {
         }
         if let Some(length_m) = slit_length_m {
             voice.set_viscous_slit_length(length_m).map_err(ReedPerformanceError::Model)?;
+        }
+        if let Some(card) = constriction_noise {
+            voice.set_constriction_noise(card).map_err(ReedPerformanceError::Model)?;
         }
         // The outlet builds use `samples` only to bound the round-trip delay,
         // so a card `latency` samples longer builds the same voice and grid.

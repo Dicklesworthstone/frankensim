@@ -7111,6 +7111,16 @@ molecular bore) opt in to the thick-wall hole lengths of Lefebvre and Scavone
 (2012) that `fs-duct` documents for `GasFieldDuct::with_printed_hole_lengths`.
 It is off unless declared, composes with the interaction, and refuses by name on
 any binding without a continuous operator.
+
+The optional reed-card record `constriction_noise SEED DUCT_RADIUS_M` (after the hole rows, before
+`compile_limits`; both fields required, no default, once only) gives the reed channel the brass lip row's
+duct-constriction noise (`turbulence_noise::ConstrictionNoise`; Oldham and Ukpoho 1990 as printed in Guedel 2005,
+the trend line read from the figure): a seeded third-octave series source on the mouth side, of rms K(St) times the
+held blowing pressure, with `St = f d / U_c`, `U_c = sqrt(2 P / rho)` (the Bernoulli speed of the total drop) and
+`d = pi r / 2` of the card's duct radius. It is silent while the previous sample's mouthpiece flow was not forward,
+and off unless declared: without it every sample is the original. It is an extrapolation in size, speed and shape,
+from dampers and orifice plates in a 300 mm duct at 10 to 25 m/s to a reed slit; the printed law fixes neither the
+jet speed nor the pressure drop for a viscous slit, and the readings available on the engine's slit span 40 dB.
 A focused impulse regression covers the combined wall/field changes to
 both incoming feedback and causal external microphone pressure.
 

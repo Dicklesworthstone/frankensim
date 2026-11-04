@@ -245,3 +245,43 @@ fn the_tonehole_lengths_row_is_validated_ordered_and_needs_a_continuous_binding(
         ObservationPolicy::Diagnostic, None, field(280.0), 8).is_err());
     assert!(continuous_load(&declared, 300.0).is_err());
 }
+
+// ---- `constriction_noise SEED DUCT_RADIUS_M` (the brass lip row's duct-constriction noise on the reed channel) ----
+
+#[test]
+fn the_constriction_noise_row_is_off_by_default_seeded_and_reaches_the_rendered_pressure() {
+    let base = holed(&source());
+    let plain = pressure_of(&base);
+    let norm = plain.iter().map(|x| x * x).sum::<f64>().sqrt();
+    let row = "constriction_noise 7 0.0015";
+    let noisy = pressure_of(&with_row(&base, row));
+    assert!(norm > 0.0 && distance(&plain, &noisy) > 1.0e-9 * norm, "the row must reach the pressure");
+    let rms = |v: &[f64]| (v.iter().map(|x| x * x).sum::<f64>() / v.len() as f64).sqrt();
+    assert!(rms(&noisy) > 0.3 * rms(&plain) && rms(&noisy) < 3.0 * rms(&plain),
+        "a series source of K times the blowing pressure leaves the level near the plain note");
+    assert_eq!(noisy, pressure_of(&with_row(&base, row)), "one seed, one stream");
+    assert_ne!(noisy, pressure_of(&with_row(&base, "constriction_noise 8 0.0015")), "another seed, another stream");
+    assert_eq!(plain, pressure_of(&base), "no row, the original voice");
+}
+
+#[test]
+fn the_constriction_noise_row_is_validated_ordered_and_once_only() {
+    let base = holed(&source());
+    for bad in [
+        "constriction_noise", "constriction_noise 7", "constriction_noise 7 0", "constriction_noise 7 -0.0015",
+        "constriction_noise 7 nan", "constriction_noise 7 inf", "constriction_noise -3 0.0015",
+        "constriction_noise 7 0.0015 extra", "constriction_noise x 0.0015",
+    ] {
+        assert!(continuous_load(&with_row(&base, bad), 280.0).is_err(), "{bad}");
+    }
+    let declared = with_row(&base, "constriction_noise 7 0.0015");
+    assert!(continuous_load(&declared, 280.0).is_ok());
+    // After the hole rows it is fine; before them, the header order refuses.
+    let ordered = with_row(&with_row(&with_row(&base, "open_hole_interaction tmmi 2"), "tonehole_lengths lefebvre-scavone-2012"),
+        "constriction_noise 7 0.0015");
+    assert!(continuous_load(&ordered, 280.0).is_ok());
+    let swapped = with_row(&with_row(&base, "constriction_noise 7 0.0015"), "open_hole_interaction tmmi 2");
+    assert!(continuous_load(&swapped, 280.0).is_err());
+    // Once only.
+    assert!(continuous_load(&with_row(&declared, "constriction_noise 8 0.0015"), 280.0).is_err());
+}

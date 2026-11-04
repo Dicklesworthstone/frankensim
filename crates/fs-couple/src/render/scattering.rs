@@ -159,6 +159,29 @@ mod tests {
         }
     }
 
+    // The opt-in constriction noise (the brass lip row's law on the reed channel) is admitted only before the first sample,
+    // is seeded, and changes the voice only once the mouthpiece flow has been forward; with no source the voice is unchanged.
+    #[test]
+    fn constriction_noise_is_admitted_before_the_first_sample_only_and_is_seeded() {
+        use crate::turbulence_noise::ConstrictionNoiseCard;
+        let card = |seed| ConstrictionNoiseCard { seed, duct_radius_m: 0.007 };
+        let run = |source: Option<ConstrictionNoiseCard>| {
+            let mut v = voice(-0.2, true);
+            if let Some(c) = source { v.set_constriction_noise(c).unwrap(); }
+            let mut out = vec![0.0; 800];
+            v.step_block(&mut out).unwrap();
+            assert!(v.set_constriction_noise(card(1)).is_err(), "an advanced voice refuses the source");
+            out
+        };
+        let (plain, a, a2, b) = (run(None), run(Some(card(5))), run(Some(card(5))), run(Some(card(6))));
+        assert_eq!(a, a2, "one seed, one stream");
+        assert_ne!(a, b, "another seed, another stream");
+        assert_ne!(a, plain, "the source reaches the sample");
+        assert_eq!(plain[0].to_bits(), a[0].to_bits(), "silent until the last sample's flow was forward");
+        assert!(ConstrictionNoiseCard { seed: 1, duct_radius_m: 0.0 }.validate().is_err());
+        assert!(voice(-0.2, true).set_constriction_noise(ConstrictionNoiseCard { seed: 1, duct_radius_m: -1.0 }).is_err());
+    }
+
     // G5: the physical source, its history and receiver are independent of the
     // host callback partition for both existing source mechanisms.
     #[test]
