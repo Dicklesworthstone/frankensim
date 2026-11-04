@@ -2847,3 +2847,9 @@ force law. Five focused native tests cover independent high-precision regular-
 solution quadrature, the near-critical sigma~(chi-2)^(3/2) and width~(chi-2)^(-1/2)
 limits with their prefactors, kappa/concentration/component-order scaling,
 physical absence/refusal cases and bounded work/cancellation.
+
+## Original IF97 isobaric density curvature
+
+`water::if97::If97State::isobaric_density_jet` supplies density and its first/second temperature derivatives at the original fixed pressure. It retains the existing Region 1/2 state value and first Gibbs derivative, evaluating only the additional mixed third Gibbs partial from the original released coefficients on demand. Fixed-size power tables and the native compensated accumulator allocate nothing; ordinary state queries retain their previous operation tree and cost. The exact relation is rho_TT = rho * (2 * (v_T/v)^2 - v_TT/v).
+
+Three focused actual-source controls cover fourth-order differences of the original scalar EOS and retained first derivatives at ten liquid/vapor states, the dilute ideal-gas limit, water's density-maximum sign change and the separate saturation-branch endpoints. The jet retains the existing source domain and uncertainty. It is a single-phase branch derivative, not a two-phase mixture tangent, automatic regional continuation, or a pressure-derivative API.

@@ -24,6 +24,8 @@ use fs_math::det;
 use fs_qty::{Density, Pressure, Qty, Temperature, Velocity};
 
 pub mod bounds;
+/// Analytic isobaric density derivatives of the same original Gibbs source.
+pub mod density;
 pub mod increments;
 pub mod region3;
 /// Original-source regional routing, saturation pairs and boundary diagnostics.

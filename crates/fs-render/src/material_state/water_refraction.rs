@@ -24,6 +24,9 @@ use fs_material::water_refraction::{
     WaterRefractiveSample,
 };
 
+/// Original IF97 water density driven by an existing thermal reconstruction.
+pub mod isobaric;
+
 /// One query of the same original temperature and mass-density reconstruction.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WaterStateGradientSample {

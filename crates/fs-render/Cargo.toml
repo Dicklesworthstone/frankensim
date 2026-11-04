@@ -30,6 +30,7 @@ fs-rep-nurbs = { path = "../fs-rep-nurbs", optional = true }
 fs-solid = { path = "../fs-solid", optional = true }
 fs-substrate = { path = "../fs-substrate", optional = true }
 fs-thermal = { path = "../fs-thermal", optional = true }
+fs-thermochem = { path = "../fs-thermochem", optional = true }
 
 [dev-dependencies]
 asupersync = { path = "../../../asupersync" }
@@ -63,7 +64,7 @@ tracer = ["chart-backends", "dep:fs-alloc", "dep:fs-rand", "dep:fs-img", "dep:fs
 # Explicitly opt-in while the observer/model error remains unbounded.
 photometry = ["tracer", "volumes", "dep:fs-ivl"]
 # Resolve optical/thermal appearance from the same material state as mechanics.
-material-state = ["tracer", "dep:fs-matdb", "dep:fs-material", "dep:fs-conduction", "dep:fs-qty"]
+material-state = ["tracer", "dep:fs-matdb", "dep:fs-material", "dep:fs-conduction", "dep:fs-qty", "dep:fs-thermochem"]
 # Fixed SI incident-beam absorption coupled to the original enthalpy timeline.
 optical-heating = ["tracer", "volumes", "dep:fs-thermal"]
 # Actual accepted material-body vertices through the original solid boundary and BVH.
