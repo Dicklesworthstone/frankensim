@@ -375,6 +375,10 @@ fn material_domain_biot_and_late_callback_cancellation_preserve_both_inputs() {
                 ..surface()
             },
             ForcedGasSurface {
+                speed_m_s: 0.0,
+                ..surface()
+            },
+            ForcedGasSurface {
                 speed_m_s: 1e20,
                 ..surface()
             },
