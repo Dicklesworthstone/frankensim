@@ -1,6 +1,46 @@
 //! One conversion of material optical sources shared by surfaces and particles.
 
 use super::*;
+use fs_material::state_point::{
+    SpectralConductorStatePoint, SpectralTabulatedDielectricStatePoint,
+};
+
+pub(super) fn spectral_conductor(
+    source: &SpectralConductorStatePoint,
+    max_knot_span_nm: f64,
+) -> Result<ConductorOptics, MaterialOpticalError> {
+    let mut samples = [ConductorIorSample::try_new_in_band(1.0, 1.0, 1.0)?; 9];
+    for (slot, sample) in samples.iter_mut().zip(source.samples()) {
+        *slot = ConductorIorSample::try_new_in_band(sample.wavelength_nm, sample.eta, sample.k)?;
+    }
+    Ok(ConductorOptics::try_new_in_band(
+        samples,
+        max_knot_span_nm,
+        ConductorSource::try_new(source.identity(), ConductorDataStatus::MaterialStateClaims)?,
+    )?)
+}
+
+pub(super) fn spectral_tabulated(
+    source: &SpectralTabulatedDielectricStatePoint,
+    max_knot_span_nm: f64,
+) -> Result<DielectricGlass, MaterialOpticalError> {
+    let mut indices = [DielectricIorSample::try_new_in_band(1.0, 1.0)?; 9];
+    let mut absorption = [(0.0, 0.0); 9];
+    for ((index, coefficient), sample) in indices
+        .iter_mut()
+        .zip(absorption.iter_mut())
+        .zip(source.samples())
+    {
+        let wavelength_nm = sample.wavelength_m * 1.0e9;
+        *index = DielectricIorSample::try_new_in_band(wavelength_nm, sample.phase_index)?;
+        *coefficient = (wavelength_nm, sample.absorption_per_m);
+    }
+    Ok(DielectricGlass::with_ior(
+        DielectricIor::Tabulated(TabulatedIor::try_new_in_band(indices, max_knot_span_nm)?),
+        BeerLambertAbsorption::try_from_spectral_extinction_in_band(&absorption)?,
+        GlassProvenance::Custom,
+    ))
+}
 
 pub(super) fn conductor(
     source: &VisibleConductorStatePoint,

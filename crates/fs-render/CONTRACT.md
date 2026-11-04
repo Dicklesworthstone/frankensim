@@ -1204,6 +1204,29 @@ differentiable lift). Pure Rust throughout.
   minimal string versus disc mechanical requirements, Fresnel and absorption
   formulas, SI conversion, material replacement, and mismatch refusals.
 
+  `try_spectral_conductor` and `try_spectral_tabulated_dielectric` additionally
+  consume the explicit finite-band source snapshots from `fs-material`. Each
+  original wavelength converts once from SI metres to vacuum nm; nine original
+  `(eta,k)` or `(n,alpha)` knots reach the native conductor or tabulated dielectric
+  owners without visible-band projection. Conductor knots and identity come from
+  the existing `SpectralComplexIndexStatePoint` projection exposed by the SI
+  source wrapper; no second n/k law is introduced. Dielectric absorption retains
+  original linear-alpha interpolation. The first and last source knots are
+  the actual closed support. A positive finite caller-declared maximum knot gap
+  is checked by those owners; it declares interpolation admission, not accuracy.
+  Smooth and GGX finishes remain independent, and the native opaque-conductor
+  and weakly absorbing real-index dielectric domains still apply.
+  `at_spectral_material_state` retains the original claims, schema identity,
+  maximum knot gap and surface finish while continuing to a new accepted state.
+  Source-selected wavelength changes must pass that same interpolation limit;
+  SI conversion overflow, unsupported states and invalid grids refuse atomically.
+  Schema identity also disambiguates two families adopted from one complete
+  source bundle. Regression sources compare infrared complex Fresnel, phase and
+  group indices, Snell refraction and intensity Beer-Lambert attenuation against
+  independent formulae, including temperature refresh and a narrow absorption
+  feature. These material bindings do not infer thermal emission or unsupported
+  spectral tails.
+
 - `thermal_surface` (feature `tracer`): `GrayDiffuseThermalSurface` declares an
   opaque gray/diffuse local-equilibrium approximation explicitly. Its source,
   temperature and emissivity identity drives SI Planck spectral radiance in

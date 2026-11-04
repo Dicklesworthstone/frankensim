@@ -10046,6 +10046,60 @@ single-pole frequency limits, multipole additivity, the zero-memory limit and
 passivity/source-domain refusals. These synthetic fixtures verify the model's
 implementation and do not establish experimental material accuracy.
 
+## Source-backed optical tables on finite vacuum-wavelength bands
+
+`state_point::SpectralConductorStatePoint` and
+`SpectralTabulatedDielectricStatePoint` resolve nine original vacuum wavelengths
+in SI metres together with their absolute complex-index `(eta, k)` or real-index
+and intensity-absorption `(n, alpha)` values. Their explicit resolvers each
+require 27 properties from the same immutable card and complete physical state.
+Wavelength coordinates use `SPECTRAL_OPTICAL_WAVELENGTH_M_PROPERTIES`; the
+separate conductor and dielectric property arrays select the constitutive
+family explicitly. The existing visible schemas and their selection rules are
+unchanged. There is no material-name inference, spectral resampling or RGB fit.
+
+The conductor ingress delegates its complete n/k projection to the existing
+`SpectralComplexIndexStatePoint` owner through `complex_index()`. It reuses that
+owner's samples, nominal interpolation, support and identity instead of defining
+another complex-index law. The SI wavelength properties and their original
+receipts remain in the complete resolved bundle; the wrapper rebuilds the
+projection's wavelength/key bindings on refresh, so temperature-dependent source
+coordinates cannot leave stale wavelengths behind. Particle, EM and surface
+consumers can therefore share the exact same projection. The separate dielectric
+schema preserves original alpha interpolation; it does not interpolate a
+converted k table and thereby change the source absorption law.
+
+Every wavelength is positive, finite and strictly increasing. The first and
+last coordinates define the closed source band. Index conventions are absolute
+relative to vacuum. The dielectric retains the native `[1,3]` real-index,
+weak-absorption model; its nonnegative `alpha` uses the exact static
+power-neper-per-metre quantity in `I(d) = I(0) exp(-alpha d)`. Amplitude-neper,
+decibel, dimension-only attenuation and external slab losses cannot substitute.
+Conductor `k` uses the explicit static `OpticalExtinctionCoefficient` quantity,
+with nonnegative dimensionless values distinct from attenuation per metre; the
+opaque rendering consumer additionally admits its own strictly positive `k` domain.
+These snapshots add no extrapolated tails, complex dielectric interface,
+birefringence, thermal-emissivity law or measurement authority.
+
+`try_from_material` can adopt a larger original snapshot while retaining its
+other properties and receipts. Optical quantities must remain canonical scalars
+at fixed external conditions; an additional frequency, field or deformation
+coordinate cannot be silently frozen into a wavelength knot. `at_query_point`
+pins every original claim and coordinate meaning, then readmits all wavelengths
+and coefficients together. A missing source, invalid grid or passivity refusal
+publishes no partial candidate. Schema-specific identities prevent different
+families adopted from the same larger snapshot from substituting on refresh.
+SI coordinates convert once to the shared complex-index owner's vacuum nm;
+dielectric coordinates convert once at rendering ingress. The renderer separately
+admits the caller's retained interpolation-gap limit. That limit is not an interpolation
+error certificate, and endpoint refresh does not certify the intervening path.
+
+Focused regression sources exercise a nonuniform 8--14 micrometre grid,
+temperature-dependent coefficients and narrow absorption, source receipts,
+competing-source refresh, grid/family identities, missing quantities,
+intensity/amplitude conventions, rebuilt source-wavelength bindings, domain
+refusals and transactional continuation.
+
 ## Source-backed visible dielectric dispersion
 
 `state_point::VisibleSellmeierStatePoint` retains three nonnegative,

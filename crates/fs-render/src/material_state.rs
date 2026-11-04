@@ -2,10 +2,10 @@
 //!
 //! Bulk optics and mechanics must come from one immutable card at one query
 //! point. Surface finish is an independent input, not inferred from chemistry.
-//! Conversion retains visible-band conductor optics, Cauchy/Sellmeier or
-//! sampled dielectric dispersion, and Beer-Lambert absorption. The gray/diffuse
-//! thermal binding reuses a conduction emissivity sample at the same complete
-//! accepted material state.
+//! Conversion retains visible or explicitly source-banded conductor optics,
+//! Cauchy/Sellmeier or sampled dielectric dispersion, and Beer-Lambert absorption.
+//! The gray/diffuse thermal binding reuses a conduction emissivity sample at the
+//! same complete accepted material state.
 //! Neither binding authenticates measurements or supplies experimental validation.
 
 /// Molecular optics on the original shared gas density and composition.
@@ -13,6 +13,7 @@
 pub mod gas_scattering;
 
 mod bulk_optics;
+mod spectral_optics;
 /// Thermal lensing from original absolute dispersion and a frozen temperature field.
 pub mod thermo_optic;
 /// Source-bound dispersive particle populations in native volume transport.
