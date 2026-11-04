@@ -9,6 +9,7 @@
 use super::super::evolve::totals;
 use super::super::{Mesh1d, MixtureEuler1d, MixtureGas, Totals, allocated, sum};
 use super::evolve::{forward, spatial};
+use super::reservoir::ReservoirEnds;
 use super::{
     DissipationControl, DissipationError, DissipationOperator, DissipationReport, MAX_COMPONENTS,
     TransportLaw, poll, positive,
@@ -105,7 +106,15 @@ impl<L: TransportLaw> DissipationOperator<L> {
         evaluations: &mut usize,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<StabilizedDissipationReport, DissipationError> {
-        advance(self, flow, duration, controls, evaluations, cancelled)
+        advance(
+            self,
+            flow,
+            duration,
+            controls,
+            [None; 2],
+            evaluations,
+            cancelled,
+        )
     }
 }
 
@@ -195,11 +204,12 @@ fn accumulate(total: &mut f64, correction: &mut f64, value: f64) {
     *total = next;
 }
 
-fn advance<L: TransportLaw>(
+pub(super) fn advance<L: TransportLaw>(
     owner: &mut DissipationOperator<L>,
     flow: &mut MixtureEuler1d,
     duration: Time,
     controls: StabilizedDissipationControl,
+    reservoirs: ReservoirEnds<'_>,
     evaluations: &mut usize,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<StabilizedDissipationReport, DissipationError> {
@@ -283,6 +293,7 @@ fn advance<L: TransportLaw>(
             gas,
             mesh,
             *boundaries,
+            reservoirs,
             widths,
             *mass_ratio,
             law,
@@ -363,6 +374,7 @@ fn advance<L: TransportLaw>(
                         gas,
                         mesh,
                         *boundaries,
+                        reservoirs,
                         widths,
                         *mass_ratio,
                         law,

@@ -372,6 +372,7 @@ fn spatial<L: TransportLaw>(
             gas,
             &shape.mesh,
             shape.molecular_boundaries,
+            [None; 2],
             &shape.widths,
             *mass_ratio,
             law,

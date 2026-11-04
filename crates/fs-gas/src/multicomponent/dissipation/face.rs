@@ -541,6 +541,49 @@ pub(super) fn interior<const PLANAR: bool, L: TransportLaw>(
     }
 }
 
+/// Axial reservoir reduction of the same planar/spatial source-effort kernel.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn reservoir<L: TransportLaw>(
+    gas: &MixtureGas,
+    law: &mut L,
+    diffusion: &MaxwellStefanV1,
+    workspace: &mut MaxwellStefanWorkspaceV1,
+    left: Trace<'_>,
+    right: Trace<'_>,
+    distance: f64,
+    boundary_on_left: bool,
+    mass_ratio: f64,
+    binary: &mut [f64],
+    out: &mut [f64],
+    controls: MaxwellStefanSolveV1,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<TransportFaceReport, DissipationError> {
+    let left = left.with_transverse([]);
+    let right = right.with_transverse([]);
+    let effort = if boundary_on_left {
+        left.effort()
+    } else {
+        right.effort()
+    };
+    interior_components(
+        gas,
+        law,
+        diffusion,
+        workspace,
+        left,
+        right,
+        distance,
+        distance,
+        [],
+        Some(effort),
+        mass_ratio,
+        binary,
+        out,
+        controls,
+        cancelled,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn interior_components<const TRANSVERSE: usize, L: TransportLaw>(
     gas: &MixtureGas,

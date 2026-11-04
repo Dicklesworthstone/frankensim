@@ -11,6 +11,7 @@
 pub(super) mod evolve;
 mod face;
 mod law;
+mod reservoir;
 mod stabilized;
 
 pub use face::{PlanarTransport, SpatialTransport, TransportFaceReport, WallThermalCondition};
@@ -366,7 +367,7 @@ impl<L: TransportLaw> DissipationOperator<L> {
         );
     }
 
-/// Advance the entire requested duration without advancing the flow clock.
+    /// Advance the entire requested duration without advancing the flow clock.
     ///
     /// SSP RK2 uses actual-state molecular coefficients and a parabolic scale
     /// estimate at both stages. Failed stages halve the step instead of clipping
@@ -379,7 +380,7 @@ impl<L: TransportLaw> DissipationOperator<L> {
         controls: DissipationControl,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<DissipationReport, DissipationError> {
-        evolve::advance(self, flow, duration, controls, &mut cancelled)
+        evolve::advance(self, flow, duration, controls, [None; 2], &mut cancelled)
     }
 }
 

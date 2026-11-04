@@ -2,6 +2,7 @@ use super::super::evolve::totals;
 use super::super::{
     Boundaries, Boundary, MAX_SPECIES, Mesh1d, MixtureEuler1d, MixtureGas, Primitive, Totals, sum,
 };
+use super::reservoir::{ReservoirEnds, ReservoirTrace};
 use super::{
     DissipationControl, DissipationError, DissipationOperator, DissipationReport, MAX_COMPONENTS,
     TransportLaw, poll, positive,
@@ -26,9 +27,10 @@ pub(super) fn advance<L: TransportLaw>(
     flow: &mut MixtureEuler1d,
     duration: Time,
     controls: DissipationControl,
+    reservoirs: ReservoirEnds<'_>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<DissipationReport, DissipationError> {
-    advance_inner(owner, flow, duration, controls, None, cancelled)
+    advance_inner(owner, flow, duration, controls, reservoirs, None, cancelled)
 }
 
 pub(super) fn advance_moving<L: TransportLaw>(
@@ -55,16 +57,19 @@ pub(super) fn advance_moving<L: TransportLaw>(
         flow,
         duration,
         controls,
+        [None; 2],
         Some(wall_velocity),
         cancelled,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn advance_inner<L: TransportLaw>(
     owner: &mut DissipationOperator<L>,
     flow: &mut MixtureEuler1d,
     duration: Time,
     controls: DissipationControl,
+    reservoirs: ReservoirEnds<'_>,
     wall_velocity: Option<[f64; 2]>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<DissipationReport, DissipationError> {
@@ -159,6 +164,7 @@ fn advance_inner<L: TransportLaw>(
                 gas,
                 mesh,
                 *boundaries,
+                reservoirs,
                 widths,
                 *mass_ratio,
                 law,
@@ -201,6 +207,7 @@ fn advance_inner<L: TransportLaw>(
                     gas,
                     mesh,
                     *boundaries,
+                    reservoirs,
                     widths,
                     *mass_ratio,
                     law,
@@ -372,6 +379,7 @@ pub(in crate::multicomponent) fn spatial<L: TransportLaw>(
     gas: &MixtureGas,
     mesh: &Mesh1d,
     boundaries: Boundaries,
+    reservoirs: ReservoirEnds<'_>,
     widths: &[f64],
     mass_ratio: f64,
     law: &mut L,
@@ -390,6 +398,7 @@ pub(in crate::multicomponent) fn spatial<L: TransportLaw>(
         gas,
         mesh,
         boundaries,
+        reservoirs,
         widths,
         mass_ratio,
         law,
@@ -412,6 +421,7 @@ fn spatial_with_wall_motion<L: TransportLaw>(
     gas: &MixtureGas,
     mesh: &Mesh1d,
     boundaries: Boundaries,
+    reservoirs: ReservoirEnds<'_>,
     widths: &[f64],
     mass_ratio: f64,
     law: &mut L,
@@ -503,7 +513,26 @@ fn spatial_with_wall_motion<L: TransportLaw>(
                     "molecular reservoir requires species-bearing state and energy references",
                 ));
             }
-            if left == Boundary::Reflecting {
+            if let Some(reservoir) = reservoirs[0] {
+                face_rates[0] = reservoir_face(
+                    gas,
+                    law,
+                    diffusion,
+                    diffusion_workspace,
+                    reservoir,
+                    &states[..m],
+                    primitive[0],
+                    cv[0],
+                    0.5 * widths[0],
+                    true,
+                    mass_ratio,
+                    binary,
+                    &mut faces[..m],
+                    controls,
+                    &mut stage,
+                    cancelled,
+                )?;
+            } else if left == Boundary::Reflecting {
                 face_rates[0] = wall_face(
                     gas,
                     law,
@@ -517,7 +546,26 @@ fn spatial_with_wall_motion<L: TransportLaw>(
                     cancelled,
                 )?;
             }
-            if right == Boundary::Reflecting {
+            if let Some(reservoir) = reservoirs[1] {
+                face_rates[count] = reservoir_face(
+                    gas,
+                    law,
+                    diffusion,
+                    diffusion_workspace,
+                    reservoir,
+                    &states[(count - 1) * m..count * m],
+                    primitive[count - 1],
+                    cv[count - 1],
+                    0.5 * widths[count - 1],
+                    false,
+                    mass_ratio,
+                    binary,
+                    &mut faces[count * m..(count + 1) * m],
+                    controls,
+                    &mut stage,
+                    cancelled,
+                )?;
+            } else if right == Boundary::Reflecting {
                 face_rates[count] = wall_face(
                     gas,
                     law,
@@ -544,6 +592,72 @@ fn spatial_with_wall_motion<L: TransportLaw>(
     stage.left[..m].copy_from_slice(&faces[..m]);
     stage.right[..m].copy_from_slice(&faces[count * m..(count + 1) * m]);
     Ok(stage)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reservoir_face<L: TransportLaw>(
+    gas: &MixtureGas,
+    law: &mut L,
+    diffusion: &MaxwellStefanV1,
+    workspace: &mut MaxwellStefanWorkspaceV1,
+    reservoir: ReservoirTrace<'_>,
+    state: &[f64],
+    primitive: Primitive,
+    cv_density: f64,
+    distance: f64,
+    boundary_on_left: bool,
+    mass_ratio: f64,
+    binary: &mut [f64],
+    out: &mut [f64],
+    controls: MaxwellStefanSolveV1,
+    stage: &mut Stage,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<f64, DissipationError> {
+    let bath = super::face::Trace {
+        densities: reservoir.cell.partial_densities,
+        primitive: reservoir.primitive,
+        transverse_velocity: 0.0,
+        cv_density: reservoir.heat_capacity_v,
+    };
+    let cell = super::face::Trace {
+        densities: &state[..gas.species_count()],
+        primitive,
+        transverse_velocity: 0.0,
+        cv_density,
+    };
+    let (left, right) = if boundary_on_left {
+        (bath, cell)
+    } else {
+        (cell, bath)
+    };
+    let evaluated = super::face::reservoir(
+        gas,
+        law,
+        diffusion,
+        workspace,
+        left,
+        right,
+        distance,
+        boundary_on_left,
+        mass_ratio,
+        binary,
+        out,
+        controls,
+        cancelled,
+    )?;
+    stage.gradient_residual = stage
+        .gradient_residual
+        .max(evaluated.maximum_gradient_residual_per_m);
+    stage.mass_frame_residual = stage
+        .mass_frame_residual
+        .max(evaluated.mass_frame_residual_kg_m2_s.abs());
+    let rate = evaluated.diffusivity_m2_s / distance;
+    if !rate.is_finite() || rate < 0.0 {
+        return Err(DissipationError::Invalid(
+            "molecular reservoir scale overflow",
+        ));
+    }
+    Ok(rate)
 }
 
 #[allow(clippy::too_many_arguments)]

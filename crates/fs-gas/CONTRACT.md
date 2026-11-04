@@ -1638,6 +1638,50 @@ fully discrete entropy/invariant-domain proof. Explicit source-owned Soret/Dufou
 coupling is described below; nonideal phases, Knudsen transport and variable-area
 viscous stresses remain separate closures.
 
+### Prescribed composition and temperature baths on the axial field
+
+`DissipationOperator::advance_with_reservoirs_for` and
+`advance_stabilized_with_reservoirs_for` accept optional stationary
+species-bearing left/right reservoir cells for an entire molecular interval.
+They extend the original SSP RK2 and RKL2 owners through the same spatial face
+evaluation. `Some` overrides that end's molecular condition; `None` preserves
+it. Two absent reservoirs execute the original entry point exactly, including
+its cancellation sequence. The raw borrowed `Cell` representation follows
+`MixtureEuler1d::step_with_reservoirs`: callers must match the owner's canonical
+species order and per-species energy gauges because it carries no source
+identity token. The original caloric source admits the complete bath state and
+heat capacity before any trial. Periodic geometry, nonstationary baths and
+invalid source states refuse without field or clock publication.
+
+Boundary gradients use each actual end cell's center-to-boundary half-width,
+including nonuniform spacing. The same constitutive kernel as planar/spatial
+reservoir faces evaluates Maxwell--Stefan, Fourier, Soret/Dufour and viscous
+transport from the fixed bath and the current stage's interior state. Species
+energy uses the bath's original referenced enthalpies, while traction work
+uses its zero velocity. No cell-center midpoint work or separate enthalpy
+source is added. Barycentric diffusion preserves zero net mass transfer while
+individual species, momentum and heat may cross an end. The existing signed
+left/right and complete conservative balances integrate those fluxes with the
+same SSP weights or RKL2 recurrence as the field.
+
+Bath traces and caloric capacity use bounded stack storage; no per-face or
+per-stage numerical workspace is added. Reservoirs remain fixed and undepleted
+and are not retained after the call. Complete-duration atomic publication,
+bounded work/cancellation and unchanged composing flow clock are preserved.
+These methods advance molecular transport only: a composing integrator must
+apply its matching advective pressure reservoirs separately. Reactive/network
+reservoir composition and moving or finite-capacity molecular baths require
+their respective coupling owners.
+
+Five focused regressions exercise both time integrators: independent
+Dirichlet binary eigenmode decay toward the linear steady profile and signed
+species balances; steady Fourier transport across a nonuniform mesh with
+physical half-cell gradients; unequal-species bath enthalpy and zero stationary
+traction work under a 1e18 formation-reference shift; late cancellation,
+work/source/geometry refusal and reuse; and exact absent-bath parity. They
+establish the specified discrete field behavior, not an experimental transport
+validation or a global entropy/invariant-domain theorem.
+
 ### Stabilized molecular diffusion intervals
 
 `DissipationOperator::advance_stabilized_for` optionally advances the same
