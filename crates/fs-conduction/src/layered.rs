@@ -35,8 +35,10 @@ pub use radial::{
 };
 mod nonlinear_generation;
 pub use nonlinear_generation::{
-    NonlinearGeneratedLayerTemperatures, NonlinearGeneratedLayeredWallSolution,
-    NonlinearGenerationOptions,
+    NonlinearGeneratedLayerTemperatureJet, NonlinearGeneratedLayerTemperatureProfile,
+    NonlinearGeneratedLayerTemperatureSample, NonlinearGeneratedLayerTemperatures,
+    NonlinearGeneratedLayeredWallSolution, NonlinearGenerationOptions,
+    NonlinearTemperatureProfileError,
 };
 
 /// Maximum layers in one bounded planar solve.

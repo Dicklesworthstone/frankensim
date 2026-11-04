@@ -2029,6 +2029,25 @@ values, reciprocal rough transmission, quarter-wave matching in both
 directions, native analytic GRIN paths/group distance/Beer attenuation, source
 bounds and normal/evanescent extreme-contrast arithmetic.
 
+## Refraction from nonlinear conduction
+
+`material_state::thermo_optic::nonlinear_conduction::PlanarNonlinearConductionTemperatureField`
+embeds one original `NonlinearGeneratedLayeredWallSolution` layer using an
+explicit origin, unit axis and execution context. It consumes the conduction
+owner's temperature and Fourier derivatives, including the original `dk/dT`
+curvature term, and rotates the gradient/Hessian into world coordinates. The
+existing thermo-optic, GRIN and bundle owners then retain phase bending,
+chromatic focusing, available group distance and the declared Beer law.
+
+First-order optical queries remain usable at continuous conductivity knots.
+Second-order queries require the physical curvature capability of that source;
+they refuse a nonzero-flux interior slope ambiguity, admit zero-flux extrema,
+and use inward derivatives at layer faces. Every query retains the original
+layer/source bounds and cancellation. There is no extra thermal solve, spatial
+fit, contact smoothing or inferred transient evolution. Controls start with an
+actual nonlinear `k(T)=T/300` solve and check native infrared focusing at three
+wavelengths against analytic temperature and ray-variation references.
+
 ## Invariants
 
 - FURNACE: `furnace_radiance` returns exactly `albedo·incident` (energy

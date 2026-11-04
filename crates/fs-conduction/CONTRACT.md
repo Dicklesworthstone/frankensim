@@ -1,5 +1,23 @@
 # CONTRACT: fs-conduction
 
+## Nonlinear generated-layer temperature derivatives
+
+`NonlinearGeneratedLayeredWallSolution::temperature_profile` borrows one
+original solved planar layer. Its gradient and jet queries retain the original
+Kirchhoff segment inversion, admitted conductivity source, stored face values
+and cancellation checks. Successful queries allocate nothing and do not solve
+another thermal problem; work remains bounded by the retained source knots.
+
+For the original signed volumetric source, `q'=s`, `T'=-q/k(T)` and
+`T''=-(s+k'(T)*(T')²)/k(T)`. The conductivity derivative contributes curvature
+even without internal generation. A continuous conductivity knot retains
+first-order temperature/gradient capability. At a genuine interior slope jump,
+nonzero flux refuses unique second-order curvature; exact zero flux removes
+the ambiguous term. Physical layer faces use the source derivative approached
+from within that layer, including reversed heat flow. Profiles preserve source
+and physical-layer support and never smooth contacts or substitute a fit to
+rounded face temperatures. The original solver and its tolerances are unchanged.
+
 ## Original generated-layer profiles for thermal lensing
 
 `GeneratedLayeredWallSolution::temperature_profile(layer_index)` borrows the

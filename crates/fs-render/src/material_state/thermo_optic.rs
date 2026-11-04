@@ -31,6 +31,8 @@ use crate::gradient_index::{
 
 /// Original solved planar conduction profiles as thermal-lensing snapshots.
 pub mod conduction;
+/// Original temperature-dependent conductivity profiles, without source-knot smoothing.
+pub mod nonlinear_conduction;
 
 /// Temperature and the analytic gradient of that same immutable reconstruction.
 #[derive(Clone, Copy, Debug, PartialEq)]

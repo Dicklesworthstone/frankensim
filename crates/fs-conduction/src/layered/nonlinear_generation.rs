@@ -14,6 +14,12 @@ use super::{LayeredWall, NonlinearWallOptions, checkpoint, finite, invalid, posi
 use crate::ConductionError;
 use fs_exec::Cx;
 
+mod profile;
+pub use profile::{
+    NonlinearGeneratedLayerTemperatureJet, NonlinearGeneratedLayerTemperatureProfile,
+    NonlinearGeneratedLayerTemperatureSample, NonlinearTemperatureProfileError,
+};
+
 /// Explicit material-temperature admission and bounded nonlinear work.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NonlinearGenerationOptions {

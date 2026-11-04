@@ -6,6 +6,8 @@ mod radial;
 #[path = "layered_nonlinear/solid_radial.rs"]
 mod solid_radial;
 mod support;
+#[path = "layered_nonlinear/temperature_profile.rs"]
+mod temperature_profile;
 
 use fs_conduction::layered::{LayeredWall, NonlinearWallOptions, PlanarThermalLayer};
 use fs_conduction::{CONDUCTIVITY_DIMS, ConductionError, ConductivityTable, TEMPERATURE_DIMS};
