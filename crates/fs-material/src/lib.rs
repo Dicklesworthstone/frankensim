@@ -114,6 +114,8 @@ pub mod tensor;
 pub mod thermal;
 /// Source-bounded absolute phase, group and thermal derivatives for dielectrics.
 pub mod thermo_optic;
+/// Original IAPWS ordinary-water phase/group indices and state derivatives.
+pub mod water_refraction;
 /// Source-bound reciprocal Seebeck and Peltier cross-domain transport.
 pub mod thermoelectric;
 /// Shared species thermodynamics, acoustic medium and source-backed gas transport.
