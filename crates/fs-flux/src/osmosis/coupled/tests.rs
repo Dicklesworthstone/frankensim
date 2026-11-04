@@ -222,6 +222,49 @@ fn near(actual: f64, expected: f64, tolerance: f64) {
 }
 
 #[test]
+fn optional_binary_implicit_molecular_stages_share_water_rollback_and_potential() {
+    use crate::osmosis::diffusion::ImplicitBinaryDiffusionControls;
+    let mut system = network(1.0, 100000.0, true, false)
+        .with_implicit_binary_diffusion(
+            ImplicitBinaryDiffusionControls {
+                maximum_evaluations: 1,
+                ..ImplicitBinaryDiffusionControls::default()
+            },
+            1 << 22,
+        )
+        .unwrap();
+    let old = bits(&system);
+    // Original implicit water has already changed trial volumes when the
+    // first molecular root exhausts its budget. Nothing can publish.
+    assert!(matches!(
+        system.advance(1.0, temporal(1e-3), || false),
+        Err(OsmoticNetworkError::WorkBudget)
+    ));
+    assert_eq!(bits(&system), old);
+    system = system
+        .with_implicit_binary_diffusion(ImplicitBinaryDiffusionControls::default(), 1 << 22)
+        .unwrap();
+    let report = system.advance(1.0, temporal(1e-3), || false).unwrap();
+    assert_ne!(system.cells[0].solution.solvent_volume_m3(), VL);
+    assert!(system.cells[0].solution.solute_moles()[0] < 100.0 * VL);
+    assert!(report.water_balance_residual_m3.abs() <= 1e-18);
+    assert!(report.solute_balance_residual_mol[0].abs() <= 1e-16);
+    assert!(
+        report
+            .coupled_potential_change
+            .unwrap()
+            .total_potential_change_j
+            < 0.0
+    );
+    assert_eq!(report.diffusion_free_energy_change_j, None);
+    let mut reverse = network(1.0, 100000.0, true, true)
+        .with_implicit_binary_diffusion(ImplicitBinaryDiffusionControls::default(), 1 << 22)
+        .unwrap();
+    reverse.advance(1.0, temporal(1e-3), || false).unwrap();
+    assert_eq!(bits(&reverse), bits(&system));
+}
+
+#[test]
 fn g1_coupled_nonideal_water_and_material_mobility_refine_to_independent_ode() {
     // State is actual [left solvent volume, left solute amount]. Both right
     // inventories follow independent closed-system conservation.

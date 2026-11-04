@@ -141,6 +141,7 @@ pub(super) fn sweep(
     cells: &mut [OsmoticCompartment],
     membranes: &[OsmoticMembrane],
     links: &mut [SolutionDiffusionLink],
+    implicit: Option<&mut diffusion::ImplicitBinaryDiffusion>,
     physical: CoupledSolutionControls,
     dt: f64,
     numerical: OsmoticStepControls,
@@ -185,7 +186,15 @@ pub(super) fn sweep(
     // Dilution/concentration from water motion changes the actual coefficient
     // coordinates even when a solute amount was retained exactly.
     diffusion::qualify_sources(cells, links, cancelled)?;
-    diffusion::sweep(cells, links, dt, physical.diffusion, evaluations, cancelled)
+    diffusion::sweep(
+        cells,
+        links,
+        implicit,
+        dt,
+        physical.diffusion,
+        evaluations,
+        cancelled,
+    )
 }
 
 fn cell_change(

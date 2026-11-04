@@ -1,17 +1,21 @@
 //! Fixed-volume nonideal solution diffusion on the existing adaptive timeline.
 //!
 //! Every connection consumes the original source-owned solvent-frame MS flux.
-//! Conservative explicit pair exchanges are swept in canonical endpoint order;
+//! Conservative pair exchanges are swept in canonical endpoint order;
 //! the enclosing full/two-half comparison controls their first-order temporal
 //! error. This mode admits no water/membrane connections, so a closed mixing
 //! free-energy decrease does not omit mechanical pressure/volume work.
+
+mod implicit;
+pub(crate) use implicit::ImplicitBinaryDiffusion;
+pub use implicit::ImplicitBinaryDiffusionControls;
 
 use super::{
     MAX_COMPARTMENTS, MAX_MEMBRANES, MAX_OSMOTIC_SPECIES, OsmoticCompartment, OsmoticNetwork,
     OsmoticNetworkError, compensated_add, nonnegative, poll, positive,
 };
 use fs_material::osmosis::{
-    OsmosisError,
+    AqueousSolution, OsmosisError,
     diffusion::{
         SolutionDiffusionError, SolutionDiffusionSolve, SolutionDiffusionWorkspace,
         SolutionMaxwellStefan, source::MaterialSolutionMaxwellStefan,
@@ -165,6 +169,47 @@ impl SolutionDiffusionLink {
                 .map_err(diffusion_source)?;
         }
         Ok(())
+    }
+
+    /// The original constitutive path for explicit and implicit trial states.
+    /// Every call, including root search and rejected time trials, is charged.
+    fn flux_into(
+        &mut self,
+        left: &AqueousSolution,
+        right: &AqueousSolution,
+        controls: SolutionDiffusionSolve,
+        output: &mut [f64],
+        evaluations: &mut usize,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), OsmoticNetworkError> {
+        *evaluations = evaluations
+            .checked_add(1)
+            .ok_or(OsmoticNetworkError::WorkBudget)?;
+        match &self.material {
+            DiffusionMaterial::Constant(material) => material
+                .flux_into(
+                    left,
+                    right,
+                    self.distance_m,
+                    controls,
+                    &mut self.workspace,
+                    output,
+                    cancelled,
+                )
+                .map(|_| ()),
+            DiffusionMaterial::Source(material) => material
+                .flux_into(
+                    left,
+                    right,
+                    self.distance_m,
+                    controls,
+                    &mut self.workspace,
+                    output,
+                    cancelled,
+                )
+                .map(|_| ()),
+        }
+        .map_err(diffusion_source)
     }
 }
 
@@ -341,6 +386,7 @@ fn finite(value: f64) -> Result<f64, OsmoticNetworkError> {
 pub(super) fn sweep(
     cells: &mut [OsmoticCompartment],
     links: &mut [SolutionDiffusionLink],
+    mut implicit: Option<&mut ImplicitBinaryDiffusion>,
     dt: f64,
     controls: SolutionDiffusionControls,
     evaluations: &mut usize,
@@ -355,45 +401,47 @@ pub(super) fn sweep(
         let right = &cells[link.right].solution;
         let n = left.solute_moles().len();
         let mut flux = [0.0; MAX_OSMOTIC_SPECIES];
-        *evaluations = evaluations
-            .checked_add(1)
-            .ok_or(OsmoticNetworkError::WorkBudget)?;
-        match &link.material {
-            DiffusionMaterial::Constant(material) => material
-                .flux_into(
-                    left,
-                    right,
-                    link.distance_m,
-                    controls.constitutive,
-                    &mut link.workspace,
-                    &mut flux[..n],
-                    &mut *cancelled,
-                )
-                .map(|_| ()),
-            DiffusionMaterial::Source(material) => material
-                .flux_into(
-                    left,
-                    right,
-                    link.distance_m,
-                    controls.constitutive,
-                    &mut link.workspace,
-                    &mut flux[..n],
-                    &mut *cancelled,
-                )
-                .map(|_| ()),
-        }
-        .map_err(diffusion_source)?;
-        let area_time = dt * link.area_m2;
-        if !positive(area_time) {
-            return Err(OsmoticNetworkError::StepUnderflow);
-        }
+        let mut area_time = 0.0;
+        let implicit_transfer = if let Some(implicit) = implicit.as_deref_mut() {
+            Some(implicit.transfer(
+                left,
+                right,
+                link,
+                dt,
+                controls.constitutive,
+                evaluations,
+                cancelled,
+            )?)
+        } else {
+            link.flux_into(
+                left,
+                right,
+                controls.constitutive,
+                &mut flux[..n],
+                evaluations,
+                cancelled,
+            )?;
+            area_time = dt * link.area_m2;
+            if !positive(area_time) {
+                return Err(OsmoticNetworkError::StepUnderflow);
+            }
+            None
+        };
         let mut next_left = [0.0; MAX_OSMOTIC_SPECIES];
         let mut next_right = [0.0; MAX_OSMOTIC_SPECIES];
         for i in 0..n {
-            let transfer = finite(area_time * flux[i])?;
-            if flux[i] != 0.0 && transfer == 0.0 {
-                return Err(OsmoticNetworkError::StepUnderflow);
-            }
+            // Preserve the explicit owner's original per-species arithmetic
+            // and refusal order, including recoverable withdrawal checks.
+            let transfer = match implicit_transfer {
+                Some(transfer) => transfer,
+                None => {
+                    let transfer = finite(area_time * flux[i])?;
+                    if flux[i] != 0.0 && transfer == 0.0 {
+                        return Err(OsmoticNetworkError::StepUnderflow);
+                    }
+                    transfer
+                }
+            };
             let (a, b) = (left.solute_moles()[i], right.solute_moles()[i]);
             let donor = if transfer >= 0.0 { a } else { b };
             // An absent species with no driving force must stay exactly absent.

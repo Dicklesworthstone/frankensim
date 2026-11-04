@@ -3056,6 +3056,47 @@ independent concentration-dependent mobility ODE, distinguish frozen mobility,
 and cover later-edge support loss, late failure atomicity, unsupported initial
 endpoints and retained source workspace admission.
 
+### Optional implicit binary molecular exchange
+
+`with_implicit_binary_diffusion(ImplicitBinaryDiffusionControls, byte_budget)`
+selects backward Euler for networks with exactly one original dissolved solute.
+The existing constructors retain explicit molecular stages by default. The
+option applies to both fixed-solvent and coupled water/species networks and
+prepares two reusable original `AqueousSolution` trial buffers within the total
+workspace budget. It introduces no alternative thermodynamic or friction law.
+
+Each canonical pair solves the conserved amount equation
+`q = dt * area * N(n_left - q, n_right + q)` between zero transfer and the
+concentration-equalizing transfer at the actual stage volumes. A bounded linear
+estimate starts a safeguarded bisection; every trial samples the original
+constant or pinned material-source owner at its actual finite inventories.
+Nonlinear concentration-dependent diffusivity is refreshed at each candidate.
+Every accepted root satisfies BOTH original rounded endpoint amount equations
+against an explicit absolute allowance plus a relative allowance scaled by
+the concentration-equalizing transfer, not by a large common inventory.
+Overflow-safe multiplication and finite-residual admission prevent a huge
+duration from producing a false equilibrium or an `Inf <= Inf` success.
+
+An explicit per-pair root-iteration limit and a separate complete-window
+molecular-evaluation limit bound initial samples, nonlinear trials, rejected
+steps, and full/two-half sweeps together. Source queries are additional work
+under the original source contract. Root exhaustion/stagnation returns
+`ImplicitDiffusionConvergence`; work exhaustion, source failure, cancellation,
+or unrepresentable changes publish no state or clock. Exact empty equilibrium
+remains exact, and nonzero changes erased by rounding refuse.
+
+Implicit stability does not waive the original `maximum_species_fraction`,
+nonnegative-inventory, source-support, amount-balance or finite free-energy
+gates. Callers can deliberately relax the withdrawal allowance independently
+of their temporal and nonlinear tolerances. The original full/two-half timeline
+still controls first-order temporal and pair-splitting error. This binary
+capability does not claim arbitrary multicomponent implicit transport, a global
+error bound, or root uniqueness for arbitrary material diffusivity curves.
+Focused tests cover an independent stiff unequal-volume BE limit, a complete
+stiff window within a small step budget, nonlinear ODE refinement, original
+source refresh, coupled water rollback/potential, exact zeros, late cancellation,
+whole-window work, physical withdrawal and extreme-exposure refusal.
+
 ## Coupled nonideal water and molecular solution transport
 
 `OsmoticNetwork::with_coupled_solution_transport` composes the existing fully
@@ -3079,6 +3120,9 @@ all source links are requalified after water and after the complete molecular
 sweep. Pinned-source and physical-domain failures stay hard refusals. Only typed
 water root/bracket failures and finite-step withdrawal/passivity failures may
 shrink the step.
+The optional binary backward-Euler choice above changes only the molecular
+stage on this same timeline; its source samples use the actual post-water
+volumes, and its nonlinear work/refusal limits retain whole-window rollback.
 
 The coupled potential is `Phi = F_mix + sum(Psi(V))`, with `dPsi/dV=p(V)` from
 the original linear chamber-pressure law. Thus `dPhi/dV=p-Pi`, exactly the force

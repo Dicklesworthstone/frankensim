@@ -84,6 +84,9 @@ pub enum OsmoticNetworkError {
     Unbracketed,
     /// Scalar solve exhausted its iteration bound.
     NonlinearConvergence,
+    /// The binary implicit molecular solve could not resolve BOTH original
+    /// inventory equations within the declared amount budget.
+    ImplicitDiffusionConvergence { residual_mol: f64, maximum_mol: f64 },
     /// Time integration exhausted its accepted-step or rejection budget.
     WorkBudget,
     /// Further halving cannot advance floating-point time.
@@ -388,6 +391,7 @@ pub struct OsmoticNetwork {
     membranes: Vec<OsmoticMembrane>,
     diffusion: Vec<diffusion::SolutionDiffusionLink>,
     diffusion_controls: Option<diffusion::SolutionDiffusionControls>,
+    implicit_diffusion: Option<diffusion::ImplicitBinaryDiffusion>,
     coupled_controls: Option<coupled::CoupledSolutionControls>,
     work: Vec<OsmoticCompartment>,
     coarse: Vec<OsmoticCompartment>,
@@ -496,6 +500,7 @@ impl OsmoticNetwork {
             membranes,
             diffusion: Vec::new(),
             diffusion_controls: None,
+            implicit_diffusion: None,
             coupled_controls: None,
             workspace_bytes: required,
             time_s: 0.0,
@@ -520,7 +525,8 @@ impl OsmoticNetwork {
 
     /// Advance exactly the requested interval with conservative, positive
     /// exchange and bounded adaptive substeps. Membrane stages are implicit;
-    /// molecular stages use explicit paired fluxes at their current volumes. Pass
+    /// molecular stages use paired fluxes at their current volumes, with an
+    /// optional deliberately selected binary backward-Euler solve. Pass
     /// `|| cx.checkpoint().is_err()` to use the shared execution scope.
     /// Cancellation is polled per scalar iteration, membrane and publication.
     pub fn advance(
@@ -536,6 +542,9 @@ impl OsmoticNetwork {
         }
         poll(&mut cancelled)?;
         copy_state(&self.cells, &mut self.work)?;
+        if let Some(implicit) = &mut self.implicit_diffusion {
+            implicit.begin_window();
+        }
         let (water_before, amounts_before) = totals(&self.cells, self.species.len());
         let mut report = OsmoticStepReport {
             interval_s: [self.time_s, end_time],
@@ -568,6 +577,7 @@ impl OsmoticNetwork {
                     &mut self.coarse,
                     &self.membranes,
                     &mut self.diffusion,
+                    self.implicit_diffusion.as_mut(),
                     self.diffusion_controls,
                     self.coupled_controls,
                     step,
@@ -579,6 +589,7 @@ impl OsmoticNetwork {
                     &mut self.fine,
                     &self.membranes,
                     &mut self.diffusion,
+                    self.implicit_diffusion.as_mut(),
                     self.diffusion_controls,
                     self.coupled_controls,
                     0.5 * step,
@@ -590,6 +601,7 @@ impl OsmoticNetwork {
                     &mut self.fine,
                     &self.membranes,
                     &mut self.diffusion,
+                    self.implicit_diffusion.as_mut(),
                     self.diffusion_controls,
                     self.coupled_controls,
                     0.5 * step,
@@ -811,6 +823,7 @@ fn sweep_all(
     cells: &mut [OsmoticCompartment],
     membranes: &[OsmoticMembrane],
     links: &mut [diffusion::SolutionDiffusionLink],
+    implicit: Option<&mut diffusion::ImplicitBinaryDiffusion>,
     physical: Option<diffusion::SolutionDiffusionControls>,
     coupled: Option<coupled::CoupledSolutionControls>,
     dt: f64,
@@ -823,6 +836,7 @@ fn sweep_all(
             cells,
             membranes,
             links,
+            implicit,
             coupled,
             dt,
             controls,
@@ -831,7 +845,9 @@ fn sweep_all(
         );
     }
     match physical {
-        Some(physical) => diffusion::sweep(cells, links, dt, physical, evaluations, cancelled),
+        Some(physical) => {
+            diffusion::sweep(cells, links, implicit, dt, physical, evaluations, cancelled)
+        }
         None => sweep(cells, membranes, dt, controls, evaluations, cancelled),
     }
 }

@@ -97,6 +97,67 @@ fn volume_cell(model: &Arc<VirialSolutionModel>, volume: f64, c: f64) -> Osmotic
 }
 
 #[test]
+fn implicit_binary_root_refreshes_original_source_at_its_actual_endpoint() {
+    let model = source(1.0, vec![0.0], vec![200.0]);
+    let mut system = OsmoticNetwork::with_solution_diffusion(
+        vec!["solute-0".into()],
+        vec![cell(&model, &[100.0]), cell(&model, &[20.0])],
+        vec![
+            SolutionDiffusionLink::from_material_sources(
+                0,
+                1,
+                0.01,
+                0.001,
+                material(&model, [1.0, 200.0]),
+            )
+            .unwrap(),
+        ],
+        physical(),
+        1 << 22,
+    )
+    .unwrap()
+    .with_implicit_binary_diffusion(ImplicitBinaryDiffusionControls::default(), 1 << 22)
+    .unwrap();
+    let old = bits(&system);
+    let mut solver = system.implicit_diffusion.take().unwrap();
+    let mut evaluations = 0;
+    let dt = 100.0;
+    let transfer = solver
+        .transfer(
+            &system.cells[0].solution,
+            &system.cells[1].solution,
+            &mut system.diffusion[0],
+            dt,
+            physical().constitutive,
+            &mut evaluations,
+            &mut || false,
+        )
+        .unwrap();
+    let next = [100.0 * VOLUME - transfer, 20.0 * VOLUME + transfer];
+    let (a, b) = (next[0] / VOLUME, next[1] / VOLUME);
+    let mean = (a - b) / (a / b).ln();
+    let coefficient = 1e-9 * (1.0 + mean / 100.0);
+    let expected = dt * 0.01 * coefficient * (a - b) * (1.0 + VBAR * mean) / 0.001;
+    assert!((transfer - expected).abs() <= 2.0 * (1e-20 + 1e-10 * 40.0 * VOLUME));
+    let initial_mean = 80.0 / 5.0_f64.ln();
+    assert!((coefficient - 1e-9 * (1.0 + initial_mean / 100.0)).abs() > 5e-11);
+    let original = system.diffusion[0].material_sources().unwrap();
+    let endpoint = original
+        .resolve_inventories([VOLUME, VOLUME], [&next[..1], &next[1..]], || false)
+        .unwrap();
+    assert!((endpoint.pairs()[0].face.properties()[0].value_si() - coefficient).abs() < 1e-23);
+    assert_eq!(
+        endpoint.pairs()[0].face.properties()[0]
+            .answer()
+            .receipt
+            .selected,
+        original.sources()[0].selected_claim()
+    );
+    assert!(evaluations > 2);
+    assert_eq!(bits(&system), old);
+}
+
+#[test]
 fn g1_evolving_source_mobility_tracks_independent_unequal_volume_relaxation() {
     let model = source(1.0, vec![0.0], vec![200.0]);
     let sourced = material(&model, [1.0, 200.0]);

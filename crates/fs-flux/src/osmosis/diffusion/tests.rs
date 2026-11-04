@@ -8,6 +8,7 @@ use fs_qty::MolarMass;
 use fs_thermochem::{SpeciesId, transport::maxwell_stefan::MaxwellStefanMolarSolveV1};
 use std::sync::Arc;
 
+mod implicit;
 mod source;
 
 const T: f64 = 298.15;
