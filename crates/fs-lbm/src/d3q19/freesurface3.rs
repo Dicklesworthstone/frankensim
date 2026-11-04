@@ -62,8 +62,9 @@ pub(crate) mod pressure;
 pub use pressure::GasPressureLink3;
 mod curvature;
 mod forcing;
-mod impulse;
+pub use forcing::BodyAccelerationField3;
 mod conversion_momentum;
+mod impulse;
 pub use conversion_momentum::ConversionMomentumReport3;
 mod geometry;
 mod motion;
@@ -378,9 +379,9 @@ pub struct FreeSurface3 {
     /// Accepted force frame of each wet population. Independent held fields
     /// omit a uniform reference frame; acceleration keeps a complete history.
     local_force: Option<BTreeMap<(u64, usize), [f64; 3]>>,
-    /// Explicit body acceleration. Its complete accepted F=rho*a history is
-    /// retained in local_force; None preserves historical held-force semantics.
-    body_acceleration: Option<[f64; 3]>,
+    /// Uniform or affine acceleration in fixed grid coordinates. Its complete
+    /// accepted F=rho*a(x) history remains in local_force; None preserves held forces.
+    body_acceleration: Option<BodyAccelerationField3>,
 }
 
 impl core::fmt::Debug for FreeSurface3 {
@@ -1352,6 +1353,7 @@ impl FreeSurface3 {
                 let perturbation = core::array::from_fn(|d| local_force[d] - base_force[d]);
                 let physical_velocity =
                     core::array::from_fn(|d| u_pre[d] + 0.5 * local_force[d] / rho_pre);
+                let endpoint_acceleration = self.acceleration_at_lane(key, lane)?;
                 let (pressure_force, correct_pressure_source) =
                     if self.redistribution == ConversionRedistribution3::LegacyGlobal {
                         if self.local_force.is_some() {
@@ -1413,7 +1415,7 @@ impl FreeSurface3 {
                                         },
                                     )?;
                                     let value = eq[q] + eq[OPP3[q]] - post[&key][lane][OPP3[q]];
-                                    if let Some(acceleration) = self.body_acceleration {
+                                    if let Some(acceleration) = endpoint_acceleration {
                                         body_pressure_source.get_or_insert([0.0; Q3])[q] =
                                             0.5 * (forcing::source(q, physical_velocity, acceleration)
                                                 + forcing::source(OPP3[q], physical_velocity, acceleration));
@@ -1456,7 +1458,7 @@ impl FreeSurface3 {
         check_cancel(gate)?;
         for (key, lane, f) in new_populations {
             let slot = self.grid.slot_of(key).expect("active");
-            if let Some(acceleration) = self.body_acceleration {
+            if let Some(acceleration) = self.acceleration_at_lane(key, lane)? {
                 if f.iter().any(|value| !value.is_finite() || *value <= 0.0) {
                     return Err(FreeSurfaceError3::Transport(
                         "body acceleration needs positive finite endpoint populations",
@@ -1605,7 +1607,7 @@ impl FreeSurface3 {
                     rho_avg = 1.0;
                 }
                 let mut initial = equilibrium3(rho_avg, u_avg);
-                let force = if let Some(acceleration) = self.body_acceleration {
+                let force = if let Some(acceleration) = self.acceleration_at_lane(nb_key, nb_lane)? {
                     // A birth is initialization, not an elapsed force update.
                     // Its own canonical density sets its half-source frame.
                     forcing::preserve_density(&mut initial, rho_avg)?;

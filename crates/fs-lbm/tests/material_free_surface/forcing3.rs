@@ -3,7 +3,9 @@ use super::*;
 use fs_exec::CancelGate;
 use fs_lbm::d3q19::freesurface3::FreeSurfaceError3;
 use fs_lbm::material::MaterialLbmError;
-use fs_lbm::material::free_surface::MaterialFreeSurfaceInitialCell3;
+use fs_lbm::material::free_surface::{
+    MaterialAffineAcceleration3, MaterialFreeSurfaceInitialCell3,
+};
 
 fn close(actual: f64, expected: f64) {
     assert!(actual.is_finite() && expected.is_finite());
@@ -336,6 +338,159 @@ fn changing_si_acceleration_and_gas_pressure_publish_one_density_force_endpoint(
     assert_eq!(
         flow.lattice().body_acceleration(),
         before.lattice().body_acceleration()
+    );
+    assert_eq!(
+        flow.ledger_mass_kg().unwrap(),
+        before.ledger_mass_kg().unwrap()
+    );
+}
+
+fn acceleration_si(field: MaterialAffineAcceleration3, position_m: [f64; 3]) -> [f64; 3] {
+    core::array::from_fn(|axis| {
+        field.acceleration_m_s2[axis]
+            + (0..3)
+                .map(|coordinate| {
+                    field.gradient_per_s2[axis][coordinate]
+                        * (position_m[coordinate] - field.origin_m[coordinate])
+                })
+                .sum::<f64>()
+    })
+}
+
+#[test]
+fn affine_si_field_converts_gradients_and_integrates_density_weighted_endpoints() {
+    let gate = CancelGate::new_clock_free();
+    let old = MaterialAffineAcceleration3 {
+        origin_m: [0.003, -0.002, 0.001],
+        acceleration_m_s2: [0.1, -0.2, 0.05],
+        gradient_per_s2: [[10.0, 2.0, 0.0], [-3.0, -4.0, 1.0], [1.0, 0.0, 2.0]],
+    };
+    let next = MaterialAffineAcceleration3 {
+        origin_m: [-0.001, 0.004, 0.003],
+        acceleration_m_s2: [-0.2, 0.1, -0.05],
+        gradient_per_s2: [[-5.0, 3.0, 1.0], [2.0, 7.0, 0.0], [0.0, -2.0, 4.0]],
+    };
+    for reference_density in [700.0, 1400.0] {
+        let source = liquid(reference_density, reference_density * 0.0001, None);
+        for (dx, dt) in [(0.001, 0.001), (0.002, 0.0005)] {
+            let mut flow = plan_free_surface_from_material(&source, dx, dt, 0.1)
+                .unwrap()
+                .free_surface3(
+                    MaterialFreeSurfaceDomain3 {
+                        cells: [12; 3],
+                        gravity_m_s2: [0.0; 3],
+                        max_cells: 12usize.pow(3),
+                        ..domain()
+                    },
+                    |_, _, _| true,
+                )
+                .unwrap();
+            flow.rebind_affine_acceleration(old, &gate).unwrap();
+            let positions = [[5, 5, 5], [7, 6, 4]];
+            let before = positions.map(|p| flow.sample_at_si(p[0], p[1], p[2]).unwrap().unwrap());
+            flow.advance_affine_acceleration(next, &gate).unwrap();
+            for (xyz, incoming) in positions.into_iter().zip(before) {
+                let position_m = xyz.map(|i| (i as f64 + 0.5) * dx);
+                let a0 = acceleration_si(old, position_m);
+                let a1 = acceleration_si(next, position_m);
+                let sample = flow.sample_at_si(xyz[0], xyz[1], xyz[2]).unwrap().unwrap();
+                let force = flow
+                    .lattice()
+                    .force_density_at(xyz[0], xyz[1], xyz[2])
+                    .unwrap();
+                // Independently dimensionalized at physical cell centres:
+                // div(a_old)=8/s², and Guo's first step from rest integrates
+                // dt*(rho_old*a_old + rho_next*a_next)/2 in the undisturbed bulk.
+                close(
+                    sample.density_kg_m3,
+                    incoming.density_kg_m3 * (1.0 - 0.5 * 8.0 * dt * dt),
+                );
+                for axis in 0..3 {
+                    close(incoming.velocity_m_s[axis], 0.0);
+                    close(
+                        force[axis] * reference_density * dx / (dt * dt),
+                        sample.density_kg_m3 * a1[axis],
+                    );
+                    close(
+                        sample.density_kg_m3 * sample.velocity_m_s[axis],
+                        0.5 * dt
+                            * (incoming.density_kg_m3 * a0[axis] + sample.density_kg_m3 * a1[axis]),
+                    );
+                }
+            }
+            assert!(std::ptr::eq(flow.scaling().material(), &source));
+            assert!(flow.lattice().body_acceleration().is_none());
+            assert!(flow.lattice().body_acceleration_field().is_some());
+        }
+    }
+}
+
+#[test]
+fn affine_si_gas_pressure_keeps_spatial_force_and_rollback_consistent() {
+    let source = liquid(1000.0, 0.1, None);
+    let gate = CancelGate::new_clock_free();
+    let field = MaterialAffineAcceleration3 {
+        origin_m: [0.002, 0.003, 0.004],
+        acceleration_m_s2: [0.02, -0.01, -0.03],
+        gradient_per_s2: [[2.0, 0.0, 0.0], [0.0, -3.0, 0.0], [0.0, 0.0, 4.0]],
+    };
+    let mut flow = plan(&source)
+        .with_pressure_reference(100_000.0)
+        .unwrap()
+        .free_surface3(
+            MaterialFreeSurfaceDomain3 {
+                cells: [12; 3],
+                gravity_m_s2: [0.0; 3],
+                max_cells: 12usize.pow(3),
+                ..domain()
+            },
+            |_, _, z| z < 6,
+        )
+        .unwrap();
+    flow.rebind_affine_acceleration(field, &gate).unwrap();
+    let mass = flow.ledger_mass_kg().unwrap();
+    let next = MaterialAffineAcceleration3 {
+        acceleration_m_s2: [-0.03, 0.02, 0.01],
+        ..field
+    };
+    flow.advance_affine_acceleration_with_gas_link_pressure(next, &gate, 0.05, |_| 100_002.0)
+        .unwrap();
+    let dx = flow.scaling().cell_size_m();
+    let dt = flow.scaling().timestep_s();
+    let mut density_departure = 0.0_f64;
+    for z in 0..12 {
+        for y in 0..12 {
+            for x in 0..12 {
+                if let Some(sample) = flow.sample_at_si(x, y, z).unwrap() {
+                    let position = [x, y, z].map(|i| (i as f64 + 0.5) * dx);
+                    let expected = acceleration_si(next, position);
+                    let force = flow.lattice().force_density_at(x, y, z).unwrap();
+                    for axis in 0..3 {
+                        close(
+                            force[axis] * 1000.0 * dx / (dt * dt),
+                            sample.density_kg_m3 * expected[axis],
+                        );
+                    }
+                    density_departure =
+                        density_departure.max((sample.density_kg_m3 / 1000.0 - 1.0).abs());
+                }
+            }
+        }
+    }
+    assert!(density_departure > 1e-4);
+    near(flow.ledger_mass_kg().unwrap(), mass, 2e-12);
+    let before = flow.clone();
+    assert!(
+        flow.advance_affine_acceleration_with_gas_link_pressure(field, &gate, 0.05, |_| f64::NAN)
+            .is_err()
+    );
+    assert_eq!(
+        flow.lattice().grid().state_bits(),
+        before.lattice().grid().state_bits()
+    );
+    assert_eq!(
+        flow.lattice().body_acceleration_field(),
+        before.lattice().body_acceleration_field()
     );
     assert_eq!(
         flow.ledger_mass_kg().unwrap(),

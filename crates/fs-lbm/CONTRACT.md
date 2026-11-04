@@ -8577,6 +8577,28 @@ adds no vessel dynamics, thermal work or total-energy closure. Focused G0/G1/G3
 regressions cover acceleration ramps across density/unit choices, pressure
 source moments at changing endpoints, held-load parity and atomic retry.
 
+### Spatial actual-density acceleration on the original free surface
+
+`BodyAccelerationField3` shares uniform and affine `a(x) = a0 + G(x - x0)`
+loading on the native D3Q19 free surface. The affine owner stores constant-size
+coefficients, with no dense spatial buffer or per-cell material callback.
+Ordinary steps hold the field; endpoint advances retain old collision force
+and use each cell's next actual density times its next local acceleration in
+accepted velocity and gas-pressure reconstruction. Newly wet cells evaluate
+the field at their own centres. Native centres are `i + 1/2`; SI centres are
+`(i + 1/2) dx` in the original zero-origin Cartesian grid. SI conversion maps
+`a0` by `dt²/dx`, `G` by `dt²`, and `x0` by `1/dx` once per field binding.
+Piston relocation holds that world-coordinate field fixed and zero-time
+reframes transported populations at their destinations before the physical
+momentum audit. Uniform fields retain their existing population arithmetic.
+The shared owner excludes independent force and rigid-frame ownership;
+candidate refusal or cancellation retains the prior field and trajectory.
+This prescribed position-dependent load does not supply Coriolis coupling or
+thermodynamic density expansion. Eight regression definitions cover independent
+density/momentum endpoints, local pressure moments, new interfaces, relocation,
+uniform parity, ownership/rollback and SI scaling. Scoped formatting and
+whitespace checks passed; native compilation and execution remain outstanding.
+
 D3Q19 records direct donor/recipient mass routes, including reversed routes for
 conversion debt. The original extensive enthalpy transport consumes these same
 routes, avoiding temperature mixing through a shared zero-storage pool. Excess

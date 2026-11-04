@@ -20,10 +20,14 @@ pub use field::{
 /// One accepted exact one-cell geometry translation of a complete planar piston.
 ///
 /// This is a conservative geometry/remap receipt, not a pressure solve. The
-/// liquid's native populations and interface masses are translated unchanged;
-/// therefore linear momentum is retained and the reported boundary impulse/work
-/// are exactly zero. Angular momentum about the fixed grid origin changes only
-/// by the geometric translation crossed with retained linear momentum.
+/// interface masses and canonical densities are retained. Physical velocity
+/// and stress remain unchanged to population roundoff. Held uniform force also
+/// retains population bits; a fixed spatial acceleration field instead requires
+/// a zero-time Guo reframe at the new physical cell positions. Linear momentum
+/// is checked after that reframe, and boundary impulse/work remain zero.
+/// Angular momentum about the fixed grid origin changes only by the geometric
+/// translation crossed with retained linear momentum. No gravitational
+/// potential-energy or finite-speed piston work account is inferred.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PlanarPistonRemapReport3 {
     /// Domain side from which the piston occupies complete cell layers.
@@ -234,12 +238,15 @@ impl FreeSurface3 {
     /// geometry-epoch primitive for the plug-translation limit of MR69.
     ///
     /// Advancing occupies one additional whole-cell slab at wall; retreating
-    /// vacates one. Actual native populations, tracked interface mass, local
-    /// force frame and local surface coefficient travel with their liquid cell.
-    /// No equilibrium reset is used for newly uncovered cells. A destination
-    /// outside the domain or inside a permanent solid tile refuses atomically.
+    /// vacates one. Tracked interface mass, density, physical velocity/stress
+    /// and local surface coefficient travel with their liquid cell. A fixed
+    /// affine acceleration stays attached to grid coordinates, so its force
+    /// frame is rebound at the destination without a physical impulse. Other
+    /// held force frames retain their original population bits. No equilibrium
+    /// reset is used. A destination outside the domain or inside a permanent
+    /// solid tile refuses atomically.
     ///
-    /// The remap itself changes no population momentum and performs no physical
+    /// The remap itself preserves physical momentum and performs no physical
     /// pressure work. A finite-speed piston needs a separate dynamics/traction
     /// closure; reporting zero impulse/work here prevents geometric relocation
     /// from being mislabeled as physical force.
@@ -406,6 +413,12 @@ impl FreeSurface3 {
             if let (Some(field), Some(value)) = (&mut candidate.local_force, cell.local_force) {
                 field.insert((key, lane), value);
             }
+        }
+        if let Some(field @ BodyAccelerationField3::Affine { .. }) = candidate.body_acceleration {
+            // This remap relocates liquid in the fixed grid, not the field's
+            // coordinate system. Retain each carried physical velocity/stress
+            // while rebinding rho*a at the destination before momentum audit.
+            candidate.rebind_body_acceleration_field(field, gate)?;
         }
         candidate.fill_smooth.clear();
         candidate.assert_closure();
