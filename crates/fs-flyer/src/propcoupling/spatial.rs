@@ -75,13 +75,18 @@ impl DiskAxes {
         let mut factors = [0.0; 2];
         for k in 0..2 {
             let offset = core::array::from_fn(|j| point[j] - centers[k][j]);
-            let axial = dot(offset, self.directions[k]);
-            let radial: [f64; 3] =
-                core::array::from_fn(|j| offset[j] - axial * self.directions[k][j]);
-            // Evaluate the disk's dimensionless law without squaring raw
-            // metre-scale distances: hypot prevents intermediate overflow.
-            let axial_ratio = axial / radius_m;
-            let radial_ratio = radial[0].hypot(radial[1]).hypot(radial[2]) / radius_m;
+            // Scale the displacement before projection. Both the raw dot
+            // product and the raw perpendicular distance can overflow for
+            // very large geometry even when the normalized disk coordinates
+            // are finite and lie inside the wash window.
+            let relative = offset.map(|x| x / radius_m);
+            let axial_ratio = dot(relative, self.directions[k]);
+            let radial_ratio = core::array::from_fn::<_, 3, _>(|j| {
+                relative[j] - axial_ratio * self.directions[k][j]
+            });
+            let radial_ratio = radial_ratio[0]
+                .hypot(radial_ratio[1])
+                .hypot(radial_ratio[2]);
             if !axial_ratio.is_finite() || !radial_ratio.is_finite() {
                 return Err(invalid("disk-relative geometry overflow"));
             }
