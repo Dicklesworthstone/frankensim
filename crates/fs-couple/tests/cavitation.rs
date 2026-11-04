@@ -5,6 +5,8 @@
 mod compressible;
 #[path = "cavitation/thermal.rs"]
 mod thermal;
+#[path = "cavitation/dissolved_gas.rs"]
+mod dissolved_gas;
 
 use fs_aeroac::monopole::{CompactMonopoleObserver, MonopoleLimits};
 use fs_couple::cavitation::bubble::{MaterialBubble, MaterialBubbleError};

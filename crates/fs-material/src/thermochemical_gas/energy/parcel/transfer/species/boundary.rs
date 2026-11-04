@@ -269,6 +269,21 @@ impl ClosedGasParcel {
         }
         let model = model_for_inventory(catalog, masses)?;
         let mass: f64 = masses.values().sum();
+        self.at_model_mass_temperature(model, mass, temperature_k)
+    }
+
+    // The same reconstruction serves species changes and frozen-inventory
+    // temperature proposals. The latter retain the accepted extensive mass
+    // exactly instead of summing rounded species fractions again.
+    pub(crate) fn at_model_mass_temperature(
+        &self,
+        model: ThermochemicalGasModel,
+        mass: f64,
+        temperature_k: f64,
+    ) -> Result<Self, GasEnergyError> {
+        if !positive(temperature_k) || !positive(mass) {
+            return Err(invalid("finite gas endpoint temperature and mass required"));
+        }
         let properties = model.thermodynamics().evaluate_properties(
             Temperature::new(temperature_k), fs_qty::Pressure::new(self.state().state().pressure),
         )

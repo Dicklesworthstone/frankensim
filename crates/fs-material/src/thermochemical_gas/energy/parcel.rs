@@ -91,6 +91,34 @@ impl ClosedGasParcel {
         self.parcel.add_heat(heat_j, controls, cancelled)
     }
 
+    /// Propose a temperature at the SAME mass, composition and fixed volume.
+    ///
+    /// The original gas owner resolves pressure, transport and acoustics
+    /// directly; no nested caloric inversion or second EOS is introduced.
+    /// Returned actual Delta U uses the original source-integrated increment,
+    /// canceling formation datums before arithmetic. The enclosing thermal
+    /// owner must balance that energy; this does not supply heat implicitly.
+    /// Original source refusal leaves this parcel untouched.
+    pub fn at_temperature(&self, temperature_k: f64) -> Result<(Self, f64), GasEnergyError> {
+        if temperature_k == self.state().state().temperature {
+            return Ok((self.clone(), 0.0));
+        }
+        let candidate = self.at_model_mass_temperature(
+            self.model().clone(), self.mass_kg(), temperature_k,
+        )?;
+        let change = self.mass_kg() * self.model().thermodynamics()
+            .specific_internal_energy_change(
+                fs_qty::Temperature::new(self.state().state().temperature),
+                fs_qty::Temperature::new(temperature_k),
+            ).map_err(|error| crate::thermochemical_gas::failure(
+                "frozen temperature coordinate", error,
+            ))?.value();
+        if !change.is_finite() || change == 0.0 {
+            return Err(GasEnergyError::Invalid("temperature change loses its caloric increment"));
+        }
+        Ok((candidate, change))
+    }
+
     /// Reconstruct a frozen-composition endpoint from volume and actual Delta U.
     ///
     /// This is a conservative-coordinate adapter to the ORIGINAL temperature-

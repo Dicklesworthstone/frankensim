@@ -3371,6 +3371,45 @@ native trajectory, and atomic cancellation/observer refusal. They do not claim f
 latent-heat feedback, nonspherical collapse, wall jets, erosion, fully coupled
 multiphase CFD, or experimental validation.
 
+## Finite solvent heat during gas absorption and exsolution
+
+`cavitation::dissolved_gas::advance_thermal_mixture` closes the original
+finite-inventory Henry/two-film kinetics with one finite incompressible solvent
+and a common gas/liquid temperature. The initial-temperature mass substep is
+the original simultaneous owner, including opposite species transfers. One
+existing safeguarded scalar solve then balances its actual internal-energy
+change with original gas, dissolved-partial and pure-solvent sensible increments
+and the prescribed external heat. Zero external heat makes the combined pair
+adiabatic. The isothermal substep's thermostat accounts are an explicitly
+reported numerical decomposition, not additional physical heat reservoirs.
+
+All caloric differences use the original source-integrated increments; gas
+formation datums are not subtracted as large absolute storage totals. Gas mass,
+composition and volume survive the temperature proposal exactly, with pressure,
+transport and acoustics reconstructed once by the original material owner.
+The same Henry/diffusivity claims continue at the accepted T/p/concentration,
+including actual interfacial concentrations, shared mixture dilution and total
+interface-pressure admission. No nested gas-temperature inversion occurs in
+the coupled heat root. Failed source, energy, work-budget or final cancellation
+checks publish none of the gas, liquid clocks or refreshed source laws.
+
+This is a first-order conservative split with explicit time and temperature
+step restrictions; energy closure is not a kinetic trajectory-error bound.
+Five G1/G3/G4 regression groups cover independent constant-Cp absorption and
+exsolution endpoints, the sealed-mass native heat limit, thermal source refresh,
+16/32/64-step refinement against an independent energy-constrained RK4 oracle,
+opposing-species canonical results, and late source/cancellation rollback.
+The native tests have not been executed in this session because the pinned
+runtime dependency build was killed by the shared memory limit.
+
+The solvent chart must remain liquid at constant density and solute partial
+volume is negligible. Independent Henry, partial-caloric and gas-film sources
+must apply over the complete pressure/composition/temperature interval and be
+physically compatible; this numerical composition does not certify that data
+compatibility. Finite interfacial thermal resistance, solvent evaporation,
+moving bubbles, spatial transport, reactions and entropy-production claims
+remain outside the common-temperature dilute closure.
+
 ## Joint sourced dry friction and finite contact heat
 
 A `DryFrictionBinding::new_temperature_source` retains the original

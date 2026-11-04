@@ -32,6 +32,9 @@ pub mod duct;
 /// This thermal inventory uses existing material owners without a bubble solver.
 pub mod water_cell;
 
+/// Finite solvent heat and the original two-film dissolved-gas kinetics.
+pub mod dissolved_gas;
+
 use fs_material::MaterialError;
 use fs_material::cavitation::{CavitationProperties, CavitationState, ResolvedCavitationState};
 use fs_tribo::resistive_film::cavitation::{CavitatingFilm, CavitationLiquid};

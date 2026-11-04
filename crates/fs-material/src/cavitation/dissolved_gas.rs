@@ -357,6 +357,98 @@ impl HenryDissolution {
         self.diffusivity_m2_s
     }
 
+    /// Continue the SAME Henry/diffusivity claims at an actual gas/liquid state.
+    ///
+    /// Temperature may change, while source identity, solvent context and the
+    /// original dissolved caloric chart remain fixed. Both bulk and actual
+    /// film-interface concentrations are admitted at the new T/p. This is a
+    /// constitutive proposal, not a heat transfer or mass exchange operation;
+    /// the enclosing owner must publish it with the accepted physical state.
+    pub fn at_conditions(
+        &self,
+        gas: &ClosedGasParcel,
+        liquid: DissolvedGasInventory,
+        film: DissolutionFilm,
+        controls: DissolvedGasControls,
+    ) -> Result<(Self, DissolutionSample)> {
+        use crate::thermochemical_gas::energy::parcel::transfer::species::boundary::admit_catalog;
+        admit_catalog(gas, &self.catalog)?;
+        if !nonnegative(film.area_m2)
+            || !positive(film.thickness_m)
+            || !positive(controls.maximum_concentration_mol_m3)
+            || !positive(controls.maximum_film_relaxation_ratio)
+            || controls.maximum_film_relaxation_ratio >= 1.0
+        {
+            return Err(invalid(
+                "physical film geometry and dilute/relaxation limits required",
+            ));
+        }
+        let temperature = gas.state().state().temperature;
+        let point = self
+            .source
+            .point
+            .clone()
+            .with_quantity(
+                "temperature",
+                typed(QuantityKind::AbsoluteTemperature),
+                temperature,
+            )
+            .and_then(|p| {
+                p.with_quantity(
+                    "pressure",
+                    typed(QuantityKind::Pressure),
+                    gas.state().state().pressure,
+                )
+            })
+            .and_then(|p| {
+                p.with_quantity(
+                    "dissolved_concentration",
+                    typed(QuantityKind::AmountConcentration),
+                    liquid.dissolved_moles / liquid.liquid_volume_m3,
+                )
+            })
+            .map_err(|_| invalid("unrepresentable Henry continuation conditions"))?;
+        let resolved = self
+            .resolved
+            .at_query_point(&self.source.material, &point)?;
+        let mut law = self.clone();
+        law.henry_mol_m3_pa = resolved
+            .property(HENRY_SOLUBILITY_PROPERTY)
+            .unwrap()
+            .value_si();
+        law.diffusivity_m2_s = resolved
+            .property(DISSOLVED_DIFFUSIVITY_PROPERTY)
+            .unwrap()
+            .value_si();
+        law.temperature_k = temperature;
+        law.dissolved_enthalpy_j_kg = finite(
+            law.calorics
+                .partial_enthalpy
+                .state_at_temperature(temperature)?
+                .specific_enthalpy_j_kg()
+                + law.calorics.enthalpy_offset_j_kg,
+        )?;
+        law.catalog
+            .species_specific_enthalpy_j_kg(&law.species, temperature)?;
+        law.source.point = point;
+        law.resolved = resolved;
+        let prepared = PreparedFilm::new(&law, film)?;
+        let capacity = finite(
+            1.0 / liquid.liquid_volume_m3
+                + law.henry_mol_m3_pa * (R * temperature / gas.volume_m3()),
+        )?;
+        let ratio =
+            finite(film.area_m2 * film.thickness_m * capacity * prepared.liquid_gradient_fraction)?;
+        if prepared.conductance_m3_s > 0.0 && ratio > controls.maximum_film_relaxation_ratio {
+            return Err(DissolvedGasError::FilmRelaxation {
+                ratio,
+                maximum: controls.maximum_film_relaxation_ratio,
+            });
+        }
+        let sample = law.sample(gas, liquid, prepared, controls)?;
+        Ok((law, sample))
+    }
+
     fn sample(
         &self,
         gas: &ClosedGasParcel,
