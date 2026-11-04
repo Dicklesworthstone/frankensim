@@ -30,6 +30,50 @@ pub struct ModalSourceResponse {
     pub source_dissipation_w: f64,
 }
 
+impl ModalSourceResponse {
+    // Staircase and continuous-profile sources use the same physical work
+    // pairing; the propagation coordinates must not change its meaning.
+    pub(super) fn from_fields(
+        sources: &[PortExcitation],
+        inlet_pressure: Vec<C64>,
+        inlet_flow: Vec<C64>,
+    ) -> Result<Self, DuctError> {
+        let n = sources.len();
+        if inlet_pressure.len() != n || inlet_flow.len() != n {
+            return Err(DuctError::BadParameter {
+                what: "modal source fields must cover every source",
+            });
+        }
+        finite_waves(&inlet_pressure)?;
+        finite_waves(&inlet_flow)?;
+        let mut generator_powers_w = Vec::with_capacity(n);
+        let mut source_dissipations_w = Vec::with_capacity(n);
+        for (i, &source) in sources.iter().enumerate() {
+            let (pressure, resistance) = match source {
+                PortExcitation::VolumeFlow(_) => (inlet_pressure[i], 0.0),
+                PortExcitation::Pressure { open_circuit_pressure_pa, impedance_pa_s_m3 } =>
+                    (open_circuit_pressure_pa, impedance_pa_s_m3.re),
+            };
+            let flow = inlet_flow[i];
+            generator_powers_w.push((pressure*flow.conj()).re*0.5);
+            // Form dissipative pressure before squaring a potentially tiny flow.
+            source_dissipations_w.push((flow.scale(resistance)*flow.conj()).re*0.5);
+        }
+        let generator_power_w = coherent_sum(generator_powers_w.iter().copied().map(C64::from_re)).re;
+        let source_dissipation_w = coherent_sum(source_dissipations_w.iter().copied().map(C64::from_re)).re;
+        let inlet_power_w = coherent_sum(inlet_pressure.iter().zip(&inlet_flow)
+            .map(|(&pressure, &flow)| (pressure*flow.conj()).scale(0.5))).re;
+        if generator_powers_w.iter().chain(&source_dissipations_w)
+            .chain(&[generator_power_w, source_dissipation_w, inlet_power_w])
+            .any(|value| !value.is_finite())
+        {
+            return Err(DuctError::Singular);
+        }
+        Ok(Self { inlet_pressure, inlet_flow, generator_powers_w,
+            source_dissipations_w, inlet_power_w, generator_power_w, source_dissipation_w })
+    }
+}
+
 /// Staircase input reflection in the inlet station's native modal waves.
 ///
 /// Pressure and volume flow satisfy `P = (I + R) a` and
@@ -312,34 +356,7 @@ impl ModalReflectionResponse {
                 (delta-self.reflection_matrix[i*n+j])*native[j]
             })) / self.characteristic_impedances[i]);
         }
-        finite_waves(&inlet_pressure)?;
-        finite_waves(&inlet_flow)?;
-        let mut generator_powers_w = Vec::with_capacity(n);
-        let mut source_dissipations_w = Vec::with_capacity(n);
-        for (i, &source) in sources.iter().enumerate() {
-            let (pressure, resistance) = match source {
-                PortExcitation::VolumeFlow(_) => (inlet_pressure[i], 0.0),
-                PortExcitation::Pressure { open_circuit_pressure_pa, impedance_pa_s_m3 } =>
-                    (open_circuit_pressure_pa, impedance_pa_s_m3.re),
-            };
-            let flow = inlet_flow[i];
-            generator_powers_w.push((pressure*flow.conj()).re*0.5);
-            // Form the dissipative pressure first, so a tiny flow's squared
-            // magnitude does not underflow before a large resistance acts.
-            source_dissipations_w.push((flow.scale(resistance)*flow.conj()).re*0.5);
-        }
-        let generator_power_w = coherent_sum(generator_powers_w.iter().copied().map(C64::from_re)).re;
-        let source_dissipation_w = coherent_sum(source_dissipations_w.iter().copied().map(C64::from_re)).re;
-        let inlet_power_w = coherent_sum(inlet_pressure.iter().zip(&inlet_flow)
-            .map(|(&pressure, &flow)| (pressure*flow.conj()).scale(0.5))).re;
-        if generator_powers_w.iter().chain(&source_dissipations_w)
-            .chain(&[generator_power_w, source_dissipation_w, inlet_power_w])
-            .any(|value| !value.is_finite())
-        {
-            return Err(DuctError::Singular);
-        }
-        Ok((ModalSourceResponse { inlet_pressure, inlet_flow, generator_powers_w,
-            source_dissipations_w, inlet_power_w, generator_power_w, source_dissipation_w }, native))
+        Ok((ModalSourceResponse::from_fields(sources, inlet_pressure, inlet_flow)?, native))
     }
 
     // The exact undirected coupling graph includes every nonzero entry in

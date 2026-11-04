@@ -1025,9 +1025,10 @@ fn mm_riccati_reciprocity_and_power() {
             true,
         )
         .unwrap();
-        let scale = p.zeta.iter().map(|v| v.abs()).fold(0.0, f64::max);
+        let zeta = p.impedance(n).unwrap();
+        let scale = zeta.iter().map(|v| v.abs()).fold(0.0, f64::max);
         let asym = (0..n * n)
-            .map(|idx| (p.zeta[idx] - p.zeta[(idx % n) * n + idx / n]).abs())
+            .map(|idx| (zeta[idx] - zeta[(idx % n) * n + idx / n]).abs())
             .fold(0.0, f64::max)
             / scale;
         assert!(asym < 1e-10, "{loss:?}: reciprocity {asym:e}");
@@ -1050,7 +1051,7 @@ fn mm_riccati_reciprocity_and_power() {
             let power_in: f64 = (0..n)
                 .map(|r| {
                     let pr = (0..n).fold(C64::ZERO, |acc, c| {
-                        acc + p.zeta[r * n + c].scale(p.zref) * u_in[c]
+                        acc + zeta[r * n + c].scale(p.zref) * u_in[c]
                     });
                     (u_in[r].conj() * pr).re
                 })

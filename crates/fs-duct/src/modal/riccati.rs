@@ -81,6 +81,9 @@ use fs_material::gas::GasState;
 use fs_math::c64::C64;
 use fs_math::det;
 
+mod source;
+pub use source::{ModalSourceField, PreparedModalProfile};
+
 /// Upper end of the Bessel range certified for continuous propagation.
 pub const BESSEL_CERTIFIED_X: f64 = 64.0;
 /// Largest admitted evanescent decay per step, `max_n |Im k_n| |h|`. The step
@@ -336,14 +339,33 @@ struct Stations {
     wave_back: Vec<Vec<C64>>,
 }
 
-/// Inlet impedance (scaled), diagnostics, and optional bounded station maps.
+/// Inlet pressure/flow maps, diagnostics, and optional bounded station maps.
 struct Propagated {
-    zeta: Vec<C64>,
+    pressure: Vec<C64>,
+    flow: Vec<C64>,
     zref: f64,
     min_shear: f64,
     throat: f64,
     mouth_ka: f64,
     stations: Option<Stations>,
+}
+
+impl Propagated {
+    fn impedance(&self, n: usize) -> Result<Vec<C64>, DuctError> {
+        let zeta = mul(&self.pressure, &mat_inv(&self.flow, n)?, n);
+        if zeta.iter().any(|&v| !finite(v)) {
+            return Err(DuctError::Singular);
+        }
+        Ok(zeta)
+    }
+}
+
+fn poll(cancelled: &mut impl FnMut() -> bool, completed_steps: usize) -> Result<(), DuctError> {
+    if cancelled() {
+        Err(DuctError::Cancelled { completed_steps })
+    } else {
+        Ok(())
+    }
 }
 
 /// Reparameterize the same admissible subspace by its incoming reference wave.
@@ -375,6 +397,22 @@ fn propagate<'a>(
     steps: RiccatiSteps,
     track_flow: bool,
 ) -> Result<Propagated, DuctError> {
+    propagate_controlled(profile, state, omega, loss, load, n, steps, track_flow, &mut || false)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn propagate_controlled<'a>(
+    profile: &RadiusProfile,
+    state: &GasState,
+    omega: f64,
+    loss: LossModel,
+    load: impl Into<ProfileLoad<'a>>,
+    n: usize,
+    steps: RiccatiSteps,
+    track_flow: bool,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Propagated, DuctError> {
+    poll(cancelled, 0)?;
     let load = load.into();
     steps.validate()?;
     if !(omega.is_finite() && omega > 0.0) {
@@ -494,6 +532,7 @@ fn propagate<'a>(
     let mut min_shear = f64::INFINITY;
     let mut throat = r_mouth.min(r_in);
     for j in 0..steps.0 {
+        poll(cancelled, j)?;
         let x0 = length + j as f64 * h;
         let l1 = generator(profile, state, omega, loss, &basis, zref, x0 + c1 * h)?;
         let l2 = generator(profile, state, omega, loss, &basis, zref, x0 + c2 * h)?;
@@ -541,12 +580,10 @@ fn propagate<'a>(
             record.wave_back.push(wave_back);
         }
     }
-    let zeta = mul(&x_blk, &mat_inv(&y_blk, n)?, n);
-    if zeta.iter().any(|&v| !finite(v)) {
-        return Err(DuctError::Singular);
-    }
+    poll(cancelled, steps.0)?;
     Ok(Propagated {
-        zeta,
+        pressure: x_blk,
+        flow: y_blk,
         zref,
         min_shear,
         throat,
@@ -633,10 +670,10 @@ fn profile_impedance_with_load(
     modes.validate()?;
     let n = modes.0;
     let full = propagate(profile, state, omega, loss, load, n, steps, false)?;
-    let z: Vec<C64> = full.zeta.iter().map(|v| v.scale(full.zref)).collect();
+    let z: Vec<C64> = full.impedance(n)?.iter().map(|v| v.scale(full.zref)).collect();
     let tail_bound_estimate = if n >= 2 {
         let half = propagate(profile, state, omega, loss, load, n / 2, steps, false)?;
-        Some((z[0] - half.zeta[0].scale(half.zref)).abs())
+        Some((z[0] - half.impedance(n / 2)?[0].scale(half.zref)).abs())
     } else {
         None
     };
@@ -760,7 +797,17 @@ fn profile_field_with_load(
     }
     let run = propagate(profile, state, omega, loss, load, n, steps, true)?;
     let record = run.stations.ok_or(DuctError::Singular)?;
-    let axis_weight: Vec<f64> = Basis::new(n)
+    // Solve the prescribed physical inlet flow once. Every interior station
+    // then uses wave coordinates, so even U=0 retains its finite pressure.
+    let mut wave = inlet_flow.to_vec();
+    let inlet = fs_la::eigen_complex::lu_complex(record.flow.last().ok_or(DuctError::Singular)?, n)
+        .map_err(|_| DuctError::Singular)?;
+    inlet.solve(&mut wave);
+    reconstruct_field(&record, run.zref, profile.length(), &axis_weights(n), wave, &mut || false)
+}
+
+fn axis_weights(n: usize) -> Vec<f64> {
+    Basis::new(n)
         .gammas
         .iter()
         .map(|&g| {
@@ -770,9 +817,20 @@ fn profile_field_with_load(
                 1.0 / bessel_j0_certified(g).abs()
             }
         })
-        .collect();
+        .collect()
+}
+
+fn reconstruct_field(
+    record: &Stations,
+    zref: f64,
+    length: f64,
+    axis_weight: &[f64],
+    mut wave: Vec<C64>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<ModalField, DuctError> {
+    let n = wave.len();
     let s = record.wave_back.len();
-    let (length, h) = (profile.length(), -profile.length() / s as f64);
+    let h = -length / s as f64;
     let mut field = ModalField {
         n_modes: n,
         x: Vec::with_capacity(s + 1),
@@ -780,25 +838,20 @@ fn profile_field_with_load(
         flow: Vec::with_capacity(s + 1),
         axis_pressure: Vec::with_capacity(s + 1),
     };
-    // Solve the prescribed physical inlet flow once. Every interior station
-    // then uses wave coordinates, so even U=0 retains its finite pressure.
-    let mut wave = inlet_flow.to_vec();
-    let inlet = fs_la::eigen_complex::lu_complex(&record.flow[s], n)
-        .map_err(|_| DuctError::Singular)?;
-    inlet.solve(&mut wave);
     // Station j counts steps from the mouth; walk back from the inlet (j = s).
     for j in (0..=s).rev() {
+        poll(cancelled, s - j)?;
         if j < s {
             wave = mat_vec(&record.wave_back[j], &wave, n);
         }
         let u = mat_vec(&record.flow[j], &wave, n);
         let p: Vec<C64> = mat_vec(&record.pressure[j], &wave, n)
             .iter()
-            .map(|v| v.scale(run.zref))
+            .map(|v| v.scale(zref))
             .collect();
         let axis = p
             .iter()
-            .zip(&axis_weight)
+            .zip(axis_weight)
             .fold(C64::ZERO, |acc, (pn, w)| acc + pn.scale(*w));
         if !(finite(axis) && p.iter().chain(&u).all(|&v| finite(v))) {
             return Err(DuctError::Singular);
@@ -810,6 +863,7 @@ fn profile_field_with_load(
         field.flow.push(u);
         field.axis_pressure.push(axis);
     }
+    poll(cancelled, s)?;
     Ok(field)
 }
 

@@ -3585,3 +3585,52 @@ Focused regressions cover dimensional Poiseuille loss, split-interval heat,
 spatial material quadrature under held input, inactive and unrelated sources,
 regional finite-gas heating, molecular coexistence, unchanged zero-source
 behavior, and complete rollback on refusal or late cancellation.
+
+## Physical sources and reflected fields in continuous multimodal profiles
+
+`modal::PreparedModalProfile` retains the original continuous Gauss–Magnus
+pressure/flow charts and backward station maps at one material, geometry,
+frequency and mouth load. Scalar/ideal/tabulated/matched, complete flanged,
+and full physical matrix loads use their existing owners and admission rules.
+Preparation no longer forms an input impedance that the source has not asked
+for. Existing impedance queries still perform their original final inversion
+and retain genuine impedance poles; their arithmetic is unchanged.
+
+`drive_sources` applies the existing `network::PortExcitation` in original
+radial order: prescribed complex volume flow, or `P + Zs U = p_open` with a
+finite passive source impedance. It solves directly against the retained
+`P/Zref = X a`, `U = Y a` maps, then reconstructs the complete pressure, flow
+and axis pressure from the same solution. Zero pressure retains its source
+impedance; zero prescribed flow closes the mode. Only exactly disconnected
+unforced components take zero forced amplitude. Every nonzero coupling is
+kept, and singular driven components refuse. Bare transverse cutoffs and
+finite pressure-driven states at inlet flow nodes need no native infinite
+characteristic impedance, pressure division or flow division.
+
+`at_references` computes the full reflected-pressure matrix at positive real
+modal references with one boundary factorization. Row scaling retains disparate
+port units; signed acoustic work uses the original inverse-reference metric.
+Source work, source-resistance dissipation and actual inlet power reuse the
+same accounting as the staircase source owner. Coherent source phases remain
+in the field and its power; individual-source powers are not added.
+
+Stored maps cost O(steps N²). Each subsequent drive uses one O(N³) source
+solve and O(steps N²) reconstruction, with no repeated propagation exponentials.
+Mode and step caps/refinement axes, material losses and evanescent-step refusal
+are unchanged. Preparation and field observation poll cancellation at each
+station and return no partial owner/field. This is the existing frozen,
+axisymmetric, single-frequency model; no causal source fit or certified modal
+truncation bound is added.
+
+Six focused G1/G3 regressions compare independent outgoing propagating and
+evanescent cylindrical waves for lossless, wide-tube and full Bessel losses;
+an exact cutoff with undefined input impedance but finite driven pressure;
+internal half-wave motion at an inlet flow node; the original tapered field
+and an independent impedance-to-wave conversion; a mutually coupled physical
+mouth with coherent source work; and cancellation/refusal behavior. These six
+and the existing fifteen native source/reflection tests passed in the focused
+actual-source Rust lane. That lane uses the original Magnus, profile, Bessel,
+LU, Jacobi, gas/coherence and source kernels; unused flanged, tabulated and
+Levine–Schwinger entry adapters refuse and are not validated by it. DSR/RCH and
+the seven required sibling Git checkouts remain unavailable, so this does not
+claim a full Cargo/workspace or flanged-source integration pass.

@@ -85,7 +85,8 @@ pub use load::{AxisymmetricMouthBasis, ModalMouthImpedance};
 /// Continuous multimodal propagation on smooth profiles (M2.1-W3b).
 mod riccati;
 pub use riccati::{
-    BESSEL_CERTIFIED_X, MAX_EVANESCENT_STEP, ModalField, ModeCount, MouthLoad, certified_mode_cap,
+    BESSEL_CERTIFIED_X, MAX_EVANESCENT_STEP, ModalField, ModalSourceField, ModeCount, MouthLoad,
+    PreparedModalProfile, certified_mode_cap,
     mm_profile_field, mm_profile_field_flanged, mm_profile_field_matrix,
     mm_profile_impedance, mm_profile_impedance_flanged, mm_profile_impedance_matrix,
 };
