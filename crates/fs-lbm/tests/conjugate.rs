@@ -1721,6 +1721,23 @@ fn de_vahl_davis(
         "{:?}",
         run.energy.report.balance
     );
+    let minimum = run
+        .energy
+        .temperature
+        .iter()
+        .copied()
+        .fold(f64::INFINITY, f64::min);
+    let maximum = run
+        .energy
+        .temperature
+        .iter()
+        .copied()
+        .fold(f64::NEG_INFINITY, f64::max);
+    assert!(
+        run.report.coupling_residual_k <= tolerance * (maximum - minimum),
+        "the returned steady thermal field must satisfy the original coupled tolerance: {:?}",
+        run.report,
+    );
     (nu, run.report)
 }
 
@@ -1728,8 +1745,88 @@ fn de_vahl_davis(
 fn natural_convection_cavity_matches_de_vahl_davis_at_ra_1e3() {
     let (nu, report) = de_vahl_davis(16, 1e3, 0.8, 1e-6);
     eprintln!("de Vahl Davis Ra=1e3 n=16: Nu = {nu:.4} (reference 1.118); {report:?}");
-    assert!(report.coupling_residual_k < 1e-3, "{report:?}");
+    assert!(report.coupling_residual_k <= 1e-6, "{report:?}");
     assert!((nu - 1.118).abs() / 1.118 < 0.03, "Nu {nu}");
+}
+
+#[test]
+fn natural_convection_endpoint_and_partial_batch_respect_the_original_step_budget() {
+    let domain = VoxelDomain::new(8, 8, 4, 1.0).unwrap();
+    let fluid = FluidProperties {
+        density_kg_m3: 1.0,
+        specific_heat_j_kg_k: 1.0,
+        conductivity_w_m_k: 1e-3,
+        kinematic_viscosity_m2_s: 0.71e-3,
+    };
+    let mut faces = [ThermalFace::Adiabatic; 6];
+    faces[0] = ThermalFace::Temperature(1.0);
+    faces[1] = ThermalFace::Temperature(0.0);
+    let setup = ThermalSetup::new(faces);
+    let mut config = BuoyancyConfig {
+        gravity_m_s2: [0.0, -9.81, 0.0],
+        expansion_per_k: 1e3 * 0.71e-6 / (9.81 * 8.0_f64.powi(3)),
+        reference_temperature_k: 0.5,
+        tau: 0.8,
+        periodic: [false, false, true],
+        coupling_interval: 160,
+        max_steps: 8_003,
+        steady_tolerance: 1e-4,
+        workers: 1,
+        ..BuoyancyConfig::default()
+    };
+    let result = natural_convection(&domain, &fluid, &[], &setup, &config, &CancelGate::new());
+    match result {
+        Ok(run) => {
+            let minimum = run
+                .energy
+                .temperature
+                .iter()
+                .copied()
+                .fold(f64::INFINITY, f64::min);
+            let maximum = run
+                .energy
+                .temperature
+                .iter()
+                .copied()
+                .fold(f64::NEG_INFINITY, f64::max);
+            assert!(run.report.steps <= config.max_steps);
+            assert!(
+                run.report.coupling_residual_k <= config.steady_tolerance * (maximum - minimum),
+                "a small geometric-tail estimate must not publish a lagged buoyancy state: {:?}",
+                run.report,
+            );
+            let endpoint = solve_energy(
+                &domain,
+                &fluid,
+                &[],
+                &run.field,
+                &setup,
+                &config.energy,
+                &CancelGate::new(),
+            )
+            .unwrap();
+            assert_eq!(run.energy.temperature, endpoint.temperature);
+        }
+        Err(ChtError::FlowNotSteady {
+            steps,
+            last_change,
+            tolerance,
+        }) => {
+            assert_eq!(steps, config.max_steps);
+            assert!(last_change > tolerance);
+            assert_eq!(tolerance, config.steady_tolerance);
+        }
+        Err(error) => panic!("unexpected coupled refusal: {error}"),
+    }
+
+    // One shortened batch cannot establish the required contraction history.
+    // The driver must neither round the budget up nor return its unchecked
+    // steady re-solve as a converged natural-convection result.
+    config.max_steps = 3;
+    assert!(matches!(
+        natural_convection(&domain, &fluid, &[], &setup, &config, &CancelGate::new()),
+        Err(ChtError::FlowNotSteady { steps: 3, .. }),
+    ));
 }
 
 #[test]

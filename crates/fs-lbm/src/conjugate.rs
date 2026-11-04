@@ -190,7 +190,9 @@ pub use unsteady::{
 /// solid-cell centre, for LVEL distance and moving-wall velocity references.
 /// Version 6 retains incoming tangential momentum separately on counterflowing
 /// half-faces of a pressure opening and admits authored backflow velocities.
-pub const CHT_SEMANTICS_VERSION: u32 = 6;
+/// Version 7 requires the steady thermal endpoint to agree with the temperature
+/// driving LBM buoyancy and uses the actual final lattice-batch duration.
+pub const CHT_SEMANTICS_VERSION: u32 = 7;
 
 /// Structured refusal from any stage of the conjugate pipeline.
 #[derive(Debug, Clone, PartialEq)]

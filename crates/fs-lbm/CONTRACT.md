@@ -4600,16 +4600,30 @@ both accepted values intact. Solid cells are skipped and unchanged-force
 population bits are retained. No second population lattice is allocated.
 Without a field, the existing step arithmetic is unchanged. Each natural
 convection coupling rebinds the buoyancy
-`-beta (T - T_ref) g` in lattice units, advances `coupling_interval`
+`-beta (T - T_ref) g` in lattice units, advances up to `coupling_interval`
 pooled steps, projects the physical cell mass fluxes including `F/2`, and takes one implicit
-energy step whose storage uses the fluid's volumetric heat capacity in
+energy step over that actual batch duration, including a final batch shortened
+by the original step budget. A shorter nonzero change cannot supply a
+geometric-tail estimate by comparison with a longer batch. Its storage uses
+the fluid's volumetric heat capacity in
 every cell (solids get it as a PSEUDO capacity: it shapes the path, never
 the fixed point). Convergence is judged on the geometric extrapolation
 `delta r / (1 - r)` of the remaining per-coupling change (no estimate
 until the sequence contracts), for the relative mass flux and for the
-temperature over its range. The answer is a fresh STEADY energy solve on
-the final fluxes; `coupling_residual_k` retains its distance from the last
-pseudo-time iterate. A lattice speed above `max_lattice_speed` refuses as
+temperature over its range. A candidate STEADY energy solve on those same
+projected fluxes must additionally satisfy the original `steady_tolerance`:
+`coupling_residual_k` is its maximum distance from both the temperature that
+drove the lattice batch and the pseudo-time endpoint, divided for admission
+by the candidate's actual temperature range (no one-kelvin or absolute-temperature
+floor). Failure continues the original pseudo-time trajectory with restarted
+contraction history, within the unchanged `max_steps` budget. Success returns
+that exact field, energy solution and projection without another solve.
+The endpoint acceptance and actual batch duration advance
+`CHT_SEMANTICS_VERSION` to 7.
+The focused endpoint tests check the lagged-force defect, thermal-scale
+invariance, bounded refusal and returned thermal-field consistency; the
+existing cavity checks also require the normalized endpoint tolerance.
+A lattice speed above `max_lattice_speed` refuses as
 `LatticeResolution`; this guard and the reported speed use the actual
 `u = (sum(f_q c_q) + F/2)/rho`, while flux projection retains `rho*u` over the
 reference density. These corrections advance `CHT_SEMANTICS_VERSION` to 3.

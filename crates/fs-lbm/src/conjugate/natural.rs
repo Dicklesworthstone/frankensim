@@ -8,7 +8,7 @@
 //! 2. the lattice advances `coupling_interval` steps;
 //! 3. the cell MASS fluxes are projected onto divergence-free face fluxes;
 //! 4. one implicit (backward-Euler) energy step of length
-//!    `coupling_interval` lattice steps updates the temperature. Solid cells
+//!    the actual lattice batch updates the temperature. Solid cells
 //!    use the fluid's volumetric heat capacity as a PSEUDO capacity: it sets
 //!    the relaxation path, never the steady answer.
 //!
@@ -18,10 +18,13 @@
 //! `delta_k r / (1 - r)` with the observed contraction `r = delta_k /
 //! delta_(k-1)` (no estimate while the sequence is not contracting): both
 //! the relative mass-flux estimate and the temperature estimate (relative to
-//! the temperature range) must fall below the steady tolerance. The returned temperature is then
-//! re-solved as the exact STEADY energy problem on the final fluxes, and the
-//! largest difference to the last pseudo-time iterate is retained as the
-//! coupling residual.
+//! the temperature range) must fall below the steady tolerance. A candidate
+//! STEADY energy solve on those same projected fluxes must also agree with
+//! both the temperature that drove the lattice batch and its pseudo-time
+//! endpoint, to that tolerance. A failed endpoint check continues the coupled
+//! march within the original step budget; it cannot publish a new thermal
+//! field that has never driven the accepted flow. The accepted field, energy
+//! solve and projection are returned together without another solve.
 //!
 //! No-claims: steady laminar natural convection only (no claim of physical
 //! steadiness above the transition Rayleigh number; a run that does not
@@ -63,7 +66,9 @@ pub struct BuoyancyConfig {
     /// Lattice step budget.
     pub max_steps: usize,
     /// Steady criterion on the EXTRAPOLATED remaining change (relative
-    /// mass flux, and temperature over the temperature range).
+    /// mass flux, and temperature over the temperature range), and on the
+    /// steady thermal endpoint's difference from the driving and pseudo-time
+    /// temperatures, normalized by the returned field's temperature range.
     pub steady_tolerance: f64,
     /// Largest admitted lattice speed (compressibility guard).
     pub max_lattice_speed: f64,
@@ -109,7 +114,10 @@ pub struct NaturalConvectionReport {
     pub remaining_flux_change: f64,
     /// Extrapolated remaining temperature change over the range at the stop.
     pub remaining_temperature_change: f64,
-    /// Largest |steady re-solve - last pseudo-time iterate|, K.
+    /// Largest difference of the returned steady thermal field from either
+    /// the temperature that drove the final lattice batch or its pseudo-time
+    /// endpoint, K. Dividing by the returned temperature range satisfies
+    /// `BuoyancyConfig::steady_tolerance` (exact equality for a uniform field).
     pub coupling_residual_k: f64,
     /// Lattice kinematic viscosity `(tau - 1/2)/3`.
     pub lattice_viscosity: f64,
@@ -147,7 +155,7 @@ pub struct NaturalConvection {
 /// Input refusals, [`ChtError::LatticeResolution`] when the buoyant flow
 /// would exceed `max_lattice_speed`, [`ChtError::FlowDiverged`],
 /// [`ChtError::FlowNotSteady`], solver refusals, or [`ChtError::Cancelled`].
-#[allow(clippy::too_many_lines)] // admission -> conduction start -> coupled march -> steady re-solve
+#[allow(clippy::too_many_lines)] // admission -> conduction start -> coupled march -> endpoint acceptance
 pub fn natural_convection(
     domain: &VoxelDomain,
     fluid: &FluidProperties,
@@ -249,29 +257,20 @@ pub fn natural_convection(
     let flow_faces = [FlowFace::Wall; 6];
 
     // Start from steady conduction.
-    let mut field = FlowField::quiescent(domain);
     let start = solve_energy_inner(
         domain,
         fluid,
         solids,
-        &field,
+        &FlowField::quiescent(domain),
         setup,
         &config.energy,
         None,
         gate,
     )?;
     let mut temperature = start.temperature;
-    let range = |t: &[f64]| {
-        let (lo, hi) = t
-            .iter()
-            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &v| {
-                (lo.min(v), hi.max(v))
-            });
-        (hi - lo).max(f64::MIN_POSITIVE)
-    };
-    let storage = vec![
-        fluid.volumetric_heat_capacity() * dx * dx * dx
-            / (config.coupling_interval as f64 * time_step_s);
+    let cell_capacity_j_k = fluid.volumetric_heat_capacity() * dx * dx * dx;
+    let mut storage = vec![
+        cell_capacity_j_k / (config.coupling_interval as f64 * time_step_s);
         domain.cell_count()
     ];
 
@@ -323,7 +322,6 @@ pub fn natural_convection(
     let mut last_flux_change = f64::INFINITY;
     let mut last_temperature_change = f64::INFINITY;
     let mut lattice_momentum = vec![[0.0f64; 3]; domain.cell_count()];
-    let mut max_lattice_speed = 0.0f64;
     let mut remaining_flux_change = f64::INFINITY;
     let mut remaining_temperature_change = f64::INFINITY;
     // Geometric tail of a contracting sequence of per-coupling changes.
@@ -341,7 +339,7 @@ pub fn natural_convection(
             f64::INFINITY
         }
     };
-    pool.with_parked_crew_local(|parked| -> Result<(), ChtError> {
+    pool.with_parked_crew_local(|parked| -> Result<NaturalConvection, ChtError> {
         while steps < config.max_steps {
             poll(gate)?;
             let force = |cell: [usize; 3]| {
@@ -351,6 +349,11 @@ pub fn natural_convection(
             };
             grid.rebind_force_field(force);
             let batch = config.coupling_interval.min(config.max_steps - steps);
+            if batch != config.coupling_interval {
+                // The last batch can be shortened by the original step
+                // budget. Its heat step must use that same physical duration.
+                storage.fill(cell_capacity_j_k / (batch as f64 * time_step_s));
+            }
             for _ in 0..batch {
                 grid.step_pooled(parked, gate)
                     .map_err(|error| match error {
@@ -367,7 +370,6 @@ pub fn natural_convection(
                 steps += 1;
             }
             let (momentum, speed) = sample(&grid, steps)?;
-            max_lattice_speed = speed;
             let (mut diff, mut norm) = (0.0f64, 0.0f64);
             for (a, b) in momentum.iter().zip(&lattice_momentum) {
                 for k in 0..3 {
@@ -386,21 +388,27 @@ pub fn natural_convection(
                 });
             }
             let flux_change = fs_math::det::sqrt(diff / norm.max(f64::MIN_POSITIVE));
-            remaining_flux_change = remaining(flux_change, last_flux_change);
+            // The geometric ratio presumes equal elapsed times. A shortened
+            // final batch must not manufacture a small tail just by moving
+            // less time; an exactly unchanged field retains its zero limit.
+            remaining_flux_change = if batch == config.coupling_interval || flux_change == 0.0 {
+                remaining(flux_change, last_flux_change)
+            } else {
+                f64::INFINITY
+            };
             last_flux_change = flux_change;
             lattice_momentum = momentum;
             let physical: Vec<[f64; 3]> = lattice_momentum
                 .iter()
                 .map(|m| m.map(|v| v * velocity_scale_m_s))
                 .collect();
-            let (projected, _) = FlowField::from_cell_velocities(
+            let (field, projection) = FlowField::from_cell_velocities(
                 domain,
                 &physical,
                 flow_faces,
                 config.projection_tolerance,
                 gate,
             )?;
-            field = projected;
             let next = solve_energy_inner(
                 domain,
                 fluid,
@@ -415,7 +423,7 @@ pub fn natural_convection(
                 }),
                 gate,
             )?;
-            let scale = range(&next.temperature);
+            let scale = temperature_range(&next.temperature);
             let temperature_change = next
                 .temperature
                 .iter()
@@ -423,67 +431,129 @@ pub fn natural_convection(
                 .map(|(a, b)| (a - b).abs())
                 .fold(0.0, f64::max)
                 / scale;
-            remaining_temperature_change = remaining(temperature_change, last_temperature_change);
+            remaining_temperature_change =
+                if batch == config.coupling_interval || temperature_change == 0.0 {
+                    remaining(temperature_change, last_temperature_change)
+                } else {
+                    f64::INFINITY
+                };
             last_temperature_change = temperature_change;
-            temperature = next.temperature;
             couplings += 1;
             if remaining_flux_change <= config.steady_tolerance
                 && remaining_temperature_change <= config.steady_tolerance
             {
-                return Ok(());
+                let energy = solve_energy_inner(
+                    domain,
+                    fluid,
+                    solids,
+                    &field,
+                    setup,
+                    &config.energy,
+                    None,
+                    gate,
+                )?;
+                // The lattice still carries the force from `temperature`,
+                // not from `next`. Checking only the last pseudo-time state
+                // would miss the force change of this very coupling.
+                let coupling_residual_k =
+                    steady_temperature_defect(&energy.temperature, &temperature, &next.temperature);
+                let coupling_residual =
+                    coupling_residual_k / temperature_range(&energy.temperature);
+                if coupling_residual.is_finite() && coupling_residual <= config.steady_tolerance {
+                    poll(gate)?;
+                    return Ok(NaturalConvection {
+                        field,
+                        velocity_m_s: physical,
+                        energy,
+                        report: NaturalConvectionReport {
+                            steps,
+                            couplings,
+                            last_flux_change,
+                            last_temperature_change,
+                            remaining_flux_change,
+                            remaining_temperature_change,
+                            coupling_residual_k,
+                            lattice_viscosity,
+                            velocity_scale_m_s,
+                            time_step_s,
+                            max_lattice_speed: speed,
+                            projection,
+                        },
+                    });
+                }
+                // A geometric tail estimate is not an endpoint residual.
+                // Keep the stable pseudo-time trajectory and restart its
+                // contraction history instead of jumping to an unaccepted
+                // steady temperature or extending the caller's step budget.
+                remaining_temperature_change = remaining_temperature_change.max(coupling_residual);
+                last_flux_change = f64::INFINITY;
+                last_temperature_change = f64::INFINITY;
             }
+            temperature = next.temperature;
         }
         Err(ChtError::FlowNotSteady {
             steps,
             last_change: remaining_flux_change.max(remaining_temperature_change),
             tolerance: config.steady_tolerance,
         })
-    })?;
-
-    let physical: Vec<[f64; 3]> = lattice_momentum
-        .iter()
-        .map(|m| m.map(|v| v * velocity_scale_m_s))
-        .collect();
-    let (field, projection) = FlowField::from_cell_velocities(
-        domain,
-        &physical,
-        flow_faces,
-        config.projection_tolerance,
-        gate,
-    )?;
-    let energy = solve_energy_inner(
-        domain,
-        fluid,
-        solids,
-        &field,
-        setup,
-        &config.energy,
-        None,
-        gate,
-    )?;
-    let coupling_residual_k = energy
-        .temperature
-        .iter()
-        .zip(&temperature)
-        .map(|(a, b)| (a - b).abs())
-        .fold(0.0, f64::max);
-    Ok(NaturalConvection {
-        field,
-        velocity_m_s: physical,
-        energy,
-        report: NaturalConvectionReport {
-            steps,
-            couplings,
-            last_flux_change,
-            last_temperature_change,
-            remaining_flux_change,
-            remaining_temperature_change,
-            coupling_residual_k,
-            lattice_viscosity,
-            velocity_scale_m_s,
-            time_step_s,
-            max_lattice_speed,
-            projection,
-        },
     })
+}
+
+fn temperature_range(temperature: &[f64]) -> f64 {
+    let (lo, hi) = temperature
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &value| {
+            (lo.min(value), hi.max(value))
+        });
+    (hi - lo).max(f64::MIN_POSITIVE)
+}
+
+// All three fields come from the same admitted domain and have equal lengths.
+fn steady_temperature_defect(steady: &[f64], driving: &[f64], pseudo: &[f64]) -> f64 {
+    steady
+        .iter()
+        .zip(driving)
+        .zip(pseudo)
+        .map(|((&endpoint, &before), &after)| {
+            (endpoint - before).abs().max((endpoint - after).abs())
+        })
+        .fold(0.0, f64::max)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{steady_temperature_defect, temperature_range};
+
+    #[test]
+    fn g0_steady_endpoint_includes_the_temperature_that_drove_buoyancy() {
+        let steady = [301.0, 303.0, 305.0];
+        let previous = [300.0, 303.0, 306.0];
+        // The heat equation has already equilibrated at the projected flow,
+        // but the force carried by that flow is still one kelvin out of date.
+        assert_eq!(steady_temperature_defect(&steady, &previous, &steady), 1.0);
+        // Conversely, a still-relaxing pseudo-time state cannot be omitted.
+        assert_eq!(steady_temperature_defect(&steady, &steady, &previous), 1.0);
+        assert_eq!(temperature_range(&steady), 4.0);
+    }
+
+    #[test]
+    fn g3_thermal_endpoint_normalization_uses_the_span_not_an_absolute_floor() {
+        let endpoint = [0.25, 0.5, 0.75];
+        let before = [0.0, 0.5, 1.0];
+        for (scale, offset) in [(1.0, 0.0), (1.0, 300.0), (1e-12, 0.0)] {
+            let steady = endpoint.map(|value| offset + scale * value);
+            let driving = before.map(|value| offset + scale * value);
+            let relative =
+                steady_temperature_defect(&steady, &driving, &steady) / temperature_range(&steady);
+            assert!(
+                (relative - 0.5).abs() < 1e-15,
+                "{scale} {offset}: {relative}"
+            );
+        }
+        let uniform = [300.0; 3];
+        assert_eq!(
+            steady_temperature_defect(&uniform, &uniform, &uniform) / temperature_range(&uniform),
+            0.0,
+        );
+    }
 }
