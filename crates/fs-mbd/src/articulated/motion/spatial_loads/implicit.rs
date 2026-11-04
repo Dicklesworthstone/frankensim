@@ -481,7 +481,15 @@ fn step_with_forcing<B: bushing::BushingLaw>(
         evaluations.set(used + 1);
         let mut forcing = forcing.borrow_mut();
         if let (Some(law), (wrenches, efforts)) = &mut *forcing {
-            return equations.evaluate_with_forcing(x, &mut **law, wrenches, efforts, &mut *cancel);
+            let mut reaction = reaction.borrow_mut();
+            return equations.evaluate_with_forcing(
+                x,
+                &mut **law,
+                wrenches,
+                efforts,
+                reaction.as_deref_mut(),
+                &mut *cancel,
+            );
         }
         let mut effort = effort.borrow_mut();
         let (law, values) = &mut *effort;
@@ -926,6 +934,7 @@ impl<B: bushing::BushingLaw> MidpointEquations<'_, B> {
         forcing: &mut ForcingLaw<'_>,
         wrenches: &mut [Wrench],
         efforts: &mut [f64],
+        reaction: Option<&mut ReactionLaw<'_>>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<MidpointEvaluation, ImplicitSpatialError> {
         let n = self.model.dof_count();
@@ -962,7 +971,7 @@ impl<B: bushing::BushingLaw> MidpointEquations<'_, B> {
             ..self.loads
         };
         let stage = bushing::evaluate(&map, state.base, loads, self.bushings, cancelled)?;
-        let dynamics = free_floating_forward_dynamics(
+        let mut dynamics = free_floating_forward_dynamics(
             self.model,
             state.base,
             &state.joint_position,
@@ -972,6 +981,17 @@ impl<B: bushing::BushingLaw> MidpointEquations<'_, B> {
             &stage.body_wrench,
         )?;
         poll(cancelled)?;
+        let constraint_power = if let Some(law) = reaction {
+            let power = law(&state, &mut dynamics.generalized_acceleration, cancelled)?;
+            poll(cancelled)?;
+            validate_slice(
+                &dynamics.generalized_acceleration,
+                "implicit_spatial.constrained_acceleration",
+            )?;
+            power
+        } else {
+            Dd::ZERO
+        };
         let linear_world = self.initial.linear_world + stage.load.force_world.scale(half);
         let momentum_base = map.reconstruct(
             rotation,
@@ -1000,7 +1020,10 @@ impl<B: bushing::BushingLaw> MidpointEquations<'_, B> {
             efforts.iter().copied(),
             state.joint_velocity.iter().copied(),
         );
-        validate_slice(&[actuator_power.to_f64()], "implicit_spatial.stage_power")?;
+        validate_slice(
+            &[actuator_power.to_f64(), constraint_power.to_f64()],
+            "implicit_spatial.stage_power",
+        )?;
         poll(cancelled)?;
         Ok(MidpointEvaluation {
             state,
@@ -1009,7 +1032,7 @@ impl<B: bushing::BushingLaw> MidpointEquations<'_, B> {
             com_velocity_residual_world: Some(linear_residual),
             load: stage.load,
             actuator_power,
-            constraint_power: Dd::ZERO,
+            constraint_power,
             residual,
         })
     }

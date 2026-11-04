@@ -5444,6 +5444,29 @@ point-loop constraints remain separate models.
 Focused native validation passes 72 cases across 12 integration targets,
 including ten new physical/refusal cases and 62 original regressions.
 
+`constraints::step_free_floating_spatial_with_forcing` and the diagonal/full-
+bushing counterparts jointly resolve state-dependent environmental wrenches,
+caller actuator effort and existing constant joint rows. The original n+6
+midpoint owner evaluates the complete trial pose and velocity, calls the forcing
+law once, and performs loaded ABA once. The original native inverse-mass row
+solve then adds internal reactions; accepted samples own external impulse/work,
+caller actuator work and separately signed constraint work. Carrier translation
+and rotation recoil and the finite COM residual retain their original momentum
+and change-of-origin treatment. Initial, midpoint and endpoint row tolerances
+and independent reaction-work admission remain authoritative; no projection
+repairs a residual.
+
+Held/effort-only n+3 paths retain their original equations; empty rows exactly
+reproduce the unconstrained forcing result, and diagonal/full representations
+retain exact parity. Six additional physical/refusal cases pass with 20 original
+regressions on the native numerical sources: independently reduced geared-rotor
+and translation/spin models with material-point drag, nonlinear locked-rotor
+second-order refinement, finite signed reaction work, frame/row rescaling and
+atomic refusal. The extended original integration target also typechecks against the
+full native dependency graph. These are smooth constant affine constraints;
+activation, backlash, varying ratios and new contact/support laws remain outside
+this extension.
+
 ## Supported payload capture with existing gears and locks
 
 `articulated::motion::inventory::supported::constraints::capture_payload`

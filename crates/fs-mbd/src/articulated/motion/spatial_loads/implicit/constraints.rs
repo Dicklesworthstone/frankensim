@@ -6,8 +6,8 @@
 //! The original momentum-coordinate equations reconstruct that carrier's
 //! actual midpoint and endpoint twist from the constrained joint motion.
 //!
-//! Spatial loads, finite bushings and smooth actuator feedback are evaluated
-//! once at the same trial. Ideal reactions are internal: no reaction enters
+//! Spatial loads, finite bushings and smooth actuator/external-force feedback
+//! are evaluated once at the same trial. Ideal reactions are internal: no reaction enters
 //! external spatial impulse and the carrier retains its finite inertia. Native
 //! inverse-mass probes form the bounded row mobility; the loaded dynamics and
 //! force laws are not evaluated a second time. Caller actuator work and signed
@@ -20,10 +20,7 @@
 //! clipping alters their equations. This does not activate a constraint, model
 //! backlash or varying ratios, or replace the nonlinear material-point loops.
 
-use super::{
-    ImplicitSpatialConfig, ImplicitSpatialError, ImplicitSpatialStep,
-    step_with_bushings_effort_and_reaction,
-};
+use super::{ImplicitSpatialConfig, ImplicitSpatialError, ImplicitSpatialStep, step_with_forcing};
 use crate::articulated::ArticulatedModel;
 use crate::articulated::motion::reconfigure::constraints::{
     ConstraintError, JointConstraint, PreparedJointConstraints, admit_constraints, apply_rows,
@@ -33,10 +30,10 @@ use crate::articulated::motion::spatial_loads::SpatialMotionLoads;
 use crate::articulated::motion::spatial_loads::bushing::coupled::CoupledSpatialBushing;
 use crate::articulated::motion::spatial_loads::bushing::{BushingLaw, SpatialBushing};
 use crate::articulated::motion::{
-    EffortLaw, FreeFloatingMotionError, FreeFloatingMotionState, MAX_FREE_FLOATING_STEP_LINKS,
-    poll, sum_products,
+    EffortLaw, ForcingLaw, FreeFloatingMotionError, FreeFloatingMotionState,
+    MAX_FREE_FLOATING_STEP_LINKS, poll, sum_products,
 };
-use fs_ga::Twist;
+use fs_ga::{Twist, Vec3, Wrench};
 use fs_math::dd::Dd;
 
 /// Row regularity and signed ideal-reaction work admission.
@@ -82,6 +79,17 @@ pub struct ConstrainedFreeSpatialStep {
     pub velocity_residuals_before: Vec<f64>,
     pub velocity_residuals_midpoint: Vec<f64>,
     pub velocity_residuals_after: Vec<f64>,
+}
+
+/// Simultaneous environmental forcing and internal reactions, with the actual
+/// finite translational solve defect retained in physical world coordinates.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConstrainedForcedFreeSpatialStep {
+    /// Original constrained state, accepted reactions, residuals and work.
+    pub step: ConstrainedFreeSpatialStep,
+    /// Trial minus momentum-derived midpoint COM velocity, in world m/s.
+    /// Its torque-origin contribution is retained by the original finalizer.
+    pub com_velocity_residual_world: Vec3,
 }
 
 /// Advance world/axial loads and constant ideal joint rows with carrier recoil.
@@ -139,6 +147,56 @@ pub fn step_free_floating_spatial_with_effort(
     )
 }
 
+/// Resolve environmental forcing, internal actuation and ideal joint rows
+/// together at the actual implicit midpoint.
+///
+/// The callback receives elapsed time h/2 and the full trial state, including
+/// COM velocity and carrier recoil. Link-body wrenches about the original link
+/// origins and relative joint efforts are reset to the held values every call.
+/// The native loaded ABA runs once; the existing free inverse-mass row solve
+/// then adds internal reactions. These have separate signed constraint work,
+/// and never enter external spatial impulse or the caller's actuator limits.
+///
+/// The accepted force/reaction samples supply all accounts without reevaluating
+/// the callback. Initial, midpoint and final row tolerances and the independent
+/// reaction-work allowance still apply. No projection repairs a loose solve.
+/// Empty rows exactly reproduce the original unconstrained forcing lane.
+///
+/// Callbacks must be smooth and repeatable, including at off-manifold numerical
+/// derivative probes, and must not commit history during trials. The parent's
+/// linear midpoint stability, finite residual, timestep, limit, cancellation
+/// and atomic-refusal contracts apply; callback side effects remain its own.
+#[allow(clippy::too_many_arguments)]
+pub fn step_free_floating_spatial_with_forcing(
+    model: &ArticulatedModel,
+    state: &FreeFloatingMotionState,
+    loads: SpatialMotionLoads<'_>,
+    rows: &[JointConstraint],
+    duration: f64,
+    config: ImplicitSpatialConfig,
+    controls: FreeConstraintControls,
+    forcing: impl FnMut(
+        f64,
+        &FreeFloatingMotionState,
+        &mut [Wrench],
+        &mut [f64],
+    ) -> Result<(), FreeFloatingMotionError>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<ConstrainedForcedFreeSpatialStep, ImplicitSpatialError> {
+    step_free_floating_bushings_with_forcing(
+        model,
+        state,
+        loads,
+        &[],
+        rows,
+        duration,
+        config,
+        controls,
+        forcing,
+        cancelled,
+    )
+}
+
 /// Solve original finite diagonal bushings with ideal joint rows and recoil.
 #[allow(clippy::too_many_arguments)]
 pub fn step_free_floating_bushings(
@@ -185,6 +243,43 @@ pub fn step_free_floating_bushings_with_effort(
         config,
         controls,
         Some(&mut effort),
+        cancelled,
+    )
+}
+
+/// Resolve the same external forcing and ideal rows with finite diagonal
+/// bushings. Attachment loads, recoil and callback loads use one trial state;
+/// connection storage/loss and internal-reaction work remain distinct.
+/// See [`step_free_floating_spatial_with_forcing`] for callback and refusal rules.
+#[allow(clippy::too_many_arguments)]
+pub fn step_free_floating_bushings_with_forcing(
+    model: &ArticulatedModel,
+    state: &FreeFloatingMotionState,
+    loads: SpatialMotionLoads<'_>,
+    bushings: &[SpatialBushing],
+    rows: &[JointConstraint],
+    duration: f64,
+    config: ImplicitSpatialConfig,
+    controls: FreeConstraintControls,
+    mut forcing: impl FnMut(
+        f64,
+        &FreeFloatingMotionState,
+        &mut [Wrench],
+        &mut [f64],
+    ) -> Result<(), FreeFloatingMotionError>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<ConstrainedForcedFreeSpatialStep, ImplicitSpatialError> {
+    advance_with_forcing(
+        model,
+        state,
+        loads,
+        bushings,
+        rows,
+        duration,
+        config,
+        controls,
+        None,
+        Some(&mut forcing),
         cancelled,
     )
 }
@@ -239,6 +334,42 @@ pub fn step_free_floating_coupled_bushings_with_effort(
     )
 }
 
+/// Resolve full passive 6x6 K/C coupling, environmental force, internal effort
+/// and ideal joint rows through the same native midpoint and reaction owners.
+/// See [`step_free_floating_spatial_with_forcing`] for callback and refusal rules.
+#[allow(clippy::too_many_arguments)]
+pub fn step_free_floating_coupled_bushings_with_forcing(
+    model: &ArticulatedModel,
+    state: &FreeFloatingMotionState,
+    loads: SpatialMotionLoads<'_>,
+    bushings: &[CoupledSpatialBushing],
+    rows: &[JointConstraint],
+    duration: f64,
+    config: ImplicitSpatialConfig,
+    controls: FreeConstraintControls,
+    mut forcing: impl FnMut(
+        f64,
+        &FreeFloatingMotionState,
+        &mut [Wrench],
+        &mut [f64],
+    ) -> Result<(), FreeFloatingMotionError>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<ConstrainedForcedFreeSpatialStep, ImplicitSpatialError> {
+    advance_with_forcing(
+        model,
+        state,
+        loads,
+        bushings,
+        rows,
+        duration,
+        config,
+        controls,
+        None,
+        Some(&mut forcing),
+        cancelled,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn advance<B: BushingLaw>(
     model: &ArticulatedModel,
@@ -250,8 +381,28 @@ fn advance<B: BushingLaw>(
     config: ImplicitSpatialConfig,
     controls: FreeConstraintControls,
     effort: Option<&mut EffortLaw<'_>>,
-    mut cancelled: impl FnMut() -> bool,
+    cancelled: impl FnMut() -> bool,
 ) -> Result<ConstrainedFreeSpatialStep, ImplicitSpatialError> {
+    Ok(advance_with_forcing(
+        model, state, loads, bushings, rows, duration, config, controls, effort, None, cancelled,
+    )?
+    .step)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn advance_with_forcing<B: BushingLaw>(
+    model: &ArticulatedModel,
+    state: &FreeFloatingMotionState,
+    loads: SpatialMotionLoads<'_>,
+    bushings: &[B],
+    rows: &[JointConstraint],
+    duration: f64,
+    config: ImplicitSpatialConfig,
+    controls: FreeConstraintControls,
+    effort: Option<&mut EffortLaw<'_>>,
+    forcing: Option<&mut ForcingLaw<'_>>,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<ConstrainedForcedFreeSpatialStep, ImplicitSpatialError> {
     poll(&mut cancelled)?;
     if model.link_count() > MAX_FREE_FLOATING_STEP_LINKS {
         return Err(FreeFloatingMotionError::TooManyLinks {
@@ -283,8 +434,8 @@ fn advance<B: BushingLaw>(
         power_w: 0.0,
         reciprocal_condition: 1.0,
     };
-    let implicit = if rows.is_empty() {
-        super::step_with_bushings_and_effort(
+    let forced = if rows.is_empty() {
+        step_with_forcing(
             model,
             state,
             loads,
@@ -292,6 +443,8 @@ fn advance<B: BushingLaw>(
             duration,
             config,
             effort,
+            None,
+            forcing,
             &mut cancelled,
         )?
     } else {
@@ -332,7 +485,7 @@ fn advance<B: BushingLaw>(
             };
             Ok(power)
         };
-        step_with_bushings_effort_and_reaction(
+        step_with_forcing(
             model,
             state,
             loads,
@@ -341,9 +494,11 @@ fn advance<B: BushingLaw>(
             config,
             effort,
             Some(&mut reaction),
+            forcing,
             &mut cancelled,
         )?
     };
+    let implicit = forced.step;
     let middle = admit_constraints(
         rows,
         &implicit.midpoint_state.joint_position,
@@ -366,14 +521,17 @@ fn advance<B: BushingLaw>(
         .into());
     }
     poll(&mut cancelled)?;
-    Ok(ConstrainedFreeSpatialStep {
-        implicit,
-        midpoint_reaction: accepted,
-        position_residuals_before: initial.position,
-        position_residuals_midpoint: middle.position,
-        position_residuals_after: final_rows.position,
-        velocity_residuals_before: initial.velocity,
-        velocity_residuals_midpoint: middle.velocity,
-        velocity_residuals_after: final_rows.velocity,
+    Ok(ConstrainedForcedFreeSpatialStep {
+        step: ConstrainedFreeSpatialStep {
+            implicit,
+            midpoint_reaction: accepted,
+            position_residuals_before: initial.position,
+            position_residuals_midpoint: middle.position,
+            position_residuals_after: final_rows.position,
+            velocity_residuals_before: initial.velocity,
+            velocity_residuals_midpoint: middle.velocity,
+            velocity_residuals_after: final_rows.velocity,
+        },
+        com_velocity_residual_world: forced.com_velocity_residual_world,
     })
 }
