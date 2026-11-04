@@ -1,0 +1,8 @@
+frankensim.matdb-source.v1
+observation	cd97-padouk-bar5	Bar No. 5 (G4, 397 Hz) of a CONCORDE X4001 xylophone, padouk, L 29.3 cm, b 3.7 cm, h 1.9 cm edge, 0.8 cm centre, total mass 142.04 g	Young's modulus from the natural frequencies of the longitudinal waves, measured with noncontact excitation and a laser vibrometer on the freely suspended bar; density as tabulated	A. Chaigne and V. Doutaut, Numerical simulations of xylophones. I. Time-domain modeling of the vibrating bars, J. Acoust. Soc. Am. 101(1), 539-557 (1997): Table I p.544
+scalar	density	cd97-padouk-bar5	density	796	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	moisture_content_known	0	0	1
+scalar	young-modulus-longitudinal	cd97-padouk-bar5	young_modulus_longitudinal	9.54	GPa	constant
+uncertainty	young-modulus-longitudinal	unstated	-	-	-	-
+validity	young-modulus-longitudinal	moisture_content_known	0	0	1

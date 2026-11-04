@@ -1,0 +1,4 @@
+frankensim.description-source.v1
+observation	chaigne-doutaut-1997-padouk-bar5	Bar No. 5 (G4, 397 Hz) of a CONCORDE X4001 xylophone, padouk, freely suspended on rubber bands, noncontact acoustic excitation in an anechoic room, laser-vibrometer free decay, decay times by the matrix pencil method. Eta is Table I's as printed; Fig. 4 of the same paper plots a padouk regression that reads 4.22 times it, and the two disagree (padouk-loss-fig4curve-chaigne-doutaut1997.tsv).	A. Chaigne and V. Doutaut, Numerical simulations of xylophones. I. Time-domain modeling of the vibrating bars, J. Acoust. Soc. Am. 101(1), 539-557 (1997): Table I p.544
+scalar	viscoelastic-constant	chaigne-doutaut-1997-padouk-bar5	viscoelastic_constant_eta	9.16e-8	s	constant
+scalar	fluid-damping	chaigne-doutaut-1997-padouk-bar5	fluid_damping_gamma_b	12.44	1/s	constant
