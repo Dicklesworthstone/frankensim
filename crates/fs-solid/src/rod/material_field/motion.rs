@@ -336,10 +336,44 @@ impl<I> PreparedRodMotion<I> {
         Ok(RodMotionResponse { potential_energy_j, force_n, torque_body_nm })
     }
 
+    /// Pull back each physical axial extension `L0 * gamma_x` through the
+    /// original geodesic-midpoint strain map. Each pair contains world
+    /// translation derivatives followed by body/right rotation derivatives.
+    /// Dotting these rows with material-node velocities gives extension rate;
+    /// their transpose applies work-conjugate force/couple impulses.
+    ///
+    /// Output is caller-owned scratch, in segment order. No matrix, perturbed
+    /// pose or new constitutive model is allocated. On an error its contents
+    /// are unspecified. The original pose/support and SO(3)-cut checks apply.
+    pub fn axial_extension_gradients_into(&self, pose: &RodMotionPose,
+        output: &mut [[[f64; 6]; 2]], gate: &CancelGate) -> Result<(), SpatialRodError> {
+        self.validate_pose(pose, gate)?;
+        if output.len() != self.source.sections.len() {
+            return Err(SpatialRodError::Invalid("axial extension gradients need one row pair per segment"));
+        }
+        for (segment, pair) in output.iter_mut().enumerate() {
+            checkpoint(gate)?;
+            let kinematics = crate::rod::derivatives::analytic::Kinematics::from_nodes(
+                &pose.positions_m, &pose.frames, self.source.rod.l0, segment)?;
+            // Unit section force differentiates L0 * gamma_x, retaining the
+            // midpoint-frame motion and its two exact body torque pullbacks.
+            *pair = kinematics.linearize(fs_ga::Vec3::new(1.0, 0.0, 0.0),
+                fs_ga::Vec3::new(0.0, 0.0, 0.0), [0.0; 3], [0.0; 3], false)?.gradient;
+        }
+        checkpoint(gate)
+    }
+
     // All material/body-load observations use the same current pose and support
     // admission. A source's retained static pose must not substitute for motion.
     fn rod_at_pose(&self, pose: &RodMotionPose, gate: &CancelGate)
         -> Result<Rod, SpatialRodError> {
+        self.validate_pose(pose, gate)?;
+        Ok(Rod { positions: pose.positions_m.clone(), frames: pose.frames.clone(),
+            l0: self.source.rod.l0, section: self.source.rod.section })
+    }
+
+    fn validate_pose(&self, pose: &RodMotionPose, gate: &CancelGate)
+        -> Result<(), SpatialRodError> {
         checkpoint(gate)?;
         let count = self.inertia.len();
         if pose.positions_m.len() != count || pose.frames.len() != count
@@ -358,9 +392,7 @@ impl<I> PreparedRodMotion<I> {
                 return Err(SpatialRodError::Invalid("dynamic rod moved a stationary frame support"));
             }
         }
-        checkpoint(gate)?;
-        Ok(Rod { positions: pose.positions_m.clone(), frames: pose.frames.clone(),
-            l0: self.source.rod.l0, section: self.source.rod.section })
+        checkpoint(gate)
     }
 }
 

@@ -182,9 +182,51 @@ and timestep refinement still matter.
 `RodMotionStep::bending_heat` and `torsional_heat` report separate total and
 original-segment physical heat. The signed integration defect includes both
 exactly once. This fixed-state mechanical path reports heat without depositing
-it into a thermal reservoir. It supplies no axial/shear strain viscosity,
+it into a thermal reservoir. This angular path supplies no axial/shear strain viscosity,
 hereditary bending spectrum or thermoelastic bending feedback. An omitted law
 is unmodeled, and an explicit zero-viscosity law leaves the native trajectory
 unchanged. Focused regressions exercise independent damped-oscillator and heat
 refinement, both bending planes, stiff viscosity, fixed supports, finite-rotation
 objectivity with eccentric full inertia, and atomic source/refusal behavior.
+
+## Source-bound axial damping
+
+`PreparedRodAxialLoss` connects the existing `ConcentricAxialViscosity` material
+owner to the same trajectory. Each original segment retains its actual layered
+section, material receipts, state and geometry. The resistance is
+`C_a/L0 = sum(eta_a A)/L0`; the viscosity must explicitly support a broadband
+Kelvin law at the held source state. A frequency-local loss sample or a missing
+viscosity property cannot supply that law.
+
+```rust,ignore
+use fs_couple::rod_motion::{PreparedRodAxialLoss, RodAngularLosses};
+
+let axial = PreparedRodAxialLoss::new(state.model(), axial_sections, &gate)?;
+let angular = RodAngularLosses { bending: None, torsional: None };
+let (candidate, receipt) = state.step_axially_damped_candidate(
+    dt, &axial, angular, &world_wrenches, controls, &gate,
+)?;
+let physical_axial_heat = receipt.axial_heat.as_ref().unwrap().total_heat_j;
+```
+
+`step_spatial_axially_damped_candidate` accepts prepared material-point loads.
+Either entry point can include independently sourced bending and torsion.
+The rate is the derivative of the native Cosserat extension `L0*gamma_x`,
+including its geodesic-midpoint frame dependence. The force and torque are
+therefore conjugate to the same finite-rotation strain used by elastic motion;
+common rigid translation and spin do not become axial viscosity. The pullback
+retains eccentric centers of mass, full central inertia and stationary support
+reactions. Each frozen-pose scalar relaxation uses an exact exponential impulse
+and nonnegative physical heat. Bounded stack scratch and symmetric segment and
+mechanism sweeps avoid a dense damping solve and retain second-order splitting.
+Elastic-wave resolution and timestep refinement remain necessary.
+
+`RodMotionStep::axial_heat` reports total and original-segment heat independently
+of bending, torsion and the signed integration defect. The defect includes each
+physical loss once. This fixed-state entry point exports heat without depositing
+it into a thermal store, and supplies no transverse-shear viscosity or hereditary
+axial memory. Explicit zero axial viscosity preserves the existing trajectory.
+Source mismatch, cancellation and a failed energy gate leave the accepted state
+unchanged. The focused integration fixtures cover axial ringdown and heat
+refinement, stiff viscosity, reactions, finite-rotation objectivity, zero-law
+parity and source/refusal behavior.

@@ -314,21 +314,7 @@ pub(super) fn relax_angular<I: RodMotionInertia>(
     if rate == 0.0 {
         return Ok(0.0);
     }
-    let exposure = (coefficient * dt) * mode.mobility;
-    if !exposure.is_finite() || exposure <= 0.0 {
-        return Err(RodMotionError::Invalid(
-            "unrepresentable angular-strain relaxation interval",
-        ));
-    }
-    let fraction = -fs_math::det::expm1(-exposure);
-    let impulse = rate * (fraction / mode.mobility);
-    let dissipated = (0.5 * impulse) * rate * (2.0 - fraction);
-    finite(&[impulse, dissipated])?;
-    if dissipated <= 0.0 || impulse == 0.0 {
-        return Err(RodMotionError::Invalid(
-            "unrepresentable positive angular-strain material heat",
-        ));
-    }
+    let (impulse, dissipated) = rank_one_relaxation(rate, mode.mobility, coefficient, dt)?;
     for side in 0..2 {
         let node = segment + side;
         let gradient = mode.directions[side];
@@ -346,6 +332,35 @@ pub(super) fn relax_angular<I: RodMotionInertia>(
         }
     }
     Ok(dissipated)
+}
+
+/// Exact frozen-coordinate viscous impulse and its nonnegative work. Shared
+/// by angular and axial strain ports; no subtraction of stored kinetic energy.
+pub(super) fn rank_one_relaxation(
+    rate: f64,
+    mobility: f64,
+    coefficient: f64,
+    dt: f64,
+) -> Result<(f64, f64), RodMotionError> {
+    if coefficient == 0.0 || mobility == 0.0 || rate == 0.0 {
+        return Ok((0.0, 0.0));
+    }
+    let exposure = (coefficient * dt) * mobility;
+    if !exposure.is_finite() || exposure <= 0.0 {
+        return Err(RodMotionError::Invalid(
+            "unrepresentable material-strain relaxation interval",
+        ));
+    }
+    let fraction = -fs_math::det::expm1(-exposure);
+    let impulse = rate * (fraction / mobility);
+    let dissipated = (0.5 * impulse) * rate * (2.0 - fraction);
+    finite(&[impulse, dissipated])?;
+    if dissipated <= 0.0 || impulse == 0.0 {
+        return Err(RodMotionError::Invalid(
+            "unrepresentable positive material-strain heat",
+        ));
+    }
+    Ok((impulse, dissipated))
 }
 
 fn angular_gradient_matrices(left: So3, right: So3) -> Result<[Mat3; 2], RodMotionError> {

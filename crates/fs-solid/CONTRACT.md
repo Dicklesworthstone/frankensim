@@ -4221,6 +4221,22 @@ their original ownership independently of a consumer's contact-face selection.
 
 `PreparedRodMotion::body_loads` exposes the external conservative wrench at an admitted dynamic pose using the same gravity, hydrostatic displacement, attached-strand forces, and reference potential as the native force assembly. Nodal forces are expressed in world axes; pure attachment couples are expressed in the current body axes. Rotating attachment arms retain their actual mass and displaced-volume distributions, including cases where their centroids differ. `rebind_submerged_fluid` replaces an existing uniform fluid snapshot through `FluidTransport` while retaining the original solid reference inventory, inertial data, displaced-volume policy, reference geometry, and stationary supports. This model-level operation neither advances time nor accounts for environmental work; the continuing time owner must account for the potential change at its actual pose. These operations retain the existing full-immersion, nonoverlapping-volume, fixed-reference-volume approximation and infer no drag, added mass, partial immersion, free surface, solid compression, or reservoir dynamics.
 
+## Native finite-rotation axial-extension covectors
+
+`PreparedRodMotion::axial_extension_gradients_into` writes each original
+segment's derivative of `L0*gamma_x` into caller-owned bounded storage. Each
+endpoint row contains the world translational covector followed by its body
+right-trivialized rotational covector. It reuses the exact geodesic-midpoint
+kinematics and analytic virtual-work pullback of the native rod elastic owner,
+without cloning a rod or introducing an approximate velocity difference.
+The accessor validates the same pose/support dimensions, polls cancellation
+per segment, and refuses the same principal-log cut as force assembly. Scratch
+contents after refusal are unspecified; no accepted material or motion state
+changes. Common rigid translation/spin lies in its nullspace, and finite
+world rotations transform the force rows while preserving body torque rows.
+Consumers must transform these material-node covectors through their actual
+inertia and centroid coordinates before applying a physical loss law.
+
 ## Continuing source-temperature rod sections
 
 `PreparedRodMotion::rebind_material_temperatures` refreshes section response through the original `RodMaterialSource`, retaining reference inventory, intrinsic geometry, supports, attached links, gravity and hydrostatic displacement. It admits the exact reference material description and verifies replay of current section claims, expansion paths and strain bounds before resolving a new temperature field. Original unheated reference sections may acquire their explicit thermal binding. The source owner re-evaluates E/rho/G and integrates expansion from the original stress-free reference; current density does not redefine closed-body mass or rotary inertia. `strain_energy_j` evaluates the original conservative strain-storage owner at an admitted dynamic pose. Section geometry, reference displaced volume and separately bound tension-link material states remain fixed.

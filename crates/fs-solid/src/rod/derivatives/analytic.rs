@@ -42,20 +42,25 @@ pub(in crate::rod) struct Kinematics {
 }
 impl Kinematics {
     pub(in crate::rod) fn new(rod: &Rod, segment: usize) -> Result<Self, SolidError> {
-        if rod.positions.len() < 2 || rod.frames.len() != rod.positions.len()
-            || segment >= rod.positions.len()-1 || !rod.l0.is_finite() || rod.l0 <= 0.0 {
+        Self::from_nodes(&rod.positions, &rod.frames, rod.l0, segment)
+    }
+
+    pub(in crate::rod) fn from_nodes(positions: &[[f64; 3]], frames: &[So3],
+        length: f64, segment: usize) -> Result<Self, SolidError> {
+        if positions.len() < 2 || frames.len() != positions.len()
+            || segment >= positions.len()-1 || !length.is_finite() || length <= 0.0 {
             return Err(invalid("rod kinematics require matching nodes/frames, a valid segment and positive finite reference length"));
         }
-        let relative = rod.frames[segment+1].body_minus(rod.frames[segment]).map_err(group_error)?;
+        let relative = frames[segment+1].body_minus(frames[segment]).map_err(group_error)?;
         let half = So3::exp(relative.scale(0.5)).map_err(group_error)?;
-        let midpoint = rod.frames[segment].compose(half).map_err(group_error)?;
-        let delta = vsub(vector(rod.positions[segment+1]),vector(rod.positions[segment]));
-        let d = Vec3::new(delta.x/rod.l0,delta.y/rod.l0,delta.z/rod.l0);
+        let midpoint = frames[segment].compose(half).map_err(group_error)?;
+        let delta = vsub(vector(positions[segment+1]),vector(positions[segment]));
+        let d = Vec3::new(delta.x/length,delta.y/length,delta.z/length);
         let local = midpoint.inverse().rotate(d).map_err(group_error)?;
         if array(local).iter().chain(&array(relative.angular)).any(|v| !v.is_finite()) {
             return Err(invalid("rod strain kinematics are not representable"));
         }
-        Ok(Self { length: rod.l0, relative, half, midpoint, local })
+        Ok(Self { length, relative, half, midpoint, local })
     }
 
     pub(in crate::rod) fn strains(&self) -> ([f64;3],[f64;3]) {

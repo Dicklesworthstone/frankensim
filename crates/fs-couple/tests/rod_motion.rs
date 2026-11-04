@@ -34,6 +34,9 @@ mod torsional_loss;
 #[path = "rod_motion/bending_loss.rs"]
 mod bending_loss;
 
+#[path = "rod_motion/axial_loss.rs"]
+mod axial_loss;
+
 #[path = "rod_motion/impulse.rs"]
 mod impulse;
 

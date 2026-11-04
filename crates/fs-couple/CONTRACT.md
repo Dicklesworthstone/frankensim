@@ -7129,7 +7129,8 @@ clarinet is one filling of those objects.
   Thermal compiler tests vary specimen temperature through source curves and
   check changed pressure in linear, sine von Karman and sampled-FE plate paths,
   with and without separately selected viscosity. A fixed-mass card swap checks
-  rebuilt thickness and both damping addends against independent Zener and
+  rebuilt thickness and both damping addends against independent slab diffusion,
+  mean-curvature participation and
   Kelvin–Voigt arithmetic; conflicting heat-capacity claims require the selected
   pin to survive compilation. These fixtures validate implementation, not an
   experiment or a transient heating simulation.
@@ -7298,20 +7299,25 @@ clarinet is one filling of those objects.
 - Plate damping: a single authored viscous ratio is the two-point
   Rayleigh fit (`fs-material::visco`) through that ratio at ω₀ and
   4ω₀ so higher certified modes sit on the stiffness limb. Both linear and
-  von Karman banks add Zener thermoelastic loss only from explicit specimen
+  von Karman banks add thermoelastic bending loss only from explicit specimen
   inputs. `with_isotropic_thermoelastic_state` binds a resolved six-property
   bundle to the plate, moving elasticity, density, thermal properties, and
   temperature together and retaining its state identity. There is no
   density-threshold material guess or fixed-temperature substitute. Missing
   thermal inputs leave that loss unavailable/unclaimed; requesting the scalar
   law on an orthotropic plate refuses (including a mismatched shear modulus
-  when E1=E2). The law estimates the first through-thickness thermal relaxation
-  mode of a homogeneous isotropic thin beam/plate; it does not solve a thermal
-  field or establish an anisotropic loss law. Callers must exclude this addend
+  when E1=E2). The material owner evaluates the complete through-thickness
+  thermal diffusion spectrum of a homogeneous isotropic slab with insulated
+  faces. It does not solve a transient thermal field or establish an anisotropic
+  loss law. Callers must exclude this addend
   when authored damping or resolved thermal transport already includes it.
-  With prestress, the thermal addend is weighted by the mode's bending/total
-  strain-energy ratio: `phi^T K_b phi / phi^T (K_b + K_G) phi` for DKT modes,
-  and `D k^2 / (D k^2 + T)` for the isotropic sine modes. Authored loss is
+  Thermal participation is `E h^3/[12(1-nu)^2] integral (kappa_xx+kappa_yy)^2`
+  divided by total modal stiffness. Original DKT quadrature gives a sum of
+  squares, so saddle bending and twist create no spurious thermal loss.
+  Sine modes use the plane-stress factor `(1+nu)/(1-nu)` and prestress
+  dilution `D k^2 / (D k^2 + T)`. Conservative prestress enters only the
+  total energy denominator; viscosity retains its own bending/total ratio.
+  Authored loss is
   unchanged. The same projection reaches the sampled-FE von Karman bank.
   This is weak-loss, diagonal modal bending damping about the prestressed
   equilibrium; it does not model finite-amplitude membrane thermal loss or
@@ -7320,7 +7326,8 @@ clarinet is one filling of those objects.
   G1 tests independently integrate geometric energy and compare actual
   unforced sine-mode ringdown to the analytic damped oscillator under refinement.
   G0/G1 tests inspect both assembled damping operators against independent
-  Zener arithmetic, vary equal-density specimens and temperature, and cross
+  thermal-mode sums and tensor-energy integrals, vary equal-density specimens
+  and temperature, and cross
   the former density threshold without switching laws. Radiation
   reaction on linear compact radiators uses the sole Bessel–Struve piston
   owner in `fs-phs`, converting acoustic p/U to face p/v by the physical
@@ -7683,7 +7690,8 @@ clarinet is one filling of those objects.
   plates refuse at this linear adapter. Failed admission preserves previous modes.
   G1/G3 tests carry compiled source curves through this pHS pressure path at two
   independent solid temperatures on both sides of the former density threshold,
-  compare damping with Zener plus Kelvin–Voigt arithmetic, and exercise repeat
+  compare damping with thermal diffusion, mean-curvature participation and
+  Kelvin–Voigt arithmetic, and exercise repeat
   determinism and failed rebinding. They are synthetic implementation checks;
   this adds neither thermal evolution nor exterior plate-radiation back-reaction.
 - Von Karman geometric nonlinearity is the isotropic simply-supported
@@ -23498,6 +23506,38 @@ small-angle analytic damped-motion and heat refinement, explicit-zero and
 pure-twist isolation, finite-rotation frame objectivity with eccentric inertia,
 simultaneous separate loss accounts, and atomic source/band/step refusals.
 They do not establish measured material calibration or spatial convergence.
+
+## Intrinsic axial loss on native rods
+
+`rod_motion::PreparedRodAxialLoss` binds one original
+`ConcentricAxialViscosity` per segment to either prepared rod inertia view.
+It preserves the original elastic sources, complete query, property selections
+and reference geometry, and requires explicit broadband viscosity support.
+Its resistance is `C_a/L0 = sum(eta_a A)/L0`; missing or frequency-local loss is
+not inferred as a transient law. Temperature/source refresh requires a newly
+admitted matching loss bundle.
+
+`step_axially_damped_candidate` and `step_spatial_axially_damped_candidate`
+compose axial loss with independently optional `RodAngularLosses`. They use
+the native analytic derivative of geodesic-midpoint extension `L0*gamma_x`,
+including frame dependence, through original nodal masses and complete central
+inertia. Material-node covectors are pulled back to the same eccentric COM/spin
+coordinates as native motion. Rigid translation and common spin annihilate the
+strain rate, while constrained components receive their actual support impulse.
+The shared exponential scalar relaxation supplies positive integrated heat;
+bounded stack scratch and symmetric segment/mechanism sweeps avoid a dense
+damping solve and retain second-order splitting for the admitted smooth model.
+
+`RodMotionStep::axial_heat` retains total and per-original-segment physical heat,
+separate from bending, torsion and signed numerical error. Every physical loss
+appears once in the step energy gate. Explicit zero viscosity preserves existing
+motion and angular-loss arithmetic. Refused or cancelled trials publish no
+state. This mechanical path exports heat without implicit thermal deposition,
+and supplies no transverse-shear viscosity, hereditary axial spectrum or
+temperature feedback. Elastic-wave stability and temporal refinement still
+apply. Focused fixtures cover exact split motion/heat, stiff loss and reactions,
+ringdown refinement, finite-pose derivatives, frame objectivity, source matching
+and atomic refusal; they do not establish measured material calibration.
 
 ## Finite-cell heating from intrinsic shaft viscosity
 

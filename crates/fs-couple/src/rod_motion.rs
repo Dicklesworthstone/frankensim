@@ -375,6 +375,10 @@ pub use torsional_loss::{PreparedRodTorsionalLoss, RodTorsionalHeat};
 pub mod bending_loss;
 pub use bending_loss::{PreparedRodBendingLoss, RodAngularLosses, RodBendingHeat};
 
+/// Original section axial viscosity on the same finite-rotation strain map.
+pub mod axial_loss;
+pub use axial_loss::{PreparedRodAxialLoss, RodAxialHeat};
+
 /// Instantaneous terminal and attachment impulses on the same trajectory.
 pub mod impulse;
 
@@ -466,6 +470,8 @@ pub struct RodMotionStep {
     pub torsional_heat: Option<RodTorsionalHeat>,
     /// Nonnegative intrinsic bending heat, separate from torsion and numerical error.
     pub bending_heat: Option<RodBendingHeat>,
+    /// Intrinsic axial heat in original segment order, never numerical damping.
+    pub axial_heat: Option<RodAxialHeat>,
     /// Applied loads, gravity/buoyancy wrenches and stationary-support impulses.
     pub external_linear_impulse_n_s: [f64; 3],
     pub external_angular_impulse_nm_s: [f64; 3],
@@ -624,6 +630,11 @@ impl<I:RodMotionInertia> RodMotion<I> {
     }
     fn step_with_angular_losses(&self,dt:f64,loads:StageLoads<'_>,losses:RodAngularLosses<'_>,controls:RodMotionControls,
         gate:&CancelGate)->Result<(Self,RodMotionStep),RodMotionError> {
+        self.step_with_material_losses(dt, loads, losses, None, controls, gate)
+    }
+    fn step_with_material_losses(&self,dt:f64,loads:StageLoads<'_>,losses:RodAngularLosses<'_>,
+        axial:Option<&PreparedRodAxialLoss>,controls:RodMotionControls,
+        gate:&CancelGate)->Result<(Self,RodMotionStep),RodMotionError> {
         checkpoint(gate)?;
         if !dt.is_finite() || dt<=0.0 || 0.5*dt==0.0
             || !controls.maximum_step_s.is_finite() || controls.maximum_step_s<=0.0 || dt>controls.maximum_step_s
@@ -635,6 +646,7 @@ impl<I:RodMotionInertia> RodMotion<I> {
         }
         loads.validate()?;
         losses.admit(&self.model,gate)?;
+        if let Some(loss) = axial { loss.admit(&self.model, gate)?; }
         let next_time=self.time_s+dt;
         if !next_time.is_finite() || next_time<=self.time_s {
             return Err(RodMotionError::Invalid("rod clock cannot represent the requested advance"));
@@ -644,7 +656,24 @@ impl<I:RodMotionInertia> RodMotion<I> {
         let mut accounts=KickAccounts::new(loads.len());
         let mut torsional_heat=losses.torsional.map(PreparedRodTorsionalLoss::heat);
         let mut bending_heat=losses.bending.map(PreparedRodBendingLoss::heat);
-        losses.flow(&mut candidate,0.5*dt,&mut accounts,&mut torsional_heat,&mut bending_heat,gate)?;
+        let mut axial_heat=axial.map(PreparedRodAxialLoss::heat);
+        let active_axial=axial.filter(|loss|loss.active());
+        let active_angular=losses.bending.is_some_and(|loss|loss.resistance_nm_s().iter().any(|&c|c!=0.0))
+            || losses.torsional.is_some_and(|loss|loss.resistance_nm_s().iter().any(|&c|c!=0.0));
+        let axial_interval=if active_angular {0.25*dt} else {0.5*dt};
+        let mut loss_flow=|candidate:&mut Self,accounts:&mut KickAccounts| -> Result<(),RodMotionError> {
+            // Axial/angular/axial composition; explicit zero axial viscosity
+            // leaves the existing angular sweep and its rounding unchanged.
+            if let (Some(loss),Some(heat))=(active_axial,axial_heat.as_mut()) {
+                loss.flow(candidate,axial_interval,controls.balance_origin_m,accounts,heat,gate)?;
+            }
+            losses.flow(candidate,0.5*dt,accounts,&mut torsional_heat,&mut bending_heat,gate)?;
+            if active_angular && let (Some(loss),Some(heat))=(active_axial,axial_heat.as_mut()) {
+                loss.flow(candidate,axial_interval,controls.balance_origin_m,accounts,heat,gate)?;
+            }
+            Ok(())
+        };
+        loss_flow(&mut candidate,&mut accounts)?;
         candidate.kick(0.5*dt,loads,controls.balance_origin_m,&mut accounts,gate)?;
         for node in 0..loads.len() {
             checkpoint(gate)?;
@@ -688,12 +717,13 @@ impl<I:RodMotionInertia> RodMotion<I> {
         }
         candidate.response=candidate.model.evaluate(&candidate.pose,gate)?;
         candidate.kick(0.5*dt,loads,controls.balance_origin_m,&mut accounts,gate)?;
-        losses.flow(&mut candidate,0.5*dt,&mut accounts,&mut torsional_heat,&mut bending_heat,gate)?;
+        loss_flow(&mut candidate,&mut accounts)?;
         let after=candidate.observe(controls.balance_origin_m)?;
         let mut defect=(after.kinetic_energy_j-before.kinetic_energy_j)
             +(after.potential_energy_j-before.potential_energy_j)-accounts.work;
         if let Some(heat)=&torsional_heat {defect+=heat.total_heat_j;}
         if let Some(heat)=&bending_heat {defect+=heat.total_heat_j;}
+        if let Some(heat)=&axial_heat {defect+=heat.total_heat_j;}
         finite(&[accounts.work,defect])?;
         if defect.abs()>controls.energy_defect_limit_j {
             return Err(RodMotionError::Energy {defect_j:defect,limit_j:controls.energy_defect_limit_j});
@@ -706,7 +736,7 @@ impl<I:RodMotionInertia> RodMotion<I> {
         candidate.steps=self.steps.checked_add(1).ok_or(RodMotionError::Invalid("rod step count overflow"))?;
         checkpoint(gate)?;
         Ok((candidate,RodMotionStep {before,after,source_work_quadrature_j:accounts.work,
-            integration_defect_j:defect,torsional_heat,bending_heat,external_linear_impulse_n_s:accounts.linear,
+            integration_defect_j:defect,torsional_heat,bending_heat,axial_heat,external_linear_impulse_n_s:accounts.linear,
             external_angular_impulse_nm_s:accounts.angular,linear_balance_residual_n_s:linear_residual,
             angular_balance_residual_nm_s:angular_residual,support_impulses:accounts.supports}))
     }
