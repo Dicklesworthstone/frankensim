@@ -12,7 +12,9 @@ use fs_conduction::fixtures::{box_grid, on_box_face};
 use fs_conduction::material::ConductivityModel;
 use fs_conduction::mesh::ConductionMesh;
 use fs_conduction::solve::LinearConfig;
-use fs_conduction::transient::{TransientConfig, TransientProblem, VolumetricHeatCapacity};
+use fs_conduction::transient::{
+    TransientConfig, TransientProblem, VolumetricHeatCapacity, assemble_capacitance,
+};
 use fs_qty::{Dims, QtyAny};
 use fs_rep_mesh::TetComplex;
 use fs_scenario::envelope::{
@@ -201,6 +203,169 @@ fn crank_nicolson_with_aligned_steps_delivers_the_declared_energy_exactly() {
     );
     // And the declared value is the analytic one, not a re-quadrature.
     assert!((energy.declared_j() - 2400.0 * FULL_LOAD_DENSITY).abs() < 1e-6);
+}
+
+#[test]
+fn switching_off_power_preserves_the_robin_bath_equilibrium() {
+    // The power map can turn off while a real 300 K environment remains.
+    // Scaling the complete assembled load would instead make the body cool
+    // toward zero kelvin by removing the bath's incoming Robin heat.
+    let mesh = unit_mesh(3);
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region(
+            "bath",
+            |_| true,
+            ThermalBc::robin(20.0, T_COLD).expect("Robin"),
+        )
+        .expect("bath region")
+        .finish()
+        .expect("boundary");
+    let source = ScalarField::uniform("full-load source", FULL_LOAD_DENSITY).expect("source");
+    let cycle =
+        DutyCycle::new(vec![DutySegment::constant(4000.0, 0.0).expect("off")]).expect("cycle");
+    let initial = vec![T_COLD; mesh.vertex_count()];
+
+    for theta in [1.0, 0.75, 0.5] {
+        let config = TransientConfig::new(theta, 1000.0, linear_config()).expect("config");
+        let solution = with_cx(|cx| {
+            march_duty_cycle(
+                cx,
+                TransientProblem {
+                    mesh: &mesh,
+                    boundary: &boundary,
+                    material: &material(),
+                    source: &source,
+                    capacity: capacity(),
+                },
+                &config,
+                &cycle,
+                FULL_LOAD_DENSITY,
+                &initial,
+                f64::INFINITY,
+            )
+            .expect("power-off march")
+        });
+        for (vertex, &temperature) in solution.temperature.iter().enumerate() {
+            assert!(
+                (temperature - T_COLD).abs() < 2e-10,
+                "theta={theta}: power-off vertex {vertex} left bath equilibrium: {temperature} K"
+            );
+        }
+        assert_eq!(solution.energy.delivered_j(), 0.0);
+    }
+}
+
+#[test]
+fn prescribed_boundary_heat_survives_a_varying_power_schedule() {
+    // Integrate the actual stored heat of a unit cube with a known inward
+    // boundary flux. The affine P1 volume source has exact mean 4 W/m^3;
+    // only that source follows the ramp. The six faces supply 12 W throughout.
+    let mesh = unit_mesh(3);
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region(
+            "inward heat",
+            |_| true,
+            ThermalBc::neumann(-2.0).expect("flux"),
+        )
+        .expect("flux region")
+        .finish()
+        .expect("boundary");
+    let source = ScalarField::nodal(
+        "affine full-load source",
+        mesh.vertex_count(),
+        mesh.positions().iter().map(|p| 2.0 + 4.0 * p[0]).collect(),
+    )
+    .expect("source");
+    let cycle =
+        DutyCycle::new(vec![DutySegment::ramp(6000.0, 0.0, 1.0).expect("ramp")]).expect("cycle");
+    let initial = vec![T_COLD; mesh.vertex_count()];
+    let capacitance = with_cx(|cx| assemble_capacitance(cx, &mesh, capacity()).expect("capacity"));
+    let dt_s = 2000.0;
+
+    for theta in [1.0, 0.75, 0.5] {
+        let config = TransientConfig::new(theta, dt_s, linear_config()).expect("config");
+        let solution = with_cx(|cx| {
+            march_duty_cycle(
+                cx,
+                TransientProblem {
+                    mesh: &mesh,
+                    boundary: &boundary,
+                    material: &material(),
+                    source: &source,
+                    capacity: capacity(),
+                },
+                &config,
+                &cycle,
+                4.0,
+                &initial,
+                f64::INFINITY,
+            )
+            .expect("heated boundary march")
+        });
+        // A linear ramp's theta quadrature differs from its exact integral by
+        // (theta - 1/2)*dt*(s_end - s_start), independently of the mesh.
+        let volume_heat_j = 4.0 * (3000.0 + (theta - 0.5) * dt_s);
+        let boundary_heat_j = 12.0 * 6000.0;
+        let change: Vec<_> = solution.temperature.iter().map(|t| t - T_COLD).collect();
+        let mut nodal_energy = vec![0.0; mesh.vertex_count()];
+        capacitance.spmv(&change, &mut nodal_energy);
+        let stored_j: f64 = nodal_energy.iter().sum();
+        let expected_j = volume_heat_j + boundary_heat_j;
+        assert!(
+            (stored_j - expected_j).abs() < 1e-5,
+            "theta={theta}: stored {stored_j} J, expected {expected_j} J with the fixed boundary heat"
+        );
+        assert!((solution.energy.delivered_j() - volume_heat_j).abs() < 1e-9);
+    }
+}
+
+#[test]
+fn a_millikelvin_scheduled_pulse_is_resolved_against_its_temperature_rise() {
+    let mesh = unit_mesh(4);
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .adiabatic_remainder()
+        .finish()
+        .expect("insulated boundary");
+    let source_density = 2.0;
+    let source = ScalarField::uniform("weak full-load source", source_density).expect("source");
+    let cycle =
+        DutyCycle::new(vec![DutySegment::ramp(6000.0, 0.0, 1.0).expect("ramp")]).expect("cycle");
+    let initial = vec![T_COLD; mesh.vertex_count()];
+    let linear = LinearConfig {
+        tolerance: 1e-7,
+        ..LinearConfig::default()
+    };
+    let dt_s = 2000.0;
+
+    for theta in [1.0, 0.75, 0.5] {
+        let config = TransientConfig::new(theta, dt_s, linear).expect("config");
+        let solution = with_cx(|cx| {
+            march_duty_cycle(
+                cx,
+                TransientProblem {
+                    mesh: &mesh,
+                    boundary: &boundary,
+                    material: &material(),
+                    source: &source,
+                    capacity: capacity(),
+                },
+                &config,
+                &cycle,
+                source_density,
+                &initial,
+                f64::INFINITY,
+            )
+            .expect("weak scheduled pulse")
+        });
+        let expected_rise = source_density * (3000.0 + (theta - 0.5) * dt_s) / RHO_CP;
+        for (vertex, &temperature) in solution.temperature.iter().enumerate() {
+            let error = (temperature - T_COLD - expected_rise).abs();
+            assert!(
+                error < 20.0 * linear.tolerance * expected_rise,
+                "theta={theta}: vertex {vertex} weak-pulse error {error} K exceeds the tolerance on the {expected_rise} K rise"
+            );
+        }
+    }
 }
 
 /// A cycle whose ramps do NOT mirror each other, so first-order integration

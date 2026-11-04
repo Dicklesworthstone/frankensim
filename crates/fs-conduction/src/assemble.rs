@@ -417,15 +417,7 @@ pub(crate) fn assemble_operator_scaled_with_interfaces(
                     coo.push(tet[a] as usize, tet[b] as usize, ke[a][b]);
                 }
             }
-            let volume = mesh.element_volume(e);
-            for a in 0..4 {
-                let mut acc = 0.0f64;
-                for (b, &vb) in tet.iter().enumerate() {
-                    let w = if a == b { volume / 10.0 } else { volume / 20.0 };
-                    acc = w.mul_add(source.at(vb as usize), acc);
-                }
-                load[tet[a] as usize] += acc;
-            }
+            add_element_source(mesh, e, source, &mut load);
         }
         start = end;
     }
@@ -439,6 +431,42 @@ pub(crate) fn assemble_operator_scaled_with_interfaces(
         operator: coo.assemble(),
         load,
     })
+}
+
+/// Integrate the original P1 volumetric source without assembling conductivity
+/// or boundary terms. Time-dependent power schedules scale only this load.
+pub(crate) fn assemble_source_load(
+    cx: &Cx<'_>,
+    mesh: &ConductionMesh,
+    source: &ScalarField,
+) -> Result<Vec<f64>, ConductionError> {
+    source.validate("volumetric source", mesh.vertex_count())?;
+    let mut load = vec![0.0; mesh.vertex_count()];
+    for element in 0..mesh.element_count() {
+        if element % ASSEMBLY_TILE == 0 {
+            checkpoint(cx, "assemble-source", element)?;
+        }
+        add_element_source(mesh, element, source, &mut load);
+    }
+    Ok(load)
+}
+
+fn add_element_source(
+    mesh: &ConductionMesh,
+    element: usize,
+    source: &ScalarField,
+    load: &mut [f64],
+) {
+    let tet = mesh.complex().tets[element];
+    let volume = mesh.element_volume(element);
+    for a in 0..4 {
+        let mut acc = 0.0f64;
+        for (b, &vb) in tet.iter().enumerate() {
+            let w = if a == b { volume / 10.0 } else { volume / 20.0 };
+            acc = w.mul_add(source.at(vb as usize), acc);
+        }
+        load[tet[a] as usize] += acc;
+    }
 }
 
 /// Exact P₁ Robin matrix for a triangle with nodal transfer coefficients.
