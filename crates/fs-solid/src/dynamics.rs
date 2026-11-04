@@ -41,6 +41,8 @@ pub mod impact;
 pub mod contact_network;
 /// Simultaneous Coulomb impacts through the same original mass and trajectory.
 pub mod frictional_impact;
+/// Sustained normal and Coulomb forces through the original exact trajectory.
+pub mod sustained;
 
 mod impulse;
 pub use impulse::{LinearSolidImpulseError, LinearSolidImpulseReport};
@@ -600,20 +602,39 @@ impl ExactLinearSolid {
             ));
         }
         let response = self.flow.evaluate(&self.state, held_force_n)?;
+        poll(cx)?;
+        let (supplied_work_j, dissipated_j) =
+            self.held_force_work(held_force_n, &response.state, &response.integrals)?;
+        self.accept(
+            response.state,
+            supplied_work_j,
+            dissipated_j,
+            step,
+            time_s,
+            cx,
+        )
+    }
+
+    // Shared by ordinary motion and the sustained-contact native replay.
+    // Work is evaluated from the actual accepted displacement, independently
+    // of the prepared viscosity integral and original stored energy.
+    fn held_force_work(
+        &self,
+        force_n: &[f64],
+        candidate: &[f64],
+        integrals: &[f64],
+    ) -> Result<(f64, f64), ExactLinearSolidError> {
         let dissipated_j = if self.viscous {
-            *response
-                .integrals
+            *integrals
                 .first()
                 .ok_or_else(|| invalid("missing independently integrated viscosity loss"))?
         } else {
             0.0
         };
-        let candidate = response.state;
-        poll(cx)?;
-        let supplied_work_j = (0..n).fold(0.0, |s, i| {
-            held_force_n[i].mul_add(candidate[i] - self.state[i], s)
+        let supplied_work_j = (0..self.free_dofs.len()).fold(0.0, |s, i| {
+            force_n[i].mul_add(candidate[i] - self.state[i], s)
         });
-        self.accept(candidate, supplied_work_j, dissipated_j, step, time_s, cx)
+        Ok((supplied_work_j, dissipated_j))
     }
 
     /// Advance one exactly linearly interpolated force interval. Start and end

@@ -22,6 +22,38 @@ G1/G3 regressions check analytic elastic/Maxwell ramp work and heat, mean-load
 response, later stress-free birth and relaxation, incompatible load-history
 refusals, and unchanged backward-Euler force/work identities.
 
+## Sustained normal and Coulomb forces on exact complete solids
+
+`ExactLinearSolid::advance_sustained_contacts` advances the original held-force
+trajectory under simultaneous normal and two-tangent Coulomb forces. The shared
+`fs-contact::sustained::solve` owner closes actual endpoint gaps and accumulated
+slip; every response starts from the same accepted native state. Original full
+consistent inertia, stiffness and optional physical viscosity remain present.
+Prepared matrices are borrowed, and native matrix contractions reuse bounded
+linear scratch without another exponential, factorization or modal truncation.
+
+Actual point traces and their transposes use one canonical contact-ID order.
+Independent work checks separate external work, prescribed-surface work,
+normal contact work, relative frictional loss and the original integrated
+viscosity. Friction is not added again to the native viscosity account and no
+thermal destination is inferred. The actual complete energy change and native
+cumulative accounts must both pass before the original sole acceptance.
+
+Initial impacts, negative actual gaps, inconsistent loaded dwell, unresolved
+endpoint slip reversals and invalid sticking/sliding directions refuse.
+A mandatory caller-owned whole-path admission checks interior nonpenetration,
+fixed geometry, contact modes and any necessary determinacy evidence; endpoint
+convergence alone is insufficient. This bounded local constant-force interval
+does not discover events, claim global uniqueness, or resolve a changing force
+history. Cancellation, budgets, source errors and late admission failures leave
+physical state, preparation, clock and cumulative work unchanged.
+
+Focused G1/G3/G4 regressions in `tests/solid_sustained_contact.rs` cover static
+support and breakaway, circular two-axis sliding, translating surfaces and
+source work, full cross mass, simultaneous contacts and ordering, analytical
+elastic/viscous motion and continuation, impacts/stopping and transactional
+refusal. Runtime verification is recorded with the implementation commit.
+
 ## Native quadratic Maxwell force, contact and pressure drift
 
 `MixedViscoTetMotion::force_kick_candidate` integrates the accepted original
