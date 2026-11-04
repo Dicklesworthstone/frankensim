@@ -329,6 +329,20 @@ fn warped_hex_impulses_and_arrest_use_exact_reference_inertia() {
             .unwrap();
             let motion =
                 FiniteThermoplasticHexMotion::try_new(solid, &DENSITY, &[[0.0; 3]; 8], cx).unwrap();
+            // The body-acceleration adapter must retain the same full mass
+            // column, rather than using a nodal lump or an equal force share.
+            let mut acceleration = [[0.0; 3]; 8];
+            acceleration[0] = target;
+            let projected = motion
+                .reference_acceleration_load_n(&acceleration, cx)
+                .unwrap();
+            assert_eq!(projected.len(), impulses.len());
+            for (&(actual_dof, actual), &(expected_dof, expected)) in
+                projected.iter().zip(&impulses)
+            {
+                assert_eq!(actual_dof, expected_dof);
+                near(actual, expected, 2e-14, 2e-14);
+            }
             let candidate = motion
                 .impulse_candidate(&[], &impulses, [0.0; 3], impulse_controls, cx)
                 .unwrap();
@@ -372,6 +386,135 @@ fn warped_hex_impulses_and_arrest_use_exact_reference_inertia() {
             near(arrested.inertia.kinetic_after_j, 0.0, 2e-12, 0.0);
             near(arrested.inertia.numerical_loss_j, kinetic, 2e-12, 0.0);
             near(arrested.material_energy.caloric_heat_j, 0.0, 2e-12, 0.0);
+        }
+    });
+}
+
+#[test]
+fn heterogeneous_hex_body_acceleration_preserves_mass_force_and_torque() {
+    with_cx(|cx| {
+        // Two unit cells share their interface; the second is four times
+        // heavier. Its exact centre of mass is x=1.3, not geometric x=1.
+        let nodes = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [2.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 1.0],
+            [2.0, 0.0, 1.0],
+            [0.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0],
+            [2.0, 1.0, 1.0],
+        ];
+        let cells = [[0, 1, 4, 3, 6, 7, 10, 9], [1, 2, 5, 4, 7, 8, 11, 10]];
+        let density = [2.0, 8.0];
+        let acceleration = [0.8, -0.3, 0.2];
+        let initial_velocity = [0.02, -0.01, 0.03];
+        let dt = 0.01;
+        for formulation in [
+            FiniteHexFormulation::Standard,
+            FiniteHexFormulation::MeanDilatation,
+        ] {
+            let solid = FiniteThermoplasticHexSolid::try_new(
+                &nodes,
+                &cells,
+                vec![family(); 2],
+                &[300.0; 2],
+                formulation,
+                HexAssemblyBudget {
+                    maximum_tangent_entries: 2 * 768,
+                    ..HexAssemblyBudget::default()
+                },
+                cx,
+            )
+            .unwrap();
+            let motion =
+                FiniteThermoplasticHexMotion::try_new(solid, &density, &[initial_velocity; 12], cx)
+                    .unwrap();
+            let loads = motion
+                .reference_acceleration_load_n(&[acceleration; 12], cx)
+                .unwrap();
+            let mut full = [0.0; 36];
+            for &(dof, force) in &loads {
+                full[dof] = force;
+            }
+            for node in 0..12 {
+                let mass_weight = match node % 3 {
+                    0 => density[0] / 8.0,
+                    1 => (density[0] + density[1]) / 8.0,
+                    _ => density[1] / 8.0,
+                };
+                for axis in 0..3 {
+                    near(
+                        full[3 * node + axis],
+                        mass_weight * acceleration[axis],
+                        2e-14,
+                        0.0,
+                    );
+                }
+            }
+            for origin in [[0.0; 3], [0.7, -0.4, 0.2]] {
+                let mut force = [0.0; 3];
+                let mut torque = [0.0; 3];
+                for (node, position) in nodes.iter().enumerate() {
+                    let arm: [f64; 3] = std::array::from_fn(|i| position[i] - origin[i]);
+                    let f: [f64; 3] = std::array::from_fn(|i| full[3 * node + i]);
+                    for axis in 0..3 {
+                        force[axis] += f[axis];
+                    }
+                    torque[0] += arm[1] * f[2] - arm[2] * f[1];
+                    torque[1] += arm[2] * f[0] - arm[0] * f[2];
+                    torque[2] += arm[0] * f[1] - arm[1] * f[0];
+                }
+                let first_moment = [
+                    13.0 - 10.0 * origin[0],
+                    5.0 - 10.0 * origin[1],
+                    5.0 - 10.0 * origin[2],
+                ];
+                let expected_torque = [
+                    first_moment[1] * acceleration[2] - first_moment[2] * acceleration[1],
+                    first_moment[2] * acceleration[0] - first_moment[0] * acceleration[2],
+                    first_moment[0] * acceleration[1] - first_moment[1] * acceleration[0],
+                ];
+                for axis in 0..3 {
+                    near(force[axis], 10.0 * acceleration[axis], 3e-13, 0.0);
+                    near(torque[axis], expected_torque[axis], 3e-13, 0.0);
+                }
+            }
+            let step = motion
+                .advance(&[300.0; 2], &[], &loads, dt, settings(), controls(), cx)
+                .unwrap();
+            for velocity in step.motion.velocity_mps() {
+                for axis in 0..3 {
+                    near(
+                        velocity[axis],
+                        initial_velocity[axis] + dt * acceleration[axis],
+                        2e-9,
+                        0.0,
+                    );
+                }
+            }
+            near(step.inertia.reference_mass_kg, 10.0, 3e-13, 0.0);
+            let after_loads = step
+                .motion
+                .reference_acceleration_load_n(&[acceleration; 12], cx)
+                .unwrap();
+            assert_eq!(after_loads, loads);
+            assert!(
+                motion
+                    .reference_acceleration_load_n(&[acceleration; 11], cx)
+                    .is_err()
+            );
+            assert!(
+                motion
+                    .reference_acceleration_load_n(&[[f64::NAN; 3]; 12], cx)
+                    .is_err()
+            );
+            assert_eq!(motion.velocity_mps(), &[initial_velocity; 12]);
+            assert_eq!(motion.solid().displacement_m(), &[[0.0; 3]; 12]);
         }
     });
 }
