@@ -91,6 +91,25 @@ mass-normalized damped modes (`time`, moved from fs-couple under owner decision 
   `tests/complex_modes.rs` regressions cover analytic nonproportional phase,
   gyroscopic handedness, full inertia, unit modal mass, coordinate/rate scaling,
   active growth, rigid and defective poles, budgets, cancellation and replay.
+- `quadratic_modes::PreparedQuadraticModes::prepare_response` rechecks one
+  resolved simple pole against the original source rows and factors the full
+  bordered linearization with `fs-la::pole_response::PreparedPole` once.
+  `PreparedQuadraticResponse::forcing_residues` accepts complete batches of
+  analytic forces evaluated at that pole and linear displacement/velocity
+  sensors in original coordinates. It returns physical Laplace displacement,
+  velocity and sensor residues plus participation in the canonical unit-mass
+  right-mode gauge. Left/right nonnormal coupling comes from the full solve;
+  no Hermitian right-mode force projection or proportional-damping shortcut is
+  used. Binary force scaling and the physical spectral chain factor preserve
+  the original mass, rate and coordinate units. Each RHS reuses the factor and
+  audits the original bordered rows. Separate numerical/physical byte and work
+  ceilings admit complete batches, and cancellation publishes no partial batch.
+  These are one simple pole's residues, not full harmonic amplitudes, powers,
+  observability certificates or a complete modal realization. Seven native
+  `tests/quadratic_residues.rs` cases cover analytic scalar and full 2x2
+  resolvents, nonnormal zero-right-projection excitation, nonproportional phase,
+  signed gyroscopic coupling, mixed units and extreme rates, complex sensors,
+  simple zero poles, active growth, refusal gates and deterministic factor reuse.
 - `ModalError` — typed refusals with stable `FS-MODAL-*` display codes:
   dimension mismatch, mass-not-SPD, factorization refusal (wrapping the
   fs-sparse `FS-SPARSE-DIRECT-*` code and the shift), invalid window,

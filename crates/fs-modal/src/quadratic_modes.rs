@@ -8,7 +8,9 @@
 //! These are local right eigenpairs, not a complete spectrum or certified
 //! eigenvalue/shape enclosures. General force participation and pole residues
 //! require left-mode information too; right modes alone cannot diagonalize a
-//! nonproportionally damped forced response. Repeated/defective roots can refuse.
+//! nonproportionally damped forced response. [`PreparedQuadraticModes::prepare_response`]
+//! obtains those residues through the shared full bordered factor, preserving
+//! that left/right coupling. Repeated/defective roots can refuse.
 
 use crate::{quadratic_fraction, quadratic_power_scale};
 use fs_la::factor::{Cholesky, cholesky};
@@ -19,6 +21,12 @@ use fs_math::{c64::C64, det};
 
 /// Shared local-pole accuracy and resource options; reference rate is physical.
 pub use fs_la::nonlinear_eig::PoleOptions;
+
+mod response;
+pub use response::{
+    PoleResponseOptions, PreparedQuadraticResponse, QuadraticForceResidue, QuadraticObservation,
+    QuadraticResponseError, QuadraticResponseOptions,
+};
 
 /// One locally resolved right mode in the ORIGINAL generalized coordinates.
 #[derive(Clone, Debug)]
@@ -259,29 +267,7 @@ impl<'a> PreparedQuadraticModes<'a> {
             |s, cancel| self.evaluate(s, cancel),
             &mut cancelled,
         )?;
-        let norm = self.mass_norm(&pole.vector, &mut cancelled)?;
-        let (mantissa, exponent) = quadratic_fraction(norm);
-        let mut displacement = Vec::with_capacity(self.n);
-        for (i, &value) in pole.vector.iter().enumerate() {
-            poll(&mut cancelled)?;
-            displacement.push(scale_complex(
-                divide(value, mantissa),
-                -self.coordinate_exponents[i] - exponent,
-            )?);
-        }
-        let pivot = (1..self.n).fold(0, |best, i| {
-            if displacement[i].abs() > displacement[best].abs() {
-                i
-            } else {
-                best
-            }
-        });
-        let amplitude = displacement[pivot].abs();
-        let phase = divide(displacement[pivot].conj(), amplitude);
-        for value in &mut displacement {
-            *value = *value * phase;
-        }
-        displacement[pivot] = C64::from_re(amplitude);
+        let displacement = self.physical_displacement(&pole.vector, &mut cancelled)?;
         let laplace_frequency_per_s = scale_complex(pole.value, self.time_exponent)?;
         let velocity: Vec<_> = displacement
             .iter()
@@ -312,6 +298,38 @@ impl<'a> PreparedQuadraticModes<'a> {
             relative_correction: pole.relative_step,
             iterations: pole.iterations,
         })
+    }
+
+    // Canonical physical gauge shared by mode discovery and response preparation.
+    fn physical_displacement(
+        &self,
+        vector: &[C64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<C64>, QuadraticModeError> {
+        let norm = self.mass_norm(vector, cancelled)?;
+        let (mantissa, exponent) = quadratic_fraction(norm);
+        let mut displacement = Vec::with_capacity(self.n);
+        for (i, &value) in vector.iter().enumerate() {
+            poll(cancelled)?;
+            displacement.push(scale_complex(
+                divide(value, mantissa),
+                -self.coordinate_exponents[i] - exponent,
+            )?);
+        }
+        let pivot = (1..self.n).fold(0, |best, i| {
+            if displacement[i].abs() > displacement[best].abs() {
+                i
+            } else {
+                best
+            }
+        });
+        let amplitude = displacement[pivot].abs();
+        let phase = divide(displacement[pivot].conj(), amplitude);
+        for value in &mut displacement {
+            *value = *value * phase;
+        }
+        displacement[pivot] = C64::from_re(amplitude);
+        Ok(displacement)
     }
 
     fn evaluate(
