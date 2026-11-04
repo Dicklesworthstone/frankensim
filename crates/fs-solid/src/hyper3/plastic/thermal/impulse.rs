@@ -133,7 +133,7 @@ impl<'a, L: FiniteThermalJ2Material> FiniteThermoplasticTetSolid<'a, L> {
     /// shared mass owner accounts for their reaction impulse and signed work,
     /// and measures angular momentum at the current deformed positions.
     ///
-    /// This requires `with_inertia` first. The candidate retains the original
+    /// This requires bound inertia first. The candidate retains the original
     /// reference density, source families and thermal reference, temperature,
     /// deformation, all plastic/creep history, stress and free/internal storage.
     /// No material interval is advanced and no physical or numerical heat is
@@ -196,6 +196,10 @@ impl<'a, L: FiniteThermalJ2Material> FiniteThermoplasticTetSolid<'a, L> {
             motion: Some(ThermalMotion {
                 velocity_mps,
                 reference_density_kg_m3: Arc::clone(&motion.reference_density_kg_m3),
+                reference_nodal_density_kg_m3: motion
+                    .reference_nodal_density_kg_m3
+                    .as_ref()
+                    .map(Arc::clone),
                 mass: Arc::clone(&motion.mass),
             }),
         };

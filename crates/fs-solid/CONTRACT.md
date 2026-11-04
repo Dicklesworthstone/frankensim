@@ -3815,6 +3815,29 @@ material interval and deposits no heat. `tests/thermoplastic_impulse.rs`
 checks hot plastically set bodies, independent reference-mass/torque/work
 oracles, moving supports, state retention and subsequent native thermal motion.
 
+### Graded reference inertia in finite thermoplastic tetrahedra
+
+`FiniteThermoplasticTetSolid::with_nodal_inertia` binds a positive P1 reference
+density through the original exact consistent-mass owner. The complete nodal
+field and mass operator remain fixed through thermal softening, plastic/creep
+history, finite deformation and instantaneous impulses. Reported cell means
+describe inventory; they do not replace the graded inertia. Existing cellwise
+binding retains its original arithmetic, including the uniform-density reduction.
+
+`reference_acceleration_load_n` applies that same mass operator to an
+original-node P1 acceleration field, retaining supported-node forces and
+density-weighted moments. The caller supplies these held loads to the native
+step once and owns any evolving field/potential. Heating does not requery
+density to change the mass of a closed specimen, and numerical kinetic losses
+remain separate from caloric heat. The retained field is available through
+`reference_nodal_density_kg_m3`.
+
+The focused `hyper_plastic_thermal/nodal_density.rs` regressions specify exact
+simplex mass/gravity moments, heated plastic continuation, equal-total-mass
+redistribution of contact mobility, impulse/history retention, the uniform
+reduction, and atomic refusal/cancellation. This authored reference inventory
+adds no new material-source or pressure-dependent density claim.
+
 ### Material-point mobility with inelastic memory
 
 The finite plastic and viscoelastic motion owners expose `TetImpulsePoint`,

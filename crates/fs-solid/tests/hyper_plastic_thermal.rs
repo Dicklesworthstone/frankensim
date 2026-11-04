@@ -1,5 +1,8 @@
 //! Finite temperature/history and momentum checks with independent coaxial laws.
 
+#[path = "hyper_plastic_thermal/nodal_density.rs"]
+mod nodal_density;
+
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_material::plastic::finite::thermal::{

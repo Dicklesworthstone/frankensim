@@ -150,6 +150,7 @@ impl FiniteThermoplasticTetEnergy {
 struct ThermalMotion {
     velocity_mps: Vec<[f64; 3]>,
     reference_density_kg_m3: Arc<[f64]>,
+    reference_nodal_density_kg_m3: Option<Arc<[f64]>>,
     mass: Arc<P1ReferenceMass>,
 }
 
@@ -336,15 +337,7 @@ impl<'a, L: FiniteThermalJ2Material> FiniteThermoplasticTetSolid<'a, L> {
         velocity_mps: &[[f64; 3]],
         cx: &Cx<'_>,
     ) -> Result<Self, FiniteThermoplasticTetError> {
-        checkpoint(cx)?;
-        if self.motion.is_some() {
-            return Err(invalid("finite thermal reference mass is already bound").into());
-        }
-        if velocity_mps.len() != self.state.nodes_m.len()
-            || velocity_mps.iter().flatten().any(|v| !v.is_finite())
-        {
-            return Err(invalid("one finite initial velocity per original node required").into());
-        }
+        self.admit_initial_motion(velocity_mps, cx)?;
         let mass = P1ReferenceMass::new(
             self.state.elements.iter().map(|e| (e.nodes, e.volume)),
             reference_density_kg_m3,
@@ -356,9 +349,61 @@ impl<'a, L: FiniteThermalJ2Material> FiniteThermoplasticTetSolid<'a, L> {
         self.motion = Some(ThermalMotion {
             velocity_mps: velocity_mps.to_vec(),
             reference_density_kg_m3: Arc::from(reference_density_kg_m3),
+            reference_nodal_density_kg_m3: None,
             mass: Arc::new(mass),
         });
         Ok(self)
+    }
+
+    /// Bind positive P1 density on the original nodes to the native momentum solve.
+    ///
+    /// The shared consistent mass integrates `rho_0*N_a*N_b` exactly. Cell
+    /// means describe inventory; they never replace the graded mass operator.
+    /// All accepted deformation, temperature and plastic/creep history survives
+    /// binding. Subsequent heating and expansion retain this original mass and
+    /// nodal field. This authored inventory implies no new caloric/source claim.
+    ///
+    /// # Errors
+    /// Rebinding, invalid density/velocity, unrepresentable mass or cancellation.
+    pub fn with_nodal_inertia(
+        mut self,
+        reference_nodal_density_kg_m3: &[f64],
+        velocity_mps: &[[f64; 3]],
+        cx: &Cx<'_>,
+    ) -> Result<Self, FiniteThermoplasticTetError> {
+        self.admit_initial_motion(velocity_mps, cx)?;
+        let (mass, means) = P1ReferenceMass::from_nodal_density(
+            self.state.elements.iter().map(|e| (e.nodes, e.volume)),
+            reference_nodal_density_kg_m3,
+            self.state.displacement_m.as_flattened().len(),
+            cx,
+        )
+        .map_err(inertia_error)?;
+        checkpoint(cx)?;
+        self.motion = Some(ThermalMotion {
+            velocity_mps: velocity_mps.to_vec(),
+            reference_density_kg_m3: Arc::from(means),
+            reference_nodal_density_kg_m3: Some(Arc::from(reference_nodal_density_kg_m3)),
+            mass: Arc::new(mass),
+        });
+        Ok(self)
+    }
+
+    fn admit_initial_motion(
+        &self,
+        velocity_mps: &[[f64; 3]],
+        cx: &Cx<'_>,
+    ) -> Result<(), FiniteThermoplasticTetError> {
+        checkpoint(cx)?;
+        if self.motion.is_some() {
+            return Err(invalid("finite thermal reference mass is already bound").into());
+        }
+        if velocity_mps.len() != self.state.nodes_m.len()
+            || velocity_mps.iter().flatten().any(|v| !v.is_finite())
+        {
+            return Err(invalid("one finite initial velocity per original node required").into());
+        }
+        Ok(())
     }
 
     /// Original immutable reference coordinates [m], in native node order.
@@ -404,13 +449,65 @@ impl<'a, L: FiniteThermalJ2Material> FiniteThermoplasticTetSolid<'a, L> {
     pub fn velocity_mps(&self) -> Option<&[[f64; 3]]> {
         self.motion.as_ref().map(|m| m.velocity_mps.as_slice())
     }
+    /// Original cell densities or cell means of the retained P1 nodal field.
+    /// Means alone do not reproduce a graded body's consistent inertia.
     pub fn reference_density_kg_m3(&self) -> Option<&[f64]> {
         self.motion
             .as_ref()
             .map(|m| m.reference_density_kg_m3.as_ref())
     }
+    /// Complete original nodal density, when inertia was bound with that field.
+    /// None denotes cellwise inertia or an unbound quasistatic state.
+    pub fn reference_nodal_density_kg_m3(&self) -> Option<&[f64]> {
+        self.motion
+            .as_ref()
+            .and_then(|m| m.reference_nodal_density_kg_m3.as_deref())
+    }
     pub fn reference_mass_kg(&self) -> Option<f64> {
         self.motion.as_ref().map(|m| m.mass.reference_mass_kg())
+    }
+
+    /// Project an original-node P1 acceleration through the retained mass, M*a.
+    ///
+    /// The returned full nodal loads [N] include supported nodes and preserve
+    /// the density-weighted force and moment, including gravity on graded
+    /// material. Supply these held loads to `advance` exactly once. This does
+    /// not resample density at the new temperature or deformed configuration.
+    /// Evolving acceleration, potential and tangent belong to the field owner.
+    ///
+    /// # Errors
+    /// Unbound inertia, invalid shape, nonfinite acceleration/force or cancellation.
+    pub fn reference_acceleration_load_n(
+        &self,
+        acceleration_m_s2: &[[f64; 3]],
+        cx: &Cx<'_>,
+    ) -> Result<Vec<(usize, f64)>, FiniteThermoplasticTetError> {
+        checkpoint(cx)?;
+        let motion = self.motion.as_ref().ok_or_else(|| {
+            invalid("finite thermal acceleration requires already bound reference inertia")
+        })?;
+        if acceleration_m_s2.len() != self.state.nodes_m.len()
+            || acceleration_m_s2.iter().flatten().any(|a| !a.is_finite())
+        {
+            return Err(
+                invalid("one finite acceleration vector per original node required").into(),
+            );
+        }
+        let forces = motion
+            .mass
+            .action(acceleration_m_s2.as_flattened(), cx)
+            .map_err(inertia_error)?;
+        let mut loads = Vec::with_capacity(forces.len());
+        for (dof, force) in forces.into_iter().enumerate() {
+            if dof % 256 == 0 {
+                checkpoint(cx)?;
+            }
+            if force != 0.0 {
+                loads.push((dof, force));
+            }
+        }
+        checkpoint(cx)?;
+        Ok(loads)
     }
 
     /// Propose one endpoint at supplied element temperatures and held dead loads.
@@ -703,6 +800,10 @@ impl<'a, L: FiniteThermalJ2Material> FiniteThermoplasticTetSolid<'a, L> {
                 Some(ThermalMotion {
                     velocity_mps,
                     reference_density_kg_m3: Arc::clone(&old.reference_density_kg_m3),
+                    reference_nodal_density_kg_m3: old
+                        .reference_nodal_density_kg_m3
+                        .as_ref()
+                        .map(Arc::clone),
                     mass: Arc::clone(&old.mass),
                 }),
                 Some(account),
