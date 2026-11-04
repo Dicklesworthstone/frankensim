@@ -17,7 +17,9 @@ use fs_material::{
 
 mod moving_walls;
 mod sgs;
-pub use sgs::{RheologySgs3, RheologySgsError3, RheologySgsReport3, RheologySgsStep3};
+pub use sgs::{
+    ChannelRheologySgs3, RheologySgs3, RheologySgsError3, RheologySgsReport3, RheologySgsStep3,
+};
 
 /// Conditions at the incoming kinetic time level, with x-fastest cell indexing.
 /// Temperature, composition and material validity remain with the producer.

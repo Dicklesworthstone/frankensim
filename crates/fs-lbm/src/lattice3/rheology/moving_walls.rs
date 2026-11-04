@@ -8,7 +8,7 @@ use crate::lattice3::wall_loads::WallMomentumProbe3;
 // fixed storage avoids per-cell wall maps, probe searches and step allocation.
 // Native probe construction guarantees unique reflected links, so the exact
 // link count proves that no moving or stationary partner face was omitted.
-fn channel_walls<L: ViscousLattice3<Q>, const Q: usize>(
+pub(super) fn channel_walls<L: ViscousLattice3<Q>, const Q: usize>(
     grid: &Grid3<L, Q>,
     motion: &WallMotion3<'_, L, Q>,
     mut poll: impl FnMut() -> Result<(), GridError3<L::Error>>,
