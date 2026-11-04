@@ -1,9 +1,12 @@
 //! Prescribed original-source temperature continuation at fixed native state.
 //!
-//! Only the local JKR contact source changes. Native modal/connection/material
+//! Only the local adhesive contact source changes. Native modal/connection/material
 //! coefficients, Maxwell history, bodies and clock remain as supplied. Signed
 //! contact-potential change is parameter work supplied by the explicit driver;
 //! it is not inferred caloric heat, thermal expansion or autonomous feedback.
+
+mod maugis;
+pub use maugis::SourceNormalMaugisRefreshReport;
 
 use super::{
     BoundNormalContact, CancelGate, NormalLawSource, NormalLawSourceError, SourceNormalModalError,

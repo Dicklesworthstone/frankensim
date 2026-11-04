@@ -14,6 +14,7 @@ use core::f64::consts::PI;
 use fs_blake3::ContentHash;
 
 mod derivative;
+mod temperature;
 
 /// Explicit attached-branch choice with bounded original-force integration.
 #[derive(Clone, Debug, PartialEq)]

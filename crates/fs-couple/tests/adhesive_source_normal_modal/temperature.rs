@@ -1,4 +1,6 @@
 //! Original-source changes preserve the complete native mechanical history.
+mod maugis;
+
 use super::*;
 use fs_contact::normal_patch::adhesive::temperature::AdhesiveTemperatures;
 

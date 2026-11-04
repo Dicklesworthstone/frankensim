@@ -17,6 +17,7 @@
 use super::{CoupledModalSystem, ModalCouplingError, dot, extension, finite, invalid, limit, poll};
 use crate::modal_acoustic_time::ModalAcousticTimeModel;
 use crate::unilateral_contact::binding::BoundNormalContact;
+use fs_contact::normal_patch::adhesive::temperature::AdhesiveTemperatureError;
 use fs_contact::normal_patch::{NormalLawSource, NormalLawSourceError};
 use fs_exec::CancelGate;
 use fs_math::dd::Dd;
@@ -33,7 +34,7 @@ pub struct SourceNormalModalConfig {
     /// Maximum absolute held reaction and endpoint constitutive force [N].
     pub maximum_force_n: f64,
     /// Finite caller-selected approach interval, initially inside the source [m].
-    /// Refreshed JKR trials also remain inside its current attached domain.
+    /// Refreshed adhesive trials remain inside the current selected source domain.
     pub minimum_approach_m: f64,
     pub maximum_approach_m: f64,
     pub force_absolute_tolerance_n: f64,
@@ -49,6 +50,7 @@ pub struct SourceNormalModalConfig {
 pub enum SourceNormalModalError {
     Network(ModalCouplingError),
     Source(NormalLawSourceError),
+    Temperature(AdhesiveTemperatureError),
     Unresolved(&'static str),
     CoordinateMismatch { residual_m: f64, tolerance_m: f64 },
     ContactWork { residual_j: f64, tolerance_j: f64 },
@@ -67,6 +69,11 @@ impl From<ModalCouplingError> for SourceNormalModalError {
 impl From<NormalLawSourceError> for SourceNormalModalError {
     fn from(error: NormalLawSourceError) -> Self {
         Self::Source(error)
+    }
+}
+impl From<AdhesiveTemperatureError> for SourceNormalModalError {
+    fn from(error: AdhesiveTemperatureError) -> Self {
+        Self::Temperature(error)
     }
 }
 
@@ -293,17 +300,27 @@ impl SourceNormalModalSystem {
         )?;
         self.network.prepare_prediction(external, Some(gate))?;
         let free_increment = dot(self.contact.work_column(), &self.network.free_delta)?;
-        // A prescribed source refresh may move the JKR fold. Keep the authored
-        // bounds and accepted geometry unchanged; only narrow the trial chart
-        // to the current original attached branch, never extrapolate it.
+        // A prescribed source refresh may move an adhesive fold. Keep the
+        // authored bounds and accepted geometry unchanged; only narrow trial
+        // bounds to the current original selected branch.
         let mut solve_config = self.config;
-        if let NormalLawSource::JkrAttached(source) = self.contact.source() {
-            solve_config.minimum_approach_m = solve_config
-                .minimum_approach_m
-                .max(source.minimum_attached_indentation_m());
-            solve_config.maximum_approach_m = solve_config
-                .maximum_approach_m
-                .min(source.envelope().maximum_indentation_m);
+        let source_bounds = match self.contact.source() {
+            NormalLawSource::JkrAttached(source) => Some((
+                source.minimum_attached_indentation_m(),
+                source.envelope().maximum_indentation_m,
+            )),
+            NormalLawSource::MaugisAttached(source) => Some((
+                source.noncontact_continuation().map_or_else(
+                    || source.source().minimum_attached_indentation_m(),
+                    |limits| limits.minimum_indentation_m,
+                ),
+                source.source().envelope().maximum_indentation_m,
+            )),
+            _ => None,
+        };
+        if let Some((minimum, maximum)) = source_bounds {
+            solve_config.minimum_approach_m = solve_config.minimum_approach_m.max(minimum);
+            solve_config.maximum_approach_m = solve_config.maximum_approach_m.min(maximum);
         }
         let solution = solve::solve(
             self.contact.source(),

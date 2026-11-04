@@ -2223,8 +2223,32 @@ paths, tiny motion, negative disk stiffness, and budget/domain refusals.
 This connects the original source to `fs-couple::BoundNormalStorage` and its
 native `fs-phs` stepping. Local elastic contact remains quasistatic while the
 caller-owned bodies carry inertia. Fold crossing, snap-induced elastic waves,
-interfacial kinetic energy, damping, thermal partition and changing sources
-need additional physical owners. No release is converted to an impulse or heat.
+interfacial kinetic energy, damping and thermal partition need additional
+physical owners. No release is converted to an impulse or heat.
+
+### Prescribed source temperatures on attached Maugis mechanics
+
+`MaugisAttachedPotential::with_held_indentation_refresh` consumes the original
+sealed held-indentation `SourceMaugisThermalRefresh` at actual accepted mechanical
+geometry. Original identity, canonical predecessor, physical phase, radius,
+interaction range and envelope must agree. Work/energy budgets remain fixed.
+A selected noncontact continuation is rebuilt from the successor's original
+finite-zone equations, including its changed junction and fold. Loss of that
+selected branch refuses; the policy never silently becomes contacting-only.
+
+A no-op retains the exact original potential and equilibrium. For changed
+sources, the receipt retains its resolved radius while native geometry remains
+fixed. The successor is reevaluated at that geometry, and its actual potential
+change must agree with the original signed parameter work under the existing
+contact-sized energy budget. This allows only the original representation
+roundoff, not a shifted physical coordinate or an inferred phase jump.
+The result is an immutable candidate; the explicit temperature driver owns
+its signed parameter supply, without an inferred impulse, loss or caloric heat.
+
+The `adhesive_maugis_temperature` tests cover changed bulk/interface sources,
+continued contact work, exact no-op, negative-stiffness noncontact attraction
+with zero solid shear area, lost noncontact-policy support, and stale, foreign,
+replayed, detached or held-load refresh refusal.
 
 ### Finite-inertia JKR motion with elastic and viscous support
 

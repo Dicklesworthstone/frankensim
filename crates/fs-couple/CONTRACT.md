@@ -19054,6 +19054,31 @@ retain native Maxwell history through changed source forces and signed work,
 exercise an outward step using this shifted lower bracket, and check no-op,
 foreign/stale-source, receiving-refusal and late-cancellation behavior.
 
+#### Prescribed-temperature continuation of finite-zone Maugis adhesion
+
+`SourceNormalModalSystem::apply_maugis_source_refresh[_with_admission]`
+consumes the original sealed held-indentation Maugis receipt through the
+retained mechanical potential. The original contact/noncontact policy, source
+work budgets, physical row and gap survive. A selected deformed noncontact
+disk keeps its true zero solid area and original attractive force; losing
+its physical support refuses rather than downgrading the policy.
+
+The successor is admitted at the unchanged actual native approach, with
+original force limits and positive mechanical load-line slope. Actual contact
+potential change independently closes against the signed parameter work.
+Native modal/link coefficients, bodies, velocities, sample clock, Maxwell
+memory, all native stores and physical losses remain unchanged. The explicit
+temperature driver owns parameter work; it is not inserted into native heat.
+A receiving candidate and final cancellation check precede source publication.
+
+Future scalar trials intersect authored limits with the refreshed original
+Maugis contact domain or explicitly selected noncontact fold. This only narrows
+trial bounds and never clips accepted geometry or widens caller controls.
+The JKR-specific root isolation still makes no Maugis snap assumption.
+Focused contact/noncontact cases preserve complete native state bit for bit,
+continue outward motion after a shifted fold, retain exact no-op evolution,
+and exercise stale/foreign/load-control, receiving and cancellation refusal.
+
 ## Adhesive junctions on the native modal network
 
 `friction::adhesive::AdhesiveModalBinding` attaches an explicit real area,
