@@ -63,6 +63,42 @@ impl ContactSteadyLinearization {
             .resistance_scale_pullback(cx, self.temperature(), &transport.nodal_load, max_face_pairs)?;
         Ok(ContactSteadyGradient { transport, resistance_multipliers })
     }
+
+    /// Differentiate a nodal goal through the complete contact and mean-Robin
+    /// feedback, then contract each whole resistance law with the SAME dual.
+    ///
+    /// Arrays follow the regions selected by `linearize_steady_endpoint`.
+    /// `htc_wall_derivatives` is dh_i/dmean_i in W/(m² K²), and
+    /// `reference_wall_derivatives` is the local dref_i/dmean_i in K/K.
+    /// The row-major m-by-m `reference_feedback` supplies ADDITIONAL
+    /// dref_i/dmean_j entries; its diagonal must not repeat the local slope.
+    /// The caller must bind the actual physical boundary at this unchanged
+    /// endpoint before linearization, including all prescribed reference laws.
+    ///
+    /// The existing bounded feedback owner adds its consistent P1 factors to
+    /// the full K'(T) and source-contact tangent and solves its true transpose
+    /// once. At most 64 ports and four nodal factor vectors per port must fit
+    /// `max_feedback_entries`; `max_face_pairs` separately bounds contacts.
+    /// Returned reference/log(h) controls are partials of the bound Robin rows,
+    /// to be mapped to original physical controls by the boundary-law owner.
+    /// No time factor, new primal solve or solver-iteration derivative enters.
+    #[allow(clippy::too_many_arguments)]
+    pub fn pullback_with_robin_feedback_and_resistance_controls(
+        &self, cx: &Cx<'_>, htc_wall_derivatives: &[f64],
+        reference_wall_derivatives: &[f64], reference_feedback: &[f64],
+        nodal_weights: &[f64], max_feedback_entries: usize, max_face_pairs: usize,
+    ) -> Result<ContactSteadyGradient, ConductionError> {
+        poll(cx, 0)?;
+        if self.contact.trace_elements() > max_face_pairs {
+            return Err(invalid("<steady-contact-adjoint>", "contact controls exceed the declared trace-element allowance"));
+        }
+        let transport = self.response.pullback_endpoint_with_mean_feedback(cx,
+            htc_wall_derivatives, reference_wall_derivatives, reference_feedback,
+            nodal_weights, max_feedback_entries)?;
+        let resistance_multipliers = self.contact.physical_contacts().frozen_interfaces()
+            .resistance_scale_pullback(cx, self.temperature(), &transport.nodal_load, max_face_pairs)?;
+        Ok(ContactSteadyGradient { transport, resistance_multipliers })
+    }
 }
 
 impl TemperatureContacts<'_, '_> {

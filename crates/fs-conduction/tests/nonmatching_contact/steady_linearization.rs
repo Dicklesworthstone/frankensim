@@ -179,3 +179,69 @@ fn g0_insulated_steady_contact_equilibrium_cannot_bind_a_singular_response() {
         ));
     });
 }
+
+#[test]
+fn g3_steady_contact_and_robin_feedback_share_one_complete_dual() {
+    with_cx(|cx| {
+        for matching in [true, false] {
+            let (mesh, split) = mesh(if matching { [1, 1, 1] } else { [1, 2, 3] }, 0.0);
+            let bc = reservoir_boundary(&mesh, true);
+            let card = source_card(1.0, false);
+            let set = contacts(cx, &mesh, &bc, &card, split, matching);
+            let material = ConductivityModel::isotropic_declared(10.0).unwrap();
+            let source = ScalarField::Uniform(0.0);
+            let problem = ConductionProblem { mesh: &mesh, boundary: &bc,
+                material: &material, element_materials: None, source: &source };
+            let solved = set.solve_steady(cx, problem, &vec![315.0; mesh.vertex_count()],
+                solver_config(), coupling()).unwrap();
+            let before = solved.conduction.temperature.clone();
+            let response = set.linearize_steady_endpoint(cx, problem, &before,
+                solver_config().linear, coupling().residual_tolerance_w,
+                coupling().energy_tolerance_w, &["hot reservoir"], 10_000).unwrap();
+            let weights = contact_mean(&mesh, split);
+            let cap = 4 * mesh.vertex_count();
+            let full = response.pullback_with_robin_feedback_and_resistance_controls(cx,
+                &[0.05], &[0.1], &[0.2], &weights, cap, 10_000).unwrap();
+
+            // Independent series physics for a physical reservoir with
+            // h(W)=10+0.05(W-W0), ref(W)=330+0.3(W-W0). Splitting the
+            // reference slope into local0.1 + additional0.2 must add once.
+            // Eliminate the two bulk drops and the original linear R(TA,TB)
+            // to obtain W(H,s), then solve only the scalar film balance.
+            let wall0 = 330.0 - 0.1 * scalar_heat(true);
+            let objective = |scale: f64, reference_offset: f64, log_h: f64| {
+                let (mut lo, mut hi) = (0.0, 60.0);
+                for _ in 0..80 {
+                    let heat = 0.5 * (lo + hi);
+                    let wall = (300.0 + 0.2 * heat
+                        + heat * scale * (0.5 - 980.0 / 1024.0 - 0.2 * heat / 1024.0))
+                        / (1.0 - 3.0 * heat * scale / 1024.0);
+                    let h = log_h.exp() * (10.0 + 0.05 * (wall - wall0));
+                    let reference = 330.0 + 0.3 * (wall - wall0) + reference_offset;
+                    if heat > h * (reference - wall) { hi = heat; } else { lo = heat; }
+                }
+                300.0 + 0.1 * 0.5 * (lo + hi)
+            };
+            near(objective(1.0, 0.0, 0.0), dot(&weights, &before), 2e-7);
+            let step = 5e-4;
+            for (actual, high, low) in [
+                (full.resistance_multipliers[0].derivative,
+                    objective(1.0 + step, 0.0, 0.0), objective(1.0 - step, 0.0, 0.0)),
+                (full.transport.references[0],
+                    objective(1.0, step, 0.0), objective(1.0, -step, 0.0)),
+                (full.transport.log_htc[0],
+                    objective(1.0, 0.0, step), objective(1.0, 0.0, -step)),
+            ] { near(actual, (high - low) / (2.0 * step), 2e-6); }
+            let frozen = response.pullback_with_resistance_controls(cx, &weights, &[0.0], &[0.0], 10_000).unwrap();
+            assert!((full.resistance_multipliers[0].derivative
+                - frozen.resistance_multipliers[0].derivative).abs() > 0.05,
+                "a contact-complete but boundary-frozen dual cannot pass this fixture");
+            assert!(response.pullback_with_robin_feedback_and_resistance_controls(cx,
+                &[0.05], &[0.1], &[0.2], &vec![0.0; weights.len()], cap - 1, 10_000).is_err());
+            assert!(response.pullback_with_robin_feedback_and_resistance_controls(cx,
+                &[0.05], &[0.1], &[0.2], &weights, cap, 0).is_err());
+            assert_eq!(response.temperature(), before);
+            assert_eq!(solved.conduction.temperature, before);
+        }
+    });
+}
