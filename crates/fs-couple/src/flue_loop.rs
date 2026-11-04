@@ -1392,8 +1392,23 @@ impl FlueVoice {
     /// As [`Self::with_forced_jet`]. `exit measured` is admitted only where Re_h = U0 h / nu lies
     /// within a factor 2 of 200, the one Re_h at which de la Cuadra measured it (Fig. 2.28);
     /// elsewhere the voice refuses.
-    pub fn with_forced_jet_exit(mut self, spec: forced_jet::ForcedJetSpec,
+    pub fn with_forced_jet_exit(self, spec: forced_jet::ForcedJetSpec,
         exit_law: forced_jet::JetExitLaw, reference_pressure_pa: f64) -> Result<Self, FlueError>
+    {
+        self.with_forced_jet_spreading(spec, exit_law, forced_jet::JetSpreadingLaw::None,
+            reference_pressure_pa)
+    }
+
+    /// [`Self::with_forced_jet_exit`] over the named base development
+    /// ([`forced_jet::JetSpreadingLaw`]): the response is integrated over the spreading base, the
+    /// tanh cut's half-width is `b(X) / b0` times its own and its swing `q_max` is
+    /// `(b(X) / b0)^(1/2)` times its own, the station's width and volume flux.
+    ///
+    /// # Errors
+    /// As [`Self::with_forced_jet_exit`].
+    pub fn with_forced_jet_spreading(mut self, spec: forced_jet::ForcedJetSpec,
+        exit_law: forced_jet::JetExitLaw, spreading: forced_jet::JetSpreadingLaw,
+        reference_pressure_pa: f64) -> Result<Self, FlueError>
     {
         if self.poisoned || self.samples != 0 || self.nolle.is_some() || self.forced.is_some()
             || self.auvray.is_some() || self.unsteady_windway.is_some() {
@@ -1428,8 +1443,8 @@ impl FlueVoice {
                 return Err(FlueError::Invalid { what: "exit measured: U_j h / nu is outside 100 to 400, a numerical neighbourhood (factor 2) chosen in code, not a measured range, around the only Re_h (200) at which the exit receptivity was measured (de la Cuadra 2005 Fig. 2.28)" });
             }
         }
-        let kernel = forced_jet::ForcedJetKernel::new_with_exit(spec, exit_law, exit,
-            self.geometry.flue_height_m, self.geometry.cut_up_m, self.nu, reference_bulk,
+        let kernel = forced_jet::ForcedJetKernel::new_with_spreading(spec, exit_law, spreading,
+            exit, self.geometry.flue_height_m, self.geometry.cut_up_m, self.nu, reference_bulk,
             self.minimum_jet_speed_m_s, self.max_jet_history_samples, self.dt)
             .map_err(|what| FlueError::Invalid { what })?;
         self.island.provenance.push_str(&format!(
@@ -1442,6 +1457,15 @@ impl FlueVoice {
         {
             self.island.provenance.push_str(&format!(
                 "; exit receptivity: measured, eta(0) = (h/U0) v in phase, R {displacement_per_velocity:.6} b per v/U0, no carried term (Terrien et al. arXiv 1402.3143 Eq. 1 after de la Cuadra 2005 sec. 2.3.5)"));
+        }
+        if let Some((beta, flux)) = kernel.station_spread() {
+            let step = kernel.step_response();
+            let origin_b = step.spreading().virtual_origin(kernel.reynolds()).unwrap_or(f64::NAN);
+            let source = spreading.source();
+            self.island.provenance.push_str(&format!(
+                "; jet spreading: {} ({source}), quasi-parallel, held past the station: b(X)/b0 {beta:.4}, u_c(X)/U0 {:.4}, virtual origin {:.4e} m ({origin_b:.2} b0) upstream of the exit, band {} b0; cut half-width x {beta:.4}, swing x {flux:.4}",
+                spreading.name(), 1.0 / flux, origin_b * kernel.half_width_m(),
+                step.resolution().half_height));
         }
         self.forced = Some(kernel);
         Ok(self)
@@ -1517,12 +1541,16 @@ impl FlueVoice {
     }
 
     /// Half-width `b` of the labium cut `Q_j = (q_max / 2)(1 + tanh((eta - y0) / b))`: half the
-    /// flue height, or the Bickley `2h/5` behind the Auvray jet.
+    /// flue height, or the Bickley `2h/5` behind the Auvray jet; behind a forced jet with a named
+    /// spreading law, half the flue height times the station's `b(X) / b0`.
     #[must_use]
     pub fn cut_half_width_m(&self) -> f64 {
         match &self.auvray {
             Some(jet) => jet.half_width_m(),
-            None => 0.5 * self.geometry.flue_height_m,
+            None => match self.forced.as_ref().and_then(forced_jet::ForcedJetKernel::station_spread) {
+                None => 0.5 * self.geometry.flue_height_m,
+                Some((beta, _)) => 0.5 * self.geometry.flue_height_m * beta,
+            },
         }
     }
 
@@ -1923,6 +1951,9 @@ impl FlueVoice {
     ) -> Result<(), FlueError> {
         let dt = self.dt;
         let b = self.cut_half_width_m();
+        // A forced jet's named spreading law swings the station's volume flux.
+        let spread_flux = self.forced.as_ref()
+            .and_then(forced_jet::ForcedJetKernel::station_spread).map(|(_, flux)| flux);
         let s_m = self.geometry.mouth_area_m2();
         let y0 = self.geometry.effective_offset_m();
         let (l, r) = (self.inertance, self.resistance);
@@ -1976,7 +2007,10 @@ impl FlueVoice {
             let q_max = if self.auvray.is_some() {
                 2.0 * b * self.geometry.flue_width_m * u
             } else {
-                u * self.geometry.flue_height_m * self.geometry.flue_width_m
+                match spread_flux {
+                    None => u * self.geometry.flue_height_m * self.geometry.flue_width_m,
+                    Some(flux) => u * self.geometry.flue_height_m * self.geometry.flue_width_m * flux,
+                }
             };
             let transit = if card_u == 0.0 { f64::INFINITY } else if windway_trial.is_some() {
                 self.geometry.cut_up_m / (self.island.convection_ratio * card_u)
@@ -3251,6 +3285,112 @@ mod forced_jet_tests {
         assert!(v.network().unwrap().last_frame().is_none());
         assert_eq!(v.mouth_flow_m3_s(), 0.0);
         assert!(v.claim_check().is_err());
+    }
+
+    // jet_spreading (forced_jet::JetSpreadingLaw): eight 257-sample blocks at 100 Pa as raw bits,
+    // with the work ledger closed.
+    fn spread_voice(law: forced_jet::JetSpreadingLaw) -> FlueVoice {
+        bare_voice(gas(101_325.0), geometry(CUT_UP_M), 48_000, 4096)
+            .with_forced_jet_spreading(PLUMBING, forced_jet::JetExitLaw::Kutta, law, 100.0).unwrap()
+    }
+    fn spread_run(mut v: FlueVoice) -> Vec<u64> {
+        v.apply(FlueControl::SetBlowingPressure(100.0)).unwrap();
+        let mut bits = Vec::new();
+        for _ in 0..8 {
+            let mut out = [0.0; 257];
+            v.step_block(&mut out).unwrap();
+            assert!(out.iter().all(|x| x.is_finite()));
+            bits.extend(out.iter().map(|x| x.to_bits()));
+        }
+        assert_work(&v);
+        bits
+    }
+
+    #[test]
+    fn g0_forced_jet_without_a_spreading_row_is_bit_identical() {
+        let named = spread_voice(forced_jet::JetSpreadingLaw::None);
+        assert!(named.forced_jet().unwrap().station_spread().is_none());
+        assert_eq!(named.cut_half_width_m(), 0.5 * geometry(CUT_UP_M).flue_height_m);
+        assert!(!named.island.provenance.contains("jet spreading"));
+        assert_eq!(spread_run(named), spread_run(voice(gas(101_325.0), geometry(CUT_UP_M))));
+    }
+
+    #[test]
+    fn g3_spreading_widens_the_cut_by_the_station_width_and_swings_its_flux() {
+        let g = geometry(CUT_UP_M);
+        // The uniform lip exit: b0 = 0.75 h, so the station is the cut-up over 0.75 h.
+        let station = g.cut_up_m / (forced_jet::UNIFORM_HALF_WIDTH_OVER_HEIGHT * g.flue_height_m);
+        let fletcher = spread_voice(forced_jet::JetSpreadingLaw::Fletcher1976);
+        let kernel = fletcher.forced_jet().unwrap();
+        let (beta, flux) = kernel.station_spread().unwrap();
+        let slope = 2.0 * fs_math::det::tan(5.0_f64.to_radians());
+        assert_eq!(beta, 1.0 + slope * kernel.step_response().station());
+        assert!((kernel.step_response().station() / station - 1.0).abs() < 1e-15);
+        assert_eq!(flux, fs_math::det::sqrt(beta));
+        assert_eq!(fletcher.cut_half_width_m(), 0.5 * g.flue_height_m * beta);
+        // The band holds 8 station half-widths, rounded up to whole spacings.
+        let band = kernel.step_response().resolution().half_height;
+        assert!(band >= forced_jet::BAND_HALF_HEIGHT * beta && band < forced_jet::BAND_HALF_HEIGHT * beta + PLUMBING.spacing);
+        assert!(fletcher.island.provenance.contains("jet spreading: fletcher-1976 (an organ-flue Pitot measurement (E4 pipe, flue 0.25-1.0 mm) applied to a flute lip jet"));
+        let bickley = spread_voice(forced_jet::JetSpreadingLaw::Bickley);
+        let kb = bickley.forced_jet().unwrap();
+        let (beta_b, _) = kb.station_spread().unwrap();
+        let x = kb.step_response().station();
+        assert!((fs_math::det::pow(beta_b, 1.5) / (1.0 + 6.0 * x / kb.reynolds()) - 1.0).abs() < 1e-14);
+        assert!(bickley.island.provenance.contains("jet spreading: bickley"));
+        let parallel = spread_run(voice(gas(101_325.0), geometry(CUT_UP_M)));
+        let (sf, sb) = (spread_run(fletcher), spread_run(bickley));
+        assert_ne!(sf, parallel);
+        assert_ne!(sb, parallel);
+    }
+
+    #[test]
+    fn g3_momentum_drive_behind_a_spread_jet_takes_the_station_centre_speed() {
+        let g = geometry(CUT_UP_M);
+        for law in [forced_jet::JetSpreadingLaw::None, forced_jet::JetSpreadingLaw::Fletcher1976] {
+            let v = spread_voice(law).with_momentum_drive(1.0).unwrap();
+            let c = JetStepCoefficients { q_max: 1e-3, half_width_m: v.cut_half_width_m(),
+                offset_m: 0.0, band_alpha: 0.0, hp_alpha: 0.0, leak_rate: 0.0,
+                eta_override: None, at_rest: false };
+            let bulk = c.q_max / (g.flue_height_m * g.flue_width_m);
+            let speed = match v.forced_jet().unwrap().station_spread() {
+                None => bulk,
+                Some((beta, _)) => bulk / beta,
+            };
+            assert_eq!(v.momentum_source_slope(c),
+                v.momentum_drive().unwrap().pressure_per_flow(speed), "{law:?}");
+        }
+    }
+
+    // MB 125: on the committed D4 card (coarse row) with `momentum_drive 1` and each law, the
+    // momentum drive's v0 is the station's centre speed u_c(X) = U beta(X)^-1/2: 0.987 U Bickley,
+    // 0.626 U Fletcher (within 0.5 %, the card's three significant figures). The swing is formed as
+    // advance_block forms it, `U h W beta(X)^1/2`, at a unit bulk speed.
+    #[test]
+    fn g3_momentum_v0_is_the_station_centre_speed_on_the_d4_card() {
+        use network::performance::file::FlueFilePerformance;
+        const CARD: &str =
+            include_str!("../../../data/instruments/descriptions/flute/flute-d4.performance");
+        const JET: &str = "jet 90 1e-6 3 0\n";
+        assert_eq!(CARD.matches(JET).count(), 1, "the D4 jet row changed; update this test");
+        for (law, expected) in [("bickley", 0.987), ("fletcher-1976", 0.626)] {
+            let text = CARD.replace(JET, &format!(
+                "{JET}jet_response forced-bickley 0.25 40\nmomentum_drive 1\njet_spreading {law}\n"));
+            let card = FlueFilePerformance::from_bytes(text.as_bytes(), 256,
+                &CancelGate::new_clock_free()).unwrap();
+            let v = card.renderer().voice();
+            let (beta, flux) = v.forced_jet().unwrap().station_spread().unwrap();
+            let (h, w) = (v.geometry.flue_height_m, v.geometry.flue_width_m);
+            let bulk = 1.0;
+            let c = JetStepCoefficients { q_max: bulk * h * w * flux, half_width_m: v.cut_half_width_m(),
+                offset_m: v.geometry.effective_offset_m(), band_alpha: 0.0, hp_alpha: 0.0,
+                leak_rate: 0.0, eta_override: None, at_rest: false };
+            let drive = v.momentum_drive().unwrap();
+            let v0 = v.momentum_source_slope(c) / drive.pressure_per_flow(1.0);
+            println!("D4 {law}: beta(X) {beta:.4}, v0/U {v0:.6}, u_c(X)/U {:.6}", 1.0 / flux);
+            assert!((v0 * flux - 1.0).abs() < 1e-14, "{law}: v0/U {v0} is not beta^-1/2 {}", 1.0 / flux);
+            assert!((v0 / expected - 1.0).abs() < 5e-3, "{law}: v0/U {v0} against {expected}");
+        }
     }
 }
 

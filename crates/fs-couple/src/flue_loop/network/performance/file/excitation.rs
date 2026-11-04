@@ -7,7 +7,7 @@
 use super::{FlueInputError, Rows, bad, poll};
 use crate::bernoulli_aperture::contraction::ContractionSpec;
 use crate::flue_loop::auvray_jet::AuvraySpec;
-use crate::flue_loop::forced_jet::{ForcedJetSpec, JetExitLaw};
+use crate::flue_loop::forced_jet::{ForcedJetSpec, JetExitLaw, JetSpreadingLaw};
 use crate::flue_loop::momentum_drive;
 use crate::flue_loop::nolle_jet::{ChannelClass, NolleSpec};
 use crate::flue_loop::{FlueError, FlueVoice};
@@ -135,6 +135,7 @@ pub(crate) struct FlueJetInput {
     transfer: Option<JetTransferInput>,
     response: Option<(ForcedJetSpec, JetExitLaw)>,
     momentum: Option<f64>,
+    spreading: JetSpreadingLaw,
 }
 
 impl FlueJetInput {
@@ -249,6 +250,27 @@ impl FlueJetInput {
         } else {
             None
         };
+        // Optional `jet_spreading LAW` after `jet_response` (and `momentum_drive`, when present): the
+        // forced jet's base widens by the named law, `bickley` or `fletcher-1976`; no default law.
+        let spreading = if rows.next_is("jet_spreading") {
+            let mut row = rows.row("jet_spreading")?;
+            let line = row.line;
+            let law = match row.fields.next() {
+                Some("bickley") => JetSpreadingLaw::Bickley,
+                Some("fletcher-1976") => JetSpreadingLaw::Fletcher1976,
+                _ => return Err(bad(line, "jet_spreading requires bickley or fletcher-1976")),
+            };
+            row.end()?;
+            if response.is_none() {
+                return Err(bad(line, "jet_spreading requires the jet_response row before it"));
+            }
+            if rows.next_is("momentum_drive") {
+                return Err(bad(line + 1, "momentum_drive goes before jet_spreading"));
+            }
+            law
+        } else {
+            JetSpreadingLaw::None
+        };
         if transfer.is_some() && response.is_some() {
             return Err(bad(
                 rows.line,
@@ -267,6 +289,7 @@ impl FlueJetInput {
             transfer,
             response,
             momentum,
+            spreading,
         })
     }
 
@@ -306,7 +329,7 @@ impl FlueJetInput {
             Some((spec, exit)) => {
                 poll(gate)?;
                 let voice = voice
-                    .with_forced_jet_exit(spec, exit, held_pressure_pa)
+                    .with_forced_jet_spreading(spec, exit, self.spreading, held_pressure_pa)
                     .map_err(FlueInputError::Physics)?;
                 poll(gate)?;
                 voice

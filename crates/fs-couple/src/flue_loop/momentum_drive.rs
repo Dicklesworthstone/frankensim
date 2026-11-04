@@ -206,9 +206,16 @@ impl FlueVoice {
         self.momentum.as_ref()
     }
 
-    /// Bulk jet speed of a trial: the `v0` of `q_max = v0 h W`.
-    fn momentum_speed_m_s(geometry: &FlueGeometry, c: &JetStepCoefficients) -> f64 {
-        c.q_max / (geometry.flue_height_m * geometry.flue_width_m)
+    /// Bulk jet speed of a trial: the `v0` of `q_max = v0 h W`. Behind a forced jet with a named
+    /// spreading law `q_max` is the station's volume flux, `(b(X) / b0)^(1/2)` times the exit's,
+    /// and the speed is the station's centre speed, `(b0 / b(X))^(1/2)` times the exit's, so the
+    /// momentum flux the cut swings stays the jet's own, which spreading conserves.
+    fn momentum_speed_m_s(&self, c: &JetStepCoefficients) -> f64 {
+        let bulk = c.q_max / (self.geometry.flue_height_m * self.geometry.flue_width_m);
+        match self.forced.as_ref().and_then(super::forced_jet::ForcedJetKernel::station_spread) {
+            None => bulk,
+            Some((beta, _)) => bulk / beta,
+        }
     }
 
     /// The series pressure the cut jet delivers for cut flow `cut_flow_m3_s`: the volume drive
@@ -219,7 +226,7 @@ impl FlueVoice {
         match &self.momentum {
             None => volume,
             Some(drive) => {
-                let speed = Self::momentum_speed_m_s(&self.geometry, &c);
+                let speed = self.momentum_speed_m_s(&c);
                 volume
                     + drive.pressure_pa(
                         speed,
@@ -235,7 +242,7 @@ impl FlueVoice {
     pub(super) fn momentum_source_slope(&self, c: JetStepCoefficients) -> f64 {
         match &self.momentum {
             None => 0.0,
-            Some(drive) => drive.pressure_per_flow(Self::momentum_speed_m_s(&self.geometry, &c)),
+            Some(drive) => drive.pressure_per_flow(self.momentum_speed_m_s(&c)),
         }
     }
 }

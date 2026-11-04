@@ -529,6 +529,27 @@ material scaling and domain/representability refusals.
   Refuses non-power-of-two or short boxes (`length < window + 8`), an
   explicit viscous number `4 dt / (Re dx^2)` above 2, stations outside
   the box, and non-finite results.
+- `forced_jet::{BaseSpreading, bickley_step_response_with_base,
+  ForcedJet::with_base, JetStepResponse::station_width_ratio}` — MB
+  97/125/216, bead pexfp.135.1: an opt-in base development,
+  quasi-parallel. At each `x` the base is `U = a(x) sech^2(y / beta(x))`,
+  with `beta = b(x) / b0` and the centre speed `a = beta^(-1/2)`, so the
+  momentum flux is conserved. The deviation keeps the linearised equations
+  with that local `U` and `U''`. The base's own transverse velocity and every
+  streamwise derivative of the base are dropped (the quasi-parallel
+  truncation). The centreline deviation moves at the local centre speed. The
+  exit is the `beta = 1` profile, so a measured exit's receptivity is
+  unchanged. Past the station the base is held at the station's.
+  `LaminarBickley`: `beta = (1 + 6 x / Re)^(2/3)`, the centreline momentum
+  balance with `u_c^2 b` conserved, virtual origin `Re / 6` half-widths
+  upstream. `Linear { width_slope }`: `beta = 1 + width_slope x`.
+  `Parallel` is the default, and its arithmetic is
+  `bickley_step_response_with_exit`'s, bit for bit. Refuses a laminar
+  Bickley base at a non-finite Reynolds number, a width slope that is not
+  positive and finite, a hold station that is not positive and finite, and a
+  band narrower than 4 of the held half-widths. NOT CLAIMED: the base's
+  transverse velocity and streamwise derivatives, and the jet past the
+  station.
 
 ## Invariants
 
@@ -915,6 +936,14 @@ downstream; step kernel against harmonic forcing; the dx 0.2/0.1/0.05
 ladder and worker-count bits; box and band invariance; hat weights and
 the causality admission against a pure delay (invariant 14); local interval
 weights against uniform hats at three clocks, tail support and invalid clocks.
+
+`tests/forced_jet_spreading.rs` (7): the parallel default unchanged; a
+spread base that never widens returns the parallel jet bit for bit; the laws'
+widths are their closed forms, and Bickley's satisfies its centreline momentum
+balance; a laminar Bickley base at Re 1e8 tends to the parallel jet
+(|dG|/|G| 2.990e-8); the Fletcher slope at the station moves |G(0.3)| by
+0.1376; the measured exit stays in phase at the exit; laws, holds and
+bands outside their domain are refused.
 
 `tests/aeroac.rs` (11): Wronskian identity; derivative cross-checks;
 fsci-special oracle; small-argument limits; Hankel far-field

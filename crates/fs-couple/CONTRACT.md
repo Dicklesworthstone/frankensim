@@ -8503,6 +8503,40 @@ None.
   `gas_direction_amount_forced_jet.rs`) carry the measured registers. The
   default switches only when all four pass with their assertions unchanged.
 
+  OPT-IN JET SPREADING (card row `jet_spreading bickley|fletcher-1976`,
+  after `jet_response` and after `momentum_drive` when both are present;
+  `FlueVoice::with_forced_jet_spreading`, `forced_jet::JetSpreadingLaw`;
+  MB 97/125/216, bead pexfp.135.1): the forced jet's response is integrated
+  over a widening base (`fs_aeroac::forced_jet::BaseSpreading`), held past
+  the station, in a band of `BAND_HALF_HEIGHT` station half-widths rounded
+  up to whole spacings. The voice's tanh cut takes the station's half-width,
+  `beta(X)` times its own. Its swing `q_max` takes the station's volume
+  flux, `beta(X)^(1/2)` times its own. The momentum drive's `v0` is the
+  station's centre speed `U / beta(X)^(1/2)`, and the `feedback < 1` guard
+  reads that same speed. `bickley`: the laminar Bickley jet at the
+  response's Reynolds number, matched at the exit, `beta = (1 + 6 x /
+  Re)^(2/3)`. `fletcher-1976`: an organ-flue Pitot measurement (E4 pipe,
+  flue 0.25-1.0 mm) applied to a flute lip jet, Fletcher 1976 eqs. 4-6,
+  `phi` 5 deg (Table I), `b = W`, `db/dx = 2 tan phi`. The voice
+  provenance and the render sidecar (`flue_input.jet_response.spreading`:
+  law, `source`, station width and centre speed, virtual origin, band, cut
+  factors) print the law and `JetSpreadingLaw::source()`. On the D4 flute
+  card at the coarse row: Bickley `b(X)/b0` 1.0267 and `u_c` 0.9869 `U0`;
+  Fletcher 2.5485 and 0.6264 `U0`. Graded through MB (216): Bickley is the
+  flute's opt-in. Fletcher sharpens D4 by 13.6 cents and overblows G4 to
+  the octave, so it was tried and is not posted. Without the row every
+  result is bit-identical
+  (`g0_forced_jet_without_a_spreading_row_is_bit_identical`; at 9c04f0065,
+  before the jet_noise band of 4ae3c06db, the posted flute D4 and pan-pipe
+  D3 mk1 cards rendered byte-identical on this code). REFUSALS: the
+  row without `jet_response` before it, `momentum_drive` after it, a law
+  other than the two named, trailing fields, and a station half-width that
+  is not finite. With the row, the forced jet's first NOT CLAIMED item (the
+  base jet's own spreading over the cut-up) is this quasi-parallel law;
+  without it, that item stands. NOT CLAIMED: the base's transverse velocity
+  and streamwise derivatives (quasi-parallel), the jet past the labium, and
+  any spreading law measured on a flute lip jet.
+
   JET SPEED EDGE (ruling 8132, bead pexfp.135.2): the declared minimum jet
   speed U_min (`jet_limits`, or 1 m/s on the legacy TMM image) sizes the
   retained history, so every lookup at or above it is retained. A slower

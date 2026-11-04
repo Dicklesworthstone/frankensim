@@ -45,6 +45,17 @@
 //!   and the output is `eta = eta_dev` with `eta_dev(0) = R v_ac`. Growth and
 //!   convection remain this solve's. The Kutta law is the default and its
 //!   arithmetic is unchanged.
+//! - Opt-in, by name ([`BaseSpreading`]): the base jet's own streamwise development, quasi-parallel.
+//!   At each `x` the base is `U = a(x) sech^2(y / beta(x))`, with `beta = b(x) / b0` and the centre
+//!   speed `a = beta^(-1/2)` from the momentum flux `a^2 beta` conserved. The deviation keeps the
+//!   equations above with that local `U` and `U''`; the base's own transverse velocity and every
+//!   streamwise derivative of the base are dropped, the quasi-parallel truncation. The
+//!   jet carried with the fluid is a rigid translation of the base, an exact solution of the full
+//!   equations, so the deviation carries no term in `xi`. The centreline deviation moves at the
+//!   local centre speed: `d_t eta_dev + a d_x eta_dev = v(x, 0)`. The exit is the
+//!   `beta = 1` profile, so its arithmetic is the parallel jet's. Past the station the base is held
+//!   at the station's: the jet beyond the labium is outside this response, and holding it keeps the
+//!   band finite. [`BaseSpreading::Parallel`] is the default and its arithmetic is unchanged.
 //!
 //! Numerics: third-order upwind-biased streamwise transport (second-order
 //! closures at both ends), the discrete second difference of `U` for `U''`
@@ -114,6 +125,71 @@ impl ExitReceptivity {
             }
         }
     }
+}
+
+/// The base jet's streamwise development (module documentation). Widths are in the exit
+/// half-width `b0` and `x` in `b0`.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum BaseSpreading {
+    /// `U = sech^2 y` at every `x`.
+    #[default]
+    Parallel,
+    /// The laminar Bickley jet at the solve's own Reynolds number, matched to the exit's width and
+    /// centre speed: the centreline momentum balance `u_c du_c/dx = -2 nu u_c / b^2` with
+    /// `u_c^2 b` conserved gives `beta = (1 + 6 x / Re)^(2/3)`, a virtual origin `Re / 6`
+    /// half-widths upstream of the exit.
+    LaminarBickley,
+    /// A width growing linearly, `beta = 1 + width_slope x`, the centre speed from the momentum
+    /// flux conserved.
+    Linear {
+        /// `db / dx`, positive.
+        width_slope: f64,
+    },
+}
+
+impl BaseSpreading {
+    /// `beta = b(x) / b0` at `x` [b0] for a solve at `reynolds` (`U0 b0 / nu`).
+    #[must_use]
+    pub fn width_ratio(self, x: f64, reynolds: f64) -> f64 {
+        match self {
+            Self::Parallel => 1.0,
+            Self::LaminarBickley => det::pow(1.0 + 6.0 * x / reynolds, 2.0 / 3.0),
+            Self::Linear { width_slope } => 1.0 + width_slope * x,
+        }
+    }
+
+    /// Virtual origin [b0] upstream of the exit, where the law's width extrapolates to zero.
+    #[must_use]
+    pub fn virtual_origin(self, reynolds: f64) -> Option<f64> {
+        match self {
+            Self::Parallel => None,
+            Self::LaminarBickley => Some(reynolds / 6.0),
+            Self::Linear { width_slope } => Some(1.0 / width_slope),
+        }
+    }
+
+    fn validate(self, reynolds: f64) -> Result<(), AeroacError> {
+        let bad = |what| Err(AeroacError::InvalidParameter { what });
+        match self {
+            Self::Parallel => Ok(()),
+            Self::LaminarBickley if !reynolds.is_finite() => {
+                bad("forced jet: laminar Bickley spreading needs a finite Reynolds number")
+            }
+            Self::LaminarBickley => Ok(()),
+            Self::Linear { width_slope } if !(width_slope > 0.0 && width_slope.is_finite()) => {
+                bad("forced jet: linear spreading needs a positive finite width slope")
+            }
+            Self::Linear { .. } => Ok(()),
+        }
+    }
+}
+
+/// The spread base on the grid: `U` and the discrete `U''` per row and column, and the centre
+/// speed per column.
+struct SpreadBase {
+    u: Vec<f64>,
+    upp: Vec<f64>,
+    centre_speed: Vec<f64>,
 }
 
 /// Grid, window and viscosity of one forced-jet computation, in jet units.
@@ -227,6 +303,9 @@ struct RowContext<'a> {
     shift: f64,
     /// `1 / (Re h^2)`, absent for the inviscid jet.
     visc: Option<f64>,
+    /// The spread base's `U` and `U''` per row and column; absent for the parallel jet, whose
+    /// exit profiles `u`, `upp` hold at every column.
+    spread: Option<(&'a [f64], &'a [f64])>,
 }
 
 impl RowContext<'_> {
@@ -234,14 +313,30 @@ impl RowContext<'_> {
     fn row(&self, r: usize, prow: &[f64], deriv: &mut [f64], drow: &mut [f64]) {
         let (cols, h) = (self.cols, self.h);
         let zr = &self.z[r * cols..(r + 1) * cols];
+        // The exit is the unspread profile under every base.
         let psi0 = self.shift * self.u[r];
         let z0 = -2.0 * (prow[0] - psi0 - h * self.wall_v) / (h * h) - self.shift * self.upp[r];
         upwind(zr, z0, h, deriv);
         let half = 0.5 / h;
-        for c in 0..cols {
-            let left = if c == 0 { psi0 } else { prow[c - 1] };
-            let right = if c + 1 == cols { 0.0 } else { prow[c + 1] };
-            drow[c] = -self.u[r] * deriv[c] - self.upp[r] * (right - left) * half;
+        match self.spread {
+            None => {
+                for c in 0..cols {
+                    let left = if c == 0 { psi0 } else { prow[c - 1] };
+                    let right = if c + 1 == cols { 0.0 } else { prow[c + 1] };
+                    drow[c] = -self.u[r] * deriv[c] - self.upp[r] * (right - left) * half;
+                }
+            }
+            Some((su, supp)) => {
+                let (ur, ppr) = (
+                    &su[r * cols..(r + 1) * cols],
+                    &supp[r * cols..(r + 1) * cols],
+                );
+                for c in 0..cols {
+                    let left = if c == 0 { psi0 } else { prow[c - 1] };
+                    let right = if c + 1 == cols { 0.0 } else { prow[c + 1] };
+                    drow[c] = -ur[c] * deriv[c] - ppr[c] * (right - left) * half;
+                }
+            }
         }
         if let Some(visc) = self.visc {
             let below = (r > 0).then(|| &self.z[(r - 1) * cols..r * cols]);
@@ -359,6 +454,8 @@ pub struct ForcedJet {
     xi: f64,
     vac: f64,
     exit: ExitReceptivity,
+    spreading: BaseSpreading,
+    spread: Option<SpreadBase>,
     stage_z: Vec<f64>,
     stage_e: Vec<f64>,
     dz: Vec<f64>,
@@ -377,8 +474,34 @@ impl ForcedJet {
         resolution: ForcedJetResolution,
         exit: ExitReceptivity,
     ) -> Result<Self, AeroacError> {
+        Self::with_base(resolution, exit, BaseSpreading::Parallel, f64::INFINITY)
+    }
+
+    /// Quiescent jet at `t = 0` under the named exit receptivity and base development, the base
+    /// held past `held_beyond` [b0] (the station). A spread base needs a band of at least 4 of its
+    /// held half-widths and a positive finite hold.
+    pub fn with_base(
+        resolution: ForcedJetResolution,
+        exit: ExitReceptivity,
+        spreading: BaseSpreading,
+        held_beyond: f64,
+    ) -> Result<Self, AeroacError> {
         exit.validate()?;
+        spreading.validate(resolution.reynolds)?;
         let (nx, ny) = resolution.validate()?;
+        if spreading != BaseSpreading::Parallel {
+            if !(held_beyond > 0.0 && held_beyond.is_finite()) {
+                return Err(AeroacError::InvalidParameter {
+                    what: "forced jet: a spread base needs a positive finite hold station",
+                });
+            }
+            let widest = spreading.width_ratio(held_beyond, resolution.reynolds);
+            if !(widest.is_finite() && resolution.half_height >= 4.0 * widest) {
+                return Err(AeroacError::InvalidParameter {
+                    what: "forced jet: half-height must be at least 4 of the spread base's held half-widths",
+                });
+            }
+        }
         let h = resolution.spacing;
         let cols = nx - 1;
         let rows = ny - 1;
@@ -413,6 +536,28 @@ impl ForcedJet {
                 inv_den[r * cols + k] = prev;
             }
         }
+        // The spread base at node c + 1 (x = (c + 1) h), held past the station: U and its
+        // discrete second difference across rows, as for the exit profile.
+        let spread = (spreading != BaseSpreading::Parallel).then(|| {
+            let mut base = SpreadBase {
+                u: vec![0.0; rows * cols],
+                upp: vec![0.0; rows * cols],
+                centre_speed: vec![0.0; cols],
+            };
+            for c in 0..cols {
+                let x = ((c + 1) as f64 * h).min(held_beyond);
+                let beta = spreading.width_ratio(x, resolution.reynolds);
+                let a = 1.0 / det::sqrt(beta);
+                let at = |j: usize| a * profile((j as f64 - (ny / 2) as f64) * h / beta);
+                for r in 0..rows {
+                    let j = r + 1;
+                    base.u[r * cols + c] = at(j);
+                    base.upp[r * cols + c] = (at(j + 1) - 2.0 * at(j) + at(j - 1)) / (h * h);
+                }
+                base.centre_speed[c] = a;
+            }
+            base
+        });
         Ok(Self {
             res: resolution,
             nx,
@@ -429,6 +574,8 @@ impl ForcedJet {
             xi: 0.0,
             vac: 0.0,
             exit,
+            spreading,
+            spread,
             stage_z: vec![0.0; rows * cols],
             stage_e: vec![0.0; cols],
             dz: vec![0.0; rows * cols],
@@ -459,6 +606,12 @@ impl ForcedJet {
     #[must_use]
     pub fn exit(&self) -> ExitReceptivity {
         self.exit
+    }
+
+    /// The base development this solver runs.
+    #[must_use]
+    pub fn spreading(&self) -> BaseSpreading {
+        self.spreading
     }
 
     /// Centreline displacement relative to the nozzle, `xi + eta_dev(x)` [b]
@@ -610,6 +763,10 @@ impl ForcedJet {
                     .reynolds
                     .is_finite()
                     .then(|| 1.0 / (self.res.reynolds * h * h)),
+                spread: self
+                    .spread
+                    .as_ref()
+                    .map(|base| (base.u.as_slice(), base.upp.as_slice())),
             };
             run_tasks(self.res.workers, cols, tasks, &|sc: &mut Scratch,
                                                        (r0, chunk, dchunk): (
@@ -629,8 +786,8 @@ impl ForcedJet {
                 }
             });
         }
-        // Centreline displacement deviation: unit speed, inflow -s; the
-        // exit streamfunction there is s U(0) = s.
+        // Centreline displacement deviation: unit speed (the local centre speed of a spread
+        // base), inflow -s; the exit streamfunction there is s U(0) = s.
         let prow = &self.psi[self.centre * cols..(self.centre + 1) * cols];
         upwind(e, -shift, h, &mut self.de);
         let half = 0.5 / h;
@@ -641,7 +798,10 @@ impl ForcedJet {
                 prow[c - 1]
             };
             let right = if c + 1 == cols { 0.0 } else { prow[c + 1] };
-            self.de[c] = -self.de[c] - (right - left) * half;
+            self.de[c] = match &self.spread {
+                None => -self.de[c] - (right - left) * half,
+                Some(base) => -base.centre_speed[c] * self.de[c] - (right - left) * half,
+            };
         }
     }
 }
@@ -656,6 +816,7 @@ pub struct JetStepResponse {
     integrals: Vec<f64>,
     resolution: ForcedJetResolution,
     exit: ExitReceptivity,
+    spreading: BaseSpreading,
 }
 
 /// Integrate the forced jet's unit-step response at `station` [b] over the window (Kutta exit).
@@ -673,7 +834,18 @@ pub fn bickley_step_response_with_exit(
     resolution: &ForcedJetResolution,
     exit: ExitReceptivity,
 ) -> Result<JetStepResponse, AeroacError> {
-    let mut jet = ForcedJet::with_exit(*resolution, exit)?;
+    bickley_step_response_with_base(station, resolution, exit, BaseSpreading::Parallel)
+}
+
+/// Integrate the forced jet's unit-step response at `station` [b0] over the window under the
+/// named exit receptivity and base development, the base held past the station.
+pub fn bickley_step_response_with_base(
+    station: f64,
+    resolution: &ForcedJetResolution,
+    exit: ExitReceptivity,
+    spreading: BaseSpreading,
+) -> Result<JetStepResponse, AeroacError> {
+    let mut jet = ForcedJet::with_base(*resolution, exit, spreading, station)?;
     jet.displacement_at(station)?;
     let dt = resolution.time_step();
     let steps = (resolution.window / dt).ceil() as usize;
@@ -698,6 +870,7 @@ pub fn bickley_step_response_with_exit(
         integrals,
         resolution: *resolution,
         exit,
+        spreading,
     })
 }
 
@@ -764,6 +937,19 @@ impl JetStepResponse {
     #[must_use]
     pub fn exit(&self) -> ExitReceptivity {
         self.exit
+    }
+
+    /// The base development the response was integrated under.
+    #[must_use]
+    pub fn spreading(&self) -> BaseSpreading {
+        self.spreading
+    }
+
+    /// `b(X) / b0` of that base at the station.
+    #[must_use]
+    pub fn station_width_ratio(&self) -> f64 {
+        self.spreading
+            .width_ratio(self.station, self.resolution.reynolds)
     }
 
     /// Zero-frequency gain of the held response, `s(window)`.

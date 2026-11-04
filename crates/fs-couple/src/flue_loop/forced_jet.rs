@@ -39,8 +39,30 @@
 //! accepted interval is the rest state, and a jet whose retained intervals cannot reach the
 //! window freezes this clock as at rest while its voice takes the declared state.
 //!
+//! The base jet is parallel over the cut-up unless the card adds `jet_spreading LAW`
+//! ([`JetSpreadingLaw`], opt-in by name; `fs_aeroac::forced_jet::BaseSpreading`): the base then
+//! widens to `b(x) = b0 beta(x)` with the centre speed `U0 beta^(-1/2)` (momentum flux conserved),
+//! quasi-parallel, and is held past the station. The growth and convection are the local jet's;
+//! the voice's tanh cut takes the station's width, `beta(X)` times its own, and its swing the
+//! station's volume flux, `beta(X)^(1/2)` times its own. The band is widened to
+//! [`BAND_HALF_HEIGHT`] station half-widths. The two laws:
+//! - `bickley`: the laminar Bickley jet at the integration's own Reynolds number, matched to the
+//!   exit's width and centre speed, `beta = (1 + 6 x / Re)^(2/3)` (virtual origin `Re / 6`
+//!   half-widths upstream of the exit; the centreline momentum balance with `u_c^2 b` conserved).
+//! - `fletcher-1976`: an organ-flue Pitot measurement (E4 pipe, flue 0.25-1.0 mm) applied to a
+//!   flute lip jet. Fletcher (JASA 60(4), 1976, p. 926) writes the jet as
+//!   `V exp[-pi (y - y0)^2 / 4 W^2]` (eq. 4) with `W = W0 + 2 x tan phi` (eq. 5) and
+//!   `V = V0 (W0 / W)^(1/2)` (eq. 6, momentum conserved), and lists `phi` = 5 deg (Table I). Its
+//!   volume flux `2 V W` is the Bickley jet's `2 U b`, so `b = W` and `db/dx = 2 tan phi`. His
+//!   Fig. 6 traverses (x 0-20 mm, flue 1.00 and 0.25 mm) widen at `db/dx` 0.179 and 0.155 against
+//!   that 0.175. The reading `db/dx = tan phi` (eq. 5 read for a half-angle) is not taken: it
+//!   would need `phi` 9.3 and 8.1 deg from those traverses. Eq. 26 prints the flux integral of
+//!   eq. 24 with a factor 1/2 that eq. 24 does not give; no width enters through it here.
+//!
 //! Not claimed:
-//! - The base jet's own spreading over the cut-up.
+//! - The base jet's own spreading over the cut-up, unless `jet_spreading` names a law; then the
+//!   base's transverse velocity and streamwise derivatives (the quasi-parallel truncation), and
+//!   the jet past the labium.
 //! - The labium's hydrodynamic back-reaction.
 //! - The Reynolds number of attack and release, and a developing exit's profile there: it is
 //!   held at the reference pressure.
@@ -53,9 +75,10 @@ use std::sync::{Mutex, PoisonError};
 
 use fs_aeroac::AeroacError;
 use fs_aeroac::forced_jet::{
-    ExitReceptivity, FRONT_MARGIN, ForcedJetResolution, JetStepResponse,
-    bickley_step_response_with_exit,
+    BaseSpreading, ExitReceptivity, FRONT_MARGIN, ForcedJetResolution, JetStepResponse,
+    bickley_step_response_with_base,
 };
+use fs_math::det;
 
 use crate::bernoulli_aperture::developing::DevelopingSlitState;
 
@@ -143,10 +166,10 @@ pub fn measured_exit_reynolds_admitted(re_h: f64) -> bool {
 // Integrated responses by their exact inputs. The integration is deterministic and its bits do
 // not depend on the worker count, so a voice built again from the same flue, gas and row reuses
 // the identical response instead of integrating it again.
-static RESPONSES: Mutex<Vec<([u64; 6], JetStepResponse)>> = Mutex::new(Vec::new());
+static RESPONSES: Mutex<Vec<([u64; 9], JetStepResponse)>> = Mutex::new(Vec::new());
 
-fn integrated(station: f64, resolution: &ForcedJetResolution, exit: ExitReceptivity)
-    -> Result<JetStepResponse, AeroacError>
+fn integrated(station: f64, resolution: &ForcedJetResolution, exit: ExitReceptivity,
+    spreading: BaseSpreading) -> Result<JetStepResponse, AeroacError>
 {
     // A measured exit's R is positive, so its bits are never the Kutta key's 0.
     let exit_key = match exit {
@@ -155,13 +178,19 @@ fn integrated(station: f64, resolution: &ForcedJetResolution, exit: ExitReceptiv
             displacement_per_velocity.to_bits()
         }
     };
+    let spread_key = match spreading {
+        BaseSpreading::Parallel => [0, 0],
+        BaseSpreading::LaminarBickley => [1, 0],
+        BaseSpreading::Linear { width_slope } => [2, width_slope.to_bits()],
+    };
     let key = [station.to_bits(), resolution.spacing.to_bits(), resolution.window.to_bits(),
-        resolution.reynolds.to_bits(), resolution.streamwise_cells as u64, exit_key];
+        resolution.reynolds.to_bits(), resolution.streamwise_cells as u64, exit_key,
+        resolution.half_height.to_bits(), spread_key[0], spread_key[1]];
     let retained = || RESPONSES.lock().unwrap_or_else(PoisonError::into_inner);
     if let Some((_, step)) = retained().iter().find(|(k, _)| *k == key) {
         return Ok(step.clone());
     }
-    let step = bickley_step_response_with_exit(station, resolution, exit)?;
+    let step = bickley_step_response_with_base(station, resolution, exit, spreading)?;
     let mut cache = retained();
     if !cache.iter().any(|(k, _)| *k == key) {
         if cache.len() == RETAINED_RESPONSES {
@@ -210,6 +239,64 @@ impl JetExitLaw {
     }
 }
 
+/// Fletcher's jet divergence angle `phi` [deg] (JASA 60(4), 1976, Table I; eq. 5
+/// `W = W0 + 2 x tan phi`), measured by Pitot traverses on an organ flue (E4 pipe, flue 0.25 and
+/// 1.0 mm).
+pub const FLETCHER_1976_DIVERGENCE_DEG: f64 = 5.0;
+
+/// Optional card row `jet_spreading LAW` after `jet_response forced-bickley ...`: the base jet's
+/// own streamwise development over the cut-up (module documentation).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum JetSpreadingLaw {
+    /// No row: the parallel base, the arithmetic of before.
+    #[default]
+    None,
+    /// `jet_spreading bickley`: the laminar Bickley jet matched at the exit.
+    Bickley,
+    /// `jet_spreading fletcher-1976`: Fletcher's organ-flue `W = W0 + 2 x tan phi`, `phi` 5 deg,
+    /// applied to this jet.
+    Fletcher1976,
+}
+
+impl JetSpreadingLaw {
+    /// The solver's base development.
+    #[must_use]
+    pub fn base(self) -> BaseSpreading {
+        match self {
+            Self::None => BaseSpreading::Parallel,
+            Self::Bickley => BaseSpreading::LaminarBickley,
+            Self::Fletcher1976 => BaseSpreading::Linear {
+                width_slope: 2.0 * det::tan(FLETCHER_1976_DIVERGENCE_DEG.to_radians()),
+            },
+        }
+    }
+
+    /// The card's name of the law.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Bickley => "bickley",
+            Self::Fletcher1976 => "fletcher-1976",
+        }
+    }
+
+    /// Where the law comes from, as the voice provenance and the render sidecar both print it.
+    #[must_use]
+    pub const fn source(self) -> &'static str {
+        match self {
+            Self::None => "none: the parallel exit profile at every station",
+            Self::Bickley => {
+                "the laminar Bickley jet at this Re matched at the exit, beta = (1 + 6 x/Re)^(2/3)"
+            }
+            Self::Fletcher1976 => {
+                "an organ-flue Pitot measurement (E4 pipe, flue 0.25-1.0 mm) applied to a flute lip \
+                 jet: Fletcher 1976 eqs. 4-6, phi 5 deg (Table I), b = W, db/dx = 2 tan phi"
+            }
+        }
+    }
+}
+
 /// One accepted physical-time velocity interval and its convective-clock advance.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 struct JetInterval {
@@ -223,6 +310,7 @@ struct JetInterval {
 pub struct ForcedJetKernel {
     spec: ForcedJetSpec,
     exit_law: JetExitLaw,
+    spreading: JetSpreadingLaw,
     step: JetStepResponse,
     half_width_m: f64,
     centre_over_bulk: f64,
@@ -300,6 +388,30 @@ impl ForcedJetKernel {
         max_taps: usize,
         sample_period_s: f64,
     ) -> Result<Self, &'static str> {
+        Self::new_with_spreading(spec, exit_law, JetSpreadingLaw::None, exit, flue_height_m,
+            cut_up_m, kinematic_viscosity_m2_s, reference_bulk_m_s, minimum_bulk_m_s, max_taps,
+            sample_period_s)
+    }
+
+    /// [`Self::new_with_exit`] over the named base development: the band is widened to
+    /// [`BAND_HALF_HEIGHT`] of the station's half-widths, rounded up to whole spacings.
+    ///
+    /// # Errors
+    /// As [`Self::new`], and a law the integrator refuses.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_spreading(
+        spec: ForcedJetSpec,
+        exit_law: JetExitLaw,
+        spreading: JetSpreadingLaw,
+        exit: JetExit,
+        flue_height_m: f64,
+        cut_up_m: f64,
+        kinematic_viscosity_m2_s: f64,
+        reference_bulk_m_s: f64,
+        minimum_bulk_m_s: f64,
+        max_taps: usize,
+        sample_period_s: f64,
+    ) -> Result<Self, &'static str> {
         let (width_ratio, centre_over_bulk) = (exit.half_width_over_height, exit.centre_over_bulk);
         let half_width_m = width_ratio * flue_height_m;
         let inputs = [
@@ -326,16 +438,26 @@ impl ForcedJetKernel {
         let workers = std::thread::available_parallelism()
             .map_or(1, std::num::NonZeroUsize::get)
             .min(MAX_WORKERS);
+        let base = spreading.base();
+        let half_height = if spreading == JetSpreadingLaw::None {
+            BAND_HALF_HEIGHT
+        } else {
+            let widest = base.width_ratio(station, reynolds);
+            if !widest.is_finite() {
+                return Err("jet_spreading: the station's half-width is not finite");
+            }
+            (BAND_HALF_HEIGHT * widest / spec.spacing).ceil() * spec.spacing
+        };
         let resolution = ForcedJetResolution {
             spacing: spec.spacing,
             streamwise_cells: cells,
-            half_height: BAND_HALF_HEIGHT,
+            half_height,
             window: spec.window,
             courant: COURANT,
             reynolds,
             workers,
         };
-        let step = integrated(station, &resolution, exit_law.receptivity(width_ratio))
+        let step = integrated(station, &resolution, exit_law.receptivity(width_ratio), base)
             .map_err(refusal)?;
         let slowest = step
             .hat_weights(
@@ -351,6 +473,7 @@ impl ForcedJetKernel {
         Ok(Self {
             spec,
             exit_law,
+            spreading,
             step,
             half_width_m,
             centre_over_bulk,
@@ -382,6 +505,22 @@ impl ForcedJetKernel {
     #[must_use]
     pub const fn exit_law(&self) -> JetExitLaw {
         self.exit_law
+    }
+
+    /// The base development this response was integrated over.
+    #[must_use]
+    pub const fn spreading(&self) -> JetSpreadingLaw {
+        self.spreading
+    }
+
+    /// `b(X) / b0` at the station and the station's volume flux over the exit's,
+    /// `(b(X) / b0)^(1/2)`, under a named spreading law; `None` without one.
+    #[must_use]
+    pub fn station_spread(&self) -> Option<(f64, f64)> {
+        (self.spreading != JetSpreadingLaw::None).then(|| {
+            let beta = self.step.station_width_ratio();
+            (beta, det::sqrt(beta))
+        })
     }
 
     /// The integrated step response.
