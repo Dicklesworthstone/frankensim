@@ -26,6 +26,8 @@ use fs_material::water_refraction::{
 
 /// Original IF97 water density driven by an existing thermal reconstruction.
 pub mod isobaric;
+/// Original IF97 water density driven by one joint pressure/temperature field.
+pub mod pressure_temperature;
 
 /// One query of the same original temperature and mass-density reconstruction.
 #[derive(Clone, Copy, Debug, PartialEq)]
