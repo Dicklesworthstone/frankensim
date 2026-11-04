@@ -479,3 +479,21 @@ impl MixedFiniteStrainPotential for Hyperelastic {
         response_from_energy(f, |x| self.isochoric_energy(x))
     }
 }
+
+// Retain the immutable source card and admitted external conditions through
+// mixed consumers. Only the original native remainder is delegated; its split
+// and deformation-domain gates remain unchanged.
+impl MixedFiniteStrainPotential for super::cards::ResolvedHyperelastic {
+    fn equilibrium_law(&self) -> &Hyperelastic {
+        self.law()
+    }
+    fn remainder_stress_and_potential(
+        &self,
+        f: &[f64; 9],
+    ) -> Result<([f64; 9], f64), MaterialError> {
+        self.law().remainder_stress_and_potential(f)
+    }
+    fn remainder_response(&self, f: &[f64; 9]) -> Result<RemainderResponse, MaterialError> {
+        self.law().remainder_response(f)
+    }
+}

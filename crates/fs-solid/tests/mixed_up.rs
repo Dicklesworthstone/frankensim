@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
-use fs_material::hyper::mixed::VolumetricTreatment;
+use fs_material::hyper::mixed::{MixedFiniteStrainPotential, VolumetricTreatment};
 use fs_material::hyper::{Hyperelastic, HyperelasticModel};
 use fs_solid::hyper3::mixed::{
     MixedLawField, MixedUpError, MixedUpEvaluation, MixedUpProblem, MixedUpSettings,
@@ -66,14 +66,14 @@ fn settings(length: f64, stress: f64) -> MixedUpSettings {
     }
 }
 
-fn problem<'a>(
+fn problem<'a, L: MixedFiniteStrainPotential>(
     nodes: &'a [[f64; 3]],
     elements: &'a [[usize; 10]],
-    material: &'a Hyperelastic,
+    material: &'a L,
     supports: &'a [(usize, f64)],
     forces: &'a [(usize, f64)],
     volumetric: VolumetricTreatment,
-) -> MixedUpProblem<'a> {
+) -> MixedUpProblem<'a, L> {
     MixedUpProblem {
         nodes_m: nodes,
         elements,
@@ -715,6 +715,345 @@ fn quadrature_budget_constraints_and_precancelled_work_are_refused() {
         with_gate(&gate, |cancelled| {
             assert!(matches!(p.prepare(cancelled), Err(MixedUpError::Cancelled)));
             assert!(matches!(p.solve(cancelled), Err(MixedUpError::Cancelled)));
+        });
+    });
+}
+
+fn modal_settings() -> fs_solid::hyper3::mixed::vibration::MixedVibrationSettings {
+    fs_solid::hyper3::mixed::vibration::MixedVibrationSettings {
+        spectrum: fs_solid::hyper3::vibration::VibrationSettings {
+            maximum_free_dofs: 128,
+            relative_residual_tolerance: 1e-8,
+        },
+        maximum_mass_assembly_bytes: 8 * 1024 * 1024,
+        maximum_condensation_bytes: 32 * 1024 * 1024,
+        pressure_residual_tolerance: 1e-10,
+    }
+}
+
+#[test]
+fn finite_bulk_corner_vibration_has_exact_p2_mass_and_algebraic_pressure() {
+    with_cx(|cx| {
+        let (length, rho, mu) = (0.4_f64, 7.0, 2.0);
+        let p1 = [
+            [0.0; 3],
+            [length, 0.0, 0.0],
+            [0.0, length, 0.0],
+            [0.0, 0.0, length],
+        ];
+        let (nodes, elements) = promote_p1_to_p2(&p1, &[[0, 1, 2, 3]], None, cx).unwrap();
+        let fixed: Vec<_> = (0..3 * nodes.len())
+            .filter(|&d| d != 3)
+            .map(|d| (d, 0.0))
+            .collect();
+        let volume = length.powi(3) / 6.0;
+        // On an affine Tet10, N1=lambda1(2lambda1-1), so
+        // integral N1²=V/70 and integral (dN1/dX1)²=3V/(5L²).
+        // div(delta u) is P1 and the native pressure space represents it exactly.
+        // These are homogeneous patch identities, not a general locking ladder.
+        for ratio in [1.0, 1e4, 1e8] {
+            let bulk = ratio * mu;
+            let material = law(mu, bulk);
+            let p = problem(
+                &nodes,
+                &elements,
+                &material,
+                &fixed,
+                &[],
+                VolumetricTreatment::OriginalMaterial,
+            );
+            let spectrum = p.solve_vibration(&[rho], modal_settings(), cx).unwrap();
+            assert_eq!(spectrum.free_dofs(), &[3]);
+            assert_eq!(spectrum.mass_kg().len(), 1, "pressure must have no inertia");
+            assert_eq!(spectrum.equilibrium().pressure_nodes, [0, 1, 2, 3]);
+            let stiffness = (bulk + 4.0 * mu / 3.0) * 3.0 * volume / (5.0 * length * length);
+            let mass = rho * volume / 70.0;
+            near(spectrum.stiffness_n_m()[0], stiffness, 2e-11 * stiffness);
+            near(spectrum.mass_kg()[0], mass, 2e-13 * mass);
+            let mode = &spectrum.modes()[0];
+            near(
+                mode.displacement.lambda,
+                42.0 * (bulk + 4.0 * mu / 3.0) / (rho * length * length),
+                2e-11 * stiffness / mass,
+            );
+            near(mode.displacement.phi[0].powi(2) * mass, 1.0, 2e-12);
+            for (point, coefficient) in [-1.0, 3.0, -1.0, -1.0].into_iter().enumerate() {
+                let expected = coefficient * bulk / length;
+                near(
+                    spectrum.pressure_response_pa_per_m()[point],
+                    expected,
+                    2e-11 * expected.abs(),
+                );
+                near(
+                    mode.pressure_shape[point] / mode.displacement.phi[0],
+                    expected,
+                    2e-11 * expected.abs(),
+                );
+            }
+            assert!(
+                mode.pressure_equation_relative_residual
+                    <= modal_settings().pressure_residual_tolerance
+            );
+            assert!(mode.displacement.interval.0 > 0.0);
+        }
+    });
+}
+
+fn modal_source_card(mu: f64, bulk: f64) -> fs_matdb::ConstitutiveModelCard {
+    use fs_matdb::{ConstitutiveModelCard, InitialStatePolicy, LawId, LawParameter, Provenance};
+    use fs_qty::Dims;
+    let pa = Dims([-1, 1, -2, 0, 0, 0]);
+    let artifact = fs_blake3::hash_bytes(b"synthetic mixed modal material; not measured data");
+    ConstitutiveModelCard {
+        law: LawId("mooney-rivlin-decoupled".into()),
+        law_version: 1,
+        parameters: [
+            ("stretch_limit", 5.0, Dims::NONE),
+            ("c10", 0.5 * mu, pa),
+            ("c01", 0.0, pa),
+            ("kappa", bulk, pa),
+        ]
+        .into_iter()
+        .map(|(name, value, dims)| (name.into(), LawParameter { value, dims }))
+        .collect(),
+        state_schema_version: 1,
+        initial_state: InitialStatePolicy::ZeroInternalState,
+        validity: fs_evidence::ValidityDomain::unconstrained(),
+        sources: vec![artifact],
+        provenance: Provenance {
+            source: "manufactured finite-compliance fixture".into(),
+            license: "test-only".into(),
+            artifact: Some(artifact),
+        },
+    }
+}
+
+#[test]
+fn sourced_prestretched_mixed_modes_match_full_material_tangent_and_pressure_equations() {
+    use fs_material::hyper::cards::ResolvedHyperelastic;
+    with_cx(|cx| {
+        let (mu, bulk, rho, length, stretch, shear) = (2.0, 30.0, 7.0, 0.4_f64, 1.2, 0.25);
+        let p1 = [
+            [0.0; 3],
+            [length, 0.0, 0.0],
+            [0.0, length, 0.0],
+            [0.0, 0.0, length],
+        ];
+        let (nodes, elements) = promote_p1_to_p2(&p1, &[[0, 1, 2, 3]], None, cx).unwrap();
+        let initial: Vec<_> = nodes
+            .iter()
+            .map(|x| [(stretch - 1.0) * x[0] + shear * x[1], 0.0, 0.0])
+            .collect();
+        let fixed: Vec<_> = (0..3 * nodes.len())
+            .filter(|d| !(3..6).contains(d))
+            .map(|d| (d, initial[d / 3][d % 3]))
+            .collect();
+        let card = modal_source_card(mu, bulk);
+        let material = ResolvedHyperelastic::try_from_model_card(&card).unwrap();
+        let mut p = problem(
+            &nodes,
+            &elements,
+            &material,
+            &fixed,
+            &[],
+            VolumetricTreatment::OriginalMaterial,
+        );
+        p.settings.load_steps = 1;
+        let pressure = [bulk * (stretch - 1.0); 4];
+        // Constant stress integrates to zero force at this P2 corner. The
+        // other nodes hold the homogeneous finite stretch/shear equilibrium.
+        let spectrum = p
+            .solve_vibration_from(&initial, &pressure, &[rho], modal_settings(), cx)
+            .unwrap();
+        assert_eq!(spectrum.free_dofs(), &[3, 4, 5]);
+        let MixedLawField::Uniform(retained) = spectrum.problem().material else {
+            panic!("original sourced material was replaced")
+        };
+        assert!(core::ptr::eq(retained, &material));
+        assert_eq!(retained.model_card(), &card);
+        assert_eq!(spectrum.reference_density_kg_m3(), &[rho]);
+        let f = [stretch, shear, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        let tangent = material.law().tangent(&f).unwrap();
+        let volume = length.powi(3) / 6.0;
+        let factor = 3.0 * volume / (5.0 * length * length);
+        let mut expected_k = vec![0.0; 9];
+        let mut expected_m = vec![0.0; 9];
+        for i in 0..3 {
+            for j in 0..3 {
+                expected_k[3 * i + j] = factor * tangent[3 * i][3 * j];
+                near(
+                    spectrum.stiffness_n_m()[3 * i + j],
+                    expected_k[3 * i + j],
+                    2e-8 * factor * bulk,
+                );
+                expected_m[3 * i + j] = if i == j { rho * volume / 70.0 } else { 0.0 };
+                near(
+                    spectrum.mass_kg()[3 * i + j],
+                    expected_m[3 * i + j],
+                    2e-13 * rho * volume,
+                );
+            }
+        }
+        assert!(
+            expected_k[1].abs() > factor * bulk * shear * 0.5,
+            "finite shear must exercise pressure cross-coupling"
+        );
+        let expected_modes = fs_modal::eigh_gen_dense(&expected_k, &expected_m, 3).unwrap();
+        let full = spectrum.mixed_tangent();
+        let nu = 3 * nodes.len();
+        for (mode, expected) in spectrum.modes().iter().zip(expected_modes) {
+            near(
+                mode.displacement.lambda,
+                expected.lambda,
+                3e-8 * expected.lambda.abs(),
+            );
+            // Verify the uncondensed physical pressure equation independently
+            // of the adapter's reported residual and without any pressure mass.
+            for row in 0..4 {
+                let mut residual = 0.0_f64;
+                let mut scale = 0.0_f64;
+                for j in 0..3 {
+                    let term = full.get(nu + row, 3 + j) * mode.displacement.phi[j];
+                    residual += term;
+                    scale += term.abs();
+                }
+                for j in 0..4 {
+                    let term = full.get(nu + row, nu + j) * mode.pressure_shape[j];
+                    residual += term;
+                    scale += term.abs();
+                }
+                assert!(residual.abs() <= 1e-10 * scale.max(f64::MIN_POSITIVE));
+            }
+        }
+        for (point, coefficient) in [-1.0, 3.0, -1.0, -1.0].into_iter().enumerate() {
+            for (axis, cofactor) in [1.0, -shear, 0.0].into_iter().enumerate() {
+                near(
+                    spectrum.pressure_response_pa_per_m()[3 * point + axis],
+                    coefficient * bulk * cofactor / length,
+                    2e-8 * bulk / length,
+                );
+            }
+        }
+        let doubled = p
+            .solve_vibration_from(&initial, &pressure, &[2.0 * rho], modal_settings(), cx)
+            .unwrap();
+        for (mode, heavier) in spectrum.modes().iter().zip(doubled.modes()) {
+            near(
+                heavier.displacement.lambda,
+                0.5 * mode.displacement.lambda,
+                2e-11 * mode.displacement.lambda.abs(),
+            );
+        }
+    });
+}
+
+#[test]
+fn rotated_isochoric_modes_keep_uncancelled_pressure_residual_scale() {
+    with_cx(|cx| {
+        let p1 = [[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let (nodes, elements) = promote_p1_to_p2(&p1, &[[0, 1, 2, 3]], None, cx).unwrap();
+        let initial: Vec<_> = nodes
+            .iter()
+            .map(|x| [-0.2 * x[0] - 0.6 * x[1], 0.6 * x[0] - 0.2 * x[1], 0.0])
+            .collect();
+        let fixed: Vec<_> = (0..3 * nodes.len())
+            .filter(|d| !(3..6).contains(d))
+            .map(|d| (d, initial[d / 3][d % 3]))
+            .collect();
+        let (mu, bulk, rho) = (2.0, 200.0, 7.0);
+        let material = law(mu, bulk);
+        let mut p = problem(
+            &nodes,
+            &elements,
+            &material,
+            &fixed,
+            &[],
+            VolumetricTreatment::OriginalMaterial,
+        );
+        p.settings.load_steps = 1;
+        let spectrum = p
+            .solve_vibration_from(&initial, &[0.0; 4], &[rho], modal_settings(), cx)
+            .unwrap();
+        // F is a rigid rotation with first column (0.8,0.6,0). Transverse
+        // eigenvectors cancel the nonzero pressure couplings, so |B*phi|
+        // alone cannot scale their pressure-equation backward error.
+        for mode in &spectrum.modes()[..2] {
+            near(
+                mode.displacement.lambda,
+                42.0 * mu / rho,
+                1e-8 * 42.0 * mu / rho,
+            );
+            let phi_scale = mode
+                .displacement
+                .phi
+                .iter()
+                .map(|v| v.abs())
+                .fold(0.0, f64::max);
+            assert!(
+                mode.pressure_shape
+                    .iter()
+                    .all(|p| p.abs() <= 1e-8 * bulk * phi_scale)
+            );
+            assert!(
+                mode.pressure_equation_relative_residual
+                    <= modal_settings().pressure_residual_tolerance
+            );
+        }
+        near(
+            spectrum.modes()[2].displacement.lambda,
+            42.0 * (bulk + 4.0 * mu / 3.0) / rho,
+            1e-8 * 42.0 * bulk / rho,
+        );
+    });
+}
+
+#[test]
+fn mixed_vibration_refuses_exact_constraints_storage_caps_and_cancellation() {
+    use fs_solid::hyper3::mixed::vibration::MixedVibrationError;
+    with_cx(|cx| {
+        let p1 = [[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let (nodes, elements) = promote_p1_to_p2(&p1, &[[0, 1, 2, 3]], None, cx).unwrap();
+        let fixed: Vec<_> = (0..3 * nodes.len())
+            .filter(|&d| d != 3)
+            .map(|d| (d, 0.0))
+            .collect();
+        let material = law(2.0, 200.0);
+        let mut p = problem(
+            &nodes,
+            &elements,
+            &material,
+            &fixed,
+            &[],
+            VolumetricTreatment::ExactIncompressible,
+        );
+        assert!(matches!(
+            p.solve_vibration(&[1.0], modal_settings(), cx),
+            Err(MixedVibrationError::Mixed(
+                MixedUpError::InvalidInput { .. }
+            ))
+        ));
+        p.volumetric = VolumetricTreatment::OriginalMaterial;
+        for kind in 0..3 {
+            let mut settings = modal_settings();
+            match kind {
+                0 => settings.spectrum.maximum_free_dofs = 0,
+                1 => settings.maximum_condensation_bytes = 0,
+                _ => settings.maximum_mass_assembly_bytes = 0,
+            }
+            assert!(matches!(
+                p.solve_vibration(&[1.0], settings, cx),
+                Err(MixedVibrationError::Mixed(
+                    MixedUpError::InvalidInput { .. }
+                ))
+            ));
+        }
+        let gate = CancelGate::new();
+        gate.request();
+        with_gate(&gate, |cancelled| {
+            assert!(matches!(
+                p.solve_vibration(&[1.0], modal_settings(), cancelled),
+                Err(MixedVibrationError::Mixed(MixedUpError::Cancelled))
+            ));
         });
     });
 }

@@ -44,6 +44,9 @@ pub mod conservative;
 /// Fixed-configuration impulses with the original incompressibility constraint.
 pub mod impulse;
 
+/// Finite-compliance physical modes with consistent pressure elimination.
+pub mod vibration;
+
 #[cfg(test)]
 mod pressure_tests;
 
