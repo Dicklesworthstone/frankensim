@@ -18,6 +18,9 @@ mod dirac_body;
 mod reed_ode;
 
 #[cfg(test)]
+mod polarization_tests;
+
+#[cfg(test)]
 use reed_ode::realize_reed_ode;
 
 use crate::modal_acoustic_time::{
@@ -58,7 +61,7 @@ use fs_phs::{
     modal_bank_ports, quasistatic_aperture_opening, step, step_descriptor, transformer,
 };
 use fs_scenario::{
-    AcousticAssembly, AmbientGas, BeatingReed, BowStroke, ContactTexture, HelmholtzCavity,
+    AcousticAssembly, AmbientGas, BeatingReed, BowStroke, ContactTexture,
     LocallyReactingWall, Pluck, PrestressedString, RadiatingPlate, RayleighParams, ThinPlate,
     UnilateralObstacle, ViscothermalDuct, VolumeVelocityPulse, WaveguideEnd,
 };
@@ -568,6 +571,14 @@ fn realize_assembly_inner(
             what: "sample rate and duration must be positive and finite",
         });
     }
+    if assembly.string.as_ref().is_some_and(|s| s.moving_end && s.polarization_detune > 0.0) {
+        // One scalar body port cannot specify both transverse attachment
+        // motions. Do not silently drop the second plane or constrain it to
+        // the first plane's velocity.
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "moving-end second polarization requires explicit transverse attachment geometry and is not supported by this assembly",
+        });
+    }
     if let Some(observer) = realize_options.baffled_duct {
         return duct_observer::realize(assembly, chart.is_some(), realize_options, observer);
     }
@@ -641,14 +652,14 @@ fn realize_assembly_inner(
     let dirac_string_only = dirac_base && assembly.duct.is_none();
     let dirac_string_duct = dirac_base
         && assembly.duct.is_some()
-        && assembly.cavity.is_none()
         && assembly
             .duct
             .as_ref()
             .is_some_and(|d| bore_spec(d).is_some());
-    if let Some(cavity) = assembly.cavity
-        && !dirac_string_only
-    {
+    // Every assembly path consumes the same complete body image. A cavity is
+    // an internal load of that body, so adding a duct must not replace the
+    // moving-end constraint with the fixed-fixed, one-way bridge path.
+    if let Some(cavity) = assembly.cavity {
         bodies.attach_cavity(cavity, &gas)?;
     }
     if dirac_string_duct {
@@ -665,7 +676,6 @@ fn realize_assembly_inner(
             &assembly.obstacles,
             assembly.contact_texture,
             &mut bodies,
-            None,
             assembly.duct.as_ref(),
             assembly.reed,
             assembly.blow,
@@ -701,7 +711,6 @@ fn realize_assembly_inner(
                 &assembly.obstacles,
                 assembly.contact_texture,
                 &mut bodies,
-                assembly.cavity,
                 None,
                 assembly.reed,
                 assembly.blow,
@@ -2040,8 +2049,9 @@ fn secondary_string(string: &PrestressedString, tension_scale: f64) -> Prestress
     twin
 }
 
-/// Two-way Dirac realize: moving-end waveguide ⊕ plate ⊕ optional
-/// Helmholtz cavity or [`acoustic_chain`] duct. `EA > 0` uses
+/// Two-way Dirac realize: moving-end waveguide ⊕ complete plate/body image
+/// ⊕ optional [`acoustic_chain`] duct. The image retains its cavity, material
+/// and exterior histories together. `EA > 0` uses
 /// [`kirchhoff_carrier_moving_end`] on the same free-fixed port.
 /// Bow, obstacle stations, and blow/reed are leftover ports of
 /// [`join_port`]. Von Karman is the same plate pHS with a quartic
@@ -2056,7 +2066,6 @@ fn realize_dirac_join(
     obstacles: &[UnilateralObstacle],
     texture: Option<ContactTexture>,
     plates: &mut PlateBank,
-    cavity: Option<HelmholtzCavity>,
     duct: Option<&ViscothermalDuct>,
     reed: Option<BeatingReed>,
     blow: Option<VolumeVelocityPulse>,
@@ -2101,8 +2110,8 @@ fn realize_dirac_join(
         ode_start,
         body_observation,
         fluid_port,
-    ) = match (body, cavity, duct) {
-        (None, _, Some(line)) => {
+    ) = match (body, duct) {
+        (None, Some(line)) => {
             refuse_open_nyquist(line, gas, sample_rate_hz)?;
             let (sections, taps) =
                 bore_spec(line).ok_or(AcousticRealizeError::InvalidDescription {
@@ -2126,8 +2135,8 @@ fn realize_dirac_join(
             string_state.resize(system.state_dim(), 0.0);
             (Some(system), None, string_state, 0, None, fluid_port)
         }
-        (None, _, None) => (Some(waveguide), None, string_state, 1, None, None),
-        (Some(plate), None, None) => {
+        (None, None) => (Some(waveguide), None, string_state, 1, None, None),
+        (Some(plate), None) => {
             let joined = dirac_body::join_complete_body(waveguide, string_state, plate, None)?;
             (
                 None,
@@ -2138,26 +2147,7 @@ fn realize_dirac_join(
                 joined.fluid_port,
             )
         }
-        (Some(plate), Some(cav), None) => {
-            let flow = helmholtz_flow_cavity(cav, gas)
-                .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
-            let load = dirac_body::DiracBodyLoad {
-                state: vec![0.0; flow.state_dim()],
-                system: flow,
-                face: 0,
-                drive_port: None,
-            };
-            let joined = dirac_body::join_complete_body(waveguide, string_state, plate, Some(load))?;
-            (
-                None,
-                Some(joined.system),
-                joined.state,
-                0,
-                Some(joined.observation),
-                joined.fluid_port,
-            )
-        }
-        (Some(plate), None, Some(line)) => {
+        (Some(plate), Some(line)) => {
             refuse_open_nyquist(line, gas, sample_rate_hz)?;
             let (sections, taps) =
                 bore_spec(line).ok_or(AcousticRealizeError::InvalidDescription {
@@ -2188,11 +2178,6 @@ fn realize_dirac_join(
                 Some(joined.observation),
                 joined.fluid_port,
             )
-        }
-        (Some(_), Some(_), Some(_)) => {
-            return Err(AcousticRealizeError::InvalidDescription {
-                what: "Dirac join takes a cavity or a duct, not both",
-            });
         }
     };
     let dt = 1.0 / f64::from(sample_rate_hz);
@@ -2606,25 +2591,6 @@ fn free_fixed_pluck_modal(pluck: Pluck, string: &PrestressedString, k_zero: usiz
         acc += w * det::cos(kappa * x);
     }
     mu * phi0 * acc * (l / nq as f64)
-}
-
-fn helmholtz_flow_cavity(
-    cavity: HelmholtzCavity,
-    gas: &GasState,
-) -> Result<fs_phs::PortHamiltonian, AcousticRealizeError> {
-    // One owner (DEF-09): the declared ends set both end corrections and the
-    // outer radiation load; the Bessel neck loss joins it at the resonance.
-    let resistance = crate::cavity_modal::resonance_neck_resistance(&cavity, gas)?;
-    fs_phs::helmholtz_resonator_flow(
-        cavity.volume_m3,
-        cavity.neck_radius_m,
-        cavity.neck_length_m,
-        gas.density,
-        gas.sound_speed,
-        resistance,
-        crate::cavity_modal::neck_ends(&cavity),
-    )
-    .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))
 }
 
 #[allow(clippy::too_many_arguments)] // one coherent realization record
@@ -6146,7 +6112,6 @@ mod string_observer_tests {
                     &[],
                     None,
                     &mut plates,
-                    None,
                     None,
                     None,
                     None,

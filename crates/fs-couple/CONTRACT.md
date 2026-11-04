@@ -7276,8 +7276,11 @@ clarinet is one filling of those objects.
   paths. Invalid authored ratios refuse instead of being clamped.
   G1/G3 tests check the resistance formula and
   pressure ring-down under changed gas pressure. A second
-  polarization at `1+detune` is a second member on the same clock
-  and shares every plate (it is not an independent unused body).
+  polarization at `1+detune` is a second fixed-end member on the same clock
+  and shares every plate (it is not an independent unused body). Moving-end
+  second polarization requires explicit transverse attachment geometry that
+  this assembly does not carry; it refuses before realization, with or without
+  Prony bending, instead of silently rendering only one plane.
 - String path, `EA > 0`: `fs-nlmodal::kirchhoff_carrier_string`
   (fixed-fixed) or `kirchhoff_carrier_moving_end` (Dirac join)
   + Gonzalez
@@ -8054,8 +8057,13 @@ clarinet is one filling of those objects.
   the duct FIR. The certified three-pHS Dirac interconnection is
   `common_flow_dirac(moving_end_waveguide, transformer(plate, load))`
   in `fs-phs` (free-end attachment port, area transformer, Kirchhoff
-  star). The load is a Helmholtz cavity or an `acoustic_chain`
-  duct — the same object. `PrestressedString.moving_end` selects
+  star). The complete plate image retains its Helmholtz cavity, material
+  memory and exterior histories before an optional `acoustic_chain` duct
+  joins its independent surface port. A cavity and duct can therefore load
+  the same body without downgrading the string to one-way bridge forcing.
+  Cavity construction uses the same `PlateBank::attach_cavity` owner on all
+  paths; a cavity without a structural attachment refuses instead of being
+  silently omitted. `PrestressedString.moving_end` selects
   that clock. Bow, obstacle stations, and blow/reed are leftover
   ports of `join_port` (Stribeck and Hunt–Crossley stay port
   forces). Von Karman is the same plate pHS with quartic storage.
