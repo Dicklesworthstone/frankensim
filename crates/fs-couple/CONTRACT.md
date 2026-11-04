@@ -8541,6 +8541,38 @@ None.
   and streamwise derivatives (quasi-parallel), the jet past the labium, and
   any spreading law measured on a flute lip jet.
 
+  OPT-IN JET FORCING AREA (card row `jet_forcing_area open-strip`, right
+  after a `window embouchure` row, with `jet_response` on the card;
+  `FlueVoice::with_jet_forcing_area`; MB 1089/1091/1407, bead pexfp.135.1):
+  `v = q / S_m` takes flue width by cut-up as the opening the mouth flow
+  crosses. On a recorder that is the window. A flute's flow crosses the
+  embouchure's open strip, ALONG by OPEN, which the flue row does not know,
+  so the row takes the jet's transverse velocity over that strip. The area
+  comes from the window row and is not fitted. Only the jet's velocity moves:
+  the source coefficient, the mouth contraction and any authored linear mouth
+  loss stay on `S_m`, though the same flow crosses the same strip, so this is
+  a partial change, and the render sidecar says so
+  (`flue_input.jet_forcing_area`: law, area, mouth area,
+  `still_on_mouth_area`). The series mass needs no move: the window row this
+  row requires already replaced it. On the held-room flute cards the
+  area is 6.44e-5 m^2 against `S_m` 3.68e-5 on G4 and 6.92e-5 against 4.64e-5
+  on D4. There the labium swing's fundamental falls from 3.47 to 2.02 h on G4
+  and from 3.25 to 2.24 h on D4, and the time past 2 `b_cut` falls from 0.878
+  to 0.568 and from 0.898 to 0.836, with both notes in the same register. The
+  swing is now below the 3.3-3.95 h de la Cuadra (2005 sec. 2.3) measured on a
+  free jet with no labium at Re 200-500. The cards run near Re 1750, so that
+  band neither supports nor rules out the row. Graded through MB (1407): G4 3
+  to 4 of 14, D4 6 to 5 of 14, because D4's HNR leaves the ruler (34.9 against
+  28.4 dB). The spectrum distance falls from 21.05 to 16.24 on G4 and from
+  20.04 to 16.25 on D4. Without the row every result is bit-identical
+  (`g0_jet_forcing_area_at_the_mouth_area_is_bit_identical`; on this code at
+  674860b2e the held-room G4 card without the row rendered wav 0820a975 and
+  flows 866aa73f, the posted control's bytes). REFUSALS: the row with no
+  `window embouchure` before it, a law other than `open-strip`, trailing
+  fields, a card without the forced jet, a late attachment, and an area that
+  is not finite and positive. NOT CLAIMED: a measured flute mouth flow, a
+  uniform velocity over the strip, and the terms left on `S_m`.
+
   JET SPEED EDGE (ruling 8132, bead pexfp.135.2): the declared minimum jet
   speed U_min (`jet_limits`, or 1 m/s on the legacy TMM image) sizes the
   retained history, so every lookup at or above it is retained. A slower

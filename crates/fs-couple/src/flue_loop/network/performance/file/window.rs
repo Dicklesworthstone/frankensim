@@ -1,7 +1,8 @@
 //! Optional `window none|wall-cut AXIAL_CELLS [cheeks radial|parallel]
 //! [ramp EDGE_HEIGHT_M ANGLE_DEG] [mass ernoult-fabre-2017]|embouchure
 //! AXIAL_CELLS ACROSS_M ALONG_M OPEN_M [lip centred|one-sided [face SETBACK_M]]`
-//! after the mouth records.
+//! after the mouth records, then optional `jet_forcing_area open-strip` on an
+//! embouchure.
 //!
 //! `mass ernoult-fabre-2017` takes the window's mass from Ernoult and Fabre,
 //! Acta Acustica united with Acustica 103 (2017) 106-116, in place of the
@@ -390,6 +391,26 @@ pub(super) fn read(rows: &mut Rows<'_>) -> Result<Option<WindowRow>, FlueInputEr
     };
     row.end()?;
     Ok(shape)
+}
+
+/// Read the optional `jet_forcing_area open-strip` right after the window row: the embouchure's
+/// open strip, ALONG times OPEN [m^2], for the jet's transverse velocity.
+pub(super) fn read_jet_forcing_area(
+    rows: &mut Rows<'_>,
+    window: Option<WindowRow>,
+) -> Result<Option<f64>, FlueInputError> {
+    if !rows.next_is("jet_forcing_area") {
+        return Ok(None);
+    }
+    let mut row = rows.row("jet_forcing_area")?;
+    if row.fields.next() != Some("open-strip") {
+        return Err(bad(row.line, "jet_forcing_area requires open-strip"));
+    }
+    let Some(WindowRow { shape: Shape::Embouchure { along, open, .. }, .. }) = window else {
+        return Err(bad(row.line, "jet_forcing_area open-strip requires a window embouchure row before it"));
+    };
+    row.end()?;
+    Ok(Some(along * open))
 }
 
 /// Derive the window from the graph and the flue row, solve its mass, and

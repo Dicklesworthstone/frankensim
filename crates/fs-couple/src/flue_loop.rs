@@ -713,6 +713,8 @@ pub struct FlueVoice {
     window_radiation: Option<window_radiation::WindowRadiation>,
     // The series inertance is the rest of a computed window mass.
     window_mass: bool,
+    // The area the jet's transverse velocity `q / area` is taken over: `S_m` unless the card names another.
+    jet_forcing_area_m2: f64,
     viscous_windway: Option<crate::bernoulli_aperture::viscous::ViscousSlit>,
     // Shah's developing-flow law and its state at the held note's pressure.
     developing_windway: Option<(DevelopingSlit, DevelopingSlitState)>,
@@ -866,6 +868,7 @@ impl FlueVoice {
             mouth_radiation: None,
             window_radiation: None,
             window_mass: false,
+            jet_forcing_area_m2: s_m,
             viscous_windway: None,
             developing_windway: None,
             unsteady_windway: None,
@@ -1250,6 +1253,30 @@ impl FlueVoice {
         self.window_mass = true;
         Ok(self)
     }
+
+    /// Force the jet with the mouth flow's mean velocity over `area_m2` instead of `S_m`.
+    ///
+    /// `v = q / S_m` takes flue width by cut-up as the opening the mouth flow crosses. On a recorder
+    /// that is the window. A flute's flow crosses the embouchure hole's open strip, which the flue
+    /// row does not know. Only the jet's transverse velocity moves: the source coefficient, the
+    /// mouth contraction and any authored linear mouth loss stay on `S_m`.
+    ///
+    /// # Errors
+    /// Late attachment, no forced jet, or an area that is not finite and positive.
+    pub fn with_jet_forcing_area(mut self, area_m2: f64) -> Result<Self, FlueError> {
+        if self.poisoned || self.samples != 0 || self.forced.is_none() {
+            return Err(FlueError::Invalid { what: "jet forcing area requires a cold voice with the forced jet" });
+        }
+        if !(area_m2.is_finite() && area_m2 > 0.0) {
+            return Err(FlueError::Invalid { what: "jet forcing area must be finite and positive" });
+        }
+        self.jet_forcing_area_m2 = area_m2;
+        Ok(self)
+    }
+
+    /// The area the jet's transverse velocity is taken over [m^2]: `S_m` unless the card names another.
+    #[must_use]
+    pub const fn jet_forcing_area_m2(&self) -> f64 { self.jet_forcing_area_m2 }
 
     /// Series mouth inertance [Pa s^2/m^3]: `rho 0.61 a_eq / S_m`, the rest
     /// of a computed window mass (less a window radiation load's static
@@ -1678,7 +1705,7 @@ impl FlueVoice {
             None => radiation_history,
         };
         let (l, r, zc, dt) = (self.inertance, self.resistance + radiation_direct, self.zc, self.dt);
-        let area = self.geometry.mouth_area_m2();
+        let area = self.jet_forcing_area_m2;
         let jet = |q: f64| self.jet_trial(delayed.past_m_s+delayed.current_weight*q/area, seed, c);
         let mouth = |source| match &self.mouth_contraction {
             Some(loss) => mouth_loss::solve(boundary, source-radiation_history, self.q_prev, l, r, zc, dt, loss),
@@ -1956,6 +1983,7 @@ impl FlueVoice {
         let spread_flux = self.forced.as_ref()
             .and_then(forced_jet::ForcedJetKernel::station_spread).map(|(_, flux)| flux);
         let s_m = self.geometry.mouth_area_m2();
+        let forcing_area = self.jet_forcing_area_m2;
         let y0 = self.geometry.effective_offset_m();
         let (l, r) = (self.inertance, self.resistance);
         // The mouth and wave boundary are solved together below. A TMM FIR
@@ -2203,15 +2231,15 @@ impl FlueVoice {
             }
             self.q_prev = q;
             // Mouth transverse velocity into the history ring.
-            self.history[self.head] = q / s_m;
+            self.history[self.head] = q / forcing_area;
             self.head = (self.head + 1) % self.history.len();
-            if self.history_moving > 0 || q / s_m != 0.0 {
+            if self.history_moving > 0 || q / forcing_area != 0.0 {
                 self.history_moving = self.history_moving.saturating_add(1);
             }
             self.reached_minimum_speed |= u >= self.minimum_jet_speed_m_s;
             // The accepted exit velocity into the forced jet's retained history.
             if let Some(kernel) = &mut self.forced {
-                kernel.push(delayed.past_m_s + q / s_m);
+                kernel.push(delayed.past_m_s + q / forcing_area);
             }
             // The observable is the wave launched into the pipe: the mouth
             // plane is the pipe's pressure node, so the total pressure
@@ -3305,6 +3333,53 @@ mod forced_jet_tests {
         }
         assert_work(&v);
         bits
+    }
+
+    // jet_forcing_area: the jet's transverse velocity over another area, on the same run as above.
+    #[test]
+    fn g0_jet_forcing_area_at_the_mouth_area_is_bit_identical() {
+        let plain = spread_voice(forced_jet::JetSpreadingLaw::None);
+        let s_m = plain.geometry.mouth_area_m2();
+        assert_eq!(plain.jet_forcing_area_m2(), s_m);
+        let named = spread_voice(forced_jet::JetSpreadingLaw::None).with_jet_forcing_area(s_m).unwrap();
+        assert_eq!(spread_run(named), spread_run(plain));
+    }
+
+    #[test]
+    fn g3_jet_forcing_area_moves_the_jet_velocity_and_leaves_the_mouth_on_its_own_area() {
+        let plain = spread_voice(forced_jet::JetSpreadingLaw::None);
+        let s_m = plain.geometry.mouth_area_m2();
+        let area = 1.75 * s_m;
+        let wider = spread_voice(forced_jet::JetSpreadingLaw::None).with_jet_forcing_area(area).unwrap();
+        assert_eq!(wider.jet_forcing_area_m2(), area);
+        assert_eq!(wider.geometry.mouth_area_m2(), s_m);
+        assert_eq!(wider.mouth_inertance_pa_s2_m3(), plain.mouth_inertance_pa_s2_m3());
+        assert_ne!(spread_run(wider), spread_run(plain));
+
+        // The velocity the jet remembers is the accepted flow over the named area.
+        let mut v = spread_voice(forced_jet::JetSpreadingLaw::None).with_jet_forcing_area(area).unwrap();
+        v.apply(FlueControl::SetBlowingPressure(100.0)).unwrap();
+        v.step_block(&mut [0.0; 257]).unwrap();
+        assert_ne!(v.q_prev, 0.0);
+        let newest = (v.head + v.history.len() - 1) % v.history.len();
+        assert_eq!(v.history[newest], v.q_prev / area);
+    }
+
+    #[test]
+    fn g6_jet_forcing_area_refuses_a_voice_without_the_forced_jet_a_late_call_and_a_bad_area() {
+        let bare = bare_voice(gas(101_325.0), geometry(CUT_UP_M), 48_000, 4096);
+        assert!(matches!(bare.with_jet_forcing_area(1e-4),
+            Err(FlueError::Invalid { what }) if what.contains("forced jet")));
+        for area in [0.0, -1e-4, f64::NAN, f64::INFINITY] {
+            let v = spread_voice(forced_jet::JetSpreadingLaw::None);
+            assert!(matches!(v.with_jet_forcing_area(area),
+                Err(FlueError::Invalid { what }) if what.contains("finite and positive")));
+        }
+        let mut late = spread_voice(forced_jet::JetSpreadingLaw::None);
+        late.apply(FlueControl::SetBlowingPressure(100.0)).unwrap();
+        late.step_block(&mut [0.0; 8]).unwrap();
+        assert!(matches!(late.with_jet_forcing_area(1e-4),
+            Err(FlueError::Invalid { what }) if what.contains("cold voice")));
     }
 
     #[test]

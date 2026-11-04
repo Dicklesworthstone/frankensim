@@ -183,6 +183,7 @@ pub struct FlueFilePerformance {
     mimo_radiation_record: Option<MimoRadiationRecord>,
     computed_radiation_record: Option<ComputedBaffledRecord>,
     window: Option<FlueWindowRecord>,
+    jet_forcing_area_m2: Option<f64>,
     hole_inner_lengths: Vec<HoleInnerLength>,
 }
 impl FlueFilePerformance {
@@ -268,6 +269,11 @@ impl FlueFilePerformance {
     /// linear loss: it needs `window wall-cut` and `mouth_loss_rel` zero.
     /// `mouth_reaction window-cylinder-piston` radiates one uniform piston over
     /// that face's angle and the window's cut-up instead, as a bracket.
+    /// Optional `jet_forcing_area open-strip` right after a `window embouchure`
+    /// row takes the forced jet's transverse velocity over the open strip, ALONG
+    /// by OPEN, instead of flue width by cut-up
+    /// ([`FlueVoice::with_jet_forcing_area`]). It needs the `jet_response` row.
+    /// Omission keeps every default result bit-identical.
     ///
     /// After the duct records, optional `walls COUNT FMIN_HZ FMAX_HZ` introduces
     /// COUNT rows `wall NODE isotropic PACK T_K OMEGA_RAD_S THICKNESS_M AXIAL LOSS`.
@@ -594,7 +600,9 @@ impl FlueFilePerformance {
             }
             selected
         } else { (false, None) };
-        let window = match window::read(&mut rows)? {
+        let window_row = window::read(&mut rows)?;
+        let jet_forcing_area_m2 = window::read_jet_forcing_area(&mut rows, window_row)?;
+        let window = match window_row {
             Some(_) if mouth_reaction => return Err(bad(rows.line,
                 "window wall-cut replaces the legacy mouth inertance; a compact mouth reaction brings its own outer mass")),
             Some(cells) => Some(window::solve(&mut duct.graph, &duct.gases, mechanics_rate_hz,
@@ -678,6 +686,10 @@ impl FlueFilePerformance {
                 record.riser_mass_per_density).map_err(FlueInputError::Physics)?,
             None => voice,
         };
+        let voice = match jet_forcing_area_m2 {
+            Some(area) => voice.with_jet_forcing_area(area).map_err(FlueInputError::Physics)?,
+            None => voice,
+        };
         let voice = match (window_reaction, &window) {
             (Some(flux), Some(record)) => {
                 // The finest rung's outer face carries the flux distribution.
@@ -743,7 +755,7 @@ impl FlueFilePerformance {
             jet_card_hash: card.content_hash(), jet_card_source, compiled_controls: renderer.controls.len() };
         Ok(Self { info, renderer, geometry, card, gas_records, wall_records, boundary_records,
             radiation_bindings, mimo_radiation_record, computed_radiation_record, window,
-            hole_inner_lengths })
+            jet_forcing_area_m2, hole_inner_lengths })
     }
     /// Original identity and finite clocks, separate from the evolving solver.
     #[must_use] pub const fn info(&self) -> FluePerformanceInfo { self.info }
@@ -772,6 +784,8 @@ impl FlueFilePerformance {
     }
     /// The window derived from the card and its computed mass, when selected.
     #[must_use] pub const fn window(&self) -> Option<&FlueWindowRecord> { self.window.as_ref() }
+    /// The area a `jet_forcing_area` row names for the jet's transverse velocity [m^2].
+    #[must_use] pub const fn jet_forcing_area_m2(&self) -> Option<f64> { self.jet_forcing_area_m2 }
     /// The side holes' inner lengths added by `inner` rows, in row order.
     #[must_use] pub fn hole_inner_lengths(&self) -> &[HoleInnerLength] { &self.hole_inner_lengths }
     /// Move the original physical pressure producer into streaming/PCM output.
