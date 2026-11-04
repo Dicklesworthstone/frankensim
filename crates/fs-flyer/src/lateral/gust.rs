@@ -2,9 +2,10 @@
 //!
 //! Reuse the circulation and washed incident velocities from the actual
 //! propeller/wing solve. There is no second aerodynamic solve and no gust
-//! coefficient or random kick. The accepted parasite wrench includes the roll
-//! moment of local sideflow at its physical height. Reference-flow induced drag
-//! remains on the CG line and supplies no differential yaw at this tier.
+//! coefficient or random kick. The accepted parasite wrench includes all roll
+//! and yaw moments from the selected component positions and directional areas.
+//! Reference-flow induced drag remains on the CG line and supplies no
+//! differential yaw at this tier.
 
 use crate::Refusal;
 use crate::aircraft::{ForceBuildup, OpenLoopDesign};
@@ -43,7 +44,7 @@ pub struct DistributedLateralLoads {
     pub profile_drag: LateralMomentsNm,
     /// Separate axial propeller thrusts at their original disk centers.
     pub propellers: LateralMomentsNm,
-    /// Local parasite force at its declared application line.
+    /// Accepted parasite moments from the aggregate line or resolved components.
     pub parasite_drag: LateralMomentsNm,
 }
 

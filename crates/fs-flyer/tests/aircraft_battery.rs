@@ -13,6 +13,126 @@ fn jlog(case: &str, payload: &str) {
 const RHO: f64 = 1.294;
 
 #[test]
+fn g3_resolved_components_feed_pitch_roll_and_yaw_from_their_own_incident_flow() {
+    use fs_flyer::dragledger::{
+        ComponentDragGeometry, ComponentDragShape, DragComponent, DragLedger,
+    };
+    let mut design = wright_openloop_v1();
+    design.coupling = fs_flyer::propcoupling::CANDIDATE_B;
+    design.ledger = DragLedger {
+        components: [("left", 1.2), ("right", 0.8)]
+            .map(|(component_id, cd)| DragComponent {
+                component_id,
+                area_m2: 1.0,
+                cd,
+                cd_source: "synthetic component-force fixture, not historical data",
+                uncertainty_frac: 0.2,
+            })
+            .to_vec(),
+        unresolved_interference_frac: 0.2,
+    };
+    let aggregate_identity = design.digest();
+    let ledger_identity = design.ledger.digest();
+    let arms = [[-0.7, 0.9, -0.25], [0.8, -1.3, 0.35]];
+    let areas = [[0.1, 0.3, 0.2], [0.15, 0.25, 0.4]];
+    design.drag_geometry = design
+        .ledger
+        .components
+        .iter()
+        .enumerate()
+        .map(|(i, c)| ComponentDragGeometry {
+            component_id: c.component_id,
+            point_body_m: std::array::from_fn(|j| design.cg_m[j] + arms[i][j]),
+            shape: ComponentDragShape::OrthogonalFaces {
+                normals_body: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                areas_m2: areas[i],
+            },
+        })
+        .collect();
+    assert_ne!(aggregate_identity, design.digest());
+    assert_eq!(ledger_identity, design.ledger.digest());
+    let mut legacy = design.clone();
+    legacy.drag_geometry.clear();
+    assert_eq!(aggregate_identity, legacy.digest());
+    let (speed, alpha, pitch) = (13.86, 0.06, 0.12);
+    let velocity = [
+        speed * fs_math::det::cos(alpha),
+        0.0,
+        speed * fs_math::det::sin(alpha),
+    ];
+    let gusts = [[0.8, -1.5, 0.2], [-0.2, 0.5, -0.1]];
+    let run = |co_moving| {
+        design
+            .force_buildup_with_incident(speed, alpha, 0.03, 40.0, pitch, RHO, None, &|point| {
+                Ok(
+                    match design
+                        .drag_geometry
+                        .iter()
+                        .position(|geometry| geometry.point_body_m == point)
+                    {
+                        Some(_) if co_moving => [
+                            -pitch * (point[2] - design.cg_m[2]),
+                            0.0,
+                            pitch * (point[0] - design.cg_m[0]),
+                        ],
+                        Some(i) => std::array::from_fn(|j| velocity[j] + gusts[i][j]),
+                        None => velocity,
+                    },
+                )
+            })
+            .unwrap()
+    };
+    let unloaded = run(true);
+    let loaded = run(false);
+    assert_eq!(unloaded.parasite_wrench, Default::default());
+    assert_eq!(unloaded.coupled.gamma, loaded.coupled.gamma);
+    assert_eq!(unloaded.thrust_n, loaded.thrust_n);
+    let (mut expected_force, mut expected_moment, mut expected_power) = ([0.0; 3], [0.0; 3], 0.0);
+    for i in 0..2 {
+        let local = [
+            velocity[0] + gusts[i][0] + pitch * arms[i][2],
+            gusts[i][1],
+            velocity[2] + gusts[i][2] - pitch * arms[i][0],
+        ];
+        let force: [f64; 3] = std::array::from_fn(|j| {
+            -0.5 * RHO
+                * design.ledger.components[i].cd
+                * areas[i][j]
+                * local[j].abs()
+                * local[j]
+                * 1.2
+        });
+        let moment = [
+            arms[i][1] * force[2] - arms[i][2] * force[1],
+            arms[i][2] * force[0] - arms[i][0] * force[2],
+            arms[i][0] * force[1] - arms[i][1] * force[0],
+        ];
+        for j in 0..3 {
+            expected_force[j] += force[j];
+            expected_moment[j] += moment[j];
+            expected_power -= force[j] * local[j];
+        }
+    }
+    for j in 0..3 {
+        assert!((loaded.force_n[j] - unloaded.force_n[j] - expected_force[j]).abs() < 1e-9);
+        assert!((loaded.parasite_wrench.moment_nm[j] - expected_moment[j]).abs() < 1e-9);
+    }
+    assert!((loaded.moment_y_nm - unloaded.moment_y_nm - expected_moment[1]).abs() < 1e-9);
+    assert!((loaded.parasite_wrench.dissipated_power_w - expected_power).abs() < 1e-9);
+    let before = design
+        .distributed_lateral_loads(&unloaded, 0.03, RHO)
+        .unwrap()
+        .net();
+    let after = design
+        .distributed_lateral_loads(&loaded, 0.03, RHO)
+        .unwrap()
+        .net();
+    assert!(expected_moment[0].abs() > 0.01 && expected_moment[2].abs() > 0.1);
+    assert!((after.roll_nm - before.roll_nm - expected_moment[0]).abs() < 1e-9);
+    assert!((after.yaw_nm - before.yaw_nm - expected_moment[2]).abs() < 1e-9);
+}
+
+#[test]
 fn g3_parasite_line_samples_local_gust_and_rigid_pitch_velocity() {
     let mut design = wright_openloop_v1();
     design.coupling = fs_flyer::propcoupling::CANDIDATE_B;

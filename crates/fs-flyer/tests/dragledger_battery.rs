@@ -7,7 +7,8 @@
 //! cargo test -p fs-flyer --test dragledger_battery
 
 use fs_flyer::dragledger::{
-    DragComponent, DragLedger, MAX_COMPONENTS, flat_plate_aggregate, wright_ledger_v1,
+    ComponentDragGeometry, ComponentDragShape, DragComponent, DragLedger, MAX_COMPONENTS,
+    flat_plate_aggregate, wright_ledger_v1,
 };
 
 fn jlog(case: &str, payload: &str) {
@@ -16,6 +17,238 @@ fn jlog(case: &str, payload: &str) {
 
 const RHO: f64 = 1.294; // Dec-17 cold sea-level (air-state-v1)
 const V: f64 = 13.86; // airspeed_dec17_mps
+
+fn spatial_ledger() -> DragLedger {
+    DragLedger {
+        components: ["first", "second"]
+            .map(|component_id| DragComponent {
+                component_id,
+                area_m2: 2.0,
+                cd: 1.0,
+                cd_source: "declared numerical pressure-face fixture",
+                uncertainty_frac: 0.2,
+            })
+            .to_vec(),
+        unresolved_interference_frac: 0.1,
+    }
+}
+
+#[test]
+fn g0_directional_faces_use_normal_speed_and_close_spatial_work() {
+    let mut ledger = spatial_ledger();
+    ledger.components.truncate(1);
+    ledger.unresolved_interference_frac = 0.25;
+    let mut geometry = [ComponentDragGeometry {
+        component_id: "first",
+        point_body_m: [1.0, -2.0, 0.5],
+        shape: ComponentDragShape::OrthogonalFaces {
+            normals_body: [[0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]],
+            areas_m2: [2.0, 0.5, 0.0],
+        },
+    }];
+    let flow = [10.0, -3.0, 4.0];
+    let load = ledger
+        .wrench_with_geometry(2.0, &geometry, [0.0; 3], &|_| Ok(flow))
+        .unwrap();
+    // Independent two-sided pressure faces: Fy=+2*3², Fz=-0.5*4²;
+    // the explicit 25% interference allowance scales force and work together.
+    assert_eq!(load.force_n, [0.0, 22.5, -10.0]);
+    assert_eq!(load.moment_nm, [8.75, 10.0, 22.5]);
+    assert_eq!(load.dissipated_power_w, 107.5);
+    assert!((load.drag_n - 107.5 / 125.0_f64.sqrt()).abs() < 1e-12);
+    let tangent = ledger
+        .wrench_with_geometry(2.0, &geometry, [0.0; 3], &|_| Ok([100.0, -3.0, 4.0]))
+        .unwrap();
+    assert_eq!(
+        tangent.force_n, load.force_n,
+        "tangential speed cannot invent normal pressure"
+    );
+    assert_eq!(tangent.dissipated_power_w, load.dissipated_power_w);
+    for velocity in [[0.0; 3], [100.0, 0.0, 0.0]] {
+        assert_eq!(
+            ledger
+                .wrench_with_geometry(2.0, &geometry, [0.0; 3], &|_| Ok(velocity))
+                .unwrap(),
+            Default::default()
+        );
+    }
+    let reverse = ledger
+        .wrench_with_geometry(2.0, &geometry, [0.0; 3], &|_| Ok(flow.map(|v| -v)))
+        .unwrap();
+    assert_eq!(reverse.force_n, load.force_n.map(|v| -v));
+    assert_eq!(reverse.moment_nm, load.moment_nm.map(|v| -v));
+    assert_eq!(reverse.dissipated_power_w, load.dissipated_power_w);
+    let dot = |a: [f64; 3], b: [f64; 3]| a.into_iter().zip(b).map(|(x, y)| x * y).sum::<f64>();
+    let velocity = [1.0, 2.0, 3.0];
+    let omega = [0.2, -0.1, 0.3];
+    let point_velocity = [1.55, 2.2, 2.7]; // V + omega cross [1,-2,0.5]
+    let wind = std::array::from_fn(|i| point_velocity[i] - flow[i]);
+    let work = dot(load.force_n, velocity) + dot(load.moment_nm, omega) - dot(load.force_n, wind);
+    assert!((work + load.dissipated_power_w).abs() < 1e-12);
+    // A proper cyclic rotation of the entire physical fixture rotates its
+    // force and moment, while relative loss remains a frame scalar.
+    let rotate = |v: [f64; 3]| [v[1], v[2], v[0]];
+    geometry[0].point_body_m = rotate(geometry[0].point_body_m);
+    if let ComponentDragShape::OrthogonalFaces { normals_body, .. } = &mut geometry[0].shape {
+        *normals_body = normals_body.map(rotate);
+    }
+    let rotated = ledger
+        .wrench_with_geometry(2.0, &geometry, [0.0; 3], &|_| Ok(rotate(flow)))
+        .unwrap();
+    assert_eq!(rotated.force_n, rotate(load.force_n));
+    assert_eq!(rotated.moment_nm, rotate(load.moment_nm));
+    assert_eq!(rotated.dissipated_power_w, load.dissipated_power_w);
+}
+
+#[test]
+fn g0_separated_components_resist_rotation_without_inventing_net_translation() {
+    let ledger = spatial_ledger();
+    let geometry = [
+        ComponentDragGeometry {
+            component_id: "first",
+            point_body_m: [1.5, 0.0, 0.0],
+            shape: ComponentDragShape::Isotropic,
+        },
+        ComponentDragGeometry {
+            component_id: "second",
+            point_body_m: [-1.5, 0.0, 0.0],
+            shape: ComponentDragShape::Isotropic,
+        },
+    ];
+    // Pure yaw omega=2 rad/s in still air. Each component sees opposite
+    // crossflow of magnitude 3, even though the CG has zero airspeed.
+    let load = ledger
+        .wrench_with_geometry(2.0, &geometry, [0.0; 3], &|point| {
+            Ok([0.0, 2.0 * point[0], 0.0])
+        })
+        .unwrap();
+    assert_eq!(load.force_n, [0.0; 3]);
+    assert_eq!(load.moment_nm[0], 0.0);
+    assert_eq!(load.moment_nm[1], 0.0);
+    assert!((load.moment_nm[2] + 59.4).abs() < 1e-12);
+    assert!((load.dissipated_power_w - 118.8).abs() < 1e-12);
+    assert!((2.0 * load.moment_nm[2] + load.dissipated_power_w).abs() < 1e-12);
+}
+
+#[test]
+fn g0_component_geometry_rejects_omission_rebinding_and_invalid_faces_before_sampling() {
+    let ledger = spatial_ledger();
+    let valid = [
+        ComponentDragGeometry {
+            component_id: "first",
+            point_body_m: [1.0, 0.0, 0.0],
+            shape: ComponentDragShape::Isotropic,
+        },
+        ComponentDragGeometry {
+            component_id: "second",
+            point_body_m: [-1.0, 0.0, 0.0],
+            shape: ComponentDragShape::Isotropic,
+        },
+    ];
+    let mut invalid = vec![
+        valid[..1].to_vec(),
+        vec![valid[1], valid[0]],
+        vec![valid[0], valid[0]],
+    ];
+    for shape in [
+        ComponentDragShape::OrthogonalFaces {
+            normals_body: [[1.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+            areas_m2: [1.0; 3],
+        },
+        ComponentDragShape::OrthogonalFaces {
+            normals_body: [[2.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            areas_m2: [1.0; 3],
+        },
+        ComponentDragShape::OrthogonalFaces {
+            normals_body: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            areas_m2: [-1.0, 1.0, 1.0],
+        },
+        ComponentDragShape::OrthogonalFaces {
+            normals_body: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            areas_m2: [0.0; 3],
+        },
+    ] {
+        let mut bad = valid;
+        bad[0].shape = shape;
+        invalid.push(bad.to_vec());
+    }
+    let mut bad_point = valid;
+    bad_point[0].point_body_m[2] = f64::NAN;
+    invalid.push(bad_point.to_vec());
+    for geometry in invalid {
+        let result = ledger.wrench_with_geometry(2.0, &geometry, [0.0; 3], &|_| {
+            panic!("invalid geometry sampled the air")
+        });
+        assert_eq!(result.unwrap_err().code, "drag-geometry-invalid");
+    }
+    let refused = ledger.wrench_with_geometry(2.0, &valid, [0.0; 3], &|_| {
+        Err(fs_flyer::Refusal {
+            code: "component-wind-refused",
+            message: "fixture".into(),
+            ranked_repairs: vec![],
+        })
+    });
+    assert_eq!(refused.unwrap_err().code, "component-wind-refused");
+    assert_eq!(
+        ledger
+            .wrench_with_geometry(2.0, &valid, [0.0; 3], &|_| Ok([f64::NAN, 0.0, 0.0]))
+            .unwrap_err()
+            .code,
+        "air-state-invalid"
+    );
+    assert_eq!(
+        ledger
+            .wrench_with_geometry(2.0, &valid, [0.0; 3], &|_| Ok([1e200, 0.0, 0.0]))
+            .unwrap_err()
+            .code,
+        "drag-wrench-overflow"
+    );
+}
+
+#[test]
+fn g0_resolved_isotropic_layout_retains_uniform_ledger_and_separate_geometry_identity() {
+    let ledger = wright_ledger_v1();
+    let original_digest = ledger.digest();
+    let mut geometry: Vec<_> = ledger
+        .components
+        .iter()
+        .map(|c| ComponentDragGeometry {
+            component_id: c.component_id,
+            point_body_m: [0.0, 0.0, 0.4],
+            shape: ComponentDragShape::Isotropic,
+        })
+        .collect();
+    let velocity = [3.0, 4.0, 12.0];
+    let resolved = ledger
+        .wrench_with_geometry(RHO, &geometry, [0.0; 3], &|_| Ok(velocity))
+        .unwrap();
+    let aggregate = ledger.wrench_at(RHO, velocity, [0.0, 0.0, 0.4]).unwrap();
+    for (a, b) in resolved
+        .force_n
+        .into_iter()
+        .chain(resolved.moment_nm)
+        .chain([resolved.drag_n, resolved.dissipated_power_w])
+        .zip(
+            aggregate
+                .force_n
+                .into_iter()
+                .chain(aggregate.moment_nm)
+                .chain([aggregate.drag_n, aggregate.dissipated_power_w]),
+        )
+    {
+        assert!((a - b).abs() < 1e-11);
+    }
+    let spatial = ledger.spatial_digest(&geometry);
+    geometry[0].point_body_m[0] = 0.2;
+    assert_ne!(spatial, ledger.spatial_digest(&geometry));
+    let moved = ledger.spatial_digest(&geometry);
+    geometry[0].shape = ComponentDragShape::OrthogonalFaces {
+        normals_body: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        areas_m2: [0.3, 0.1, 0.2],
+    };
+    assert_ne!(moved, ledger.spatial_digest(&geometry));
+    assert_eq!(ledger.digest(), original_digest);
+}
 
 #[test]
 fn g0_local_drag_wrench_obeys_spatial_work_and_reverses_with_relative_flow() {

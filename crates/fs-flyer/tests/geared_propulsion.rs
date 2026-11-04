@@ -320,6 +320,109 @@ fn inputs() -> PropulsionInputs {
 }
 
 #[test]
+fn g3_resolved_parasite_components_use_world_positions_and_all_rigid_rates() {
+    use fs_flyer::dragledger::{
+        ComponentDragGeometry, ComponentDragShape, DragComponent, DragLedger,
+    };
+    let mut design = wright_openloop_v1();
+    design.coupling = CANDIDATE_B;
+    design.ledger = DragLedger {
+        components: [("left", 1.2), ("right", 0.8)]
+            .map(|(component_id, cd)| DragComponent {
+                component_id,
+                area_m2: 1.0,
+                cd,
+                cd_source: "synthetic component-force fixture, not historical data",
+                uncertainty_frac: 0.2,
+            })
+            .to_vec(),
+        unresolved_interference_frac: 0.2,
+    };
+    let arms = [[-0.7, 0.9, -0.25], [0.8, -1.3, 0.35]];
+    let areas = [[0.1, 0.3, 0.2], [0.15, 0.25, 0.4]];
+    design.drag_geometry = design
+        .ledger
+        .components
+        .iter()
+        .enumerate()
+        .map(|(i, c)| ComponentDragGeometry {
+            component_id: c.component_id,
+            point_body_m: std::array::from_fn(|j| design.cg_m[j] + arms[i][j]),
+            shape: ComponentDragShape::OrthogonalFaces {
+                normals_body: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                areas_m2: areas[i],
+            },
+        })
+        .collect();
+    let assembly = aero_assembly(design.gross_mass_kg);
+    let model = GearedPropulsion::new(&design, &assembly, mounts()).unwrap();
+    let mut state = flight_state(&assembly);
+    // Rotate the whole fixture into world axes; drag normals remain body-fixed.
+    let s = core::f64::consts::FRAC_1_SQRT_2;
+    state.rigid.quat = [s, 0.0, 0.0, s];
+    let attitude = rotation(&state);
+    let world_velocity = attitude.rotate(v(state.rigid.vel_mps)).unwrap();
+    state.rigid.vel_mps = [world_velocity.x, world_velocity.y, world_velocity.z];
+    state.rigid.omega_body = [0.15, 0.20, -0.07];
+    let points: [Vec3; 2] =
+        std::array::from_fn(|i| v(state.rigid.pos_m) + attitude.rotate(v(arms[i])).unwrap());
+    let omega = v(state.rigid.omega_body);
+    let co_moving: [Vec3; 2] =
+        std::array::from_fn(|i| world_velocity + attitude.rotate(omega.cross(v(arms[i]))).unwrap());
+    let winds = [[2.0, -3.0, 0.5], [-1.0, 1.0, 0.25]];
+    let run = |unloaded| {
+        model
+            .evaluate(
+                &state,
+                inputs(),
+                &|point| {
+                    Ok(
+                        match points.iter().position(|p| (*p - v(point)).norm() < 1e-10) {
+                            Some(i) if unloaded => [co_moving[i].x, co_moving[i].y, co_moving[i].z],
+                            Some(i) => winds[i],
+                            None => ZERO,
+                        },
+                    )
+                },
+                None,
+            )
+            .unwrap()
+    };
+    let unloaded = run(true);
+    let loaded = run(false);
+    assert_eq!(unloaded.coupled.gamma, loaded.coupled.gamma);
+    assert_eq!(unloaded.coupled.thrust_n, loaded.coupled.thrust_n);
+    let (mut force, mut moment) = (v(ZERO), v(ZERO));
+    for i in 0..2 {
+        let relative = attitude
+            .inverse()
+            .rotate(world_velocity - v(winds[i]))
+            .unwrap()
+            + omega.cross(v(arms[i]));
+        let local = [relative.x, relative.y, relative.z];
+        let component = v(std::array::from_fn(|j| {
+            -0.5 * inputs().density_kg_m3
+                * design.ledger.components[i].cd
+                * areas[i][j]
+                * local[j].abs()
+                * local[j]
+                * 1.2
+        }));
+        force = force + component;
+        moment = moment + v(arms[i]).cross(component);
+    }
+    assert!(
+        (v(loaded.aerodynamic_force_body_n) - v(unloaded.aerodynamic_force_body_n) - force).norm()
+            < 1e-9
+    );
+    assert!(
+        (v(loaded.loads.carrier.moment_nm) - v(unloaded.loads.carrier.moment_nm) - moment).norm()
+            < 1e-9
+    );
+    assert!(moment.x.abs() > 0.1 && moment.y.abs() > 0.1 && moment.z.abs() > 0.1);
+}
+
+#[test]
 fn g3_native_parasite_drag_uses_its_world_sample_and_all_angular_rates() {
     let mut design = wright_openloop_v1();
     design.coupling = CANDIDATE_B;

@@ -2277,3 +2277,50 @@ accepted expansions and achieved error bounds, image axial-curl reflection,
 exact core masks, request-wide work exhaustion, cancellation/retry and zero-core
 masking. Native Rust compilation and execution were unavailable for this
 extension; the independent numerical expansion cross-check is separate evidence.
+
+## Component-resolved parasite resistance
+
+OpenLoopDesign::drag_geometry selects an explicit component layout in original
+ledger order. An empty layout retains the registered aggregate at drag_z_m,
+including its operation order, scalar coefficients, ledger digest and design
+identity. Explicit layouts must cover every original component; positions and
+area/orientation data enter the spatial and aircraft design identities.
+The scalar ledger and its coefficient provenance and uncertainty remain intact.
+
+Each body-fixed point samples its own velocity relative to local ambient air.
+The longitudinal path adds the full pitch-point velocity once; the shared native
+six-DOF propulsion owner includes all rigid angular rates and transforms the
+component point into world coordinates for wind sampling. Both owners assemble
+the same accepted component force/moment result. Distributed roll/yaw loads
+reuse it without resampling or discarding the component moments.
+
+ComponentDragShape::Isotropic retains the original scalar area/Cd force law at
+the supplied point. OrthogonalFaces explicitly selects the reduced two-sided
+pressure law F_j = -rho*Cd*A_j*|v dot n_j|*(v dot n_j)*n_j/2, for three admitted
+orthonormal body-fixed normals. Areas are nonnegative with at least one positive;
+zero area can represent a face without pressure resistance in that direction.
+Only the normal speed drives each face, so tangential flow cannot manufacture
+normal pressure. The areas must use the declared coefficient convention; no
+historical dimensions, directional coefficients or calibration are inferred.
+
+For each component, the moment is its actual CG arm cross its force. The sum of
+face losses is nonnegative, including during pure rotation with zero CG speed.
+The explicit unresolved-interference fraction scales the same component forces,
+moments and relative losses proportionally; this remains an Estimated allowance.
+DragWrench::drag_n is the sum of local wind-axis drag projections, which need not
+equal the norm of the net force when opposing component forces produce a couple.
+Its dissipated_power_w is relative-motion loss, not inertial body power in wind.
+
+The successful load evaluation allocates no reports and computes no hashes.
+Missing, duplicated, reordered or invalid geometry refuses before component air
+sampling, and local sampling failures propagate without an aggregate fallback.
+The tests cover direction-dependent normal pressure, zero/tangential flow,
+reversal, rotation covariance, a pure rotational drag couple, work closure,
+complete identity binding, and integration into longitudinal/lateral and native
+aircraft force assemblies.
+
+This is an explicitly selected engineering pressure model. It does not resolve
+component wake interference, parasite propeller wash, skin friction, flow-driven
+pressure-center migration or Reynolds/Mach variation of Cd. It does not establish
+historical Flyer validity in crossflow. Wing profile drag and induced drag retain
+their separate owners; lifting surfaces must not be counted again in this ledger.

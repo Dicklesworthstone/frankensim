@@ -27,7 +27,7 @@
 //! anyway); far wake = trailing legs at this tier.
 
 use crate::Refusal;
-use crate::dragledger::{DragLedger, DragWrench, wright_ledger_v1};
+use crate::dragledger::{ComponentDragGeometry, DragLedger, DragWrench, wright_ledger_v1};
 use crate::propcoupling::{
     CANDIDATE_A, CoupledStep, IncidentInflow, PropCouplingSolverSpec, PropDisk,
     coupled_prop_airframe_step_with_incident,
@@ -78,7 +78,12 @@ pub struct OpenLoopDesign {
     /// Parasite ledger.
     pub ledger: DragLedger,
     /// z at which the ledger's parasite drag acts (Estimated near CG).
+    /// Used by the original aggregate when `drag_geometry` is empty.
     pub drag_z_m: f64,
+    /// Optional complete component layout, in ledger order. Each component
+    /// samples its own relative flow and supplies its own force and moment.
+    /// Empty preserves the registered aggregate law and design identity.
+    pub drag_geometry: Vec<ComponentDragGeometry>,
     /// Coupling solver spec.
     pub coupling: PropCouplingSolverSpec,
     /// Spanwise panels per wing plane.
@@ -167,6 +172,7 @@ pub fn wright_openloop_v1() -> OpenLoopDesign {
         rotor: wright_rotor_v1(),
         ledger: wright_ledger_v1(),
         drag_z_m: -0.6,
+        drag_geometry: Vec::new(),
         coupling: CANDIDATE_A,
         n_span_wing: 8,
         n_chord_wing: 2,
@@ -189,7 +195,7 @@ pub struct ForceBuildup {
     pub thrust_n: [f64; 2],
     /// Induced-drag term [N] (declared classical formula).
     pub induced_drag_n: f64,
-    /// Accepted parasite force and moment at its physical drag line.
+    /// Accepted parasite force and moment from the selected load geometry.
     /// Retained so distributed lateral loads reuse the identical local sample.
     pub parasite_wrench: DragWrench,
     /// The coupled prop step receipt.
@@ -276,7 +282,41 @@ impl OpenLoopDesign {
         }
         p.extend_from_slice(self.ledger.digest().as_bytes());
         p.extend_from_slice(self.coupling.digest().as_bytes());
+        if !self.drag_geometry.is_empty() {
+            p.extend_from_slice(self.ledger.spatial_digest(&self.drag_geometry).as_bytes());
+        }
         hash_domain("org.frankensim.fs-flyer.openloop-design.v1", &p).to_hex()
+    }
+
+    /// Parasite force and moment about the CG from the selected load geometry.
+    /// The callback supplies full MATERIAL-POINT velocity relative to local air,
+    /// including rigid angular motion exactly once. Both flight owners call
+    /// this same assembly; accepted lateral moments reuse its returned wrench.
+    ///
+    /// An empty layout follows the original single-line aggregate, without
+    /// changing its operation order, coefficients or ledger/design hashes.
+    /// Explicit geometry must cover every component; admission or local-flow
+    /// refusals propagate, without falling back to the aggregate.
+    pub fn parasite_wrench_with_incident(
+        &self,
+        rho_kg_m3: f64,
+        relative_velocity_at: &dyn Fn([f64; 3]) -> Result<[f64; 3], Refusal>,
+    ) -> Result<DragWrench, Refusal> {
+        if self.drag_geometry.is_empty() {
+            let point = [self.cg_m[0], self.cg_m[1], self.drag_z_m];
+            self.ledger.wrench_at(
+                rho_kg_m3,
+                relative_velocity_at(point)?,
+                [0.0, 0.0, self.drag_z_m - self.cg_m[2]],
+            )
+        } else {
+            self.ledger.wrench_with_geometry(
+                rho_kg_m3,
+                &self.drag_geometry,
+                self.cg_m,
+                relative_velocity_at,
+            )
+        }
     }
 
     /// Build panels + strips for the frozen control state. The canard
@@ -429,8 +469,9 @@ impl OpenLoopDesign {
     /// Every wing/canard strip and both propeller disk centers are sampled.
     /// Local accepted prop wash enters circulation, Kutta–Joukowsky forces,
     /// profile drag, and section moments consistently. Parasite drag samples
-    /// incident air and rigid-point velocity at its declared application line;
-    /// induced drag and the common straight wake retain the CG reference.
+    /// incident air and rigid-point velocity at each selected component point
+    /// (one declared line for the legacy aggregate). Induced drag and the common
+    /// straight wake retain the CG reference.
     ///
     /// # Errors
     /// As [`Self::force_buildup_warm`], plus incident-field and local-flow
@@ -495,6 +536,9 @@ impl OpenLoopDesign {
             message: e.message,
             ranked_repairs: e.ranked_repairs,
         };
+        if !self.drag_geometry.is_empty() {
+            self.ledger.admit_geometry(&self.drag_geometry)?;
+        }
         let (panels, strips) = self.layout(delta_canard_rad)?;
         // Body-axes airspeed (u = V cos α, w = V sin α, FRD).
         let fs_v = [
@@ -520,17 +564,17 @@ impl OpenLoopDesign {
         ];
         let uniform = |_: [f64; 3]| Ok(fs_v);
         let incident = incident.unwrap_or(&uniform);
+        // The same material-point velocity drives every loading path.
+        // For omega = (0, q, 0), omega cross r = (q rz, 0, -q rx).
+        // This also supplies every parasite component, without adding pitch
+        // motion a second time in the component load owner.
+        let sample = |point: [f64; 3]| -> Result<[f64; 3], Refusal> {
+            let mut velocity = incident(point)?;
+            velocity[0] += q_pitch_rad_s * (point[2] - self.cg_m[2]);
+            velocity[2] -= q_pitch_rad_s * (point[0] - self.cg_m[0]);
+            Ok(velocity)
+        };
         let coupled = {
-            // The same material-point velocity drives every loading path.
-            // For omega = (0, q, 0), omega cross r = (q rz, 0, -q rx).
-            // Keeping the actual vector also changes local speed and hub
-            // inflow; replacing only incidence with q rx/V misses both.
-            let sample = |point: [f64; 3]| -> Result<[f64; 3], Refusal> {
-                let mut velocity = incident(point)?;
-                velocity[0] += q_pitch_rad_s * (point[2] - self.cg_m[2]);
-                velocity[2] -= q_pitch_rad_s * (point[0] - self.cg_m[0]);
-                Ok(velocity)
-            };
             let mut local_strips = Vec::with_capacity(strips.len());
             for strip in &strips {
                 let front = &panels[strip.panel_indices[0]];
@@ -656,14 +700,9 @@ impl OpenLoopDesign {
         let diz = d_ind * vhat[2];
         force[0] -= dix;
         force[2] -= diz;
-        // Force and moment use the SAME local relative velocity. Sampling at
-        // the CG while applying drag off-CG loses rotational damping and lets
-        // a localized gust change the moment arm without changing its force.
-        let drag_point = [self.cg_m[0], self.cg_m[1], self.drag_z_m];
-        let drag_arm = [0.0, 0.0, self.drag_z_m - self.cg_m[2]];
-        let mut drag_velocity = incident(drag_point)?;
-        drag_velocity[0] += q_pitch_rad_s * drag_arm[2];
-        let parasite = self.ledger.wrench_at(rho_kg_m3, drag_velocity, drag_arm)?;
+        // Every selected parasite component uses its own material-point flow,
+        // area orientation and arm; the legacy layout remains one drag line.
+        let parasite = self.parasite_wrench_with_incident(rho_kg_m3, &sample)?;
         for (force, drag) in force.iter_mut().zip(parasite.force_n) {
             *force += drag;
         }

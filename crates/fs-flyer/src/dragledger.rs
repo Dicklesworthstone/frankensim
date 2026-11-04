@@ -19,6 +19,9 @@
 use crate::Refusal;
 use fs_blake3::hash_domain;
 
+mod spatial;
+pub use spatial::{ComponentDragGeometry, ComponentDragShape};
+
 /// Component-count cap (absurd-input guard).
 pub const MAX_COMPONENTS: usize = 32;
 
@@ -92,18 +95,20 @@ pub struct FlatPlateAggregate {
     pub power_w: f64,
 }
 
-/// Non-lifting drag at one material point, expressed in the caller's frame.
+/// Non-lifting component resistance, expressed in the caller's frame.
 ///
-/// The declared scalar component coefficients remain an isotropic engineering
-/// estimate. This spatial load does not infer orientation-dependent component
-/// areas, resolved interference, or propeller wash.
+/// `wrench_at` retains the scalar isotropic estimate; `wrench_with_geometry`
+/// uses explicitly supplied component points and area models. Neither infers
+/// resolved interference, propeller wash, or historical coefficient validity.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct DragWrench {
-    /// Force opposite the local body-relative-to-air velocity [N].
+    /// Resultant resisting force [N]. Directional faces may produce sideforce;
+    /// their work against local relative motion remains nonpositive.
     pub force_n: [f64; 3],
     /// Moment about the origin used to define the application arm [N m].
     pub moment_nm: [f64; 3],
-    /// Magnitude of the drag force [N].
+    /// Wind-axis drag [N]. For a resolved layout, the sum of component
+    /// projections opposing their own local flow, not the net-force norm.
     pub drag_n: f64,
     /// Nonnegative energy transfer out of relative motion [W].
     /// This is `-force dot relative_velocity`, not inertial body power in wind.

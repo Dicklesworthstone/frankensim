@@ -435,7 +435,11 @@ impl PropulsionGeometry<'_> {
             message: error.message,
             ranked_repairs: error.ranked_repairs,
         })?;
-        design.ledger.admit()
+        if design.drag_geometry.is_empty() {
+            design.ledger.admit()
+        } else {
+            design.ledger.admit_geometry(&design.drag_geometry)
+        }
     }
 
     fn equilibrium(
@@ -677,12 +681,9 @@ impl PropulsionGeometry<'_> {
                 / (core::f64::consts::PI * aspect * design.oswald_e);
             force = force - air_direction.scale(induced_drag);
         }
-        let drag_point = [design.cg_m[0], design.cg_m[1], design.drag_z_m];
-        let parasite = design.ledger.wrench_at(
-            rho,
-            air.sample(drag_point)?.relative_velocity_mps,
-            [0.0, 0.0, design.drag_z_m - design.cg_m[2]],
-        )?;
+        let parasite = design.parasite_wrench_with_incident(rho, &|point| {
+            Ok(air.sample(point)?.relative_velocity_mps)
+        })?;
         force = force + vec(parasite.force_n);
         moment = moment + vec(parasite.moment_nm);
         let mut aerodynamic_nm = [0.0; N];
