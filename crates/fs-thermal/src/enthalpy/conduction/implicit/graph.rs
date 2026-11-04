@@ -46,6 +46,20 @@ pub struct ImplicitConductionGraph<'a> {
     inner: ImplicitConductionChain<'a>,
 }
 impl<'a> ImplicitConductionGraph<'a> {
+    /// Replace selected bulk-series links with original integrated conductive
+    /// fluxes and their full tangents. The same attachment and ownership rules
+    /// as [`ImplicitConductionChain::with_link_laws`] apply.
+    pub fn with_link_laws(
+        self,
+        thermal: &DepositionSimulation<'_>,
+        links: &[(u64, &'a dyn super::link::ImplicitLinkLaw)],
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, ImplicitConductionError> {
+        Ok(Self {
+            inner: self.inner.with_link_laws(thermal, links, checkpoint)?,
+        })
+    }
+
     /// Attach original two-sided contact laws to this same graph and nonlinear
     /// residual. See the chain entry for binding and no-double-counting rules.
     pub fn with_contacts(

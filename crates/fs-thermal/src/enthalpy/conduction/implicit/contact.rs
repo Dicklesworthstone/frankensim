@@ -100,10 +100,12 @@ impl<'a> ImplicitConductionChain<'a> {
                 .ok_or(ImplicitConductionError::Invalid(
                     "inactive implicit contact link",
                 ))?;
-            if link.geometry.contact_resistance_m2_k_w != 0.0 || bindings.insert(id, law).is_some()
+            if link.geometry.contact_resistance_m2_k_w != 0.0
+                || self.link_laws.contains_key(&id)
+                || bindings.insert(id, law).is_some()
             {
                 return Err(ImplicitConductionError::Invalid(
-                    "implicit source contact must replace zero authored resistance on a unique link",
+                    "implicit source contact must replace zero authored resistance on a unique bulk-series link",
                 ));
             }
             let caloric = law.caloric_laws();

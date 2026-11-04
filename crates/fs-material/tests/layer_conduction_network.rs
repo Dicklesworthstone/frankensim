@@ -1,4 +1,6 @@
 //! Original source resolution and actual implicit enthalpy history, not a second integrator.
+#[path = "layer_conduction_network/implicit.rs"]
+mod implicit;
 use std::sync::Arc;
 use fs_evidence::ValidityDomain;
 use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve, SolidLiquidPhase};

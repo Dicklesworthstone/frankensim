@@ -332,6 +332,149 @@ fn analytic_nonlinear_tangent_matches_original_residual_and_time_refinement() {
     );
 }
 
+struct IntegratedLinearK<'a>(&'a Law);
+impl ImplicitLinkLaw for IntegratedLinearK<'_> {
+    fn caloric_laws(&self) -> [&dyn ThermalLaw; 2] { [self.0; 2] }
+    fn state_at_specific_enthalpies(
+        &self, h: [f64; 2], geometry: ConductiveLink, patch: ContactPatch,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<ImplicitLinkState, DepositionError> {
+        checkpoint()?;
+        if geometry.contact_resistance_m2_k_w != 0.0 {
+            return Err(DepositionError::InvalidInput("this test law needs perfect contact"));
+        }
+        let a = self.0.state_at_specific_enthalpy(h[0])?;
+        let b = self.0.state_at_specific_enthalpy(h[1])?;
+        let scale = patch.link.area_m2 / geometry.half_distances_m.iter().sum::<f64>();
+        // Independent Kirchhoff integral of k(T)=T/100 through one homogeneous link.
+        Ok(ImplicitLinkState {
+            conductance_w_k: scale * (a.temperature_k + b.temperature_k) / 200.0,
+            power_enthalpy_derivatives_w_kg_j: [
+                scale * a.temperature_k / 100.0 * a.temperature_slope_kg_k_j,
+                -scale * b.temperature_k / 100.0 * b.temperature_slope_kg_k_j,
+            ],
+        })
+    }
+}
+
+#[test]
+fn integrated_link_flux_drives_chain_and_graph_with_exact_internal_heat() {
+    let law = Law { nonlinear_k: true, plateau: false };
+    let (thermal, observer) = setup(&law, &[400.0, 200.0], None, vec![]);
+    let integrated = IntegratedLinearK(&law);
+    let native = ImplicitConductionChain::new(
+        &thermal, &observer, &[(MaterialId(0), &law)], || Ok(()),
+    ).unwrap();
+    near(native.endpoint(&thermal, &mut || Ok(())).unwrap().link_values[&0], 8.0 / 3.0, 1e-14);
+    let chain = native.with_link_laws(&thermal, &[(0, &integrated)], || Ok(())).unwrap();
+    near(chain.endpoint(&thermal, &mut || Ok(())).unwrap().link_values[&0], 3.0, 1e-14);
+    let graph = ImplicitConductionGraph::new(
+        &thermal, &observer, &[(MaterialId(0), &law)],
+        ImplicitConductionLinearControls::default(), || Ok(()),
+    ).unwrap().with_link_laws(&thermal, &[(0, &integrated)], || Ok(())).unwrap();
+    let mut workspace = ImplicitConductionWorkspace::new(2).unwrap();
+    let (a, report) = chain.advance_to(&thermal, 2.0, controls(2.0), &mut workspace, || Ok(())).unwrap();
+    let (b, graph_report) = graph.advance_to(&thermal, 2.0, controls(2.0), &mut workspace, || Ok(())).unwrap();
+    // Ta+Tb=600 K is conserved, so the integrated G is always 3 W/K.
+    // One backward-Euler interval therefore has this independent exact result.
+    for (id, expected) in [(CellId(0), 300.0 + 100.0 / 13.0), (CellId(1), 300.0 - 100.0 / 13.0)] {
+        near(a.temperature_k(id).unwrap(), expected, 1e-10);
+        near(b.temperature_k(id).unwrap(), expected, 1e-10);
+    }
+    for report in [report, graph_report] {
+        assert_eq!(report.energy.substeps, 1);
+        assert_eq!(report.energy.external_heat_j, 0.0);
+        assert!(report.energy.residual_j.abs() < 1e-9);
+        assert!(report.entropy.conduction_generation_j_k > 0.0);
+        assert!(report.maximum_cell_residual_j <= 1e-10);
+    }
+    assert_eq!(thermal.time_s(), 0.0);
+    assert_eq!(thermal.temperature_k(CellId(0)).unwrap(), 400.0);
+}
+
+#[test]
+fn integrated_link_tangent_matches_original_energy_residual_with_unequal_masses() {
+    let law = Law { nonlinear_k: true, plateau: false };
+    let (mut thermal, mut observer) = setup(&law, &[400.0, 320.0, 250.0], None, vec![]);
+    for (id, mass) in [(CellId(1), 2.0), (CellId(2), 0.5)] {
+        thermal.cells.get_mut(&id).unwrap().mass_kg = mass;
+        observer.cells.get_mut(&id).unwrap().mass_kg = mass;
+    }
+    let integrated = IntegratedLinearK(&law);
+    let chain = ImplicitConductionChain::new(
+        &thermal, &observer, &[(MaterialId(0), &law)], || Ok(()),
+    ).unwrap().with_link_laws(&thermal, &[(0, &integrated)], || Ok(())).unwrap();
+    // One integrated link and one unchanged bulk-series link share each row.
+    let step = BackwardEulerStep::new(&thermal, 0.3, || Ok(())).unwrap();
+    let energy = [-7.0, 4.0, 3.0];
+    let mut report = empty_report();
+    let trial = chain.evaluate(&step, &energy, &BTreeMap::new(), false, controls(1.0),
+        &mut report, &mut || Ok(())).unwrap();
+    let mut workspace = ImplicitConductionWorkspace::new(3).unwrap();
+    chain.jacobian(&thermal, trial.payload(), 0.3, &mut workspace, &mut || Ok(())).unwrap();
+    for column in 0..3 {
+        let mut plus = energy; let mut minus = energy;
+        plus[column] += 1e-3; minus[column] -= 1e-3;
+        let a = chain.evaluate(&step, &plus, &BTreeMap::new(), false, controls(1.0),
+            &mut report, &mut || Ok(())).unwrap();
+        let b = chain.evaluate(&step, &minus, &BTreeMap::new(), false, controls(1.0),
+            &mut report, &mut || Ok(())).unwrap();
+        for row in 0..3 {
+            let derivative = if row == column { workspace.diagonal[row] }
+                else if row == column + 1 { workspace.lower[column] }
+                else if column == row + 1 { workspace.upper[row] }
+                else { 0.0 };
+            near(derivative, (a.residual_j()[row] - b.residual_j()[row]) / 0.002, 1e-8);
+        }
+    }
+}
+
+#[test]
+fn integrated_link_attachment_and_late_failure_preserve_original_history() {
+    let law = Law { nonlinear_k: true, plateau: false };
+    let other = Law { nonlinear_k: true, plateau: false };
+    let (thermal, observer) = setup(&law, &[400.0, 200.0, 300.0], None, vec![]);
+    let integrated = IntegratedLinearK(&law);
+    let foreign = IntegratedLinearK(&other);
+    let make = || ImplicitConductionChain::new(
+        &thermal, &observer, &[(MaterialId(0), &law)], || Ok(()),
+    ).unwrap();
+    assert!(make().with_link_laws(&thermal, &[(0, &foreign)], || Ok(())).is_err());
+    assert!(make().with_link_laws(&thermal, &[(99, &integrated)], || Ok(())).is_err());
+    assert!(make().with_link_laws(&thermal, &[(0, &integrated), (0, &integrated)], || Ok(())).is_err());
+    assert!(make().with_link_laws(&thermal, &[], || Ok(())).is_err());
+    struct Contact<'a>(&'a Law);
+    impl ImplicitContactLaw for Contact<'_> {
+        fn caloric_laws(&self) -> [&dyn ThermalLaw; 2] { [self.0; 2] }
+        fn enthalpy_bounds_j_kg(&self) -> [[f64; 2]; 2] { [[100.0, 1000.0]; 2] }
+        fn state_at_specific_enthalpies(&self, _: [f64; 2]) -> Result<ImplicitContactState, DepositionError> {
+            Ok(ImplicitContactState { resistance_m2_k_w: 1.0,
+                resistance_enthalpy_derivatives_m2_kg_k_w_j: [0.0; 2] })
+        }
+    }
+    let contact = Contact(&law);
+    assert!(make().with_contacts(&thermal, &[(0, &contact)], || Ok(())).unwrap()
+        .with_link_laws(&thermal, &[(0, &integrated)], || Ok(())).is_err());
+    assert!(make().with_link_laws(&thermal, &[(0, &integrated)], || Ok(())).unwrap()
+        .with_contacts(&thermal, &[(0, &contact)], || Ok(())).is_err());
+    let chain = make().with_link_laws(&thermal, &[(0, &integrated)], || Ok(())).unwrap();
+    let mut workspace = ImplicitConductionWorkspace::new(3).unwrap();
+    let mut polls = 0;
+    let (expected, _) = chain.advance_to(&thermal, 0.2, controls(0.1), &mut workspace,
+        || { polls += 1; Ok(()) }).unwrap();
+    let mut calls = 0;
+    assert!(chain.advance_to(&thermal, 0.2, controls(0.1), &mut workspace,
+        || { calls += 1; if calls == polls { Err(DepositionError::Cancelled) } else { Ok(()) } }).is_err());
+    assert_eq!(thermal.time_s(), 0.0);
+    assert_eq!(thermal.temperature_k(CellId(0)).unwrap(), 400.0);
+    let (retry, _) = chain.advance_to(&thermal, 0.2, controls(0.1), &mut workspace, || Ok(())).unwrap();
+    for id in chain.cell_ids() { assert_eq!(retry.cells()[id], expected.cells()[id]); }
+    for state in [
+        ImplicitLinkState { conductance_w_k: -1.0, power_enthalpy_derivatives_w_kg_j: [1.0, -1.0] },
+        ImplicitLinkState { conductance_w_k: 1.0, power_enthalpy_derivatives_w_kg_j: [f64::NAN, -1.0] },
+    ] { assert!(state.admit().is_err()); }
+}
+
 #[test]
 fn scheduled_baths_split_exactly_and_failures_do_not_publish_partial_state() {
     let law = Law {
@@ -1038,3 +1181,4 @@ fn observed_refusals_preserve_native_state_and_source_history() {
 
 #[path = "tests/ambient.rs"]
 mod ambient;
+

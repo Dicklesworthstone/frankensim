@@ -8885,6 +8885,19 @@ work limits and cancellation without altering accepted state.
 
 ## Radial material conduction and finite thermal feedback
 
+`PreparedLayerConduction::implicit_link_laws` now supplies borrowed original
+Kirchhoff/contact fluxes to the native implicit chain and graph. It reuses
+`TwoLayerConduction`, including its analytic endpoint derivatives, with the
+same caloric dT/dh and physical link/coverage/distance checks. Source-local
+temperature spans, pure-phase restrictions and the admitted left derivative
+at an upper source endpoint remain explicit. No database query, identity
+construction or allocation occurs in a link evaluation. These are source-free
+quasi-steady half-cell reconstructions; transient spatial/time refinement and
+material uncertainty remain separate. Reservoir faces retain their native
+bulk-conductivity model. Focused layer-network regressions exercise the actual
+chain/graph solve, affine-k closed-form heat and derivatives, disjoint source
+spans across contact, source endpoints and transactional refusals.
+
 `thermal::conduction::LayerGeometry` admits planar, concentric cylindrical and
 spherical source-free conduction. It lowers the exact metric
 `A_contact * integral(ds/A(s))` to equivalent planar distances, retaining

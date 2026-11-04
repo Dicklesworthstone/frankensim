@@ -416,6 +416,17 @@ acceptance. Interface geometry, pressure and interfacial storage remain fixed.
 
 ## Existing thermal timeline
 
+### Integrated conductive links in the implicit heat solve
+
+Chain and graph `with_link_laws` attach original two-sided `ImplicitLinkLaw`
+closures to selected faces. Their nonnegative secant supplies the existing
+equal/opposite heat transfer; their complete dQ/dh replaces the bulk-series
+tangent in the same energy-coordinate Newton matrix. Ordered caloric objects,
+contact coverage and geometry stay explicit. Source-contact overlap and duplicate
+ownership refuse. Unselected links retain their original arithmetic. This adds
+no thermal store, heat source or time integrator; original entropy, energy,
+nonlinear work limits and cancellation still govern publication.
+
 The enthalpy, advection, contact, observation and event APIs retain their
 documented control-volume semantics. A cell stores total energy as mass times
 specific enthalpy. Every material chart in one balance uses a compatible energy

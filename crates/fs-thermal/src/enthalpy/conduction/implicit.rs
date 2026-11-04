@@ -45,6 +45,11 @@ pub use observed::ImplicitConductionObservedError;
 pub mod contact;
 use contact::{ImplicitContactLaw, ImplicitContactState};
 
+/// Integrated half-cell fluxes and their complete two-sided tangents.
+#[path = "implicit/link.rs"]
+pub mod link;
+use link::{ImplicitLinkLaw, ImplicitLinkState};
+
 /// One fused constitutive query, with derivatives on the same enthalpy chart.
 /// At a genuine corner the material owner explicitly selects its one-sided
 /// generalized derivative. The original residual still decides acceptance.
@@ -224,6 +229,7 @@ pub struct ImplicitConductionChain<'a> {
     index: BTreeMap<CellId, usize>,
     topology: LinearTopology,
     contacts: BTreeMap<u64, &'a dyn ImplicitContactLaw>,
+    link_laws: BTreeMap<u64, &'a dyn ImplicitLinkLaw>,
 }
 
 struct Endpoint {
@@ -231,6 +237,7 @@ struct Endpoint {
     link_values: BTreeMap<u64, f64>,
     boundary_values: BoundaryConductances,
     contacts: BTreeMap<u64, ImplicitContactState>,
+    link_states: BTreeMap<u64, ImplicitLinkState>,
 }
 
 impl<'a> ImplicitConductionChain<'a> {
@@ -295,6 +302,7 @@ impl<'a> ImplicitConductionChain<'a> {
             ids,
             topology,
             contacts: BTreeMap::new(),
+            link_laws: BTreeMap::new(),
         };
         result.admit(thermal, &mut checkpoint)?;
         result.endpoint(thermal, &mut checkpoint)?;
@@ -461,8 +469,26 @@ impl<'a> ImplicitConductionChain<'a> {
         }
         let mut link_values = BTreeMap::new();
         let mut contacts = BTreeMap::new();
+        let mut link_states = BTreeMap::new();
         for (&id, binding) in &self.conduction.links {
             checkpoint()?;
+            if let Some(law) = self.link_laws.get(&id) {
+                let state = law.state_at_specific_enthalpies(
+                    [
+                        thermal.cells[&binding.a].specific_h_j_kg,
+                        thermal.cells[&binding.b].specific_h_j_kg,
+                    ],
+                    binding.geometry,
+                    thermal.contact_patch(id).ok_or(ImplicitConductionError::Invalid(
+                        "implicit flux link disappeared",
+                    ))?,
+                    checkpoint,
+                )?;
+                state.admit()?;
+                link_values.insert(id, state.conductance_w_k);
+                link_states.insert(id, state);
+                continue;
+            }
             let a = states[self.index[&binding.a]];
             let b = states[self.index[&binding.b]];
             let resistance = if let Some(law) = self.contacts.get(&id) {
@@ -523,6 +549,7 @@ impl<'a> ImplicitConductionChain<'a> {
             link_values,
             boundary_values,
             contacts,
+            link_states,
         })
     }
 
@@ -607,24 +634,38 @@ impl<'a> ImplicitConductionChain<'a> {
             checkpoint()?;
             let ia = self.index[&link.a];
             let ib = self.index[&link.b];
-            let a = endpoint.states[ia];
-            let b = endpoint.states[ib];
-            let g = endpoint.link_values[&id];
-            let mut ga =
-                conductance_derivative(g, link.area_m2, link.geometry.half_distances_m[0], a)?;
-            let mut gb =
-                conductance_derivative(g, link.area_m2, link.geometry.half_distances_m[1], b)?;
-            if let Some(contact) = endpoint.contacts.get(&id) {
-                ga = finite(ga + contact.conductance_derivative(g, link.area_m2, 0)?)?;
-                gb = finite(gb + contact.conductance_derivative(g, link.area_m2, 1)?)?;
-            }
-            let difference = b.temperature_k - a.temperature_k;
-            let qa = finite(
-                (ga * difference - g * a.temperature_slope_kg_k_j) / thermal.cells[&link.a].mass_kg,
-            )?;
-            let qb = finite(
-                (gb * difference + g * b.temperature_slope_kg_k_j) / thermal.cells[&link.b].mass_kg,
-            )?;
+            let (qa, qb) = if let Some(state) = endpoint.link_states.get(&id) {
+                // The supplied Q leaves A. The original residual uses heat
+                // INTO A and energy, not specific enthalpy, coordinates.
+                let [a, b] = state.power_enthalpy_derivatives_w_kg_j;
+                (
+                    finite(-a / thermal.cells[&link.a].mass_kg)?,
+                    finite(-b / thermal.cells[&link.b].mass_kg)?,
+                )
+            } else {
+                let a = endpoint.states[ia];
+                let b = endpoint.states[ib];
+                let g = endpoint.link_values[&id];
+                let mut ga =
+                    conductance_derivative(g, link.area_m2, link.geometry.half_distances_m[0], a)?;
+                let mut gb =
+                    conductance_derivative(g, link.area_m2, link.geometry.half_distances_m[1], b)?;
+                if let Some(contact) = endpoint.contacts.get(&id) {
+                    ga = finite(ga + contact.conductance_derivative(g, link.area_m2, 0)?)?;
+                    gb = finite(gb + contact.conductance_derivative(g, link.area_m2, 1)?)?;
+                }
+                let difference = b.temperature_k - a.temperature_k;
+                (
+                    finite(
+                        (ga * difference - g * a.temperature_slope_kg_k_j)
+                            / thermal.cells[&link.a].mass_kg,
+                    )?,
+                    finite(
+                        (gb * difference + g * b.temperature_slope_kg_k_j)
+                            / thermal.cells[&link.b].mass_kg,
+                    )?,
+                )
+            };
             add_entry(workspace, ia, ia, -dt * qa)?;
             add_entry(workspace, ia, ib, -dt * qb)?;
             add_entry(workspace, ib, ia, dt * qa)?;

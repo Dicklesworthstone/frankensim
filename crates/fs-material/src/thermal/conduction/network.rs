@@ -13,6 +13,9 @@ use std::sync::Arc;
 mod observe;
 pub use observe::LayerConductionObserver;
 
+mod implicit;
+pub use implicit::ImplicitLayerLink;
+
 /// Explicit original link and homogeneous distances, in the link's a/b order.
 /// The contact resistance is caller-declared here; it is not inferred from the
 /// existing conductance or confused with either bulk layer resistance.
