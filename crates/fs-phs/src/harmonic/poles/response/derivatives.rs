@@ -1,5 +1,5 @@
 //! Physical chain rule on the original descriptor model, in a fixed state chart.
-//! With S=J-R and e=W*v: dA*v=(dJ-dR)*e+S*(dQ*v)-dT*v. T is the optional
+//! With S=J-R and e=W*v: dL*v=(dJ-dR)*e+S*(dQ*v)-dT*v. T is the optional
 //! total nonlinear resisting-flow derivative. No storage inverse is required.
 use super::*;
 use crate::harmonic::parameter::{ParameterAction, generator_action};
@@ -22,7 +22,9 @@ pub struct HarmonicPoleDerivative {
     pub relative_residual: f64,
     pub linear_residual: f64,
 }
-fn at(matrix: Option<&[f64]>, index: usize) -> f64 { matrix.map_or(0.0, |a| a[index]) }
+fn at(matrix: Option<&[f64]>, index: usize) -> f64 {
+    matrix.map_or(0.0, |a| a[index])
+}
 
 impl PreparedHarmonicPole<'_> {
     /// Differentiate free poles, full eigenstates, efforts and port outputs.
@@ -32,106 +34,170 @@ impl PreparedHarmonicPole<'_> {
     /// including dT on nonlinear local models. No change of coordinates,
     /// topology or differential rank is inferred. Batches are transactional.
     pub fn parameter_derivatives(
-        &self, directions: &[HarmonicParameterDirection<'_>], mut cancelled: impl FnMut() -> bool,
+        &self,
+        directions: &[HarmonicParameterDirection<'_>],
+        mut cancelled: impl FnMut() -> bool,
     ) -> Result<Vec<HarmonicPoleDerivative>, HarmonicPoleResponseError> {
         check_cancel(&mut cancelled)?;
         if directions.is_empty() || directions.len() > self.options.numerical.max_vectors {
-            return Err(invalid("complete nonempty parameter batch within its ceiling required"));
+            return Err(invalid(
+                "complete nonempty parameter batch within its ceiling required",
+            ));
         }
-        let model = self.model;
-        let (n,m) = (model.n,model.m);
-        let v = self.right_state();
-        let s = self.laplace_pole_per_s();
-        let h = 0.5*(0..model.n_diff).map(|i|(v[i].conj()*self.effort[i]).re).sum::<f64>();
         let mut results = Vec::with_capacity(directions.len());
         for direction in directions {
-            direction.validate(model,&mut cancelled)?;
-            let ParameterAction {storage:dqv,generator:mut action,envelope} =
-                generator_action(model,direction,v,&self.effort,&mut cancelled)?;
-            for value in &mut action { *value = -*value; }
-            let scaled: Vec<_> = action.iter().zip(&self.row_scales).map(|(&z,&r)|divide(z,r)).collect();
-            let mut solved = self.numerical.parameter_derivatives(&[&scaled],&mut cancelled)?;
-            let tangent = solved.pop().expect("one admitted parameter");
-            let ds = tangent.value;
-            let dv = tangent.vector;
-            let mut residual = 0.0_f64;
-            for i in 0..n {
-                check_cancel(&mut cancelled)?;
-                let scale = self.row_scales[i];
-                let mut sum = divide(action[i],scale);
-                let mut correction = C64::ZERO;
-                let mut denominator = envelope[i]/scale;
-                if i < model.n_diff {
-                    let a = divide(s,scale)*dv[i];
-                    let b = divide(ds,scale)*v[i];
-                    accumulate(&mut sum,&mut correction,a);
-                    accumulate(&mut sum,&mut correction,b);
-                    denominator += a.abs()+b.abs();
-                }
-                for j in 0..n {
-                    let a = dv[j].scale(model.generator[i*n+j]/scale);
-                    accumulate(&mut sum,&mut correction,-a);
-                    denominator += a.abs();
-                }
-                if !finite(sum) || !denominator.is_finite() {
-                    return Err(invalid("original tangent residual overflow"));
-                }
-                let row = if denominator == 0.0 { if sum.abs()==0.0 {0.0} else {f64::INFINITY} }
-                    else {sum.abs()/denominator};
-                residual = residual.max(row);
-            }
-            if !residual.is_finite() || residual > model.budget.relative_residual_tolerance {
-                return Err(HarmonicPoleResponseError::Physical(HarmonicPoleError::Residual {
-                    relative:residual,tolerance:model.budget.relative_residual_tolerance,
-                }));
-            }
-            let mut effort = dv.clone();
-            let mut dh = 0.0;
-            for i in 0..model.n_diff {
-                check_cancel(&mut cancelled)?;
-                effort[i]=dqv[i];
-                let mut correction=C64::ZERO;
-                for j in 0..model.n_diff {
-                    accumulate(&mut effort[i],&mut correction,dv[j].scale(model.q[i*n+j]));
-                }
-                dh += (dv[i].conj()*self.effort[i]).re+0.5*(v[i].conj()*dqv[i]).re;
-            }
-            let mut output=vec![C64::ZERO;m];
-            for p in 0..m {
-                check_cancel(&mut cancelled)?;
-                let mut correction=C64::ZERO;
-                for i in 0..n {
-                    accumulate(&mut output[p],&mut correction,effort[i].scale(model.g[i*m+p])
-                        +self.effort[i].scale(at(direction.ports,i*m+p)));
-                }
-            }
-            let mut dd=0.0;
-            for i in 0..n {
-                check_cancel(&mut cancelled)?;
-                for j in 0..n {
-                    dd += 2.0*(effort[i].conj()*self.effort[j]).re*model.r[i*n+j]
-                        +(self.effort[i].conj()*self.effort[j]).re*at(direction.dissipation,i*n+j);
-                    if let Some(t)=&model.resisting_tangent {
-                        dd += (effort[i].conj()*v[j]+self.effort[i].conj()*dv[j]).re*t[i*n+j];
-                    }
-                    if let Some(dt)=direction.resisting_flow {
-                        dd += (self.effort[i].conj()*v[j]).re*dt[i*n+j];
-                    }
-                }
-            }
-            let balance=2.0*ds.re*h+2.0*s.re*dh+dd;
-            if effort.iter().chain(&output).any(|&z| !finite(z))
-                || [h,dh,dd,balance].iter().any(|x| !x.is_finite()) {
-                return Err(invalid("physical tangent observation overflow"));
-            }
-            results.push(HarmonicPoleDerivative {
-                laplace_pole_per_s:ds,angular_frequency_rad_s:C64::new(-ds.im,ds.re),
-                state:dv,effort,output,stored_energy_j:dh,dissipated_power_w:dd,
-                decay_power_residual_w:balance,relative_residual:residual,
-                linear_residual:tangent.linear_residual,
-            });
+            direction.validate(self.model, &mut cancelled)?;
+            let action = generator_action(
+                self.model,
+                direction,
+                self.right_state(),
+                &self.effort,
+                &mut cancelled,
+            )?;
+            results.push(self.parameter_derivative_from_action(
+                *direction,
+                action,
+                &mut cancelled,
+            )?);
         }
         check_cancel(&mut cancelled)?;
         Ok(results)
+    }
+
+    // Complete generator action in this exact fixed gauge, including a loaded
+    // owner's boundary feedback when present. Material observations still use
+    // ONLY the original direction; the boundary is never inserted into R/T.
+    pub(in crate::harmonic) fn parameter_derivative_from_action(
+        &self,
+        direction: HarmonicParameterDirection<'_>,
+        action: ParameterAction,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<HarmonicPoleDerivative, HarmonicPoleResponseError> {
+        let model = self.model;
+        let (n, m) = (model.n, model.m);
+        let v = self.right_state();
+        let s = self.laplace_pole_per_s();
+        let h = 0.5
+            * (0..model.n_diff)
+                .map(|i| (v[i].conj() * self.effort[i]).re)
+                .sum::<f64>();
+        let ParameterAction {
+            storage: dqv,
+            generator: mut action,
+            envelope,
+        } = action;
+        for value in &mut action {
+            *value = -*value;
+        }
+        let scaled: Vec<_> = action
+            .iter()
+            .zip(&self.row_scales)
+            .map(|(&z, &r)| divide(z, r))
+            .collect();
+        let mut solved = self
+            .numerical
+            .parameter_derivatives(&[&scaled], &mut cancelled)?;
+        let tangent = solved.pop().expect("one admitted parameter");
+        let ds = tangent.value;
+        let dv = tangent.vector;
+        let mut residual = 0.0_f64;
+        for i in 0..n {
+            check_cancel(&mut cancelled)?;
+            let scale = self.row_scales[i];
+            let mut sum = divide(action[i], scale);
+            let mut correction = C64::ZERO;
+            let mut denominator = envelope[i] / scale;
+            if i < model.n_diff {
+                let a = divide(s, scale) * dv[i];
+                let b = divide(ds, scale) * v[i];
+                accumulate(&mut sum, &mut correction, a);
+                accumulate(&mut sum, &mut correction, b);
+                denominator += a.abs() + b.abs();
+            }
+            for j in 0..n {
+                let a = dv[j].scale(model.generator[i * n + j] / scale);
+                accumulate(&mut sum, &mut correction, -a);
+                denominator += a.abs();
+            }
+            if !finite(sum) || !denominator.is_finite() {
+                return Err(invalid("original tangent residual overflow"));
+            }
+            let row = if denominator == 0.0 {
+                if sum.abs() == 0.0 { 0.0 } else { f64::INFINITY }
+            } else {
+                sum.abs() / denominator
+            };
+            residual = residual.max(row);
+        }
+        if !residual.is_finite() || residual > model.budget.relative_residual_tolerance {
+            return Err(HarmonicPoleResponseError::Physical(
+                HarmonicPoleError::Residual {
+                    relative: residual,
+                    tolerance: model.budget.relative_residual_tolerance,
+                },
+            ));
+        }
+        let mut effort = dv.clone();
+        let mut dh = 0.0;
+        for i in 0..model.n_diff {
+            check_cancel(&mut cancelled)?;
+            effort[i] = dqv[i];
+            let mut correction = C64::ZERO;
+            for j in 0..model.n_diff {
+                accumulate(
+                    &mut effort[i],
+                    &mut correction,
+                    dv[j].scale(model.q[i * n + j]),
+                );
+            }
+            dh += (dv[i].conj() * self.effort[i]).re + 0.5 * (v[i].conj() * dqv[i]).re;
+        }
+        let mut output = vec![C64::ZERO; m];
+        for p in 0..m {
+            check_cancel(&mut cancelled)?;
+            let mut correction = C64::ZERO;
+            for i in 0..n {
+                accumulate(
+                    &mut output[p],
+                    &mut correction,
+                    effort[i].scale(model.g[i * m + p])
+                        + self.effort[i].scale(at(direction.ports, i * m + p)),
+                );
+            }
+        }
+        let mut dd = 0.0;
+        for i in 0..n {
+            check_cancel(&mut cancelled)?;
+            for j in 0..n {
+                dd += 2.0 * (effort[i].conj() * self.effort[j]).re * model.r[i * n + j]
+                    + (self.effort[i].conj() * self.effort[j]).re
+                        * at(direction.dissipation, i * n + j);
+                if let Some(t) = &model.resisting_tangent {
+                    dd +=
+                        (effort[i].conj() * v[j] + self.effort[i].conj() * dv[j]).re * t[i * n + j];
+                }
+                if let Some(dt) = direction.resisting_flow {
+                    dd += (self.effort[i].conj() * v[j]).re * dt[i * n + j];
+                }
+            }
+        }
+        let balance = 2.0 * ds.re * h + 2.0 * s.re * dh + dd;
+        if effort.iter().chain(&output).any(|&z| !finite(z))
+            || [h, dh, dd, balance].iter().any(|x| !x.is_finite())
+        {
+            return Err(invalid("physical tangent observation overflow"));
+        }
+        Ok(HarmonicPoleDerivative {
+            laplace_pole_per_s: ds,
+            angular_frequency_rad_s: C64::new(-ds.im, ds.re),
+            state: dv,
+            effort,
+            output,
+            stored_energy_j: dh,
+            dissipated_power_w: dd,
+            decay_power_residual_w: balance,
+            relative_residual: residual,
+            linear_residual: tangent.linear_residual,
+        })
     }
 }

@@ -11,7 +11,7 @@ use super::{
     finite, invalid, poll,
 };
 use crate::harmonic::{HarmonicParameterDirection, parameter};
-use parameter::{ParameterStateDerivative, accumulate, at};
+use parameter::{accumulate, at};
 
 /// One selected boundary differentiated per unit of the caller's real parameter.
 /// The reference derivative follows the same authored order as wave_ports().
@@ -126,6 +126,7 @@ impl ScatteringFactor<'_> {
             input_derivative,
             reference_derivative,
             &mut rhs,
+            None,
             &mut cancelled,
         )?;
         let (state, relative) = self.factor.solve_rhs(&rhs, &mut cancelled)?;
@@ -154,10 +155,17 @@ impl ScatteringFactor<'_> {
         observed.relative_residual =
             observed
                 .relative_residual
-                .max(self.original_parameter_residual(
-                    &response,
-                    &observed,
-                    &physical_input_derivative,
+                .max(self.model.original_parameter_residual(
+                    ParameterResidualState {
+                        laplace: C64::new(0.0, -response.physical.omega_rad_s),
+                        laplace_derivative: C64::ZERO,
+                        state: &response.physical.state,
+                        effort: &response.physical.effort,
+                        input: &response.physical_inputs,
+                        state_derivative: &observed.state,
+                        effort_derivative: &observed.effort,
+                        input_derivative: &physical_input_derivative,
+                    },
                     direction,
                     &mut cancelled,
                 )?);
@@ -247,44 +255,62 @@ impl ScatteringFactor<'_> {
             relative_derivative_residual: physical.relative_derivative_residual,
         })
     }
+}
 
+// Complete original physical values and their tangent at one spectral point.
+// Free modes add ds*E*x; fixed-frequency forced responses set ds exactly zero.
+pub(super) struct ParameterResidualState<'a> {
+    pub laplace: C64,
+    pub laplace_derivative: C64,
+    pub state: &'a [C64],
+    pub effort: &'a [C64],
+    pub input: &'a [C64],
+    pub state_derivative: &'a [C64],
+    pub effort_derivative: &'a [C64],
+    pub input_derivative: &'a [C64],
+}
+
+impl ScatteringModel {
     // Independently audit the differentiated ORIGINAL physical equations:
-    // sE dx-(J-R)de-(dJ-dR)e+T dx+dT x-G du-dG u=0. No closed
-    // generator or imposed wave-power balance can validate its own sign here.
-    fn original_parameter_residual(
+    // sE dx+ds*E*x-(J-R)de-(dJ-dR)e+T dx+dT x-G du-dG u=0. No
+    // closed generator or imposed wave-power balance validates its own sign.
+    pub(super) fn original_parameter_residual(
         &self,
-        response: &ScatteringResponse,
-        observed: &ParameterStateDerivative,
-        input_derivative: &[C64],
+        observed: ParameterResidualState<'_>,
         direction: HarmonicParameterDirection<'_>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<f64, HarmonicError> {
-        let model = &self.model.closed;
+        let model = &self.closed;
         let (n, m) = (model.n, model.m);
-        let s = C64::new(0.0, -response.physical.omega_rad_s);
         let mut relative = 0.0_f64;
         for i in 0..n {
             poll(cancelled)?;
-            let mut residual = if i < model.n_diff {
-                s * observed.state[i]
+            let dynamic = if i < model.n_diff {
+                observed.laplace * observed.state_derivative[i]
             } else {
                 C64::ZERO
             };
-            let mut scale = residual.abs();
+            let moving_pole = if i < model.n_diff {
+                observed.laplace_derivative * observed.state[i]
+            } else {
+                C64::ZERO
+            };
+            let mut residual = dynamic + moving_pole;
+            let mut scale = dynamic.abs() + moving_pole.abs();
             for j in 0..n {
                 let terms = [
-                    -observed.effort[j].scale(model.structure[i * n + j]),
-                    -response.physical.effort[j].scale(
+                    -observed.effort_derivative[j].scale(model.structure[i * n + j]),
+                    -observed.effort[j].scale(
                         at(direction.interconnection, i * n + j)
                             - at(direction.dissipation, i * n + j),
                     ),
-                    observed.state[j].scale(
+                    observed.state_derivative[j].scale(
                         model
                             .resisting_tangent
                             .as_ref()
                             .map_or(0.0, |t| t[i * n + j]),
                     ),
-                    response.physical.state[j].scale(at(direction.resisting_flow, i * n + j)),
+                    observed.state[j].scale(at(direction.resisting_flow, i * n + j)),
                 ];
                 for term in terms {
                     residual = residual + term;
@@ -292,8 +318,8 @@ impl ScatteringFactor<'_> {
                 }
             }
             for p in 0..m {
-                let force = input_derivative[p].scale(model.g[i * m + p]);
-                let map = response.physical_inputs[p].scale(at(direction.ports, i * m + p));
+                let force = observed.input_derivative[p].scale(model.g[i * m + p]);
+                let map = observed.input[p].scale(at(direction.ports, i * m + p));
                 residual = residual - force - map;
                 scale += force.abs() + map.abs();
             }
@@ -321,6 +347,8 @@ impl ScatteringFactor<'_> {
 // Add dG*u+G*du_explicit to an admitted full-state physical action. The explicit
 // changing output map excludes Y*dx, already closed on the left. Reusing this
 // same action on frequency tangents supplies the mixed frequency/parameter RHS.
+// A free-pole caller may additionally retain uncancelled source magnitudes for
+// its original conditioned tangent-row check; no new vector is allocated.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn add_parameter_source(
     owner: &ScatteringModel,
@@ -331,6 +359,7 @@ pub(super) fn add_parameter_source(
     input_derivative: Option<&[C64]>,
     reference_derivative: Option<&[f64]>,
     rhs: &mut [C64],
+    mut envelope: Option<&mut [f64]>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), HarmonicError> {
     let model = &owner.closed;
@@ -364,12 +393,12 @@ pub(super) fn add_parameter_source(
         poll(cancelled)?;
         let mut correction = C64::ZERO;
         for p in 0..m {
-            accumulate(
-                &mut rhs[i],
-                &mut correction,
-                physical_input[p].scale(at(direction.ports, i * m + p))
-                    + source[p].scale(model.g[i * m + p]),
-            );
+            let map = physical_input[p].scale(at(direction.ports, i * m + p));
+            let source = source[p].scale(model.g[i * m + p]);
+            accumulate(&mut rhs[i], &mut correction, map + source);
+            if let Some(bound) = envelope.as_deref_mut() {
+                bound[i] += map.abs() + source.abs();
+            }
         }
     }
     Ok(())

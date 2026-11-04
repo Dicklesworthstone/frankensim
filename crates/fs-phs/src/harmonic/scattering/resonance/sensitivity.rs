@@ -159,6 +159,7 @@ impl ScatteringModel {
                     None,
                     reference_derivative,
                     &mut rhs,
+                    None,
                     cancelled,
                 )?;
                 for (target, &dx) in rhs[..model.n_diff]

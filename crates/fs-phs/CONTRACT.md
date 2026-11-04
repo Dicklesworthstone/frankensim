@@ -467,6 +467,38 @@ cancelled/budget-refused solves with deterministic retry and an unchanged
 reusable harmonic response. The eight existing harmonic-response regressions
 also pass with this owner.
 
+### Loaded-pole forcing participation and physical parameter derivatives
+
+`ScatteringModel::prepare_pole_response` reuses the ordinary conditioned physical
+pole owner and its one fs-la bordered LU. It rechecks the supplied complete
+loaded pole/state and independently restores the original outgoing-boundary
+equations. The prepared gauge is `v[pivot]=1`; its mode observations expose
+original storage, material `R/T` work and escaped boundary power separately.
+These are complex-envelope exponential-mode quantities, without the forced
+cycle-average factor. They are not unit-energy modes or total biased-source heat.
+
+`PreparedScatteringPole::port_residues` maps selected incident sources through
+`2a/Z` and retains ordinary source slots. Its complete Laurent state/effort/output
+coefficients include descriptor reactions and memory. Actual input residues are
+`-Y_res/Z`; outgoing residues equal `Y_res`, because analytic incident feedthrough
+has no pole residue. A dark internal pole or zero participation remains valid.
+`parameter_derivatives` accepts original `dJ/dR/dQ/dG/dT` and selected `dZ` in
+authored wave order. The shared loaded source action retains forcing, feedback
+and output-map contributions; the shared physical observer keeps original
+material work. An independent original-row tangent check includes `ds*E*v`.
+Changing-reference outward-power slopes and differentiated storage/decay/work
+balances are independently evaluated, with no boundary resistance added to heat.
+
+Explicit physical and numerical budgets cover the complete batch before work;
+failed or cancelled calls publish nothing and preserve the reusable factor.
+No perturbed solve, finite difference, storage inverse, separate adjoint or new
+spectral solver is used. Seven focused native tests cover mixed sources and
+reversed boundary order, analytic mass/stiffness/loss/port/reference tuning,
+Kirchhoff-constrained RLC, oscillatory and relaxing Maxwell modes, dark-mode
+visibility, complete nonlinear `dQ+dT`, stale poles, capacity and cancellation.
+These are local simple-pole diagnostics, not finite-change, repeated-pole,
+whole-spectrum, spatial-fidelity or closed-loop passivity certificates.
+
 ### Stable constitutive energy changes
 
 Quadratic storage evaluates its midpoint remainder analytically, retaining

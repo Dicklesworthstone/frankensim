@@ -6,6 +6,8 @@ use crate::harmonic::{
 };
 use fs_la::nonlinear_eig::NonlinearEigError;
 
+pub mod response;
+
 /// One outgoing boundary account for a mode proportional to exp(s*t).
 /// Quadratic values are complex-envelope powers at the returned arbitrary
 /// amplitude, without the factor 1/2 used for peak forced harmonic averages.

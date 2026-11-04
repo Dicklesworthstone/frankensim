@@ -22,6 +22,10 @@ mod poles;
 mod resonance;
 pub use frequency::{ScatteringFrequencyResponse, ScatteringWaveDerivative};
 pub use parameter::{ScatteringParameterResponse, ScatteringWaveParameterDerivative};
+pub use poles::response::{
+    DecayWaveParameterDerivative, PreparedScatteringPole, ScatteringPoleDerivative,
+    ScatteringPoleObservation, ScatteringPoleParameterDirection, ScatteringPortResidue,
+};
 pub use poles::{DecayWavePort, ScatteringPole, ScatteringSpectrum};
 pub use resonance::ScatteringObservation;
 
