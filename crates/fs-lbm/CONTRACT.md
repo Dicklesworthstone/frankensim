@@ -1,5 +1,29 @@
 # CONTRACT: fs-lbm
 
+## Dimensional free-surface laminar film
+
+`film::NusseltFilm` evaluates the constant-property Newtonian no-slip,
+shear-free planar base flow from actual SI flux, viscosity, density, tension
+and effective acceleration. It exposes film thickness, mean/surface speed,
+Reynolds number, wall shear and the wall-normal velocity/stress profiles.
+Flux is conserved analytically; there is no Reynolds floor.
+
+`long_wave_mode` uses the isothermal Benney surface-wave approximation with
+caller-declared `kh` and `Re*kh` budgets. Its onset uses mean-speed
+`Re=q/nu`, with critical `Re=(5/6) g_n/g_t`; it does not substitute the
+two-wall Poiseuille threshold. Invalid inputs, dry flow, unrepresentable
+derived quantities and modes outside the budgets refuse explicitly.
+Base construction and mode evaluation allocate no buffers. Profile/mode
+arithmetic has fixed order; thickness uses the existing deterministic math.
+
+This is a locally planar, fully developed, laterally wide, near-onset
+long-wave model, not a turbulence, contact-line, arbitrary-wavelength,
+non-Newtonian or transient-pour certificate. The module cites its primary
+derivation and includes independent flux, stress/power, threshold, capillary,
+material-scaling and refusal regressions. Native Rust execution was
+unavailable in the implementing session; numerical comparisons are separate.
+
+
 ## Instantaneous momentum input on the original fluid populations
 
 `Grid::apply_impulse_density` and `BoundaryGrid3::apply_impulse_density`

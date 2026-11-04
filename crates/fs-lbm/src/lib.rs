@@ -7,6 +7,8 @@
 //! LATTICE-SCALING ASSISTANT.
 //! [`d3q27`] adds checked full central/cumulant collisions; [`lattice3`]
 //! supplies their explicit acoustic scaling and shared reference tile grid.
+//! [`film`] supplies a dimensional Nusselt base flow and an explicitly bounded
+//! free-surface long-wave screen for physical laminar-film studies.
 //! [`nsf3`] adds a compressible Navier-Stokes-Fourier grid: isothermal D3Q27 mass and momentum, the thermal
 //! pressure as a body force and a conservative total-energy field.
 //!
@@ -24,6 +26,7 @@ pub mod conjugate;
 pub mod core2;
 pub mod d3q19;
 pub mod d3q27;
+pub mod film;
 pub mod freesurface;
 /// Instantaneous momentum changes on the original low-Mach fluid populations.
 pub mod impulse;
