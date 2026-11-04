@@ -62,6 +62,9 @@ pub mod poles;
 /// Native frame resonance with all physical boundary-load states and constraints.
 pub mod coupled;
 
+/// Original layer Maxwell memory in the same native coupled AC/pole operator.
+pub mod relaxation;
+
 mod mass;
 pub use mass::FrameMassFormulation;
 mod impulse;

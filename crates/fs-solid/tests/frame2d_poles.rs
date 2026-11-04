@@ -4,6 +4,9 @@
 #[path = "frame2d_poles/coupled.rs"]
 mod coupled;
 
+#[path = "frame2d_poles/relaxation.rs"]
+mod relaxation;
+
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_evidence::ValidityDomain;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};

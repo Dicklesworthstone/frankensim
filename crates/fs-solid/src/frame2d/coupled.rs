@@ -32,7 +32,7 @@ pub enum FramePortDynamics<'a> {
 }
 
 impl FramePortDynamics<'_> {
-    fn parts(&self) -> (usize, usize, usize, &[f64], &[f64], &[f64], &dyn Storage) {
+    pub(super) fn parts(&self) -> (usize, usize, usize, &[f64], &[f64], &[f64], &dyn Storage) {
         match self {
             Self::Ode(s) => {
                 let (j, r, g) = s.structure();
@@ -153,7 +153,11 @@ impl From<HarmonicError> for FrameCoupledError {
 fn poll(cx: &Cx<'_>) -> Result<(), FrameCoupledError> {
     cx.checkpoint().map_err(|_| FrameCoupledError::Cancelled)
 }
-fn limit(quantity: &'static str, requested: u128, cap: u128) -> Result<(), FrameCoupledError> {
+pub(super) fn limit(
+    quantity: &'static str,
+    requested: u128,
+    cap: u128,
+) -> Result<(), FrameCoupledError> {
     if requested > cap {
         Err(FrameCoupledError::Budget {
             quantity,
@@ -517,10 +521,27 @@ impl PreparedFrameResonance {
     pub fn load_algebraic_range(&self) -> core::ops::Range<usize> {
         2 * self.free_dofs.len() + self.load_differential_dimension..self.dimension()
     }
-    /// Original material-viscosity real-frequency support. It is provenance for
+    /// Original material real-frequency support. It is provenance for
     /// complex poles, not certification of analytic continuation outside it.
     pub fn material_omega_band_rad_s(&self) -> Option<(f64, f64)> {
         self.material_band
+    }
+
+    // A source-bound constitutive adapter can only narrow original support.
+    pub(super) fn intersect_material_band(
+        &mut self,
+        band: (f64, f64),
+    ) -> Result<(), FrameCoupledError> {
+        let (lo, hi) = self
+            .material_band
+            .map_or(band, |old| (old.0.max(band.0), old.1.min(band.1)));
+        if !lo.is_finite() || !hi.is_finite() || lo < 0.0 || lo > hi {
+            return Err(FrameCoupledError::Invalid(
+                "original material frequency supports must overlap",
+            ));
+        }
+        self.material_band = Some((lo, hi));
+        Ok(())
     }
 
     /// Refine one isolated pole of the complete coupled pencil under exp(s t).
@@ -592,7 +613,7 @@ impl PreparedFrameResonance {
         if let Some((lo, hi)) = self.material_band {
             if !omega_rad_s.is_finite() || omega_rad_s < lo || omega_rad_s > hi {
                 return Err(FrameCoupledError::Invalid(
-                    "forcing frequency is outside native material viscosity support",
+                    "forcing frequency is outside native material support",
                 ));
             }
         }

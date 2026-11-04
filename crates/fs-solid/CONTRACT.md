@@ -6181,3 +6181,58 @@ remain separate owners.
 Every original native trial, actual endpoint contact-speed and Coulomb-law audit, contact-work identity, whole-network applied-plus-support-work balance, and final cancellation check precedes publication of any body. Original per-body receipts preserve supported cross-mass reactions and prescribed support work separately from opposing-surface work and relative contact loss. No contact loss is silently allocated to heat or native viscosity. Geometry owns complete simultaneous contact discovery, common frames and physically consistent coincident-point interpolation; arbitrary algebraic point maps alone do not certify world linear or angular momentum. Determinacy and total-work witnesses retain the shared law owner's meaning.
 
 Five focused regression groups cover finite-pair transfer and original trajectory continuation, a three-body coupled closure, consistent-mass tetrahedral world momentum at two origins, supported source work under a common velocity shift, and multi-owner refusal/retry. New files passed Rust formatting checks; edited parents passed syntax parsing. Small independent arithmetic checks covered analytic fixture impulses, work and tetrahedral mobility. Native compilation, Rust test execution, convergence and performance benchmarking remain outstanding in this resource-constrained environment.
+
+## Original layer Maxwell memory in native frame resonance
+
+`Frame2d::prepare_relaxing_resonance` binds authored longitudinal layer spectra
+to the same complete native `PreparedFrameResonance` used for physical boundary
+AC and poles. The original source resolver retains equilibrium modulus, every
+delta_E/tau pair, selectors, receipts and held-environment applicability. The
+explicit longitudinal declaration applies one scalar E(t) to axial strain and
+both bending strains; it does not reinterpret a bending-only or torsional law.
+Only `reference_strain_traces` supplies the geometry and conjugate force maps.
+Their exact coefficients are delta_E*A/L, 3*delta_E*I/L^3 and delta_E*I/L^3.
+
+Each positive original arm/channel has an energy-normalized elastic extension
+z, with z_dot=-z/tau+sqrt(k)*extension_dot, opposing force sqrt(k)*z,
+H=z^2/2 and heat=z^2/tau. No modulus is frozen at a resonance frequency and no
+modal loss ratio is fitted. Original equilibrium stiffness enters once.
+Different layer times remain distinct; exact-zero increments retain source
+identity without a state, while positive arms with zero free-motion projection
+retain their physical energy/decay states. Selected members with nonzero
+Kelvin–Voigt material loss refuse an unspecified second material calibration.
+Separately authored Rayleigh loss and other members' native material loss remain.
+
+The optional physical boundary retains all original states, mutual structure,
+ports and descriptor constraints. State order is
+`[q,p,material_memory,original_boundary]`; no algebraic multiplier acquires
+storage. Full consistent translation/rotation inertia and frame rigid modes
+remain with the existing native coupled owner. The adapter adds no integrator,
+factorization or eigensolver. Preparation charges constitutive composition and
+native work/payload together, with conservative pre-admission of three states
+per declared arm and cancellation between bounded operations.
+
+Original material frequency bands are intersected and installed in the native
+AC factor gate. Complex poles describe the declared continuous Maxwell law;
+finite real-frequency source support is provenance, not experimental authority
+for its complex continuation and not an Im(s) root filter. Local and requested
+contour queries retain the shared solver's completeness qualifications. Boundary
+source applicability remains with its owner. Fixed temperature/reference geometry,
+perfect bonding, small strain and Euler–Bernoulli kinematics apply. This prepares
+a linear constitutive model without importing transient history or depositing heat.
+
+`harmonic_memory` reconstructs each original extension, elastic/viscous split,
+opposing force, mean storage and physical material heat from the same peak native
+phasors. The material account is already part of native total storage/dissipation;
+it is not added again or confused with boundary work or Rayleigh damping.
+
+Three native tests of the unmodified production coefficient/observation helper
+passed against the existing production `fs_math` artifact: original channel/rate
+integration, dynamic storage/loss, and all three analytic coupled Maxwell cubic
+rates. Six full integration regression groups define source-bound pole/heat
+closure, distinct layer times and zero identity, both bending traces under full
+translation/rotary inertia and orientation changes, descriptor inertance/drag,
+zero-only/empty spectra, and source/budget/cancellation refusals. New modules
+passed pinned Rust formatting and syntax parsing. Full dependency compilation
+and those integration executions remain outstanding in this constrained session;
+the leaf checks are not a full native frame validation or performance benchmark.
