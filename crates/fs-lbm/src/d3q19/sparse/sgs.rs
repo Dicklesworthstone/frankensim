@@ -10,6 +10,9 @@ use crate::lattice3::{D3q19, Lattice3, ViscousLattice3};
 use crate::sgs3::{SgsConfig, SgsError, SgsReport, SgsWorkspace3, eddy_viscosity};
 use fs_exec::{CancelGate, KernelRunner};
 
+/// Retained source responses supplying spatial molecular viscosity under SGS.
+pub mod material;
+
 /// Refused preparation or native sparse step. Published populations and step
 /// count stay intact; a partially prepared workspace is not a valid output.
 #[derive(Clone, Debug, PartialEq)]
@@ -20,6 +23,10 @@ pub enum SparseSgsError3 {
     EmptyGrid,
     /// Active Morton keys or domain dimensions differ from the prepared plan.
     TopologyChanged,
+    MolecularFieldLength {
+        expected: usize,
+        actual: usize,
+    },
     InvalidState {
         tile_key: u64,
         lane: usize,
@@ -189,10 +196,28 @@ impl SparseGrid3 {
         config: SgsConfig,
         workspace: &mut SparseSgsWorkspace3,
     ) -> Result<SgsReport, SparseSgsError3> {
+        self.prepare_sgs_molecular(gate, config, workspace, None)
+    }
+
+    fn prepare_sgs_molecular(
+        &self,
+        gate: &CancelGate,
+        config: SgsConfig,
+        workspace: &mut SparseSgsWorkspace3,
+        molecular: Option<&[CollisionModel3]>,
+    ) -> Result<SgsReport, SparseSgsError3> {
         checkpoint(gate)?;
         config.validate()?;
         if workspace.tile_dims != self.tile_dims() || workspace.keys != self.keys {
             return Err(SparseSgsError3::TopologyChanged);
+        }
+        if let Some(field) = molecular {
+            if field.len() != workspace.local.collisions.len() {
+                return Err(SparseSgsError3::MolecularFieldLength {
+                    expected: workspace.local.collisions.len(),
+                    actual: field.len(),
+                });
+            }
         }
         self.model
             .validate()
@@ -201,8 +226,8 @@ impl SparseGrid3 {
                 lane: 0,
                 source,
             })?;
-        let nu = self.model.kinematic_viscosity();
-        if !nu.is_finite() || nu <= 0.0 {
+        let uniform_nu = self.model.kinematic_viscosity();
+        if !uniform_nu.is_finite() || uniform_nu <= 0.0 {
             return Err(SgsError::InvalidMolecularViscosity { cell: 0 }.into());
         }
         for (slot, &key) in self.keys.iter().enumerate() {
@@ -234,6 +259,22 @@ impl SparseGrid3 {
             checkpoint(gate)?;
             for lane in 0..TILE_CELLS {
                 let cell = slot * TILE_CELLS + lane;
+                let original = molecular.map_or(self.model, |field| field[cell]);
+                let nu = if molecular.is_some() {
+                    original
+                        .validate()
+                        .map_err(|source| SparseError3::Collision {
+                            tile_key: key,
+                            lane,
+                            source,
+                        })?;
+                    original.kinematic_viscosity()
+                } else {
+                    uniform_nu
+                };
+                if !nu.is_finite() || nu <= 0.0 {
+                    return Err(SgsError::InvalidMolecularViscosity { cell }.into());
+                }
                 let gradient = workspace.gradient(slot, lane);
                 let eddy = eddy_viscosity(config.model, config.filter_width_lu, gradient)?;
                 let ratio = eddy / nu;
@@ -246,14 +287,15 @@ impl SparseGrid3 {
                     .into());
                 }
                 workspace.local.collisions[cell] = if eddy == 0.0 {
-                    self.model
+                    original
                 } else {
-                    D3q19::with_shear_relaxation(self.model, 0.5 + (nu + eddy) / D3q19::CS2)
-                        .map_err(|source| SparseError3::Collision {
+                    D3q19::with_shear_relaxation(original, 0.5 + (nu + eddy) / D3q19::CS2).map_err(
+                        |source| SparseError3::Collision {
                             tile_key: key,
                             lane,
                             source,
-                        })?
+                        },
+                    )?
                 };
                 let mut strain2 = 0.0;
                 let dilation_third = (gradient[0][0] + gradient[1][1] + gradient[2][2]) / 3.0;
@@ -289,8 +331,21 @@ impl SparseGrid3 {
         config: SgsConfig,
         workspace: &mut SparseSgsWorkspace3,
     ) -> Result<SgsReport, SparseSgsError3> {
-        let report = self.prepare_sgs(gate, config, workspace)?;
-        let field = (config.model.coefficient() != 0.0).then_some(workspace.collisions());
+        self.step_serial_with_sgs_molecular(gate, config, workspace, None)
+    }
+
+    fn step_serial_with_sgs_molecular(
+        &mut self,
+        gate: &CancelGate,
+        config: SgsConfig,
+        workspace: &mut SparseSgsWorkspace3,
+        molecular: Option<&[CollisionModel3]>,
+    ) -> Result<SgsReport, SparseSgsError3> {
+        let report = self.prepare_sgs_molecular(gate, config, workspace, molecular)?;
+        // Disabling SGS must retain a spatial molecular field. Only the
+        // original uniform owner can return to its scalar-collision path.
+        let field = (molecular.is_some() || config.model.coefficient() != 0.0)
+            .then_some(workspace.collisions());
         self.step_serial_inner(Some(gate), field)?;
         Ok(report)
     }
@@ -306,8 +361,20 @@ impl SparseGrid3 {
         config: SgsConfig,
         workspace: &mut SparseSgsWorkspace3,
     ) -> Result<SgsReport, SparseSgsError3> {
-        let report = self.prepare_sgs(gate, config, workspace)?;
-        let field = (config.model.coefficient() != 0.0).then_some(workspace.collisions());
+        self.step_pooled_with_sgs_molecular(pool, gate, config, workspace, None)
+    }
+
+    fn step_pooled_with_sgs_molecular<P: KernelRunner>(
+        &mut self,
+        pool: &P,
+        gate: &CancelGate,
+        config: SgsConfig,
+        workspace: &mut SparseSgsWorkspace3,
+        molecular: Option<&[CollisionModel3]>,
+    ) -> Result<SgsReport, SparseSgsError3> {
+        let report = self.prepare_sgs_molecular(gate, config, workspace, molecular)?;
+        let field = (molecular.is_some() || config.model.coefficient() != 0.0)
+            .then_some(workspace.collisions());
         self.step_pooled_inner(pool, gate, false, field)?;
         Ok(report)
     }

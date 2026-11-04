@@ -9,9 +9,10 @@ use fs_exec::{Cx, RunError, RunReport, TileKernel, TilePool};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 const DIMS: [usize; 3] = [12, 8, 8];
-const ACTIVE: [(u32, u32, u32); 5] = [(1, 0, 1), (0, 0, 0), (1, 0, 0), (1, 1, 0), (2, 0, 0)];
+pub(super) const ACTIVE: [(u32, u32, u32); 5] =
+    [(1, 0, 1), (0, 0, 0), (1, 0, 0), (1, 1, 0), (2, 0, 0)];
 
-fn settings(model: SgsModel) -> SgsConfig {
+pub(super) fn settings(model: SgsModel) -> SgsConfig {
     SgsConfig {
         model,
         filter_width_lu: 1.0,
@@ -29,7 +30,7 @@ fn coordinates(key: u64, lane: usize) -> [usize; 3] {
     ]
 }
 
-fn seeded(tiles: &[(u32, u32, u32)]) -> SparseGrid3 {
+pub(super) fn seeded(tiles: &[(u32, u32, u32)]) -> SparseGrid3 {
     let [nx, ny, nz] = DIMS;
     let mut grid = SparseGrid3::new(nx, ny, nz, 0.8, [1e-5, -2e-5, 3e-5]).unwrap();
     grid.activate_tiles(tiles).unwrap();

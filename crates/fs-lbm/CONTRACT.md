@@ -1643,6 +1643,32 @@ These are local/integration G0/G1/G4/G5 checks. Diagnostics remain instantaneous
 shear dissipation in lattice units; no heat, free-surface closure, wall model,
 DNS calibration, developed-turbulence validation or acceptance render is added.
 
+#### Source-bound molecular viscosity under sparse SGS
+
+`MaterialScaling::bind_sparse_sgs_materials` samples one original
+`FluidTransport` response per active sparse cell, retaining that response, its
+admitted transport snapshot and its applied molecular relaxation in
+`sgs::material::SparseMaterialSgs3`. Canonical Morton topology and the native
+collision law bind the field; inactive cells are neither sampled nor allocated.
+The existing momentum-scaling routine supplies the physical conversion.
+Reference density must remain unchanged; thermal coefficients are retained
+without imposing a thermal relaxation bound on this isothermal path.
+
+`SparseMaterialSgs3::{prepare_sgs, step_serial, step_pooled}` add the shared
+closure's eddy viscosity to each cell's own molecular viscosity and apply the
+ratio refusal against that same local value. Zero SGS retains the heterogeneous
+molecular field. Repeated steps allocate no new material field, resample no
+source and never compound a previously augmented viscosity. Original collision
+families and non-shear controls remain intact. Topology, source, numerical or
+cancellation refusals publish no flow update or partial binding.
+
+Focused tests cover original-source identity, physical scaling, heterogeneous
+zero-SGS native equivalence, analytic local eddy addition, local ratio refusal,
+pooled identity and stale-epoch/cancellation refusal. This is a frozen source
+epoch: temperature/composition evolution, source refresh, nonlinear shear-law
+closure, variable-density remapping and developed-turbulence validation remain
+outside this adapter.
+
 ### 3-D free surface on sparse tiles (`d3q19::freesurface3`, bead sxnm)
 
 - `FreeSurface3::new(nx, ny, nz, tau, gravity, sigma, contact, fluid)` /

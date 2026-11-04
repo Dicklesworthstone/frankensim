@@ -497,7 +497,7 @@ fn g1_angular_conversion_keeps_disconnected_debts_and_dual_role_sources_local() 
 #[test]
 fn g3_angular_conversion_is_coordinate_translation_invariant() {
     let gate = CancelGate::new_clock_free();
-    let make = |offset| {
+    let make = |offset: usize| {
         let mut sim = surface(
             &[
                 ([3 + offset, 3], 0.8, [0.06, 0.01]),

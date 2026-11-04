@@ -333,7 +333,7 @@ impl<L> MaterialSlab<L> {
 
 // Both caloric and isothermal liquid consumers use exactly the same numerical
 // momentum contract. Heat capacity/conductivity are not momentum prerequisites.
-fn plan_momentum_scaling(
+pub(crate) fn plan_momentum_scaling(
     kinematic_viscosity_m2_s: f64,
     cell_size_m: f64,
     timestep_s: f64,
