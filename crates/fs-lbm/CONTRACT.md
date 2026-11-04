@@ -1559,6 +1559,36 @@ it does not add solved-interface latent feedback or relax wetting restrictions.
   (Morton key + lane + the underlying `CollisionError3`), `Cancelled`
   (pre-step state intact; re-issue is deterministic), `Pool`.
 
+#### Full-gradient SGS on active sparse tiles
+
+`SparseGrid3::{sgs_workspace, prepare_sgs, step_serial_with_sgs,
+step_pooled_with_sgs}` apply the shared explicit Smagorinsky, WALE or Vreman
+closure through the original sparse collision and pull-stream kernels. The
+workspace retains only active cells and six neighbor slots per active tile;
+SGS preparation performs no step allocation or per-cell sparse-map lookup.
+The existing pooled owner's chunk descriptors remain its scheduling cost.
+Domain dimensions and canonical Morton keys must match the workspace exactly;
+activation/deactivation requires a newly prepared workspace, even when the
+active-cell count stays the same. Empty active sets refuse preparation.
+
+Gradients use the actual force-centered velocity, centered differences across
+tile boundaries and the dense owner's quadratic stationary-halfway-wall
+stencil at inactive tiles and external links. Inactive space retains its solid
+wall meaning. Native molecular collision settings are the input on every step;
+eddy viscosity is never accumulated from the prior step. The shared viscosity
+ratio bound refuses rather than clips. Zero coefficient uses the original
+scalar-collision path with unchanged model bits. Both serial and pooled
+publication retain populations and step count on closure, native collision or
+cancellation refusal, including a request observed after streaming.
+
+`d3q19::sparse::sgs::tests` checks dense/sparse local-collision and population
+parity for all three closures with forcing and internal/external walls,
+analytic quadratic wall and halo shear, zero controls, sparse memory/topology
+binding, mass conservation, real worker-count identity and cancellation/retry.
+These are local/integration G0/G1/G4/G5 checks. Diagnostics remain instantaneous
+shear dissipation in lattice units; no heat, free-surface closure, wall model,
+DNS calibration, developed-turbulence validation or acceptance render is added.
+
 ### 3-D free surface on sparse tiles (`d3q19::freesurface3`, bead sxnm)
 
 - `FreeSurface3::new(nx, ny, nz, tau, gravity, sigma, contact, fluid)` /

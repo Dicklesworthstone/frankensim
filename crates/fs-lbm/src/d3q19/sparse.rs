@@ -37,6 +37,9 @@ use fs_exec::{CancelGate, Cancelled, Cx, KernelRunner, Reduce, RunReport, TileKe
 
 use super::{CollisionError3, CollisionModel3, E3, OPP3, Q3, TILE, Tile, equilibrium3};
 
+/// Full-gradient subgrid transport on the native sparse active tiles.
+pub mod sgs;
+
 /// Number of cells in one tile (4×4×4).
 const TILE_CELLS: usize = TILE * TILE * TILE;
 
@@ -582,16 +585,31 @@ impl SparseGrid3 {
     /// [`SparseError3::Collision`] fail-closed on the first refusing cell
     /// in canonical order; the pre-step state is left intact.
     pub fn step_serial(&mut self) -> Result<(), SparseError3> {
+        self.step_serial_inner(None, None)
+    }
+
+    fn step_serial_inner(
+        &mut self,
+        gate: Option<&CancelGate>,
+        collisions: Option<&[CollisionModel3]>,
+    ) -> Result<(), SparseError3> {
         for slot in 0..self.keys.len() {
+            if gate.is_some_and(CancelGate::is_requested) {
+                return Err(SparseError3::Cancelled);
+            }
             collide_block(
                 &self.pre[slot],
                 &mut self.post[slot],
                 self.keys[slot],
                 self.model,
                 self.force,
+                collisions.map(|field| &field[slot * TILE_CELLS..(slot + 1) * TILE_CELLS]),
             )?;
         }
         for slot in 0..self.keys.len() {
+            if gate.is_some_and(CancelGate::is_requested) {
+                return Err(SparseError3::Cancelled);
+            }
             stream_local_block(&mut self.next[slot], slot, &self.post);
             stream_halo_block(
                 &mut self.next[slot],
@@ -601,6 +619,9 @@ impl SparseGrid3 {
                 &self.index,
                 (self.ntx, self.nty, self.ntz),
             );
+        }
+        if gate.is_some_and(CancelGate::is_requested) {
+            return Err(SparseError3::Cancelled);
         }
         std::mem::swap(&mut self.pre, &mut self.next);
         self.steps += 1;
@@ -622,7 +643,7 @@ impl SparseGrid3 {
         pool: &P,
         gate: &CancelGate,
     ) -> Result<(), SparseError3> {
-        self.step_pooled_inner(pool, gate, false).map(|_| ())
+        self.step_pooled_inner(pool, gate, false, None).map(|_| ())
     }
 
     /// One pooled sweep with opt-in measurement-only pass/group observation.
@@ -644,7 +665,7 @@ impl SparseGrid3 {
         pool: &P,
         gate: &CancelGate,
     ) -> Result<SparseSweepObservation, SparseError3> {
-        self.step_pooled_inner(pool, gate, true)?
+        self.step_pooled_inner(pool, gate, true, None)?
             .ok_or(SparseError3::IncompleteObservation {
                 expected_groups: self.keys.len().div_ceil(SPARSE_SWEEP_GROUP_TILES).max(1),
                 observed_groups: 0,
@@ -656,6 +677,7 @@ impl SparseGrid3 {
         pool: &P,
         gate: &CancelGate,
         observed: bool,
+        collisions: Option<&[CollisionModel3]>,
     ) -> Result<Option<SparseSweepObservation>, SparseError3> {
         let group_count = self.keys.len().div_ceil(SPARSE_SWEEP_GROUP_TILES).max(1);
         let groups = group_count as u64;
@@ -679,6 +701,7 @@ impl SparseGrid3 {
                 keys: &self.keys,
                 model: self.model,
                 force: self.force,
+                collisions,
                 groups,
             };
             run_sweep(pool, gate, &kernel)
@@ -722,6 +745,9 @@ impl SparseGrid3 {
             }
         }
 
+        if gate.is_requested() {
+            return Err(SparseError3::Cancelled);
+        }
         let publication_started = observed.then(std::time::Instant::now);
         std::mem::swap(&mut self.pre, &mut self.next);
         self.steps += 1;
@@ -779,12 +805,28 @@ fn collide_block(
     tile_key: u64,
     model: CollisionModel3,
     force: [f64; 3],
+    collisions: Option<&[CollisionModel3]>,
+) -> Result<(), SparseError3> {
+    // Select once per tile. The ordinary/zero-closure path keeps a uniform
+    // model, without a per-cell optional-field branch or viscosity round trip.
+    match collisions {
+        None => collide_block_models(pre, post, tile_key, force, |_| model),
+        Some(field) => collide_block_models(pre, post, tile_key, force, |lane| field[lane]),
+    }
+}
+
+fn collide_block_models(
+    pre: &TileBlock,
+    post: &mut TileBlock,
+    tile_key: u64,
+    force: [f64; 3],
+    model: impl Fn(usize) -> CollisionModel3,
 ) -> Result<(), SparseError3> {
     let collide = super::collision_kernel3();
     for lane in 0..TILE_CELLS {
         let populations: [f64; Q3] = core::array::from_fn(|q| pre.f[q].0[lane]);
         let collided =
-            collide(populations, model, force).map_err(|source| SparseError3::Collision {
+            collide(populations, model(lane), force).map_err(|source| SparseError3::Collision {
                 tile_key,
                 lane,
                 source,
@@ -895,6 +937,7 @@ struct CollideKernel<'a> {
     keys: &'a [u64],
     model: CollisionModel3,
     force: [f64; 3],
+    collisions: Option<&'a [CollisionModel3]>,
     groups: u64,
 }
 
@@ -920,6 +963,8 @@ impl TileKernel for CollideKernel<'_> {
                 self.keys[slot],
                 self.model,
                 self.force,
+                self.collisions
+                    .map(|field| &field[slot * TILE_CELLS..(slot + 1) * TILE_CELLS]),
             ) {
                 return ControlFlow::Continue(FirstRefusal(Some(refusal)));
             }
