@@ -89,7 +89,7 @@ impl PreparedDiffuser {
             law.scattered_fraction > 0.0 && law.transmission > 0.0 && gobo.data.maximum > 0.0;
         let (half_width_m, integral) = if active {
             let widths = Self::metric_half_widths(law, gobo, distance_m)?;
-            (widths, Some(Arc::new(PositiveIntegral::try_new(gobo)?)))
+            (widths, Some(PositiveIntegral::shared(gobo)?))
         } else {
             ([0.0; 2], None)
         };
@@ -172,7 +172,7 @@ pub(super) fn product(left: f64, right: f64) -> Result<f64, SourceError> {
 /// No large-prefix subtraction can erase a small independently queried texel.
 /// Power-of-two padding is charged against four million double storage slots.
 #[derive(Debug)]
-struct PositiveIntegral {
+pub(super) struct PositiveIntegral {
     row_leaf: usize,
     column_leaf: usize,
     stride: usize,
@@ -180,6 +180,19 @@ struct PositiveIntegral {
 }
 
 impl PositiveIntegral {
+    /// Cache only a successful preparation on the original immutable map.
+    /// Concurrent builders may race, but every completed caller uses the
+    /// retained tree. Evaluation keeps its Arc and never enters this cache.
+    fn shared(gobo: &GoboTransmission) -> Result<Arc<Self>, SourceError> {
+        let cache = &gobo.data.diffusion_integral;
+        if let Some(integral) = cache.get() {
+            return Ok(Arc::clone(integral));
+        }
+        let integral = Arc::new(Self::try_new(gobo)?);
+        let _ = cache.set(integral);
+        cache.get().cloned().ok_or(SourceError::NumericalRange)
+    }
+
     fn try_new(gobo: &GoboTransmission) -> Result<Self, SourceError> {
         let row_leaf = gobo.rows().next_power_of_two();
         let column_leaf = gobo.columns().next_power_of_two();
@@ -630,6 +643,15 @@ mod tests {
             PositiveIntegral::try_new(&too_padded),
             Err(SourceError::DistributionTooLarge)
         ));
+        assert!(matches!(
+            PreparedDiffuser::try_new(
+                ParaxialBoxDiffuser::try_new([0.1; 2], 1.0, 1.0).unwrap(),
+                &too_padded,
+                1.0
+            ),
+            Err(SourceError::DistributionTooLarge)
+        ));
+        assert!(too_padded.data.diffusion_integral.get().is_none());
         let gobo = GoboTransmission::try_new(1.0, 1.0, 1, 1, vec![1.0]).unwrap();
         let law = ParaxialBoxDiffuser::try_new([1.0e-200; 2], 1.0, 1.0).unwrap();
         assert!(matches!(
@@ -725,6 +747,140 @@ mod tests {
                 Err(SourceError::NumericalRange)
             ));
             assert_eq!(base.gobo_distance_m(), 1.0);
+        }
+    }
+
+    #[test]
+    fn g3_shared_gobo_integrals_follow_map_data_not_diffuser_laws_or_distances() {
+        let map = gobo();
+        let equivalent_map = gobo();
+        let law = ParaxialBoxDiffuser::try_new([0.25, 0.125], 1.0, 0.8).unwrap();
+        let other_law = ParaxialBoxDiffuser::try_new([0.3, 0.1], 0.25, 0.6).unwrap();
+        let base = ThinLensProjector::try_new(RigidTransform::identity(), 1.0, 0.5, map.clone())
+            .unwrap()
+            .with_diffuser(law)
+            .unwrap();
+        let integral = base.diffuser.as_ref().unwrap().integral.as_ref().unwrap();
+        assert!(map.data.diffusion_integral.get().is_some());
+        assert!(equivalent_map.data.diffusion_integral.get().is_none());
+        assert_eq!(map, equivalent_map);
+        let identity = base
+            .with_optical_state(1.0, 0.5, map.clone(), None, Some(law))
+            .unwrap();
+        assert!(Arc::ptr_eq(&base.gobo.data, &identity.gobo.data));
+        assert_eq!(
+            identity.transmitted_fraction().to_bits(),
+            base.transmitted_fraction().to_bits()
+        );
+
+        let other = ThinLensProjector::try_new(RigidTransform::identity(), 2.0, 1.0, map.clone())
+            .unwrap()
+            .with_diffuser(other_law)
+            .unwrap();
+        let changed = base.clone().with_diffuser(other_law).unwrap();
+        let removed = base
+            .with_optical_state(1.0, 0.5, map.clone(), None, None)
+            .unwrap();
+        let reactivated = removed.with_diffuser(other_law).unwrap();
+        for projector in [&identity, &other, &changed, &reactivated] {
+            let prepared = projector.diffuser.as_ref().unwrap();
+            assert!(Arc::ptr_eq(integral, prepared.integral.as_ref().unwrap()));
+            assert_eq!(
+                prepared.half_width_m,
+                prepared
+                    .law
+                    .half_slope_widths()
+                    .map(|width| width * projector.gobo_distance_m())
+            );
+        }
+
+        // A common replacement must be adopted even when every original has
+        // equal texels. Otherwise each emitter would retain its private tree.
+        let consolidated = base
+            .with_optical_state(1.0, 0.5, equivalent_map.clone(), None, Some(law))
+            .unwrap();
+        let independent = ThinLensProjector::try_new(RigidTransform::identity(), 2.0, 1.0, gobo())
+            .unwrap()
+            .with_diffuser(other_law)
+            .unwrap();
+        let second = independent
+            .with_optical_state(2.0, 1.0, equivalent_map.clone(), None, Some(other_law))
+            .unwrap();
+        let shared = equivalent_map.data.diffusion_integral.get().unwrap();
+        assert!(!Arc::ptr_eq(integral, shared));
+        for projector in [&consolidated, &second] {
+            assert!(Arc::ptr_eq(&projector.gobo.data, &equivalent_map.data));
+            assert!(Arc::ptr_eq(
+                projector
+                    .diffuser
+                    .as_ref()
+                    .unwrap()
+                    .integral
+                    .as_ref()
+                    .unwrap(),
+                shared
+            ));
+        }
+        assert_eq!(map, equivalent_map);
+        assert_eq!(
+            consolidated.transmitted_fraction().to_bits(),
+            base.transmitted_fraction().to_bits()
+        );
+
+        let replacement = GoboTransmission::try_new(4.0, 2.0, 4, 2, vec![1.0; 8]).unwrap();
+        assert_ne!(map, replacement);
+        assert!(replacement.data.diffusion_integral.get().is_none());
+        let replaced = base
+            .with_optical_state(1.0, 0.5, replacement.clone(), None, Some(law))
+            .unwrap();
+        let prepared = replaced.diffuser.as_ref().unwrap();
+        assert!(!Arc::ptr_eq(integral, prepared.integral.as_ref().unwrap()));
+        assert!(Arc::ptr_eq(
+            prepared.integral.as_ref().unwrap(),
+            replacement.data.diffusion_integral.get().unwrap()
+        ));
+        // Only the new map is uniformly clear over the entire kernel. The
+        // old central four texels average (0.25 + 0.5 + 0.5 + 0.25)/4.
+        close(prepared.mask(&replacement, 0.0, 0.0).unwrap(), 0.8);
+        close(
+            base.diffuser
+                .as_ref()
+                .unwrap()
+                .mask(&map, 0.0, 0.0)
+                .unwrap(),
+            0.8 * 0.375,
+        );
+    }
+
+    #[test]
+    fn g4_concurrent_gobo_preparation_retains_one_shared_integral() {
+        let map = gobo();
+        let barrier = std::sync::Barrier::new(4);
+        let prepared = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..4)
+                .map(|index| {
+                    let map = &map;
+                    let barrier = &barrier;
+                    scope.spawn(move || {
+                        barrier.wait();
+                        PreparedDiffuser::try_new(
+                            ParaxialBoxDiffuser::try_new([0.1; 2], 1.0, 0.8).unwrap(),
+                            map,
+                            (index + 1) as f64,
+                        )
+                        .unwrap()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        let retained = map.data.diffusion_integral.get().unwrap();
+        for entry in prepared {
+            assert!(Arc::ptr_eq(entry.integral.as_ref().unwrap(), retained));
+            close(entry.mask(&map, 0.0, 0.0).unwrap(), 0.8 * 0.375);
         }
     }
 }

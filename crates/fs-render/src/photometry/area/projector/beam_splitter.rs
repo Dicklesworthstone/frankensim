@@ -55,7 +55,7 @@ impl ProjectorBeam {
 /// is a declared ideal paraxial source model, not a solved refractive prism:
 /// facet-dependent pupil partitions, dispersion, diffraction, internal
 /// reflections and aberrations are not represented.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ParaxialBeamSplitter {
     beams: Arc<[ProjectorBeam]>,
     transmitted_fraction: f64,

@@ -31,7 +31,7 @@
 //! References: <https://openstax.org/books/university-physics-volume-3/pages/2-4-thin-lenses>
 //! and <https://www.pbr-book.org/4ed/Light_Sources/Point_Lights>.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use fs_geom::{Point3, Vec3};
 
@@ -52,7 +52,9 @@ pub const MAX_GOBO_TEXELS: usize = 1_048_576;
 /// Values are piecewise constant, row-major with X changing fastest. The
 /// support is `[-width/2,width/2) × [-height/2,height/2)` in metres; everything
 /// outside is opaque. X points right and Y points up in the optical frame.
-/// Clones share the immutable sample storage.
+/// Clones share the immutable sample storage and any prepared frost integral,
+/// retained until the final clone of that data is dropped.
+/// Equality compares the represented map, independently of preparation state.
 #[derive(Debug, Clone)]
 pub struct GoboTransmission {
     data: Arc<GoboData>,
@@ -68,6 +70,18 @@ struct GoboData {
     values: Vec<f64>,
     mean: f64,
     maximum: f64,
+    diffusion_integral: OnceLock<Arc<diffuser::PositiveIntegral>>,
+}
+
+impl PartialEq for GoboTransmission {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.data, &other.data)
+            || (self.data.width_m == other.data.width_m
+                && self.data.height_m == other.data.height_m
+                && self.data.columns == other.data.columns
+                && self.data.rows == other.data.rows
+                && self.data.values == other.data.values)
+    }
 }
 
 impl GoboTransmission {
@@ -130,6 +144,7 @@ impl GoboTransmission {
                 values: transmission,
                 mean,
                 maximum,
+                diffusion_integral: OnceLock::new(),
             }),
         })
     }
@@ -275,25 +290,89 @@ impl ThinLensProjector {
         gobo_distance_m: f64,
         focal_length_m: f64,
     ) -> Result<Self, SourceError> {
-        if gobo_distance_m == self.gobo_distance_m && focal_length_m == self.focal_length_m {
-            return Ok(self.clone());
-        }
-        let mut result = Self::try_new(
-            self.frame,
+        self.with_optical_state(
             gobo_distance_m,
             focal_length_m,
             self.gobo.clone(),
-        )?;
-        result.beam_splitter = self.beam_splitter.clone();
-        result.diffuser = if gobo_distance_m == self.gobo_distance_m {
-            self.diffuser.clone()
+            self.beam_splitter.clone(),
+            self.diffuser().copied(),
+        )
+    }
+
+    /// Admit a complete optical state while retaining this projector's frame.
+    ///
+    /// `None` removes the corresponding splitter or diffuser. The final gobo,
+    /// distances and passive components are admitted together: a removed frost
+    /// filter is never prepared at an obsolete gobo size or lens distance.
+    /// Unchanged components retain their transmitted-fraction bits, including
+    /// a lens-only update. A changed gobo recomputes the native radiance factor;
+    /// its opaque exterior and physical dimensions remain part of the source.
+    ///
+    /// Frost integrals belong to shared immutable gobo data, independently of
+    /// diffuser angles, fractions and lens distances. Preparation is fallible
+    /// and introduces no per-ray cache access. This method changes the optical
+    /// transmission, not a source's clear-output photometric calibration.
+    pub fn with_optical_state(
+        &self,
+        gobo_distance_m: f64,
+        focal_length_m: f64,
+        gobo: GoboTransmission,
+        beam_splitter: Option<ParaxialBeamSplitter>,
+        diffuser: Option<ParaxialBoxDiffuser>,
+    ) -> Result<Self, SourceError> {
+        let same_gobo = Arc::ptr_eq(&gobo.data, &self.gobo.data);
+        let same_splitter = beam_splitter == self.beam_splitter;
+        let same_diffuser = diffuser.as_ref() == self.diffuser();
+        let same_components = same_gobo && same_splitter && same_diffuser;
+        let same_distances =
+            gobo_distance_m == self.gobo_distance_m && focal_length_m == self.focal_length_m;
+        if same_components && same_distances {
+            return Ok(self.clone());
+        }
+        // A distinct supplied map is adopted even if its values equal the
+        // original. Shared fixture controls can thereby consolidate separately
+        // allocated originals without scanning their texels per emitter.
+        let mut result = if same_gobo && same_distances {
+            self.clone()
         } else {
-            self.diffuser
+            Self::try_new(self.frame, gobo_distance_m, focal_length_m, gobo.clone())?
+        };
+        let transmitted_fraction = if same_components {
+            self.transmitted_fraction
+        } else {
+            let splitter = beam_splitter
                 .as_ref()
-                .map(|diffuser| diffuser.with_distance(&self.gobo, gobo_distance_m))
+                .map_or(1.0, |value| value.transmitted_fraction());
+            let frost = diffuser.map_or(1.0, |law| law.transmission());
+            if gobo.mean_transmission() == 0.0 || splitter == 0.0 || frost == 0.0 {
+                0.0
+            } else {
+                diffuser::product(
+                    diffuser::product(gobo.mean_transmission(), splitter)?,
+                    frost,
+                )?
+            }
+        };
+        result.diffuser = if same_gobo && same_diffuser {
+            if gobo_distance_m == self.gobo_distance_m {
+                self.diffuser.clone()
+            } else {
+                self.diffuser
+                    .as_ref()
+                    .map(|prepared| prepared.with_distance(&gobo, gobo_distance_m))
+                    .transpose()?
+            }
+        } else {
+            diffuser
+                .map(|law| PreparedDiffuser::try_new(law, &gobo, gobo_distance_m))
                 .transpose()?
         };
-        result.transmitted_fraction = self.transmitted_fraction;
+        result.beam_splitter = if same_splitter {
+            self.beam_splitter.clone()
+        } else {
+            beam_splitter
+        };
+        result.transmitted_fraction = transmitted_fraction;
         Ok(result)
     }
 
@@ -302,24 +381,14 @@ impl ThinLensProjector {
     /// Gobo geometry, focus and the clear-output calibration are retained.
     /// Replacing a splitter does not compound the previous splitter's losses.
     /// The full aperture's radiance bound is checked during scene admission.
-    pub fn with_beam_splitter(
-        mut self,
-        splitter: ParaxialBeamSplitter,
-    ) -> Result<Self, SourceError> {
-        let mut transmission = self.gobo.mean_transmission() * splitter.transmitted_fraction();
-        if !transmission.is_finite()
-            || (self.gobo.mean_transmission() > 0.0
-                && splitter.transmitted_fraction() > 0.0
-                && transmission == 0.0)
-        {
-            return Err(SourceError::NumericalRange);
-        }
-        if let Some(diffuser) = &self.diffuser {
-            transmission = diffuser::product(transmission, diffuser.law.transmission())?;
-        }
-        self.transmitted_fraction = transmission;
-        self.beam_splitter = Some(splitter);
-        Ok(self)
+    pub fn with_beam_splitter(self, splitter: ParaxialBeamSplitter) -> Result<Self, SourceError> {
+        self.with_optical_state(
+            self.gobo_distance_m,
+            self.focal_length_m,
+            self.gobo.clone(),
+            Some(splitter),
+            self.diffuser().copied(),
+        )
     }
 
     /// Optional outgoing beam replication, or the original unsplit light field.
@@ -333,24 +402,21 @@ impl ThinLensProjector {
     /// Gobo, focus, splitter and clear-output calibration are retained. The
     /// scattered fraction changes the angular distribution; only the absolute
     /// transmission changes total flux. A shared positive-sum range tree is
-    /// prepared for nonzero scattering, with at most `4*MAX_GOBO_TEXELS` f64
-    /// storage slots including power-of-two padding (32 MiB at the current cap).
+    /// prepared once per shared gobo for nonzero scattering, with at most
+    /// `4*MAX_GOBO_TEXELS` f64 storage slots including power-of-two padding
+    /// (32 MiB at the current cap). Concurrent first preparations may build
+    /// redundant temporary trees; completed projectors share the retained tree.
     /// Too much padding or unavailable storage refuses. Source evaluation has
     /// no allocation or additional random draws. Replacing the diffuser does
     /// not compound its previous loss.
-    pub fn with_diffuser(mut self, diffuser: ParaxialBoxDiffuser) -> Result<Self, SourceError> {
-        let splitter = self
-            .beam_splitter
-            .as_ref()
-            .map_or(1.0, |value| value.transmitted_fraction());
-        let transmission = diffuser::product(
-            diffuser::product(self.gobo.mean_transmission(), splitter)?,
-            diffuser.transmission(),
-        )?;
-        let prepared = PreparedDiffuser::try_new(diffuser, &self.gobo, self.gobo_distance_m)?;
-        self.transmitted_fraction = transmission;
-        self.diffuser = Some(prepared);
-        Ok(self)
+    pub fn with_diffuser(self, diffuser: ParaxialBoxDiffuser) -> Result<Self, SourceError> {
+        self.with_optical_state(
+            self.gobo_distance_m,
+            self.focal_length_m,
+            self.gobo.clone(),
+            self.beam_splitter.clone(),
+            Some(diffuser),
+        )
     }
 
     /// Declared diffuser state, or the original exit-pupil light field.
@@ -855,5 +921,212 @@ mod tests {
         }
         assert_eq!(base.gobo_distance_m(), 1.0);
         assert_eq!(base.focal_length_m(), 0.5);
+    }
+
+    #[test]
+    fn g0_atomic_optical_state_replaces_and_removes_without_compounding_loss() {
+        use crate::photometry::area::{EmissionSidedness, PhotometricAreaEmitter};
+        use crate::photometry::source::{SPECTRAL_BINS, SourceSpectrum};
+
+        let splitter = |power| {
+            ParaxialBeamSplitter::try_new(vec![
+                ProjectorBeam::try_new([0.1, -0.05], power).unwrap(),
+            ])
+            .unwrap()
+        };
+        let base = ThinLensProjector::try_new(
+            RigidTransform::identity(),
+            1.0,
+            0.5,
+            GoboTransmission::try_new(2.0, 2.0, 1, 1, vec![0.5]).unwrap(),
+        )
+        .unwrap()
+        .with_beam_splitter(splitter(0.5))
+        .unwrap()
+        .with_diffuser(ParaxialBoxDiffuser::try_new([0.1; 2], 0.75, 0.5).unwrap())
+        .unwrap();
+        let source = PhotometricAreaEmitter::try_new(
+            7,
+            320.0,
+            0.5,
+            SourceSpectrum::equal_energy(),
+            EmissionSidedness::Front,
+        )
+        .unwrap()
+        .filtered([0.5; SPECTRAL_BINS])
+        .unwrap()
+        .with_projector(base.clone())
+        .unwrap();
+        let clear = source.clear_flux_lm();
+        assert_eq!(base.transmitted_fraction(), 0.125);
+        assert_eq!(source.flux_lm(), clear * 0.125);
+
+        let updated = base
+            .with_optical_state(
+                1.0,
+                0.5,
+                GoboTransmission::try_new(2.0, 2.0, 1, 1, vec![0.25]).unwrap(),
+                Some(splitter(0.75)),
+                Some(ParaxialBoxDiffuser::try_new([0.2; 2], 0.25, 0.8).unwrap()),
+            )
+            .unwrap();
+        let updated_source = source.clone().with_projector(updated.clone()).unwrap();
+        assert_eq!(updated.transmitted_fraction(), 0.25 * 0.75 * 0.8);
+        assert_eq!(
+            updated_source.flux_lm(),
+            clear * updated.transmitted_fraction()
+        );
+        assert_eq!(updated_source.clear_flux_lm().to_bits(), clear.to_bits());
+        assert_eq!(
+            updated_source.spectrum().bins_w_per_lumen_nm(),
+            source.spectrum().bins_w_per_lumen_nm()
+        );
+        let removed = updated
+            .with_optical_state(1.0, 0.5, updated.gobo().clone(), None, None)
+            .unwrap();
+        assert!(removed.beam_splitter().is_none());
+        assert!(removed.diffuser().is_none());
+        assert_eq!(removed.transmitted_fraction(), 0.25);
+        assert_eq!(
+            source
+                .clone()
+                .with_projector(removed.clone())
+                .unwrap()
+                .flux_lm(),
+            clear * 0.25
+        );
+        let opened = removed
+            .with_optical_state(
+                1.0,
+                0.5,
+                GoboTransmission::try_new(2.0, 2.0, 1, 1, vec![1.0]).unwrap(),
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            source.clone().with_projector(opened).unwrap().flux_lm(),
+            clear
+        );
+        assert_eq!(source.clear_flux_lm(), clear);
+        assert_eq!(source.flux_lm(), clear * 0.125);
+        assert_eq!(base.transmitted_fraction(), 0.125);
+    }
+
+    #[test]
+    fn g1_gobo_replacement_updates_native_support_and_radiance() {
+        let frame =
+            RigidTransform::try_new([0.0, 0.0, 0.2_f64.sin(), 0.2_f64.cos()], [0.3, -0.2, 0.1])
+                .unwrap();
+        let base = ThinLensProjector::try_new(
+            frame,
+            1.0,
+            0.5,
+            GoboTransmission::try_new(2.0, 2.0, 1, 1, vec![1.0]).unwrap(),
+        )
+        .unwrap();
+        let updated = base
+            .with_optical_state(
+                1.0,
+                0.5,
+                GoboTransmission::try_new(4.0, 2.0, 1, 1, vec![0.5]).unwrap(),
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(updated.frame(), frame);
+        assert_eq!(updated.gobo_distance_m(), base.gobo_distance_m());
+        assert_eq!(updated.focal_length_m(), base.focal_length_m());
+        assert_eq!(updated.focus_distance_m(), Some(1.0));
+        assert_eq!(updated.transmitted_fraction(), 0.5);
+        let pupil = Point3::new(0.0, 0.0, 0.0);
+        let axis = Vec3::new(0.0, 0.0, 1.0);
+        assert_eq!(
+            base.luminance_per_clear_flux_per_area(pupil, axis),
+            Ok(0.25)
+        );
+        assert_eq!(
+            updated.luminance_per_clear_flux_per_area(pupil, axis),
+            Ok(0.5 / 8.0)
+        );
+        let direction = Vec3::new(1.5, 0.0, 1.0);
+        assert_eq!(
+            base.luminance_per_clear_flux_per_area(pupil, direction),
+            Ok(0.0)
+        );
+        // g=(-1.5,0) is inside only the wider replacement. Its independent
+        // law is s²/G * transmission * (1 + slope_x² + slope_y²)².
+        let expected = 0.5 / 8.0 * (1.0_f64 + 1.5 * 1.5).powi(2);
+        let actual = updated
+            .luminance_per_clear_flux_per_area(pupil, direction)
+            .unwrap();
+        assert!((actual - expected).abs() <= 2.0e-14 * expected);
+        assert!(actual <= updated.maximum_luminance_factor([0.0; 2]).unwrap());
+        assert_eq!(
+            updated.luminance_per_clear_flux_per_area(pupil, Vec3::new(2.1, 0.0, 1.0)),
+            Ok(0.0)
+        );
+    }
+
+    #[test]
+    fn g0_atomic_optics_admit_only_final_preparation_and_representable_power() {
+        let gobo = GoboTransmission::try_new(2.0, 2.0, 1, 1, vec![1.0]).unwrap();
+        let base = ThinLensProjector::try_new(RigidTransform::identity(), 1.0, 0.5, gobo.clone())
+            .unwrap()
+            .with_diffuser(ParaxialBoxDiffuser::try_new([1.0e-200; 2], 1.0, 1.0).unwrap())
+            .unwrap();
+        // Retaining the old frost would underflow its metric width. The final
+        // state removes it, so no obsolete intermediate preparation is needed.
+        assert!(matches!(
+            base.with_lens_distances(1.0e-150, 0.5e-150),
+            Err(SourceError::NumericalRange)
+        ));
+        let removed = base
+            .with_optical_state(1.0e-150, 0.5e-150, gobo.clone(), None, None)
+            .unwrap();
+        assert!(removed.diffuser().is_none());
+        assert_eq!(removed.transmitted_fraction(), 1.0);
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(matches!(
+                base.with_optical_state(bad, 0.5, gobo.clone(), None, None),
+                Err(SourceError::InvalidDistribution)
+            ));
+        }
+        let faint_gobo =
+            GoboTransmission::try_new(2.0, 2.0, 1, 1, vec![f64::MIN_POSITIVE]).unwrap();
+        let faint_splitter = ParaxialBeamSplitter::try_new(vec![
+            ProjectorBeam::try_new([0.0; 2], f64::MIN_POSITIVE).unwrap(),
+        ])
+        .unwrap();
+        assert!(matches!(
+            base.with_optical_state(
+                1.0,
+                0.5,
+                faint_gobo.clone(),
+                Some(faint_splitter.clone()),
+                None
+            ),
+            Err(SourceError::NumericalRange)
+        ));
+        let opaque = base
+            .with_optical_state(
+                1.0,
+                0.5,
+                faint_gobo,
+                Some(faint_splitter),
+                Some(ParaxialBoxDiffuser::try_new([0.1; 2], 1.0, 0.0).unwrap()),
+            )
+            .unwrap();
+        assert_eq!(opaque.transmitted_fraction(), 0.0);
+        assert_eq!(
+            opaque.luminance_per_clear_flux_per_area(
+                Point3::new(0.0, 0.0, 0.0),
+                Vec3::new(0.0, 0.0, 1.0)
+            ),
+            Ok(0.0)
+        );
+        assert_eq!(base.gobo_distance_m(), 1.0);
+        assert!(base.diffuser().is_some());
+        assert_eq!(base.transmitted_fraction(), 1.0);
     }
 }
