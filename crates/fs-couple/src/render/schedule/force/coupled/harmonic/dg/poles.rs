@@ -16,6 +16,9 @@ mod pencil;
 use pencil::Pencil;
 mod spectrum;
 pub use spectrum::{BeynOptions, DgLoadedModalSpectrum, DgLoadedSpectrumError, ResonanceRegion};
+mod response;
+pub use response::{DgLoadedModalForceResidue, DgPoleResponseError, DgPoleResponseOptions,
+    PoleResponseOptions, PreparedDgPoleResponse};
 
 /// Cold complete-pencil resources, excluding already owned physical sources.
 #[derive(Clone, Copy, Debug, PartialEq)]

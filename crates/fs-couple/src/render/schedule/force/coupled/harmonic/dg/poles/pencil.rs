@@ -117,6 +117,30 @@ impl Pencil {
         })
     }
 
+    /// Apply the SAME fixed row equilibration to a complete physical RHS.
+    /// Spectral s and state coordinates remain unchanged by this operation.
+    pub fn scale_rhs(
+        &self,
+        rhs: &mut [C64],
+        cancel: &mut impl FnMut() -> bool,
+    ) -> Result<(), NonlinearEigError> {
+        if rhs.len() != self.dimension {
+            return Err(invalid("joint pole forcing must retain every original row"));
+        }
+        for (value, &row) in rhs.iter_mut().zip(&self.rows) {
+            poll(cancel)?;
+            let scaled = C64::new(value.re / row, value.im / row);
+            if !finite(scaled)
+                || (value.re != 0.0 && scaled.re == 0.0)
+                || (value.im != 0.0 && scaled.im == 0.0)
+            {
+                return Err(invalid("joint pole forcing row scale is not representable"));
+            }
+            *value = scaled;
+        }
+        Ok(())
+    }
+
     /// The same entire pencil, including all memory and algebraic rows. Reserve
     /// callback work and complete physical result vectors before the numerical
     /// owner admits its LU/moment/SVD/QR/refinement resources. Cached real

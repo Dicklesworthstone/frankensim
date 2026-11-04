@@ -19,7 +19,7 @@ fn gas() -> GasState {
     GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101325.0).unwrap()
 }
 
-fn oscillator() -> CoupledModalSystem {
+pub(in super::super) fn oscillator() -> CoupledModalSystem {
     let gate = CancelGate::new_clock_free();
     let model = ModalAcousticTimeModel::try_new(
         48_000,
@@ -99,7 +99,7 @@ fn bare() -> DgDuct {
     .unwrap()
 }
 
-fn loaded(circular: bool, reverse: bool) -> DgPortLoad {
+pub(in super::super) fn loaded(circular: bool, reverse: bool) -> DgPortLoad {
     let bore = DgDuct::new(
         &Duct {
             segments: vec![Segment::Cylinder {
