@@ -962,6 +962,161 @@ impl OrbitProblem for CubicWithPreload {
     }
 }
 
+/// A biased first-order physical response: x' + x = dc + a cos(t) + b sin(t).
+struct BiasedDrive {
+    dc: f64,
+    cosine: f64,
+    sine: f64,
+}
+
+impl OrbitProblem for BiasedDrive {
+    fn dim(&self) -> usize {
+        1
+    }
+    fn island(&self, t: f64, _: &[f64], out: &mut [f64]) {
+        let (s, c) = fs_math::det::sin_cos(t);
+        out[0] = self.dc + (self.cosine * c + self.sine * s);
+    }
+    fn port(&self, s: C64) -> Vec<C64> {
+        vec![C64::from_re(1.0) + s]
+    }
+    fn island_state_jacobian(&self) -> Option<fs_orbit::IslandStateJacobian<Self>> {
+        Some(|_, _, _, out| {
+            out[0] = 0.0;
+            true
+        })
+    }
+    fn autonomous(&self) -> bool {
+        false
+    }
+}
+
+fn biased_drive_scales() -> HbScales {
+    HbScales {
+        states: vec![1.0],
+        equations: vec![1.0],
+        angular_frequency: 1.0,
+    }
+}
+
+#[test]
+fn a_constant_large_source_has_exactly_zero_harmonics_on_both_sampling_grids() {
+    for dc in [1.0e12, -1.0e12, 1.0e300, -1.0e300] {
+        let mut seed = vec![0.0; 7];
+        seed[0] = dc;
+        let result = solve_hb_scaled_seeded(
+            &BiasedDrive {
+                dc,
+                cosine: 0.0,
+                sine: 0.0,
+            },
+            HbAnchor::Forced { omega: 1.0 },
+            seed,
+            &HbBudget {
+                harmonics: 3,
+                max_newton: 1,
+                tolerance: 1.0e-13,
+                deflate_equilibrium: false,
+            },
+            &biased_drive_scales(),
+        )
+        .expect("a constant source must not manufacture Fourier residuals from its preload");
+        assert_eq!(result.orbit.coeffs[0][0].re, dc);
+        assert!(result.orbit.coeffs[0][1..].iter().all(|c| *c == C64::ZERO));
+        assert_eq!(result.scaled_residual, 0.0);
+        assert_eq!(result.scaled_sampling_defect, 0.0);
+        assert_eq!(result.orbit.aft_samples, 33);
+    }
+}
+
+#[test]
+fn a_weak_complex_tone_survives_a_large_bias_within_source_sample_resolution() {
+    let expected = C64::new(0.0005, -0.000375) / C64::new(1.0, 1.0);
+    for dc in [0.0_f64, 1_073_741_824.0, -1_073_741_824.0] {
+        let source_resolution = (f64::next_up(dc.abs()) - dc.abs()).max(1.0e-12);
+        let mut seed = vec![0.0; 7];
+        seed[0] = dc;
+        let result = solve_hb_scaled_seeded(
+            &BiasedDrive {
+                dc,
+                cosine: 0.001,
+                sine: 0.00075,
+            },
+            HbAnchor::Forced { omega: 1.0 },
+            seed,
+            &HbBudget {
+                harmonics: 3,
+                tolerance: source_resolution,
+                deflate_equilibrium: false,
+                ..HbBudget::default()
+            },
+            &biased_drive_scales(),
+        )
+        .expect("bias must not swamp the independently scaled complex response");
+        assert_complex(result.orbit.coeffs[0][1], expected, source_resolution);
+        for coefficient in &result.orbit.coeffs[0][2..] {
+            assert!(coefficient.abs() <= source_resolution);
+        }
+        assert!((result.orbit.coeffs[0][0].re - dc).abs() <= source_resolution);
+    }
+}
+
+#[test]
+fn adaptive_harmonic_assessment_does_not_invent_a_tail_from_static_loading() {
+    let dc = 1.0e300;
+    let result = fs_orbit::solve_hb_adaptive_scaled_seeded(
+        &BiasedDrive {
+            dc,
+            cosine: 0.0,
+            sine: 0.0,
+        },
+        HbAnchor::Forced { omega: 1.0 },
+        vec![dc, 0.0, 0.0],
+        &HbBudget {
+            harmonics: 1,
+            max_newton: 1,
+            tolerance: 1.0e-13,
+            deflate_equilibrium: false,
+        },
+        &fs_orbit::HbRefinementBudget {
+            max_harmonics: 3,
+            residual_tolerances: vec![1.0e-12],
+            state_tolerances: vec![1.0e-12],
+            frequency_tolerance: 1.0e-12,
+        },
+        &biased_drive_scales(),
+    )
+    .expect("retained and omitted bands must share the constant-preserving projection");
+    assert_eq!(result.refinement_trace.len(), 2);
+    for check in &result.refinement_trace {
+        assert_eq!(check.total_residual_ratio, 0.0);
+        assert_eq!(check.omitted_residual_ratio, 0.0);
+        assert_eq!(check.sampling_defect_ratio, 0.0);
+    }
+    assert_eq!(result.orbit.coeffs[0][0].re, dc);
+}
+
+#[test]
+fn waveform_synthesis_accumulates_weak_modes_before_adding_static_displacement() {
+    let dc = 4_503_599_627_370_496.0;
+    let orbit = fs_orbit::HbOrbit {
+        omega: 1.0,
+        coeffs: vec![vec![
+            C64::from_re(dc),
+            C64::from_re(0.125),
+            C64::from_re(0.125),
+            C64::from_re(0.125),
+        ]],
+        residual_trace: vec![],
+        residual: 0.0,
+        aft_samples: 0,
+        sampling_defect: 0.0,
+    };
+    // Each mode alone is below half a DC ULP; their sum is resolvable.
+    assert_eq!(orbit.sample(0, 0.0), dc + 0.75);
+    assert!(orbit.sample(0, 0.0) > dc);
+}
+
 #[test]
 fn physical_hb_scales_preserve_small_nonlinear_harmonics_and_replay() {
     let budget = HbBudget {

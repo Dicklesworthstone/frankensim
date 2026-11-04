@@ -371,12 +371,13 @@ impl HbOrbit {
     /// Synthesize the state at phase `theta` in `[0, tau)`.
     #[must_use]
     pub fn sample(&self, k: usize, theta: f64) -> f64 {
-        let mut x = self.coeffs[k][0].re;
+        let mut ac = AftSum::new(0.0);
         for (n, c) in self.coeffs[k].iter().enumerate().skip(1) {
             let a = n as f64 * theta;
-            x += 2.0 * (c.re * det::cos(a) - c.im * det::sin(a));
+            let (s, co) = det::sin_cos(a);
+            ac.add(2.0 * (c.re * co - c.im * s));
         }
-        x
+        self.coeffs[k][0].re + ac.total()
     }
 
     /// First-harmonic amplitude of state `k` (`2 |X_1|`).
@@ -433,6 +434,48 @@ impl Packing {
         }
         let omega = self.omega_slot.map_or(f64::NAN, |s| u[s]);
         (coeffs, omega)
+    }
+}
+
+/// Fixed-order compensated accumulation. Starting the DC sum at its reference
+/// keeps partial means inside the sample range even near the finite-f64 limit.
+struct AftSum {
+    sum: f64,
+    correction: f64,
+}
+
+impl AftSum {
+    fn new(initial: f64) -> Self {
+        Self {
+            sum: initial,
+            correction: 0.0,
+        }
+    }
+
+    fn add(&mut self, value: f64) {
+        let next = self.sum + value;
+        self.correction += if self.sum.abs() >= value.abs() {
+            (self.sum - next) + value
+        } else {
+            (value - next) + self.sum
+        };
+        self.sum = next;
+    }
+
+    fn total(&self) -> f64 {
+        self.sum + self.correction
+    }
+}
+
+fn normalized_difference(value: f64, reference: f64, samples: usize) -> f64 {
+    let difference = value - reference;
+    if difference.is_finite() {
+        difference / samples as f64
+    } else {
+        // Opposite finite extremes can overflow their difference even though
+        // its normalized contribution is representable. Nonfinite sources
+        // still propagate to the original residual admission checks.
+        value / samples as f64 - reference / samples as f64
     }
 }
 
@@ -505,6 +548,37 @@ impl AftWorkspace {
             })?;
         Self::with_samples(pack, samples, self.refinement + 1)
     }
+
+    /// Keep the first sample as a reference and normalize the remaining
+    /// deviations in place. This preserves a constant source exactly without
+    /// relying on floating-point trigonometric tables summing to zero.
+    fn center_island(&mut self, d: usize) {
+        for sample in 1..self.samples {
+            for k in 0..d {
+                self.gs[sample * d + k] =
+                    normalized_difference(self.gs[sample * d + k], self.gs[k], self.samples);
+            }
+        }
+    }
+
+    /// Fourier projection of the centered samples, shared by the solved and
+    /// independently assessed harmonic bands. DC restores the reference once;
+    /// AC projects only deviations. No additional sample buffer is needed.
+    fn island_coefficient(&self, pack: &Packing, n: usize, k: usize) -> C64 {
+        let mut re = AftSum::new(if n == 0 { self.gs[k] } else { 0.0 });
+        let mut im = AftSum::new(0.0);
+        for sample in 1..self.samples {
+            let value = self.gs[sample * pack.d + k];
+            if n == 0 {
+                re.add(value);
+            } else {
+                let i = sample * pack.n_harm + n - 1;
+                re.add(value * self.cosine[i]);
+                im.add(-value * self.sine[i]);
+            }
+        }
+        C64::new(re.total(), im.total())
+    }
 }
 
 /// The HB residual: for each harmonic n, P(i n omega) X_n - G_n.
@@ -523,14 +597,14 @@ fn hb_residual<P: OrbitProblem>(
     let m = aft.samples;
     for j in 0..m {
         for k in 0..d {
-            let mut x = u[pack.re_index(0, k)];
+            let mut ac = AftSum::new(0.0);
             for n in 1..=n_harm {
                 let i = j * n_harm + n - 1;
-                x += 2.0
+                ac.add(2.0
                     * (u[pack.re_index(n, k)] * aft.cosine[i]
-                        - u[pack.im_index(n, k)] * aft.sine[i]);
+                        - u[pack.im_index(n, k)] * aft.sine[i]));
             }
-            aft.xs[j * d + k] = x;
+            aft.xs[j * d + k] = u[pack.re_index(0, k)] + ac.total();
         }
     }
     let period = if omega > 0.0 { TAU / omega } else { f64::NAN };
@@ -540,15 +614,12 @@ fn hb_residual<P: OrbitProblem>(
         problem.island(t, &aft.xs[j * d..(j + 1) * d], &mut aft.island);
         aft.gs[j * d..(j + 1) * d].copy_from_slice(&aft.island);
     }
+    aft.center_island(d);
     // P(0) is shared by all state rows. Rebuild once per residual because
     // continuation is allowed to change the problem's physical parameter.
     let p0 = problem.port(C64::new(0.0, 0.0));
     for k in 0..d {
-        let mut g0 = 0.0;
-        for j in 0..m {
-            g0 += aft.gs[j * d + k];
-        }
-        g0 /= m as f64;
+        let g0 = aft.island_coefficient(pack, 0, k).re;
         let mut px = C64::new(0.0, 0.0);
         for kk in 0..d {
             px = px + p0[k * d + kk].scale(u[pack.re_index(0, kk)]);
@@ -558,12 +629,7 @@ fn hb_residual<P: OrbitProblem>(
     for n in 1..=n_harm {
         let p = problem.port(C64::new(0.0, n as f64 * omega));
         for k in 0..d {
-            let mut gn = C64::new(0.0, 0.0);
-            for j in 0..m {
-                let i = j * n_harm + n - 1;
-                gn = gn + C64::new(aft.cosine[i], -aft.sine[i]).scale(aft.gs[j * d + k]);
-            }
-            gn = gn.scale(1.0 / m as f64);
+            let gn = aft.island_coefficient(pack, n, k);
             let mut px = C64::new(0.0, 0.0);
             for kk in 0..d {
                 let xkk = C64::new(u[pack.re_index(n, kk)], u[pack.im_index(n, kk)]);

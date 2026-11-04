@@ -126,13 +126,19 @@ location and stability need their own convergence/validation checks.
 ## Exact state tangents in harmonic balance
 
 The fixed-order Newton owner and its adaptive-order callers consume the exact
-island Jacobian at each current AFT sample. Its compensated discrete Fourier
-transform is retained through order `2N`. Real coefficient columns use
+island Jacobian at each current AFT sample. Compensated Fourier coefficients
+of its difference from the reference-sample Jacobian are retained through order
+`2N`, together with the actual discrete basis means. Real coefficient columns use
 `A_(n-k) + A_(n+k)`; imaginary columns use `i(A_(n-k) - A_(n+k))`, with
-conjugation for negative indices and a single real DC coefficient. The original
-linear port supplies its exact diagonal-in-harmonic blocks. This is the
-derivative of the sampled original equation, including cross-harmonic mixing;
-it does not assume a band-limited material law.
+conjugation for negative indices and a single real DC coefficient. Assembly
+restores the constant Jacobian with those measured means and differentiates the
+reference subtraction: for nonzero output order `n`, subtract
+`J(0) b_k(0) mean(exp(-i n theta))`. The real DC/AC input basis values at zero
+are one/two, and imaginary AC inputs are zero. The DC row restores its reference
+once. The original linear port supplies its exact diagonal-in-harmonic blocks.
+This retains the sampled original equation's cross-harmonic derivative, up to
+floating-point arithmetic; it assumes neither a band-limited material law nor
+exact numerical orthogonality of the trigonometric tables.
 
 Fourier accumulation costs O(samples * N * d^2), followed by O(N^2 * d^2)
 coefficient-block assembly. Tangent callbacks run once per sample and Newton
@@ -153,6 +159,28 @@ source owner's supplied Hamiltonian Hessian action. Original physical memory,
 storage, resistance and forcing remain in the model; feedback derivatives are
 not inferred. Forced continuation reuses the same tangent workspace; shooting
 retains its existing differentiation path.
+
+## Static loading and weak harmonics
+
+The retained and independently assessed omitted-band AFT projections share one
+constant-preserving owner. The first island sample is the reference; subsequent
+samples are converted in place to normalized deviations. Compensated sums form
+the DC mean by restoring the reference once and project AC only from deviations.
+Equal finite samples therefore have exactly zero AC coefficients on every grid.
+Normalization precedes accumulation, with a divided-difference fallback when
+opposite finite sample extremes would overflow their raw difference. Waveform
+reconstruction accumulates AC before adding DC once, including `HbOrbit::sample`.
+These changes retain the original equation, budgets and sampling/order gates;
+they add no sample buffer and cannot recover information already lost when a
+source evaluates a weak variation beside a large offset in finite precision.
+
+G1/G3 regressions in `tests/harmonic_balance.rs` cover large constant drives,
+weak complex forcing within source-sample resolution, the omitted-band check,
+and state reconstruction. `src/tangent/tests.rs` compares the centered derivative
+against direct sampled products and finite differences, and checks exact
+constant-Jacobian DC-to-AC decoupling. This supports
+`frankensim-irp-v5-instrument-realism-pexfp.175`; it does not claim that bead's
+graph/time-domain threshold acceptance.
 
 ## Autonomous cycle continuation
 

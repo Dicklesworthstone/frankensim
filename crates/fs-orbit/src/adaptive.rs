@@ -1,7 +1,7 @@
 //! Bounded, measured refinement of retained harmonic order.
 
 use super::{
-    AftWorkspace, HbAnchor, HbBudget, HbOrbit, HbScales, OrbitError, OrbitProblem, Packing, TAU,
+    AftSum, AftWorkspace, HbAnchor, HbBudget, HbOrbit, HbScales, OrbitError, OrbitProblem, Packing, TAU,
     solve_hb, solve_hb_scaled_seeded, solve_hb_seeded,
 };
 use fs_math::{c64::C64, det};
@@ -244,13 +244,13 @@ fn projected_residual<P: OrbitProblem>(
     let retained = orbit.coeffs[0].len() - 1;
     for j in 0..aft.samples {
         for k in 0..pack.d {
-            let mut x = orbit.coeffs[k][0].re;
+            let mut ac = AftSum::new(0.0);
             for n in 1..=retained {
                 let c = orbit.coeffs[k][n];
                 let i = j * pack.n_harm + n - 1;
-                x += 2.0 * (c.re * aft.cosine[i] - c.im * aft.sine[i]);
+                ac.add(2.0 * (c.re * aft.cosine[i] - c.im * aft.sine[i]));
             }
-            aft.xs[j * pack.d + k] = x;
+            aft.xs[j * pack.d + k] = orbit.coeffs[k][0].re + ac.total();
         }
         aft.island.fill(0.0);
         problem.island(
@@ -260,20 +260,12 @@ fn projected_residual<P: OrbitProblem>(
         );
         aft.gs[j * pack.d..(j + 1) * pack.d].copy_from_slice(&aft.island);
     }
+    aft.center_island(pack.d);
     let mut residual = vec![0.0; pack.coeff_len()];
     for n in 0..=pack.n_harm {
         let port = (n <= retained).then(|| problem.port(C64::new(0.0, n as f64 * orbit.omega)));
         for k in 0..pack.d {
-            let mut g = C64::new(0.0, 0.0);
-            for j in 0..aft.samples {
-                let basis = if n == 0 {
-                    C64::new(1.0, 0.0)
-                } else {
-                    let i = j * pack.n_harm + n - 1;
-                    C64::new(aft.cosine[i], -aft.sine[i])
-                };
-                g = g + basis.scale(aft.gs[j * pack.d + k] / aft.samples as f64);
-            }
+            let g = aft.island_coefficient(pack, n, k);
             let mut r = C64::new(0.0, 0.0) - g;
             if let Some(p) = &port {
                 for kk in 0..pack.d {

@@ -3,10 +3,15 @@
 //! If A_l is the Fourier coefficient of the time-local island Jacobian,
 //! a real X_k column contributes A_(n-k) + A_(n+k), and an imaginary
 //! column contributes i(A_(n-k) - A_(n+k)). A negative index conjugates.
-//! DC has only one real coefficient. These are derivatives of the discrete
-//! AFT sum, not an assumption that a nonlinear Jacobian is band-limited.
+//! DC has only one real coefficient. The centered AFT projection additionally
+//! subtracts the reference-sample derivative times the measured basis mean.
+//! These are derivatives of the sampled equation, not an assumption that a
+//! nonlinear Jacobian is band-limited or that floating-point basis means vanish.
 
-use super::{AftWorkspace, IslandStateJacobian, OrbitError, OrbitProblem, Packing, TAU};
+use super::{
+    AftSum, AftWorkspace, IslandStateJacobian, OrbitError, OrbitProblem, Packing, TAU,
+    normalized_difference,
+};
 use fs_math::{c64::C64, det};
 
 fn invalid(what: &'static str) -> OrbitError {
@@ -34,7 +39,10 @@ pub(super) struct Workspace {
     samples: usize,
     cosine: Vec<f64>,
     sine: Vec<f64>,
+    basis_means: Vec<C64>,
     local: Vec<f64>,
+    reference: Vec<f64>,
+    /// Fourier coefficients of J(sample) - J(0), including the DC difference.
     coefficients: Vec<C64>,
     correction: Vec<C64>,
     ports: Vec<C64>,
@@ -54,8 +62,9 @@ impl Workspace {
         let complex = entries
             .checked_mul(2)
             .and_then(|n| n.checked_add(port_entries))
+            .and_then(|n| n.checked_add(orders))
             .and_then(|n| n.checked_mul(core::mem::size_of::<C64>()));
-        let real = product(square, core::mem::size_of::<f64>())?;
+        let real = product(square, 2 * core::mem::size_of::<f64>())?;
         if complex
             .and_then(|n| n.checked_add(real))
             .is_none_or(|n| n > isize::MAX as usize)
@@ -68,7 +77,9 @@ impl Workspace {
             samples: 0,
             cosine: Vec::new(),
             sine: Vec::new(),
+            basis_means: zeros(orders, C64::ZERO)?,
             local: zeros(square, 0.0)?,
+            reference: zeros(square, 0.0)?,
             coefficients: zeros(entries, C64::ZERO)?,
             correction: zeros(entries, C64::ZERO)?,
             ports: zeros(port_entries, C64::ZERO)?,
@@ -94,6 +105,16 @@ impl Workspace {
                 sine[sample * self.orders + order] = s;
                 cosine[sample * self.orders + order] = c;
             }
+        }
+        for (order, mean) in self.basis_means.iter_mut().enumerate() {
+            let mut re = AftSum::new(0.0);
+            let mut im = AftSum::new(0.0);
+            for sample in 0..samples {
+                let index = sample * self.orders + order;
+                re.add(cosine[index] / samples as f64);
+                im.add(-sine[index] / samples as f64);
+            }
+            *mean = C64::new(re.total(), im.total());
         }
         self.cosine = cosine;
         self.sine = sine;
@@ -126,13 +147,18 @@ impl Workspace {
             {
                 return Err(OrbitError::TangentRefused { sample });
             }
-            // Normalize before accumulation to avoid a gratuitous sample-count
-            // overflow. Fixed sample order and compensated sums preserve weak
-            // harmonic entries beside a much larger constant tangent.
+            if sample == 0 {
+                self.reference.copy_from_slice(&self.local);
+            }
+            for (value, reference) in self.local.iter_mut().zip(&self.reference) {
+                *value = normalized_difference(*value, *reference, aft.samples);
+            }
+            // Project normalized deviations. The constant reference is restored
+            // analytically with the actual finite-grid means in coefficient_entry.
             for order in 0..self.orders {
                 let index = sample * self.orders + order;
-                let c = self.cosine[index] / aft.samples as f64;
-                let s = -self.sine[index] / aft.samples as f64;
+                let c = self.cosine[index];
+                let s = -self.sine[index];
                 for entry in 0..self.square {
                     let index = order * self.square + entry;
                     let term = C64::new(c * self.local[entry], s * self.local[entry]);
@@ -173,22 +199,24 @@ impl Workspace {
         let (n, output, imaginary_row) = coordinate(row, pack.d);
         let (k, input, imaginary_col) = coordinate(col, pack.d);
         let entry = output * pack.d + input;
-        let nonlinear = if k == 0 {
-            self.fourier(n, entry)
+        let fluctuation = mixed_coefficient(n, k, imaginary_col, |order| self.fourier(order, entry));
+        let reference_factor = if k == 0 {
+            // d<g-g(0)>/dX_0 removes the constant Jacobian exactly in AC.
+            C64::from_re(if n == 0 { 1.0 } else { 0.0 })
         } else {
-            let difference = if n >= k {
-                self.fourier(n - k, entry)
-            } else {
-                self.fourier(k - n, entry).conj()
-            };
-            let sum = self.fourier(n + k, entry);
-            if imaginary_col {
-                let value = difference - sum;
-                C64::new(-value.im, value.re)
-            } else {
-                difference + sum
+            let mut mean = mixed_coefficient(n, k, imaginary_col, |order| self.basis_means[order]);
+            // At theta=0 the real AC column is 2; the imaginary column is 0.
+            // DC restores the reference once, whereas AC removes its projection.
+            if !imaginary_col {
+                mean = if n == 0 {
+                    mean + C64::from_re(2.0 * (1.0 - self.basis_means[0].re))
+                } else {
+                    mean - self.basis_means[n].scale(2.0)
+                };
             }
+            mean
         };
+        let nonlinear = fluctuation + reference_factor.scale(self.reference[entry]);
         let mut linear = if n == k {
             self.ports[n * self.square + entry]
         } else {
@@ -203,6 +231,24 @@ impl Workspace {
         } else {
             derivative.re
         }
+    }
+}
+
+fn mixed_coefficient(n: usize, k: usize, imaginary: bool, coefficient: impl Fn(usize) -> C64) -> C64 {
+    if k == 0 {
+        return coefficient(n);
+    }
+    let difference = if n >= k {
+        coefficient(n - k)
+    } else {
+        coefficient(k - n).conj()
+    };
+    let sum = coefficient(n + k);
+    if imaginary {
+        let value = difference - sum;
+        C64::new(-value.im, value.re)
+    } else {
+        difference + sum
     }
 }
 
