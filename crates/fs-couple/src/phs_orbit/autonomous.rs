@@ -50,6 +50,8 @@ fn feedback_problem<'a>(
             law: feedback,
             flows: RefCell::new(vec![0.0; system.port_dim()]),
         },
+        // The complete feedback derivative is not declared by this law.
+        tangent: super::tangent::StorageTangent::Unavailable,
         effort: RefCell::new(vec![0.0; system.state_dim()]),
         ports: RefCell::new(vec![0.0; system.port_dim()]),
         source_refused: Cell::new(false),

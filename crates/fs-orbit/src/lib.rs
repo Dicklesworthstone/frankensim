@@ -44,6 +44,8 @@ pub use adaptive::{
 mod scaling;
 pub use scaling::{HbScales, ScaledHbOrbit, solve_hb_scaled_seeded};
 
+mod tangent;
+
 const TAU: f64 = core::f64::consts::TAU;
 
 // Four successively finer quadratures bound sampling work independently of
@@ -58,6 +60,12 @@ pub enum OrbitError {
     BadParameter {
         /// Which parameter refused.
         what: &'static str,
+    },
+    /// A declared exact island state Jacobian refused or left nonfinite entries.
+    /// The solver never silently replaces an authored tangent with probes.
+    TangentRefused {
+        /// Zero-based sample in the current AFT grid.
+        sample: usize,
     },
     /// Newton exhausted its iteration budget without meeting the
     /// tolerance. The residual trace is disclosed for diagnosis.
@@ -117,6 +125,12 @@ impl core::fmt::Display for OrbitError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             OrbitError::BadParameter { what } => write!(f, "FS-ORBIT-PARAM: {what}"),
+            OrbitError::TangentRefused { sample } => {
+                write!(
+                    f,
+                    "FS-ORBIT-TANGENT: exact island Jacobian refused at sample {sample}"
+                )
+            }
             OrbitError::NewtonStalled {
                 residual,
                 iterations,
@@ -178,6 +192,14 @@ impl std::error::Error for OrbitError {}
 /// Its equivalence to that problem is the model implementer's obligation.
 pub type TimeDomainRhs<P> = fn(&P, f64, &[f64], &mut [f64]);
 
+/// Exact state Jacobian of the original nonlinear island at one physical sample.
+///
+/// Fill the complete row-major `dim() * dim()` matrix `d island_i / d x_j`
+/// in the original physical row/state units. Return false when the derivative
+/// is unavailable at this sample. Nonfinite or unwritten entries also refuse.
+/// Availability is declared separately by [`OrbitProblem::island_state_jacobian`].
+pub type IslandStateJacobian<P> = fn(&P, f64, &[f64], &mut [f64]) -> bool;
+
 /// The island-plus-linear-port problem shape.
 pub trait OrbitProblem {
     /// State dimension `d`.
@@ -187,6 +209,22 @@ pub trait OrbitProblem {
     /// `M x' = g` evaluated pointwise in time (AFT samples this).
     /// For a plain ODE this is the whole vector field.
     fn island(&self, t: f64, x: &[f64], out: &mut [f64]);
+
+    /// Optional exact state derivative of this island, not of its linear port.
+    ///
+    /// When declared, HB samples it once per quadrature point and assembles all
+    /// coefficient columns from its Fourier coefficients through order `2N`.
+    /// Physical scales, phase/backbone rows and the deflation product rule are
+    /// retained. An unknown frequency still uses the original residual probe.
+    /// `None` preserves finite differences; a declared callback's refusal is
+    /// [`OrbitError::TangentRefused`], never an implicit finite-difference fallback.
+    /// Callbacks must be deterministic and must not change the physical source.
+    fn island_state_jacobian(&self) -> Option<IslandStateJacobian<Self>>
+    where
+        Self: Sized,
+    {
+        None
+    }
 
     /// The LINEAR port at Laplace argument `s = i n omega`, row-major
     /// `d x d`: the harmonic-domain operator applied to `X_n` on the
@@ -713,6 +751,10 @@ fn solve_hb_seeded_impl<P: OrbitProblem>(
     }
     let nn = free.len();
     let mut aft = AftWorkspace::new(&pack)?;
+    let state_jacobian = problem.island_state_jacobian();
+    let mut tangent_workspace = state_jacobian
+        .map(|_| tangent::Workspace::new(&pack))
+        .transpose()?;
     let mut res = vec![0.0f64; pack.coeff_len()];
     let mut trace = Vec::new();
     let oscillatory_norm = |u: &[f64]| {
@@ -838,7 +880,8 @@ fn solve_hb_seeded_impl<P: OrbitProblem>(
                 scaled_sampling_defect: sampling_metric,
             });
         }
-        // Forward-difference Jacobian over the free unknowns.
+        // Exact AFT coefficient columns when the source declares its tangent;
+        // otherwise retain residual probes. Frequency remains a residual probe.
         let mut jac = vec![0.0f64; nn * nn];
         let mut res2 = vec![0.0f64; pack.coeff_len()];
         let amp0 = amp_residual(&u);
@@ -871,7 +914,49 @@ fn solve_hb_seeded_impl<P: OrbitProblem>(
             scales
         });
         let m0 = deflate(&u);
+        if let (Some(callback), Some(workspace)) = (state_jacobian, tangent_workspace.as_mut()) {
+            let omega = pack.omega_slot.map_or(omega_fixed, |slot| u[slot]);
+            workspace.prepare(problem, callback, &pack, omega, &aft)?;
+        }
+        let ac_norm = oscillatory_norm(&u);
         for (col, &ui) in free.iter().enumerate() {
+            if let Some(gradient) = amplitude_gradient {
+                // Keep the physical amplitude equation separate from dynamical
+                // deflation, including when the source supplies its exact tangent.
+                jac[kept.len() * nn + col] = if ui == pack.re_index(1, 0) {
+                    gradient[0]
+                } else if ui == pack.im_index(1, 0) {
+                    gradient[1]
+                } else {
+                    0.0
+                };
+                if let Some(scales) = scales {
+                    jac[kept.len() * nn + col] *= scales.columns[ui] / scales.rows[kept.len()];
+                }
+            }
+            if let Some(workspace) = tangent_workspace.as_ref().filter(|_| ui < pack.coeff_len()) {
+                let column_scale = scales.map_or(1.0, |scales| scales.columns[ui]);
+                // Derivative of 1+(s0/||X_ac||)^2 in this column's chart.
+                // The seed-derived s0 is constant, DC/frequency do not enter,
+                // and the original clamped norm has zero derivative at its floor.
+                let dm = if deflation_s0 > 0.0 && ui >= d && ac_norm > 1.0e-15 {
+                    -2.0 * (deflation_s0 / ac_norm).powi(2) * ((u[ui] / column_scale) / ac_norm)
+                        / ac_norm
+                } else {
+                    0.0
+                };
+                for (row, &ri) in kept.iter().enumerate() {
+                    let derivative = workspace.coefficient_entry(ri, ui, &pack);
+                    jac[row * nn + col] = scales.map_or_else(
+                        || m0 * derivative + res[ri] * dm,
+                        |scales| {
+                            m0 * (derivative / scales.rows[row]) * column_scale
+                                + (res[ri] / scales.rows[row]) * dm
+                        },
+                    );
+                }
+                continue;
+            }
             // A unit-size perturbation probes a different nonlinear regime
             // when the physical orbit is measured in micrometres. Keep each
             // backbone state column on its own retained oscillation scale;
@@ -902,21 +987,6 @@ fn solve_hb_seeded_impl<P: OrbitProblem>(
             };
             hb_residual(problem, &pack, &u, omega_fixed, &mut aft, &mut res2);
             let m1 = deflate(&u);
-            if let Some(gradient) = amplitude_gradient {
-                // Analytic norm derivative: a finite-difference step larger
-                // than a micron-scale coefficient changes its direction and
-                // corrupts this row even for an exactly linear oscillator.
-                jac[kept.len() * nn + col] = if ui == pack.re_index(1, 0) {
-                    gradient[0]
-                } else if ui == pack.im_index(1, 0) {
-                    gradient[1]
-                } else {
-                    0.0
-                };
-                if let Some(scales) = scales {
-                    jac[kept.len() * nn + col] *= scales.columns[ui] / scales.rows[kept.len()];
-                }
-            }
             u[ui] = saved;
             for (row, &ri) in kept.iter().enumerate() {
                 jac[row * nn + col] = scales.map_or_else(
@@ -928,9 +998,9 @@ fn solve_hb_seeded_impl<P: OrbitProblem>(
                 );
             }
         }
-        if scales.is_some() && jac.iter().any(|v| !v.is_finite()) {
+        if (scales.is_some() || state_jacobian.is_some()) && jac.iter().any(|v| !v.is_finite()) {
             return Err(OrbitError::BadParameter {
-                what: "scaled harmonic Jacobian must be finite",
+                what: "scaled or exact harmonic Jacobian must be finite",
             });
         }
         // Conservative families carry a parity nullspace; a fixed

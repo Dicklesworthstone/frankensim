@@ -23,6 +23,11 @@ API — never instrument-shaped.
   derivative `x' = f(t, x)` in the same state and time coordinates.
   It defaults to unavailable; a plain ODE explicitly supplies
   `Some(Self::island)`, while a mass-weighted problem supplies `M^-1 g`.
+- `IslandStateJacobian` / `OrbitProblem::island_state_jacobian()` optionally
+  declares the complete exact state derivative of the original nonlinear island.
+  Availability is separate from evaluation: a declared callback must fill every
+  row-major entry and return true; refusal or nonfinite output is `TangentRefused`.
+  Absent callbacks retain the original finite-difference coefficient columns.
 - `HbAnchor` — `Forced { omega }`, `Autonomous { omega_guess }`
   (phase anchored by `Im X_1[0] = 0`), `Backbone { amplitude,
   omega_guess }` (conservative backbone point closed by an APPENDED
@@ -75,6 +80,37 @@ API — never instrument-shaped.
   phase condition, independent physical scales and explicit work/payload caps.
   It returns `AutonomousBranch`, with exactly two corrected seeds plus the
   declared number of accepted additional points, not a parameter endpoint.
+
+## Exact state tangents in harmonic balance
+
+The fixed-order Newton owner and its adaptive-order callers consume the exact
+island Jacobian at each current AFT sample. Its compensated discrete Fourier
+transform is retained through order `2N`. Real coefficient columns use
+`A_(n-k) + A_(n+k)`; imaginary columns use `i(A_(n-k) - A_(n+k))`, with
+conjugation for negative indices and a single real DC coefficient. The original
+linear port supplies its exact diagonal-in-harmonic blocks. This is the
+derivative of the sampled original equation, including cross-harmonic mixing;
+it does not assume a band-limited material law.
+
+Fourier accumulation costs O(samples * N * d^2), followed by O(N^2 * d^2)
+coefficient-block assembly. Tangent callbacks run once per sample and Newton
+iterate, not once per Fourier unknown. Checked tangent buffers and phase
+tables are reused across Newton; quadrature refinement rebuilds the phase
+tables. These are algorithmic counts, not measured throughput claims.
+
+Physical row/column conditioning, phase masks, the analytic backbone-amplitude
+row, and the full product rule for equilibrium deflation remain in the same
+Newton solve. The unknown-frequency column still probes the complete original
+residual. The finer-grid residual check and adaptive omitted-band check remain
+independent acceptance gates. A source tangent does not certify convergence,
+continuum accuracy, derivative correctness, or a nonsmooth branch choice.
+
+The `fs-couple::phs_orbit` consumer supplies the exact `(J-R)Q` tangent for
+explicitly exact quadratic storage. Its explicit nonlinear path uses the
+source owner's supplied Hamiltonian Hessian action. Original physical memory,
+storage, resistance and forcing remain in the model; feedback derivatives are
+not inferred. Shooting and the separate continuation correctors retain their
+existing differentiation paths.
 
 ## Autonomous cycle continuation
 
@@ -212,7 +248,7 @@ Typed `OrbitError`: `BadParameter`, `NewtonStalled` (with the full
 per-iteration residual trace), `SamplingUnresolved` (finest sample count,
 residual and measured defect), `HarmonicsUnresolved` (last finite-band check,
 including whether retained equations or omitted/order-change evidence failed),
-`SingularJacobian`,
+`SingularJacobian`, `TangentRefused` (the failing AFT sample),
 `ContinuationExhausted`, `TrivialCollapse`, `TimeDomainUnavailable`,
 `TorusSuspected` (a
 non-trivial unit-circle Floquet pair with nonzero angle:
@@ -314,6 +350,15 @@ independently, retains a large unrelated preload, and actually solves orders
 1, 3 and 7. A cap at order 2 still checks through order 5 and refuses the
 analytically known missing third harmonic. This exercises physical conditioning
 and spectral resolution together rather than normalizing a solved result.
+
+The tangent unit regressions compare complete coefficient actions against an
+independent cubic convolution and an explicitly time-periodic linear matrix's
+known Fourier coefficients, including DC and complex phase. Native analytic
+HB regressions recover the same nonlinear fundamental/third harmonic with
+fewer source evaluations, retain mixed physical units and unknown-frequency
+backbones with and without deflation, and refuse false or incomplete tangent
+callbacks before any substitute perturbation. These are focused G1/G3 numerical
+claims; source-call counts are not wall-clock performance measurements.
 
 ## No-claim boundaries
 

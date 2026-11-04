@@ -1,0 +1,249 @@
+use super::*;
+use crate::phs_orbit::{audit_forced_orbit, solve_forced_harmonic_balance_scaled_seeded};
+use core::cell::Cell;
+use fs_math::{c64::C64, det};
+use fs_orbit::OrbitError;
+use fs_phs::{QuadraticStorage, Storage};
+use std::rc::Rc;
+
+fn scales(omega: f64) -> HbScales {
+    HbScales {
+        states: vec![1.0, 2.0],
+        equations: vec![2.0, 4.0],
+        angular_frequency: omega,
+    }
+}
+
+struct CountedQuadratic {
+    storage: QuadraticStorage,
+    gradient_calls: Rc<Cell<usize>>,
+    declare: bool,
+}
+impl Storage for CountedQuadratic {
+    fn hamiltonian(&self, x: &[f64]) -> f64 {
+        self.storage.hamiltonian(x)
+    }
+    fn gradient(&self, x: &[f64], out: &mut [f64]) {
+        self.gradient_calls.set(self.gradient_calls.get() + 1);
+        self.storage.gradient(x, out);
+    }
+    fn exact_quadratic_matrix(&self) -> Option<&[f64]> {
+        self.declare.then(|| self.storage.matrix())
+    }
+}
+
+#[test]
+fn declared_original_quadratic_tangent_avoids_fourier_column_source_sweeps() {
+    let make = |declare| {
+        let count = Rc::new(Cell::new(0));
+        let storage = CountedQuadratic {
+            storage: QuadraticStorage::new(vec![4.0, 0.0, 0.0, 0.5], 2).unwrap(),
+            gradient_calls: count.clone(),
+            declare,
+        };
+        let system = PortHamiltonian::new(
+            2,
+            1,
+            vec![0.0, 1.0, -1.0, 0.0],
+            vec![0.0, 0.0, 0.0, 0.3],
+            vec![0.0, 1.0],
+            Box::new(storage),
+        )
+        .unwrap();
+        count.set(0);
+        (system, count)
+    };
+    let (exact, exact_calls) = make(true);
+    let (difference, difference_calls) = make(false);
+    let omega = 1.3;
+    let input = PeriodicPortInput::new(
+        omega,
+        vec![vec![
+            C64::from_re(0.2),
+            C64::new(0.3, -0.2),
+            C64::ZERO,
+            C64::new(-0.07, 0.03),
+        ]],
+    )
+    .unwrap();
+    let budget = HbBudget {
+        harmonics: 7,
+        tolerance: 1e-11,
+        ..HbBudget::default()
+    };
+    let units = scales(omega);
+    let a =
+        solve_forced_harmonic_balance_scaled_seeded(&exact, &input, vec![0.0; 30], &budget, &units)
+            .unwrap();
+    let b = solve_forced_harmonic_balance_scaled_seeded(
+        &difference,
+        &input,
+        vec![0.0; 30],
+        &budget,
+        &units,
+    )
+    .unwrap();
+    for (n, force) in input.coefficients[0].iter().enumerate() {
+        let w = n as f64 * omega;
+        let q = *force / C64::new(4.0 - 2.0 * w * w, 0.3 * w);
+        let p = C64::new(0.0, 2.0 * w) * q;
+        for (state, expected) in [(0, q), (1, p)] {
+            assert!((a.orbit.coeffs[state][n] - expected).abs() < 1e-10);
+            assert!((b.orbit.coeffs[state][n] - expected).abs() < 1e-10);
+        }
+    }
+    assert!(
+        exact_calls.get() * 5 < difference_calls.get(),
+        "original gradient evaluations: analytic {}, finite-difference {}",
+        exact_calls.get(),
+        difference_calls.get()
+    );
+}
+
+struct CubicStorage {
+    stiffness: f64,
+    cubic: f64,
+    mass: f64,
+}
+impl Storage for CubicStorage {
+    fn hamiltonian(&self, x: &[f64]) -> f64 {
+        0.5 * self.stiffness * x[0] * x[0]
+            + 0.25 * self.cubic * x[0].powi(4)
+            + 0.5 * x[1] * x[1] / self.mass
+    }
+    fn gradient(&self, x: &[f64], out: &mut [f64]) {
+        out[0] = self.stiffness * x[0] + self.cubic * x[0].powi(3);
+        out[1] = x[1] / self.mass;
+    }
+}
+
+#[test]
+fn original_nonlinear_hessian_recovers_manufactured_multiharmonic_force_and_work() {
+    let (mass, stiffness, cubic, damping, omega, amplitude) = (2.0, 4.0, 10.0, 0.3, 1.3, 0.4);
+    let system = PortHamiltonian::new(
+        2,
+        1,
+        vec![0.0, 1.0, -1.0, 0.0],
+        vec![0.0, 0.0, 0.0, damping],
+        vec![0.0, 1.0],
+        Box::new(CubicStorage {
+            stiffness,
+            cubic,
+            mass,
+        }),
+    )
+    .unwrap();
+    let (sin_phase, cos_phase) = det::sin_cos(0.37);
+    let q1 = C64::new(0.5 * amplitude * cos_phase, 0.5 * amplitude * sin_phase);
+    let p1 = C64::new(0.0, mass * omega) * q1;
+    // Independently substitute q(t)=A cos(omega*t+phase) into
+    // m q'' + d q' + k q + alpha q^3 = F(t).
+    let f1 = q1
+        * C64::new(
+            stiffness - mass * omega * omega + 0.75 * cubic * amplitude * amplitude,
+            damping * omega,
+        );
+    let f3 = (q1 * q1 * q1).scale(cubic);
+    let input = PeriodicPortInput::new(omega, vec![vec![C64::ZERO, f1, C64::ZERO, f3]]).unwrap();
+    let calls = Cell::new(0);
+    let hessian = |x: &[f64], v: &[f64], out: &mut [f64]| {
+        calls.set(calls.get() + 1);
+        out[0] = (stiffness + 3.0 * cubic * x[0] * x[0]) * v[0];
+        out[1] = v[1] / mass;
+        true
+    };
+    let budget = HbBudget {
+        harmonics: 3,
+        tolerance: 1e-11,
+        ..HbBudget::default()
+    };
+    let units = scales(omega);
+    let mut seed = vec![0.0; 14];
+    seed[2] = 0.8 * q1.re;
+    seed[3] = 0.8 * p1.re;
+    seed[4] = 0.8 * q1.im;
+    seed[5] = 0.8 * p1.im;
+    let fixed = solve_forced_harmonic_balance_analytic_scaled_seeded(
+        &system,
+        &input,
+        seed.clone(),
+        &budget,
+        &units,
+        &hessian,
+    )
+    .unwrap();
+    let adaptive = solve_forced_harmonic_balance_analytic_adaptive_scaled_seeded(
+        &system,
+        &input,
+        seed,
+        &budget,
+        &HbRefinementBudget {
+            max_harmonics: 7,
+            residual_tolerances: vec![1e-8; 2],
+            state_tolerances: vec![1e-8; 2],
+            frequency_tolerance: 1e-10,
+        },
+        &units,
+        &hessian,
+    )
+    .unwrap();
+    assert!(calls.get() > 0);
+    assert_eq!(
+        adaptive
+            .refinement_trace
+            .iter()
+            .map(|x| x.harmonics)
+            .collect::<Vec<_>>(),
+        [3, 7]
+    );
+    let exact_loss = 0.5 * damping * omega * omega * amplitude * amplitude;
+    for orbit in [&fixed.orbit, &adaptive.orbit] {
+        assert!((orbit.coeffs[0][1] - q1).abs() < 1e-9);
+        assert!((orbit.coeffs[1][1] - p1).abs() < 1e-9);
+        for state in &orbit.coeffs {
+            for (n, coefficient) in state.iter().enumerate() {
+                if n != 1 {
+                    assert!(coefficient.abs() < 1e-9);
+                }
+            }
+        }
+        let audit = audit_forced_orbit(&system, &input, orbit, 256).unwrap();
+        assert!((audit.mean_resistance_loss_w / exact_loss - 1.0).abs() < 1e-8);
+        assert!(audit.relative_power_residual < 1e-8);
+    }
+}
+
+#[test]
+fn declared_storage_hessian_refusal_and_incomplete_output_cannot_fall_back() {
+    let system = fs_phs::mass_spring_damper(2.0, 4.0, 0.3).unwrap();
+    let input = PeriodicPortInput::new(1.3, vec![vec![C64::ZERO, C64::from_re(0.5)]]).unwrap();
+    let budget = HbBudget {
+        harmonics: 1,
+        ..HbBudget::default()
+    };
+    let units = scales(1.3);
+    for mode in 0..3 {
+        let action = |_: &[f64], _: &[f64], out: &mut [f64]| {
+            if mode == 0 {
+                return false;
+            }
+            if mode == 1 {
+                out.fill(f64::NAN);
+            } else {
+                out[0] = 1.0;
+            }
+            true
+        };
+        assert!(matches!(
+            solve_forced_harmonic_balance_analytic_scaled_seeded(
+                &system,
+                &input,
+                vec![0.0; 6],
+                &budget,
+                &units,
+                &action,
+            ),
+            Err(PhsOrbitError::Orbit(OrbitError::TangentRefused { .. }))
+        ));
+    }
+}

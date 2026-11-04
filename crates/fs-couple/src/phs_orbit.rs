@@ -21,6 +21,12 @@ use fs_orbit::{
 };
 use fs_phs::PortHamiltonian;
 
+mod tangent;
+pub use tangent::{
+    PhsStorageHessianAction, solve_forced_harmonic_balance_analytic_adaptive_scaled_seeded,
+    solve_forced_harmonic_balance_analytic_scaled_seeded,
+};
+
 mod continuation;
 pub use continuation::{PhsFrequencyResponsePoint, continue_forced_frequency_response};
 mod stability;
@@ -157,6 +163,7 @@ impl PeriodicPortInput {
 struct PhsOrbitProblem<'a> {
     system: &'a PortHamiltonian,
     input: InputKind<'a>,
+    tangent: tangent::StorageTangent<'a>,
     effort: RefCell<Vec<f64>>,
     ports: RefCell<Vec<f64>>,
     source_refused: Cell<bool>,
@@ -176,6 +183,9 @@ impl PhsOrbitProblem<'_> {
 impl OrbitProblem for PhsOrbitProblem<'_> {
     fn dim(&self) -> usize { self.system.state_dim() }
     fn autonomous(&self) -> bool { !matches!(self.input, InputKind::Forced { .. }) }
+    fn island_state_jacobian(&self) -> Option<fs_orbit::IslandStateJacobian<Self>> {
+        self.tangent.available().then_some(Self::state_jacobian)
+    }
     fn time_domain_rhs(&self) -> Option<fs_orbit::TimeDomainRhs<Self>> {
         // This adapter's frequency port is exactly sI: island already evaluates
         // the complete original ODE, including all explicit memory coordinates.
@@ -243,6 +253,7 @@ fn forced_problem<'a>(
     }
     Ok(PhsOrbitProblem {
         system, input: InputKind::Forced { periodic: input, omega_rad_s: input.omega_rad_s() },
+        tangent: tangent::StorageTangent::from_storage(system),
         effort: RefCell::new(vec![0.0; system.state_dim()]),
         ports: RefCell::new(vec![0.0; system.port_dim()]),
         source_refused: Cell::new(false),
@@ -258,6 +269,7 @@ fn autonomous_problem<'a>(
     }
     Ok(PhsOrbitProblem {
         system, input: InputKind::Constant(bias),
+        tangent: tangent::StorageTangent::from_storage(system),
         effort: RefCell::new(vec![0.0; system.state_dim()]),
         ports: RefCell::new(bias.to_vec()),
         source_refused: Cell::new(false),
