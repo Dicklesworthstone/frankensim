@@ -166,6 +166,23 @@ impl<'a> DielectricCoatingStack<'a> {
         self.wavelength_bounds_nm
     }
 
+    /// Use the original ordered films in the shared scalar/polarized smooth
+    /// and GGX samplers. `reverse` means incidence from the authored inside
+    /// side; the caller still supplies the actual adjacent bulk indices.
+    /// Even an empty or zero-thickness stack retains its wavelength support.
+    pub fn interface(
+        self,
+        wavelength_nm: f64,
+        reverse: bool,
+    ) -> Result<DielectricInterface<'a>, DielectricError> {
+        self.validate_wavelength(wavelength_nm)?;
+        Ok(DielectricInterface {
+            coating: Some(InterfaceCoating::Stack(self)),
+            wavelength_nm,
+            reverse,
+        })
+    }
+
     fn validate_wavelength(self, wavelength_nm: f64) -> Result<(), DielectricError> {
         let (minimum, maximum) = self.wavelength_bounds_nm;
         if wavelength_nm.is_finite() && (minimum..=maximum).contains(&wavelength_nm) {
@@ -190,6 +207,38 @@ impl<'a> DielectricCoatingStack<'a> {
                 CoatingLayer::Absorbing(film) => film.thickness_m() != 0.0,
             }),
         }
+    }
+
+    fn has_contrast(self, wavelength_nm: f64, index: f64) -> Result<bool, DielectricError> {
+        match self.layers {
+            StackLayers::Transparent(layers) => {
+                for film in layers {
+                    if film.thickness_m() != 0.0 && film.ior().eval(wavelength_nm)? != index {
+                        return Ok(true);
+                    }
+                }
+            }
+            StackLayers::Mixed(stack) => {
+                for layer in stack.layers() {
+                    let contrasting = match layer {
+                        CoatingLayer::Dielectric(film) => {
+                            film.thickness_m() != 0.0 && film.ior().eval(wavelength_nm)? != index
+                        }
+                        CoatingLayer::Absorbing(film) => {
+                            if film.thickness_m() == 0.0 {
+                                false
+                            } else {
+                                let law = film.complex_ior(wavelength_nm)
+                                    .map_err(|_| DielectricError::InvalidCoating)?;
+                                law.k() != 0.0 || law.eta() != index
+                            }
+                        }
+                    };
+                    if contrasting { return Ok(true); }
+                }
+            }
+        }
+        Ok(false)
     }
 
     /// Reflected/transmitted ray-power matrices. `reverse` traverses the authored
@@ -304,9 +353,15 @@ fn covers(outer: (f64, f64), inner: (f64, f64)) -> bool {
 /// the existing Snell geometry, GGX Jacobians and radiance eta-squared factors.
 #[derive(Clone, Copy)]
 pub struct DielectricInterface<'a> {
-    coating: Option<&'a DielectricCoating>,
+    coating: Option<InterfaceCoating<'a>>,
     wavelength_nm: f64,
     reverse: bool,
+}
+
+#[derive(Clone, Copy)]
+enum InterfaceCoating<'a> {
+    Compact(&'a DielectricCoating),
+    Stack(DielectricCoatingStack<'a>),
 }
 
 impl<'a> DielectricInterface<'a> {
@@ -316,24 +371,33 @@ impl<'a> DielectricInterface<'a> {
         reverse: bool,
     ) -> Self {
         Self {
-            coating,
+            coating: match coating {
+                Some(coating) => Some(InterfaceCoating::Compact(coating)),
+                None => None,
+            },
             wavelength_nm,
             reverse,
         }
     }
 
     pub(super) fn is_active(self) -> bool {
-        self.coating.is_some_and(DielectricCoating::is_active)
+        match self.coating {
+            None => false,
+            Some(InterfaceCoating::Compact(coating)) => coating.is_active(),
+            Some(InterfaceCoating::Stack(stack)) => stack.is_active(),
+        }
     }
 
-    pub(super) fn has_contrast(self, index: f64) -> bool {
-        self.coating.is_some_and(|coating| {
-            coating.0.unit_cell().iter().any(|layer| {
+    pub(super) fn has_contrast(self, index: f64) -> Result<bool, DielectricError> {
+        match self.coating {
+            None => Ok(false),
+            Some(InterfaceCoating::Compact(coating)) => Ok(coating.0.unit_cell().iter().any(|layer| {
                 layer.thickness_m() != 0.0
                     && (layer.extinction_k() != 0.0
                         || layer.ior().eval_unchecked(self.wavelength_nm) != index)
-            })
-        })
+            })),
+            Some(InterfaceCoating::Stack(stack)) => stack.has_contrast(self.wavelength_nm, index),
+        }
     }
 
     /// Scalar normal-power flux, with exact native bare-interface behavior when
@@ -364,10 +428,16 @@ impl<'a> DielectricInterface<'a> {
         eta_i: f64,
         eta_t: f64,
     ) -> Result<PolarizedFresnel, DielectricError> {
+        if let Some(InterfaceCoating::Stack(stack)) = self.coating {
+            return stack.fresnel_polarized(self.wavelength_nm, self.reverse, cosine, eta_i, eta_t);
+        }
         let bare = fresnel_dielectric_polarized(cosine, eta_i, eta_t)?;
-        let Some(coating) = self.coating.filter(|coating| coating.is_active()) else {
+        let Some(InterfaceCoating::Compact(coating)) = self.coating else {
             return Ok(bare);
         };
+        if !coating.is_active() {
+            return Ok(bare);
+        }
         if cosine == 0.0 {
             return Err(DielectricError::InvalidInterface);
         }

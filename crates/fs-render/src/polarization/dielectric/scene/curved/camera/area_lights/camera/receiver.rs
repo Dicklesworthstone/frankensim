@@ -166,9 +166,15 @@ impl SurfaceReceiver {
                 let opposite = if self.medium == outside { inside } else { outside };
                 let medium = camera.scene.medium_at(opposite, position, wavelength)
                     .map_err(CameraRadianceError::from)?;
-                incoming.evaluate_dielectric_connection(contact.witness.normal, medium, surface,
-                    source_frame, source_stokes)
-                    .map_err(CurvedSceneError::from).map_err(CameraRadianceError::from).map_err(Into::into)
+                let response = if let Some(stack) = camera.scene.coating_stacks
+                    .get(contact.witness.boundary_id).copied().flatten() {
+                    incoming.evaluate_stack_dielectric_connection(contact.witness.normal, medium,
+                        surface, stack, source_frame, source_stokes)
+                } else {
+                    incoming.evaluate_dielectric_connection(contact.witness.normal, medium, surface,
+                        source_frame, source_stokes)
+                };
+                response.map_err(CurvedSceneError::from).map_err(CameraRadianceError::from).map_err(Into::into)
             }
             Interaction::RoughConductor { optics, surface, .. } if !surface.is_delta() =>
                 incoming.evaluate_rough_conductor_connection(contact.witness.normal,

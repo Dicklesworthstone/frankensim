@@ -26,7 +26,8 @@ use fs_math::det;
 
 use crate::charts::Ray;
 use crate::dielectric::{
-    DielectricError, DielectricEvent, DielectricGlass, DielectricSurface, sample_rough_dielectric,
+    DielectricCoatingStack, DielectricError, DielectricEvent, DielectricGlass, DielectricInterface,
+    DielectricSurface, sample_rough_dielectric,
 };
 use crate::gradient_index::{
     GradientIndexError, GradientIndexField, GradientIndexOptions, GradientIndexPropagation,
@@ -529,27 +530,57 @@ impl PolarizedBeam {
             return Err(DielectricError::InvalidInterface.into());
         }
         let target = target.into();
-        let Some(alpha) = surface.roughness_alpha() else {
-            if surface.coating().is_none() {
-                return self.sample_smooth_interface(normal, target, samples[2]).map(Some);
-            }
-            let reverse = normal.dot(self.frame.direction) > 0.0;
-            let normal = self.incident_normal(normal)?;
-            let eta_i = self.medium.phase_index_at(self.origin, self.wavelength_nm)?;
-            let eta_t = target.phase_index_at(self.origin, self.wavelength_nm)?;
-            let sample = surface.interface(self.wavelength_nm, reverse)?.sample_smooth_polarized(
-                normal, self.frame.direction.scale(-1.0), eta_i, eta_t, samples[2],
-            )?;
-            return self.scatter_smooth_sample(normal, target, eta_i, eta_t, sample).map(Some);
-        };
+        if surface.is_delta() && surface.coating().is_none() {
+            return self.sample_smooth_interface(normal, target, samples[2]).map(Some);
+        }
         let reverse = normal.dot(self.frame.direction) > 0.0;
+        self.sample_resolved_interface(normal, target, surface.roughness_alpha(),
+            surface.interface(self.wavelength_nm, reverse)?, samples)
+    }
+
+    /// Sample an original arbitrary spectral film stack at a smooth or GGX
+    /// boundary. `surface` supplies roughness and must have no compact coating.
+    /// Actual local bulk indices, reversed film order, conditional survival and
+    /// frame rotation are shared with ordinary native dielectric sampling.
+    /// The films are collapsed onto this interface: no film travel/group delay
+    /// is added, and bulk Beer absorption remains with the two media.
+    pub fn sample_stack_interface(
+        self,
+        normal: Vec3,
+        target: impl Into<BeamMedium>,
+        surface: DielectricSurface,
+        stack: DielectricCoatingStack<'_>,
+        samples: [f64; 3],
+    ) -> Result<Option<BeamSample>, BeamError> {
+        if surface.coating().is_some() {
+            return Err(DielectricError::InvalidCoating.into());
+        }
+        if samples.iter().any(|u| !u.is_finite() || !(0.0..1.0).contains(u)) {
+            return Err(DielectricError::InvalidInterface.into());
+        }
+        let reverse = normal.dot(self.frame.direction) > 0.0;
+        self.sample_resolved_interface(normal, target.into(), surface.roughness_alpha(),
+            stack.interface(self.wavelength_nm, reverse)?, samples)
+    }
+
+    fn sample_resolved_interface(
+        self,
+        normal: Vec3,
+        target: BeamMedium,
+        roughness: Option<f64>,
+        interface: DielectricInterface<'_>,
+        samples: [f64; 3],
+    ) -> Result<Option<BeamSample>, BeamError> {
         let normal = self.incident_normal(normal)?;
         let wo = self.frame.direction.scale(-1.0);
         let eta_i = self
             .medium
             .phase_index_at(self.origin, self.wavelength_nm)?;
         let eta_t = target.phase_index_at(self.origin, self.wavelength_nm)?;
-        let interface = surface.interface(self.wavelength_nm, reverse)?;
+        let Some(alpha) = roughness else {
+            let sample = interface.sample_smooth_polarized(normal, wo, eta_i, eta_t, samples[2])?;
+            return self.scatter_smooth_sample(normal, target, eta_i, eta_t, sample).map(Some);
+        };
         let Some(sample) = interface.sample_rough(
             normal, wo, eta_i, eta_t, alpha, samples[0], samples[1], samples[2],
         )? else { return Ok(None); };

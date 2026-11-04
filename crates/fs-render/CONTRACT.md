@@ -137,6 +137,27 @@ differentiable lift). Pure Rust throughout.
   internal critical/evanescent and terminal-TIR limits, reciprocal flux and
   polarized power closure, deep Bragg transmission, native sampling/PDF replay,
   packet/connector consumption and polarized beam transport.
+  Original arbitrary spectral stacks additionally expose `interface` through
+  that same scalar smooth/GGX sampling and polarized response owner.
+  `DielectricStackBinding` and the straight/curved scenes'
+  `with_dielectric_coating_stacks` attach borrowed original layers to exact
+  existing uncoated dielectric object IDs. Bounded preparation stores only
+  per-boundary slice descriptors; duplicate, unknown, nondielectric and
+  conflicting compact/single-film attachments refuse. The actual incident and
+  target local bulk laws supply indices at every contact and wavelength.
+  Native ordinary/molecular camera continuation, smooth differentiated source
+  bundles and shared rough point/area/multiple-image receivers consult that
+  same table. Reverse transmission proposals reverse both media and layer
+  order; their conditional probabilities remain distinct from physical film
+  power. The original Snell directions, bundle area, receiver eta factors and
+  bulk Beer absorption are unchanged. Empty bindings preserve existing paths;
+  empty physical stacks still retain their declared wavelength support.
+  This is a collapsed locally parallel film interface, with no geometric film
+  travel or group delay, scene-path coherence, inferred optical fit, or change
+  to scalar Copy scene-material storage. Independent spectral Airy controls
+  exercise asymmetric absorbing stacks in both native scene directions,
+  physical bundle powers/reverse densities, polarized GGX evaluation and actual
+  calibrated camera/source connections through the original refractive area.
   At a stochastic nonzero coating, an unsplit spectral packet takes the existing
   one-time per-wavelength continuation path before conditioning on an event.
   This retains companion-wavelength reflection/transmission at a hero-lane

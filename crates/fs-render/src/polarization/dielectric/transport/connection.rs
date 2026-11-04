@@ -7,7 +7,9 @@
 //! native molecular connection, including coherent Fresnel phase.
 
 use super::{BeamError, BeamMedium, PolarizationFrame, PolarizedBeam, unit};
-use crate::dielectric::{DielectricEvent, DielectricSurface};
+use crate::dielectric::{
+    DielectricCoatingStack, DielectricError, DielectricEvent, DielectricInterface, DielectricSurface,
+};
 use crate::polarization::{Mueller, Stokes};
 use fs_geom::Vec3;
 use fs_math::det;
@@ -69,11 +71,45 @@ impl PolarizedBeam {
         source_frame: PolarizationFrame,
         normalized_source: Stokes,
     ) -> Result<SurfaceConnectionResponse, BeamError> {
+        let reverse = normal.dot(self.frame.direction) > 0.0;
+        self.evaluate_interface_connection(normal, opposite_medium.into(), surface.roughness_alpha(),
+            surface.interface(self.wavelength_nm, reverse)?, source_frame, normalized_source)
+    }
+
+    /// Evaluate the same reciprocal rough response with an original borrowed
+    /// mixed spectral stack. Its layers replace no hidden treatment: the
+    /// supplied surface must be uncoated and declares only smooth/GGX roughness.
+    /// Actual adjacent indices and authored outward-normal ordering are used
+    /// exactly as in `sample_stack_interface`, including its original PDF.
+    pub fn evaluate_stack_dielectric_connection(
+        self,
+        normal: Vec3,
+        opposite_medium: impl Into<BeamMedium>,
+        surface: DielectricSurface,
+        stack: DielectricCoatingStack<'_>,
+        source_frame: PolarizationFrame,
+        normalized_source: Stokes,
+    ) -> Result<SurfaceConnectionResponse, BeamError> {
+        if surface.coating().is_some() {
+            return Err(DielectricError::InvalidCoating.into());
+        }
+        let reverse = normal.dot(self.frame.direction) > 0.0;
+        self.evaluate_interface_connection(normal, opposite_medium.into(), surface.roughness_alpha(),
+            stack.interface(self.wavelength_nm, reverse)?, source_frame, normalized_source)
+    }
+
+    fn evaluate_interface_connection(
+        self,
+        normal: Vec3,
+        opposite_medium: BeamMedium,
+        roughness: Option<f64>,
+        interface: DielectricInterface<'_>,
+        source_frame: PolarizationFrame,
+        normalized_source: Stokes,
+    ) -> Result<SurfaceConnectionResponse, BeamError> {
         let camera = normalized_camera(self, normalized_source)?;
-        let opposite_medium = opposite_medium.into();
         let eta_i = camera.medium.phase_index_at(camera.origin, camera.wavelength_nm)?;
         let eta_t = opposite_medium.phase_index_at(camera.origin, camera.wavelength_nm)?;
-        let reverse = normal.dot(camera.frame.direction) > 0.0;
         let normal = camera.incident_normal(normal)?;
         let wo = camera.frame.direction.scale(-1.0);
         let wi = source_frame.direction().scale(-1.0);
@@ -82,10 +118,9 @@ impl PolarizedBeam {
         } else {
             DielectricEvent::Transmission
         };
-        let Some(alpha) = surface.roughness_alpha() else {
+        let Some(alpha) = roughness else {
             return Ok(SurfaceConnectionResponse::zero(event));
         };
-        let interface = surface.interface(camera.wavelength_nm, reverse)?;
         let (evaluation, fresnel) = interface.evaluate_rough_polarized(normal, wo, wi, eta_i, eta_t, alpha)?;
         if evaluation.value == 0.0 {
             return SurfaceConnectionResponse::checked(0.0, evaluation.pdf, evaluation.event);

@@ -970,13 +970,15 @@ impl CurvedPolarizedScene<'_> {
                     result.bundle = match interaction {
                         Interaction::Dielectric {
                             surface: material, ..
-                        } => result.bundle.smooth_surface_interface(
-                            surface.differential,
-                            target_sample,
-                            &material,
-                            branch,
-                            settings.interface,
-                        )?,
+                        } => {
+                            if let Some(stack) = self.coating_stacks.get(witness.boundary_id).copied().flatten() {
+                                result.bundle.smooth_stack_interface(surface.differential,
+                                    target_sample, stack, branch, settings.interface)?
+                            } else {
+                                result.bundle.smooth_surface_interface(surface.differential,
+                                    target_sample, &material, branch, settings.interface)?
+                            }
+                        }
                         Interaction::CoatedDielectric { coating, .. } => {
                             result.bundle.smooth_coated_interface(
                                 surface.differential,

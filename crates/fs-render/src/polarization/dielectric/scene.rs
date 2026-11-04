@@ -19,7 +19,7 @@ use fs_rand::philox::philox4x32_10;
 use super::mirrors::ConductorBeamError;
 use super::transport::{BeamError, BeamMedium, BeamSample, PolarizedBeam};
 use crate::conductor::{CoherentDielectricCoating, ConductorOptics, ConductorSurface};
-use crate::dielectric::{DielectricEvent, DielectricGlass, DielectricSurface};
+use crate::dielectric::{DielectricCoatingStack, DielectricEvent, DielectricGlass, DielectricSurface};
 use crate::instances::{InstanceError, InstanceHit, InstanceScene};
 use crate::spectral::SpectralReflectance;
 
@@ -30,6 +30,10 @@ pub const MAX_POLARIZED_PATH_EVENTS: u32 = 65_536;
 
 /// Curved paths through immutable gradient-index fields and native geometry.
 pub mod curved;
+
+mod coating_stacks;
+pub use coating_stacks::DielectricStackBinding;
+use coating_stacks::admit_coating_stacks;
 
 /// Molecular multiple scattering between the original native surface events.
 #[cfg(feature = "volumes")]
@@ -110,6 +114,7 @@ impl TraceSettings {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SceneError {
     InvalidBindings,
+    AllocationRefused,
     InvalidSettings,
     InvalidInitialMedium,
     MediumMismatch { object_id: u64, expected: usize, actual: usize },
@@ -206,6 +211,7 @@ pub struct PolarizedScene<'a> {
     conductors: &'a [ConductorOptics],
     coatings: &'a [CoherentDielectricCoating],
     reflectances: &'a [SpectralReflectance],
+    coating_stacks: Vec<Option<DielectricCoatingStack<'a>>>,
     bindings: Vec<SurfaceBinding>,
 }
 impl<'a> PolarizedScene<'a> {
@@ -253,7 +259,8 @@ impl<'a> PolarizedScene<'a> {
         let bindings = admit_bindings(
             geometry, media.len(), conductors.len(), coatings.len(), reflectances.len(), bindings,
         )?;
-        Ok(Self { geometry, media, conductors, coatings, reflectances, bindings })
+        Ok(Self { geometry, media, conductors, coatings, reflectances,
+            coating_stacks: Vec::new(), bindings })
     }
 
     /// Deterministic counter-based sampling keyed by `(seed, path_id, event)`.
@@ -471,7 +478,7 @@ impl<'a> PolarizedScene<'a> {
                     }
                     let Some(next) = sample_boundary(
                         result.beam, normal, self.media[target].into(), interaction,
-                        self.coatings, samples(event),
+                        self.coatings, self.coating_stacks.get(index).copied().flatten(), samples(event),
                     )? else {
                         result.termination = PathTermination::RejectedMicrofacet;
                         return finish(cx, result);
@@ -558,11 +565,15 @@ fn sample_boundary(
     target: BeamMedium,
     interaction: Interaction,
     coatings: &[CoherentDielectricCoating],
+    stack: Option<DielectricCoatingStack<'_>>,
     samples: [f64; 3],
 ) -> Result<Option<BeamSample>, BeamError> {
     match interaction {
         Interaction::Dielectric { surface, .. } => {
-            beam.sample_interface(normal, target, surface, samples)
+            match stack {
+                Some(stack) => beam.sample_stack_interface(normal, target, surface, stack, samples),
+                None => beam.sample_interface(normal, target, surface, samples),
+            }
         }
         Interaction::CoatedDielectric { coating, .. } => {
             if samples.iter().any(|u| !u.is_finite() || !(0.0..1.0).contains(u)) {

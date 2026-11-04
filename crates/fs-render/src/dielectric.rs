@@ -1149,7 +1149,7 @@ fn sample_smooth_with_interface(
     let normal = normalize_admitted(normal);
     let wo = normalize_admitted(wo);
     if indices_exactly_equal(eta_i, eta_t)
-        && !interface.is_some_and(|value| value.has_contrast(eta_i))
+        && !interface.map(|value| value.has_contrast(eta_i)).transpose()?.unwrap_or(false)
     {
         return Ok(SmoothDielectricSample {
             direction: wo.scale(-1.0),
@@ -1574,7 +1574,7 @@ fn refuse_coated_rough_null(
     eta_t: f64,
 ) -> Result<(), DielectricError> {
     if indices_exactly_equal(eta_i, eta_t)
-        && interface.is_some_and(|value| value.has_contrast(eta_i))
+        && interface.map(|value| value.has_contrast(eta_i)).transpose()?.unwrap_or(false)
     {
         Err(DielectricError::CoatedNullRoughInterface)
     } else {

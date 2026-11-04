@@ -80,6 +80,7 @@ enum InterfaceOptics<'a> {
     Bare,
     Film(&'a CoherentDielectricCoating),
     Surface(&'a DielectricSurface),
+    Stack(DielectricCoatingStack<'a>),
 }
 
 impl PolarizedRayBundle {
@@ -261,6 +262,22 @@ impl PolarizedRayBundle {
         )
     }
 
+    /// Preserve original arbitrary spectral films on the same smooth Snell
+    /// map. The actual bulk indices determine directions and derivatives;
+    /// film order reverses on exits and in reverse transmission proposals.
+    /// Finite-film absorption stays separate from bulk Beer transport. This
+    /// collapsed optical interface adds neither geometric film travel nor delay.
+    pub fn smooth_stack_interface(
+        &self,
+        surface: NormalDifferential,
+        target: GradientIndexSample,
+        stack: DielectricCoatingStack<'_>,
+        event: DielectricEvent,
+        options: InterfaceOptions,
+    ) -> Result<Self, PolarizedBundleError> {
+        self.interface(surface, target, InterfaceOptics::Stack(stack), event, options)
+    }
+
     /// Native smooth-metal reflection with the same differentiated geometric
     /// reflection map. Complex optical constants, coating and Stokes phase
     /// remain owned by the existing polarized conductor response.
@@ -342,6 +359,9 @@ impl PolarizedRayBundle {
             InterfaceOptics::Surface(material) => material
                 .interface(wavelength_nm, surface.normal.dot(previous.ray.dir) > 0.0)
                 .and_then(|interface| interface.fresnel_polarized(cosine, eta_i, eta_t)),
+            InterfaceOptics::Stack(stack) => stack.fresnel_polarized(
+                wavelength_nm, surface.normal.dot(previous.ray.dir) > 0.0, cosine, eta_i, eta_t,
+            ),
         }
         .map_err(BeamError::from)?;
         let matrix = match event {
@@ -499,6 +519,9 @@ fn reverse_probability(
                 .and_then(|interface| {
                     interface.fresnel_polarized(cosine, incident_index, target_index)
                 }),
+            InterfaceOptics::Stack(stack) => stack.fresnel_polarized(
+                wavelength_nm, reverse_layers, cosine, incident_index, target_index,
+            ),
         }
         .map_err(BeamError::from)?
     };
@@ -514,6 +537,10 @@ fn reverse_probability(
             [reflected / total, transmitted / total]
         }
         InterfaceOptics::Surface(material) => material
+            .interface(wavelength_nm, reverse_layers)
+            .map_err(BeamError::from)?
+            .event_probabilities(response.scalar),
+        InterfaceOptics::Stack(stack) => stack
             .interface(wavelength_nm, reverse_layers)
             .map_err(BeamError::from)?
             .event_probabilities(response.scalar),

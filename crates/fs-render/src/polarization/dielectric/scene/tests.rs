@@ -9,6 +9,8 @@ use crate::instances::{GeometryInstance, RigidTransform, SharedGeometry};
 use crate::polarization::Stokes;
 use super::super::transport::PolarizationFrame;
 
+mod coating_stacks;
+
 fn with_cx(f: impl FnOnce(&Cx<'_>)) {
     let gate = CancelGate::new();
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());

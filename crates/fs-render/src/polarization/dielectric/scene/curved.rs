@@ -26,12 +26,12 @@ use fs_rand::philox::philox4x32_10;
 
 use super::super::transport::{BeamError, BeamMedium, PolarizationFrame, PolarizedBeam};
 use super::{
-    Interaction, MAX_POLARIZED_PATH_EVENTS, PathTermination, SceneError, SurfaceBinding,
-    admit_bindings, sample_boundary,
+    DielectricStackBinding, Interaction, MAX_POLARIZED_PATH_EVENTS, PathTermination, SceneError,
+    SurfaceBinding, admit_bindings, admit_coating_stacks, sample_boundary,
 };
 use crate::charts::Ray;
 use crate::conductor::{CoherentDielectricCoating, ConductorOptics};
-use crate::dielectric::{DielectricEvent, DielectricGlass};
+use crate::dielectric::{DielectricCoatingStack, DielectricEvent, DielectricGlass};
 use crate::gradient_index::bundle::SecondOrderIndexField;
 use crate::gradient_index::event::{
     BoundaryOracle, BoundarySide, BoundaryTermination, BoundaryWitness, GradientDeparture,
@@ -236,6 +236,7 @@ pub struct CurvedPolarizedScene<'a> {
     media: &'a [SceneMedium<'a>],
     conductors: &'a [ConductorOptics],
     coatings: &'a [CoherentDielectricCoating],
+    coating_stacks: Vec<Option<DielectricCoatingStack<'a>>>,
     reflectances: &'a [SpectralReflectance],
     boundaries: BoundaryGeometry<'a>,
 }
@@ -331,10 +332,25 @@ impl<'a> CurvedPolarizedScene<'a> {
             media,
             conductors,
             coatings,
+            coating_stacks: Vec::new(),
             reflectances,
             bindings,
             boundaries,
         })
+    }
+
+    /// Attach original arbitrary spectral coating stacks to existing uncoated
+    /// smooth/GGX dielectric boundaries. The same prepared slots feed native
+    /// camera continuation, differentiated source paths and receiver BSDFs.
+    /// Empty input disables the optional stacks. Geometry and actual local
+    /// media retain their owners; collapsed films add no geometric/group delay.
+    pub fn with_dielectric_coating_stacks(
+        mut self,
+        cx: &Cx<'_>,
+        bindings: &[DielectricStackBinding<'a>],
+    ) -> Result<Self, CurvedSceneError> {
+        self.coating_stacks = admit_coating_stacks(cx, &self.bindings, bindings)?;
+        Ok(self)
     }
 
     /// Local launch medium for native calibrated sources or explicit beams.
@@ -982,6 +998,7 @@ impl<'a> CurvedPolarizedScene<'a> {
                         target_medium,
                         interaction,
                         self.coatings,
+                        self.coating_stacks.get(witness.boundary_id).copied().flatten(),
                         samples(event),
                     )?
                     else {
