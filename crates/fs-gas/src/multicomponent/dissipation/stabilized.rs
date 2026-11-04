@@ -92,7 +92,20 @@ impl<L: TransportLaw> DissipationOperator<L> {
         controls: StabilizedDissipationControl,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<StabilizedDissipationReport, DissipationError> {
-        advance(self, flow, duration, controls, &mut cancelled)
+        self.advance_stabilized_with_budget(flow, duration, controls, &mut 0, &mut cancelled)
+    }
+
+    // The composing owner retains this actual work counter through both halves,
+    // coupled retries and complete physical windows. Failed calls consume work.
+    pub(in crate::multicomponent) fn advance_stabilized_with_budget(
+        &mut self,
+        flow: &mut MixtureEuler1d,
+        duration: Time,
+        controls: StabilizedDissipationControl,
+        evaluations: &mut usize,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<StabilizedDissipationReport, DissipationError> {
+        advance(self, flow, duration, controls, evaluations, cancelled)
     }
 }
 
@@ -187,6 +200,7 @@ fn advance<L: TransportLaw>(
     flow: &mut MixtureEuler1d,
     duration: Time,
     controls: StabilizedDissipationControl,
+    evaluations: &mut usize,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<StabilizedDissipationReport, DissipationError> {
     poll(cancelled)?;
@@ -214,7 +228,7 @@ fn advance<L: TransportLaw>(
     let mut end_corrections = [[0.0; MAX_COMPONENTS]; 2];
     let mut accepted_steps = 0;
     let mut rejected_steps = 0;
-    let mut evaluations = 0;
+    let initial_evaluations = *evaluations;
     let mut elapsed = 0.0;
     let mut maximum_stages_used = 0;
     let mut maximum_parabolic = 0.0_f64;
@@ -264,11 +278,7 @@ fn advance<L: TransportLaw>(
                 rejected_steps,
             });
         }
-        reserve_evaluation(
-            &mut evaluations,
-            controls.maximum_operator_evaluations,
-            elapsed,
-        )?;
+        reserve_evaluation(evaluations, controls.maximum_operator_evaluations, elapsed)?;
         let a = spatial(
             gas,
             mesh,
@@ -345,7 +355,7 @@ fn advance<L: TransportLaw>(
                 for j in 2..=stages + 1 {
                     poll(cancelled)?;
                     reserve_evaluation(
-                        &mut evaluations,
+                        evaluations,
                         controls.maximum_operator_evaluations,
                         elapsed,
                     )?;
@@ -504,7 +514,7 @@ fn advance<L: TransportLaw>(
             conservation_residual: Totals::from_values(&residual[..m], n),
             absolute_energy_residual_j: absolute_energy_residual,
         },
-        operator_evaluations: evaluations,
+        operator_evaluations: *evaluations - initial_evaluations,
         maximum_stages_used,
         maximum_scaled_parabolic_number: maximum_scaled_parabolic,
     })

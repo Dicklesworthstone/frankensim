@@ -1894,6 +1894,50 @@ viscosity and constant-area restrictions remain in force. This symmetric
 composition and either selected chemistry method do not by themselves
 establish global second-order accuracy or a fully discrete entropy inequality.
 
+
+### RKL2 diffusion in reacting flow and complete physical windows
+
+`ReactingEuler1d::step_with_stabilized_dissipation` opts both molecular halves
+of the original D-C-A-C-D composition into the shared RKL2 owner. Chemistry,
+advection, caloric support, final chemistry-domain admission, complete-step
+restarts and physical boundary/source balances remain with their original
+owners. The default explicit APIs retain their original composition.
+
+A single actual RHS counter spans both halves and every discarded coupled
+attempt. Exhaustion is terminal; halving the physical duration cannot create
+another allowance. Reports retain the original coupled balance and both
+accepted RKL2 half reports, while the aggregate RHS count includes rejected
+work.
+
+`advance_stabilized_to` completes an explicit represented target through that
+same step owner; `advance_stabilized_for` admits a duration only when adding it
+to the clock preserves its span within a named 1e-10 relative roundoff bound.
+Every terminal remainder is integrated. Actual accepted durations and physical
+source/boundary transfers accumulate with compensation, and integrated time
+must agree with the represented window. Coupled attempts and molecular RHS
+calls have separate whole-window limits. One lazily reused conserved-state
+backup restores the original accepted field and clock after any late refusal,
+cancellation, budget exhaustion or final balance failure.
+
+This extension retains stationary constant-area molecular geometry and
+original source-owned chemistry/transport closures. Macrostep and chemistry
+controls still govern accuracy; the interval owner supplies no global temporal
+estimator, nonlinear RKL2 stability certificate, moving-mesh coupling or
+experimental material validation.
+
+
+Seven new focused regression groups pass with the original reacting and
+molecular tests: 16 reacting tests and 33 dissipation/planar/spatial tests,
+49 total. The native selected-owner build uses the genuine current
+Maxwell-Stefan v3 thermochemistry and original gas/chemistry physical modules;
+this is not a full workspace Cargo gate. The independent advected
+reaction-diffusion mode has L1 errors 2.61263736e-5 and 7.60930020e-6 at
+40 and 80 cells. In the authored 96-cell comparison, a 2.5e-4 s molecular
+macrostep cap uses 36 actual RHS calls versus 132 explicit SSP RK2 calls,
+with maximum/mean conservative-component discrepancies 7.29747e-6 /
+2.36738e-7. These are fixture-specific operation counts and numerical
+accuracy checks, not measured runtime or material-validation claims.
+
 ## Characteristic ports with distinct local compositions
 
 `MixtureGas::reservoir_flux` connects a conservative duct trace to a stationary

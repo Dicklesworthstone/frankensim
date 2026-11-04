@@ -22,6 +22,11 @@ pub use fs_thermochem::kinetics::IdealGasKineticsV1;
 
 mod cell;
 pub use cell::CellChemistry;
+mod stabilized;
+pub use stabilized::{
+    SplitStabilizedDissipationReport, StabilizedReactiveIntervalControl,
+    StabilizedReactiveIntervalReport, StabilizedReactiveStepReport,
+};
 mod inertial_walls;
 pub use inertial_walls::ReactiveInertialWallsStep;
 mod piston;
@@ -45,6 +50,20 @@ impl Default for ReactiveStepControl {
             transport: StepControl::default(),
             maximum_coupling_retries: 16,
         }
+    }
+}
+
+impl ReactiveStepControl {
+    /// Admit the original acoustic and whole-composition retry controls.
+    pub fn validate(self) -> Result<(), ReactiveError> {
+        if self.maximum_coupling_retries > 32
+            || !positive(self.transport.cfl)
+            || self.transport.cfl > 0.45
+            || self.transport.maximum_halvings > 32
+        {
+            return Err(ReactiveError::Invalid("reacting duration, CFL or retry controls"));
+        }
+        Ok(())
     }
 }
 
@@ -159,6 +178,12 @@ pub enum ReactiveError {
         /// Last concrete refusal.
         last: Box<ReactiveError>,
     },
+    /// A complete-duration update exhausted its coupled-step budget.
+    IntervalWorkLimit {
+        elapsed_time_s: f64,
+        completed_steps: usize,
+        attempts: usize,
+    },
     /// Cancellation before publication.
     Cancelled,
 }
@@ -225,6 +250,8 @@ pub struct ReactingEuler1d {
     trial: MixtureEuler1d,
     reactor: IsochoricReactor,
     amounts: Vec<Amount>,
+    // Only complete-duration evolution lazily reserves this physical rollback.
+    interval_initial: Vec<f64>,
 }
 impl ReactingEuler1d {
     /// Bind a complete mechanism to the flow's identical original species bank.
@@ -271,6 +298,7 @@ impl ReactingEuler1d {
             trial,
             reactor,
             amounts,
+            interval_initial: Vec::new(),
         })
     }
     /// Read only the accepted flow, including its original sources and mesh.
@@ -306,9 +334,10 @@ impl ReactingEuler1d {
             maximum_duration,
             controls,
             None,
-            DissipationControl::default(),
+            stabilized::MolecularMethod::Explicit(DissipationControl::default()),
+            None,
             cancelled,
-        )
+        ).map(|(report, _)| report)
     }
 
     /// Advance molecular diffusion, viscosity and heat conduction together with
@@ -330,9 +359,10 @@ impl ReactingEuler1d {
             maximum_duration,
             controls,
             Some(operator),
-            dissipation_controls,
+            stabilized::MolecularMethod::Explicit(dissipation_controls),
+            None,
             cancelled,
-        )
+        ).map(|(report, _)| report)
     }
 
     fn step_impl<L: TransportLaw>(
@@ -340,16 +370,13 @@ impl ReactingEuler1d {
         maximum_duration: Time,
         controls: ReactiveStepControl,
         mut operator: Option<&mut DissipationOperator<L>>,
-        dissipation_controls: DissipationControl,
+        mut molecular: stabilized::MolecularMethod<'_>,
+        mut interval_budget: Option<&mut stabilized::CouplingBudget>,
         mut cancelled: impl FnMut() -> bool,
-    ) -> Result<ReactiveStepReport, ReactiveError> {
+    ) -> Result<(ReactiveStepReport, Option<SplitStabilizedDissipationReport>), ReactiveError> {
         poll(&mut cancelled)?;
-        if !positive(maximum_duration.value())
-            || controls.maximum_coupling_retries > 32
-            || !positive(controls.transport.cfl)
-            || controls.transport.cfl > 0.45
-            || controls.transport.maximum_halvings > 32
-        {
+        controls.validate()?;
+        if !positive(maximum_duration.value()) {
             return Err(ReactiveError::Invalid(
                 "reacting duration, CFL or retry controls",
             ));
@@ -371,6 +398,9 @@ impl ReactingEuler1d {
         let mut last = ReactiveError::Invalid("no representable reacting time increment");
         for retry in 0..=controls.maximum_coupling_retries {
             poll(&mut cancelled)?;
+            if let Some(budget) = interval_budget.as_deref_mut() {
+                budget.reserve(self.accepted.time)?;
+            }
             if !positive(duration)
                 || !positive(self.accepted.time + duration - self.accepted.time)
                 || !(self.accepted.time + duration).is_finite()
@@ -383,10 +413,10 @@ impl ReactingEuler1d {
             let mut report = ChemistryReport::default();
             let attempt = (|| {
                 let first = match operator.as_deref_mut() {
-                    Some(operator) => Some(operator.advance_for(
+                    Some(operator) => Some(molecular.advance(
+                        operator,
                         &mut self.trial,
                         Time::new(0.5 * duration),
-                        dissipation_controls,
                         &mut cancelled,
                     )?),
                     None => None,
@@ -403,7 +433,7 @@ impl ReactingEuler1d {
                     self.trial
                         .step(Time::new(duration), controls.transport, &mut cancelled)?;
                 if transport.elapsed.value() != duration {
-                    return Ok((transport, false, None));
+                    return Ok((transport, false, None, None));
                 }
                 react_cells(
                     &mut self.trial,
@@ -414,10 +444,10 @@ impl ReactingEuler1d {
                     &mut cancelled,
                 )?;
                 let second = match operator.as_deref_mut() {
-                    Some(operator) => Some(operator.advance_for(
+                    Some(operator) => Some(molecular.advance(
+                        operator,
                         &mut self.trial,
                         Time::new(0.5 * duration),
-                        dissipation_controls,
                         &mut cancelled,
                     )?),
                     None => None,
@@ -443,25 +473,26 @@ impl ReactingEuler1d {
                         }
                     }
                 }
-                let dissipation = first
-                    .zip(second)
-                    .map(|(first, second)| SplitDissipationReport { first, second });
-                Ok::<_, ReactiveError>((transport, true, dissipation))
+                let (dissipation, stabilized) = stabilized::split_halves(first, second);
+                Ok::<_, ReactiveError>((transport, true, dissipation, stabilized))
             })();
             match attempt {
-                Ok((transport, false, _)) => {
+                Ok((transport, false, _, _)) => {
                     duration = transport.elapsed.value();
                     last = ReactiveError::Invalid("transport shortened the coupled duration");
                 }
-                Ok((transport, true, dissipation)) => {
+                Ok((transport, true, dissipation, stabilized)) => {
                     let after = self.trial.totals();
                     let complete = coupled_report(&self.trial.gas, before, after,
                         transport, report, dissipation, retry)?;
                     poll(&mut cancelled)?;
                     core::mem::swap(&mut self.accepted, &mut self.trial);
-                    return Ok(complete);
+                    return Ok((complete, stabilized));
                 }
                 Err(ReactiveError::Cancelled) => return Err(ReactiveError::Cancelled),
+                Err(error @ ReactiveError::Dissipation(DissipationError::OperatorWorkLimit { .. })) => {
+                    return Err(error);
+                }
                 Err(error) => {
                     last = error;
                     duration *= 0.5;
@@ -487,7 +518,6 @@ fn coupled_report(
     coupling_retries: usize,
 ) -> Result<ReactiveStepReport, ReactiveError> {
     let n = gas.species_count();
-    let mut residual = [0.0; MAX_COMPONENTS];
     let mut molecular_boundary = [0.0; MAX_COMPONENTS];
     if let Some(d) = dissipation {
         for k in 0..n + 2 {
@@ -495,37 +525,69 @@ fn coupled_report(
                 d.first.boundary_change.get(k) + d.second.boundary_change.get(k);
         }
     }
+    let (conservation_residual, mass_residual_kg, absolute_energy_residual_j) = coupled_balance(
+        gas, before, after, transport.boundary_change,
+        Totals::from_values(&molecular_boundary[..n + 2], n),
+        transport.area_momentum_impulse, &chemistry,
+    )?;
+    Ok(ReactiveStepReport {
+        elapsed: transport.elapsed,
+        coupling_retries,
+        transport,
+        chemistry,
+        dissipation,
+        before,
+        after,
+        conservation_residual,
+        mass_residual_kg,
+        absolute_energy_residual_j,
+    })
+}
+
+
+// One endpoint balance owner for accepted steps and complete stationary windows.
+fn coupled_balance(
+    gas: &super::MixtureGas,
+    before: Totals,
+    after: Totals,
+    transport_boundary: Totals,
+    molecular_boundary: Totals,
+    area_momentum_impulse: f64,
+    chemistry: &ChemistryReport,
+) -> Result<(Totals, f64, f64), ReactiveError> {
+    let n = gas.species_count();
+    let mut residual = [0.0; MAX_COMPONENTS];
     for k in 0..n {
         residual[k] = after.species_masses[k]
             - before.species_masses[k]
-            - transport.boundary_change.species_masses[k]
-            - molecular_boundary[k]
+            - transport_boundary.species_masses[k]
+            - molecular_boundary.get(k)
             - chemistry.species_change_kg[k];
     }
     residual[n] = after.momentum
         - before.momentum
-        - transport.boundary_change.momentum
-        - molecular_boundary[n]
-        - transport.area_momentum_impulse;
+        - transport_boundary.momentum
+        - molecular_boundary.get(n)
+        - area_momentum_impulse;
     residual[n + 1] = after.energy
         - before.energy
-        - transport.boundary_change.energy
-        - molecular_boundary[n + 1]
+        - transport_boundary.energy
+        - molecular_boundary.get(n + 1)
         - chemistry.referenced_energy_change_j;
     let mass_residual_kg = sum((0..n).map(|k| {
         after.species_masses[k]
             - before.species_masses[k]
-            - transport.boundary_change.species_masses[k]
-            - molecular_boundary[k]
+            - transport_boundary.species_masses[k]
+            - molecular_boundary.get(k)
     }));
     let absolute_energy_residual_j = sum(core::iter::once(
-        after.energy - before.energy - transport.boundary_change.energy - molecular_boundary[n + 1],
+        after.energy - before.energy - transport_boundary.energy - molecular_boundary.get(n + 1),
     )
     .chain((0..n).map(|k| {
         (after.species_masses[k]
             - before.species_masses[k]
-            - transport.boundary_change.species_masses[k]
-            - molecular_boundary[k])
+            - transport_boundary.species_masses[k]
+            - molecular_boundary.get(k))
             * gas.energy_references()[k]
     })));
     if !residual[..n + 2].iter().all(|x| x.is_finite())
@@ -537,18 +599,7 @@ fn coupled_report(
             "non-finite coupled extensive balance",
         ));
     }
-    Ok(ReactiveStepReport {
-        elapsed: transport.elapsed,
-        coupling_retries,
-        transport,
-        chemistry,
-        dissipation,
-        before,
-        after,
-        conservation_residual: Totals::from_values(&residual[..n + 2], n),
-        mass_residual_kg,
-        absolute_energy_residual_j,
-    })
+    Ok((Totals::from_values(&residual[..n + 2], n), mass_residual_kg, absolute_energy_residual_j))
 }
 
 fn react_cells(

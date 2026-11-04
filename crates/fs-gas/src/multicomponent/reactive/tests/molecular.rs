@@ -1,4 +1,6 @@
 use super::*;
+
+mod stabilized;
 use crate::multicomponent::Boundary;
 use crate::multicomponent::dissipation::{
     ConstantTransport, DissipationControl, DissipationOperator, TransportCoefficients,
