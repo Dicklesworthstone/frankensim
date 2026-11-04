@@ -134,6 +134,7 @@ pub use flow::{
     CoexistenceVolumeStep, ConductiveThermalVolumeControls,
     ConductiveThermalVolumeMomentumControls, ConductiveThermalVolumeMomentumStep,
     ConductiveThermalVolumeReport, ConductiveThermalVolumeStep, DensityForceControls,
+    ConductiveViscousThermalVolumeMomentumStep,
     DensityForceInput, DensityForcePrediction, DensityForceReport, DensityMomentumReconstruction,
     DensityMomentumReconstructionControls, DensityMomentumReconstructionReport, DensityProjection,
     DensityProjectionControls, DensityProjectionReport, FlowFace, FlowField,

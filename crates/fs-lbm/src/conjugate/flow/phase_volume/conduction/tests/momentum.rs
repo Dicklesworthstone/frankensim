@@ -1,5 +1,7 @@
 //! Source heat must drive the same accepted material impulse and mass routes.
 
+mod viscous;
+
 use super::*;
 use crate::conjugate::flow::{
     ConductiveThermalVolumeMomentumControls, DensityForceControls,

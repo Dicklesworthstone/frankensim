@@ -10,7 +10,10 @@ use super::{
 };
 
 mod momentum;
-pub use momentum::{ConductiveThermalVolumeMomentumControls, ConductiveThermalVolumeMomentumStep};
+pub use momentum::{
+    ConductiveThermalVolumeMomentumControls, ConductiveThermalVolumeMomentumStep,
+    ConductiveViscousThermalVolumeMomentumStep,
+};
 
 /// The existing full-chart budgets and an explicit bound on conductive work.
 #[derive(Clone, Copy, Debug)]
@@ -42,7 +45,8 @@ pub struct ConductiveThermalVolumeReport {
     /// Includes heat lost beside a much larger authored increment [J].
     pub increment_assembly_defect_j: f64,
     /// Assembly plus conductive balance plus original caloric/transport
-    /// defects [J], all checked against the SAME native enthalpy budget.
+    /// defects [J], including any composed molecular-heat assembly defect,
+    /// all checked against the SAME native enthalpy budget.
     pub absolute_enthalpy_defect_j: f64,
 }
 
@@ -125,7 +129,7 @@ impl FlowField {
                     gate,
                 )
             },
-            |thermal| thermal,
+            |thermal| (thermal, 0.0),
         )?;
         Ok(ConductiveThermalVolumeStep {
             thermal: accepted.evolution,
@@ -143,7 +147,7 @@ impl FlowField {
         controls: ConductiveThermalVolumeControls,
         gate: &CancelGate,
         advance: impl FnOnce(CoexistenceVolumeInput<'_>) -> Result<T, ChtError>,
-        thermal: impl Fn(&T) -> &ThermalVolumeStep,
+        thermal: impl Fn(&T) -> (&ThermalVolumeStep, f64),
     ) -> Result<ConductiveAdvance<T>, ChtError> {
         poll(gate)?;
         let n = domain.cell_count();
@@ -312,9 +316,12 @@ impl FlowField {
             net_enthalpy_increment_j: &combined,
             ..input
         })?;
-        let thermal = thermal(&evolution);
+        let (thermal, evolution_heat_defect) = thermal(&evolution);
+        if !evolution_heat_defect.is_finite() || evolution_heat_defect < 0.0 {
+            return Err(refuse("invalid composed thermal heat-assembly defect"));
+        }
         let absolute_enthalpy_defect_j =
-            extra_defect + thermal.volume.report.absolute_enthalpy_defect_j;
+            extra_defect + evolution_heat_defect + thermal.volume.report.absolute_enthalpy_defect_j;
         finite(
             "flow.conductive_total_enthalpy_defect",
             absolute_enthalpy_defect_j,

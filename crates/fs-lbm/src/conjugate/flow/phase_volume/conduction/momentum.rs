@@ -1,5 +1,8 @@
 //! Original-source heat, thermal volume and actual material momentum together.
 
+mod viscous;
+pub use viscous::ConductiveViscousThermalVolumeMomentumStep;
+
 use super::super::{
     ThermalVolumeMomentumControls, ThermalVolumeMomentumInput, ThermalVolumeMomentumStep,
 };
@@ -132,7 +135,7 @@ impl FlowField {
                     ),
                 }
             },
-            |evolution| &evolution.thermal,
+            |evolution| (&evolution.thermal, 0.0),
         )?;
         Ok(ConductiveThermalVolumeMomentumStep {
             evolution: accepted.evolution,

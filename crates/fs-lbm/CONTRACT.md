@@ -9976,6 +9976,32 @@ spurious plateau conduction, and bidirectional reservoir transport under large
 ambient references with missing-inflow-velocity refusal and exact retry.
 These are compiler-checked regression sources; they have not been executed here.
 
+## Conductive and molecular heat on one evolving density chart
+
+`FlowField::advance_isotropic_conductive_thermal_volume_momentum_with_viscosity`
+and its pressure-profile variant combine original source conductivity with
+molecular stress and its reciprocal physical heat before the accepted
+thermal-density/momentum evolution. Both source evaluations use the same
+original phase states. Conductive face heat, the viscosity solve and body-force
+prediction each run once; bounded phase-volume trials consume their fixed
+caloric increments and viscously updated momentum.
+
+The original conduction preparation and final source-domain checks are shared
+with the conduction-only and conductive-momentum owners. The actual caloric
+state after adding molecular heat must also stay inside the original source's
+support, even if later advection would bring the endpoint back inside. Its
+enthalpy gate
+includes conductive assembly, molecular-heat assembly and native caloric/
+transport defects together, preventing two individually accepted heat stages
+from exceeding the common budget. Source-pressure work, reservoir/wall work
+and numerical losses retain their native separate accounts.
+
+The original isotropic-conductivity and insulated exterior/fixed-solid thermal
+boundary assumptions remain, as do the viscosity boundary restrictions,
+first-order frozen-source splitting and caller-owned phase/work conventions.
+A source, heat, chart, volume, momentum or cancellation refusal returns no
+partial heated or accelerated state.
+
 ## Evolving material momentum on one native pressure and transport step
 
 `FlowField::advance_material_momentum` composes the existing current-mass

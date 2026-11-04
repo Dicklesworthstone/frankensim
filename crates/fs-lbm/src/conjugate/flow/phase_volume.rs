@@ -4,7 +4,8 @@ mod conduction;
 pub use conduction::{
     ConductiveThermalVolumeControls, ConductiveThermalVolumeMomentumControls,
     ConductiveThermalVolumeMomentumStep, ConductiveThermalVolumeReport,
-    ConductiveThermalVolumeStep, };
+    ConductiveThermalVolumeStep, ConductiveViscousThermalVolumeMomentumStep,
+};
 mod momentum;
 pub use momentum::{
     ThermalVolumeMomentumControls, ThermalVolumeMomentumInput, ThermalVolumeMomentumStep,
