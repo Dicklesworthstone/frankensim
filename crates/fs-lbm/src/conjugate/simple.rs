@@ -472,7 +472,7 @@ impl SimpleConfig {
     // Work on pressure differences so atmospheric-sized common offsets do not
     // enter the small momentum/correction residuals. A face fan draws from its
     // declared ambient zero and therefore retains that numerical datum.
-    fn pressure_reference_pa(&self) -> f64 {
+    fn pressure_reference_pa(&self, domain: &VoxelDomain) -> f64 {
         if self.fan.is_some() {
             0.0
         } else {
@@ -480,15 +480,35 @@ impl SimpleConfig {
                 .iter()
                 .enumerate()
                 .find_map(|(side, face)| {
-                    face.prescribed_pressure().map(|uniform| {
-                        self.pressure_profiles_pa[side]
-                            .as_ref()
-                            .and_then(|profile| profile.first().copied())
-                            .unwrap_or(uniform)
+                    face.prescribed_pressure().and_then(|uniform| {
+                        self.pressure_profiles_pa[side].as_ref().map_or(Some(uniform), |profile| {
+                            let n = domain.dims();
+                            let axis = side / 2;
+                            // Shape admission follows this datum selection.
+                            // Never interpret excess malformed entries as cells.
+                            profile.iter().take(n[(axis + 1) % 3] * n[(axis + 2) % 3])
+                                .enumerate().find_map(|(index, &pressure)| {
+                                    domain.is_fluid(Self::pressure_profile_cell(domain, side, index))
+                                        .then_some(pressure)
+                                })
+                        })
                     })
                 })
                 .unwrap_or(0.0)
         }
+    }
+
+    // Inverse of pressure_at's plane indexing, shared by datum selection and
+    // difference admission. An inactive face cannot choose a numerical gauge.
+    fn pressure_profile_cell(domain: &VoxelDomain, side: usize, index: usize) -> usize {
+        let n = domain.dims();
+        let plane = if side % 2 == 0 { 0 } else { n[side / 2] - 1 };
+        let [x, y, z] = match side / 2 {
+            0 => [plane, index % n[1], index / n[1]],
+            1 => [index % n[0], plane, index / n[0]],
+            _ => [index % n[0], index / n[0], plane],
+        };
+        domain.index(x, y, z)
     }
 
     // Use the original Cartesian face indexing, shared by momentum loading
@@ -527,12 +547,14 @@ impl SimpleConfig {
                         ),
                     });
                 }
-                for &pressure in profile {
+                for (index, &pressure) in profile.iter().enumerate() {
                     finite("simple.pressure_profiles_pa", pressure)?;
-                    finite(
-                        "simple.pressure_difference_pa",
-                        2.0 * (pressure - reference),
-                    )?;
+                    if domain.is_fluid(Self::pressure_profile_cell(domain, side, index)) {
+                        finite(
+                            "simple.pressure_difference_pa",
+                            2.0 * (pressure - reference),
+                        )?;
+                    }
                 }
             } else if let Some(pressure) = face.prescribed_pressure() {
                 finite(
@@ -1099,7 +1121,7 @@ impl<'a> Solver<'a> {
             comps,
             vel,
             pressure: vec![0.0; domain.cell_count()],
-            pressure_reference_pa: config.pressure_reference_pa(),
+            pressure_reference_pa: config.pressure_reference_pa(domain),
             d,
             momentum_krylov: 0,
             pressure_krylov: 0,
@@ -2493,7 +2515,7 @@ pub(super) fn admit(
             FvBoundary::Symmetry | FvBoundary::Outlet => {}
         }
     }
-    config.admit_pressure_data(domain, config.pressure_reference_pa())?;
+    config.admit_pressure_data(domain, config.pressure_reference_pa(domain))?;
     if let Some(fan) = config.fan
         && !matches!(config.faces[fan.face as usize], FvBoundary::Inlet { .. })
     {

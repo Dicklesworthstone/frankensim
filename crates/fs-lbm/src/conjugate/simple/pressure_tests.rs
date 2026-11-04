@@ -676,6 +676,42 @@ fn spatial_pressure_drives_opposed_channel_streams_and_ignores_solid_faces() {
 }
 
 #[test]
+fn spatial_pressure_leading_solid_face_cannot_erase_the_active_driving_head() {
+    use crate::conjugate::Voxel;
+
+    let mut domain =
+        VoxelDomain::graded([vec![0.25; 8], vec![0.5; 3], vec![1.0]]).unwrap();
+    for x in 0..8 {
+        domain.set(x, 0, 0, Voxel::Solid(0));
+    }
+    let mut faces = [FvBoundary::Symmetry; 6];
+    faces[0] = FvBoundary::Pressure { pressure_pa: 1.0 };
+    faces[1] = FvBoundary::Outlet;
+    faces[2] = FvBoundary::wall();
+    faces[3] = FvBoundary::wall();
+    let mut config = SimpleConfig::new(faces);
+    config.tolerance = 1e-10;
+    config.pressure_tolerance = 1e-12;
+    let gate = CancelGate::new();
+    let reference = simple_flow(&domain, &fluid(), &config, &gate).unwrap();
+    assert!((reference.report.outflow_m3_s - 0.25).abs() < 1e-8);
+    for unused in [1e18, f64::MAX] {
+        config.pressure_profiles_pa[0] = Some(vec![unused, 1.0, 1.0]);
+        config.pressure_profiles_pa[1] = Some(vec![-unused, 0.0, 0.0]);
+        // A 1 Pa active head must survive arbitrary FINITE inactive values.
+        // f64::MAX additionally proves unused doubled pressure differences
+        // are never admitted as if they loaded a fluid face.
+        let actual = simple_flow(&domain, &fluid(), &config, &gate).unwrap();
+        assert_eq!(actual, reference);
+    }
+    config.pressure_profiles_pa[0] = Some(vec![f64::NAN, 1.0, 1.0]);
+    assert!(matches!(
+        simple_flow(&domain, &fluid(), &config, &gate),
+        Err(ChtError::InvalidInput { field: "simple.pressure_profiles_pa", .. })
+    ));
+}
+
+#[test]
 fn spatial_pressure_work_uses_each_original_face_and_closes_physical_heat() {
     use super::viscous_heat::{ViscousHeatControls, creeping_flow_with_pressure_work_heat};
 

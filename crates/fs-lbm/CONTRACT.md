@@ -9,9 +9,11 @@ pressure momentum load, SIMPLEC correction, body-force coupling and transient
 state. Plane values use x-fast indexing with the normal coordinate omitted;
 solid faces receive no load. No interpolation or plane averaging is implicit.
 
-The original numerical pressure datum is removed before momentum assembly and
-restored only for pressure readback. Restart admission checks the profile against
-the retained datum. The existing Stokes reservoir-traction heating mode samples
+The numerical datum comes from a fluid-exposed profile face; unused solid-face
+values must remain finite but cannot set a gauge or enter pressure differences.
+The datum is removed before momentum assembly and restored only for pressure
+readback. Restart admission checks active profile values against the retained
+datum. The existing Stokes reservoir-traction heating mode samples
 pressure times volume flow at each original face, preserving spatial covariance
 and the same relative-gauge work account. Uniform profiles reproduce the existing
 uniform solve, and omitting profiles preserves its API behavior.
