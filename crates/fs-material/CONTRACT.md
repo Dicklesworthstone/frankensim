@@ -13464,3 +13464,24 @@ Moisture shifts, vertical modulus changes, thermal expansion, integration along
 a changing temperature history, and caloric/entropy coupling remain separate.
 This is a temperature-dependent constitutive slice of IRP M0.2-W4
 (`frankensim-irp-v5-instrument-realism-pexfp.24`), not closure of that whole bead.
+
+## Temperature shifts of finite-strain viscous kinetics
+
+`TemperatureShift::shift_hyperelastic` applies the shared calibrated WLF or
+Arrhenius factor to the original `ViscoHyperelastic` branch relaxation times.
+It retains equilibrium and branch energies, ordering, deformation limits and
+local Newton controls. Original public parameters are checked by the existing
+constructors. Shift and original material errors remain separately typed.
+
+The original full and bulk-free histories, mixed pressure formulation, return
+map and consistent tangents remain the numerical owners. Accepted viscous
+metrics and work/storage/dissipation ledgers carry between temperature intervals.
+At frozen temperature, the same update corresponds to reference duration
+`dt / a_T`; temperature alone does not change stored energy or reset memory.
+No eigensolve, fit or evolution is performed when preparing the shifted law.
+
+This is thermorheologically simple kinetic dependence with unchanged elastic
+energies. It does not supply expansion, entropy, caloric coupling or exact
+integration through a changing-temperature interval. Such trajectories require
+explicit temporal refinement, and the caller retains the original calibration
+and source qualifications. Shift the original reference law on each preparation.

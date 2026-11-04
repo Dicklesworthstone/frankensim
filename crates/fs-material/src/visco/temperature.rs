@@ -18,6 +18,8 @@
 use super::{TensorProny, ViscoError};
 use fs_math::det;
 
+mod hyperelastic;
+pub use hyperelastic::*;
 mod scalar;
 pub use scalar::*;
 
