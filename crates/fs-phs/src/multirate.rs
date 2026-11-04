@@ -11,7 +11,7 @@ use fs_la::factor::{Lu, lu};
 
 /// Maximum native physical substeps per common window.
 pub const MAX_SUBSTEPS: usize = 16;
-/// Maximum simultaneous power-port pairs in the dense interface solve.
+/// Maximum selected ports on either side of the dense interface solve.
 pub const MAX_INTERFACE_PORTS: usize = 32;
 
 /// Explicit choice of the original subsystem's time integrator.
@@ -35,13 +35,72 @@ pub struct Clock {
 
 /// Canonical skew connection: u_left = -average(y_right), u_right = average(y_left).
 /// The caller supplies compatible conjugate units. Physical transformer/area/
-/// gear ratios belong to the original owners, not to numerical input scaling.
+/// gear ratios belong to the original owners or [`PowerTransfer`], never to
+/// numerical input scaling.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PortPair {
     pub left: usize,
     pub right: usize,
     /// Positive numerical reference with units of left input/right output.
     pub input_scale: f64,
+}
+
+/// Physical, possibly rectangular, work-conjugate interface map.
+///
+/// For the selected outputs, the held interface solves
+/// `u_right = M * average(y_left)` and
+/// `u_left = -M^T * average(y_right)`. The SAME coefficients define both
+/// directions, so the two integrated interface works cancel. Areas, lever
+/// ratios, winding orientation and already assembled mortar weights belong in
+/// `M`; numerical reference scales never change that physical map.
+///
+/// This map does not construct a spatial projection or certify its accuracy.
+/// Field ports must already include their physical integration measures and
+/// use dual coordinates whose ordinary dot product is power. Each entry must
+/// have the conjugate units required by its two ports. Coefficients are held
+/// over one complete window; moving geometry and its parameter work are not
+/// inferred from swapping maps between windows.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PowerTransfer {
+    /// Distinct original left port indices, in map-column order.
+    pub left_ports: Vec<usize>,
+    /// Distinct original right port indices, in map-row order.
+    pub right_ports: Vec<usize>,
+    /// Row-major RIGHT-by-LEFT physical matrix `M`. Signed and rank-deficient
+    /// maps are admitted; uncoupled physical coordinates are retained.
+    pub right_from_left: Vec<f64>,
+    /// Positive numerical references, one per selected LEFT input.
+    pub left_input_scales: Vec<f64>,
+}
+
+impl PowerTransfer {
+    fn validate(&self, left_ports: usize, right_ports: usize) -> Result<(), MultirateError> {
+        let (nl, nr) = (self.left_ports.len(), self.right_ports.len());
+        if !(1..=MAX_INTERFACE_PORTS).contains(&nl)
+            || !(1..=MAX_INTERFACE_PORTS).contains(&nr)
+            || self.right_from_left.len() != nl * nr
+            || self.left_input_scales.len() != nl
+            || !finite(&self.right_from_left)
+            || self.left_input_scales.iter().any(|&scale| !positive(scale))
+        {
+            return Err(MultirateError::Invalid(
+                "invalid physical power map or input scales",
+            ));
+        }
+        for (ports, count) in [
+            (&self.left_ports, left_ports),
+            (&self.right_ports, right_ports),
+        ] {
+            for (i, &port) in ports.iter().enumerate() {
+                if port >= count || ports[..i].contains(&port) {
+                    return Err(MultirateError::Invalid(
+                        "invalid or duplicate mapped interface port",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Explicit bounded interface solve and independent physical energy admission.
@@ -265,34 +324,94 @@ struct Trial {
 pub struct MultiratePair<'a> {
     left: LocalClock<'a>,
     right: LocalClock<'a>,
-    pairs: Vec<PortPair>,
+    transfer: PowerTransfer,
+    // Prepare both sparse traversals from the same physical coefficients.
+    // Canonical paired ports keep their O(number_of_pairs) warm mapping cost.
+    forward: Vec<Vec<(usize, f64)>>,
+    transpose: Vec<Vec<(usize, f64)>>,
     solve: SolveConfig,
     affine: Option<Lu>,
     guess: Vec<f64>,
 }
 impl<'a> MultiratePair<'a> {
     #[allow(clippy::too_many_arguments)]
-    pub fn new(left: &'a PortHamiltonian, right: &'a PortHamiltonian,
-        pairs: &[PortPair], duration_s: f64, left_clock: Clock, right_clock: Clock,
-        solve: SolveConfig) -> Result<Self, MultirateError> {
-        if !positive(duration_s) || pairs.is_empty() || pairs.len()>MAX_INTERFACE_PORTS
+    pub fn new(
+        left: &'a PortHamiltonian,
+        right: &'a PortHamiltonian,
+        pairs: &[PortPair],
+        duration_s: f64,
+        left_clock: Clock,
+        right_clock: Clock,
+        solve: SolveConfig,
+    ) -> Result<Self, MultirateError> {
+        let k = pairs.len();
+        if !(1..=MAX_INTERFACE_PORTS).contains(&k) {
+            return Err(MultirateError::Invalid("invalid interface count"));
+        }
+        let mut map = vec![0.0; k * k];
+        for i in 0..k {
+            map[i * k + i] = 1.0;
+        }
+        Self::new_mapped(
+            left,
+            right,
+            &PowerTransfer {
+                left_ports: pairs.iter().map(|p| p.left).collect(),
+                right_ports: pairs.iter().map(|p| p.right).collect(),
+                right_from_left: map,
+                left_input_scales: pairs.iter().map(|p| p.input_scale).collect(),
+            },
+            duration_s,
+            left_clock,
+            right_clock,
+            solve,
+        )
+    }
+
+    /// Prepare a work-conjugate transfer between any selected port banks.
+    /// The left and right banks may have different sizes. Both complete native
+    /// states, independent clocks, physical losses and external sources remain
+    /// owned by their original systems. Quadratic owners cache one interface LU
+    /// for all subsequent source histories; no pseudoinverse or rank truncation
+    /// is applied to the physical transfer.
+    ///
+    /// # Errors
+    /// Invalid/duplicate indices, nonfinite or misshaped maps, clock/solve
+    /// budgets, or any original subsystem/setup refusal.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_mapped(
+        left: &'a PortHamiltonian,
+        right: &'a PortHamiltonian,
+        transfer: &PowerTransfer,
+        duration_s: f64,
+        left_clock: Clock,
+        right_clock: Clock,
+        solve: SolveConfig,
+    ) -> Result<Self, MultirateError> {
+        transfer.validate(left.m, right.m)?;
+        if !positive(duration_s)
             || solve.max_iterations>64 || !positive(solve.relative_tolerance)
             || !nonnegative(solve.absolute_energy_tolerance_j)
             || !nonnegative(solve.relative_energy_tolerance) {
             return Err(MultirateError::Invalid("invalid window, interface count or solve budget"));
         }
-        for (i,pair) in pairs.iter().enumerate() {
-            if pair.left>=left.m || pair.right>=right.m || !positive(pair.input_scale)
-                || pairs[..i].iter().any(|p| p.left==pair.left || p.right==pair.right) {
-                return Err(MultirateError::Invalid("invalid, duplicate or unscaled interface port"));
+        let k = transfer.left_ports.len();
+        let mut forward = vec![Vec::new(); transfer.right_ports.len()];
+        let mut transpose = vec![Vec::new(); k];
+        for (row, &right_port) in transfer.right_ports.iter().enumerate() {
+            for (col, &left_port) in transfer.left_ports.iter().enumerate() {
+                let coefficient = transfer.right_from_left[row * k + col];
+                if coefficient != 0.0 {
+                    forward[row].push((left_port, coefficient));
+                    transpose[col].push((right_port, coefficient));
+                }
             }
         }
         let mut result = Self { left:LocalClock::new(left,left_clock,duration_s,"left")?,
-            right:LocalClock::new(right,right_clock,duration_s,"right")?, pairs:pairs.to_vec(),
-            solve, affine:None, guess:vec![0.0;pairs.len()] };
+            right:LocalClock::new(right,right_clock,duration_s,"right")?, transfer:transfer.clone(),
+            forward, transpose, solve, affine:None, guess:vec![0.0;k] };
         if left_clock.method==IntegrationMethod::ExactQuadratic
             && right_clock.method==IntegrationMethod::ExactQuadratic {
-            let k = pairs.len();
             let (xl,xr,ul,ur) = (vec![0.0;left.n],vec![0.0;right.n],vec![0.0;left.m],vec![0.0;right.m]);
             let mut jac = vec![0.0;k*k];
             for col in 0..k {
@@ -306,22 +425,42 @@ impl<'a> MultiratePair<'a> {
         Ok(result)
     }
 
-    fn evaluate(&mut self, xl:&[f64], xr:&[f64], external_l:Inputs<'_>, external_r:Inputs<'_>,
-        z:&[f64], cancelled:&mut impl FnMut()->bool) -> Result<Trial,MultirateError> {
+    fn evaluate(
+        &mut self,
+        xl: &[f64],
+        xr: &[f64],
+        external_l: Inputs<'_>,
+        external_r: Inputs<'_>,
+        z: &[f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Trial, MultirateError> {
         check(cancelled)?;
+        let nl = self.transfer.left_ports.len();
         let mut ul=vec![0.0;self.left.system.m];
-        for (pair,&value) in self.pairs.iter().zip(z) { ul[pair.left]=pair.input_scale*value; }
+        for (col, &port) in self.transfer.left_ports.iter().enumerate() {
+            ul[port] = self.transfer.left_input_scales[col] * z[col];
+        }
         let l=self.left.evolve(xl,external_l,&ul,cancelled)?;
         let mut ur=vec![0.0;self.right.system.m];
-        for pair in &self.pairs { ur[pair.right]=l.result.average_output[pair.left]; }
+        for (row, &port) in self.transfer.right_ports.iter().enumerate() {
+            ur[port] = sum(self.forward[row]
+                .iter()
+                .map(|&(left, coefficient)| coefficient * l.result.average_output[left]));
+        }
         let r=self.right.evolve(xr,external_r,&ur,cancelled)?;
         let external_work_j=[l.external_work_j,r.external_work_j];
         let exchange_work_j=[l.exchange_work_j,r.exchange_work_j];
         let (left,right)=(l.result,r.result);
-        let residual:Vec<f64>=self.pairs.iter().zip(z).map(|(pair,&value)|
-            value+right.average_output[pair.right]/pair.input_scale).collect();
-        let scale=self.pairs.iter().zip(z).fold(1.0_f64,|s,(pair,&value)|
-            s.max(value.abs()).max((right.average_output[pair.right]/pair.input_scale).abs()));
+        let mut residual = vec![0.0; nl];
+        let mut scale = 1.0_f64;
+        for col in 0..nl {
+            let reaction = sum(self.transpose[col]
+                .iter()
+                .map(|&(port, coefficient)| coefficient * right.average_output[port]))
+                / self.transfer.left_input_scales[col];
+            residual[col] = z[col] + reaction;
+            scale = scale.max(z[col].abs()).max(reaction.abs());
+        }
         let norm=residual.iter().map(|v|v.abs()).fold(0.0_f64,f64::max)/scale;
         if !finite(&residual) || !norm.is_finite() || !scale.is_finite() {
             return Err(MultirateError::Invalid("nonfinite interface equation"));
@@ -373,8 +512,14 @@ impl<'a> MultiratePair<'a> {
         self.step_inputs(left,right,Inputs::Substeps(left_external),Inputs::Substeps(right_external),&mut cancelled)
     }
 
-    fn step_inputs(&mut self, left:&[f64], right:&[f64], left_external:Inputs<'_>,
-        right_external:Inputs<'_>, mut cancelled:impl FnMut()->bool) -> Result<CoupledStep,MultirateError> {
+    fn step_inputs(
+        &mut self,
+        left: &[f64],
+        right: &[f64],
+        left_external: Inputs<'_>,
+        right_external: Inputs<'_>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<CoupledStep, MultirateError> {
         check(&mut cancelled)?;
         if left.len()!=self.left.system.n || right.len()!=self.right.system.n
             || !left_external.valid(self.left.system.m,self.left.clock.substeps)
@@ -383,7 +528,7 @@ impl<'a> MultiratePair<'a> {
             return Err(MultirateError::Invalid("complete finite paired state and external input required"));
         }
         let mut z=self.guess.clone();
-        let k=self.pairs.len();
+        let k = self.transfer.left_ports.len();
         for iteration in 0..=self.solve.max_iterations {
             let trial=self.evaluate(left,right,left_external,right_external,&z,&mut cancelled)?;
             if trial.norm<=self.solve.relative_tolerance {

@@ -1009,6 +1009,27 @@ whole-window constitutive energy increment is also checked independently against
 the compensated sum of native increments; a supplied nonadditive remainder cannot
 hide merely because each individual update closes its own equation.
 
+`MultiratePair::new_mapped` additionally accepts a physical `PowerTransfer`
+between independently selected port banks: `u_right = M average(y_left)` and
+`u_left = -M^T average(y_right)`. Rectangular, signed and rank-deficient maps
+retain every native state and uncoupled coordinate. Piston areas, winding
+orientation, lever ratios and already assembled spatial transfer weights enter
+the physical map; numerical input scales do not alter it. The transpose uses
+the same coefficients, so opposite interface works close over the same window.
+Sparse traversals are prepared once; ordinary paired ports retain linear
+mapping work, and the original quadratic interface LU is reused. There are at
+most 32 selected ports on either side. Field coordinates must already be dual
+with respect to physical power, including integration measures. This API does
+not construct a mortar, certify spatial approximation error, or supply moving
+geometry/parameter work. Coefficients are held over a complete window.
+
+Mapped-interface regressions independently solve two unequal, oppositely
+oriented pistons sharing one compressible chamber, verify the transposed owner
+ordering, preserve the uncoupled momentum combination and show second-order
+convergence to its analytic pressure frequency. Further cases cover original
+unconnected sources, coordinate permutation/scaling, nonlinear losses,
+cancellation/retry, zero coupling and invalid map admission.
+
 `step_subcycled_sources` and its cancellable variant additionally accept one
 held external-input row per native substep, independently on each clock.
 Discontinuities must align with those clocks. Work is integrated from each
@@ -1030,7 +1051,7 @@ storage/heat/work, and exercise malformed-history and cancellation retry.
 
 Quadratic pairs prepare the complete affine interface response and its LU once.
 Nonlinear pairs retain the original Gonzalez `StepWorkspace`, with bounded
-interface Newton updates and at most 32 paired ports. Caller-declared local pole
+interface Newton updates and at most 32 selected ports per side. Caller-declared local pole
 rate and optional contact-resolution bounds are enforced before preparation.
 All subsystem states are returned together only on success; refusal/cancellation
 does not publish a state or advance a clock. Numerical scratch may change.

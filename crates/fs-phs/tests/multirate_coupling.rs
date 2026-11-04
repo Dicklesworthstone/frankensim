@@ -1,6 +1,8 @@
-use fs_phs::{PortHamiltonian, QuadraticStorage, Storage, duffing_oscillator, mass_spring_damper};
 use fs_phs::linear_exact::{LinearSplitBudget, PreparedExactZoh};
-use fs_phs::multirate::{Clock, IntegrationMethod, MultirateError, MultiratePair, PortPair, SolveConfig};
+use fs_phs::multirate::{
+    Clock, IntegrationMethod, MultirateError, MultiratePair, PortPair, PowerTransfer, SolveConfig,
+};
+use fs_phs::{PortHamiltonian, QuadraticStorage, Storage, duffing_oscillator, mass_spring_damper};
 
 fn exact(substeps: usize) -> Clock {
     Clock { substeps, method: IntegrationMethod::ExactQuadratic, maximum_contact_step_s: None }
@@ -62,6 +64,333 @@ fn free_mass(mass: f64) -> PortHamiltonian {
     // Momentum is the state; force is input and physical velocity is output.
     PortHamiltonian::new(1,1,vec![0.0],vec![0.0],vec![1.0],
         Box::new(QuadraticStorage::new(vec![1.0/mass],1).unwrap())).unwrap()
+}
+
+fn inertias(masses: &[f64]) -> PortHamiltonian {
+    let n = masses.len();
+    let mut storage = vec![0.0; n * n];
+    let mut ports = vec![0.0; n * n];
+    for i in 0..n {
+        storage[i * n + i] = 1.0 / masses[i];
+        ports[i * n + i] = 1.0;
+    }
+    PortHamiltonian::new(
+        n,
+        n,
+        vec![0.0; n * n],
+        vec![0.0; n * n],
+        ports,
+        Box::new(QuadraticStorage::new(storage, n).unwrap()),
+    )
+    .unwrap()
+}
+
+fn piston_transfer() -> PowerTransfer {
+    PowerTransfer {
+        left_ports: vec![0, 1],
+        right_ports: vec![0],
+        right_from_left: vec![0.1, -0.07],
+        left_input_scales: vec![1.0, 1.0],
+    }
+}
+
+#[test]
+fn unequal_signed_piston_areas_drive_one_compliance_with_reciprocal_force_and_work() {
+    // G0/G1: two inertias exchange power with ONE compressible chamber.
+    // p_i' = F_i - A_i P, V' = Q + sum A_i p_i/m_i, P = V/C.
+    // The opposite piston orientation is a signed physical area, not a
+    // numerical scale. Solve these window-average equations independently.
+    let masses = [2.0, 3.0];
+    let compliance = 0.004;
+    let (left, right) = (inertias(&masses), free_mass(compliance));
+    let transfer = piston_transfer();
+    let (p, v, f, q, dt) = ([0.8, -0.3], 0.003, [0.3, -0.2], 0.01, 0.2);
+    let areas = [0.1, -0.07];
+    let stiffness: f64 = (0..2).map(|i| areas[i] * areas[i] / masses[i]).sum();
+    let free_flow: f64 = (0..2).map(|i| areas[i] * p[i] / masses[i]).sum();
+    let forced_flow: f64 = (0..2).map(|i| areas[i] * f[i] / masses[i]).sum();
+    let pressure = (v / compliance
+        + dt / (2.0 * compliance) * (q + free_flow)
+        + dt * dt / (4.0 * compliance) * forced_flow)
+        / (1.0 + dt * dt / (4.0 * compliance) * stiffness);
+    let momentum: Vec<f64> = (0..2)
+        .map(|i| p[i] + dt * (f[i] - areas[i] * pressure))
+        .collect();
+    let velocity: Vec<f64> = (0..2)
+        .map(|i| (p[i] + momentum[i]) / (2.0 * masses[i]))
+        .collect();
+    let flow: f64 = (0..2).map(|i| areas[i] * velocity[i]).sum();
+    let mut coupling = MultiratePair::new_mapped(
+        &left,
+        &right,
+        &transfer,
+        dt,
+        exact(2),
+        exact(8),
+        SolveConfig::default(),
+    )
+    .unwrap();
+    let r = coupling.step(&p, &[v], &f, &[q]).unwrap();
+    for i in 0..2 {
+        close(r.left.state[i], momentum[i], 2e-14);
+        close(r.left.average_output[i], velocity[i], 2e-14);
+    }
+    close(r.right.state[0], v + dt * (q + flow), 2e-14);
+    close(r.right.average_output[0], pressure, 2e-13);
+    close(
+        r.external_work_j[0],
+        dt * (f[0] * velocity[0] + f[1] * velocity[1]),
+        2e-14,
+    );
+    close(r.external_work_j[1], dt * q * pressure, 2e-14);
+    close(r.exchange_work_j[0], -dt * pressure * flow, 2e-14);
+    close(r.exchange_work_j[1], dt * pressure * flow, 2e-14);
+    close(r.balance_residual_j, 0.0, 2e-14);
+    assert!(r.exchange_work_j[0] < 0.0 && r.exchange_work_j[1] > 0.0);
+    // The same physical assembly with the two owners exchanged uses -M^T.
+    // This also exercises a tall (two-by-one) map and independent solve scaling.
+    let reversed = PowerTransfer {
+        left_ports: vec![0],
+        right_ports: vec![0, 1],
+        right_from_left: vec![-0.1, 0.07],
+        left_input_scales: vec![3.0],
+    };
+    let s = MultiratePair::new_mapped(
+        &right,
+        &left,
+        &reversed,
+        dt,
+        exact(8),
+        exact(2),
+        SolveConfig::default(),
+    )
+    .unwrap()
+    .step(&[v], &p, &[q], &f)
+    .unwrap();
+    assert!(distance(&r.left.state, &s.right.state) < 2e-14);
+    assert!(distance(&r.right.state, &s.left.state) < 2e-14);
+    for i in 0..2 {
+        close(r.external_work_j[i], s.external_work_j[1 - i], 2e-14);
+        close(r.exchange_work_j[i], s.exchange_work_j[1 - i], 2e-14);
+    }
+}
+
+#[test]
+fn rectangular_transfer_retains_null_motion_and_converges_to_physical_coupled_frequency() {
+    // G1/G3: the piston system has one oscillating pressure mode and one
+    // uncoupled momentum combination. Neither may be removed by an SVD cutoff.
+    let masses = [2.0, 3.0];
+    let compliance = 0.004;
+    let areas = [0.1, -0.07];
+    let (left, right) = (inertias(&masses), free_mass(compliance));
+    let transfer = piston_transfer();
+    let initial = [0.8, -0.3];
+    let volume = 0.003;
+    let duration = 2.0;
+    let omega: f64 =
+        ((areas[0] * areas[0] / masses[0] + areas[1] * areas[1] / masses[1]) / compliance).sqrt();
+    let flow = areas[0] * initial[0] / masses[0] + areas[1] * initial[1] / masses[1];
+    let angle = omega * duration;
+    let volume_integral =
+        volume * angle.sin() / omega + flow * (1.0 - angle.cos()) / (omega * omega);
+    let truth = [
+        initial[0] - areas[0] * volume_integral / compliance,
+        initial[1] - areas[1] * volume_integral / compliance,
+        volume * angle.cos() + flow * angle.sin() / omega,
+    ];
+    let mut errors = Vec::new();
+    for windows in [10, 20, 40] {
+        let mut coupling = MultiratePair::new_mapped(
+            &left,
+            &right,
+            &transfer,
+            duration / windows as f64,
+            exact(2),
+            exact(8),
+            SolveConfig::default(),
+        )
+        .unwrap();
+        let (mut p, mut v) = (initial.to_vec(), vec![volume]);
+        let energy = left.hamiltonian(&p) + right.hamiltonian(&v);
+        for _ in 0..windows {
+            let r = coupling.step(&p, &v, &[0.0; 2], &[0.0]).unwrap();
+            close(r.exchange_work_j.iter().sum(), 0.0, 2e-14);
+            p = r.left.state;
+            v = r.right.state;
+        }
+        close(
+            areas[1] * p[0] - areas[0] * p[1],
+            areas[1] * initial[0] - areas[0] * initial[1],
+            2e-14,
+        );
+        close(left.hamiltonian(&p) + right.hamiltonian(&v), energy, 2e-13);
+        p.extend(v);
+        errors.push(distance(&p, &truth));
+    }
+    assert!(
+        errors[0] / errors[1] > 3.8 && errors[1] / errors[2] > 3.8,
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn mapped_interfaces_preserve_port_ordering_scales_and_unconnected_sources() {
+    // G3: a full non-diagonal map and its reordered coordinates describe the
+    // same physics. The third native port stays externally driven on each side.
+    let (left, right) = (two_modes(), two_modes());
+    let map = PowerTransfer {
+        left_ports: vec![0, 1],
+        right_ports: vec![0, 1],
+        right_from_left: vec![0.5, -2.0, 1.2, 0.3],
+        left_input_scales: vec![1.0, 1.0],
+    };
+    let reordered = PowerTransfer {
+        left_ports: vec![1, 0],
+        right_ports: vec![1, 0],
+        right_from_left: vec![0.3, 1.2, -2.0, 0.5],
+        left_input_scales: vec![100.0, 0.01],
+    };
+    let solve = |map: &PowerTransfer| {
+        MultiratePair::new_mapped(
+            &left,
+            &right,
+            map,
+            0.03,
+            exact(2),
+            exact(8),
+            SolveConfig::default(),
+        )
+        .unwrap()
+        .step_subcycled_sources(
+            &[0.3, 0.4, -0.2, 0.1],
+            &[-0.1, 0.2, 0.7, -0.3],
+            &[0.4, -0.1, 0.2, -0.2, 0.3, -0.1],
+            &[-0.2, 0.3, -0.1].repeat(8),
+        )
+        .unwrap()
+    };
+    let (a, b) = (solve(&map), solve(&reordered));
+    assert!(distance(&a.left.state, &b.left.state) < 1e-13);
+    assert!(distance(&a.right.state, &b.right.state) < 1e-13);
+    for i in 0..2 {
+        close(a.external_work_j[i], b.external_work_j[i], 2e-14);
+        close(a.exchange_work_j[i], b.exchange_work_j[i], 2e-14);
+    }
+    close(a.exchange_work_j.iter().sum(), 0.0, 2e-14);
+}
+
+#[test]
+fn mapped_nonlinear_ports_keep_original_heat_and_cancel_without_changing_retry() {
+    // G0/G4: the physical transfer acts on original nonlinear outputs; it does
+    // not replace the material storage or loss law with a quadratic surrogate.
+    let left = duffing_oscillator(1.0, 1.0, 0.8, 0.05).unwrap();
+    let right = duffing_oscillator(1.2, 1.3, 0.6, 0.02).unwrap();
+    let map = PowerTransfer {
+        left_ports: vec![0],
+        right_ports: vec![0],
+        right_from_left: vec![-2.5],
+        left_input_scales: vec![0.1],
+    };
+    let make = || {
+        MultiratePair::new_mapped(
+            &left,
+            &right,
+            &map,
+            0.02,
+            nonlinear(2),
+            nonlinear(4),
+            SolveConfig::default(),
+        )
+        .unwrap()
+    };
+    let (a, b) = ([0.6, 0.2], [-0.4, 0.1]);
+    let mut candidate = make();
+    let mut calls = 0;
+    assert!(matches!(
+        candidate.step_controlled(&a, &b, &[0.1], &[-0.05], || {
+            calls += 1;
+            calls >= 9
+        }),
+        Err(MultirateError::Cancelled)
+    ));
+    let r = candidate.step(&a, &b, &[0.1], &[-0.05]).unwrap();
+    assert_eq!(r, make().step(&a, &b, &[0.1], &[-0.05]).unwrap());
+    assert!(r.left.dissipated_j > 0.0 && r.right.dissipated_j > 0.0);
+    close(r.exchange_work_j.iter().sum(), 0.0, 2e-13);
+    close(r.balance_residual_j, 0.0, 2e-13);
+}
+
+#[test]
+fn zero_map_retains_independent_evolution_and_invalid_maps_refuse_before_preparation() {
+    let (left, right) = (inertias(&[2.0, 3.0]), free_mass(0.004));
+    let zero = PowerTransfer {
+        right_from_left: vec![0.0, 0.0],
+        ..piston_transfer()
+    };
+    let r = MultiratePair::new_mapped(
+        &left,
+        &right,
+        &zero,
+        0.2,
+        exact(2),
+        exact(8),
+        SolveConfig::default(),
+    )
+    .unwrap()
+    .step(&[0.8, -0.3], &[0.003], &[0.3, -0.2], &[0.01])
+    .unwrap();
+    close(r.left.state[0], 0.86, 2e-14);
+    close(r.left.state[1], -0.34, 2e-14);
+    close(r.right.state[0], 0.005, 2e-14);
+    assert_eq!(r.exchange_work_j, [0.0, 0.0]);
+    let valid = piston_transfer();
+    for bad in [
+        PowerTransfer {
+            left_ports: vec![],
+            ..valid.clone()
+        },
+        PowerTransfer {
+            left_ports: vec![0, 0],
+            ..valid.clone()
+        },
+        PowerTransfer {
+            right_ports: vec![1],
+            ..valid.clone()
+        },
+        PowerTransfer {
+            right_from_left: vec![0.1],
+            ..valid.clone()
+        },
+        PowerTransfer {
+            right_from_left: vec![0.1, f64::NAN],
+            ..valid.clone()
+        },
+        PowerTransfer {
+            left_input_scales: vec![1.0, 0.0],
+            ..valid.clone()
+        },
+        PowerTransfer {
+            left_input_scales: vec![1.0],
+            ..valid.clone()
+        },
+        PowerTransfer {
+            left_ports: vec![0; 33],
+            ..valid
+        },
+    ] {
+        assert!(matches!(
+            MultiratePair::new_mapped(
+                &left,
+                &right,
+                &bad,
+                0.2,
+                exact(2),
+                exact(8),
+                SolveConfig::default()
+            ),
+            Err(MultirateError::Invalid(_))
+        ));
+    }
 }
 
 #[test]
