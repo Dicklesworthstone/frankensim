@@ -412,6 +412,48 @@ MQS tests, not empirical winding validation. Axial end redistribution, individua
 insulated strands inside an authored homogeneous region, full 3-D end turns,
 and displacement-current regimes are not inferred.
 
+### Finite-window winding heat and magnetic work
+
+The opt-in `harmonic-exposure` feature adds
+`PlanarHarmonicWindings::prepare_exposure` over original frequency owners and
+authored peak-current phases. Every tone must retain the exact same prepared
+source, geometry, boundary and nonlinear DC linearization. Equal frequencies
+combine currents with compensated arithmetic before one native field recovery.
+Different frequencies retain their original resolved skin/proximity response.
+The compact bank stores numerical fields without copying material bundles;
+further observations do not solve a field or circuit again.
+
+Uniform physical windows use the existing `fs-fft::harmonic_window` product
+kernel, retaining both beat and sum-frequency terms. Kernels are prepared once
+per frequency pair, and double-double accumulators retain interference through
+the complete contraction. Original-cell P1 Joule integrals use the actual total
+solid/floating conductor E. Stranded-current moments are computed once per
+winding and reused for its material cells. Each cell retains its original
+source and returns mean watts and interval joules; no cycle-mean subtotal is
+deposited a second time.
+
+The same fixed Hessian and explicit end inductances give quadratic perturbation
+storage `U = a^T K_t a/2 + sum L_end i^2/2`. Independently contracted terminal
+work, spatial Joule heat and `dU/dt` must close within the caller's watt allowance.
+Storage change is the integral of its rate, preserving short intervals without
+subtracting two rounded endpoint energies. Signed returned source work may be
+negative during energy return. Line count, pair contractions and additional
+numerical workspace are bounded before allocation; native response budgets
+still apply separately. Queries cost
+`O((F^2+1)*(vertices+eddy_cells+windings)+stranded_cells)` for F distinct frequencies
+and cancel without publishing a partial result. This is an operation bound,
+not measured throughput.
+
+Five G1/G3/G4 regression groups in `tests/winding_harmonic.rs`, enabled with
+`--features harmonic-exposure`, cover independent real-time field/heat/work
+integration, common-period cycle averages, large cancelling equal-frequency
+drives, solid winding heat, darkness at nonzero bias, source identity, budgets
+and cancellation. The source-backed tests remain unexecuted in this environment
+because the workspace's seven sibling repositories are unavailable. These are
+settled infinitesimal AC perturbations; total DC heat and DC/AC cross work,
+switch-on history, finite saturation cycles, thermal evolution and hysteresis
+are not inferred.
+
 
 ### Native circuits drive and load the resolved winding fields
 

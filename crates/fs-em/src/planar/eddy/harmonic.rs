@@ -22,6 +22,9 @@
 
 /// Native circuit-network composition of the field-derived terminal matrix.
 pub mod circuit;
+/// Finite-window heat and work of coherent winding tones at their own frequencies.
+#[cfg(feature = "harmonic-exposure")]
+pub mod exposure;
 mod response;
 /// Resolved solid winding currents, skin/proximity redistribution and heat.
 pub mod solid;

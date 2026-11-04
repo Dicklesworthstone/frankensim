@@ -46,6 +46,11 @@ pub(super) struct SolidWindings {
 }
 
 impl SolidWindings {
+    #[cfg(feature = "harmonic-exposure")]
+    pub(super) fn binding_for_group(&self, group: usize) -> Option<SolidWindingRegion> {
+        self.region_bindings[group].map(|index| self.bindings[index])
+    }
+
     pub(super) fn new(
         basis: &PlanarIncrementalWindingBasis<'_>,
         conduction: &Conduction,

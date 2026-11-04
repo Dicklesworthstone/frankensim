@@ -464,3 +464,404 @@ fn refuses_overlap_bad_regions_skin_underresolution_failed_solve_and_cancellatio
     ));
     assert_eq!(basis.operating_field().potential_wb_m(), original);
 }
+
+#[cfg(feature = "harmonic-exposure")]
+mod exposure {
+    use super::*;
+    use fs_em::planar::eddy::harmonic::{
+        SolidWindingRegion,
+        exposure::{HarmonicWindingExposureLimits, HarmonicWindingHeatSource, HarmonicWindingTone},
+    };
+    use fs_fft::harmonic_window::{HarmonicWindow, HarmonicWindowProfile};
+
+    fn limits() -> HarmonicWindingExposureLimits {
+        HarmonicWindingExposureLimits {
+            maximum_lines: 8,
+            maximum_pair_products: 100_000,
+            maximum_workspace_bytes: 100_000,
+            power_tolerance_w: 1e-8,
+        }
+    }
+    fn signal(amplitude: C64, omega: f64, time: f64) -> f64 {
+        amplitude.re * (omega * time).cos() + amplitude.im * (omega * time).sin()
+    }
+    fn velocity(amplitude: C64, omega: f64, time: f64) -> f64 {
+        omega * (-amplitude.re * (omega * time).sin() + amplitude.im * (omega * time).cos())
+    }
+    fn integrate(window: HarmonicWindow, quantity: impl Fn(f64) -> f64) -> f64 {
+        let n = 4000;
+        let dt = window.duration_s() / f64::from(n);
+        let mut sum = 0.0;
+        for step in 0..=n {
+            let weight = if step == 0 || step == n {
+                1.0
+            } else if step % 2 == 0 {
+                2.0
+            } else {
+                4.0
+            };
+            sum += weight * quantity(window.start_s() + f64::from(step) * dt);
+        }
+        sum / (3.0 * f64::from(n))
+    }
+
+    #[test]
+    fn beat_and_carrier_heat_close_independent_real_field_energy_and_terminal_work() {
+        let depth = 0.6;
+        let sigma = 18.0;
+        let source = common::source(true, sigma);
+        let problem = common::problem(&source, depth);
+        let basis = basis(&problem, 0.4);
+        let model = prepared(&basis, &source);
+        let omegas = [13.0, 17.0];
+        let frequencies = omegas.map(|w| model.at_frequency(w, &mut || false).unwrap());
+        let currents = [
+            [C64::new(0.2, -0.07), C64::new(-0.03, 0.09)],
+            [C64::new(-0.13, 0.08), C64::new(0.04, 0.06)],
+        ];
+        let tones = [0, 1].map(|i| HarmonicWindingTone {
+            frequency: &frequencies[i],
+            currents_a: &currents[i],
+        });
+        let bank = model
+            .prepare_exposure(&tones, limits(), &mut || false)
+            .unwrap();
+        assert_eq!(bank.distinct_frequencies(), 2);
+        // Independent weak one-mode elimination in each square, K=4*depth,
+        // C=sigma*depth/36 and F*I=2*depth*(I0-I1/2). The second hat is -a.
+        let a = [0, 1].map(|j| {
+            (currents[j][0] - currents[j][1].scale(0.5)) / C64::new(2.0, -omegas[j] * sigma / 72.0)
+        });
+        let resistance = [288.0 * depth / sigma, 72.0 * depth / sigma];
+        let end = [0.02, 0.03];
+        let amplitude = |time| (0..2).map(|j| signal(a[j], omegas[j], time)).sum::<f64>();
+        let derivative = |time| (0..2).map(|j| velocity(a[j], omegas[j], time)).sum::<f64>();
+        let current = |winding, time| {
+            (0..2)
+                .map(|j| signal(currents[j][winding], omegas[j], time))
+                .sum::<f64>()
+        };
+        let stored = |time| {
+            4.0 * depth * amplitude(time).powi(2)
+                + (0..2)
+                    .map(|k| 0.5 * end[k] * current(k, time).powi(2))
+                    .sum::<f64>()
+        };
+        let voltage = |k: usize, time| {
+            let turns = [1.0, -0.5][k];
+            resistance[k] * current(k, time)
+                + 4.0 * depth * turns * derivative(time)
+                + end[k]
+                    * (0..2)
+                        .map(|j| velocity(currents[j][k], omegas[j], time))
+                        .sum::<f64>()
+        };
+        for window in [
+            HarmonicWindow::new(0.017, 0.079).unwrap(),
+            HarmonicWindow::new(-0.13, 0.51).unwrap(),
+        ] {
+            let got = bank.observe(window, &mut || false).unwrap();
+            let copper = integrate(window, |t| {
+                (0..2).map(|k| resistance[k] * current(k, t).powi(2)).sum()
+            });
+            let eddy = sigma * depth / 18.0 * integrate(window, |t| derivative(t).powi(2));
+            near(got.mean_dissipated_power_w, copper + eddy);
+            near(got.mean_magnetic_energy_j, integrate(window, stored));
+            near(
+                got.magnetic_energy_change_j,
+                stored(window.start_s() + window.duration_s()) - stored(window.start_s()),
+            );
+            near(
+                got.mean_supplied_power_w,
+                integrate(window, |t| {
+                    (0..2).map(|k| voltage(k, t) * current(k, t)).sum()
+                }),
+            );
+            near(
+                got.supplied_work_j,
+                got.dissipated_heat_j + got.magnetic_energy_change_j,
+            );
+            assert!(got.power_residual_w.abs() < 1e-10);
+            assert_eq!(got.cells.len(), 8);
+            for cell in got.cells {
+                let expected = match cell.source {
+                    HarmonicWindingHeatSource::Floating(source) => {
+                        assert!([2, 3, 6, 7].contains(&source.triangle));
+                        eddy / 4.0
+                    }
+                    HarmonicWindingHeatSource::Stranded { source, winding } => {
+                        assert!([0, 1, 4, 5].contains(&source.triangle));
+                        resistance[winding] / 2.0
+                            * integrate(window, |t| current(winding, t).powi(2))
+                    }
+                    HarmonicWindingHeatSource::Solid { .. } => {
+                        panic!("fixture has no solid winding")
+                    }
+                };
+                near(cell.mean_power_w, expected);
+                near(cell.heat_j, expected * window.duration_s());
+                near(cell.volume_m3, 0.25 * depth);
+            }
+        }
+    }
+
+    #[test]
+    fn complete_common_period_recovers_the_original_cycle_means() {
+        let source = common::source(true, 18.0);
+        let problem = common::problem(&source, 0.6);
+        let basis = basis(&problem, 2.0);
+        let model = prepared(&basis, &source);
+        let frequencies = [12.0, 36.0].map(|w| model.at_frequency(w, &mut || false).unwrap());
+        let currents = [
+            [C64::new(0.2, -0.3), C64::new(0.1, 0.2)],
+            [C64::new(-0.1, 0.05), C64::new(0.08, -0.03)],
+        ];
+        let tones = [0, 1].map(|i| HarmonicWindingTone {
+            frequency: &frequencies[i],
+            currents_a: &currents[i],
+        });
+        let original = [0, 1].map(|i| {
+            frequencies[i]
+                .response(&currents[i], &mut || false)
+                .unwrap()
+        });
+        let bank = model
+            .prepare_exposure(&tones, limits(), &mut || false)
+            .unwrap();
+        let got = bank
+            .observe(
+                HarmonicWindow::new(-0.029, core::f64::consts::TAU / 12.0).unwrap(),
+                &mut || false,
+            )
+            .unwrap();
+        near(
+            got.mean_dissipated_power_w,
+            original.iter().map(|r| r.mean_dissipated_power_w()).sum(),
+        );
+        near(
+            got.mean_magnetic_energy_j,
+            original.iter().map(|r| r.mean_magnetic_energy_j).sum(),
+        );
+        near(
+            got.mean_supplied_power_w,
+            original.iter().map(|r| r.mean_supplied_power_w).sum(),
+        );
+        assert!(got.magnetic_energy_change_j.abs() < 1e-12);
+    }
+
+    #[test]
+    fn equal_frequency_currents_combine_before_large_cancelled_fields_are_recovered() {
+        let source = common::source(true, 18.0);
+        let problem = common::problem(&source, 0.6);
+        let basis = basis(&problem, 0.4);
+        let model = prepared(&basis, &source);
+        let frequency = model.at_frequency(30.0, &mut || false).unwrap();
+        let large = 2.0_f64.powi(54);
+        let currents = [
+            [C64::from_re(large), C64::ZERO],
+            [C64::new(0.125, 0.05), C64::new(0.03, -0.02)],
+            [C64::from_re(-large), C64::ZERO],
+        ];
+        let tones = [0, 1, 2].map(|i| HarmonicWindingTone {
+            frequency: &frequency,
+            currents_a: &currents[i],
+        });
+        let bank = model
+            .prepare_exposure(&tones, limits(), &mut || false)
+            .unwrap();
+        let single = model
+            .prepare_exposure(&tones[1..2], limits(), &mut || false)
+            .unwrap();
+        assert_eq!(bank.distinct_frequencies(), 1);
+        let window = HarmonicWindow::new(0.0, 1e-8).unwrap();
+        let got = bank.observe(window, &mut || false).unwrap();
+        let expected = single.observe(window, &mut || false).unwrap();
+        assert_eq!(
+            got.mean_dissipated_power_w,
+            expected.mean_dissipated_power_w
+        );
+        assert_eq!(got.mean_magnetic_energy_j, expected.mean_magnetic_energy_j);
+        assert_eq!(got.supplied_work_j, expected.supplied_work_j);
+        // A subcycle current quadrature is not automatically its cycle average.
+        let cycle = frequency.response(&currents[1], &mut || false).unwrap();
+        assert!((got.mean_dissipated_power_w - cycle.mean_dissipated_power_w()).abs() > 1e-3);
+    }
+
+    #[test]
+    fn solid_winding_total_current_heat_retains_cross_frequency_terms() {
+        let sigma = 18.0;
+        let source = common::source(false, sigma);
+        let problem = common::problem(&source, 0.6);
+        let basis = PlanarIncrementalWindingBasis::new(
+            &problem,
+            vec![vec![1.0, 1.0, 1.0, 1.0, -1.0, -1.0, -1.0, -1.0]],
+            &common::boundary(),
+            vec![0.0],
+            vec![0.03],
+            &[0.0; 8],
+            incremental_config(),
+            common::material::controls().nonlinear,
+            &mut || false,
+        )
+        .unwrap();
+        let conductor =
+            common::material::conductor(&source, 300.0, ElectricalPropertyBasis::Resistivity);
+        let eddies = (0..8)
+            .map(|triangle| EddyConductor {
+                triangle,
+                region: if triangle < 4 { 7 } else { 9 },
+                conductor: conductor.clone(),
+            })
+            .collect();
+        let model = PlanarHarmonicWindings::new_with_solid_regions(
+            &basis,
+            eddies,
+            &[],
+            vec![],
+            vec![
+                SolidWindingRegion {
+                    region: 7,
+                    winding: 0,
+                    signed_turns: 1.0,
+                },
+                SolidWindingRegion {
+                    region: 9,
+                    winding: 0,
+                    signed_turns: -1.0,
+                },
+            ],
+            controls(),
+            &mut || false,
+        )
+        .unwrap();
+        let omegas = [11.0, 19.0];
+        let frequencies = omegas.map(|w| model.at_frequency(w, &mut || false).unwrap());
+        let currents = [[C64::new(0.2, -0.1)], [C64::new(-0.1, 0.07)]];
+        let tones = [0, 1].map(|i| HarmonicWindingTone {
+            frequency: &frequencies[i],
+            currents_a: &currents[i],
+        });
+        let bank = model
+            .prepare_exposure(&tones, limits(), &mut || false)
+            .unwrap();
+        let window = HarmonicWindow::new(0.014, 0.085).unwrap();
+        let got = bank.observe(window, &mut || false).unwrap();
+        // Independent uniform-current-constrained mode: A=I/(12-i*omega*sigma/6).
+        // E at the two exterior vertices and centre is I/sigma + i*omega*(A-A/3).
+        let fields = [0, 1].map(|j| {
+            let a = currents[j][0] / C64::new(12.0, -omegas[j] * sigma / 6.0);
+            let circulation = C64::new(-omegas[j] * a.im, omegas[j] * a.re);
+            let drive = currents[j][0].scale(1.0 / sigma);
+            [
+                drive - circulation.scale(1.0 / 3.0),
+                drive - circulation.scale(1.0 / 3.0),
+                drive + circulation.scale(2.0 / 3.0),
+            ]
+        });
+        for cell in &got.cells {
+            assert!(matches!(
+                cell.source,
+                HarmonicWindingHeatSource::Solid { .. }
+            ));
+            // Independent three-point degree-two triangle quadrature at each
+            // time, instead of the native mass-matrix product formula.
+            let expected = sigma
+                * cell.volume_m3
+                * integrate(window, |time| {
+                    let electric: [f64; 3] = std::array::from_fn(|k| {
+                        (0..2).map(|j| signal(fields[j][k], omegas[j], time)).sum()
+                    });
+                    (0..3)
+                        .map(|q| {
+                            (0..3)
+                                .map(|k| electric[k] * if k == q { 2.0 / 3.0 } else { 1.0 / 6.0 })
+                                .sum::<f64>()
+                                .powi(2)
+                                / 3.0
+                        })
+                        .sum()
+                });
+            near(cell.mean_power_w, expected);
+        }
+        near(
+            got.mean_dissipated_power_w,
+            got.cells.iter().map(|c| c.mean_power_w).sum(),
+        );
+        near(
+            got.supplied_work_j,
+            got.dissipated_heat_j + got.magnetic_energy_change_j,
+        );
+    }
+
+    #[test]
+    fn source_budget_window_and_cancellation_refusals_preserve_original_fields() {
+        let source = common::source(true, 18.0);
+        let problem = common::problem(&source, 0.6);
+        let basis = basis(&problem, 2.0);
+        let model = prepared(&basis, &source);
+        let other = prepared(&basis, &source);
+        let frequency = model.at_frequency(30.0, &mut || false).unwrap();
+        let foreign = other.at_frequency(30.0, &mut || false).unwrap();
+        let current = [C64::new(0.1, 0.2); 2];
+        let tone = HarmonicWindingTone {
+            frequency: &frequency,
+            currents_a: &current,
+        };
+        assert!(
+            model
+                .prepare_exposure(
+                    &[HarmonicWindingTone {
+                        frequency: &foreign,
+                        currents_a: &current
+                    }],
+                    limits(),
+                    &mut || false
+                )
+                .is_err()
+        );
+        let mut budget = limits();
+        budget.maximum_pair_products = 0;
+        assert!(
+            model
+                .prepare_exposure(&[tone], budget, &mut || false)
+                .is_err()
+        );
+        budget = limits();
+        budget.maximum_workspace_bytes = 1;
+        assert!(
+            model
+                .prepare_exposure(&[tone], budget, &mut || false)
+                .is_err()
+        );
+        let bank = model
+            .prepare_exposure(&[tone], limits(), &mut || false)
+            .unwrap();
+        assert!(
+            bank.observe(
+                HarmonicWindow::with_profile(0.0, 0.1, HarmonicWindowProfile::Triangular).unwrap(),
+                &mut || false
+            )
+            .is_err()
+        );
+        let window = HarmonicWindow::new(0.0, 0.1).unwrap();
+        let original = bank.observe(window, &mut || false).unwrap();
+        let mut polls = 0;
+        assert!(matches!(
+            bank.observe(window, &mut || {
+                polls += 1;
+                polls > 20
+            }),
+            Err(HarmonicWindingError::Cancelled)
+        ));
+        let replay = bank.observe(window, &mut || false).unwrap();
+        assert_eq!(replay.supplied_work_j, original.supplied_work_j);
+        let dark = model
+            .prepare_exposure(&[], limits(), &mut || false)
+            .unwrap();
+        let got = dark.observe(window, &mut || false).unwrap();
+        assert_eq!(got.dissipated_heat_j, 0.0); // nonzero DC bias is not extra AC heat
+        assert_eq!(got.mean_magnetic_energy_j, 0.0);
+        assert_eq!(got.supplied_work_j, 0.0);
+        assert_eq!(got.cells.len(), 8);
+    }
+}

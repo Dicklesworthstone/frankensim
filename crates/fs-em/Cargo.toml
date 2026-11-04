@@ -12,6 +12,7 @@ layer = "L3"
 
 [features]
 plane-wave = ["dep:fs-fft"]
+harmonic-exposure = ["dep:fs-fft"]
 
 [dependencies]
 fs-math = { path = "../fs-math" }
