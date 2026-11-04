@@ -1,0 +1,100 @@
+frankensim-flue-performance-v1
+clock 288000 48000
+output 120000 5 1000000
+gas pack breath-woodwind-exhaled-coltman1966-nederveen1969
+exterior 293.15 101325 0
+network 25 24
+duct_node inlet
+duct_node junction
+duct_node reflection 1
+duct_node junction
+duct_node junction
+duct_node junction
+duct_node junction
+duct_node reflection 1
+duct_node junction
+duct_node reflection 1
+duct_node junction
+duct_node reflection 1
+duct_node junction
+duct_node reflection -1
+duct_node junction
+duct_node reflection -1
+duct_node junction
+duct_node reflection -1
+duct_node junction
+duct_node reflection -1
+duct_node junction
+duct_node reflection -1
+duct_node junction
+duct_node junction
+duct_node reflection -1
+duct_section 0 1 0.006029684935409091 0.003800524840045454 1e-10
+duct_section 1 2 0.0020853608636363635 0.00890358420909091 1e-10
+duct_section 1 3 0.03397778189772727 0.008845919447818183 1e-10
+duct_section 3 4 0.03397778189772727 0.008829236560909092 1e-10
+duct_section 4 5 0.03397778189772727 0.008789614704500001 1e-10
+duct_section 5 6 0.03397778189772727 0.008646812819272726 1e-10
+duct_section 6 7 0.0042423493395454545 0.0029013716363636365 1e-10
+duct_section 6 8 0.013418843818181819 0.008449156876545455 1e-10
+duct_section 8 9 0.004310350237272728 0.0027200359090909093 1e-10
+duct_section 8 10 0.02556833754545455 0.0081782413 1e-10
+duct_section 10 11 0.0043148836304545465 0.0028560377045454546 1e-10
+duct_section 10 12 0.03191508800000001 0.00798702277559091 1e-10
+duct_section 12 13 0.004062373630227273 0.002810703772727273 1e-10 inner 0.00795111830159091 matching series
+duct_section 12 14 0.03545113468181819 0.007851020980136363 1e-10
+duct_section 14 15 0.004103627508181818 0.0026293680454545455 1e-10 inner 0.007683194764545455 matching series
+duct_section 14 16 0.02883238063636364 0.007483906800272728 1e-10
+duct_section 16 17 0.004247789411363636 0.0029013716363636365 1e-10 inner 0.007312363202272727 matching series
+duct_section 16 18 0.026565684045454546 0.007119693992045455 1e-10
+duct_section 18 19 0.004466298962727273 0.0024253653522727276 1e-10 inner 0.006867183991818182 matching series
+duct_section 18 20 0.030464402181818184 0.0065891056540454546 1e-10
+duct_section 20 21 0.00815004359440909 0.0023800314204545456 1e-10 inner 0.0063568145874090915 matching series
+duct_section 20 22 0.02608215232868182 0.00605516260509091 1e-10
+duct_section 22 23 0.02608215232868182 0.005657040015863636 1e-10
+duct_section 23 24 0.02608215232868182 0.005629567653181819 1e-10
+radiation compact-baffled
+flue 0.010880143636363637 0.000960172675909091 0.004170721727272727 0.0001319217415909091 0 0
+windway none
+mouth_loss contraction 0.9 0.3 Auvray2012-JASA131-TableI-explored-range-0.5-0.9:alpha_vc-0.9-top-of-range-NOT-A-FIT(MB-1033-ruling:nearest-printed-v/U-0.24)
+jet_card tonal-interim
+jet 90 1e-6 3 0
+jet_transfer auvray-2014 0.3 0.4 fits-on-one-Zen-On-Bressan-at-W/h-about-4:Auvray2014-TableI(beta-deLaCuadra,gamma-Auvray2012)
+jet_limits 0.2 0.3 65536
+jet_noise 14 1.3e-3 0.045 0.115 700
+wave_memory_bytes 67108864
+fractional 3000 0.01
+viscothermal sections 13
+loss_section 2 6 200 3000
+loss_section 3 6 200 3000
+loss_section 4 6 200 3000
+loss_section 5 6 200 3000
+loss_section 9 5 200 3000
+loss_section 11 6 200 3000
+loss_section 13 7 200 3000
+loss_section 15 5 200 3000
+loss_section 17 5 200 3000
+loss_section 19 6 200 3000
+loss_section 21 5 200 3000
+loss_section 22 5 200 3000
+loss_section 23 5 200 3000
+receiver -0.4063733648181818 0 1 4 16 2800
+outlets 24 5
+outlet 13 -0.1995599678636364 0 unflanged
+outlet 15 -0.16410883318181818 0 unflanged
+outlet 17 -0.13527645254545456 0 unflanged
+outlet 19 -0.10871076850000001 0 unflanged
+outlet 21 -0.07824636631818183 0 unflanged
+mouth_radiation -0.4063733648181818 0 4 4
+mouth_reaction window-cylinder
+window wall-cut 4 cheeks parallel ramp 0.0004624061045454546 18.6210 mass ernoult-fabre-2017
+controls 8192 100000
+gesture
+frankensim-gesture-schedule-v1
+control_rate_hz	1000
+tracks	1
+track	blow	blowing-pressure
+initial	pressure-pa	0e0
+events	2
+event	0e0	5e-2	pressure-pa	3.67e2
+event	2.2e0	1.05e-2	pressure-pa	0e0
