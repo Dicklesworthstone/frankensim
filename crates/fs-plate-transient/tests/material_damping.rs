@@ -7,9 +7,11 @@ use fs_plate::{PlateMesh, PlateModel, viscosity::{
     PlateBendingViscosity, PlateViscosityBudget, ViscousPlateSection,
 }};
 use fs_plate_transient::{NoPlateLoad, PlateDynamics, PlateDynamicsError};
-use fs_solver::FlexiblePreconditioner;
+use fs_solver::{FlexiblePreconditioner, NewtonKrylovConfig};
 use fs_time::galpha::{
-    GeneralizedAlpha, SecondOrderOperatorWeights, SecondOrderProblem, SecondOrderState, galpha_step,
+    GeneralizedAlpha, ImplicitSolveConfig, OperatorGeneralizedAlpha, SecondOrderOperatorWeights,
+    SecondOrderProblem, SecondOrderState, galpha_step,
+    initialization::{initial_workspace_components, second_order_acceleration},
     second_order_adjoint::SecondOrderVjp,
 };
 
@@ -141,6 +143,77 @@ fn midpoint_transient_matches_dense_steps_and_exact_material_work_balance() {
     }
     assert!(total_loss>0.01*initial);
     assert!((initial-energy(&actual)-total_loss).abs()<1e-8*initial);
+}
+
+#[test]
+fn preloaded_plate_retains_material_damping_in_initialization_and_step() {
+    let (mesh, plate) = moving::build_plate().unwrap();
+    let law = loss(&mesh, &plate);
+    let p = [1.1, 0.9, 0.0, 0.0, 0.0];
+    let model = dynamics(&plate, &law, p);
+    let (m, c, k) = dense_operators(&plate, &law, p);
+    let n = plate.free;
+    let preload: Vec<_> = (0..n)
+        .map(|i| 1e-4 * (1.0 + 0.25 * (i % 3) as f64))
+        .collect();
+    let velocity: Vec<_> = (0..n).map(|i| (0.37 * i as f64 + 0.2).sin()).collect();
+    let viscous_force = dense_action(&c, &velocity);
+    let acceleration: Vec<_> = (0..n)
+        .map(|i| -viscous_force[i] / m[n * i + i])
+        .collect();
+    let mut forcing = vec![0.0; n];
+    model.internal_force(&preload, &mut forcing);
+    // Keep the actual preload inside small-deflection kinematics. Tiny motion
+    // makes C v unresolved beside K q; compare its normalized response with an
+    // independent unit-amplitude system expressed relative to equilibrium.
+    let scale = 1e-20;
+    let initial_velocity: Vec<_> = velocity.iter().map(|v| scale * v).collect();
+    let initial = second_order_acceleration(
+        &model,
+        &preload,
+        &initial_velocity,
+        &forcing,
+        &model.mass_preconditioner(),
+        moving::initial_config(),
+        initial_workspace_components(n, 0, moving::initial_config()).unwrap(),
+        &mut || false,
+    )
+    .unwrap();
+    let normalized =
+        |values: &[f64]| values.iter().map(|value| value / scale).collect::<Vec<_>>();
+    close(&normalized(&initial.value), &acceleration, 1e-11);
+    for rho in [0.4, 1.0] {
+        let method = OperatorGeneralizedAlpha::new(
+            n,
+            moving::STEP,
+            rho,
+            ImplicitSolveConfig {
+                newton: NewtonKrylovConfig {
+                    absolute_tolerance: 1e-11 * scale,
+                    relative_tolerance: 1e-11,
+                    linear_restart: n,
+                    max_linear_cycles: 4,
+                    forcing_minimum: 1e-12,
+                    forcing_maximum: 1e-10,
+                    ..NewtonKrylovConfig::default()
+                },
+                max_newton_iterations: 8,
+            },
+        );
+        let mut actual = SecondOrderState::new(0.0, &preload, &initial_velocity, &initial.value);
+        method.step(&mut actual, &model, &forcing).unwrap();
+        let mut expected = SecondOrderState::new(0.0, &vec![0.0; n], &velocity, &acceleration);
+        let dense = GeneralizedAlpha::new(&m, &c, &k, n, moving::STEP, rho);
+        galpha_step(
+            &dense,
+            &mut expected.q,
+            &mut expected.v,
+            &mut expected.a,
+            &vec![0.0; n],
+        );
+        close(&normalized(&actual.v), &expected.v, 2e-8);
+        close(&normalized(&actual.a), &expected.a, 2e-8);
+    }
 }
 
 #[test]

@@ -21,7 +21,9 @@ use fs_solver::FlexiblePreconditioner;
 use fs_sparse::{Csr, DirectOrdering, LdltError, LdltOptions, SymbolicLdlt};
 use fs_time::galpha::second_order_adjoint::SecondOrderVjp;
 use fs_time::galpha::second_order_adjoint::trajectory::StructuralTrajectoryModel;
-use fs_time::galpha::{SecondOrderOperatorWeights, SecondOrderProblem};
+use fs_time::galpha::{
+    SecondOrderOperatorWeights, SecondOrderProblem, linear_resistance_balance,
+};
 
 /// Applied generalized forces in the reduced `(w, wx, wy)` coordinates.
 /// Callbacks are pure at a fixed parameter point, overwrite all outputs, and
@@ -531,6 +533,17 @@ impl<L: PlateLoad + ?Sized> SecondOrderProblem for PlateDynamics<'_, L> {
     }
     fn tangent_apply(&self, _: &[f64], input: &[f64], output: &mut [f64]) {
         self.internal_force(input, output);
+    }
+    fn resistance_balance(
+        &self,
+        q_base: &[f64],
+        dq: &[f64],
+        fraction: f64,
+        v: &[f64],
+        forcing: &[f64],
+        output: &mut [f64],
+    ) {
+        linear_resistance_balance(self, q_base, dq, fraction, v, forcing, output);
     }
     fn preconditioner_apply(
         &self,

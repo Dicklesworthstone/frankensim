@@ -293,6 +293,18 @@ where claimed below.
   physical residual, Jacobian and preconditioner weights unchanged and avoids
   two temporary vectors per residual/Jacobian evaluation. Position remains an
   ordinary `f64`, so sub-ULP position accumulation is not claimed.
+  `SecondOrderProblem::resistance_balance` also retains the separate stage
+  increment when evaluating resistance minus applied load. Its default calls
+  the complete nonlinear resistance at the same fused stage coordinate.
+  Declared linear models can use `linear_resistance_balance`, also used by the
+  linear adapter, to subtract `K q_base - f` before adding the incremental
+  elastic force and full `C v`. Consistent acceleration uses the same balance
+  at zero increment; Newton and adjoint partials remain the original physical
+  derivatives. This preserves small damping and acceleration around balanced
+  preloads without claiming accumulation below absolute-displacement resolution.
+  The preload regressions in `operator_integrators` and
+  `generalized_alpha_initialization` compare coupled nonproportional damping
+  with independent equilibrium-relative dense dynamics (G3).
   If the initial explicit predictor fails the model's stage admission, one
   bounded retry seeds the original configuration by negating the Newmark
   predictor drift. The resulting stage velocity is admitted independently;

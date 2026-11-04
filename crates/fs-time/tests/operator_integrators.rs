@@ -235,6 +235,42 @@ fn structural_dense_operator_agreement_and_split_replay() {
     );
 }
 
+#[test]
+fn structural_preload_preserves_damping_and_elastic_stage_increments() {
+    let mass = [2.0, 0.5, 0.5, 1.5];
+    let damping = [0.5, 0.125, 0.125, 0.75];
+    let stiffness = [4.0, 1.0, 1.0, 3.0];
+    let mass_op = DenseOp::new(2, &mass);
+    let damping_op = DenseOp::new(2, &damping);
+    let stiffness_op = DenseOp::new(2, &stiffness);
+    let system = LinearSecondOrderSystem::new(&mass_op, &damping_op, &stiffness_op);
+    let preload = [2.0_f64.powi(56), -2.0_f64.powi(55)];
+    let mut forcing = [0.0; 2];
+    stiffness_op.apply(&preload, &mut forcing);
+    let v0 = [0.75, -0.5];
+    // Consistent acceleration from the independent 2x2 solve M a0 = -C v0.
+    let a0 = [-39.0 / 176.0, 23.0 / 88.0];
+
+    for h in [0.001, 0.1, 0.5] {
+        for rho in [0.0, 0.4, 1.0] {
+            // The equilibrium-relative dense system has no large force or
+            // displacement to cancel and retains the full nonproportional C.
+            let dense = GeneralizedAlpha::new(&mass, &damping, &stiffness, 2, h, rho);
+            let (mut q, mut v, mut a) = ([0.0; 2], v0, a0);
+            galpha_step(&dense, &mut q, &mut v, &mut a, &[0.0; 2]);
+            let mut state = SecondOrderState::new(0.0, &preload, &v0, &a0);
+            OperatorGeneralizedAlpha::new(2, h, rho, tight_newton())
+                .step(&mut state, &system, &forcing)
+                .unwrap();
+            assert_close(&state.v, &v, 3e-11);
+            assert_close(&state.a, &a, 3e-11);
+            // Only this step's resolved dynamics are claimed: absolute f64
+            // positions cannot accumulate these sub-ULP displacements.
+            assert_same_bits(&state.q, &preload);
+        }
+    }
+}
+
 fn structural_error(h: f64, operator_path: bool) -> f64 {
     let steps = (1.0 / h).round() as usize;
     let mass = [1.0];

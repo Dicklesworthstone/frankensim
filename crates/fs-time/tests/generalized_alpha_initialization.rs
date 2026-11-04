@@ -1,9 +1,9 @@
 //! G3/G4: consistent initialization, its IFT pullback, and the full step chain.
-use fs_solver::{FlexiblePreconditioner, NewtonKrylovConfig};
+use fs_solver::{FlexiblePreconditioner, LinearOp, NewtonKrylovConfig};
 use fs_time::galpha::{
     FirstOrderGeneralizedAlpha, FirstOrderProblem, FirstOrderState, GeneralizedAlpha,
-    ImplicitSolveConfig, OperatorFirstOrderGeneralizedAlpha, OperatorGeneralizedAlpha,
-    SecondOrderProblem, SecondOrderState,
+    ImplicitSolveConfig, LinearSecondOrderSystem, OperatorFirstOrderGeneralizedAlpha,
+    OperatorGeneralizedAlpha, SecondOrderProblem, SecondOrderState,
     adjoint::{FirstOrderAdjointConfig, FirstOrderVjp},
     first_order_galpha_step, galpha_step,
     initialization::{
@@ -302,6 +302,44 @@ fn second_dense(x: [f64; 8]) -> [f64; 2] {
             x[5] - internal[1] - damping[1],
         ],
     )
+}
+
+#[test]
+fn consistent_acceleration_preserves_damping_against_large_preload() {
+    struct Matrix([f64; 4]);
+    impl LinearOp for Matrix {
+        fn n(&self) -> usize {
+            2
+        }
+        fn apply(&self, x: &[f64], out: &mut [f64]) {
+            out.copy_from_slice(&multiply(self.0, x));
+        }
+    }
+    let mass = Matrix([2.0, 0.5, 0.5, 1.5]);
+    let damping = Matrix([0.5, 0.125, 0.125, 0.75]);
+    let stiffness = Matrix([4.0, 1.0, 1.0, 3.0]);
+    let system = LinearSecondOrderSystem::new(&mass, &damping, &stiffness);
+    let velocity = [0.75, -0.5];
+    let viscous_force = multiply(damping.0, &velocity);
+    let expected = dense_solve(mass.0, [-viscous_force[0], -viscous_force[1]]);
+    for displacement in [[0.0; 2], [2.0_f64.powi(56), -2.0_f64.powi(55)]] {
+        let forcing = multiply(stiffness.0, &displacement);
+        let result = second_order_acceleration(
+            &system,
+            &displacement,
+            &velocity,
+            &forcing,
+            &Preconditioner(1.0),
+            config(),
+            initial_workspace_components(2, 0, config()).unwrap(),
+            &mut || false,
+        )
+        .unwrap();
+        assert!(result.report.converged);
+        for (actual, expected) in result.value.iter().zip(expected) {
+            close(*actual, expected, 1e-12);
+        }
+    }
 }
 
 #[test]

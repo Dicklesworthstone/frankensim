@@ -305,13 +305,13 @@ where
     poll(cancelled)?;
     admission.map_err(InitialSolveError::ModelRefused)?;
     let mut rhs = vec![f64::NAN; displacement.len()];
-    model.resistance(displacement, velocity, &mut rhs);
+    model.resistance_balance(displacement, displacement, 0.0, velocity, forcing, &mut rhs);
     poll(cancelled)?;
     if !finite(&rhs) {
         return Err(InitialSolveError::NonFiniteOutput);
     }
-    for (value, load) in rhs.iter_mut().zip(forcing) {
-        *value = *load - *value;
+    for value in &mut rhs {
+        *value = -*value;
     }
     solve(
         &rhs,

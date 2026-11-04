@@ -43,6 +43,17 @@ prestress, stiffener loss or numerical integration dissipation. This is a
 linear Kelvin--Voigt spatial law within the declared material band; it supplies
 no additional material-parameter gradients or hereditary constitutive state.
 
+`PlateDynamics` uses the shared `fs-time::galpha::linear_resistance_balance`
+for consistent acceleration and implicit stages. Applied preload is subtracted
+before the incremental elastic force and full damping force are added, including
+the original attached material-viscosity matrix. The same original tangent,
+transpose and parameter actions remain authoritative; nonlinear impact models
+retain the complete nonlinear resistance path. The material-damping preload
+regression compares normalized tiny motion about a small-deflection equilibrium
+with independent dense dynamics. This preserves the current stage's forces and
+velocity/acceleration, while absolute `f64` displacement still cannot accumulate
+motion below its representable spacing.
+
 `tests/material_damping.rs` compares full sparse primal/transposed actions and
 both effective preconditioners with independent dense matrices, checks the
 four residual parameter derivatives while holding material C fixed, and

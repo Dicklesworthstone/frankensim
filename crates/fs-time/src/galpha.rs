@@ -387,6 +387,42 @@ pub trait SecondOrderProblem {
         }
     }
 
+    /// Overwrite with `R(q_base + fraction * dq, v) - forcing`.
+    ///
+    /// Split displacement coordinates retain a resolved stage increment even
+    /// when adding it to the absolute displacement would round it away. The
+    /// default reconstructs the same fused stage coordinate used by admission
+    /// and derivative callbacks, then calls the complete `resistance` override.
+    /// A model may instead evaluate the algebraically identical balance with
+    /// preload cancellation before small elastic/dissipative forces are added.
+    /// Its displacement/velocity partials and parameter VJPs must still match
+    /// that same physical resistance; this hook introduces no new force law.
+    /// A zero `fraction` evaluates the base displacement without using `dq`.
+    /// Linear models can delegate to [`linear_resistance_balance`].
+    fn resistance_balance(
+        &self,
+        q_base: &[f64],
+        dq: &[f64],
+        fraction: f64,
+        v: &[f64],
+        forcing: &[f64],
+        output: &mut [f64],
+    ) {
+        if fraction == 0.0 {
+            self.resistance(q_base, v, output);
+        } else {
+            let q: Vec<f64> = q_base
+                .iter()
+                .zip(dq)
+                .map(|(&base, &increment)| fraction.mul_add(increment, base))
+                .collect();
+            self.resistance(&q, v, output);
+        }
+        for (value, force) in output.iter_mut().zip(forcing) {
+            *value -= force;
+        }
+    }
+
     /// Overwrite with the partial R_q(q,v) direction, holding velocity fixed.
     fn resistance_displacement_apply(
         &self,
@@ -434,6 +470,42 @@ pub trait SecondOrderProblem {
         output: &mut [f64],
     ) {
         output.copy_from_slice(residual);
+    }
+}
+
+/// Evaluate the split force balance for a declared linear structural model.
+///
+/// Requires state-independent stiffness/damping with `r(q) = K q` and
+/// `R(q,v) = K q + C v`. The original internal-force, tangent and damping
+/// actions are reused; the applied preload is subtracted before adding the
+/// increment's elastic force and physical damping. This preserves small
+/// dynamic forces when `K q_base` is large and nearly balanced by `forcing`.
+/// The stage coordinate is `q_base + fraction * dq`; a zero `fraction` skips
+/// its tangent action. One dimension-sized scratch vector is reused.
+pub fn linear_resistance_balance<P: SecondOrderProblem + ?Sized>(
+    problem: &P,
+    q_base: &[f64],
+    dq: &[f64],
+    fraction: f64,
+    v: &[f64],
+    forcing: &[f64],
+    output: &mut [f64],
+) {
+    problem.internal_force(q_base, output);
+    for (value, force) in output.iter_mut().zip(forcing) {
+        *value -= force;
+    }
+    let mut force = vec![f64::NAN; problem.dimension()];
+    if fraction != 0.0 {
+        problem.tangent_apply(q_base, dq, &mut force);
+        for (value, increment) in output.iter_mut().zip(&force) {
+            *value = fraction.mul_add(*increment, *value);
+        }
+        force.fill(f64::NAN);
+    }
+    problem.damping_apply(v, &mut force);
+    for (value, damping) in output.iter_mut().zip(force) {
+        *value += damping;
     }
 }
 
@@ -491,6 +563,18 @@ where
 
     fn tangent_apply(&self, _q: &[f64], direction: &[f64], output: &mut [f64]) {
         self.stiffness.apply(direction, output);
+    }
+
+    fn resistance_balance(
+        &self,
+        q_base: &[f64],
+        dq: &[f64],
+        fraction: f64,
+        v: &[f64],
+        forcing: &[f64],
+        output: &mut [f64],
+    ) {
+        linear_resistance_balance(self, q_base, dq, fraction, v, forcing, output);
     }
 }
 
@@ -776,24 +860,34 @@ impl<P: SecondOrderProblem + ?Sized> NonlinearProblem for StructuralStepResidual
     fn residual(&self, correction: &[f64], output: &mut [f64]) {
         let method = self.method;
         let mut q_eval = vec![0.0; method.n];
+        let mut q_increment = vec![0.0; method.n];
         let mut v_eval = vec![0.0; method.n];
         let mut a_eval = vec![0.0; method.n];
         for i in 0..method.n {
             let (dq, dv, acceleration) =
                 structural_increment(method, self.v0[i], self.a0[i], correction[i]);
             q_eval[i] = (1.0 - method.alpha_f).mul_add(dq, self.q0[i]);
+            q_increment[i] = dq;
             v_eval[i] = (1.0 - method.alpha_f).mul_add(dv, self.v0[i]);
             a_eval[i] = (1.0 - method.alpha_m).mul_add(acceleration, method.alpha_m * self.a0[i]);
         }
-        let mut mass = vec![0.0; method.n];
-        let mut resistance = vec![0.0; method.n];
         if !self.admit_stage(&q_eval, &v_eval, output) {
             return;
         }
+        drop(q_eval);
+        let mut mass = vec![f64::NAN; method.n];
         self.problem.mass_apply(&a_eval, &mut mass);
-        self.problem.resistance(&q_eval, &v_eval, &mut resistance);
+        output.fill(f64::NAN);
+        self.problem.resistance_balance(
+            self.q0,
+            &q_increment,
+            1.0 - method.alpha_f,
+            &v_eval,
+            self.forcing,
+            output,
+        );
         for i in 0..method.n {
-            output[i] = mass[i] + resistance[i] - self.forcing[i];
+            output[i] += mass[i];
         }
     }
 
