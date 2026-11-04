@@ -13,7 +13,8 @@ pub mod regions;
 pub mod mechanical;
 
 use fs_feec::acoustics::helmholtz::heterogeneous::{
-    HeterogeneousHelmholtzFe, HeterogeneousProbe,
+    ElementFace, HeterogeneousHelmholtzFe, HeterogeneousProbe, HeterogeneousSurfaceProbe,
+    SurfaceProbeLimits,
 };
 use fs_feec::acoustics::helmholtz::{AcousticFeError, HelmholtzFe, Medium};
 use fs_material::MaterialError;
@@ -285,25 +286,69 @@ impl<'f, 'c, 's> AxialGasInterior<'f, 'c, 's> {
         element: usize,
         barycentric: [f64; 4],
     ) -> Result<HeterogeneousProbe<'_, 'f, 'c>, AxialGasInteriorError> {
-        self.operator.probe(element, barycentric, &mut |element, point| {
-            if let Some(state) = self.source.uniform_state() {
-                return Ok(Medium {
-                    density_kg_m3: state.state().density,
-                    sound_speed_m_s: state.state().sound_speed,
-                });
-            }
-            if self.source.sampling() == AxialGasSampling::CellwiseConstant {
-                return self.cell_media.get(element).copied().flatten().ok_or_else(|| {
-                    AcousticFeError::InvalidInput {
-                        what: "cellwise acoustic element has no original assembled medium",
-                    }.into()
-                });
-            }
-            let state = self.source.state_at(self.embedding.coordinate_m(point)?)?;
-            Ok(Medium {
+        self.operator
+            .probe(element, barycentric, &mut |element, point| {
+                self.medium_at(element, point)
+            })
+    }
+
+    /// Integrate signed outward harmonic or instantaneous power through original
+    /// element faces, using the SAME source and element-side state as assembly.
+    ///
+    /// Continuous fields resolve their primitives at every surface quadrature
+    /// point. Cellwise fields use the selected tetrahedron's retained medium,
+    /// including at the inlet and discontinuous station planes. No material is
+    /// requeried when the prepared probe evaluates another pressure/time field.
+    /// Face and point budgets, quadrature convergence and duplicate-face refusal
+    /// are those of the original finite-element surface owner.
+    pub fn surface_probe(
+        &self,
+        faces: &[ElementFace],
+        quadrature_order: usize,
+        limits: SurfaceProbeLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<HeterogeneousSurfaceProbe<'_, 'f, 'c>, AxialGasInteriorError> {
+        let mut was_cancelled = false;
+        let result = self.operator.surface_probe(
+            faces,
+            quadrature_order,
+            limits,
+            &mut |element, point| self.medium_at(element, point),
+            &mut || {
+                was_cancelled |= cancelled();
+                was_cancelled
+            },
+        );
+        if was_cancelled {
+            Err(AxialGasInteriorError::Cancelled)
+        } else {
+            result
+        }
+    }
+
+    fn medium_at(
+        &self,
+        element: usize,
+        point: [f64; 3],
+    ) -> Result<Medium, AxialGasInteriorError> {
+        if let Some(state) = self.source.uniform_state() {
+            return Ok(Medium {
                 density_kg_m3: state.state().density,
                 sound_speed_m_s: state.state().sound_speed,
-            })
+            });
+        }
+        if self.source.sampling() == AxialGasSampling::CellwiseConstant {
+            return self.cell_media.get(element).copied().flatten().ok_or_else(|| {
+                AcousticFeError::InvalidInput {
+                    what: "cellwise acoustic element has no original assembled medium",
+                }
+                .into()
+            });
+        }
+        let state = self.source.state_at(self.embedding.coordinate_m(point)?)?;
+        Ok(Medium {
+            density_kg_m3: state.state().density,
+            sound_speed_m_s: state.state().sound_speed,
         })
     }
 }

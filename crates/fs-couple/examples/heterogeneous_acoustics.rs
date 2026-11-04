@@ -14,6 +14,9 @@
 //! complex peak pressure [Pa], particle velocity [m/s] and active/reactive
 //! intensity [W/m^2] at original element centroids, in exp(+i omega t).
 //! Each observation uses the same original local material as the wave equation.
+//! Standard error also reports signed outward active/reactive power through the
+//! original outlet faces. This flux is recovered from the pressure gradient;
+//! compare it with the imposed-admittance work as the mesh is refined.
 //! The rectangular cavity has length L and width/height L/5. A phased velocity on x=0
 //! excites transverse structure; x=L has a local passive impedance, while side
 //! walls are rigid. This outlet is not an exact multimode radiation condition.
@@ -26,7 +29,9 @@ mod thermochemical;
 use json::json_string;
 
 use fs_couple::cavity_modal::interior::heterogeneous::{AxialGasEmbedding, AxialGasInterior};
-use fs_feec::acoustics::helmholtz::heterogeneous::{BoundaryAdmittance, HarmonicLimits};
+use fs_feec::acoustics::helmholtz::heterogeneous::{
+    BoundaryAdmittance, ElementFace, HarmonicLimits, SurfaceProbeLimits,
+};
 use fs_feec::acoustics::helmholtz::{HelmholtzFe, Medium};
 use fs_matdb::QueryPoint;
 use fs_material::gas_field::{AxialGasField, input::PrimitiveGasColumns};
@@ -153,6 +158,32 @@ fn main() -> Result<()> {
         })
         .collect::<Vec<_>>();
     let result = prepared.solve(&velocities, &mut || false)?;
+    let outlet_selection: Vec<_> = geometry
+        .tetrahedra()
+        .iter()
+        .enumerate()
+        .filter_map(|(element, tet)| {
+            let mut face = tet
+                .iter()
+                .copied()
+                .filter(|&vertex| positions[vertex as usize][0] == length);
+            Some(ElementFace {
+                element,
+                vertices: [face.next()?, face.next()?, face.next()?],
+            })
+        })
+        .collect();
+    let outlet_probe = acoustic.surface_probe(
+        &outlet_selection,
+        3,
+        SurfaceProbeLimits::default(),
+        &mut || false,
+    )?;
+    let outlet_power = outlet_probe.harmonic(
+        &result.pressure_pa,
+        prepared.frequency_hz(),
+        &mut || false,
+    )?;
     eprintln!(
         "{} pressure DOFs, f={} Hz, input={} W, boundary={} W, balance={} W, backward_error={}",
         geometry.ndof(),
@@ -161,6 +192,13 @@ fn main() -> Result<()> {
         result.boundary_dissipation_w,
         result.power_balance_residual_w(),
         result.backward_error
+    );
+    eprintln!(
+        "outlet flux: active_outward={} W, reactive_outward={} W, area={} m^2, quadrature_order={}",
+        outlet_power.active_power_w,
+        outlet_power.reactive_power_w,
+        outlet_probe.area_m2(),
+        outlet_probe.quadrature_order()
     );
     println!(concat!(
         "tet,x_m,y_m,z_m,pressure_re_pa,pressure_im_pa,",

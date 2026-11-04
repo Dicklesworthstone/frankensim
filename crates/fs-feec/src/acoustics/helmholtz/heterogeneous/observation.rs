@@ -91,10 +91,25 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
         material_at: &mut impl FnMut(usize, [f64; 3]) -> Result<Medium, E>,
     ) -> Result<HeterogeneousProbe<'m, 'f, 'c>, E> {
         self.validate_sample(self.ndof(), element, barycentric)?;
-        let mut position_m = [0.0; 3];
-        for (&vertex, &bary) in self.geometry.tetrahedra()[element].iter().zip(&barycentric) {
+        let vertices = self.geometry.tetrahedra()[element];
+        let mut anchor = 0;
+        for local in 1..4 {
+            if barycentric[local] > barycentric[anchor] {
+                anchor = local;
+            }
+        }
+        let origin = self.geometry.positions[vertices[anchor] as usize];
+        let mut position_m = origin;
+        // An affine map about a contributing vertex preserves vertices and
+        // constant face coordinates exactly. Summing barycentric multiples of
+        // an absolute boundary coordinate can round outside its source domain.
+        for (local, (&vertex, &bary)) in vertices.iter().zip(&barycentric).enumerate() {
+            if local == anchor || bary == 0.0 {
+                continue;
+            }
             for (axis, position) in position_m.iter_mut().enumerate() {
-                *position += bary * self.geometry.positions[vertex as usize][axis];
+                let offset = self.geometry.positions[vertex as usize][axis] - origin[axis];
+                *position = bary.mul_add(offset, *position);
             }
         }
         if position_m.iter().any(|x| !x.is_finite()) {

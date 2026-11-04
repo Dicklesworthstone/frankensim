@@ -1602,6 +1602,17 @@ Focused checks cover analytic P1–P4 gradients on skew/reordered tetrahedra,
 one-sided density-jump velocity, propagating/standing/evanescent flux, a solved
 Snell intensity mesh ladder, and transient gauge-invariant velocity/flux.
 
+`HeterogeneousHelmholtzFe::surface_probe` integrates signed outward power on
+original element faces. The selected tetrahedron fixes both material side and
+normal; duplicate physical faces refuse. Harmonic results retain active and
+reactive `integral(p conj(v_out)/2)` separately; transient results use
+`integral(p v_out)` without the half factor. Prepared normal stencils require
+no further source queries and accumulate with fixed-order double-double sums.
+Caller-visible face/point budgets and quadrature order bound preparation.
+High-order field gradients and continuous-material surface quadrature require
+their own convergence; coarse interface-flux discrepancies are not corrected
+into continuity. Reactive power is not dissipated heat.
+
 Focused regressions cover homogeneous mode recovery, a matched traveling
 wave and its energy/work, same-speed density-interface reflection, analytic
 continuous sound-speed travel time, subcritical and evanescent Snell fields

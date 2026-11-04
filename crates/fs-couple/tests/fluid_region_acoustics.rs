@@ -6,6 +6,7 @@ use std::error::Error;
 use fs_couple::cavity_modal::interior::heterogeneous::regions::{
     FluidRegionsInterior, FluidRegionsInteriorError,
 };
+use fs_feec::acoustics::helmholtz::heterogeneous::{ElementFace, SurfaceProbeLimits};
 use fs_feec::acoustics::helmholtz::{HelmholtzFe, Medium};
 use fs_feec::fixtures::two_tets;
 use fs_material::MaterialError;
@@ -82,6 +83,21 @@ fn gas_water_interface_assembles_original_physical_states_and_shared_pressure_do
             near(sample.particle_velocity_m_s[axis].re, expected_v);
             near(sample.active_intensity_w_m2[axis], 0.5 * expected_v);
         }
+        let surface = bound
+            .surface_probe(
+                &[ElementFace { element, vertices: [1, 2, 3] }],
+                3,
+                SurfaceProbeLimits::default(),
+                &mut || false,
+            )
+            .unwrap();
+        let power = surface.harmonic(&coefficients, 1.0, &mut || false).unwrap();
+        // n.A = +/-[1/2,1/2,1/2] on x+y+z=1. The shared pressure is
+        // real one, while each material retains its OWN normal velocity.
+        let sign = if element == 0 { 1.0 } else { -1.0 };
+        let expected = sign * 0.75 * expected_v;
+        near(power.active_power_w, expected);
+        assert!(power.reactive_power_w.abs() < 3e-12 * expected.abs());
     }
 
     // Volumes 1/6 and 1/3; the shared face is x+y+z=1. Vertex 0
@@ -187,6 +203,37 @@ fn one_query_per_used_source_freezes_coherent_coefficients_across_high_order_ele
         near(sample.particle_velocity_m_s[0].re,
             1.0 / (core::f64::consts::TAU * frozen.density_kg_m3()));
     }
+    let face = ElementFace { element: 0, vertices: [1, 2, 3] };
+    let surface = bound
+        .surface_probe(&[face], 4, SurfaceProbeLimits::default(), &mut || false)
+        .unwrap();
+    let power = surface.harmonic(&coefficients, 1.0, &mut || false).unwrap();
+    // On this face p=1-ix and v_x=1/(omega rho_frozen). Its area vector
+    // is [1/2,1/2,1/2] and the mean x is 1/3.
+    let expected = 0.25 / (core::f64::consts::TAU * frozen.density_kg_m3());
+    near(power.active_power_w, expected);
+    near(power.reactive_power_w, -expected / 3.0);
+    assert!(matches!(
+        bound.surface_probe(&[face], 4, SurfaceProbeLimits::default(), &mut || true),
+        Err(FluidRegionsInteriorError::Cancelled)
+    ));
+    let mut checkpoints = 0;
+    assert!(matches!(
+        bound.surface_probe(&[face], 4, SurfaceProbeLimits::default(), &mut || {
+            checkpoints += 1;
+            checkpoints >= 4
+        }),
+        Err(FluidRegionsInteriorError::Cancelled)
+    ));
+    assert!(matches!(
+        bound.surface_probe(
+            &[face],
+            4,
+            SurfaceProbeLimits { max_faces: 1, max_quadrature_points: 15 },
+            &mut || false,
+        ),
+        Err(FluidRegionsInteriorError::Interior(_))
+    ));
     assert!(matches!(bound.probe(2, [0.25; 4]), Err(FluidRegionsInteriorError::Interior(_))));
     assert!(matches!(bound.probe(0, [f64::NAN; 4]), Err(FluidRegionsInteriorError::Interior(_))));
     assert_eq!(used.queries.get(), 1);

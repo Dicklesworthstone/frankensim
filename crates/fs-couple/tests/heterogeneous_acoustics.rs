@@ -4,7 +4,9 @@
 use fs_couple::cavity_modal::interior::heterogeneous::{
     AxialGasEmbedding, AxialGasInterior, AxialGasInteriorError,
 };
-use fs_feec::acoustics::helmholtz::heterogeneous::{BoundaryAdmittance, HarmonicLimits};
+use fs_feec::acoustics::helmholtz::heterogeneous::{
+    BoundaryAdmittance, ElementFace, HarmonicLimits, SurfaceProbeLimits,
+};
 use fs_feec::acoustics::helmholtz::{HelmholtzFe, Medium};
 use fs_feec::fixtures::{kuhn_cube, single_tet};
 use fs_matdb::QueryPoint;
@@ -59,6 +61,23 @@ const PLACEHOLDER: Medium = Medium {
     density_kg_m3: 1000.0,
     sound_speed_m_s: 1500.0,
 };
+
+fn plane_faces(geometry: &HelmholtzFe<'_>, axis: usize, coordinate: f64) -> Vec<ElementFace> {
+    geometry
+        .tetrahedra()
+        .iter()
+        .enumerate()
+        .filter_map(|(element, tet)| {
+            let mut face = tet.iter().copied().filter(|&vertex| {
+                geometry.positions()[vertex as usize][axis] == coordinate
+            });
+            Some(ElementFace {
+                element,
+                vertices: [face.next()?, face.next()?, face.next()?],
+            })
+        })
+        .collect()
+}
 
 fn dense(matrix: &Csr) -> Vec<f64> {
     let mut values = vec![0.0; matrix.nrows() * matrix.ncols()];
@@ -233,12 +252,113 @@ fn material_jumps_require_conforming_tetrahedra_but_equal_cells_do_not() {
                 assert_ne!(probe.medium().density_kg_m3, endpoint.state().density,
                     "one-sided FE trace must not adopt the source endpoint's other side");
             }
+            let mut vertices = tet
+                .iter()
+                .copied()
+                .filter(|&v| positions[v as usize][0] == station);
+            let face = ElementFace {
+                element,
+                vertices: [
+                    vertices.next().unwrap(),
+                    vertices.next().unwrap(),
+                    vertices.next().unwrap(),
+                ],
+            };
+            let surface = bound
+                .surface_probe(&[face], 3, SurfaceProbeLimits::default(), &mut || false)
+                .unwrap();
+            let power = surface.harmonic(&coefficients, 1.0, &mut || false).unwrap();
+            // Each grid-2 face triangle has area 1/8. Select the side from
+            // the original cell, including where state_at chooses the other one.
+            let outward_x = if center_x < station { 1.0 } else { -1.0 };
+            let expected = outward_x * 0.125 * 0.5 * expected_v;
+            assert!((surface.area_m2() - 0.125).abs() < 1e-15);
+            assert!((power.active_power_w / expected - 1.0).abs() < 2e-12);
+            assert!((power.reactive_power_w + station * expected).abs() < 2e-12 * expected.abs());
             sampled[face_kind] += 1;
         }
     }
     assert!(sampled.into_iter().all(|count| count > 0));
     let equal = field(vec![0.0, 0.5, 1.0], vec![primitive(300.0, 1.0); 3], true);
     assert!(AxialGasInterior::new(&coarse, &equal, axis(), 3, &mut || false).is_ok());
+}
+
+#[test]
+fn continuous_source_surface_power_samples_real_positions_and_exact_outlet_boundary() {
+    let length: f64 = 0.3;
+    let source = field(
+        vec![0.0, length],
+        vec![primitive(300.0, 0.5), primitive(600.0, 0.5)],
+        false,
+    );
+    let (complex, mut positions) = kuhn_cube(1);
+    for point in &mut positions {
+        point[0] *= length;
+    }
+    let geometry = HelmholtzFe::new(&complex, &positions, 1, PLACEHOLDER).unwrap();
+    let bound = AxialGasInterior::new(&geometry, &source, axis(), 4, &mut || false).unwrap();
+    let outlet_faces = plane_faces(&geometry, 0, length);
+    assert_eq!(outlet_faces.len(), 2);
+    let endpoint = source.state_at(length).unwrap();
+
+    // This Gauss point's absolute weighted coordinate formerly rounded to
+    // 0.30000000000000004, outside the ORIGINAL source's strict interval.
+    let face = outlet_faces[0];
+    let mut barycentric = [0.0; 4];
+    for (vertex, weight) in face.vertices.into_iter().zip([
+        0.443_649_167_310_370_85,
+        0.112_701_665_379_258_3,
+        0.443_649_167_310_370_85,
+    ]) {
+        let local = geometry.tetrahedra()[face.element]
+            .iter()
+            .position(|&v| v == vertex)
+            .unwrap();
+        barycentric[local] = weight;
+    }
+    let point = bound.probe(face.element, barycentric).unwrap();
+    assert_eq!(point.position_m()[0], length);
+    assert_eq!(point.medium().density_kg_m3, endpoint.state().density);
+    assert!(source.state_at(f64::from_bits(length.to_bits() + 1)).is_err());
+
+    let outlet = bound
+        .surface_probe(&outlet_faces, 3, SurfaceProbeLimits::default(), &mut || false)
+        .unwrap();
+    let coefficients: Vec<_> = positions.iter().map(|point| C64::new(1.0, -point[0])).collect();
+    let power = outlet.harmonic(&coefficients, 1.0, &mut || false).unwrap();
+    let expected = 0.5 / (core::f64::consts::TAU * endpoint.state().density);
+    assert!((outlet.area_m2() - 1.0).abs() < 1e-14);
+    assert!((power.active_power_w / expected - 1.0).abs() < 2e-12);
+    assert!((power.reactive_power_w + length * expected).abs() < 2e-12 * expected);
+
+    // The side wall spans the temperature gradient. For this fixed-composition
+    // ideal mixture, 1/rho is linear in x: its exact surface integral equals
+    // area times the original midpoint value. A frozen cell-center sample
+    // cannot substitute for actual surface quadrature positions.
+    let side_faces = plane_faces(&geometry, 1, 0.0);
+    let side = bound
+        .surface_probe(&side_faces, 3, SurfaceProbeLimits::default(), &mut || false)
+        .unwrap();
+    let coefficients: Vec<_> = positions.iter().map(|point| C64::new(1.0, -point[1])).collect();
+    let power = side.harmonic(&coefficients, 1.0, &mut || false).unwrap();
+    let midpoint = source.state_at(0.5 * length).unwrap();
+    let expected = -0.5 * length / (core::f64::consts::TAU * midpoint.state().density);
+    assert!((side.area_m2() / length - 1.0).abs() < 1e-14);
+    assert!((power.active_power_w / expected - 1.0).abs() < 2e-12);
+    assert!(power.reactive_power_w.abs() < 2e-12 * expected.abs());
+
+    assert!(matches!(
+        bound.surface_probe(&outlet_faces, 3, SurfaceProbeLimits::default(), &mut || true),
+        Err(AxialGasInteriorError::Cancelled)
+    ));
+    let mut checkpoints = 0;
+    assert!(matches!(
+        bound.surface_probe(&outlet_faces, 3, SurfaceProbeLimits::default(), &mut || {
+            checkpoints += 1;
+            checkpoints >= outlet_faces.len() + 3
+        }),
+        Err(AxialGasInteriorError::Cancelled)
+    ));
 }
 
 #[test]

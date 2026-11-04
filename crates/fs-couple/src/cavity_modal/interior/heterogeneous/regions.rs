@@ -9,7 +9,8 @@
 //! `FluidAcoustics` interface; their phase and relaxation policies remain theirs.
 
 use fs_feec::acoustics::helmholtz::heterogeneous::{
-    HeterogeneousHelmholtzFe, HeterogeneousProbe,
+    ElementFace, HeterogeneousHelmholtzFe, HeterogeneousProbe, HeterogeneousSurfaceProbe,
+    SurfaceProbeLimits,
 };
 use fs_feec::acoustics::helmholtz::{AcousticFeError, HelmholtzFe, Medium};
 use fs_material::MaterialError;
@@ -201,16 +202,53 @@ impl<'f, 'c, 's> FluidRegionsInterior<'f, 'c, 's> {
         element: usize,
         barycentric: [f64; 4],
     ) -> Result<HeterogeneousProbe<'_, 'f, 'c>, FluidRegionsInteriorError> {
-        self.operator.probe(element, barycentric, &mut |element, _| {
-            let state = self.region_state(self.element_regions[element]).ok_or(
-                AcousticFeError::InvalidInput {
-                    what: "acoustic region has no original assembled material state",
-                },
-            )?;
-            Ok(Medium {
-                density_kg_m3: state.density_kg_m3(),
-                sound_speed_m_s: state.sound_speed_m_s(),
+        self.operator
+            .probe(element, barycentric, &mut |element, _| {
+                self.medium_at(element)
             })
+    }
+
+    /// Integrate signed outward harmonic or instantaneous power through original
+    /// element faces, using the exact frozen region snapshot from assembly.
+    ///
+    /// Each selected tetrahedron fixes the material side and outward normal.
+    /// Prepare opposite sides separately: duplicate physical faces refuse.
+    /// Original sources are never requeried, including during preparation.
+    /// Quadrature order and face/point budgets belong to the original FE owner.
+    pub fn surface_probe(
+        &self,
+        faces: &[ElementFace],
+        quadrature_order: usize,
+        limits: SurfaceProbeLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<HeterogeneousSurfaceProbe<'_, 'f, 'c>, FluidRegionsInteriorError> {
+        let mut was_cancelled = false;
+        let result = self.operator.surface_probe(
+            faces,
+            quadrature_order,
+            limits,
+            &mut |element, _| self.medium_at(element),
+            &mut || {
+                was_cancelled |= cancelled();
+                was_cancelled
+            },
+        );
+        if was_cancelled {
+            Err(FluidRegionsInteriorError::Cancelled)
+        } else {
+            result
+        }
+    }
+
+    fn medium_at(&self, element: usize) -> Result<Medium, FluidRegionsInteriorError> {
+        let state = self.region_state(self.element_regions[element]).ok_or(
+            AcousticFeError::InvalidInput {
+                what: "acoustic region has no original assembled material state",
+            },
+        )?;
+        Ok(Medium {
+            density_kg_m3: state.density_kg_m3(),
+            sound_speed_m_s: state.sound_speed_m_s(),
         })
     }
 }
