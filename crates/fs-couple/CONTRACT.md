@@ -1361,6 +1361,41 @@ receiver motion, independently inverted curved pairs, coherent source sums,
 partition invariance, finite domains, cancellation and the original PCM path.
 Native compilation and execution remain separate verification obligations.
 
+## Stationary compact fields from accepted force and volume histories
+
+`pcm_wav::observation::moving::stationary::StationaryCompactRenderer` reuses
+the original finite-history admission, physical receiver clock, source cubic
+Hermite coefficients and retarded-time endpoint reconciliation. For fixed
+sources and a fixed receiver it observes pressure, all Cartesian particle
+velocities, signed instantaneous intensity and the original `FirstOrder`
+microphone's Pa-equivalent output. Source pressure and velocity are summed
+coherently before intensity or microphone projection; a pressure node can
+still contain transverse motion and a directional-microphone signal.
+
+Each source supplies its force impulse at its FIRST retained endpoint. The
+observer integrates the exact same force cubics analytically into cached
+double-double prefix impulses and evaluates their partial-interval integrals
+at emission time. It does not reset history at callbacks, integrate on the
+audio clock, infer missing prehistory, advance mechanics or peak-normalize
+the signal. Both the monopole `Q,Qdot` terms and the complete compact-force
+`impulse,F,Fdot` terms retain their induction and near fields.
+
+The original work, history, bandwidth and payload limits also charge the
+added transfer records, impulse endpoints and full-field scratch. Callbacks
+allocate nothing and publish atomically; full-field and `PressureRenderer`
+callbacks share one finite cursor. The ordinary decimator and explicitly
+scaled PCM writer can consume microphone output without changing the physical
+source. G1/G3/G4 regression cases cover an independent polynomial primitive,
+scalar-pressure parity, explicit initial history, coherent reinforcement and
+cancellation, quadratic flux, callback partitioning, PCM output and refusal.
+
+This remains a one-way stationary compact-source model in a homogeneous
+lossless linear fluid. It refuses moving sources and inherits each source
+field owner's representable range, including individual flux. It supplies no
+source qualification, nonlinear propagation, scattering, microphone-body
+response, radiation reaction or experimental amplitude validation. Native
+Cargo execution is a separate obligation from the authored regressions.
+
 ## Full spatial circuits coupled to complete heat assemblies
 
 `conduction::heat::step_spatial_conduction_circuit_candidate` and the

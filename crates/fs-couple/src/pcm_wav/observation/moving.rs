@@ -30,6 +30,8 @@ mod motion;
 mod receiver;
 /// Native rigid-body attachments and bounded accepted acoustic histories.
 pub mod rigid;
+/// Full stationary compact fields and directional microphones on these histories.
+pub mod stationary;
 pub use motion::{CompactMotion, CompactSourceMotion};
 
 /// Immutable accepted history and a prescribed trajectory in the medium frame.
