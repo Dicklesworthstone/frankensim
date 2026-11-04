@@ -10,7 +10,9 @@
 //! Liquid inventories share one physical volume and clock. Their volumes are
 //! never added. Source laws must explicitly describe each solute in that same
 //! solvent; this owner cannot infer mixture applicability from species names.
-//! Cross-solute interactions, reactions, moving volumes and adiabatic heating
+//! Optional gas films retain independent source-backed resistances; their
+//! dilute bound also limits the summed exchanging-species gas concentration.
+//! Cross-solute interactions, Stefan flow, reactions, moving volumes and adiabatic heating
 //! are outside the independent dilute model. Both thermostats remain explicit.
 
 use super::*;
@@ -50,7 +52,8 @@ fn total(values: impl Iterator<Item = f64>) -> Result<f64> {
 /// exact same liquid volume and accepted time, and every law must retain the
 /// same original gas catalog and temperature. Each species appears once.
 /// Different diffusivities and physical films are allowed, including zero area.
-/// Optional gas-side coefficients use the SAME scalar two-film resistance.
+/// Optional gas-side coefficients or original diffusivity sources use the SAME
+/// scalar two-film resistance.
 /// Each conducting interface must fit in one common constant-total-pressure
 /// gas mixture throughout the interval; a conservative envelope may require a
 /// shorter step for opposing transfers. Zero-coefficient sealed paths supply
@@ -129,20 +132,20 @@ pub fn advance_mixture(
     // Summing separate extrema is conservative for unlike relaxation rates.
     let initial_pressure = gas.state().state().pressure;
     let final_pressure = candidate.gas().state().state().pressure;
-    if films.iter().any(|film| film.gas_side_transfer.is_some()) {
-        let active = order.iter().zip(&exchanges).filter(|(index, _)| {
-            films[**index].area_m2 > 0.0
-                && laws[**index].diffusivity_m2_s > 0.0
-                && films[**index]
-                    .gas_side_transfer
-                    .is_none_or(|k| k.value_si() > 0.0)
-        });
+    if films.iter().any(|film| film.gas_side_transfer.is_some())
+        || laws.iter().any(|law| law.gas_film.is_some())
+    {
+        // The prepared rate identifies conducting paths for either gas-film
+        // description, including an explicitly sealed film or zero area.
+        let active = exchanges
+            .iter()
+            .filter(|exchange| exchange.relaxation_rate_per_s > 0.0);
         let bulk = total(
             active
                 .clone()
-                .map(|(_, exchange)| exchange.sources[0].partial_pressure_pa),
+                .map(|exchange| exchange.sources[0].partial_pressure_pa),
         )?;
-        let interface_excess = total(active.map(|(_, exchange)| {
+        let interface_excess = total(active.map(|exchange| {
             exchange
                 .sources
                 .iter()
@@ -215,7 +218,43 @@ pub fn advance_mixture(
                         .map_err(|_| invalid("unrepresentable mixture source envelope"))?;
                     law.resolved.at_query_point(&law.source.material, &point)?;
                 }
+                if let Some(film) = &law.gas_film {
+                    for partial in [
+                        sample.partial_pressure_pa,
+                        sample.interface_partial_pressure_pa,
+                    ] {
+                        film.sample(pressure, partial)?;
+                    }
+                }
             }
+        }
+    }
+    // Independent gas films need a dilute common carrier, including when
+    // their thicknesses differ. Bound the sum of species maxima at all bulk/
+    // interface traces against the smallest declared gas-film limit. The
+    // same conservative pressure envelope covers interior composition peaks.
+    if let Some(maximum) = laws
+        .iter()
+        .filter_map(|law| {
+            law.gas_film
+                .as_ref()
+                .map(|film| film.source.maximum_mole_fraction)
+        })
+        .reduce(f64::min)
+    {
+        let partial_sum = total(exchanges.iter().map(|exchange| {
+            exchange.sources.iter().fold(0.0_f64, |maximum, sample| {
+                maximum
+                    .max(sample.partial_pressure_pa)
+                    .max(sample.interface_partial_pressure_pa)
+            })
+        }))?;
+        let fraction = finite(partial_sum / lower)?;
+        if fraction > maximum {
+            return Err(DissolvedGasError::GasFilmConcentration {
+                actual_mole_fraction: fraction,
+                maximum_mole_fraction: maximum,
+            });
         }
     }
     // A species' linear quasi-steady film is bounded by its own bulk and

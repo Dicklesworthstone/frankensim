@@ -3,7 +3,7 @@
 use super::*;
 use crate::cavitation::dissolved_gas::mixture::advance_mixture;
 
-fn species_law(
+pub(super) fn species_law(
     catalog: &ThermochemicalGasModel,
     name: &str,
     h: f64,

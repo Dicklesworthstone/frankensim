@@ -11567,6 +11567,39 @@ support, sealed-film limits, reduced liquid relaxation rate, time subdivision,
 shared-interface refusal, canonical ordering and transactional cancellation.
 
 
+### Independently sourced gas-film resistance
+
+`HenryDissolution::with_gas_film` optionally adds a separately selected
+`GasFilmSource` for the solute's diffusivity in the declared carrier gas.
+The gas coefficient `k_g = D_G/(R T delta_G)` enters the same prepared series
+resistance as `DissolutionFilm::gas_side_transfer`; selecting both gas-film
+descriptions refuses ambiguity. Independent thicknesses and diffusivities give
+`1/K_L = delta_L/D_L + H R T delta_G/D_G`. The original exact finite-pair
+relaxation, native gas reconstruction and thermostat accounts use that shared
+conductance. The default liquid-only path retains its original coefficient
+and interface admission.
+
+Actual interfacial partial pressure and concentration satisfy Henry equilibrium
+and the two films' common molar flux. Both endpoint traces retain these values,
+the gas-film material answers and each film's quasi-steady applicability ratio.
+Source support and authored dilute bounds apply to bulk and interface states.
+Simultaneous exchange retains one original carrier inventory and conservatively
+bounds the combined gas dilution and full-interval pressure support. Zero
+diffusivity seals a single film; two sealed films refuse because the interface
+state is undetermined.
+
+Four synthetic native regressions check independent series resistance and
+finite equilibrium, both film fluxes, absorption/exsolution heat, time
+subdivision, liquid-only and sealed limits, source/timescale/cancellation
+refusals, combined species dilution and permutation replay. Equivalent authored
+and sourced coefficients share the same trajectory; dual selection refuses
+without changing state. This extension assumes dilute Fick diffusion with
+admitted constant diffusivities and negligible film storage at prescribed
+temperature, fixed volumes and fixed area. Stefan flow, finite diffusion-layer
+transients, nucleation, moving bubbles and adiabatic heat feedback remain
+outside the model; a selected numerical fixture is not measured validation.
+
+
 ## Thermal Voce with physical overstress kinetics
 
 The original ThermoplasticSource and CaloricPoint now compose selected Voce saturation with linear or power-law Perzyna kinetics in either selection order. Source coefficients remain pinned over the full original caloric interval. Endpoint stress, state and consistent tangent use the joint VoceOverstressJ2 return; actual physical dt is mandatory. The shared thermal first-law account retains Q(T) storage, its coefficient work and entropy alongside positive yield/viscous dissipation. Kinetic coefficients add no recoverable energy or entropy. Numerical integration loss remains separate from heat.

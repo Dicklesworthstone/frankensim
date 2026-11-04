@@ -11,6 +11,8 @@ use fs_matdb::{
 };
 use fs_thermochem::{Composition, CompositionBasis};
 
+#[path = "tests/gas_film.rs"]
+mod gas_film;
 #[path = "tests/mixture.rs"]
 mod mixture;
 
@@ -206,6 +208,19 @@ fn finite_dissolution_and_exsolution_follow_analytic_partition_and_preserve_iner
                 false
             })
             .unwrap();
+        assert_eq!(step.relaxation_rate_per_s, lambda);
+        assert_eq!(step.gas_film_relaxation_ratio, None);
+        for sample in &step.sources {
+            assert_eq!(
+                sample.interface_partial_pressure_pa,
+                sample.partial_pressure_pa
+            );
+            assert_eq!(
+                sample.interface_concentration_mol_m3,
+                sample.equilibrium_concentration_mol_m3
+            );
+            assert!(sample.gas_film_material.is_none());
+        }
         near(liquid.dissolved_moles(), expected, 2e-15);
         near(
             gas.species_mass_kg(&id("A")).unwrap() / MW + liquid.dissolved_moles(),

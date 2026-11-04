@@ -21,12 +21,21 @@
 //! Streams use gas-side partial h in both directions; dissolution heat is
 //! assigned to the solution thermostat. The combined thermostat heat is invariant.
 //!
+//! An optional source-qualified gas film supplies k_g = D_G/(R T delta_G):
+//! K_L = 1/(delta_L/D_L + H_s^cp R T delta_G/D_G). Both film traces use
+//! one common molar flux; the bulk gas pressure is not the interface pressure.
+//! Supply either that original diffusivity source or the explicit coefficient,
+//! never both for the same film.
+//!
 //! Applicability: dilute ideal solution, one exchanging noncondensable species,
-//! existing gas volume and already quasi-steady films. A supplied gas-side
-//! coefficient must apply to the entire interval; no pressure/composition-
-//! dependent gas coefficient is silently frozen. The liquid timescale check
-//! does not certify a gas-film transient, Stefan flow or multicomponent gas
-//! diffusion. The authored film-relaxation/concentration bounds
+//! existing gas volume and already quasi-steady films. Gas-side resistance is
+//! negligible by default; an explicit gas film additionally assumes dilute
+//! Fick diffusion in its declared carrier, without Stefan-flow correction.
+//! A supplied coefficient must apply to the entire interval; no pressure- or
+//! composition-dependent coefficient is silently frozen. A bare coefficient
+//! has no gas diffusion time; only a gas diffusivity and thickness admit that
+//! additional timescale check. Neither check certifies a gas-film transient.
+//! The authored film-relaxation/concentration bounds
 //! do not validate those assumptions. This model supplies no nucleation,
 //! moving bubble radius, transient diffusion field, evaporation, gas reaction,
 //! or adiabatic thermal evolution. No entropy-production theorem is claimed.
@@ -39,6 +48,10 @@
 
 /// Simultaneous absorption/exsolution of independent dilute species into one liquid.
 pub mod mixture;
+
+mod gas_film;
+use gas_film::{FilmResponse, ResolvedGasFilm};
+pub use gas_film::{GAS_FILM_DIFFUSIVITY_PROPERTY, GAS_FILM_MOLE_FRACTION_AXIS, GasFilmSource};
 
 use crate::phase::{PhaseStateError, ResolvedHeatCapacityCurve};
 use crate::state_point::{
@@ -104,6 +117,20 @@ pub enum DissolvedGasError {
     FilmRelaxation {
         ratio: f64,
         maximum: f64,
+    },
+    /// Gas diffusion cannot be treated as quasi-steady at the authored limit.
+    GasFilmRelaxation {
+        /// Gas-film diffusion time divided by the common bulk relaxation time.
+        ratio: f64,
+        /// Authored maximum of that dimensionless ratio.
+        maximum: f64,
+    },
+    /// A gas bulk/interface or simultaneous-mixture dilution bound is exceeded.
+    GasFilmConcentration {
+        /// Selected or conservatively summed exchanging-species mole fraction.
+        actual_mole_fraction: f64,
+        /// Authored dilute-Fick upper limit, strictly below one.
+        maximum_mole_fraction: f64,
     },
     Balance {
         quantity: &'static str,
@@ -176,6 +203,37 @@ fn typed(kind: QuantityKind) -> QuantitySpec {
     QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static))
 }
 
+fn admit_frozen_sources(resolved: &ResolvedMaterialStatePoint) -> Result<()> {
+    for property in resolved.properties() {
+        if !property.is_constant_at_fixed_temperature()
+            || !property.is_static_at_fixed_external_conditions()
+            || property
+                .source_axes()
+                .iter()
+                .any(|(axis, _)| axis != "temperature")
+            || property
+                .answer()
+                .evidence
+                .model
+                .validity
+                .bounds()
+                .keys()
+                .any(|axis| {
+                    let q = property.answer().receipt.axis_quantities.get(axis);
+                    matches!(axis.as_str(), "T" | "p" | "P")
+                        || (axis != "temperature"
+                            && q.is_some_and(|q| q.dims() == Temperature::DIMS))
+                        || (axis != "pressure" && q.is_some_and(|q| q.dims() == Pressure::DIMS))
+                })
+        {
+            return Err(invalid(
+                "isothermal Henry exchange needs constant-at-fixed-T sources and canonical axes",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Original constitutive sources frozen at one explicitly authored temperature.
 #[derive(Clone, Debug, PartialEq)]
 pub struct HenryDissolution {
@@ -189,6 +247,7 @@ pub struct HenryDissolution {
     henry_mol_m3_pa: f64,
     diffusivity_m2_s: f64,
     dissolved_enthalpy_j_kg: f64,
+    gas_film: Option<ResolvedGasFilm>,
 }
 
 impl HenryDissolution {
@@ -245,33 +304,7 @@ impl HenryDissolution {
             &requirements,
             source.selection.clone(),
         )?;
-        for property in resolved.properties() {
-            if !property.is_constant_at_fixed_temperature()
-                || !property.is_static_at_fixed_external_conditions()
-                || property
-                    .source_axes()
-                    .iter()
-                    .any(|(axis, _)| axis != "temperature")
-                || property
-                    .answer()
-                    .evidence
-                    .model
-                    .validity
-                    .bounds()
-                    .keys()
-                    .any(|axis| {
-                        let q = property.answer().receipt.axis_quantities.get(axis);
-                        matches!(axis.as_str(), "T" | "p" | "P")
-                            || (axis != "temperature"
-                                && q.is_some_and(|q| q.dims() == Temperature::DIMS))
-                            || (axis != "pressure" && q.is_some_and(|q| q.dims() == Pressure::DIMS))
-                    })
-            {
-                return Err(invalid(
-                    "isothermal Henry exchange needs constant-at-fixed-T sources and canonical axes",
-                ));
-            }
-        }
+        admit_frozen_sources(&resolved)?;
         let henry = resolved
             .property(HENRY_SOLUBILITY_PROPERTY)
             .unwrap()
@@ -299,6 +332,7 @@ impl HenryDissolution {
             henry_mol_m3_pa: henry,
             diffusivity_m2_s: diffusivity,
             dissolved_enthalpy_j_kg: dissolved_h,
+            gas_film: None,
         })
     }
     pub fn species(&self) -> &SpeciesId {
@@ -327,8 +361,8 @@ impl HenryDissolution {
         &self,
         gas: &ClosedGasParcel,
         liquid: DissolvedGasInventory,
-        film: PreparedFilm,
         controls: DissolvedGasControls,
+        film: FilmResponse,
     ) -> Result<DissolutionSample> {
         if gas.state().state().temperature != self.temperature_k {
             return Err(invalid(
@@ -338,18 +372,15 @@ impl HenryDissolution {
         let pressure = gas.species_partial_pressure_pa(&self.species)?;
         let concentration = finite(liquid.dissolved_moles / liquid.liquid_volume_m3)?;
         let equilibrium = finite(self.henry_mol_m3_pa * pressure)?;
-        let (interface_concentration, interface_pressure) = if film.single_liquid_film {
-            // Preserve the original one-film source coordinates exactly.
-            (equilibrium, pressure)
+        let interface = finite(film.liquid_weight * equilibrium + film.gas_weight * concentration)?;
+        let interface_pressure = if film.gas_weight == 0.0 {
+            pressure
         } else {
-            let fraction = film.liquid_gradient_fraction;
-            let interface = finite(if fraction <= 0.5 {
-                concentration + fraction * (equilibrium - concentration)
-            } else {
-                equilibrium + (1.0 - fraction) * (concentration - equilibrium)
-            })?;
-            (interface, finite(interface / self.henry_mol_m3_pa)?)
+            finite(interface / self.henry_mol_m3_pa)?
         };
+        if interface > 0.0 && interface_pressure == 0.0 {
+            return Err(invalid("positive Henry interface pressure underflows"));
+        }
         // A conducting constant-total-pressure gas film cannot have a species
         // partial pressure larger than its total pressure. A sealed path has
         // only a Henry-equivalent pressure on its disconnected liquid side.
@@ -360,7 +391,7 @@ impl HenryDissolution {
                 "gas-film interfacial partial pressure exceeds total pressure",
             ));
         }
-        for c in [concentration, interface_concentration] {
+        for c in [concentration, interface] {
             if !nonnegative(c) || c > controls.maximum_concentration_mol_m3 {
                 return Err(DissolvedGasError::Concentration {
                     actual_mol_m3: c,
@@ -386,16 +417,16 @@ impl HenryDissolution {
                 })
                 .map_err(|_| invalid("unrepresentable actual Henry source conditions"))
         };
-        // Admit the ACTUAL liquid interface. H times bulk gas pressure is only
-        // a driving potential when a finite gas film is present, not a liquid
-        // concentration reached anywhere in that film.
+        // Both liquid bulk and interfacial equilibrium must lie in the SAME
+        // original claims' support; a supported dilute bulk cannot hide a
+        // nondilute interfacial concentration.
         let bulk = self
             .resolved
             .at_query_point(&self.source.material, &point(concentration)?)?;
-        let interface = self
+        let interface_material = self
             .resolved
-            .at_query_point(&self.source.material, &point(interface_concentration)?)?;
-        for at in [&bulk, &interface] {
+            .at_query_point(&self.source.material, &point(interface)?)?;
+        for at in [&bulk, &interface_material] {
             if at.property(HENRY_SOLUBILITY_PROPERTY).unwrap().value_si() != self.henry_mol_m3_pa
                 || at
                     .property(DISSOLVED_DIFFUSIVITY_PROPERTY)
@@ -408,13 +439,29 @@ impl HenryDissolution {
                 ));
             }
         }
+        let gas_film_material = self
+            .gas_film
+            .as_ref()
+            .map(|source| -> Result<_> {
+                Ok([
+                    source.sample(gas.state().state().pressure, pressure)?,
+                    source.sample(gas.state().state().pressure, interface_pressure)?,
+                ])
+            })
+            .transpose()?;
+        let flux = finite(film.coefficient_m_s * (equilibrium - concentration))?;
+        if film.coefficient_m_s > 0.0 && equilibrium != concentration && flux == 0.0 {
+            return Err(invalid("nonzero film flux underflows"));
+        }
         Ok(DissolutionSample {
             partial_pressure_pa: pressure,
             concentration_mol_m3: concentration,
             equilibrium_concentration_mol_m3: equilibrium,
-            interface_concentration_mol_m3: interface_concentration,
             interface_partial_pressure_pa: interface_pressure,
-            material: [bulk, interface],
+            interface_concentration_mol_m3: interface,
+            molar_flux_mol_m2_s: flux,
+            material: [bulk, interface_material],
+            gas_film_material,
         })
     }
 
@@ -424,11 +471,9 @@ impl HenryDissolution {
     /// clock; the supplied finite-liquid clock owns this exchange interval.
     ///
     /// A and delta are physical authored film geometry, not a fitted rate.
-    /// delta²/D divided by the ACTUAL bulk relaxation time must meet the
-    /// declared quasi-steady limit, including any additional gas resistance.
-    /// A new initially uniform diffusion layer is outside this model even if
-    /// the timescale ratio is small; a gas coefficient needs its own applicable
-    /// quasi-steady, constant-coefficient justification.
+    /// delta²/D divided by the bulk relaxation time must meet the declared
+    /// quasi-steady limit. A new initially uniform diffusion layer is outside
+    /// this model even if the timescale ratio is small.
     pub fn advance(
         &self,
         gas: &mut ClosedGasParcel,
@@ -464,6 +509,7 @@ impl HenryDissolution {
             dissolved_moles_change: exchange.dissolved_moles_change,
             relaxation_rate_per_s: exchange.relaxation_rate_per_s,
             film_relaxation_ratio: exchange.film_relaxation_ratio,
+            gas_film_relaxation_ratio: exchange.gas_film_relaxation_ratio,
             partial_enthalpy_into_liquid_j: exchange.partial_enthalpy_into_liquid_j,
             dissolved_internal_energy_change_j: exchange.dissolved_internal_energy_change_j,
             thermostat_heat_into_gas_j: exchange.thermostat_heat_into_gas_j,
@@ -508,24 +554,34 @@ impl HenryDissolution {
                 "positive bounded time, dilute/film limits, budgets and physical film geometry required",
             ));
         }
-        let prepared_film = PreparedFilm::new(self, film)?;
-        let before = self.sample(gas, initial, prepared_film, controls)?;
         let initial_mass = gas.species_mass_kg(&self.species)?;
         let capacity = finite(
             1.0 / initial.liquid_volume_m3
                 + self.henry_mol_m3_pa * (R * self.temperature_k / gas.volume_m3()),
         )?;
-        let rate = finite(prepared_film.conductance_m3_s * capacity)?;
-        let ratio = finite(
-            film.area_m2 * film.thickness_m * capacity * prepared_film.liquid_gradient_fraction,
-        )?;
+        if !positive(capacity) {
+            return Err(invalid("positive finite liquid/gas capacity required"));
+        }
+        let response = self.film_response(film, capacity)?;
+        let before = self.sample(gas, initial, controls, response)?;
+        let rate = finite(response.conductance_m3_s * capacity)?;
+        let ratio = response.liquid_relaxation_ratio;
         if rate > 0.0 && ratio > controls.maximum_film_relaxation_ratio {
             return Err(DissolvedGasError::FilmRelaxation {
                 ratio,
                 maximum: controls.maximum_film_relaxation_ratio,
             });
         }
-        if !positive(capacity) || (prepared_film.conductance_m3_s > 0.0 && !positive(rate)) {
+        if let Some(gas_ratio) = response.gas_relaxation_ratio
+            && rate > 0.0
+            && gas_ratio > controls.maximum_film_relaxation_ratio
+        {
+            return Err(DissolvedGasError::GasFilmRelaxation {
+                ratio: gas_ratio,
+                maximum: controls.maximum_film_relaxation_ratio,
+            });
+        }
+        if response.conductance_m3_s > 0.0 && !positive(rate) {
             return Err(invalid("positive film relaxation underflows or overflows"));
         }
         let drive = before.equilibrium_concentration_mol_m3 - before.concentration_mol_m3;
@@ -575,7 +631,7 @@ impl HenryDissolution {
             mass_into_liquid_kg: dm,
             capacity,
             drive,
-            film: prepared_film,
+            film: response,
             exchange: DissolutionExchange {
                 species: self.species.clone(),
                 initial,
@@ -584,6 +640,7 @@ impl HenryDissolution {
                 dissolved_moles_change: dn,
                 relaxation_rate_per_s: rate,
                 film_relaxation_ratio: ratio,
+                gas_film_relaxation_ratio: response.gas_relaxation_ratio,
                 partial_enthalpy_into_liquid_j: stream_h,
                 dissolved_internal_energy_change_j: dissolved_change,
                 thermostat_heat_into_gas_j: gas_bath_heat,
@@ -600,7 +657,7 @@ impl HenryDissolution {
         gas: &ClosedGasParcel,
         controls: DissolvedGasControls,
     ) -> Result<DissolutionExchange> {
-        let after = self.sample(gas, prepared.exchange.state, prepared.film, controls)?;
+        let after = self.sample(gas, prepared.exchange.state, controls, prepared.film)?;
         let next_mass = gas.species_mass_kg(&self.species)?;
         let mass_residual =
             finite((next_mass - prepared.initial_gas_mass_kg) + prepared.mass_into_liquid_kg)?;
@@ -631,79 +688,7 @@ struct PreparedDissolution {
     mass_into_liquid_kg: f64,
     capacity: f64,
     drive: f64,
-    film: PreparedFilm,
-}
-
-#[derive(Clone, Copy)]
-struct PreparedFilm {
-    conductance_m3_s: f64,
-    liquid_gradient_fraction: f64,
-    single_liquid_film: bool,
-}
-impl PreparedFilm {
-    fn new(law: &HenryDissolution, film: DissolutionFilm) -> Result<Self> {
-        let Some(gas) = film.gas_side_transfer else {
-            let conductance = finite(law.diffusivity_m2_s * film.area_m2 / film.thickness_m)?;
-            if law.diffusivity_m2_s > 0.0 && film.area_m2 > 0.0 && !positive(conductance) {
-                return Err(invalid(
-                    "positive liquid-film conductance is unrepresentable",
-                ));
-            }
-            return Ok(Self {
-                conductance_m3_s: conductance,
-                liquid_gradient_fraction: 1.0,
-                single_liquid_film: true,
-            });
-        };
-        let gas = gas.value_si();
-        let liquid = finite(law.diffusivity_m2_s / film.thickness_m)?;
-        if law.diffusivity_m2_s > 0.0 && liquid == 0.0 {
-            return Err(invalid(
-                "positive liquid-film coefficient is unrepresentable",
-            ));
-        }
-        // If both films are sealed the massless interface has no unique state.
-        // Do not invent an interfacial concentration or a material query there.
-        if liquid == 0.0 && gas == 0.0 {
-            return Err(invalid(
-                "two sealed films have no determinate interfacial state",
-            ));
-        }
-        let (overall, fraction) = if gas == 0.0 {
-            (0.0, 0.0)
-        } else if liquid == 0.0 {
-            (0.0, 1.0)
-        } else {
-            let gas_equivalent = finite(gas / law.henry_mol_m3_pa)?;
-            if !positive(gas_equivalent) {
-                return Err(invalid(
-                    "gas-film liquid-equivalent coefficient is unrepresentable",
-                ));
-            }
-            // A scaled harmonic mean avoids overflowing either resistance and
-            // preserves the limiting film without subtracting nearly equal fluxes.
-            let (overall, fraction) = if liquid <= gas_equivalent {
-                let fraction = 1.0 / (1.0 + liquid / gas_equivalent);
-                (liquid * fraction, fraction)
-            } else {
-                let ratio = gas_equivalent / liquid;
-                (gas_equivalent / (1.0 + ratio), ratio / (1.0 + ratio))
-            };
-            if !positive(overall) || !positive(fraction) {
-                return Err(invalid("positive two-film transfer is unrepresentable"));
-            }
-            (overall, fraction)
-        };
-        let conductance = finite(film.area_m2 * overall)?;
-        if film.area_m2 > 0.0 && overall > 0.0 && !positive(conductance) {
-            return Err(invalid("positive two-film conductance is unrepresentable"));
-        }
-        Ok(Self {
-            conductance_m3_s: conductance,
-            liquid_gradient_fraction: fraction,
-            single_liquid_film: false,
-        })
-    }
+    film: FilmResponse,
 }
 impl PreparedDissolution {
     fn transfer(&self, law: &HenryDissolution) -> SpeciesBoundaryRelativeTransfer {
@@ -726,7 +711,11 @@ pub struct DissolutionExchange {
     /// Positive for absorption into the liquid, negative for exsolution.
     pub dissolved_moles_change: f64,
     pub relaxation_rate_per_s: f64,
+    /// Liquid-film diffusion time divided by the common bulk relaxation time.
     pub film_relaxation_ratio: f64,
+    /// The same ratio for a source-qualified gas film with known diffusivity
+    /// and thickness; absent for a bare gas coefficient or liquid-only model.
+    pub gas_film_relaxation_ratio: Option<f64>,
     pub partial_enthalpy_into_liquid_j: f64,
     pub dissolved_internal_energy_change_j: f64,
     pub thermostat_heat_into_gas_j: f64,
@@ -772,10 +761,12 @@ pub struct DissolutionFilm {
     pub area_m2: f64,
     pub thickness_m: f64,
     /// Fixed pressure-normalized gas-side coefficient [mol/(m² s Pa)].
-    /// None preserves negligible gas-side resistance; Some(0) seals the path.
-    /// This is not a velocity coefficient [m/s] or a volumetric kLa [1/s].
-    /// Its applicability throughout the isothermal pressure/composition change
-    /// must be supplied independently; it carries no inferred material authority.
+    /// None preserves negligible gas-side resistance unless the law retains a
+    /// source-qualified gas film; supplying both descriptions is ambiguous.
+    /// Some(0) seals the path. This is not a velocity coefficient [m/s] or a
+    /// volumetric kLa [1/s]. Its applicability throughout the isothermal
+    /// pressure/composition change must be supplied independently; it carries
+    /// no inferred material authority or gas-film diffusion time.
     /// Two simultaneously sealed films refuse an undetermined interface state.
     pub gas_side_transfer: Option<MolarPermeance>,
 }
@@ -783,25 +774,30 @@ pub struct DissolutionFilm {
 pub struct DissolvedGasControls {
     pub gas: GasSpeciesBoundarySolve,
     pub maximum_step_s: f64,
-    /// Applies to BOTH bulk and ACTUAL liquid-side interfacial concentration.
+    /// Applies to BOTH liquid bulk and actual liquid interface concentration.
     pub maximum_concentration_mol_m3: f64,
-    /// Authored ceiling in (0,1) on lambda*delta²/D. Not an accuracy theorem.
+    /// Authored ceiling in (0,1) on lambda*delta²/D for the liquid film and any
+    /// source-qualified gas film. A bare gas coefficient supplies no diffusion
+    /// time. Not an accuracy theorem; a sealed path has no bulk relaxation.
     pub maximum_film_relaxation_ratio: f64,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct DissolutionSample {
     pub partial_pressure_pa: f64,
     pub concentration_mol_m3: f64,
-    /// H times bulk gas partial pressure; with gas resistance this is a driving
-    /// potential, not the actual concentration at the liquid interface.
+    /// Henry concentration implied by the BULK gas, not the actual interface.
     pub equilibrium_concentration_mol_m3: f64,
-    /// Actual liquid-side concentration at the common film interface.
-    pub interface_concentration_mol_m3: f64,
-    /// Henry-equivalent interfacial partial pressure. For a sealed gas film it
-    /// is a disconnected equilibrium potential, not a realized bulk gas state.
+    /// Henry-equivalent interfacial partial pressure [Pa]. For a sealed gas
+    /// film it is a disconnected equilibrium potential, not a bulk gas state.
     pub interface_partial_pressure_pa: f64,
+    /// Liquid-side concentration in Henry equilibrium with that interface [mol/m³].
+    pub interface_concentration_mol_m3: f64,
+    /// Signed common quasi-steady film flux, positive into the liquid.
+    pub molar_flux_mol_m2_s: f64,
     /// Original claim bundle at [bulk liquid, liquid-side interface].
     pub material: [ResolvedMaterialStatePoint; 2],
+    /// Original gas diffusivity source at [bulk gas, gas-side interface].
+    pub gas_film_material: Option<[ResolvedMaterialStatePoint; 2]>,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct DissolutionStep {
@@ -813,6 +809,9 @@ pub struct DissolutionStep {
     pub dissolved_moles_change: f64,
     pub relaxation_rate_per_s: f64,
     pub film_relaxation_ratio: f64,
+    /// Gas-film diffusion/bulk relaxation ratio when its original diffusivity
+    /// source and physical thickness are supplied, otherwise absent.
+    pub gas_film_relaxation_ratio: Option<f64>,
     /// Signed original gas partial enthalpy entering the liquid, including flow work.
     pub partial_enthalpy_into_liquid_j: f64,
     pub dissolved_internal_energy_change_j: f64,
