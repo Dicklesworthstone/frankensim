@@ -1,7 +1,8 @@
 //! Spatial DKT plate dynamics through the shared generalized-alpha integrator.
 //!
 //! For one fixed assembled mesh/support state, `M = s_m M0`, `K = s_k K0`
-//! and `C = alpha M + beta K`. All actions use the existing sparse matrices;
+//! and `C = alpha M + beta K + C_material`. Optional `C_material` is the
+//! original spatial anisotropic bending viscosity from `fs-plate`. All actions use sparse matrices;
 //! no dense operator, modal truncation or second time integrator is introduced.
 //! The four model parameters and any applied-load parameters share one discrete
 //! adjoint. Scaling the whole K also scales prestress and stiffeners, if present;
@@ -11,9 +12,11 @@
 //! inherits the supplied spatial DKT/inertia approximation and small-deflection plate
 //! assumptions. Nonnegative Rayleigh coefficients dissipate energy when the
 //! supplied stiffness is positive semidefinite; this adapter does not establish
-//! that spectral property or identify physical damping from material data.
+//! that spectral property. The optional material operator separately admits
+//! passive constitutive tensors without damping geometric prestress or stiffeners.
 
 use crate::PlateModel;
+use fs_plate::viscosity::PlateBendingViscosity;
 use fs_solver::FlexiblePreconditioner;
 use fs_sparse::{Csr, DirectOrdering, LdltError, LdltOptions, SymbolicLdlt};
 use fs_time::galpha::second_order_adjoint::SecondOrderVjp;
@@ -132,6 +135,7 @@ pub struct PlateDynamics<'a, L: ?Sized> {
     parameters: PlateDynamicsParameters,
     load: &'a L,
     load_parameters: usize,
+    bending_viscosity: Option<&'a PlateBendingViscosity<'a>>,
 }
 
 impl<L: ?Sized> Copy for PlateDynamics<'_, L> {}
@@ -147,6 +151,11 @@ impl<'a, L: PlateLoad + ?Sized> PlateDynamics<'a, L> {
             && core::ptr::eq(self.load, other.load)
             && self.load_parameters == other.load_parameters
             && self.parameters == other.parameters
+            && match (self.bending_viscosity, other.bending_viscosity) {
+                (None, None) => true,
+                (Some(a), Some(b)) => core::ptr::eq(a, b),
+                _ => false,
+            }
     }
 
     /// Bind admitted sparse operators and pure load callbacks.
@@ -321,7 +330,41 @@ impl<'a, L: PlateLoad + ?Sized> PlateDynamics<'a, L> {
             parameters,
             load,
             load_parameters,
+            bending_viscosity: None,
         })
+    }
+
+    /// Add the original spatial anisotropic bending-viscosity operator.
+    ///
+    /// Material viscosity stays independent of the four M/K/Rayleigh parameters;
+    /// their adjoints hold this selected constitutive law fixed. Any nonzero
+    /// Rayleigh coefficients are additional caller-selected loss mechanisms and
+    /// must not count the same material loss twice. No stiffness or inertia is
+    /// altered, and no allocation is added to operator actions.
+    pub fn with_bending_viscosity<C: FnMut() -> bool>(
+        mut self,
+        viscosity: &'a PlateBendingViscosity<'a>,
+        max_total_nonzeros: usize,
+        cancelled: &mut C,
+    ) -> Result<Self, PlateDynamicsError> {
+        poll(cancelled)?;
+        if !core::ptr::eq(self.model, viscosity.model()) {
+            return Err(PlateDynamicsError::InvalidInput(
+                "bending viscosity must retain the identical original plate model",
+            ));
+        }
+        if self.model.k.nnz().checked_add(self.model.m.nnz())
+            .and_then(|n| n.checked_add(viscosity.matrix().nnz()))
+            .is_none_or(|n| n > max_total_nonzeros) {
+            return Err(PlateDynamicsError::Budget("material damping exceeds total operator cap"));
+        }
+        self.bending_viscosity = Some(viscosity);
+        Ok(self)
+    }
+
+    /// Attached original spatial material loss, if explicitly selected.
+    pub const fn bending_viscosity(&self) -> Option<&PlateBendingViscosity<'a>> {
+        self.bending_viscosity
     }
 
     /// The immutable reference spatial pencil and support map.
@@ -384,7 +427,9 @@ impl<'a, L: PlateLoad + ?Sized> PlateDynamics<'a, L> {
         for row in 0..self.model.free {
             poll(cancelled)?;
             let diagonal = m_coefficient * self.model.m.get(row, row)
-                + k_coefficient * self.model.k.get(row, row);
+                + k_coefficient * self.model.k.get(row, row)
+                + (1.0 - alpha_f) * gamma / (beta * step)
+                    * self.material_damping_diagonal(row);
             if !diagonal.is_finite() || diagonal <= 0.0 || !(1.0 / diagonal).is_finite() {
                 return Err(PlateDynamicsError::InvalidInput(
                     "positive finite invertible effective diagonal required",
@@ -402,6 +447,10 @@ impl<'a, L: PlateLoad + ?Sized> PlateDynamics<'a, L> {
             p.mass_scale * (weights.mass + weights.damping * p.mass_damping_per_s),
             p.stiffness_scale * (weights.tangent + weights.damping * p.stiffness_damping_s),
         )
+    }
+
+    fn material_damping_diagonal(&self, row: usize) -> f64 {
+        self.bending_viscosity.map_or(0.0, |law| law.matrix().get(row, row))
     }
 
     fn action(&self, input: &[f64], output: &mut [f64], mass: f64, stiffness: f64) {
@@ -469,6 +518,13 @@ impl<L: PlateLoad + ?Sized> SecondOrderProblem for PlateDynamics<'_, L> {
             p.mass_scale * p.mass_damping_per_s,
             p.stiffness_scale * p.stiffness_damping_s,
         );
+        if input.len() == self.model.free && output.len() == self.model.free {
+            if let Some(law) = self.bending_viscosity {
+                for (row, out) in output.iter_mut().enumerate() {
+                    *out += dot_row(law.matrix(), row, input);
+                }
+            }
+        }
     }
     fn internal_force(&self, q: &[f64], output: &mut [f64]) {
         self.action(q, output, 0.0, self.parameters.stiffness_scale);
@@ -497,7 +553,8 @@ impl<L: PlateLoad + ?Sized> SecondOrderProblem for PlateDynamics<'_, L> {
         }
         for (row, (out, &value)) in output.iter_mut().zip(residual).enumerate() {
             let diagonal =
-                mass * self.model.m.get(row, row) + stiffness * self.model.k.get(row, row);
+                mass * self.model.m.get(row, row) + stiffness * self.model.k.get(row, row)
+                    + weights.damping * self.material_damping_diagonal(row);
             let inverse = 1.0 / diagonal;
             if !diagonal.is_finite() || diagonal <= 0.0 || !inverse.is_finite() {
                 output.fill(f64::NAN);
@@ -525,7 +582,16 @@ impl<L: PlateLoad + ?Sized> SecondOrderVjp for PlateDynamics<'_, L> {
             output,
             p.mass_scale * p.mass_damping_per_s,
             p.stiffness_scale * p.stiffness_damping_s,
-        )
+        )?;
+        if let Some(law) = self.bending_viscosity {
+            for (row, &value) in seed.iter().enumerate() {
+                let (columns, entries) = law.matrix().row(row);
+                for (&column, &entry) in columns.iter().zip(entries) {
+                    output[column] += entry * value;
+                }
+            }
+        }
+        if finite(output) { Ok(()) } else { Err("nonfinite material damping transpose".into()) }
     }
     fn tangent_transpose_apply(
         &self,

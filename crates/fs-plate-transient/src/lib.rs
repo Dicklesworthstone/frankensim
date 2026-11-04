@@ -5,7 +5,8 @@
 //! depends on `fs-plate`. As an optional feature of `fs-plate` it therefore
 //! closed a package cycle that made every workspace cargo command fail. As its
 //! own crate it depends on `fs-plate`, and nothing below it depends back.
-//! It reaches `fs-plate` only through the public [`PlateModel`].
+//! It consumes the public [`PlateModel`] and optional original spatial
+//! material-viscosity operator from `fs-plate`.
 
 pub use fs_plate::PlateModel;
 

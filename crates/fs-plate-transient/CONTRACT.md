@@ -16,12 +16,39 @@ workspace cargo command failed. Here the dependency points one way only
 moved here from `fs-plate` on 2026-09-28). The mathematical contract (M/K/C parameterization, VJP ordering,
 cancellation and refusal behaviour) is stated in `fs-plate/CONTRACT.md` under
 the transient bullet and is unchanged by the move. The file reaches `fs-plate`
-only through the public `PlateModel`.
+only through its public assembled-model and material-viscosity owners.
 
 ## Tests
 `tests/plate_transient.rs`, `tests/plate_preconditioning.rs` and the
 `moving_plate` / `preconditioned_plate` examples live in this crate.
 `fs-ascent`'s `plate_calibration` example includes `examples/moving_plate.rs`.
+
+## Physical anisotropic bending loss
+
+`PlateDynamics::with_bending_viscosity` attaches the immutable original sparse
+`fs-plate::viscosity::PlateBendingViscosity` to the identical retained plate
+model. The additional matrix contributes to damping forces, explicit
+transposes, consistent acceleration, implicit time stepping and both forward
+and adjoint effective Jacobi diagonals, with no per-action allocation. An
+explicit total stored-entry ceiling includes M, K and material C. Original
+model identity and cancellation are checked before attachment; contact/source
+bindings also retain the identity of the attached material-loss owner.
+
+`C = alpha M + beta K + C_material`. The selected constitutive viscosity stays
+fixed under the original four mechanical parameters, and every original
+parameter/load VJP keeps its existing order. Any nonzero Rayleigh terms are
+additional explicitly selected mechanisms; callers must avoid counting the
+same material dissipation twice. Material C does not inherit stiffness scale,
+prestress, stiffener loss or numerical integration dissipation. This is a
+linear Kelvin--Voigt spatial law within the declared material band; it supplies
+no additional material-parameter gradients or hereditary constitutive state.
+
+`tests/material_damping.rs` compares full sparse primal/transposed actions and
+both effective preconditioners with independent dense matrices, checks the
+four residual parameter derivatives while holding material C fixed, and
+compares midpoint trajectories with dense LU steps and integrated viscous
+work. Original-model, extra storage-budget and cancellation refusals are
+covered separately.
 
 ## Consistent physical inertia
 

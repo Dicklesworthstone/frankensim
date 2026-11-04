@@ -43,6 +43,7 @@
 //! downstream through fs-modal).
 
 pub mod loading;
+pub mod viscosity;
 pub mod shell;
 mod edge_cubic;
 mod stiffener_mass;

@@ -550,7 +550,9 @@ against CST/DKT.
   pencil to `fs-time`'s structural residual, discrete adjoint and loaded
   trajectory interfaces. It borrows a fixed mesh/support model and uses
   `M = mass_scale*M0`, `K = stiffness_scale*K0`, and
-  `C = mass_damping_per_s*M + stiffness_damping_s*K`. The four parameters
+  `C = mass_damping_per_s*M + stiffness_damping_s*K + C_material`.
+  The optional material matrix is assembled by `viscosity::PlateBendingViscosity`
+  and remains fixed under the four mechanical parameters. The four parameters
   precede the load's parameters in every VJP. Explicit stored transposes
   and all mass/stiffness/damping derivatives are implemented without dense
   matrices or per-action scratch. `PlateLoad` supplies a pure time-dependent
@@ -576,7 +578,7 @@ against CST/DKT.
   owned by the shared time integrator. Geometry, supports and reference
   matrices are fixed; stiffness scaling also scales any prestress/stiffeners.
   The adapter does not independently certify positive-semidefinite K or
-  identify physical damping. It retains the supplied DKT/inertia spatial model,
+  identify Rayleigh coefficients from physical damping. It retains the supplied DKT/inertia spatial model,
   linear small-deflection kinematics, and the supplied initial-state chain.
   `examples/moving_plate.rs` advances a force across a clamped DKT mesh and
   differentiates sampled deflection through all four mechanical parameters
@@ -914,6 +916,29 @@ improvement, not a measured runtime claim. Native affine membrane-energy
 checks verify active directions, null modes and complete modal congruence.
 
 ## Shared DKT curvature quadrature
+
+`viscosity::PlateBendingViscosity` assembles complete anisotropic material
+bending loss on the original spatial DKT support map, using this same
+three-point curvature integration: `C_e = integral B^T V_b B dA`.
+`ViscousPlateSection` admits finite symmetric positive-semidefinite resultants,
+including exact zero and directional null channels. Its material constructor
+retains the selected `PlaneStressViscosity`, applies the original orientation
+and thickness-cubed reduction, and checks both endpoints of the caller's
+declared resolved frequency band against the source. Cloned element selections
+share their immutable source law. This band declaration does not certify a
+trajectory's frequency content or extrapolate the material law.
+
+The operator retains all displacement/slope cross terms; it is independent of
+the assembled elastic tensor, prestress, stiffeners and inertia. A caller must
+supply the original mesh geometry/connectivity used for the retained model.
+Explicit triangle, full/free coordinate and pre-elimination entry ceilings
+precede allocation; complete element coverage, valid support mapping, finite
+assembly and cancellation are checked before publishing. There is no loss
+floor, modal approximation, numerical dissipation or history-dependent Prony
+model in this Kelvin--Voigt operator. `tests/plate_viscosity.rs` checks exact
+constant-curvature power, rigid/null directions, source retention and band
+refusals, unchanged damping under prestress/inertia changes, and bounded
+admission/cancellation.
 
 `dkt_curvature_quadrature` exposes the same three mid-side curvature matrices
 used by `dkt_stiffness`, with their signed doubled area. Each matrix maps the
