@@ -6,6 +6,12 @@ the compiler must reproduce them from the pinned manifest and source record.
 
 ## Mineral processing
 
+The [ore work-index guide](MINING_BOND_WORK_INDEX.md) supplies five published
+SGS/Joanna Bond test specimens with 20 claims for work index, test feed/product
+sizes and closing screen. The material resolver retains each original test in
+the existing grinding card, making source-backed milling energy, throughput,
+inversion and blends available without substituting a generic ore constant.
+
 The [arsenic reference guide](MINING_ARSENIC_REFERENCE.md) adds six compatible
 NBS aqueous profiles and 24 claims. Exact protonation reactions connect all
 four As(V) forms to the shared-pH solver; As(III) source components also support

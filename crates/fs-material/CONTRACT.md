@@ -1250,6 +1250,21 @@ liberation, selection-rate kinetics, transient hold-up or a process calibration.
 
 ## Source-specific comminution references
 
+`comminution::source::resolve_bond_ball_mill` resolves four original scalar
+material claims for one specimen's work index, closing screen, F80 and P80.
+The claims must share one observation and the same source support. The
+metric-tonne and short-ton property names remain distinct after normalization
+to J/kg; missing/wrong units, unbacked values, mixed specimens, interpolation
+and unsupported source coordinates refuse. `BondGrindingCard` retains the
+original pack hash, query, claims, observation, evidence and verified receipts
+through ordinary cloning and its existing physical consumers. Reported test
+sizes remain separate from the explicitly supplied operational size domain;
+neither scope is expanded by resolution. The `bond_grinding_reference` example
+uses the five historical Joanna composites from the real material pack.
+Source-backed test values do not make its energy/throughput outputs measured
+plant performance. Unit regressions and `xtask`'s `mining_bond_sources` exercise
+source preservation, independent energy/throughput answers and refusals.
+
 `comminution` supplies a typed, uncorrected Bond grinding-energy closure,
 dry-solids throughput from net pinion power, and ideal single-ball critical
 speed. Work-index construction distinguishes kWh per dry metric tonne from

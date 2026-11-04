@@ -28,6 +28,10 @@ pub use blend::{AdditiveGrindingBlend, GrindingFeed};
 #[path = "comminution/inverse.rs"]
 mod inverse;
 
+/// Reported specimen-specific Bond test rows resolved through the material database.
+#[path = "comminution/source.rs"]
+pub mod source;
+
 /// Source-declared congruent per-pass size redistribution with conserved elements.
 #[path = "comminution/breakage.rs"]
 pub mod breakage;
@@ -244,6 +248,7 @@ pub struct BondGrindingCard {
     index: BondWorkIndex,
     test: BondTestContext,
     domain: BondSizeDomain,
+    source: Option<Box<source::BondCalibrationSource>>,
 }
 
 impl BondGrindingCard {
@@ -277,6 +282,7 @@ impl BondGrindingCard {
             index,
             test,
             domain,
+            source: None,
         })
     }
 
@@ -296,6 +302,13 @@ impl BondGrindingCard {
     #[must_use]
     pub const fn domain(&self) -> BondSizeDomain {
         self.domain
+    }
+
+    /// Original material-database test row, when resolved through that source path.
+    /// Its reported F80/P80 point is distinct from the caller's model size domain.
+    #[must_use]
+    pub fn calibration_source(&self) -> Option<&source::BondCalibrationSource> {
+        self.source.as_deref()
     }
 
     /// Evaluate the uncorrected Bond baseline in J/kg of dry solids.

@@ -1,0 +1,166 @@
+frankensim.matdb-source.v1
+observation	comp1	Joanna Hosco Comp 1 (S)	SGS standard Bond ball-mill test; Table 13.2 row 1	Historical PFS testwork. Preparation details, temperature and pressure unreported. No operating-ore qualification.
+observation	comp2	Joanna Hosco Comp 2 (S)	SGS standard Bond ball-mill test; Table 13.2 row 2	Historical PFS testwork. Preparation details, temperature and pressure unreported. No operating-ore qualification.
+observation	comp3	Joanna Hosco Comp 3 (N)	SGS standard Bond ball-mill test; Table 13.2 row 3	Historical PFS testwork. Preparation details, temperature and pressure unreported. No operating-ore qualification.
+observation	comp4	Joanna Hosco Comp 4 (S)	SGS standard Bond ball-mill test; Table 13.2 row 4	Historical PFS testwork. Preparation details, temperature and pressure unreported. No operating-ore qualification.
+observation	comp5	Joanna Hosco Comp 5 (S)	SGS standard Bond ball-mill test; Table 13.2 row 5	Historical PFS testwork. Preparation details, temperature and pressure unreported. No operating-ore qualification.
+scalar	comp1-wi	comp1	work_index	12.6	kW*h/Mg	constant
+uncertainty	comp1-wi	unstated	-	-	-	-
+validity	comp1-wi	composite	1	1	1
+validity	comp1-wi	temperature_known	0	0	1
+validity	comp1-wi	pressure_known	0	0	1
+validity	comp1-wi	preparation_known	0	0	1
+validity	comp1-wi	operating_ore	0	0	1
+validity	comp1-wi	historical	1	1	1
+scalar	comp1-screen	comp1	closing_screen	150	um	constant
+uncertainty	comp1-screen	unstated	-	-	-	-
+validity	comp1-screen	composite	1	1	1
+validity	comp1-screen	temperature_known	0	0	1
+validity	comp1-screen	pressure_known	0	0	1
+validity	comp1-screen	preparation_known	0	0	1
+validity	comp1-screen	operating_ore	0	0	1
+validity	comp1-screen	historical	1	1	1
+scalar	comp1-feed	comp1	feed_f80	2166	um	constant
+uncertainty	comp1-feed	unstated	-	-	-	-
+validity	comp1-feed	composite	1	1	1
+validity	comp1-feed	temperature_known	0	0	1
+validity	comp1-feed	pressure_known	0	0	1
+validity	comp1-feed	preparation_known	0	0	1
+validity	comp1-feed	operating_ore	0	0	1
+validity	comp1-feed	historical	1	1	1
+scalar	comp1-product	comp1	product_p80	114	um	constant
+uncertainty	comp1-product	unstated	-	-	-	-
+validity	comp1-product	composite	1	1	1
+validity	comp1-product	temperature_known	0	0	1
+validity	comp1-product	pressure_known	0	0	1
+validity	comp1-product	preparation_known	0	0	1
+validity	comp1-product	operating_ore	0	0	1
+validity	comp1-product	historical	1	1	1
+scalar	comp2-wi	comp2	work_index	14.3	kW*h/Mg	constant
+uncertainty	comp2-wi	unstated	-	-	-	-
+validity	comp2-wi	composite	2	2	1
+validity	comp2-wi	temperature_known	0	0	1
+validity	comp2-wi	pressure_known	0	0	1
+validity	comp2-wi	preparation_known	0	0	1
+validity	comp2-wi	operating_ore	0	0	1
+validity	comp2-wi	historical	1	1	1
+scalar	comp2-screen	comp2	closing_screen	150	um	constant
+uncertainty	comp2-screen	unstated	-	-	-	-
+validity	comp2-screen	composite	2	2	1
+validity	comp2-screen	temperature_known	0	0	1
+validity	comp2-screen	pressure_known	0	0	1
+validity	comp2-screen	preparation_known	0	0	1
+validity	comp2-screen	operating_ore	0	0	1
+validity	comp2-screen	historical	1	1	1
+scalar	comp2-feed	comp2	feed_f80	2271	um	constant
+uncertainty	comp2-feed	unstated	-	-	-	-
+validity	comp2-feed	composite	2	2	1
+validity	comp2-feed	temperature_known	0	0	1
+validity	comp2-feed	pressure_known	0	0	1
+validity	comp2-feed	preparation_known	0	0	1
+validity	comp2-feed	operating_ore	0	0	1
+validity	comp2-feed	historical	1	1	1
+scalar	comp2-product	comp2	product_p80	113	um	constant
+uncertainty	comp2-product	unstated	-	-	-	-
+validity	comp2-product	composite	2	2	1
+validity	comp2-product	temperature_known	0	0	1
+validity	comp2-product	pressure_known	0	0	1
+validity	comp2-product	preparation_known	0	0	1
+validity	comp2-product	operating_ore	0	0	1
+validity	comp2-product	historical	1	1	1
+scalar	comp3-wi	comp3	work_index	12.5	kW*h/Mg	constant
+uncertainty	comp3-wi	unstated	-	-	-	-
+validity	comp3-wi	composite	3	3	1
+validity	comp3-wi	temperature_known	0	0	1
+validity	comp3-wi	pressure_known	0	0	1
+validity	comp3-wi	preparation_known	0	0	1
+validity	comp3-wi	operating_ore	0	0	1
+validity	comp3-wi	historical	1	1	1
+scalar	comp3-screen	comp3	closing_screen	150	um	constant
+uncertainty	comp3-screen	unstated	-	-	-	-
+validity	comp3-screen	composite	3	3	1
+validity	comp3-screen	temperature_known	0	0	1
+validity	comp3-screen	pressure_known	0	0	1
+validity	comp3-screen	preparation_known	0	0	1
+validity	comp3-screen	operating_ore	0	0	1
+validity	comp3-screen	historical	1	1	1
+scalar	comp3-feed	comp3	feed_f80	2239	um	constant
+uncertainty	comp3-feed	unstated	-	-	-	-
+validity	comp3-feed	composite	3	3	1
+validity	comp3-feed	temperature_known	0	0	1
+validity	comp3-feed	pressure_known	0	0	1
+validity	comp3-feed	preparation_known	0	0	1
+validity	comp3-feed	operating_ore	0	0	1
+validity	comp3-feed	historical	1	1	1
+scalar	comp3-product	comp3	product_p80	112	um	constant
+uncertainty	comp3-product	unstated	-	-	-	-
+validity	comp3-product	composite	3	3	1
+validity	comp3-product	temperature_known	0	0	1
+validity	comp3-product	pressure_known	0	0	1
+validity	comp3-product	preparation_known	0	0	1
+validity	comp3-product	operating_ore	0	0	1
+validity	comp3-product	historical	1	1	1
+scalar	comp4-wi	comp4	work_index	12.2	kW*h/Mg	constant
+uncertainty	comp4-wi	unstated	-	-	-	-
+validity	comp4-wi	composite	4	4	1
+validity	comp4-wi	temperature_known	0	0	1
+validity	comp4-wi	pressure_known	0	0	1
+validity	comp4-wi	preparation_known	0	0	1
+validity	comp4-wi	operating_ore	0	0	1
+validity	comp4-wi	historical	1	1	1
+scalar	comp4-screen	comp4	closing_screen	150	um	constant
+uncertainty	comp4-screen	unstated	-	-	-	-
+validity	comp4-screen	composite	4	4	1
+validity	comp4-screen	temperature_known	0	0	1
+validity	comp4-screen	pressure_known	0	0	1
+validity	comp4-screen	preparation_known	0	0	1
+validity	comp4-screen	operating_ore	0	0	1
+validity	comp4-screen	historical	1	1	1
+scalar	comp4-feed	comp4	feed_f80	1998	um	constant
+uncertainty	comp4-feed	unstated	-	-	-	-
+validity	comp4-feed	composite	4	4	1
+validity	comp4-feed	temperature_known	0	0	1
+validity	comp4-feed	pressure_known	0	0	1
+validity	comp4-feed	preparation_known	0	0	1
+validity	comp4-feed	operating_ore	0	0	1
+validity	comp4-feed	historical	1	1	1
+scalar	comp4-product	comp4	product_p80	112	um	constant
+uncertainty	comp4-product	unstated	-	-	-	-
+validity	comp4-product	composite	4	4	1
+validity	comp4-product	temperature_known	0	0	1
+validity	comp4-product	pressure_known	0	0	1
+validity	comp4-product	preparation_known	0	0	1
+validity	comp4-product	operating_ore	0	0	1
+validity	comp4-product	historical	1	1	1
+scalar	comp5-wi	comp5	work_index	12.5	kW*h/Mg	constant
+uncertainty	comp5-wi	unstated	-	-	-	-
+validity	comp5-wi	composite	5	5	1
+validity	comp5-wi	temperature_known	0	0	1
+validity	comp5-wi	pressure_known	0	0	1
+validity	comp5-wi	preparation_known	0	0	1
+validity	comp5-wi	operating_ore	0	0	1
+validity	comp5-wi	historical	1	1	1
+scalar	comp5-screen	comp5	closing_screen	150	um	constant
+uncertainty	comp5-screen	unstated	-	-	-	-
+validity	comp5-screen	composite	5	5	1
+validity	comp5-screen	temperature_known	0	0	1
+validity	comp5-screen	pressure_known	0	0	1
+validity	comp5-screen	preparation_known	0	0	1
+validity	comp5-screen	operating_ore	0	0	1
+validity	comp5-screen	historical	1	1	1
+scalar	comp5-feed	comp5	feed_f80	2114	um	constant
+uncertainty	comp5-feed	unstated	-	-	-	-
+validity	comp5-feed	composite	5	5	1
+validity	comp5-feed	temperature_known	0	0	1
+validity	comp5-feed	pressure_known	0	0	1
+validity	comp5-feed	preparation_known	0	0	1
+validity	comp5-feed	operating_ore	0	0	1
+validity	comp5-feed	historical	1	1	1
+scalar	comp5-product	comp5	product_p80	111	um	constant
+uncertainty	comp5-product	unstated	-	-	-	-
+validity	comp5-product	composite	5	5	1
+validity	comp5-product	temperature_known	0	0	1
+validity	comp5-product	pressure_known	0	0	1
+validity	comp5-product	preparation_known	0	0	1
+validity	comp5-product	operating_ore	0	0	1
+validity	comp5-product	historical	1	1	1
