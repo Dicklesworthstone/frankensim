@@ -12624,6 +12624,28 @@ conductivity, volumes and masses therefore belong to the accepted caloric
 temperature and compositions. A failed final source refresh, mismatched owner,
 unrepresentable sum or last-poll cancellation publishes no result.
 
+`caloric::homogeneous::ResolvedHomogeneousBinaryLiquidFeed` explicitly retains
+an initially homogeneous parcel, including metastable and spinodally unstable
+compositions. `BinaryLiquidCaloricLaw::homogeneous` queries its actual initial
+transport sources and preserves its original homogeneous excess enthalpy; it
+does not replace that energy with an isothermal equilibrium. The distinct feed
+type exposes its local thermodynamic response, conserved component amounts,
+source-derived mass/volume and transport state without claiming phase
+equilibrium or entering equilibrium-only tank consumers.
+
+`relax_homogeneous` delegates signed heat and that unchanged initial caloric
+state to the existing L1 energy solver. Zero heat therefore permits demixing
+with its accompanying temperature change, while supplied heat can cross the
+miscibility boundary. Only the accepted equilibrium refreshes the original
+phase transport sources, and the returned balance remains compatible with
+ordinary heating, mixing and thermal storage. Source mismatch, incomplete
+phase-domain coverage or cancellation leaves the feed unchanged. This is a
+closed isobaric equilibrium endpoint, without separation kinetics, nucleation,
+spinodal dynamics or interfacial energy. Synthetic regressions cover unstable
+and metastable feeds, analytic variable-Cp heat balances, remixed endpoints,
+existing storage/consumer compatibility and atomic source refusals; native
+integration execution remains required to validate those cases.
+
 `caloric::storage::BinaryLiquidThermalStorage` makes the same fixed-composition
 equilibrium available to the existing `fs-thermal` enthalpy timeline. Zero
 specific enthalpy is the cold equilibrium endpoint; heat increments and the

@@ -7,6 +7,8 @@
 
 /// Fixed-composition enthalpy storage on the existing conservative heat timeline.
 pub mod storage;
+/// Explicit homogeneous feeds and their energy-conserving relaxation to equilibrium.
+pub mod homogeneous;
 
 use super::{
     BinaryLiquidError, BinaryLiquidOwner, BinaryLiquidSolutionLaw, ResolvedBinaryLiquidEquilibrium,
