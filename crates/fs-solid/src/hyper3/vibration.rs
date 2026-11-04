@@ -10,7 +10,10 @@
 //! averaging a graded density before constructing the pencil is not equivalent.
 //!
 //! This bounded dense route freezes hyperelastic material conditions, dead
-//! loads and optional conservative closed-surface pressure. Uniform, affine
+//! loads, optional stationary conservative gravity and closed-surface pressure.
+//! Gravity uses the same reference density for equilibrium and inertia and
+//! contributes its exact external-force gradient at the accepted deformation.
+//! Uniform, affine
 //! Eulerian and planar free-surface fields contribute their original follower
 //! tangent exactly once, including buoyancy and wetted-area restoring terms.
 //! It does not admit
@@ -20,6 +23,8 @@
 //! not a unique two-sided harmonic response. P1 volumetric locking and spatial
 //! convergence remain properties of the original discretization.
 
+use super::gravity::{GravityField3, ReferenceGravityDensity};
+use super::prepared::PreparedHyperTetProblem;
 use super::pressure::{ClosedTetPressureSurface, TetPressure};
 use super::{HyperTetError, HyperTetProblem, HyperTetSolution, checkpoint};
 use fs_exec::Cx;
@@ -90,6 +95,7 @@ impl std::error::Error for VibrationError {
 pub struct HyperTetVibration<'a, L: HyperelasticMaterial = Hyperelastic> {
     problem: HyperTetProblem<'a, L>,
     held_pressure: Option<(&'a ClosedTetPressureSurface, TetPressure<'a>)>,
+    held_gravity: Option<HeldGravity<'a>>,
     reference_density: RetainedReferenceDensity,
     equilibrium: HyperTetSolution,
     free_dofs: Vec<usize>,
@@ -106,13 +112,31 @@ enum ReferenceDensityInput<'a> {
     Nodal(&'a [f64]),
 }
 
+#[derive(Clone, Copy)]
+struct HeldGravity<'a> {
+    field: &'a GravityField3<'a>,
+}
+
+impl core::fmt::Debug for HeldGravity<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("HeldGravity(stationary conservative field)")
+    }
+}
+
 #[derive(Debug)]
 struct RetainedReferenceDensity {
     cell_means_kg_m3: Vec<f64>,
     nodal_kg_m3: Option<Vec<f64>>,
 }
 
-impl ReferenceDensityInput<'_> {
+impl<'a> ReferenceDensityInput<'a> {
+    fn gravity_density(self) -> ReferenceGravityDensity<'a> {
+        match self {
+            Self::PerElement(density) => ReferenceGravityDensity::PerElement(density),
+            Self::Nodal(density) => ReferenceGravityDensity::Nodal(density),
+        }
+    }
+
     fn mass_matrix<L: HyperelasticMaterial>(
         self,
         problem: &HyperTetProblem<'_, L>,
@@ -122,6 +146,22 @@ impl ReferenceDensityInput<'_> {
             Self::PerElement(density) => problem.reference_mass_matrix(density, cx),
             Self::Nodal(density) => problem.reference_mass_matrix_with_nodal_density(density, cx),
         }
+    }
+
+    fn gravity_tangent<L: HyperelasticMaterial>(
+        self,
+        prepared: &PreparedHyperTetProblem<'_, L>,
+        displacement: &[f64],
+        field: &GravityField3<'_>,
+        cx: &Cx<'_>,
+    ) -> Result<Csr, HyperTetError> {
+        let load = match self {
+            Self::PerElement(density) => prepared.gravity_load(density, displacement, field, cx)?,
+            Self::Nodal(density) => {
+                prepared.gravity_load_with_nodal_density(density, displacement, field, cx)?
+            }
+        };
+        Ok(load.force_tangent_n_m)
     }
 
     /// Retain an already admitted field. The means never enter the mass solve.
@@ -186,6 +226,37 @@ fn admit_pressure_field<L: HyperelasticMaterial>(
     surface.validate_pressure(pressure, cx)
 }
 
+// Both spectral owners solve exactly the same loaded physical problem. Keep
+// the legacy no-gravity routes intact, including their initial-iterate rules.
+#[allow(clippy::too_many_arguments)]
+fn solve_equilibrium<L: HyperelasticMaterial>(
+    problem: &HyperTetProblem<'_, L>,
+    density: ReferenceDensityInput<'_>,
+    initial: Option<&[f64]>,
+    held_pressure: Option<(&ClosedTetPressureSurface, TetPressure<'_>)>,
+    unloaded_pressure: bool,
+    held_gravity: Option<HeldGravity<'_>>,
+    cx: &Cx<'_>,
+) -> Result<HyperTetSolution, HyperTetError> {
+    if let Some(gravity) = held_gravity {
+        return problem.solve_loaded_from(
+            initial,
+            None,
+            held_pressure.filter(|_| !unloaded_pressure),
+            Some((density.gravity_density(), gravity.field)),
+            None,
+            cx,
+        );
+    }
+    match held_pressure {
+        Some((surface, pressure)) => problem.solve_with_pressure_field(surface, pressure, cx),
+        None => match initial {
+            None => problem.solve(cx),
+            Some(displacement) => problem.solve_from(displacement, cx),
+        },
+    }
+}
+
 fn dense_restriction(matrix: &Csr, free: &[usize], cx: &Cx<'_>) -> Result<Vec<f64>, HyperTetError> {
     let n = free.len();
     let mut dense = vec![0.0; n * n];
@@ -240,6 +311,7 @@ impl<'a, L: HyperelasticMaterial> HyperTetProblem<'a, L> {
             ReferenceDensityInput::PerElement(reference_density_kg_m3),
             None,
             None,
+            None,
             settings,
             cx,
         )
@@ -261,6 +333,7 @@ impl<'a, L: HyperelasticMaterial> HyperTetProblem<'a, L> {
     ) -> Result<HyperTetVibration<'a, L>, VibrationError> {
         self.solve_vibration_impl(
             ReferenceDensityInput::Nodal(reference_nodal_density_kg_m3),
+            None,
             None,
             None,
             settings,
@@ -295,6 +368,7 @@ impl<'a, L: HyperelasticMaterial> HyperTetProblem<'a, L> {
             ReferenceDensityInput::PerElement(reference_density_kg_m3),
             None,
             Some((surface, pressure_pa.into())),
+            None,
             settings,
             cx,
         )
@@ -319,6 +393,7 @@ impl<'a, L: HyperelasticMaterial> HyperTetProblem<'a, L> {
             ReferenceDensityInput::Nodal(reference_nodal_density_kg_m3),
             None,
             Some((surface, pressure_pa.into())),
+            None,
             settings,
             cx,
         )
@@ -342,6 +417,7 @@ impl<'a, L: HyperelasticMaterial> HyperTetProblem<'a, L> {
             ReferenceDensityInput::PerElement(reference_density_kg_m3),
             Some(initial_displacement_m),
             None,
+            None,
             settings,
             cx,
         )
@@ -364,16 +440,69 @@ impl<'a, L: HyperelasticMaterial> HyperTetProblem<'a, L> {
             ReferenceDensityInput::Nodal(reference_nodal_density_kg_m3),
             Some(initial_displacement_m),
             None,
+            None,
             settings,
             cx,
         )
     }
 
+    /// Equilibrate under the original stationary conservative gravity field,
+    /// then retain its exact signed vibration pencil. One positive reference
+    /// density per tetrahedron supplies both weight and consistent inertia.
+    /// The current-position gravity tangent is subtracted exactly once from
+    /// the native material tangent, alongside any explicit closed pressure.
+    /// No finite-strain initial-stress term is added a second time.
+    ///
+    /// The borrowed field must remain stationary and deterministic. Its domain,
+    /// finite-value and conservative-gradient gates apply throughout equilibrium
+    /// and final linearization. No time-varying source or self-gravity is inferred.
+    pub fn solve_vibration_with_gravity(
+        &self,
+        reference_density_kg_m3: &[f64],
+        field: &'a GravityField3<'a>,
+        held_pressure: Option<(&'a ClosedTetPressureSurface, TetPressure<'a>)>,
+        settings: VibrationSettings,
+        cx: &Cx<'_>,
+    ) -> Result<HyperTetVibration<'a, L>, VibrationError> {
+        self.solve_vibration_impl(
+            ReferenceDensityInput::PerElement(reference_density_kg_m3),
+            None,
+            held_pressure,
+            Some(HeldGravity { field }),
+            settings,
+            cx,
+        )
+    }
+
+    /// Gravity-loaded spectrum with the original positive P1 nodal density.
+    /// Exact cubic reference moments determine both the equilibrium load and
+    /// consistent mass. Cell averages are retained only for reporting; neither
+    /// changing volume nor gravity replaces the original material inventory.
+    pub fn solve_vibration_with_nodal_density_gravity(
+        &self,
+        reference_nodal_density_kg_m3: &[f64],
+        field: &'a GravityField3<'a>,
+        held_pressure: Option<(&'a ClosedTetPressureSurface, TetPressure<'a>)>,
+        settings: VibrationSettings,
+        cx: &Cx<'_>,
+    ) -> Result<HyperTetVibration<'a, L>, VibrationError> {
+        self.solve_vibration_impl(
+            ReferenceDensityInput::Nodal(reference_nodal_density_kg_m3),
+            None,
+            held_pressure,
+            Some(HeldGravity { field }),
+            settings,
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn solve_vibration_impl(
         &self,
         density: ReferenceDensityInput<'_>,
         initial: Option<&[f64]>,
         held_pressure: Option<(&'a ClosedTetPressureSurface, TetPressure<'a>)>,
+        held_gravity: Option<HeldGravity<'a>>,
         settings: VibrationSettings,
         cx: &Cx<'_>,
     ) -> Result<HyperTetVibration<'a, L>, VibrationError> {
@@ -404,24 +533,24 @@ impl<'a, L: HyperelasticMaterial> HyperTetProblem<'a, L> {
         // Admit mass before the nonlinear work. Neither density nor reference
         // volume is updated to the deformed geometry or statically lumped.
         let mass_kg = dense_restriction(&density.mass_matrix(self, cx)?, &free_dofs, cx)?;
-        let equilibrium = match held_pressure {
-            Some((surface, pressure)) => self.solve_with_pressure_field(surface, pressure, cx)?,
-            None => match initial {
-                None => self.solve(cx)?,
-                Some(displacement) => self.solve_from(displacement, cx)?,
-            },
-        };
+        let equilibrium = solve_equilibrium(
+            self,
+            density,
+            initial,
+            held_pressure,
+            unloaded_pressure,
+            held_gravity,
+            cx,
+        )?;
         let displacement: Vec<_> = equilibrium
             .displacement_m
             .iter()
             .flatten()
             .copied()
             .collect();
-        let mut stiffness_n_m = dense_restriction(
-            &self.prepare(cx)?.tangent_matrix(&displacement, cx)?,
-            &free_dofs,
-            cx,
-        )?;
+        let prepared = self.prepare(cx)?;
+        let mut stiffness_n_m =
+            dense_restriction(&prepared.tangent_matrix(&displacement, cx)?, &free_dofs, cx)?;
         if let Some((surface, pressure)) = held_pressure {
             if !unloaded_pressure {
                 let external = dense_restriction(
@@ -435,6 +564,19 @@ impl<'a, L: HyperelasticMaterial> HyperTetProblem<'a, L> {
                 admit_symmetric(&stiffness_n_m, n)?;
             }
         }
+        if let Some(gravity) = held_gravity {
+            let external = dense_restriction(
+                &density.gravity_tangent(&prepared, &displacement, gravity.field, cx)?,
+                &free_dofs,
+                cx,
+            )?;
+            for (stiffness, load) in stiffness_n_m.iter_mut().zip(external) {
+                *stiffness -= load;
+            }
+            admit_symmetric(&stiffness_n_m, n)?;
+        }
+        drop(prepared);
+        drop(displacement);
         checkpoint(cx)?;
         let modes = eigh_gen_dense(&stiffness_n_m, &mass_kg, n).map_err(VibrationError::Modal)?;
         checkpoint(cx)?;
@@ -466,6 +608,7 @@ impl<'a, L: HyperelasticMaterial> HyperTetProblem<'a, L> {
         Ok(HyperTetVibration {
             problem: *self,
             held_pressure,
+            held_gravity,
             reference_density,
             equilibrium,
             free_dofs,
@@ -493,13 +636,22 @@ impl<L: HyperelasticMaterial> HyperTetVibration<'_, L> {
         }
     }
 
-    /// Exact original closed surface and conservative held field. None selects
-    /// dead loads only. Spatial fields retain their world origin, gradient and
+    /// Exact original closed surface and conservative held field. None means
+    /// no held pressure. Spatial fields retain their world origin, gradient and
     /// free-surface plane; their tangent is never replaced by uniform pressure.
     pub const fn held_pressure_field(
         &self,
     ) -> Option<(&ClosedTetPressureSurface, TetPressure<'_>)> {
         self.held_pressure
+    }
+
+    /// The exact stationary field used for equilibrium and its gravity tangent.
+    /// None means no explicit gravity; a retained zero field remains Some.
+    pub const fn held_gravity_field(&self) -> Option<&GravityField3<'_>> {
+        match self.held_gravity {
+            Some(gravity) => Some(gravity.field),
+            None => None,
+        }
     }
 
     /// Conserved mass density per original volume, in tetrahedron order.
@@ -525,7 +677,7 @@ impl<L: HyperelasticMaterial> HyperTetVibration<'_, L> {
     }
 
     /// Row-major free-by-free tangent, N/m: native material tangent minus any
-    /// held-pressure force tangent, without a second initial-stress matrix.
+    /// held-pressure and gravity force tangents, without another initial-stress matrix.
     pub fn stiffness_n_m(&self) -> &[f64] {
         &self.stiffness_n_m
     }

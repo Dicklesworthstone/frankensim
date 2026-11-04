@@ -529,6 +529,33 @@ native source validation executes the three new assembly regressions and the
 three shared-mass regressions; the full Newton integration regressions remain
 unexecuted in the current dependency-constrained environment.
 
+### Gravity-loaded finite-strain vibration
+
+The complete-spectrum and sparse-window owners accept the same borrowed
+stationary gravity field, either original elementwise or P1 nodal reference
+density, and optional conservative closed pressure. Their common equilibrium
+helper calls the native finite-strain load owner. At the accepted deformation,
+the physical pencil is the original material tangent minus the pressure and
+gravity external-force derivatives, each included once. Reference mass retains
+the identical density basis used for weight; current volume and cell averaging
+do not replace a graded material inventory. Both results expose the retained
+gravity callback, including an explicitly supplied zero field.
+
+The sparse path merges all three canonical rows directly and releases full
+load matrices before entering the existing spectral owner. Signed negative
+eigenvalues remain visible. Original field-domain, conservative-gradient,
+pressure, material, cancellation and spectral-resource gates still apply;
+these modes do not introduce evolving gravity, damping or a new spatial
+discretization.
+
+`tests/hyper3_gravity/vibration.rs` adds independent finite-height equilibrium
+and modal-stiffness formulas for constant/graded density, uniform/affine gravity
+and affine pressure, dense/sparse parity, unstable modes and refusals. The
+unchanged production sparse merge passed bounded original-source tests against
+independent dense arithmetic, including cancellation and nonfinite/symmetry
+refusals. Full native equilibrium/API/eigenmode integration tests remain
+unexecuted without the complete workspace dependency closure.
+
 ## Fatigue on source-bound inertial J2 motion
 
 `plastic3::dynamics::fatigue::J2DynamicFatigueRun` owns accepted physical time,

@@ -4,6 +4,8 @@
 mod nodal_density;
 #[path = "tet10/support.rs"]
 mod support;
+#[path = "hyper3_gravity/vibration.rs"]
+mod vibration;
 use support::{block, with_cx};
 
 use fs_material::hyper::{Hyperelastic, HyperelasticModel};
