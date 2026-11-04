@@ -294,6 +294,42 @@ impl BoundaryGrid3 {
         )
     }
 
+    /// Advance original rigid motion and fluid with one held local shear field.
+    ///
+    /// Full-grid x-fastest `relaxation` supplies the same local molecular tau
+    /// to native fluid collision, saturation weight and six-velocity response.
+    /// Rigid drift, midpoint geometry, higher collision rates and all measured
+    /// impulse/work accounts retain their original owners. Optional endpoint
+    /// force scaling uses the existing trapezoidal physical-source account.
+    /// All endpoint geometry and cancellation checks precede publication.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_moving_partial_saturation_body_and_relaxation(
+        &mut self,
+        sampler: &mut BodyFrameSampler3,
+        shape: &impl BodyFrameShape3,
+        body: &mut MovingPartialSaturationBody3,
+        external_impulse: [f64; 6],
+        moment_origin: [f64; 3],
+        relaxation: &[f64],
+        endpoint_force_scale: Option<f64>,
+        gate: &CancelGate,
+    ) -> Result<MovingPartialSaturationExchange3> {
+        if let Some(scale) = endpoint_force_scale {
+            self.validate_immersed_endpoint_force_scale(scale, gate)?;
+        }
+        self.moving_partial_saturation_transition_with_relaxation(
+            sampler,
+            shape,
+            body,
+            external_impulse,
+            moment_origin,
+            gate,
+            true,
+            endpoint_force_scale,
+            Some(relaxation),
+        )
+    }
+
     // Same drift/collision/stream/drift for immediate or candidate publication.
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     fn moving_partial_saturation_transition(
@@ -331,6 +367,32 @@ impl BoundaryGrid3 {
         gate: &CancelGate,
         publish: bool,
         endpoint_force_scale: Option<f64>,
+    ) -> Result<MovingPartialSaturationExchange3> {
+        self.moving_partial_saturation_transition_with_relaxation(
+            sampler,
+            shape,
+            body,
+            external_impulse,
+            moment_origin,
+            gate,
+            publish,
+            endpoint_force_scale,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn moving_partial_saturation_transition_with_relaxation(
+        &mut self,
+        sampler: &mut BodyFrameSampler3,
+        shape: &impl BodyFrameShape3,
+        body: &mut MovingPartialSaturationBody3,
+        external_impulse: [f64; 6],
+        moment_origin: [f64; 3],
+        gate: &CancelGate,
+        publish: bool,
+        endpoint_force_scale: Option<f64>,
+        local_relaxation: Option<&[f64]>,
     ) -> Result<MovingPartialSaturationExchange3> {
         checkpoint(gate)?;
         if !(sampler.dims == self.dimensions()
@@ -400,7 +462,7 @@ impl BoundaryGrid3 {
         };
         let dims = sampler.dims;
         let samples = sampler.samples_per_axis;
-        let (_, (accepted, receipt)) = self.partial_saturation_body_step(
+        let (_, (accepted, receipt)) = self.partial_saturation_body_step_with_relaxation(
             &sampler.fractions,
             &mut frozen,
             external_impulse,
@@ -408,6 +470,7 @@ impl BoundaryGrid3 {
             gate,
             publish,
             endpoint_force_scale,
+            local_relaxation,
             |grid, exchanged, coupling| {
                 let dw = core::array::from_fn(|i| {
                     exchanged.angular_velocity[i] - omega_before_exchange[i]

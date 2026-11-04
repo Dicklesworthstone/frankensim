@@ -71,6 +71,30 @@ impl BoundaryGrid3 {
         .map(|report| report.motion)
     }
 
+    // Used by the material adapter after its complete source epoch is sampled.
+    // All body poses still share the original midpoint geometry and one stream.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn step_with_moving_partial_saturation_bodies_local_relaxation<const N: usize>(
+        &mut self,
+        samplers: &mut [BodyFrameSampler3; N],
+        shapes: [&dyn BodyFrameShape3; N],
+        bodies: &mut [MovingPartialSaturationBody3; N],
+        external: [[f64; 6]; N],
+        origin: [f64; 3],
+        gate: &CancelGate,
+        endpoint_force_scale: Option<f64>,
+        local_relaxation: &[f64],
+    ) -> Result<MovingPartialSaturationBodiesExchange3<N>> {
+        if let Some(scale) = endpoint_force_scale {
+            self.validate_immersed_endpoint_force_scale(scale, gate)?;
+        }
+        self.moving_partial_saturation_resistance_transition_with_relaxation(
+            samplers, shapes, bodies, external, origin, gate, None, true, None,
+            endpoint_force_scale, Some(local_relaxation),
+        )
+        .map(|(report, _)| report.motion)
+    }
+
     /// Advance the same simultaneous moving assembly with the force-field scale
     /// at the next endpoint. The old force owns collision and body response;
     /// the next force owns endpoint Guo momentum and open-face reconstruction.
@@ -273,6 +297,27 @@ impl BoundaryGrid3 {
         surfaces: Option<&PreparedSurfaces>,
         endpoint_force_scale: Option<f64>,
     ) -> Result<(MovingLubricatedPlanesExchange3<N>, Option<SurfaceCandidate>)> {
+        self.moving_partial_saturation_resistance_transition_with_relaxation(
+            samplers, shapes, bodies, external, origin, gate, lubrication, publish,
+            surfaces, endpoint_force_scale, None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn moving_partial_saturation_resistance_transition_with_relaxation<const N: usize>(
+        &mut self,
+        samplers: &mut [BodyFrameSampler3; N],
+        shapes: [&dyn BodyFrameShape3; N],
+        bodies: &mut [MovingPartialSaturationBody3; N],
+        external: [[f64; 6]; N],
+        origin: [f64; 3],
+        gate: &CancelGate,
+        lubrication: Option<(SphereLubrication3, &[LubricationPlane3])>,
+        publish: bool,
+        surfaces: Option<&PreparedSurfaces>,
+        endpoint_force_scale: Option<f64>,
+        local_relaxation: Option<&[f64]>,
+    ) -> Result<(MovingLubricatedPlanesExchange3<N>, Option<SurfaceCandidate>)> {
         checkpoint(gate)?;
         if N == 0 || !origin.into_iter().all(f64::is_finite) {
             return Err(invalid(
@@ -384,7 +429,7 @@ impl BoundaryGrid3 {
         }
         let frozen_before = frozen;
         let fields = core::array::from_fn(|a| samplers[a].fractions.as_slice());
-        let response = self.partial_saturation_resistance_transition_with_endpoint_force(
+        let response = self.partial_saturation_resistance_transition_with_relaxation(
             fields,
             &mut frozen,
             external,
@@ -393,6 +438,7 @@ impl BoundaryGrid3 {
             lubrication.map(|(model, _)| (model, radii, midpoint_planes)),
             publish,
             endpoint_force_scale,
+            local_relaxation,
             |grid, exchanged, coupling, plane_reports| {
                 let mut accepted = initial;
                 let mut reports = [None; N];

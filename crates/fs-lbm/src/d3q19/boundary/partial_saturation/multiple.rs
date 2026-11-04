@@ -408,9 +408,47 @@ impl BoundaryGrid3 {
         T,
         Vec<PlaneLubricationExchange3>,
     )> {
+        self.partial_saturation_resistance_transition_with_relaxation(
+            fractions, bodies, external, origin, gate, lubrication, publish,
+            endpoint_force_scale, None, finish,
+        )
+    }
+
+    // Material viscosity changes the same local collision, occupancy weight
+    // and simultaneous rigid response. It never introduces a per-body fluid
+    // step or independently retunes the unresolved film model.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub(in crate::d3q19::boundary) fn partial_saturation_resistance_transition_with_relaxation<
+        const N: usize,
+        T,
+    >(
+        &mut self,
+        fractions: [&[f64]; N],
+        bodies: &mut [PartialSaturationBody3; N],
+        external: [[f64; 6]; N],
+        origin: [f64; 3],
+        gate: &CancelGate,
+        lubrication: Option<(SphereLubrication3, [f64; N], &[LubricationPlane3])>,
+        publish: bool,
+        endpoint_force_scale: Option<f64>,
+        local_relaxation: Option<&[f64]>,
+        finish: impl FnOnce(
+            &Self,
+            &[PartialSaturationBody3; N],
+            &PartialSaturationBodiesExchange3<N>,
+            &[PlaneLubricationExchange3],
+        ) -> Result<T>,
+    ) -> Result<(
+        PartialSaturationBodiesExchange3<N>,
+        T,
+        Vec<PlaneLubricationExchange3>,
+    )> {
         checkpoint(gate)?;
         if N == 0 {
             return Err(invalid("immersed assembly must contain at least one body"));
+        }
+        if local_relaxation.is_some_and(|field| field.len() != self.nx * self.ny * self.nz) {
+            return Err(invalid("assembly viscosity field must cover the original grid"));
         }
         if let Some((model, radii, planes)) = lubrication {
             model.admit(radii)?;
@@ -419,7 +457,7 @@ impl BoundaryGrid3 {
         if N == 1 && lubrication.is_none_or(|(_, _, planes)| planes.is_empty()) {
             let mut proposed = *bodies;
             let mut single = proposed[0];
-            let (_, (receipt, value)) = self.partial_saturation_body_step(
+            let (_, (receipt, value)) = self.partial_saturation_body_step_with_relaxation(
                 fractions[0],
                 &mut single,
                 external[0],
@@ -427,6 +465,7 @@ impl BoundaryGrid3 {
                 gate,
                 publish,
                 endpoint_force_scale,
+                local_relaxation,
                 |grid, after, exchange| {
                     proposed[0] = *after;
                     let receipt = PartialSaturationBodiesExchange3 {
@@ -449,7 +488,6 @@ impl BoundaryGrid3 {
         }
         let relaxation = ImmersedRelaxation3::new(self.collision_model)
             .ok_or_else(|| invalid("immersed assembly needs finite viscous relaxation time"))?;
-        let tau = relaxation.tau;
         if !origin.into_iter().all(f64::is_finite)
             || Face3::ALL.into_iter().any(|face| {
                 matches!(self.boundaries.face(face), FaceBoundary3::Wall { velocity } if velocity != [0.0; 3])
@@ -499,6 +537,11 @@ impl BoundaryGrid3 {
                 if total == 0.0 {
                     continue;
                 }
+                let (_, cell_relaxation) = local_immersed_collision(
+                    self.collision_model, relaxation, local_relaxation,
+                    self.dimensions(), cell,
+                )?;
+                let tau = cell_relaxation.tau;
                 if self.open_link_masks[tile].0[lane] != 0 {
                     return Err(PartialSaturationError3::Cell {
                         cell,
@@ -579,7 +622,12 @@ impl BoundaryGrid3 {
                 let index = (cell[2] * self.ny + cell[1]) * self.nx + cell[0];
                 let f = self.f.each_ref().map(|f| f[tile].0[lane]);
                 let force = cell_force(self.force, self.force_field.as_deref(), tile, lane);
-                let ordinary = collide(f, self.collision_model, force)
+                let (model, relaxation) = local_immersed_collision(
+                    self.collision_model, relaxation, local_relaxation,
+                    self.dimensions(), cell,
+                )?;
+                let tau = relaxation.tau;
+                let ordinary = collide(f, model, force)
                     .map_err(|source| PartialSaturationError3::Collision { cell, source })?;
                 let mut post = ordinary;
                 let mut total = 0.0;

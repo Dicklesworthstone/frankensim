@@ -30,6 +30,35 @@ use super::{
 mod collision;
 use collision::ImmersedRelaxation3;
 
+// One shear field for fluid collision AND the reciprocal immersed response.
+// Callers admit full-grid field length before entering either native pass.
+// Constant fields keep the exact authored moment rates, avoiding reciprocal
+// round trips that would otherwise change unchanged-model population bits.
+fn local_immersed_collision(
+    model: CollisionModel3,
+    uniform: ImmersedRelaxation3,
+    field: Option<&[f64]>,
+    dimensions: [usize; 3],
+    cell: [usize; 3],
+) -> Result<(CollisionModel3, ImmersedRelaxation3)> {
+    use crate::lattice3::{D3q19, ViscousLattice3};
+
+    let Some(field) = field else {
+        return Ok((model, uniform));
+    };
+    let tau = field[(cell[2] * dimensions[1] + cell[1]) * dimensions[0] + cell[0]];
+    if tau == uniform.tau {
+        return Ok((model, uniform));
+    }
+    let model = D3q19::with_shear_relaxation(model, tau)
+        .map_err(|source| PartialSaturationError3::Collision { cell, source })?;
+    let relaxation = ImmersedRelaxation3::new(model).ok_or(PartialSaturationError3::Cell {
+        cell,
+        reason: "immersed material requires finite viscous relaxation time",
+    })?;
+    Ok((model, relaxation))
+}
+
 pub(super) mod open;
 pub use open::OpenBoundaryMomentumTransport3;
 use open::OpenTransport;
@@ -492,6 +521,42 @@ impl BoundaryGrid3 {
         .map(|(exchange, ())| exchange)
     }
 
+    /// Advance the same frozen body/fluid transaction with local molecular tau.
+    ///
+    /// The x-fastest field covers the full grid; solid entries are ignored.
+    /// Each fluid cell uses the same rate in its selected native collision,
+    /// saturation weight and implicit rigid response. All independent collision
+    /// controls are retained. Coefficients stay fixed during this tick.
+    /// `endpoint_force_scale` has the original prescribed-history semantics.
+    /// Invalid rates, endpoint checks or cancellation publish nothing.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_partial_saturation_body_and_relaxation(
+        &mut self,
+        solid_fractions: &[f64],
+        body: &mut PartialSaturationBody3,
+        external_impulse: [f64; 6],
+        moment_origin: [f64; 3],
+        relaxation: &[f64],
+        endpoint_force_scale: Option<f64>,
+        gate: &CancelGate,
+    ) -> Result<PartialSaturationBodyExchange3> {
+        if let Some(scale) = endpoint_force_scale {
+            self.validate_immersed_endpoint_force_scale(scale, gate)?;
+        }
+        self.partial_saturation_body_step_with_relaxation(
+            solid_fractions,
+            body,
+            external_impulse,
+            moment_origin,
+            gate,
+            true,
+            endpoint_force_scale,
+            Some(relaxation),
+            |_, _, _| Ok(()),
+        )
+        .map(|(exchange, ())| exchange)
+    }
+
     pub(super) fn validate_immersed_endpoint_force_scale(
         &self,
         scale: f64,
@@ -580,12 +645,44 @@ impl BoundaryGrid3 {
             &PartialSaturationBodyExchange3,
         ) -> Result<T>,
     ) -> Result<(PartialSaturationBodyExchange3, T)> {
+        self.partial_saturation_body_step_with_relaxation(
+            solid_fractions,
+            body,
+            external_impulse,
+            moment_origin,
+            gate,
+            publish,
+            endpoint_force_scale,
+            None,
+            finish,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub(super) fn partial_saturation_body_step_with_relaxation<T>(
+        &mut self,
+        solid_fractions: &[f64],
+        body: &mut PartialSaturationBody3,
+        external_impulse: [f64; 6],
+        moment_origin: [f64; 3],
+        gate: &CancelGate,
+        publish: bool,
+        endpoint_force_scale: Option<f64>,
+        local_relaxation: Option<&[f64]>,
+        finish: impl FnOnce(
+            &Self,
+            &PartialSaturationBody3,
+            &PartialSaturationBodyExchange3,
+        ) -> Result<T>,
+    ) -> Result<(PartialSaturationBodyExchange3, T)> {
         checkpoint(gate)?;
-        let relaxation = ImmersedRelaxation3::new(self.collision_model)
+        let uniform = ImmersedRelaxation3::new(self.collision_model)
             .ok_or_else(|| invalid("immersed coupling needs finite viscous relaxation time"))?;
-        let tau = relaxation.tau;
         if solid_fractions.len() != self.nx * self.ny * self.nz {
             return Err(invalid("solid fractions must cover the whole grid"));
+        }
+        if local_relaxation.is_some_and(|field| field.len() != solid_fractions.len()) {
+            return Err(invalid("immersed relaxation must cover the whole grid"));
         }
         if Face3::ALL.into_iter().any(|face| {
             matches!(self.boundaries.face(face), FaceBoundary3::Wall { velocity } if velocity != [0.0; 3])
@@ -633,6 +730,14 @@ impl BoundaryGrid3 {
                 if epsilon == 0.0 {
                     continue;
                 }
+                let (_, relaxation) = local_immersed_collision(
+                    self.collision_model,
+                    uniform,
+                    local_relaxation,
+                    self.dimensions(),
+                    cell,
+                )?;
+                let tau = relaxation.tau;
                 if self.open_link_masks[tile].0[lane] != 0 {
                     return Err(PartialSaturationError3::Cell {
                         cell,
@@ -684,7 +789,15 @@ impl BoundaryGrid3 {
                 let cell = self.coords(tile, lane);
                 let f = self.f.each_ref().map(|f| f[tile].0[lane]);
                 let force = cell_force(self.force, self.force_field.as_deref(), tile, lane);
-                let ordinary = collide(f, self.collision_model, force)
+                let (model, relaxation) = local_immersed_collision(
+                    self.collision_model,
+                    uniform,
+                    local_relaxation,
+                    self.dimensions(),
+                    cell,
+                )?;
+                let tau = relaxation.tau;
+                let ordinary = collide(f, model, force)
                     .map_err(|source| PartialSaturationError3::Collision { cell, source })?;
                 let mut post = ordinary;
                 let epsilon = solid_fractions[(cell[2] * self.ny + cell[1]) * self.nx + cell[0]];

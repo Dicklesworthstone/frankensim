@@ -9,6 +9,8 @@
 /// Local material viscosity on the original curved-wall D3Q19 owner.
 pub mod boundary;
 pub mod conjugate;
+/// Original source rheology on native moving immersed-body transactions.
+pub mod immersed;
 
 use fs_material::MaterialError;
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};

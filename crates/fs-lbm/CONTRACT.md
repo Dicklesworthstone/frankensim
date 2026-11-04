@@ -10313,6 +10313,52 @@ the reconstructed final payload and new tests remain uncompiled/unexecuted,
 and the tests have not passed a parser check. No measured nonlinear-flow
 accuracy, performance or arbitrary constitutive convergence claim is made.
 
+## Source rheology on moving immersed bodies
+
+`MaterialScaling::step_moving_body_with_material_rheology` and
+`step_moving_bodies_with_material_rheology` bind original
+`FluidTransport` sources to the native moving partial-saturation owner.
+The existing physical half-force velocity and wall/open/periodic gradient
+supply the full symmetric strain rate, `sqrt(2 D:D) / dt`. Rigid rotation
+contributes no strain. Each non-solid cell resolves one original source and
+reads its transport once, independently of body count. A mixed solid/fluid
+cell is sampled through this velocity gradient; its blended nonequilibrium
+stress is not treated as a pure-fluid constitutive estimator.
+
+The source's dynamic viscosity and retained reference density determine the
+same local relaxation used by fluid collision, the Noble--Torczynski weight,
+and the implicit six-velocity rigid-body response. Multiple bodies sharing
+disjoint subvolumes of a cell use one total-occupancy denominator. BGK, TRT,
+central-moment and reduced-cumulant non-shear controls remain native. An
+unchanged relaxation preserves the authored collision model exactly. A
+one-body assembly delegates to the same single-body coupling.
+
+The shared source field is prepared once before native rigid half-drift,
+geometry sampling, simultaneous exchange and final half-drift. Existing
+pair, wall/halo, endpoint-force and cancellation checks precede the original
+sole population publication; no second fluid step or sequential body update
+is introduced. Source, allocation, density, geometry or cancellation refusal
+preserves accepted populations, rigid states and force history. Scratch
+workspaces may change. Explicit cell and kinematics byte budgets bound the
+preparation; no fallible source work follows native publication.
+
+Sources retain the original rho0/dx/dt conversion and exact reference density.
+Temperature, composition and material history remain with the caller, whose
+callback must not publish tentative history. Cp and conductivity impose no
+thermal lattice constraint on this momentum-only path. Coefficients are
+frozen at the incoming time level and resampled on the next call. This is
+not an implicit endpoint rheology solve, viscous-heat integrator or subgrid
+lubrication law. Native lattice units, low-Mach restrictions and additional
+body inertia over retained interior fluid remain unchanged.
+
+Focused regressions cover all-family constant-source/native identity,
+independent Carreau collision/body response, full strain and rigid rotation,
+source and geometry refusal, late cancellation with exact retry, shared-cell
+simultaneous momentum exchange and one-body-array identity. These sources
+passed Rust parsing and scoped whitespace checks; native compilation and
+execution remain pending. No measured accuracy or performance result is
+claimed for this extension.
+
 ## Source-backed gas convection on planar moving-liquid interfaces
 
 `MaterialFreeSurfaceEnthalpy3::step_with_surface_convection` and
