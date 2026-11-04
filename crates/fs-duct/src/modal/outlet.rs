@@ -71,6 +71,15 @@ pub struct MouthExcitation {
     pub mouth_flow: Vec<C64>,
 }
 
+/// Coherent physical source boundaries and their original mouth observation.
+#[derive(Debug, Clone)]
+pub struct MouthSourceResponse {
+    /// Inlet pressures, flows, generator work and source resistance losses.
+    pub inlet: ModalSourceResponse,
+    /// Outward mouth modal volume flows [m³/s] from the same source solve.
+    pub mouth_flow: Vec<C64>,
+}
+
 impl MouthWaveResponse {
     /// Mouth flows per unit incident plane pressure, with all higher inlet
     /// volume flows zero. This is the original `Z00` source closure; no input
@@ -99,6 +108,23 @@ impl MouthWaveResponse {
     {
         let (reflected_pressure, native) = self.input.excitation(references, incident_pressure)?;
         Ok(MouthExcitation { reflected_pressure, mouth_flow: self.observe(&native)? })
+    }
+
+    /// Apply one physical pressure/flow source law to each retained inlet
+    /// mode and observe every mouth mode. The same native-wave solution
+    /// supplies inlet work and mouth motion, including reactive source
+    /// impedance, cross-mode reflection and coherent source interference.
+    ///
+    /// See [`ModalReflectionResponse::drive_sources`] for the source law,
+    /// zero-flow/zero-pressure distinction and disconnected-resonance rule.
+    ///
+    /// # Errors
+    /// The original source-boundary refusals or an invalid mouth observation.
+    pub fn drive_sources(&self, sources: &[crate::network::PortExcitation])
+        -> Result<MouthSourceResponse, DuctError>
+    {
+        let (inlet, native) = self.input.source_excitation(sources)?;
+        Ok(MouthSourceResponse { inlet, mouth_flow: self.observe(&native)? })
     }
 
     fn observe(&self, native: &[C64]) -> Result<Vec<C64>, DuctError> {

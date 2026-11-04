@@ -562,7 +562,7 @@ fn source_conditions<'a>(
 
 // Neumaier accumulation preserves weak residuals of strongly cancelling
 // sources. Callers supply canonical port order, independent of input order.
-fn coherent_sum(values: impl Iterator<Item = C64>) -> C64 {
+pub(crate) fn coherent_sum(values: impl Iterator<Item = C64>) -> C64 {
     let mut sum = C64::ZERO;
     let mut correction = C64::ZERO;
     for value in values {

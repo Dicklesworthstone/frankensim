@@ -460,6 +460,36 @@ fn native_mouth_observation_excludes_unforced_disconnected_resonances() {
 }
 
 #[test]
+fn physical_modal_sources_observe_the_same_mouth_wave_and_source_work() {
+    use crate::network::PortExcitation;
+    // Exact quarter-wave pressure-release plane channel plus a disconnected
+    // closed higher-mode resonance. The moving mouth is finite at zero inlet
+    // flow, and a complex source impedance cannot manufacture extra loss.
+    let waves = MouthWaveResponse {
+        input: ModalReflectionResponse { omega: 1.0, n_modes: 2,
+            reflection_matrix: vec![C64::ONE, C64::ZERO, C64::ZERO, C64::ONE],
+            characteristic_impedances: vec![C64::from_re(2.0), C64::from_re(3.0)],
+            min_shear_number: f64::INFINITY, mouth_ka: 0.1,
+            cutoffs_at_throat_hz: vec![0.1], steps_used: 1 },
+        inlet_radius_m: 0.01, mouth_radius_m: 0.01,
+        native_flow_map: vec![C64::new(0.0, 1.0), C64::ZERO,
+            C64::ZERO, C64::new(0.0, -2.0/3.0)],
+    };
+    let drive = C64::new(0.4, -0.7);
+    let result = waves.drive_sources(&[
+        PortExcitation::Pressure { open_circuit_pressure_pa: drive,
+            impedance_pa_s_m3: C64::new(0.5, -0.3) },
+        PortExcitation::VolumeFlow(C64::ZERO),
+    ]).unwrap();
+    close(result.inlet.inlet_pressure[0], drive, 1.0);
+    assert_eq!(result.inlet.inlet_flow, vec![C64::ZERO; 2]);
+    close(result.mouth_flow[0], C64::new(0.0, 0.5)*drive, 1.0);
+    assert_eq!(result.mouth_flow[1], C64::ZERO);
+    assert_eq!(result.inlet.generator_power_w, 0.0);
+    assert_eq!(result.inlet.source_dissipation_w, 0.0);
+}
+
+#[test]
 fn native_mouth_source_closures_match_independent_global_wave_equations() {
     let gas = air();
     let n = 3;

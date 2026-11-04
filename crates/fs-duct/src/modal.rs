@@ -74,7 +74,7 @@ mod prepared;
 pub use prepared::PreparedModalDuct;
 
 mod reflection;
-pub use reflection::ModalReflectionResponse;
+pub use reflection::{ModalReflectionResponse, ModalSourceResponse};
 
 mod load;
 pub use load::{AxisymmetricMouthBasis, ModalMouthImpedance};

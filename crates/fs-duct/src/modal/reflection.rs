@@ -1,6 +1,34 @@
 //! Finite reflected waves without an intermediate input-impedance inverse.
 
 use super::*;
+use crate::network::{PortExcitation, coherent_sum};
+
+/// Original inlet fields and source work from one coherent modal boundary solve.
+///
+/// All vectors retain the original radial mode order. Peak phasors use
+/// `exp(-i omega t)` and positive inlet volume flow enters the duct. Source
+/// impedance dissipation is separate from the gas, wall and mouth losses.
+#[derive(Debug, Clone)]
+pub struct ModalSourceResponse {
+    /// Actual complex inlet modal pressures [Pa].
+    pub inlet_pressure: Vec<C64>,
+    /// Actual complex inlet modal volume flows [m³/s], into the duct.
+    pub inlet_flow: Vec<C64>,
+    /// Signed cycle-mean generator work [W] for each mode. A pressure source
+    /// uses `Re(p_open conj(U))/2`; a flow source uses its actual inlet work.
+    /// A driven generator may absorb work from the other coherent sources.
+    pub generator_powers_w: Vec<f64>,
+    /// Nonnegative cycle-mean loss [W] in each source's declared resistance,
+    /// `Re(Zs) |U|²/2`. Ideal flow sources have no internal impedance loss.
+    pub source_dissipations_w: Vec<f64>,
+    /// Signed total power entering the duct, `sum Re(P conj(U))/2` [W].
+    pub inlet_power_w: f64,
+    /// Signed total generator power [W], before internal source dissipation.
+    pub generator_power_w: f64,
+    /// Total loss [W] in the source resistances. Generator power equals this
+    /// loss plus inlet power, up to the boundary solve's numerical error.
+    pub source_dissipation_w: f64,
+}
 
 /// Staircase input reflection in the inlet station's native modal waves.
 ///
@@ -145,31 +173,7 @@ impl ModalReflectionResponse {
         // zeros alone separate blocks; arbitrarily weak coupling is retained.
         let mut connected = [false; MAX_MODES];
         connected[0] = true;
-        loop {
-            let mut changed = false;
-            for i in 0..n {
-                if connected[i] {
-                    for j in 0..n {
-                        if !connected[j]
-                            && (self.reflection_matrix[i * n + j] != C64::ZERO
-                                || self.reflection_matrix[j * n + i] != C64::ZERO)
-                        {
-                            connected[j] = true;
-                            changed = true;
-                        }
-                    }
-                }
-            }
-            if !changed { break; }
-        }
-        let mut modes = [0; MAX_MODES];
-        let mut count = 0;
-        for (i, &included) in connected[..n].iter().enumerate() {
-            if included {
-                modes[count] = i;
-                count += 1;
-            }
-        }
+        let (modes, count) = self.connected_modes(connected);
         let modes = &modes[..count];
         let mut boundary = vec![C64::ZERO; count * count];
         for (row, &i) in modes.iter().enumerate() {
@@ -198,22 +202,201 @@ impl ModalReflectionResponse {
         Ok((reflected, outgoing))
     }
 
-    fn pressure_and_scaled_flow(&self, references: &[f64]) -> Result<(Vec<C64>, Vec<C64>), DuctError> {
+    /// Drive every retained inlet mode with the existing physical source law.
+    ///
+    /// Sources are in original modal order. `VolumeFlow(0)` closes that mode;
+    /// a `Pressure` source enforces `P + Zs U = p_open`, including its finite
+    /// passive complex impedance. Zero `p_open` retains that load, while zero
+    /// `Zs` is an ideal pressure source. All nonzero drives share this
+    /// response's frequency and phase clock. Coherent higher-mode drives and
+    /// mixed pressure/flow conditions retain every original modal coupling.
+    ///
+    /// The solve uses `(I+R)a` and `diag(1/Zc)(I-R)a` directly, without an
+    /// input-impedance inverse. Exactly disconnected unforced components have
+    /// zero amplitude, including free resonances; a singular driven component
+    /// still refuses. This is one harmonic sample, not a causal model for an
+    /// arbitrary frequency-dependent source impedance.
+    ///
+    /// # Errors
+    /// Invalid response/source dimensions, nonfinite drive or impedance,
+    /// negative source resistance, nonrepresentable fields/work, or a singular
+    /// source-connected boundary solve. Original modal admissions still apply.
+    pub fn drive_sources(&self, sources: &[PortExcitation])
+        -> Result<ModalSourceResponse, DuctError>
+    {
+        self.source_excitation(sources).map(|(response, _)| response)
+    }
+
+    pub(super) fn source_excitation(&self, sources: &[PortExcitation])
+        -> Result<(ModalSourceResponse, Vec<C64>), DuctError>
+    {
+        self.admit_native()?;
+        let n = self.n_modes;
+        if sources.len() != n {
+            return Err(DuctError::BadParameter {
+                what: "modal sources must prescribe every retained inlet mode",
+            });
+        }
+        let mut connected = [false; MAX_MODES];
+        let mut p_weight = [C64::ZERO; MAX_MODES];
+        let mut u_weight = [C64::ZERO; MAX_MODES];
+        let mut drive = [C64::ZERO; MAX_MODES];
+        for (i, &source) in sources.iter().enumerate() {
+            let zc = self.characteristic_impedances[i];
+            match source {
+                PortExcitation::VolumeFlow(flow) => {
+                    finite_waves(&[flow])?;
+                    connected[i] = flow != C64::ZERO;
+                    u_weight[i] = C64::ONE;
+                    drive[i] = zc * flow;
+                }
+                PortExcitation::Pressure { open_circuit_pressure_pa: pressure,
+                    impedance_pa_s_m3: impedance } => {
+                    finite_waves(&[pressure, impedance])?;
+                    if impedance.re < 0.0 {
+                        return Err(DuctError::BadParameter {
+                            what: "modal source impedance must have nonnegative resistance",
+                        });
+                    }
+                    connected[i] = pressure != C64::ZERO;
+                    // Multiply P+Zs U=p_open by Zc/scale. Bounded impedance
+                    // weights avoid forming an overflowing Zs/Zc ratio and
+                    // keep evanescent native impedances in their own phase.
+                    let scale = zc.re.abs().max(zc.im.abs())
+                        .max(impedance.re.abs()).max(impedance.im.abs());
+                    p_weight[i] = zc / C64::from_re(scale);
+                    u_weight[i] = impedance / C64::from_re(scale);
+                    if p_weight[i] == C64::ZERO {
+                        return Err(DuctError::Singular);
+                    }
+                    drive[i] = p_weight[i] * pressure;
+                }
+            }
+        }
+        finite_waves(&drive[..n])?;
+        let (modes, count) = self.connected_modes(connected);
+        let modes = &modes[..count];
+        let mut native = vec![C64::ZERO; n];
+        if count != 0 {
+            let mut boundary = [C64::ZERO; MAX_MODES * MAX_MODES];
+            let mut rhs = [C64::ZERO; MAX_MODES];
+            for (row, &i) in modes.iter().enumerate() {
+                for (column, &j) in modes.iter().enumerate() {
+                    let r = self.reflection_matrix[i*n+j];
+                    let delta = if i == j { C64::ONE } else { C64::ZERO };
+                    boundary[row*count+column] = p_weight[i]*(delta+r) + u_weight[i]*(delta-r);
+                }
+                let values = &mut boundary[row*count..(row+1)*count];
+                finite_waves(values)?;
+                let scale = values.iter().fold(0.0_f64,
+                    |scale, z| scale.max(z.re.abs()).max(z.im.abs()));
+                if scale == 0.0 { return Err(DuctError::Singular); }
+                for value in values { *value = *value / C64::from_re(scale); }
+                rhs[row] = drive[i] / C64::from_re(scale);
+            }
+            finite_waves(&rhs[..count])?;
+            let lu = lu_complex(&boundary[..count*count], count).map_err(|_| DuctError::Singular)?;
+            lu.solve(&mut rhs[..count]);
+            for (&i, &amplitude) in modes.iter().zip(&rhs) { native[i] = amplitude; }
+            finite_waves(&native)?;
+        }
+        let mut inlet_pressure = Vec::with_capacity(n);
+        let mut inlet_flow = Vec::with_capacity(n);
+        for i in 0..n {
+            inlet_pressure.push(coherent_sum((0..n).map(|j| {
+                let delta = if i == j { C64::ONE } else { C64::ZERO };
+                (delta+self.reflection_matrix[i*n+j])*native[j]
+            })));
+            inlet_flow.push(coherent_sum((0..n).map(|j| {
+                let delta = if i == j { C64::ONE } else { C64::ZERO };
+                (delta-self.reflection_matrix[i*n+j])*native[j]
+            })) / self.characteristic_impedances[i]);
+        }
+        finite_waves(&inlet_pressure)?;
+        finite_waves(&inlet_flow)?;
+        let mut generator_powers_w = Vec::with_capacity(n);
+        let mut source_dissipations_w = Vec::with_capacity(n);
+        for (i, &source) in sources.iter().enumerate() {
+            let (pressure, resistance) = match source {
+                PortExcitation::VolumeFlow(_) => (inlet_pressure[i], 0.0),
+                PortExcitation::Pressure { open_circuit_pressure_pa, impedance_pa_s_m3 } =>
+                    (open_circuit_pressure_pa, impedance_pa_s_m3.re),
+            };
+            let flow = inlet_flow[i];
+            generator_powers_w.push((pressure*flow.conj()).re*0.5);
+            // Form the dissipative pressure first, so a tiny flow's squared
+            // magnitude does not underflow before a large resistance acts.
+            source_dissipations_w.push((flow.scale(resistance)*flow.conj()).re*0.5);
+        }
+        let generator_power_w = coherent_sum(generator_powers_w.iter().copied().map(C64::from_re)).re;
+        let source_dissipation_w = coherent_sum(source_dissipations_w.iter().copied().map(C64::from_re)).re;
+        let inlet_power_w = coherent_sum(inlet_pressure.iter().zip(&inlet_flow)
+            .map(|(&pressure, &flow)| (pressure*flow.conj()).scale(0.5))).re;
+        if generator_powers_w.iter().chain(&source_dissipations_w)
+            .chain(&[generator_power_w, source_dissipation_w, inlet_power_w])
+            .any(|value| !value.is_finite())
+        {
+            return Err(DuctError::Singular);
+        }
+        Ok((ModalSourceResponse { inlet_pressure, inlet_flow, generator_powers_w,
+            source_dissipations_w, inlet_power_w, generator_power_w, source_dissipation_w }, native))
+    }
+
+    // The exact undirected coupling graph includes every nonzero entry in
+    // either direction. Callers have already admitted the native dimensions.
+    fn connected_modes(&self, mut connected: [bool; MAX_MODES]) -> ([usize; MAX_MODES], usize) {
+        let n = self.n_modes;
+        loop {
+            let mut changed = false;
+            for i in 0..n {
+                if connected[i] {
+                    for j in 0..n {
+                        if !connected[j]
+                            && (self.reflection_matrix[i * n + j] != C64::ZERO
+                                || self.reflection_matrix[j * n + i] != C64::ZERO)
+                        {
+                            connected[j] = true;
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            if !changed { break; }
+        }
+        let mut modes = [0; MAX_MODES];
+        let mut count = 0;
+        for (i, &included) in connected[..n].iter().enumerate() {
+            if included {
+                modes[count] = i;
+                count += 1;
+            }
+        }
+        (modes, count)
+    }
+
+    fn admit_native(&self) -> Result<(), DuctError> {
         let n = self.n_modes;
         if !(1..=MAX_MODES).contains(&n)
             || self.reflection_matrix.len() != n * n
             || self.characteristic_impedances.len() != n
-            || references.len() != n
-            || references.iter().any(|z| !z.is_finite() || *z <= 0.0)
             || self.characteristic_impedances.iter().any(|z| {
                 !z.re.is_finite() || !z.im.is_finite() || z.abs() == 0.0
             })
         {
             return Err(DuctError::BadParameter {
-                what: "modal reflection needs an N x N matrix, nonzero native impedances and positive real references",
+                what: "modal reflection needs an N x N matrix and finite nonzero native impedances",
             });
         }
         finite_waves(&self.reflection_matrix)?;
+        Ok(())
+    }
+
+    fn pressure_and_scaled_flow(&self, references: &[f64]) -> Result<(Vec<C64>, Vec<C64>), DuctError> {
+        self.admit_native()?;
+        let n = self.n_modes;
+        if references.len() != n || references.iter().any(|z| !z.is_finite() || *z <= 0.0) {
+            return Err(DuctError::BadParameter { what: "modal reflection needs positive real references for every mode" });
+        }
         let mut p = self.reflection_matrix.clone();
         let mut q = vec![C64::ZERO; n * n];
         for i in 0..n {
@@ -239,3 +422,6 @@ fn finite_waves(waves: &[C64]) -> Result<(), DuctError> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod source_tests;

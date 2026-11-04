@@ -513,6 +513,23 @@ pipe `Z_in = +i Zc cot(kL)`.
   mouth can remain observable at an inlet flow node. Strict tables retain
   their original mouth reference and support; existing impedance APIs and
   their physical poles are unchanged.
+  `ModalReflectionResponse::drive_sources` applies the existing
+  `network::PortExcitation` law in original retained-mode order: prescribed
+  complex volume flow, or `P + Zs U = p_open` with a finite passive complex
+  source impedance. Zero prescribed flow closes that mode; zero pressure
+  leaves its impedance connected and able to absorb other coherent sources.
+  `MouthWaveResponse::drive_sources` observes the same solved native waves.
+  This admits simultaneous higher-mode drives and mixed pressure/flow
+  conditions without an input-impedance inverse. Only exactly disconnected
+  unforced components take zero amplitude; every nonzero modal coupling is
+  retained and driven singular components refuse. Source equations use
+  bounded impedance weights and row scaling, retaining native evanescent
+  phases. Returned physical inlet fields carry signed generator work,
+  independently computed nonnegative source resistance loss, and actual
+  power into the duct. One generator may absorb another's work; powers are
+  never added from separate incoherent runs. These are independent scalar
+  source impedances at one harmonic frequency, with the original complete
+  duct coupling, not a source-bank or arbitrary causal impedance fit.
   `Closed` imposes zero normal volume flow on every retained mode, and
   `IdealOpen` imposes zero pressure on every mode. Their terminal pressure
   reflection matrices are respectively `+I` and `-I`, including evanescent
