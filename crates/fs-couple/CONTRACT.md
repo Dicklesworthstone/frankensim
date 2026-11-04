@@ -1,5 +1,23 @@
 # CONTRACT: fs-couple
 
+## Native continuous tangents in periodic and variational solves
+
+The original pHS orbit adapter discovers `Storage::continuous_tangent()`
+after its existing exact-quadratic cached path. Ordinary harmonic balance,
+variational shooting and Floquet adapters can therefore differentiate assembled,
+boxed nonlinear storage without a separately maintained constitutive callback.
+Native SOS, direct sums, shared storage and complete Maxwell memory retain their
+original effort law, geometric prestress curvature and memory cross terms.
+Explicit caller-provided actions remain available as overrides.
+
+A selected native action must fill every physical derivative row with finite
+values. Refusal or incomplete output stops the analytic solve; no hidden
+finite-difference columns replace a declared action. Unsupported storage retains
+its existing solver support and limitations. Feedback derivatives and harmonic
+resolution remain the responsibility of their existing owners. Focused tests
+exercise ordinary phased nonlinear HB, original cycle work, variational shooting
+against the independent Liouville determinant, and strict native refusal.
+
 ## Physical harmonics of original nonlinear port outputs
 
 `phs_orbit::spectrum::observe_port_spectrum` evaluates `G^T grad H(x)` from

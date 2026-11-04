@@ -9,7 +9,7 @@ use fs_orbit::{
     AdaptiveHbOrbit, HbAnchor, ScaledHbOrbit, solve_hb_adaptive_scaled_seeded,
     solve_hb_scaled_seeded,
 };
-use fs_phs::PortHamiltonian;
+use fs_phs::{ContinuousStorageTangent, PortHamiltonian};
 use std::borrow::Cow;
 
 /// Complete continuous Hessian action of the original Hamiltonian.
@@ -23,6 +23,20 @@ use std::borrow::Cow;
 /// the solve; no finite-difference replacement is used for a declared action.
 pub type PhsStorageHessianAction<'a> = dyn Fn(&[f64], &[f64], &mut [f64]) -> bool + 'a;
 
+pub(super) enum StorageAction<'a> {
+    Native(&'a dyn ContinuousStorageTangent),
+    Callback(&'a PhsStorageHessianAction<'a>),
+}
+
+impl StorageAction<'_> {
+    fn apply(&self, state: &[f64], direction: &[f64], out: &mut [f64]) -> bool {
+        match self {
+            Self::Native(action) => action.apply(state, direction, out),
+            Self::Callback(action) => action(state, direction, out),
+        }
+    }
+}
+
 pub(super) enum StorageTangent<'a> {
     Unavailable,
     Quadratic {
@@ -30,7 +44,7 @@ pub(super) enum StorageTangent<'a> {
         prepared: RefCell<Option<Vec<f64>>>,
     },
     Hessian {
-        action: &'a PhsStorageHessianAction<'a>,
+        action: StorageAction<'a>,
         scratch: RefCell<(Vec<f64>, Vec<f64>)>,
     },
 }
@@ -44,6 +58,12 @@ impl<'a> StorageTangent<'a> {
             // quadratic form through owned metadata, including memory rows.
             // A merely quadratic PART of a nonlinear law is never sufficient.
             Cow::Owned(part.matrix)
+        } else if let Some(action) = system.storage().continuous_tangent() {
+            let n = system.state_dim();
+            return Self::Hessian {
+                action: StorageAction::Native(action),
+                scratch: RefCell::new((vec![0.0; n], vec![0.0; n])),
+            };
         } else {
             return Self::Unavailable;
         };
@@ -55,7 +75,7 @@ impl<'a> StorageTangent<'a> {
 
     pub(super) fn hessian(n: usize, action: &'a PhsStorageHessianAction<'a>) -> Self {
         Self::Hessian {
-            action,
+            action: StorageAction::Callback(action),
             scratch: RefCell::new((vec![0.0; n], vec![0.0; n])),
         }
     }
@@ -116,7 +136,9 @@ impl PhsOrbitProblem<'_> {
                     direction.fill(0.0);
                     direction[column] = 1.0;
                     effort.fill(f64::NAN);
-                    if !action(state, direction, effort) || effort.iter().any(|v| !v.is_finite()) {
+                    if !action.apply(state, direction, effort)
+                        || effort.iter().any(|v| !v.is_finite())
+                    {
                         return false;
                     }
                     for row in 0..n {
@@ -148,8 +170,9 @@ impl PhsOrbitProblem<'_> {
 /// its tangent `(J-R) D(gradient H)` is assembled once per AFT sample by fs-orbit.
 /// All Fourier coefficients, phases, memory coordinates, sampling checks and
 /// source refusals keep the semantics of the ordinary scaled seeded wrapper.
-/// Exact quadratic storage is already accelerated automatically by that wrapper;
-/// this entry admits an explicit action for nonlinear storage.
+/// Exact quadratic storage and storage-owned continuous tangents are already
+/// discovered automatically by that wrapper. This entry admits an explicit
+/// action for other storage laws or a caller-supplied override.
 ///
 /// # Errors
 /// Invalid forcing/scales/seeds, source evaluation failure, declared tangent
