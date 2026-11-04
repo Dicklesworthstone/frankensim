@@ -832,3 +832,30 @@ and apply one combined center phase, preserving weak translated interference
 nulls instead of separately rounding spatial and temporal rotations. Callers
 still own the original center phase and source clock; these weights alone
 are not the translated product or an additional phase-average assumption.
+
+### Streaming synchronized interference measurements
+
+`welch::WelchStream` acquires a declared record through synchronized channel
+slices or interleaved chunks. Construction admits total channel/sample/FFT
+counts, the final factor bank, original FFT/window workspace and two
+segment-sized input buffers. Batch and streaming share one segment algorithm
+and the final segment count: chunk boundaries preserve factor bits, overlap,
+complex cross-channel phase, detrending and one-sided PSD normalization.
+Completed input is discarded; chunks are borrowed without a record-sized copy,
+and small chunks append without repeatedly copying the entire overlap.
+
+Each push commits accepted samples/segments only after complete validation,
+transforms, tail preparation and the final cancellation poll. Invalid input,
+numerical refusal and cancellation leave accepted history unchanged. Retry
+overwrites unaccepted factor slots, including zero channels. `finish` requires
+the complete declared record and moves the existing immutable spectrum out
+without a second factor bank, transpose or padding. Retained-factor storage
+remains O(bins * segments * channels), with O(segment_samples * channels)
+input storage. This is bounded-record acquisition, not open-ended snapshots,
+inferred segment independence or cross-frequency coherence.
+
+Five new native regressions and eleven existing Welch regressions pass against
+the production FFT/SIMD/math owners. Coverage includes bitwise chunk-partition
+equivalence across hop/window/detrend/layout choices, late cancellation and
+changed-data retry, exact overlap/tail counts, extreme scaling, input/budget
+refusal and incomplete finalization. Full workspace gates remain unrun.

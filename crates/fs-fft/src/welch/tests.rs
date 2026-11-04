@@ -558,3 +558,304 @@ fn g1_detrending_preserves_representable_fluctuations_beside_dc_offsets() {
         );
     }
 }
+
+fn same_stream_spectrum(actual: &WelchCrossSpectrum, expected: &WelchCrossSpectrum) {
+    assert_eq!(actual.config(), expected.config());
+    assert_eq!(
+        actual.timestep_s().to_bits(),
+        expected.timestep_s().to_bits()
+    );
+    assert_eq!(
+        actual.bin_width_hz().to_bits(),
+        expected.bin_width_hz().to_bits()
+    );
+    assert_eq!(actual.channel_count(), expected.channel_count());
+    assert_eq!(actual.segment_count(), expected.segment_count());
+    assert_eq!(actual.used_sample_count(), expected.used_sample_count());
+    assert_eq!(
+        actual.discarded_tail_samples(),
+        expected.discarded_tail_samples()
+    );
+    assert_eq!(actual.factors.len(), expected.factors.len());
+    for (a, b) in actual.factors.iter().zip(&expected.factors) {
+        assert_eq!(
+            (a.re.to_bits(), a.im.to_bits()),
+            (b.re.to_bits(), b.im.to_bits())
+        );
+    }
+}
+
+#[test]
+fn g3_stream_partitions_preserve_exact_batch_phase_overlap_windows_and_tails() {
+    let rows: Vec<[f64; 3]> = (0..85)
+        .map(|j| {
+            let t = j as f64;
+            [
+                0.8 + (0.41 * t).cos(),
+                -0.2 + (0.41 * t + 0.63).cos(),
+                0.05 * ((j * 7 % 11) as f64 - 5.0),
+            ]
+        })
+        .collect();
+    let columns: [Vec<f64>; 3] = core::array::from_fn(|c| rows.iter().map(|r| r[c]).collect());
+    let limits = WelchBudget {
+        maximum_transforms: 256,
+        ..budget()
+    };
+    for window in [WelchWindow::Rectangular, WelchWindow::PeriodicHann] {
+        for detrend in [WelchDetrend::None, WelchDetrend::SegmentMean] {
+            for hop_samples in [1, 5, 16, 32] {
+                let cfg = WelchConfig {
+                    hop_samples,
+                    ..config(window, detrend)
+                };
+                let expected =
+                    WelchCrossSpectrum::estimate_interleaved(&rows, 0.002, cfg, limits, || false)
+                        .unwrap();
+                for pattern in [
+                    &[1][..],
+                    &[7, 1, 23, 4][..],
+                    &[31, 1, 32, 13, 8][..],
+                    &[85][..],
+                ] {
+                    let mut stream =
+                        WelchStream::new(3, rows.len(), 0.002, cfg, limits, || false).unwrap();
+                    let (mut start, mut chunk) = (0, 0);
+                    while start < rows.len() {
+                        let end = (start + pattern[chunk % pattern.len()]).min(rows.len());
+                        if chunk % 2 == 0 {
+                            stream
+                                .push_interleaved(&rows[start..end], || false)
+                                .unwrap();
+                        } else {
+                            let slices: [&[f64]; 3] =
+                                core::array::from_fn(|c| &columns[c][start..end]);
+                            stream.push(&slices, || false).unwrap();
+                        }
+                        assert_eq!(stream.accepted_sample_count(), end);
+                        assert_eq!(stream.remaining_sample_count(), rows.len() - end);
+                        assert_eq!(
+                            stream.completed_segment_count(),
+                            if end < 32 {
+                                0
+                            } else {
+                                1 + (end - 32) / hop_samples
+                            }
+                        );
+                        start = end;
+                        chunk += 1;
+                    }
+                    stream.push_interleaved::<3>(&[], || false).unwrap();
+                    same_stream_spectrum(&stream.finish().unwrap(), &expected);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn g4_stream_cancelled_chunks_replay_with_different_data_without_stale_factors() {
+    let cfg = WelchConfig {
+        segment_samples: 8,
+        hop_samples: 4,
+        window: WelchWindow::PeriodicHann,
+        detrend: WelchDetrend::None,
+    };
+    let original: Vec<[f64; 2]> = (0..64)
+        .map(|j| [(0.31 * j as f64).cos(), (0.27 * j as f64).sin()])
+        .collect();
+    let accepted: Vec<_> = original[..17]
+        .iter()
+        .copied()
+        .chain([[0.0; 2]; 47])
+        .collect();
+    let expected =
+        WelchCrossSpectrum::estimate_interleaved(&accepted, 0.001, cfg, budget(), || false)
+            .unwrap();
+    let prepare = || {
+        let mut stream = WelchStream::new(2, 64, 0.001, cfg, budget(), || false).unwrap();
+        stream.push_interleaved(&original[..17], || false).unwrap();
+        stream
+    };
+    let mut total_polls = 0;
+    prepare()
+        .push_interleaved(&original[17..41], || {
+            total_polls += 1;
+            false
+        })
+        .unwrap();
+    assert!(total_polls > 35);
+    // Before input admission, after multiple FFTs, and after replacement-tail
+    // construction. The retry is dark where the cancelled chunk was nonzero.
+    for stop in [1, 35, total_polls] {
+        let mut stream = prepare();
+        let mut polls = 0;
+        assert!(matches!(
+            stream.push_interleaved(&original[17..41], || {
+                polls += 1;
+                polls == stop
+            }),
+            Err(WelchError::Cancelled)
+        ));
+        assert_eq!(stream.accepted_sample_count(), 17);
+        assert_eq!(stream.completed_segment_count(), 3);
+        stream.push_interleaved(&accepted[17..], || false).unwrap();
+        same_stream_spectrum(&stream.finish().unwrap(), &expected);
+    }
+    // The no-complete-window append path also rolls back a partially copied
+    // chunk without overwriting the previous accepted prefix.
+    let cfg = config(WelchWindow::Rectangular, WelchDetrend::SegmentMean);
+    let accepted: Vec<_> = original[..5]
+        .iter()
+        .copied()
+        .chain([[0.0; 2]; 27])
+        .collect();
+    let expected =
+        WelchCrossSpectrum::estimate_interleaved(&accepted, 0.001, cfg, budget(), || false)
+            .unwrap();
+    let mut stream = WelchStream::new(2, 32, 0.001, cfg, budget(), || false).unwrap();
+    stream.push_interleaved(&original[..5], || false).unwrap();
+    let mut polls = 0;
+    assert!(matches!(
+        stream.push_interleaved(&original[5..22], || {
+            polls += 1;
+            polls == 11
+        }),
+        Err(WelchError::Cancelled)
+    ));
+    assert_eq!(stream.accepted_sample_count(), 5);
+    stream.push_interleaved(&accepted[5..], || false).unwrap();
+    same_stream_spectrum(&stream.finish().unwrap(), &expected);
+}
+
+#[test]
+fn g0_stream_rejects_shape_overrun_and_nonfinite_discarded_tail_atomically() {
+    let cfg = WelchConfig {
+        segment_samples: 8,
+        hop_samples: 4,
+        window: WelchWindow::Rectangular,
+        detrend: WelchDetrend::None,
+    };
+    let rows = [[1.0, -1.0]; 19];
+    let mut stream = WelchStream::new(2, rows.len(), 0.001, cfg, budget(), || false).unwrap();
+    stream.push_interleaved(&rows[..16], || false).unwrap();
+    assert!(matches!(
+        stream.push_interleaved(&[[f64::NAN; 2]; 4], || false),
+        Err(WelchError::Invalid(_))
+    ));
+    assert!(matches!(
+        stream.push(&[&[1.0], &[]], || false),
+        Err(WelchError::Invalid(_))
+    ));
+    assert!(matches!(
+        stream.push_interleaved(&[[1.0; 3]], || false),
+        Err(WelchError::Invalid(_))
+    ));
+    let bad_tail = [[1.0, -1.0], [f64::INFINITY, -1.0], [1.0, -1.0]];
+    assert!(matches!(
+        stream.push_interleaved(&bad_tail, || false),
+        Err(WelchError::NonFinite)
+    ));
+    assert_eq!(stream.accepted_sample_count(), 16);
+    assert_eq!(stream.completed_segment_count(), 3);
+    stream.push_interleaved(&rows[16..], || false).unwrap();
+    let actual = stream.finish().unwrap();
+    assert_eq!(actual.used_sample_count(), 16);
+    assert_eq!(actual.discarded_tail_samples(), 3);
+    same_stream_spectrum(
+        &actual,
+        &WelchCrossSpectrum::estimate_interleaved(&rows, 0.001, cfg, budget(), || false).unwrap(),
+    );
+}
+
+#[test]
+fn g1_stream_keeps_batch_dynamic_range_and_transactional_numerical_refusal() {
+    let cfg = WelchConfig {
+        segment_samples: 4,
+        hop_samples: 4,
+        window: WelchWindow::Rectangular,
+        detrend: WelchDetrend::None,
+    };
+    for (large, dt) in [(1e308, 1e-300), (1e300, 1e-100)] {
+        let values = [large, 1.0, large, -1.0];
+        let expected =
+            WelchCrossSpectrum::estimate(&[&values], dt, cfg, budget(), || false).unwrap();
+        let mut stream = WelchStream::new(1, 4, dt, cfg, budget(), || false).unwrap();
+        for chunk in values.chunks(1) {
+            stream.push(&[chunk], || false).unwrap();
+        }
+        same_stream_spectrum(&stream.finish().unwrap(), &expected);
+    }
+    let mut stream = WelchStream::new(1, 4, 1e-100, cfg, budget(), || false).unwrap();
+    stream.push(&[&[1e300]], || false).unwrap();
+    assert!(matches!(
+        stream.push(&[&[1e-30, 1e300, -1e-30]], || false),
+        Err(WelchError::Unrepresentable)
+    ));
+    assert_eq!(stream.accepted_sample_count(), 1);
+    assert_eq!(stream.completed_segment_count(), 0);
+    stream.push(&[&[0.0, 1e300, 0.0]], || false).unwrap();
+    let expected =
+        WelchCrossSpectrum::estimate(&[&[1e300, 0.0, 1e300, 0.0]], 1e-100, cfg, budget(), || {
+            false
+        })
+        .unwrap();
+    same_stream_spectrum(&stream.finish().unwrap(), &expected);
+
+    let cfg = WelchConfig {
+        detrend: WelchDetrend::SegmentMean,
+        ..cfg
+    };
+    let d = f64::EPSILON;
+    let rows = [
+        [1.5 + d, 1.75],
+        [1.5, 1.75 + d],
+        [1.5 - d, 1.75],
+        [1.5, 1.75 - d],
+    ];
+    let expected =
+        WelchCrossSpectrum::estimate_interleaved(&rows, 1.0, cfg, budget(), || false).unwrap();
+    let mut stream = WelchStream::new(2, 4, 1.0, cfg, budget(), || false).unwrap();
+    for row in &rows {
+        stream
+            .push_interleaved(core::slice::from_ref(row), || false)
+            .unwrap();
+    }
+    same_stream_spectrum(&stream.finish().unwrap(), &expected);
+}
+
+#[test]
+fn g0_stream_admits_full_record_resources_and_never_pads_missing_samples() {
+    let cfg = config(WelchWindow::Rectangular, WelchDetrend::None);
+    for limits in [
+        WelchBudget {
+            maximum_channels: 1,
+            ..budget()
+        },
+        WelchBudget {
+            maximum_samples_per_channel: 63,
+            ..budget()
+        },
+        WelchBudget {
+            maximum_transforms: 5,
+            ..budget()
+        },
+        WelchBudget {
+            maximum_workspace_bytes: 128,
+            ..budget()
+        },
+    ] {
+        assert!(matches!(
+            WelchStream::new(2, 64, 0.001, cfg, limits, || false),
+            Err(WelchError::BudgetExceeded(_))
+        ));
+    }
+    assert!(matches!(
+        WelchStream::new(2, 64, 0.001, cfg, budget(), || true),
+        Err(WelchError::Cancelled)
+    ));
+    let mut stream = WelchStream::new(2, 64, 0.001, cfg, budget(), || false).unwrap();
+    stream.push_interleaved(&[[1.0; 2]; 63], || false).unwrap();
+    assert_eq!(stream.remaining_sample_count(), 1);
+    assert!(matches!(stream.finish(), Err(WelchError::Invalid(_))));
+}

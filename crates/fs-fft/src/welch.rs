@@ -19,6 +19,10 @@
 use crate::{C64, Fft};
 use fs_math::{dd::Dd, det};
 
+#[path = "welch/stream.rs"]
+mod stream;
+pub use stream::WelchStream;
+
 /// Bounds the uninterrupted work of one existing FFT. Cancellation is also
 /// checked during input admission and between segment/channel transforms.
 pub const MAX_WELCH_SEGMENT_SAMPLES: usize = 65_536;
@@ -197,7 +201,7 @@ impl WelchCrossSpectrum {
         )
     }
 
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    #[allow(clippy::too_many_arguments)]
     fn estimate_with(
         channels: usize,
         samples: usize,
@@ -208,164 +212,34 @@ impl WelchCrossSpectrum {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, WelchError> {
         poll(&mut cancelled)?;
-        let n = config.segment_samples;
-        if channels == 0
-            || samples < n
-            || n < 4
-            || !n.is_power_of_two()
-            || n > MAX_WELCH_SEGMENT_SAMPLES
-            || config.hop_samples == 0
-            || config.hop_samples > n
-        {
-            return Err(WelchError::Invalid(
-                "nonempty channels and valid segment/hop required",
-            ));
-        }
-        if !timestep_s.is_finite() || timestep_s <= 0.0 || !(1.0 / timestep_s).is_finite() {
-            return Err(WelchError::Invalid("positive finite sample rate required"));
-        }
-        let bin_width_hz = (1.0 / timestep_s) / n as f64;
-        if bin_width_hz == 0.0 {
-            return Err(WelchError::Unrepresentable);
-        }
-        let segments = 1 + (samples - n) / config.hop_samples;
-        let transforms = channels
-            .checked_mul(segments)
-            .ok_or(WelchError::BudgetExceeded("transform count overflow"))?;
-        if channels > budget.maximum_channels
-            || samples > budget.maximum_samples_per_channel
-            || transforms > budget.maximum_transforms
-        {
-            return Err(WelchError::BudgetExceeded(
-                "channels, samples or transforms",
-            ));
-        }
-        let bin_count = n / 2 + 1;
-        let factor_count = bin_count
-            .checked_mul(transforms)
-            .ok_or(WelchError::BudgetExceeded("factor count overflow"))?;
-        let mut workspace = factor_count
-            .checked_mul(core::mem::size_of::<C64>())
-            .and_then(|v| v.checked_add(n * (8 + 2 * core::mem::size_of::<C64>())))
-            .ok_or(WelchError::BudgetExceeded("workspace size overflow"))?;
-        // Account for the actual FFT plan, including optional six-step subplans.
-        let mut plan_n = n;
-        loop {
-            workspace = workspace
-                .checked_add(plan_n / 2 * core::mem::size_of::<C64>())
-                .and_then(|v| v.checked_add(core::mem::size_of::<Fft>()))
-                .ok_or(WelchError::BudgetExceeded("FFT plan size overflow"))?;
-            if !Fft::takes_sixstep(plan_n) {
-                break;
-            }
-            plan_n = 1usize << (plan_n.trailing_zeros() / 2);
-        }
-        if workspace > budget.maximum_workspace_bytes {
-            return Err(WelchError::BudgetExceeded(
-                "retained factors and FFT workspace",
-            ));
-        }
+        let shape = admit(channels, samples, timestep_s, config, budget, 0)?;
         // Validate the entire supplied record, including its explicitly unused
         // tail, before any estimate or allocation can be published.
-        for c in 0..channels {
-            for j in 0..samples {
-                if j % 256 == 0 {
-                    poll(&mut cancelled)?;
-                }
-                if !sample(c, j).is_finite() {
-                    return Err(WelchError::NonFinite);
-                }
-            }
-        }
-        let mut window = allocate(n, 0.0)?;
-        let mut window_energy = Dd::ZERO;
-        for (j, w) in window.iter_mut().enumerate() {
-            if j % 256 == 0 {
-                poll(&mut cancelled)?;
-            }
-            *w = match config.window {
-                WelchWindow::Rectangular => 1.0,
-                WelchWindow::PeriodicHann => {
-                    0.5 - 0.5 * det::cos(core::f64::consts::TAU * j as f64 / n as f64)
-                }
-            };
-            let value = Dd::from_f64(*w);
-            window_energy = window_energy + value * value;
-        }
-        let gain =
-            det::sqrt(timestep_s) / det::sqrt(segments as f64) / det::sqrt(window_energy.to_f64());
-        let fft = Fft::new(n);
-        let mut buffer = allocate(n, C64::default())?;
-        let mut scratch = allocate(n, C64::default())?;
-        let mut factors = allocate(factor_count, C64::default())?;
-        for segment in 0..segments {
+        validate_samples(channels, samples, &sample, &mut cancelled)?;
+        let mut transform =
+            SegmentTransform::new(timestep_s, config, shape.segments, &mut cancelled)?;
+        let mut factors = allocate(shape.factor_count, C64::default())?;
+        for segment in 0..shape.segments {
             let start = segment * config.hop_samples;
             for channel in 0..channels {
-                poll(&mut cancelled)?;
-                let mut scale = 0.0f64;
-                for j in 0..n {
-                    if j % 256 == 0 {
-                        poll(&mut cancelled)?;
-                    }
-                    scale = scale.max(sample(channel, start + j).abs());
-                }
-                if scale == 0.0 {
-                    continue;
-                }
-                let mut mean = Dd::ZERO;
-                if config.detrend == WelchDetrend::SegmentMean {
-                    for j in 0..n {
-                        if j % 256 == 0 {
-                            poll(&mut cancelled)?;
-                        }
-                        mean = mean + normalized(sample(channel, start + j), scale)?;
-                    }
-                    mean = mean / Dd::from_f64(n as f64);
-                }
-                for j in 0..n {
-                    if j % 256 == 0 {
-                        poll(&mut cancelled)?;
-                    }
-                    let centered = normalized(sample(channel, start + j), scale)? - mean;
-                    let tapered = (centered * Dd::from_f64(window[j])).to_f64();
-                    if centered.hi != 0.0 && window[j] != 0.0 && tapered == 0.0 {
-                        return Err(WelchError::Unrepresentable);
-                    }
-                    buffer[j] = C64::new(tapered, 0.0);
-                }
-                fft.forward(&mut buffer, &mut scratch);
-                poll(&mut cancelled)?;
-                for (bin, value) in buffer.iter().take(bin_count).enumerate() {
-                    if bin % 256 == 0 {
-                        poll(&mut cancelled)?;
-                    }
-                    let endpoint = bin == 0 || bin == n / 2;
-                    let factor_gain = if endpoint {
-                        gain
-                    } else {
-                        gain * core::f64::consts::SQRT_2
-                    };
-                    let offset = (bin * segments + segment) * channels + channel;
-                    factors[offset] = C64::new(
-                        scaled(value.re, factor_gain, scale)?,
-                        if endpoint {
-                            0.0
-                        } else {
-                            scaled(-value.im, factor_gain, scale)?
-                        },
-                    );
-                }
+                transform.channel(
+                    |j| sample(channel, start + j),
+                    |bin, value| {
+                        factors[(bin * shape.segments + segment) * channels + channel] = value
+                    },
+                    &mut cancelled,
+                )?;
             }
         }
         poll(&mut cancelled)?;
         Ok(Self {
             config,
             timestep_s,
-            bin_width_hz,
+            bin_width_hz: shape.bin_width_hz,
             channels,
-            segments,
+            segments: shape.segments,
             input_samples: samples,
-            used_samples: (segments - 1) * config.hop_samples + n,
+            used_samples: (shape.segments - 1) * config.hop_samples + config.segment_samples,
             factors,
         })
     }
@@ -493,6 +367,234 @@ impl WelchCrossSpectrum {
         } else {
             Err(WelchError::Invalid("bin outside recorded spectrum"))
         }
+    }
+}
+
+struct WelchShape {
+    bin_width_hz: f64,
+    segments: usize,
+    factor_count: usize,
+}
+
+fn admit(
+    channels: usize,
+    samples: usize,
+    timestep_s: f64,
+    config: WelchConfig,
+    budget: WelchBudget,
+    input_buffers: usize,
+) -> Result<WelchShape, WelchError> {
+    let n = config.segment_samples;
+    if channels == 0
+        || samples < n
+        || n < 4
+        || !n.is_power_of_two()
+        || n > MAX_WELCH_SEGMENT_SAMPLES
+        || config.hop_samples == 0
+        || config.hop_samples > n
+    {
+        return Err(WelchError::Invalid(
+            "nonempty channels and valid segment/hop required",
+        ));
+    }
+    if !timestep_s.is_finite() || timestep_s <= 0.0 || !(1.0 / timestep_s).is_finite() {
+        return Err(WelchError::Invalid("positive finite sample rate required"));
+    }
+    let bin_width_hz = (1.0 / timestep_s) / n as f64;
+    if bin_width_hz == 0.0 {
+        return Err(WelchError::Unrepresentable);
+    }
+    let segments = 1 + (samples - n) / config.hop_samples;
+    let transforms = channels
+        .checked_mul(segments)
+        .ok_or(WelchError::BudgetExceeded("transform count overflow"))?;
+    if channels > budget.maximum_channels
+        || samples > budget.maximum_samples_per_channel
+        || transforms > budget.maximum_transforms
+    {
+        return Err(WelchError::BudgetExceeded(
+            "channels, samples or transforms",
+        ));
+    }
+    let factor_count = (n / 2 + 1)
+        .checked_mul(transforms)
+        .ok_or(WelchError::BudgetExceeded("factor count overflow"))?;
+    let mut workspace = factor_count
+        .checked_mul(core::mem::size_of::<C64>())
+        .and_then(|v| v.checked_add(n * (8 + 2 * core::mem::size_of::<C64>())))
+        .ok_or(WelchError::BudgetExceeded("workspace size overflow"))?;
+    if input_buffers != 0 {
+        let input_bytes = n
+            .checked_mul(channels)
+            .and_then(|v| v.checked_mul(core::mem::size_of::<f64>()))
+            .and_then(|v| v.checked_add(core::mem::size_of::<Vec<f64>>()))
+            .and_then(|v| v.checked_mul(input_buffers))
+            .ok_or(WelchError::BudgetExceeded("stream input storage overflow"))?;
+        workspace = workspace
+            .checked_add(input_bytes)
+            .ok_or(WelchError::BudgetExceeded("workspace size overflow"))?;
+    }
+    // Include the original FFT plan and its optional six-step subplans.
+    let mut plan_n = n;
+    loop {
+        workspace = workspace
+            .checked_add(plan_n / 2 * core::mem::size_of::<C64>())
+            .and_then(|v| v.checked_add(core::mem::size_of::<Fft>()))
+            .ok_or(WelchError::BudgetExceeded("FFT plan size overflow"))?;
+        if !Fft::takes_sixstep(plan_n) {
+            break;
+        }
+        plan_n = 1usize << (plan_n.trailing_zeros() / 2);
+    }
+    if workspace > budget.maximum_workspace_bytes {
+        return Err(WelchError::BudgetExceeded(
+            "retained factors, FFT workspace and stream input storage",
+        ));
+    }
+    Ok(WelchShape {
+        bin_width_hz,
+        segments,
+        factor_count,
+    })
+}
+
+fn validate_samples(
+    channels: usize,
+    samples: usize,
+    sample: &impl Fn(usize, usize) -> f64,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), WelchError> {
+    for c in 0..channels {
+        for j in 0..samples {
+            if j % 256 == 0 {
+                poll(cancelled)?;
+            }
+            if !sample(c, j).is_finite() {
+                return Err(WelchError::NonFinite);
+            }
+        }
+    }
+    Ok(())
+}
+
+// The batch and chunked owners share this exact segment implementation and
+// final-record gain. Chunk boundaries never become new window boundaries.
+struct SegmentTransform {
+    config: WelchConfig,
+    window: Vec<f64>,
+    gain: f64,
+    fft: Fft,
+    buffer: Vec<C64>,
+    scratch: Vec<C64>,
+}
+
+impl SegmentTransform {
+    fn new(
+        timestep_s: f64,
+        config: WelchConfig,
+        segments: usize,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, WelchError> {
+        let n = config.segment_samples;
+        let mut window = allocate(n, 0.0)?;
+        let mut window_energy = Dd::ZERO;
+        for (j, w) in window.iter_mut().enumerate() {
+            if j % 256 == 0 {
+                poll(cancelled)?;
+            }
+            *w = match config.window {
+                WelchWindow::Rectangular => 1.0,
+                WelchWindow::PeriodicHann => {
+                    0.5 - 0.5 * det::cos(core::f64::consts::TAU * j as f64 / n as f64)
+                }
+            };
+            let value = Dd::from_f64(*w);
+            window_energy = window_energy + value * value;
+        }
+        let gain =
+            det::sqrt(timestep_s) / det::sqrt(segments as f64) / det::sqrt(window_energy.to_f64());
+        Ok(Self {
+            config,
+            window,
+            gain,
+            fft: Fft::new(n),
+            buffer: allocate(n, C64::default())?,
+            scratch: allocate(n, C64::default())?,
+        })
+    }
+
+    fn channel(
+        &mut self,
+        sample: impl Fn(usize) -> f64,
+        mut write: impl FnMut(usize, C64),
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), WelchError> {
+        poll(cancelled)?;
+        let n = self.config.segment_samples;
+        let mut scale = 0.0f64;
+        for j in 0..n {
+            if j % 256 == 0 {
+                poll(cancelled)?;
+            }
+            scale = scale.max(sample(j).abs());
+        }
+        if scale == 0.0 {
+            // A cancelled chunk may have touched these future factor slots.
+            // A subsequently accepted zero channel must overwrite all of them.
+            for bin in 0..=n / 2 {
+                if bin % 256 == 0 {
+                    poll(cancelled)?;
+                }
+                write(bin, C64::default());
+            }
+            return Ok(());
+        }
+        let mut mean = Dd::ZERO;
+        if self.config.detrend == WelchDetrend::SegmentMean {
+            for j in 0..n {
+                if j % 256 == 0 {
+                    poll(cancelled)?;
+                }
+                mean = mean + normalized(sample(j), scale)?;
+            }
+            mean = mean / Dd::from_f64(n as f64);
+        }
+        for j in 0..n {
+            if j % 256 == 0 {
+                poll(cancelled)?;
+            }
+            let centered = normalized(sample(j), scale)? - mean;
+            let tapered = (centered * Dd::from_f64(self.window[j])).to_f64();
+            if centered.hi != 0.0 && self.window[j] != 0.0 && tapered == 0.0 {
+                return Err(WelchError::Unrepresentable);
+            }
+            self.buffer[j] = C64::new(tapered, 0.0);
+        }
+        self.fft.forward(&mut self.buffer, &mut self.scratch);
+        poll(cancelled)?;
+        for (bin, value) in self.buffer.iter().take(n / 2 + 1).enumerate() {
+            if bin % 256 == 0 {
+                poll(cancelled)?;
+            }
+            let endpoint = bin == 0 || bin == n / 2;
+            let gain = if endpoint {
+                self.gain
+            } else {
+                self.gain * core::f64::consts::SQRT_2
+            };
+            write(
+                bin,
+                C64::new(
+                    scaled(value.re, gain, scale)?,
+                    if endpoint {
+                        0.0
+                    } else {
+                        scaled(-value.im, gain, scale)?
+                    },
+                ),
+            );
+        }
+        Ok(())
     }
 }
 
