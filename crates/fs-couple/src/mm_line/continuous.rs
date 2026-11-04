@@ -32,6 +32,10 @@ use fs_phs::linear_exact::{
 mod load;
 pub use load::{ModalAdmittanceLoad, ModalLoadSource};
 
+#[path = "continuous/molecular_field.rs"]
+mod molecular_field;
+mod viscothermal;
+
 /// Original continuous duct and full rational impedance in one exact flow.
 pub mod rational;
 
@@ -429,18 +433,18 @@ impl ContinuousModalLine {
             cancelled,
         )
     }
-    /// Accepted complete state: duct [potential; M*pressure], followed by every
-    /// original load coordinate when attached.
+    /// Accepted complete state: duct [potential; M*pressure; physical memory],
+    /// followed by every original load coordinate when attached.
     pub fn state(&self) -> &[f64] {
         &self.state
     }
-    /// Original duct coordinates, without any load-state substitution.
+    /// Complete original duct coordinates, including its physical loss memory.
     pub fn duct_state(&self) -> &[f64] {
-        &self.state[..2 * self.source.coordinates()]
+        &self.state[..self.source.state_dimension()]
     }
     /// Complete accepted original load coordinates; empty for an unbound mouth.
     pub fn load_state(&self) -> &[f64] {
-        &self.state[2 * self.source.coordinates()..]
+        &self.state[self.source.state_dimension()..]
     }
     /// Actual exact-flow interval [s].
     pub fn duration(&self) -> f64 {

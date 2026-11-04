@@ -3,9 +3,11 @@
 //! Lossless assembly can retain original molecular relaxation through
 //! [ModalGalerkin::with_molecular_relaxation], without reducing any spatial
 //! mode. That attachment supplies real bulk absorption and original thermal
-//! memory; it does not introduce wall viscothermal physics.
+//! memory. A separate bounded cylindrical thin-layer attachment supplies wall
+//! viscothermal memory through the original pressure and velocity traces.
 //!
-//! Let C=(R'/R)A be the ORIGINAL Riccati coupling and P=q_dot. Its equations
+//! Let C=(R'/R)A be the ORIGINAL Riccati coupling. In the lossless source,
+//! P=q_dot. Its equations
 //! give U=-(S/rho)(q'-Cq). The weak equation is M q_ddot + K q = B U_in,
 //! with M=int S/(rho c²) N^T N dx and
 //! K=int S/rho [(N'-CN)^T(N'-CN)+N^T diag(gamma²/R²) N] dx.
@@ -15,7 +17,7 @@
 //!
 //! Every axial/radial coordinate is retained. The pressure-release mouth
 //! constrains its endpoint potential to zero; a rigid mouth is the natural
-//! zero-flow boundary. Canonical state is [q; p=M q_dot], output is inlet
+//! zero-flow boundary. Canonical state is [q; p=M P], output is inlet
 //! modal pressure, input is volume flow INTO the region. A port mouth retains
 //! every endpoint coordinate and exposes every modal pressure/flow pair, with
 //! the same inward-flow convention on both faces. Both propagating
@@ -23,7 +25,7 @@
 //!
 //! This is a spatial approximation of the existing finite-mode operator.
 //! Axial elements and retained modes must be refined separately; quadrature
-//! refines with the elements. No 3-D, viscothermal, azimuthal-mode, open-bell
+//! refines with the elements. No 3-D, unrestricted thermoviscous, azimuthal-mode, open-bell
 //! radiation or nonlinear-interface accuracy is inferred from energy closure.
 
 use super::riccati::{Basis, ModeCount};
@@ -38,6 +40,11 @@ use fs_phs::{PhsError, PortHamiltonian, QuadraticStorage};
 
 mod molecular;
 pub use molecular::ModalMolecularBudget;
+mod viscothermal;
+pub use viscothermal::{
+    ModalViscothermalAdmission, ModalViscothermalBudget, ModalViscothermalHeat,
+    ModalViscothermalResolution,
+};
 
 /// Actual boundary on every retained far-end mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,6 +131,7 @@ pub struct ModalGalerkinSource {
     inlet_reference: f64,
     mouth_reference: f64,
     molecular: Option<molecular::MolecularSource>,
+    viscothermal: Option<viscothermal::ViscothermalSource>,
 }
 impl ModalGalerkinSource {
     /// Original continuous radius and slope owner.
@@ -261,7 +269,7 @@ impl ModalGalerkin {
     pub const fn source(&self) -> &ModalGalerkinSource {
         &self.source
     }
-    /// Full physical system; R is exactly zero before molecular attachment.
+    /// Full physical system; R is exactly zero before dissipative attachments.
     pub const fn system(&self) -> &PortHamiltonian {
         &self.system
     }
@@ -673,6 +681,7 @@ fn assemble(
             inlet_reference,
             mouth_reference,
             molecular: None,
+            viscothermal: None,
         },
         system,
     })

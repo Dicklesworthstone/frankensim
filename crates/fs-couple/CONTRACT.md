@@ -29637,3 +29637,30 @@ energy conservation during this isolated kinetic change. Source multipoles,
 solid self-gravity, near-source quadrature accuracy and timestep convergence
 require their respective physical models or refinement. The same interaction
 must not also be supplied through the stationary external-gravity binding.
+
+## Spatial molecular absorption and modal wall diffusion on the exact clock
+
+`ContinuousModalLine::new_field_molecular` and `new_field_molecular_loaded`
+retain the original `AxialGasField`, its local caloric reservoirs and both
+actual endpoint gas references. `new_viscothermal` and
+`new_viscothermal_loaded` retain the complete uniform-cylinder modal field
+and the original positive wall-diffusion histories. Signed modal wall traces
+preserve coherent pressure and tangential-velocity interference. All acoustic,
+thermal, molecular, wall and attached mouth-load coordinates participate in
+the existing prepared exact scattering flow and its complete resource limits.
+No retained mode or positive reservoir is removed to satisfy capacity.
+
+`duct_state()` includes every physical duct-memory coordinate, and
+`load_state()` begins at `source.state_dimension()`. Original mouth-load
+binding, face work, independent physical heat, cancellation and exact clock
+subdivision remain binding. Empty molecular laws retain the existing numerical
+operator and time samples bitwise. The gas background is prescribed and
+frozen. Wall physics requires the original cylindrical shape, uniform gas and
+declared thin-boundary-layer frequency band; generic time evolution does not
+establish accuracy outside that band. Molecular and wall attachments refuse
+each other until a shared thermal realization is supplied.
+
+Focused native checks exercise the original spatial molecular law, wall
+trace/lift/loss kernels and source-row resistance reconstruction. The authored
+loaded/unloaded exact-runtime regressions remain unexecuted in this workspace
+because the full constellation dependencies are unavailable.

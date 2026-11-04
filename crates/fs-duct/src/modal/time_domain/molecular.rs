@@ -16,6 +16,8 @@ use super::*;
 use fs_material::relaxation::RelaxationState;
 use fs_math::{c64::C64, det};
 
+mod field;
+
 /// Additional complete-source resources, checked before dense allocation.
 #[derive(Clone, Copy, Debug)]
 pub struct ModalMolecularBudget {
@@ -28,7 +30,29 @@ pub struct ModalMolecularBudget {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct MolecularSource {
+pub(super) enum MolecularSource {
+    Uniform(UniformMolecularSource),
+    Field(field::FieldMolecularSource),
+}
+
+impl MolecularSource {
+    fn states(&self) -> usize {
+        match self {
+            Self::Uniform(source) => source.states,
+            Self::Field(source) => source.states,
+        }
+    }
+
+    fn uniform(&self) -> Option<&UniformMolecularSource> {
+        match self {
+            Self::Uniform(source) => Some(source),
+            Self::Field(_) => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct UniformMolecularSource {
     original: RelaxationState,
     /// Original process indices: equal rates stay distinct, zero capacities have no state.
     processes: Vec<usize>,
@@ -70,6 +94,14 @@ impl ModalGalerkin {
         cancelled_at(&mut cancelled, 0)?;
         if self.source.molecular.is_some() {
             return Err(invalid("molecular relaxation is already attached"));
+        }
+        if self.source.viscothermal.is_some()
+            || self.system.state_dim() != 2 * self.source.coordinates()
+            || self.system.structure().1.iter().any(|r| *r != 0.0)
+        {
+            return Err(invalid(
+                "attach molecular relaxation to the original lossless source",
+            ));
         }
         if original.gas() != self.source.gas()
             || self
@@ -113,7 +145,7 @@ impl ModalGalerkin {
             ));
         }
         if count == 0 {
-            self.source.molecular = Some(MolecularSource {
+            self.source.molecular = Some(MolecularSource::Uniform(UniformMolecularSource {
                 original,
                 processes: vec![],
                 rates: vec![],
@@ -121,7 +153,7 @@ impl ModalGalerkin {
                 temperature_scale: 0.0,
                 mass_lower: vec![],
                 states,
-            });
+            }));
             cancelled_at(&mut cancelled, n)?;
             return Ok(self);
         }
@@ -234,7 +266,7 @@ impl ModalGalerkin {
         self.system = system;
         self.source.mass = mass;
         self.source.inverse_mass = inverse_mass;
-        self.source.molecular = Some(MolecularSource {
+        self.source.molecular = Some(MolecularSource::Uniform(UniformMolecularSource {
             original,
             processes,
             rates,
@@ -242,38 +274,53 @@ impl ModalGalerkin {
             temperature_scale,
             mass_lower,
             states,
-        });
+        }));
         Ok(self)
     }
 }
 
 impl ModalGalerkinSource {
-    /// Exact original material evaluation, retaining every species and process.
+    /// Exact uniform material evaluation, retaining every species and process.
+    /// A spatial attachment instead exposes each original evaluation through
+    /// [`Self::molecular_relaxation_at_quadrature`].
     pub fn molecular_relaxation(&self) -> Option<&RelaxationState> {
-        self.molecular.as_ref().map(|m| &m.original)
+        self.molecular
+            .as_ref()
+            .and_then(MolecularSource::uniform)
+            .map(|m| &m.original)
     }
-    /// Original process indices for memory blocks, in source order. Equal rates
-    /// are never merged; zero-capacity declarations remain in the source only.
+    /// Original uniform process indices for memory blocks, in source order.
+    /// Equal rates are never merged; zero capacities remain in the source.
+    /// Spatial attachments expose [`Self::molecular_process_indices_at_quadrature`].
     pub fn molecular_process_indices(&self) -> &[usize] {
         self.molecular
             .as_ref()
+            .and_then(MolecularSource::uniform)
             .map_or(&[], |m| m.processes.as_slice())
     }
     /// Full pressure-temperature-reservoir state extent.
     pub fn state_dimension(&self) -> usize {
-        self.molecular
-            .as_ref()
-            .map_or(2 * self.coordinates(), |m| m.states)
+        self.molecular.as_ref().map_or_else(
+            || {
+                self.viscothermal
+                    .as_ref()
+                    .map_or(2 * self.coordinates(), |wall| wall.states)
+            },
+            MolecularSource::states,
+        )
     }
-    /// Unit-storage temperature block followed by every original active
-    /// reservoir block; each block has coordinates() entries.
+    /// All unit-storage thermal and reservoir states. The uniform attachment
+    /// uses full-coordinate blocks; a spatial attachment groups its states by
+    /// Gauss point, then temperature/process, then radial mode.
     pub fn molecular_state_range(&self) -> Option<core::ops::Range<usize>> {
         self.molecular
             .as_ref()
-            .map(|m| 2 * self.coordinates()..m.states)
+            .map(|m| 2 * self.coordinates()..m.states())
     }
 
     /// Independent cycle-mean heat [W] for each retained original process.
+    /// Spatial attachments return Gauss-point/process order, summed over modes;
+    /// [`Self::molecular_heat_range_at_quadrature`] identifies each point's slice.
     /// Peak phasors use exp(-i omega t); no attenuation is converted into heat.
     pub fn molecular_mean_heat_per_process_w(
         &self,
@@ -303,6 +350,10 @@ impl ModalGalerkinSource {
         }
         let Some(memory) = &self.molecular else {
             return Ok(vec![]);
+        };
+        let memory = match memory {
+            MolecularSource::Uniform(memory) => memory,
+            MolecularSource::Field(memory) => return memory.heat(self, state, factor),
         };
         if memory.processes.is_empty() {
             return Ok(vec![]);

@@ -3255,6 +3255,85 @@ With `M_inf=L*L^T`, `x=L^T*P`, `a=sqrt(R/cv_inf)` and `b_j=sqrt(C_j/cp_inf)`, ea
 
 Complete state/payload/work and existing exact-flow capacity are admitted before dense allocation; cancellation, finite constitutive coefficients and positive frozen pressure mass remain required. Repeated attachment, a different gas, or nonuniform regional material is refused. Uniform regional copies are accepted. This is frozen adiabatic molecular absorption; it does not model higher-mode viscothermal walls, Stokes--Kirchhoff losses, or evolving gas/species fields. Four regressions compare constant/flared two-mode weak equations to the original caloric source, independently verify heat, converge damped poles under spatial refinement, retain equal-rate reservoirs, and exercise original-source/resource/cancellation refusals.
 
+`ModalGalerkin::with_field_molecular_relaxation(RelaxationAbsorption, ...)`
+requires the retained original `AxialGasField` and evaluates the authored
+molecular law on every cached physical Gauss-point gas state. Each active
+point retains a thermal coordinate and every positive original reservoir
+for each radial mode; equal rates stay distinct, zero capacities remain in
+metadata, and points without active reservoirs add no states. The frozen
+mass is assembled locally with `w=A*h/(2*rho*c_inf²)`; `x=sqrt(w)*N*P`,
+`a=sqrt(R/cv_inf)` and `b_j=sqrt(C_j/cp_inf)` give loss squares
+`(z_j-b_j*(y+a*x))²/tau_j`. Their exact elimination recovers the original
+local `A*h/(2*K(s))` before spatial integration. Full stiffness, canonical J
+and both physical face maps remain. Original source-row resistance witnesses
+preserve local loss/nullspace information through exact-flow composition.
+Empty laws leave numerical matrices bitwise unchanged. Local evaluations,
+process/state/heat ranges, authored law and independent nonnegative
+point/process heat remain observable. Complete-state/work/payload limits and
+local material refusals/cancellation apply without truncation. Uniform and
+spatial molecular attachment explicitly refuse a wall-memory attachment:
+a combined shared thermal realization remains outside this slice. The
+background is prescribed and frozen; this does not evolve heat/species or
+add Stokes--Kirchhoff bulk attenuation. Focused native leaf checks execute
+original material evaluation, coefficient/assembly/heat blocks and existing
+spatial/LA kernels, agreeing with independently assembled complex compliance
+over two flares, both open-port and pressure-release boundaries, and four
+frequencies (worst pressure `2.4e-11`, local heat `4.7e-11` relative); full
+pack ingress and full-workspace pHS/runtime tests remain unexecuted. Repository
+integration tests add exact empty-law parity, local absent/equal/zero-reservoir
+handling, complete capacity, material-range and cancellation cases.
+
+### Physical modal viscothermal wall work
+
+`ModalGalerkin::with_viscothermal` adds the existing positive `ZkDiffusive`
+viscous and thermal spectra to the complete uniform-cylinder modal field.
+The actual wall-normalized basis has `s_n=sgn(J0(gamma_n))`: pressure is
+`sum s_n*P_n`, and tangential velocity is `-sum s_n*q'_n/rho`. Their wall
+work therefore contains signed mutual terms. Higher-mode shear depends on
+its tangential velocity, including its decline toward transverse cutoff;
+the plane-mode damping scalar is not copied to every radial mode.
+
+The pressure and velocity channel Gramians are
+`T^T*T=(A/(rho*c²))*int N^T*s*s^T*N dx` and
+`V^T*V=(A/rho)*int N'^T*s*s^T*N' dx`. The pressure channels use the original
+consistent axial mass factor. The shear channels use the original element
+derivatives and a checked `K^+*V^T` effort lift. Only the analytically known
+constant-plane-potential gauge is fixed in that solve; every original
+coordinate remains and the physical trace residual is checked. Each positive
+diffusion arm retains its unit-energy history and original resistor square;
+the direct Poiseuille resistance remains. Original Q, J, G and face work
+are preserved. Physical pressure remains `M^-1*p`; with shear, `q` is the
+velocity potential and its time derivative alone is no longer pressure.
+Source-square resistance witnesses and independent instantaneous/cycle-mean
+viscous/thermal heat observers retain the actual loss mechanism.
+
+For the plane mode this is the original cylindrical Bessel constitutive law
+to its declared diffusion error. For higher modes it is a thin-boundary-layer
+wall closure, with shear/thermal work as in Berggren, Bernland and Noreland,
+JCP 371 (2018), DOI `10.1016/j.jcp.2018.06.005`. The positive velocity-port
+realization avoids directly stamping the unstable time-domain viscous
+Wentzell truncation identified by Hägg and Berggren, `arXiv:2207.03152`.
+`ModalViscothermalResolution` admits the original sampled complex/loss errors,
+and bounds `max(delta_v,delta_t)*(1+gamma_max)/R` and
+`max(delta_v,delta_t)*omega/c` over the authored band by a declared value
+at most 0.1. Those are asymptotic domain controls, not rigorous continuum
+error bounds. The exact shape coefficients must be cylindrical and the
+original gas uniform. Tapers, evolving backgrounds, general radial LNS,
+bulk Stokes--Kirchhoff loss, moving/compliant walls and combined molecular
+thermal physics are outside this slice. Repeated or mixed attachments,
+capacity exhaustion, unresolved lifts and cancellation refuse transactionally.
+
+`modal/time_domain/viscothermal/tests.rs` checks independent Bessel wall power,
+the half-space shear/Fourier asymptotic ladder, modal wall interference,
+diffusion-pole and full-response spatial ladders, physical source heat,
+two-face reciprocity, the known gauge and original refusal boundaries.
+`ContinuousModalLine::new_viscothermal` and `new_viscothermal_loaded` retain
+all acoustic/wall/load histories on the existing exact flow. The loaded and
+unloaded clock-subdivision regression also checks the actual duct-state
+boundary used by independent wall heat observation. Declared wall bands
+remain available in the source; a generic linear solve or time history does
+not establish physical accuracy outside them.
+
 ## Finite-expansion Landau first and second sound
 
 The opt-in `superfluid` feature exposes `superfluid::TwoFluidChannel`, a

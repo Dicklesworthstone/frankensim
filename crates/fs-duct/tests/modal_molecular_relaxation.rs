@@ -14,6 +14,9 @@ use fs_math::c64::C64;
 use fs_phs::harmonic::{HarmonicBudget, HarmonicModel, PoleOptions};
 use fs_thermochem::SpeciesId;
 
+#[path = "modal_molecular_relaxation/field.rs"]
+mod field;
+
 fn gas() -> GasState {
     GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101325.0).unwrap()
 }

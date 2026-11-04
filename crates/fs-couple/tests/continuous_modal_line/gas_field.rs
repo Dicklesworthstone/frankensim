@@ -9,6 +9,9 @@ use fs_thermochem::{Composition, CompositionBasis};
 #[path = "../../src/render/schedule/reed/field_input/tests/support.rs"]
 mod gas_support;
 
+#[path = "gas_field/molecular.rs"]
+mod molecular;
+
 fn field(length: f64, uniform: bool) -> AxialGasField {
     let a = gas_support::packs("A", 0.028, 3.5, 200.0);
     let b = gas_support::packs("B", 0.044, 4.5, 200.0);

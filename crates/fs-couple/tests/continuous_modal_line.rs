@@ -13,6 +13,8 @@ use fs_phs::{PortHamiltonian, QuadraticStorage};
 
 #[path = "continuous_modal_line/gas_field.rs"]
 mod gas_field;
+#[path = "continuous_modal_line/viscothermal.rs"]
+mod viscothermal;
 
 fn line(duration: f64) -> ContinuousModalLine {
     let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).unwrap();

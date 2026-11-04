@@ -234,6 +234,21 @@ impl RadiusProfile {
     pub fn outlet_radius(&self) -> f64 {
         self.eval(self.length)
     }
+    /// Exact cylindrical radius, when the original shape coefficients are
+    /// constant. This inspects the complete profile, not a sampled chord.
+    pub fn constant_radius_m(&self) -> Option<f64> {
+        match &self.shape {
+            Shape::Exponential { r0, area_flare } if *area_flare == 0.0 => Some(*r0),
+            Shape::Power { r0, exponent, .. } if *exponent == 0.0 => Some(*r0),
+            Shape::Spline { stations, second }
+                if stations.iter().all(|(_, radius)| *radius == stations[0].1)
+                    && second.iter().all(|value| *value == 0.0) =>
+            {
+                Some(stations[0].1)
+            }
+            _ => None,
+        }
+    }
     pub fn stations(&self) -> Option<&[(f64, f64)]> {
         match &self.shape {
             Shape::Spline { stations, .. } => Some(stations),
