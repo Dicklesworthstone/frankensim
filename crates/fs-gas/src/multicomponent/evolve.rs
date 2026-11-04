@@ -111,7 +111,7 @@ pub(super) struct Workspace {
 /// scratch is allocated on first use and retained for later steps. All
 /// species share each face's wave speeds and one conservative energy flux.
 /// No species clipping, trace seeding or composition normalization is applied.
-/// Periodic, reflecting and transmissive boundaries are supported. The shared
+/// Periodic, reflecting, transmissive and pressure-outlet boundaries are supported. The shared
 /// frozen-gas `Boundary::Reservoir` variant refuses because it cannot specify
 /// the required species masses and their separate formation-energy references.
 /// Prescribed species-bearing reservoirs use [`Self::step_with_reservoirs`].
@@ -234,6 +234,27 @@ impl MixtureEuler1d {
     /// Declared endpoint conditions of this accepted flow.
     pub fn boundaries(&self) -> Boundaries {
         self.boundaries
+    }
+    /// Replace prescribed physical boundaries without advancing the field.
+    /// Pressure values remain fixed during an accepted RK step; a caller can
+    /// update them between steps for a prescribed pressure history. Invalid
+    /// pressure, incompatible periodic geometry or cancellation changes nothing.
+    pub fn set_boundaries(
+        &mut self,
+        boundaries: Boundaries,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(), Error> {
+        poll(&mut cancelled)?;
+        admit_boundaries(boundaries)?;
+        let areas = self.mesh.face_areas();
+        if boundaries == Boundaries::Periodic && areas[0] != areas[self.cell_count()] {
+            return Err(Error::Invalid(
+                "periodic end faces must have identical physical area",
+            ));
+        }
+        poll(&mut cancelled)?;
+        self.boundaries = boundaries;
+        Ok(())
     }
     /// Current accepted time.
     pub fn time(&self) -> Time {
@@ -550,6 +571,17 @@ impl MixtureEuler1d {
 }
 
 fn admit_boundaries(boundaries: Boundaries) -> Result<(), Error> {
+    if let Boundaries::Ends { left, right } = boundaries {
+        for boundary in [left, right] {
+            if let Boundary::PressureOutlet { pressure_pa } = boundary {
+                if !positive(pressure_pa) {
+                    return Err(Error::Invalid(
+                        "pressure outlet needs positive absolute pressure",
+                    ));
+                }
+            }
+        }
+    }
     if matches!(
         boundaries,
         Boundaries::Ends {
@@ -911,6 +943,30 @@ pub(super) fn operator_with_face_motion(
                 face_data[face] = flux.data;
                 fallbacks += usize::from(flux.data.used_hll_fallback);
                 continue;
+            }
+            if let Boundaries::Ends {
+                left: lower,
+                right: upper,
+            } = boundaries
+            {
+                if let Boundary::PressureOutlet { pressure_pa } =
+                    if face == 0 { lower } else { upper }
+                {
+                    let inner = reconstruct(
+                        if face == 0 { 0 } else { count - 1 },
+                        if face == 0 { -0.5 } else { 0.5 },
+                        &mut left[..m],
+                    )?;
+                    face_data[face] = gas.pressure_outlet_admitted_flux(
+                        &left[..n],
+                        inner,
+                        if face == 0 { -1.0 } else { 1.0 },
+                        pressure_pa,
+                        &mut faces[face * m..(face + 1) * m],
+                        cancelled,
+                    )?;
+                    continue;
+                }
             }
         }
         if face == count && boundaries == Boundaries::Periodic {

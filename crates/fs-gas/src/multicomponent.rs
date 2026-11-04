@@ -7,7 +7,9 @@
 //! discrete entropy inequality or exact pressure equilibrium across a moving
 //! material interface with different caloric laws.
 //!
-//! Shared boundary types admit periodic, reflecting and transmissive ends here.
+//! Shared boundary types admit periodic, reflecting, transmissive and
+//! pressure-outlet ends here. Pressure outlets preserve the outgoing local
+//! composition and refuse backflow without an exterior thermodynamic state.
 //! A frozen `Boundary::Reservoir` has no species-mass axis or species energy
 //! references and therefore refuses. Species-bearing compact-reservoir ports
 //! use [`MixtureGas::reservoir_flux`] with the original local compositions.

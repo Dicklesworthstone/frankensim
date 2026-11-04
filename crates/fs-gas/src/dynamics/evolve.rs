@@ -12,6 +12,12 @@ pub enum Boundary {
     Transmissive,
     /// Stationary impermeable adiabatic wall, with exactly zero mass/energy flux.
     Reflecting,
+    /// Positive absolute static backpressure [Pa] at a stationary open end.
+    /// The source-owned outgoing shock/rarefaction selects the face state,
+    /// including sonic discharge and departing supersonic characteristics.
+    /// Backflow refuses because pressure alone supplies no entering gas state.
+    /// This boundary is not nonreflecting; use a reservoir when inflow is needed.
+    PressureOutlet { pressure_pa: f64 },
     /// Fixed, stationary reservoir state in this gas owner's energy reference.
     /// Its pressure and temperature are stagnation conditions for inflow and
     /// its pressure is the backpressure for outflow. Momentum must be zero.
@@ -881,6 +887,23 @@ pub(super) fn operator_with_face_motion(
                 continue;
             }
             if let Boundaries::Ends { left, right } = boundaries {
+                if let Boundary::PressureOutlet { pressure_pa } =
+                    if face == 0 { left } else { right }
+                {
+                    let inner = if face == 0 {
+                        reconstruct(0, -0.5)?
+                    } else {
+                        reconstruct(n - 1, 0.5)?
+                    };
+                    let (state, signal) = gas.pressure_outlet_state(
+                        inner.1,
+                        if face == 0 { -1.0 } else { 1.0 },
+                        pressure_pa,
+                        cancelled,
+                    )?;
+                    faces[face] = gas.face_flux(state, signal)?;
+                    continue;
+                }
                 if let Boundary::Reservoir(reservoir) = if face == 0 { left } else { right } {
                     let inner = if face == 0 {
                         reconstruct(0, -0.5)?
@@ -1066,6 +1089,13 @@ fn validate_reservoirs(
     if let Boundaries::Ends { left, right } = boundaries {
         for boundary in [left, right] {
             poll(cancelled)?;
+            if let Boundary::PressureOutlet { pressure_pa } = boundary {
+                if !positive(pressure_pa) {
+                    return Err(Error::Invalid(
+                        "pressure outlet needs positive absolute pressure",
+                    ));
+                }
+            }
             if let Boundary::Reservoir(state) = boundary {
                 if state.momentum != 0.0 {
                     return Err(Error::Invalid("stationary reservoir has nonzero momentum"));
@@ -1080,3 +1110,7 @@ fn validate_reservoirs(
 #[cfg(test)]
 #[path = "port_tests.rs"]
 mod port_tests;
+
+#[cfg(test)]
+#[path = "pressure_boundary_tests.rs"]
+mod pressure_boundary_tests;

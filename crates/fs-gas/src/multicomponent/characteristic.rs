@@ -1,4 +1,6 @@
-//! Species-bearing compact-reservoir flux with one shared characteristic solve.
+//! Species-bearing pressure outlets and compact-reservoir characteristic fluxes.
+
+mod pressure;
 
 use super::wall::LocalCaloric;
 use super::{Cell, Error, FaceFlux, MAX_COMPONENTS, MixtureGas, Primitive, poll, positive};
