@@ -1,5 +1,27 @@
 # CONTRACT: fs-conduction
 
+## Original generated-layer profiles for thermal lensing
+
+`GeneratedLayeredWallSolution::temperature_profile(layer_index)` borrows the
+original layer, solved face records and declared volumetric source. It admits
+constant conductivity once; `GeneratedLayerTemperatureProfile::temperature_jet_at`
+then returns temperature, heat flux and both spatial derivatives in O(1) work
+without allocation or source-knot rescans. The convenience solution-level
+`temperature_jet_at(layer_index, offset_m)` retains the same semantics.
+
+Interior values use the original solved inlet flux and Fourier law:
+`q(x) = q_left + s*x`, `T(x) = T_left - x*(q_left + s*x/2)/k`,
+`T'(x) = -q(x)/k`, and `T''(x) = -s/k`.
+Stored face temperatures and fluxes are retained exactly at endpoints. Queries
+refuse outside the physical layer or original conductivity temperature span,
+and malformed required result rows refuse. Profiles never cross contacts,
+resample a mean state, fit rounded faces or perform another thermal solve.
+The renderer can therefore consume the same accepted thermal state for
+refraction and focusing while retaining explicit world placement and separate
+material regions. Existing conservation, source receipts, source-domain and
+cancellation controls remain in the generated-conduction test suite alongside
+independent profile/derivative and endpoint controls.
+
 ## Original material phase states in spatial thermal contacts
 
 `TemperatureContact::with_material_states(MaterialContactState { point, curves })`

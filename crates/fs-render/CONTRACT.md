@@ -1915,6 +1915,37 @@ differentiable lift). Pure Rust throughout.
   energy and replay. This does not add refractive multi-interface source
   connectors or participating fields inside a glass body.
 
+## Material thermo-optic refraction
+
+With `material-state`, `MaterialThermoOpticField` binds the original reference
+glass and `fs-material::thermo_optic::SchottThermoOpticLaw` to one immutable
+thermal snapshot. Its usable wavelengths are the intersection of reference
+phase/absorption and thermo-optic support. Preparing a wavelength evaluates
+reference dispersion and the spectral material coefficients once; optical
+stages still query the actual spatial temperature and its analytic derivatives.
+
+The original gradient-index and ray-bundle owners consume
+`grad(n) = n_T grad(T)` and
+`Hess(n) = n_T Hess(T) + n_TT grad(T) grad(T)^T`, including mixed terms.
+Phase and available group optical distance retain the original material law;
+absorption remains the explicitly declared reference law. The same bound
+source supplies the native temperature trait. No finite-difference field,
+temperature-dependent absorption, moving state, expansion or stress response
+is invented. Each material/contact discontinuity requires a separate region
+and the native boundary event, not a smooth integration across the jump.
+
+`thermo_optic::conduction::PlanarConductionTemperatureField` borrows one original
+`GeneratedLayeredWallSolution` profile, with an explicit world origin and unit
+axis. The conduction owner supplies temperature, Fourier gradient and
+curvature; the bridge only rotates them. Prepared profile queries are O(1),
+allocation-free and bounded by the original layer and source temperature span.
+Contact jumps and exact stored face values survive. Even a constant-temperature
+bounded layer cannot activate an unbounded uniform-field shortcut.
+
+Controls run original conduction solves through analytic infrared dispersion,
+thermal refraction and native bundle focusing, with independent path/footprint,
+phase/group, Beer attenuation, mixed-Hessian, contact and domain references.
+
 ## Invariants
 
 - FURNACE: `furnace_radiance` returns exactly `albedo·incident` (energy

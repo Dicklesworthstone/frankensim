@@ -13,6 +13,8 @@
 pub mod gas_scattering;
 
 mod bulk_optics;
+/// Thermal lensing from original absolute dispersion and a frozen temperature field.
+pub mod thermo_optic;
 /// Source-bound dispersive particle populations in native volume transport.
 #[cfg(feature = "volumes")]
 pub mod particle_scattering;

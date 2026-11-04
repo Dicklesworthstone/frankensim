@@ -38,6 +38,77 @@ fn g1_generated_slab_resolves_the_interior_peak_and_two_outward_heat_rates() {
 }
 
 #[test]
+fn g1_original_generated_profile_exposes_exact_fourier_temperature_derivatives() {
+    for sign in [-1.0, 0.0, 1.0] {
+        let solution = with_cx(|cx| {
+            symmetric_stack().solve_with_generation(cx, [300.0; 2], 3.0, &[8.0 * sign])
+        })
+        .unwrap();
+        for x in [0.0, 0.25, 0.5, 1.0, 1.5, 2.0] {
+            let jet = solution.temperature_jet_at(0, x).unwrap();
+            // Independent solution of T''=-s/k with T(0)=T(2)=300 K.
+            close(jet.temperature_k, 300.0 + sign * (2.0 * x - x * x));
+            close(jet.gradient_k_per_m, sign * (2.0 - 2.0 * x));
+            close(jet.curvature_k_per_m2, -2.0 * sign);
+            close(jet.heat_flux_w_per_m2, sign * (-8.0 + 8.0 * x));
+            close(-4.0 * jet.gradient_k_per_m, jet.heat_flux_w_per_m2);
+        }
+        for (side, x) in [(0, 0.0), (1, 2.0)] {
+            let jet = solution.temperature_jet_at(0, x).unwrap();
+            assert_eq!(
+                jet.temperature_k.to_bits(),
+                solution.layer_temperatures[0].face_temperatures_k[side].to_bits()
+            );
+            assert_eq!(
+                jet.heat_flux_w_per_m2.to_bits(),
+                solution.layer_temperatures[0].face_fluxes_w_per_m2[side].to_bits()
+            );
+        }
+    }
+}
+
+#[test]
+fn g1_generated_temperature_jet_retains_contact_jump_and_each_material_gradient() {
+    let solution =
+        with_cx(|cx| asymmetric_stack().solve_with_generation(cx, [300.0; 2], 7.0, &[2.0, 0.0]))
+            .unwrap();
+    let left = solution.temperature_jet_at(0, 1.0).unwrap();
+    let right = solution.temperature_jet_at(1, 0.0).unwrap();
+    close(left.temperature_k - right.temperature_k, 2.0 / 7.0);
+    close(left.heat_flux_w_per_m2, 4.0 / 7.0);
+    close(right.heat_flux_w_per_m2, 4.0 / 7.0);
+    close(left.gradient_k_per_m, -4.0 / 7.0);
+    close(right.gradient_k_per_m, -2.0 / 7.0);
+    close(left.curvature_k_per_m2, -2.0);
+    close(right.curvature_k_per_m2, 0.0);
+}
+
+#[test]
+fn g0_generated_temperature_jet_refuses_missing_rows_and_spatial_extrapolation() {
+    let solution =
+        with_cx(|cx| symmetric_stack().solve_with_generation(cx, [300.0; 2], 3.0, &[8.0])).unwrap();
+    for (layer, offset) in [
+        (1, 0.0),
+        (usize::MAX, 1.0),
+        (0, -f64::MIN_POSITIVE),
+        (0, f64::from_bits(2.0_f64.to_bits() + 1)),
+        (0, f64::NAN),
+        (0, f64::INFINITY),
+    ] {
+        assert!(solution.temperature_jet_at(layer, offset).is_err());
+    }
+    let mut missing = solution.clone();
+    missing.volumetric_generation_w_m3.clear();
+    assert!(missing.temperature_jet_at(0, 1.0).is_err());
+    let mut missing = solution.clone();
+    missing.layer_temperatures.clear();
+    assert!(missing.temperature_jet_at(0, 1.0).is_err());
+    let mut invalid = solution;
+    invalid.layer_temperatures[0].face_temperatures_k[1] = f64::NAN;
+    assert!(invalid.temperature_jet_at(0, 2.0).is_err());
+}
+
+#[test]
 fn g1_heterogeneous_generation_uses_the_local_flux_at_each_contact_and_film() {
     let answer =
         with_cx(|cx| asymmetric_stack().solve_with_generation(cx, [300.0; 2], 7.0, &[2.0, 0.0]))

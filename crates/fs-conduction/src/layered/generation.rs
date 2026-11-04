@@ -8,7 +8,7 @@
 //! See MIT 3.044, spring 2013, problem set 2 (internally heated slab):
 //! <https://ocw.mit.edu/courses/3-044-materials-processing-spring-2013/ff9d5adcbafc16451f8e329865aba5e7_MIT3_044S13_pset2solns.pdf>.
 
-use super::{LayeredWall, checkpoint, finite, invalid, positive};
+use super::{LayeredWall, PlanarThermalLayer, checkpoint, finite, invalid, positive};
 use crate::ConductionError;
 use fs_exec::Cx;
 
@@ -63,6 +63,143 @@ pub struct GeneratedLayeredWallSolution {
     pub maximum_flux_residual_w_per_m2: f64,
     /// Reconstructed right reservoir minus its prescribed temperature, K.
     pub right_boundary_residual_k: f64,
+}
+
+/// Temperature and its original one-dimensional Fourier derivatives within
+/// one solved constant-conductivity layer. Coordinates run left to right.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GeneratedLayerTemperatureJet {
+    /// Absolute local material temperature, K.
+    pub temperature_k: f64,
+    /// `dT/dx = -q/k`, K/m.
+    pub gradient_k_per_m: f64,
+    /// `d²T/dx² = -s/k`, K/m².
+    pub curvature_k_per_m2: f64,
+    /// Signed local left-to-right Fourier heat flux, W/m².
+    pub heat_flux_w_per_m2: f64,
+}
+
+/// Borrowed original profile with its constant conductivity admitted once.
+/// Reuse this for O(1) stage queries without rescanning source knots.
+#[derive(Clone, Copy, Debug)]
+pub struct GeneratedLayerTemperatureProfile<'a> {
+    layer: &'a PlanarThermalLayer,
+    solved: &'a GeneratedLayerTemperatures,
+    source: f64,
+}
+
+impl GeneratedLayeredWallSolution {
+    /// Query the original analytic profile inside one physical layer, with
+    /// offset in metres from that layer's left face. Stored face temperatures
+    /// and fluxes are retained exactly at the endpoints. Interior values use
+    /// the solved inlet flux and original volumetric source, not a fit to the
+    /// rounded face temperatures or a layer-average reconstruction.
+    ///
+    /// This allocation-free query does not cross contacts, extrapolate the
+    /// layer or source temperature span, or solve another thermal problem.
+    /// A public result whose required rows have been removed or made invalid
+    /// refuses instead of indexing missing state. Repeated queries should use
+    /// [`Self::temperature_profile`] to admit constant conductivity only once.
+    pub fn temperature_jet_at(
+        &self,
+        layer_index: usize,
+        offset_m: f64,
+    ) -> Result<GeneratedLayerTemperatureJet, ConductionError> {
+        self.temperature_profile(layer_index)?
+            .temperature_jet_at(offset_m)
+    }
+
+    /// Borrow one original layer for constant-work thermal/optical sampling.
+    /// The existing conductivity knots are inspected once; the profile retains
+    /// their original temperature support and borrows the solved face records.
+    pub fn temperature_profile(
+        &self,
+        layer_index: usize,
+    ) -> Result<GeneratedLayerTemperatureProfile<'_>, ConductionError> {
+        let layer = self
+            .wall
+            .layers
+            .get(layer_index)
+            .ok_or_else(|| invalid("generated layer index is outside the original wall"))?;
+        let solved = self
+            .layer_temperatures
+            .get(layer_index)
+            .ok_or_else(|| invalid("generated layer temperature row is missing"))?;
+        let source = *self
+            .volumetric_generation_w_m3
+            .get(layer_index)
+            .ok_or_else(|| invalid("generated layer source row is missing"))?;
+        if layer.conductivity.is_temperature_dependent() {
+            return Err(invalid(
+                "generated layer derivatives require constant conductivity",
+            ));
+        }
+        finite("volumetric generation", source)?;
+        finite("layer inlet flux", solved.face_fluxes_w_per_m2[0])?;
+        positive("layer left temperature", solved.face_temperatures_k[0])?;
+        Ok(GeneratedLayerTemperatureProfile {
+            layer,
+            solved,
+            source,
+        })
+    }
+}
+
+impl GeneratedLayerTemperatureProfile<'_> {
+    /// Original physical layer thickness, m.
+    pub const fn thickness_m(&self) -> f64 {
+        self.layer.thickness_m
+    }
+
+    /// Original temperature and Fourier derivatives at a supported offset.
+    pub fn temperature_jet_at(
+        &self,
+        offset_m: f64,
+    ) -> Result<GeneratedLayerTemperatureJet, ConductionError> {
+        let Self {
+            layer,
+            solved,
+            source,
+        } = *self;
+        if !offset_m.is_finite() || !(0.0..=layer.thickness_m).contains(&offset_m) {
+            return Err(invalid(
+                "generated layer offset is outside its physical thickness",
+            ));
+        }
+        let conductivity = layer.conductivity.knots()[0].1;
+        let inlet = solved.face_fluxes_w_per_m2[0];
+        let left = solved.face_temperatures_k[0];
+        let (temperature_k, heat_flux_w_per_m2) = if offset_m == 0.0 {
+            (left, inlet)
+        } else if offset_m == layer.thickness_m {
+            (
+                solved.face_temperatures_k[1],
+                solved.face_fluxes_w_per_m2[1],
+            )
+        } else {
+            let flux = finite("local generated flux", source.mul_add(offset_m, inlet))?;
+            let midpoint_flux = finite(
+                "partial-layer midpoint flux",
+                source.mul_add(0.5 * offset_m, inlet),
+            )?;
+            let temperature = (-offset_m / conductivity).mul_add(midpoint_flux, left);
+            (temperature, flux)
+        };
+        positive("local generated temperature", temperature_k)?;
+        layer.conductivity.span().check(temperature_k)?;
+        finite("local generated flux", heat_flux_w_per_m2)?;
+        let gradient_k_per_m = finite(
+            "generated temperature gradient",
+            -heat_flux_w_per_m2 / conductivity,
+        )?;
+        let curvature_k_per_m2 = finite("generated temperature curvature", -source / conductivity)?;
+        Ok(GeneratedLayerTemperatureJet {
+            temperature_k,
+            gradient_k_per_m,
+            curvature_k_per_m2,
+            heat_flux_w_per_m2,
+        })
+    }
 }
 
 impl LayeredWall {

@@ -22,7 +22,10 @@ pub use nonlinear::{
     NonlinearLayerTemperatures, NonlinearLayeredWallSolution, NonlinearWallOptions,
 };
 mod generation;
-pub use generation::{GeneratedLayerTemperatures, GeneratedLayeredWallSolution};
+pub use generation::{
+    GeneratedLayerTemperatureJet, GeneratedLayerTemperatureProfile, GeneratedLayerTemperatures,
+    GeneratedLayeredWallSolution,
+};
 mod geometry;
 mod radial;
 pub use radial::{

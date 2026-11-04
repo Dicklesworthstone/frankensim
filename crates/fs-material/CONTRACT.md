@@ -1,5 +1,27 @@
 # fs-material — CONTRACT
 
+## Absolute thermo-optic response for refraction
+
+`thermo_optic::SchottThermoOpticLaw` retains explicitly supplied SCHOTT TIE-19
+coefficients, an absolute reference temperature, a nonzero source association,
+and positive finite temperature/vacuum-wavelength domains. Active resonances
+anywhere in the inclusive source band refuse. The source association does not
+establish measurement authority or qualify coefficients for a material.
+
+`prepare` evaluates the spectral coefficients once from the original absolute
+phase index and optional original group index. The group correction retains
+both the wavelength derivative of the reference-index prefactor and the
+resonance term. Unknown reference group index remains unknown. Each subsequent
+allocation-free cubic evaluation returns phase/group indices and exact first
+and second temperature derivatives, always relative to the original reference
+state. The reference-temperature indices retain their bits; unsupported states,
+nonpositive indices and unrepresentable responses refuse without clamping.
+
+The law supplies no absorption, thermal expansion, stress birefringence, air
+correction or inferred material data. Controls include independent
+high-precision phase/group values, wavelength and temperature derivatives,
+reference-state recovery, signed coefficients, pole/domain refusal and identity.
+
 ## Source-bound hyperelastic membranes
 
 `ResolvedSheet::with_hyperelastic_membrane(card, model_index, settings)` explicitly

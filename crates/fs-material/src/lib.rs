@@ -112,6 +112,8 @@ pub mod sublimation;
 pub mod evaporation;
 pub mod tensor;
 pub mod thermal;
+/// Source-bounded absolute phase, group and thermal derivatives for dielectrics.
+pub mod thermo_optic;
 /// Source-bound reciprocal Seebeck and Peltier cross-domain transport.
 pub mod thermoelectric;
 /// Shared species thermodynamics, acoustic medium and source-backed gas transport.
