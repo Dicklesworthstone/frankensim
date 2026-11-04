@@ -333,6 +333,13 @@ impl FlueFilePerformance {
     /// An optional `radiation prescribed` or `radiation compact-baffled` row then
     /// selects whether every observed outlet retains its supplied load or receives
     /// the existing compact passive load in the same exterior as the receiver.
+    /// Under `radiation compact-baffled`, an additional `outlet NODE X_M Y_M` row may
+    /// end in the word `unflanged`: that opening then receives the compact load of a
+    /// thin-wall UNFLANGED pipe end instead of the baffled piston (Garcia Mayen 2021,
+    /// Eq. 14's "tube without flange" via Silva et al. 2009, Eqs. 10-11). Reaction
+    /// unflanged, observation baffled half-space: only the terminal REACTION changes;
+    /// the microphone model of that opening is still the baffled monopole. Absent the
+    /// word, the card produces exactly the same network as before.
     /// `radiation mimo ARTIFACT MAX_STATES MAX_MEMORY_BYTES PASSIVITY_POINTS`
     /// instead loads one explicit reciprocal rational operator for all declared
     /// outlets, in their original order. The shared artifact decoder retains its
@@ -552,7 +559,8 @@ impl FlueFilePerformance {
         } else {
             None
         };
-        let (outlet_node, additional_outlets) = duct.read_outlets(&mut rows)?;
+        let (outlet_node, additional_outlets, outlet_flanges) =
+            duct.read_outlets(&mut rows, radiation_reaction)?;
         let aperture_size_m = read_mouth_aperture(&mut rows)?;
         let mouth_radiation = if rows.next_is("mouth_radiation") {
             let mut row = rows.row("mouth_radiation")?;
@@ -636,9 +644,10 @@ impl FlueFilePerformance {
             }
         };
         let (voice, radiation_bindings) = if radiation_reaction {
-            let (voice, environment) = FlueVoice::from_baffled_environment(Some(&card),
+            let (voice, environment) = FlueVoice::from_baffled_environment_flanges(Some(&card),
                 displacement_gain, seed_amplitude_rel, geometry, source, walls, Some(policy),
-                radiation(), voice_seed, voice_index, gate).map_err(FlueInputError::Physics)?;
+                radiation(), &outlet_flanges, voice_seed, voice_index, gate)
+                .map_err(FlueInputError::Physics)?;
             for binding in environment.bindings() {
                 binding.validate_receiver(voice.network().expect("constructed graph").graph(),
                     environment.radiation(), exterior)

@@ -322,6 +322,19 @@ quadrature limits. The example's two outlets contribute to one pressure
 history, preserving propagation timing and interference. A single-tube source
 may omit this block and retain its original sole terminal receiver.
 
+Under `radiation compact-baffled`, an additional `outlet` row may end in the word
+`unflanged` (`outlet OTHER_NODE CENTER_X_M CENTER_Y_M unflanged`). That opening then
+reacts as a thin-wall UNFLANGED circular pipe end (end correction 0.6133 a, low-ka
+resistance (ka)^2/4: Silva et al. 2009, Eqs. 10-11, the law Garcia Mayen et al. 2021
+assume for a tone hole's radiation length) instead of the baffled piston (0.8488 a,
+(ka)^2/2). It keeps every `inner ... matching series` term of the chimney. The word is
+refused without `radiation compact-baffled`, and the primary `outlets` row takes none.
+**Reaction unflanged, observation baffled half-space:** the exterior pressure of that
+opening is still the baffled monopole of the shared receiver, so the option changes
+pitch and loss, not level or directivity, and the render record says so. A card without
+the word is unchanged byte for byte. Contract: `CONTRACT.md`, "Per-aperture unflanged
+open-end reaction".
+
 Prescribed terminal loads retain their one-way infinite-baffle receiver. The
 explicit MIMO selection below instead supplies shared exterior feedback. These
 remain plane-wave cylindrical sections and ideal junctions; the source file

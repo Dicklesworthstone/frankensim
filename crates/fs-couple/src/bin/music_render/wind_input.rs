@@ -144,6 +144,14 @@ pub(super) fn outlet_provenance(p: &AperturePerformance, radiation: Option<Baffl
 fn radiation_provenance(radiation: Option<BaffledRadiationLoad>) -> String {
     if let Some(load)=radiation {
         let spec=load.load();let term=spec.terms()[0];
+        if load.flange()==fs_couple::bernoulli_aperture::radiation::RadiationFlange::Unflanged {
+            // Selected per aperture by the card's `outlet ... unflanged` word (MB 92): the REACTION is the
+            // compact unflanged-pipe load; the exterior pressure of the same opening is still the shared
+            // receiver's baffled half-space monopole, so the record says so. Baffled records stay byte-identical.
+            return format!(",\"radiation_load\":{{\"model\":\"compact-unflanged-pipe-positive-real-v1\",\"reaction_flange\":\"unflanged\",\"radiation_scope\":\"reaction unflanged, observation baffled half-space\",\"end_correction_radii\":0.6133,\"low_ka_resistance_coefficient\":0.25,\"source\":\"Silva et al. J. Sound Vib. 322 (2009) Eqs. 10-11; Garcia Mayen 2021 Eq. 14 (tube without flange)\",\"maximum_frequency_hz\":{:e},\"resistance_pa_s_m3\":{:e},\"pole_rate_per_s\":{:e},\"checked_max_complex_relative_error\":{:e},\"checked_max_resistance_relative_error\":{:e},\"oracle\":\"fs-duct Levine-Schwinger, 256 nodes\",\"replaces_memoryless_reflection\":true,\"extra_end_correction_m\":0,\"scope\":\"finite-sample low-ka analogue and bilinear checks, not broadband or measured calibration\"}}",
+                load.maximum_frequency_hz(),term.resistance_pa_s_m3,term.rate_per_s,
+                load.max_complex_relative_error(),load.max_resistance_relative_error());
+        }
         format!(",\"radiation_load\":{{\"model\":\"compact-baffled-piston-positive-real-v1\",\"maximum_frequency_hz\":{:e},\"resistance_pa_s_m3\":{:e},\"pole_rate_per_s\":{:e},\"checked_max_complex_relative_error\":{:e},\"checked_max_resistance_relative_error\":{:e},\"replaces_memoryless_reflection\":true,\"extra_end_correction_m\":0,\"scope\":\"finite-sample low-ka analogue and bilinear checks, not broadband or measured calibration\"}}",
             load.maximum_frequency_hz(),term.resistance_pa_s_m3,term.rate_per_s,
             load.max_complex_relative_error(),load.max_resistance_relative_error())

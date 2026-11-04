@@ -4,7 +4,7 @@
 //! BaffledRadiationLoad owns the compact positive-real boundary law. Selected
 //! memoryless endpoints become those physical loads before propagation starts.
 //! No reaction is inferred merely from attaching a one-way pressure observer.
-use super::BaffledRadiationLoad;
+use super::{BaffledRadiationLoad, RadiationFlange};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::network::{NetworkNode, TubeNetworkSpec};
 use crate::pcm_wav::baffled::openings::duct::{
@@ -123,11 +123,33 @@ fn poll(gate: &CancelGate) -> Result<(), AcousticRealizeError> {
 /// input graph remains unchanged on error, including a late load refusal.
 pub fn bind_baffled_environment(
     graphs: &mut [TubeNetworkSpec], gases: &[&[GasState]],
-    mut radiation: DuctRadiationSpec, gate: &CancelGate,
+    radiation: DuctRadiationSpec, gate: &CancelGate,
+) -> Result<BaffledEnvironment, AcousticRealizeError> {
+    bind_baffled_environment_with_flanges(graphs, gases, radiation, &[], gate)
+}
+
+/// [`bind_baffled_environment`] with an explicit exterior law per opening. `flanges`
+/// is either empty (every opening keeps the baffled piston, exactly the original
+/// function) or holds one [`RadiationFlange`] per `radiation.openings` entry, in that
+/// order. An `Unflanged` opening receives the compact unflanged-pipe load of
+/// [`BaffledRadiationLoad::with_flange`] at the same radius, band and clock; this changes
+/// the terminal REACTION only. The observed exterior pressure of that opening is still
+/// the baffled half-space monopole of the shared receiver, so reaction and observation
+/// then use different exterior models; the caller must say so in its record.
+///
+/// # Errors
+/// As [`bind_baffled_environment`], plus a `flanges` list that is neither empty nor one
+/// entry per opening. Every input graph remains unchanged on error.
+pub fn bind_baffled_environment_with_flanges(
+    graphs: &mut [TubeNetworkSpec], gases: &[&[GasState]],
+    mut radiation: DuctRadiationSpec, flanges: &[RadiationFlange], gate: &CancelGate,
 ) -> Result<BaffledEnvironment, AcousticRealizeError> {
     poll(gate)?;
     if graphs.len() != gases.len() {
         return Err(invalid("baffled environment needs one gas mapping per network"));
+    }
+    if !flanges.is_empty() && flanges.len() != radiation.openings.len() {
+        return Err(invalid("baffled environment needs no flange selections or exactly one per opening"));
     }
     let views: Vec<_> = graphs.iter().zip(gases).map(|(graph, gases)|
         DuctView { graph, gases }).collect();
@@ -144,8 +166,9 @@ pub fn bind_baffled_environment(
     let mut bindings = Vec::new();
     bindings.try_reserve_exact(radiation.openings.len())
         .map_err(|_| invalid("baffled boundary allocation failed"))?;
-    for &opening in &radiation.openings {
+    for (position, &opening) in radiation.openings.iter().enumerate() {
         poll(gate)?;
+        let flange = flanges.get(position).copied().unwrap_or_default();
         let graph = &graphs[opening.network]; // shared receiver admitted addresses
         let NetworkNode::Termination { reflection } = graph.nodes[opening.node] else {
             return Err(invalid("baffled environment only replaces explicitly selected memoryless terminals"));
@@ -155,8 +178,12 @@ pub fn bind_baffled_environment(
         }
         let (index, section) = graph.sections.iter().enumerate()
             .find(|(_, s)| s.nodes.contains(&opening.node)).expect("admitted physical outlet");
-        let load = BaffledRadiationLoad::new(section.radius_m, exterior.density,
-            exterior.sound_speed, dt, band, gate)?;
+        let load = match flange {
+            RadiationFlange::Baffled => BaffledRadiationLoad::new(section.radius_m, exterior.density,
+                exterior.sound_speed, dt, band, gate)?,
+            RadiationFlange::Unflanged => BaffledRadiationLoad::with_flange(section.radius_m,
+                exterior.density, exterior.sound_speed, dt, band, RadiationFlange::Unflanged, gate)?,
+        };
         bindings.push(BaffledOutletBinding { opening, interior: gases[opening.network][index],
             previous_reflection: reflection, load });
     }

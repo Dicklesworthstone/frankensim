@@ -9242,6 +9242,61 @@ clock, band and exterior density/sound speed (relative tolerance 1e-12).
 reaction load, changes no bore gas and never changes a termination to admit it.
 Existing one-way builders retain Diagnostic scope.
 
+### Per-aperture unflanged open-end reaction (flue performance cards)
+
+`bernoulli_aperture::radiation::RadiationFlange {Baffled, Unflanged}` and
+`BaffledRadiationLoad::with_flange` choose the exterior law of ONE compact open end;
+`BaffledRadiationLoad::new` is `with_flange(.., Baffled, ..)` and
+`bind_baffled_environment` is `bind_baffled_environment_with_flanges` with an empty
+list, so a card or caller that selects nothing builds the identical load, graph and
+render bytes as before. A flue performance card selects it per additional opening by a
+trailing word, `outlet NODE X_M Y_M unflanged`, under `radiation compact-baffled`
+(refused with the row's line number otherwise; the primary `outlets` row takes no
+such word, and the foot/primary opening stays baffled). `inner ... matching series`
+chimney rows are untouched: their far node stays `reflection -1` and is replaced at
+bind time, so t_i, t_m and t_a are kept.
+
+Law. Garcia Mayen et al. (HAL hal-03230052, 2021) write the tone-hole shunt length
+`t_s = t_i + t + t_m + Re(t_r)` (Eq. 14) and, for `t_r`, "we assume it is equal to
+the radiation of a tube without flange", citing Silva, Guillemain, Kergomard,
+Mallaroni & Norris, J. Sound Vib. 322 (2009) 255-263 (arXiv:0811.3625; corrigendum
+J. Sound Vib. 336 (2015) 296, which corrects only the sign of its Eq. 20 and leaves
+Table 1 and the other equations valid). Silva et al. give, for the planar mode,
+`|R| = 1 - beta (ka)^2 + o(ka)^2` with `beta = 1/2` (unflanged; 1 flanged) and an end
+correction `L/a = eta = 0.6133` (unflanged; 0.8216 flanged), Eqs. 10-11, the static
+values being Levine & Schwinger's. Matching the two low-ka terms
+`Z/Zc = -i eta ka + (beta/2)(ka)^2` to the positive-real `R s/(s+p)` gives
+`p = 2 eta c/(beta a)` and `R = 2 eta^2 Zc/beta`: for the baffled piston (eta = 8/(3 pi),
+beta = 1) `p = 2 alpha c/a`, `R = 2 alpha^2 Zc` as before; unflanged `p = 4 eta c/a = 2.4532 c/a`,
+`R = 4 eta^2 Zc = 1.5045 Zc`. Same `fs-vfit` relaxation owner, same ka <= 0.5 and dt*fmax <= 0.1
+domain, same 32-point analogue-and-discrete 5 % complex/resistance gates; the oracle is fs-duct's exact
+Levine-Schwinger evaluation (256 nodes), whose static end correction is 0.6127 (the 0.1 % difference from the
+source's 0.6133 is inside the gate; 0.6133 is also the value of fs-duct's `UnflangedOpen` termination). Measured
+against the exact Levine-Schwinger rows printed in fs-duct, the compact load is within 0.10 % (complex) at ka 0.01
+and 1.33 % at ka 0.5; over a 512-point grid on ka in (0, 0.5] the worst complex discrepancy is 1.33 % and the worst
+radiation-resistance discrepancy is 1.74 % (measured by the unit test on ts2, 2026-11-04; recorded, with 2 %
+regression bounds). No Pade coefficient of Silva et al. is used in the code. No formula for a hole in a
+cylindrical outer wall or for an intermediate flange was available from an opened source, so none is
+implemented. Levine-Schwinger 1948 and Dalmont-Nederveen-Joly 2001 were NOT opened by the author.
+
+**Reaction unflanged, observation baffled half-space.** Only the terminal REACTION of the selected
+opening changes (pitch and loss). The exterior pressure of that same opening is still the shared receiver's
+baffled half-space monopole, so reaction and observation use different exterior models for it: its level and
+directivity at the microphone are not those of an unflanged pipe, and the energy removed by the network (half the
+baffled low-ka resistance) is not the energy the microphone model radiates. The render record names this per
+node (`radiation_load.model = "compact-unflanged-pipe-positive-real-v1"`, `reaction_flange`, `radiation_scope`);
+baffled records are unchanged. A consistent unflanged observation is a separate change.
+
+Tests, with their Gauntlet tiers: G0 (algebraic laws and boundaries) `compact_unflanged_load_domain_boundaries`,
+`baffled_flange_is_the_original_load_and_unflanged_differs` (wrapper identity, resistance coefficient exactly half),
+and in `tests/tone_hole_flange.rs` the empty-or-all-baffled list being bit-identical to the original binding, the
+wrong-length list and the card refusals; G2 (canonical reference) `unflanged_load_two_term_exact_and_oracle_error_recorded`
+against fs-duct's exact Levine-Schwinger evaluation; G3 (metamorphic) `unflanged_hole_matches_shortened_chimney_in_reactance_at_low_ka`
+(the option on the unmodified chimney equals the shortened-chimney emulation in reactance, and differs in loss by the
+factor 2 by construction) and the planted negatives (baffled must differ in node, resistance ratio 0.5, reactance ratio
+0.7226, and rendered pressure on the real a1 card). Not covered: G1 convergence order, G4 and G5 beyond the inherited
+determinism of the existing load owner.
+
 `TwoSidedAperture` binds the original `BoundaryApertures` on either physical
 duct, including material-modal valves. Every driven node retains its complete
 local gas, represented chimney and material/contact/Maxwell owner on the same

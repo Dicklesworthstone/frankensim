@@ -1,6 +1,8 @@
 //! Compose the shared boundary/environment selection with existing instruments.
-use super::{BaffledEnvironment, BaffledOutletBinding, bind_baffled_environment, poll};
+use super::{BaffledEnvironment, BaffledOutletBinding, bind_baffled_environment,
+    bind_baffled_environment_with_flanges, poll};
 use crate::acoustic_realize::AcousticRealizeError;
+use crate::bernoulli_aperture::radiation::RadiationFlange;
 use crate::bernoulli_aperture::fractional::FractionalTubePolicy;
 use crate::bernoulli_aperture::two_sided::{
     ApertureDuctSpec, LoadedAperture, TwoSidedAperture, TwoSidedLimits,
@@ -135,11 +137,25 @@ impl FlueNetworkSpec {
     ///
     /// # Errors
     /// The shared compact boundary, geometry, exterior-gas or cancellation refusal.
-    pub fn with_baffled_environment(mut self, radiation: DuctRadiationSpec,
+    pub fn with_baffled_environment(self, radiation: DuctRadiationSpec,
         gate: &CancelGate) -> Result<(Self, BaffledEnvironment), AcousticRealizeError>
     {
-        let environment = bind_baffled_environment(core::slice::from_mut(&mut self.graph),
-            &[&self.gases], radiation, gate)?;
+        self.with_baffled_environment_flanges(radiation, &[], gate)
+    }
+
+    /// [`Self::with_baffled_environment`] with one [`RadiationFlange`] per observed
+    /// opening, in `radiation.openings` order (or none: all baffled, identical to the
+    /// original). See [`bind_baffled_environment_with_flanges`] for the reaction-only
+    /// scope of an `Unflanged` selection.
+    ///
+    /// # Errors
+    /// As [`Self::with_baffled_environment`], plus a flange list of the wrong length.
+    pub fn with_baffled_environment_flanges(mut self, radiation: DuctRadiationSpec,
+        flanges: &[RadiationFlange], gate: &CancelGate)
+        -> Result<(Self, BaffledEnvironment), AcousticRealizeError>
+    {
+        let environment = bind_baffled_environment_with_flanges(core::slice::from_mut(&mut self.graph),
+            &[&self.gases], radiation, flanges, gate)?;
         Ok((self, environment))
     }
 }
@@ -163,6 +179,26 @@ impl crate::flue_loop::FlueVoice {
         policy: Option<FractionalTubePolicy>, radiation: DuctRadiationSpec,
         voice_seed: u64, voice_index: u32, gate: &CancelGate,
     ) -> Result<(Self, BaffledEnvironment), crate::flue_loop::FlueError> {
+        Self::from_baffled_environment_flanges(card, displacement_gain, seed_amplitude_rel,
+            geometry, source, walls, policy, radiation, &[], voice_seed, voice_index, gate)
+    }
+
+    /// [`Self::from_baffled_environment`] with one [`RadiationFlange`] per observed
+    /// opening, in `radiation.openings` order (an empty list is the original function).
+    /// An `Unflanged` selection changes that terminal's reaction only; the microphone
+    /// model of the same opening stays the baffled half-space monopole.
+    ///
+    /// # Errors
+    /// As [`Self::from_baffled_environment`], plus a flange list of the wrong length.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_baffled_environment_flanges(
+        card: Option<&fs_aeroac::jetcard::JetCard>, displacement_gain: f64,
+        seed_amplitude_rel: f64, geometry: crate::flue_loop::FlueGeometry,
+        source: FlueNetworkSpec, walls: Option<MaterialWallInput>,
+        policy: Option<FractionalTubePolicy>, radiation: DuctRadiationSpec,
+        flanges: &[RadiationFlange],
+        voice_seed: u64, voice_index: u32, gate: &CancelGate,
+    ) -> Result<(Self, BaffledEnvironment), crate::flue_loop::FlueError> {
         use crate::flue_loop::FlueError;
         poll(gate).map_err(FlueError::Physics)?;
         let card = card.ok_or(FlueError::NoCard)?;
@@ -170,7 +206,7 @@ impl crate::flue_loop::FlueVoice {
         if policy.is_some_and(|p| p.maximum_frequency_hz < radiation.receiver.maximum_frequency_hz) {
             return Err(FlueError::Physics(super::invalid("fractional propagation must cover the exterior radiation band")));
         }
-        let (source, environment) = source.with_baffled_environment(radiation, gate)
+        let (source, environment) = source.with_baffled_environment_flanges(radiation, flanges, gate)
             .map_err(FlueError::Physics)?;
         let voice = match (policy, walls) {
             (Some(policy), walls) => Self::from_fractional_network(Some(card),

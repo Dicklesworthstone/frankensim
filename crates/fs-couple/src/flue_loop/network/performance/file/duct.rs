@@ -1,6 +1,7 @@
 //! Geometry and gas data lowered into the existing shared tube-network owner.
 //! No propagation, scattering, load or material formula is repeated here.
 use super::*;
+use crate::bernoulli_aperture::radiation::RadiationFlange;
 use crate::flue_loop::network::performance::FlueRadiatingOutlet;
 use fs_vfit::impedance::SeriesImpedanceSpec;
 use fs_vfit::relaxation::RelaxationImpedanceSpec;
@@ -302,8 +303,18 @@ impl Input {
         }
     }
 
-    pub fn read_outlets(&self, rows: &mut Rows<'_>) -> Result<(usize, Vec<FlueRadiatingOutlet>), FlueInputError> {
-        if !rows.next_is("outlets") && !self.explicit_network { return Ok((1, Vec::new())); }
+    /// The outlet rows: `outlets PRIMARY ADDITIONAL`, then per additional opening
+    /// `outlet NODE X_M Y_M [unflanged]`. The optional trailing word selects the
+    /// compact unflanged-pipe REACTION for that opening (Garcia Mayen 2021, Eq. 14's
+    /// "tube without flange", via Silva et al. 2009); it needs `radiation compact-baffled`
+    /// (`compact_reaction`) because only that selection installs a per-outlet load, and
+    /// the primary row takes no such word. The microphone model of the opening stays the
+    /// baffled half-space monopole. The returned flange list is empty when no row selects
+    /// one, and otherwise has one entry per opening in observed order (primary first).
+    pub fn read_outlets(&self, rows: &mut Rows<'_>, compact_reaction: bool)
+        -> Result<(usize, Vec<FlueRadiatingOutlet>, Vec<RadiationFlange>), FlueInputError>
+    {
+        if !rows.next_is("outlets") && !self.explicit_network { return Ok((1, Vec::new(), Vec::new())); }
         let mut row = rows.row("outlets")?;
         let primary: usize = row.number()?;
         let additional: usize = row.number()?;
@@ -313,6 +324,7 @@ impl Input {
             return Err(bad(rows.line, "outlets exceed the physical node or receiver input budget"));
         }
         let mut outlets = Vec::with_capacity(additional);
+        let mut selected = Vec::with_capacity(additional);
         for _ in 0..additional {
             let mut row = rows.row("outlet")?;
             let node: usize = row.number()?;
@@ -321,11 +333,23 @@ impl Input {
                 return Err(bad(row.line, "outlet must name one distinct existing node"));
             }
             let center_m = [row.scalar()?, row.scalar()?];
+            let flange = if row.fields.clone().next() == Some("unflanged") {
+                row.fields.next();
+                if !compact_reaction {
+                    return Err(bad(row.line,
+                        "outlet unflanged selects a compact open-end reaction; declare radiation compact-baffled"));
+                }
+                RadiationFlange::Unflanged
+            } else { RadiationFlange::Baffled };
             row.end()?;
             outlets.push(FlueRadiatingOutlet { node, center_m });
+            selected.push(flange);
         }
         // The shared DuctPressure owner validates terminal degree, overlap,
         // common-pressure exterior and the geometry/band of every aperture.
-        Ok((primary, outlets))
+        let flanges = if selected.contains(&RadiationFlange::Unflanged) {
+            core::iter::once(RadiationFlange::Baffled).chain(selected).collect()
+        } else { Vec::new() };
+        Ok((primary, outlets, flanges))
     }
 }
