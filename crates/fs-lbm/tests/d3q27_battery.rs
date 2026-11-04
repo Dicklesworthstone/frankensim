@@ -316,6 +316,217 @@ fn factorized_bgk_force_matches_maxwellian_moments_in_moving_frames() {
     }
 }
 
+/// G0: the even/odd decomposition reduces to BGK at equal rates and delivers
+/// the complete body-force impulse at independent rates. Both equilibrium
+/// choices must retain their matching source, including product ghost moments.
+#[test]
+fn trt_reduces_to_bgk_and_preserves_force_moments() {
+    for equilibrium in [Equilibrium27::Quadratic, Equilibrium27::Factorized] {
+        for rho in [0.8, 1.4] {
+            let mut populations = equilibrium27(rho, [0.04, -0.02, 0.01], equilibrium);
+            for (q, value) in populations.iter_mut().enumerate() {
+                *value += (q as f64 - 13.0) * 1e-5;
+            }
+            for force in [[0.0; 3], [7e-4, -3e-4, 5e-4]] {
+                for tau in [0.55_f64, 0.8, 1.7, 3.0] {
+                    let bgk = collide_cell27(
+                        populations,
+                        config(CollisionModel27::Bgk { tau, equilibrium }),
+                        force,
+                    )
+                    .unwrap();
+                    let trt = collide_cell27(
+                        populations,
+                        config(CollisionModel27::Trt {
+                            tau,
+                            magic: (tau - 0.5).powi(2),
+                            equilibrium,
+                        }),
+                        force,
+                    )
+                    .unwrap();
+                    for q in 0..Q27 {
+                        assert!((trt[q] - bgk[q]).abs() < 2e-14);
+                    }
+                    let before = conserved(&populations);
+                    let (density, velocity) = macroscopic27(&populations, force, 0.2).unwrap();
+                    for magic in [0.02, 3.0 / 16.0, 1.0] {
+                        let post = collide_cell27(
+                            populations,
+                            config(CollisionModel27::Trt {
+                                tau,
+                                magic,
+                                equilibrium,
+                            }),
+                            force,
+                        )
+                        .unwrap();
+                        let after = conserved(&post);
+                        assert!((after[0] - before[0]).abs() < 2e-14);
+                        for a in 0..3 {
+                            assert!((after[a + 1] - before[a + 1] - force[a]).abs() < 2e-14);
+                            for b in 0..3 {
+                                let moment = |f: &[f64; Q27]| -> f64 {
+                                    (0..Q27)
+                                        .map(|q| f[q] * f64::from(E27[q][a] * E27[q][b]))
+                                        .sum()
+                                };
+                                let eq = density
+                                    * (velocity[a] * velocity[b]
+                                        + if a == b { CS2_27 } else { 0.0 });
+                                let source = velocity[a] * force[b] + velocity[b] * force[a];
+                                let expected = eq + (1.0 - 1.0 / tau) * (moment(&populations) - eq)
+                                    + (1.0 - 0.5 / tau) * source;
+                                assert!((moment(&post) - expected).abs() < 3e-14);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// G0/G3: all 27 product-source populations, not only mass and momentum,
+/// survive unequal even/odd relaxation of a physical moving equilibrium.
+#[test]
+fn trt_factorized_source_keeps_the_complete_physical_equilibrium() {
+    for rho in [0.8, 1.4] {
+        for u in [[0.065, -0.04, 0.025], [-0.035, 0.06, 0.045]] {
+            let force = [7e-4, -4e-4, 2e-4];
+            let (eq, source) = factorized_force_oracle(rho, u, force);
+            let before = core::array::from_fn(|q| eq[q] - 0.5 * source[q]);
+            for tau in [0.55, 0.9, 1.7] {
+                for magic in [0.02, 3.0 / 16.0, 1.0] {
+                    let post = collide_cell27(
+                        before,
+                        config(CollisionModel27::Trt {
+                            tau,
+                            magic,
+                            equilibrium: Equilibrium27::Factorized,
+                        }),
+                        force,
+                    )
+                    .unwrap();
+                    for q in 0..Q27 {
+                        assert!((post[q] - eq[q] - 0.5 * source[q]).abs() < 3e-14 * rho);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn trt_refuses_invalid_and_unrepresentable_relaxation_products() {
+    let collision = |tau, magic| {
+        config(CollisionModel27::Trt {
+            tau,
+            magic,
+            equilibrium: Equilibrium27::Quadratic,
+        })
+    };
+    for magic in [0.0, -0.1, f64::NAN, f64::INFINITY] {
+        assert!(matches!(
+            collide_cell27(W27, collision(0.8, magic), [0.0; 3]),
+            Err(CollisionError27::TrtMagic { .. })
+        ));
+    }
+    for (tau, magic) in [
+        (0.5, 3.0 / 16.0),
+        (f64::NAN, 3.0 / 16.0),
+        (f64::INFINITY, 3.0 / 16.0),
+        (0.6, f64::MAX),
+        (f64::MAX, f64::MIN_POSITIVE),
+    ] {
+        assert!(matches!(
+            collide_cell27(W27, collision(tau, magic), [0.0; 3]),
+            Err(CollisionError27::Tau { .. })
+        ));
+    }
+}
+
+/// G2/G3: the actual Grid27 collision/stream/wall owner must keep the
+/// continuum wall position across viscosities, flow signs and Cartesian axes.
+/// A BGK control exposes the substantial numerical slip at high lattice tau.
+#[test]
+fn trt_planar_poiseuille_wall_location_is_independent_of_viscosity() {
+    let height = 8usize;
+    let h = height as f64;
+    let rho = 1.4;
+    let run = |axis: usize, tau: f64, equilibrium, magic: Option<f64>| {
+        let normal = (axis + 1) % 3;
+        let peak = if axis == 1 { -0.008 } else { 0.008 };
+        let nu = (tau - 0.5) * CS2_27;
+        let mut force = [0.0; 3];
+        force[axis] = rho * 8.0 * nu * peak / (h * h);
+        let model = match magic {
+            Some(magic) => CollisionModel27::Trt {
+                tau,
+                magic,
+                equilibrium,
+            },
+            None => CollisionModel27::Bgk { tau, equilibrium },
+        };
+        let mut dims = [1; 3];
+        dims[normal] = height;
+        let mut periodic = [true; 3];
+        periodic[normal] = false;
+        // Physical rest in the held force frame, at nonunit density.
+        let initial = core::array::from_fn(|q| {
+            rho * W27[q] - 1.5 * W27[q] * f64::from(E27[q][axis]) * force[axis]
+        });
+        let mut grid = Grid27::try_new(
+            dims,
+            config(model),
+            force,
+            periodic,
+            GridBudget3 {
+                maximum_cells: height,
+                maximum_mach: 0.2,
+            },
+            |_| false,
+            |_| initial,
+        )
+        .unwrap();
+        let mass0 = grid.populations().iter().flatten().sum::<f64>();
+        let steps = (20.0 * h * h / (std::f64::consts::PI.powi(2) * nu)).ceil() as usize + 80;
+        with_cx(|cx| {
+            for _ in 0..steps {
+                grid.step_serial(cx).unwrap();
+            }
+        });
+        let mut error = 0.0_f64;
+        for y in 0..height {
+            let distance = y as f64 + 0.5;
+            let expected = (force[axis] / rho) * distance * (h - distance) / (2.0 * nu);
+            // The two singleton periodic dimensions leave y as the flat index.
+            let (_, velocity) = grid.macroscopic(y).unwrap();
+            error = error.max((velocity[axis] - expected).abs() / peak.abs());
+            for a in 0..3 {
+                if a != axis {
+                    assert!(velocity[a].abs() < 5e-12);
+                }
+            }
+        }
+        let mass = grid.populations().iter().flatten().sum::<f64>();
+        assert!((mass - mass0).abs() / mass0 < 1e-10);
+        error
+    };
+    for axis in 0..3 {
+        for tau in [0.65, 0.9, 1.7] {
+            for equilibrium in [Equilibrium27::Quadratic, Equilibrium27::Factorized] {
+                let error = run(axis, tau, equilibrium, Some(3.0 / 16.0));
+                assert!(
+                    error < 5e-7,
+                    "axis={axis}, tau={tau}, {equilibrium:?}: {error:e}"
+                );
+            }
+        }
+    }
+    assert!(run(0, 1.7, Equilibrium27::Quadratic, None) > 0.05);
+}
+
 #[test]
 fn central_moment_force_matches_factorized_equilibrium_derivative() {
     // G0/G3: the transformed population is f = feq - S/2. For an equilibrium

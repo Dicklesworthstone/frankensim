@@ -1,4 +1,4 @@
-//! Full tensor-product D3Q27 central-moment and cumulant collisions.
+//! Full tensor-product D3Q27 BGK, TRT, central-moment and cumulant collisions.
 //!
 //! Geier, Schoenherr, Pasquali & Krafczyk (2015), CAMWA70:507--547,
 //! doi:10.1016/j.camwa.2015.05.001, section4, equations43--96. All 27
@@ -72,7 +72,7 @@ pub const OPP27: [usize; Q27] = [
     25,
 ];
 
-/// Explicit BGK equilibrium choice; used to isolate the lattice in controls.
+/// Explicit BGK/TRT equilibrium choice; used to isolate the lattice in controls.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Equilibrium27 {
     Quadratic,
@@ -114,6 +114,20 @@ pub enum CollisionModel27 {
         tau: f64,
         equilibrium: Equilibrium27,
     },
+    /// Two-relaxation-time population collision with viscosity
+    /// `nu = (tau - 1/2)/3`. Opposite even/odd modes receive their own
+    /// trapezoidal force prefactors. Both equilibrium forms are supported.
+    ///
+    /// `magic = (tau - 1/2)(tau_odd - 1/2)` remains fixed when a material
+    /// or SGS changes viscosity. `magic = 3/16` removes the numerical wall
+    /// offset in uniformly forced, fully developed planar Poiseuille flow
+    /// with stationary halfway bounce-back. This is not an accuracy claim
+    /// for curved walls, spatially varying viscosity or arbitrary forcing.
+    Trt {
+        tau: f64,
+        magic: f64,
+        equilibrium: Equilibrium27,
+    },
     CentralMoment {
         rates: Rates27,
     },
@@ -142,6 +156,19 @@ impl CollisionConfig27 {
         match self.model {
             CollisionModel27::Bgk { tau, .. } if tau.is_finite() && tau > 0.5 => Ok(()),
             CollisionModel27::Bgk { tau, .. } => Err(CollisionError27::Tau { tau }),
+            CollisionModel27::Trt { tau, magic, .. } => {
+                if !(tau.is_finite() && tau > 0.5) {
+                    return Err(CollisionError27::Tau { tau });
+                }
+                if !(magic.is_finite() && magic > 0.0) {
+                    return Err(CollisionError27::TrtMagic { magic });
+                }
+                let odd_tau = 0.5 + magic / (tau - 0.5);
+                if !(odd_tau.is_finite() && odd_tau > 0.5) {
+                    return Err(CollisionError27::Tau { tau: odd_tau });
+                }
+                Ok(())
+            }
             CollisionModel27::CentralMoment { rates } | CollisionModel27::Cumulant { rates } => {
                 rates.validate()
             }
@@ -153,6 +180,7 @@ impl CollisionConfig27 {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum CollisionError27 {
     Tau { tau: f64 },
+    TrtMagic { magic: f64 },
     Rate { group: usize, rate: f64 },
     MachLimit { limit: f64 },
     Mach { observed: f64, limit: f64 },
@@ -422,8 +450,9 @@ fn factorized_source27(u: [f64; 3], force: [f64; 3]) -> [f64; Q27] {
 /// frame (Geier85--87). Central-moment forcing also supplies the third/fifth
 /// Gaussian source moments with their own grouped trapezoidal prefactors
 /// (Fei, Luo & Li2018, PRE97:053309, equations5,20--21).
-/// BGK differentiates its selected equilibrium: quadratic uses Guo's
+/// BGK/TRT differentiate their selected equilibrium: quadratic uses Guo's
 /// polynomial, factorized retains the complete product source through degree6.
+/// TRT applies each source parity at its corresponding relaxation rate.
 /// No positivity limiter or automatic rate selection.
 /// Finite-force Navier--Stokes accuracy requires its own downstream ladder.
 pub fn collide_cell27(
@@ -455,6 +484,55 @@ pub fn collide_cell27(
                         + (1.0 - 0.5 / tau) * W27[q] * source
                 })
             }
+        }
+        CollisionModel27::Trt {
+            tau,
+            magic,
+            equilibrium,
+        } => {
+            let eq = equilibrium27(rho, u, equilibrium);
+            let source = if force.iter().all(|&f| f == 0.0) {
+                [0.0; Q27]
+            } else if equilibrium == Equilibrium27::Factorized {
+                factorized_source27(u, force)
+            } else {
+                core::array::from_fn(|q| {
+                    let e = E27[q].map(f64::from);
+                    let eu = (0..3).map(|a| e[a] * u[a]).sum::<f64>();
+                    W27[q]
+                        * (0..3)
+                            .map(|a| {
+                                ((e[a] - u[a]) / CS2_27
+                                    + eu * e[a] / (CS2_27 * CS2_27))
+                                    * force[a]
+                            })
+                            .sum::<f64>()
+                })
+            };
+            let even_rate = 1.0 / tau;
+            let odd_rate = 1.0 / (0.5 + magic / (tau - 0.5));
+            let even_force = 1.0 - 0.5 * even_rate;
+            let odd_force = 1.0 - 0.5 * odd_rate;
+            let mut post = [0.0; Q27];
+            post[0] = pop[0] - even_rate * (pop[0] - eq[0]) + even_force * source[0];
+            // One shared even and one antisymmetric odd update per pair;
+            // the rest population has no odd part. No moment transform or
+            // heap buffer is needed. A single force prefactor here would
+            // deliver a viscosity-dependent impulse whenever the rates differ.
+            for q in (1..Q27).step_by(2) {
+                let opposite = OPP27[q];
+                let neq = pop[q] - eq[q];
+                let neq_opposite = pop[opposite] - eq[opposite];
+                let even = 0.5 * (neq + neq_opposite);
+                let odd = 0.5 * (neq - neq_opposite);
+                let source_even = 0.5 * (source[q] + source[opposite]);
+                let source_odd = 0.5 * (source[q] - source[opposite]);
+                let even_change = -even_rate * even + even_force * source_even;
+                let odd_change = -odd_rate * odd + odd_force * source_odd;
+                post[q] = pop[q] + even_change + odd_change;
+                post[opposite] = pop[opposite] + even_change - odd_change;
+            }
+            post
         }
         CollisionModel27::CentralMoment { rates } | CollisionModel27::Cumulant { rates } => {
             let mut tensor = [0.0; Q27];

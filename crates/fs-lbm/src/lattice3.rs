@@ -445,7 +445,8 @@ impl ViscousLattice3<27> for crate::d3q27::D3q27 {
             return Err(CollisionError27::Tau { tau });
         }
         match &mut collision.model {
-            CollisionModel27::Bgk { tau: previous, .. } => *previous = tau,
+            CollisionModel27::Bgk { tau: previous, .. }
+            | CollisionModel27::Trt { tau: previous, .. } => *previous = tau,
             CollisionModel27::CentralMoment { rates } | CollisionModel27::Cumulant { rates } => {
                 rates.omega[0] = 1.0 / tau;
             }
@@ -880,6 +881,16 @@ mod collision_field_tests {
     fn constant_fields_preserve_d19_and_all_d27_collision_paths() {
         constant_parity::<D3q19, 19>(CollisionModel3::Bgk { tau: 0.8 });
         constant_parity::<D3q27, 27>(bgk27(0.8));
+        for equilibrium in [Equilibrium27::Quadratic, Equilibrium27::Factorized] {
+            constant_parity::<D3q27, 27>(CollisionConfig27 {
+                model: CollisionModel27::Trt {
+                    tau: 0.8,
+                    magic: 3.0 / 16.0,
+                    equilibrium,
+                },
+                maximum_mach: 0.2,
+            });
+        }
         let rates = Rates27 {
             omega: [1.25, 1.0, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5],
         };
@@ -1155,6 +1166,35 @@ mod collision_field_tests {
                     maximum_mach: 0.1
                 }
             );
+        }
+        for equilibrium in [Equilibrium27::Quadratic, Equilibrium27::Factorized] {
+            let original = CollisionConfig27 {
+                model: CollisionModel27::Trt {
+                    tau: 0.8,
+                    magic: 3.0 / 16.0,
+                    equilibrium,
+                },
+                maximum_mach: 0.1,
+            };
+            let updated = D3q27::with_shear_relaxation(original, 1.7).unwrap();
+            assert_eq!(
+                updated,
+                CollisionConfig27 {
+                    model: CollisionModel27::Trt {
+                        tau: 1.7,
+                        magic: 3.0 / 16.0,
+                        equilibrium,
+                    },
+                    maximum_mach: 0.1,
+                }
+            );
+            assert_eq!(
+                <D3q27 as crate::sgs3::SgsLattice3<27>>::molecular_viscosity(updated).unwrap(),
+                (1.7 - 0.5) / 3.0
+            );
+            // Retuning must also admit the resulting odd rate: at this
+            // extreme viscosity its offset would round to exactly zero.
+            assert!(D3q27::with_shear_relaxation(original, f64::MAX).is_err());
         }
         let d19 = CollisionModel3::ReducedCumulant {
             second_order_rate: 1.2,

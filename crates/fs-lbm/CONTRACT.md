@@ -1,5 +1,31 @@
 # CONTRACT: fs-lbm
 
+## D3Q27 TRT for wall-bounded laminar flow
+
+`CollisionModel27::Trt { tau, magic, equilibrium }` extends the original
+`Grid27` collision/stream owner with even/odd population relaxation. Molecular
+viscosity stays `(tau-1/2)/3`; `tau_odd=1/2+magic/(tau-1/2)`. Each force
+parity uses its own trapezoidal prefactor. Quadratic equilibrium retains the
+Guo source; factorized equilibrium retains its full product derivative.
+Thirteen opposite pairs and the rest population require no moment transform
+or heap allocation. Existing collision models and arithmetic stay unchanged.
+
+Material collision fields, material rheology and SGS read/retune the same
+model while retaining its selected equilibrium and magic product. Invalid
+magic, nonfinite tau and an unrepresentable odd relaxation time refuse before
+stepping. The original grid admission, cancellation and publication rules apply.
+
+The `magic=3/16` wall-placement claim is restricted to uniformly forced,
+fully developed planar Poiseuille flow on stationary halfway walls. It does
+not establish curved-wall, variable-viscosity-interface, open-boundary or
+turbulent-flow accuracy. Added native regressions cover both equilibria, all
+three axes at tau 0.65/0.9/1.7, nonunit density, reversed flow, a BGK slip
+control, force/stress moments, BGK reduction and material/SGS retuning.
+Independent JavaScript lattice-equation checks exercised those planar cases;
+Rust regressions remain unexecuted in this session because no shell/runtime
+was available. They are tests to run, not retained native acceptance evidence.
+
+
 ## Moving shared film carriers through one fluid/body step
 
 `MovingCarrierSurface3::Attached` binds body-coordinate `LubricationPlanePatch3`

@@ -107,7 +107,9 @@ impl SgsLattice3<27> for crate::d3q27::D3q27 {
         use crate::d3q27::CollisionModel27;
         collision.validate()?;
         match collision.model {
-            CollisionModel27::Bgk { tau, .. } => Ok((tau - 0.5) / 3.0),
+            CollisionModel27::Bgk { tau, .. } | CollisionModel27::Trt { tau, .. } => {
+                Ok((tau - 0.5) / 3.0)
+            }
             CollisionModel27::CentralMoment { rates } | CollisionModel27::Cumulant { rates } => {
                 rates.viscosity()
             }

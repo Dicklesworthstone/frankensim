@@ -513,6 +513,22 @@ mod tests {
         ] {
             constant_law::<D3q19, 19>(model);
         }
+        for equilibrium in [Equilibrium27::Quadratic, Equilibrium27::Factorized] {
+            let original = CollisionConfig27 {
+                model: CollisionModel27::Trt {
+                    tau: 0.9,
+                    magic: 3.0 / 16.0,
+                    equilibrium,
+                },
+                maximum_mach: 0.2,
+            };
+            let updated = constant_law::<D3q27, 27>(original);
+            assert!(matches!(
+                updated.model,
+                CollisionModel27::Trt { magic, equilibrium: selected, .. }
+                    if magic == 3.0 / 16.0 && selected == equilibrium
+            ));
+        }
         for model in 0..4 {
             let updated = constant_law::<D3q27, 27>(collision(model));
             if let (
