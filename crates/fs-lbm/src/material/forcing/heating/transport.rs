@@ -16,6 +16,7 @@ pub mod sgs3;
 
 use super::{HeatBalance, HeatSourceLimits, MaterialSlab, ThermalLbm, ThermalLbm3, ThermalSourceError};
 use crate::material::{MaterialLbmError, plan_scaling_from_material};
+use crate::thermal::boundary::ThermalWall;
 use crate::thermal::sources::{Slab, source_step_transport_mapped, transport::RelaxationField};
 use fs_exec::CancelGate;
 use fs_material::{MaterialError, fluid_transport::{FluidTransport, FluidTransportState}};
@@ -120,14 +121,39 @@ pub(in crate::material::forcing) fn sample<S: Slab<D, Q>, F: FluidTransport, con
     sample_temperatures::<S, F, D, Q>(mapping, &temperatures, cells, plane, range, gate, resolve)
 }
 
+fn admit_wall_temperatures<S: Slab<D, Q>, const D: usize, const Q: usize>(
+    mapping: &MaterialSlab<S>, state: &S, range: [f64; 2],
+) -> Result<(), MaterialTransportError> {
+    // The declared reservoir temperature is physical boundary data; unused
+    // constructor ghost populations are not. Check declarations before any
+    // material callback, including callers with explicit midpoint coordinates.
+    for wall in state.thermal_walls() {
+        wall.validate().map_err(ThermalSourceError::Wall)?;
+        if let ThermalWall::Temperature(value) = wall {
+            let t = mapping.temperature_si(value).map_err(ThermalSourceError::from)?;
+            if t < range[0] || t > range[1] {
+                return Err(MaterialTransportError::Invalid(
+                    "prescribed wall temperature outside the admitted interval",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn temperatures<S: Slab<D, Q>, const D: usize, const Q: usize>(
     mapping: &MaterialSlab<S>, state: &S, range: [f64; 2], gate: &CancelGate,
 ) -> Result<Vec<f64>, MaterialTransportError> {
-    // Admit the whole field before calling a material owner; no late bad
-    // temperature causes an otherwise avoidable partially evaluated field.
-    let mut temperatures = Vec::with_capacity(state.populations().len());
-    for (cell, pop) in state.populations().iter().enumerate() {
+    poll(gate)?;
+    let (cells, plane) = state.layout()?;
+    admit_wall_temperatures::<S, D, Q>(mapping, state, range)?;
+    // Admit the whole active field before calling a material owner. Preserve
+    // original cell indices, but leave ghost slots as unused padding: their
+    // constructor populations carry neither fluid storage nor wall traces.
+    let mut temperatures = vec![0.0; cells];
+    for cell in plane..cells-plane {
         if cell % 256 == 0 { poll(gate)?; }
+        let pop = &state.populations()[cell];
         if !pop.iter().all(|x| x.is_finite()) {
             return Err(MaterialTransportError::Invalid("nonfinite temperature population"));
         }
@@ -135,7 +161,7 @@ fn temperatures<S: Slab<D, Q>, const D: usize, const Q: usize>(
         if t < range[0] || t > range[1] {
             return Err(MaterialTransportError::Invalid("temperature outside the admitted interval"));
         }
-        temperatures.push(t);
+        temperatures[cell] = t;
     }
     Ok(temperatures)
 }
@@ -169,8 +195,10 @@ fn sample_temperatures_with<S: Slab<D, Q>, F: FluidTransport, const D: usize, co
     {
         return Err(MaterialTransportError::Invalid("invalid material temperature coordinates"));
     }
-    for (cell, &t) in temperatures.iter().enumerate() {
+    admit_wall_temperatures::<S, D, Q>(mapping, &mapping.lattice, range)?;
+    for cell in plane..cells-plane {
         if cell % 256 == 0 { poll(gate)?; }
+        let t = temperatures[cell];
         if !t.is_finite() || t < range[0] || t > range[1] {
             return Err(MaterialTransportError::Invalid("temperature outside the admitted interval"));
         }

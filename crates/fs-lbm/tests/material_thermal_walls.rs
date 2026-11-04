@@ -226,3 +226,94 @@ fn g0_invalid_physical_wall_data_leaves_both_original_laws_and_last_report_intac
     assert!(two.last_wall_exchange(DEPTH).unwrap().is_none());
     assert!(three.last_wall_exchange().unwrap().is_none());
 }
+
+#[test]
+fn g0_material_queries_admit_active_temperatures_and_declared_walls_without_ghost_storage() {
+    let gate = fs_exec::CancelGate::new();
+    let tight = HeatSourceLimits { temperature_range_k: [309.0, 311.0], ..limits() };
+    for reverse in [false, true] {
+        let (mut two, mut three) = slabs(reverse, 0.0);
+        let count2 = two.lattice.gpop.len();
+        let count3 = three.lattice.gpop.len();
+        let plane3 = NX * NX;
+        // The constructor's bottom ghost is unit-temperature equilibrium.
+        // Initialize only fluid cells at theta=0.5 (310 K in either mapping).
+        // Its 300/320 K ghost planes must remain untouched and irrelevant.
+        let equilibrium2 = two.lattice.gpop[0].map(|value| 0.5 * value);
+        let equilibrium3 = three.lattice.gpop[0].map(|value| 0.5 * value);
+        two.lattice.gpop[NX..count2 - NX].fill(equilibrium2);
+        three.lattice.gpop[plane3..count3 - plane3].fill(equilibrium3);
+        let ghosts2 = (two.lattice.gpop[..NX].to_vec(), two.lattice.gpop[count2 - NX..].to_vec());
+        let ghosts3 = (three.lattice.gpop[..plane3].to_vec(), three.lattice.gpop[count3 - plane3..].to_vec());
+        two.set_thermal_walls([MaterialThermalWall::Adiabatic; 2]).unwrap();
+        three.set_thermal_walls([MaterialThermalWall::Adiabatic; 2]).unwrap();
+        let power2 = vec![0.0; count2];
+        let power3 = vec![0.0; count3];
+        let force2 = vec![[0.0; 2]; count2];
+        let force3 = vec![[0.0; 3]; count3];
+        let mut queries2 = 0;
+        let mut queries3 = 0;
+        let report2 = two.step_with_material_transport(
+            &power2, &force2, DEPTH, tight, &gate,
+            |cell, kelvin, retained| {
+                assert_eq!(cell, NX + queries2 % (count2 - 2 * NX));
+                close(kelvin, 310.0, 1e-12);
+                queries2 += 1;
+                Ok(*retained)
+            },
+        ).unwrap();
+        let report3 = three.step_with_material_transport(
+            &power3, &force3, tight, &gate,
+            |cell, kelvin, retained| {
+                assert_eq!(cell, plane3 + queries3 % (count3 - 2 * plane3));
+                close(kelvin, 310.0, 1e-12);
+                queries3 += 1;
+                Ok(*retained)
+            },
+        ).unwrap();
+        assert_eq!(queries2, 2 * (count2 - 2 * NX));
+        assert_eq!(queries3, 2 * (count3 - 2 * plane3));
+        assert_eq!(report2.applied.len(), count2 - 2 * NX);
+        assert_eq!(report2.endpoint.len(), count2 - 2 * NX);
+        assert_eq!(report3.applied.len(), count3 - 2 * plane3);
+        assert_eq!(report3.endpoint.len(), count3 - 2 * plane3);
+        for heat in [report2.heat, report3.heat] {
+            assert_eq!(heat.bottom_wall_j, 0.0);
+            assert_eq!(heat.top_wall_j, 0.0);
+            close(heat.stored_change_j, 0.0, 1e-12);
+        }
+        assert_eq!((&two.lattice.gpop[..NX], &two.lattice.gpop[count2 - NX..]),
+            (ghosts2.0.as_slice(), ghosts2.1.as_slice()));
+        assert_eq!((&three.lattice.gpop[..plane3], &three.lattice.gpop[count3 - plane3..]),
+            (ghosts3.0.as_slice(), ghosts3.1.as_slice()));
+
+        // A real fixed-temperature reservoir outside the material interval
+        // must still refuse before querying the material or publishing state.
+        let walls = [MaterialThermalWall::Temperature(320.0), MaterialThermalWall::Adiabatic];
+        two.set_thermal_walls(walls).unwrap();
+        three.set_thermal_walls(walls).unwrap();
+        let saved2 = (two.lattice.gpop.clone(), two.lattice.grid.f.clone(),
+            two.lattice.grid.fext.clone(), two.lattice.last_wall_exchange());
+        let saved3 = (three.lattice.gpop.clone(), three.lattice.grid.f.clone(),
+            three.lattice.grid.fext.clone(), three.lattice.last_wall_exchange());
+        let laws2 = two.lattice.thermal_walls();
+        let laws3 = three.lattice.thermal_walls();
+        queries2 = 0;
+        queries3 = 0;
+        assert!(two.step_with_material_transport(
+            &power2, &force2, DEPTH, tight, &gate,
+            |_, _, retained| { queries2 += 1; Ok(*retained) },
+        ).is_err());
+        assert!(three.step_with_material_transport(
+            &power3, &force3, tight, &gate,
+            |_, _, retained| { queries3 += 1; Ok(*retained) },
+        ).is_err());
+        assert_eq!((queries2, queries3), (0, 0));
+        assert_eq!((&two.lattice.gpop, &two.lattice.grid.f, &two.lattice.grid.fext,
+            two.lattice.last_wall_exchange()), (&saved2.0, &saved2.1, &saved2.2, saved2.3));
+        assert_eq!((&three.lattice.gpop, &three.lattice.grid.f, &three.lattice.grid.fext,
+            three.lattice.last_wall_exchange()), (&saved3.0, &saved3.1, &saved3.2, saved3.3));
+        assert_eq!(two.lattice.thermal_walls(), laws2);
+        assert_eq!(three.lattice.thermal_walls(), laws3);
+    }
+}
