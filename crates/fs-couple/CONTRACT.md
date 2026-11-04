@@ -8632,6 +8632,49 @@ None.
   row's own refusals above. NOT CLAIMED: a measured source length for an
   embouchure, a uniform flow over the strip, and the terms left on `S_m`.
 
+  OPT-IN JET SWING LIMIT (card row `jet_swing_limit fletcher-1976`, after
+  `jet_spreading`; `FlueVoice::with_jet_swing_limit`, `jet_swing_limit`; MB
+  1784/1816): the forced jet's displacement is linear, and on the organ B4
+  card it swings 25 mm across a 7 mm cut-up. The row limits it by Fletcher's
+  envelope, his model choice (JASA 60, 1976, pp. 927, 933), carried to this
+  jet and not measured on it: exponential growth up to the spread width `W`
+  at the lip, then linear growth with an envelope of semiangle about 15 deg;
+  he says varying these "has very little effect". `E = W + (X - x_t) tan 15
+  deg`, `x_t = X acosh(W w/v) / acosh(y w/v)` from his eq. 9-12, 0 when `W w/v
+  <= 1`. `W` is the station's `b(X)`, `X` the cut-up; no coefficient. THE TIME
+  FORM IS OURS, NOT PRINTED: one gain `g = min(1, E/y)` on the whole linear
+  displacement, stepped at its sign changes, with `y` and `v` its peaks over
+  the last two half cycles and `w` from their length; `mu` from the kernel's
+  gain `y w/v` read through his cosh, though the kernel's response is not a
+  cosh. A saturation of the displacement leaves it crossing zero at the same
+  speed and doesn't change the cut's harmonics (open loop on the organ B4
+  render). The current-feedback guard still reads the linear slope, which
+  bounds the limited one. The render sidecar prints the law, what is printed
+  and what is ours (`flue_input.jet_response.swing_limit`). Measured anchors,
+  neither on this pipe: de la Cuadra and Fabre, ISMA 2004, amplitude at
+  transition about `h` at `Vac/Ub` about 1e-2 and under, and the B4 card's
+  `u/U_j` 0.287 is about 30 times outside that; Verge 1995 ch. 4, linear to
+  `h/2`. Without the row every result is bit-identical
+  (`g0_jet_swing_limit_under_the_spread_width_is_bit_identical` shows the row
+  itself changes nothing until the gain leaves 1). REFUSALS: no forced jet, no
+  named spreading law, a late attachment, a law other than `fletcher-1976`,
+  trailing fields, and a width, cut-up or step not finite and positive. NOT
+  CLAIMED: a measured limit on any pipe here, the vortex street Fletcher sets
+  aside, and any phase change past the transition.
+
+  OPT-IN JET CUT WIDTH (card row `jet_cut_width station`, after
+  `jet_swing_limit`; `FlueVoice::with_jet_cut_width_station`; MB 1784/1816):
+  the tanh cut's half-width is half the flue height times `beta(X)`, the width
+  at which `2 b H U` equals the exit's bulk flux `U h H`. The prints have one
+  `b`, the jet's own sech^2 width at the lip, in the profile, the tanh and the
+  swing (Fletcher and Douglas 1980 eq. 1-2, Verge 1995 eq. 4.25, Auvray et al.
+  2014), and the kernel already carries it as `b0`. The row gives the cut
+  `b0 beta(X)` and the swing `2 b H U` at the station's centre speed. The slope
+  at the crossing is the same, so only the saturation differs. `momentum_drive`
+  keeps the station's centre speed. Without the row every result is
+  bit-identical. REFUSALS: no forced jet, a late attachment, a law other than
+  `station`, trailing fields, and `jet_swing_limit` after it.
+
   JET SPEED EDGE (ruling 8132, bead pexfp.135.2): the declared minimum jet
   speed U_min (`jet_limits`, or 1 m/s on the legacy TMM image) sizes the
   retained history, so every lookup at or above it is retained. A slower

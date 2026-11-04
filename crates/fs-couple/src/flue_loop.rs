@@ -139,6 +139,9 @@ pub mod forced_jet;
 /// Opt-in momentum drive of the jet beside the volume drive (Thwaites and Fletcher 1983, Eq. (1)).
 pub mod momentum_drive;
 
+/// Opt-in limit on the forced jet's swing at the labium (Fletcher 1976's envelope; the time form is ours).
+pub mod jet_swing_limit;
+
 /// Opt-in jet drive of Auvray et al. (2012, 2014) in place of the island's band chain.
 pub mod auvray_jet;
 
@@ -715,6 +718,10 @@ pub struct FlueVoice {
     window_mass: bool,
     // The area the jet's transverse velocity `q / area` is taken over: `S_m` unless the card names another.
     jet_forcing_area_m2: f64,
+    // Opt-in `jet_swing_limit`: the gain on the forced jet's linear displacement.
+    jet_swing_limit: Option<jet_swing_limit::JetSwingLimit>,
+    // Opt-in `jet_cut_width station`: the cut takes the forced jet's own width and the printed swing.
+    jet_cut_width_station: bool,
     viscous_windway: Option<crate::bernoulli_aperture::viscous::ViscousSlit>,
     // Shah's developing-flow law and its state at the held note's pressure.
     developing_windway: Option<(DevelopingSlit, DevelopingSlitState)>,
@@ -869,6 +876,8 @@ impl FlueVoice {
             window_radiation: None,
             window_mass: false,
             jet_forcing_area_m2: s_m,
+            jet_swing_limit: None,
+            jet_cut_width_station: false,
             viscous_windway: None,
             developing_windway: None,
             unsteady_windway: None,
@@ -1279,6 +1288,63 @@ impl FlueVoice {
     #[must_use]
     pub const fn jet_forcing_area_m2(&self) -> f64 { self.jet_forcing_area_m2 }
 
+    /// Limit the forced jet's swing at the labium by Fletcher's envelope: card row
+    /// `jet_swing_limit fletcher-1976` ([`jet_swing_limit`], which states what is printed and what
+    /// is ours). The spread width is the station's `b(X)`, the distance the cut-up.
+    ///
+    /// # Errors
+    /// Late attachment, no forced jet, or a forced jet with no named spreading law: the limit takes
+    /// the spread width at the lip, and a parallel base has none.
+    pub fn with_jet_swing_limit(mut self) -> Result<Self, FlueError> {
+        if self.poisoned || self.samples != 0 || self.forced.is_none() {
+            return Err(FlueError::Invalid { what: "jet swing limit requires a cold voice with the forced jet" });
+        }
+        let Some(width) = self.forced.as_ref()
+            .and_then(|jet| jet.station_spread().map(|(beta, _)| beta * jet.half_width_m())) else {
+            return Err(FlueError::Invalid { what: "jet swing limit takes the spread width at the lip: it requires a named jet_spreading law" });
+        };
+        let limit = jet_swing_limit::JetSwingLimit::new(width, self.geometry.cut_up_m, self.dt)
+            .map_err(|what| FlueError::Invalid { what })?;
+        self.island.provenance.push_str(&format!(
+            "; jet swing limit: {} (W {width:.4e} m, X {:.4e} m): {}; {}; {}",
+            jet_swing_limit::NAME, self.geometry.cut_up_m, jet_swing_limit::LAW,
+            jet_swing_limit::PRINTED, jet_swing_limit::OURS));
+        self.jet_swing_limit = Some(limit);
+        Ok(self)
+    }
+
+    /// The attached swing limit, if any.
+    #[must_use]
+    pub const fn jet_swing_limit(&self) -> Option<&jet_swing_limit::JetSwingLimit> {
+        self.jet_swing_limit.as_ref()
+    }
+
+    /// The gain on the forced jet's linear displacement: exactly 1 without the row.
+    fn jet_swing_gain(&self) -> f64 {
+        self.jet_swing_limit.as_ref().map_or(1.0, jet_swing_limit::JetSwingLimit::gain)
+    }
+
+    /// Take the cut's half-width and swing from the forced jet's own base: card row
+    /// `jet_cut_width station` ([`forced_jet::JET_CUT_WIDTH_STATION_SOURCE`]). The half-width is
+    /// `b0 beta(X)`, the kernel's own, and the swing the printed `2 b H U` at the station's centre
+    /// speed. Without a named spreading law `beta` is 1.
+    ///
+    /// # Errors
+    /// Late attachment or no forced jet.
+    pub fn with_jet_cut_width_station(mut self) -> Result<Self, FlueError> {
+        if self.poisoned || self.samples != 0 || self.forced.is_none() {
+            return Err(FlueError::Invalid { what: "jet cut width requires a cold voice with the forced jet" });
+        }
+        self.island.provenance.push_str(&format!(
+            "; jet cut width: station, {}", forced_jet::JET_CUT_WIDTH_STATION_SOURCE));
+        self.jet_cut_width_station = true;
+        Ok(self)
+    }
+
+    /// Whether the card's `jet_cut_width station` row is attached.
+    #[must_use]
+    pub const fn jet_cut_width_station(&self) -> bool { self.jet_cut_width_station }
+
     /// Evaluate the default source coefficient `rho 0.61 sqrt(A/pi) / A` on `area_m2` instead of `S_m`.
     ///
     /// The volume source is driven by the flow the jet puts into the mouth, and on a flute that flow
@@ -1596,9 +1662,13 @@ impl FlueVoice {
 
     /// Half-width `b` of the labium cut `Q_j = (q_max / 2)(1 + tanh((eta - y0) / b))`: half the
     /// flue height, or the Bickley `2h/5` behind the Auvray jet; behind a forced jet with a named
-    /// spreading law, half the flue height times the station's `b(X) / b0`.
+    /// spreading law, half the flue height times the station's `b(X) / b0`; under the card's
+    /// `jet_cut_width station` the forced jet's own `b0 beta(X)`.
     #[must_use]
     pub fn cut_half_width_m(&self) -> f64 {
+        if let (true, Some(jet)) = (self.jet_cut_width_station, &self.forced) {
+            return jet.half_width_m() * jet.station_spread().map_or(1.0, |(beta, _)| beta);
+        }
         match &self.auvray {
             Some(jet) => jet.half_width_m(),
             None => match self.forced.as_ref().and_then(forced_jet::ForcedJetKernel::station_spread) {
@@ -1684,8 +1754,9 @@ impl FlueVoice {
         };
         let eta_m = match (c.eta_override, &self.forced) {
             (Some(eta), _) => eta,
-            // The forced jet's prepared known part plus g_0 times this trial's exit velocity.
-            (None, Some(kernel)) => kernel.current().0 + kernel.current().1*velocity,
+            // The forced jet's prepared known part plus g_0 times this trial's exit velocity, under the
+            // swing limit's gain (exactly 1 without the row).
+            (None, Some(kernel)) => self.jet_swing_gain()*(kernel.current().0 + kernel.current().1*velocity),
             // The Auvray drive: in-phase receptivity of this trial's retarded velocity plus the
             // onset seed as exit velocity. Its U is the accepted jet speed: it refuses the
             // unsteady windway, the only owner of a different per-sample speed.
@@ -2010,6 +2081,9 @@ impl FlueVoice {
             .and_then(forced_jet::ForcedJetKernel::station_spread).map(|(_, flux)| flux);
         let s_m = self.geometry.mouth_area_m2();
         let forcing_area = self.jet_forcing_area_m2;
+        // `jet_cut_width station`: the centre speed over bulk of the printed swing `2 b H U`.
+        let station_centre = self.forced.as_ref().filter(|_| self.jet_cut_width_station)
+            .map(|jet| jet.centre_over_bulk() / jet.station_spread().map_or(1.0, |(_, flux)| flux));
         let y0 = self.geometry.effective_offset_m();
         let (l, r) = (self.inertance, self.resistance);
         // The mouth and wave boundary are solved together below. A TMM FIR
@@ -2061,6 +2135,8 @@ impl FlueVoice {
             // The Auvray drive's Bickley jet swings Q_in = H b U (1 + tanh) over 2 b H U.
             let q_max = if self.auvray.is_some() {
                 2.0 * b * self.geometry.flue_width_m * u
+            } else if let Some(centre) = station_centre {
+                2.0 * b * self.geometry.flue_width_m * centre * u
             } else {
                 match spread_flux {
                     None => u * self.geometry.flue_height_m * self.geometry.flue_width_m,
@@ -2265,7 +2341,13 @@ impl FlueVoice {
             self.reached_minimum_speed |= u >= self.minimum_jet_speed_m_s;
             // The accepted exit velocity into the forced jet's retained history.
             if let Some(kernel) = &mut self.forced {
-                kernel.push(delayed.past_m_s + q / forcing_area);
+                let velocity = delayed.past_m_s + q / forcing_area;
+                // The swing limit reads this accepted sample's linear displacement. A gain it sets
+                // here starts on the next sample, just past a sign change.
+                if let Some(limit) = &mut self.jet_swing_limit {
+                    limit.accept(eta / limit.gain(), velocity);
+                }
+                kernel.push(velocity);
             }
             // The observable is the wave launched into the pipe: the mouth
             // plane is the pipe's pressure node, so the total pressure
@@ -3359,6 +3441,116 @@ mod forced_jet_tests {
         }
         assert_work(&v);
         bits
+    }
+
+    // jet_swing_limit (module jet_swing_limit): one-sample blocks at 100 Pa with the labium tapped.
+    // Returns the raw bits, the largest |eta| and the lowest gain the limit reached.
+    fn limit_run(v: &mut FlueVoice, samples: usize) -> (Vec<u64>, f64, f64) {
+        v.apply(FlueControl::SetBlowingPressure(100.0)).unwrap();
+        let (mut bits, mut peak, mut lowest) = (Vec::new(), 0.0_f64, 1.0_f64);
+        for _ in 0..samples {
+            let mut out = [0.0];
+            v.step_block_labium_observed(&mut out, |_, s| { peak = peak.max(s.eta_m.abs()); Ok(()) }).unwrap();
+            assert!(out[0].is_finite());
+            bits.push(out[0].to_bits());
+            lowest = lowest.min(v.jet_swing_limit().map_or(1.0, jet_swing_limit::JetSwingLimit::gain));
+        }
+        assert_work(v);
+        (bits, peak, lowest)
+    }
+
+    #[test]
+    fn g0_jet_swing_limit_under_the_spread_width_is_bit_identical() {
+        let law = forced_jet::JetSpreadingLaw::Fletcher1976;
+        let mut plain = spread_voice(law);
+        let mut limited = spread_voice(law).with_jet_swing_limit().unwrap();
+        let (a, peak, _) = limit_run(&mut plain, 2056);
+        let (b, _, lowest) = limit_run(&mut limited, 2056);
+        let width = limited.jet_swing_limit().unwrap().spread_width_m();
+        assert!(peak > 0.0 && peak < width, "peak {peak}, W {width}: this run must stay under the width");
+        assert_eq!(lowest, 1.0);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn g0_jet_swing_limit_that_bites_lowers_the_swing_and_closes_the_ledger() {
+        const SAMPLES: usize = 16_448;
+        let law = forced_jet::JetSpreadingLaw::Fletcher1976;
+        let mut free = spread_voice(law);
+        let (free_bits, free_peak, _) = limit_run(&mut free, SAMPLES);
+        // A planted width and cut-up far inside this run's swing: the machinery is under test
+        // here, not the law's numbers.
+        let mut limited = spread_voice(law);
+        let planted = free_peak / 64.0;
+        limited.jet_swing_limit = Some(jet_swing_limit::JetSwingLimit::new(planted, planted, limited.dt).unwrap());
+        let (bits, peak, lowest) = limit_run(&mut limited, SAMPLES);
+        println!("free peak {free_peak:e} m, planted {planted:e} m, limited peak {peak:e} m, lowest gain {lowest}");
+        assert!(lowest < 1.0, "the limit never bit: free peak {free_peak}, limited peak {peak}");
+        assert!(peak < free_peak, "limited {peak}, free {free_peak}");
+        assert_ne!(bits, free_bits);
+    }
+
+    #[test]
+    fn g0_jet_swing_limit_refuses_without_a_spread_width_and_late() {
+        assert!(spread_voice(forced_jet::JetSpreadingLaw::None).with_jet_swing_limit().is_err());
+        assert!(bare_voice(gas(101_325.0), geometry(CUT_UP_M), 48_000, 4096).with_jet_swing_limit().is_err());
+        let mut late = spread_voice(forced_jet::JetSpreadingLaw::Fletcher1976);
+        late.apply(FlueControl::SetBlowingPressure(100.0)).unwrap();
+        let mut out = [0.0; 4];
+        late.step_block(&mut out).unwrap();
+        assert!(late.with_jet_swing_limit().is_err());
+    }
+
+    // jet_cut_width station: the print's one b, in the cut and in its swing.
+    #[test]
+    fn g0_jet_cut_width_station_is_the_jets_own_width_and_the_printed_swing() {
+        for law in [forced_jet::JetSpreadingLaw::None, forced_jet::JetSpreadingLaw::Fletcher1976] {
+            let mut v = spread_voice(law).with_jet_cut_width_station().unwrap();
+            let kernel = v.forced_jet().unwrap();
+            let (beta, flux) = kernel.station_spread().unwrap_or((1.0, 1.0));
+            let centre = kernel.centre_over_bulk();
+            let b = kernel.half_width_m() * beta;
+            assert_eq!(v.cut_half_width_m(), b, "{law:?}");
+            let w = v.geometry.flue_width_m;
+            v.apply(FlueControl::SetBlowingPressure(100.0)).unwrap();
+            for _ in 0..64 {
+                let mut out = [0.0];
+                let mut seen = None;
+                v.step_block_labium_observed(&mut out, |_, s| { seen = Some(s); Ok(()) }).unwrap();
+                let s = seen.expect("one observed sample");
+                let q_max = 2.0 * b * w * (centre / flux) * v.jet_speed_m_s();
+                let cut = 0.5 * q_max * (1.0 + ((s.eta_m - s.offset_m) / b).tanh());
+                assert!((v.flow_prev - cut).abs() <= 8.0 * f64::EPSILON * q_max,
+                    "{law:?}: flow {} against the printed cut {cut}", v.flow_prev);
+            }
+            assert_work(&v);
+        }
+    }
+
+    #[test]
+    fn g0_jet_cut_width_station_refuses_without_the_forced_jet_and_late() {
+        assert!(bare_voice(gas(101_325.0), geometry(CUT_UP_M), 48_000, 4096).with_jet_cut_width_station().is_err());
+        let mut late = spread_voice(forced_jet::JetSpreadingLaw::None);
+        late.apply(FlueControl::SetBlowingPressure(100.0)).unwrap();
+        let mut out = [0.0; 4];
+        late.step_block(&mut out).unwrap();
+        assert!(late.with_jet_cut_width_station().is_err());
+    }
+
+    // The momentum drive reads its speed from `q_max`: under the printed swing that is still the
+    // station's centre speed.
+    #[test]
+    fn g0_jet_cut_width_station_keeps_the_momentum_drives_centre_speed() {
+        let v = spread_voice(forced_jet::JetSpreadingLaw::Fletcher1976).with_momentum_drive(1.0).unwrap()
+            .with_jet_cut_width_station().unwrap();
+        let kernel = v.forced_jet().unwrap();
+        let (_, flux) = kernel.station_spread().unwrap();
+        let speed = kernel.centre_over_bulk() / flux;
+        let b = v.cut_half_width_m();
+        let c = JetStepCoefficients { q_max: 2.0 * b * v.geometry.flue_width_m * speed, half_width_m: b,
+            offset_m: 0.0, band_alpha: 0.0, hp_alpha: 0.0, leak_rate: 0.0, eta_override: None, at_rest: false };
+        let expected = v.momentum_drive().unwrap().pressure_per_flow(speed);
+        assert!((v.momentum_source_slope(c) / expected - 1.0).abs() < 1e-14);
     }
 
     // jet_forcing_area: the jet's transverse velocity over another area, on the same run as above.

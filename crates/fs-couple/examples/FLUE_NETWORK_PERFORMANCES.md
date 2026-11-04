@@ -678,6 +678,27 @@ own) and the station's volume flux (`beta(X)^(1/2)` times its own). With `moment
 It needs the `jet_response` row and has no default law. Omitting it keeps every result
 bit-identical.
 
+The optional `jet_swing_limit fletcher-1976` row, after `jet_spreading`, limits the forced jet's
+swing at the labium. The envelope is Fletcher's model choice (JASA 60, 1976, pp. 927, 933), carried
+to the card's jet and not measured on it: exponential growth up to the spread width `W` at the lip,
+then linear growth with an envelope of semiangle about 15 deg. He says varying these "has very little
+effect". So `E = W + (X - x_t) tan 15 deg`, with `x_t = X acosh(W w/v) / acosh(y w/v)` from his eq. 9-12,
+and `x_t = 0` when `W w/v <= 1`. `W` is the station's `b(X)` and `X` the cut-up, and the row carries no
+coefficient. **The print gives an envelope, not a waveform, so the time form is ours:** one gain
+`g = min(1, E/y)` on the whole linear displacement, stepped at its sign changes, with `y` and `v` its
+peaks over the last two half cycles and `w` from their length. A saturation of the displacement itself
+was tried open loop and doesn't change the cut's harmonics, because the displacement still crosses zero
+at the same speed. Measured anchors, neither on this pipe: de la Cuadra and Fabre 2004, amplitude at
+transition about `h` at `Vac/Ub` about 1e-2 and under; Verge 1995 ch. 4, linear to `h/2`. It needs a named
+spreading law. Omitting it keeps every result bit-identical.
+
+The optional `jet_cut_width station` row, last of these, gives the tanh cut the forced jet's own width
+`b0 beta(X)` and the printed swing `2 b H U` at the station's centre speed, in place of half the flue
+height times `beta(X)` and the volume match `U h H beta(X)^(1/2)`. The prints have one `b` (Fletcher and
+Douglas 1980 eq. 1-2, Verge 1995 eq. 4.25, Auvray et al. 2014). The slope at the crossing is the same,
+so only the saturation differs. It needs the `jet_response` row. Omitting it keeps every result
+bit-identical.
+
 During a pressure gesture the response uses the accumulated convective clock
 `tau = integral U0(t)/b dt`. Each accepted physical-time velocity interval keeps
 its own speed and age; changing the pressure no longer retimes the entire past

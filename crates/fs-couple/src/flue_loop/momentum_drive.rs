@@ -211,6 +211,10 @@ impl FlueVoice {
     /// and the speed is the station's centre speed, `(b0 / b(X))^(1/2)` times the exit's, so the
     /// momentum flux the cut swings stays the jet's own, which spreading conserves.
     fn momentum_speed_m_s(&self, c: &JetStepCoefficients) -> f64 {
+        // `jet_cut_width station`: `q_max = 2 b H U` holds the station's centre speed itself.
+        if self.jet_cut_width_station {
+            return c.q_max / (2.0 * c.half_width_m * self.geometry.flue_width_m);
+        }
         let bulk = c.q_max / (self.geometry.flue_height_m * self.geometry.flue_width_m);
         match self.forced.as_ref().and_then(super::forced_jet::ForcedJetKernel::station_spread) {
             None => bulk,
