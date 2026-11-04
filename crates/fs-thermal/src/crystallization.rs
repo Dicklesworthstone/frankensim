@@ -38,6 +38,10 @@
 
 use core::fmt;
 
+#[path = "crystallization/adaptive.rs"]
+mod adaptive;
+pub use adaptive::{AdaptiveCrystallizationStep, CrystallizationAdaptivity};
+
 #[path = "crystallization/remelting.rs"]
 mod remelting;
 pub use remelting::EquivalentAgeRemelting;
