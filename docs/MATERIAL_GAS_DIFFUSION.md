@@ -164,9 +164,68 @@ solver change. The same resulting parcels can enter existing nozzle, thermal,
 reaction and mechanical paths; this adapter does not automatically schedule those
 operators or retune a live acoustic renderer.
 
+## Stiff binary parcel mixing
+
+`ClosedGasParcel::diffuse_binary_exponential_with` integrates the original binary
+molar-average diffusion law with a positive exponential pair map. It uses the
+same material-card diffusivity, source catalog, species inventory, upstream
+partial enthalpies, caloric reconstruction and actual closed-pair entropy gate
+as `diffuse_with`. It introduces no independent thermal or acoustic state.
+
+For initial parcel mole counts `N_l, N_r`, first-species mole fractions `x_l,
+x_r`, and sampled face conductance `G = p D A / (R T L)` in mol/s, define
+`H = N_l N_r / (N_l + N_r)`. The integrated first-species transfer is
+
+```text
+q = H (x_l - x_r) [1 - exp(-G dt / H)]
+```
+
+The second species transfers `-q` moles. Each amount is converted with its own
+molar mass before entering the existing conservative exchange owner. Unequal
+parcel volumes and unequal molecular masses therefore remain physical inputs;
+zero net molar flux is not mistaken for zero net mass flux. Each mole fraction
+approaches the mole-weighted equilibrium without crossing it. The bounded
+capacity avoids a product of inventories, and deterministic `expm1` retains
+weak exchanges. Work requires one face evaluation and one pair reconstruction,
+independent of how many explicit stability intervals fit inside `dt`.
+
+The endpoint is analytic for an isothermal/isobaric binary pair with constant
+source D. With evolving temperature or coefficients, this is a first-order
+frozen-coefficient step and still needs time refinement. It is not a fully
+implicit thermal solve. The caller's withdrawal, source, mass, energy and
+entropy limits remain unchanged; both final states must also lie inside the
+original binary source's support. A small authored withdrawal allowance can
+still reject a large exchange. Open faces require exactly two joined species;
+general multicomponent and pressure-driven transport keep their existing owners.
+
+`BinaryDiffusionCandidate::initial_flux` reports the instantaneous initial
+derivative and source receipts. The actual integrated amount is in `step()` and
+the original `exchange()` account; it is not initial flux times duration.
+Initially absent species need no seeded trace. Closed and equilibrated pairs
+retain the original exact identity behavior.
+
+The example now selects exponential mixing by default. Its optional last
+argument selects `explicit` for a time-refinement comparison. A single long
+interval can reach the same equilibrium without explicit diffusion substeps:
+
+```sh
+cargo run -p fs-material --example material_gas_diffusion -- \
+  crates/fs-material/examples/material_gas_spring/mixture-a.tsv \
+  crates/fs-material/examples/material_gas_spring/mixture-b.tsv \
+  0.00002 1 100000000 exponential
+cargo test -p fs-material --test gas_binary_diffusion
+```
+
+The public integration regressions compare with independent unequal-volume
+exponentials, semigroup composition, pure-species ideal mixing entropy, reversed
+orientation, diffusivity/time scaling and the weak-step limit. They also check
+original material observations, conservation and transactional refusal.
+
 ## Model and verification limits
 
-This is a two-point spatial approximation and an explicit first-order time step.
+The original `diffuse_with` entry is a two-point spatial approximation and an
+explicit first-order time step. The binary exponential entry has the narrower
+analytic/frozen-coefficient scope described above.
 The default mode neglects pressure diffusion; the explicit mass-frame mode
 includes it. Both modes omit thermal diffusion/Soret and Dufour coupling,
 external species forces, resolved bulk momentum, Knudsen effects, nonideal

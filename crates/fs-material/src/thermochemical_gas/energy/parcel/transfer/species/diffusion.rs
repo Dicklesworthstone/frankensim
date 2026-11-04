@@ -20,6 +20,8 @@
 pub mod network;
 /// Molecular friction, Knudsen wall transport and Darcy flow in one porous path.
 pub mod dusty_gas;
+/// Positive exponential relaxation of a binary pair without an explicit diffusion CFL.
+pub mod binary;
 
 use super::{ClosedGasParcel, GasEnergyError, GasSpeciesExchangeCandidate,
     GasSpeciesExchangeSolve, SpeciesId, SpeciesMassTransfer, Sum, catalog, invalid, poll, positive, source_error};
@@ -345,21 +347,32 @@ impl ClosedGasParcel {
             }
             rows.push(SpeciesMassTransfer { species: species.species.clone(), mass_left_to_right_kg: mass });
         }
-        let exchange = self.exchange_species_with(right, &rows, controls.exchange, &mut cancelled)?;
-        let entropy = super::entropy::closed_entropy_change(
-            [(0, self, exchange.left()), (1, right, exchange.right())],
-            controls.exchange.mass_tolerance_kg, &mut cancelled,
-        ).map_err(|error| match error {
-            super::entropy::Error::Invalid(reason) => invalid(reason),
-            super::entropy::Error::Parcel { error, .. } => error,
-            super::entropy::Error::Cancelled => GasEnergyError::Cancelled,
-        })?;
-        if entropy < -controls.entropy_tolerance_j_k {
-            return Err(invalid("finite diffusion step decreases pair entropy; reduce the interval"));
-        }
-        poll(&mut cancelled)?;
-        Ok(GasDiffusionCandidate { exchange, flux, entropy_change_j_k: entropy })
+        finish_candidate(self, right, flux, &rows, controls, &mut cancelled)
     }
+}
+
+// Both time discretizations use the original selective-transfer caloric owner
+// and the same actual endpoint entropy gate. An exponential species update is
+// not permission to relax a source, withdrawal, mass or energy allowance.
+fn finish_candidate(
+    left: &ClosedGasParcel, right: &ClosedGasParcel, flux: GasDiffusionFlux,
+    rows: &[SpeciesMassTransfer], controls: GasDiffusionSolve,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<GasDiffusionCandidate, GasEnergyError> {
+    let exchange = left.exchange_species_with(right, rows, controls.exchange, &mut cancelled)?;
+    let entropy = super::entropy::closed_entropy_change(
+        [(0, left, exchange.left()), (1, right, exchange.right())],
+        controls.exchange.mass_tolerance_kg, &mut cancelled,
+    ).map_err(|error| match error {
+        super::entropy::Error::Invalid(reason) => invalid(reason),
+        super::entropy::Error::Parcel { error, .. } => error,
+        super::entropy::Error::Cancelled => GasEnergyError::Cancelled,
+    })?;
+    if entropy < -controls.entropy_tolerance_j_k {
+        return Err(invalid("finite diffusion step decreases pair entropy; reduce the interval"));
+    }
+    poll(&mut cancelled)?;
+    Ok(GasDiffusionCandidate { exchange, flux, entropy_change_j_k: entropy })
 }
 
 fn diffusion_error(error: MaxwellStefanErrorV1) -> GasEnergyError {

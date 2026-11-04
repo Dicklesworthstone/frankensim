@@ -37,7 +37,7 @@ fn controls() -> GasDiffusionSolve {
         energy_tolerance_j_kg: 1e-7, maximum_iterations: 128 };
     GasDiffusionSolve { maximum_temperature_difference_k: 1e-5, maximum_pressure_difference_pa: 0.01,
         gradient_tolerance_per_m: 1e-9, molar_flux_tolerance_mol_m2_s: 1e-12, entropy_tolerance_j_k: 1e-10,
-        exchange: GasSpeciesExchangeSolve { gas: [gas;2], maximum_species_fraction: 0.1,
+        exchange: GasSpeciesExchangeSolve { gas: [gas;2], maximum_species_fraction: 0.9,
             mass_tolerance_kg: 1e-14, energy_tolerance_j: 1e-8 } }
 }
 fn read(path: &str) -> Result<String> {
@@ -47,12 +47,17 @@ fn read(path: &str) -> Result<String> {
 }
 fn main() -> Result<()> {
     let args=std::env::args().skip(1).collect::<Vec<_>>();
-    if !(3..=5).contains(&args.len()) {
-        return Err("usage: material_gas_diffusion LEFT.tsv RIGHT.tsv D_m2_s [steps=200] [dt_s=0.05]".into());
+    if !(3..=6).contains(&args.len()) {
+        return Err("usage: material_gas_diffusion LEFT.tsv RIGHT.tsv D_m2_s [steps=200] [dt_s=0.05] [method=exponential|explicit]".into());
     }
     let d=diffusion_card(args[2].parse()?)?;
     let steps:usize=args.get(3).map_or(Ok(200),|x|x.parse())?;
     let dt:f64=args.get(4).map_or(Ok(0.05),|x|x.parse())?;
+    let exponential = match args.get(5).map(String::as_str).unwrap_or("exponential") {
+        "exponential" => true,
+        "explicit" => false,
+        _ => return Err("diffusion method must be exponential or explicit".into()),
+    };
     if !(1..=10000).contains(&steps) || !dt.is_finite() || dt<=0.0 || !(dt*steps as f64).is_finite() {
         return Err("bounded step count and positive finite duration required".into());
     }
@@ -69,7 +74,12 @@ fn main() -> Result<()> {
     println!("time_s,left_first_mole_fraction,right_first_mole_fraction,left_pressure_pa,right_pressure_pa,left_temperature_k,right_temperature_k,left_sound_speed_m_s,right_sound_speed_m_s,step_entropy_change_j_k,step_energy_error_j");
     for i in 0..=steps {
         let (ds,de)=if i==0 {(0.0,0.0)} else {
-            let proposal=left.diffuse_with(&right,geometry,dt,&pairs,controls(),||false)?;
+            let proposal=if exponential {
+                left.diffuse_binary_exponential_with(&right,geometry,dt,&pairs,controls(),||false)?
+                    .into_parts().0
+            } else {
+                left.diffuse_with(&right,geometry,dt,&pairs,controls(),||false)?
+            };
             let ds=proposal.entropy_change_j_k(); let de=proposal.exchange().step().energy_residual_j;
             let (exchange,_,_)=proposal.into_parts(); let (a,b,_)=exchange.into_parts();left=a;right=b;(ds,de)
         };
