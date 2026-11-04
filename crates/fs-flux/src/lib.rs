@@ -26,6 +26,9 @@ pub mod cavitation;
 /// Source-owned, conservative two-dimensional shock propagation and reflection.
 #[cfg(feature = "experimental-compressible")]
 pub mod compressible;
+/// Conservative isothermal diffuse-interface dynamics from the original liquid law.
+#[cfg(feature = "experimental-miscibility")]
+pub mod miscibility;
 #[cfg(feature = "continuum")]
 pub mod gas_film;
 #[cfg(feature = "quarter-wave")]
@@ -119,3 +122,4 @@ mod tests {
         assert!(!super::VERSION.is_empty());
     }
 }
+

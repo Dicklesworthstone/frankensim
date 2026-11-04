@@ -3888,3 +3888,67 @@ within each solve; thermal evolution, viscoelastic memory, constitutive fitting
 and multiphase density transport are outside this owner. The existing rigid
 BDF1 geometry/time truncation limits remain unchanged; nonlinear material
 closure does not establish exact finite-step whole-fluid angular conservation.
+
+## Conservative spatial binary miscibility
+
+The opt-in `experimental-miscibility` feature exposes `miscibility` without
+requiring the continuum runtime feature. `BinaryMiscibilityNetwork` prepares a
+closed finite-volume graph using the original
+`fs_thermochem::solution::gradient::BinarySquareGradientV1`. Geometry and the
+binary diffusivity on each face are explicit physical inputs; no coefficient is
+inferred from a negative effective Fick diffusivity.
+
+For cell capacities `N_i=c*V_i` and face weights
+`K_e=kappa*A_e/L_e`, the retained energy is
+`F=sum_i N_i*g_mix(x_i,T) + 0.5*sum_e K_e*(x_i-x_j)^2`.
+Each face moves A and B in equal opposite molar amounts. This is a
+molar/volume reference frame with equal fixed partial molar volumes; unequal
+molar masses do not imply zero barycentric mass flux. Local density can change
+with composition. Temperature, pressure and geometry are externally fixed.
+The lane does not advance heat, advection, momentum, gravity, wetting or
+nucleation rates.
+
+One canonical face sweep solves an implicit convex-split scalar exchange on
+each face. Logarithmic entropy, convex interactions and the entire graph's
+gradient energy are implicit; positive-chi concavity uses the preceding pair
+state. Every neighboring gradient contribution participates, including faces
+outside the exchanging pair. A safeguarded Newton/bisection solve stays inside
+the physically available paired inventories. Pure opposite components can
+mix without a logarithmic floor or invented initial trace. Both component
+amounts are represented independently, with retained addition residuals
+preventing drift across long repeated exchanges.
+
+Each immutable candidate audits both global species balances, every fixed
+cell capacity, the direct actual free-energy increment and the convex-split
+dissipation inequality. Nonzero transfers that disappear from represented
+inventory arithmetic refuse. The free-energy allowance applies once to the
+whole sweep, not once per face. Cancellation or failure publishes no partial
+state.
+
+`miscibility::adaptive` advances a requested interval using one full sweep
+versus two half sweeps. The accepted two-half state remains first order in
+time. The local estimator considers both species with explicit absolute and
+relative mole-fraction tolerances; it is not a global error certificate.
+Step-size bounds and a maximum attempt count bound work. The report includes
+accepted/rejected intervals, completed-sweep work, integrated face transfers
+and the suggested next step. A final independent species/capacity/energy
+audit applies the original single allowance to the entire interval and sums
+only accepted dissipation. Failure anywhere leaves the input unchanged.
+
+Canonical faces and CSR incidence are prepared once. Retained arrays and
+conservative transaction scratch, including adaptive trials, are admitted
+under a caller-supplied payload budget of 512 bytes per cell plus 512 bytes per
+face and the fixed owner size; allocator overhead and pair-model strings are
+excluded. Graphs are bounded to 65,536 cells and 262,144 faces; scalar roots
+are bounded to 256 iterations. Work scales with faces times root iterations
+and with `sum(degree^2)` for cache updates, which is linear on bounded-valence
+finite-volume grids. The area/distance formula requires an appropriate
+orthogonal mesh or explicitly authored compartment connection.
+
+Focused native tests cover full-graph energy derivatives, pure contact,
+stationary interfaces, independent spinodal growth/short-wave damping rates,
+gradient-cache consistency, first-order refinement, canonical symmetry,
+long evolution, adaptive error reduction against an independent RK4 scalar
+oracle, integrated flux/species/energy closure and atomic budget/cancellation
+refusals. These feature-level tests do not replace the full default-feature
+workspace gate.

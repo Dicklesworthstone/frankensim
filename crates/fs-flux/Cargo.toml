@@ -16,6 +16,7 @@ continuum = ["cavitation", "dep:fs-la", "dep:fs-material", "dep:fs-math", "dep:f
 cavitation = ["dep:fs-material", "dep:fs-la"]
 quarter-wave = []
 experimental-compressible = ["dep:fs-gas", "dep:fs-qty", "dep:fs-solver"]
+experimental-miscibility = ["dep:fs-thermochem", "dep:fs-qty"]
 # Reuse the same authored local closures as LBM and conjugate finite volumes.
 experimental-sgs = ["experimental-compressible", "dep:fs-lbm", "dep:fs-thermochem"]
 
