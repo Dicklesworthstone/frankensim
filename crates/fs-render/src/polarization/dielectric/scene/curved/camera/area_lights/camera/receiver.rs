@@ -9,7 +9,7 @@ use super::{AreaLightCameraError, diffuse_contribution, face_normal};
 use super::super::super::{CameraRadianceError, CurvedCameraScene, phase_index};
 use crate::dielectric::DielectricError;
 use crate::polarization::Stokes;
-use crate::polarization::dielectric::scene::{Interaction, SceneError};
+use crate::polarization::dielectric::scene::{Interaction, SceneError, bind_dielectric_surface};
 use crate::polarization::dielectric::scene::curved::{CurvedContact, CurvedPathResult, CurvedSceneError};
 use crate::polarization::dielectric::scene::curved::bundle::connection::{
     BundleConnection, BundleConnectionError, BundleConnectionTarget,
@@ -18,6 +18,9 @@ use crate::polarization::dielectric::transport::{PolarizationFrame, PolarizedBea
 use crate::polarization::dielectric::transport::connection::SurfaceConnectionResponse;
 use fs_geom::{Point3, Vec3};
 use fs_math::det;
+
+#[cfg(test)]
+mod anisotropic_tests;
 
 /// The two original adjacent media admitted by a continuous native receiver.
 /// Fixed-medium surfaces repeat the same index; smooth delta laws have no
@@ -166,6 +169,10 @@ impl SurfaceReceiver {
                 let opposite = if self.medium == outside { inside } else { outside };
                 let medium = camera.scene.medium_at(opposite, position, wavelength)
                     .map_err(CameraRadianceError::from)?;
+                let instance = camera.scene.geometry.instances().get(contact.witness.boundary_id)
+                    .ok_or(AreaLightCameraError::PathMismatch { binding })?;
+                let surface = bind_dielectric_surface(surface, instance.transform())
+                    .map_err(CurvedSceneError::from).map_err(CameraRadianceError::from)?;
                 let response = if let Some(stack) = camera.scene.coating_stacks
                     .get(contact.witness.boundary_id).copied().flatten() {
                     incoming.evaluate_stack_dielectric_connection(contact.witness.normal, medium,

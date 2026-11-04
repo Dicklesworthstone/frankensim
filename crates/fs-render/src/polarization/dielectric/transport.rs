@@ -506,7 +506,7 @@ impl PolarizedBeam {
         Ok(BeamSample { beam, event: sample.event, pdf: sample.probability, delta: true })
     }
 
-    /// Sample the native smooth or isotropic-GGX surface without losing its
+    /// Sample the native smooth or GGX surface without losing its
     /// polarization frame. `samples` is `[microfacet_u, microfacet_v, event]`,
     /// each in `[0,1)`. Smooth surfaces ignore the first two admitted samples.
     ///
@@ -517,6 +517,11 @@ impl PolarizedBeam {
     /// subsequent noncoplanar interactions retain linear/circular polarization.
     /// For a coated surface, `normal` is the object's outward geometric normal:
     /// the native source-bound layer order reverses when exiting the object.
+    /// An anisotropic surface's authored tangent axis must be in the same
+    /// world/query frame as `normal` and this beam. Native scene consumers
+    /// rotate their geometry-local axis using the original instance placement.
+    /// The finish controls facet probabilities, not the polarization reference
+    /// axes: each sampled facet retains its own physical s/p incidence plane.
     ///
     /// `None` is the native zero-contribution microfacet rejection, not an
     /// error. This keeps the native single-scattering microfacet approximation;
@@ -528,9 +533,6 @@ impl PolarizedBeam {
         surface: DielectricSurface,
         samples: [f64; 3],
     ) -> Result<Option<BeamSample>, BeamError> {
-        if surface.anisotropy().is_some() {
-            return Err(DielectricError::UnsupportedAnisotropicTransport.into());
-        }
         if samples.iter().any(|u| !u.is_finite() || !(0.0..1.0).contains(u)) {
             return Err(DielectricError::InvalidInterface.into());
         }
@@ -557,9 +559,6 @@ impl PolarizedBeam {
         stack: DielectricCoatingStack<'_>,
         samples: [f64; 3],
     ) -> Result<Option<BeamSample>, BeamError> {
-        if surface.anisotropy().is_some() {
-            return Err(DielectricError::UnsupportedAnisotropicTransport.into());
-        }
         if surface.coating().is_some() {
             return Err(DielectricError::InvalidCoating.into());
         }
@@ -568,7 +567,7 @@ impl PolarizedBeam {
         }
         let reverse = normal.dot(self.frame.direction) > 0.0;
         self.sample_resolved_interface(normal, target.into(), surface.roughness_alpha(),
-            stack.interface(self.wavelength_nm, reverse)?, samples)
+            stack.interface(self.wavelength_nm, reverse)?.with_anisotropy(surface.anisotropy()), samples)
     }
 
     fn sample_resolved_interface(
@@ -743,6 +742,9 @@ fn physical_roundoff(mut s: Stokes, reference: f64) -> Result<Stokes, BeamError>
     }
     Ok(s)
 }
+
+#[cfg(test)]
+mod anisotropic_tests;
 
 #[cfg(test)]
 mod tests {

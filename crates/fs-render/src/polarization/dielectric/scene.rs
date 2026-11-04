@@ -20,7 +20,7 @@ use super::mirrors::ConductorBeamError;
 use super::transport::{BeamError, BeamMedium, BeamSample, PolarizedBeam};
 use crate::conductor::{CoherentDielectricCoating, ConductorOptics, ConductorSurface};
 use crate::dielectric::{DielectricCoatingStack, DielectricEvent, DielectricGlass, DielectricSurface};
-use crate::instances::{InstanceError, InstanceHit, InstanceScene};
+use crate::instances::{InstanceError, InstanceHit, InstanceScene, RigidTransform};
 use crate::spectral::SpectralReflectance;
 
 /// Admission bound on scene bindings and media; not a performance claim.
@@ -45,6 +45,8 @@ pub enum Interaction {
     /// The geometric normal points from `inside` to `outside`. Both indices
     /// refer to the scene's original media slice; equal-index glass may still
     /// have different absorption. Misoriented/overlapping media fail closed.
+    /// An anisotropic surface axis is authored in geometry-local coordinates
+    /// and follows the instance's original proper-rigid placement.
     Dielectric { outside: usize, inside: usize, surface: DielectricSurface },
     /// Smooth dielectric boundary carrying one original transparent film.
     /// `coating` indexes the borrowed coating table. The same physical film
@@ -478,6 +480,7 @@ impl<'a> PolarizedScene<'a> {
                     }
                     let Some(next) = sample_boundary(
                         result.beam, normal, self.media[target].into(), interaction,
+                        self.geometry.instances()[index].transform(),
                         self.coatings, self.coating_stacks.get(index).copied().flatten(), samples(event),
                     )? else {
                         result.termination = PathTermination::RejectedMicrofacet;
@@ -559,17 +562,20 @@ fn admit_bindings(
 }
 
 // Both straight and curved scenes use exactly the same boundary sampler.
+#[allow(clippy::too_many_arguments)]
 fn sample_boundary(
     beam: PolarizedBeam,
     normal: Vec3,
     target: BeamMedium,
     interaction: Interaction,
+    transform: RigidTransform,
     coatings: &[CoherentDielectricCoating],
     stack: Option<DielectricCoatingStack<'_>>,
     samples: [f64; 3],
 ) -> Result<Option<BeamSample>, BeamError> {
     match interaction {
         Interaction::Dielectric { surface, .. } => {
+            let surface = bind_dielectric_surface(surface, transform)?;
             match stack {
                 Some(stack) => beam.sample_stack_interface(normal, target, surface, stack, samples),
                 None => beam.sample_interface(normal, target, surface, samples),
@@ -587,6 +593,18 @@ fn sample_boundary(
     }
 }
 
+// Sampling and reciprocal camera connections share this body-to-world binding.
+// Isotropic paths return the unchanged owner, without rebuilding any law.
+fn bind_dielectric_surface(
+    surface: DielectricSurface,
+    transform: RigidTransform,
+) -> Result<DielectricSurface, BeamError> {
+    match surface.anisotropy() {
+        Some(law) => Ok(surface.with_tangent_axis(transform.transform_vector(law.tangent_axis()))?),
+        None => Ok(surface),
+    }
+}
+
 fn finish(cx: &Cx<'_>, result: PathResult) -> Result<PathResult, SceneError> {
     cx.checkpoint()?;
     Ok(result)
@@ -597,6 +615,9 @@ pub mod measurement;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod anisotropic_tests;
 
 #[cfg(test)]
 mod brushed_tests;

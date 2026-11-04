@@ -141,8 +141,8 @@ differentiable lift). Pure Rust throughout.
   kernels. Three additional native scene/BDPT/packet/refusal regressions are
   authored and pass a real-dependency Cargo metadata check with tracer,
   volumes and photometry enabled; scene-test execution remains unverified
-  in the implementation environment. Polarized scene sampling and direct connections explicitly
-  refuse this new finish until they carry its body-frame binding. This remains
+  in the implementation environment. Polarized sampling and reciprocal connections consume the same body-bound
+  slope law and the original facet Fresnel Mueller response. This remains
   single-scattering GGX: no inter-facet multiple scattering, finite coherence
   averaging, diffuse substrate, inferred roughness spectrum or thermal law.
 - **Coherent coatings on transmitting dielectrics:** `DielectricSurface` owns
@@ -6954,3 +6954,11 @@ Focused native controls cover 300, 1550 and 2500 nm phase/group paths and analyt
 ray-bundle footprints, with independent material scattering and source-domain
 controls. These are explicit synthetic fits, not measured-gas accuracy claims.
 Molecular scattering stays distinct from true absorption.
+
+## Polarized anisotropic dielectric reflection and transmission
+
+`PolarizedBeam::sample_interface` and `evaluate_dielectric_connection`, including their original borrowed-stack variants, consume the same scalar anisotropic GGX distribution, directional masking, visible-normal proposal and refractive measure. Raw beam queries receive the authored tangent in the beam's world/query frame. Straight and curved native scenes bind the original geometry-local axis through the owning instance placement before scattering; the shared continuous camera receiver applies that identical binding before source connections and recorded-PDF replay. Scene snapshots remain immutable during a trace.
+
+The finish changes facet statistics. Every facet retains the original isotropic bulk/coating Fresnel Mueller law, its actual s/p plane and coherent relative phase; no depolarization or birefringent material response is invented. Film order, survival, adjacent phase indices and forward-power versus radiance conversion retain their existing owners. Coated original stacks retain anisotropy instead of reducing to alpha-x. Isotropic surfaces bypass axis binding and preserve their former numerical path; invalid contact axes refuse.
+
+Five focused tests pass against the original numerical owners, checking independently reconstructed Walter densities and full Stokes power, normal-facet analytic power/probability, Brewster extinction with positive proposal density, reciprocal source/frame changes, original-film equivalence and reverse incidence, and isotropic/null limits. Three native scene/receiver regressions cover body rotations, both boundary sides and original stack paths, plus consistent camera receiver/MIS densities. The actual renderer and unit-test code pass a real-dependency Cargo metadata check with tracer, volumes and photometry enabled; the scene tests remain unexecuted. A wider original-source optical/beam build passes 189 of 190 tests: the existing deep-film sampler-cache test fails identically on the pre-edit source. This remains allocation-free local single-scattering transport; no inter-facet multiple scattering, coherent interference between scene rays, measured finish calibration, or bulk anisotropic dielectric tensor is claimed.

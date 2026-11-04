@@ -383,7 +383,7 @@ impl<'a> DielectricInterface<'a> {
         }
     }
 
-    pub(super) const fn with_anisotropy(
+    pub(crate) const fn with_anisotropy(
         mut self,
         anisotropy: Option<super::AnisotropicDielectricRoughness>,
     ) -> Self {

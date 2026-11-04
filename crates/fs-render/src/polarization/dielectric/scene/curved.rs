@@ -1009,6 +1009,7 @@ impl<'a> CurvedPolarizedScene<'a> {
                         witness.normal,
                         target_medium,
                         interaction,
+                        instance.transform(),
                         self.coatings,
                         self.coating_stacks.get(witness.boundary_id).copied().flatten(),
                         samples(event),

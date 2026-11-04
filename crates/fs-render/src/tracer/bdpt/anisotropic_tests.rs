@@ -1,7 +1,7 @@
 use super::*;
 use crate::dielectric::{BeerLambertAbsorption, CauchyIor};
 use crate::polarization::Stokes;
-use crate::polarization::dielectric::transport::{BeamError, PolarizationFrame, PolarizedBeam};
+use crate::polarization::dielectric::transport::{PolarizationFrame, PolarizedBeam};
 use fs_blake3::hash_domain;
 use fs_exec::{CancelGate, StreamKey};
 
@@ -99,7 +99,11 @@ fn native_camera_and_bidirectional_paths_share_both_anisotropic_branches_and_rev
         let tangent = vertex.brushed_frame.unwrap().tangent;
         // A quaternion quarter-turn cancels unit-scale terms here; use an
         // absolute roundoff bound only for this theoretically zero component.
-        assert!(tangent.x.abs() <= 8.0 * f64::EPSILON, "rotated tangent x={:.17e}", tangent.x);
+        assert!(
+            tangent.x.abs() <= 8.0 * f64::EPSILON,
+            "rotated tangent x={:.17e}",
+            tangent.x
+        );
         close(tangent.y, 1.0);
         let Material::Dielectric { glass, surface } = &scene.primitives[0].material else {
             unreachable!()
@@ -225,7 +229,7 @@ fn dispersive_packet_lanes_and_material_identity_keep_the_authored_finish() {
 }
 
 #[test]
-fn polarized_scene_consumers_refuse_anisotropy_without_a_bound_body_frame() {
+fn polarized_queries_retain_the_same_anisotropic_scalar_proposal() {
     let n = Vec3::new(0.0, 0.0, 1.0);
     let frame = PolarizationFrame::try_new(n.scale(-1.0), Vec3::new(1.0, 0.0, 0.0)).unwrap();
     let vacuum = DielectricGlass::new(
@@ -241,16 +245,28 @@ fn polarized_scene_consumers_refuse_anisotropy_without_a_bound_body_frame() {
         Stokes::unpolarized(1.0),
     )
     .unwrap();
-    assert!(matches!(
-        beam.sample_interface(n, glass(), rough(), [0.2, 0.3, 0.4]),
-        Err(BeamError::Dielectric(
-            DielectricError::UnsupportedAnisotropicTransport
-        ))
-    ));
-    assert!(matches!(
-        beam.evaluate_dielectric_connection(n, glass(), rough(), frame, Stokes::unpolarized(1.0)),
-        Err(BeamError::Dielectric(
-            DielectricError::UnsupportedAnisotropicTransport
-        ))
-    ));
+    let sample = beam
+        .sample_interface(n, glass(), rough(), [0.2, 0.3, 0.4])
+        .unwrap()
+        .unwrap();
+    let scalar = rough()
+        .interface(550.0, false)
+        .unwrap()
+        .sample_rough(n, n, 1.0, 1.5, 0.14, 0.2, 0.3, 0.4)
+        .unwrap()
+        .unwrap();
+    assert_eq!(sample.pdf, scalar.pdf);
+    close(sample.beam.frame().direction().dot(scalar.direction), 1.0);
+    let source =
+        PolarizationFrame::try_new(scalar.direction.scale(-1.0), frame.horizontal()).unwrap();
+    let connection = beam
+        .evaluate_dielectric_connection(n, glass(), rough(), source, Stokes::unpolarized(1.0))
+        .unwrap();
+    let evaluation = rough()
+        .interface(550.0, false)
+        .unwrap()
+        .evaluate_rough(n, n, scalar.direction, 1.0, 1.5, 0.14)
+        .unwrap();
+    close(connection.factor, evaluation.value);
+    close(connection.pdf, scalar.pdf);
 }

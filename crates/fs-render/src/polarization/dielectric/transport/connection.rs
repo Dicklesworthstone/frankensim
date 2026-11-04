@@ -63,6 +63,9 @@ impl PolarizedBeam {
     /// proposal and Mueller matrices. No direction or Fresnel event is sampled.
     /// The supplied normal is the original outward geometric normal, so exiting
     /// rays reverse authored coating order exactly as the native sampler does.
+    /// An anisotropic axis is expressed in this beam's world/query frame,
+    /// exactly as for `sample_interface`; native scenes bind it from the
+    /// original body placement before either sampling or evaluation.
     pub fn evaluate_dielectric_connection(
         self,
         normal: Vec3,
@@ -71,9 +74,6 @@ impl PolarizedBeam {
         source_frame: PolarizationFrame,
         normalized_source: Stokes,
     ) -> Result<SurfaceConnectionResponse, BeamError> {
-        if surface.anisotropy().is_some() {
-            return Err(DielectricError::UnsupportedAnisotropicTransport.into());
-        }
         let reverse = normal.dot(self.frame.direction) > 0.0;
         self.evaluate_interface_connection(normal, opposite_medium.into(), surface.roughness_alpha(),
             surface.interface(self.wavelength_nm, reverse)?, source_frame, normalized_source)
@@ -93,15 +93,13 @@ impl PolarizedBeam {
         source_frame: PolarizationFrame,
         normalized_source: Stokes,
     ) -> Result<SurfaceConnectionResponse, BeamError> {
-        if surface.anisotropy().is_some() {
-            return Err(DielectricError::UnsupportedAnisotropicTransport.into());
-        }
         if surface.coating().is_some() {
             return Err(DielectricError::InvalidCoating.into());
         }
         let reverse = normal.dot(self.frame.direction) > 0.0;
         self.evaluate_interface_connection(normal, opposite_medium.into(), surface.roughness_alpha(),
-            stack.interface(self.wavelength_nm, reverse)?, source_frame, normalized_source)
+            stack.interface(self.wavelength_nm, reverse)?.with_anisotropy(surface.anisotropy()),
+            source_frame, normalized_source)
     }
 
     fn evaluate_interface_connection(
