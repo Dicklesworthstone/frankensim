@@ -6,6 +6,8 @@
 mod force;
 #[path = "spatial_electrostatic/sources.rs"]
 mod sources;
+#[path = "spatial_electrostatic/virtual_work.rs"]
+mod virtual_work;
 #[path = "spatial_electrostatic/network.rs"]
 mod network;
 

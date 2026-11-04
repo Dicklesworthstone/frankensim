@@ -10,6 +10,8 @@ mod network;
 mod rebind;
 #[path = "electrostatic/sources.rs"]
 mod sources;
+#[path = "electrostatic/virtual_work.rs"]
+mod virtual_work;
 use common::{config, layered, limits};
 use fs_em::electrostatic::{ElectrostaticControls, ElectrostaticError, PlanarElectrostatics};
 use fs_evidence::ValidityDomain;

@@ -20,6 +20,7 @@
 
 mod force;
 mod terminals;
+mod virtual_work;
 pub mod network;
 pub use network::{SpatialCapacitanceControls, SpatialCapacitanceMatrix, SpatialCapacitanceResponse};
 pub use terminals::SpatialCapacitance;
@@ -725,6 +726,8 @@ impl SpatialElectrostatics {
             impressed_polarization_c_m2: sources.polarization,
             sheets: sources.sheets,
             charged_sheet_vertices: sources.charged_sheet_vertices,
+            has_imposed_displacement: boundary.displacement.iter()
+                .any(|trace| trace.outward_displacement_c_m2 != 0.0),
             voltage_v,
             relative_voltage_v: relative,
             electric_field_v_m,
@@ -762,6 +765,8 @@ pub struct SpatialElectricField<'a> {
     impressed_polarization_c_m2: Option<Vec<[f64; 3]>>,
     sheets: Vec<ElectrostaticChargeSheet>,
     charged_sheet_vertices: Vec<bool>,
+    // Preserve boundary intent even when distinct face traces cancel nodally.
+    has_imposed_displacement: bool,
     voltage_v: Vec<f64>,
     relative_voltage_v: Vec<f64>,
     electric_field_v_m: Vec<[f64; 3]>,

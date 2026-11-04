@@ -13,6 +13,7 @@
 //! with Ohmic transport on a retained charge history at constant permittivity.
 
 mod force;
+pub(crate) mod virtual_work;
 mod sources;
 pub use sources::{
     ElectrostaticChargeSheet, ElectrostaticDisplacementTrace, PlanarElectrostaticSources,
