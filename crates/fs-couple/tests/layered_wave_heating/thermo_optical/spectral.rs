@@ -9,9 +9,12 @@ use fs_material::state_point::{
     SPECTRAL_CONDUCTOR_ETA_PROPERTIES, SPECTRAL_CONDUCTOR_K_PROPERTIES,
     SPECTRAL_CONDUCTOR_K_QUANTITY, SPECTRAL_DIELECTRIC_ABSORPTION_PER_M_PROPERTIES,
     SPECTRAL_DIELECTRIC_ABSORPTION_QUANTITY, SPECTRAL_DIELECTRIC_IOR_PROPERTIES,
+    SPECTRAL_DIELECTRIC_SELLMEIER_WAVELENGTH_BOUNDS_M_PROPERTIES,
     SPECTRAL_OPTICAL_WAVELENGTH_M_PROPERTIES, SpectralConductorStatePoint,
-    SpectralOpticalStatePoint, SpectralTabulatedDielectricStatePoint,
-    resolve_spectral_conductor_state_point, resolve_spectral_tabulated_dielectric_state_point,
+    SpectralOpticalStatePoint, SpectralSellmeierStatePoint, SpectralTabulatedDielectricStatePoint,
+    VISIBLE_DIELECTRIC_SELLMEIER_B_PROPERTIES, VISIBLE_DIELECTRIC_SELLMEIER_C_M2_PROPERTIES,
+    resolve_spectral_conductor_state_point, resolve_spectral_sellmeier_state_point,
+    resolve_spectral_tabulated_dielectric_state_point,
 };
 
 const IR_OMEGA: f64 = core::f64::consts::TAU * LIGHT_SPEED / 11e-6;
@@ -122,6 +125,14 @@ fn infrared_source(
             .unwrap(),
         )
     };
+    with_permeability(card, source, include_mu)
+}
+
+fn with_permeability(
+    card: &MaterialCard,
+    source: SpectralOpticalStatePoint,
+    include_mu: bool,
+) -> SpectralOpticalStatePoint {
     if !include_mu {
         return source;
     }
@@ -147,16 +158,124 @@ fn infrared_source(
                 SpectralTabulatedDielectricStatePoint::try_from_material(complete).unwrap(),
             )
         }
+        SpectralOpticalStatePoint::DielectricSellmeier(_) => {
+            SpectralOpticalStatePoint::DielectricSellmeier(
+                SpectralSellmeierStatePoint::try_from_material(complete).unwrap(),
+            )
+        }
+    }
+}
+
+fn infrared_sellmeier_card() -> MaterialCard {
+    let base = infrared_card(true, 360.0, false);
+    let template = base
+        .claims()
+        .claims_ordered()
+        .find(|(_, claim)| claim.key.name() == SPECTRAL_DIELECTRIC_IOR_PROPERTIES[0])
+        .unwrap()
+        .1;
+    let mut claims = base.claims().clone();
+    let length = Dims([1, 0, 0, 0, 0, 0]);
+    let squared_length = Dims([2, 0, 0, 0, 0, 0]);
+    let b = VISIBLE_DIELECTRIC_SELLMEIER_B_PROPERTIES;
+    let c = VISIBLE_DIELECTRIC_SELLMEIER_C_M2_PROPERTIES;
+    let band = SPECTRAL_DIELECTRIC_SELLMEIER_WAVELENGTH_BOUNDS_M_PROPERTIES;
+    for (name, dims, values) in [
+        (b[0], Dims::NONE, [0.96, 1.4336]),
+        (b[1], Dims::NONE, [0.0; 2]),
+        (b[2], Dims::NONE, [0.0; 2]),
+        (c[0], squared_length, [0.25e-12; 2]),
+        (c[1], squared_length, [0.0; 2]),
+        (c[2], squared_length, [0.0; 2]),
+        (band[0], length, [8e-6; 2]),
+        (band[1], length, [14e-6; 2]),
+    ] {
+        let mut claim = template.clone();
+        claim.key = PropertyKey::new(name, dims);
+        claim.value = PropertyValue::Curve {
+            abscissa: "T".into(),
+            abscissa_dims: fs_qty::Temperature::DIMS,
+            knots: vec![(280.0, values[0]), (360.0, values[1])],
+            dims,
+        };
+        claim.provenance.source = "authored analytic infrared thermo-optical regression".into();
+        claims.insert_claim(claim).unwrap();
+    }
+    MaterialCard::assemble(base.id().clone(), claims, vec![]).unwrap()
+}
+
+fn infrared_sellmeier_source(card: &MaterialCard) -> SpectralOpticalStatePoint {
+    with_permeability(
+        card,
+        SpectralOpticalStatePoint::DielectricSellmeier(
+            resolve_spectral_sellmeier_state_point(
+                card,
+                &at(300.0, 100_000.0),
+                MaterialPropertySelection::SingleClaimOnly,
+            )
+            .unwrap(),
+        ),
+        true,
+    )
+}
+
+#[test]
+fn infrared_analytic_fixture_retains_dispersion_absorption_and_claims_through_refresh() {
+    let card = infrared_sellmeier_card();
+    let cold = infrared_sellmeier_source(&card);
+    let hot = cold.at_query_point(&card, &at(330.0, 100_000.0)).unwrap();
+    for source in [&cold, &hot] {
+        assert!(matches!(
+            source,
+            SpectralOpticalStatePoint::DielectricSellmeier(_)
+        ));
+        let response = SpectralOpticalResponse::try_new(source.into(), MAX_GAP_M).unwrap();
+        let value = response.complex_index(IR_OMEGA).unwrap();
+        let fraction = (source.resolved().state_coordinate("T").unwrap() - 280.0) / 80.0;
+        let b = 0.96 + fraction * (1.4336 - 0.96);
+        let expected_n = (1.0 + b * 121.0 / (121.0 - 0.25)).sqrt();
+        let alpha = 1e4 + fraction * 3e4;
+        near(value.re, expected_n, 1e-14);
+        near(
+            value.im,
+            -alpha * 11e-6 / (4.0 * core::f64::consts::PI),
+            1e-14,
+        );
+        assert!(response.permittivity_f_m(IR_OMEGA).is_ok());
+    }
+    for (a, b) in cold
+        .resolved()
+        .properties()
+        .iter()
+        .zip(hot.resolved().properties())
+    {
+        assert_eq!(a.answer().receipt.selected, b.answer().receipt.selected);
     }
 }
 
 #[test]
 fn infrared_mixed_sources_refresh_each_native_cell_and_feed_conservative_heat_and_next_step() {
-    let glass_card = infrared_card(true, 360.0, false);
+    check_infrared_mixed_sources(false);
+}
+
+#[test]
+fn infrared_analytic_sources_refresh_each_native_cell_and_feed_conservative_heat_and_next_step() {
+    check_infrared_mixed_sources(true);
+}
+
+fn check_infrared_mixed_sources(sellmeier: bool) {
+    let glass_card = if sellmeier {
+        infrared_sellmeier_card()
+    } else {
+        infrared_card(true, 360.0, false)
+    };
     let metal_card = infrared_card(false, 360.0, false);
-    let glass =
-        SpectralThermoOpticalSource::try_new(infrared_source(&glass_card, true, true), MAX_GAP_M)
-            .unwrap();
+    let glass_source = if sellmeier {
+        infrared_sellmeier_source(&glass_card)
+    } else {
+        infrared_source(&glass_card, true, true)
+    };
+    let glass = SpectralThermoOpticalSource::try_new(glass_source, MAX_GAP_M).unwrap();
     let metal =
         SpectralThermoOpticalSource::try_new(infrared_source(&metal_card, false, true), MAX_GAP_M)
             .unwrap();
@@ -283,10 +402,20 @@ fn infrared_mixed_sources_refresh_each_native_cell_and_feed_conservative_heat_an
         result.step.optical.absorbed_j,
         3e-10,
     );
-    assert!(matches!(
-        result.endpoint_optical_states[0].source(),
-        SpectralOpticalStatePoint::TabulatedDielectric(_)
-    ));
+    assert_eq!(
+        matches!(
+            result.endpoint_optical_states[0].source(),
+            SpectralOpticalStatePoint::DielectricSellmeier(_)
+        ),
+        sellmeier
+    );
+    assert_eq!(
+        matches!(
+            result.endpoint_optical_states[0].source(),
+            SpectralOpticalStatePoint::TabulatedDielectric(_)
+        ),
+        !sellmeier
+    );
     assert!(matches!(
         result.endpoint_optical_states[2].source(),
         SpectralOpticalStatePoint::Conductor(_)
