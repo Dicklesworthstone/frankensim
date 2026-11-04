@@ -24,6 +24,7 @@ use fs_material::state_point::MaterialStatePointError;
 use fs_tribo::TriboError;
 
 pub mod source;
+mod temperature;
 pub use source::{ResidualCoulombSource, resolve_residual_coulomb};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -31,6 +31,7 @@ use fs_material::state_point::MaterialStatePointError;
 use fs_tribo::TriboError;
 
 pub(crate) mod local;
+mod temperature;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DamageFrictionRegime {

@@ -21168,9 +21168,41 @@ retain kinetic occupancy when zero net slip conceals a moving endpoint.
 Nine focused original-source tests cover full coupling, manufactured work,
 entry/exit, tangent rotation, source/history checks, actual rupture-to-reclosure
 handoff, velocity occupancy and atomic retry. Partial-damage friction, rebonding,
-evolving sources, evolving frames, heat recipients and exact stopping events
+autonomous source evolution, evolving frames, heat recipients and exact stopping events
 remain outside this owner; a full Cargo/workspace check is separate.
 
+
+
+### Fixed-jump temperature continuation of cohesive friction
+
+`ReclosureLoadLine::transfer_temperature` and
+`DamageFrictionLoadLine::transfer_temperature` stage the same original cohesive
+point and residual Coulomb history at paired source-temperature successors.
+Each original source must retain its card, selected claims, surface ordering,
+non-temperature coordinates and constitutive bounds; the two new sources must
+resolve the identical query. Area, full reciprocal compliance, numerical
+controls and material/work allowances remain those of the original owner.
+Admission is repeated at the new coefficients, including the reclosure solver's
+normal/friction feedback screen.
+
+The material temperature operation runs once at the held accepted jump. Signed
+coefficient work, storage change and nonnegative additional fracture are
+returned separately and checked with the original area-integrated work gate.
+The operation preserves irreversible fracture history and the exact friction
+occupancy, including an occupied kinetic branch; cooling cannot heal and
+coefficient changes cannot rebond. Rigid Coulomb friction has no stored slip
+energy, so its coefficient update supplies no friction work or heat. No
+velocity or static reaction is inferred. Actual mechanical force limits remain
+enforced by the original mechanical audit. The immutable candidate owner and
+rebound state permit atomic publication by the receiving caller; every refusal
+leaves the original owner and state usable. This operation supplies neither a
+temperature trajectory, thermal expansion, heat transport nor heat partition.
+
+G1/G3 tests in `tests/cohesive_friction_temperature.rs` cover independently
+computed hot sliding forces with full cross-axis compliance, retained kinetic
+occupancy versus static readoption, temperature-induced first damage without
+repeated release, cooling without healing, exact same-query transfer, source
+and state refusals, and the original reclosure feedback-admission bound.
 
 ## Live thermoelastic frames in complete native assemblies
 
