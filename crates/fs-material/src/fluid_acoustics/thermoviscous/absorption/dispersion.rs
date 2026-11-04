@@ -80,25 +80,16 @@ pub(crate) fn relaxing_acoustic_wavenumber(
     let inverse_z = if conductivity_time == 0.0 {
         viscous
     } else {
-        // D = u^2 - 4 i y r, u = g-i(x-y). The rationalized correction
-        // retains arbitrarily weak thermal coupling. Re(u)>0 for passive cv,
-        // so sqrt(D)+u never subtracts nearly equal roots.
+        // D = u^2 - 4 i y r, u = g-i(x-y). Continue its square root from
+        // g as BOTH transport coefficients increase at this fixed frequency.
         let u = viscous + C64::new(-y.im, y.re);
         let yr = y * r;
         let correction = C64::new(4.0 * yr.im, -4.0 * yr.re);
         let discriminant = u * u + correction;
         let scale = u.norm_sq() + correction.abs();
-        let imaginary_scale = (2.0 * u.re * u.im).abs() + correction.im.abs();
         if !discriminant.re.is_finite() || !discriminant.im.is_finite() || !scale.is_finite() {
             return Err("relaxing dispersion discriminant is unrepresentable");
         }
-        // Complex calorics can move D through the negative-real cut as
-        // frequency changes. Passivity alone does not distinguish the two
-        // roots there. Admit a sufficient separated domain: Re(D(t)) stays
-        // positive as viscosity/conduction scale from zero to their values.
-        // This is a quadratic in t, so its minimum is checked analytically,
-        // without a frequency sweep or a hidden continuation state.
-        let d0 = g * g;
         let product = g * (C64::from_re(x) + y);
         let d1 = C64::new(2.0 * product.im, -2.0 * product.re)
             + C64::new(
@@ -107,26 +98,27 @@ pub(crate) fn relaxing_acoustic_wavenumber(
             );
         let difference = C64::from_re(x) - y;
         let d2 = -(difference * difference);
-        let branch_scale = d0.abs() + d1.abs() + d2.abs();
-        let mut minimum_real = d0.re.min(discriminant.re);
-        if d2.re > 0.0 {
-            let vertex = -0.5 * (d1.re / d2.re);
-            if vertex > 0.0 && vertex < 1.0 {
-                minimum_real = minimum_real.min(d0.re + vertex * (d1.re + vertex * d2.re));
+        let root = continued_discriminant_sqrt(g, d1, d2, discriminant)?;
+        let denominator = root + u;
+        if denominator.abs() >= 0.5 * (root.abs() + u.abs()) {
+            // Retain arbitrarily weak thermal coupling without subtracting
+            // nearby roots. A continued root need not be on the principal
+            // sheet, so the old positive-real denominator guarantee is gone.
+            viscous + correction.scale(0.5) / denominator
+        } else {
+            // w=z^-1 satisfies w^2-Bw-A=0. After a sheet change use whichever
+            // equivalent formula adds the separated roots instead of
+            // subtracting them; the product of the two w roots is -A.
+            let b = viscous + C64::new(y.im, -y.re);
+            let sum = b + root;
+            let difference = b - root;
+            if sum.abs() >= difference.abs() {
+                sum.scale(0.5)
+            } else {
+                let a = (C64::from_re(x) + C64::new(0.0, 1.0 / equilibrium_gamma)) * y;
+                -a / difference.scale(0.5)
             }
         }
-        if !branch_scale.is_finite() || minimum_real <= 64.0 * f64::EPSILON * branch_scale {
-            return Err(
-                "strong mixed caloric/thermal modes require explicit acoustic continuation",
-            );
-        }
-        if discriminant.abs() <= 64.0 * f64::EPSILON * scale
-            || (discriminant.re < 0.0
-                && discriminant.im.abs() <= 128.0 * f64::EPSILON * imaginary_scale)
-        {
-            return Err("relaxing acoustic and thermal branches are unresolved");
-        }
-        viscous + correction.scale(0.5) / (discriminant.sqrt() + u)
     };
     let wave = inverse_z.sqrt().recip().scale(omega / sound_speed);
     if !wave.re.is_finite()
@@ -138,6 +130,86 @@ pub(crate) fn relaxing_acoustic_wavenumber(
         return Err("relaxing acoustic wavenumber is unrepresentable or nonpassive");
     }
     Ok(wave)
+}
+
+/// Continue sqrt(D(t)) from `start_root`, for the quadratic discriminant
+/// D(t)=start_root^2 + linear*t + quadratic*t^2, 0<=t<=1. This is transport
+/// continuation at ONE frequency, not a global causal-analyticity claim.
+///
+/// On each interval [a,b], the quadratic lies in the convex hull of its three
+/// exact Bezier controls D(a), D(a)+(b-a)D'(a)/2, D(b). Enclose that hull in
+/// a disk centered at D(a), with radius at most |D(a)|/2. The whole interval
+/// then avoids zero and changes argument by at most pi/6; the square root
+/// with positive projection on the preceding root is uniquely continued.
+/// This tests an enclosure of the interval, not just sampled endpoints.
+///
+/// The coefficient-scaled roundoff margin also rejects near coalescence.
+/// Storage is constant and at most 256 attempted intervals are evaluated;
+/// unresolved or excessively conditioned paths refuse rather than selecting
+/// a mode from passivity alone. No previous frequency evaluation is needed.
+fn continued_discriminant_sqrt(
+    start_root: C64,
+    linear: C64,
+    quadratic: C64,
+    end_value: C64,
+) -> Result<C64, &'static str> {
+    let constant = start_root * start_root;
+    let scale = constant.abs() + linear.abs() + quadratic.abs();
+    if !scale.is_finite() || scale == 0.0 {
+        return Err("relaxing dispersion continuation is unrepresentable");
+    }
+    let margin = 512.0 * f64::EPSILON * scale;
+    // The common weak/moderate-loss case needs no subdivision: an analytic
+    // minimum of Re(D) establishes the principal sheet on the whole path.
+    let mut minimum_real = constant.re.min(end_value.re);
+    if quadratic.re > 0.0 {
+        let vertex = -0.5 * (linear.re / quadratic.re);
+        if vertex > 0.0 && vertex < 1.0 {
+            minimum_real =
+                minimum_real.min(constant.re + vertex * (linear.re + vertex * quadratic.re));
+        }
+    }
+    if minimum_real > margin {
+        return Ok(end_value.sqrt());
+    }
+    let mut at: f64 = 0.0;
+    let mut step: f64 = 1.0;
+    let mut value = constant;
+    let mut root = start_root;
+    for _ in 0..256 {
+        let next = (at + step).min(1.0);
+        let width = next - at;
+        if width == 0.0 || value.abs() <= margin {
+            return Err("relaxing acoustic and thermal branches are unresolved");
+        }
+        let next_value = if next == 1.0 {
+            end_value
+        } else {
+            constant + (linear + quadratic.scale(next)).scale(next)
+        };
+        let control = value + (linear + quadratic.scale(2.0 * at)).scale(0.5 * width);
+        let radius = (control - value).abs().max((next_value - value).abs());
+        let magnitude = value.abs();
+        if radius <= 0.5 * magnitude && magnitude - radius > margin {
+            let candidate = next_value.sqrt();
+            // The ratio stays near a unit complex value on an accepted step;
+            // it avoids overflowing an unscaled complex dot product.
+            root = if (candidate / root).re >= 0.0 {
+                candidate
+            } else {
+                -candidate
+            };
+            if next == 1.0 {
+                return Ok(root);
+            }
+            at = next;
+            value = next_value;
+            step = (2.0 * width).min(1.0 - at);
+        } else {
+            step = 0.5 * width;
+        }
+    }
+    Err("relaxing acoustic continuation exceeds its bounded resolution")
 }
 
 pub(super) fn acoustic_wavenumber(
@@ -339,19 +411,151 @@ mod tests {
     }
 
     #[test]
-    fn g0_molecular_thermal_mode_switch_cannot_pass_as_absorption() {
+    fn g1_molecular_thermal_cut_crossing_continues_the_acoustic_mode() {
         // Positive Cv_inf=2R and reservoir C=0.25R. The transport ratio is
         // Eucken-consistent. A principal square root without continuation
         // jumps by about 25% between these neighboring frequencies, although
-        // both roots have positive attenuation. Refuse that unresolved domain.
-        for omega in [49.425, 49.430] {
+        // both roots have positive attenuation. The continued root is smooth.
+        let mut waves = Vec::new();
+        let mut principal_waves = Vec::new();
+        for omega in [49.425, 49.430, 100.0, 1000.0] {
             let wt = 0.03 * omega;
             let cv = C64::new(2.0 + 0.25 / (1.0 + wt * wt), 0.25 * wt / (1.0 + wt * wt));
-            assert_eq!(
-                relaxing_acoustic_wavenumber(omega, 1.0, 0.16, 0.54, 13.0 / 9.0, cv),
-                Err("strong mixed caloric/thermal modes require explicit acoustic continuation"),
+            let gamma = 13.0 / 9.0;
+            let k = relaxing_acoustic_wavenumber(omega, 1.0, 0.16, 0.54, gamma, cv).unwrap();
+            // Independent reference: follow the two roots of the ORIGINAL
+            // quadratic in inverse_z through 8192 small transport steps.
+            // The step-size assertion establishes a uniquely nearest root;
+            // this does not use the production discriminant enclosure.
+            let g = (C64::ONE + cv.recip()).scale(gamma.recip());
+            let mut inverse_z = g;
+            for step in 1..=8192 {
+                let fraction = f64::from(step) / 8192.0;
+                let x = omega * 0.16 * fraction;
+                let y = cv.recip().scale(omega * 0.54 * fraction);
+                let a = (C64::from_re(x) + C64::new(0.0, gamma.recip())) * y;
+                let b = g + C64::new(y.im, -x - y.re);
+                let root = (b * b + a.scale(4.0)).sqrt();
+                let first = (b + root).scale(0.5);
+                let second = (b - root).scale(0.5);
+                let next = if (first - inverse_z).abs() < (second - inverse_z).abs() {
+                    first
+                } else {
+                    second
+                };
+                assert!((next - inverse_z).abs() < 0.05 * (first - second).abs());
+                inverse_z = next;
+                if step == 8192 {
+                    principal_waves.push(first.sqrt().recip().scale(omega));
+                }
+            }
+            let expected = inverse_z.sqrt().recip().scale(omega);
+            assert!(
+                relative(k, expected) < 3e-14,
+                "omega={omega}: {k:?} vs {expected:?}"
+            );
+            waves.push(k);
+        }
+        assert!(relative(waves[1], waves[0]) < 1e-4);
+        assert!(relative(principal_waves[1], principal_waves[0]) > 0.2);
+    }
+
+    #[test]
+    fn g1_strong_molecular_continuation_closes_physics_and_scales() {
+        let gamma: f64 = 13.0 / 9.0;
+        for omega in [49.425, 49.430, 100.0, 1000.0, 1e6] {
+            let wt = 0.03 * omega;
+            let cv = C64::new(2.0 + 0.25 / (1.0 + wt * wt), 0.25 * wt / (1.0 + wt * wt));
+            let k = relaxing_acoustic_wavenumber(omega, 1.0, 0.16, 0.54, gamma, cv).unwrap();
+            let g = (C64::ONE + cv.recip()).scale(gamma.recip());
+            let x = omega * 0.16;
+            let y = cv.recip().scale(omega * 0.54);
+            let a = (C64::from_re(x) + C64::new(0.0, gamma.recip())) * y;
+            let b = g + C64::new(y.im, -x - y.re);
+            let z = k.scale(omega.recip()) * k.scale(omega.recip());
+            let quadratic = a * z * z;
+            let linear = b * z;
+            assert!(
+                (quadratic + linear - C64::ONE).abs()
+                    < 3e-14 * (quadratic.abs() + linear.abs() + 1.0)
+            );
+            // Original continuity, energy, EOS and momentum equations with
+            // rho=R=c0=1, T=p=1/gamma and unit peak longitudinal velocity.
+            let density = k.scale(omega.recip());
+            let momentum_pressure = k.recip().scale(omega) + C64::new(0.0, 0.16) * k;
+            let temperature = momentum_pressure - density.scale(gamma.recip());
+            let caloric = cv.scale(omega) * temperature;
+            let conduction = C64::new(0.0, 0.54) * k * k * temperature;
+            let compression = k.scale(gamma.recip());
+            // At extreme transport the caloric and conduction terms nearly
+            // cancel. Check the original energy residual, rather than
+            // amplifying rounding by dividing by that small difference.
+            assert!(
+                (caloric + conduction - compression).abs()
+                    < 3e-14 * (caloric.abs() + conduction.abs() + compression.abs()),
+                "omega={omega}",
+            );
+            if omega <= 1000.0 {
+                let energy_temperature =
+                    k.scale(gamma.recip()) / (cv.scale(omega) + C64::new(0.0, 0.54) * k * k);
+                let energy_pressure = density.scale(gamma.recip()) + energy_temperature;
+                assert!(relative(energy_pressure, momentum_pressure) < 3e-13);
+            }
+            assert!(k.re > 0.0 && k.im > 0.0);
+            let scaled =
+                relaxing_acoustic_wavenumber(7.0 * omega, 3.0, 0.16 / 7.0, 0.54 / 7.0, gamma, cv)
+                    .unwrap();
+            assert!(relative(scaled, k.scale(7.0 / 3.0)) < 3e-14);
+        }
+    }
+
+    #[test]
+    fn g3_quadratic_continuation_tracks_exact_sheet_and_scale() {
+        // D(t)=(g+t*q)^2 has the known continuous square root g+t*q.
+        // It crosses the negative-real cut, including exactly at t=1.
+        let g = C64::new(1.0, -0.125);
+        for q in [-1.0, -1.2, -3.0] {
+            let q = C64::from_re(q);
+            for scale in [1e-100, 1.0, 1e100] {
+                let root_scale = fs_math::det::sqrt(scale);
+                let expected = (g + q).scale(root_scale);
+                let actual = continued_discriminant_sqrt(
+                    g.scale(root_scale),
+                    (g * q).scale(2.0 * scale),
+                    (q * q).scale(scale),
+                    ((g + q) * (g + q)).scale(scale),
+                )
+                .unwrap();
+                assert!(relative(actual, expected) < 3e-14, "q={q:?}, scale={scale}");
+            }
+        }
+    }
+
+    #[test]
+    fn g0_quadratic_continuation_refuses_coalescence_and_roundoff_neighbours() {
+        // D(t)=(1-2t)^2-i*offset. A nonzero endpoint does not establish
+        // separated modes in the interior of the transport path.
+        for offset in [0.0, 1e-15, 1e-13] {
+            let endpoint = C64::new(1.0, -offset);
+            assert!(
+                continued_discriminant_sqrt(
+                    endpoint.sqrt(),
+                    C64::from_re(-4.0),
+                    C64::from_re(4.0),
+                    endpoint,
+                )
+                .is_err()
             );
         }
+        let endpoint = C64::new(1.0, -1e-4);
+        let root = continued_discriminant_sqrt(
+            endpoint.sqrt(),
+            C64::from_re(-4.0),
+            C64::from_re(4.0),
+            endpoint,
+        )
+        .unwrap();
+        assert!(relative(root, endpoint.sqrt()) < 1e-14);
     }
 
     #[test]

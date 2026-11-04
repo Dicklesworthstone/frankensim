@@ -3384,15 +3384,21 @@ rationalized quadratic, retaining weak thermal loss and refusing unresolved
 acoustic/thermal roots. No extra bulk viscosity, wall attenuation or thermal
 mode is added. Zero reservoir strength recovers the full original classical
 dispersion, including outside the leading Stokes--Kirchhoff approximation.
-For complex calorics, admission requires the discriminant's real part to stay
-positive throughout the zero-transport homotopy, whose quadratic minimum is
-checked analytically. Stronger mixed modes require explicit continuation and
-refuse: positive attenuation alone cannot exclude an acoustic/thermal root
-switch. A positive-reservoir, Eucken-ratio regression demonstrates that failure.
-Work is allocation-free and bounded by the admitted reservoir count. Direct
-continuity/momentum/energy residuals, a falsifier for the former multiplier,
-the zero-reservoir limit, dimensional similarity and branch refusals are
-covered by the shared dispersion unit tests and `tests/relaxation_absorption.rs`.
+For complex calorics, the acoustic root continues from zero transport at the
+requested frequency. An analytic positive-real discriminant minimum retains the
+inexpensive separated-mode fast path. Otherwise a quadratic Bezier enclosure
+bounds each complete continuation interval away from zero and tracks the
+square-root sheet across its artificial principal cut. Constant storage and at
+most 256 attempted intervals bound this work; coalescing, numerically unresolved
+or exhausted paths refuse. A stable equivalent quadratic formula avoids a
+cancelling denominator after a sheet change while the original rationalized
+formula retains weak thermal loss. This is pointwise transport continuation,
+not a proof of global frequency analyticity. Independent fine-step inverse-root
+continuation checks the positive-reservoir Eucken crossing that previously
+refused, with original polynomial and continuity/momentum/energy residuals,
+exact cut endpoints, coefficient scaling, coalescence refusals and dimensional
+similarity. The shared dispersion tests and `tests/relaxation_absorption.rs`
+also retain the old-multiplier falsifier and full zero-reservoir limit.
 Continuum, linear-response, constant-transport and original rate-data support
 remain required; no experimental or finite-wavefront claim is inferred.
 
