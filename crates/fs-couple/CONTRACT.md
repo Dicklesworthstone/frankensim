@@ -1124,6 +1124,25 @@ that flow enters the existing finite-aperture Rayleigh receiver and causal
 atmospheric filter. Internal source pressure is not added to physical microphone
 pressure.
 
+The explicitly selected lumped path also admits original tone-hole branches
+with one uniform interior/exterior gas and rigid walls. Each open or vented
+mouth uses its original assembler-selected flow row: the compact neck flux or
+the long chimney's actual terminal flux after its compression cells. Native
+effective aperture already includes open fraction. Closed pads keep their
+acoustic load and emit no receiver flow. Regional tap materials, a distinct
+exterior and chimney wall/source partitions retain explicit refusals.
+
+The existing Rayleigh receiver and causal atmosphere filter are prepared
+individually for every active mouth. They process its actual flow and physical
+range before pressures are summed. `BaffledDuctObservation::openings` retains
+each original axial station, effective radius, translated receiver, filter and
+delay support. Geometry uses the existing parallel-baffle convention: every
+mouth faces +z, with receiver.x shifted by bore_length - opening_station.
+No hole azimuth, arbitrary normal or mutual radiation is inferred. Axial and
+chimney propagation stay in the native state, without a second propagation
+delay, source-pressure proxy or radiation load. The original authored stations
+remain independent of the ladder's numerical cell-length correction.
+
 The physical image selects the original mass-conserving frustum owner before
 passive-pitch admission. Its prepared chain carries the original `RegionalDuct`
 reference, is borrowed by the passive impedance and pitch gate, then moves
@@ -1177,8 +1196,8 @@ observation does not certify its continuum loading accuracy. Axial propagation
 stays in the spatial ODE, so the receipt reports zero separately factored
 axial-delay samples; finite spatial resolution does not claim an exact continuum
 wavefront. Receiver geometry, exterior delay, quadrature band and all media remain
-explicit. Side openings and separate body receivers require their supported
-owners and refuse on this bounded path.
+explicit. Side openings retain the uniform-gas/rigid-wall scope above; separate
+body receivers require their own supported owner and refuse on this path.
 
 Authored G1/G3 regressions cover retarded inverse-range pressure for massive and
 quasistatic reeds on cylinders and single cones, absolute-pressure substitution,
@@ -23022,10 +23041,11 @@ remain independent of interior and exterior gases. These new Rust cases are
 unexecuted; nine changed Rust files passed pinned parsing and bounded source/API
 review, with scoped whitespace checks passing.
 
-This explicit image currently admits unbranched cylinder/cone bores, their local
-wall law, a flanged terminal and the original default characteristic ladder.
-Other body/string/cavity members, side holes, extra excitations and unsupported
-discretization requests refuse. Existing default assembly paths are unchanged.
+This image's default characteristic route admits unbranched cylinder/cone bores,
+their local wall law and a flanged terminal. The explicitly selected lumped route
+also admits tone holes under the uniform-gas/rigid-wall scope documented above.
+Other body/string/cavity members, extra excitations and unsupported discretization
+requests refuse. Existing default assembly paths are unchanged.
 Any explicit gas binding requires an explicit observer law, including an explicit
 lossless/classical choice with its labelled molecular-relaxation omission. ISO or
 molecular laws retain their original admission; scenario air alone preserves the

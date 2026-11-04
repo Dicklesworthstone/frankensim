@@ -23,9 +23,10 @@ use fs_scenario::{AcousticAssembly, WaveguideEnd};
 
 /// Explicit regional materials and exterior receiver for one reed-driven bore.
 ///
-/// This bounded image admits an unbranched cylinder/cone chain with its existing
-/// local wall law and flanged termination. Strings, separate body/plate/cavity
-/// members, other excitation and tone holes refuse; none is silently dropped.
+/// This bounded image admits a cylinder/cone chain with its existing local wall
+/// law and flanged termination. The physical lumped route also admits native
+/// tone holes with uniform gas, the same exterior and rigid walls. Strings,
+/// separate body/plate/cavity members and other excitation retain their refusals.
 /// The explicit lumped ladder uses the original compression-volume/volume-flow
 /// frustum owner, including for a single widening cone, with regional interior
 /// gases, an independent pressure-matched exterior and either the original
@@ -47,8 +48,13 @@ use fs_scenario::{AcousticAssembly, WaveguideEnd};
 /// actual radius and slanted strip area; the same source supplies the TMM gate.
 /// This is frozen local membrane motion, without axial shell coupling, static
 /// pressure prestress or wall radiation. Source applicability and the original
-/// exact-propagator frequency admission remain binding. Side-hole and general body microphones
-/// retain their existing dedicated owners and are not inferred from this input.
+/// exact-propagator frequency admission remain binding. Open/vented side mouths
+/// use their actual native terminal flow (after all long-chimney compression),
+/// effective open radius and individual receiver/atmosphere history. Closed pads
+/// retain their load but emit no mouth flow. Their geometry uses the existing
+/// parallel-baffle convention: every opening faces +z and a hole at axial station
+/// x has receiver coordinate receiver.x + bore_length - x. This does not infer
+/// an instrument's hole azimuths, arbitrary normals or unmodeled mutual radiation.
 ///
 /// Frozen gas regions share one static pressure. This is not advective mixing,
 /// evolving breath, wall radiation or experimental qualification of an instrument.
@@ -103,6 +109,131 @@ pub struct BaffledDuctObservation {
     pub axial_delay_samples: usize,
     /// Retarded Rayleigh kernel's minimum and maximum sample delays.
     pub exterior_delay_samples: (usize, usize),
+    /// Active side mouths in original bore order, excluding closed pads. Each
+    /// uses its own range, delay and atmospheric filter before pressure summation.
+    pub openings: Vec<BaffledDuctOpeningObservation>,
+}
+
+/// One original open/vented mouth in the explicitly selected parallel baffle.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BaffledDuctOpeningObservation {
+    /// Authored physical axial station [m], before numerical cell alignment.
+    pub axial_position_m: f64,
+    /// Native aperture radius including sqrt(open_fraction) [m].
+    pub effective_radius_m: f64,
+    /// Bell receiver translated by bore_length - axial_position along x;
+    /// every mouth uses the same +z normal. No separate chimney delay is added.
+    pub receiver: CircularOutletReceiver,
+    /// This mouth's own center-range atmosphere and delay allocation.
+    pub filter: ObserverFilterReceipt,
+    /// Physical Rayleigh delay support on the source sample clock.
+    pub exterior_delay_samples: (usize, usize),
+}
+
+struct SpatialMouthReceiver {
+    microphone: BaffledPressure,
+    atmosphere: ObserverFilter,
+}
+
+impl SpatialMouthReceiver {
+    fn step(&mut self, flow: f64) -> Result<f64, AcousticRealizeError> {
+        let pressure = self.microphone.step(&[flow]).map_err(receiver_error)?;
+        Ok(self.atmosphere.process(pressure))
+    }
+}
+
+// Original per-mouth receivers only; no source transfer or extra axial delay.
+pub(super) struct SpatialDuctReceivers {
+    bell: SpatialMouthReceiver,
+    openings: Vec<SpatialMouthReceiver>,
+}
+
+impl SpatialDuctReceivers {
+    pub(super) fn bell_only(microphone: BaffledPressure, atmosphere: ObserverFilter) -> Self {
+        Self {
+            bell: SpatialMouthReceiver {
+                microphone,
+                atmosphere,
+            },
+            openings: Vec::new(),
+        }
+    }
+
+    pub(super) fn opening_count(&self) -> usize {
+        self.openings.len()
+    }
+
+    pub(super) fn observe(
+        &mut self,
+        bell: &fs_phs::acoustic_outlet::AcousticOutletFlow,
+        openings: &[fs_phs::acoustic_outlet::AcousticTapFlow],
+        state: &[f64],
+    ) -> Result<f64, AcousticRealizeError> {
+        if openings.len() != self.openings.len() {
+            return Err(invalid(
+                "physical opening rows and receivers must remain aligned",
+            ));
+        }
+        let flow = bell
+            .volume_flow_m3_s(state)
+            .map_err(super::render_phs_error)?;
+        let mut pressure = self.bell.step(flow)?;
+        for (opening, receiver) in openings.iter().zip(&mut self.openings) {
+            let flow = opening
+                .flow
+                .volume_flow_m3_s(state)
+                .map_err(super::render_phs_error)?;
+            pressure += receiver.step(flow)?;
+        }
+        if !pressure.is_finite() {
+            return Err(invalid("physical lumped duct pressure left the finite set"));
+        }
+        Ok(pressure)
+    }
+}
+
+fn receiver_error(error: String) -> AcousticRealizeError {
+    AcousticRealizeError::DuctObserver(
+        crate::driving_point::regional::outlet::OutletError::Receiver(error),
+    )
+}
+
+fn receiver_filter(
+    law: GasAbsorptionModel,
+    exterior: &GasState,
+    options: &RealizeOptions<'_>,
+    receiver: CircularOutletReceiver,
+    radius_m: f64,
+    sample_rate_hz: u32,
+) -> Result<ObserverFilter, AcousticRealizeError> {
+    let [x, y, z] = receiver.position_m;
+    let range_m = x.hypot(y).hypot(z);
+    if !range_m.is_finite() || range_m <= 0.0 {
+        return Err(invalid(
+            "physical receiver range must be finite and positive",
+        ));
+    }
+    let observer = ObserverFilter::for_law(
+        law,
+        exterior,
+        options.observer_relaxation,
+        range_m,
+        sample_rate_hz,
+    )?;
+    let filter = observer.receipt();
+    let near_m = (x.hypot(y) - radius_m).max(0.0).hypot(z);
+    let rate = f64::from(sample_rate_hz);
+    let available_samples = near_m / exterior.sound_speed * rate;
+    let needed_samples = near_m * filter.low_frequency_delay_s / range_m * rate + 1.0;
+    if filter.delay_speed_m_s.is_none() || available_samples < needed_samples {
+        return Err(AcousticRealizeError::ObserverLatency {
+            range_m,
+            available_samples,
+            needed_samples,
+            budget_energy: filter.budget_energy,
+        });
+    }
+    Ok(observer)
 }
 
 fn invalid(what: &'static str) -> AcousticRealizeError {
@@ -144,9 +275,15 @@ pub(super) fn realize(
     let reed = assembly
         .reed
         .ok_or_else(|| invalid("physical duct observation requires a reed excitation"))?;
-    if !duct.tone_holes.is_empty() {
+    let has_holes = !duct.tone_holes.is_empty();
+    if has_holes && !is_lumped {
         return Err(invalid(
-            "physical assembly observation currently requires an unbranched bore; side mouths need individual receiver paths",
+            "physical assembly side-mouth observation requires the explicit lumped ladder",
+        ));
+    }
+    if has_holes && (duct.wall.is_some() || binding.material_wall.is_some()) {
+        return Err(invalid(
+            "physical side mouths require rigid walls; chimney wall partition is not represented",
         ));
     }
     if duct.termination != WaveguideEnd::FlangedOpen {
@@ -172,10 +309,25 @@ pub(super) fn realize(
                 Some(gas) => gas,
                 None => gas_state(assembly.ambient)?,
             };
-            vec![gas; physical.segments.len()]
+            vec![gas; duct.segments.len()]
         }
     };
-    let regional = RegionalDuct::new(&physical, &gases).map_err(AcousticRealizeError::Duct)?;
+    let regional_gases = if has_holes {
+        if gases.len() != duct.segments.len()
+            || gases.first().is_none()
+            || gases.iter().any(|gas| Some(gas) != gases.first())
+        {
+            return Err(invalid(
+                "physical side mouths require one uniform interior gas; regional tap ownership is not represented",
+            ));
+        }
+        // The same uniform state also owns native zero-length hole records.
+        vec![gases[0]; physical.segments.len()]
+    } else {
+        gases.clone()
+    };
+    let regional =
+        RegionalDuct::new(&physical, &regional_gases).map_err(AcousticRealizeError::Duct)?;
     let regional = match binding.exterior_gas {
         Some(gas) => regional
             .with_exterior_gas(gas)
@@ -190,6 +342,11 @@ pub(super) fn realize(
     };
     let exterior = *regional.exterior_gas();
     let interior = *regional.inlet_gas();
+    if has_holes && exterior != interior {
+        return Err(invalid(
+            "physical side mouths require the same exterior gas as their native chimney load",
+        ));
+    }
     let [x, y, z] = binding.receiver.position_m;
     let range_m = x.hypot(y).hypot(z);
     if !range_m.is_finite() || range_m <= 0.0 {
@@ -210,37 +367,26 @@ pub(super) fn realize(
             "an observer relaxation state needs the MolecularRelaxation observer law",
         ));
     }
-    let mut observer = ObserverFilter::for_law(
-        law,
-        &exterior,
-        options.observer_relaxation,
-        range_m,
-        assembly.sample_rate_hz,
-    )?;
-    let filter = *observer.receipt();
     let radius_m = physical
         .segments
         .last()
         .expect("admitted nonempty duct")
         .outlet_radius();
-    let near_m = (x.hypot(y) - radius_m).max(0.0).hypot(z);
-    let rate = f64::from(assembly.sample_rate_hz);
-    let available_samples = near_m / exterior.sound_speed * rate;
-    let needed_samples = near_m * filter.low_frequency_delay_s / range_m * rate + 1.0;
-    if filter.delay_speed_m_s.is_none() || available_samples < needed_samples {
-        return Err(AcousticRealizeError::ObserverLatency {
-            range_m,
-            available_samples,
-            needed_samples,
-            budget_energy: filter.budget_energy,
-        });
-    }
+    let mut observer = receiver_filter(
+        law,
+        &exterior,
+        options,
+        binding.receiver,
+        radius_m,
+        assembly.sample_rate_hz,
+    )?;
+    let filter = *observer.receipt();
     let delay_speed_m_s = filter
         .delay_speed_m_s
         .expect("admitted positive receiver delay");
     let count = sample_count(assembly.sample_rate_hz, assembly.duration_s)?;
     if is_lumped {
-        let mut microphone = BaffledPressure::circular_outlet(
+        let microphone = BaffledPressure::circular_outlet(
             radius_m,
             assembly.sample_rate_hz,
             binding.receiver,
@@ -249,13 +395,46 @@ pub(super) fn realize(
                 sound_speed: delay_speed_m_s,
             },
         )
-        .map_err(|error| {
-            AcousticRealizeError::DuctObserver(
-                crate::driving_point::regional::outlet::OutletError::Receiver(error),
-            )
-        })?;
+        .map_err(receiver_error)?;
         let exterior_delay_samples = microphone.delay_samples;
-        let (mut pressure_pa, bore_receipt) = realize_reed_on_duct_with_receiver(
+        let mut receivers = SpatialDuctReceivers::bell_only(microphone, observer);
+        let mut openings = Vec::new();
+        let length_m = regional.total_axial_length_m();
+        for site in regional.open_hole_sites() {
+            let mut receiver = binding.receiver;
+            receiver.position_m[0] += length_m - site.axial_position_m;
+            let atmosphere = receiver_filter(
+                law,
+                &exterior,
+                options,
+                receiver,
+                site.effective_radius_m,
+                assembly.sample_rate_hz,
+            )?;
+            let filter = *atmosphere.receipt();
+            let microphone = BaffledPressure::circular_outlet(
+                site.effective_radius_m,
+                assembly.sample_rate_hz,
+                receiver,
+                RayleighMedium {
+                    density: exterior.density,
+                    sound_speed: filter.delay_speed_m_s.expect("admitted side-mouth delay"),
+                },
+            )
+            .map_err(receiver_error)?;
+            openings.push(BaffledDuctOpeningObservation {
+                axial_position_m: site.axial_position_m,
+                effective_radius_m: site.effective_radius_m,
+                receiver,
+                filter,
+                exterior_delay_samples: microphone.delay_samples,
+            });
+            receivers.openings.push(SpatialMouthReceiver {
+                microphone,
+                atmosphere,
+            });
+        }
+        let (pressure_pa, bore_receipt) = realize_reed_on_duct_with_receiver(
             duct,
             reed,
             &mut PlateBank::default(),
@@ -264,14 +443,8 @@ pub(super) fn realize(
             assembly.sample_rate_hz,
             count,
             options.bore,
-            Some((&mut microphone, regional, binding.material_wall)),
+            Some((&mut receivers, regional, binding.material_wall)),
         )?;
-        for pressure in &mut pressure_pa {
-            *pressure = observer.process(*pressure);
-            if !pressure.is_finite() {
-                return Err(invalid("physical lumped duct pressure left the finite set"));
-            }
-        }
         return Ok(RealizedAssembly {
             sample_rate_hz: assembly.sample_rate_hz,
             pressure_pa,
@@ -286,6 +459,7 @@ pub(super) fn realize(
                 filter,
                 axial_delay_samples: 0,
                 exterior_delay_samples,
+                openings,
             }),
         });
     }
@@ -347,6 +521,145 @@ pub(super) fn realize(
             filter,
             axial_delay_samples: receiver.axial_delay_samples,
             exterior_delay_samples: receiver.exterior_delay_samples,
+            openings: Vec::new(),
         }),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opening_observation_filters_each_native_flow_before_pressure_summation() {
+        use fs_phs::{AcousticSection, AcousticTap, ChainOutlet, MouthFlange};
+        let gas = GasState::try_new(
+            &fs_material::gas::GasSpec::dry_air_ussa1976(),
+            293.15,
+            101_325.0,
+        )
+        .unwrap();
+        let rate = 16_000;
+        let sections = [AcousticSection {
+            length: 0.3,
+            radius: 0.004,
+            outlet_radius: 0.004,
+            cells: 6,
+        }];
+        let taps = [
+            AcousticTap {
+                station: 0.3,
+                neck_length: 0.003,
+                neck_radius: 0.001,
+                open_fraction: 0.25,
+            },
+            AcousticTap {
+                station: 0.5,
+                neck_length: 0.01,
+                neck_radius: 0.001,
+                open_fraction: 0.0,
+            },
+            AcousticTap {
+                station: 0.7,
+                neck_length: 0.05,
+                neck_radius: 0.00125,
+                open_fraction: 1.0,
+            },
+        ];
+        let (source, bell, holes) = fs_phs::acoustic_outlet::acoustic_chain_with_opening_flows(
+            &sections,
+            gas.density,
+            gas.sound_speed,
+            ChainOutlet::Radiating(MouthFlange::Flanged),
+            1,
+            &taps,
+            None,
+            None,
+        )
+        .unwrap();
+        let receiver = CircularOutletReceiver {
+            position_m: [0.25, 0.0, 0.75],
+            radial_rings: 1,
+            angular_points: 8,
+            maximum_frequency_hz: 400.0,
+        };
+        let settings = RealizeOptions::default();
+        let law = GasAbsorptionModel::StokesKirchhoff;
+        let mut geometry = vec![(0.004, receiver)];
+        for hole in &holes {
+            let mut position = receiver;
+            position.position_m[0] += sections[0].length * (1.0 - hole.station);
+            geometry.push((hole.effective_radius_m, position));
+        }
+        let actual_mouth = |(radius, receiver): (f64, CircularOutletReceiver)| {
+            let atmosphere = receiver_filter(law, &gas, &settings, receiver, radius, rate).unwrap();
+            let microphone = BaffledPressure::circular_outlet(
+                radius,
+                rate,
+                receiver,
+                RayleighMedium {
+                    density: gas.density,
+                    sound_speed: atmosphere.receipt().delay_speed_m_s.unwrap(),
+                },
+            )
+            .unwrap();
+            SpatialMouthReceiver {
+                microphone,
+                atmosphere,
+            }
+        };
+        let mut actual = SpatialDuctReceivers {
+            bell: actual_mouth(geometry[0]),
+            openings: geometry[1..].iter().copied().map(actual_mouth).collect(),
+        };
+        // Independent original receiver/filter instances use each physical
+        // center range. Applying the bell's filter after summing is different.
+        let mut expected: Vec<_> = geometry
+            .iter()
+            .map(|&(radius, receiver)| {
+                let [x, y, z] = receiver.position_m;
+                let filter =
+                    ObserverFilter::for_law(law, &gas, None, x.hypot(y).hypot(z), rate).unwrap();
+                let microphone = BaffledPressure::circular_outlet(
+                    radius,
+                    rate,
+                    receiver,
+                    RayleighMedium {
+                        density: gas.density,
+                        sound_speed: filter.receipt().delay_speed_m_s.unwrap(),
+                    },
+                )
+                .unwrap();
+                (microphone, filter)
+            })
+            .collect();
+        assert_ne!(
+            expected[0].1.receipt().range_m,
+            expected[1].1.receipt().range_m
+        );
+        let mut state = vec![0.0; source.state_dim()];
+        let mut amplitude = 0.0_f64;
+        for sample in 0..128 {
+            state = fs_phs::step(
+                &source,
+                &state,
+                &[if sample < 20 { 1e-4 } else { 0.0 }],
+                1.0 / f64::from(rate),
+            )
+            .unwrap()
+            .x;
+            let effort = source.effort(&state);
+            // Actual physical effort coordinates: bell; compact vent; long
+            // terminal after its two compression cells. No neck substitution.
+            let flows = [effort[11], -effort[12], effort[17]];
+            let mut independent = 0.0;
+            for ((microphone, atmosphere), flow) in expected.iter_mut().zip(flows) {
+                independent += atmosphere.process(microphone.step(&[flow]).unwrap());
+            }
+            let observed = actual.observe(&bell, &holes, &state).unwrap();
+            amplitude = amplitude.max(independent.abs());
+            assert!((observed - independent).abs() < 1e-12 * independent.abs().max(1e-12));
+        }
+        assert!(amplitude > 0.0);
+    }
 }

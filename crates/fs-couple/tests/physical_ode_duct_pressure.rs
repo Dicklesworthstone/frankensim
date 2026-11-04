@@ -11,8 +11,8 @@ use fs_couple::driving_point::regional::material_wall::MaterialWallLayout;
 use fs_couple::pcm_wav::baffled::CircularOutletReceiver;
 use fs_material::gas::{GasSpec, GasState};
 use fs_scenario::{
-    AcousticAssembly, AmbientGas, BeatingReed, CylinderSegment, Listener, ViscothermalDuct,
-    WaveguideEnd,
+    AcousticAssembly, AmbientGas, BeatingReed, CylinderSegment, Listener, ToneHole,
+    ViscothermalDuct, WaveguideEnd,
 };
 
 const RATE: u32 = 16_000;
@@ -186,6 +186,156 @@ fn options(gas: GasState, path_samples: usize) -> RealizeOptions<'static> {
             receiver: receiver(gas, path_samples, 0.004),
         }),
         ..RealizeOptions::default()
+    }
+}
+
+fn input_with_side_mouths(mass_kg: f64) -> AcousticAssembly {
+    let mut assembly = input(mass_kg);
+    let duct = assembly.duct.as_mut().unwrap();
+    duct.segments = vec![CylinderSegment::cylinder(0.004, 0.1); 3];
+    // Deliberately declare the downstream long chimney first. Native bore
+    // order, including the retained closed pad, owns the observation mapping.
+    duct.tone_holes = vec![
+        ToneHole {
+            after_segment: 1,
+            radius_m: 0.00125,
+            chimney_m: 0.05,
+            open_fraction: 1.0,
+        },
+        ToneHole {
+            after_segment: 0,
+            radius_m: 0.001,
+            chimney_m: 0.01,
+            open_fraction: 0.0,
+        },
+        ToneHole {
+            after_segment: 0,
+            radius_m: 0.0008,
+            chimney_m: 0.001,
+            open_fraction: 0.25,
+        },
+    ];
+    assembly
+}
+
+#[test]
+fn native_short_vent_and_long_mouth_emit_through_their_own_physical_paths() {
+    let gas = gas(101_325.0);
+    for mass in [0.0, 1e-4] {
+        let assembly = input_with_side_mouths(mass);
+        let mut settings = options(gas, 16);
+        settings.bore = BoreRealization::lumped_ladder_with_tolerance(6, 500.0);
+        let rendered = realize_assembly_with_options(&assembly, &settings).unwrap();
+        let receipt = rendered.duct_observer.as_ref().unwrap();
+        assert_eq!(receipt.openings.len(), 2);
+        assert_eq!(receipt.segment_gases, vec![gas; 3]);
+        assert_eq!(receipt.axial_delay_samples, 0);
+        let mut minimum_delay = receipt.exterior_delay_samples.0;
+        for (mouth, (station, radius)) in
+            receipt.openings.iter().zip([(0.1, 0.0004), (0.2, 0.00125)])
+        {
+            assert!((mouth.axial_position_m - station).abs() < 1e-15);
+            assert_eq!(mouth.effective_radius_m, radius);
+            let mut expected_receiver = receipt.receiver;
+            expected_receiver.position_m[0] += 0.3 - station;
+            for (actual, expected) in mouth
+                .receiver
+                .position_m
+                .iter()
+                .zip(expected_receiver.position_m)
+            {
+                assert!((actual - expected).abs() < 1e-15);
+            }
+            let [x, y, z] = mouth.receiver.position_m;
+            assert_eq!(mouth.filter.range_m, x.hypot(y).hypot(z));
+            assert_eq!(mouth.filter.absorption.law, GasAbsorptionModel::Lossless);
+            assert_eq!(mouth.filter.delay_speed_m_s, Some(gas.sound_speed));
+            minimum_delay = minimum_delay.min(mouth.exterior_delay_samples.0);
+        }
+        assert!(
+            rendered.pressure_pa[..minimum_delay.saturating_sub(1)]
+                .iter()
+                .all(|p| *p == 0.0)
+        );
+        assert!(rendered.pressure_pa.iter().any(|p| *p != 0.0));
+        assert!(rendered.pressure_pa.iter().all(|p| p.is_finite()));
+        // A uniform explicit axial profile binds the identical gas to native
+        // hole records; it cannot become a second assembly or a different sound.
+        let gases = [gas; 3];
+        let bound = RealizeOptions {
+            gas: None,
+            baffled_duct: Some(BaffledDuctObserver {
+                segment_gases: Some(&gases),
+                ..settings.baffled_duct.unwrap()
+            }),
+            ..settings
+        };
+        let uniform = realize_assembly_with_options(&assembly, &bound).unwrap();
+        assert_eq!(uniform.pressure_pa, rendered.pressure_pa);
+        assert_eq!(uniform.bore_receipt, rendered.bore_receipt);
+    }
+    let mut closed = input_with_side_mouths(0.0);
+    for hole in &mut closed.duct.as_mut().unwrap().tone_holes {
+        hole.open_fraction = 0.0;
+    }
+    let mut settings = options(gas, 16);
+    settings.bore = BoreRealization::lumped_ladder_with_tolerance(6, 500.0);
+    let rendered = realize_assembly_with_options(&closed, &settings).unwrap();
+    assert!(rendered.duct_observer.unwrap().openings.is_empty());
+    assert!(rendered.pressure_pa.iter().any(|p| *p != 0.0));
+}
+
+#[test]
+fn side_mouths_refuse_unowned_medium_and_wall_partitions() {
+    let gas = gas(101_325.0);
+    let assembly = input_with_side_mouths(0.0);
+    let mut settings = options(gas, 16);
+    settings.bore = BoreRealization::lumped_ladder_with_tolerance(6, 500.0);
+    let outside = GasState::try_new(&GasSpec::dry_air_ussa1976(), 310.0, gas.pressure).unwrap();
+    settings.baffled_duct.as_mut().unwrap().exterior_gas = Some(outside);
+    match realize_assembly_with_options(&assembly, &settings).unwrap_err() {
+        AcousticRealizeError::InvalidDescription { what } => {
+            assert!(what.contains("same exterior"))
+        }
+        other => panic!("unexpected side-mouth exterior refusal: {other:?}"),
+    }
+    settings.baffled_duct.as_mut().unwrap().exterior_gas = None;
+    let gases = [gas, outside, gas];
+    let regional = RealizeOptions {
+        gas: None,
+        baffled_duct: Some(BaffledDuctObserver {
+            segment_gases: Some(&gases),
+            ..settings.baffled_duct.unwrap()
+        }),
+        ..settings
+    };
+    match realize_assembly_with_options(&assembly, &regional).unwrap_err() {
+        AcousticRealizeError::InvalidDescription { what } => {
+            assert!(what.contains("uniform interior"))
+        }
+        other => panic!("unexpected side-mouth regional refusal: {other:?}"),
+    }
+    let mut walled = assembly.clone();
+    walled.duct.as_mut().unwrap().wall = Some(fs_scenario::LocallyReactingWall {
+        surface_density_kg_m2: 0.1,
+        stiffness_pa_per_m: 1e7,
+        resistance_pa_s_per_m: 10.0,
+    });
+    match realize_assembly_with_options(&walled, &settings).unwrap_err() {
+        AcousticRealizeError::InvalidDescription { what } => assert!(what.contains("rigid walls")),
+        other => panic!("unexpected side-mouth wall refusal: {other:?}"),
+    }
+    let layout = MaterialWallLayout::Uniform(sourced_wall(None, [1.0, 1e7]));
+    let sourced = RealizeOptions {
+        baffled_duct: Some(BaffledDuctObserver {
+            material_wall: Some(&layout),
+            ..settings.baffled_duct.unwrap()
+        }),
+        ..settings
+    };
+    match realize_assembly_with_options(&assembly, &sourced).unwrap_err() {
+        AcousticRealizeError::InvalidDescription { what } => assert!(what.contains("rigid walls")),
+        other => panic!("unexpected side-mouth material-wall refusal: {other:?}"),
     }
 }
 

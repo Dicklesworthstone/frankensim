@@ -40,7 +40,8 @@ pub(super) fn realize_reed_ode(
 
 struct ReedOutletObserver<'a> {
     flow: fs_phs::acoustic_outlet::AcousticOutletFlow,
-    receiver: &'a mut crate::pcm_wav::baffled::BaffledPressure,
+    openings: Vec<fs_phs::acoustic_outlet::AcousticTapFlow>,
+    receiver: &'a mut duct_observer::SpatialDuctReceivers,
 }
 
 // Admit the same physical frustum that will produce the outlet history. The
@@ -60,11 +61,16 @@ impl<'a> PreparedReedOutlet<'a> {
         reference: crate::driving_point::regional::RegionalDuct,
         wall: Option<LocallyReactingWall>,
         material_wall: Option<&crate::driving_point::regional::material_wall::MaterialWallLayout>,
-        receiver: &'a mut crate::pcm_wav::baffled::BaffledPressure,
+        receiver: &'a mut duct_observer::SpatialDuctReceivers,
     ) -> Result<Self, AcousticRealizeError> {
-        if !taps.is_empty() {
+        if !taps.is_empty()
+            && (wall.is_some()
+                || material_wall.is_some()
+                || nonuniform_interior(&reference)
+                || reference.exterior_gas() != reference.inlet_gas())
+        {
             return Err(AcousticRealizeError::InvalidDescription {
-                what: "physical ODE outlet observation requires separate receivers for side openings",
+                what: "physical ODE side mouths require uniform gas, the same exterior and rigid walls",
             });
         }
         use crate::driving_point::regional::material_wall::MaterialWallLayout;
@@ -96,7 +102,19 @@ impl<'a> PreparedReedOutlet<'a> {
             })
             .collect();
         let exterior = reference.exterior_gas();
-        let (line, flow) = if let Some(materials) = material_wall {
+        let (line, flow, openings) = if !taps.is_empty() {
+            let gas = reference.inlet_gas();
+            fs_phs::acoustic_outlet::acoustic_chain_with_opening_flows(
+                sections,
+                gas.density,
+                gas.sound_speed,
+                outlet,
+                1,
+                taps,
+                Some(&viscothermal_pin(gas)),
+                None,
+            )
+        } else if let Some(materials) = material_wall {
             let geometry = fs_phs::acoustic_outlet::acoustic_cell_geometry(sections)
                 .map_err(render_phs_error)?;
             let walls = geometry
@@ -118,6 +136,7 @@ impl<'a> PreparedReedOutlet<'a> {
                 1,
                 &walls,
             )
+            .map(|(line, flow)| (line, flow, Vec::new()))
         } else {
             fs_phs::acoustic_outlet::acoustic_chain_with_regional_outlet_flow(
                 sections,
@@ -128,12 +147,31 @@ impl<'a> PreparedReedOutlet<'a> {
                 1,
                 wall_pin(wall).as_ref(),
             )
+            .map(|(line, flow)| (line, flow, Vec::new()))
         }
         .map_err(render_phs_error)?;
+        let sites = reference.open_hole_sites();
+        let length = reference.total_axial_length_m();
+        if openings.len() != receiver.opening_count()
+            || openings.len() != sites.len()
+            || openings.iter().zip(&sites).any(|(flow, site)| {
+                flow.effective_radius_m != site.effective_radius_m
+                    || (flow.station * length - site.axial_position_m).abs()
+                        > 16.0 * f64::EPSILON * length
+            })
+        {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "native opening rows and original physical mouth geometry must agree",
+            });
+        }
         Ok(Self {
             line,
             reference,
-            observer: ReedOutletObserver { flow, receiver },
+            observer: ReedOutletObserver {
+                flow,
+                openings,
+                receiver,
+            },
         })
     }
 }
@@ -161,9 +199,9 @@ pub(super) fn realize_reed_ode_with_receiver(
         });
     }
     let inlets = if plates.is_empty() { 1 } else { 2 };
-    if receiver.is_some() && (!plates.is_empty() || !taps.is_empty()) {
+    if receiver.is_some() && !plates.is_empty() {
         return Err(AcousticRealizeError::InvalidDescription {
-            what: "physical ODE outlet observation requires separate receivers for plates and side openings",
+            what: "physical ODE outlet observation requires separate receivers for plates",
         });
     }
     let (line, mut receiver) = if let Some(receiver) = receiver {
@@ -234,15 +272,9 @@ fn observe_pressure(
     dt: f64,
 ) -> Result<f64, AcousticRealizeError> {
     if let Some(receiver) = receiver {
-        let flow = receiver
-            .flow
-            .volume_flow_m3_s(next_state)
-            .map_err(render_phs_error)?;
-        return receiver.receiver.step(&[flow]).map_err(|error| {
-            AcousticRealizeError::DuctObserver(
-                crate::driving_point::regional::outlet::OutletError::Receiver(error),
-            )
-        });
+        return receiver
+            .receiver
+            .observe(&receiver.flow, &receiver.openings, next_state);
     }
     Ok(source_pressure_pa
         + plate_chain_radiation(observation, next_state, state, gas, listener_m, dt)?)

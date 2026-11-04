@@ -327,11 +327,12 @@ pub struct RealizeOptions<'a> {
     /// evaluated for another gas, or a state supplied with another law, refuses
     /// instead of being ignored.
     pub observer_relaxation: Option<&'a fs_material::relaxation::RelaxationState>,
-    /// Physical flanged-outlet microphone for an unbranched reed-driven duct.
+    /// Physical mouth microphones for a reed-driven duct with a flanged outlet.
     /// Its regional gas, exterior load and causal observation share the existing
     /// owners. A lumped ladder admits and advances the same original regional
     /// gas/material-wall frustum model, including for a single cone, and exports
-    /// its terminal flow. Other coupled
+    /// its terminal flow. Uniform-gas rigid-wall ladders also observe each native
+    /// open/vented side mouth through its individual parallel-baffle path. Other coupled
     /// members and unsupported medium/wall combinations refuse explicitly.
     /// The observer law/relaxation above applies to this path's exterior gas;
     /// the receiver position replaces `assembly.listener.distance_m`.
@@ -4988,7 +4989,7 @@ fn realize_reed_on_duct_with_receiver(
     n: usize,
     bore: BoreRealization,
     receiver: Option<(
-        &mut crate::pcm_wav::baffled::BaffledPressure,
+        &mut duct_observer::SpatialDuctReceivers,
         crate::driving_point::regional::RegionalDuct,
         Option<&crate::driving_point::regional::material_wall::MaterialWallLayout>,
     )>,
@@ -6263,7 +6264,7 @@ mod lumped_ladder_resonance_tests {
         };
         let physics = physics_duct(&duct).unwrap();
         let (sections, taps) = bore_spec_with_cells(&duct, 4).unwrap();
-        let mut microphone = BaffledPressure::circular_outlet(
+        let microphone = BaffledPressure::circular_outlet(
             0.004, 16_000,
             CircularOutletReceiver {
                 position_m: [0.0, 0.0, 1.0],
@@ -6273,6 +6274,12 @@ mod lumped_ladder_resonance_tests {
             },
             RayleighMedium { density: exterior.density, sound_speed: exterior.sound_speed },
         ).unwrap();
+        let mut microphone = duct_observer::SpatialDuctReceivers::bell_only(
+            microphone,
+            crate::air_path::ObserverFilter::for_law(
+                crate::air_path::GasAbsorptionModel::Lossless, &exterior, None, 1.0, 16_000,
+            ).unwrap(),
+        );
         let prepared = reed_ode::PreparedReedOutlet::new(
             &sections, duct_outlet(duct.termination), &taps,
             crate::driving_point::regional::RegionalDuct::new(&physics, &[interior])
@@ -6347,7 +6354,7 @@ mod lumped_ladder_resonance_tests {
         let (mut sections, taps) = bore_spec_with_cells(&duct, 6).unwrap();
         let (counts, _, _) = regional_lumped_cells(&physics, &regional, 6, 500.0).unwrap();
         for (section, count) in sections.iter_mut().zip(counts) { section.cells = count; }
-        let mut microphone = BaffledPressure::circular_outlet(
+        let microphone = BaffledPressure::circular_outlet(
             0.004, 16_000,
             CircularOutletReceiver {
                 position_m: [0.0, 0.0, 1.0], radial_rings: 1, angular_points: 8,
@@ -6355,6 +6362,12 @@ mod lumped_ladder_resonance_tests {
             },
             RayleighMedium { density: exterior.density, sound_speed: exterior.sound_speed },
         ).unwrap();
+        let mut microphone = duct_observer::SpatialDuctReceivers::bell_only(
+            microphone,
+            crate::air_path::ObserverFilter::for_law(
+                crate::air_path::GasAbsorptionModel::Lossless, &exterior, None, 1.0, 16_000,
+            ).unwrap(),
+        );
         let prepared = reed_ode::PreparedReedOutlet::new(
             &sections, duct_outlet(duct.termination), &taps, regional, None, None, &mut microphone,
         ).unwrap();
