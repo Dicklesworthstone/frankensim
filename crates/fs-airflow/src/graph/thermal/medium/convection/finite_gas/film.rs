@@ -47,12 +47,13 @@ impl ForcedPlateGasSurface {
         let end = self.end.value();
         if !self.area_m2.is_finite() || self.area_m2 < 0.0
             || !self.speed_m_s.is_finite() || self.speed_m_s < 0.0
+            || (self.area_m2 > 0.0 && self.speed_m_s == 0.0)
             || !start.is_finite() || start < 0.0
             || !end.is_finite() || end <= start
             || (start > 0.0 && start / end == 0.0)
         {
             return Err(invalid(
-                "finite gas plate sections need nonnegative area/speed and finite 0 <= start < end from one leading edge",
+                "finite gas plate sections need nonnegative area, positive speed for active heat transfer and finite 0 <= start < end from one leading edge",
             ));
         }
         if !matches!(self.correlation,
