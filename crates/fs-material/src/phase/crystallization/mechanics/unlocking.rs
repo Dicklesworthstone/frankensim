@@ -26,6 +26,9 @@ use crate::{MaterialAdmissibility, SmallStrainLaw, Tangent6, Voigt};
 use fs_blake3::ContentHash;
 use fs_evidence::{Ambition, ModelCard, ValidityDomain};
 
+/// Atomic transfer of a released network's heat to its original thermal cell.
+pub mod thermal;
+
 /// A debit from recoverable elastic storage. Positive heat is deposited into
 /// the material; positive export must be credited to the caller's other owner.
 /// Neither term is external heating of a boundary enclosing both participants.
@@ -46,8 +49,24 @@ pub struct CrystallizationUnlockEnergy {
 /// accepted-state transaction. No thermal cell or mechanical field is mutated.
 #[derive(Debug)]
 pub struct CrystallizationUnlock {
-    pub state: UnlockedCrystallization,
-    pub energy: CrystallizationUnlockEnergy,
+    state: UnlockedCrystallization,
+    energy: CrystallizationUnlockEnergy,
+}
+
+impl CrystallizationUnlock {
+    pub const fn state(&self) -> &UnlockedCrystallization {
+        &self.state
+    }
+    pub const fn energy(&self) -> CrystallizationUnlockEnergy {
+        self.energy
+    }
+
+    /// Consume the authentic release for an explicitly caller-owned transfer.
+    /// Neither returned component can reconstruct another consumable release.
+    /// Use [`Self::thermalize`] for an atomic handoff to the original timeline.
+    pub fn into_parts(self) -> (UnlockedCrystallization, CrystallizationUnlockEnergy) {
+        (self.state, self.energy)
+    }
 }
 
 /// Zero recoverable elastic contribution after explicit network release.
