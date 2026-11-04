@@ -85,6 +85,40 @@ impl DisplacementMesh {
         self.submerged_moments::<true>(world_from_body, down, surface, 0.0, cancelled)
     }
 
+    /// Integrate one slab directly, rather than subtracting nearly equal
+    /// submerged volumes. Depth moments are relative to the slab's upper plane.
+    /// Both clips retain the same affine depth coordinate at intersections.
+    pub(super) fn slab_depth_moments(&self, world_from_body: Se3, down: Vec3,
+        datum: Vec3, upper_depth_m: f64, thickness_m: Option<f64>,
+        cancelled: &mut impl FnMut() -> bool)
+        -> Result<(DisplacedVolume, DepthMoments), HydrostaticError> {
+        poll(cancelled)?;
+        let direction = world_from_body.rotation().inverse().rotate(down)?;
+        let origin_depth = finite(down.dot(world_from_body.translation()-datum)-upper_depth_m)?;
+        let mut sum = Accumulator::<true>::default();
+        for cell in &self.cells {
+            poll(cancelled)?;
+            let mut vertices = [Vertex { point: Vec3::new(0.0,0.0,0.0), depth: 0.0 };4];
+            for (out, &point) in vertices.iter_mut().zip(cell) {
+                *out = Vertex { point, depth: finite(origin_depth+direction.dot(point))? };
+            }
+            clip_plane::<true>(vertices, 0.0, &mut |wet| {
+                if let Some(thickness) = thickness_m {
+                    clip_plane::<false>(wet, thickness, &mut |slab| sum.add(slab))
+                } else {
+                    sum.add(wet)
+                }
+            })?;
+        }
+        let depth_integral_m4 = finite(sum.volume * sum.mean_depth)?;
+        if sum.volume > 0.0 && depth_integral_m4 <= 0.0 {
+            return Err(HydrostaticError::Invalid("slab depth integral is unrepresentable"));
+        }
+        poll(cancelled)?;
+        Ok((DisplacedVolume { volume_m3: sum.volume,
+            centroid_body_m: (sum.volume > 0.0).then_some(sum.center), depth_integral_m4 }, sum.depth))
+    }
+
     fn submerged_moments<const DEPTH: bool>(&self, world_from_body: Se3, down: Vec3,
         datum: Vec3, interface_depth_m: f64,
         cancelled: &mut impl FnMut() -> bool)
@@ -134,12 +168,14 @@ impl DisplacedVolume {
 #[derive(Clone, Copy)]
 struct Vertex { point: Vec3, depth: f64 }
 impl Vertex {
-    fn intersection(self, dry: Self) -> Result<Self, HydrostaticError> {
+    fn intersection(self, dry: Self, plane: f64) -> Result<Self, HydrostaticError> {
         // Opposite signs, with a possible exactly-on-plane dry endpoint.
-        let scale = self.depth.abs().max(dry.depth.abs());
-        let fraction = (self.depth/scale) / (self.depth/scale-dry.depth/scale);
+        let a = finite(self.depth-plane)?;
+        let b = finite(dry.depth-plane)?;
+        let scale = a.abs().max(b.abs());
+        let fraction = (a/scale) / (a/scale-b/scale);
         let point = finite_vec(self.point+(dry.point-self.point).scale(fraction))?;
-        Ok(Self { point, depth: 0.0 })
+        Ok(Self { point, depth: plane })
     }
 }
 
@@ -215,26 +251,32 @@ impl<const DEPTH: bool> Accumulator<DEPTH> {
 }
 
 fn clip<const DEPTH: bool>(v: [Vertex;4], sum: &mut Accumulator<DEPTH>) -> Result<(), HydrostaticError> {
+    clip_plane::<true>(v, 0.0, &mut |tet| sum.add(tet))
+}
+
+fn clip_plane<const DEEPER: bool>(v: [Vertex;4], plane: f64,
+    consume: &mut impl FnMut([Vertex;4]) -> Result<(), HydrostaticError>) -> Result<(), HydrostaticError> {
     let mut wet = [0usize;4]; let mut dry = [0usize;4]; let mut n = 0; let mut m = 0;
     for (i, vertex) in v.iter().enumerate() {
-        if vertex.depth > 0.0 { wet[n]=i; n+=1; } else { dry[m]=i; m+=1; }
+        let inside = if DEEPER { vertex.depth > plane } else { vertex.depth < plane };
+        if inside { wet[n]=i; n+=1; } else { dry[m]=i; m+=1; }
     }
     match n {
         0 => Ok(()),
-        4 => sum.add(v),
+        4 => consume(v),
         1 => {
             let a=v[wet[0]];
-            sum.add([a,a.intersection(v[dry[0]])?,a.intersection(v[dry[1]])?,a.intersection(v[dry[2]])?])
+            consume([a,a.intersection(v[dry[0]],plane)?,a.intersection(v[dry[1]],plane)?,a.intersection(v[dry[2]],plane)?])
         }
         2 => {
             let (a,b,c,d)=(v[wet[0]],v[wet[1]],v[dry[0]],v[dry[1]]);
-            let (ac,ad,bc,bd)=(a.intersection(c)?,a.intersection(d)?,b.intersection(c)?,b.intersection(d)?);
-            sum.add([a,b,ac,ad])?; sum.add([b,ac,ad,bc])?; sum.add([b,ad,bc,bd])
+            let (ac,ad,bc,bd)=(a.intersection(c,plane)?,a.intersection(d,plane)?,b.intersection(c,plane)?,b.intersection(d,plane)?);
+            consume([a,b,ac,ad])?; consume([b,ac,ad,bc])?; consume([b,ad,bc,bd])
         }
         _ => {
             let (a,b,c,d)=(v[wet[0]],v[wet[1]],v[wet[2]],v[dry[0]]);
-            let (ad,bd,cd)=(a.intersection(d)?,b.intersection(d)?,c.intersection(d)?);
-            sum.add([a,b,c,ad])?; sum.add([b,c,ad,bd])?; sum.add([c,ad,bd,cd])
+            let (ad,bd,cd)=(a.intersection(d,plane)?,b.intersection(d,plane)?,c.intersection(d,plane)?);
+            consume([a,b,c,ad])?; consume([b,c,ad,bd])?; consume([c,ad,bd,cd])
         }
     }
 }

@@ -6,6 +6,8 @@ mod motion;
 mod layered;
 #[path = "hydrostatic/linear_density.rs"]
 mod linear_density;
+#[path = "hydrostatic/density_profile.rs"]
+mod density_profile;
 #[path = "hydrostatic/finite_tank.rs"]
 mod finite_tank;
 #[path = "hydrostatic/finite_layered.rs"]

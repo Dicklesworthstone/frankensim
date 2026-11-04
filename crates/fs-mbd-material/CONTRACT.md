@@ -1115,6 +1115,38 @@ applicability remain caller obligations. Mixing, diffusion, entrainment, waves,
 drag, fluid inertia, added mass and reciprocal heat remain outside this model.
 Its regression evidence is numerical and does not establish empirical validity.
 
+### Sampled continuous density profiles
+
+`hydrostatic::DensityProfileHydrostaticMedium` binds up to 32 original
+`FluidTransport` sources at strictly increasing depths, beginning at the free
+surface. Each source is resolved once and retained with its actual snapshot.
+Positive density must not decrease downward. Between samples it varies
+linearly; below the final sample it has the explicitly declared constant
+continuation. Thus the slope may flatten or steepen across several thermoclines
+without pretending that one global gradient or cell-centroid density describes
+the reservoir. This is a prescribed static profile, not an inferred EOS.
+
+The original tetrahedral clipping owner now also integrates a slab directly
+between two planes. Within each slab, positive volume and depth moments give
+the exact affine-density mass and first moment, and the quadratic pressure
+potential. The sum uses positive physical slab contributions, avoiding
+subtraction of nearly equal submerged volumes or cancellation of signed slope
+corrections. Force, buoyant torque and pressure potential therefore describe
+the same configuration, including interface crossings. Loading allocates
+nothing and performs O(cells × samples) work; cancellation is checked between
+bounded cell operations. Uniform profiles delegate to the original uniform
+load and native step bitwise.
+
+The shared `HydrostaticReservoir` implementation feeds the existing native
+Verlet motion and thermal-expansion coupling without replacing body mass or
+inertia. G1/G3/G4 tests in `tests/hydrostatic/density_profile.rs` compare against
+independent column integrals, force/torque potential derivatives, profile
+refinement, original uniform behavior and second-order neutral-depth motion.
+Source reuse and cancellation/refusal are also exercised. There is no claim
+of transported density, moving thermoclines, mixing, drag, added fluid mass,
+waves or empirical validation; source support and deep continuation remain
+caller obligations.
+
 ## Source-bound creeping-flow motion of a sphere (MR57)
 
 `VolumeMoments::sphere` supplies analytic volume and centroidal moments to the
