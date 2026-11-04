@@ -28,7 +28,8 @@ pub struct ShellObstacleMotion {
     /// A point on the plane at the shell's accepted time, in world metres.
     pub point_m: [f64; 3],
     /// Surface velocity at this contact, held throughout the event [m/s].
-    /// Tangential motion supplies no work to this frictionless normal law.
+    /// The normal law ignores tangential motion; the Coulomb law also pairs
+    /// its tangential impulses with the corresponding surface velocity.
     pub velocity_m_s: [f64; 3],
 }
 

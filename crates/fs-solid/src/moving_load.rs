@@ -35,6 +35,13 @@ pub use normal_impact::{
     ShellNormalImpactReport, ShellNormalImpactSite, ShellObstacleMotion,
 };
 
+#[path = "moving_load/frictional_impact.rs"]
+mod frictional_impact;
+pub use frictional_impact::{
+    NormalVelocityLaw, PreparedShellFrictionalImpacts, ShellFrictionalImpactControls,
+    ShellFrictionalImpactError, ShellFrictionalImpactReport, ShellFrictionalImpactSite,
+};
+
 /// A reference material location on one original triangle.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ShellLoadPoint {

@@ -866,6 +866,47 @@ condensed anisotropic payload inertia with moving-plane/driven-pin work,
 and actual post-trial audit refusal, cancellation/retry, redundant contact
 motion, incompatible source work, model identity and no-impulse parity.
 
+### Native simultaneous Coulomb shell impacts
+
+`prepare_frictional_impacts` binds stable contact IDs, fixed material points,
+orthonormal normal-first Cartesian frames, authored friction coefficients
+and the existing `NormalVelocityLaw` to the original shell model. Three
+directed mass solves per contact reuse its retained LU and exact point
+kinematics/transpose. The complete contact-major `3N x 3N` mobility preserves
+normal/tangent, cross-contact, finite-payload and support coupling, including
+null directions. The native 21-contact cap, original point budget and checked
+matrix-entry/byte limits bound preparation; the immutable result is reusable.
+
+`apply_frictional_impacts` derives gaps and full relative velocity from actual
+material-point observations and explicit instantaneous plane motion. One
+`fs-contact::frictional_multicontact::solve_frictional_contacts` call owns the
+non-associated Coulomb disk, Newton/target normal law, simultaneous stick/slip,
+passivity and SPD/PSD determinacy. Geometry-active separating contacts remain
+in the coupled solve. Stable IDs canonicalize native solving, world-impulse
+scatter and work accumulation without replacing the original law or witnesses.
+
+One aggregate native impulse trial remains private until its actual rounded
+endpoint passes speed, normal complementarity, friction-cone and final-slip
+checks with the native velocity, impulse and work-unit allowances. Actual
+relative work retains the native energy allowance and work-scale roundoff
+term. Full-mass linear/reference-angular momentum and kinetic energy are
+checked with separate prescribed-plane and driven-support work. Redundant
+contact impulses retain representative load/source shares and native total-work
+authority; neither individual pressure nor per-contact heat is inferred.
+
+Acceptance holds displacement, time, support motion and force inputs fixed,
+refreshing native force acceleration/reactions. Any geometry, law, trial,
+accounting or cancellation refusal preserves accepted motion. The caller owns
+event discovery, contact completeness and friction-coefficient evidence.
+The original small-rotation/reference-frame scope remains; this event consumer
+does not implement sustained friction, accumulated partial slip or thermal loss.
+
+The three physical groups in `tests/moving_load/frictional_impact.rs` establish
+analytic off-center sticking and slip reversal, simultaneous shared-node
+contact with input-order and tangent-frame invariance, and independent finite
+payload momentum/energy with moving planes, driven pins, late refusal,
+cancellation/retry and unchanged force-continuation behavior.
+
 ## Momentum-stable shell integration
 
 `shell_time::step_newmark` solves the effective mass equation for acceleration,

@@ -18,6 +18,9 @@ mod inverse_inertia;
 #[path = "moving_load/normal_impact.rs"]
 mod normal_impact;
 
+#[path = "moving_load/frictional_impact.rs"]
+mod frictional_impact;
+
 fn plate() -> ShellPlate {
     ShellPlate {
         nodes: vec![
