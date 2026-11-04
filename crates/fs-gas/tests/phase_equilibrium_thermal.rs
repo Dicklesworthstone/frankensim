@@ -12,8 +12,8 @@ mod pair;
 
 use common::{MIXTURE_MASS, model, source};
 use fs_gas::material::phase_thermal::{
-    IsobaricMixtureThermalControl, MixtureThermalControl, exchange_isobaric_mixture_parcel,
-    exchange_mixture_parcel,
+    IsobaricMixtureThermalControl, MixtureThermalControl, exchange_driven_mixture_parcel,
+    exchange_isobaric_mixture_parcel, exchange_mixture_parcel,
 };
 use fs_gas::multicomponent::wall_exchange::{
     MaterialWallCaloric, WallDrag, WallExchangeError, WallThermal,
@@ -21,7 +21,10 @@ use fs_gas::multicomponent::wall_exchange::{
 use fs_material::thermochemical_gas::nonideal::ThermochemicalPengRobinsonModel;
 use fs_material::thermochemical_gas::nonideal::flash::{
     equilibrium::{PhaseEnthalpyControls, volume::PhaseEnergyVolumeControls},
-    parcel::{IsochoricMixtureEquilibriumParcel, isobaric::IsobaricMixtureEquilibriumParcel},
+    parcel::{
+        IsochoricMixtureEquilibriumParcel, driven::DrivenMixtureEquilibriumParcel,
+        isobaric::IsobaricMixtureEquilibriumParcel,
+    },
 };
 use fs_qty::{Pressure, Temperature, Time};
 use fs_thermal::enthalpy::{
@@ -715,4 +718,380 @@ fn g4_total_work_and_final_cancellation_are_atomic_and_replayable() {
     assert_eq!(gas, expected);
     assert_eq!(wall, expected_wall);
     assert_eq!(accepted, retried);
+}
+
+// Independent cubic/fugacity/entropy roots retained by the S,V reference suite:
+// 208.20276510936935 K, 2 MPa -> 220 K, 3 MPa is an isentropic compression,
+// with Delta u = 12591.965499954124 J/kg and final rho = 130.8461208274619 kg/m3.
+// Additional supplied work is removed as heat in the finite-time cases below.
+const DRIVEN_INITIAL_TEMPERATURE: f64 = 208.202_765_109_369_35;
+const DRIVEN_ENERGY_RISE: f64 = 12_591.965_499_954_124;
+const DRIVEN_FINAL_DENSITY: f64 = 130.846_120_827_461_9;
+
+fn driven_parcel(
+    model: ThermochemicalPengRobinsonModel,
+    mass: f64,
+) -> DrivenMixtureEquilibriumParcel {
+    DrivenMixtureEquilibriumParcel::from_pressure_temperature(
+        model,
+        mass,
+        Temperature::new(DRIVEN_INITIAL_TEMPERATURE),
+        Pressure::new(2e6),
+        equilibrium().phase.phase_options(),
+        || false,
+    )
+    .unwrap()
+}
+
+#[test]
+fn g1_driven_compression_exchanges_heat_from_equal_initial_temperatures() {
+    let mut gas = driven_parcel(source(), 2.0 * MIXTURE_MASS);
+    let initial = gas.clone();
+    let heat = -5000.0 * gas.mass_kg();
+    let stored = DRIVEN_ENERGY_RISE * gas.mass_kg();
+    let work_by = heat - stored;
+    let final_volume = gas.mass_kg() / DRIVEN_FINAL_DENSITY;
+    let mut bath = WallThermal::Reservoir {
+        temperature_k: DRIVEN_INITIAL_TEMPERATURE,
+        conductance_w_per_k: 1.0,
+    };
+    let initial_bath = bath;
+    let report = exchange_driven_mixture_parcel(
+        &mut gas,
+        final_volume,
+        work_by,
+        &mut bath,
+        None,
+        Time::new(heat / (DRIVEN_INITIAL_TEMPERATURE - 220.0)),
+        controls([1.1 * heat, 0.0]),
+        || false,
+    )
+    .unwrap();
+    assert!(final_volume < initial.volume_m3());
+    assert_eq!(
+        report.initial_temperature_k,
+        [DRIVEN_INITIAL_TEMPERATURE; 2]
+    );
+    close(gas.state().temperature_k(), 220.0, 2e-6);
+    close(gas.state().pressure_pa(), 3e6, 0.2);
+    assert!(gas.state().phase().two_phase().is_some());
+    assert_eq!(gas.volume_m3(), final_volume);
+    assert_eq!(gas.mass_kg(), initial.mass_kg());
+    assert_eq!(gas.model(), initial.model());
+    assert_eq!(bath, initial_bath);
+    close(report.heat.heat_to_gas_j, heat, 2e-5);
+    close(report.equilibrium.stored_energy_change_j, stored, 2e-5);
+    close(report.equilibrium.supplied_heat_j, heat, 2e-5);
+    assert_eq!(report.equilibrium.boundary_work_by_mixture_j, work_by);
+    assert_eq!(report.heat.mechanical_work_to_gas_j, -work_by);
+    assert_eq!(
+        report.heat.external_heat_to_gas_j,
+        report.heat.heat_to_gas_j
+    );
+    close(report.heat.energy_residual_j, 0.0, 2e-5);
+    close(report.heat.thermal_residual_j, 0.0, 2e-5);
+    assert!(report.equilibrium.entropy_change_j_k - heat / DRIVEN_INITIAL_TEMPERATURE > 0.0);
+    assert!(report.pt_evaluations > report.equilibrium.pt_evaluations);
+}
+
+#[test]
+fn g1_driven_work_reverses_heat_into_finite_and_latent_walls() {
+    let source = latent_wall([0.0, 20_000.0]);
+    let latent = source.initial_contact(1.0, WallDrag::None).unwrap().thermal;
+    for initial_wall in [
+        WallThermal::Lumped {
+            temperature_k: 215.0,
+            heat_capacity_j_per_k: 100.0,
+            conductance_w_per_k: 1.0,
+        },
+        latent,
+    ] {
+        let mut gas = driven_parcel(common::source(), 2.0 * MIXTURE_MASS);
+        let heat = -5000.0 * gas.mass_kg();
+        let stored = DRIVEN_ENERGY_RISE * gas.mass_kg();
+        let final_volume = gas.mass_kg() / DRIVEN_FINAL_DENSITY;
+        let is_latent = matches!(initial_wall, WallThermal::Caloric { .. });
+        let wall_endpoint = if is_latent {
+            215.0
+        } else {
+            215.0 - heat / 100.0
+        };
+        let mut wall = initial_wall;
+        let report = exchange_driven_mixture_parcel(
+            &mut gas,
+            final_volume,
+            heat - stored,
+            &mut wall,
+            is_latent.then_some(&source),
+            Time::new(heat / (wall_endpoint - 220.0)),
+            controls([1.1 * heat, 0.0]),
+            || false,
+        )
+        .unwrap();
+        // The wall starts hotter than the gas, but the driven endpoint must cool.
+        assert!(report.initial_temperature_k[0] < report.initial_temperature_k[1]);
+        assert!(report.heat.heat_to_gas_j < 0.0);
+        close(gas.state().temperature_k(), 220.0, 2e-6);
+        close(gas.state().pressure_pa(), 3e6, 0.2);
+        close(report.endpoint_temperature_k[1], wall_endpoint, 2e-7);
+        close(report.heat.heat_to_gas_j, heat, 2e-5);
+        close(report.heat.wall_energy_change_j, -heat, 2e-5);
+        close(report.equilibrium.stored_energy_change_j, stored, 2e-5);
+        close(report.heat.energy_residual_j, 0.0, 2e-5);
+        assert_eq!(report.heat.external_heat_to_gas_j, 0.0);
+        if let WallThermal::Caloric {
+            specific_energy_j_kg,
+            ..
+        } = wall
+        {
+            close(specific_energy_j_kg, 5000.0 - heat, 2e-5);
+        }
+    }
+}
+
+#[test]
+fn g0_driven_thermal_rest_still_applies_volume_work_and_charges_its_phase_solve() {
+    let initial = driven_parcel(source(), 2.0 * MIXTURE_MASS);
+    let final_volume = initial.mass_kg() / DRIVEN_FINAL_DENSITY;
+    let work_by = -DRIVEN_ENERGY_RISE * initial.mass_kg();
+    for (duration, conductance) in [(0.0, 1.0), (1.0, 0.0)] {
+        let mut gas = initial.clone();
+        let mut wall = WallThermal::Lumped {
+            temperature_k: 300.0,
+            heat_capacity_j_per_k: 100.0,
+            conductance_w_per_k: conductance,
+        };
+        let initial_wall = wall;
+        let mut control = controls([-1.0, 1.0]);
+        control.maximum_heat_evaluations = 1;
+        let report = exchange_driven_mixture_parcel(
+            &mut gas,
+            final_volume,
+            work_by,
+            &mut wall,
+            None,
+            Time::new(duration),
+            control,
+            || false,
+        )
+        .unwrap();
+        close(gas.state().temperature_k(), 220.0, 2e-6);
+        close(gas.state().pressure_pa(), 3e6, 0.2);
+        assert_eq!(gas.volume_m3(), final_volume);
+        assert_eq!(wall, initial_wall);
+        assert_eq!(report.heat.heat_to_gas_j, 0.0);
+        assert_eq!(report.heat.external_heat_to_gas_j, 0.0);
+        assert_eq!(report.equilibrium.supplied_heat_j, 0.0);
+        assert_eq!(report.heat.mechanical_work_to_gas_j, -work_by);
+        assert_eq!(report.heat_evaluations, 1);
+        assert_eq!(report.heat.iterations, 0);
+        assert!(report.pt_evaluations > 0);
+        assert_eq!(report.pt_evaluations, report.equilibrium.pt_evaluations);
+    }
+
+    let mut gas = initial.clone();
+    let mut wall = WallThermal::Reservoir {
+        temperature_k: DRIVEN_INITIAL_TEMPERATURE,
+        conductance_w_per_k: 1.0,
+    };
+    let old_wall = wall;
+    let mut control = controls([-1.0, 1.0]);
+    control.maximum_heat_evaluations = 1;
+    control.maximum_pt_evaluations = 1;
+    let report = exchange_driven_mixture_parcel(
+        &mut gas,
+        initial.volume_m3(),
+        0.0,
+        &mut wall,
+        None,
+        Time::new(1.0),
+        control,
+        || false,
+    )
+    .unwrap();
+    assert_eq!(gas, initial);
+    assert_eq!(wall, old_wall);
+    assert_eq!(report.pt_evaluations, 0);
+    assert_eq!(report.pressure_evaluations, 0);
+    assert_eq!(report.eos_evaluation_upper_bound, 0);
+}
+
+#[test]
+fn g3_driven_heat_work_and_phase_state_ignore_species_energy_datums() {
+    let make = |model| driven_parcel(model, 2.0 * MIXTURE_MASS);
+    let initial = make(source());
+    let mut plain = initial.clone();
+    let mut shifted = make(model([1e22, -3e21], [2e18, -7e17], [100.0, 450.0]));
+    let heat = -5000.0 * initial.mass_kg();
+    let work = heat - DRIVEN_ENERGY_RISE * initial.mass_kg();
+    let final_volume = initial.mass_kg() / DRIVEN_FINAL_DENSITY;
+    let initial_wall = WallThermal::Lumped {
+        temperature_k: 215.0,
+        heat_capacity_j_per_k: 100.0,
+        conductance_w_per_k: 1.0,
+    };
+    let mut wall_a = initial_wall;
+    let mut wall_b = initial_wall;
+    let duration = Time::new(heat / (215.0 - heat / 100.0 - 220.0));
+    let a = exchange_driven_mixture_parcel(
+        &mut plain,
+        final_volume,
+        work,
+        &mut wall_a,
+        None,
+        duration,
+        controls([1.1 * heat, 0.0]),
+        || false,
+    )
+    .unwrap();
+    let b = exchange_driven_mixture_parcel(
+        &mut shifted,
+        final_volume,
+        work,
+        &mut wall_b,
+        None,
+        duration,
+        controls([1.1 * heat, 0.0]),
+        || false,
+    )
+    .unwrap();
+    assert_eq!(a, b);
+    assert_eq!(wall_a, wall_b);
+    assert_eq!(plain.volume_m3(), shifted.volume_m3());
+    assert_eq!(
+        plain.state().temperature_k(),
+        shifted.state().temperature_k()
+    );
+    assert_eq!(plain.state().pressure_pa(), shifted.state().pressure_pa());
+    assert_eq!(plain.state().phase(), shifted.state().phase());
+}
+
+#[test]
+fn g4_driven_mechanics_heat_budgets_and_final_cancellation_are_atomic() {
+    let initial = driven_parcel(source(), 2.0 * MIXTURE_MASS);
+    let heat = -5000.0 * initial.mass_kg();
+    let work = heat - DRIVEN_ENERGY_RISE * initial.mass_kg();
+    let final_volume = initial.mass_kg() / DRIVEN_FINAL_DENSITY;
+    let initial_wall = WallThermal::Lumped {
+        temperature_k: 215.0,
+        heat_capacity_j_per_k: 100.0,
+        conductance_w_per_k: 1.0,
+    };
+    let duration = Time::new(heat / (215.0 - heat / 100.0 - 220.0));
+    let normal = controls([1.1 * heat, 0.0]);
+    for (max_heat, max_pt) in [(1, normal.maximum_pt_evaluations), (132, 1)] {
+        let mut gas = initial.clone();
+        let mut wall = initial_wall;
+        let limited = MixtureThermalControl {
+            maximum_heat_evaluations: max_heat,
+            maximum_pt_evaluations: max_pt,
+            ..normal
+        };
+        assert!(matches!(
+            exchange_driven_mixture_parcel(
+                &mut gas,
+                final_volume,
+                work,
+                &mut wall,
+                None,
+                duration,
+                limited,
+                || false,
+            ),
+            Err(WallExchangeError::MixtureThermalWork { .. })
+        ));
+        assert_eq!(gas, initial);
+        assert_eq!(wall, initial_wall);
+    }
+    for (volume, boundary_work) in [(0.0, work), (final_volume, f64::NAN)] {
+        let mut gas = initial.clone();
+        let mut wall = initial_wall;
+        assert!(
+            exchange_driven_mixture_parcel(
+                &mut gas,
+                volume,
+                boundary_work,
+                &mut wall,
+                None,
+                duration,
+                normal,
+                || false,
+            )
+            .is_err()
+        );
+        assert_eq!(gas, initial);
+        assert_eq!(wall, initial_wall);
+    }
+    let narrow = latent_wall([4999.0, 5001.0]);
+    let mut wall = narrow.initial_contact(1.0, WallDrag::None).unwrap().thermal;
+    let old_wall = wall;
+    let mut gas = initial.clone();
+    assert!(
+        exchange_driven_mixture_parcel(
+            &mut gas,
+            final_volume,
+            work,
+            &mut wall,
+            Some(&narrow),
+            duration,
+            normal,
+            || false,
+        )
+        .is_err()
+    );
+    assert_eq!(gas, initial);
+    assert_eq!(wall, old_wall);
+
+    let mut expected = initial.clone();
+    let mut expected_wall = initial_wall;
+    let mut polls = 0;
+    let accepted = exchange_driven_mixture_parcel(
+        &mut expected,
+        final_volume,
+        work,
+        &mut expected_wall,
+        None,
+        duration,
+        normal,
+        || {
+            polls += 1;
+            false
+        },
+    )
+    .unwrap();
+    let mut wall = initial_wall;
+    let mut repeated = 0;
+    assert_eq!(
+        exchange_driven_mixture_parcel(
+            &mut gas,
+            final_volume,
+            work,
+            &mut wall,
+            None,
+            duration,
+            normal,
+            || {
+                repeated += 1;
+                repeated == polls
+            },
+        ),
+        Err(WallExchangeError::Cancelled)
+    );
+    assert_eq!(repeated, polls);
+    assert_eq!(gas, initial);
+    assert_eq!(wall, initial_wall);
+    let retried = exchange_driven_mixture_parcel(
+        &mut gas,
+        final_volume,
+        work,
+        &mut wall,
+        None,
+        duration,
+        normal,
+        || false,
+    )
+    .unwrap();
+    assert_eq!(retried, accepted);
+    assert_eq!(gas, expected);
+    assert_eq!(wall, expected_wall);
 }

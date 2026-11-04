@@ -3,7 +3,8 @@
 use super::{
     CaloricReport, Error, IsobaricMixtureEquilibriumParcel, IsobaricMixtureHeatStep,
     IsochoricMixtureEquilibriumParcel, MixtureEquilibriumHeatStep, PhaseEnergyVolumeControls,
-    PhaseEnthalpyControls, ThermalParcel, Time, WallControl, Work, poll, positive, solve_scalar,
+    PhaseEnthalpyControls, ThermalParcel, Time, WallControl, Work, energy_sum_j, poll, positive,
+    solve_scalar,
 };
 
 /// Bounded heat exchange between two finite phase-equilibrium inventories.
@@ -120,8 +121,8 @@ pub struct MixturePairThermalStep<L = MixtureEquilibriumHeatStep, R = MixtureEqu
     /// Work exported by each parcel [J]: zero at fixed V, actual p Delta V at
     /// prescribed p. The two mechanical loads are separate from heat exchange.
     pub boundary_work_by_parcels_j: [f64; 2],
-    /// Combined Delta U plus both outward boundary works [J], evaluated against
-    /// the exactly opposed trial heat to avoid subtracting absolute energies.
+    /// Combined Delta U plus both outward boundary works [J], compensated across
+    /// all four original increments; equal/opposite internal heat cancels.
     pub energy_residual_j: f64,
     /// Left source heat minus dt G times the endpoint temperature gap [J].
     /// The corresponding right equation is independently checked as well.
@@ -426,8 +427,12 @@ fn exchange<L: ThermalParcel, R: ThermalParcel>(
     let endpoint_temperature_k = [accepted.left.temperature(), accepted.right.temperature()];
     let flux = coefficient * (endpoint_temperature_k[1] - endpoint_temperature_k[0]);
     let heat_balance = l.heat_change_j + r.heat_change_j;
-    let energy_residual = ((l.internal_energy_change_j - heat) + l.boundary_work_j)
-        + ((r.internal_energy_change_j + heat) + r.boundary_work_j);
+    let energy_residual = energy_sum_j([
+        l.internal_energy_change_j,
+        l.boundary_work_j,
+        r.internal_energy_change_j,
+        r.boundary_work_j,
+    ]);
     let thermal_residual = l.heat_change_j - flux;
     let right_thermal_residual = -r.heat_change_j - flux;
     let scale = l

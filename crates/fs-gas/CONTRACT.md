@@ -4468,3 +4468,58 @@ and supersonic departure against independent gamma-law relations and variable-Cp
 entropy/invariant integrals. G3 covers normal reversal, formation-reference
 invariance, both shear components and primitive/conserved parity. G4 covers
 backflow, invalid data, source precision and cancellation.
+
+## Heat exchange during driven phase-mixture volume changes
+
+`material::phase_thermal::exchange_driven_mixture_parcel` connects the original
+`DrivenMixtureEquilibriumParcel` to the same reservoir, finite constant-capacity
+wall or original caloric wall as the isochoric/isobaric thermal entries. The
+mechanical caller supplies the final volume and integrated boundary work BY the
+mixture. Every heat trial resolves original U,V phase equilibrium with
+`Delta U = Q - W_by`, while the shared scalar owner closes
+`Q = dt G (Twall(-Q) - Tgas(Q, V_final, W_by))`. No equilibrium heat capacity,
+extra latent source or approximated pressure/work trajectory is introduced.
+
+Before choosing the passive heat direction and bounds, the owner solves the
+mechanically driven zero-heat endpoint. The initial gas temperature is not a
+valid thermal reference for this step: compression can induce cooling when the
+wall and gas start at the same temperature, or reverse their original heat-flow
+direction. That reference solve consumes the same whole-call heat/PT budgets
+and contributes to the returned pressure/EOS counts. It is reused for zero-heat
+queries when the numerical controls agree; query counts remain explicit and
+PT work is not counted twice. Source brackets must admit the zero-heat driven
+endpoint as well as every remaining heat-bracket endpoint.
+
+The accepted report retains supplied heat Q, represented Delta U and prescribed
+outward work independently. `mechanical_work_to_gas_j` is `-W_by`, while
+`heat_to_gas_j` is the solved Q. Both the source's `first_law_residual_j` and the
+outer gas/wall energy residual retain caloric reconstruction defects; neither
+turns a numerical defect into a heat source. Zero conductance or zero thermal
+duration therefore reports exactly zero heat, but still applies the supplied
+volume/work change. Only a complete mechanical and thermal no-op skips phase
+work. Mass and original species inventory remain fixed. Gas state, physical
+volume and finite-wall storage publish together after balances and final
+cancellation; refused source queries, exhausted work and cancellation publish
+none of them.
+
+The common wall and paired-mixture first-law checks retain all four independently
+represented energy/work terms in a compensated TwoSum reduction. Small heat
+cannot disappear when combined with large opposing storage and boundary work.
+The physical joule tolerance remains tied to heat/flux, without inflation by
+the large mechanical terms. Nonfinite or overflowing reductions refuse;
+focused exact-binary accounting regressions check both residual rejection and
+correct closure under power-of-two rescaling.
+
+This remains a first-order, spatially uniform, fixed-conductance endpoint
+coupling. The caller owns the mechanical trajectory, the actual integral p dV,
+its entropy/dissipation accounting, geometry and time refinement. Arbitrary
+prescribed volume/work does not establish a realizable piston trajectory or a
+combined entropy-production theorem. The original finite phase-screen evidence
+and material domains retain their existing scope.
+
+Five focused G0/G1/G3/G4 groups in `phase_equilibrium_thermal` check independent
+compression calorimetry with equal initial temperatures, reversal into finite
+and latent walls, mechanical evolution at zero thermal exposure, independent
+species-datum invariance, whole-call budgets, source refusal and final
+cancellation with deterministic retry. They use the existing synthetic binary
+constitutive fixture and do not claim experimental-mixture validation.

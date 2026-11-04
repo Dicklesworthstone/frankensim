@@ -3,8 +3,10 @@
 //! The heat coordinate closes `Q = dt G [Tw(-Q) - Tg(Q)]`. Every gas trial
 //! uses the original U,V or prescribed-pressure H owner; no equilibrium Cp/Cv
 //! or separate latent source is constructed. Original finite wall storage
-//! remains in its declared h/u coordinate. This backward-Euler lumped interface needs time refinement and
-//! a uniform-inventory justification; it is not a spatial or kinetic model.
+//! remains in its declared h/u coordinate. Driven volumes retain separately
+//! supplied boundary work in the same first law. This backward-Euler lumped
+//! interface needs time refinement and a uniform-inventory justification;
+//! it is not a spatial or kinetic model.
 
 use crate::multicomponent::wall_exchange::{
     MaterialWallCaloric, WallCellReport, WallContact, WallControl, WallDrag,
@@ -15,9 +17,11 @@ use fs_material::thermochemical_gas::nonideal::flash::{
     equilibrium::{PhaseEnthalpyControls, volume::PhaseEnergyVolumeControls},
     parcel::{
         IsochoricMixtureEquilibriumParcel, MixtureEquilibriumHeatStep,
+        driven::{DrivenMixtureEquilibriumParcel, DrivenMixtureEquilibriumStep},
         isobaric::{IsobaricMixtureEquilibriumParcel, IsobaricMixtureHeatStep},
     },
 };
+use fs_math::eft::two_sum;
 use fs_qty::Time;
 
 mod pair;
@@ -33,7 +37,9 @@ pub use pair::{
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MixtureThermalControl<C = PhaseEnergyVolumeControls> {
     /// Signed heat into the gas [J]; finite increasing endpoints must contain
-    /// zero. Intersected with the passive initial-flux and wall-source limits.
+    /// zero. Intersected with the passive zero-heat flux and wall-source limits.
+    /// With driven mechanics, the zero-heat state includes the complete supplied
+    /// volume/work change, rather than the initial gas temperature.
     /// Every remaining endpoint must be supported by the original caloric solver.
     pub heat_bracket_j: [f64; 2],
     /// Original species/phase policy, physical bounds and per-trial work limits.
@@ -122,13 +128,22 @@ pub struct MixtureThermalStep<R = MixtureEquilibriumHeatStep> {
 /// mechanical work is negative when the mixture exports expansion work.
 pub type IsobaricMixtureThermalStep = MixtureThermalStep<IsobaricMixtureHeatStep>;
 
+/// Accepted thermal exchange with externally supplied volume and boundary work.
+/// The original U,V report retains `Delta U = Q - W_by`; its work is credited
+/// separately to the common heat report as mechanical work into the mixture.
+pub type DrivenMixtureThermalStep = MixtureThermalStep<DrivenMixtureEquilibriumStep>;
+
 // Only the native caloric constraint varies. Heat transfer, wall response,
 // bounded scalar iteration, physical acceptance and publication stay shared.
 trait ThermalParcel: Clone {
-    type Control: Copy;
+    type Control: Copy + PartialEq;
     type Report: Copy;
     fn temperature(&self) -> f64;
     fn mass(&self) -> f64;
+    /// Whether zero supplied heat can change the original gas temperature.
+    fn has_mechanical_change(&self) -> bool {
+        false
+    }
     fn validate(control: Self::Control) -> Result<(), Error>;
     fn refine(control: &mut Self::Control, tolerance_j_kg: f64);
     fn resolve(
@@ -140,6 +155,7 @@ trait ThermalParcel: Clone {
     ) -> Result<CaloricReport<Self::Report>, ThermochemicalFlashError>;
 }
 
+#[derive(Clone, Copy)]
 struct CaloricReport<R> {
     source: R,
     heat_change_j: f64,
@@ -232,6 +248,73 @@ impl ThermalParcel for IsobaricMixtureEquilibriumParcel {
     }
 }
 
+#[derive(Clone)]
+struct DrivenThermalParcel {
+    parcel: DrivenMixtureEquilibriumParcel,
+    final_volume_m3: f64,
+    boundary_work_by_mixture_j: f64,
+}
+
+impl ThermalParcel for DrivenThermalParcel {
+    type Control = PhaseEnergyVolumeControls;
+    type Report = DrivenMixtureEquilibriumStep;
+    fn temperature(&self) -> f64 {
+        self.parcel.state().temperature_k()
+    }
+    fn mass(&self) -> f64 {
+        self.parcel.mass_kg()
+    }
+    fn has_mechanical_change(&self) -> bool {
+        self.final_volume_m3 != self.parcel.volume_m3() || self.boundary_work_by_mixture_j != 0.0
+    }
+    fn validate(control: Self::Control) -> Result<(), Error> {
+        Ok(control.validate()?)
+    }
+    fn refine(control: &mut Self::Control, tolerance_j_kg: f64) {
+        control.internal_energy_tolerance_j_kg =
+            control.internal_energy_tolerance_j_kg.min(tolerance_j_kg);
+    }
+    fn resolve(
+        &mut self,
+        heat: f64,
+        mut control: Self::Control,
+        remaining_pt: usize,
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<CaloricReport<Self::Report>, ThermochemicalFlashError> {
+        if heat != 0.0 || self.has_mechanical_change() {
+            control.maximum_pt_evaluations = control.maximum_pt_evaluations.min(remaining_pt);
+        }
+        let source = self.parcel.advance(
+            self.final_volume_m3,
+            heat,
+            self.boundary_work_by_mixture_j,
+            control,
+            cancelled,
+        )?;
+        let represented_heat = source.stored_energy_change_j + source.boundary_work_by_mixture_j;
+        if !represented_heat.is_finite()
+            || (heat != 0.0
+                && (represented_heat == 0.0 || represented_heat.signum() != heat.signum()))
+        {
+            return Err(ThermochemicalFlashError::Invalid(
+                "driven-mixture thermal heat is unrepresentable",
+            ));
+        }
+        Ok(CaloricReport {
+            // The thermal source owns Q. Leave U + W - Q visible in the native
+            // and outer first-law residuals; insulated mechanics supplies no heat.
+            heat_change_j: source.supplied_heat_j,
+            internal_energy_change_j: source.stored_energy_change_j,
+            boundary_work_j: source.boundary_work_by_mixture_j,
+            entropy_change_j_k: source.entropy_change_j_k,
+            pt: source.pt_evaluations,
+            pressure: source.pressure_evaluations,
+            eos: source.eos_evaluation_upper_bound,
+            source,
+        })
+    }
+}
+
 #[derive(Default)]
 struct Work {
     heat: usize,
@@ -246,9 +329,13 @@ impl Work {
             pt_evaluations: self.pt,
         }
     }
-    fn begin<C>(&mut self, controls: &MixtureThermalControl<C>, heat: f64) -> Result<usize, Error> {
+    fn begin<C>(
+        &mut self,
+        controls: &MixtureThermalControl<C>,
+        needs_phase_solve: bool,
+    ) -> Result<usize, Error> {
         if self.heat == controls.maximum_heat_evaluations
-            || (heat != 0.0 && self.pt == controls.maximum_pt_evaluations)
+            || (needs_phase_solve && self.pt == controls.maximum_pt_evaluations)
         {
             return Err(self.error());
         }
@@ -274,12 +361,14 @@ impl Work {
     }
 }
 
+#[derive(Clone, Copy)]
 struct WallSample {
     state: WallThermal,
     temperature: f64,
     change: f64,
 }
 
+#[derive(Clone)]
 struct Trial<P: ThermalParcel> {
     heat: f64,
     parcel: P,
@@ -296,7 +385,7 @@ fn trial<P: ThermalParcel>(
     work: &mut Work,
     cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<Trial<P>, Error> {
-    let remaining = work.begin(&controls, heat)?;
+    let remaining = work.begin(&controls, heat != 0.0 || parcel.has_mechanical_change())?;
     let mut candidate = parcel.clone();
     let equilibrium = candidate
         .resolve(heat, controls.equilibrium, remaining, cancelled)
@@ -410,6 +499,55 @@ pub fn exchange_isobaric_mixture_parcel(
     exchange(parcel, wall, wall_source, duration, controls, cancelled)
 }
 
+/// Exchange heat while an external mechanical owner prescribes the final
+/// volume [m3] and complete boundary work BY the closed mixture [J].
+///
+/// Every heat trial uses the original U,V equilibrium with
+/// `Delta U = Q - boundary_work_by_mixture_j`. The zero-heat driven endpoint
+/// supplies the passive thermal bracket: compression can induce cooling even
+/// when gas and wall initially have equal temperatures. Its original phase
+/// work is included in the whole-call budget and reused where controls agree.
+///
+/// Gas, volume and wall publish together only after both endpoint heat flux
+/// and the complete first law close. Zero duration or conductance suppresses
+/// heat transfer, but still applies the declared mechanical change. The caller
+/// owns the volume trajectory, actual integral p dV, mechanical entropy and
+/// applicability of the fixed conductance and geometry over this interval.
+/// This function does not infer piston dynamics or a pressure/work path.
+#[allow(clippy::too_many_arguments)]
+pub fn exchange_driven_mixture_parcel(
+    parcel: &mut DrivenMixtureEquilibriumParcel,
+    final_volume_m3: f64,
+    boundary_work_by_mixture_j: f64,
+    wall: &mut WallThermal,
+    wall_source: Option<&MaterialWallCaloric<'_>>,
+    duration: Time,
+    controls: MixtureThermalControl,
+    cancelled: impl FnMut() -> bool,
+) -> Result<DrivenMixtureThermalStep, Error> {
+    if !positive(final_volume_m3) || !boundary_work_by_mixture_j.is_finite() {
+        return Err(Error::Invalid(
+            "finite driven-mixture volume and boundary work required",
+        ));
+    }
+    let mut candidate = DrivenThermalParcel {
+        parcel: parcel.clone(),
+        final_volume_m3,
+        boundary_work_by_mixture_j,
+    };
+    let report = exchange(
+        &mut candidate,
+        wall,
+        wall_source,
+        duration,
+        controls,
+        cancelled,
+    )?;
+    // No fallible operation remains after the shared final publication gate.
+    *parcel = candidate.parcel;
+    Ok(report)
+}
+
 fn exchange<P: ThermalParcel>(
     parcel: &mut P,
     wall: &mut WallThermal,
@@ -456,26 +594,59 @@ fn exchange<P: ThermalParcel>(
     let initial = wall_after(*wall, wall_source, 0.0)?;
     let tg0 = parcel.temperature();
     let coefficient = duration.value() * conductance;
-    let initial_flux = coefficient * (initial.temperature - tg0);
     if !coefficient.is_finite()
-        || !initial_flux.is_finite()
         || (coefficient == 0.0 && duration.value() != 0.0 && conductance != 0.0)
-        || (initial_flux == 0.0 && coefficient != 0.0 && initial.temperature != tg0)
     {
         return Err(Error::Invalid("mixture thermal flux is unrepresentable"));
     }
     let mut work = Work::default();
+    let driven = parcel.has_mechanical_change();
+    let mut zero_heat = if driven {
+        P::refine(
+            &mut controls.equilibrium,
+            0.125 * controls.thermal.absolute_energy_tolerance_j / parcel.mass(),
+        );
+        P::validate(controls.equilibrium)?;
+        Some((
+            controls.equilibrium,
+            trial(
+                parcel,
+                *wall,
+                wall_source,
+                0.0,
+                controls,
+                &mut work,
+                &mut cancelled,
+            )?,
+        ))
+    } else {
+        None
+    };
+    let reference_temperature = zero_heat
+        .as_ref()
+        .map_or(tg0, |(_, trial)| trial.parcel.temperature());
+    let initial_flux = coefficient * (initial.temperature - reference_temperature);
+    if !initial_flux.is_finite()
+        || (initial_flux == 0.0
+            && coefficient != 0.0
+            && initial.temperature != reference_temperature)
+    {
+        return Err(Error::Invalid("mixture thermal flux is unrepresentable"));
+    }
     let mut accepted = None;
     let (heat, iterations) = if initial_flux == 0.0 {
-        accepted = Some(trial(
-            parcel,
-            *wall,
-            wall_source,
-            0.0,
-            controls,
-            &mut work,
-            &mut cancelled,
-        )?);
+        accepted = Some(match zero_heat {
+            Some((_, candidate)) => candidate,
+            None => trial(
+                parcel,
+                *wall,
+                wall_source,
+                0.0,
+                controls,
+                &mut work,
+                &mut cancelled,
+            )?,
+        });
         (0.0, 0)
     } else {
         controls.thermal.absolute_energy_tolerance_j = controls
@@ -492,7 +663,7 @@ fn exchange<P: ThermalParcel>(
         lo = lo.max(initial_flux.min(0.0));
         hi = hi.min(initial_flux.max(0.0));
         if let Some(source) = wall_source {
-            let limits = source.heat_limits(contact, tg0)?;
+            let limits = source.heat_limits(contact, reference_temperature)?;
             lo = lo.max(limits[0]);
             hi = hi.min(limits[1]);
         } else if let WallThermal::Lumped {
@@ -500,7 +671,7 @@ fn exchange<P: ThermalParcel>(
             ..
         } = *wall
         {
-            let equalized = heat_capacity_j_per_k * (initial.temperature - tg0);
+            let equalized = heat_capacity_j_per_k * (initial.temperature - reference_temperature);
             lo = lo.max(equalized.min(0.0));
             hi = hi.min(equalized.max(0.0));
         }
@@ -509,7 +680,23 @@ fn exchange<P: ThermalParcel>(
         }
         let mut previous: Option<(f64, f64)> = None;
         let mut equation = |q: f64, cancel: &mut dyn FnMut() -> bool| {
-            let candidate = trial(parcel, *wall, wall_source, q, controls, &mut work, cancel)?;
+            let candidate = if let Some((control, reference)) = &zero_heat
+                && q == 0.0
+                && *control == controls.equilibrium
+            {
+                // Count the heat query, but not a second copy of the same PT work.
+                work.begin(&controls, false)?;
+                if cancel() {
+                    return Err(Error::Cancelled);
+                }
+                reference.clone()
+            } else {
+                let candidate = trial(parcel, *wall, wall_source, q, controls, &mut work, cancel)?;
+                if driven && q == 0.0 {
+                    zero_heat = Some((controls.equilibrium, candidate.clone()));
+                }
+                candidate
+            };
             let tg = candidate.parcel.temperature();
             let tw = candidate.wall.temperature;
             let flux = coefficient * (tw - tg);
@@ -552,22 +739,18 @@ fn exchange<P: ThermalParcel>(
     } else {
         0.0
     };
-    let energy_residual = (equilibrium.internal_energy_change_j + endpoint.change)
-        + equilibrium.boundary_work_j
-        - external;
     let flux = coefficient * (endpoint.temperature - candidate.temperature());
-    let thermal_residual = actual - flux;
-    let tolerance = controls.thermal.tolerance(actual.abs().max(flux.abs()));
-    if !energy_residual.is_finite()
-        || !thermal_residual.is_finite()
-        || energy_residual.abs() > tolerance
-        || thermal_residual.abs() > tolerance
-    {
-        return Err(Error::Balance {
-            energy_residual_j: energy_residual,
-            thermal_residual_j: thermal_residual,
-        });
-    }
+    let (energy_residual, thermal_residual) = check_heat_balance(
+        [
+            equilibrium.internal_energy_change_j,
+            equilibrium.boundary_work_j,
+            endpoint.change,
+            -external,
+        ],
+        actual,
+        flux,
+        controls.thermal,
+    )?;
     let report = MixtureThermalStep {
         heat: WallCellReport {
             elapsed: duration,
@@ -599,6 +782,49 @@ fn exchange<P: ThermalParcel>(
     Ok(report)
 }
 
+// Keep separately represented heat/storage/work terms until the final residual.
+// Two compensated pairs retain small heat beside nearly cancelling large work.
+// General TwoSum has no ordering assertion; nonrepresentable intermediates
+// propagate to a nonfinite result and the physical acceptance gate refuses.
+fn energy_sum_j(terms: [f64; 4]) -> f64 {
+    if terms.iter().any(|value| !value.is_finite()) {
+        return f64::NAN;
+    }
+    let (left, left_tail) = two_sum(terms[0], terms[1]);
+    let (right, right_tail) = two_sum(terms[2], terms[3]);
+    let (sum, sum_tail) = two_sum(left, right);
+    let (tail, tail_tail) = two_sum(left_tail, right_tail);
+    let (sum, remainder) = two_sum(sum, sum_tail + tail);
+    let (result, remainder) = two_sum(sum, remainder + tail_tail);
+    if result.is_finite() && remainder.is_finite() {
+        result
+    } else {
+        f64::NAN
+    }
+}
+
+fn check_heat_balance(
+    energy_terms_j: [f64; 4],
+    heat_to_gas_j: f64,
+    endpoint_flux_j: f64,
+    control: WallControl,
+) -> Result<(f64, f64), Error> {
+    let energy_residual = energy_sum_j(energy_terms_j);
+    let thermal_residual = heat_to_gas_j - endpoint_flux_j;
+    let tolerance = control.tolerance(heat_to_gas_j.abs().max(endpoint_flux_j.abs()));
+    if !energy_residual.is_finite()
+        || !thermal_residual.is_finite()
+        || energy_residual.abs() > tolerance
+        || thermal_residual.abs() > tolerance
+    {
+        return Err(Error::Balance {
+            energy_residual_j: energy_residual,
+            thermal_residual_j: thermal_residual,
+        });
+    }
+    Ok((energy_residual, thermal_residual))
+}
+
 fn positive(value: f64) -> bool {
     value.is_finite() && value > 0.0
 }
@@ -607,5 +833,80 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), Error> {
         Err(Error::Cancelled)
     } else {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod balance_tests {
+    use super::*;
+
+    #[test]
+    fn g0_small_heat_defect_cannot_hide_in_large_boundary_work() {
+        // The two integer-valued work/storage inputs sum EXACTLY to 2 J.
+        // The binary64 number 1.1 is 2476979795053773 / 2251799813685248;
+        // the exact residual is therefore 2026619832316723 / 2251799813685248.
+        // It is itself binary64, independently fixing every expected output bit.
+        let expected = f64::from_bits(0x3fec_cccc_cccc_cccc);
+        let stored = 1e16;
+        let work = -9_999_999_999_999_998.0;
+        let wall = -1.1;
+        assert_eq!((stored + wall) + work, 0.0, "original false closure");
+        for scale in [2.0_f64.powi(-500), 1.0, 2.0_f64.powi(500)] {
+            let control = WallControl {
+                absolute_energy_tolerance_j: 1e-8 * scale,
+                relative_energy_tolerance: 0.0,
+                maximum_iterations: 1,
+            };
+            let failure = check_heat_balance(
+                [stored * scale, work * scale, wall * scale, 0.0],
+                1.1 * scale,
+                1.1 * scale,
+                control,
+            );
+            assert_eq!(
+                failure,
+                Err(Error::Balance {
+                    energy_residual_j: expected * scale,
+                    thermal_residual_j: 0.0,
+                })
+            );
+            // A correctly balanced 2 J transfer is still accepted at each scale.
+            assert_eq!(
+                check_heat_balance(
+                    [stored * scale, work * scale, -2.0 * scale, 0.0],
+                    2.0 * scale,
+                    2.0 * scale,
+                    control,
+                ),
+                Ok((0.0, 0.0))
+            );
+            // A reservoir occupies the fourth term, rather than finite storage.
+            assert_eq!(
+                energy_sum_j([stored * scale, work * scale, 0.0, -1.1 * scale]),
+                expected * scale
+            );
+        }
+    }
+
+    #[test]
+    fn g0_nonfinite_and_overflowing_energy_accounts_refuse_without_panicking() {
+        let control = WallControl {
+            absolute_energy_tolerance_j: 1e-8,
+            relative_energy_tolerance: 0.0,
+            maximum_iterations: 1,
+        };
+        for terms in [
+            [f64::NAN, 0.0, 0.0, 0.0],
+            [f64::INFINITY, -f64::INFINITY, 0.0, 0.0],
+            [f64::MAX, f64::MAX, -f64::MAX, -f64::MAX],
+            // Even a finite leading sum can have an overflowing EFT intermediate.
+            [-3.0 * 2.0_f64.powi(970), f64::MAX, 0.0, 0.0],
+        ] {
+            assert!(matches!(
+                check_heat_balance(terms, 0.0, 0.0, control),
+                Err(Error::Balance { energy_residual_j, thermal_residual_j })
+                    if energy_residual_j.is_nan() && thermal_residual_j == 0.0
+            ));
+        }
     }
 }
