@@ -31,6 +31,8 @@ pub mod linearization;
 pub mod newton;
 /// Spatial intrinsic-permeability tensors in the existing Stokes operator.
 pub mod porous;
+/// Conservative directional volume transport on the original BDM1 faces.
+pub mod transport;
 
 fn positive_viscosity(nu: f64) -> f64 {
     assert!(

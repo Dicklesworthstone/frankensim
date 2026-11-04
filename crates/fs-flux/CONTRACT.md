@@ -221,6 +221,13 @@ result alone is not a full discrete energy-balance or thermal-evolution claim.
 Analytic Couette/extensional, rigid-motion, mesh-refinement, temperature-layered
 rheology and moving-chart tests cover the physical values and source ownership.
 
+`FluxSystem::edge_volume_transport` retains both nonnegative directional volume
+rates on each BDM1 face, including simultaneous counterflow at zero net flow.
+It reuses the momentum operator's affine-trace sign split and retains the signed
+net directly from the original mean moment. Rates are per unit depth in m²/s;
+consumers supply density, depth, carried state and fixed-inventory continuity
+admission. The operator neither repairs divergence nor infers ALE mesh velocity.
+
 1. BDM1 basis reproduces its defining dofs (Kronecker to 3.7e-15),
    satisfies the divergence theorem per basis function (1.4e-15), and
    has single-valued normal traces across interior edges (3.6e-15)
