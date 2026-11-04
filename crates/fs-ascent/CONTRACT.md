@@ -608,3 +608,34 @@ roots before a seeded `StormAssertion` is emitted.
   establish optimizer convergence across dominated gaps, cover all nine WFG
   families, or produce cross-ISA/performance evidence. Its retained identity
   is replay evidence, not cryptographic scientific authority.
+
+## Coherent acoustic source control
+
+The opt-in `harmonic-control` feature binds `harmonic_control::HarmonicControlStudy`
+to the original `fs_bem::observation_transfers::PreparedHarmonicEnergyControl` and fallible
+`LbfgsState::{try_new,try_run}`. Only distinct authored actuator indices vary;
+all other coefficients retain their exact full-bank baseline, including fixed
+disturbance sources. Each complex actuator has an explicit positive physical
+source scale. The original Cartesian Hermitian gradient maps to interleaved
+real/imaginary decisions with no extra conjugation or peak/RMS factor.
+
+The objective is original mean pressure/velocity mismatch energy divided by an
+explicit positive energy scale [J], plus authored nonnegative quadratic source
+effort relative to physical complex reference coefficients. Effort is a
+dimensionless optimization preference, not a material power/dissipation law or
+an actuator limit. Reports retain original physical residual energy separately
+from effort and the normalized optimizer objective/gradient norm.
+
+Whole-study bounds cover up to 256 complex actuators, curvature memory,
+cumulative accepted iterations, callback attempts and conservative logical
+workspace including original physical storage. Every Wolfe probe uses the
+original exact physical energy gradient; no boundary re-solve, finite-difference
+physical gradient or dense source Hessian is introduced. Accepted coefficients,
+objective, gradient, history and curvature remain immutable through public
+getters. Failed/cancelled probes retain that checkpoint while spending their
+attempt; resumes preserve the same operator, targets, source mapping and
+budgets. Original Budget, IterationCap, Stall and convergence stop attributions
+remain distinct. This is fixed-frequency source control on the admitted
+discrete operator, with its original medium and spatial-accuracy limitations;
+it adds no transient controller, hard constraints, robustness guarantee,
+geometry/material derivative or experimental calibration claim.

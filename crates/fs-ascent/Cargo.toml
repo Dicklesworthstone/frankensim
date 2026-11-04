@@ -19,9 +19,12 @@ transient-design = ["dep:fs-time", "dep:fs-blake3"]
 conduction-assimilation = ["transient-design", "dep:fs-conduction"]
 # Exact physical conductivity Hessians for the live reverse-IR Newton study.
 conduction-design = ["dep:fs-conduction"]
+# Coherent acoustic source control through the original physical BEM adjoint.
+harmonic-control = ["dep:fs-bem"]
 
 [dependencies]
 fs-blake3 = { path = "../fs-blake3", optional = true }
+fs-bem = { path = "../fs-bem", optional = true }
 fs-adjoint = { path = "../fs-adjoint" }
 fs-conduction = { path = "../fs-conduction", optional = true }
 fs-couple = { path = "../fs-couple", optional = true }
@@ -62,6 +65,10 @@ workspace = true
 [[test]]
 name = "equilibrium_study"
 required-features = ["equilibrium-design"]
+
+[[test]]
+name = "harmonic_control"
+required-features = ["harmonic-control"]
 
 [[bin]]
 name = "equilibrium_fit"

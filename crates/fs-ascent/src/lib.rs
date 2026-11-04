@@ -26,6 +26,9 @@ pub mod scan_design;
 #[cfg(feature = "equilibrium-design")]
 pub mod equilibrium;
 pub mod interior;
+/// Selected coherent actuators on an immutable physical acoustic field bank.
+#[cfg(feature = "harmonic-control")]
+pub mod harmonic_control;
 pub mod lbfgs;
 pub mod newton_continuation;
 pub mod nsga;
