@@ -3345,6 +3345,67 @@ Focused regressions compare the accepted-state readout against direct native
 face replay, verify gauges and node-current closure, and cover storage/work
 refusal, late cancellation and deterministic subsequent evolution.
 
+### Globally implicit multisalt diffusion
+
+`with_implicit_electroneutral_diffusion(ImplicitElectroneutralDiffusionControls,
+byte_budget)` selects simultaneous backward Euler on an already prepared global
+electrical network. It supports cycles, multiple independent salts, neutral
+co-solutes and disconnected molecular components in the original species order.
+The existing specialized binary-salt forest option remains available. This
+global mode also composes with fully retaining water paths at their ACTUAL
+updated solvent volumes on the original adaptive timeline.
+
+A shared feasible-inventory coordinate owner eliminates one anchor cell per
+molecular component and one present charged pivot species, preserving each
+component's original species totals and each cell's original signed charge.
+One component-wide rational radial factor bounds the full inventory direction
+inside the original nonnegative concentration-cap box. This chart is piecewise
+differentiable; it does not project fluxes, invent salt identities or impose
+zero current on each edge. Interior original inventories are the initial
+center. Boundary states use a conserved feasible reference solely as nonlinear
+coordinates, never as an accepted physical state. Exactly absent species,
+saturated pools, isolated cells and zero-dimensional components remain fixed;
+unrepresentable interiors refuse without concentration floors.
+
+The ORIGINAL `FallibleFiniteDifference` and `NewtonKrylovState` owners supply
+Jacobian products, FGMRES, line search and nonlinear iteration. Every trial
+decodes complete physical inventories and calls the original global electrical
+owner, including actual source resolution, gauge-fixed checked CG and bound
+combined-force face replay. At each checkpoint, EVERY original node/species
+backward-Euler equation must satisfy its explicit absolute/relative molar
+budget, including all eliminated anchors, counterions and absent spectators.
+Convergence of only the reduced nonlinear system is insufficient.
+
+The final original-law replay supplies gross outgoing withdrawals at the
+converged candidate. Publication retains the same rounded inventory-charge,
+species-balance, global mixing-free-energy and post-transfer source gates as
+the explicit global mode. The enclosing full/two-half comparison still controls
+local temporal error, and coupled water stages retain their total mechanical
+and mixing-potential account. Source refusals, exhausted nonlinear work and
+cancellation publish neither physical state nor time.
+
+The nonlinear face budget counts actual preparations/replays across the complete
+requested window, including finite differences, line searches, discarded time
+probes and failed prefixes. Native electrical work has its own whole-window
+bounds. `maximum_unknowns` explicitly limits independent coordinates. Prepared
+storage admits reusable trial solutions, the shared chart and a
+dimension-scaled native nonlinear payload allowance; it reserves topology's
+possible rank because water can release an initially saturated constraint.
+The estimate retains original source-receipt and allocator exclusions and is
+not a peak-RSS bound. No dense global Jacobian or replacement numerical solver
+is added. Implicit stability is not a universal Newton-convergence or temporal
+accuracy guarantee.
+
+Focused regressions cover an exact finite-concentration cyclic decay mode,
+stiff adaptive evolution, heterogeneous circulating currents and complete
+original-equation replay; coordinate tests cover mixed valences, absent and
+neutral-only pools, disconnected/saturated states and extreme probes. Existing
+retained-water and source-dependent cyclic fixtures exercise both global
+integration modes. Work, storage, unknown-count and cancellation refusals retain
+atomic publication. Accepted-state ionic observations use the same native
+readout for either mode. This extension adds no electrode reactions, imposed
+electrical ports, Poisson charge storage or double-layer model.
+
 ## Coupled nonideal water and molecular solution transport
 
 `OsmoticNetwork::with_coupled_solution_transport` composes the existing fully

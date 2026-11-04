@@ -68,7 +68,7 @@ impl ImplicitMulticomponentDiffusionControls {
         512 * 1024
     }
 
-    fn admit(self) -> Result<(), OsmoticNetworkError> {
+    pub(super) fn admit(self) -> Result<(), OsmoticNetworkError> {
         self.newton.validate().map_err(|_| {
             OsmoticNetworkError::Invalid("invalid native multicomponent Newton controls")
         })?;
@@ -91,7 +91,7 @@ impl ImplicitMulticomponentDiffusionControls {
         Ok(())
     }
 
-    fn tolerance(self, transfer: f64) -> Result<f64, OsmoticNetworkError> {
+    pub(super) fn tolerance(self, transfer: f64) -> Result<f64, OsmoticNetworkError> {
         finite(
             self.absolute_residual_tolerance_mol
                 + self.relative_residual_tolerance * transfer.abs(),

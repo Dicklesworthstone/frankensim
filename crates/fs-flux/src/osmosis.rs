@@ -37,9 +37,13 @@
 //! including a charge-constrained implicit binary-salt stage. General closed
 //! graphs can instead solve globally compatible diffusion potentials and
 //! circulating currents with native checked CG and simultaneous species updates.
-//! That global option allocates bounded transient numerical payloads. Both
-//! retain the original source-qualified forces; neither supplies double layers
-//! or electrochemical reactions.
+//! Optional global backward Euler covers multiple salts and neutral co-solutes
+//! through conserved ionic coordinates and the original Newton--Krylov owner.
+//! Every original node/species equation remains an acceptance condition. The
+//! global options allocate bounded transient numerical payloads; accepted-state
+//! observations expose fresh potentials and native species fluxes. All retain
+//! the original source-qualified forces; none supplies double layers or
+//! electrochemical reactions.
 
 /// Nonideal Maxwell–Stefan diffusion at fixed solvent volume on this timeline.
 pub mod diffusion;
@@ -556,6 +560,7 @@ pub struct OsmoticNetwork {
     implicit_multicomponent: Option<diffusion::ImplicitMulticomponentDiffusion>,
     implicit_salt: Option<diffusion::ImplicitSaltDiffusion>,
     electroneutral_diffusion: Option<diffusion::ElectroneutralDiffusion>,
+    implicit_electroneutral: Option<diffusion::ImplicitElectroneutralDiffusion>,
     coupled_controls: Option<coupled::CoupledSolutionControls>,
     work: Vec<OsmoticCompartment>,
     coarse: Vec<OsmoticCompartment>,
@@ -699,6 +704,7 @@ impl OsmoticNetwork {
             implicit_multicomponent: None,
             implicit_salt: None,
             electroneutral_diffusion: None,
+            implicit_electroneutral: None,
             coupled_controls: None,
             workspace_bytes: required,
             time_s: 0.0,
@@ -753,6 +759,9 @@ impl OsmoticNetwork {
         if let Some(electrical) = &mut self.electroneutral_diffusion {
             electrical.begin_window();
         }
+        if let Some(implicit) = &mut self.implicit_electroneutral {
+            implicit.begin_window();
+        }
         let (water_before, amounts_before) = totals(&self.cells, self.species.len());
         let mut report = OsmoticStepReport {
             interval_s: [self.time_s, end_time],
@@ -790,6 +799,7 @@ impl OsmoticNetwork {
                     self.implicit_multicomponent.as_mut(),
                     self.implicit_salt.as_mut(),
                     self.electroneutral_diffusion.as_mut(),
+                    self.implicit_electroneutral.as_mut(),
                     self.diffusion_controls,
                     self.coupled_controls,
                     step,
@@ -805,6 +815,7 @@ impl OsmoticNetwork {
                     self.implicit_multicomponent.as_mut(),
                     self.implicit_salt.as_mut(),
                     self.electroneutral_diffusion.as_mut(),
+                    self.implicit_electroneutral.as_mut(),
                     self.diffusion_controls,
                     self.coupled_controls,
                     0.5 * step,
@@ -820,6 +831,7 @@ impl OsmoticNetwork {
                     self.implicit_multicomponent.as_mut(),
                     self.implicit_salt.as_mut(),
                     self.electroneutral_diffusion.as_mut(),
+                    self.implicit_electroneutral.as_mut(),
                     self.diffusion_controls,
                     self.coupled_controls,
                     0.5 * step,
@@ -1060,6 +1072,7 @@ fn sweep_all(
     multicomponent: Option<&mut diffusion::ImplicitMulticomponentDiffusion>,
     salt: Option<&mut diffusion::ImplicitSaltDiffusion>,
     electrical: Option<&mut diffusion::ElectroneutralDiffusion>,
+    implicit_electrical: Option<&mut diffusion::ImplicitElectroneutralDiffusion>,
     physical: Option<diffusion::SolutionDiffusionControls>,
     coupled: Option<coupled::CoupledSolutionControls>,
     dt: f64,
@@ -1076,6 +1089,7 @@ fn sweep_all(
             multicomponent,
             salt,
             electrical,
+            implicit_electrical,
             coupled,
             dt,
             controls,
@@ -1091,6 +1105,7 @@ fn sweep_all(
             multicomponent,
             salt,
             electrical,
+            implicit_electrical,
             dt,
             physical,
             evaluations,

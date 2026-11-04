@@ -512,7 +512,13 @@ fn retained_water_and_ionic_diffusion_share_one_neutral_finite_network() {
         system
             .with_implicit_salt_diffusion(ImplicitSaltDiffusionControls::default(), 1 << 22)
             .unwrap(),
-        global,
+        global.clone(),
+        global
+            .with_implicit_electroneutral_diffusion(
+                ImplicitElectroneutralDiffusionControls::default(),
+                1 << 22,
+            )
+            .unwrap(),
     ] {
         let report = system.advance(5.0, numerical(1e-4), || false).unwrap();
         assert!(system.compartments()[0].solution().solvent_volume_m3() > VOLUME);

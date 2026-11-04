@@ -260,7 +260,7 @@ fn cyclic_source_transport_uses_actual_neutral_face_coefficients_after_evolution
     use crate::osmosis::coupled::CoupledSolutionControls;
     let model = source(1.0, vec![0.0; 4], vec![200.0; 2]);
     let sourced = super::source::multicomponent_material(&model);
-    let mut system = OsmoticNetwork::with_electroneutral_solution_transport(
+    let system = OsmoticNetwork::with_electroneutral_solution_transport(
         vec!["solute-0".into(), "solute-1".into()],
         [100.0, 40.0, 15.0].map(|c| cell(&model, &[c, c])).into(),
         Vec::new(),
@@ -280,57 +280,67 @@ fn cyclic_source_transport_uses_actual_neutral_face_coefficients_after_evolution
         1 << 22,
     )
     .unwrap();
-    let report = system.advance(2.0, numerical(1e-5), || false).unwrap();
-    assert!(
-        report
-            .electroneutral_diffusion
-            .unwrap()
-            .maximum_edge_charge_rate_mol_s
-            > 0.0
-    );
-    assert!(
-        report
-            .coupled_potential_change
-            .unwrap()
-            .total_potential_change_j
-            < 0.0
-    );
-    let link = &system.solution_diffusion_links()[1];
-    let (left, right) = (
-        system.compartments()[0].solution(),
-        system.compartments()[2].solution(),
-    );
-    let (a, b) = (
-        left.solute_moles()[0] / VOLUME,
-        right.solute_moles()[0] / VOLUME,
-    );
-    let coefficient = 1e-9 * (1.0 + (a - b) / (a / b).ln() / 100.0);
-    let original = link.material_sources().unwrap();
-    let resolved = original
-        .resolve_zero_current_inventories(
-            [VOLUME, VOLUME],
-            [left.solute_moles(), right.solute_moles()],
-            &ionic(),
-            || false,
-        )
-        .unwrap();
-    assert!(
-        (coefficient - 1.6e-9).abs() > 1e-11,
-        "reference-state coefficients cannot represent the actual face"
-    );
-    for pair in resolved.pairs() {
-        assert!((pair.face.properties()[0].value_si() - coefficient).abs() < 1e-21);
+    for mut system in [
+        system.clone(),
+        system
+            .with_implicit_electroneutral_diffusion(
+                ImplicitElectroneutralDiffusionControls::default(),
+                1 << 22,
+            )
+            .unwrap(),
+    ] {
+        let report = system.advance(2.0, numerical(1e-5), || false).unwrap();
         assert!(
-            original
-                .sources()
-                .iter()
-                .any(|source| source.selected_claim()
-                    == pair.face.properties()[0].answer().receipt.selected)
+            report
+                .electroneutral_diffusion
+                .unwrap()
+                .maximum_edge_charge_rate_mol_s
+                > 0.0
         );
-    }
-    for cell in system.compartments() {
-        ionic()
-            .admit_inventories(cell.solution().solute_moles())
+        assert!(
+            report
+                .coupled_potential_change
+                .unwrap()
+                .total_potential_change_j
+                < 0.0
+        );
+        let link = &system.solution_diffusion_links()[1];
+        let (left, right) = (
+            system.compartments()[0].solution(),
+            system.compartments()[2].solution(),
+        );
+        let (a, b) = (
+            left.solute_moles()[0] / VOLUME,
+            right.solute_moles()[0] / VOLUME,
+        );
+        let coefficient = 1e-9 * (1.0 + (a - b) / (a / b).ln() / 100.0);
+        let original = link.material_sources().unwrap();
+        let resolved = original
+            .resolve_zero_current_inventories(
+                [VOLUME, VOLUME],
+                [left.solute_moles(), right.solute_moles()],
+                &ionic(),
+                || false,
+            )
             .unwrap();
+        assert!(
+            (coefficient - 1.6e-9).abs() > 1e-11,
+            "reference-state coefficients cannot represent the actual face"
+        );
+        for pair in resolved.pairs() {
+            assert!((pair.face.properties()[0].value_si() - coefficient).abs() < 1e-21);
+            assert!(
+                original
+                    .sources()
+                    .iter()
+                    .any(|source| source.selected_claim()
+                        == pair.face.properties()[0].answer().receipt.selected)
+            );
+        }
+        for cell in system.compartments() {
+            ionic()
+                .admit_inventories(cell.solution().solute_moles())
+                .unwrap();
+        }
     }
 }

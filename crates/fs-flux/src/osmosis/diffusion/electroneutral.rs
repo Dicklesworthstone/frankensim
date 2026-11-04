@@ -149,9 +149,10 @@ impl OsmoticNetwork {
     /// Every component is electrically isolated and may carry loop currents.
     /// No external voltage/current port or independent ionic leak is inferred.
     ///
-    /// This mode uses simultaneous explicit molecular stages, controlled by the
-    /// existing full/two-half timeline. Independent-transfer and pairwise salt
-    /// implicit modes are incompatible with this global charge constraint.
+    /// This mode starts with simultaneous explicit molecular stages. Select
+    /// `with_implicit_electroneutral_diffusion` for globally coupled backward
+    /// Euler on the same full/two-half timeline. Independent-transfer and
+    /// pairwise salt implicit modes do not enforce this global charge constraint.
     ///
     /// Storage admission includes retained arrays, transient bound face
     /// responses, resolved binary matrices and a conservative allowance for

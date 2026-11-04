@@ -11,6 +11,7 @@ use std::sync::Arc;
 mod electrical;
 mod electroneutral;
 mod implicit;
+mod implicit_electroneutral;
 mod implicit_salt;
 mod multicomponent;
 mod snapshot;

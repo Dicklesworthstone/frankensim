@@ -73,7 +73,7 @@ impl OsmoticNetwork {
     /// Uses the same original material/source responses, gauge-fixed native CG
     /// and combined-force replays as evolution, with fresh source qualification.
     /// No amount, solvent volume, accepted time or advance work counter changes.
-    /// Uses the prepared global electrical closure.
+    /// Works for both explicit and implicit global electrical integration.
     ///
     /// `maximum_snapshot_bytes` bounds additional retained output-array payload,
     /// beyond the already admitted network numerical workspace. Source-query

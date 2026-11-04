@@ -8,13 +8,18 @@
 //! A zero-current option evolves neutral ionic inventories on a forest, with
 //! optional charge-constrained implicit binary-salt exchange. General closed
 //! graphs can select a native global potential solve and simultaneous molecular
-//! updates. These ionic paths share the original source-qualified face and the
-//! same adaptive timeline, conservation, charge and free-energy gates.
+//! updates, with optional globally implicit multisalt transport. Its feasible
+//! coordinates preserve original species totals and node charge while native
+//! Newton--Krylov checks every original backward-Euler equation. These ionic
+//! paths share the original source-qualified face and the same adaptive timeline,
+//! conservation, charge and free-energy gates.
 
 mod electrical;
 mod electroneutral;
 mod implicit;
+mod implicit_electroneutral;
 mod implicit_salt;
+mod ionic_coordinates;
 mod multicomponent;
 pub(crate) use electroneutral::ElectroneutralDiffusion;
 pub use electroneutral::{
@@ -24,6 +29,8 @@ pub use electroneutral::{
 pub use fs_material::osmosis::diffusion::electrical::ZeroCurrentDiffusion;
 pub(crate) use implicit::ImplicitBinaryDiffusion;
 pub use implicit::ImplicitBinaryDiffusionControls;
+pub(crate) use implicit_electroneutral::ImplicitElectroneutralDiffusion;
+pub use implicit_electroneutral::ImplicitElectroneutralDiffusionControls;
 pub(crate) use implicit_salt::ImplicitSaltDiffusion;
 pub use implicit_salt::ImplicitSaltDiffusionControls;
 pub(crate) use multicomponent::ImplicitMulticomponentDiffusion;
@@ -459,12 +466,24 @@ pub(super) fn sweep(
     mut multicomponent: Option<&mut ImplicitMulticomponentDiffusion>,
     mut salt: Option<&mut ImplicitSaltDiffusion>,
     electrical: Option<&mut ElectroneutralDiffusion>,
+    implicit_electrical: Option<&mut ImplicitElectroneutralDiffusion>,
     dt: f64,
     controls: SolutionDiffusionControls,
     evaluations: &mut usize,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), OsmoticNetworkError> {
     if let Some(electrical) = electrical {
+        if let Some(implicit) = implicit_electrical {
+            return implicit.sweep(
+                electrical,
+                cells,
+                links,
+                dt,
+                controls,
+                evaluations,
+                cancelled,
+            );
+        }
         return electrical.sweep(cells, links, dt, controls, evaluations, cancelled);
     }
     for link in links.iter_mut() {
