@@ -88,6 +88,7 @@ impl ViscoDynamicState<'_, '_> {
             // velocity, so both momentum and this computed kinetic value survive.
             kinetic_j: self.kinetic_j,
             external_work_j: self.external_work_j,
+            support_work_j: self.support_work_j,
             eigenstrain_work_j: self.eigenstrain_work_j,
             parameter_work_j,
             time_s: self.time_s,

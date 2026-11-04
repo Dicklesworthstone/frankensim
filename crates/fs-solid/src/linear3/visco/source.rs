@@ -203,6 +203,7 @@ impl ViscoElements {
         Ok(Self {
             elements,
             equilibrium,
+            full_mass: self.full_mass.clone(),
             full_dofs: self.full_dofs,
             internal_variables: self.internal_variables,
             static_constraint_error: self.static_constraint_error.clone(),

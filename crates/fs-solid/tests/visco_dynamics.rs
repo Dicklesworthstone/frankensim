@@ -55,6 +55,23 @@ fn system(law: &TetViscoMaterial, free: &[usize], cx: &Cx<'_>) -> ViscoElements 
     )
     .unwrap()
 }
+fn supported_system(law: &TetViscoMaterial, free: &[usize], cx: &Cx<'_>) -> ViscoElements {
+    let fixed: Vec<_> = (0..12).filter(|d| !free.contains(d)).collect();
+    ViscoElements::new_with_full_reference_mass(
+        SolidMeshRef::Tet4 {
+            nodes_m: &NODES,
+            elements: &CELLS,
+        },
+        TetViscoField::Uniform(law),
+        &fixed,
+        TetAssemblyBudget::standard(),
+        ViscoStateBudget {
+            max_internal_variables: 1000,
+        },
+        cx,
+    )
+    .unwrap()
+}
 fn config() -> ViscoDynamicConfig {
     ViscoDynamicConfig {
         maximum_steps: 2000,
@@ -392,6 +409,359 @@ fn dynamic_refusals_keep_motion_material_memory_and_clock_atomic() {
             );
             assert_eq!(state.velocity_mps(), clean.velocity_mps());
             assert_eq!(state.time_s(), clean.time_s());
+        });
+    });
+}
+
+#[test]
+fn g1_moving_support_retains_consistent_mass_coupling_and_reaction_work() {
+    with_cx(|cx, _| {
+        let e = 1200.0;
+        let law = material(TensorProny::new_mandel(diagonal([e; 6]), vec![], 0.02).unwrap());
+        let legacy = system(&law, &[3], cx);
+        let solid = supported_system(&law, &[3], cx);
+        assert_eq!(
+            solid.equilibrium().stiffness.to_dense(),
+            legacy.equilibrium().stiffness.to_dense()
+        );
+        assert_eq!(
+            solid.equilibrium().mass.to_dense(),
+            legacy.equilibrium().mass.to_dense()
+        );
+        assert!(legacy.full_reference_mass().is_none());
+        let h = 0.02;
+        let prepared = solid.dynamic_operator(h, config(), cx).unwrap();
+        let old_prepared = legacy.dynamic_operator(h, config(), cx).unwrap();
+        assert!(
+            old_prepared
+                .start_with_support_motion(legacy.state(cx).unwrap(), &[0.0; 12], cx)
+                .is_err()
+        );
+        let mut state = prepared
+            .start(solid.state(cx).unwrap(), &[0.0; 12], cx)
+            .unwrap();
+        let mut support = [0.0; 12];
+        support[0] = 0.01;
+        let mut applied = [0.0; 12];
+        applied[0] = 4.0;
+        let step = state
+            .advance_with_support_velocity(&applied, &support, cx)
+            .unwrap();
+        // Independent affine-tetrahedron moments: diagonal rho*V/10,
+        // off-diagonal rho*V/20. Only node 1x is free, with K_ff=E/6.
+        let mass = law.density_kg_m3 / 60.0;
+        let cross_mass = law.density_kg_m3 / 120.0;
+        let k = e / 6.0;
+        let base_u = 0.5 * h * support[0];
+        let mean_v =
+            (-0.5 * cross_mass * support[0] + 0.25 * h * k * base_u) / (mass + 0.25 * h * h * k);
+        let free_u = h * mean_v;
+        let free_v = 2.0 * mean_v;
+        assert!(
+            free_u < 0.0,
+            "support acceleration must retain M_fc inertia"
+        );
+        close(state.material_history().displacement_m()[3], free_u, 2e-12);
+        close(state.velocity_mps()[3], free_v, 2e-12);
+        assert_eq!(state.velocity_mps()[0], support[0]);
+        let reaction = step.mean_reaction_force_n.as_ref().unwrap();
+        let base_reaction = (mass * support[0] + cross_mass * free_v) / h
+            + 0.5 * (2.0 * k * base_u - k * free_u)
+            - applied[0];
+        close(reaction[0], base_reaction, 2e-12);
+        assert!(reaction[3].abs() < 1e-11);
+        close(step.support_work_j, base_reaction * base_u, 2e-12);
+        close(step.external_work_j, applied[0] * base_u, 2e-12);
+        let kinetic = 0.5
+            * (mass * (support[0] * support[0] + free_v * free_v)
+                + 2.0 * cross_mass * support[0] * free_v);
+        let elastic = 0.5 * k * (2.0 * base_u * base_u - 2.0 * base_u * free_u + free_u * free_u);
+        close(step.kinetic_energy_j, kinetic, 2e-12);
+        close(step.constitutive.energy.stored_j, elastic, 2e-12);
+        close(
+            step.external_work_j + step.support_work_j,
+            kinetic + elastic,
+            2e-12,
+        );
+        assert_eq!(step.constitutive.step_dissipated_j, 0.0);
+        close(state.support_work_j(), step.support_work_j, 1e-14);
+    });
+}
+
+#[test]
+fn g3_supported_translation_preserves_inertia_on_every_native_element_family() {
+    use fs_solid::linear::Formulation;
+    use fs_solid::linear3::hex::{
+        HEX20_REFERENCE_NODES, HEX27_REFERENCE_NODES, HexConnectivity, HexQuadrature,
+    };
+    use fs_solid::linear3::tet10::{TetQuadrature, promote_p1_to_p2};
+    with_cx(|cx, _| {
+        let law = coupled();
+        let (tet_nodes, tets) = promote_p1_to_p2(&NODES, &CELLS, None, cx).unwrap();
+        let physical = |p: [i8; 3]| p.map(f64::from);
+        let n20 = HEX20_REFERENCE_NODES.map(physical);
+        let n27 = HEX27_REFERENCE_NODES.map(physical);
+        let n8: [[f64; 3]; 8] = core::array::from_fn(|i| n20[i]);
+        let h8 = [core::array::from_fn(|i| i)];
+        let h20 = [core::array::from_fn(|i| i)];
+        let h27 = [core::array::from_fn(|i| i)];
+        for (mesh, nodes, volume) in [
+            (
+                SolidMeshRef::Tet4 {
+                    nodes_m: &NODES,
+                    elements: &CELLS,
+                },
+                NODES.as_slice(),
+                1.0 / 6.0,
+            ),
+            (
+                SolidMeshRef::Tet10 {
+                    nodes_m: &tet_nodes,
+                    elements: &tets,
+                    quadrature: TetQuadrature {
+                        stiffness_points_per_dir: 3,
+                        mass_points_per_dir: 4,
+                    },
+                },
+                tet_nodes.as_slice(),
+                1.0 / 6.0,
+            ),
+            (
+                SolidMeshRef::Hex8 {
+                    nodes_m: &n8,
+                    elements: &h8,
+                    formulation: Formulation::BBar,
+                    stiffness_points_per_dir: 2,
+                },
+                n8.as_slice(),
+                8.0,
+            ),
+            (
+                SolidMeshRef::Hex {
+                    nodes_m: &n20,
+                    elements: HexConnectivity::Hex20(&h20),
+                    quadrature: HexQuadrature { points_per_dir: 3 },
+                },
+                n20.as_slice(),
+                8.0,
+            ),
+            (
+                SolidMeshRef::Hex {
+                    nodes_m: &n27,
+                    elements: HexConnectivity::Hex27(&h27),
+                    quadrature: HexQuadrature { points_per_dir: 3 },
+                },
+                n27.as_slice(),
+                8.0,
+            ),
+        ] {
+            let solid = ViscoElements::new_with_full_reference_mass(
+                mesh,
+                TetViscoField::Uniform(&law),
+                &[0, 1, 2],
+                TetAssemblyBudget::standard(),
+                ViscoStateBudget {
+                    max_internal_variables: 100_000,
+                },
+                cx,
+            )
+            .unwrap();
+            let prepared = solid.dynamic_operator(0.04, config(), cx).unwrap();
+            let speed = [0.8, -0.3, 0.2];
+            let velocity: Vec<_> = nodes.iter().flat_map(|_| speed).collect();
+            let mut prescribed = vec![0.0; velocity.len()];
+            prescribed[..3].copy_from_slice(&speed);
+            let zero = vec![0.0; velocity.len()];
+            let mut state = prepared
+                .start_with_support_motion(solid.state(cx).unwrap(), &velocity, cx)
+                .unwrap();
+            let energy =
+                0.5 * law.density_kg_m3 * volume * speed.iter().map(|v| v * v).sum::<f64>();
+            close(state.kinetic_energy_j(), energy, 2e-12);
+            for _ in 0..4 {
+                let step = state
+                    .advance_with_support_velocity(&zero, &prescribed, cx)
+                    .unwrap();
+                for node in 0..nodes.len() {
+                    for axis in 0..3 {
+                        close(state.velocity_mps()[3 * node + axis], speed[axis], 2e-10);
+                        close(
+                            state.material_history().displacement_m()[3 * node + axis],
+                            state.time_s() * speed[axis],
+                            2e-10,
+                        );
+                    }
+                }
+                close(step.kinetic_energy_j, energy, 2e-10);
+                assert!(step.constitutive.energy.stored_j.abs() < 1e-17);
+                assert!(step.constitutive.step_dissipated_j.abs() < 1e-17);
+                assert!(step.support_work_j.abs() < 2e-10 * energy);
+            }
+        }
+    });
+}
+
+#[test]
+fn g1_fully_prescribed_acceleration_accounts_for_all_support_mass_and_work() {
+    with_cx(|cx, _| {
+        let law = coupled();
+        let solid = supported_system(&law, &[], cx);
+        let h = 0.01;
+        let prepared = solid.dynamic_operator(h, config(), cx).unwrap();
+        let mut state = prepared
+            .start(solid.state(cx).unwrap(), &[0.0; 12], cx)
+            .unwrap();
+        let velocity = [0.01, -0.02, 0.03];
+        let support: Vec<_> = (0..4).flat_map(|_| velocity).collect();
+        let step = state
+            .advance_with_support_velocity(&[0.0; 12], &support, cx)
+            .unwrap();
+        let mass = law.density_kg_m3 / 6.0;
+        let expected = 0.5 * mass * velocity.iter().map(|v| v * v).sum::<f64>();
+        close(step.kinetic_energy_j, expected, 2e-12);
+        close(step.support_work_j, expected, 2e-12);
+        assert_eq!(step.external_work_j, 0.0);
+        assert_eq!(step.force_residual_n, 0.0);
+        let reactions = step.mean_reaction_force_n.unwrap();
+        for node in 0..4 {
+            for axis in 0..3 {
+                close(
+                    reactions[3 * node + axis],
+                    0.25 * mass * velocity[axis] / h,
+                    2e-12,
+                );
+            }
+        }
+    });
+}
+
+#[test]
+fn g0_moving_support_thermal_memory_keeps_separate_work_and_physical_heat() {
+    use fs_qty::ContentHash;
+    use fs_solid::linear3::{TetThermalStrainField, TetThermalStrainState};
+    with_cx(|cx, _| {
+        let law = coupled();
+        let solid = supported_system(&law, &[3, 4, 5], cx);
+        let h = 0.01;
+        let prepared = solid.dynamic_operator(h, config(), cx).unwrap();
+        let mut state = prepared
+            .start(solid.state(cx).unwrap(), &[0.0; 12], cx)
+            .unwrap();
+        let mut applied = [0.0; 12];
+        applied[0] = 0.3;
+        applied[3] = 0.2;
+        applied[4] = -0.1;
+        for i in 1..=40 {
+            let time = f64::from(i) * h;
+            let mut support = [0.0; 12];
+            support[0] = 0.002 * fs_math::det::sin(20.0 * time);
+            let thermal = TetThermalStrainState::try_new(
+                300.0 + time,
+                300.0,
+                [1e-4 * time, 0.0, 0.0, 0.0, 0.0, 0.0],
+                law.material_state_identity,
+                ContentHash([91; 32]),
+                0.02,
+            )
+            .unwrap();
+            let previous = state.material_history().displacement_m().to_vec();
+            let old_velocity = state.velocity_mps()[0];
+            let step = state
+                .advance_with_support_velocity_and_thermal_strain(
+                    &applied,
+                    &support,
+                    TetThermalStrainField::Uniform(&thermal),
+                    cx,
+                )
+                .unwrap();
+            close(
+                state.material_history().displacement_m()[0] - previous[0],
+                0.5 * h * (old_velocity + support[0]),
+                2e-12,
+            );
+            let reactions = step.mean_reaction_force_n.as_ref().unwrap();
+            close(
+                step.support_work_j,
+                reactions[0] * (state.material_history().displacement_m()[0] - previous[0]),
+                2e-12,
+            );
+            for d in [3, 4, 5] {
+                assert!(reactions[d].abs() < 1e-8);
+            }
+            assert!(step.constitutive.step_dissipated_j >= 0.0);
+        }
+        let material = state.material_history().energy();
+        assert!(material.dissipated_j > 1e-8);
+        assert!(state.support_work_j().abs() > 1e-8);
+        assert!(state.eigenstrain_work_j().abs() > 1e-8);
+        close(
+            state.external_work_j() + state.support_work_j() + state.eigenstrain_work_j(),
+            state.kinetic_energy_j() + material.stored_j + material.dissipated_j,
+            2e-10,
+        );
+    });
+}
+
+#[test]
+fn g0_support_input_and_cancellation_refuse_without_advancing_any_state() {
+    with_cx(|cx, gate| {
+        let solid = supported_system(&coupled(), &[3, 4, 5], cx);
+        let prepared = solid.dynamic_operator(0.01, config(), cx).unwrap();
+        let mut state = prepared
+            .start(solid.state(cx).unwrap(), &[0.0; 12], cx)
+            .unwrap();
+        let mut support = [0.0; 12];
+        support[0] = 0.002;
+        state
+            .advance_with_support_velocity(&[0.0; 12], &support, cx)
+            .unwrap();
+        let mut clean = state.clone();
+        assert!(state.advance(&[0.0; 12], cx).is_err());
+        for (dof, value) in [(3, 0.1), (0, f64::NAN), (0, 1000.0)] {
+            let mut invalid = support;
+            invalid[dof] = value;
+            assert!(
+                state
+                    .advance_with_support_velocity(&[0.0; 12], &invalid, cx)
+                    .is_err()
+            );
+        }
+        assert!(
+            state
+                .advance_with_support_velocity(&[0.0; 12], &[], cx)
+                .is_err()
+        );
+        gate.request();
+        assert!(
+            state
+                .advance_with_support_velocity(&[0.0; 12], &support, cx)
+                .is_err()
+        );
+        assert_eq!(state.velocity_mps(), clean.velocity_mps());
+        assert_eq!(
+            state.material_history().displacement_m(),
+            clean.material_history().displacement_m()
+        );
+        assert_eq!(
+            state.material_history().energy(),
+            clean.material_history().energy()
+        );
+        assert_eq!(state.time_s(), clean.time_s());
+        assert_eq!(state.steps(), clean.steps());
+        assert_eq!(state.support_work_j(), clean.support_work_j());
+        with_cx(|retry, _| {
+            state
+                .advance_with_support_velocity(&[0.0; 12], &support, retry)
+                .unwrap();
+            clean
+                .advance_with_support_velocity(&[0.0; 12], &support, retry)
+                .unwrap();
+            assert_eq!(state.velocity_mps(), clean.velocity_mps());
+            assert_eq!(
+                state.material_history().energy(),
+                clean.material_history().energy()
+            );
+            assert_eq!(state.support_work_j(), clean.support_work_j());
         });
     });
 }

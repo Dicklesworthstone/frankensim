@@ -1754,10 +1754,21 @@ large cumulative counters. Explicit step/free-DOF/iteration budgets, source
 strain limits, finite arithmetic, cancellation and energy allowances are
 checked before publishing motion, memory, work or clock changes.
 
-Supports are stationary at their accepted displacements and have zero velocity
-and zero work. Full dynamic support reactions and moving-support inertial
-couplings are not reconstructed from the reduced mass. Free bodies are admitted
-through their original consistent mass, without artificial constraints. Every
+Ordinary `start`/`advance` retain stationary supports and zero support work.
+`ViscoElements::new_with_full_reference_mass` additionally retains the original
+full consistent mass, including support rows and free/support couplings, for
+P1/TET10/HEX8/HEX20/HEX27. The ordinary constructor keeps its original reduced
+storage cost. `start_with_support_motion` and `advance_with_support_velocity`
+admit explicit support velocities; displacement follows the same midpoint
+kinematics as the free coordinates. Complete mean reactions include inertia
+and original work-mean material forces. Their signed work enters the existing
+independent energy gate separately from applied loads, eigenstrain work and
+physical heat. Thermal forcing composes through the same interval, and source
+continuation preserves full reference mass and accumulated support work.
+Missing retained mass, malformed/free-DOF support input, unrepresentable motion,
+source refusal and cancellation leave accepted motion and memory unchanged.
+Free bodies are admitted through their original consistent mass, without
+artificial constraints. Every
 material band must include DC; transient spectral admission and temporal
 convergence remain caller obligations. The material ramp is exact, while the
 coupled inertial trajectory is a time discretization. `tests/visco_dynamics.rs`
@@ -1787,8 +1798,8 @@ quadratic (2e-10 relative), and deliberately shifts it by more than a factor
 of two from the equilibrium result.
 
 This module does not yet supply the fractional-target modal-loss ladder,
-certified modal block reduction, valve-card integration, moving-support inertial
-evolution, or material/specimen validation. Arbitrary
+certified modal block reduction, valve-card integration, or material/specimen
+validation. Arbitrary
 time-domain input is not a certification that its spectrum lies in the law's
 band. Intrinsic material heat excludes support, contact and radiation losses.
 

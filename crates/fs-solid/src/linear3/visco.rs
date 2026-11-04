@@ -299,7 +299,7 @@ impl IntegrationPoint {
         &self,
         mut strain: [f64; 6],
         displacement: impl Fn(usize) -> f64,
-    ) -> [f64; 6]{
+    ) -> [f64; 6] {
         if let Some(gradients) = &self.compatible_gradients {
             for i in 0..3 {
                 strain[i] = gradients
@@ -324,6 +324,9 @@ struct Element {
 pub struct ViscoElements {
     elements: Vec<Element>,
     equilibrium: TetElasticAssembly,
+    // Optional support inertia and free/support couplings from the same native
+    // assembly. Free bodies already retain this matrix in equilibrium.
+    full_mass: Option<std::sync::Arc<Csr>>,
     full_dofs: usize,
     internal_variables: usize,
     // Free-body modal/history use remains admitted; load control requires the
@@ -572,6 +575,36 @@ impl ViscoElements {
         state_budget: ViscoStateBudget,
         cx: &Cx<'_>,
     ) -> Result<Self, ViscoElementError> {
+        Self::prepare(mesh, field, fixed, budget, state_budget, false, cx)
+    }
+
+    /// Prepare the same solid while retaining full consistent reference mass.
+    /// This enables moving supports and complete dynamic support reactions.
+    /// Native full-coordinate assembly is bounded by the node/element limits;
+    /// the requested free-DOF limit still applies to the reduced solve. Only
+    /// the full mass is additionally retained, and coefficient continuations
+    /// share it. Ordinary `new` keeps its original reduced-storage cost.
+    pub fn new_with_full_reference_mass(
+        mesh: SolidMeshRef<'_>,
+        field: TetViscoField<'_>,
+        fixed: &[usize],
+        budget: TetAssemblyBudget,
+        state_budget: ViscoStateBudget,
+        cx: &Cx<'_>,
+    ) -> Result<Self, ViscoElementError> {
+        Self::prepare(mesh, field, fixed, budget, state_budget, true, cx)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare(
+        mesh: SolidMeshRef<'_>,
+        field: TetViscoField<'_>,
+        fixed: &[usize],
+        budget: TetAssemblyBudget,
+        state_budget: ViscoStateBudget,
+        retain_full_mass: bool,
+        cx: &Cx<'_>,
+    ) -> Result<Self, ViscoElementError> {
         checkpoint(cx)?;
         let (nodes, count, points) = match mesh {
             SolidMeshRef::Tet4 { nodes_m, elements } => (nodes_m, elements.len(), 1),
@@ -659,13 +692,33 @@ impl ViscoElements {
             let m = field.at(e);
             materials.push(m.equilibrium_material()?);
         }
-        let eq = match mesh {
+        let reduction = if retain_full_mass && !fixed.is_empty() {
+            Some(super::free_dof_map(
+                nodes.len(),
+                fixed,
+                budget.maximum_free_dofs,
+            )?)
+        } else {
+            None
+        };
+        let (assembly_fixed, assembly_budget) = if let Some((_, map)) = &reduction {
+            (
+                &[][..],
+                TetAssemblyBudget {
+                    maximum_free_dofs: map.len(),
+                    ..budget
+                },
+            )
+        } else {
+            (fixed, budget)
+        };
+        let mut eq = match mesh {
             SolidMeshRef::Tet4 { nodes_m, elements } => TetLinearElasticProblem {
                 nodes_m,
                 tetrahedra: elements,
                 materials: TetMaterialField::PerElement(&materials),
-                fixed_dofs: fixed,
-                budget,
+                fixed_dofs: assembly_fixed,
+                budget: assembly_budget,
             }
             .assemble(cx)?,
             SolidMeshRef::Tet10 {
@@ -676,8 +729,8 @@ impl ViscoElements {
                 nodes_m,
                 elements,
                 materials: TetMaterialField::PerElement(&materials),
-                fixed_dofs: fixed,
-                budget,
+                fixed_dofs: assembly_fixed,
+                budget: assembly_budget,
                 quadrature,
             }
             .assemble(cx)?,
@@ -691,8 +744,8 @@ impl ViscoElements {
                 hexahedra: elements,
                 materials: TetMaterialField::PerElement(&materials),
                 formulation,
-                fixed_dofs: fixed,
-                budget,
+                fixed_dofs: assembly_fixed,
+                budget: assembly_budget,
                 stiffness_points_per_dir,
             }
             .assemble(cx)?,
@@ -708,11 +761,33 @@ impl ViscoElements {
                 },
                 elements,
                 materials: TetMaterialField::PerElement(&materials),
-                fixed_dofs: fixed,
-                budget,
+                fixed_dofs: assembly_fixed,
+                budget: assembly_budget,
                 quadrature,
             }
             .assemble(cx)?,
+        };
+        let full_mass = if let Some((free_dofs, reduced)) = reduction {
+            let restrict = |matrix: &Csr| -> Result<Csr, ViscoElementError> {
+                let mut result = Coo::new(free_dofs.len(), free_dofs.len());
+                for (row, &dof) in free_dofs.iter().enumerate() {
+                    checkpoint(cx)?;
+                    let (columns, values) = matrix.row(dof);
+                    for (&column, &value) in columns.iter().zip(values) {
+                        if let Some(column) = reduced[column] {
+                            result.push(row, column, value);
+                        }
+                    }
+                }
+                Ok(result.assemble())
+            };
+            eq.stiffness = restrict(&eq.stiffness)?;
+            let mass = restrict(&eq.mass)?;
+            let full = std::mem::replace(&mut eq.mass, mass);
+            eq.free_dofs = free_dofs;
+            Some(std::sync::Arc::new(full))
+        } else {
+            None
         };
         let mut prepared = Vec::with_capacity(count);
         match mesh {
@@ -851,6 +926,7 @@ impl ViscoElements {
         Ok(Self {
             elements: prepared,
             equilibrium: eq,
+            full_mass,
             full_dofs: nodes.len() * 3,
             internal_variables: needed,
             static_constraint_error,
@@ -861,6 +937,15 @@ impl ViscoElements {
     /// Canonical equilibrium elastic pencil, including consistent mass.
     pub fn equilibrium(&self) -> &TetElasticAssembly {
         &self.equilibrium
+    }
+
+    /// Full node-major consistent mass, including supported rows, when retained.
+    /// Free bodies always retain it. Constrained solids request it through
+    /// `new_with_full_reference_mass`; source refreshes preserve this inventory.
+    pub fn full_reference_mass(&self) -> Option<&Csr> {
+        self.full_mass.as_deref().or_else(|| {
+            (self.equilibrium.free_dofs.len() == self.full_dofs).then_some(&self.equilibrium.mass)
+        })
     }
 
     /// Current material law and source identity with the original reference density.

@@ -8,8 +8,9 @@
 //! checked solve error. Frozen coefficients admit thermal forcing through the
 //! SAME mean tangent; thermal storage/capacity is not part of this work port.
 //! Endpoint stress is retained for observation, never substituted for f_mean.
-//! Supports remain stationary; the original reduced consistent mass is exact
-//! on that subspace. Moving supports need full mass coupling and are absent.
+//! Explicit support motion uses the original full consistent mass, including
+//! free/support cross-couplings. Its independently recovered mean reactions
+//! contribute their signed work; neither support work nor a solve defect is heat.
 
 use super::quasistatic::{assemble_tangents, check_residual, solve_linear};
 use super::*;
@@ -66,6 +67,7 @@ pub struct ViscoDynamicState<'p, 'a> {
     velocity_mps: Vec<f64>,
     kinetic_j: f64,
     external_work_j: f64,
+    support_work_j: f64,
     eigenstrain_work_j: f64,
     parameter_work_j: f64,
     time_s: f64,
@@ -84,10 +86,14 @@ pub struct ViscoDynamicStep {
     pub kinetic_energy_j: f64,
     /// Actual interval-mean applied nodal force times actual displacement [J].
     pub external_work_j: f64,
-    /// Exactly zero for this stationary-support owner [J].
+    /// Signed mean support-reaction work over the actual displacement [J].
     pub support_work_j: f64,
-    /// External nodal plus imposed-eigenstrain work minus kinetic/storage
-    /// changes and physical heat [J].
+    /// Full mean inertia plus internal force minus applied force [N]. Fixed
+    /// rows are forces exerted by supports on the solid; free rows retain the
+    /// physical residual. None when preparation omitted supported mass rows.
+    pub mean_reaction_force_n: Option<Vec<f64>>,
+    /// Applied-load, support and imposed-eigenstrain work minus kinetic/storage
+    /// changes and original physical heat [J].
     pub balance_residual_j: f64,
     /// Endpoint and exact mean internal forces; original storage/work/heat.
     pub constitutive: ViscoForceStep,
@@ -103,9 +109,25 @@ fn finite(value: f64) -> Result<f64, ViscoElementError> {
         Err(ViscoElementError::NonFiniteResult)
     }
 }
-fn kinetic(mass: &Csr, velocity: &[f64]) -> Result<f64, ViscoElementError> {
+fn mass_action(system: &ViscoElements, velocity: &[f64]) -> Vec<f64> {
     let mut momentum = vec![0.0; velocity.len()];
-    mass.spmv(velocity, &mut momentum);
+    if let Some(mass) = system.full_reference_mass() {
+        mass.spmv(velocity, &mut momentum);
+    } else {
+        // Legacy stationary supports need only the existing reduced matrix.
+        // These zero support rows are never published as full reactions.
+        let free = &system.equilibrium.free_dofs;
+        let reduced: Vec<_> = free.iter().map(|&d| velocity[d]).collect();
+        let mut result = vec![0.0; free.len()];
+        system.equilibrium.mass.spmv(&reduced, &mut result);
+        for (&d, value) in free.iter().zip(result) {
+            momentum[d] = value;
+        }
+    }
+    momentum
+}
+fn kinetic(system: &ViscoElements, velocity: &[f64]) -> Result<f64, ViscoElementError> {
+    let momentum = mass_action(system, velocity);
     let value = finite(
         0.5 * velocity
             .iter()
@@ -210,33 +232,50 @@ impl<'a> ViscoDynamicOperator<'a> {
 
     /// Continue any accepted original material history, including a quasistatic
     /// preload. Full node-major velocity must be exactly zero on fixed DOFs.
-    /// Their accepted displacement remains constant for this entire trajectory.
+    /// Ordinary `advance` holds their displacement; explicit support-motion
+    /// calls may subsequently prescribe motion using retained full mass.
     pub fn start<'p>(
         &'p self,
         material: ViscoElementState<'a>,
         velocity_mps: &[f64],
         cx: &Cx<'_>,
     ) -> Result<ViscoDynamicState<'p, 'a>, ViscoElementError> {
+        self.start_impl(material, velocity_mps, false, cx)
+    }
+
+    /// Start with explicit physical velocity on supports as well as free nodes.
+    /// Requires `ViscoElements::new_with_full_reference_mass` when constrained.
+    /// Subsequent support endpoint velocities are supplied to
+    /// `advance_with_support_velocity`; no inertial cross term is discarded.
+    pub fn start_with_support_motion<'p>(
+        &'p self,
+        material: ViscoElementState<'a>,
+        velocity_mps: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<ViscoDynamicState<'p, 'a>, ViscoElementError> {
+        self.start_impl(material, velocity_mps, true, cx)
+    }
+
+    fn start_impl<'p>(
+        &'p self,
+        material: ViscoElementState<'a>,
+        velocity_mps: &[f64],
+        moving_supports: bool,
+        cx: &Cx<'_>,
+    ) -> Result<ViscoDynamicState<'p, 'a>, ViscoElementError> {
         checkpoint(cx)?;
         if !core::ptr::eq(self.system, material.system)
             || velocity_mps.len() != self.system.full_dofs
-            || velocity_mps
-                .iter()
-                .enumerate()
-                .any(|(d, v)| !v.is_finite() || (self.reduced[d].is_none() && *v != 0.0))
+            || (moving_supports && self.system.full_reference_mass().is_none())
+            || velocity_mps.iter().enumerate().any(|(d, v)| {
+                !v.is_finite() || (!moving_supports && self.reduced[d].is_none() && *v != 0.0)
+            })
         {
             return Err(invalid(
-                "same-system material history and stationary-support finite velocity required",
+                "same-system history, finite velocity and full reference mass for moving supports required",
             ));
         }
-        let velocity: Vec<_> = self
-            .system
-            .equilibrium
-            .free_dofs
-            .iter()
-            .map(|&d| velocity_mps[d])
-            .collect();
-        let kinetic_j = kinetic(&self.system.equilibrium.mass, &velocity)?;
+        let kinetic_j = kinetic(self.system, velocity_mps)?;
         checkpoint(cx)?;
         Ok(ViscoDynamicState {
             prepared: self,
@@ -244,6 +283,7 @@ impl<'a> ViscoDynamicOperator<'a> {
             velocity_mps: velocity_mps.to_vec(),
             kinetic_j,
             external_work_j: 0.0,
+            support_work_j: 0.0,
             eigenstrain_work_j: 0.0,
             parameter_work_j: 0.0,
             time_s: 0.0,
@@ -257,7 +297,7 @@ impl ViscoDynamicState<'_, '_> {
     pub fn material_history(&self) -> &ViscoElementState<'_> {
         &self.material
     }
-    /// Full node-major physical velocity; fixed support entries are zero [m/s].
+    /// Full node-major physical velocity, including prescribed supports [m/s].
     pub fn velocity_mps(&self) -> &[f64] {
         &self.velocity_mps
     }
@@ -278,6 +318,11 @@ impl ViscoDynamicState<'_, '_> {
         self.external_work_j
     }
 
+    /// Cumulative signed support work, separate from applied loads and heat [J].
+    pub const fn support_work_j(&self) -> f64 {
+        self.support_work_j
+    }
+
     /// Cumulative signed imposed-eigenstrain work since starting this trajectory
     /// [J]. This work is separate from applied-load work and physical heat.
     pub const fn eigenstrain_work_j(&self) -> f64 {
@@ -294,15 +339,15 @@ impl ViscoDynamicState<'_, '_> {
     /// Advance one interval using the actual interval-mean external nodal load.
     /// For an affine force history this is its endpoint average. No material
     /// endpoint-force trapezoid is used. All fixed supports stay stationary,
-    /// so their reaction work is zero; full dynamic support reactions are not
-    /// reconstructed from the reduced mass. Any accepted free strain is held.
+    /// so their reaction work is zero. Nonzero accepted support velocity needs
+    /// explicit support-motion input instead. Any accepted free strain is held.
     /// Failure preserves the entire state.
     pub fn advance(
         &mut self,
         mean_force_n: &[f64],
         cx: &Cx<'_>,
     ) -> Result<ViscoDynamicStep, ViscoElementError> {
-        self.advance_impl(mean_force_n, None, cx)
+        self.advance_impl(mean_force_n, None, None, cx)
     }
 
     /// Advance the original inertial trajectory while imposing source-integrated
@@ -318,12 +363,44 @@ impl ViscoDynamicState<'_, '_> {
         thermal: impl Into<super::super::QuadraticThermalStrainField<'t>>,
         cx: &Cx<'_>,
     ) -> Result<ViscoDynamicStep, ViscoElementError> {
-        self.advance_impl(mean_force_n, Some(thermal.into()), cx)
+        self.advance_impl(mean_force_n, None, Some(thermal.into()), cx)
+    }
+
+    /// Advance with prescribed support endpoint velocities [m/s]. The full
+    /// node-major input must be zero on free DOFs. Support displacement follows
+    /// `u1-u0 = h*(v0+v1)/2`, so the same midpoint kinematics closes momentum
+    /// and reaction work. Unrepresentable support increments refuse. The
+    /// original full reference mass must have been retained at preparation.
+    pub fn advance_with_support_velocity(
+        &mut self,
+        mean_force_n: &[f64],
+        support_velocity_mps: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<ViscoDynamicStep, ViscoElementError> {
+        self.advance_impl(mean_force_n, Some(support_velocity_mps), None, cx)
+    }
+
+    /// The same imposed support motion combined with original thermal strain.
+    /// Nodal, support and eigenstrain work remain separate signed inputs.
+    pub fn advance_with_support_velocity_and_thermal_strain<'t>(
+        &mut self,
+        mean_force_n: &[f64],
+        support_velocity_mps: &[f64],
+        thermal: impl Into<super::super::QuadraticThermalStrainField<'t>>,
+        cx: &Cx<'_>,
+    ) -> Result<ViscoDynamicStep, ViscoElementError> {
+        self.advance_impl(
+            mean_force_n,
+            Some(support_velocity_mps),
+            Some(thermal.into()),
+            cx,
+        )
     }
 
     fn advance_impl(
         &mut self,
         mean_force_n: &[f64],
+        support_velocity_mps: Option<&[f64]>,
         thermal: Option<super::super::QuadraticThermalStrainField<'_>>,
         cx: &Cx<'_>,
     ) -> Result<ViscoDynamicStep, ViscoElementError> {
@@ -342,10 +419,56 @@ impl ViscoDynamicState<'_, '_> {
                 "dynamic step budget, representable time and complete finite mean load required",
             ));
         }
+        if let Some(support) = support_velocity_mps {
+            if system.full_reference_mass().is_none()
+                || support.len() != system.full_dofs
+                || support
+                    .iter()
+                    .enumerate()
+                    .any(|(d, v)| !v.is_finite() || (prepared.reduced[d].is_some() && *v != 0.0))
+            {
+                return Err(invalid(
+                    "moving supports require full reference mass and finite fixed-DOF-only endpoint velocity",
+                ));
+            }
+        } else if self
+            .velocity_mps
+            .iter()
+            .enumerate()
+            .any(|(d, v)| prepared.reduced[d].is_none() && *v != 0.0)
+        {
+            return Err(invalid(
+                "nonzero support velocity requires explicit support motion",
+            ));
+        }
         let thermal = thermal
             .map(|field| self.material.prepare_thermal_field(field, cx))
             .transpose()?;
         let free = &system.equilibrium.free_dofs;
+        let mut displacement = self.material.displacement_m.clone();
+        let mut next_velocity = self.velocity_mps.clone();
+        let mut momentum_velocity = self.velocity_mps.clone();
+        let mut support_increment = support_velocity_mps.map(|_| vec![0.0; system.full_dofs]);
+        if let (Some(support), Some(increments)) =
+            (support_velocity_mps, support_increment.as_mut())
+        {
+            for d in 0..system.full_dofs {
+                if prepared.reduced[d].is_none() {
+                    let mean = 0.5 * self.velocity_mps[d] + 0.5 * support[d];
+                    let requested_increment = finite(h * mean)?;
+                    displacement[d] = finite(displacement[d] + requested_increment)?;
+                    let increment = finite(displacement[d] - self.material.displacement_m[d])?;
+                    if mean != 0.0 && (requested_increment == 0.0 || increment == 0.0) {
+                        return Err(invalid("support midpoint displacement is unrepresentable"));
+                    }
+                    increments[d] = increment;
+                    next_velocity[d] = support[d];
+                    // M_ff v_f0 - M_fc (v_c1-v_c0)/2. Applying the native
+                    // full mass also retains every off-diagonal inertial term.
+                    momentum_velocity[d] = 0.5 * self.velocity_mps[d] - 0.5 * support[d];
+                }
+            }
+        }
         let mut held = {
             let mut trial = self.material.clone();
             trial.step_internal_force(self.material.displacement_m(), h, cx)?
@@ -357,16 +480,48 @@ impl ViscoDynamicState<'_, '_> {
             &mut held.reduced_mean_force_n,
             cx,
         )?;
-        let velocity: Vec<_> = free.iter().map(|&d| self.velocity_mps[d]).collect();
-        let mut momentum = vec![0.0; free.len()];
-        system.equilibrium.mass.spmv(&velocity, &mut momentum);
+        if let Some(increment) = &support_increment {
+            // Add K_mean,fc delta_u_c with the original B/B^T pair. This
+            // affine offset is not an accepted support-only intermediate
+            // strain: the final complete motion must pass source admission.
+            for (element, tangent) in system.elements.iter().zip(&prepared.mean_tangents) {
+                for point in &element.points {
+                    checkpoint(cx)?;
+                    let strain = point.strain(&element.dofs, increment);
+                    let stress: [f64; 6] =
+                        core::array::from_fn(|i| (0..6).map(|j| tangent[i][j] * strain[j]).sum());
+                    for (b, &d) in point.b.iter().zip(&element.dofs) {
+                        if let Some(i) = prepared.reduced[d] {
+                            held.reduced_mean_force_n[i] += point.volume_m3
+                                * b.iter().zip(stress).map(|(b, s)| b * s).sum::<f64>();
+                        }
+                    }
+                }
+            }
+        }
+        let momentum = mass_action(system, &momentum_velocity);
+        // A prescribed support impulse can cancel the previous free momentum.
+        // Retain its uncancelled scale when checking the physical equation.
+        let support_momentum_scale = match (support_velocity_mps, system.full_reference_mass()) {
+            (Some(_), Some(mass)) => euclidean_norm(free.iter().map(|&d| {
+                let (columns, values) = mass.row(d);
+                columns
+                    .iter()
+                    .zip(values)
+                    .filter(|(column, _)| prepared.reduced[**column].is_none())
+                    .map(|(&column, &value)| value * momentum_velocity[column])
+                    .sum::<f64>()
+            })),
+            _ => 0.0,
+        };
         let rhs: Vec<_> = free
             .iter()
             .enumerate()
-            .map(|(i, &d)| momentum[i] + 0.5 * h * (mean_force_n[d] - held.reduced_mean_force_n[i]))
+            .map(|(i, &d)| momentum[d] + 0.5 * h * (mean_force_n[d] - held.reduced_mean_force_n[i]))
             .collect();
         let scale = euclidean_norm(rhs.iter().copied())
-            .max(euclidean_norm(momentum.iter().copied()))
+            .max(euclidean_norm(free.iter().map(|&d| momentum[d])))
+            .max(support_momentum_scale)
             .max(0.5 * h * euclidean_norm(free.iter().map(|&d| mean_force_n[d])))
             .max(0.5 * h * euclidean_norm(held.reduced_mean_force_n.iter().copied()))
             .max(f64::MIN_POSITIVE);
@@ -381,8 +536,6 @@ impl ViscoDynamicState<'_, '_> {
             prepared.config.solve,
             cx,
         )?;
-        let mut displacement = self.material.displacement_m.clone();
-        let mut next_velocity = self.velocity_mps.clone();
         for (i, &d) in free.iter().enumerate() {
             displacement[d] = finite(displacement[d] + h * mean_velocity[i])?;
             // Recover the actual representable increment, ensuring constitutive
@@ -393,19 +546,39 @@ impl ViscoDynamicState<'_, '_> {
         let mut candidate = self.material.clone();
         let constitutive =
             candidate.step_internal_force_impl(&displacement, h, thermal.as_ref(), cx)?;
-        let delta_velocity: Vec<_> = free
+        let delta_velocity: Vec<_> = next_velocity
             .iter()
-            .map(|&d| next_velocity[d] - self.velocity_mps[d])
+            .zip(&self.velocity_mps)
+            .map(|(new, old)| new - old)
             .collect();
-        let mut impulse = vec![0.0; free.len()];
-        system.equilibrium.mass.spmv(&delta_velocity, &mut impulse);
+        let impulse = mass_action(system, &delta_velocity);
         let residual = euclidean_norm(free.iter().enumerate().map(|(i, &d)| {
-            impulse[i] + h * (constitutive.reduced_mean_force_n[i] - mean_force_n[d])
+            impulse[d] + h * (constitutive.reduced_mean_force_n[i] - mean_force_n[d])
         }));
         check_residual(residual / (2.0 * scale), iterations, prepared.config.solve)?;
         let force_residual_n = finite(residual / h)?;
-        let new_free_velocity: Vec<_> = free.iter().map(|&d| next_velocity[d]).collect();
-        let kinetic_j = kinetic(&system.equilibrium.mass, &new_free_velocity)?;
+        let mean_reaction_force_n = if system.full_reference_mass().is_some() {
+            Some(
+                (0..system.full_dofs)
+                    .map(|d| {
+                        finite(impulse[d] / h + constitutive.full_mean_force_n[d] - mean_force_n[d])
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
+        } else {
+            None
+        };
+        let support_work_j = if let Some(reaction) = &mean_reaction_force_n {
+            finite(
+                (0..system.full_dofs)
+                    .filter(|&d| prepared.reduced[d].is_none())
+                    .map(|d| reaction[d] * (displacement[d] - self.material.displacement_m[d]))
+                    .sum(),
+            )?
+        } else {
+            0.0
+        };
+        let kinetic_j = kinetic(system, &next_velocity)?;
         let work = finite(
             mean_force_n
                 .iter()
@@ -414,7 +587,7 @@ impl ViscoDynamicState<'_, '_> {
                 .sum(),
         )?;
         let defect = finite(
-            work + constitutive.step_eigenstrain_work_j
+            work + support_work_j + constitutive.step_eigenstrain_work_j
                 - (kinetic_j - self.kinetic_j)
                 - (constitutive.energy.stored_j - self.material.energy.stored_j)
                 - constitutive.step_dissipated_j,
@@ -423,6 +596,7 @@ impl ViscoDynamicState<'_, '_> {
             prepared.config.absolute_energy_tolerance_j
                 + prepared.config.relative_energy_tolerance
                     * (work.abs()
+                        + support_work_j.abs()
                         + constitutive.step_eigenstrain_work_j.abs()
                         + kinetic_j
                         + self.kinetic_j
@@ -437,6 +611,7 @@ impl ViscoDynamicState<'_, '_> {
             });
         }
         let external_work = finite(self.external_work_j + work)?;
+        let support_work = finite(self.support_work_j + support_work_j)?;
         let eigenstrain_work =
             finite(self.eigenstrain_work_j + constitutive.step_eigenstrain_work_j)?;
         checkpoint(cx)?;
@@ -444,6 +619,7 @@ impl ViscoDynamicState<'_, '_> {
         self.velocity_mps = next_velocity;
         self.kinetic_j = kinetic_j;
         self.external_work_j = external_work;
+        self.support_work_j = support_work;
         self.eigenstrain_work_j = eigenstrain_work;
         self.time_s = time;
         self.steps += 1;
@@ -453,7 +629,8 @@ impl ViscoDynamicState<'_, '_> {
             force_residual_n,
             kinetic_energy_j: kinetic_j,
             external_work_j: work,
-            support_work_j: 0.0,
+            support_work_j,
+            mean_reaction_force_n,
             balance_residual_j: defect,
             constitutive,
         })
