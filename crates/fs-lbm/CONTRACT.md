@@ -2950,6 +2950,34 @@ halfway wall values. The two remaining axes must be periodic. The existing
 uniform body force enters through the same Guo-centered macroscopic velocity.
 Spatially varying or time-dependent forces use the `ForcedGrid3` methods below.
 
+The explicit moving-wall entries
+`prepare_channel_dynamic_sgs_with_moving_walls`,
+`step_serial_with_channel_dynamic_sgs_and_moving_walls` and their pooled
+counterpart derive both wall velocities from the complete native
+`WallMomentumProbe3` and its prescribed velocity field. Every reflected link
+on both walls is required, including a stationary plate when only one moves.
+Each plane must have one uniform tangential velocity. Native topology,
+finite-value, Mach and discrete impermeability checks remain authoritative;
+partial probes and nonuniform drives refuse even when their net mass source
+vanishes.
+
+That exact wall pair enters the dynamic filter and the quadratic wall-relative
+dissipation stencil. The prepared molecular-plus-SGS field then feeds the
+original moving-wall stream, which returns its actual impulse and wall-work
+receipt alongside the SGS report. Actuator work supplied to the fluid is the
+negative of reported wall work. No new arrays, stochastic force, thermal
+source or persistent boundary drive are introduced. Zero drive retains the
+stationary arithmetic. The existing channel resolution and exploratory-use
+limits apply; arbitrary moving geometry and turbulent-flow qualification
+remain outside this API.
+
+Five native regression definitions cover Couette dissipation and co-motion
+for both lattices and all wall normals, active-fit frame changes, material
+rates and original impulse receipts, serial/pooled and zero-drive identity,
+and incomplete/nonuniform drive, cancellation and late-stream refusal/retry.
+These new integration tests await native execution; the implementation
+session's shared executor exhausted storage and memory before that build.
+
 The channel and periodic native adapters share molecular-ratio admission,
 collision conversion and dissipation reporting. Every preparation starts from
 the original collision or supplied molecular field. A zero fitted viscosity

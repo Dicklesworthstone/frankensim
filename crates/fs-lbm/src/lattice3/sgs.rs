@@ -293,17 +293,53 @@ impl<L: Lattice3<Q>, const Q: usize> Grid3<L, Q> {
     }
 
     pub(super) fn velocity_gradient(&self, cell: usize, velocity: &[[f64; 3]]) -> [[f64; 3]; 3] {
+        self.velocity_gradient_with_walls(cell, velocity, |_, _, _| [0.0; 3])
+    }
+
+    // The caller must bind each missing neighbor to the SAME halfway-wall
+    // velocity used by native streaming. Wall-relative differences preserve
+    // uniform co-motion and the quadratic reconstruction at the fluid centre.
+    pub(super) fn velocity_gradient_with_walls(
+        &self,
+        cell: usize,
+        velocity: &[[f64; 3]],
+        mut wall_velocity: impl FnMut(usize, usize, bool) -> [f64; 3],
+    ) -> [[f64; 3]; 3] {
         let p = coordinates(cell, self.dims);
         let mut gradient = [[0.0; 3]; 3];
         for axis in 0..3 {
             let minus = self.velocity_neighbour(p, axis, false, velocity);
             let plus = self.velocity_neighbour(p, axis, true, velocity);
+            let low_wall = if minus.is_none() {
+                wall_velocity(cell, axis, false)
+            } else {
+                [0.0; 3]
+            };
+            let high_wall = if plus.is_none() {
+                wall_velocity(cell, axis, true)
+            } else {
+                [0.0; 3]
+            };
             for component in 0..3 {
                 gradient[component][axis] = match (minus, plus) {
                     (Some(low), Some(high)) => 0.5 * (high[component] - low[component]),
-                    (None, Some(high)) => velocity[cell][component] + high[component] / 3.0,
-                    (Some(low), None) => -velocity[cell][component] - low[component] / 3.0,
-                    (None, None) => 0.0,
+                    // Keep the stationary arithmetic, including signed zero.
+                    (None, Some(high)) if low_wall[component] == 0.0 => {
+                        velocity[cell][component] + high[component] / 3.0
+                    }
+                    (Some(low), None) if high_wall[component] == 0.0 => {
+                        -velocity[cell][component] - low[component] / 3.0
+                    }
+                    (None, Some(high)) => {
+                        (velocity[cell][component] - low_wall[component])
+                            + (high[component] - low_wall[component]) / 3.0
+                    }
+                    (Some(low), None) => {
+                        -(velocity[cell][component] - high_wall[component])
+                            - (low[component] - high_wall[component]) / 3.0
+                    }
+                    (None, None) if low_wall[component] == high_wall[component] => 0.0,
+                    (None, None) => high_wall[component] - low_wall[component],
                 };
             }
         }

@@ -1,7 +1,7 @@
 //! G0/G1 native wall-channel checks, not a Reynolds-number validation campaign.
 
 use super::*;
-use crate::d3q19::CollisionModel3;
+use crate::d3q19::{CollisionModel3, equilibrium3};
 use crate::d3q27::{
     CollisionConfig27, CollisionModel27, D3q27, Equilibrium27, Rates27, equilibrium27,
 };
@@ -57,6 +57,15 @@ fn random(i: usize, salt: u64) -> f64 {
 }
 
 fn channel(normal: usize, varying: bool, force_size: f64) -> Grid3<D3q27, 27> {
+    boosted_channel(normal, varying, force_size, [0.0; 3])
+}
+
+fn boosted_channel(
+    normal: usize,
+    varying: bool,
+    force_size: f64,
+    boost: [f64; 3],
+) -> Grid3<D3q27, 27> {
     let axes = [(normal + 1) % 3, (normal + 2) % 3, normal];
     let mut dims = [5; 3];
     dims[axes[1]] = 4;
@@ -77,10 +86,10 @@ fn channel(normal: usize, varying: bool, force_size: f64) -> Grid3<D3q27, 27> {
             let active = (z * 4 + y) * 5 + x;
             let h = z as f64 + 0.5;
             let envelope = 4.0 * h * (5.0 - h) / 25.0;
-            let mut velocity = [0.0; 3];
+            let mut velocity = boost;
             if varying {
                 for component in 0..3 {
-                    velocity[axes[component]] =
+                    velocity[axes[component]] +=
                         0.02 * envelope * random(active, 31 * component as u64 + 7);
                 }
             }
@@ -299,4 +308,428 @@ fn g1_channel_late_forced_mach_failure_keeps_populations_and_clock() {
     });
     assert_eq!(flow.populations(), before);
     assert_eq!(flow.completed_steps(), 0);
+}
+
+fn wall_drive<L: Lattice3<Q>, const Q: usize>(
+    flow: &Grid3<L, Q>,
+    cx: &Cx<'_>,
+    normal: usize,
+    walls: [[f64; 3]; 2],
+) -> (WallMomentumProbe3<L, Q>, Vec<[f64; 3]>) {
+    let probe = flow.wall_momentum_probe(cx, [0.0; 3], |_| true).unwrap();
+    let velocities = probe
+        .wall_links()
+        .map(|link| walls[usize::from(link.exterior_faces[2 * normal + 1])])
+        .collect();
+    (probe, velocities)
+}
+
+fn laminar_moving_channel<L: SgsLattice3<Q>, const Q: usize>(
+    collision: L::Collision,
+    equilibrium: impl Fn(f64, [f64; 3]) -> [f64; Q],
+) {
+    for normal in 0..3 {
+        let tangent = (normal + 1) % 3;
+        for difference in [0.0, 0.02] {
+            let mut walls = [[0.0; 3]; 2];
+            walls[0][tangent] = 0.01;
+            walls[1][tangent] = 0.01 + difference;
+            let mut flow = Grid3::<L, Q>::try_new(
+                [4; 3],
+                collision,
+                [0.0; 3],
+                core::array::from_fn(|axis| axis != normal),
+                GridBudget3 {
+                    maximum_cells: 64,
+                    maximum_mach: 0.2,
+                },
+                |_| false,
+                |point| {
+                    let mut velocity = walls[0];
+                    velocity[tangent] += difference * (point[normal] as f64 + 0.5) / 4.0;
+                    equilibrium(1.0, velocity)
+                },
+            )
+            .unwrap();
+            let molecular: Vec<_> = (0..64)
+                .map(|cell| {
+                    L::with_shear_relaxation(collision, 0.75 + 0.01 * (cell % 3) as f64).unwrap()
+                })
+                .collect();
+            let expected = molecular
+                .iter()
+                .map(|&law| L::molecular_viscosity(law).unwrap() * (difference / 4.0).powi(2))
+                .sum::<f64>();
+            let mut workspace = flow.channel_dynamic_sgs_workspace(usize::MAX).unwrap();
+            with_cx(&CancelGate::new_clock_free(), |cx| {
+                let (probe, velocities) = wall_drive(&flow, cx, normal, walls);
+                let report = flow
+                    .prepare_channel_dynamic_sgs_with_moving_walls(
+                        cx,
+                        config(),
+                        Some(&molecular),
+                        &probe,
+                        &velocities,
+                        &mut workspace,
+                    )
+                    .unwrap();
+                // Homogeneous laminar shear needs no fitted SGS transport;
+                // the remaining error comes only from population moments.
+                assert!(report.fit.maximum_eddy_viscosity < 1e-14);
+                assert!(report.dissipation.sgs_dissipation_lu < 1e-16);
+                if difference == 0.0 {
+                    assert!(report.dissipation.resolved_dissipation_lu < 1e-26);
+                    let (_, load) = flow
+                        .step_serial_with_channel_dynamic_sgs_and_moving_walls(
+                            cx,
+                            config(),
+                            Some(&molecular),
+                            &probe,
+                            &velocities,
+                            &mut workspace,
+                        )
+                        .unwrap();
+                    assert!(load.wall_impulse[tangent].abs() < 1e-13);
+                    assert!(load.wall_work.abs() < 1e-14);
+                    for cell in 0..64 {
+                        let velocity = flow.macroscopic(cell).unwrap().1;
+                        for axis in 0..3 {
+                            assert!((velocity[axis] - walls[0][axis]).abs() < 2e-15);
+                        }
+                    }
+                } else {
+                    assert!(
+                        (report.dissipation.resolved_dissipation_lu - expected).abs()
+                            < 1e-12 * expected
+                    );
+                }
+            });
+        }
+    }
+}
+
+#[test]
+fn g1_dynamic_moving_channel_couette_and_uniform_frame_use_actual_wall_strain() {
+    laminar_moving_channel::<D3q19, 19>(CollisionModel3::Bgk { tau: 0.8 }, equilibrium3);
+    laminar_moving_channel::<D3q27, 27>(law(), |rho, velocity| {
+        equilibrium27(rho, velocity, Equilibrium27::Factorized)
+    });
+}
+
+#[test]
+fn g1_moving_channel_fit_is_frame_invariant_and_retains_native_impulses_and_rates() {
+    for normal in 0..3 {
+        let mut boost = [0.0; 3];
+        boost[(normal + 1) % 3] = 0.015;
+        boost[(normal + 2) % 3] = -0.008;
+        let reference = channel(normal, true, 2e-5);
+        let mut serial = boosted_channel(normal, true, 2e-5, boost);
+        let mut native = boosted_channel(normal, true, 2e-5, boost);
+        let mut pooled = boosted_channel(normal, true, 2e-5, boost);
+        let mut stationary = reference.channel_dynamic_sgs_workspace(usize::MAX).unwrap();
+        let mut workspace = serial.channel_dynamic_sgs_workspace(usize::MAX).unwrap();
+        let mut parallel = pooled.channel_dynamic_sgs_workspace(usize::MAX).unwrap();
+        let molecular: Vec<_> = (0..100)
+            .map(|cell| {
+                let mut collision = law();
+                if let CollisionModel27::Cumulant { ref mut rates } = collision.model {
+                    rates.omega[0] = 1.90 + 0.005 * (cell % 5) as f64;
+                    rates.omega[1] += 0.001 * (cell % 3) as f64;
+                }
+                collision
+            })
+            .collect();
+        let mass: f64 = serial.populations().iter().flatten().sum();
+        let pointer = workspace.collisions().as_ptr();
+        let bytes = workspace.workspace_bytes();
+        with_cx(&CancelGate::new_clock_free(), |cx| {
+            let baseline = reference
+                .prepare_channel_dynamic_sgs(cx, config(), Some(&molecular), &mut stationary)
+                .unwrap();
+            let (probe, velocities) = wall_drive(&serial, cx, normal, [boost; 2]);
+            let prepared = serial
+                .prepare_channel_dynamic_sgs_with_moving_walls(
+                    cx,
+                    config(),
+                    Some(&molecular),
+                    &probe,
+                    &velocities,
+                    &mut workspace,
+                )
+                .unwrap();
+            assert!(prepared.fit.maximum_eddy_viscosity > 0.0);
+            for (&moving, &fixed) in workspace
+                .eddy_viscosities()
+                .iter()
+                .zip(stationary.eddy_viscosities())
+            {
+                assert!((moving - fixed).abs() < 1e-13);
+            }
+            assert!(
+                (prepared.dissipation.resolved_dissipation_lu
+                    - baseline.dissipation.resolved_dissipation_lu)
+                    .abs()
+                    < 1e-13
+            );
+            assert!(
+                (prepared.dissipation.sgs_dissipation_lu - baseline.dissipation.sgs_dissipation_lu)
+                    .abs()
+                    < 1e-13
+            );
+            for (cell, (&actual, &original)) in
+                workspace.collisions().iter().zip(&molecular).enumerate()
+            {
+                let (
+                    CollisionModel27::Cumulant { rates: augmented },
+                    CollisionModel27::Cumulant { rates: source },
+                ) = (actual.model, original.model)
+                else {
+                    panic!("collision family changed");
+                };
+                assert_eq!(augmented.omega[1..], source.omega[1..]);
+                assert_eq!(actual.maximum_mach, original.maximum_mach);
+                assert!(
+                    (augmented.viscosity().unwrap()
+                        - source.viscosity().unwrap()
+                        - workspace.eddy_viscosities()[cell])
+                        .abs()
+                        < 2e-16
+                );
+            }
+            let expected_load = native
+                .step_serial_with_moving_wall_momentum(
+                    cx,
+                    &probe,
+                    &velocities,
+                    Some(workspace.collisions()),
+                )
+                .unwrap();
+            let accepted = serial
+                .step_serial_with_channel_dynamic_sgs_and_moving_walls(
+                    cx,
+                    config(),
+                    Some(&molecular),
+                    &probe,
+                    &velocities,
+                    &mut workspace,
+                )
+                .unwrap();
+            let actual = pooled
+                .step_pooled_with_channel_dynamic_sgs_and_moving_walls(
+                    &TilePool::for_host(2, 93),
+                    &CancelGate::new_clock_free(),
+                    config(),
+                    Some(&molecular),
+                    &probe,
+                    &velocities,
+                    &mut parallel,
+                )
+                .unwrap();
+            assert_eq!(accepted, (prepared, expected_load));
+            assert_eq!(actual, accepted);
+            assert_eq!(serial.populations(), native.populations());
+            assert_eq!(serial.populations(), pooled.populations());
+            assert_eq!(serial.collision, law());
+            assert_eq!(serial.completed_steps(), 1);
+            assert_eq!(pointer, workspace.collisions().as_ptr());
+            assert_eq!(bytes, workspace.workspace_bytes());
+            let final_mass: f64 = serial.populations().iter().flatten().sum();
+            assert!((final_mass - mass).abs() < 2e-11);
+            for axis in 0..3 {
+                assert!(
+                    (accepted.1.wall_impulse[axis] + accepted.1.fluid_population_impulse[axis]
+                        - accepted.1.wall_velocity_mass_impulse[axis])
+                        .abs()
+                        < 2e-13
+                );
+            }
+        });
+    }
+}
+
+#[test]
+fn g0_zero_wall_drive_keeps_existing_dynamic_channel_bits() {
+    let mut original = channel(2, true, 2e-5);
+    let mut moving = channel(2, true, 2e-5);
+    let mut base = original.channel_dynamic_sgs_workspace(usize::MAX).unwrap();
+    let mut workspace = moving.channel_dynamic_sgs_workspace(usize::MAX).unwrap();
+    with_cx(&CancelGate::new_clock_free(), |cx| {
+        let (probe, zero) = wall_drive(&moving, cx, 2, [[0.0; 3]; 2]);
+        let expected = original
+            .step_serial_with_channel_dynamic_sgs(cx, config(), None, &mut base)
+            .unwrap();
+        let actual = moving
+            .step_serial_with_channel_dynamic_sgs_and_moving_walls(
+                cx,
+                config(),
+                None,
+                &probe,
+                &zero,
+                &mut workspace,
+            )
+            .unwrap();
+        assert_eq!(actual.0, expected);
+        assert_eq!(moving.populations(), original.populations());
+        assert_eq!(actual.1.wall_work, 0.0);
+        assert_eq!(actual.1.wall_velocity_mass_impulse, [0.0; 3]);
+    });
+}
+
+#[test]
+fn g0_moving_channel_refuses_incomplete_or_inconsistent_drive_then_retries() {
+    let boost = [0.015, 0.0, 0.0];
+    let mut flow = boosted_channel(2, true, 2e-5, boost);
+    let before = flow.populations().to_vec();
+    let mut workspace = flow.channel_dynamic_sgs_workspace(usize::MAX).unwrap();
+    with_cx(&CancelGate::new_clock_free(), |cx| {
+        let (probe, velocities) = wall_drive(&flow, cx, 2, [boost; 2]);
+        let partial = flow
+            .wall_momentum_probe(cx, [0.0; 3], |link| link.exterior_faces[5])
+            .unwrap();
+        assert!(matches!(
+            flow.step_serial_with_channel_dynamic_sgs_and_moving_walls(
+                cx,
+                config(),
+                None,
+                &partial,
+                &vec![[0.0; 3]; partial.measured_links()],
+                &mut workspace,
+            ),
+            Err(SgsStepError::Dynamic(DynamicSgsError::Invalid(_)))
+        ));
+        // Tangential speed on axial-only wall links changes no streamed
+        // population (e.u_wall = 0), even though native mass admission passes.
+        // It must not masquerade as a complete physical wall drive in SGS.
+        let axial = flow
+            .wall_momentum_probe(cx, [0.0; 3], |link| {
+                link.incoming_direction[0] == 0 && link.incoming_direction[1] == 0
+            })
+            .unwrap();
+        let axial_velocities = vec![boost; axial.measured_links()];
+        WallMotion3 {
+            probe: &axial,
+            velocities: &axial_velocities,
+        }
+        .admit(&flow, || Ok(()))
+        .unwrap();
+        assert!(matches!(
+            flow.step_serial_with_channel_dynamic_sgs_and_moving_walls(
+                cx,
+                config(),
+                None,
+                &axial,
+                &axial_velocities,
+                &mut workspace,
+            ),
+            Err(SgsStepError::Dynamic(DynamicSgsError::Invalid(_)))
+        ));
+        assert_eq!(flow.populations(), before);
+        assert_eq!(flow.completed_steps(), 0);
+        let nonuniform: Vec<_> = probe
+            .wall_links()
+            .map(|link| [0.001 * (1.0 + link.fluid_cell[0] as f64), 0.0, 0.0])
+            .collect();
+        // The native mass-conserving moving-wall owner permits this drive;
+        // the homogeneous-plane dynamic model must refuse it explicitly.
+        WallMotion3 {
+            probe: &probe,
+            velocities: &nonuniform,
+        }
+        .admit(&flow, || Ok(()))
+        .unwrap();
+        for invalid in [
+            nonuniform,
+            vec![[0.0, 0.0, 0.001]; velocities.len()],
+            velocities[..velocities.len() - 1].to_vec(),
+        ] {
+            assert!(
+                flow.step_serial_with_channel_dynamic_sgs_and_moving_walls(
+                    cx,
+                    config(),
+                    None,
+                    &probe,
+                    &invalid,
+                    &mut workspace,
+                )
+                .is_err()
+            );
+            assert_eq!(flow.populations(), before);
+            assert_eq!(flow.completed_steps(), 0);
+        }
+        let cancelled = CancelGate::new_clock_free();
+        cancelled.request();
+        with_cx(&cancelled, |cx| {
+            assert!(matches!(
+                flow.step_serial_with_channel_dynamic_sgs_and_moving_walls(
+                    cx,
+                    config(),
+                    None,
+                    &probe,
+                    &velocities,
+                    &mut workspace,
+                ),
+                Err(SgsStepError::Grid(GridError3::Cancelled))
+            ));
+        });
+        assert_eq!(flow.populations(), before);
+        assert_eq!(flow.completed_steps(), 0);
+        let mut reference = boosted_channel(2, true, 2e-5, boost);
+        let mut fresh = reference.channel_dynamic_sgs_workspace(usize::MAX).unwrap();
+        let retry = flow
+            .step_serial_with_channel_dynamic_sgs_and_moving_walls(
+                cx,
+                config(),
+                None,
+                &probe,
+                &velocities,
+                &mut workspace,
+            )
+            .unwrap();
+        let expected = reference
+            .step_serial_with_channel_dynamic_sgs_and_moving_walls(
+                cx,
+                config(),
+                None,
+                &probe,
+                &velocities,
+                &mut fresh,
+            )
+            .unwrap();
+        assert_eq!(retry, expected);
+        assert_eq!(flow.populations(), reference.populations());
+    });
+}
+
+#[test]
+fn g1_dynamic_moving_channel_late_forced_mach_refusal_is_atomic() {
+    let mut flow = channel(2, false, 0.002);
+    flow.budget.maximum_mach = 0.001;
+    let before = flow.populations().to_vec();
+    let mut workspace = flow.channel_dynamic_sgs_workspace(usize::MAX).unwrap();
+    with_cx(&CancelGate::new_clock_free(), |cx| {
+        let (probe, velocities) = wall_drive(&flow, cx, 2, [[0.0003, 0.0, 0.0]; 2]);
+        flow.prepare_channel_dynamic_sgs_with_moving_walls(
+            cx,
+            config(),
+            None,
+            &probe,
+            &velocities,
+            &mut workspace,
+        )
+        .unwrap();
+        assert!(matches!(
+            flow.step_serial_with_channel_dynamic_sgs_and_moving_walls(
+                cx,
+                config(),
+                None,
+                &probe,
+                &velocities,
+                &mut workspace,
+            ),
+            Err(SgsStepError::Grid(GridError3::Mach { .. }))
+        ));
+    });
+    assert_eq!(flow.populations(), before);
+    assert_eq!(flow.completed_steps(), 0);
+    assert_eq!(flow.collision, law());
 }

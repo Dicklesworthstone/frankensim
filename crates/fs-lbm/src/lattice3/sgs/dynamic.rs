@@ -176,6 +176,25 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
         molecular: Option<&[L::Collision]>,
         viscosities: &[f64],
         local: &mut SgsWorkspace3<L::Collision>,
+        checkpoint: impl FnMut() -> Result<(), GridError3<L::Error>>,
+    ) -> Result<SgsReport, SgsStepError<L::Error>> {
+        self.apply_dynamic_sgs_viscosities_with_walls(
+            maximum_ratio,
+            molecular,
+            viscosities,
+            local,
+            |_, _, _| [0.0; 3],
+            checkpoint,
+        )
+    }
+
+    pub(super) fn apply_dynamic_sgs_viscosities_with_walls(
+        &self,
+        maximum_ratio: f64,
+        molecular: Option<&[L::Collision]>,
+        viscosities: &[f64],
+        local: &mut SgsWorkspace3<L::Collision>,
+        mut wall_velocity: impl FnMut(usize, usize, bool) -> [f64; 3],
         mut checkpoint: impl FnMut() -> Result<(), GridError3<L::Error>>,
     ) -> Result<SgsReport, SgsStepError<L::Error>> {
         let mut dissipation = SgsReport::default();
@@ -204,7 +223,8 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
                 L::with_shear_relaxation(original, 0.5 + (nu + eddy) / L::CS2)
                     .map_err(|source| GridError3::Collision { cell, source })?
             };
-            let gradient = self.velocity_gradient(cell, &local.velocity);
+            let gradient =
+                self.velocity_gradient_with_walls(cell, &local.velocity, &mut wall_velocity);
             let third = (gradient[0][0] + gradient[1][1] + gradient[2][2]) / 3.0;
             let mut strain2 = 0.0;
             for i in 0..3 {
