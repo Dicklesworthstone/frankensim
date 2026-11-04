@@ -2245,13 +2245,28 @@ The exact legacy one-rectangle/no-environment lighting branch retains its
 original light-selection draws and estimator. Tracer bit-semantics v2
 deliberately changes reflective GGX sample/PDF bits from NDF sampling to
 isotropic visible-normal sampling while preserving the same BSDF integral in
-expectation.
+expectation. Tracer bit-semantics v4 and bidirectional semantics v10 retain
+ordinary emitting geometry's authored surface scattering. Source radiance is
+added at a hit with its existing emitter MIS weight; reflection/transmission
+then uses the original diffuse, GGX, conductor/coating, brushing or dielectric
+owner. An emitting surface can be an intermediate vertex on either BDPT
+subpath; its emission is a separate source endpoint contribution for the
+corresponding camera prefix. Emitting dielectric solids also participate in
+initial-medium discovery and Beer absorption. An exact black
+`SpectralDiffuse` material supplies an opaque emission-only surface. These
+authored relative-radiance sources do not infer an equilibrium thermal law;
+thermal and calibrated photometric source ownership remains unchanged.
+The five emitter-continuation regressions are authored but not yet executed:
+the native feature build was killed while compiling the pinned runtime under
+the available memory limit. The Cornell reference remains pinned to tracer
+v3 and must be reproduced in debug and release before a justified v4 re-freeze;
+neither its digest nor its evidence pin has been replaced without that proof.
 Current scalar scene-integrator no-claims: no gradient-index propagation or arbitrary overlapping media,
 no Russian roulette, reflective GGX
 and conductor sampling is isotropic-only, conductor and rough-dielectric GGX
-are single-scattering without multiple-scattering compensation, and standalone
-RGB emitters do not reflect. Thermal emitters retain their reciprocal diffuse
-reflection. Dielectric tracer bit-semantics v14 retains v13's isotropic
+are single-scattering without multiple-scattering compensation. Thermal
+emitters retain their reciprocal diffuse reflection. Dielectric tracer
+bit-semantics v14 retains v13's isotropic
 view-conditioned visible-normal rough-dielectric proposal, exact environment
 endpoint, finite-rectangle one-internal-reflection manifold connector,
 coplanar-interface canonicalization, and support-preserving `T-R-T` cone cull.

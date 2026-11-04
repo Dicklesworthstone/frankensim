@@ -72,11 +72,6 @@ impl<'scene> InitialMedia<'scene> {
             let Material::Dielectric { .. } = &item.material else {
                 continue;
             };
-            // Pure emitters do not scatter and their material is ignored by
-            // the tracer. An emitter's decorative material is not a volume.
-            if item.emission.is_some() {
-                continue;
-            }
             let (geometry, placement) = match &item.shape {
                 Shape::Mesh(mesh) => (
                     Geometry::mesh(mesh, cx)?,

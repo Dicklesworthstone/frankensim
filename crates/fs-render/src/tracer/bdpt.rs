@@ -34,7 +34,9 @@ mod brushed;
 /// including endpoint connection absorption for paths wholly inside glass.
 /// Version 9 uses triangle position error for dielectric mesh continuations
 /// and connections, preserving material boundaries closer than one micrometre.
-pub const BIDIRECTIONAL_TRACER_SEMANTICS_VERSION: u32 = 9;
+/// Version 10 retains emitting surfaces as scattering vertices on either
+/// subpath. Their emission is evaluated independently at each camera prefix.
+pub const BIDIRECTIONAL_TRACER_SEMANTICS_VERSION: u32 = 10;
 
 /// Admitted finite-light BDPT technique set.
 ///
@@ -939,12 +941,10 @@ fn random_walk<'scene>(
         )?;
         vertices.push(vertex);
 
-        if scene.primitives[intersection.primitive_index]
-            .emission
-            .is_some()
-        {
-            break;
-        }
+        // An emissive hit remains a Surface vertex: its BSDF and reciprocal
+        // densities govern continuation on either subpath. evaluate_strategies
+        // separately accounts for its emission as an s=0 camera endpoint;
+        // only a sampled source origin has VertexKind::Light.
         if vertices.len() >= max_vertices {
             break;
         }
@@ -4022,6 +4022,101 @@ mod tests {
             assert_eq!(rendered.film.xyz[0], expected);
             assert_eq!(rendered.strategies.evaluated, PACKET as u64);
             assert_eq!(rendered.strategies.nonzero, PACKET as u64);
+        });
+    }
+
+    #[test]
+    fn emitting_mirror_preserves_additive_source_power_in_camera_connected_bdpt() {
+        let settings = Settings { width: 1, height: 1, spp: 4, max_depth: 2,
+            sampler: Sampler::Iid, strategy: DirectStrategy::Mis, seed: 0x454d_4954 };
+        with_test_cx(|cx| {
+            let (mut scene, camera, shutter) = direct_emitter_scene(true);
+            let white = lift_rgb([1.0; 3]);
+            let optics = ConductorOptics::representative_tungsten();
+            scene.primitives[0].material = Material::Conductor {
+                optics, surface: ConductorSurface::SMOOTH,
+            };
+            scene.primitives.push(Primitive {
+                shape: Shape::Mesh(emitter_quad(3.0)),
+                material: Material::SpectralDiffuse {
+                    reflectance: crate::spectral::SpectralReflectance::constant(0.0).unwrap(),
+                },
+                emission: Some((white, 3.0)),
+            });
+            scene.lights.push(RectLight {
+                corner: Point3::new(-1.0, -1.0, 3.0), edge_u: Vec3::new(2.0, 0.0, 0.0),
+                edge_v: Vec3::new(0.0, 2.0, 0.0), prim: 1, emission: (white, 3.0),
+            });
+            let rendered = render_cinematic_bidirectional_with_strategy_set(
+                &scene, &camera, CutSide::After, cx, &settings, shutter,
+                BidirectionalStrategySet::CameraConnected,
+            ).unwrap();
+            let camera_path = render(&scene, cx, &settings).unwrap();
+            // The camera sees the first source directly and the second only
+            // by ideal reflection. No continuous NEE proposal competes with
+            // that mirror event. Both source terms must be counted once.
+            let key = [(settings.seed & 0xffff_ffff) as u32, (settings.seed >> 32) as u32];
+            let mut expected = [0.0; 3];
+            for sample in 0..settings.spp {
+                let (jx, jy, ul) = pixel_dims(&settings, None, key, 0, sample).unwrap();
+                let ray = legacy_camera_ray(&scene.camera,
+                    (2.0 * jx - 1.0) * scene.camera.half_tan,
+                    (1.0 - 2.0 * jy) * scene.camera.half_tan);
+                let wavelengths = hero_wavelength_packet::<PACKET>(
+                    LAMBDA_MIN + ul * (LAMBDA_MAX - LAMBDA_MIN), LAMBDA_MIN, LAMBDA_MAX,
+                );
+                for wavelength in wavelengths {
+                    let radiance = white.eval(wavelength)
+                        * (2.0 + 3.0 * optics.fresnel(wavelength, 1.0, -ray.dir.z).unwrap());
+                    add_scaled_xyz(&mut expected, scalar_to_xyz(radiance / PACKET as f64, wavelength));
+                }
+            }
+            for channel in 0..3 {
+                assert!((rendered.film.xyz[0][channel] - expected[channel]).abs()
+                    < 2e-11 * expected[channel]);
+                assert!((camera_path.xyz[0][channel] - expected[channel]).abs()
+                    < 2e-11 * expected[channel]);
+            }
+            assert_eq!(rendered.strategies.camera_splats, 0);
+        });
+    }
+
+    #[test]
+    fn light_subpath_continues_through_an_emitting_reflector_with_reciprocal_density() {
+        with_test_cx(|cx| {
+            let (mut scene, _, _) = direct_emitter_scene(true);
+            let optics = ConductorOptics::representative_tungsten();
+            scene.primitives[0].material = Material::Conductor {
+                optics, surface: ConductorSurface::SMOOTH,
+            };
+            scene.primitives.push(Primitive {
+                shape: Shape::Mesh(emitter_quad(3.0)),
+                material: Material::SpectralDiffuse {
+                    reflectance: crate::spectral::SpectralReflectance::constant(0.0).unwrap(),
+                },
+                emission: Some((lift_rgb([1.0; 3]), 3.0)),
+            });
+            let launch = crate::lighting::RectEmissionSample {
+                light_index: 1, primitive_index: 1, point: Point3::new(0.0, 0.0, 3.0),
+                normal: Vec3::new(0.0, 0.0, 1.0), direction: Vec3::new(0.0, 0.0, -1.0),
+                emission: scene.primitives[1].emission.unwrap(), pdf_position_area: 0.25,
+                pdf_direction_solid_angle: 1.0 / (2.0 * PI),
+            };
+            let settings = Settings { width: 1, height: 1, spp: 1, max_depth: 2,
+                sampler: Sampler::Iid, strategy: DirectStrategy::Mis, seed: 73 };
+            let mut vertices = vec![Vertex::light(launch, 550.0)];
+            let mut rng = SubpathRng::new(&settings, 0, 0, LIGHT_WALK_DOMAIN, None);
+            random_walk(&scene, cx, None, 550.0, TransportMode::Importance,
+                Ray { origin: Point3::new(0.0, 0.0, 3.0 - RAY_EPS), dir: launch.direction },
+                1.0, launch.pdf_direction_solid_angle, 3, &mut vertices, &mut rng, None,
+                MediumStack::new(), launch.point).unwrap();
+            assert_eq!(vertices.len(), 3, "the emitting reflector must not truncate the light walk");
+            assert!(matches!(vertices[1].kind, VertexKind::Surface { primitive_index: 0 }));
+            assert!(matches!(vertices[2].kind, VertexKind::Surface { primitive_index: 1 }));
+            assert!(vertices[1].delta);
+            assert!((vertices[2].beta - optics.fresnel(550.0, 1.0, 1.0).unwrap()).abs() < 2e-14);
+            assert_eq!(vertices[2].pdf_fwd, 0.0, "the mirror has no continuous forward density");
+            assert_eq!(vertices[0].pdf_rev, 0.0, "the same mirror has no continuous reverse density");
         });
     }
 

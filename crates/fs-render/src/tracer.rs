@@ -177,7 +177,9 @@ mod transport;
 /// Philox/Sobol stream keying, the BSDF forms, the CMF/adaptation
 /// constants it inherits from `spectral`, and the EXR channel layout.
 /// Bump ONLY with a semantic justification per docs/GOLDEN_POLICY.md.
-pub const TRACER_BIT_SEMANTICS_VERSION: u32 = 3;
+/// Version 4 retains the authored BSDF after accumulating ordinary surface
+/// emission, so emitting geometry can also reflect and transmit incident light.
+pub const TRACER_BIT_SEMANTICS_VERSION: u32 = 4;
 
 /// Bit-affecting semantics of the optional motion-time path. This is versioned
 /// separately because the legacy static entry points do not draw a shutter
@@ -1150,8 +1152,8 @@ pub enum Shape {
 pub struct Primitive {
     /// Geometry.
     pub shape: Shape,
-    /// Material (ignored for pure emitters in v1: lights do not
-    /// reflect).
+    /// Surface scattering, including on emitting geometry. Use zero spectral
+    /// diffuse reflectance for a purely emitting, nonreflecting opaque surface.
     pub material: Material,
     /// Emitted radiance: spectrum × scale (None = non-emissive).
     pub emission: Option<(LiftedSpectrum, f64)>,
@@ -14304,7 +14306,10 @@ fn trace_path_with_regions<'scene>(
                     );
                 }
             }
-            break; // v1: emitters do not reflect
+            // Source radiance is additive to the authored surface response.
+            // Only this emitted term receives the previous-vertex MIS weight;
+            // reflected/transmitted continuation keeps the original throughput
+            // and is sampled by this primitive's BSDF below.
         }
 
         if let Some(surface) = prim.material.thermal_surface() {
@@ -19617,6 +19622,160 @@ mod tests {
                         }
                     }
                 }
+            }
+        });
+    }
+
+    #[test]
+    fn emitting_surfaces_add_source_radiance_to_the_original_bsdf() {
+        let white = lift_rgb([1.0; 3]);
+        let bare = ConductorOptics::representative_tungsten();
+        let coated = bare.with_coating(crate::conductor::CoherentDielectricCoating::try_new(
+            CauchyIor::try_constant(1.45).unwrap(), 125e-9, bare.source(),
+        ).unwrap());
+        let diffuse = crate::spectral::SpectralReflectance::constant(0.4).unwrap();
+        let materials = [
+            Material::Lambertian { reflectance: lift_rgb([0.2, 0.4, 0.8]) },
+            Material::SpectralDiffuse { reflectance: diffuse },
+            Material::Ggx { reflectance: lift_rgb([0.3; 3]), alpha: 0.25 },
+            Material::Conductor { optics: bare, surface: ConductorSurface::SMOOTH },
+            Material::Conductor { optics: coated, surface: ConductorSurface::SMOOTH },
+            Material::Conductor { optics: coated, surface: ConductorSurface::try_rough(0.2).unwrap() },
+            Material::BrushedConductor { optics: bare,
+                detail: crate::surface_detail::SurfaceDetail::try_new(0.15, 2.0,
+                    crate::surface_detail::BrushingPattern::Circular, 0.0, None).unwrap() },
+            Material::SpectralDiffuse {
+                reflectance: crate::spectral::SpectralReflectance::constant(0.0).unwrap(),
+            },
+        ];
+        let hero = 0.173;
+        let wavelengths = hero_wavelength_packet::<PACKET>(
+            LAMBDA_MIN + hero * (LAMBDA_MAX - LAMBDA_MIN), LAMBDA_MIN, LAMBDA_MAX,
+        );
+        let emitted = packet_radiance_to_xyz(wavelengths.map(|lambda| 2.0 * white.eval(lambda)),
+            &wavelengths, 1.0);
+        let settings = Settings { width: 1, height: 1, spp: 1, max_depth: 2,
+            sampler: Sampler::Iid, strategy: DirectStrategy::BsdfOnly, seed: 73 };
+        with_test_cx(|cx| {
+            for material in materials {
+                let mut scene = Scene {
+                    primitives: vec![Primitive { shape: Shape::Mesh(horizontal_quad(0.0, 10.0)),
+                        material, emission: None }],
+                    lights: Vec::new(),
+                    environment: Some(crate::lighting::EnvironmentMap::try_from_linear_srgb(
+                        1, 1, vec![[1.0; 3]], 0.0,
+                    ).unwrap()),
+                    camera: Camera { eye: Point3::new(0.3, 0.2, 1.0),
+                        forward: Vec3::new(0.0, 0.0, -1.0), up: Vec3::new(0.0, 1.0, 0.0),
+                        half_tan: 0.2 },
+                };
+                for sample in [0, 17, 31] {
+                    scene.primitives[0].emission = None;
+                    let reflected = {
+                        let lighting = validate_scene(&scene, cx, None).unwrap();
+                        trace_path(&scene, &lighting, cx, &settings, 1.0, 0, sample, 0.5, 0.5,
+                            hero, None, CameraPath::Legacy, false, None, None).unwrap().xyz
+                    };
+                    scene.primitives[0].emission = Some((white, 2.0));
+                    let lighting = validate_scene(&scene, cx, None).unwrap();
+                    let actual = trace_path(&scene, &lighting, cx, &settings, 1.0, 0, sample,
+                        0.5, 0.5, hero, None, CameraPath::Legacy, false, None, None).unwrap().xyz;
+                    for channel in 0..3 {
+                        let expected = emitted[channel] + reflected[channel];
+                        assert_near(actual[channel], expected, 2e-12 * expected,
+                            "surface emission must preserve the original reflected path");
+                        if material == (Material::SpectralDiffuse { reflectance: diffuse }) {
+                            assert_near(actual[channel], 1.2 * emitted[channel],
+                                2e-12 * expected, "emitting diffuse furnace: Le + rho * Lenv");
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn emitting_mirror_retains_finite_source_reflection_for_every_mis_strategy() {
+        let white = lift_rgb([1.0; 3]);
+        let optics = ConductorOptics::representative_tungsten();
+        with_test_cx(|cx| {
+            let scene = Scene {
+                primitives: vec![
+                    Primitive { shape: Shape::Mesh(horizontal_quad(0.0, 1.0)),
+                        material: Material::Conductor { optics, surface: ConductorSurface::SMOOTH },
+                        emission: Some((white, 2.0)) },
+                    Primitive { shape: Shape::Mesh(horizontal_quad(3.0, 1.0)),
+                        material: Material::SpectralDiffuse {
+                            reflectance: crate::spectral::SpectralReflectance::constant(0.0).unwrap(),
+                        }, emission: Some((white, 3.0)) },
+                ],
+                lights: [0.0, 3.0].into_iter().enumerate().map(|(prim, z)| RectLight {
+                    corner: Point3::new(-1.0, -1.0, z), edge_u: Vec3::new(2.0, 0.0, 0.0),
+                    edge_v: Vec3::new(0.0, 2.0, 0.0), prim,
+                    emission: (white, if prim == 0 { 2.0 } else { 3.0 }),
+                }).collect(),
+                environment: None,
+                camera: Camera { eye: Point3::new(0.0, 0.0, 1.0),
+                    forward: Vec3::new(0.0, 0.0, -1.0), up: Vec3::new(0.0, 1.0, 0.0),
+                    half_tan: 0.2 },
+            };
+            let lighting = validate_scene(&scene, cx, None).unwrap();
+            for hero in [0.0, 0.173] {
+                let wavelengths = hero_wavelength_packet::<PACKET>(
+                    LAMBDA_MIN + hero * (LAMBDA_MAX - LAMBDA_MIN), LAMBDA_MIN, LAMBDA_MAX,
+                );
+                let expected = packet_radiance_to_xyz(wavelengths.map(|lambda|
+                    white.eval(lambda) * (2.0 + 3.0 * optics.fresnel(lambda, 1.0, 1.0).unwrap())),
+                    &wavelengths, 1.0);
+                for strategy in [DirectStrategy::BsdfOnly, DirectStrategy::NeeOnly,
+                    DirectStrategy::Mis, DirectStrategy::PowerMis] {
+                    let settings = Settings { width: 1, height: 1, spp: 1, max_depth: 2,
+                        sampler: Sampler::Iid, strategy, seed: 73 };
+                    let actual = trace_path(&scene, &lighting, cx, &settings, 1.0, 0, 0, 0.5,
+                        0.5, hero, None, CameraPath::Legacy, false, None, None).unwrap().xyz;
+                    for (observed, expected) in actual.into_iter().zip(expected) {
+                        assert_near(observed, expected, 2e-12 * expected,
+                            "emitting mirror: Le + Fresnel * second source, counted once");
+                    }
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn emitting_dielectric_keeps_its_initial_host_and_beer_attenuation() {
+        let white = lift_rgb([1.0; 3]);
+        let glass = DielectricGlass::new(CauchyIor::try_constant(1.5).unwrap(),
+            BeerLambertAbsorption::try_constant(0.4).unwrap(), GlassProvenance::Custom);
+        let scene = Scene {
+            primitives: vec![Primitive { shape: Shape::Mesh(closed_test_slab(-1.0, 1.0)),
+                material: Material::Dielectric { glass, surface: DielectricSurface::SMOOTH },
+                emission: Some((white, 2.0)) }],
+            lights: Vec::new(),
+            environment: Some(crate::lighting::EnvironmentMap::try_from_linear_srgb(
+                1, 1, vec![[1.0; 3]], 0.0,
+            ).unwrap()),
+            camera: Camera { eye: Point3::new(0.0, 0.0, 0.0),
+                forward: Vec3::new(0.0, 0.0, 1.0), up: Vec3::new(0.0, 1.0, 0.0), half_tan: 0.2 },
+        };
+        with_test_cx(|cx| {
+            let lighting = validate_scene(&scene, cx, None).unwrap();
+            let initial = lighting.initial_media.stack(&scene, cx, scene.camera.eye, None).unwrap();
+            assert_eq!(initial.len(), 1);
+            assert_eq!(initial.last().unwrap().boundary_primitive, 0);
+            let hero = 0.173;
+            let wavelengths = hero_wavelength_packet::<PACKET>(
+                LAMBDA_MIN + hero * (LAMBDA_MAX - LAMBDA_MIN), LAMBDA_MIN, LAMBDA_MAX,
+            );
+            let expected = packet_radiance_to_xyz(wavelengths.map(|lambda|
+                2.0 * white.eval(lambda) * (-0.4_f64).exp()), &wavelengths, 1.0);
+            let settings = Settings { width: 1, height: 1, spp: 1, max_depth: 1,
+                sampler: Sampler::Iid, strategy: DirectStrategy::BsdfOnly, seed: 73 };
+            let actual = trace_path(&scene, &lighting, cx, &settings, 1.0, 0, 0, 0.5, 0.5,
+                hero, None, CameraPath::Legacy, false, None, None).unwrap().xyz;
+            for (observed, expected) in actual.into_iter().zip(expected) {
+                assert_near(observed, expected, 2e-12 * expected,
+                    "emitting glass must attenuate the one-metre interior camera segment");
             }
         });
     }
