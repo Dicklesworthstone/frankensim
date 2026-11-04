@@ -90,7 +90,8 @@ use fs_math::det;
 pub mod continuous;
 pub use continuous::{
     DgContinuous, DgHarmonicDerivative, DgHarmonicFrequencyResponse, DgHarmonicPort,
-    DgHarmonicPortDerivative, DgHarmonicResponse,
+    DgHarmonicPortDerivative, DgHarmonicResponse, DgScatteringFactor, DgScatteringPort,
+    DgScatteringResponse,
 };
 
 mod viscothermal;

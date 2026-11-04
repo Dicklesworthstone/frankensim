@@ -3791,3 +3791,39 @@ normalization, forty recorded segments, identity/budget refusal and cancellation
 They do not execute graph/material assembly. One additional original lossy and
 lossless graph integration test is authored but unrun; full Cargo/DSR remains
 unavailable without the sibling constellation checkouts.
+
+## Coherent incident-wave reflection from the original DG operator
+
+`DgDuct::scattering_factor` prepares one full-state complex LU at an admitted
+positive frequency, with explicit positive real pressure/volume-flow reference
+impedances on selected original `PortId`s. Under peak-phasor
+`exp(-i omega t)`, the source relation is `Q=(2a-p)/Z` into the duct and
+the reflected wave is `b=p-a`. Loading `B Z^-1 B^T` enters the original
+generator BEFORE factorization; no isolated duct impedance is formed.
+The prepared factor is reused for coherent incident vectors and preserves the
+declared reference order. Missing selected incident amplitudes are zero with
+their loads still connected. Every unselected native port has zero flow.
+
+All original gas, viscothermal, molecular and compliant/Maxwell coordinates
+remain. Recovered physical flows go through `DgContinuous::observe_harmonic`,
+which checks the original equations and independently observes material and
+native boundary losses. Net input is `Re(p conj(Q))/2`, not the subtraction
+of nearly equal incident/reflected powers. Both squared wave powers and their
+consistency residuals remain visible; reference loading is not relabeled as
+material heat. `physical.power_residual_w` retains the original loss/work
+account, while `wave_power_residual_w` is an additional wave diagnostic.
+
+Preparation admits `n^2*(n+original_ports+selected_ports+16)` work before
+allocation; responses use that same per-call allowance and the existing
+complete-state cap. Original constitutive bands and bounded cancellation
+remain. Nonfinite loaded coefficients and genuinely singular systems refuse;
+source loading does not promise to control every mode. Backward residuals
+are not forward-error, conditioning or spatial-convergence certificates.
+The reference impedance is real and constant for each prepared query, not
+an inferred causal termination or a new approximation of the duct material.
+
+`tests/dg_scattering_reflection.rs` defines analytic two-port gas/liquid mesh
+convergence, finite reflection at an actual discrete impedance pole, coherent
+signed multiport work and factor reuse, zero-flow unselected ports, original
+viscothermal/Maxwell absorption, and malformed-input/resource/cancellation
+regressions. Native execution of these new full DG tests is pending.
