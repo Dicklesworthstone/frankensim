@@ -270,6 +270,45 @@ clock and separately integrated displacement/unsigned path. The 21-group native
 ellipse target retains analytic limits, frame covariance, stiff short steps and
 cancellation. Quadrature errors remain estimates, not certified enclosures.
 
+## Shared occupied-branch dry friction
+
+`stribeck_friction` owns the original scalar Gaussian Stribeck, hyperbolic,
+shifted-power and affine load-line continuation formerly embedded in `fs-couple`.
+The coupler re-exports that same owner; its modal consumers retain their existing
+stable-root and adhesive-offset behavior. `HystereticFriction` makes the shared
+owner a checkpoint-bearing `TangentialLaw` for scalar/isotropic held body response.
+A sliding branch remains occupied while its stable root exists, including when a
+static reaction also becomes admissible. Loss of the root, resolved reversal and
+normal release follow the original rule; a force budget cannot choose another
+physical branch. The separate memoryless `FrictionLaw` interface is unchanged.
+
+The checkpoint retains the original law or optional ordered dry-interface card,
+occupied branch, tangent axis, solved slip and last explicit thermal boundary.
+Cards admit actual solved speed and retain their original temperature/pressure
+limits and caller authority. Exported heat is traction contracted with actual
+slip; no reversible or thermal storage is invented. Preparation, refused trials
+and numerical iterations never advance accepted history. A complete candidate
+alone may be committed by its surrounding mechanical transaction.
+
+Gaussian critical points use safeguarded Newton proposals inside the original
+monotone predicate brackets. Every narrowed endpoint is checked, and termination
+still requires adjacent floating-point values. Preparation probes and selected
+root bisections share the explicit step iteration budget, enforced before each
+update. Exact matching load and mobility reuse a prepared line. Optional bounded
+`prepare_state` returns a zero-motion candidate and preparation count for difficult
+near-fold or changing-load cases; ordinary first sliding steps need no separate
+preparation call.
+
+The one-dimensional hysteresis rule retains its scope: the first loaded motion
+selects an axis, and continued sliding or collinear reversal uses that axis.
+`ObjectiveTangentialLaw` transports the retained axis and slip with the existing
+contact-frame convention. Untransported oblique continuation refuses; arrest and
+normal release permit a new direction. This adds no two-axis hysteresis model,
+rate/state aging, source acquisition or experimental validation. The original
+empirical/benchmark-law boundaries remain. Native regressions exercise coexisting
+roots, release/reversal/restart, original-card domains, work/heat, bounded cached
+preparation and the existing isotropic matrix-compliance consumer.
+
 ## Purpose and layer
 
 `fs-tribo` is an L3 dry-contact constitutive leaf. It provides typed dry

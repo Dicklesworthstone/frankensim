@@ -25,6 +25,8 @@ pub mod mindlin;
 pub mod sliding_patch;
 /// Stateful, work-conjugate tangential constitutive interface.
 pub mod tangential;
+/// Shared scalar load lines and checkpoint-bearing stable-branch friction.
+pub mod stribeck_friction;
 pub use tangential::{
     DryTangentialState, TangentialLaw, TangentialSolveConfig, TangentialStep, TangentialStepInput,
 };
