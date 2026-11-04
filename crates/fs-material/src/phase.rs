@@ -18,6 +18,8 @@ pub mod conductivity;
 pub mod transport;
 /// Source-backed solid/liquid Cp branches joined by one sharp fusion plateau.
 pub mod melting;
+/// Fixed-mass phase-change material embedded in a sensible solid matrix.
+pub mod composite;
 /// Separate parent/crystal calorics and density for finite-rate crystallization.
 pub mod crystallization;
 /// Source-backed liquid/vapor coexistence and isobaric heat with expansion work.

@@ -135,6 +135,36 @@ and retained source/mass/domain controls. `hyperelastic_membrane` checks 3-D
 force/tangent objectivity, independent mass, and finite-deformation
 dead-load/pressure equilibrium against an independent pyramid oracle.
 
+## Fixed-mass PCM storage in a sensible solid matrix
+
+`phase::composite::PcmComposite` borrows one sensible all-solid matrix branch
+and one complete solid/liquid PCM chart. Its declared PCM mass fraction remains
+fixed. The constituents share temperature, retain their original source receipts
+and density interpolation laws, and have additive enthalpy and specific volume:
+`1/rho = (1-w)/rho_matrix + w/rho_pcm`. Actual composite liquid mass fraction is
+`w*f_pcm`; complete PCM melting leaves the matrix solid. PCM volume fraction is
+reported separately. A supplied total mass remains fixed as the returned free
+volume changes; the law does not update reference geometry or thermal inventory.
+
+Preparation merges every original caloric breakpoint, preserving the admitted
+piecewise-affine constituent `T(h)` exactly in real arithmetic, including latent
+plateaus. The explicit composite lower enthalpy datum is independent of both
+constituent datums. Cached slope and logarithmic, allocation-free state queries
+feed the existing `ThermalLaw`, thermal timeline and backward-Euler residual;
+entropy remains the mass-weighted original constituent integrals. Density is
+evaluated on the original constituents, never fitted to the compiled mixture
+knots. The combined original-knot preparation ceiling is 8192.
+
+The caller supplies compatible source pressure/work conditions and a nonreacting,
+local-equilibrium, additive-volume model with no heat of mixing. Unsupported
+temperatures, nonpositive fractions and unresolved caloric coordinates refuse.
+A matrix with an ambiguous solid plateau is excluded; two melting constituents
+would require a separate phase-allocation closure. No confinement, conductivity
+mixture rule, evolving geometry or extra pressure-work solver is supplied.
+Manufactured controls cover latent energy, mass/volume fractions, original
+density laws, merged sensible breakpoints, entropy, independent datum shifts,
+and explicit/implicit native heating across the latent plateau.
+
 ## Source calorics, kinetics and shrinkage for crystallization
 
 `phase::crystallization::CrystallizationCaloricPair` borrows two original pure
