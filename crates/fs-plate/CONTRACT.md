@@ -683,6 +683,34 @@ eigenvalues and the existing mass-normalized acoustic pressure port. No new
 eigensolver, acoustic model or time integrator is introduced; those consumers
 receive the resulting physical mass matrix.
 
+### Layered CST/DKT reference density and first mass moment
+
+`ReferenceDensityMoments` and the `*_with_reference_density_moments` assembly
+entry points extend that same mass owner to asymmetric coatings and layered
+inventories. The immutable carrier stores `qk = integral rho*s^k ds`, all in
+kg/m³, where `s = z/h` follows the mesh normal and its declared reference plane.
+`from_laminate` consumes the existing material owner's `I0/I1/I2` without
+reintegrating or replacing its layers. Local thickness scales the source's
+layer fractions and reference offset. A positive-definite moment block is
+required: `q0 > 0`, `q2 > 0`, and `q0*q2 > q1²`; `q1` remains signed.
+
+The physical moments `h*q0`, `h²*q1`, and `h³*q2` are integrated with the same
+positive degree-six rule and measured P1 thickness. Kinetic velocity is
+`u_dot + z*(theta_dot cross normal)`, so the first moment supplies the signed
+translation/director mass blocks. It is not a stiffness, damping, or added
+normal-spin inertia. The original relative drilling gauge retains the second
+moment scale and vanishes for rigid motion. Symmetric uniform-through-thickness
+inputs delegate to the preceding scalar/P1-density kernel exactly.
+
+These APIs change inertia only. Independent CST/DKT elastic sections remain
+explicit; full laminate A/B/D constitutive coupling and transverse shear use
+the existing MITC `ShearShellSection::from_laminate` path. The mesh and moments
+must describe the same reference plane and normal; reversing a normal reverses
+the first moment for an unchanged physical inventory. Tests in
+`shell_layered_density.rs` cover independent full spatial moments, graded
+density/thickness correlation, layer reversal, reference-plane shifts, normal
+orientation, homogeneous limits, and the existing modal/acoustic consumers.
+
 ### Three-dimensional beam inertia
 
 `shell::stiffened::timoshenko::{segment_matrices, assemble_beam_chain}` and

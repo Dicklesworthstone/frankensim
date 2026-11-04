@@ -5,6 +5,7 @@
 //! triangles, nodal thickness and per-facet isotropic material. No smoothing,
 //! welding, hole filling, resampling or inferred manufacturing data is applied.
 use super::{ShellMesh, ShellModel, ShellSupport, FacetGeometry, CstDktMass,
+    ReferenceDensityMoments, ReferenceInertia,
     assemble_with_inertia, assemble_with_reference_inertia, DRILLING_ALPHA};
 use super::profile::{ProfileBudget, ProfileShell};
 use crate::{PlateError, PlateSection};
@@ -179,7 +180,26 @@ impl MeshShell {
         nodes: &[usize], support: ShellSupport) -> Result<ShellModel, PlateError> {
         assemble_with_reference_inertia(&self.mesh, &self.sections, false, nodes, support,
             DRILLING_ALPHA, CstDktMass::Consistent, Some(&self.nodal_thickness_m),
-            Some(reference_corner_density_kg_m3))
+            Some(ReferenceInertia::Density(reference_corner_density_kg_m3)))
+    }
+
+    /// Integrate full normalized layer-density moments with measured P1 thickness.
+    /// `h*q0`, `h²*q1`, and `h³*q2` retain the actual areal mass, signed
+    /// translation/director cross inertia, and rotary inertia. Moment fields are
+    /// P1 in each facet's original corner order; layer fractions and reference
+    /// offset scale with the local thickness. Facet interfaces stay explicit.
+    ///
+    /// Stiffness remains the original independently supplied CST/DKT law. The
+    /// existing MITC laminate adapter supplies laminate A/B/D elastic coupling.
+    /// No original material, thickness, or `mass_kg` metadata is mutated.
+    /// # Errors
+    /// Invalid field count, measured thickness, support, or assembly arithmetic.
+    pub fn assemble_with_reference_density_moments(&self,
+        reference_corner_moments: &[[ReferenceDensityMoments;3]], nodes: &[usize], support: ShellSupport)
+        -> Result<ShellModel, PlateError> {
+        assemble_with_reference_inertia(&self.mesh, &self.sections, false, nodes, support,
+            DRILLING_ALPHA, CstDktMass::Consistent, Some(&self.nodal_thickness_m),
+            Some(ReferenceInertia::Moments(reference_corner_moments)))
     }
 
     /// Integrate the supplied original density with the measured thickness [kg].
@@ -189,16 +209,29 @@ impl MeshShell {
     /// Invalid density/thickness fields, reference geometry or unrepresentable mass.
     pub fn mass_with_reference_density_kg(&self, reference_corner_density_kg_m3: &[[f64;3]])
         -> Result<f64, PlateError> {
+        self.mass_from_reference_inertia(ReferenceInertia::Density(reference_corner_density_kg_m3))
+    }
+
+    /// Exact total reference mass of the layered inventory [kg]. The first and
+    /// second moments affect its center and rotary inertia, not its total mass.
+    /// # Errors
+    /// Invalid field count, measured thickness, geometry, or unrepresentable mass.
+    pub fn mass_with_reference_density_moments_kg(&self,
+        reference_corner_moments: &[[ReferenceDensityMoments;3]]) -> Result<f64, PlateError> {
+        self.mass_from_reference_inertia(ReferenceInertia::Moments(reference_corner_moments))
+    }
+
+    fn mass_from_reference_inertia(&self, reference: ReferenceInertia<'_>) -> Result<f64, PlateError> {
         self.mesh.validate()?;
-        super::inertia::validate_reference_density(self.mesh.tris.len(), reference_corner_density_kg_m3)?;
+        reference.validate(self.mesh.tris.len())?;
         if self.nodal_thickness_m.len() != self.mesh.nodes.len()
             || self.nodal_thickness_m.iter().any(|h| !h.is_finite() || *h <= 0.0) {
             return Err(bad("shell reference mass requires positive finite thickness at every node"));
         }
         let mut mass = 0.0;
-        for (e, (tri, density)) in self.mesh.tris.iter().zip(reference_corner_density_kg_m3).enumerate() {
+        for (e, tri) in self.mesh.tris.iter().enumerate() {
             mass += super::inertia::reference_mass_kg(self.mesh.facet(e)?.area_m2,
-                tri.map(|node| self.nodal_thickness_m[node]), *density)?;
+                tri.map(|node| self.nodal_thickness_m[node]), reference.zeroth_at(e))?;
         }
         if !mass.is_finite() || mass <= 0.0 {
             return Err(bad("graded shell reference mass sum is unrepresentable"));
