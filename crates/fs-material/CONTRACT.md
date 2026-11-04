@@ -1,5 +1,35 @@
 # fs-material — CONTRACT
 
+## Source-bound hyperelastic membranes
+
+`ResolvedSheet::with_hyperelastic_membrane(card, model_index, settings)` explicitly
+selects a native Neo-Hookean, Mooney--Rivlin, Ogden or HGO model from the exact
+original material card at the same retained typed query. Independently sourced
+reference areal mass and thickness, extra selected properties, receipts and
+model provenance survive the shared `MembraneLaw::Hyperelastic` carrier.
+Mechanical/frequency-conditioned reference properties, competing selected
+membrane capabilities, missing model/context and native domain failures refuse.
+The supplied thickness belongs to the model's original stress-free reference;
+bending and evolving thermal/reference changes are not inferred.
+
+For engineering Green strain `[E11,E22,2E12]`, an objective Cholesky
+representative supplies the original native plane-stress owner, including all
+three transverse traction conditions and its Schur-complement tangent.
+Reference thickness scales energy, work-conjugate second-Piola resultants and
+the full chain-rule tangent; the stress times second kinematic derivative is
+retained. Existing `fs-solid::membrane::MembranePatch` therefore uses these
+models through its original 3-D kinematics, geometric stiffness, dead/pressure
+equilibrium and reference mass, without another spatial solver. HGO activation
+and unresolved principal-stretch boundaries refuse two-sided vibration
+admission. Native local stable-branch limits remain; no wrinkling or global
+stability certificate is added.
+
+`sheet_hyperelastic` checks independent compressible Neo-Hookean reduction,
+all native model tangents, tilted-fibre transverse relaxation and source/reference
+refusals. `hyperelastic_membrane` checks 3-D force/tangent objectivity,
+independent mass, and finite-deformation dead-load/pressure equilibrium against
+an independent pyramid oracle.
+
 ## Source calorics, kinetics and shrinkage for crystallization
 
 `phase::crystallization::CrystallizationCaloricPair` borrows two original pure

@@ -45,20 +45,25 @@ pub struct SheetCapabilities {
 pub enum SheetError {
     /// The shared immutable material query failed.
     Material(MaterialStatePointError),
+    /// The original three-dimensional constitutive owner refused the state.
+    Hyperelastic(crate::MaterialError),
     /// Missing capability, incompatible meaning, nonfinite or unstable data.
     Invalid(&'static str),
 }
 impl From<MaterialStatePointError> for SheetError {
     fn from(value: MaterialStatePointError) -> Self { Self::Material(value) }
 }
+impl From<crate::MaterialError> for SheetError {
+    fn from(value: crate::MaterialError) -> Self { Self::Hyperelastic(value) }
+}
 impl core::fmt::Display for SheetError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self { Self::Material(e) => e.fmt(f), Self::Invalid(s) => write!(f, "sheet: {s}") }
+        match self { Self::Material(e) => e.fmt(f), Self::Hyperelastic(e) => e.fmt(f), Self::Invalid(s) => write!(f, "sheet: {s}") }
     }
 }
 impl std::error::Error for SheetError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self { Self::Material(e) => Some(e), _ => None }
+        match self { Self::Material(e) => Some(e), Self::Hyperelastic(e) => Some(e), _ => None }
     }
 }
 
@@ -71,6 +76,7 @@ pub struct ResolvedSheet {
     areal_density: f64,
     thickness: f64,
     tabulated: Option<Arc<TabulatedMembrane>>,
+    hyperelastic: Option<Arc<hyperelastic::HyperelasticMembrane>>,
 }
 fn property(m: &ResolvedMaterialStatePoint, key: &'static str, dims: Dims)
     -> Result<f64, SheetError> {
@@ -91,7 +97,7 @@ impl ResolvedSheet {
         if areal_density <= 0.0 || thickness <= 0.0 {
             return Err(SheetError::Invalid("positive reference areal density and full thickness required"));
         }
-        Ok(Self { material, areal_density, thickness, tabulated: None })
+        Ok(Self { material, areal_density, thickness, tabulated: None, hyperelastic: None })
     }
     /// Complete original immutable material bundle.
     pub const fn material(&self) -> &ResolvedMaterialStatePoint { &self.material }
@@ -103,7 +109,7 @@ impl ResolvedSheet {
     /// are effective membrane moduli, not instantaneous tangents of a nonlinear
     /// stress curve. This does not infer compression softening or Maxwell loss.
     pub fn membrane(&self) -> Result<QuadraticMembrane, SheetError> {
-        if self.tabulated.is_some() || CURVE_PROPERTIES.iter().any(|k|self.material.property(k).is_some())
+        if self.tabulated.is_some() || self.hyperelastic.is_some() || CURVE_PROPERTIES.iter().any(|k|self.material.property(k).is_some())
             || self.material.property(COUPLING_PROPERTY).is_some() {
             return Err(SheetError::Invalid("a nonlinear sheet cannot become constant stiffness; use membrane_law"));
         }
@@ -130,9 +136,24 @@ impl ResolvedSheet {
         }
         Ok(sheet)
     }
-    /// Exact selected constitutive law, shared immutably across triangles. The
-    /// source, not the mechanical solver, chooses quadratic versus tabulated.
+    /// Bind an explicitly selected native three-dimensional hyperelastic model
+    /// from this exact source card. Resolve reference mass/thickness (and any
+    /// independent bending) first, with `SheetCapabilities::membrane = false`.
+    /// The supplied thickness is the model's original reference thickness;
+    /// areal mass stays independently characterized. No prestrain, evolving
+    /// environment or bending law is inferred from the bulk model.
+    pub fn with_hyperelastic_membrane(mut self, card: &MaterialCard, model_index: usize,
+        settings: crate::hyper::plane_stress::PlaneStressSettings) -> Result<Self, SheetError> {
+        let law = hyperelastic::HyperelasticMembrane::from_material_source(&self, card, model_index, settings)?;
+        self.hyperelastic = Some(Arc::new(law));
+        Ok(self)
+    }
+    /// Exact selected constitutive law, shared immutably across triangles.
+    /// Hyperelastic selection is explicit through `with_hyperelastic_membrane`.
     pub fn membrane_law(&self) -> Result<MembraneLaw, SheetError> {
+        if let Some(law) = &self.hyperelastic {
+            return Ok(MembraneLaw::Hyperelastic(Arc::clone(law)));
+        }
         match &self.tabulated {
             Some(law)=>Ok(MembraneLaw::Tabulated(Arc::clone(law))),
             None=>Ok(MembraneLaw::Quadratic(self.membrane()?)),
@@ -312,6 +333,9 @@ pub mod thermal;
 /// Work-consistent signed nonlinear stress/strain tables.
 pub mod tabulated;
 
+/// Source-bound finite-strain plane stress from native three-dimensional laws.
+pub mod hyperelastic;
+
 /// Complete immutable equilibrium law selected by the material source.
 #[derive(Clone,Debug,PartialEq)]
 pub enum MembraneLaw {
@@ -319,6 +343,8 @@ pub enum MembraneLaw {
     Quadratic(QuadraticMembrane),
     /// Signed source curves with integrated work and actual segment tangents.
     Tabulated(Arc<TabulatedMembrane>),
+    /// Full transverse relaxation with exact Green-strain work and tangent.
+    Hyperelastic(Arc<hyperelastic::HyperelasticMembrane>),
 }
 impl MembraneLaw {
     /// Small-vibration analysis needs a locally unique, two-sided material
@@ -327,11 +353,12 @@ impl MembraneLaw {
         match self {
             Self::Quadratic(law)=>law.response(strain).map(|_|()),
             Self::Tabulated(law)=>law.admit_linearization(strain),
+            Self::Hyperelastic(law)=>law.admit_linearization(strain),
         }
     }
 }
 impl SheetLaw for MembraneLaw {
     fn response(&self, strain:[f64;3])->Result<SheetResponse,SheetError> {
-        match self {Self::Quadratic(law)=>law.response(strain),Self::Tabulated(law)=>law.response(strain)}
+        match self {Self::Quadratic(law)=>law.response(strain),Self::Tabulated(law)=>law.response(strain),Self::Hyperelastic(law)=>law.response(strain)}
     }
 }
