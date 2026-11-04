@@ -10,12 +10,16 @@ use fs_conduction::{
 };
 
 fn patch() -> AmbientRadiationPatch {
+    patch_with_emissivity(0.2)
+}
+
+fn patch_with_emissivity(emissivity: f64) -> AmbientRadiationPatch {
     let mut claims = ClaimSet::new();
     claims
         .insert_claim(PropertyClaim {
             key: PropertyKey::new(SURFACE_EMISSIVITY_PROPERTY, EMISSIVITY_DIMS),
             value: PropertyValue::Scalar {
-                value: 0.2,
+                value: emissivity,
                 dims: EMISSIVITY_DIMS,
             },
             validity: ValidityDomain::unconstrained().with("T", 280.0, 380.0),

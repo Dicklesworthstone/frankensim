@@ -1,5 +1,30 @@
 # CONTRACT: fs-cli
 
+## Live contact and enclosure sensitivities — driver 118
+
+Steady `temperature-max-adjoint` and `temperature-max-contact-adjoint` now
+compose live source-backed contacts with closed/open area-mean gray enclosures.
+The retained original contact law is re-queried on the unchanged physical
+endpoint, with both temperature partials and heterogeneous bulk K'(T). The
+existing radiosity binder adds its complete reflected tangent, including
+original prescribed-flux patches without artificial convection ports.
+
+Natural-convection and transported-air feedback participate in the same total
+dual. Source power, original convection, inlet, fan, conductivity, whole contact
+resistance-law, emissivity and shared open-bath controls use that dual and their
+original physical owners. Fresh physical residual, heat, source-slope and
+transpose gates remain mandatory. Requesting the derivative does not replace
+or perturb the accepted primal, and live contacts cannot also retain a frozen
+interface operator. Driver 118 invalidates earlier cached producer results.
+
+Focused native physical re-solves cover closed curve/Newton and open
+source-surface/Picard contact, source power, bath temperature and air inlet.
+Mixed Robin/flux numerical tests additionally check emissivity and stale-field
+refusal. Rust syntax and source review passed; runtime execution remains
+pending. Ambient/pointwise contact-radiation derivatives, prescribed-temperature
+controls and radiating contact trajectory adjoints remain unsupported. No
+continuum, unique-maximum-at-a-tie or gradient-error certificate is added.
+
 ## Capacity storage in open radiative cavities — driver 117
 
 Declared regional heat-capacity trajectories now compose live source contacts
@@ -47,8 +72,9 @@ the solid's outward balance; the independent black-reservoir row closes the
 radiation system. Original convection alone reaches air transport. Receipts
 retain the actual field, source states, separate reservoir heat, and every nested
 contact, nonlinear and Krylov response. The new driver version invalidates
-earlier cached producer results. Contact/radiation adjoints and steady pointwise
-emission remain unsupported. Driver 117 adds capacity-storage open-cavity histories.
+earlier cached producer results. Driver 117 adds capacity-storage open-cavity
+histories; driver 118 adds complete steady contact/enclosure adjoints. Steady
+pointwise emission remains unsupported.
 
 ## Source-caloric cooling scenes
 

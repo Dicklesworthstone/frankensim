@@ -306,7 +306,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// retaining physical-surface heat separately from the explicit black reservoir.
 /// Version 117 admits capacity trajectories with open enclosure exchange,
 /// including live contact, natural convection and transported-air feedback.
-pub const SOLVE_DRIVER_VERSION: u32 = 117;
+/// Version 118 differentiates steady live-contact closed/open enclosures
+/// through the complete material, contact, convection and radiosity dual.
+pub const SOLVE_DRIVER_VERSION: u32 = 118;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";

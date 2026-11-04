@@ -5,6 +5,9 @@ use fs_conduction::radiation::{CoupledRadiationConfig, GrayDiffuseEnclosure,
     ViewFactorTolerance, solve_with_convective_gray_diffuse_enclosure};
 use fs_conduction::DofMap;
 
+#[path = "enclosure/adjoint.rs"]
+mod adjoint;
+
 fn boundary(mesh: &ConductionMesh, prescribed: bool) -> ThermalBoundary {
     let builder = ThermalBoundaryBuilder::new(mesh)
         .region("cold", |f| f.centroid[2] < 0.0 && f.centroid[1] == 0.0,

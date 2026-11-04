@@ -1,5 +1,29 @@
 # CONTRACT: fs-conduction
 
+## Complete steady contact and reflected-radiation adjoints
+
+`ContactSteadyLinearization::pullback_with_robin_and_flux_feedback_and_resistance_controls`
+composes the existing complete bulk/contact tangent with the boundary owner's
+mean-Robin and independent mean-flux factors. The original mean-only entry
+delegates to the same implementation. No new primal, radiation solver, time
+factor or frozen-contact response is introduced.
+
+`EnclosureRadiationLinearization` supplies those factors for closed/open gray
+enclosures on original uniform Robin and prescribed-flux patches. Rebinding its
+fresh physical boundary to `linearize_steady_endpoint` rechecks the unchanged
+field against the original residual and heat tolerances. Both contact-temperature
+partials, bulk K'(T), reflected exchange and any original natural/air feedback
+participate in one true transposed solve. Whole resistance-law controls contract
+that same dual; the radiosity owner remaps original convection, emissivity and
+the shared open-bath temperature controls.
+
+The existing source-slope, cancellation, trace-element and feedback-memory gates
+remain in force. `tests/temperature_contact/radiation/enclosure/adjoint.rs`
+compares contact, source, emissivity and bath derivatives with independent
+physical re-solves on mixed Robin/flux surfaces with nonlinear conductivity.
+This is a local discrete steady derivative, with no pointwise/ambient contact
+radiation adjoint, trajectory derivative or continuum error certificate.
+
 ## Capacity storage with open reflected radiation and live contacts
 
 The existing backward-Euler enclosure owner now accepts `OpenDiffuseEnclosure`
@@ -45,8 +69,9 @@ reservoir row closes the radiation system and never cancels the solid's external
 heat or enters transported air. Original convection stays separate. Acceptance
 requires the original contact residual, heat closure, patch mismatch and radiosity
 watt gates; cancellation and source-domain refusal publish no candidate. This
-steady patch-mean composition adds no contact/radiation adjoint, pointwise model,
-transient open-cavity storage or continuum-error certificate.
+steady patch-mean producer adds no pointwise model or continuum-error certificate.
+Capacity open-cavity storage and complete steady contact/radiosity derivatives
+are composed by the shared owners described above.
 
 ## Nonlinear generated-layer temperature derivatives
 

@@ -2,7 +2,7 @@
 
 use fs_exec::Cx;
 use crate::{ConductionError, ConductionProblem, EnergyBalance, LinearConfig};
-use crate::adjoint::robin::{RobinGradient, RobinResponse};
+use crate::adjoint::robin::{MeanFluxFeedback, RobinGradient, RobinResponse};
 use crate::interface::ContactResistanceGradient;
 use crate::interface::temperature::tangent::ContactTemperatureLinearization;
 use super::{TemperatureContacts, invalid, poll};
@@ -88,13 +88,35 @@ impl ContactSteadyLinearization {
         reference_wall_derivatives: &[f64], reference_feedback: &[f64],
         nodal_weights: &[f64], max_feedback_entries: usize, max_face_pairs: usize,
     ) -> Result<ContactSteadyGradient, ConductionError> {
+        self.pullback_with_robin_and_flux_feedback_and_resistance_controls(cx,
+            htc_wall_derivatives, reference_wall_derivatives, reference_feedback,
+            None, nodal_weights, max_feedback_entries, max_face_pairs)
+    }
+
+    /// Include independent mean-flux feedback in the SAME complete contact dual.
+    ///
+    /// This composes reflected radiosity on original Robin and prescribed-flux
+    /// patches with the smooth bulk/contact tangent. `flux_feedback` carries
+    /// the boundary owner's consistent load and observation factors; it must
+    /// not repeat feedback already represented by the Robin arrays. Bind the
+    /// fresh physical boundary at the unchanged endpoint before linearization,
+    /// then remap the returned boundary partials with that same owner.
+    /// Contact multipliers contract this total dual without an extra solve or
+    /// physical time factor. The existing feedback and contact budgets apply.
+    #[allow(clippy::too_many_arguments)]
+    pub fn pullback_with_robin_and_flux_feedback_and_resistance_controls(
+        &self, cx: &Cx<'_>, htc_wall_derivatives: &[f64],
+        reference_wall_derivatives: &[f64], reference_feedback: &[f64],
+        flux_feedback: Option<&MeanFluxFeedback>, nodal_weights: &[f64],
+        max_feedback_entries: usize, max_face_pairs: usize,
+    ) -> Result<ContactSteadyGradient, ConductionError> {
         poll(cx, 0)?;
         if self.contact.trace_elements() > max_face_pairs {
             return Err(invalid("<steady-contact-adjoint>", "contact controls exceed the declared trace-element allowance"));
         }
-        let transport = self.response.pullback_endpoint_with_mean_feedback(cx,
+        let transport = self.response.pullback_endpoint_with_mean_and_flux_feedback(cx,
             htc_wall_derivatives, reference_wall_derivatives, reference_feedback,
-            nodal_weights, max_feedback_entries)?;
+            flux_feedback, nodal_weights, max_feedback_entries)?;
         let resistance_multipliers = self.contact.physical_contacts().frozen_interfaces()
             .resistance_scale_pullback(cx, self.temperature(), &transport.nodal_load, max_face_pairs)?;
         Ok(ContactSteadyGradient { transport, resistance_multipliers })

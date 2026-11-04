@@ -235,7 +235,22 @@ pub(super) fn extract(
     let mut inlet_rows = Vec::new();
     let mut live_contact_rows = None;
     let (lambda, residual, dual_iterations, stability_iterations, response_iterations, mode) =
-    if data.temperature_contact.is_some() {
+    if setup.enclosure_radiation.is_some() {
+        let result = enclosure_feedback::pullback(cx, spec, solved, &weights,
+            contact_requested, count(64))?;
+        inlet_rows = result.air_rows;
+        natural_ambient = result.natural_ambient;
+        radiation_rows = result.radiation_rows;
+        live_contact_rows = result.contact_rows;
+        let mode = match (data.temperature_contact.is_some(), data.open_enclosure.is_some()) {
+            (true, true) => "nonlinear-contact-open-enclosure-full-radiosity-feedback",
+            (true, false) => "nonlinear-contact-enclosure-full-radiosity-feedback",
+            (false, true) => "open-enclosure-full-radiosity-feedback",
+            (false, false) => "enclosure-full-radiosity-feedback",
+        };
+        (result.gradient.nodal_load, result.gradient.relative_residual, result.gradient.iterations,
+            None, None, mode)
+    } else if data.temperature_contact.is_some() {
         let result = temperature_contact::pullback(cx, spec, solved, &weights,
             contact_requested, count(64))?;
         live_contact_rows = Some(result.contact_rows);
@@ -245,15 +260,6 @@ pub(super) fn extract(
             else if !data.air_paths.is_empty() { "nonlinear-contact-full-air-feedback" }
             else if has_natural { "nonlinear-contact-natural-convection-feedback" }
             else { "nonlinear-contact-full-material-feedback" };
-        (result.gradient.nodal_load, result.gradient.relative_residual, result.gradient.iterations,
-            None, None, mode)
-    } else if setup.enclosure_radiation.is_some() {
-        let result = enclosure_feedback::pullback(cx, spec, solved, &weights)?;
-        inlet_rows = result.air_rows;
-        natural_ambient = result.natural_ambient;
-        radiation_rows = result.radiation_rows;
-        let mode = if data.open_enclosure.is_some() { "open-enclosure-full-radiosity-feedback" }
-            else { "enclosure-full-radiosity-feedback" };
         (result.gradient.nodal_load, result.gradient.relative_residual, result.gradient.iterations,
             None, None, mode)
     } else if !data.air_paths.is_empty()
@@ -398,7 +404,8 @@ pub(super) fn extract(
         else { SCOPE.to_string() };
     let scope = if setup.enclosure_radiation.is_some() {
         format!("{scope} {}", enclosure_feedback::SCOPE)
-    } else if data.temperature_contact.is_some() {
+    } else { scope };
+    let scope = if data.temperature_contact.is_some() {
         format!("{scope} {}", temperature_contact::SCOPE)
     } else { scope };
     poll(cx)?;

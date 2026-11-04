@@ -13,7 +13,7 @@ use fs_project::{EnclosureViewFactorEvidence, ThermalBoundaryCondition as B};
 
 use super::{
     ConductionProblem, Cx, ProjectSpec, RungSolved, SolveRefusal, bad,
-    convective_feedback, lower, poll, row,
+    contact_controls, convective_feedback, lower, poll, row,
 };
 
 pub(super) const SCOPE: &str = "Enclosure mode differentiates the complete reflected gray-diffuse radiosity, smooth material/contact laws, natural convection and transported-air feedback at the unchanged final field. Uniform prescribed-flux patches, including vacuum, retain their original external heat and need no convection control. Only original convection heats the air; internal enclosure exchange retains its exact view-factor order. An open enclosure additionally has one shared radiation-reservoir-temperature control for its prescribed black environment. This reservoir has no FEM degree of freedom or independent emissivity; its heat stays external. Natural-reservoir and air-inlet controls contract the same complete dual as source, convection, fan, material, contact and emissivity controls. Enclosure emissivity rows are local absolute coefficient partials at the selected immutable card query. This is a local discrete derivative at fixed geometry and view factors, not a continuum or geometric error certificate.";
@@ -23,6 +23,7 @@ pub(super) struct Pullback {
     pub natural_ambient: BTreeMap<String, f64>,
     pub air_rows: Vec<String>,
     pub radiation_rows: Vec<String>,
+    pub contact_rows: Option<Vec<String>>,
 }
 
 pub(super) enum Model<'a> {
@@ -167,6 +168,7 @@ pub(super) fn model<'a>(
 
 pub(super) fn pullback(
     cx: &Cx<'_>, spec: &ProjectSpec, solved: &RungSolved, weights: &[f64],
+    contact_requested: bool, max_pairs: usize,
 ) -> Result<Pullback, SolveRefusal> {
     let enclosure = model(cx, spec, solved)?;
     let setup = spec.cooling.as_ref().and_then(|c| c.conduction.as_ref())
@@ -187,16 +189,39 @@ pub(super) fn pullback(
         cx, problem, data.linear, &solved.solution.temperature, &names,
         &bound.natural.wall_slopes, &bound.feedback, declaration.heat_tolerance.value, entries,
     )?;
-    let convection = RobinResponse::pullback_mean_robin_with_reference_and_flux_feedback(
-        cx, ConductionProblem { boundary: radiation.boundary(), ..problem },
-        data.interfaces.as_ref(), data.linear, &solved.solution.temperature, &names,
-        radiation.convective_mean_slopes(), radiation.local_reference_slopes(),
-        radiation.reference_feedback(), radiation.flux_feedback(), weights, entries,
-    ).map_err(|error| {
-        let mut refusal = lower(error);
-        refusal.fix = "tighten physical solid/air, enclosure temperature/heat and thermal solve tolerances; fresh radiosity, the unchanged physical residual and complete transpose must all converge".into();
-        refusal
-    })?;
+    let physical = ConductionProblem { boundary: radiation.boundary(), ..problem };
+    let (convection, contact_rows) = if let Some(contacts) = &data.temperature_contact {
+        if data.interfaces.is_some() {
+            return Err(bad("live enclosure contact cannot also retain a frozen interface operator"));
+        }
+        // Requery both independent contact temperatures on the freshly bound
+        // radiative endpoint. Its complete tangent, including bulk K'(T), is
+        // the base for the existing radiosity/air low-rank feedback owner.
+        let response = contacts.linearize(cx, physical, &solved.solution.temperature,
+            data.linear, &names, max_pairs)?;
+        let full = response.pullback_with_robin_and_flux_feedback_and_resistance_controls(
+            cx, radiation.convective_mean_slopes(), radiation.local_reference_slopes(),
+            radiation.reference_feedback(), radiation.flux_feedback(), weights, entries,
+            max_pairs,
+        ).map_err(lower)?;
+        let rows = if contact_requested {
+            contact_controls::rows_from_gradients(cx, spec, full.resistance_multipliers,
+                "R''(T_A,T_B) -> s R''(T_A,T_B), evaluated at s=1")?
+        } else { Vec::new() };
+        (full.transport, Some(rows))
+    } else {
+        let gradient = RobinResponse::pullback_mean_robin_with_reference_and_flux_feedback(
+            cx, physical, data.interfaces.as_ref(), data.linear,
+            &solved.solution.temperature, &names,
+            radiation.convective_mean_slopes(), radiation.local_reference_slopes(),
+            radiation.reference_feedback(), radiation.flux_feedback(), weights, entries,
+        ).map_err(|error| {
+            let mut refusal = lower(error);
+            refusal.fix = "tighten physical solid/air, enclosure temperature/heat and thermal solve tolerances; fresh radiosity, the unchanged physical residual and complete transpose must all converge".into();
+            refusal
+        })?;
+        (gradient, None)
+    };
     let full = radiation.remap_gradient(cx, convection, data.linear).map_err(lower)?;
     let natural_ambient = bound.natural_ambient(&full.convection)?;
     let air_rows = bound.air_rows(cx, setup, solved, &full.convection)?;
@@ -209,5 +234,6 @@ pub(super) fn pullback(
         rows.push(row("radiation-reservoir-temperature", "enclosure-environment", 0, "K", derivative)?);
     }
     poll(cx)?;
-    Ok(Pullback { gradient: full.convection, natural_ambient, air_rows, radiation_rows: rows })
+    Ok(Pullback { gradient: full.convection, natural_ambient, air_rows,
+        radiation_rows: rows, contact_rows })
 }
