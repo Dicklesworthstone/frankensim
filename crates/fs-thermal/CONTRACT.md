@@ -86,13 +86,24 @@ enters with its original mass/enthalpy and zero exposure. Whole-call nonlinear
 work, physical interval count and accumulated energy defects remain bounded;
 late source, solver or checkpoint failures return no partial timeline.
 
+`advance_implicit_with_coefficients_to` uses that same event-aware march with
+original state-dependent powers, link conductances and boundary-channel
+conductances queried inside every nonlinear endpoint. Source callbacks must
+keep their physical history immutable during speculative calls. The return
+retains the payload used by the last accepted physical interval, or `None`
+when no interval was solved, without a later source requery or an unbounded
+per-step log. Exact endpoint events follow that interval, so its payload
+describes the pre-event endpoint. A later source refusal rolls back the whole
+request, including earlier accepted intervals and events.
+
 The implicit path requires explicitly selected phase adaptivity for every
 active kinetic material. It removes the explicit heat-transfer CFL restriction;
 maximum timestep, phase tolerances and the joule-valued numerical-difference
 scale still require independent resolution. It retains fixed reference geometry
 and mass between births, with no moving-interface or pressure-work model inferred.
-Three integration regressions specify a three-body kinetic/finite-bath analytic
-balance, deposition/contact event replay, and original refusal/cancellation.
+Four integration regressions specify a three-body kinetic/finite-bath analytic
+balance, deposition/contact event replay, original refusal/cancellation, and
+nonlinear contact/source continuation with original heat accounts and rollback.
 The complete thermal library and this public integration-test target pass native
 metadata compilation against the original dependency artifacts. That verifies
 type integration; it does not execute the new network regressions.

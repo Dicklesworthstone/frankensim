@@ -372,3 +372,76 @@ fn original_source_evaluation_budget_and_final_cancellation_publish_no_history()
     assert_eq!(old.states()[&CellId(1)].exposure(), 0.0);
     assert_eq!(old.energy_j(), 100_000.0);
 }
+
+#[test]
+fn state_dependent_network_sources_continue_through_the_same_atomic_march() {
+    let law = law();
+    let old = simulation(&law, vec![]);
+    let mut settings = controls();
+    settings.phase.maximum_dt_s = 0.5;
+    let source = |candidate: &CrystallizationSimulation<'_>| {
+        let t = candidate.temperature_k(CellId(1))?;
+        let bath = candidate.temperature_k(CellId(2))?;
+        let power = 4.0 * (360.0 - candidate.temperature_k(CellId(3))?);
+        Ok::<_, CrystallizationTimelineError>(
+            StepCoefficients {
+                sources_w: BTreeMap::from([(CellId(3), power)]),
+                conductances_w_k: BTreeMap::from([(10, 100.0 + 0.1 * (t - bath).powi(2))]),
+                payload: (
+                    candidate.time_s(),
+                    power,
+                    candidate.states()[&CellId(1)].exposure(),
+                ),
+            }
+            .into(),
+        )
+    };
+    let (whole, last, report) = old
+        .advance_implicit_with_coefficients_to(1.0, settings, source, || Ok(()))
+        .unwrap();
+    let (middle, first_payload, _) = old
+        .solve_implicit_step(0.5, settings, source, || Ok(()))
+        .unwrap();
+    let (split, second_payload, _) = middle
+        .solve_implicit_step(1.0, settings, source, || Ok(()))
+        .unwrap();
+    assert_eq!(whole.states(), split.states());
+    for (id, cell) in whole.cells() {
+        assert_eq!(cell.specific_h_j_kg, split.cells()[id].specific_h_j_kg);
+    }
+    assert_eq!(last, Some(second_payload));
+    assert_eq!(second_payload.0, 1.0);
+    close(second_payload.2, 0.1, 1e-12);
+    close(
+        report.phase.thermal.external_heat_j,
+        0.5 * (first_payload.1 + second_payload.1),
+        1e-6,
+    );
+    close(
+        report.phase.thermal.stored_energy_change_j,
+        report.phase.thermal.external_heat_j,
+        1e-3,
+    );
+    let refused = old.advance_implicit_with_coefficients_to(
+        1.0,
+        settings,
+        |candidate| {
+            if candidate.time_s() > 0.5 {
+                Err(DepositionError::InvalidInput("later original source refused").into())
+            } else {
+                source(candidate)
+            }
+        },
+        || Ok(()),
+    );
+    assert!(matches!(
+        refused,
+        Err(CrystallizationImplicitError::Physical(
+            CrystallizationTimelineError::Thermal(DepositionError::InvalidInput(
+                "later original source refused"
+            ))
+        ))
+    ));
+    assert_eq!(old.time_s(), 0.0);
+    assert_eq!(old.states()[&CellId(1)].exposure(), 0.0);
+}

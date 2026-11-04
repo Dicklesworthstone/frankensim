@@ -250,8 +250,46 @@ impl<'a> CrystallizationSimulation<'a> {
         &self,
         target_s: f64,
         controls: CrystallizationImplicitControls,
-        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<(Self, CrystallizationImplicitReport), CrystallizationImplicitError> {
+        let (next, _, report) = self.advance_implicit_with_coefficients_to(
+            target_s,
+            controls,
+            |_| {
+                Ok(StepCoefficients {
+                    sources_w: BTreeMap::new(),
+                    conductances_w_k: BTreeMap::new(),
+                    payload: (),
+                }
+                .into())
+            },
+            checkpoint,
+        )?;
+        Ok((next, report))
+    }
+
+    /// The same event-aware advance with original state-dependent coefficients
+    /// queried inside every nonlinear endpoint. Speculative source calls must
+    /// preserve physical history; all accepted thermal/phase history is owned
+    /// by this transaction. Source failures retain their original cause.
+    ///
+    /// Returns the payload of the last accepted PHYSICAL interval, without a
+    /// later requery or an unbounded per-step log. It is None when no interval
+    /// was solved. Events exactly at the final time are processed afterward by
+    /// the original timeline; the payload describes that interval's left-limit
+    /// coefficient evaluation. Only the final successful return publishes it.
+    #[allow(clippy::type_complexity)]
+    pub fn advance_implicit_with_coefficients_to<T>(
+        &self,
+        target_s: f64,
+        controls: CrystallizationImplicitControls,
+        mut resolve: impl FnMut(
+            &CrystallizationSimulation<'a>,
+        )
+            -> Result<BoundaryStepCoefficients<T>, CrystallizationTimelineError>,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(Self, Option<T>, CrystallizationImplicitReport), CrystallizationImplicitError>
+    {
         checkpoint()?;
         controls.validate()?;
         if !target_s.is_finite() || target_s < self.time_s() {
@@ -260,6 +298,7 @@ impl<'a> CrystallizationSimulation<'a> {
             ));
         }
         let mut next = self.clone();
+        let mut last_payload = None;
         let mut report = CrystallizationImplicitReport {
             phase: CrystallizationAudit {
                 thermal: empty_audit(),
@@ -327,19 +366,8 @@ impl<'a> CrystallizationSimulation<'a> {
                 )
                 .into());
             }
-            let (candidate, (), accepted) = next.solve_implicit_step(
-                endpoint,
-                local,
-                |_| {
-                    Ok(StepCoefficients {
-                        sources_w: BTreeMap::new(),
-                        conductances_w_k: BTreeMap::new(),
-                        payload: (),
-                    }
-                    .into())
-                },
-                &mut checkpoint,
-            )?;
+            let (candidate, payload, accepted) =
+                next.solve_implicit_step(endpoint, local, &mut resolve, &mut checkpoint)?;
             report.newton_iterations =
                 add_count(report.newton_iterations, accepted.newton_iterations)?;
             report.residual_evaluations =
@@ -355,6 +383,7 @@ impl<'a> CrystallizationSimulation<'a> {
                 .into());
             }
             next = candidate;
+            last_payload = Some(payload);
         }
         if report.phase.absolute_energy_residual_j > controls.phase.total_energy_tolerance_j {
             return Err(
@@ -362,7 +391,7 @@ impl<'a> CrystallizationSimulation<'a> {
             );
         }
         checkpoint()?;
-        Ok((next, report))
+        Ok((next, last_payload, report))
     }
 }
 
