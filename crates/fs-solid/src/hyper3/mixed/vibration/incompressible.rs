@@ -21,6 +21,7 @@
 //! projected-pencil intervals are retained; unstable/singular equilibria still
 //! refuse through the original static owner.
 
+use super::super::gravity::HeldMixedGravity;
 use super::super::pressure::UniformBoundaryPressure;
 use super::super::{
     MixedUpError, MixedUpProblem, MixedUpSolution, PreparedMixedUpProblem, checkpoint,
@@ -67,6 +68,7 @@ pub struct IncompressibleMixedVibration<
 > {
     problem: MixedUpProblem<'a, L>,
     boundary_pressure: Option<UniformBoundaryPressure>,
+    gravity: Option<HeldMixedGravity<'a>>,
     settings: MixedVibrationSettings,
     reference_density_kg_m3: Vec<f64>,
     equilibrium: MixedUpSolution,
@@ -455,6 +457,7 @@ impl<'a, L: HyperelasticMaterial + MixedFiniteStrainPotential> PreparedMixedUpPr
         let result = IncompressibleMixedVibration {
             problem: *problem,
             boundary_pressure: prepared.boundary_pressure,
+            gravity: prepared.gravity,
             settings,
             reference_density_kg_m3: density.to_vec(),
             equilibrium,
@@ -483,6 +486,11 @@ impl<L: HyperelasticMaterial + MixedFiniteStrainPotential> IncompressibleMixedVi
     /// convention are unchanged.
     pub const fn boundary_pressure(&self) -> Option<UniformBoundaryPressure> {
         self.boundary_pressure
+    }
+    /// Original stationary field and reference density. Its displacement
+    /// tangent is projected with the SAME exact-constraint basis as material K.
+    pub const fn gravity(&self) -> Option<HeldMixedGravity<'_>> {
+        self.gravity
     }
     pub const fn settings(&self) -> MixedVibrationSettings {
         self.settings

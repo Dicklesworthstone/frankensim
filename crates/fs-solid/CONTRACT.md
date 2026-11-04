@@ -887,6 +887,45 @@ equivalence and finite-deformation support reactions with independent formulas.
 These synthetic regressions require native execution; they do not establish
 experimental material calibration or mesh convergence.
 
+## Conservative gravity on mixed P2/P1 solids
+
+`MixedUpProblem::prepare_with_gravity` binds one positive reference density per
+Tet10 element and the original stationary `GravityField3`, optionally composed
+with uniform pressure on the complete closed material boundary. The native
+mixed preparation and solver retain their pressure space, volumetric treatment,
+pressure gauges, source domains and stable-KKT admission. Gravity acts only on
+displacement; it adds no pressure mass or bulk penalty.
+
+Current sampling uses the original cached quadratic shapes and positive
+reference quadrature, with translation-stable relative coordinates. Force
+and its spatial derivative enter the existing 34-by-34 element block and sparse
+scatter directly. The same density, shapes and weights supply consistent modal
+mass, including the signed quadratic shape contributions. Current det(F)
+never multiplies the fixed material mass. General nonlinear fields and curved
+geometry retain the declared reference quadrature approximation.
+
+The wrapper exposes evaluation and native static solves, plus finite-compliance
+and exact-incompressible vibration, each with optional accepted initial iterates.
+Both modal paths consume the SAME loaded equilibrium and tangent; original
+pressure condensation or exact-constraint projection and full residual gates
+remain intact. Results retain the exact density/field through `HeldMixedGravity`.
+Static results report gravitational and boundary-pressure potentials separately
+from the original material saddle potential.
+
+Field-domain and gradient errors retain element/point attribution. Callback
+cancellation remains canonical and sticky within the native solve, participates
+in its existing stop callback and prevents further field sampling. Refusals
+publish no altered input state. This is external gravity for equilibrium and
+small vibration; self-gravity, changing sources and gravity-loaded motion are
+not introduced.
+
+Native `mixed_gravity` regressions include independent rational Tet10 moments,
+force/potential derivatives, harmonic-field frequency shifts, exact-mode bulk
+independence, pressure gauges, combined-pressure reactions and source/cancellation
+refusals. Bounded original-source kernel checks cover sampling and element
+assembly; the complete static/modal integration tests remain unexecuted until
+the workspace sibling dependencies are available.
+
 ## Native three-dimensional hyperelastic continuation
 
 `HyperTetProblem::prepare_continuation` binds the original prepared P1
