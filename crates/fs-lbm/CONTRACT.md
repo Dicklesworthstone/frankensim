@@ -8244,6 +8244,29 @@ matching cell counts alone are insufficient. Source, scaling, native endpoint
 and cancellation refusals preserve both the accepted flow and the previous
 source report. Only native success permits the infallible report-buffer swap.
 
+`Grid3::step_{serial,pooled}_with_channel_material_rheology_and_moving_walls`
+bind that same reusable material preparation to prescribed native moving walls.
+The admitted channel has one fixed halfway-wall pair, two periodic tangents,
+no interior solids and a complete native probe containing both wall planes.
+Each plane has one uniform tangential lattice velocity. The material strain
+stencil uses those exact wall velocities, including the two-wall difference
+for a one-cell gap; a common translation does not become artificial shear.
+The same local molecular collision field and wall velocities drive one native
+stream, whose actual impulse/work accompanies the accepted source epoch.
+Wall admission precedes source queries; source, streaming, measurement and
+cancellation refusals preserve both accepted flow and the previous source
+report. The ordinary workspace supplies all adapter storage, with no wall map
+or per-step allocation. This remains incoming-time generalized-Newtonian
+rheology on fixed geometry; wall work is not deposited as thermal energy.
+
+The moving-material regressions check analytic Couette strain and the original
+Carreau-Yasuda material producer on D3Q19 central moments and D3Q27 cumulants,
+including one-cell gaps, two-component shear, common translation and the
+same-time half-force shift. Repeated changed drives compare serial/pooled
+population bits and native wall-load receipts, retain independent rates and
+reuse allocation addresses. Missing-wall and post-stream cancellation cases
+retain the previous source epoch and permit an exact successful retry.
+
 Five native exact-source serial tests exercise the actual grid owners and real
 execution context: all seven Newtonian collision variants reproduce existing
 population bits; force-centered Carreau queries ignore rigid rotation;

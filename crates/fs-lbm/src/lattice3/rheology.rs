@@ -15,6 +15,8 @@ use fs_material::{
     fluid_transport::{FluidTransport, FluidTransportState},
 };
 
+mod moving_walls;
+
 /// Conditions at the incoming kinetic time level, with x-fastest cell indexing.
 /// Temperature, composition and material validity remain with the producer.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -168,6 +170,7 @@ fn prepare<L: ViscousLattice3<Q>, const Q: usize, R: FluidTransport + ?Sized, F:
         grid,
         reference,
         forces,
+        None,
         &mut velocity,
         &mut report,
         resolve,
@@ -186,6 +189,7 @@ fn prepare_into<
     grid: &Grid3<L, Q>,
     reference: &MaterialScaling<'_, R>,
     forces: Option<&[[f64; 3]]>,
+    channel_walls: Option<(usize, [[f64; 3]; 2])>,
     velocity: &mut Vec<[f64; 3]>,
     report: &mut RheologyStep3<L::Collision, F>,
     mut resolve: impl FnMut(RheologyPoint3, &FluidTransportState) -> Result<F, MaterialError>,
@@ -242,7 +246,16 @@ fn prepare_into<
             collisions.push(grid.collision);
             continue;
         }
-        let lattice_rate = strain_rate(grid.velocity_gradient(cell, velocity));
+        let gradient = match channel_walls {
+            Some((normal, walls)) => {
+                grid.velocity_gradient_with_walls(cell, velocity, |_, axis, upper| {
+                    debug_assert_eq!(axis, normal);
+                    walls[usize::from(upper)]
+                })
+            }
+            None => grid.velocity_gradient(cell, velocity),
+        };
+        let lattice_rate = strain_rate(gradient);
         let rate = lattice_rate / dt;
         if !rate.is_finite() || (lattice_rate != 0.0 && rate == 0.0) {
             return Err(GridError3::MaterialField {
@@ -303,6 +316,24 @@ fn prepare_workspace<
     resolve: impl FnMut(RheologyPoint3, &FluidTransportState) -> Result<F, MaterialError>,
     poll: impl FnMut() -> Result<(), GridError3<L::Error>>,
 ) -> Result<(), RheologyError3<L::Error>> {
+    prepare_workspace_with_walls(grid, reference, forces, None, workspace, resolve, poll)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_workspace_with_walls<
+    L: ViscousLattice3<Q>,
+    const Q: usize,
+    R: FluidTransport + ?Sized,
+    F: FluidTransport,
+>(
+    grid: &Grid3<L, Q>,
+    reference: &MaterialScaling<'_, R>,
+    forces: Option<&[[f64; 3]]>,
+    channel_walls: Option<(usize, [[f64; 3]; 2])>,
+    workspace: &mut RheologyWorkspace3<L::Collision, F>,
+    resolve: impl FnMut(RheologyPoint3, &FluidTransportState) -> Result<F, MaterialError>,
+    poll: impl FnMut() -> Result<(), GridError3<L::Error>>,
+) -> Result<(), RheologyError3<L::Error>> {
     if workspace.dimensions != grid.dims {
         return Err(GridError3::Input("rheology workspace dimensions differ").into());
     }
@@ -310,6 +341,7 @@ fn prepare_workspace<
         grid,
         reference,
         forces,
+        channel_walls,
         &mut workspace.velocity,
         &mut workspace.trial,
         resolve,
@@ -644,6 +676,8 @@ impl<L: ViscousLattice3<Q> + ForcedLattice3<Q>, const Q: usize> ForcedGrid3<L, Q
 
 #[cfg(test)]
 mod tests {
+    mod moving_walls;
+
     use super::*;
     use crate::d3q19::CollisionModel3;
     use crate::d3q27::{
