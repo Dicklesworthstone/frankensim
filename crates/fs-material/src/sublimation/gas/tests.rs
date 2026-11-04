@@ -274,6 +274,59 @@ fn zero_net_mass_at_unequal_temperatures_still_transfers_molecular_heat() {
 }
 
 #[test]
+fn exact_saturation_preserves_long_holds_without_discarding_molecular_turnover() {
+    let catalog = catalog(0.0);
+    let binding = binding(0.0);
+    let chart = chart(&catalog, &binding);
+    let solid = solid(400.0, chart);
+    let gas = gas(&catalog, 400.0, 1000.0);
+    let duration = 1e6;
+    let result = advance_surface_with_gas(
+        &phase(),
+        &binding,
+        solid,
+        &gas,
+        &catalog,
+        |h| temperature(h, chart),
+        duration,
+        controls(),
+        || false,
+    )
+    .unwrap();
+    assert_eq!(result.solid(), solid);
+    assert_eq!(result.gas(), &gas);
+    assert!(result.step().outgoing_mass_kg > solid.mass_kg);
+    assert!(result.step().incoming_mass_kg > gas.species_mass_kg(&species()).unwrap());
+    assert_eq!(
+        result.step().incoming_mass_kg,
+        result.step().outgoing_mass_kg
+    );
+    assert_eq!(result.step().transferred_mass_kg, 0.0);
+    assert_eq!(result.step().energy_into_gas_j, 0.0);
+    assert_eq!(result.step().recession_m, 0.0);
+    assert_eq!(result.step().energy_residual_j, 0.0);
+    assert_eq!(result.step().mass_residual_kg, 0.0);
+
+    // A nearby pressure is not equilibrium, even if a user's nonlinear error
+    // budget would tolerate its small difference. No approximate skip is safe.
+    let supersaturated = self::gas(&catalog, 400.0, 1000.0 + 1e-7);
+    assert!(matches!(
+        advance_surface_with_gas(
+            &phase(),
+            &binding,
+            solid,
+            &supersaturated,
+            &catalog,
+            |h| temperature(h, chart),
+            duration,
+            controls(),
+            || false,
+        ),
+        Err(GasSurfaceError::InventoryLimit { .. })
+    ));
+}
+
+#[test]
 fn consistent_formation_reference_shifts_preserve_both_temperatures_and_mass() {
     let base = catalog(0.0);
     let shifted = catalog(1.0e7);

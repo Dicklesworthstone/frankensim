@@ -17,7 +17,9 @@
 //! external heat, solid pressure work, or moving-mesh update in this operation.
 //!
 //! Rates are explicit, frozen at the initial temperatures. BOTH gross streams
-//! are inventory-bounded, including when their net mass is zero. Refine the
+//! are inventory-bounded, including zero net mass with unequal temperatures.
+//! Exact isothermal saturation is a stationary solution: its equal counterflows
+//! may turn over the inventory repeatedly without depleting it. Refine the
 //! physical timestep to resolve evolving temperatures and backpressure.
 
 /// Explicit reflected-molecule heat on the original caloric and gas owners.
@@ -69,8 +71,10 @@ pub struct GasSurfaceBinding {
 pub struct GasSurfaceSolve {
     pub gas: GasSpeciesBoundarySolve,
     /// Each gross withdrawal / its own initial solid or vapor inventory, in (0,1).
-    /// This controls counterflow stiffness even at zero net mass. The opt-in
-    /// equilibrium lane uses only the initially SOLID part of condensed mass.
+    /// This controls counterflow stiffness even at zero net mass with unequal
+    /// temperatures. Exact isothermal saturation is exempt only when the WHOLE
+    /// exchanging system is stationary; gross turnover is still reported.
+    /// The opt-in equilibrium lane uses only the initially SOLID condensed mass.
     pub maximum_gross_inventory_fraction: f64,
     /// Absolute agreement required for h_v(T)-(h_s+offset)=L(T), at BOTH endpoints.
     /// A reference offset cannot repair incompatible temperature dependence.
@@ -272,6 +276,9 @@ struct GasSpeciesSnapshot {
 #[derive(Clone, Copy)]
 struct SurfaceSnapshot {
     solid: SolidSurfaceState,
+    /// Equality is checked on temperature and pressure BEFORE multiplying by
+    /// exposure. A tiny underflowed net transfer is not proof of stationarity.
+    stationary_equilibrium: bool,
     /// The initially emitting phase; distinct from total condensed storage.
     available_solid_mass_kg: f64,
     gas: GasSpeciesSnapshot,
@@ -448,6 +455,8 @@ where
     };
     Ok(SurfaceSnapshot {
         solid,
+        stationary_equilibrium: temperature_k == gas.temperature_k
+            && phase.saturation_pressure_pa == gas.partial_pressure_pa,
         available_solid_mass_kg: solid.mass_kg,
         gas,
         temperature_k,
@@ -543,6 +552,7 @@ fn prepare_surface_with_endpoint(
     }
     let SurfaceSnapshot {
         solid,
+        stationary_equilibrium: _,
         available_solid_mass_kg: _,
         gas,
         temperature_k,
@@ -651,6 +661,13 @@ fn admit_surface_inventory(
     duration_s: f64,
     controls: GasSurfaceSolve,
 ) -> Result<(), GasSurfaceError> {
+    // Both streams are retained for molecular pressure and gross histories.
+    // Only the artificial turnover time restriction disappears: at equal T
+    // and exact saturation neither the solid nor the gas changes, including
+    // optional reflected heat. No tolerance-based equilibrium is inferred.
+    if snapshot.stationary_equilibrium {
+        return Ok(());
+    }
     let limit = [
         inventory_limit(
             duration_s,
@@ -681,9 +698,11 @@ fn admit_surface_inventory(
 /// difference at both endpoints. No constant-cp gas or second energy inversion
 /// is used. The original parcel reconstructs all accepted gas properties once.
 ///
-/// All gross rates use the initial state. A step that exceeds either gross
-/// inventory allowance returns a conservative duration bound instead of clipping
-/// a stream. Exact extinction/vacuum and unsupported final states refuse.
+/// All gross rates use the initial state. Except at exact isothermal saturation,
+/// a step that exceeds either gross inventory allowance returns a conservative
+/// duration bound instead of clipping a stream. At that stationary solution,
+/// equal opposing turnover is integrated without a timestep restriction while
+/// retaining its gross streams. Exact extinction/vacuum and unsupported states refuse.
 /// Both endpoints are returned together; no accepted input is ever modified.
 #[allow(clippy::too_many_arguments)]
 pub fn advance_surface_with_gas<'catalog, L: SublimationLaw + ?Sized>(

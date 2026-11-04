@@ -3,6 +3,9 @@
 //! Every surface sees the same initial gas temperature, composition and
 //! species partial pressure. Gross incoming streams of each species share its
 //! OLD inventory budget; outgoing streams are bounded by their own solids.
+//! When EVERY surface is exactly at the gas temperature and its species'
+//! saturation pressure, the joint state is stationary and gross turnover need
+//! not restrict time. A single evolving surface disables this exception for all.
 //! Solid endpoints use the same preparation as the single-surface operation.
 //! All signed species/energy streams are then aggregated canonically and the
 //! original gas owner reconstructs ONE endpoint. Sequential surface updates
@@ -322,9 +325,18 @@ pub(super) fn advance_chamber_observed<'catalog>(
     catalog: &'catalog ThermochemicalGasModel,
     duration_s: f64,
     controls: GasChamberSolve,
-    mut observe: impl FnMut(&GasChamberSurface<'_>, &super::SurfaceSnapshot) -> Result<(), GasSurfaceError>,
+    mut observe: impl FnMut(
+        &GasChamberSurface<'_>,
+        &super::SurfaceSnapshot,
+    ) -> Result<(), GasSurfaceError>,
     mut cancelled: impl FnMut() -> bool,
-) -> Result<(GasChamberCandidate<'catalog>, BTreeMap<u64, ReflectedHeatStep>), GasSurfaceError> {
+) -> Result<
+    (
+        GasChamberCandidate<'catalog>,
+        BTreeMap<u64, ReflectedHeatStep>,
+    ),
+    GasSurfaceError,
+> {
     poll(&mut cancelled)?;
     validate_controls(controls.surface, duration_s)?;
     if controls.maximum_surfaces == 0 || surfaces.len() > controls.maximum_surfaces {
@@ -401,7 +413,15 @@ pub(super) fn advance_chamber_observed<'catalog>(
             ),
         );
     }
-    if let Some(maximum_duration_s) = limit {
+    // Local equilibrium alone is insufficient: another surface could change
+    // this shared gas during the interval. Only a stationary complete chamber
+    // can integrate arbitrarily many balanced molecular turnovers exactly.
+    // Keep all snapshots and observer calls, including their nonzero pressure.
+    if let Some(maximum_duration_s) = limit.filter(|_| {
+        !snapshots
+            .iter()
+            .all(|(_, snapshot)| snapshot.stationary_equilibrium)
+    }) {
         return Err(GasSurfaceError::InventoryLimit { maximum_duration_s });
     }
     let mut outputs = Vec::with_capacity(snapshots.len());

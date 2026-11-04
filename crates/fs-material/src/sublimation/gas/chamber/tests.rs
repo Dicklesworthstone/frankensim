@@ -288,6 +288,65 @@ fn aggregate_gross_withdrawal_cannot_spend_the_same_original_vapor_twice() {
 }
 
 #[test]
+fn stationary_shared_chamber_keeps_gross_streams_but_never_exempts_an_evolving_neighbor() {
+    let catalog = fixture::catalog(0.0);
+    let gas = fixture::gas(&catalog, 400.0, 1000.0);
+    let law = fixture::phase();
+    let binding = fixture::binding(0.0);
+    let chart = fixture::chart(&catalog, &binding);
+    let caloric = |h| fixture::temperature(h, chart);
+    let solid = fixture::solid(400.0, chart);
+    let rows = [
+        surface(2, &law, &binding, solid, &caloric),
+        surface(1, &law, &binding, solid, &caloric),
+    ];
+    let duration = 1e6;
+    let result =
+        advance_chamber_with_gas(&rows, &gas, &catalog, duration, controls(), || false).unwrap();
+    let reversed = advance_chamber_with_gas(
+        &[rows[1], rows[0]],
+        &gas,
+        &catalog,
+        duration,
+        controls(),
+        || false,
+    )
+    .unwrap();
+    assert_eq!(result, reversed);
+    assert_eq!(result.gas(), &gas);
+    assert_eq!(result.step().transferred_mass_kg, 0.0);
+    assert_eq!(result.step().energy_into_gas_j, 0.0);
+    for row in result.surfaces() {
+        assert_eq!(row.solid, solid);
+        assert!(row.outgoing_mass_kg > solid.mass_kg);
+        assert_eq!(row.outgoing_mass_kg, row.incoming_mass_kg);
+    }
+    // The small neighbor evolves the COMMON gas. A locally saturated surface
+    // must retain its original gross allowance when any neighbor can move it.
+    let warm = surface(
+        3,
+        &law,
+        &binding,
+        SolidSurfaceState {
+            area_m2: 1e-16,
+            ..fixture::solid(401.0, chart)
+        },
+        &caloric,
+    );
+    assert!(matches!(
+        advance_chamber_with_gas(
+            &[rows[0], warm],
+            &gas,
+            &catalog,
+            duration,
+            controls(),
+            || false
+        ),
+        Err(GasSurfaceError::InventoryLimit { .. })
+    ));
+}
+
+#[test]
 fn one_surface_is_the_original_single_surface_update_exactly() {
     let catalog = fixture::catalog(-1e7);
     let binding = fixture::binding(-1e7);

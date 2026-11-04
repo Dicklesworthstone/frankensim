@@ -143,6 +143,46 @@ fn reflected_heat_changes_fusion_at_exactly_zero_phase_mass_flux() {
 }
 
 #[test]
+fn saturated_hold_retains_solid_liquid_partition_and_reflected_pressure_turnover() {
+    let catalog = fixture::catalog(0.0);
+    let binding = fixture::binding(0.0);
+    let chart = curve(&catalog, &binding);
+    let phase = fixture::phase();
+    let temperature = |h| invert(&chart, h);
+    let bulk = state(&chart, 0.999);
+    let surface = GasChamberSurface {
+        id: 1,
+        law: &phase,
+        binding: &binding,
+        solid: bulk,
+        temperature_from_enthalpy: &temperature,
+    };
+    let sources = BTreeMap::from([(1, SharpMeltingCaloric::new(&chart).unwrap())]);
+    let reflection = BTreeMap::from([(1, coefficients(&catalog, 0.5))]);
+    let gas = fixture::gas(&catalog, 400.0, 1000.0);
+    let candidate = advance_partitioned_chamber(
+        &[surface],
+        &sources,
+        Some(&reflection),
+        &gas,
+        &catalog,
+        1e6,
+        controls(),
+        || false,
+    )
+    .unwrap();
+    let row = &candidate.exchange().surfaces()[0];
+    let partition = &candidate.phases()[&1];
+    assert_eq!(candidate.exchange().gas(), &gas);
+    assert_eq!(row.solid, bulk);
+    assert_eq!(partition.initial, partition.final_inventory);
+    assert_eq!(partition.melted_mass_kg, 0.0);
+    assert!(row.outgoing_mass_kg > partition.initial.solid_mass_kg);
+    assert_eq!(row.outgoing_mass_kg, row.incoming_mass_kg);
+    assert_eq!(candidate.reflection()[&1].heat_into_gas_j, 0.0);
+}
+
+#[test]
 fn pure_solid_limit_preserves_original_chamber_bits_and_input_order() {
     let catalog = fixture::catalog(0.0);
     let binding = fixture::binding(0.0);

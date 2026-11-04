@@ -342,7 +342,7 @@ fn impulse_error_alone_resolves_changing_reflection_and_rejected_probes_add_no_l
 }
 
 #[test]
-fn equilibrium_gross_inventory_retries_integrate_pressure_once_and_preserve_work_limits() {
+fn equilibrium_skips_gross_inventory_retries_but_integrates_pressure_and_preserves_work_limits() {
     let catalog = fixture::catalog(0.0);
     let binding = fixture::binding(0.0);
     let chart = fixture::chart(&catalog, &binding);
@@ -371,7 +371,8 @@ fn equilibrium_gross_inventory_retries_integrate_pressure_once_and_preserve_work
         || false,
     )
     .unwrap();
-    assert!(result.history().audit().rejected_trials > 0);
+    assert_eq!(result.history().audit().rejected_trials, 0);
+    assert_eq!(result.history().audit().accepted_intervals, 1);
     let load = result.momentum().surfaces[&1];
     fixture::near(load.total_normal_impulse_n_s, 100000.0 * 1e-4 * 0.03, 2e-15);
     fixture::near(

@@ -5902,8 +5902,13 @@ checks actual combined mass and energy and retains signed recession; neither
 input changes until the surrounding consumer accepts both endpoints together.
 
 This is a bounded first-order explicit interval. Both gross withdrawals must
-fit their initial inventories and the caller's maximum fraction, even when
-net mass is zero; timestep refinement resolves thermal and pressure feedback.
+fit their initial inventories and the caller's maximum fraction, including
+zero net mass with unequal temperatures; timestep refinement resolves thermal
+and pressure feedback. Exact equal-temperature saturation is a stationary
+turnover exception: balanced molecules may exchange repeatedly without changing
+either inventory or energy. Gross stream histories and molecular pressure loads
+remain active. Equality is checked on the original temperature and pressure,
+before exposure multiplication; no tolerance-based equilibrium snapping occurs.
 Unsupported domains, incompatible references, unrepresentable increments,
 exhaustion and cancellation refuse atomically. The local Maxwellian/sticking
 assumptions exclude a gas film, carrier thermal accommodation, external heat,
@@ -6016,7 +6021,11 @@ boundary reconstruction; input ordering cannot change the accepted result.
 Gross incoming streams share each species' OLD inventory allowance. Gas emitted
 by another surface cannot fund an additional withdrawal in the same explicit
 interval. Each solid separately bounds gross emission. `InventoryLimit` returns
-a conservative retry duration instead of clipping streams. Common-reference
+a conservative retry duration instead of clipping streams. The stationary
+turnover exception applies only when EVERY surface is exactly at its gas
+temperature and species saturation pressure; one evolving neighbor retains all
+original gross limits. Original source compatibility, reflected heat, phase
+inventory, momentum and cancellation checks remain active. Common-reference
 energy aggregation preserves heat transfer during counterflow without repeatedly
 adding large opposing formation energies. All solids and gas pass actual total
 and per-species mass balance, original caloric compatibility and energy checks
