@@ -11,6 +11,8 @@ mod heat_network;
 mod sphere;
 #[path = "film_source/enclosure.rs"]
 mod enclosure;
+#[path = "film_source/plate_sections.rs"]
+mod plate_sections;
 use fs_airflow::graph::thermal::medium::convection::deposition::source::*;
 use fs_evidence::ValidityDomain;
 use fs_matdb::{

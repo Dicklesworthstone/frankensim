@@ -9,6 +9,8 @@ mod natural_geometry;
 mod mixed_convection;
 #[path = "links/sphere.rs"]
 mod sphere;
+#[path = "links/plate_sections.rs"]
+mod plate_sections;
 use fs_airflow::graph::thermal::medium::convection::deposition::source::links::*;
 use fs_matdb::SelectionPolicy;
 use fs_material::phase::{HeatCapacitySourceQuery, ResolvedHeatCapacityCurve, SolidLiquidPhase};

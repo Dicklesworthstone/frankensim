@@ -32,6 +32,16 @@ pub enum SourceCellConvectionLaw {
         speed_m_s: f64,
         settings: ForcedConvectionSettings,
     },
+    /// External flat-plate strip using the actual mean-film source state.
+    /// Characteristic length is the downstream distance from the physical
+    /// leading edge; `start` is measured from that same edge. Only the original
+    /// laminar and turbulent mean cards are admitted. Rebind after reversing
+    /// flow; local source updates retain the held-property approximation.
+    ForcedPlateSection {
+        correlation: CorrelationId,
+        speed_m_s: f64,
+        start: Length,
+    },
     /// Isolated isothermal sphere with Whitaker's original bulk/surface
     /// property convention. Select `Reservoir` for the primary state; the
     /// SAME resolver is additionally queried at the actual wall temperature.
@@ -58,6 +68,16 @@ pub enum SourceCellConvectionLaw {
 }
 
 impl SourceCellConvectionLaw {
+    // Admit prescribed strip geometry before invoking an external resolver.
+    // The same native law also checks it when consuming a borrowed snapshot.
+    pub(crate) fn admit_geometry(self, length: Length) -> Result<(), ConvectionSourceError> {
+        if let Self::ForcedPlateSection { correlation, speed_m_s, start } = self {
+            CellConvectionLaw::ForcedPlateSection { correlation, speed_m_s, start }
+                .admit_area(0.0, length)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn admit_property_temperature(
         self,
         convention: ConvectionPropertyTemperature,
@@ -78,10 +98,11 @@ impl SourceCellConvectionLaw {
                 ..
             }
                 | Self::AidingVerticalPlate { .. }
+                | Self::ForcedPlateSection { .. }
         ) && convention != ConvectionPropertyTemperature::FilmMean
         {
             return Err(ConvectionSourceError::Invalid(
-                "horizontal or spherical natural convection and aiding mixed convection require mean wall/bulk film properties",
+                "plate sections, horizontal or spherical natural convection and aiding mixed convection require mean wall/bulk film properties",
             ));
         }
         Ok(())
@@ -111,6 +132,9 @@ impl SourceCellConvectionLaw {
                 speed_m_s,
                 settings,
             },
+            Self::ForcedPlateSection { correlation, speed_m_s, start } => {
+                CellConvectionLaw::ForcedPlateSection { correlation, speed_m_s, start }
+            }
             Self::ForcedSphere { speed_m_s } => CellConvectionLaw::ForcedSphere {
                 speed_m_s,
                 surface_transport: surface.ok_or(ConvectionSourceError::Invalid(
@@ -272,6 +296,7 @@ pub fn evaluate_source_cell_convection<F: ThermalFluidTransport, E>(
         binding
             .law
             .admit_property_temperature(binding.property_temperature)?;
+        binding.law.admit_geometry(binding.characteristic_length)?;
         if !ids.insert(binding.cell) {
             return Err(ConvectionSourceError::Invalid("duplicate convective cell").into());
         }

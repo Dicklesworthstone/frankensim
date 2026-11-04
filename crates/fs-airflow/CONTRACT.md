@@ -3479,6 +3479,21 @@ cards keep their own domains at both positive endpoints; no transition blend
 or new entrance at a cell boundary is introduced. A section starting at zero
 retains the original whole-length mean exactly.
 
+`CellConvectionLaw::ForcedPlateSection` and
+`SourceCellConvectionLaw::ForcedPlateSection` carry the same section coefficient
+into original finite-cell boundaries and reciprocal finite-fluid links.
+`start` and the binding's `characteristic_length` are upstream and downstream
+distances from one physical leading edge. Source bindings require mean-film
+properties at the actual wall/fluid temperatures, and invalid geometry refuses
+before source callbacks. Existing observers and heat assemblies apply the
+coefficient to native exposed/contact area and include its conductance in the
+original timestep bound. `CellConvectionEvaluation::section` retains the
+upstream mean and physical interval; `nusselt` retains the original downstream
+mean, while `effective_nusselt()` returns the actual strip mean. Positive-start
+coefficients preserve the shared section owner's unbounded local-model
+discrepancy. Regression sources exercise unequal subdivision, heating/cooling,
+film refresh, native timestep bounds and closed two-store energy balances.
+
 `PlanarFreeSurfaceSections` applies those coefficients to the original
 liquid/gas heat solve by O(1) lookup in authored surface-contact order.
 Every patch retains its liquid/gas identities, area, normal distances and

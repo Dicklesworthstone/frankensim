@@ -355,6 +355,7 @@ pub fn evaluate_source_enclosed_gas_layers<F: ThermalFluidTransport, E>(
             evaluation: CellConvectionEvaluation {
                 nusselt,
                 coefficient,
+                section: None,
             },
         });
     }

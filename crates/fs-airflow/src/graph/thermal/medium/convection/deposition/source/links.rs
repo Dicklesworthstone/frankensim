@@ -128,6 +128,7 @@ pub fn evaluate_source_link_convection<F: ThermalFluidTransport, E>(
         binding
             .law
             .admit_property_temperature(binding.property_temperature)?;
+        binding.law.admit_geometry(binding.characteristic_length)?;
         let link = thermal
             .links()
             .get(&binding.link)

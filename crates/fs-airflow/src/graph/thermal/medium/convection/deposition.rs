@@ -45,6 +45,18 @@ pub enum CellConvectionLaw {
         speed_m_s: f64,
         settings: ForcedConvectionSettings,
     },
+    /// External isothermal flat-plate strip measured from one physical leading
+    /// edge. Characteristic length is the downstream distance; `start` is the
+    /// upstream distance from that SAME edge, never a fresh entrance. Positive
+    /// relative speed and the selected original card apply at both endpoints.
+    /// Flow reversal requires rebinding both distances from the opposite edge.
+    /// Held wall/film properties are a local approximation to an isothermal
+    /// boundary layer; unequal local states do not imply partition invariance.
+    ForcedPlateSection {
+        correlation: CorrelationId,
+        speed_m_s: f64,
+        start: Length,
+    },
     /// Whitaker's isolated isothermal sphere. The primary material supplies
     /// BULK transport; this second fluid state supplies only wall viscosity.
     /// Both states must retain one fluid, pressure, composition and source.
@@ -85,6 +97,19 @@ impl CellConvectionLaw {
     pub(crate) fn admit_area(self, area_m2: f64, length: Length)
         -> Result<(), ConvectionSourceError>
     {
+        if let Self::ForcedPlateSection { correlation, speed_m_s, start } = self {
+            if !matches!(correlation,
+                CorrelationId::FlatPlateLaminarAverage | CorrelationId::FlatPlateTurbulentAverage)
+                || !speed_m_s.is_finite() || speed_m_s <= 0.0
+                || !start.value().is_finite() || start.value() < 0.0
+                || !length.value().is_finite() || length.value() <= start.value()
+                || (start.value() > 0.0 && start.value() / length.value() == 0.0)
+            {
+                return Err(ConvectionSourceError::Invalid(
+                    "plate sections require an original flat-plate card, positive speed and finite 0 <= start < end from one leading edge",
+                ));
+            }
+        }
         if matches!(self, Self::ForcedSphere { .. })
             && (!length.value().is_finite() || length.value() <= 0.0
                 || !area_m2.is_finite() || area_m2 < 0.0
@@ -129,8 +154,24 @@ impl<'a> From<ConvectiveCell<'a>> for MaterialConvectiveCell<'a> {
 /// One supported correlation evaluation, without an invented equilibrium limit.
 #[derive(Debug)]
 pub struct CellConvectionEvaluation {
+    /// Original mean-correlation evaluation. For a plate section this is the
+    /// downstream cumulative mean; use `effective_nusselt` for the strip mean.
     pub nusselt: NusseltEvaluation,
+    /// Actual coefficient used by the thermal owner, including section evidence.
     pub coefficient: Evidence<HeatTransferCoefficient>,
+    /// The physical strip and its original upstream mean, without duplicating
+    /// the downstream mean above. Positive starts keep an unbounded local-model
+    /// discrepancy in `coefficient`, as required by the shared section owner.
+    pub section: Option<PlateSectionDetails>,
+}
+
+impl CellConvectionEvaluation {
+    /// Actual dimensionless coefficient: strip mean when a section is present,
+    /// otherwise the original whole-geometry correlation result.
+    pub fn effective_nusselt(&self) -> f64 {
+        self.section.as_ref().map_or(self.nusselt.evidence().value,
+            |section| section.nusselt)
+    }
 }
 
 /// Original dimensional/correlation result and the exact thermal destination.
@@ -346,12 +387,21 @@ pub(crate) fn evaluate_convection_state(
             evaluate_forced_from_material(correlation, transport,
                 speed_m_s, length, settings).map(Some)
         }
+        CellConvectionLaw::ForcedPlateSection { correlation, speed_m_s, start } => {
+            let evaluated = evaluate_flat_plate_section_from_material(
+                correlation, transport, speed_m_s, start, length,
+            )?;
+            let (_, nusselt, coefficient, section) = evaluated.into_parts();
+            return Ok(Some(CellConvectionEvaluation {
+                nusselt, coefficient, section: Some(section),
+            }));
+        }
         CellConvectionLaw::ForcedSphere { speed_m_s, surface_transport } => {
             let result = evaluate_sphere_from_material(
                 transport, &surface_transport, speed_m_s, length,
             )?;
             let (_, nusselt, coefficient) = result.into_parts();
-            return Ok(Some(CellConvectionEvaluation { nusselt, coefficient }));
+            return Ok(Some(CellConvectionEvaluation { nusselt, coefficient, section: None }));
         }
         CellConvectionLaw::VerticalPlate { gravity_m_s2, expansion_per_k } => {
             natural(NaturalConvectionGeometry::VerticalPlate, gravity_m_s2, expansion_per_k)
@@ -371,6 +421,6 @@ pub(crate) fn evaluate_convection_state(
     }?;
     Ok(result.map(|value| {
         let (_, nusselt, coefficient) = value.into_parts();
-        CellConvectionEvaluation { nusselt, coefficient }
+        CellConvectionEvaluation { nusselt, coefficient, section: None }
     }))
 }
