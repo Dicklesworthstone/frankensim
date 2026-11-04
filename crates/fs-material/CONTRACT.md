@@ -11126,9 +11126,10 @@ specimen diffraction or certify a reverberant room's diffuse field.
 
 ### Layer-resolved viscous and thermal acoustic absorption
 
-Both prepared layer owners expose `layer_absorption` for explicit incident
-normal watts at one angle. Each original layer retains separate viscous and
-thermal absorbed fractions and their combined watts. The original R/T API
+Rigid-backed, fluid-transmitting and elastic-transmitting prepared layers expose
+`layer_absorption` for explicit incident normal watts at one angle. Each original
+layer retains separate viscous and thermal absorbed fractions and their combined
+watts. The original R/T API
 is unchanged. Its SAME bounded propagation supplies the layer-face states;
 no additional material query, fitted attenuation or second field solver enters.
 
@@ -11148,6 +11149,15 @@ watts retain coefficients and zero work. Existing `porous_layers` G0/G1/G3/G4
 regressions compare interface fluxes and independent spatial quadrature, weak
 transmitting loss, thin standing waves, subdivision, opaque/refraction limits,
 source retention and atomic work/cancellation refusal.
+
+For `ElasticTransmittingLayers`, the original longitudinal/SV boundary solution
+supplies the layer states. Transmitted power is the sum of the two outgoing mode
+powers; evanescent modes retain their loading but carry no normal power, and the
+lossless elastic half-space produces no heat. `porous_elastic_layers` G0/G1/G3/G4
+regressions compare an independent three-equation elastic boundary plus spatial
+loss quadrature across both mode cutoffs, the matched thin-layer limit below
+roundoff, normal-incidence fluid equivalence, subdivision, opaque layers and
+cancelled/budget-refused queries.
 
 The mechanism split does not assign mean heat separately to the pore fluid and
 solid frame or evolve their temperatures. Original linear, rigid-frame,

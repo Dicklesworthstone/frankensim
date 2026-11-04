@@ -27,9 +27,10 @@ pub use plate::{ElasticPlateLayers, LayeredElasticPlateTransmission};
 pub mod stack;
 pub use stack::{ElasticPlateStack, ElasticPlateStackLayer};
 
-use super::transmission::transmit_state;
+use super::transmission::transmit_state_with_layers;
 use super::{
-    Layer, RigidBackedLayers, bad, divided, finite, magnitude_scale, normal_wavenumber_ratio,
+    Layer, LayerTransfer, RigidBackedLayers, bad, divided, finite, magnitude_scale,
+    normal_wavenumber_ratio,
 };
 use crate::MaterialError;
 use crate::elastic::acoustic::ElasticAcousticState;
@@ -139,10 +140,16 @@ impl<'a> ElasticTransmittingLayers<'a> {
     /// grazing incidence in the *incident* fluid is outside the normal-power
     /// normalization, as it is for the existing fluid transmission owner.
     pub fn scattering(&self, cosine: f64) -> Result<LayeredElasticTransmission, MaterialError> {
+        self.scattering_with_layers(cosine, |_, _| Ok(()))
+    }
+
+    pub(super) fn scattering_with_layers<E: From<MaterialError>>(
+        &self,
+        cosine: f64,
+        observe: impl FnMut(usize, LayerTransfer) -> Result<(), E>,
+    ) -> Result<LayeredElasticTransmission, E> {
         if !cosine.is_finite() || cosine <= 0.0 || cosine > 1.0 {
-            return Err(bad(
-                "elastic layer transmission needs incidence cosine in (0,1]",
-            ));
+            return Err(bad("elastic layer transmission needs incidence cosine in (0,1]").into());
         }
         let incident_speed = self.prepared.fluid().acoustic().sound_speed_m_s();
         let qp = normal_wavenumber_ratio(
@@ -160,7 +167,7 @@ impl<'a> ElasticTransmittingLayers<'a> {
             || (qp != C64::ZERO && p_kn == C64::ZERO)
             || (qs != C64::ZERO && s_kn == C64::ZERO)
         {
-            return Err(bad("elastic receiving wavenumber is unrepresentable"));
+            return Err(bad("elastic receiving wavenumber is unrepresentable").into());
         }
         let cp = divided(qp, self.longitudinal_ratio);
         let cs = divided(qs, self.shear_ratio);
@@ -169,7 +176,7 @@ impl<'a> ElasticTransmittingLayers<'a> {
         let a = (-2.0 * ss).mul_add(ss, 1.0);
         let b = cp.scale(2.0 * ss);
         if !a.is_finite() || !finite(b) || !finite(cp) || !finite(cs) {
-            return Err(bad("elastic refraction direction is unrepresentable"));
+            return Err(bad("elastic refraction direction is unrepresentable").into());
         }
         let scale = a.abs().max(magnitude_scale(b));
         let (p_mode, s_mode) = if scale == 0.0 {
@@ -188,10 +195,11 @@ impl<'a> ElasticTransmittingLayers<'a> {
         let normal_velocity = cp * p_mode - s_mode.scale(ss);
         let normal_impedance_ratio = self.impedance_ratio / cosine;
         if !normal_impedance_ratio.is_finite() || normal_impedance_ratio <= 0.0 {
-            return Err(bad("elastic receiving normal impedance is unrepresentable"));
+            return Err(bad("elastic receiving normal impedance is unrepresentable").into());
         }
         let velocity = normal_velocity.scale(normal_impedance_ratio);
-        let state = transmit_state(&self.prepared, cosine, pressure, velocity)?;
+        let state =
+            transmit_state_with_layers(&self.prepared, cosine, pressure, velocity, observe)?;
         let log_ratio = det::ln(self.impedance_ratio);
         let longitudinal = if cp.re == 0.0 {
             0.0
@@ -221,9 +229,9 @@ impl<'a> ElasticTransmittingLayers<'a> {
             || absorbed < -tolerance
             || (reflected + longitudinal + shear + absorbed - 1.0).abs() > tolerance
         {
-            return Err(bad(
-                "elastic layer transmission failed passive modal-power balance",
-            ));
+            return Err(
+                bad("elastic layer transmission failed passive modal-power balance").into(),
+            );
         }
         Ok(LayeredElasticTransmission {
             pressure_reflection: state.reflection,

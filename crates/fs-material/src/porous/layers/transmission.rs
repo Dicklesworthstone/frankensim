@@ -200,7 +200,7 @@ pub(super) fn transmit_state(
     )
 }
 
-fn transmit_state_with_layers<E: From<MaterialError>>(
+pub(super) fn transmit_state_with_layers<E: From<MaterialError>>(
     prepared: &RigidBackedLayers<'_>,
     cosine: f64,
     exit_pressure: C64,
