@@ -317,6 +317,8 @@ pub struct FiniteSolidStep {
     /// Uniform pressure uses -p (V_after - V_before). Per-face pressure uses
     /// exact work along the straight nodal-displacement segment; this is
     /// path-dependent, and the physical curved trajectory needs time refinement.
+    /// Affine and prescribed free-surface fields use the exact endpoint change
+    /// of the native volume pressure integral, including wet/dry transitions.
     /// Midpoint force work is not substituted for either expression.
     pub pressure_work_j: f64,
     /// Delta kinetic + delta strain - source work. Signed numerical defect;
@@ -816,26 +818,29 @@ impl<'a> FiniteSolidBody<'a> {
         )
     }
 
-    /// Advance with uniform signed pressure and objective energy/momentum
+    /// Advance with conservative pressure and objective energy/momentum
     /// compatible material forces on the original closed pressure surface.
     ///
-    /// The same strain-space discrete gradient acts on W(F)+p det(F), so the
-    /// pressure contribution closes its endpoint-volume work without adding an
-    /// internal midpoint torque. The receipt keeps material storage and native
-    /// pressure work -p Delta V separate. The original nonlinear/energy gates,
+    /// Uniform pressure retains the original discrete gradient of W(F)+p det(F).
+    /// Affine Eulerian and planar free-surface fields use the exact native
+    /// pressure potential, including wet/dry transitions. Their field forces
+    /// are parallel to the pressure gradient: transverse linear momentum and
+    /// angular momentum about that axis are preserved when otherwise unforced.
+    /// The receipt keeps material storage and native endpoint pressure work
+    /// separate. The original nonlinear/energy gates,
     /// fixed supports, source admission and immutable reference mass apply.
     /// This is a conservative algorithmic volume load, approaching the native
     /// face traction as the step shrinks; finite-step interior terms and the
     /// curved physical trajectory still require time refinement.
     /// Pressure may change between held intervals; no fluid storage is inferred.
-    /// Zero pressure delegates to the unpressurized algorithm exactly. Nonuniform
-    /// face fields are supported only by the ordinary midpoint pressure entry.
-    pub fn step_energy_momentum_candidate_with_pressure(
+    /// Zero pressure delegates to the unpressurized algorithm exactly. Per-face
+    /// fields have no assumed conservative potential and are refused here.
+    pub fn step_energy_momentum_candidate_with_pressure<'p>(
         &self,
         duration_s: f64,
         nodal_forces_n: &[(usize, f64)],
         body_force_n_m3: [f64; 3],
-        pressure_pa: f64,
+        pressure_pa: impl Into<TetPressure<'p>>,
         controls: FiniteSolidControls,
         cx: &Cx<'_>,
     ) -> Result<(Self, FiniteSolidStep), FiniteSolidError> {
@@ -846,7 +851,12 @@ impl<'a> FiniteSolidBody<'a> {
             .ok_or(FiniteSolidError::Invalid(
                 "body was not initialized with a pressure surface",
             ))?;
-        let pressure = TetPressure::Uniform(pressure_pa);
+        let pressure = pressure_pa.into();
+        if matches!(pressure, TetPressure::PerFace(_)) {
+            return Err(FiniteSolidError::Invalid(
+                "energy-momentum pressure requires a conservative uniform, affine or free-surface field",
+            ));
+        }
         let pressure = if surface.validate_pressure(pressure, cx)? {
             None
         } else {
@@ -1282,21 +1292,16 @@ impl<'a, 'b, 'cx> DynamicOperator<'a, 'b, 'cx> {
 
     fn algorithmic_force(&self, before: &[f64], after: &[f64]) -> Result<Vec<f64>, HyperTetError> {
         match self.pressure {
-            Some((surface, TetPressure::Uniform(pressure_pa))) => {
-                self.problem.energy_momentum_force_with_uniform_pressure(
-                    before,
-                    after,
-                    surface,
-                    pressure_pa,
-                    self.cx,
-                )
-            }
+            Some((surface, pressure_pa)) => self.problem.energy_momentum_force_with_pressure(
+                before,
+                after,
+                surface,
+                pressure_pa,
+                self.cx,
+            ),
             None => self
                 .problem
                 .energy_momentum_internal_force(before, after, self.cx),
-            Some(_) => Err(HyperTetError::InvalidInput {
-                what: "energy-momentum pressure must be spatially uniform".into(),
-            }),
         }
     }
 
@@ -1315,8 +1320,8 @@ impl<'a, 'b, 'cx> DynamicOperator<'a, 'b, 'cx> {
                     .map(|(mid, old)| 2.0 * mid - old)
                     .collect();
                 match self.pressure {
-                    Some((surface, TetPressure::Uniform(pressure_pa))) => {
-                        self.problem.energy_momentum_tangent_with_uniform_pressure(
+                    Some((surface, pressure_pa)) => {
+                        self.problem.energy_momentum_tangent_with_pressure(
                             before,
                             &after,
                             surface,
@@ -1327,11 +1332,6 @@ impl<'a, 'b, 'cx> DynamicOperator<'a, 'b, 'cx> {
                     None => self
                         .problem
                         .energy_momentum_tangent(before, &after, self.cx)?,
-                    Some(_) => {
-                        return Err(HyperTetError::InvalidInput {
-                            what: "energy-momentum pressure must be spatially uniform".into(),
-                        });
-                    }
                 }
             } else {
                 self.problem.tangent_matrix(&displacement, self.cx)?

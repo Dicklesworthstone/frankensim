@@ -32,6 +32,7 @@ use super::{HyperTetError, checkpoint};
 use crate::linear3::TetAssemblyBudget;
 use crate::loads3::{LoadError3, TetLoadGeometry3};
 
+pub(super) mod algorithmic;
 /// Enclosed void volume and work-conjugate pressure geometry for gas cavities.
 pub mod cavity;
 mod free_surface;
@@ -532,7 +533,7 @@ impl ClosedTetPressureSurface {
         }
     }
 
-    fn spatial_pressure_at(
+    pub(super) fn spatial_pressure_at(
         &self,
         displacement_m: &[f64],
         node: usize,

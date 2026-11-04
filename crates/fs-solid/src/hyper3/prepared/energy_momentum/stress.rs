@@ -189,6 +189,43 @@ pub(super) fn evaluate_with_uniform_pressure<L: HyperelasticMaterial>(
     )
 }
 
+/// Coefficient derivative of the SAME objective strain-space pressure term.
+/// The caller has already admitted both endpoints and the representative with
+/// the original material response. This is the geometric potential det(F),
+/// not another constitutive law or a replacement material-domain admission.
+pub(super) fn volume_stress<L: HyperelasticMaterial>(
+    material: &L,
+    before: &[f64; 9],
+    after: &[f64; 9],
+) -> Result<[f64; 9], MaterialError> {
+    struct Volume<'a>(&'a fs_material::hyper::Hyperelastic);
+    impl HyperelasticMaterial for Volume<'_> {
+        fn hyperelastic(&self) -> &fs_material::hyper::Hyperelastic {
+            self.0
+        }
+        fn energy_density(&self, f: &[f64; 9]) -> f64 {
+            let cof = cofactor(f);
+            f[0] * cof[0] + f[1] * cof[1] + f[2] * cof[2]
+        }
+        fn first_piola(&self, f: &[f64; 9]) -> Result<[f64; 9], MaterialError> {
+            Ok(cofactor(f))
+        }
+        fn consistent_tangent(&self, f: &[f64; 9]) -> Result<[[f64; 9]; 9], MaterialError> {
+            let mut result = [[0.0; 9]; 9];
+            for column in 0..9 {
+                let mut direction = [0.0; 9];
+                direction[column] = 1.0;
+                let derivative = cofactor_direction(f, &direction);
+                for row in 0..9 {
+                    result[row][column] = derivative[row];
+                }
+            }
+            Ok(result)
+        }
+    }
+    Ok(evaluate(&Volume(material.hyperelastic()), before, after, false)?.piola)
+}
+
 struct Pressurized<'a, L> {
     material: &'a L,
     pressure_pa: f64,
@@ -196,7 +233,7 @@ struct Pressurized<'a, L> {
 
 // Analytic first/second derivatives of det(F), the material-volume density.
 // Row-major cofactors avoid inverse-F cancellation in the pressure Hessian.
-fn cofactor(f: &[f64; 9]) -> [f64; 9] {
+pub(super) fn cofactor(f: &[f64; 9]) -> [f64; 9] {
     core::array::from_fn(|ij| {
         let (a, b) = ((ij / 3 + 1) % 3, (ij / 3 + 2) % 3);
         let (c, d) = ((ij % 3 + 1) % 3, (ij % 3 + 2) % 3);

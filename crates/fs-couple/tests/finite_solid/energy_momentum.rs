@@ -1,6 +1,8 @@
 //! Independent P1 mass, energy and momentum checks for nonlinear solid motion.
 #[path = "energy_momentum/pressure.rs"]
 mod pressure;
+#[path = "energy_momentum/spatial_pressure.rs"]
+mod spatial_pressure;
 
 use super::*;
 

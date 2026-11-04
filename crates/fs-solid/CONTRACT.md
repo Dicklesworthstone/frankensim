@@ -808,8 +808,44 @@ All six production stress/tangent groups pass, including signed pressure,
 endpoint tangent directions, objectivity/reversal, native face-traction limits
 and the work-versus-torque counterexample. Native time integration also closes
 energy and both momenta and shows resolved second-order refinement. Public
-prepared/Cx integration remains syntax/static reviewed, not an executed Cargo
-qualification in the dependency-incomplete environment.
+prepared/Cx integration is additionally qualified by the native spatial-pressure
+tests below; full Cargo qualification remains blocked by missing siblings.
+
+### Spatial hydrostatics in the objective discrete gradient
+
+`energy_momentum_force_with_pressure` and its endpoint tangent admit the native
+`Uniform`, `Affine` and `FreeSurface` fields. Each tetrahedron retains the exact
+pressure potential `V * m(p_nodes)`, where `m` is the original affine or positive
+clipped-volume mean. The product discrete gradient is
+`m_bar * DG(V) + V_bar * DG(m)`. The volume term reuses the original objective
+strain-space kernel; the mean term averages coordinate increments over all node
+orders. Fully wet and dry elements take their affine and zero limits. Existing
+uniform-pressure and zero-pressure arithmetic remain unchanged.
+
+Field forces lie along the pressure-gradient axis. A free body therefore keeps
+linear momentum transverse to that axis and angular momentum about it, while
+buoyancy changes the momentum along the axis. No conservation of all momenta
+is claimed for an external spatial field. The analytic endpoint tangent includes
+both changing volume and spatial pressure, using native scalar AD of the same
+clipped moment. Midpoint unknowns still require the original factor of two.
+
+Rational divided differences retain coincident-pressure limits and thin wet
+caps without subtracting endpoint potentials. An edge landing on another
+coplanar vertex uses its finite complete-moment quotient; only a numerator
+unresolved at `64 epsilon` relative to its endpoint moments takes the analytic
+midpoint limit. Entirely coplanar mixed states select the dry-side generalized
+derivative. Native work and nonlinear gates remain authoritative. These are
+finite-step conservative algorithmic loads; native surface traction is recovered
+as endpoints coalesce and the trajectory still needs time refinement.
+
+Three native scalar tests and four complete prepared/Cx tests pass, including
+independent endpoint work, every assembled tangent entry, admissible force and
+torque, reversal, thin caps, coplanar arrival, uniform bits and cancellation.
+The existing 22 pressure/surface/static-Newton regressions also pass. These
+focused executions use original source and numerical dependencies; the full
+workspace Cargo suite remains blocked by missing sibling repositories. This
+entry supplies no fluid evolution, evolving free surface or conservative
+potential for `PerFace` loads.
 
 ## Source-pack mechanical coupons and nonthermal dead loads
 

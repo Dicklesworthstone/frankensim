@@ -6,6 +6,30 @@
 
 use super::{HyperTetError, finite};
 
+/// The positive simplex formula uses only rational arithmetic. Keeping this
+/// small scalar seam lets the native AD and exact interval divided differences
+/// differentiate the SAME clipped-volume moment, including very thin wet caps.
+pub(super) trait MomentScalar:
+    Copy
+    + core::ops::Add<Output = Self>
+    + core::ops::Sub<Output = Self>
+    + core::ops::Mul<Output = Self>
+    + core::ops::Div<Output = Self>
+    + core::ops::Neg<Output = Self>
+{
+    fn constant(value: f64) -> Self;
+    fn value(self) -> f64;
+}
+
+impl<R: fs_ad::Real> MomentScalar for R {
+    fn constant(value: f64) -> Self {
+        Self::from_f64(value)
+    }
+    fn value(self) -> f64 {
+        fs_ad::Real::value(self)
+    }
+}
+
 const FULL_BASIS: [[f64; 3]; 3] = [
     [1.0 / 6.0, 1.0 / 12.0, 1.0 / 12.0],
     [1.0 / 12.0, 1.0 / 6.0, 1.0 / 12.0],
@@ -53,8 +77,10 @@ impl FaceMoments {
 /// Fractions from a wet vertex to the plane and from the plane to a dry one.
 /// Rescale before adding opposite pressure magnitudes; calculate both fractions
 /// directly so a thin wet region does not become `1 - nearly_one`.
-fn edge_fractions(wet: f64, dry: f64) -> (f64, f64) {
-    let scale = wet.max(-dry);
+fn edge_fractions<R: MomentScalar>(wet: R, dry: R) -> (R, R) {
+    // This common scale cancels algebraically, so holding its primal constant
+    // also gives the exact derivatives and divided differences of the ratio.
+    let scale = R::constant(wet.value().max(-dry.value()));
     let positive = wet / scale;
     let negative = -dry / scale;
     let sum = positive + negative;
@@ -167,14 +193,25 @@ pub(super) fn face_moments<const TANGENT: bool>(
 /// into positive-volume tetrahedra; the average of an affine field on each
 /// tetrahedron is the arithmetic mean of its four vertex values.
 pub(super) fn tet_mean(values: [f64; 4]) -> Result<f64, HyperTetError> {
-    if values.iter().all(|&value| value >= 0.0) {
-        return finite(values.into_iter().map(|value| value / 4.0).sum());
+    finite(tet_mean_scalar(values))
+}
+
+pub(super) fn tet_mean_scalar<R: MomentScalar>(values: [R; 4]) -> R {
+    if values.iter().all(|&value| value.value() <= 0.0) {
+        // At an entirely coplanar simplex select the dry-side derivative.
+        return R::constant(0.0);
+    }
+    let quarter = R::constant(4.0);
+    if values.iter().all(|&value| value.value() >= 0.0) {
+        return values
+            .into_iter()
+            .fold(R::constant(0.0), |sum, value| sum + value / quarter);
     }
     let mut wet = [0; 4];
     let mut dry = [0; 4];
     let (mut wet_count, mut dry_count) = (0, 0);
     for (index, value) in values.into_iter().enumerate() {
-        if value > 0.0 {
+        if value.value() > 0.0 {
             wet[wet_count] = index;
             wet_count += 1;
         } else {
@@ -182,15 +219,14 @@ pub(super) fn tet_mean(values: [f64; 4]) -> Result<f64, HyperTetError> {
             dry_count += 1;
         }
     }
-    let mean = match wet_count {
-        0 => 0.0,
+    match wet_count {
+        0 => R::constant(0.0),
         1 => {
             let p = values[wet[0]];
-            let fraction = dry[..3]
-                .iter()
-                .map(|&index| edge_fractions(p, values[index]).0)
-                .product::<f64>();
-            (p / 4.0) * fraction
+            let fraction = dry[..3].iter().fold(R::constant(1.0), |product, &index| {
+                product * edge_fractions(p, values[index]).0
+            });
+            (p / quarter) * fraction
         }
         2 => {
             let (a, b, c, d) = (
@@ -207,7 +243,7 @@ pub(super) fn tet_mean(values: [f64; 4]) -> Result<f64, HyperTetError> {
             let first = ac.0 * ad.0 * bd.1;
             let second = ac.0 * bc.1 * bd.0;
             let third = bc.0 * bd.0;
-            (a / 4.0) * first + (a / 4.0) * second + (a / 4.0 + b / 4.0) * third
+            (a / quarter) * first + (a / quarter) * second + (a / quarter + b / quarter) * third
         }
         3 => {
             let (a, b, c, d) = (
@@ -220,11 +256,10 @@ pub(super) fn tet_mean(values: [f64; 4]) -> Result<f64, HyperTetError> {
             let bd = edge_fractions(b, d);
             let cd = edge_fractions(c, d);
             // [A, B, C, CD], [A, B, BD, CD], [A, AD, BD, CD].
-            (a / 4.0 + b / 4.0 + c / 4.0) * cd.0
-                + (a / 4.0 + b / 4.0) * cd.1 * bd.0
-                + (a / 4.0) * bd.1 * cd.1 * ad.0
+            (a / quarter + b / quarter + c / quarter) * cd.0
+                + (a / quarter + b / quarter) * cd.1 * bd.0
+                + (a / quarter) * bd.1 * cd.1 * ad.0
         }
         _ => unreachable!("fully wet tetrahedron handled above"),
-    };
-    finite(mean)
+    }
 }

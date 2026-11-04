@@ -3700,8 +3700,8 @@ factor of two in both tangent action and preconditioning.
 
 Held nodal and body dead loads retain displacement-conjugate work. Support
 reactions use the same algorithmic force and full consistent-mass acceleration.
-Pressure-bound bodies use the explicit uniform-pressure energy/momentum entry
-for each held interval. The ordinary midpoint path remains available. Stable midpoint
+Pressure-bound bodies use the explicit conservative-pressure energy/momentum
+entry for each held interval. The ordinary midpoint path remains available. Stable midpoint
 velocity times the mass-applied velocity increment evaluates kinetic change;
 the measured energy gate retains potential-work and nonlinear error instead
 of converting it to heat. Material failure, failed convergence, energy refusal
@@ -3716,19 +3716,19 @@ the original source-card-compatible Ogden alpha=2 fixture changed from
 validation or general performance results.
 
 Public integration regressions cover free tumbling, supported dead-load work
-and atomic stalled/cancelled refusal. They have not been executed: exact public
-prepared/Cx/source-card compilation is blocked by unavailable sibling runtime
-dependencies. Integration received static API, lifetime and scaling review;
-no runtime stubs or substitute numerical solver were introduced. The bounded
+and atomic stalled/cancelled refusal. The current focused native qualification
+is stated with conservative spatial pressure below; full workspace Cargo
+compilation remains blocked by unavailable sibling repositories. No runtime
+stubs or substitute numerical solver were introduced. The bounded
 midpoint method still requires temporal/mesh refinement and does not supply
-frequency-unwarped modal flow, nonuniform pressure work in this algorithm or
+frequency-unwarped modal flow, nonconservative per-face pressure work or
 completion of the broader instrument-realism program.
 
 ### Uniform pressure with energy and angular-momentum balance
 
-`FiniteSolidBody::step_energy_momentum_candidate_with_pressure` requires the
-original pressure-bound body and one explicit signed uniform pressure for the
-held interval. It consumes the prepared discrete gradient of
+For explicit signed uniform pressure,
+`FiniteSolidBody::step_energy_momentum_candidate_with_pressure` retains the
+original pressure-bound body and consumes the prepared discrete gradient of
 `W_material(F)+p det(F)` and its analytic tangent. Force callbacks, tangent
 actions and support reactions use the same combined algorithmic force; ordinary
 face-force subtraction is bypassed on this path, so pressure is applied once.
@@ -3754,9 +3754,39 @@ accuracy. These are numerical fixtures, not material calibration.
 
 Three public regressions cover pressure-driven tumbling/refinement, changing
 signed pressure against an independent breathing/work/reaction oracle, and
-zero-pressure/atomic refusal. Their full Cx-bound target remains unexecuted
-because sibling runtime dependencies are unavailable; the actual stress/tangent
-and native generalized-alpha/Newton-FGMRES driver were compiled and run.
+zero-pressure/atomic refusal. These original Cx-bound regressions now pass
+in the focused native closure described below; full workspace Cargo
+qualification remains blocked by missing sibling repositories.
+
+### Conservative spatial pressure in native energy/momentum motion
+
+`FiniteSolidBody::step_energy_momentum_candidate_with_pressure` also accepts
+`TetPressure::Affine` and `TetPressure::FreeSurface`. Existing scalar callers
+retain uniform-pressure behavior. The prepared native product discrete gradient
+supplies force, endpoint tangent and reactions to the same generalized-alpha /
+Newton-FGMRES owner; the original surface supplies actual endpoint pressure
+work, including wet/dry transitions. Material storage, consistent reference
+mass, source admission, fixed supports and transactional refusal retain their
+existing owners. The pressure is applied once, and no numerical defect becomes
+heat or inferred fluid storage. `PerFace` remains outside this conservative
+entry, including an all-zero face field.
+
+The prescribed spatial field is held over each interval. Buoyancy supplies
+momentum along its gradient axis; when otherwise unforced, transverse linear
+momentum and angular momentum about that axis are conserved. This does not
+advance the surrounding liquid or its free surface. Finite-step loads approach
+native surface traction as the interval shrinks; energy balance alone does not
+certify trajectory accuracy.
+
+The complete original source-bound material/Cx/prepared/time/coupling path was
+compiled and executed in a focused native-source closure. Two new regressions
+pass: 30 actual Newton intervals for each spatial field, at least two wet/dry
+vertex crossings, independent total potential and pressure work, admissible
+momenta, receipts and unchanged accepted state after refusal/cancellation.
+All six existing energy/momentum regressions also pass, including uniform
+pressure refinement, support reactions and zero-pressure identity. No material,
+mass, cancellation or integrator substitute was used; full workspace Cargo
+qualification remains blocked by missing sibling repositories.
 
 ## Material-bound finite bodies under spatial follower pressure
 
