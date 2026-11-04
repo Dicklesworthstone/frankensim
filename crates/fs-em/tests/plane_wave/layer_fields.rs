@@ -27,6 +27,85 @@ fn relative(a: f64, b: f64, tolerance: f64) {
 }
 
 #[test]
+fn optical_films_and_both_interior_owners_share_the_unrounded_phase_product() {
+    // Synthetic matched-impedance sources isolate propagation at q=1.1.
+    // Independent 110-digit decimal values retain the EXACT binary64 q, k
+    // and thickness before reducing the angle. The old q*fl(k*d) phase is
+    // wrong by 1.05e-9 rad; rounding q*k first gives a different wrong phase.
+    let outside = material(1.0, 1.0);
+    let film = material(1.1, 1.1);
+    let thickness = 1.234_567_890_123_456_7;
+    let full_phase = C64::new(-0.827_971_212_537_248_7, -0.560_770_604_801_641);
+    let half_phase = C64::new(-0.293_282_106_053_839_7, 0.956_025_944_349_118_8);
+    let layer = DielectricLayer {
+        response: DielectricResponse::Lossless(&film),
+        thickness_m: thickness,
+    };
+    let stack = PlanarDielectricLayers::try_new(
+        &outside,
+        DielectricResponse::Lossless(&outside),
+        1e7,
+        &[layer],
+    )
+    .unwrap();
+    // The two authored lengths sum EXACTLY to thickness. Subdivision must not
+    // move the interference phase by choosing another multiplication grouping.
+    let split = PlanarDielectricLayers::try_new(
+        &outside,
+        DielectricResponse::Lossless(&outside),
+        1e7,
+        &[
+            DielectricLayer {
+                thickness_m: 1.0,
+                ..layer
+            },
+            DielectricLayer {
+                thickness_m: thickness - 1.0,
+                ..layer
+            },
+        ],
+    )
+    .unwrap();
+    for pol in [Polarization::Te, Polarization::Tm] {
+        let response = stack.response(1.0, pol).unwrap();
+        complex_near(response.reflected_tangential_e, C64::ZERO, 2e-14);
+        complex_near(response.transmitted_tangential_e, full_phase, 2e-14);
+        complex_near(
+            split.response(1.0, pol).unwrap().transmitted_tangential_e,
+            full_phase,
+            2e-14,
+        );
+        near(response.transmitted_power_fraction, 1.0, 2e-14);
+        assert_eq!(response.absorbed_power_fraction, 0.0);
+        let field = stack.prepare_layer_field(0, 1.0, pol).unwrap();
+        let illumination = stack.prepare_illumination(1.0, pol).unwrap();
+        for (depth, expected_left, expected_right) in [
+            (0.0, C64::ONE, full_phase),
+            (0.5 * thickness, half_phase, half_phase),
+            (thickness, full_phase, C64::ONE),
+        ] {
+            let left = field.field(depth).unwrap();
+            complex_near(left.electric_v_per_m, expected_left, 3e-14);
+            complex_near(left.conjugate_magnetic_a_per_m, expected_left, 3e-14);
+            let point = illumination.prepare_point(0, depth).unwrap();
+            for (input, electric, magnetic) in [
+                ([C64::ONE, C64::ZERO], expected_left, expected_left),
+                ([C64::ZERO, C64::ONE], expected_right, -expected_right),
+            ] {
+                let actual = point.evaluate(input).unwrap();
+                let tangent = match pol {
+                    Polarization::Te => [actual.electric_v_m[1], -actual.magnetic_a_m[0]],
+                    Polarization::Tm => [actual.electric_v_m[0], actual.magnetic_a_m[1]],
+                };
+                complex_near(tangent[0], electric, 4e-14);
+                complex_near(tangent[1], magnetic, 4e-14);
+                assert_eq!(actual.statistics.absorbed_power_w_m3, 0.0);
+            }
+        }
+    }
+}
+
+#[test]
 fn internal_film_traces_match_both_original_external_fields_and_lossless_power() {
     let incident = material(1.0, 1.0);
     let film = material(3.0, 1.4);

@@ -41,7 +41,8 @@ fn internal_fields_match_independent_bidirectional_waves_through_critical_neighb
             let d = 1.0;
             let left = reference(kz, y, f, back, d, 0.0);
             let right = reference(kz, y, f, back, d, d);
-            let kernel = LayerFieldKernel::new(d, kz, a, b, left, right).unwrap();
+            let kernel =
+                LayerFieldKernel::new(d, kz, Dd::from_f64(kz.re), a, b, left, right).unwrap();
             for z in [0.0, 1e-8, 0.1, 0.5, 0.9, 1.0] {
                 let expected = reference(kz, y, f, back, d, z);
                 let got = kernel.field(z).unwrap();
@@ -67,7 +68,8 @@ fn exactly_critical_te_and_tm_keep_the_linear_maxwell_limit() {
                 left[1] - C64::new(0.0, z) * b * left[0],
             ]
         };
-        let kernel = LayerFieldKernel::new(d, C64::ZERO, a, b, left, expected(d)).unwrap();
+        let kernel =
+            LayerFieldKernel::new(d, C64::ZERO, Dd::ZERO, a, b, left, expected(d)).unwrap();
         for z in [0.0, 0.01, 0.7, d] {
             let got = kernel.field(z).unwrap();
             let reference = expected(z);
@@ -113,7 +115,8 @@ fn integrated_vector_dielectric_heat_matches_signed_poynting_loss_for_both_polar
             thickness,
             thickness,
         );
-        let kernel = LayerFieldKernel::new(thickness, kz, a, b, left, right).unwrap();
+        let kernel =
+            LayerFieldKernel::new(thickness, kz, Dd::from_f64(kz.re), a, b, left, right).unwrap();
         let flux = |field: [C64; 2]| 0.5 * (field[0] * field[1].conj()).re;
         let heat = |z: f64| {
             let field = kernel.field(z).unwrap();
@@ -165,7 +168,9 @@ fn negative_real_permittivity_retains_metal_fields_and_positive_volume_heat() {
                 |z| reference(kz, y, C64::new(0.9, 0.2), C64::new(-0.3, 0.4), thickness, z);
             let left = independent(0.0);
             let right = independent(thickness);
-            let kernel = LayerFieldKernel::new(thickness, kz, a, b, left, right).unwrap();
+            let kernel =
+                LayerFieldKernel::new(thickness, kz, Dd::from_f64(kz.re), a, b, left, right)
+                    .unwrap();
             let heat = |z| {
                 let field = kernel.field(z).unwrap();
                 let expected = independent(z);
@@ -200,13 +205,56 @@ fn opaque_film_never_needs_a_growing_wave_or_an_unobservable_underflowed_phase()
     let kz = C64::new(2.0, -800.0);
     let a = C64::ONE;
     let b = kz * kz;
-    let kernel = LayerFieldKernel::new(1e308, kz, a, b, [C64::ONE, kz], [C64::ZERO; 2]).unwrap();
+    let kernel = LayerFieldKernel::new(
+        1e308,
+        kz,
+        Dd::from_f64(kz.re),
+        a,
+        b,
+        [C64::ONE, kz],
+        [C64::ZERO; 2],
+    )
+    .unwrap();
     let near = kernel.field(0.001).unwrap();
     assert!(near[0].abs() > 0.4 && near[0].abs() < 0.5);
     assert_eq!(kernel.field(0.999e308), Some([C64::ZERO; 2]));
     assert_eq!(kernel.field(1e308), Some([C64::ZERO; 2]));
     assert!(
-        LayerFieldKernel::new(1.0, C64::new(1.0, 0.1), a, b, [C64::ONE; 2], [C64::ONE; 2])
-            .is_none()
+        LayerFieldKernel::new(
+            1.0,
+            C64::new(1.0, 0.1),
+            Dd::ONE,
+            a,
+            b,
+            [C64::ONE; 2],
+            [C64::ONE; 2],
+        )
+        .is_none()
     );
+}
+
+#[test]
+fn optical_internal_fields_keep_the_path_product_before_range_reduction() {
+    // Independent decimal exp(-i * 1e7 * binary64(1.0000000000000002)).
+    let depth = 1.000_000_000_000_000_2;
+    let expected = C64::new(-0.907_270_387_115_543_2, -0.420_547_791_176_237_53);
+    let kz = C64::from_re(1e7);
+    let right = expected * expected;
+    let kernel = LayerFieldKernel::new(
+        2.0 * depth,
+        kz,
+        Dd::from_f64(kz.re),
+        kz,
+        kz,
+        [C64::ONE; 2],
+        [right; 2],
+    )
+    .unwrap();
+    let actual = kernel.field(depth).unwrap();
+    for component in actual {
+        assert!(
+            (component - expected).norm_sq() < 1e-28,
+            "{component:?} != {expected:?}"
+        );
+    }
 }

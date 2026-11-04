@@ -47,7 +47,12 @@ pub struct PreparedLayerPoint<'p, 's, 'm> {
 
 // Return p and 1-p without cancelling weak attenuation or a small phase.
 // Fully decayed waves do not need an otherwise unrepresentable optical phase.
-fn propagation(q: C64, distance: f64) -> Result<(C64, C64), ReflectionError> {
+fn propagation(
+    q: C64,
+    wave_number: f64,
+    distance_m: f64,
+) -> Result<(C64, C64), ReflectionError> {
+    let distance = wave_number * distance_m;
     if !distance.is_finite() || distance < 0.0 {
         return Err(bad("interior optical distance is unrepresentable"));
     }
@@ -60,8 +65,13 @@ fn propagation(q: C64, distance: f64) -> Result<(C64, C64), ReflectionError> {
     if !phase.is_finite() || !attenuation.is_finite() || attenuation > 1.0 {
         return Err(bad("interior propagation is unrepresentable"));
     }
-    let (sine, cosine) = det::sin_cos(phase);
-    let half_sine = det::sin(0.5 * phase);
+    // Use the same full product as the slab and its one-sided field owner.
+    // In particular, p and 1-p must not use differently rounded phases.
+    let phase_parts =
+        Dd::from_f64(q.re) * (Dd::from_f64(wave_number) * Dd::from_f64(distance_m));
+    let (sine, cosine) = det::sin_cos_dd(phase_parts);
+    let (sine, cosine) = (sine.to_f64(), cosine.to_f64());
+    let half_sine = det::sin_cos_dd(phase_parts * Dd::from_f64(0.5)).0.to_f64();
     Ok((
         C64::new(attenuation * cosine, -attenuation * sine),
         C64::new(
@@ -136,9 +146,9 @@ impl<'s, 'm> PreparedLayerIllumination<'s, 'm> {
         }
         let k = self.stack.wave_number;
         let distance = positive(k * thickness)?;
-        let (p, difference) = propagation(q, distance)?;
-        let (left, _) = propagation(q, k * depth_m)?;
-        let (right, _) = propagation(q, k * distance_from_right_m)?;
+        let (p, difference) = propagation(q, k, thickness)?;
+        let (left, _) = propagation(q, k, depth_m)?;
+        let (right, _) = propagation(q, k, distance_from_right_m)?;
         // [u,v] represents [1,(1-p)/q] up to a common scale, without
         // overflowing at a deep critical film or dividing a zero normal wave.
         let reciprocal = if q == C64::ZERO {
@@ -171,7 +181,7 @@ impl<'s, 'm> PreparedLayerIllumination<'s, 'm> {
             } else {
                 (right, depth_m - distance_from_right_m, -1.0)
             };
-            let (_, local) = propagation(q, k * span)?;
+            let (_, local) = propagation(q, k, span)?;
             near * (local / if reciprocal { difference } else { q }).scale(sign)
         };
         let sum = left + right;

@@ -107,13 +107,25 @@ impl<'m> PlanarDielectricLayers<'m> {
             self.omega * linear_magnetic_permeability(selected.source.response.material())?,
         )?;
         let omega_epsilon = selected.wave.epsilon_f_m.scale(self.omega);
-        let kz = selected.wave.normal(c)?.scale(self.wave_number);
+        let normal = selected.wave.normal(c)?;
+        let kz = normal.scale(self.wave_number);
+        // Match the slab's full q*k*d phase instead of rounding q*k before
+        // reconstructing an interior field from its corrected face traces.
+        let phase_wavenumber = Dd::from_f64(normal.re) * Dd::from_f64(self.wave_number);
         let (a, b) = match polarization {
             Polarization::Te => (C64::from_re(omega_mu), (kz * kz).scale(1.0 / omega_mu)),
             Polarization::Tm => ((kz * kz) / omega_epsilon, omega_epsilon),
         };
-        let kernel = LayerFieldKernel::new(selected.source.thickness_m, kz, a, b, left, right)
-            .ok_or_else(|| bad("selected layer field is unrepresentable"))?;
+        let kernel = LayerFieldKernel::new(
+            selected.source.thickness_m,
+            kz,
+            phase_wavenumber,
+            a,
+            b,
+            left,
+            right,
+        )
+        .ok_or_else(|| bad("selected layer field is unrepresentable"))?;
         if !absorbed_power_w_m2.is_finite() || absorbed_power_w_m2 < 0.0 {
             return Err(bad("selected layer absorbed power is unrepresentable"));
         }

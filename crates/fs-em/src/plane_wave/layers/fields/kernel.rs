@@ -1,5 +1,5 @@
 //! Bounded homogeneous E/H evolution; exp(+i omega t), E'=-i A H, H'=-i B E.
-use fs_math::{c64::C64, det};
+use fs_math::{c64::C64, dd::Dd, det};
 
 #[derive(Clone, Copy)]
 enum Interior {
@@ -18,6 +18,8 @@ enum Interior {
 pub(super) struct LayerFieldKernel {
     thickness: f64,
     kz: C64,
+    // Retained real q*k for phase; kz still owns admittance and attenuation.
+    phase_wavenumber: Dd,
     left: [C64; 2],
     right: [C64; 2],
     interior: Interior,
@@ -31,6 +33,7 @@ impl LayerFieldKernel {
     pub(super) fn new(
         thickness: f64,
         kz: C64,
+        phase_wavenumber: Dd,
         a: C64,
         b: C64,
         left: [C64; 2],
@@ -40,6 +43,8 @@ impl LayerFieldKernel {
             || thickness < 0.0
             || kz.re < 0.0
             || kz.im > 0.0
+            || phase_wavenumber.hi != kz.re
+            || !phase_wavenumber.lo.is_finite()
             || ![kz, a, b]
                 .iter()
                 .chain(&left)
@@ -71,6 +76,7 @@ impl LayerFieldKernel {
         Some(Self {
             thickness,
             kz,
+            phase_wavenumber,
             left,
             right,
             interior,
@@ -101,8 +107,8 @@ impl LayerFieldKernel {
                 forward,
                 backward,
             } => {
-                let f = forward * decay(self.kz, depth)?;
-                let b = backward * decay(self.kz, self.thickness - depth)?;
+                let f = forward * decay(self.kz, self.phase_wavenumber, depth)?;
+                let b = backward * decay(self.kz, self.phase_wavenumber, self.thickness - depth)?;
                 [f + b, admittance * (f - b)]
             }
         };
@@ -128,7 +134,7 @@ fn entire(z: C64) -> (C64, C64) {
     (cosine, sinc)
 }
 
-fn decay(kz: C64, distance: f64) -> Option<C64> {
+fn decay(kz: C64, phase_wavenumber: Dd, distance: f64) -> Option<C64> {
     let amplitude = det::exp(kz.im * distance);
     if amplitude == 0.0 {
         return Some(C64::ZERO);
@@ -137,7 +143,8 @@ fn decay(kz: C64, distance: f64) -> Option<C64> {
     if !phase.is_finite() {
         return None;
     }
-    Some(C64::new(det::cos(phase), -det::sin(phase)).scale(amplitude))
+    let (sine, cosine) = det::sin_cos_dd(phase_wavenumber * Dd::from_f64(distance));
+    Some(C64::new(cosine.to_f64(), -sine.to_f64()).scale(amplitude))
 }
 
 #[cfg(test)]

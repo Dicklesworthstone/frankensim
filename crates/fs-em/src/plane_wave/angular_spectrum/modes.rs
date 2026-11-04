@@ -1,5 +1,5 @@
 //! Maxwell reconstruction for the parent's exp(+i omega t - i k.r) convention.
-use fs_math::{c64::C64, det};
+use fs_math::{c64::C64, dd::Dd, det};
 
 pub(super) fn finite(z: C64) -> bool {
     z.re.is_finite() && z.im.is_finite()
@@ -39,7 +39,11 @@ pub(super) fn propagation(kz: C64, distance: f64) -> Option<C64> {
         return None;
     }
     let amplitude = det::exp(decay);
-    let value = C64::new(det::cos(phase), -det::sin(phase)).scale(amplitude);
+    // Keep the product residual until argument reduction. Optical paths can
+    // accumulate millions of cycles even for metre-scale authored geometry.
+    // This retains the supplied binary64 operands, not their physical uncertainty.
+    let (sine, cosine) = det::sin_cos_dd(Dd::from_f64(kz.re) * Dd::from_f64(distance));
+    let value = C64::new(cosine.to_f64(), -sine.to_f64()).scale(amplitude);
     finite(value).then_some(value)
 }
 
@@ -167,6 +171,40 @@ mod tests {
             propagation(C64::from_re(2.0), -0.3).unwrap(),
             forward.conj(),
         );
+    }
+
+    #[test]
+    fn optical_phase_products_preserve_meter_and_kilometer_dark_ports() {
+        // Independent 110-digit decimal reduction/Taylor values of exp(-i*k*d),
+        // with each authored binary64 operand converted exactly. k=1e7 rad/m
+        // corresponds to a 628 nm wavelength. Rounding k*d first loses
+        // 3.58e-10 rad over this metre and 7.70e-7 rad over this kilometre.
+        for (distance, expected) in [
+            (
+                1.000_000_000_000_000_2,
+                C64::new(-0.907_270_387_115_543_2, -0.420_547_791_176_237_53),
+            ),
+            (
+                1000.000_000_000_000_1,
+                C64::new(0.873_120_176_906_475_4, 0.487_505_032_465_107_1),
+            ),
+        ] {
+            let actual = propagation(C64::from_re(1e7), distance).unwrap();
+            // A matched opposing reference must not acquire spurious dark-port
+            // power from a prematurely rounded propagation phase.
+            assert!(
+                (actual - expected).norm_sq() < 1e-28,
+                "distance={distance}: {actual:?} != {expected:?}"
+            );
+            close(
+                propagation(C64::from_re(1e7), -distance).unwrap(),
+                expected.conj(),
+            );
+            close(
+                propagation(C64::new(1e7, -1e-4), distance).unwrap(),
+                expected.scale(det::exp(-1e-4 * distance)),
+            );
+        }
     }
 
     #[test]

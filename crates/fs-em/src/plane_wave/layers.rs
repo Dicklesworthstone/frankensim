@@ -29,7 +29,7 @@ use super::{
 use fs_material::{
     field_storage::linear_magnetic_permeability, state_point::ResolvedMaterialStatePoint,
 };
-use fs_math::{c64::C64, det};
+use fs_math::{c64::C64, dd::Dd, det};
 
 mod illumination;
 pub use illumination::{
@@ -528,7 +528,13 @@ impl Slab {
         if !phase.is_finite() {
             return Err(bad("film propagation phase is unrepresentable"));
         }
-        let (sine, cos_phase) = det::sin_cos(phase);
+        // Preserve both products of the authored q, k and thickness. The
+        // original rounded depth still owns attenuation and admission; phase
+        // reduction alone uses DD. This does not refine the material law or q.
+        let phase_parts =
+            Dd::from_f64(q.re) * (Dd::from_f64(wave_number) * Dd::from_f64(thickness));
+        let (sine, cos_phase) = det::sin_cos_dd(phase_parts);
+        let (sine, cos_phase) = (sine.to_f64(), cos_phase.to_f64());
         let p = C64::new(attenuation * cos_phase, -attenuation * sine);
         let power_decay = det::exp(2.0 * decay);
         let loss = -det::expm1(2.0 * decay);
@@ -642,7 +648,7 @@ impl Slab {
             };
             let sum = C64::ONE + p;
             // Stable 1-p, including weak attenuation and small phase.
-            let half_sine = det::sin(0.5 * phase);
+            let half_sine = det::sin_cos_dd(phase_parts * Dd::from_f64(0.5)).0.to_f64();
             let difference = C64::new(
                 -det::expm1(decay) + 2.0 * attenuation * half_sine * half_sine,
                 attenuation * sine,
