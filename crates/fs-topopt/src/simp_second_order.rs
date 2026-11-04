@@ -17,7 +17,7 @@ use crate::{DensityElasticity, DesignPipeline, SolveControl};
 
 mod design_map;
 use design_map::DesignMap;
-mod thermal;
+pub mod thermal;
 pub use thermal::SimpThermalComplianceGoal;
 
 /// Smooth compliance, volume and material-mass linearization at one raw design.

@@ -232,3 +232,98 @@ fn stress_work_refusals_leave_the_original_thermal_point_usable() {
     assert_eq!(before, control.work());
     assert!(stress.value().is_finite() && stress.value() > 0.0);
 }
+
+#[test]
+fn ordinary_and_robust_stress_curvature_uses_the_complete_original_design_map() {
+    use fs_topopt::RobustPipeline;
+    use fs_topopt::simp_second_order::thermal::SimpThermalComplianceGoal;
+
+    for robust in [false, true] {
+        let (mesh, positions, elasticity, thermal, a, b) = cube();
+        let params = SimpParams { e_min: 0.03, penal: 2.7, beta: 2.3, eta: 0.5 };
+        let ordinary = DesignPipeline {
+            filter: DensityFilter::new(&mesh, &positions, 0.15), params,
+        };
+        let three_field = RobustPipeline {
+            filter: DensityFilter::new(&mesh, &positions, 0.15),
+            params,
+            eta_offset: 0.08,
+        };
+        let reference = DesignPipeline {
+            filter: DensityFilter::new(&mesh, &positions, 0.15),
+            params: SimpParams { eta: if robust { 0.58 } else { 0.5 }, ..params },
+        };
+        let loads = [
+            ThermalLoadCase {
+                force: &a, weight: 1.0,
+                strains: TetThermalStrainField::PerElement(&thermal),
+            },
+            ThermalLoadCase {
+                force: &b, weight: 0.0,
+                strains: TetThermalStrainField::PerElement(&thermal),
+            },
+        ];
+        let rho: Vec<_> = (0..elasticity.cells()).map(|i| 0.42 + 0.03 * i as f64).collect();
+        let direction: Vec<_> = (0..rho.len()).map(|i| 0.03 * ((i % 3) as f64 - 1.0)).collect();
+        let criterion = ThermalStressOptions { allowable_pa: 0.2, power: 4 };
+        let mut callback = |_| ControlFlow::Continue(());
+        let mut control = SolveControl::new(SolveBudget::default(), &mut callback);
+        let prepare = |point: &[f64], control: &mut SolveControl<'_>| {
+            if robust {
+                SimpThermalComplianceGoal::new_robust(
+                    &three_field, &elasticity, point, &loads, options(), control,
+                )
+            } else {
+                SimpThermalComplianceGoal::new(
+                    &ordinary, &elasticity, point, &loads, options(), control,
+                )
+            }.unwrap()
+        };
+        let goal = prepare(&rho, &mut control);
+        let before = control.work();
+        let stress = goal.stress_goal(criterion, &mut control).unwrap();
+        assert_eq!(control.work().linear_solves, before.linear_solves + 3);
+        let before = control.work();
+        let hv = stress.hessian_vector_product(&direction, &mut control).unwrap();
+        assert_eq!(control.work().linear_solves, before.linear_solves + 6);
+        let first = reference.try_thermal_compliance_and_gradient(
+            &elasticity, &rho, &loads, options(), &mut control,
+        ).unwrap();
+        close(stress.value(), independent_moment(&first.goal, criterion), 1e-10);
+        let step = 1e-5;
+        for i in 0..rho.len() {
+            let mut plus = rho.clone();
+            let mut minus = rho.clone();
+            plus[i] += step;
+            minus[i] -= step;
+            let p = reference.try_thermal_compliance_and_gradient(
+                &elasticity, &plus, &loads, options(), &mut control,
+            ).unwrap();
+            let m = reference.try_thermal_compliance_and_gradient(
+                &elasticity, &minus, &loads, options(), &mut control,
+            ).unwrap();
+            close(
+                stress.gradient()[i],
+                (independent_moment(&p.goal, criterion) - independent_moment(&m.goal, criterion))
+                    / (2.0 * step),
+                3e-5,
+            );
+        }
+        let plus: Vec<_> = rho.iter().zip(&direction).map(|(x, v)| x + step * v).collect();
+        let minus: Vec<_> = rho.iter().zip(&direction).map(|(x, v)| x - step * v).collect();
+        let p = prepare(&plus, &mut control);
+        let m = prepare(&minus, &mut control);
+        let sp = p.stress_goal(criterion, &mut control).unwrap();
+        let sm = m.stress_goal(criterion, &mut control).unwrap();
+        for i in 0..rho.len() {
+            close(hv[i], (sp.gradient()[i] - sm.gradient()[i]) / (2.0 * step), 3e-5);
+        }
+        assert!(std::ptr::eq(stress.source(), &goal));
+        let before = control.work();
+        assert_eq!(
+            stress.hessian_vector_product(&vec![0.0; rho.len()], &mut control).unwrap(),
+            vec![0.0; rho.len()],
+        );
+        assert_eq!(before, control.work());
+    }
+}

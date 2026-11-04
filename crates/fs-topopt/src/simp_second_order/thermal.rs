@@ -9,6 +9,9 @@ use crate::filter::DensityFilter;
 use crate::pipeline::{LoadCase, SimpParams};
 use crate::{DensityElasticity, DesignPipeline, RobustPipeline, SolveControl};
 
+/// Physical thermal stress constraints through the complete design map.
+pub mod stress;
+
 /// Thermal equivalent-load compliance, physical volume and source-bound mass
 /// at one raw design. This is f(rho)^T u, not stored elastic strain energy.
 /// The original thermal goal retains source states and physical stress/reactions.

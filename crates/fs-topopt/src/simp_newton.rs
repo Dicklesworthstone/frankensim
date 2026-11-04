@@ -22,7 +22,10 @@ use crate::{DensityElasticity, DesignPipeline, EvaluationStop, RobustPipeline, S
 use crate::elasticity::second_order::thermal::OwnedThermalField;
 
 mod thermal;
+mod stress;
 use thermal::CachedGoal;
+use crate::elasticity::second_order::thermal::stress::ThermalStressOptions;
+use crate::simp_second_order::thermal::stress::SimpStressLinearization;
 
 /// SI kilograms for a physical material inventory objective or constraint.
 pub const MASS_DIMS: Dims = Dims([0, 1, 0, 0, 0, 0]);
@@ -57,6 +60,7 @@ struct Cached<'a> {
     goal: CachedGoal<'a>,
     volume: PhysicsSample,
     mass: Option<PhysicsSample>,
+    stress: RefCell<Option<SimpStressLinearization>>,
 }
 
 /// Joint raw-density physics for compliance objectives / volume constraints, or
@@ -114,6 +118,7 @@ enum Output {
     Volume,
     Mass,
     LoadCase(usize),
+    ThermalStress(ThermalStressOptions),
 }
 
 /// A named scalar view. Cloning shares, and cannot reset, its owner's state.
@@ -364,7 +369,8 @@ impl<'a> SimpNewtonModel<'a> {
                     Some(PhysicsSample { value, gradient })
                 } else { None };
                 Ok(Cached { bits: point.iter().map(|x| x.to_bits()).collect(), goal,
-                    volume: PhysicsSample { value, gradient }, mass })
+                    volume: PhysicsSample { value, gradient }, mass,
+                    stress: RefCell::new(None) })
             })?;
             poll(cx)?;
             *cache = Some(prepared);
@@ -381,6 +387,7 @@ impl PhysicsModel for SimpNewtonGoal<'_, '_> {
             parameter_dims: Dims::NONE, residual_dims: match self.output {
                 Output::Compliance | Output::LoadCase(_) => COMPLIANCE_DIMS, Output::Volume => Dims::NONE,
                 Output::Mass => MASS_DIMS,
+                Output::ThermalStress(_) => Dims::NONE,
             } }
     }
     fn value_gradient(
@@ -395,6 +402,12 @@ impl PhysicsModel for SimpNewtonGoal<'_, '_> {
             Output::LoadCase(index) => self.model.controlled(1, cx, |control| {
                 let (value, gradient) = c.goal.load_case_value_gradient(index, control)?;
                 Ok(PhysicsSample { value, gradient })
+            }),
+            Output::ThermalStress(options) => self.model.at_stress(c, options, cx, |_, point| {
+                Ok(PhysicsSample {
+                    value: point.physical.value,
+                    gradient: point.gradient.clone(),
+                })
             }),
         })
     }
@@ -433,6 +446,13 @@ impl PhysicsHessian for SimpNewtonGoal<'_, '_> {
                 }
                 Output::LoadCase(index) => self.model.controlled(3, cx, |control|
                     c.goal.load_case_hessian_vector_product(index, direction, control)),
+                Output::ThermalStress(options) => self.model.at_stress(c, options, cx, |goal, point| {
+                    let slots = self.model.loads.len().checked_mul(2)
+                        .and_then(|n| n.checked_add(2))
+                        .ok_or(PhysicsError::InvalidInput("too many thermal stress loads"))?;
+                    self.model.controlled(slots, cx, |control|
+                        goal.stress_hessian(point, direction, control))
+                }),
             }
         })
     }

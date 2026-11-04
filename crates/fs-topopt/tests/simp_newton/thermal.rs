@@ -309,3 +309,159 @@ fn thermal_views_keep_original_sources_and_share_cache_budget_and_failed_trial_r
         assert_eq!(model.work(), before);
     });
 }
+
+
+fn transverse_thermal(material: &TetElasticMaterial) -> TetThermalStrainState {
+    TetThermalStrainState::try_new(
+        320.0, 300.0, [0.01, 0.0, 0.0, 0.0, 0.0, 0.0],
+        material.material_state_identity, ContentHash([51; 32]), 0.1,
+    ).unwrap()
+}
+
+#[test]
+fn constrained_newton_limits_stress_in_an_independent_zero_weight_thermal_case() {
+    use fs_topopt::elasticity::second_order::thermal::stress::ThermalStressOptions;
+    with_cx(|_, cx| {
+        let (pipeline, elasticity, material, axial, force) = thermal_fixture(0.1);
+        let transverse = transverse_thermal(&material);
+        let zero = vec![0.0; elasticity.n()];
+        let loads = [
+            ThermalLoadCase {
+                force: &force, weight: 1.0,
+                strains: TetThermalStrainField::Uniform(&axial),
+            },
+            ThermalLoadCase {
+                force: &zero, weight: 0.0,
+                strains: TetThermalStrainField::Uniform(&transverse),
+            },
+        ];
+        let model = SimpNewtonModel::new_thermal(
+            &pipeline, &elasticity, &loads, &[1.0 / 6.0], options(), budget(),
+        ).unwrap();
+        // The first case has physical sigma_zz=6F=.36 Pa, independent of m.
+        // The second has restrained sigma_xx=-1.2m Pa and ZERO compliance.
+        // Pick the allowance so the unnormalized fourth moment is one at m=.2.
+        let maximum_m: f64 = 0.2;
+        let allowance = (0.36_f64.powi(4) + (1.2 * maximum_m).powi(4)).sqrt().sqrt();
+        let raw_c = model.compliance("thermal compliance").unwrap();
+        let raw_s = model.thermal_stress_moment(
+            ThermalStressOptions { allowable_pa: allowance, power: 4 },
+            "physical thermal stress",
+        ).unwrap();
+        let chart = LogisticBox::new(&[0.05], &[0.95], Dims::NONE).unwrap();
+        let c = chart.bind(&raw_c).unwrap();
+        let stress = chart.bind(&raw_s).unwrap();
+        let start = chart.encode(&[0.7], Some(cx)).unwrap();
+        let scale = c.value_gradient(&start, Some(cx)).unwrap().value;
+        let mut builder = ProblemBuilder::new();
+        let x = builder.var("bounded raw occupancy", Manifold::Rn { dim: 1 }, Dims::NONE).unwrap();
+        let cn = builder.pde_residual("thermal compliance", x, true, COMPLIANCE_DIMS).unwrap();
+        let sn = builder.pde_residual("physical thermal stress", x, true, Dims::NONE).unwrap();
+        let unit = builder.konst(scale, COMPLIANCE_DIMS).unwrap();
+        let objective = builder.div(cn, unit).unwrap();
+        builder.objective(objective, Sense::Minimize, 1.0).unwrap();
+        let one = builder.konst(1.0, Dims::NONE).unwrap();
+        let constraint = builder.sub(sn, one).unwrap();
+        builder.constraint(constraint, ConstraintKind::LeZero, "all-case physical stress").unwrap();
+        let problem = builder.finish();
+        let oracle = ReverseProblem::new_with_physics(
+            &problem,
+            ReverseLimits { max_nodes: 128, max_scalar_slots: 1024 },
+            &[PhysicsBinding { node: cn, model: &c }, PhysicsBinding { node: sn, model: &stress }],
+            None,
+        ).unwrap();
+        let mut study = AugmentedNewtonStudy::new(
+            &oracle, &start, AugmentedNewtonOptions::default(), Some(cx),
+        ).unwrap();
+        let result = study.run(
+            1e-6, 300,
+            AugmentedNewtonBudget {
+                objective_evals: 600, hessian_products: 3000, multiplier_updates: 100,
+            },
+            Some(cx),
+        ).unwrap();
+        assert_eq!(result.stop, AugmentedNewtonStop::Converged, "{result:?}");
+        assert!(result.kkt.within_tolerance(1e-6));
+        let rho = chart.decode(&result.x, Some(cx)).unwrap()[0];
+        let expected = ((maximum_m - 0.05) / 0.95).cbrt();
+        close(&[rho], &[expected], 3e-4);
+        let m = 0.05 + 0.95 * rho.powi(3);
+        assert!(m < 0.25, "the unconstrained compliance optimum is m=.3");
+        let physical_moment = (0.36_f64.powi(4) + (1.2 * m).powi(4)) / allowance.powi(4);
+        close(&result.constraints, &[physical_moment - 1.0], 1e-8);
+        assert!(result.constraints[0].abs() < 2e-6);
+        assert!(result.multipliers[0] > 0.0);
+        let mass = model.mass("material inventory").unwrap().value_gradient(&[rho], Some(cx)).unwrap();
+        close(&[mass.value], &[rho], 1e-10);
+    });
+}
+
+#[test]
+fn thermal_stress_views_reuse_adjoints_and_keep_work_and_criterion_cache_transactional() {
+    use fs_topopt::elasticity::second_order::thermal::stress::ThermalStressOptions;
+    with_cx(|gate, cx| {
+        let (pipeline, elasticity, material, axial, force) = thermal_fixture(0.03);
+        let transverse = transverse_thermal(&material);
+        let zero = vec![0.0; elasticity.n()];
+        let loads = [
+            ThermalLoadCase {
+                force: &force, weight: 1.0,
+                strains: TetThermalStrainField::Uniform(&axial),
+            },
+            ThermalLoadCase {
+                force: &zero, weight: 0.0,
+                strains: TetThermalStrainField::Uniform(&transverse),
+            },
+        ];
+        let model = SimpNewtonModel::new_thermal(
+            &pipeline, &elasticity, &loads, &[1.0 / 6.0], options(), budget(),
+        ).unwrap();
+        let stress = model.thermal_stress_moment(
+            ThermalStressOptions { allowable_pa: 0.4, power: 4 }, "stress",
+        ).unwrap();
+        let second = model.thermal_stress_moment(
+            ThermalStressOptions { allowable_pa: 0.8, power: 4 }, "second criterion",
+        ).unwrap();
+        let x = [0.6];
+        let sample = stress.value_gradient(&x, Some(cx)).unwrap();
+        let prepared = model.work();
+        // Existing preparation: 2 loads + forward/compliance/volume/mass filters.
+        // Additional stress: 2 retained adjoints + one transpose filter.
+        assert_eq!(prepared.solve_reservations, 9);
+        assert_eq!(prepared.started_solves, 9);
+        assert_eq!(stress.signature().residual_dims, Dims::NONE);
+        assert_eq!(stress.clone().value_gradient(&x, Some(cx)).unwrap(), sample);
+        model.compliance("compliance").unwrap().value_gradient(&x, Some(cx)).unwrap();
+        model.mass("mass").unwrap().value_gradient(&x, Some(cx)).unwrap();
+        assert_eq!(model.work(), prepared);
+        let hv = stress.hessian_vector_product(&x, &[0.2], Some(cx)).unwrap();
+        assert_eq!(model.work().solve_reservations, prepared.solve_reservations + 6);
+        assert_eq!(model.work().started_solves, prepared.started_solves + 6);
+        let before = model.work();
+        assert_eq!(stress.hessian_vector_product(&x, &[0.0], Some(cx)).unwrap(), [0.0]);
+        assert_eq!(model.work(), before);
+        model.set_budget(ComplianceNewtonBudget { solve_reservations: before.solve_reservations, ..budget() });
+        assert!(matches!(second.value_gradient(&x, Some(cx)), Err(PhysicsError::Budget { .. })));
+        assert_eq!(stress.value_gradient(&x, Some(cx)).unwrap(), sample);
+        assert_eq!(model.work(), before);
+        model.set_budget(budget());
+        let rescaled = second.value_gradient(&x, Some(cx)).unwrap();
+        close(&[rescaled.value], &[sample.value / 16.0], 1e-11);
+        close(&rescaled.gradient, &[sample.gradient[0] / 16.0], 1e-10);
+        assert_eq!(model.work().solve_reservations, before.solve_reservations + 3);
+        let hs = second.hessian_vector_product(&x, &[0.2], Some(cx)).unwrap();
+        close(&hs, &[hv[0] / 16.0], 1e-9);
+        // A failed source-domain preparation must retain the previous point and
+        // its stress adjoints, as it already does for compliance/mass.
+        let before = model.work();
+        let invalid = [0.1];
+        assert!(second.value_gradient(&invalid, Some(cx)).is_err());
+        let failed = model.work();
+        assert!(failed.solve_reservations > before.solve_reservations);
+        assert_eq!(second.value_gradient(&x, Some(cx)).unwrap(), rescaled);
+        assert_eq!(model.work(), failed);
+        gate.request();
+        assert_eq!(second.value_gradient(&x, Some(cx)), Err(PhysicsError::Cancelled));
+        assert_eq!(model.work(), failed);
+    });
+}
