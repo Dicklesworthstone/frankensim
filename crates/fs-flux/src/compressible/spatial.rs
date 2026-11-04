@@ -14,6 +14,8 @@ use fs_qty::Time;
 
 mod cartesian;
 mod evolve;
+mod reservoir;
+pub use reservoir::ReservoirBoundary;
 /// Conservative body impulse and mechanical work on the original time owner.
 pub mod forcing;
 pub use forcing::{BodyForce3d, ForceChange3d, ForceControl3d, ForcingWorkspace3d};
@@ -416,6 +418,7 @@ pub struct Euler3d {
     gas: FrozenGas,
     grid: CartesianGrid,
     boundaries: Boundaries3d,
+    reservoirs: reservoir::Reservoirs,
     states: Vec<State>,
     time: f64,
     last_step: Option<StepReport>,
@@ -429,12 +432,32 @@ impl Euler3d {
         grid: CartesianGrid,
         states: Vec<State>,
         boundaries: Boundaries3d,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, Error> {
+        Self::new_with_reservoirs(gas, grid, states, boundaries, &[], cancelled)
+    }
+
+    /// Drive selected open sides with externally maintained source-admitted gas.
+    ///
+    /// Each side carries a complete density, velocity and absolute-pressure
+    /// trace of this same frozen composition. The original Riemann solver owns
+    /// the exchange and the accepted boundary account includes its enthalpy and
+    /// pressure work. Unbound sides keep their original conditions. Reservoirs
+    /// have infinite prescribed storage and remain fixed through all stages;
+    /// this is not a pressure-only or nonreflecting boundary condition.
+    pub fn new_with_reservoirs(
+        gas: FrozenGas,
+        grid: CartesianGrid,
+        states: Vec<State>,
+        boundaries: Boundaries3d,
+        reservoirs: &[ReservoirBoundary],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, Error> {
         poll(&mut cancelled)?;
         if states.len() != grid.len() {
             return Err(Error::Invalid("volumetric Cartesian state count"));
         }
+        let reservoirs = reservoir::Reservoirs::new(&gas, boundaries, reservoirs, &mut cancelled)?;
         let n = states.len();
         let mut primitive = allocated(n, Primitive::default())?;
         for (p, q) in primitive.iter_mut().zip(&states) {
@@ -451,6 +474,7 @@ impl Euler3d {
             gas,
             grid,
             boundaries,
+            reservoirs,
             states,
             time: 0.0,
             last_step: None,
@@ -482,6 +506,12 @@ impl Euler3d {
     /// Boundary treatments.
     pub const fn boundaries(&self) -> Boundaries3d {
         self.boundaries
+    }
+    /// Original immutable exterior state on one physical side, if supplied.
+    pub fn reservoir(&self, side: BoundarySide) -> Option<ReservoirBoundary> {
+        self.reservoirs
+            .get(side.axis(), side.sign())
+            .map(|state| state.input)
     }
     /// Current cell averages, x fastest.
     pub fn states(&self) -> &[State] {
@@ -556,7 +586,7 @@ impl Euler3d {
         {
             return Err(Error::Invalid("volumetric duration, CFL or retry controls"));
         }
-        let mut rate: f64 = 0.0;
+        let mut rate = self.reservoirs.maximum_rate(&self.grid);
         for (p, q) in self.work.primitive.iter_mut().zip(&self.states) {
             *p = q.primitive(&self.gas, &mut cancelled)?;
             if let Some((_, controls, _)) = &forcing {
@@ -577,12 +607,12 @@ impl Euler3d {
             }
             let trial = match forcing.as_mut() {
                 Some((force, force_controls, workspace)) => forcing::attempt(
-                    &self.gas, &self.grid, self.boundaries, &self.states,
+                    &self.gas, &self.grid, self.boundaries, &self.reservoirs, &self.states,
                     &mut self.work, workspace, *force, *force_controls,
                     dt, controls.cfl, reconstruction, &mut cancelled,
                 ),
                 None => evolve::attempt(
-                    &self.gas, &self.grid, self.boundaries, &self.states,
+                    &self.gas, &self.grid, self.boundaries, &self.reservoirs, &self.states,
                     &mut self.work, dt, controls.cfl, reconstruction, None, &mut cancelled,
                 ).map(|stats| (stats, ForceChange3d::default())),
             };

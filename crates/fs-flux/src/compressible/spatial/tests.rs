@@ -62,6 +62,305 @@ fn run(flow: &mut Euler3d, end: f64) {
 }
 
 #[test]
+fn g0_reservoir_equilibrium_preserves_the_field_and_its_source() {
+    let grid = CartesianGrid::new(3, 2, 2, 0.2, 0.3, 0.4).unwrap();
+    let topology = Boundaries3d {
+        x: OPEN,
+        y: OPEN,
+        z: OPEN,
+    };
+    for reconstruction in [Reconstruction::FirstOrder, Reconstruction::Muscl] {
+        for velocity in [[0.0; 3], [0.3, -0.2, 0.1]] {
+            let source = gas(0.4);
+            let state = State::from_primitive(&source, 1.0, velocity, 1.0).unwrap();
+            let reservoirs = BoundarySide::ALL.map(|side| ReservoirBoundary {
+                side,
+                density: 1.0,
+                velocity,
+                pressure_pa: 1.0,
+            });
+            let mut flow = Euler3d::new_with_reservoirs(
+                source.clone(),
+                grid,
+                vec![state; grid.len()],
+                topology,
+                &reservoirs,
+                || false,
+            )
+            .unwrap();
+            assert_eq!(flow.gas(), &source);
+            for boundary in reservoirs {
+                assert_eq!(flow.reservoir(boundary.side), Some(boundary));
+            }
+            for _ in 0..3 {
+                let report = flow
+                    .step(
+                        Time::new(0.01),
+                        StepControl {
+                            reconstruction,
+                            ..StepControl::default()
+                        },
+                        || false,
+                    )
+                    .unwrap();
+                balance(&report);
+                assert_eq!(flow.states(), &vec![state; grid.len()]);
+            }
+        }
+    }
+}
+
+#[test]
+fn g1_reservoir_pressure_drives_all_six_faces_with_conservative_work() {
+    let grid = CartesianGrid::new(2, 2, 2, 0.1, 0.1, 0.1).unwrap();
+    for reconstruction in [Reconstruction::FirstOrder, Reconstruction::Muscl] {
+        let mut reference: Option<(f64, f64, f64)> = None;
+        for side in BoundarySide::ALL {
+            let source = gas(0.4);
+            let inside = State::from_primitive(&source, 1.0, [0.0; 3], 1.0).unwrap();
+            let mut pairs = [AxisBoundaries::Periodic; 3];
+            pairs[side.axis()] = AxisBoundaries::Ends {
+                lower: if side.sign() < 0.0 {
+                    BoundaryCondition::Transmissive
+                } else {
+                    BoundaryCondition::Reflecting
+                },
+                upper: if side.sign() > 0.0 {
+                    BoundaryCondition::Transmissive
+                } else {
+                    BoundaryCondition::Reflecting
+                },
+            };
+            let exterior = ReservoirBoundary {
+                side,
+                density: 1.0,
+                velocity: [0.0; 3],
+                pressure_pa: 2.0,
+            };
+            let mut flow = Euler3d::new_with_reservoirs(
+                source,
+                grid,
+                vec![inside; grid.len()],
+                Boundaries3d {
+                    x: pairs[0],
+                    y: pairs[1],
+                    z: pairs[2],
+                },
+                &[exterior],
+                || false,
+            )
+            .unwrap();
+            for _ in 0..4 {
+                let report = flow
+                    .step(
+                        Time::new(0.002),
+                        StepControl {
+                            reconstruction,
+                            ..StepControl::default()
+                        },
+                        || false,
+                    )
+                    .unwrap();
+                balance(&report);
+                assert!(report.boundary_change.mass > 0.0);
+                assert!(report.boundary_change.energy > 0.0);
+                let reservoir_energy: f64 = flow
+                    .boundary_impulses(side)
+                    .iter()
+                    .map(|face| face.energy)
+                    .sum();
+                close(
+                    report.after.energy - report.before.energy,
+                    -reservoir_energy,
+                    2e-14,
+                );
+            }
+            let totals = flow.totals();
+            let toward_inside = -side.sign() * totals.momentum[side.axis()];
+            assert!(toward_inside > 0.0);
+            assert!(
+                flow.states()
+                    .iter()
+                    .all(|state| { state.primitive(flow.gas(), || false).unwrap().pressure > 1.0 })
+            );
+            for axis in 0..3 {
+                if axis != side.axis() {
+                    close(totals.momentum[axis], 0.0, 2e-14);
+                }
+            }
+            if let Some((mass, energy, momentum)) = reference {
+                close(totals.mass, mass, 2e-14);
+                close(totals.energy, energy, 2e-14);
+                close(toward_inside, momentum, 2e-14);
+            } else {
+                reference = Some((totals.mass, totals.energy, toward_inside));
+            }
+        }
+    }
+}
+
+#[test]
+fn g1_hot_reservoir_sets_the_initial_combined_cfl_without_a_retry() {
+    let source = gas(0.0);
+    let grid = CartesianGrid::new(2, 2, 2, 0.1, 0.1, 0.1).unwrap();
+    let inside = State::from_primitive(&source, 1.0, [0.0; 3], 0.01).unwrap();
+    let exterior = ReservoirBoundary {
+        side: BoundarySide::XMin,
+        density: 1.0,
+        velocity: [0.0; 3],
+        pressure_pa: 32.0,
+    };
+    let mut flow = Euler3d::new_with_reservoirs(
+        source,
+        grid,
+        vec![inside; grid.len()],
+        Boundaries3d {
+            x: OPEN,
+            y: WALL,
+            z: WALL,
+        },
+        &[exterior],
+        || false,
+    )
+    .unwrap();
+    let controls = StepControl {
+        cfl: 0.2,
+        maximum_halvings: 0,
+        reconstruction: Reconstruction::FirstOrder,
+    };
+    let report = flow.step(Time::new(1.0), controls, || false).unwrap();
+    // The manufactured source has R=1, gamma=1.4. All three directional
+    // signal contributions count; no cell-only estimate sees this hot gas.
+    let bound = controls.cfl * 0.1 / (3.0 * (1.4_f64 * 32.0).sqrt());
+    assert!(report.elapsed.value() <= bound * (1.0 + 2e-14));
+    assert_eq!(report.halvings, 0);
+    assert!(report.maximum_cfl <= controls.cfl * (1.0 + 2e-14));
+    assert!(report.boundary_change.mass > 0.0);
+    balance(&report);
+}
+
+#[test]
+fn g1_pressure_reservoir_and_body_force_share_the_original_transaction() {
+    let source = gas(0.4);
+    let grid = CartesianGrid::new(2, 2, 2, 0.1, 0.1, 0.1).unwrap();
+    let state = State::from_primitive(&source, 1.0, [0.0; 3], 1.0).unwrap();
+    let input = ReservoirBoundary {
+        side: BoundarySide::XMin,
+        density: 1.0,
+        velocity: [0.0; 3],
+        pressure_pa: 2.0,
+    };
+    let mut flow = Euler3d::new_with_reservoirs(
+        source,
+        grid,
+        vec![state; grid.len()],
+        Boundaries3d {
+            x: OPEN,
+            y: AxisBoundaries::Periodic,
+            z: AxisBoundaries::Periodic,
+        },
+        &[input],
+        || false,
+    )
+    .unwrap();
+    let mut work = flow.forcing_workspace(4096).unwrap();
+    let report = flow
+        .step_with_forcing(
+            Time::new(0.001),
+            StepControl::default(),
+            BodyForce3d::UniformAcceleration([0.0, 0.1, 0.0]),
+            ForceControl3d { maximum_mach: 1.0 },
+            &mut work,
+            || false,
+        )
+        .unwrap();
+    assert!(report.boundary_change.mass > 0.0);
+    assert!(report.after.momentum[0] > 0.0);
+    assert!(report.source_change.impulse[1] > 0.0);
+    balance(&report);
+}
+
+#[test]
+fn g4_reservoir_admission_and_cancelled_trial_preserve_native_state() {
+    let source = gas(0.0);
+    let grid = CartesianGrid::new(2, 2, 2, 0.1, 0.1, 0.1).unwrap();
+    let state = State::from_primitive(&source, 1.0, [0.0; 3], 1.0).unwrap();
+    let input = ReservoirBoundary {
+        side: BoundarySide::XMin,
+        density: 1.0,
+        velocity: [0.0; 3],
+        pressure_pa: 2.0,
+    };
+    let open = Boundaries3d {
+        x: OPEN,
+        y: WALL,
+        z: WALL,
+    };
+    let make = |topology, inputs: &[ReservoirBoundary]| {
+        Euler3d::new_with_reservoirs(
+            source.clone(),
+            grid,
+            vec![state; grid.len()],
+            topology,
+            inputs,
+            || false,
+        )
+    };
+    assert!(make(WALLS, &[input]).is_err());
+    assert!(make(PERIODIC, &[input]).is_err());
+    assert!(make(open, &[input, input]).is_err());
+    assert!(
+        make(
+            open,
+            &[ReservoirBoundary {
+                pressure_pa: -1.0,
+                ..input
+            }]
+        )
+        .is_err()
+    );
+    assert!(
+        make(
+            open,
+            &[ReservoirBoundary {
+                pressure_pa: 100.0,
+                ..input
+            }]
+        )
+        .is_err()
+    );
+    assert!(
+        make(
+            open,
+            &[ReservoirBoundary {
+                velocity: [f64::NAN; 3],
+                ..input
+            }]
+        )
+        .is_err()
+    );
+    let mut flow = make(open, &[input]).unwrap();
+    flow.step(Time::new(0.002), StepControl::default(), || false)
+        .unwrap();
+    let before = flow.states().to_vec();
+    let report = *flow.last_step().unwrap();
+    let time = flow.time();
+    let loads = flow.boundary_impulses(input.side).to_vec();
+    let mut polls = 0;
+    assert_eq!(
+        flow.step(Time::new(0.002), StepControl::default(), || {
+            polls += 1;
+            polls == 30
+        }),
+        Err(Error::Cancelled)
+    );
+    assert_eq!(flow.states(), before);
+    assert_eq!(flow.time(), time);
+    assert_eq!(flow.last_step(), Some(&report));
+    assert_eq!(flow.boundary_impulses(input.side), loads);
+}
+
+#[test]
 fn g0_spatial_uniform_state_and_physical_face_geometry() {
     let grid = CartesianGrid::new(5, 4, 3, 0.2, 0.3, 0.4).unwrap();
     let mut flow = field(gas(0.4), grid, PERIODIC, |_| [1.1, 0.5, -0.3, 0.7, 1.7]);

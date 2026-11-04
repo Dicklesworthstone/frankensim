@@ -201,13 +201,14 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
         let molecular = MolecularTransport3d::new(&flow, law, &mut cancelled)?;
         let mut cells = allocated(flow.states.len(), State::default())?;
         cells.copy_from_slice(&flow.states);
-        let trial = Euler3d::new(
+        let mut trial = Euler3d::new(
             flow.gas.clone(),
             flow.grid,
             cells,
             flow.boundaries,
             &mut cancelled,
         )?;
+        trial.reservoirs = flow.reservoirs.clone();
         let faces = flow.boundary_impulses.len();
         let result = Self {
             accepted: flow,
