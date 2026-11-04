@@ -610,32 +610,7 @@ pub fn input_impedance_boundary<M: ThermoviscousFluid + ?Sized>(
 ) -> Result<ChainResult, FluidDuctError> {
     admit_geometry(duct, options, &mut cancelled)?;
     let state = material.thermoviscous_state()?;
-    let impedance = match load {
-        NetworkLoad::Closed => None,
-        NetworkLoad::PressureRelease => Some(C64::ZERO),
-        NetworkLoad::Impedance(z) => Some(*z),
-        NetworkLoad::Tabulated(table) => Some(table.z_at(omega)?),
-        NetworkLoad::PorousRigid {
-            material,
-            thickness_m,
-            area_m2,
-        } => {
-            if !positive(*area_m2) {
-                return Err(bad("porous boundary area must be positive and finite").into());
-            }
-            let surface = material.surface_impedance_rigid_fluid(&state, omega, *thickness_m)?;
-            Some(crate::network::porous_volume_impedance(surface, *area_m2)?)
-        }
-        NetworkLoad::Radiation {
-            radius,
-            termination,
-        } => Some(crate::compact_radiation_impedance_from_material(
-            *termination,
-            &state,
-            *radius,
-            omega,
-        )?),
-    };
+    let impedance = boundary_from_state(&state.acoustic(), Some(&state), omega, load)?;
     poll(&mut cancelled, 0)?;
     // This immutable admitted snapshot implements the shared trait directly:
     // the caller's original material is evaluated exactly once for both owners.
@@ -650,4 +625,43 @@ pub fn input_impedance_boundary<M: ThermoviscousFluid + ?Sized>(
         options,
         cancelled,
     )
+}
+
+/// The same original boundary laws for a material chain and branched graph.
+/// An acoustic-only material cannot supply porous thermal/viscous relaxation.
+pub(crate) fn boundary_from_state(
+    acoustic: &FluidAcousticState,
+    thermoviscous: Option<&ThermoviscousFluidState>,
+    omega: f64,
+    load: &NetworkLoad,
+) -> Result<Option<C64>, FluidDuctError> {
+    Ok(match load {
+        NetworkLoad::Closed => None,
+        NetworkLoad::PressureRelease => Some(C64::ZERO),
+        NetworkLoad::Impedance(z) => Some(*z),
+        NetworkLoad::Tabulated(table) => Some(table.z_at(omega)?),
+        NetworkLoad::PorousRigid {
+            material,
+            thickness_m,
+            area_m2,
+        } => {
+            if !positive(*area_m2) {
+                return Err(bad("porous boundary area must be positive and finite").into());
+            }
+            let state = thermoviscous.ok_or_else(|| {
+                bad("porous boundary requires the original thermoviscous fluid state")
+            })?;
+            let surface = material.surface_impedance_rigid_fluid(state, omega, *thickness_m)?;
+            Some(crate::network::porous_volume_impedance(surface, *area_m2)?)
+        }
+        NetworkLoad::Radiation {
+            radius,
+            termination,
+        } => Some(crate::compact_radiation_impedance_from_material(
+            *termination,
+            acoustic,
+            *radius,
+            omega,
+        )?),
+    })
 }

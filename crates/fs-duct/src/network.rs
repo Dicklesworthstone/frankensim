@@ -14,6 +14,8 @@ use crate::{Duct, DuctError, HoleState, LossModel, Segment, TabulatedLoad, Termi
 mod media;
 pub use media::NetworkMedia;
 mod loaded;
+/// Original gas/liquid material waves in the same loaded graph and sources.
+pub mod fluid;
 /// Original molecular and viscothermal edge laws in the loaded graph.
 pub mod molecular;
 pub use loaded::{

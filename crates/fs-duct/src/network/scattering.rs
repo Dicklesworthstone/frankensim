@@ -19,6 +19,9 @@ use super::{
     NetworkMedia, PortExcitation, PortSource, PortTermination, PreparedNetworkSources, bad,
     coherent_sum, finite, network_prepare_sources, network_prepare_sources_regional,
 };
+use crate::fluid::FluidDuctError;
+use fs_material::fluid_acoustics::FluidAcoustics;
+use fs_material::fluid_acoustics::thermoviscous::ThermoviscousFluid;
 use fs_math::{c64::C64, det};
 
 /// A labelled characteristic-wave port with a real positive reference.
@@ -77,6 +80,61 @@ impl PreparedNetworkScattering {
             net, media, omega, loss, &sources, None, loads, coupled,
         )?;
         Self::from_prepared(prepared, ports)
+    }
+
+    /// Scattering in one original gas/liquid material. Its actual rho and c
+    /// drive the existing branched pressure/flow graph and same-fluid loads;
+    /// the explicit real wave references never substitute for that material.
+    /// Prepared application retains the same allocation-free matrices.
+    ///
+    /// # Errors
+    /// Original material, graph, source/load and wave-reference refusals from
+    /// [`super::fluid::prepare_sources`]. Open-circuit poles need no inverse.
+    pub fn from_material<M: FluidAcoustics + ?Sized>(
+        net: &DuctNetwork,
+        material: &M,
+        omega: f64,
+        ports: &[WavePort],
+        loads: &[PortTermination],
+        coupled: Option<&CoupledTermination>,
+    ) -> Result<Self, FluidDuctError> {
+        let sources = wave_sources(ports)?;
+        let prepared =
+            super::fluid::prepare_sources(net, material, omega, &sources, None, loads, coupled)?;
+        Ok(Self::from_prepared(prepared, ports)?)
+    }
+
+    /// Material-driven scattering with original transport/caloric data and
+    /// an explicit lossy-cone refinement axis. Radiation and porous boundaries
+    /// use the same single complete snapshot as every propagation edge.
+    ///
+    /// # Errors
+    /// As [`super::fluid::prepare_sources_with_loss`], plus wave-reference
+    /// normalization refusals. No clipping or passive projection is applied.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_material_with_loss<M: ThermoviscousFluid + ?Sized>(
+        net: &DuctNetwork,
+        material: &M,
+        omega: f64,
+        loss: LossModel,
+        cone_slices: crate::ConeSlices,
+        ports: &[WavePort],
+        loads: &[PortTermination],
+        coupled: Option<&CoupledTermination>,
+    ) -> Result<Self, FluidDuctError> {
+        let sources = wave_sources(ports)?;
+        let prepared = super::fluid::prepare_sources_with_loss(
+            net,
+            material,
+            omega,
+            loss,
+            cone_slices,
+            &sources,
+            None,
+            loads,
+            coupled,
+        )?;
+        Ok(Self::from_prepared(prepared, ports)?)
     }
 
     fn from_prepared(

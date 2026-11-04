@@ -416,6 +416,57 @@ fn retained_source_system_bound<'a>(
             ));
         }
     }
+    retained_source_system_admitted(
+        net,
+        omega,
+        sources,
+        bank,
+        loads,
+        coupled,
+        |edge| match &propagation {
+            SourceEdges::Prepared(prepared) => Ok(prepared[&edge.id]),
+            SourceEdges::Gas(loss) => {
+                let interior = media.map_or(exterior, |binding| {
+                    binding
+                        .edge_gas(&edge.id)
+                        .expect("complete edge identities admitted")
+                });
+                let (two_port, condition, _) = network_chain_scattering(
+                    &edge.duct,
+                    interior,
+                    exterior,
+                    omega,
+                    *loss,
+                    edge.corrections,
+                )?;
+                Ok((two_port, condition))
+            }
+        },
+        |load, node| {
+            load_impedance(
+                load,
+                node_gas(net, exterior, media, node).as_ref(),
+                exterior,
+                omega,
+            )
+        },
+    )
+}
+
+// The topology, retained pressure/flow equations and source closure have one
+// owner. Material adapters supply only the original edge and load operators;
+// they never need to fabricate a GasState or an open-circuit impedance.
+#[allow(clippy::too_many_arguments)]
+fn retained_source_system_admitted<'a, E: From<DuctError>>(
+    net: &DuctNetwork,
+    omega: f64,
+    sources: &[PortSource],
+    bank: Option<&'a CoupledSourceBank>,
+    loads: &[PortTermination],
+    coupled: Option<&CoupledTermination>,
+    mut edge_operator: impl FnMut(&NetworkEdge) -> Result<(crate::compose::TwoPort, f64), E>,
+    mut boundary_operator: impl FnMut(&NetworkLoad, usize) -> Result<Option<C64>, E>,
+) -> Result<RetainedSourceSystem<'a>, E> {
     let port_nodes: Vec<usize> = net
         .nodes
         .iter()
@@ -435,9 +486,7 @@ fn retained_source_system_bound<'a>(
     let conditions = &sources.conditions;
     let source_count = conditions.iter().filter(|source| source.is_some()).count();
     if loads.len() + coupled.map_or(0, |value| value.labels.len()) != labels.len() - source_count {
-        return Err(bad(
-            "every other network port needs an explicit termination",
-        ));
+        return Err(bad("every other network port needs an explicit termination").into());
     }
     let mut resolved: Vec<Option<C64>> = conditions
         .iter()
@@ -453,7 +502,7 @@ fn retained_source_system_bound<'a>(
                 .position(|candidate| *candidate == label.as_str())
                 .ok_or_else(|| bad("unknown network coupled-termination label"))?;
             if seen[port] {
-                return Err(bad("duplicate or active-port coupled termination"));
+                return Err(bad("duplicate or active-port coupled termination").into());
             }
             seen[port] = true;
             coupled_rows[port] = Some(row);
@@ -465,18 +514,13 @@ fn retained_source_system_bound<'a>(
             .position(|candidate| *candidate == load.label.as_str())
             .ok_or_else(|| bad("unknown network termination label"))?;
         if seen[port] {
-            return Err(bad("duplicate or active-port termination"));
+            return Err(bad("duplicate or active-port termination").into());
         }
         seen[port] = true;
-        resolved[port] = load_impedance(
-            &load.load,
-            node_gas(net, exterior, media, port_nodes[port]).as_ref(),
-            exterior,
-            omega,
-        )?;
+        resolved[port] = boundary_operator(&load.load, port_nodes[port])?;
     }
     if seen.iter().any(|&value| !value) {
-        return Err(bad("network port termination omitted"));
+        return Err(bad("network port termination omitted").into());
     }
 
     let mut order: Vec<usize> = (0..net.nodes.len()).collect();
@@ -485,12 +529,7 @@ fn retained_source_system_bound<'a>(
     let mut node_loads = vec![None; net.nodes.len()];
     for &node in &order {
         if let NodeBoundary::Termination(load) = &net.nodes[node].boundary {
-            node_loads[node] = load_impedance(
-                load,
-                node_gas(net, exterior, media, node).as_ref(),
-                exterior,
-                omega,
-            )?;
+            node_loads[node] = boundary_operator(load, node)?;
             ground[node] = node_loads[node].is_some_and(|z| z == C64::ZERO);
         }
     }
@@ -500,9 +539,7 @@ fn retained_source_system_bound<'a>(
     for &node in &order {
         if let NodeBoundary::JunctionMultiport(feature) = &net.nodes[node].boundary {
             if feature.omega.to_bits() != omega.to_bits() {
-                return Err(bad(
-                    "junction multiport frequency differs from network query",
-                ));
+                return Err(bad("junction multiport frequency differs from network query").into());
             }
             let mut terminals = feature.terminals.clone();
             terminals.sort();
@@ -536,25 +573,7 @@ fn retained_source_system_bound<'a>(
     edges.sort_unstable_by(|a, b| a.id.cmp(&b.id));
     let mut wave_edges = Vec::with_capacity(edges.len());
     for edge in edges {
-        let (two_port, condition) = match &propagation {
-            SourceEdges::Prepared(prepared) => prepared[&edge.id],
-            SourceEdges::Gas(loss) => {
-                let interior = media.map_or(exterior, |binding| {
-                    binding
-                        .edge_gas(&edge.id)
-                        .expect("complete edge identities admitted")
-                });
-                let (two_port, condition, _) = network_chain_scattering(
-                    &edge.duct,
-                    interior,
-                    exterior,
-                    omega,
-                    *loss,
-                    edge.corrections,
-                )?;
-                (two_port, condition)
-            }
-        };
+        let (two_port, condition) = edge_operator(edge)?;
         let endpoint = |node: usize, end: EdgeEnd| {
             if matches!(net.nodes[node].boundary, NodeBoundary::JunctionMultiport(_)) {
                 terminal_slots
@@ -869,6 +888,33 @@ pub(super) fn prepare_sources_from_edges(
         coupled,
     )?;
     prepared_from_retained(omega, &system)
+}
+
+/// Material-owned edges and boundaries in the original retained source solve.
+/// The adapter's error type preserves original material refusals unchanged.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn prepare_sources_with_operators<E: From<DuctError>>(
+    net: &DuctNetwork,
+    omega: f64,
+    sources: &[PortSource],
+    bank: Option<&CoupledSourceBank>,
+    loads: &[PortTermination],
+    coupled: Option<&CoupledTermination>,
+    edge_operator: impl FnMut(&NetworkEdge) -> Result<(crate::compose::TwoPort, f64), E>,
+    boundary_operator: impl FnMut(&NetworkLoad, usize) -> Result<Option<C64>, E>,
+) -> Result<PreparedNetworkSources, E> {
+    net.validate()?;
+    let system = retained_source_system_admitted(
+        net,
+        omega,
+        sources,
+        bank,
+        loads,
+        coupled,
+        edge_operator,
+        boundary_operator,
+    )?;
+    Ok(prepared_from_retained(omega, &system)?)
 }
 
 fn prepared_from_retained(
