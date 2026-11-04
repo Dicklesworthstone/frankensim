@@ -185,6 +185,15 @@ impl<'a> LiftingSurfaces<'a> {
                 "accepted section velocities are missing",
             )
         })?;
+        if local.len() != self.strips.len()
+            || fields.strip_alpha_eff_rad.len() != self.strips.len()
+            || !origin.iter().all(|v| v.is_finite())
+        {
+            return Err(reject(
+                "lifting-surfaces-invalid",
+                "one local velocity and effective incidence per strip and a finite wrench origin are required",
+            ));
+        }
         let mut force = Vec3::default();
         let mut moment = Vec3::default();
         for (s, strip) in self.strips.iter().enumerate() {
