@@ -9,23 +9,27 @@
 //! Trials end at scheduled events. Initial events are processed once; empty
 //! pre-birth intervals jump directly to the next event. Coarse/rejected trials
 //! contribute no physical history, but ALL their thermal substeps spend the
-//! original timeline's single work budget. Coefficients and source laws stay
-//! fixed. Inventory refusals alone permit retry; source-domain and caloric
+//! original timeline's single work budget. Original observers resolve transport
+//! and sources on every actual substep, with one enclosing history window.
+//! Inventory refusals alone permit retry; source-domain and caloric
 //! failures are not silently reclassified as temporal error.
 //!
 //! This is first-order step doubling with a LOCAL estimate, not a rigorous
 //! global error bound, positivity/entropy proof, or spatial convergence claim.
 
+use super::observed::{GasTimelineAdaptiveObservedError, GasTimelineObservedError};
 use super::{
-    GasCellAudit, GasTimelineAudit, GasTimelineCandidate, GasTimelineError,
-    GasTimelineEquilibriumSurface, GasTimelineSurface, TimelineSurface,
-    HeatTotals, Sum, ThermalWork, advance_deposition, finite, normalize_surfaces, partition_reports,
+    GasCellAudit, GasTimelineAudit, GasTimelineCandidate, GasTimelineEquilibriumSurface,
+    GasTimelineError, GasTimelineSurface, HeatTotals, Sum, ThermalWork, TimelineSurface,
+    advance_deposition_observed, finite, normalize_surfaces, partition_reports,
 };
 use crate::sublimation::gas::{
     GasSurfaceError, accommodation::ThermalAccommodation, chamber::GasChamberSolve,
 };
 use crate::thermochemical_gas::{ThermochemicalGasModel, energy::parcel::ClosedGasParcel};
-use fs_thermal::enthalpy::{CellId, DepositionError, DepositionSimulation, Event, StepConfig};
+use fs_thermal::enthalpy::{
+    CellId, DepositionError, DepositionObserver, DepositionSimulation, Event, StepConfig,
+};
 use std::collections::BTreeMap;
 
 /// Physical-state error scales and a bound on COMPLETE coupled trials.
@@ -404,8 +408,45 @@ fn advance<'thermal, 'catalog>(
     thermal_config: StepConfig,
     phase_config: GasChamberSolve,
     controls: GasTimelineAdaptiveSolve,
-    mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    checkpoint: impl FnMut() -> Result<(), DepositionError>,
 ) -> Result<GasTimelineAdaptiveCandidate<'thermal, 'catalog>, GasTimelineAdaptiveError> {
+    advance_observed(
+        thermal,
+        surfaces,
+        accommodation,
+        &(),
+        gas,
+        catalog,
+        target_s,
+        thermal_config,
+        phase_config,
+        controls,
+        checkpoint,
+    )
+    .map(|(candidate, ())| candidate)
+    .map_err(|error| match error {
+        GasTimelineAdaptiveObservedError::Adaptive(error) => error,
+        GasTimelineAdaptiveObservedError::Observer(error) => error.into(),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn advance_observed<'thermal, 'catalog, O: DepositionObserver>(
+    thermal: &DepositionSimulation<'thermal>,
+    surfaces: &[TimelineSurface<'_>],
+    accommodation: Option<&BTreeMap<CellId, ThermalAccommodation>>,
+    observer: &O,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    target_s: f64,
+    thermal_config: StepConfig,
+    phase_config: GasChamberSolve,
+    controls: GasTimelineAdaptiveSolve,
+    mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+) -> Result<
+    (GasTimelineAdaptiveCandidate<'thermal, 'catalog>, O),
+    GasTimelineAdaptiveObservedError<O::Error>,
+> {
     checkpoint()?;
     if !target_s.is_finite() || target_s < thermal.time_s()
         || !positive(controls.absolute_mass_tolerance_kg)
@@ -415,11 +456,23 @@ fn advance<'thermal, 'catalog>(
         || !positive(controls.minimum_dt_s) || !positive(thermal_config.max_dt_s)
         || controls.minimum_dt_s > thermal_config.max_dt_s || controls.maximum_trials == 0
     {
-        return Err(GasTimelineAdaptiveError::Invalid("finite target, positive error scales and bounded coupled-step controls required"));
+        return Err(GasTimelineAdaptiveError::Invalid("finite target, positive error scales and bounded coupled-step controls required").into());
     }
     let meter = ThermalWork::new(thermal.work_budget().max_substeps);
-    let mut current = advance_deposition(thermal, surfaces, accommodation, gas, catalog,
-        thermal.time_s(), thermal_config, phase_config, Some(&meter), &mut checkpoint)?;
+    let (mut current, mut current_observer) = advance_deposition_observed(
+        thermal,
+        surfaces,
+        accommodation,
+        observer,
+        gas,
+        catalog,
+        thermal.time_s(),
+        thermal_config,
+        phase_config,
+        Some(&meter),
+        true,
+        &mut checkpoint,
+    )?;
     let mut history = History::default();
     history.add(&current)?;
     let mut work = GasTimelineAdaptiveAudit {
@@ -432,18 +485,32 @@ fn advance<'thermal, 'catalog>(
     while current.thermal().time_s() < target_s {
         checkpoint()?;
         let start = current.thermal().time_s();
-        let event_stop = current.thermal().pending_events().first().map_or(target_s,
+        let mut event_stop = current.thermal().pending_events().first().map_or(target_s,
             |event| event.time_s.min(target_s));
-        if current.thermal().cells().is_empty() {
+        let dormant = current.thermal().cells().is_empty() && !current_observer.requires_step_interval();
+        if !dormant {
+            // Query on a private clone: caches prepared to find a transition
+            // must not publish rejected/coarse history into the accepted owner.
+            let mut probe = current_observer.clone();
+            if let Some(transition) = probe.next_transition_time_s(current.thermal(), &mut checkpoint)
+                .map_err(GasTimelineAdaptiveObservedError::Observer)? {
+                if !transition.is_finite() || transition <= start {
+                    return Err(DepositionError::InvalidInput("invalid adaptive deposition heat-source transition").into());
+                }
+                event_stop = event_stop.min(transition);
+            }
+        }
+        if dormant {
             increment(&mut work.interval_evaluations)?;
-            current = advance_deposition(current.thermal(), surfaces, accommodation, current.gas(),
-                catalog, event_stop, thermal_config, phase_config, Some(&meter), &mut checkpoint)?;
+            (current, current_observer) = advance_deposition_observed(
+                current.thermal(), surfaces, accommodation, &current_observer, current.gas(),
+                catalog, event_stop, thermal_config, phase_config, Some(&meter), false, &mut checkpoint)?;
             history.add(&current)?;
             increment(&mut work.dormant_advances)?;
             continue;
         }
         if work.trials >= controls.maximum_trials {
-            return Err(GasTimelineAdaptiveError::TrialBudget { maximum_trials: controls.maximum_trials });
+            return Err(GasTimelineAdaptiveError::TrialBudget { maximum_trials: controls.maximum_trials }.into());
         }
         let stop = (start + dt).min(event_stop);
         let span = stop - start;
@@ -451,24 +518,25 @@ fn advance<'thermal, 'catalog>(
         if !positive(span) || !(start < middle && middle < stop) {
             return Err(GasTimelineAdaptiveError::MinimumStep {
                 requested_dt_s: span * 0.5, minimum_dt_s: controls.minimum_dt_s,
-            });
+            }.into());
         }
         increment(&mut work.trials)?;
-        let mut evaluate = |state: &GasTimelineCandidate<'thermal, 'catalog>, end: f64| {
-            increment(&mut work.interval_evaluations).map_err(GasTimelineError::from)?;
-            advance_deposition(state.thermal(), surfaces, accommodation, state.gas(), catalog,
+        let mut evaluate = |state: &GasTimelineCandidate<'thermal, 'catalog>, observed: &O, end: f64| {
+            increment(&mut work.interval_evaluations)?;
+            advance_deposition_observed(state.thermal(), surfaces, accommodation, observed, state.gas(), catalog,
                 end, StepConfig { max_dt_s: end - state.thermal().time_s(), ..thermal_config },
-                phase_config, Some(&meter), &mut checkpoint)
+                phase_config, Some(&meter), false, &mut checkpoint)
         };
         let trial = (|| {
-            let coarse = evaluate(&current, stop)?;
-            let first = evaluate(&current, middle)?;
-            let fine = evaluate(&first, stop)?;
-            Ok::<_, GasTimelineError>((coarse, first, fine))
+            let (coarse, _) = evaluate(&current, &current_observer, stop)?;
+            let (first, first_observer) = evaluate(&current, &current_observer, middle)?;
+            let (fine, fine_observer) = evaluate(&first, &first_observer, stop)?;
+            Ok::<_, GasTimelineObservedError<O::Error>>((coarse, first, fine, fine_observer))
         })();
-        let (coarse, first, fine) = match trial {
+        let (coarse, first, fine, fine_observer) = match trial {
             Ok(value) => value,
-            Err(GasTimelineError::Exchange(GasSurfaceError::InventoryLimit { maximum_duration_s })) => {
+            Err(GasTimelineObservedError::Timeline(GasTimelineError::Exchange(
+                GasSurfaceError::InventoryLimit { maximum_duration_s }))) => {
                 increment(&mut work.rejected_trials)?;
                 dt = smaller(0.8 * maximum_duration_s, span, controls.minimum_dt_s)?;
                 continue;
@@ -484,6 +552,7 @@ fn advance<'thermal, 'catalog>(
         history.add(&first)?;
         history.add(&fine)?;
         current = fine;
+        current_observer = fine_observer;
         increment(&mut work.accepted_intervals)?;
         work.maximum_accepted_error_ratio = work.maximum_accepted_error_ratio.max(error);
         let growth = if error == 0.0 { 2.0 } else { (0.9 / fs_math::det::sqrt(error)).clamp(0.5, 2.0) };
@@ -492,7 +561,13 @@ fn advance<'thermal, 'catalog>(
     history.finish(thermal, gas, surfaces, &mut current, thermal_config, phase_config, &mut work, &mut checkpoint)?;
     work.thermal_substeps_evaluated = meter.used();
     checkpoint()?;
-    Ok(GasTimelineAdaptiveCandidate { endpoint: current, audit: work })
+    Ok((
+        GasTimelineAdaptiveCandidate {
+            endpoint: current,
+            audit: work,
+        },
+        current_observer,
+    ))
 }
 
 #[cfg(test)]

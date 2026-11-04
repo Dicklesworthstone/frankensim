@@ -11,7 +11,12 @@
 //! heat/phase split: coefficient and splitting error need timestep refinement.
 //! Observers see the accepted mass from preceding phase intervals. Their step
 //! callbacks see the heat endpoint, before that interval's molecular exchange.
+//! The adaptive entry points use the original complete-split controller and
+//! retain only the accepted fine observer history, including source transitions.
 
+use super::adaptive::{
+    GasTimelineAdaptiveCandidate, GasTimelineAdaptiveError, GasTimelineAdaptiveSolve,
+};
 use super::{
     GasChamberSolve, GasTimelineCandidate, GasTimelineEquilibriumSurface, GasTimelineError,
     GasTimelineSurface, ThermalAccommodation, advance_deposition_observed, normalize_surfaces,
@@ -57,6 +62,47 @@ impl<E: std::error::Error + 'static> std::error::Error for GasTimelineObservedEr
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Timeline(error) => Some(error),
+            Self::Observer(error) => Some(error),
+        }
+    }
+}
+
+/// Preserve both adaptive numerical refusals and the source owner's typed error.
+#[derive(Clone, Debug, PartialEq)]
+pub enum GasTimelineAdaptiveObservedError<E> {
+    Adaptive(GasTimelineAdaptiveError),
+    Observer(E),
+}
+impl<E> From<GasTimelineAdaptiveError> for GasTimelineAdaptiveObservedError<E> {
+    fn from(error: GasTimelineAdaptiveError) -> Self {
+        Self::Adaptive(error)
+    }
+}
+impl<E> From<DepositionError> for GasTimelineAdaptiveObservedError<E> {
+    fn from(error: DepositionError) -> Self {
+        Self::Adaptive(error.into())
+    }
+}
+impl<E> From<GasTimelineObservedError<E>> for GasTimelineAdaptiveObservedError<E> {
+    fn from(error: GasTimelineObservedError<E>) -> Self {
+        match error {
+            GasTimelineObservedError::Timeline(error) => Self::Adaptive(error.into()),
+            GasTimelineObservedError::Observer(error) => Self::Observer(error),
+        }
+    }
+}
+impl<E: core::fmt::Display> core::fmt::Display for GasTimelineAdaptiveObservedError<E> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Adaptive(error) => write!(f, "{error}"),
+            Self::Observer(error) => write!(f, "adaptive deposition heat observer: {error}"),
+        }
+    }
+}
+impl<E: std::error::Error + 'static> std::error::Error for GasTimelineAdaptiveObservedError<E> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Adaptive(error) => Some(error),
             Self::Observer(error) => Some(error),
         }
     }
@@ -110,6 +156,7 @@ pub fn advance_deposition_with_gas<'thermal, 'catalog, O: DepositionObserver>(
         thermal_config,
         phase_config,
         None,
+        true,
         checkpoint,
     )
 }
@@ -145,6 +192,89 @@ pub fn advance_deposition_with_equilibrium<'thermal, 'catalog, O: DepositionObse
         thermal_config,
         phase_config,
         None,
+        true,
+        checkpoint,
+    )
+}
+
+/// Adapt heat, mass-dependent conduction and molecular exchange together.
+///
+/// Each trial compares one complete heat/phase step with two half steps using
+/// the same committed observer. Only the conservative fine state and its source
+/// history survive. `begin` runs once per requested window; rejected source
+/// heat, transitions and histories are discarded. All thermal work, including
+/// rejected trials, spends the original single substep ceiling.
+///
+/// The local error norm controls original cell mass, enthalpy and temperature,
+/// gas temperature and species inventories. It does not independently estimate
+/// private observer-state error or supply a global/spatial error guarantee.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_deposition_adaptive_with_gas<'thermal, 'catalog, O: DepositionObserver>(
+    thermal: &DepositionSimulation<'thermal>,
+    surfaces: &[GasTimelineSurface<'_>],
+    accommodation: Option<&BTreeMap<CellId, ThermalAccommodation>>,
+    observer: &O,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    target_s: f64,
+    thermal_config: StepConfig,
+    phase_config: GasChamberSolve,
+    controls: GasTimelineAdaptiveSolve,
+    mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+) -> Result<
+    (GasTimelineAdaptiveCandidate<'thermal, 'catalog>, O),
+    GasTimelineAdaptiveObservedError<O::Error>,
+> {
+    let normalized = normalize_surfaces(thermal, surfaces, phase_config, &mut checkpoint)?;
+    super::adaptive::advance_observed(
+        thermal,
+        &normalized,
+        accommodation,
+        observer,
+        gas,
+        catalog,
+        target_s,
+        thermal_config,
+        phase_config,
+        controls,
+        checkpoint,
+    )
+}
+
+/// The same observer-aware controller through sharp solid/liquid equilibrium.
+///
+/// Bulk enthalpy participates in the error estimate even at a constant melting
+/// temperature. Caloric identity, positive solid seeds, original source domains
+/// and atomic publication retain the fixed-step equilibrium owner's semantics.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_deposition_adaptive_with_equilibrium<'thermal, 'catalog, O: DepositionObserver>(
+    thermal: &DepositionSimulation<'thermal>,
+    surfaces: &[GasTimelineEquilibriumSurface<'_>],
+    accommodation: Option<&BTreeMap<CellId, ThermalAccommodation>>,
+    observer: &O,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    target_s: f64,
+    thermal_config: StepConfig,
+    phase_config: GasChamberSolve,
+    controls: GasTimelineAdaptiveSolve,
+    mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+) -> Result<
+    (GasTimelineAdaptiveCandidate<'thermal, 'catalog>, O),
+    GasTimelineAdaptiveObservedError<O::Error>,
+> {
+    let normalized = normalize_surfaces(thermal, surfaces, phase_config, &mut checkpoint)?;
+    super::adaptive::advance_observed(
+        thermal,
+        &normalized,
+        accommodation,
+        observer,
+        gas,
+        catalog,
+        target_s,
+        thermal_config,
+        phase_config,
+        controls,
         checkpoint,
     )
 }

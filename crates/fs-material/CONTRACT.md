@@ -6305,9 +6305,28 @@ All selected exposed areas are evaluated in one original canonical coverage
 sweep per molecular interval, preserving subtraction order while avoiding a
 full contact scan for every surface. This observed path is a fixed-step,
 first-order heat/phase composition and requires temporal refinement; it does
-not provide an adaptive observer error estimate. Focused regressions cover
+not by itself provide an adaptive observer error estimate. Focused regressions cover
 unchanged no-op trajectories, deposition/resistance feedback, source transition
 clipping and accumulated heat, conservation and transactional source refusal.
+
+`observed::advance_deposition_adaptive_with_gas` and
+`observed::advance_deposition_adaptive_with_equilibrium` connect these same
+observers to the original complete heat/phase step-doubling controller. Each
+trial starts from the same committed observer; only the two accepted fine
+intervals contribute physical heat and source history. `begin` runs once for
+the whole request. Source transitions clip the coupled trial, including
+interval-dependent observers before the first thermal cell is born. Coarse
+and rejected thermal work spends the same original substep ceiling. Typed
+source failures propagate without being retried as numerical error.
+
+The local estimate covers every cell's mass, temperature and caloric increment,
+plus original gas temperature and species inventories. Enthalpy error remains
+visible on a sharp fusion plateau. It does not independently bound private
+observer states, global time error, spatial resolution or empirical model error.
+The returned observer, thermal state and gas remain one transactional candidate.
+G0/G1/G3/G4 regressions exercise no-op compatibility, accepted-only pulse heat,
+source transitions, growing-layer conduction refinement, equilibrium phase
+inventories and rollback after late source/cancellation refusal.
 
 `cargo run -p fs-material --example nonisothermal_ice_cold_trap --
 --conducting-layers` runs a finite-vapor, two-temperature ice-layer scenario
@@ -6317,6 +6336,10 @@ mass/energy closure and three temporal resolutions. Its specified dense-layer
 density and conductivity are scenario inputs; it does not infer porous frost,
 spatial gas transport, bare-surface nucleation or an experimentally calibrated
 cold trap.
+Add `--adaptive` after `--conducting-layers` to control the complete split with
+explicit kg/K/J-per-kg tolerances and report accepted/rejected intervals and
+executed thermal work. An optional following `0.1` tightens those local error
+targets tenfold while retaining the same original physical and conservation laws.
 
 ## Sourced sharp solid/liquid melting
 

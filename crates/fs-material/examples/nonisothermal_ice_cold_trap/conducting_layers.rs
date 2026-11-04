@@ -8,7 +8,9 @@
 
 use super::*;
 use fs_material::sublimation::gas::timeline::{
-    GasTimelineSurface, observed::advance_deposition_with_gas,
+    GasTimelineSurface,
+    adaptive::{GasTimelineAdaptiveAudit, GasTimelineAdaptiveSolve},
+    observed::{advance_deposition_adaptive_with_gas, advance_deposition_with_gas},
 };
 use fs_thermal::enthalpy::{
     Boundary, CellGeometry, CellId, DepositedCell, DepositionBudget, DepositionError,
@@ -58,7 +60,7 @@ impl ConductivityLaw for Conductivity {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Report {
     dt_s: f64,
     temperatures_k: [f64; 3],
@@ -72,6 +74,7 @@ struct Report {
     energy_residual_j: f64,
     thermal_steps: usize,
     phase_steps: usize,
+    adaptive: Option<GasTimelineAdaptiveAudit>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -85,22 +88,44 @@ fn simulate(
     caloric: &IceCaloric<'_>,
     phase: GasChamberSolve,
     dt_s: f64,
+    adaptive: Option<GasTimelineAdaptiveSolve>,
 ) -> Result<Report, Box<dyn Error>> {
-    let (candidate, conduction) = advance_deposition_with_gas(
-        thermal,
-        surfaces,
-        None,
-        observer,
-        gas,
-        catalog,
-        DURATION_S,
-        StepConfig {
-            max_dt_s: dt_s,
-            energy_tolerance_j: 1e-8,
-        },
-        phase,
-        || Ok(()),
-    )?;
+    let heat = StepConfig {
+        max_dt_s: dt_s,
+        energy_tolerance_j: 1e-8,
+    };
+    let (candidate, conduction, adaptive) = if let Some(controls) = adaptive {
+        let (candidate, conduction) = advance_deposition_adaptive_with_gas(
+            thermal,
+            surfaces,
+            None,
+            observer,
+            gas,
+            catalog,
+            DURATION_S,
+            heat,
+            phase,
+            controls,
+            || Ok(()),
+        )?;
+        let (endpoint, audit) = candidate.into_parts();
+        assert!(audit.maximum_accepted_error_ratio <= 1.0);
+        (endpoint, conduction, Some(audit))
+    } else {
+        let (candidate, conduction) = advance_deposition_with_gas(
+            thermal,
+            surfaces,
+            None,
+            observer,
+            gas,
+            catalog,
+            DURATION_S,
+            heat,
+            phase,
+            || Ok(()),
+        )?;
+        (candidate, conduction, None)
+    };
     let final_thermal = candidate.thermal();
     let final_gas = candidate.gas();
     let initial = [
@@ -169,17 +194,20 @@ fn simulate(
         energy_residual_j: energy_residual,
         thermal_steps: candidate.audit().thermal.substeps,
         phase_steps: candidate.audit().phase_steps,
+        adaptive,
     })
 }
 
 pub(super) fn run() -> Result<(), Box<dyn Error>> {
-    let scale = std::env::args()
-        .nth(2)
+    let mut arguments = std::env::args().skip(2);
+    let first = arguments.next();
+    let adaptive = first.as_deref() == Some("--adaptive");
+    let scale = if adaptive { arguments.next() } else { first }
         .map(|value| value.parse::<f64>())
         .transpose()?
         .unwrap_or(1.0);
-    if !scale.is_finite() || scale <= 0.0 {
-        return Err("step scale must be finite and positive".into());
+    if !scale.is_finite() || scale <= 0.0 || arguments.next().is_some() {
+        return Err("usage: --conducting-layers [step-scale] or --conducting-layers --adaptive [tolerance-scale]; scales must be finite and positive".into());
     }
     let water = SpeciesId::new("H2O")?;
     let catalog = ThermochemicalGasModel::new(
@@ -310,8 +338,25 @@ pub(super) fn run() -> Result<(), Box<dyn Error>> {
         },
         maximum_surfaces: 2,
     };
+    let adaptive_controls = adaptive.then_some(GasTimelineAdaptiveSolve {
+        absolute_mass_tolerance_kg: 2e-11 * scale,
+        absolute_temperature_tolerance_k: 0.002 * scale,
+        // This conservative heat-capacity envelope converts the temperature
+        // target to a caloric target without using arbitrary absolute datums.
+        absolute_specific_enthalpy_tolerance_j_kg: MINIMUM_HEAT_CAPACITY_J_KG_K * 0.002 * scale,
+        relative_tolerance: 1e-6 * scale,
+        minimum_dt_s: 1e-10,
+        maximum_trials: 10000,
+    });
     let mut reports = Vec::new();
-    for factor in [1.0, 0.5, 0.25] {
+    let timesteps = if adaptive {
+        vec![DURATION_S]
+    } else {
+        [1.0, 0.5, 0.25]
+            .map(|factor| 20e-6 * scale * factor)
+            .to_vec()
+    };
+    for dt in timesteps {
         reports.push(simulate(
             &thermal,
             &surfaces,
@@ -321,7 +366,8 @@ pub(super) fn run() -> Result<(), Box<dyn Error>> {
             &water,
             &caloric,
             phase,
-            20e-6 * scale * factor,
+            dt,
+            adaptive_controls,
         )?);
     }
     println!("Conducting dense-ice layers: {DURATION_S:.6} s; fixed gas volume 100 mL");
@@ -335,9 +381,23 @@ pub(super) fn run() -> Result<(), Box<dyn Error>> {
     println!(
         "NASA-9/IAPWS derived caloric approximation; one thermal cell per layer, no frost porosity or gas-volume work"
     );
-    for row in &reports {
+    if let Some(controls) = adaptive_controls {
         println!(
-            "dt={:.3} us: warm loss={:.6} ug, cold gain={:.6} ug; Tw/Tc/Tg={:.6}/{:.6}/{:.6} K, pv={:.6} Pa",
+            "Adaptive local tolerances: mass={:.3e} kg, temperature={:.3e} K, enthalpy={:.3e} J/kg, relative={:.3e}",
+            controls.absolute_mass_tolerance_kg,
+            controls.absolute_temperature_tolerance_k,
+            controls.absolute_specific_enthalpy_tolerance_j_kg,
+            controls.relative_tolerance,
+        );
+    }
+    for row in &reports {
+        let step_label = if row.adaptive.is_some() {
+            "max dt"
+        } else {
+            "dt"
+        };
+        println!(
+            "{step_label}={:.3} us: warm loss={:.6} ug, cold gain={:.6} ug; Tw/Tc/Tg={:.6}/{:.6}/{:.6} K, pv={:.6} Pa",
             row.dt_s * 1e6,
             row.warm_loss_kg * 1e9,
             row.cold_gain_kg * 1e9,
@@ -361,6 +421,15 @@ pub(super) fn run() -> Result<(), Box<dyn Error>> {
             row.thermal_steps,
             row.phase_steps
         );
+        if let Some(audit) = &row.adaptive {
+            println!(
+                "  adaptive: {} accepted intervals, {} rejected trials; largest accepted local error ratio={:.6}; executed thermal steps={}",
+                audit.accepted_intervals,
+                audit.rejected_trials,
+                audit.maximum_accepted_error_ratio,
+                audit.thermal_substeps_evaluated,
+            );
+        }
     }
     for pair in reports.windows(2) {
         let temperature_change = pair[0]
@@ -377,8 +446,14 @@ pub(super) fn run() -> Result<(), Box<dyn Error>> {
             (pair[0].cold_gain_kg - pair[1].cold_gain_kg).abs() * 1e9
         );
     }
-    println!(
-        "Refinement differences estimate temporal sensitivity only, not spatial or experimental validation."
-    );
+    if adaptive {
+        println!(
+            "The adaptive estimate controls local temporal error, not global, spatial or experimental error."
+        );
+    } else {
+        println!(
+            "Refinement differences estimate temporal sensitivity only, not spatial or experimental validation."
+        );
+    }
     Ok(())
 }

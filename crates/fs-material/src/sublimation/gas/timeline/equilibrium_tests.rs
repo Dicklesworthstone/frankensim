@@ -484,6 +484,27 @@ fn adaptive_plateau_error_and_whole_history_phase_report_include_thermal_convers
         || Ok(()),
     )
     .unwrap();
+    let (observed, ()) = super::observed::advance_deposition_adaptive_with_equilibrium(
+        &thermal,
+        &selected,
+        None,
+        &(),
+        &gas,
+        &catalog,
+        0.2,
+        heat(0.2),
+        controls(),
+        adaptive,
+        || Ok(()),
+    )
+    .unwrap();
+    assert_eq!(
+        observed.endpoint().thermal().cells(),
+        trial.endpoint().thermal().cells()
+    );
+    assert_eq!(observed.endpoint().gas(), trial.endpoint().gas());
+    assert_eq!(observed.endpoint().audit(), trial.endpoint().audit());
+    assert_eq!(observed.audit(), trial.audit());
     let reference = advance_deposition_with_equilibrium(
         &thermal,
         &selected,

@@ -539,7 +539,7 @@ fn advance_deposition<'thermal, 'catalog>(
     checkpoint: impl FnMut() -> Result<(), DepositionError>,
 ) -> Result<GasTimelineCandidate<'thermal, 'catalog>, GasTimelineError> {
     advance_deposition_observed(thermal, surfaces, accommodation, &(), gas, catalog,
-        target_s, thermal_config, phase_config, work, checkpoint)
+        target_s, thermal_config, phase_config, work, true, checkpoint)
         .map(|(candidate, ())| candidate)
         .map_err(|error| match error {
             GasTimelineObservedError::Timeline(error) => error,
@@ -559,6 +559,7 @@ fn advance_deposition_observed<'thermal, 'catalog, O: DepositionObserver>(
     thermal_config: StepConfig,
     phase_config: GasChamberSolve,
     work: Option<&ThermalWork>,
+    begin_observer: bool,
     mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
 ) -> Result<(GasTimelineCandidate<'thermal, 'catalog>, O), GasTimelineObservedError<O::Error>> {
     checkpoint()?;
@@ -659,13 +660,30 @@ fn advance_deposition_observed<'thermal, 'catalog, O: DepositionObserver>(
     validation?;
 
     let combined = CoupledObservers::new(guard, observer.clone());
-    let (mut next, mut observed, initial_heat) = thermal.advance_observed_limited(
-        &combined,
-        thermal.time_s(),
-        thermal_config,
-        work.map_or(budget.max_substeps, |meter| meter.remaining().min(budget.max_substeps)),
-        &mut checkpoint,
-    ).map_err(observed::coupled_error)?;
+    // Adaptive coarse/fine trials continue the SAME enclosing observer window.
+    // Re-running begin here would erase accumulated source heat and history at
+    // every trial boundary, even on the accepted fine trajectory.
+    let allowance = work.map_or(budget.max_substeps, |meter| {
+        meter.remaining().min(budget.max_substeps)
+    });
+    let initial = if begin_observer {
+        thermal.advance_observed_limited(
+            &combined,
+            thermal.time_s(),
+            thermal_config,
+            allowance,
+            &mut checkpoint,
+        )
+    } else {
+        thermal.advance_observed_continuing_limited(
+            &combined,
+            thermal.time_s(),
+            thermal_config,
+            allowance,
+            &mut checkpoint,
+        )
+    };
+    let (mut next, mut observed, initial_heat) = initial.map_err(observed::coupled_error)?;
     let mut heat = HeatTotals::default();
     heat.add(initial_heat)?;
     let mut next_gas = gas.clone();

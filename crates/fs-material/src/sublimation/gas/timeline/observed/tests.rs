@@ -388,3 +388,6 @@ fn a_late_source_refusal_preserves_heat_gas_and_observer_state() {
     assert_eq!(gas, original_gas);
     assert_eq!(pulse, saved_pulse);
 }
+
+#[path = "adaptive_tests.rs"]
+mod adaptive;

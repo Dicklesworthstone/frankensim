@@ -4,6 +4,8 @@
 //! Pass 0.1 as an optional argument to tighten local time-error targets tenfold.
 //! Pass --conducting-layers [step-scale] for finite ice storage with
 //! mass-dependent layer conduction and a three-timestep refinement comparison.
+//! Pass --conducting-layers --adaptive [tolerance-scale] to adapt that SAME
+//! coupled conduction/deposition model using mass, temperature and enthalpy error.
 //! Adaptive step doubling accepts the conservative two-half-step history; its
 //! local estimate is not a bound on global or experimental error.
 //!
