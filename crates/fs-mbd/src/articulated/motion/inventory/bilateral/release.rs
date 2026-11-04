@@ -4,6 +4,9 @@ use super::*;
 use crate::articulated::motion::inventory::release::{
     PayloadBatchRelease, PayloadRelease, PayloadReleaseInput, SeparationImpulse,
 };
+use crate::articulated::motion::inventory::release::ejection::{
+    self, PayloadEjection, PayloadEjectionControls, PayloadEjectionError, PayloadEjectionInput,
+};
 
 /// Original two-body release with the retained tree's simultaneous reaction.
 #[derive(Debug)]
@@ -129,4 +132,46 @@ pub fn release_payload(
         cancelled,
     )
     .map(|(release, reaction)| BilateralPayloadRelease { release, reaction })
+}
+
+/// Commanded relative payload motion with its actual retained mixed reaction.
+#[derive(Debug)]
+pub struct BilateralPayloadEjection {
+    /// Original native release and accepted final relative-velocity residuals.
+    pub ejection: PayloadEjection,
+    /// Actual RETAINED-tree physical impulse response. Auxiliary loaded-tree
+    /// response work is neither exposed here nor charged as separation energy.
+    pub reaction: Option<BilateralImpulseResponse>,
+}
+
+/// Eject payloads at final relative twists through existing material/joint rows.
+///
+/// The shared ejection owner uses loaded inertia to derive all internal
+/// impulses, then delegates to the original simultaneous retained-inertia
+/// release. All actual source/reaction work and returned relative-rate gates
+/// must pass together. Finite admitted initial tangent defects enter the
+/// active native response; zero commands retain passive state semantics.
+/// Empty material loops reproduce the unconstrained-loop entry exactly.
+///
+/// # Errors
+/// Original ejection inventory, target, row/condition, native endpoint,
+/// momentum/work/energy, relative-rate or cancellation refusal.
+#[allow(clippy::too_many_arguments)]
+pub fn eject_payloads(
+    model: &ArticulatedModel,
+    state: &FreeFloatingMotionState,
+    inputs: &[PayloadEjectionInput<'_>],
+    loops: &[BilateralLoop],
+    rows: &[JointConstraint],
+    controls: PayloadEjectionControls<'_>,
+    config: BilateralImpulseConfig,
+    cancelled: impl FnMut() -> bool,
+) -> Result<BilateralPayloadEjection, PayloadEjectionError> {
+    let bilateral = if loops.is_empty() {
+        None
+    } else {
+        Some((loops, config))
+    };
+    ejection::eject_evaluated(model, state, inputs, rows, controls, bilateral, cancelled)
+        .map(|(ejection, reaction)| BilateralPayloadEjection { ejection, reaction })
 }

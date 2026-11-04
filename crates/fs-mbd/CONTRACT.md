@@ -6558,3 +6558,48 @@ tests. The native harness uses the actual core and assembly source with
 module-path adaptation and genuine cached dependencies;
 no physical solver is replaced. Full-workspace Cargo and distributed gates
 remain unrun in this session.
+
+## Prescribed final-relative-twist payload ejection
+
+`inventory::release::ejection::eject_payloads` commands each payload's final
+angular and origin-linear velocity relative to the FINAL retained-link field
+at that same payload origin, in the payload's original axes. This preserves the
+difference between an origin velocity and a COM velocity. Original opaque
+attachment chains and full spatial inertias remain authoritative; command
+count is capped at 4096 before staging.
+
+For payload map S_i and spatial inertia I_i, loaded momentum gives
+M_loaded*delta_v = -sum(S_i^T*I_i*d_i) + constraint_impulse.
+The existing native ABA and original row response determine shared recoil.
+Derived payload impulse I_i*(S_i*delta_v+d_i) uses small velocity CHANGES,
+never subtraction of large before/desired endpoint velocities. Force is placed
+at the original payload origin with its spin impulse represented as a free
+couple; this is a wrench decomposition, not inferred actuator geometry.
+No dense 6N mobility or independent pairwise ejection sequence is introduced.
+
+The loaded-side source uses the same native point/couple decomposition and
+compensated link accumulation as physical release, retaining exact-cancelling
+source semantics. True all-zero commands skip auxiliary recoil and preserve
+passive native state bits, including admitted finite tangent defects. Active
+rows retain their actual initial defect correction. The mixed distance/
+spherical/gear entry `inventory::bilateral::release::eject_payloads` removes only
+uniform translation from its auxiliary state, retains original angular/joint
+rates, and recovers the native full-body delta from summed source/reaction
+impulses. Auxiliary work is never counted as physical separation energy.
+
+The original simultaneous retained-inertia release owns all returned states,
+source/constraint work, momentum/energy and physical speed admission. Both
+actual relative linear and angular endpoint residuals must then meet declared
+component tolerances before publication. At an exact commanded endpoint, pair
+work is 0.5*d_i.pairing(payload_impulse_i); cross terms from common recoil remain
+inside that impulse. The original separate absolute work caps apply.
+Outside original constraint handling, work/storage is O(links + payloads).
+
+Focused regressions cover the independent 213/28 J shared-recoil oracle,
+full-tensor off-center payload-origin commands and scene covariance, mixed
+distance/gear recoil including finite admitted tangent defects, passive state
+bits, and target/inventory/work/cancellation refusal with exact retry. Pinned
+Rust parsing is separate from native compilation and numerical execution,
+which remain unrun while local storage is full and DSR/RCH are unavailable.
+Contact/fracture decisions, real actuator placement and finite-time forcing,
+supported-base ejection, mechanical-source evolution and heat remain external.

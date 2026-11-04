@@ -11,6 +11,10 @@ mod batch;
 pub(super) use batch::release_evaluated as release_payloads_evaluated;
 pub use batch::{PayloadBatchRelease, PayloadReleaseInput, ReleasedPayload, release_payloads};
 
+/// Prescribed final payload-origin velocity and spin relative to retained links.
+#[path = "release/ejection.rs"]
+pub mod ejection;
+
 use super::{
     PayloadAttachment, PayloadBalance, PayloadControls, PayloadError, PayloadState, finite, poll,
 };
