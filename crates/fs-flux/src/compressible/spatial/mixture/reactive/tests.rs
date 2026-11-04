@@ -396,3 +396,64 @@ fn g4_spatial_reacting_publication_is_atomic_and_all_field_memory_is_admitted() 
     assert_eq!(refused.flow().time().value(), 0.0);
     assert!(refused.last_step().is_none());
 }
+
+#[test]
+fn g1_hot_species_reservoir_survives_reactive_split_without_cfl_retry() {
+    use crate::compressible::spatial::mixture::ReservoirBoundary;
+    let (gas, mechanism) = mechanism(0.0, 2.0, 0.0);
+    let grid = CartesianGrid::new(2, 2, 2, 0.1, 0.1, 0.1).unwrap();
+    let input = ReservoirBoundary {
+        side: BoundarySide::XMin,
+        partial_densities: &[1.0, 0.0],
+        velocity: [0.0; 3],
+        pressure_pa: 32.0,
+    };
+    let mut states = vec![0.0; 8 * 6];
+    for row in states.chunks_exact_mut(6) {
+        state_into(&gas, &[0.5, 0.5], [0.0; 3], 0.01, row).unwrap();
+    }
+    let bytes = MixtureEuler3d::required_workspace_bytes_with_reservoirs(&gas, &grid, 1).unwrap();
+    let flow = MixtureEuler3d::new_with_reservoirs(
+        gas,
+        grid,
+        states,
+        Boundaries3d {
+            x: AxisBoundaries::Ends {
+                lower: BoundaryCondition::Transmissive,
+                upper: BoundaryCondition::Reflecting,
+            },
+            y: AxisBoundaries::Periodic,
+            z: AxisBoundaries::Periodic,
+        },
+        &[input],
+        bytes,
+        || false,
+    ).unwrap();
+    let reactor = CellChemistry::new(flow.gas().clone(), mechanism, chemistry(), || false).unwrap();
+    let bytes = ReactingEuler3d::required_workspace_bytes(&flow, &reactor).unwrap();
+    let mut reacting = ReactingEuler3d::with_chemistry(flow, reactor, bytes, || false).unwrap();
+    assert_eq!(reacting.workspace_bytes(), bytes);
+    let controls = ReactiveStepControl {
+        transport: StepControl {
+            cfl: 0.2,
+            maximum_halvings: 0,
+            reconstruction: crate::compressible::Reconstruction::FirstOrder,
+        },
+        maximum_coupling_retries: 0,
+    };
+    for _ in 0..2 {
+        let before_time = reacting.flow().time().value();
+        let report = reacting.step(Time::new(1.0), controls, || false).unwrap();
+        // The original reactive owner retains its 0.8 acoustic headroom, now
+        // applied to incoming gas before either chemistry half is evaluated.
+        let bound = 0.8 * controls.transport.cfl * 0.1 / (3.0 * (1.4_f64 * 32.0).sqrt());
+        assert!(report.elapsed.value() <= bound * (1.0 + 2e-14));
+        assert_eq!(report.coupling_retries, 0);
+        assert_eq!(report.transport.halvings, 0);
+        assert!(report.boundary_change.species_masses[0] > 0.0);
+        assert!(report.chemistry.cell_solves > 0);
+        assert_eq!(reacting.flow().reservoir(input.side), Some(input));
+        close(reacting.flow().time().value() - before_time, report.elapsed.value(), 2e-14);
+        balance(&report);
+    }
+}

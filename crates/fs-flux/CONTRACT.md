@@ -4442,3 +4442,32 @@ sides, both reconstruction modes, reservoir/body-force composition, shared
 boundary work, zero-transport molecular parity and positive-transport sonic
 interval agreement. G4 covers topology/duplicate/pressure admission, backflow
 and cancellation without partial publication.
+
+## Pressure-fed evolving species in three-dimensional flow
+
+`spatial::mixture::MixtureEuler3d::new_with_reservoirs` binds immutable complete
+gas traces to selected transmissive sides. Each trace retains canonical partial
+mass densities, Cartesian velocity and absolute pressure. The original
+`MixtureGas` admits its thermodynamic state and supplies composition-dependent
+temperature, heat capacity, sound speed and referenced energy. First-order and
+MUSCL boundaries use the existing spatial HLLC solve; each face's species,
+momentum, pressure work and enthalpy enter the same conservative RK account.
+
+The exterior three-axis signal bound participates before selecting either the
+Euler interval or the complete chemistry/waves/chemistry interval. Prescribed
+body forcing retains the same traces and its separate mechanical-work account.
+The reacting trial clones the original binding once, includes both copies in
+its explicit numerical-byte budget and retains it across accepted intervals.
+No face-sized reservoir storage or per-step allocation is added.
+
+G0/G1 regressions cover uniform stationary/moving mixtures, pressure-driven
+species and physical-energy exchange on all six sides with both reconstruction
+modes, original caloric recovery, hot-reservoir CFL, body forcing and reactive
+persistence without coupling retries. G4 covers source/topology/byte admission
+and late cancellation preserving accepted state, time, loads and reports.
+
+These are prescribed infinite reservoirs, not finite inventories, pressure-only
+or nonreflecting boundaries. This increment does not define molecular species
+diffusion or heat/stress exchange with the exterior; the existing molecular
+owner continues to refuse transmissive sides. It adds no pressure-equilibrium
+guarantee for unequal-caloric moving contacts or fully discrete entropy theorem.

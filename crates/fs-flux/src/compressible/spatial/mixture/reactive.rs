@@ -110,6 +110,7 @@ impl ReactingEuler3d {
                 flow.gas(),
                 flow.grid(),
             )?)
+            .and_then(|bytes| bytes.checked_add(flow.reservoirs.workspace_bytes()))
             .and_then(|bytes| {
                 bytes.checked_add(
                     flow.boundary_impulses
@@ -199,6 +200,8 @@ impl ReactingEuler3d {
             MixtureEuler3d::required_workspace_bytes(flow.gas(), flow.grid())?,
             &mut cancelled,
         )?;
+        trial.reservoirs = flow.reservoirs.try_clone(&mut cancelled)?;
+        trial.workspace_bytes += trial.reservoirs.workspace_bytes();
         copy_physical(&flow, &mut trial, &mut cancelled)?;
         let mut boundary_impulses = allocated(flow.boundary_impulses.len(), 0.0)?;
         copy_field(
@@ -496,7 +499,7 @@ impl ReactingEuler3d {
             &mut cancelled,
         )?;
         let spacing = self.accepted.grid.spacing();
-        let mut rate: f64 = 0.0;
+        let mut rate = self.accepted.reservoirs.maximum_rate(&self.accepted.grid);
         for q in self.accepted.states.chunks_exact(width) {
             let p = cell(q, n).primitive(&self.accepted.gas, &mut cancelled)?;
             if let Some((_, control, _)) = forcing.as_ref() {
