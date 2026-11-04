@@ -7,6 +7,9 @@
 //! Hamiltonian force subflow, not a complete time integrator or a claim that
 //! kinetic plus potential energy is conserved during an isolated kick.
 
+/// Moving solid/source trajectories through native symmetric subflows.
+pub mod trajectory;
+
 use super::{BoundGravity, StationaryGravity, checkpoint, dd};
 use crate::finite_solid::impulse::{FiniteSolidImpulse, FiniteSolidImpulseControls};
 use crate::finite_solid::{Cx, FiniteSolidBody, FiniteSolidError, inflate};

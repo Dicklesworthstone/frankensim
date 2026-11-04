@@ -29863,6 +29863,34 @@ solid self-gravity, near-source quadrature accuracy and timestep convergence
 require their respective physical models or refinement. The same interaction
 must not also be supplied through the stationary external-gravity binding.
 
+### Moving reciprocal solid/source trajectories
+
+`reciprocal_gravity_step_candidate` composes the original reciprocal half-kick,
+native objective solid energy/momentum step plus symmetric rigid free drift,
+and a second half-kick evaluated on both moved configurations. The native solid
+clock/history advances once. Its retained acceleration belongs to the material
+middle flow; gravity remains an explicit split impulse. Held solid loads,
+stationary external fields, optional uniform pressure, source free spin and all
+stationary support reactions retain their native owners and work conventions.
+
+The gravitational splitting defect is kick work plus the change of the single
+pair potential. It has its own absolute gate. A separate complete energy gate
+uses the sum of absolute middle, gravity-splitting and impulse/work defects, so
+opposing numerical errors cannot conceal each other. Full pair linear and
+angular increments use native measured residual identities, without another
+mass action or subtraction of large endpoint momenta. Individual native gates
+and noncancelling stage residuals remain active; support exchanges are external.
+
+Explicit duration/node limits bound the wrapper's interval and extra storage.
+Per-element swept source-relative boxes enforce a declared minimum separation
+before and after the middle flow. Outward-rounded coordinate gaps give a
+conservative lower bound along linear interpolation of the accepted endpoint
+geometry and source COM; a source cannot tunnel through that numerical path.
+This is not continuous physical-path CCD, near-field quadrature certification,
+finite-source contact or a global error bound. Smooth trajectory accuracy still
+requires spatial/time refinement. Every late separation, energy, momentum or
+cancellation refusal publishes neither state.
+
 ## Spatial molecular absorption and modal wall diffusion on the exact clock
 
 `ContinuousModalLine::new_field_molecular` and `new_field_molecular_loaded`

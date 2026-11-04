@@ -1,4 +1,7 @@
 //! Native tidal response, finite-source recoil and supported pair momentum.
+#[path = "reciprocal/trajectory.rs"]
+mod trajectory;
+
 use super::*;
 use fs_couple::finite_solid::gravity::reciprocal::ReciprocalGravityKickControls;
 use fs_mbd::gravity::CentralGravity;
