@@ -1,5 +1,38 @@
 # CONTRACT: fs-tribo
 
+## Externally pressurized Reynolds films
+
+`resistive_film::pressure::PressureDrivenFilm` binds an explicit gauge pressure
+to every original reservoir channel. The original geometry, conductances,
+Cholesky elimination, force transpose and common Barus law remain the owners.
+This admits pressure-fed lubrication, stationary load support and hydraulic
+actuation alongside squeeze motion. All supplies share the original mechanical
+and zero-gauge viscosity datum; their absolute values are not discarded.
+
+The solve subtracts one common reservoir potential before elimination, keeping
+a stationary equally pressurized film exact and separating pressure bias from
+the hydraulic residual. Physical pressure and the original reference viscosity
+are recovered in that chart. Boundary potentials compile once; evaluation and
+the full gap/velocity/supply-pressure force tangent use bounded stack scratch
+and the native factorization, without an added nonlinear pressure iteration.
+
+Each channel reports signed volume flow and nonnegative physical `Q*delta_p`
+heat. The distinct driven report closes `F*v - sum(p_b*Q_out) = heat` and
+permits negative mechanical input when the supplies drive the body. Reservoir
+power is an external supply, not extra heat or proof of passive mechanical
+resistance. Force, pressure and channel outputs publish together after checks.
+Wrong reservoir topology, source/pressure limits, trapped islands and failed
+work balances refuse. The caller owns time integration, reservoir inventory,
+cavitation, supply dynamics and thermal destinations; this adds no compressible,
+sliding-wall or high-pressure EHL model.
+
+Seven focused G0/G1/G3 native tests cover pressure-fed flow/load, hydraulic
+mechanical output, independent Barus fluidity, the complete directional tangent,
+zero-supply native parity, closed supply/refusal behavior, and the annular
+hydrostatic-bearing analytic flow with second-order load refinement. These
+tests use the original complete film implementation and real fs-math/fs-rand
+dependencies; they are numerical verification, not measured bearing validation.
+
 ## Combined pressure and sliding work within individual layers
 
 `ShearedFilm::evaluate_with_layers_into` reports each original channel's

@@ -16,20 +16,24 @@
 //! A nonpositive CHANNEL aperture closes that passage exactly; a collapsed
 //! VOLUME cell, disconnected trapped pocket, or exceeded validity limit refuses.
 //! There is no gap floor, pressure clipping, diagonal jitter, or hidden leakage.
-//! Reservoir pressures are zero gauge. Suction is retained within the supplied
+//! The passive image has zero-gauge reservoirs; [`pressure::PressureDrivenFilm`]
+//! admits independently pressurized reservoirs with their explicit supply work.
+//! Suction is retained within the supplied
 //! pressure limit. Compressibility, gas inertia, thermal effects, slip, moving
 //! topology and fluid acoustic radiation are not part of this image.
 /// Mass-conserving liquid-film rupture, starvation and reformation on this graph.
 pub mod cavitation;
 /// Compressible mass storage and transport on the same geometric pressure graph.
 pub mod isothermal;
-/// Exact pressure-flow reduction for prescribed through-gap viscosity layers.
-pub mod stratified;
 /// Work-conjugate sliding walls, Couette entrainment and shear on this same graph.
 pub mod shear;
+/// Exact pressure-flow reduction for prescribed through-gap viscosity layers.
+pub mod stratified;
 
 /// Regularized power-law pressure flow on the original Reynolds graph.
 pub mod power_law;
+/// Externally pressurized films with conservative hydraulic and mechanical work.
+pub mod pressure;
 
 use core::fmt;
 use std::sync::Arc;
@@ -377,6 +381,26 @@ impl ResistiveFilm {
         v: &[f64],
         entrainment: &[f64],
     ) -> Result<Solution, FilmError> {
+        self.solve_with_boundaries::<ENTRAINMENT, false>(
+            q,
+            v,
+            entrainment,
+            &[],
+            pressure::PressureDatum::ZERO,
+        )
+    }
+
+    // Reservoir potentials share one fixed pressure datum. Subtracting that
+    // datum before elimination preserves a stationary pressurized film exactly
+    // and keeps a common pressure bias out of the hydraulic residual.
+    fn solve_with_boundaries<const ENTRAINMENT: bool, const PRESSURIZED: bool>(
+        &self,
+        q: &[f64],
+        v: &[f64],
+        entrainment: &[f64],
+        reservoir_potential: &[f64],
+        datum: pressure::PressureDatum,
+    ) -> Result<Solution, FilmError> {
         if ENTRAINMENT
             && (entrainment.len() != self.channels.len()
                 || entrainment.iter().any(|flow| !flow.is_finite()))
@@ -417,23 +441,41 @@ impl ResistiveFilm {
                 }
             }
         }
+        if PRESSURIZED {
+            for (k, edge) in self.channels.iter().enumerate() {
+                if edge.to.is_none() {
+                    s.pressure[edge.from] += s.conductance[k] * reservoir_potential[k];
+                }
+            }
+        }
         s.factor()?;
         solve_factored(&s.lower, &s.scale, n, &mut s.pressure)?;
         s.potential = s.pressure;
         let alpha = self.pressure_viscosity_coefficient_per_pa;
         if alpha != 0.0 {
             for (p, psi) in s.pressure[..n].iter_mut().zip(&s.potential[..n]) {
-                let scaled = alpha * psi;
+                let scaled = if PRESSURIZED {
+                    alpha * psi / datum.fluidity
+                } else {
+                    alpha * psi
+                };
                 if !scaled.is_finite() || scaled >= 1.0 {
                     return fail("Barus film flow exceeds its finite-pressure limit");
                 }
                 // ln_1p retains the constant-viscosity limit. An underflowed
                 // alpha*psi has no representable pressure-viscosity correction.
                 *p = if scaled == 0.0 {
-                    *psi
+                    if PRESSURIZED {
+                        *psi / datum.fluidity
+                    } else {
+                        *psi
+                    }
                 } else {
                     -(-scaled).ln_1p() / alpha
                 };
+                if PRESSURIZED {
+                    *p += datum.pressure_pa;
+                }
                 if !p.is_finite() {
                     return fail("Barus film pressure is unrepresentable");
                 }
@@ -441,21 +483,39 @@ impl ResistiveFilm {
             // Each passage retains its own reference viscosity. Pressure is
             // monotone along a passage, so checking both ends bounds its full
             // Barus viscosity; do not test an unrelated cell's coefficient.
-            for (edge, &mu) in self.channels.iter().zip(&self.channel_viscosities_pa_s) {
+            for (k, (edge, &mu)) in self
+                .channels
+                .iter()
+                .zip(&self.channel_viscosities_pa_s)
+                .enumerate()
+            {
                 for psi in [
                     s.potential[edge.from],
-                    edge.to.map_or(0.0, |j| s.potential[j]),
+                    edge.to.map_or_else(
+                        || {
+                            if PRESSURIZED {
+                                reservoir_potential[k]
+                            } else {
+                                0.0
+                            }
+                        },
+                        |j| s.potential[j],
+                    ),
                 ] {
-                    let viscosity = mu / (1.0 - alpha * psi);
+                    let viscosity = mu / (datum.fluidity - alpha * psi);
                     if !viscosity.is_finite() || viscosity <= 0.0 {
                         return fail("Barus film viscosity is unrepresentable");
                     }
                 }
             }
+        } else if PRESSURIZED {
+            for p in &mut s.pressure[..n] {
+                *p += datum.pressure_pa;
+            }
         }
         if s.pressure[..n]
             .iter()
-            .any(|p| p.abs() > self.limits.maximum_pressure_pa)
+            .any(|p| !p.is_finite() || p.abs() > self.limits.maximum_pressure_pa)
         {
             return fail("film pressure exceeds declared incompressible domain");
         }
@@ -504,8 +564,10 @@ impl ResistiveFilm {
         pressure: &mut [f64],
         channels: &mut [FilmChannelReport],
     ) -> Result<FilmReport, FilmError> {
-        if force.len() != self.ports || pressure.len() != self.cells.len()
-            || (CHANNEL_REPORTS && channels.len() != self.channels.len()) {
+        if force.len() != self.ports
+            || pressure.len() != self.cells.len()
+            || (CHANNEL_REPORTS && channels.len() != self.channels.len())
+        {
             return fail("invalid film output shape");
         }
         let s = self.solve(q, velocity)?;
