@@ -2,6 +2,10 @@
 
 mod viscous;
 pub use viscous::ConductiveViscousThermalVolumeMomentumStep;
+mod resistance;
+pub use resistance::{
+    ConductiveResistiveThermalVolumeMomentumControls, ConductiveResistiveThermalVolumeMomentumStep,
+};
 
 use super::super::{
     ThermalVolumeMomentumControls, ThermalVolumeMomentumInput, ThermalVolumeMomentumStep,

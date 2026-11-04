@@ -11,6 +11,7 @@ use super::{
 
 mod momentum;
 pub use momentum::{
+    ConductiveResistiveThermalVolumeMomentumControls, ConductiveResistiveThermalVolumeMomentumStep,
     ConductiveThermalVolumeMomentumControls, ConductiveThermalVolumeMomentumStep,
     ConductiveViscousThermalVolumeMomentumStep,
 };
@@ -45,7 +46,8 @@ pub struct ConductiveThermalVolumeReport {
     /// Includes heat lost beside a much larger authored increment [J].
     pub increment_assembly_defect_j: f64,
     /// Assembly plus conductive balance plus original caloric/transport
-    /// defects [J], including any composed molecular-heat assembly defect,
+    /// defects [J], including composed molecular-heat assembly or coupled
+    /// resistance heat/constitutive defects,
     /// all checked against the SAME native enthalpy budget.
     pub absolute_enthalpy_defect_j: f64,
 }
@@ -61,7 +63,7 @@ pub struct ConductiveThermalVolumeStep {
     pub report: ConductiveThermalVolumeReport,
 }
 
-// Both public consumers retain the same original heat preparation and final
+// All public consumers retain the same original heat preparation and final
 // source/enthalpy gates. The evolution value owns its one accepted transport.
 struct ConductiveAdvance<T> {
     evolution: T,

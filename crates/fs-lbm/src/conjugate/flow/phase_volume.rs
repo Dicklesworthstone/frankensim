@@ -2,6 +2,7 @@
 
 mod conduction;
 pub use conduction::{
+    ConductiveResistiveThermalVolumeMomentumControls, ConductiveResistiveThermalVolumeMomentumStep,
     ConductiveThermalVolumeControls, ConductiveThermalVolumeMomentumControls,
     ConductiveThermalVolumeMomentumStep, ConductiveThermalVolumeReport,
     ConductiveThermalVolumeStep, ConductiveViscousThermalVolumeMomentumStep,

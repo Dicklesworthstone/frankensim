@@ -1,5 +1,37 @@
 # CONTRACT: fs-lbm
 
+## Original-source conduction with phase/resistance feedback
+
+The conductive phase-resistance thermal-volume momentum entries prepare
+paired original-state isotropic conduction once through the existing
+harmonic half-cell operator, then call the coupled phase/resistance owner.
+Authored net heat and conduction enter each original M/h/P trial once;
+physical drag heat, endpoint source viscosity/permeability, phase density
+and compatible volume flux converge together before momentum transport.
+
+Conductivity and permeability retain the same original caloric chart and
+material card. Initial, incoming, accepted and drag-heated caloric
+intermediate states must remain inside the conductivity source. A final
+in-range mixed endpoint cannot conceal an out-of-source intermediate.
+The retained conductivity identity, paired heat, explicit enthalpy-secant
+mixing-weight bound and endpoint resistance source receipts remain visible.
+
+Conduction assembly/balance, caloric representation/transport and coupled
+heat/constitutive residuals share one original enthalpy budget. Their
+aggregate plus native resistance work defects also shares the mechanical
+energy budget. Controls derive conduction's volume clock/gates from the same
+resistance/thermal controls, so a second divergent configuration is absent.
+Ordinary and spatial-pressure variants retain one accepted pressure field
+and one accepted set of material/momentum routes; no numerical loss is heat.
+
+Focused tests combine sourced conduction with nonzero mushy drag, actual
+density/volume change and conservative enthalpy transport, plus identity,
+stability, source-bound and cancellation refusals. Conduction remains an
+explicit original-state first-order split with its original monotonicity
+limit; it is not reevaluated inside the nonlinear drag loop. Exterior and
+fixed-solid thermal faces remain insulated. Exact-solid momentum, moving
+interfaces and a pressure-dependent thermodynamic EOS remain outside scope.
+
 ## Endpoint-source phase, resistance and thermal-volume feedback
 
 The resolved phase-resistance thermal-volume momentum entries close the
