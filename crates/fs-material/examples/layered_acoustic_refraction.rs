@@ -1,7 +1,8 @@
 //! Refraction and coherent transmission through a finite warm-air layer.
 //!
 //! Run: `cargo run -p fs-material --example layered_acoustic_refraction -- 353.15 0.05 1000`
-//! Arguments: layer temperature [K], nominal thickness [m], frequency [Hz].
+//! Arguments: layer temperature [K], nominal thickness [m], frequency [Hz],
+//! and optional `field` to emit a coherent transmitted pressure/velocity map.
 //! Both exterior half-spaces contain dry air at 293.15 K and 101325 Pa. The
 //! finite layer uses the same explicit USSA-1976 calorically perfect gas model
 //! at the requested temperature and pressure. The maintained planar states
@@ -10,17 +11,24 @@
 //! The calculation retains coherent pressure interference and conserved
 //! tangential wavenumber. A finite layer can transmit above the single-interface
 //! critical angle through an evanescent field. This lossless, infinite-plane
-//! example does not include absorption, finite beam diffraction or flow.
+//! example does not include absorption or flow. The `field` mode propagates
+//! nine explicitly weighted plane waves together, including their interference
+//! and angular filtering by the layer. This finite angular sum is not a
+//! compact-aperture source or a converged continuous angular-spectrum integral.
 
 use fs_material::fluid_acoustics::FluidAcoustics;
 use fs_material::gas::{GasSpec, GasState};
+use fs_material::porous::layers::angular_spectrum::{AngularSpectrumBudget, IncidentPlaneWave};
 use fs_material::porous::layers::{Layer, TransmittingLayers};
+use fs_math::c64::C64;
+use std::fmt::Write as _;
+use std::io::Write as _;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
-    if args.len() > 3 {
+    if args.len() > 4 || args.get(3).is_some_and(|mode| mode != "field") {
         return Err(
-            "usage: layered_acoustic_refraction [layer_temperature_k] [thickness_m] [frequency_hz]"
+            "usage: layered_acoustic_refraction [layer_temperature_k] [thickness_m] [frequency_hz] [field]"
                 .into(),
         );
     }
@@ -51,6 +59,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         layer_acoustic.density_kg_m3(),
         layer_acoustic.sound_speed_m_s(),
     );
+    if args.get(3).is_some() {
+        return coherent_field(&exterior, &layer, thickness, frequency);
+    }
     let mut angles = vec![0.0_f64, 30.0, 60.0, 80.0];
     if speed_ratio < 1.0 {
         let critical = speed_ratio.asin().to_degrees();
@@ -93,5 +104,80 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     }
+    Ok(())
+}
+
+fn coherent_field(
+    exterior: &GasState,
+    layer: &GasState,
+    thickness_m: f64,
+    frequency_hz: f64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let stack = TransmittingLayers::new(
+        exterior,
+        exterior,
+        core::f64::consts::TAU * frequency_hz,
+        &[Layer::FluidLayer {
+            fluid: layer,
+            thickness_m,
+        }],
+    )?;
+    // An explicitly authored angular distribution. Positive amplitudes sum to
+    // one pascal at the entrance origin; none is a power probability or a
+    // second copy of the layer's transmission coefficient.
+    let weights = [1.0, 8.0, 28.0, 56.0, 70.0, 56.0, 28.0, 8.0, 1.0];
+    let components = core::array::from_fn::<_, 9, _>(|i| {
+        let angle = (48.0 + 3.0 * i as f64).to_radians();
+        IncidentPlaneWave {
+            direction: [angle.sin(), 0.0, angle.cos()],
+            pressure_pa: C64::new(weights[i] / 256.0, 0.0),
+        }
+    });
+    let spectrum = stack.prepare_angular_spectrum(
+        &components,
+        AngularSpectrumBudget { max_components: 9 },
+        &mut || false,
+    )?;
+    let wavelength_m = exterior.acoustic_state()?.sound_speed_m_s() / frequency_hz;
+    if !wavelength_m.is_finite() || wavelength_m <= 0.0 {
+        return Err("the exterior wavelength must be representable".into());
+    }
+    eprintln!(
+        "coherent field: 9 plane waves at 48..72 degrees in 3-degree steps; binomial pressure weights /256, total incident peak pressure 1 Pa at the entrance origin"
+    );
+    eprintln!(
+        "x and receiving depth are metres; z=0 is the layer exit; time convention exp(+i omega t); intensity is computed after summing complex fields"
+    );
+    let mut csv = String::from(
+        "x_m,receiving_depth_m,pressure_real_pa,pressure_imag_pa,velocity_x_real_m_s,velocity_x_imag_m_s,velocity_z_real_m_s,velocity_z_imag_m_s,active_x_w_m2,active_z_w_m2,reactive_x_w_m2,reactive_z_w_m2\n",
+    );
+    for iz in 0..=10 {
+        let z = 0.2 * iz as f64 * wavelength_m;
+        for ix in 0..=40 {
+            let x = (-2.0 + 0.15 * ix as f64) * wavelength_m;
+            let sample = spectrum.transmitted_field([x, 0.0, z], &mut || false)?;
+            let p = sample.pressure_pa;
+            let vx = sample.particle_velocity_m_s[0];
+            let vz = sample.particle_velocity_m_s[2];
+            let active = sample.active_intensity_w_m2;
+            let reactive = sample.reactive_intensity_w_m2;
+            writeln!(
+                csv,
+                "{x:.12e},{z:.12e},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e},{:.12e}",
+                p.re,
+                p.im,
+                vx.re,
+                vx.im,
+                vz.re,
+                vz.im,
+                active[0],
+                active[2],
+                reactive[0],
+                reactive[2],
+            )?;
+        }
+    }
+    // Keep a failed field query from publishing a partial map as a complete run.
+    std::io::stdout().lock().write_all(csv.as_bytes())?;
     Ok(())
 }

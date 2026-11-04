@@ -11093,8 +11093,39 @@ independent heterogeneous fluid/porous matrices, analytic evanescent tunneling,
 critical-angle continuity, quarter-wave impedance matching and original-source
 reuse/refusal. `layered_acoustic_refraction` is a runnable warm-air-layer example
 using the existing gas-state owner. Infinite planar, linear, stationary-fluid
-and rigid-frame scope remains; finite beams, shear waves, flow and continuous
-sound-speed gradients are not supplied by this layer model.
+and rigid-frame scope remains; finite-aperture boundary conditions, shear waves,
+flow and continuous sound-speed gradients are not supplied by this layer model.
+
+### Coherent angular acoustic fields
+
+`TransmittingLayers::prepare_angular_spectrum` binds an explicit finite set of
+incident plane-wave directions and complex peak pressures to the SAME prepared
+layer scattering response. Each component retains its conserved tangential
+wavenumber and original complex pressure reflection/transmission; no coefficient
+is inferred from a power fraction. Original incident, layer and receiving fluid
+snapshots are reused without additional material queries.
+
+`PreparedAcousticSpectrum::incident_field` observes the incident plus reflected
+field at `z <= 0`, measured from the entrance face. `transmitted_field` observes
+the receiving half-space at `z >= 0`, measured from the exit face. Coordinates
+are metres and phasors use `exp(+i omega t)`. Pressure and all three particle
+velocity components add coherently BEFORE evaluating the complex intensity
+`p * conj(v) / 2`; its real and imaginary parts retain active and reactive
+intensity in W/m2. Thus destructive interference and evanescent reactive fields
+are not replaced by an incoherent power average. The original outgoing normal
+wavenumber retains critical incidence and exponential evanescent decay.
+
+Preparation has explicit component/work limits and O(component count) storage;
+observation is O(component count), allocates nothing and checks cancellation.
+This is an explicitly supplied finite angular sum, not an automatically sampled
+aperture, a certified angular quadrature, a finite-specimen diffraction model or
+a field inside the finite layers. The existing incoherent angular-power API
+retains its separate meaning.
+
+The `layered_acoustic_refraction` example accepts a fourth argument `field` to
+emit a coherent pressure, velocity and active/reactive intensity CSV map through
+the original warm-air layer. Its nine directions and binomial pressure weights
+are explicit; the original three-argument angle/power table remains available.
 
 ### Diffuse and authored angular incident power
 

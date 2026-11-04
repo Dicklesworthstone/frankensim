@@ -45,6 +45,12 @@ pub use angular::{
     AngularPower, AngularPowerBudget, AngularPowerError, DiffuseIncidence, IncidentPower,
     MAX_ANGULAR_POWER_SAMPLES,
 };
+/// Coherent incident beams and their refracted exterior pressure/velocity fields.
+pub mod angular_spectrum;
+pub use angular_spectrum::{
+    AcousticSpectrumError, AcousticSpectrumSample, AngularSpectrumBudget, IncidentPlaneWave,
+    MAX_ANGULAR_SPECTRUM_COMPONENTS, PreparedAcousticSpectrum,
+};
 /// Layer-resolved viscous and thermal loss from the same coherent fields.
 pub mod absorption;
 pub use absorption::{
