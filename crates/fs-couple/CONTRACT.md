@@ -1,5 +1,61 @@
 # CONTRACT: fs-couple
 
+## Native converter conduction and finite material temperatures
+
+`circuit_enthalpy::converter::ConverterThermalNetwork` joins the native
+three-state buck/boost stage to the existing finite-enthalpy/Newton owner.
+Its five explicit receivers retain the original winding, input-high,
+input-low, output-high and output-low channel order. Every channel has a
+distinct original caloric/material body, including inactive channels; other
+finite thermal cells and source-derived conduction links remain in the same
+thermal inventory.
+
+`ConverterResistance` separates caller-admitted fixed values, whole-body
+uniform bulk resistivity/conductivity paths through `MaterialOhmicBody`, and
+explicit static scalar resistance keys in ohms. The latter consume the
+original material resolver, claim selection and complete source domain. They
+do not reinterpret resistivity, efficiency or switching energy as resistance.
+No semiconductor card or device law is fabricated. Unowned electrical-field,
+current, gate, rate and frequency conditions refuse even when they appear
+only in source applicability. Sources can depend on the actually owned
+temperature and explicitly declared liquid mass fraction; no phase mixture
+rule is introduced.
+
+`bind` retains the original L/C and exact flux/bus-charge coordinates while
+attaching those source laws to actual caloric state. Each `step_candidate`
+trial refreshes the same original claims at its proposed thermal endpoint and
+restarts the native electrical trajectory from the same accepted coordinates.
+`ConverterElectricalDrive` selects held-duty averaging or a complete prescribed
+switch sequence. Both feed the same thermal residual and native work ledger.
+Each exact electrical interval counts against the shared circuit-trial budget;
+a switch cycle must span the thermal interval within f64 duration and absolute
+endpoint-clock roundoff. A period unable to advance the original clock refuses;
+the authored switching durations are never rescaled to fit the thermal step.
+
+Only the five native integrated conduction heats enter the cells, once, as
+interval-average thermal rates. They are checked against native dissipation,
+while both signed terminal works independently check native supply. Electrical
+storage change uses the original small-transfer-aware native record, never
+the difference of separately rounded large endpoint energies. The final shared
+gate closes retained electrical storage, finite thermal storage, terminal work
+and other original thermal exchange before either history publishes.
+
+L/C and geometry remain fixed; no reversible parameter heat is inferred.
+The averaged lane omits unresolved PWM RMS loss; the switched lane resolves
+its actual current ripple and each channel's conducting intervals. Neither
+adds dead time, recovery, diode clamping, gate drive or switching-transition
+heat. A resistance source is a bounded on-state law, not a complete device
+model or safe-operating-area claim. Thermal endpoint feedback is first-order
+in general and needs refinement independently of the energy gates.
+
+`tests/converter_enthalpy.rs` includes an independent scalar nonlinear energy
+oracle for temperature-dependent freewheel decay, continued material/current
+history, all-five-channel forward/reverse steady conversion, and actual
+switched-ripple deposition with endpoint source feedback. It checks source
+units, unambiguous receivers, event-period agreement, work budgets, source
+domain and cancellation before joint publication. Its material data are
+manufactured numerical fixtures, not measured-device validation.
+
 ## Source-bound moving-current feedback into native rigid momentum
 
 `circuit_enthalpy::conduction::spatial::mechanical::PreparedSpatialConductionKick`

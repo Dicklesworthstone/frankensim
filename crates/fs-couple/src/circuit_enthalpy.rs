@@ -14,6 +14,8 @@ pub mod entropy;
 pub mod conductivity;
 /// Spatial DC current and local Joule heating on the same finite thermal solve.
 pub mod conduction;
+/// Native averaged/switched converter loss and material-temperature feedback.
+pub mod converter;
 /// Data-only caloric/card, resistor and conductive-link bindings.
 pub mod material;
 /// Two-sided deposition of source-backed electrical contact heat.
