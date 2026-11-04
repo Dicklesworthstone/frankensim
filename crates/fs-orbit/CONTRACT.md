@@ -34,6 +34,14 @@ API — never instrument-shaped.
 - `HbBudget` / `solve_hb` / `solve_hb_seeded` -> `HbOrbit` (omega,
   canonical coefficients, per-iteration residual trace, verified residual,
   final verification sample count, measured sampling defect).
+- `HbScales` / `solve_hb_scaled_seeded` -> `ScaledHbOrbit` conditions this
+  same Newton owner with separate physical state, equation and frequency
+  magnitudes. The seed and returned orbit remain in original units. Acceptance
+  bounds the absolute normalized Parseval RMS defect and independent sampling
+  change; large static preloads never relax it. Both scaled diagnostics are
+  retained alongside the original physical residual trace. This is the entry
+  for mixed-unit or very small physical responses; the original unscaled
+  entry points retain their existing coefficient-relative convergence rule.
 - `HbRefinementBudget` / `solve_hb_adaptive` /
   `solve_hb_adaptive_seeded` -> `AdaptiveHbOrbit`. These additive entry
   points retain the fixed-order Newton budget, start at its harmonic order,
@@ -141,6 +149,16 @@ conservative families and hybrid cycles remain outside this entry's claim.
   unknown-frequency seeds must remain positive and finite.
 - Canonical unknown ordering: DC block, then per-harmonic
   `Re`/`Im` blocks, state-major; the packing is the seed format.
+- The explicitly scaled entry uses one row/column unit for DC and that unit
+  divided by sqrt(2) for each positive-frequency real/imaginary coefficient.
+  Thus Euclidean norms in the conditioned chart are real-waveform RMS norms.
+  Equation units are independent of state units, as required by general
+  mechanical/acoustic/electrical frequency ports. Newton differences use each
+  coordinate's declared physical magnitude; the dense solve is conditioned on
+  both sides, and physical steps are restored before original-model evaluation.
+  The backbone's extra row is its relative fundamental-amplitude error. No
+  amplitude or frequency is silently normalized in the returned waveform.
+  Invalid scales, physical seeds and budgets refuse before island/port calls.
 - Backbone acceptance independently bounds `|2|X_1[0]|/a - 1|` by the
   requested tolerance. Other state coordinates and DC offsets cannot relax
   this relative amplitude gate. The appended Newton row is the unsquared
@@ -245,6 +263,15 @@ instead of the retained Galerkin answer 1.0); an independent shifted
 65-point quadrature checks the corrected coefficients. Further regressions
 verify truthful continuation residuals against the analytic scalar balance
 and a bounded named refusal for persistently unresolved forcing.
+
+The physically scaled path additionally recovers the exact fundamental and
+generated third harmonic of a nonlinear cubic cascade under independent state,
+equation and clock-unit changes, including picometre-scale coordinates. A
+1e12 unrelated static coordinate cannot hide its missing third harmonic; an
+insufficient Newton budget refuses. Other G1/G3 cases retain prescribed
+backbone amplitude/frequency under free phase, refine the seventh-order alias
+in small physical units, refuse invalid scales before source calls, and replay
+the accepted coefficients and scaled residual bit-for-bit on the same toolchain.
 
 Backbone regressions additionally correct a seed with twice the prescribed
 micrometre or picometre displacement, under phase shifts and optional

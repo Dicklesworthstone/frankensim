@@ -41,6 +41,9 @@ pub use adaptive::{
     solve_hb_adaptive_seeded,
 };
 
+mod scaling;
+pub use scaling::{HbScales, ScaledHbOrbit, solve_hb_scaled_seeded};
+
 const TAU: f64 = core::f64::consts::TAU;
 
 // Four successively finer quadratures bound sampling work independently of
@@ -641,9 +644,20 @@ pub fn solve_hb<P: OrbitProblem>(
 pub fn solve_hb_seeded<P: OrbitProblem>(
     problem: &P,
     anchor: HbAnchor,
-    mut u: Vec<f64>,
+    u: Vec<f64>,
     budget: &HbBudget,
 ) -> Result<HbOrbit, OrbitError> {
+    solve_hb_seeded_impl(problem, anchor, u, budget, None).map(|result| result.orbit)
+}
+
+#[allow(clippy::too_many_lines)] // the same Newton owner serves both physical charts
+fn solve_hb_seeded_impl<P: OrbitProblem>(
+    problem: &P,
+    anchor: HbAnchor,
+    mut u: Vec<f64>,
+    budget: &HbBudget,
+    scales: Option<&scaling::AdmittedScales>,
+) -> Result<ScaledHbOrbit, OrbitError> {
     let amplitude_row = admitted_backbone_amplitude(anchor, budget.tolerance)?;
     let d = problem.dim();
     if d == 0 {
@@ -701,7 +715,13 @@ pub fn solve_hb_seeded<P: OrbitProblem>(
     let mut aft = AftWorkspace::new(&pack)?;
     let mut res = vec![0.0f64; pack.coeff_len()];
     let mut trace = Vec::new();
-    let oscillatory_norm = |u: &[f64]| norm(&u[d..pack.coeff_len()]);
+    let oscillatory_norm = |u: &[f64]| {
+        scales.map_or_else(
+            || norm(&u[d..pack.coeff_len()]),
+            |scales| scales.oscillatory_norm(u, &pack),
+        )
+    };
+    let row_norm = |r: &[f64]| scales.map_or_else(|| norm(r), |scales| scales.row_norm(r));
     let autonomous_anchor = !matches!(anchor, HbAnchor::Forced { .. });
     let deflation_s0 = if budget.deflate_equilibrium && autonomous_anchor {
         0.1 * oscillatory_norm(&u).max(1.0e-12)
@@ -729,7 +749,13 @@ pub fn solve_hb_seeded<P: OrbitProblem>(
         if amplitude_row.is_some() {
             r.push(amp_residual(&u));
         }
-        let rn = norm(&r);
+        let rn = scales.map_or_else(|| norm(&r), |_| scaling::length(r.iter().copied()));
+        let measured = row_norm(&r);
+        if scales.is_some() && !measured.is_finite() {
+            return Err(OrbitError::BadParameter {
+                what: "scaled harmonic residual must be finite",
+            });
+        }
         trace.push(rn);
         // Scale over the COEFFICIENTS only: the omega slot is in
         // rad/s and would inflate the relative gate (measured: a
@@ -739,23 +765,39 @@ pub fn solve_hb_seeded<P: OrbitProblem>(
         // Its target supplies the floor; a unit floor would accept incorrect
         // frequencies and amplitudes simply because the whole motion is small.
         // Static preloads must not relax the dynamical accuracy of that motion.
-        let scale = amplitude_row.map_or_else(
-            || norm(&u[..pack.coeff_len()]).max(1.0),
-            |a| oscillatory_norm(&u).max(a),
-        );
+        let scale = if scales.is_some() {
+            1.0
+        } else {
+            amplitude_row.map_or_else(
+                || norm(&u[..pack.coeff_len()]).max(1.0),
+                |a| oscillatory_norm(&u).max(a),
+            )
+        };
         let relative_amplitude_error =
             amplitude_row.map_or(0.0, |a| 2.0 * (amp_residual(&u) / a).abs());
-        if rn < budget.tolerance * scale && relative_amplitude_error < budget.tolerance {
+        if measured < budget.tolerance * scale && relative_amplitude_error < budget.tolerance {
             let (finer, checked, sampling_defect) =
                 check_sampling(problem, &pack, &u, omega_fixed, &aft, &res)?;
+            let sampling_defect = scales.map_or(sampling_defect, |_| {
+                scaling::length(checked.iter().zip(&res).map(|(a, b)| a - b))
+            });
             let mut checked_sq: f64 = kept.iter().map(|&i| checked[i] * checked[i]).sum();
             if amplitude_row.is_some() {
                 let ar = amp_residual(&u);
                 checked_sq += ar * ar;
             }
-            let checked_norm = det::sqrt(checked_sq);
-            if !(checked_norm < budget.tolerance * scale
-                && sampling_defect < budget.tolerance * scale)
+            let checked_norm = scales.map_or_else(
+                || det::sqrt(checked_sq),
+                |_| det::hypot(scaling::length(checked.iter().copied()), amp_residual(&u)),
+            );
+            let checked_metric = scales.map_or(checked_norm, |scales| {
+                scales.balance_norm(&checked, amp_residual(&u))
+            });
+            let sampling_metric = scales.map_or(sampling_defect, |scales| {
+                scales.difference_norm(&checked, &res)
+            });
+            if !(checked_metric < budget.tolerance * scale
+                && sampling_metric < budget.tolerance * scale)
             {
                 if finer.refinement >= MAX_AFT_REFINEMENTS {
                     return Err(OrbitError::SamplingUnresolved {
@@ -783,13 +825,17 @@ pub fn solve_hb_seeded<P: OrbitProblem>(
                 omega_fixed
             };
             *trace.last_mut().expect("current iteration") = checked_norm;
-            return Ok(HbOrbit {
-                omega,
-                coeffs,
-                residual_trace: trace,
-                residual: checked_norm,
-                aft_samples: finer.samples,
-                sampling_defect,
+            return Ok(ScaledHbOrbit {
+                orbit: HbOrbit {
+                    omega,
+                    coeffs,
+                    residual_trace: trace,
+                    residual: checked_norm,
+                    aft_samples: finer.samples,
+                    sampling_defect,
+                },
+                scaled_residual: checked_metric,
+                scaled_sampling_defect: sampling_metric,
             });
         }
         // Forward-difference Jacobian over the free unknowns.
@@ -831,13 +877,29 @@ pub fn solve_hb_seeded<P: OrbitProblem>(
             // backbone state column on its own retained oscillation scale;
             // zero coordinates use the admitted amplitude as a seed scale.
             // Frequency and non-backbone solves retain their original rule.
-            let floor = backbone_coordinate_scales
-                .as_ref()
-                .filter(|_| ui < pack.coeff_len())
-                .map_or(1.0, |scales| scales[ui % d]);
+            let floor = scales.map_or_else(
+                || {
+                    backbone_coordinate_scales
+                        .as_ref()
+                        .filter(|_| ui < pack.coeff_len())
+                        .map_or(1.0, |scales| scales[ui % d])
+                },
+                |scales| scales.columns[ui],
+            );
             let h = 1.0e-7 * u[ui].abs().max(floor);
             let saved = u[ui];
             u[ui] = saved + h;
+            let h = if scales.is_some() {
+                let actual = u[ui] - saved;
+                if !u[ui].is_finite() || !actual.is_finite() || actual <= 0.0 {
+                    return Err(OrbitError::BadParameter {
+                        what: "scaled harmonic perturbation must be representable",
+                    });
+                }
+                actual
+            } else {
+                h
+            };
             hb_residual(problem, &pack, &u, omega_fixed, &mut aft, &mut res2);
             let m1 = deflate(&u);
             if let Some(gradient) = amplitude_gradient {
@@ -851,11 +913,25 @@ pub fn solve_hb_seeded<P: OrbitProblem>(
                 } else {
                     0.0
                 };
+                if let Some(scales) = scales {
+                    jac[kept.len() * nn + col] *= scales.columns[ui] / scales.rows[kept.len()];
+                }
             }
             u[ui] = saved;
             for (row, &ri) in kept.iter().enumerate() {
-                jac[row * nn + col] = (m1 * res2[ri] - m0 * res[ri]) / h;
+                jac[row * nn + col] = scales.map_or_else(
+                    || (m1 * res2[ri] - m0 * res[ri]) / h,
+                    |scales| {
+                        (m1 * (res2[ri] / scales.rows[row]) - m0 * (res[ri] / scales.rows[row]))
+                            * (scales.columns[ui] / h)
+                    },
+                );
             }
+        }
+        if scales.is_some() && jac.iter().any(|v| !v.is_finite()) {
+            return Err(OrbitError::BadParameter {
+                what: "scaled harmonic Jacobian must be finite",
+            });
         }
         // Conservative families carry a parity nullspace; a fixed
         // Tikhonov jitter keeps the step deterministic and the
@@ -880,12 +956,22 @@ pub fn solve_hb_seeded<P: OrbitProblem>(
             // amplitude row, whose analytic Jacobian is unscaled above.
             step[kept.len()] = amp0;
         }
+        if let Some(scales) = scales {
+            for (value, unit) in step.iter_mut().zip(&scales.rows) {
+                *value /= unit;
+            }
+        }
         let merit = if amplitude_row.is_some() {
             norm(&step)
         } else {
-            rn * m_now
+            measured * m_now
         };
         factorized.solve(&mut step);
+        if let Some(scales) = scales {
+            for (delta, &ui) in step.iter_mut().zip(&free) {
+                *delta *= scales.columns[ui];
+            }
+        }
         // Deterministic backtracking: halve the step (up to 8 times)
         // until the residual does not grow — the undamped Newton
         // overshoots island problems into the equilibrium basin
@@ -899,10 +985,24 @@ pub fn solve_hb_seeded<P: OrbitProblem>(
             for (col, &ui) in free.iter().enumerate() {
                 u_try[ui] -= alpha * step[col];
             }
+            if scales.is_some()
+                && (u_try.iter().any(|v| !v.is_finite())
+                    || pack.omega_slot.is_some_and(|slot| u_try[slot] <= 0.0))
+            {
+                alpha *= 0.5;
+                continue;
+            }
             hb_residual(problem, &pack, &u_try, omega_fixed, &mut aft, &mut trial);
             let physical_sq: f64 = kept.iter().map(|&i| trial[i] * trial[i]).sum();
             let physical_norm = det::sqrt(physical_sq) * deflate(&u_try);
-            let tn = if amplitude_row.is_some() {
+            let tn = if let Some(scales) = scales {
+                let physical = scales.row_norm(&trial) * deflate(&u_try);
+                if amplitude_row.is_some() {
+                    det::hypot(physical, amp_residual(&u_try) / scales.rows[kept.len()])
+                } else {
+                    physical
+                }
+            } else if amplitude_row.is_some() {
                 det::hypot(physical_norm, amp_residual(&u_try))
             } else {
                 physical_norm
@@ -915,6 +1015,13 @@ pub fn solve_hb_seeded<P: OrbitProblem>(
                 break;
             }
             alpha *= 0.5;
+        }
+        if scales.is_some() && !best_norm.is_finite() {
+            return Err(OrbitError::NewtonStalled {
+                residual: rn,
+                iterations: trace.len(),
+                trace,
+            });
         }
         for (col, &ui) in free.iter().enumerate() {
             u[ui] -= best_alpha * step[col];

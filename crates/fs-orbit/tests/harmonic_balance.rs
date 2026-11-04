@@ -2,7 +2,9 @@
 //! These verify the retained Fourier balance, not continuum orbit existence.
 
 use fs_math::c64::C64;
-use fs_orbit::{HbAnchor, HbBudget, OrbitError, OrbitProblem, solve_hb};
+use fs_orbit::{
+    HbAnchor, HbBudget, HbScales, OrbitError, OrbitProblem, solve_hb, solve_hb_scaled_seeded,
+};
 
 /// x'' + 2 zeta omega_0 x' + omega_0^2 x = dc + F cos(q omega t).
 struct ForcedOscillator {
@@ -880,5 +882,315 @@ fn adaptive_retained_and_omitted_residuals_share_one_physical_budget() {
             assert_eq!(check.state_change_ratio, Some(0.0));
         }
         other => panic!("the full measured equation must meet its single budget: {other:?}"),
+    }
+}
+
+/// Change state, equation and time units independently without changing the
+/// underlying physical balance. Tests compare against the original analytic
+/// coefficients, not against a second invocation of the solver.
+struct PhysicalUnits<P> {
+    problem: P,
+    states: Vec<f64>,
+    equations: Vec<f64>,
+    clock_rate: f64,
+}
+
+impl<P: OrbitProblem> PhysicalUnits<P> {
+    fn scales(&self) -> HbScales {
+        HbScales {
+            states: self.states.clone(),
+            equations: self.equations.clone(),
+            angular_frequency: self.clock_rate,
+        }
+    }
+
+    fn seed(&self, mut normalized: Vec<f64>, unknown_frequency: bool) -> Vec<f64> {
+        let nc = normalized.len() - usize::from(unknown_frequency);
+        for (i, value) in normalized[..nc].iter_mut().enumerate() {
+            *value *= self.states[i % self.states.len()];
+        }
+        if unknown_frequency {
+            normalized[nc] *= self.clock_rate;
+        }
+        normalized
+    }
+}
+
+impl<P: OrbitProblem> OrbitProblem for PhysicalUnits<P> {
+    fn dim(&self) -> usize {
+        self.problem.dim()
+    }
+    fn island(&self, t: f64, x: &[f64], out: &mut [f64]) {
+        let normalized: Vec<_> = x
+            .iter()
+            .zip(&self.states)
+            .map(|(x, unit)| x / unit)
+            .collect();
+        self.problem.island(t * self.clock_rate, &normalized, out);
+        for (value, unit) in out.iter_mut().zip(&self.equations) {
+            *value *= unit;
+        }
+    }
+    fn port(&self, s: C64) -> Vec<C64> {
+        let d = self.dim();
+        let mut port = self.problem.port(s.scale(1.0 / self.clock_rate));
+        for row in 0..d {
+            for col in 0..d {
+                port[row * d + col] =
+                    port[row * d + col].scale(self.equations[row] / self.states[col]);
+            }
+        }
+        port
+    }
+    fn autonomous(&self) -> bool {
+        self.problem.autonomous()
+    }
+}
+
+struct CubicWithPreload(f64);
+impl OrbitProblem for CubicWithPreload {
+    fn dim(&self) -> usize {
+        3
+    }
+    fn island(&self, t: f64, x: &[f64], out: &mut [f64]) {
+        out[0] = fs_math::det::cos(t) - x[0];
+        out[1] = x[0].powi(3) - x[1];
+        out[2] = self.0 - x[2];
+    }
+    fn autonomous(&self) -> bool {
+        false
+    }
+}
+
+#[test]
+fn physical_hb_scales_preserve_small_nonlinear_harmonics_and_replay() {
+    let budget = HbBudget {
+        harmonics: 3,
+        tolerance: 1.0e-11,
+        ..HbBudget::default()
+    };
+    for (states, equations, clock_rate) in [
+        ([1.0, 1.0, 1.0], [1.0, 1.0, 1.0], 1.0),
+        ([1.0e-12, 1.0e6, 1.0], [1.0e8, 1.0e-12, 1.0], 1.0e-3),
+        ([1.0e6, 1.0e-12, 1.0], [1.0e-12, 1.0e6, 1.0], 1.0e3),
+    ] {
+        let problem = PhysicalUnits {
+            problem: CubicWithPreload(0.0),
+            states: states.to_vec(),
+            equations: equations.to_vec(),
+            clock_rate,
+        };
+        let solve = || {
+            solve_hb_scaled_seeded(
+                &problem,
+                HbAnchor::Forced { omega: clock_rate },
+                vec![0.0; 21],
+                &budget,
+                &problem.scales(),
+            )
+            .expect("the nonlinear orbit must not depend on coordinate or equation units")
+        };
+        let result = solve();
+        let replay = solve();
+        assert!(result.scaled_residual < budget.tolerance);
+        assert!(result.scaled_sampling_defect < budget.tolerance);
+        for (k, &unit) in states.iter().enumerate() {
+            for n in 0..=3 {
+                let expected = match (k, n) {
+                    (0, 1) => C64::new(0.25, -0.25),
+                    (1, 1) => C64::new(0.0, -3.0 / 32.0),
+                    (1, 3) => C64::new(-1.0 / 80.0, 1.0 / 160.0),
+                    _ => C64::ZERO,
+                };
+                let actual = result.orbit.coeffs[k][n];
+                assert_complex(actual.scale(1.0 / unit), expected, 1.0e-9);
+                let repeated = replay.orbit.coeffs[k][n];
+                assert_eq!(
+                    [actual.re.to_bits(), actual.im.to_bits()],
+                    [repeated.re.to_bits(), repeated.im.to_bits()]
+                );
+            }
+        }
+        assert_eq!(
+            result.scaled_residual.to_bits(),
+            replay.scaled_residual.to_bits()
+        );
+    }
+}
+
+#[test]
+fn physical_hb_scales_do_not_let_static_preload_hide_an_unsolved_third_harmonic() {
+    let problem = PhysicalUnits {
+        problem: CubicWithPreload(1.0e12),
+        states: vec![1.0e-12, 1.0e-9, 1.0],
+        equations: vec![1.0e-9, 1.0e-12, 1.0],
+        clock_rate: 1.0,
+    };
+    // Exact DC and fundamental, but the generated third harmonic is missing.
+    let mut seed = vec![0.0; 21];
+    seed[2] = 1.0e12;
+    seed[3] = 0.25;
+    seed[6] = -0.25;
+    seed[7] = -3.0 / 32.0;
+    let seed = problem.seed(seed, false);
+    let anchor = HbAnchor::Forced { omega: 1.0 };
+    let budget = HbBudget {
+        harmonics: 3,
+        tolerance: 1.0e-11,
+        ..HbBudget::default()
+    };
+    assert!(matches!(
+        solve_hb_scaled_seeded(
+            &problem,
+            anchor,
+            seed.clone(),
+            &HbBudget {
+                max_newton: 1,
+                ..budget
+            },
+            &problem.scales()
+        ),
+        Err(OrbitError::NewtonStalled { .. }),
+    ));
+    let result = solve_hb_scaled_seeded(&problem, anchor, seed, &budget, &problem.scales()).expect(
+        "the small nonlinear motion must resolve alongside the unrelated static coordinate",
+    );
+    assert_complex(
+        result.orbit.coeffs[1][3].scale(1.0e9),
+        C64::new(-1.0 / 80.0, 1.0 / 160.0),
+        1.0e-9,
+    );
+    assert_eq!(result.orbit.coeffs[2][0].re, 1.0e12);
+    assert!(result.scaled_residual < budget.tolerance);
+}
+
+#[test]
+fn physical_hb_scales_keep_backbone_amplitude_frequency_and_free_phase() {
+    let problem = PhysicalUnits {
+        problem: LinearBackbone,
+        states: vec![1.0e-12, 1.0e6],
+        equations: vec![1.0e6, 1.0e-12],
+        clock_rate: 1.0e-3,
+    };
+    let budget = HbBudget {
+        harmonics: 1,
+        tolerance: 1.0e-10,
+        ..HbBudget::default()
+    };
+    for phase in [0.0, 0.7] {
+        let mut seed = linear_backbone_seed(0.8, phase);
+        *seed.last_mut().unwrap() = 2.6;
+        let result = solve_hb_scaled_seeded(
+            &problem,
+            HbAnchor::Backbone {
+                amplitude: 0.4e-12,
+                omega_guess: 2.6e-3,
+            },
+            problem.seed(seed, true),
+            &budget,
+            &problem.scales(),
+        )
+        .expect("physical scales must preserve the free-phase conservative amplitude constraint");
+        assert!((result.orbit.first_harmonic_amplitude(0) / 0.4e-12 - 1.0).abs() < 1.0e-9);
+        assert!((result.orbit.omega / 2.0e-3 - 1.0).abs() < 1.0e-9);
+        assert_complex(
+            result.orbit.coeffs[1][1].scale(1.0e-6),
+            C64::new(0.0, 2.0) * result.orbit.coeffs[0][1].scale(1.0e12),
+            1.0e-9,
+        );
+        assert!(result.scaled_residual < budget.tolerance);
+    }
+}
+
+#[test]
+fn physical_hb_scales_apply_to_the_independent_sampling_gate() {
+    let problem = PhysicalUnits {
+        problem: SeventhOrder { force: 99.0 / 64.0 },
+        states: vec![1.0e-12],
+        equations: vec![1.0e-12],
+        clock_rate: 1.0,
+    };
+    let budget = HbBudget {
+        harmonics: 1,
+        tolerance: 1.0e-11,
+        ..HbBudget::default()
+    };
+    let result = solve_hb_scaled_seeded(
+        &problem,
+        HbAnchor::Forced { omega: 1.0 },
+        problem.seed(vec![0.0, 0.5, 0.0], false),
+        &budget,
+        &problem.scales(),
+    )
+    .expect("equation units must not hide the seventh-order alias");
+    assert_complex(
+        result.orbit.coeffs[0][1].scale(1.0e12),
+        C64::from_re(0.5),
+        1.0e-9,
+    );
+    assert!(result.orbit.aft_samples > 8);
+    assert!(result.scaled_sampling_defect < budget.tolerance);
+}
+
+#[test]
+fn invalid_physical_hb_scales_refuse_before_source_callbacks() {
+    struct Uncalled;
+    impl OrbitProblem for Uncalled {
+        fn dim(&self) -> usize {
+            2
+        }
+        fn island(&self, _: f64, _: &[f64], _: &mut [f64]) {
+            panic!("invalid scales evaluated the island");
+        }
+        fn port(&self, _: C64) -> Vec<C64> {
+            panic!("invalid scales evaluated the port");
+        }
+        fn autonomous(&self) -> bool {
+            false
+        }
+    }
+    let valid = HbScales {
+        states: vec![1.0; 2],
+        equations: vec![1.0; 2],
+        angular_frequency: 1.0,
+    };
+    let mut invalid = vec![
+        HbScales {
+            states: vec![1.0],
+            ..valid.clone()
+        },
+        HbScales {
+            equations: vec![],
+            ..valid.clone()
+        },
+    ];
+    for value in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        invalid.push(HbScales {
+            states: vec![value, 1.0],
+            ..valid.clone()
+        });
+        invalid.push(HbScales {
+            equations: vec![1.0, value],
+            ..valid.clone()
+        });
+        invalid.push(HbScales {
+            angular_frequency: value,
+            ..valid.clone()
+        });
+    }
+    for scales in invalid {
+        assert!(matches!(
+            solve_hb_scaled_seeded(
+                &Uncalled,
+                HbAnchor::Forced { omega: 1.0 },
+                vec![0.0; 6],
+                &HbBudget {
+                    harmonics: 1,
+                    ..HbBudget::default()
+                },
+                &scales
+            ),
+            Err(OrbitError::BadParameter { .. }),
+        ));
     }
 }
