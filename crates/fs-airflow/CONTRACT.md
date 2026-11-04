@@ -861,13 +861,14 @@ against the analytic constant-property solution across three timestep sizes.
 They also check native CFL budget enforcement, zero external heat, distinct
 applied/endpoint sources, late support failure and cancellation.
 
-### Enclosed horizontal and inclined air layers between finite walls
+### Enclosed horizontal, inclined and vertical air layers between finite walls
 
 `source::enclosure::evaluate_source_enclosed_gas_layers` supplies total gas-gap
 conductance to an original reciprocal thermal link. Both endpoints are finite
 isothermal walls; the gas has negligible storage in this quasi-steady model.
 The declared lower wall determines signed buoyancy independently of endpoint
-ordering. Actual caloric wall temperatures determine the full contrast and the
+ordering; at 90 degrees it names the reference wall for signed heat. Actual
+caloric wall temperatures determine the full contrast and the
 mean temperature used to query one original gas material, retained with its
 thermal snapshot and original correlation evidence on every trial.
 
@@ -882,21 +883,30 @@ Positive wall-plane angles through 60 degrees use the shared
 `HollandsInclinedAirLayer` card with the FULL gravity-based Rayleigh number.
 Its normal driving and along-slope sine correction remain inside the original
 correlation owner. Merely projecting gravity into the horizontal relation is
-not the inclined model. A negative signed Rayleigh number at positive tilt
+not the inclined model. A negative signed Rayleigh number at these inclinations
 refuses; the horizontal stable conduction limit cannot establish an inclined
 heated-from-above model. The actual declared angle is retained with each
 source sample and correlation evaluation. The original observer and complete
 heat assembly consume this same evaluator, including during nonlinear trials.
 
+Exactly 90 degrees selects `WrightVerticalAirLayer` using the magnitude of the
+full gap-based Rayleigh number. Either wall may be hotter; the original link
+retains the signed temperature difference and reciprocal heat. `plate_spans`
+then means `[whole width, whole vertical height]`, with height/gap in `[5,110]`
+and width/gap above 10 as a conservative lateral-extent gate. The shared card
+admits `Ra` in `[0,1e6]` and `Pr` in `[0.70,0.72]`; equilibrium retains `Nu=1`.
+The second span is the physical vertical height, never the smaller span or a
+mesh-cell length. Angles strictly between 60 and 90 degrees remain unsupported.
+
 Bindings declare the normal gap, both complete rectangular plate spans,
 full gravity, wall-plane inclination in degrees and an explicit maximum
 `|beta delta_T|` in `[0,1)`. The native link
 must cover that full rectangle on both walls within floating-point roundoff and have zero
-authored conductance. Thin-layer geometry, air-only source support and all
+authored conductance. Orientation-specific geometry, air-only source support and all
 Rayleigh/Prandtl limits remain with the original card. A matching Pr is not
 evidence that a non-air fluid is supported. Wall temperatures must represent
 uniform isothermal faces; this adapter does not replace resolved wall gradients,
-gas thermal storage, angles above 60 degrees, inclined heated-from-above
+gas thermal storage, unsupported inclinations, tilted heated-from-above
 circulation, sidewall bridges or radiation. The caller must bind the actual
 wall orientation; the link's endpoint ordering is not an inclination model.
 
@@ -936,6 +946,13 @@ the two-wall system; native circuit loss heats its declared material cells,
 and only prescribed reservoirs or other authored supplies contribute external
 heat. Existing source, work-budget, energy and cancellation gates retain their
 original ownership and transaction boundaries.
+
+Vertical-layer tests reconstruct Wright's expression independently, exercise
+both reference walls and heat directions, distinguish vertical height from
+width, and retain film-property refresh. The existing native backward-Euler
+and coupled circuit/radiation tests also include vertical gaps, checking both
+wall storage changes and the complete energy balance. Manufactured source packs
+exercise the material path; they do not establish empirical fluid validation.
 
 ### Shared thermochemical medium in hydraulic and heat paths
 

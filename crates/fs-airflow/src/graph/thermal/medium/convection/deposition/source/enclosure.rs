@@ -1,4 +1,4 @@
-//! Enclosed horizontal or inclined air layers on reciprocal thermal links.
+//! Enclosed horizontal, inclined or vertical air layers on reciprocal links.
 //!
 //! Both endpoints are finite isothermal WALLS. The intervening gas layer has
 //! negligible storage in this quasi-steady approximation; it is not a third
@@ -16,8 +16,10 @@ use super::*;
 /// One complete rectangular air gap between two parallel isothermal walls.
 ///
 /// `lower_cell` declares the physically lower wall independently of the link's
-/// endpoint ordering. `gap` is the normal wall separation; `plate_spans` are
-/// the two WHOLE lateral spans. They are not inferred from mesh-cell centers,
+/// endpoint ordering. At exactly 90 degrees it instead names the reference wall
+/// for signed heat; either vertical wall may be hotter. `gap` is the normal wall
+/// separation; `plate_spans` are the two WHOLE lateral spans, ordered as
+/// [width, vertical height] at 90 degrees. They are not inferred from cell centers,
 /// exposed-area remainders or contact patches. The native link must cover the
 /// full rectangle on BOTH sides, and its authored conductance must be zero: the selected
 /// Nusselt relation already includes the gas's Fourier conduction exactly once.
@@ -25,12 +27,14 @@ use super::*;
 /// the angle between gravity and the wall plane. Zero retains the original
 /// signed horizontal law; positive angles through 60 degrees select the full
 /// inclined heated-from-below law, including its along-slope correction.
+/// Exactly 90 degrees selects the vertical-cavity law with height/gap in
+/// [5,110] and width/gap above 10. Intermediate angles above 60 degrees refuse.
 /// The caller owns this physical orientation; mesh coordinates do not infer it.
 ///
 /// Mean-temperature source properties are a Boussinesq approximation. The
 /// caller explicitly bounds `|beta * (T_lower - T_upper)|` below one. In
 /// addition, the original correlation admits only air, continuum transport,
-/// large lateral aspect ratio, its stated unstable Rayleigh range and no
+/// its stated aspect-ratio and Rayleigh ranges and no
 /// imposed throughflow or moving-wall shear. Matching Pr alone does not
 /// establish that another fluid is supported by the air experiments.
 #[derive(Clone, Copy, Debug)]
@@ -41,9 +45,9 @@ pub struct SourceEnclosedGasLayer {
     pub plate_spans: [Length; 2],
     /// Nonnegative full gravity magnitude, not its wall-normal projection.
     pub gravity_m_s2: f64,
-    /// Wall-plane angle from horizontal in [0, 60] degrees. At a positive
-    /// angle, negative signed Rayleigh refuses instead of using the horizontal
-    /// stable-layer shortcut. Rebind after changing physical orientation.
+    /// Wall-plane angle from horizontal in [0, 60] or exactly 90 degrees.
+    /// Positive angles through 60 refuse negative signed Rayleigh; exactly
+    /// 90 uses its magnitude. Rebind after changing physical orientation.
     pub inclination_degrees: f64,
     /// Explicit relative-density-departure bound in [0, 1).
     pub maximum_relative_density_departure: f64,
@@ -182,12 +186,13 @@ pub fn evaluate_source_enclosed_gas_layers<F: ThermalFluidTransport, E>(
             || !binding.gravity_m_s2.is_finite()
             || binding.gravity_m_s2 < 0.0
             || !binding.inclination_degrees.is_finite()
-            || !(0.0..=60.0).contains(&binding.inclination_degrees)
+            || (!(0.0..=60.0).contains(&binding.inclination_degrees)
+                && binding.inclination_degrees != 90.0)
             || !binding.maximum_relative_density_departure.is_finite()
             || !(0.0..1.0).contains(&binding.maximum_relative_density_departure)
         {
             return Err(ConvectionSourceError::Invalid(
-                "gas layers require positive dimensions, nonnegative gravity, inclination in [0,60] degrees and a density bound in [0,1)",
+                "gas layers require positive dimensions, nonnegative gravity, inclination in [0,60] or exactly 90 degrees and a density bound in [0,1)",
             ).into());
         }
         let area = finite(width * length)?;
@@ -216,12 +221,23 @@ pub fn evaluate_source_enclosed_gas_layers<F: ThermalFluidTransport, E>(
             )
             .into());
         }
-        let aspect = finite(gap / width.min(length))?;
-        if aspect <= 0.0 || aspect >= 0.1 {
-            return Err(ConvectionSourceError::Invalid(
-                "gas layers require gap divided by each whole span below 0.1",
-            )
-            .into());
+        if binding.inclination_degrees == 90.0 {
+            let width_over_gap = finite(width / gap)?;
+            let height_over_gap = finite(length / gap)?;
+            if width_over_gap <= 10.0 || !(5.0..=110.0).contains(&height_over_gap) {
+                return Err(ConvectionSourceError::Invalid(
+                    "vertical gas layers require whole width/gap above 10 and whole height/gap in [5,110]",
+                )
+                .into());
+            }
+        } else {
+            let aspect = finite(gap / width.min(length))?;
+            if aspect <= 0.0 || aspect >= 0.1 {
+                return Err(ConvectionSourceError::Invalid(
+                    "gas layers require gap divided by each whole span below 0.1",
+                )
+                .into());
+            }
         }
         ordered.push(binding);
     }
@@ -276,7 +292,16 @@ pub fn evaluate_source_enclosed_gas_layers<F: ThermalFluidTransport, E>(
             .value()
             .min(binding.plate_spans[1].value());
         let aspect = binding.gap.value() / minimum_span;
-        let (correlation, inputs) = if binding.inclination_degrees == 0.0 {
+        let (correlation, inputs) = if binding.inclination_degrees == 90.0 {
+            (
+                CorrelationId::WrightVerticalAirLayer,
+                CorrelationInputs::vertical_air_layer(
+                    signed_rayleigh.abs(),
+                    transport.prandtl(),
+                    binding.plate_spans[1].value() / binding.gap.value(),
+                ),
+            )
+        } else if binding.inclination_degrees == 0.0 {
             (
                 CorrelationId::HollandsHorizontalAirLayer,
                 CorrelationInputs::horizontal_air_layer(

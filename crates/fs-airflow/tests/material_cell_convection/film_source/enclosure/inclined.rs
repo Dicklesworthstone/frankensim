@@ -107,7 +107,14 @@ fn g0_inclined_geometry_and_unsupported_heated_above_states_refuse() {
     let chart = gas_source::body_curve();
     let model = gas_source::model(1.0);
     let thermal = pair(&chart, [410.0, 390.0], false, 0.0);
-    for angle in [-1.0, 60.0_f64.next_up(), 90.0, f64::NAN, f64::INFINITY] {
+    for angle in [
+        -1.0,
+        60.0_f64.next_up(),
+        75.0,
+        90.0_f64.next_up(),
+        f64::NAN,
+        f64::INFINITY,
+    ] {
         let mut queries = 0;
         let result = evaluate_source_enclosed_gas_layers(
             &thermal,

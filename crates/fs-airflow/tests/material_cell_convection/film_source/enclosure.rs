@@ -12,6 +12,8 @@ mod gas_source;
 
 #[path = "enclosure/inclined.rs"]
 mod inclined;
+#[path = "enclosure/vertical.rs"]
+mod vertical;
 
 const GAP: f64 = 0.018;
 const SPANS: [f64; 2] = [0.2, 0.3];
@@ -99,7 +101,7 @@ fn pair<'a>(
     .0
 }
 
-// Independent dimensional algebra and source horizontal-layer expression.
+// Independent dimensional algebra and source gas-layer expressions.
 fn expected(model: &ThermochemicalGasModel, lower: f64, upper: f64) -> (f64, f64, f64) {
     expected_at_inclination(model, lower, upper, 0.0)
 }
@@ -123,7 +125,9 @@ fn expected_at_inclination(
         / (s.dynamic_viscosity * s.thermal_conductivity);
     let angle = inclination_degrees.to_radians();
     let normal_ra = ra * angle.cos();
-    let nu = if normal_ra <= 1708.0 {
+    let nu = if inclination_degrees == 90.0 {
+        vertical::expected_nusselt(ra.abs(), SPANS[1] / GAP)
+    } else if normal_ra <= 1708.0 {
         1.0
     } else {
         1.0 + 1.44
@@ -189,6 +193,8 @@ fn implicit_layer_resolves_actual_endpoint_mean_and_closes_both_original_wall_en
         ([410.0, 390.0], 0.0),
         ([390.0, 410.0], 0.0),
         ([410.0, 390.0], 45.0),
+        ([410.0, 390.0], 90.0),
+        ([390.0, 410.0], 90.0),
     ] {
         for reversed in [false, true] {
             let thermal = pair(&chart, initial, reversed, 0.0);

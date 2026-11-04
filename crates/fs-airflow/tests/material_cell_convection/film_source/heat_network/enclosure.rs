@@ -276,7 +276,7 @@ fn with_case<T>(
     })
 }
 
-// Independent Hollands algebra and Stefan-Boltzmann parallel-plate balance.
+// Independent gas-layer algebra and Stefan-Boltzmann parallel-plate balance.
 // The gas properties still come from the original manufactured material law.
 fn gap_conductance(
     gas: &ThermochemicalGasModel,
@@ -296,7 +296,17 @@ fn gap_conductance(
         / (s.dynamic_viscosity * s.thermal_conductivity);
     let angle = inclination_degrees.to_radians();
     let normal_ra = ra * angle.cos();
-    let nu = if normal_ra <= 1708.0 {
+    let nu = if inclination_degrees == 90.0 {
+        let magnitude = ra.abs();
+        let tall = if magnitude <= 1e4 {
+            1.0 + 1.75967e-10 * magnitude.powf(2.2984755)
+        } else if magnitude <= 5e4 {
+            0.028154 * magnitude.powf(0.4134)
+        } else {
+            0.0673838 * magnitude.cbrt()
+        };
+        tall.max(0.242 * (magnitude / (SPANS[1] / GAP)).powf(0.272))
+    } else if normal_ra <= 1708.0 {
         1.0
     } else {
         1.0 + 1.44
@@ -340,7 +350,7 @@ fn reference(gas: &ThermochemicalGasModel, pressure: f64, inclination_degrees: f
 
 #[test]
 fn gas_gap_changes_actual_circuit_and_wall_storage_with_closed_radiation() {
-    for inclination_degrees in [0.0, 45.0] {
+    for inclination_degrees in [0.0, 45.0, 90.0] {
         with_case(true, true, |cx, _, heat, thermal, gas| {
             let saved = thermal.cells().clone();
             let layers = [SourceEnclosedGasLayer {
