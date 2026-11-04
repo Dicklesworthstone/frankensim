@@ -5,7 +5,9 @@ material, the original two-sound channel, native rigid pistons, and the existing
 finite thermal timeline. A heater can now launch counterflow and second sound
 while its own finite caloric storage changes the heat it supplies. Two finite
 contacts can connect a heater and a thermal sink through the same channel,
-including an authored normal-fluid viscous wall model.
+including authored normal-fluid wall drag or unsteady transverse-profile memory.
+Distributed irreversible heat can enter explicit native caloric receivers on
+the same timeline as both finite contacts.
 
 ## Normal-fluid wall viscosity and fourth sound
 
@@ -66,11 +68,90 @@ volumes. The current piston composition includes their inertia and reports the
 interior wall reaction; it does not infer side-wall drag on those endpoint
 half volumes.
 
-This reduced model does not resolve transverse startup, high-frequency Stokes
-boundary layers, wall turbulence, longitudinal or second viscosities. The
+This scalar Darcy model does not resolve transverse startup or high-frequency
+Stokes boundary layers. The spectrum below supplies that unsteady response.
+Neither wall closure resolves turbulence, longitudinal or second viscosities. The
 frozen two-fluid properties and small-signal thermal limits remain explicit.
 The wall-force convention and its frequency-dependent limitations follow
 [Kekutia and Chkhaidze, section 3](https://arxiv.org/abs/cond-mat/0604193).
+
+## Unsteady transverse normal-fluid profiles
+
+`NormalViscousSpectrum` retains the viscous memory of a circular capillary or
+wide parallel-plate slit. It is bound to the same frozen `TwoFluidState` as the
+channel, including normal density and viscosity. Each mode obeys
+`dU_m/dt + lambda_m*U_m = a_n`; its positive weight determines the mean flow,
+kinetic storage and irreversible heat:
+
+| Quantity per fluid volume | Modal expression |
+| --- | --- |
+| Section-mean normal velocity | `sum(w_m*U_m)` |
+| Normal kinetic energy | `rho_n/2 * sum(w_m*U_m^2)` |
+| Normal viscous heating rate | `rho_n * sum(w_m*lambda_m*U_m^2)` |
+
+Circular modes use J0 zeros with `w_m=4/j_m^2` and
+`lambda_m=(eta_n/rho_n)*j_m^2/R^2`. Slit modes use the full gap H,
+weights `8/((2m+1)*pi)^2` and rates `(eta_n/rho_n)*((2m+1)*pi/H)^2`.
+These are classical transverse Stokes eigenfunctions, not an empirical
+frequency fit. See [Szymanski's tube solution](https://www.numdam.org/item/JMPA_1932_9_11__67_0.pdf),
+[Womersley's oscillatory-flow analysis](https://doi.org/10.1113/jphysiol.1955.sp005276),
+and [NIST's Bessel-root conventions](https://dlmf.nist.gov/10.21).
+
+```rust,ignore
+use fs_material::superfluid::NormalViscousSpectrum;
+
+let spectrum = NormalViscousSpectrum::circular_capillary(material, radius_m, 8)?;
+let mut channel = TwoFluidChannel::try_new_with_normal_profile(
+    material, length_m, area_m2, cells, limits, spectrum,
+)?;
+channel.initialize(&pressure, &temperature, &normal, &superfluid, || false)?;
+// Optional: interpret the authored mean flow as already fully developed.
+channel.initialize_normal_profile_steady(|| false)?;
+```
+
+Choose 1 through 32 resolved modes. One additional positive mode represents
+the unresolved infinite tail by matching its inertia and static mobility.
+The complete approximation retains unit normal inertia and the Poiseuille
+resistance. It does not discard or renormalize omitted inertia.
+`harmonic_mobility_s(omega)` returns velocity/acceleration for the
+`exp(+i*omega*t)` convention. `harmonic_mobility_error_bound_s(omega)` bounds
+only the analytical error from the aggregate tail; it does not cover
+floating-point, longitudinal discretization, timestep or physical-model errors.
+Increase the mode count to meet the frequency band's accuracy needs.
+
+Ordinary initialization gives each mode the authored mean velocity, a uniform
+initial profile with zero excess energy. The optional steady initializer seeds
+inverse-rate modal velocities while preserving the mean. It admits the
+profile's positive kinetic energy before time advances. Zero viscosity has
+inviscid modal dynamics but no selected steady profile. The public modal
+values are spectral amplitudes, not point samples across the capillary.
+Admission bounds the profile RMS speed as well as the original section means.
+
+The channel stores accepted and candidate profile memory at interior faces.
+`normal_profile_excess_energy_j()` reports storage above section-mean kinetic
+energy; this is already included in `wave_energy_j()` and every step report.
+It must not be added again by a coupler. Existing closed thermal and native
+rigid-piston compositions therefore retain the complete storage. Exact positive
+heat integrals and wall impulses use the material owner's shared factors.
+Every accepted loss is exported once through the original per-cell heat arrays.
+Rejected response probes, caloric intake or cancellation publish no profile
+memory, clock, heat history or field.
+
+The longitudinal solve remains two original scalar tridiagonals. Profile work
+and memory are O(cells * modes), with at most 33 modes. Exponentials are cached
+once per distinct timestep outside the face loops; the channel step performs
+no heap allocation. Both endpoint response matrices use the same operator.
+The wall integration has no explicit viscous stability restriction; the wave
+Courant policy and timestep refinement still govern temporal accuracy.
+
+This resolves fully developed linear transverse momentum diffusion, including
+startup and oscillatory phase lag, without a low-Womersley assumption. It
+requires continuum no-slip normal flow, fixed geometry and frozen properties.
+The section-mean mutual-friction closure accelerates all normal modes equally;
+it does not resolve local radial vortex forces. Entrance regions, moving side
+walls, normal turbulence, vortex evolution and transverse thermodynamics remain
+outside the model. Endpoint half volumes retain their separate existing owner;
+interior profile memory does not infer an additional end-wall force.
 
 ## Run the viscous heater-to-sink example
 
@@ -80,17 +161,19 @@ cargo run -p fs-couple --features superfluid --example superfluid_heat_link
 
 This connects two finite native caloric cells through the sourced **1.8 K SVP
 helium-II** reference in an authored one-micrometre-radius, one-metre capillary.
-The permeability follows the steady circular-wall closure. The example starts
-from an independently derived quasisteady counterflow/fountain-pressure
-profile, then advances both finite temperatures and both contacts together.
+Eight resolved circular Stokes modes and one matched tail retain the normal
+profile's memory. The example starts from an independently derived steady
+counterflow/fountain-pressure profile and seeds its developed modal shape,
+then advances both finite temperatures and both contacts together.
 Its geometry, caloric capacities and conductances are demonstration inputs,
 not measured apparatus calibration. It prints normal relaxation rate, both
-temperature histories, heat power at each end, each finite cell's caloric
-balance, exported distributed viscous heat and wave availability.
-
-The spatial viscous heat remains separately exported. Depositing it into the
-two endpoint cells would require a declared physical heat route and would not
-follow from the boundary-contact model alone.
+temperature histories, heat power at each end, each endpoint's caloric balance,
+distributed viscous heat, profile excess energy and wave availability.
+One explicitly authored finite caloric receiver per channel cell collects the
+local irreversible heat through the composition below. The example checks each
+receiver's intake against the original per-cell loss and the summed stored
+heat against cumulative channel dissipation. These receiver capacities are
+demonstration inputs and do not update the helium's frozen coefficients.
 
 ## Run the finite heater example
 
@@ -162,6 +245,32 @@ one active contact reduces to the single-contact equations. As in the original
 single-contact composition, thermal-network coupling is a first-order split
 and reference-state heat is distinct from quadratic wave availability.
 
+## Distributed heating during finite-contact transport
+
+`counterflow_pair::dissipation::advance_counterflow_heat_pair_with_dissipation`
+adds an explicit `destinations: &[CellId]` to the paired-contact composition.
+Exactly one active, unique receiving cell is required per channel cell. Both
+endpoint contact cells must be distinct from those receivers: adding heat to a
+contact after solving its midpoint temperature would invalidate the contact
+equation. A route is never inferred from geometry or a material name.
+
+The original native network advances once. Both finite-contact powers solve
+against its original caloric laws; their combined heat intake is prepared.
+The actual wave step supplies its current per-cell mutual-friction plus
+normal-viscous heat to a second native caloric intake for distinct distributed
+receivers. Only after all laws, balances and cancellation checks pass do the
+wave, profile and complete thermal candidate publish together. This uses one
+physical wave step and one native network march. It does not repeat damping,
+estimate loss from kinetic-energy subtraction or replay previously accepted heat.
+
+`CounterflowDissipationStep.contacts` preserves the original reference-heat,
+entropy, wave-port and contact-intake accounts. Its separate
+`dissipation_intake` and `dissipation_transfer_residual_j` account for the
+irreversible distributed heat. Each receiver's original caloric chart remains
+authoritative, including phase plateaux. The thermal-network split remains
+first order and the channel coefficients remain frozen. Choose and justify
+the physical heat route for the intended apparatus.
+
 ## Three distinct thermal quantities
 
 For reference temperature `T0` and channel temperature perturbation `theta`:
@@ -182,6 +291,8 @@ Optional mutual-friction and normal-wall losses remain in the channel's
 per-cell heat fields and report. This boundary contact does not redirect all
 distributed heating into the heater. Existing closed-channel and piston thermal
 compositions remain available for explicitly mapped dissipative-heat destinations.
+The paired distributed-heating composition above provides such destinations
+while both finite boundary contacts operate.
 
 ## Thermal boundary response for other couplings
 
@@ -223,10 +334,13 @@ does not silently assign a universal B value to a material name.
 ```bash
 cargo test -p fs-material --test superfluid
 cargo test -p fs-material --test superfluid_viscosity
+cargo test -p fs-material --test superfluid_normal_spectrum
 cargo test -p fs-duct --features superfluid --test superfluid_channel --test superfluid_ports
 cargo test -p fs-duct --features superfluid --test superfluid_viscosity
+cargo test -p fs-duct --features superfluid --test superfluid_normal_profile
 cargo test -p fs-couple --features superfluid --test superfluid_counterflow --test superfluid_heat
 cargo test -p fs-couple --features superfluid --test superfluid_counterflow_pair
+cargo test -p fs-couple --features superfluid --test superfluid_transport_dissipation
 ```
 
 The contact tests include independent finite-capacity/two-cell equations,
@@ -243,3 +357,11 @@ Pair-contact regressions add independent coupled finite-capacity equations,
 nonlinear heater-to-sink transport with viscous walls, simultaneous latent
 plateaux, zero/one-contact limits, temporary power/chart projection, and
 complete thermal/wave/viscous-history refusal and cancellation.
+
+Profile regressions add independent circular/slit startup and harmonic
+references, exact inertia and steady resistance, positive tail bounds,
+developed-profile storage, full energy/impulse/heat balances, flow reversal,
+native piston coupling and transactional mode memory. Distributed transport
+checks finite contacts and local native calorics together, original source
+intake, mapping and chart refusals, and early/final cancellation with accepted
+nonzero profile history.

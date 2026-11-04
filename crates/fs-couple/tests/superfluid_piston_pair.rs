@@ -8,11 +8,27 @@ use fs_duct::superfluid::{
     BodyForce, CellSample, ChannelEnd, ComponentForceDensity, FaceSample, LinearizationLimits,
     MutualFriction, TwoFluidChannel,
 };
-use fs_material::superfluid::{NormalViscousWall, TwoFluidProperties, TwoFluidState};
+use fs_material::superfluid::{
+    NormalViscousSpectrum, NormalViscousWall, TwoFluidProperties, TwoFluidState,
+};
 use fs_mbd::{MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3};
 
 const RHO: f64 = 8.0;
 const AREA: f64 = 0.01;
+
+#[derive(Clone, Copy)]
+enum NormalWallModel {
+    None,
+    Darcy(NormalViscousWall),
+    CircularProfile,
+    SlitProfile,
+}
+
+impl NormalWallModel {
+    fn is_profile(self) -> bool {
+        matches!(self, Self::CircularProfile | Self::SlitProfile)
+    }
+}
 
 fn channel(
     n: usize,
@@ -34,6 +50,26 @@ fn channel_with_wall(
     pressure_limit: f64,
     wall: Option<NormalViscousWall>,
 ) -> TwoFluidChannel {
+    channel_with_model(
+        n,
+        alpha,
+        pressure,
+        velocity,
+        relative,
+        pressure_limit,
+        wall.map_or(NormalWallModel::None, NormalWallModel::Darcy),
+    )
+}
+
+fn channel_with_model(
+    n: usize,
+    alpha: f64,
+    pressure: f64,
+    velocity: f64,
+    relative: f64,
+    pressure_limit: f64,
+    model: NormalWallModel,
+) -> TwoFluidChannel {
     let material = TwoFluidState::try_new(TwoFluidProperties {
         temperature_k: 2.0,
         density_kg_m3: RHO,
@@ -50,11 +86,27 @@ fn channel_with_wall(
         max_temperature_perturbation_k: 0.1,
         max_component_speed_m_s: 0.2,
     };
-    let mut channel = match wall {
-        Some(wall) => {
+    let mut channel = match model {
+        NormalWallModel::Darcy(wall) => {
             TwoFluidChannel::try_new_with_normal_wall(material, 1.0, AREA, n, limits, wall)
         }
-        None => TwoFluidChannel::try_new(material, 1.0, AREA, n, limits),
+        NormalWallModel::None => TwoFluidChannel::try_new(material, 1.0, AREA, n, limits),
+        NormalWallModel::CircularProfile | NormalWallModel::SlitProfile => {
+            // Both spectra have the scalar case's DC permeability, but their
+            // independent profile memory and kinetic storage remain active.
+            let spectrum = match model {
+                NormalWallModel::CircularProfile => NormalViscousSpectrum::circular_capillary(
+                    material,
+                    (8.0_f64 * 0.0003).sqrt(),
+                    8,
+                ),
+                _ => {
+                    NormalViscousSpectrum::parallel_plates(material, (12.0_f64 * 0.0003).sqrt(), 8)
+                }
+            }
+            .unwrap();
+            TwoFluidChannel::try_new_with_normal_profile(material, 1.0, AREA, n, limits, spectrum)
+        }
     }
     .unwrap();
     let mut normal = vec![velocity; n + 1];
@@ -73,6 +125,10 @@ fn channel_with_wall(
             || false,
         )
         .unwrap();
+    if model.is_profile() {
+        channel.initialize_normal_profile_steady(|| false).unwrap();
+        assert!(channel.normal_profile_excess_energy_j().unwrap() > 0.0);
+    }
     channel
 }
 
@@ -149,7 +205,51 @@ fn total_energy(
     properties: [MassProperties; 2],
 ) -> f64 {
     let half_mass = 0.5 * RHO * AREA / channel.cells() as f64;
-    channel.wave_energy_j().unwrap()
+    let fluid_energy = if let Some(spectrum) = channel.normal_viscous_spectrum() {
+        // Independently integrate physical thermodynamic storage and the FULL
+        // weighted normal profile, instead of trusting a mean-only face norm.
+        let volume = AREA / channel.cells() as f64;
+        let material = channel.material();
+        let mut energy = 0.0;
+        for i in 0..channel.cells() {
+            let cell = channel.cell(i).unwrap();
+            let p = cell.pressure_perturbation_pa;
+            let theta = cell.temperature_perturbation_k;
+            energy += 0.5
+                * volume
+                * (material.isothermal_compressibility_per_pa() * p * p
+                    - 2.0 * material.thermal_expansion_per_k() * p * theta
+                    + material.density_kg_m3() * material.specific_heat_cp_j_kg_k()
+                        / material.temperature_k()
+                        * theta
+                        * theta);
+        }
+        for i in 1..channel.cells() {
+            let normal_squared: f64 = spectrum
+                .modes()
+                .iter()
+                .enumerate()
+                .map(|(mode, coefficients)| {
+                    let velocity = channel.normal_profile_mode_velocity_m_s(i, mode).unwrap();
+                    coefficients.weight * velocity * velocity
+                })
+                .sum();
+            let superfluid = channel.face(i).unwrap().superfluid_velocity_m_s;
+            energy += 0.5
+                * volume
+                * (material.normal_density_kg_m3() * normal_squared
+                    + material.superfluid_density_kg_m3() * superfluid * superfluid);
+        }
+        close(
+            channel.wave_energy_j().unwrap(),
+            energy,
+            5e-13 * energy.abs() + 1e-21,
+        );
+        energy
+    } else {
+        channel.wave_energy_j().unwrap()
+    };
+    fluid_energy
         + (0..2)
             .map(|i| {
                 let v = bodies[i]
@@ -425,9 +525,17 @@ fn spatial_component_and_piston_forces_keep_full_volume_impulse_and_actual_work(
 #[test]
 fn stationary_wall_reaction_closes_native_pair_momentum_and_separate_heat() {
     let wall = NormalViscousWall::try_new(0.0003).unwrap();
-    for n in [2, 24] {
+    for (n, model) in [2, 24].into_iter().flat_map(|n| {
+        [
+            NormalWallModel::Darcy(wall),
+            NormalWallModel::CircularProfile,
+            NormalWallModel::SlitProfile,
+        ]
+        .map(|model| (n, model))
+    }) {
         let v0 = 0.007;
-        let mut fluid = channel_with_wall(n, 0.1, 0.1, v0, 0.02, 4.0, Some(wall));
+        let mut fluid = channel_with_model(n, 0.1, 0.1, v0, 0.02, 4.0, model);
+        let profile_before = fluid.normal_profile_excess_energy_j().unwrap();
         let (mut bodies, properties, boundaries) = mechanics([0.02, 0.035], v0);
         let p0 = total_momentum(&fluid, bodies, properties);
         let e0 = total_energy(&fluid, bodies, properties);
@@ -491,6 +599,10 @@ fn stationary_wall_reaction_closes_native_pair_momentum_and_separate_heat() {
         }
         assert!(wall_impulse < 0.0);
         assert!(mutual_heat > 0.0 && viscous_heat > 0.0);
+        if model.is_profile() {
+            let profile_after = fluid.normal_profile_excess_energy_j().unwrap();
+            assert!((profile_after - profile_before).abs() > 1e-6 * profile_before);
+        }
     }
 }
 
@@ -504,10 +616,22 @@ struct Snapshot {
     faces: Vec<FaceSample>,
     last_heat: Vec<f64>,
     last_viscous_heat: Vec<f64>,
+    profile_modes: Vec<f64>,
     bodies: [RigidBodyState; 2],
 }
 
 fn snapshot(fluid: &TwoFluidChannel, bodies: [RigidBodyState; 2]) -> Snapshot {
+    let profile_modes = fluid
+        .normal_viscous_spectrum()
+        .map_or_else(Vec::new, |spectrum| {
+            (1..fluid.cells())
+                .flat_map(|face| {
+                    (0..spectrum.modes().len()).map(move |mode| {
+                        fluid.normal_profile_mode_velocity_m_s(face, mode).unwrap()
+                    })
+                })
+                .collect()
+        });
     Snapshot {
         time: fluid.time_s(),
         energy: fluid.wave_energy_j().unwrap(),
@@ -519,6 +643,7 @@ fn snapshot(fluid: &TwoFluidChannel, bodies: [RigidBodyState; 2]) -> Snapshot {
             .collect(),
         last_heat: fluid.last_mutual_friction_heat_j().to_vec(),
         last_viscous_heat: fluid.last_normal_viscous_heat_j().to_vec(),
+        profile_modes,
         bodies,
     }
 }
@@ -718,21 +843,33 @@ mod thermal_tests {
 
     #[test]
     fn driven_pair_deposits_each_friction_increment_once_and_closes_full_storage() {
-        check_driven_pair_heat(None);
+        check_driven_pair_heat(NormalWallModel::None);
     }
 
     #[test]
     fn viscous_driven_pair_routes_both_losses_and_external_wall_impulse() {
-        check_driven_pair_heat(Some(NormalViscousWall::try_new(0.0003).unwrap()));
+        check_driven_pair_heat(NormalWallModel::Darcy(
+            NormalViscousWall::try_new(0.0003).unwrap(),
+        ));
     }
 
-    fn check_driven_pair_heat(wall: Option<NormalViscousWall>) {
+    #[test]
+    fn unsteady_profiles_preserve_native_pair_storage_and_both_caloric_heat_routes() {
+        for model in [
+            NormalWallModel::CircularProfile,
+            NormalWallModel::SlitProfile,
+        ] {
+            check_driven_pair_heat(model);
+        }
+    }
+
+    fn check_driven_pair_heat(model: NormalWallModel) {
         let law = Caloric {
             maximum_specific_energy_j_kg: 2.0,
         };
         let source = 1e-5;
         let mut thermal = thermal(&law, source);
-        let mut fluid = channel_with_wall(N, 0.1, 0.4, 0.003, 0.02, 4.0, wall);
+        let mut fluid = channel_with_model(N, 0.1, 0.4, 0.003, 0.02, 4.0, model);
         let original_material = *fluid.material();
         let (mut bodies, properties, boundaries) = mechanics([0.02, 0.035], 0.003);
         let ids = destinations();
@@ -819,7 +956,7 @@ mod thermal_tests {
             );
         }
         assert!(total_heat > 0.0);
-        if wall.is_some() {
+        if !matches!(model, NormalWallModel::None) {
             assert!(fluid.cumulative_normal_viscous_heat_j() > 0.0);
             assert!(wall_impulse != 0.0);
         }
@@ -834,18 +971,25 @@ mod thermal_tests {
 
     #[test]
     fn caloric_and_final_cancellation_refusals_publish_none_of_the_four_owners() {
-        check_pair_heat_refusal(None);
+        check_pair_heat_refusal(NormalWallModel::None);
     }
 
     #[test]
     fn viscous_caloric_and_final_cancellation_refusals_preserve_all_owners() {
-        check_pair_heat_refusal(Some(NormalViscousWall::try_new(0.0003).unwrap()));
+        check_pair_heat_refusal(NormalWallModel::Darcy(
+            NormalViscousWall::try_new(0.0003).unwrap(),
+        ));
     }
 
-    fn check_pair_heat_refusal(wall: Option<NormalViscousWall>) {
+    #[test]
+    fn unsteady_profile_caloric_refusal_and_final_cancellation_preserve_all_owners() {
+        check_pair_heat_refusal(NormalWallModel::CircularProfile);
+    }
+
+    fn check_pair_heat_refusal(model: NormalWallModel) {
         let make = || {
             (
-                channel_with_wall(N, 0.1, 0.4, 0.003, 0.02, 4.0, wall),
+                channel_with_model(N, 0.1, 0.4, 0.003, 0.02, 4.0, model),
                 mechanics([0.02, 0.035], 0.003),
             )
         };

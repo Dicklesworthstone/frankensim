@@ -16,6 +16,8 @@
 //! entropy have separate accounts. It is not a finite-excursion helium EOS or
 //! total internal-energy theorem. Wall/mutual-friction heat stays in the original
 //! channel's spatial heat field; it is not assigned to either endpoint cell.
+//! The optional [`dissipation`] composition routes that field to explicitly
+//! mapped distinct native caloric receivers within the same atomic update.
 
 use std::collections::BTreeMap;
 
@@ -26,6 +28,9 @@ use super::counterflow::{
     CounterflowHeatControls, CounterflowHeatError, CounterflowThermalContact, admit_temperature,
     check, nonnegative, positive, thermal_check,
 };
+
+/// Explicit spatial dissipation destinations on the same finite thermal timeline.
+pub mod dissipation;
 
 /// Original owner reports and both finite-contact accounts, ordered [left,right].
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -68,12 +73,39 @@ pub struct CounterflowPairHeatStep {
 pub fn advance_counterflow_heat_pair(
     channel: &mut TwoFluidChannel,
     thermal: &mut DepositionSimulation<'_>,
-    mut contacts: [CounterflowThermalContact; 2],
+    contacts: [CounterflowThermalContact; 2],
     dt_s: f64,
     friction: MutualFriction,
     controls: CounterflowHeatControls,
     cancelled: impl Fn() -> bool,
 ) -> Result<CounterflowPairHeatStep, CounterflowHeatError> {
+    advance_pair_prepared(
+        channel,
+        thermal,
+        contacts,
+        dt_s,
+        friction,
+        controls,
+        cancelled,
+        |next, report, _| Ok((next, report)),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn advance_pair_prepared<'a, T>(
+    channel: &mut TwoFluidChannel,
+    thermal: &mut DepositionSimulation<'a>,
+    mut contacts: [CounterflowThermalContact; 2],
+    dt_s: f64,
+    friction: MutualFriction,
+    controls: CounterflowHeatControls,
+    cancelled: impl Fn() -> bool,
+    prepare: impl FnOnce(
+        DepositionSimulation<'a>,
+        CounterflowPairHeatStep,
+        &[f64],
+    ) -> Result<(DepositionSimulation<'a>, T), CounterflowHeatError>,
+) -> Result<T, CounterflowHeatError> {
     check(&cancelled)?;
     let t0 = channel.material().temperature_k();
     if contacts[0].end == ChannelEnd::Right {
@@ -181,7 +213,7 @@ pub fn advance_counterflow_heat_pair(
         boundary,
         friction,
         || cancelled(),
-        |wave, _| {
+        |wave, per_cell_heat| {
             let total_heat = heat_j[0] + heat_j[1];
             let heat_residual = heat_intake.external_heat_j + wave.boundary_counterflow_heat_j;
             let entropy_residual = wave.boundary_entropy_j_k + total_heat / t0;
@@ -210,7 +242,7 @@ pub fn advance_counterflow_heat_pair(
                 ));
             }
             check(&cancelled)?;
-            Ok((
+            prepare(
                 next_thermal,
                 CounterflowPairHeatStep {
                     channel: *wave,
@@ -227,7 +259,8 @@ pub fn advance_counterflow_heat_pair(
                     contact_availability_loss_j: availability_loss,
                     iterations: solution.probes,
                 },
-            ))
+                per_cell_heat,
+            )
         },
     )?;
     *thermal = next;

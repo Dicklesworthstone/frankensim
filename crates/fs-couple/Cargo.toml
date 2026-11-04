@@ -158,3 +158,7 @@ required-features = ["superfluid"]
 [[example]]
 name = "superfluid_heat_link"
 required-features = ["superfluid"]
+
+[[test]]
+name = "superfluid_transport_dissipation"
+required-features = ["superfluid"]
