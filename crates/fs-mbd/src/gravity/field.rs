@@ -9,6 +9,9 @@ use super::{CentralGravity, GravityError, UniformGravity, finite, same_frame};
 use crate::Vec3;
 use fs_ga::Mat3;
 
+mod source;
+pub use source::{QuadrupoleSourceExtent, QuadrupoleSourceGravity};
+
 /// A conservative point sample in one declared inertial coordinate frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PointGravitySample {
@@ -99,21 +102,29 @@ impl PointGravityField for CentralGravity {
         // division avoids forming r³, whose intermediate can overflow even
         // when every requested physical value is representable.
         let (direction, radius, potential) = self.radial(frame, position_world_m)?;
-        let acceleration = direction.scale(finite(potential / radius)?);
-        let mu_over_r3 = finite((-potential / radius) / radius)?;
-        let n = [direction.x, direction.y, direction.z];
-        let mut gradient = [0.0; 9];
-        for i in 0..3 {
-            for j in 0..3 {
-                let diagonal = if i == j { 1.0 } else { 0.0 };
-                gradient[3 * i + j] = mu_over_r3 * ((3.0 * n[i]) * n[j] - diagonal);
-            }
-        }
-        PointGravitySample {
-            acceleration_world_m_s2: acceleration,
-            specific_potential_j_kg: potential,
-            acceleration_gradient_s2: Mat3 { m: gradient },
-        }
-        .validate()
+        central_sample(direction, radius, potential)
     }
+}
+
+fn central_sample(
+    direction: Vec3,
+    radius: f64,
+    potential: f64,
+) -> Result<PointGravitySample, GravityError> {
+    let acceleration = direction.scale(finite(potential / radius)?);
+    let mu_over_r3 = finite((-potential / radius) / radius)?;
+    let n = [direction.x, direction.y, direction.z];
+    let mut gradient = [0.0; 9];
+    for i in 0..3 {
+        for j in 0..3 {
+            let diagonal = if i == j { 1.0 } else { 0.0 };
+            gradient[3 * i + j] = mu_over_r3 * ((3.0 * n[i]) * n[j] - diagonal);
+        }
+    }
+    PointGravitySample {
+        acceleration_world_m_s2: acceleration,
+        specific_potential_j_kg: potential,
+        acceleration_gradient_s2: Mat3 { m: gradient },
+    }
+    .validate()
 }

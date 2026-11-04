@@ -8,7 +8,9 @@
 
 /// Conservative point-field values and analytic spatial derivatives.
 pub mod field;
-pub use field::{PointGravityField, PointGravitySample};
+pub use field::{
+    PointGravityField, PointGravitySample, QuadrupoleSourceExtent, QuadrupoleSourceGravity,
+};
 
 use crate::{
     DynamicsDiagnostics, DynamicsError, Gravity, MassProperties, Pose, RigidBodyIntegrator,

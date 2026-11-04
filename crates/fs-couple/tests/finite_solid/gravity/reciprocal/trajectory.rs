@@ -52,6 +52,142 @@ fn total_momentum(
 }
 
 #[test]
+fn rotating_extended_source_matches_native_subflows_and_exchanges_actual_spin() {
+    with_cx(|_, cx| {
+        let material = bind(&source_card(6.0, 1.0, false, false));
+        let solid = FiniteSolidBody::new(
+            problem(&material, &[], &[]),
+            &[[0.0; 3]; 4],
+            &[[0.0; 3]; 4],
+            0.0,
+            Default::default(),
+            cx,
+        )
+        .unwrap();
+        let (source, properties) = extended_source();
+        let c = step_controls(0.02);
+        let before = solid.native_state().clone();
+        let (next, moved, report) = solid
+            .reciprocal_quadrupole_gravity_step_candidate(
+                source,
+                properties,
+                SOURCE_EXTENT,
+                &[],
+                [0.0; 3],
+                None,
+                c,
+                cx,
+            )
+            .unwrap();
+        assert_ne!(moved.pose().orientation(), source.pose().orientation());
+        assert!(
+            report
+                .first_kick
+                .source
+                .angular_increment_body
+                .x
+                .hypot(report.first_kick.source.angular_increment_body.y)
+                .hypot(report.first_kick.source.angular_increment_body.z)
+                > 1e-7
+        );
+        assert!(
+            report.path_separation_lower_bound_m > SOURCE_EXTENT.minimum_sample_radius_m().unwrap()
+        );
+        let half = ReciprocalGravityKickControls {
+            duration_s: 0.5 * c.gravity.duration_s,
+            ..c.gravity
+        };
+        let (a, s0, _) = solid
+            .reciprocal_quadrupole_gravity_kick_candidate(
+                source,
+                properties,
+                SOURCE_EXTENT,
+                half,
+                cx,
+            )
+            .unwrap();
+        let (b, s1, _) = a
+            .rigid_free_flight_candidate(
+                &[s0],
+                &[properties],
+                &[],
+                [0.0; 3],
+                &[Wrench::ZERO],
+                Gravity::ZERO,
+                c.gravity.duration_s,
+                c.gravity.balance_origin_m,
+                c.middle,
+                cx,
+            )
+            .unwrap();
+        let (expected, expected_source, _) = b
+            .reciprocal_quadrupole_gravity_kick_candidate(
+                s1[0],
+                properties,
+                SOURCE_EXTENT,
+                half,
+                cx,
+            )
+            .unwrap();
+        assert_eq!(next.native_state(), expected.native_state());
+        assert_eq!(moved, expected_source);
+        assert_eq!(next.native_state().a, b.native_state().a);
+        assert_eq!(next.native_state().steps, 1);
+        let (p0, l0) = total_momentum(&solid, source, c.gravity.balance_origin_m, cx);
+        let (p1, l1) = total_momentum(&next, moved, c.gravity.balance_origin_m, cx);
+        near_vector(components(p1.sub(p0)), [0.0; 3], 2e-10);
+        near_vector(components(l1.sub(l0)), [0.0; 3], 2e-10);
+        near(
+            next.kinetic_energy_j().unwrap() - solid.kinetic_energy_j().unwrap()
+                + moved.kinetic_energy(properties).unwrap()
+                - source.kinetic_energy(properties).unwrap()
+                + report.middle.strain_change_j
+                + report.interaction_potential_change_j,
+            report.integration_defect_j + report.middle.source_work_j,
+            3e-12,
+        );
+        near(report.work_energy_residual_j, 0.0, 3e-12);
+        let (shifted, shifted_source, _) = solid
+            .reciprocal_quadrupole_gravity_step_candidate(
+                source,
+                properties,
+                SOURCE_EXTENT,
+                &[],
+                [0.0; 3],
+                None,
+                ReciprocalGravityStepControls {
+                    gravity: ReciprocalGravityKickControls {
+                        balance_origin_m: [-1.3, 2.2, -0.6],
+                        ..c.gravity
+                    },
+                    ..c
+                },
+                cx,
+            )
+            .unwrap();
+        assert_eq!(shifted.native_state(), next.native_state());
+        assert_eq!(shifted_source, moved);
+        assert!(matches!(
+            solid.reciprocal_quadrupole_gravity_step_candidate(
+                source,
+                properties,
+                QuadrupoleSourceExtent {
+                    radius_m: 1.2,
+                    ..SOURCE_EXTENT
+                },
+                &[],
+                [0.0; 3],
+                None,
+                c,
+                cx
+            ),
+            Err(ReciprocalGravityStepError::Separation { .. })
+        ));
+        assert_eq!(solid.native_state(), &before);
+    });
+}
+
+#[test]
 fn actual_moving_source_step_matches_native_strang_subflows_and_pair_balances() {
     with_cx(|_, cx| {
         let material = bind(&source_card(6.0, 1.0, false, false));
@@ -169,16 +305,36 @@ fn coupled_motion_refines_at_second_order_while_preserving_actual_pair_momentum(
         .unwrap();
         let (source, inertia) = source_at([-3.0, 0.3, -1.0]);
         let source = RigidBodyState::new(source.pose(), Vec3::ZERO, Vec3::ZERO).unwrap();
-        let run = |steps: usize| {
+        let run = |steps: usize, extended: bool| {
             let mut solid = initial.clone();
             let mut source = source;
             let mut c = step_controls(0.08 / steps as f64);
             c.gravity.gravitational_constant_m3_kg_s2 = 20.0;
             let initial_momentum = total_momentum(&solid, source, c.gravity.balance_origin_m, cx);
             for _ in 0..steps {
-                let (next, next_source, report) = solid
-                    .reciprocal_gravity_step_candidate(source, inertia, &[], [0.0; 3], None, c, cx)
-                    .unwrap();
+                let (next, next_source, report) = if extended {
+                    solid.reciprocal_quadrupole_gravity_step_candidate(
+                        source,
+                        inertia,
+                        SOURCE_EXTENT,
+                        &[],
+                        [0.0; 3],
+                        None,
+                        c,
+                        cx,
+                    )
+                } else {
+                    solid.reciprocal_gravity_step_candidate(
+                        source,
+                        inertia,
+                        &[],
+                        [0.0; 3],
+                        None,
+                        c,
+                        cx,
+                    )
+                }
+                .unwrap();
                 near(report.work_energy_residual_j, 0.0, 2e-10);
                 solid = next;
                 source = next_source;
@@ -200,11 +356,10 @@ fn coupled_motion_refines_at_second_order_while_preserving_actual_pair_momentum(
             state.extend(&solid.native_state().v);
             state.extend(components(source.pose().position_world()));
             state.extend(components(source.linear_momentum_world()));
+            state.extend(components(source.angular_momentum_body()));
+            state.extend(source.pose().orientation().components());
             state
         };
-        let coarse = run(4);
-        let medium = run(8);
-        let fine = run(16);
         let difference = |a: &[f64], b: &[f64]| {
             a.iter()
                 .zip(b)
@@ -212,17 +367,22 @@ fn coupled_motion_refines_at_second_order_while_preserving_actual_pair_momentum(
                 .sum::<f64>()
                 .sqrt()
         };
-        let coarse_error = difference(&coarse, &medium);
-        let fine_error = difference(&medium, &fine);
-        assert!(
-            fine_error > 1e-12,
-            "refinement difference must resolve the physical trajectory"
-        );
-        let ratio = coarse_error / fine_error;
-        assert!(
-            (2.8..5.2).contains(&ratio),
-            "symmetric splitting refinement ratio {ratio:e}"
-        );
+        for extended in [false, true] {
+            let coarse = run(4, extended);
+            let medium = run(8, extended);
+            let fine = run(16, extended);
+            let coarse_error = difference(&coarse, &medium);
+            let fine_error = difference(&medium, &fine);
+            assert!(
+                fine_error > 1e-12,
+                "refinement difference must resolve the physical trajectory"
+            );
+            let ratio = coarse_error / fine_error;
+            assert!(
+                (2.8..5.2).contains(&ratio),
+                "symmetric splitting refinement ratio {ratio:e}, extended={extended}"
+            );
+        }
     });
 }
 

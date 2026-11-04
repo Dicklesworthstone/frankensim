@@ -6,7 +6,10 @@
 //! second-order splitting error in smooth, adequately resolved regimes; its
 //! measured energy defect is not physical heating or a trajectory error bound.
 
-use super::{ReciprocalGravityKick, ReciprocalGravityKickControls, components, dd, vector};
+use super::{
+    QuadrupoleSourceExtent, ReciprocalGravityKick, ReciprocalGravityKickControls, components, dd,
+    vector,
+};
 use crate::finite_solid::contact::step::free::{
     FreeFlightControls, FreeFlightError, FreeFlightReport,
 };
@@ -113,6 +116,64 @@ impl<'a> FiniteSolidBody<'a> {
         controls: ReciprocalGravityStepControls,
         cx: &Cx<'_>,
     ) -> Result<(Self, RigidBodyState, ReciprocalGravityStep), ReciprocalGravityStepError> {
+        self.gravity_source_step_candidate(
+            source,
+            properties,
+            None,
+            nodal_forces_n,
+            body_force_n_m3,
+            uniform_pressure_pa,
+            controls,
+            cx,
+        )
+    }
+
+    /// Advance an extended, rotating source and the original deformable solid.
+    ///
+    /// Each half-kick samples the source's actual COM pose and full inertia and
+    /// exchanges both linear impulse and tidal COM spin. Native free rotation
+    /// therefore changes the endpoint field. The original material middle flow,
+    /// supports, work accounts and separate splitting/total-energy gates remain
+    /// unchanged. The accepted swept relative tetrahedra must stay farther than
+    /// both `minimum_separation_m` and the declared source radius/ratio; this
+    /// conservative linear-path admission is not physical continuous CCD or a
+    /// multipole/solid-quadrature accuracy certificate.
+    #[allow(clippy::too_many_arguments)]
+    pub fn reciprocal_quadrupole_gravity_step_candidate(
+        &self,
+        source: RigidBodyState,
+        properties: MassProperties,
+        extent: QuadrupoleSourceExtent,
+        nodal_forces_n: &[(usize, f64)],
+        body_force_n_m3: [f64; 3],
+        uniform_pressure_pa: Option<f64>,
+        controls: ReciprocalGravityStepControls,
+        cx: &Cx<'_>,
+    ) -> Result<(Self, RigidBodyState, ReciprocalGravityStep), ReciprocalGravityStepError> {
+        self.gravity_source_step_candidate(
+            source,
+            properties,
+            Some(extent),
+            nodal_forces_n,
+            body_force_n_m3,
+            uniform_pressure_pa,
+            controls,
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn gravity_source_step_candidate(
+        &self,
+        source: RigidBodyState,
+        properties: MassProperties,
+        extent: Option<QuadrupoleSourceExtent>,
+        nodal_forces_n: &[(usize, f64)],
+        body_force_n_m3: [f64; 3],
+        uniform_pressure_pa: Option<f64>,
+        controls: ReciprocalGravityStepControls,
+        cx: &Cx<'_>,
+    ) -> Result<(Self, RigidBodyState, ReciprocalGravityStep), ReciprocalGravityStepError> {
         poll(cx)?;
         let h = controls.gravity.duration_s;
         if !h.is_finite()
@@ -137,13 +198,22 @@ impl<'a> FiniteSolidBody<'a> {
                 "finite bounded trajectory controls required",
             ));
         }
+        let minimum_separation_m = match extent {
+            Some(extent) => controls.minimum_separation_m.max(
+                extent
+                    .minimum_sample_radius_m()
+                    .map_err(|error| FiniteSolidError::Source(error.to_string()))?
+                    .next_up(),
+            ),
+            None => controls.minimum_separation_m,
+        };
         let before_x = self.current_positions(cx)?;
         self.gravity_path_clearance(
             &before_x,
             &before_x,
             source,
             source,
-            controls.minimum_separation_m,
+            minimum_separation_m,
             cx,
         )?;
         let half = ReciprocalGravityKickControls {
@@ -151,7 +221,7 @@ impl<'a> FiniteSolidBody<'a> {
             ..controls.gravity
         };
         let (kicked, kicked_source, first_kick) =
-            self.reciprocal_gravity_kick_candidate(source, properties, half, cx)?;
+            self.gravity_source_kick_candidate(source, properties, extent, half, cx)?;
         let middle_result = match uniform_pressure_pa {
             None => kicked.rigid_free_flight_candidate(
                 &[kicked_source],
@@ -187,11 +257,11 @@ impl<'a> FiniteSolidBody<'a> {
             &after_x,
             source,
             moved_source,
-            controls.minimum_separation_m,
+            minimum_separation_m,
             cx,
         )?;
         let (candidate, final_source, last_kick) =
-            moved.reciprocal_gravity_kick_candidate(moved_source, properties, half, cx)?;
+            moved.gravity_source_kick_candidate(moved_source, properties, extent, half, cx)?;
         let potential = dd(last_kick.potential_energy_j) - dd(first_kick.potential_energy_j);
         let split = dd(first_kick.impulse_work_j) + dd(last_kick.impulse_work_j) + potential;
         let kinetic = dd(first_kick.kinetic_energy_change_j)

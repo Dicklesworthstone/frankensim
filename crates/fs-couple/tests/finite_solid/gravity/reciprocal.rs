@@ -3,8 +3,10 @@
 mod trajectory;
 
 use super::*;
-use fs_couple::finite_solid::gravity::reciprocal::ReciprocalGravityKickControls;
-use fs_mbd::gravity::CentralGravity;
+use fs_couple::finite_solid::gravity::reciprocal::{
+    QuadrupoleSourceExtent, ReciprocalGravityKickControls,
+};
+use fs_mbd::gravity::{CentralGravity, QuadrupoleSourceGravity};
 use fs_mbd::{MassProperties, Pose, RigidBodyState, UnitQuaternion};
 
 fn kick_controls() -> ReciprocalGravityKickControls {
@@ -25,6 +27,34 @@ fn source_at(position: [f64; 3]) -> (RigidBodyState, MassProperties) {
     )
     .unwrap();
     (body, inertia)
+}
+const SOURCE_EXTENT: QuadrupoleSourceExtent = QuadrupoleSourceExtent {
+    radius_m: 0.7,
+    maximum_radius_ratio: 0.3,
+};
+fn extended_source() -> (RigidBodyState, MassProperties) {
+    let (source, properties) = source_at([-3.0, 0.3, -1.0]);
+    let properties = MassProperties::from_principal_frame(
+        properties.mass(),
+        Vec3::ZERO,
+        properties.principal_inertia_body(),
+        UnitQuaternion::from_axis_angle(Vec3::new(1.0, 2.0, -0.5), 0.6).unwrap(),
+    )
+    .unwrap();
+    let pose = Pose::new(
+        source.pose().position_world(),
+        UnitQuaternion::from_axis_angle(Vec3::new(-2.0, 1.0, 0.5), 0.4).unwrap(),
+    )
+    .unwrap();
+    (
+        RigidBodyState::new(
+            pose,
+            source.linear_momentum_world(),
+            source.angular_momentum_body(),
+        )
+        .unwrap(),
+        properties,
+    )
 }
 fn near_vector(a: [f64; 3], b: [f64; 3], tolerance: f64) {
     for c in 0..3 {
@@ -77,6 +107,185 @@ fn oracle(x: [[f64; 3]; 4], rho: [f64; 4], source: [f64; 3], graded: bool) -> ([
 /// Exact P1 consistent mass integral of rho*N_a*N_b, including graded rho.
 fn mass(a: usize, b: usize, rho: [f64; 4]) -> f64 {
     VOLUME * (rho.iter().sum::<f64>() + rho[a] + rho[b]) / if a == b { 60.0 } else { 120.0 }
+}
+
+#[test]
+fn extended_source_spin_is_the_discrete_potential_derivative_with_actual_pair_recoil() {
+    with_cx(|_, cx| {
+        let material = bind(&source_card(6.0, 1.0, false, false));
+        let (source, properties) = extended_source();
+        let c = kick_controls();
+        for fixed in [vec![], vec![(0, 0.0), (1, 0.0), (2, 0.0)]] {
+            let body = FiniteSolidBody::new(
+                problem(&material, &fixed, &[]),
+                &[[0.0; 3]; 4],
+                &[[0.0; 3]; 4],
+                0.0,
+                Default::default(),
+                cx,
+            )
+            .unwrap();
+            let before = body.native_state().clone();
+            let (next, recoiled, report) = body
+                .reciprocal_quadrupole_gravity_kick_candidate(
+                    source,
+                    properties,
+                    SOURCE_EXTENT,
+                    c,
+                    cx,
+                )
+                .unwrap();
+            let spin = recoiled
+                .angular_momentum_body()
+                .sub(source.angular_momentum_body());
+            assert!(spin.x.hypot(spin.y).hypot(spin.z) > 1e-7);
+            let prepared = body.problem().prepare(cx).unwrap();
+            let potential = |orientation| {
+                let pose = Pose::new(source.pose().position_world(), orientation).unwrap();
+                let gravity = QuadrupoleSourceGravity::new(
+                    FRAME,
+                    pose,
+                    properties,
+                    c.gravitational_constant_m3_kg_s2,
+                    SOURCE_EXTENT,
+                )
+                .unwrap();
+                let field = fs_couple::solid_gravity::bind_field(&gravity, FRAME);
+                prepared
+                    .gravity_force_and_potential(&[6.0], &[0.0; 12], &field, cx)
+                    .unwrap()
+                    .1
+            };
+            for axis in 0..3 {
+                let h = 1e-5;
+                let mut direction = [0.0; 3];
+                direction[axis] = h;
+                let plus = source
+                    .pose()
+                    .orientation()
+                    .right_exp(vector(direction))
+                    .unwrap();
+                let minus = source
+                    .pose()
+                    .orientation()
+                    .right_exp(vector(direction).scale(-1.0))
+                    .unwrap();
+                near(
+                    components(spin)[axis] / c.duration_s,
+                    -(potential(plus) - potential(minus)) / (2.0 * h),
+                    2e-9,
+                );
+            }
+            let p0 = body.momentum_about(c.balance_origin_m, cx).unwrap();
+            let p1 = next.momentum_about(c.balance_origin_m, cx).unwrap();
+            let source_dp = recoiled
+                .linear_momentum_world()
+                .sub(source.linear_momentum_world());
+            let linear = vector(std::array::from_fn(|i| {
+                p1.linear_kg_m_s[i] - p0.linear_kg_m_s[i]
+            }))
+            .add(source_dp);
+            let angular = vector(std::array::from_fn(|i| {
+                p1.angular_kg_m2_s[i] - p0.angular_kg_m2_s[i]
+            }))
+            .add(
+                source
+                    .pose()
+                    .position_world()
+                    .sub(vector(c.balance_origin_m))
+                    .cross(source_dp),
+            )
+            .add(source.pose().orientation().rotate_body_to_world(spin));
+            near_vector(
+                components(linear),
+                report.solid.support.linear_kg_m_s,
+                3e-13,
+            );
+            near_vector(
+                components(angular),
+                report.solid.support.angular_kg_m2_s,
+                3e-13,
+            );
+            if !fixed.is_empty() {
+                assert!(
+                    report
+                        .solid
+                        .support
+                        .linear_kg_m_s
+                        .iter()
+                        .any(|x| x.abs() > 1e-6)
+                );
+            }
+            near(
+                report.kinetic_energy_change_j,
+                next.kinetic_energy_j().unwrap() - body.kinetic_energy_j().unwrap()
+                    + recoiled.kinetic_energy(properties).unwrap()
+                    - source.kinetic_energy(properties).unwrap(),
+                2e-14,
+            );
+            near(report.impulse_work_j, report.kinetic_energy_change_j, 2e-14);
+            assert_eq!(body.native_state(), &before);
+            assert_eq!(recoiled.pose(), source.pose());
+            let (shifted, shifted_source, _) = body
+                .reciprocal_quadrupole_gravity_kick_candidate(
+                    source,
+                    properties,
+                    SOURCE_EXTENT,
+                    ReciprocalGravityKickControls {
+                        balance_origin_m: [-1.1, 2.3, -0.7],
+                        ..c
+                    },
+                    cx,
+                )
+                .unwrap();
+            assert_eq!(shifted.native_state(), next.native_state());
+            assert_eq!(shifted_source, recoiled);
+        }
+    });
+}
+
+#[test]
+fn isotropic_source_kick_retains_monopole_bits_and_extent_refusal_is_atomic() {
+    with_cx(|_, cx| {
+        let material = bind(&source_card(6.0, 1.0, false, false));
+        let body = FiniteSolidBody::new(
+            problem(&material, &[], &[]),
+            &[[0.0; 3]; 4],
+            &[[0.0; 3]; 4],
+            0.0,
+            Default::default(),
+            cx,
+        )
+        .unwrap();
+        let (source, _) = extended_source();
+        let properties = MassProperties::new(3.0, Vec3::ZERO, Vec3::new(0.3, 0.3, 0.3)).unwrap();
+        let c = kick_controls();
+        let (monopole, monopole_source, mono) = body
+            .reciprocal_gravity_kick_candidate(source, properties, c, cx)
+            .unwrap();
+        let (extended, extended_source, quad) = body
+            .reciprocal_quadrupole_gravity_kick_candidate(source, properties, SOURCE_EXTENT, c, cx)
+            .unwrap();
+        assert_eq!(monopole.native_state(), extended.native_state());
+        assert_eq!(monopole_source, extended_source);
+        assert_eq!(mono.source, quad.source);
+        assert_eq!(mono.potential_energy_j, quad.potential_energy_j);
+        let before = body.native_state().clone();
+        assert!(
+            body.reciprocal_quadrupole_gravity_kick_candidate(
+                source,
+                properties,
+                QuadrupoleSourceExtent {
+                    radius_m: 3.0,
+                    ..SOURCE_EXTENT
+                },
+                c,
+                cx
+            )
+            .is_err()
+        );
+        assert_eq!(body.native_state(), &before);
+    });
 }
 
 #[test]

@@ -690,6 +690,15 @@ potential, with caller-supplied source position and G M. Rocket environments
 reuse this owner. `UniformGravity` binds the existing acceleration to an explicit
 potential datum. Neither infers Earth, a radius, softening or a rotating frame.
 
+`gravity::QuadrupoleSourceGravity` exposes a native extended source's original
+mass, full inertia and COM pose through the same potential/force correction and
+its analytic spatial derivative. A declared inertia-compatible source radius
+and radius/distance ratio admit far-field point and continuum samples. Isotropic
+inertia reproduces `CentralGravity` exactly. Sampling a source snapshot supplies
+no recoil or spin update; reciprocal consumers apply the equal/opposite force
+and source COM torque from that same potential. No interior-gravity or
+higher-multipole accuracy is claimed.
+
 `gravity::step_in_field` uses the native `step_verlet_with` endpoint-load map
 for conservative force/torque half-kicks and samples the actual
 endpoint pose. It returns the native state/diagnostic receipt with the same

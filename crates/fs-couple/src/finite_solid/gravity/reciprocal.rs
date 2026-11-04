@@ -1,9 +1,9 @@
 //! A frozen-configuration Newtonian kick with finite-source recoil.
 //!
-//! Native CentralGravity and the original solid quadrature supply one discrete
+//! Native gravity fields and the original solid quadrature supply one discrete
 //! pair potential and its forces. The full consistent mass changes the solid's
-//! velocity; the native rigid momentum owner changes the source's translation.
-//! The source is a monopole at its COM, so its spin is unchanged. This is a
+//! velocity; the native rigid momentum owner changes the source's translation
+//! and, for an explicitly selected quadrupole, its spin. This is a
 //! Hamiltonian force subflow, not a complete time integrator or a claim that
 //! kinetic plus potential energy is conserved during an isolated kick.
 
@@ -14,7 +14,8 @@ use super::{BoundGravity, StationaryGravity, checkpoint, dd};
 use crate::finite_solid::impulse::{FiniteSolidImpulse, FiniteSolidImpulseControls};
 use crate::finite_solid::{Cx, FiniteSolidBody, FiniteSolidError, inflate};
 use fs_math::dd::Dd;
-use fs_mbd::gravity::CentralGravity;
+pub use fs_mbd::gravity::QuadrupoleSourceExtent;
+use fs_mbd::gravity::{CentralGravity, PointGravityField, QuadrupoleSourceGravity};
 use fs_mbd::{MassProperties, MomentumImpulseReceipt, RigidBodyState, Vec3};
 
 /// Declared physical exposure and the original native impulse allowances.
@@ -44,7 +45,7 @@ pub struct ReciprocalGravityKick {
     pub source: MomentumImpulseReceipt,
     /// Pair momentum change MINUS the solid's stationary support impulse.
     pub linear_residual_kg_m_s: [f64; 3],
-    /// Includes source orbital momentum about the declared balance origin.
+    /// Includes source spin and orbital momentum about the declared balance origin.
     pub angular_residual_kg_m2_s: [f64; 3],
     pub kinetic_energy_change_j: f64,
     pub impulse_work_j: f64,
@@ -75,6 +76,42 @@ impl<'a> FiniteSolidBody<'a> {
         controls: ReciprocalGravityKickControls,
         cx: &Cx<'_>,
     ) -> Result<(Self, RigidBodyState, ReciprocalGravityKick), FiniteSolidError> {
+        self.gravity_source_kick_candidate(source, properties, None, controls, cx)
+    }
+
+    /// Recoil and tidal spin of an extended source under the same discrete
+    /// potential that loads the actual solid quadrature.
+    ///
+    /// The original source inertia and orientation supply its quadrupole field.
+    /// Its COM couple is the negative source-relative moment of the nodal
+    /// impulses: by affine shape completeness this is also the negative moment
+    /// of the quadrature forces and the source orientation derivative of their
+    /// potential. It is not a balance projection. Isotropic source inertia
+    /// reduces exactly to the monopole kick. Other kick semantics are unchanged.
+    ///
+    /// The declared extent is checked against source inertia and every sampled
+    /// quadrature position. This frozen kick does not certify clearance of the
+    /// whole solid or an intervening trajectory; the paired trajectory entry
+    /// point additionally checks its swept per-element bounds.
+    pub fn reciprocal_quadrupole_gravity_kick_candidate(
+        &self,
+        source: RigidBodyState,
+        properties: MassProperties,
+        extent: QuadrupoleSourceExtent,
+        controls: ReciprocalGravityKickControls,
+        cx: &Cx<'_>,
+    ) -> Result<(Self, RigidBodyState, ReciprocalGravityKick), FiniteSolidError> {
+        self.gravity_source_kick_candidate(source, properties, Some(extent), controls, cx)
+    }
+
+    fn gravity_source_kick_candidate(
+        &self,
+        source: RigidBodyState,
+        properties: MassProperties,
+        extent: Option<QuadrupoleSourceExtent>,
+        controls: ReciprocalGravityKickControls,
+        cx: &Cx<'_>,
+    ) -> Result<(Self, RigidBodyState, ReciprocalGravityKick), FiniteSolidError> {
         checkpoint(cx)?;
         if !controls.duration_s.is_finite()
             || controls.duration_s <= 0.0
@@ -99,16 +136,37 @@ impl<'a> FiniteSolidBody<'a> {
             controls.gravitational_constant_m3_kg_s2 * properties.mass(),
         )
         .map_err(|error| FiniteSolidError::Source(error.to_string()))?;
+        let extended = extent
+            .map(|extent| {
+                QuadrupoleSourceGravity::new(
+                    controls.frame,
+                    source.pose(),
+                    properties,
+                    controls.gravitational_constant_m3_kg_s2,
+                    extent,
+                )
+            })
+            .transpose()
+            .map_err(|error| FiniteSolidError::Source(error.to_string()))?;
+        let selected: &dyn PointGravityField = match &extended {
+            Some(extended) => extended,
+            None => &field,
+        };
+        let principal = properties.principal_inertia_body();
+        let spin_reaction =
+            extended.is_some() && !(principal.x == principal.y && principal.y == principal.z);
         let gravity = BoundGravity::new(
             &self.problem,
             self.reference_density_field.as_deref(),
-            StationaryGravity::new(&field, controls.frame),
+            StationaryGravity::new(selected, controls.frame),
             cx,
         )?;
         let displacement = inflate(&self.state.q, &self.free, &self.fixed);
         let (force, potential_energy_j) =
             gravity.force_and_potential(&self.prepared, &displacement, cx)?;
         let mut total = [Dd::ZERO; 3];
+        let mut couple = [Dd::ZERO; 3];
+        let center = components(source.pose().position_world());
         let mut impulses = Vec::with_capacity(force.len() / 3);
         for (node, force) in force.chunks_exact(3).enumerate() {
             if node % 256 == 0 {
@@ -123,11 +181,30 @@ impl<'a> FiniteSolidBody<'a> {
             for c in 0..3 {
                 total[c] = total[c] + dd(impulse[c]);
             }
+            if spin_reaction {
+                // Same rounded current nodes used by the original solid owner;
+                // source-relative differences avoid a distant reporting origin.
+                let arm = std::array::from_fn(|c| {
+                    dd(self.problem.nodes_m[node][c] + displacement[3 * node + c]) - dd(center[c])
+                });
+                let moment = cross(arm, impulse.map(dd));
+                for c in 0..3 {
+                    couple[c] = couple[c] - moment[c];
+                }
+            }
             impulses.push((node, impulse));
         }
         let reaction = total.map(|x| (-x).to_f64());
+        let spin = if spin_reaction {
+            source
+                .pose()
+                .orientation()
+                .rotate_world_to_body(vector(couple.map(Dd::to_f64)))
+        } else {
+            Vec3::ZERO
+        };
         let source_receipt = source
-            .apply_momentum_impulse(properties, vector(reaction), Vec3::ZERO)
+            .apply_momentum_impulse(properties, vector(reaction), spin)
             .map_err(|error| FiniteSolidError::Source(error.to_string()))?;
         // Check the source separately: opposite unresolved increments cannot
         // disappear in a joint residual. The solid owner gates its own update.
@@ -148,6 +225,12 @@ impl<'a> FiniteSolidBody<'a> {
             dd(components(source.pose().position_world())[c]) - dd(controls.balance_origin_m[c])
         });
         let source_orbital = cross(arm, source_increment);
+        let source_spin = components(
+            source
+                .pose()
+                .orientation()
+                .rotate_body_to_world(source_receipt.angular_increment_body),
+        );
         // Native residuals were measured from M*(v_after-v_before), so these
         // identities retain actual solid increments without subtracting large
         // endpoint momenta or repeating a full mass-matrix multiplication.
@@ -158,10 +241,14 @@ impl<'a> FiniteSolidBody<'a> {
                 .to_f64()
         });
         let angular = std::array::from_fn(|c| {
-            (dd(solid.applied.angular_kg_m2_s[c])
+            let value = dd(solid.applied.angular_kg_m2_s[c])
                 + dd(solid.angular_residual_kg_m2_s[c])
-                + source_orbital[c])
-                .to_f64()
+                + source_orbital[c];
+            if spin_reaction {
+                (value + dd(source_spin[c])).to_f64()
+            } else {
+                value.to_f64()
+            }
         });
         let work_residual_j =
             (dd(solid.work_residual_j) + dd(source_receipt.work.work_energy_residual_j)).to_f64();

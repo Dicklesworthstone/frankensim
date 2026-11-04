@@ -30091,3 +30091,46 @@ continuation through the original finite-time equations.
 `source_count` continues to count physical sources; `source_path_count` reports all propagation paths. The existing `maximum_source_receiver_pairs` budget counts every path/output pair, and retained root-iteration bounds include that multiplicity. Full history coverage and Doppler bandwidth admission apply separately to every path. Missing reflected prehistory or tails refuse the complete observation instead of becoming silence. Existing global sample indices, no-allocation callbacks, cancellation rollback, pressure units and `PressureRenderer` sinks remain the owners.
 
 Focused G1/G3 tests reconstruct the reflected waveform from independent source-image polynomials, verify original physical-source accounting and exact callback partitioning, retain coherent source cancellation, and exercise path-work, history, boundary identity and transactional cancellation refusals. The underlying ideal stationary-wall, quiescent lossless compact-source model limits remain; this adds no source feedback or experimental acoustic qualification.
+
+## Extended gravity source recoil and tidal spin
+
+`reciprocal_quadrupole_gravity_kick_candidate` and
+`reciprocal_quadrupole_gravity_step_candidate` extend the original finite-solid
+reciprocal interaction with the native `QuadrupoleSourceGravity` field. The
+source's original mass, full inertia and actual COM pose determine one
+monopole-plus-second-moment potential, acceleration and analytic spatial
+derivative. The original cellwise/nodal reference-mass quadrature and consistent
+mass remain the solid's owners. The original monopole APIs and isotropic-inertia
+reduction retain the original arithmetic.
+
+The rigid source receives the opposite net nodal impulse and the negative
+source-relative moment of those same impulses as a COM spin impulse. Affine
+shape completeness makes this the orientation derivative of the same discrete
+quadrature potential, up to rounding; it is not a momentum projection. Native
+rigid impulse work includes spin, and the joint angular account includes actual
+source spin, orbital momentum, and the solid's separate stationary support
+reaction. Source-relative compensated moment accumulation keeps the physical
+update independent of the reporting origin. Each native participant and the
+combined exchange retain their original residual gates.
+
+The trajectory uses the same reciprocal half-kicks and native material/free
+rigid middle flow. Both endpoint source positions and orientations are sampled,
+so tidal spin changes the subsequent field. The original independent splitting
+defect, total work/energy and noncancelling momentum gates remain; no complete
+trajectory energy-conservation claim is added. Native acceleration/history
+continue to describe the material middle flow.
+
+An explicit source COM bounding radius must be compatible with its native
+inertia, and radius/distance must remain below the declared ratio in (0,1).
+The frozen kick admits quadrature sample positions; the trajectory additionally
+requires every per-element swept relative bounding box to clear radius/ratio
+and the caller's minimum separation. These conservative linear-path checks do
+not certify curved physical CCD, source contact, neglected higher multipoles,
+interior/near-field gravity, or spatial quadrature accuracy. A source/domain,
+work, native-step or cancellation refusal publishes neither participant.
+
+Focused tests compare field potential, force, spatial derivative and source
+orientation torque; exercise exact isotropic reduction; measure actual pair
+linear/spin/orbital momentum including supports; replay the original native
+subflows; refine both source models; shift the reporting origin; and refuse
+inadmissible extents atomically.
