@@ -22,7 +22,9 @@
 //! pressure/eigenstrain projection and are not silently averaged here.
 //!
 //! The returned ordinary stiffness/mass pencil feeds the existing spectral
-//! and linear-dynamics owners. Supports are homogeneous displacement DOFs.
+//! and linear-dynamics owners. Thermal or dead-load equilibrium also feeds the
+//! shared signed initial-stress tangent, retaining the same strain formulation
+//! and reference mass. Supports are homogeneous displacement DOFs.
 //! Geometry admission samples corners, centre and integration points; this
 //! does not certify global injectivity of a warped brick. No finite-strain,
 //! general shear-locking or continuum-convergence claim is made.
@@ -38,6 +40,7 @@ use std::collections::BTreeSet;
 
 pub use super::{
     QuadraticElementThermalResponse as Hex8ElementThermalResponse,
+    QuadraticPrestressedAssembly as Hex8PrestressedAssembly,
     QuadraticThermalResponse as Hex8ThermalResponse,
 };
 

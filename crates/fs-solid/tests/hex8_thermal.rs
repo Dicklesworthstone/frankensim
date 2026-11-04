@@ -164,7 +164,7 @@ fn g1_g3_anisotropic_expansion_is_stress_free_on_the_warped_reference_geometry()
 #[test]
 fn g1_heterogeneous_thermal_restraint_keeps_each_source_and_its_physical_reaction() {
     with_cx(false, |cx| {
-        let index = |x, y, z| 4 * x + 2 * y + z;
+        let index = |x: usize, y: usize, z: usize| 4 * x + 2 * y + z;
         let mut nodes = Vec::new();
         for x in 0..3 {
             for y in 0..2 {
@@ -258,20 +258,7 @@ fn manufactured(
     form: Formulation,
     a: f64,
 ) -> ([[f64; 3]; 8], f64, [f64; 6]) {
-    let h = std::f64::consts::FRAC_1_SQRT_2;
-    let coefficients = if form == Formulation::BBar {
-        [
-            [a / 6.0, a / 6.0, a / 6.0, 0.0, 0.0, 0.0],
-            [0.0, 0.0, 0.0, a * h, 0.0, 0.0],
-            [2.0 * a / 3.0, -a / 3.0, -a / 3.0, 0.0, 0.0, 0.0],
-        ]
-    } else {
-        [
-            [0.0; 6],
-            [0.0, 0.0, 0.0, a * h, 0.0, 0.0],
-            [a, 0.0, 0.0, 0.0, 0.0, 0.0],
-        ]
-    };
+    let coefficients = manufactured_strain_coefficients(form, a);
     let s = coefficients.map(|e| stress(law, e));
     let tensors = s.map(tensor);
     let mean = std::array::from_fn(|i| s[0][i] + 0.5 * (s[1][i] + s[2][i]));
@@ -319,11 +306,266 @@ fn manufactured(
     (force, energy, mean)
 }
 
+fn manufactured_strain_coefficients(form: Formulation, a: f64) -> [[f64; 6]; 3] {
+    let h = std::f64::consts::FRAC_1_SQRT_2;
+    if form == Formulation::BBar {
+        [
+            [a / 6.0, a / 6.0, a / 6.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, a * h, 0.0, 0.0],
+            [2.0 * a / 3.0, -a / 3.0, -a / 3.0, 0.0, 0.0, 0.0],
+        ]
+    } else {
+        [
+            [0.0; 6],
+            [0.0, 0.0, 0.0, a * h, 0.0, 0.0],
+            [a, 0.0, 0.0, 0.0, 0.0, 0.0],
+        ]
+    }
+}
+
 fn free_forces(forces: &[[f64; 3]; 8]) -> Vec<(usize, f64)> {
     (0..24)
         .filter(|d| !FIXED.contains(d))
         .map(|d| (d, forces[d / 3][d % 3]))
         .collect()
+}
+
+fn quadratic_work(matrix: &fs_sparse::Csr, displacement: &[f64]) -> f64 {
+    displacement
+        .iter()
+        .enumerate()
+        .map(|(row, &value)| {
+            let (columns, values) = matrix.row(row);
+            value
+                * columns
+                    .iter()
+                    .zip(values)
+                    .map(|(&column, &entry)| entry * displacement[column])
+                    .sum::<f64>()
+        })
+        .sum()
+}
+
+/// For v_y=x*y, grad(v_y)=(y,x,0). Integrate each polynomial stress
+/// coefficient in sigma_xx*y^2 + 2*sigma_xy*x*y + sigma_yy*x^2 exactly.
+fn manufactured_geometric_work(law: &TetElasticMaterial, form: Formulation, a: f64) -> f64 {
+    let s = manufactured_strain_coefficients(form, a).map(|e| tensor(stress(law, e)));
+    s[0][0][0] / 3.0
+        + s[1][0][0] / 6.0
+        + s[2][0][0] / 4.0
+        + s[0][0][1] / 2.0
+        + s[1][0][1] / 3.0
+        + s[2][0][1] / 3.0
+        + s[0][1][1] / 3.0
+        + s[1][1][1] / 4.0
+        + s[2][1][1] / 6.0
+}
+
+#[test]
+fn g1_prestress_uses_the_accepted_projected_stress_at_each_quadrature_point() {
+    with_cx(false, |cx| {
+        let law = material(93);
+        let state = thermal(&law, FREE, 400.0);
+        let field = TetThermalStrainField::Uniform(&state);
+        let amplitude = 0.002;
+        for form in FORMS {
+            let p = problem(&NODES, &law, &FIXED, form);
+            let forces = free_forces(&manufactured(&law, form, amplitude).0);
+            let original = p.assemble(cx).unwrap();
+            let expected_response = p
+                .solve_thermal_response_with_nodal_forces(field, &forces, config(), FRAME, 0.02, cx)
+                .unwrap();
+            let loaded = p
+                .solve_thermal_tangent_with_nodal_forces(field, &forces, config(), FRAME, 0.02, cx)
+                .unwrap();
+            assert_eq!(loaded.response(), &expected_response);
+            assert_eq!(loaded.pencil().free_dofs, original.free_dofs);
+            assert_eq!(loaded.pencil().mass.to_dense(), original.mass.to_dense());
+            assert_eq!(loaded.pencil().total_mass_kg, original.total_mass_kg);
+            assert_eq!(
+                loaded.elastic_stiffness().to_dense(),
+                original.stiffness.to_dense()
+            );
+            let probe: Vec<_> = original
+                .free_dofs
+                .iter()
+                .map(|&dof| {
+                    let [x, y, _] = NODES[dof / 3];
+                    if dof % 3 == 1 { x * y } else { 0.0 }
+                })
+                .collect();
+            let expected = manufactured_geometric_work(&law, form, amplitude);
+            near(
+                quadratic_work(loaded.geometric_stiffness(), &probe),
+                expected,
+                2e-5,
+            );
+            near(
+                quadratic_work(&loaded.pencil().stiffness, &probe),
+                quadratic_work(&original.stiffness, &probe) + expected,
+                2e-5,
+            );
+            if form == Formulation::BBar {
+                // An unprojected recovery gives a different physical initial
+                // stress, even though its displacement is identical.
+                let compatible =
+                    manufactured_geometric_work(&law, Formulation::Standard, amplitude);
+                assert!((expected - compatible).abs() > 1.0);
+            }
+            let mean = tensor(*loaded.response().elements()[0].mean_stress_mandel_pa());
+            let averaged = (mean[0][0] + mean[1][1]) / 3.0 + mean[0][1] / 2.0;
+            assert!((expected - averaged).abs() > 1.0);
+            for row in 0..probe.len() {
+                for column in 0..probe.len() {
+                    assert_eq!(
+                        loaded.geometric_stiffness().get(row, column).to_bits(),
+                        loaded.geometric_stiffness().get(column, row).to_bits(),
+                    );
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn g1_signed_thermal_and_mechanical_prestress_shift_the_original_hex8_pencil() {
+    with_cx(false, |cx| {
+        let law = TetElasticMaterial::try_new(1500.0, 2e6, 0.0, [98; 32]).unwrap();
+        for form in FORMS {
+            for thermal_restraint in [false, true] {
+                let fixed: Vec<_> = (0..24)
+                    .filter(|&dof| NODES[dof / 3][0] == 0.0 || thermal_restraint && dof % 3 == 0)
+                    .collect();
+                let p = problem(&NODES, &law, &fixed, form);
+                let original = p.assemble(cx).unwrap();
+                let probe: Vec<_> = original
+                    .free_dofs
+                    .iter()
+                    .map(|&dof| if dof % 3 == 1 { NODES[dof / 3][0] } else { 0.0 })
+                    .collect();
+                for sign in [-1.0, 0.0, 1.0] {
+                    let free_x = if thermal_restraint {
+                        -sign * 0.001
+                    } else {
+                        sign * 0.00025
+                    };
+                    let state = thermal(&law, [free_x, 0.0, 0.0, 0.0, 0.0, 0.0], 300.0);
+                    let field = TetThermalStrainField::Uniform(&state);
+                    let mut forces = vec![(0, 17.0)];
+                    forces.extend(
+                        NODES
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, p)| p[0] == 1.0)
+                            .map(|(node, _)| (3 * node, sign * 500.0)),
+                    );
+                    let loaded = if thermal_restraint {
+                        p.solve_thermal_tangent(field, config(), FRAME, 0.02, cx)
+                    } else {
+                        p.solve_thermal_tangent_with_nodal_forces(
+                            field,
+                            &forces,
+                            config(),
+                            FRAME,
+                            0.02,
+                            cx,
+                        )
+                    }
+                    .unwrap();
+                    let sigma = sign * 2000.0;
+                    near(
+                        loaded.response().elements()[0].mean_stress_mandel_pa()[0],
+                        sigma,
+                        2e-6,
+                    );
+                    near(
+                        quadratic_work(loaded.geometric_stiffness(), &probe),
+                        sigma,
+                        2e-6,
+                    );
+                    near(
+                        quadratic_work(&loaded.pencil().stiffness, &probe),
+                        quadratic_work(&original.stiffness, &probe) + sigma,
+                        2e-6,
+                    );
+                    assert_eq!(loaded.pencil().mass.to_dense(), original.mass.to_dense());
+                    assert_eq!(loaded.pencil().free_dofs, original.free_dofs);
+                    for (node, displacement) in
+                        loaded.response().displacement_m().iter().enumerate()
+                    {
+                        near(
+                            displacement[0],
+                            if thermal_restraint {
+                                0.0
+                            } else {
+                                sign * 0.00125 * NODES[node][0]
+                            },
+                            1e-12,
+                        );
+                        near(displacement[1], 0.0, 1e-12);
+                        near(displacement[2], 0.0, 1e-12);
+                    }
+                    if !thermal_restraint {
+                        let reaction: f64 = NODES
+                            .iter()
+                            .zip(loaded.response().nodal_force_balance_n())
+                            .filter(|(p, _)| p[0] == 0.0)
+                            .map(|(_, force)| force[0])
+                            .sum();
+                        near(reaction, -sigma - 17.0, 2e-6);
+                    }
+                    if sign == 0.0 {
+                        assert!(
+                            loaded
+                                .geometric_stiffness()
+                                .to_dense()
+                                .iter()
+                                .all(|&value| value == 0.0)
+                        );
+                        assert_eq!(
+                            loaded.pencil().stiffness.to_dense(),
+                            original.stiffness.to_dense()
+                        );
+                    }
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn g0_g4_hex8_prestress_requires_vibration_dofs_and_preserves_cancellation() {
+    with_cx(false, |cx| {
+        let law = material(93);
+        let state = thermal(&law, FREE, 400.0);
+        let fixed: Vec<_> = (0..24).collect();
+        for form in FORMS {
+            assert!(matches!(
+                problem(&NODES, &law, &fixed, form).solve_thermal_tangent(
+                    TetThermalStrainField::Uniform(&state),
+                    config(),
+                    FRAME,
+                    0.02,
+                    cx
+                ),
+                Err(TetElasticError::NoFreeDofs)
+            ));
+        }
+    });
+    with_cx(true, |cx| {
+        let law = material(93);
+        let state = thermal(&law, FREE, 400.0);
+        assert!(matches!(
+            problem(&NODES, &law, &FIXED, Formulation::BBar).solve_thermal_tangent(
+                TetThermalStrainField::Uniform(&state),
+                config(),
+                FRAME,
+                0.02,
+                cx
+            ),
+            Err(TetElasticError::Cancelled)
+        ));
+    });
 }
 
 #[test]

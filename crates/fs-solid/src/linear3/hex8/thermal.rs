@@ -1,6 +1,8 @@
 //! Source-bound thermal loads and equilibrium on the HEX8 strain formulation.
 
-use super::{Hex8ElasticProblem, Hex8ThermalResponse, isoparametric, tensor_rule};
+use super::{
+    Hex8ElasticProblem, Hex8PrestressedAssembly, Hex8ThermalResponse, isoparametric, tensor_rule,
+};
 use crate::linear3::{
     TetElasticError, TetStaticSolveConfig, TetThermalLoad, TetThermalStrainField,
     add_nodal_forces_to_thermal_load,
@@ -102,6 +104,94 @@ impl Hex8ElasticProblem<'_> {
             Some(nodal_forces_n),
             config,
             mesh_frame,
+            maximum_absolute_mandel_strain,
+            cx,
+        )
+    }
+
+    /// Solve thermal equilibrium and assemble its signed initial-stress pencil.
+    ///
+    /// The same compatible or B-bar stress accepted by equilibrium enters
+    /// `K_g[(a,i),(b,j)] = delta_ij integral grad(N_a)^T sigma grad(N_b) dV`.
+    /// Actual quadrature stress is retained, including anisotropic coupling and
+    /// within-element variation; an element-mean stress is not substituted.
+    /// The original material stiffness, consistent mass, reference geometry
+    /// and homogeneous incremental supports feed the existing spectral owner.
+    ///
+    /// This conservative initial-stress approximation is not a finite-strain
+    /// tangent or stability certificate. Compression may make the tangent
+    /// indefinite; nonpositive eigenvalues must remain signed. A fully fixed
+    /// body has a static response but no vibration pencil and returns NoFreeDofs.
+    pub fn solve_thermal_tangent(
+        &self,
+        thermal_strains: TetThermalStrainField<'_>,
+        config: TetStaticSolveConfig,
+        mesh_frame: ContentHash,
+        maximum_absolute_mandel_strain: f64,
+        cx: &Cx<'_>,
+    ) -> Result<Hex8PrestressedAssembly, TetElasticError> {
+        self.solve_thermal_tangent_impl(
+            thermal_strains,
+            None,
+            config,
+            mesh_frame,
+            maximum_absolute_mandel_strain,
+            cx,
+        )
+    }
+
+    /// The same signed tangent about thermal and dead-nodal-force equilibrium.
+    ///
+    /// Solve and recover from these exact material, thermal and force inputs
+    /// before assembling the original geometric-stiffness owner. Fixed-DOF
+    /// loads retain their support-reaction meaning. Dead forces add no follower
+    /// stiffness; no independently supplied or stale stress field is accepted.
+    pub fn solve_thermal_tangent_with_nodal_forces(
+        &self,
+        thermal_strains: TetThermalStrainField<'_>,
+        nodal_forces_n: &[(usize, f64)],
+        config: TetStaticSolveConfig,
+        mesh_frame: ContentHash,
+        maximum_absolute_mandel_strain: f64,
+        cx: &Cx<'_>,
+    ) -> Result<Hex8PrestressedAssembly, TetElasticError> {
+        self.solve_thermal_tangent_impl(
+            thermal_strains,
+            Some(nodal_forces_n),
+            config,
+            mesh_frame,
+            maximum_absolute_mandel_strain,
+            cx,
+        )
+    }
+
+    fn solve_thermal_tangent_impl(
+        &self,
+        thermal_strains: TetThermalStrainField<'_>,
+        nodal_forces_n: Option<&[(usize, f64)]>,
+        config: TetStaticSolveConfig,
+        mesh_frame: ContentHash,
+        maximum_absolute_mandel_strain: f64,
+        cx: &Cx<'_>,
+    ) -> Result<Hex8PrestressedAssembly, TetElasticError> {
+        let response = self.solve_thermal_response_impl(
+            thermal_strains,
+            nodal_forces_n,
+            config,
+            mesh_frame,
+            maximum_absolute_mandel_strain,
+            cx,
+        )?;
+        let pencil = self.assemble(cx)?;
+        isoparametric::thermal_response::prestress::assemble::<8, 24, _>(
+            self.nodes_m,
+            self.hexahedra,
+            self.materials,
+            thermal_strains.into(),
+            pencil,
+            response,
+            &tensor_rule(self.stiffness_points_per_dir),
+            |nodes, reference, element, point| self.point(nodes, reference, element, point),
             maximum_absolute_mandel_strain,
             cx,
         )

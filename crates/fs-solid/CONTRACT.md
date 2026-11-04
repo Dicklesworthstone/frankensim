@@ -1,5 +1,29 @@
 # fs-solid CONTRACT
 
+## Prestressed Standard and B-bar HEX8 vibration
+
+`linear3::hex8::Hex8ElasticProblem::solve_thermal_tangent` and
+`solve_thermal_tangent_with_nodal_forces` expose the existing conservative
+initial-stress pencil for eight-node bricks. `Hex8PrestressedAssembly` names
+the shared immutable response/pencil carrier. Thermal strain and explicit
+dead forces first enter the original equilibrium owner; an independently
+supplied stress or stale response cannot enter this path.
+
+The shared prestress kernel integrates the accepted compatible or B-bar
+stress at every original stiffness point. B-bar uses the same volume-weighted
+strain projection as equilibrium and recovery; geometric stiffness uses the
+physical basis gradients. Neither raw compatible stress nor element-average
+stress replaces the accepted quadrature field. Reference consistent mass,
+elastic stiffness, geometry and homogeneous incremental supports retain their
+existing owners. Fixed-DOF forces retain their reaction meaning.
+
+Compression remains signed, and fully constrained bodies return `NoFreeDofs`.
+This is a frozen-reference initial-stress approximation, not a finite-strain
+tangent, follower-load model, stability certificate or live thermal update.
+The existing `hex8_thermal` tests check independent anisotropic polynomial
+geometric work, signed thermal/mechanical shifts, unchanged mass and supports,
+reactions, zero-stress recovery, cancellation and fully fixed refusal.
+
 ## Static elasticity preserves the original force scale
 
 The plane P1/Q1 and native P1 tetrahedral, TET10, HEX8, HEX20 and HEX27 static

@@ -1,16 +1,16 @@
-//! Initial-stress vibration about an accepted quadratic thermal equilibrium.
+//! Initial-stress vibration about an accepted isoparametric thermal equilibrium.
 //!
 //! Keep the reference geometry, mass and homogeneous incremental supports.
 //! Integrate K_g[(a,i),(b,j)] = delta_ij grad(N_a)^T sigma_0 grad(N_b)
-//! at every original stiffness quadrature point. The actual quadratic strain
-//! and stress enter this integral; element-mean stress would lose correlations
-//! with the varying gradients, especially on curved isoparametric cells.
+//! at every original stiffness quadrature point. The accepted compatible or
+//! B-bar strain and stress enter this integral; element-mean stress would lose
+//! correlations with the varying gradients, especially on curved isoparametric cells.
 //!
 //! This extends the same conservative initial-stress approximation as
 //! crate::prestress. It is not a finite-strain tangent, follower-load model,
 //! stability certificate, mode transfer or post-buckling continuation.
 
-use super::super::{Point, mandel_b};
+use super::super::{Point, StrainProjection};
 use super::{QuadraticThermalResponse, elastic_response_at};
 use crate::linear3::{
     QuadraticThermalStrainField, TetElasticAssembly, TetElasticError, TetMaterialField, hash_usize,
@@ -103,12 +103,29 @@ pub(in crate::linear3) fn assemble<const N: usize, const D: usize, R: Copy>(
         checkpoint(cx)?;
         let nodes = connectivity.map(|node| nodes_m[node]);
         let material = materials.at(element);
+        let projection = StrainProjection::prepare(
+            nodes,
+            element,
+            response.formulation(),
+            stiffness_rule,
+            &evaluate,
+            cx,
+        )?;
         let mut local = [[0.0; N]; N];
         for (point, &(reference, weight)) in stiffness_rule.iter().enumerate() {
             checkpoint(cx)?;
-            let p = evaluate(nodes, reference, element, point)?;
+            let compatible_point;
+            let p = if let Some(prepared) = projection.point(point) {
+                prepared
+            } else {
+                compatible_point = evaluate(nodes, reference, element, point)?;
+                &compatible_point
+            };
             let material = thermal.material_at(material, element, point)?;
-            let b = mandel_b::<N, D>(p.gradients);
+            // Initial stress must be the same physical stress accepted by the
+            // equilibrium owner. B-bar changes that constitutive strain, while
+            // the geometric contraction still uses the actual basis gradients.
+            let b = projection.columns::<D>(p);
             let (_, stress) = elastic_response_at(
                 &b,
                 connectivity,
