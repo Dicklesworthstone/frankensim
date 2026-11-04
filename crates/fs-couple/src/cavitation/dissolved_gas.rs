@@ -17,6 +17,9 @@
 //! Heat effects in absorption: ETH Zurich, nonisothermal absorption,
 //! https://www.hyper-tvt.ethz.ch/abstrip-nonisothermal.html .
 
+/// Local-error-controlled histories through the same finite thermal endpoint.
+pub mod trajectory;
+
 use crate::cavity_phs::piston::thermal::feedback;
 use fs_material::cavitation::dissolved_gas::{
     DissolutionFilm, DissolutionSample, DissolvedGasControls, DissolvedGasError,
@@ -105,6 +108,11 @@ pub enum ThermalDissolutionError {
     Energy {
         residual_j: f64,
         tolerance_j: f64,
+    },
+    /// A shorter physical interval may resolve this authored increment limit.
+    TemperatureIncrement {
+        increment_k: f64,
+        maximum_k: f64,
     },
     Cancelled,
 }
@@ -353,9 +361,10 @@ pub fn advance_thermal_mixture(
         },
     })?;
     if (t1 - t0).abs() > controls.maximum_temperature_increment_k {
-        return Err(invalid(
-            "thermal absorption exceeds its declared temperature step",
-        ));
+        return Err(ThermalDissolutionError::TemperatureIncrement {
+            increment_k: t1 - t0,
+            maximum_k: controls.maximum_temperature_increment_k,
+        });
     }
     let (accepted_gas, actual_gas_sensible) = next_gas.at_temperature(t1)?;
     let mut next_laws = laws.to_vec();

@@ -3512,6 +3512,30 @@ checks publish none of the gas, liquid clocks or refreshed source laws.
 
 This is a first-order conservative split with explicit time and temperature
 step restrictions; energy closure is not a kinetic trajectory-error bound.
+`dissolved_gas::trajectory::advance_thermal_to` resolves a held-power window
+by comparing one original full step with two original half steps, accepting
+only the latter. Original H(T), liquid and gas diffusivities, pressure and
+calorics refresh at every native endpoint. Componentwise local errors cover
+temperature, pressure and every gas/dissolved species; relative scales use
+changes, so a large background cannot hide a small evolving coordinate.
+Actual representable half durations scale the first-order estimate, including
+unequal halves at large clocks. This remains an asymptotic local estimate,
+not a global accuracy or empirical uncertainty bound.
+
+Only time-error and typed temperature-increment failures permit shorter
+retries; original source/regime/caloric refusals retain their authority.
+Native evaluations are explicitly bounded. Accepted physical increments alone
+enter compensated whole-window heat accounts; original/final species
+inventories independently enforce fixed per-species and total mass budgets.
+These conservation tolerances are never multiplied by the number of steps.
+Gross absorption and exsolution retain transfer reversals in bounded memory,
+alongside the final native receipt. Cancellation or failure discards the entire
+window, including accepted internal prefixes. Five additional G1/G3/G4 groups
+cover tolerance tightening against an independent nonlinear RK4 trajectory,
+warming-induced exsolution with original gas-film sources, sealed finite heat,
+opposite-species ordering, unequal representable halves, and transactional
+minimum-step/work/source/final-cancellation refusals.
+
 Five G1/G3/G4 regression groups cover independent constant-Cp absorption and
 exsolution endpoints, the sealed-mass native heat limit, thermal source refresh,
 16/32/64-step refinement against an independent energy-constrained RK4 oracle,

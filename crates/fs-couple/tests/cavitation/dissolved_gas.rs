@@ -3,6 +3,9 @@
 #[path = "../material_exchange/gas.rs"]
 mod gas_fixture;
 
+#[path = "dissolved_gas/trajectory.rs"]
+mod trajectory;
+
 use fs_couple::cavitation::dissolved_gas::{
     IncompressibleSolvent, ThermalDissolutionControls, ThermalDissolutionError,
     advance_thermal_mixture,
