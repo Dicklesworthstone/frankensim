@@ -8,7 +8,8 @@ pub use conduction::{
 };
 mod momentum;
 pub use momentum::{
-    ResolvedViscousThermalVolumeMomentumStep,
+    ResistiveThermalVolumeMomentumControls, ResistiveThermalVolumeMomentumStep,
+    ResolvedViscousThermalVolumeMomentumStep, ThermalResistanceCouplingReport,
     ThermalVolumeMomentumControls, ThermalVolumeMomentumInput, ThermalVolumeMomentumStep,
     ViscousThermalVolumeMomentumStep,
 };

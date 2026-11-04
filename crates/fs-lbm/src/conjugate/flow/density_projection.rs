@@ -10,7 +10,10 @@ pub use feedback::{
     MaterialDensityMomentumControls, MaterialDensityMomentumInput, MaterialDensityMomentumReport,
     MaterialDensityMomentumStep, ResistiveMaterialDensityMomentumStep,
 };
-pub(super) use feedback::{admit_feedback_controls, scatter_projected_material_momentum};
+pub(super) use feedback::{
+    admit_feedback_controls, scatter_projected_material_momentum,
+    scatter_resistive_projected_material_momentum,
+};
 mod forcing;
 pub(super) use forcing::audit_combined;
 pub use forcing::{

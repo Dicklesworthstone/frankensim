@@ -1,5 +1,37 @@
 # CONTRACT: fs-lbm
 
+## Coupled physical Darcy heating and thermodynamic volume
+
+The resistance-aware piecewise thermal-volume momentum entries solve a
+bounded nonlinear heat/volume problem on the existing native owners. Every
+trial starts from the original M, P and chart state. The once-authored net
+external caloric increment plus a physical drag-heat guess advances h; its
+chart density change and original enthalpy-mixing volume drive continuity.
+The same accepted implicit resistance projection supplies actual-density
+pressure/body/drag impulses and physical cell heat.
+
+Acceptance requires agreement of caloric and native drag heat, including
+addition roundoff, local heat limits and shared non-cancelling mechanical
+and enthalpy budgets. Current M/P is reconstructed once. Only the accepted
+impulses are scattered; the accepted mass routes then transport kicked P.
+Iterations do not accumulate heat, impulses or elapsed physical time.
+Numerical backward-Euler, reconstruction, scatter and transport losses
+retain their separate accounts. Actual M/V remains the inertial density.
+
+Spatial reservoir pressure preserves native relative gauges and explicit
+incoming material/velocity. Required source-pressure and opening work retain
+the original NET-enthalpy convention. Prescribed resistance is frozen in this
+entry; the source-response seam also measures endpoint constitutive changes
+as physical impulse and heat residuals, without a second accepted pressure
+solve. Coupling/volume iteration and cancellation bounds remain explicit.
+Exhaustion or any early/late refusal returns no candidate.
+
+Focused tests cover an independent quadratic heat/expansion solution on all
+axes, actual M/h/P and phase volume, zero-resistance reduction under large
+pressure offsets, and failed-step/retry behavior. No exact-solid locking,
+moving skeleton, free surface or pressure-dependent thermodynamic law is
+introduced by this fixed-grid coupling.
+
 ## Phase/source-bound stationary resistance mechanics
 
 The phase-resistance momentum entries resolve each admitted original fluid

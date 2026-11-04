@@ -3,10 +3,11 @@
 use super::{
     BoundaryPressure, CancelGate, ChtError, DensityForceControls, DensityForceInput,
     DensityMomentumReconstruction, DensityMomentumReconstructionControls,
-    DensityMomentumReconstructionReport, DensityProjection, DensityProjectionControls, FlowFace,
-    FlowField, ForcedDensityProjection, PressureReadback, ReservoirPressure,
-    ResistiveDensityProjection, StaggeredBoundaryPressure, Sum, VoxelDomain, face_dual_mass,
-    face_resistance_kg_s, finite, finite_positive, nonnegative, poll, poll_every, refuse,
+    DensityMomentumReconstructionReport, DensityProjection, DensityProjectionControls,
+    DensityResistanceReport, FlowFace, FlowField, ForcedDensityProjection, PressureReadback,
+    ReservoirPressure, ResistiveDensityProjection, StaggeredBoundaryPressure, Sum, VoxelDomain,
+    face_dual_mass, face_resistance_kg_s, finite, finite_positive, nonnegative, poll, poll_every,
+    refuse,
 };
 use fs_math::dd::Dd;
 
@@ -325,56 +326,20 @@ impl FlowField {
                 controls.forcing,
                 gate,
             )?;
-        let exchange = Exchange {
-            held: self,
+        let (momentum, report) = scatter_resistive_projected_material_momentum(
+            self,
             domain,
             faces,
             boundary_pressure,
-            pressure_readback: Some(&pressure_readback),
+            &pressure_readback,
             input,
             controls,
-            reconstructed: &reconstructed,
-            projection: &evolution.projection,
-            resistance_pa_s_m2: Some(resistance_pa_s_m2),
-        };
-        exchange.admit(gate)?;
-        let momentum = exchange.scatter(gate)?;
-        let mut report = exchange.audit(&momentum, gate)?;
-        // Independently combine actual cell energy with the fresh physical
-        // resistance account. The exchange's local centered identity above
-        // treats body plus accepted drag as one algebraic impulse; that is not
-        // a claim that physical drag is a midpoint-work body-force predictor.
-        let native = &evolution.report;
-        let pressure = &evolution.projection.report;
-        let terms = [
-            report.kinetic_energy_change_j,
-            report.numerical_scatter_loss_j,
-            reconstructed.report.numerical_constraint_loss_j,
-            native.backward_euler_loss_j,
-            native.resistance_heat_j,
-            -reconstructed.report.constraint_reservoir_work_j,
-            -native.body_endpoint_work_j,
-            -native.constraint_endpoint_work_j,
-            -pressure.pressure_source_work_j,
-            pressure.fixed_boundary_pressure_work_j,
-            pressure.open_boundary_pressure_work_j,
-            -report.mass_representation_work_j,
-        ];
-        let composed = terms
-            .into_iter()
-            .fold(Dd::ZERO, |sum, value| sum + Dd::from_f64(value))
-            .to_f64();
-        finite("flow.resistance_feedback_composed_energy", composed)?;
-        let absolute =
-            (Dd::from_f64(report.absolute_energy_defect_j) + Dd::from_f64(composed.abs())).to_f64();
-        check_budget(
-            "flow.resistance_feedback_energy_budget",
-            absolute,
-            controls.maximum_feedback_energy_defect_j,
+            &reconstructed,
+            &evolution.projection,
+            &evolution.report,
+            resistance_pa_s_m2,
+            gate,
         )?;
-        report.composed_energy_defect_j = composed;
-        report.absolute_energy_defect_j = absolute;
-        poll(gate)?;
         Ok(ResistiveMaterialDensityMomentumStep {
             momentum_kg_m_s: momentum,
             density_kg_m3: reconstructed.density_kg_m3,
@@ -496,6 +461,78 @@ pub(in crate::conjugate::flow) fn scatter_projected_material_momentum(
     exchange.admit(gate)?;
     let momentum = exchange.scatter(gate)?;
     let report = exchange.audit(&momentum, gate)?;
+    poll(gate)?;
+    Ok((momentum, report))
+}
+
+/// Return the accepted internally computed resistance impulse to original P.
+/// The projection, relative pressure readback and physical resistance account
+/// must come from the same fresh native solve. Borrowing lets thermal-volume
+/// trials retain only their accepted result without another reconstruction,
+/// pressure solve or copy of the accepted material transport field.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::conjugate::flow) fn scatter_resistive_projected_material_momentum(
+    held: &FlowField,
+    domain: &VoxelDomain,
+    faces: [FlowFace; 6],
+    boundary_pressure: Option<BoundaryPressure<'_>>,
+    pressure_readback: &PressureReadback,
+    input: MaterialDensityMomentumInput<'_>,
+    controls: MaterialDensityMomentumControls,
+    reconstructed: &DensityMomentumReconstruction,
+    projection: &DensityProjection,
+    native: &DensityResistanceReport,
+    resistance_pa_s_m2: &[f64],
+    gate: &CancelGate,
+) -> Result<(Vec<[f64; 3]>, MaterialDensityMomentumReport), ChtError> {
+    let exchange = Exchange {
+        held,
+        domain,
+        faces,
+        boundary_pressure,
+        pressure_readback: Some(pressure_readback),
+        input,
+        controls,
+        reconstructed,
+        projection,
+        resistance_pa_s_m2: Some(resistance_pa_s_m2),
+    };
+    exchange.admit(gate)?;
+    let momentum = exchange.scatter(gate)?;
+    let mut report = exchange.audit(&momentum, gate)?;
+    // Independently combine actual cell energy with the fresh physical
+    // resistance account. The exchange's local centered identity above
+    // treats body plus accepted drag as one algebraic impulse; that is not
+    // a claim that physical drag is a midpoint-work body-force predictor.
+    let pressure = &projection.report;
+    let terms = [
+        report.kinetic_energy_change_j,
+        report.numerical_scatter_loss_j,
+        reconstructed.report.numerical_constraint_loss_j,
+        native.backward_euler_loss_j,
+        native.resistance_heat_j,
+        -reconstructed.report.constraint_reservoir_work_j,
+        -native.body_endpoint_work_j,
+        -native.constraint_endpoint_work_j,
+        -pressure.pressure_source_work_j,
+        pressure.fixed_boundary_pressure_work_j,
+        pressure.open_boundary_pressure_work_j,
+        -report.mass_representation_work_j,
+    ];
+    let composed = terms
+        .into_iter()
+        .fold(Dd::ZERO, |sum, value| sum + Dd::from_f64(value))
+        .to_f64();
+    finite("flow.resistance_feedback_composed_energy", composed)?;
+    let absolute =
+        (Dd::from_f64(report.absolute_energy_defect_j) + Dd::from_f64(composed.abs())).to_f64();
+    check_budget(
+        "flow.resistance_feedback_energy_budget",
+        absolute,
+        controls.maximum_feedback_energy_defect_j,
+    )?;
+    report.composed_energy_defect_j = composed;
+    report.absolute_energy_defect_j = absolute;
     poll(gate)?;
     Ok((momentum, report))
 }

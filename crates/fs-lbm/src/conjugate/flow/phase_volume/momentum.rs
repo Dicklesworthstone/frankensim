@@ -2,6 +2,11 @@
 
 mod viscous;
 pub use viscous::{ResolvedViscousThermalVolumeMomentumStep, ViscousThermalVolumeMomentumStep};
+mod resistance;
+pub use resistance::{
+    ResistiveThermalVolumeMomentumControls, ResistiveThermalVolumeMomentumStep,
+    ThermalResistanceCouplingReport,
+};
 
 use fs_material::phase::EquilibriumEnthalpyPhaseCurve;
 

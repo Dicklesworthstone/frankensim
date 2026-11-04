@@ -50,9 +50,10 @@ pub use phase_volume::{
     ConductiveThermalVolumeMomentumControls, ConductiveThermalVolumeMomentumStep,
     ConductiveThermalVolumeReport, ConductiveThermalVolumeStep,
     ConductiveViscousThermalVolumeMomentumStep, PiecewiseThermalVolumeControls,
-    ResolvedViscousThermalVolumeMomentumStep, ThermalVolumeControls, ThermalVolumeMomentumControls,
-    ThermalVolumeMomentumInput, ThermalVolumeMomentumStep, ThermalVolumeStep,
-    ViscousThermalVolumeMomentumStep,
+    ResistiveThermalVolumeMomentumControls, ResistiveThermalVolumeMomentumStep,
+    ResolvedViscousThermalVolumeMomentumStep, ThermalResistanceCouplingReport,
+    ThermalVolumeControls, ThermalVolumeMomentumControls, ThermalVolumeMomentumInput,
+    ThermalVolumeMomentumStep, ThermalVolumeStep, ViscousThermalVolumeMomentumStep,
 };
 
 /// Mass-flow role of one domain face for flux construction and projection.
