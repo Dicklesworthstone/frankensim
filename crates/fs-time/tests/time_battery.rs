@@ -527,6 +527,426 @@ mod momentum_verlet {
             "cancellation must stop checkpoint replay immediately"
         );
     }
+
+    mod parameters {
+        use super::*;
+        use fs_ad::{Dual64, Real};
+        use fs_time::{
+            MomentumVerletGradient, MomentumVerletParameterVjp, verlet_momentum_parameter_adjoint,
+        };
+
+        struct SpringDesign([f64; 5]);
+
+        impl LinearOp for SpringDesign {
+            fn n(&self) -> usize {
+                2
+            }
+            fn apply(&self, p: &[f64], out: &mut [f64]) {
+                let [m1, m2, coupling, _, _] = self.0;
+                let determinant = m1 * m2 - coupling * coupling;
+                out[0] = (m2 * p[0] - coupling * p[1]) / determinant;
+                out[1] = (m1 * p[1] - coupling * p[0]) / determinant;
+            }
+        }
+
+        impl SpringDesign {
+            fn force(&self, q: &[f64], out: &mut [f64]) {
+                let extension = q[0] - q[1];
+                out[0] = -self.0[3] * extension - self.0[4] * extension.powi(3);
+                out[1] = -out[0];
+            }
+            fn state_vjp(&self, q: &[f64], seed: &[f64], out: &mut [f64]) {
+                let tangent = self.0[3] + 3.0 * self.0[4] * (q[0] - q[1]).powi(2);
+                out[0] = tangent * (seed[1] - seed[0]);
+                out[1] = -out[0];
+            }
+            fn trajectory(&self) -> ([f64; 2], [f64; 2]) {
+                let (mut q, mut p) = ([0.7, -0.25], [0.2, -0.35]);
+                for _ in 0..33 {
+                    verlet_momentum_step(
+                        &mut q,
+                        &mut p,
+                        0.025,
+                        self,
+                        &|q, f| self.force(q, f),
+                        &mut [0.0; 6],
+                        &mut || false,
+                    )
+                    .unwrap();
+                }
+                (q, p)
+            }
+            fn cost(&self) -> f64 {
+                let (q, p) = self.trajectory();
+                0.5 * ((q[0] - 0.1).powi(2) + (q[1] + 0.2).powi(2))
+                    + 0.05 * (p[0] * p[0] + p[1] * p[1])
+            }
+            fn gradient(&self) -> MomentumVerletGradient {
+                let (q, p) = self.trajectory();
+                verlet_momentum_parameter_adjoint(
+                    &[0.7, -0.25],
+                    &[0.2, -0.35],
+                    0.025,
+                    33,
+                    self,
+                    &|q, f| self.force(q, f),
+                    &|q, seed, out| self.state_vjp(q, seed, out),
+                    self,
+                    (&[q[0] - 0.1, q[1] + 0.2], &[0.1 * p[0], 0.1 * p[1]]),
+                    &mut || false,
+                )
+                .unwrap()
+            }
+        }
+
+        impl MomentumVerletParameterVjp for SpringDesign {
+            fn parameter_count(&self) -> usize {
+                5
+            }
+            fn force_vjp(
+                &self,
+                q: &[f64],
+                seed: &[f64],
+                out: &mut [f64],
+            ) -> Result<(), MomentumVerletError> {
+                out.fill(0.0);
+                let extension = q[0] - q[1];
+                out[3] = extension * (seed[1] - seed[0]);
+                out[4] = extension.powi(3) * (seed[1] - seed[0]);
+                Ok(())
+            }
+            fn mass_vjp(
+                &self,
+                v: &[f64],
+                seed: &[f64],
+                out: &mut [f64],
+            ) -> Result<(), MomentumVerletError> {
+                out.copy_from_slice(&[
+                    seed[0] * v[0],
+                    seed[1] * v[1],
+                    seed[0] * v[1] + seed[1] * v[0],
+                    0.0,
+                    0.0,
+                ]);
+                Ok(())
+            }
+        }
+
+        #[test]
+        fn coupled_mass_and_nonlinear_force_gradients_match_independent_duals_and_differences() {
+            let model = SpringDesign([2.0, 3.0, 0.4, 4.0, 0.7]);
+            let actual = model.gradient();
+            // Independently differentiate the scalar two-body equations forward,
+            // including the explicit 2x2 inverse and all nine initial/design inputs.
+            type D = Dual64<9>;
+            let mut q = [D::variable(0.7, 0), D::variable(-0.25, 1)];
+            let mut p = [D::variable(0.2, 2), D::variable(-0.35, 3)];
+            let [m1, m2, c, k, a] = std::array::from_fn(|i| D::variable(model.0[i], i + 4));
+            let determinant = m1 * m2 - c * c;
+            let half = D::constant(0.0125);
+            let h = D::constant(0.025);
+            for _ in 0..33 {
+                let x = q[0] - q[1];
+                let f = -(k * x + a * x * x * x);
+                p[0] = half.mul_add(f, p[0]);
+                p[1] = half.mul_add(-f, p[1]);
+                let v = [
+                    (m2 * p[0] - c * p[1]) / determinant,
+                    (m1 * p[1] - c * p[0]) / determinant,
+                ];
+                q[0] = h.mul_add(v[0], q[0]);
+                q[1] = h.mul_add(v[1], q[1]);
+                let x = q[0] - q[1];
+                let f = -(k * x + a * x * x * x);
+                p[0] = half.mul_add(f, p[0]);
+                p[1] = half.mul_add(-f, p[1]);
+            }
+            let e0 = q[0] - D::constant(0.1);
+            let e1 = q[1] + D::constant(0.2);
+            let objective = D::constant(0.5) * (e0 * e0 + e1 * e1)
+                + D::constant(0.05) * (p[0] * p[0] + p[1] * p[1]);
+            assert!((objective.re - model.cost()).abs() < 2e-14);
+            let all = actual
+                .initial_position
+                .iter()
+                .chain(&actual.initial_momentum)
+                .chain(&actual.parameters);
+            for (index, (&reverse, forward)) in all.zip(objective.eps).enumerate() {
+                assert!(
+                    (reverse - forward).abs() < 3e-12,
+                    "component {index}: reverse={reverse:e}, dual={forward:e}"
+                );
+            }
+            for i in 0..5 {
+                let epsilon = 1e-5;
+                let (mut plus, mut minus) = (model.0, model.0);
+                plus[i] += epsilon;
+                minus[i] -= epsilon;
+                let finite_difference =
+                    (SpringDesign(plus).cost() - SpringDesign(minus).cost()) / (2.0 * epsilon);
+                assert!((actual.parameters[i] - finite_difference).abs() < 2e-9);
+            }
+        }
+
+        #[test]
+        fn mass_and_force_design_updates_reduce_the_actual_trajectory_objective() {
+            let mut model = SpringDesign([2.0, 3.0, 0.4, 4.0, 0.7]);
+            let initial = model.cost();
+            for _ in 0..6 {
+                let before = model.cost();
+                let gradient = model.gradient().parameters;
+                let norm2 = gradient.iter().map(|g| g * g).sum::<f64>();
+                let mut accepted = None;
+                for backtrack in 0..8 {
+                    let rate = 0.5 * 0.5_f64.powi(backtrack);
+                    let next = std::array::from_fn(|i| model.0[i] - rate * gradient[i]);
+                    assert!(next[0] > 0.0 && next[0] * next[1] > next[2] * next[2]);
+                    assert!(next[3] > 0.0 && next[4] > 0.0);
+                    let trial = SpringDesign(next);
+                    if trial.cost() < before - 1e-4 * rate * norm2 {
+                        accepted = Some(trial);
+                        break;
+                    }
+                }
+                model = accepted.expect("physical gradient must produce descent");
+            }
+            println!(
+                "momentum design: initial={initial:e}, final={:e}",
+                model.cost()
+            );
+            assert!(model.cost() < 0.95 * initial);
+        }
+
+        struct Ballistic {
+            mass: f64,
+            force: f64,
+        }
+        impl LinearOp for Ballistic {
+            fn n(&self) -> usize {
+                1
+            }
+            fn apply(&self, p: &[f64], out: &mut [f64]) {
+                out[0] = p[0] / self.mass;
+            }
+        }
+        impl MomentumVerletParameterVjp for Ballistic {
+            fn parameter_count(&self) -> usize {
+                2
+            }
+            fn force_vjp(
+                &self,
+                _: &[f64],
+                seed: &[f64],
+                out: &mut [f64],
+            ) -> Result<(), MomentumVerletError> {
+                out.copy_from_slice(&[0.0, seed[0]]);
+                Ok(())
+            }
+            fn mass_vjp(
+                &self,
+                v: &[f64],
+                seed: &[f64],
+                out: &mut [f64],
+            ) -> Result<(), MomentumVerletError> {
+                out.copy_from_slice(&[v[0] * seed[0], 0.0]);
+                Ok(())
+            }
+        }
+
+        #[test]
+        fn ballistic_mass_and_thrust_gradients_use_fixed_canonical_momentum_in_both_time_directions()
+         {
+            let model = Ballistic {
+                mass: 2.5,
+                force: 0.7,
+            };
+            let initial_momentum = 1.3;
+            for h in [-0.03, 0.03] {
+                for steps in [0, 1, 17] {
+                    let result = verlet_momentum_parameter_adjoint(
+                        &[0.2],
+                        &[initial_momentum],
+                        h,
+                        steps,
+                        &model,
+                        &|_, out| out[0] = model.force,
+                        &|_, _, out| out.fill(0.0),
+                        &model,
+                        (&[0.8], &[-0.4]),
+                        &mut || false,
+                    )
+                    .unwrap();
+                    let time = h * steps as f64;
+                    let dm = -0.8 * (time * initial_momentum + 0.5 * time * time * model.force)
+                        / model.mass.powi(2);
+                    let df = 0.8 * 0.5 * time * time / model.mass - 0.4 * time;
+                    assert!((result.parameters[0] - dm).abs() < 2e-14);
+                    assert!((result.parameters[1] - df).abs() < 2e-14);
+                    assert_eq!(result.initial_position, [0.8]);
+                    assert!(
+                        (result.initial_momentum[0] - (-0.4 + 0.8 * time / model.mass)).abs()
+                            < 2e-14
+                    );
+                    // Fixed-velocity initialization needs this additional chain.
+                    let fixed_velocity_dm =
+                        dm + result.initial_momentum[0] * initial_momentum / model.mass;
+                    let expected = -0.8 * 0.5 * time * time * model.force / model.mass.powi(2)
+                        - 0.4 * initial_momentum / model.mass;
+                    assert!((fixed_velocity_dm - expected).abs() < 2e-14);
+                }
+            }
+        }
+
+        #[test]
+        fn parameter_pullback_retains_initial_state_bits_and_adds_no_inverse_solve() {
+            struct Counted<'a> {
+                model: &'a SpringDesign,
+                applications: Cell<usize>,
+            }
+            impl LinearOp for Counted<'_> {
+                fn n(&self) -> usize {
+                    2
+                }
+                fn apply(&self, x: &[f64], out: &mut [f64]) {
+                    self.applications.set(self.applications.get() + 1);
+                    self.model.apply(x, out);
+                }
+            }
+            let model = SpringDesign([2.0, 3.0, 0.4, 4.0, 0.7]);
+            let mass = Counted {
+                model: &model,
+                applications: Cell::new(0),
+            };
+            let force = |q: &[f64], f: &mut [f64]| model.force(q, f);
+            let state_vjp =
+                |q: &[f64], seed: &[f64], out: &mut [f64]| model.state_vjp(q, seed, out);
+            let seed = (&[0.5, -0.3][..], &[-0.2, 0.8][..]);
+            let original = verlet_momentum_adjoint(
+                &[0.7, -0.25],
+                &[0.2, -0.35],
+                0.025,
+                33,
+                &mass,
+                &force,
+                &state_vjp,
+                seed,
+                &mut || false,
+            )
+            .unwrap();
+            let original_count = mass.applications.replace(0);
+            let expanded = verlet_momentum_parameter_adjoint(
+                &[0.7, -0.25],
+                &[0.2, -0.35],
+                0.025,
+                33,
+                &mass,
+                &force,
+                &state_vjp,
+                &model,
+                seed,
+                &mut || false,
+            )
+            .unwrap();
+            assert_eq!(mass.applications.get(), original_count);
+            for (a, b) in original.0.iter().chain(&original.1).zip(
+                expanded
+                    .initial_position
+                    .iter()
+                    .chain(&expanded.initial_momentum),
+            ) {
+                assert_eq!(a.to_bits(), b.to_bits());
+            }
+        }
+
+        #[test]
+        fn parameter_derivative_errors_incomplete_writes_and_cancellation_return_no_gradient() {
+            struct Faulty<'a> {
+                model: &'a SpringDesign,
+                mode: usize,
+                calls: Cell<usize>,
+            }
+            impl MomentumVerletParameterVjp for Faulty<'_> {
+                fn parameter_count(&self) -> usize {
+                    match self.mode {
+                        4 => usize::MAX,
+                        5 => 0,
+                        _ => 5,
+                    }
+                }
+                fn force_vjp(
+                    &self,
+                    q: &[f64],
+                    seed: &[f64],
+                    out: &mut [f64],
+                ) -> Result<(), MomentumVerletError> {
+                    self.calls.set(self.calls.get() + 1);
+                    if self.mode == 0 {
+                        return Err(MomentumVerletError::InvalidInput("derivative domain"));
+                    }
+                    self.model.force_vjp(q, seed, out)?;
+                    if self.mode == 2 {
+                        out[0] = f64::INFINITY;
+                    }
+                    Ok(())
+                }
+                fn mass_vjp(
+                    &self,
+                    v: &[f64],
+                    seed: &[f64],
+                    out: &mut [f64],
+                ) -> Result<(), MomentumVerletError> {
+                    self.calls.set(self.calls.get() + 1);
+                    if self.mode != 1 {
+                        self.model.mass_vjp(v, seed, out)?;
+                    }
+                    Ok(())
+                }
+            }
+            let model = SpringDesign([2.0, 3.0, 0.4, 4.0, 0.7]);
+            for mode in 0..6 {
+                let parameters = Faulty {
+                    model: &model,
+                    mode,
+                    calls: Cell::new(0),
+                };
+                let result = verlet_momentum_parameter_adjoint(
+                    &[0.7, -0.25],
+                    &[0.2, -0.35],
+                    0.025,
+                    1,
+                    &model,
+                    &|q, f| model.force(q, f),
+                    &|q, seed, out| model.state_vjp(q, seed, out),
+                    &parameters,
+                    (&[0.5, -0.3], &[-0.2, 0.8]),
+                    &mut || mode == 3 && parameters.calls.get() > 0,
+                );
+                match mode {
+                    0 => assert_eq!(
+                        result,
+                        Err(MomentumVerletError::InvalidInput("derivative domain"))
+                    ),
+                    1 => assert_eq!(
+                        result,
+                        Err(MomentumVerletError::NonFinite("mass parameter derivative"))
+                    ),
+                    2 => assert_eq!(
+                        result,
+                        Err(MomentumVerletError::NonFinite(
+                            "endpoint force parameter derivative"
+                        ))
+                    ),
+                    3 => assert_eq!(result, Err(MomentumVerletError::Cancelled)),
+                    4 => assert!(matches!(result, Err(MomentumVerletError::InvalidInput(_)))),
+                    5 => assert!(result.unwrap().parameters.is_empty()),
+                    _ => unreachable!(),
+                }
+                if mode >= 4 {
+                    assert_eq!(parameters.calls.get(), 0);
+                }
+            }
+        }
+    }
 }
 
 // ----------------------------------------------------------------- Lie/SO(3)

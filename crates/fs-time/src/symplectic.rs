@@ -207,6 +207,7 @@ fn momentum_action(
 
 // Shared complete primal replay for the forward map and its pullback. The
 // reverse sweep must also refuse an inadmissible endpoint force or momentum.
+#[allow(clippy::too_many_arguments)]
 fn momentum_proposal<M: LinearOp + ?Sized, F: Fn(&[f64], &mut [f64])>(
     q: &[f64],
     p: &[f64],
@@ -214,6 +215,7 @@ fn momentum_proposal<M: LinearOp + ?Sized, F: Fn(&[f64], &mut [f64])>(
     inverse_mass: &M,
     force: &F,
     workspace: &mut [f64],
+    drift_velocity: Option<&mut [f64]>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), MomentumVerletError> {
     let n = q.len();
@@ -233,6 +235,12 @@ fn momentum_proposal<M: LinearOp + ?Sized, F: Fn(&[f64], &mut [f64])>(
         |out| inverse_mass.apply(half_p, out),
         cancelled,
     )?;
+    if let Some(velocity) = drift_velocity {
+        for (saved, current) in velocity.chunks_mut(256).zip(work.chunks(256)) {
+            momentum_poll(cancelled)?;
+            saved.copy_from_slice(current);
+        }
+    }
     for i in 0..n {
         if i % 256 == 0 {
             momentum_poll(cancelled)?;
@@ -267,8 +275,9 @@ fn momentum_proposal<M: LinearOp + ?Sized, F: Fn(&[f64], &mut [f64])>(
 /// not inferred or certified from an arbitrary [`LinearOp`]. Approximate mass
 /// solves carry their own defects. The map is second order and reversible for
 /// fixed smooth actions; negative `h` performs a reverse step. Configuration-
-/// dependent mass, constraints, impulses and mass-parameter gradients are outside
-/// this separable lane. The existing unit-mass [`verlet_step`] is unchanged.
+/// dependent mass, constraints and impulses are outside this separable lane.
+/// Design-parameter derivatives use [`verlet_momentum_parameter_adjoint`].
+/// The existing unit-mass [`verlet_step`] is unchanged.
 pub fn verlet_momentum_step<M: LinearOp + ?Sized, F: Fn(&[f64], &mut [f64])>(
     q: &mut [f64],
     p: &mut [f64],
@@ -285,7 +294,7 @@ pub fn verlet_momentum_step<M: LinearOp + ?Sized, F: Fn(&[f64], &mut [f64])>(
         ));
     }
     let workspace = &mut scratch[..required];
-    momentum_proposal(q, p, h, inverse_mass, force, workspace, cancelled)?;
+    momentum_proposal(q, p, h, inverse_mass, force, workspace, None, cancelled)?;
     let (next_q, rest) = workspace.split_at_mut(q.len());
     let (next_p, _) = rest.split_at_mut(p.len());
     q.copy_from_slice(next_q);
@@ -325,6 +334,136 @@ where
     J: Fn(&[f64], &[f64], &mut [f64]),
     C: FnMut() -> bool,
 {
+    let gradient = momentum_adjoint(
+        q0,
+        p0,
+        h,
+        steps,
+        inverse_mass,
+        force,
+        force_vjp,
+        None,
+        bar_n,
+        cancelled,
+    )?;
+    Ok((gradient.initial_position, gradient.initial_momentum))
+}
+
+/// Parameter derivatives at the fixed physical model used during a trajectory.
+///
+/// Both actions overwrite every output component, including exact zeros, and
+/// must be repeatable throughout checkpoint replay. The parameter coordinates
+/// and ordering are shared by both actions. A constant mass may depend on design
+/// parameters, but not on position, momentum or time within the trajectory.
+/// Callback errors propagate unchanged; long kernels own their cancellation.
+pub trait MomentumVerletParameterVjp {
+    /// Number of design parameters. Zero skips both parameter actions.
+    fn parameter_count(&self) -> usize;
+
+    /// Write `(d F(q, theta) / d theta)^T seed` with position held fixed.
+    fn force_vjp(
+        &self,
+        position: &[f64],
+        seed: &[f64],
+        out: &mut [f64],
+    ) -> Result<(), MomentumVerletError>;
+
+    /// Write `(d (M(theta) velocity) / d theta)^T seed`, holding velocity fixed.
+    /// This differentiates the physical MASS, not its inverse action. The
+    /// supplied `LinearOp` must apply the inverse of this same mass and its true
+    /// transpose. No matrix entries, factorization derivative or solve-iteration
+    /// tape are needed. The driver supplies the inverse derivative's minus sign.
+    fn mass_vjp(
+        &self,
+        velocity: &[f64],
+        seed: &[f64],
+        out: &mut [f64],
+    ) -> Result<(), MomentumVerletError>;
+}
+
+/// Pullback of a terminal objective through a physical-momentum trajectory.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MomentumVerletGradient {
+    pub initial_position: Vec<f64>,
+    pub initial_momentum: Vec<f64>,
+    pub parameters: Vec<f64>,
+}
+
+/// Discrete initial-state AND mass/force parameter adjoint of momentum Verlet.
+///
+/// The force state VJP and inverse-mass transpose have exactly the meaning in
+/// [`verlet_momentum_adjoint`]. Parameter contributions include both force kicks
+/// and the drift: with `v = M^-1 p_half` and `z = M^-T bar_q`, the latter is
+/// `-h * z^T (dM/dtheta) v`. The actual primal drift velocity is retained, so
+/// no extra mass solve or subtraction of large endpoint momenta is required.
+///
+/// Initial position and CANONICAL MOMENTUM are held fixed for the parameter
+/// gradient. For fixed initial velocity, additionally chain `p0 = M(theta) v0`
+/// through the returned initial-momentum cotangent. Direct objective parameter
+/// dependence also belongs to the caller. Step size and step count are fixed.
+///
+/// This shares the original fallible binary checkpoint/reverse sweep and its
+/// initial-state arithmetic. It adds O(n + parameters) peak scalar workspace,
+/// not one state vector or trajectory solve per parameter. Parameter actions
+/// are NaN-filled and checked for complete finite writes, with cancellation
+/// around actions and every 256 components. Refusal returns no partial gradient.
+/// A zero-step chain returns the state seed and zero parameter derivatives.
+///
+/// Matching mass, inverse actions and derivatives are caller obligations. An
+/// approximate inverse solve introduces its own derivative defect; this is the
+/// derivative of the physical inverse, not of an arbitrary iterative algorithm.
+#[allow(clippy::too_many_arguments)]
+pub fn verlet_momentum_parameter_adjoint<M, F, J, C>(
+    q0: &[f64],
+    p0: &[f64],
+    h: f64,
+    steps: usize,
+    inverse_mass: &M,
+    force: &F,
+    force_vjp: &J,
+    parameters: &dyn MomentumVerletParameterVjp,
+    bar_n: (&[f64], &[f64]),
+    cancelled: &mut C,
+) -> Result<MomentumVerletGradient, MomentumVerletError>
+where
+    M: LinearOp + ?Sized,
+    F: Fn(&[f64], &mut [f64]),
+    J: Fn(&[f64], &[f64], &mut [f64]),
+    C: FnMut() -> bool,
+{
+    momentum_adjoint(
+        q0,
+        p0,
+        h,
+        steps,
+        inverse_mass,
+        force,
+        force_vjp,
+        Some(parameters),
+        bar_n,
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn momentum_adjoint<M, F, J, C>(
+    q0: &[f64],
+    p0: &[f64],
+    h: f64,
+    steps: usize,
+    inverse_mass: &M,
+    force: &F,
+    force_vjp: &J,
+    parameters: Option<&dyn MomentumVerletParameterVjp>,
+    bar_n: (&[f64], &[f64]),
+    cancelled: &mut C,
+) -> Result<MomentumVerletGradient, MomentumVerletError>
+where
+    M: LinearOp + ?Sized,
+    F: Fn(&[f64], &mut [f64]),
+    J: Fn(&[f64], &[f64], &mut [f64]),
+    C: FnMut() -> bool,
+{
     let required = momentum_inputs(q0, p0, h, inverse_mass, cancelled)?;
     let n = q0.len();
     if bar_n.0.len() != n || bar_n.1.len() != n {
@@ -334,6 +473,15 @@ where
     }
     momentum_finite(bar_n.0, "position seed", cancelled)?;
     momentum_finite(bar_n.1, "momentum seed", cancelled)?;
+    let parameter_count = parameters.map_or(0, MomentumVerletParameterVjp::parameter_count);
+    parameter_count
+        .checked_mul(2)
+        .and_then(|size| size.checked_add(required))
+        .filter(|&size| size <= isize::MAX as usize / std::mem::size_of::<f64>())
+        .ok_or(MomentumVerletError::InvalidInput(
+            "parameter workspace length overflow",
+        ))?;
+    let parameters = parameters.filter(|_| parameter_count != 0);
     let initial: Vec<_> = q0.iter().chain(p0).copied().collect();
     let forward = |state: &[f64], cancelled: &mut C| {
         let mut next = state.to_vec();
@@ -342,14 +490,29 @@ where
         verlet_momentum_step(q, p, h, inverse_mass, force, &mut scratch, cancelled)?;
         Ok(next)
     };
-    let reverse = |state: &[f64], bar: (Vec<f64>, Vec<f64>), cancelled: &mut C| {
+    let reverse = |state: &[f64], bar: MomentumVerletGradient, cancelled: &mut C| {
         let (q, p) = state.split_at(n);
         momentum_inputs(q, p, h, inverse_mass, cancelled)?;
         let mut scratch = vec![0.0; required];
-        momentum_proposal(q, p, h, inverse_mass, force, &mut scratch, cancelled)?;
+        let mut velocity = vec![0.0; if parameters.is_some() { n } else { 0 }];
+        momentum_proposal(
+            q,
+            p,
+            h,
+            inverse_mass,
+            force,
+            &mut scratch,
+            parameters.map(|_| velocity.as_mut_slice()),
+            cancelled,
+        )?;
         let (next_q, rest) = scratch.split_at_mut(n);
         let (_, work) = rest.split_at_mut(n);
-        let (mut bar_q, mut bar_p) = bar;
+        let MomentumVerletGradient {
+            initial_position: mut bar_q,
+            initial_momentum: mut bar_p,
+            parameters: mut bar_parameters,
+        } = bar;
+        let mut parameter_work = vec![0.0; parameter_count];
         momentum_action(
             work,
             "endpoint force transpose",
@@ -358,6 +521,16 @@ where
             },
             cancelled,
         )?;
+        if let Some(parameters) = parameters {
+            momentum_parameter_update(
+                &mut bar_parameters,
+                &mut parameter_work,
+                0.5 * h,
+                "endpoint force parameter derivative",
+                |out| parameters.force_vjp(next_q, &bar_p, out),
+                cancelled,
+            )?;
+        }
         for i in 0..n {
             if i % 256 == 0 {
                 momentum_poll(cancelled)?;
@@ -373,6 +546,16 @@ where
             },
             cancelled,
         )?;
+        if let Some(parameters) = parameters {
+            momentum_parameter_update(
+                &mut bar_parameters,
+                &mut parameter_work,
+                -h,
+                "mass parameter derivative",
+                |out| parameters.mass_vjp(&velocity, work, out),
+                cancelled,
+            )?;
+        }
         for i in 0..n {
             if i % 256 == 0 {
                 momentum_poll(cancelled)?;
@@ -380,6 +563,16 @@ where
             bar_p[i] = h.mul_add(work[i], bar_p[i]);
         }
         momentum_finite(&bar_p, "initial momentum cotangent", cancelled)?;
+        if let Some(parameters) = parameters {
+            momentum_parameter_update(
+                &mut bar_parameters,
+                &mut parameter_work,
+                0.5 * h,
+                "initial force parameter derivative",
+                |out| parameters.force_vjp(q, &bar_p, out),
+                cancelled,
+            )?;
+        }
         momentum_action(
             work,
             "initial force transpose",
@@ -395,27 +588,59 @@ where
             bar_q[i] = (0.5 * h).mul_add(work[i], bar_q[i]);
         }
         momentum_finite(&bar_q, "initial position cotangent", cancelled)?;
-        Ok((bar_q, bar_p))
+        Ok(MomentumVerletGradient {
+            initial_position: bar_q,
+            initial_momentum: bar_p,
+            parameters: bar_parameters,
+        })
     };
-    let seed = (bar_n.0.to_vec(), bar_n.1.to_vec());
+    let seed = MomentumVerletGradient {
+        initial_position: bar_n.0.to_vec(),
+        initial_momentum: bar_n.1.to_vec(),
+        parameters: vec![0.0; parameter_count],
+    };
     momentum_sweep(&initial, steps, seed, &forward, &reverse, cancelled)
+}
+
+fn momentum_parameter_update(
+    accumulated: &mut [f64],
+    work: &mut [f64],
+    scale: f64,
+    context: &'static str,
+    action: impl FnOnce(&mut [f64]) -> Result<(), MomentumVerletError>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), MomentumVerletError> {
+    for chunk in work.chunks_mut(256) {
+        momentum_poll(cancelled)?;
+        chunk.fill(f64::NAN);
+    }
+    momentum_poll(cancelled)?;
+    action(work)?;
+    momentum_finite(work, context, cancelled)?;
+    for i in 0..accumulated.len() {
+        if i % 256 == 0 {
+            momentum_poll(cancelled)?;
+        }
+        accumulated[i] = scale.mul_add(work[i], accumulated[i]);
+    }
+    momentum_finite(accumulated, "parameter cotangent", cancelled)
 }
 
 fn momentum_sweep<F, R, C>(
     state: &[f64],
     steps: usize,
-    bar: (Vec<f64>, Vec<f64>),
+    bar: MomentumVerletGradient,
     forward: &F,
     reverse: &R,
     cancelled: &mut C,
-) -> Result<(Vec<f64>, Vec<f64>), MomentumVerletError>
+) -> Result<MomentumVerletGradient, MomentumVerletError>
 where
     F: Fn(&[f64], &mut C) -> Result<Vec<f64>, MomentumVerletError>,
     R: Fn(
         &[f64],
-        (Vec<f64>, Vec<f64>),
+        MomentumVerletGradient,
         &mut C,
-    ) -> Result<(Vec<f64>, Vec<f64>), MomentumVerletError>,
+    ) -> Result<MomentumVerletGradient, MomentumVerletError>,
     C: FnMut() -> bool,
 {
     momentum_poll(cancelled)?;

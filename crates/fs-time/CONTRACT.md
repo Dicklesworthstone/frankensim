@@ -47,6 +47,23 @@ where claimed below.
   mass, constraints and impacts are outside this separable lane. Polls bracket
   actions and occur every 256 vector components; actions own their internal
   latency and accepted forward publication uses two final slice copies.
+- `verlet_momentum_parameter_adjoint` extends the same checkpoint/reverse sweep
+  to design-dependent constant physical mass and force laws. The
+  `MomentumVerletParameterVjp` actions supply force-parameter derivatives and
+  derivatives of `M(theta) v`, not an assembled inverse or solver-iteration
+  tape. Drift contributions are `-h z^T (dM/dtheta) v`, with the actual retained
+  primal drift velocity and the original inverse-mass transpose action. Both
+  force kicks contribute; no extra mass solve or state-sized column per
+  parameter is needed. `MomentumVerletGradient` returns initial position,
+  initial canonical-momentum and parameter cotangents. Fixed initial velocity
+  requires chaining `p0=M(theta)v0`; direct objective derivatives are separate.
+  Matching mass/inverse/derivative actions remain caller obligations, and an
+  approximate inverse carries its own derivative defect. Completely written
+  finite parameter outputs, bounded cancellation and atomic refusal are checked.
+  Zero-step gradients have zero parameter part. The focused `time_battery`
+  tests check analytic ballistic sensitivity, independent dual/finite-difference
+  gradients for coupled mass and nonlinear internal forces, actual design
+  descent, original initial-state arithmetic, replay and derivative refusals.
 - `fs_ga::{So3, Se3, Twist, Vec3}` are re-exported canonical state/tangent
   types; fs-time does not own a second quaternion, motor, pose, or twist
   representation. `lie::{so3_body_exp_step, so3_space_exp_step}` name the

@@ -56,7 +56,8 @@ pub use stiff::{
     ImexStepTelemetry, OperatorImex2, imex2_step,
 };
 pub use symplectic::{
-    MomentumVerletError, verlet_adjoint, verlet_momentum_adjoint, verlet_momentum_step, verlet_step,
+    MomentumVerletError, MomentumVerletGradient, MomentumVerletParameterVjp, verlet_adjoint,
+    verlet_momentum_adjoint, verlet_momentum_parameter_adjoint, verlet_momentum_step, verlet_step,
 };
 
 /// Crate version, re-exported for provenance stamping.
