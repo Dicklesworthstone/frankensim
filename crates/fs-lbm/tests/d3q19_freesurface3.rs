@@ -46,6 +46,37 @@ fn construction_inserts_interface_and_holds_closure() {
 }
 
 #[test]
+fn forced_free_surface_initializes_wet_cells_at_physical_rest() {
+    let fs = FreeSurface3::new(
+        8,
+        8,
+        8,
+        0.8,
+        [0.001, -0.002, 0.003],
+        0.0,
+        ContactModel3::Neutral,
+        column(6, 6, 6),
+    )
+    .unwrap();
+    let mut has_fluid = false;
+    let mut has_interface = false;
+    for z in 0..8 {
+        for y in 0..8 {
+            for x in 0..8 {
+                let Some(sample) = fs.sample_at(x, y, z) else {
+                    continue;
+                };
+                has_fluid |= sample.cell == Cell3::Fluid;
+                has_interface |= sample.cell == Cell3::Interface;
+                assert!(sample.velocity.iter().all(|u| u.abs() < 1.0e-15));
+                assert!((sample.density - 1.0).abs() < 1.0e-15);
+            }
+        }
+    }
+    assert!(has_fluid && has_interface);
+}
+
+#[test]
 fn all_gas_fixture_refuses() {
     let refusal = FreeSurface3::new(
         16,

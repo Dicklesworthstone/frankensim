@@ -14,6 +14,65 @@ use fs_lbm::d3q19::sparse::{
     state_bytes_per_tile,
 };
 
+#[test]
+fn sparse_activation_and_density_perturbation_start_at_physical_rest() {
+    use fs_lbm::d3q19::{E3, Q3};
+
+    let force = [0.002, -0.003, 0.001];
+    let mut grid = SparseGrid3::new(8, 4, 4, 0.8, force).unwrap();
+    grid.activate_tiles(&[(0, 0, 0)]).unwrap();
+    for phase in 0..3 {
+        if phase == 1 {
+            grid.perturb(42, 0.1);
+        } else if phase == 2 {
+            let before = grid.state_bits();
+            grid.activate_tiles(&[(1, 0, 0)]).unwrap();
+            assert_eq!(&grid.state_bits()[..before.len()], before);
+        }
+        let bits = grid.state_bits();
+        for slot in 0..grid.active_tiles() {
+            for lane in 0..64 {
+                let f: [f64; Q3] =
+                    std::array::from_fn(|q| f64::from_bits(bits[(slot * Q3 + q) * 64 + lane]));
+                let rho: f64 = f.iter().sum();
+                let e = E3.map(|(x, y, z)| [f64::from(x), f64::from(y), f64::from(z)]);
+                for a in 0..3 {
+                    let raw_p = f.iter().zip(e).map(|(f, c)| f * c[a]).sum::<f64>();
+                    assert!((raw_p + 0.5 * force[a]).abs() < 1.0e-15);
+                    for b in 0..3 {
+                        let second = f.iter().zip(e).map(|(f, c)| f * c[a] * c[b]).sum::<f64>();
+                        let expected = if a == b { rho / 3.0 } else { 0.0 };
+                        assert!((second - expected).abs() < 1.0e-15);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn sparse_uniform_forcing_delivers_whole_steps_from_rest() {
+    let force = [0.0002, -0.0003, 0.0001];
+    let mut grid = SparseGrid3::new(12, 12, 12, 0.8, force).unwrap();
+    let mut tiles: Vec<_> = (0..3)
+        .flat_map(|z| (0..3).flat_map(move |y| (0..3).map(move |x| (x, y, z))))
+        .collect();
+    grid.activate_tiles(&tiles).unwrap();
+    tiles.sort_by_key(|&(x, y, z)| morton3(x, y, z));
+    let slot = tiles.iter().position(|&p| p == (1, 1, 1)).unwrap();
+    // Cell (5,5,5) is beyond the wall's streaming domain of dependence
+    // throughout these three steps: only the homogeneous force acts on it.
+    let lane = 21;
+    for step in 1..=3 {
+        grid.step_serial().unwrap();
+        let (rho, raw) = grid.cell_macros(slot, lane);
+        for a in 0..3 {
+            let physical_p = rho * raw[a] + 0.5 * force[a];
+            assert!((physical_p - f64::from(step) * force[a]).abs() < 2.0e-15);
+        }
+    }
+}
+
 fn splitmix64(mut z: u64) -> u64 {
     z = z.wrapping_add(0x9e37_79b9_7f4a_7c15);
     z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);

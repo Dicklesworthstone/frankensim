@@ -791,7 +791,7 @@ impl VelocityPressureX2 {
     }
 }
 
-fn raw_population_moments(populations: &[f64; Q]) -> (f64, [f64; 2]) {
+pub(crate) fn raw_population_moments(populations: &[f64; Q]) -> (f64, [f64; 2]) {
     let mut mass = 0.0;
     let mut momentum = [0.0; 2];
     for (q, &population) in populations.iter().enumerate() {

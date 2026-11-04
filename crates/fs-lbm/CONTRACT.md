@@ -2044,8 +2044,12 @@ it does not add solved-interface latent feedback or relax wetting restrictions.
 - `sponge::Sponge2::new(side, width, sigma_max, target_rho, target_u)`
   — a checked absorbing layer over a contiguous x-range of the D2Q9
   `core2::Grid`: after each step, fluid cells in the layer blend
-  toward the equilibrium of the authored far-field target,
-  `f <- f + sigma (f_eq - f)`, with a quadratic ramp
+  toward the equilibrium of the authored far-field target in the physical
+  Guo frame, `h <- h + sigma (f_eq - h)` with `h = f + S(u,F)/2`,
+  then restore the endpoint source at the actual blended density/velocity.
+  The held acceleration and spatial external forces stay attached; target
+  velocity, momentum and second moments receive no half-force bias. The
+  unforced path retains its original population arithmetic, with a quadratic ramp
   `sigma = sigma_max ((d+1)/width)^2` growing toward the boundary (an
   abrupt sigma is its own reflector). `SpongeSide::{LeftX, RightX}`.
   Construction-time asserts (crate boundary convention): positive
@@ -2056,6 +2060,10 @@ it does not add solved-interface latent feedback or relax wetting restrictions.
   profile, turning the layer into a spectral-DNS style FRINGE region
   (periodic-x domains: outflow re-conditioned to an authored inflow
   profile — the jet-labium fixture in fs-aeroac consumes it).
+  This imposed reservoir exchanges mass and momentum with the fluid; it is
+  not a closed-domain conservative or thermal-energy model. Focused G0/G3
+  tests retain forced matched states, independently check mass, physical
+  momentum and the full second-moment blend, and pin the unforced arithmetic.
 - Purpose: outlet-reflection suppression for aeroacoustic source
   extraction (bead 9ok02 — the jet pilot's 6% Re-200 flux imbalance
   was outlet-reflection sensitivity; source spectra are untrusted
@@ -2072,7 +2080,9 @@ it does not add solved-interface latent feedback or relax wetting restrictions.
   on any out-of-domain tile), preserves existing tile state bit-exactly, and
   re-sorts the active list into ascending Morton order — iteration, sweep,
   and reduction order depend only on the active SET, never on activation
-  history.
+  history. New tiles start at physical rest in the retained Guo force frame,
+  `f = f_eq(rho,0) - S(0,F)/2`; this also gives the native free-surface
+  constructor zero initial physical momentum under nonzero forcing.
 - `step_serial()` / `step_pooled(&runner, &gate)` — one sweep step as two
   passes (collide from the shared per-cell `collide_cell3` kernel, then
   pull-stream) over three retained buffers. The pull-stream pass writes a
@@ -2085,7 +2095,12 @@ it does not add solved-interface latent feedback or relax wetting restrictions.
   groups sized by a worker-count-independent constant, and all inputs are
   read-only within a pass.
 - `perturb(seed, amplitude)` — splitmix64 hash-seeded density perturbation
-  (the hash IS the seed schedule); `state_bits()` — canonical-order exact
+  at physical rest in the same force frame (the hash IS the seed schedule);
+  `cell_macros` retains its raw population-velocity convention so local-force
+  free-surface consumers add their own half source exactly once.
+  G0/G1 regressions verify activation, density changes, unchanged existing
+  tiles, full resting stress, and three complete force impulses from rest.
+  `state_bits()` — canonical-order exact
   bits for golden hashing; `total_mass()`, `cell_macros(slot, lane)`,
   `active_tiles()`, `allocated_state_bytes()` (exactly three population
   buffers per active tile), `state_bytes_per_tile()`.

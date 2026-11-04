@@ -105,12 +105,23 @@ struct TileBlock {
 }
 
 impl TileBlock {
-    fn equilibrium(rho: f64) -> TileBlock {
-        let eq = equilibrium3(rho, [0.0; 3]);
+    fn equilibrium(rho: f64, force: [f64; 3]) -> TileBlock {
+        let eq = physical_rest(rho, force);
         TileBlock {
             f: core::array::from_fn(|q| Tile([eq[q]; TILE_CELLS])),
         }
     }
+}
+
+/// The native collision reads physical momentum as sum(c_q*f_q) + F/2.
+/// Newly activated fluid therefore needs the same half-source frame as every
+/// subsequent step. Bare zero-velocity equilibrium would start it at F/(2rho).
+fn physical_rest(rho: f64, force: [f64; 3]) -> [f64; Q3] {
+    let mut populations = equilibrium3(rho, [0.0; 3]);
+    if force != [0.0; 3] {
+        crate::thermal::forcing::reframe3(&mut populations, [0.0; 3], [0.0; 3], force);
+    }
+    populations
 }
 
 /// Bytes of population state held per active tile (published, collided, and
@@ -323,8 +334,8 @@ impl SparseGrid3 {
         })
     }
 
-    /// Activate tiles (idempotent), initializing new tiles at rest-density
-    /// equilibrium. Existing tile state is preserved; the active list is
+    /// Activate tiles (idempotent), initializing new tiles at unit density
+    /// and physical rest in the retained Guo force frame. Existing tile state is preserved; the active list is
     /// re-sorted into Morton order, so iteration order depends only on the
     /// final active SET, never on activation history.
     ///
@@ -359,9 +370,9 @@ impl SparseGrid3 {
                     next.push(self.next[old_slot].clone());
                 }
                 None => {
-                    pre.push(TileBlock::equilibrium(1.0));
-                    post.push(TileBlock::equilibrium(1.0));
-                    next.push(TileBlock::equilibrium(1.0));
+                    pre.push(TileBlock::equilibrium(1.0, self.force));
+                    post.push(TileBlock::equilibrium(1.0, self.force));
+                    next.push(TileBlock::equilibrium(1.0, self.force));
                 }
             }
             index.insert(key, slot);
@@ -456,7 +467,8 @@ impl SparseGrid3 {
 
     /// Deterministic seeded perturbation: every cell's density is offset by
     /// a splitmix64 hash of `(seed, morton key, lane)` scaled to
-    /// `±amplitude`, and populations reset to equilibrium at that density.
+    /// `±amplitude`, and populations reset to physical rest at that density
+    /// in the retained Guo force frame.
     /// The hash IS the seed schedule — no RNG state, bitwise reproducible.
     pub fn perturb(&mut self, seed: u64, amplitude: f64) {
         fn splitmix64(mut z: u64) -> u64 {
@@ -471,7 +483,7 @@ impl SparseGrid3 {
                 #[allow(clippy::cast_precision_loss)]
                 let unit = (h >> 11) as f64 / (1u64 << 53) as f64;
                 let rho = 1.0 + amplitude * (2.0 * unit - 1.0);
-                let eq = equilibrium3(rho, [0.0; 3]);
+                let eq = physical_rest(rho, self.force);
                 for q in 0..Q3 {
                     self.pre[slot].f[q].0[lane] = eq[q];
                 }
@@ -509,8 +521,10 @@ impl SparseGrid3 {
         bits
     }
 
-    /// Density and velocity of the cell at `lane` of active slot `slot`
-    /// (test/diagnostic surface; canonical slot order is Morton order).
+    /// Density and raw population velocity of the cell at `lane` of active
+    /// slot `slot` (canonical slot order is Morton order). Add `F/(2rho)`
+    /// for physical velocity. Free-surface owners add their complete local
+    /// force, which may differ from this grid's uniform collision force.
     #[must_use]
     pub fn cell_macros(&self, slot: usize, lane: usize) -> (f64, [f64; 3]) {
         let mut rho = 0.0;

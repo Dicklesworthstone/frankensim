@@ -6,7 +6,13 @@
 //!
 //! Mechanism: after each stream/collide step, cells inside the layer
 //! blend toward the equilibrium of an authored far-field target
-//! state, `f <- f + sigma(x) (f_eq(rho_t, u_t) - f)`, with a
+//! state, `h <- h + sigma(x) (f_eq(rho_t, u_t) - h)`, where
+//! `h = f + S(u, F)/2` is the physical population in the Guo force
+//! convention. Restoring the endpoint half-source retains the grid's
+//! acceleration and external force without a spurious half-force impulse or
+//! stress. This blends mass, physical momentum and physical second moments
+//! with the same strength, including density-changing targets. With no force,
+//! `h = f` and the original arithmetic is retained. The
 //! QUADRATIC ramp `sigma(x) = sigma_max ((d + 1) / width)^2` growing
 //! into the layer — a gentle impedance gradient, so the layer itself
 //! reflects little (an abrupt sigma is its own reflector).
@@ -19,8 +25,9 @@
 //! bounce-back wall CONTROL that catches the disabled-sponge
 //! mutation.
 
-use crate::core2::{Cell, Grid};
+use crate::core2::{Cell, Grid, raw_population_moments};
 use crate::equilibrium;
+use crate::thermal::forcing::reframe2;
 
 /// Which x-side of the domain the layer occupies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,6 +154,9 @@ impl Sponge2 {
 
     /// Apply one blending pass (call once per LBM step, after
     /// [`Grid::step`]). Only `Cell::Fluid` cells are touched.
+    /// The authored target velocity is physical, including when gravity or a
+    /// spatial external force is present. The layer exchanges mass and momentum
+    /// with its imposed far field; it is not a closed-system conservative step.
     ///
     /// # Panics
     /// If the layer is wider than the grid, or a per-row profile's
@@ -173,8 +183,28 @@ impl Sponge2 {
                 } else {
                     &self.targets[y]
                 };
-                for (fq, tq) in grid.f[i].iter_mut().zip(target) {
-                    *fq += s * (tq - *fq);
+                if grid.g == [0.0; 2] && grid.fext[i] == [0.0; 2] {
+                    // Keep the original unforced acoustic/fringe path exactly.
+                    for (fq, tq) in grid.f[i].iter_mut().zip(target) {
+                        *fq += s * (tq - *fq);
+                    }
+                } else {
+                    let old = grid.moments(i);
+                    let force =
+                        std::array::from_fn(|a| grid.g[a].mul_add(old.rho, grid.fext[i][a]));
+                    let populations = &mut grid.f[i];
+                    reframe2(populations, old.u, force, [0.0; 2]);
+                    for (fq, tq) in populations.iter_mut().zip(target) {
+                        *fq += s * (tq - *fq);
+                    }
+                    // The target can change density, so both rho*g and the
+                    // velocity in S must use the actual blended physical state.
+                    // Blending raw force-shifted populations, even toward a
+                    // shifted target, would not preserve the second moment.
+                    let (rho, momentum) = raw_population_moments(populations);
+                    let velocity = momentum.map(|p| p / rho);
+                    let force = std::array::from_fn(|a| grid.g[a].mul_add(rho, grid.fext[i][a]));
+                    reframe2(populations, velocity, [0.0; 2], force);
                 }
             }
         }
