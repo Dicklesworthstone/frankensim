@@ -952,15 +952,18 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
 
     /// Solve dead loads and a current-area pressure field on the closed surface.
     ///
-    /// An affine spatial field is sampled at CURRENT coordinates with exact P1
-    /// surface integration. Its gradient supplies the physical buoyancy force,
-    /// and both the field value and gradient ramp with the native load factor.
+    /// Affine and planar free-surface fields are sampled at CURRENT coordinates
+    /// with exact P1 wet-surface integration. Their gradient supplies physical
+    /// buoyancy, and both field value and gradient ramp with the native load
+    /// factor. A free surface keeps its zero plane fixed during that ramp.
     /// The consistent tangent and conservative work drive the original Newton
     /// and Armijo solve. Support reactions retain all pressure components.
     ///
     /// Uniform and per-face fields retain their existing semantics. Per-face
-    /// fields use nonsymmetric residual globalization; affine fields on the
+    /// fields use nonsymmetric residual globalization; spatial fields on the
     /// complete closed surface have a conservative volume-integral potential.
+    /// At a whole face exactly on a free surface, Newton uses the declared
+    /// dry-side generalized pressure tangent and the exact endpoint work.
     ///
     /// # Errors
     /// Invalid pressure data, a mismatched reference surface, or native solve
@@ -1037,7 +1040,7 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
     /// Combine conservative gravity with the existing current-area pressure.
     ///
     /// A face pressure field keeps its nonsymmetric tangent and residual
-    /// globalization. Uniform or affine spatial pressure and gravity share
+    /// globalization. Uniform or spatial pressure and gravity share
     /// conservative Armijo work increments. Neither load is converted into a
     /// frozen dead force.
     ///
@@ -1222,6 +1225,15 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                         pressure_pa,
                         gradient_pa_m,
                     } => pressure::TetPressure::Affine {
+                        origin_m,
+                        pressure_pa: load * pressure_pa,
+                        gradient_pa_m: gradient_pa_m.map(|value| load * value),
+                    },
+                    pressure::TetPressure::FreeSurface {
+                        origin_m,
+                        pressure_pa,
+                        gradient_pa_m,
+                    } => pressure::TetPressure::FreeSurface {
                         origin_m,
                         pressure_pa: load * pressure_pa,
                         gradient_pa_m: gradient_pa_m.map(|value| load * value),
@@ -1482,19 +1494,21 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                                 Some((_, pressure::TetPressure::Uniform(value))) => {
                                     value * (trial_volume - current_volume)
                                 }
-                                Some((surface, value @ pressure::TetPressure::Affine { .. })) => {
-                                    match surface.work_j(&u, &trial, value, cx) {
-                                        Ok(work) => -work,
-                                        Err(HyperTetError::Cancelled) => {
-                                            return Err(HyperTetError::Cancelled);
-                                        }
-                                        Err(_) => {
-                                            alpha *= 0.5;
-                                            record.backtracks += 1;
-                                            continue;
-                                        }
+                                Some((
+                                    surface,
+                                    value @ (pressure::TetPressure::Affine { .. }
+                                    | pressure::TetPressure::FreeSurface { .. }),
+                                )) => match surface.work_j(&u, &trial, value, cx) {
+                                    Ok(work) => -work,
+                                    Err(HyperTetError::Cancelled) => {
+                                        return Err(HyperTetError::Cancelled);
                                     }
-                                }
+                                    Err(_) => {
+                                        alpha *= 0.5;
+                                        record.backtracks += 1;
+                                        continue;
+                                    }
+                                },
                                 _ => 0.0,
                             };
                             let gravity_change =

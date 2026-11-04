@@ -671,6 +671,33 @@ fully immersed affine field: free-surface clipping, varying fluid density,
 cavitation, fluid evolution and global self-intersection remain outside this
 load owner's contract.
 
+### Partial immersion at a prescribed planar free surface
+
+`TetPressure::FreeSurface` applies gauge pressure
+`max(0, p_origin + gradient dot (current_x - origin))`; uniform-fluid
+hydrostatics uses `gradient = rho_fluid * gravity`. Wet polygons are split into
+at most two triangles in the original P1 barycentric chart. Exact integrals of
+`N_i p` retain the nodal force and torque, while wet `N_i N_j` moments supply the
+spatial-pressure tangent alongside the current-area derivative. The moving-cut
+term vanishes at zero pressure. A whole face on the plane selects the dry-side
+generalized tangent; no unique two-sided tangent is claimed at that state.
+
+Conservative work uses exact endpoint moments of `integral_volume max(0,p) dV`.
+Positive decompositions into at most three wet tetrahedra avoid subtracting an
+almost equal dry volume or dividing by a small pressure gradient. Element work
+increments retain changes in immersion without treating a crossing as a fixed
+Simpson interval. The native Newton load ramp scales pressure and gradient
+together, preserving the zero plane, and uses this work in globalization and
+the same traction in reactions. Fully wet and zero-gradient limits retain the
+existing affine or nonnegative uniform load; a currently dry body can enter
+the fluid during a solve.
+
+`tests/hyper3_pressure/free_surface.rs` checks independent truncated-power
+volume moments, wet-volume buoyancy and torque, consistent tangents, thin caps,
+transition work, extreme finite pressure ratios, refusal and a native equilibrium
+that crosses a wet vertex. This is a prescribed exposure field on the prepared
+boundary; fluid/free-surface evolution, capillarity and cavitation are not added.
+
 ## Finite-deformation static follower pressure
 
 `hyper3::HyperTetProblem::solve_with_pressure` couples dead referential loads

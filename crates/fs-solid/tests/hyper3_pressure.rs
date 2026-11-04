@@ -7,6 +7,9 @@ use fs_solid::hyper3::pressure::{ClosedTetPressureSurface, TetPressure};
 use fs_solid::hyper3::{HyperTetError, HyperTetProblem, HyperTetSettings, HyperelasticLawField};
 use fs_solid::linear3::TetAssemblyBudget;
 
+#[path = "hyper3_pressure/free_surface.rs"]
+mod free_surface;
+
 const NODES: [[f64; 3]; 4] = [
     [0.0, 0.0, 0.0],
     [1.0, 0.0, 0.0],

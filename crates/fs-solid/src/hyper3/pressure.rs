@@ -18,6 +18,8 @@
 //! exactly against the P1 surface basis. Its closed-surface potential is
 //! `integral_volume p(x) dV`; the pressure gradient therefore supplies buoyancy
 //! without replacing the physical surface traction by a separate body force.
+//! A prescribed planar free surface clips this field at zero gauge pressure,
+//! integrating wet-face traction and clipped-volume work exactly.
 //! There is no global injectivity certificate, fluid equation of state, or
 //! time integrator in this module.
 
@@ -32,6 +34,9 @@ use crate::loads3::{LoadError3, TetLoadGeometry3};
 
 /// Enclosed void volume and work-conjugate pressure geometry for gas cavities.
 pub mod cavity;
+mod free_surface;
+
+use free_surface::FaceMoments;
 
 /// Signed differential pressure in Pa, held over the declared load interval.
 /// Positive pressure acts inward; negative pressure prescribes outward traction.
@@ -55,6 +60,22 @@ pub enum TetPressure<'a> {
         /// World pressure gradient [Pa/m].
         gradient_pa_m: [f64; 3],
     },
+    /// Prescribed planar free surface with gauge pressure
+    /// `max(0, pressure_pa + gradient_pa_m dot (x-origin_m))`.
+    ///
+    /// Uniform-fluid hydrostatics uses `gradient_pa_m = rho_fluid * gravity`;
+    /// the zero plane is the prescribed liquid surface and the other side is
+    /// unloaded. Atmospheric/reference pressure is already subtracted. This
+    /// does not evolve the fluid, model wetting/surface tension, or implement
+    /// cavitation. Zero gradient reduces to uniform nonnegative pressure.
+    FreeSurface {
+        /// World reference position [m].
+        origin_m: [f64; 3],
+        /// Unclipped gauge pressure at `origin_m` [Pa].
+        pressure_pa: f64,
+        /// World hydrostatic pressure gradient [Pa/m].
+        gradient_pa_m: [f64; 3],
+    },
 }
 
 impl From<f64> for TetPressure<'_> {
@@ -73,7 +94,12 @@ impl TetPressure<'_> {
                 gradient_pa_m,
                 ..
             } if gradient_pa_m == [0.0; 3] => Some(pressure_pa),
-            Self::Affine { .. } => None,
+            Self::FreeSurface {
+                pressure_pa,
+                gradient_pa_m,
+                ..
+            } if gradient_pa_m == [0.0; 3] => Some(pressure_pa.max(0.0)),
+            Self::Affine { .. } | Self::FreeSurface { .. } => None,
         }
     }
 }
@@ -215,12 +241,19 @@ impl ClosedTetPressureSurface {
                 origin_m,
                 pressure_pa,
                 gradient_pa_m,
+            }
+            | TetPressure::FreeSurface {
+                origin_m,
+                pressure_pa,
+                gradient_pa_m,
             } => {
                 finite(pressure_pa)?;
                 for value in origin_m.into_iter().chain(gradient_pa_m) {
                     finite(value)?;
                 }
-                pressure_pa == 0.0 && gradient_pa_m == [0.0; 3]
+                gradient_pa_m == [0.0; 3]
+                    && (pressure_pa == 0.0
+                        || matches!(pressure, TetPressure::FreeSurface { .. }) && pressure_pa < 0.0)
             }
         };
         checkpoint(cx)?;
@@ -281,7 +314,9 @@ impl ClosedTetPressureSurface {
         let mut force = vec![0.0; displacement_m.len()];
         for (index, face) in self.faces.iter().enumerate() {
             checkpoint(cx)?;
-            let weights = self.face_pressure_weights(displacement_m, index, pressure)?;
+            let weights = self
+                .face_pressure_moments::<false>(displacement_m, index, pressure)?
+                .weights_pa;
             let [a, b, c] = face.map(|node| positions[node]);
             let area = area_vector(a, b, c)?;
             for (&node, weight) in face.iter().zip(weights) {
@@ -305,6 +340,11 @@ impl ClosedTetPressureSurface {
     /// fields include both area and spatial-pressure derivatives; their complete
     /// closed-boundary assembly is also symmetric. This is the EXTERNAL force
     /// Jacobian, which an internal residual subtracts.
+    ///
+    /// A free surface integrates both terms over the current wet polygon. Its
+    /// moving-edge term vanishes at zero pressure. A whole face exactly on the
+    /// plane has no unique two-sided tangent; the dry-side generalized tangent
+    /// is selected. Isolated zero-pressure edges/vertices have zero measure.
     pub fn force_tangent<'p>(
         &self,
         displacement_m: &[f64],
@@ -317,28 +357,30 @@ impl ClosedTetPressureSurface {
         let mut entries = Coo::new(displacement_m.len(), displacement_m.len());
         for (index, face) in self.faces.iter().enumerate() {
             checkpoint(cx)?;
-            let weights = self.face_pressure_weights(displacement_m, index, pressure)?;
+            let moments = self.face_pressure_moments::<true>(displacement_m, index, pressure)?;
             let constant_factor = pressure.constant_at(index).map(|value| -value / 6.0);
             let gradient = match pressure {
-                TetPressure::Affine { gradient_pa_m, .. } => gradient_pa_m,
+                TetPressure::Affine { gradient_pa_m, .. }
+                | TetPressure::FreeSurface { gradient_pa_m, .. } => gradient_pa_m,
                 _ => [0.0; 3],
             };
             let [a, b, c] = face.map(|node| positions[node]);
             let area = area_vector(a, b, c)?;
             let variations = [difference(b, c)?, difference(c, a)?, difference(a, b)?];
-            for (&column_node, edge) in face.iter().zip(variations) {
+            for (column_local, (&column_node, edge)) in face.iter().zip(variations).enumerate() {
                 for column_axis in 0..3 {
                     let mut basis = [0.0; 3];
                     basis[column_axis] = 1.0;
                     let derivative = cross(basis, edge);
-                    for (&row_node, weight) in face.iter().zip(weights) {
+                    for (row_local, (&row_node, weight)) in
+                        face.iter().zip(moments.weights_pa).enumerate()
+                    {
+                        let factor = constant_factor.unwrap_or(-0.5 * weight);
+                        let pressure_slope =
+                            gradient[column_axis] * moments.basis[row_local][column_local];
                         for (row_axis, value) in derivative.into_iter().enumerate() {
-                            let factor = constant_factor.unwrap_or(-0.5 * weight);
-                            // Integral N_i N_j dA / A is 1/6 on the diagonal,
-                            // 1/12 otherwise. Pressure varies even under rigid
-                            // drift because the field is fixed in world space.
-                            let pressure_slope = gradient[column_axis]
-                                / if row_node == column_node { 6.0 } else { 12.0 };
+                            // The basis moment is over the actual wet portion,
+                            // normalized by the full current triangle area.
                             let value = finite(factor * value - pressure_slope * area[row_axis])?;
                             if value != 0.0 {
                                 entries.push(
@@ -371,6 +413,9 @@ impl ClosedTetPressureSurface {
     /// is conservative on a closed surface, with potential `integral p(x) dV`.
     /// It retains common translation work on open patches. Subdividing a
     /// curved trajectory is necessary to resolve its physical path work.
+    /// A free surface instead uses exact clipped-tetrahedron endpoint moments
+    /// of `integral max(0,p(x)) dV`, including changes in immersion. No fixed
+    /// time quadrature is assumed exact across a wet/dry transition.
     pub fn work_j<'p>(
         &self,
         before_m: &[f64],
@@ -387,12 +432,32 @@ impl ClosedTetPressureSurface {
                 gradient_pa_m,
                 ..
             } if gradient_pa_m == [0.0; 3] => Some(pressure_pa),
+            TetPressure::FreeSurface {
+                pressure_pa,
+                gradient_pa_m,
+                ..
+            } if gradient_pa_m == [0.0; 3] => Some(pressure_pa.max(0.0)),
             _ => None,
         };
         if let Some(value) = uniform {
             let before = self.volume_m3(before_m, cx)?;
             let after = self.volume_m3(after_m, cx)?;
             return finite(-value * finite(after - before)?);
+        }
+        if let TetPressure::FreeSurface {
+            origin_m,
+            pressure_pa,
+            gradient_pa_m,
+        } = pressure
+        {
+            return self.free_surface_work_j(
+                before_m,
+                after_m,
+                origin_m,
+                pressure_pa,
+                gradient_pa_m,
+                cx,
+            );
         }
         let before_force = self.force_n(before_m, pressure, cx)?;
         let after_force = self.force_n(after_m, pressure, cx)?;
@@ -425,47 +490,147 @@ impl ClosedTetPressureSurface {
         finite(work)
     }
 
-    /// Exact integrals `integral N_i p dA / A` on one current P1 triangle.
+    /// Exact pressure and, when requested, wet basis-product moments.
     /// The field is sampled in world coordinates; translated relative geometry
     /// from `positions_and_volume` is deliberately not used as the field origin.
-    fn face_pressure_weights(
+    fn face_pressure_moments<const TANGENT: bool>(
         &self,
         displacement_m: &[f64],
         face_index: usize,
         pressure: TetPressure<'_>,
-    ) -> Result<[f64; 3], HyperTetError> {
+    ) -> Result<FaceMoments, HyperTetError> {
         if let Some(value) = pressure.constant_at(face_index) {
-            return Ok([value / 3.0; 3]);
+            return Ok(FaceMoments::constant(value));
         }
-        let TetPressure::Affine {
-            origin_m,
-            pressure_pa,
-            gradient_pa_m,
-        } = pressure
-        else {
-            unreachable!("constant pressure handled above")
+        let (origin_m, pressure_pa, gradient_pa_m) = match pressure {
+            TetPressure::Affine {
+                origin_m,
+                pressure_pa,
+                gradient_pa_m,
+            }
+            | TetPressure::FreeSurface {
+                origin_m,
+                pressure_pa,
+                gradient_pa_m,
+            } => (origin_m, pressure_pa, gradient_pa_m),
+            _ => unreachable!("constant pressure handled above"),
         };
         let mut values = [0.0; 3];
         for (local, &node) in self.faces[face_index].iter().enumerate() {
-            let mut value = pressure_pa;
-            for axis in 0..3 {
-                let offset = finite(
-                    finite(self.nodes_m[node][axis] - origin_m[axis])?
-                        + displacement_m[3 * node + axis],
-                )?;
-                value = finite(gradient_pa_m[axis].mul_add(offset, value))?;
-            }
-            values[local] = value;
-        }
-        let mut weights = [0.0; 3];
-        for local in 0..3 {
-            weights[local] = finite(
-                values[local] / 6.0
-                    + values[(local + 1) % 3] / 12.0
-                    + values[(local + 2) % 3] / 12.0,
+            values[local] = self.spatial_pressure_at(
+                displacement_m,
+                node,
+                origin_m,
+                pressure_pa,
+                gradient_pa_m,
             )?;
         }
-        Ok(weights)
+        if matches!(pressure, TetPressure::FreeSurface { .. }) {
+            free_surface::face_moments::<TANGENT>(values)
+        } else {
+            FaceMoments::affine(values)
+        }
+    }
+
+    fn spatial_pressure_at(
+        &self,
+        displacement_m: &[f64],
+        node: usize,
+        origin_m: [f64; 3],
+        pressure_pa: f64,
+        gradient_pa_m: [f64; 3],
+    ) -> Result<f64, HyperTetError> {
+        let mut value = pressure_pa;
+        for axis in 0..3 {
+            let offset = finite(
+                finite(self.nodes_m[node][axis] - origin_m[axis])?
+                    + displacement_m[3 * node + axis],
+            )?;
+            value = finite(gradient_pa_m[axis].mul_add(offset, value))?;
+        }
+        Ok(value)
+    }
+
+    /// Conservative endpoint work from positive clipped-volume moments.
+    /// Summing element increments avoids subtracting large global potentials;
+    /// the symmetric product difference avoids large endpoint energy products.
+    #[allow(clippy::too_many_arguments)]
+    fn free_surface_work_j(
+        &self,
+        before_m: &[f64],
+        after_m: &[f64],
+        origin_m: [f64; 3],
+        pressure_pa: f64,
+        gradient_pa_m: [f64; 3],
+        cx: &Cx<'_>,
+    ) -> Result<f64, HyperTetError> {
+        let (before, _) = self.positions_and_volume(before_m, cx)?;
+        let (after, _) = self.positions_and_volume(after_m, cx)?;
+        let mut before_pressure = Vec::with_capacity(self.nodes_m.len());
+        let mut after_pressure = Vec::with_capacity(self.nodes_m.len());
+        for node in 0..self.nodes_m.len() {
+            checkpoint(cx)?;
+            before_pressure.push(self.spatial_pressure_at(
+                before_m,
+                node,
+                origin_m,
+                pressure_pa,
+                gradient_pa_m,
+            )?);
+            after_pressure.push(self.spatial_pressure_at(
+                after_m,
+                node,
+                origin_m,
+                pressure_pa,
+                gradient_pa_m,
+            )?);
+        }
+        let mut work = 0.0;
+        let mut compensation = 0.0;
+        for (tet, &orientation) in self.tetrahedra.iter().zip(&self.orientations) {
+            checkpoint(cx)?;
+            let before_values = tet.map(|node| before_pressure[node]);
+            let after_values = tet.map(|node| after_pressure[node]);
+            let mean_before = free_surface::tet_mean(before_values)?;
+            let mean_after = free_surface::tet_mean(after_values)?;
+            if mean_before == 0.0 && mean_after == 0.0 {
+                continue;
+            }
+            let volume_before = orientation * signed_volume(tet.map(|node| before[node]))?;
+            let volume_after = orientation * signed_volume(tet.map(|node| after[node]))?;
+            let mean_change = if before_values
+                .iter()
+                .chain(&after_values)
+                .all(|&value| value >= 0.0)
+            {
+                // In a fully wet element, the datum cancels analytically. This
+                // retains small translation work even at large ambient depth.
+                let mut change = 0.0;
+                for &node in tet {
+                    for axis in 0..3 {
+                        change = finite((gradient_pa_m[axis] / 4.0).mul_add(
+                            finite(after_m[3 * node + axis] - before_m[3 * node + axis])?,
+                            change,
+                        ))?;
+                    }
+                }
+                change
+            } else {
+                finite(mean_after - mean_before)?
+            };
+            let mean_volume = finite(0.5 * volume_before + 0.5 * volume_after)?;
+            let mean_pressure = finite(0.5 * mean_before + 0.5 * mean_after)?;
+            let increment = finite(-mean_pressure.mul_add(
+                finite(volume_after - volume_before)?,
+                finite(mean_volume * mean_change)?,
+            ))?;
+            let corrected = finite(increment - compensation)?;
+            let next = finite(work + corrected)?;
+            compensation = (next - work) - corrected;
+            work = next;
+        }
+        checkpoint(cx)?;
+        finite(work)
     }
 
     fn positions_and_volume(
