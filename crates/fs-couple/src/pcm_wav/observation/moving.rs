@@ -30,6 +30,8 @@ use fs_aeroac::curle3d::moving::{
 };
 use fs_math::{dd::Dd, det};
 
+/// Coherent moving volume-source fields and ideal first-order microphones.
+pub mod field;
 mod flow;
 /// Simultaneous independently moving microphones on the original pressure clocks.
 pub mod frames;
@@ -424,8 +426,7 @@ impl<'a, M: CompactMotion> MovingCompactRenderer<'a, M> {
                 "moving pressure block exceeds its preallocated capacity",
             ));
         }
-        let completed =
-            u64::try_from(count).map_err(|_| sizing("pressure block exceeds u64"))?;
+        let completed = u64::try_from(count).map_err(|_| sizing("pressure block exceeds u64"))?;
         self.validate_sample_count(completed)?;
         for i in 0..count {
             check_cancel(cancelled)?;
