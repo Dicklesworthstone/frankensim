@@ -16,6 +16,8 @@ use fs_material::{
 };
 
 mod moving_walls;
+mod sgs;
+pub use sgs::{RheologySgs3, RheologySgsError3, RheologySgsReport3, RheologySgsStep3};
 
 /// Conditions at the incoming kinetic time level, with x-fastest cell indexing.
 /// Temperature, composition and material validity remain with the producer.
@@ -47,6 +49,7 @@ impl<F> RheologySample3<F> {
     pub const fn transport(&self) -> &FluidTransportState {
         &self.transport
     }
+    /// Original molecular relaxation, before any optional SGS addition.
     pub const fn shear_relaxation_time(&self) -> f64 {
         self.tau
     }
@@ -59,6 +62,8 @@ impl<F> RheologySample3<F> {
 pub struct RheologyStep3<C, F> {
     pub sampled_at_step: usize,
     pub samples: Vec<Option<RheologySample3<F>>>,
+    /// Actual applied field. Explicit SGS composition augments these rates;
+    /// each source sample's relaxation time remains molecular.
     pub collisions: Vec<C>,
 }
 
@@ -686,7 +691,7 @@ mod tests {
     use crate::lattice3::{D3q19, GridBudget3, Lattice3};
     use std::{cell::Cell, rc::Rc};
 
-    fn with_gate<T>(gate: &CancelGate, f: impl FnOnce(&Cx<'_>) -> T) -> T {
+    pub(super) fn with_gate<T>(gate: &CancelGate, f: impl FnOnce(&Cx<'_>) -> T) -> T {
         let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
         pool.scope(|arena| {
             f(&Cx::new(
@@ -703,13 +708,13 @@ mod tests {
             ))
         })
     }
-    fn with_cx<T>(f: impl FnOnce(&Cx<'_>) -> T) -> T {
+    pub(super) fn with_cx<T>(f: impl FnOnce(&Cx<'_>) -> T) -> T {
         with_gate(&CancelGate::new_clock_free(), f)
     }
-    fn fluid(mu: f64) -> FluidTransportState {
+    pub(super) fn fluid(mu: f64) -> FluidTransportState {
         FluidTransportState::try_new(1000.0, 4000.0, 0.5, mu).unwrap()
     }
-    fn collision(model: usize) -> CollisionConfig27 {
+    pub(super) fn collision(model: usize) -> CollisionConfig27 {
         let rates = Rates27 {
             omega: [1.0 / 0.9, 1.1, 0.8, 1.2, 0.9, 1.3, 0.7, 1.0, 1.4, 0.6],
         };
@@ -729,7 +734,7 @@ mod tests {
             maximum_mach: 0.2,
         }
     }
-    fn grid27(
+    pub(super) fn grid27(
         dims: [usize; 3],
         model: usize,
         force: [f64; 3],
@@ -750,11 +755,11 @@ mod tests {
         )
         .unwrap()
     }
-    fn bits<const Q: usize>(populations: &[[f64; Q]]) -> Vec<u64> {
+    pub(super) fn bits<const Q: usize>(populations: &[[f64; Q]]) -> Vec<u64> {
         populations.iter().flatten().map(|v| v.to_bits()).collect()
     }
 
-    fn storage_addresses<C, F>(workspace: &RheologyWorkspace3<C, F>) -> [usize; 5] {
+    pub(super) fn storage_addresses<C, F>(workspace: &RheologyWorkspace3<C, F>) -> [usize; 5] {
         let mut sources = [
             workspace.accepted.samples.as_ptr() as usize,
             workspace.trial.samples.as_ptr() as usize,

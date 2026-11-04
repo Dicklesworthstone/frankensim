@@ -3143,6 +3143,41 @@ ladder on both D3Q19 and D3Q27, analytic viscous enstrophy decay of the exact
 two-dimensional Taylor--Green solution extruded in z, NSF moving-wall and
 characteristic-throughflow sampling, solid exclusion and bounded refusal/retry.
 
+### Source-resolved rheology with local and dynamic SGS
+
+`lattice3::rheology::RheologySgs3` selects a local closure, periodic dynamic
+fit or channel dynamic fit together with its existing reusable workspace.
+The native `step_*_with_material_rheology_and_sgs` methods on `Grid3` and
+`ForcedGrid3`, and the latter's endpoint-force advances, first resolve the
+original material producer at each incoming physical shear rate. That exact
+source-derived molecular field supplies SGS viscosity-ratio admission and
+molecular dissipation. Each call starts from fresh molecular transport;
+previously augmented collisions are never recycled as material coefficients.
+
+Source records keep molecular relaxation times and original transport
+responses. The accepted `RheologySgsStep3` also retains the actual applied
+molecular-plus-SGS collision field and typed local/dynamic diagnostics.
+Independent nonshear rates, reference density and source-domain checks keep
+their original owners. Current F_n sets both source and SGS preparation;
+F_(n+1) enters only the native force-history advance.
+
+The source and SGS workspaces are reused without new adapter-owned arrays.
+Copying the applied collision snapshot occurs in bounded chunks before native
+stepping. Successful population publication is followed only by the original
+infallible source-report swap. Refusal or cancellation retains the previous
+accepted source epoch, populations, force history and clock. Source callbacks
+retain responsibility for their own allocation and external side effects.
+
+This is an explicit resolved-shear generalized-Newtonian LES composition.
+It retains each closure's stationary-wall/periodic/channel topology and
+exploration-only policy. It does not close correlations between unresolved
+strain and nonlinear molecular stress, or add constitutive memory, heat
+evolution, moving-wall rheology or turbulent-flow qualification. Focused
+regression definitions cover original-source and zero-SGS equivalence,
+nonzero local/dynamic transport, incoming force timing, source epochs,
+worker identity and rejected-step retry; native execution was unavailable
+after the shared executor disconnected.
+
 ### Moving/open D3Q19 boundaries and turbulent wall loads
 
 `BoundaryGrid3::{sgs_workspace, prepare_sgs, step_with_sgs,
