@@ -6866,6 +6866,30 @@ moisture, covariance or coupled mechanics is inferred. Re-prepare after changing
 the card, fixed conditions or selected claims. Focused integration tests cover
 numerical evaluation, source selection, typed refusal and the real NASA 316 pack.
 
+### Oriented principal-direction thermal sources
+
+`thermal::transport::orthotropic::PreparedOrthotropicThermalTransport<D>`
+composes two or three original directional paths into an explicitly declared
+orthotropic law. All paths must retain the same original material card, fixed
+query context and complete density/specific-heat source lines and receipts.
+The caller assigns principal directions; scalar observations do not establish
+material symmetry or orientation. A proper orthonormal basis is admitted
+without repair and retained in the prepared identity.
+
+Runtime evaluation reuses the original scalar interpolation and support,
+then forms `K(T)=Q diag(k_i(T)) Q^T` and `alpha(T)=K(T)/(rho*c)` in SI.
+Signed cross terms survive; no conductivity averaging, extrapolation or new
+measured-property claim is introduced. Every original directional source
+remains accessible on the prepared owner. A constant-storage view is exposed
+only when every original density and specific-heat knot is unchanged over
+the entire prepared path, including hidden interior excursions.
+
+Three focused native source tests pass for rotation/receipts/support,
+interior storage excursions and three-dimensional cross-plane transport.
+This is a source constitutive view; consumers still admit their represented
+discrete tensor, heat storage and physical evolution. In-plane D=2 does not
+infer a transverse-flux reduction of an unknown 3-D material.
+
 ## Unified gas enthalpy transport
 
 Bulk pair transfer, bulk snapshot networks and selective pair exchange share

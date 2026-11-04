@@ -12,6 +12,10 @@
 //! evolution or uncertainty propagation is inferred. Existing caloric and
 //! conservative thermal owners remain responsible for those operations.
 
+/// Source-bound principal conductivities in an explicitly declared material basis.
+#[path = "transport/orthotropic.rs"]
+pub mod orthotropic;
+
 /// Local thermal response from directly supplied volumetric heat capacity.
 #[path = "transport/volumetric.rs"]
 pub mod volumetric;

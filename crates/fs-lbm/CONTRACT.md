@@ -3347,6 +3347,42 @@ The original low-Mach, startup-history, uniform-storage and wall-model
 limitations remain; sharp material interfaces, variable heat capacity and
 unrestricted high-anisotropy accuracy require their own physical treatment.
 
+### Original material sources for thermal tensor diffusion
+
+`material::transport::tensor::ThermalMaterialField` supplies uniform or
+per-cell original `PreparedOrthotropicThermalTransport<D>` paths to
+`MaterialSlab::step_with_material_tensor_diffusion` in two and three
+dimensions. Principal directions are expressed in the square/cubic lattice
+frame. The retained SI mapping supplies `alpha_lattice=alpha_SI*dt/dx^2`;
+the existing tensor preparation and collision remain the numerical owners.
+
+Both original density and specific-heat paths must be constant at every
+canonical source knot and match the slab's retained physical storage exactly.
+Endpoint equality alone is insufficient. Conductivity may vary with actual
+temperature and declared cell assignment. Initial coefficients are frozen
+for one explicit step; endpoint samples qualify source support and tensor
+representation before adoption. They do not constitute an implicit solve.
+
+Power, force, wall heat and joule balances use the original physical adapter.
+Its existing acceptance callback performs endpoint qualification and
+cancellation checks inside the single native candidate transaction; there is
+no additional full-grid snapshot. Source records borrow their original owner,
+retaining every receipt without per-cell source clones. Adjacent identical
+evaluated tensors reuse their factorization. No factorization is added to
+the population collision loop.
+
+Five integration tests cover original-source authority, scalar limits in both
+dimensions, temperature-dependent/per-cell transport and SI heat balance,
+rotated 3-D flux, and endpoint/storage/cancellation refusal with replay.
+The source-only native subset passes three tests; the full LBM integration
+battery remains unexecuted in the constrained development environment.
+
+The caller's declared orthotropic symmetry and fixed orientation remain
+explicit. Variable storage, latent heat, contact resistance and evolving
+material axes require their own physical models. Momentum and buoyancy retain
+the existing background setup; scalar background diffusivity/Nusselt
+diagnostics do not become tensor diagnostics.
+
 ### Independently fitted dynamic transport on the thermal slab
 
 `ThermalLbm3::{thermal_channel_sgs_workspace, prepare_thermal_channel_sgs,

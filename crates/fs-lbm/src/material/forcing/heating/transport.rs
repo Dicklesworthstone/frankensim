@@ -4,6 +4,9 @@
 //! heating adapter supplies SI conversions. The existing thermal/flow kernels
 //! evolve the populations. No constitutive interpolation is invented here.
 
+/// Oriented source-bound physical conductivity on the original tensor kernels.
+pub mod tensor;
+
 /// Density-resolved buoyancy with explicit, fixed reference storage.
 pub mod boussinesq;
 /// Source-resolved shear-dependent viscosity on the same thermal/flow path.
