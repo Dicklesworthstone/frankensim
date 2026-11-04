@@ -88,13 +88,16 @@ use fs_material::gas_field::AxialGasField;
 use fs_math::det;
 
 pub mod continuous;
-pub use continuous::{DgContinuous, DgHarmonicPort, DgHarmonicResponse};
+pub use continuous::{
+    DgContinuous, DgHarmonicDerivative, DgHarmonicFrequencyResponse, DgHarmonicPort,
+    DgHarmonicPortDerivative, DgHarmonicResponse,
+};
 
 mod viscothermal;
 pub use viscothermal::{DgViscousHeat, DgWallAdmission, DgWallResolution};
 mod compliant_wall;
-pub use compliant_wall::{DgCompliantWallState, DgWallMaterialUpdate, DgWallRelaxationTransfer};
 pub use compliant_wall::DgCompliantWallHeat;
+pub use compliant_wall::{DgCompliantWallState, DgWallMaterialUpdate, DgWallRelaxationTransfer};
 mod port_response;
 pub use port_response::{DgMultiportResponse, DgPortResponse};
 mod side_ports;
@@ -671,11 +674,17 @@ impl DgDuct {
         }
         let gas = *field.state_at(0.0)?.state();
         let outlet_gas = *field.state_at(field.length_m())?.state();
-        Self::assemble(duct, &gas, &outlet_gas, mesh, inlet, outlet, Some(field), &mut |x| {
-            Ok(*field.state_at(x)?.state())
-        })
+        Self::assemble(
+            duct,
+            &gas,
+            &outlet_gas,
+            mesh,
+            inlet,
+            outlet,
+            Some(field),
+            &mut |x| Ok(*field.state_at(x)?.state()),
+        )
     }
-
 }
 
 impl<M: DgMedium> DgDuct<M> {
@@ -1232,15 +1241,22 @@ impl<M: DgMedium> DgDuct<M> {
         if state.operator_identity != self.operator_identity()
             || state.tilde.len() != self.total_dofs()
         {
-            return Err(DuctError::BadParameter { what: "DG port observation requires the current operator state" });
+            return Err(DuctError::BadParameter {
+                what: "DG port observation requires the current operator state",
+            });
         }
-        self.ports.iter().map(|(id, column)| {
-            let pressure: f64 = column.iter().zip(&state.tilde).map(|(b, x)| b * x).sum();
-            if !pressure.is_finite() {
-                return Err(DuctError::BadParameter { what: "DG port pressure is unrepresentable" });
-            }
-            Ok((*id, pressure))
-        }).collect()
+        self.ports
+            .iter()
+            .map(|(id, column)| {
+                let pressure: f64 = column.iter().zip(&state.tilde).map(|(b, x)| b * x).sum();
+                if !pressure.is_finite() {
+                    return Err(DuctError::BadParameter {
+                        what: "DG port pressure is unrepresentable",
+                    });
+                }
+                Ok((*id, pressure))
+            })
+            .collect()
     }
 
     /// Inlet boundary condition at $x = 0$.
@@ -2085,8 +2101,7 @@ impl DgPropagator {
     }
 
     fn validate_state(&self, state: &DgState) -> Result<(), DuctError> {
-        if state.operator_identity != self.operator_identity
-            || state.tilde.len() != self.total_dofs
+        if state.operator_identity != self.operator_identity || state.tilde.len() != self.total_dofs
         {
             return Err(DuctError::BadParameter {
                 what: "DG state does not belong to this propagator",
@@ -2236,7 +2251,9 @@ impl DgPropagator {
         state.step_count += 1;
         state.cumulative_port_work_j += step_work;
         let energy_now = state.stored_energy_j();
-        let residual = energy_now - state.initial_energy_j - state.cumulative_port_work_j
+        let residual = energy_now
+            - state.initial_energy_j
+            - state.cumulative_port_work_j
             - state.cumulative_parameter_work_j;
         let scale = (state.initial_energy_j
             + state.cumulative_port_work_j.abs()
@@ -2314,7 +2331,9 @@ impl DgPropagator {
         // Absorbed energy in boundaries and wall memory is inferred as the deficit, unclamped: a
         // negative value would expose a non-passive step.
         state.cumulative_dissipated_j += e_prev + step_work - e_now;
-        let residual = e_now - state.initial_energy_j - state.cumulative_port_work_j
+        let residual = e_now
+            - state.initial_energy_j
+            - state.cumulative_port_work_j
             - state.cumulative_parameter_work_j
             + state.cumulative_dissipated_j;
         let scale = (state.initial_energy_j
@@ -2379,7 +2398,6 @@ impl DgDuct {
         Ok(())
     }
 
-
     /// Inlet reference state. This is the uniform medium for [`Self::new`];
     /// a field-backed duct instead uses its local material at each point.
     #[must_use]
@@ -2398,5 +2416,4 @@ impl DgDuct {
     pub const fn outlet_gas(&self) -> &GasState {
         &self.outlet_gas
     }
-
 }

@@ -102,7 +102,10 @@ impl CompliantWall {
     pub(super) fn retain_physical_observation_maps(&mut self, elements: &[DgElement]) {
         if self.physical_velocity_maps.is_none() {
             self.physical_velocity_maps = Some(
-                elements.iter().map(|element| element.mp_inv_sqrt.clone()).collect(),
+                elements
+                    .iter()
+                    .map(|element| element.mp_inv_sqrt.clone())
+                    .collect(),
             );
         }
     }
@@ -129,7 +132,9 @@ impl CompliantWall {
         {
             *value /= pressure_scale;
             if !value.is_finite() || *value <= 0.0 {
-                return Err(invalid("updated gas lost a physical wall observation scale"));
+                return Err(invalid(
+                    "updated gas lost a physical wall observation scale",
+                ));
             }
         }
         Ok(())
@@ -198,10 +203,11 @@ impl<M: DgMedium> DgDuct<M> {
         let radius = self
             .uniform_radius_m
             .ok_or_else(|| invalid("DG compliant wall requires identical circular cylinders"))?;
-        let spatial_material = self.gas.has_spatial_acoustics() || self
-            .gas_field
-            .as_ref()
-            .is_some_and(|field| field.uniform_state().is_none());
+        let spatial_material = self.gas.has_spatial_acoustics()
+            || self
+                .gas_field
+                .as_ref()
+                .is_some_and(|field| field.uniform_state().is_none());
         fs_phs::wall_specific_impedance(&pin, 1.0).map_err(|_| {
             invalid("DG compliant wall requires passive finite mass, stiffness and resistance")
         })?;
@@ -534,15 +540,19 @@ impl<M: DgMedium> DgDuct<M> {
         let mut relaxation_stored_energy_j = 0.0;
         for branch in &wall.relaxation {
             let mut pressure = vec![0.0; m];
-            for (e, element) in self.elements.iter().enumerate()
-                .skip(branch.field_start / local).take(branch.dofs / local)
+            for (e, element) in self
+                .elements
+                .iter()
+                .enumerate()
+                .skip(branch.field_start / local)
+                .take(branch.dofs / local)
             {
                 let base = e * local;
                 let map = wall.physical_map(element, e);
                 for i in 0..local {
                     for j in 0..local {
-                        pressure[base + i] +=
-                            map[i * local + j] * state.tilde[branch.start + base - branch.field_start + j];
+                        pressure[base + i] += map[i * local + j]
+                            * state.tilde[branch.start + base - branch.field_start + j];
                     }
                     pressure[base + i] *= branch.pressure_scale;
                 }
@@ -582,6 +592,17 @@ impl<M: DgMedium> DgDuct<M> {
     }
 
     pub(super) fn compliant_wall_loss(&self, state: &DgState) -> f64 {
+        self.compliant_wall_loss_pair::<false>(&state.tilde, &state.tilde)
+    }
+
+    /// Original viscosity and relaxation forms. The self specialization keeps
+    /// the existing square arithmetic; the cross specialization observes an
+    /// analytic tangent without differencing two nearly equal positive losses.
+    pub(super) fn compliant_wall_loss_pair<const CROSS: bool>(
+        &self,
+        state: &[f64],
+        tangent: &[f64],
+    ) -> f64 {
         self.compliant_wall.as_ref().map_or(0.0, |wall| {
             let mut loss = if let Some(pins) = &wall.regional_pins {
                 let local = self.mesh.order + 1;
@@ -590,24 +611,43 @@ impl<M: DgMedium> DgDuct<M> {
                     .map(|(e, pin)| {
                         let base = wall.start + self.field_dofs + e * local;
                         pin.resistance / pin.surface_density
-                            * state.tilde[base..base + local]
+                            * state[base..base + local]
                                 .iter()
-                                .map(|value| value * value)
+                                .enumerate()
+                                .map(|(i, value)| {
+                                    value * if CROSS { tangent[base + i] } else { *value }
+                                })
                                 .sum::<f64>()
                     })
                     .sum()
             } else {
                 wall.pin.resistance / wall.pin.surface_density
-                    * state.tilde[wall.start + self.field_dofs..wall.start + 2 * self.field_dofs]
+                    * state[wall.start + self.field_dofs..wall.start + 2 * self.field_dofs]
                         .iter()
-                        .map(|value| value * value)
+                        .enumerate()
+                        .map(|(i, value)| {
+                            value
+                                * if CROSS {
+                                    tangent[wall.start + self.field_dofs + i]
+                                } else {
+                                    *value
+                                }
+                        })
                         .sum::<f64>()
             };
             for branch in &wall.relaxation {
                 loss += branch.rate_per_s
-                    * state.tilde[branch.start..branch.start + branch.dofs]
+                    * state[branch.start..branch.start + branch.dofs]
                         .iter()
-                        .map(|value| value * value)
+                        .enumerate()
+                        .map(|(i, value)| {
+                            value
+                                * if CROSS {
+                                    tangent[branch.start + i]
+                                } else {
+                                    *value
+                                }
+                        })
                         .sum::<f64>();
             }
             loss

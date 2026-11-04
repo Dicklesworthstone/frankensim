@@ -40,8 +40,8 @@ use super::*;
 use fs_material::relaxation::{RelaxationAbsorption, RelaxationState};
 
 mod field;
-mod update;
 pub(super) mod heat;
+mod update;
 
 #[derive(Clone, Debug)]
 pub(super) struct MolecularMemory {
@@ -400,7 +400,6 @@ impl DgDuct {
         poll(cancelled)?;
         Ok(self)
     }
-
 }
 
 impl<M: DgMedium> DgDuct<M> {
@@ -419,16 +418,26 @@ impl<M: DgMedium> DgDuct<M> {
     pub(super) fn molecular_replaces_thermal(&self) -> bool {
         self.molecular.as_ref().is_some_and(|m| !m.modes.is_empty())
     }
-    pub(super) fn molecular_thermal_loss(&self, state: &DgState) -> f64 {
+    pub(super) fn molecular_thermal_loss_pair<const CROSS: bool>(
+        &self,
+        state: &[f64],
+        tangent: &[f64],
+    ) -> f64 {
         let Some(memory) = &self.molecular else {
             return 0.0;
         };
         let mut power = 0.0;
         for mode in &memory.modes {
             for i in 0..mode.projection.width(self.field_dofs) {
-                let temperature = state.tilde[mode.start + i]
-                    + mode.pressure_scale * mode.projection.value(&state.tilde, i);
-                power += mode.heat_rate * temperature * temperature;
+                let temperature =
+                    state[mode.start + i] + mode.pressure_scale * mode.projection.value(state, i);
+                let other = if CROSS {
+                    tangent[mode.start + i]
+                        + mode.pressure_scale * mode.projection.value(tangent, i)
+                } else {
+                    temperature
+                };
+                power += mode.heat_rate * temperature * other;
             }
         }
         power
@@ -445,26 +454,47 @@ impl<M: DgMedium> DgDuct<M> {
                 "molecular loss needs a finite state of its exact DG operator",
             ));
         }
+        let power = self.molecular_loss_pair::<false>(&state.tilde, &state.tilde);
+        if !power.is_finite() {
+            return Err(invalid("molecular loss is unrepresentable"));
+        }
+        Ok(power)
+    }
+
+    pub(super) fn molecular_loss_pair<const CROSS: bool>(
+        &self,
+        state: &[f64],
+        tangent: &[f64],
+    ) -> f64 {
         let Some(memory) = &self.molecular else {
-            return Ok(0.0);
+            return 0.0;
         };
         let mut power = 0.0;
         let m = self.field_dofs;
         for mode in &memory.modes {
             let width = mode.projection.width(m);
             for i in 0..width {
-                let temperature = state.tilde[mode.start + i]
-                    + mode.pressure_scale * mode.projection.value(&state.tilde, i);
+                let temperature =
+                    state[mode.start + i] + mode.pressure_scale * mode.projection.value(state, i);
+                let other_temperature = if CROSS {
+                    tangent[mode.start + i]
+                        + mode.pressure_scale * mode.projection.value(tangent, i)
+                } else {
+                    temperature
+                };
                 for (j, (&b, &rate)) in mode.reservoir_scales.iter().zip(&mode.rates).enumerate() {
-                    let slip = state.tilde[mode.start + (j + 1) * width + i] - b * temperature;
-                    power += rate * slip * slip;
+                    let index = mode.start + (j + 1) * width + i;
+                    let slip = state[index] - b * temperature;
+                    let other = if CROSS {
+                        tangent[index] - b * other_temperature
+                    } else {
+                        slip
+                    };
+                    power += rate * slip * other;
                 }
             }
         }
-        if !power.is_finite() {
-            return Err(invalid("molecular loss is unrepresentable"));
-        }
-        Ok(power)
+        power
     }
 }
 

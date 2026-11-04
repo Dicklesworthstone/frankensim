@@ -4,11 +4,13 @@
 //! Peak phasors use exp(-i omega t). This is the frozen linear spatial model;
 //! its spatial and constitutive-band errors remain separate from solve residuals.
 use super::*;
-/// Transactional source-bound adoption after a complete coupled trajectory.
-pub mod state;
+mod frequency;
 /// Free resonance and decay of the complete original material-memory operator.
 pub mod poles;
-use fs_la::eigen_complex::{LuComplexError, lu_complex_with_cancel};
+/// Transactional source-bound adoption after a complete coupled trajectory.
+pub mod state;
+pub use frequency::{DgHarmonicDerivative, DgHarmonicFrequencyResponse, DgHarmonicPortDerivative};
+use fs_la::eigen_complex::{LuComplex, LuComplexError, lu_complex_with_cancel};
 use fs_math::c64::C64;
 
 /// Borrowed physical owner: x' = L x + sum_j B_j U_j, p_j = B_j^T x,
@@ -20,7 +22,9 @@ pub struct DgContinuous<'a, M: DgMedium = GasState> {
 }
 impl<M: DgMedium> Copy for DgContinuous<'_, M> {}
 impl<M: DgMedium> Clone for DgContinuous<'_, M> {
-    fn clone(&self) -> Self { *self }
+    fn clone(&self) -> Self {
+        *self
+    }
 }
 
 /// Original declared port, in boundary-then-side-port order.
@@ -117,8 +121,33 @@ impl<M: DgMedium> DgDuct<M> {
         view.admit_work(maximum_work, true)?;
         admit_tolerance(relative_tolerance)?;
         let flows = view.resolve_flows(inflows)?;
-        let n = view.dimension();
-        let scale = self.l_tilde.iter().fold(omega_rad_s, |a, b| a.max(b.abs()));
+        let (state, _, _) = view.solve_harmonic_state(omega_rad_s, &flows, cancelled)?;
+        view.observe_harmonic(
+            omega_rad_s,
+            &state,
+            inflows,
+            maximum_work,
+            relative_tolerance,
+            cancelled,
+        )
+    }
+}
+
+impl<M: DgMedium> DgContinuous<'_, M> {
+    // Share the original assembly and LU with analytic frequency tangents.
+    // The caller admits dimension/work, frequency, tolerance and source flows.
+    fn solve_harmonic_state(
+        &self,
+        omega_rad_s: f64,
+        flows: &[C64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(Vec<C64>, LuComplex, f64), DuctError> {
+        let n = self.dimension();
+        let scale = self
+            .duct
+            .l_tilde
+            .iter()
+            .fold(omega_rad_s, |a, b| a.max(b.abs()));
         if !scale.is_finite() {
             return Err(invalid("DG harmonic operator is not finite"));
         }
@@ -128,11 +157,11 @@ impl<M: DgMedium> DgDuct<M> {
             poll(cancelled)?;
             for j in 0..n {
                 matrix[i * n + j] = C64::new(
-                    -self.l_tilde[i * n + j] / scale,
+                    -self.duct.l_tilde[i * n + j] / scale,
                     if i == j { -omega_rad_s / scale } else { 0.0 },
                 );
             }
-            let rhs = view.forcing(i, &flows);
+            let rhs = self.forcing(i, flows);
             state[i] = C64::new(rhs.re / scale, rhs.im / scale);
         }
         if state.iter().any(|&x| !finite(x)) {
@@ -142,14 +171,7 @@ impl<M: DgMedium> DgDuct<M> {
         factor
             .solve_with_cancel(&mut state, &mut *cancelled)
             .map_err(lu_error)?;
-        view.observe_harmonic(
-            omega_rad_s,
-            &state,
-            inflows,
-            maximum_work,
-            relative_tolerance,
-            cancelled,
-        )
+        Ok((state, factor, scale))
     }
 }
 
@@ -317,8 +339,8 @@ impl<M: DgMedium> DgContinuous<'_, M> {
         }
         let (imag_p, imag_q) = self.duct.from_energy_coords(&native.tilde);
         let wall_dissipation_w = 0.5 * (real_loss + self.duct.wall_dissipated_power_w(&native)?);
-        let molecular_dissipation_w = 0.5 * (real_molecular
-            + self.duct.molecular_dissipated_power_w(&native)?);
+        let molecular_dissipation_w =
+            0.5 * (real_molecular + self.duct.molecular_dissipated_power_w(&native)?);
         let pressure_pa: Vec<_> = real_p
             .into_iter()
             .zip(imag_p)
@@ -373,8 +395,8 @@ impl<M: DgMedium> DgContinuous<'_, M> {
                 .iter()
                 .map(|x| x.norm_sq())
                 .sum::<f64>();
-        let power_residual_w = wall_dissipation_w + molecular_dissipation_w
-            + matched_absorption_w - input_power_w;
+        let power_residual_w =
+            wall_dissipation_w + molecular_dissipation_w + matched_absorption_w - input_power_w;
         if pressure_pa
             .iter()
             .chain(&volume_flow_m3_s)

@@ -115,22 +115,34 @@ impl SpatialViscothermal {
     /// Original velocity projections, drag, series arms and memory offsets.
     /// Thermal channels remain separate, including after molecular replacement.
     pub(super) fn viscous_channels(
-        &self, field_dofs: usize,
+        &self,
+        field_dofs: usize,
     ) -> impl Iterator<Item = (&[f64], f64, &[ZkDiffusiveTerm], usize)> {
-        self.channels.iter().filter(move |channel| channel.field_start == field_dofs)
-            .map(|channel| (channel.projection.as_slice(), channel.drag_per_s,
-                channel.terms.as_slice(), channel.memory_start))
+        self.channels
+            .iter()
+            .filter(move |channel| channel.field_start == field_dofs)
+            .map(|channel| {
+                (
+                    channel.projection.as_slice(),
+                    channel.drag_per_s,
+                    channel.terms.as_slice(),
+                    channel.memory_start,
+                )
+            })
     }
 
     /// Original pointwise thermal measure, before molecular replacement.
     pub(in crate::dg) fn thermal_quadrature(&self, field_dofs: usize) -> Vec<ThermalQuadrature> {
-        self.channels.iter().filter(|channel| channel.field_start < field_dofs)
+        self.channels
+            .iter()
+            .filter(|channel| channel.field_start < field_dofs)
             .map(|channel| ThermalQuadrature {
                 field_start: channel.field_start,
                 point_m: channel.point_m,
                 projection: channel.projection.clone(),
                 terms: channel.terms.clone(),
-            }).collect()
+            })
+            .collect()
     }
     /// Reindex only the surviving viscous coordinates. Thermal coordinates are
     /// replaced by the joint heat/molecular law after the returned prefix.
@@ -197,15 +209,16 @@ impl DgDuct {
         let geometry = self.geometry.clone();
         let field = self.gas_field.clone();
         let uniform = self.gas;
-        self.attach_spatial_viscothermal::<GasFieldDuctError, _>(&geometry, resolution, &mut |x| {
-            match &field {
+        self.attach_spatial_viscothermal::<GasFieldDuctError, _>(
+            &geometry,
+            resolution,
+            &mut |x| match &field {
                 Some(field) => Ok(*field.state_at(x)?.state()),
                 None => Ok(uniform),
-            }
-        })?;
+            },
+        )?;
         Ok(self)
     }
-
 }
 
 impl<M: DgMedium> DgDuct<M> {
@@ -216,7 +229,9 @@ impl<M: DgMedium> DgDuct<M> {
         gas_at: &mut impl FnMut(f64) -> Result<A, E>,
     ) -> Result<(), E> {
         if self.compliant_wall.is_some() || self.molecular.is_some() {
-            return Err(invalid("attach DG viscothermal memory before compliant wall mechanics").into());
+            return Err(
+                invalid("attach DG viscothermal memory before compliant wall mechanics").into(),
+            );
         }
         if self.viscothermal.is_some() {
             return Err(invalid("DG viscothermal memory is already attached").into());
@@ -280,8 +295,8 @@ impl<M: DgMedium> DgDuct<M> {
                 admission.max_real_loss_error =
                     admission.max_real_loss_error.max(law.max_real_loss_error());
                 let phi = self.lgl.eval_basis(xi);
-                let compliance = area
-                    / (gas.density_kg_m3() * gas.sound_speed_m_s() * gas.sound_speed_m_s());
+                let compliance =
+                    area / (gas.density_kg_m3() * gas.sound_speed_m_s() * gas.sound_speed_m_s());
                 let inertance = gas.density_kg_m3() / area;
                 for (is_pressure, coefficient, drag, terms) in [
                     (true, compliance, 0.0, law.shunt_terms()),
@@ -297,11 +312,14 @@ impl<M: DgMedium> DgDuct<M> {
                     if terms.is_empty() && drag == 0.0 {
                         continue;
                     }
-                    let next_cursor = cursor.checked_add(terms.len())
+                    let next_cursor = cursor
+                        .checked_add(terms.len())
                         .filter(|n| *n <= MAX_DG_PROPAGATOR_DOFS)
-                        .ok_or_else(|| invalid(
-                            "DG acoustic plus wall-memory DOFs exceed MAX_DG_PROPAGATOR_DOFS",
-                        ))?;
+                        .ok_or_else(|| {
+                            invalid(
+                                "DG acoustic plus wall-memory DOFs exceed MAX_DG_PROPAGATOR_DOFS",
+                            )
+                        })?;
                     let mass = jac * weight * coefficient;
                     if !mass.is_finite() || mass <= 0.0 {
                         return Err(
@@ -309,9 +327,15 @@ impl<M: DgMedium> DgDuct<M> {
                         );
                     }
                     let storage_root = det::sqrt(mass)
-                        * if is_pressure { det::sqrt(gas.heat_capacity_ratio() - 1.0) } else { 1.0 };
+                        * if is_pressure {
+                            det::sqrt(gas.heat_capacity_ratio() - 1.0)
+                        } else {
+                            1.0
+                        };
                     if !storage_root.is_finite() || storage_root <= 0.0 {
-                        return Err(invalid("DG wall physical arm storage is unrepresentable").into());
+                        return Err(
+                            invalid("DG wall physical arm storage is unrepresentable").into()
+                        );
                     }
                     let inverse = if is_pressure {
                         &element.mp_inv_sqrt
@@ -402,7 +426,6 @@ impl<M: DgMedium> DgDuct<M> {
         );
         Ok(())
     }
-
 }
 
 impl<M: DgMedium> DgDuct<M> {
@@ -440,7 +463,22 @@ impl<M: DgMedium> DgDuct<M> {
                 "DG wall loss needs a finite state of this exact operator",
             ));
         }
-        let mut power = self.compliant_wall_loss(state);
+        let power = self.wall_loss_pair::<false>(&state.tilde, &state.tilde);
+        if !power.is_finite() {
+            return Err(invalid("DG wall loss is unrepresentable"));
+        }
+        Ok(power)
+    }
+
+    /// Bilinear original source squares, shared by self loss and frequency
+    /// tangents. Neither total work nor a rounded generator symmetric part is
+    /// used to infer heat; every physical drag and material memory remains.
+    pub(in crate::dg) fn wall_loss_pair<const CROSS: bool>(
+        &self,
+        state: &[f64],
+        tangent: &[f64],
+    ) -> f64 {
+        let mut power = self.compliant_wall_loss_pair::<CROSS>(state, tangent);
         match &self.viscothermal {
             Some(ViscothermalMemory::Spatial(wall)) => {
                 for channel in &wall.channels {
@@ -451,42 +489,70 @@ impl<M: DgMedium> DgDuct<M> {
                         .projection
                         .iter()
                         .enumerate()
-                        .map(|(i, weight)| weight * state.tilde[channel.field_start + i])
+                        .map(|(i, weight)| weight * state[channel.field_start + i])
                         .sum();
-                    power += channel.drag_per_s * value * value;
+                    let other = if CROSS {
+                        channel
+                            .projection
+                            .iter()
+                            .enumerate()
+                            .map(|(i, weight)| weight * tangent[channel.field_start + i])
+                            .sum()
+                    } else {
+                        value
+                    };
+                    power += channel.drag_per_s * value * other;
                     for (arm, term) in channel.terms.iter().enumerate() {
                         let slip = det::sqrt(term.gain_per_s) * value
-                            - det::sqrt(term.rate_per_s) * state.tilde[channel.memory_start + arm];
-                        power += slip * slip;
+                            - det::sqrt(term.rate_per_s) * state[channel.memory_start + arm];
+                        let other_slip = if CROSS {
+                            det::sqrt(term.gain_per_s) * other
+                                - det::sqrt(term.rate_per_s) * tangent[channel.memory_start + arm]
+                        } else {
+                            slip
+                        };
+                        power += slip * other_slip;
                     }
                 }
             }
             Some(ViscothermalMemory::Uniform(model)) => {
                 let m = self.field_dofs;
                 power += model.series_drag_per_s()
-                    * state.tilde[m..2 * m].iter().map(|v| v * v).sum::<f64>();
+                    * state[m..2 * m]
+                        .iter()
+                        .enumerate()
+                        .map(|(i, v)| v * if CROSS { tangent[m + i] } else { *v })
+                        .sum::<f64>();
                 for (branch, (offset, term)) in model
                     .series_terms()
                     .iter()
                     .map(|t| (m, t))
-                    .chain(model.shunt_terms().iter().filter(|_| !self.molecular_replaces_thermal())
-                        .map(|t| (0, t)))
+                    .chain(
+                        model
+                            .shunt_terms()
+                            .iter()
+                            .filter(|_| !self.molecular_replaces_thermal())
+                            .map(|t| (0, t)),
+                    )
                     .enumerate()
                 {
                     for i in 0..m {
-                        let slip = det::sqrt(term.gain_per_s) * state.tilde[offset + i]
-                            - det::sqrt(term.rate_per_s) * state.tilde[2 * m + branch * m + i];
-                        power += slip * slip;
+                        let slip = det::sqrt(term.gain_per_s) * state[offset + i]
+                            - det::sqrt(term.rate_per_s) * state[2 * m + branch * m + i];
+                        let other = if CROSS {
+                            det::sqrt(term.gain_per_s) * tangent[offset + i]
+                                - det::sqrt(term.rate_per_s) * tangent[2 * m + branch * m + i]
+                        } else {
+                            slip
+                        };
+                        power += slip * other;
                     }
                 }
             }
             None => {}
         }
-        power += self.molecular_thermal_loss(state);
-        if !power.is_finite() {
-            return Err(invalid("DG wall loss is unrepresentable"));
-        }
-        Ok(power)
+        power += self.molecular_thermal_loss_pair::<CROSS>(state, tangent);
+        power
     }
 }
 
