@@ -86,6 +86,7 @@ use fs_couple::thin_plate::{with_uniform_plate_material_state,PlateMaterialModel
 use fs_exec::{CancelGate,Cx};
 use fs_matdb::{NormalizedPack,NormalizedInterfacePack,MaterialCard,MaterialStateId,QueryPoint};
 use fs_material::gas::GasState;
+use fs_material::section::LayerIsotropicParameters;
 use fs_material::state_point::{ResolvedMaterialStatePoint,ScalarPropertyRequirement as Requirement,
     ScalarAdmissibility as Admit,MaterialPropertySelection as Pick,resolve_material_state_point,
     INVERSE_TEMPERATURE_DIMS,LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY,
@@ -130,11 +131,30 @@ fn template(w:&input::Wire) -> PrestressedString {
 // labels source identity, not a new assertion about chemistry or measured quality.
 struct CatalogEntry { pack: MaterialPack, card: MaterialCard }
 type Catalog = BTreeMap<String,CatalogEntry>;
-fn resolve(name:&str, catalog:&mut Catalog, loader:&mut impl FnMut(&str)->Result<MaterialPack>,
-    spec:&input::Spec, body:bool, twist:bool, loss:&input::BendingLoss) -> Result<ResolvedMaterialStatePoint>
-{
-    let mut requirements=vec![Requirement::try_new("density",Density::DIMS,Admit::StrictlyPositive)?,
-        Requirement::try_new("young_modulus",Pressure::DIMS,Admit::StrictlyPositive)?];
+#[allow(clippy::too_many_arguments)]
+fn resolve(
+    name: &str,
+    catalog: &mut Catalog,
+    loader: &mut impl FnMut(&str) -> Result<MaterialPack>,
+    spec: &input::Spec,
+    body: bool,
+    twist: bool,
+    loss: &input::BendingLoss,
+    elastic: Option<&LayerIsotropicParameters>,
+) -> Result<ResolvedMaterialStatePoint> {
+    if body && elastic.is_some() {
+        return Err("string elastic source roles cannot replace a body constitutive law".into());
+    }
+    let mut requirements = match elastic {
+        Some(source) => std::iter::once(&source.density)
+            .chain(source.parameters.requirements())
+            .cloned()
+            .collect(),
+        None => vec![
+            Requirement::try_new("density", Density::DIMS, Admit::StrictlyPositive)?,
+            Requirement::try_new("young_modulus", Pressure::DIMS, Admit::StrictlyPositive)?,
+        ],
+    };
     match loss {
         input::BendingLoss::KelvinVoigt =>
             requirements.push(Requirement::try_new(ETA,DynViscosity::DIMS,Admit::Finite)?),
@@ -175,8 +195,18 @@ fn resolve(name:&str, catalog:&mut Catalog, loader:&mut impl FnMut(&str)->Result
     }
     if body { requirements.push(Requirement::try_new("poisson_ratio",Dims::NONE,Admit::Finite)?); }
     if twist {
-        requirements.push(Requirement::try_new(SHEAR,Pressure::DIMS,Admit::StrictlyPositive)?);
-        requirements.push(Requirement::try_new(SHEAR_ETA,DynViscosity::DIMS,Admit::Finite)?);
+        if elastic.is_none() {
+            requirements.push(Requirement::try_new(
+                SHEAR,
+                Pressure::DIMS,
+                Admit::StrictlyPositive,
+            )?);
+        }
+        requirements.push(Requirement::try_new(
+            SHEAR_ETA,
+            DynViscosity::DIMS,
+            Admit::Finite,
+        )?);
         // A pack that wrote its shear viscosity at a stated reference frequency has constant torsional loss
         // (fs_couple::bowed_string::runtime::reciprocal::bank::torsion::SHEAR_VISCOSITY_REFERENCE_OMEGA).
         load_pack(name,catalog,loader)?;
@@ -273,9 +303,15 @@ impl input::Spec {
         self.compile_bank_with_profiles(cx,gate,profile,stop_profile,false,loader)?
             .into_performance(gate)
     }
-    fn compile_bank_with_profiles<P: Into<MaterialPack>>(mut self,cx:&Cx<'_>,gate:&CancelGate,
-        profile:Option<body::Profile>,stop_profile:Option<stops::Profile>,harmonic_only:bool,
-        mut loader:impl FnMut(&str)->Result<P>)->Result<ReadyBank> {
+    fn compile_bank_with_profiles<P: Into<MaterialPack>>(
+        mut self,
+        cx: &Cx<'_>,
+        gate: &CancelGate,
+        profile: Option<body::Profile>,
+        stop_profile: Option<stops::Profile>,
+        harmonic_only: bool,
+        mut loader: impl FnMut(&str) -> Result<P>,
+    ) -> Result<ReadyBank> {
         poll(gate)?;
         self.validate_material_states()?;
         self.friction.require_environment(&self.material_states)?;
@@ -446,7 +482,16 @@ impl input::Spec {
                 return Err(format!("flat plate bodies admit 1..={} retained body modes",
                     input::MAX_PLATE_BODY_MODES).into());
             }
-            let material=resolve(&self.body.pack,&mut catalog,&mut loader,&self,true,false,&input::BendingLoss::KelvinVoigt)?;
+            let material = resolve(
+                &self.body.pack,
+                &mut catalog,
+                &mut loader,
+                &self,
+                true,
+                false,
+                &input::BendingLoss::KelvinVoigt,
+                None,
+            )?;
             let body=SharedMaterialPlateBody {
                 specimen:with_uniform_plate_material_state(ThinPlate { length_m:self.body.length,width_m:self.body.width,
                     thickness_m:1.0,density_kg_m3:1.0,e1_pa:1.0,e2_pa:1.0,nu12:0.0,g12_pa:1.0,material_angle_rad:0.0,
@@ -1259,4 +1304,3 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
 #[cfg(test)]
 #[path = "material_strings/tests.rs"]
 mod tests;
-

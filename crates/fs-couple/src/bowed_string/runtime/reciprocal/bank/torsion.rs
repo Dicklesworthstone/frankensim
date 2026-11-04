@@ -300,6 +300,34 @@ impl MaterialStringSource {
         if let Self::WithPolarizations(p) = self {
             return p.add_torsion(shear_property, viscosity_property, modes);
         }
+        self.with_torsion_binding(Some(shear_property), viscosity_property, modes)
+    }
+
+    /// Add torsion using G from each layer's original explicit isotropic pair.
+    /// E/nu, E/G and K/G share the material section's existing projection; no
+    /// separate shear-modulus claim, material query or nominal value is added.
+    /// The named shear viscosity remains an independent source requirement.
+    ///
+    /// # Errors
+    /// Requires an explicitly parameterized concentric source and the same
+    /// geometry, mode-count, loss and frequency admission as `with_torsion`.
+    pub fn with_isotropic_torsion(
+        self,
+        viscosity_property: &str,
+        modes: usize,
+    ) -> Result<Self, MaterialStatePointError> {
+        if let Self::WithPolarizations(p) = self {
+            return p.add_isotropic_torsion(viscosity_property, modes);
+        }
+        self.with_torsion_binding(None, viscosity_property, modes)
+    }
+
+    fn with_torsion_binding(
+        self,
+        shear_property: Option<&str>,
+        viscosity_property: &str,
+        modes: usize,
+    ) -> Result<Self, MaterialStatePointError> {
         let invalid = |quantity| MaterialStatePointError::InvalidDerived { quantity };
         if modes == 0 || modes > 4096 || matches!(&self, Self::WithTorsion(_)) {
             return Err(invalid("torsional extension requires 1..=4096 modes and a non-nested source"));
@@ -319,10 +347,17 @@ impl MaterialStringSource {
             Self::WithPolarizations(_) => return Err(invalid("polarized torsion must retain its original source")),
         };
         // The correction multiplies transverse GA only; it never changes GJ.
-        let section = elastic.with_shear_modulus(shear_property, 1.0)?
-            .with_torsional_viscosity(viscosity_property)?;
+        let shear = match shear_property {
+            Some(property) => elastic.with_shear_modulus(property, 1.0)?,
+            None => elastic.with_isotropic_shear(1.0)?,
+        };
+        let section = shear.with_torsional_viscosity(viscosity_property)?;
         Ok(Self::WithTorsion(Box::new(TorsionalStringSource {
-            bending: self, section, relaxation: None, mode_count: modes, total_modes,
+            bending: self,
+            section,
+            relaxation: None,
+            mode_count: modes,
+            total_modes,
         })))
     }
 

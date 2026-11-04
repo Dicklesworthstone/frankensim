@@ -70,6 +70,266 @@ fn close(a: f64, b: f64) {
     assert!((a-b).abs() <= 2e-12 * a.abs().max(b.abs()).max(1e-30), "{a} != {b}");
 }
 
+fn explicit_sources(pair: &str) -> input::Spec {
+    let fields = match pair {
+        "young-poisson" => "E-source nu-source",
+        "young-shear" => "E-source G-source",
+        "bulk-shear" => "K-source G-source",
+        _ => unreachable!(),
+    };
+    let text = String::from_utf8(bowed().bytes).unwrap().replace(
+        "layer sleeve.fsmatpk 0.0003",
+        &format!(
+            "layer sleeve.fsmatpk 0.0003\nelastic-sources 2\n\
+            elastic-source rho-source young-poisson E-source nu-source\n\
+            elastic-source rho-source {pair} {fields}"
+        ),
+    );
+    input::Spec::parse(text.as_bytes()).unwrap()
+}
+
+// Equivalent independent source pairs: E=180 GPa, nu=1/8, K=G=80 GPa.
+// Only the selected pair exists in each pack; neither canonical density nor
+// fictitious measured Young/shear claims can rescue an unwired consumer.
+fn independent_pack(name: &str, pair: &str, mutation: Option<(&str, f64)>) -> NormalizedPack {
+    let mut values = vec![
+        ("rho-source", Density::DIMS, 7800.0),
+        (ETA, DynViscosity::DIMS, 10.0),
+        (SHEAR_ETA, DynViscosity::DIMS, 1000.0),
+    ];
+    values.extend(match pair {
+        "young-poisson" => [
+            ("E-source", Pressure::DIMS, 180e9),
+            ("nu-source", Dims::NONE, 0.125),
+        ],
+        "young-shear" => [
+            ("E-source", Pressure::DIMS, 180e9),
+            ("G-source", Pressure::DIMS, 80e9),
+        ],
+        "bulk-shear" => [
+            ("K-source", Pressure::DIMS, 80e9),
+            ("G-source", Pressure::DIMS, 80e9),
+        ],
+        _ => unreachable!(),
+    });
+    let mut claims = ClaimSet::new();
+    let provenance = Provenance {
+        source: "manufactured independent elastic sources".into(),
+        license: "CC0-1.0".into(),
+        artifact: Some(fs_blake3::ContentHash([5; 32])),
+    };
+    let observation = claims
+        .register_observation(ObservationDataset {
+            specimen: name.into(),
+            method: "manufactured algebraic equivalence".into(),
+            artifact: fs_blake3::ContentHash([5; 32]),
+            caveats: "synthetic; not measured metal data".into(),
+            provenance: provenance.clone(),
+        })
+        .unwrap();
+    for (key, dims, original) in values {
+        let value = mutation
+            .filter(|(selected, _)| *selected == key)
+            .map_or(original, |(_, value)| value);
+        claims
+            .insert_claim(PropertyClaim {
+                key: PropertyKey::new(key, dims),
+                value: PropertyValue::Scalar { value, dims },
+                validity: ValidityDomain::unconstrained()
+                    .with("T", 280.0, 320.0)
+                    .with("omega", 0.0, 200_000.0),
+                uncertainty: UncertaintyModel::Unstated,
+                interpolation: InterpolationPolicy::ConstantWithinValidity,
+                observations: vec![observation.clone()],
+                provenance: provenance.clone(),
+            })
+            .unwrap();
+    }
+    let pack = NormalizedPack::new(
+        name,
+        "synthetic-independent-pair-v1",
+        fs_blake3::ContentHash([5; 32]),
+        "synthetic redistribution permitted",
+        claims,
+        vec![],
+        vec![],
+    )
+    .unwrap();
+    NormalizedPack::from_bytes(&pack.to_bytes()).unwrap()
+}
+
+fn independent_ready(
+    cx: &Cx<'_>,
+    gate: &CancelGate,
+    pair: &str,
+    mutation: Option<(&str, f64)>,
+) -> Ready {
+    explicit_sources(pair)
+        .compile(cx, gate, |name| {
+            Ok(match name {
+                "wire.fsmatpk" => independent_pack(name, "young-poisson", None),
+                "sleeve.fsmatpk" => independent_pack(name, pair, mutation),
+                _ => pack(name, 7800.0, 200_000.0, None),
+            })
+        })
+        .unwrap()
+}
+
+#[test]
+fn independent_elastic_source_rows_are_bounded_explicit_and_complete() {
+    for pair in ["young-poisson", "young-shear", "bulk-shear"] {
+        let spec = explicit_sources(pair);
+        assert_eq!(spec.strings[0].elastic_sources.as_ref().unwrap().len(), 2);
+    }
+    let text = String::from_utf8(explicit_sources("bulk-shear").bytes).unwrap();
+    for (from, to) in [
+        ("elastic-sources 2", "elastic-sources 0"),
+        ("elastic-sources 2", "elastic-sources 1"),
+        ("elastic-sources 2", "elastic-sources 17"),
+        (
+            "bulk-shear K-source G-source",
+            "automatic K-source G-source",
+        ),
+        (
+            "bulk-shear K-source G-source",
+            "bulk-shear K-source K-source",
+        ),
+        (
+            "bulk-shear K-source G-source",
+            "bulk-shear rho-source G-source",
+        ),
+        (
+            "bulk-shear K-source G-source",
+            "bulk-shear K-source G-source extra",
+        ),
+        (
+            "section bonded 0.0002 1\nlayer sleeve.fsmatpk 0.0003",
+            "section homogeneous",
+        ),
+    ] {
+        assert!(
+            input::Spec::parse(text.replace(from, to).as_bytes()).is_err(),
+            "accepted {to}"
+        );
+    }
+    scoped(|cx, gate| {
+        for mutation in [None, Some(("K-source", -1.0))] {
+            assert!(
+                explicit_sources("bulk-shear")
+                    .compile(cx, gate, |name| Ok(match name {
+                        "wire.fsmatpk" => independent_pack(name, "young-poisson", None),
+                        // Missing selected K must not switch to the available E/G pair.
+                        "sleeve.fsmatpk" => independent_pack(
+                            name,
+                            if mutation.is_none() {
+                                "young-shear"
+                            } else {
+                                "bulk-shear"
+                            },
+                            mutation
+                        ),
+                        _ => pack(name, 7800.0, 200_000.0, None),
+                    }))
+                    .is_err()
+            );
+        }
+    });
+}
+
+#[test]
+fn data_only_elastic_pairs_reach_bending_torsion_and_coupled_pressure() {
+    scoped(|cx, gate| {
+        let mut baseline = independent_ready(cx, gate, "bulk-shear", None);
+        let expected = pressure(&mut baseline, 37);
+        assert!(expected.iter().any(|value| *value != 0.0));
+        for pair in ["young-poisson", "young-shear", "bulk-shear"] {
+            let mut ready = independent_ready(cx, gate, pair, None);
+            let elastic = section(&ready).elastic();
+            assert_eq!(
+                elastic.isotropic_parameters(),
+                ready.spec.strings[0].elastic_sources.as_deref()
+            );
+            for layer in elastic.layers() {
+                for absent in ["density", "young_modulus", "shear_modulus"] {
+                    assert!(layer.material.property(absent).is_none());
+                }
+            }
+            let MaterialStringSource::WithTorsion(twist) = source(&ready) else {
+                panic!("retained torsion")
+            };
+            assert_eq!(twist.section().shear().shear_property(), None);
+            assert_eq!(
+                pressure(&mut ready, 1),
+                expected,
+                "equivalent {pair} changed sound"
+            );
+        }
+        let core_a = core::f64::consts::PI * 0.0002_f64.powi(2);
+        let sleeve_a = core::f64::consts::PI * (0.0003_f64.powi(2) - 0.0002_f64.powi(2));
+        let core_i = core::f64::consts::PI * 0.0002_f64.powi(4) / 4.0;
+        let sleeve_i = core::f64::consts::PI * (0.0003_f64.powi(4) - 0.0002_f64.powi(4)) / 4.0;
+        for (key, value) in [
+            ("rho-source", 15600.0),
+            ("K-source", 40e9),
+            ("G-source", 40e9),
+        ] {
+            let mut changed = independent_ready(cx, gate, "bulk-shear", Some((key, value)));
+            assert_eq!(changed.spec.bytes, baseline.spec.bytes);
+            assert_eq!(
+                changed.catalog["wire.fsmatpk"].pack.content_hash(),
+                baseline.catalog["wire.fsmatpk"].pack.content_hash()
+            );
+            assert_eq!(
+                changed.catalog["body.fsmatpk"].pack.content_hash(),
+                baseline.catalog["body.fsmatpk"].pack.content_hash()
+            );
+            let density = if key == "rho-source" { value } else { 7800.0 };
+            let bulk = if key == "K-source" { value } else { 80e9 };
+            let shear = if key == "G-source" { value } else { 80e9 };
+            let young = 9.0 * bulk * shear / (3.0 * bulk + shear);
+            let elastic = section(&changed).elastic();
+            close(
+                elastic.line_density_kg_m(),
+                7800.0 * core_a + density * sleeve_a,
+            );
+            close(
+                elastic.axial_stiffness_n(),
+                180e9 * core_a + young * sleeve_a,
+            );
+            close(
+                elastic.bending_stiffness_n_m2(),
+                180e9 * core_i + young * sleeve_i,
+            );
+            assert_eq!(
+                elastic.layers()[0].material,
+                section(&baseline).elastic().layers()[0].material
+            );
+            let MaterialStringSource::WithTorsion(twist) = source(&changed) else {
+                panic!("retained torsion")
+            };
+            close(
+                twist.section().rotary_inertia_kg_m(),
+                2.0 * (7800.0 * core_i + density * sleeve_i),
+            );
+            close(
+                twist.section().stiffness_n_m2(),
+                2.0 * (80e9 * core_i + shear * sleeve_i),
+            );
+            assert_eq!(changed.performance.bank().cards()[0].tension_n, 20.0);
+            let actual = pressure(&mut changed, 1);
+            assert!(
+                actual
+                    .iter()
+                    .zip(&expected)
+                    .any(|(a, b)| (a - b).abs() > 1e-12),
+                "{key} did not reach sound"
+            );
+            let frame = changed.performance.bank().system().last_frame().unwrap();
+            assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+        }
+    });
+}
+
 #[test]
 fn explicit_v2_homogeneous_support_keeps_v1_mechanics_and_pcm_bit_for_bit() {
     scoped(|cx, gate| {

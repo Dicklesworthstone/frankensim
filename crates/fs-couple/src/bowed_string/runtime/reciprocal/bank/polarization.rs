@@ -271,6 +271,16 @@ impl PolarizedStringSource {
             .with_torsion(shear, viscosity, modes)?
             .with_transverse_polarizations(self.directions)
     }
+
+    pub(super) fn add_isotropic_torsion(
+        self,
+        viscosity: &str,
+        modes: usize,
+    ) -> Result<MaterialStringSource, MaterialStatePointError> {
+        self.source
+            .with_isotropic_torsion(viscosity, modes)?
+            .with_transverse_polarizations(self.directions)
+    }
 }
 impl MaterialStringSource {
     /// Retain both transverse displacement components from the SAME source.

@@ -1871,6 +1871,49 @@ Missing sleeve data never falls back to the core. Each original source receipt,
 loss band and spatial assignment remains attached to the shared string bank.
 Repeated references load one immutable pack once, not one copy per layer.
 
+### Independent elastic source properties
+
+A bonded V2/V3 string can select each layer's density property and independent
+isotropic elastic pair in the input file. Put this optional block immediately
+after the last `layer` row, before V3 `polarizations` or `bending-loss`:
+
+```text
+section bonded 0.0002 1
+layer sleeve.fsmatpk 0.0003
+elastic-sources 2
+elastic-source core_density young-poisson axial_modulus poisson_ratio
+elastic-source sleeve_density bulk-shear bulk_modulus shear_modulus
+```
+
+The count must cover the core and every sleeve in spatial order. Each row is
+`elastic-source DENSITY PAIR FIRST SECOND`, where `PAIR` is `young-poisson`,
+`young-shear`, or `bulk-shear`. Density has units kg/m³, elastic moduli Pa, and
+Poisson ratio is dimensionless. These are property names in the original material
+pack; values, source selection and complete physical query still belong to that
+pack. No parameter pair is guessed from the available properties. Missing or
+incompatible data refuses without switching pairs or using core coefficients.
+
+The shared isotropic material law derives E and G once for the original section.
+Its actual mass, EA, EI, rotary inertia and GJ feed the same coupled string, body,
+bow, gas and pressure calculation. With twist modes enabled, G comes from this
+same pair; an extra `shear_modulus` claim is not required. Bending viscosity and
+shear viscosity remain separately declared material properties. Derived E/G do
+not appear as measured claims in the retained source bundle. Changing only a
+layer pack's density, K or G therefore changes mechanics and sound with the
+input geometry, prescribed support and physics code unchanged.
+
+Omitting `elastic-sources` preserves the original canonical density/Young/shear
+path exactly. This block currently applies to bonded sections; homogeneous,
+measured and close-wound declarations retain their existing source contracts.
+Additional thermal, contact and memory features continue to require their own
+explicit source properties and admitted constitutive laws. In particular, some
+whole-string heat and normal-contact bindings retain canonical property
+requirements and can refuse a pack containing only the selected elastic roles.
+This declaration does not fabricate extra claims for those consumers. Synthetic
+executable regressions compare all three equivalent pairs, then independently change only
+sleeve density, K or G and check section integrals, torsion and actual pressure.
+They do not provide measured gold, silver or alloy data.
+
 Replace `tension 20` with `extension 0.4998 0.001` to hold the 0.5 m loaded span
 against a 0.4998 m stress-free length with a declared 0.001 strain limit. The
 original support owner computes tension from the section's total EA and imposed

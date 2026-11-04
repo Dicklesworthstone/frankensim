@@ -46,11 +46,15 @@ fn modal_bending_section(elastic: ConcentricElasticSection, loss: &input::Bendin
 }
 
 impl input::Wire {
-    pub(super) fn resolve_source(&self, catalog: &mut Catalog,
-        loader: &mut impl FnMut(&str) -> Result<MaterialPack>, spec: &input::Spec,
-        gate: &CancelGate) -> Result<MaterialStringSource>
-    {
+    pub(super) fn resolve_source(
+        &self,
+        catalog: &mut Catalog,
+        loader: &mut impl FnMut(&str) -> Result<MaterialPack>,
+        spec: &input::Spec,
+        gate: &CancelGate,
+    ) -> Result<MaterialStringSource> {
         poll(gate)?;
+        self.validate_elastic_sources()?;
         if matches!(&self.section, input::WireSection::Measured { .. }) {
             return measured::resolve(self, catalog, loader, spec, gate);
         }
@@ -67,7 +71,17 @@ impl input::Wire {
             None => None,
         };
         let twist = self.twist_modes > 0;
-        let core = resolve(&self.pack, catalog, loader, spec, false, twist, &self.bending_loss)?;
+        let parameters = self.elastic_sources.as_deref();
+        let core = resolve(
+            &self.pack,
+            catalog,
+            loader,
+            spec,
+            false,
+            twist,
+            &self.bending_loss,
+            parameters.map(|layers| &layers[0]),
+        )?;
         let mut source = match &self.section {
             input::WireSection::Measured { .. } => unreachable!("measured assembly resolves before bulk material"),
             input::WireSection::CloseWound { core_radius_m, pack, wire_radius_m, pitch_m } => {
@@ -150,12 +164,28 @@ impl input::Wire {
             input::WireSection::Bonded { core_radius_m, sleeves } => {
                 let mut layers = Vec::with_capacity(sleeves.len() + 1);
                 layers.push(ConcentricMaterialLayer { outer_radius_m: *core_radius_m, material: core });
-                for sleeve in sleeves {
+                for (index, sleeve) in sleeves.iter().enumerate() {
                     poll(gate)?;
-                    layers.push(ConcentricMaterialLayer { outer_radius_m: sleeve.outer_radius_m,
-                        material: resolve(&sleeve.pack, catalog, loader, spec, false, twist, &self.bending_loss)? });
+                    layers.push(ConcentricMaterialLayer {
+                        outer_radius_m: sleeve.outer_radius_m,
+                        material: resolve(
+                            &sleeve.pack,
+                            catalog,
+                            loader,
+                            spec,
+                            false,
+                            twist,
+                            &self.bending_loss,
+                            parameters.map(|layers| &layers[index + 1]),
+                        )?,
+                    });
                 }
-                let elastic = ConcentricElasticSection::try_new(0.0, layers)?;
+                let elastic = match parameters {
+                    Some(parameters) => ConcentricElasticSection::try_new_with_isotropic_parameters(
+                        0.0, layers, parameters,
+                    )?,
+                    None => ConcentricElasticSection::try_new(0.0, layers)?,
+                };
                 if elastic.outer_radius_m().to_bits() != self.radius.to_bits() {
                     return Err("resolved section disagrees with the original string radius".into());
                 }
@@ -209,7 +239,13 @@ impl input::Wire {
         };
         // Torsion resolves from these SAME original layer states, not a second
         // query at averaged conditions or a mass copied from the nominal core.
-        if twist { source = source.with_torsion(SHEAR, SHEAR_ETA, self.twist_modes)?; }
+        if twist {
+            source = if parameters.is_some() {
+                source.with_isotropic_torsion(SHEAR_ETA, self.twist_modes)?
+            } else {
+                source.with_torsion(SHEAR, SHEAR_ETA, self.twist_modes)?
+            };
+        }
         if let Some(layers) = &self.torsion_memory {
             source = source.with_torsional_relaxation(layers)?;
         }

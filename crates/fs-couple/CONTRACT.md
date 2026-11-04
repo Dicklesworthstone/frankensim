@@ -1,5 +1,22 @@
 # CONTRACT: fs-couple
 
+## Declared isotropic sources in bonded string input
+
+The layered `material_strings` frontend accepts an optional `elastic-sources`
+block with one `elastic-source DENSITY PAIR FIRST SECOND` row per bonded
+core/sleeve, in spatial order. The explicit pair is `young-poisson`,
+`young-shear` or `bulk-shear`; original property keys, admissibility, material
+queries and claim receipts feed `LayerIsotropicParameters` and the shared
+concentric-section projection. The resulting mass, EA, EI, rotary inertia and
+GJ enter the original coupled performer and pressure output.
+`MaterialStringSource::with_isotropic_torsion` uses that same section's derived
+or directly selected G without a fabricated shear claim; viscosity remains
+independently sourced. Missing, incompatible, repeated-role or incomplete
+declarations refuse. Omission retains the original canonical source path.
+Separate contact, caloric and memory bindings retain their own source requirements
+and validity limits; this input block adds no material law or measured-property
+claim.
+
 ## Exact-ramp work and heat in deposited layers
 
 `strip_enthalpy::step_candidate` uses the solid owner's native work-conjugate

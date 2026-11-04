@@ -3,6 +3,7 @@ use super::*;
 use std::str::{FromStr, Lines, SplitAsciiWhitespace};
 use fs_material::gas_species::input::{GasRecord, ThermochemicalSources, read_gas_record};
 use fs_material::relaxation::RelaxationState;
+use fs_material::state_point::IsotropicElasticParameters;
 use fs_couple::bowed_string::runtime::reciprocal::bank::cavity::ShellCavityMolecularOptions;
 use fs_scenario::gesture::GestureValue;
 use fs_couple::bowed_string::runtime::reciprocal::bank::polarization::{TransverseDirection, TransverseDirections};
@@ -45,6 +46,9 @@ pub const MAX_WORK: u64 = (MAX_TOTAL_MODES * (MAX_BODY_MODES + 1) * (MAX_BODY_MO
 pub struct Wire {
     pub pack: String, pub length: f64, pub radius: f64, pub prestress: StringPrestress,
     pub section: WireSection,
+    /// Optional independent source roles, ordered core then bonded sleeves.
+    /// None retains the original canonical density/Young-modulus binding.
+    pub elastic_sources: Option<Vec<LayerIsotropicParameters>>,
     pub bending_loss: BendingLoss,
     pub torsion_memory: Option<Vec<torsion_memory::LayerProperties>>,
     /// With fixed extension, L0 is stress-free at this explicit reference T.
@@ -55,6 +59,35 @@ pub struct Wire {
     pub polarizations: Option<TransverseDirections>,
     /// The `tension-loss` row this string selects. None is no tension loss term.
     pub tension_loss: Option<TensionLossRow>,
+}
+impl Wire {
+    pub(super) fn validate_elastic_sources(&self) -> Result<()> {
+        let Some(sources) = &self.elastic_sources else {
+            return Ok(());
+        };
+        let WireSection::Bonded { sleeves, .. } = &self.section else {
+            return Err("elastic-sources requires a bonded section".into());
+        };
+        if sources.len() != sleeves.len() + 1 {
+            return Err(
+                "elastic-sources needs one independent parameter pair per core and sleeve".into(),
+            );
+        }
+        for source in sources {
+            let names = std::iter::once(&source.density)
+                .chain(source.parameters.requirements())
+                .map(|requirement| requirement.name())
+                .collect::<Vec<_>>();
+            if names
+                .iter()
+                .enumerate()
+                .any(|(i, name)| names[..i].contains(name))
+            {
+                return Err("elastic source roles require distinct property names".into());
+            }
+        }
+        Ok(())
+    }
 }
 /// One cited construction's tension loss factor eta_F in `tension-loss.tsv`.
 #[derive(Clone, Debug, PartialEq)]
@@ -286,7 +319,10 @@ impl Spec {
         Self::parse_with_gas_sources(bytes, None)
     }
 
-    pub fn parse_with_gas_sources(bytes: &[u8], sources: Option<&ThermochemicalSources<'_>>) -> Result<Self> {
+    pub fn parse_with_gas_sources(
+        bytes: &[u8],
+        sources: Option<&ThermochemicalSources<'_>>,
+    ) -> Result<Self> {
         if bytes.len() > MAX_INPUT_BYTES { return Err("material-string input exceeds 1 MiB".into()); }
         let text = std::str::from_utf8(bytes)?;
         let (header, schedule) = text.split_once("\nschedule\n")
@@ -389,12 +425,57 @@ impl Spec {
                 (0.0, 0.0)
             } else { (row.scalar()?, row.scalar()?) };
             let mut wire = Wire { pack, length, radius, prestress, section: WireSection::Homogeneous,
+                elastic_sources: None,
                 bending_loss: BendingLoss::KelvinVoigt, torsion_memory: None,
                 thermal_reference_kelvin: None, tension_loss: None,
                 polarizations: None, bending_modes, twist_modes,
                 bridge: SharedPlateBridge { station_fraction, stiffness_n_m, damping_n_s_m, rest_extension_m: 0.0 } };
             row.end()?;
             if layered { wire.section = r.section(radius)?; }
+            if r.lines.clone().next().and_then(|line| line.split_ascii_whitespace().next())
+                == Some("elastic-sources")
+            {
+                let mut row = r.row("elastic-sources")?;
+                let count = row.count(MAX_LAYERS)?;
+                row.end()?;
+                let mut sources = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let mut row = r.row("elastic-source")?;
+                    let density = Requirement::try_new(
+                        row.label()?, Density::DIMS, Admit::StrictlyPositive,
+                    )?;
+                    let pair = row.word()?;
+                    let first = Requirement::try_new(
+                        row.label()?, Pressure::DIMS, Admit::StrictlyPositive,
+                    )?;
+                    let second = row.label()?;
+                    let parameters = match pair {
+                        "young-poisson" => IsotropicElasticParameters::YoungPoisson {
+                            young_modulus: first,
+                            poisson_ratio: Requirement::try_new(second, Dims::NONE, Admit::Finite)?,
+                        },
+                        "young-shear" => IsotropicElasticParameters::YoungShear {
+                            young_modulus: first,
+                            shear_modulus: Requirement::try_new(
+                                second, Pressure::DIMS, Admit::StrictlyPositive,
+                            )?,
+                        },
+                        "bulk-shear" => IsotropicElasticParameters::BulkShear {
+                            bulk_modulus: first,
+                            shear_modulus: Requirement::try_new(
+                                second, Pressure::DIMS, Admit::StrictlyPositive,
+                            )?,
+                        },
+                        _ => return Err(
+                            "elastic-source selects young-poisson, young-shear or bulk-shear".into(),
+                        ),
+                    };
+                    row.end()?;
+                    sources.push(LayerIsotropicParameters { density, parameters });
+                }
+                wire.elastic_sources = Some(sources);
+                wire.validate_elastic_sources()?;
+            }
             if format >= 3 {
                 let mut row = r.row("polarizations")?;
                 wire.polarizations = match row.word()? {
