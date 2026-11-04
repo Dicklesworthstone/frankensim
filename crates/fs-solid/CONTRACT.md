@@ -6296,6 +6296,40 @@ linear/angular impulse, redundant contacts under boosts and tangent-frame
 rotation, and late native-readback refusal with unchanged-state retry.
 Native compilation and test execution remain outstanding.
 
+### Directional Coulomb impacts on complete solid trajectories
+
+`ExactLinearSolid::apply_elliptic_impacts` and
+`CompleteSpectralSolid::apply_elliptic_impacts` extend that same native impulse
+path with two principal friction coefficients and their material axis in the
+original tangent frame. Shared assembly retains the complete original mass
+response, normal/shear and intercontact blocks, canonical transpose order,
+private native momentum trial and physical work accounting. The circular entry
+points retain their original scalar dispatch and arithmetic. The existing
+`fs-contact` elliptic owner alone maps the directional cone to its scalar disk;
+equal coefficients select its exact identity map, and a zero principal
+coefficient gives physical free slip without an artificial traction floor.
+
+Native endpoint readback independently reconstructs the original material
+ellipse, forbidden free-axis traction, normal complementarity, final-slip
+support gradient and tangential duality. It also checks actual native velocity
+and relative work against the mapped solve. Loosening the adapter readback
+allowance cannot silently loosen these original physical law gates. Actual
+opposing-surface work and native applied work retain their separate balance.
+All refusals leave physical/modal state and cumulative accounts unchanged.
+
+The law's determinacy vectors and total-work witness remain explicitly in its
+mapped coordinates; its physical impulse/velocity outputs remain in the
+original contact frame. These are caller-declared fixed impact coefficients,
+not inferred material calibration, intrastep static/kinetic switching,
+sustained contact, event discovery or a frictional heat partition.
+
+Four G1/G3/G4 regression groups in `tests/solid_frictional_impacts/elliptic.rs`
+cover the isotropic limit on both complete owners, a manufactured coupled
+stick/slide event with independent all-mode continuation, physical texture
+rotation and free-axis frame covariance, and late native refusal/retry.
+These integration tests require the real constellation runtime and native
+solid owners; formatting alone does not establish that these gates pass.
+
 
 ### Simultaneous Coulomb impacts with moving solid supports
 

@@ -6,6 +6,9 @@
 //! applied through the original impulse trial; actual contact velocities,
 //! final-slip traction, original momentum and work must pass before acceptance.
 
+/// Directional Coulomb impulses on the same original solid state and mobility.
+pub mod elliptic;
+
 use super::spectral::CompleteSpectralSolid;
 use super::{ExactLinearSolid, LinearSolidImpulseError, LinearSolidImpulseReport, impulse};
 use fs_contact::frictional_multicontact::{
@@ -25,7 +28,7 @@ use fs_math::det;
 /// functions, event time and completeness of the contact set. These properties
 /// cannot be inferred from arbitrary algebraic rows.
 #[derive(Clone, Copy, Debug)]
-pub struct SolidFrictionalContact<'a> {
+pub struct SolidFrictionalContact<'a, F = f64> {
     /// Stable geometry-owned identity; duplicate IDs refuse.
     pub id: u64,
     pub velocity_weights: [&'a [f64]; 3],
@@ -35,7 +38,10 @@ pub struct SolidFrictionalContact<'a> {
     /// Opposing-surface velocity in the SAME contact frame, held throughout
     /// the instantaneous event. Relative velocity is J*v minus this value.
     pub prescribed_surface_velocity_mps: [f64; 3],
-    pub friction_coefficient: f64,
+    /// Constitutive payload of the selected entry point. The scalar default is
+    /// one common static/kinetic coefficient; the directional entry point uses
+    /// principal coefficients and their axis in this SAME tangent frame.
+    pub friction_coefficient: F,
     pub normal_law: NormalVelocityLaw,
 }
 
@@ -67,6 +73,7 @@ pub enum SolidFrictionalImpactError {
     },
     Native(LinearSolidImpulseError),
     Contact(FrictionalContactError),
+    EllipticContact(fs_contact::frictional_multicontact::elliptic::EllipticFrictionalContactError),
     Speed {
         contact: usize,
         component: usize,
@@ -107,17 +114,20 @@ impl From<FrictionalContactError> for SolidFrictionalImpactError {
 
 /// Shared actual-state receipt for complete and supported solid consumers.
 ///
-/// Retain `law.determinacy` and its total-work witness. A velocity-only result
+/// Retain the law's determinacy and total-work witness. A velocity-only result
 /// supplies one checked impulse representative, not unique individual loads
 /// or local source/heat allocations. Prescribed solid-support reaction work,
 /// when present, remains separate in that owner's original impulse receipt.
 #[derive(Clone, Debug, PartialEq)]
-pub struct SolidFrictionalContactImpulseReport {
-    pub law: FrictionalContactResult,
+pub struct SolidFrictionalContactImpulseReport<
+    R = FrictionalContactResult,
+    A = FrictionalContactResiduals,
+> {
+    pub law: R,
     pub relative_velocities_after_mps: Vec<[f64; 3]>,
     pub maximum_contact_speed_error_mps: f64,
-    /// Coulomb residuals reconstructed from the actual native endpoint.
-    pub measured_residuals: FrictionalContactResiduals,
+    /// Physical constitutive residuals reconstructed from the actual endpoint.
+    pub measured_residuals: A,
     /// Sum p dot opposing-surface velocity for the selected representative [J].
     pub prescribed_surface_work_j: f64,
     /// Sum p dot (relative velocity before + actual relative velocity after)/2.
@@ -133,8 +143,9 @@ pub struct SolidFrictionalContactImpulseReport {
 
 /// One accepted event; contact loss is not double-counted as native viscosity.
 #[derive(Clone, Debug)]
-pub struct SolidFrictionalImpactReport {
-    pub contact: SolidFrictionalContactImpulseReport,
+pub struct SolidFrictionalImpactReport<R = FrictionalContactResult, A = FrictionalContactResiduals>
+{
+    pub contact: SolidFrictionalContactImpulseReport<R, A>,
     pub impulse: LinearSolidImpulseReport,
 }
 
@@ -169,8 +180,8 @@ fn dot(a: &[f64], b: &[f64], cx: &Cx<'_>) -> Result<Dd> {
     rounded(sum)?;
     Ok(sum)
 }
-fn relative_velocity(
-    contact: &SolidFrictionalContact<'_>,
+fn relative_velocity<F>(
+    contact: &SolidFrictionalContact<'_, F>,
     velocity: &[f64],
     cx: &Cx<'_>,
 ) -> Result<[f64; 3]> {
@@ -195,32 +206,150 @@ fn bound(resource: &'static str, required: u128, maximum: u128) -> Result<()> {
     }
 }
 
-pub(super) struct FrictionalImpulseProposal {
+pub(super) struct FrictionalImpulseProposal<R = FrictionalContactResult> {
     pub(super) impulse_kg_m_s: Vec<f64>,
-    law: FrictionalContactResult,
+    law: R,
     relative_velocities_before_mps: Vec<[f64; 3]>,
     order: Vec<usize>,
+}
+
+/// Only original physical impulses, endpoint velocities and work enter native
+/// mechanics. Constitutive coordinate transforms remain owned by fs-contact.
+pub(super) struct PhysicalImpulseView<'a> {
+    impulses: &'a [[f64; 3]],
+    relative_velocities_after: &'a [[f64; 3]],
+    relative_work: f64,
+}
+
+pub(super) trait ImpactResponse {
+    fn physical(&self) -> PhysicalImpulseView<'_>;
+}
+
+impl ImpactResponse for FrictionalContactResult {
+    fn physical(&self) -> PhysicalImpulseView<'_> {
+        PhysicalImpulseView {
+            impulses: &self.impulses,
+            relative_velocities_after: &self.relative_velocities_after,
+            relative_work: self.relative_work,
+        }
+    }
+}
+
+/// The coefficient type changes law dispatch, not original state assembly,
+/// transpose impulses, staging or physical work accumulation.
+pub(super) trait ImpactFriction: Copy {
+    type Contact;
+    type Response: ImpactResponse;
+    type Residuals;
+
+    fn contact(c: &SolidFrictionalContact<'_, Self>, velocity: [f64; 3]) -> Self::Contact;
+    fn solve(
+        contacts: &[Self::Contact],
+        delassus: &[f64],
+        config: FrictionalContactConfig,
+        cx: &Cx<'_>,
+    ) -> Result<Self::Response>;
+    fn measure(
+        proposal: &FrictionalImpulseProposal<Self::Response>,
+        contacts: &[SolidFrictionalContact<'_, Self>],
+        velocities: &[[f64; 3]],
+        config: FrictionalContactConfig,
+        cx: &Cx<'_>,
+    ) -> Result<Self::Residuals>;
+}
+
+impl ImpactFriction for f64 {
+    type Contact = FrictionalContact;
+    type Response = FrictionalContactResult;
+    type Residuals = FrictionalContactResiduals;
+
+    fn contact(c: &SolidFrictionalContact<'_>, velocity: [f64; 3]) -> Self::Contact {
+        FrictionalContact {
+            id: c.id,
+            gap: c.gap_m,
+            activation_tolerance: c.activation_tolerance_m,
+            relative_velocity: velocity,
+            friction_coefficient: c.friction_coefficient,
+            normal_law: c.normal_law,
+        }
+    }
+
+    fn solve(
+        contacts: &[Self::Contact],
+        delassus: &[f64],
+        config: FrictionalContactConfig,
+        cx: &Cx<'_>,
+    ) -> Result<Self::Response> {
+        Ok(solve_frictional_contacts(
+            contacts,
+            delassus,
+            config,
+            || cx.checkpoint().is_err(),
+        )?)
+    }
+
+    fn measure(
+        proposal: &FrictionalImpulseProposal,
+        contacts: &[SolidFrictionalContact<'_>],
+        velocities: &[[f64; 3]],
+        config: FrictionalContactConfig,
+        cx: &Cx<'_>,
+    ) -> Result<Self::Residuals> {
+        measured_law(proposal, contacts, velocities, config, cx)
+    }
 }
 
 /// Native velocity and mobility action use the SAME original coordinate order.
 /// Supported owners retain real prescribed velocities with zero incremental
 /// mobility there, and recover cross-mass reactions in their original trial.
-pub(super) fn propose(
+pub(super) fn propose<F: ImpactFriction>(
     velocity_mps: &[f64],
-    contacts: &[SolidFrictionalContact<'_>],
+    contacts: &[SolidFrictionalContact<'_, F>],
+    controls: SolidFrictionalImpactControls,
+    inverse_mass_action: impl FnMut(
+        &[f64],
+        &Cx<'_>,
+    ) -> core::result::Result<Vec<f64>, LinearSolidImpulseError>,
+    cx: &Cx<'_>,
+) -> Result<FrictionalImpulseProposal<F::Response>> {
+    propose_with(
+        velocity_mps,
+        contacts,
+        controls,
+        inverse_mass_action,
+        |velocities, _, delassus, cx| {
+            let mut native = Vec::with_capacity(contacts.len());
+            for (contact, &velocity) in contacts.iter().zip(velocities) {
+                poll(cx)?;
+                native.push(F::contact(contact, velocity));
+            }
+            F::solve(&native, delassus, controls.contact, cx)
+        },
+        cx,
+    )
+}
+
+/// Constitutive callback sees admitted original velocities, canonical contact
+/// order and the complete original mobility. Source-bound descendants can stage
+/// their own histories here without recomputing inertia or publishing a trial.
+pub(super) fn propose_with<F, R: ImpactResponse, E: From<SolidFrictionalImpactError>>(
+    velocity_mps: &[f64],
+    contacts: &[SolidFrictionalContact<'_, F>],
     controls: SolidFrictionalImpactControls,
     mut inverse_mass_action: impl FnMut(
         &[f64],
         &Cx<'_>,
     ) -> core::result::Result<Vec<f64>, LinearSolidImpulseError>,
+    resolve: impl FnOnce(&[[f64; 3]], &[usize], &[f64], &Cx<'_>) -> core::result::Result<R, E>,
     cx: &Cx<'_>,
-) -> Result<FrictionalImpulseProposal> {
+) -> core::result::Result<FrictionalImpulseProposal<R>, E> {
     poll(cx)?;
     let (n, m) = (velocity_mps.len(), contacts.len());
     if n == 0 || !(1..=21).contains(&m) || m > controls.contact.maximum_contacts {
         return Err(SolidFrictionalImpactError::Invalid(
             "nonempty original state and 1..=21 admitted contact frames required",
-        ));
+        )
+        .into());
     }
     if [
         controls.maximum_impulse_error_kg_m_s,
@@ -232,7 +361,8 @@ pub(super) fn propose(
     {
         return Err(SolidFrictionalImpactError::Invalid(
             "finite nonnegative impulse, speed and work allowances required",
-        ));
+        )
+        .into());
     }
     let (nn, dd) = (n as u128, (3 * m) as u128);
     bound(
@@ -253,9 +383,8 @@ pub(super) fn propose(
         .windows(2)
         .any(|pair| contacts[pair[0]].id == contacts[pair[1]].id)
     {
-        return Err(SolidFrictionalImpactError::Invalid("duplicate contact ID"));
+        return Err(SolidFrictionalImpactError::Invalid("duplicate contact ID").into());
     }
-    let mut native = Vec::with_capacity(m);
     let mut relative_velocities_before_mps = Vec::with_capacity(m);
     for contact in contacts {
         poll(cx)?;
@@ -270,29 +399,23 @@ pub(super) fn propose(
         {
             return Err(SolidFrictionalImpactError::Invalid(
                 "three complete finite covectors and finite opposing-surface velocities required",
-            ));
+            )
+            .into());
         }
         let relative_velocity = relative_velocity(contact, velocity_mps, cx)?;
         relative_velocities_before_mps.push(relative_velocity);
-        native.push(FrictionalContact {
-            id: contact.id,
-            gap: contact.gap_m,
-            activation_tolerance: contact.activation_tolerance_m,
-            relative_velocity,
-            friction_coefficient: contact.friction_coefficient,
-            normal_law: contact.normal_law,
-        });
     }
     let d = 3 * m;
     let mut delassus = vec![0.0; d * d];
     for &j in &order {
         for b in 0..3 {
             poll(cx)?;
-            let response = inverse_mass_action(contacts[j].velocity_weights[b], cx)?;
+            let response = inverse_mass_action(contacts[j].velocity_weights[b], cx)
+                .map_err(SolidFrictionalImpactError::from)?;
             if response.len() != n {
-                return Err(SolidFrictionalImpactError::Invalid(
-                    "native mobility shape changed",
-                ));
+                return Err(
+                    SolidFrictionalImpactError::Invalid("native mobility shape changed").into(),
+                );
             }
             for &i in &order {
                 for a in 0..3 {
@@ -302,9 +425,11 @@ pub(super) fn propose(
             }
         }
     }
-    let law = solve_frictional_contacts(&native, &delassus, controls.contact, || {
-        cx.checkpoint().is_err()
-    })?;
+    let law = resolve(&relative_velocities_before_mps, &order, &delassus, cx)?;
+    let physical = law.physical();
+    if physical.impulses.len() != m || physical.relative_velocities_after.len() != m {
+        return Err(SolidFrictionalImpactError::Invalid("contact result shape changed").into());
+    }
     let mut impulse_kg_m_s = Vec::with_capacity(n);
     for coordinate in 0..n {
         if coordinate % 256 == 0 {
@@ -315,7 +440,7 @@ pub(super) fn propose(
             for a in 0..3 {
                 value = value
                     + Dd::from_f64(contacts[i].velocity_weights[a][coordinate])
-                        * Dd::from_f64(law.impulses[i][a]);
+                        * Dd::from_f64(physical.impulses[i][a]);
             }
         }
         impulse_kg_m_s.push(rounded(value)?);
@@ -378,17 +503,18 @@ fn measured_law(
     Ok(r)
 }
 
-pub(super) fn audit(
-    proposal: FrictionalImpulseProposal,
-    contacts: &[SolidFrictionalContact<'_>],
+pub(super) fn audit<F: ImpactFriction>(
+    proposal: FrictionalImpulseProposal<F::Response>,
+    contacts: &[SolidFrictionalContact<'_, F>],
     velocity_after_mps: &[f64],
     applied_work_j: f64,
     controls: SolidFrictionalImpactControls,
     cx: &Cx<'_>,
-) -> Result<SolidFrictionalContactImpulseReport> {
+) -> Result<SolidFrictionalContactImpulseReport<F::Response, F::Residuals>> {
     poll(cx)?;
+    let physical = proposal.law.physical();
     if velocity_after_mps.len() != proposal.impulse_kg_m_s.len()
-        || contacts.len() != proposal.law.impulses.len()
+        || contacts.len() != physical.impulses.len()
     {
         return Err(SolidFrictionalImpactError::Invalid(
             "native impact candidate shape changed",
@@ -402,7 +528,7 @@ pub(super) fn audit(
         let after = relative_velocity(&contacts[i], velocity_after_mps, cx)?;
         relative_velocities_after_mps[i] = after;
         for a in 0..3 {
-            let defect = finite(after[a] - proposal.law.relative_velocities_after[i][a])?;
+            let defect = finite(after[a] - physical.relative_velocities_after[i][a])?;
             maximum_contact_speed_error_mps = maximum_contact_speed_error_mps.max(defect.abs());
             if defect.abs() > controls.maximum_contact_speed_error_mps {
                 return Err(SolidFrictionalImpactError::Speed {
@@ -412,7 +538,7 @@ pub(super) fn audit(
                     allowance_mps: controls.maximum_contact_speed_error_mps,
                 });
             }
-            let p = Dd::from_f64(proposal.law.impulses[i][a]);
+            let p = Dd::from_f64(physical.impulses[i][a]);
             prescribed_work =
                 prescribed_work + p * Dd::from_f64(contacts[i].prescribed_surface_velocity_mps[a]);
             let work = p
@@ -422,7 +548,7 @@ pub(super) fn audit(
             work_scale = work_scale + Dd::from_f64(rounded(work)?.abs());
         }
     }
-    let measured_residuals = measured_law(
+    let measured_residuals = F::measure(
         &proposal,
         contacts,
         &relative_velocities_after_mps,
@@ -431,7 +557,7 @@ pub(super) fn audit(
     )?;
     let prescribed_surface_work_j = rounded(prescribed_work)?;
     let relative_work_j = rounded(relative_work)?;
-    let relative_work_error_j = rounded(relative_work - Dd::from_f64(proposal.law.relative_work))?;
+    let relative_work_error_j = rounded(relative_work - Dd::from_f64(physical.relative_work))?;
     let work_balance_error_j =
         rounded(Dd::from_f64(applied_work_j) - prescribed_work - relative_work)?;
     for defect_j in [relative_work_error_j, work_balance_error_j] {

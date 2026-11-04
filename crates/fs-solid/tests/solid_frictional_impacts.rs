@@ -1,6 +1,9 @@
 //! Physical complete-coordinate Coulomb impulses, continued original dynamics,
 //! independent world momentum, and transactional actual-endpoint refusals.
 
+#[path = "solid_frictional_impacts/elliptic.rs"]
+mod elliptic;
+
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_contact::frictional_multicontact::{
     FrictionalContactConfig, FrictionalContactDeterminacy, FrictionalContactError,
