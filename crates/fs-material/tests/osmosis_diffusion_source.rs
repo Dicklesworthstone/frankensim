@@ -10,6 +10,7 @@ use fs_material::{
         AqueousSolution,
         diffusion::{
             SolutionDiffusionError, SolutionDiffusionSolve,
+            electrical::ZeroCurrentDiffusion,
             source::{
                 BINARY_SOLUTION_DIFFUSIVITY_DIMS as DIMS, BinarySolutionDiffusionSource,
                 MaterialSolutionMaxwellStefan, SolutionDiffusionSourceAxes,
@@ -128,6 +129,158 @@ fn controls() -> SolutionDiffusionSolve {
         friction: MaxwellStefanMolarSolveV1::default(),
         entropy_tolerance_w_m3_k: 1e-10,
     }
+}
+
+#[test]
+fn g1_ionic_response_replays_the_exact_admitted_source_matrix() {
+    let model = model(2);
+    let (material, ids) = card(vec![
+        curve("Dp", "c_P", [10.0, 150.0], 1.3e-9),
+        curve("Dn", "c_N", [10.0, 150.0], 2.1e-9),
+        curve("Dpn", "c_N", [10.0, 150.0], 1.7e-9),
+    ]);
+    let law = MaterialSolutionMaxwellStefan::new(
+        model.clone(),
+        species("water"),
+        vec![species("P"), species("N")],
+        vec![
+            binding(["water", "P"], &material, "Dp"),
+            binding(["water", "N"], &material, "Dn"),
+            binding(["P", "N"], &material, "Dpn"),
+        ],
+        axes(&["P", "N"]),
+        &solution(&model, &[40.0, 40.0]),
+        || false,
+    )
+    .unwrap();
+    let electrical = ZeroCurrentDiffusion::new(vec![1, -1], 1e-13, 1e-14).unwrap();
+    let mut workspace = law.workspace().unwrap();
+    let mut output = [0.0; 2];
+    // The bound snapshot outlives temporary endpoints. Its face data are not a
+    // borrowed reference state and its replay API accepts no replacement matrix.
+    let response = law
+        .current_response_into(
+            &solution(&model, &[100.0, 100.0]),
+            &solution(&model, &[20.0, 20.0]),
+            0.005,
+            controls(),
+            &electrical,
+            &mut workspace,
+            &mut output,
+            || false,
+        )
+        .unwrap();
+    let sources = response.sources().unwrap();
+    let mean = 80.0 / 5.0_f64.ln();
+    let scale = 1.0 + mean / 100.0;
+    for pair in sources.pairs() {
+        let value = pair.face.properties()[0].value_si();
+        let property = &pair.face.properties()[0];
+        let base = match property.answer().receipt.selected {
+            selected if selected == ids[0] => 1.3e-9,
+            selected if selected == ids[1] => 2.1e-9,
+            selected if selected == ids[2] => 1.7e-9,
+            _ => panic!("original selected pair claim was lost"),
+        };
+        close(value, base * scale, 2e-24);
+        assert_eq!(pair.face.card_identity(), material.content_hash());
+        close(pair.left.properties()[0].value_si(), 2.0 * base, 2e-24);
+        close(pair.right.properties()[0].value_si(), 1.2 * base, 2e-24);
+    }
+    // Compare against a separately prepared constant law at the ACTUAL face,
+    // then against the reference coefficients to rule out a frozen source path.
+    let actual = fs_material::osmosis::diffusion::SolutionMaxwellStefan::new(
+        model.clone(),
+        species("water"),
+        vec![species("P"), species("N")],
+        vec![
+            0.0,
+            1.3e-9 * scale,
+            2.1e-9 * scale,
+            1.3e-9 * scale,
+            0.0,
+            1.7e-9 * scale,
+            2.1e-9 * scale,
+            1.7e-9 * scale,
+            0.0,
+        ],
+    )
+    .unwrap();
+    let left = solution(&model, &[100.0, 100.0]);
+    let right = solution(&model, &[20.0, 20.0]);
+    for difference in [-12.0, 0.3] {
+        let report = response
+            .flux_at_potential_into(difference, &mut workspace, &mut output, || false)
+            .unwrap();
+        let mut expected = [0.0; 2];
+        actual
+            .flux_at_potential_into(
+                &left,
+                &right,
+                0.005,
+                controls(),
+                &electrical,
+                difference,
+                &mut workspace,
+                &mut expected,
+                || false,
+            )
+            .unwrap();
+        for i in 0..2 {
+            close(output[i], expected[i], 2e-17);
+        }
+        let direct = law
+            .flux_at_potential_into(
+                &left,
+                &right,
+                0.005,
+                controls(),
+                &electrical,
+                difference,
+                &mut workspace,
+                &mut expected,
+                || false,
+            )
+            .unwrap();
+        assert_eq!(&direct.sources, sources);
+        close(
+            direct.constitutive.charge_flux_mol_m2_s,
+            report.charge_flux_mol_m2_s,
+            2e-17,
+        );
+        let mut frozen = [0.0; 2];
+        law.reference_law()
+            .flux_at_potential_into(
+                &left,
+                &right,
+                0.005,
+                controls(),
+                &electrical,
+                difference,
+                &mut workspace,
+                &mut frozen,
+                || false,
+            )
+            .unwrap();
+        for i in 0..2 {
+            close(output[i] / frozen[i], scale / 1.4, 2e-12);
+        }
+    }
+    output = [123.0; 2];
+    assert!(matches!(
+        law.current_response_into(
+            &solution(&model, &[200.0, 200.0]),
+            &right,
+            0.005,
+            controls(),
+            &electrical,
+            &mut workspace,
+            &mut output,
+            || false,
+        ),
+        Err(SolutionDiffusionError::Material(_))
+    ));
+    assert_eq!(output, [123.0; 2]);
 }
 fn close(a: f64, b: f64, tolerance: f64) {
     assert!((a - b).abs() <= tolerance, "{a:e} != {b:e}");

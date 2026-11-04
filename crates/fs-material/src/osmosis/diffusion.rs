@@ -19,8 +19,8 @@
 //!
 //! The default is neutral, isothermal, fixed-solvent transport on the original
 //! convex concentration domain. [`electrical`] adds explicitly qualified ions
-//! under a floating zero-current constraint, with its own neutral face and
-//! charge budgets. Neither route supplies unrestricted liquid flow. Nonnegative
+//! under a floating or prescribed field, with its own neutral face and charge
+//! budgets. Neither route supplies unrestricted liquid flow. Nonnegative
 //! neutral endpoint concentrations are admitted; no log floor or seeded
 //! trace supplies an absent species. All binary Maxwell–Stefan coefficients,
 //! including solute/solute pairs, are explicit fixed numerical data in m²/s.
@@ -60,6 +60,11 @@ pub enum SolutionDiffusionError {
         chemical_w_m3_k: f64,
         friction_w_m3_k: f64,
     },
+    ElectrochemicalEntropy {
+        chemical_w_m3_k: f64,
+        electrical_w_m3_k: f64,
+        friction_w_m3_k: f64,
+    },
     /// A finite floating electric potential cannot enforce zero ionic current.
     SingularDiffusionPotential,
     /// Actual elementary-charge equivalents in a finite compartment [mol].
@@ -67,7 +72,8 @@ pub enum SolutionDiffusionError {
         residual_mol: f64,
         maximum_mol: f64,
     },
-    /// Actual published ionic charge flux exceeds its absolute allowance.
+    /// A zero-current constraint or retained affine-response residual exceeds
+    /// its stated allowance; finite prescribed-field current itself is allowed.
     ElectricCurrent {
         residual_mol_m2_s: f64,
         maximum_mol_m2_s: f64,
@@ -217,8 +223,29 @@ pub struct SolutionDiffusionReport {
     pub chemical_entropy_production_w_m3_k: Option<f64>,
     /// None at a singular zero-endpoint jump. Otherwise the original shared
     /// pair-friction diagnostic must be representable and agree with the
-    /// chemical diagnostic within the explicitly declared budgets.
+    /// conjugate chemical plus electrical diagnostic within explicit budgets.
     pub friction_entropy_production_w_m3_k: Option<f64>,
+}
+
+/// Frozen physical face, without a binary matrix or an owned endpoint clone.
+/// Both the neutral and electrical routes prepare and replay this same face.
+#[derive(Clone, Debug)]
+struct PreparedSolutionDiffusionFace {
+    fractions: [f64; MAX_OSMOTIC_SOLUTES + 1],
+    chemical_driving_forces: [f64; MAX_OSMOTIC_SOLUTES + 1],
+    chemical_potential_jumps: [f64; MAX_OSMOTIC_SOLUTES],
+    concentration_mol_m3: f64,
+    distance_m: f64,
+    singular_entropy: bool,
+}
+
+struct EvaluatedSolutionDiffusionFace {
+    molecular: SolutionDiffusionReport,
+    solvent_frame_fluxes: [f64; MAX_OSMOTIC_SOLUTES + 1],
+    potential_gradient_per_m: Option<f64>,
+    charge_flux_mol_m2_s: f64,
+    electrical_entropy_production_w_m3_k: f64,
+    electrochemical_entropy_production_w_m3_k: Option<f64>,
 }
 
 /// Immutable solution thermodynamics and a complete constant binary-friction law.
@@ -417,14 +444,51 @@ impl SolutionMaxwellStefan {
         Option<electrical::ZeroCurrentDiffusionReport>,
     )> {
         poll(&mut cancelled)?;
+        if output.len() != self.species.len() {
+            return Err(SolutionDiffusionError::Invalid(
+                "exact original diffusion output layout required",
+            ));
+        }
+        let face = self.prepare_face(left, right, distance_m, electrical, &mut cancelled)?;
+        let evaluated = self.evaluate_prepared_face(
+            &face,
+            controls,
+            binary_diffusivities_m2_s,
+            electrical,
+            None,
+            workspace,
+            &mut cancelled,
+        )?;
+        let report = electrical
+            .map(|policy| {
+                policy.report(
+                    self,
+                    evaluated.molecular,
+                    evaluated.potential_gradient_per_m,
+                    distance_m,
+                    &evaluated.solvent_frame_fluxes[..self.species.len() + 1],
+                )
+            })
+            .transpose()?;
+        poll(&mut cancelled)?;
+        self.publish_fluxes(&evaluated, output);
+        Ok((evaluated.molecular, report))
+    }
+
+    fn prepare_face(
+        &self,
+        left: &AqueousSolution,
+        right: &AqueousSolution,
+        distance_m: f64,
+        electrical: Option<&electrical::ZeroCurrentDiffusion>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PreparedSolutionDiffusionFace> {
+        poll(cancelled)?;
         let count = self.species.len();
         let n = count + 1;
-        if output.len() != count
-            || !positive(distance_m)
-            || !positive(controls.entropy_tolerance_w_m3_k)
-        {
+        if !positive(distance_m) {
             return Err(SolutionDiffusionError::Invalid(
-                "positive distance/entropy allowance and exact output layout required",
+                "positive diffusion distance required",
             ));
         }
         self.admit_solution(left)?;
@@ -484,13 +548,19 @@ impl SolutionMaxwellStefan {
         }
         let concentration = total.finish()?;
         for value in &mut x[..n] {
+            let original = *value;
             *value /= concentration;
+            if original > 0.0 && *value == 0.0 {
+                return Err(SolutionDiffusionError::Invalid(
+                    "positive face mole fraction is unrepresentable",
+                ));
+            }
         }
         let mut balance = Sum::default();
         let mut singular_entropy = false;
         let interactions = self.thermodynamics.interaction_matrix_m3_mol();
         for i in 0..count {
-            poll(&mut cancelled)?;
+            poll(cancelled)?;
             let mut excess = Sum::default();
             for j in 0..count {
                 excess.add(finite(interactions[i * count + j] * (b[j] - a[j]))?);
@@ -523,17 +593,57 @@ impl SolutionMaxwellStefan {
             }
         }
         drive[solvent] = -balance.finish()?;
+        Ok(PreparedSolutionDiffusionFace {
+            fractions: x,
+            chemical_driving_forces: drive,
+            chemical_potential_jumps: chemical_force,
+            concentration_mol_m3: concentration,
+            distance_m,
+            singular_entropy,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_prepared_face(
+        &self,
+        face: &PreparedSolutionDiffusionFace,
+        controls: SolutionDiffusionSolve,
+        binary_diffusivities_m2_s: &[f64],
+        electrical: Option<&electrical::ZeroCurrentDiffusion>,
+        prescribed_dimensionless_potential: Option<f64>,
+        workspace: &mut MaxwellStefanWorkspaceV1,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<EvaluatedSolutionDiffusionFace> {
+        poll(cancelled)?;
+        if !positive(controls.entropy_tolerance_w_m3_k) {
+            return Err(SolutionDiffusionError::Invalid(
+                "positive diffusion entropy allowance required",
+            ));
+        }
+        let count = self.species.len();
+        let n = count + 1;
+        let solvent = self.original_to_canonical[0];
+        let x = &face.fractions;
+        let mut drive = face.chemical_driving_forces;
+        let concentration = face.concentration_mol_m3;
+        let distance_m = face.distance_m;
         let potential_gradient = if let Some(policy) = electrical {
-            policy.add_electric_force(
-                self,
-                &x[..n],
-                &mut drive[..n],
-                concentration,
-                binary_diffusivities_m2_s,
-                controls,
-                workspace,
-                &mut cancelled,
-            )?
+            if let Some(difference) = prescribed_dimensionless_potential {
+                let gradient = finite(finite(difference)? / distance_m)?;
+                policy.add_prescribed_force(self, &x[..n], &mut drive[..n], gradient)?;
+                Some(gradient)
+            } else {
+                policy.add_electric_force(
+                    self,
+                    &x[..n],
+                    &mut drive[..n],
+                    concentration,
+                    binary_diffusivities_m2_s,
+                    controls,
+                    workspace,
+                    &mut *cancelled,
+                )?
+            }
         } else {
             None
         };
@@ -544,9 +654,9 @@ impl SolutionMaxwellStefan {
             binary_diffusivities_m2_s,
             controls.friction,
             workspace,
-            &mut cancelled,
+            &mut *cancelled,
         )?;
-        let friction_entropy = if singular_entropy {
+        let friction_entropy = if face.singular_entropy {
             None
         } else {
             Some(evaluated.drag_entropy_production_w_m3_k().ok_or(
@@ -564,7 +674,7 @@ impl SolutionMaxwellStefan {
         // The shared solve checks its molar frame. Also check every original row
         // after the actual published solvent-frame conversion, without repair.
         for i in 0..n {
-            poll(&mut cancelled)?;
+            poll(cancelled)?;
             let mut row = Sum::default();
             let mut scale = drive[i].abs();
             for j in 0..n {
@@ -590,27 +700,53 @@ impl SolutionMaxwellStefan {
                 });
             }
         }
-        let chemical_entropy = if singular_entropy {
+        let chemical_entropy = if face.singular_entropy {
             None
         } else {
             let mut dissipation = Sum::default();
             for i in 0..count {
                 dissipation.add(
-                    -converted[self.original_to_canonical[i + 1]] * (R * chemical_force[i])
+                    -converted[self.original_to_canonical[i + 1]]
+                        * (R * face.chemical_potential_jumps[i])
                         / distance_m,
                 );
             }
             Some(dissipation.finish()?)
         };
-        if let (Some(chemical), Some(friction)) = (chemical_entropy, friction_entropy) {
+        let charge_flux = electrical
+            .map(|policy| policy.current_from_solvent_fluxes(self, &converted[..n]))
+            .transpose()?
+            .unwrap_or(0.0);
+        let electrical_entropy = potential_gradient
+            .map(|gradient| finite(-R * gradient * charge_flux))
+            .transpose()?
+            .unwrap_or(0.0);
+        let electrochemical_entropy = chemical_entropy
+            .map(|chemical| finite(chemical + electrical_entropy))
+            .transpose()?;
+        if let (Some(chemical), Some(combined), Some(friction)) =
+            (chemical_entropy, electrochemical_entropy, friction_entropy)
+        {
             let allowance = controls.entropy_tolerance_w_m3_k
-                + controls.friction.relative_tolerance * chemical.abs().max(friction.abs());
-            if chemical < -controls.entropy_tolerance_w_m3_k
-                || (chemical - friction).abs() > allowance
+                + controls.friction.relative_tolerance
+                    * chemical
+                        .abs()
+                        .max(electrical_entropy.abs())
+                        .max(friction.abs());
+            if combined < -controls.entropy_tolerance_w_m3_k
+                || (combined - friction).abs() > allowance
             {
-                return Err(SolutionDiffusionError::Entropy {
-                    chemical_w_m3_k: chemical,
-                    friction_w_m3_k: friction,
+                return Err(if electrical.is_some() {
+                    SolutionDiffusionError::ElectrochemicalEntropy {
+                        chemical_w_m3_k: chemical,
+                        electrical_w_m3_k: electrical_entropy,
+                        friction_w_m3_k: friction,
+                    }
+                } else {
+                    SolutionDiffusionError::Entropy {
+                        chemical_w_m3_k: chemical,
+                        friction_w_m3_k: friction,
+                    }
                 });
             }
         }
@@ -621,21 +757,19 @@ impl SolutionMaxwellStefan {
             chemical_entropy_production_w_m3_k: chemical_entropy,
             friction_entropy_production_w_m3_k: friction_entropy,
         };
-        let electrical = electrical
-            .map(|policy| {
-                policy.report(
-                    self,
-                    molecular,
-                    potential_gradient,
-                    distance_m,
-                    &converted[..n],
-                )
-            })
-            .transpose()?;
-        poll(&mut cancelled)?;
+        Ok(EvaluatedSolutionDiffusionFace {
+            molecular,
+            solvent_frame_fluxes: converted,
+            potential_gradient_per_m: potential_gradient,
+            charge_flux_mol_m2_s: charge_flux,
+            electrical_entropy_production_w_m3_k: electrical_entropy,
+            electrochemical_entropy_production_w_m3_k: electrochemical_entropy,
+        })
+    }
+
+    fn publish_fluxes(&self, evaluated: &EvaluatedSolutionDiffusionFace, output: &mut [f64]) {
         for (i, value) in output.iter_mut().enumerate() {
-            *value = converted[self.original_to_canonical[i + 1]];
+            *value = evaluated.solvent_frame_fluxes[self.original_to_canonical[i + 1]];
         }
-        Ok((molecular, electrical))
     }
 }

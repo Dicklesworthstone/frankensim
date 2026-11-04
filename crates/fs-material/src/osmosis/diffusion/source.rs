@@ -118,6 +118,12 @@ pub struct MaterialZeroCurrentDiffusionReport {
     pub sources: ResolvedSolutionDiffusivities,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct MaterialPrescribedPotentialDiffusionReport {
+    pub constitutive: super::electrical::PrescribedPotentialDiffusionReport,
+    pub sources: ResolvedSolutionDiffusivities,
+}
+
 /// Original nonideal solution law with complete material-sourced binary pairs.
 /// Original thermodynamic species order and the shared MS canonical order are
 /// mapped explicitly. No kinetic datum is inferred from virial free energy.
@@ -522,6 +528,88 @@ impl MaterialSolutionMaxwellStefan {
             cancelled,
         )?;
         Ok(MaterialZeroCurrentDiffusionReport {
+            constitutive,
+            sources,
+        })
+    }
+
+    /// Bind chemical and electric responses to one original source snapshot.
+    /// The returned face retains the actual left/face/right receipts and binary
+    /// matrix. Its later prescribed-field replay neither re-queries a callback
+    /// nor substitutes reference-state coefficients. Endpoint solutions are
+    /// not borrowed by the returned response.
+    #[allow(clippy::too_many_arguments)]
+    pub fn current_response_into<'a>(
+        &'a self,
+        left: &AqueousSolution,
+        right: &AqueousSolution,
+        distance_m: f64,
+        controls: SolutionDiffusionSolve,
+        electrical: &'a super::electrical::ZeroCurrentDiffusion,
+        workspace: &mut SolutionDiffusionWorkspace,
+        output: &mut [f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<super::electrical::IonicDiffusionResponse<'a>> {
+        poll(&mut cancelled)?;
+        self.reference_law.admit_solution(left)?;
+        self.reference_law.admit_solution(right)?;
+        let sources = self.resolve_zero_current_inventories(
+            [left.solvent_volume_m3(), right.solvent_volume_m3()],
+            [left.solute_moles(), right.solute_moles()],
+            electrical,
+            &mut cancelled,
+        )?;
+        self.reference_law.current_response_with_sources_into(
+            left,
+            right,
+            distance_m,
+            controls,
+            electrical,
+            Some(sources),
+            workspace,
+            output,
+            cancelled,
+        )
+    }
+
+    /// Direct finite-field evaluation with complete fresh source qualification.
+    /// Network callers preparing a global potential solve use
+    /// `current_response_into` and replay its retained source snapshot instead.
+    #[allow(clippy::too_many_arguments)]
+    pub fn flux_at_potential_into(
+        &self,
+        left: &AqueousSolution,
+        right: &AqueousSolution,
+        distance_m: f64,
+        controls: SolutionDiffusionSolve,
+        electrical: &super::electrical::ZeroCurrentDiffusion,
+        dimensionless_potential_right_minus_left: f64,
+        workspace: &mut SolutionDiffusionWorkspace,
+        output: &mut [f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<MaterialPrescribedPotentialDiffusionReport> {
+        poll(&mut cancelled)?;
+        self.reference_law.admit_solution(left)?;
+        self.reference_law.admit_solution(right)?;
+        let sources = self.resolve_zero_current_inventories(
+            [left.solvent_volume_m3(), right.solvent_volume_m3()],
+            [left.solute_moles(), right.solute_moles()],
+            electrical,
+            &mut cancelled,
+        )?;
+        let constitutive = self.reference_law.flux_at_potential_with_binary_into(
+            left,
+            right,
+            distance_m,
+            controls,
+            electrical,
+            dimensionless_potential_right_minus_left,
+            &sources.binary_diffusivities_m2_s,
+            workspace,
+            output,
+            cancelled,
+        )?;
+        Ok(MaterialPrescribedPotentialDiffusionReport {
             constitutive,
             sources,
         })

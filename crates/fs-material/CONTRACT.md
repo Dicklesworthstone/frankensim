@@ -11270,7 +11270,7 @@ logarithmic-mean chain rule follows the finite-volume construction of Cancès,
 Ehrlacher and Monasse (https://doi.org/10.1093/imanum/drad032); no theorem for
 their full time discretization is claimed for this constitutive face.
 
-### Floating-potential ionic Maxwell--Stefan diffusion
+### Floating and prescribed-potential ionic Maxwell--Stefan diffusion
 
 `osmosis::diffusion::electrical::ZeroCurrentDiffusion` assigns explicit original
 solute valences and absolute inventory-charge/current tolerances. Both the
@@ -11299,17 +11299,57 @@ Reports return the right-minus-left floating voltage, actual current residual
 and native solve count. No absolute voltage datum enters. A carrier-free equal
 state has an undetermined voltage, explicitly `None`. Publication is atomic.
 
-This is an isothermal, local electroneutral open-circuit limit; it supplies no
-Poisson/Debye-layer dynamics, electrode/current drive, ion association or caloric
-closure. Consumers must admit globally compatible potentials; independent
-zero-current constraints on arbitrary cyclic graphs are not justified. The
+Both owners also expose `current_response_into`, returning an immutable
+`IonicDiffusionResponse` with the chemical species flux and affine charge law
+`q(dpsi)=q_chemical-G*dpsi`, where `dpsi=F(phi_right-phi_left)/(RT)` and q is in
+mol/(m² s) of elementary-charge equivalents. Chemical and normalized electric
+responses use the SAME full pair matrix. G must be positive when carriers
+exist; an exactly absent ionic pool has exactly zero q and G. A response
+retains the original neutral face, chemical forces, declared solve tolerances
+and ionic policy. Constant data borrow the original matrix without allocation;
+source data own the actual n-by-n resolved matrix and original left/face/right
+receipts. Three bounded face vectors are retained, not a maximum-sized binary
+matrix or cloned endpoint solutions. Source receipt/query allocations retain
+the existing source path's explicit payload scope.
+
+A network can assemble its global potential solve from these affine responses,
+then call each response's `flux_at_potential_into` for ONE native combined-force
+replay. That replay uses the immutable original source snapshot without another
+material callback and checks every solvent-frame friction row and actual affine
+current before publication. Preparation uses two native solves, or one for an
+exactly absent carrier pool. Direct `flux_at_potential_into` on either owner
+also accepts a prescribed finite voltage in one native friction solve; the
+material owner first qualifies the actual sources as usual.
+
+Finite current is permitted in the prescribed-field path. Chemical dissipation
+alone may be negative, representing electric work driving uphill transport.
+`PrescribedPotentialDiffusionReport` separates chemical entropy from signed
+electrical contribution `-R*(dpsi/L)*sum_i z_i N_i`; their sum must be
+nonnegative and match original pair-friction dissipation within explicit
+budgets. The report returns actual signed charge flux, dimensionless voltage,
+volts, combined electrochemical entropy and solve count. Exactly singular
+neutral concentration fronts keep the existing absent chemical/combined entropy
+diagnostic; the finite electrical term remains explicit. Nonfinite fields,
+unsupported charged fronts, source failures and late cancellation preserve
+caller outputs.
+
+This is an isothermal, local electroneutral limit; it supplies no Poisson/Debye
+layer dynamics, electrode reactions, ion association or caloric closure.
+Consumers must enforce charge continuity and globally compatible potentials;
+independent zero-current constraints on arbitrary cyclic graphs are not
+justified. The
 force/friction and current/entropy structure follows Van-Brunt, Farrell and
 Monroe (https://arxiv.org/abs/2211.13505), equations 1.1--1.2, 6.5 and 16.13;
 the dilute ambipolar limit and its scale assumptions follow Ghosal and Chen
 (https://doi.org/10.1098/rspa.2010.0028). Public network-module regressions compare
 1:1 salt flux/voltage, divalent nonideal salt with a neutral co-solute, and
 independent Na/K/Cl salt fluxes against separate reduced equations and a
-quadrature-constructed neutral face.
+quadrature-constructed neutral face. Direct material regressions additionally
+compare finite-current flux and conductance against independent two-row
+elimination, admit electrically driven negative chemical entropy while checking
+total dissipation, recover the floating-field limit, preserve orientation and
+absent carriers, retain the actual source matrix across replay, and check late
+cancellation and invalid-field output atomicity.
 
 ### Finite gas–adsorbent sensible heat on the original pore timeline
 

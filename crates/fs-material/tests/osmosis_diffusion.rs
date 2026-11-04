@@ -1,7 +1,10 @@
 //! Independent liquid friction and original-free-energy checks through public owners.
 use fs_material::osmosis::{
     AqueousSolution,
-    diffusion::{SolutionDiffusionError, SolutionDiffusionSolve, SolutionMaxwellStefan},
+    diffusion::{
+        SolutionDiffusionError, SolutionDiffusionSolve, SolutionMaxwellStefan,
+        electrical::ZeroCurrentDiffusion,
+    },
     nonideal::VirialSolutionModel,
 };
 use fs_qty::MolarMass;
@@ -450,4 +453,344 @@ fn g0_missing_pair_source_mismatch_and_cancellation_refuse_atomically() {
         Err(SolutionDiffusionError::Cancelled)
     );
     assert_eq!(output, [123.0]);
+}
+
+fn salt_law() -> (
+    Arc<VirialSolutionModel>,
+    SolutionMaxwellStefan,
+    ZeroCurrentDiffusion,
+) {
+    let source = model(1.0, vec![0.0; 4]);
+    let law = SolutionMaxwellStefan::new(
+        source.clone(),
+        species("water", 0.018),
+        vec![species("Z_positive", 0.023), species("A_negative", 0.0355)],
+        vec![
+            0.0, 1.3e-9, 2.1e-9, 1.3e-9, 0.0, 1.7e-9, 2.1e-9, 1.7e-9, 0.0,
+        ],
+    )
+    .unwrap();
+    (
+        source,
+        law,
+        ZeroCurrentDiffusion::new(vec![1, -1], 1e-13, 1e-14).unwrap(),
+    )
+}
+
+// Independent solvent-frame two-row elimination, without the native MS owner,
+// to check both ion currents and the sign of the electric force.
+fn salt_flux_oracle(left: f64, right: f64, length: f64, difference: f64) -> [f64; 2] {
+    let logarithm = (right / left).ln();
+    let face = if left == right {
+        left
+    } else {
+        (right - left) / logarithm
+    };
+    let concentration = 1.0 / VBAR + 2.0 * face;
+    let (x0, x) = (1.0 / VBAR / concentration, face / concentration);
+    let a = x0 / 1.3e-9 + x / 1.7e-9;
+    let b = x / 1.7e-9;
+    let d = x0 / 2.1e-9 + x / 1.7e-9;
+    let plus = -face * (logarithm + difference) / length;
+    let minus = -face * (logarithm - difference) / length;
+    let determinant = a * d - b * b;
+    [
+        (d * plus + b * minus) / determinant,
+        (b * plus + a * minus) / determinant,
+    ]
+}
+
+#[test]
+fn g1_finite_ionic_current_matches_independent_friction_and_electrochemical_work() {
+    let (source, law, electrical) = salt_law();
+    let mut workspace = law.workspace().unwrap();
+    let mut chemical = [0.0; 2];
+    // Temporary endpoint owners are intentionally not retained by the response.
+    let response = law
+        .current_response_into(
+            &solution(&source, &[100.0, 100.0]),
+            &solution(&source, &[20.0, 20.0]),
+            0.005,
+            controls(),
+            &electrical,
+            &mut workspace,
+            &mut chemical,
+            || false,
+        )
+        .unwrap();
+    let zero = salt_flux_oracle(100.0, 20.0, 0.005, 0.0);
+    let unit = salt_flux_oracle(100.0, 20.0, 0.005, 1.0);
+    let conductance = (zero[0] - zero[1]) - (unit[0] - unit[1]);
+    close(
+        response.chemical_charge_flux_mol_m2_s(),
+        zero[0] - zero[1],
+        2e-18,
+    );
+    close(response.electric_conductance_mol_m2_s(), conductance, 2e-18);
+    assert!(conductance > 0.0);
+    assert_eq!(response.friction_evaluations(), 2);
+    assert!(response.sources().is_none());
+    for difference in [-12.0, -1.0, 0.0, 3.0] {
+        let mut flux = [0.0; 2];
+        let report = response
+            .flux_at_potential_into(difference, &mut workspace, &mut flux, || false)
+            .unwrap();
+        let expected = salt_flux_oracle(100.0, 20.0, 0.005, difference);
+        for i in 0..2 {
+            close(flux[i], expected[i], 2e-17);
+        }
+        close(report.charge_flux_mol_m2_s, flux[0] - flux[1], 2e-18);
+        let chemical_entropy = -R * (0.2_f64).ln() * (flux[0] + flux[1]) / 0.005;
+        let electrical_entropy = -R * difference * (flux[0] - flux[1]) / 0.005;
+        close(
+            report.molecular.chemical_entropy_production_w_m3_k.unwrap(),
+            chemical_entropy,
+            1e-12,
+        );
+        close(
+            report.electrical_entropy_production_w_m3_k,
+            electrical_entropy,
+            1e-12,
+        );
+        close(
+            report.electrochemical_entropy_production_w_m3_k.unwrap(),
+            chemical_entropy + electrical_entropy,
+            1e-12,
+        );
+        close(
+            report.molecular.friction_entropy_production_w_m3_k.unwrap(),
+            chemical_entropy + electrical_entropy,
+            1e-10,
+        );
+        assert!(report.electrochemical_entropy_production_w_m3_k.unwrap() >= 0.0);
+        assert_eq!(report.friction_evaluations, 1);
+        if difference == -12.0 {
+            assert!(
+                chemical_entropy < 0.0,
+                "an applied field can drive salt uphill"
+            );
+            assert!(electrical_entropy > 0.0);
+        }
+        let mut direct = [0.0; 2];
+        law.flux_at_potential_into(
+            &solution(&source, &[100.0, 100.0]),
+            &solution(&source, &[20.0, 20.0]),
+            0.005,
+            controls(),
+            &electrical,
+            difference,
+            &mut workspace,
+            &mut direct,
+            || false,
+        )
+        .unwrap();
+        for i in 0..2 {
+            close(flux[i], direct[i], 2e-18);
+        }
+    }
+    let floating =
+        response.chemical_charge_flux_mol_m2_s() / response.electric_conductance_mol_m2_s();
+    let mut eliminated = [0.0; 2];
+    let mut replayed = [0.0; 2];
+    let original = law
+        .flux_zero_current_into(
+            &solution(&source, &[100.0, 100.0]),
+            &solution(&source, &[20.0, 20.0]),
+            0.005,
+            controls(),
+            &electrical,
+            &mut workspace,
+            &mut eliminated,
+            || false,
+        )
+        .unwrap();
+    close(
+        original.dimensionless_potential_right_minus_left.unwrap(),
+        floating,
+        1e-13,
+    );
+    let report = response
+        .flux_at_potential_into(floating, &mut workspace, &mut replayed, || false)
+        .unwrap();
+    assert!(report.charge_flux_mol_m2_s.abs() < 1e-13);
+    for i in 0..2 {
+        close(eliminated[i], replayed[i], 2e-18);
+    }
+}
+
+#[test]
+fn g3_ionic_current_response_preserves_orientation_and_absent_carriers() {
+    let (source, law, electrical) = salt_law();
+    let mut workspace = law.workspace().unwrap();
+    let left = solution(&source, &[100.0, 100.0]);
+    let right = solution(&source, &[20.0, 20.0]);
+    let mut scratch = [0.0; 2];
+    let forward = law
+        .current_response_into(
+            &left,
+            &right,
+            0.005,
+            controls(),
+            &electrical,
+            &mut workspace,
+            &mut scratch,
+            || false,
+        )
+        .unwrap();
+    let reverse = law
+        .current_response_into(
+            &right,
+            &left,
+            0.005,
+            controls(),
+            &electrical,
+            &mut workspace,
+            &mut scratch,
+            || false,
+        )
+        .unwrap();
+    close(
+        forward.electric_conductance_mol_m2_s(),
+        reverse.electric_conductance_mol_m2_s(),
+        2e-18,
+    );
+    close(
+        forward.chemical_charge_flux_mol_m2_s(),
+        -reverse.chemical_charge_flux_mol_m2_s(),
+        2e-18,
+    );
+    let mut a = [0.0; 2];
+    let mut b = [0.0; 2];
+    forward
+        .flux_at_potential_into(2.0, &mut workspace, &mut a, || false)
+        .unwrap();
+    reverse
+        .flux_at_potential_into(-2.0, &mut workspace, &mut b, || false)
+        .unwrap();
+    for i in 0..2 {
+        close(a[i], -b[i], 2e-18);
+    }
+    let empty = solution(&source, &[0.0, 0.0]);
+    let absent = law
+        .current_response_into(
+            &empty,
+            &empty,
+            0.005,
+            controls(),
+            &electrical,
+            &mut workspace,
+            &mut scratch,
+            || false,
+        )
+        .unwrap();
+    assert_eq!(absent.electric_conductance_mol_m2_s(), 0.0);
+    assert_eq!(absent.chemical_charge_flux_mol_m2_s(), 0.0);
+    assert_eq!(absent.friction_evaluations(), 1);
+    let report = absent
+        .flux_at_potential_into(4.0, &mut workspace, &mut scratch, || false)
+        .unwrap();
+    assert_eq!(scratch, [0.0; 2]);
+    assert_eq!(report.charge_flux_mol_m2_s, 0.0);
+    assert_eq!(report.electrochemical_entropy_production_w_m3_k, Some(0.0));
+    scratch = [123.0; 2];
+    assert!(matches!(
+        law.current_response_into(
+            &left,
+            &empty,
+            0.005,
+            controls(),
+            &electrical,
+            &mut workspace,
+            &mut scratch,
+            || false,
+        ),
+        Err(SolutionDiffusionError::SingularDiffusionPotential)
+    ));
+    assert_eq!(scratch, [123.0; 2]);
+    let nonzero = AqueousSolution::nonideal(source, 1.0, vec![f64::from_bits(1); 2]).unwrap();
+    assert!(matches!(
+        law.current_response_into(
+            &nonzero,
+            &nonzero,
+            0.005,
+            controls(),
+            &electrical,
+            &mut workspace,
+            &mut scratch,
+            || false,
+        ),
+        Err(SolutionDiffusionError::Invalid(
+            "positive face mole fraction is unrepresentable"
+        ))
+    ));
+    assert_eq!(scratch, [123.0; 2]);
+}
+
+#[test]
+fn g4_ionic_response_late_cancellation_and_invalid_potential_preserve_outputs() {
+    let (source, law, electrical) = salt_law();
+    let mut workspace = law.workspace().unwrap();
+    let left = solution(&source, &[100.0, 100.0]);
+    let right = solution(&source, &[20.0, 20.0]);
+    let mut output = [123.0; 2];
+    let mut polls = 0;
+    let response = law
+        .current_response_into(
+            &left,
+            &right,
+            0.005,
+            controls(),
+            &electrical,
+            &mut workspace,
+            &mut output,
+            || {
+                polls += 1;
+                false
+            },
+        )
+        .unwrap();
+    output = [123.0; 2];
+    let mut called = 0;
+    assert!(matches!(
+        law.current_response_into(
+            &left,
+            &right,
+            0.005,
+            controls(),
+            &electrical,
+            &mut workspace,
+            &mut output,
+            || {
+                called += 1;
+                called == polls
+            },
+        ),
+        Err(SolutionDiffusionError::Cancelled)
+    ));
+    assert_eq!(output, [123.0; 2]);
+    for invalid in [f64::NAN, f64::INFINITY, f64::MAX] {
+        assert!(
+            response
+                .flux_at_potential_into(invalid, &mut workspace, &mut output, || false)
+                .is_err()
+        );
+        assert_eq!(output, [123.0; 2]);
+    }
+    polls = 0;
+    response
+        .flux_at_potential_into(1.0, &mut workspace, &mut output, || {
+            polls += 1;
+            false
+        })
+        .unwrap();
+    output = [123.0; 2];
+    called = 0;
+    assert_eq!(
+        response.flux_at_potential_into(1.0, &mut workspace, &mut output, || {
+            called += 1;
+            called == polls
+        }),
+        Err(SolutionDiffusionError::Cancelled)
+    );
+    assert_eq!(output, [123.0; 2]);
 }
