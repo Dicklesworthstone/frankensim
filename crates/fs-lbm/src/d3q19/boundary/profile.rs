@@ -75,6 +75,7 @@ pub struct VelocityProfileReport3 {
     pub maximum_speed_squared_lu: f64,
 }
 
+#[derive(Clone)]
 pub(super) struct ProfileState3<T = [f64; 3]> {
     values: Vec<T>,
     scratch: Vec<T>,

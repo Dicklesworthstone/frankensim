@@ -133,15 +133,15 @@ Native collision uses the initial law. Native pull streaming solves
 then publishes populations and endpoint forces together. The same grouped
 kernels serve serial and pooled paths; no second collision or post-stream
 population scan is introduced. Invalid data, cancellation and late refusal
-publish neither state nor force. Closed/periodic domains are admitted;
-open-face/source joint solves, nonlinear drag, evolved skeleton inertia and
-heat deposition are outside this lane.
+publish neither state nor force. Velocity/pressure reservoirs use the joint
+open-face/source solve described below. Nonlinear drag shares the extension
+below; evolved skeleton inertia and heat deposition belong to coupled owners.
 
 The receipt separates independent forcing, constitutive skeleton reaction,
 their angular impulses/work, nonnegative midpoint relative dissipation and
 selected native wall exchange. Complete momentum balances require every wall
-link and close to floating-point precision; periodic angular flux remains
-separate. Tiny constitutive drag is retained in the receipt even if it rounds
+link and close to floating-point precision; measured reservoir exchange and
+periodic angular transport remain separate. Tiny constitutive drag is retained in the receipt even if it rounds
 out of the total force, without a promise to accumulate sub-ULP fluid impulses.
 The local drag/work identity is not a transported kinetic-energy equality.
 Uniform resolved relaxation is second order and has bounded relative source
@@ -168,7 +168,35 @@ Analytic quadratic endpoints, resolved nonlinear decay order, rotated
 anisotropy, large principal contrast, wall/source/skeleton momentum and work,
 serial/pooled parity, exact beta-zero reduction and nonlinear atomic refusal
 are exercised in `tests/boundary_forcing.rs`. The preceding prescribed-skeleton,
-closed/periodic, floating-point, no-heat and stiff-time-resolution limits apply.
+floating-point, no-heat and stiff-time-resolution limits apply.
+
+### Joint porous resistance and open reservoirs
+
+Both resistance laws admit the native velocity/pressure reservoir geometry and
+spatial traces. Face interiors evaluate the constitutive law at the original
+regularized physical target. Mixed wall/open cells retain every wall-owned and
+tangential population and solve `F = law((m(F)+F/2)/rho(F))` on the actual
+reconstructed state. The native Guo transform supplies its affine row
+derivative; the existing prepared 3x3 LU solves a bounded damped Newton step.
+Force-scaled final admission checks the represented populations and force,
+including weak drag; failure publishes neither populations nor forces. Mixed
+seam macros retain the native partial-reconstruction convention and need not
+equal full-face targets.
+
+The shared receipt independently measures open population mass, linear and
+angular transfer and actual periodic coordinate angular transport. With all
+wall links selected, `delta_P = external - skeleton + wall_population + open`;
+the angular balance additionally includes periodic transport, to floating-point
+precision. Reservoir pressure-work and heat are not supplied by this account.
+Zero resistance retains original open-step bits, and the existing closed
+endpoint solve and arithmetic remain unchanged. Native grid clones preserve
+complete kinetic state, topology and profiles; `clone_from` reuses candidate
+buffers without reconstructing populations or rebuilding links.
+
+Five additional physical/refusal cases in `tests/boundary_forcing.rs` exercise
+all six face normals with spatial traces and corrected stress, mixed wall/open
+edges on all three axes, mass/linear/angular closure, serial/pooled parity,
+weak drag, exact zero-drag reduction, and late refusal with atomic retry.
 
 ## D3Q27 TRT for wall-bounded laminar flow
 

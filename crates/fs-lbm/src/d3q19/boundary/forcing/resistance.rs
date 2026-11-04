@@ -2,6 +2,8 @@
 
 use super::*;
 
+mod open;
+
 /// Prescribed local law `F = body_force + D (skeleton_velocity - u)`.
 ///
 /// All values use lattice units, `dx = dt = 1`. Principal resistances are
@@ -42,12 +44,13 @@ impl Default for LinearResistance3 {
 /// One tick's external forcing and reaction on the prescribed skeleton.
 /// Angular impulses use cell centres and the requested moment origin.
 ///
-/// In a closed domain with ALL wall links selected, fluid momentum changes,
+/// With ALL wall links selected, fluid momentum changes,
 /// to floating-point precision, by `external_impulse - skeleton_impulse +
-/// walls.fluid_population_impulse`. Omitted wall links require their
+/// walls.fluid_population_impulse + open.impulse`. Omitted wall links require their
 /// independently measured contribution. Angular momentum uses the corresponding
-/// angular terms. Periodic cuts additionally carry angular momentum, as for
-/// the native unforced stream.
+/// angular terms plus `periodic.angular_momentum_change`. Reservoir exchange
+/// and periodic coordinate transport are measured from the actual native
+/// population operators, independently of the skeleton reaction.
 ///
 /// Work uses the arithmetic mean of each cell's initial and final physical
 /// velocity. `fluid_drag_work + skeleton_work = -relative_dissipation`
@@ -81,6 +84,10 @@ pub struct ResistanceMomentumExchange3 {
     pub relative_dissipation: f64,
     /// Native exchange on the selected wall links, from this same collision.
     pub walls: WallMomentumExchange3,
+    /// Prescribed velocity/pressure reservoir mass and momentum exchange.
+    pub open: OpenBoundaryMomentumTransport3,
+    /// Angular transport through periodic coordinate cuts.
+    pub periodic: PeriodicMomentumTransport3,
 }
 
 impl LinearResistance3 {
@@ -228,6 +235,47 @@ impl PreparedResistance3 {
         }
         force
     }
+
+    fn exchange(
+        self,
+        velocity: [f64; 3],
+        endpoint_drag: [f64; 3],
+        cell: [usize; 3],
+        origin: [f64; 3],
+    ) -> Option<ResistanceMomentumExchange3> {
+        let law = self.law.linear;
+        let midpoint = core::array::from_fn(|a| 0.5 * self.velocity[a] + 0.5 * velocity[a]);
+        let initial_drag = self.law.drag(self.velocity);
+        // Retain the constitutive transfer independently of body-force scale.
+        let reaction = core::array::from_fn(|a| -0.5 * initial_drag[a] - 0.5 * endpoint_drag[a]);
+        let offset = core::array::from_fn(|a| cell[a] as f64 + 0.5 - origin[a]);
+        let relative = core::array::from_fn(|a| midpoint[a] - law.skeleton_velocity[a]);
+        let mut relative_dissipation = if law.principal.iter().all(|&d| d == law.principal[0]) {
+            law.principal[0] * dot(relative, relative)
+        } else {
+            (0..3)
+                .map(|a| {
+                    let r = dot(law.axes[a], relative);
+                    (law.principal[a] * r) * r
+                })
+                .sum()
+        };
+        if self.law.quadratic != 0.0 {
+            relative_dissipation += self.law.nonlinear_dissipation(self.velocity, velocity);
+        }
+        let exchange = ResistanceMomentumExchange3 {
+            external_impulse: law.body_force,
+            external_angular_impulse: cross(offset, law.body_force),
+            skeleton_impulse: reaction,
+            skeleton_angular_impulse: cross(offset, reaction),
+            external_work: dot(law.body_force, midpoint),
+            fluid_drag_work: -dot(reaction, midpoint),
+            skeleton_work: dot(reaction, law.skeleton_velocity),
+            relative_dissipation,
+            ..ResistanceMomentumExchange3::default()
+        };
+        (velocity.iter().all(|v| v.is_finite()) && exchange.is_finite()).then_some(exchange)
+    }
 }
 
 pub(in crate::d3q19::boundary) struct ResistanceGroup3<'a> {
@@ -255,47 +303,13 @@ impl ResistanceStream3<'_> {
             return false;
         };
         let prepared = self.prepared[tile * TILE_CELLS + lane];
-        let law = prepared.law.linear;
         let Some((force, endpoint_drag)) = prepared.law.endpoint_force(rho, momentum) else {
             return false;
         };
         let velocity: [f64; 3] = core::array::from_fn(|a| (momentum[a] + 0.5 * force[a]) / rho);
-        let midpoint = core::array::from_fn(|a| 0.5 * prepared.velocity[a] + 0.5 * velocity[a]);
-        let initial_drag = prepared.law.drag(prepared.velocity);
-        // Preserve a small physical reaction even when the independent body
-        // force is large enough to round it away in the total force vector.
-        let reaction = core::array::from_fn(|a| -0.5 * initial_drag[a] - 0.5 * endpoint_drag[a]);
-        let offset = core::array::from_fn(|a| cell[a] as f64 + 0.5 - self.origin[a]);
-        let relative = core::array::from_fn(|a| midpoint[a] - law.skeleton_velocity[a]);
-        let mut relative_dissipation = if law.principal.iter().all(|&d| d == law.principal[0]) {
-            law.principal[0] * dot(relative, relative)
-        } else {
-            (0..3)
-                .map(|a| {
-                    let r = dot(law.axes[a], relative);
-                    (law.principal[a] * r) * r
-                })
-                .sum()
-        };
-        if prepared.law.quadratic != 0.0 {
-            relative_dissipation += prepared
-                .law
-                .nonlinear_dissipation(prepared.velocity, velocity);
-        }
-        let exchange = ResistanceMomentumExchange3 {
-            external_impulse: law.body_force,
-            external_angular_impulse: cross(offset, law.body_force),
-            skeleton_impulse: reaction,
-            skeleton_angular_impulse: cross(offset, reaction),
-            external_work: dot(law.body_force, midpoint),
-            fluid_drag_work: -dot(reaction, midpoint),
-            skeleton_work: dot(reaction, law.skeleton_velocity),
-            relative_dissipation,
-            walls: WallMomentumExchange3::default(),
-        };
-        if !velocity.iter().all(|v| v.is_finite()) || !exchange.is_finite() {
+        let Some(exchange) = prepared.exchange(velocity, endpoint_drag, cell, self.origin) else {
             return false;
-        }
+        };
         output.force[local_tile * TILE_CELLS + lane] = force;
         output.exchange.add(exchange);
         true
@@ -303,7 +317,7 @@ impl ResistanceStream3<'_> {
 }
 
 impl BoundaryGrid3 {
-    /// Advance one closed/periodic tick with implicit anisotropic resistance.
+    /// Advance one tick with implicit anisotropic resistance.
     ///
     /// Samples fluid cells once in x-fastest order, skipping static solids.
     /// The old state is reframed at fixed physical velocity/stress, then the
@@ -311,7 +325,11 @@ impl BoundaryGrid3 {
     /// the endpoint half-source relation is solved analytically for `u_(n+1)`
     /// and `F_(n+1)`. Forces and populations publish together; an invalid law,
     /// cancellation or a late refusal leaves both accepted fields unchanged.
-    /// Open faces are refused: their reconstruction needs a joint source solve.
+    /// Native velocity/pressure faces reconstruct in the solved force frame.
+    /// At wall/open seams only open-owned populations change; a bounded joint
+    /// solve enforces the law on their actual final density and velocity.
+    /// Face interiors retain their prescribed macros; mixed seam macros retain
+    /// the original partial-reconstruction convention, not full-face targets.
     ///
     /// For an isolated uniform source this is implicit midpoint/trapezoidal
     /// drag, with bounded relative kinetic energy for any admitted resistance.
@@ -399,14 +417,6 @@ impl BoundaryGrid3 {
     ) -> Result<ResistanceMomentumExchange3, BoundaryStepError3> {
         endpoint_checkpoint(gate)?;
         self.validate_wall_measurement(links, origin)?;
-        if Face3::ALL
-            .iter()
-            .any(|&face| self.boundaries.face(face).is_open())
-        {
-            return Err(BoundaryStepError3::EndpointForce {
-                reason: "implicit resistance requires closed or periodic boundaries",
-            });
-        }
         let mut prepared = vec![PreparedResistance3::default(); self.f[0].len() * TILE_CELLS];
         for z in 0..self.nz {
             for y in 0..self.ny {
@@ -470,6 +480,9 @@ impl BoundaryGrid3 {
             }
         }
         let walls = self.wall_momentum(links, origin, Some(gate))?;
+        let periodic = self
+            .periodic_momentum_transport(gate)
+            .map_err(open::transport_error)?;
         let mut next = self.next.take().unwrap_or_else(|| self.f.clone());
         let mut forces = vec![[0.0; 3]; prepared.len()];
         let outcome = (|| {
@@ -536,16 +549,28 @@ impl BoundaryGrid3 {
                 });
             }
             exchange.walls = walls;
+            exchange.periodic = periodic;
             Ok(exchange)
         })();
-        let exchange = match outcome {
+        let mut exchange = match outcome {
             Ok(exchange) => exchange,
             Err(error) => {
                 self.next = Some(next);
                 return Err(error);
             }
         };
-        self.publish_next_with_forcing(
+        if let Err(error) = self.reconstruct_resistance_open_faces(
+            &mut next,
+            &mut forces,
+            &prepared,
+            &mut exchange,
+            origin,
+            gate,
+        ) {
+            self.next = Some(next);
+            return Err(error);
+        }
+        self.publish_admitted_next_with_forcing(
             next,
             gate,
             true,

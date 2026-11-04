@@ -205,7 +205,7 @@ impl BoundaryGrid3 {
     /// `beta/8 (r0+r1) (|v0+v1|²+(r0-r1)²)`, not `beta |v_mid|³`.
     /// Uniform resolved decay is second order. Stiff trapezoidal updates can
     /// reverse velocity; this is not an L-stable/exact relaxation integrator.
-    /// Closed/periodic, prescribed-skeleton, no-heat and native low-Mach limits
+    /// Prescribed-skeleton, no-heat and native low-Mach limits
     /// are unchanged. This overload measures no wall links and uses zero origin.
     pub fn step_with_darcy_forchheimer(
         &mut self,

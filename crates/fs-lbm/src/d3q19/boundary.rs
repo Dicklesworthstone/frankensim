@@ -630,6 +630,74 @@ pub struct BoundaryGrid3 {
     pressure_profiles: [Option<profile::ProfileState3<f64>>; 6],
 }
 
+/// Copy the complete native state for transactional coupled trials. Reusing a
+/// candidate with `clone_from` retains allocated population and topology buffers;
+/// it neither rebuilds links nor reconstructs populations from macroscopic data.
+impl Clone for BoundaryGrid3 {
+    fn clone(&self) -> Self {
+        Self {
+            nx: self.nx,
+            ny: self.ny,
+            nz: self.nz,
+            collision_model: self.collision_model,
+            force: self.force,
+            boundaries: self.boundaries,
+            f: self.f.clone(),
+            post: self.post.clone(),
+            solid: self.solid.clone(),
+            link_masks: self.link_masks.clone(),
+            open_link_masks: self.open_link_masks.clone(),
+            stationary_link_masks: self.stationary_link_masks.clone(),
+            topology_locked: self.topology_locked,
+            pull: self.pull.clone(),
+            next: self.next.clone(),
+            force_field: self.force_field.clone(),
+            force_field_shape: self.force_field_shape.clone(),
+            open_cells: self.open_cells.clone(),
+            velocity_profiles: self.velocity_profiles.clone(),
+            pressure_profiles: self.pressure_profiles.clone(),
+        }
+    }
+
+    fn clone_from(&mut self, source: &Self) {
+        self.nx = source.nx;
+        self.ny = source.ny;
+        self.nz = source.nz;
+        self.collision_model = source.collision_model;
+        self.force = source.force;
+        self.boundaries = source.boundaries;
+        for q in 0..Q3 {
+            self.f[q].clone_from(&source.f[q]);
+            self.post[q].clone_from(&source.post[q]);
+        }
+        self.solid.clone_from(&source.solid);
+        self.link_masks.clone_from(&source.link_masks);
+        self.open_link_masks.clone_from(&source.open_link_masks);
+        self.stationary_link_masks
+            .clone_from(&source.stationary_link_masks);
+        self.topology_locked = source.topology_locked;
+        self.pull.clone_from(&source.pull);
+        if let Some(next) = &mut self.next {
+            // A pristine source need not have streaming scratch yet. Retain
+            // this candidate's allocation with the same initial contents the
+            // native first-step allocation would use, including solid slots.
+            let initial = source.next.as_ref().unwrap_or(&source.f);
+            for q in 0..Q3 {
+                next[q].clone_from(&initial[q]);
+            }
+        } else {
+            self.next.clone_from(&source.next);
+        }
+        self.force_field.clone_from(&source.force_field);
+        self.force_field_shape.clone_from(&source.force_field_shape);
+        self.open_cells.clone_from(&source.open_cells);
+        for face in 0..6 {
+            self.velocity_profiles[face].clone_from(&source.velocity_profiles[face]);
+            self.pressure_profiles[face].clone_from(&source.pressure_profiles[face]);
+        }
+    }
+}
+
 /// Lattice tiles per pooled kernel tile (512 cells).
 const POOLED_GROUP_TILES: usize = 8;
 
@@ -1606,6 +1674,18 @@ impl BoundaryGrid3 {
             self.next = Some(next);
             return Err(error);
         }
+        self.publish_admitted_next_with_forcing(next, gate, check_cancellation, endpoint_forcing)
+    }
+
+    // All reconstruction/source owners finish in unpublished storage before
+    // entering this shared, cancellation-checked population/force publication.
+    fn publish_admitted_next_with_forcing(
+        &mut self,
+        mut next: [Vec<Tile>; Q3],
+        gate: &CancelGate,
+        check_cancellation: bool,
+        endpoint_forcing: Option<EndpointForcing3>,
+    ) -> Result<(), BoundaryStepError3> {
         if check_cancellation && gate.is_requested() {
             self.next = Some(next);
             return Err(BoundaryStepError3::Cancelled);
@@ -2227,35 +2307,17 @@ impl BoundaryGrid3 {
     ) -> Result<[f64; Q3], BoundaryStepError3> {
         let (neighbor_rho, neighbor_velocity, stress) =
             self.regularized_source(fields, interior, endpoint)?;
-        let (rho, velocity) = match self.boundaries.face(face) {
-            FaceBoundary3::Velocity { velocity } => (
-                neighbor_rho,
-                self.profile_velocity(face, cell).unwrap_or(velocity),
-            ),
-            FaceBoundary3::Pressure { density } => (
-                self.profile_density(face, cell).unwrap_or(density),
-                neighbor_velocity,
-            ),
-            FaceBoundary3::Periodic | FaceBoundary3::Wall { .. } => unreachable!(),
-        };
+        let (rho, velocity) = self.open_target(cell, face, neighbor_rho, neighbor_velocity);
         let (tile, lane) = self.addr(cell[0], cell[1], cell[2]);
         let force = self.open_force_with_forcing(tile, lane, endpoint);
-        let mut reconstructed = regularized_populations(rho, velocity, stress);
-        if force != [0.0; 3] {
-            // Guo's stored populations are f_phys - S(u,F)/2. Project
-            // physical stress first, then enter this cell's own frame;
-            // copying the neighbour's raw stress invents a force jump.
-            crate::thermal::forcing::reframe3(&mut reconstructed, velocity, [0.0; 3], force);
-        }
-        if self.link_masks[tile].0[lane] != 0 {
-            let open_mask = self.open_link_masks[tile].0[lane];
-            for q in 0..Q3 {
-                if open_mask & (1u32 << q) == 0 {
-                    // Retain bounced wall and streamed tangential populations.
-                    reconstructed[q] = fields[q][tile].0[lane];
-                }
-            }
-        }
+        let reconstructed = reconstruct_open_populations(
+            regularized_populations(rho, velocity, stress),
+            velocity,
+            force,
+            core::array::from_fn(|q| fields[q][tile].0[lane]),
+            self.link_masks[tile].0[lane],
+            self.open_link_masks[tile].0[lane],
+        );
         let physical = if matches!(endpoint, Some(EndpointForcing3::Field { .. })) {
             finite_forced_populations(&reconstructed, force)
         } else {
@@ -2268,11 +2330,42 @@ impl BoundaryGrid3 {
         Ok(reconstructed)
     }
 
+    fn open_target(
+        &self,
+        cell: [usize; 3],
+        face: Face3,
+        neighbor_rho: f64,
+        neighbor_velocity: [f64; 3],
+    ) -> (f64, [f64; 3]) {
+        match self.boundaries.face(face) {
+            FaceBoundary3::Velocity { velocity } => (
+                neighbor_rho,
+                self.profile_velocity(face, cell).unwrap_or(velocity),
+            ),
+            FaceBoundary3::Pressure { density } => (
+                self.profile_density(face, cell).unwrap_or(density),
+                neighbor_velocity,
+            ),
+            FaceBoundary3::Periodic | FaceBoundary3::Wall { .. } => unreachable!(),
+        }
+    }
+
     fn regularized_source(
         &self,
         fields: &[Vec<Tile>; Q3],
         [x, y, z]: [usize; 3],
         endpoint: Option<&EndpointForcing3>,
+    ) -> Result<(f64, [f64; 3], [[f64; 3]; 3]), BoundaryStepError3> {
+        let (tile, lane) = self.addr(x, y, z);
+        let force = self.open_force_with_forcing(tile, lane, endpoint);
+        self.regularized_source_with_force(fields, [x, y, z], force)
+    }
+
+    fn regularized_source_with_force(
+        &self,
+        fields: &[Vec<Tile>; Q3],
+        [x, y, z]: [usize; 3],
+        force: [f64; 3],
     ) -> Result<(f64, [f64; 3], [[f64; 3]; 3]), BoundaryStepError3> {
         let (tile, lane) = self.addr(x, y, z);
         let mut rho = 0.0;
@@ -2284,7 +2377,6 @@ impl BoundaryGrid3 {
             momentum[1] += f64::from(velocity.1) * fq;
             momentum[2] += f64::from(velocity.2) * fq;
         }
-        let force = self.open_force_with_forcing(tile, lane, endpoint);
         let velocity = core::array::from_fn(|axis| (momentum[axis] + 0.5 * force[axis]) / rho);
         if !rho.is_finite() || rho <= 0.0 || !velocity.iter().all(|v| v.is_finite()) {
             return Err(BoundaryStepError3::Unphysical { cell: [x, y, z] });
@@ -2820,7 +2912,11 @@ impl StreamPass<'_> {
                 }
                 if let (Some(field), Some(output)) = (self.resistance, resistance.as_mut()) {
                     let cell = tile_lane_coords(self.view.dims, tile, lane);
-                    if !field.finish_cell(&values, tile, lane, local, cell, output) {
+                    // Open cells still contain temporary reflected rows. Their
+                    // source and work belong to the final joint reconstruction.
+                    if self.view.open_link_masks[tile].0[lane] == 0
+                        && !field.finish_cell(&values, tile, lane, local, cell, output)
+                    {
                         return FirstUnphysical(Some(tile * TILE_CELLS + lane));
                     }
                 }
@@ -2854,6 +2950,30 @@ fn same_velocity(left: [f64; 3], right: [f64; 3]) -> bool {
             || (matches!(left.classify(), core::num::FpCategory::Zero)
                 && matches!(right.classify(), core::num::FpCategory::Zero))
     })
+}
+
+// Shared by prescribed forcing and the joint implicit-source boundary solve.
+// In mixed wall/open cells, only open-owned rows may be changed.
+fn reconstruct_open_populations(
+    mut reconstructed: [f64; Q3],
+    velocity: [f64; 3],
+    force: [f64; 3],
+    streamed: [f64; Q3],
+    wall_mask: u32,
+    open_mask: u32,
+) -> [f64; Q3] {
+    if force != [0.0; 3] {
+        // Project physical stress first, then enter this cell's Guo frame.
+        crate::thermal::forcing::reframe3(&mut reconstructed, velocity, [0.0; 3], force);
+    }
+    if wall_mask != 0 {
+        for q in 0..Q3 {
+            if open_mask & (1u32 << q) == 0 {
+                reconstructed[q] = streamed[q];
+            }
+        }
+    }
+    reconstructed
 }
 
 pub(crate) fn regularized_populations(

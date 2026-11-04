@@ -82,7 +82,7 @@ impl OpenTransport {
         }
     }
 
-    fn add_reconstruction(
+    pub(in super::super) fn add_reconstruction(
         &mut self,
         before: [f64; Q3],
         after: [f64; Q3],
@@ -98,7 +98,7 @@ impl OpenTransport {
         self.cells += 1;
     }
 
-    fn finish(self) -> Result<OpenBoundaryMomentumTransport3> {
+    pub(in super::super) fn finish(self) -> Result<OpenBoundaryMomentumTransport3> {
         let receipt = OpenBoundaryMomentumTransport3 {
             mass_change: self.mass.to_f64(),
             impulse: self.impulse.map(Dd::to_f64),

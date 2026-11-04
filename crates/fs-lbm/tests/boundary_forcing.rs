@@ -1787,12 +1787,432 @@ mod linear_resistance {
         let before = snapshot(&grid);
         assert!(matches!(
             grid.step_with_linear_resistance(
-                |_| panic!("must reject open faces before sampling"),
+                |cell| LinearResistance3 {
+                    principal: if cell == [7, 3, 3] {
+                        [-0.1; 3]
+                    } else {
+                        [0.1; 3]
+                    },
+                    ..LinearResistance3::default()
+                },
                 &CancelGate::new_clock_free()
             ),
             Err(BoundaryStepError3::EndpointForce { .. })
         ));
         assert_eq!(snapshot(&grid), before);
+    }
+
+    mod open {
+        use super::*;
+        use fs_lbm::d3q19::DarcyForchheimer3;
+
+        fn law([x, y, z]: [usize; 3], quadratic: f64) -> DarcyForchheimer3 {
+            DarcyForchheimer3 {
+                linear: LinearResistance3 {
+                    principal: [
+                        0.03 + 0.004 * x as f64,
+                        0.08 + 0.003 * y as f64,
+                        0.2 + 0.002 * z as f64,
+                    ],
+                    axes: AXES,
+                    skeleton_velocity: [0.002, -0.001, 0.003],
+                    body_force: [
+                        1e-5 * (y + 1) as f64,
+                        -2e-5 * (z + 1) as f64,
+                        3e-5 * (x + 1) as f64,
+                    ],
+                },
+                quadratic,
+            }
+        }
+
+        fn drag(law: DarcyForchheimer3, velocity: [f64; 3]) -> [f64; 3] {
+            let linear = force(
+                LinearResistance3 {
+                    body_force: [0.0; 3],
+                    ..law.linear
+                },
+                velocity,
+            );
+            let relative: [f64; 3] =
+                core::array::from_fn(|a| law.linear.skeleton_velocity[a] - velocity[a]);
+            let speed = dot(relative, relative).sqrt();
+            core::array::from_fn(|a| linear[a] + law.quadratic * speed * relative[a])
+        }
+
+        fn make(faces: [FaceBoundary3; 6], model: CollisionModel3) -> BoundaryGrid3 {
+            let mut grid = BoundaryGrid3::with_collision_model(
+                8,
+                8,
+                8,
+                model,
+                [0.0; 3],
+                BoundarySpec3::new(faces),
+            );
+            for [x, y, z] in cells(&grid) {
+                let mut f = equilibrium3(
+                    1.0 + 0.0004 * (x + y + z) as f64,
+                    [
+                        0.008 + 0.0003 * y as f64,
+                        -0.004 + 0.0002 * z as f64,
+                        0.003 - 0.0001 * x as f64,
+                    ],
+                );
+                // A real nonequilibrium shear mode must survive the boundary's
+                // regularized stress projection and source-frame conversion.
+                f[7] += 1e-5;
+                f[8] += 1e-5;
+                f[9] -= 1e-5;
+                f[10] -= 1e-5;
+                grid.set_populations(x, y, z, &f);
+            }
+            grid.rebind_uniform_force([1e-5, -2e-5, 3e-5], &CancelGate::new_clock_free())
+                .unwrap();
+            grid
+        }
+
+        fn check_balance(
+            before: &BoundaryGrid3,
+            after: &BoundaryGrid3,
+            receipt: fs_lbm::d3q19::ResistanceMomentumExchange3,
+            origin: [f64; 3],
+            quadratic: f64,
+        ) {
+            let (p0, p1) = (fluid_momentum(before), fluid_momentum(after));
+            let (l0, l1) = (angular(before, origin), angular(after, origin));
+            for a in 0..3 {
+                close(
+                    p1[a] - p0[a],
+                    receipt.external_impulse[a] - receipt.skeleton_impulse[a]
+                        + receipt.walls.fluid_population_impulse[a]
+                        + receipt.open.impulse[a],
+                    3e-11,
+                );
+                close(
+                    l1[a] - l0[a],
+                    receipt.external_angular_impulse[a] - receipt.skeleton_angular_impulse[a]
+                        + receipt.walls.fluid_population_angular_impulse[a]
+                        + receipt.open.angular_impulse[a]
+                        + receipt.periodic.angular_momentum_change[a],
+                    7e-11,
+                );
+            }
+            close(
+                after.total_mass() - before.total_mass(),
+                receipt.walls.fluid_mass_change + receipt.open.mass_change,
+                2e-10,
+            );
+            close(
+                receipt.fluid_drag_work + receipt.skeleton_work,
+                -receipt.relative_dissipation,
+                2e-13,
+            );
+            assert!(receipt.relative_dissipation >= 0.0);
+            let mut expected_reaction = [0.0; 3];
+            for cell @ [x, y, z] in cells(after) {
+                let law = law(cell, quadratic);
+                let old_drag = drag(law, before.velocity(x, y, z));
+                let new_drag = drag(law, after.velocity(x, y, z));
+                for a in 0..3 {
+                    close(
+                        after.force_density(x, y, z)[a],
+                        law.linear.body_force[a] + new_drag[a],
+                        2e-14,
+                    );
+                    expected_reaction[a] -= 0.5 * (old_drag[a] + new_drag[a]);
+                }
+            }
+            for a in 0..3 {
+                close(receipt.skeleton_impulse[a], expected_reaction[a], 2e-12);
+            }
+        }
+
+        #[test]
+        fn all_face_normals_jointly_preserve_targets_stress_and_reservoir_momentum() {
+            let gate = CancelGate::new_clock_free();
+            let origin = [0.2, -0.4, 1.1];
+            for face in Face3::ALL {
+                let axis = (face as usize) / 2;
+                let opposite = Face3::ALL[(face as usize) ^ 1];
+                for quadratic in [0.0, 1.7] {
+                    let mut faces = [FaceBoundary3::Periodic; 6];
+                    faces[face as usize] = FaceBoundary3::Velocity {
+                        velocity: [0.012, -0.007, 0.004],
+                    };
+                    faces[opposite as usize] = FaceBoundary3::Pressure { density: 1.003 };
+                    let mut grid = make(faces, models()[(face as usize) % 4]);
+                    grid.set_velocity_profile(
+                        face,
+                        fs_lbm::d3q19::InletFlux3::Unconstrained,
+                        &gate,
+                        |cell| Ok([0.012 + 1e-4 * cell[(axis + 1) % 3] as f64, -0.007, 0.004]),
+                    )
+                    .unwrap();
+                    grid.set_pressure_profile(opposite, &gate, |cell| {
+                        Ok(1.003 + 1e-4 * cell[(axis + 2) % 3] as f64)
+                    })
+                    .unwrap();
+                    let before = grid.clone();
+                    let receipt = grid
+                        .step_with_darcy_forchheimer_and_wall_momentum(
+                            |cell| law(cell, quadratic),
+                            &[],
+                            origin,
+                            &gate,
+                        )
+                        .unwrap();
+                    check_balance(&before, &grid, receipt, origin, quadratic);
+                    assert_eq!(receipt.open.reconstructed_cells, 128);
+                    assert_eq!(receipt.open.open_links, 640);
+                    assert!(receipt.periodic.face_crossings > 0);
+                    for cell @ [x, y, z] in cells(&grid) {
+                        if cell[axis] != 0 && cell[axis] != 7 {
+                            continue;
+                        }
+                        let is_velocity =
+                            cell[axis] == if (face as usize) % 2 == 0 { 0 } else { 7 };
+                        let mut interior = cell;
+                        interior[axis] = if cell[axis] == 0 { 1 } else { 6 };
+                        let (rho, momentum, stress) = moments(&grid, cell);
+                        let (neighbor_rho, neighbor_momentum, neighbor_stress) =
+                            moments(&grid, interior);
+                        let expected_velocity = if is_velocity {
+                            [0.012 + 1e-4 * cell[(axis + 1) % 3] as f64, -0.007, 0.004]
+                        } else {
+                            neighbor_momentum.map(|p| p / neighbor_rho)
+                        };
+                        let expected_density = if is_velocity {
+                            neighbor_rho
+                        } else {
+                            1.003 + 1e-4 * cell[(axis + 2) % 3] as f64
+                        };
+                        close(rho, expected_density, 3e-15);
+                        for a in 0..3 {
+                            close(momentum[a] / rho, expected_velocity[a], 4e-16);
+                            for b in 0..3 {
+                                close(stress[a][b], neighbor_stress[a][b], 4e-15);
+                            }
+                        }
+                        let _ = (x, y, z);
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn mixed_wall_open_cells_solve_actual_law_and_preserve_native_rows_and_pool_bits() {
+            let gate = CancelGate::new_clock_free();
+            let origin = [-0.3, 1.2, 0.7];
+            for axis in 0..3 {
+                for quadratic in [0.0, 2.1] {
+                    let mut faces = [FaceBoundary3::Wall { velocity: [0.0; 3] }; 6];
+                    faces[2 * axis] = FaceBoundary3::Velocity {
+                        velocity: [0.009, -0.003, 0.004],
+                    };
+                    faces[2 * axis + 1] = FaceBoundary3::Pressure { density: 1.005 };
+                    let initial = make(faces, models()[axis]);
+                    for workers in [1, 3] {
+                        let pool = TilePool::for_host(workers, 0x0F3A);
+                        let (mut serial, mut pooled) = (initial.clone(), initial.clone());
+                        let links = serial.boundary_links();
+                        for _ in 0..2 {
+                            let before = serial.clone();
+                            let receipt = serial
+                                .step_with_darcy_forchheimer_and_wall_momentum(
+                                    |cell| law(cell, quadratic),
+                                    &links,
+                                    origin,
+                                    &gate,
+                                )
+                                .unwrap();
+                            let parallel = pooled
+                                .step_pooled_with_darcy_forchheimer_and_wall_momentum(
+                                    &pool,
+                                    &gate,
+                                    |cell| law(cell, quadratic),
+                                    &links,
+                                    origin,
+                                )
+                                .unwrap();
+                            assert_eq!(snapshot(&serial), snapshot(&pooled));
+                            assert_eq!(receipt, parallel);
+                            check_balance(&before, &serial, receipt, origin, quadratic);
+                            assert_eq!(receipt.open.reconstructed_cells, 128);
+                            assert!(receipt.open.open_links < 640);
+                            assert_eq!(receipt.periodic.face_crossings, 0);
+                            // Replay the unchanged native prescribed-source owner
+                            // with the same endpoint field. Every retained wall or
+                            // tangential row must match, including seam rest rows.
+                            let mut reference = before.clone();
+                            reference.rebind_uniform_force([0.0; 3], &gate).unwrap();
+                            reference
+                                .rebind_force_field_with_gate(
+                                    |cell @ [x, y, z]| {
+                                        let law = law(cell, quadratic);
+                                        let relative = core::array::from_fn::<_, 3, _>(|a| {
+                                            law.linear.skeleton_velocity[a]
+                                                - before.velocity(x, y, z)[a]
+                                        });
+                                        let projected =
+                                            law.linear.axes.map(|axis| dot(axis, relative));
+                                        let coefficients = core::array::from_fn::<_, 3, _>(|k| {
+                                            law.linear.principal[k] * projected[k]
+                                        });
+                                        let speed =
+                                            relative[0].hypot(relative[1]).hypot(relative[2]);
+                                        core::array::from_fn(|a| {
+                                            law.linear.body_force[a]
+                                                + (0..3)
+                                                    .map(|k| {
+                                                        law.linear.axes[k][a] * coefficients[k]
+                                                    })
+                                                    .sum::<f64>()
+                                                + (law.quadratic * speed) * relative[a]
+                                        })
+                                    },
+                                    &gate,
+                                )
+                                .unwrap();
+                            reference
+                                .step_with_endpoint_forcing(
+                                    [0.0; 3],
+                                    |[x, y, z]| serial.force_density(x, y, z),
+                                    &gate,
+                                )
+                                .unwrap();
+                            for link in &links {
+                                if link.cell[axis] != 0 && link.cell[axis] != 7 {
+                                    continue;
+                                }
+                                let [x, y, z] = link.cell;
+                                let actual = serial.populations(x, y, z);
+                                let expected = reference.populations(x, y, z);
+                                // Different constitutive evaluation parentheses
+                                // can perturb collision by a final rounding bit.
+                                close(actual[link.direction], expected[link.direction], 8e-16);
+                                close(actual[0], expected[0], 8e-16);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn zero_drag_reduces_to_native_open_reconstruction_bits_including_seams() {
+            let gate = CancelGate::new_clock_free();
+            for mixed in [false, true] {
+                let mut faces = [if mixed {
+                    FaceBoundary3::Wall { velocity: [0.0; 3] }
+                } else {
+                    FaceBoundary3::Periodic
+                }; 6];
+                faces[0] = FaceBoundary3::Velocity {
+                    velocity: [0.012, -0.003, 0.006],
+                };
+                faces[1] = FaceBoundary3::Pressure { density: 1.002 };
+                let mut reference = make(faces, models()[3]);
+                reference.rebind_uniform_force([0.0; 3], &gate).unwrap();
+                reference
+                    .rebind_force_field_with_gate(|cell| law(cell, 0.0).linear.body_force, &gate)
+                    .unwrap();
+                let mut implicit = reference.clone();
+                for _ in 0..3 {
+                    reference.step();
+                    let receipt = implicit
+                        .step_with_darcy_forchheimer(
+                            |cell| DarcyForchheimer3 {
+                                linear: LinearResistance3 {
+                                    body_force: law(cell, 0.0).linear.body_force,
+                                    ..LinearResistance3::default()
+                                },
+                                quadratic: 0.0,
+                            },
+                            &gate,
+                        )
+                        .unwrap();
+                    assert_eq!(snapshot(&reference), snapshot(&implicit));
+                    assert_eq!(receipt.skeleton_impulse, [0.0; 3]);
+                    assert_eq!(receipt.relative_dissipation, 0.0);
+                }
+            }
+        }
+
+        #[test]
+        fn weak_drag_at_open_wall_seams_is_resolved_at_its_constitutive_scale() {
+            let gate = CancelGate::new_clock_free();
+            let mut faces = [FaceBoundary3::Wall { velocity: [0.0; 3] }; 6];
+            faces[0] = FaceBoundary3::Velocity {
+                velocity: [0.012, -0.003, 0.006],
+            };
+            faces[1] = FaceBoundary3::Pressure { density: 1.002 };
+            let mut grid = make(faces, models()[0]);
+            let small = DarcyForchheimer3 {
+                linear: LinearResistance3 {
+                    principal: [1e-18, 3e-18, 8e-18],
+                    axes: AXES,
+                    ..LinearResistance3::default()
+                },
+                quadratic: 2e-17,
+            };
+            let _ = grid.step_with_darcy_forchheimer(|_| small, &gate).unwrap();
+            for cell @ [x, y, z] in cells(&grid) {
+                if cell[0] != 0 && cell[0] != 7 {
+                    continue;
+                }
+                let expected = drag(small, grid.velocity(x, y, z));
+                for (actual, expected) in grid.force_density(x, y, z).into_iter().zip(expected) {
+                    assert!(
+                        (actual - expected).abs() <= 1e-12 * expected.abs().max(1e-30),
+                        "{cell:?}: {actual:e} != {expected:e}"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn late_open_refusal_and_retry_preserve_populations_forces_and_profiles() {
+            let gate = CancelGate::new_clock_free();
+            let pool = TilePool::for_host(3, 0x0F3A);
+            let mut faces = [FaceBoundary3::Wall { velocity: [0.0; 3] }; 6];
+            faces[0] = FaceBoundary3::Velocity {
+                velocity: [0.009, -0.003, 0.004],
+            };
+            faces[1] = FaceBoundary3::Pressure { density: 1.005 };
+            for pooled in [false, true] {
+                let mut grid = make(faces, models()[0]);
+                grid.set_pressure_profile(Face3::XMax, &gate, |cell| {
+                    Ok(if cell[1] >= 5 && cell[2] >= 5 {
+                        1e308
+                    } else {
+                        1.005
+                    })
+                })
+                .unwrap();
+                let accepted = snapshot(&grid);
+                let mut control = grid.clone();
+                let result = if pooled {
+                    grid.step_pooled_with_darcy_forchheimer(&pool, &gate, |cell| law(cell, 1.7))
+                } else {
+                    grid.step_with_darcy_forchheimer(|cell| law(cell, 1.7), &gate)
+                };
+                assert!(matches!(
+                    result,
+                    Err(BoundaryStepError3::Unphysical { .. }
+                        | BoundaryStepError3::EndpointForce { .. })
+                ));
+                assert_eq!(snapshot(&grid), accepted);
+                for candidate in [&mut grid, &mut control] {
+                    candidate
+                        .set_pressure_profile(Face3::XMax, &gate, |_| Ok(1.005))
+                        .unwrap();
+                    let _ = candidate
+                        .step_with_darcy_forchheimer(|cell| law(cell, 1.7), &gate)
+                        .unwrap();
+                }
+                assert_eq!(snapshot(&grid), snapshot(&control));
+            }
+        }
     }
 
     mod forchheimer {
