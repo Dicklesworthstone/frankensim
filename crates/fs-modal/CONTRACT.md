@@ -157,6 +157,25 @@ uses a caller-supplied complex pressure-per-modal-velocity transfer at each
 natural frequency under `exp(-i omega t)`; no material names, digital gains,
 or mastering values occur in this layer. Energy/work diagnostics and
 transactional state/pressure budgets accompany every sample.
+
+`ModalAcousticTimeModel::apply_impulse[_into]` applies already resolved
+generalized impulses in `N s / sqrt(kg)` at fixed modal displacement:
+`v+ = v- + J`, independent of the nominal sample period, stiffness and viscous
+damping. `apply_port_impulse[_into]` projects a physical `N s` impulse with
+the same reciprocal mode-shape weights that reconstruct the port velocity.
+Signed work is the impulse dotted with mean pre/post velocity; it is computed
+without subtracting stored mechanical energies. No time elapses and all viscous
+heat entries are exactly zero. Free coordinates use the same mass normalization.
+The `_into` methods reuse the existing workspace and perform one bounded scalar
+pass without allocation or transcendental functions. All existing state,
+energy, pressure and work-balance admission gates remain transactional. These
+methods consume a resolved impulse; they infer neither restitution nor contact
+duration, support reactions, omitted modes or broadband impact radiation.
+Finite-duration excitation remains a force-trajectory problem. G1/G3 regressions
+in `tests/modal_impulse.rs` check clock/damping independence, physical mass and
+reciprocal port work, braking, subdivision/reversal, retained small work and
+whole-bank refusal.
+
 The damped transition prepares its held-force convolution with a scaled entire
 series and transition doubling, then reuses scalar gains in the sample loop.
 It does not subtract a potentially huge static equilibrium, snap nearby damping

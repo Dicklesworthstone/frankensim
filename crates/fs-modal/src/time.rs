@@ -34,6 +34,8 @@ use fs_math::{c64::C64, det};
 mod heat;
 use heat::{DampedTransition, ViscousIntegral};
 
+mod impulse;
+
 /// Prepared exact transitions under linearly interpolated force samples.
 pub mod forcing;
 pub use forcing::{LinearForceFrame, LinearForcePullback, LinearForceTransition};
@@ -99,7 +101,7 @@ pub struct ModalAcousticState {
     pub velocity_m_sqrt_kg_per_s: f64,
 }
 
-/// One exact sample transition under the selected physical forcing law.
+/// One exact transition under a force trajectory or instantaneous impulse.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModalAcousticFrame {
     /// Physical pressure at the observer after the transition [Pa].
@@ -108,13 +110,14 @@ pub struct ModalAcousticFrame {
     pub modal_energy_j: Vec<f64>,
     /// Sum of retained modal energies after the transition [J].
     pub total_modal_energy_j: f64,
-    /// Work done by the selected generalized force trajectory during this sample [J].
+    /// Signed work done by the selected force trajectory or impulse [J].
     pub input_work_j: f64,
-    /// Energy removed by viscous damping during this sample [J].
+    /// Energy removed by viscous damping during this transition [J].
     ///
     /// Independently integrates `2*zeta*omega*v(t)^2` along the exact forced
     /// trajectory. This is nonnegative physical heat, including losses smaller
-    /// than subtraction roundoff in the stored mechanical energy.
+    /// than subtraction roundoff in the stored mechanical energy. An
+    /// instantaneous impulse has zero duration and exactly zero viscous heat.
     pub viscous_dissipation_j: f64,
     /// Independent mode-local viscous integrals for physical loss routing.
     /// Their sum is the aggregate heat; undamped and free modes report exact zero.
@@ -207,6 +210,13 @@ pub enum ModalAcousticTimeError {
         /// Number of generalized forces supplied.
         found: usize,
     },
+    /// The impulse vector cardinality differs from the admitted mode count.
+    ImpulseCountMismatch {
+        /// Admitted number of modes.
+        expected: usize,
+        /// Number of generalized impulses supplied.
+        found: usize,
+    },
     /// A restored checkpoint supplied one state per the wrong number of modes.
     StateCountMismatch {
         /// Admitted number of modes.
@@ -257,6 +267,10 @@ impl core::fmt::Display for ModalAcousticTimeError {
             Self::ForceCountMismatch { expected, found } => write!(
                 f,
                 "FS-COUPLE-MODAL-TIME-SHAPE: expected {expected} modal forces, found {found}"
+            ),
+            Self::ImpulseCountMismatch { expected, found } => write!(
+                f,
+                "FS-COUPLE-MODAL-TIME-IMPULSE-SHAPE: expected {expected} modal impulses, found {found}"
             ),
             Self::StateCountMismatch { expected, found } => write!(
                 f,
@@ -1248,7 +1262,7 @@ struct ModalStepData {
 }
 
 // Shared state admission and independent work/heat balance for held forces,
-// linear ramps and harmonic loads. A forcing owner proposes motion and integrals;
+// ramps, harmonic loads and impulses. A forcing owner proposes motion and integrals;
 // it cannot bypass the physical budgets or commit only part of a mode bank.
 #[allow(clippy::too_many_lines)] // one shared, transactional physics loop
 fn stage_modal_frame(
