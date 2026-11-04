@@ -144,12 +144,14 @@ pub use flow::{
     MaterialMomentumAdvance, MaterialMomentumAdvanceControls, MaterialMomentumAdvanceInput,
     MaterialMomentumControls, MaterialMomentumInput, MaterialMomentumReport, MaterialMomentumStep,
     MaterialMomentumViscosityInput, MaterialViscosityControls, MaterialViscosityReport,
-    MaterialVolumeSource, PiecewiseThermalVolumeControls, ProjectionReport, ReservoirPressure,
+    MaterialVolumeSource, PhaseResistanceMomentumControls, PhaseResistanceMomentumInput,
+    PiecewiseThermalVolumeControls, ProjectionReport, ReservoirPressure,
     ResistiveDensityProjection, ResistiveMaterialDensityMomentumStep,
-    ResistiveMaterialMomentumAdvance, ResolvedViscousThermalVolumeMomentumStep,
-    StaggeredBoundaryPressure, ThermalVolumeControls, ThermalVolumeMomentumControls,
-    ThermalVolumeMomentumInput, ThermalVolumeMomentumStep, ThermalVolumeStep,
-    ViscousMaterialMomentumAdvance, ViscousThermalVolumeMomentumStep, lbm_duct_flow,
+    ResistiveMaterialMomentumAdvance, ResolvedPhaseResistanceMomentumStep,
+    ResolvedViscousThermalVolumeMomentumStep, StaggeredBoundaryPressure, ThermalVolumeControls,
+    ThermalVolumeMomentumControls, ThermalVolumeMomentumInput, ThermalVolumeMomentumStep,
+    ThermalVolumeStep, ViscousMaterialMomentumAdvance, ViscousThermalVolumeMomentumStep,
+    lbm_duct_flow,
 };
 pub use natural::{BuoyancyConfig, NaturalConvection, NaturalConvectionReport, natural_convection};
 pub use radiation::{

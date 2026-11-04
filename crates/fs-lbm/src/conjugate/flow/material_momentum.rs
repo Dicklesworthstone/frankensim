@@ -12,7 +12,10 @@ use super::{
 };
 
 mod resistance;
-pub use resistance::ResistiveMaterialMomentumAdvance;
+pub use resistance::{
+    PhaseResistanceMomentumControls, PhaseResistanceMomentumInput,
+    ResistiveMaterialMomentumAdvance, ResolvedPhaseResistanceMomentumStep,
+};
 mod viscous;
 pub(in crate::conjugate::flow) use viscous::PreparedMaterialViscosity;
 pub use viscous::{

@@ -6,6 +6,12 @@ use super::super::{
 use super::*;
 use fs_math::dd::Dd;
 
+mod phase;
+pub use phase::{
+    PhaseResistanceMomentumControls, PhaseResistanceMomentumInput,
+    ResolvedPhaseResistanceMomentumStep,
+};
+
 /// One atomic implicit-resistance/pressure/material-momentum candidate.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResistiveMaterialMomentumAdvance {

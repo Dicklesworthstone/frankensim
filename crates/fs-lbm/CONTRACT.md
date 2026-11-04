@@ -1,5 +1,31 @@
 # CONTRACT: fs-lbm
 
+## Phase/source-bound stationary resistance mechanics
+
+The phase-resistance momentum entries resolve each admitted original fluid
+state through its existing material source and `MushyPhaseLaw`, then set
+`beta = mu K^-1` for the native implicit resistance owner. Permeability uses
+the law's true liquid volume fraction, including unequal constituent
+densities. Kinematic viscosity is converted by the original source resolver
+at its chart-matching current density. Complete mobility/law identity, exact
+h-resolved phase and source/transport density are checked; one original
+source receipt is retained per fluid cell.
+
+Original `M/rho_chart(h)` must fill its cell within an explicit volume
+budget. That admission never replaces authoritative M or native M/V inertia.
+Exactly solid constitutive states refuse before liquid-property queries;
+fixed grid solids retain zero inventory and need no source. Fully liquid
+states yield exactly zero resistance. Nonzero beta overflow or underflow
+refuses. Ordinary and reservoir-pressure entries perform one fresh native
+momentum step and retain physical cell drag heat for the caloric owner.
+
+Focused tests cover unequal-density volume fractions, source nu-to-mu
+conversion, analytic graded-column response, actual-mass retention,
+fully liquid reduction, source provenance and immobility/refusal boundaries.
+This is an explicit original-state mechanical coupling: h, phase and
+thermodynamic volume do not advance, source shear is caller-declared, and no
+coupled heat/volume fixed point or exact-solid momentum owner is claimed.
+
 ## Material transport with physical resistance heating
 
 `advance_material_momentum_with_resistance` and its reservoir-pressure form
