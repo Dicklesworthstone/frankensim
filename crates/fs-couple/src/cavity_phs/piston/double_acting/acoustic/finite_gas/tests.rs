@@ -190,16 +190,28 @@ fn staged_complete_load_refuses_unowned_molecular_heat_before_caloric_trials() {
         endpoint: None,
     };
     let mut gas = parcels[&10].clone();
-    for heat in [1e-6, -1e-6, f64::NAN, f64::INFINITY] {
+    // Both source integrals are refused, alone and with nonfinite values.
+    let heat = |molecular_heat_j, viscous_heat_j| FiniteGasDgInternalHeat {
+        molecular_heat_j,
+        viscous_heat_j,
+    };
+    for heat in [
+        heat(1e-6, 0.0),
+        heat(-1e-6, 0.0),
+        heat(f64::NAN, 0.0),
+        heat(f64::INFINITY, 0.0),
+        heat(0.0, 1e-6),
+        heat(0.0, f64::NAN),
+    ] {
         let result = staged.advance::<(), (), _>(
             &mut gas,
             &inputs[&10],
-            heat,
-            |_, _, _, _| panic!("unowned molecular heat reached a caloric trial"),
+            &heat,
+            |_, _, _, _| panic!("unowned gas heat reached a caloric trial"),
             &mut || false,
         );
         assert!(matches!(result, Err(FiniteGasDgError::Invalid(
-            "complete passive loads do not own the source-wall molecular heat integral"
+            "complete passive loads do not own source-wall gas heat integrals"
         ))));
         assert_eq!(gas, parcels[&10]);
         assert!(staged.endpoint.is_none());
