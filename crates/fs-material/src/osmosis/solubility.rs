@@ -13,9 +13,14 @@
 //! owner supplies neither nucleation nor dissolution rates. The caloric adapter
 //! closes phase-change heat with explicitly declared compatible heat capacities.
 //! Numerical pair parameters do not establish measured material authority.
+//! Source-backed ionic phases and acid/base speciation use the separate
+//! [`electrolyte`] adapter over the original thermochemical equilibrium owners.
 
 /// Energy-balanced heating and cooling of the original finite phase owner.
 pub mod caloric;
+
+/// Source-backed ionic solids, pH and actual dissolved osmotic species.
+pub mod electrolyte;
 
 use std::sync::Arc;
 

@@ -1,5 +1,43 @@
 # fs-material — CONTRACT
 
+## Source-backed ionic solubility and osmotic particles
+
+`osmosis::solubility::electrolyte::ElectrolyteSolubilitySolution` retains one
+original `HydrolysisPrecipitation` or `SaltPrecipitation` model, its selected
+formation-Gibbs sources, complete analytical cation/family stocks, declared
+spectator stocks and accepted phase/pH result. Its shared ideal aqueous view
+counts the actual H+, OH-, acid-family members and spectators exactly once.
+Pure solids and a second nominal dissociation multiplier contribute no particles.
+The original analytical totals remain distinct from dissolved-only reports.
+
+`SolventActivityBasis` explicitly binds solvent molar volume and reference
+amount per physical volume. Each solvent-volume trial scales the common
+amount at unit activity from that declared density and re-equilibrates the
+original chemistry. Unit-molality sources require the caller's solvent-mass
+conversion; no density, standard-state conversion or charge is inferred from
+a name. Volume trials share immutable analytical-stock and species-axis
+storage. The original bounded chemistry solver still owns source validation,
+component/charge balance, work limits and cancellation. This adapter does not
+claim allocation-free ionic volume trials.
+
+`with_analytical_totals` permits finite stock updates on the same source,
+family and spectator layout, including material held in the selected solid.
+Failed construction, volume changes, dosing and cancellation publish no partial
+state. The native tests use source-qualified manufactured 1:2 salt and
+hydrolysis equilibria to check particle counts, reversible phase changes,
+preserved sources and inventory/layout refusals.
+
+The original fixed-temperature, fixed-pressure ideal chemistry uses unit
+water activity. Osmotic pressure and water activity are the leading dilute
+particle approximation, not a concentrated-electrolyte activity correction.
+Actual H+/OH- inventories retain the small pure-water autoionization reference
+term (2*sqrt(Kw) times the declared reference-amount density); no reference
+osmolarity subtraction is made. Empty analytical stocks therefore do not
+supply an exactly normalized pure-water solvent activity. Chemical reaction
+water, crystal/solute partial volumes, phase-change heat,
+extra aqueous complexes, competing solids and kinetic rates are not supplied
+by this adapter.
+
 ## Absolute thermo-optic response for refraction
 
 `thermo_optic::SchottThermoOpticLaw` retains explicitly supplied SCHOTT TIE-19
