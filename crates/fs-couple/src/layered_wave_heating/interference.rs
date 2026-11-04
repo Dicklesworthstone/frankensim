@@ -95,8 +95,8 @@ pub struct ThermalInterferenceDrive<'a> {
 /// Original owner limits plus bounds on their simultaneous preparation.
 /// Native workspace figures are conservatively summed while their owners
 /// coexist. Borrowed input arrays, material cards, resolved material-source
-/// payloads and allocator overhead are excluded. Native thermal output storage
-/// is separately bounded by LumpedEnthalpySpectrumControls.
+/// payloads and allocator overhead are excluded. Native thermal state, output
+/// and solve storage remain separately bounded by their receiving owner.
 #[derive(Clone, Copy, Debug)]
 pub struct ThermalInterferenceLimits {
     pub maximum_lines: usize,
@@ -183,13 +183,13 @@ impl<'a> QuasiSteadyFilmState<'a> {
     }
 }
 
-enum RefreshedFilmLaw {
+pub(super) enum RefreshedFilmLaw {
     Debye(ResolvedDebyeCapacitor),
     Ohmic(ResolvedConductorState),
     DebyeWithOhmic(ResolvedDebyeCapacitor, ResolvedConductorState),
 }
 impl RefreshedFilmLaw {
-    fn response(&self) -> DielectricResponse<'_> {
+    pub(super) fn response(&self) -> DielectricResponse<'_> {
         match self {
             Self::Debye(source) => DielectricResponse::Debye(source),
             Self::Ohmic(source) => DielectricResponse::Ohmic(source),
@@ -314,33 +314,11 @@ impl<'a, 'm> QuasiSteadyFilmHeating<'a, 'm> {
         let film = original
             .layer(layer_index)
             .ok_or(bad("target film is absent"))?;
-        match film.response {
-            DielectricResponse::Debye(_)
-            | DielectricResponse::Ohmic(_)
-            | DielectricResponse::DebyeWithOhmic { .. } => {}
-            _ => return Err(bad("feedback requires an original Debye and/or Ohmic film")),
-        }
+        admit_refresh_source(film.response, card, temperature_axis)?;
         let material = film.response.material();
-        if material.card_identity() != card.content_hash()
-            || body.phase_curve().material_card_identity() != card.content_hash()
-        {
+        if body.phase_curve().material_card_identity() != card.content_hash() {
             return Err(bad(
                 "field, thermal curve and original immutable card must agree",
-            ));
-        }
-        let absolute = QuantitySpec::semantic(SemanticType::new(
-            QuantityKind::AbsoluteTemperature,
-            ValueForm::Static,
-        ));
-        if material.axis_quantities().get(temperature_axis) != Some(&absolute)
-            || material.state_coordinate(temperature_axis).is_none()
-            || material
-                .properties()
-                .iter()
-                .any(|p| !p.has_only_fixed_external_conditions(Some(temperature_axis), false))
-        {
-            return Err(bad(
-                "feedback needs one explicit absolute temperature and fixed external conditions",
             ));
         }
         for receipt in body
@@ -378,38 +356,7 @@ impl<'a, 'm> QuasiSteadyFilmHeating<'a, 'm> {
                 "feedback integrates the full film thickness and original periodic cell",
             ));
         }
-        if drive.source_clock.trim().is_empty()
-            || drive.factors.len() > 4096
-            || drive.factors.len() > limits.ensemble.maximum_factors
-        {
-            return Err(bad(
-                "an explicit clock and bounded factor count are required",
-            ));
-        }
-        let mut line_count = drive.mean.len();
-        for factor in drive.factors {
-            poll(&mut cancelled)?;
-            line_count = line_count
-                .checked_add(factor.lines.len())
-                .ok_or(bad("source line count overflows"))?;
-        }
-        if line_count == 0 || line_count > 4096 || line_count > limits.maximum_lines {
-            return Err(bad(
-                "the complete drive needs one to 4096 budgeted authored lines",
-            ));
-        }
-        for line in drive
-            .mean
-            .iter()
-            .chain(drive.factors.iter().flat_map(|f| f.lines))
-        {
-            poll(&mut cancelled)?;
-            if !line.angular_frequency_rad_s.is_finite() || line.angular_frequency_rad_s <= 0.0 {
-                return Err(bad(
-                    "every source line needs a finite positive native angular frequency",
-                ));
-            }
-        }
+        let line_count = admit_drive(drive, limits, &mut cancelled)?;
         let result = Self {
             original,
             layer_index,
@@ -521,34 +468,7 @@ impl<'a, 'm> QuasiSteadyFilmHeating<'a, 'm> {
             .layer(self.layer_index)
             .ok_or(bad("target film is absent"))?
             .response;
-        let point = original
-            .material()
-            .query()
-            .with(self.temperature_axis, temperature_k)
-            .map_err(|_| bad("accepted temperature violates the original source coordinate"))?;
-        Ok(match original {
-            DielectricResponse::Debye(source) => {
-                RefreshedFilmLaw::Debye(source.at_query_point(self.card, &point)?)
-            }
-            DielectricResponse::Ohmic(source) => {
-                let material = source.material().at_query_point(self.card, &point)?;
-                RefreshedFilmLaw::Ohmic(source.with_material(material)?)
-            }
-            DielectricResponse::DebyeWithOhmic {
-                dielectric,
-                conductor,
-            } => {
-                if dielectric.material().identity() != conductor.material().identity() {
-                    return Err(bad(
-                        "Debye and Ohmic laws must retain the same complete original snapshot",
-                    ));
-                }
-                let dielectric = dielectric.at_query_point(self.card, &point)?;
-                let conductor = conductor.with_material(dielectric.material().clone())?;
-                RefreshedFilmLaw::DebyeWithOhmic(dielectric, conductor)
-            }
-            _ => return Err(bad("feedback requires an original Debye and/or Ohmic film")),
-        })
+        RefreshedFilmLaw::at_temperature(original, self.card, self.temperature_axis, temperature_k)
     }
 
     /// Rebuild all original field owners at this accepted temperature.
@@ -566,6 +486,7 @@ impl<'a, 'm> QuasiSteadyFilmHeating<'a, 'm> {
             let metadata = checked_sum(&[
                 bytes::<&ThermalInterferenceLine<'_>>(self.line_count)?,
                 bytes::<f64>(self.line_count)?,
+                bytes::<&PlanarDielectricLayers<'_>>(self.line_count)?,
                 bytes::<PlanarAngularSpectrum<'_, '_>>(self.line_count)?,
                 bytes::<PreparedAngularSpectrumIllumination<'_, '_, '_>>(self.line_count)?,
                 bytes::<AngularSpectrumExposure<'_, '_, '_>>(factor_count + 1)?,
@@ -574,14 +495,14 @@ impl<'a, 'm> QuasiSteadyFilmHeating<'a, 'm> {
             ])?;
             let mut work =
                 Workspace::new(metadata, self.limits.maximum_preparation_workspace_bytes)?;
-            let mut lines: Vec<&ThermalInterferenceLine<'_>> = reserve(self.line_count)?;
-            lines.extend(self.drive.mean.iter());
-            for factor in self.drive.factors {
-                poll(&mut cancelled)?;
-                lines.extend(factor.lines.iter());
-            }
             let mut frequencies = reserve(self.line_count)?;
-            frequencies.extend(lines.iter().map(|line| line.angular_frequency_rad_s));
+            frequencies.extend(
+                self.drive
+                    .mean
+                    .iter()
+                    .chain(self.drive.factors.iter().flat_map(|factor| factor.lines))
+                    .map(|line| line.angular_frequency_rad_s),
+            );
             frequencies.sort_unstable_by(f64::total_cmp);
             frequencies.dedup_by(|left, right| *left == *right);
             poll(&mut cancelled)?;
@@ -618,97 +539,39 @@ impl<'a, 'm> QuasiSteadyFilmHeating<'a, 'm> {
                     &films,
                 )?);
             }
-            let mut beams = reserve(self.line_count)?;
-            for line in &lines {
-                poll(&mut cancelled)?;
-                let index = frequencies
-                    .binary_search_by(|omega| omega.total_cmp(&line.angular_frequency_rad_s))
-                    .map_err(|_| bad("authored frequency is absent from its native cache"))?;
-                let mut limits = self.limits.angular;
-                limits.maximum_workspace_bytes =
-                    work.remaining().min(limits.maximum_workspace_bytes);
-                let beam = PlanarAngularSpectrum::prepare(
-                    &stacks[index],
-                    self.grid,
-                    line.left_tangential_e_v_per_m,
-                    limits,
-                    &mut cancelled,
-                )?;
-                work.charge(beam.workspace_bytes())?;
-                beams.push(beam);
-            }
-            let mut illumination = reserve(self.line_count)?;
-            for (beam, line) in beams.iter().zip(&lines) {
-                poll(&mut cancelled)?;
-                let mut limits = self.limits.illumination;
-                limits.maximum_workspace_bytes =
-                    work.remaining().min(limits.maximum_workspace_bytes);
-                let prepared = beam.prepare_illumination(
-                    line.right_tangential_e_v_per_m,
-                    limits,
-                    &mut cancelled,
-                )?;
-                work.charge(prepared.workspace_bytes())?;
-                illumination.push(prepared);
-            }
-            let anchor = beams.first().ok_or(bad("a source line is required"))?;
-            let mean_count = self.drive.mean.len();
-            let mut limits = self.limits.exposure;
-            limits.maximum_workspace_bytes = work.remaining().min(limits.maximum_workspace_bytes);
-            let mean = AngularSpectrumExposure::try_new_illumination(
-                anchor,
-                &illumination[..mean_count],
-                limits,
+            let mut views = reserve(stacks.len())?;
+            views.extend(stacks.iter());
+            with_drive_ensemble(
+                &views,
+                &frequencies,
+                self.grid,
+                self.drive,
+                self.line_count,
+                self.limits,
+                &mut work,
                 &mut cancelled,
-            )?;
-            work.charge(mean.workspace_bytes())?;
-            let mut factors = reserve(factor_count)?;
-            let mut statistics = reserve(factor_count)?;
-            let mut offset = mean_count;
-            for factor in self.drive.factors {
-                poll(&mut cancelled)?;
-                let end = offset + factor.lines.len();
-                let mut limits = self.limits.exposure;
-                limits.maximum_workspace_bytes =
-                    work.remaining().min(limits.maximum_workspace_bytes);
-                let prepared = AngularSpectrumExposure::try_new_illumination(
-                    anchor,
-                    &illumination[offset..end],
-                    limits,
-                    &mut cancelled,
-                )?;
-                work.charge(prepared.workspace_bytes())?;
-                factors.push(prepared);
-                statistics.push(factor.statistics);
-                offset = end;
-            }
-            let mut limits = self.limits.ensemble;
-            limits.maximum_workspace_bytes = work.remaining().min(limits.maximum_workspace_bytes);
-            let ensemble = AngularSpectrumExposureEnsemble::try_new_with_statistics(
-                anchor,
-                if mean_count == 0 { None } else { Some(&mean) },
-                &factors,
-                &statistics,
-                limits,
-                &mut cancelled,
-            )?;
-            work.charge(ensemble.workspace_bytes())?;
-            let mut limits = self.limits.layer;
-            limits.maximum_workspace_bytes = work.remaining().min(limits.maximum_workspace_bytes);
-            let layer = ensemble.prepare_layer(self.layer_index, limits, &mut cancelled)?;
-            work.charge(layer.workspace_bytes())?;
-            let mut limits = self.limits.heat;
-            limits.maximum_workspace_bytes = work.remaining().min(limits.maximum_workspace_bytes);
-            let load = layer.integrated_heat_spectrum(
-                self.quadrature,
-                AngularSpectrumExposureHeatChannel::Total,
-                limits,
-                &mut cancelled,
-            )?;
-            work.charge(load.preparation_workspace_bytes())?;
-            let volume = load.represented_volume_m3_dd();
-            self.admit_volume(volume)?;
-            (load.into_spectrum(), volume, work.used)
+                |ensemble, work, cancelled| -> Result<_, ThermalInterferenceError> {
+                    let mut limits = self.limits.layer;
+                    limits.maximum_workspace_bytes =
+                        work.remaining().min(limits.maximum_workspace_bytes);
+                    let layer =
+                        ensemble.prepare_layer(self.layer_index, limits, &mut *cancelled)?;
+                    work.charge(layer.workspace_bytes())?;
+                    let mut limits = self.limits.heat;
+                    limits.maximum_workspace_bytes =
+                        work.remaining().min(limits.maximum_workspace_bytes);
+                    let load = layer.integrated_heat_spectrum(
+                        self.quadrature,
+                        AngularSpectrumExposureHeatChannel::Total,
+                        limits,
+                        &mut *cancelled,
+                    )?;
+                    work.charge(load.preparation_workspace_bytes())?;
+                    let volume = load.represented_volume_m3_dd();
+                    self.admit_volume(volume)?;
+                    Ok((load.into_spectrum(), volume, work.used))
+                },
+            )??
         };
         poll(&mut cancelled)?;
         Ok(QuasiSteadyFilmHeatLoad {
@@ -841,21 +704,232 @@ fn admit_thermal_context(
     Ok(())
 }
 
-struct Workspace {
+impl RefreshedFilmLaw {
+    /// Refresh the complete original Debye/Ohmic source, including mu and the
+    /// same-state bundle shared by combined dielectric/conductor reservoirs.
+    pub(super) fn at_temperature(
+        original: DielectricResponse<'_>,
+        card: &MaterialCard,
+        temperature_axis: &str,
+        temperature_k: f64,
+    ) -> Result<Self, ThermalInterferenceError> {
+        let point = original
+            .material()
+            .query()
+            .with(temperature_axis, temperature_k)
+            .map_err(|_| bad("accepted temperature violates the original source coordinate"))?;
+        Ok(match original {
+            DielectricResponse::Debye(source) => {
+                RefreshedFilmLaw::Debye(source.at_query_point(card, &point)?)
+            }
+            DielectricResponse::Ohmic(source) => {
+                let material = source.material().at_query_point(card, &point)?;
+                RefreshedFilmLaw::Ohmic(source.with_material(material)?)
+            }
+            DielectricResponse::DebyeWithOhmic {
+                dielectric,
+                conductor,
+            } => {
+                if dielectric.material().identity() != conductor.material().identity() {
+                    return Err(bad(
+                        "Debye and Ohmic laws must retain the same complete original snapshot",
+                    ));
+                }
+                let dielectric = dielectric.at_query_point(card, &point)?;
+                let conductor = conductor.with_material(dielectric.material().clone())?;
+                RefreshedFilmLaw::DebyeWithOhmic(dielectric, conductor)
+            }
+            _ => return Err(bad("feedback requires an original Debye and/or Ohmic film")),
+        })
+    }
+}
+
+pub(super) fn admit_refresh_source(
+    original: DielectricResponse<'_>,
+    card: &MaterialCard,
+    temperature_axis: &str,
+) -> Result<(), ThermalInterferenceError> {
+    if !matches!(
+        original,
+        DielectricResponse::Debye(_)
+            | DielectricResponse::Ohmic(_)
+            | DielectricResponse::DebyeWithOhmic { .. }
+    ) {
+        return Err(bad("feedback requires an original Debye and/or Ohmic film"));
+    }
+    let material = original.material();
+    let absolute = QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::AbsoluteTemperature,
+        ValueForm::Static,
+    ));
+    if material.card_identity() != card.content_hash()
+        || material.axis_quantities().get(temperature_axis) != Some(&absolute)
+        || material.state_coordinate(temperature_axis).is_none()
+        || material
+            .properties()
+            .iter()
+            .any(|p| !p.has_only_fixed_external_conditions(Some(temperature_axis), false))
+    {
+        return Err(bad(
+            "feedback needs its original card, an explicit absolute temperature and fixed external conditions",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn admit_drive(
+    drive: ThermalInterferenceDrive<'_>,
+    limits: ThermalInterferenceLimits,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<usize, ThermalInterferenceError> {
+    if drive.source_clock.trim().is_empty()
+        || drive.factors.len() > 4096
+        || drive.factors.len() > limits.ensemble.maximum_factors
+    {
+        return Err(bad(
+            "an explicit clock and bounded factor count are required",
+        ));
+    }
+    let mut line_count = drive.mean.len();
+    for factor in drive.factors {
+        poll(&mut *cancelled)?;
+        line_count = line_count
+            .checked_add(factor.lines.len())
+            .ok_or(bad("source line count overflows"))?;
+    }
+    if line_count == 0 || line_count > 4096 || line_count > limits.maximum_lines {
+        return Err(bad(
+            "the complete drive needs one to 4096 budgeted authored lines",
+        ));
+    }
+    for line in drive
+        .mean
+        .iter()
+        .chain(drive.factors.iter().flat_map(|f| f.lines))
+    {
+        poll(&mut *cancelled)?;
+        if !line.angular_frequency_rad_s.is_finite() || line.angular_frequency_rad_s <= 0.0 {
+            return Err(bad(
+                "every source line needs a finite positive native angular frequency",
+            ));
+        }
+    }
+    Ok(line_count)
+}
+
+/// Reuse the exact original two-face field and mean/real/proper bank preparation.
+/// The callback cannot retain these temporary field caches; owned physical
+/// results and source snapshots remain with their original coupling owner.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn with_drive_ensemble<'s, 'm, C: FnMut() -> bool, R>(
+    stacks: &[&'s PlanarDielectricLayers<'m>],
+    frequencies: &[f64],
+    grid: AngularSpectrumGrid,
+    drive: ThermalInterferenceDrive<'_>,
+    line_count: usize,
+    owner_limits: ThermalInterferenceLimits,
+    work: &mut Workspace,
+    cancelled: &mut C,
+    evaluate: impl FnOnce(&AngularSpectrumExposureEnsemble<'_, '_, 's, 'm>, &mut Workspace, &mut C) -> R,
+) -> Result<R, ThermalInterferenceError> {
+    let factor_count = drive.factors.len();
+    let mut lines: Vec<&ThermalInterferenceLine<'_>> = reserve(line_count)?;
+    lines.extend(drive.mean.iter());
+    for factor in drive.factors {
+        poll(&mut *cancelled)?;
+        lines.extend(factor.lines.iter());
+    }
+    let mut beams = reserve(line_count)?;
+    for line in &lines {
+        poll(&mut *cancelled)?;
+        let index = frequencies
+            .binary_search_by(|omega| omega.total_cmp(&line.angular_frequency_rad_s))
+            .map_err(|_| bad("authored frequency is absent from its native cache"))?;
+        let mut limits = owner_limits.angular;
+        limits.maximum_workspace_bytes = work.remaining().min(limits.maximum_workspace_bytes);
+        let beam = PlanarAngularSpectrum::prepare(
+            stacks[index],
+            grid,
+            line.left_tangential_e_v_per_m,
+            limits,
+            &mut *cancelled,
+        )?;
+        work.charge(beam.workspace_bytes())?;
+        beams.push(beam);
+    }
+    let mut illumination = reserve(line_count)?;
+    for (beam, line) in beams.iter().zip(&lines) {
+        poll(&mut *cancelled)?;
+        let mut limits = owner_limits.illumination;
+        limits.maximum_workspace_bytes = work.remaining().min(limits.maximum_workspace_bytes);
+        let prepared =
+            beam.prepare_illumination(line.right_tangential_e_v_per_m, limits, &mut *cancelled)?;
+        work.charge(prepared.workspace_bytes())?;
+        illumination.push(prepared);
+    }
+    let anchor = beams.first().ok_or(bad("a source line is required"))?;
+    let mean_count = drive.mean.len();
+    let mut limits = owner_limits.exposure;
+    limits.maximum_workspace_bytes = work.remaining().min(limits.maximum_workspace_bytes);
+    let mean = AngularSpectrumExposure::try_new_illumination(
+        anchor,
+        &illumination[..mean_count],
+        limits,
+        &mut *cancelled,
+    )?;
+    work.charge(mean.workspace_bytes())?;
+    let mut factors = reserve(factor_count)?;
+    let mut statistics = reserve(factor_count)?;
+    let mut offset = mean_count;
+    for factor in drive.factors {
+        poll(&mut *cancelled)?;
+        let end = offset + factor.lines.len();
+        let mut limits = owner_limits.exposure;
+        limits.maximum_workspace_bytes = work.remaining().min(limits.maximum_workspace_bytes);
+        let prepared = AngularSpectrumExposure::try_new_illumination(
+            anchor,
+            &illumination[offset..end],
+            limits,
+            &mut *cancelled,
+        )?;
+        work.charge(prepared.workspace_bytes())?;
+        factors.push(prepared);
+        statistics.push(factor.statistics);
+        offset = end;
+    }
+    let mut limits = owner_limits.ensemble;
+    limits.maximum_workspace_bytes = work.remaining().min(limits.maximum_workspace_bytes);
+    let ensemble = AngularSpectrumExposureEnsemble::try_new_with_statistics(
+        anchor,
+        if mean_count == 0 { None } else { Some(&mean) },
+        &factors,
+        &statistics,
+        limits,
+        &mut *cancelled,
+    )?;
+    work.charge(ensemble.workspace_bytes())?;
+
+    Ok(evaluate(&ensemble, work, cancelled))
+}
+
+pub(super) struct Workspace {
     used: usize,
     maximum: usize,
 }
 impl Workspace {
-    fn new(used: usize, maximum: usize) -> Result<Self, ThermalInterferenceError> {
+    pub(super) fn new(used: usize, maximum: usize) -> Result<Self, ThermalInterferenceError> {
         if used > maximum {
             return Err(bad("feedback preparation exceeds its workspace limit"));
         }
         Ok(Self { used, maximum })
     }
-    fn remaining(&self) -> usize {
+    pub(super) fn used(&self) -> usize {
+        self.used
+    }
+    pub(super) fn remaining(&self) -> usize {
         self.maximum - self.used
     }
-    fn charge(&mut self, bytes: usize) -> Result<(), ThermalInterferenceError> {
+    pub(super) fn charge(&mut self, bytes: usize) -> Result<(), ThermalInterferenceError> {
         self.used = self
             .used
             .checked_add(bytes)
@@ -866,19 +940,19 @@ impl Workspace {
         Ok(())
     }
 }
-fn bytes<T>(count: usize) -> Result<usize, ThermalInterferenceError> {
+pub(super) fn bytes<T>(count: usize) -> Result<usize, ThermalInterferenceError> {
     count
         .checked_mul(core::mem::size_of::<T>())
         .ok_or(bad("feedback metadata bytes overflow"))
 }
-fn checked_sum(values: &[usize]) -> Result<usize, ThermalInterferenceError> {
+pub(super) fn checked_sum(values: &[usize]) -> Result<usize, ThermalInterferenceError> {
     values.iter().try_fold(0usize, |total, &value| {
         total
             .checked_add(value)
             .ok_or(bad("feedback metadata bytes overflow"))
     })
 }
-fn reserve<T>(capacity: usize) -> Result<Vec<T>, ThermalInterferenceError> {
+pub(super) fn reserve<T>(capacity: usize) -> Result<Vec<T>, ThermalInterferenceError> {
     let mut result = Vec::new();
     result
         .try_reserve_exact(capacity)

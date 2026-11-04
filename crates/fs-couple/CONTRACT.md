@@ -30501,3 +30501,53 @@ typechecks with the complete real dependency graph of these numerical owners.
 `MovingCompactRenderer::with_moving_receiver_reflections` borrows `PreparedReflectedMovingReceiverSource` histories sharing the same original `MovingReflectionObserver`. Every physical strength interpolant is compiled once; each direct/reflected path queries it at its own retarded source time and contributes signed physical pressure to the existing compensated sum. The microphone's trajectory changes arrival times and source-clock bandwidth, never the Eulerian pressure coefficient law.
 
 The existing source/path counts, complete finite-history checks, source/receiver-pair budgets, retained root work, global sample clock and `PressureRenderer` interface remain the owners. Bandwidth admission includes every image's reflected receiver velocity; a direct-path relative-motion bound is insufficient. A foreign microphone/wall owner, incomplete reflected prehistory, a tighter unsupported residual policy or an out-of-window clock refuses before rendering. Callback partitioning remains bit-identical, coherent opposing sources cancel, and cancelled blocks preserve both output and accepted sample count. The underlying stationary ideal-wall, quiescent lossless compact-source model boundaries remain explicit; no trajectory, radiation feedback or PCM encoder semantics are introduced.
+
+### Per-cell temperature feedback for finite-footprint interference heat
+
+`layered_wave_heating::spatial_interference::feedback::QuasiSteadySpatialInterferenceHeating`
+connects accepted original thermal-cell temperatures to the existing continuous
+finite-rectangle heat path. It retains the original `LayeredWaveHeating` body,
+material-layer cards, cell order, geometry, footprint and authored quadratures.
+Each cell independently refreshes its complete selected Debye/Ohmic material
+bundle at that cell's native accepted temperature, including permeability. A
+combined Debye/Ohmic law refreshes one shared complete snapshot. No layer-average
+temperature, replacement source selection or inferred n+k reservoir is used.
+
+One rebuilt original cellwise stack per distinct authored frequency retains the
+actual source-backed incident and exit responses. The existing two-face drive
+preparer now serves both the uniform and spatial feedback owners; mean, empty,
+real and proper factors retain their original order, joint moments, frequency
+coherence and source clock. All cell heat comes from one common ensemble across
+the complete rebuilt stack. Distinct frequencies are never tolerance-merged.
+The original cell-area/volume and work admission, including the uniform-body
+complete-volume guard, remain in force.
+
+One explicit interval holds the initially refreshed optical laws and calls the
+existing spatial heat step once. Its analytic source joules, DD phase epoch,
+local source-ripple bounds, nonlinear thermal solve and native energy acceptance
+are unchanged. After that candidate solve, EACH cell must satisfy the declared
+temperature-excursion limit. Every original endpoint material source and actual-
+frequency stack is admitted before the joint result is returned. Applied and
+endpoint source responses remain inspectable in native cell order; endpoint
+admission supplies no second heat credit. Cancellation, source/stack refusal,
+excursion failure or native solve failure publishes no partial accepted state.
+
+The endpoint excursion is a control on an explicit quasi-steady split, not a
+coupled residual or a temporal-convergence certificate. The existing thermal
+column still does not resolve lateral gradients or patch-edge scattering.
+Exterior source states, geometry and native thermal laws remain held. This adds
+no phase-change chart, finite-band-table-to-causal-law inference, transient
+polarization history, reversible parameter work or ensemble-mean temperature.
+Preparation bounds cover coexisting original field caches and retained cell
+sources; dropped applied caches are not charged as coexisting with endpoint
+stack admission. Source payloads and allocator overhead remain excluded.
+
+Seven focused native tests passed: the five existing exact source/clock/ripple
+tests plus two new per-cell excursion/domain/cancellation tests. The complete
+new adapter and actual shared drive helper typechecked together with original
+native math/FFT libraries and signature-only optical/material/thermal owner
+declarations. That supplies no full physical-owner execution claim. Two public
+actual-owner tests are authored for mixed-bank temperature feedback, independent
+two-cell thermal balance, source-joule change, clock continuation, and atomic
+endpoint optical-domain refusal. They remain unrun while the full Cargo/DSR
+workspace is blocked by the missing sibling checkouts.

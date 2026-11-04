@@ -1,4 +1,7 @@
 //! Original public field/material/cell-solve integration, with authored laws.
+#[path = "spatial_interference/feedback.rs"]
+mod feedback;
+
 use super::*;
 use fs_couple::layered_wave_heating::spatial_interference::{
     SpatialInterferenceCellQuadrature, SpatialInterferenceHeating,

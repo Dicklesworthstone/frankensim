@@ -45,6 +45,10 @@ use fs_material::thermal::{
 use fs_math::dd::Dd;
 use fs_thermal::enthalpy::{CellId, DepositionError, DepositionSimulation};
 
+/// Accepted-cell-temperature feedback using original causal loss reservoirs.
+#[path = "spatial_interference/feedback.rs"]
+pub mod feedback;
+
 /// Each native cell has its own original positive depth samples, in metres
 /// relative to that cell's optical entrance face. The complete cell thickness
 /// is integrated; weights are never normalized or copied from another cell.
