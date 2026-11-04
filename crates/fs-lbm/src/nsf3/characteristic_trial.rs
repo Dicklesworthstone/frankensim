@@ -203,14 +203,27 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         controls: &[(usize, NsfOpenState)], steps: usize, maximum_cell_steps: usize,
         cancelled: impl Fn() -> bool,
     ) -> Result<NsfCharacteristicTrial<'_, L>, NsfError> {
+        self.preview_boundary_interval_with_updates(drives, patch_drives, controls,
+            steps, maximum_cell_steps, cancelled, |_| Ok(()))
+    }
+
+    // A source may update the original candidate at each native step boundary,
+    // including the final endpoint. The solver and complete chronological
+    // exchange aggregation below remain the same owner as held controls.
+    pub(super) fn preview_boundary_interval_with_updates<E: From<NsfError>>(
+        &mut self, drives: [NsfBoundaryDrive; 2], patch_drives: [Option<NsfBoundaryDrive>; 2],
+        controls: &[(usize, NsfOpenState)], steps: usize, maximum_cell_steps: usize,
+        cancelled: impl Fn() -> bool,
+        mut update: impl FnMut(&mut Self) -> Result<(), E>,
+    ) -> Result<NsfCharacteristicTrial<'_, L>, E> {
         if cancelled() {
-            return Err(NsfError::Input("characteristic interval cancelled"));
+            return Err(NsfError::Input("characteristic interval cancelled").into());
         }
         if self.open.is_none() || self.sources.is_some() || self.dynamic_sgs.is_some() || steps == 0
             || self.n.checked_mul(steps).is_none_or(|work| work > maximum_cell_steps)
             || self.steps.checked_add(steps).is_none()
         {
-            return Err(NsfError::Input("characteristic interval requires bounded positive source-free cell-step work"));
+            return Err(NsfError::Input("characteristic interval requires bounded positive source-free cell-step work").into());
         }
         let mass_before_kg = self.total_mass_kg();
         let energy_before_j = self.total_energy_j();
@@ -235,8 +248,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         }
         for _ in 0..steps {
             if cancelled() {
-                return Err(NsfError::Input("characteristic interval cancelled"));
+                return Err(NsfError::Input("characteristic interval cancelled").into());
             }
+            update(&mut candidate)?;
             let step = candidate.step()?;
             reservoir_mass_out_kg += candidate.last_reservoir_mass_out_kg().unwrap_or(0.0);
             for total in &mut reservoir_exchanges {
@@ -246,7 +260,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 if step.aperture != total.aperture || step.area_m2 != total.area_m2
                     || step.reference_pressure_pa != total.reference_pressure_pa
                 {
-                    return Err(NsfError::Input("reservoir work changed its original area or reference"));
+                    return Err(NsfError::Input("reservoir work changed its original area or reference").into());
                 }
                 total.mean_pressure_pa += step.mean_pressure_pa;
                 total.mean_acoustic_pressure_pa += step.mean_acoustic_pressure_pa;
@@ -309,6 +323,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 total.acoustic_pressure_work_out_j += step.acoustic_pressure_work_out_j;
             }
         }
+        // Refresh a time-dependent boundary at the accepted endpoint without
+        // adding a fluid step or fabricating another mass/energy transfer.
+        update(&mut candidate)?;
         for face in &mut exchange {
             face.mean_pressure_pa /= steps as f64;
             face.mean_acoustic_pressure_pa /= steps as f64;
@@ -354,10 +371,10 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 reservoir_mass_out_kg]
                 .iter().all(|x| x.is_finite())
         {
-            return Err(NsfError::Input("characteristic interval exchange overflowed"));
+            return Err(NsfError::Input("characteristic interval exchange overflowed").into());
         }
         if cancelled() {
-            return Err(NsfError::Input("characteristic interval cancelled"));
+            return Err(NsfError::Input("characteristic interval cancelled").into());
         }
         Ok(NsfCharacteristicTrial {
             owner: self, candidate, exchange, patch_exchange, ledger, mass_before_kg, energy_before_j,

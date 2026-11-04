@@ -2,12 +2,17 @@
 //!
 //! The atmosphere owns both temporal decorrelation and advection. A successful
 //! apply publishes its advanced state together with the original reservoir
-//! profile. Native fluid advancement remains a separate operation, as for the
-//! frozen adapter. OU correlation times are authored model inputs, not a
-//! resolved eddy-turnover or wall-layer model.
+//! profile. A native interval can also evolve that profile at every fluid-step
+//! boundary and accept both owners together. OU correlation times are authored
+//! model inputs, not a resolved eddy-turnover or wall-layer model.
 
 use super::*;
 use fs_atmo::mann_field::fixed_step::FixedStepMannField;
+
+mod interval;
+pub use interval::{
+    NsfEvolvingMannIntervalBudget, NsfEvolvingMannIntervalReport, NsfEvolvingMannTrial,
+};
 
 /// Both inlet policies use the same physical-frame and boundary refusals.
 pub type NsfEvolvingMannError = NsfFrozenMannError;
@@ -348,6 +353,16 @@ impl NsfEvolvingMannInflow {
         if cancelled() {
             return Err(NsfEvolvingMannError::Cancelled);
         }
+        self.trial.copy_temporal_state_from(&self.field)?;
+        let report = self.stage_profile(grid, maximum_ou_mode_transitions, &mut cancelled)?;
+        core::mem::swap(&mut self.field, &mut self.trial);
+        Ok(report)
+    }
+
+    fn target_step<L: Lattice3<27>>(
+        &self,
+        grid: &NsfGrid3<L>,
+    ) -> Result<u64, NsfEvolvingMannError> {
         let b = &self.binding;
         let source = grid
             .reservoir_aperture_at(b.aperture)
@@ -368,30 +383,47 @@ impl NsfEvolvingMannInflow {
                 "evolving Mann inlet requires its bound grid and aperture geometry",
             ));
         }
-        let elapsed_steps = grid
-            .steps()
-            .checked_sub(b.cfd_step)
+        self.atmosphere_step_at(grid.steps())
+    }
+
+    fn atmosphere_step_at(&self, cfd_step: usize) -> Result<u64, NsfEvolvingMannError> {
+        let elapsed_steps = cfd_step
+            .checked_sub(self.binding.cfd_step)
             .and_then(|steps| u64::try_from(steps).ok())
             .ok_or(NsfEvolvingMannError::Input(
                 "CFD clock precedes the bound inlet epoch",
             ))?;
-        let target = b
+        self.binding
             .atmosphere_step
             .checked_add(elapsed_steps)
-            .ok_or(NsfEvolvingMannError::Input("atmosphere step overflows"))?;
+            .ok_or(NsfEvolvingMannError::Input("atmosphere step overflows"))
+    }
+
+    fn transition_work(&self, from: u64, target: u64) -> Result<usize, NsfEvolvingMannError> {
         let span = target
-            .checked_sub(self.field.step())
+            .checked_sub(from)
             .and_then(|span| usize::try_from(span).ok())
             .ok_or(NsfEvolvingMannError::Input(
                 "CFD clock precedes the accepted atmosphere",
             ))?;
-        let transitions = span
-            .checked_mul(self.field.model().mode_count())
+        span.checked_mul(self.field.model().mode_count())
             .and_then(|work| work.checked_mul(4))
             .ok_or(NsfEvolvingMannError::Input(
                 "atmosphere transition work overflows",
-            ))?;
-        self.trial.copy_temporal_state_from(&self.field)?;
+            ))
+    }
+
+    // Only the trial atmosphere and the supplied candidate grid are changed.
+    // Standalone apply swaps after this succeeds; a native interval retains it
+    // between original substeps and publishes only with the complete fluid.
+    fn stage_profile<L: Lattice3<27>>(
+        &mut self,
+        grid: &mut NsfGrid3<L>,
+        maximum_ou_mode_transitions: usize,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<NsfEvolvingMannApplied, NsfEvolvingMannError> {
+        let target = self.target_step(grid)?;
+        let transitions = self.transition_work(self.trial.step(), target)?;
         self.trial
             .advance_to(target, maximum_ou_mode_transitions, &mut cancelled)
             .map_err(|error| {
@@ -401,6 +433,7 @@ impl NsfEvolvingMannInflow {
                     NsfEvolvingMannError::Atmosphere(error)
                 }
             })?;
+        let b = &self.binding;
         let sampled = sample_profile(
             grid,
             b.aperture,
@@ -444,10 +477,12 @@ impl NsfEvolvingMannInflow {
             advective_phase_bound_rad: sampled.temporal_phase_bound_rad,
         };
         grid.set_reservoir_aperture_profile(b.aperture, &self.profile)?;
-        core::mem::swap(&mut self.field, &mut self.trial);
         Ok(report)
     }
 }
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod interval_tests;

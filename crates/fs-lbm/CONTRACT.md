@@ -11169,3 +11169,29 @@ This is an Estimated maximum of the declared local model, not a floating-point
 enclosure, arbitrary-wavelength stability proof or full free-surface eigensolve.
 `tests/film_band.rs` checks independent dimensional extrema, an unstable
 interior missed by endpoint samples, monotone/neutral limits and tail refusals.
+
+## Evolving Mann inflow across native characteristic intervals
+
+`NsfEvolvingMannInflow::preview_boundary_interval` evolves the existing inlet
+at every original fixed-dt NSF step boundary. The profile at time n is held
+through native step n to n+1; a final endpoint refresh aligns both accepted
+clocks without adding a fluid transfer. Point samples, face/cell averages,
+mean/frame/gas and planar filtering reuse the existing sampler.
+`NsfEvolvingMannIntervalBudget` bounds total cell steps, OU transitions
+(including initial catch-up and endpoint), and N+1 tile-mode profile evaluations.
+
+The existing `NsfCharacteristicTrial` owns the single fluid candidate and
+unchanged chronological mass, energy, pressure-work and covariance aggregation.
+The inlet reuses its source trial and profile buffers. `NsfEvolvingMannTrial::fluid()`
+exposes those interval receipts before acceptance; the endpoint rebind retains
+the original control-update semantics for the candidate's last-step queries.
+Acceptance publishes both owners. Drop, refusal or cancellation retains both
+accepted states for exact retry. Standalone `apply` semantics remain unchanged.
+
+This is native stepwise prescribed synthetic inflow, without interpolation
+within predictor passes or a higher-order, nonreflecting or eddy-turnover
+qualification. Regressions in `mann_inflow/evolving/interval_tests.rs` compare
+all six point/face/cell and homogeneous/plane observations with explicit
+apply/step/endpoint sequences, demonstrate changed resolved velocity and energy
+exchange relative to held inflow, and cover budgets, catch-up, cancelled/dropped
+retry and native fluid refusal.
