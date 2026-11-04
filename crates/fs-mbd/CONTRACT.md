@@ -1783,6 +1783,24 @@ are not rolled back. Second order applies to smooth resolved load laws. This
 explicit lane does not imply stiff stability, motor electrical-state coupling,
 hybrid controller switching or a dissipation/thermal model for callback effort.
 
+### Stage-dependent external forcing and internal actuation
+
+`articulated::motion::step_free_floating_with_forcing` samples external link
+wrenches and internal joint efforts together at elapsed times zero and `dt/2`,
+using the actual reconstructed stage states. Both output slices reset from the
+held loads before each call. External wrenches remain about link origins in
+their own body frames; uniform gravity retains its separate original owner.
+The same accepted samples drive native ABA, momentum reconstruction and the
+original external impulse/work and internal actuator-work accounts. Internal
+efforts retain finite carrier recoil and never enter external momentum supply.
+One wrench and one effort buffer are reused; existing held/effort-only paths
+retain their arithmetic. Callback errors, nonfinite loads, effort limits and
+cancellation refuse atomically. Smooth histories and feedback must be resolved
+by this explicit step; load jumps require step splitting, impulses have their
+separate owner, and callback work is not automatically assigned to heat.
+Focused tests in `articulated_motion` cover ramped thrust, analytic drag decay,
+combined motor/external torque, held-path equivalence and midpoint refusals.
+
 ## Live free-floating inertia reconfiguration
 
 `articulated::motion::reconfigure::transfer_inertia` transfers an actual moving

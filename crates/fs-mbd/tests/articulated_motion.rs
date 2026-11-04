@@ -1134,3 +1134,347 @@ fn internal_actuation_receipts_retain_work_below_the_total_energy_ulp() {
     close(step.kinetic_work_residual, 0.0, roundoff);
     impulse_balance(&step, 1e-14 * duration);
 }
+
+mod forcing {
+    use super::*;
+    use fs_mbd::articulated::motion::{
+        step_free_floating_with_effort, step_free_floating_with_forcing,
+    };
+    use std::cell::Cell;
+
+    fn free_body(mass: f64) -> ArticulatedModel {
+        ArticulatedModel::new(vec![Link::new(
+            "body",
+            None,
+            Se3::identity(),
+            JointModel::FIXED,
+            sphere(mass, 1.0),
+        )])
+        .unwrap()
+    }
+
+    #[test]
+    fn ramped_world_thrust_uses_the_actual_two_stages_and_the_same_work_sample() {
+        let model = free_body(2.0);
+        let orientation = rotation(Vec3::new(0.2, -0.3, 0.4));
+        let origin = Vec3::new(1.0, -2.0, 0.5);
+        let velocity = Vec3::new(0.3, -0.4, 0.2);
+        let mut state = still(vec![], vec![]);
+        state.base = FreeFloatingBaseState::new(
+            Se3::from_parts(orientation, origin).unwrap(),
+            Twist::new(
+                Vec3::default(),
+                orientation.inverse().rotate(velocity).unwrap(),
+            ),
+        );
+        let f0 = Vec3::new(1.0, -0.5, 0.3);
+        let slope = Vec3::new(2.0, -1.0, 0.5);
+        let duration = 0.2;
+        let mut samples = Vec::new();
+        let step = step_free_floating_with_forcing(
+            &model,
+            &state,
+            FreeFloatingMotionLoads {
+                generalized_force: &[],
+                external_body_wrench: &[Wrench::default()],
+                gravity_world: Vec3::default(),
+            },
+            duration,
+            |time, stage, wrenches, efforts| {
+                assert_eq!(wrenches, &[Wrench::default()]);
+                assert!(efforts.is_empty());
+                let stage_rotation = stage.base.world_from_base.rotation();
+                samples.push((
+                    time,
+                    stage.base.world_from_base.translation(),
+                    stage_rotation.rotate(stage.base.twist_body.linear).unwrap(),
+                ));
+                wrenches[0].force = stage_rotation.inverse().rotate(f0 + slope.scale(time))?;
+                Ok(())
+            },
+            || false,
+        )
+        .unwrap();
+        assert_eq!(
+            samples.len(),
+            2,
+            "no extra callback evaluations for receipts"
+        );
+        close(samples[0].0, 0.0, 0.0);
+        close(samples[1].0, 0.5 * duration, 0.0);
+        vector(samples[0].1, origin, 1e-14);
+        vector(samples[1].1, origin + velocity.scale(0.5 * duration), 1e-14);
+        let midpoint_velocity = velocity + f0.scale(duration / 4.0);
+        vector(samples[1].2, midpoint_velocity, 2e-14);
+        let impulse = f0.scale(duration) + slope.scale(0.5 * duration * duration);
+        vector(step.external_linear_impulse_world, impulse, 2e-14);
+        vector(
+            step.momentum_after.linear_momentum_world,
+            velocity.scale(2.0) + impulse,
+            3e-14,
+        );
+        close(
+            step.external_work,
+            duration * (f0 + slope.scale(0.5 * duration)).dot(midpoint_velocity),
+            2e-14,
+        );
+        close(step.actuator_work, 0.0, 0.0);
+        impulse_balance(&step, 4e-14);
+    }
+
+    #[test]
+    fn velocity_drag_converges_to_exponential_momentum_decay_at_second_order() {
+        let model = free_body(2.0);
+        let initial_velocity = Vec3::new(1.2, -0.8, 0.3);
+        let gamma = 1.3;
+        let decay = (-gamma / 2.0_f64).exp();
+        let mut errors = Vec::new();
+        for count in [10, 20, 40] {
+            let mut state = still(vec![], vec![]);
+            state.base.twist_body.linear = initial_velocity;
+            for _ in 0..count {
+                let step = step_free_floating_with_forcing(
+                    &model,
+                    &state,
+                    FreeFloatingMotionLoads {
+                        generalized_force: &[],
+                        external_body_wrench: &[Wrench::default()],
+                        gravity_world: Vec3::default(),
+                    },
+                    1.0 / f64::from(count),
+                    |_, stage, wrenches, _| {
+                        wrenches[0].force = stage.base.twist_body.linear.scale(-gamma);
+                        Ok(())
+                    },
+                    || false,
+                )
+                .unwrap();
+                assert!(step.external_work < 0.0);
+                close(step.actuator_work, 0.0, 0.0);
+                impulse_balance(&step, 1e-13);
+                state = step.state_after;
+            }
+            let velocity_error =
+                (state.base.twist_body.linear - initial_velocity.scale(decay)).norm();
+            let position_error = (state.base.world_from_base.translation()
+                - initial_velocity.scale(2.0 * (1.0 - decay) / gamma))
+            .norm();
+            errors.push(velocity_error + position_error);
+        }
+        for pair in errors.windows(2) {
+            assert!((3.8..4.3).contains(&(pair[0] / pair[1])), "{errors:?}");
+        }
+        assert!(errors[2] < 8e-5, "{errors:?}");
+    }
+
+    #[test]
+    fn external_torque_history_and_internal_motor_effort_keep_distinct_momenta_and_work() {
+        let model = wheel(None);
+        let mut state = still(vec![0.0], vec![0.4]);
+        state.base.twist_body.angular = Vec3::new(0.0, 0.0, 0.2);
+        let duration = 0.2;
+        let mut samples = Vec::new();
+        let step = step_free_floating_with_forcing(
+            &model,
+            &state,
+            FreeFloatingMotionLoads {
+                generalized_force: &[0.25],
+                external_body_wrench: &[Wrench::default(); 2],
+                gravity_world: Vec3::default(),
+            },
+            duration,
+            |time, stage, wrenches, efforts| {
+                assert_eq!(wrenches, &[Wrench::default(); 2]);
+                assert_eq!(
+                    efforts,
+                    &[0.25],
+                    "held efforts must reset at the second stage"
+                );
+                wrenches[0].torque = Vec3::new(0.0, 0.0, 1.2 + 0.7 * time);
+                efforts[0] = 2.0 - 0.3 * time;
+                samples.push((
+                    time,
+                    stage.base.twist_body.angular.z,
+                    stage.joint_velocity[0],
+                ));
+                Ok(())
+            },
+            || false,
+        )
+        .unwrap();
+        assert_eq!(samples.len(), 2);
+        // I_base=2, I_rotor=1. Only the external torque changes total L;
+        // base torque is T_ext-tau and absolute rotor torque is tau.
+        close(
+            step.state_after.base.twist_body.angular.z,
+            0.2 - 0.4 * duration + 0.25 * duration * duration,
+            2e-14,
+        );
+        close(
+            step.state_after.joint_velocity[0],
+            0.4 + 2.4 * duration - 0.4 * duration * duration,
+            3e-14,
+        );
+        let angular_impulse = 1.2 * duration + 0.35 * duration * duration;
+        close(
+            step.momentum_after.angular_momentum_world.z,
+            1.0 + angular_impulse,
+            3e-14,
+        );
+        close(
+            step.external_angular_impulse_world.z,
+            angular_impulse,
+            2e-14,
+        );
+        let half = 0.5 * duration;
+        close(samples[1].1, 0.2 - 0.4 * half, 2e-14);
+        close(samples[1].2, 0.4 + 2.4 * half, 2e-14);
+        close(
+            step.external_work,
+            duration * (1.2 + 0.7 * half) * samples[1].1,
+            2e-14,
+        );
+        close(
+            step.actuator_work,
+            duration * (2.0 - 0.3 * half) * samples[1].2,
+            3e-14,
+        );
+        vector(
+            step.momentum_after.linear_momentum_world,
+            Vec3::default(),
+            2e-14,
+        );
+        impulse_balance(&step, 5e-14);
+    }
+
+    #[test]
+    fn unchanged_forcing_retains_both_held_and_effort_only_paths() {
+        let model = wheel(None);
+        let mut state = still(vec![0.2], vec![0.5]);
+        state.base = FreeFloatingBaseState::new(
+            Se3::from_parts(
+                rotation(Vec3::new(0.2, -0.1, 0.3)),
+                Vec3::new(1.0, -2.0, 0.5),
+            )
+            .unwrap(),
+            Twist::new(Vec3::new(0.2, 0.3, -0.4), Vec3::new(0.1, -0.2, 0.5)),
+        );
+        let wrenches = [
+            Wrench::new(Vec3::new(0.2, 0.1, -0.3), Vec3::new(0.1, 0.3, -0.2)),
+            Wrench::new(Vec3::new(-0.1, 0.3, 0.2), Vec3::new(0.4, -0.1, 0.2)),
+        ];
+        let loads = FreeFloatingMotionLoads {
+            generalized_force: &[0.7],
+            external_body_wrench: &wrenches,
+            gravity_world: Vec3::new(0.0, -0.8, 0.0),
+        };
+        let held = step_free_floating(&model, &state, loads, 0.01, || false).unwrap();
+        let supplied = step_free_floating_with_forcing(
+            &model,
+            &state,
+            loads,
+            0.01,
+            |_, _, _, _| Ok(()),
+            || false,
+        )
+        .unwrap();
+        assert_eq!(held, supplied);
+        let effort = |t: f64, s: &FreeFloatingMotionState, e: &mut [f64]| {
+            e[0] += 0.3 * t - 0.2 * s.joint_position[0] - 0.1 * s.joint_velocity[0];
+            Ok(())
+        };
+        let original =
+            step_free_floating_with_effort(&model, &state, loads, 0.01, effort, || false).unwrap();
+        let supplied = step_free_floating_with_forcing(
+            &model,
+            &state,
+            loads,
+            0.01,
+            |t, s, _, e| effort(t, s, e),
+            || false,
+        )
+        .unwrap();
+        assert_eq!(original, supplied);
+    }
+
+    #[test]
+    fn callback_domain_nonfinite_effort_limit_and_midpoint_cancellation_are_atomic() {
+        let model = wheel(Some(JointLimits::new(-2.0, 2.0, 10.0, 1.0).unwrap()));
+        let state = still(vec![0.0], vec![0.0]);
+        let before = state.clone();
+        let loads = FreeFloatingMotionLoads {
+            generalized_force: &[0.0],
+            external_body_wrench: &[Wrench::default(); 2],
+            gravity_world: Vec3::default(),
+        };
+        let error = FreeFloatingMotionError::InvalidLoad("forcing domain");
+        assert_eq!(
+            step_free_floating_with_forcing(
+                &model,
+                &state,
+                loads,
+                0.01,
+                |time, _, _, _| if time > 0.0 {
+                    Err(error.clone())
+                } else {
+                    Ok(())
+                },
+                || false
+            ),
+            Err(error)
+        );
+        assert!(matches!(
+            step_free_floating_with_forcing(
+                &model,
+                &state,
+                loads,
+                0.01,
+                |time, _, w, _| {
+                    if time > 0.0 {
+                        w[0].force.x = f64::NAN;
+                    }
+                    Ok(())
+                },
+                || false
+            ),
+            Err(FreeFloatingMotionError::Dynamics(
+                ArticulatedError::NonFinite { .. }
+            ))
+        ));
+        assert!(matches!(
+            step_free_floating_with_forcing(
+                &model,
+                &state,
+                loads,
+                0.01,
+                |time, _, _, e| {
+                    if time > 0.0 {
+                        e[0] = 2.0;
+                    }
+                    Ok(())
+                },
+                || false
+            ),
+            Err(FreeFloatingMotionError::Dynamics(
+                ArticulatedError::JointEffortLimitViolation { .. }
+            ))
+        ));
+        let calls = Cell::new(0);
+        assert_eq!(
+            step_free_floating_with_forcing(
+                &model,
+                &state,
+                loads,
+                0.01,
+                |_, _, _, _| {
+                    calls.set(calls.get() + 1);
+                    Ok(())
+                },
+                || calls.get() == 2
+            ),
+            Err(FreeFloatingMotionError::Cancelled)
+        );
+        assert_eq!(calls.get(), 2);
+        assert_eq!(state, before);
+    }
+}

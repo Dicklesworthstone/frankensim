@@ -270,7 +270,78 @@ pub fn step_free_floating_with_effort(
     .step)
 }
 
+/// Advance with external loading and internal actuation sampled at both stages.
+///
+/// `forcing` is called once at elapsed time zero and once at `duration / 2`,
+/// with the actual initial and reconstructed midpoint states. Both output
+/// slices are reset from `loads` before each call. The callback may add to or
+/// replace the per-link external wrenches and internal joint efforts together,
+/// allowing thrust histories, velocity-dependent drag and smooth feedback.
+/// An absolute clock can be captured by the callback.
+///
+/// Each external wrench is about its link origin and expressed in that link's
+/// body frame, including the moment of any off-origin force. A world-fixed
+/// load must be transformed at the supplied stage. Generalized efforts retain
+/// the existing joint units and are internal: native ABA supplies carrier
+/// recoil, while only external wrenches enter the spatial impulse account.
+/// Uniform gravity remains separately owned by `loads.gravity_world`.
+///
+/// The SAME accepted stage sample drives ABA, momentum reconstruction and the
+/// midpoint work/impulse accounts. No force law is reevaluated for diagnostics.
+/// One O(links) wrench buffer and one O(joints) effort buffer are reused across
+/// the two samples; the original held-load paths retain their borrowed slices.
+///
+/// Second order requires smooth, resolved forcing. This explicit lane supplies
+/// no stiff stability, event localization, force-to-impulse replacement or
+/// constitutive heat assignment. Split a trajectory at load discontinuities;
+/// instantaneous impulses use the separate native impulse owner. Cancellation
+/// brackets each callback, whose internal work and side effects remain its
+/// responsibility. Refusal never changes the borrowed input state.
+///
+/// # Errors
+/// The original physical/state/effort admissions, nonfinite stage wrenches,
+/// callback errors and cancellation all refuse before publication.
+pub fn step_free_floating_with_forcing(
+    model: &ArticulatedModel,
+    state: &FreeFloatingMotionState,
+    loads: FreeFloatingMotionLoads<'_>,
+    duration: f64,
+    mut forcing: impl FnMut(
+        f64,
+        &FreeFloatingMotionState,
+        &mut [Wrench],
+        &mut [f64],
+    ) -> Result<(), FreeFloatingMotionError>,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<FreeFloatingMotionStep, FreeFloatingMotionError> {
+    Ok(step_evaluated_with_forcing(
+        model,
+        state,
+        loads,
+        duration,
+        &mut cancelled,
+        |map, base, cancelled| {
+            Ok(EvaluatedStage {
+                body_wrench: Cow::Borrowed(loads.external_body_wrench),
+                load: map.loads(base, loads, cancelled)?,
+            })
+        },
+        None,
+        None,
+        Some(&mut forcing),
+    )?
+    .step)
+}
+
 type EffortLaw<'a> = dyn FnMut(f64, &FreeFloatingMotionState, &mut [f64]) -> Result<(), FreeFloatingMotionError>
+    + 'a;
+
+type ForcingLaw<'a> = dyn FnMut(
+        f64,
+        &FreeFloatingMotionState,
+        &mut [Wrench],
+        &mut [f64],
+    ) -> Result<(), FreeFloatingMotionError>
     + 'a;
 
 /// Internal reaction after one native ABA, without changing caller efforts.
@@ -337,6 +408,26 @@ fn step_evaluated_with_reaction<'a, C: FnMut() -> bool>(
     loads: FreeFloatingMotionLoads<'a>,
     duration: f64,
     cancelled: &mut C,
+    evaluate: impl FnMut(
+        &MomentumMap,
+        FreeFloatingBaseState,
+        &mut C,
+    ) -> Result<EvaluatedStage<'a>, FreeFloatingMotionError>,
+    effort: Option<&mut EffortLaw<'_>>,
+    reaction: Option<&mut ReactionLaw<'_>>,
+) -> Result<EvaluatedStep, FreeFloatingMotionError> {
+    step_evaluated_with_forcing(
+        model, state, loads, duration, cancelled, evaluate, effort, reaction, None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn step_evaluated_with_forcing<'a, C: FnMut() -> bool>(
+    model: &ArticulatedModel,
+    state: &FreeFloatingMotionState,
+    loads: FreeFloatingMotionLoads<'a>,
+    duration: f64,
+    cancelled: &mut C,
     mut evaluate: impl FnMut(
         &MomentumMap,
         FreeFloatingBaseState,
@@ -344,6 +435,7 @@ fn step_evaluated_with_reaction<'a, C: FnMut() -> bool>(
     ) -> Result<EvaluatedStage<'a>, FreeFloatingMotionError>,
     mut effort: Option<&mut EffortLaw<'_>>,
     mut reaction: Option<&mut ReactionLaw<'_>>,
+    mut forcing: Option<&mut ForcingLaw<'_>>,
 ) -> Result<EvaluatedStep, FreeFloatingMotionError> {
     poll(cancelled)?;
     if !duration.is_finite() || duration <= 0.0 {
@@ -381,8 +473,22 @@ fn step_evaluated_with_reaction<'a, C: FnMut() -> bool>(
     )?;
     let momentum_before = momentum_from_kinematics(model, &kinematics_before)?;
     poll(cancelled)?;
-    let initial_stage = evaluate(&initial_map, state.base, cancelled)?;
     let mut stage_effort = Cow::Borrowed(loads.generalized_force);
+    let mut stage_wrench = Cow::Borrowed(loads.external_body_wrench);
+    let initial_stage = if let Some(law) = forcing.as_deref_mut() {
+        sample_forcing(
+            0.0,
+            state,
+            &initial_map,
+            loads,
+            stage_wrench.to_mut(),
+            stage_effort.to_mut(),
+            law,
+            cancelled,
+        )?
+    } else {
+        evaluate(&initial_map, state.base, cancelled)?
+    };
     if let Some(law) = effort.as_deref_mut() {
         poll(cancelled)?;
         law(0.0, state, stage_effort.to_mut())?;
@@ -417,6 +523,7 @@ fn step_evaluated_with_reaction<'a, C: FnMut() -> bool>(
         )?;
     }
     let initial_load = initial_stage.load;
+    drop(initial_stage);
     let half = 0.5 * duration;
     let midpoint_coordinates = MomentumCoordinates {
         center_world: initial.center_world + initial.linear_world.scale(half / initial_map.mass()),
@@ -440,7 +547,20 @@ fn step_evaluated_with_reaction<'a, C: FnMut() -> bool>(
     let midpoint_map = MomentumMap::new(model, &midpoint, cancelled)?;
     midpoint.base = midpoint_map.reconstruct(midpoint_rotation, midpoint_coordinates)?;
     poll(cancelled)?;
-    let midpoint_stage = evaluate(&midpoint_map, midpoint.base, cancelled)?;
+    let midpoint_stage = if let Some(law) = forcing.as_deref_mut() {
+        sample_forcing(
+            half,
+            &midpoint,
+            &midpoint_map,
+            loads,
+            stage_wrench.to_mut(),
+            stage_effort.to_mut(),
+            law,
+            cancelled,
+        )?
+    } else {
+        evaluate(&midpoint_map, midpoint.base, cancelled)?
+    };
     if let Some(law) = effort.as_deref_mut() {
         poll(cancelled)?;
         stage_effort
@@ -604,6 +724,35 @@ fn step_evaluated_with_reaction<'a, C: FnMut() -> bool>(
             internal_body_work,
             kinetic_work_residual,
         },
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sample_forcing<'s>(
+    elapsed: f64,
+    state: &FreeFloatingMotionState,
+    map: &MomentumMap,
+    held: FreeFloatingMotionLoads<'_>,
+    wrenches: &'s mut [Wrench],
+    efforts: &mut [f64],
+    law: &mut ForcingLaw<'_>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<EvaluatedStage<'s>, FreeFloatingMotionError> {
+    wrenches.copy_from_slice(held.external_body_wrench);
+    efforts.copy_from_slice(held.generalized_force);
+    poll(cancelled)?;
+    law(elapsed, state, wrenches, efforts)?;
+    poll(cancelled)?;
+    validate_external_wrenches(wrenches)?;
+    validate_slice(efforts, "free_floating_motion.stage_effort")?;
+    let loads = FreeFloatingMotionLoads {
+        generalized_force: efforts,
+        external_body_wrench: wrenches,
+        gravity_world: held.gravity_world,
+    };
+    Ok(EvaluatedStage {
+        load: map.loads(state.base, loads, cancelled)?,
+        body_wrench: Cow::Borrowed(wrenches),
     })
 }
 
