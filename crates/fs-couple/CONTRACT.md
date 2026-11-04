@@ -24987,6 +24987,27 @@ apply. Focused fixtures cover exact split motion/heat, stiff loss and reactions,
 ringdown refinement, finite-pose derivatives, frame objectivity, source matching
 and atomic refusal; they do not establish measured material calibration.
 
+## Intrinsic transverse shear loss on native rods
+
+The native fixed-state rod also admits transverse shear through
+`PreparedRodTransverseLoss` and `RodMaterialLosses`. The section retains its
+original shear correction and explicit per-layer shear viscosities, giving
+`C_s = kappa * sum(eta_s A)`. The native geodesic-midpoint derivatives of
+`L0 * [gamma_y, gamma_z]` supply both rate and force/couple impulses, including
+finite-rotation and eccentric-inertia terms. Axial and transverse loss share
+one displacement-flow owner; bending and torsional loss remain independent.
+Exact frozen-pose exponential flows compose symmetrically across directions,
+segments and mechanisms. They report separate transverse heat, support
+reactions and the signed integration defect before publishing a candidate.
+Explicit zero viscosity preserves the preexisting trajectory. Sources must
+match the original mechanics and supply broadband fixed-state support.
+This Kelvin section model does not resolve cross-sectional warping, hereditary
+shear relaxation, thermal deposition or thermal feedback. Elastic-wave and
+splitting accuracy still require timestep refinement. Focused G0/G1/G3/G4
+tests exercise manufactured two-direction decay and independent heat, stiff
+viscosity, a three-clock refinement ladder, zero-law parity, rigid motion,
+source mismatch and cancellation. They do not establish measured calibration.
+
 ## Finite-cell heating from intrinsic shaft viscosity
 
 `RodThermoelasticSystem::step_torsional` and `step_spatial_torsional` connect

@@ -34,6 +34,8 @@ pub mod winding;
 pub mod wound;
 /// Rotary inertia and explicitly sourced torsional shear loss.
 pub mod torsion;
+/// Explicit transverse shear viscosity on the original corrected shear section.
+pub mod transverse;
 
 #[cfg(test)]
 mod parameter_tests;

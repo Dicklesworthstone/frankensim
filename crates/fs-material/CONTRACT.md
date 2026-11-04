@@ -2432,6 +2432,14 @@ homogenization, the P2 milestone.
   They carry no tension and add no EA, EI, loss, friction or wrap prestress:
   the core section owns those. G0 tests check the helix integral, the second
   wrap's radius, brute-force turn clearance and every refusal.
+- `section::transverse::ConcentricTransverseViscosity` retains each original
+  shear section, material state and explicit shear-viscosity selector. Its
+  corrected rigidity is `C_s = kappa * sum(eta_s A)` in each transverse
+  direction, using the same declared uniform-shear correction as elasticity.
+  Fixed-state constant coefficients, original source bands and layer order
+  survive; absent, negative, wrong-quantity and frequency-local transient
+  substitutes are refused. This is a small-strain section reduction, without
+  resolved cross-sectional warping or interlayer slip.
 - `section::strength::AxialTensileCapacity` binds a caller-named tensile-limit
   claim [Pa] (yield, proof or ultimate strength; never chosen, factored or
   converted to an allowable here) from every bonded layer. A common axial

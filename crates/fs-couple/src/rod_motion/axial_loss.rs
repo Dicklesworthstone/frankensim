@@ -145,106 +145,25 @@ impl PreparedRodAxialLoss {
             .axial_extension_gradients_into(&state.pose, &mut gradients[..n], gate)?;
         // Convert material-node covectors into the SAME COM/spin coordinates
         // used by native motion. This preserves all translation/rotation terms.
-        let mut modes = [AxialMode::ZERO; MAX_MATERIAL_ROD_SEGMENTS];
+        let mut modes = [DisplacementMode::ZERO; MAX_MATERIAL_ROD_SEGMENTS];
         for (segment, mode) in modes[..n].iter_mut().enumerate() {
             checkpoint(gate)?;
             if self.resistance_n_s_m[segment] == 0.0 {
                 continue;
             }
-            let mut free = false;
-            for side in 0..2 {
-                let node = segment + side;
-                let k = state.kinetics[node];
-                let g = gradients[segment][side];
-                let force = [g[0], g[1], g[2]];
-                let torque = [g[3], g[4], g[5]];
-                mode.force[side] = force;
-                mode.spin[side] = if k.eccentric() {
-                    sub(
-                        torque,
-                        cross(k.center, rotate(state.pose.frames[node].inverse(), force)?),
-                    )
-                } else {
-                    torque
-                };
-                for (c, &g) in force.iter().enumerate() {
-                    if !state.model.fixed_positions()[node][c] {
-                        free |= g != 0.0;
-                        mode.mobility += g * (g / k.mass);
-                    }
-                }
-                if !state.model.fixed_frames()[node] {
-                    free |= mode.spin[side].iter().any(|&g| g != 0.0);
-                    mode.mobility += dot(mode.spin[side], k.omega(mode.spin[side])?);
-                }
-            }
-            finite(&[mode.mobility])?;
-            if mode.mobility < 0.0 || (free && mode.mobility == 0.0) {
-                return Err(RodMotionError::Invalid(
-                    "unrepresentable positive axial-strain mobility",
-                ));
-            }
+            *mode = displacement_mode(state, segment, gradients[segment])?;
         }
         let mut relax = |segment: usize, h: f64| -> Result<(), RodMotionError> {
-            checkpoint(gate)?;
-            let mode = modes[segment];
-            let mut rate = 0.0;
-            for side in 0..2 {
-                let node = segment + side;
-                let k = state.kinetics[node];
-                rate += dot(mode.force[side], state.linear[node].map(|p| p / k.mass))
-                    + dot(mode.spin[side], k.omega(state.spin[node])?);
-            }
-            finite(&[rate])?;
-            let (impulse, dissipated) =
-                rank_one_relaxation(rate, mode.mobility, self.resistance_n_s_m[segment], h)?;
-            if impulse == 0.0 {
-                return Ok(());
-            }
-            for side in 0..2 {
-                let node = segment + side;
-                let frame = state.pose.frames[node];
-                let k = state.kinetics[node];
-                let mut support_force = [0.0; 3];
-                let mut support_torque = [0.0; 3];
-                for c in 0..3 {
-                    if state.model.fixed_positions()[node][c] {
-                        support_force[c] = impulse * mode.force[side][c];
-                    } else {
-                        state.linear[node][c] =
-                            (-impulse).mul_add(mode.force[side][c], state.linear[node][c]);
-                    }
-                    if state.model.fixed_frames()[node] {
-                        support_torque[c] = impulse * mode.spin[side][c];
-                    } else {
-                        state.spin[node][c] =
-                            (-impulse).mul_add(mode.spin[side][c], state.spin[node][c]);
-                    }
-                }
-                if k.eccentric() && state.model.fixed_frames()[node] {
-                    support_torque = add(
-                        support_torque,
-                        cross(k.center, rotate(frame.inverse(), support_force)?),
-                    );
-                }
-                let support_torque = rotate(frame, support_torque)?;
-                accounts.linear = add(accounts.linear, support_force);
-                accounts.angular = add(
-                    accounts.angular,
-                    add(
-                        support_torque,
-                        cross(sub(state.pose.positions_m[node], origin), support_force),
-                    ),
-                );
-                accounts.supports[node].linear_n_s =
-                    add(accounts.supports[node].linear_n_s, support_force);
-                accounts.supports[node].angular_nm_s =
-                    add(accounts.supports[node].angular_nm_s, support_torque);
-                finite(&state.linear[node])?;
-                finite(&state.spin[node])?;
-                finite(&accounts.supports[node].linear_n_s)?;
-                finite(&accounts.supports[node].angular_nm_s)?;
-            }
+            let dissipated = relax_displacement(
+                state,
+                segment,
+                modes[segment],
+                self.resistance_n_s_m[segment],
+                h,
+                origin,
+                accounts,
+                gate,
+            )?;
             heat.segment_heat_j[segment] += dissipated;
             heat.total_heat_j += dissipated;
             finite(&[heat.segment_heat_j[segment], heat.total_heat_j])
@@ -261,17 +180,129 @@ impl PreparedRodAxialLoss {
 }
 
 #[derive(Clone, Copy)]
-struct AxialMode {
+pub(super) struct DisplacementMode {
     force: [[f64; 3]; 2],
     spin: [[f64; 3]; 2],
     mobility: f64,
 }
-impl AxialMode {
-    const ZERO: Self = Self {
+impl DisplacementMode {
+    pub(super) const ZERO: Self = Self {
         force: [[0.0; 3]; 2],
         spin: [[0.0; 3]; 2],
         mobility: 0.0,
     };
+}
+
+/// Shared native pullback for axial extension and transverse shear. Reference
+/// COM inertia, eccentric spin coupling and the original supports stay intact.
+pub(super) fn displacement_mode<I: RodMotionInertia>(
+    state: &RodMotion<I>,
+    segment: usize,
+    gradient: [[f64; 6]; 2],
+) -> Result<DisplacementMode, RodMotionError> {
+    let mut mode = DisplacementMode::ZERO;
+    let mut free = false;
+    for (side, g) in gradient.into_iter().enumerate() {
+        let node = segment + side;
+        let k = state.kinetics[node];
+        let force = [g[0], g[1], g[2]];
+        let torque = [g[3], g[4], g[5]];
+        mode.force[side] = force;
+        mode.spin[side] = if k.eccentric() {
+            sub(
+                torque,
+                cross(k.center, rotate(state.pose.frames[node].inverse(), force)?),
+            )
+        } else {
+            torque
+        };
+        for (c, &g) in force.iter().enumerate() {
+            if !state.model.fixed_positions()[node][c] {
+                free |= g != 0.0;
+                mode.mobility += g * (g / k.mass);
+            }
+        }
+        if !state.model.fixed_frames()[node] {
+            free |= mode.spin[side].iter().any(|&g| g != 0.0);
+            mode.mobility += dot(mode.spin[side], k.omega(mode.spin[side])?);
+        }
+    }
+    finite(&[mode.mobility])?;
+    if mode.mobility < 0.0 || (free && mode.mobility == 0.0) {
+        return Err(RodMotionError::Invalid(
+            "unrepresentable positive section-strain mobility",
+        ));
+    }
+    Ok(mode)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn relax_displacement<I: RodMotionInertia>(
+    state: &mut RodMotion<I>,
+    segment: usize,
+    mode: DisplacementMode,
+    resistance: f64,
+    dt: f64,
+    origin: [f64; 3],
+    accounts: &mut KickAccounts,
+    gate: &CancelGate,
+) -> Result<f64, RodMotionError> {
+    checkpoint(gate)?;
+    let mut rate = 0.0;
+    for side in 0..2 {
+        let node = segment + side;
+        let k = state.kinetics[node];
+        rate += dot(mode.force[side], state.linear[node].map(|p| p / k.mass))
+            + dot(mode.spin[side], k.omega(state.spin[node])?);
+    }
+    finite(&[rate])?;
+    let (impulse, dissipated) = rank_one_relaxation(rate, mode.mobility, resistance, dt)?;
+    if impulse == 0.0 {
+        return Ok(dissipated);
+    }
+    for side in 0..2 {
+        let node = segment + side;
+        let frame = state.pose.frames[node];
+        let k = state.kinetics[node];
+        let mut support_force = [0.0; 3];
+        let mut support_torque = [0.0; 3];
+        for c in 0..3 {
+            if state.model.fixed_positions()[node][c] {
+                support_force[c] = impulse * mode.force[side][c];
+            } else {
+                state.linear[node][c] =
+                    (-impulse).mul_add(mode.force[side][c], state.linear[node][c]);
+            }
+            if state.model.fixed_frames()[node] {
+                support_torque[c] = impulse * mode.spin[side][c];
+            } else {
+                state.spin[node][c] = (-impulse).mul_add(mode.spin[side][c], state.spin[node][c]);
+            }
+        }
+        if k.eccentric() && state.model.fixed_frames()[node] {
+            support_torque = add(
+                support_torque,
+                cross(k.center, rotate(frame.inverse(), support_force)?),
+            );
+        }
+        let support_torque = rotate(frame, support_torque)?;
+        accounts.linear = add(accounts.linear, support_force);
+        accounts.angular = add(
+            accounts.angular,
+            add(
+                support_torque,
+                cross(sub(state.pose.positions_m[node], origin), support_force),
+            ),
+        );
+        accounts.supports[node].linear_n_s = add(accounts.supports[node].linear_n_s, support_force);
+        accounts.supports[node].angular_nm_s =
+            add(accounts.supports[node].angular_nm_s, support_torque);
+        finite(&state.linear[node])?;
+        finite(&state.spin[node])?;
+        finite(&accounts.supports[node].linear_n_s)?;
+        finite(&accounts.supports[node].angular_nm_s)?;
+    }
+    Ok(dissipated)
 }
 fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
     (0..3).map(|i| a[i] * b[i]).sum()

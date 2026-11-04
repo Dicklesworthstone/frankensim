@@ -397,7 +397,7 @@ fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
 
 // The viscosity bundle may add the explicitly selected loss property, but may
 // neither replace an original coefficient nor change its source/query meaning.
-fn same_mechanics(original: &ConcentricShearSection, enriched: &ConcentricShearSection) -> bool {
+pub(super) fn same_mechanics(original: &ConcentricShearSection, enriched: &ConcentricShearSection) -> bool {
     original.shear_property() == enriched.shear_property()
         && original.shear_correction() == enriched.shear_correction()
         && same_elastic_source(original.elastic(), enriched.elastic())

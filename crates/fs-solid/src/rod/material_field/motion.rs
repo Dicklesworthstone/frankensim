@@ -347,18 +347,46 @@ impl<I> PreparedRodMotion<I> {
     /// are unspecified. The original pose/support and SO(3)-cut checks apply.
     pub fn axial_extension_gradients_into(&self, pose: &RodMotionPose,
         output: &mut [[[f64; 6]; 2]], gate: &CancelGate) -> Result<(), SpatialRodError> {
+        let count = output.len();
+        self.section_displacement_gradients(pose, &[0], |segment, _, pair| {
+            output[segment] = pair;
+        }, count, gate)
+    }
+
+    /// Pull back both transverse displacements `L0 * [gamma_y, gamma_z]`
+    /// through the SAME finite-rotation midpoint map as the elastic shear law.
+    /// Each segment has two work-conjugate row pairs (y then z), with world
+    /// translation and body/right rotation derivatives. Common rigid motion
+    /// gives zero shear rate, including a bent or twisted configuration.
+    /// Caller-owned output is unspecified on failure; no global matrix is built.
+    pub fn transverse_displacement_gradients_into(&self, pose: &RodMotionPose,
+        output: &mut [[[[f64; 6]; 2]; 2]], gate: &CancelGate) -> Result<(), SpatialRodError> {
+        let count = output.len();
+        self.section_displacement_gradients(pose, &[1, 2], |segment, axis, pair| {
+            output[segment][axis] = pair;
+        }, count, gate)
+    }
+
+    fn section_displacement_gradients(&self, pose: &RodMotionPose, axes: &[usize],
+        mut emit: impl FnMut(usize, usize, [[f64; 6]; 2]), count: usize,
+        gate: &CancelGate) -> Result<(), SpatialRodError> {
         self.validate_pose(pose, gate)?;
-        if output.len() != self.source.sections.len() {
-            return Err(SpatialRodError::Invalid("axial extension gradients need one row pair per segment"));
+        if count != self.source.sections.len() {
+            return Err(SpatialRodError::Invalid("section displacement gradients need one output per segment"));
         }
-        for (segment, pair) in output.iter_mut().enumerate() {
+        for segment in 0..count {
             checkpoint(gate)?;
             let kinematics = crate::rod::derivatives::analytic::Kinematics::from_nodes(
                 &pose.positions_m, &pose.frames, self.source.rod.l0, segment)?;
-            // Unit section force differentiates L0 * gamma_x, retaining the
+            // Unit section force differentiates L0 * gamma_axis, retaining the
             // midpoint-frame motion and its two exact body torque pullbacks.
-            *pair = kinematics.linearize(fs_ga::Vec3::new(1.0, 0.0, 0.0),
-                fs_ga::Vec3::new(0.0, 0.0, 0.0), [0.0; 3], [0.0; 3], false)?.gradient;
+            for (slot, &axis) in axes.iter().enumerate() {
+                let mut direction = [0.0; 3];
+                direction[axis] = 1.0;
+                emit(segment, slot, kinematics.linearize(fs_ga::Vec3::new(
+                    direction[0], direction[1], direction[2]),
+                    fs_ga::Vec3::new(0.0, 0.0, 0.0), [0.0; 3], [0.0; 3], false)?.gradient);
+            }
         }
         checkpoint(gate)
     }
@@ -514,6 +542,60 @@ fn g4_centered_refusal_support_admission_and_cancellation_remain_explicit() {
     gate.request();
     assert_eq!(model.evaluate(&model.initial_pose(),&gate),Err(SpatialRodError::Cancelled));
     assert!(specimen([0.0,0.01,0.0]).into_spatial_motion_model(RodRootBoundary::Free,&gate).is_err());
+}
+
+#[test]
+fn g1_transverse_pullback_matches_finite_pose_derivatives_and_rigid_spin() {
+    use fs_ga::{So3Tangent, Vec3};
+    let gate = CancelGate::new();
+    let model = SpatialMaterialRod::try_straight(0.8, vec![section()]).unwrap()
+        .into_motion_model(RodRootBoundary::Free, &gate).unwrap();
+    let mut pose = model.initial_pose();
+    pose.positions_m = vec![[0.1, -0.2, 0.05], [0.88, -0.1, 0.02]];
+    pose.frames[0] = So3::exp(So3Tangent::new(Vec3::new(0.2, -0.1, 0.3))).unwrap();
+    pose.frames[1] = pose.frames[0].compose(
+        So3::exp(So3Tangent::new(Vec3::new(0.15, 0.25, -0.12))).unwrap()).unwrap();
+    let mut rows = [[[[0.0; 6]; 2]; 2]; 1];
+    model.transverse_displacement_gradients_into(&pose, &mut rows, &gate).unwrap();
+    let displacement = |p: &super::RodMotionPose| {
+        let relative = p.frames[1].body_minus(p.frames[0]).unwrap();
+        let midpoint = p.frames[0].compose(So3::exp(relative.scale(0.5)).unwrap()).unwrap();
+        let d: [f64; 3] = std::array::from_fn(|i| p.positions_m[1][i]-p.positions_m[0][i]);
+        let local = midpoint.inverse().rotate(Vec3::new(d[0],d[1],d[2])).unwrap();
+        [local.y,local.z]
+    };
+    for node in 0..2 { for coordinate in 0..6 {
+        let h = 1e-6;
+        let mut plus = pose.clone(); let mut minus = pose.clone();
+        if coordinate < 3 {
+            plus.positions_m[node][coordinate] += h;
+            minus.positions_m[node][coordinate] -= h;
+        } else {
+            let mut e = [0.0;3]; e[coordinate-3] = h;
+            plus.frames[node] = pose.frames[node].compose(
+                So3::exp(So3Tangent::new(Vec3::new(e[0],e[1],e[2]))).unwrap()).unwrap();
+            minus.frames[node] = pose.frames[node].compose(
+                So3::exp(So3Tangent::new(Vec3::new(-e[0],-e[1],-e[2]))).unwrap()).unwrap();
+        }
+        let a = displacement(&plus); let b = displacement(&minus);
+        for axis in 0..2 {
+            assert!((rows[0][axis][node][coordinate]-(a[axis]-b[axis])/(2.0*h)).abs()<3e-9);
+        }
+    }}
+    let world_spin = [0.3, -0.2, 0.4];
+    for axis in 0..2 {
+        let mut rate = 0.0;
+        for node in 0..2 {
+            let x = pose.positions_m[node]; let w = world_spin;
+            let velocity = [0.1+w[1]*x[2]-w[2]*x[1], -0.05+w[2]*x[0]-w[0]*x[2],
+                0.02+w[0]*x[1]-w[1]*x[0]];
+            let body = pose.frames[node].inverse().rotate(Vec3::new(w[0],w[1],w[2])).unwrap();
+            let spin = [body.x,body.y,body.z];
+            for c in 0..3 { rate += rows[0][axis][node][c]*velocity[c]
+                + rows[0][axis][node][c+3]*spin[c]; }
+        }
+        assert!(rate.abs()<3e-15, "rigid motion created shear rate {rate:e}");
+    }
 }
 
 }
