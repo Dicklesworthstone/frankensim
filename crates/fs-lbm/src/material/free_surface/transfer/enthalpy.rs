@@ -11,7 +11,7 @@
 //! This does not release a stressed solid, erase plastic history,
 //! convert phases, introduce pressure work or supply capillary surface energy.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 mod buoyancy;
 mod rheology;
 

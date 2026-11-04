@@ -77,7 +77,7 @@ fn catalog(text: &str, datum_j_kg: f64) -> ThermochemicalGasModel {
         )
         .unwrap(),
         original.transport_materials().to_vec(),
-        original.water_species().cloned(),
+        original.water_species(),
     )
     .unwrap()
 }
