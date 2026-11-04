@@ -255,6 +255,66 @@ fn sourced_uv_and_infrared_power_heat_native_cells_without_visible_extrapolation
 }
 
 #[test]
+fn infrared_mie_particle_absorption_heats_native_enthalpy_without_scattering_heat() {
+    use fs_render::volumes::transport::scattering::mie::{MieBudget, MieSphere};
+
+    with_cx(|cx| {
+        let wavelength = 10_000.0;
+        let sphere = MieSphere::try_new(0.6e-6, 1.5, 0.02, 1.0, 1800.0).unwrap();
+        let spectrum = sphere
+            .source_spectrum(
+                cx,
+                &[8000.0, wavelength, 12_000.0],
+                fs_blake3::ContentHash([57; 32]),
+                MieBudget::default(),
+                0.002,
+                4096,
+            )
+            .unwrap();
+        let density = [0.005];
+        let medium = ScatteringGrid::try_new(
+            cx,
+            grid(cx, &density, spectrum.absorption),
+            spectrum.scattering,
+            spectrum.phase,
+        )
+        .unwrap();
+        let deposition = medium
+            .deposit_beam_power(
+                cx,
+                Point3::new(-1.0, 0.5, 0.5),
+                Vec3::new(1.0, 0.0, 0.0),
+                3.0,
+                &[wavelength],
+                &[20.0],
+                1,
+            )
+            .unwrap();
+        let ka = spectrum.absorption.at(wavelength).unwrap();
+        let ks = spectrum.scattering.at(wavelength).unwrap();
+        let removed_w = 20.0 * -(-density[0] * (ka + ks)).exp_m1();
+        let heat_w = removed_w * ka / (ka + ks);
+        assert!(deposition.scattered_power_w[0] > 0.0);
+        close(deposition.absorbed_power_w[0], heat_w);
+        close(deposition.scattered_power_w[0], removed_w - heat_w);
+        let original = thermal(vec![cell(11, 1.0, 1.0, 0.0)], &SENSIBLE, vec![]);
+        let heating =
+            OpticalHeating::try_new(deposition, &[(0, CellId(11))], &original, 1e-12, || Ok(()))
+                .unwrap();
+        let (heated, accepted, audit) = original
+            .advance_observed(&heating, 2.0, config(0.17), || Ok(()))
+            .unwrap();
+        close(
+            heated.temperature_k(CellId(11)).unwrap(),
+            300.0 + heat_w / 2.0,
+        );
+        close(audit.external_heat_j, 2.0 * heat_w);
+        close(accepted.energy().thermal_input_j, audit.external_heat_j);
+        assert_eq!(accepted.power().wavelength_bounds_nm, (8000.0, 12_000.0));
+    });
+}
+
+#[test]
 fn spectral_beam_heats_original_cells_by_their_exact_absorbed_watts() {
     with_cx(|cx| {
         let incident = [7.0, 3.0];

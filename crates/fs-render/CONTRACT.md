@@ -4121,6 +4121,30 @@ transport, particle interactions, nonspherical particles, measured material
 dispersion, or an inferred aerosol distribution. A constant-index visible spectrum
 does not acquire material dispersion from wavelength sampling alone.
 
+`MieSphere::source_spectrum` and `MiePopulation::source_spectrum` prepare the
+same positive absorption, scattering and wavelength-resolved angular owners on
+2--16 explicitly sourced UV/visible/infrared knots. All three laws retain exactly
+the supplied wavelength support and nonzero source identity; neither absorption
+nor phase extrapolates into an unsupported band. The existing visible entry
+points preserve their numerical responses and unsourced table identities.
+
+`MieOpticalSpectrum::from_population_source` queries the original optical source
+at every knot and fresh midpoint before solving the native population. Complex
+indices may disperse; physical radii, densities, normalized number fractions and
+the real host must remain fixed. Source errors remain distinguishable from Mie
+numerical/work failures. The source identity is an association, not measurement
+authority. Preparation retains the original recurrence, multipole, angular and
+population limits, with no source query or Mie solve during transport. Sampled
+midpoint discrepancies still do not certify unobserved spectral resonances.
+
+Focused regressions verify infrared Rayleigh absorption in m²/kg, population
+mass weighting, dispersive source queries, visible numerical parity and strict
+support/source/geometry/budget/cancellation refusal. An infrared particle beam
+also reaches the original native enthalpy timeline: only true absorbed watts
+become heat, while elastically scattered watts remain radiative power. Fixed
+indices must be physically supported over their declared band; this extension
+does not invent missing infrared material data or relax the native Mie domain.
+
 `MiePopulation` admits up to 256 explicitly number-weighted sphere bins in one
 real host. Cross sections add by number fraction; mass coefficients divide by
 the number-mean particle mass; phase and asymmetry add by scattered power.

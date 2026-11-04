@@ -445,6 +445,264 @@ fn g1_visible_preparation_retains_spectral_physics_and_exposes_interpolation_err
 }
 
 #[test]
+fn g1_source_spectra_retain_infrared_particle_absorption_and_population_weights() {
+    use fs_blake3::ContentHash;
+
+    with_cx(|cx, _| {
+        let source = ContentHash([53; 32]);
+        let sphere = MieSphere::try_new(2e-9, 1.5, 0.02, 1.0, 1800.0).unwrap();
+        let wavelengths = [8000.0, 10_000.0, 12_000.0];
+        let spectrum = sphere
+            .source_spectrum(cx, &wavelengths, source, MieBudget::default(), 0.002, 4096)
+            .unwrap();
+        assert_eq!(
+            spectrum.absorption.wavelength_bounds_nm(),
+            (8000.0, 12_000.0)
+        );
+        assert_eq!(spectrum.absorption.source_identity(), Some(source));
+        assert_eq!(spectrum.scattering.source_identity(), Some(source));
+        let super::super::PhaseFunction::SpectralTable(phase) = &spectrum.phase else {
+            panic!("source phase was replaced by an achromatic approximation");
+        };
+        assert_eq!(phase.source_identity(), Some(source));
+        // Independent electrostatic absorption of a small sphere:
+        // C_abs/m = 6*pi*Im((m²-1)/(m²+2))/(lambda*rho).
+        // This checks absolute m²/kg and vacuum-nanometre conversion in IR.
+        let m = C64::new(1.5, 0.02);
+        let contrast = (m * m - C64::ONE) / (m * m + C64::from_re(2.0));
+        for wavelength in wavelengths {
+            let expected = 6.0 * core::f64::consts::PI * contrast.im / (wavelength * 1e-9 * 1800.0);
+            close(
+                spectrum.absorption.at(wavelength).unwrap() / expected,
+                1.0,
+                2e-6,
+            );
+        }
+        for wavelength in [550.0, 7999.0, 12_001.0] {
+            assert!(spectrum.absorption.at(wavelength).is_err());
+            assert!(spectrum.scattering.at(wavelength).is_err());
+            assert!(spectrum.phase.eval_at(wavelength, 0.0).is_err());
+        }
+        let large = MieSphere::try_new(0.7e-6, 1.7, 0.3, 1.0, 3100.0).unwrap();
+        let population = MiePopulation::try_new(&[(sphere, 2.0), (large, 1.0)]).unwrap();
+        let prepared = population
+            .source_spectrum(
+                cx,
+                &wavelengths,
+                source,
+                MiePopulationBudget::default(),
+                0.002,
+                4096,
+            )
+            .unwrap();
+        for wavelength in wavelengths {
+            let a = sphere
+                .at_wavelength(cx, wavelength, MieBudget::default())
+                .unwrap();
+            let b = large
+                .at_wavelength(cx, wavelength, MieBudget::default())
+                .unwrap();
+            let mass = 2.0 * sphere.particle_mass_kg().unwrap() + large.particle_mass_kg().unwrap();
+            let expected =
+                (2.0 * a.cross_sections().absorption_m2 + b.cross_sections().absorption_m2) / mass;
+            close(
+                prepared.absorption.at(wavelength).unwrap() / expected,
+                1.0,
+                2e-14,
+            );
+        }
+    });
+}
+
+#[test]
+fn g1_dispersive_source_is_queried_at_each_infrared_knot_and_midpoint() {
+    use fs_blake3::ContentHash;
+
+    with_cx(|cx, _| {
+        let wavelengths = [8000.0, 10_000.0, 12_000.0];
+        let index_at = |wavelength: f64| {
+            C64::new(
+                1.4 + 0.1 * (wavelength - 8000.0) / 4000.0,
+                0.01 + 0.03 * (wavelength - 8000.0) / 4000.0,
+            )
+        };
+        let mut sampled = Vec::new();
+        let spectrum = MieOpticalSpectrum::from_population_source(
+            cx,
+            &wavelengths,
+            ContentHash([54; 32]),
+            MiePopulationBudget::default(),
+            0.002,
+            4096,
+            |wavelength| {
+                sampled.push(wavelength);
+                let index = index_at(wavelength);
+                MiePopulation::try_new(&[(
+                    MieSphere::try_new(3e-9, index.re, index.im, 1.0, 1000.0)?,
+                    1.0,
+                )])
+            },
+        )
+        .unwrap();
+        assert_eq!(sampled, vec![8000.0, 10_000.0, 12_000.0, 9000.0, 11_000.0]);
+        for wavelength in wavelengths {
+            let m = index_at(wavelength);
+            let contrast = (m * m - C64::ONE) / (m * m + C64::from_re(2.0));
+            let expected = 6.0 * core::f64::consts::PI * contrast.im / (wavelength * 1e-9 * 1000.0);
+            close(
+                spectrum.absorption.at(wavelength).unwrap() / expected,
+                1.0,
+                3e-6,
+            );
+        }
+        // The changing source index reverses the constant-index absorption trend.
+        assert!(
+            spectrum.absorption.at(12_000.0).unwrap() > spectrum.absorption.at(8000.0).unwrap()
+        );
+        assert!(spectrum.max_relative_spectral_midpoint_error > 0.0);
+    });
+}
+
+#[test]
+fn g0_source_spectrum_preserves_visible_results_and_refuses_unsupported_work() {
+    use fs_blake3::ContentHash;
+
+    with_cx(|cx, gate| {
+        let sphere = sphere_for_x(0.2, 1.5, 0.02);
+        let wavelengths = [380.0, 550.0, 780.0];
+        let legacy = sphere
+            .visible_spectrum(cx, &wavelengths, MieBudget::default(), 0.002, 4096)
+            .unwrap();
+        let source = ContentHash([55; 32]);
+        let explicit = sphere
+            .source_spectrum(cx, &wavelengths, source, MieBudget::default(), 0.002, 4096)
+            .unwrap();
+        for wavelength in [380.0, 465.0, 550.0, 665.0, 780.0] {
+            assert_eq!(
+                legacy.absorption.at(wavelength),
+                explicit.absorption.at(wavelength)
+            );
+            assert_eq!(
+                legacy.scattering.at(wavelength),
+                explicit.scattering.at(wavelength)
+            );
+            assert_eq!(
+                legacy.phase.eval_at(wavelength, 0.3),
+                explicit.phase.eval_at(wavelength, 0.3)
+            );
+        }
+        assert_eq!(legacy.angular_reports, explicit.angular_reports);
+        assert_eq!(
+            legacy.max_relative_spectral_midpoint_error,
+            explicit.max_relative_spectral_midpoint_error
+        );
+        for invalid in [
+            &[][..],
+            &[8000.0][..],
+            &[8000.0, 8000.0][..],
+            &[0.0, 12_000.0][..],
+            &[8000.0, f64::NAN][..],
+        ] {
+            assert_eq!(
+                sphere.source_spectrum(cx, invalid, source, MieBudget::default(), 0.002, 4096),
+                Err(MieError::Parameters)
+            );
+        }
+        assert_eq!(
+            sphere.source_spectrum(
+                cx,
+                &wavelengths,
+                ContentHash([0; 32]),
+                MieBudget::default(),
+                0.002,
+                4096
+            ),
+            Err(MieError::Parameters)
+        );
+        let limited = MieBudget {
+            max_multipoles: 1,
+            ..MieBudget::default()
+        };
+        assert_eq!(
+            sphere.source_spectrum(cx, &wavelengths, source, limited, 0.002, 4096),
+            Err(MieError::Budget)
+        );
+        gate.request();
+        assert_eq!(
+            sphere.source_spectrum(cx, &wavelengths, source, MieBudget::default(), 0.002, 4096),
+            Err(MieError::Execution)
+        );
+    });
+}
+
+#[test]
+fn g0_dispersive_preparation_preserves_source_refusals_and_fixed_particle_geometry() {
+    use fs_blake3::ContentHash;
+
+    #[derive(Debug, PartialEq)]
+    enum SourceError {
+        OutsideMeasuredSupport,
+        Mie(MieError),
+    }
+    impl From<MieError> for SourceError {
+        fn from(error: MieError) -> Self {
+            Self::Mie(error)
+        }
+    }
+    with_cx(|cx, _| {
+        let population = MiePopulation::try_new(&[(
+            MieSphere::try_new(1e-7, 1.5, 0.1, 1.0, 1000.0).unwrap(),
+            1.0,
+        )])
+        .unwrap();
+        let unavailable = MieOpticalSpectrum::from_population_source(
+            cx,
+            &[8000.0, 12_000.0],
+            ContentHash([56; 32]),
+            MiePopulationBudget::default(),
+            0.002,
+            4096,
+            |wavelength| {
+                if wavelength == 10_000.0 {
+                    Err(SourceError::OutsideMeasuredSupport)
+                } else {
+                    Ok(population.clone())
+                }
+            },
+        );
+        assert_eq!(unavailable, Err(SourceError::OutsideMeasuredSupport));
+        for changed in 0..3 {
+            let result = MieOpticalSpectrum::from_population_source(
+                cx,
+                &[8000.0, 12_000.0],
+                ContentHash([56; 32]),
+                MiePopulationBudget::default(),
+                0.002,
+                4096,
+                |wavelength| {
+                    let later = wavelength != 8000.0;
+                    MiePopulation::try_new(&[(
+                        MieSphere::try_new(
+                            if later && changed == 0 { 2e-7 } else { 1e-7 },
+                            1.5,
+                            0.1,
+                            if later && changed == 1 { 1.1 } else { 1.0 },
+                            if later && changed == 2 {
+                                2000.0
+                            } else {
+                                1000.0
+                            },
+                        )?,
+                        1.0,
+                    )])
+                },
+            );
+            assert_eq!(result, Err(MieError::Parameters));
+        }
+    });
+}
+
+#[test]
 fn g0_medium_scaling_and_explicit_refusals() {
     with_cx(|cx, gate| {
         let original = MieSphere::try_new(1e-7, 1.5, 0.1, 1.0, 1000.0)
