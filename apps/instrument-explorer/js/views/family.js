@@ -174,7 +174,7 @@ function header(doc) {
   return h('header.familyhead', null,
     h('nav.crumbs', { 'aria-label': 'Breadcrumb' }, h('a', { href: '#/instruments' }, 'Instruments'), h('span', { 'aria-hidden': 'true' }, '/'), h('span', null, doc.section)),
     h('div.titlerow', null, h('h1', null, doc.title), badge(v.badge, v.label)),
-    st.reference_instrument ? h('p.small.muted', null, `Graded against: ${st.reference_instrument}`) : null,
+    st.reference_instrument ? h('p.small.muted', null, `${v.counts && !v.counts.graded && v.counts.compared ? 'Compared with' : 'Graded against'}: ${st.reference_instrument}`) : null,
     summary, more, newer,
     st.draft ? h('p.small.muted', { role: 'note' }, st.draft) : null,
     v.blocked ? h('p.blocked', null, `Blocked: ${typeof v.blocked === 'string' ? v.blocked : JSON.stringify(v.blocked)}`) : null,
@@ -232,7 +232,11 @@ function pairDetail(doc, p) {
       p.refused.render_sha ? h('span.small.muted', null, ` (render ${p.refused.render_sha})`) : null));
   }
   if (p.kind === 'listening' && p.no_reference) out.push(h('div.note', null, h('b', null, 'No recording to grade against. '), p.no_reference));
-  if (p.kind === 'reference-only') out.push(h('div.note', null, 'The grader holds this recording, but the family has no render of the note yet.'));
+  if (p.kind === 'reference-only') {
+    const blocked = doc.verdict && typeof doc.verdict.blocked === 'string' ? doc.verdict.blocked : null;
+    const why = p.no_render || blocked;
+    out.push(h('div.note', null, why ? [h('b', null, 'No render of this note. '), why] : 'The grader holds this recording, but the family has no render of the note yet.'));
+  }
   if (p.kind === 'compared' && p.compare) out.push(compareTable(p));
 
   const sources = [];
