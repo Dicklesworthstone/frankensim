@@ -320,6 +320,137 @@ fn inputs() -> PropulsionInputs {
 }
 
 #[test]
+fn g3_native_reynolds_drag_binds_material_transport_and_all_local_rigid_rates() {
+    use fs_flyer::dragledger::{
+        ComponentDragCoefficients, ComponentDragGeometry, ComponentDragLaw, ComponentDragShape,
+        DragComponent, DragLedger, ReynoldsDragCurve, ReynoldsDragLaw, ReynoldsDragPoint,
+    };
+    use fs_material::gas::{ConductivityModel, GasSpec, GasState};
+    let spec = GasSpec::dry_air_ussa1976();
+    let gas = GasState::try_new(&spec, 288.15, 101325.0).unwrap();
+    let viscous = GasState::try_new(
+        &GasSpec {
+            sutherland_beta: 2.0 * spec.sutherland_beta,
+            conductivity: ConductivityModel::Eucken,
+            ..spec
+        },
+        288.15,
+        101325.0,
+    )
+    .unwrap();
+    assert_eq!(gas.density, viscous.density);
+    let mut design = wright_openloop_v1();
+    design.coupling = CANDIDATE_B;
+    design.ledger = DragLedger {
+        components: vec![DragComponent {
+            component_id: "body",
+            area_m2: 0.4,
+            cd: 99.0,
+            cd_source: "unused fallback fixture",
+            uncertainty_frac: 0.2,
+        }],
+        unresolved_interference_frac: 0.0,
+    };
+    let arm = v([-0.7, 0.9, -0.25]);
+    design.drag_geometry = vec![ComponentDragGeometry {
+        component_id: "body",
+        point_body_m: [
+            design.cg_m[0] + arm.x,
+            design.cg_m[1] + arm.y,
+            design.cg_m[2] + arm.z,
+        ],
+        shape: ComponentDragShape::Isotropic,
+    }];
+    let curve = ReynoldsDragCurve::new(
+        "manufactured inverse-Re fixture, not historical calibration",
+        0.2,
+        [100.0, 1e8]
+            .map(|reynolds| ReynoldsDragPoint {
+                reynolds,
+                cd: 200000.0 / reynolds,
+                uncertainty_frac: 0.2,
+            })
+            .to_vec(),
+    )
+    .unwrap();
+    design.drag_coefficients = vec![ComponentDragCoefficients {
+        component_id: "body",
+        law: ComponentDragLaw::Isotropic(ReynoldsDragLaw::new(0.5, curve).unwrap()),
+    }];
+    let assembly = aero_assembly(design.gross_mass_kg);
+    let mut state = flight_state(&assembly);
+    let s = core::f64::consts::FRAC_1_SQRT_2;
+    state.rigid.quat = [s, 0.0, 0.0, s];
+    let attitude = rotation(&state);
+    let world_velocity = attitude.rotate(v(state.rigid.vel_mps)).unwrap();
+    state.rigid.vel_mps = [world_velocity.x, world_velocity.y, world_velocity.z];
+    state.rigid.omega_body = [0.15, 0.20, -0.07];
+    let point_world = v(state.rigid.pos_m) + attitude.rotate(arm).unwrap();
+    let wind = v([2.0, -3.0, 0.5]);
+    let wind_at = |point| {
+        Ok(if (v(point) - point_world).norm() < 1e-10 {
+            [wind.x, wind.y, wind.z]
+        } else {
+            ZERO
+        })
+    };
+    let stage = PropulsionInputs {
+        density_kg_m3: gas.density,
+        ..inputs()
+    };
+    let missing = GearedPropulsion::new(&design, &assembly, mounts()).unwrap();
+    let calls = std::cell::Cell::new(0);
+    let counting_wind = |point| {
+        calls.set(calls.get() + 1);
+        wind_at(point)
+    };
+    assert_eq!(
+        missing
+            .evaluate(&state, stage, &counting_wind, None)
+            .unwrap_err()
+            .code,
+        "drag-transport-required"
+    );
+    assert_eq!(calls.get(), 0);
+    let model = missing.with_material_air(&gas).unwrap();
+    assert!(std::ptr::eq(model.material_air().unwrap(), &gas));
+    let mismatched = PropulsionInputs {
+        density_kg_m3: gas.density * 1.01,
+        ..stage
+    };
+    assert_eq!(
+        model
+            .evaluate(&state, mismatched, &counting_wind, None)
+            .unwrap_err()
+            .code,
+        "propulsion-air-source-mismatch"
+    );
+    assert_eq!(calls.get(), 0);
+    let low = model.evaluate(&state, stage, &wind_at, None).unwrap();
+    let high = GearedPropulsion::new(&design, &assembly, mounts())
+        .unwrap()
+        .with_material_air(&viscous)
+        .unwrap()
+        .evaluate(&state, stage, &wind_at, None)
+        .unwrap();
+    assert_eq!(low.coupled, high.coupled);
+    let local = attitude.inverse().rotate(world_velocity - wind).unwrap()
+        + v(state.rigid.omega_body).cross(arm);
+    // Doubling viscosity at fixed density doubles this manufactured force;
+    // every other aerodynamic owner has exactly the same input and output.
+    let difference = local.scale(-0.5 * 0.4 * 200000.0 * gas.dynamic_viscosity / 0.5);
+    assert!(
+        (v(high.aerodynamic_force_body_n) - v(low.aerodynamic_force_body_n) - difference).norm()
+            < 1e-9
+    );
+    assert!(
+        (v(high.loads.carrier.moment_nm) - v(low.loads.carrier.moment_nm) - arm.cross(difference))
+            .norm()
+            < 1e-9
+    );
+}
+
+#[test]
 fn g3_resolved_parasite_components_use_world_positions_and_all_rigid_rates() {
     use fs_flyer::dragledger::{
         ComponentDragGeometry, ComponentDragShape, DragComponent, DragLedger,

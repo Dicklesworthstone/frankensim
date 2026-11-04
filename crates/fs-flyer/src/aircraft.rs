@@ -27,13 +27,17 @@
 //! anyway); far wake = trailing legs at this tier.
 
 use crate::Refusal;
-use crate::dragledger::{ComponentDragGeometry, DragLedger, DragWrench, wright_ledger_v1};
+use crate::dragledger::{
+    ComponentDragCoefficients, ComponentDragGeometry, DragAirState, DragLedger, DragWrench,
+    wright_ledger_v1,
+};
 use crate::propcoupling::{
     CANDIDATE_A, CoupledStep, IncidentInflow, PropCouplingSolverSpec, PropDisk,
     coupled_prop_airframe_step_with_incident,
 };
 use fs_airscrew::{BladeStation, Rotor};
 use fs_blake3::hash_domain;
+use fs_material::gas::GasState;
 use fs_math::det;
 use fs_wing::nonlinear::{InfluenceOperator, StripSpec};
 use fs_wing::{Panel, SurfaceId, flat_surface};
@@ -84,6 +88,10 @@ pub struct OpenLoopDesign {
     /// samples its own relative flow and supplies its own force and moment.
     /// Empty preserves the registered aggregate law and design identity.
     pub drag_geometry: Vec<ComponentDragGeometry>,
+    /// Optional complete coefficient selection for the explicit component
+    /// geometry. Empty retains the original fixed coefficients and identities.
+    /// Reynolds-dependent selections require an actual material-air load path.
+    pub drag_coefficients: Vec<ComponentDragCoefficients>,
     /// Coupling solver spec.
     pub coupling: PropCouplingSolverSpec,
     /// Spanwise panels per wing plane.
@@ -173,6 +181,7 @@ pub fn wright_openloop_v1() -> OpenLoopDesign {
         ledger: wright_ledger_v1(),
         drag_z_m: -0.6,
         drag_geometry: Vec::new(),
+        drag_coefficients: Vec::new(),
         coupling: CANDIDATE_A,
         n_span_wing: 8,
         n_chord_wing: 2,
@@ -207,6 +216,33 @@ pub struct ForceBuildup {
 
 /// Standard terrestrial acceleration used by this historical aircraft model.
 pub(crate) const GRAVITY_MPS2: f64 = 9.80665;
+
+/// Keep the complete gas with its material owner; pass only the properties
+/// consumed by the component law. No EOS or viscosity formula is duplicated.
+pub(crate) fn material_drag_air(gas: &GasState) -> Result<DragAirState, Refusal> {
+    gas.validate_coherence().map_err(|error| Refusal {
+        code: "material-atmosphere-invalid",
+        message: error.to_string(),
+        ranked_repairs: vec!["evaluate one coherent GasState through its material owner".into()],
+    })?;
+    Ok(DragAirState {
+        density_kg_m3: gas.density,
+        dynamic_viscosity_pa_s: gas.dynamic_viscosity,
+        sound_speed_mps: gas.sound_speed,
+    })
+}
+
+fn missing_drag_transport() -> Refusal {
+    Refusal {
+        code: "drag-transport-required",
+        message:
+            "selected Reynolds drag requires density, viscosity and sound speed from material air"
+                .into(),
+        ranked_repairs: vec![
+            "use the material-air load path or bind material air to native propulsion".into(),
+        ],
+    }
+}
 
 // Signed circulatory force perpendicular to the reference flow in the pitch
 // plane. Statement-split to retain the deterministic no-FMA convention.
@@ -285,6 +321,13 @@ impl OpenLoopDesign {
         if !self.drag_geometry.is_empty() {
             p.extend_from_slice(self.ledger.spatial_digest(&self.drag_geometry).as_bytes());
         }
+        if !self.drag_coefficients.is_empty() {
+            p.extend_from_slice(
+                self.ledger
+                    .reynolds_digest(&self.drag_geometry, &self.drag_coefficients)
+                    .as_bytes(),
+            );
+        }
         hash_domain("org.frankensim.fs-flyer.openloop-design.v1", &p).to_hex()
     }
 
@@ -302,6 +345,9 @@ impl OpenLoopDesign {
         rho_kg_m3: f64,
         relative_velocity_at: &dyn Fn([f64; 3]) -> Result<[f64; 3], Refusal>,
     ) -> Result<DragWrench, Refusal> {
+        if !self.drag_coefficients.is_empty() {
+            return Err(missing_drag_transport());
+        }
         if self.drag_geometry.is_empty() {
             let point = [self.cg_m[0], self.cg_m[1], self.drag_z_m];
             self.ledger.wrench_at(
@@ -317,6 +363,38 @@ impl OpenLoopDesign {
                 relative_velocity_at,
             )
         }
+    }
+
+    /// The same component force owner with locally evaluated fluid transport.
+    /// Coefficient tables use the selected component/face speed for Reynolds
+    /// number and full local slip for Mach admission. Source data and geometry
+    /// remain separate from the caller's material-air state.
+    pub fn parasite_wrench_with_air(
+        &self,
+        air: DragAirState,
+        relative_velocity_at: &dyn Fn([f64; 3]) -> Result<[f64; 3], Refusal>,
+    ) -> Result<DragWrench, Refusal> {
+        air.admit()?;
+        if self.drag_coefficients.is_empty() {
+            self.parasite_wrench_with_incident(air.density_kg_m3, relative_velocity_at)
+        } else {
+            self.ledger.wrench_with_reynolds_geometry(
+                air,
+                &self.drag_geometry,
+                &self.drag_coefficients,
+                self.cg_m,
+                relative_velocity_at,
+            )
+        }
+    }
+
+    pub(crate) fn admit_drag_transport(&self, air: Option<DragAirState>) -> Result<(), Refusal> {
+        if !self.drag_coefficients.is_empty() {
+            air.ok_or_else(missing_drag_transport)?.admit()?;
+            self.ledger
+                .admit_reynolds_coefficients(&self.drag_geometry, &self.drag_coefficients)?;
+        }
+        Ok(())
     }
 
     /// Build panels + strips for the frozen control state. The canard
@@ -456,6 +534,7 @@ impl OpenLoopDesign {
             omega_prop_rad_s,
             q_pitch_rad_s,
             rho_kg_m3,
+            None,
             warm,
             None,
         )
@@ -495,8 +574,42 @@ impl OpenLoopDesign {
             omega_prop_rad_s,
             q_pitch_rad_s,
             rho_kg_m3,
+            None,
             warm,
             Some(incident),
+        )
+    }
+
+    /// Evaluate the original aircraft/propeller force owner using one coherent
+    /// material gas for density, viscosity and sound speed. Transport is frozen
+    /// across the aircraft for this stage; the optional incident field still
+    /// supplies each component's local translational flow. The original owner
+    /// adds pitch-point velocity exactly once. `None` uses uniform incident air.
+    /// Wing/propeller reference polars remain Reynolds-independent; only explicitly
+    /// selected parasite coefficient data acquire the new Reynolds dependence.
+    #[allow(clippy::too_many_arguments)]
+    pub fn force_buildup_with_material_air(
+        &self,
+        v_mps: f64,
+        alpha_rad: f64,
+        delta_canard_rad: f64,
+        omega_prop_rad_s: f64,
+        q_pitch_rad_s: f64,
+        gas: &GasState,
+        warm: Option<[f64; 2]>,
+        incident: Option<&dyn Fn([f64; 3]) -> Result<[f64; 3], Refusal>>,
+    ) -> Result<ForceBuildup, Refusal> {
+        let air = material_drag_air(gas)?;
+        self.force_buildup_impl(
+            v_mps,
+            alpha_rad,
+            delta_canard_rad,
+            omega_prop_rad_s,
+            q_pitch_rad_s,
+            air.density_kg_m3,
+            Some(air),
+            warm,
+            incident,
         )
     }
 
@@ -509,9 +622,11 @@ impl OpenLoopDesign {
         omega_prop_rad_s: f64,
         q_pitch_rad_s: f64,
         rho_kg_m3: f64,
+        drag_air: Option<DragAirState>,
         warm: Option<[f64; 2]>,
         incident: Option<&dyn Fn([f64; 3]) -> Result<[f64; 3], Refusal>>,
     ) -> Result<ForceBuildup, Refusal> {
+        self.admit_drag_transport(drag_air)?;
         if !(v_mps.is_finite()
             && v_mps > 1.0
             && alpha_rad.is_finite()
@@ -702,7 +817,10 @@ impl OpenLoopDesign {
         force[2] -= diz;
         // Every selected parasite component uses its own material-point flow,
         // area orientation and arm; the legacy layout remains one drag line.
-        let parasite = self.parasite_wrench_with_incident(rho_kg_m3, &sample)?;
+        let parasite = match drag_air {
+            Some(air) => self.parasite_wrench_with_air(air, &sample)?,
+            None => self.parasite_wrench_with_incident(rho_kg_m3, &sample)?,
+        };
         for (force, drag) in force.iter_mut().zip(parasite.force_n) {
             *force += drag;
         }

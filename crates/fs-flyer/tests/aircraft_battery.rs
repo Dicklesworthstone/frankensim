@@ -13,6 +13,149 @@ fn jlog(case: &str, payload: &str) {
 const RHO: f64 = 1.294;
 
 #[test]
+fn g3_material_viscosity_drives_selected_component_loads_in_the_longitudinal_owner() {
+    use fs_flyer::dragledger::{
+        ComponentDragCoefficients, ComponentDragGeometry, ComponentDragLaw, ComponentDragShape,
+        DragComponent, DragLedger, ReynoldsDragCurve, ReynoldsDragLaw, ReynoldsDragPoint,
+    };
+    use fs_material::gas::{ConductivityModel, GasSpec, GasState};
+    let spec = GasSpec::dry_air_ussa1976();
+    let gas = GasState::try_new(&spec, 288.15, 101325.0).unwrap();
+    let viscous = GasState::try_new(
+        &GasSpec {
+            sutherland_beta: 2.0 * spec.sutherland_beta,
+            conductivity: ConductivityModel::Eucken,
+            ..spec
+        },
+        288.15,
+        101325.0,
+    )
+    .unwrap();
+    assert_eq!(gas.density, viscous.density);
+    assert_eq!(gas.sound_speed, viscous.sound_speed);
+    let mut design = wright_openloop_v1();
+    design.coupling = fs_flyer::propcoupling::CANDIDATE_B;
+    let identity = design.digest();
+    let legacy = design
+        .force_buildup(13.86, 0.06, 0.05, 40.0, 0.1, gas.density)
+        .unwrap();
+    assert_eq!(
+        legacy,
+        design
+            .force_buildup_with_material_air(13.86, 0.06, 0.05, 40.0, 0.1, &gas, None, None)
+            .unwrap()
+    );
+    assert_eq!(identity, design.digest());
+    design.ledger = DragLedger {
+        components: ["left", "right"]
+            .map(|component_id| DragComponent {
+                component_id,
+                area_m2: 0.4,
+                cd: 99.0,
+                cd_source: "unused fixed-coefficient fixture",
+                uncertainty_frac: 0.2,
+            })
+            .to_vec(),
+        unresolved_interference_frac: 0.2,
+    };
+    let arms = [[-0.7, 0.9, -0.25], [0.8, -1.3, 0.35]];
+    design.drag_geometry = design
+        .ledger
+        .components
+        .iter()
+        .enumerate()
+        .map(|(i, c)| ComponentDragGeometry {
+            component_id: c.component_id,
+            point_body_m: std::array::from_fn(|j| design.cg_m[j] + arms[i][j]),
+            shape: ComponentDragShape::Isotropic,
+        })
+        .collect();
+    let curve = ReynoldsDragCurve::new(
+        "manufactured inverse-Re law for force-owner verification; not Flyer calibration",
+        0.2,
+        [100.0, 1e8]
+            .map(|reynolds| ReynoldsDragPoint {
+                reynolds,
+                cd: 200000.0 / reynolds,
+                uncertainty_frac: 0.2,
+            })
+            .to_vec(),
+    )
+    .unwrap();
+    design.drag_coefficients = design
+        .ledger
+        .components
+        .iter()
+        .map(|c| ComponentDragCoefficients {
+            component_id: c.component_id,
+            law: ComponentDragLaw::Isotropic(ReynoldsDragLaw::new(0.5, curve.clone()).unwrap()),
+        })
+        .collect();
+    assert_eq!(
+        design
+            .force_buildup(13.86, 0.06, 0.05, 40.0, 0.1, gas.density)
+            .unwrap_err()
+            .code,
+        "drag-transport-required"
+    );
+    let velocity = [
+        13.86 * fs_math::det::cos(0.06),
+        0.0,
+        13.86 * fs_math::det::sin(0.06),
+    ];
+    let incident = |_| Ok(velocity);
+    let run = |gas| {
+        design
+            .force_buildup_with_material_air(
+                13.86,
+                0.06,
+                0.05,
+                40.0,
+                0.1,
+                gas,
+                None,
+                Some(&incident),
+            )
+            .unwrap()
+    };
+    let low = run(&gas);
+    let high = run(&viscous);
+    assert_eq!(low.coupled, high.coupled);
+    let mut expected_force = [0.0; 3];
+    let mut expected_moment = [0.0; 3];
+    let mut expected_power = 0.0;
+    // Independent closed form for the manufactured Cd=K/Re law: the density
+    // cancels, and each component's resistance is A*K*mu/(2*L).
+    let resistance = 0.5 * 0.4 * 200000.0 * gas.dynamic_viscosity / 0.5 * 1.2;
+    for arm in arms {
+        let local = [
+            velocity[0] + 0.1 * arm[2],
+            velocity[1],
+            velocity[2] - 0.1 * arm[0],
+        ];
+        let force = local.map(|u| -resistance * u);
+        let moment = [
+            arm[1] * force[2] - arm[2] * force[1],
+            arm[2] * force[0] - arm[0] * force[2],
+            arm[0] * force[1] - arm[1] * force[0],
+        ];
+        for axis in 0..3 {
+            expected_force[axis] += force[axis];
+            expected_moment[axis] += moment[axis];
+        }
+        expected_power += resistance * local.iter().map(|u| u * u).sum::<f64>();
+    }
+    for axis in 0..3 {
+        assert!((low.parasite_wrench.force_n[axis] - expected_force[axis]).abs() < 1e-9);
+        assert!((low.parasite_wrench.moment_nm[axis] - expected_moment[axis]).abs() < 1e-9);
+        assert!((high.parasite_wrench.force_n[axis] - 2.0 * expected_force[axis]).abs() < 1e-9);
+        assert!((high.force_n[axis] - low.force_n[axis] - expected_force[axis]).abs() < 1e-9);
+    }
+    assert!((low.parasite_wrench.dissipated_power_w - expected_power).abs() < 1e-8);
+    assert!((high.moment_y_nm - low.moment_y_nm - expected_moment[1]).abs() < 1e-9);
+}
+
+#[test]
 fn g3_resolved_components_feed_pitch_roll_and_yaw_from_their_own_incident_flow() {
     use fs_flyer::dragledger::{
         ComponentDragGeometry, ComponentDragShape, DragComponent, DragLedger,

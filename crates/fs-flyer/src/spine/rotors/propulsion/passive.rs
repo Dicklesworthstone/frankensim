@@ -104,6 +104,7 @@ impl<'a, const N: usize> ShaftPropulsion<'a, N> {
             mounts,
             spatial_axes,
             surfaces: None,
+            material_air: None,
         };
         geometry.admit(
             assembly.reduced_body.mass_kg,
@@ -116,6 +117,22 @@ impl<'a, const N: usize> ShaftPropulsion<'a, N> {
             "shaft",
         )?;
         Ok(Self { geometry, assembly })
+    }
+
+    /// Use the same immutable material-air binding as geared propulsion.
+    /// All shared steady/dynamic/wake stages consume its transport, and reject
+    /// any scalar stage density that disagrees with the bound original gas.
+    pub fn with_material_air(
+        mut self,
+        gas: &'a fs_material::gas::GasState,
+    ) -> Result<Self, Refusal> {
+        crate::aircraft::material_drag_air(gas)?;
+        self.geometry.material_air = Some(gas);
+        Ok(self)
+    }
+
+    pub const fn material_air(&self) -> Option<&'a fs_material::gas::GasState> {
+        self.geometry.material_air
     }
 
     /// Use admitted native lifting surfaces, with the same spatial-wash domain

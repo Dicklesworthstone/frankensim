@@ -115,6 +115,7 @@ pub struct GearedPropulsion<'a, const N: usize> {
     mounts: [PropellerMount; 2],
     spatial_axes: Option<DiskAxes>,
     surfaces: Option<&'a surfaces::LiftingSurfaces<'a>>,
+    material_air: Option<&'a fs_material::gas::GasState>,
 }
 
 // Both wake models use exactly the same material-air sampling and body/shaft
@@ -176,6 +177,7 @@ struct PropulsionGeometry<'a> {
     mounts: [PropellerMount; 2],
     spatial_axes: Option<DiskAxes>,
     surfaces: Option<&'a surfaces::LiftingSurfaces<'a>>,
+    material_air: Option<&'a fs_material::gas::GasState>,
 }
 
 #[derive(Clone, Copy)]
@@ -218,6 +220,7 @@ impl<'a, const N: usize> GearedPropulsion<'a, N> {
             mounts: self.mounts,
             spatial_axes: self.spatial_axes,
             surfaces: self.surfaces,
+            material_air: self.material_air,
         }
     }
 
@@ -262,6 +265,7 @@ impl<'a, const N: usize> GearedPropulsion<'a, N> {
             mounts,
             spatial_axes,
             surfaces: None,
+            material_air: None,
         }
         .admit(
             assembly.mass_kg(),
@@ -279,7 +283,27 @@ impl<'a, const N: usize> GearedPropulsion<'a, N> {
             mounts,
             spatial_axes,
             surfaces: None,
+            material_air: None,
         })
+    }
+
+    /// Bind one coherent, homogeneous material gas to every native aerodynamic
+    /// stage, including dynamic/swirl consumers of this owner. Its viscosity
+    /// and sound speed drive explicitly selected parasite coefficient curves.
+    /// Each stage's supplied density must equal this same gas density; a bound
+    /// source can never coexist with a second scalar-density atmosphere.
+    pub fn with_material_air(
+        mut self,
+        gas: &'a fs_material::gas::GasState,
+    ) -> Result<Self, Refusal> {
+        crate::aircraft::material_drag_air(gas)?;
+        self.material_air = Some(gas);
+        Ok(self)
+    }
+
+    /// The exact material gas borrowed by this native force owner, if selected.
+    pub const fn material_air(&self) -> Option<&'a fs_material::gas::GasState> {
+        self.material_air
     }
 
     /// Evaluate the current distributed two-way wing/BEMT model at one state.
@@ -435,7 +459,11 @@ impl PropulsionGeometry<'_> {
             message: error.message,
             ranked_repairs: error.ranked_repairs,
         })?;
-        if design.drag_geometry.is_empty() {
+        if !design.drag_coefficients.is_empty() {
+            design
+                .ledger
+                .admit_reynolds_coefficients(&design.drag_geometry, &design.drag_coefficients)
+        } else if design.drag_geometry.is_empty() {
             design.ledger.admit()
         } else {
             design.ledger.admit_geometry(&design.drag_geometry)
@@ -516,6 +544,20 @@ impl PropulsionGeometry<'_> {
             ));
         }
         let design = self.design;
+        let drag_air = self
+            .material_air
+            .map(|gas| crate::dragledger::DragAirState {
+                density_kg_m3: gas.density,
+                dynamic_viscosity_pa_s: gas.dynamic_viscosity,
+                sound_speed_mps: gas.sound_speed,
+            });
+        if drag_air.is_some_and(|air| air.density_kg_m3 != inputs.density_kg_m3) {
+            return Err(reject(
+                "propulsion-air-source-mismatch",
+                "stage density must equal the bound material gas density",
+            ));
+        }
+        design.admit_drag_transport(drag_air)?;
         let mut disks = design.disks;
         let mut propeller_absolute_speed_rad_s = [0.0; 2];
         for k in 0..2 {
@@ -681,9 +723,11 @@ impl PropulsionGeometry<'_> {
                 / (core::f64::consts::PI * aspect * design.oswald_e);
             force = force - air_direction.scale(induced_drag);
         }
-        let parasite = design.parasite_wrench_with_incident(rho, &|point| {
-            Ok(air.sample(point)?.relative_velocity_mps)
-        })?;
+        let local_velocity = |point| Ok(air.sample(point)?.relative_velocity_mps);
+        let parasite = match drag_air {
+            Some(transport) => design.parasite_wrench_with_air(transport, &local_velocity)?,
+            None => design.parasite_wrench_with_incident(rho, &local_velocity)?,
+        };
         force = force + vec(parasite.force_n);
         moment = moment + vec(parasite.moment_nm);
         let mut aerodynamic_nm = [0.0; N];

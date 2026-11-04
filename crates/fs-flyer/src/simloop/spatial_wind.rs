@@ -763,12 +763,28 @@ impl SimLoop {
         dc: f64,
         warm_slip: Option<[f64; 2]>,
     ) -> Result<SampledFlightLoads, Refusal> {
-        let rho_kg_m3 = self.air_density_at_height(state.longitudinal.position_m[1])?;
-        let forces = if self
+        let material_air = match self.material_air_profile() {
+            Some(profile) => Some(profile.gas_at_height(state.longitudinal.position_m[1])?),
+            None => self.material_gas().copied(),
+        };
+        let rho_kg_m3 = material_air.map_or(self.spec.rho_kg_m3, |gas| gas.density);
+        let distributed = self
             .spatial_wind
             .as_ref()
-            .is_some_and(|wind| wind.distributed)
-        {
+            .is_some_and(|wind| wind.distributed);
+        let incident = |point| self.incident_at_motion(state, point);
+        let forces = if let Some(gas) = material_air {
+            self.design.force_buildup_with_material_air(
+                v_air,
+                alpha,
+                dc.clamp(-0.55, 0.55),
+                state.rotor_rad_s.clamp(10.5, 119.5),
+                state.longitudinal.q_rad_s.clamp(-2.9, 2.9),
+                &gas,
+                warm_slip,
+                if distributed { Some(&incident) } else { None },
+            )
+        } else if distributed {
             self.design.force_buildup_with_incident(
                 v_air,
                 alpha,
@@ -980,18 +996,32 @@ impl SimLoop {
         loads: &crate::aircraft::ForceBuildup,
         dt: f64,
     ) -> Result<crate::lateral::LateralTick, Refusal> {
-        if self.spatial_wind.as_ref().is_some_and(|wind| wind.distributed) {
-            let incident = self.design.distributed_lateral_loads(
-                loads, dc_eff.clamp(-0.55, 0.55), rho_kg_m3,
-            )?.net();
-            self.lateral_model.step_with_moments(
-                &mut self.lateral_state, loaded_twist_rad, v_air,
-                rho_kg_m3, dt, incident,
-            ).map(|step| step.reduced)
+        if self
+            .spatial_wind
+            .as_ref()
+            .is_some_and(|wind| wind.distributed)
+        {
+            let incident = self
+                .design
+                .distributed_lateral_loads(loads, dc_eff.clamp(-0.55, 0.55), rho_kg_m3)?
+                .net();
+            self.lateral_model
+                .step_with_moments(
+                    &mut self.lateral_state,
+                    loaded_twist_rad,
+                    v_air,
+                    rho_kg_m3,
+                    dt,
+                    incident,
+                )
+                .map(|step| step.reduced)
         } else {
             self.lateral_model.step(
-                &mut self.lateral_state, loaded_twist_rad, v_air,
-                rho_kg_m3, dt,
+                &mut self.lateral_state,
+                loaded_twist_rad,
+                v_air,
+                rho_kg_m3,
+                dt,
             )
         }
     }

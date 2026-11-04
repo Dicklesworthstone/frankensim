@@ -19,7 +19,12 @@
 use crate::Refusal;
 use fs_blake3::hash_domain;
 
+mod reynolds;
 mod spatial;
+pub use reynolds::{
+    ComponentDragCoefficients, ComponentDragLaw, DragAirState, MAX_REYNOLDS_POINTS,
+    ReynoldsDragCurve, ReynoldsDragLaw, ReynoldsDragPoint,
+};
 pub use spatial::{ComponentDragGeometry, ComponentDragShape};
 
 /// Component-count cap (absurd-input guard).

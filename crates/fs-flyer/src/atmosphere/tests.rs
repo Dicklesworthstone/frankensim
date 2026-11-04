@@ -144,6 +144,112 @@ fn arbitrary_uniform_gas_preserves_composition_transport_and_pressure_scaling() 
 }
 
 #[test]
+fn material_atmosphere_passes_viscosity_to_actual_component_coefficients() {
+    use crate::dragledger::{
+        ComponentDragCoefficients, ComponentDragGeometry, ComponentDragLaw, ComponentDragShape,
+        DragComponent, DragLedger, ReynoldsDragCurve, ReynoldsDragLaw, ReynoldsDragPoint,
+    };
+    let spec = GasSpec::dry_air_ussa1976();
+    let gas = GasState::try_new(&spec, 288.15, 101325.0).unwrap();
+    let viscous = GasState::try_new(
+        &GasSpec {
+            sutherland_beta: 2.0 * spec.sutherland_beta,
+            conductivity: ConductivityModel::Eucken,
+            ..spec
+        },
+        288.15,
+        101325.0,
+    )
+    .unwrap();
+    let mut design = wright_openloop_v1();
+    design.coupling = crate::propcoupling::CANDIDATE_B;
+    design.ledger = DragLedger {
+        components: vec![DragComponent {
+            component_id: "body",
+            area_m2: 0.4,
+            cd: 99.0,
+            cd_source: "unused fallback fixture",
+            uncertainty_frac: 0.2,
+        }],
+        unresolved_interference_frac: 0.0,
+    };
+    design.drag_geometry = vec![ComponentDragGeometry {
+        component_id: "body",
+        point_body_m: design.cg_m,
+        shape: ComponentDragShape::Isotropic,
+    }];
+    let curve = ReynoldsDragCurve::new(
+        "manufactured inverse-Re atmosphere consumer fixture",
+        0.2,
+        [100.0, 1e8]
+            .map(|reynolds| ReynoldsDragPoint {
+                reynolds,
+                cd: 200000.0 / reynolds,
+                uncertainty_frac: 0.2,
+            })
+            .to_vec(),
+    )
+    .unwrap();
+    design.drag_coefficients = vec![ComponentDragCoefficients {
+        component_id: "body",
+        law: ComponentDragLaw::Isotropic(ReynoldsDragLaw::new(0.5, curve).unwrap()),
+    }];
+    let state = flight();
+    let still = wind(0.0, 0.0);
+    let run = |gas| {
+        design
+            .force_buildup_in_atmosphere(
+                &MaterialAirProfile::uniform(gas).unwrap(),
+                &still,
+                state,
+                0,
+            )
+            .unwrap()
+    };
+    let low = run(gas);
+    let high = run(viscous);
+    assert_eq!(low.air.gas, gas);
+    assert_eq!(high.air.gas, viscous);
+    assert_eq!(low.loads.coupled, high.loads.coupled);
+    close(
+        high.loads.parasite_wrench.drag_n / low.loads.parasite_wrench.drag_n,
+        2.0,
+        1e-13,
+    );
+    close(
+        high.loads.parasite_wrench.dissipated_power_w
+            / low.loads.parasite_wrench.dissipated_power_w,
+        2.0,
+        1e-13,
+    );
+    assert_eq!(
+        low.loads,
+        design
+            .force_buildup_with_material_air(
+                low.airspeed_mps,
+                low.angle_of_attack_rad,
+                state.canard_rad,
+                state.propeller_rad_s,
+                state.pitch_rate_rad_s,
+                &gas,
+                None,
+                None
+            )
+            .unwrap()
+    );
+    let mut evolving = still.into_evolving(71, vec![1.8; 8]).unwrap();
+    evolving.turbulence.advance_to(240).unwrap();
+    let evolving_load = design
+        .force_buildup_in_evolving_atmosphere(
+            &MaterialAirProfile::uniform(gas).unwrap(),
+            &evolving,
+            state,
+        )
+        .unwrap();
+    assert_eq!(evolving_load.loads, low.loads);
+}
+
+#[test]
 fn hydrostatic_density_drives_actual_wing_and_propeller_loads() {
     let design = wright_openloop_v1();
     let profile = MaterialAirProfile::standard1976(0.0).unwrap();

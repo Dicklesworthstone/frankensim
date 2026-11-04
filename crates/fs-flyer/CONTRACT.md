@@ -2324,3 +2324,59 @@ component wake interference, parasite propeller wash, skin friction, flow-driven
 pressure-center migration or Reynolds/Mach variation of Cd. It does not establish
 historical Flyer validity in crossflow. Wing profile drag and induced drag retain
 their separate owners; lifting surfaces must not be counted again in this ledger.
+
+### Supplied Reynolds-dependent component parasite coefficients
+
+`fs-flyer::dragledger` accepts immutable `ReynoldsDragCurve` data containing
+2–256 ordered positive Reynolds/Cd samples, source identity, fractional
+uncertainty and an explicit subsonic Mach ceiling. Prepared piecewise log-log
+interpolation preserves exact sample values, stays positive and never
+extrapolates. Fractional uncertainty interpolates in log Reynolds coordinates;
+it is the source's stated uncertainty, not a certified interpolation-error
+enclosure. A source string does not by itself qualify the data for a geometry,
+surface condition, incidence or unresolved transition.
+
+`ComponentDragCoefficients` binds a complete ordered selection to the original
+ledger and `ComponentDragGeometry`. Each selected `ReynoldsDragLaw` carries its
+own positive reference length. Isotropic components use full local relative
+speed in `Re = rho V L / mu`; pressure faces use the magnitude of their own
+normal relative speed, with independent lengths and curves for active faces.
+Mach admission always uses full local relative speed. Zero driving speed gives
+zero force without inventing a coefficient at Re=0. Out-of-range Reynolds or
+Mach values, invalid transport, missing component coverage and shape/order
+mismatches are typed refusals. No finite-Re curve or drag-crisis continuation
+is guessed. Areas and lengths must follow the supplied coefficient convention.
+
+The selected curves feed the original component force/moment/work assembly,
+including its explicit interference allowance. Successful evaluation performs
+no heap allocation, hashing, curve fitting or material-property recomputation;
+curve preparation occurs once and lookup uses bounded binary search. The
+opt-in model digest includes geometry, source strings, data, uncertainties,
+reference lengths and Mach ceilings. Empty selections preserve the registered
+scalar/spatial coefficient laws and their existing digests.
+
+`OpenLoopDesign::force_buildup_with_material_air` consumes density, viscosity and
+sound speed from one coherent `fs-material::GasState`. Frozen and evolving
+material-atmosphere load paths, and source-bound spatial-wind flight stages,
+pass that original gas into the same owner. Transport is uniform over each
+aircraft stage; incident velocity and rotational point velocity retain the
+existing local geometry treatment. Density-only force entry points refuse a
+selected Reynolds model instead of silently using fixed coefficients.
+
+`GearedPropulsion::with_material_air` and `ShaftPropulsion::with_material_air`
+bind the original immutable gas to the shared native six-DOF force owner,
+including its steady/dynamic/swirl/harmonic consumers. Every stage must use
+exactly that source's density. Component Reynolds evaluation uses the existing
+world wind samples and all three rigid angular rates. This adds no duplicate
+equation of state or viscosity law and does not alter wing/propeller reference
+polars. It does not supply a historical Flyer coefficient calibration, skin
+friction, compressible drag, propwash on parasite components or resolved
+component/wake interference.
+
+The ledger battery exercises exact knots, independent inverse-Re and Stokes
+force/torque/work oracles, density cancellation, viscosity scaling, independent
+pressure-face Reynolds numbers, full-slip Mach admission, source identity and
+typed data/domain refusals. Longitudinal, material-atmosphere and native
+six-DOF regression cases additionally vary viscosity at fixed density and
+check that only the selected parasite loads change. The empty-selection
+regression retains the original material/density-only force equivalence.

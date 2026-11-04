@@ -7,8 +7,9 @@
 //! cargo test -p fs-flyer --test dragledger_battery
 
 use fs_flyer::dragledger::{
-    ComponentDragGeometry, ComponentDragShape, DragComponent, DragLedger, MAX_COMPONENTS,
-    flat_plate_aggregate, wright_ledger_v1,
+    ComponentDragCoefficients, ComponentDragGeometry, ComponentDragLaw, ComponentDragShape,
+    DragAirState, DragComponent, DragLedger, MAX_COMPONENTS, MAX_REYNOLDS_POINTS,
+    ReynoldsDragCurve, ReynoldsDragLaw, ReynoldsDragPoint, flat_plate_aggregate, wright_ledger_v1,
 };
 
 fn jlog(case: &str, payload: &str) {
@@ -17,6 +18,340 @@ fn jlog(case: &str, payload: &str) {
 
 const RHO: f64 = 1.294; // Dec-17 cold sea-level (air-state-v1)
 const V: f64 = 13.86; // airspeed_dec17_mps
+
+fn reynolds_curve(source: &str, factor: f64, lo: f64, hi: f64) -> ReynoldsDragCurve {
+    ReynoldsDragCurve::new(
+        source,
+        0.2,
+        vec![
+            ReynoldsDragPoint {
+                reynolds: lo,
+                cd: factor / lo,
+                uncertainty_frac: 0.1,
+            },
+            ReynoldsDragPoint {
+                reynolds: hi,
+                cd: factor / hi,
+                uncertainty_frac: 0.3,
+            },
+        ],
+    )
+    .unwrap()
+}
+
+fn near(actual: f64, expected: f64) {
+    assert!(
+        (actual - expected).abs() <= 3e-13 * expected.abs().max(1.0),
+        "{actual:e} != {expected:e}"
+    );
+}
+
+#[test]
+fn g1_reynolds_curve_preserves_knots_and_power_law_with_declared_uncertainty() {
+    let curve = reynolds_curve(
+        "analytic Stokes coefficient fixture, not measured component data",
+        24.0,
+        0.0001,
+        0.01,
+    );
+    assert_eq!(curve.maximum_mach(), 0.2);
+    assert!(!curve.source().is_empty());
+    for point in curve.points() {
+        assert_eq!(curve.evaluate(point.reynolds).unwrap(), *point);
+    }
+    for re in [0.00013, 0.0003, 0.001, 0.003, 0.008] {
+        let point = curve.evaluate(re).unwrap();
+        near(point.cd, 24.0 / re);
+        let fraction = (re / 0.0001).ln() / 100.0_f64.ln();
+        near(point.uncertainty_frac, 0.1 + 0.2 * fraction);
+    }
+    for re in [0.0, -1.0, 0.0000999, 0.01001, f64::NAN, f64::INFINITY] {
+        assert_eq!(
+            curve.evaluate(re).unwrap_err().code,
+            "drag-reynolds-outside-domain"
+        );
+    }
+}
+
+#[test]
+fn g1_actual_stokes_limit_force_uses_local_transport_and_closes_work() {
+    let radius: f64 = 0.01;
+    let mut ledger = spatial_ledger();
+    ledger.components.truncate(1);
+    ledger.unresolved_interference_frac = 0.0;
+    ledger.components[0].area_m2 = core::f64::consts::PI * radius * radius;
+    ledger.components[0].cd = 99.0; // Unused selected-table fallback must not leak.
+    let geometry = [ComponentDragGeometry {
+        component_id: "first",
+        point_body_m: [0.5, -0.3, 0.2],
+        shape: ComponentDragShape::Isotropic,
+    }];
+    let coefficients = [ComponentDragCoefficients {
+        component_id: "first",
+        law: ComponentDragLaw::Isotropic(
+            ReynoldsDragLaw::new(
+                2.0 * radius,
+                reynolds_curve("analytic Stokes limit", 24.0, 0.0001, 0.01),
+            )
+            .unwrap(),
+        ),
+    }];
+    let velocity: [f64; 3] = [-0.02, 0.03, 0.04];
+    let mut previous = None;
+    for (rho, mu) in [(1.0, 1.0), (5.0, 1.0), (5.0, 2.0)] {
+        let air = DragAirState {
+            density_kg_m3: rho,
+            dynamic_viscosity_pa_s: mu,
+            sound_speed_mps: 100.0,
+        };
+        let load = ledger
+            .wrench_with_reynolds_geometry(air, &geometry, &coefficients, [0.0; 3], &|_| {
+                Ok(velocity)
+            })
+            .unwrap();
+        let resistance = 6.0 * core::f64::consts::PI * mu * radius;
+        let force = velocity.map(|v| -resistance * v);
+        let arm = geometry[0].point_body_m;
+        let moment = [
+            arm[1] * force[2] - arm[2] * force[1],
+            arm[2] * force[0] - arm[0] * force[2],
+            arm[0] * force[1] - arm[1] * force[0],
+        ];
+        for axis in 0..3 {
+            near(load.force_n[axis], force[axis]);
+            near(load.moment_nm[axis], moment[axis]);
+        }
+        near(
+            load.dissipated_power_w,
+            resistance * velocity.iter().map(|v| v * v).sum::<f64>(),
+        );
+        near(
+            load.drag_n,
+            resistance * velocity[0].hypot(velocity[1]).hypot(velocity[2]),
+        );
+        if let Some(old) = previous {
+            near(load.force_n[0] / mu, old);
+        }
+        previous = Some(load.force_n[0] / mu);
+        assert_eq!(
+            ledger
+                .wrench_with_reynolds_geometry(air, &geometry, &coefficients, [0.0; 3], &|_| Ok(
+                    [0.0; 3]
+                ))
+                .unwrap(),
+            Default::default()
+        );
+    }
+}
+
+#[test]
+fn g3_pressure_faces_use_separate_normal_reynolds_and_full_slip_mach() {
+    let mut ledger = spatial_ledger();
+    ledger.components.truncate(1);
+    ledger.unresolved_interference_frac = 0.0;
+    let geometry = [ComponentDragGeometry {
+        component_id: "first",
+        point_body_m: [0.0; 3],
+        shape: ComponentDragShape::OrthogonalFaces {
+            normals_body: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            areas_m2: [0.1, 0.2, 0.0],
+        },
+    }];
+    let coefficients = [ComponentDragCoefficients {
+        component_id: "first",
+        law: ComponentDragLaw::OrthogonalFaces([
+            Some(
+                ReynoldsDragLaw::new(
+                    0.5,
+                    reynolds_curve("face-x manufactured law", 10.0, 1.0, 100.0),
+                )
+                .unwrap(),
+            ),
+            Some(
+                ReynoldsDragLaw::new(
+                    2.0,
+                    reynolds_curve("face-y manufactured law", 100.0, 1.0, 100.0),
+                )
+                .unwrap(),
+            ),
+            None,
+        ]),
+    }];
+    let air = DragAirState {
+        density_kg_m3: 2.0,
+        dynamic_viscosity_pa_s: 0.1,
+        sound_speed_mps: 100.0,
+    };
+    let evaluate = |flow| {
+        ledger.wrench_with_reynolds_geometry(air, &geometry, &coefficients, [0.0; 3], &|_| Ok(flow))
+    };
+    let load = evaluate([3.0, -1.0, 0.0]).unwrap();
+    // Independent Re_x=30 and Re_y=40, hence Cd_x=1/3 and Cd_y=2.5.
+    near(load.force_n[0], -0.3);
+    near(load.force_n[1], 0.5);
+    assert_eq!(load.force_n[2], 0.0);
+    near(load.dissipated_power_w, 1.4);
+    let tangent = evaluate([3.0, -1.0, 10.0]).unwrap();
+    assert_eq!(load.force_n, tangent.force_n);
+    assert_eq!(load.dissipated_power_w, tangent.dissipated_power_w);
+    assert_eq!(evaluate([0.0, 0.0, 10.0]).unwrap(), Default::default());
+    assert_eq!(
+        evaluate([3.0, -1.0, 30.0]).unwrap_err().code,
+        "drag-mach-outside-domain"
+    );
+    assert_eq!(
+        evaluate([0.001, -1.0, 0.0]).unwrap_err().code,
+        "drag-reynolds-outside-domain"
+    );
+    let reverse = evaluate([-3.0, 1.0, 0.0]).unwrap();
+    assert_eq!(reverse.force_n, load.force_n.map(|force| -force));
+    assert_eq!(reverse.dissipated_power_w, load.dissipated_power_w);
+}
+
+#[test]
+fn g0_reynolds_data_binding_refusal_and_source_identity() {
+    let points = vec![
+        ReynoldsDragPoint {
+            reynolds: 1.0,
+            cd: 1.0,
+            uncertainty_frac: 0.1,
+        },
+        ReynoldsDragPoint {
+            reynolds: 100.0,
+            cd: 0.2,
+            uncertainty_frac: 0.3,
+        },
+    ];
+    for source in ["", " "] {
+        assert!(ReynoldsDragCurve::new(source, 0.2, points.clone()).is_err());
+    }
+    for mach in [0.0, -1.0, 1.0, f64::NAN, f64::INFINITY] {
+        assert!(ReynoldsDragCurve::new("source", mach, points.clone()).is_err());
+    }
+    for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        let mut p = points.clone();
+        p[0].reynolds = bad;
+        assert!(ReynoldsDragCurve::new("source", 0.2, p).is_err());
+        let mut p = points.clone();
+        p[0].cd = bad;
+        assert!(ReynoldsDragCurve::new("source", 0.2, p).is_err());
+        assert!(ReynoldsDragLaw::new(bad, reynolds_curve("source", 1.0, 1.0, 100.0)).is_err());
+    }
+    let mut p = points.clone();
+    p[1].reynolds = p[0].reynolds;
+    assert!(ReynoldsDragCurve::new("source", 0.2, p).is_err());
+    let mut p = points.clone();
+    p[0].uncertainty_frac = 1.1;
+    assert!(ReynoldsDragCurve::new("source", 0.2, p).is_err());
+    assert!(ReynoldsDragCurve::new("source", 0.2, points[..1].to_vec()).is_err());
+    let max: Vec<_> = (1..=MAX_REYNOLDS_POINTS)
+        .map(|i| ReynoldsDragPoint {
+            reynolds: i as f64,
+            cd: 1.0,
+            uncertainty_frac: 0.2,
+        })
+        .collect();
+    assert!(ReynoldsDragCurve::new("source", 0.2, max.clone()).is_ok());
+    let mut too_many = max;
+    too_many.push(ReynoldsDragPoint {
+        reynolds: 1000.0,
+        ..points[0]
+    });
+    assert!(ReynoldsDragCurve::new("source", 0.2, too_many).is_err());
+
+    let ledger = spatial_ledger();
+    let geometry: Vec<_> = ledger
+        .components
+        .iter()
+        .enumerate()
+        .map(|(i, c)| ComponentDragGeometry {
+            component_id: c.component_id,
+            point_body_m: [0.0, i as f64, 0.0],
+            shape: ComponentDragShape::Isotropic,
+        })
+        .collect();
+    let coefficients: Vec<_> = ledger
+        .components
+        .iter()
+        .map(|c| ComponentDragCoefficients {
+            component_id: c.component_id,
+            law: ComponentDragLaw::LedgerConstant,
+        })
+        .collect();
+    let air = DragAirState {
+        density_kg_m3: 2.0,
+        dynamic_viscosity_pa_s: 0.1,
+        sound_speed_mps: 100.0,
+    };
+    assert_eq!(
+        ledger
+            .wrench_with_reynolds_geometry(air, &geometry, &coefficients, [0.0; 3], &|_| Ok([
+                3.0, -1.0, 0.0
+            ]))
+            .unwrap(),
+        ledger
+            .wrench_with_geometry(air.density_kg_m3, &geometry, [0.0; 3], &|_| Ok([
+                3.0, -1.0, 0.0
+            ]))
+            .unwrap()
+    );
+    let calls = std::cell::Cell::new(0);
+    let sample = |_| {
+        calls.set(calls.get() + 1);
+        Ok([3.0, 0.0, 0.0])
+    };
+    let mut bad = coefficients.clone();
+    bad.swap(0, 1);
+    assert_eq!(
+        ledger
+            .wrench_with_reynolds_geometry(air, &geometry, &bad, [0.0; 3], &sample)
+            .unwrap_err()
+            .code,
+        "drag-coefficients-invalid"
+    );
+    assert_eq!(calls.get(), 0);
+    assert_eq!(
+        ledger
+            .wrench_with_reynolds_geometry(air, &geometry, &coefficients[..1], [0.0; 3], &sample)
+            .unwrap_err()
+            .code,
+        "drag-coefficients-invalid"
+    );
+    let mut bad = coefficients.clone();
+    bad[0].law = ComponentDragLaw::OrthogonalFaces([None, None, None]);
+    assert!(ledger.admit_reynolds_coefficients(&geometry, &bad).is_err());
+    let mut invalid_air = air;
+    invalid_air.dynamic_viscosity_pa_s = f64::NAN;
+    assert_eq!(
+        ledger
+            .wrench_with_reynolds_geometry(invalid_air, &geometry, &coefficients, [0.0; 3], &sample)
+            .unwrap_err()
+            .code,
+        "drag-transport-invalid"
+    );
+    assert_eq!(calls.get(), 0);
+    let refusal = fs_flyer::Refusal {
+        code: "fixture-wind-refusal",
+        message: "failed local wind".into(),
+        ranked_repairs: vec![],
+    };
+    assert_eq!(
+        ledger
+            .wrench_with_reynolds_geometry(air, &geometry, &coefficients, [0.0; 3], &|_| Err(
+                refusal.clone()
+            ))
+            .unwrap_err(),
+        refusal
+    );
+    let with_source = |source| {
+        let mut coefficients = coefficients.clone();
+        coefficients[0].law = ComponentDragLaw::Isotropic(
+            ReynoldsDragLaw::new(1.0, reynolds_curve(source, 1.0, 1.0, 100.0)).unwrap(),
+        );
+        ledger.reynolds_digest(&geometry, &coefficients)
+    };
+    assert_ne!(with_source("source-a"), with_source("source-b"));
+}
 
 fn spatial_ledger() -> DragLedger {
     DragLedger {

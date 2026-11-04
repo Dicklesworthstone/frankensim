@@ -2,7 +2,8 @@
 //!
 //! OrthogonalFaces uses each face's NORMAL relative speed, rather than the
 //! aircraft's total speed. The caller supplies the projected areas and their
-//! orientation; the original ledger owns Cd and its uncertainty/provenance.
+//! orientation; the original ledger or an explicitly selected Reynolds curve
+//! owns Cd and its uncertainty/provenance.
 //! This is a reduced face-pressure law, not resolved bluff-body interference,
 //! skin friction, or a calibration of the registered Flyer in crossflow.
 
@@ -11,13 +12,14 @@ use super::{DragLedger, DragWrench, Refusal, hash_domain};
 /// Directional area model at one physical component's application point.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ComponentDragShape {
-    /// The original scalar area and Cd, with force opposite the full local flow.
+    /// The original scalar area, with force opposite the full local flow.
     Isotropic,
     /// Three orthogonal, two-sided pressure faces. For each normal n,
     /// F = -rho*Cd*A*|v dot n|*(v dot n)*n/2. Thus a zero-thickness face
     /// resists normal flow and generates no pressure force in tangential flow.
-    /// The faces share the ledger's declared Cd; their areas must be supplied
-    /// for that coefficient convention, not inferred from the scalar area.
+    /// The faces share the ledger's declared Cd unless separate Reynolds laws
+    /// are selected. Areas must match the selected coefficient convention,
+    /// rather than being inferred from the scalar area.
     OrthogonalFaces {
         /// Orthonormal unit face normals, expressed in body FRD axes.
         normals_body: [[f64; 3]; 3],
@@ -117,6 +119,26 @@ impl DragLedger {
         relative_velocity_at: &dyn Fn([f64; 3]) -> Result<[f64; 3], Refusal>,
     ) -> Result<DragWrench, Refusal> {
         self.admit_geometry(geometry)?;
+        self.wrench_with_coefficients(
+            rho_kg_m3,
+            geometry,
+            origin_body_m,
+            relative_velocity_at,
+            &|component, _, _, _| Ok(self.components[component].cd),
+        )
+    }
+
+    // Geometry and coefficient binding are admitted before this shared force
+    // assembly. The coefficient callback receives component index, face index
+    // (None for isotropic drag), full slip speed, and force-driving speed.
+    pub(super) fn wrench_with_coefficients(
+        &self,
+        rho_kg_m3: f64,
+        geometry: &[ComponentDragGeometry],
+        origin_body_m: [f64; 3],
+        relative_velocity_at: &dyn Fn([f64; 3]) -> Result<[f64; 3], Refusal>,
+        coefficient_at: &impl Fn(usize, Option<usize>, f64, f64) -> Result<f64, Refusal>,
+    ) -> Result<DragWrench, Refusal> {
         if !rho_kg_m3.is_finite()
             || rho_kg_m3 <= 0.0
             || !origin_body_m.iter().all(|v| v.is_finite())
@@ -124,7 +146,7 @@ impl DragLedger {
             return Err(air_invalid());
         }
         let mut result = DragWrench::default();
-        for (component, geometry) in self.components.iter().zip(geometry) {
+        for (index, (component, geometry)) in self.components.iter().zip(geometry).enumerate() {
             let velocity = relative_velocity_at(geometry.point_body_m)?;
             if !velocity.iter().all(|v| v.is_finite()) {
                 return Err(air_invalid());
@@ -138,8 +160,9 @@ impl DragLedger {
             }
             let (force, drag, power) = match geometry.shape {
                 ComponentDragShape::Isotropic => {
+                    let cd = coefficient_at(index, None, speed, speed)?;
                     let q = 0.5 * rho_kg_m3 * speed * speed;
-                    let drag = q * component.area_m2 * component.cd;
+                    let drag = q * component.area_m2 * cd;
                     (velocity.map(|v| -drag * (v / speed)), drag, drag * speed)
                 }
                 ComponentDragShape::OrthogonalFaces {
@@ -148,13 +171,18 @@ impl DragLedger {
                 } => {
                     let mut force = [0.0; 3];
                     let mut power = 0.0;
-                    for (normal, area) in normals_body.into_iter().zip(areas_m2) {
+                    for (face, (normal, area)) in normals_body.into_iter().zip(areas_m2).enumerate()
+                    {
                         if area == 0.0 {
                             continue;
                         }
                         let vn = dot(velocity, normal);
+                        if vn == 0.0 {
+                            continue;
+                        }
+                        let cd = coefficient_at(index, Some(face), speed, vn.abs())?;
                         let q = 0.5 * rho_kg_m3 * vn.abs() * vn.abs();
-                        let magnitude = q * area * component.cd;
+                        let magnitude = q * area * cd;
                         let signed_force = -magnitude.copysign(vn);
                         for i in 0..3 {
                             force[i] += signed_force * normal[i];

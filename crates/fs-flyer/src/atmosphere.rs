@@ -162,7 +162,7 @@ pub struct AtmosphericFlightState {
     pub pitch_rate_rad_s: f64,
 }
 
-/// Actual original gas/wind sample beside the loads that consumed its density.
+/// Original gas/wind sample beside the loads that consumed its transport.
 #[derive(Clone, Debug)]
 pub struct AtmosphericLoads {
     /// Original material state and wind sampled at the requested CG position.
@@ -179,11 +179,12 @@ pub struct AtmosphericLoads {
 
 impl OpenLoopDesign {
     /// Evaluate original wing, drag, propeller and engine loads using the same
-    /// profile pressure/density and locally sampled relative wind. Sampling is
-    /// at the CG and density is frozen across the aircraft for this load solve.
+    /// profile transport and locally sampled relative wind. Sampling is at the
+    /// CG and transport is frozen across the aircraft for this load solve.
     /// Crosswind is retained for observation but the original longitudinal model
-    /// has no sideslip response. Reynolds/Mach diagnostics do not change the
-    /// original polar; no compressible-flow or high-altitude validation is implied.
+    /// has no sideslip response. Explicit parasite coefficient curves consume
+    /// its viscosity and sound speed; the original wing/rotor polar is unchanged.
+    /// No compressible-flow or high-altitude validation is implied.
     /// The returned load frame and level-flight gravity convention are those
     /// of `force_buildup`; this method does not itself integrate flight motion.
     pub fn force_buildup_in_atmosphere(
@@ -225,13 +226,15 @@ impl OpenLoopDesign {
         );
         let speed = det::sqrt(u * u + w * w);
         let alpha = det::atan2(w, u);
-        let loads = self.force_buildup(
+        let loads = self.force_buildup_with_material_air(
             speed,
             alpha,
             state.canard_rad,
             state.propeller_rad_s,
             state.pitch_rate_rad_s,
-            air.gas.density,
+            &air.gas,
+            None,
+            None,
         )?;
         Ok(AtmosphericLoads {
             air,
