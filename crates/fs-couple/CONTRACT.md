@@ -11561,6 +11561,28 @@ emissivity changes, integrated layer flux, closed energy, original-path reductio
 and atomic refusal. These remain manufactured numerical fixtures, with the
 original first-order, fixed-geometry and single-solid-leg limitations.
 
+`circuit_enthalpy::thermoelectric::piezoelectric::step_candidate` connects the
+same finite thermoelectric legs to the original `PiezoelectricCircuit`. A
+temperature gradient can charge and move the sourced rod; external mechanical
+work can drive current and reciprocal junction heat through that same circuit.
+The existing Kelvin/circuit/enthalpy kernel owns every thermal trial, source
+selection, current-to-heat transfer and resistor deposition. Its piezoelectric
+driver retains the original charge/strain storage and inertia once, and all
+trials restart accepted charge, flux, extension and momentum.
+
+Internal Seebeck work and its opposite junction/bulk heat are removed together
+from external supply. Authored electrical work, force-displacement work and
+external heat remain separate, and total rod/circuit/thermal storage must close
+before one candidate is returned. The ceramic's prepared coefficients, source
+context, geometry and inertia stay fixed; this composition adds no ceramic
+thermal strain, dielectric loss or electrical-contact law. The existing
+first-order thermal coupling and bounded longitudinal rod scopes apply.
+`tests/circuit_thermoelectric/piezoelectric.rs` compares the coupled result with
+independently eliminated rod/circuit equations and four individual caloric
+balances, including variable-Seebeck interior heat, polarity/poling reversal,
+mechanical-to-Kelvin transfer, zero-Seebeck reduction and atomic refusal/retry.
+These authored numerical fixtures do not qualify measured active materials.
+
 ### Nozzle flow through finite electrical and thermal networks
 
 `cavity_phs::piston::exchange::network` stages one original pressure-driven

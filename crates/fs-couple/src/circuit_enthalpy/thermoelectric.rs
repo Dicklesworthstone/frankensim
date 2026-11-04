@@ -9,6 +9,8 @@
 
 /// Reciprocal thermoelectric, field-motion and finite-thermal evolution.
 pub mod motion;
+/// Reciprocal thermoelectric and piezoelectric motion on the same finite heat state.
+pub mod piezoelectric;
 /// Exact caloric and reversible Kelvin entropy on the same accepted interval.
 pub mod entropy;
 
