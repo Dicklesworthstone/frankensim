@@ -110,6 +110,28 @@ mass-normalized damped modes (`time`, moved from fs-couple under owner decision 
   resolvents, nonnormal zero-right-projection excitation, nonproportional phase,
   signed gyroscopic coupling, mixed units and extreme rates, complex sensors,
   simple zero poles, active growth, refusal gates and deterministic factor reuse.
+- `quadratic_modes::PreparedQuadraticModes::prepare_sensitivities` borrows the
+  original source pencil and prepares one existing bordered response factor.
+  `PreparedQuadraticSensitivities::parameter_derivatives` accepts batches of
+  complete signed physical `dM/dtheta`, `dC/dtheta`, `dK/dtheta`, with symmetric
+  mass directions and full nonsymmetric damping/stiffness directions. It
+  returns original-coordinate pole, displacement and velocity derivatives.
+  Each analytic source action uses the shared fs-la parameter-derivative owner;
+  `response()` reuses that same factor for force residues. Binary direction,
+  coordinate and rate scaling retain the declared physical parameter units.
+  Recovery differentiates `phi^H M phi=1`, including the moving mass, and holds
+  the **baseline** original phase-reference component real. That coordinate
+  stays fixed across a batch; no differentiability of a moving largest-component
+  convention is claimed. Published values are independently gated by the
+  differentiated original M/C/K rows and the unit-mass derivative constraint.
+  Separate physical work/payload envelopes and the shared RHS ceiling admit
+  complete batches; cancellation or refusal changes no model or prepared factor.
+  These are local simple-pole tangents, not finite-step predictions, a mode
+  tracker across crossings, shape-error enclosures or repeated-mode derivatives.
+  Seven native `tests/quadratic_sensitivities.rs` cases cover analytic scalar
+  tuning and mass normalization, nonnormal and signed gyroscopic motion, full
+  mutual mass/nonproportional directions, independent neighboring pencils,
+  extreme coordinate/rate/parameter units, zero poles, refusal and exact reuse.
 - `ModalError` — typed refusals with stable `FS-MODAL-*` display codes:
   dimension mismatch, mass-not-SPD, factorization refusal (wrapping the
   fs-sparse `FS-SPARSE-DIRECT-*` code and the shift), invalid window,

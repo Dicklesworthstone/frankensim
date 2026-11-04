@@ -14,6 +14,11 @@ use super::{
 };
 use fs_la::pole_response::{PoleResponseError, PreparedPole};
 
+mod sensitivity;
+pub use sensitivity::{
+    PreparedQuadraticSensitivities, QuadraticModeDerivative, QuadraticParameterDirection,
+};
+
 /// Shared numerical factor and batch limits. The reference rate is physical [1/s].
 pub use fs_la::pole_response::PoleResponseOptions;
 
@@ -43,6 +48,16 @@ pub enum QuadraticResponseError {
     Physical(QuadraticModeError),
     /// Shared bordered-factor refusal, including a singular pole linearization.
     Numerical(PoleResponseError),
+    /// Published physical parameter derivatives failed an independent source
+    /// polynomial or differentiated unit-mass constraint check.
+    SensitivityResidual {
+        /// Maximum original-polynomial row backward residual.
+        polynomial: f64,
+        /// Differentiated physical unit-mass constraint residual.
+        normalization: f64,
+        /// Caller-authored linear residual ceiling.
+        limit: f64,
+    },
     /// Cancellation observed before publication.
     Cancelled,
 }

@@ -24,8 +24,9 @@ pub use fs_la::nonlinear_eig::PoleOptions;
 
 mod response;
 pub use response::{
-    PoleResponseOptions, PreparedQuadraticResponse, QuadraticForceResidue, QuadraticObservation,
-    QuadraticResponseError, QuadraticResponseOptions,
+    PoleResponseOptions, PreparedQuadraticResponse, PreparedQuadraticSensitivities,
+    QuadraticForceResidue, QuadraticModeDerivative, QuadraticObservation,
+    QuadraticParameterDirection, QuadraticResponseError, QuadraticResponseOptions,
 };
 
 /// One locally resolved right mode in the ORIGINAL generalized coordinates.
