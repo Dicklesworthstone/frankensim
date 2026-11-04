@@ -1,5 +1,10 @@
 //! Adaptive positive-time advection and diffusion of planar vortices.
 //!
+//! [`simulate_with_cx`] selects second/fourth-order inviscid pair maps, and
+//! [`simulate_with_affine_flow_cx`] includes one held affine source. These
+//! impulse-preserving paths share the original adaptive execution vocabulary.
+//!
+//! The viscous [`simulate_viscous_with_cx`] path retains positive diffusion:
 //! One original D(h/2) A(h) D(h/2) step is compared with two half steps.
 //! Both positions and circulation must satisfy their own physical tolerance;
 //! accepting the fine state preserves the original positive diffusion maps.
@@ -11,8 +16,8 @@
 //! changing cloud still needs sufficient kernel overlap and explicit remeshing.
 
 use crate::diffusion::adaptive::{
-    AdaptiveBudget, AdaptiveError, AdaptiveOptions, AdaptiveRun, admit_count, count, next_step,
-    overflow, scaled_error, trial_time, validate_options,
+    AdaptiveOptions as DiffusionAdaptiveOptions, admit_count, count, next_step, overflow,
+    scaled_error, trial_time, validate_options,
 };
 use crate::diffusion::{self, PseDiffusion};
 use crate::{
@@ -21,12 +26,20 @@ use crate::{
 };
 use fs_math::det;
 
+pub use crate::diffusion::adaptive::{AdaptiveBudget, AdaptiveError, AdaptiveRun};
+
+mod inviscid;
+pub use inviscid::{
+    AdaptiveOptions, AmbientAdaptiveBudget, AmbientAdaptiveRun, simulate_with_affine_flow_cx,
+    simulate_with_cx,
+};
+
 /// Independent physical tolerances for vorticity and particle trajectories.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ViscousAdaptiveOptions {
     /// Positive step limits, absolute vorticity [1/s] and relative circulation
     /// tolerances, shared with fixed-site adaptive diffusion.
-    pub time: AdaptiveOptions,
+    pub time: DiffusionAdaptiveOptions,
     /// Strictly positive absolute Euclidean position tolerance [m].
     /// No tolerance is scaled by distance from an arbitrary coordinate origin.
     pub absolute_position_tolerance_m: f64,

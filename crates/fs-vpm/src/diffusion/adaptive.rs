@@ -80,7 +80,7 @@ pub struct AdaptiveRun {
 /// Input, resource or time-accuracy refusal; the caller's state stays untouched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdaptiveError {
-    /// The existing checked PSE owner refused its physical or execution domain.
+    /// The existing checked VPM owner refused its physical or execution domain.
     Engine(VpmError),
     /// The local estimate still exceeds tolerance at the minimum retry step.
     ToleranceUnreachable {
@@ -107,7 +107,7 @@ impl core::fmt::Display for AdaptiveError {
                 error_ratio_bits,
             } => write!(
                 f,
-                "PSE local time tolerance is unreachable at dt={} s (error ratio={})",
+                "VPM local time tolerance is unreachable at dt={} s (error ratio={})",
                 f64::from_bits(*dt_bits),
                 f64::from_bits(*error_ratio_bits),
             ),
@@ -116,7 +116,7 @@ impl core::fmt::Display for AdaptiveError {
                 dt_bits,
             } => write!(
                 f,
-                "PSE time cannot advance from {} s by {} s",
+                "VPM time cannot advance from {} s by {} s",
                 f64::from_bits(*elapsed_bits),
                 f64::from_bits(*dt_bits),
             ),
@@ -567,19 +567,39 @@ pub(crate) fn next_step(
     error_ratio: f64,
     elapsed: f64,
 ) -> Result<f64, AdaptiveError> {
-    if error_ratio <= 0.125 {
-        return Ok((h + h).min(options.max_dt_s).max(options.min_dt_s));
+    next_step_with_growth(
+        options.min_dt_s,
+        options.max_dt_s,
+        0.125,
+        h,
+        error_ratio,
+        elapsed,
+    )
+}
+
+// The same dyadic controller admits a different local-error order without
+// changing the original second-order viscous/fixed-site decisions or caps.
+pub(crate) fn next_step_with_growth(
+    min_dt_s: f64,
+    max_dt_s: f64,
+    growth_ratio: f64,
+    h: f64,
+    error_ratio: f64,
+    elapsed: f64,
+) -> Result<f64, AdaptiveError> {
+    if error_ratio <= growth_ratio {
+        return Ok((h + h).min(max_dt_s).max(min_dt_s));
     }
     if error_ratio <= 1.0 {
-        return Ok(h.max(options.min_dt_s));
+        return Ok(h.max(min_dt_s));
     }
-    if h <= options.min_dt_s {
+    if h <= min_dt_s {
         return Err(AdaptiveError::ToleranceUnreachable {
             dt_bits: h.to_bits(),
             error_ratio_bits: error_ratio.to_bits(),
         });
     }
-    let dt = (h * 0.5).max(options.min_dt_s);
+    let dt = (h * 0.5).max(min_dt_s);
     if dt >= h {
         return Err(AdaptiveError::TimeStagnation {
             elapsed_bits: elapsed.to_bits(),

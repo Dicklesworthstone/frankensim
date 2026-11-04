@@ -20,7 +20,7 @@ use super::{
 mod viscous;
 pub use viscous::simulate_with_cx as simulate_viscous_with_cx;
 
-/// Adaptive positive-time evolution of moving viscous particle clouds.
+/// Adaptive positive-time inviscid/source and moving viscous particle windows.
 pub mod adaptive;
 
 mod composition;

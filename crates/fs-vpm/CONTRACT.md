@@ -248,6 +248,79 @@ subnormal-time transport, exact resource admission and cancellation inside
 signed pair and coalesced source stages. Original affine/viscous/remeshed
 regressions remain applicable to the unchanged Second path.
 
+### Adaptive positive-time inviscid windows
+
+`conservative::adaptive::simulate_with_cx` and
+`simulate_with_affine_flow_cx` complete an explicit finite nonnegative duration
+with the original selected Second/Fourth pair maps and, optionally, one held
+affine source. `AdaptiveOptions` declares initial/minimum/maximum physical
+timesteps, a positive absolute position tolerance in metres and a nonnegative
+relative tolerance. Every trial compares one selected-order full step with two
+half steps. For order `p`, its local estimate is
+
+`max_i ||x_fine_i-x_coarse_i|| / ((2^p-1)*(atol+rtol*max(R_old,R_fine)))`.
+
+`R` is the maximum Euclidean radius about the unweighted particle centroid.
+The centroid uses double-double accumulation; the norm uses deterministic
+`fs_math::det::hypot`. The scale is objective under translations and rotations,
+transforms with physical length units, admits signed zero-net-circulation
+clouds and does not relax when a uniform source moves the whole cloud far from
+the origin. The estimate includes passive tracers. A ratio at most one accepts
+the fine state unchanged: there is no Richardson state extrapolation, impulse
+projection or circulation correction. Thus accepted unforced steps retain
+the original circulation and linear/angular impulse invariants to roundoff.
+Rejected trials halve the physical step; accepted ratios at most `1/8` or
+`1/32` permit doubling at Second or Fourth order. Limits bound all positive
+trials, except that the final remainder may be shorter than the minimum.
+Failure to meet tolerance at that floor refuses the whole window.
+
+Original composition weights remain separate from the physical timestep, so
+the two half steps retain resolvable subnormal-time motion. Endpoint time uses
+a double-double accumulator and a downward-rounded final remainder when
+needed; a remaining low part is advanced explicitly rather than silently
+discarded. Original signed Fourth stages are internal inviscid/source maps.
+No negative step reaches diffusion or remapping. Original numerical refusals
+propagate; the controller does not hide unrepresentable source maps or geometry
+by returning a partial trajectory.
+
+The affine path prepares both full/fine source-map sets once per trial and
+combines adjacent exact source maps at the fine midpoint. Only accepted fine
+source increments enter the original double-double moment account. Rejected
+and coarse source visits still count as computational work. A trial uses
+`3*q*N*(N-1)` pair visits with `q=1` or `3`, plus `5*N` or `11*N` source visits
+when active. Initial validation/centered geometry costs `2*N`; each trial adds
+`3*N+4` copy/geometry/boundary units beyond pair and source work. Three particle
+banks are fallibly reserved once and reused; no trial allocates. Empty,
+zero-duration and unforced singleton windows are identities with one bank and
+`N` validation units. Zero source takes the exact unforced path.
+
+The owner reuses the original adaptive budget, result and error vocabulary,
+including a zero `fraction_evaluations` receipt because this lane evaluates no
+PSE kernels. It shares the dyadic step controller with the fixed-site and
+moving-viscous lanes; their original Second-order threshold is unchanged.
+Whole-window particle, attempt, pair, source-visit, work and live-payload caps
+are checked before each candidate's work; one admitted `Cx` account charges
+all accepted and rejected candidates. Original bounded work checkpoints and
+the final publication checkpoint make cancellation atomic. Deterministic
+operation counts and the three-bank payload are stated; no wall-clock speed
+claim is inferred. The local estimate is neither a certified/global trajectory
+bound nor a spatial/core/continuum-error bound. Variable accepted steps do not
+establish time reversibility or symplecticity. Held prescribed sources retain
+their original external-impulse interpretation; no body reaction, moving-source
+adaptation, adaptive remapping or broad 3-D VPM completion is claimed.
+Viscous trajectories retain the separate original positive diffusion owner
+and its independent position/vorticity tolerances described below.
+
+`tests/adaptive_conservative.rs` (G0/G1/G3/G4) compares both orders with an
+independent refined full-ODE reference for close vortices and noncommuting
+strain, checks actual error improvement under tighter local tolerances and
+lower admitted work for Fourth on that fixture, signed zero-net impulse and
+analytic source first moments, equivalence to original fine maps, frame/unit
+covariance, inactive/subnormal/short-endpoint motion, exact cap admission,
+deterministic retry, tolerance/numerical refusals and cancellation throughout
+pair/source trials and final publication. Existing adaptive fixed-site PSE,
+moving-viscous and conservative/affine/viscous/remeshed tests remain applicable.
+
 ## Conservative 2-D viscous diffusion
 
 The diffusion-focused implementation adds `diffusion::PseDiffusion` and two
