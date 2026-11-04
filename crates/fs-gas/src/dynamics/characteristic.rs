@@ -183,7 +183,9 @@ impl FrozenGas {
     /// isentropic fan for expansion. This is the interior's half of an end
     /// Riemann problem; a caller-owned port supplies the other relation
     /// between end pressure and end velocity. `outward_normal` is -1 at a left
-    /// end and +1 at a right end. No gamma-law replacement is used.
+    /// end and +1 at a right end. No gamma-law replacement is used. The supplied
+    /// temperature and sound speed must agree with this original gas source;
+    /// stale or caller-invented auxiliary thermodynamics refuse.
     pub fn end_wave(
         &self,
         interior: Primitive,
@@ -195,6 +197,10 @@ impl FrozenGas {
         if !matches!(outward_normal, -1.0 | 1.0) {
             return Err(Error::Invalid("end wave outward normal"));
         }
+        require_matching_thermodynamics(
+            interior,
+            self.from_rho_u_p(interior.density, interior.velocity, interior.pressure)?,
+        )?;
         let inside = Primitive {
             velocity: outward_normal * interior.velocity,
             ..interior
@@ -214,13 +220,19 @@ impl FrozenGas {
     /// Isentropic discharge of stationary stagnation gas `donor` through a
     /// converging throat into `backpressure`, along this source's isentrope.
     /// Returns the throat state, whose velocity is the positive exit speed,
-    /// and whether the throat is sonic (choked).
+    /// and whether the throat is sonic (choked). Even at equal pressures the
+    /// donor must carry temperature and sound speed from this gas source.
     pub fn nozzle_exit(
         &self,
         donor: Primitive,
         backpressure: f64,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<(Primitive, bool), Error> {
+        poll(&mut cancelled)?;
+        require_matching_thermodynamics(
+            donor,
+            self.from_rho_u_p(donor.density, donor.velocity, donor.pressure)?,
+        )?;
         shared::nozzle::state(self, donor, backpressure, &mut cancelled).map_err(wave_error)
     }
 
@@ -267,9 +279,11 @@ impl FrozenGas {
 
     /// Euler flux through a stationary face that carries `face`, oriented
     /// along the increasing duct coordinate. `signal_speed` is raised to the
-    /// face's own `|u| + c` when smaller.
+    /// face's own `|u| + c` when smaller. The face's thermodynamics must agree
+    /// with this source, including the sound speed used for the CFL bound.
     pub fn face_flux(&self, face: Primitive, signal_speed: f64) -> Result<FaceFlux, Error> {
-        let q = self.conserved(face.density, face.velocity, face.pressure)?;
+        let (q, admitted) = self.state_at(face.density, face.velocity, face.pressure)?;
+        require_matching_thermodynamics(face, admitted)?;
         checked_flux(
             q.momentum,
             q.momentum * face.velocity + face.pressure,
@@ -287,6 +301,10 @@ impl FrozenGas {
         stagnation_temperature: f64,
         signal_speed: f64,
     ) -> Result<FaceFlux, Error> {
+        require_matching_thermodynamics(
+            face,
+            self.from_rho_u_p(face.density, face.velocity, face.pressure)?,
+        )?;
         let enthalpy = self.stagnation_enthalpy(stagnation_temperature)?;
         let mass = face.density * face.velocity;
         checked_flux(
@@ -296,6 +314,26 @@ impl FrozenGas {
             signal_speed.max(face.velocity.abs() + face.sound_speed),
         )
     }
+}
+
+// Public Primitive fields can be authored independently. Only the original
+// source may supply their redundant thermodynamic coordinates. Allow arithmetic
+// round trips (including conservative decoding), not an energy-solve tolerance
+// that could admit a materially different acoustic speed. Keep the caller's
+// valid bits, so a zero-strength wave remains the exact original state.
+fn require_matching_thermodynamics(supplied: Primitive, source: Primitive) -> Result<(), Error> {
+    for (value, expected) in [
+        (supplied.pressure, source.pressure),
+        (supplied.temperature, source.temperature),
+        (supplied.sound_speed, source.sound_speed),
+    ] {
+        if !positive(value) || ((value - expected) / expected).abs() > 64.0 * f64::EPSILON {
+            return Err(Error::Invalid(
+                "primitive thermodynamics disagree with the original gas source",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn wave_error(error: WallError<Error>) -> Error {

@@ -198,6 +198,73 @@ fn end_wave_has_the_acoustic_limit_and_stops_gas_at_the_wall_pressure() {
 }
 
 #[test]
+fn public_pressure_ports_reject_stale_thermodynamics_even_without_a_pressure_jump() {
+    let source = gas(0.4, 0.0);
+    let donor = at_rest(&source, 1.0, 0.0, 10.0);
+    let foreign = at_rest(&gas(0.0, 0.0), 1.0, 0.0, 10.0);
+    assert_ne!(foreign.sound_speed, donor.sound_speed);
+    for invalid in [
+        Primitive {
+            temperature: donor.temperature * 1.01,
+            ..donor
+        },
+        Primitive {
+            sound_speed: donor.sound_speed * 0.5,
+            ..donor
+        },
+        Primitive {
+            pressure: donor.pressure * 1.01,
+            ..donor
+        },
+        Primitive {
+            temperature: f64::NAN,
+            ..donor
+        },
+        Primitive {
+            sound_speed: f64::NAN,
+            ..donor
+        },
+        foreign,
+    ] {
+        assert!(
+            source
+                .end_wave(invalid, 1.0, invalid.pressure, || false)
+                .is_err()
+        );
+        assert!(
+            source
+                .nozzle_exit(invalid, invalid.pressure, || false)
+                .is_err()
+        );
+        assert!(source.face_flux(invalid, 0.0).is_err());
+        assert!(source.inflow_flux(invalid, donor.temperature, 0.0).is_err());
+    }
+    // Valid zero-strength states and formation-reference shifts still preserve
+    // the source state exactly; no state is silently repaired or normalized.
+    for owner in [source, gas(0.4, 1e18)] {
+        assert_eq!(
+            owner.nozzle_exit(donor, donor.pressure, || false).unwrap(),
+            (donor, false)
+        );
+        assert_eq!(
+            owner
+                .end_wave(donor, 1.0, donor.pressure, || false)
+                .unwrap()
+                .primitive,
+            donor
+        );
+        let flux = owner.face_flux(donor, 0.0).unwrap();
+        assert_eq!(flux.mass, 0.0);
+        assert_eq!(flux.momentum, donor.pressure);
+        assert_eq!(flux.signal_speed, donor.sound_speed);
+        assert_eq!(
+            owner.nozzle_exit(donor, donor.pressure, || true),
+            Err(Error::Cancelled)
+        );
+    }
+}
+
+#[test]
 fn nozzle_exit_has_the_incompressible_bernoulli_limit_and_face_flux_is_consistent() {
     let source = gas(0.02, 0.0);
     let donor = at_rest(&source, 1.0, 0.0, 10.0);
