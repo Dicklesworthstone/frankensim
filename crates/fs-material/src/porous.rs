@@ -54,6 +54,8 @@ use crate::MaterialError;
 /// Resolve the existing rigid-frame law in a shared, changing fluid state.
 pub mod gas;
 pub use gas::{PorousFluidLaw, PorousFluidResponse};
+/// Positive causal realization of the original rigid-frame JCA/JCAL law.
+pub mod diffusive;
 /// Coherent rigid-backed porous/fluid multilayers and oblique reflection.
 pub mod layers;
 /// Typed intrinsic permeability and conservative, compressible Darcy barriers.
@@ -629,3 +631,4 @@ mod porous_tests {
         println!("{{\"suite\":\"fs-material\",\"case\":\"pa-006-cards\",\"verdict\":\"pass\"}}");
     }
 }
+
