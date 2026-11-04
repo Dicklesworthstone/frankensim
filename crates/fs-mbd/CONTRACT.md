@@ -6351,3 +6351,23 @@ nightly-2026-08-31 rustfmt. Pinned July formatting, native compilation and
 numerical execution remain **UNRUN** because this runtime has no original
 FrankenSim native build graph, DSR or RCH. No passing native qualification is
 claimed.
+
+
+### Native inverse-mass actions for articulated multiphysics composition
+
+`articulated::free_floating_impulse_delta` and
+`prescribed_base_impulse_delta` expose the existing O(links) zero-bias ABA
+actions, with original `ImpulseVelocityChange` and `PrescribedImpulseDelta`
+values. Their numerical implementations are unchanged. Body impulses are
+about link origins in link axes; joint impulses retain their revolute/prismatic
+units. The prescribed action returns its original condensed support impulse.
+
+These are linear mobility probes, independent of incoming velocities and
+smooth loads. They validate configuration, dimensions, finite inputs and
+native inertia admission, while permitting probe velocities beyond physical
+joint speed limits. Coupled consumers must submit their combined impulse to
+the original free/prescribed physical impulse owner for actual endpoint and
+momentum/work admission. The articulated/modal consumer exercises that
+distinction with an admissible combined response and an atomic actual-speed
+refusal, alongside independent coupled-mass and prescribed-support oracles.
+No state is changed by a mobility probe and no finite force duration is inferred.

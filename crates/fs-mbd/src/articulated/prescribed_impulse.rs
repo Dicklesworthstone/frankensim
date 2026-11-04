@@ -202,13 +202,29 @@ pub fn apply_prescribed_base_impulses(
     })
 }
 
-pub(crate) struct PrescribedImpulseDelta {
-    pub(crate) velocity: ImpulseVelocityChange,
-    pub(crate) support_body: Wrench,
+/// Original supported inverse-mass action and its condensed support reaction.
+/// This describes a linear response, not an admitted physical endpoint.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrescribedImpulseDelta {
+    /// Link/joint changes with an exactly zero prescribed base velocity jump.
+    pub velocity: ImpulseVelocityChange,
+    /// Impulse exerted ON the tree by its support, about the base origin in
+    /// base axes. The opposite impulse acts on the prescribed support.
+    pub support_body: Wrench,
 }
 
-/// Inverse-mass probes do not apply an event or enforce endpoint speed limits.
-pub(crate) fn prescribed_base_impulse_delta(
+/// Apply the native prescribed-base inverse inertia without applying an event.
+///
+/// Inputs have the same units, frames and complete model ordering as
+/// [`apply_prescribed_base_impulses`]. The original O(links) ABA checks the
+/// configuration, finite impulses and inertia while holding the base velocity
+/// change at zero. Neither base velocity nor smooth acceleration affects this
+/// linear action; root scalar joints retain their original mobility.
+///
+/// Mobility probes do not enforce endpoint speed limits. A coupled solver must
+/// pass its final combined impulse to [`apply_prescribed_base_impulses`] for
+/// physical endpoint, support-work and momentum admission. No input is mutated.
+pub fn prescribed_base_impulse_delta(
     model: &ArticulatedModel,
     joint_position: &[f64],
     joint_impulses: &[f64],

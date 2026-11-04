@@ -28,8 +28,10 @@ pub use point_motion::{ArticulatedPointMotion, PreparedLinkPointMotion};
 
 #[path = "articulated/prescribed_impulse.rs"]
 mod prescribed_impulse;
-pub(super) use prescribed_impulse::prescribed_base_impulse_delta;
-pub use prescribed_impulse::{PrescribedBaseImpulseResponse, apply_prescribed_base_impulses};
+pub use prescribed_impulse::{
+    PrescribedBaseImpulseResponse, PrescribedImpulseDelta, apply_prescribed_base_impulses,
+    prescribed_base_impulse_delta,
+};
 
 use core::fmt;
 use fs_ga::{GaError, Mat3, Mat6, Se3, Twist, Vec3, Wrench};
@@ -1710,15 +1712,37 @@ pub fn apply_free_floating_impulses(
     })
 }
 
-/// Internal inverse-mass action, before any physical endpoint speed checks.
-/// Effective-mass probes must not be mistaken for an applied unit impulse.
-pub(super) struct ImpulseVelocityChange {
-    pub(super) base: Twist,
-    pub(super) joint: Vec<f64>,
-    pub(super) body: Vec<Twist>,
+/// Native fixed-configuration inverse-mass action for mechanical composition.
+///
+/// This is a linear velocity CHANGE, independent of incoming velocities. It
+/// does not apply an event or admit any physical endpoint. In particular,
+/// effective-mass columns may exceed joint speed limits; only the final
+/// combined impulse is passed to the original physical impulse owner.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImpulseVelocityChange {
+    /// Base velocity change in base axes, ordered [angular, linear].
+    /// This is exactly zero for the prescribed-base inverse-mass action.
+    pub base: Twist,
+    /// Relative joint velocity changes in the model's compact DOF order.
+    pub joint: Vec<f64>,
+    /// Complete link velocity changes in each original link's axes.
+    pub body: Vec<Twist>,
 }
 
-pub(super) fn free_floating_impulse_delta(
+/// Apply the original free-base inverse inertia at one admitted configuration.
+///
+/// Joint impulses are N m s for revolute joints and N s for prismatic joints.
+/// Body impulses are expressed about each original link origin in link axes,
+/// with [torque impulse, force impulse] ordering. The fixed root, complete
+/// configuration, input sizes, finite values and native inertia conditioning
+/// are checked by the same O(links) ABA used by physical impulse application.
+///
+/// No incoming velocity, smooth load or force duration enters this linear
+/// action. It neither enforces endpoint speed limits nor updates any state.
+/// Coupled solvers must pass their combined physical impulse to
+/// [`apply_free_floating_impulses`] for actual endpoint and momentum/work
+/// admission; a successful mobility probe is not an accepted physical event.
+pub fn free_floating_impulse_delta(
     model: &ArticulatedModel,
     joint_position: &[f64],
     joint_impulses: &[f64],

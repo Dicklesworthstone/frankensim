@@ -29,6 +29,11 @@ pub mod frictional;
 /// Simultaneous reciprocal impacts between native rigid bodies and modal points.
 pub mod rigid;
 
+/// Simultaneous reciprocal impacts between native mechanisms and modal points.
+pub mod articulated;
+
+mod point;
+
 /// Physical normal ports in one common scalar direction.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModalImpactContact {

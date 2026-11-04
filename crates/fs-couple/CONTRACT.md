@@ -28477,3 +28477,41 @@ Focused native tests exercise genuine free magnetic DOFs, signed braking,
 finite-inertia feedback versus frozen-speed forcing, continuation, driven
 annular rotation, source/geometry refusals and final-publication cancellation.
 
+
+
+## Native articulated mechanisms against continuing modal surfaces
+
+`PreparedArticulatedModalImpacts` and
+`CoupledModalSystem::apply_articulated_frictional_impacts` connect original
+free/prescribed articulated trees to complete modal world-point traces through
+one simultaneous 3N Coulomb solve. Original ABA mobility retains root joints,
+cross-link coupling, full inertias and COM offsets. Mobility probes do not
+apply fictitious unit events or enforce their speeds; actual combined native
+responses retain physical endpoint joint limits and prescribed reactions.
+
+Rigid and articulated consumers share the same modal frame/trace/Gram
+preparation. Native geometry and inverse-mass responses are rebuilt at every
+event. Actual DD link-COM kinetic/spatial increments, per-coordinate velocity
+changes, modal momentum, endpoint contact conditions, finite-witness couples
+and contact/support work are checked before either receiver publishes.
+Prescribed support work is an explicit source, distinct from passive contact
+work. Redundant contact/support allocations retain native determinacy and
+representative-work qualifications.
+
+`SharedCavity::apply_surface_articulated_frictional_impacts` permits original
+physical surface incidence and checks actual volume flow before publishing
+modal or mechanism state. Configuration, clocks, prior interval receipts and
+material/radiation histories remain continuous. The caller selects states at
+one physical event; independent clocks are not resynchronized. This adds no
+collision discovery, force duration, contact compliance or thermal allocation.
+Modal spatial conservation extends only to represented basis symmetries.
+
+Six new native integration groups cover a rotated free-chain mass-matrix
+oracle, driven offset-COM hinge/source work, shared-modal free/prescribed
+recoil and permutation, mobility probes versus actual joint limits, redundant
+determinacy and atomic modal-budget refusal, and live Maxwell/radiation
+continuation. All six passed, as did twelve existing rigid/modal and continuing
+impulse groups. Two owner-local tests passed for late-admission/final-cancellation
+atomicity in both bridges. Validation used bounded original-source Rust graphs;
+the full cavity wrapper received source review but its complete fixture and
+the full workspace/DSR lane were not executed.

@@ -7,6 +7,9 @@
 
 use super::{ModalCouplingError, SharedCavity, network_invalid};
 use crate::render::schedule::force::coupled::impulse::ModalImpulseReceipt;
+use crate::render::schedule::force::coupled::impulse::impact::articulated::{
+    ArticulatedModalImpactError, ArticulatedModalImpactReceipt, PreparedArticulatedModalImpacts,
+};
 use crate::render::schedule::force::coupled::impulse::impact::frictional::{
     ModalFrictionalImpactError, ModalFrictionalImpactReceipt, PreparedModalFrictionalImpacts,
 };
@@ -22,6 +25,59 @@ use crate::render::schedule::force::coupled::impulse::impact::{
 use fs_exec::CancelGate;
 
 impl SharedCavity {
+    /// Exchange one simultaneous Coulomb event with original free/prescribed
+    /// articulated mechanisms through this cavity's physical surface modes.
+    /// Original joint/base recoil, support impulses and signed source work
+    /// enter the same native solve; acoustic auxiliaries cannot be struck.
+    ///
+    /// Prepare against [`Self::network`]. The caller selects states at the same
+    /// physical event; prescribed clocks remain independent and unchanged.
+    /// Actual cavity volume-flow admission precedes publication of BOTH native
+    /// receivers. Compression, neck/auxiliary and material/radiation histories
+    /// remain continuous. This supplies no collision search or shock/heat law.
+    pub fn apply_surface_articulated_frictional_impacts(
+        &mut self,
+        states: &mut [fs_mbd::articulated_contacts::trajectory::mixed::MixedArticulatedTrajectoryState],
+        models: &[&fs_mbd::articulated::ArticulatedModel],
+        impacts: &mut PreparedArticulatedModalImpacts,
+        gate: &CancelGate,
+    ) -> Result<ArticulatedModalImpactReceipt, ArticulatedModalImpactError> {
+        poll(gate)?;
+        if impacts
+            .modal_components()
+            .any(|index| index >= self.neck_component)
+        {
+            return Err(network_invalid(
+                "articulated/cavity impacts require original physical surfaces",
+            )
+            .into());
+        }
+        let column = &self.column;
+        let surface_modes = self.surface_modes;
+        let neck_shape = self.source.neck_volume_shape_m2_per_sqrt_kg();
+        let neck_area = self.source.neck_area_m2();
+        self.system
+            .apply_articulated_frictional_impacts_with_admission(
+                states,
+                models,
+                impacts,
+                gate,
+                |components| {
+                    validate_volume_flows(
+                        components
+                            .iter()
+                            .flat_map(|model| model.states())
+                            .map(|state| state.velocity_m_sqrt_kg_per_s),
+                        column,
+                        surface_modes,
+                        neck_shape,
+                        neck_area,
+                        gate,
+                    )
+                },
+            )
+    }
+
     /// Exchange one simultaneous Coulomb impulse set with actual free rigid
     /// bodies, through the original cavity's physical surface modes. Native
     /// translation/full inertia and modal recoil share the same complete solve.
