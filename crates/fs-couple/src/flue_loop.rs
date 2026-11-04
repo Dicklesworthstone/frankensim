@@ -774,6 +774,8 @@ pub struct FlueVoice {
     forced: Option<forced_jet::ForcedJetKernel>,
     // Opt-in momentum drive beside the volume drive (see `momentum_drive`). None = the volume drive alone, bit-identical.
     momentum: Option<momentum_drive::MomentumDrive>,
+    // Actual station-profile integral; mutually exclusive with the printed lumped drive.
+    bickley_momentum: Option<momentum_drive::BickleyMomentumDrive>,
     // Opt-in Auvray jet drive (see `auvray_jet`): in-phase receptivity, flat growth, pure convection,
     // Bickley cut and Verge source length. None = the island's own chain.
     auvray: Option<auvray_jet::AuvrayJet>,
@@ -911,6 +913,7 @@ impl FlueVoice {
             forced: None,
             auvray: None,
             momentum: None,
+            bickley_momentum: None,
             jet_noise: None,
             minimum_jet_speed_m_s: minimum_jet_speed,
             max_jet_history_samples: max_history,
@@ -1777,7 +1780,7 @@ impl FlueVoice {
         let flow_m3_s = if c.q_max > 0.0 {
             0.5*c.q_max*(1.0+((eta_m-c.offset_m)/c.half_width_m).tanh())
         } else { 0.0 };
-        let source_pa = self.jet_source_pa(flow_m3_s, c);
+        let source_pa = self.jet_source_pa(flow_m3_s, c)?;
         if ![velocity, band_state[0], band_state[1], hp_out, displacement_m,
             eta_m, flow_m3_s, source_pa].iter().all(|v| v.is_finite()) {
             return Err(FlueError::Invalid { what: "jet trial left the finite physical domain" });
@@ -1965,8 +1968,9 @@ impl FlueVoice {
             (None, None) => self.island.displacement_gain*dt*c.hp_alpha*c.band_alpha*c.band_alpha
                 *delayed.current_weight/area,
         };
-        // The source's slope in Q_j: the volume drive's `source_coeff/dt` plus, with the opt-in momentum drive attached,
-        // its direct `kappa rho v0 / S_p` (exactly zero without it). The bound is never loosened.
+        // The source's slope in Q_j: the volume drive's `source_coeff/dt` plus
+        // kappa*rho*U/S_p for the printed lumped model, or rho*U/S_p as the
+        // upper bound of the Bickley profile's 4*f*(1-f)*rho*U/S_p derivative.
         let source_slope = self.source_coeff/dt + self.momentum_source_slope(c);
         let feedback = compliance*source_slope*(0.5*c.q_max)*eta_slope/c.half_width_m;
         if direct.abs() > 1.0 || !compliance.is_finite() || compliance <= 0.0
@@ -1976,7 +1980,7 @@ impl FlueVoice {
         // The cut jet lies between zero and Qmax. The lossless responses at
         // those extremes, extended to zero, bracket every passive-loss root.
         let linear = |flow| solve_mouth_port(boundary,
-            self.jet_source_pa(flow, c)-radiation_history, self.q_prev, l, r, zc, dt);
+            self.jet_source_pa(flow, c)?-radiation_history, self.q_prev, l, r, zc, dt);
         let mut lo = linear(0.0)?.flow_m3_s.min(0.0);
         let mut hi = linear(c.q_max)?.flow_m3_s.max(0.0);
         if let Some(loss) = &self.mouth_contraction {

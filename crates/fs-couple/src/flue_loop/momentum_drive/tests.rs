@@ -202,7 +202,7 @@ fn without_the_row_the_source_is_the_original_expression_bit_for_bit() {
     for flow in [0.0, 1e-5, 5.3e-5, 1.99e-4, -3e-5] {
         let original = v.source_coeff * (flow - v.flow_prev) / v.dt;
         assert_eq!(
-            v.jet_source_pa(flow, c).to_bits(),
+            v.jet_source_pa(flow, c).unwrap().to_bits(),
             original.to_bits(),
             "flow {flow}"
         );
@@ -358,4 +358,83 @@ fn with_the_term_on_the_ledger_closes_and_the_sound_changes() {
             .zip(&again)
             .all(|(p, q)| p.to_bits() == q.to_bits())
     );
+}
+
+#[test]
+fn g1_profile_source_uses_the_original_station_for_volume_and_momentum() {
+    let on = forced().with_bickley_momentum_drive().unwrap();
+    let off = forced().with_jet_cut_width_station().unwrap();
+    assert!(on.jet_cut_width_station());
+    assert!(on.momentum_drive().is_none());
+    assert!(on.bickley_momentum_drive().is_some());
+    assert!(on.island().provenance.contains("momentum drive: bickley-profile"));
+    let b = on.cut_half_width_m();
+    let u = 20.0;
+    for eta in [-b, 0.0, 0.25 * b, b] {
+        let c = JetStepCoefficients {
+            q_max: 2.0 * b * FLUE_W * u,
+            half_width_m: b,
+            ..coefficients(Some(eta))
+        };
+        let baseline = off.jet_trial(0.0, 0.0, c).unwrap();
+        let profile = on.jet_trial(0.0, 0.0, c).unwrap();
+        assert_eq!(profile.flow_m3_s, baseline.flow_m3_s);
+        let s = ((eta-c.offset_m)/b).tanh();
+        let rest = (-c.offset_m/b).tanh();
+        let integral = (s-rest) - (s.powi(3)-rest.powi(3))/3.0;
+        let pressure = on.rho*u*u*b*FLUE_W/on.geometry.bore_area_m2*integral;
+        if eta == 0.0 {
+            assert_eq!(profile.source_pa.to_bits(), baseline.source_pa.to_bits());
+        } else {
+            assert!((profile.source_pa-baseline.source_pa-pressure).abs() <= 1e-11*pressure.abs());
+        }
+    }
+    assert!(invalid(bare().with_bickley_momentum_drive()).contains("after the forced jet"));
+    assert!(invalid(voice(Some(1.0)).with_bickley_momentum_drive()).contains("excludes"));
+    assert!(invalid(forced().with_bickley_momentum_drive().unwrap()
+        .with_momentum_drive(1.0)).contains("one cold attachment"));
+}
+
+#[test]
+fn g0_profile_same_sample_guard_uses_the_exact_derivative_upper_bound() {
+    let off = forced().with_jet_cut_width_station().unwrap();
+    let source = off.source_coeff/off.dt;
+    let on = forced().with_bickley_momentum_drive().unwrap();
+    let c = coefficients(None);
+    let u = c.q_max/(2.0*c.half_width_m*FLUE_W);
+    let expected = on.rho*u/on.geometry.bore_area_m2;
+    assert_eq!(on.momentum_source_slope(c), expected);
+    let w_off = first_refused_weight(off);
+    let w_on = first_refused_weight(on);
+    assert!(w_on < w_off);
+    assert!(((w_off/w_on)/((source+expected)/source)-1.0).abs() < 1e-9);
+}
+
+#[test]
+fn g0_g5_profile_source_advances_the_actual_loop_with_closed_work_and_replay() {
+    let run = |profile: bool| {
+        let mut voice = if profile {
+            forced().with_bickley_momentum_drive().unwrap()
+        } else {
+            forced().with_jet_cut_width_station().unwrap()
+        };
+        voice.apply(FlueControl::SetBlowingPressure(100.0)).unwrap();
+        let mut samples = Vec::new();
+        for _ in 0..2 {
+            let mut block = [0.0; 4096];
+            voice.step_block(&mut block).unwrap();
+            samples.extend_from_slice(&block);
+        }
+        for d in voice.diagnostics() {
+            let scale = d.source_work_j.abs() + d.pipe_work_j.abs()
+                + d.stored_delta_j.abs() + d.radiation_loss_j;
+            assert!(d.ledger_defect_j.abs() <= 1e-9*scale.max(f64::MIN_POSITIVE));
+        }
+        assert!(samples.iter().all(|v| v.is_finite()));
+        samples
+    };
+    let off = run(false);
+    let on = run(true);
+    assert!(off.iter().zip(&on).any(|(a,b)| a.to_bits() != b.to_bits()));
+    assert_eq!(on, run(true));
 }

@@ -1,5 +1,8 @@
-//! Opt-in momentum drive of the jet in the pipe: card row `momentum_drive KAPPA`, after
-//! `jet_response`, with KAPPA required and only the two printed values accepted.
+//! Opt-in momentum drive of the jet in the pipe. `momentum_drive KAPPA`, after
+//! `jet_response`, retains the two printed lumped coefficients described below.
+//! `momentum_drive bickley-profile` instead integrates the actual station
+//! profile's squared velocity through [`BickleyMomentumDrive`], with no fitted
+//! multiplier. It also selects that same profile for the volume cut.
 //!
 //! The forced jet's cut flow `Q_j` enters the pipe as a VOLUME source: the series pressure
 //! `p_s = source_coeff dQ_j/dt`, `source_coeff = rho (0.61 a_eq) / S_m` (Fletcher 1976, J. Acoust.
@@ -74,6 +77,9 @@
 //! so the mechanism is not shown.
 
 use super::{FlueError, FlueGeometry, FlueVoice, JetStepCoefficients};
+
+mod bickley;
+pub use bickley::BickleyMomentumDrive;
 
 /// Eq. (1) of Thwaites and Fletcher (1983, p. 401) as printed: the momentum term's coefficient.
 pub const EQ1_KAPPA: f64 = 1.0;
@@ -180,6 +186,7 @@ impl FlueVoice {
         if self.poisoned
             || self.samples != 0
             || self.momentum.is_some()
+            || self.bickley_momentum.is_some()
             || self.forced.is_none()
             || self.nolle.is_some()
         {
@@ -206,6 +213,41 @@ impl FlueVoice {
         self.momentum.as_ref()
     }
 
+    /// Integrate `rho*u²` over the selected side of the original Bickley jet.
+    /// The station width, centre speed and `2 U b H` volume swing are the
+    /// existing forced jet's own values, including its named spreading law.
+    /// This selects [`Self::with_jet_cut_width_station`] so volume and momentum
+    /// cannot describe different profiles. The printed lumped drive is excluded.
+    ///
+    /// The source is `(J_cut-J_rest)/S_p` at THIS sample, in the existing series
+    /// port and energy account. Its analytic derivative is bounded by `rho U/S_p`,
+    /// keeping the original same-sample root admission. Zero jet/deflection gives
+    /// zero added source. No labium-reaction or experimental acoustic claim follows.
+    pub fn with_bickley_momentum_drive(mut self) -> Result<Self, FlueError> {
+        if self.poisoned || self.samples != 0 || self.momentum.is_some()
+            || self.bickley_momentum.is_some() || self.forced.is_none() || self.nolle.is_some()
+        {
+            return Err(FlueError::Invalid {
+                what: "Bickley momentum requires one cold attachment after the forced jet and excludes other momentum drives",
+            });
+        }
+        let drive = BickleyMomentumDrive::new(self.rho, self.geometry.bore_area_m2)
+            .map_err(|what| FlueError::Invalid { what })?;
+        if !self.jet_cut_width_station {
+            self = self.with_jet_cut_width_station()?;
+        }
+        self.island.provenance.push_str(
+            "; momentum drive: bickley-profile, p = (J_cut - J_rest)/S_p, J = rho U^2 b H (2/3 + s - s^3/3), s = tanh((eta-offset)/b); original station volume and momentum profile; complete deposition into bore assumed, no fitted multiplier or resolved labium reaction",
+        );
+        self.bickley_momentum = Some(drive);
+        Ok(self)
+    }
+
+    #[must_use]
+    pub const fn bickley_momentum_drive(&self) -> Option<&BickleyMomentumDrive> {
+        self.bickley_momentum.as_ref()
+    }
+
     /// Bulk jet speed of a trial: the `v0` of `q_max = v0 h W`. Behind a forced jet with a named
     /// spreading law `q_max` is the station's volume flux, `(b(X) / b0)^(1/2)` times the exit's,
     /// and the speed is the station's centre speed, `(b0 / b(X))^(1/2)` times the exit's, so the
@@ -225,9 +267,17 @@ impl FlueVoice {
     /// The series pressure the cut jet delivers for cut flow `cut_flow_m3_s`: the volume drive
     /// `source_coeff dQ_j/dt` and, only when the momentum drive is attached, its `p_mom`. Without the row this
     /// is the original expression and nothing is added.
-    pub(super) fn jet_source_pa(&self, cut_flow_m3_s: f64, c: JetStepCoefficients) -> f64 {
+    pub(super) fn jet_source_pa(&self, cut_flow_m3_s: f64, c: JetStepCoefficients)
+        -> Result<f64, FlueError>
+    {
         let volume = self.source_coeff * (cut_flow_m3_s - self.flow_prev) / self.dt;
-        match &self.momentum {
+        if let Some(drive) = self.bickley_momentum {
+            let rest = rest_cut_flow_m3_s(c.q_max, c.offset_m, c.half_width_m);
+            let pressure = drive.pressure_pa(self.momentum_speed_m_s(&c), c.q_max, cut_flow_m3_s, rest)
+                .map_err(|what| FlueError::Invalid { what })?;
+            return Ok(volume + pressure);
+        }
+        Ok(match &self.momentum {
             None => volume,
             Some(drive) => {
                 let speed = self.momentum_speed_m_s(&c);
@@ -238,12 +288,16 @@ impl FlueVoice {
                         rest_cut_flow_m3_s(c.q_max, c.offset_m, c.half_width_m),
                     )
             }
-        }
+        })
     }
 
-    /// The momentum drive's direct slope `kappa rho v0 / S_p` [Pa s / m^3] of the series source with
-    /// respect to `Q_j`; exactly zero without the row.
+    /// Bound on the momentum source's slope with respect to `Q_j` [Pa s / m^3]:
+    /// `kappa rho v0 / S_p` for the printed law or `rho U / S_p` for the
+    /// profile integral. Exactly zero without either momentum selection.
     pub(super) fn momentum_source_slope(&self, c: JetStepCoefficients) -> f64 {
+        if let Some(drive) = self.bickley_momentum {
+            return drive.pressure_per_flow_bound(self.momentum_speed_m_s(&c));
+        }
         match &self.momentum {
             None => 0.0,
             Some(drive) => drive.pressure_per_flow(self.momentum_speed_m_s(&c)),

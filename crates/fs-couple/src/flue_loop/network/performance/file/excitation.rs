@@ -131,11 +131,16 @@ enum JetTransferInput {
 }
 
 /// Optional source selections after `jet`, before `jet_limits`.
+enum MomentumDriveInput {
+    Lumped(f64),
+    BickleyProfile,
+}
+
 pub(crate) struct FlueJetInput {
     card_centreline: bool,
     transfer: Option<JetTransferInput>,
     response: Option<(ForcedJetSpec, JetExitLaw)>,
-    momentum: Option<f64>,
+    momentum: Option<MomentumDriveInput>,
     spreading: JetSpreadingLaw,
     swing_limit: bool,
     cut_width_station: bool,
@@ -233,23 +238,29 @@ impl FlueJetInput {
         } else {
             None
         };
-        // Optional `momentum_drive KAPPA` right after `jet_response`: KAPPA is required and only the two printed weights
-        // (1, Thwaites and Fletcher 1983 Eq. (1); 2.6, their Sec. II fit) are accepted. It acts on the forced jet's cut flow.
+        // Preserve the two printed lumped weights; bickley-profile instead
+        // integrates the original station's squared velocity and selects its cut.
         let momentum = if rows.next_is("momentum_drive") {
             let mut row = rows.row("momentum_drive")?;
             let line = row.line;
             if row.fields.clone().next().is_none() {
                 return Err(bad(line, momentum_drive::KAPPA_REFUSED));
             }
-            let kappa = row.scalar().map_err(|_| bad(line, momentum_drive::KAPPA_REFUSED))?;
+            let drive = if row.fields.clone().next() == Some("bickley-profile") {
+                row.fields.next();
+                MomentumDriveInput::BickleyProfile
+            } else {
+                let kappa = row.scalar().map_err(|_| bad(line, momentum_drive::KAPPA_REFUSED))?;
+                if !momentum_drive::is_printed_weight(kappa) {
+                    return Err(bad(line, momentum_drive::KAPPA_REFUSED));
+                }
+                MomentumDriveInput::Lumped(kappa)
+            };
             row.end()?;
             if response.is_none() {
                 return Err(bad(line, "momentum_drive requires the jet_response row before it"));
             }
-            if !momentum_drive::is_printed_weight(kappa) {
-                return Err(bad(line, momentum_drive::KAPPA_REFUSED));
-            }
-            Some(kappa)
+            Some(drive)
         } else {
             None
         };
@@ -373,8 +384,11 @@ impl FlueJetInput {
             None => voice,
         };
         let voice = match self.momentum {
-            Some(kappa) => voice
+            Some(MomentumDriveInput::Lumped(kappa)) => voice
                 .with_momentum_drive(kappa)
+                .map_err(FlueInputError::Physics)?,
+            Some(MomentumDriveInput::BickleyProfile) => voice
+                .with_bickley_momentum_drive()
                 .map_err(FlueInputError::Physics)?,
             None => voice,
         };

@@ -219,6 +219,11 @@ impl FlueFilePerformance {
     /// drive, Thwaites and Fletcher (1983) Eq. (1). KAPPA is required and only `1` (Eq. (1), p. 401) or
     /// `2.6` (their Sec. II fit, p. 402) is accepted; it requires the `jet_response` row. Omission keeps
     /// every default result bit-identical.
+    /// Alternatively `momentum_drive bickley-profile` integrates `rho*u²` over the selected
+    /// Bickley profile, with no empirical multiplier. It selects the forced jet's original
+    /// station width and volume swing for both flows (`with_bickley_momentum_drive`), and
+    /// subtracts that same profile's quiescent momentum. Complete deposition into the bore is
+    /// assumed; this is not a resolved labium reaction or an acoustic calibration.
     /// Optional `jet_spreading bickley|fletcher-1976` after `jet_response` (and after `momentum_drive`
     /// when both are present) widens the forced jet's base by the named law
     /// (`flue_loop::forced_jet::JetSpreadingLaw`): the laminar Bickley jet matched at the exit, or

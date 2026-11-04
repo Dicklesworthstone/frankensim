@@ -8504,10 +8504,31 @@ None.
   same-sample solve and in the `feedback < 1` guard (never loosened). KAPPA is
   required and only `1` (Eq. (1), as printed) or `2.6` (their Sec. II
   pulsating-jet fit, one rig, authors unsure of its meaning) is accepted;
-  anything else is refused. A card without the row is bit-identical. Transfer
+  other numerical weights are refused. A card without the row is bit-identical. Transfer
   caveats (turbulent jet, cut-up/slit 20-40, versus this laminar Bickley jet;
   their end correction 19-30 cm referred to the pipe versus ours of a few
   millimetres) are in the module doc and the provenance sidecar.
+
+  PROFILE MOMENTUM (`FlueVoice::with_bickley_momentum_drive`, card row
+  `momentum_drive bickley-profile`) integrates the original station's
+  `u=U sech²((y-eta)/b)` instead of multiplying its cut volume by one speed.
+  Both volume and momentum use that forced jet's actual station width,
+  centre speed and span, including its named spreading law; this selection
+  also enables the existing `jet_cut_width station` path. With
+  `s=tanh((eta-offset)/b)`, the cut is `Q=U b H (1+s)` and
+  `J=rho U² b H (2/3+s-s³/3)`. Full-jet momentum is `4 rho U² b H/3`.
+  The original series port takes `(J-J_rest)/S_p`, including its signed work;
+  the quiescent cut at the same instantaneous speed/offset supplies J_rest.
+  A factored cubic difference retains small cut changes. Its derivative
+  `dJ/dQ=rho U (1-s²)` preserves the existing same-sample solver's upper
+  feedback bound `rho U/S_p`. There is no fitted multiplier, time filter or
+  extra lag. The printed lumped and profile sources exclude one another.
+  This assumes deposition of selected streamwise momentum into the bore;
+  labium recoil, downstream jet dynamics and experimental sound accuracy
+  remain outside the claim. G0/G1/G3 kernel tests compare independent
+  velocity-squared quadrature, the analytic derivative, cut symmetry, zero
+  deviation and momentum-preserving spreading. Native voice/card tests cover
+  shared profile selection, same-sample feedback and source-work accounting.
 
   OPT-IN FORCED JET (`FlueVoice::with_forced_jet`, card row `jet_response
   forced-bickley SPACING WINDOW`; rulings 7376/7518): the forced Bickley
