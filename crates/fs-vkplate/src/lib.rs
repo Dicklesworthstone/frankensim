@@ -2006,20 +2006,18 @@ pub struct Cavity {
 /// The mode's pressure amplitude is `-kappa (Y - X)` and pushes node `i` with `g_i` times it, so heads and air
 /// exchange energy without making any: held heads leave `X` ringing at the mode's frequency. The leapfrog air
 /// step uses `wt2 = (2 - 2 cos(omega k)) / k^2`, so a held-head mode rings at `omega` exactly. Lossless unless
-/// `sigma` is given: then each mode carries the viscothermal boundary-layer loss on shell and heads
-/// (`kit::cylinder_mode_wall_sigma`) as a dashpot `c_m = 2 sigma_m kappa_m / wt2_m` in parallel with its air
-/// spring, on the stretch. The air coordinate takes `-c_m d(X - Y)/dt`, with its own velocity centred and the
-/// heads' velocity as the bodies' backward difference `(Y - Y-) / k`; the heads take the reaction. A held-head
-/// mode rings down as `exp(-sigma_m t)`. Below a mode, where `X` follows the heads, the dashpot charges their
-/// motion almost nothing (about `sigma_m (omega / omega_m)^4` times the air's share of the moving mass), so the
-/// loss is a lower bound there too. Above a mode, where `X` barely moves, the stretch moves with the heads and
-/// the dashpot sees their whole velocity: it charges about `sigma_m (omega / omega_m)^2` of the air spring's
-/// share, more than the boundary layers' `sqrt(omega)` law gives there, so above the modes the loss is an
-/// overcharge and not a lower bound. The form landed in 9d3b26242 damped `2 sigma_m dX/dt`, the air coordinate's
-/// own velocity: below a mode that charged each mode's own-frequency loss to the heads' motion at every
-/// frequency, so it overcharged the loss below the air modes and was not a lower bound there (MB 17080). The
-/// energy can rise in a step by at most `sum_m c_m (Y+ - 2Y + Y-)^2 / (16 k)`, the share of the heads' backward
-/// velocity; held heads give zero. An empty `sigma` is the lossless step, bit for bit. Modes that differ only
+/// `sigma` and `layers` are given: then each mode carries the viscothermal boundary-layer loss on shell and
+/// heads as Pierce's two layers with their half-order law (`AirLayers`). The viscous layer acts on the air's
+/// kinetic energy and the thermal layer on its potential energy, each loss growing as `sqrt(omega)`. At the
+/// mode's own frequency they give its `sigma`, so a held-head mode rings down as `exp(-sigma_m t)`.
+/// Earlier forms, which this law replaces:
+/// - 9d3b26242 damped `2 sigma_m dX/dt`, the air coordinate's own velocity, which overcharged the loss below the
+///   air modes.
+/// - Form B (79988cd3e) put a dashpot `2 sigma_m kappa_m / wt2_m` on the stretch. Below the air modes it charged
+///   only about `sigma_m (omega / omega_m)^4` of the kinetic share, a lower bound; above them it overcharged the
+///   loss, by about `sigma_m (omega / omega_m)^2` of the air spring's share.
+///
+/// An empty `sigma` is the lossless step, bit for bit. Modes that differ only
 /// in their axial order share one shape on a head and differ there by a sign (`(-1)^p` on the far head), so
 /// the weights are stored per shape: `shape[m]` is mode `m`'s shape, and `heads` holds per head body its
 /// weights shape-major (`g` of shape `s` at node `i` is `weights[s * n + i]`) and per mode its sign there.
@@ -2036,8 +2034,212 @@ pub struct AirModes {
     pub y: Vec<f64>,
     /// Scratch per shape: a head's projection on it, then the pressure it carries there.
     pub q: Vec<f64>,
-    /// Per mode, the amplitude decay rate [1/s] of the wall boundary layers (opt-in); empty = lossless.
+    /// Per mode, the amplitude decay rate [1/s] of the wall boundary layers at the mode's own frequency (opt-in);
+    /// empty = lossless.
     pub sigma: Vec<f64>,
+    /// The wall boundary layers that carry `sigma` (opt-in, with it): `None` = lossless. Stepping a non-empty
+    /// `sigma` without them is refused.
+    pub layers: Option<AirLayers>,
+}
+
+/// Points of the half-order fit's least squares, log-spaced over its band; its error is read on a grid ten times
+/// finer.
+const LAYER_FIT_POINTS: usize = 400;
+/// The fit's poles per decade, from a thirtieth of the band's lowest (warped) frequency to thirty times its highest.
+const LAYER_POLES_PER_DECADE: f64 = 3.0;
+/// The largest relative error the fit may leave in either layer's loss over its band.
+pub const LAYER_FIT_TOLERANCE: f64 = 0.01;
+
+/// The wall boundary layers of a set of `AirModes` (opt-in): Pierce's two layers with their half-order law
+/// (Acoustics 1981, sec. 10-4), each mode's share taken from `kit::cylinder_mode_wall_sigma_parts`.
+/// - The viscous layer dissipates in proportion to `sqrt(omega)` times the air's kinetic energy in the mode. It
+///   acts on the air coordinate's own velocity `V` as the impedance `A_v sqrt(i omega)`.
+/// - The thermal layer dissipates in proportion to `sqrt(omega)` times the air's potential (pressure) energy.
+///   It softens the air spring to `kappa - A_t (i omega)^(-1/2)`, to first order in the layer's thickness as
+///   Pierce's theory is, and the heads take that force with the spring's. The softening grows toward low
+///   frequency and stops, below the fit's band, at `sum_j G_j` (`softening`). That reaches about 20 % on a drum's
+///   lossiest high modes, but only below about 1 Hz; on tom-12's modes it is under 1 % from 60 Hz up.
+/// - Both half-order operators come from one few-pole fit per clock, `sum_j w_j p / (p + xi_j)` with
+///   non-negative weights, each pole stepped by the trapezoid rule:
+///   - Viscous: a dashpot `c_j` from `X` to a free mass `c_j / xi_j`.
+///   - Thermal: a Maxwell arm (spring `G_j`, dashpot `G_j / xi_j`) on the stretch, with `kappa - sum G_j` left as
+///     the spring at rest.
+///   The fit is made in the leapfrog's own discrete domain (the trapezoid's warped frequency and the scheme's
+///   `sin(omega k) / (omega k)` decay factor), so the stepped loss follows the law. The poles are numerical
+///   (`LAYER_POLES_PER_DECADE`), not physics, and the band is 20 Hz to the smaller of 20 kHz and a fifth of the
+///   rate. The worst relative error left in either layer's loss over the band is in `fit_error`, and above
+///   `LAYER_FIT_TOLERANCE` the layers are refused.
+/// - Each mode scales the fit so that, at its own frequency, the viscous part decays at its viscous share and the
+///   thermal part at its thermal share, so the mode rings down at its `sigma`. The layers' reactance also lowers
+///   its frequency. The law's first-order shift is `sigma / (2 pi)` Hz, but only the loss is fitted, so the
+///   fitted reactance gives less: about 0.9 of it at 591 Hz and 0.7 at 5.8 kHz (96 and 144 kHz).
+/// - Away from its own frequency a mode's loss follows the half-order law on both sides:
+///   - Below it, where `X` follows the heads, the viscous layer scrubs the air the heads carry.
+///   - Above it, where `X` barely moves, the thermal layer takes the air spring's share.
+/// - Energy: the viscous elements are exactly passive. The thermal arms can raise the discrete energy in a step
+///   by at most `sum_mj G_mj k xi_j (s+ - 2s + s-)^2 / 64`, their share of the stretch's second difference.
+/// - Admission: none is needed. The viscous elements are centred on `X`, and the arms' instantaneous stiffness
+///   plus the spring at rest is at most `kappa`.
+/// - Not modelled: loss inside the air, the heads' own motion in the layers, and coupling between modes through
+///   the layers.
+#[derive(Clone)]
+pub struct AirLayers {
+    /// The clock the poles were fitted on [s]; stepping on another clock is refused.
+    pub k: f64,
+    /// The poles [1/s], shared by every mode, and each one's trapezoid gain `k xi / (1 + k xi / 2)`.
+    pub xi: Vec<f64>,
+    pub gain: Vec<f64>,
+    /// Per mode, the viscous and thermal shares of its decay rate at its own frequency [1/s].
+    pub sigma_viscous: Vec<f64>,
+    pub sigma_thermal: Vec<f64>,
+    /// Per mode and pole (mode-major): the viscous dashpots `c / (1 + k xi / 2)` on `X`'s centred velocity, and
+    /// the thermal arms' stiffnesses `G / (1 + k xi / 2)` on the stretch.
+    pub visc: Vec<f64>,
+    pub arm: Vec<f64>,
+    /// Per mode: the air spring at rest, `kappa - sum_j G_j`, and the viscous dashpots' sum.
+    pub kappa_rest: Vec<f64>,
+    pub visc_sum: Vec<f64>,
+    /// State per mode and pole at the last half step, zero at rest: the viscous elements' low-passed air
+    /// velocity, and the thermal arms' low-passed stretch.
+    pub u: Vec<f64>,
+    pub r: Vec<f64>,
+    /// The fit's band [Hz], and its worst relative error there in the viscous and the thermal loss.
+    pub band: (f64, f64),
+    pub fit_error: (f64, f64),
+    /// The largest static softening of an air spring, `sum_j G_j / kappa`, over the modes.
+    pub softening: f64,
+}
+
+/// One pole's response on the leapfrog's clock: the trapezoid-stepped `p / (p + xi)` at `omega`, which is the
+/// continuous one at the warped frequency `(2 / k) tan(omega k / 2)`. Returns (Re, Im).
+fn layer_pole(k: f64, omega: f64, xi: f64) -> (f64, f64) {
+    let w = 2.0 / k * (0.5 * omega * k).tan();
+    let d = w * w + xi * xi;
+    (w * w / d, w * xi / d)
+}
+
+/// The half-order law's shapes on the leapfrog's clock, both up to a constant: the viscous loss term
+/// `omega^(1/2)` (the real part of the impedance on `X`'s centred velocity) and the thermal loss term
+/// `omega^(-1/2) sin(omega k) / (omega k)` (the imaginary part of the stretch's stiffness). The leapfrog's
+/// eigenvalue derivative is `M (1 - z^-2) / k^2`, so a loss term's decay is `Im(delta) k / (2 M sin(omega k))`
+/// against `Im(delta) / (2 M omega)` in continuous time.
+fn layer_targets(k: f64, omega: f64) -> (f64, f64) {
+    (omega.sqrt(), (omega * k).sin() / (omega * k) / omega.sqrt())
+}
+
+impl AirLayers {
+    /// Fits the half-order law on the clock `k`, then scales it to each mode (`kappa`, `wt2` as in `AirModes`)
+    /// so that at its own frequency the viscous part decays at `sigma_viscous` and the thermal part at
+    /// `sigma_thermal`. Refused: mismatched lengths, a negative or non-finite share, a mode outside the band, a
+    /// fit worse than `LAYER_FIT_TOLERANCE`, or an air spring the thermal layer would soften to nothing.
+    pub fn new(k: f64, kappa: &[f64], wt2: &[f64], sigma_viscous: &[f64], sigma_thermal: &[f64]) -> Result<AirLayers, String> {
+        let nm = kappa.len();
+        if wt2.len() != nm || sigma_viscous.len() != nm || sigma_thermal.len() != nm {
+            return Err("air layers: kappa, wt2 and both sigma shares must have one entry per mode".into());
+        }
+        if !(k.is_finite() && k > 0.0) {
+            return Err(format!("air layers: clock {k} s must be positive"));
+        }
+        let band = (20.0, (0.2 / k).min(20000.0));
+        let (wa, wb) = (2.0 * PI * band.0, 2.0 * PI * band.1);
+        let warp = |w: f64| 2.0 / k * (0.5 * w * k).tan();
+        let (xi_lo, xi_hi) = (warp(wa) / 30.0, warp(wb) * 30.0);
+        let poles = (LAYER_POLES_PER_DECADE * (xi_hi / xi_lo).log10()).ceil() as usize + 1;
+        let xi: Vec<f64> = (0..poles).map(|j| xi_lo * (xi_hi / xi_lo).powf(j as f64 / (poles - 1) as f64)).collect();
+        let at = |i: usize, n: usize| wa * (wb / wa).powf(i as f64 / (n - 1) as f64);
+        // one least squares per layer on the relative error, columns at unit norm (nnls's threshold is absolute)
+        let fit = |viscous: bool| -> Vec<f64> {
+            let mut a = vec![0.0; LAYER_FIT_POINTS * poles];
+            for i in 0..LAYER_FIT_POINTS {
+                let w = at(i, LAYER_FIT_POINTS);
+                let (tv, tt) = layer_targets(k, w);
+                for (j, &x) in xi.iter().enumerate() {
+                    let (re, im) = layer_pole(k, w, x);
+                    a[i * poles + j] = if viscous { re / tv } else { im / tt };
+                }
+            }
+            let norms: Vec<f64> = (0..poles).map(|j| (0..LAYER_FIT_POINTS).map(|i| a[i * poles + j].powi(2)).sum::<f64>().sqrt()).collect();
+            for i in 0..LAYER_FIT_POINTS {
+                for j in 0..poles {
+                    a[i * poles + j] /= norms[j];
+                }
+            }
+            let x = fs_material::visco::nnls(&a, &vec![1.0; LAYER_FIT_POINTS], LAYER_FIT_POINTS, poles);
+            x.iter().zip(&norms).map(|(x, n)| x / n).collect()
+        };
+        let (wv, wt) = (fit(true), fit(false));
+        let fine = 10 * LAYER_FIT_POINTS;
+        let mut fit_error = (0.0f64, 0.0f64);
+        for i in 0..fine {
+            let w = at(i, fine);
+            let (tv, tt) = layer_targets(k, w);
+            let (mut sv, mut st) = (0.0, 0.0);
+            for (j, &x) in xi.iter().enumerate() {
+                let (re, im) = layer_pole(k, w, x);
+                sv += wv[j] * re;
+                st += wt[j] * im;
+            }
+            fit_error = (fit_error.0.max((sv / tv - 1.0).abs()), fit_error.1.max((st / tt - 1.0).abs()));
+        }
+        if !(fit_error.0 <= LAYER_FIT_TOLERANCE && fit_error.1 <= LAYER_FIT_TOLERANCE) {
+            return Err(format!(
+                "air layers: the half-order fit leaves {:.2e} (viscous) and {:.2e} (thermal) over {}-{} Hz, above {LAYER_FIT_TOLERANCE}",
+                fit_error.0, fit_error.1, band.0, band.1
+            ));
+        }
+        let gain: Vec<f64> = xi.iter().map(|x| k * x / (1.0 + 0.5 * k * x)).collect();
+        let (mut visc, mut arm) = (vec![0.0; nm * poles], vec![0.0; nm * poles]);
+        let (mut kappa_rest, mut visc_sum) = (vec![0.0; nm], vec![0.0; nm]);
+        let mut softening: f64 = 0.0;
+        for m in 0..nm {
+            let (sv, st) = (sigma_viscous[m], sigma_thermal[m]);
+            if !(sv.is_finite() && sv >= 0.0 && st.is_finite() && st >= 0.0) {
+                return Err(format!("air layers: mode {m}'s shares {sv} and {st} 1/s must be finite and not negative"));
+            }
+            let mass = kappa[m] / wt2[m];
+            let om = 2.0 / k * (0.5 * k * wt2[m].sqrt()).asin();
+            if !(mass.is_finite() && mass > 0.0 && om >= wa && om <= wb) {
+                return Err(format!("air layers: mode {m} at {:.1} Hz lies outside the fit's {}-{} Hz", om / (2.0 * PI), band.0, band.1));
+            }
+            let (mut re, mut im) = (0.0, 0.0);
+            for (j, &x) in xi.iter().enumerate() {
+                let (r, i) = layer_pole(k, om, x);
+                re += wv[j] * r;
+                im += wt[j] * i;
+            }
+            let a_v = 2.0 * mass * sv / re;
+            let a_t = 2.0 * mass * st * (om * k).sin() / (k * im);
+            let mut g_sum = 0.0;
+            for j in 0..poles {
+                let den = 1.0 + 0.5 * k * xi[j];
+                visc[m * poles + j] = a_v * wv[j] / den;
+                arm[m * poles + j] = a_t * wt[j] / den;
+                g_sum += a_t * wt[j];
+            }
+            kappa_rest[m] = kappa[m] - g_sum;
+            visc_sum[m] = visc[m * poles..(m + 1) * poles].iter().sum();
+            if !(kappa_rest[m] > 0.0) {
+                return Err(format!("air layers: mode {m}'s thermal layer softens its air spring by {:.3} of kappa", g_sum / kappa[m]));
+            }
+            softening = softening.max(g_sum / kappa[m]);
+        }
+        Ok(AirLayers {
+            k,
+            xi,
+            gain,
+            sigma_viscous: sigma_viscous.to_vec(),
+            sigma_thermal: sigma_thermal.to_vec(),
+            visc,
+            arm,
+            kappa_rest,
+            visc_sum,
+            u: vec![0.0; nm * poles],
+            r: vec![0.0; nm * poles],
+            band,
+            fit_error,
+            softening,
+        })
+    }
 }
 
 /// A hole in a head (a kick drum's front port): the air plug in it is an inertance
@@ -3305,20 +3507,9 @@ impl Instrument {
                 row_bound = row_bound.max(row);
             }
             gas_rate2 += trace_bound.min(row_bound);
-            // The wall loss's dashpots act on the heads through their backward velocity, an explicit dashpot like
-            // the radiation's: 2 D / dt more, D = sum_k c_k u_k u_k^T with c_k = 2 sigma_k kappa_k / wt2_k and
-            // u_k = M^-1/2 g_k, bounded the same two ways on its Gram sqrt(c_k c_l) g_k^T M^-1 g_l. (The air
-            // coordinate's own share is centred, so it needs no admission.)
-            if !air.sigma.is_empty() {
-                let c: Vec<f64> = (0..nm).map(|k| 2.0 * air.sigma[k] * air.kappa[k] / air.wt2[k]).collect();
-                let d_trace: f64 = (0..nm).map(|k| c[k] * gkl(k, k)).sum();
-                let mut d_row: f64 = 0.0;
-                for k in 0..nm {
-                    let row: f64 = (0..nm).map(|l| (c[k] * c[l]).sqrt() * gkl(k, l).abs()).sum();
-                    d_row = d_row.max(row);
-                }
-                gas_rate2 += 2.0 * rate * d_trace.min(d_row);
-            }
+            // The wall boundary layers (`AirLayers`) need no term of their own. The viscous elements are centred
+            // on the air coordinate's velocity, and the thermal arms' instantaneous stiffness plus the spring at
+            // rest is at most kappa, counted above.
         }
         gas_rate2
     }
@@ -3447,45 +3638,58 @@ impl Instrument {
         // displacement and air coordinate, then the air coordinate's leapfrog step on the same state
         for air in self.air_modes.iter_mut() {
             let (nm, ns) = (air.kappa.len(), air.q.len());
-            let lossy = !air.sigma.is_empty();
+            assert!(air.sigma.is_empty() || air.layers.is_some(), "air modes carry a wall-loss sigma without their boundary layers");
+            if let Some(l) = &air.layers {
+                assert!((l.k - k).abs() <= 1e-12 * k, "the air modes' boundary layers were fitted on a {} s clock, stepped on {k} s", l.k);
+            }
             air.y.iter_mut().for_each(|y| *y = 0.0);
-            // with the wall loss, each mode's projected head step dY = Y - Y- (the bodies' backward difference)
-            let mut dy = if lossy { vec![0.0; nm] } else { Vec::new() };
-            let mut dq = if lossy { vec![0.0; ns] } else { Vec::new() };
             for (body, weights, sign) in &air.heads {
                 let b = &self.bodies[*body];
                 for s in 0..ns {
                     let gs = &weights[s * b.n..(s + 1) * b.n];
                     air.q[s] = gs.iter().zip(&b.w).map(|(g, w)| g * w).sum::<f64>();
-                    if lossy {
-                        dq[s] = gs.iter().zip(b.w.iter().zip(&b.wp)).map(|(g, (w, wp))| g * (w - wp)).sum::<f64>();
-                    }
                 }
                 for m in 0..nm {
                     air.y[m] += sign[m] * air.q[air.shape[m]];
-                    if lossy {
-                        dy[m] += sign[m] * dq[air.shape[m]];
-                    }
                 }
             }
-            for m in 0..nm {
-                let stretch = air.y[m] - air.x[m];
-                if !lossy {
-                    let next = 2.0 * air.x[m] - air.xp[m] + k * k * air.wt2[m] * stretch;
-                    air.xp[m] = air.x[m];
-                    air.x[m] = next;
-                    air.y[m] = -air.kappa[m] * stretch; // this mode's pressure amplitude
-                } else {
-                    // the dashpot c = 2 sigma kappa / wt2 in parallel with the air spring, on the stretch:
-                    // (X+ - 2X + X-) / k^2 = wt2 (Y - X) - 2 sigma ((X+ - X-) / 2k - dY / k);
-                    // the heads take its reaction c ((X+ - X-) / 2k - dY / k) beside the spring's -kappa (Y - X)
-                    let sk = air.sigma[m] * k;
-                    let next = (2.0 * air.x[m] - (1.0 - sk) * air.xp[m] + 2.0 * sk * dy[m] + k * k * air.wt2[m] * stretch) / (1.0 + sk);
-                    let c = 2.0 * air.sigma[m] * air.kappa[m] / air.wt2[m];
-                    let relative = (0.5 * (next - air.xp[m]) - dy[m]) / k;
-                    air.xp[m] = air.x[m];
-                    air.x[m] = next;
-                    air.y[m] = -air.kappa[m] * stretch + c * relative; // pressure amplitude and the dashpot's reaction
+            match &mut air.layers {
+                None => {
+                    for m in 0..nm {
+                        let stretch = air.y[m] - air.x[m];
+                        let next = 2.0 * air.x[m] - air.xp[m] + k * k * air.wt2[m] * stretch;
+                        air.xp[m] = air.x[m];
+                        air.x[m] = next;
+                        air.y[m] = -air.kappa[m] * stretch; // this mode's pressure amplitude
+                    }
+                }
+                Some(l) => {
+                    let nj = l.xi.len();
+                    for m in 0..nm {
+                        let stretch = air.y[m] - air.x[m];
+                        let base = m * nj;
+                        // the thermal arms on the stretch: P = kappa_rest s + sum G (s - r_bar), r a trapezoid
+                        // low-pass of s at xi (r at the half steps); the heads take -P with the spring's
+                        let mut p = l.kappa_rest[m] * stretch;
+                        for j in 0..nj {
+                            let a = stretch - l.r[base + j];
+                            p += l.arm[base + j] * a;
+                            l.r[base + j] += l.gain[j] * a;
+                        }
+                        // the viscous elements on X's centred velocity V = (X+ - X-) / 2k:
+                        // M (X+ - 2X + X-) / k^2 = P - sum c (V - u_bar), u a trapezoid low-pass of V at xi
+                        let u_sum: f64 = l.visc[base..base + nj].iter().zip(&l.u[base..base + nj]).map(|(c, u)| c * u).sum();
+                        let inv_mass = air.wt2[m] / air.kappa[m];
+                        let sk = 0.5 * k * l.visc_sum[m] * inv_mass;
+                        let next = (2.0 * air.x[m] - (1.0 - sk) * air.xp[m] + k * k * inv_mass * (p + u_sum)) / (1.0 + sk);
+                        let v = (next - air.xp[m]) / (2.0 * k);
+                        for j in 0..nj {
+                            l.u[base + j] += l.gain[j] * (v - l.u[base + j]);
+                        }
+                        air.xp[m] = air.x[m];
+                        air.x[m] = next;
+                        air.y[m] = -p; // this mode's pressure amplitude, the thermal arms' share in it
+                    }
                 }
             }
             for (body, weights, sign) in &air.heads {

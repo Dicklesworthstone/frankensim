@@ -1236,6 +1236,21 @@ pub fn cylinder_air_modes(radius: f64, depth: f64, sound_speed: f64, f_max: f64)
 /// fitted. A non-finite or negative property is refused; zero viscosity and conductivity give sigma = 0,
 /// so Q is infinite.
 pub fn cylinder_mode_wall_sigma(md: &CylinderAirMode, radius: f64, depth: f64, gas: &crate::GasState) -> Result<f64, String> {
+    let (viscous, thermal, scale) = cylinder_mode_wall_terms(md, radius, depth, gas)?;
+    Ok((viscous + thermal) / scale)
+}
+
+/// `cylinder_mode_wall_sigma`'s two terms as decay rates [1/s]: (viscous, thermal), the shares of the free
+/// mode's sigma from the viscous layer (the tangential velocity, so the air's kinetic energy) and from the
+/// thermal layer (the pressure, so its potential energy). Their sum is the sigma to rounding. `AirLayers`
+/// steps each share with its half-order law.
+pub fn cylinder_mode_wall_sigma_parts(md: &CylinderAirMode, radius: f64, depth: f64, gas: &crate::GasState) -> Result<(f64, f64), String> {
+    let (viscous, thermal, scale) = cylinder_mode_wall_terms(md, radius, depth, gas)?;
+    Ok((viscous / scale, thermal / scale))
+}
+
+/// The two wall-loss integrals of Eq. (10-4.16) for one mode and their common divisor `2 rho int psi^2 dV`.
+fn cylinder_mode_wall_terms(md: &CylinderAirMode, radius: f64, depth: f64, gas: &crate::GasState) -> Result<(f64, f64, f64), String> {
     use crate::radiation::bessel_j;
     let (rho, c) = (gas.density, gas.sound_speed);
     let (mu, kap, cp, gamma) = (gas.dynamic_viscosity, gas.thermal_conductivity, gas.specific_heat_cp, gas.gamma);
@@ -1268,7 +1283,7 @@ pub fn cylinder_mode_wall_sigma(md: &CylinderAirMode, radius: f64, depth: f64, g
     let w = md.omega;
     let viscous = (c / w).powi(2) * (w * rho * mu / 2.0).sqrt() * surface_grad;
     let thermal = (gamma - 1.0) * (w * rho * kap / (2.0 * cp)).sqrt() * surface_sq;
-    Ok((viscous + thermal) / (2.0 * rho * volume_sq))
+    Ok((viscous, thermal, 2.0 * rho * volume_sq))
 }
 
 /// Opt-in (ALL-IN, MB 14741): the drum's enclosed air as the rigid cylinder's acoustic modes below `f_max`
@@ -1280,11 +1295,15 @@ pub fn attach_cavity_modes(p: &mut Piece, spec: &DrumSpec, f_max: f64) -> Result
 }
 
 /// `attach_cavity_modes`, and with `wall_loss` (opt-in, MB 15788) each mode also carries the viscothermal
-/// boundary-layer loss on shell and heads (`cylinder_mode_wall_sigma`), stepped as a dashpot on the stretch
-/// (`AirModes`; form B, MB 17080). Form B is a lower bound below each mode, but above each mode it charges about
-/// `sigma (omega / omega_m)^2` of the air spring's share, an overcharge against the layers' `sqrt(omega)` law, so
-/// it is not a lower bound there. The form landed in 9d3b26242 damped the air coordinate's own velocity: it
-/// overcharged the loss below the air modes and was not a lower bound there. Without `wall_loss` the result is
+/// boundary-layer loss on shell and heads (`cylinder_mode_wall_sigma_parts`), stepped as Pierce's two layers
+/// with their half-order law (`AirLayers`): the viscous layer on the air's kinetic energy, the thermal layer on
+/// its potential energy, each loss growing as `sqrt(omega)`. This replaces two earlier forms:
+/// - Form B (79988cd3e), a dashpot on the stretch. Below the air modes it charged only about
+///   `sigma (omega / omega_m)^4` of the air's kinetic share, a lower bound; above them it overcharged the loss by
+///   about `sigma (omega / omega_m)^2` of the air spring's share.
+/// - The form landed in 9d3b26242, which damped the air coordinate's own velocity and overcharged it below them.
+///
+/// Without `wall_loss` the result is
 /// `attach_cavity_modes`'s, bit for bit.
 pub fn attach_cavity_modes_with(p: &mut Piece, spec: &DrumSpec, f_max: f64, wall_loss: bool) -> Result<String, String> {
     use crate::radiation::bessel_j;
@@ -1345,16 +1364,26 @@ pub fn attach_cavity_modes_with(p: &mut Piece, spec: &DrumSpec, f_max: f64, wall
     } else {
         vec![]
     };
-    let loss = if wall_loss {
+    let layers = if wall_loss {
+        let parts: Vec<(f64, f64)> = modes.iter().map(|md| cylinder_mode_wall_sigma_parts(md, a, l, &gas)).collect::<Result<_, _>>()?;
+        let (sv, st): (Vec<f64>, Vec<f64>) = parts.into_iter().unzip();
+        Some(AirLayers::new(k, &kappa, &wt2, &sv, &st).map_err(|e| format!("cavity wall loss: {e}"))?)
+    } else {
+        None
+    };
+    let loss = if let Some(layers) = &layers {
         let q = |i: usize| modes[i].omega / (2.0 * sigma[i]);
         let (lo, hi) = (0..nm).fold((0, 0), |(lo, hi), i| (if q(i) < q(lo) { i } else { lo }, if q(i) > q(hi) { i } else { hi }));
         let band: Vec<usize> = (0..nm).filter(|&i| (2000.0..=8000.0).contains(&(modes[i].omega / (2.0 * PI)))).collect();
         let t60 = |i: usize| 3.0 * std::f64::consts::LN_10 / sigma[i];
         let (t_lo, t_hi) = band.iter().fold((f64::INFINITY, 0.0f64), |(x, y), &i| (x.min(t60(i)), y.max(t60(i))));
         let name = |i: usize| format!("({},{},{}) {:.0} Hz", modes[i].m, modes[i].n, modes[i].p, modes[i].omega / (2.0 * PI));
+        let share = |i: usize| layers.sigma_viscous[i] / (layers.sigma_viscous[i] + layers.sigma_thermal[i]);
+        let (v_lo, v_hi) = (0..nm).fold((1.0f64, 0.0f64), |(x, y), i| (x.min(share(i)), y.max(share(i))));
         format!(
-            "shell rigid; viscothermal wall loss (opt-in, MB 15788): Pierce's boundary-layer loss (Acoustics 1981, Eq. (10-4.16)) on the shell and both heads as rigid walls at ambient temperature, from the gas record (mu {:.4e} Pa s, kappa {:.4e} W/(m K), c_p {:.1} J/(kg K), gamma {:.4}): Q {:.0} at {} to {:.0} at {}, T60 {t_lo:.2}-{t_hi:.2} s for the {} modes at 2-8 kHz, each as a dashpot in parallel with its air spring, on the stretch (form B, MB 17080). Below a mode it charges the heads' motion about sigma (f / f_m)^4 of the air's kinetic share, a lower bound there. Above a mode it charges about sigma (f / f_m)^2 of the air spring's share, more than the layers' sqrt(f) law gives, so above the modes it overcharges the loss and is not a lower bound there. No loss inside the air, none from the heads' own motion in the layers, and no wall scrub of the air the heads move below the modes. The form landed in 9d3b26242 damped the air coordinate's own velocity instead: it overcharged the loss below the air modes and was not a lower bound there",
-            gas.dynamic_viscosity, gas.thermal_conductivity, gas.specific_heat_cp, gas.gamma, q(lo), name(lo), q(hi), name(hi), band.len()
+            "shell rigid; viscothermal wall loss (opt-in, MB 15788): Pierce's boundary-layer loss (Acoustics 1981, Eq. (10-4.16)) on the shell and both heads as rigid walls at ambient temperature, from the gas record (mu {:.4e} Pa s, kappa {:.4e} W/(m K), c_p {:.1} J/(kg K), gamma {:.4}): Q {:.0} at {} to {:.0} at {}, T60 {t_lo:.2}-{t_hi:.2} s for the {} modes at 2-8 kHz. Each mode carries Pierce's two layers with their half-order law (sec. 10-4): the viscous layer on the air's kinetic energy, the thermal layer on its potential energy, each loss growing as sqrt(f) away from the mode's own frequency (viscous share {:.0}-{:.0} %). The half-order operators are {} poles fitted over {:.0}-{:.0} Hz on this clock, within {:.1e} (viscous) and {:.1e} (thermal) of the law; the thermal layer softens the air springs at rest by at most {:.2} %. The layers' reactance lowers each mode by less than the law's sigma / (2 pi) Hz (about 0.7-0.9 of it), since only the loss is fitted. No loss inside the air, none from the heads' own motion in the layers, and no coupling between modes through the layers. This replaces form B (79988cd3e), a dashpot on the stretch that was a lower bound below the air modes and overcharged the loss above them, and 9d3b26242's form, which overcharged it below them",
+            gas.dynamic_viscosity, gas.thermal_conductivity, gas.specific_heat_cp, gas.gamma, q(lo), name(lo), q(hi), name(hi), band.len(),
+            100.0 * v_lo, 100.0 * v_hi, layers.xi.len(), layers.band.0, layers.band.1, layers.fit_error.0, layers.fit_error.1, 100.0 * layers.softening
         )
     } else {
         "shell rigid, air lossless (no boundary-layer loss: a lower bound)".to_string()
@@ -1369,6 +1398,7 @@ pub fn attach_cavity_modes_with(p: &mut Piece, spec: &DrumSpec, f_max: f64, wall
         y: vec![0.0; nm],
         q: vec![0.0; ns],
         sigma,
+        layers,
     });
     let first: Vec<String> = modes.iter().filter(|md| !md.sine).take(10)
         .map(|md| format!("({},{},{}) {:.0} Hz", md.m, md.n, md.p, md.omega / (2.0 * PI))).collect();
@@ -1671,6 +1701,7 @@ mod air_mode_tests {
             y: vec![0.0; 2],
             q: vec![0.0; 2],
             sigma: vec![],
+            layers: None,
         });
         let energy = |w: f64, wp: f64, x: &[f64], xp: &[f64]| -> f64 {
             let mut e = 0.5 * mass * ((w - wp) / k).powi(2);
@@ -1752,6 +1783,7 @@ mod air_mode_tests {
                 y: vec![0.0; 3],
                 q: vec![0.0; 2],
                 sigma: vec![],
+                layers: None,
             });
             let g = |j: usize, m: usize| sign[j][m] * gs[j][shape[m]];
             let mut out: [f64; 0] = [];
@@ -2004,9 +2036,12 @@ mod cavity_wall_loss_tests {
     }
 
     /// The stepped air coordinate, heads held: one mode near 5754 Hz rings down at its sigma.
+    /// - The mode carries the half-order layers (`AirLayers`) with its viscous and thermal shares.
     /// - The discrete energy E = (kappa / wt2) ((X - X-) / k)^2 / 2 + kappa X X- / 2 falls as exp(-2 sigma t).
-    ///   Checked over 1 s at 144 kHz; bound 1e-3.
-    /// - The same mode without sigma keeps E to 1e-9.
+    ///   Checked at 144 kHz over 1 / sigma, while the oscillation's energy falls by e^2; bound 1e-3.
+    ///   Over longer windows the layers' slow memory (their low poles) is a larger share of what is left.
+    /// - Also printed: the ringing frequency against the mode's, read from interpolated zero crossings.
+    /// - The same mode without sigma or layers keeps E to 1e-9.
     #[test]
     fn a_held_head_air_mode_rings_down_at_its_sigma() {
         let g = crate::standard_gas();
@@ -2014,37 +2049,51 @@ mod cavity_wall_loss_tests {
         let target = 2.0 * PI * 5754.0;
         let md = modes.iter().min_by(|x, y| (x.omega - target).abs().total_cmp(&(y.omega - target).abs())).unwrap();
         let sigma = cylinder_mode_wall_sigma(md, A, L, &g).unwrap();
+        let (sv, st) = cylinder_mode_wall_sigma_parts(md, A, L, &g).unwrap();
         let rate = 144000.0;
         let k = 1.0 / rate;
         let wt2 = (2.0 - 2.0 * (md.omega * k).cos()) / (k * k);
         let kappa = 1.0e7;
-        let run = |s: Vec<f64>| -> f64 {
+        let steps = (rate / sigma).round() as usize;
+        let run = |lossy: bool| -> (f64, f64) {
             let mut ins = Instrument::new(rate);
             ins.add(Body::point("held", 1.0));
+            let layers = lossy.then(|| AirLayers::new(k, &[kappa], &[wt2], &[sv], &[st]).unwrap());
             ins.air_modes.push(AirModes {
                 kappa: vec![kappa], wt2: vec![wt2], x: vec![1.0], xp: vec![1.0], shape: vec![0], heads: vec![],
-                y: vec![0.0], q: vec![0.0], sigma: s,
+                y: vec![0.0], q: vec![0.0], sigma: if lossy { vec![sigma] } else { vec![] }, layers,
             });
             let energy = |a: &AirModes| 0.5 * kappa / wt2 * ((a.x[0] - a.xp[0]) / k).powi(2) + 0.5 * kappa * a.x[0] * a.xp[0];
             let mut out: [f64; 0] = [];
             ins.step(&mut out);
             let e0 = energy(&ins.air_modes[0]);
-            for _ in 0..144000 {
+            let mut crossings: Vec<f64> = vec![];
+            for i in 0..steps {
+                let before = ins.air_modes[0].x[0];
                 ins.step(&mut out);
+                let after = ins.air_modes[0].x[0];
+                if before != 0.0 && (before < 0.0) != (after < 0.0) {
+                    crossings.push((i as f64 + before / (before - after)) * k);
+                }
             }
-            energy(&ins.air_modes[0]) / e0
+            let freq = (crossings.len() - 1) as f64 / (2.0 * (crossings[crossings.len() - 1] - crossings[0]));
+            (energy(&ins.air_modes[0]) / e0, freq)
         };
-        let measured = -run(vec![sigma]).ln() / (2.0 * 144000.0 * k);
-        let lossless = run(vec![]);
-        eprintln!("({},{},{}) {:.0} Hz: sigma {sigma:.4} 1/s, stepped {measured:.4} 1/s (T60 {:.2} s, Q {:.0}); lossless energy ratio {lossless:.12}",
-            md.m, md.n, md.p, md.omega / (2.0 * PI), 3.0 * std::f64::consts::LN_10 / sigma, md.omega / (2.0 * sigma));
+        let (ratio, f_lossy) = run(true);
+        let measured = -ratio.ln() / (2.0 * steps as f64 * k);
+        let (lossless, f_lossless) = run(false);
+        eprintln!(
+            "({},{},{}) {:.0} Hz: sigma {sigma:.4} 1/s (viscous {sv:.4}, thermal {st:.4}), stepped {measured:.4} 1/s over {steps} steps (T60 {:.2} s, Q {:.0}); rings at {f_lossy:.3} Hz against {f_lossless:.3} Hz lossless ({:+.3} Hz; sigma / 2 pi = {:.3}); lossless energy ratio {lossless:.12}",
+            md.m, md.n, md.p, md.omega / (2.0 * PI), 3.0 * std::f64::consts::LN_10 / sigma, md.omega / (2.0 * sigma), f_lossy - f_lossless, sigma / (2.0 * PI)
+        );
         assert!((measured / sigma - 1.0).abs() < 1e-3, "{measured} vs {sigma}");
         assert!((lossless - 1.0).abs() < 1e-9, "{lossless}");
     }
 
     /// (2) The loss is opt-in.
-    /// - Without it, the snare-off's air modes carry no sigma and the receipt is the lossless one.
-    /// - With it, only sigma differs: kappa, wt2, the shapes, the weights and the signs are the same bits.
+    /// - Without it, the snare-off's air modes carry no sigma and no layers, and the receipt is the lossless one.
+    /// - With it, only sigma and the layers differ: kappa, wt2, the shapes, the weights and the signs are the
+    ///   same bits. The layers carry one share pair per mode, summing to its sigma.
     /// - The WAV-level check, this binary against build8's with no new flag, is the build's `cmp`.
     #[test]
     fn the_wall_loss_is_opt_in_and_changes_only_sigma() {
@@ -2055,8 +2104,15 @@ mod cavity_wall_loss_tests {
         let r_on = attach_cavity_modes_with(&mut on, &spec, 8000.0, true).unwrap();
         let (a, b) = (&off.instrument.air_modes[0], &on.instrument.air_modes[0]);
         assert!(a.sigma.is_empty() && r_off.ends_with("shell rigid, air lossless (no boundary-layer loss: a lower bound)"), "{r_off}");
+        assert!(a.layers.is_none());
         assert_eq!(b.sigma.len(), b.kappa.len());
         assert!(b.sigma.iter().all(|s| s.is_finite() && *s > 0.0));
+        let layers = b.layers.as_ref().expect("the wall loss carries its layers");
+        assert_eq!((layers.sigma_viscous.len(), layers.sigma_thermal.len()), (b.kappa.len(), b.kappa.len()));
+        for m in 0..b.kappa.len() {
+            let sum = layers.sigma_viscous[m] + layers.sigma_thermal[m];
+            assert!((sum / b.sigma[m] - 1.0).abs() < 1e-14, "mode {m}: shares {sum} vs sigma {}", b.sigma[m]);
+        }
         let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
         assert_eq!(bits(&a.kappa), bits(&b.kappa));
         assert_eq!(bits(&a.wt2), bits(&b.wt2));
@@ -2091,6 +2147,8 @@ mod cavity_wall_loss_tests {
             let therm = (air.gamma - 1.0) * (w * air.thermal_conductivity / (2.0 * air.density * air.specific_heat_cp)).sqrt();
             let s = cylinder_mode_wall_sigma(md, A, L, &inviscid).unwrap();
             assert!((s / (therm / A + 2.0 * therm / L) - 1.0).abs() < 1e-12, "{md:?}: {s}");
+            let (sv, st) = cylinder_mode_wall_sigma_parts(md, A, L, &inviscid).unwrap();
+            assert!(sv == 0.0 && (st / s - 1.0).abs() < 1e-15, "{md:?}: shares {sv} {st} against {s}");
         }
         for (field, v) in [("mu", f64::NAN), ("mu", -1e-5), ("kappa", f64::NAN), ("kappa", -1e-3)] {
             let mut bad = air.clone();
@@ -2099,32 +2157,93 @@ mod cavity_wall_loss_tests {
         }
     }
 
-    /// (4) Form B on a moving head (MB 17080). A point head on a ground spring (near 150 Hz) carries two lossy
-    /// air modes.
-    /// - The discrete energy is E = m v^2 / 2 + k_h w w- / 2 + sum [ (kappa / wt2) vx^2 / 2 + kappa (g w - x)(g w- - x-) / 2 ].
-    /// - In a step it changes by -k c R^2 + (c / 2) R (Y+ - 2Y + Y-) per mode, R being the stretch rate.
-    ///   So it can rise by at most sum c (Y+ - 2Y + Y-)^2 / (16 k), the heads' backward velocity's share.
-    /// - Checked every step for 40000 steps at 144 kHz, with an allowance of 1e-12 of E.
-    /// - Planted negative: the same air step by hand, but the head does not take the dashpot's reaction. It
-    ///   must break the bound.
+    /// The discrete energy at the half step just stepped to, of a point head (mass, ground spring `kh`) on air modes
+    /// with their layers:
+    /// E = m v^2 / 2 + kh w w- / 2 + sum_m [ (kappa / wt2) vx^2 / 2 + kappa_rest s s- / 2
+    ///     + sum_j ( (G_j / 2) (s- - r_j) (s - r_j) + (c_j / xi_j) u_j^2 / 2 ) ],
+    /// with s = g w - x and s- = g w- - x-, and r, u the layers' half-step states. Without layers kappa_rest is
+    /// kappa and the sum over j is empty.
+    #[allow(clippy::too_many_arguments)]
+    fn layered_energy(mass: f64, kh: f64, g: &[f64], w: f64, wp: f64, kappa: &[f64], wt2: &[f64], x: &[f64], xp: &[f64], layers: Option<&AirLayers>, k: f64) -> f64 {
+        let mut e = 0.5 * mass * ((w - wp) / k).powi(2) + 0.5 * kh * w * wp;
+        for m in 0..kappa.len() {
+            let (s, sp) = (g[m] * w - x[m], g[m] * wp - xp[m]);
+            e += 0.5 * kappa[m] / wt2[m] * ((x[m] - xp[m]) / k).powi(2);
+            match layers {
+                None => e += 0.5 * kappa[m] * s * sp,
+                Some(l) => {
+                    let nj = l.xi.len();
+                    e += 0.5 * l.kappa_rest[m] * s * sp;
+                    for j in 0..nj {
+                        let den = 1.0 + 0.5 * k * l.xi[j];
+                        let (gj, cj) = (l.arm[m * nj + j] * den, l.visc[m * nj + j] * den);
+                        let (r, u) = (l.r[m * nj + j], l.u[m * nj + j]);
+                        e += 0.5 * gj * (sp - r) * (s - r) + 0.5 * cj / l.xi[j] * u * u;
+                    }
+                }
+            }
+        }
+        e
+    }
+
+    /// One air step of `AirModes` with layers, by hand, as `Instrument::step` takes it, for one point head at
+    /// displacement `w` (projections `g`). Returns the force on the head, with or without the thermal arms'
+    /// share of it (`reaction`).
+    #[allow(clippy::too_many_arguments)]
+    fn layered_air_step_by_hand(l: &mut AirLayers, kappa: &[f64], wt2: &[f64], g: &[f64], w: f64, x: &mut [f64], xp: &mut [f64], k: f64, reaction: bool) -> f64 {
+        let nj = l.xi.len();
+        let mut f = 0.0;
+        for m in 0..kappa.len() {
+            let s = g[m] * w - x[m];
+            let base = m * nj;
+            let mut p = l.kappa_rest[m] * s;
+            for j in 0..nj {
+                let a = s - l.r[base + j];
+                p += l.arm[base + j] * a;
+                l.r[base + j] += l.gain[j] * a;
+            }
+            let u_sum: f64 = (0..nj).map(|j| l.visc[base + j] * l.u[base + j]).sum();
+            let inv_mass = wt2[m] / kappa[m];
+            let sk = 0.5 * k * l.visc_sum[m] * inv_mass;
+            let next = (2.0 * x[m] - (1.0 - sk) * xp[m] + k * k * inv_mass * (p + u_sum)) / (1.0 + sk);
+            let v = (next - xp[m]) / (2.0 * k);
+            for j in 0..nj {
+                l.u[base + j] += l.gain[j] * (v - l.u[base + j]);
+            }
+            xp[m] = x[m];
+            x[m] = next;
+            f -= g[m] * if reaction { p } else { l.kappa_rest[m] * s };
+        }
+        f
+    }
+
+    /// (4) The layers on a moving head. A point head on a ground spring (near 150 Hz) carries two lossy air modes,
+    /// at 600 and 1900 Hz, each with its half-order layers.
+    /// - The discrete energy is `layered_energy`'s: the lossless one plus each thermal arm's spring and each viscous
+    ///   element's mass.
+    /// - The viscous elements are exactly passive. Each thermal arm changes the energy in a step by
+    ///   -G k xi (a^2 + a (s+ - 2s + s-) / 4), where a = s - r_bar. So it can rise by at most
+    ///   sum G k xi (s+ - 2s + s-)^2 / 64, the arms' share of the stretch's second difference.
+    /// - Checked every step for 40000 steps at 144 kHz, with an allowance of 1e-12 of E0. The energy must fall.
+    /// - Planted negative: the same step by hand, but the head takes only the spring at rest, not the arms' force.
+    ///   It must break the bound.
     #[test]
-    fn form_b_on_a_moving_head_rises_at_most_its_backward_velocity_share_and_a_missing_reaction_does_not() {
+    fn the_layers_on_a_moving_head_rise_at_most_their_second_difference_share_and_a_missing_reaction_does_not() {
         let (mass, rate) = (4.0e-3, 144000.0);
         let k = 1.0 / rate;
         let kappa = [1.0e7, 3.0e7];
         let wt2: Vec<f64> = [600.0, 1900.0].iter().map(|f: &f64| (2.0 - 2.0 * (2.0 * PI * f * k).cos()) / (k * k)).collect();
         let g = [1.2e-3, -0.7e-3];
-        let sigma = [20.0, 40.0];
+        let (sv, st) = ([1.2, 2.4], [0.8, 1.6]);
         let kh = mass * (2.0 * PI * 150.0).powi(2);
-        let c: Vec<f64> = (0..2).map(|m| 2.0 * sigma[m] * kappa[m] / wt2[m]).collect();
-        let energy = |w: f64, wp: f64, x: &[f64], xp: &[f64]| -> f64 {
-            let mut e = 0.5 * mass * ((w - wp) / k).powi(2) + 0.5 * kh * w * wp;
-            for m in 0..2 {
-                e += 0.5 * kappa[m] / wt2[m] * ((x[m] - xp[m]) / k).powi(2) + 0.5 * kappa[m] * (g[m] * w - x[m]) * (g[m] * wp - xp[m]);
-            }
-            e
+        let layers = AirLayers::new(k, &kappa, &wt2, &sv, &st).unwrap();
+        let nj = layers.xi.len();
+        let allowed_rise = |d2: &[f64; 2]| -> f64 {
+            (0..2)
+                .map(|m| (0..nj).map(|j| layers.arm[m * nj + j] * (1.0 + 0.5 * k * layers.xi[j]) * k * layers.xi[j] * d2[m] * d2[m] / 64.0).sum::<f64>())
+                .sum()
         };
-        let allowed_rise = |wn: f64, w: f64, wp: f64| -> f64 { (0..2).map(|m| c[m] * (g[m] * (wn - 2.0 * w + wp)).powi(2) / (16.0 * k)).sum() };
+        let second = |a: [f64; 2], b: [f64; 2], c: [f64; 2]| [a[0] - 2.0 * b[0] + c[0], a[1] - 2.0 * b[1] + c[1]];
         let mut ins = Instrument::new(rate);
         let head = ins.add(Body::point("head", mass));
         ins.bodies[head].w[0] = 1e-4;
@@ -2132,49 +2251,71 @@ mod cavity_wall_loss_tests {
         ins.links.push(Link { a: (head, 0), b: None, k: kh, c: 0.0 });
         ins.air_modes.push(AirModes {
             kappa: kappa.to_vec(), wt2: wt2.clone(), x: vec![0.0; 2], xp: vec![0.0; 2], shape: vec![0, 1],
-            heads: vec![(head, g.to_vec(), vec![1.0, 1.0])], y: vec![0.0; 2], q: vec![0.0; 2], sigma: sigma.to_vec(),
+            heads: vec![(head, g.to_vec(), vec![1.0, 1.0])], y: vec![0.0; 2], q: vec![0.0; 2],
+            sigma: vec![sv[0] + st[0], sv[1] + st[1]], layers: Some(layers.clone()),
         });
         let mut out: [f64; 0] = [];
+        let state = |ins: &Instrument| {
+            let (b, a) = (&ins.bodies[head], &ins.air_modes[0]);
+            layered_energy(mass, kh, &g, b.w[0], b.wp[0], &a.kappa, &a.wt2, &a.x, &a.xp, a.layers.as_ref(), k)
+        };
+        let stretch = |ins: &Instrument| {
+            let (w, x) = (ins.bodies[head].w[0], &ins.air_modes[0].x);
+            [g[0] * w - x[0], g[1] * w - x[1]]
+        };
+        let mut s_prev = [g[0] * 1e-4, g[1] * 1e-4];
         ins.step(&mut out);
-        let e0 = energy(ins.bodies[head].w[0], ins.bodies[head].wp[0], &ins.air_modes[0].x, &ins.air_modes[0].xp);
+        let mut s_now = stretch(&ins);
+        let e0 = state(&ins);
         let (mut e, mut worst) = (e0, f64::NEG_INFINITY);
         for _ in 0..40000 {
-            let (w, wp) = (ins.bodies[head].w[0], ins.bodies[head].wp[0]);
             ins.step(&mut out);
-            let wn = ins.bodies[head].w[0];
-            let en = energy(wn, ins.bodies[head].wp[0], &ins.air_modes[0].x, &ins.air_modes[0].xp);
-            worst = worst.max((en - e - allowed_rise(wn, w, wp)) / e0);
+            let s_next = stretch(&ins);
+            let en = state(&ins);
+            worst = worst.max((en - e - allowed_rise(&second(s_next, s_now, s_prev))) / e0);
             e = en;
+            (s_prev, s_now) = (s_now, s_next);
         }
-        // planted negative: the same air step by hand, the head with the spring forces alone
+        // planted negative: the same step by hand, the head without the thermal arms' force
+        let mut l = layers.clone();
         let (mut w, mut wp) = (1e-4, 1e-4);
-        let (mut x, mut xp) = ([0.0; 2], [0.0; 2]);
+        let (mut x, mut xp) = (vec![0.0; 2], vec![0.0; 2]);
         let (mut e_prev, mut e_first) = (None, 0.0);
+        let mut s_hist = vec![[g[0] * w, g[1] * w]];
         let mut broken = f64::NEG_INFINITY;
         for _ in 0..40001 {
-            let mut f = -kh * w;
-            let mut xn = [0.0; 2];
-            for m in 0..2 {
-                let (s, dy) = (g[m] * w - x[m], g[m] * (w - wp));
-                let sk = sigma[m] * k;
-                xn[m] = (2.0 * x[m] - (1.0 - sk) * xp[m] + 2.0 * sk * dy + k * k * wt2[m] * s) / (1.0 + sk);
-                f += -kappa[m] * s * g[m];
-            }
+            let f = -kh * w + layered_air_step_by_hand(&mut l, &kappa, &wt2, &g, w, &mut x, &mut xp, k, false);
             let wn = 2.0 * w - wp + k * k * f / mass;
-            let rise = allowed_rise(wn, w, wp);
             (wp, w) = (w, wn);
-            (xp, x) = (x, xn);
-            let en = energy(w, wp, &x, &xp);
+            s_hist.push([g[0] * w - x[0], g[1] * w - x[1]]);
+            let en = layered_energy(mass, kh, &g, w, wp, &kappa, &wt2, &x, &xp, Some(&l), k);
+            let n = s_hist.len();
             match e_prev {
-                Some(ep) => broken = broken.max((en - ep - rise) / e_first),
+                Some(ep) => broken = broken.max((en - ep - allowed_rise(&second(s_hist[n - 1], s_hist[n - 2], s_hist[n - 3]))) / e_first),
                 None => e_first = en,
             }
             e_prev = Some(en);
         }
-        eprintln!("form B, moving head: worst step (dE - allowed rise) / E0 {worst:.3e}, E end / E0 {:.6}; planted (no reaction on the head): {broken:.3e}", e / e0);
-        assert!(worst <= 1e-12, "the energy rose past its backward-velocity share by {worst} of E0");
+        eprintln!(
+            "layers, moving head ({} poles): worst step (dE - allowed rise) / E0 {worst:.3e}, E end / E0 {:.6}; planted (no arms' force on the head): {broken:.3e}",
+            nj, e / e0
+        );
+        assert!(worst <= 1e-12, "the energy rose past the arms' second-difference share by {worst} of E0");
         assert!(e < e0, "the loss took no energy: {e} vs {e0}");
         assert!(broken > 1e-9, "the per-step bound cannot see a missing reaction: {broken}");
+    }
+
+    /// The energy log-slope decay [1/s] of a run's samples (time, energy) between `t_a` and `t_b`.
+    fn energy_decay(samples: &[(f64, f64)], t_a: f64, t_b: f64) -> f64 {
+        let pts: Vec<(f64, f64)> = samples.iter().filter(|(t, _)| *t >= t_a && *t <= t_b).map(|(t, e)| (*t, e.ln())).collect();
+        let n = pts.len() as f64;
+        let (st, se) = (pts.iter().map(|p| p.0).sum::<f64>() / n, pts.iter().map(|p| p.1).sum::<f64>() / n);
+        let (mut num, mut den) = (0.0, 0.0);
+        for (t, e) in &pts {
+            num += (t - st) * (e - se);
+            den += (t - st) * (t - st);
+        }
+        -0.5 * num / den
     }
 
     /// (5) Below the air modes (MB 17080). The test cylinder's lowest air mode is carried by a point head on a
@@ -2183,7 +2324,7 @@ mod cavity_wall_loss_tests {
     ///   scaled to the head's frequency by sqrt(omega_h / omega_m), times the air's share of the moving mass.
     /// - Both runs start in the low mode, the air carried quasi-statically, and are read from the discrete
     ///   energy between 0.1 s and 2 s at 144 kHz.
-    /// - Form B is stepped by the instrument.
+    /// - The half-order layers are stepped by the instrument.
     /// - Planted negative: 9d3b26242's form (2 sigma dX/dt on the air coordinate, the head with the spring alone),
     ///   stepped by hand. It must exceed the bound.
     #[test]
@@ -2192,6 +2333,7 @@ mod cavity_wall_loss_tests {
         let modes = cylinder_air_modes(A, L, gas.sound_speed, 8000.0);
         let md = modes.iter().min_by(|x, y| x.omega.total_cmp(&y.omega)).unwrap();
         let sigma = cylinder_mode_wall_sigma(md, A, L, &gas).unwrap();
+        let (sv, st) = cylinder_mode_wall_sigma_parts(md, A, L, &gas).unwrap();
         let rate = 144000.0;
         let k = 1.0 / rate;
         let wt2 = (2.0 - 2.0 * (md.omega * k).cos()) / (k * k);
@@ -2217,9 +2359,13 @@ mod cavity_wall_loss_tests {
         ins.air_modes.push(AirModes {
             kappa: vec![kappa], wt2: vec![wt2], x: vec![x0], xp: vec![x0], shape: vec![0],
             heads: vec![(head, vec![g], vec![1.0])], y: vec![0.0], q: vec![0.0], sigma: vec![sigma],
+            layers: Some(AirLayers::new(k, &[kappa], &[wt2], &[sv], &[st]).unwrap()),
         });
         let mut out: [f64; 0] = [];
-        let state = |ins: &Instrument| energy(ins.bodies[head].w[0], ins.bodies[head].wp[0], ins.air_modes[0].x[0], ins.air_modes[0].xp[0]);
+        let state = |ins: &Instrument| {
+            let (b, a) = (&ins.bodies[head], &ins.air_modes[0]);
+            layered_energy(mass, kh, &[g], b.w[0], b.wp[0], &a.kappa, &a.wt2, &a.x, &a.xp, a.layers.as_ref(), k)
+        };
         let mut e1 = 0.0;
         for i in 1..=t2 {
             ins.step(&mut out);
@@ -2227,7 +2373,7 @@ mod cavity_wall_loss_tests {
                 e1 = state(&ins);
             }
         }
-        let form_b = decay(e1, state(&ins));
+        let law = decay(e1, state(&ins));
         // planted negative: 9d3b26242's form, by hand
         let (mut w, mut wp, mut x, mut xp) = (w0, w0, x0, x0);
         let sk = sigma * k;
@@ -2243,10 +2389,143 @@ mod cavity_wall_loss_tests {
         }
         let old_form = decay(f1, energy(w, wp, x, xp));
         eprintln!(
-            "lowest air mode ({},{},{}) {:.0} Hz, sigma {sigma:.4} 1/s; head at {:.0} Hz, air share {share:.3}: form B decays at {form_b:.3e} 1/s, Pierce sqrt(omega) bound {bound:.3e}, 9d3b26242's form {old_form:.3e} (whole sigma x share {:.3e})",
+            "lowest air mode ({},{},{}) {:.0} Hz, sigma {sigma:.4} 1/s (viscous {sv:.4}, thermal {st:.4}); head at {:.0} Hz, air share {share:.3}: the half-order layers decay at {law:.3e} 1/s, Pierce sqrt(omega) bound {bound:.3e}, 9d3b26242's form {old_form:.3e} (whole sigma x share {:.3e})",
             md.m, md.n, md.p, md.omega / (2.0 * PI), wh / (2.0 * PI), sigma * share
         );
-        assert!(form_b.is_finite() && form_b <= bound, "form B charges the head {form_b} 1/s, over the bound {bound}");
+        assert!(law.is_finite() && law > 0.0 && law <= bound, "the layers charge the head {law} 1/s, over the bound {bound}");
         assert!(old_form > bound, "the below-mode check cannot see 9d3b26242's form: {old_form} <= {bound}");
+    }
+
+    /// (6) Off resonance, on both sides of a mode. The test cylinder's lowest air mode, with its viscous
+    /// and thermal shares, is carried by a point head on a ground spring. The air is a fifth of the head's mass.
+    /// The head mode sits at a fifth and at a half of the air mode's frequency, and at twice and four times it.
+    /// - The half-order law: the head mode decays at
+    ///   sqrt(omega / omega_m) M (sigma_v X^2 + sigma_t (omega_m / omega)^2 (Y - X)^2) / (m w^2 + M X^2).
+    ///   Here (w, Y = g w, X) is the lossless eigenvector at the head mode's discrete eigenvalue and M = kappa / wt2.
+    ///   This is the viscous layer on the air's kinetic energy and the thermal layer on its potential energy, each
+    ///   scaled from the mode's own frequency by sqrt(omega / omega_m).
+    /// - Read from `layered_energy`'s log-slope from 5 ms to the smaller of 2 s and 1 / (the law's decay), at
+    ///   144 kHz. It must match the law within the fit's worst error plus 2e-3.
+    /// - Planted negatives, stepped by hand: 9d3b26242's form below the mode and form B above it each decay at
+    ///   more than twice the law.
+    #[test]
+    fn off_resonance_the_head_follows_the_half_order_law_on_both_sides_and_the_two_earlier_forms_do_not() {
+        let gas = crate::standard_gas();
+        let modes = cylinder_air_modes(A, L, gas.sound_speed, 8000.0);
+        let md = modes.iter().min_by(|x, y| x.omega.total_cmp(&y.omega)).unwrap();
+        let sigma = cylinder_mode_wall_sigma(md, A, L, &gas).unwrap();
+        let (sv, st) = cylinder_mode_wall_sigma_parts(md, A, L, &gas).unwrap();
+        let rate = 144000.0;
+        let k = 1.0 / rate;
+        let wt2 = (2.0 - 2.0 * (md.omega * k).cos()) / (k * k);
+        let (mass, g) = (4.0e-3, 1.0e-3);
+        let air_mass = 0.2 * mass;
+        let kappa = air_mass * wt2 / (g * g);
+        let big_m = kappa / wt2;
+        let layers = AirLayers::new(k, &[kappa], &[wt2], &[sv], &[st]).unwrap();
+        let tolerance = layers.fit_error.0.max(layers.fit_error.1) + 2e-3;
+        // one run: (form, head frequency ratio) -> (measured decay, the law's decay)
+        let run = |form: &str, ratio: f64| -> (f64, f64) {
+            let wh = md.omega * ratio;
+            let lam = (2.0 - 2.0 * (wh * k).cos()) / (k * k);
+            let carried = kappa / (kappa - big_m * lam); // X / Y in the lossless eigenvector
+            let kh = mass * lam - kappa * g * g * (1.0 - carried);
+            let (y, x0) = (g, carried * g);
+            let law = (wh / md.omega).sqrt() * big_m * (sv * x0 * x0 + st * (md.omega / wh).powi(2) * (y - x0).powi(2)) / (mass + big_m * x0 * x0);
+            let (w0, steps) = (1e-4, (rate * (2.0f64).min(1.0 / law)).round() as usize);
+            let (mut w, mut wp) = (w0, w0);
+            let (mut x, mut xp) = (vec![x0 * w0], vec![x0 * w0]);
+            let mut l = layers.clone();
+            let mut samples = vec![];
+            for i in 1..=steps {
+                let s = g * w - x[0];
+                let f = match form {
+                    "layers" => -kh * w + layered_air_step_by_hand(&mut l, &[kappa], &[wt2], &[g], w, &mut x, &mut xp, k, true),
+                    "9d3b26242" => {
+                        let sk = sigma * k;
+                        let xn = (2.0 * x[0] - (1.0 - sk) * xp[0] + k * k * wt2 * s) / (1.0 + sk);
+                        (xp[0], x[0]) = (x[0], xn);
+                        -kh * w - kappa * s * g
+                    }
+                    _ => {
+                        // form B (79988cd3e): a dashpot 2 sigma kappa / wt2 on the stretch, the head taking its reaction
+                        let (sk, dy) = (sigma * k, g * (w - wp));
+                        let xn = (2.0 * x[0] - (1.0 - sk) * xp[0] + 2.0 * sk * dy + k * k * wt2 * s) / (1.0 + sk);
+                        let relative = (0.5 * (xn - xp[0]) - dy) / k;
+                        (xp[0], x[0]) = (x[0], xn);
+                        -kh * w + g * (-kappa * s + 2.0 * sigma * kappa / wt2 * relative)
+                    }
+                };
+                let wn = 2.0 * w - wp + k * k * f / mass;
+                (wp, w) = (w, wn);
+                if i % 100 == 0 {
+                    let lay = if form == "layers" { Some(&l) } else { None };
+                    samples.push((i as f64 * k, layered_energy(mass, kh, &[g], w, wp, &[kappa], &[wt2], &x, &xp, lay, k)));
+                }
+            }
+            (energy_decay(&samples, 0.005, steps as f64 * k), law)
+        };
+        eprintln!(
+            "lowest air mode ({},{},{}) {:.0} Hz, sigma {sigma:.4} 1/s (viscous {sv:.4}, thermal {st:.4}); fit error {:.2e} / {:.2e}; tolerance {tolerance:.2e}",
+            md.m, md.n, md.p, md.omega / (2.0 * PI), layers.fit_error.0, layers.fit_error.1
+        );
+        for ratio in [0.2, 0.5, 2.0, 4.0] {
+            let (measured, law) = run("layers", ratio);
+            eprintln!("  head at {ratio} x the mode ({:.0} Hz): the layers decay at {measured:.5e} 1/s, the law {law:.5e} ({:+.2e})", ratio * md.omega / (2.0 * PI), measured / law - 1.0);
+            assert!((measured / law - 1.0).abs() <= tolerance, "head at {ratio} x the mode: {measured} against the law's {law}");
+        }
+        let (old_below, law_below) = run("9d3b26242", 0.2);
+        let (b_above, law_above) = run("B", 2.0);
+        eprintln!("  planted: 9d3b26242's form at 0.2 x decays at {old_below:.4e} ({:.2} x the law); form B at 2 x at {b_above:.4e} ({:.2} x the law)", old_below / law_below, b_above / law_above);
+        assert!(old_below > 2.0 * law_below, "the law cannot tell 9d3b26242's form below the mode: {old_below} vs {law_below}");
+        assert!(b_above > 2.0 * law_above, "the law cannot tell form B above the mode: {b_above} vs {law_above}");
+    }
+
+    /// (7) The half-order fit, and its error over the band.
+    /// - On the drums' clocks (96 and 144 kHz) and at 192 kHz, the fit's worst relative error in each layer's loss
+    ///   is at most `LAYER_FIT_TOLERANCE` (1 %). The band is 20 Hz to the smaller of 20 kHz and a fifth of the
+    ///   rate, and the error is read on a grid ten times finer than the fit's.
+    /// - At each mode's own frequency, its stepped coefficients give back its viscous and thermal shares to 1e-12,
+    ///   by the scheme's first-order decay. So at resonance the loss is the mode's sigma.
+    /// - Refused: a mode below the band, a negative share, mismatched lengths.
+    #[test]
+    fn the_half_order_fit_is_within_one_percent_over_the_band_and_exact_at_each_mode() {
+        for rate in [96000.0, 144000.0, 192000.0] {
+            let k = 1.0 / rate;
+            let freqs = [60.0, 591.0, 2400.0, 7990.0];
+            let wt2: Vec<f64> = freqs.iter().map(|f| (2.0 - 2.0 * (2.0 * PI * f * k).cos()) / (k * k)).collect();
+            let kappa = vec![1.0e7; 4];
+            let (sv, st) = (vec![0.5, 1.6, 3.0, 6.0], vec![0.3, 1.1, 2.0, 4.0]);
+            let l = AirLayers::new(k, &kappa, &wt2, &sv, &st).unwrap();
+            eprintln!(
+                "{rate} Hz: {} poles over {:.0}-{:.0} Hz; worst relative error in the loss: viscous {:.2e}, thermal {:.2e}; air springs softened at rest by at most {:.3} %",
+                l.xi.len(), l.band.0, l.band.1, l.fit_error.0, l.fit_error.1, 100.0 * l.softening
+            );
+            assert!(l.fit_error.0 <= LAYER_FIT_TOLERANCE && l.fit_error.1 <= LAYER_FIT_TOLERANCE, "{:?}", l.fit_error);
+            assert!(l.band.0 == 20.0 && (l.band.1 / (0.2 * rate).min(20000.0) - 1.0).abs() < 1e-12, "band {:?}", l.band);
+            let nj = l.xi.len();
+            for m in 0..4 {
+                let mass = kappa[m] / wt2[m];
+                let om = 2.0 / k * (0.5 * k * wt2[m].sqrt()).asin();
+                let w = 2.0 / k * (0.5 * om * k).tan();
+                let (mut re, mut im) = (0.0, 0.0);
+                for j in 0..nj {
+                    let (den, d) = (1.0 + 0.5 * k * l.xi[j], w * w + l.xi[j] * l.xi[j]);
+                    re += l.visc[m * nj + j] * den * w * w / d;
+                    im += l.arm[m * nj + j] * den * w * l.xi[j] / d;
+                }
+                let (back_v, back_t) = (re / (2.0 * mass), im * k / (2.0 * mass * (om * k).sin()));
+                assert!(
+                    (back_v / sv[m] - 1.0).abs() < 1e-12 && (back_t / st[m] - 1.0).abs() < 1e-12,
+                    "{rate} Hz, mode at {} Hz: shares back {back_v} {back_t} against {} {}",
+                    freqs[m], sv[m], st[m]
+                );
+            }
+        }
+        let k = 1.0 / 96000.0;
+        let wt2 = |f: f64| (2.0 - 2.0 * (2.0 * PI * f * k).cos()) / (k * k);
+        assert!(AirLayers::new(k, &[1e7], &[wt2(10.0)], &[1.0], &[1.0]).is_err(), "a mode below the band was not refused");
+        assert!(AirLayers::new(k, &[1e7], &[wt2(1000.0)], &[-1.0], &[1.0]).is_err(), "a negative share was not refused");
+        assert!(AirLayers::new(k, &[1e7, 1e7], &[wt2(1000.0)], &[1.0], &[1.0]).is_err(), "mismatched lengths were not refused");
     }
 }
