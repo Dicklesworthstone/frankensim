@@ -229,3 +229,116 @@ fn zero_acceleration_retains_native_trajectory_and_source_scaling() {
         acceleration.step().unwrap();
     }
 }
+
+#[test]
+fn acceleration_endpoints_integrate_si_velocity_across_material_density_and_units() {
+    let gate = CancelGate::new_clock_free();
+    let initial_velocity = [0.01, -0.015, 0.005];
+    let initial = filled(initial_velocity);
+    let initial_gravity = [0.2, -0.3, 0.1];
+    with_cx(&gate, |cx| {
+        for reference_density in [700.0, 1400.0] {
+            let source = liquid(reference_density, reference_density * 0.0001, None);
+            for (dx, dt) in [(0.001, 0.001), (0.002, 0.0005)] {
+                let velocity_unit: f64 = dx / dt;
+                let numerical_density = 1.04;
+                let pressure = 100_000.0
+                    + reference_density * velocity_unit.powi(2) * CS2 * (numerical_density - 1.0);
+                let mut flow = plan_free_surface_from_material(&source, dx, dt, 0.1)
+                    .unwrap()
+                    .with_density_dependent_gravity()
+                    .with_pressure_reference(100_000.0)
+                    .unwrap()
+                    .free_surface3_from_cells_with_pressure(
+                        MaterialFreeSurfaceDomain3 {
+                            cells: [12; 3],
+                            gravity_m_s2: initial_gravity,
+                            max_cells: 12usize.pow(3),
+                            ..domain()
+                        },
+                        &initial,
+                        0.05,
+                        |_| pressure,
+                        cx,
+                    )
+                    .unwrap();
+                let mut expected = initial_velocity;
+                let mut previous = initial_gravity;
+                for next in [[-0.1, 0.15, -0.05], [0.0; 3], [0.3, -0.1, 0.2]] {
+                    flow.advance_gravity(next, &gate).unwrap();
+                    let sample = flow.sample_at_si(6, 6, 6).unwrap().unwrap();
+                    for axis in 0..3 {
+                        expected[axis] += 0.5 * (previous[axis] + next[axis]) * dt;
+                        close(sample.velocity_m_s[axis], expected[axis]);
+                    }
+                    close(sample.density_kg_m3 / reference_density, numerical_density);
+                    previous = next;
+                }
+                assert!(std::ptr::eq(flow.scaling().material(), &source));
+                assert_eq!(flow.scaling().reference_pressure_pa(), Some(100_000.0));
+                assert_eq!(flow.scaling().cell_size_m(), dx);
+                assert_eq!(flow.scaling().timestep_s(), dt);
+            }
+        }
+    });
+}
+
+#[test]
+fn changing_si_acceleration_and_gas_pressure_publish_one_density_force_endpoint() {
+    let source = liquid(1000.0, 0.1, None);
+    let gate = CancelGate::new_clock_free();
+    let mut flow = plan(&source)
+        .with_density_dependent_gravity()
+        .with_pressure_reference(100_000.0)
+        .unwrap()
+        .free_surface3(
+            MaterialFreeSurfaceDomain3 {
+                cells: [12; 3],
+                gravity_m_s2: [0.02, -0.01, -0.03],
+                max_cells: 12usize.pow(3),
+                ..domain()
+            },
+            |_, _, z| z < 6,
+        )
+        .unwrap();
+    let mass = flow.ledger_mass_kg().unwrap();
+    for (next, pressure) in [
+        ([-0.03, 0.02, 0.01], 100_001.0),
+        ([0.01, -0.02, -0.04], 100_002.0),
+    ] {
+        flow.advance_gravity_with_gas_link_pressure(next, &gate, 0.05, |_| pressure)
+            .unwrap();
+        let native = next.map(|g| flow.scaling().gravity_lattice(g).unwrap());
+        assert_eq!(flow.lattice().body_acceleration(), Some(native));
+        for z in 0..12 {
+            for y in 0..12 {
+                for x in 0..12 {
+                    if let Some(sample) = flow.lattice().sample_at(x, y, z) {
+                        assert_eq!(
+                            flow.lattice().force_density_at(x, y, z).unwrap(),
+                            native.map(|a| sample.density * a)
+                        );
+                    }
+                }
+            }
+        }
+        near(flow.ledger_mass_kg().unwrap(), mass, 2e-12);
+    }
+    let before = flow.clone();
+    assert!(
+        flow.advance_gravity_with_gas_link_pressure([0.0; 3], &gate, 0.05, |_| f64::NAN)
+            .is_err()
+    );
+    assert_eq!(
+        flow.lattice().grid().state_bits(),
+        before.lattice().grid().state_bits()
+    );
+    assert_eq!(
+        flow.lattice().body_acceleration(),
+        before.lattice().body_acceleration()
+    );
+    assert_eq!(
+        flow.ledger_mass_kg().unwrap(),
+        before.ledger_mass_kg().unwrap()
+    );
+}

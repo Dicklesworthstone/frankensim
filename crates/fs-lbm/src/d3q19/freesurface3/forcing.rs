@@ -329,6 +329,84 @@ impl FreeSurface3 {
         self.body_acceleration
     }
 
+    /// Advance one lattice timestep to a prescribed body-acceleration endpoint.
+    ///
+    /// The accepted force history supplies `F_n = rho_n * a_n` to collision.
+    /// Streaming then retains `F_next = rho_next * next_acceleration` in the
+    /// physical velocity and gas-pressure source. These two endpoints give
+    /// trapezoidal body impulse, including when density changes during the
+    /// interval. There is no zero-time force reframe before or after the step:
+    /// that would discard the physical half impulse of the changed load.
+    /// Equal acceleration endpoints reproduce [`Self::step_with_gate`] exactly.
+    ///
+    /// First select the initial acceleration with
+    /// [`Self::rebind_body_acceleration`]. This entry cannot infer an acceleration
+    /// from an independently held force density. The new acceleration becomes
+    /// the retained value only after the complete native step, conversion and
+    /// cancellation checks succeed. Ordinary steps thereafter hold that value.
+    /// Native low-Mach, capillary and boundary-resolution limits still apply;
+    /// this does not evolve a vessel or add a mechanical-energy/heat account.
+    pub fn advance_body_acceleration(
+        &mut self,
+        next_acceleration: [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<(), FreeSurfaceError3> {
+        self.advance_body_acceleration_with_pressure(next_acceleration, gate, None)
+    }
+
+    /// The same endpoint-acceleration step with prescribed gas-link pressure.
+    ///
+    /// Pressure and its density-excursion bound have the same units, sampling
+    /// and physical scope as [`Self::step_with_gas_link_pressure`]. Gas links
+    /// close their even Guo moment using the actual next density and the NEXT
+    /// acceleration, while collision still uses the retained OLD force. The
+    /// pressure field describes this one frozen boundary step. Any pressure,
+    /// flow, conversion or cancellation refusal preserves both force epochs
+    /// and every accepted physical state.
+    pub fn advance_body_acceleration_with_gas_link_pressure(
+        &mut self,
+        next_acceleration: [f64; 3],
+        gate: &CancelGate,
+        maximum_density_excursion: f64,
+        pressure: impl Fn(GasPressureLink3) -> Result<f64, FreeSurfaceError3>,
+    ) -> Result<(), FreeSurfaceError3> {
+        check_cancel(gate)?;
+        let boundary = pressure::GasPressure3::new(
+            maximum_density_excursion,
+            pressure::GasPressureField3::Link(&pressure),
+        )?;
+        self.advance_body_acceleration_with_pressure(next_acceleration, gate, Some(&boundary))
+    }
+
+    fn advance_body_acceleration_with_pressure(
+        &mut self,
+        next_acceleration: [f64; 3],
+        gate: &CancelGate,
+        pressure: Option<&pressure::GasPressure3<'_>>,
+    ) -> Result<(), FreeSurfaceError3> {
+        check_cancel(gate)?;
+        self.admit_body_acceleration_mode()?;
+        if self.body_acceleration.is_none() {
+            return Err(FreeSurfaceError3::Transport(
+                "acceleration evolution requires an explicit initial body-acceleration owner",
+            ));
+        }
+        if next_acceleration.iter().any(|value| !value.is_finite()) {
+            return Err(FreeSurfaceError3::Transport(
+                "next body acceleration must be finite",
+            ));
+        }
+        let mut candidate = self.clone();
+        // Do not rebind local_force: it is the accepted collision source F_n.
+        // The existing stream already uses this descriptor only to close the
+        // endpoint pressure, refresh F_next, and initialize newly wet cells.
+        candidate.body_acceleration = Some(next_acceleration);
+        candidate.step_inner(gate, None, None, pressure)?;
+        check_cancel(gate)?;
+        *self = candidate;
+        Ok(())
+    }
+
     /// Select or change a piecewise-held body acceleration with F=rho*a.
     ///
     /// This is a change of the accepted Guo representation, with no elapsed

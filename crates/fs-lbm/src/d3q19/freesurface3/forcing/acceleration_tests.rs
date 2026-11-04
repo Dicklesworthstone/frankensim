@@ -238,6 +238,15 @@ fn g1_new_interfaces_use_their_own_density_acceleration_frame() {
 
 #[test]
 fn g1_gas_pressure_pairs_close_in_the_actual_endpoint_force_frame() {
+    assert_gas_pressure_endpoint(None);
+}
+
+#[test]
+fn g1_acceleration_endpoint_and_pressure_close_in_the_same_force_frame() {
+    assert_gas_pressure_endpoint(Some([-0.003, 0.001, 0.004]));
+}
+
+fn assert_gas_pressure_endpoint(next_acceleration: Option<[f64; 3]>) {
     let mut flow = surface(&[cell([3, 3, 3], 0.75, [0.02, -0.01, 0.015])], [0.0; 3]);
     let acceleration = [0.002, -0.003, 0.001];
     let gate = CancelGate::new_clock_free();
@@ -252,14 +261,21 @@ fn g1_gas_pressure_pairs_close_in_the_actual_endpoint_force_frame() {
     )
     .unwrap();
     let boundary_density = |q: usize| 1.05 + 0.01 * f64::from(E3[q].0 - E3[q].1);
-    flow.step_with_gas_link_pressure(&gate, 0.2, |link| {
-        Ok((boundary_density(link.incoming_direction) - 1.0) * CS2_3)
-    })
-    .unwrap();
+    let pressure =
+        |link: GasPressureLink3| Ok((boundary_density(link.incoming_direction) - 1.0) * CS2_3);
+    if let Some(next) = next_acceleration {
+        flow.advance_body_acceleration_with_gas_link_pressure(next, &gate, 0.2, pressure)
+            .unwrap();
+    } else {
+        flow.step_with_gas_link_pressure(&gate, 0.2, pressure)
+            .unwrap();
+    }
     let after = flow.sample_at(3, 3, 3).unwrap();
     assert!((after.density - before.density).abs() > 0.1);
     let force = flow.force_density_at(3, 3, 3).unwrap();
-    assert_eq!(force, acceleration.map(|a| after.density * a));
+    let endpoint = next_acceleration.unwrap_or(acceleration);
+    assert_eq!(flow.body_acceleration(), Some(endpoint));
+    assert_eq!(force, endpoint.map(|a| after.density * a));
     let f = flow.grid.populations(slot, lane);
     let uu: f64 = before.velocity.iter().map(|u| u * u).sum();
     let uf: f64 = before
@@ -281,6 +297,134 @@ fn g1_gas_pressure_pairs_close_in_the_actual_endpoint_force_frame() {
             "direction {q}"
         );
     }
+}
+
+#[test]
+fn g1_acceleration_endpoints_integrate_a_ramp_at_actual_density() {
+    let gate = CancelGate::new_clock_free();
+    let velocity = [0.02, -0.01, 0.005];
+    let initial_acceleration = [0.001, -0.002, 0.003];
+    for density in [0.4, 1.0, 2.5] {
+        let mut initial = Vec::new();
+        for z in 0..8 {
+            for y in 0..8 {
+                for x in 0..8 {
+                    initial.push(FreeSurfaceInitialCell3 {
+                        coordinates: [x, y, z],
+                        fill_fraction: 1.0,
+                        density,
+                        velocity,
+                    });
+                }
+            }
+        }
+        let mut flow = surface(&initial, [0.0; 3]);
+        flow.rebind_body_acceleration(initial_acceleration, &gate)
+            .unwrap();
+        let mut expected_velocity = velocity;
+        let mut previous = initial_acceleration;
+        for next in [[-0.003, 0.002, 0.001], [0.004, -0.001, -0.002], [0.0; 3]] {
+            let before = flow.sample_at(4, 4, 4).unwrap();
+            let (momentum_before, _) = moments(&flow, [4, 4, 4]);
+            flow.advance_body_acceleration(next, &gate).unwrap();
+            let after = flow.sample_at(4, 4, 4).unwrap();
+            let (momentum_after, _) = moments(&flow, [4, 4, 4]);
+            assert_eq!(flow.body_acceleration(), Some(next));
+            assert_eq!(
+                flow.force_density_at(4, 4, 4).unwrap(),
+                next.map(|a| after.density * a)
+            );
+            // The bulk cell has not received any wall disturbance. The
+            // analytic time integral of a linear acceleration ramp is exact.
+            for axis in 0..3 {
+                expected_velocity[axis] += 0.5 * (previous[axis] + next[axis]);
+                assert!((after.velocity[axis] - expected_velocity[axis]).abs() < 5e-13);
+                let impulse = 0.5 * (before.density * previous[axis] + after.density * next[axis]);
+                assert!(
+                    (momentum_after[axis] - momentum_before[axis] - impulse).abs()
+                        < 5e-13 * density
+                );
+            }
+            assert!((after.density - density).abs() < 5e-13 * density);
+            previous = next;
+        }
+    }
+}
+
+#[test]
+fn g3_equal_acceleration_endpoints_reproduce_held_force_population_bits() {
+    let gate = CancelGate::new_clock_free();
+    let acceleration = [0.001, -0.002, 0.0005];
+    let mut initial = surface(&[cell([3, 3, 3], 0.9, [0.01, -0.02, 0.005])], [0.0; 3]);
+    initial
+        .rebind_body_acceleration(acceleration, &gate)
+        .unwrap();
+    for with_pressure in [false, true] {
+        let mut held = initial.clone();
+        let mut evolved = initial.clone();
+        for _ in 0..3 {
+            if with_pressure {
+                held.step_with_gas_link_pressure(&gate, 0.1, |_| Ok(0.01))
+                    .unwrap();
+                evolved
+                    .advance_body_acceleration_with_gas_link_pressure(
+                        acceleration,
+                        &gate,
+                        0.1,
+                        |_| Ok(0.01),
+                    )
+                    .unwrap();
+            } else {
+                held.step_with_gate(&gate).unwrap();
+                evolved
+                    .advance_body_acceleration(acceleration, &gate)
+                    .unwrap();
+            }
+            unchanged(&held, &evolved);
+            assert_eq!(held.worst_step_violation, evolved.worst_step_violation);
+        }
+    }
+}
+
+#[test]
+fn g0_acceleration_endpoint_refusal_and_late_cancellation_preserve_history() {
+    let gate = CancelGate::new_clock_free();
+    let next = [-0.002, 0.001, 0.003];
+    let mut flow = surface(&[cell([3, 3, 3], 0.9, [0.01, -0.02, 0.005])], [0.0; 3]);
+    let unowned = flow.clone();
+    assert!(flow.advance_body_acceleration(next, &gate).is_err());
+    unchanged(&unowned, &flow);
+    flow.rebind_body_acceleration([0.001, 0.0, -0.001], &gate)
+        .unwrap();
+    let before = flow.clone();
+    for invalid in [[f64::NAN, 0.0, 0.0], [0.0, f64::INFINITY, 0.0]] {
+        assert!(flow.advance_body_acceleration(invalid, &gate).is_err());
+        unchanged(&before, &flow);
+    }
+    assert!(
+        flow.advance_body_acceleration_with_gas_link_pressure(next, &gate, 0.1, |_| Ok(f64::NAN),)
+            .is_err()
+    );
+    unchanged(&before, &flow);
+    let calls = std::cell::Cell::new(0);
+    assert!(matches!(
+        flow.advance_body_acceleration_with_gas_link_pressure(next, &gate, 0.1, |_| {
+            calls.set(calls.get() + 1);
+            gate.request();
+            Ok(0.01)
+        },),
+        Err(FreeSurfaceError3::Cancelled)
+    ));
+    assert!(calls.get() > 0);
+    unchanged(&before, &flow);
+    let retry = CancelGate::new_clock_free();
+    let mut reference = before;
+    reference
+        .advance_body_acceleration_with_gas_link_pressure(next, &retry, 0.1, |_| Ok(0.01))
+        .unwrap();
+    flow.advance_body_acceleration_with_gas_link_pressure(next, &retry, 0.1, |_| Ok(0.01))
+        .unwrap();
+    unchanged(&reference, &flow);
 }
 
 #[test]

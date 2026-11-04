@@ -8499,6 +8499,21 @@ power-of-two density rescalings, mass/volume conversion, zero-density refusal,
 dry-interface readback, pressure-driven density collapse before publication,
 and fractional mass defects across small, ordinary and large inventories.
 
+`FreeSurface3::advance_body_acceleration` evolves prescribed acceleration from
+its retained endpoint to the next one. Collision consumes the old `rho*a`;
+the shared native stream, gas-pressure closure and interface initialization
+use the actual next density and acceleration. No zero-time source reframe
+removes the changed load's half impulse. Homogeneous constant-density bulk flow
+receives `delta_u = (a_old + a_next)/2` per lattice step at any admitted density.
+Equal acceleration endpoints reproduce the held-force trajectory bit for bit.
+The gas-link-pressure variant composes this evolution with the original frozen
+pressure field, and material `advance_gravity` entries retain the same SI units
+and pressure reference. Native flow, conversions, force history and the next
+acceleration publish together after all refusals/cancellation checks. This
+adds no vessel dynamics, thermal work or total-energy closure. Focused G0/G1/G3
+regressions cover acceleration ramps across density/unit choices, pressure
+source moments at changing endpoints, held-load parity and atomic retry.
+
 D3Q19 records direct donor/recipient mass routes, including reversed routes for
 conversion debt. The original extensive enthalpy transport consumes these same
 routes, avoiding temperature mixing through a shared zero-storage pool. Excess

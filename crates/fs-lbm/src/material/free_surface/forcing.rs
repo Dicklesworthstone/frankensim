@@ -52,6 +52,70 @@ impl MaterialRigidFrame3 {
 }
 
 impl MaterialFreeSurface3<'_> {
+    /// Advance one physical timestep from the accepted gravity/acceleration
+    /// to `next_gravity_m_s2`, retaining both actual-density force endpoints.
+    ///
+    /// Select [`MaterialFreeSurfaceScaling::with_density_dependent_gravity`]
+    /// at construction, or first call [`Self::rebind_gravity`] without advancing
+    /// time. For homogeneous constant-density interior flow the velocity
+    /// increment is `dt * (gravity_before + gravity_after) / 2` at any admitted
+    /// sourced density and fixed numerical pressure-density level. When density
+    /// evolves, the momentum source uses each endpoint's own `rho * gravity`;
+    /// advection and pressure also contribute to the resulting velocity.
+    ///
+    /// SI conversion and the complete native candidate must succeed before
+    /// either liquid or the next acceleration publishes. Material coefficients,
+    /// pressure reference, dx/dt and the original speed limits stay attached.
+    /// The vectors are in the same fixed axes; rotating-frame inertia belongs
+    /// to [`Self::step_in_rigid_frame_si`]. This is prescribed loading, with no
+    /// added vessel evolution, thermal feedback or mechanical-work heating.
+    pub fn advance_gravity(
+        &mut self,
+        next_gravity_m_s2: [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<(), MaterialLbmError> {
+        let next = self.scaling.gravity_vector_lattice(next_gravity_m_s2)?;
+        self.lattice.advance_body_acceleration(next, gate)?;
+        Ok(())
+    }
+
+    /// Evolve the same gravity endpoints under absolute gas-link pressure [Pa].
+    ///
+    /// The original fixed pressure reference and physical link coordinates are
+    /// those of [`Self::step_with_gas_link_pressure`]. Pressure reconstruction
+    /// uses the actual next liquid density and acceleration; it cannot retain
+    /// the old gravity force merely because pressure changed the carrier mass.
+    /// Load conversion, pressure admission, native flow and cancellation are
+    /// one transaction. The callback describes one frozen pressure field.
+    pub fn advance_gravity_with_gas_link_pressure(
+        &mut self,
+        next_gravity_m_s2: [f64; 3],
+        gate: &CancelGate,
+        maximum_density_excursion: f64,
+        pressure_pa: impl Fn(MaterialGasPressureLink3) -> f64,
+    ) -> Result<(), MaterialLbmError> {
+        let next = self.scaling.gravity_vector_lattice(next_gravity_m_s2)?;
+        let reference = self
+            .scaling
+            .reference_pressure_pa
+            .ok_or(MaterialLbmError::Invalid(
+                "absolute gas loading requires an explicit fixed pressure reference",
+            ))?;
+        self.lattice
+            .advance_body_acceleration_with_gas_link_pressure(
+                next,
+                gate,
+                maximum_density_excursion,
+                super::pressure::lattice_link_pressure_field(
+                    reference,
+                    self.scaling.cell_size_m,
+                    self.scaling.pressure_unit_pa,
+                    pressure_pa,
+                ),
+            )?;
+        Ok(())
+    }
+
     /// Advance the original liquid by one SI timestep in an accelerating vessel.
     ///
     /// `body_acceleration_m_s2` includes gravity, already rotated into vessel
