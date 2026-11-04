@@ -138,16 +138,16 @@ pub(super) fn advance(
     {
         return None;
     }
-    // Resolve the small physical impulse before adding it to a possibly much
-    // larger stored momentum. Otherwise an accepted transfer can silently
-    // disappear when the receiver is moving in a highly boosted frame.
+    // Preserve the full product through the accumulation. Rounding the
+    // impulse separately would throw away subnormal but representable changes
+    // before the compensated sum can observe them.
     let impulse = core::array::from_fn::<_, 3, _>(|d| {
-        (Dd::from_f64(transferred_mass) * Dd::from_f64(donor_velocity[d])).to_f64()
+        Dd::from_f64(transferred_mass) * Dd::from_f64(donor_velocity[d])
     });
     let next_momentum = core::array::from_fn(|d| {
-        (Dd::from_f64(momentum[d]) + Dd::from_f64(impulse[d])).to_f64()
+        (Dd::from_f64(momentum[d]) + impulse[d]).to_f64()
     });
-    if (0..3).any(|d| impulse[d] != 0.0 && next_momentum[d] == momentum[d]) {
+    if (0..3).any(|d| impulse[d].to_f64() != 0.0 && next_momentum[d] == momentum[d]) {
         return None;
     }
     let next_velocity = velocity(new_mass, next_momentum)?;
